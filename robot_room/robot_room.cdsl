@@ -1,8 +1,16 @@
+import "Lidar3D.idsl";
+import "FullPoseEstimationPub.idsl";
+import "JoystickAdapter.idsl";
+import "OmniRobot.idsl";
+
 
 Component robot_room
 {
     Communications
     {
+       requires Lidar3D, OmniRobot;
+       subscribesTo FullPoseEstimationPub, JoystickAdapter;   	
+ 	
     };
     language Cpp11;
     gui Qt(QMainWindow);

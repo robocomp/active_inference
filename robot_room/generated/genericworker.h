@@ -42,13 +42,19 @@
 
 #include "dsr/api/dsr_api.h"
 #include "dsr/gui/dsr_gui.h"
-#include <doublebuffer/DoubleBuffer.h>
+//#include <doublebuffer/DoubleBuffer.h>
 #include <memory>
 
+#include <FullPoseEstimation.h>
+#include <FullPoseEstimationPub.h>
+#include <GenericBase.h>
+#include <JoystickAdapter.h>
+#include <Lidar3D.h>
+#include <OmniRobot.h>
 
 #define BASIC_PERIOD 100
 
-using TuplePrx = std::tuple<>;
+using TuplePrx = std::tuple<RoboCompLidar3D::Lidar3DPrxPtr,RoboCompOmniRobot::OmniRobotPrxPtr>;
 
 
 class GenericWorker : public QMainWindow, public Ui_guiDlg
@@ -67,6 +73,12 @@ public:
 	std::atomic_bool hibernation = false;
 
 
+	RoboCompLidar3D::Lidar3DPrxPtr lidar3d_proxy;
+	RoboCompOmniRobot::OmniRobotPrxPtr omnirobot_proxy;
+
+	virtual void FullPoseEstimationPub_newFullPose (RoboCompFullPoseEstimation::FullPoseEuler pose) = 0;
+
+	virtual void JoystickAdapter_sendData (RoboCompJoystickAdapter::TData data) = 0;
 
 
 protected:

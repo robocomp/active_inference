@@ -1,3 +1,16 @@
+# This property is used by the clients to connect to IceStorm.
+Proxies.TopicManager = "IceStorm/TopicManager:default -p 9999"
+
+# Proxies for required interfaces
+Proxies.Lidar3D = "lidar3d:tcp -h localhost -p 0"
+Proxies.OmniRobot = "omnirobot:tcp -h localhost -p 0"
+
+# Endpoints for subscriptions interfaces
+Endpoints.FullPoseEstimationPubTopic = "tcp -p 0"
+Endpoints.FullPoseEstimationPubPrefix = ""
+Endpoints.JoystickAdapterTopic = "tcp -p 0"
+Endpoints.JoystickAdapterPrefix = ""
+
 
 # --- Common Agent Data ---
 Agent.id = 0 # Change id
@@ -30,3 +43,114 @@ Ice.Warn.Connections = "0"
 Ice.Trace.Network = "0"
 Ice.Trace.Protocol = "0"
 Ice.MessageSizeMax = "20004800"
+
+# ────────────────────────────────────────────────────────────────────────────
+# RoomConcept localizer params (ported from sdf_localizer/etc/config.toml)
+# ────────────────────────────────────────────────────────────────────────────
+RoomConcept.PredictionEarlyExit = true
+RoomConcept.SigmaSdf = 0.15
+RoomConcept.PredictionTrustFactor = 0.7
+RoomConcept.MinTrackingSteps = 5
+RoomConcept.RotationSdfCoupling = 0.5
+RoomConcept.OptimizerType = "LBFGS"
+RoomConcept.LbfgsLr = 1.0
+RoomConcept.LbfgsHistorySize = 10
+RoomConcept.LbfgsToleranceGrad = 1e-4
+RoomConcept.LbfgsToleranceChange = 1e-7
+RoomConcept.NumIterations = 25
+RoomConcept.LearningRatePos = 0.05
+RoomConcept.ObsSigma = 0.05
+RoomConcept.HuberDelta = 0.15
+RoomConcept.ConvergenceRelTol = 0.001
+RoomConcept.ConvergenceMinIters = 5
+RoomConcept.WindowSize = 5
+RoomConcept.MaxLidarPoints = 400
+RoomConcept.MaxLidarOldSlot = 200
+RoomConcept.BoundaryQualityGate = true
+RoomConcept.BoundaryHessianQualityThreshold = 0.06
+RoomConcept.BoundaryMuQualityThreshold = 0.10
+RoomConcept.EigenvalueClampBoundaryMax = 500.0
+RoomConcept.RecoveryLossThreshold = 0.45
+RoomConcept.RecoveryConsecutiveCount = 10
+RoomConcept.RecoveryCooldownFrames = 60
+RoomConcept.VelocityAdaptiveWeights = false
+RoomConcept.LinearVelocityThreshold = 0.05
+RoomConcept.AngularVelocityThreshold = 0.10
+RoomConcept.WeightBoostFactor = 2.0
+RoomConcept.WeightReductionFactor = 0.5
+RoomConcept.WeightSmoothingAlpha = 0.3
+RoomConcept.OdomNoiseScale = 1.0
+RoomConcept.CmdNoiseTrans = 0.20
+RoomConcept.CmdNoiseRot = 0.10
+RoomConcept.CmdNoiseBase = 0.05
+RoomConcept.OdomNoiseTrans = 0.08
+RoomConcept.OdomNoiseRot = 0.04
+RoomConcept.OdomNoiseBase = 0.01
+RoomConcept.EncoderRotSlipK = 0.05
+RoomConcept.StationaryMotionThreshold = 0.02
+RoomConcept.LearnMotionModel = true
+RoomConcept.MotionLearnAlpha = 0.05
+RoomConcept.MotionLearnBeta = 0.02
+RoomConcept.MotionLearnMinOmega = 0.05
+RoomConcept.MotionLearnMinTrans = 0.02
+RoomConcept.MotionLearnMinFrames = 50
+RoomConcept.MotionLearnQualityThreshold = 0.12
+RoomConcept.DifferentialTest = false
+RoomConcept.SdfCurrentSlotOnly = true
+RoomConcept.EnableCornerTracking = true
+RoomConcept.FarPointsWeight = true
+RoomConcept.FarPointsExponent = 2.0
+RoomConcept.FarPointsMinWeight = 0.1
+RoomConcept.UseCuda = false
+RoomConcept.DebugLog = true
+RoomConcept.RerunEnabled = true
+RoomConcept.RerunHost = "127.0.0.1"
+RoomConcept.RerunPort = 9877
+RoomConcept.RerunSdfEveryN = 20
+RoomConcept.RerunSdfResolution = 150
+RoomConcept.RerunMaxQueue = 30
+
+# ── DSR stabilization ────────────────────────────────────────────────────────
+# Require this many consecutive early-exit + low-uncertainty frames before
+# creating the room node and re-parenting robot under it.
+DSR.StableFramesRequired = 30
+DSR.StableSdfMseMax = 0.06
+DSR.StableCovTtMax = 0.001
+
+# ── Epistemic Controller ─────────────────────────────────────────────────────
+EpistemicController.NumArcCurvatures = 9
+EpistemicController.HorizonSteps = 20
+EpistemicController.Dt = 0.2
+EpistemicController.MaxAdvSpeed = 0.9
+EpistemicController.MaxRotSpeed = 0.75
+EpistemicController.WEpistemic = 0.1
+EpistemicController.WPragmatic = 3.0
+EpistemicController.WHeading = 2.0
+EpistemicController.WBoundary = 10.0
+EpistemicController.KRot = 3.5
+EpistemicController.GaussianSigma = 0.5
+EpistemicController.SpeedHorizonS = 0.4
+EpistemicController.ObstacleRadius = 0.35
+EpistemicController.ObstacleK = 0.5
+EpistemicController.ObstacleStepCap = 10.0
+EpistemicController.WObstacle = 2.0
+EpistemicController.WallFilterMargin = 0.30
+EpistemicController.BandwidthCoupling = 0.3
+EpistemicController.SdfSafe = 0.06
+EpistemicController.SdfDanger = 0.10
+EpistemicController.GovernorAlphaMin = 0.4
+EpistemicController.FimCornerSigma = 0.04
+EpistemicController.FimMaxRange = 10.0
+EpistemicController.GridResolution = 0.5
+EpistemicController.MinDistance = 1.0
+EpistemicController.MaxCandidates = 2000
+EpistemicController.TargetWallMargin = 1.0
+EpistemicController.AngularDominanceRatio = 50.0
+EpistemicController.WExploration = 0.5
+EpistemicController.IorCellSize = 0.5
+EpistemicController.IorDecayTime = 120.0
+EpistemicController.WIor = 2.0
+EpistemicController.ArrivalDistance = 0.15
+EpistemicController.DwellTime = 2.0
+EpistemicController.MaxLinAccel = 1.2
+EpistemicController.MaxRotAccel = 2.0

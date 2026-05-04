@@ -1,12 +1,30 @@
+[Proxies]
+# This property is used by the clients to connect to IceStorm.
+TopicManager = "IceStorm/TopicManager:default -p 9999"
+# Proxies for required interfaces
+Lidar3D = "lidar3d:tcp -h localhost -p 11995" # FILTER"
+Webots2Robocomp = "webots2robocomp:tcp -h localhost -p 10006"
+OmniRobot = "omnirobot:tcp -h localhost -p 10004"
+
+[Endpoints]
+# Endpoints for subscriptions interfaces
+FullPoseEstimationPubTopic = "tcp -p 0"
+FullPoseEstimationPubPrefix = ""
+JoystickAdapterTopic = "tcp -p 0"
+JoystickAdapterPrefix = ""
+
+[Period]
+Compute = 50
+Emergency = 500
 
 # --- Common Agent Data ---
 [Agent]
-id = 0 # Change id
+id = 5 # Change id
 name = "robot_room"
 
 # --- Single Instance Configuration ---
 # Use this if you only have one graph.
-configFile = ""
+configFile = "room.json"
 domain = 0
 tree = true
 graph = true
@@ -23,9 +41,205 @@ graph = true
 # 2d = true
 # 3d = true
 
-[Period]
-Compute = 100
-Emergency = 500
+[RoomConcept]
+
+# ── Early exit ────────────────────────────────────────────────────────────────
+PredictionEarlyExit    = true  # OFF: siempre corre Adam (modo test)
+SigmaSdf               = 0.15  # σ_obs del SDF para el umbral de early exit (m)
+PredictionTrustFactor  = 0.7   # threshold = SigmaSdf × factor  → 12 cm
+MinTrackingSteps       = 5     # Warm-up tras reset: 5 frames (default 20).
+                                # Con 20 se perdían 20 frames de Adam obligatorio
+                                # tras cada recovery antes de que early exit
+                                # pudiera actuar. Con 5 se alcanza steady-state
+                                # en cuanto la ventana está llena.
+RotationSdfCoupling    = 0.5   # Extra tolerancia SDF por rotación (m/rad)
+
+# ── Selección de optimizador ──────────────────────────────────────────────────
+# "ADAM"  — Adam adaptativo (default probado, robusto lejos del mínimo)
+# "LBFGS" — L-BFGS con line search Wolfe (convergencia más rápida, ~8-12 evals)
+# "CAVI"  — reservado para implementación futura
+OptimizerType          = "LBFGS"
+
+# ── Parámetros L-BFGS ─────────────────────────────────────────────────────────
+# Activos solo cuando OptimizerType = "LBFGS"
+# LbfgsLr: paso inicial; el line search strong-Wolfe lo ajusta automáticamente.
+# Usar 1.0 (paso Newton completo). No requiere escalar como Adam.
+LbfgsLr               = 1.0    # Paso inicial (el line search lo ajusta)
+LbfgsHistorySize      = 10     # Pares (s,y) para H^-1; igualado a W=10 (30 DOF)
+LbfgsToleranceGrad    = 1e-4   # Para cuando ||grad||_inf < tol (convergencia fina)
+LbfgsToleranceChange  = 1e-7   # Para cuando |Δloss| < tol entre pasos
+
+# ── Optimizador Adam ──────────────────────────────────────────────────────────
+NumIterations          = 25    # Iteraciones Adam (o pasos Newton máx para LBFGS).
+                                # Con W=1 solo hay término SDF; Adam converge en ~15-20 iters.
+LearningRatePos        = 0.05  # LR base; escalado a lr/√W internamente
+ObsSigma               = 0.05  # σ ruido SDF en la función de pérdida (m)
+HuberDelta             = 0.15  # Umbral Huber para saturar outliers (m)
+ConvergenceRelTol      = 0.001 # FIX 2: de 0.01 a 0.001. El criterio anterior
+                                # paraba en escalones intermedios de la cola
+                                # larga del motion factor (loss ~15-20 cuando
+                                # el mínimo real era ~10). Con 0.001 sólo para
+                                # en el plateau verdadero.
+ConvergenceMinIters    = 5     # Iters mínimas antes de aplicar el criterio
+
+# ── Ventana deslizante (RFE) ──────────────────────────────────────────────────
+WindowSize             = 5  # Slots retenidos. Objetivo del experimento.
+MaxLidarPoints         = 400   # Puntos slot actual (anterior 400). Más densidad
+                                # → gradiente SDF más estable con W grande.
+MaxLidarOldSlot        = 200   # Puntos slots antiguos (anterior 100). Mejora el
+                                # condicionamiento de los motion factors.
+BoundaryQualityGate    = true  # Suprime prior de frontera si frame anterior fue
+                                # malo: w = min(1, σ²/sdf_mse_prev). ON para
+                                # observar su efecto a W=10.
+
+# ── Boundary prior quality gates (Soluciones B y C) ─────────────────────────
+# Evitan que el prior de frontera sea "envenenado" por scans contaminados
+# (desplazamiento forzado, obstáculo persistente).
+# B: si sdf_mse_final del slot > HessianQualityThreshold → Hessiana solo cinemática.
+# C: si sdf_mse_final del slot > MuQualityThreshold → mu no se actualiza.
+BoundaryHessianQualityThreshold = 0.06   # m — umbral para incluir H_obs en Hessiana
+BoundaryMuQualityThreshold      = 0.10   # m — umbral para actualizar mu del prior
+EigenvalueClampBoundaryMax      = 500.0  # techo autovalores precisión (evita over-confidence)
+
+# ── Recovery ──────────────────────────────────────────────────────────────────
+RecoveryLossThreshold    = 0.45  # sqrt(sdf_mse) > umbral → frame malo (m).
+                                  # Anterior 0.2 disparaba en giros normales.
+RecoveryConsecutiveCount = 10    # Frames malos consecutivos para recovery.
+                                  # Anterior 3 reseteaba la ventana cada ~30 f.
+RecoveryCooldownFrames   = 60    # Frames sin detection tras recovery (default 30).
+                                  # 60 garantiza que W llega a 10 antes de que
+                                  # el detector vuelva a estar activo.
+
+# ── Pesos de gradiente adaptativos por velocidad ──────────────────────────────
+VelocityAdaptiveWeights  = false # OFF con LBFGS: escalar grad post-backward corrompe
+                                 # los pares (s,y) de la aproximación H^-1 → el log
+                                 # mostraba grad_norm residual ~0.09 (≫ tol=1e-5) y
+                                 # 0/53 frames con convergencia real.
+LinearVelocityThreshold  = 0.05  # m/s — por debajo = no traslación
+AngularVelocityThreshold = 0.10  # rad/s — por debajo = no rotación
+WeightBoostFactor        = 2.0   # Multiplicador para el eje dominante
+WeightReductionFactor    = 0.5   # Multiplicador para ejes secundarios
+WeightSmoothingAlpha     = 0.3   # EMA de transición entre perfiles
+
+# ── Modelo de ruido de movimiento ────────────────────────────────────────────
+OdomNoiseScale  = 1.0   # Sin inflado artificial (anterior 1.5 distorsionaba
+                         # el balance boundary/obs/motion en la pérdida RFE)
+CmdNoiseTrans   = 0.20  # Fracción de ruido translacional del comando (m/m)
+CmdNoiseRot     = 0.10  # Fracción de ruido rotacional del comando (rad/rad)
+CmdNoiseBase    = 0.05  # Ruido base translacional del comando (m)
+OdomNoiseTrans  = 0.08  # Fracción de ruido translacional de odometría
+OdomNoiseRot    = 0.04  # Fracción de ruido rotacional de odometría
+OdomNoiseBase   = 0.01  # Ruido base translacional de odometría (m)
+EncoderRotSlipK = 0.05  # Incertidumbre extra por slip: (k·|ω|)² (rad/rad·s⁻¹)
+StationaryMotionThreshold = 0.02  # FIX 1: de 0.001 a 0.02 m. Cuando el robot
+                                   # está parado, position_std = este valor y
+                                   # cov(0,0) = (0.02)² = 4e-4 m². El valor
+                                   # anterior (0.001 m = 1mm) causaba spikes de
+                                   # loss_motion hasta 6000: con residuo 3.4cm
+                                   # y cov=1e-6 → loss = 0.5×(0.034)²/1e-6 = 578.
+                                   # Con 0.02 m el mismo residuo da loss = 1.4.
+
+# ── Online motion model learning ──────────────────────────────────────────────
+# Continuously adapt three odometry noise parameters from post-optimisation
+# residuals of the RFE window.  All updates are gated on localization quality
+# (SDF MSE < BoundaryHessianQualityThreshold).
+#
+#   LearnMotionModel      — master switch (false = all static params used)
+#   MotionLearnAlpha      — EMA rate for slip-k and translational noise fraction
+#   MotionLearnBeta       — EMA rate for odometry bias vector (slower)
+#   MotionLearnMinOmega   — min |ω| (rad/s) for slip-k sample to be used
+#   MotionLearnMinFrames  — warmup: static params used until this many quality
+#                           frames have been accumulated (default 50 ≈ 10 s @ 5 Hz)
+LearnMotionModel            = true    # enabled; disable to fall back to static params
+MotionLearnAlpha            = 0.05    # slip-k and trans-noise EMA rate
+MotionLearnBeta             = 0.02    # bias EMA rate
+MotionLearnMinOmega         = 0.05    # rad/s — min angular speed per slot to update slip-k
+MotionLearnMinTrans         = 0.02    # m  — min *accumulated* translation over the full window
+MotionLearnMinFrames        = 50      # warmup frames
+MotionLearnQualityThreshold = 0.12    # Per-slot SDF MSE gate for motion learning.
+                                      # Independent from BoundaryHessianQualityThreshold;
+                                      # set higher so learning is not starved of data
+                                      # (typical sdf_mse while moving is 0.06-0.09).
+
+# ── Feature flags ─────────────────────────────────────────────────────────────
+DifferentialTest     = false  # Sin overhead A/B: experimento limpio
+SdfCurrentSlotOnly   = true   # SDF obs solo en el slot actual; slots antiguos aportan
+                              # solo via motion factors + corners. ~67% menos SDF evals.
+EnableCornerTracking = true  # Activa factores de esquinas en la perdida RFE
+FarPointsWeight      = true   # Ponderación por distancia: puntos lejanos más peso
+FarPointsExponent    = 2.0   # α — exponente de la distancia.
+                              #   α=1: lineal (original). α=2: cuadrático (recomendado).
+                              #   Fórmula: w_i = dist_i^α / mean(dist^α), re-norm tras floor.
+                              #   Mayor α → gradiente dominado por puntos en paredes lejanas,
+                              #   mejor precisión angular pero más sensible a puntos espurios.
+FarPointsMinWeight   = 0.1   # Floor de peso (evita anular puntos muy cercanos).
+UseCuda              = false   # Fallback automático a CPU si falla
+DebugLog             = true   # CSV → tmp/sdf_localizer/log.csv
+
+# ── Rerun (desactivado para timing limpio) ────────────────────────────────────
+RerunEnabled      = true     # OFF: elimina ~3 ms/frame de overhead de red
+RerunHost         = "127.0.0.1"
+RerunPort         = 9877
+RerunSdfEveryN    = 20
+RerunSdfResolution = 150
+RerunMaxQueue     = 30
+
+# ── Epistemic Controller ───────────────────────────────────────────────────────
+[EpistemicController]
+# ---- Arc trajectory generation ----
+NumArcCurvatures   = 9      # discrete curvatures sampled (odd ⇒ includes κ=0)
+
+# ---- Policy rollout & EFE ----
+HorizonSteps       = 20     # rollout length in steps
+Dt                 = 0.2    # step duration (s); rollout horizon = HorizonSteps × Dt
+MaxAdvSpeed        = 0.9    # m/s
+MaxRotSpeed        = 0.75   # rad/s
+WEpistemic         = 0.1    # EFE weight: information gain
+WPragmatic         = 3.0    # EFE weight: goal proximity
+WHeading           = 2.0    # EFE weight: heading alignment
+WBoundary          = 10.0   # EFE weight: room boundary avoidance
+
+# ---- Approach speed ----
+KRot               = 3.5    # proportional gain for heading correction
+GaussianSigma      = 0.5    # goal proximity Gaussian σ (m)
+SpeedHorizonS      = 0.4    # max time-to-target (s) for approach speed ramp
+                            # decoupled from rollout horizon; lower = more decisive
+
+# ---- Obstacle avoidance ----
+ObstacleRadius     = 0.35   # robot clearance radius (m)
+ObstacleK          = 0.5    # obstacle repulsion gain
+ObstacleStepCap    = 10.0   # max repulsion step size
+WObstacle          = 2.0    # EFE weight: obstacle penalty
+WallFilterMargin   = 0.30   # lidar points within this margin of wall are ignored (m)
+
+# ---- Perceptual bandwidth speed limit ----
+BandwidthCoupling  = 0.3    # reduces max adv speed when rotating: eff_v = max_v × (1 - k×|ω|/ω_max)
+
+# ---- Reactive speed governor ----
+SdfSafe            = 0.06   # SDF-MSE below this → full speed
+SdfDanger          = 0.10   # SDF-MSE at/above this → minimum speed
+GovernorAlphaMin   = 0.4    # minimum speed fraction when localization is poor
+
+# ---- FIM scoring ----
+FimCornerSigma     = 0.04   # corner detection noise σ (m)
+FimMaxRange        = 10.0   # max corner visibility range (m)
+
+# ---- Target selector (EpistemicPlanner) ----
+GridResolution     = 0.5    # spacing between candidate targets (m)
+MinDistance        = 1.0    # ignore targets closer than this to robot (m)
+MaxCandidates      = 2000   # cap on evaluated candidates
+TargetWallMargin   = 1.0    # reject targets closer than this to walls (m)
+AngularDominanceRatio = 50.0 # σ²_θ / max(σ²_x, σ²_y) threshold to trigger rotate-in-place
+WExploration       = 0.5    # weight: distance bonus (explore farther)
+IorCellSize        = 0.5    # inhibition-of-return grid resolution (m)
+IorDecayTime       = 120.0  # seconds until visited cell is fully stale
+WIor               = 2.0    # weight: staleness bonus
+ArrivalDistance    = 0.15   # target reached threshold (m)
+DwellTime          = 2.0    # seconds to pause after reaching target
+
+# ---- Acceleration ramp (SpecificWorker) ----
+MaxLinAccel        = 1.2    # m/s² max translational acceleration
+MaxRotAccel        = 2.0    # rad/s² max angular acceleration
 
 [Component.Debug]
 Verbose = true

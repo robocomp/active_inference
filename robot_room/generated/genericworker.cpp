@@ -27,6 +27,8 @@ GenericWorker::GenericWorker(const ConfigLoader& configLoader, TuplePrx tprx) : 
     if (!this->configLoader.get<bool>("Component.Debug.Verbose")) {
         qInstallMessageHandler([](QtMsgType, const QMessageLogContext&, const QString&) {});
     }
+	lidar3d_proxy = std::get<0>(tprx);
+	omnirobot_proxy = std::get<1>(tprx);
 
 	states["Initialize"] = std::make_unique<GRAFCETStep>("Initialize", BASIC_PERIOD, nullptr, std::bind(&GenericWorker::initialize, this));
 	states["Compute"] = std::make_unique<GRAFCETStep>("Compute", configLoader.get<int>("Period.Compute"), std::bind(&GenericWorker::compute, this));
