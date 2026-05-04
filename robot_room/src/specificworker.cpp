@@ -204,8 +204,11 @@ void SpecificWorker::initialize()
     room_concept_.set_seed_pose_file(pose_path);
     std::cout << "Pose seed file: " << pose_path << "\n";
 
-    // ── 2-D viewer (attached to central widget) ────────────────────────────
-    // viewer_2d_ = std::make_unique<rc::Viewer2D>(centralWidget(), params.GRID_MAX_DIM, true);
+    // custom widget
+    graph_viewers[agent_name]->add_custom_widget_to_dock("room concept", &custom_widget);
+    //widget_2d = qobject_cast<DSR::QScene2dViewer*> (viewer->get_widget(opts::scene));
+
+    viewer_2d_ = std::make_unique<rc::Viewer2D>(centralWidget(), params.GRID_MAX_DIM, true);
     // viewer_2d_->show();
     // viewer_2d_->add_robot(params.ROBOT_WIDTH, params.ROBOT_LENGTH, 0.f, 0.f, QColor("blue"));
     // if (room_initialized_from_svg_polygon_)

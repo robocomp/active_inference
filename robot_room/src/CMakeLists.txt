@@ -34,6 +34,7 @@ LIST(APPEND SOURCES
   ../src/timeseries_plot.cpp
   ../src/corner_detector.cpp
   ../src/rerun_logger.cpp
+  ../src/custom_widget.h
 )
 
 # ── Headers ────────────────────────────────────────────────────────────────────

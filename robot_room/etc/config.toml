@@ -20,7 +20,7 @@ Emergency = 500
 # --- Common Agent Data ---
 [Agent]
 id = 5 # Change id
-name = "robot_room"
+name = "room_concept"
 
 # --- Single Instance Configuration ---
 # Use this if you only have one graph.
