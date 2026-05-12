@@ -1,0 +1,14 @@
+import "Lidar3D.idsl";
+import "CameraRGBDSimple.idsl";
+
+Component robot_concept
+{
+    Communications
+    {
+        requires Lidar3D, CameraRGBDSimple;
+    };
+    language Cpp11;
+    options dsr;
+
+};
+
