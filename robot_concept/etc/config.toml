@@ -1,16 +1,16 @@
 [Proxies]
 # Proxies for required interfaces
-CameraRGBDSimple = "camerargbdsimple:tcp -h localhost -p 0"
-Lidar3D = "lidar3d:tcp -h localhost -p 0"
+CameraRGBDSimple = "camerargbdsimple:tcp -h localhost -p 10096"
+Lidar3D = "lidar3d:tcp -h localhost -p 11995"  # Filter
 
 # --- Common Agent Data ---
 [Agent]
-id = 0 # Change id
+id = 6 # Change id
 name = "robot_concept"
 
 # --- Single Instance Configuration ---
 # Use this if you only have one graph.
-configFile = ""
+configFile = "room.json"
 domain = 0
 tree = true
 graph = true
@@ -32,7 +32,7 @@ Compute = 100
 Emergency = 500
 
 [Component.Debug]
-Verbose = true
+Verbose = false
 
 [Ice]
 Warn.Connections = "0"

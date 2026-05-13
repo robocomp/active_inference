@@ -53,8 +53,8 @@ public:
 	~SpecificWorker();
 
 	 /// Lidar buffer: input LidarData and output a tuple of three vectors of floats (x, y, z coordinates) for G uploading to the DSR graph.
-    using PointCloud_Buffer = BufferSync<InOut<std::pair<RoboCompLidar3D::TPoints, std::int64_t>,
-					           				   std::tuple<std::vector<float>, std::vector<float>, std::vector<float>>>>;
+    using PointCloud_Buffer = BufferSync<InOut<std::pair<RoboCompLidar3D::TPoints, std::uint64_t>,
+		std::tuple<std::uint64_t, std::vector<float>, std::vector<float>, std::vector<float>>>>;
                                     
 
 public slots:

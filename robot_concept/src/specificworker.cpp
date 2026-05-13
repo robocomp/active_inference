@@ -58,6 +58,11 @@ void SpecificWorker::initialize()
     std::cout << "initialize worker" << std::endl;
 	GenericWorker::initialize();
 
+	 // ── Start lidar reader thread ────────────────────────────
+    lidar_thread = std::thread(&SpecificWorker::read_lidar_thread, this);
+    qInfo() << __FUNCTION__ << "Started lidar reader";
+
+
 	//Subscription to DSR graph update signals. 
 	// If multiple graphs exist, it is necessary to specify the graph name 
 	// using 'Graphs.at("name")' to connect its signals to the Worker's slots.
@@ -87,24 +92,34 @@ void SpecificWorker::initialize()
 
 void SpecificWorker::compute()
 {
+	static FPSCounter compute_fps;
+    
 	const auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
 	// read pointcloud data from the buffer and upload it to the DSR graph as attributes of the lidar3d node
-	const auto &[points_opt] = pointcloud_buffer.read(timestamp);
-	if(not points_opt.has_value())
+	const auto &[data_opt] = pointcloud_buffer.read(timestamp);
+	if(not data_opt.has_value())
 	{ qWarning() << "No pointcloud data available at timestamp" << timestamp; return;}
-	const auto &[xs, ys, zs] = points_opt.value();
-
+	const auto &[ts, xs, ys, zs] = data_opt.value();
+	std::cout << " " <<xs.size()*3*4 << "  uploaded to DSR graph at timestamp " << timestamp << std::endl;
 	// Upload to DSR graph
-	
-
+	 if (auto laser_node = G->get_node("lidar3D"); laser_node.has_value())
+	 {
+	 	G->add_or_modify_attrib_local<laser_X_att>(laser_node.value(), xs);
+	 	G->add_or_modify_attrib_local<laser_Y_att>(laser_node.value(), ys);
+	 	G->add_or_modify_attrib_local<laser_Z_att>(laser_node.value(), zs);
+	 	G->add_or_modify_attrib_local<laser_timestamp_att>(laser_node.value(), static_cast<uint64_t>(timestamp));
+	 	G->update_node(laser_node.value());
+	 }
+	 else
+	 	qWarning() << "Laser node not found in DSR graph";
+	compute_fps.print("[Compute]", 2000);
 }
-
 
 ////////////////////////////////////////////////////////////////////////////////////////////////
 void SpecificWorker::read_lidar_thread()
 {
-	FPSCounter lidar_fps;
+	static FPSCounter lidar_fps;
     auto wait_period = std::chrono::milliseconds(getPeriod("Compute"));
     while (!stop_lidar_thread)
     {
@@ -122,24 +137,22 @@ void SpecificWorker::read_lidar_thread()
             { qWarning() << "[read_lidar] getLidarData failed:" << e.what(); std::terminate(); }
 
 			pointcloud_buffer.put<0>(
-				std::make_pair(std::move(data.points), static_cast<std::int64_t>(data.timestamp)),
+				std::make_pair(std::move(data.points), static_cast<std::uint64_t>(data.timestamp)),
 				timestamp,
 				[](auto &&input, auto &output)
 				{
 					auto &&[points, lidar_ts] = input;
-					(void)lidar_ts;
-					auto &[xs, ys, zs] = output;
-					xs.clear();
-					ys.clear();
-					zs.clear();
-					xs.reserve(points.size());
-					ys.reserve(points.size());
-					zs.reserve(points.size());
-					for (const auto &p : points)
+					auto &[ts, xs, ys, zs] = output;
+					ts = lidar_ts;
+					const auto n = points.size();
+					xs.resize(n);
+					ys.resize(n);
+					zs.resize(n);
+					for (std::size_t i = 0; i < n; ++i)
 					{
-						xs.emplace_back(p.x);
-						ys.emplace_back(p.y);
-						zs.emplace_back(p.z);
+						xs[i] = points[i].x;
+						ys[i] = points[i].y;
+						zs[i] = points[i].z;
 					}
 				});
         
@@ -154,7 +167,6 @@ void SpecificWorker::read_lidar_thread()
         { qWarning() << "[read_lidar] Ice exception:" << e.what(); }
     }
 }
-
 
 
 ////////////////////////////////////////////////////////////////////////////////////////////////
