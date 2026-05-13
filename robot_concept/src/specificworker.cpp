@@ -101,7 +101,7 @@ void SpecificWorker::compute()
 	if(not data_opt.has_value())
 	{ qWarning() << "No pointcloud data available at timestamp" << timestamp; return;}
 	const auto &[ts, xs, ys, zs] = data_opt.value();
-	std::cout << " " <<xs.size()*3*4 << "  uploaded to DSR graph at timestamp " << timestamp << std::endl;
+	//std::cout << " " <<xs.size()*3*4 << "  uploaded to DSR graph at timestamp " << timestamp << std::endl;
 	// Upload to DSR graph
 	 if (auto laser_node = G->get_node("lidar3D"); laser_node.has_value())
 	 {
