@@ -1,8 +1,12 @@
+find_package(Qt6 COMPONENTS 3DCore 3DRender 3DExtras QUIET)
+find_package(Qt6 COMPONENTS OpenGL OpenGLWidgets QUIET)
+
 # Sources set
 LIST(APPEND SOURCES
   ../src/specificworker.cpp
   ../src/unified_voxel_grid.cpp
   ../src/yolo_seg_detector.cpp
+  ../src/custom_widget.h
 )
 
 # Headers set
@@ -11,6 +15,22 @@ LIST(APPEND HEADERS
   ../src/unified_voxel_grid.h
   ../src/yolo_seg_detector.h
 )
+
+if(TARGET Qt6::3DCore AND TARGET Qt6::3DRender AND TARGET Qt6::3DExtras)
+  LIST(APPEND SOURCES ../src/voxel_viewer_3d.cpp)
+  LIST(APPEND HEADERS ../src/voxel_viewer_3d.h)
+  LIST(APPEND LIBS Qt6::3DCore Qt6::3DRender Qt6::3DExtras)
+else()
+  message(WARNING "Qt3D targets not found; building without voxel_viewer_3d")
+endif()
+
+if(TARGET Qt6::OpenGL AND TARGET Qt6::OpenGLWidgets)
+  LIST(APPEND SOURCES ../src/voxel_opengl_viewer.cpp)
+  LIST(APPEND HEADERS ../src/voxel_opengl_viewer.h)
+  LIST(APPEND LIBS Qt6::OpenGL Qt6::OpenGLWidgets)
+else()
+  message(WARNING "Qt OpenGL targets not found; building without voxel_opengl_viewer")
+endif()
 
 
 # TBB is required by std::execution::par_unseq (libstdc++ on Linux)

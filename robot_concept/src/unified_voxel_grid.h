@@ -52,26 +52,26 @@ struct VoxelKeyHash
 
 class CategoryRegistry
 {
-public:
-    static constexpr std::array DEFAULT_CATEGORIES{
-        "chair", "table", "desk", "sofa", "bed",
-        "monitor", "shelf", "barrel", "toilet", "night_stand"
-    };
+    public:
+        static constexpr std::array DEFAULT_CATEGORIES{
+            "chair", "table", "desk", "sofa", "bed",
+            "monitor", "shelf", "barrel", "toilet", "night_stand"
+        };
 
-    explicit CategoryRegistry(std::span<const char* const> cats = DEFAULT_CATEGORIES);
+        explicit CategoryRegistry(std::span<const char* const> cats = DEFAULT_CATEGORIES);
 
-    int  register_category(const std::string& name);
-    int  idx(const std::string& name);         // registers if missing
-    [[nodiscard]] int idx_or(const std::string& name, int fallback = -1) const;  // const, no register
-    [[nodiscard]] std::string name(int i) const;
-    [[nodiscard]] int K() const noexcept { return static_cast<int>(_n2i.size()); }
-    [[nodiscard]] std::vector<std::string> names() const;
-    [[nodiscard]] std::map<std::string, float>
-        belief_to_dict(std::span<const float> alpha) const;
+        int  register_category(const std::string& name);
+        int  idx(const std::string& name);         // registers if missing
+        [[nodiscard]] int idx_or(const std::string& name, int fallback = -1) const;  // const, no register
+        [[nodiscard]] std::string name(int i) const;
+        [[nodiscard]] int K() const noexcept { return static_cast<int>(_n2i.size()); }
+        [[nodiscard]] std::vector<std::string> names() const;
+        [[nodiscard]] std::map<std::string, float>
+            belief_to_dict(std::span<const float> alpha) const;
 
-private:
-    std::unordered_map<std::string, int> _n2i;
-    std::unordered_map<int, std::string> _i2n;
+    private:
+        std::unordered_map<std::string, int> _n2i;
+        std::unordered_map<int, std::string> _i2n;
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -152,124 +152,124 @@ struct SemanticVoxelExport
 
 class UnifiedVoxelGrid
 {
-public:
-    // ── Construction ──────────────────────────────────────────────────────
-    explicit UnifiedVoxelGrid(UnifiedGridConfig cfg = {},
-                              CategoryRegistry  reg = {});
+    public:
+        // ── Construction ──────────────────────────────────────────────────────
+        explicit UnifiedVoxelGrid(UnifiedGridConfig cfg = {},
+                                CategoryRegistry  reg = {});
 
-    // ── 1. Positive observation ───────────────────────────────────────────
-    void observe(int track_id,
-                 std::span<const Eigen::Vector3f> pts,
-                 const std::string& category,
-                 int frame,
-                 std::span<const std::string> per_point_labels = {},
-                 std::span<const float>        confidences     = {},
-                 float detection_confidence = 1.0f);
+        // ── 1. Positive observation ───────────────────────────────────────────
+        void observe(int track_id,
+                    std::span<const Eigen::Vector3f> pts,
+                    const std::string& category,
+                    int frame,
+                    std::span<const std::string> per_point_labels = {},
+                    std::span<const float>        confidences     = {},
+                    float detection_confidence = 1.0f);
 
-    // ── 2. Ray-based visibility update ───────────────────────────────────
-    [[nodiscard]] std::expected<VisibilityStats, std::string>
-    visibility_update(const Eigen::Vector3f& cam_pos,
-                      const Eigen::Matrix3f& cam_R,
-                      int frame,
-                      std::span<const Eigen::Vector3f> scene_pts = {});
+        // ── 2. Ray-based visibility update ───────────────────────────────────
+        [[nodiscard]] std::expected<VisibilityStats, std::string>
+        visibility_update(const Eigen::Vector3f& cam_pos,
+                        const Eigen::Matrix3f& cam_R,
+                        int frame,
+                        std::span<const Eigen::Vector3f> scene_pts = {});
 
-    // ── 3. Point-cloud queries ────────────────────────────────────────────
-    [[nodiscard]] std::vector<Eigen::Vector3f>
-        get_points(int track_id) const;
+        // ── 3. Point-cloud queries ────────────────────────────────────────────
+        [[nodiscard]] std::vector<Eigen::Vector3f>
+            get_points(int track_id) const;
 
-    [[nodiscard]] std::optional<Eigen::Vector3f>
-        get_extent(int track_id) const;
+        [[nodiscard]] std::optional<Eigen::Vector3f>
+            get_extent(int track_id) const;
 
-    [[nodiscard]] std::optional<float>
-        get_z_centroid(int track_id) const;
+        [[nodiscard]] std::optional<float>
+            get_z_centroid(int track_id) const;
 
-    [[nodiscard]] int get_n_voxels(int track_id) const noexcept;
+        [[nodiscard]] int get_n_voxels(int track_id) const noexcept;
 
-    [[nodiscard]] std::vector<Eigen::Vector3f>
-        get_filtered_points(int track_id,
-                            const std::string& expected_cat,
-                            std::optional<float> threshold = std::nullopt) const;
+        [[nodiscard]] std::vector<Eigen::Vector3f>
+            get_filtered_points(int track_id,
+                                const std::string& expected_cat,
+                                std::optional<float> threshold = std::nullopt) const;
 
-    [[nodiscard]] std::vector<Eigen::Vector3f>
-        get_points_clustered(int track_id,
-                             std::optional<std::string> expected_cat = std::nullopt,
-                             std::optional<float> cat_threshold      = std::nullopt,
-                             std::optional<float> eps                = std::nullopt,
-                             std::optional<int>   min_samples        = std::nullopt,
-                             std::optional<int>   top_k              = std::nullopt,
-                             std::optional<float> min_ratio          = std::nullopt) const;
+        [[nodiscard]] std::vector<Eigen::Vector3f>
+            get_points_clustered(int track_id,
+                                std::optional<std::string> expected_cat = std::nullopt,
+                                std::optional<float> cat_threshold      = std::nullopt,
+                                std::optional<float> eps                = std::nullopt,
+                                std::optional<int>   min_samples        = std::nullopt,
+                                std::optional<int>   top_k              = std::nullopt,
+                                std::optional<float> min_ratio          = std::nullopt) const;
 
-    // ── 4. Ownership / category ───────────────────────────────────────────
-    [[nodiscard]] float ownership_prob(VoxelKey key, int track_id) const noexcept;
-    [[nodiscard]] std::pair<int, float> dominant_owner(VoxelKey key) const noexcept;
+        // ── 4. Ownership / category ───────────────────────────────────────────
+        [[nodiscard]] float ownership_prob(VoxelKey key, int track_id) const noexcept;
+        [[nodiscard]] std::pair<int, float> dominant_owner(VoxelKey key) const noexcept;
 
-    [[nodiscard]] std::vector<float>
-        object_category_belief(int track_id) const;
+        [[nodiscard]] std::vector<float>
+            object_category_belief(int track_id) const;
 
-    [[nodiscard]] std::map<std::string, float>
-        object_category_dict(int track_id) const;
+        [[nodiscard]] std::map<std::string, float>
+            object_category_dict(int track_id) const;
 
-    [[nodiscard]] std::pair<std::string, float>
-        object_dominant_category(int track_id) const;
+        [[nodiscard]] std::pair<std::string, float>
+            object_dominant_category(int track_id) const;
 
-    // ── 5. Track management ───────────────────────────────────────────────
-    void remove(int track_id);
-    int  cleanup_voxels(int track_id,
-                        std::optional<float> eps         = std::nullopt,
-                        std::optional<int>   min_samples = std::nullopt,
-                        std::optional<float> min_ratio   = std::nullopt);
-    int  prune_to_sdf(int track_id,
-                      std::function<std::vector<float>(std::span<const Eigen::Vector3f>)> sdf_fn,
-                      float sdf_threshold = 0.10f);
-    int  reassign_ownership(int from_id, int to_id);
+        // ── 5. Track management ───────────────────────────────────────────────
+        void remove(int track_id);
+        int  cleanup_voxels(int track_id,
+                            std::optional<float> eps         = std::nullopt,
+                            std::optional<int>   min_samples = std::nullopt,
+                            std::optional<float> min_ratio   = std::nullopt);
+        int  prune_to_sdf(int track_id,
+                        std::function<std::vector<float>(std::span<const Eigen::Vector3f>)> sdf_fn,
+                        float sdf_threshold = 0.10f);
+        int  reassign_ownership(int from_id, int to_id);
 
-    [[nodiscard]] std::unordered_set<int> get_all_track_ids() const;
-    [[nodiscard]] std::unordered_map<int, int> summary() const;
+        [[nodiscard]] std::unordered_set<int> get_all_track_ids() const;
+        [[nodiscard]] std::unordered_map<int, int> summary() const;
 
-    // ── 6. Export & diagnostics ───────────────────────────────────────────
-    [[nodiscard]] SemanticVoxelExport
-        export_semantic_voxels(const std::unordered_set<int>* track_ids   = nullptr,
-                               const std::unordered_map<int,std::string>* hints = nullptr,
-                               float min_prob = 0.0f) const;
+        // ── 6. Export & diagnostics ───────────────────────────────────────────
+        [[nodiscard]] SemanticVoxelExport
+            export_semantic_voxels(const std::unordered_set<int>* track_ids   = nullptr,
+                                const std::unordered_map<int,std::string>* hints = nullptr,
+                                float min_prob = 0.0f) const;
 
-    [[nodiscard]] std::map<std::string,
-                           std::variant<int, std::map<std::string,int>>>
-        global_debug_stats() const;
+        [[nodiscard]] std::map<std::string,
+                            std::variant<int, std::map<std::string,int>>>
+            global_debug_stats() const;
 
-private:
-    // ── Helpers ───────────────────────────────────────────────────────────
-    [[nodiscard]] VoxelKey make_key(const Eigen::Vector3f& pt) const noexcept;
-    [[nodiscard]] bool _is_categorized(const VoxelState& vs) const noexcept;
-    void _enforce_max_voxels(int frame);
-    void _reset_frame_bookkeeping();
+    private:
+        // ── Helpers ───────────────────────────────────────────────────────────
+        [[nodiscard]] VoxelKey make_key(const Eigen::Vector3f& pt) const noexcept;
+        [[nodiscard]] bool _is_categorized(const VoxelState& vs) const noexcept;
+        void _enforce_max_voxels(int frame);
+        void _reset_frame_bookkeeping();
 
-    // AABB slab test: returns keys of voxels traversed (not endpoints).
-    // SoA layout fed to par_unseq inner loop.
-    [[nodiscard]] std::unordered_set<VoxelKey, VoxelKeyHash>
-        _aabb_traversed(const Eigen::Vector3f& cam,
-                        std::span<const Eigen::Vector3f> targets) const;
+        // AABB slab test: returns keys of voxels traversed (not endpoints).
+        // SoA layout fed to par_unseq inner loop.
+        [[nodiscard]] std::unordered_set<VoxelKey, VoxelKeyHash>
+            _aabb_traversed(const Eigen::Vector3f& cam,
+                            std::span<const Eigen::Vector3f> targets) const;
 
-    // DBSCAN — brute-force SoA, bitmatrix adjacency, par_unseq.
-    // Returns per-point label (-1 = noise).
-    [[nodiscard]] std::vector<int>
-        _dbscan(std::span<const Eigen::Vector3f> pts,
-                float eps, int min_samples) const;
+        // DBSCAN — brute-force SoA, bitmatrix adjacency, par_unseq.
+        // Returns per-point label (-1 = noise).
+        [[nodiscard]] std::vector<int>
+            _dbscan(std::span<const Eigen::Vector3f> pts,
+                    float eps, int min_samples) const;
 
-    int  _track_dec(int track_id) noexcept;   // decrement count, clamp ≥ 0
-    void _track_inc(int track_id) noexcept;
+        int  _track_dec(int track_id) noexcept;   // decrement count, clamp ≥ 0
+        void _track_inc(int track_id) noexcept;
 
-    // ── State ─────────────────────────────────────────────────────────────
-    UnifiedGridConfig _cfg;
-    CategoryRegistry  _reg;
-    float             _inv;   // 1.0f / resolution
+        // ── State ─────────────────────────────────────────────────────────────
+        UnifiedGridConfig _cfg;
+        CategoryRegistry  _reg;
+        float             _inv;   // 1.0f / resolution
 
-    std::unordered_map<VoxelKey, VoxelState, VoxelKeyHash> _grid;
-    std::unordered_map<int, int>  _track_voxel_count;
+        std::unordered_map<VoxelKey, VoxelState, VoxelKeyHash> _grid;
+        std::unordered_map<int, int>  _track_voxel_count;
 
-    // Per-frame bookkeeping — flat_set for cache-friendly membership test
-    std::flat_set<VoxelKey> _touched_this_frame;
-    std::vector<Eigen::Vector3f> _observed_pts_this_frame;
+        // Per-frame bookkeeping — flat_set for cache-friendly membership test
+        std::flat_set<VoxelKey> _touched_this_frame;
+        std::vector<Eigen::Vector3f> _observed_pts_this_frame;
 
-    static constexpr int MAX_RAYS = 500;
-    int _frame = 0;
+        static constexpr int MAX_RAYS = 500;
+        int _frame = 0;
 };

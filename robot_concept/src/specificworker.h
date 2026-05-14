@@ -33,8 +33,11 @@
 #include <fps/fps.h>
 #include <memory>
 #include "yolo_seg_detector.h"
+#include "custom_widget.h"
 
 class UnifiedVoxelGrid;
+namespace rc { class VoxelViewer3D; }
+namespace rc { class VoxelOpenGLViewer; }
 
 /**
  * \brief Class SpecificWorker implements the core functionality of the component.
@@ -120,6 +123,9 @@ private:
             int         YOLO_INPUT_SIZE   = 640;
             bool        YOLO_USE_GPU      = true;
             bool        YOLO_USE_TRT       = false;
+
+			// Voxel grid
+			std::size_t VOXEL_DECIMATION_FACTOR = 2;
         };
         Params params;
 
@@ -139,7 +145,39 @@ private:
 	std::atomic<bool> stop_rgbd_thread{false};
 
 	// Visualisation
+	struct VoxelSelectionResult
+	{
+		std::vector<Eigen::Vector3f> points;
+		std::vector<std::string> labels;
+		std::vector<float> confidences;
+		std::size_t valid_points = 0;
+		std::size_t masked_points = 0;
+		std::size_t selected_points = 0;
+		std::size_t table_points = 0;
+		std::size_t chair_points = 0;
+		std::size_t monitor_points = 0;
+	};
+
 	void draw_detections(const cv::Mat& rgb_frame, const std::vector<SegDetection>& detections) const;
+	bool is_target_label(const std::string& label) const;
+	float detect_point_scale_once(const RoboCompCameraRGBDSimple::TRGBD& rgbd) const;
+	void build_owner_map_and_medians(const RoboCompCameraRGBDSimple::TRGBD& rgbd,
+	                                float point_scale,
+	                                const std::vector<SegDetection>& detections,
+	                                std::vector<int32_t>& pixel_owner,
+	                                std::vector<float>& det_median_range_m) const;
+	VoxelSelectionResult collect_points_parallel(const RoboCompCameraRGBDSimple::TRGBD& rgbd,
+	                                            float point_scale,
+	                                            const std::vector<int32_t>& pixel_owner,
+	                                            const std::vector<SegDetection>& detections,
+	                                            const std::vector<float>& det_median_range_m) const;
+	void update_voxel_grid_from_rgbd(const RoboCompCameraRGBDSimple::TRGBD& rgbd,
+	                                const std::vector<SegDetection>& detections);
+	
+	// Custom widget for docking in the graph viewer
+	Custom_widget custom_widget;
+	std::unique_ptr<rc::VoxelOpenGLViewer> voxel_viewer_gl;
+	std::unique_ptr<rc::VoxelViewer3D> voxel_viewer_3d;
 
 	// Unified voxel grid — scene-level semantic map
 	std::unique_ptr<UnifiedVoxelGrid> voxel_grid;

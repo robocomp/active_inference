@@ -876,7 +876,6 @@ UnifiedVoxelGrid::export_semantic_voxels(const std::unordered_set<int>* track_id
     SemanticVoxelExport out;
     for (const auto& [k, vs] : _grid)
     {
-        if (vs.track_id == 0) continue;
         if (track_ids && !track_ids->contains(vs.track_id)) continue;
 
         const float a_sum = std::reduce(vs.alpha.begin(), vs.alpha.end(), 0.0f);
