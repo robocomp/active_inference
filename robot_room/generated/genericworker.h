@@ -20,15 +20,6 @@
 #define GENERICWORKER_H
 
 #include <stdint.h>
-
-#if Qt5_FOUND
-	#include <QtWidgets>
-#else
-	#include <QtGui>
-#endif
-#include <ui_mainUI.h>
-#define USE_QTGUI
-
 #include <grafcetStep/GRAFCETStep.h>
 #include <ConfigLoader/ConfigLoader.h>
 #include <QStateMachine>
@@ -42,7 +33,7 @@
 
 #include "dsr/api/dsr_api.h"
 #include "dsr/gui/dsr_gui.h"
-//#include <doublebuffer/DoubleBuffer.h>
+
 #include <memory>
 
 #include <FullPoseEstimation.h>
@@ -57,7 +48,7 @@
 using TuplePrx = std::tuple<RoboCompLidar3D::Lidar3DPrxPtr,RoboCompOmniRobot::OmniRobotPrxPtr>;
 
 
-class GenericWorker : public QMainWindow, public Ui_guiDlg
+class GenericWorker : public QObject
 {
 Q_OBJECT
 public:

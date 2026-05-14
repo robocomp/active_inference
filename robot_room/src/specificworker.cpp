@@ -205,19 +205,21 @@ void SpecificWorker::initialize()
     std::cout << "Pose seed file: " << pose_path << "\n";
 
     // custom widget
-    graph_viewers[agent_name]->add_custom_widget_to_dock("room concept", &custom_widget);
-    //widget_2d = qobject_cast<DSR::QScene2dViewer*> (viewer->get_widget(opts::scene));
+    //graph_viewers[agent_name]->add_custom_widget_to_dock("room concept", &custom_widget);
+    qInfo() << __FUNCTION__ << "Adding custom widget to dock" << agent_name.c_str();
+    graph_viewers.at("")->add_custom_widget_to_dock("layout", &custom_widget);
+    //viewer_2d_ = qobject_cast<DSR::QScene2dViewer*> (graph_viewers[agent_name]->get_widget(opts::scene));
 
-    viewer_2d_ = std::make_unique<rc::Viewer2D>(centralWidget(), params.GRID_MAX_DIM, true);
-    // viewer_2d_->show();
-    // viewer_2d_->add_robot(params.ROBOT_WIDTH, params.ROBOT_LENGTH, 0.f, 0.f, QColor("blue"));
-    // if (room_initialized_from_svg_polygon_)
-    // {
-    //     const auto room_polygon = rc::SvgRoomLoader::load_polygon_points(
-    //         "beta_layout.svg", "room_contour", false, true);
-    //     if (room_polygon.size() >= 3)
-    //         viewer_2d_->draw_room_polygon(room_polygon, false);
-    // }
+    viewer_2d_ = std::make_unique<rc::Viewer2D>(custom_widget.frame, params.GRID_MAX_DIM, true);
+    viewer_2d_->show();
+    viewer_2d_->add_robot(params.ROBOT_WIDTH, params.ROBOT_LENGTH, 0.f, 0.f, QColor("blue"));
+    if (room_initialized_from_svg_polygon_)
+    {
+         const auto room_polygon = rc::SvgRoomLoader::load_polygon_points(
+             "beta_layout.svg", "room_contour", false, true);
+         if (room_polygon.size() >= 3)
+             viewer_2d_->draw_room_polygon(room_polygon, false);
+    }
 
     // ── DSR: create world + robot nodes ───────────────────────────────────
     //dsr_init_graph();
@@ -248,28 +250,28 @@ void SpecificWorker::compute()
     const Eigen::Affine2f pose_for_draw = best_available_pose(loc_res, have_loc);
 
     // ── Update 2-D viewer ─────────────────────────────────────────────────
-    // const Eigen::Affine2f loc_pose = have_loc ? loc_res->robot_pose : pose_for_draw;
-    // const bool use_loc = have_loc && !loc_res->lidar_scan.empty();
-    // const std::vector<Eigen::Vector3f>& draw_points =
-    //     use_loc ? loc_res->lidar_scan : lidar_data_->first;
+    const Eigen::Affine2f loc_pose = have_loc ? loc_res->robot_pose : pose_for_draw;
+    const bool use_loc = have_loc && !loc_res->lidar_scan.empty();
+    const std::vector<Eigen::Vector3f>& draw_points =
+        use_loc ? loc_res->lidar_scan : lidar_data_->first;
 
-    // viewer_2d_->update_frame({
-    //     .lidar_points     = draw_points,
-    //     .display_pose     = pose_for_draw,
-    //     .max_lidar_points = params.MAX_LIDAR_DRAW_POINTS,
-    //     .have_loc         = have_loc,
-    //     .is_initialized   = room_concept_.is_initialized(),
-    //     .has_room_polygon = room_initialized_from_svg_polygon_,
-    //     .room_width       = have_loc ? loc_res->state[0] : 0.f,
-    //     .room_length      = have_loc ? loc_res->state[1] : 0.f,
-    //     .loc_pose         = loc_pose,
-    //     .use_loc_pose     = use_loc,
-    // });
+    viewer_2d_->update_frame({
+        .lidar_points     = draw_points,
+        .display_pose     = pose_for_draw,
+        .max_lidar_points = params.MAX_LIDAR_DRAW_POINTS,
+        .have_loc         = have_loc,
+        .is_initialized   = room_concept_.is_initialized(),
+        .has_room_polygon = room_initialized_from_svg_polygon_,
+        .room_width       = have_loc ? loc_res->state[0] : 0.f,
+        .room_length      = have_loc ? loc_res->state[1] : 0.f,
+        .loc_pose         = loc_pose,
+        .use_loc_pose     = use_loc,
+    });
 
-    // if (have_loc && !loc_res->corner_matches.empty())
-    //     viewer_2d_->draw_corners(loc_res->corner_matches, pose_for_draw);
-    // else
-    //     viewer_2d_->draw_corners({}, pose_for_draw);
+    if (have_loc && !loc_res->corner_matches.empty())
+        viewer_2d_->draw_corners(loc_res->corner_matches, pose_for_draw);
+    else
+        viewer_2d_->draw_corners({}, pose_for_draw);
 
     // ── DSR graph update ───────────────────────────────────────────────────
     // if (have_loc)
@@ -281,6 +283,10 @@ void SpecificWorker::compute()
     //                           && sdf_mse < params.STABLE_SDF_MSE_MAX
     //                           && cov_tt  < params.STABLE_COV_TT_MAX;
 
+    //     qInfo() << "Localization stable:" << stable
+    //           << "| sdf_mse:" << sdf_mse << "(" << params.STABLE_SDF_MSE_MAX << ")"
+    //           << "| cov_tt:" << cov_tt << "(" << params.STABLE_COV_TT_MAX << ")"
+    //           << "| iterations_used:" << loc_res->iterations_used;
     //     if (!room_node_created_)
     //     {
     //         stable_frames_ = stable ? stable_frames_ + 1 : 0;

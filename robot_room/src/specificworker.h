@@ -83,7 +83,7 @@ class SpecificWorker : public GenericWorker
             std::string LIDAR_NAME_HIGH = "helios";
             float MAX_LIDAR_HIGH_RANGE      = 100.f;  // m
             int   LIDAR_LOW_DECIMATION_FACTOR = 1;
-            float LIDAR_HIGH_MIN_HEIGHT     = 1.0f;   // m
+            float LIDAR_HIGH_MIN_HEIGHT     = 1.5f;   // m
             float LIDAR_HIGH_MAX_HEIGHT     = 2.0f;   // m
             float LIDAR_HIGH_FLOOR_HEIGHT   = 0.15f;  // m
 

@@ -29,7 +29,7 @@ domain = 0
 tree = true
 graph = true
 2d = true
-3d = true
+3d = false
 
 # --- Multiple Instance Template ---
 # If you define multiple instances, the single instance config above will be ignored.

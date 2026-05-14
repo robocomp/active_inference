@@ -20,7 +20,7 @@
 /**
 * \brief Default constructor
 */
-GenericWorker::GenericWorker(const ConfigLoader& configLoader, TuplePrx tprx) : Ui_guiDlg()
+GenericWorker::GenericWorker(const ConfigLoader& configLoader, TuplePrx tprx) : QObject()
 {
 
 	this->configLoader = configLoader;
@@ -49,11 +49,6 @@ GenericWorker::GenericWorker(const ConfigLoader& configLoader, TuplePrx tprx) : 
 
 	connect(&hibernationChecker, SIGNAL(timeout()), this, SLOT(hibernationCheck()));
 
-
-	#ifdef USE_QTGUI
-		setupUi(this);
-		show();
-	#endif
 
     agent_name = this->configLoader.get<std::string>("Agent.name");
     agent_id = this->configLoader.get<int>("Agent.id");
