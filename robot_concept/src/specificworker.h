@@ -31,7 +31,10 @@
 #include <genericworker.h>
 #include <doublebuffer_sync/doublebuffer_sync.h>
 #include <fps/fps.h>
+#include <memory>
 #include "yolo_seg_detector.h"
+
+class UnifiedVoxelGrid;
 
 /**
  * \brief Class SpecificWorker implements the core functionality of the component.
@@ -138,6 +141,9 @@ private:
 	// Visualisation
 	void draw_detections(const cv::Mat& rgb_frame, const std::vector<SegDetection>& detections) const;
 
+	// Unified voxel grid — scene-level semantic map
+	std::unique_ptr<UnifiedVoxelGrid> voxel_grid;
+	int compute_frame_ = 0;
 	
 signals:
 	//void customSignal();

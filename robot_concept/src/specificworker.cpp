@@ -17,6 +17,10 @@
  *    along with RoboComp.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "specificworker.h"
+#ifdef emit
+#undef emit
+#endif
+#include "unified_voxel_grid.h"
 #include <print>
 
 SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, bool startup_check) : GenericWorker(configLoader, tprx)
@@ -107,6 +111,9 @@ void SpecificWorker::initialize()
 	//If you have more than one graph, you need to connect to the specific graph with the name
 	//graph_viewers.at("")->add_custom_widget_to_dock("CustomWidget", &custom_widget);
 
+	// Allocate here so the heavy header remains out of specificworker.h and MOC units.
+	voxel_grid = std::make_unique<UnifiedVoxelGrid>();
+
     //initializeCODE
     /////////GET PARAMS, OPEND DEVICES....////////
     //int period = configLoader.get<int>("Period.Compute") //NOTE: If you want get period of compute use getPeriod("compute")
@@ -174,8 +181,93 @@ void SpecificWorker::compute()
 		// 	std::println("Detected {} with confidence {:.3f}", det.label, det.confidence);
 	}
 
-	// Update the unified_voxel grid with the new detections (this is just an example, adapt as needed)
-	
+	// Update the unified voxel grid: project each RGBD point into 3D,
+	// label it with the YOLO class if its pixel falls inside a mask.
+	const auto& raw_pts = rgbd.points.points;
+	const int   img_w   = rgbd.image.width;
+	const int   img_h   = rgbd.image.height;
+
+	if (!raw_pts.empty() && img_w > 0 && img_h > 0
+	    && static_cast<int>(raw_pts.size()) == img_w * img_h)
+	{
+		std::vector<Eigen::Vector3f> pts_eigen;
+		std::vector<std::string>     pt_labels;
+		std::vector<float>           pt_confs;
+		std::size_t                  valid_points = 0;
+		std::size_t                  masked_points = 0;
+		pts_eigen.reserve(raw_pts.size() / 4);
+		pt_labels.reserve(raw_pts.size() / 4);
+		pt_confs .reserve(raw_pts.size() / 4);
+
+		for (int row = 0; row < img_h; ++row)
+		{
+			for (int col = 0; col < img_w; ++col)
+			{
+				const auto& p = raw_pts[static_cast<std::size_t>(row * img_w + col)];
+
+				// Skip invalid / out-of-range points
+				if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z))
+					continue;
+
+				// RoboComp RGBD points may come in mm depending on camera driver.
+				// If magnitudes are large, convert mm -> m before filtering/voxelizing.
+				const float max_abs = std::max({std::abs(p.x), std::abs(p.y), std::abs(p.z)});
+				const float unit_scale = (max_abs > 50.0f) ? 0.001f : 1.0f;
+				const float px = p.x * unit_scale;
+				const float py = p.y * unit_scale;
+				const float pz = p.z * unit_scale;
+
+				const float rng_sq = px*px + py*py + pz*pz;
+				if (rng_sq < 0.01f || rng_sq > 100.0f) // 0.1 m … 10 m
+					continue;
+
+				++valid_points;
+				pts_eigen.emplace_back(px, py, pz);
+
+				// Check if this pixel falls inside any YOLO detection mask.
+				// Detections are returned highest-confidence first by the model.
+				std::string label   = "background";
+				float       conf    = 0.0f;
+				for (const auto& det : detections)
+				{
+					if (det.mask.empty()
+					    || col >= det.mask.cols || row >= det.mask.rows)
+						continue;
+					if (det.mask.at<uint8_t>(row, col) > 127)
+					{
+						label = det.label;
+						conf  = det.confidence;
+						++masked_points;
+						break; // first (highest-confidence) match wins
+					}
+				}
+				pt_labels.push_back(std::move(label));
+				pt_confs .push_back(conf);
+			}
+		}
+
+		if (!pts_eigen.empty() && voxel_grid)
+			voxel_grid->observe(/*track_id=*/0,
+			                    pts_eigen,
+			                    /*category=*/"",
+			                    ++compute_frame_,
+			                    pt_labels,
+			                    pt_confs,
+			                    /*detection_confidence=*/1.0f);
+
+		if (compute_frame_ % 30 == 0)
+		{
+			const float ratio = valid_points > 0
+				? (100.0f * static_cast<float>(masked_points) / static_cast<float>(valid_points))
+				: 0.0f;
+			std::println("[VoxelDebug] valid_pts={} masked_pts={} ({:.1f}%) detections={}",
+			             valid_points,
+			             masked_points,
+			             ratio,
+			             detections.size());
+		}
+	}
+
 
 	compute_fps.print("[Compute]", 2000);
 }
