@@ -17,6 +17,7 @@
  *    along with RoboComp.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "specificworker.h"
+#include <print>
 
 SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, bool startup_check) : GenericWorker(configLoader, tprx)
 {
@@ -62,6 +63,29 @@ void SpecificWorker::initialize()
     lidar_thread = std::thread(&SpecificWorker::read_lidar_thread, this);
     qInfo() << __FUNCTION__ << "Started lidar reader";
 
+    // ── Start RGBD reader thread ─────────────────────────────
+    rgbd_thread = std::thread(&SpecificWorker::read_rgbd_thread, this);
+    qInfo() << __FUNCTION__ << "Started RGBD reader";
+
+    // ── Initialise YOLO-seg detector ─────────────────────────
+    try
+    {
+        params.YOLO_MODEL_PATH  = configLoader.get<std::string>("Yolo.model_path");
+    }
+    catch (...) { /* key absent — use default */ }
+    try { params.YOLO_CONF_THRESH = static_cast<float>(configLoader.get<double>("Yolo.conf_thresh")); } catch (...) {}
+    try { params.YOLO_IOU_THRESH  = static_cast<float>(configLoader.get<double>("Yolo.iou_thresh"));  } catch (...) {}
+    try { params.YOLO_USE_GPU     = configLoader.get<bool>("Yolo.use_gpu");  } catch (...) {}
+    try { params.YOLO_USE_TRT     = configLoader.get<bool>("Yolo.use_trt");  } catch (...) {}
+
+    yolo_detector.emplace(params.YOLO_MODEL_PATH,
+                          std::vector<std::string>{},   // default COCO names
+                          params.YOLO_CONF_THRESH,
+                          params.YOLO_IOU_THRESH,
+                          params.YOLO_INPUT_SIZE,
+                          params.YOLO_USE_GPU,
+                          params.YOLO_USE_TRT);
+   std::println("YOLO-seg detector ready: {}", params.YOLO_MODEL_PATH);
 
 	//Subscription to DSR graph update signals. 
 	// If multiple graphs exist, it is necessary to specify the graph name 
@@ -101,7 +125,7 @@ void SpecificWorker::compute()
 	if(not data_opt.has_value())
 	{ qWarning() << "No pointcloud data available at timestamp" << timestamp; return;}
 	const auto &[ts, xs, ys, zs] = data_opt.value();
-	//std::cout << " " <<xs.size()*3*4 << "  uploaded to DSR graph at timestamp " << timestamp << std::endl;
+
 	// Upload to DSR graph
 	 if (auto laser_node = G->get_node("lidar3D"); laser_node.has_value())
 	 {
@@ -113,7 +137,110 @@ void SpecificWorker::compute()
 	 }
 	 else
 	 	qWarning() << "Laser node not found in DSR graph";
+
+	// read RGBD data from the buffer
+	const auto &[rgbd_opt] = rgbd_buffer.read(timestamp);
+	if(not rgbd_opt.has_value())
+	{ qWarning() << "No RGBD data available at timestamp" << timestamp; return;}
+	const auto &rgbd = rgbd_opt.value();
+
+	// Upload to DSR graph
+	if (auto cam_node = G->get_node("zed"); cam_node.has_value())
+	{
+		G->add_or_modify_attrib_local<cam_rgb_att>(cam_node.value(),
+			std::vector<uint8_t>(rgbd.image.image.begin(), rgbd.image.image.end()));
+		G->add_or_modify_attrib_local<cam_depth_att>(cam_node.value(),
+			std::vector<uint8_t>(rgbd.depth.depth.begin(), rgbd.depth.depth.end()));
+		G->add_or_modify_attrib_local<cam_rgb_width_att>(cam_node.value(), rgbd.image.width);
+		G->add_or_modify_attrib_local<cam_rgb_height_att>(cam_node.value(), rgbd.image.height);
+		G->add_or_modify_attrib_local<cam_depth_width_att>(cam_node.value(), rgbd.depth.width);
+		G->add_or_modify_attrib_local<cam_depth_height_att>(cam_node.value(), rgbd.depth.height);
+		G->add_or_modify_attrib_local<cam_depthFactor_att>(cam_node.value(), rgbd.depth.depthFactor);
+		G->update_node(cam_node.value());
+	}
+	else
+		qWarning() << "Camera node not found in DSR graph";
+
+	// Process RGB image through YOLO-seg
+	std::vector<SegDetection> detections;
+	if (yolo_detector.has_value() && rgbd.image.width > 0 && rgbd.image.height > 0)
+	{
+		// Reconstruct cv::Mat from the raw byte vector (RGB, 3 channels)
+		const cv::Mat rgb_frame(rgbd.image.height, rgbd.image.width, CV_8UC3,
+			const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(rgbd.image.image.data())));
+		detections = yolo_detector->detect(rgb_frame, /*is_rgb=*/true);
+		//draw_detections(rgb_frame, detections);
+		// for (const auto& det : detections)
+		// 	std::println("Detected {} with confidence {:.3f}", det.label, det.confidence);
+	}
+
+	// Update the unified_voxel grid with the new detections (this is just an example, adapt as needed)
+	
+
 	compute_fps.print("[Compute]", 2000);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////
+void SpecificWorker::draw_detections(const cv::Mat& rgb_frame,
+                                     const std::vector<SegDetection>& detections) const
+{
+    // Work in BGR (OpenCV native)
+    cv::Mat canvas;
+    cv::cvtColor(rgb_frame, canvas, cv::COLOR_RGB2BGR);
+
+    // Colour palette — one colour per class (mod 20)
+    static const std::array<cv::Scalar, 20> palette = {{
+        {220,  20,  60}, {119,  11,  32}, {  0,   0, 142}, {  0,   0, 230}, { 106,   0, 228},
+        {  0,  60, 100}, {  0,  80, 100}, {  0,   0, 192}, {250, 170,  30}, {100, 170,  30},
+        {220, 220,   0}, {175, 116, 175}, {250,   0,  30}, {165,  42,  42}, {255,  77, 255},
+        {  0, 226, 252}, {182, 182, 255}, {  0,  82,   0}, {120, 166, 157}, {110,  76,   0},
+    }};
+
+    for (const auto& det : detections)
+    {
+        const cv::Scalar& colour = palette[static_cast<std::size_t>(det.class_id) % palette.size()];
+
+        // Coloured mask overlay (alpha blend directly onto canvas)
+        if (!det.mask.empty())
+        {
+            // Build a solid-colour BGR image the same size as canvas
+            cv::Mat colour_layer(canvas.size(), CV_8UC3, colour);
+            // Binary mask (CV_8UC1, 0 or 255)
+            cv::Mat mask_bin;
+            cv::threshold(det.mask, mask_bin, 127, 255, cv::THRESH_BINARY);
+            // Blend only the masked pixels: canvas = canvas*0.55 + colour*0.45
+            cv::Mat blended;
+            cv::addWeighted(canvas, 0.55, colour_layer, 0.45, 0.0, blended);
+            blended.copyTo(canvas, mask_bin);   // copy blended pixels where mask==255
+
+            // Contour outline for crisp mask boundary
+            std::vector<std::vector<cv::Point>> contours;
+            cv::findContours(mask_bin, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+            cv::drawContours(canvas, contours, -1, colour, 1, cv::LINE_AA);
+        }
+
+        // Bounding box
+        cv::rectangle(canvas, det.bbox, colour, 2);
+
+        // Label background + text
+        const std::string text = std::format("{} {:.2f}", det.label, det.confidence);
+        const int font        = cv::FONT_HERSHEY_SIMPLEX;
+        const double scale    = 0.55;
+        const int thickness   = 1;
+        int baseline          = 0;
+        const cv::Size ts     = cv::getTextSize(text, font, scale, thickness, &baseline);
+        const cv::Point tl    = det.bbox.tl();
+        cv::rectangle(canvas,
+                      cv::Point(tl.x, tl.y - ts.height - 4),
+                      cv::Point(tl.x + ts.width + 2, tl.y),
+                      colour, cv::FILLED);
+        cv::putText(canvas, text,
+                    cv::Point(tl.x + 1, tl.y - 3),
+                    font, scale, cv::Scalar(255, 255, 255), thickness, cv::LINE_AA);
+    }
+
+    cv::imshow("YOLO detections", canvas);
+    cv::waitKey(1);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////
@@ -165,6 +292,46 @@ void SpecificWorker::read_lidar_thread()
         }
         catch (const Ice::Exception& e)
         { qWarning() << "[read_lidar] Ice exception:" << e.what(); }
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////
+void SpecificWorker::read_rgbd_thread()
+{
+    static FPSCounter rgbd_fps;
+    auto wait_period = std::chrono::milliseconds(getPeriod("Compute"));
+    while (!stop_rgbd_thread)
+    {
+        const auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        try
+        {
+            RoboCompCameraRGBDSimple::TRGBD frame;
+            try
+            {
+                frame = camerargbdsimple_proxy->getAll("camera");
+            }
+            catch (const Ice::Exception& e)
+            { qWarning() << "[read_rgbd] getAll failed:" << e.what(); std::terminate(); }
+
+            const long p_ms = static_cast<long>(frame.image.period);
+
+            rgbd_buffer.put<0>(
+                std::move(frame),
+                timestamp,
+                [](auto &&input, auto &output) { output = std::forward<decltype(input)>(input); });
+
+            if (p_ms > 0)
+            {
+                if (wait_period > std::chrono::milliseconds(p_ms + 2)) --wait_period;
+                else if (wait_period < std::chrono::milliseconds(p_ms - 2)) ++wait_period;
+            }
+
+            rgbd_fps.print("[RGBDThread]", 2000);
+            std::this_thread::sleep_for(wait_period);
+        }
+        catch (const Ice::Exception& e)
+        { qWarning() << "[read_rgbd] Ice exception:" << e.what(); }
     }
 }
 

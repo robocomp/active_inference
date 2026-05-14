@@ -1,6 +1,6 @@
 [Proxies]
 # Proxies for required interfaces
-CameraRGBDSimple = "camerargbdsimple:tcp -h localhost -p 10096"
+CameraRGBDSimple = "camerargbdsimple:tcp -h localhost -p 12001"
 Lidar3D = "lidar3d:tcp -h localhost -p 11995"  # Filter
 
 # --- Common Agent Data ---
@@ -15,7 +15,7 @@ domain = 0
 tree = true
 graph = true
 2d = true
-3d = true
+3d = false
 
 # --- Multiple Instance Template ---
 # If you define multiple instances, the single instance config above will be ignored.
@@ -30,6 +30,13 @@ graph = true
 [Period]
 Compute = 100
 Emergency = 500
+
+[Yolo]
+model_path  = "yolo26l-seg.onnx"
+conf_thresh = 0.25
+iou_thresh  = 0.45
+use_gpu     = true
+use_trt     = false
 
 [Component.Debug]
 Verbose = false

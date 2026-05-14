@@ -28,6 +28,13 @@ Agent.3d = true
 Period.Compute = 100
 Period.Emergency = 500
 
+# YOLO segmentation detector
+Yolo.model_path  = "yolo26l-seg.onnx"
+Yolo.conf_thresh = 0.25
+Yolo.iou_thresh  = 0.45
+Yolo.use_gpu     = True
+Yolo.use_trt     = False
+
 Component.Debug.Verbose = true
 
 Ice.Warn.Connections = "0"

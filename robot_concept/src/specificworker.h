@@ -31,6 +31,7 @@
 #include <genericworker.h>
 #include <doublebuffer_sync/doublebuffer_sync.h>
 #include <fps/fps.h>
+#include "yolo_seg_detector.h"
 
 /**
  * \brief Class SpecificWorker implements the core functionality of the component.
@@ -55,6 +56,10 @@ public:
 	 /// Lidar buffer: input LidarData and output a tuple of three vectors of floats (x, y, z coordinates) for G uploading to the DSR graph.
     using PointCloud_Buffer = BufferSync<InOut<std::pair<RoboCompLidar3D::TPoints, std::uint64_t>,
 		std::tuple<std::uint64_t, std::vector<float>, std::vector<float>, std::vector<float>>>>;
+
+	/// RGBD buffer: input TRGBD frame, output same TRGBD frame (pass-through).
+	using RGBD_Buffer = BufferSync<InOut<RoboCompCameraRGBDSimple::TRGBD,
+		RoboCompCameraRGBDSimple::TRGBD>>;
                                     
 
 public slots:
@@ -104,15 +109,34 @@ private:
 
             // Lidar
             int   LIDAR_DECIMATION_FACTOR = 1;
-          
+
+            // YOLO segmentation
+            std::string YOLO_MODEL_PATH   = "yolo11-seg.onnx";
+            float       YOLO_CONF_THRESH  = 0.25f;
+            float       YOLO_IOU_THRESH   = 0.45f;
+            int         YOLO_INPUT_SIZE   = 640;
+            bool        YOLO_USE_GPU      = true;
+            bool        YOLO_USE_TRT       = false;
         };
         Params params;
+
+	// YOLO-seg detector (constructed in initialize() once model path is known)
+	std::optional<YoloSegDetector> yolo_detector;
 
 	// lidar
 	PointCloud_Buffer pointcloud_buffer;
 	void read_lidar_thread();
 	std::thread lidar_thread;	
 	std::atomic<bool> stop_lidar_thread{false};
+
+	// RGBD camera
+	RGBD_Buffer rgbd_buffer;
+	void read_rgbd_thread();
+	std::thread rgbd_thread;
+	std::atomic<bool> stop_rgbd_thread{false};
+
+	// Visualisation
+	void draw_detections(const cv::Mat& rgb_frame, const std::vector<SegDetection>& detections) const;
 
 	
 signals:

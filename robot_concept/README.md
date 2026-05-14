@@ -7,7 +7,8 @@ A brief introduction to the component. Describe its purpose, functionality, and 
 ## Dependencies
 The following dependencies are required to build and run robot_concept. Ensure they are installed and properly configured on your system before proceeding:
 ```
-<YOUR DEPENDENCIES>
+sudo apt install tensorrt-dev-cuda-13.2
+
 ```
 
 ## Configuration parameters
