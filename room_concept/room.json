@@ -194,11 +194,11 @@
                     },
                     "pos_x": {
                         "type": 2,
-                        "value": 0.0
+                        "value": 100.0
                     },
                     "pos_y": {
                         "type": 2,
-                        "value": 0.0
+                        "value": 100.0
                     }
                 }
             }

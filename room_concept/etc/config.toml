@@ -24,7 +24,7 @@ name = "room_concept"
 
 # --- Single Instance Configuration ---
 # Use this if you only have one graph.
-configFile = "room.json"
+configFile = ""
 domain = 0
 tree = true
 graph = true
