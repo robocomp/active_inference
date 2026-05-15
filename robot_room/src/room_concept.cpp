@@ -541,8 +541,15 @@ namespace rc
                 loc_initialized_ = true;
 
             // ===== 8. RECOVERY DETECTION =====
+            // Only while relocalization is enabled (i.e. before room is stable).
+            if (relocalization_enabled_.load())
             {
                 const float avg_sdf_err = std::sqrt(res.sdf_mse);
+                qInfo() << "[Recovery] avg_sdf_err=" << avg_sdf_err
+                        << "threshold=" << params.recovery_loss_threshold
+                        << "iters=" << res.iterations_used
+                        << "bad_frames=" << recovery_.consecutive_bad_frames
+                        << "cooldown=" << recovery_.cooldown;
                 if (recovery_.check(avg_sdf_err, res.iterations_used,
                                     params.recovery_loss_threshold, params.recovery_consecutive_count))
                 {
@@ -554,6 +561,82 @@ namespace rc
                     window_mgr_.clear();
                     recovery_.on_recovery_done(params.recovery_cooldown_frames);
                     qInfo() << "[LocThread] Recovery complete.";
+                    symmetry_check_counter_ = 0;
+                }
+            }
+
+            // ===== 9. PERIODIC SYMMETRY CHECK ================================
+            // Only while relocalization is active (before room node is created).
+            // Uses res.sdf_mse as reference (already computed this frame).
+            // Tests all four pose symmetries that a polygonal room may have:
+            //   rot180  : (-x, -y,  θ+π)   — 180° rotation
+            //   refl_y  : (-x,  y,  π−θ)   — Y-axis reflection  ← most common failure
+            //   refl_x  : ( x, -y,   −θ)   — X-axis reflection
+            //   rot180_y: (-x,  y,  θ+π)   — combined rot+refl (same as rot180 ∘ refl_y)
+            if (params.symmetry_check_interval > 0
+                && relocalization_enabled_.load()
+                && res.iterations_used > 0)
+            {
+                ++symmetry_check_counter_;
+                if (symmetry_check_counter_ >= params.symmetry_check_interval)
+                {
+                    symmetry_check_counter_ = 0;
+                    const auto cur  = model_->get_state();
+                    const float cx  = cur[2], cy = cur[3], cth = cur[4];
+                    const auto& pts = lidar_high_->first;
+
+                    // Subsample (reuse grid-search budget)
+                    std::vector<Eigen::Vector3f> sample;
+                    const int stride = std::max(1,
+                        static_cast<int>(pts.size()) / params.grid_search_max_samples);
+                    sample.reserve(pts.size() / stride + 1);
+                    for (size_t i = 0; i < pts.size(); i += stride)
+                        sample.push_back(pts[i]);
+                    const torch::Tensor pts_t = points_to_tensor_xyz(sample, get_device());
+
+                    const float loss_cur = res.sdf_mse;
+
+                    // Evaluate all symmetry candidates
+                    auto eval_at = [&](float nx, float ny, float nth) -> float {
+                        torch::NoGradGuard ng;
+                        auto xy = torch::tensor({nx, ny},
+                            torch::TensorOptions().dtype(torch::kFloat32).device(get_device()));
+                        auto th = torch::tensor({nth},
+                            torch::TensorOptions().dtype(torch::kFloat32).device(get_device()));
+                        return torch::mean(torch::square(
+                            model_->sdf_at_pose(pts_t, xy, th))).item<float>();
+                    };
+
+                    struct Candidate { const char* name; float x, y, theta, loss; };
+                    std::array<Candidate,4> cands = {{
+                        {"rot180",   -cx,  -cy,  cth + static_cast<float>(M_PI),  0.f},
+                        {"refl_y",   -cx,   cy,  static_cast<float>(M_PI) - cth,  0.f},
+                        {"refl_x",    cx,  -cy,  -cth,                             0.f},
+                        {"rot180_y", -cx,   cy,  cth + static_cast<float>(M_PI),  0.f},
+                    }};
+                    for (auto& c : cands)
+                        c.loss = eval_at(c.x, c.y, c.theta);
+
+                    // Pick the best candidate
+                    const auto* best = &cands[0];
+                    for (const auto& c : cands)
+                        if (c.loss < best->loss) best = &c;
+
+                    qInfo() << "[SymmetryCheck] cur=" << loss_cur
+                            << "rot180=" << cands[0].loss
+                            << "refl_y=" << cands[1].loss
+                            << "refl_x=" << cands[2].loss
+                            << "rot180_y=" << cands[3].loss
+                            << "best=" << best->name;
+
+                    if (best->loss < loss_cur - params.symmetry_flip_min_improvement)
+                    {
+                        qWarning() << "[SymmetryCheck]" << best->name << "wins by"
+                                   << (loss_cur - best->loss) << "-> applying";
+                        set_robot_pose(best->x, best->y, best->theta);
+                        recovery_.reset();
+                        window_mgr_.clear();
+                    }
                 }
             }
 
@@ -811,14 +894,48 @@ namespace rc
 
     bool RoomConcept::grid_search_initial_pose(const std::vector<Eigen::Vector3f>& lidar_points,
                                                   float grid_resolution,
-                                                  float angle_resolution)
+                                                  float /*angle_resolution*/)
     {
         if (model_ == nullptr || lidar_points.empty())
             return false;
 
-        qInfo() << "Starting grid search for initial pose...";
+        qInfo() << "Starting hierarchical grid search for pose...";
 
-        // Get room bounds from polygon or half_extents
+        // ── Helpers ───────────────────────────────────────────────────────────
+
+        // Evaluate mean-squared SDF loss at a pose, without permanently touching the model.
+        auto eval_loss = [&](const torch::Tensor& pts, float x, float y, float theta) -> float
+        {
+            model_->robot_pos.data().copy_(
+                torch::tensor({x, y}, torch::TensorOptions().device(get_device())));
+            model_->robot_theta.data().copy_(
+                torch::tensor({theta}, torch::TensorOptions().device(get_device())));
+            torch::NoGradGuard no_grad;
+            return torch::mean(torch::square(model_->sdf(pts))).item<float>();
+        };
+
+        // Commit best pose and reset all tracking state.
+        // Reassign with new leaf tensors (requires_grad=true) so the next
+        // optimizer iteration starts clean — avoids version-counter corruption
+        // that .data().copy_() causes when NoGradGuard is not active.
+        auto commit_pose = [&](float x, float y, float theta)
+        {
+            model_->robot_pos = torch::tensor(
+                {x, y},
+                torch::TensorOptions().dtype(torch::kFloat32)
+                    .device(get_device()).requires_grad(true));
+            model_->robot_theta = torch::tensor(
+                {theta},
+                torch::TensorOptions().dtype(torch::kFloat32)
+                    .device(get_device()).requires_grad(true));
+            smoothed_pose_              = Eigen::Vector3f(x, y, theta);
+            has_smoothed_pose_          = true;
+            needs_orientation_search_   = false;
+            tracking_step_count_        = 0;
+            current_covariance          = Eigen::Matrix3f::Identity() * 0.1f;
+        };
+
+        // ── Room bounds ───────────────────────────────────────────────────────
         float min_x, max_x, min_y, max_y;
         if (model_->use_polygon && model_->polygon_vertices.defined())
         {
@@ -842,81 +959,146 @@ namespace rc
             min_x = -hw; max_x = hw;
             min_y = -hh; max_y = hh;
         }
-
-        // Add margin inside the room (robot shouldn't be at the walls)
         const float margin = params.grid_search_wall_margin;
         min_x += margin; max_x -= margin;
         min_y += margin; max_y -= margin;
 
-        // Subsample lidar points for faster evaluation
-        std::vector<Eigen::Vector3f> sample_points;
-        const int max_samples = params.grid_search_max_samples;
-        const int stride = std::max(1, static_cast<int>(lidar_points.size()) / max_samples);
-        for (size_t i = 0; i < lidar_points.size(); i += stride)
-            sample_points.push_back(lidar_points[i]);
+        // ── Subsampled point tensors ───────────────────────────────────────────
+        // Coarse tensor (half budget) for Stages 0 and 1; fine (full) for Stage 2.
+        auto make_tensor = [&](int max_pts) -> torch::Tensor {
+            std::vector<Eigen::Vector3f> sample;
+            const int stride = std::max(1, static_cast<int>(lidar_points.size()) / max_pts);
+            sample.reserve(static_cast<size_t>(lidar_points.size() / stride + 1));
+            for (size_t i = 0; i < lidar_points.size(); i += stride)
+                sample.push_back(lidar_points[i]);
+            return points_to_tensor_xyz(sample, get_device());
+        };
+        const torch::Tensor pts_coarse = make_tensor(params.grid_search_max_samples / 2);
+        const torch::Tensor pts_fine   = make_tensor(params.grid_search_max_samples);
 
-        const torch::Tensor points_tensor = points_to_tensor_xyz(sample_points, get_device());
+        const float good_thr = params.grid_search_good_threshold;
 
-        // Generate angle candidates
-        std::vector<float> angles;
-        for (float a = -M_PI; a < M_PI; a += angle_resolution)
-            angles.push_back(a);
-
-        float best_x = 0, best_y = 0, best_theta = 0;
-        float best_loss = std::numeric_limits<float>::infinity();
-        int total_tests = 0;
-
-        // Grid search
-        for (float x = min_x; x <= max_x; x += grid_resolution)
+        // ══ STAGE 0: Symmetry flips at current position ═══════════════════════
+        // Rectangular/polygonal rooms have 180° rotational symmetry and often 90°
+        // symmetry too. The localizer frequently locks to the mirror solution.
+        // Try the four cardinal flips — 180° first — before any global search.
         {
-            for (float y = min_y; y <= max_y; y += grid_resolution)
+            const auto cur  = model_->get_state();
+            const float cx  = cur[2];
+            const float cy  = cur[3];
+            const float cth = cur[4];
+
+            // Order: 180° → 90° → 270° → 0° (current)
+            const std::array<float, 4> flips = {
+                static_cast<float>(M_PI),
+                static_cast<float>(M_PI_2),
+                static_cast<float>(-M_PI_2),
+                0.f
+            };
+
+            float s0_best_loss  = std::numeric_limits<float>::infinity();
+            float s0_best_theta = cth;
+            for (float dth : flips)
             {
-                for (float theta : angles)
-                {
-                    // Set test pose
-                    model_->robot_pos.data().copy_(torch::tensor({x, y},
-                        torch::TensorOptions().device(get_device())));
-                    model_->robot_theta.data().copy_(torch::tensor({theta},
-                        torch::TensorOptions().device(get_device())));
+                const float theta = cth + dth;
+                const float loss  = eval_loss(pts_coarse, cx, cy, theta);
+                qInfo() << "  Stage0 flip" << qRadiansToDegrees(dth) << "° loss=" << loss;
+                if (loss < s0_best_loss) { s0_best_loss = loss; s0_best_theta = theta; }
+            }
+            qInfo() << "Stage 0 best flip: theta=" << qRadiansToDegrees(s0_best_theta)
+                    << "° loss=" << s0_best_loss;
+            if (s0_best_loss < good_thr)
+            {
+                commit_pose(cx, cy, s0_best_theta);
+                qInfo() << "Stage 0 sufficient — early exit";
+                return true;
+            }
+        }
 
-                    // Evaluate SDF loss
-                    torch::NoGradGuard no_grad;
-                    const auto sdf_vals = model_->sdf(points_tensor);
-                    const float loss = torch::mean(torch::square(sdf_vals)).item<float>();
+        // ══ STAGE 1: Coarse global grid (≥1 m step, 90° angles) ══════════════
+        // Evaluate the whole room at low resolution and keep the top-K candidates.
+        constexpr int TOP_K = 8;
+        const float   coarse_step  = std::max(grid_resolution, 1.0f);
+        const float   coarse_angle = static_cast<float>(M_PI_2);   // 90°
 
-                    if (loss < best_loss)
+        struct Candidate { float x, y, theta, loss; };
+        std::vector<Candidate> candidates;
+
+        {
+            std::vector<float> angles;
+            for (float a = -static_cast<float>(M_PI); a < static_cast<float>(M_PI); a += coarse_angle)
+                angles.push_back(a);
+
+            int total = 0;
+            for (float x = min_x; x <= max_x; x += coarse_step)
+                for (float y = min_y; y <= max_y; y += coarse_step)
+                    for (float theta : angles)
                     {
-                        best_loss = loss;
-                        best_x = x;
-                        best_y = y;
-                        best_theta = theta;
+                        candidates.push_back({x, y, theta, eval_loss(pts_coarse, x, y, theta)});
+                        ++total;
                     }
-                    total_tests++;
+
+            std::sort(candidates.begin(), candidates.end(),
+                      [](const Candidate& a, const Candidate& b){ return a.loss < b.loss; });
+            if (static_cast<int>(candidates.size()) > TOP_K)
+                candidates.resize(TOP_K);
+
+            qInfo() << "Stage 1:" << total << "poses, top-" << TOP_K
+                    << "best loss=" << candidates.front().loss;
+            if (candidates.front().loss < good_thr)
+            {
+                const auto& b = candidates.front();
+                commit_pose(b.x, b.y, b.theta);
+                qInfo() << "Stage 1 sufficient — early exit";
+                return true;
+            }
+        }
+
+        // ══ STAGE 2: Fine refinement around each top-K candidate ══════════════
+        // Search a neighbourhood of ±coarse_step with step = coarse_step/3
+        // and ±coarse_angle with step = coarse_angle/3 (≈30°), using the full
+        // lidar budget.
+        const float fine_pos   = coarse_step  / 3.f;
+        const float fine_angle = coarse_angle / 3.f;
+
+        float best_x     = candidates.front().x;
+        float best_y     = candidates.front().y;
+        float best_theta = candidates.front().theta;
+        float best_loss  = candidates.front().loss;
+        int   total2     = 0;
+
+        for (const auto& cand : candidates)
+        {
+            for (float dx = -coarse_step; dx <= coarse_step + 1e-4f; dx += fine_pos)
+            {
+                const float rx = cand.x + dx;
+                if (rx < min_x || rx > max_x) continue;
+                for (float dy = -coarse_step; dy <= coarse_step + 1e-4f; dy += fine_pos)
+                {
+                    const float ry = cand.y + dy;
+                    if (ry < min_y || ry > max_y) continue;
+                    for (float da = -coarse_angle; da <= coarse_angle + 1e-4f; da += fine_angle)
+                    {
+                        const float loss = eval_loss(pts_fine, rx, ry, cand.theta + da);
+                        if (loss < best_loss)
+                        {
+                            best_loss  = loss;
+                            best_x     = rx;
+                            best_y     = ry;
+                            best_theta = cand.theta + da;
+                        }
+                        ++total2;
+                    }
                 }
             }
         }
 
-        // Set the best pose found
-        model_->robot_pos.data().copy_(torch::tensor({best_x, best_y},
-            torch::TensorOptions().device(get_device())));
-        model_->robot_theta.data().copy_(torch::tensor({best_theta},
-            torch::TensorOptions().device(get_device())));
-
-        // Initialize smoothed pose
-        smoothed_pose_ = Eigen::Vector3f(best_x, best_y, best_theta);
-        has_smoothed_pose_ = true;
-
-        // Reset tracking state
-        needs_orientation_search_ = false;  // We already found the best orientation
-        tracking_step_count_ = 0;
-        current_covariance = Eigen::Matrix3f::Identity() * 0.1f;
-
-        qInfo() << "Grid search complete:" << total_tests << "poses tested";
+        qInfo() << "Stage 2:" << total2 << "poses refined";
         qInfo() << "Best pose: (" << best_x << "," << best_y << ") theta="
                 << qRadiansToDegrees(best_theta) << "° (loss=" << best_loss << ")";
 
-        // Return true if we found a reasonable pose (loss < threshold)
-        return best_loss < params.grid_search_good_threshold;
+        commit_pose(best_x, best_y, best_theta);
+        return best_loss < good_thr;
     }
 
     void RoomConcept::set_initial_state(float width, float length, float x, float y, float phi)

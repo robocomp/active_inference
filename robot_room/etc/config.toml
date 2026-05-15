@@ -242,7 +242,7 @@ MaxLinAccel        = 1.2    # m/s² max translational acceleration
 MaxRotAccel        = 2.0    # rad/s² max angular acceleration
 
 [Component.Debug]
-Verbose = true
+Verbose = false
 
 [Ice]
 Warn.Connections = "0"

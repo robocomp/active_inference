@@ -17,6 +17,7 @@
  *    along with RoboComp.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "specificworker.h"
+#include <print>
 #include <random>
 #include <fstream>
 #include <QDir>
@@ -222,7 +223,10 @@ void SpecificWorker::initialize()
     }
 
     // ── DSR: resolve existing graph node IDs ──────────────────────────────
-    dsr_init_graph();
+    check_init_graph_is_valid();
+
+    // RT_API
+    rt_api = G->get_rt_api();
 
     // ── Connect DSR signals ────────────────────────────────────────────────
     connect(G.get(), &DSR::DSRGraph::update_node_signal,      this, &SpecificWorker::modify_node_slot);
@@ -233,6 +237,12 @@ void SpecificWorker::initialize()
     connect(G.get(), &DSR::DSRGraph::del_node_signal,         this, &SpecificWorker::del_node_slot);
 
     room_concept_.start();
+
+    // ── Wire mouse-driven pose reset ───────────────────────────────────────
+    connect(viewer_2d_.get(), &rc::Viewer2D::robot_moved,
+            this, [this](QPointF p){ slot_mouse_translate(p); });
+    connect(viewer_2d_.get(), &rc::Viewer2D::robot_rotate,
+            this, [this](QPointF p){ slot_mouse_rotate(p); });
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -247,6 +257,7 @@ void SpecificWorker::compute()
 
     const auto loc_res  = room_concept_.get_last_result();
     const bool have_loc = loc_res.has_value() && loc_res->ok;
+
     const Eigen::Affine2f pose_for_draw = best_available_pose(loc_res, have_loc);
 
     // ── Update 2-D viewer ─────────────────────────────────────────────────
@@ -275,38 +286,43 @@ void SpecificWorker::compute()
 
     // ── DSR graph update ───────────────────────────────────────────────────
     if (have_loc)
-    {
-        const float sdf_mse = loc_res->sdf_mse;
-        const float cov_tt  = (loc_res->covariance.rows() > 2 && loc_res->covariance.cols() > 2)
-                              ? loc_res->covariance(2, 2) : 1.f;
-        const bool stable   = (loc_res->iterations_used == 0)  // prediction early exit → pose is stable
-                              && sdf_mse < params.STABLE_SDF_MSE_MAX
-                              && cov_tt  < params.STABLE_COV_TT_MAX;
-
-        qInfo() << "Localization stable:" << stable
-              << "| sdf_mse:" << sdf_mse << "(" << params.STABLE_SDF_MSE_MAX << ")"
-              << "| cov_tt:" << cov_tt << "(" << params.STABLE_COV_TT_MAX << ")"
-              << "| iterations_used:" << loc_res->iterations_used;
-        if (!room_node_created_)
-        {
-            stable_frames_ = stable ? stable_frames_ + 1 : 0;
-            if (stable_frames_ >= params.STABLE_FRAMES_REQUIRED)
-                dsr_create_room_and_reparent(*loc_res);
-            else
-                dsr_update_pose(*loc_res);   // world→robot RT
-        }
-        else
-        {
-            dsr_update_pose(*loc_res);       // room→robot RT
-        }
-    }
+        update_dsr(*loc_res);
 
     //update_ui(loc_res, pose_for_draw);
     fps_counter_.print("[Compute]", 2000);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-void SpecificWorker::dsr_init_graph()
+void SpecificWorker::update_dsr(const rc::RoomConcept::UpdateResult& res)
+{
+    const float sdf_mse = res.sdf_mse;
+    const float cov_tt  = (res.covariance.rows() > 2 && res.covariance.cols() > 2)
+                          ? res.covariance(2, 2) : 1.f;
+    const bool stable   = (res.iterations_used == 0)  // prediction early exit → pose is stable
+                          && sdf_mse < params.STABLE_SDF_MSE_MAX
+                          && cov_tt  < params.STABLE_COV_TT_MAX;
+
+    qInfo() << "Localization stable:" << stable
+            << "| sdf_mse:" << sdf_mse << "(" << params.STABLE_SDF_MSE_MAX << ")"
+            << "| cov_tt:" << cov_tt << "(" << params.STABLE_COV_TT_MAX << ")"
+            << "| iterations_used:" << res.iterations_used;
+
+    if (!room_node_created_)
+    {
+        stable_frames_ = stable ? stable_frames_ + 1 : 0;
+        if (stable_frames_ >= params.STABLE_FRAMES_REQUIRED)
+            dsr_create_room_and_reparent(res);
+        else
+            dsr_update_pose(res);   // world→robot RT
+    }
+    else
+    {
+        dsr_update_pose(res);       // room→robot RT
+    }
+}
+
+///////////////////////////////////////////////////////////////////////////////
+void SpecificWorker::check_init_graph_is_valid()
 {
     if (!G) { qWarning() << "dsr_init_graph: DSR graph not available"; return; }
 
@@ -344,18 +360,62 @@ void SpecificWorker::dsr_update_pose(const rc::RoomConcept::UpdateResult& res)
     auto parent_opt = G->get_node(parent_id);
     if (!parent_opt.has_value()) return;
 
-    auto rt = G->get_rt_api();
-    rt->insert_or_assign_edge_RT(*parent_opt, dsr_robot_id_,
-                                 {x * 1000.f, y * 1000.f, 0.f},   // DSR uses mm
-                                 {0.f, 0.f, theta});
+    if (!rt_api) return;
+    rt_api->insert_or_assign_edge_RT(*parent_opt, dsr_robot_id_,
+                                     {x, y, 0.f},  
+                                     {0.f, 0.f, theta});
 
-    // Store localization covariance on the RT edge as custom attributes
-    const float cov_xx = (res.covariance.rows() > 0 && res.covariance.cols() > 0)
-                         ? res.covariance(0, 0) : 0.f;
-    const float cov_tt = (res.covariance.rows() > 2 && res.covariance.cols() > 2)
-                         ? res.covariance(2, 2) : 0.f;
 
-    (void)cov_xx; (void)cov_tt;  // custom attributes not registered in DSR type system
+    // Covariance: 6x6 row-major (36 floats), SE2 3x3 in top-left block, rest zeros
+    std::vector<float> cov_flat(36, 0.f);
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
+            cov_flat[r * 6 + c] = res.covariance(r, c);
+    auto edge_rt = G->get_edge(parent_id, dsr_robot_id_, "RT");
+    if (!edge_rt.has_value()) { qWarning() << "dsr_update_pose: edge RT not found after insert_or_assign_edge_RT"; return; }
+    G->add_or_modify_attrib_local<rt_se2_covariance_att>(edge_rt.value(), cov_flat);
+    G->insert_or_assign_edge(edge_rt.value());
+
+    // Re-fetch parent: get_edge_RT reads from n.fano() (local snapshot),
+    // must use a fresh node to see the values just written into the CRDT store.
+    // parent_opt = G->get_node(parent_id);
+    // if (!parent_opt.has_value()) return;
+    // if (auto edge_opt = DSR::RT_API::get_edge_RT(*parent_opt, dsr_robot_id_); edge_opt.has_value())
+    // {
+    //     const auto& edge = edge_opt.value();
+    //     auto tr_o   = G->get_attrib_by_name<rt_translation_att>(edge);
+    //     auto rot_o  = G->get_attrib_by_name<rt_rotation_euler_xyz_att>(edge);
+    //     auto head_o = G->get_attrib_by_name<rt_head_index_att>(edge);
+
+    //     if (tr_o.has_value())
+    //     {
+    //         const auto& t = tr_o->get();
+    //         const int head = head_o.has_value() ? static_cast<int>(head_o.value()) : 0;
+    //         const int hi   = head % static_cast<int>(t.size());
+    //         std::println("[RT readback] tr size={} head={} hi={} current=({},{},{}) want=({},{},0)",
+    //             t.size(), head, hi,
+    //             (t.size()>size_t(hi)  ?t[hi]  :0.f),
+    //             (t.size()>size_t(hi+1)?t[hi+1]:0.f),
+    //             (t.size()>size_t(hi+2)?t[hi+2]:0.f),
+    //             x, y);
+    //     }
+    //     else std::println("[RT readback] no rt_translation attribute");
+
+    //     if (rot_o.has_value())
+    //     {
+    //         const auto& r = rot_o->get();
+    //         const int head = head_o.has_value() ? static_cast<int>(head_o.value()) : 0;
+    //         const int hi   = head % static_cast<int>(r.size());
+    //         std::println("[RT readback] rot size={} head={} hi={} current=({},{},{}) want=(0,0,{})",
+    //             r.size(), head, hi,
+    //             (r.size()>size_t(hi)  ?r[hi]  :0.f),
+    //             (r.size()>size_t(hi+1)?r[hi+1]:0.f),
+    //             (r.size()>size_t(hi+2)?r[hi+2]:0.f),
+    //             theta);
+    //     }
+    //     else std::println("[RT readback] no rt_rotation attribute");
+    // }
+    // else std::println("[RT readback] get_edge_RT returned empty after insert_or_assign_edge_RT");
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -397,6 +457,9 @@ void SpecificWorker::dsr_create_room_and_reparent(const rc::RoomConcept::UpdateR
 
     dsr_update_pose(res);
     qInfo() << "DSR: stabilized — room node created, robot re-parented under room.";
+
+    // Stop symmetry / recovery checks — pose is confirmed stable.
+    room_concept_.set_relocalization_enabled(false);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -586,6 +649,35 @@ void SpecificWorker::navigate_to_target(const std::optional<rc::RoomConcept::Upd
     try { omnirobot_proxy->setSpeedBase(cmd.adv_x * 1000.f, 0.f, cmd.rot); }
     catch (const Ice::Exception& e)
     { qWarning() << "[navigate_to_target] setSpeedBase failed:" << e.what(); }
+}
+
+///////////////////////////////////////////////////////////////////////////////
+void SpecificWorker::slot_mouse_translate(QPointF scene_pos)
+{
+    // Shift+Left: move robot to clicked position, keep current heading.
+    // Use push_command (thread-safe queue) — never call set_robot_pose() directly
+    // from the GUI thread while the localization thread may be mid-backward().
+    const auto state = room_concept_.get_current_state();
+    const float theta = state[4];
+    room_concept_.push_command(rc::RoomConcept::CmdSetPose{
+        static_cast<float>(scene_pos.x()),
+        static_cast<float>(scene_pos.y()),
+        theta});
+    qInfo() << "[mouse] Translate robot to" << scene_pos.x() << scene_pos.y();
+}
+
+///////////////////////////////////////////////////////////////////////////////
+void SpecificWorker::slot_mouse_rotate(QPointF scene_pos)
+{
+    // Ctrl+Left: rotate robot to face the clicked point, keep current position.
+    const auto state = room_concept_.get_current_state();
+    const float rx    = state[2];
+    const float ry    = state[3];
+    const float theta = std::atan2(static_cast<float>(scene_pos.y()) - ry,
+                                   static_cast<float>(scene_pos.x()) - rx);
+    room_concept_.push_command(rc::RoomConcept::CmdSetPose{rx, ry, theta});
+    qInfo() << "[mouse] Rotate robot toward" << scene_pos.x() << scene_pos.y()
+            << "-> theta" << qRadiansToDegrees(theta) << "deg";
 }
 
 ///////////////////////////////////////////////////////////////////////////////

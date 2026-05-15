@@ -148,15 +148,21 @@ class SpecificWorker : public GenericWorker
         void update_ui(const std::optional<rc::RoomConcept::UpdateResult>& loc_res,
                     const Eigen::Affine2f& pose_for_draw);
 
+        // ── Mouse-driven pose reset (Shift+Left = translate, Ctrl+Left = rotate) ──
+        void slot_mouse_translate(QPointF scene_pos);
+        void slot_mouse_rotate(QPointF scene_pos);
+
         // ── DSR graph state ────────────────────────────────────────────────────
         uint64_t dsr_robot_id_ = 0;
         uint64_t dsr_world_id_ = 0;
         uint64_t dsr_room_id_  = 0;
         bool     room_node_created_ = false;
         int      stable_frames_     = 0;
-        void dsr_init_graph();
+        void check_init_graph_is_valid();
+        void update_dsr(const rc::RoomConcept::UpdateResult& res);
         void dsr_update_pose(const rc::RoomConcept::UpdateResult& res);
         void dsr_create_room_and_reparent(const rc::RoomConcept::UpdateResult& res);
+        std::unique_ptr<DSR::RT_API> rt_api;
 
     signals:
         //void customSignal();

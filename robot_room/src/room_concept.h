@@ -195,6 +195,13 @@ public:
         int recovery_cooldown_frames = 30;     // Frames to skip detection after recovery
         int manual_reset_skip_frames = 5;      // Frames to skip optimization after manual pose set
 
+        // ===== Periodic 180° symmetry flip check =====
+        // Every N optimizer-frames test whether rotating the robot by 180° gives
+        // lower SDF FE than the current pose.  Disabled once the room is stable.
+        // Set to 0 to disable.
+        int   symmetry_check_interval       = 30;    // optimizer-frames between checks
+        float symmetry_flip_min_improvement = 0.005f; // flip must beat current sdf_mse by this much
+
         // ===== Grid Search / Orientation Search =====
         float grid_search_wall_margin = 0.3f;        // meters from room walls
         int grid_search_max_samples = 150;            // Lidar subsample for grid evaluation
@@ -386,6 +393,10 @@ public:
                                      int max_samples = 300) const;
     bool is_initialized() const { return model_ != nullptr; }
 
+    /// Disable relocalization (symmetry check + recovery) once the room is stable.
+    void set_relocalization_enabled(bool enabled) { relocalization_enabled_.store(enabled); }
+    bool is_relocalization_enabled() const        { return relocalization_enabled_.load(); }
+
     // Grid search for initial pose (solves kidnapping problem)
     // Returns true if a good pose was found, false otherwise
     bool grid_search_initial_pose(const std::vector<Eigen::Vector3f>& lidar_points,
@@ -570,6 +581,8 @@ private:
    std::ofstream      debug_log_;
    RerunLogger        rerun_logger_;
    int                rerun_frame_counter_ = 0;
+   int                symmetry_check_counter_ = 0;
+   std::atomic<bool>  relocalization_enabled_{true};
    bool               rerun_room_polygon_sent_ = false;
    std::vector<float> last_adam_losses_;    // per-iteration losses from last Adam/LBFGS run
    float              last_loss_init_  = 0.f;  // loss before first step
