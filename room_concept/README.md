@@ -1,23 +1,23 @@
-# robot_room
+# room_concept
 A brief introduction to the component. Describe its purpose, functionality, and any specific features here.
 ```
 <YOUR BRIEFING>
 ```
 
 ## Dependencies
-The following dependencies are required to build and run robot_room. Ensure they are installed and properly configured on your system before proceeding:
+The following dependencies are required to build and run room_concept. Ensure they are installed and properly configured on your system before proceeding:
 ```
 <YOUR DEPENDENCIES>
 ```
 
 ## Configuration parameters
-Like any other component, robot_room requires a configuration file to start. In etc/config or etc/config.toml, you can find an example of the configuration file.
+Like any other component, room_concept requires a configuration file to start. In etc/config or etc/config.toml, you can find an example of the configuration file.
 
 ## Starting the component
 To avoid modifying the config file directly in the repository, you can copy it to the component's home directory. This prevents changes from being overridden by future `git pull` commands:
 
 ```bash
-cd <robot_room's path> 
+cd <room_concept's path> 
 cp etc/config etc/yourConfig
 ```
 
@@ -25,12 +25,12 @@ After editing the new config file we can run the component:
 
 ```bash
 cmake -B build && make -C build -j12 # Compile the component
-bin/robot_room etc/yourConfig # Execute the component
+bin/room_concept etc/yourConfig # Execute the component
 ```
 -----
 -----
 # Developer Notes
-This section explains how to work with the generated code of robot_room, including what can be modified and how to use key features.
+This section explains how to work with the generated code of room_concept, including what can be modified and how to use key features.
 ## Editable Files
 You can freely edit the following files:
 - etc/* – Configuration files

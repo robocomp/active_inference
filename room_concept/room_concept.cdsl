@@ -4,7 +4,7 @@ import "JoystickAdapter.idsl";
 import "OmniRobot.idsl";
 
 
-Component robot_room
+Component room_concept
 {
     Communications
     {

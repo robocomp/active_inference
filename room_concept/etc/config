@@ -14,7 +14,7 @@ Endpoints.JoystickAdapterPrefix = ""
 
 # --- Common Agent Data ---
 Agent.id = 0 # Change id
-Agent.name = "robot_room"
+Agent.name = "room_concept"
 
 # --- Single Instance Configuration ---
 # Use this if you only have one graph.

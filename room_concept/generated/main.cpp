@@ -18,11 +18,11 @@
  */
 
 
-/** \mainpage RoboComp::robot_room
+/** \mainpage RoboComp::room_concept
  *
  * \section intro_sec Introduction
  *
- * The robot_room component...
+ * The room_concept component...
  *
  * \section interface_sec Interface
  *
@@ -34,7 +34,7 @@
  * ...
  *
  * \subsection install2_ssec Compile and install
- * cd robot_room
+ * cd room_concept
  * <br>
  * cmake . && make
  * <br>
@@ -52,7 +52,7 @@
  *
  * \subsection execution_ssec Execution
  *
- * Just: "${PATH_TO_BINARY}/robot_room --Ice.Config=${PATH_TO_CONFIG_FILE}"
+ * Just: "${PATH_TO_BINARY}/room_concept --Ice.Config=${PATH_TO_CONFIG_FILE}"
  *
  * \subsection running_ssec Once running
  *
@@ -89,8 +89,8 @@
 
 #define USE_QTGUI
 
-#define PROGRAM_NAME    "robot_room"
-#define SERVER_FULL_NAME   "RoboComp robot_room::robot_room"
+#define PROGRAM_NAME    "room_concept"
+#define SERVER_FULL_NAME   "RoboComp room_concept::room_concept"
 
 
 template <typename ProxyType, typename ProxyPointer>
@@ -171,10 +171,10 @@ void subscribe( const Ice::CommunicatorPtr& communicator,
 }
 
 
-class robot_room : public Ice::Application
+class room_concept : public Ice::Application
 {
 public:
-	robot_room (QString configFile, QString prfx, bool startup_check) { 
+	room_concept (QString configFile, QString prfx, bool startup_check) { 
 		this->configFile = configFile.toStdString();
 		this->prefix = prfx.toStdString();
 		this->startup_check_flag=startup_check; 
@@ -195,7 +195,7 @@ public:
 	virtual int run(int, char*[]);
 };
 
-Ice::InitializationData robot_room::getInitializationDataIce(){
+Ice::InitializationData room_concept::getInitializationDataIce(){
         Ice::InitializationData initData;
         initData.properties = Ice::createProperties();
         initData.properties->setProperty("Ice.Warn.Connections", this->configLoader.get<std::string>("Ice.Warn.Connections"));
@@ -205,14 +205,14 @@ Ice::InitializationData robot_room::getInitializationDataIce(){
 		return initData;
 }
 
-void robot_room::initialize()
+void room_concept::initialize()
 {
     this->configLoader.load(this->configFile);
 	this->configLoader.printConfig();
 	std::cout<<std::endl;
 }
 
-int robot_room::run(int argc, char* argv[])
+int room_concept::run(int argc, char* argv[])
 {
 #ifdef USE_QTGUI
 	QApplication a(argc, argv);  // GUI application
@@ -379,7 +379,7 @@ int main(int argc, char* argv[])
 		}
 
 	}
-	robot_room app(configFile, prefix, startup_check_flag);
+	room_concept app(configFile, prefix, startup_check_flag);
 
 	return app.main(argc, argv, app.getInitializationDataIce());
 }

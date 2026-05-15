@@ -11,7 +11,7 @@
    </rect>
   </property>
   <property name="windowTitle">
-   <string>robot_room</string>
+   <string>room_concept</string>
   </property>
     <widget class="QWidget" name="centralwidget">
      <layout class="QVBoxLayout" name="verticalLayout">
