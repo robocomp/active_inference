@@ -113,19 +113,24 @@ private:
             float ROBOT_LENGTH = 0.480f;   // m
             float ROBOT_HEIGHT = 1.6f;     // m, obstacle cloud ceiling
 
-            // Lidar
-            int   LIDAR_DECIMATION_FACTOR = 1;
+			  // Lidar
+			  int   LIDAR_DECIMATION_FACTOR = 1;
 
-            // YOLO segmentation
-            std::string YOLO_MODEL_PATH   = "yolo11-seg.onnx";
-            float       YOLO_CONF_THRESH  = 0.25f;
-            float       YOLO_IOU_THRESH   = 0.45f;
-            int         YOLO_INPUT_SIZE   = 640;
-            bool        YOLO_USE_GPU      = true;
-            bool        YOLO_USE_TRT       = false;
+			  // YOLO segmentation
+			  std::string YOLO_MODEL_PATH   = "yolo11-seg.onnx";
+			  float       YOLO_CONF_THRESH  = 0.25f;
+			  float       YOLO_IOU_THRESH   = 0.45f;
+			  int         YOLO_INPUT_SIZE   = 640;
+			  bool        YOLO_USE_GPU      = true;
+			  bool        YOLO_USE_TRT      = true;
+			  int         YOLO_MASK_ERODE_KERNEL = 2; // pixels
 
-			// Voxel grid
-			std::size_t VOXEL_DECIMATION_FACTOR = 2;
+			  // Voxel grid
+			  std::size_t VOXEL_DECIMATION_FACTOR = 2;
+
+			  // Hungarian association
+			  float TRACK_ASSOCIATION_MAX_DISTANCE_M = 0.7f;
+			  int   TRACK_MAX_MISSED_FRAMES = 10;
         };
         Params params;
 
@@ -158,7 +163,24 @@ private:
 		std::size_t monitor_points = 0;
 	};
 
+	struct DetectionObservation
+	{
+		std::size_t det_index = 0;
+		Eigen::Vector3f centroid = Eigen::Vector3f::Zero();
+		std::string label;
+		float confidence = 0.0f;
+	};
+
+	struct InstanceTrack
+	{
+		int id = -1;
+		Eigen::Vector3f centroid = Eigen::Vector3f::Zero();
+		std::string label;
+		int last_seen_frame = -1;
+	};
+
 	void draw_detections(const cv::Mat& rgb_frame, const std::vector<SegDetection>& detections) const;
+	void postprocess_yolo_detections(std::vector<SegDetection>& detections) const;
 	bool is_target_label(const std::string& label) const;
 	float detect_point_scale_once(const RoboCompCameraRGBDSimple::TRGBD& rgbd) const;
 	void build_owner_map_and_medians(const RoboCompCameraRGBDSimple::TRGBD& rgbd,
@@ -171,8 +193,15 @@ private:
 	                                            const std::vector<int32_t>& pixel_owner,
 	                                            const std::vector<SegDetection>& detections,
 	                                            const std::vector<float>& det_median_range_m) const;
+	std::vector<int> hungarian_min_cost(const std::vector<std::vector<float>>& cost) const;
+	std::vector<int> associate_detections_hungarian(const std::vector<DetectionObservation>& observations,
+	                                                int frame_id);
+	void prune_stale_tracks(int frame_id);
 	void update_voxel_grid_from_rgbd(const RoboCompCameraRGBDSimple::TRGBD& rgbd,
-	                                const std::vector<SegDetection>& detections);
+	                                const std::vector<SegDetection>& detections,
+	                                const Mat::RTMat& room_T_robot);
+
+	void update_room_polygon_in_viewers();
 	
 	// Custom widget for docking in the graph viewer
 	Custom_widget custom_widget;
@@ -181,7 +210,19 @@ private:
 
 	// Unified voxel grid — scene-level semantic map
 	std::unique_ptr<UnifiedVoxelGrid> voxel_grid;
+	std::unique_ptr<DSR::InnerEigenAPI> inner_eigen_api;
 	int compute_frame_ = 0;
+	int next_track_id_ = 1;
+	std::unordered_map<int, InstanceTrack> active_tracks;
+	// Hungarian association parameters (now set from params)
+	float track_association_max_distance_m = 0.7f;
+	int track_max_missed_frames = 10;
+	bool room_ready_logged_ = false;
+	bool room_wait_logged_ = false;
+	bool room_rt_ready_logged_ = false;
+	bool room_rt_wait_logged_ = false;
+	std::string room_node_name_;
+	std::string robot_node_name_;
 	
 signals:
 	//void customSignal();

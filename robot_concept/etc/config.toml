@@ -10,7 +10,7 @@ name = "robot_concept"
 
 # --- Single Instance Configuration ---
 # Use this if you only have one graph.
-configFile = "room.json"
+configFile = "room.json"   
 domain = 0
 tree = true
 graph = true
@@ -20,7 +20,7 @@ graph = true
 # --- Multiple Instance Template ---
 # If you define multiple instances, the single instance config above will be ignored.
 # [Agent.instance_name]
-# configFile = ""
+# configFile = "room.json"
 # domain = 1
 # tree = true
 # graph = true
@@ -37,6 +37,11 @@ conf_thresh = 0.25
 iou_thresh  = 0.45
 use_gpu     = true
 use_trt     = false
+
+# Hungarian association and mask erosion parameters
+mask_erode_kernel = 2
+track_association_max_distance_m = 0.7
+track_max_missed_frames = 10
 
 [Component.Debug]
 Verbose = false

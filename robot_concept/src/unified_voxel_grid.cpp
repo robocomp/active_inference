@@ -158,6 +158,7 @@ void UnifiedVoxelGrid::observe(int track_id,
     const int  K       = _reg.K();
     const int  cat_idx = _reg.idx(category);
     const int  cap     = _cfg.max_voxels_per_track;
+    const bool use_per_point_labels = !per_point_labels.empty();
 
     for (std::size_t i = 0; i < pts.size(); ++i)
     {
@@ -198,7 +199,7 @@ void UnifiedVoxelGrid::observe(int track_id,
                 vs.best_confidence = 0.0f; vs.best_cat_idx = -1;
                 vs.track_id = track_id;
             }
-            else if (vs.best_cat_idx != -1 && vs.best_cat_idx != cat_idx)
+            else if (!use_per_point_labels && vs.best_cat_idx != -1 && vs.best_cat_idx != cat_idx)
             {
                 if (detection_confidence > vs.best_confidence)
                 {
@@ -850,8 +851,7 @@ std::unordered_set<int> UnifiedVoxelGrid::get_all_track_ids() const
 {
     std::unordered_set<int> out;
     for (const auto& [k, vs] : _grid)
-        if (vs.track_id != 0)
-            out.insert(vs.track_id);
+        out.insert(vs.track_id);
     return out;
 }
 
@@ -859,8 +859,7 @@ std::unordered_map<int, int> UnifiedVoxelGrid::summary() const
 {
     std::unordered_map<int, int> out;
     for (const auto& [k, vs] : _grid)
-        if (vs.track_id != 0)
-            ++out[vs.track_id];
+        ++out[vs.track_id];
     return out;
 }
 
@@ -911,7 +910,6 @@ UnifiedVoxelGrid::global_debug_stats() const
     int n_owned = 0;
     for (const auto& [k, vs] : _grid)
     {
-        if (vs.track_id == 0) continue;
         ++n_owned;
         if (!vs.alpha.empty())
         {

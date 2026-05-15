@@ -54,8 +54,8 @@ class CategoryRegistry
 {
     public:
         static constexpr std::array DEFAULT_CATEGORIES{
-            "chair", "table", "desk", "sofa", "bed",
-            "monitor", "shelf", "barrel", "toilet", "night_stand"
+            "chair", "table", "desk", "sofa", "bed", "pot", "plant", "tv", "laptop", "keyboard",
+            "monitor", "shelf", "door", "window"
         };
 
         explicit CategoryRegistry(std::span<const char* const> cats = DEFAULT_CATEGORIES);
@@ -155,7 +155,7 @@ class UnifiedVoxelGrid
     public:
         // ── Construction ──────────────────────────────────────────────────────
         explicit UnifiedVoxelGrid(UnifiedGridConfig cfg = {},
-                                CategoryRegistry  reg = {});
+                                CategoryRegistry  reg = CategoryRegistry{});
 
         // ── 1. Positive observation ───────────────────────────────────────────
         void observe(int track_id,

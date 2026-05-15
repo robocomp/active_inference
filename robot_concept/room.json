@@ -53,7 +53,7 @@
             "200": {
                 "id": "200",
                 "type": "robot",
-                "name": "P3bot",
+                "name": "Shadow",
                 "attribute": {
                     "base_target_x": {
                         "type": 2,
@@ -109,15 +109,15 @@
                                 "value": [
                                     0,
                                     0,
-                                    0
+                                    -4.7116
                                 ]
                             },
                             "rt_translation": {
                                 "type": 3,
                                 "value": [
                                     0,
-                                    0,
-                                    0
+                                    -0.155,
+                                    1.075
                                 ]
                             }
                         },
@@ -132,15 +132,15 @@
                                 "value": [
                                     0,
                                     0,
-                                    0
+                                    1.57
                                 ]
                             },
                             "rt_translation": {
                                 "type": 3,
                                 "value": [
                                     0,
-                                    0,
-                                    0
+                                    -0.075,
+                                    0.945
                                 ]
                             }
                         },
@@ -180,9 +180,45 @@
                 "type": "rgbd",
                 "name": "zed",
                 "attribute": {
+                    "cam_depth_focalx": {
+                        "type": 1,
+                        "value": 448
+                    },
+                    "cam_depth_focaly": {
+                        "type": 1,
+                        "value": 448
+                    },
+                    "cam_depth_height": {
+                        "type": 1,
+                        "value": 720
+                    },
+                    "cam_depth_width": {
+                        "type": 1,
+                        "value": 1280
+                    },
+                    "cam_fov": {
+                        "type": 2,
+                        "value": 1.9198
+                    },
+                    "cam_rgb_focalx": {
+                        "type": 1,
+                        "value": 448
+                    },
+                    "cam_rgb_focaly": {
+                        "type": 1,
+                        "value": 448
+                    },
+                    "cam_rgb_height": {
+                        "type": 1,
+                        "value": 720
+                    },
+                    "cam_rgb_width": {
+                        "type": 1,
+                        "value": 1280
+                    },
                     "color": {
                         "type": 0,
-                        "value": "Magenta"
+                        "value": "Orange"
                     },
                     "level": {
                         "type": 1,
@@ -198,7 +234,7 @@
                     },
                     "pos_y": {
                         "type": 2,
-                        "value": 0.0
+                        "value": 100.0
                     }
                 }
             }

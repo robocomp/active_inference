@@ -32,6 +32,7 @@
 #include <numeric>
 #include <iterator>
 #include <unordered_map>
+#include <Eigen/Geometry>
 #include "custom_widget.h"
 #include "ui_localUI.h"
 
@@ -76,24 +77,19 @@ void SpecificWorker::initialize()
     std::cout << "initialize worker" << std::endl;
 	GenericWorker::initialize();
 
-	 // ── Start lidar reader thread ────────────────────────────
-    lidar_thread = std::thread(&SpecificWorker::read_lidar_thread, this);
-    qInfo() << __FUNCTION__ << "Started lidar reader";
-
-    // ── Start RGBD reader thread ─────────────────────────────
-    rgbd_thread = std::thread(&SpecificWorker::read_rgbd_thread, this);
-    qInfo() << __FUNCTION__ << "Started RGBD reader";
-
     // ── Initialise YOLO-seg detector ─────────────────────────
     try
     {
         params.YOLO_MODEL_PATH  = configLoader.get<std::string>("Yolo.model_path");
     }
     catch (...) { /* key absent — use default */ }
-    try { params.YOLO_CONF_THRESH = static_cast<float>(configLoader.get<double>("Yolo.conf_thresh")); } catch (...) {}
-    try { params.YOLO_IOU_THRESH  = static_cast<float>(configLoader.get<double>("Yolo.iou_thresh"));  } catch (...) {}
-    try { params.YOLO_USE_GPU     = configLoader.get<bool>("Yolo.use_gpu");  } catch (...) {}
-    try { params.YOLO_USE_TRT     = configLoader.get<bool>("Yolo.use_trt");  } catch (...) {}
+	try { params.YOLO_CONF_THRESH = static_cast<float>(configLoader.get<double>("Yolo.conf_thresh")); } catch (...) {}
+	try { params.YOLO_IOU_THRESH  = static_cast<float>(configLoader.get<double>("Yolo.iou_thresh"));  } catch (...) {}
+	try { params.YOLO_USE_GPU     = configLoader.get<bool>("Yolo.use_gpu");  } catch (...) {}
+	try { params.YOLO_USE_TRT     = configLoader.get<bool>("Yolo.use_trt");  } catch (...) {}
+	try { params.YOLO_MASK_ERODE_KERNEL = configLoader.get<int>("Yolo.mask_erode_kernel"); } catch (...) {}
+	try { params.TRACK_ASSOCIATION_MAX_DISTANCE_M = static_cast<float>(configLoader.get<double>("Yolo.track_association_max_distance_m")); } catch (...) {}
+	try { params.TRACK_MAX_MISSED_FRAMES = configLoader.get<int>("Yolo.track_max_missed_frames"); } catch (...) {}
 
     yolo_detector.emplace(params.YOLO_MODEL_PATH,
                           std::vector<std::string>{},   // default COCO names
@@ -147,6 +143,31 @@ void SpecificWorker::initialize()
 
 	// Allocate here so the heavy header remains out of specificworker.h and MOC units.
 	voxel_grid = std::make_unique<UnifiedVoxelGrid>();
+	inner_eigen_api = G->get_inner_eigen_api();
+	if (const auto room_nodes = G->get_nodes_by_type("room"); !room_nodes.empty())
+	{
+		room_node_name_ = room_nodes.front().name();
+		std::println("[VoxelInit] Found room node: '{}'", room_node_name_);
+	}
+	else
+	{
+		std::println("[VoxelInit] No room nodes found in graph");
+	}
+	
+	if (const auto robot_nodes = G->get_nodes_by_type("robot"); !robot_nodes.empty())
+		robot_node_name_ = robot_nodes.front().name();
+	if (!room_node_name_.empty() && !robot_node_name_.empty())
+	{
+		std::println("[VoxelInit] Cached room='{}' robot='{}' from initial graph", room_node_name_, robot_node_name_);
+	}
+
+	 // ── Start lidar reader thread ────────────────────────────
+    //lidar_thread = std::thread(&SpecificWorker::read_lidar_thread, this);
+    //qInfo() << __FUNCTION__ << "Started lidar reader";
+
+    // ── Start RGBD reader thread ─────────────────────────────
+    rgbd_thread = std::thread(&SpecificWorker::read_rgbd_thread, this);
+    qInfo() << __FUNCTION__ << "Started RGBD reader";
 
     //initializeCODE
     /////////GET PARAMS, OPEND DEVICES....////////
@@ -168,6 +189,98 @@ void SpecificWorker::compute()
 	{ qWarning() << "No RGBD data available at timestamp" << timestamp; return;}
 	const auto &rgbd = rgbd_opt.value();
 
+	if (room_node_name_.empty())
+	{
+		if (const auto room_nodes = G->get_nodes_by_type("room"); !room_nodes.empty())
+			room_node_name_ = room_nodes.front().name();
+	}
+	if (room_node_name_.empty())
+	{
+		if (!room_wait_logged_)
+		{
+			qWarning() << "Room node not found in DSR graph. Voxelization paused until a room exists.";
+			std::println("[VoxelGate] No room nodes in graph. Voxelization paused.");
+			room_wait_logged_ = true;
+			room_ready_logged_ = false;
+		}
+		compute_fps.print("[Compute]", 2000);
+		return;
+	}
+	if (robot_node_name_.empty())
+	{
+		if (const auto robot_nodes = G->get_nodes_by_type("robot"); !robot_nodes.empty())
+			robot_node_name_ = robot_nodes.front().name();
+	}
+	if (robot_node_name_.empty())
+	{
+		if (!room_wait_logged_)
+		{
+			std::println("[VoxelGate] No robot nodes in graph. Voxelization paused.");
+			room_wait_logged_ = true;
+			room_ready_logged_ = false;
+		}
+		compute_fps.print("[Compute]", 2000);
+		return;
+	}
+	const std::string& room_name = room_node_name_;
+	const std::string& robot_name = robot_node_name_;
+	if (!room_ready_logged_)
+	{
+		qInfo() << "Room node found in DSR graph. Voxelization enabled.";
+		std::println("[VoxelGate] Room found: '{}'  Robot found: '{}'", room_name, robot_name);
+		room_ready_logged_ = true;
+		room_wait_logged_ = false;
+	}
+
+	if (!inner_eigen_api)
+	{
+		if (!room_rt_wait_logged_)
+		{
+			qWarning() << "InnerEigen API is not available. Voxelization paused.";
+			std::println("[VoxelGate] InnerEigen API is null. Voxelization paused.");
+			room_rt_wait_logged_ = true;
+			room_rt_ready_logged_ = false;
+		}
+		compute_fps.print("[Compute]", 2000);
+		return;
+	}
+
+	auto room_T_robot = inner_eigen_api->get_transformation_matrix(room_name, robot_name);
+	if (!room_T_robot.has_value())
+	{
+		if (!room_rt_wait_logged_)
+		{
+			qWarning() << "robot->room RTMat not available in InnerEigen API. Voxelization paused until transform is available.";
+			std::println("[VoxelGate] No RTMat for '{}' <- '{}'. Voxelization paused.", room_name, robot_name);
+			room_rt_wait_logged_ = true;
+			room_rt_ready_logged_ = false;
+		}
+		compute_fps.print("[Compute]", 2000);
+		return;
+	}
+	{
+		static int pose_log_count = 0;
+		if (++pose_log_count % 10 == 0)
+		{
+			const auto& T = room_T_robot.value();
+			const auto& t = T.translation();
+			const Eigen::Vector3d rpy = T.rotation().eulerAngles(0, 1, 2);
+			std::println("[RT {}<-{}] t=({:.3f}, {:.3f}, {:.3f}) rpy_xyz=({:.3f}, {:.3f}, {:.3f})",
+			             room_name, robot_name, t.x(), t.y(), t.z(), rpy.x(), rpy.y(), rpy.z());
+		}
+	}
+	if (!room_rt_ready_logged_)
+	{
+		std::println("[Compute] RT edge robot<->room found. Voxelization now running in room frame.");
+		room_rt_ready_logged_ = true;
+		room_rt_wait_logged_ = false;
+	}
+
+	// Try to fetch room polygon periodically (every 50 compute cycles)
+	static int polygon_check_count = 0;
+	if (++polygon_check_count % 50 == 0)
+		update_room_polygon_in_viewers();
+
 	// Process RGB image through YOLO-seg
 	std::vector<SegDetection> detections;
 	if (yolo_detector.has_value() && rgbd.image.width > 0 && rgbd.image.height > 0)
@@ -176,40 +289,53 @@ void SpecificWorker::compute()
 		const cv::Mat rgb_frame(rgbd.image.height, rgbd.image.width, CV_8UC3,
 			const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(rgbd.image.image.data())));
 		detections = yolo_detector->detect(rgb_frame, /*is_rgb=*/true);
-		auto normalize_label = [](const std::string& label) -> std::string
-		{
-			std::string out = label;
-			std::transform(out.begin(), out.end(), out.begin(),
-			               [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
-			if (out == "dining table") return "table";
-			if (out == "tv") return "monitor";
-			return out;
-		};
-
-		for (auto& det : detections)
-		{
-			det.label = normalize_label(det.label);
-			const bool is_target = (det.label == "table" || det.label == "chair" || det.label == "monitor");
-			if (is_target && !det.mask.empty())
-			{
-				cv::Mat eroded;
-				cv::erode(det.mask, eroded, cv::Mat(), cv::Point(-1, -1), 1);
-				det.mask = eroded;
-			}
-		}
+		postprocess_yolo_detections(detections);
 		//draw_detections(rgb_frame, detections);
 		// for (const auto& det : detections)
 		// 	std::println("Detected {} with confidence {:.3f}", det.label, det.confidence);
 	}
 
-	update_voxel_grid_from_rgbd(rgbd, detections);
-
+	// Update association params from config (Params)
+	track_association_max_distance_m = params.TRACK_ASSOCIATION_MAX_DISTANCE_M;
+	track_max_missed_frames = params.TRACK_MAX_MISSED_FRAMES;
+	update_voxel_grid_from_rgbd(rgbd, detections, room_T_robot.value());
 
 	compute_fps.print("[Compute]", 2000);
 }
 
+//////////////////////////////////////////////////////////////////////////////
+
+// YOLO postprocessing logic 
+void SpecificWorker::postprocess_yolo_detections(std::vector<SegDetection>& detections) const
+{
+    auto normalize_label = [](const std::string& label) -> std::string
+    {
+        std::string out = label;
+        std::transform(out.begin(), out.end(), out.begin(),
+                       [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+        if (out == "dining table") return "table";
+        if (out == "tv") return "monitor";
+        return out;
+    };
+
+	for (auto& det : detections)
+	{
+		det.label = normalize_label(det.label);
+		const bool is_target = (det.label == "table" || det.label == "chair" || det.label == "monitor");
+		if (is_target && !det.mask.empty())
+		{
+			cv::Mat eroded;
+			int k = std::max(1, params.YOLO_MASK_ERODE_KERNEL);
+			cv::erode(det.mask, eroded, cv::Mat(), cv::Point(-1, -1), k);
+			det.mask = eroded;
+		}
+	}
+}
+
+// voxel grid update logic 
 void SpecificWorker::update_voxel_grid_from_rgbd(const RoboCompCameraRGBDSimple::TRGBD& rgbd,
-	                                              const std::vector<SegDetection>& detections)
+	                                              const std::vector<SegDetection>& detections,
+	                                              const Mat::RTMat& room_T_robot)
 {
 	// Update the unified voxel grid: project each RGBD point into 3D,
 	// label it with the YOLO class if its pixel falls inside a mask.
@@ -217,6 +343,8 @@ void SpecificWorker::update_voxel_grid_from_rgbd(const RoboCompCameraRGBDSimple:
 	const int   img_w   = rgbd.image.width;
 	const int   img_h   = rgbd.image.height;
 
+	// Sanity check: the points array should have one entry per pixel. 
+	//If not, something is wrong with the RGBD data and we skip processing this frame.
 	if (!raw_pts.empty() && img_w > 0 && img_h > 0
 	    && static_cast<int>(raw_pts.size()) == img_w * img_h)
 	{
@@ -229,44 +357,155 @@ void SpecificWorker::update_voxel_grid_from_rgbd(const RoboCompCameraRGBDSimple:
 		std::vector<int32_t> pixel_owner(static_cast<std::size_t>(img_w * img_h), -1);
 		const float point_scale = detect_point_scale_once(rgbd);
 		build_owner_map_and_medians(rgbd, point_scale, detections, pixel_owner, det_median_range_m);
-		auto selected = collect_points_parallel(rgbd, point_scale, pixel_owner, detections, det_median_range_m);
 
-		auto& pts_eigen = selected.points;
-		auto& pt_labels = selected.labels;
-		auto& pt_confs = selected.confidences;
-		valid_points = selected.valid_points;
-		masked_points = selected.masked_points;
-		selected_points = selected.selected_points;
-		selected_by_class["table"] = selected.table_points;
-		selected_by_class["chair"] = selected.chair_points;
-		selected_by_class["monitor"] = selected.monitor_points;
+		const std::size_t n_dets = detections.size();
+		std::vector<std::vector<Eigen::Vector3f>> points_by_det(n_dets);
+		std::vector<std::vector<std::string>> labels_by_det(n_dets);
+		std::vector<std::vector<float>> confs_by_det(n_dets);
+		std::vector<Eigen::Vector3f> selected_points_robot;
+		std::vector<std::size_t> selected_det_indices;
+		selected_points_robot.reserve(static_cast<std::size_t>(img_w * img_h / 6));
+		selected_det_indices.reserve(selected_points_robot.capacity());
 
-		if (!pts_eigen.empty() && voxel_grid)
+		for (int row = 0; row < img_h; ++row)
 		{
-			const std::size_t voxel_decimation_step = std::max<std::size_t>(1, params.VOXEL_DECIMATION_FACTOR);
-			std::vector<Eigen::Vector3f> pts_decimated;
-			std::vector<std::string>     labels_decimated;
-			std::vector<float>           confs_decimated;
-
-			pts_decimated.reserve((pts_eigen.size() + voxel_decimation_step - 1) / voxel_decimation_step);
-			labels_decimated.reserve(pts_decimated.capacity());
-			confs_decimated.reserve(pts_decimated.capacity());
-
-			for (std::size_t i = 0; i < pts_eigen.size(); i += voxel_decimation_step)
+			for (int col = 0; col < img_w; ++col)
 			{
-				pts_decimated.push_back(pts_eigen[i]);
-				labels_decimated.push_back(pt_labels[i]);
-				confs_decimated.push_back(pt_confs[i]);
+				const std::size_t idx = static_cast<std::size_t>(row * img_w + col);
+				const auto& p = raw_pts[idx];
+
+				if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z))
+					continue;
+
+				const float px = p.x * point_scale;
+				const float py = p.y * point_scale;
+				const float pz = p.z * point_scale;
+				const float rng_sq = px * px + py * py + pz * pz;
+				if (rng_sq < 0.01f || rng_sq > 100.0f)
+					continue;
+				const float rng = std::sqrt(rng_sq);
+
+				++valid_points;
+
+				const int32_t owner = pixel_owner[idx];
+				if (owner < 0)
+					continue;
+
+				const std::size_t det_idx = static_cast<std::size_t>(owner);
+				if (det_idx >= n_dets)
+					continue;
+
+				const auto& det = detections[det_idx];
+				const float ref_rng = det_median_range_m[det_idx];
+				if (std::isfinite(ref_rng) && std::abs(rng - ref_rng) > 0.35f)
+					continue;
+
+				++masked_points;
+				++selected_points;
+				selected_points_robot.emplace_back(px, py, pz);
+				selected_det_indices.push_back(det_idx);
+
+				if (det.label == "table") ++selected_by_class["table"];
+				else if (det.label == "chair") ++selected_by_class["chair"];
+				else if (det.label == "monitor") ++selected_by_class["monitor"];
+			}
+		}
+
+		if (!selected_points_robot.empty())
+		{
+			const std::size_t n_sel = selected_points_robot.size();
+			Eigen::Matrix<double, 3, Eigen::Dynamic> pts_robot(3, static_cast<Eigen::Index>(n_sel));
+			for (std::size_t i = 0; i < n_sel; ++i)
+			{
+				pts_robot(0, static_cast<Eigen::Index>(i)) = static_cast<double>(selected_points_robot[i].x());
+				pts_robot(1, static_cast<Eigen::Index>(i)) = static_cast<double>(selected_points_robot[i].y());
+				pts_robot(2, static_cast<Eigen::Index>(i)) = static_cast<double>(selected_points_robot[i].z());
 			}
 
-			decimated_points = pts_decimated.size();
-			voxel_grid->observe(/*track_id=*/0,
-			                    pts_decimated,
-			                    /*category=*/"",
-			                    ++compute_frame_,
-			                    labels_decimated,
-			                    confs_decimated,
-			                    /*detection_confidence=*/1.0f);
+			Eigen::Matrix<double, 3, Eigen::Dynamic> pts_room =
+				(room_T_robot.linear() * pts_robot).colwise() + room_T_robot.translation();
+
+			for (std::size_t i = 0; i < n_sel; ++i)
+			{
+				const std::size_t det_idx = selected_det_indices[i];
+				points_by_det[det_idx].emplace_back(
+					static_cast<float>(pts_room(0, static_cast<Eigen::Index>(i))),
+					static_cast<float>(pts_room(1, static_cast<Eigen::Index>(i))),
+					static_cast<float>(pts_room(2, static_cast<Eigen::Index>(i))));
+				labels_by_det[det_idx].push_back(detections[det_idx].label);
+				confs_by_det[det_idx].push_back(detections[det_idx].confidence);
+			}
+		}
+
+		const int frame_id = ++compute_frame_;
+		std::vector<DetectionObservation> observations;
+		observations.reserve(n_dets);
+
+		for (std::size_t d = 0; d < n_dets; ++d)
+		{
+			if (points_by_det[d].empty())
+				continue;
+			if (!is_target_label(detections[d].label))
+				continue;
+
+			Eigen::Vector3f centroid = Eigen::Vector3f::Zero();
+			for (const auto& p : points_by_det[d])
+				centroid += p;
+			centroid /= static_cast<float>(points_by_det[d].size());
+
+			observations.push_back(DetectionObservation{
+				.det_index = d,
+				.centroid = centroid,
+				.label = detections[d].label,
+				.confidence = detections[d].confidence
+			});
+		}
+
+		std::vector<int> det_to_track(n_dets, -1);
+		if (!observations.empty())
+		{
+			auto track_ids = associate_detections_hungarian(observations, frame_id);
+			for (std::size_t i = 0; i < observations.size(); ++i)
+				det_to_track[observations[i].det_index] = track_ids[i];
+		}
+		else
+		{
+			prune_stale_tracks(frame_id);
+		}
+
+		if (voxel_grid)
+		{
+			const std::size_t voxel_decimation_step = std::max<std::size_t>(1, params.VOXEL_DECIMATION_FACTOR);
+			for (std::size_t d = 0; d < n_dets; ++d)
+			{
+				const int track_id = det_to_track[d];
+				if (track_id < 0 || points_by_det[d].empty())
+					continue;
+
+				std::vector<Eigen::Vector3f> pts_decimated;
+				std::vector<std::string>     labels_decimated;
+				std::vector<float>           confs_decimated;
+
+				pts_decimated.reserve((points_by_det[d].size() + voxel_decimation_step - 1) / voxel_decimation_step);
+				labels_decimated.reserve(pts_decimated.capacity());
+				confs_decimated.reserve(pts_decimated.capacity());
+
+				for (std::size_t i = 0; i < points_by_det[d].size(); i += voxel_decimation_step)
+				{
+					pts_decimated.push_back(points_by_det[d][i]);
+					labels_decimated.push_back(labels_by_det[d][i]);
+					confs_decimated.push_back(confs_by_det[d][i]);
+				}
+
+				decimated_points += pts_decimated.size();
+				voxel_grid->observe(track_id,
+				                    pts_decimated,
+				                    detections[d].label,
+				                    frame_id,
+				                    labels_decimated,
+				                    confs_decimated,
+				                    detections[d].confidence);
+			}
 		}
 
 		if (voxel_grid && (compute_frame_ % 8 == 0))
@@ -289,7 +528,7 @@ void SpecificWorker::update_voxel_grid_from_rgbd(const RoboCompCameraRGBDSimple:
 			const float ratio = valid_points > 0
 				? (100.0f * static_cast<float>(masked_points) / static_cast<float>(valid_points))
 				: 0.0f;
-			std::println("[VoxelDebug] valid_pts={} masked_pts={} ({:.1f}%) selected_pts={} decimated_pts={} table={} chair={} monitor={} detections={}",
+			std::println("[VoxelDebug] valid_pts={} masked_pts={} ({:.1f}%) selected_pts={} decimated_pts={} table={} chair={} monitor={} detections={} active_tracks={}",
 			             valid_points,
 			             masked_points,
 			             ratio,
@@ -298,12 +537,110 @@ void SpecificWorker::update_voxel_grid_from_rgbd(const RoboCompCameraRGBDSimple:
 			             selected_by_class["table"],
 			             selected_by_class["chair"],
 			             selected_by_class["monitor"],
-			             detections.size());
+			             detections.size(),
+			             active_tracks.size());
 		}
 	}
 }
 
-////////////////////////////////////////////////////////////////////////////////////////////////
+void SpecificWorker::update_room_polygon_in_viewers()
+{
+	if (room_node_name_.empty())
+	{
+		std::println("[RoomPolygon] room_node_name_ is empty");
+		return;
+	}
+
+	std::println("[RoomPolygon] Attempting to fetch polygon from room node: '{}'", room_node_name_);
+
+	try
+	{
+		auto room_node = G->get_node(room_node_name_);
+		if (!room_node)
+		{
+			std::println("[RoomPolygon] Failed to get room node '{}'", room_node_name_);
+			return;
+		}
+
+		std::println("[RoomPolygon] Found room node. Attributes: {}", room_node.value().attrs().size());
+
+		// Use typed DSR API accessors for registered attribute names.
+		auto polygon_x_opt = G->get_attrib_by_name<delimiting_polygon_x_att>(room_node.value());
+		auto polygon_y_opt = G->get_attrib_by_name<delimiting_polygon_y_att>(room_node.value());
+
+		if (!polygon_x_opt.has_value())
+		{
+			std::println("[RoomPolygon] delimiting_polygon_x attribute not found");
+			return;
+		}
+		if (!polygon_y_opt.has_value())
+		{
+			std::println("[RoomPolygon] delimiting_polygon_y attribute not found");
+			return;
+		}
+
+		const auto &polygon_x_src = polygon_x_opt.value().get();
+		const auto &polygon_y_src = polygon_y_opt.value().get();
+
+		std::vector<float> polygon_x(polygon_x_src.begin(), polygon_x_src.end());
+		std::vector<float> polygon_y(polygon_y_src.begin(), polygon_y_src.end());
+
+		std::println("[RoomPolygon] Extracted {} x-coordinates and {} y-coordinates",
+		             polygon_x.size(), polygon_y.size());
+
+		if (polygon_x.size() != polygon_y.size())
+		{
+			std::println("[RoomPolygon] WARNING: size mismatch x={} y={}", polygon_x.size(), polygon_y.size());
+		}
+
+		if (!polygon_x.empty() && !polygon_y.empty())
+		{
+			const std::size_t n = std::min(polygon_x.size(), polygon_y.size());
+			float min_x = std::numeric_limits<float>::max();
+			float min_y = std::numeric_limits<float>::max();
+			float max_x = std::numeric_limits<float>::lowest();
+			float max_y = std::numeric_limits<float>::lowest();
+
+			for (std::size_t i = 0; i < n; ++i)
+			{
+				min_x = std::min(min_x, polygon_x[i]);
+				min_y = std::min(min_y, polygon_y[i]);
+				max_x = std::max(max_x, polygon_x[i]);
+				max_y = std::max(max_y, polygon_y[i]);
+				std::println("[RoomPolygon] corner[{}] = ({:.3f}, {:.3f})", i, polygon_x[i], polygon_y[i]);
+			}
+
+			std::println("[RoomPolygon] bbox x:[{:.3f}, {:.3f}] y:[{:.3f}, {:.3f}]",
+			             min_x, max_x, min_y, max_y);
+		}
+
+		// Update viewers with polygon data
+		if (!polygon_x.empty() && !polygon_y.empty())
+		{
+			if (voxel_viewer_gl)
+			{
+				voxel_viewer_gl->update_room_polygon(polygon_x, polygon_y);
+				std::println("[RoomPolygon] Updated GL viewer with room outline");
+			}
+			if (voxel_viewer_3d)
+			{
+				voxel_viewer_3d->update_room_polygon(polygon_x, polygon_y);
+				std::println("[RoomPolygon] Updated 3D viewer with room outline");
+			}
+			std::println("[RoomPolygon] Successfully updated viewers with {} points", polygon_x.size());
+		}
+		else
+		{
+			std::println("[RoomPolygon] Polygon vectors are empty: x.size()={} y.size()={}", 
+			             polygon_x.size(), polygon_y.size());
+		}
+	}
+	catch (const std::exception& e)
+	{
+		std::println("[RoomPolygon] Exception: {}", e.what());
+	}
+}
+
 void SpecificWorker::draw_detections(const cv::Mat& rgb_frame,
                                      const std::vector<SegDetection>& detections) const
 {
@@ -366,7 +703,6 @@ void SpecificWorker::draw_detections(const cv::Mat& rgb_frame,
     cv::waitKey(1);
 }
 
-////////////////////////////////////////////////////////////////////////////////////////////////
 void SpecificWorker::read_lidar_thread()
 {
 	static FPSCounter lidar_fps;
@@ -622,6 +958,188 @@ SpecificWorker::VoxelSelectionResult SpecificWorker::collect_points_parallel(con
 	}
 
 	return out;
+}
+
+std::vector<int> SpecificWorker::hungarian_min_cost(const std::vector<std::vector<float>>& cost) const
+{
+	const std::size_t n = cost.size();
+	if (n == 0)
+		return {};
+
+	std::size_t m = 0;
+	for (const auto& row : cost)
+		m = std::max(m, row.size());
+
+	if (m == 0)
+		return std::vector<int>(n, -1);
+
+	const std::size_t dim = std::max(n, m);
+	constexpr double big_cost = 1e9;
+	std::vector<std::vector<double>> a(n, std::vector<double>(dim, big_cost));
+	for (std::size_t i = 0; i < n; ++i)
+		for (std::size_t j = 0; j < cost[i].size(); ++j)
+			a[i][j] = static_cast<double>(cost[i][j]);
+
+	std::vector<double> u(n + 1, 0.0), v(dim + 1, 0.0);
+	std::vector<std::size_t> p(dim + 1, 0), way(dim + 1, 0);
+
+	for (std::size_t i = 1; i <= n; ++i)
+	{
+		p[0] = i;
+		std::size_t j0 = 0;
+		std::vector<double> minv(dim + 1, std::numeric_limits<double>::infinity());
+		std::vector<bool> used(dim + 1, false);
+
+		do
+		{
+			used[j0] = true;
+			const std::size_t i0 = p[j0];
+			double delta = std::numeric_limits<double>::infinity();
+			std::size_t j1 = 0;
+			for (std::size_t j = 1; j <= dim; ++j)
+			{
+				if (used[j])
+					continue;
+				const double cur = a[i0 - 1][j - 1] - u[i0] - v[j];
+				if (cur < minv[j])
+				{
+					minv[j] = cur;
+					way[j] = j0;
+				}
+				if (minv[j] < delta)
+				{
+					delta = minv[j];
+					j1 = j;
+				}
+			}
+
+			for (std::size_t j = 0; j <= dim; ++j)
+			{
+				if (used[j])
+				{
+					u[p[j]] += delta;
+					v[j] -= delta;
+				}
+				else
+				{
+					minv[j] -= delta;
+				}
+			}
+			j0 = j1;
+		}
+		while (p[j0] != 0);
+
+		do
+		{
+			const std::size_t j1 = way[j0];
+			p[j0] = p[j1];
+			j0 = j1;
+		}
+		while (j0 != 0);
+	}
+
+	std::vector<int> assignment(n, -1);
+	for (std::size_t j = 1; j <= dim; ++j)
+	{
+		if (p[j] == 0)
+			continue;
+		const std::size_t row = p[j] - 1;
+		const std::size_t col = j - 1;
+		if (row < n && col < m && col < cost[row].size())
+			assignment[row] = static_cast<int>(col);
+	}
+
+	return assignment;
+}
+
+std::vector<int> SpecificWorker::associate_detections_hungarian(const std::vector<DetectionObservation>& observations,
+	                                                            int frame_id)
+{
+	std::vector<int> out(observations.size(), -1);
+	if (observations.empty())
+		return out;
+
+	if (active_tracks.empty())
+	{
+		for (std::size_t i = 0; i < observations.size(); ++i)
+		{
+			const int new_id = next_track_id_++;
+			active_tracks[new_id] = InstanceTrack{
+				.id = new_id,
+				.centroid = observations[i].centroid,
+				.label = observations[i].label,
+				.last_seen_frame = frame_id
+			};
+			out[i] = new_id;
+		}
+		return out;
+	}
+
+	std::vector<int> track_ids;
+	track_ids.reserve(active_tracks.size());
+	for (const auto& [track_id, _] : active_tracks)
+		track_ids.push_back(track_id);
+
+	constexpr float impossible_cost = 1e6f;
+	std::vector<std::vector<float>> cost(observations.size(), std::vector<float>(track_ids.size(), impossible_cost));
+	for (std::size_t i = 0; i < observations.size(); ++i)
+	{
+		for (std::size_t j = 0; j < track_ids.size(); ++j)
+		{
+			const auto it = active_tracks.find(track_ids[j]);
+			if (it == active_tracks.end())
+				continue;
+			const auto& tr = it->second;
+			if (tr.label != observations[i].label)
+				continue;
+			cost[i][j] = (observations[i].centroid - tr.centroid).norm();
+		}
+	}
+
+	const auto assignment = hungarian_min_cost(cost);
+	for (std::size_t i = 0; i < observations.size(); ++i)
+	{
+		const int col = assignment[i];
+		if (col < 0 || static_cast<std::size_t>(col) >= track_ids.size())
+			continue;
+
+		const float c = cost[i][static_cast<std::size_t>(col)];
+		if (c > track_association_max_distance_m || c >= impossible_cost * 0.5f)
+			continue;
+
+		const int track_id = track_ids[static_cast<std::size_t>(col)];
+		out[i] = track_id;
+		auto& tr = active_tracks[track_id];
+		tr.centroid = 0.65f * tr.centroid + 0.35f * observations[i].centroid;
+		tr.label = observations[i].label;
+		tr.last_seen_frame = frame_id;
+	}
+
+	for (std::size_t i = 0; i < observations.size(); ++i)
+	{
+		if (out[i] != -1)
+			continue;
+
+		const int new_id = next_track_id_++;
+		active_tracks[new_id] = InstanceTrack{
+			.id = new_id,
+			.centroid = observations[i].centroid,
+			.label = observations[i].label,
+			.last_seen_frame = frame_id
+		};
+		out[i] = new_id;
+	}
+
+	prune_stale_tracks(frame_id);
+	return out;
+}
+
+void SpecificWorker::prune_stale_tracks(int frame_id)
+{
+	std::erase_if(active_tracks, [&](const auto& kv)
+	{
+		return (frame_id - kv.second.last_seen_frame) > track_max_missed_frames;
+	});
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////

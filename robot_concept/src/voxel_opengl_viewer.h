@@ -28,6 +28,9 @@ public:
                        std::span<const std::string> categories = {},
                        std::span<const float> confidences = {});
 
+    void update_room_polygon(std::span<const float> polygon_x,
+                             std::span<const float> polygon_y);
+
 protected:
     void initializeGL() override;
     void resizeGL(int w, int h) override;
@@ -48,9 +51,14 @@ private:
     QOpenGLShaderProgram program_;
     QOpenGLVertexArrayObject vao_;
     QOpenGLBuffer vbo_{QOpenGLBuffer::VertexBuffer};
+    QOpenGLVertexArrayObject room_vao_;
+    QOpenGLBuffer room_vbo_{QOpenGLBuffer::VertexBuffer};
 
     std::vector<Vertex> cpu_vertices_;
     std::mutex data_mutex_;
+
+    std::vector<QVector3D> room_polygon_;
+    std::mutex room_polygon_mutex_;
 
     bool gl_ready_ = false;
     bool upload_pending_ = false;

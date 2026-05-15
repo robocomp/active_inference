@@ -31,6 +31,8 @@ VoxelOpenGLViewer::~VoxelOpenGLViewer()
     makeCurrent();
     if (vbo_.isCreated())
         vbo_.destroy();
+    if (room_vbo_.isCreated())
+        room_vbo_.destroy();
     doneCurrent();
 }
 
@@ -90,6 +92,28 @@ void VoxelOpenGLViewer::update_voxels(std::span<const QVector3D> positions,
     update();
 }
 
+void VoxelOpenGLViewer::update_room_polygon(std::span<const float> polygon_x,
+                                            std::span<const float> polygon_y)
+{
+    std::vector<QVector3D> polygon;
+    const std::size_t n = std::min(polygon_x.size(), polygon_y.size());
+    polygon.reserve(n);
+
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        // Match voxel mapping used in update_voxels: world (x, y, h) -> GL (x, h, y).
+        // Room polygon is floor (h=0), with source coordinates (x, y).
+        const QVector3D point{polygon_x[i], 0.f, polygon_y[i]};
+        polygon.push_back(point);
+    }
+
+    {
+        std::scoped_lock lk(room_polygon_mutex_);
+        room_polygon_ = std::move(polygon);
+    }
+    update();
+}
+
 void VoxelOpenGLViewer::initializeGL()
 {
     initializeOpenGLFunctions();
@@ -116,10 +140,14 @@ void VoxelOpenGLViewer::initializeGL()
         #version 330 core
         in vec3 v_col;
         out vec4 out_col;
+        uniform int u_round_points;
         void main()
         {
-            vec2 uv = gl_PointCoord * 2.0 - 1.0;
-            if (dot(uv, uv) > 1.0) discard;
+            if (u_round_points != 0)
+            {
+                vec2 uv = gl_PointCoord * 2.0 - 1.0;
+                if (dot(uv, uv) > 1.0) discard;
+            }
             out_col = vec4(v_col, 1.0);
         }
     )";
@@ -142,8 +170,14 @@ void VoxelOpenGLViewer::initializeGL()
     static constexpr const char* fs_120 = R"(
         #version 120
         varying vec3 v_col;
+        uniform int u_round_points;
         void main()
         {
+            if (u_round_points != 0)
+            {
+                vec2 uv = gl_PointCoord * 2.0 - 1.0;
+                if (dot(uv, uv) > 1.0) discard;
+            }
             gl_FragColor = vec4(v_col, 1.0);
         }
     )";
@@ -206,6 +240,20 @@ void VoxelOpenGLViewer::initializeGL()
     program_.release();
     vbo_.release();
     vao_.release();
+
+    room_vao_.create();
+    room_vao_.bind();
+    room_vbo_.create();
+    room_vbo_.bind();
+    room_vbo_.setUsagePattern(QOpenGLBuffer::DynamicDraw);
+    program_.bind();
+    program_.enableAttributeArray(0);
+    program_.enableAttributeArray(1);
+    program_.setAttributeBuffer(0, GL_FLOAT, offsetof(Vertex, px), 3, sizeof(Vertex));
+    program_.setAttributeBuffer(1, GL_FLOAT, offsetof(Vertex, r), 3, sizeof(Vertex));
+    program_.release();
+    room_vbo_.release();
+    room_vao_.release();
 
     gl_ready_ = true;
 }
@@ -270,6 +318,7 @@ void VoxelOpenGLViewer::paintGL()
     program_.bind();
     program_.setUniformValue("u_mvp", mvp);
     program_.setUniformValue("u_point_size", 4.5f);
+    program_.setUniformValue("u_round_points", 1);
 
     vao_.bind();
 
@@ -292,6 +341,46 @@ void VoxelOpenGLViewer::paintGL()
             glVertex3f(v.px, v.py, v.pz);
         }
         glEnd();
+    }
+
+    // Draw room polygon outline
+    std::vector<QVector3D> local_polygon;
+    {
+        std::scoped_lock lk(room_polygon_mutex_);
+        if (!room_polygon_.empty())
+            local_polygon = room_polygon_;
+    }
+
+    if (!local_polygon.empty())
+    {
+        std::vector<Vertex> line_vertices;
+        std::vector<Vertex> corner_vertices;
+        line_vertices.reserve(local_polygon.size());
+        corner_vertices.reserve(local_polygon.size());
+        for (const auto& p : local_polygon)
+        {
+            line_vertices.push_back(Vertex{p.x(), p.y(), p.z(), 1.0f, 1.0f, 1.0f});
+            corner_vertices.push_back(Vertex{p.x(), p.y(), p.z(), 1.0f, 0.5f, 0.0f});
+        }
+
+        glDisable(GL_DEPTH_TEST);
+        room_vao_.bind();
+        room_vbo_.bind();
+
+        room_vbo_.allocate(line_vertices.data(), static_cast<int>(line_vertices.size() * sizeof(Vertex)));
+        program_.setUniformValue("u_round_points", 0);
+        glLineWidth(4.0f);
+        glDrawArrays(GL_LINE_LOOP, 0, static_cast<GLsizei>(line_vertices.size()));
+
+        room_vbo_.allocate(corner_vertices.data(), static_cast<int>(corner_vertices.size() * sizeof(Vertex)));
+        program_.setUniformValue("u_round_points", 1);
+        program_.setUniformValue("u_point_size", 12.0f);
+        glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(corner_vertices.size()));
+        program_.setUniformValue("u_point_size", 4.5f);
+
+        room_vbo_.release();
+        room_vao_.release();
+        glEnable(GL_DEPTH_TEST);
     }
 
     vao_.release();
@@ -340,6 +429,9 @@ void VoxelOpenGLViewer::wheelEvent(QWheelEvent* event)
 
 QColor VoxelOpenGLViewer::color_for_category(const std::string& category)
 {
+    if (category == "chair") return QColor(0, 170, 255);   // cyan-blue
+    if (category == "table") return QColor(255, 125, 0);   // orange
+
     static const std::array<QColor, 20> palette = {
         QColor(220, 20, 60), QColor(0, 90, 181), QColor(34, 139, 34), QColor(255, 140, 0),
         QColor(153, 102, 204), QColor(46, 139, 87), QColor(205, 92, 92), QColor(70, 130, 180),
