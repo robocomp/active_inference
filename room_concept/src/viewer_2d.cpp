@@ -5,6 +5,7 @@
 #include <QPen>
 #include <QBrush>
 #include <QPolygonF>
+#include <QLayout>
 #include <QtMath>
 
 #include <algorithm>
@@ -140,14 +141,15 @@ void Viewer2D::update_covariance_ellipse(float cx, float cy,
     {
         cov_ellipse_item_ = agv_->scene.addEllipse(
             -rx, -ry, 2.f * rx, 2.f * ry,
-            QPen(QColor(255, 50, 50), 0.03),
-            QBrush(QColor(255, 100, 100, 80)));
+            QPen(QColor(40, 120, 220), 0.03),
+            QBrush(QColor(40, 120, 220, 70)));
         cov_ellipse_item_->setZValue(100);
     }
     else
     {
         cov_ellipse_item_->setRect(-rx, -ry, 2.f * rx, 2.f * ry);
     }
+    cov_ellipse_item_->setVisible(true);
     cov_ellipse_item_->setPos(cx, cy);
     cov_ellipse_item_->setRotation(angle_deg);
 }
@@ -279,8 +281,40 @@ void Viewer2D::update_frame(const FrameData& fd)
     if (fd.have_loc || fd.is_initialized)
         update_robot(fd.display_pose);
 
+    // 1-sigma translation covariance ellipse aligned with the robot axis.
+    if (fd.have_loc)
+    {
+        const float theta = std::atan2(fd.display_pose.linear()(1, 0), fd.display_pose.linear()(0, 0));
+        const float c = std::cos(theta);
+        const float s = std::sin(theta);
+        Eigen::Matrix2f R;
+        R << c, -s,
+             s,  c;
+
+        const Eigen::Matrix2f cov_xy_world = fd.covariance.topLeftCorner<2, 2>();
+        const Eigen::Matrix2f cov_xy_robot = R.transpose() * cov_xy_world * R;
+
+        const float sigma_x = std::sqrt(std::max(1e-9f, cov_xy_robot(0, 0))) * 2.0f;
+        const float sigma_y = std::sqrt(std::max(1e-9f, cov_xy_robot(1, 1))) * 2.0f;
+        const auto t = fd.display_pose.translation();
+        update_covariance_ellipse(t.x(), t.y(), sigma_x, sigma_y, qRadiansToDegrees(theta));
+    }
+    else if (cov_ellipse_item_ != nullptr)
+    {
+        cov_ellipse_item_->setVisible(false);
+    }
+
     if (fd.have_loc && !fd.has_room_polygon)
         update_estimated_room_rect(fd.room_width, fd.room_length, false);
+
+    // Keep dock/main-window layout in sync with canvas size changes.
+    if (QWidget* top = agv_->window(); top != nullptr && !top->isMaximized() && !top->isFullScreen())
+    {
+        agv_->updateGeometry();
+        if (QLayout* lay = top->layout(); lay != nullptr)
+            lay->activate();
+        top->adjustSize();
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

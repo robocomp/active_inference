@@ -384,6 +384,20 @@ public:
     void configure_room_from_polygon(const std::vector<Eigen::Vector2f>& polygon_vertices);
     void configure_room_from_rect(float width, float length);
     const std::vector<Eigen::Vector2f>& polygon_vertices() const { return init_polygon_vertices_; }
+    std::vector<Eigen::Vector2f> nominal_room_polygon() const
+    {
+        if (init_use_polygon_ && init_polygon_vertices_.size() >= 3)
+            return init_polygon_vertices_;
+
+        const float half_w = init_room_width_ * 0.5f;
+        const float half_l = init_room_length_ * 0.5f;
+        return {
+            {-half_w, -half_l},
+            { half_w, -half_l},
+            { half_w,  half_l},
+            {-half_w,  half_l}
+        };
+    }
     void set_seed_pose_file(const std::string& pose_file_path);
 
     void set_initial_state(float width, float length, float x, float y, float phi);

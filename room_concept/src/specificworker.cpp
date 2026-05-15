@@ -17,6 +17,7 @@
  *    along with RoboComp.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "specificworker.h"
+#include "camera_visualizer.h"
 #include <print>
 #include <random>
 #include <fstream>
@@ -209,18 +210,37 @@ void SpecificWorker::initialize()
     //graph_viewers[agent_name]->add_custom_widget_to_dock("room concept", &custom_widget);
     qInfo() << __FUNCTION__ << "Adding custom widget to dock" << agent_name.c_str();
     graph_viewers.at("")->add_custom_widget_to_dock("layout", &custom_widget);
-    //viewer_2d_ = qobject_cast<DSR::QScene2dViewer*> (graph_viewers[agent_name]->get_widget(opts::scene));
-
     viewer_2d_ = std::make_unique<rc::Viewer2D>(custom_widget.frame, params.GRID_MAX_DIM, true);
     viewer_2d_->show();
     viewer_2d_->add_robot(params.ROBOT_WIDTH, params.ROBOT_LENGTH, 0.f, 0.f, QColor("blue"));
+
+    // Free-Energy time series in the lower frame of the custom widget.
+    if (custom_widget.frame_series->layout() == nullptr)
+    {
+        auto* series_layout = new QVBoxLayout(custom_widget.frame_series);
+        series_layout->setContentsMargins(2, 2, 2, 2);
+        series_layout->setSpacing(2);
+        custom_widget.frame_series->setLayout(series_layout);
+    }
+    ts_plot_fe_ = new rc::TimeSeriesPlot(custom_widget.frame_series);
+    ts_plot_fe_->set_visible_window(60.f);
+    ts_plot_fe_->add_series("free_energy", QColor(255, 170, 0), 1.8f, 0);
+    ts_plot_fe_->add_series("cov_det_scaled", QColor(0, 190, 255), 1.6f, 0);
+    custom_widget.frame_series->layout()->addWidget(ts_plot_fe_);
+    
+    // Load room polygon for visualizations
+    std::vector<Eigen::Vector2f> room_polygon_for_viz;
     if (room_initialized_from_svg_polygon_)
     {
-         const auto room_polygon = rc::SvgRoomLoader::load_polygon_points(
+         room_polygon_for_viz = rc::SvgRoomLoader::load_polygon_points(
              "beta_layout.svg", "room_contour", false, true);
-         if (room_polygon.size() >= 3)
-             viewer_2d_->draw_room_polygon(room_polygon, false);
+         if (room_polygon_for_viz.size() >= 3)
+             viewer_2d_->draw_room_polygon(room_polygon_for_viz, false);
     }
+
+    // Camera visualizer
+    camera_viz_ = std::make_unique<rc::CameraVisualizer>(G.get(), room_polygon_for_viz, nullptr);
+    connect(custom_widget.btn_camera_viz, &QPushButton::clicked, this, &SpecificWorker::slot_show_camera_visualization);
 
     // ── DSR: resolve existing graph node IDs ──────────────────────────────
     check_init_graph_is_valid();
@@ -229,12 +249,12 @@ void SpecificWorker::initialize()
     rt_api = G->get_rt_api();
 
     // ── Connect DSR signals ────────────────────────────────────────────────
-    connect(G.get(), &DSR::DSRGraph::update_node_signal,      this, &SpecificWorker::modify_node_slot);
-    connect(G.get(), &DSR::DSRGraph::update_edge_signal,      this, &SpecificWorker::modify_edge_slot);
-    connect(G.get(), &DSR::DSRGraph::update_node_attr_signal, this, &SpecificWorker::modify_node_attrs_slot);
-    connect(G.get(), &DSR::DSRGraph::update_edge_attr_signal, this, &SpecificWorker::modify_edge_attrs_slot);
-    connect(G.get(), &DSR::DSRGraph::del_edge_signal,         this, &SpecificWorker::del_edge_slot);
-    connect(G.get(), &DSR::DSRGraph::del_node_signal,         this, &SpecificWorker::del_node_slot);
+    // connect(G.get(), &DSR::DSRGraph::update_node_signal,      this, &SpecificWorker::modify_node_slot);
+    // connect(G.get(), &DSR::DSRGraph::update_edge_signal,      this, &SpecificWorker::modify_edge_slot);
+    // connect(G.get(), &DSR::DSRGraph::update_node_attr_signal, this, &SpecificWorker::modify_node_attrs_slot);
+    // connect(G.get(), &DSR::DSRGraph::update_edge_attr_signal, this, &SpecificWorker::modify_edge_attrs_slot);
+    // connect(G.get(), &DSR::DSRGraph::del_edge_signal,         this, &SpecificWorker::del_edge_slot);
+    // connect(G.get(), &DSR::DSRGraph::del_node_signal,         this, &SpecificWorker::del_node_slot);
 
     room_concept_.start();
 
@@ -263,21 +283,23 @@ void SpecificWorker::compute()
     // ── Update 2-D viewer ─────────────────────────────────────────────────
     const Eigen::Affine2f loc_pose = have_loc ? loc_res->robot_pose : pose_for_draw;
     const bool use_loc = have_loc && !loc_res->lidar_scan.empty();
-    const std::vector<Eigen::Vector3f>& draw_points =
-        use_loc ? loc_res->lidar_scan : lidar_data_->first;
-
-    viewer_2d_->update_frame({
-        .lidar_points     = draw_points,
-        .display_pose     = pose_for_draw,
-        .max_lidar_points = params.MAX_LIDAR_DRAW_POINTS,
-        .have_loc         = have_loc,
-        .is_initialized   = room_concept_.is_initialized(),
-        .has_room_polygon = room_initialized_from_svg_polygon_,
-        .room_width       = have_loc ? loc_res->state[0] : 0.f,
-        .room_length      = have_loc ? loc_res->state[1] : 0.f,
-        .loc_pose         = loc_pose,
-        .use_loc_pose     = use_loc,
-    });
+    //const std::vector<Eigen::Vector3f>& draw_points =
+    //    use_loc ? loc_res->lidar_scan : lidar_data_->first;
+    
+    if(use_loc)    
+        viewer_2d_->update_frame({
+            .lidar_points     = loc_res->lidar_scan,
+            .display_pose     = pose_for_draw,
+            .covariance       = have_loc ? loc_res->covariance : Eigen::Matrix3f::Identity(),
+            .max_lidar_points = params.MAX_LIDAR_DRAW_POINTS,
+            .have_loc         = have_loc,
+            .is_initialized   = room_concept_.is_initialized(),
+            .has_room_polygon = room_initialized_from_svg_polygon_,
+            .room_width       = have_loc ? loc_res->state[0] : 0.f,
+            .room_length      = have_loc ? loc_res->state[1] : 0.f,
+            .loc_pose         = loc_pose,
+            .use_loc_pose     = use_loc,
+        });
 
     if (have_loc && !loc_res->corner_matches.empty())
         viewer_2d_->draw_corners(loc_res->corner_matches, pose_for_draw);
@@ -288,7 +310,7 @@ void SpecificWorker::compute()
     if (have_loc)
         update_dsr(*loc_res);
 
-    //update_ui(loc_res, pose_for_draw);
+    update_ui(loc_res, pose_for_draw);
     fps_counter_.print("[Compute]", 2000);
 }
 
@@ -298,7 +320,7 @@ void SpecificWorker::update_dsr(const rc::RoomConcept::UpdateResult& res)
     const float sdf_mse = res.sdf_mse;
     const float cov_tt  = (res.covariance.rows() > 2 && res.covariance.cols() > 2)
                           ? res.covariance(2, 2) : 1.f;
-    const bool stable   = (res.iterations_used == 0)  // prediction early exit → pose is stable
+    const bool stable   = (res.iterations_used == 0)
                           && sdf_mse < params.STABLE_SDF_MSE_MAX
                           && cov_tt  < params.STABLE_COV_TT_MAX;
 
@@ -313,12 +335,145 @@ void SpecificWorker::update_dsr(const rc::RoomConcept::UpdateResult& res)
         if (stable_frames_ >= params.STABLE_FRAMES_REQUIRED)
             dsr_create_room_and_reparent(res);
         else
-            dsr_update_pose(res);   // world→robot RT
+            dsr_update_pose(res);   // world->robot RT while waiting for stable room creation
     }
     else
     {
-        dsr_update_pose(res);       // room→robot RT
+        dsr_update_pose(res);       // robot->room RT once room node exists
     }
+}
+
+///////////////////////////////////////////////////////////////////////////////
+void SpecificWorker::dsr_update_pose(const rc::RoomConcept::UpdateResult& res)
+{
+    if (!G || !rt_api) return;
+
+    const Eigen::Matrix2f R = res.robot_pose.linear();
+    const Eigen::Vector2f t = res.robot_pose.translation();
+    const float theta_room_to_robot = std::atan2(R(1, 0), R(0, 0));
+
+    // Convert room->robot estimate into robot->room when the room is a child of the robot.
+    const Eigen::Vector2f t_robot_to_room = -(R.transpose() * t);
+    const float theta_robot_to_room = -theta_room_to_robot;
+
+    const uint64_t parent_id = room_node_created_ ? dsr_robot_id_ : dsr_world_id_;
+    const uint64_t child_id  = room_node_created_ ? dsr_room_id_  : dsr_robot_id_;
+
+    auto parent_opt = G->get_node(parent_id);
+    if (!parent_opt.has_value()) return;
+
+    const float x = room_node_created_ ? t_robot_to_room.x() : t.x();
+    const float y = room_node_created_ ? t_robot_to_room.y() : t.y();
+    const float theta = room_node_created_ ? theta_robot_to_room : theta_room_to_robot;
+
+    // std::print("[dsr_update_pose] {} -> {} | x={:.4f} y={:.4f} theta={:.4f} rad ({:.2f} deg) | t_raw=({:.4f},{:.4f}) theta_raw={:.4f}\n",
+    //            room_node_created_ ? "robot" : "world",
+    //            room_node_created_ ? "room"  : "robot",
+    //            x, y, theta, theta * 180.f / static_cast<float>(M_PI),
+    //            t.x(), t.y(), theta_room_to_robot);
+
+    rt_api->insert_or_assign_edge_RT(parent_opt.value(), child_id,
+                                     {x, y, 0.f},
+                                     {0.f, 0.f, theta});
+
+    Eigen::Matrix3f cov_se2 = Eigen::Matrix3f::Identity();
+    if (res.covariance.rows() >= 3 && res.covariance.cols() >= 3)
+        cov_se2 = res.covariance.topLeftCorner<3, 3>();
+
+    // If we invert pose (robot->room), propagate covariance through the inverse map.
+    if (room_node_created_)
+    {
+        const float c = std::cos(theta_room_to_robot);
+        const float s = std::sin(theta_room_to_robot);
+        Eigen::Matrix3f J = Eigen::Matrix3f::Zero();
+        J(0, 0) = -c;
+        J(0, 1) = -s;
+        J(0, 2) =  s * t.x() - c * t.y();
+        J(1, 0) =  s;
+        J(1, 1) = -c;
+        J(1, 2) =  c * t.x() + s * t.y();
+        J(2, 2) = -1.f;
+        cov_se2 = J * cov_se2 * J.transpose();
+    }
+
+    std::vector<float> cov_flat(36, 0.f);
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c)
+            cov_flat[r * 6 + c] = cov_se2(r, c);
+
+    auto edge_rt = G->get_edge(parent_id, child_id, "RT");
+    if (!edge_rt.has_value())
+    {
+        qWarning() << "dsr_update_pose: edge RT not found after insert_or_assign_edge_RT";
+        return;
+    }
+    G->add_or_modify_attrib_local<rt_se2_covariance_att>(edge_rt.value(), cov_flat);
+    G->insert_or_assign_edge(edge_rt.value());
+
+    // Verify what was actually written to DSR using rt_api
+    auto rt_edge = DSR::RT_API::get_edge_RT(parent_opt.value(), child_id);
+    if (rt_edge.has_value())
+    {
+        auto rtmat = rt_api->get_edge_RT_as_rtmat(rt_edge.value());
+        if (rtmat.has_value())
+        {
+            // Verification output disabled.
+            // std::print("[dsr_update_pose VERIFY via rt_api] Written RT edge: trans=({:.4f},{:.4f}) rot_angle={:.4f} rad ({:.2f} deg)\n",
+            //            trans.x(), trans.y(), rot_angle, rot_angle * 180.0 / M_PI);
+        }
+        else
+        {
+            // std::print("[dsr_update_pose VERIFY] Could not convert Edge to RTMat\n");
+        }
+    }
+    else
+    {
+        // std::print("[dsr_update_pose VERIFY] Could not retrieve RT edge via rt_api\n");
+    }
+}
+
+///////////////////////////////////////////////////////////////////////////////
+void SpecificWorker::dsr_create_room_and_reparent(const rc::RoomConcept::UpdateResult& res)
+{
+    if (!G) return;
+
+    const auto room_polygon = room_concept_.nominal_room_polygon();
+    std::vector<float> polygon_x;
+    std::vector<float> polygon_y;
+    polygon_x.reserve(room_polygon.size());
+    polygon_y.reserve(room_polygon.size());
+    for (const auto& vertex : room_polygon)
+    {
+        polygon_x.push_back(vertex.x());
+        polygon_y.push_back(vertex.y());
+    }
+
+    if (const auto room_nodes = G->get_nodes_by_type("room"); !room_nodes.empty())
+    {
+        dsr_room_id_ = room_nodes.front().id();
+        room_node_created_ = true;
+        stable_frames_ = 0;
+        qInfo() << "DSR: reusing existing room node id=" << dsr_room_id_;
+        dsr_update_pose(res);
+        return;
+    }
+
+    DSR::Node room_node = DSR::Node::create<room_node_type>("room");
+    room_node.attrs()[delimiting_polygon_x_str.data()] = DSR::Attribute{polygon_x, 0, 0};
+    room_node.attrs()[delimiting_polygon_y_str.data()] = DSR::Attribute{polygon_y, 0, 0};
+    const auto room_id_opt = G->insert_node(room_node);
+    if (!room_id_opt.has_value())
+    {
+        qWarning() << "DSR: failed to create room node";
+        return;
+    }
+
+    dsr_room_id_ = room_id_opt.value();
+    room_node_created_ = true;
+    stable_frames_ = 0;
+    qInfo() << "DSR: created room node id=" << dsr_room_id_ << "hanging from robot id=" << dsr_robot_id_;
+
+    dsr_update_pose(res);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -348,121 +503,6 @@ void SpecificWorker::check_init_graph_is_valid()
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-void SpecificWorker::dsr_update_pose(const rc::RoomConcept::UpdateResult& res)
-{
-    if (!G) return;
-
-    const float x     = res.robot_pose.translation().x();
-    const float y     = res.robot_pose.translation().y();
-    const float theta = std::atan2(res.robot_pose.linear()(1, 0), res.robot_pose.linear()(0, 0));
-
-    const uint64_t parent_id = room_node_created_ ? dsr_room_id_ : dsr_world_id_;
-    auto parent_opt = G->get_node(parent_id);
-    if (!parent_opt.has_value()) return;
-
-    if (!rt_api) return;
-    rt_api->insert_or_assign_edge_RT(*parent_opt, dsr_robot_id_,
-                                     {x, y, 0.f},  
-                                     {0.f, 0.f, theta});
-
-
-    // Covariance: 6x6 row-major (36 floats), SE2 3x3 in top-left block, rest zeros
-    std::vector<float> cov_flat(36, 0.f);
-    for (int r = 0; r < 3; ++r)
-        for (int c = 0; c < 3; ++c)
-            cov_flat[r * 6 + c] = res.covariance(r, c);
-    auto edge_rt = G->get_edge(parent_id, dsr_robot_id_, "RT");
-    if (!edge_rt.has_value()) { qWarning() << "dsr_update_pose: edge RT not found after insert_or_assign_edge_RT"; return; }
-    G->add_or_modify_attrib_local<rt_se2_covariance_att>(edge_rt.value(), cov_flat);
-    G->insert_or_assign_edge(edge_rt.value());
-
-    // Re-fetch parent: get_edge_RT reads from n.fano() (local snapshot),
-    // must use a fresh node to see the values just written into the CRDT store.
-    // parent_opt = G->get_node(parent_id);
-    // if (!parent_opt.has_value()) return;
-    // if (auto edge_opt = DSR::RT_API::get_edge_RT(*parent_opt, dsr_robot_id_); edge_opt.has_value())
-    // {
-    //     const auto& edge = edge_opt.value();
-    //     auto tr_o   = G->get_attrib_by_name<rt_translation_att>(edge);
-    //     auto rot_o  = G->get_attrib_by_name<rt_rotation_euler_xyz_att>(edge);
-    //     auto head_o = G->get_attrib_by_name<rt_head_index_att>(edge);
-
-    //     if (tr_o.has_value())
-    //     {
-    //         const auto& t = tr_o->get();
-    //         const int head = head_o.has_value() ? static_cast<int>(head_o.value()) : 0;
-    //         const int hi   = head % static_cast<int>(t.size());
-    //         std::println("[RT readback] tr size={} head={} hi={} current=({},{},{}) want=({},{},0)",
-    //             t.size(), head, hi,
-    //             (t.size()>size_t(hi)  ?t[hi]  :0.f),
-    //             (t.size()>size_t(hi+1)?t[hi+1]:0.f),
-    //             (t.size()>size_t(hi+2)?t[hi+2]:0.f),
-    //             x, y);
-    //     }
-    //     else std::println("[RT readback] no rt_translation attribute");
-
-    //     if (rot_o.has_value())
-    //     {
-    //         const auto& r = rot_o->get();
-    //         const int head = head_o.has_value() ? static_cast<int>(head_o.value()) : 0;
-    //         const int hi   = head % static_cast<int>(r.size());
-    //         std::println("[RT readback] rot size={} head={} hi={} current=({},{},{}) want=(0,0,{})",
-    //             r.size(), head, hi,
-    //             (r.size()>size_t(hi)  ?r[hi]  :0.f),
-    //             (r.size()>size_t(hi+1)?r[hi+1]:0.f),
-    //             (r.size()>size_t(hi+2)?r[hi+2]:0.f),
-    //             theta);
-    //     }
-    //     else std::println("[RT readback] no rt_rotation attribute");
-    // }
-    // else std::println("[RT readback] get_edge_RT returned empty after insert_or_assign_edge_RT");
-}
-
-///////////////////////////////////////////////////////////////////////////////
-void SpecificWorker::dsr_create_room_and_reparent(const rc::RoomConcept::UpdateResult& res)
-{
-    if (!G) return;
-    const uint32_t agent_id = G->get_agent_id();
-
-    // Create room node
-    DSR::Node room_node;
-    room_node.name("room");
-    room_node.type("room");
-    room_node.agent_id(agent_id);
-    G->add_or_modify_attrib_local<level_att>(room_node, 1);
-    G->add_or_modify_attrib_local<pos_x_att>(room_node, -200.f);
-    G->add_or_modify_attrib_local<pos_y_att>(room_node, 0.f);
-    auto room_id_opt = G->insert_node(room_node);
-    if (!room_id_opt.has_value()) { qWarning() << "DSR: failed to insert room node"; return; }
-    dsr_room_id_ = room_id_opt.value();
-
-    // world→room identity RT
-    auto wopt = G->get_node(dsr_world_id_);
-    if (wopt.has_value())
-    {
-        auto rt = G->get_rt_api();
-        rt->insert_or_assign_edge_RT(*wopt, dsr_room_id_, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f});
-    }
-
-    // Delete world→robot, then create room→robot
-    G->delete_edge(dsr_world_id_, dsr_robot_id_, "RT");
-    room_node_created_ = true;
-
-    // Update robot node level
-    if (auto ropt = G->get_node(dsr_robot_id_); ropt.has_value())
-    {
-        G->add_or_modify_attrib_local<level_att>(*ropt, 2);
-        G->update_node(*ropt);
-    }
-
-    dsr_update_pose(res);
-    qInfo() << "DSR: stabilized — room node created, robot re-parented under room.";
-
-    // Stop symmetry / recovery checks — pose is confirmed stable.
-    room_concept_.set_relocalization_enabled(false);
-}
-
-///////////////////////////////////////////////////////////////////////////////
 Eigen::Affine2f SpecificWorker::best_available_pose(
     const std::optional<rc::RoomConcept::UpdateResult>& loc_res, bool have_loc) const
 {
@@ -487,9 +527,13 @@ void SpecificWorker::update_ui(const std::optional<rc::RoomConcept::UpdateResult
     if (ts_plot_sdf_) ts_plot_sdf_->add_point("sdf_mse", loc_res->sdf_mse);
     if (ts_plot_fe_)
     {
-        const std::string key = (params.OptimizerType == "LBFGS") ? "fe_lbfgs" : "fe_adam";
-        ts_plot_fe_->add_point(key, loc_res->final_loss);
-        ts_plot_fe_->add_point("fe_pred", loc_res->final_loss);
+        ts_plot_fe_->add_point("free_energy", loc_res->final_loss);
+
+        const float det_cov = std::max(1e-12f, std::abs(loc_res->covariance.determinant()));
+        float det_scaled = -std::log10(det_cov) / 10.f;  // map ~[1..1e-10] to [0..1]
+        if (det_scaled < 0.f) det_scaled = 0.f;
+        if (det_scaled > 1.f) det_scaled = 1.f;
+        ts_plot_fe_->add_point("cov_det_scaled", det_scaled);
     }
 }
 
@@ -678,6 +722,18 @@ void SpecificWorker::slot_mouse_rotate(QPointF scene_pos)
     room_concept_.push_command(rc::RoomConcept::CmdSetPose{rx, ry, theta});
     qInfo() << "[mouse] Rotate robot toward" << scene_pos.x() << scene_pos.y()
             << "-> theta" << qRadiansToDegrees(theta) << "deg";
+}
+
+///////////////////////////////////////////////////////////////////////////////
+void SpecificWorker::slot_show_camera_visualization()
+{
+    if (camera_viz_)
+    {
+        camera_viz_->update_frame();
+        camera_viz_->show();
+        camera_viz_->raise();
+        camera_viz_->activateWindow();
+    }
 }
 
 ///////////////////////////////////////////////////////////////////////////////

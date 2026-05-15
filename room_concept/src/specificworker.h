@@ -35,6 +35,7 @@
 #include "epistemic_controller.h"
 #include "viewer_2d.h"
 #include "timeseries_plot.h"
+#include "camera_visualizer.h"
 #include <atomic>
 #include <thread>
 #include <fps/fps.h>
@@ -143,6 +144,7 @@ class SpecificWorker : public GenericWorker
         std::unique_ptr<rc::Viewer2D> viewer_2d_;
         rc::TimeSeriesPlot* ts_plot_sdf_ = nullptr;
         rc::TimeSeriesPlot* ts_plot_fe_  = nullptr;
+        std::unique_ptr<rc::CameraVisualizer> camera_viz_;
         FPSCounter fps_counter_;
         Eigen::Affine2f best_available_pose(const std::optional<rc::RoomConcept::UpdateResult>&, bool) const;
         void update_ui(const std::optional<rc::RoomConcept::UpdateResult>& loc_res,
@@ -151,6 +153,7 @@ class SpecificWorker : public GenericWorker
         // ── Mouse-driven pose reset (Shift+Left = translate, Ctrl+Left = rotate) ──
         void slot_mouse_translate(QPointF scene_pos);
         void slot_mouse_rotate(QPointF scene_pos);
+        void slot_show_camera_visualization();
 
         // ── DSR graph state ────────────────────────────────────────────────────
         uint64_t dsr_robot_id_ = 0;

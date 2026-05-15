@@ -11,7 +11,7 @@ TimeSeriesPlot::TimeSeriesPlot(QWidget* parent)
     setMinimumHeight(80);
     setAutoFillBackground(true);
     QPalette pal = palette();
-    pal.setColor(QPalette::Window, QColor(30, 30, 30));
+    pal.setColor(QPalette::Window, QColor(255, 255, 255));
     setPalette(pal);
 
     clock_.start();
@@ -157,7 +157,7 @@ void TimeSeriesPlot::draw_axes(QPainter& p, float t_min, float t_max,
     const float pw = static_cast<float>(width()  - kLeft - kRight);
     const float ph = static_cast<float>(height() - kTop  - kBottom);
 
-    p.setPen(QPen(QColor(100, 100, 100), 1));
+    p.setPen(QPen(QColor(80, 80, 80), 1));
     // Y axis
     p.drawLine(kLeft, kTop, kLeft, kTop + static_cast<int>(ph));
     // X axis
@@ -165,7 +165,7 @@ void TimeSeriesPlot::draw_axes(QPainter& p, float t_min, float t_max,
                kLeft + static_cast<int>(pw), kTop + static_cast<int>(ph));
 
     p.setFont(QFont("Monospace", 7));
-    p.setPen(QColor(160, 160, 160));
+    p.setPen(QColor(20, 20, 20));
 
     // Y tick labels (5 ticks)
     for (int i = 0; i <= 4; ++i)
@@ -176,9 +176,9 @@ void TimeSeriesPlot::draw_axes(QPainter& p, float t_min, float t_max,
         p.drawText(QRect(0, y - 7, kLeft - 4, 14), Qt::AlignRight | Qt::AlignVCenter,
                    QString::number(val, 'f', 3));
         // grid line
-        p.setPen(QPen(QColor(60, 60, 60), 1, Qt::DotLine));
+        p.setPen(QPen(QColor(200, 200, 200), 1, Qt::DotLine));
         p.drawLine(kLeft, y, kLeft + static_cast<int>(pw), y);
-        p.setPen(QColor(160, 160, 160));
+        p.setPen(QColor(20, 20, 20));
     }
 
     // X tick labels — show relative seconds
@@ -229,7 +229,11 @@ void TimeSeriesPlot::draw_legend(QPainter& p) const
 
     // Semi-transparent background
     p.setPen(Qt::NoPen);
-    p.setBrush(QColor(30, 30, 30, 180));
+    p.setBrush(QColor(255, 255, 255, 220));
+    p.drawRoundedRect(bx, by, box_w, box_h, 3, 3);
+
+    p.setPen(QPen(QColor(180, 180, 180), 1));
+    p.setBrush(Qt::NoBrush);
     p.drawRoundedRect(bx, by, box_w, box_h, 3, 3);
 
     int y = by + pad;
@@ -241,7 +245,7 @@ void TimeSeriesPlot::draw_legend(QPainter& p) const
         p.drawRect(bx + pad, y + 2, swatch, swatch);
 
         // Label + value
-        p.setPen(QColor(220, 220, 220));
+        p.setPen(QColor(20, 20, 20));
         QString txt = QString::fromStdString(e.label) + QString(": %1").arg(e.last_val, 0, 'f', 4);
         p.drawText(bx + pad + swatch + pad, y, max_text_w, row_h,
                    Qt::AlignLeft | Qt::AlignVCenter, txt);

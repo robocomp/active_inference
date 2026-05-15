@@ -34,6 +34,7 @@ LIST(APPEND SOURCES
   ../src/timeseries_plot.cpp
   ../src/corner_detector.cpp
   ../src/rerun_logger.cpp
+  ../src/camera_visualizer.cpp
   ../src/custom_widget.h
 )
 
@@ -51,6 +52,7 @@ LIST(APPEND HEADERS
   ../src/timeseries_plot.h
   ../src/corner_detector.h
   ../src/rerun_logger.h
+  ../src/camera_visualizer.h
 )
 
 LIST(APPEND LIBS ${LIBS} "${TORCH_LIBRARIES}" tbb Qt6PrintSupport Qt6Xml

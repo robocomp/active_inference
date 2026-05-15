@@ -86,6 +86,7 @@ class Viewer2D : public QObject
         {
             const std::vector<Eigen::Vector3f>& lidar_points;
             Eigen::Affine2f display_pose;
+            Eigen::Matrix3f covariance = Eigen::Matrix3f::Identity();
             int max_lidar_points;
             bool have_loc;
             bool is_initialized;

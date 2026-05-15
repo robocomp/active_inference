@@ -26,9 +26,9 @@ name = "room_concept"
 # Use this if you only have one graph.
 configFile = ""
 domain = 0
-tree = true
+tree = false
 graph = true
-2d = true
+2d = false
 3d = false
 
 # --- Multiple Instance Template ---
