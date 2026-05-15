@@ -221,8 +221,8 @@ void SpecificWorker::initialize()
              viewer_2d_->draw_room_polygon(room_polygon, false);
     }
 
-    // ── DSR: create world + robot nodes ───────────────────────────────────
-    //dsr_init_graph();
+    // ── DSR: resolve existing graph node IDs ──────────────────────────────
+    dsr_init_graph();
 
     // ── Connect DSR signals ────────────────────────────────────────────────
     connect(G.get(), &DSR::DSRGraph::update_node_signal,      this, &SpecificWorker::modify_node_slot);
@@ -274,32 +274,32 @@ void SpecificWorker::compute()
         viewer_2d_->draw_corners({}, pose_for_draw);
 
     // ── DSR graph update ───────────────────────────────────────────────────
-    // if (have_loc)
-    // {
-    //     const float sdf_mse = loc_res->sdf_mse;
-    //     const float cov_tt  = (loc_res->covariance.rows() > 2 && loc_res->covariance.cols() > 2)
-    //                           ? loc_res->covariance(2, 2) : 1.f;
-    //     const bool stable   = (loc_res->iterations_used == 0)  // prediction early exit → pose is stable
-    //                           && sdf_mse < params.STABLE_SDF_MSE_MAX
-    //                           && cov_tt  < params.STABLE_COV_TT_MAX;
+    if (have_loc)
+    {
+        const float sdf_mse = loc_res->sdf_mse;
+        const float cov_tt  = (loc_res->covariance.rows() > 2 && loc_res->covariance.cols() > 2)
+                              ? loc_res->covariance(2, 2) : 1.f;
+        const bool stable   = (loc_res->iterations_used == 0)  // prediction early exit → pose is stable
+                              && sdf_mse < params.STABLE_SDF_MSE_MAX
+                              && cov_tt  < params.STABLE_COV_TT_MAX;
 
-    //     qInfo() << "Localization stable:" << stable
-    //           << "| sdf_mse:" << sdf_mse << "(" << params.STABLE_SDF_MSE_MAX << ")"
-    //           << "| cov_tt:" << cov_tt << "(" << params.STABLE_COV_TT_MAX << ")"
-    //           << "| iterations_used:" << loc_res->iterations_used;
-    //     if (!room_node_created_)
-    //     {
-    //         stable_frames_ = stable ? stable_frames_ + 1 : 0;
-    //         if (stable_frames_ >= params.STABLE_FRAMES_REQUIRED)
-    //             dsr_create_room_and_reparent(*loc_res);
-    //         else
-    //             dsr_update_pose(*loc_res);   // world→robot RT
-    //     }
-    //     else
-    //     {
-    //         dsr_update_pose(*loc_res);       // room→robot RT
-    //     }
-    // }
+        qInfo() << "Localization stable:" << stable
+              << "| sdf_mse:" << sdf_mse << "(" << params.STABLE_SDF_MSE_MAX << ")"
+              << "| cov_tt:" << cov_tt << "(" << params.STABLE_COV_TT_MAX << ")"
+              << "| iterations_used:" << loc_res->iterations_used;
+        if (!room_node_created_)
+        {
+            stable_frames_ = stable ? stable_frames_ + 1 : 0;
+            if (stable_frames_ >= params.STABLE_FRAMES_REQUIRED)
+                dsr_create_room_and_reparent(*loc_res);
+            else
+                dsr_update_pose(*loc_res);   // world→robot RT
+        }
+        else
+        {
+            dsr_update_pose(*loc_res);       // room→robot RT
+        }
+    }
 
     //update_ui(loc_res, pose_for_draw);
     fps_counter_.print("[Compute]", 2000);
@@ -309,56 +309,26 @@ void SpecificWorker::compute()
 void SpecificWorker::dsr_init_graph()
 {
     if (!G) { qWarning() << "dsr_init_graph: DSR graph not available"; return; }
-    const uint32_t agent_id = G->get_agent_id();
 
-    // Create or retrieve 'world' root node
-    if (auto wopt = G->get_node("world"); wopt.has_value())
+    // Resolve the root/world node by type (name may vary, e.g. "root", "world")
+    const auto root_nodes = G->get_nodes_by_type("root");
+    if (!root_nodes.empty())
     {
-        dsr_world_id_ = wopt->id();
+        dsr_world_id_ = root_nodes.front().id();
+        qInfo() << "DSR: found root node id=" << dsr_world_id_
+                << "name=" << root_nodes.front().name().c_str();
     }
-    else
-    {
-        DSR::Node world_node;
-        world_node.name("world");
-        world_node.type("world");
-        world_node.agent_id(agent_id);
-        G->add_or_modify_attrib_local<level_att>(world_node, 0);
-        G->add_or_modify_attrib_local<pos_x_att>(world_node, 0.f);
-        G->add_or_modify_attrib_local<pos_y_att>(world_node, 0.f);
-        auto id = G->insert_node(world_node);
-        if (!id.has_value()) { qWarning() << "dsr_init_graph: failed to insert world node"; return; }
-        dsr_world_id_ = id.value();
-        qInfo() << "DSR: created world node id=" << dsr_world_id_;
-    }
+    else { qWarning() << "dsr_init_graph: no 'root' type node found in graph"; return; }
 
-    // Create or retrieve 'robot' node
-    if (auto ropt = G->get_node("robot"); ropt.has_value())
+    // Resolve the robot node by type
+    const auto robot_nodes = G->get_nodes_by_type("robot");
+    if (!robot_nodes.empty())
     {
-        dsr_robot_id_ = ropt->id();
+        dsr_robot_id_ = robot_nodes.front().id();
+        qInfo() << "DSR: found robot node id=" << dsr_robot_id_
+                << "name=" << robot_nodes.front().name().c_str();
     }
-    else
-    {
-        DSR::Node robot_node;
-        robot_node.name("robot");
-        robot_node.type("robot");
-        robot_node.agent_id(agent_id);
-        G->add_or_modify_attrib_local<level_att>(robot_node, 1);
-        G->add_or_modify_attrib_local<pos_x_att>(robot_node, 100.f);
-        G->add_or_modify_attrib_local<pos_y_att>(robot_node, 0.f);
-        auto id = G->insert_node(robot_node);
-        if (!id.has_value()) { qWarning() << "dsr_init_graph: failed to insert robot node"; return; }
-        dsr_robot_id_ = id.value();
-        qInfo() << "DSR: created robot node id=" << dsr_robot_id_;
-    }
-
-    // Create identity RT edge world→robot
-    if (dsr_world_id_ && dsr_robot_id_)
-    {
-        auto rt    = G->get_rt_api();
-        auto wopt  = G->get_node(dsr_world_id_);
-        if (wopt.has_value())
-            rt->insert_or_assign_edge_RT(*wopt, dsr_robot_id_, {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f});
-    }
+    else { qWarning() << "dsr_init_graph: no 'robot' type node found in graph"; return; }
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -385,13 +355,7 @@ void SpecificWorker::dsr_update_pose(const rc::RoomConcept::UpdateResult& res)
     const float cov_tt = (res.covariance.rows() > 2 && res.covariance.cols() > 2)
                          ? res.covariance(2, 2) : 0.f;
 
-    auto edge_opt = DSR::RT_API::get_edge_RT(*parent_opt, dsr_robot_id_);
-    if (edge_opt.has_value())
-    {
-        G->runtime_checked_add_or_modify_attrib_local(*edge_opt, "loc_cov_xx", cov_xx);
-        G->runtime_checked_add_or_modify_attrib_local(*edge_opt, "loc_cov_tt", cov_tt);
-        G->insert_or_assign_edge(*edge_opt);
-    }
+    (void)cov_xx; (void)cov_tt;  // custom attributes not registered in DSR type system
 }
 
 ///////////////////////////////////////////////////////////////////////////////
