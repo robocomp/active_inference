@@ -233,7 +233,8 @@ void SpecificWorker::initialize()
     if (room_initialized_from_svg_polygon_)
     {
          room_polygon_for_viz = rc::SvgRoomLoader::load_polygon_points(
-             "beta_layout.svg", "room_contour", false, true);
+
+            "beta_layout.svg", "room_contour", false, true);
          if (room_polygon_for_viz.size() >= 3)
              viewer_2d_->draw_room_polygon(room_polygon_for_viz, false);
     }
@@ -271,9 +272,9 @@ void SpecificWorker::compute()
     const auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
 
-    const auto& [robot_pose_gt_, lidar_data_, obstacle_data_] = lidar_buffer.read(timestamp);
-    if (!lidar_data_.has_value())
-    { qWarning() << "No lidar data"; return; }
+    // const auto& [robot_pose_gt_, lidar_data_, obstacle_data_] = lidar_buffer.read(timestamp);
+    // if (!lidar_data_.has_value())
+    // { qWarning() << "No lidar data"; return; }
 
     const auto loc_res  = room_concept_.get_last_result();
     const bool have_loc = loc_res.has_value() && loc_res->ok;
@@ -351,6 +352,26 @@ void SpecificWorker::dsr_update_pose(const rc::RoomConcept::UpdateResult& res)
     const Eigen::Matrix2f R = res.robot_pose.linear();
     const Eigen::Vector2f t = res.robot_pose.translation();
     const float theta_room_to_robot = std::atan2(R(1, 0), R(0, 0));
+
+    // Diagnostic: print the raw SDF-optimized pose every N calls, with motion deltas.
+    {
+        static int print_count = 0;
+        static bool have_prev = false;
+        static float prev_x = 0.f, prev_y = 0.f, prev_yaw = 0.f;
+        if (++print_count % 5 == 0)
+        {
+            const float dx = have_prev ? (t.x() - prev_x) : 0.f;
+            const float dy = have_prev ? (t.y() - prev_y) : 0.f;
+            float dyaw = have_prev ? (theta_room_to_robot - prev_yaw) : 0.f;
+            while (dyaw > M_PI)  dyaw -= 2.f * M_PI;
+            while (dyaw < -M_PI) dyaw += 2.f * M_PI;
+            std::printf("[SDF_POSE] room_T_robot t=(%+.3f,%+.3f) yaw=%+.3frad (%+.1fdeg)  d=(%+.3f,%+.3f) dyaw=%+.3frad (%+.1fdeg)\n",
+                        t.x(), t.y(), theta_room_to_robot, theta_room_to_robot * 180.f / float(M_PI),
+                        dx, dy, dyaw, dyaw * 180.f / float(M_PI));
+            prev_x = t.x(); prev_y = t.y(); prev_yaw = theta_room_to_robot;
+            have_prev = true;
+        }
+    }
 
     // Convert room->robot estimate into robot->room when the room is a child of the robot.
     const Eigen::Vector2f t_robot_to_room = -(R.transpose() * t);
@@ -461,6 +482,7 @@ void SpecificWorker::dsr_create_room_and_reparent(const rc::RoomConcept::UpdateR
     DSR::Node room_node = DSR::Node::create<room_node_type>("room");
     room_node.attrs()[delimiting_polygon_x_str.data()] = DSR::Attribute{polygon_x, 0, 0};
     room_node.attrs()[delimiting_polygon_y_str.data()] = DSR::Attribute{polygon_y, 0, 0};
+    room_node.attrs()[room_height_str.data()] = DSR::Attribute{params.room_height, 0, 0};
     const auto room_id_opt = G->insert_node(room_node);
     if (!room_id_opt.has_value())
     {
@@ -786,9 +808,13 @@ void SpecificWorker::FullPoseEstimationPub_newFullPose(RoboCompFullPoseEstimatio
     };
 
     rc::OdometryReading odom;
+    // Webots reports adv with opposite sign of our body Y+ (forward) axis.
+    // Flipping one in-plane axis flips the right-hand-rule yaw sign as well,
+    // so pose.rot must also be negated to match the math-CCW convention used
+    // downstream (SDF rotation, Eigen::Rotation2Df, EKF Jacobian, DSR writer).
     odom.adv          = add_noise(-pose.adv);
-    odom.side         = add_noise(pose.side);
-    odom.rot          = add_noise(pose.rot);
+    odom.side         = add_noise( pose.side);
+    odom.rot          = add_noise(-pose.rot);
     odom.source_ts_ms = pose.timestamp;
     odom.recv_ts_ms   = static_cast<std::int64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(

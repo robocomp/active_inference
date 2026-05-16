@@ -102,6 +102,9 @@ class SpecificWorker : public GenericWorker
             int   STABLE_FRAMES_REQUIRED = 30;
             float STABLE_SDF_MSE_MAX     = 0.06f;   // sdf_mse must be below this
             float STABLE_COV_TT_MAX      = 0.001f;  // angular covariance must be below this
+
+            // Room height for DSR node attribute
+            float room_height = 2.4f;  // meters
         };
         Params params;
 
