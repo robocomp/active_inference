@@ -12,7 +12,7 @@ name = "robot_concept"
 # Use this if you only have one graph.
 configFile = "room.json"   
 domain = 0
-tree = true
+tree = false
 graph = true
 2d = true
 3d = false

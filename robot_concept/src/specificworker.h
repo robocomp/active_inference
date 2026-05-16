@@ -36,7 +36,6 @@
 #include "custom_widget.h"
 
 class UnifiedVoxelGrid;
-namespace rc { class VoxelViewer3D; }
 namespace rc { class VoxelOpenGLViewer; }
 
 /**
@@ -180,6 +179,11 @@ private:
 	};
 
 	void draw_detections(const cv::Mat& rgb_frame, const std::vector<SegDetection>& detections) const;
+	bool ensure_room_and_robot_ready(FPSCounter& compute_fps);
+	std::optional<Mat::RTMat> get_room_robot_transform(FPSCounter& compute_fps);
+	void log_room_robot_pose_periodic(const Mat::RTMat& room_T_robot) const;
+	void update_room_polygon_periodic();
+	std::vector<SegDetection> detect_segmentation(const RoboCompCameraRGBDSimple::TRGBD& rgbd);
 	void postprocess_yolo_detections(std::vector<SegDetection>& detections) const;
 	bool is_target_label(const std::string& label) const;
 	float detect_point_scale_once(const RoboCompCameraRGBDSimple::TRGBD& rgbd) const;
@@ -206,7 +210,6 @@ private:
 	// Custom widget for docking in the graph viewer
 	Custom_widget custom_widget;
 	std::unique_ptr<rc::VoxelOpenGLViewer> voxel_viewer_gl;
-	std::unique_ptr<rc::VoxelViewer3D> voxel_viewer_3d;
 
 	// Unified voxel grid — scene-level semantic map
 	std::unique_ptr<UnifiedVoxelGrid> voxel_grid;

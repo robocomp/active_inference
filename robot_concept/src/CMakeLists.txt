@@ -16,13 +16,6 @@ LIST(APPEND HEADERS
   ../src/yolo_seg_detector.h
 )
 
-if(TARGET Qt6::3DCore AND TARGET Qt6::3DRender AND TARGET Qt6::3DExtras)
-  LIST(APPEND SOURCES ../src/voxel_viewer_3d.cpp)
-  LIST(APPEND HEADERS ../src/voxel_viewer_3d.h)
-  LIST(APPEND LIBS Qt6::3DCore Qt6::3DRender Qt6::3DExtras)
-else()
-  message(WARNING "Qt3D targets not found; building without voxel_viewer_3d")
-endif()
 
 if(TARGET Qt6::OpenGL AND TARGET Qt6::OpenGLWidgets)
   LIST(APPEND SOURCES ../src/voxel_opengl_viewer.cpp)

@@ -2,6 +2,7 @@
 
 #include <QHash>
 #include <QDebug>
+#include <QKeyEvent>
 #include <QMouseEvent>
 #include <QSurfaceFormat>
 #include <QWheelEvent>
@@ -46,7 +47,17 @@ void VoxelOpenGLViewer::update_voxels(std::span<const QVector3D> positions,
     for (std::size_t i = 0; i < positions.size(); ++i)
     {
         const QVector3D p = positions[i];
-        const QVector3D mapped{p.x(), p.z(), p.y()};
+        // RoboComp room frame -> OpenGL: X=X, Z(height)->Y, Y(depth)->Z.
+        const float fx = voxel_flip_x_ ? -1.f : 1.f;
+        const float fy = voxel_flip_y_ ? -1.f : 1.f;
+        const QVector3D mapped{fx * p.x(), p.z(), fy * p.y()};
+
+        // Diagnostic: print first 5 voxels every 60 calls.
+        static int call_count = 0;
+        if (i == 0) ++call_count;
+        if (call_count % 60 == 1 && i < 5)
+            printf("[VoxelDiag] raw[%zu] room=(x=%.3f y=%.3f z=%.3f)  opengl=(x=%.3f y=%.3f z=%.3f)\n",
+                   i, p.x(), p.y(), p.z(), mapped.x(), mapped.y(), mapped.z());
 
         QColor c = QColor(140, 145, 155);
         if (!categories.empty() && i < categories.size())
@@ -75,10 +86,14 @@ void VoxelOpenGLViewer::update_voxels(std::span<const QVector3D> positions,
             bb_max.setY(std::max(bb_max.y(), v.py));
             bb_max.setZ(std::max(bb_max.z(), v.pz));
         }
-        target_ = 0.5f * (bb_min + bb_max);
         const float radius = 0.5f * (bb_max - bb_min).length();
         if (!first_cloud_received_)
         {
+            // Only set target/distance once from the very first cloud, so the
+            // camera stays stable as the robot moves and voxels accumulate.
+            // If a room polygon is already loaded its centroid will override
+            // this in rebuild_polygon_locked_().
+            target_ = 0.5f * (bb_min + bb_max);
             distance_ = std::clamp(2.8f * std::max(0.25f, radius), 1.5f, 80.0f);
             first_cloud_received_ = true;
         }
@@ -95,23 +110,84 @@ void VoxelOpenGLViewer::update_voxels(std::span<const QVector3D> positions,
 void VoxelOpenGLViewer::update_room_polygon(std::span<const float> polygon_x,
                                             std::span<const float> polygon_y)
 {
-    std::vector<QVector3D> polygon;
-    const std::size_t n = std::min(polygon_x.size(), polygon_y.size());
-    polygon.reserve(n);
+    // Backward compatibility: only floor
+    update_room_polygon_dual(polygon_x, polygon_y, 0.f);
+}
 
-    for (std::size_t i = 0; i < n; ++i)
-    {
-        // Match voxel mapping used in update_voxels: world (x, y, h) -> GL (x, h, y).
-        // Room polygon is floor (h=0), with source coordinates (x, y).
-        const QVector3D point{polygon_x[i], 0.f, polygon_y[i]};
-        polygon.push_back(point);
-    }
-
+void VoxelOpenGLViewer::update_room_polygon_dual(std::span<const float> polygon_x,
+                                                 std::span<const float> polygon_y,
+                                                 float height)
+{
     {
         std::scoped_lock lk(room_polygon_mutex_);
-        room_polygon_ = std::move(polygon);
+        raw_polygon_x_.assign(polygon_x.begin(), polygon_x.end());
+        raw_polygon_y_.assign(polygon_y.begin(), polygon_y.end());
+        raw_polygon_height_ = height;
+        rebuild_polygon_locked_();
     }
     update();
+}
+
+void VoxelOpenGLViewer::set_robot_pose(float x, float y, float theta)
+{
+    {
+        std::scoped_lock lk(robot_pose_mutex_);
+        robot_x_ = x;
+        robot_y_ = y;
+        robot_theta_ = theta;
+        have_robot_pose_ = true;
+    }
+    update();
+}
+
+void VoxelOpenGLViewer::rebuild_polygon_locked_()
+{
+    // Apply polygon_rotation_quadrants_ * 90deg rotation around the room Z axis
+    // (which maps to OpenGL Y axis after our x,z,y mapping below).
+    const int q = ((polygon_rotation_quadrants_ % 4) + 4) % 4;
+    const float sx = polygon_flip_x_ ? -1.f : 1.f;
+    const float sy = polygon_flip_y_ ? -1.f : 1.f;
+    auto rot = [q, sx, sy](float x, float y) -> std::pair<float,float> {
+        x *= sx; y *= sy;
+        switch (q) {
+            case 0: return {x, y};
+            case 1: return {-y, x};
+            case 2: return {-x, -y};
+            case 3: return {y, -x};
+        }
+        return {x, y};
+    };
+
+    const std::size_t n = std::min(raw_polygon_x_.size(), raw_polygon_y_.size());
+    std::vector<QVector3D> floor, ceiling;
+    floor.reserve(n);
+    ceiling.reserve(n);
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        auto [rx, ry] = rot(raw_polygon_x_[i], raw_polygon_y_[i]);
+        floor.emplace_back(rx, 0.f, ry);
+        ceiling.emplace_back(rx, raw_polygon_height_, ry);
+    }
+
+    printf("[PolygonDiag] rotation_quadrants=%d (=%d deg), height=%.3f\n",
+           q, q * 90, raw_polygon_height_);
+    printf("[PolygonDiag] flip_x=%d flip_y=%d\n", polygon_flip_x_ ? 1 : 0, polygon_flip_y_ ? 1 : 0);
+    for (std::size_t i = 0; i < n; ++i)
+        printf("[PolygonDiag] floor[%zu]  OpenGL=(x=%.3f, y=%.3f, z=%.3f)\n", i, floor[i].x(), floor[i].y(), floor[i].z());
+
+    // Anchor the camera target to the room polygon centroid so the scene
+    // stays centered regardless of where the robot/voxels are.
+    if (!room_polygon_floor_.empty() || !floor.empty())
+    {
+        const auto& poly = floor.empty() ? room_polygon_floor_ : floor;
+        QVector3D centroid{0.f, 0.f, 0.f};
+        for (const auto& p : poly) centroid += p;
+        if (!poly.empty()) centroid /= static_cast<float>(poly.size());
+        target_ = centroid;
+    }
+
+    room_polygon_floor_ = std::move(floor);
+    room_polygon_ceiling_ = std::move(ceiling);
 }
 
 void VoxelOpenGLViewer::initializeGL()
@@ -300,6 +376,8 @@ void VoxelOpenGLViewer::paintGL()
     if (n_vertices == 0)
         return;
 
+    const bool draw_voxels = show_voxels_;
+
     const float cp = std::cos(pitch_);
     const QVector3D eye(
         target_.x() + distance_ * cp * std::sin(yaw_),
@@ -322,7 +400,8 @@ void VoxelOpenGLViewer::paintGL()
 
     vao_.bind();
 
-    glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(n_vertices));
+    if (draw_voxels)
+        glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(n_vertices));
 
     // Compatibility fallback: if shader path silently fails on some drivers,
     // draw a second pass using fixed-function calls when available.
@@ -343,41 +422,213 @@ void VoxelOpenGLViewer::paintGL()
         glEnd();
     }
 
-    // Draw room polygon outline
-    std::vector<QVector3D> local_polygon;
+    // Draw room polygon outlines (floor and ceiling)
+    std::vector<QVector3D> local_floor, local_ceiling;
     {
         std::scoped_lock lk(room_polygon_mutex_);
-        if (!room_polygon_.empty())
-            local_polygon = room_polygon_;
+        local_floor = room_polygon_floor_;
+        local_ceiling = room_polygon_ceiling_;
     }
 
-    if (!local_polygon.empty())
+    // Draw a floor grid on y=0 for orientation.
     {
-        std::vector<Vertex> line_vertices;
-        std::vector<Vertex> corner_vertices;
-        line_vertices.reserve(local_polygon.size());
-        corner_vertices.reserve(local_polygon.size());
-        for (const auto& p : local_polygon)
+        float min_x = 0.f, max_x = 0.f, min_z = 0.f, max_z = 0.f;
+        bool have_bounds = false;
+
+        if (!local_floor.empty())
         {
-            line_vertices.push_back(Vertex{p.x(), p.y(), p.z(), 1.0f, 1.0f, 1.0f});
-            corner_vertices.push_back(Vertex{p.x(), p.y(), p.z(), 1.0f, 0.5f, 0.0f});
+            min_x = max_x = local_floor.front().x();
+            min_z = max_z = local_floor.front().z();
+            for (const auto& p : local_floor)
+            {
+                min_x = std::min(min_x, p.x());
+                max_x = std::max(max_x, p.x());
+                min_z = std::min(min_z, p.z());
+                max_z = std::max(max_z, p.z());
+            }
+            have_bounds = true;
+        }
+        else if (!draw_vertices.empty())
+        {
+            min_x = max_x = draw_vertices.front().px;
+            min_z = max_z = draw_vertices.front().pz;
+            for (const auto& v : draw_vertices)
+            {
+                min_x = std::min(min_x, v.px);
+                max_x = std::max(max_x, v.px);
+                min_z = std::min(min_z, v.pz);
+                max_z = std::max(max_z, v.pz);
+            }
+            have_bounds = true;
         }
 
+        if (have_bounds)
+        {
+            const float margin = 1.0f;
+            min_x -= margin;
+            max_x += margin;
+            min_z -= margin;
+            max_z += margin;
+
+            constexpr float major_step = 1.0f;
+            constexpr float minor_step = 0.5f;
+
+            std::vector<Vertex> grid_vertices;
+            grid_vertices.reserve(2048);
+
+            auto push_grid = [&](float x0, float y0, float z0, float x1, float y1, float z1, const QColor& c)
+            {
+                grid_vertices.push_back(Vertex{x0, y0, z0, c.redF(), c.greenF(), c.blueF()});
+                grid_vertices.push_back(Vertex{x1, y1, z1, c.redF(), c.greenF(), c.blueF()});
+            };
+
+            const float x_minor_start = std::floor(min_x / minor_step) * minor_step;
+            const float x_minor_end   = std::ceil(max_x / minor_step) * minor_step;
+            const float z_minor_start = std::floor(min_z / minor_step) * minor_step;
+            const float z_minor_end   = std::ceil(max_z / minor_step) * minor_step;
+
+            const QColor minor_col(70, 75, 82);
+            const QColor major_col(110, 120, 130);
+            const QColor axis_x_col(220, 70, 70);
+            const QColor axis_z_col(70, 180, 220);
+
+            for (float x = x_minor_start; x <= x_minor_end + 1e-4f; x += minor_step)
+            {
+                const bool is_major = std::fabs(std::fmod(x, major_step)) < 1e-4f;
+                const QColor c = std::fabs(x) < 1e-4f ? axis_z_col : (is_major ? major_col : minor_col);
+                push_grid(x, 0.f, z_minor_start, x, 0.f, z_minor_end, c);
+            }
+
+            for (float z = z_minor_start; z <= z_minor_end + 1e-4f; z += minor_step)
+            {
+                const bool is_major = std::fabs(std::fmod(z, major_step)) < 1e-4f;
+                const QColor c = std::fabs(z) < 1e-4f ? axis_x_col : (is_major ? major_col : minor_col);
+                push_grid(x_minor_start, 0.f, z, x_minor_end, 0.f, z, c);
+            }
+
+            glDisable(GL_DEPTH_TEST);
+            room_vao_.bind();
+            room_vbo_.bind();
+            room_vbo_.allocate(grid_vertices.data(), static_cast<int>(grid_vertices.size() * sizeof(Vertex)));
+            program_.setUniformValue("u_round_points", 0);
+            glLineWidth(1.2f);
+            glDrawArrays(GL_LINES, 0, static_cast<GLsizei>(grid_vertices.size()));
+            room_vbo_.release();
+            room_vao_.release();
+            glEnable(GL_DEPTH_TEST);
+        }
+    }
+
+    auto draw_outline = [&](const std::vector<QVector3D>& poly, const QColor& line_col, const QColor& corner_col)
+    {
+        if (poly.empty()) return;
+        std::vector<Vertex> line_vertices, corner_vertices;
+        line_vertices.reserve(poly.size());
+        corner_vertices.reserve(poly.size());
+        for (const auto& p : poly)
+        {
+            line_vertices.push_back(Vertex{p.x(), p.y(), p.z(),
+                                           line_col.redF(), line_col.greenF(), line_col.blueF()});
+            corner_vertices.push_back(Vertex{p.x(), p.y(), p.z(),
+                                             corner_col.redF(), corner_col.greenF(), corner_col.blueF()});
+        }
         glDisable(GL_DEPTH_TEST);
         room_vao_.bind();
         room_vbo_.bind();
-
         room_vbo_.allocate(line_vertices.data(), static_cast<int>(line_vertices.size() * sizeof(Vertex)));
         program_.setUniformValue("u_round_points", 0);
         glLineWidth(4.0f);
         glDrawArrays(GL_LINE_LOOP, 0, static_cast<GLsizei>(line_vertices.size()));
-
         room_vbo_.allocate(corner_vertices.data(), static_cast<int>(corner_vertices.size() * sizeof(Vertex)));
         program_.setUniformValue("u_round_points", 1);
         program_.setUniformValue("u_point_size", 12.0f);
         glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(corner_vertices.size()));
         program_.setUniformValue("u_point_size", 4.5f);
+        room_vbo_.release();
+        room_vao_.release();
+        glEnable(GL_DEPTH_TEST);
+    };
 
+    // Floor: white, orange corners. Ceiling: cyan, blue corners.
+    draw_outline(local_floor, QColor(255,255,255), QColor(255,128,0));
+    draw_outline(local_ceiling, QColor(0,255,255), QColor(0,128,255));
+
+    // Draw vertical lines connecting floor and ceiling corners
+    if (!local_floor.empty() && local_floor.size() == local_ceiling.size())
+    {
+        std::vector<Vertex> vertical_lines;
+        vertical_lines.reserve(local_floor.size() * 2);
+        QColor vert_col(255,0,255); // magenta
+        for (std::size_t i = 0; i < local_floor.size(); ++i)
+        {
+            const auto& f = local_floor[i];
+            const auto& c = local_ceiling[i];
+            vertical_lines.push_back(Vertex{f.x(), f.y(), f.z(), vert_col.redF(), vert_col.greenF(), vert_col.blueF()});
+            vertical_lines.push_back(Vertex{c.x(), c.y(), c.z(), vert_col.redF(), vert_col.greenF(), vert_col.blueF()});
+        }
+        glDisable(GL_DEPTH_TEST);
+        room_vao_.bind();
+        room_vbo_.bind();
+        room_vbo_.allocate(vertical_lines.data(), static_cast<int>(vertical_lines.size() * sizeof(Vertex)));
+        program_.setUniformValue("u_round_points", 0);
+        glLineWidth(2.5f);
+        glDrawArrays(GL_LINES, 0, static_cast<GLsizei>(vertical_lines.size()));
+        room_vbo_.release();
+        room_vao_.release();
+        glEnable(GL_DEPTH_TEST);
+    }
+
+    // Draw robot pose marker: dot + forward arrow on the floor (y=0).
+    bool have_pose = false;
+    float rx = 0.f, ry_room = 0.f, rtheta = 0.f;
+    {
+        std::scoped_lock lk(robot_pose_mutex_);
+        have_pose = have_robot_pose_;
+        rx = robot_x_;
+        ry_room = robot_y_;
+        rtheta = robot_theta_;
+    }
+    if (have_pose)
+    {
+        // Map room frame (x, y) to OpenGL (-x, 0, y) to match the existing
+        // viewer convention used elsewhere in the project.
+        const float ogl_x = -rx;
+        const float ogl_z = ry_room;
+        const float ogl_y = 0.02f; // slightly above the floor so it's visible
+        const float arrow_len = 0.6f;
+        // RoboComp convention: forward in robot frame is +Y, right is +X.
+        // theta is math-CCW rotation; forward_room = R(theta) * (0, +L) = (-sin*L, cos*L).
+        // After mirroring room X into OpenGL X, the arrow X delta flips sign too.
+        const float fx     =  std::sin(rtheta) * arrow_len;
+        const float fy_room =  std::cos(rtheta) * arrow_len;
+
+        std::vector<Vertex> robot_lines;
+        const QColor body_col(255, 220, 0);   // yellow body line (cross)
+        const QColor arrow_col(0, 255, 0);    // green forward arrow
+        // Cross marker at robot position (so the dot is clearly visible regardless of point size).
+        robot_lines.push_back(Vertex{ogl_x - 0.15f, ogl_y, ogl_z, body_col.redF(), body_col.greenF(), body_col.blueF()});
+        robot_lines.push_back(Vertex{ogl_x + 0.15f, ogl_y, ogl_z, body_col.redF(), body_col.greenF(), body_col.blueF()});
+        robot_lines.push_back(Vertex{ogl_x, ogl_y, ogl_z - 0.15f, body_col.redF(), body_col.greenF(), body_col.blueF()});
+        robot_lines.push_back(Vertex{ogl_x, ogl_y, ogl_z + 0.15f, body_col.redF(), body_col.greenF(), body_col.blueF()});
+        // Forward arrow.
+        robot_lines.push_back(Vertex{ogl_x, ogl_y, ogl_z, arrow_col.redF(), arrow_col.greenF(), arrow_col.blueF()});
+        robot_lines.push_back(Vertex{ogl_x + fx, ogl_y, ogl_z + fy_room, arrow_col.redF(), arrow_col.greenF(), arrow_col.blueF()});
+
+        glDisable(GL_DEPTH_TEST);
+        room_vao_.bind();
+        room_vbo_.bind();
+        room_vbo_.allocate(robot_lines.data(), static_cast<int>(robot_lines.size() * sizeof(Vertex)));
+        program_.setUniformValue("u_round_points", 0);
+        glLineWidth(4.0f);
+        glDrawArrays(GL_LINES, 0, static_cast<GLsizei>(robot_lines.size()));
+
+        // Center point as a large round dot.
+        Vertex dot{ogl_x, ogl_y, ogl_z, 1.0f, 1.0f, 1.0f};
+        room_vbo_.allocate(&dot, sizeof(Vertex));
+        program_.setUniformValue("u_round_points", 1);
+        program_.setUniformValue("u_point_size", 14.0f);
+        glDrawArrays(GL_POINTS, 0, 1);
+        program_.setUniformValue("u_point_size", 4.5f);
         room_vbo_.release();
         room_vao_.release();
         glEnable(GL_DEPTH_TEST);
@@ -425,6 +676,70 @@ void VoxelOpenGLViewer::wheelEvent(QWheelEvent* event)
     distance_ = std::clamp(distance_ * scale, 0.2f, 250.0f);
     update();
     QOpenGLWidget::wheelEvent(event);
+}
+
+void VoxelOpenGLViewer::keyPressEvent(QKeyEvent* event)
+{
+    if (event->key() == Qt::Key_R)
+    {
+        const bool reverse = event->modifiers() & Qt::ShiftModifier;
+        {
+            std::scoped_lock lk(room_polygon_mutex_);
+            polygon_rotation_quadrants_ = ((polygon_rotation_quadrants_ + (reverse ? -1 : 1)) % 4 + 4) % 4;
+            rebuild_polygon_locked_();
+        }
+        printf("[PolygonDiag] R-key: rotation set to %d deg\n", polygon_rotation_quadrants_ * 90);
+        update();
+        event->accept();
+        return;
+    }
+    if (event->key() == Qt::Key_F)
+    {
+        {
+            std::scoped_lock lk(room_polygon_mutex_);
+            polygon_flip_x_ = !polygon_flip_x_;
+            rebuild_polygon_locked_();
+        }
+        printf("[PolygonDiag] F-key: flip_x = %d\n", polygon_flip_x_ ? 1 : 0);
+        update();
+        event->accept();
+        return;
+    }
+    if (event->key() == Qt::Key_G)
+    {
+        {
+            std::scoped_lock lk(room_polygon_mutex_);
+            polygon_flip_y_ = !polygon_flip_y_;
+            rebuild_polygon_locked_();
+        }
+        printf("[PolygonDiag] G-key: flip_y = %d\n", polygon_flip_y_ ? 1 : 0);
+        update();
+        event->accept();
+        return;
+    }
+    if (event->key() == Qt::Key_V)
+    {
+        voxel_flip_x_ = !voxel_flip_x_;
+        printf("[VoxelDiag] V-key: voxel_flip_x = %d (next cloud update will apply)\n", voxel_flip_x_ ? 1 : 0);
+        event->accept();
+        return;
+    }
+    if (event->key() == Qt::Key_B)
+    {
+        voxel_flip_y_ = !voxel_flip_y_;
+        printf("[VoxelDiag] B-key: voxel_flip_y = %d (next cloud update will apply)\n", voxel_flip_y_ ? 1 : 0);
+        event->accept();
+        return;
+    }
+    if (event->key() == Qt::Key_H)
+    {
+        show_voxels_ = !show_voxels_;
+        printf("[VoxelDiag] H-key: show_voxels = %d\n", show_voxels_ ? 1 : 0);
+        update();
+        event->accept();
+        return;
+    }
+    QOpenGLWidget::keyPressEvent(event);
 }
 
 QColor VoxelOpenGLViewer::color_for_category(const std::string& category)

@@ -21,7 +21,6 @@
 #undef emit
 #endif
 #include "unified_voxel_grid.h"
-#include "voxel_viewer_3d.h"
 #include "voxel_opengl_viewer.h"
 #include <QVBoxLayout>
 #include <print>
@@ -176,24 +175,66 @@ void SpecificWorker::initialize()
 }
 
 
+
 void SpecificWorker::compute()
 {
 	static FPSCounter compute_fps;
-    
 	const auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
+		std::chrono::system_clock::now().time_since_epoch()).count();
 
-	// read RGBD data from the buffer
+	// Read latest RGDB frame
 	const auto &[rgbd_opt] = rgbd_buffer.read(timestamp);
-	if(not rgbd_opt.has_value())
-	{ qWarning() << "No RGBD data available at timestamp" << timestamp; return;}
-	const auto &rgbd = rgbd_opt.value();
-
-	if (room_node_name_.empty())
+	if (!rgbd_opt.has_value())
 	{
+		qWarning() << "No RGBD data available at timestamp" << timestamp;
+		return;
+	}
+	const auto& rgbd = rgbd_opt.value();
+
+	if (!ensure_room_and_robot_ready(compute_fps))
+		return;
+
+	auto room_T_robot = get_room_robot_transform(compute_fps);
+	if (!room_T_robot.has_value())
+		return;
+
+	log_room_robot_pose_periodic(room_T_robot.value());
+	if (!room_rt_ready_logged_)
+	{
+		std::println("[Compute] RT edge robot<->room found. Voxelization now running in room frame.");
+		room_rt_ready_logged_ = true;
+		room_rt_wait_logged_ = false;
+	}
+
+	// Push the robot pose (in room frame) to the GL viewer so the user can
+	// visually verify polygon/voxels/robot are all coherent in the same frame.
+	if (voxel_viewer_gl)
+	{
+		const auto& T = room_T_robot.value();
+		const auto& t = T.translation();
+		const Eigen::Matrix3d R = T.rotation();
+		const float theta = static_cast<float>(std::atan2(R(1, 0), R(0, 0)));
+		voxel_viewer_gl->set_robot_pose(static_cast<float>(t.x()), static_cast<float>(t.y()), theta);
+	}
+
+	update_room_polygon_periodic();
+	auto detections = detect_segmentation(rgbd);
+
+	track_association_max_distance_m = params.TRACK_ASSOCIATION_MAX_DISTANCE_M;
+	track_max_missed_frames = params.TRACK_MAX_MISSED_FRAMES;
+	update_voxel_grid_from_rgbd(rgbd, detections, room_T_robot.value());
+
+	compute_fps.print("[Compute]", 2000);
+}
+
+//////////////////////////////////////////////////////////////////////////////
+
+bool SpecificWorker::ensure_room_and_robot_ready(FPSCounter& compute_fps)
+{
+	if (room_node_name_.empty())
 		if (const auto room_nodes = G->get_nodes_by_type("room"); !room_nodes.empty())
 			room_node_name_ = room_nodes.front().name();
-	}
+
 	if (room_node_name_.empty())
 	{
 		if (!room_wait_logged_)
@@ -204,13 +245,13 @@ void SpecificWorker::compute()
 			room_ready_logged_ = false;
 		}
 		compute_fps.print("[Compute]", 2000);
-		return;
+		return false;
 	}
+
 	if (robot_node_name_.empty())
-	{
 		if (const auto robot_nodes = G->get_nodes_by_type("robot"); !robot_nodes.empty())
 			robot_node_name_ = robot_nodes.front().name();
-	}
+
 	if (robot_node_name_.empty())
 	{
 		if (!room_wait_logged_)
@@ -220,18 +261,22 @@ void SpecificWorker::compute()
 			room_ready_logged_ = false;
 		}
 		compute_fps.print("[Compute]", 2000);
-		return;
+		return false;
 	}
-	const std::string& room_name = room_node_name_;
-	const std::string& robot_name = robot_node_name_;
+
 	if (!room_ready_logged_)
 	{
 		qInfo() << "Room node found in DSR graph. Voxelization enabled.";
-		std::println("[VoxelGate] Room found: '{}'  Robot found: '{}'", room_name, robot_name);
+		std::println("[VoxelGate] Room found: '{}'  Robot found: '{}'", room_node_name_, robot_node_name_);
 		room_ready_logged_ = true;
 		room_wait_logged_ = false;
 	}
 
+	return true;
+}
+
+std::optional<Mat::RTMat> SpecificWorker::get_room_robot_transform(FPSCounter& compute_fps)
+{
 	if (!inner_eigen_api)
 	{
 		if (!room_rt_wait_logged_)
@@ -242,68 +287,78 @@ void SpecificWorker::compute()
 			room_rt_ready_logged_ = false;
 		}
 		compute_fps.print("[Compute]", 2000);
-		return;
+		return std::nullopt;
 	}
 
-	auto room_T_robot = inner_eigen_api->get_transformation_matrix(room_name, robot_name);
+	auto room_T_robot = inner_eigen_api->get_transformation_matrix(room_node_name_, robot_node_name_);
 	if (!room_T_robot.has_value())
 	{
 		if (!room_rt_wait_logged_)
 		{
 			qWarning() << "robot->room RTMat not available in InnerEigen API. Voxelization paused until transform is available.";
-			std::println("[VoxelGate] No RTMat for '{}' <- '{}'. Voxelization paused.", room_name, robot_name);
+			std::println("[VoxelGate] No RTMat for '{}' <- '{}'. Voxelization paused.", room_node_name_, robot_node_name_);
 			room_rt_wait_logged_ = true;
 			room_rt_ready_logged_ = false;
 		}
 		compute_fps.print("[Compute]", 2000);
-		return;
-	}
-	{
-		static int pose_log_count = 0;
-		if (++pose_log_count % 10 == 0)
-		{
-			const auto& T = room_T_robot.value();
-			const auto& t = T.translation();
-			const Eigen::Vector3d rpy = T.rotation().eulerAngles(0, 1, 2);
-			std::println("[RT {}<-{}] t=({:.3f}, {:.3f}, {:.3f}) rpy_xyz=({:.3f}, {:.3f}, {:.3f})",
-			             room_name, robot_name, t.x(), t.y(), t.z(), rpy.x(), rpy.y(), rpy.z());
-		}
-	}
-	if (!room_rt_ready_logged_)
-	{
-		std::println("[Compute] RT edge robot<->room found. Voxelization now running in room frame.");
-		room_rt_ready_logged_ = true;
-		room_rt_wait_logged_ = false;
+		return std::nullopt;
 	}
 
-	// Try to fetch room polygon periodically (every 50 compute cycles)
+	return room_T_robot;
+}
+
+void SpecificWorker::log_room_robot_pose_periodic(const Mat::RTMat& room_T_robot) const
+{
+	static int pose_log_count = 0;
+	if (++pose_log_count % 10 != 0)
+		return;
+
+	const auto& t = room_T_robot.translation();
+	const Eigen::Matrix3d R = room_T_robot.rotation();
+	const double yaw = std::atan2(R(1, 0), R(0, 0));
+	const Eigen::Vector3d rpy = R.eulerAngles(0, 1, 2);
+	// Print yaw separately (more meaningful than rpy here).
+	std::println("[RT {}<-{}] t=({:.3f}, {:.3f}, {:.3f}) yaw={:.3f}rad ({:.1f}deg) rpy_xyz=({:.3f}, {:.3f}, {:.3f})",
+	             room_node_name_, robot_node_name_, t.x(), t.y(), t.z(),
+	             yaw, yaw * 180.0 / M_PI, rpy.x(), rpy.y(), rpy.z());
+
+	// Motion delta tracking (since previous log).
+	static bool have_prev = false;
+	static double prev_x = 0.0, prev_y = 0.0, prev_yaw = 0.0;
+	if (have_prev)
+	{
+		const double dx = t.x() - prev_x;
+		const double dy = t.y() - prev_y;
+		double dyaw = yaw - prev_yaw;
+		while (dyaw > M_PI)  dyaw -= 2.0 * M_PI;
+		while (dyaw < -M_PI) dyaw += 2.0 * M_PI;
+		if (std::abs(dx) > 0.01 || std::abs(dy) > 0.01 || std::abs(dyaw) > 0.01)
+			std::println("[RT motion]    d=({:+.3f}, {:+.3f}) m   dyaw={:+.3f}rad ({:+.1f}deg)",
+			             dx, dy, dyaw, dyaw * 180.0 / M_PI);
+	}
+	prev_x = t.x(); prev_y = t.y(); prev_yaw = yaw;
+	have_prev = true;
+}
+
+void SpecificWorker::update_room_polygon_periodic()
+{
 	static int polygon_check_count = 0;
 	if (++polygon_check_count % 50 == 0)
 		update_room_polygon_in_viewers();
-
-	// Process RGB image through YOLO-seg
-	std::vector<SegDetection> detections;
-	if (yolo_detector.has_value() && rgbd.image.width > 0 && rgbd.image.height > 0)
-	{
-		// Reconstruct cv::Mat from the raw byte vector (RGB, 3 channels)
-		const cv::Mat rgb_frame(rgbd.image.height, rgbd.image.width, CV_8UC3,
-			const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(rgbd.image.image.data())));
-		detections = yolo_detector->detect(rgb_frame, /*is_rgb=*/true);
-		postprocess_yolo_detections(detections);
-		//draw_detections(rgb_frame, detections);
-		// for (const auto& det : detections)
-		// 	std::println("Detected {} with confidence {:.3f}", det.label, det.confidence);
-	}
-
-	// Update association params from config (Params)
-	track_association_max_distance_m = params.TRACK_ASSOCIATION_MAX_DISTANCE_M;
-	track_max_missed_frames = params.TRACK_MAX_MISSED_FRAMES;
-	update_voxel_grid_from_rgbd(rgbd, detections, room_T_robot.value());
-
-	compute_fps.print("[Compute]", 2000);
 }
 
-//////////////////////////////////////////////////////////////////////////////
+std::vector<SegDetection> SpecificWorker::detect_segmentation(const RoboCompCameraRGBDSimple::TRGBD& rgbd)
+{
+	if (!yolo_detector.has_value() || rgbd.image.width <= 0 || rgbd.image.height <= 0)
+		return {};
+
+	const cv::Mat rgb_frame(rgbd.image.height, rgbd.image.width, CV_8UC3,
+		const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(rgbd.image.image.data())));
+	auto detections = yolo_detector->detect(rgb_frame, /*is_rgb=*/true);
+	postprocess_yolo_detections(detections);
+	return detections;
+}
+
 
 // YOLO postprocessing logic 
 void SpecificWorker::postprocess_yolo_detections(std::vector<SegDetection>& detections) const
@@ -413,6 +468,25 @@ void SpecificWorker::update_voxel_grid_from_rgbd(const RoboCompCameraRGBDSimple:
 
 		if (!selected_points_robot.empty())
 		{
+			// The RGBD points arrive in a robot-aligned frame (X right, Y forward, Z up)
+			// with the camera origin, so we must use the robot orientation plus the
+			// camera position in room. Applying the zed mount yaw here rotates the cloud
+			// an extra 90 degrees relative to the robot marker and room polygon.
+			const auto room_T_robot_opt = inner_eigen_api->get_transformation_matrix(room_node_name_, robot_node_name_);
+			if (!room_T_robot_opt.has_value())
+			{
+				std::println("[VoxelGate] No RTMat for '{}' <- '{}'. Skipping frame.", room_node_name_, robot_node_name_);
+				return;
+			}
+			const auto room_T_camera_opt = inner_eigen_api->get_transformation_matrix(room_node_name_, "zed");
+			if (!room_T_camera_opt.has_value())
+			{
+				std::println("[VoxelGate] No RTMat for '{}' <- 'zed'. Skipping frame.", room_node_name_);
+				return;
+			}
+			const Mat::RTMat& room_T_robot = room_T_robot_opt.value();
+			const Mat::RTMat& room_T_camera = room_T_camera_opt.value();
+
 			const std::size_t n_sel = selected_points_robot.size();
 			Eigen::Matrix<double, 3, Eigen::Dynamic> pts_robot(3, static_cast<Eigen::Index>(n_sel));
 			for (std::size_t i = 0; i < n_sel; ++i)
@@ -423,7 +497,7 @@ void SpecificWorker::update_voxel_grid_from_rgbd(const RoboCompCameraRGBDSimple:
 			}
 
 			Eigen::Matrix<double, 3, Eigen::Dynamic> pts_room =
-				(room_T_robot.linear() * pts_robot).colwise() + room_T_robot.translation();
+				(room_T_robot.linear() * pts_robot).colwise() + room_T_camera.translation();
 
 			for (std::size_t i = 0; i < n_sel; ++i)
 			{
@@ -517,10 +591,8 @@ void SpecificWorker::update_voxel_grid_from_rgbd(const RoboCompCameraRGBDSimple:
 				qpts.emplace_back(p.x(), p.y(), p.z());
 
 			std::println("[VoxelViewer] Exported {} points to viewer", qpts.size());
-			if (voxel_viewer_gl)
-				voxel_viewer_gl->update_voxels(qpts, sem.categories, sem.probs);
-			else if (voxel_viewer_3d)
-				voxel_viewer_3d->update_voxels(qpts, sem.categories, sem.probs);
+			   if (voxel_viewer_gl)
+				   voxel_viewer_gl->update_voxels(qpts, sem.categories, sem.probs);
 		}
 
 		if (compute_frame_ % 30 == 0)
@@ -585,6 +657,9 @@ void SpecificWorker::update_room_polygon_in_viewers()
 		std::vector<float> polygon_x(polygon_x_src.begin(), polygon_x_src.end());
 		std::vector<float> polygon_y(polygon_y_src.begin(), polygon_y_src.end());
 
+		// Polygon corners are already in room-local frame (centered near origin).
+		// Voxels from get_transformation_matrix(room, "zed") are also in room-local frame.
+		// No transform needed; the robot pose lives inside this same frame.
 		std::println("[RoomPolygon] Extracted {} x-coordinates and {} y-coordinates",
 		             polygon_x.size(), polygon_y.size());
 
@@ -614,26 +689,31 @@ void SpecificWorker::update_room_polygon_in_viewers()
 			             min_x, max_x, min_y, max_y);
 		}
 
-		// Update viewers with polygon data
-		if (!polygon_x.empty() && !polygon_y.empty())
-		{
-			if (voxel_viewer_gl)
+
+			// Try to get room_height_att (must be registered in DSR)
+			float room_height = 0.f;
+			bool has_height = false;
+			if (auto height_opt = G->get_attrib_by_name<room_height_att>(room_node.value()); height_opt.has_value())
 			{
-				voxel_viewer_gl->update_room_polygon(polygon_x, polygon_y);
-				std::println("[RoomPolygon] Updated GL viewer with room outline");
+				room_height = height_opt.value();
+				has_height = true;
 			}
-			if (voxel_viewer_3d)
+			std::print("[RoomPolygon] room_height_att attribute: {} (found: {})\n", room_height, has_height);
+
+			if (!polygon_x.empty() && !polygon_y.empty())
 			{
-				voxel_viewer_3d->update_room_polygon(polygon_x, polygon_y);
-				std::println("[RoomPolygon] Updated 3D viewer with room outline");
+				   if (voxel_viewer_gl)
+				   {
+					   voxel_viewer_gl->update_room_polygon_dual(polygon_x, polygon_y, room_height);
+					   std::println("[RoomPolygon] Updated GL viewer with room outlines at z=0 and z={}", room_height);
+				   }
+				std::println("[RoomPolygon] Successfully updated viewers with {} points (dual height)", polygon_x.size());
 			}
-			std::println("[RoomPolygon] Successfully updated viewers with {} points", polygon_x.size());
-		}
-		else
-		{
-			std::println("[RoomPolygon] Polygon vectors are empty: x.size()={} y.size()={}", 
-			             polygon_x.size(), polygon_y.size());
-		}
+			else
+			{
+				std::println("[RoomPolygon] Polygon vectors are empty: x.size()={} y.size()={}", 
+							 polygon_x.size(), polygon_y.size());
+			}
 	}
 	catch (const std::exception& e)
 	{
@@ -1162,23 +1242,87 @@ void SpecificWorker::read_rgbd_thread()
             { qWarning() << "[read_rgbd] getAll failed:" << e.what(); std::terminate(); }
 
             const long p_ms = static_cast<long>(frame.image.period);
- 
-			// Upload to DSR graph
-			if (auto cam_node = G->get_node("zed"); cam_node.has_value())
+
+			// Debug: dump RGB stats and periodically save the raw image to disk
+			// to verify content arriving from the proxy without touching Qt from this thread.
+			if (frame.image.width > 0 && frame.image.height > 0 && !frame.image.image.empty())
 			{
-				G->add_or_modify_attrib_local<cam_rgb_att>(cam_node.value(),
-					std::vector<uint8_t>(frame.image.image.begin(), frame.image.image.end()));
-				G->add_or_modify_attrib_local<cam_depth_att>(cam_node.value(),
-					std::vector<uint8_t>(frame.depth.depth.begin(), frame.depth.depth.end()));
-				G->add_or_modify_attrib_local<cam_rgb_width_att>(cam_node.value(), frame.image.width);
-				G->add_or_modify_attrib_local<cam_rgb_height_att>(cam_node.value(), frame.image.height);
-				G->add_or_modify_attrib_local<cam_depth_width_att>(cam_node.value(), frame.depth.width);
-				G->add_or_modify_attrib_local<cam_depth_height_att>(cam_node.value(), frame.depth.height);
-				G->add_or_modify_attrib_local<cam_depthFactor_att>(cam_node.value(), frame.depth.depthFactor);
-				G->update_node(cam_node.value());
+				static int dbg_count = 0;
+				if ((dbg_count++ % 30) == 0)
+				{
+					const cv::Mat rgb_frame(frame.image.height, frame.image.width, CV_8UC3,
+						const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(frame.image.image.data())));
+					cv::Scalar mean = cv::mean(rgb_frame);
+					double minv = 0, maxv = 0;
+					cv::minMaxLoc(rgb_frame.reshape(1), &minv, &maxv);
+					std::println("[zed RGB raw] bytes={}, wh=({}x{}), mean=(R={:.1f}, G={:.1f}, B={:.1f}), min={}, max={}",
+					             frame.image.image.size(), frame.image.width, frame.image.height,
+					             mean[0], mean[1], mean[2], static_cast<int>(minv), static_cast<int>(maxv));
+					cv::Mat bgr;
+					cv::cvtColor(rgb_frame, bgr, cv::COLOR_RGB2BGR);
+					cv::imwrite("/tmp/zed_rgb_raw.png", bgr);
+				}
 			}
-			else
-				qWarning() << "Camera node not found in DSR graph";
+ 
+			// Upload to DSR graph (throttled to ~2 Hz to keep FastDDS bandwidth sane;
+			// the voxel pipeline consumes the RGBD via rgbd_buffer, not the DSR attribute).
+			static auto last_dsr_upload = std::chrono::steady_clock::time_point{};
+			const auto now_steady = std::chrono::steady_clock::now();
+			const bool do_dsr_upload = (now_steady - last_dsr_upload) >= std::chrono::milliseconds(500);
+			if (do_dsr_upload)
+			{
+				last_dsr_upload = now_steady;
+				if (auto cam_node = G->get_node("zed"); cam_node.has_value())
+				{
+					// First push the small metadata attributes (incl. the ones the GUI's CameraAPI needs).
+					G->add_or_modify_attrib_local<cam_rgb_width_att>(cam_node.value(), frame.image.width);
+					G->add_or_modify_attrib_local<cam_rgb_height_att>(cam_node.value(), frame.image.height);
+					G->add_or_modify_attrib_local<cam_rgb_focalx_att>(cam_node.value(), frame.image.focalx);
+					G->add_or_modify_attrib_local<cam_rgb_focaly_att>(cam_node.value(), frame.image.focaly);
+					G->add_or_modify_attrib_local<cam_rgb_depth_att>(cam_node.value(), 3);
+					G->add_or_modify_attrib_local<cam_rgb_cameraID_att>(cam_node.value(), 0);
+					G->add_or_modify_attrib_local<cam_depth_width_att>(cam_node.value(), frame.depth.width);
+					G->add_or_modify_attrib_local<cam_depth_height_att>(cam_node.value(), frame.depth.height);
+					G->add_or_modify_attrib_local<cam_depth_focalx_att>(cam_node.value(), frame.depth.focalx);
+					G->add_or_modify_attrib_local<cam_depth_focaly_att>(cam_node.value(), frame.depth.focaly);
+					G->add_or_modify_attrib_local<cam_depthFactor_att>(cam_node.value(), frame.depth.depthFactor);
+					G->update_node(cam_node.value());
+
+					// Send one big blob per tick, alternating RGB and depth.
+					// Sending both back-to-back causes FastDDS to drop the first
+					// (only the most recent large sample reaches the GUI subscriber).
+					static bool send_rgb_this_tick = true;
+					if (send_rgb_this_tick)
+					{
+						if (auto cam_node2 = G->get_node("zed"); cam_node2.has_value())
+						{
+							G->add_or_modify_attrib_local<cam_rgb_att>(cam_node2.value(),
+								std::vector<uint8_t>(frame.image.image.begin(), frame.image.image.end()));
+							G->update_node(cam_node2.value());
+						}
+					}
+					else
+					{
+						if (auto cam_node3 = G->get_node("zed"); cam_node3.has_value())
+						{
+							G->add_or_modify_attrib_local<cam_depth_att>(cam_node3.value(),
+								std::vector<uint8_t>(frame.depth.depth.begin(), frame.depth.depth.end()));
+							G->update_node(cam_node3.value());
+						}
+					}
+					send_rgb_this_tick = !send_rgb_this_tick;
+
+					static int rgbd_upload_count = 0;
+					if ((++rgbd_upload_count) % 20 == 1)
+						std::println("[RGBD->DSR] uploaded frame to 'zed': rgb_bytes={}, depth_bytes={}, "
+						             "rgb_wh=({},{}) focal=({},{})",
+						             frame.image.image.size(), frame.depth.depth.size(),
+						             frame.image.width, frame.image.height,
+						             frame.image.focalx, frame.image.focaly);
+				}
+				else
+					qWarning() << "Camera node not found in DSR graph";
+			}
 
             rgbd_buffer.put<0>(
                 std::move(frame),
