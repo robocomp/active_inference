@@ -32,6 +32,7 @@
 #include <doublebuffer_sync/doublebuffer_sync.h>
 #include <fps/fps.h>
 #include <memory>
+#include <mutex>
 #include "yolo_seg_detector.h"
 #include "custom_widget.h"
 
@@ -131,6 +132,10 @@ private:
 			  // Hungarian association
 			  float TRACK_ASSOCIATION_MAX_DISTANCE_M = 0.7f;
 			  int   TRACK_MAX_MISSED_FRAMES = 10;
+		  // DSR upload rates (Hz)
+		  int DSR_RGB_FPS   = 0;   // 0 = every frame (no throttle)
+		  int DSR_DEPTH_FPS = 5;
+		  int DSR_LIDAR_FPS = 0;   // 0 = every captured scan (no throttle)
         };
         Params params;
 
@@ -181,10 +186,19 @@ private:
 
 	void draw_detections(const cv::Mat& rgb_frame, const std::vector<SegDetection>& detections) const;
 	cv::Mat compose_detection_canvas(const cv::Mat& rgb_frame, const std::vector<SegDetection>& detections) const;
-	void update_yolo_tab_views(const cv::Mat& rgb_frame_rgb, const cv::Mat& yolo_canvas_bgr);
-	bool ensure_room_and_robot_ready(FPSCounter& compute_fps);
-	std::optional<Mat::RTMat> get_room_robot_transform(FPSCounter& compute_fps, std::uint64_t timestamp_ms);
-	std::optional<Mat::RTMat> get_room_zed_transform(FPSCounter& compute_fps, std::uint64_t timestamp_ms);
+	void update_yolo_tab_display(const RoboCompCameraRGBDSimple::TRGBD& rgbd, const std::vector<SegDetection>& detections);
+	void update_viewer_robot_pose(const Mat::RTMat& room_T_robot);
+	std::pair<std::string, std::string> get_room_robot_names_for_compute();
+	bool ensure_room_and_robot_ready(FPSCounter& compute_fps,
+	                                const std::string& room_name,
+	                                const std::string& robot_name);
+	std::optional<Mat::RTMat> get_room_robot_transform(FPSCounter& compute_fps,
+	                                                   const std::string& room_name,
+	                                                   const std::string& robot_name,
+	                                                   std::uint64_t timestamp_ms);
+	std::optional<Mat::RTMat> get_room_zed_transform(FPSCounter& compute_fps,
+	                                                 const std::string& room_name,
+	                                                 std::uint64_t timestamp_ms);
 	std::uint64_t get_rgbd_frame_timestamp_ms(const RoboCompCameraRGBDSimple::TRGBD& rgbd) const;
 	void log_room_robot_pose_periodic(const Mat::RTMat& room_T_robot) const;
 	void update_room_polygon_periodic();
@@ -228,10 +242,12 @@ private:
 	// Hungarian association parameters (now set from params)
 	float track_association_max_distance_m = 0.7f;
 	int track_max_missed_frames = 10;
+	bool verbose_debug_ = false;
 	bool room_ready_logged_ = false;
 	bool room_wait_logged_ = false;
 	bool room_rt_ready_logged_ = false;
 	bool room_rt_wait_logged_ = false;
+	mutable std::mutex node_names_mutex_;
 	std::string room_node_name_;
 	std::string robot_node_name_;
 	

@@ -201,15 +201,16 @@ void VoxelOpenGLViewer::rebuild_polygon_locked_()
         ceiling.emplace_back(rx, raw_polygon_height_, ry);
     }
 
-    // Anchor the camera target to the room polygon centroid so the scene
-    // stays centered regardless of where the robot/voxels are.
-    if (!room_polygon_floor_.empty() || !floor.empty())
+    // Initialize camera target from room centroid only once, then preserve
+    // user camera control (pan/orbit/zoom) across periodic room updates.
+    if (!room_target_initialized_ && !camera_user_moved_ && (!room_polygon_floor_.empty() || !floor.empty()))
     {
         const auto& poly = floor.empty() ? room_polygon_floor_ : floor;
         QVector3D centroid{0.f, 0.f, 0.f};
         for (const auto& p : poly) centroid += p;
         if (!poly.empty()) centroid /= static_cast<float>(poly.size());
         target_ = centroid;
+        room_target_initialized_ = true;
     }
 
     room_polygon_floor_ = std::move(floor);
@@ -753,6 +754,7 @@ void VoxelOpenGLViewer::mouseMoveEvent(QMouseEvent* event)
 
     if (event->buttons() & Qt::LeftButton)
     {
+        camera_user_moved_ = true;
         yaw_   -= static_cast<float>(d.x()) * 0.01f;
         pitch_ -= static_cast<float>(d.y()) * 0.01f;
         pitch_ = std::clamp(pitch_, -1.45f, 1.45f);
@@ -760,6 +762,7 @@ void VoxelOpenGLViewer::mouseMoveEvent(QMouseEvent* event)
     }
     else if (event->buttons() & Qt::RightButton)
     {
+        camera_user_moved_ = true;
         const float pan_scale = 0.0025f * distance_;
         const QVector3D right(std::cos(yaw_), 0.f, -std::sin(yaw_));
         const QVector3D up(0.f, 1.f, 0.f);
@@ -773,6 +776,7 @@ void VoxelOpenGLViewer::mouseMoveEvent(QMouseEvent* event)
 
 void VoxelOpenGLViewer::wheelEvent(QWheelEvent* event)
 {
+    camera_user_moved_ = true;
     const float num_steps = static_cast<float>(event->angleDelta().y()) / 120.0f;
     const float scale = std::pow(0.87f, num_steps);
     distance_ = std::clamp(distance_ * scale, 0.2f, 250.0f);

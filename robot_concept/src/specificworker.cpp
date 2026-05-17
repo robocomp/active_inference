@@ -66,7 +66,13 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
 
 SpecificWorker::~SpecificWorker()
 {
-	std::cout << "Destroying SpecificWorker" << std::endl;
+	qInfo() << "Destroying SpecificWorker";
+	stop_lidar_thread = true;
+	stop_rgbd_thread = true;
+	if (lidar_thread.joinable())
+		lidar_thread.join();
+	if (rgbd_thread.joinable())
+		rgbd_thread.join();
 	/*
 	for (auto const& [name, g] : Graphs) {
 	    g->write_to_json_file("./"+agent_name+"_"+name+".json");
@@ -77,7 +83,7 @@ SpecificWorker::~SpecificWorker()
 
 void SpecificWorker::initialize()
 {
-    std::cout << "initialize worker" << std::endl;
+	qInfo() << "initialize worker";
 	GenericWorker::initialize();
 
     // ── Initialise YOLO-seg detector ─────────────────────────
@@ -93,7 +99,12 @@ void SpecificWorker::initialize()
 	try { params.YOLO_MASK_ERODE_KERNEL = configLoader.get<int>("Yolo.mask_erode_kernel"); } catch (...) {}
 	try { params.TRACK_ASSOCIATION_MAX_DISTANCE_M = static_cast<float>(configLoader.get<double>("Yolo.track_association_max_distance_m")); } catch (...) {}
 	try { params.TRACK_MAX_MISSED_FRAMES = configLoader.get<int>("Yolo.track_max_missed_frames"); } catch (...) {}
-	std::println("[YOLO] effective flags: use_gpu={} use_trt={}", params.YOLO_USE_GPU, params.YOLO_USE_TRT);
+	try { params.DSR_RGB_FPS   = configLoader.get<int>("Camera.dsr_rgb_fps");   } catch (...) {}
+	try { params.DSR_DEPTH_FPS = configLoader.get<int>("Camera.dsr_depth_fps"); } catch (...) {}
+	try { params.DSR_LIDAR_FPS = configLoader.get<int>("Lidar.dsr_lidar_fps"); } catch (...) {}
+	try { verbose_debug_ = configLoader.get<bool>("Debug.verbose"); } catch (...) { verbose_debug_ = false; }
+	if (verbose_debug_)
+		std::println("[YOLO] effective flags: use_gpu={} use_trt={}", params.YOLO_USE_GPU, params.YOLO_USE_TRT);
 
     yolo_detector.emplace(params.YOLO_MODEL_PATH,
                           std::vector<std::string>{},   // default COCO names
@@ -102,7 +113,8 @@ void SpecificWorker::initialize()
                           params.YOLO_INPUT_SIZE,
                           params.YOLO_USE_GPU,
                           params.YOLO_USE_TRT);
-   std::println("YOLO-seg detector ready: {}", params.YOLO_MODEL_PATH);
+	if (verbose_debug_)
+		std::println("YOLO-seg detector ready: {}", params.YOLO_MODEL_PATH);
 
 	//Subscription to DSR graph update signals. 
 	// If multiple graphs exist, it is necessary to specify the graph name 
@@ -166,19 +178,32 @@ void SpecificWorker::initialize()
 	inner_eigen_api = G->get_inner_eigen_api();
 	if (const auto room_nodes = G->get_nodes_by_type("room"); !room_nodes.empty())
 	{
+		std::scoped_lock lk(node_names_mutex_);
 		room_node_name_ = room_nodes.front().name();
-		std::println("[VoxelInit] Found room node: '{}'", room_node_name_);
+		if (verbose_debug_)
+			std::println("[VoxelInit] Found room node: '{}'", room_node_name_);
 	}
 	else
 	{
-		std::println("[VoxelInit] No room nodes found in graph");
+		if (verbose_debug_)
+			std::println("[VoxelInit] No room nodes found in graph");
 	}
 	
 	if (const auto robot_nodes = G->get_nodes_by_type("robot"); !robot_nodes.empty())
-		robot_node_name_ = robot_nodes.front().name();
-	if (!room_node_name_.empty() && !robot_node_name_.empty())
 	{
-		std::println("[VoxelInit] Cached room='{}' robot='{}' from initial graph", room_node_name_, robot_node_name_);
+		std::scoped_lock lk(node_names_mutex_);
+		robot_node_name_ = robot_nodes.front().name();
+	}
+	std::string room_name_snapshot, robot_name_snapshot;
+	{
+		std::scoped_lock lk(node_names_mutex_);
+		room_name_snapshot = room_node_name_;
+		robot_name_snapshot = robot_node_name_;
+	}
+	if (!room_name_snapshot.empty() && !robot_name_snapshot.empty())
+	{
+		if (verbose_debug_)
+			std::println("[VoxelInit] Cached room='{}' robot='{}' from initial graph", room_name_snapshot, robot_name_snapshot);
 	}
 
 	 // ── Start lidar reader thread ────────────────────────────
@@ -200,90 +225,94 @@ void SpecificWorker::initialize()
 void SpecificWorker::compute()
 {
 	static FPSCounter compute_fps;
+
+	// ── 1. Per-cycle node name snapshot ──────────────────────────────────────
+	const auto [room_name, robot_name] = get_room_robot_names_for_compute();
+
+	// ── 2. Acquire latest RGBD frame ─────────────────────────────────────────
 	const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
 		std::chrono::system_clock::now().time_since_epoch()).count();
-
-	// Read latest RGDB frame
 	const auto &[rgbd_opt] = rgbd_buffer.read(now_ms);
 	if (!rgbd_opt.has_value())
-	{
-		qWarning() << "No RGBD data available at timestamp" << now_ms;
 		return;
-	}
 	const auto& rgbd = rgbd_opt.value();
 	const std::uint64_t frame_ts_ms = get_rgbd_frame_timestamp_ms(rgbd);
 
-	// Always compute detections for voxel grid update
-	auto detections = detect_segmentation(rgbd);
+	// ── 3. YOLO segmentation ──────────────────────────────────────────────────
+	const auto detections = detect_segmentation(rgbd);
 
-	// Only update ZED RGB and YOLO overlay if the widget is visible (tab selected)
-	if (yolo_image_label_ != nullptr && rgbd.image.width > 0 && rgbd.image.height > 0 && custom_widget_yolo.isVisible())
-	{
-		const cv::Mat rgb_frame(rgbd.image.height, rgbd.image.width, CV_8UC3,
-			const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(rgbd.image.image.data())));
-		const cv::Mat yolo_canvas = compose_detection_canvas(rgb_frame, detections);
-		cv::Mat yolo_canvas_rgb;
-		cv::cvtColor(yolo_canvas, yolo_canvas_rgb, cv::COLOR_BGR2RGB);
-		QImage yolo_qimg(yolo_canvas_rgb.data,
-			yolo_canvas_rgb.cols,
-			yolo_canvas_rgb.rows,
-			static_cast<int>(yolo_canvas_rgb.step),
-			QImage::Format_RGB888);
-		QPixmap yolo_pix = QPixmap::fromImage(yolo_qimg.copy());
-		yolo_image_label_->setPixmap(yolo_pix.scaled(yolo_image_label_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
-	}
+	// ── 4. Update ZED+YOLO overlay tab (only when tab is visible) ────────────
+	update_yolo_tab_display(rgbd, detections);
 
-	// Only update voxel/room/robot if ready
-	if (!ensure_room_and_robot_ready(compute_fps))
+	// ── 5. Guard: room and robot nodes must exist in the graph ────────────────
+	if (!ensure_room_and_robot_ready(compute_fps, room_name, robot_name))
 		return;
 
-	// Get robot pose in room frame
-	auto room_T_robot = get_room_robot_transform(compute_fps, frame_ts_ms);
+	// ── 6. Fetch room-frame transforms at frame timestamp ────────────────────
+	const auto room_T_robot = get_room_robot_transform(compute_fps, room_name, robot_name, frame_ts_ms);
 	if (!room_T_robot.has_value())
 		return;
-	auto room_T_zed = get_room_zed_transform(compute_fps, frame_ts_ms);
+	const auto room_T_zed = get_room_zed_transform(compute_fps, room_name, frame_ts_ms);
 	if (!room_T_zed.has_value())
 		return;
-
-	// Log robot pose periodically (even if not ready) so the user gets feedback when it becomes available.
 	log_room_robot_pose_periodic(room_T_robot.value());
-	if (!room_rt_ready_logged_)
-	{
-		room_rt_ready_logged_ = true;
-		room_rt_wait_logged_ = false;
-	}
+	if (!room_rt_ready_logged_) { room_rt_ready_logged_ = true; room_rt_wait_logged_ = false; }
 
-	// Push the robot pose (in room frame) to the GL viewer so the user can
-	// visually verify polygon/voxels/robot are all coherent in the same frame.
-	if (voxel_viewer_gl)
-	{
-		const auto& T = room_T_robot.value();
-		const auto& t = T.translation();
-		const Eigen::Matrix3d R = T.rotation();
-		const float theta = static_cast<float>(std::atan2(R(1, 0), R(0, 0)));
-		voxel_viewer_gl->set_robot_pose(static_cast<float>(t.x()), static_cast<float>(t.y()), theta);
-	}
+	// ── 7. Push robot pose to 3-D viewer ─────────────────────────────────────
+	update_viewer_robot_pose(room_T_robot.value());
 
-	// Update the room polygon in the viewers periodically (in case it changes in the graph or simply to trigger a redraw).
+	// ── 8. Refresh room polygon overlay ──────────────────────────────────────
 	update_room_polygon_periodic();
 
-	// Update the voxel grid with the new RGBD frame and YOLO detections, using the robot pose to keep everything aligned in the room frame.
+	// ── 9. Update semantic voxel map ─────────────────────────────────────────
 	track_association_max_distance_m = params.TRACK_ASSOCIATION_MAX_DISTANCE_M;
 	track_max_missed_frames = params.TRACK_MAX_MISSED_FRAMES;
 	update_voxel_grid_from_rgbd(rgbd, detections, room_T_robot.value(), room_T_zed.value());
 
-	compute_fps.print("[Compute]", 2000);
+	if (verbose_debug_)
+		compute_fps.print("[Compute]", 2000);
 }
 
 //////////////////////////////////////////////////////////////////////////////
 
-bool SpecificWorker::ensure_room_and_robot_ready(FPSCounter& compute_fps)
+std::pair<std::string, std::string> SpecificWorker::get_room_robot_names_for_compute()
 {
-	if (room_node_name_.empty())
-		if (const auto room_nodes = G->get_nodes_by_type("room"); !room_nodes.empty())
-			room_node_name_ = room_nodes.front().name();
+	std::string room_name_snapshot;
+	std::string robot_name_snapshot;
+	{
+		std::scoped_lock lk(node_names_mutex_);
+		room_name_snapshot = room_node_name_;
+		robot_name_snapshot = robot_node_name_;
+	}
 
-	if (room_node_name_.empty())
+	if (room_name_snapshot.empty())
+	{
+		if (const auto room_nodes = G->get_nodes_by_type("room"); !room_nodes.empty())
+			room_name_snapshot = room_nodes.front().name();
+	}
+
+	if (robot_name_snapshot.empty())
+	{
+		if (const auto robot_nodes = G->get_nodes_by_type("robot"); !robot_nodes.empty())
+			robot_name_snapshot = robot_nodes.front().name();
+	}
+
+	{
+		std::scoped_lock lk(node_names_mutex_);
+		if (room_node_name_.empty() && !room_name_snapshot.empty())
+			room_node_name_ = room_name_snapshot;
+		if (robot_node_name_.empty() && !robot_name_snapshot.empty())
+			robot_node_name_ = robot_name_snapshot;
+	}
+
+	return {room_name_snapshot, robot_name_snapshot};
+}
+
+bool SpecificWorker::ensure_room_and_robot_ready(FPSCounter& compute_fps,
+	                                              const std::string& room_name,
+	                                              const std::string& robot_name)
+{
+	if (room_name.empty())
 	{
 		if (!room_wait_logged_)
 		{
@@ -291,15 +320,12 @@ bool SpecificWorker::ensure_room_and_robot_ready(FPSCounter& compute_fps)
 			room_wait_logged_ = true;
 			room_ready_logged_ = false;
 		}
-		compute_fps.print("[Compute]", 2000);
+		if (verbose_debug_)
+			compute_fps.print("[Compute]", 2000);
 		return false;
 	}
 
-	if (robot_node_name_.empty())
-		if (const auto robot_nodes = G->get_nodes_by_type("robot"); !robot_nodes.empty())
-			robot_node_name_ = robot_nodes.front().name();
-
-	if (robot_node_name_.empty())
+	if (robot_name.empty())
 	{
 		if (!room_wait_logged_)
 		{
@@ -307,7 +333,8 @@ bool SpecificWorker::ensure_room_and_robot_ready(FPSCounter& compute_fps)
 			room_wait_logged_ = true;
 			room_ready_logged_ = false;
 		}
-		compute_fps.print("[Compute]", 2000);
+		if (verbose_debug_)
+			compute_fps.print("[Compute]", 2000);
 		return false;
 	}
 
@@ -319,7 +346,10 @@ bool SpecificWorker::ensure_room_and_robot_ready(FPSCounter& compute_fps)
 	return true;
 }
 
-std::optional<Mat::RTMat> SpecificWorker::get_room_robot_transform(FPSCounter& compute_fps, std::uint64_t timestamp_ms)
+std::optional<Mat::RTMat> SpecificWorker::get_room_robot_transform(FPSCounter& compute_fps,
+	                                                               const std::string& room_name,
+	                                                               const std::string& robot_name,
+	                                                               std::uint64_t timestamp_ms)
 {
 	if (!inner_eigen_api)
 	{
@@ -329,11 +359,12 @@ std::optional<Mat::RTMat> SpecificWorker::get_room_robot_transform(FPSCounter& c
 			room_rt_wait_logged_ = true;
 			room_rt_ready_logged_ = false;
 		}
-		compute_fps.print("[Compute]", 2000);
+		if (verbose_debug_)
+			compute_fps.print("[Compute]", 2000);
 		return std::nullopt;
 	}
 
-	auto room_T_robot = inner_eigen_api->get_transformation_matrix(room_node_name_, robot_node_name_, timestamp_ms);
+	auto room_T_robot = inner_eigen_api->get_transformation_matrix(room_name, robot_name, timestamp_ms);
 	if (!room_T_robot.has_value())
 	{
 		if (!room_rt_wait_logged_)
@@ -342,14 +373,17 @@ std::optional<Mat::RTMat> SpecificWorker::get_room_robot_transform(FPSCounter& c
 			room_rt_wait_logged_ = true;
 			room_rt_ready_logged_ = false;
 		}
-		compute_fps.print("[Compute]", 2000);
+		if (verbose_debug_)
+			compute_fps.print("[Compute]", 2000);
 		return std::nullopt;
 	}
 
 	return room_T_robot;
 }
 
-std::optional<Mat::RTMat> SpecificWorker::get_room_zed_transform(FPSCounter& compute_fps, std::uint64_t timestamp_ms)
+std::optional<Mat::RTMat> SpecificWorker::get_room_zed_transform(FPSCounter& compute_fps,
+	                                                             const std::string& room_name,
+	                                                             std::uint64_t timestamp_ms)
 {
 	if (!inner_eigen_api)
 	{
@@ -359,11 +393,12 @@ std::optional<Mat::RTMat> SpecificWorker::get_room_zed_transform(FPSCounter& com
 			room_rt_wait_logged_ = true;
 			room_rt_ready_logged_ = false;
 		}
-		compute_fps.print("[Compute]", 2000);
+		if (verbose_debug_)
+			compute_fps.print("[Compute]", 2000);
 		return std::nullopt;
 	}
 
-	auto room_T_zed = inner_eigen_api->get_transformation_matrix(room_node_name_, "zed", timestamp_ms);
+	auto room_T_zed = inner_eigen_api->get_transformation_matrix(room_name, "zed", timestamp_ms);
 	if (!room_T_zed.has_value())
 	{
 		if (!room_rt_wait_logged_)
@@ -372,7 +407,8 @@ std::optional<Mat::RTMat> SpecificWorker::get_room_zed_transform(FPSCounter& com
 			room_rt_wait_logged_ = true;
 			room_rt_ready_logged_ = false;
 		}
-		compute_fps.print("[Compute]", 2000);
+		if (verbose_debug_)
+			compute_fps.print("[Compute]", 2000);
 		return std::nullopt;
 	}
 
@@ -668,7 +704,7 @@ void SpecificWorker::update_voxel_grid_from_rgbd(const RoboCompCameraRGBDSimple:
 			}
 		}
 
-		if (compute_frame_ % 30 == 0)
+		if (verbose_debug_ && compute_frame_ % 30 == 0)
 		{
 			const float ratio = valid_points > 0
 				? (100.0f * static_cast<float>(masked_points) / static_cast<float>(valid_points))
@@ -690,12 +726,18 @@ void SpecificWorker::update_voxel_grid_from_rgbd(const RoboCompCameraRGBDSimple:
 
 void SpecificWorker::update_room_polygon_in_viewers()
 {
-	if (room_node_name_.empty())
+	std::string room_name_snapshot;
+	{
+		std::scoped_lock lk(node_names_mutex_);
+		room_name_snapshot = room_node_name_;
+	}
+
+	if (room_name_snapshot.empty())
 		return;
 
 	try
 	{
-		auto room_node = G->get_node(room_node_name_);
+		auto room_node = G->get_node(room_name_snapshot);
 		if (!room_node)
 			return;
 
@@ -800,7 +842,36 @@ cv::Mat SpecificWorker::compose_detection_canvas(const cv::Mat& rgb_frame,
 	return canvas;
 }
 
-// update_yolo_tab_views removed: now handled inline in compute()
+void SpecificWorker::update_yolo_tab_display(const RoboCompCameraRGBDSimple::TRGBD& rgbd,
+                                              const std::vector<SegDetection>& detections)
+{
+	if (yolo_image_label_ == nullptr || rgbd.image.width == 0 || rgbd.image.height == 0
+		|| !custom_widget_yolo.isVisible())
+		return;
+
+	const cv::Mat rgb_frame(rgbd.image.height, rgbd.image.width, CV_8UC3,
+		const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(rgbd.image.image.data())));
+	const cv::Mat yolo_canvas = compose_detection_canvas(rgb_frame, detections);
+	cv::Mat yolo_canvas_rgb;
+	cv::cvtColor(yolo_canvas, yolo_canvas_rgb, cv::COLOR_BGR2RGB);
+	QImage yolo_qimg(yolo_canvas_rgb.data,
+		yolo_canvas_rgb.cols,
+		yolo_canvas_rgb.rows,
+		static_cast<int>(yolo_canvas_rgb.step),
+		QImage::Format_RGB888);
+	QPixmap yolo_pix = QPixmap::fromImage(yolo_qimg, Qt::NoFormatConversion);
+	yolo_image_label_->setPixmap(yolo_pix.scaled(yolo_image_label_->size(), Qt::KeepAspectRatio, Qt::FastTransformation));
+}
+
+void SpecificWorker::update_viewer_robot_pose(const Mat::RTMat& room_T_robot)
+{
+	if (!voxel_viewer_gl)
+		return;
+	const auto& t = room_T_robot.translation();
+	const Eigen::Matrix3d R = room_T_robot.rotation();
+	const float theta = static_cast<float>(std::atan2(R(1, 0), R(0, 0)));
+	voxel_viewer_gl->set_robot_pose(static_cast<float>(t.x()), static_cast<float>(t.y()), theta);
+}
 
 void SpecificWorker::read_lidar_thread()
 {
@@ -819,7 +890,11 @@ void SpecificWorker::read_lidar_thread()
                     "", 0.f, static_cast<float>(M_PI) * 2.f, params.LIDAR_DECIMATION_FACTOR);
             }
             catch (const Ice::Exception& e)
-            { qWarning() << "[read_lidar] getLidarData failed:" << e.what(); std::terminate(); }
+			{
+				qWarning() << "[read_lidar] getLidarData failed:" << e.what() << "retrying...";
+				std::this_thread::sleep_for(std::chrono::milliseconds(100));
+				continue;
+			}
 
 			const auto n = data.points.size();
 			std::vector<float> xs(n), ys(n), zs(n);
@@ -829,43 +904,35 @@ void SpecificWorker::read_lidar_thread()
 				ys[i] = data.points[i].y;
 				zs[i] = data.points[i].z;
 			}
-			// Upload to DSR graph
-			if (auto laser_node = G->get_node("lidar3D"); laser_node.has_value())
+			// Upload to DSR graph (rate-limited by dsr_lidar_fps; 0 = every scan).
+			static auto last_lidar_upload = std::chrono::steady_clock::time_point{};
+			const auto  now_steady_lidar  = std::chrono::steady_clock::now();
+			const auto  lidar_interval_ms = params.DSR_LIDAR_FPS > 0
+				? std::chrono::milliseconds(1000 / params.DSR_LIDAR_FPS)
+				: std::chrono::milliseconds(0);
+			const bool do_lidar_upload = (lidar_interval_ms.count() == 0)
+				|| (now_steady_lidar - last_lidar_upload >= lidar_interval_ms);
+			if (do_lidar_upload)
 			{
-				G->add_or_modify_attrib_local<laser_X_att>(laser_node.value(), xs);
-				G->add_or_modify_attrib_local<laser_Y_att>(laser_node.value(), ys);
-				G->add_or_modify_attrib_local<laser_Z_att>(laser_node.value(), zs);
-				G->add_or_modify_attrib_local<laser_timestamp_att>(laser_node.value(), static_cast<uint64_t>(data.timestamp));
-				G->update_node(laser_node.value());
+				last_lidar_upload = now_steady_lidar;
+				if (auto laser_node = G->get_node("lidar3D"); laser_node.has_value())
+				{
+					G->add_or_modify_attrib_local<laser_X_att>(laser_node.value(), xs);
+					G->add_or_modify_attrib_local<laser_Y_att>(laser_node.value(), ys);
+					G->add_or_modify_attrib_local<laser_Z_att>(laser_node.value(), zs);
+					G->add_or_modify_attrib_local<laser_timestamp_att>(laser_node.value(), static_cast<uint64_t>(data.timestamp));
+					G->update_node(laser_node.value());
+				}
+				else
+					qWarning() << "Laser node not found in DSR graph";
 			}
-			else
-				qWarning() << "Laser node not found in DSR graph";
 
-			// pointcloud_buffer.put<0>(
-			// 	std::make_pair(std::move(data.points), static_cast<std::uint64_t>(data.timestamp)),
-			// 	timestamp,
-			// 	[](auto &&input, auto &output)
-			// 	{
-			// 		auto &&[points, lidar_ts] = input;
-			// 		auto &[ts, xs, ys, zs] = output;
-			// 		ts = lidar_ts;
-			// 		const auto n = points.size();
-			// 		xs.resize(n);
-			// 		ys.resize(n);
-			// 		zs.resize(n);
-			// 		for (std::size_t i = 0; i < n; ++i)
-			// 		{
-			// 			xs[i] = points[i].x;
-			// 			ys[i] = points[i].y;
-			// 			zs[i] = points[i].z;
-			// 		}
-			// 	});
-        
             const long p_ms = static_cast<long>(data.period);
             if (wait_period > std::chrono::milliseconds(p_ms + 2)) --wait_period;
             else if (wait_period < std::chrono::milliseconds(p_ms - 2)) ++wait_period;
 
-            lidar_fps.print("[LidarThread]", 2000);
+			if (verbose_debug_)
+				lidar_fps.print("[LidarThread]", 2000);
             std::this_thread::sleep_for(wait_period);
         }
         catch (const Ice::Exception& e)
@@ -1258,62 +1325,59 @@ void SpecificWorker::read_rgbd_thread()
                 frame = camerargbdsimple_proxy->getAll("camera");
             }
             catch (const Ice::Exception& e)
-            { qWarning() << "[read_rgbd] getAll failed:" << e.what(); std::terminate(); }
+			{
+				qWarning() << "[read_rgbd] getAll failed:" << e.what() << "retrying...";
+				std::this_thread::sleep_for(std::chrono::milliseconds(100));
+				continue;
+			}
 
             const long p_ms = static_cast<long>(frame.image.period);
 
-			// Upload to DSR graph (throttled to ~2 Hz to keep FastDDS bandwidth sane;
-			// the voxel pipeline consumes the RGBD via rgbd_buffer, not the DSR attribute).
-			static auto last_dsr_upload = std::chrono::steady_clock::time_point{};
+			// Upload RGB to DSR at the configured rate (dsr_rgb_fps=0 means every frame).
+			// Depth is large; upload at dsr_depth_fps.
+			static auto last_rgb_upload   = std::chrono::steady_clock::time_point{};
+			static auto last_depth_upload = std::chrono::steady_clock::time_point{};
 			const auto now_steady = std::chrono::steady_clock::now();
-			const bool do_dsr_upload = (now_steady - last_dsr_upload) >= std::chrono::milliseconds(500);
-			if (do_dsr_upload)
+			const auto rgb_interval_ms   = params.DSR_RGB_FPS   > 0
+				? std::chrono::milliseconds(1000 / params.DSR_RGB_FPS) : std::chrono::milliseconds(0);
+			const auto depth_interval_ms = params.DSR_DEPTH_FPS > 0
+				? std::chrono::milliseconds(1000 / params.DSR_DEPTH_FPS) : std::chrono::milliseconds(0);
+			const bool do_rgb   = (rgb_interval_ms.count()   == 0) || (now_steady - last_rgb_upload   >= rgb_interval_ms);
+			const bool do_depth = (depth_interval_ms.count() == 0) || (now_steady - last_depth_upload >= depth_interval_ms);
+			if (auto cam_node = G->get_node("zed"); cam_node.has_value())
 			{
-				last_dsr_upload = now_steady;
-				if (auto cam_node = G->get_node("zed"); cam_node.has_value())
+				G->add_or_modify_attrib_local<cam_rgb_width_att>(cam_node.value(), frame.image.width);
+				G->add_or_modify_attrib_local<cam_rgb_height_att>(cam_node.value(), frame.image.height);
+				G->add_or_modify_attrib_local<cam_rgb_focalx_att>(cam_node.value(), frame.image.focalx);
+				G->add_or_modify_attrib_local<cam_rgb_focaly_att>(cam_node.value(), frame.image.focaly);
+				G->add_or_modify_attrib_local<cam_rgb_depth_att>(cam_node.value(), 3);
+				G->add_or_modify_attrib_local<cam_rgb_cameraID_att>(cam_node.value(), 0);
+				if (do_rgb)
 				{
-					// First push the small metadata attributes (incl. the ones the GUI's CameraAPI needs).
-					G->add_or_modify_attrib_local<cam_rgb_width_att>(cam_node.value(), frame.image.width);
-					G->add_or_modify_attrib_local<cam_rgb_height_att>(cam_node.value(), frame.image.height);
-					G->add_or_modify_attrib_local<cam_rgb_focalx_att>(cam_node.value(), frame.image.focalx);
-					G->add_or_modify_attrib_local<cam_rgb_focaly_att>(cam_node.value(), frame.image.focaly);
-					G->add_or_modify_attrib_local<cam_rgb_depth_att>(cam_node.value(), 3);
-					G->add_or_modify_attrib_local<cam_rgb_cameraID_att>(cam_node.value(), 0);
-					G->add_or_modify_attrib_local<cam_depth_width_att>(cam_node.value(), frame.depth.width);
-					G->add_or_modify_attrib_local<cam_depth_height_att>(cam_node.value(), frame.depth.height);
-					G->add_or_modify_attrib_local<cam_depth_focalx_att>(cam_node.value(), frame.depth.focalx);
-					G->add_or_modify_attrib_local<cam_depth_focaly_att>(cam_node.value(), frame.depth.focaly);
-					G->add_or_modify_attrib_local<cam_depthFactor_att>(cam_node.value(), frame.depth.depthFactor);
+					last_rgb_upload = now_steady;
+					G->add_or_modify_attrib_local<cam_rgb_att>(cam_node.value(),
+						std::vector<uint8_t>(frame.image.image.begin(), frame.image.image.end()));
 					G->update_node(cam_node.value());
-
-					// Send one big blob per tick, alternating RGB and depth.
-					// Sending both back-to-back causes FastDDS to drop the first
-					// (only the most recent large sample reaches the GUI subscriber).
-					static bool send_rgb_this_tick = true;
-					if (send_rgb_this_tick)
-					{
-						if (auto cam_node2 = G->get_node("zed"); cam_node2.has_value())
-						{
-							G->add_or_modify_attrib_local<cam_rgb_att>(cam_node2.value(),
-								std::vector<uint8_t>(frame.image.image.begin(), frame.image.image.end()));
-							G->update_node(cam_node2.value());
-						}
-					}
-					else
-					{
-						if (auto cam_node3 = G->get_node("zed"); cam_node3.has_value())
-						{
-							G->add_or_modify_attrib_local<cam_depth_att>(cam_node3.value(),
-								std::vector<uint8_t>(frame.depth.depth.begin(), frame.depth.depth.end()));
-							G->update_node(cam_node3.value());
-						}
-					}
-					send_rgb_this_tick = !send_rgb_this_tick;
-
 				}
-				else
-					qWarning() << "Camera node not found in DSR graph";
+
+				if (do_depth)
+				{
+					last_depth_upload = now_steady;
+					if (auto depth_node = G->get_node("zed"); depth_node.has_value())
+					{
+						G->add_or_modify_attrib_local<cam_depth_width_att>(depth_node.value(), frame.depth.width);
+						G->add_or_modify_attrib_local<cam_depth_height_att>(depth_node.value(), frame.depth.height);
+						G->add_or_modify_attrib_local<cam_depth_focalx_att>(depth_node.value(), frame.depth.focalx);
+						G->add_or_modify_attrib_local<cam_depth_focaly_att>(depth_node.value(), frame.depth.focaly);
+						G->add_or_modify_attrib_local<cam_depthFactor_att>(depth_node.value(), frame.depth.depthFactor);
+						G->add_or_modify_attrib_local<cam_depth_att>(depth_node.value(),
+							std::vector<uint8_t>(frame.depth.depth.begin(), frame.depth.depth.end()));
+						G->update_node(depth_node.value());
+					}
+				}
 			}
+			else
+				qWarning() << "Camera node not found in DSR graph";
 
 			std::uint64_t frame_ts_ms = get_rgbd_frame_timestamp_ms(frame);
 			if (frame_ts_ms == 0)
@@ -1330,7 +1394,8 @@ void SpecificWorker::read_rgbd_thread()
                 else if (wait_period < std::chrono::milliseconds(p_ms - 2)) ++wait_period;
             }
 
-            rgbd_fps.print("[RGBDThread]", 2000);
+			if (verbose_debug_)
+				rgbd_fps.print("[RGBDThread]", 2000);
             std::this_thread::sleep_for(wait_period);
         }
         catch (const Ice::Exception& e)
@@ -1342,7 +1407,7 @@ void SpecificWorker::read_rgbd_thread()
 ////////////////////////////////////////////////////////////////////////////////////////////////
 void SpecificWorker::emergency()
 {
-    std::cout << "Emergency worker" << std::endl;
+	qInfo() << "Emergency worker";
     //emergencyCODE
     //
     //if (SUCCESSFUL) //The componet is safe for continue
@@ -1353,7 +1418,7 @@ void SpecificWorker::emergency()
 //Execute one when exiting to emergencyState
 void SpecificWorker::restore()
 {
-    std::cout << "Restore worker" << std::endl;
+	qInfo() << "Restore worker";
     //restoreCODE
     //Restore emergency component
 
@@ -1362,7 +1427,7 @@ void SpecificWorker::restore()
 
 int SpecificWorker::startup_check()
 {
-	std::cout << "Startup check" << std::endl;
+	qInfo() << "Startup check";
 	QTimer::singleShot(200, QCoreApplication::instance(), SLOT(quit()));
 	return 0;
 }

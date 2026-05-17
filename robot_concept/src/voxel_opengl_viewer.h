@@ -111,6 +111,8 @@ private:
     float distance_ = 6.0f;
     QVector3D target_{0.f, 0.f, 0.f};
     bool first_cloud_received_ = false;
+    bool room_target_initialized_ = false;
+    bool camera_user_moved_ = false;
 
     QPoint last_mouse_pos_;
 };
