@@ -240,7 +240,7 @@ void SpecificWorker::initialize()
     }
 
     // Camera visualizer
-    camera_viz_ = std::make_unique<rc::CameraVisualizer>(G.get(), room_polygon_for_viz, nullptr);
+    camera_viz_ = std::make_unique<rc::CameraVisualizer>(G, room_polygon_for_viz, nullptr);
     connect(custom_widget.btn_camera_viz, &QPushButton::clicked, this, &SpecificWorker::slot_show_camera_visualization);
 
     // ── DSR: resolve existing graph node IDs ──────────────────────────────
@@ -312,7 +312,7 @@ void SpecificWorker::compute()
         update_dsr(*loc_res);
 
     update_ui(loc_res, pose_for_draw);
-    fps_counter_.print("[Compute]", 2000);
+    fps_counter_.print("[Compute]", 3000);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -353,26 +353,6 @@ void SpecificWorker::dsr_update_pose(const rc::RoomConcept::UpdateResult& res)
     const Eigen::Vector2f t = res.robot_pose.translation();
     const float theta_room_to_robot = std::atan2(R(1, 0), R(0, 0));
 
-    // Diagnostic: print the raw SDF-optimized pose every N calls, with motion deltas.
-    {
-        static int print_count = 0;
-        static bool have_prev = false;
-        static float prev_x = 0.f, prev_y = 0.f, prev_yaw = 0.f;
-        if (++print_count % 5 == 0)
-        {
-            const float dx = have_prev ? (t.x() - prev_x) : 0.f;
-            const float dy = have_prev ? (t.y() - prev_y) : 0.f;
-            float dyaw = have_prev ? (theta_room_to_robot - prev_yaw) : 0.f;
-            while (dyaw > M_PI)  dyaw -= 2.f * M_PI;
-            while (dyaw < -M_PI) dyaw += 2.f * M_PI;
-            std::printf("[SDF_POSE] room_T_robot t=(%+.3f,%+.3f) yaw=%+.3frad (%+.1fdeg)  d=(%+.3f,%+.3f) dyaw=%+.3frad (%+.1fdeg)\n",
-                        t.x(), t.y(), theta_room_to_robot, theta_room_to_robot * 180.f / float(M_PI),
-                        dx, dy, dyaw, dyaw * 180.f / float(M_PI));
-            prev_x = t.x(); prev_y = t.y(); prev_yaw = theta_room_to_robot;
-            have_prev = true;
-        }
-    }
-
     // Convert room->robot estimate into robot->room when the room is a child of the robot.
     const Eigen::Vector2f t_robot_to_room = -(R.transpose() * t);
     const float theta_robot_to_room = -theta_room_to_robot;
@@ -386,12 +366,6 @@ void SpecificWorker::dsr_update_pose(const rc::RoomConcept::UpdateResult& res)
     const float x = room_node_created_ ? t_robot_to_room.x() : t.x();
     const float y = room_node_created_ ? t_robot_to_room.y() : t.y();
     const float theta = room_node_created_ ? theta_robot_to_room : theta_room_to_robot;
-
-    // std::print("[dsr_update_pose] {} -> {} | x={:.4f} y={:.4f} theta={:.4f} rad ({:.2f} deg) | t_raw=({:.4f},{:.4f}) theta_raw={:.4f}\n",
-    //            room_node_created_ ? "robot" : "world",
-    //            room_node_created_ ? "room"  : "robot",
-    //            x, y, theta, theta * 180.f / static_cast<float>(M_PI),
-    //            t.x(), t.y(), theta_room_to_robot);
 
     rt_api->insert_or_assign_edge_RT(parent_opt.value(), child_id,
                                      {x, y, 0.f},

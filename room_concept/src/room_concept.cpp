@@ -2461,19 +2461,19 @@ namespace rc
         {
             const float mse_old = window.front().sdf_mse_final;
             const float mse_new = window.back().sdf_mse_final;
-            std::cout << "[MotionLearn] frames=" << motion_learn_good_frames_
-                      << "  slip_k="      << learned_slip_k_
-                      << "  trans_noise=" << learned_odom_noise_trans_
-                      << "  bias=["  << learned_odom_bias_[0]
-                      << ", "        << learned_odom_bias_[1]
-                      << ", "        << learned_odom_bias_[2] << "]"
-                      << "  (slip_pairs="   << slip_k_count
-                      << "  trans_s="       << trans_count
-                      << "  trans_buf="     << trans_noise_sample_buf_.size()
-                      << "  n_pairs="       << n_pairs
-                      << "  mse_span="      << mse_old << "/" << mse_new
-                      << "  gate="          << quality_threshold << ")"
-                      << std::endl;
+            // std::cout << "[MotionLearn] frames=" << motion_learn_good_frames_
+            //           << "  slip_k="      << learned_slip_k_
+            //           << "  trans_noise=" << learned_odom_noise_trans_
+            //           << "  bias=["  << learned_odom_bias_[0]
+            //           << ", "        << learned_odom_bias_[1]
+            //           << ", "        << learned_odom_bias_[2] << "]"
+            //           << "  (slip_pairs="   << slip_k_count
+            //           << "  trans_s="       << trans_count
+            //           << "  trans_buf="     << trans_noise_sample_buf_.size()
+            //           << "  n_pairs="       << n_pairs
+            //           << "  mse_span="      << mse_old << "/" << mse_new
+            //           << "  gate="          << quality_threshold << ")"
+            //           << std::endl;
         }
     }
 
