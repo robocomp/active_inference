@@ -5,6 +5,7 @@
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QSurfaceFormat>
+#include <QTimer>
 #include <QWheelEvent>
 
 #include <algorithm>
@@ -25,6 +26,31 @@ VoxelOpenGLViewer::VoxelOpenGLViewer(QWidget* parent)
 
     setMinimumSize(420, 300);
     setFocusPolicy(Qt::StrongFocus);
+    last_update_request_ = std::chrono::steady_clock::now() - kMinUpdateIntervalMs;
+}
+
+void VoxelOpenGLViewer::request_update_throttled()
+{
+    const auto now = std::chrono::steady_clock::now();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_update_request_);
+    if (elapsed >= kMinUpdateIntervalMs)
+    {
+        last_update_request_ = now;
+        update();
+        return;
+    }
+
+    if (repaint_scheduled_)
+        return;
+
+    repaint_scheduled_ = true;
+    const auto wait_ms = std::max<std::chrono::milliseconds>(std::chrono::milliseconds{1}, kMinUpdateIntervalMs - elapsed);
+    QTimer::singleShot(static_cast<int>(wait_ms.count()), this, [this]
+    {
+        repaint_scheduled_ = false;
+        last_update_request_ = std::chrono::steady_clock::now();
+        update();
+    });
 }
 
 VoxelOpenGLViewer::~VoxelOpenGLViewer()
@@ -97,7 +123,7 @@ void VoxelOpenGLViewer::update_voxels(std::span<const QVector3D> positions,
         cpu_vertices_ = std::move(new_vertices);
         upload_pending_ = true;
     }
-    update();
+    request_update_throttled();
 }
 
 void VoxelOpenGLViewer::update_room_polygon(std::span<const float> polygon_x,
@@ -118,7 +144,20 @@ void VoxelOpenGLViewer::update_room_polygon_dual(std::span<const float> polygon_
         raw_polygon_height_ = height;
         rebuild_polygon_locked_();
     }
-    update();
+    request_update_throttled();
+}
+
+void VoxelOpenGLViewer::update_track_boxes(std::span<const QVector3D> mins,
+                                           std::span<const QVector3D> maxs,
+                                           std::span<const std::string> categories)
+{
+    {
+        std::scoped_lock lk(track_boxes_mutex_);
+        track_box_mins_.assign(mins.begin(), mins.end());
+        track_box_maxs_.assign(maxs.begin(), maxs.end());
+        track_box_categories_.assign(categories.begin(), categories.end());
+    }
+    request_update_throttled();
 }
 
 void VoxelOpenGLViewer::set_robot_pose(float x, float y, float theta)
@@ -130,7 +169,7 @@ void VoxelOpenGLViewer::set_robot_pose(float x, float y, float theta)
         robot_theta_ = theta;
         have_robot_pose_ = true;
     }
-    update();
+    request_update_throttled();
 }
 
 void VoxelOpenGLViewer::rebuild_polygon_locked_()
@@ -621,6 +660,82 @@ void VoxelOpenGLViewer::paintGL()
         glEnable(GL_DEPTH_TEST);
     }
 
+    // Draw tracked object bounding boxes (wireframe).
+    {
+        std::vector<QVector3D> local_mins, local_maxs;
+        std::vector<std::string> local_cats;
+        {
+            std::scoped_lock lk(track_boxes_mutex_);
+            local_mins = track_box_mins_;
+            local_maxs = track_box_maxs_;
+            local_cats = track_box_categories_;
+        }
+
+        if (!local_mins.empty() && local_mins.size() == local_maxs.size())
+        {
+            std::vector<Vertex> box_lines;
+            box_lines.reserve(local_mins.size() * 24);
+
+            const auto map_room_to_ogl = [&](float x, float y, float z) -> QVector3D
+            {
+                const float fx = voxel_flip_x_ ? -1.f : 1.f;
+                const float fy = voxel_flip_y_ ? -1.f : 1.f;
+                return {fx * x, z, fy * y};
+            };
+
+            constexpr int edges[12][2] = {
+                {0,1}, {1,2}, {2,3}, {3,0},
+                {4,5}, {5,6}, {6,7}, {7,4},
+                {0,4}, {1,5}, {2,6}, {3,7}
+            };
+
+            for (std::size_t i = 0; i < local_mins.size(); ++i)
+            {
+                const auto& mn = local_mins[i];
+                const auto& mx = local_maxs[i];
+                std::string cat;
+                if (i < local_cats.size()) cat = local_cats[i];
+                const QColor c = color_for_category(cat);
+                const float r = c.redF();
+                const float g = c.greenF();
+                const float b = c.blueF();
+
+                QVector3D corners[8] = {
+                    map_room_to_ogl(mn.x(), mn.y(), mn.z()),
+                    map_room_to_ogl(mx.x(), mn.y(), mn.z()),
+                    map_room_to_ogl(mx.x(), mx.y(), mn.z()),
+                    map_room_to_ogl(mn.x(), mx.y(), mn.z()),
+                    map_room_to_ogl(mn.x(), mn.y(), mx.z()),
+                    map_room_to_ogl(mx.x(), mn.y(), mx.z()),
+                    map_room_to_ogl(mx.x(), mx.y(), mx.z()),
+                    map_room_to_ogl(mn.x(), mx.y(), mx.z())
+                };
+
+                for (const auto& e : edges)
+                {
+                    const auto& a = corners[e[0]];
+                    const auto& d = corners[e[1]];
+                    box_lines.push_back(Vertex{a.x(), a.y(), a.z(), r, g, b});
+                    box_lines.push_back(Vertex{d.x(), d.y(), d.z(), r, g, b});
+                }
+            }
+
+            if (!box_lines.empty())
+            {
+                glDisable(GL_DEPTH_TEST);
+                room_vao_.bind();
+                room_vbo_.bind();
+                room_vbo_.allocate(box_lines.data(), static_cast<int>(box_lines.size() * sizeof(Vertex)));
+                program_.setUniformValue("u_round_points", 0);
+                glLineWidth(2.0f);
+                glDrawArrays(GL_LINES, 0, static_cast<GLsizei>(box_lines.size()));
+                room_vbo_.release();
+                room_vao_.release();
+                glEnable(GL_DEPTH_TEST);
+            }
+        }
+    }
+
     vao_.release();
     program_.release();
 }
@@ -727,6 +842,7 @@ QColor VoxelOpenGLViewer::color_for_category(const std::string& category)
 {
     if (category == "chair") return QColor(0, 170, 255);   // cyan-blue
     if (category == "table") return QColor(255, 125, 0);   // orange
+    if (category == "monitor") return QColor(186, 85, 211); // orchid-violet
 
     static const std::array<QColor, 20> palette = {
         QColor(220, 20, 60), QColor(0, 90, 181), QColor(34, 139, 34), QColor(255, 140, 0),

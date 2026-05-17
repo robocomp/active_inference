@@ -183,7 +183,9 @@ private:
 	cv::Mat compose_detection_canvas(const cv::Mat& rgb_frame, const std::vector<SegDetection>& detections) const;
 	void update_yolo_tab_views(const cv::Mat& rgb_frame_rgb, const cv::Mat& yolo_canvas_bgr);
 	bool ensure_room_and_robot_ready(FPSCounter& compute_fps);
-	std::optional<Mat::RTMat> get_room_robot_transform(FPSCounter& compute_fps);
+	std::optional<Mat::RTMat> get_room_robot_transform(FPSCounter& compute_fps, std::uint64_t timestamp_ms);
+	std::optional<Mat::RTMat> get_room_zed_transform(FPSCounter& compute_fps, std::uint64_t timestamp_ms);
+	std::uint64_t get_rgbd_frame_timestamp_ms(const RoboCompCameraRGBDSimple::TRGBD& rgbd) const;
 	void log_room_robot_pose_periodic(const Mat::RTMat& room_T_robot) const;
 	void update_room_polygon_periodic();
 	std::vector<SegDetection> detect_segmentation(const RoboCompCameraRGBDSimple::TRGBD& rgbd);
@@ -206,7 +208,8 @@ private:
 	void prune_stale_tracks(int frame_id);
 	void update_voxel_grid_from_rgbd(const RoboCompCameraRGBDSimple::TRGBD& rgbd,
 	                                const std::vector<SegDetection>& detections,
-	                                const Mat::RTMat& room_T_robot);
+	                                const Mat::RTMat& room_T_robot,
+	                                const Mat::RTMat& room_T_zed);
 
 	void update_room_polygon_in_viewers();
 	

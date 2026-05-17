@@ -11,6 +11,7 @@
 #include <QVector3D>
 
 #include <array>
+#include <chrono>
 #include <mutex>
 #include <span>
 #include <string>
@@ -36,6 +37,11 @@ public:
                                   std::span<const float> polygon_y,
                                   float height);
 
+    // Tracked object boxes in room frame (min/max corners per track).
+    void update_track_boxes(std::span<const QVector3D> mins,
+                            std::span<const QVector3D> maxs,
+                            std::span<const std::string> categories = {});
+
     // Robot pose in room frame (x, y in meters; theta in radians).
     void set_robot_pose(float x, float y, float theta);
 
@@ -57,6 +63,7 @@ private:
     };
 
     static QColor color_for_category(const std::string& category);
+    void request_update_throttled();
     QOpenGLShaderProgram program_;
     QOpenGLVertexArrayObject vao_;
     QOpenGLBuffer vbo_{QOpenGLBuffer::VertexBuffer};
@@ -69,6 +76,9 @@ private:
     // Store both floor and ceiling polygons
     std::vector<QVector3D> room_polygon_floor_;
     std::vector<QVector3D> room_polygon_ceiling_;
+    std::vector<QVector3D> track_box_mins_;
+    std::vector<QVector3D> track_box_maxs_;
+    std::vector<std::string> track_box_categories_;
     // Raw polygon coordinates (room frame) plus current debug rotation in 90deg steps.
     std::vector<float> raw_polygon_x_;
     std::vector<float> raw_polygon_y_;
@@ -87,10 +97,14 @@ private:
     float robot_theta_ = 0.f;
     std::mutex robot_pose_mutex_;
     std::mutex room_polygon_mutex_;
+    std::mutex track_boxes_mutex_;
     void rebuild_polygon_locked_();
 
     bool gl_ready_ = false;
     bool upload_pending_ = false;
+    bool repaint_scheduled_ = false;
+    std::chrono::steady_clock::time_point last_update_request_{};
+    static constexpr std::chrono::milliseconds kMinUpdateIntervalMs{33};
 
     float yaw_ = 0.0f;
     float pitch_ = +0.35f;

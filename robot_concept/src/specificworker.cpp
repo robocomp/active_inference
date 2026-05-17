@@ -200,17 +200,18 @@ void SpecificWorker::initialize()
 void SpecificWorker::compute()
 {
 	static FPSCounter compute_fps;
-	const auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+	const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
 		std::chrono::system_clock::now().time_since_epoch()).count();
 
 	// Read latest RGDB frame
-	const auto &[rgbd_opt] = rgbd_buffer.read(timestamp);
+	const auto &[rgbd_opt] = rgbd_buffer.read(now_ms);
 	if (!rgbd_opt.has_value())
 	{
-		qWarning() << "No RGBD data available at timestamp" << timestamp;
+		qWarning() << "No RGBD data available at timestamp" << now_ms;
 		return;
 	}
 	const auto& rgbd = rgbd_opt.value();
+	const std::uint64_t frame_ts_ms = get_rgbd_frame_timestamp_ms(rgbd);
 
 	// Always compute detections for voxel grid update
 	auto detections = detect_segmentation(rgbd);
@@ -237,8 +238,11 @@ void SpecificWorker::compute()
 		return;
 
 	// Get robot pose in room frame
-	auto room_T_robot = get_room_robot_transform(compute_fps);
+	auto room_T_robot = get_room_robot_transform(compute_fps, frame_ts_ms);
 	if (!room_T_robot.has_value())
+		return;
+	auto room_T_zed = get_room_zed_transform(compute_fps, frame_ts_ms);
+	if (!room_T_zed.has_value())
 		return;
 
 	// Log robot pose periodically (even if not ready) so the user gets feedback when it becomes available.
@@ -266,7 +270,7 @@ void SpecificWorker::compute()
 	// Update the voxel grid with the new RGBD frame and YOLO detections, using the robot pose to keep everything aligned in the room frame.
 	track_association_max_distance_m = params.TRACK_ASSOCIATION_MAX_DISTANCE_M;
 	track_max_missed_frames = params.TRACK_MAX_MISSED_FRAMES;
-	update_voxel_grid_from_rgbd(rgbd, detections, room_T_robot.value());
+	update_voxel_grid_from_rgbd(rgbd, detections, room_T_robot.value(), room_T_zed.value());
 
 	compute_fps.print("[Compute]", 2000);
 }
@@ -315,7 +319,7 @@ bool SpecificWorker::ensure_room_and_robot_ready(FPSCounter& compute_fps)
 	return true;
 }
 
-std::optional<Mat::RTMat> SpecificWorker::get_room_robot_transform(FPSCounter& compute_fps)
+std::optional<Mat::RTMat> SpecificWorker::get_room_robot_transform(FPSCounter& compute_fps, std::uint64_t timestamp_ms)
 {
 	if (!inner_eigen_api)
 	{
@@ -329,7 +333,7 @@ std::optional<Mat::RTMat> SpecificWorker::get_room_robot_transform(FPSCounter& c
 		return std::nullopt;
 	}
 
-	auto room_T_robot = inner_eigen_api->get_transformation_matrix(room_node_name_, robot_node_name_);
+	auto room_T_robot = inner_eigen_api->get_transformation_matrix(room_node_name_, robot_node_name_, timestamp_ms);
 	if (!room_T_robot.has_value())
 	{
 		if (!room_rt_wait_logged_)
@@ -343,6 +347,48 @@ std::optional<Mat::RTMat> SpecificWorker::get_room_robot_transform(FPSCounter& c
 	}
 
 	return room_T_robot;
+}
+
+std::optional<Mat::RTMat> SpecificWorker::get_room_zed_transform(FPSCounter& compute_fps, std::uint64_t timestamp_ms)
+{
+	if (!inner_eigen_api)
+	{
+		if (!room_rt_wait_logged_)
+		{
+			qWarning() << "InnerEigen API is not available. Voxelization paused.";
+			room_rt_wait_logged_ = true;
+			room_rt_ready_logged_ = false;
+		}
+		compute_fps.print("[Compute]", 2000);
+		return std::nullopt;
+	}
+
+	auto room_T_zed = inner_eigen_api->get_transformation_matrix(room_node_name_, "zed", timestamp_ms);
+	if (!room_T_zed.has_value())
+	{
+		if (!room_rt_wait_logged_)
+		{
+			qWarning() << "zed->room RTMat not available in InnerEigen API. Voxelization paused until transform is available.";
+			room_rt_wait_logged_ = true;
+			room_rt_ready_logged_ = false;
+		}
+		compute_fps.print("[Compute]", 2000);
+		return std::nullopt;
+	}
+
+	return room_T_zed;
+}
+
+std::uint64_t SpecificWorker::get_rgbd_frame_timestamp_ms(const RoboCompCameraRGBDSimple::TRGBD& rgbd) const
+{
+	if (rgbd.image.alivetime > 0)
+		return static_cast<std::uint64_t>(rgbd.image.alivetime);
+	if (rgbd.depth.alivetime > 0)
+		return static_cast<std::uint64_t>(rgbd.depth.alivetime);
+	if (rgbd.points.alivetime > 0)
+		return static_cast<std::uint64_t>(rgbd.points.alivetime);
+	return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+		std::chrono::system_clock::now().time_since_epoch()).count());
 }
 
 void SpecificWorker::log_room_robot_pose_periodic(const Mat::RTMat& room_T_robot) const
@@ -400,7 +446,8 @@ void SpecificWorker::postprocess_yolo_detections(std::vector<SegDetection>& dete
 // voxel grid update logic 
 void SpecificWorker::update_voxel_grid_from_rgbd(const RoboCompCameraRGBDSimple::TRGBD& rgbd,
 	                                              const std::vector<SegDetection>& detections,
-	                                              const Mat::RTMat& room_T_robot)
+	                                              const Mat::RTMat& room_T_robot,
+	                                              const Mat::RTMat& room_T_zed)
 {
 	// Update the unified voxel grid: project each RGBD point into 3D,
 	// label it with the YOLO class if its pixel falls inside a mask.
@@ -478,18 +525,9 @@ void SpecificWorker::update_voxel_grid_from_rgbd(const RoboCompCameraRGBDSimple:
 
 		if (!selected_points_robot.empty())
 		{
-			// The RGBD points arrive in a robot-aligned frame (X right, Y forward, Z up)
-			// with the camera origin, so we must use the robot orientation plus the
-			// camera position in room. Applying the zed mount yaw here rotates the cloud
-			// an extra 90 degrees relative to the robot marker and room polygon.
-			const auto room_T_robot_opt = inner_eigen_api->get_transformation_matrix(room_node_name_, robot_node_name_);
-			if (!room_T_robot_opt.has_value())
-				return;
-			const auto room_T_camera_opt = inner_eigen_api->get_transformation_matrix(room_node_name_, "zed");
-			if (!room_T_camera_opt.has_value())
-				return;
-			const Mat::RTMat& room_T_robot = room_T_robot_opt.value();
-			const Mat::RTMat& room_T_camera = room_T_camera_opt.value();
+			// Points are expressed in robot-oriented axes but originate at the camera.
+			// So use room->robot rotation and room->zed translation, both sampled at
+			// the same RGBD timestamp, to preserve heading and eliminate temporal blur.
 
 			const std::size_t n_sel = selected_points_robot.size();
 			Eigen::Matrix<double, 3, Eigen::Dynamic> pts_robot(3, static_cast<Eigen::Index>(n_sel));
@@ -501,7 +539,7 @@ void SpecificWorker::update_voxel_grid_from_rgbd(const RoboCompCameraRGBDSimple:
 			}
 
 			Eigen::Matrix<double, 3, Eigen::Dynamic> pts_room =
-				(room_T_robot.linear() * pts_robot).colwise() + room_T_camera.translation();
+				(room_T_robot.linear() * pts_robot).colwise() + room_T_zed.translation();
 
 			for (std::size_t i = 0; i < n_sel; ++i)
 			{
@@ -593,8 +631,41 @@ void SpecificWorker::update_voxel_grid_from_rgbd(const RoboCompCameraRGBDSimple:
 			qpts.reserve(sem.points.size());
 			for (const auto& p : sem.points)
 				qpts.emplace_back(p.x(), p.y(), p.z());
-			   if (voxel_viewer_gl)
-				   voxel_viewer_gl->update_voxels(qpts, sem.categories, sem.probs);
+			if (voxel_viewer_gl)
+			{
+				voxel_viewer_gl->update_voxels(qpts, sem.categories, sem.probs);
+
+				std::vector<QVector3D> box_mins;
+				std::vector<QVector3D> box_maxs;
+				std::vector<std::string> box_categories;
+
+				const auto track_ids = voxel_grid->get_all_track_ids();
+				box_mins.reserve(track_ids.size());
+				box_maxs.reserve(track_ids.size());
+				box_categories.reserve(track_ids.size());
+
+				for (const int tid : track_ids)
+				{
+					auto pts = voxel_grid->get_points(tid);
+					if (pts.size() < 10)
+						continue;
+
+					Eigen::Vector3f mn = pts.front();
+					Eigen::Vector3f mx = pts.front();
+					for (const auto& p : pts)
+					{
+						mn = mn.cwiseMin(p);
+						mx = mx.cwiseMax(p);
+					}
+
+					const auto [dom_cat, _] = voxel_grid->object_dominant_category(tid);
+					box_mins.emplace_back(mn.x(), mn.y(), mn.z());
+					box_maxs.emplace_back(mx.x(), mx.y(), mx.z());
+					box_categories.push_back(dom_cat);
+				}
+
+				voxel_viewer_gl->update_track_boxes(box_mins, box_maxs, box_categories);
+			}
 		}
 
 		if (compute_frame_ % 30 == 0)
@@ -1177,7 +1248,7 @@ void SpecificWorker::read_rgbd_thread()
     auto wait_period = std::chrono::milliseconds(getPeriod("Compute"));
     while (!stop_rgbd_thread)
     {
-        const auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+		const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
         try
         {
@@ -1244,9 +1315,13 @@ void SpecificWorker::read_rgbd_thread()
 					qWarning() << "Camera node not found in DSR graph";
 			}
 
-            rgbd_buffer.put<0>(
+			std::uint64_t frame_ts_ms = get_rgbd_frame_timestamp_ms(frame);
+			if (frame_ts_ms == 0)
+				frame_ts_ms = static_cast<std::uint64_t>(now_ms);
+
+			rgbd_buffer.put<0>(
                 std::move(frame),
-                timestamp,
+				frame_ts_ms,
                 [](auto &&input, auto &output) { output = std::forward<decltype(input)>(input); });
 
             if (p_ms > 0)
