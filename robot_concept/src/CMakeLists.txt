@@ -30,14 +30,50 @@ endif()
 find_package(TBB REQUIRED)
 LIST(APPEND LIBS ${LIBS} TBB::tbb)
 
-# ONNX Runtime (same path as the reference component)
-set(ONNXRUNTIME_ROOT "/usr/local/onnxruntime" CACHE PATH "Path to ONNX Runtime installation")
-if(NOT EXISTS "${ONNXRUNTIME_ROOT}")
-  message(FATAL_ERROR "ONNX Runtime not found at ${ONNXRUNTIME_ROOT}")
+# ONNX Runtime
+set(ONNXRUNTIME_ROOT "$ENV{ONNXRUNTIME_ROOT}" CACHE PATH "Path to ONNX Runtime installation prefix")
+
+set(_onnxruntime_hints)
+if(ONNXRUNTIME_ROOT)
+  list(APPEND _onnxruntime_hints "${ONNXRUNTIME_ROOT}")
 endif()
-include_directories(${ONNXRUNTIME_ROOT}/include)
-link_directories(${ONNXRUNTIME_ROOT}/lib)
-LIST(APPEND LIBS ${LIBS} onnxruntime)
+list(APPEND _onnxruntime_hints
+  "/usr/local/onnxruntime"
+  "/opt/onnxruntime"
+  "/opt/onnxruntime-gpu"
+  "/usr"
+  "/usr/local")
+
+find_path(ONNXRUNTIME_INCLUDE_DIR
+  NAMES onnxruntime_cxx_api.h
+  HINTS ${_onnxruntime_hints}
+  PATH_SUFFIXES include)
+
+find_library(ONNXRUNTIME_LIBRARY
+  NAMES onnxruntime
+  HINTS ${_onnxruntime_hints}
+  PATH_SUFFIXES lib lib64)
+
+if(NOT ONNXRUNTIME_INCLUDE_DIR OR NOT ONNXRUNTIME_LIBRARY)
+  message(FATAL_ERROR
+    "ONNX Runtime not found. Set ONNXRUNTIME_ROOT to the unpacked/install prefix, "
+    "for example: cmake -S . -B build -DONNXRUNTIME_ROOT=/opt/onnxruntime")
+endif()
+
+get_filename_component(ONNXRUNTIME_LIBRARY_DIR "${ONNXRUNTIME_LIBRARY}" DIRECTORY)
+message(STATUS "Using ONNX Runtime include dir: ${ONNXRUNTIME_INCLUDE_DIR}")
+message(STATUS "Using ONNX Runtime library: ${ONNXRUNTIME_LIBRARY}")
+
+add_library(onnxruntime::onnxruntime SHARED IMPORTED GLOBAL)
+set_target_properties(onnxruntime::onnxruntime PROPERTIES
+  IMPORTED_LOCATION "${ONNXRUNTIME_LIBRARY}"
+  INTERFACE_INCLUDE_DIRECTORIES "${ONNXRUNTIME_INCLUDE_DIR}")
+
+set(CMAKE_BUILD_RPATH_USE_ORIGIN TRUE)
+set(CMAKE_BUILD_RPATH "${ONNXRUNTIME_LIBRARY_DIR}")
+set(CMAKE_INSTALL_RPATH "${ONNXRUNTIME_LIBRARY_DIR}")
+
+LIST(APPEND LIBS ${LIBS} onnxruntime::onnxruntime)
 
 # OpenCV (needed by YoloSegDetector)
 find_package(OpenCV REQUIRED)

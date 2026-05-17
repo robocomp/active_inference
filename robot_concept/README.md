@@ -1,161 +1,196 @@
 # robot_concept
-A brief introduction to the component. Describe its purpose, functionality, and any specific features here.
-```
-<YOUR BRIEFING>
-```
 
-## Dependencies
-The following dependencies are required to build and run robot_concept. Ensure they are installed and properly configured on your system before proceeding:
-```
-sudo apt install tensorrt-dev-cuda-13.2
 
-```
+`robot_concept` consumes RGBD and lidar data, segments semantic objects with YOLO, voxelizes them in room coordinates, and publishes the resulting scene to DSR and the local OpenGL viewer.
 
-## Configuration parameters
-Like any other component, robot_concept requires a configuration file to start. In etc/config or etc/config.toml, you can find an example of the configuration file.
+---
 
-## Starting the component
-To avoid modifying the config file directly in the repository, you can copy it to the component's home directory. This prevents changes from being overridden by future `git pull` commands:
+## Quick Start Checklist (New Users)
+
+1. **Install GCC 15** (required for C++23 and `flat_set`)
+2. **Install system dependencies** (Qt6, OpenCV, TBB, Eigen, RoboComp/DSR)
+3. **Install ONNX Runtime GPU** (see below)
+4. **Install CUDA and (optionally) TensorRT** (see below)
+5. **Configure and build** (see below)
+6. **Copy and edit config file**
+7. **Run the agent**
+
+---
+
+
+## Requirements
+
+- **GCC 15** (required for C++23 and `flat_set`)
+- RoboComp / DSR runtime and the generated interfaces already available in the build environment.
+- OpenCV
+- TBB
+- Qt6 with OpenGL / OpenGLWidgets
+- ONNX Runtime GPU build for YOLO inference
+- CUDA runtime compatible with the chosen ONNX Runtime package
+- Optional: TensorRT for faster YOLO inference
+
+### GCC 15 Installation (Ubuntu)
+
+Ubuntu 24.04+ may provide GCC 15 directly:
 
 ```bash
-cd <robot_concept's path> 
-cp etc/config etc/yourConfig
+sudo apt update
+sudo apt install g++-15
 ```
 
-After editing the new config file we can run the component:
+If not available, see [GCC Wiki](https://gcc.gnu.org/wiki/InstallingGCC) or use a tool like `update-alternatives` to select GCC 15.
+
+**Check your compiler:**
 
 ```bash
-cmake -B build && make -C build -j12 # Compile the component
-bin/robot_concept etc/yourConfig # Execute the component
+g++-15 --version
 ```
------
------
-# Developer Notes
-This section explains how to work with the generated code of robot_concept, including what can be modified and how to use key features.
+
+If you see errors about `flat_set` or C++23 features, you are not using GCC 15.
+
+tensorrt-dev
+
+## System Packages
+
+Typical Ubuntu packages needed for build/runtime:
+
+```bash
+sudo apt update
+sudo apt install -y \
+  build-essential cmake pkg-config \
+  qt6-base-dev qt6-base-dev-tools qt6-declarative-dev qt6-scxml-dev \
+  libqt6opengl6-dev libopencv-dev libtbb-dev \
+  libeigen3-dev
+```
+
+If TensorRT acceleration is desired, install the matching TensorRT runtime/devel packages for the CUDA version of the target machine (e.g., `libnvinfer-dev`, `libnvinfer-plugin-dev`).
+
+
+
+## ONNX Runtime Installation
+
+This component does not assume a fixed ONNX Runtime location. CMake will search these in order:
+
+1. `-DONNXRUNTIME_ROOT=...`
+2. `ONNXRUNTIME_ROOT` environment variable
+3. Common prefixes such as `/usr/local/onnxruntime`, `/opt/onnxruntime`, `/usr`, `/usr/local`
+
+**Download ONNX Runtime GPU** from https://github.com/microsoft/onnxruntime/releases (choose the GPU tarball matching your CUDA version).
+
+Recommended layout on a new machine:
+
+```bash
+sudo mkdir -p /opt
+sudo tar -C /opt -xzf onnxruntime-linux-x64-gpu-<version>.tgz
+sudo ln -sfn /opt/onnxruntime-linux-x64-gpu-<version> /opt/onnxruntime
+```
+
+Then configure with:
+
+```bash
+cmake -S . -B build -DONNXRUNTIME_ROOT=/opt/onnxruntime
+```
+
+If you prefer system-wide linker visibility, you can also add the ONNX Runtime `lib` directory to the system loader config, but it is not required because the executable stores an rpath to the selected ONNX Runtime library directory.
+
+
+## Build
+
+```bash
+cd /path/to/robot_concept
+cmake -S . -B build -DONNXRUNTIME_ROOT=/opt/onnxruntime -DCMAKE_CXX_COMPILER=g++-15 -DCMAKE_C_COMPILER=gcc-15
+cmake --build build -j$(nproc)
+```
+
+If you have multiple GCC versions, always specify the compiler as above.
+
+## Configuration Files
+
+Two example config formats are provided:
+
+- `etc/config` for the legacy format
+- `etc/config.toml` for the TOML format
+
+For normal use, copy one of them and edit the copy:
+
+```bash
+cd /path/to/robot_concept
+cp etc/config.toml etc/local_config.toml
+```
+
+## Run
+
+```bash
+cd /path/to/robot_concept
+bin/robot_concept --Ice.Config=etc/local_config.toml
+```
+
+
+## CUDA / TensorRT Notes
+
+- For CUDA-only inference, the default system runtime is usually enough.
+- For TensorRT inference, the ONNX Runtime GPU package, CUDA runtime, and TensorRT runtime **must be ABI-compatible**. If more than one CUDA/TensorRT stack is installed, ensure the desired one is first in `LD_LIBRARY_PATH`.
+
+**Examples:**
+
+CUDA 12.8:
+
+```bash
+export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/local/cuda-12.8/lib64:$LD_LIBRARY_PATH
+```
+
+CUDA 13.2:
+
+```bash
+export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/local/cuda-13.2/lib64:$LD_LIBRARY_PATH
+```
+
+**Useful startup signals:**
+
+- `[YOLO] effective flags: use_gpu=true use_trt=true`
+- `[YoloSegDetector] TensorRT EP registered ...`
+- `[YoloSegDetector] CUDA EP registered`
+
+If TensorRT fails to initialize, the detector falls back to CUDA instead of crashing.
+
+
+## Install
+
+The component install target copies both example configs to RoboComp's `etc-default` directory:
+
+- `robot_concept.conf`
+- `robot_concept.toml`
+
+Standard install:
+
+```bash
+cmake --install build
+```
+
 ## Editable Files
-You can freely edit the following files:
-- etc/* – Configuration files
-- src/* – Component logic and implementation
-- README.md – Documentation
 
-The `generated` folder contains autogenerated files. **Do not edit these files directly**, as they will be overwritten every time the component is regenerated with RoboComp.
+Edit freely:
 
-## ConfigLoader
-The `ConfigLoader` simplifies fetching configuration parameters. Use the `get<>()` method to retrieve parameters from the configuration file.
-```C++
-// Syntax
-type variable = this->configLoader.get<type>("ParameterName");
-
-// Example
-int computePeriod = this->configLoader.get<int>("Period.Compute");
-```
-
-## StateMachine
-RoboComp components utilize a state machine to manage the main execution flow. The default states are:
-
-1. **Initialize**:
-    - Executes once after the constructor.
-    - May use for parameter initialization, opening devices, and calculating constants.
-2. **Compute**:
-    - Executes cyclically after Initialize.
-    - Place your functional logic here. If an emergency is detected, call goToEmergency() to transition to the Emergency state.
-3. **Emergency**:
-    - Executes cyclically during emergencies.
-    - Once resolved, call goToRestore() to transition to the Restore state.
-4. **Restore**:
-    - Executes once to restore the component after an emergency.
-    - Transitions automatically back to the Compute state.
-
-### Setting and Getting State Periods
-You can get the period of some state with de function `getPeriod` and set with `setPeriod`
-```C++
-int currentPeriod = getPeriod("Compute");   // Get the current Compute period
-setPeriod("Compute", currentPeriod * 0.5); // Set Compute period to half
-```
-
-### Creating Custom States
-To add a custom state, follow these steps in the constructor:
-1. **Define Your State** Use `GRAFCETStep` to create your state. If any function is not required, use `nullptr`.
-
-```C++
-states["CustomState"] = std::make_unique<GRAFCETStep>("CustomState", period, 
-                                                      std::bind(&SpecificWorker::customLoop, this),  // Cyclic function
-                                                      std::bind(&SpecificWorker::customEnter, this), // On-enter function
-                                                      std::bind(&SpecificWorker::customExit, this)); // On-exit function
-
-```
-2. **Define Transitions** Add transitions between states using `addTransition`. You can trigger transitions using Qt signals such as `entered()` and `exited()` or custom signals in .h.
-```C++
-// Syntax
-states[srcState]->addTransition(originOfSignal, signal, dstState)
-
-// Example
-states["CustomState"]->addTransition(states["CustomState"].get(), SIGNAL(entered()), states["OtherState"].get());
-states["Compute"]->addTransition(this, SIGNAL(customSignal()), states["CustomState"].get());
-
-```
-3. **Add State to the StateMachine** Include your state in the state machine:
-```C++
-statemachine.addState(states["CustomState"].get());
-
-```
-
-## Hibernation Flag
-The `#define HIBERNATION_ENABLED` flag in `specificworker.h` activates hibernation mode. When enabled, the component reduces its state execution frequency to 500ms if no method calls are received within 5 seconds. Once a method call is received, the period is restored to its original value.
-
-Default hibernation monitoring runs every 500ms.
-
-## Changes Introduced in the New Code Generator
-If you’re regenerating or adapting old components, here’s what has changed:
-
-- Deprecated classes removed: `CommonBehavior`, `InnerModel`, `AGM`, `Monitors`, and `src/config.h`.
-- Configuration parsing replaced with the new `ConfigLoader`, supporting both .`toml` and legacy configuration formats.
-- Skeleton code split: `generated` (non-editable) and `src` (editable).
-- Component period is now configurable in the configuration file.
-- State machine integrated with predefined states: `Initialize`, `Compute`, `Emergency`, and `Restore`.
-- With the `dsr` option, you generate `G` in the GenericWorker, making the viewer independent. If you want to use the `dsrviewer`, you will need the `Qt GUI (QMainWindow)` and the `dsr` option enabled in the **CDSL**.
-- Strings in the legacy config now need to be enclosed in quotes (`""`).
-
-## Adapting Old Components
-To adapt older components to the new structure:
-
-1. **Add** `Period.Compute` and `Period.Emergency` and swap Endpoints and Proxies with their names in the `etc/config` file.
-2. **Merge** the new `src/CMakeLists.txt` and the old `CMakeListsSpecific` files.
-3. **Modify** `specificworker.h`:
-    - Add the `HIBERNATION_ENABLED` flag.
-    - Update the constructor signature.
-    - Replace `setParams` with state definitions (`Initialize`, `Compute`, etc.).
-4. **Modify** `specificworker.cpp`:
-    - Refactor the constructor entirely.
-    - Move `setParams` logic to the `initialize` state using `ConfigLoader.get<>()`.
-    - Remove the old timer and period logic and replace it with `getPeriod()` and `setPeriod()`.
-    - Add the new function state `Emergency`, and `Restore`.
-    - Add the following code to the implements and publish functions:
-        ```C++
-        #ifdef HIBERNATION_ENABLED
-            hibernation = true;
-        #endif
-        ```
-5. **Update Configuration Strings**, ensure all strings in the `config` under legacy are enclosed in quotes (`""`), as required by the new structure.
-6. **Using DSR**, if you use the DSR option, note that `G` is generated in `GenericWorker`, making the viewer independent. However, to use the `dsrviewer`, you must integrate a `Qt GUI (QMainWindow)` and enable the `dsr` option in the **CDSL**. 
-7. **Installing toml++**, to use the new .toml configuration format, install the toml++ library:
-```bash
-mkdir ~/software 2> /dev/null; git clone https://github.com/marzer/tomlplusplus.git ~/software/tomlplusplus
-cd ~/software/tomlplusplus && cmake -B build && sudo make install -C build -j12 && cd -
-```
-8. **Installing qt6 Dependencies**
-```bash
-sudo apt install qt6-base-dev qt6-declarative-dev qt6-scxml-dev libqt6statemachineqml6 libqt6statemachine6
-
-mkdir ~/software 2> /dev/null; git clone https://github.com/GillesDebunne/libQGLViewer.git ~/software/libQGLViewer
-cd ~/software/libQGLViewer && qmake6 *.pro && make -j12 && sudo make install && sudo ldconfig && cd -
-```
-9. **Generated Code**, When the component is generated, a `generated` folder is created containing non-editable files. You can delete everything in the `src` directory except for:
-- `src/specificworker.h`
-- `src/specificworker.cpp`
-- `src/CMakeLists.txt`
-- `src/mainUI.ui`
+- `src/*`
+- `etc/*`
 - `README.md`
-- `etc/config`
-- `etc/config.toml`
-- Your Clases...
+
+
+Do not edit `generated/*` directly; it is regenerated by RoboComp tools.
+
+---
+
+## Troubleshooting
+
+**Build fails with error about `flat_set` or C++23 features:**
+- You are not using GCC 15. Re-run CMake with `-DCMAKE_CXX_COMPILER=g++-15 -DCMAKE_C_COMPILER=gcc-15`.
+
+**ONNX Runtime not found:**
+- Make sure you downloaded the GPU tarball and set `ONNXRUNTIME_ROOT` correctly.
+
+**TensorRT or CUDA errors at runtime:**
+- Check that your CUDA and TensorRT versions match the ONNX Runtime build. See ONNX Runtime release notes for compatibility.
+- Use `LD_LIBRARY_PATH` to prioritize the correct CUDA/TRT libraries.
+
+**Still stuck?**
+- Check the [Issues](https://github.com/robocomp/robocomp/issues) or ask in the RoboComp community.

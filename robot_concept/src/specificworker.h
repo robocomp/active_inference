@@ -37,6 +37,7 @@
 
 class UnifiedVoxelGrid;
 namespace rc { class VoxelOpenGLViewer; }
+class QLabel;
 
 /**
  * \brief Class SpecificWorker implements the core functionality of the component.
@@ -179,6 +180,8 @@ private:
 	};
 
 	void draw_detections(const cv::Mat& rgb_frame, const std::vector<SegDetection>& detections) const;
+	cv::Mat compose_detection_canvas(const cv::Mat& rgb_frame, const std::vector<SegDetection>& detections) const;
+	void update_yolo_tab_views(const cv::Mat& rgb_frame_rgb, const cv::Mat& yolo_canvas_bgr);
 	bool ensure_room_and_robot_ready(FPSCounter& compute_fps);
 	std::optional<Mat::RTMat> get_room_robot_transform(FPSCounter& compute_fps);
 	void log_room_robot_pose_periodic(const Mat::RTMat& room_T_robot) const;
@@ -209,6 +212,8 @@ private:
 	
 	// Custom widget for docking in the graph viewer
 	Custom_widget custom_widget;
+	Custom_widget custom_widget_yolo;
+	QLabel* yolo_image_label_ = nullptr;
 	std::unique_ptr<rc::VoxelOpenGLViewer> voxel_viewer_gl;
 
 	// Unified voxel grid — scene-level semantic map

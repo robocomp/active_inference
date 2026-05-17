@@ -33,7 +33,7 @@ Yolo.model_path  = "yolo26l-seg.onnx"
 Yolo.conf_thresh = 0.25
 Yolo.iou_thresh  = 0.45
 Yolo.use_gpu     = True
-Yolo.use_trt     = False
+Yolo.use_trt     = True
 
 Component.Debug.Verbose = true
 

@@ -4,6 +4,8 @@
 #include <cassert>
 #include <cmath>
 #include <cstring>
+#include <dlfcn.h>
+#include <filesystem>
 #include <iostream>
 #include <mutex>
 #include <numeric>
@@ -27,6 +29,104 @@ YoloSegDetector::YoloSegDetector(const std::string&              model_path,
 {
     class_names_ = class_names.empty() ? default_class_names() : class_names;
 
+    auto can_use_tensorrt = []() -> bool
+    {
+        // Probe the core TensorRT runtime + builder resource so ORT does not segfault
+        // later when creating the builder.
+        struct HandleGuard
+        {
+            void* h = nullptr;
+            ~HandleGuard() { if (h) dlclose(h); }
+        } nvinfer, builder_res;
+
+        auto try_open_any = [](std::initializer_list<const char*> names) -> void*
+        {
+            for (const char* name : names)
+            {
+                if (void* h = dlopen(name, RTLD_LAZY | RTLD_LOCAL); h)
+                    return h;
+            }
+            return nullptr;
+        };
+
+        nvinfer.h = try_open_any({"libnvinfer.so", "libnvinfer.so.10", "libnvinfer.so.10.9.0"});
+        if (!nvinfer.h)
+        {
+            std::cerr << "[YoloSegDetector] TensorRT runtime missing (libnvinfer.so): "
+                      << dlerror() << "\n";
+            return false;
+        }
+
+        builder_res.h = try_open_any({
+            "libnvinfer_builder_resource.so",
+            "libnvinfer_builder_resource.so.10",
+            "libnvinfer_builder_resource.so.10.9.0"
+        });
+
+        // TensorRT 10.16+ may package builder resources as split SM/PTX libraries
+        // (e.g., libnvinfer_builder_resource_sm86.so.10.16.1) without a generic soname.
+        if (!builder_res.h)
+        {
+            const std::array<std::filesystem::path, 3> probe_dirs = {
+                "/usr/lib/x86_64-linux-gnu",
+                "/lib/x86_64-linux-gnu",
+                "/usr/local/cuda-13.2/lib64"
+            };
+            for (const auto& dir : probe_dirs)
+            {
+                std::error_code ec;
+                if (!std::filesystem::exists(dir, ec) || ec)
+                    continue;
+                for (const auto& entry : std::filesystem::directory_iterator(dir, ec))
+                {
+                    if (ec) break;
+                    if (!entry.is_regular_file(ec) || ec)
+                        continue;
+                    const auto name = entry.path().filename().string();
+                    if (name.rfind("libnvinfer_builder_resource_", 0) == 0 &&
+                        name.find(".so") != std::string::npos)
+                    {
+                        builder_res.h = dlopen(entry.path().c_str(), RTLD_LAZY | RTLD_LOCAL);
+                        if (builder_res.h)
+                            break;
+                    }
+                }
+                if (builder_res.h)
+                    break;
+            }
+        }
+
+        if (!builder_res.h)
+        {
+            std::cerr << "[YoloSegDetector] TensorRT builder resources missing "
+                      << "(libnvinfer_builder_resource.so): " << dlerror() << "\n";
+            return false;
+        }
+
+        return true;
+    };
+
+    auto prefer_system_tensorrt_stack = []()
+    {
+        // Force the process to bind against the system TensorRT 10.16 stack before
+        // ONNX Runtime's TensorRT EP gets a chance to pull an older CUDA-12 install
+        // from the global linker cache.
+        static const std::array<const char*, 3> libs = {
+            "/usr/lib/x86_64-linux-gnu/libnvinfer.so.10",
+            "/usr/lib/x86_64-linux-gnu/libnvonnxparser.so.10",
+            "/usr/lib/x86_64-linux-gnu/libnvinfer_plugin.so.10"
+        };
+
+        for (const char* lib : libs)
+        {
+            if (void* h = dlopen(lib, RTLD_NOW | RTLD_GLOBAL); h == nullptr)
+            {
+                std::cerr << "[YoloSegDetector] Failed to preload TensorRT library "
+                          << lib << ": " << dlerror() << "\n";
+            }
+        }
+    };
+
     try
     {
         env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "YoloSegDetector");
@@ -38,20 +138,30 @@ YoloSegDetector::YoloSegDetector(const std::string&              model_path,
         {
             if (use_trt)
             {
-                try
+                if (can_use_tensorrt())
                 {
-                    OrtTensorRTProviderOptions trt{};
-                    trt.device_id               = 0;
-                    trt.trt_fp16_enable         = 1;
-                    trt.trt_engine_cache_enable = 1;
-                    trt.trt_engine_cache_path   = ".trt_cache";
-                    session_opts_.AppendExecutionProvider_TensorRT(trt);
-                    std::cout << "[YoloSegDetector] TensorRT EP registered (FP16, cache=.trt_cache)\n";
+                    prefer_system_tensorrt_stack();
+                    try
+                    {
+                        OrtTensorRTProviderOptions trt{};
+                        trt.device_id                    = 0;
+                        trt.trt_fp16_enable              = 1;
+                        trt.trt_engine_cache_enable      = 1;
+                        trt.trt_engine_cache_path        = ".trt_cache";
+                        trt.trt_max_partition_iterations = 1000;
+                        trt.trt_min_subgraph_size        = 1;
+                        session_opts_.AppendExecutionProvider_TensorRT(trt);
+                        std::cout << "[YoloSegDetector] TensorRT EP registered (FP16, cache=.trt_cache)\n";
+                    }
+                    catch (const Ort::Exception& e)
+                    {
+                        std::cerr << "[YoloSegDetector] TensorRT EP unavailable ("
+                                  << e.what() << "), using CUDA only\n";
+                    }
                 }
-                catch (const Ort::Exception& e)
+                else
                 {
-                    std::cerr << "[YoloSegDetector] TensorRT EP unavailable ("
-                              << e.what() << "), using CUDA only\n";
+                    std::cerr << "[YoloSegDetector] TensorRT disabled due to missing shared libraries; using CUDA only\n";
                 }
             }
             try

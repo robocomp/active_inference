@@ -14,7 +14,7 @@ configFile = "room.json"
 domain = 0
 tree = false
 graph = true
-2d = true
+2d = false
 3d = false
 
 # --- Multiple Instance Template ---
@@ -36,7 +36,7 @@ model_path  = "yolo26l-seg.onnx"
 conf_thresh = 0.25
 iou_thresh  = 0.45
 use_gpu     = true
-use_trt     = false
+use_trt     = true
 
 # Hungarian association and mask erosion parameters
 mask_erode_kernel = 2

@@ -52,13 +52,6 @@ void VoxelOpenGLViewer::update_voxels(std::span<const QVector3D> positions,
         const float fy = voxel_flip_y_ ? -1.f : 1.f;
         const QVector3D mapped{fx * p.x(), p.z(), fy * p.y()};
 
-        // Diagnostic: print first 5 voxels every 60 calls.
-        static int call_count = 0;
-        if (i == 0) ++call_count;
-        if (call_count % 60 == 1 && i < 5)
-            printf("[VoxelDiag] raw[%zu] room=(x=%.3f y=%.3f z=%.3f)  opengl=(x=%.3f y=%.3f z=%.3f)\n",
-                   i, p.x(), p.y(), p.z(), mapped.x(), mapped.y(), mapped.z());
-
         QColor c = QColor(140, 145, 155);
         if (!categories.empty() && i < categories.size())
             c = color_for_category(categories[i]);
@@ -168,12 +161,6 @@ void VoxelOpenGLViewer::rebuild_polygon_locked_()
         floor.emplace_back(rx, 0.f, ry);
         ceiling.emplace_back(rx, raw_polygon_height_, ry);
     }
-
-    printf("[PolygonDiag] rotation_quadrants=%d (=%d deg), height=%.3f\n",
-           q, q * 90, raw_polygon_height_);
-    printf("[PolygonDiag] flip_x=%d flip_y=%d\n", polygon_flip_x_ ? 1 : 0, polygon_flip_y_ ? 1 : 0);
-    for (std::size_t i = 0; i < n; ++i)
-        printf("[PolygonDiag] floor[%zu]  OpenGL=(x=%.3f, y=%.3f, z=%.3f)\n", i, floor[i].x(), floor[i].y(), floor[i].z());
 
     // Anchor the camera target to the room polygon centroid so the scene
     // stays centered regardless of where the robot/voxels are.
@@ -688,7 +675,6 @@ void VoxelOpenGLViewer::keyPressEvent(QKeyEvent* event)
             polygon_rotation_quadrants_ = ((polygon_rotation_quadrants_ + (reverse ? -1 : 1)) % 4 + 4) % 4;
             rebuild_polygon_locked_();
         }
-        printf("[PolygonDiag] R-key: rotation set to %d deg\n", polygon_rotation_quadrants_ * 90);
         update();
         event->accept();
         return;
@@ -700,7 +686,6 @@ void VoxelOpenGLViewer::keyPressEvent(QKeyEvent* event)
             polygon_flip_x_ = !polygon_flip_x_;
             rebuild_polygon_locked_();
         }
-        printf("[PolygonDiag] F-key: flip_x = %d\n", polygon_flip_x_ ? 1 : 0);
         update();
         event->accept();
         return;
@@ -712,7 +697,6 @@ void VoxelOpenGLViewer::keyPressEvent(QKeyEvent* event)
             polygon_flip_y_ = !polygon_flip_y_;
             rebuild_polygon_locked_();
         }
-        printf("[PolygonDiag] G-key: flip_y = %d\n", polygon_flip_y_ ? 1 : 0);
         update();
         event->accept();
         return;
@@ -720,21 +704,18 @@ void VoxelOpenGLViewer::keyPressEvent(QKeyEvent* event)
     if (event->key() == Qt::Key_V)
     {
         voxel_flip_x_ = !voxel_flip_x_;
-        printf("[VoxelDiag] V-key: voxel_flip_x = %d (next cloud update will apply)\n", voxel_flip_x_ ? 1 : 0);
         event->accept();
         return;
     }
     if (event->key() == Qt::Key_B)
     {
         voxel_flip_y_ = !voxel_flip_y_;
-        printf("[VoxelDiag] B-key: voxel_flip_y = %d (next cloud update will apply)\n", voxel_flip_y_ ? 1 : 0);
         event->accept();
         return;
     }
     if (event->key() == Qt::Key_H)
     {
         show_voxels_ = !show_voxels_;
-        printf("[VoxelDiag] H-key: show_voxels = %d\n", show_voxels_ ? 1 : 0);
         update();
         event->accept();
         return;
