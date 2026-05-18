@@ -5,6 +5,7 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <print>
 #include <sstream>
 #include <sys/stat.h>
 #include <QDebug>
@@ -249,7 +250,7 @@ namespace rc
     {
         if (is_initialized())
             return true;
-        if (run_ctx_.sensor_buffer == nullptr)
+        if (!run_ctx_.lidar_reader && run_ctx_.sensor_buffer == nullptr)
             return false;
 
         Eigen::Vector2f init_xy = Eigen::Vector2f::Zero();
@@ -282,7 +283,17 @@ namespace rc
         std::vector<Eigen::Vector3f> pts;
         if (!have_saved_pose)
         {
-            const auto& [gt_, lidar_high_, obstacles_] = run_ctx_.sensor_buffer->read_last();
+            std::optional<LidarData> lidar_high_;
+            if (run_ctx_.lidar_reader)
+                lidar_high_ = run_ctx_.lidar_reader();
+            else
+            {
+                const auto& [gt_, lidar_from_buffer, obstacles_] = run_ctx_.sensor_buffer->read_last();
+                (void)gt_;
+                (void)obstacles_;
+                lidar_high_ = lidar_from_buffer;
+            }
+
             if (!lidar_high_.has_value() || lidar_high_->first.empty())
                 return false;
             pts = lidar_high_->first;
@@ -351,6 +362,8 @@ namespace rc
         std::int64_t last_ts = -1;
         constexpr auto kMinWait = std::chrono::milliseconds(2);
         constexpr auto kMaxWait = std::chrono::milliseconds(100);
+        constexpr auto kSameFrameWait = std::chrono::milliseconds(20);
+        int same_frame_count = 0;
 
         while (!stop_requested_.load())
         {
@@ -386,9 +399,20 @@ namespace rc
             }
             
             // ===== 3. READ LIDAR DATA =====
-            const auto& [gt_, lidar_high_, obstacles_] = run_ctx_.sensor_buffer->read_last();
+            std::optional<LidarData> lidar_high_;
+            if (run_ctx_.lidar_reader)
+                lidar_high_ = run_ctx_.lidar_reader();
+            else if (run_ctx_.sensor_buffer != nullptr)
+            {
+                const auto& [gt_, lidar_from_buffer, obstacles_] = run_ctx_.sensor_buffer->read_last();
+                (void)gt_;
+                (void)obstacles_;
+                lidar_high_ = lidar_from_buffer;
+            }
+
             if (!lidar_high_.has_value())
             {
+                std::print("[LocThread] lidar points: {}\n", 0);
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
                 continue;
             }
@@ -397,9 +421,13 @@ namespace rc
             const auto current_ts = lidar_high_->second;
             if (current_ts == last_ts)
             {
-                std::this_thread::sleep_for(kMinWait);
+                same_frame_count++;
+                if (same_frame_count % 25 == 1)
+                    std::print("[LocThread] same lidar frame (ts_ms={}) x{}; backing off\n", current_ts, same_frame_count);
+                std::this_thread::sleep_for(kSameFrameWait);
                 continue;
             }
+            same_frame_count = 0;
 
             // ===== 5. SNAPSHOT VELOCITY & ODOMETRY HISTORY =====
             auto vel_snap  = run_ctx_.velocity_buffer->get_snapshot<0>();

@@ -49,9 +49,9 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
 ///////////////////////////////////////////////////////////////////////////////
 SpecificWorker::~SpecificWorker()
 {
-    stop_lidar_thread = true;
-    if (read_lidar_th.joinable())
-        read_lidar_th.join();
+    // stop_lidar_thread = true;
+    // if (read_lidar_th.joinable())
+    //     read_lidar_th.join();
     save_robot_pose_once();
     room_concept_.stop();
     std::cout << "Destroying SpecificWorker" << std::endl;
@@ -188,13 +188,13 @@ void SpecificWorker::initialize()
     try { max_lin_accel_           = static_cast<float>(configLoader.get<double>("EpistemicController.MaxLinAccel")); } catch (...) {}
     try { max_rot_accel_           = static_cast<float>(configLoader.get<double>("EpistemicController.MaxRotAccel")); } catch (...) {}
 
-    // ── Start lidar reader thread ──────────────────────────────────────────
-    read_lidar_th = std::thread(&SpecificWorker::read_lidar, this);
-    qInfo() << __FUNCTION__ << "Started lidar reader";
+    // ── Lidar reader thread disabled: lidar is read from compute() ─────────
+    // read_lidar_th = std::thread(&SpecificWorker::read_lidar, this);
+    // qInfo() << __FUNCTION__ << "Started lidar reader";
 
     // ── Wire RoomConcept run context ───────────────────────────────────────
     rc::RoomConcept::RunContext run_ctx;
-    run_ctx.sensor_buffer   = &lidar_buffer;
+    run_ctx.lidar_reader    = [this]() { return this->read_lidar_from_graph(); };
     run_ctx.velocity_buffer = &velocity_buffer_;
     run_ctx.odometry_buffer = &odometry_buffer_;
     room_concept_.set_run_context(run_ctx);
@@ -269,13 +269,6 @@ void SpecificWorker::initialize()
 ///////////////////////////////////////////////////////////////////////////////
 void SpecificWorker::compute()
 {
-    const auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
-
-    // const auto& [robot_pose_gt_, lidar_data_, obstacle_data_] = lidar_buffer.read(timestamp);
-    // if (!lidar_data_.has_value())
-    // { qWarning() << "No lidar data"; return; }
-
     const auto loc_res  = room_concept_.get_last_result();
     const bool have_loc = loc_res.has_value() && loc_res->ok;
 
@@ -284,23 +277,26 @@ void SpecificWorker::compute()
     // ── Update 2-D viewer ─────────────────────────────────────────────────
     const Eigen::Affine2f loc_pose = have_loc ? loc_res->robot_pose : pose_for_draw;
     const bool use_loc = have_loc && !loc_res->lidar_scan.empty();
-    //const std::vector<Eigen::Vector3f>& draw_points =
-    //    use_loc ? loc_res->lidar_scan : lidar_data_->first;
-    
-    if(use_loc)    
-        viewer_2d_->update_frame({
-            .lidar_points     = loc_res->lidar_scan,
-            .display_pose     = pose_for_draw,
-            .covariance       = have_loc ? loc_res->covariance : Eigen::Matrix3f::Identity(),
-            .max_lidar_points = params.MAX_LIDAR_DRAW_POINTS,
-            .have_loc         = have_loc,
-            .is_initialized   = room_concept_.is_initialized(),
-            .has_room_polygon = room_initialized_from_svg_polygon_,
-            .room_width       = have_loc ? loc_res->state[0] : 0.f,
-            .room_length      = have_loc ? loc_res->state[1] : 0.f,
-            .loc_pose         = loc_pose,
-            .use_loc_pose     = use_loc,
-        });
+
+    std::vector<Eigen::Vector3f> lidar_for_canvas;
+    if (use_loc)
+        lidar_for_canvas = loc_res->lidar_scan;
+    else if (const auto lidar_graph = read_lidar_from_graph(); lidar_graph.has_value())
+        lidar_for_canvas = lidar_graph->first;
+
+    viewer_2d_->update_frame({
+        .lidar_points     = lidar_for_canvas,
+        .display_pose     = pose_for_draw,
+        .covariance       = have_loc ? loc_res->covariance : Eigen::Matrix3f::Identity(),
+        .max_lidar_points = params.MAX_LIDAR_DRAW_POINTS,
+        .have_loc         = have_loc,
+        .is_initialized   = room_concept_.is_initialized(),
+        .has_room_polygon = room_initialized_from_svg_polygon_,
+        .room_width       = have_loc ? loc_res->state[0] : 0.f,
+        .room_length      = have_loc ? loc_res->state[1] : 0.f,
+        .loc_pose         = loc_pose,
+        .use_loc_pose     = use_loc,
+    });
 
     if (have_loc && !loc_res->corner_matches.empty())
         viewer_2d_->draw_corners(loc_res->corner_matches, pose_for_draw);
@@ -313,6 +309,115 @@ void SpecificWorker::compute()
 
     update_ui(loc_res, pose_for_draw);
     fps_counter_.print("[Compute]", 3000);
+}
+
+///////////////////////////////////////////////////////////////////////////////
+std::optional<rc::LidarData> SpecificWorker::read_lidar_from_graph() const
+{
+    // Lidar comes in meters
+    if (!G)
+        return std::nullopt;
+
+    std::optional<DSR::Node> lidar_node = G->get_node("lidar3d");
+    if (!lidar_node.has_value())
+        lidar_node = G->get_node("lidar3D");
+    if (!lidar_node.has_value() && !params.LIDAR_NAME_HIGH.empty())
+        lidar_node = G->get_node(params.LIDAR_NAME_HIGH);
+    if (!lidar_node.has_value())
+    {
+        const auto laser_nodes = G->get_nodes_by_type("laser");
+        if (!laser_nodes.empty())
+            lidar_node = laser_nodes.front();
+    }
+
+    if (!lidar_node.has_value())
+    {
+        std::print("[RoomConcept] Lidar node not found. Tried: 'lidar3d', 'lidar3D', '{}', type 'laser'\n",
+                       params.LIDAR_NAME_HIGH);
+        return std::nullopt;
+    }
+ 
+    const auto lx = G->get_attrib_by_name<laser_X_att>(lidar_node.value());
+    const auto ly = G->get_attrib_by_name<laser_Y_att>(lidar_node.value());
+    const auto lz = G->get_attrib_by_name<laser_Z_att>(lidar_node.value());
+    const auto laser_ts = G->get_attrib_by_name<laser_timestamp_att>(lidar_node.value());
+    if (!lx.has_value() || !ly.has_value() || !lz.has_value())
+    {
+        std::print("[RoomConcept] Missing laser_X/Y/Z attributes on node '{}'\n", lidar_node->name());
+        return std::nullopt;
+    }
+    
+    const auto &xs = lx.value().get();
+    const auto &ys = ly.value().get();
+    const auto &zs = lz.value().get();
+    const std::size_t npts = std::min({xs.size(), ys.size(), zs.size()});
+
+    float z_min_raw = std::numeric_limits<float>::infinity();
+    float z_max_raw = -std::numeric_limits<float>::infinity();
+    std::size_t finite_count = 0;
+    for (std::size_t i = 0; i < npts; ++i)
+    {
+        const float xr = xs[i];
+        const float yr = ys[i];
+        const float zr = zs[i];
+        if (!std::isfinite(xr) || !std::isfinite(yr) || !std::isfinite(zr))
+            continue;
+        ++finite_count;
+        z_min_raw = std::min(z_min_raw, zr);
+        z_max_raw = std::max(z_max_raw, zr);
+    }
+
+    const float to_m = 1.f;
+
+    std::vector<Eigen::Vector3f> points_high;
+    points_high.reserve(npts);
+    const float min_h_m = params.LIDAR_HIGH_MIN_HEIGHT;
+    int infinite_count = 0;
+
+    for (std::size_t i = 0; i < npts; ++i)
+    {
+        const float x_raw = xs[i];
+        const float y_raw = ys[i];
+        const float z_raw = zs[i];
+        if (!std::isfinite(x_raw) || !std::isfinite(y_raw) || !std::isfinite(z_raw))
+        {
+            infinite_count++;
+            continue;
+        }
+
+        const float x_m = x_raw * to_m;
+        const float y_m = y_raw * to_m;
+        const float z_m = z_raw * to_m;
+
+        if (z_m > min_h_m)
+            points_high.emplace_back(x_m, y_m, z_m);
+    }
+
+    static auto last_diag = std::chrono::steady_clock::now() - std::chrono::seconds(10);
+    const auto now_diag = std::chrono::steady_clock::now();
+    if (now_diag - last_diag > std::chrono::seconds(2))
+    {
+        const float z_min_m = std::isfinite(z_min_raw) ? z_min_raw * to_m : 0.f;
+        const float z_max_m = std::isfinite(z_max_raw) ? z_max_raw * to_m : 0.f;
+        std::print("[RoomConcept][LidarGraph] node='{}' raw={} finite={} filtered={} inf={} scale_to_m={:.6f} z_raw=[{:.3f},{:.3f}] z_m=[{:.3f},{:.3f}]\n",
+                   lidar_node->name(), npts, finite_count, points_high.size(), infinite_count,
+                   to_m, z_min_raw, z_max_raw, z_min_m, z_max_m);
+        last_diag = now_diag;
+    }
+
+    const auto now_ts = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    std::int64_t source_ts = static_cast<std::int64_t>(laser_ts.value_or(static_cast<uint64_t>(now_ts)));
+
+    // Keep RoomConcept frame gate moving even if graph timestamp is stale/repeated.
+    static std::int64_t last_source_ts = -1;
+    if (source_ts <= last_source_ts)
+        source_ts = std::max(last_source_ts + 1, now_ts);
+    if (source_ts <= last_source_ts)
+        source_ts = last_source_ts + 1;
+    last_source_ts = source_ts;
+
+    return rc::LidarData{std::move(points_high), source_ts};
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -540,50 +645,9 @@ void SpecificWorker::read_lidar()
     auto wait_period = std::chrono::milliseconds(getPeriod("Compute"));
     while (!stop_lidar_thread)
     {
-        const auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count();
         try
         {
-            RoboCompLidar3D::TData data_high;
-            try
-            {
-                data_high = lidar3d_proxy->getLidarData(
-                    "", 0.f, static_cast<float>(M_PI) * 2.f, params.LIDAR_LOW_DECIMATION_FACTOR);
-            }
-            catch (const Ice::Exception& e)
-            { qWarning() << "[read_lidar] getLidarData failed:" << e.what(); std::terminate(); }
-
-            std::vector<Eigen::Vector3f> points_high;
-            std::vector<Eigen::Vector2f> obstacle_points;
-            points_high.reserve(data_high.points.size());
-            obstacle_points.reserve(data_high.points.size());
-
-            const float min_h_mm   = params.LIDAR_HIGH_MIN_HEIGHT   * 1000.f;
-            const float floor_h_mm = params.LIDAR_HIGH_FLOOR_HEIGHT * 1000.f;
-            const float robot_h_mm = params.ROBOT_HEIGHT             * 1000.f;
-            constexpr float mm2m   = 0.001f;
-
-            for (const auto& p : data_high.points)
-            {
-                const bool is_high     = p.z > min_h_mm;
-                const bool is_obstacle = p.z > floor_h_mm && p.z < robot_h_mm;
-                if (is_high || is_obstacle)
-                {
-                    const float mx = p.x * mm2m;
-                    const float my = p.y * mm2m;
-                    if (is_high)     points_high.emplace_back(mx, my, p.z * mm2m);
-                    if (is_obstacle) obstacle_points.emplace_back(mx, my);
-                }
-            }
-
-            lidar_buffer.put<1>(
-                std::make_pair(std::move(points_high), static_cast<std::int64_t>(data_high.timestamp)),
-                timestamp);
-            lidar_buffer.put<2>(std::move(obstacle_points), timestamp);
-
-            const long p_ms = static_cast<long>(data_high.period);
-            if (wait_period > std::chrono::milliseconds(p_ms + 2)) --wait_period;
-            else if (wait_period < std::chrono::milliseconds(p_ms - 2)) ++wait_period;
+            (void)read_lidar_from_graph();
 
             lidar_fps.print("[LidarThread]", 2000);
             std::this_thread::sleep_for(wait_period);

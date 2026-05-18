@@ -5,7 +5,6 @@
 #include <dsr/api/dsr_inner_eigen_api.h>
 #include <dsr/core/types/type_checking/dsr_attr_name.h>
 
-#include <print>
 #include <QPainter>
 #include <QVBoxLayout>
 
@@ -64,7 +63,7 @@ CameraVisualizer::CameraVisualizer(std::shared_ptr<DSRGraph> graph, const std::v
         }
         else
         {
-            std::print("WARNING: zed node not found in DSR graph\n");
+            image_label_->setText("No 'zed' node found in DSR");
         }
     }
 
@@ -77,7 +76,6 @@ CameraVisualizer::CameraVisualizer(std::shared_ptr<DSRGraph> graph, const std::v
     refresh_timer_->start(50);  // target 20 Hz to guarantee >=10 Hz in practice
     fps_timer_.start();
     update_frame();  // paint first frame immediately
-    std::print("Constructor done, timer started at 20Hz target\n");
 }
 
 bool CameraVisualizer::fetch_rgb_from_dsr(QImage& rgb_image, std::uint64_t& frame_timestamp)
@@ -193,9 +191,6 @@ bool CameraVisualizer::fetch_camera_intrinsics()
     camera_data_.height = height;
     camera_data_.valid = true;
 
-    std::print("Camera intrinsics: fx={} fy={} cx={} cy={} width={} height={}\n",
-              fx, fy, cx, cy, width, height);
-
     return true;
 }
 
@@ -233,11 +228,18 @@ std::vector<Eigen::Vector3f> CameraVisualizer::get_room_corners_3d() const
 std::vector<Eigen::Vector2f> CameraVisualizer::project_points_to_image(
     const std::vector<Eigen::Vector3f>& world_points, std::uint64_t rt_timestamp) const
 {
-    static bool projection_debug_printed = false;
     std::vector<Eigen::Vector2f> image_points;
     image_points.reserve(world_points.size());
 
     if (!inner_eigen_api_ || !camera_api_)
+    {
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        for (std::size_t i = 0; i < world_points.size(); ++i)
+            image_points.emplace_back(nan, nan);
+        return image_points;
+    }
+
+    if (!graph_ || !graph_->get_node(room_frame_name_).has_value() || !graph_->get_node(camera_node_name_).has_value())
     {
         const float nan = std::numeric_limits<float>::quiet_NaN();
         for (std::size_t i = 0; i < world_points.size(); ++i)
@@ -273,135 +275,27 @@ std::vector<Eigen::Vector2f> CameraVisualizer::project_points_to_image(
 
         const Eigen::Vector2d uv = camera_api_->project(p_cam);
         image_points.emplace_back(static_cast<float>(uv.x()), static_cast<float>(uv.y()));
-
-        if (!projection_debug_printed)
-            std::print("Projection point {}: room=({:.3f},{:.3f},{:.3f}) cam=({:.3f},{:.3f},{:.3f}) Z/Y={:.4f} img=({:.1f},{:.1f})\n",
-                       i, p.x(), p.y(), p.z(), p_cam.x(), p_cam.y(), p_cam.z(),
-                       p_cam.z() / p_cam.y(), uv.x(), uv.y());
     }
-
-    projection_debug_printed = true;
 
     return image_points;
 }
 
 void CameraVisualizer::draw_projections(QImage& image, std::uint64_t rt_timestamp)
 {
-    static bool frame_debug_printed = false;
     if (!camera_data_.valid)
         return;
 
-    // Print the room->camera extrinsic transform (RT chain through DSR tree).
-    if (inner_eigen_api_)
-    {
-        // Transform the three unit axes of the room frame into camera frame
-        // to read off what direction each room axis maps to in the camera.
-        const auto origin_opt = inner_eigen_api_->transform(camera_node_name_,
-            Mat::Vector3d(0.0, 0.0, 0.0), room_frame_name_, rt_timestamp);
-        const auto x_opt = inner_eigen_api_->transform(camera_node_name_,
-            Mat::Vector3d(1.0, 0.0, 0.0), room_frame_name_, rt_timestamp);
-        const auto y_opt = inner_eigen_api_->transform(camera_node_name_,
-            Mat::Vector3d(0.0, 1.0, 0.0), room_frame_name_, rt_timestamp);
-        const auto z_opt = inner_eigen_api_->transform(camera_node_name_,
-            Mat::Vector3d(0.0, 0.0, 1.0), room_frame_name_, rt_timestamp);
-
-        if (origin_opt && x_opt && y_opt && z_opt)
-        {
-            const auto& o = origin_opt.value();
-            const auto& xc = x_opt.value() - o;
-            const auto& yc = y_opt.value() - o;
-            const auto& zc = z_opt.value() - o;
-            if (!frame_debug_printed)
-            {
-                std::print("[EXTRINSIC] room->camera transform (room frame axes in cam coords):\n");
-                std::print("[EXTRINSIC]   camera origin in room:  ({:.4f}, {:.4f}, {:.4f})\n", -o.x(), -o.y(), -o.z());
-                std::print("[EXTRINSIC]   room +X axis in cam:    ({:.4f}, {:.4f}, {:.4f})\n", xc.x(), xc.y(), xc.z());
-                std::print("[EXTRINSIC]   room +Y axis in cam:    ({:.4f}, {:.4f}, {:.4f})\n", yc.x(), yc.y(), yc.z());
-                std::print("[EXTRINSIC]   room +Z axis in cam:    ({:.4f}, {:.4f}, {:.4f})\n", zc.x(), zc.y(), zc.z());
-                std::print("[EXTRINSIC]   cam  +Y (forward) in room: ({:.4f}, {:.4f}, {:.4f})\n",
-                           yc.x() / yc.norm(), yc.y() / yc.norm(), yc.z() / yc.norm());
-            }
-        }
-
-        // Read the RT edge attributes (translation + euler XYZ) from the robot->zed edge directly.
-        const auto robot_nodes = graph_->get_nodes_by_type("robot");
-        if (!robot_nodes.empty())
-        {
-            const auto& robot_node = robot_nodes.front();
-            const auto zed_node_opt = graph_->get_node(camera_node_name_);
-            if (zed_node_opt.has_value())
-            {
-                const auto rt_edge_opt = graph_->get_edge(robot_node.id(), zed_node_opt->id(), "RT");
-                if (rt_edge_opt.has_value())
-                {
-                    const auto& edge = rt_edge_opt.value();
-                    const auto trans_opt = graph_->get_attrib_by_name<rt_translation_att>(edge);
-                    const auto rot_opt   = graph_->get_attrib_by_name<rt_rotation_euler_xyz_att>(edge);
-                    if (!frame_debug_printed)
-                        std::print("[EXTRINSIC] RT edge '{}'->'{}':\n", robot_node.name(), camera_node_name_);
-                    if (trans_opt.has_value())
-                    {
-                        const auto& t = trans_opt->get();
-                        if (!frame_debug_printed)
-                            std::print("[EXTRINSIC]   rt_translation (x,y,z): ({:.4f}, {:.4f}, {:.4f})\n",
-                                       t.size() > 0 ? t[0] : 0.f,
-                                       t.size() > 1 ? t[1] : 0.f,
-                                       t.size() > 2 ? t[2] : 0.f);
-                    }
-                    if (rot_opt.has_value())
-                    {
-                        const auto& r = rot_opt->get();
-                        if (!frame_debug_printed)
-                            std::print("[EXTRINSIC]   rt_rotation_euler_xyz (rx,ry,rz rad): ({:.4f}, {:.4f}, {:.4f})\n",
-                                       r.size() > 0 ? r[0] : 0.f,
-                                       r.size() > 1 ? r[1] : 0.f,
-                                       r.size() > 2 ? r[2] : 0.f);
-                        if (r.size() > 2)
-                        {
-                            if (!frame_debug_printed)
-                                std::print("[EXTRINSIC]   rz = {:.2f} deg\n", r[2] * 180.f / static_cast<float>(M_PI));
-                        }
-                    }
-                }
-                else
-                {
-                    if (!frame_debug_printed)
-                        std::print("[EXTRINSIC]   RT edge '{}'->'{}' not found\n", robot_node.name(), camera_node_name_);
-                }
-            }
-        }
-    }
+    if (!graph_ || !graph_->get_node(room_frame_name_).has_value() || !graph_->get_node(camera_node_name_).has_value())
+        return;
 
     auto corners_3d = get_room_corners_3d();
     if (corners_3d.size() < 6)
         return;
 
-    if (!frame_debug_printed)
-    {
-        std::print("Number of 3D corners: {}\n", corners_3d.size());
-        for (size_t i = 0; i < corners_3d.size(); ++i)
-            std::print("3D Corner {}: ({}, {}, {})\n", i, corners_3d[i].x(), corners_3d[i].y(), corners_3d[i].z());
-    }
-
     auto image_points = project_points_to_image(corners_3d, rt_timestamp);
-
-    if (!frame_debug_printed)
-    {
-        std::print("Number of projected image points: {}\n", image_points.size());
-        for (size_t i = 0; i < image_points.size(); ++i)
-            std::print("Image Point {}: ({}, {})\n", i, image_points[i].x(), image_points[i].y());
-    }
 
     QPainter painter(&image);
     painter.setRenderHint(QPainter::Antialiasing, true);
-
-    // [TEST] Project a point (0, 1, 0) in the camera frame and log the image coordinates
-    if (camera_api_ && !frame_debug_printed)
-    {
-        Eigen::Vector3d test_point_cam(0.0, 1.0, 0.0); // (X, Y, Z) in camera frame, Y is forward
-        Eigen::Vector2d uv = camera_api_->project(test_point_cam);
-        std::print("[TEST] Projected (0, 1, 0) in camera frame to image coordinates: ({}, {})\n", uv.x(), uv.y());
-    }
 
     const int num_corners = static_cast<int>(corners_3d.size() / 2);
     if (!inner_eigen_api_ || !camera_api_ || num_corners < 2)
@@ -426,27 +320,6 @@ void CameraVisualizer::draw_projections(QImage& image, std::uint64_t rt_timestam
         floor_in_cam.push_back(p_floor_cam_opt.value());
         top_in_cam.push_back(p_top_cam_opt.value());
     }
-
-    // Diagnostic: print focal and first visible edge cam-frame ratios.
-    if (!frame_debug_printed)
-    {
-        const float fy = camera_api_->get_focal_y();
-        const float fx = camera_api_->get_focal_x();
-        std::print("[DIAG] fx={:.1f} fy={:.1f}\n", fx, fy);
-        for (int i = 0; i < num_corners; ++i)
-        {
-            const int j = (i + 1) % num_corners;
-            const auto& c0 = floor_in_cam[i];
-            const auto& c1 = floor_in_cam[j];
-            if (c0.y() <= 1e-6 && c1.y() <= 1e-6)
-                continue;
-            std::print("[DIAG] visible edge {} floor c0=({:.3f},{:.3f},{:.3f}) c1=({:.3f},{:.3f},{:.3f})\n",
-                       i, c0.x(), c0.y(), c0.z(), c1.x(), c1.y(), c1.z());
-            break;
-        }
-    }
-
-    frame_debug_printed = true;
 
     auto finite = [](const Eigen::Vector2f& p)
     {
@@ -601,9 +474,6 @@ void CameraVisualizer::update_frame()
         const qint64 elapsed_ms = fps_timer_.elapsed();
         if (elapsed_ms >= 2000)
         {
-            const double fps = static_cast<double>(frames_since_fps_log_) * 1000.0 / static_cast<double>(elapsed_ms);
-            std::print("Refresh FPS={:.2f} (target >=10) frame_time={}ms\n",
-                      fps, frame_timer.elapsed());
             fps_timer_.restart();
             frames_since_fps_log_ = 0;
         }

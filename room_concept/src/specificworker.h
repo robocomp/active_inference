@@ -114,14 +114,12 @@ class SpecificWorker : public GenericWorker
         rc::VelocityBuffer velocity_buffer_{20};
         rc::OdometryBuffer odometry_buffer_{20};
 
-        // ── Lidar buffer: slot 0 = GT pose, slot 1 = high scan, slot 2 = obstacle ─
-        rc::SensorBuffer lidar_buffer;
-
         // ── Lidar reader thread ─────────────────────────────────────────────────
         std::thread            read_lidar_th;
         std::atomic<bool>      stop_lidar_thread{false};
         std::atomic<bool>      pose_saved_{false};
         void read_lidar();
+        std::optional<rc::LidarData> read_lidar_from_graph() const;
         void save_robot_pose_once();
         std::string pose_file_path() const;
 

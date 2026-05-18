@@ -11,6 +11,7 @@
 #include <optional>
 #include <string>
 #include <fstream>
+#include <functional>
 #include <fps/fps.h>
 
 // ---- PyTorch vs Qt macros (slots/signals/emit) ----
@@ -276,7 +277,7 @@ public:
         int torch_num_interop_threads = 2;  // Limit inter-op threads for better latency
 
         // ===== Debug Logging =====
-        bool debug_log_enabled = true;      // Write per-frame CSV to tmp/sdf_localizer/log.csv
+        bool debug_log_enabled = false;      // Write per-frame CSV to tmp/sdf_localizer/log.csv
 
         // ===== Rerun streaming =====
         bool rerun_enabled = false;
@@ -343,6 +344,7 @@ public:
     struct RunContext
     {
         SensorBuffer*   sensor_buffer   = nullptr;  // lidar + GT pose
+        std::function<std::optional<LidarData>()> lidar_reader;  // direct lidar reader callback
         VelocityBuffer* velocity_buffer = nullptr;  // joystick / controller commands
         OdometryBuffer* odometry_buffer = nullptr;  // measured odometry (encoders/IMU)
     };
