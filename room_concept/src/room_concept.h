@@ -343,8 +343,7 @@ public:
     /// External buffers that the localization thread reads from directly.
     struct RunContext
     {
-        SensorBuffer*   sensor_buffer   = nullptr;  // lidar + GT pose
-        std::function<std::optional<LidarData>()> lidar_reader;  // direct lidar reader callback
+        HighLidarBuffer* high_lidar_buffer   = nullptr;  // lidar + GT pose
         VelocityBuffer* velocity_buffer = nullptr;  // joystick / controller commands
         OdometryBuffer* odometry_buffer = nullptr;  // measured odometry (encoders/IMU)
     };

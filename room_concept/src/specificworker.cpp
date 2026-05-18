@@ -194,7 +194,7 @@ void SpecificWorker::initialize()
 
     // ── Wire RoomConcept run context ───────────────────────────────────────
     rc::RoomConcept::RunContext run_ctx;
-    run_ctx.lidar_reader    = [this]() { return this->read_lidar_from_graph(); };
+    run_ctx.high_lidar_buffer = &high_lidar_buffer_;
     run_ctx.velocity_buffer = &velocity_buffer_;
     run_ctx.odometry_buffer = &odometry_buffer_;
     room_concept_.set_run_context(run_ctx);
@@ -250,7 +250,7 @@ void SpecificWorker::initialize()
     rt_api = G->get_rt_api();
 
     // ── Connect DSR signals ────────────────────────────────────────────────
-    // connect(G.get(), &DSR::DSRGraph::update_node_signal,      this, &SpecificWorker::modify_node_slot);
+    connect(G.get(), &DSR::DSRGraph::update_node_signal,      this, &SpecificWorker::modify_node_slot);
     // connect(G.get(), &DSR::DSRGraph::update_edge_signal,      this, &SpecificWorker::modify_edge_slot);
     // connect(G.get(), &DSR::DSRGraph::update_node_attr_signal, this, &SpecificWorker::modify_node_attrs_slot);
     // connect(G.get(), &DSR::DSRGraph::update_edge_attr_signal, this, &SpecificWorker::modify_edge_attrs_slot);
@@ -281,8 +281,12 @@ void SpecificWorker::compute()
     std::vector<Eigen::Vector3f> lidar_for_canvas;
     if (use_loc)
         lidar_for_canvas = loc_res->lidar_scan;
-    else if (const auto lidar_graph = read_lidar_from_graph(); lidar_graph.has_value())
-        lidar_for_canvas = lidar_graph->first;
+    else
+    {
+        const auto& [lidar_from_buffer] = high_lidar_buffer_.read_last();
+        if (lidar_from_buffer.has_value())
+            lidar_for_canvas = lidar_from_buffer->first;
+    }
 
     viewer_2d_->update_frame({
         .lidar_points     = lidar_for_canvas,
@@ -321,8 +325,8 @@ std::optional<rc::LidarData> SpecificWorker::read_lidar_from_graph() const
     std::optional<DSR::Node> lidar_node = G->get_node("lidar3d");
     if (!lidar_node.has_value())
         lidar_node = G->get_node("lidar3D");
-    if (!lidar_node.has_value() && !params.LIDAR_NAME_HIGH.empty())
-        lidar_node = G->get_node(params.LIDAR_NAME_HIGH);
+    if (!lidar_node.has_value() && !params.LIDAR_NAME.empty())
+        lidar_node = G->get_node(params.LIDAR_NAME);
     if (!lidar_node.has_value())
     {
         const auto laser_nodes = G->get_nodes_by_type("laser");
@@ -333,7 +337,7 @@ std::optional<rc::LidarData> SpecificWorker::read_lidar_from_graph() const
     if (!lidar_node.has_value())
     {
         std::print("[RoomConcept] Lidar node not found. Tried: 'lidar3d', 'lidar3D', '{}', type 'laser'\n",
-                       params.LIDAR_NAME_HIGH);
+                       params.LIDAR_NAME);
         return std::nullopt;
     }
  
@@ -355,17 +359,17 @@ std::optional<rc::LidarData> SpecificWorker::read_lidar_from_graph() const
     float z_min_raw = std::numeric_limits<float>::infinity();
     float z_max_raw = -std::numeric_limits<float>::infinity();
     std::size_t finite_count = 0;
-    for (std::size_t i = 0; i < npts; ++i)
-    {
-        const float xr = xs[i];
-        const float yr = ys[i];
-        const float zr = zs[i];
-        if (!std::isfinite(xr) || !std::isfinite(yr) || !std::isfinite(zr))
-            continue;
-        ++finite_count;
-        z_min_raw = std::min(z_min_raw, zr);
-        z_max_raw = std::max(z_max_raw, zr);
-    }
+    // for (std::size_t i = 0; i < npts; ++i)
+    // {
+    //     const float xr = xs[i];
+    //     const float yr = ys[i];
+    //     const float zr = zs[i];
+    //     if (!std::isfinite(xr) || !std::isfinite(yr) || !std::isfinite(zr))
+    //         continue;
+    //     ++finite_count;
+    //     z_min_raw = std::min(z_min_raw, zr);
+    //     z_max_raw = std::max(z_max_raw, zr);
+    // }
 
     const float to_m = 1.f;
 
@@ -657,7 +661,12 @@ void SpecificWorker::read_lidar()
     }
 }
 
+
+
 ///////////////////////////////////////////////////////////////////////////////
+/// Auxiliary methods for DSR graph management and other utilities
+//////////////////////////////////////////////////////////////////////////////
+
 void SpecificWorker::initialize_room_model_from_svg()
 {
     const auto room_polygon = rc::SvgRoomLoader::load_polygon_points(
@@ -723,6 +732,7 @@ std::string SpecificWorker::pose_file_path() const
             + "/last_robot_pose.txt").toStdString();
 }
 
+
 ///////////////////////////////////////////////////////////////////////////////
 void SpecificWorker::navigate_to_target(const std::optional<rc::RoomConcept::UpdateResult>& loc_res,
                                         const std::optional<rc::ObstacleData>& obstacles)
@@ -754,6 +764,110 @@ void SpecificWorker::navigate_to_target(const std::optional<rc::RoomConcept::Upd
     catch (const Ice::Exception& e)
     { qWarning() << "[navigate_to_target] setSpeedBase failed:" << e.what(); }
 }
+
+
+///////////////////////////////////////////////////////////////////////////////
+/// SLOTS from GUI and DSR signals
+//////////////////////////////////////////////////////////////////////////////
+
+void SpecificWorker::modify_node_slot(std::uint64_t id, const std::string &type)
+{
+    const auto t_cb_start = std::chrono::steady_clock::now();
+
+    if (!G)
+        return;
+
+    if (type != "laser")
+        return;
+
+    const auto node_opt = G->get_node(id);
+    if (!node_opt.has_value())
+        return;
+
+    const auto& lidar3D = node_opt.value();
+    const std::string& name = lidar3D.name();
+    if (name != params.LIDAR_NAME)
+        return;
+
+    const auto lx = G->get_attrib_by_name<laser_X_att>(lidar3D);
+    const auto ly = G->get_attrib_by_name<laser_Y_att>(lidar3D);
+    const auto lz = G->get_attrib_by_name<laser_Z_att>(lidar3D);
+    const auto laser_ts = G->get_attrib_by_name<laser_timestamp_att>(lidar3D);
+    if (!lx.has_value() || !ly.has_value() || !lz.has_value() || !laser_ts.has_value())
+    { 
+        std::print("[modify_node_slot] Node '{}' missing laser_X/Y/Z attributes\n", name);
+        return;
+    }
+    else
+    {
+        const auto &xs = lx.value().get();
+        const auto &ys = ly.value().get();
+        const auto &zs = lz.value().get();
+        const std::size_t npts = std::min({xs.size(), ys.size(), zs.size()});
+
+        std::vector<Eigen::Vector3f> points_high;
+        points_high.reserve(npts);
+        const float min_h_m = params.LIDAR_HIGH_MIN_HEIGHT;
+        int infinite_count = 0;
+
+        for (std::size_t i = 0; i < npts; ++i)
+        {
+            const float x_raw = xs[i];
+            const float y_raw = ys[i];
+            const float z_raw = zs[i];
+            if (!std::isfinite(x_raw) || !std::isfinite(y_raw) || !std::isfinite(z_raw))
+            {
+                infinite_count++;
+                continue;
+            }
+
+            if (z_raw > min_h_m)
+                points_high.emplace_back(x_raw, y_raw, z_raw);
+        }
+        const std::size_t out_count = points_high.size();
+        const auto t_filter_end = std::chrono::steady_clock::now();
+        const std::uint64_t ts = static_cast<std::uint64_t>(std::max<std::int64_t>(0, static_cast<std::int64_t>(laser_ts.value_or(0))));
+        rc::LidarData lidar_data{std::move(points_high), static_cast<std::int64_t>(laser_ts.value())};
+
+        high_lidar_buffer_.put<0>(std::move(lidar_data), ts);
+
+        const auto t_cb_end = std::chrono::steady_clock::now();
+        const float cb_ms = std::chrono::duration<float, std::milli>(t_cb_end - t_cb_start).count();
+        const float filter_ms = std::chrono::duration<float, std::milli>(t_filter_end - t_cb_start).count();
+
+        static auto last_timing = std::chrono::steady_clock::now();
+        static std::uint64_t callbacks = 0;
+        static std::uint64_t in_points = 0;
+        static std::uint64_t out_points = 0;
+        static float total_cb_ms = 0.f;
+        static float total_filter_ms = 0.f;
+
+        callbacks++;
+        in_points += npts;
+        out_points += out_count;
+        total_cb_ms += cb_ms;
+        total_filter_ms += filter_ms;
+
+        const auto now_timing = std::chrono::steady_clock::now();
+        if (now_timing - last_timing >= std::chrono::seconds(2))
+        {
+            const float avg_cb_ms = callbacks > 0 ? total_cb_ms / static_cast<float>(callbacks) : 0.f;
+            const float avg_filter_ms = callbacks > 0 ? total_filter_ms / static_cast<float>(callbacks) : 0.f;
+            const float avg_in = callbacks > 0 ? static_cast<float>(in_points) / static_cast<float>(callbacks) : 0.f;
+            const float avg_out = callbacks > 0 ? static_cast<float>(out_points) / static_cast<float>(callbacks) : 0.f;
+            std::print("[Timing][LidarSlot] calls={} avg_cb_ms={:.3f} avg_filter_ms={:.3f} avg_pts_in={:.1f} avg_pts_out={:.1f}\n",
+                       callbacks, avg_cb_ms, avg_filter_ms, avg_in, avg_out);
+
+            callbacks = 0;
+            in_points = 0;
+            out_points = 0;
+            total_cb_ms = 0.f;
+            total_filter_ms = 0.f;
+            last_timing = now_timing;
+        }
+    }
+}
+
 
 ///////////////////////////////////////////////////////////////////////////////
 void SpecificWorker::slot_mouse_translate(QPointF scene_pos)

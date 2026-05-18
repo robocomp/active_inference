@@ -25,6 +25,9 @@ namespace rc
                                     InOut<LidarData, LidarData>,
                                     InOut<ObstacleData, ObstacleData>>;
 
+   /// Main sensor buffer: slot 0 = GT pose, slot 1 = high lidar, slot 2 = obstacle cloud
+    using HighLidarBuffer = BufferSync<InOut<LidarData, LidarData>>;
+                                        
     /// Single-channel circular buffer for velocity commands (joystick / controller)
     using VelocityBuffer = BufferSync<InOut<VelocityCommand, VelocityCommand>>;
 

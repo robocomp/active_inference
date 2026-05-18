@@ -250,7 +250,7 @@ namespace rc
     {
         if (is_initialized())
             return true;
-        if (!run_ctx_.lidar_reader && run_ctx_.sensor_buffer == nullptr)
+        if (run_ctx_.high_lidar_buffer == nullptr)
             return false;
 
         Eigen::Vector2f init_xy = Eigen::Vector2f::Zero();
@@ -283,16 +283,8 @@ namespace rc
         std::vector<Eigen::Vector3f> pts;
         if (!have_saved_pose)
         {
-            std::optional<LidarData> lidar_high_;
-            if (run_ctx_.lidar_reader)
-                lidar_high_ = run_ctx_.lidar_reader();
-            else
-            {
-                const auto& [gt_, lidar_from_buffer, obstacles_] = run_ctx_.sensor_buffer->read_last();
-                (void)gt_;
-                (void)obstacles_;
-                lidar_high_ = lidar_from_buffer;
-            }
+            const auto& [lidar_from_buffer] = run_ctx_.high_lidar_buffer->read_last();
+            std::optional<LidarData> lidar_high_ = lidar_from_buffer;
 
             if (!lidar_high_.has_value() || lidar_high_->first.empty())
                 return false;
@@ -359,14 +351,21 @@ namespace rc
         }
 
         auto wait_period = std::chrono::milliseconds(40);
-        std::int64_t last_ts = -1;
         constexpr auto kMinWait = std::chrono::milliseconds(2);
         constexpr auto kMaxWait = std::chrono::milliseconds(100);
         constexpr auto kSameFrameWait = std::chrono::milliseconds(20);
         int same_frame_count = 0;
+        std::int64_t last_lidar_ts_processed = std:
+        :numeric_limits<std::int64_t>::min();
+        float last_update_ms_report = 0.f;
 
         while (!stop_requested_.load())
         {
+            const auto t_loop_start = std::chrono::steady_clock::now();
+            bool did_update = false;
+            float update_ms = 0.f;
+            std::size_t lidar_size = 0;
+
             // ===== 1. DRAIN PENDING COMMANDS =====
             {
                 std::vector<Command> cmds;
@@ -399,45 +398,79 @@ namespace rc
             }
             
             // ===== 3. READ LIDAR DATA =====
-            std::optional<LidarData> lidar_high_;
-            if (run_ctx_.lidar_reader)
-                lidar_high_ = run_ctx_.lidar_reader();
-            else if (run_ctx_.sensor_buffer != nullptr)
+            LidarData lidar_high;
+            if (run_ctx_.high_lidar_buffer!= nullptr)
             {
-                const auto& [gt_, lidar_from_buffer, obstacles_] = run_ctx_.sensor_buffer->read_last();
-                (void)gt_;
-                (void)obstacles_;
-                lidar_high_ = lidar_from_buffer;
-            }
+                const auto& [lidar_from_buffer] = run_ctx_.high_lidar_buffer->read_last();
+                if (lidar_from_buffer.has_value())
+                {
+                    lidar_high = lidar_from_buffer.value();
+                    lidar_size = lidar_high.first.size();
+                }
+                else
+                {        
+                    //std::print("[LocThread] lidar points: {}\n", 0);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
 
-            if (!lidar_high_.has_value())
-            {
-                std::print("[LocThread] lidar points: {}\n", 0);
-                std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                continue;
-            }
+                    static auto last_timing = std::chrono::steady_clock::now();
+                    static std::uint64_t loops = 0;
+                    static std::uint64_t no_lidar_loops = 0;
+                    static std::uint64_t update_loops = 0;
+                    static std::uint64_t lidar_points_acc = 0;
+                    static float loop_ms_acc = 0.f;
+                    static float update_ms_acc = 0.f;
 
-            // ===== 4. SKIP IF SAME LIDAR FRAME =====
-            const auto current_ts = lidar_high_->second;
-            if (current_ts == last_ts)
-            {
-                same_frame_count++;
-                if (same_frame_count % 25 == 1)
-                    std::print("[LocThread] same lidar frame (ts_ms={}) x{}; backing off\n", current_ts, same_frame_count);
-                std::this_thread::sleep_for(kSameFrameWait);
-                continue;
-            }
-            same_frame_count = 0;
+                    loops++;
+                    no_lidar_loops++;
+                    loop_ms_acc += std::chrono::duration<float, std::milli>(
+                        std::chrono::steady_clock::now() - t_loop_start).count();
 
+                    const auto now_timing = std::chrono::steady_clock::now();
+                    if (now_timing - last_timing >= std::chrono::seconds(2))
+                    {
+                        const float avg_loop_ms = loops > 0 ? loop_ms_acc / static_cast<float>(loops) : 0.f;
+                        const float avg_update_ms = update_loops > 0 ? update_ms_acc / static_cast<float>(update_loops) : 0.f;
+                        const float avg_lidar_points = update_loops > 0 ? static_cast<float>(lidar_points_acc) / static_cast<float>(update_loops) : 0.f;
+                        std::print("[Timing][LocLoop] loops={} updates={} no_lidar={} avg_loop_ms={:.3f} avg_update_ms={:.3f} avg_lidar_pts={:.1f} wait_ms={}\n",
+                                   loops, update_loops, no_lidar_loops, avg_loop_ms, avg_update_ms,
+                                   avg_lidar_points, wait_period.count());
+                        loops = 0;
+                        no_lidar_loops = 0;
+                        update_loops = 0;
+                        lidar_points_acc = 0;
+                        loop_ms_acc = 0.f;
+                        update_ms_acc = 0.f;
+                        last_timing = now_timing;
+                    }
+                    continue;
+                }
+            }
+           
             // ===== 5. SNAPSHOT VELOCITY & ODOMETRY HISTORY =====
             auto vel_snap  = run_ctx_.velocity_buffer->get_snapshot<0>();
             auto odom_snap = run_ctx_.odometry_buffer->get_snapshot<0>();
 
             // ===== 6. RUN LOCALIZATION UPDATE =====
-            const auto t_update_start_ = std::chrono::high_resolution_clock::now();
-            const auto res = update(lidar_high_.value(), vel_snap, odom_snap);
-            const float update_ms = std::chrono::duration<float, std::milli>(
-                std::chrono::high_resolution_clock::now() - t_update_start_).count();
+            const bool same_lidar_frame = (lidar_high.second == last_lidar_ts_processed);
+            if (same_lidar_frame)
+            {
+                same_frame_count++;
+                wait_period = kSameFrameWait;
+            }
+            else
+            {
+                last_lidar_ts_processed = lidar_high.second;
+                same_frame_count = 0;
+            }
+
+            if (!same_lidar_frame)
+            {
+                const auto t_update_start_ = std::chrono::high_resolution_clock::now();
+                const auto res = update(lidar_high, vel_snap, odom_snap);
+                update_ms = std::chrono::duration<float, std::milli>(
+                    std::chrono::high_resolution_clock::now() - t_update_start_).count();
+                did_update = true;
+                last_update_ms_report = update_ms;
 
             if (params.rerun_enabled)
             {
@@ -560,15 +593,15 @@ namespace rc
                 rerun_logger_.log_frame(std::move(rf));
             }
 
-            // ===== 7. PUBLISH RESULT =====
-            {
-                std::lock_guard lock(result_mutex_);
-                last_result_ = res;
-            }
-            if (res.ok && !loc_initialized_.load())
-                loc_initialized_ = true;
+                // ===== 7. PUBLISH RESULT =====
+                {
+                    std::lock_guard lock(result_mutex_);
+                    last_result_ = res;
+                }
+                if (res.ok && !loc_initialized_.load())
+                    loc_initialized_ = true;
 
-            // ===== 8. RECOVERY DETECTION =====
+                // ===== 8. RECOVERY DETECTION =====
             // Only while relocalization is enabled (i.e. before room is stable).
             if (relocalization_enabled_.load())
             {
@@ -584,7 +617,7 @@ namespace rc
                     qWarning() << "[LocThread] Recovery triggered after" << recovery_.consecutive_bad_frames
                                << "bad frames. avg_sdf_err=" << avg_sdf_err << "m"
                                << "Running grid search...";
-                    const auto& pts = lidar_high_->first;
+                    const auto& pts = lidar_high.first;
                     grid_search_initial_pose(pts, 0.5f, static_cast<float>(M_PI_4));
                     window_mgr_.clear();
                     recovery_.on_recovery_done(params.recovery_cooldown_frames);
@@ -593,7 +626,7 @@ namespace rc
                 }
             }
 
-            // ===== 9. PERIODIC SYMMETRY CHECK ================================
+                // ===== 9. PERIODIC SYMMETRY CHECK ================================
             // Only while relocalization is active (before room node is created).
             // Uses res.sdf_mse as reference (already computed this frame).
             // Tests all four pose symmetries that a polygonal room may have:
@@ -611,7 +644,7 @@ namespace rc
                     symmetry_check_counter_ = 0;
                     const auto cur  = model_->get_state();
                     const float cx  = cur[2], cy = cur[3], cth = cur[4];
-                    const auto& pts = lidar_high_->first;
+                    const auto& pts = lidar_high.first;
 
                     // Subsample (reuse grid-search budget)
                     std::vector<Eigen::Vector3f> sample;
@@ -668,17 +701,16 @@ namespace rc
                 }
             }
 
-            last_ts = current_ts;
-            // Adaptive polling: throttle when stationary + early-exiting (pose is good),
-            // snap back to fast polling when Adam runs (motion or correction needed).
-            if (res.iterations_used > 0)
-                wait_period = kMinWait;   // motion or correction needed → full rate
-            else
-                wait_period = std::min(wait_period + std::chrono::milliseconds(2), kMaxWait);
-            update_ms_accum_ += update_ms;
-            update_ms_count_++;
+                // Adaptive polling: throttle when stationary + early-exiting (pose is good),
+                // snap back to fast polling when Adam runs (motion or correction needed).
+                if (res.iterations_used > 0)
+                    wait_period = kMinWait;   // motion or correction needed → full rate
+                else
+                    wait_period = std::min(wait_period + std::chrono::milliseconds(2), kMaxWait);
+                update_ms_accum_ += update_ms;
+                update_ms_count_++;
 
-            // ===== DIFFERENTIAL TEST: RFE vs single-step vs prediction-only =====
+                // ===== DIFFERENTIAL TEST: RFE vs single-step vs prediction-only =====
             // Compares SDF accuracy AND pose jitter (temporal consistency).
             // Single-step will typically achieve lower SDF (it's unconstrained), but
             // RFE should show lower jitter (the window regularises across time).
@@ -705,7 +737,7 @@ namespace rc
                         pred_theta = res.state[4];
                     }
 
-                    const auto& pts = lidar_high_->first;
+                    const auto& pts = lidar_high.first;
                     auto pts_tensor = points_to_tensor_xyz(pts, get_device());
 
                     // 1. Prediction-only SDF
@@ -836,10 +868,64 @@ namespace rc
                     }
                 }
             }
-            const float avg_update_ms = update_ms_accum_ / update_ms_count_;
-            const int fps = loc_fps_.print("[LocThread] update_ms(last/avg)=" + std::to_string(static_cast<int>(update_ms))
-                               + "/" + std::to_string(static_cast<int>(avg_update_ms)), 2000);
+
+            // End of heavy localization update path (executed only for new lidar frames).
+            }
+            const float avg_update_ms = update_ms_count_ > 0 ? (update_ms_accum_ / static_cast<float>(update_ms_count_))
+                                                              : last_update_ms_report;
+            const int last_update_ms_i = static_cast<int>(std::lround(last_update_ms_report));
+            const int avg_update_ms_i = static_cast<int>(std::lround(avg_update_ms));
+            const int fps = loc_fps_.print("[LocThread] update_ms(last/avg)=" + std::to_string(last_update_ms_i)
+                               + "/" + std::to_string(avg_update_ms_i), 2000);
             if (fps > 0) { update_ms_accum_ = 0.f; update_ms_count_ = 0; }
+
+            {
+                static auto last_timing = std::chrono::steady_clock::now();
+                static std::uint64_t loops = 0;
+                static std::uint64_t no_lidar_loops = 0;
+                static std::uint64_t update_loops = 0;
+                static std::uint64_t same_frame_loops = 0;
+                static std::uint64_t lidar_points_acc = 0;
+                static float loop_ms_acc = 0.f;
+                static float update_ms_acc = 0.f;
+
+                loops++;
+                if (did_update)
+                {
+                    update_loops++;
+                    update_ms_acc += update_ms;
+                    lidar_points_acc += lidar_size;
+                }
+                else
+                {
+                    no_lidar_loops++;
+                    if (same_frame_count > 0)
+                        same_frame_loops++;
+                }
+
+                loop_ms_acc += std::chrono::duration<float, std::milli>(
+                    std::chrono::steady_clock::now() - t_loop_start).count();
+
+                const auto now_timing = std::chrono::steady_clock::now();
+                if (now_timing - last_timing >= std::chrono::seconds(2))
+                {
+                    const float avg_loop_ms = loops > 0 ? loop_ms_acc / static_cast<float>(loops) : 0.f;
+                    const float avg_update_ms = update_loops > 0 ? update_ms_acc / static_cast<float>(update_loops) : 0.f;
+                    const float avg_lidar_points = update_loops > 0 ? static_cast<float>(lidar_points_acc) / static_cast<float>(update_loops) : 0.f;
+                    std::print("[Timing][LocLoop] loops={} updates={} no_lidar={} same_frame={} avg_loop_ms={:.3f} avg_update_ms={:.3f} avg_lidar_pts={:.1f} wait_ms={} adam_ms={:.3f} cov_ms={:.3f} breakdown_ms={:.3f}\n",
+                               loops, update_loops, no_lidar_loops, same_frame_loops, avg_loop_ms, avg_update_ms,
+                               avg_lidar_points, wait_period.count(), last_t_adam_ms_, last_t_cov_ms_, last_t_breakdown_ms_);
+                    loops = 0;
+                    no_lidar_loops = 0;
+                    update_loops = 0;
+                    same_frame_loops = 0;
+                    lidar_points_acc = 0;
+                    loop_ms_acc = 0.f;
+                    update_ms_acc = 0.f;
+                    last_timing = now_timing;
+                }
+            }
+
             std::this_thread::sleep_for(wait_period);
         }
 
@@ -1343,7 +1429,7 @@ namespace rc
     }
 
     RoomConcept::UpdateResult RoomConcept::update(
-                const std::pair<std::vector<Eigen::Vector3f>, int64_t> &lidar,
+                const LidarData &lidar,
                 const std::vector<VelocityCommand> &velocity_history,
                 const std::vector<OdometryReading> &odometry_history)
     {
@@ -1889,6 +1975,9 @@ namespace rc
             return std::nullopt;
 
         prediction_early_exits_++;
+        last_t_adam_ms_ = 0.f;
+        last_t_cov_ms_ = 0.f;
+        last_t_breakdown_ms_ = 0.f;
 
         auto pose_cpu = newest.pose.detach().to(torch::kCPU);
         auto p_acc = pose_cpu.accessor<float, 1>();

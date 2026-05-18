@@ -66,7 +66,7 @@ class SpecificWorker : public GenericWorker
         void restore();
         int  startup_check();
 
-        void modify_node_slot(std::uint64_t, const std::string &type){};
+        void modify_node_slot(std::uint64_t id, const std::string &type);
         void modify_node_attrs_slot(std::uint64_t id, const std::vector<std::string>& att_names){};
         void modify_edge_slot(std::uint64_t from, std::uint64_t to,  const std::string &type){};
         void modify_edge_attrs_slot(std::uint64_t from, std::uint64_t to, const std::string &type, const std::vector<std::string>& att_names){};
@@ -81,7 +81,7 @@ class SpecificWorker : public GenericWorker
             float ROBOT_HEIGHT = 1.6f;     // m, obstacle cloud ceiling
 
             // Lidar
-            std::string LIDAR_NAME_HIGH = "helios";
+            std::string LIDAR_NAME = "lidar3D";
             float MAX_LIDAR_HIGH_RANGE      = 100.f;  // m
             int   LIDAR_LOW_DECIMATION_FACTOR = 1;
             float LIDAR_HIGH_MIN_HEIGHT     = 1.5f;   // m
@@ -111,6 +111,7 @@ class SpecificWorker : public GenericWorker
         bool startup_check_flag;
 
         // ── Velocity / odometry buffers (thread-safe) ──────────────────────────
+        rc::HighLidarBuffer high_lidar_buffer_{3};
         rc::VelocityBuffer velocity_buffer_{20};
         rc::OdometryBuffer odometry_buffer_{20};
 
