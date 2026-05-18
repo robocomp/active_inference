@@ -307,9 +307,12 @@ void SpecificWorker::compute()
     else
         viewer_2d_->draw_corners({}, pose_for_draw);
 
-    // ── DSR graph update ───────────────────────────────────────────────────
-    if (have_loc)
+    // ── DSR graph update (only on fresh localization frames) ──────────────
+    if (have_loc && loc_res->timestamp_ms > 0 && loc_res->timestamp_ms != last_dsr_published_ts_ms_)
+    {
         update_dsr(*loc_res);
+        last_dsr_published_ts_ms_ = loc_res->timestamp_ms;
+    }
 
     update_ui(loc_res, pose_for_draw);
     fps_counter_.print("[Compute]", 3000);
@@ -830,6 +833,7 @@ void SpecificWorker::modify_node_slot(std::uint64_t id, const std::string &type)
         rc::LidarData lidar_data{std::move(points_high), static_cast<std::int64_t>(laser_ts.value())};
 
         high_lidar_buffer_.put<0>(std::move(lidar_data), ts);
+        room_concept_.notify_new_lidar(static_cast<std::int64_t>(ts));
 
         const auto t_cb_end = std::chrono::steady_clock::now();
         const float cb_ms = std::chrono::duration<float, std::milli>(t_cb_end - t_cb_start).count();
@@ -903,6 +907,7 @@ void SpecificWorker::slot_show_camera_visualization()
 {
     if (camera_viz_)
     {
+        qInfo() << "[CameraViz] button clicked visible=" << camera_viz_->isVisible();
         camera_viz_->update_frame();
         camera_viz_->show();
         camera_viz_->raise();

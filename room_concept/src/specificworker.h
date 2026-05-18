@@ -163,6 +163,7 @@ class SpecificWorker : public GenericWorker
         uint64_t dsr_room_id_  = 0;
         bool     room_node_created_ = false;
         int      stable_frames_     = 0;
+        std::int64_t last_dsr_published_ts_ms_ = 0;
         void check_init_graph_is_valid();
         void update_dsr(const rc::RoomConcept::UpdateResult& res);
         void dsr_update_pose(const rc::RoomConcept::UpdateResult& res);

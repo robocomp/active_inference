@@ -32,6 +32,11 @@ namespace rc
     {
         if (loc_running_.load() || loc_thread_.joinable()) return;
         stop_requested_ = false;
+        commands_pending_.store(false);
+        {
+            std::lock_guard lock(wake_mutex_);
+            latest_notified_lidar_ts_ = std::numeric_limits<std::int64_t>::min();
+        }
 
         // If CUDA is requested, initialize the CUDA context HERE on the calling thread
         // (main/Qt thread) before spawning the localization thread.
@@ -60,6 +65,7 @@ namespace rc
     void RoomConcept::stop()
     {
         stop_requested_ = true;
+        wake_cv_.notify_all();
         if (loc_thread_.joinable())
             loc_thread_.join();
         loc_running_ = false;
@@ -158,8 +164,23 @@ namespace rc
 
     void RoomConcept::push_command(Command cmd)
     {
-        std::lock_guard lock(cmd_mutex_);
-        pending_commands_.push_back(std::move(cmd));
+        {
+            std::lock_guard lock(cmd_mutex_);
+            pending_commands_.push_back(std::move(cmd));
+        }
+        commands_pending_.store(true);
+        wake_cv_.notify_one();
+    }
+
+    void RoomConcept::notify_new_lidar(std::int64_t lidar_timestamp_ms)
+    {
+        {
+            std::lock_guard lock(wake_mutex_);
+            if (lidar_timestamp_ms <= latest_notified_lidar_ts_)
+                return;
+            latest_notified_lidar_ts_ = lidar_timestamp_ms;
+        }
+        wake_cv_.notify_one();
     }
 
     void RoomConcept::configure_room_from_polygon(const std::vector<Eigen::Vector2f>& polygon_vertices)
@@ -350,13 +371,10 @@ namespace rc
             rerun_logger_.init(cfg);
         }
 
-        auto wait_period = std::chrono::milliseconds(40);
+        auto wait_period = std::chrono::milliseconds(0);
         constexpr auto kMinWait = std::chrono::milliseconds(2);
-        constexpr auto kMaxWait = std::chrono::milliseconds(100);
-        constexpr auto kSameFrameWait = std::chrono::milliseconds(20);
         int same_frame_count = 0;
-        std::int64_t last_lidar_ts_processed = std:
-        :numeric_limits<std::int64_t>::min();
+        std::int64_t last_lidar_ts_processed = std::numeric_limits<std::int64_t>::min();
         float last_update_ms_report = 0.f;
 
         while (!stop_requested_.load())
@@ -373,6 +391,7 @@ namespace rc
                     std::lock_guard lock(cmd_mutex_);
                     cmds.swap(pending_commands_);
                 }
+                commands_pending_.store(false);
                 for (auto& cmd : cmds)
                 {
                     std::visit([this](auto&& arg)
@@ -392,10 +411,32 @@ namespace rc
             if (!is_initialized())
             {
                 bootstrap_initialization_from_lidar();
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                std::cout << "[LocThread] Waiting for initialization..." << std::endl;
+                if (!is_initialized())
+                {
+                    std::unique_lock lock(wake_mutex_);
+                    wake_cv_.wait(lock, [this]()
+                    {
+                        return stop_requested_.load()
+                            || commands_pending_.load()
+                            || latest_notified_lidar_ts_ != std::numeric_limits<std::int64_t>::min();
+                    });
+                }
                 continue;
             }
+
+            {
+                std::unique_lock lock(wake_mutex_);
+                wake_cv_.wait(lock, [this, last_lidar_ts_processed]()
+                {
+                    return stop_requested_.load()
+                        || commands_pending_.load()
+                        || latest_notified_lidar_ts_ > last_lidar_ts_processed;
+                });
+            }
+            if (stop_requested_.load())
+                break;
+            if (commands_pending_.load())
+                continue;
             
             // ===== 3. READ LIDAR DATA =====
             LidarData lidar_high;
@@ -409,8 +450,7 @@ namespace rc
                 }
                 else
                 {        
-                    //std::print("[LocThread] lidar points: {}\n", 0);
-                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    wait_period = std::chrono::milliseconds(0);
 
                     static auto last_timing = std::chrono::steady_clock::now();
                     static std::uint64_t loops = 0;
@@ -451,19 +491,19 @@ namespace rc
             auto odom_snap = run_ctx_.odometry_buffer->get_snapshot<0>();
 
             // ===== 6. RUN LOCALIZATION UPDATE =====
-            const bool same_lidar_frame = (lidar_high.second == last_lidar_ts_processed);
-            if (same_lidar_frame)
+            const bool has_new_lidar_frame = lidar_high.second > last_lidar_ts_processed;
+            if (!has_new_lidar_frame)
             {
                 same_frame_count++;
-                wait_period = kSameFrameWait;
+                wait_period = std::chrono::milliseconds(0);
             }
             else
             {
-                last_lidar_ts_processed = lidar_high.second;
                 same_frame_count = 0;
+                last_lidar_ts_processed = lidar_high.second;
             }
 
-            if (!same_lidar_frame)
+            if (has_new_lidar_frame)
             {
                 const auto t_update_start_ = std::chrono::high_resolution_clock::now();
                 const auto res = update(lidar_high, vel_snap, odom_snap);
@@ -701,12 +741,7 @@ namespace rc
                 }
             }
 
-                // Adaptive polling: throttle when stationary + early-exiting (pose is good),
-                // snap back to fast polling when Adam runs (motion or correction needed).
-                if (res.iterations_used > 0)
-                    wait_period = kMinWait;   // motion or correction needed → full rate
-                else
-                    wait_period = std::min(wait_period + std::chrono::milliseconds(2), kMaxWait);
+                wait_period = std::chrono::milliseconds(0);
                 update_ms_accum_ += update_ms;
                 update_ms_count_++;
 
@@ -926,7 +961,6 @@ namespace rc
                 }
             }
 
-            std::this_thread::sleep_for(wait_period);
         }
 
         rerun_logger_.stop();

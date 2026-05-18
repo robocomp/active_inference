@@ -307,14 +307,6 @@ void Viewer2D::update_frame(const FrameData& fd)
     if (fd.have_loc && !fd.has_room_polygon)
         update_estimated_room_rect(fd.room_width, fd.room_length, false);
 
-    // Keep dock/main-window layout in sync with canvas size changes.
-    if (QWidget* top = agv_->window(); top != nullptr && !top->isMaximized() && !top->isFullScreen())
-    {
-        agv_->updateGeometry();
-        if (QLayout* lay = top->layout(); lay != nullptr)
-            lay->activate();
-        top->adjustSize();
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

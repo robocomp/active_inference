@@ -10,8 +10,52 @@
 
 #include <cmath>
 #include <limits>
+#include <print>
 
 namespace rc {
+
+namespace {
+
+struct RoomToCameraBasis
+{
+    Mat::Vector3d origin{0.0, 0.0, 0.0};
+    Mat::Vector3d axis_x{0.0, 0.0, 0.0};
+    Mat::Vector3d axis_y{0.0, 0.0, 0.0};
+    Mat::Vector3d axis_z{0.0, 0.0, 0.0};
+};
+
+bool compute_room_to_camera_basis(DSR::InnerEigenAPI* inner_eigen_api,
+                                  const std::string& camera_node_name,
+                                  const std::string& room_frame_name,
+                                  std::uint64_t rt_timestamp,
+                                  RoomToCameraBasis& basis)
+{
+    if (inner_eigen_api == nullptr)
+        return false;
+
+    const auto origin_opt = inner_eigen_api->transform(camera_node_name, Mat::Vector3d(0.0, 0.0, 0.0), room_frame_name, rt_timestamp);
+    const auto x_opt = inner_eigen_api->transform(camera_node_name, Mat::Vector3d(1.0, 0.0, 0.0), room_frame_name, rt_timestamp);
+    const auto y_opt = inner_eigen_api->transform(camera_node_name, Mat::Vector3d(0.0, 1.0, 0.0), room_frame_name, rt_timestamp);
+    const auto z_opt = inner_eigen_api->transform(camera_node_name, Mat::Vector3d(0.0, 0.0, 1.0), room_frame_name, rt_timestamp);
+    if (!origin_opt.has_value() || !x_opt.has_value() || !y_opt.has_value() || !z_opt.has_value())
+        return false;
+
+    basis.origin = origin_opt.value();
+    basis.axis_x = x_opt.value() - basis.origin;
+    basis.axis_y = y_opt.value() - basis.origin;
+    basis.axis_z = z_opt.value() - basis.origin;
+    return true;
+}
+
+Mat::Vector3d transform_room_point(const RoomToCameraBasis& basis, const Mat::Vector3d& point_room)
+{
+    return basis.origin
+         + point_room.x() * basis.axis_x
+         + point_room.y() * basis.axis_y
+         + point_room.z() * basis.axis_z;
+}
+
+}  // namespace
 
 static std::vector<Eigen::Vector2f> read_room_polygon_from_dsr(const std::shared_ptr<DSRGraph>& graph, const std::string& room_frame_name)
 {
@@ -73,9 +117,121 @@ CameraVisualizer::CameraVisualizer(std::shared_ptr<DSRGraph> graph, const std::v
     refresh_timer_ = new QTimer(this);
     refresh_timer_->setTimerType(Qt::PreciseTimer);
     connect(refresh_timer_, &QTimer::timeout, this, &CameraVisualizer::update_frame);
-    refresh_timer_->start(50);  // target 20 Hz to guarantee >=10 Hz in practice
     fps_timer_.start();
-    update_frame();  // paint first frame immediately
+    timing_window_timer_.start();
+}
+
+void CameraVisualizer::showEvent(QShowEvent* event)
+{
+    QDialog::showEvent(event);
+    callback_gap_timer_.invalidate();
+    have_last_source_timestamp_ = false;
+    last_source_timestamp_ = 0;
+    estimated_source_period_ms_ = 50.0;
+    have_estimated_source_period_ = false;
+    reset_timing_window();
+    if (refresh_timer_ != nullptr && !refresh_timer_->isActive())
+        refresh_timer_->start(50);  // target 20 Hz to guarantee >=10 Hz in practice
+    std::print("[CameraViz] show timer_interval_ms={} room_vertices={}\n",
+               refresh_timer_ != nullptr ? refresh_timer_->interval() : -1,
+               room_polygon_.size());
+    update_frame();
+}
+
+void CameraVisualizer::hideEvent(QHideEvent* event)
+{
+    log_timing_summary("hide");
+    if (refresh_timer_ != nullptr)
+        refresh_timer_->stop();
+    QDialog::hideEvent(event);
+}
+
+void CameraVisualizer::reset_timing_window()
+{
+    timing_stats_ = TimingStats{};
+    timing_window_timer_.restart();
+}
+
+double CameraVisualizer::raw_timestamp_delta_to_ms(std::uint64_t raw_delta)
+{
+    if (raw_delta == 0)
+        return 0.0;
+
+    // Heuristic unit detection: DSR camera timestamps are typically ns, but keep
+    // compatibility with ms/us producers.
+    if (raw_delta >= 1000000ULL)
+        return static_cast<double>(raw_delta) / 1000000.0;
+    if (raw_delta >= 1000ULL)
+        return static_cast<double>(raw_delta) / 1000.0;
+    return static_cast<double>(raw_delta);
+}
+
+void CameraVisualizer::adapt_refresh_interval(std::uint64_t raw_delta)
+{
+    if (refresh_timer_ == nullptr || raw_delta == 0)
+        return;
+
+    const double observed_period_ms = raw_timestamp_delta_to_ms(raw_delta);
+    if (!std::isfinite(observed_period_ms) || observed_period_ms < 5.0)
+        return;
+
+    if (!have_estimated_source_period_)
+    {
+        estimated_source_period_ms_ = observed_period_ms;
+        have_estimated_source_period_ = true;
+    }
+    else
+    {
+        constexpr double alpha = 0.25;
+        estimated_source_period_ms_ = (1.0 - alpha) * estimated_source_period_ms_ + alpha * observed_period_ms;
+    }
+
+    const int target_interval_ms = std::clamp(static_cast<int>(std::lround(estimated_source_period_ms_)), 20, 250);
+    if (std::abs(refresh_timer_->interval() - target_interval_ms) >= 5)
+        refresh_timer_->setInterval(target_interval_ms);
+}
+
+void CameraVisualizer::log_timing_summary(const char* reason)
+{
+    if (!timing_window_timer_.isValid())
+        return;
+
+    const double window_s = static_cast<double>(timing_window_timer_.elapsed()) / 1000.0;
+    if (window_s <= 0.0 || timing_stats_.timer_callbacks == 0)
+        return;
+
+    const auto avg_or_zero = [](float total, std::uint64_t count)
+    {
+        return count > 0 ? total / static_cast<float>(count) : 0.f;
+    };
+    const auto avg_or_zero_double = [](double total, std::uint64_t count)
+    {
+        return count > 0 ? total / static_cast<double>(count) : 0.0;
+    };
+
+    std::print(
+        "[Timing][CameraViz] reason={} window_s={:.2f} cb={} cb_hz={:.2f} rendered={} rendered_hz={:.2f} src_unique={} src_hz={:.2f} src_repeat={} src_zero={} src_backwards={} fetch_fail={} avg_gap_ms={:.2f} max_gap_ms={:.2f} avg_fetch_ms={:.2f} avg_draw_ms={:.2f} avg_present_ms={:.2f} avg_total_ms={:.2f} max_total_ms={:.2f} avg_src_delta_raw={:.1f} last_src_ts={}\n",
+        reason,
+        window_s,
+        timing_stats_.timer_callbacks,
+        static_cast<double>(timing_stats_.timer_callbacks) / window_s,
+        timing_stats_.rendered_frames,
+        static_cast<double>(timing_stats_.rendered_frames) / window_s,
+        timing_stats_.unique_source_frames,
+        static_cast<double>(timing_stats_.unique_source_frames) / window_s,
+        timing_stats_.repeated_source_frames,
+        timing_stats_.zero_timestamps,
+        timing_stats_.source_regressions,
+        timing_stats_.fetch_failures,
+        avg_or_zero(timing_stats_.total_callback_gap_ms, timing_stats_.callback_gap_samples),
+        timing_stats_.max_callback_gap_ms,
+        avg_or_zero(timing_stats_.total_fetch_ms, timing_stats_.timer_callbacks),
+        avg_or_zero(timing_stats_.total_draw_ms, timing_stats_.rendered_frames),
+        avg_or_zero(timing_stats_.total_present_ms, timing_stats_.rendered_frames),
+        avg_or_zero(timing_stats_.total_callback_ms, timing_stats_.timer_callbacks),
+        timing_stats_.max_callback_ms,
+        avg_or_zero_double(timing_stats_.total_source_delta, timing_stats_.source_delta_samples),
+        last_source_timestamp_);
 }
 
 bool CameraVisualizer::fetch_rgb_from_dsr(QImage& rgb_image, std::uint64_t& frame_timestamp)
@@ -247,23 +403,19 @@ std::vector<Eigen::Vector2f> CameraVisualizer::project_points_to_image(
         return image_points;
     }
 
+    RoomToCameraBasis basis;
+    if (!compute_room_to_camera_basis(inner_eigen_api_.get(), camera_node_name_, room_frame_name_, rt_timestamp, basis))
+    {
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        for (std::size_t i = 0; i < world_points.size(); ++i)
+            image_points.emplace_back(nan, nan);
+        return image_points;
+    }
+
     for (std::size_t i = 0; i < world_points.size(); ++i)
     {
         const auto& p = world_points[i];
-        const auto p_in_cam_opt = inner_eigen_api_->transform(
-            camera_node_name_,
-            Mat::Vector3d(p.x(), p.y(), p.z()),
-            room_frame_name_,
-            rt_timestamp);
-
-        if (!p_in_cam_opt.has_value())
-        {
-            const float nan = std::numeric_limits<float>::quiet_NaN();
-            image_points.emplace_back(nan, nan);
-            continue;
-        }
-
-        const auto p_cam = p_in_cam_opt.value();
+        const auto p_cam = transform_room_point(basis, Mat::Vector3d(p.x(), p.y(), p.z()));
 
         // CameraAPI::project uses Y as depth axis in camera frame.
         if (p_cam.y() <= 1e-6)
@@ -292,13 +444,15 @@ void CameraVisualizer::draw_projections(QImage& image, std::uint64_t rt_timestam
     if (corners_3d.size() < 6)
         return;
 
-    auto image_points = project_points_to_image(corners_3d, rt_timestamp);
-
     QPainter painter(&image);
     painter.setRenderHint(QPainter::Antialiasing, true);
 
     const int num_corners = static_cast<int>(corners_3d.size() / 2);
     if (!inner_eigen_api_ || !camera_api_ || num_corners < 2)
+        return;
+
+    RoomToCameraBasis basis;
+    if (!compute_room_to_camera_basis(inner_eigen_api_.get(), camera_node_name_, room_frame_name_, rt_timestamp, basis))
         return;
 
     // 1) Transform all room floor/top corners from room frame -> camera frame.
@@ -311,14 +465,8 @@ void CameraVisualizer::draw_projections(QImage& image, std::uint64_t rt_timestam
         const auto& p_floor_room = corners_3d[i * 2];      // floor corner z=0
         const auto& p_top_room = corners_3d[i * 2 + 1];    // top corner z=room_height
 
-        const auto p_floor_cam_opt = inner_eigen_api_->transform(
-            camera_node_name_, Mat::Vector3d(p_floor_room.x(), p_floor_room.y(), p_floor_room.z()), room_frame_name_, rt_timestamp);
-        const auto p_top_cam_opt = inner_eigen_api_->transform(
-            camera_node_name_, Mat::Vector3d(p_top_room.x(), p_top_room.y(), p_top_room.z()), room_frame_name_, rt_timestamp);
-        if (!p_floor_cam_opt.has_value() || !p_top_cam_opt.has_value())
-            return;
-        floor_in_cam.push_back(p_floor_cam_opt.value());
-        top_in_cam.push_back(p_top_cam_opt.value());
+        floor_in_cam.push_back(transform_room_point(basis, Mat::Vector3d(p_floor_room.x(), p_floor_room.y(), p_floor_room.z())));
+        top_in_cam.push_back(transform_room_point(basis, Mat::Vector3d(p_top_room.x(), p_top_room.y(), p_top_room.z())));
     }
 
     auto finite = [](const Eigen::Vector2f& p)
@@ -388,11 +536,10 @@ void CameraVisualizer::draw_projections(QImage& image, std::uint64_t rt_timestam
         auto project_room_segment = [&](const Mat::Vector3d& p0_room, const Mat::Vector3d& p1_room,
                                         Eigen::Vector2f& out0, Eigen::Vector2f& out1)
         {
-            const auto p0_cam_opt = inner_eigen_api_->transform(camera_node_name_, p0_room, room_frame_name_, rt_timestamp);
-            const auto p1_cam_opt = inner_eigen_api_->transform(camera_node_name_, p1_room, room_frame_name_, rt_timestamp);
-            if (!p0_cam_opt.has_value() || !p1_cam_opt.has_value())
-                return false;
-            return project_clipped_segment(p0_cam_opt.value(), p1_cam_opt.value(), out0, out1);
+            return project_clipped_segment(transform_room_point(basis, p0_room),
+                                           transform_room_point(basis, p1_room),
+                                           out0,
+                                           out1);
         };
 
         const float x0 = std::floor(min_x / grid_step) * grid_step;
@@ -458,17 +605,138 @@ void CameraVisualizer::draw_projections(QImage& image, std::uint64_t rt_timestam
     painter.end();
 }
 
+void CameraVisualizer::draw_status_overlay(QImage& image) const
+{
+    QPainter painter(&image);
+    painter.setRenderHint(QPainter::TextAntialiasing, true);
+
+    const double source_fps = (have_estimated_source_period_ && estimated_source_period_ms_ > 1e-3)
+        ? 1000.0 / estimated_source_period_ms_
+        : 0.0;
+    const double poll_fps = (refresh_timer_ != nullptr && refresh_timer_->interval() > 0)
+        ? 1000.0 / static_cast<double>(refresh_timer_->interval())
+        : 0.0;
+
+    const QString overlay_text = QString("RGB %1 fps | Poll %2 fps")
+        .arg(source_fps, 0, 'f', 1)
+        .arg(poll_fps, 0, 'f', 1);
+
+    QFont font = painter.font();
+    const int target_point_size = std::clamp(image.height() / 22, 11, 26);
+    font.setPointSize(target_point_size);
+    font.setBold(true);
+    painter.setFont(font);
+
+    const QFontMetrics metrics(font);
+    const QRect text_rect = metrics.boundingRect(overlay_text).adjusted(-10, -6, 10, 6);
+    const QRect panel_rect(12, 12, text_rect.width(), text_rect.height());
+
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(0, 0, 0, 170));
+    painter.drawRoundedRect(panel_rect, 8, 8);
+
+    painter.setPen(Qt::white);
+    painter.drawText(panel_rect, Qt::AlignCenter, overlay_text);
+    painter.end();
+}
+
 void CameraVisualizer::update_frame()
 {
+    if (!isVisible())
+        return;
+
+    ++timing_stats_.timer_callbacks;
+
+    if (callback_gap_timer_.isValid())
+    {
+        const float callback_gap_ms = static_cast<float>(callback_gap_timer_.restart());
+        timing_stats_.total_callback_gap_ms += callback_gap_ms;
+        timing_stats_.max_callback_gap_ms = std::max(timing_stats_.max_callback_gap_ms, callback_gap_ms);
+        ++timing_stats_.callback_gap_samples;
+    }
+    else
+    {
+        callback_gap_timer_.start();
+    }
+
     QElapsedTimer frame_timer;
     frame_timer.start();
 
     QImage rgb_image;
     std::uint64_t frame_timestamp = 0;
-    if (fetch_rgb_from_dsr(rgb_image, frame_timestamp))
+    QElapsedTimer stage_timer;
+    stage_timer.start();
+    const bool fetched = fetch_rgb_from_dsr(rgb_image, frame_timestamp);
+    const float fetch_ms = static_cast<float>(stage_timer.elapsed());
+    timing_stats_.total_fetch_ms += fetch_ms;
+
+    if (!fetched)
     {
-        draw_projections(rgb_image, frame_timestamp);
-        image_label_->setPixmap(QPixmap::fromImage(rgb_image));
+        ++timing_stats_.fetch_failures;
+    }
+    else
+    {
+        bool should_render = true;
+        if (frame_timestamp == 0)
+        {
+            ++timing_stats_.zero_timestamps;
+        }
+        else if (have_last_source_timestamp_)
+        {
+            if (frame_timestamp == last_source_timestamp_)
+            {
+                ++timing_stats_.repeated_source_frames;
+                should_render = false;
+            }
+            else if (frame_timestamp > last_source_timestamp_)
+            {
+                ++timing_stats_.unique_source_frames;
+                const auto source_delta = frame_timestamp - last_source_timestamp_;
+                timing_stats_.total_source_delta += static_cast<double>(source_delta);
+                ++timing_stats_.source_delta_samples;
+                adapt_refresh_interval(source_delta);
+            }
+            else
+            {
+                ++timing_stats_.source_regressions;
+            }
+        }
+        else
+        {
+            ++timing_stats_.unique_source_frames;
+        }
+
+        if (frame_timestamp > 0 && (!have_last_source_timestamp_ || frame_timestamp >= last_source_timestamp_))
+        {
+            last_source_timestamp_ = frame_timestamp;
+            have_last_source_timestamp_ = true;
+        }
+
+        if (should_render)
+        {
+            stage_timer.restart();
+            draw_projections(rgb_image, frame_timestamp);
+            const float draw_ms = static_cast<float>(stage_timer.elapsed());
+            timing_stats_.total_draw_ms += draw_ms;
+
+            stage_timer.restart();
+            QImage display_image = rgb_image;
+            if (image_label_ != nullptr)
+            {
+                const QSize target_size = image_label_->size();
+                if (target_size.isValid() && !target_size.isEmpty())
+                {
+                    display_image = rgb_image.scaled(target_size,
+                                                     Qt::KeepAspectRatio,
+                                                     Qt::SmoothTransformation);
+                }
+            }
+            draw_status_overlay(display_image);
+            image_label_->setPixmap(QPixmap::fromImage(display_image));
+            const float present_ms = static_cast<float>(stage_timer.elapsed());
+            timing_stats_.total_present_ms += present_ms;
+            ++timing_stats_.rendered_frames;
+        }
 
         ++frames_since_fps_log_;
         const qint64 elapsed_ms = fps_timer_.elapsed();
@@ -477,6 +745,16 @@ void CameraVisualizer::update_frame()
             fps_timer_.restart();
             frames_since_fps_log_ = 0;
         }
+    }
+
+    const float total_ms = static_cast<float>(frame_timer.elapsed());
+    timing_stats_.total_callback_ms += total_ms;
+    timing_stats_.max_callback_ms = std::max(timing_stats_.max_callback_ms, total_ms);
+
+    if (timing_window_timer_.elapsed() >= 2000)
+    {
+        log_timing_summary("periodic");
+        reset_timing_window();
     }
 }
 

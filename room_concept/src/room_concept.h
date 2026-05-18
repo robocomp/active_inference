@@ -6,6 +6,7 @@
 #include <limits>
 #include <thread>
 #include <mutex>
+#include <condition_variable>
 #include <atomic>
 #include <variant>
 #include <optional>
@@ -381,6 +382,9 @@ public:
     /// Thread-safe: push a command to be executed on the localization thread.
     void push_command(Command cmd);
 
+    /// Wake the localization thread when a newer lidar scan is available.
+    void notify_new_lidar(std::int64_t lidar_timestamp_ms);
+
     // ----- Initialization configuration -----
     void configure_room_from_polygon(const std::vector<Eigen::Vector2f>& polygon_vertices);
     void configure_room_from_rect(float width, float length);
@@ -484,6 +488,10 @@ private:
 
    std::mutex cmd_mutex_;
    std::vector<Command> pending_commands_;
+    std::atomic<bool> commands_pending_{false};
+    std::mutex wake_mutex_;
+    std::condition_variable wake_cv_;
+    std::int64_t latest_notified_lidar_ts_ = std::numeric_limits<std::int64_t>::min();
 
    /// The localization loop body (runs on loc_thread_)
    void run();
