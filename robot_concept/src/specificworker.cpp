@@ -42,6 +42,40 @@
 #include "custom_widget.h"
 #include "ui_localUI.h"
 
+namespace
+{
+	struct RoomToCameraBasis
+	{
+		Mat::Vector3d origin{0.0, 0.0, 0.0};
+		Mat::Vector3d axis_x{0.0, 0.0, 0.0};
+		Mat::Vector3d axis_y{0.0, 0.0, 0.0};
+		Mat::Vector3d axis_z{0.0, 0.0, 0.0};
+	};
+
+	bool compute_room_to_camera_basis(DSR::InnerEigenAPI* inner_eigen_api,
+	                                 const std::string& camera_node_name,
+	                                 const std::string& room_frame_name,
+	                                 std::uint64_t rt_timestamp,
+	                                 RoomToCameraBasis& basis)
+	{
+		if (inner_eigen_api == nullptr)
+			return false;
+
+		const auto origin_opt = inner_eigen_api->transform(camera_node_name, Mat::Vector3d(0.0, 0.0, 0.0), room_frame_name, rt_timestamp);
+		const auto x_opt = inner_eigen_api->transform(camera_node_name, Mat::Vector3d(1.0, 0.0, 0.0), room_frame_name, rt_timestamp);
+		const auto y_opt = inner_eigen_api->transform(camera_node_name, Mat::Vector3d(0.0, 1.0, 0.0), room_frame_name, rt_timestamp);
+		const auto z_opt = inner_eigen_api->transform(camera_node_name, Mat::Vector3d(0.0, 0.0, 1.0), room_frame_name, rt_timestamp);
+		if (!origin_opt.has_value() || !x_opt.has_value() || !y_opt.has_value() || !z_opt.has_value())
+			return false;
+
+		basis.origin = origin_opt.value();
+		basis.axis_x = x_opt.value() - basis.origin;
+		basis.axis_y = y_opt.value() - basis.origin;
+		basis.axis_z = z_opt.value() - basis.origin;
+		return true;
+	}
+}
+
 
 SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, bool startup_check) : GenericWorker(configLoader, tprx)
 {
@@ -162,10 +196,12 @@ void SpecificWorker::initialize()
 
 		voxel_lidar_toggle_button_ = new QPushButton("Hide LiDAR", custom_widget.frame);
 		voxel_lidar_toggle_button_->setCheckable(true);
-		voxel_lidar_toggle_button_->setChecked(true);
+		voxel_lidar_toggle_button_->setChecked(false);
+		voxel_lidar_toggle_button_->setText("Show LiDAR");
 		custom_widget.frame->layout()->addWidget(voxel_lidar_toggle_button_);
 
 		voxel_viewer_gl = std::make_unique<rc::VoxelOpenGLViewer>(custom_widget.frame);
+		voxel_viewer_gl->set_show_lidar(false);
 		custom_widget.frame->layout()->addWidget(voxel_viewer_gl.get());
 		QObject::connect(voxel_lidar_toggle_button_, &QPushButton::toggled, custom_widget.frame,
 		                 [this](bool checked)
@@ -895,61 +931,142 @@ void SpecificWorker::overlay_room_polygon_on_canvas(cv::Mat& canvas,
 	if (!zed_node.has_value())
 		return;
 
-	DSR::CameraAPI camera_api(G.get(), zed_node.value());
+	auto camera_api = G->get_camera_api(zed_node.value());
+	if (!camera_api)
+		return;
+
 	const std::uint64_t frame_ts_ms = get_rgbd_frame_timestamp_ms(rgbd);
 	const std::size_t n = std::min(room_data->polygon_x.size(), room_data->polygon_y.size());
 	if (n < 2)
 		return;
 
-	auto zed_T_room = inner_eigen_api->get_transformation_matrix("zed", room_data->room_name, frame_ts_ms);
-	if (!zed_T_room.has_value())
+	RoomToCameraBasis basis;
+	if (!compute_room_to_camera_basis(inner_eigen_api.get(), "zed", room_data->room_name, frame_ts_ms, basis))
 		return;
 
 	Eigen::Matrix<double, 3, Eigen::Dynamic> room_points(3, static_cast<Eigen::Index>(n));
+	Eigen::Matrix<double, 3, Eigen::Dynamic> room_points_top(3, static_cast<Eigen::Index>(n));
 	for (std::size_t i = 0; i < n; ++i)
 	{
 		room_points(0, static_cast<Eigen::Index>(i)) = static_cast<double>(room_data->polygon_x[i]);
-		room_points(1, static_cast<Eigen::Index>(i)) = 0.0;
-		room_points(2, static_cast<Eigen::Index>(i)) = static_cast<double>(room_data->polygon_y[i]);
+		room_points(1, static_cast<Eigen::Index>(i)) = static_cast<double>(room_data->polygon_y[i]);
+		room_points(2, static_cast<Eigen::Index>(i)) = 0.0;
+		room_points_top(0, static_cast<Eigen::Index>(i)) = static_cast<double>(room_data->polygon_x[i]);
+		room_points_top(1, static_cast<Eigen::Index>(i)) = static_cast<double>(room_data->polygon_y[i]);
+		room_points_top(2, static_cast<Eigen::Index>(i)) = static_cast<double>(room_data->room_height);
 	}
+
+	Eigen::Matrix3d basis_matrix;
+	basis_matrix.col(0) = basis.axis_x;
+	basis_matrix.col(1) = basis.axis_y;
+	basis_matrix.col(2) = basis.axis_z;
+	const Eigen::Vector3d basis_origin = basis.origin;
 
 	Eigen::Matrix<double, 3, Eigen::Dynamic> zed_points =
-		(zed_T_room->linear() * room_points).colwise() + zed_T_room->translation();
+		(basis_matrix * room_points).colwise() + basis_origin;
+	Eigen::Matrix<double, 3, Eigen::Dynamic> zed_points_top =
+		(basis_matrix * room_points_top).colwise() + basis_origin;
 
-	std::vector<std::optional<cv::Point>> projected(n);
+	auto project_clipped_segment = [&](Eigen::Vector3d a, Eigen::Vector3d b,
+	                                  cv::Point& out_a, cv::Point& out_b) -> bool
+	{
+		constexpr double near_y = 1e-4;
+
+		if (a.y() <= near_y && b.y() <= near_y)
+			return false;
+
+		if (a.y() <= near_y)
+		{
+			const double t = (near_y - a.y()) / (b.y() - a.y());
+			a = a + t * (b - a);
+		}
+		else if (b.y() <= near_y)
+		{
+			const double t = (near_y - b.y()) / (a.y() - b.y());
+			b = b + t * (a - b);
+		}
+
+		const Eigen::Vector2d uv0 = camera_api->project(a);
+		const Eigen::Vector2d uv1 = camera_api->project(b);
+		if (!std::isfinite(uv0.x()) || !std::isfinite(uv0.y()) || !std::isfinite(uv1.x()) || !std::isfinite(uv1.y()))
+			return false;
+
+		out_a = cv::Point(static_cast<int>(std::lround(uv0.x())), static_cast<int>(std::lround(uv0.y())));
+		out_b = cv::Point(static_cast<int>(std::lround(uv1.x())), static_cast<int>(std::lround(uv1.y())));
+		return true;
+	};
+
+	std::vector<std::optional<cv::Point>> projected_floor(n);
+	std::vector<std::optional<cv::Point>> projected_top(n);
 	for (std::size_t i = 0; i < n; ++i)
 	{
-		const Eigen::Vector3d point_zed = zed_points.col(static_cast<Eigen::Index>(i));
-		if (point_zed.z() <= 0.05)
-			continue;
+		const Eigen::Vector3d floor_point_zed = zed_points.col(static_cast<Eigen::Index>(i));
+		if (floor_point_zed.y() > 1e-6)
+		{
+			const Eigen::Vector2d uv = camera_api->project(floor_point_zed);
+			if (std::isfinite(uv.x()) && std::isfinite(uv.y()))
+				projected_floor[i] = cv::Point(static_cast<int>(std::lround(uv.x())),
+				                              static_cast<int>(std::lround(uv.y())));
+		}
 
-		const Eigen::Vector2d pixel = camera_api.project(point_zed);
-		if (!std::isfinite(pixel.x()) || !std::isfinite(pixel.y()))
-			continue;
-
-		projected[i] = cv::Point(static_cast<int>(std::lround(pixel.x())),
-		                        static_cast<int>(std::lround(pixel.y())));
+		const Eigen::Vector3d top_point_zed = zed_points_top.col(static_cast<Eigen::Index>(i));
+		if (top_point_zed.y() > 1e-6)
+		{
+			const Eigen::Vector2d uv = camera_api->project(top_point_zed);
+			if (std::isfinite(uv.x()) && std::isfinite(uv.y()))
+				projected_top[i] = cv::Point(static_cast<int>(std::lround(uv.x())),
+				                            static_cast<int>(std::lround(uv.y())));
+		}
 	}
 
-	const cv::Scalar room_colour(255, 0, 255);
+	const cv::Scalar floor_colour(255, 0, 255);
+	const cv::Scalar top_colour(0, 0, 255);
+	const cv::Scalar vertical_colour(0, 200, 255);
 	for (std::size_t i = 0; i < n; ++i)
 	{
 		const std::size_t j = (i + 1) % n;
-		if (!projected[i].has_value() || !projected[j].has_value())
-			continue;
 
-		cv::Point p0 = projected[i].value();
-		cv::Point p1 = projected[j].value();
-		if (cv::clipLine(canvas.size(), p0, p1))
-			cv::line(canvas, p0, p1, room_colour, 2, cv::LINE_AA);
+		cv::Point p0;
+		cv::Point p1;
+		if (project_clipped_segment(zed_points.col(static_cast<Eigen::Index>(i)),
+		                           zed_points.col(static_cast<Eigen::Index>(j)),
+		                           p0, p1))
+		{
+			if (cv::clipLine(canvas.size(), p0, p1))
+				cv::line(canvas, p0, p1, floor_colour, 2, cv::LINE_AA);
+		}
+
+		if (project_clipped_segment(zed_points_top.col(static_cast<Eigen::Index>(i)),
+		                           zed_points_top.col(static_cast<Eigen::Index>(j)),
+		                           p0, p1))
+		{
+			if (cv::clipLine(canvas.size(), p0, p1))
+				cv::line(canvas, p0, p1, top_colour, 2, cv::LINE_AA);
+		}
+
+		if (project_clipped_segment(zed_points.col(static_cast<Eigen::Index>(i)),
+		                           zed_points_top.col(static_cast<Eigen::Index>(i)),
+		                           p0, p1))
+		{
+			if (cv::clipLine(canvas.size(), p0, p1))
+				cv::line(canvas, p0, p1, vertical_colour, 2, cv::LINE_AA);
+		}
 	}
 
-	for (const auto& p : projected)
+	for (const auto& p : projected_floor)
 	{
 		if (!p.has_value())
 			continue;
 		if (p->x >= 0 && p->x < canvas.cols && p->y >= 0 && p->y < canvas.rows)
-			cv::circle(canvas, p.value(), 4, room_colour, cv::FILLED, cv::LINE_AA);
+			cv::circle(canvas, p.value(), 4, floor_colour, cv::FILLED, cv::LINE_AA);
+	}
+
+	for (const auto& p : projected_top)
+	{
+		if (!p.has_value())
+			continue;
+		if (p->x >= 0 && p->x < canvas.cols && p->y >= 0 && p->y < canvas.rows)
+			cv::circle(canvas, p.value(), 4, top_colour, cv::FILLED, cv::LINE_AA);
 	}
 }
 
@@ -1605,6 +1722,7 @@ void SpecificWorker::read_rgbd_thread()
     auto wait_period = std::chrono::milliseconds(getPeriod("Compute"));
     while (!stop_rgbd_thread)
     {
+		const auto loop_start = std::chrono::steady_clock::now();
 		const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
         try
@@ -1648,6 +1766,7 @@ void SpecificWorker::read_rgbd_thread()
 			}
 
             const long p_ms = static_cast<long>(frame.image.period);
+			std::uint64_t frame_ts_ms = get_rgbd_frame_timestamp_ms(frame);
 
 			// Upload RGB to DSR at the configured rate (dsr_rgb_fps=0 means every frame).
 			// Depth is large; upload at dsr_depth_fps.
@@ -1673,6 +1792,7 @@ void SpecificWorker::read_rgbd_thread()
 					last_rgb_upload = now_steady;
 					G->add_or_modify_attrib_local<cam_rgb_att>(cam_node.value(),
 						std::vector<uint8_t>(frame.image.image.begin(), frame.image.image.end()));
+					G->add_or_modify_attrib_local<cam_rgb_alivetime_att>(cam_node.value(), static_cast<std::uint64_t>(frame.image.alivetime));
 					G->update_node(cam_node.value());
 				}
 
@@ -1694,8 +1814,6 @@ void SpecificWorker::read_rgbd_thread()
 			}
 			else
 				qWarning() << "Camera node not found in DSR graph";
-
-			std::uint64_t frame_ts_ms = get_rgbd_frame_timestamp_ms(frame);
 			if (frame_ts_ms == 0)
 				frame_ts_ms = static_cast<std::uint64_t>(now_ms);
 
@@ -1712,7 +1830,9 @@ void SpecificWorker::read_rgbd_thread()
 
 			if (verbose_debug_)
 				rgbd_fps.print("[RGBDThread]", 2000);
-            std::this_thread::sleep_for(wait_period);
+			const auto loop_elapsed = std::chrono::steady_clock::now() - loop_start;
+			if (loop_elapsed < wait_period)
+				std::this_thread::sleep_for(wait_period - loop_elapsed);
         }
         catch (const Ice::Exception& e)
         { qWarning() << "[read_rgbd] Ice exception:" << e.what(); }

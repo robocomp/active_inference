@@ -209,7 +209,7 @@ private:
 		std::string room_name;
 		std::vector<float> polygon_x;
 		std::vector<float> polygon_y;
-		float room_height = 0.f;
+		float room_height = 2.4f;
 	};
 
 	void draw_detections(const cv::Mat& rgb_frame, const std::vector<SegDetection>& detections) const;
