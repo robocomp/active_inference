@@ -1,11 +1,12 @@
 import "Lidar3D.idsl";
 import "CameraRGBDSimple.idsl";
+import "IMU.idsl";
 
 Component robot_concept
 {
     Communications
     {
-        requires Lidar3D, CameraRGBDSimple;
+        requires Lidar3D, CameraRGBDSimple, IMU;
     };
     language Cpp11;
     options dsr;

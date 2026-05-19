@@ -634,8 +634,8 @@ void VoxelOpenGLViewer::paintGL()
         glEnable(GL_DEPTH_TEST);
     };
 
-    // Floor: white, orange corners. Ceiling: cyan, blue corners.
-    draw_outline(local_floor, QColor(255,255,255), QColor(255,128,0));
+    // Floor: white, magenta corners. Ceiling: cyan, blue corners.
+    draw_outline(local_floor, QColor(255,255,255), QColor(255,0,255));
     draw_outline(local_ceiling, QColor(0,255,255), QColor(0,128,255));
 
     // Draw vertical lines connecting floor and ceiling corners

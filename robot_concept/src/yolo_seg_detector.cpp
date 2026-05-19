@@ -567,39 +567,39 @@ YoloSegDetector::detect(const cv::Mat& image, bool is_rgb) const
     const int num_protos = static_cast<int>(proto_shape[1]);
 
     // ── Diagnostics (printed once) ─────────────────────────────────────────
-    {
-        static std::once_flag diag_flag;
-        std::call_once(diag_flag, [&]()
-        {
-            std::cerr << "[YOLO DIAG] out0 shape: [" << det_shape[0]
-                      << ", " << det_shape[1] << ", " << det_shape[2] << "]\n";
-            std::cerr << "[YOLO DIAG] out1 shape: [" << proto_shape[0] << ", "
-                      << proto_shape[1] << ", " << proto_shape[2] << ", " << proto_shape[3] << "]\n";
-            const bool e2e = (det_shape[2] == 4 + 1 + 1 + num_protos);
-            std::cerr << "[YOLO DIAG] format=" << (e2e ? "end2end-NMS" : "standard-raw")
-                      << "  num_protos=" << num_protos
-                      << "  conf_thresh=" << conf_thresh_ << "\n";
-            // Print first row with conf > 0 to see if boxes are in letterbox (0-640)
-            // or original-image space (values > 640 likely means already scaled)
-            if (e2e)
-            {
-                const int64_t N = det_shape[1], F2 = det_shape[2];
-                for (int64_t d = 0; d < N; ++d)
-                {
-                    const float* row = det_data + d * F2;
-                    if (row[4] > 0.01f)
-                    {
-                        std::cerr << "[YOLO DIAG] first det: x1=" << row[0] << " y1=" << row[1]
-                                  << " x2=" << row[2] << " y2=" << row[3]
-                                  << " conf=" << row[4] << " cls=" << row[5]
-                                  << "  image=" << orig_size.width << "x" << orig_size.height
-                                  << "  input_size=" << input_size_ << "\n";
-                        break;
-                    }
-                }
-            }
-        });
-    }
+    // {
+    //     static std::once_flag diag_flag;
+    //     std::call_once(diag_flag, [&]()
+    //     {
+    //         std::cerr << "[YOLO DIAG] out0 shape: [" << det_shape[0]
+    //                   << ", " << det_shape[1] << ", " << det_shape[2] << "]\n";
+    //         std::cerr << "[YOLO DIAG] out1 shape: [" << proto_shape[0] << ", "
+    //                   << proto_shape[1] << ", " << proto_shape[2] << ", " << proto_shape[3] << "]\n";
+    //         const bool e2e = (det_shape[2] == 4 + 1 + 1 + num_protos);
+    //         std::cerr << "[YOLO DIAG] format=" << (e2e ? "end2end-NMS" : "standard-raw")
+    //                   << "  num_protos=" << num_protos
+    //                   << "  conf_thresh=" << conf_thresh_ << "\n";
+    //         // Print first row with conf > 0 to see if boxes are in letterbox (0-640)
+    //         // or original-image space (values > 640 likely means already scaled)
+    //         if (e2e)
+    //         {
+    //             const int64_t N = det_shape[1], F2 = det_shape[2];
+    //             for (int64_t d = 0; d < N; ++d)
+    //             {
+    //                 const float* row = det_data + d * F2;
+    //                 if (row[4] > 0.01f)
+    //                 {
+    //                     std::cerr << "[YOLO DIAG] first det: x1=" << row[0] << " y1=" << row[1]
+    //                               << " x2=" << row[2] << " y2=" << row[3]
+    //                               << " conf=" << row[4] << " cls=" << row[5]
+    //                               << "  image=" << orig_size.width << "x" << orig_size.height
+    //                               << "  input_size=" << input_size_ << "\n";
+    //                     break;
+    //                 }
+    //             }
+    //         }
+    //     });
+    // }
 
     // Detect layout: end2end has shape [1, max_det, 4+1+1+P]; standard has [1, 4+C+P, anchors]
     const bool is_end2end = (det_shape[2] == static_cast<int64_t>(4 + 1 + 1 + num_protos));

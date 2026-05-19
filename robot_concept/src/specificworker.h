@@ -141,8 +141,8 @@ private:
 			  int         YOLO_TRAY_MASK_REF_WIDTH = 1280;
 			  int         YOLO_TRAY_MASK_REF_HEIGHT = 720;
 			  std::vector<cv::Point> YOLO_TRAY_MASK_POLYGON_PX = {
-				  {210, 719}, {252, 694}, {320, 670}, {410, 646}, {520, 630},
-				  {640, 627}, {760, 630}, {870, 646}, {960, 670}, {1026, 694}, {1068, 719}
+				  {210, 719}, {252, 690}, {320, 662}, {410, 636}, {520, 620},
+				  {640, 617}, {760, 620}, {870, 636}, {960, 662}, {1026, 690}, {1068, 719}
 			  }; // Estimated tray silhouette in 1280x720 ZED RGB image.
 
 			  // Voxel grid
@@ -204,8 +204,18 @@ private:
 		int last_seen_frame = -1;
 	};
 
+	struct RoomPolygonData
+	{
+		std::string room_name;
+		std::vector<float> polygon_x;
+		std::vector<float> polygon_y;
+		float room_height = 0.f;
+	};
+
 	void draw_detections(const cv::Mat& rgb_frame, const std::vector<SegDetection>& detections) const;
 	cv::Mat compose_detection_canvas(const cv::Mat& rgb_frame, const std::vector<SegDetection>& detections) const;
+	std::optional<RoomPolygonData> get_room_polygon_from_graph() const;
+	void overlay_room_polygon_on_canvas(cv::Mat& canvas, const RoboCompCameraRGBDSimple::TRGBD& rgbd) const;
 	void update_yolo_tab_display(const RoboCompCameraRGBDSimple::TRGBD& rgbd, const std::vector<SegDetection>& detections);
 	void update_viewer_robot_pose(const Mat::RTMat& room_T_robot);
 	void update_viewer_lidar_points(const Mat::RTMat& room_T_robot);

@@ -28,6 +28,7 @@
 #include <QHBoxLayout>
 #include <QImage>
 #include <QPixmap>
+#include <dsr/api/dsr_camera_api.h>
 #include <print>
 #include <limits>
 #include <algorithm>
@@ -772,7 +773,7 @@ void SpecificWorker::update_voxel_grid_from_rgbd(const RoboCompCameraRGBDSimple:
 			}
 		}
 
-		if (voxel_grid && (compute_frame_ % 8 == 0))
+		if (voxel_grid)
 		{
 			const auto sem = voxel_grid->export_semantic_voxels();
 			std::vector<QVector3D> qpts;
@@ -836,8 +837,11 @@ void SpecificWorker::update_voxel_grid_from_rgbd(const RoboCompCameraRGBDSimple:
 	}
 }
 
-void SpecificWorker::update_room_polygon_in_viewers()
+std::optional<SpecificWorker::RoomPolygonData> SpecificWorker::get_room_polygon_from_graph() const
 {
+	if (!G)
+		return std::nullopt;
+
 	std::string room_name_snapshot;
 	{
 		std::scoped_lock lk(node_names_mutex_);
@@ -845,38 +849,123 @@ void SpecificWorker::update_room_polygon_in_viewers()
 	}
 
 	if (room_name_snapshot.empty())
+	{
+		if (const auto room_nodes = G->get_nodes_by_type("room"); !room_nodes.empty())
+			room_name_snapshot = room_nodes.front().name();
+	}
+
+	if (room_name_snapshot.empty())
+		return std::nullopt;
+
+	auto room_node = G->get_node(room_name_snapshot);
+	if (!room_node.has_value())
+		return std::nullopt;
+
+	auto polygon_x_opt = G->get_attrib_by_name<delimiting_polygon_x_att>(room_node.value());
+	auto polygon_y_opt = G->get_attrib_by_name<delimiting_polygon_y_att>(room_node.value());
+	if (!polygon_x_opt.has_value() || !polygon_y_opt.has_value())
+		return std::nullopt;
+
+	const auto &polygon_x_src = polygon_x_opt.value().get();
+	const auto &polygon_y_src = polygon_y_opt.value().get();
+	if (polygon_x_src.empty() || polygon_y_src.empty())
+		return std::nullopt;
+
+	RoomPolygonData data;
+	data.room_name = std::move(room_name_snapshot);
+	data.polygon_x.assign(polygon_x_src.begin(), polygon_x_src.end());
+	data.polygon_y.assign(polygon_y_src.begin(), polygon_y_src.end());
+	if (auto height_opt = G->get_attrib_by_name<room_height_att>(room_node.value()); height_opt.has_value())
+		data.room_height = height_opt.value();
+
+	return data;
+}
+
+void SpecificWorker::overlay_room_polygon_on_canvas(cv::Mat& canvas,
+	                                                const RoboCompCameraRGBDSimple::TRGBD& rgbd) const
+{
+	if (canvas.empty() || !G || !inner_eigen_api)
+		return;
+
+	auto room_data = get_room_polygon_from_graph();
+	if (!room_data.has_value())
+		return;
+
+	auto zed_node = G->get_node("zed");
+	if (!zed_node.has_value())
+		return;
+
+	DSR::CameraAPI camera_api(G.get(), zed_node.value());
+	const std::uint64_t frame_ts_ms = get_rgbd_frame_timestamp_ms(rgbd);
+	const std::size_t n = std::min(room_data->polygon_x.size(), room_data->polygon_y.size());
+	if (n < 2)
+		return;
+
+	auto zed_T_room = inner_eigen_api->get_transformation_matrix("zed", room_data->room_name, frame_ts_ms);
+	if (!zed_T_room.has_value())
+		return;
+
+	Eigen::Matrix<double, 3, Eigen::Dynamic> room_points(3, static_cast<Eigen::Index>(n));
+	for (std::size_t i = 0; i < n; ++i)
+	{
+		room_points(0, static_cast<Eigen::Index>(i)) = static_cast<double>(room_data->polygon_x[i]);
+		room_points(1, static_cast<Eigen::Index>(i)) = 0.0;
+		room_points(2, static_cast<Eigen::Index>(i)) = static_cast<double>(room_data->polygon_y[i]);
+	}
+
+	Eigen::Matrix<double, 3, Eigen::Dynamic> zed_points =
+		(zed_T_room->linear() * room_points).colwise() + zed_T_room->translation();
+
+	std::vector<std::optional<cv::Point>> projected(n);
+	for (std::size_t i = 0; i < n; ++i)
+	{
+		const Eigen::Vector3d point_zed = zed_points.col(static_cast<Eigen::Index>(i));
+		if (point_zed.z() <= 0.05)
+			continue;
+
+		const Eigen::Vector2d pixel = camera_api.project(point_zed);
+		if (!std::isfinite(pixel.x()) || !std::isfinite(pixel.y()))
+			continue;
+
+		projected[i] = cv::Point(static_cast<int>(std::lround(pixel.x())),
+		                        static_cast<int>(std::lround(pixel.y())));
+	}
+
+	const cv::Scalar room_colour(255, 0, 255);
+	for (std::size_t i = 0; i < n; ++i)
+	{
+		const std::size_t j = (i + 1) % n;
+		if (!projected[i].has_value() || !projected[j].has_value())
+			continue;
+
+		cv::Point p0 = projected[i].value();
+		cv::Point p1 = projected[j].value();
+		if (cv::clipLine(canvas.size(), p0, p1))
+			cv::line(canvas, p0, p1, room_colour, 2, cv::LINE_AA);
+	}
+
+	for (const auto& p : projected)
+	{
+		if (!p.has_value())
+			continue;
+		if (p->x >= 0 && p->x < canvas.cols && p->y >= 0 && p->y < canvas.rows)
+			cv::circle(canvas, p.value(), 4, room_colour, cv::FILLED, cv::LINE_AA);
+	}
+}
+
+void SpecificWorker::update_room_polygon_in_viewers()
+{
+	auto room_data = get_room_polygon_from_graph();
+	if (!room_data.has_value())
 		return;
 
 	try
 	{
-		auto room_node = G->get_node(room_name_snapshot);
-		if (!room_node)
-			return;
-
-		// Use typed DSR API accessors for registered attribute names.
-		auto polygon_x_opt = G->get_attrib_by_name<delimiting_polygon_x_att>(room_node.value());
-		auto polygon_y_opt = G->get_attrib_by_name<delimiting_polygon_y_att>(room_node.value());
-
-		if (!polygon_x_opt.has_value())
-			return;
-		if (!polygon_y_opt.has_value())
-			return;
-
-		const auto &polygon_x_src = polygon_x_opt.value().get();
-		const auto &polygon_y_src = polygon_y_opt.value().get();
-
-		std::vector<float> polygon_x(polygon_x_src.begin(), polygon_x_src.end());
-		std::vector<float> polygon_y(polygon_y_src.begin(), polygon_y_src.end());
-
 		// Polygon corners are already in room-local frame (centered near origin).
 		// Voxels from get_transformation_matrix(room, "zed") are also in room-local frame.
 		// No transform needed; the robot pose lives inside this same frame.
-		float room_height = 0.f;
-		if (auto height_opt = G->get_attrib_by_name<room_height_att>(room_node.value()); height_opt.has_value())
-			room_height = height_opt.value();
-
-		if (!polygon_x.empty() && !polygon_y.empty() && voxel_viewer_gl)
-			voxel_viewer_gl->update_room_polygon_dual(polygon_x, polygon_y, room_height);
+		if (!room_data->polygon_x.empty() && !room_data->polygon_y.empty() && voxel_viewer_gl)
+			voxel_viewer_gl->update_room_polygon_dual(room_data->polygon_x, room_data->polygon_y, room_data->room_height);
 	}
 	catch (const std::exception& e)
 	{
@@ -974,7 +1063,8 @@ void SpecificWorker::update_yolo_tab_display(const RoboCompCameraRGBDSimple::TRG
 	const cv::Mat rgb_frame(rgbd.image.height, rgbd.image.width, CV_8UC3,
 		const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(rgbd.image.image.data())));
 	const cv::Mat masked_rgb_frame = apply_tray_mask(rgb_frame);
-	const cv::Mat yolo_canvas = compose_detection_canvas(masked_rgb_frame, detections);
+	cv::Mat yolo_canvas = compose_detection_canvas(masked_rgb_frame, detections);
+	overlay_room_polygon_on_canvas(yolo_canvas, rgbd);
 	cv::Mat yolo_canvas_rgb;
 	cv::cvtColor(yolo_canvas, yolo_canvas_rgb, cv::COLOR_BGR2RGB);
 	QImage yolo_qimg(yolo_canvas_rgb.data,
