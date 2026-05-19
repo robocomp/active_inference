@@ -25,6 +25,11 @@
 #include <QFileInfo>
 #include <QVBoxLayout>
 
+namespace
+{
+    constexpr auto kTimingReportInterval = std::chrono::seconds(10);
+}
+
 ///////////////////////////////////////////////////////////////////////////////
 SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, bool startup_check)
     : GenericWorker(configLoader, tprx)
@@ -52,6 +57,7 @@ SpecificWorker::~SpecificWorker()
     // stop_lidar_thread = true;
     // if (read_lidar_th.joinable())
     //     read_lidar_th.join();
+    save_window_settings();
     save_robot_pose_once();
     room_concept_.stop();
     std::cout << "Destroying SpecificWorker" << std::endl;
@@ -264,6 +270,8 @@ void SpecificWorker::initialize()
             this, [this](QPointF p){ slot_mouse_translate(p); });
     connect(viewer_2d_.get(), &rc::Viewer2D::robot_rotate,
             this, [this](QPointF p){ slot_mouse_rotate(p); });
+
+        restore_window_settings();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -400,9 +408,9 @@ std::optional<rc::LidarData> SpecificWorker::read_lidar_from_graph() const
             points_high.emplace_back(x_m, y_m, z_m);
     }
 
-    static auto last_diag = std::chrono::steady_clock::now() - std::chrono::seconds(10);
+    static auto last_diag = std::chrono::steady_clock::now() - kTimingReportInterval;
     const auto now_diag = std::chrono::steady_clock::now();
-    if (now_diag - last_diag > std::chrono::seconds(2))
+    if (now_diag - last_diag > kTimingReportInterval)
     {
         const float z_min_m = std::isfinite(z_min_raw) ? z_min_raw * to_m : 0.f;
         const float z_max_m = std::isfinite(z_max_raw) ? z_max_raw * to_m : 0.f;
@@ -853,7 +861,7 @@ void SpecificWorker::modify_node_slot(std::uint64_t id, const std::string &type)
         total_filter_ms += filter_ms;
 
         const auto now_timing = std::chrono::steady_clock::now();
-        if (now_timing - last_timing >= std::chrono::seconds(2))
+        if (now_timing - last_timing >= kTimingReportInterval)
         {
             const float avg_cb_ms = callbacks > 0 ? total_cb_ms / static_cast<float>(callbacks) : 0.f;
             const float avg_filter_ms = callbacks > 0 ? total_filter_ms / static_cast<float>(callbacks) : 0.f;

@@ -17,6 +17,18 @@
  *    along with RoboComp.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "genericworker.h"
+
+namespace
+{
+constexpr int kWindowStateVersion = 1;
+
+QString settings_group_name(const std::string& graph_name, int agent_id)
+{
+    const QString graph_suffix = graph_name.empty() ? QStringLiteral("default")
+                                                    : QString::fromStdString(graph_name);
+    return QStringLiteral("windows/%1/%2").arg(agent_id).arg(graph_suffix);
+}
+}
 /**
 * \brief Default constructor
 */
@@ -189,6 +201,52 @@ std::shared_ptr<DSR::DSRViewer> GenericWorker::setupViewer(std::shared_ptr<DSR::
 	else
 		return nullptr;
 };
+
+void GenericWorker::restore_window_settings()
+{
+    QSettings settings(QStringLiteral("RoboComp"), QString::fromStdString(agent_name));
+
+    for (const auto& [name, window] : windows)
+    {
+        if (window == nullptr)
+            continue;
+
+        const QString group_name = settings_group_name(name, agent_id);
+        settings.beginGroup(group_name);
+
+        const QByteArray geometry = settings.value(QStringLiteral("geometry")).toByteArray();
+        if (!geometry.isEmpty())
+            window->restoreGeometry(geometry);
+
+        const QByteArray state = settings.value(QStringLiteral("state")).toByteArray();
+        if (!state.isEmpty())
+            window->restoreState(state, kWindowStateVersion);
+
+        settings.endGroup();
+    }
+}
+
+void GenericWorker::save_window_settings() const
+{
+    QSettings settings(QStringLiteral("RoboComp"), QString::fromStdString(agent_name));
+
+    for (const auto& [name, window] : windows)
+    {
+        if (window == nullptr)
+            continue;
+
+        const QString group_name = settings_group_name(name, agent_id);
+        const QByteArray geometry = window->saveGeometry();
+        const QByteArray state = window->saveState(kWindowStateVersion);
+
+        settings.beginGroup(group_name);
+        settings.setValue(QStringLiteral("geometry"), geometry);
+        settings.setValue(QStringLiteral("state"), state);
+        settings.endGroup();
+    }
+
+    settings.sync();
+}
 
 void GenericWorker::initialize(){
     for (const auto& [name, Graph] : Graphs) {

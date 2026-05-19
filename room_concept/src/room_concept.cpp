@@ -12,6 +12,12 @@
 
 namespace rc
 {
+    namespace
+    {
+        constexpr auto kTimingReportInterval = std::chrono::seconds(10);
+        constexpr int kLocFpsPrintPeriodMs = 10000;
+    }
+
     // =====================================================================
     //  Threading: start / stop / run / get_last_result / push_command
     // =====================================================================
@@ -466,7 +472,7 @@ namespace rc
                         std::chrono::steady_clock::now() - t_loop_start).count();
 
                     const auto now_timing = std::chrono::steady_clock::now();
-                    if (now_timing - last_timing >= std::chrono::seconds(2))
+                    if (now_timing - last_timing >= kTimingReportInterval)
                     {
                         const float avg_loop_ms = loops > 0 ? loop_ms_acc / static_cast<float>(loops) : 0.f;
                         const float avg_update_ms = update_loops > 0 ? update_ms_acc / static_cast<float>(update_loops) : 0.f;
@@ -911,7 +917,7 @@ namespace rc
             const int last_update_ms_i = static_cast<int>(std::lround(last_update_ms_report));
             const int avg_update_ms_i = static_cast<int>(std::lround(avg_update_ms));
             const int fps = loc_fps_.print("[LocThread] update_ms(last/avg)=" + std::to_string(last_update_ms_i)
-                               + "/" + std::to_string(avg_update_ms_i), 2000);
+                               + "/" + std::to_string(avg_update_ms_i), kLocFpsPrintPeriodMs);
             if (fps > 0) { update_ms_accum_ = 0.f; update_ms_count_ = 0; }
 
             {
@@ -942,7 +948,7 @@ namespace rc
                     std::chrono::steady_clock::now() - t_loop_start).count();
 
                 const auto now_timing = std::chrono::steady_clock::now();
-                if (now_timing - last_timing >= std::chrono::seconds(2))
+                if (now_timing - last_timing >= kTimingReportInterval)
                 {
                     const float avg_loop_ms = loops > 0 ? loop_ms_acc / static_cast<float>(loops) : 0.f;
                     const float avg_update_ms = update_loops > 0 ? update_ms_acc / static_cast<float>(update_loops) : 0.f;

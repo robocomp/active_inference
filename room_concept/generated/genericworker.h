@@ -86,6 +86,8 @@ protected:
 	std::unordered_map<std::string, std::shared_ptr<DSR::DSRViewer>> graph_viewers;
 	std::unordered_map<std::string, std::unique_ptr<QMainWindow>> windows;
 	std::shared_ptr<DSR::DSRViewer> setupViewer(std::shared_ptr<DSR::DSRGraph> graph, const std::string& prefix, QMainWindow* parent);
+	void restore_window_settings();
+	void save_window_settings() const;
 
 
 

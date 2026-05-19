@@ -186,7 +186,11 @@ void CameraVisualizer::adapt_refresh_interval(std::uint64_t raw_delta)
         estimated_source_period_ms_ = (1.0 - alpha) * estimated_source_period_ms_ + alpha * observed_period_ms;
     }
 
-    const int target_interval_ms = std::clamp(static_cast<int>(std::lround(estimated_source_period_ms_)), 20, 250);
+    // Poll at roughly 2x the estimated source rate. Matching the source period
+    // makes the viewer sensitive to phase drift and can cause a feedback loop
+    // where skipped frames inflate the estimated source period and the poll rate
+    // collapses toward 4 Hz.
+    const int target_interval_ms = std::clamp(static_cast<int>(std::lround(0.5 * estimated_source_period_ms_)), 20, 250);
     if (std::abs(refresh_timer_->interval() - target_interval_ms) >= 5)
         refresh_timer_->setInterval(target_interval_ms);
 }
@@ -266,10 +270,10 @@ bool CameraVisualizer::fetch_rgb_from_dsr(QImage& rgb_image, std::uint64_t& fram
 
     if (auto zed_node = graph_->get_node(camera_node_name_); zed_node.has_value())
     {
-        if (auto ts_opt = graph_->get_attrib_timestamp_by_name(zed_node.value(), "cam_rgb"); ts_opt.has_value())
-            frame_timestamp = ts_opt.value();
-        else if (auto alive_opt = graph_->get_attrib_by_name<cam_rgb_alivetime_att>(zed_node.value()); alive_opt.has_value())
+        if (auto alive_opt = graph_->get_attrib_by_name<cam_rgb_alivetime_att>(zed_node.value()); alive_opt.has_value())
             frame_timestamp = static_cast<std::uint64_t>(alive_opt.value());
+        else if (auto ts_opt = graph_->get_attrib_timestamp_by_name(zed_node.value(), "cam_rgb"); ts_opt.has_value())
+            frame_timestamp = ts_opt.value();
     }
 
     const auto rgb_opt = camera_api_->get_rgb_image();
