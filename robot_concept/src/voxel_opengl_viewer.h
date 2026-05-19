@@ -47,6 +47,7 @@ public:
 
     // Robot pose in room frame (x, y in meters; theta in radians).
     void set_robot_pose(float x, float y, float theta);
+    bool load_robot_mesh(const std::string& path);
 
 protected:
     void initializeGL() override;
@@ -94,6 +95,8 @@ private:
     bool voxel_flip_y_ = false;
     bool show_voxels_ = true;
     bool show_lidar_ = true;
+    std::vector<QVector3D> robot_mesh_local_;
+    std::mutex robot_mesh_mutex_;
 
     // Robot pose (room frame).
     bool have_robot_pose_ = false;

@@ -1,29 +1,26 @@
 {
     "DSRModel": {
-        "symbols":
-        {
+        "symbols": {
             "100": {
                 "attribute": {
-                        "color": {
-                            "type": 0,
-                            "value": "SeaGreen"
-                        },
-                        "level": {
-                            "type": 1,
-                            "value": 0
-                        },
-                        "pos_x": {
-                            "type": 2,
-                            "value": 0.0
-                        },
-                        "pos_y": {
-                            "type": 2,
-                            "value": -100.0
-                        }
+                    "color": {
+                        "type": 0,
+                        "value": "SeaGreen"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 0
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": 0
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": -100
+                    }
                 },
                 "id": "100",
-                "type": "root",
-                "name": "root",
                 "links": [
                     {
                         "dst": "200",
@@ -48,12 +45,11 @@
                         },
                         "src": "100"
                     }
-                ]
+                ],
+                "name": "root",
+                "type": "root"
             },
             "200": {
-                "id": "200",
-                "type": "robot",
-                "name": "Shadow",
                 "attribute": {
                     "base_target_x": {
                         "type": 2,
@@ -73,7 +69,11 @@
                     },
                     "parent": {
                         "type": 7,
-                        "value": 100
+                        "value": "100"
+                    },
+                    "path": {
+                        "type": 0,
+                        "value": "meshes/shadow.obj"
                     },
                     "port": {
                         "type": 1,
@@ -81,11 +81,11 @@
                     },
                     "pos_x": {
                         "type": 2,
-                        "value": 0.0
+                        "value": 0
                     },
                     "pos_y": {
                         "type": 2,
-                        "value": 0.0
+                        "value": 0
                     },
                     "robot_ref_adv_speed": {
                         "type": 2,
@@ -96,9 +96,11 @@
                         "value": 0
                     },
                     "robot_ref_side_speed": {
-                        "type": 2
+                        "type": 2,
+                        "value": 0
                     }
                 },
+                "id": "200",
                 "links": [
                     {
                         "dst": "210",
@@ -116,8 +118,8 @@
                                 "type": 3,
                                 "value": [
                                     0,
-                                    -0.155,
-                                    1.075
+                                    -0.1550000011920929,
+                                    1.0750000476837158
                                 ]
                             }
                         },
@@ -139,23 +141,87 @@
                                 "type": 3,
                                 "value": [
                                     0,
-                                    -0.075,
-                                    0.945
+                                    -0.07500000298023224,
+                                    0.9449999928474426
+                                ]
+                            }
+                        },
+                        "src": "200"
+                    },
+                    {
+                        "dst": "230",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0,
+                                    0
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0,
+                                    0
+                                ]
+                            }
+                        },
+                        "src": "200"
+                    },
+                    {
+                        "dst": "240",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0,
+                                    0
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0,
+                                    0
                                 ]
                             }
                         },
                         "src": "200"
                     }
-                ]
+                ],
+                "name": "Shadow",
+                "type": "robot"
             },
             "210": {
-                "id": "210",
-                "type": "laser",
-                "name": "lidar3D",
                 "attribute": {
                     "color": {
                         "type": 0,
                         "value": "Orange"
+                    },
+                    "laser_X": {
+                        "type": 3,
+                        "value": [
+                        ]
+                    },
+                    "laser_Y": {
+                        "type": 3,
+                        "value": [
+                        ]
+                    },
+                    "laser_Z": {
+                        "type": 3,
+                        "value": [
+                        ]
+                    },
+                    "laser_timestamp": {
+                        "type": 7,
+                        "value": "1779214261014"
                     },
                     "level": {
                         "type": 1,
@@ -163,23 +229,34 @@
                     },
                     "parent": {
                         "type": 7,
-                        "value": 200
+                        "value": "200"
                     },
                     "pos_x": {
                         "type": 2,
-                        "value": 0.0
+                        "value": 0
                     },
                     "pos_y": {
                         "type": 2,
-                        "value": 100.0
+                        "value": 100
                     }
-                }
+                },
+                "id": "210",
+                "links": [
+                ],
+                "name": "lidar3D",
+                "type": "laser"
             },
             "220": {
-                "id": "220",
-                "type": "rgbd",
-                "name": "zed",
                 "attribute": {
+                    "cam_depth": {
+                        "type": 5,
+                        "value": [
+                        ]
+                    },
+                    "cam_depthFactor": {
+                        "type": 2,
+                        "value": 1
+                    },
                     "cam_depth_focalx": {
                         "type": 1,
                         "value": 448
@@ -199,6 +276,23 @@
                     "cam_fov": {
                         "type": 2,
                         "value": 1.9198
+                    },
+                    "cam_rgb": {
+                        "type": 5,
+                        "value": [
+                        ]
+                    },
+                    "cam_rgb_alivetime": {
+                        "type": 7,
+                        "value": "1779214260949"
+                    },
+                    "cam_rgb_cameraID": {
+                        "type": 1,
+                        "value": 0
+                    },
+                    "cam_rgb_depth": {
+                        "type": 1,
+                        "value": 3
                     },
                     "cam_rgb_focalx": {
                         "type": 1,
@@ -226,17 +320,80 @@
                     },
                     "parent": {
                         "type": 7,
-                        "value": 200
+                        "value": "200"
                     },
                     "pos_x": {
                         "type": 2,
-                        "value": 100.0
+                        "value": 100
                     },
                     "pos_y": {
                         "type": 2,
-                        "value": 100.0
+                        "value": 100
                     }
-                }
+                },
+                "id": "220",
+                "links": [
+                ],
+                "name": "zed",
+                "type": "rgbd"
+            },
+            "230": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Plum"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 2
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "200"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": -59.931175
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": 45.970432
+                    }
+                },
+                "id": "230",
+                "links": [
+                ],
+                "name": "imu",
+                "type": "imu"
+            },
+            "240": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "Khaki"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 2
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "200"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": 93.543716
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": 45.530407
+                    }
+                },
+                "id": "240",
+                "links": [
+                ],
+                "name": "voxels",
+                "type": "semantic_grid"
             }
         }
     }

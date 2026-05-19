@@ -202,6 +202,11 @@ void SpecificWorker::initialize()
 
 		voxel_viewer_gl = std::make_unique<rc::VoxelOpenGLViewer>(custom_widget.frame);
 		voxel_viewer_gl->set_show_lidar(false);
+		std::string robot_mesh_path = "meshes/shadow.obj";
+		if (auto robot_node = G->get_node("Shadow"); robot_node.has_value())
+			if (auto mesh_path = G->get_attrib_by_name<path_att>(robot_node.value()); mesh_path.has_value() && !mesh_path.value().get().empty())
+				robot_mesh_path = mesh_path.value().get();
+		voxel_viewer_gl->load_robot_mesh(robot_mesh_path);
 		custom_widget.frame->layout()->addWidget(voxel_viewer_gl.get());
 		QObject::connect(voxel_lidar_toggle_button_, &QPushButton::toggled, custom_widget.frame,
 		                 [this](bool checked)

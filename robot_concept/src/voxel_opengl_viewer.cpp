@@ -1,5 +1,6 @@
 #include "voxel_opengl_viewer.h"
 
+#include <QCoreApplication>
 #include <QHash>
 #include <QDebug>
 #include <QKeyEvent>
@@ -11,9 +12,136 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <optional>
+#include <sstream>
 
 namespace rc
 {
+namespace
+{
+struct ObjMeshData
+{
+    std::vector<QVector3D> triangles;
+    QVector3D bb_min;
+    QVector3D bb_max;
+};
+
+std::optional<std::filesystem::path> resolve_robot_mesh_path(const std::string& mesh_path)
+{
+    if (mesh_path.empty())
+        return std::nullopt;
+
+    const std::filesystem::path input(mesh_path);
+    std::vector<std::filesystem::path> candidates;
+    if (input.is_absolute())
+        candidates.push_back(input);
+    else
+    {
+        candidates.push_back(std::filesystem::current_path() / input);
+        const auto app_dir = std::filesystem::path(QCoreApplication::applicationDirPath().toStdString());
+        candidates.push_back(app_dir.parent_path() / input);
+        candidates.push_back(input);
+    }
+
+    for (const auto& candidate : candidates)
+        if (!candidate.empty() && std::filesystem::exists(candidate))
+            return candidate;
+
+    return std::nullopt;
+}
+
+int parse_obj_index(const std::string& token, int vertex_count)
+{
+    const auto slash = token.find('/');
+    const std::string index_str = token.substr(0, slash);
+    if (index_str.empty())
+        return -1;
+
+    const int raw_index = std::stoi(index_str);
+    if (raw_index > 0)
+        return raw_index - 1;
+    if (raw_index < 0)
+        return vertex_count + raw_index;
+    return -1;
+}
+
+std::optional<ObjMeshData> load_obj_mesh_data(const std::filesystem::path& mesh_path)
+{
+    std::ifstream input(mesh_path);
+    if (!input.is_open())
+        return std::nullopt;
+
+    std::vector<QVector3D> vertices;
+    std::vector<QVector3D> triangles;
+    QVector3D bb_min;
+    QVector3D bb_max;
+    bool have_bounds = false;
+    std::string line;
+
+    while (std::getline(input, line))
+    {
+        if (line.size() < 2)
+            continue;
+
+        std::istringstream stream(line);
+        std::string tag;
+        stream >> tag;
+        if (tag == "v")
+        {
+            float x = 0.f, y = 0.f, z = 0.f;
+            if (!(stream >> x >> y >> z))
+                continue;
+
+            const QVector3D vertex(x, y, z);
+            vertices.push_back(vertex);
+            if (!have_bounds)
+            {
+                bb_min = vertex;
+                bb_max = vertex;
+                have_bounds = true;
+            }
+            else
+            {
+                bb_min.setX(std::min(bb_min.x(), vertex.x()));
+                bb_min.setY(std::min(bb_min.y(), vertex.y()));
+                bb_min.setZ(std::min(bb_min.z(), vertex.z()));
+                bb_max.setX(std::max(bb_max.x(), vertex.x()));
+                bb_max.setY(std::max(bb_max.y(), vertex.y()));
+                bb_max.setZ(std::max(bb_max.z(), vertex.z()));
+            }
+        }
+        else if (tag == "f")
+        {
+            std::vector<int> face_indices;
+            std::string token;
+            while (stream >> token)
+            {
+                const int index = parse_obj_index(token, static_cast<int>(vertices.size()));
+                if (index >= 0 && index < static_cast<int>(vertices.size()))
+                    face_indices.push_back(index);
+            }
+
+            if (face_indices.size() < 3)
+                continue;
+
+            for (std::size_t i = 1; i + 1 < face_indices.size(); ++i)
+            {
+                triangles.push_back(vertices[static_cast<std::size_t>(face_indices[0])]);
+                triangles.push_back(vertices[static_cast<std::size_t>(face_indices[i])]);
+                triangles.push_back(vertices[static_cast<std::size_t>(face_indices[i + 1])]);
+            }
+        }
+    }
+
+    if (triangles.empty() || !have_bounds)
+        return std::nullopt;
+
+    return ObjMeshData{std::move(triangles), bb_min, bb_max};
+}
+}
+
 VoxelOpenGLViewer::VoxelOpenGLViewer(QWidget* parent)
     : QOpenGLWidget(parent)
 {
@@ -209,6 +337,44 @@ void VoxelOpenGLViewer::set_robot_pose(float x, float y, float theta)
         have_robot_pose_ = true;
     }
     request_update_throttled();
+}
+
+bool VoxelOpenGLViewer::load_robot_mesh(const std::string& path)
+{
+    const auto resolved_path = resolve_robot_mesh_path(path);
+    if (!resolved_path.has_value())
+    {
+        qWarning() << "VoxelOpenGLViewer robot mesh not found:" << QString::fromStdString(path);
+        return false;
+    }
+
+    const auto mesh = load_obj_mesh_data(resolved_path.value());
+    if (!mesh.has_value())
+    {
+        qWarning() << "VoxelOpenGLViewer failed to load robot mesh:" << QString::fromStdString(resolved_path->string());
+        return false;
+    }
+
+    const QVector3D center_xy(0.5f * (mesh->bb_min.x() + mesh->bb_max.x()),
+                              0.5f * (mesh->bb_min.y() + mesh->bb_max.y()),
+                              mesh->bb_min.z());
+
+    std::vector<QVector3D> local_vertices;
+    local_vertices.reserve(mesh->triangles.size());
+    for (const auto& vertex : mesh->triangles)
+        local_vertices.emplace_back(vertex.x() - center_xy.x(),
+                                    vertex.y() - center_xy.y(),
+                                    vertex.z() - center_xy.z());
+
+    {
+        std::scoped_lock lk(robot_mesh_mutex_);
+        robot_mesh_local_ = std::move(local_vertices);
+    }
+
+    qInfo() << "VoxelOpenGLViewer loaded robot mesh" << QString::fromStdString(resolved_path->string())
+            << "triangles=" << mesh->triangles.size() / 3;
+    request_update_throttled();
+    return true;
 }
 
 void VoxelOpenGLViewer::rebuild_polygon_locked_()
@@ -666,6 +832,7 @@ void VoxelOpenGLViewer::paintGL()
     // Draw robot pose marker: dot + forward arrow on the floor (y=0).
     bool have_pose = false;
     float rx = 0.f, ry_room = 0.f, rtheta = 0.f;
+    std::vector<QVector3D> robot_mesh_local;
     {
         std::scoped_lock lk(robot_pose_mutex_);
         have_pose = have_robot_pose_;
@@ -673,50 +840,80 @@ void VoxelOpenGLViewer::paintGL()
         ry_room = robot_y_;
         rtheta = robot_theta_;
     }
+    {
+        std::scoped_lock lk(robot_mesh_mutex_);
+        robot_mesh_local = robot_mesh_local_;
+    }
     if (have_pose)
     {
-        // Map room frame (x, y) to OpenGL (-x, 0, y) to match the existing
-        // viewer convention used elsewhere in the project.
-        const float ogl_x = -rx;
-        const float ogl_z = ry_room;
-        const float ogl_y = 0.02f; // slightly above the floor so it's visible
-        const float arrow_len = 0.6f;
-        // RoboComp convention: forward in robot frame is +Y, right is +X.
-        // theta is math-CCW rotation; forward_room = R(theta) * (0, +L) = (-sin*L, cos*L).
-        // After mirroring room X into OpenGL X, the arrow X delta flips sign too.
-        const float fx     =  std::sin(rtheta) * arrow_len;
-        const float fy_room =  std::cos(rtheta) * arrow_len;
+        const float fx_map = voxel_flip_x_ ? -1.f : 1.f;
+        const float fy_map = voxel_flip_y_ ? -1.f : 1.f;
 
-        std::vector<Vertex> robot_lines;
-        const QColor body_col(255, 220, 0);   // yellow body line (cross)
-        const QColor arrow_col(0, 255, 0);    // green forward arrow
-        // Cross marker at robot position (so the dot is clearly visible regardless of point size).
-        robot_lines.push_back(Vertex{ogl_x - 0.15f, ogl_y, ogl_z, body_col.redF(), body_col.greenF(), body_col.blueF()});
-        robot_lines.push_back(Vertex{ogl_x + 0.15f, ogl_y, ogl_z, body_col.redF(), body_col.greenF(), body_col.blueF()});
-        robot_lines.push_back(Vertex{ogl_x, ogl_y, ogl_z - 0.15f, body_col.redF(), body_col.greenF(), body_col.blueF()});
-        robot_lines.push_back(Vertex{ogl_x, ogl_y, ogl_z + 0.15f, body_col.redF(), body_col.greenF(), body_col.blueF()});
-        // Forward arrow.
-        robot_lines.push_back(Vertex{ogl_x, ogl_y, ogl_z, arrow_col.redF(), arrow_col.greenF(), arrow_col.blueF()});
-        robot_lines.push_back(Vertex{ogl_x + fx, ogl_y, ogl_z + fy_room, arrow_col.redF(), arrow_col.greenF(), arrow_col.blueF()});
+        if (!robot_mesh_local.empty())
+        {
+            const float c = std::cos(rtheta);
+            const float s = std::sin(rtheta);
+            const QColor mesh_col(180, 190, 205);
+            std::vector<Vertex> robot_mesh_vertices;
+            robot_mesh_vertices.reserve(robot_mesh_local.size());
+            for (const auto& local : robot_mesh_local)
+            {
+                const float room_x = rx + c * local.x() - s * local.y();
+                const float room_y = ry_room + s * local.x() + c * local.y();
+                const float room_z = local.z() + 0.01f;
+                robot_mesh_vertices.push_back(Vertex{fx_map * room_x,
+                                                     room_z,
+                                                     fy_map * room_y,
+                                                     mesh_col.redF(),
+                                                     mesh_col.greenF(),
+                                                     mesh_col.blueF()});
+            }
 
-        glDisable(GL_DEPTH_TEST);
-        room_vao_.bind();
-        room_vbo_.bind();
-        room_vbo_.allocate(robot_lines.data(), static_cast<int>(robot_lines.size() * sizeof(Vertex)));
-        program_.setUniformValue("u_round_points", 0);
-        glLineWidth(4.0f);
-        glDrawArrays(GL_LINES, 0, static_cast<GLsizei>(robot_lines.size()));
+            room_vao_.bind();
+            room_vbo_.bind();
+            room_vbo_.allocate(robot_mesh_vertices.data(), static_cast<int>(robot_mesh_vertices.size() * sizeof(Vertex)));
+            program_.setUniformValue("u_round_points", 0);
+            glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(robot_mesh_vertices.size()));
+            room_vbo_.release();
+            room_vao_.release();
+        }
+        else
+        {
+            const float ogl_x = fx_map * rx;
+            const float ogl_z = fy_map * ry_room;
+            const float ogl_y = 0.02f;
+            const float arrow_len = 0.6f;
+            const float arrow_x = fx_map * std::sin(rtheta) * arrow_len;
+            const float arrow_z = fy_map * std::cos(rtheta) * arrow_len;
 
-        // Center point as a large round dot.
-        Vertex dot{ogl_x, ogl_y, ogl_z, 1.0f, 1.0f, 1.0f};
-        room_vbo_.allocate(&dot, sizeof(Vertex));
-        program_.setUniformValue("u_round_points", 1);
-        program_.setUniformValue("u_point_size", 14.0f);
-        glDrawArrays(GL_POINTS, 0, 1);
-        program_.setUniformValue("u_point_size", 4.5f);
-        room_vbo_.release();
-        room_vao_.release();
-        glEnable(GL_DEPTH_TEST);
+            std::vector<Vertex> robot_lines;
+            const QColor body_col(255, 220, 0);
+            const QColor arrow_col(0, 255, 0);
+            robot_lines.push_back(Vertex{ogl_x - 0.15f, ogl_y, ogl_z, body_col.redF(), body_col.greenF(), body_col.blueF()});
+            robot_lines.push_back(Vertex{ogl_x + 0.15f, ogl_y, ogl_z, body_col.redF(), body_col.greenF(), body_col.blueF()});
+            robot_lines.push_back(Vertex{ogl_x, ogl_y, ogl_z - 0.15f, body_col.redF(), body_col.greenF(), body_col.blueF()});
+            robot_lines.push_back(Vertex{ogl_x, ogl_y, ogl_z + 0.15f, body_col.redF(), body_col.greenF(), body_col.blueF()});
+            robot_lines.push_back(Vertex{ogl_x, ogl_y, ogl_z, arrow_col.redF(), arrow_col.greenF(), arrow_col.blueF()});
+            robot_lines.push_back(Vertex{ogl_x + arrow_x, ogl_y, ogl_z + arrow_z, arrow_col.redF(), arrow_col.greenF(), arrow_col.blueF()});
+
+            glDisable(GL_DEPTH_TEST);
+            room_vao_.bind();
+            room_vbo_.bind();
+            room_vbo_.allocate(robot_lines.data(), static_cast<int>(robot_lines.size() * sizeof(Vertex)));
+            program_.setUniformValue("u_round_points", 0);
+            glLineWidth(4.0f);
+            glDrawArrays(GL_LINES, 0, static_cast<GLsizei>(robot_lines.size()));
+
+            Vertex dot{ogl_x, ogl_y, ogl_z, 1.0f, 1.0f, 1.0f};
+            room_vbo_.allocate(&dot, sizeof(Vertex));
+            program_.setUniformValue("u_round_points", 1);
+            program_.setUniformValue("u_point_size", 14.0f);
+            glDrawArrays(GL_POINTS, 0, 1);
+            program_.setUniformValue("u_point_size", 4.5f);
+            room_vbo_.release();
+            room_vao_.release();
+            glEnable(GL_DEPTH_TEST);
+        }
     }
 
     // Draw tracked object bounding boxes (wireframe).
