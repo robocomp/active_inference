@@ -4,6 +4,7 @@
 #include <QDebug>
 #include <QKeyEvent>
 #include <QMouseEvent>
+#include <QPainter>
 #include <QSurfaceFormat>
 #include <QTimer>
 #include <QWheelEvent>
@@ -67,6 +68,18 @@ void VoxelOpenGLViewer::update_voxels(std::span<const QVector3D> positions,
                                       std::span<const std::string> categories,
                                       std::span<const float> confidences)
 {
+    const auto now = std::chrono::steady_clock::now();
+    if (last_voxel_update_time_ != std::chrono::steady_clock::time_point{})
+    {
+        const auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_voxel_update_time_).count();
+        if (dt_ms > 0)
+        {
+            const float inst_fps = 1000.0f / static_cast<float>(dt_ms);
+            voxel_input_fps_ = (voxel_input_fps_ > 0.0f) ? (0.85f * voxel_input_fps_ + 0.15f * inst_fps) : inst_fps;
+        }
+    }
+    last_voxel_update_time_ = now;
+
     std::vector<Vertex> new_vertices;
     new_vertices.reserve(positions.size());
 
@@ -113,7 +126,7 @@ void VoxelOpenGLViewer::update_voxels(std::span<const QVector3D> positions,
             // If a room polygon is already loaded its centroid will override
             // this in rebuild_polygon_locked_().
             target_ = 0.5f * (bb_min + bb_max);
-            distance_ = std::clamp(2.8f * std::max(0.25f, radius), 1.5f, 80.0f);
+            distance_ = std::clamp(3.6f * std::max(0.25f, radius), 3.0f, 80.0f);
             first_cloud_received_ = true;
         }
     }
@@ -122,6 +135,32 @@ void VoxelOpenGLViewer::update_voxels(std::span<const QVector3D> positions,
         std::scoped_lock lk(data_mutex_);
         cpu_vertices_ = std::move(new_vertices);
         upload_pending_ = true;
+    }
+    request_update_throttled();
+}
+
+void VoxelOpenGLViewer::set_show_lidar(bool show)
+{
+    show_lidar_ = show;
+    request_update_throttled();
+}
+
+void VoxelOpenGLViewer::update_lidar_points(std::span<const QVector3D> positions)
+{
+    std::vector<Vertex> new_vertices;
+    new_vertices.reserve(positions.size());
+
+    for (const QVector3D& p : positions)
+    {
+        const float fx = voxel_flip_x_ ? -1.f : 1.f;
+        const float fy = voxel_flip_y_ ? -1.f : 1.f;
+        const QVector3D mapped{fx * p.x(), p.z(), fy * p.y()};
+        new_vertices.push_back(Vertex{mapped.x(), mapped.y(), mapped.z(), 0.35f, 0.95f, 0.25f});
+    }
+
+    {
+        std::scoped_lock lk(data_mutex_);
+        lidar_vertices_ = std::move(new_vertices);
     }
     request_update_throttled();
 }
@@ -394,14 +433,18 @@ void VoxelOpenGLViewer::paintGL()
     }
 
     std::size_t n_vertices = 0;
+    std::size_t n_lidar_vertices = 0;
     std::vector<Vertex> draw_vertices;
+    std::vector<Vertex> lidar_draw_vertices;
     {
         std::scoped_lock lk(data_mutex_);
         n_vertices = cpu_vertices_.size();
+        n_lidar_vertices = lidar_vertices_.size();
         draw_vertices = cpu_vertices_;
+        lidar_draw_vertices = lidar_vertices_;
     }
-    if (n_vertices == 0)
-        return;
+    const bool has_voxels = n_vertices > 0;
+    const bool has_lidar = n_lidar_vertices > 0;
 
     const bool draw_voxels = show_voxels_;
 
@@ -427,12 +470,12 @@ void VoxelOpenGLViewer::paintGL()
 
     vao_.bind();
 
-    if (draw_voxels)
+    if (draw_voxels && has_voxels)
         glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(n_vertices));
 
     // Compatibility fallback: if shader path silently fails on some drivers,
     // draw a second pass using fixed-function calls when available.
-    if (context() && context()->format().profile() != QSurfaceFormat::CoreProfile)
+    if (has_voxels && context() && context()->format().profile() != QSurfaceFormat::CoreProfile)
     {
         glUseProgram(0);
         glMatrixMode(GL_PROJECTION);
@@ -447,6 +490,21 @@ void VoxelOpenGLViewer::paintGL()
             glVertex3f(v.px, v.py, v.pz);
         }
         glEnd();
+    }
+
+    if (show_lidar_ && has_lidar)
+    {
+        glDisable(GL_DEPTH_TEST);
+        room_vao_.bind();
+        room_vbo_.bind();
+        room_vbo_.allocate(lidar_draw_vertices.data(), static_cast<int>(lidar_draw_vertices.size() * sizeof(Vertex)));
+        program_.setUniformValue("u_round_points", 1);
+        program_.setUniformValue("u_point_size", 3.0f);
+        glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(lidar_draw_vertices.size()));
+        program_.setUniformValue("u_point_size", 4.5f);
+        room_vbo_.release();
+        room_vao_.release();
+        glEnable(GL_DEPTH_TEST);
     }
 
     // Draw room polygon outlines (floor and ceiling)
@@ -739,6 +797,19 @@ void VoxelOpenGLViewer::paintGL()
 
     vao_.release();
     program_.release();
+
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::TextAntialiasing, true);
+    painter.setPen(QColor(255, 255, 255));
+    const QString fps_text = (voxel_input_fps_ > 0.0f)
+                                 ? QString::number(voxel_input_fps_, 'f', 1)
+                                 : QStringLiteral("--");
+    painter.drawText(QRect(10, 10, width() - 20, 24),
+                     Qt::AlignLeft | Qt::AlignTop,
+                     QString("LiDAR points: %1   Voxels: %2   Voxel update FPS: %3")
+                         .arg(static_cast<qulonglong>(n_lidar_vertices))
+                         .arg(static_cast<qulonglong>(n_vertices))
+                         .arg(fps_text));
 }
 
 void VoxelOpenGLViewer::mousePressEvent(QMouseEvent* event)

@@ -23,6 +23,7 @@
 #include "unified_voxel_grid.h"
 #include "voxel_opengl_viewer.h"
 #include <QLabel>
+#include <QPushButton>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QImage>
@@ -31,6 +32,7 @@
 #include <limits>
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <execution>
 #include <numeric>
 #include <iterator>
@@ -92,6 +94,7 @@ void SpecificWorker::initialize()
         params.YOLO_MODEL_PATH  = configLoader.get<std::string>("Yolo.model_path");
     }
     catch (...) { /* key absent — use default */ }
+	try { params.YOLO_ACCEPTED_LABELS = configLoader.get<std::vector<std::string>>("Yolo.accepted_labels"); } catch (...) {}
 	try { params.YOLO_CONF_THRESH = static_cast<float>(configLoader.get<double>("Yolo.conf_thresh")); } catch (...) {}
 	try { params.YOLO_IOU_THRESH  = static_cast<float>(configLoader.get<double>("Yolo.iou_thresh"));  } catch (...) {}
 	try { params.YOLO_USE_GPU     = configLoader.get<bool>("Yolo.use_gpu");  } catch (...) {}
@@ -102,6 +105,11 @@ void SpecificWorker::initialize()
 	try { params.DSR_RGB_FPS   = configLoader.get<int>("Camera.dsr_rgb_fps");   } catch (...) {}
 	try { params.DSR_DEPTH_FPS = configLoader.get<int>("Camera.dsr_depth_fps"); } catch (...) {}
 	try { params.DSR_LIDAR_FPS = configLoader.get<int>("Lidar.dsr_lidar_fps"); } catch (...) {}
+	for (auto& label : params.YOLO_ACCEPTED_LABELS)
+		label = normalize_yolo_label(label);
+	std::sort(params.YOLO_ACCEPTED_LABELS.begin(), params.YOLO_ACCEPTED_LABELS.end());
+	params.YOLO_ACCEPTED_LABELS.erase(std::unique(params.YOLO_ACCEPTED_LABELS.begin(), params.YOLO_ACCEPTED_LABELS.end()),
+	                                  params.YOLO_ACCEPTED_LABELS.end());
 	try { verbose_debug_ = configLoader.get<bool>("Debug.verbose"); } catch (...) { verbose_debug_ = false; }
 	if (verbose_debug_)
 		std::println("[YOLO] effective flags: use_gpu={} use_trt={}", params.YOLO_USE_GPU, params.YOLO_USE_TRT);
@@ -151,16 +159,35 @@ void SpecificWorker::initialize()
 			custom_widget.frame->setLayout(layout);
 		}
 
+		voxel_lidar_toggle_button_ = new QPushButton("Hide LiDAR", custom_widget.frame);
+		voxel_lidar_toggle_button_->setCheckable(true);
+		voxel_lidar_toggle_button_->setChecked(true);
+		custom_widget.frame->layout()->addWidget(voxel_lidar_toggle_button_);
+
 		voxel_viewer_gl = std::make_unique<rc::VoxelOpenGLViewer>(custom_widget.frame);
 		custom_widget.frame->layout()->addWidget(voxel_viewer_gl.get());
+		QObject::connect(voxel_lidar_toggle_button_, &QPushButton::toggled, custom_widget.frame,
+		                 [this](bool checked)
+		                 {
+			                 if (voxel_viewer_gl)
+				                 voxel_viewer_gl->set_show_lidar(checked);
+			                 if (voxel_lidar_toggle_button_)
+				                 voxel_lidar_toggle_button_->setText(checked ? "Hide LiDAR" : "Show LiDAR");
+		                 });
 		qInfo() << __FUNCTION__ << "Voxel OpenGL custom widget attached to graph viewer";
 
 		if (custom_widget_yolo.frame->layout() == nullptr)
 		{
-			auto* layout = new QHBoxLayout(custom_widget_yolo.frame);
+			auto* layout = new QVBoxLayout(custom_widget_yolo.frame);
 			layout->setContentsMargins(0, 0, 0, 0);
+			layout->setSpacing(4);
 			custom_widget_yolo.frame->setLayout(layout);
 		}
+
+		yolo_fps_label_ = new QLabel(custom_widget_yolo.frame);
+		yolo_fps_label_->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+		yolo_fps_label_->setText("YOLO display FPS: --");
+		custom_widget_yolo.frame->layout()->addWidget(yolo_fps_label_);
 
 		yolo_image_label_ = new QLabel(custom_widget_yolo.frame);
 		yolo_image_label_->setMinimumSize(320, 240);
@@ -225,6 +252,7 @@ void SpecificWorker::initialize()
 void SpecificWorker::compute()
 {
 	static FPSCounter compute_fps;
+	check_input_stream_startup_status();
 
 	// ── 1. Per-cycle node name snapshot ──────────────────────────────────────
 	const auto [room_name, robot_name] = get_room_robot_names_for_compute();
@@ -260,6 +288,7 @@ void SpecificWorker::compute()
 
 	// ── 7. Push robot pose to 3-D viewer ─────────────────────────────────────
 	update_viewer_robot_pose(room_T_robot.value());
+	update_viewer_lidar_points(room_T_robot.value());
 
 	// ── 8. Refresh room polygon overlay ──────────────────────────────────────
 	update_room_polygon_periodic();
@@ -369,7 +398,10 @@ std::optional<Mat::RTMat> SpecificWorker::get_room_robot_transform(FPSCounter& c
 	{
 		if (!room_rt_wait_logged_)
 		{
-			qWarning() << "robot->room RTMat not available in InnerEigen API. Voxelization paused until transform is available.";
+			qWarning() << "robot->room RTMat not available in InnerEigen API. Voxelization paused until transform is available."
+			           << "room=" << QString::fromStdString(room_name)
+			           << "robot=" << QString::fromStdString(robot_name)
+			           << "ts_ms=" << timestamp_ms;
 			room_rt_wait_logged_ = true;
 			room_rt_ready_logged_ = false;
 		}
@@ -403,7 +435,10 @@ std::optional<Mat::RTMat> SpecificWorker::get_room_zed_transform(FPSCounter& com
 	{
 		if (!room_rt_wait_logged_)
 		{
-			qWarning() << "zed->room RTMat not available in InnerEigen API. Voxelization paused until transform is available.";
+			qWarning() << "zed->room RTMat not available in InnerEigen API. Voxelization paused until transform is available."
+			           << "room=" << QString::fromStdString(room_name)
+			           << "zed=zed"
+			           << "ts_ms=" << timestamp_ms;
 			room_rt_wait_logged_ = true;
 			room_rt_ready_logged_ = false;
 		}
@@ -427,6 +462,26 @@ std::uint64_t SpecificWorker::get_rgbd_frame_timestamp_ms(const RoboCompCameraRG
 		std::chrono::system_clock::now().time_since_epoch()).count());
 }
 
+void SpecificWorker::check_input_stream_startup_status()
+{
+	constexpr auto startup_grace = std::chrono::seconds(3);
+	const auto now = std::chrono::steady_clock::now();
+	if (now - input_stream_watchdog_start_ < startup_grace)
+		return;
+
+	if (!rgbd_stream_seen_.load(std::memory_order_relaxed)
+		&& !rgbd_stream_wait_logged_.exchange(true, std::memory_order_relaxed))
+	{
+		std::print(stderr, "[read_rgbd] No RGBD frames received since startup. Waiting for input stream...\n");
+	}
+
+	if (!lidar_stream_seen_.load(std::memory_order_relaxed)
+		&& !lidar_stream_wait_logged_.exchange(true, std::memory_order_relaxed))
+	{
+		std::print(stderr, "[read_lidar] No LiDAR frames received since startup. Waiting for input stream...\n");
+	}
+}
+
 void SpecificWorker::log_room_robot_pose_periodic(const Mat::RTMat& room_T_robot) const
 {
 	(void)room_T_robot;
@@ -446,28 +501,85 @@ std::vector<SegDetection> SpecificWorker::detect_segmentation(const RoboCompCame
 
 	const cv::Mat rgb_frame(rgbd.image.height, rgbd.image.width, CV_8UC3,
 		const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(rgbd.image.image.data())));
-	auto detections = yolo_detector->detect(rgb_frame, /*is_rgb=*/true);
+	const cv::Mat masked_rgb_frame = apply_tray_mask(rgb_frame);
+	auto detections = yolo_detector->detect(masked_rgb_frame, /*is_rgb=*/true);
 	postprocess_yolo_detections(detections);
 	return detections;
+}
+
+std::vector<cv::Point> SpecificWorker::get_tray_mask_polygon(const cv::Size& image_size) const
+{
+	if (!params.YOLO_MASK_TRAY || params.YOLO_TRAY_MASK_POLYGON_PX.size() < 3
+		|| image_size.width <= 0 || image_size.height <= 0
+		|| params.YOLO_TRAY_MASK_REF_WIDTH <= 0 || params.YOLO_TRAY_MASK_REF_HEIGHT <= 0)
+		return {};
+
+	const float scale_x = static_cast<float>(image_size.width) / static_cast<float>(params.YOLO_TRAY_MASK_REF_WIDTH);
+	const float scale_y = static_cast<float>(image_size.height) / static_cast<float>(params.YOLO_TRAY_MASK_REF_HEIGHT);
+
+	std::vector<cv::Point> polygon;
+	polygon.reserve(params.YOLO_TRAY_MASK_POLYGON_PX.size());
+	for (const auto& p : params.YOLO_TRAY_MASK_POLYGON_PX)
+	{
+		polygon.emplace_back(
+			std::clamp(static_cast<int>(std::lround(static_cast<float>(p.x) * scale_x)), 0, image_size.width - 1),
+			std::clamp(static_cast<int>(std::lround(static_cast<float>(p.y) * scale_y)), 0, image_size.height - 1));
+	}
+
+	return polygon;
+}
+
+cv::Mat SpecificWorker::apply_tray_mask(const cv::Mat& rgb_frame) const
+{
+	if (rgb_frame.empty())
+		return {};
+
+	const auto polygon = get_tray_mask_polygon(rgb_frame.size());
+	if (polygon.size() < 3)
+		return rgb_frame.clone();
+
+	cv::Mat masked = rgb_frame.clone();
+	const std::vector<std::vector<cv::Point>> polygons{polygon};
+	cv::fillPoly(masked, polygons, cv::Scalar(0, 0, 0));
+	return masked;
+}
+
+
+std::string SpecificWorker::normalize_yolo_label(const std::string& label) const
+{
+	std::string out = label;
+	std::transform(out.begin(), out.end(), out.begin(),
+	               [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+	if (out == "dining table") return "table";
+	if (out == "tv") return "monitor";
+	return out;
+}
+
+bool SpecificWorker::is_accepted_yolo_label(const std::string& label) const
+{
+	if (params.YOLO_ACCEPTED_LABELS.empty())
+		return true;
+
+	return std::find(params.YOLO_ACCEPTED_LABELS.begin(), params.YOLO_ACCEPTED_LABELS.end(), label)
+	       != params.YOLO_ACCEPTED_LABELS.end();
 }
 
 
 // YOLO postprocessing logic 
 void SpecificWorker::postprocess_yolo_detections(std::vector<SegDetection>& detections) const
 {
-    auto normalize_label = [](const std::string& label) -> std::string
-    {
-        std::string out = label;
-        std::transform(out.begin(), out.end(), out.begin(),
-                       [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
-        if (out == "dining table") return "table";
-        if (out == "tv") return "monitor";
-        return out;
-    };
+	for (auto& det : detections)
+	{
+		det.label = normalize_yolo_label(det.label);
+	}
+
+	std::erase_if(detections, [&](const SegDetection& det)
+	{
+		return !is_accepted_yolo_label(det.label);
+	});
 
 	for (auto& det : detections)
 	{
-		det.label = normalize_label(det.label);
 		const bool is_target = (det.label == "table" || det.label == "chair" || det.label == "monitor");
 		if (is_target && !det.mask.empty())
 		{
@@ -823,20 +935,27 @@ cv::Mat SpecificWorker::compose_detection_canvas(const cv::Mat& rgb_frame,
         cv::rectangle(canvas, det.bbox, colour, 2);
 
         // Label background + text
-        const std::string text = std::format("{} {:.2f}", det.label, det.confidence);
-        const int font        = cv::FONT_HERSHEY_SIMPLEX;
-        const double scale    = 0.55;
-        const int thickness   = 1;
-        int baseline          = 0;
-        const cv::Size ts     = cv::getTextSize(text, font, scale, thickness, &baseline);
-        const cv::Point tl    = det.bbox.tl();
-        cv::rectangle(canvas,
-                      cv::Point(tl.x, tl.y - ts.height - 4),
-                      cv::Point(tl.x + ts.width + 2, tl.y),
-                      colour, cv::FILLED);
-        cv::putText(canvas, text,
-                    cv::Point(tl.x + 1, tl.y - 3),
-                    font, scale, cv::Scalar(255, 255, 255), thickness, cv::LINE_AA);
+		const std::string text = std::format("{} {:.2f}", det.label, det.confidence);
+		const int font        = cv::FONT_HERSHEY_SIMPLEX;
+		const double scale    = 0.65;
+		const int thickness   = 2;
+		int baseline          = 0;
+		const cv::Size ts     = cv::getTextSize(text, font, scale, thickness, &baseline);
+
+		const int label_pad = 4;
+		const int box_x0 = std::clamp(det.bbox.x, 0, std::max(0, canvas.cols - 1));
+		const int box_y0 = std::clamp(det.bbox.y, 0, std::max(0, canvas.rows - 1));
+		const int label_w = std::min(canvas.cols, ts.width + 2 * label_pad);
+		const int label_h = ts.height + baseline + 2 * label_pad;
+		const bool place_above = box_y0 >= label_h;
+		const int label_x0 = std::clamp(box_x0, 0, std::max(0, canvas.cols - label_w));
+		const int label_y0 = place_above ? (box_y0 - label_h) : std::min(box_y0 + 2, std::max(0, canvas.rows - label_h));
+		const cv::Rect label_rect(label_x0, label_y0, label_w, std::min(label_h, canvas.rows - label_y0));
+
+		cv::rectangle(canvas, label_rect, colour, cv::FILLED);
+		cv::putText(canvas, text,
+			    cv::Point(label_rect.x + label_pad, label_rect.y + label_rect.height - baseline - label_pad),
+			    font, scale, cv::Scalar(255, 255, 255), thickness, cv::LINE_AA);
     }
 
 	return canvas;
@@ -845,13 +964,17 @@ cv::Mat SpecificWorker::compose_detection_canvas(const cv::Mat& rgb_frame,
 void SpecificWorker::update_yolo_tab_display(const RoboCompCameraRGBDSimple::TRGBD& rgbd,
                                               const std::vector<SegDetection>& detections)
 {
+	static auto last_display_update = std::chrono::steady_clock::time_point{};
+	static float display_fps = 0.f;
+
 	if (yolo_image_label_ == nullptr || rgbd.image.width == 0 || rgbd.image.height == 0
 		|| !custom_widget_yolo.isVisible())
 		return;
 
 	const cv::Mat rgb_frame(rgbd.image.height, rgbd.image.width, CV_8UC3,
 		const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(rgbd.image.image.data())));
-	const cv::Mat yolo_canvas = compose_detection_canvas(rgb_frame, detections);
+	const cv::Mat masked_rgb_frame = apply_tray_mask(rgb_frame);
+	const cv::Mat yolo_canvas = compose_detection_canvas(masked_rgb_frame, detections);
 	cv::Mat yolo_canvas_rgb;
 	cv::cvtColor(yolo_canvas, yolo_canvas_rgb, cv::COLOR_BGR2RGB);
 	QImage yolo_qimg(yolo_canvas_rgb.data,
@@ -861,6 +984,22 @@ void SpecificWorker::update_yolo_tab_display(const RoboCompCameraRGBDSimple::TRG
 		QImage::Format_RGB888);
 	QPixmap yolo_pix = QPixmap::fromImage(yolo_qimg, Qt::NoFormatConversion);
 	yolo_image_label_->setPixmap(yolo_pix.scaled(yolo_image_label_->size(), Qt::KeepAspectRatio, Qt::FastTransformation));
+
+	if (yolo_fps_label_ != nullptr)
+	{
+		const auto now = std::chrono::steady_clock::now();
+		if (last_display_update != std::chrono::steady_clock::time_point{})
+		{
+			const auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_display_update).count();
+			if (dt_ms > 0)
+			{
+				const float inst_fps = 1000.0f / static_cast<float>(dt_ms);
+				display_fps = (display_fps > 0.f) ? (0.85f * display_fps + 0.15f * inst_fps) : inst_fps;
+			}
+		}
+		last_display_update = now;
+		yolo_fps_label_->setText(QString("YOLO display FPS: %1").arg(display_fps, 0, 'f', 1));
+	}
 }
 
 void SpecificWorker::update_viewer_robot_pose(const Mat::RTMat& room_T_robot)
@@ -873,70 +1012,130 @@ void SpecificWorker::update_viewer_robot_pose(const Mat::RTMat& room_T_robot)
 	voxel_viewer_gl->set_robot_pose(static_cast<float>(t.x()), static_cast<float>(t.y()), theta);
 }
 
+void SpecificWorker::update_viewer_lidar_points(const Mat::RTMat& room_T_robot)
+{
+	if (!voxel_viewer_gl)
+		return;
+
+	std::vector<float> xs, ys, zs;
+	{
+		std::scoped_lock lk(lidar_points_mutex_);
+		xs = latest_lidar_xs_;
+		ys = latest_lidar_ys_;
+		zs = latest_lidar_zs_;
+	}
+
+	if (xs.empty() || ys.size() != xs.size() || zs.size() != xs.size())
+	{
+		voxel_viewer_gl->update_lidar_points({});
+		return;
+	}
+
+	std::vector<QVector3D> lidar_points_room;
+	lidar_points_room.reserve(xs.size());
+	for (std::size_t i = 0; i < xs.size(); ++i)
+	{
+		const Eigen::Vector3d point_robot(static_cast<double>(xs[i]),
+		                                 static_cast<double>(ys[i]),
+		                                 static_cast<double>(zs[i]));
+		const Eigen::Vector3d point_room = room_T_robot.linear() * point_robot + room_T_robot.translation();
+		lidar_points_room.emplace_back(static_cast<float>(point_room.x()),
+		                              static_cast<float>(point_room.y()),
+		                              static_cast<float>(point_room.z()));
+	}
+
+	voxel_viewer_gl->update_lidar_points(lidar_points_room);
+}
+
 void SpecificWorker::read_lidar_thread()
 {
 	static FPSCounter lidar_fps;
+	bool empty_lidar_logged = false;
     auto wait_period = std::chrono::milliseconds(getPeriod("Compute"));
     while (!stop_lidar_thread)
     {
-        //const auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
-        //    std::chrono::system_clock::now().time_since_epoch()).count();
-        try
-        {
-            RoboCompLidar3D::TData data;
-            try
-            {
-                data = lidar3d_proxy->getLidarData(
-                    "", 0.f, static_cast<float>(M_PI) * 2.f, params.LIDAR_DECIMATION_FACTOR);
-            }
-            catch (const Ice::Exception& e)
-			{
-				qWarning() << "[read_lidar] getLidarData failed:" << e.what() << "retrying...";
-				std::this_thread::sleep_for(std::chrono::milliseconds(100));
-				continue;
-			}
+		RoboCompLidar3D::TData data;
+		try
+		{
+			data = lidar3d_proxy->getLidarData(
+				"", 0.f, static_cast<float>(M_PI) * 2.f, params.LIDAR_DECIMATION_FACTOR);
+		}
+		catch (const Ice::Exception& e)
+		{
+			qWarning() << "[read_lidar] getLidarData failed:" << e.what() << "retrying...";
+			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+			continue;
+		}
 
-			const auto n = data.points.size();
-			std::vector<float> xs(n), ys(n), zs(n);
-			for (std::size_t i = 0; i < n; ++i)
+		if (data.points.empty())
+		{
+			if (!empty_lidar_logged)
 			{
-				xs[i] = data.points[i].x;
-				ys[i] = data.points[i].y;
-				zs[i] = data.points[i].z;
+				if (!lidar_stream_wait_logged_.exchange(true, std::memory_order_relaxed))
+					std::print(stderr, "[read_lidar] Empty LiDAR stream received. Waiting for points...\n");
+				empty_lidar_logged = true;
 			}
-			// Upload to DSR graph (rate-limited by dsr_lidar_fps; 0 = every scan).
-			static auto last_lidar_upload = std::chrono::steady_clock::time_point{};
-			const auto  now_steady_lidar  = std::chrono::steady_clock::now();
-			const auto  lidar_interval_ms = params.DSR_LIDAR_FPS > 0
-				? std::chrono::milliseconds(1000 / params.DSR_LIDAR_FPS)
-				: std::chrono::milliseconds(0);
-			const bool do_lidar_upload = (lidar_interval_ms.count() == 0)
-				|| (now_steady_lidar - last_lidar_upload >= lidar_interval_ms);
-			if (do_lidar_upload)
+			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+			continue;
+		}
+		else if (empty_lidar_logged)
+		{
+			lidar_stream_seen_.store(true, std::memory_order_relaxed);
+			lidar_stream_wait_logged_.store(false, std::memory_order_relaxed);
+			std::print("[read_lidar] LiDAR stream recovered.\n");
+			empty_lidar_logged = false;
+		}
+		else
+		{
+			lidar_stream_seen_.store(true, std::memory_order_relaxed);
+		}
+
+		const auto n = data.points.size();
+		std::vector<float> xs(n), ys(n), zs(n);
+		for (std::size_t i = 0; i < n; ++i)
+		{
+			xs[i] = data.points[i].x/1000.f;  // mm to m
+			ys[i] = data.points[i].y/1000.f;  // mm to m
+			zs[i] = data.points[i].z/1000.f;  // mm to m
+		}
+		// Upload to DSR graph (rate-limited by dsr_lidar_fps; 0 = every scan).
+		static auto last_lidar_upload = std::chrono::steady_clock::time_point{};
+		const auto  now_steady_lidar  = std::chrono::steady_clock::now();
+		const auto  lidar_interval_ms = params.DSR_LIDAR_FPS > 0
+			? std::chrono::milliseconds(1000 / params.DSR_LIDAR_FPS)
+			: std::chrono::milliseconds(0);
+		const bool do_lidar_upload = (lidar_interval_ms.count() == 0)
+			|| (now_steady_lidar - last_lidar_upload >= lidar_interval_ms);
+		if (do_lidar_upload)
+		{
+			last_lidar_upload = now_steady_lidar;
+			if (auto laser_node = G->get_node("lidar3D"); laser_node.has_value())
 			{
-				last_lidar_upload = now_steady_lidar;
-				if (auto laser_node = G->get_node("lidar3D"); laser_node.has_value())
-				{
-					G->add_or_modify_attrib_local<laser_X_att>(laser_node.value(), xs);
-					G->add_or_modify_attrib_local<laser_Y_att>(laser_node.value(), ys);
-					G->add_or_modify_attrib_local<laser_Z_att>(laser_node.value(), zs);
-					G->add_or_modify_attrib_local<laser_timestamp_att>(laser_node.value(), static_cast<uint64_t>(data.timestamp));
-					G->update_node(laser_node.value());
-				}
-				else
-					qWarning() << "Laser node not found in DSR graph";
+				G->add_or_modify_attrib_local<laser_X_att>(laser_node.value(), xs);
+				G->add_or_modify_attrib_local<laser_Y_att>(laser_node.value(), ys);
+				G->add_or_modify_attrib_local<laser_Z_att>(laser_node.value(), zs);
+				G->add_or_modify_attrib_local<laser_timestamp_att>(laser_node.value(), static_cast<uint64_t>(data.timestamp));
+				G->update_node(laser_node.value());
 			}
+			else
+				qWarning() << "Laser node not found in DSR graph";
+		}
 
-            const long p_ms = static_cast<long>(data.period);
-            if (wait_period > std::chrono::milliseconds(p_ms + 2)) --wait_period;
-            else if (wait_period < std::chrono::milliseconds(p_ms - 2)) ++wait_period;
+		{
+			std::scoped_lock lk(lidar_points_mutex_);
+			latest_lidar_xs_ = xs;
+			latest_lidar_ys_ = ys;
+			latest_lidar_zs_ = zs;
+			latest_lidar_timestamp_ms_ = static_cast<std::uint64_t>(data.timestamp);
+		}
 
-			if (verbose_debug_)
-				lidar_fps.print("[LidarThread]", 2000);
-            std::this_thread::sleep_for(wait_period);
-        }
-        catch (const Ice::Exception& e)
-        { qWarning() << "[read_lidar] Ice exception:" << e.what(); }
+		const long p_ms = static_cast<long>(data.period);
+		if (wait_period > std::chrono::milliseconds(p_ms + 2)) --wait_period;
+		else if (wait_period < std::chrono::milliseconds(p_ms - 2)) ++wait_period;
+
+		if (verbose_debug_)
+			lidar_fps.print("[LidarThread]", 2000);
+		std::this_thread::sleep_for(wait_period);
     }
 }
 
@@ -1312,6 +1511,7 @@ void SpecificWorker::prune_stale_tracks(int frame_id)
 void SpecificWorker::read_rgbd_thread()
 {
     static FPSCounter rgbd_fps;
+	bool empty_rgbd_logged = false;
     auto wait_period = std::chrono::milliseconds(getPeriod("Compute"));
     while (!stop_rgbd_thread)
     {
@@ -1329,6 +1529,32 @@ void SpecificWorker::read_rgbd_thread()
 				qWarning() << "[read_rgbd] getAll failed:" << e.what() << "retrying...";
 				std::this_thread::sleep_for(std::chrono::milliseconds(100));
 				continue;
+			}
+
+			const bool empty_rgb = frame.image.width <= 0 || frame.image.height <= 0 || frame.image.image.empty();
+			const bool empty_depth = frame.depth.width <= 0 || frame.depth.height <= 0 || frame.depth.depth.empty();
+			const bool empty_points = frame.points.points.empty();
+			if (empty_rgb || empty_depth || empty_points)
+			{
+				if (!empty_rgbd_logged)
+				{
+					if (!rgbd_stream_wait_logged_.exchange(true, std::memory_order_relaxed))
+						std::print(stderr, "[read_rgbd] Empty RGBD stream received. Waiting for RGB, depth and point cloud data...\n");
+					empty_rgbd_logged = true;
+				}
+				std::this_thread::sleep_for(std::chrono::milliseconds(100));
+				continue;
+			}
+			else if (empty_rgbd_logged)
+			{
+				rgbd_stream_seen_.store(true, std::memory_order_relaxed);
+				rgbd_stream_wait_logged_.store(false, std::memory_order_relaxed);
+				std::print("[read_rgbd] RGBD stream recovered.\n");
+				empty_rgbd_logged = false;
+			}
+			else
+			{
+				rgbd_stream_seen_.store(true, std::memory_order_relaxed);
 			}
 
             const long p_ms = static_cast<long>(frame.image.period);

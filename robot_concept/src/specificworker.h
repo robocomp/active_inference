@@ -31,6 +31,7 @@
 #include <genericworker.h>
 #include <doublebuffer_sync/doublebuffer_sync.h>
 #include <fps/fps.h>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include "yolo_seg_detector.h"
@@ -39,6 +40,7 @@
 class UnifiedVoxelGrid;
 namespace rc { class VoxelOpenGLViewer; }
 class QLabel;
+class QPushButton;
 
 /**
  * \brief Class SpecificWorker implements the core functionality of the component.
@@ -124,7 +126,24 @@ private:
 			  int         YOLO_INPUT_SIZE   = 640;
 			  bool        YOLO_USE_GPU      = true;
 			  bool        YOLO_USE_TRT      = true;
+			  std::vector<std::string> YOLO_ACCEPTED_LABELS = {
+				  "backpack", "handbag", "suitcase",
+				  "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl",
+				  "banana", "apple", "sandwich", "orange", "broccoli", "carrot",
+				  "hot dog", "pizza", "donut", "cake",
+				  "chair", "couch", "potted plant", "bed", "dining table", "toilet", "tv",
+				  "laptop", "mouse", "remote", "keyboard", "cell phone",
+				  "microwave", "oven", "toaster", "sink", "refrigerator",
+				  "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush"
+			  };
 			  int         YOLO_MASK_ERODE_KERNEL = 2; // pixels
+			  bool        YOLO_MASK_TRAY = true;
+			  int         YOLO_TRAY_MASK_REF_WIDTH = 1280;
+			  int         YOLO_TRAY_MASK_REF_HEIGHT = 720;
+			  std::vector<cv::Point> YOLO_TRAY_MASK_POLYGON_PX = {
+				  {210, 719}, {252, 694}, {320, 670}, {410, 646}, {520, 630},
+				  {640, 627}, {760, 630}, {870, 646}, {960, 670}, {1026, 694}, {1068, 719}
+			  }; // Estimated tray silhouette in 1280x720 ZED RGB image.
 
 			  // Voxel grid
 			  std::size_t VOXEL_DECIMATION_FACTOR = 2;
@@ -132,10 +151,11 @@ private:
 			  // Hungarian association
 			  float TRACK_ASSOCIATION_MAX_DISTANCE_M = 0.7f;
 			  int   TRACK_MAX_MISSED_FRAMES = 10;
-		  // DSR upload rates (Hz)
-		  int DSR_RGB_FPS   = 0;   // 0 = every frame (no throttle)
-		  int DSR_DEPTH_FPS = 5;
-		  int DSR_LIDAR_FPS = 0;   // 0 = every captured scan (no throttle)
+
+			  // DSR upload rates (Hz)
+			  int DSR_RGB_FPS   = 0;   // 0 = every frame (no throttle)
+			  int DSR_DEPTH_FPS = 5;
+			  int DSR_LIDAR_FPS = 0;   // 0 = every captured scan (no throttle)
         };
         Params params;
 
@@ -188,6 +208,7 @@ private:
 	cv::Mat compose_detection_canvas(const cv::Mat& rgb_frame, const std::vector<SegDetection>& detections) const;
 	void update_yolo_tab_display(const RoboCompCameraRGBDSimple::TRGBD& rgbd, const std::vector<SegDetection>& detections);
 	void update_viewer_robot_pose(const Mat::RTMat& room_T_robot);
+	void update_viewer_lidar_points(const Mat::RTMat& room_T_robot);
 	std::pair<std::string, std::string> get_room_robot_names_for_compute();
 	bool ensure_room_and_robot_ready(FPSCounter& compute_fps,
 	                                const std::string& room_name,
@@ -200,10 +221,15 @@ private:
 	                                                 const std::string& room_name,
 	                                                 std::uint64_t timestamp_ms);
 	std::uint64_t get_rgbd_frame_timestamp_ms(const RoboCompCameraRGBDSimple::TRGBD& rgbd) const;
+	void check_input_stream_startup_status();
 	void log_room_robot_pose_periodic(const Mat::RTMat& room_T_robot) const;
 	void update_room_polygon_periodic();
 	std::vector<SegDetection> detect_segmentation(const RoboCompCameraRGBDSimple::TRGBD& rgbd);
+	std::string normalize_yolo_label(const std::string& label) const;
+	bool is_accepted_yolo_label(const std::string& label) const;
 	void postprocess_yolo_detections(std::vector<SegDetection>& detections) const;
+	std::vector<cv::Point> get_tray_mask_polygon(const cv::Size& image_size) const;
+	cv::Mat apply_tray_mask(const cv::Mat& rgb_frame) const;
 	bool is_target_label(const std::string& label) const;
 	float detect_point_scale_once(const RoboCompCameraRGBDSimple::TRGBD& rgbd) const;
 	void build_owner_map_and_medians(const RoboCompCameraRGBDSimple::TRGBD& rgbd,
@@ -230,8 +256,15 @@ private:
 	// Custom widget for docking in the graph viewer
 	Custom_widget custom_widget;
 	Custom_widget custom_widget_yolo;
+	QPushButton* voxel_lidar_toggle_button_ = nullptr;
 	QLabel* yolo_image_label_ = nullptr;
+	QLabel* yolo_fps_label_ = nullptr;
 	std::unique_ptr<rc::VoxelOpenGLViewer> voxel_viewer_gl;
+	std::mutex lidar_points_mutex_;
+	std::vector<float> latest_lidar_xs_;
+	std::vector<float> latest_lidar_ys_;
+	std::vector<float> latest_lidar_zs_;
+	std::uint64_t latest_lidar_timestamp_ms_ = 0;
 
 	// Unified voxel grid — scene-level semantic map
 	std::unique_ptr<UnifiedVoxelGrid> voxel_grid;
@@ -247,6 +280,11 @@ private:
 	bool room_wait_logged_ = false;
 	bool room_rt_ready_logged_ = false;
 	bool room_rt_wait_logged_ = false;
+	std::chrono::steady_clock::time_point input_stream_watchdog_start_ = std::chrono::steady_clock::now();
+	std::atomic<bool> lidar_stream_seen_{false};
+	std::atomic<bool> rgbd_stream_seen_{false};
+	std::atomic<bool> lidar_stream_wait_logged_{false};
+	std::atomic<bool> rgbd_stream_wait_logged_{false};
 	mutable std::mutex node_names_mutex_;
 	std::string room_node_name_;
 	std::string robot_node_name_;

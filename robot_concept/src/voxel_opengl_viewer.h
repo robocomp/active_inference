@@ -29,6 +29,9 @@ public:
                        std::span<const std::string> categories = {},
                        std::span<const float> confidences = {});
 
+    void update_lidar_points(std::span<const QVector3D> positions);
+    void set_show_lidar(bool show);
+
     void update_room_polygon(std::span<const float> polygon_x,
                              std::span<const float> polygon_y);
 
@@ -71,6 +74,7 @@ private:
     QOpenGLBuffer room_vbo_{QOpenGLBuffer::VertexBuffer};
 
     std::vector<Vertex> cpu_vertices_;
+    std::vector<Vertex> lidar_vertices_;
     std::mutex data_mutex_;
 
     // Store both floor and ceiling polygons
@@ -89,6 +93,7 @@ private:
     bool voxel_flip_x_ = true;
     bool voxel_flip_y_ = false;
     bool show_voxels_ = true;
+    bool show_lidar_ = true;
 
     // Robot pose (room frame).
     bool have_robot_pose_ = false;
@@ -104,11 +109,13 @@ private:
     bool upload_pending_ = false;
     bool repaint_scheduled_ = false;
     std::chrono::steady_clock::time_point last_update_request_{};
+    std::chrono::steady_clock::time_point last_voxel_update_time_{};
     static constexpr std::chrono::milliseconds kMinUpdateIntervalMs{33};
+    float voxel_input_fps_ = 0.0f;
 
     float yaw_ = 0.0f;
-    float pitch_ = +0.35f;
-    float distance_ = 6.0f;
+    float pitch_ = +0.52f;
+    float distance_ = 8.5f;
     QVector3D target_{0.f, 0.f, 0.f};
     bool first_cloud_received_ = false;
     bool room_target_initialized_ = false;
