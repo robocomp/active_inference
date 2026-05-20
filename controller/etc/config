@@ -1,0 +1,48 @@
+# Proxies for required interfaces
+Proxies.OmniRobot = "omnirobot:tcp -h localhost -p 0"
+
+
+# --- Common Agent Data ---
+Agent.id = 0 # Change id
+Agent.name = "controller"
+
+# --- Single Instance Configuration ---
+# Use this if you only have one graph.
+Agent.configFile = ""
+Agent.domain = 0
+Agent.tree = true
+Agent.graph = true
+Agent.2d = true
+Agent.3d = true
+
+# --- Multiple Instance Template ---
+# If you define sub-instances, the single instance config above will be ignored.
+# Agent.instance_name.configFile = ""
+# Agent.instance_name.domain = 1
+# Agent.instance_name.tree = true
+# Agent.instance_name.graph = true
+# Agent.instance_name.2d = true
+# Agent.instance_name.3d = true
+
+Period.Compute = 100
+Period.Emergency = 500
+
+Planner.Clearance = 0.4
+Planner.GridResolution = 0.35
+Planner.ConnectionRadius = 1.2
+
+Controller.WaypointTolerance = 0.25
+Controller.MaxAdvSpeed = 0.7
+Controller.MaxRotSpeed = 0.8
+Controller.PosGain = 1.2
+Controller.RotGain = 1.5
+
+Target.EdgeType = "target"
+Transforms.interpolate_rt = true
+
+Component.Debug.Verbose = true
+
+Ice.Warn.Connections = "0"
+Ice.Trace.Network = "0"
+Ice.Trace.Protocol = "0"
+Ice.MessageSizeMax = "20004800"

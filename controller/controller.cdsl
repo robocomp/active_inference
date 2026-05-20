@@ -1,0 +1,13 @@
+import "OmniRobot.idsl";
+
+Component controller
+{
+    Communications
+    {
+        requires OmniRobot;
+    };
+    language Cpp11;
+    options dsr;
+
+};
+
