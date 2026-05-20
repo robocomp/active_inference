@@ -31,27 +31,31 @@
 #include <genericworker.h>
 #include <doublebuffer_sync/doublebuffer_sync.h>
 #include <fps/fps.h>
+#include <Eigen/Core>
+#include <opencv2/core.hpp>
+
+#include <atomic>
 #include <chrono>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <string>
+#include <thread>
+#include <tuple>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
 #include "yolo_seg_detector.h"
 #include "custom_widget.h"
 
 class UnifiedVoxelGrid;
+class VoxelProcessor;
+class YoloProcessor;
+class SceneProcessor;
 namespace rc { class VoxelOpenGLViewer; }
 class QLabel;
 class QPushButton;
-
-struct TrackBoxCandidate
-{
-	int track_id = -1;
-	std::string category;
-	Eigen::Vector3f min = Eigen::Vector3f::Zero();
-	Eigen::Vector3f max = Eigen::Vector3f::Zero();
-	Eigen::Vector3f centroid = Eigen::Vector3f::Zero();
-	int voxel_count = 0;
-	int last_seen_frame = -1;
-};
 
 /**
  * \brief Class SpecificWorker implements the core functionality of the component.
@@ -194,98 +198,7 @@ private:
 	std::atomic<bool> stop_rgbd_thread{false};
 
 	// Visualisation
-	struct VoxelSelectionResult
-	{
-		std::vector<Eigen::Vector3f> points;
-		std::vector<std::string> labels;
-		std::vector<float> confidences;
-		std::size_t valid_points = 0;
-		std::size_t masked_points = 0;
-		std::size_t selected_points = 0;
-		std::size_t table_points = 0;
-		std::size_t chair_points = 0;
-		std::size_t monitor_points = 0;
-	};
-
-	struct DetectionObservation
-	{
-		std::size_t det_index = 0;
-		Eigen::Vector3f centroid = Eigen::Vector3f::Zero();
-		std::string label;
-		float confidence = 0.0f;
-	};
-
-	struct InstanceTrack
-	{
-		int id = -1;
-		Eigen::Vector3f centroid = Eigen::Vector3f::Zero();
-		std::string label;
-		int last_seen_frame = -1;
-	};
-
-	struct RoomPolygonData
-	{
-		std::string room_name;
-		std::vector<float> polygon_x;
-		std::vector<float> polygon_y;
-		float room_height = 2.4f;
-	};
-
-	void draw_detections(const cv::Mat& rgb_frame, const std::vector<SegDetection>& detections) const;
-	cv::Mat compose_detection_canvas(const cv::Mat& rgb_frame, const std::vector<SegDetection>& detections) const;
-	std::optional<RoomPolygonData> get_room_polygon_from_graph() const;
-	void overlay_room_polygon_on_canvas(cv::Mat& canvas, const RoboCompCameraRGBDSimple::TRGBD& rgbd) const;
 	void update_yolo_tab_display(const RoboCompCameraRGBDSimple::TRGBD& rgbd, const std::vector<SegDetection>& detections);
-	void update_viewer_robot_pose(const Mat::RTMat& room_T_robot);
-	void update_viewer_lidar_points(const std::string& room_name,
-	                              const std::string& robot_name,
-	                              const Mat::RTMat& room_T_robot_fallback);
-	std::pair<std::string, std::string> get_room_robot_names_for_compute();
-	bool ensure_room_and_robot_ready(FPSCounter& compute_fps,
-	                                const std::string& room_name,
-	                                const std::string& robot_name);
-	std::optional<Mat::RTMat> get_room_robot_transform(FPSCounter& compute_fps,
-	                                                   const std::string& room_name,
-	                                                   const std::string& robot_name,
-	                                                   std::uint64_t timestamp_ms);
-	std::optional<Mat::RTMat> get_room_zed_transform(FPSCounter& compute_fps,
-	                                                 const std::string& room_name,
-	                                                 std::uint64_t timestamp_ms);
-	std::uint64_t get_rgbd_frame_timestamp_ms(const RoboCompCameraRGBDSimple::TRGBD& rgbd) const;
-	void check_input_stream_startup_status();
-	void log_room_robot_pose_periodic(const Mat::RTMat& room_T_robot) const;
-	void update_room_polygon_periodic();
-	std::vector<SegDetection> detect_segmentation(const RoboCompCameraRGBDSimple::TRGBD& rgbd);
-	std::string normalize_yolo_label(const std::string& label) const;
-	bool is_accepted_yolo_label(const std::string& label) const;
-	void postprocess_yolo_detections(std::vector<SegDetection>& detections) const;
-	std::vector<cv::Point> get_tray_mask_polygon(const cv::Size& image_size) const;
-	cv::Mat apply_tray_mask(const cv::Mat& rgb_frame) const;
-	bool is_target_label(const std::string& label) const;
-	float detect_point_scale_once(const RoboCompCameraRGBDSimple::TRGBD& rgbd) const;
-	void build_owner_map_and_medians(const RoboCompCameraRGBDSimple::TRGBD& rgbd,
-	                                float point_scale,
-	                                const std::vector<SegDetection>& detections,
-	                                std::vector<int32_t>& pixel_owner,
-	                                std::vector<float>& det_median_range_m) const;
-	VoxelSelectionResult collect_points_parallel(const RoboCompCameraRGBDSimple::TRGBD& rgbd,
-	                                            float point_scale,
-	                                            const std::vector<int32_t>& pixel_owner,
-	                                            const std::vector<SegDetection>& detections,
-	                                            const std::vector<float>& det_median_range_m) const;
-	std::vector<int> hungarian_min_cost(const std::vector<std::vector<float>>& cost) const;
-	std::vector<int> associate_detections_hungarian(const std::vector<DetectionObservation>& observations,
-	                                                int frame_id);
-	void prune_stale_tracks(int frame_id);
-	std::vector<TrackBoxCandidate> build_track_box_candidates() const;
-	void merge_duplicate_tracks(std::vector<TrackBoxCandidate>& candidates, int frame_id);
-	std::vector<TrackBoxCandidate> filter_track_boxes_for_viewer(const std::vector<TrackBoxCandidate>& candidates) const;
-	void update_voxel_grid_from_rgbd(const RoboCompCameraRGBDSimple::TRGBD& rgbd,
-	                                const std::vector<SegDetection>& detections,
-	                                const Mat::RTMat& room_T_robot,
-	                                const Mat::RTMat& room_T_zed);
-
-	void update_room_polygon_in_viewers();
 	
 	// Custom widget for docking in the graph viewer
 	Custom_widget custom_widget;
@@ -301,27 +214,16 @@ private:
 	std::uint64_t latest_lidar_timestamp_ms_ = 0;
 
 	// Unified voxel grid — scene-level semantic map
+	std::unique_ptr<YoloProcessor> yolo_processor;
 	std::unique_ptr<UnifiedVoxelGrid> voxel_grid;
+	std::unique_ptr<VoxelProcessor> voxel_processor;
 	std::unique_ptr<DSR::InnerEigenAPI> inner_eigen_api;
-	int compute_frame_ = 0;
-	int next_track_id_ = 1;
-	std::unordered_map<int, InstanceTrack> active_tracks;
-	// Hungarian association parameters (now set from params)
-	float track_association_max_distance_m = 0.7f;
-	int track_max_missed_frames = 10;
+	std::unique_ptr<SceneProcessor> scene_processor;
 	bool verbose_debug_ = false;
-	bool room_ready_logged_ = false;
-	bool room_wait_logged_ = false;
-	bool room_rt_ready_logged_ = false;
-	bool room_rt_wait_logged_ = false;
-	std::chrono::steady_clock::time_point input_stream_watchdog_start_ = std::chrono::steady_clock::now();
 	std::atomic<bool> lidar_stream_seen_{false};
 	std::atomic<bool> rgbd_stream_seen_{false};
 	std::atomic<bool> lidar_stream_wait_logged_{false};
 	std::atomic<bool> rgbd_stream_wait_logged_{false};
-	mutable std::mutex node_names_mutex_;
-	std::string room_node_name_;
-	std::string robot_node_name_;
 	
 signals:
 	//void customSignal();
