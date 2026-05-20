@@ -2460,7 +2460,7 @@ namespace rc
         int    n_pairs        = 0;
         int    slip_k_count   = 0;
         float  slip_k_sum     = 0.f;
-        int    trans_count    = 0;
+        
         Eigen::Vector3f bias_sum = Eigen::Vector3f::Zero();
 
         // ── 1. Per-pair loop: slip-k (newest pair only) + bias (all pairs) ────
@@ -2571,7 +2571,6 @@ namespace rc
                     const float var_sample = (span_residual / total_trans_mag) *
                                              (span_residual / total_trans_mag);
                     trans_noise_sample_buf_.push_back(var_sample);
-                    trans_count = 1; // sample was collected
                 }
             }
         }
@@ -2612,26 +2611,6 @@ namespace rc
         learned_odom_bias_ = (1.f - beta) * learned_odom_bias_ + beta * bias_batch;
 
         ++motion_learn_good_frames_;
-
-        // ── Debug printout every 50 good frames ──────────────────────────────
-        if (motion_learn_good_frames_ % 50 == 0)
-        {
-            const float mse_old = window.front().sdf_mse_final;
-            const float mse_new = window.back().sdf_mse_final;
-            // std::cout << "[MotionLearn] frames=" << motion_learn_good_frames_
-            //           << "  slip_k="      << learned_slip_k_
-            //           << "  trans_noise=" << learned_odom_noise_trans_
-            //           << "  bias=["  << learned_odom_bias_[0]
-            //           << ", "        << learned_odom_bias_[1]
-            //           << ", "        << learned_odom_bias_[2] << "]"
-            //           << "  (slip_pairs="   << slip_k_count
-            //           << "  trans_s="       << trans_count
-            //           << "  trans_buf="     << trans_noise_sample_buf_.size()
-            //           << "  n_pairs="       << n_pairs
-            //           << "  mse_span="      << mse_old << "/" << mse_new
-            //           << "  gate="          << quality_threshold << ")"
-            //           << std::endl;
-        }
     }
 
     // ===== HELPER METHOD: Compute motion-based covariance =====

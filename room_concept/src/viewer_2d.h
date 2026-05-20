@@ -154,6 +154,10 @@ class Viewer2D : public QObject
         // Room polygon outline
         QGraphicsPolygonItem* polygon_item_         = nullptr;
         QGraphicsPolygonItem* polygon_item_backup_  = nullptr;
+        QGraphicsLineItem* room_axis_x_item_        = nullptr;
+        QGraphicsLineItem* room_axis_y_item_        = nullptr;
+        QGraphicsTextItem* room_axis_x_label_       = nullptr;
+        QGraphicsTextItem* room_axis_y_label_       = nullptr;
 
         // Furniture
         std::vector<QGraphicsPolygonItem*> furniture_draw_items_;
@@ -188,6 +192,8 @@ class Viewer2D : public QObject
 
         // Score grid overlay
         std::vector<QGraphicsRectItem*> score_grid_items_;
+
+        void update_room_axes(const QRectF& room_bounds);
 
     };
 

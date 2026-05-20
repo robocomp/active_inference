@@ -482,10 +482,28 @@ void SpecificWorker::dsr_update_pose(const rc::RoomConcept::UpdateResult& res)
 
     auto parent_opt = G->get_node(parent_id);
     if (!parent_opt.has_value()) return;
+    auto child_opt = G->get_node(child_id);
 
     const float x = room_node_created_ ? t_robot_to_room.x() : t.x();
     const float y = room_node_created_ ? t_robot_to_room.y() : t.y();
     const float theta = room_node_created_ ? theta_robot_to_room : theta_room_to_robot;
+
+    {
+        static auto last_rt_trace = std::chrono::steady_clock::now() - std::chrono::seconds(1);
+        const auto now_rt_trace = std::chrono::steady_clock::now();
+        if (now_rt_trace - last_rt_trace >= std::chrono::seconds(1))
+        {
+            std::print(
+                "[RTTrace][Producer] frame_ts={} mode={} parent={} child={} published=({:.4f},{:.4f},{:.4f}) room_to_robot=({:.4f},{:.4f},{:.4f})\n",
+                res.timestamp_ms,
+                room_node_created_ ? "robot->room" : "world->robot",
+                parent_opt->name(),
+                child_opt.has_value() ? child_opt->name() : std::to_string(child_id),
+                x, y, theta,
+                t.x(), t.y(), theta_room_to_robot);
+            last_rt_trace = now_rt_trace;
+        }
+    }
 
     rt_api->insert_or_assign_edge_RT(parent_opt.value(), child_id,
                                      {x, y, 0.f},
@@ -522,29 +540,9 @@ void SpecificWorker::dsr_update_pose(const rc::RoomConcept::UpdateResult& res)
         qWarning() << "dsr_update_pose: edge RT not found after insert_or_assign_edge_RT";
         return;
     }
-    G->add_or_modify_attrib_local<rt_se2_covariance_att>(edge_rt.value(), cov_flat);
+    G->add_or_modify_attrib_local<rt_covariance_att>(edge_rt.value(), cov_flat);
     G->insert_or_assign_edge(edge_rt.value());
 
-    // Verify what was actually written to DSR using rt_api
-    auto rt_edge = DSR::RT_API::get_edge_RT(parent_opt.value(), child_id);
-    if (rt_edge.has_value())
-    {
-        auto rtmat = rt_api->get_edge_RT_as_rtmat(rt_edge.value());
-        if (rtmat.has_value())
-        {
-            // Verification output disabled.
-            // std::print("[dsr_update_pose VERIFY via rt_api] Written RT edge: trans=({:.4f},{:.4f}) rot_angle={:.4f} rad ({:.2f} deg)\n",
-            //            trans.x(), trans.y(), rot_angle, rot_angle * 180.0 / M_PI);
-        }
-        else
-        {
-            // std::print("[dsr_update_pose VERIFY] Could not convert Edge to RTMat\n");
-        }
-    }
-    else
-    {
-        // std::print("[dsr_update_pose VERIFY] Could not retrieve RT edge via rt_api\n");
-    }
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -637,8 +635,15 @@ Eigen::Affine2f SpecificWorker::best_available_pose(
 
 ///////////////////////////////////////////////////////////////////////////////
 void SpecificWorker::update_ui(const std::optional<rc::RoomConcept::UpdateResult>& loc_res,
-                               const Eigen::Affine2f& /*pose_for_draw*/)
+                               const Eigen::Affine2f& pose_for_draw)
 {
+    const Eigen::Vector2f pose_t = pose_for_draw.translation();
+    const float pose_theta_rad = std::atan2(pose_for_draw.linear()(1, 0), pose_for_draw.linear()(0, 0));
+    custom_widget.set_pose_text(QString("x %1 m   y %2 m   th %3 rad")
+                                .arg(pose_t.x(), 0, 'f', 2)
+                                .arg(pose_t.y(), 0, 'f', 2)
+                                .arg(pose_theta_rad, 0, 'f', 3));
+
     if (!loc_res.has_value()) return;
     if (ts_plot_sdf_) ts_plot_sdf_->add_point("sdf_mse", loc_res->sdf_mse);
     if (ts_plot_fe_)

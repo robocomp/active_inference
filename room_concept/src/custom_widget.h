@@ -43,11 +43,41 @@ public:
     Custom_widget() : Ui_local_guiDlg()
     {
         setupUi(this);
+
+        auto *pose_panel = new QFrame(this);
+        pose_panel->setFrameShape(QFrame::StyledPanel);
+        pose_panel->setFrameShadow(QFrame::Raised);
+
+        auto *pose_layout = new QHBoxLayout(pose_panel);
+        pose_layout->setContentsMargins(8, 4, 8, 4);
+        pose_layout->setSpacing(8);
+
+        auto *pose_title = new QLabel("Robot in room:", pose_panel);
+        pose_value_ = new QLabel("x 0.00 m   y 0.00 m   th 0.0 deg", pose_panel);
+        pose_value_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+
+        QFont value_font = pose_value_->font();
+        value_font.setBold(true);
+        pose_value_->setFont(value_font);
+
+        pose_layout->addWidget(pose_title);
+        pose_layout->addWidget(pose_value_, 1);
+
+        verticalLayout->insertWidget(1, pose_panel);
     }
 	~Custom_widget()
     {
 
     }
+
+    void set_pose_text(const QString &text)
+    {
+        if (pose_value_ != nullptr)
+            pose_value_->setText(text);
+    }
+
+private:
+    QLabel *pose_value_ = nullptr;
 
 
 

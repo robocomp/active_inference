@@ -182,7 +182,60 @@ void Viewer2D::update_estimated_room_rect(float width, float length, bool has_po
         estimated_room_item_->setRect(room_rect);
     }
 
+    update_room_axes(room_rect);
+
     fit_view();
+}
+
+void Viewer2D::update_room_axes(const QRectF& room_bounds)
+{
+    QRectF bounds = room_bounds;
+    if (!bounds.isValid() || bounds.isEmpty())
+        bounds = QRectF(-1.0, -1.0, 2.0, 2.0);
+
+    const qreal axis_length = std::clamp<qreal>(0.05 * std::max(bounds.width(), bounds.height()), 0.16, 0.55);
+    const QPen x_pen(QColor(220, 70, 70), 0.04);
+    const QPen y_pen(QColor(60, 170, 90), 0.04);
+
+    if (room_axis_x_item_ == nullptr)
+    {
+        room_axis_x_item_ = agv_->scene.addLine(QLineF(0.0, 0.0, axis_length, 0.0), x_pen);
+        room_axis_x_item_->setZValue(7);
+    }
+    else
+    {
+        room_axis_x_item_->setLine(QLineF(0.0, 0.0, axis_length, 0.0));
+        room_axis_x_item_->setPen(x_pen);
+    }
+
+    if (room_axis_y_item_ == nullptr)
+    {
+        room_axis_y_item_ = agv_->scene.addLine(QLineF(0.0, 0.0, 0.0, axis_length), y_pen);
+        room_axis_y_item_->setZValue(7);
+    }
+    else
+    {
+        room_axis_y_item_->setLine(QLineF(0.0, 0.0, 0.0, axis_length));
+        room_axis_y_item_->setPen(y_pen);
+    }
+
+    if (room_axis_x_label_ == nullptr)
+    {
+        room_axis_x_label_ = agv_->scene.addText("X");
+        room_axis_x_label_->setDefaultTextColor(x_pen.color());
+        room_axis_x_label_->setZValue(8);
+        room_axis_x_label_->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+    }
+    room_axis_x_label_->setPos(axis_length, 0.0);
+
+    if (room_axis_y_label_ == nullptr)
+    {
+        room_axis_y_label_ = agv_->scene.addText("Y");
+        room_axis_y_label_->setDefaultTextColor(y_pen.color());
+        room_axis_y_label_->setZValue(8);
+        room_axis_y_label_->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+    }
+    room_axis_y_label_->setPos(0.0, axis_length);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -210,6 +263,8 @@ void Viewer2D::draw_room_polygon(const std::vector<Eigen::Vector2f>& verts, bool
              is_capturing ? 0.08 : 0.15);
     polygon_item_ = agv_->scene.addPolygon(poly, pen, QBrush(Qt::NoBrush));
     polygon_item_->setZValue(8);
+
+    update_room_axes(poly.boundingRect());
 
     if (!is_capturing)
         fit_view();
