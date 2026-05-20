@@ -194,8 +194,11 @@ void Viewer2D::update_room_axes(const QRectF& room_bounds)
         bounds = QRectF(-1.0, -1.0, 2.0, 2.0);
 
     const qreal axis_length = std::clamp<qreal>(0.05 * std::max(bounds.width(), bounds.height()), 0.16, 0.55);
+    const qreal label_axis_fraction = 0.58;
     const QPen x_pen(QColor(220, 70, 70), 0.04);
     const QPen y_pen(QColor(60, 170, 90), 0.04);
+    QFont label_font;
+    label_font.setPointSizeF(8.0);
 
     if (room_axis_x_item_ == nullptr)
     {
@@ -226,7 +229,12 @@ void Viewer2D::update_room_axes(const QRectF& room_bounds)
         room_axis_x_label_->setZValue(8);
         room_axis_x_label_->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
     }
-    room_axis_x_label_->setPos(axis_length, 0.0);
+    room_axis_x_label_->setFont(label_font);
+    {
+        const QRectF label_rect = room_axis_x_label_->boundingRect();
+        room_axis_x_label_->setPos(label_axis_fraction * axis_length - label_rect.width() * 0.5,
+                                   -label_rect.height() * 0.85);
+    }
 
     if (room_axis_y_label_ == nullptr)
     {
@@ -235,7 +243,12 @@ void Viewer2D::update_room_axes(const QRectF& room_bounds)
         room_axis_y_label_->setZValue(8);
         room_axis_y_label_->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
     }
-    room_axis_y_label_->setPos(0.0, axis_length);
+    room_axis_y_label_->setFont(label_font);
+    {
+        const QRectF label_rect = room_axis_y_label_->boundingRect();
+        room_axis_y_label_->setPos(-label_rect.width() - 2.0,
+                                   label_axis_fraction * axis_length - label_rect.height() * 0.5);
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
