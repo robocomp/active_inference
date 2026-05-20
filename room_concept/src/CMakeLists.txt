@@ -4,12 +4,29 @@ find_package(Qt6 COMPONENTS Xml PrintSupport REQUIRED)
 find_package(Qt6 COMPONENTS 3DCore 3DRender 3DExtras QUIET)
 
 # Find PyTorch
-set(CMAKE_PREFIX_PATH "/home/robolab/software/libtorch")
 set(CUDAToolkit_ROOT "/usr/local/cuda-13.2")
 find_package(CUDAToolkit REQUIRED)
 
-# Point to where you unzipped the cu130 LibTorch
-set(Torch_DIR "/home/robolab/software/libtorch")
+# Allow an external Torch_DIR/CMAKE_PREFIX_PATH to win, then try common local installs.
+if(NOT Torch_DIR)
+  if(EXISTS "/home/robocomp/software/libtorch/share/cmake/Torch/TorchConfig.cmake")
+    set(Torch_DIR "/home/robocomp/software/libtorch/share/cmake/Torch")
+  else()
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+      execute_process(
+        COMMAND ${Python3_EXECUTABLE} -c "import torch; print(torch.utils.cmake_prefix_path, end='')"
+        OUTPUT_VARIABLE TORCH_CMAKE_PREFIX
+        RESULT_VARIABLE TORCH_CMAKE_PREFIX_RESULT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+      if(TORCH_CMAKE_PREFIX_RESULT EQUAL 0 AND EXISTS "${TORCH_CMAKE_PREFIX}/Torch/TorchConfig.cmake")
+        set(Torch_DIR "${TORCH_CMAKE_PREFIX}/Torch")
+      endif()
+    endif()
+  endif()
+endif()
+
 find_package(Torch REQUIRED)
 
 # Enable CUDA language so CMake initializes detection scripts
