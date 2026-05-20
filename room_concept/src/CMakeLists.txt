@@ -4,12 +4,12 @@ find_package(Qt6 COMPONENTS Xml PrintSupport REQUIRED)
 find_package(Qt6 COMPONENTS 3DCore 3DRender 3DExtras QUIET)
 
 # Find PyTorch
-set(CMAKE_PREFIX_PATH "/home/pbustos/software/libtorch")
+set(CMAKE_PREFIX_PATH "/home/robolab/software/libtorch")
 set(CUDAToolkit_ROOT "/usr/local/cuda-13.2")
 find_package(CUDAToolkit REQUIRED)
 
 # Point to where you unzipped the cu130 LibTorch
-set(Torch_DIR "/home/robocomp/software/libtorch")
+set(Torch_DIR "/home/robolab/software/libtorch")
 find_package(Torch REQUIRED)
 
 # Enable CUDA language so CMake initializes detection scripts
