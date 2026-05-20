@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <print>
+#include <variant>
 
 SceneProcessor::SceneProcessor(const std::shared_ptr<DSR::DSRGraph>& graph,
                                std::mutex& lidar_points_mutex,
@@ -315,6 +316,80 @@ std::optional<SceneProcessor::RoomPolygonData> SceneProcessor::get_room_polygon_
     return data;
 }
 
+std::optional<SceneProcessor::GraphObjectBox> SceneProcessor::build_graph_object_box(const DSR::Node& node,
+                                                                                     const std::string& room_name,
+                                                                                     std::uint64_t timestamp_ms) const
+{
+    if (!graph_ || inner_eigen_api_ == nullptr || room_name.empty())
+        return std::nullopt;
+
+    const auto width_opt = graph_->get_attrib_by_name<width_m_att>(node);
+    const auto depth_opt = graph_->get_attrib_by_name<depth_m_att>(node);
+    const auto height_opt = graph_->get_attrib_by_name<height_m_att>(node);
+    if (!width_opt.has_value() || !depth_opt.has_value() || !height_opt.has_value())
+        return std::nullopt;
+
+    const float width = width_opt.value();
+    const float depth = depth_opt.value();
+    const float height = height_opt.value();
+    if (width <= 0.f || depth <= 0.f || height <= 0.f)
+        return std::nullopt;
+
+    const auto time_query = transforms_interpolate_rt_
+        ? DSR::RT_API::TimeQuery::Interpolated
+        : DSR::RT_API::TimeQuery::Nearest;
+    const auto room_T_object = inner_eigen_api_->get_transformation_matrix(room_name,
+                                                                           node.name(),
+                                                                           timestamp_ms,
+                                                                           "RT",
+                                                                           time_query);
+    if (!room_T_object.has_value())
+        return std::nullopt;
+
+    const float half_width = width * 0.5f;
+    const float half_depth = depth * 0.5f;
+    const float half_height = height * 0.5f;
+
+    const std::array<Eigen::Vector3d, 8> local_corners = {
+        Eigen::Vector3d{-half_width, -half_depth, -half_height},
+        Eigen::Vector3d{ half_width, -half_depth, -half_height},
+        Eigen::Vector3d{ half_width,  half_depth, -half_height},
+        Eigen::Vector3d{-half_width,  half_depth, -half_height},
+        Eigen::Vector3d{-half_width, -half_depth,  half_height},
+        Eigen::Vector3d{ half_width, -half_depth,  half_height},
+        Eigen::Vector3d{ half_width,  half_depth,  half_height},
+        Eigen::Vector3d{-half_width,  half_depth,  half_height}
+    };
+
+    QVector3D min_corner(std::numeric_limits<float>::max(),
+                         std::numeric_limits<float>::max(),
+                         std::numeric_limits<float>::max());
+    QVector3D max_corner(std::numeric_limits<float>::lowest(),
+                         std::numeric_limits<float>::lowest(),
+                         std::numeric_limits<float>::lowest());
+
+    for (const auto& local_corner : local_corners)
+    {
+        const Eigen::Vector3d room_corner = room_T_object->linear() * local_corner + room_T_object->translation();
+        min_corner.setX(std::min(min_corner.x(), static_cast<float>(room_corner.x())));
+        min_corner.setY(std::min(min_corner.y(), static_cast<float>(room_corner.y())));
+        min_corner.setZ(std::min(min_corner.z(), static_cast<float>(room_corner.z())));
+        max_corner.setX(std::max(max_corner.x(), static_cast<float>(room_corner.x())));
+        max_corner.setY(std::max(max_corner.y(), static_cast<float>(room_corner.y())));
+        max_corner.setZ(std::max(max_corner.z(), static_cast<float>(room_corner.z())));
+    }
+
+    std::string category = node.name();
+    if (const auto it = node.attrs().find("semantic_class"); it != node.attrs().end() && it->second.selected() == 0)
+        category = it->second.str();
+
+    // Keep graph/model tables visually distinct from YOLO-derived table tracks.
+    if (category == "table" || node.type() == "table" || node.name() == "bootstrap_table")
+        category = "model_table";
+
+    return GraphObjectBox{min_corner, max_corner, std::move(category)};
+}
+
 void SceneProcessor::overlay_room_polygon_on_canvas(cv::Mat& canvas,
                                                     const RoboCompCameraRGBDSimple::TRGBD& rgbd) const
 {
@@ -481,6 +556,40 @@ void SceneProcessor::update_room_polygon_in_viewers()
     {
         qWarning() << "update_room_polygon_in_viewers failed:" << e.what();
     }
+}
+
+void SceneProcessor::update_viewer_graph_object_boxes(const std::string& room_name,
+                                                      std::uint64_t timestamp_ms)
+{
+    if (!graph_ || voxel_viewer_ == nullptr || room_name.empty())
+        return;
+
+    const auto object_nodes = graph_->get_nodes_by_type("object");
+    if (object_nodes.empty())
+    {
+        voxel_viewer_->update_graph_boxes({}, {}, {});
+        return;
+    }
+
+    std::vector<QVector3D> mins;
+    std::vector<QVector3D> maxs;
+    std::vector<std::string> categories;
+    mins.reserve(object_nodes.size());
+    maxs.reserve(object_nodes.size());
+    categories.reserve(object_nodes.size());
+
+    for (const auto& node : object_nodes)
+    {
+        const auto box = build_graph_object_box(node, room_name, timestamp_ms);
+        if (!box.has_value())
+            continue;
+
+        mins.push_back(box->min);
+        maxs.push_back(box->max);
+        categories.push_back(box->category);
+    }
+
+    voxel_viewer_->update_graph_boxes(mins, maxs, categories);
 }
 
 void SceneProcessor::update_viewer_robot_pose(const Mat::RTMat& room_T_robot)

@@ -59,6 +59,8 @@ public:
     void update_viewer_lidar_points(const std::string& room_name,
                                     const std::string& robot_name,
                                     const Mat::RTMat& room_T_robot_fallback);
+    void update_viewer_graph_object_boxes(const std::string& room_name,
+                                          std::uint64_t timestamp_ms);
 
 private:
     struct RoomPolygonData
@@ -77,11 +79,21 @@ private:
         Mat::Vector3d axis_z{0.0, 0.0, 0.0};
     };
 
+    struct GraphObjectBox
+    {
+        QVector3D min;
+        QVector3D max;
+        std::string category;
+    };
+
     bool compute_room_to_camera_basis(const std::string& camera_node_name,
                                       const std::string& room_frame_name,
                                       std::uint64_t rt_timestamp,
                                       RoomToCameraBasis& basis) const;
     std::optional<RoomPolygonData> get_room_polygon_from_graph() const;
+    std::optional<GraphObjectBox> build_graph_object_box(const DSR::Node& node,
+                                                         const std::string& room_name,
+                                                         std::uint64_t timestamp_ms) const;
     void update_room_polygon_in_viewers();
 
     std::shared_ptr<DSR::DSRGraph> graph_;

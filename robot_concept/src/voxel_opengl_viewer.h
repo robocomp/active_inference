@@ -45,6 +45,11 @@ public:
                             std::span<const QVector3D> maxs,
                             std::span<const std::string> categories = {});
 
+    // DSR graph object boxes in room frame (min/max corners per object).
+    void update_graph_boxes(std::span<const QVector3D> mins,
+                            std::span<const QVector3D> maxs,
+                            std::span<const std::string> categories = {});
+
     // Robot pose in room frame (x, y in meters; theta in radians).
     void set_robot_pose(float x, float y, float theta);
     bool load_robot_mesh(const std::string& path);
@@ -86,6 +91,9 @@ private:
     std::vector<QVector3D> track_box_mins_;
     std::vector<QVector3D> track_box_maxs_;
     std::vector<std::string> track_box_categories_;
+    std::vector<QVector3D> graph_box_mins_;
+    std::vector<QVector3D> graph_box_maxs_;
+    std::vector<std::string> graph_box_categories_;
     // Raw polygon coordinates (room frame) plus current debug rotation in 90deg steps.
     std::vector<float> raw_polygon_x_;
     std::vector<float> raw_polygon_y_;
@@ -108,6 +116,7 @@ private:
     std::mutex robot_pose_mutex_;
     std::mutex room_polygon_mutex_;
     std::mutex track_boxes_mutex_;
+    std::mutex graph_boxes_mutex_;
     void rebuild_polygon_locked_();
 
     bool gl_ready_ = false;

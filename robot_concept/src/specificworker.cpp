@@ -271,6 +271,7 @@ void SpecificWorker::compute()
 
 	scene_processor->update_viewer_robot_pose(room_T_robot.value());
 	scene_processor->update_viewer_lidar_points(room_name, robot_name, room_T_robot.value());
+	scene_processor->update_viewer_graph_object_boxes(room_name, frame_ts_ms);
 	scene_processor->update_room_polygon_periodic();
 
 	if (voxel_processor)
