@@ -165,6 +165,8 @@ private:
 
 			  // Voxel grid
 			  std::size_t VOXEL_DECIMATION_FACTOR = 2;
+			  std::size_t VOXEL_VIEWER_MAX_RENDERED_VOXELS = 30'000;
+			  int         VOXEL_VIEWER_FPS = 10;
 
 			  // Hungarian association
 			  float TRACK_ASSOCIATION_MAX_DISTANCE_M = 0.7f;
@@ -204,6 +206,7 @@ private:
 	Custom_widget custom_widget;
 	Custom_widget custom_widget_yolo;
 	QPushButton* voxel_lidar_toggle_button_ = nullptr;
+	QPushButton* voxel_clear_button_ = nullptr;
 	QLabel* yolo_image_label_ = nullptr;
 	QLabel* yolo_fps_label_ = nullptr;
 	std::unique_ptr<rc::VoxelOpenGLViewer> voxel_viewer_gl;

@@ -76,6 +76,12 @@ UnifiedVoxelGrid::UnifiedVoxelGrid(UnifiedGridConfig cfg, CategoryRegistry reg)
 {
     _grid.reserve(static_cast<std::size_t>(_cfg.max_voxels));
     _track_voxel_count.reserve(256);
+    if (_cfg.max_display_voxels > 0)
+    {
+        const auto max_display_voxels = static_cast<std::size_t>(_cfg.max_display_voxels);
+        _display_sample_keys.reserve(max_display_voxels);
+        _display_sample_index.reserve(max_display_voxels);
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -97,6 +103,56 @@ bool UnifiedVoxelGrid::_is_categorized(const VoxelState& vs) const noexcept
 void UnifiedVoxelGrid::_track_inc(int track_id) noexcept
 {
     ++_track_voxel_count[track_id];
+}
+
+void UnifiedVoxelGrid::_display_touch_key(const VoxelKey& key)
+{
+    if (_cfg.max_display_voxels <= 0)
+        return;
+
+    if (_display_sample_index.contains(key))
+        return;
+
+    const auto max_display_voxels = static_cast<std::size_t>(_cfg.max_display_voxels);
+    if (_display_sample_keys.size() < max_display_voxels)
+    {
+        _display_sample_index.emplace(key, _display_sample_keys.size());
+        _display_sample_keys.push_back(key);
+        return;
+    }
+
+    if (_display_sample_keys.empty())
+        return;
+
+    const std::size_t replace_index = _display_sample_cursor % _display_sample_keys.size();
+    const VoxelKey replaced_key = _display_sample_keys[replace_index];
+    _display_sample_index.erase(replaced_key);
+    _display_sample_keys[replace_index] = key;
+    _display_sample_index[key] = replace_index;
+    _display_sample_cursor = (_display_sample_cursor + 1) % _display_sample_keys.size();
+}
+
+void UnifiedVoxelGrid::_display_remove_key(const VoxelKey& key)
+{
+    const auto it = _display_sample_index.find(key);
+    if (it == _display_sample_index.end())
+        return;
+
+    const std::size_t index = it->second;
+    const std::size_t last_index = _display_sample_keys.size() - 1;
+    if (index != last_index)
+    {
+        const VoxelKey moved_key = _display_sample_keys.back();
+        _display_sample_keys[index] = moved_key;
+        _display_sample_index[moved_key] = index;
+    }
+    _display_sample_keys.pop_back();
+    _display_sample_index.erase(it);
+
+    if (_display_sample_keys.empty())
+        _display_sample_cursor = 0;
+    else
+        _display_sample_cursor %= _display_sample_keys.size();
 }
 
 void UnifiedVoxelGrid::_track_bind_key(int track_id, const VoxelKey& key)
@@ -152,6 +208,7 @@ void UnifiedVoxelGrid::_enforce_max_voxels(int /*frame*/)
         auto it = _grid.find(age_idx[i].second);
         if (it != _grid.end())
         {
+            _display_remove_key(age_idx[i].second);
             _track_unbind_key(it->second.track_id, age_idx[i].second);
             _track_dec(it->second.track_id);
             _grid.erase(it);
@@ -262,6 +319,7 @@ void UnifiedVoxelGrid::observe(int track_id,
         vs.last_frame       = frame;
         vs.n_ray_traversals = 0;
         _touched_this_frame.insert(key);
+        _display_touch_key(key);
     }
 
     // Subsample for ray traversal
@@ -500,6 +558,7 @@ UnifiedVoxelGrid::visibility_update(const Eigen::Vector3f& cam_pos,
         auto it = _grid.find(key);
         if (it != _grid.end())
         {
+            _display_remove_key(key);
             _track_unbind_key(it->second.track_id, key);
             _track_dec(it->second.track_id);
             _grid.erase(it);
@@ -787,13 +846,28 @@ UnifiedVoxelGrid::object_dominant_category(int track_id) const
 //  5. Track management
 // ═══════════════════════════════════════════════════════════════════════════
 
+void UnifiedVoxelGrid::clear()
+{
+    _grid.clear();
+    _track_voxel_count.clear();
+    _track_keys.clear();
+    _display_sample_keys.clear();
+    _display_sample_index.clear();
+    _display_sample_cursor = 0;
+    _frame = 0;
+    _reset_frame_bookkeeping();
+}
+
 void UnifiedVoxelGrid::remove(int track_id)
 {
     const auto track_it = _track_keys.find(track_id);
     if (track_it != _track_keys.end())
     {
         for (const auto& key : track_it->second)
+        {
+            _display_remove_key(key);
             _grid.erase(key);
+        }
         _track_keys.erase(track_it);
     }
     _track_voxel_count.erase(track_id);
@@ -844,6 +918,7 @@ int UnifiedVoxelGrid::cleanup_voxels(int track_id,
     {
         if (labels[i] == -1 || !keep.contains(labels[i]))
         {
+            _display_remove_key(keys[i]);
             _track_unbind_key(track_id, keys[i]);
             _grid.erase(keys[i]);
             _track_dec(track_id);
@@ -876,6 +951,7 @@ int UnifiedVoxelGrid::prune_to_sdf(
     {
         if (std::abs(sdf_vals[i]) > sdf_threshold)
         {
+            _display_remove_key(keys[i]);
             _track_unbind_key(track_id, keys[i]);
             _grid.erase(keys[i]);
             _track_dec(track_id);
@@ -927,39 +1003,96 @@ std::unordered_map<int, int> UnifiedVoxelGrid::summary() const
 //  6. Export & diagnostics
 // ═══════════════════════════════════════════════════════════════════════════
 
+void UnifiedVoxelGrid::_append_semantic_voxel_export(SemanticVoxelExport& out,
+                                                     const VoxelState& vs,
+                                                     const std::unordered_map<int,std::string>* hints,
+                                                     float min_prob) const
+{
+    const float a_sum = std::reduce(vs.alpha.begin(), vs.alpha.end(), 0.0f);
+    std::string cat_name = "unknown";
+    float p_cat = 0.0f;
+    if (a_sum > 0.0f)
+    {
+        const auto it = std::max_element(vs.alpha.begin(), vs.alpha.end());
+        const int idx = static_cast<int>(std::distance(vs.alpha.begin(), it));
+        cat_name = (idx < _reg.K()) ? _reg.name(idx) : "unknown";
+        p_cat = *it / a_sum;
+    }
+    else if (hints)
+    {
+        if (const auto hit = hints->find(vs.track_id); hit != hints->end())
+            cat_name = hit->second;
+    }
+
+    if (p_cat < min_prob)
+        cat_name = "unknown";
+
+    out.points.push_back(vs.centroid);
+    out.categories.push_back(std::move(cat_name));
+    out.probs.push_back(p_cat);
+    out.track_ids.push_back(vs.track_id);
+}
+
 SemanticVoxelExport
 UnifiedVoxelGrid::export_semantic_voxels(const std::unordered_set<int>* track_ids,
                                           const std::unordered_map<int,std::string>* hints,
                                           float min_prob) const
 {
     SemanticVoxelExport out;
+    out.points.reserve(_grid.size());
+    out.categories.reserve(_grid.size());
+    out.probs.reserve(_grid.size());
+    out.track_ids.reserve(_grid.size());
     for (const auto& [k, vs] : _grid)
     {
-        if (track_ids && !track_ids->contains(vs.track_id)) continue;
-
-        const float a_sum = std::reduce(vs.alpha.begin(), vs.alpha.end(), 0.0f);
-        std::string cat_name = "unknown";
-        float p_cat = 0.0f;
-        if (a_sum > 0.0f)
-        {
-            const auto it = std::max_element(vs.alpha.begin(), vs.alpha.end());
-            const int idx = static_cast<int>(std::distance(vs.alpha.begin(), it));
-            cat_name = (idx < _reg.K()) ? _reg.name(idx) : "unknown";
-            p_cat = *it / a_sum;
-        }
-        else if (hints)
-        {
-            auto hit = hints->find(vs.track_id);
-            if (hit != hints->end()) cat_name = hit->second;
-        }
-
-        if (p_cat < min_prob) cat_name = "unknown";
-
-        out.points.push_back(vs.centroid);
-        out.categories.push_back(std::move(cat_name));
-        out.probs.push_back(p_cat);
-        out.track_ids.push_back(vs.track_id);
+        (void)k;
+        if (track_ids && !track_ids->contains(vs.track_id))
+            continue;
+        _append_semantic_voxel_export(out, vs, hints, min_prob);
     }
+    return out;
+}
+
+SemanticVoxelExport
+UnifiedVoxelGrid::export_display_semantic_voxels(std::size_t max_points,
+                                                 const std::unordered_set<int>* track_ids,
+                                                 const std::unordered_map<int,std::string>* hints,
+                                                 float min_prob) const
+{
+    const std::size_t target_points = max_points > 0
+        ? max_points
+        : (_cfg.max_display_voxels > 0
+            ? static_cast<std::size_t>(_cfg.max_display_voxels)
+            : _grid.size());
+
+    if (_display_sample_keys.empty() || target_points == 0)
+        return export_semantic_voxels(track_ids, hints, min_prob);
+
+    SemanticVoxelExport out;
+    const std::size_t reserve_points = std::min(target_points, _display_sample_keys.size());
+    out.points.reserve(reserve_points);
+    out.categories.reserve(reserve_points);
+    out.probs.reserve(reserve_points);
+    out.track_ids.reserve(reserve_points);
+
+    const std::size_t start_index = _display_sample_keys.empty()
+        ? 0
+        : (_display_sample_cursor % _display_sample_keys.size());
+
+    for (std::size_t offset = 0; offset < _display_sample_keys.size() && out.points.size() < target_points; ++offset)
+    {
+        const auto& key = _display_sample_keys[(start_index + offset) % _display_sample_keys.size()];
+        const auto grid_it = _grid.find(key);
+        if (grid_it == _grid.end())
+            continue;
+
+        const auto& vs = grid_it->second;
+        if (track_ids && !track_ids->contains(vs.track_id))
+            continue;
+
+        _append_semantic_voxel_export(out, vs, hints, min_prob);
+    }
+
     return out;
 }
 

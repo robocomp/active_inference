@@ -4,7 +4,9 @@
 
 #include <Eigen/Core>
 
+#include <chrono>
 #include <cstdint>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -24,14 +26,17 @@ public:
     struct Config
     {
         std::size_t voxel_decimation_factor = 2;
+        std::size_t viewer_max_rendered_voxels = 30'000;
         float track_association_max_distance_m = 0.7f;
         int track_max_missed_frames = 10;
+        int viewer_voxel_fps = 10;
         bool verbose_debug = false;
     };
 
     explicit VoxelProcessor(UnifiedVoxelGrid& voxel_grid);
 
     void configure(const Config& config);
+    void clear_state(rc::VoxelOpenGLViewer* voxel_viewer);
 
     void process_rgbd_frame(const RoboCompCameraRGBDSimple::TRGBD& rgbd,
                             const std::vector<SegDetection>& detections,
@@ -40,6 +45,14 @@ public:
                             rc::VoxelOpenGLViewer* voxel_viewer);
 
 private:
+    struct PointCloudStats
+    {
+        Eigen::Vector3f min = Eigen::Vector3f::Zero();
+        Eigen::Vector3f max = Eigen::Vector3f::Zero();
+        Eigen::Vector3f sum = Eigen::Vector3f::Zero();
+        std::size_t count = 0;
+    };
+
     struct TrackBoxCandidate
     {
         int track_id = -1;
@@ -78,6 +91,7 @@ private:
     std::vector<int> associate_detections_hungarian(const std::vector<DetectionObservation>& observations,
                                                     int frame_id);
     void prune_stale_tracks(int frame_id);
+    PointCloudStats compute_point_cloud_stats(std::span<const Eigen::Vector3f> points) const;
     std::vector<TrackBoxCandidate> build_track_box_candidates() const;
     void merge_duplicate_tracks(std::vector<TrackBoxCandidate>& candidates, int frame_id);
     std::vector<TrackBoxCandidate> filter_track_boxes_for_viewer(const std::vector<TrackBoxCandidate>& candidates) const;
@@ -91,6 +105,8 @@ private:
 
     UnifiedVoxelGrid& voxel_grid_;
     Config config_;
+    static constexpr std::size_t max_clustered_box_points_ = 512;
+    std::chrono::steady_clock::time_point last_voxel_viewer_update_{};
     int compute_frame_ = 0;
     int next_track_id_ = 1;
     std::unordered_map<int, InstanceTrack> active_tracks_;

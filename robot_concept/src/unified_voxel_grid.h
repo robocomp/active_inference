@@ -83,6 +83,7 @@ struct UnifiedGridConfig
     float resolution            = 0.05f;
     int   max_voxels            = 250'000;
     int   max_voxels_per_track  = 3'000;
+    int   max_display_voxels    = 30'000;
 
     float alpha_prior           = 0.1f;
     float centroid_ema          = 0.3f;
@@ -213,6 +214,7 @@ class UnifiedVoxelGrid
             object_dominant_category(int track_id) const;
 
         // ── 5. Track management ───────────────────────────────────────────────
+        void clear();
         void remove(int track_id);
         int  cleanup_voxels(int track_id,
                             std::optional<float> eps         = std::nullopt,
@@ -231,6 +233,12 @@ class UnifiedVoxelGrid
             export_semantic_voxels(const std::unordered_set<int>* track_ids   = nullptr,
                                 const std::unordered_map<int,std::string>* hints = nullptr,
                                 float min_prob = 0.0f) const;
+
+        [[nodiscard]] SemanticVoxelExport
+            export_display_semantic_voxels(std::size_t max_points = 0,
+                                           const std::unordered_set<int>* track_ids = nullptr,
+                                           const std::unordered_map<int,std::string>* hints = nullptr,
+                                           float min_prob = 0.0f) const;
 
         [[nodiscard]] std::map<std::string,
                             std::variant<int, std::map<std::string,int>>>
@@ -259,6 +267,12 @@ class UnifiedVoxelGrid
         void _track_unbind_key(int track_id, const VoxelKey& key);
         int  _track_dec(int track_id) noexcept;   // decrement count, clamp ≥ 0
         void _track_inc(int track_id) noexcept;
+        void _display_touch_key(const VoxelKey& key);
+        void _display_remove_key(const VoxelKey& key);
+        void _append_semantic_voxel_export(SemanticVoxelExport& out,
+                           const VoxelState& vs,
+                           const std::unordered_map<int,std::string>* hints,
+                           float min_prob) const;
 
         // ── State ─────────────────────────────────────────────────────────────
         UnifiedGridConfig _cfg;
@@ -268,6 +282,9 @@ class UnifiedVoxelGrid
         std::unordered_map<VoxelKey, VoxelState, VoxelKeyHash> _grid;
         std::unordered_map<int, int>  _track_voxel_count;
         std::unordered_map<int, std::unordered_set<VoxelKey, VoxelKeyHash>> _track_keys;
+        std::vector<VoxelKey> _display_sample_keys;
+        std::unordered_map<VoxelKey, std::size_t, VoxelKeyHash> _display_sample_index;
+        std::size_t _display_sample_cursor = 0;
 
         // Per-frame bookkeeping — flat_set for cache-friendly membership test
         std::flat_set<VoxelKey> _touched_this_frame;

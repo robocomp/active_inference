@@ -27,6 +27,7 @@
 #include "unified_voxel_grid.h"
 #include "voxel_opengl_viewer.h"
 
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
 #include <QVBoxLayout>
@@ -96,6 +97,8 @@ void SpecificWorker::initialize()
 	try { params.YOLO_MASK_ERODE_KERNEL = configLoader.get<int>("Yolo.mask_erode_kernel"); } catch (...) {}
 	try { params.TRACK_ASSOCIATION_MAX_DISTANCE_M = static_cast<float>(configLoader.get<double>("Yolo.track_association_max_distance_m")); } catch (...) {}
 	try { params.TRACK_MAX_MISSED_FRAMES = configLoader.get<int>("Yolo.track_max_missed_frames"); } catch (...) {}
+	try { params.VOXEL_VIEWER_MAX_RENDERED_VOXELS = static_cast<std::size_t>(configLoader.get<int>("Voxel.viewer_max_rendered_voxels")); } catch (...) {}
+	try { params.VOXEL_VIEWER_FPS = configLoader.get<int>("Voxel.viewer_fps"); } catch (...) {}
 	try { params.DSR_RGB_FPS = configLoader.get<int>("Camera.dsr_rgb_fps"); } catch (...) {}
 	try { params.DSR_DEPTH_FPS = configLoader.get<int>("Camera.dsr_depth_fps"); } catch (...) {}
 	try { params.DSR_LIDAR_FPS = configLoader.get<int>("Lidar.dsr_lidar_fps"); } catch (...) {}
@@ -133,11 +136,20 @@ void SpecificWorker::initialize()
 			custom_widget.frame->setLayout(layout);
 		}
 
+		auto* controls_layout = new QHBoxLayout();
+		controls_layout->setContentsMargins(0, 0, 0, 0);
+		controls_layout->setSpacing(6);
+		custom_widget.frame->layout()->addItem(controls_layout);
+
 		voxel_lidar_toggle_button_ = new QPushButton("Hide LiDAR", custom_widget.frame);
 		voxel_lidar_toggle_button_->setCheckable(true);
 		voxel_lidar_toggle_button_->setChecked(false);
 		voxel_lidar_toggle_button_->setText("Show LiDAR");
-		custom_widget.frame->layout()->addWidget(voxel_lidar_toggle_button_);
+		controls_layout->addWidget(voxel_lidar_toggle_button_);
+
+		voxel_clear_button_ = new QPushButton("Clear Voxels", custom_widget.frame);
+		controls_layout->addWidget(voxel_clear_button_);
+		controls_layout->addStretch(1);
 
 		voxel_viewer_gl = std::make_unique<rc::VoxelOpenGLViewer>(custom_widget.frame);
 		voxel_viewer_gl->set_show_lidar(false);
@@ -154,6 +166,12 @@ void SpecificWorker::initialize()
 				                 voxel_viewer_gl->set_show_lidar(checked);
 			                 if (voxel_lidar_toggle_button_)
 				                 voxel_lidar_toggle_button_->setText(checked ? "Hide LiDAR" : "Show LiDAR");
+		                 });
+		QObject::connect(voxel_clear_button_, &QPushButton::clicked, custom_widget.frame,
+		                 [this]
+		                 {
+			                 if (voxel_processor)
+				                 voxel_processor->clear_state(voxel_viewer_gl.get());
 		                 });
 		qInfo() << __FUNCTION__ << "Voxel OpenGL custom widget attached to graph viewer";
 
@@ -181,12 +199,16 @@ void SpecificWorker::initialize()
 	else
 		qWarning() << __FUNCTION__ << "No graph viewer available; Voxel3D widget not attached";
 
-	voxel_grid = std::make_unique<UnifiedVoxelGrid>();
+	UnifiedGridConfig voxel_grid_config;
+	voxel_grid_config.max_display_voxels = static_cast<int>(params.VOXEL_VIEWER_MAX_RENDERED_VOXELS);
+	voxel_grid = std::make_unique<UnifiedVoxelGrid>(voxel_grid_config);
 	voxel_processor = std::make_unique<VoxelProcessor>(*voxel_grid);
 	VoxelProcessor::Config voxel_processor_config;
 	voxel_processor_config.voxel_decimation_factor = params.VOXEL_DECIMATION_FACTOR;
+	voxel_processor_config.viewer_max_rendered_voxels = params.VOXEL_VIEWER_MAX_RENDERED_VOXELS;
 	voxel_processor_config.track_association_max_distance_m = params.TRACK_ASSOCIATION_MAX_DISTANCE_M;
 	voxel_processor_config.track_max_missed_frames = params.TRACK_MAX_MISSED_FRAMES;
+	voxel_processor_config.viewer_voxel_fps = params.VOXEL_VIEWER_FPS;
 	voxel_processor_config.verbose_debug = verbose_debug_;
 	voxel_processor->configure(voxel_processor_config);
 	inner_eigen_api = G->get_inner_eigen_api();

@@ -28,6 +28,23 @@ void VoxelProcessor::configure(const Config& config)
     config_ = config;
 }
 
+void VoxelProcessor::clear_state(rc::VoxelOpenGLViewer* voxel_viewer)
+{
+    voxel_grid_.clear();
+    active_tracks_.clear();
+    next_track_id_ = 1;
+    compute_frame_ = 0;
+    last_voxel_viewer_update_ = {};
+
+    if (voxel_viewer == nullptr)
+        return;
+
+    const std::vector<QVector3D> empty_points;
+    const std::vector<std::string> empty_categories;
+    voxel_viewer->update_voxels(empty_points);
+    voxel_viewer->update_track_boxes(empty_points, empty_points, empty_categories);
+}
+
 void VoxelProcessor::process_rgbd_frame(const RoboCompCameraRGBDSimple::TRGBD& rgbd,
                                         const std::vector<SegDetection>& detections,
                                         const Mat::RTMat& room_T_robot,
@@ -45,7 +62,9 @@ void VoxelProcessor::process_rgbd_frame(const RoboCompCameraRGBDSimple::TRGBD& r
     std::size_t masked_points = 0;
     std::size_t selected_points = 0;
     std::size_t decimated_points = 0;
-    std::unordered_map<std::string, std::size_t> selected_by_class;
+    std::size_t selected_tables = 0;
+    std::size_t selected_chairs = 0;
+    std::size_t selected_monitors = 0;
     std::vector<float> det_median_range_m(detections.size(), std::numeric_limits<float>::quiet_NaN());
     std::vector<int32_t> pixel_owner(static_cast<std::size_t>(img_w * img_h), -1);
     const float point_scale = detect_point_scale_once(rgbd);
@@ -53,8 +72,7 @@ void VoxelProcessor::process_rgbd_frame(const RoboCompCameraRGBDSimple::TRGBD& r
 
     const std::size_t n_dets = detections.size();
     std::vector<std::vector<Eigen::Vector3f>> points_by_det(n_dets);
-    std::vector<std::vector<std::string>> labels_by_det(n_dets);
-    std::vector<std::vector<float>> confs_by_det(n_dets);
+    std::vector<std::size_t> selected_points_per_det(n_dets, 0);
     std::vector<Eigen::Vector3f> selected_points_robot;
     std::vector<std::size_t> selected_det_indices;
     selected_points_robot.reserve(static_cast<std::size_t>(img_w * img_h / 6));
@@ -97,39 +115,45 @@ void VoxelProcessor::process_rgbd_frame(const RoboCompCameraRGBDSimple::TRGBD& r
             ++selected_points;
             selected_points_robot.emplace_back(px, py, pz);
             selected_det_indices.push_back(det_idx);
+            ++selected_points_per_det[det_idx];
 
             if (det.label == "table")
-                ++selected_by_class["table"];
+                ++selected_tables;
             else if (det.label == "chair")
-                ++selected_by_class["chair"];
+                ++selected_chairs;
             else if (det.label == "monitor")
-                ++selected_by_class["monitor"];
+                ++selected_monitors;
         }
     }
 
+    std::vector<Eigen::Vector3f> centroid_sums_by_det(n_dets, Eigen::Vector3f::Zero());
+    std::vector<std::size_t> centroid_counts_by_det(n_dets, 0);
+
     if (!selected_points_robot.empty())
     {
-        const std::size_t n_sel = selected_points_robot.size();
-        Eigen::Matrix<double, 3, Eigen::Dynamic> pts_robot(3, static_cast<Eigen::Index>(n_sel));
-        for (std::size_t i = 0; i < n_sel; ++i)
-        {
-            pts_robot(0, static_cast<Eigen::Index>(i)) = static_cast<double>(selected_points_robot[i].x());
-            pts_robot(1, static_cast<Eigen::Index>(i)) = static_cast<double>(selected_points_robot[i].y());
-            pts_robot(2, static_cast<Eigen::Index>(i)) = static_cast<double>(selected_points_robot[i].z());
-        }
+        for (std::size_t d = 0; d < n_dets; ++d)
+            points_by_det[d].reserve(selected_points_per_det[d]);
 
-        Eigen::Matrix<double, 3, Eigen::Dynamic> pts_room =
-            (room_T_robot.linear() * pts_robot).colwise() + room_T_zed.translation();
+        const std::size_t n_sel = selected_points_robot.size();
+        const Eigen::Matrix3f room_rotation = room_T_robot.linear().cast<float>();
+        const Eigen::Vector3f room_translation = room_T_zed.translation().cast<float>();
+        std::vector<Eigen::Vector3f> selected_points_room(n_sel);
+
+        std::transform(std::execution::par_unseq,
+                       selected_points_robot.begin(),
+                       selected_points_robot.end(),
+                       selected_points_room.begin(),
+                       [&](const Eigen::Vector3f& point)
+                       {
+                           return room_rotation * point + room_translation;
+                       });
 
         for (std::size_t i = 0; i < n_sel; ++i)
         {
             const std::size_t det_idx = selected_det_indices[i];
-            points_by_det[det_idx].emplace_back(
-                static_cast<float>(pts_room(0, static_cast<Eigen::Index>(i))),
-                static_cast<float>(pts_room(1, static_cast<Eigen::Index>(i))),
-                static_cast<float>(pts_room(2, static_cast<Eigen::Index>(i))));
-            labels_by_det[det_idx].push_back(detections[det_idx].label);
-            confs_by_det[det_idx].push_back(detections[det_idx].confidence);
+            points_by_det[det_idx].push_back(selected_points_room[i]);
+            centroid_sums_by_det[det_idx] += selected_points_room[i];
+            ++centroid_counts_by_det[det_idx];
         }
     }
 
@@ -144,10 +168,7 @@ void VoxelProcessor::process_rgbd_frame(const RoboCompCameraRGBDSimple::TRGBD& r
         if (!is_target_label(detections[d].label))
             continue;
 
-        Eigen::Vector3f centroid = Eigen::Vector3f::Zero();
-        for (const auto& p : points_by_det[d])
-            centroid += p;
-        centroid /= static_cast<float>(points_by_det[d].size());
+        const Eigen::Vector3f centroid = centroid_sums_by_det[d] / static_cast<float>(centroid_counts_by_det[d]);
 
         observations.push_back(DetectionObservation{
             .det_index = d,
@@ -177,42 +198,61 @@ void VoxelProcessor::process_rgbd_frame(const RoboCompCameraRGBDSimple::TRGBD& r
         if (track_id < 0 || points_by_det[d].empty())
             continue;
 
-        std::vector<Eigen::Vector3f> pts_decimated;
-        std::vector<std::string> labels_decimated;
-        std::vector<float> confs_decimated;
-
-        pts_decimated.reserve((points_by_det[d].size() + voxel_decimation_step - 1) / voxel_decimation_step);
-        labels_decimated.reserve(pts_decimated.capacity());
-        confs_decimated.reserve(pts_decimated.capacity());
-
-        for (std::size_t i = 0; i < points_by_det[d].size(); i += voxel_decimation_step)
+        if (voxel_decimation_step == 1)
         {
-            pts_decimated.push_back(points_by_det[d][i]);
-            labels_decimated.push_back(labels_by_det[d][i]);
-            confs_decimated.push_back(confs_by_det[d][i]);
+            decimated_points += points_by_det[d].size();
+            voxel_grid_.observe(track_id,
+                                points_by_det[d],
+                                detections[d].label,
+                                frame_id,
+                                {},
+                                {},
+                                detections[d].confidence);
+            continue;
         }
+
+        std::vector<Eigen::Vector3f> pts_decimated;
+        pts_decimated.reserve((points_by_det[d].size() + voxel_decimation_step - 1) / voxel_decimation_step);
+        for (std::size_t i = 0; i < points_by_det[d].size(); i += voxel_decimation_step)
+            pts_decimated.push_back(points_by_det[d][i]);
 
         decimated_points += pts_decimated.size();
         voxel_grid_.observe(track_id,
                             pts_decimated,
                             detections[d].label,
                             frame_id,
-                            labels_decimated,
-                            confs_decimated,
+                            {},
+                            {},
                             detections[d].confidence);
     }
 
     box_candidates = build_track_box_candidates();
     merge_duplicate_tracks(box_candidates, frame_id);
 
-    const auto sem = voxel_grid_.export_semantic_voxels();
     if (voxel_viewer != nullptr)
     {
-        std::vector<QVector3D> qpts;
-        qpts.reserve(sem.points.size());
-        for (const auto& p : sem.points)
-            qpts.emplace_back(p.x(), p.y(), p.z());
-        voxel_viewer->update_voxels(qpts, sem.categories, sem.probs);
+        const auto now = std::chrono::steady_clock::now();
+        const auto viewer_interval = config_.viewer_voxel_fps > 0
+            ? std::chrono::milliseconds{1000 / config_.viewer_voxel_fps}
+            : std::chrono::milliseconds{0};
+        const bool should_update_voxels = viewer_interval.count() == 0
+            || last_voxel_viewer_update_ == std::chrono::steady_clock::time_point{}
+            || now - last_voxel_viewer_update_ >= viewer_interval;
+        if (should_update_voxels)
+        {
+            last_voxel_viewer_update_ = now;
+            const auto sem = voxel_grid_.export_display_semantic_voxels(config_.viewer_max_rendered_voxels);
+            std::vector<QVector3D> qpts(sem.points.size());
+            std::transform(std::execution::par_unseq,
+                           sem.points.begin(),
+                           sem.points.end(),
+                           qpts.begin(),
+                           [](const Eigen::Vector3f& point)
+                           {
+                               return QVector3D(point.x(), point.y(), point.z());
+                           });
+            voxel_viewer->update_voxels(qpts, sem.categories, sem.probs);
+        }
 
         const auto filtered_boxes = filter_track_boxes_for_viewer(box_candidates);
 
@@ -237,17 +277,22 @@ void VoxelProcessor::process_rgbd_frame(const RoboCompCameraRGBDSimple::TRGBD& r
         const float ratio = valid_points > 0
             ? (100.0f * static_cast<float>(masked_points) / static_cast<float>(valid_points))
             : 0.0f;
+        const int viewer_voxel_fps = config_.viewer_voxel_fps;
         std::println("[VoxelDebug] valid_pts={} masked_pts={} ({:.1f}%) selected_pts={} decimated_pts={} table={} chair={} monitor={} detections={} active_tracks={}",
                      valid_points,
                      masked_points,
                      ratio,
                      selected_points,
                      decimated_points,
-                     selected_by_class["table"],
-                     selected_by_class["chair"],
-                     selected_by_class["monitor"],
+                     selected_tables,
+                     selected_chairs,
+                     selected_monitors,
                      detections.size(),
                      active_tracks_.size());
+        if (viewer_voxel_fps > 0)
+            std::println("[VoxelDebug] viewer_voxel_fps={} viewer_max_rendered_voxels={}",
+                         viewer_voxel_fps,
+                         config_.viewer_max_rendered_voxels);
     }
 }
 
@@ -518,6 +563,53 @@ void VoxelProcessor::prune_stale_tracks(int frame_id)
     });
 }
 
+VoxelProcessor::PointCloudStats VoxelProcessor::compute_point_cloud_stats(std::span<const Eigen::Vector3f> points) const
+{
+    if (points.empty())
+        return {};
+
+    if (points.size() == 1)
+    {
+        return PointCloudStats{
+            .min = points.front(),
+            .max = points.front(),
+            .sum = points.front(),
+            .count = 1
+        };
+    }
+
+    const auto combine = [](PointCloudStats lhs, const PointCloudStats& rhs)
+    {
+        if (lhs.count == 0)
+            return rhs;
+        if (rhs.count == 0)
+            return lhs;
+
+        lhs.min = lhs.min.cwiseMin(rhs.min);
+        lhs.max = lhs.max.cwiseMax(rhs.max);
+        lhs.sum += rhs.sum;
+        lhs.count += rhs.count;
+        return lhs;
+    };
+
+    const auto to_stats = [](const Eigen::Vector3f& point)
+    {
+        return PointCloudStats{
+            .min = point,
+            .max = point,
+            .sum = point,
+            .count = 1
+        };
+    };
+
+    return std::transform_reduce(std::execution::par,
+                                 points.begin(),
+                                 points.end(),
+                                 PointCloudStats{},
+                                 combine,
+                                 to_stats);
+}
+
 std::vector<VoxelProcessor::TrackBoxCandidate> VoxelProcessor::build_track_box_candidates() const
 {
     std::vector<TrackBoxCandidate> candidates;
@@ -530,23 +622,26 @@ std::vector<VoxelProcessor::TrackBoxCandidate> VoxelProcessor::build_track_box_c
         if (tid <= 0)
             continue;
 
+        const int voxel_count = voxel_grid_.get_n_voxels(tid);
+        if (voxel_count < 10)
+            continue;
+
         const auto [dom_cat, _] = voxel_grid_.object_dominant_category(tid);
-        auto pts = voxel_grid_.get_points_clustered(tid, dom_cat);
-        if (pts.size() < 10)
+        const bool use_clustered_points = static_cast<std::size_t>(voxel_count) <= max_clustered_box_points_;
+        auto pts = use_clustered_points
+            ? voxel_grid_.get_points_clustered(tid, dom_cat)
+            : voxel_grid_.get_points(tid);
+
+        if (pts.size() < 10 && use_clustered_points)
             pts = voxel_grid_.get_points(tid);
         if (pts.size() < 10)
             continue;
 
-        Eigen::Vector3f mn = pts.front();
-        Eigen::Vector3f mx = pts.front();
-        Eigen::Vector3f centroid = Eigen::Vector3f::Zero();
-        for (const auto& p : pts)
-        {
-            mn = mn.cwiseMin(p);
-            mx = mx.cwiseMax(p);
-            centroid += p;
-        }
-        centroid /= static_cast<float>(pts.size());
+        const auto stats = compute_point_cloud_stats(pts);
+        if (stats.count == 0)
+            continue;
+
+        const Eigen::Vector3f centroid = stats.sum / static_cast<float>(stats.count);
 
         int last_seen_frame = -1;
         if (const auto it = active_tracks_.find(tid); it != active_tracks_.end())
@@ -555,10 +650,10 @@ std::vector<VoxelProcessor::TrackBoxCandidate> VoxelProcessor::build_track_box_c
         candidates.push_back(TrackBoxCandidate{
             .track_id = tid,
             .category = dom_cat,
-            .min = mn,
-            .max = mx,
+            .min = stats.min,
+            .max = stats.max,
             .centroid = centroid,
-            .voxel_count = voxel_grid_.get_n_voxels(tid),
+            .voxel_count = voxel_count,
             .last_seen_frame = last_seen_frame
         });
     }

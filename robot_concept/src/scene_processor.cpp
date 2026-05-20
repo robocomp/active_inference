@@ -6,6 +6,8 @@
 
 #include <Eigen/Geometry>
 
+#include <opencv2/imgproc.hpp>
+
 #include <algorithm>
 #include <cmath>
 #include <print>

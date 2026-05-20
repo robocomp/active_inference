@@ -1,6 +1,8 @@
 #pragma once
 
 #include <genericworker.h>
+#include <fps/fps.h>
+#include <opencv2/core.hpp>
 
 #include <atomic>
 #include <chrono>
