@@ -37,11 +37,12 @@
 #include <memory>
 
 #include <CameraRGBDSimple.h>
+#include <IMU.h>
 #include <Lidar3D.h>
 
 #define BASIC_PERIOD 100
 
-using TuplePrx = std::tuple<RoboCompCameraRGBDSimple::CameraRGBDSimplePrxPtr,RoboCompLidar3D::Lidar3DPrxPtr>;
+using TuplePrx = std::tuple<RoboCompCameraRGBDSimple::CameraRGBDSimplePrxPtr,RoboCompIMU::IMUPrxPtr,RoboCompLidar3D::Lidar3DPrxPtr>;
 
 
 class GenericWorker : public QObject
@@ -61,6 +62,7 @@ public:
 
 
 	RoboCompCameraRGBDSimple::CameraRGBDSimplePrxPtr camerargbdsimple_proxy;
+	RoboCompIMU::IMUPrxPtr imu_proxy;
 	RoboCompLidar3D::Lidar3DPrxPtr lidar3d_proxy;
 
 

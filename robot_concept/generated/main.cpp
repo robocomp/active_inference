@@ -79,6 +79,7 @@
 
 
 #include <CameraRGBDSimple.h>
+#include <IMU.h>
 #include <Lidar3D.h>
 
 #define USE_QTGUI
@@ -171,16 +172,19 @@ int robot_concept::run(int argc, char* argv[])
 	int status=EXIT_SUCCESS;
 
 	RoboCompCameraRGBDSimple::CameraRGBDSimplePrxPtr camerargbdsimple_proxy;
+	RoboCompIMU::IMUPrxPtr imu_proxy;
 	RoboCompLidar3D::Lidar3DPrxPtr lidar3d_proxy;
 
 
 	//Require code
 	require<RoboCompCameraRGBDSimple::CameraRGBDSimplePrx, RoboCompCameraRGBDSimple::CameraRGBDSimplePrxPtr>(communicator(),
 	                    configLoader.get<std::string>("Proxies.CameraRGBDSimple"), "CameraRGBDSimpleProxy", camerargbdsimple_proxy);
+	require<RoboCompIMU::IMUPrx, RoboCompIMU::IMUPrxPtr>(communicator(),
+	                    configLoader.get<std::string>("Proxies.IMU"), "IMUProxy", imu_proxy);
 	require<RoboCompLidar3D::Lidar3DPrx, RoboCompLidar3D::Lidar3DPrxPtr>(communicator(),
 	                    configLoader.get<std::string>("Proxies.Lidar3D"), "Lidar3DProxy", lidar3d_proxy);
 
-	tprx = std::make_tuple(camerargbdsimple_proxy,lidar3d_proxy);
+	tprx = std::make_tuple(camerargbdsimple_proxy,imu_proxy,lidar3d_proxy);
 	SpecificWorker *worker = new SpecificWorker(this->configLoader, tprx, startup_check_flag);
 	QObject::connect(worker, SIGNAL(kill()), &a, SLOT(quit()));
 

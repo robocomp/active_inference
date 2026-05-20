@@ -124,6 +124,15 @@ namespace
 		return lhs.track_id < rhs.track_id;
 	}
 
+	std::uint64_t get_imu_timestamp_ms(const RoboCompIMU::DataImu& data)
+	{
+		const long latest = std::max({data.acc.timestamp,
+		                             data.gyro.timestamp,
+		                             data.mag.timestamp,
+		                             data.rot.timestamp});
+		return latest > 0 ? static_cast<std::uint64_t>(latest) : 0ULL;
+	}
+
 	bool compute_room_to_camera_basis(DSR::InnerEigenAPI* inner_eigen_api,
 	                                 const std::string& camera_node_name,
 	                                 const std::string& room_frame_name,
@@ -176,8 +185,11 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
 SpecificWorker::~SpecificWorker()
 {
 	qInfo() << "Destroying SpecificWorker";
+	stop_imu_thread = true;
 	stop_lidar_thread = true;
 	stop_rgbd_thread = true;
+	if (imu_thread.joinable())
+		imu_thread.join();
 	if (lidar_thread.joinable())
 		lidar_thread.join();
 	if (rgbd_thread.joinable())
@@ -346,6 +358,10 @@ void SpecificWorker::initialize()
 		if (verbose_debug_)
 			std::println("[VoxelInit] Cached room='{}' robot='{}' from initial graph", room_name_snapshot, robot_name_snapshot);
 	}
+
+	// ── Start IMU reader thread ──────────────────────────────
+	imu_thread = std::thread(&SpecificWorker::read_imu_thread, this);
+	qInfo() << __FUNCTION__ << "Started IMU reader";
 
 	 // ── Start lidar reader thread ────────────────────────────
     lidar_thread = std::thread(&SpecificWorker::read_lidar_thread, this);
@@ -1510,6 +1526,74 @@ void SpecificWorker::read_lidar_thread()
 			lidar_fps.print("[LidarThread]", 2000);
 		std::this_thread::sleep_for(wait_period);
     }
+}
+
+void SpecificWorker::read_imu_thread()
+{
+	static FPSCounter imu_fps;
+	auto wait_period = std::chrono::milliseconds(getPeriod("Compute"));
+	std::uint64_t prev_sensor_timestamp_ms = 0;
+	bool missing_imu_node_logged = false;
+
+	while (!stop_imu_thread)
+	{
+		RoboCompIMU::DataImu data;
+		try
+		{
+			data = imu_proxy->getDataImu();
+		}
+		catch (const Ice::Exception& e)
+		{
+			qWarning() << "[read_imu] getDataImu failed:" << e.what() << "retrying...";
+			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+			continue;
+		}
+
+		const std::uint64_t sensor_timestamp_ms = get_imu_timestamp_ms(data);
+		const std::vector<float> acceleration{data.acc.XAcc, data.acc.YAcc, data.acc.ZAcc};
+		const std::vector<float> gyroscope{data.gyro.XGyr, data.gyro.YGyr, data.gyro.ZGyr};
+		const std::vector<float> euler_xyz{data.rot.Roll, data.rot.Pitch, data.rot.Yaw};
+
+		if (auto imu_node = G->get_node("imu"); imu_node.has_value())
+		{
+			G->add_or_modify_attrib_local<imu_accelerometer_att>(imu_node.value(), acceleration);
+			G->add_or_modify_attrib_local<imu_linear_acceleration_att>(imu_node.value(), acceleration);
+			G->add_or_modify_attrib_local<imu_gyroscope_att>(imu_node.value(), gyroscope);
+			G->add_or_modify_attrib_local<imu_angular_velocity_att>(imu_node.value(), gyroscope);
+			G->add_or_modify_attrib_local<imu_angular_euler_xyz_pose_att>(imu_node.value(), euler_xyz);
+			G->add_or_modify_attrib_local<imu_compass_att>(imu_node.value(), data.rot.Yaw);
+			G->add_or_modify_attrib_local<imu_time_stamp_att>(imu_node.value(), sensor_timestamp_ms);
+			G->add_or_modify_attrib_local<imu_sensor_tick_att>(imu_node.value(), sensor_timestamp_ms);
+			G->update_node(imu_node.value());
+
+			if (missing_imu_node_logged)
+			{
+				qInfo() << "[read_imu] IMU node recovered in DSR graph.";
+				missing_imu_node_logged = false;
+			}
+		}
+		else if (!missing_imu_node_logged)
+		{
+			qWarning() << "[read_imu] IMU node not found in DSR graph.";
+			missing_imu_node_logged = true;
+		}
+
+		if (sensor_timestamp_ms > prev_sensor_timestamp_ms)
+		{
+			const auto sensor_period = std::chrono::milliseconds(sensor_timestamp_ms - prev_sensor_timestamp_ms);
+			if (sensor_period.count() > 0 && sensor_period <= std::chrono::seconds(1))
+			{
+				if (wait_period > sensor_period + std::chrono::milliseconds(2)) --wait_period;
+				else if (wait_period < sensor_period - std::chrono::milliseconds(2)) ++wait_period;
+			}
+		}
+		if (sensor_timestamp_ms > 0)
+			prev_sensor_timestamp_ms = sensor_timestamp_ms;
+
+		if (verbose_debug_)
+			imu_fps.print("[ImuThread]", 2000);
+		std::this_thread::sleep_for(wait_period);
+	}
 }
 
 bool SpecificWorker::is_target_label(const std::string& label) const

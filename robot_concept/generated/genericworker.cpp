@@ -28,7 +28,8 @@ GenericWorker::GenericWorker(const ConfigLoader& configLoader, TuplePrx tprx) : 
         qInstallMessageHandler([](QtMsgType, const QMessageLogContext&, const QString&) {});
     }
 	camerargbdsimple_proxy = std::get<0>(tprx);
-	lidar3d_proxy = std::get<1>(tprx);
+	imu_proxy = std::get<1>(tprx);
+	lidar3d_proxy = std::get<2>(tprx);
 
 	states["Initialize"] = std::make_unique<GRAFCETStep>("Initialize", BASIC_PERIOD, nullptr, std::bind(&GenericWorker::initialize, this));
 	states["Compute"] = std::make_unique<GRAFCETStep>("Compute", configLoader.get<int>("Period.Compute"), std::bind(&GenericWorker::compute, this));

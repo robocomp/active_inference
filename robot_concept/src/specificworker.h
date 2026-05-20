@@ -168,6 +168,11 @@ private:
 	std::thread lidar_thread;	
 	std::atomic<bool> stop_lidar_thread{false};
 
+	// IMU
+	void read_imu_thread();
+	std::thread imu_thread;
+	std::atomic<bool> stop_imu_thread{false};
+
 	// RGBD camera
 	RGBD_Buffer rgbd_buffer;
 	void read_rgbd_thread();

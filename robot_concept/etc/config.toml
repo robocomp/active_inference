@@ -2,6 +2,7 @@
 # Proxies for required interfaces
 CameraRGBDSimple = "camerargbdsimple:tcp -h localhost -p 12001"
 Lidar3D = "lidar3d:tcp -h localhost -p 11995"  # Filter
+IMU = "imu:tcp -h localhost -p 10007"
 
 # --- Common Agent Data ---
 [Agent]
