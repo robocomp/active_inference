@@ -5,6 +5,18 @@
 
 namespace rc {
 
+namespace
+{
+QString legend_label_for_series(const std::string& name)
+{
+    if (name == "cov_det_scaled")
+        return "cov";
+    if (name == "free_energy")
+        return "fr";
+    return QString::fromStdString(name);
+}
+}
+
 TimeSeriesPlot::TimeSeriesPlot(QWidget* parent)
     : QWidget(parent)
 {
@@ -206,19 +218,19 @@ void TimeSeriesPlot::draw_legend(QPainter& p) const
     }
     if (entries.empty()) return;
 
-    const QFont font("Monospace", 8);
+    const QFont font("Monospace", 7);
     p.setFont(font);
     const QFontMetrics fm(font);
 
-    constexpr int swatch = 12;
-    constexpr int pad = 4;
-    constexpr int row_h = 16;
+    constexpr int swatch = 10;
+    constexpr int pad = 3;
+    constexpr int row_h = 13;
 
     // Compute box width from longest label
     int max_text_w = 0;
     for (const auto& e : entries)
     {
-        QString txt = QString::fromStdString(e.label) + QString(": %1").arg(e.last_val, 0, 'f', 4);
+        QString txt = legend_label_for_series(e.label) + QString(": %1").arg(e.last_val, 0, 'f', 4);
         max_text_w = std::max(max_text_w, fm.horizontalAdvance(txt));
     }
     const int box_w = swatch + pad * 3 + max_text_w;
@@ -246,7 +258,7 @@ void TimeSeriesPlot::draw_legend(QPainter& p) const
 
         // Label + value
         p.setPen(QColor(20, 20, 20));
-        QString txt = QString::fromStdString(e.label) + QString(": %1").arg(e.last_val, 0, 'f', 4);
+        QString txt = legend_label_for_series(e.label) + QString(": %1").arg(e.last_val, 0, 'f', 4);
         p.drawText(bx + pad + swatch + pad, y, max_text_w, row_h,
                    Qt::AlignLeft | Qt::AlignVCenter, txt);
         y += row_h;

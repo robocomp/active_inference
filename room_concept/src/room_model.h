@@ -50,6 +50,12 @@ namespace rc
 class Model : public torch::nn::Module
 {
 public:
+  struct SdfQueryResult
+  {
+    torch::Tensor sdf;              // [N]
+    torch::Tensor closest_normals;  // [N, 2] wall normals in room frame
+  };
+
     // Device for tensor operations (CPU or CUDA)
     torch::Device device_ = torch::kCPU;
 
@@ -104,6 +110,11 @@ public:
                               const torch::Tensor& pose_xy,
                               const torch::Tensor& pose_theta) const;
 
+    // Compute SDF and closest-wall normals for points in robot frame using an external pose.
+    SdfQueryResult sdf_query_at_pose(const torch::Tensor& points_robot,
+                     const torch::Tensor& pose_xy,
+                     const torch::Tensor& pose_theta) const;
+
     // Get current state as Eigen vector [width, length, x, y, phi]
     Eigen::Matrix<float, 5, 1> get_state() const;
 
@@ -114,11 +125,11 @@ private:
     void init_common();
 
     // SDF for box room
-    torch::Tensor sdf_box(const torch::Tensor& points_robot,
-                          const torch::Tensor& points_room_xy) const;
+    SdfQueryResult sdf_box_query(const torch::Tensor& points_robot,
+                   const torch::Tensor& points_room_xy) const;
 
     // SDF for polygon room
-    torch::Tensor sdf_polygon(const torch::Tensor& points_room_xy) const;
+    SdfQueryResult sdf_polygon_query(const torch::Tensor& points_room_xy) const;
 };
 
 } // namespace rc

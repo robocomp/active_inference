@@ -137,6 +137,9 @@ void SpecificWorker::initialize()
     try { room_concept_.params.far_points_weight      = configLoader.get<bool>("RoomConcept.FarPointsWeight"); } catch (...) {}
     try { room_concept_.params.far_points_exponent    = static_cast<float>(configLoader.get<double>("RoomConcept.FarPointsExponent")); } catch (...) {}
     try { room_concept_.params.far_points_min_weight  = static_cast<float>(configLoader.get<double>("RoomConcept.FarPointsMinWeight")); } catch (...) {}
+    try { room_concept_.params.incidence_angle_weight = configLoader.get<bool>("RoomConcept.IncidenceAngleWeight"); } catch (...) {}
+    try { room_concept_.params.incidence_angle_exponent = static_cast<float>(configLoader.get<double>("RoomConcept.IncidenceAngleExponent")); } catch (...) {}
+    try { room_concept_.params.incidence_angle_min_weight = static_cast<float>(configLoader.get<double>("RoomConcept.IncidenceAngleMinWeight")); } catch (...) {}
     try { room_concept_.params.use_cuda               = configLoader.get<bool>("RoomConcept.UseCuda"); } catch (...) {}
     try { room_concept_.params.debug_log_enabled      = configLoader.get<bool>("RoomConcept.DebugLog"); } catch (...) {}
 
@@ -487,23 +490,6 @@ void SpecificWorker::dsr_update_pose(const rc::RoomConcept::UpdateResult& res)
     const float x = room_node_created_ ? t_robot_to_room.x() : t.x();
     const float y = room_node_created_ ? t_robot_to_room.y() : t.y();
     const float theta = room_node_created_ ? theta_robot_to_room : theta_room_to_robot;
-
-    {
-        static auto last_rt_trace = std::chrono::steady_clock::now() - std::chrono::seconds(1);
-        const auto now_rt_trace = std::chrono::steady_clock::now();
-        if (now_rt_trace - last_rt_trace >= std::chrono::seconds(1))
-        {
-            std::print(
-                "[RTTrace][Producer] frame_ts={} mode={} parent={} child={} published=({:.4f},{:.4f},{:.4f}) room_to_robot=({:.4f},{:.4f},{:.4f})\n",
-                res.timestamp_ms,
-                room_node_created_ ? "robot->room" : "world->robot",
-                parent_opt->name(),
-                child_opt.has_value() ? child_opt->name() : std::to_string(child_id),
-                x, y, theta,
-                t.x(), t.y(), theta_room_to_robot);
-            last_rt_trace = now_rt_trace;
-        }
-    }
 
     rt_api->insert_or_assign_edge_RT(parent_opt.value(), child_id,
                                      {x, y, 0.f},

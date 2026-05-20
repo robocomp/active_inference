@@ -115,6 +115,14 @@ public:
         float far_points_exponent   = 1.0f;  // α — exponent of the distance weight
         float far_points_min_weight = 0.1f;  // floor weight to avoid silencing near points
 
+        // ===== Incidence-angle weighting =====
+        // Grazing hits are more ambiguous against the nearest-face model, so reduce
+        // their contribution using the cosine of the angle between the ray and the
+        // closest wall normal. The sign of the normal is irrelevant because |dot| is used.
+        bool  incidence_angle_weight = false;
+        float incidence_angle_exponent = 1.0f;   // β — exponent of the incidence weight
+        float incidence_angle_min_weight = 0.2f; // floor weight for grazing rays
+
         // GPU/CPU selection
         // Note: For small tensors (~200 points), CPU is faster due to GPU transfer overhead
         bool use_cuda = false;

@@ -144,14 +144,30 @@ torch::Tensor Model::sdf_at_pose(const torch::Tensor& points_robot,
                                   const torch::Tensor& pose_xy,
                                   const torch::Tensor& pose_theta) const
 {
+    return sdf_query_at_pose(points_robot, pose_xy, pose_theta).sdf;
+}
+
+Model::SdfQueryResult Model::sdf_query_at_pose(const torch::Tensor& points_robot,
+                                               const torch::Tensor& pose_xy,
+                                               const torch::Tensor& pose_theta) const
+{
     if (!points_robot.defined())
-        return torch::zeros({0}, torch::TensorOptions().dtype(torch::kFloat32).device(device_));
+        return {
+            torch::zeros({0}, torch::TensorOptions().dtype(torch::kFloat32).device(device_)),
+            torch::zeros({0, 2}, torch::TensorOptions().dtype(torch::kFloat32).device(device_))
+        };
 
     if (points_robot.dim() != 2 || points_robot.size(1) < 2)
-        return torch::zeros({0}, torch::TensorOptions().dtype(torch::kFloat32).device(points_robot.device()));
+        return {
+            torch::zeros({0}, torch::TensorOptions().dtype(torch::kFloat32).device(points_robot.device())),
+            torch::zeros({0, 2}, torch::TensorOptions().dtype(torch::kFloat32).device(points_robot.device()))
+        };
 
     if (points_robot.size(0) == 0)
-        return torch::zeros({0}, torch::TensorOptions().dtype(torch::kFloat32).device(points_robot.device()));
+        return {
+            torch::zeros({0}, torch::TensorOptions().dtype(torch::kFloat32).device(points_robot.device())),
+            torch::zeros({0, 2}, torch::TensorOptions().dtype(torch::kFloat32).device(points_robot.device()))
+        };
 
     // Transform points from robot frame to room frame
     // Use the device of input points as the reference
@@ -184,16 +200,16 @@ torch::Tensor Model::sdf_at_pose(const torch::Tensor& points_robot,
 
     if (use_polygon)
     {
-        return sdf_polygon(points_room_xy);
+        return sdf_polygon_query(points_room_xy);
     }
     else
     {
-        return sdf_box(points_robot, points_room_xy);
+        return sdf_box_query(points_robot, points_room_xy);
     }
 }
 
-torch::Tensor Model::sdf_box(const torch::Tensor& points_robot,
-                              const torch::Tensor& points_room_xy) const
+Model::SdfQueryResult Model::sdf_box_query(const torch::Tensor& points_robot,
+                                           const torch::Tensor& points_room_xy) const
 {
     const auto device = points_room_xy.device();
     const auto pz = points_robot.index({torch::indexing::Slice(), 2}).reshape({-1,1});
@@ -211,10 +227,34 @@ torch::Tensor Model::sdf_box(const torch::Tensor& points_robot,
     const auto outside = torch::norm(torch::max(d, torch::zeros_like(d)), 2, 1);
     const auto inside = torch::clamp_max(
         torch::max(torch::max(d.select(1,0), d.select(1,1)), d.select(1,2)), 0.0);
-    return outside + inside;
+
+    const auto px = points_room_xy.select(1, 0);
+    const auto py = points_room_xy.select(1, 1);
+    const auto half_ext_cpu = half_ext.defined() ? half_ext : torch::zeros({2}, points_room_xy.options());
+    const auto hx = half_ext_cpu.index({0});
+    const auto hy = half_ext_cpu.index({1});
+
+    const auto dist_left = torch::abs(px + hx);
+    const auto dist_right = torch::abs(hx - px);
+    const auto dist_bottom = torch::abs(py + hy);
+    const auto dist_top = torch::abs(hy - py);
+    const auto face_dists = torch::stack({dist_left, dist_right, dist_bottom, dist_top}, 1);
+    const auto min_indices = std::get<1>(torch::min(face_dists, 1));
+
+    auto normals = torch::zeros({points_room_xy.size(0), 2}, points_room_xy.options());
+    const auto left_mask = min_indices == 0;
+    const auto right_mask = min_indices == 1;
+    const auto bottom_mask = min_indices == 2;
+    const auto top_mask = min_indices == 3;
+    normals.index_put_({left_mask, 0}, -1.0f);
+    normals.index_put_({right_mask, 0}, 1.0f);
+    normals.index_put_({bottom_mask, 1}, -1.0f);
+    normals.index_put_({top_mask, 1}, 1.0f);
+
+    return {outside + inside, normals};
 }
 
-torch::Tensor Model::sdf_polygon(const torch::Tensor& points_room_xy) const
+Model::SdfQueryResult Model::sdf_polygon_query(const torch::Tensor& points_room_xy) const
 {
     // Fully vectorized: broadcast [N,1,2] vs [1,S,2] for all segments at once
     // Segment tensors (seg_a_, seg_ab_, seg_ab_sq_) are already on device_ from init
@@ -239,9 +279,18 @@ torch::Tensor Model::sdf_polygon(const torch::Tensor& points_room_xy) const
     const auto dist_sq = torch::sum(diff * diff, /*dim=*/2);
 
     // Min over segments → [N]
-    const auto min_dist_sq = std::get<0>(torch::min(dist_sq, /*dim=*/1));
+    const auto min_result = torch::min(dist_sq, /*dim=*/1);
+    const auto min_dist_sq = std::get<0>(min_result);
+    const auto min_indices = std::get<1>(min_result);
 
-    return torch::sqrt(min_dist_sq + 1e-8f);
+    const auto seg_len = torch::sqrt(seg_ab_sq_ + 1e-8f).unsqueeze(1);
+    const auto tangent = seg_ab_ / seg_len;
+    auto seg_normals = torch::zeros_like(seg_a_);
+    seg_normals.index_put_({torch::indexing::Slice(), 0}, -tangent.index({torch::indexing::Slice(), 1}));
+    seg_normals.index_put_({torch::indexing::Slice(), 1}, tangent.index({torch::indexing::Slice(), 0}));
+    const auto closest_normals = seg_normals.index_select(0, min_indices);
+
+    return {torch::sqrt(min_dist_sq + 1e-8f), closest_normals};
 }
 
 Eigen::Matrix<float, 5, 1> Model::get_state() const

@@ -16,6 +16,95 @@ namespace rc
     {
         constexpr auto kTimingReportInterval = std::chrono::seconds(10);
         constexpr int kLocFpsPrintPeriodMs = 10000;
+        constexpr float kObsWeightEps = 1e-6f;
+
+        torch::Tensor build_observation_weights(const Model& model,
+                                                const RoomConcept::Params& params,
+                                                const torch::Tensor& points_robot,
+                                                const torch::Tensor& pose_theta,
+                                                const Model::SdfQueryResult& query)
+        {
+            auto weights = torch::ones({points_robot.size(0)}, points_robot.options());
+            bool any_weighting = false;
+
+            if (points_robot.size(0) <= 1)
+                return weights;
+
+            if (params.far_points_weight)
+            {
+                auto pts_xy = points_robot.index(
+                    {torch::indexing::Slice(), torch::indexing::Slice(0, 2)});
+                auto dists = torch::norm(pts_xy, 2, /*dim=*/1);
+                auto dists_alpha = torch::pow(dists, params.far_points_exponent);
+                auto range_weights = dists_alpha / (dists_alpha.mean() + kObsWeightEps);
+                range_weights = range_weights.clamp_min(params.far_points_min_weight);
+                weights = weights * range_weights;
+                any_weighting = true;
+            }
+
+            if (params.incidence_angle_weight && query.closest_normals.defined() && query.closest_normals.numel() > 0)
+            {
+                auto pts_xy = points_robot.index(
+                    {torch::indexing::Slice(), torch::indexing::Slice(0, 2)});
+                auto ray_norms = torch::norm(pts_xy, 2, /*dim=*/1).clamp_min(kObsWeightEps);
+                auto ray_dirs_robot = pts_xy / ray_norms.unsqueeze(1);
+
+                auto theta = pose_theta.to(points_robot.device());
+                const auto c = torch::cos(theta).squeeze();
+                const auto s = torch::sin(theta).squeeze();
+                auto rot = torch::stack({
+                    torch::stack({c, -s}),
+                    torch::stack({s, c})
+                });
+                auto ray_dirs_room = torch::matmul(ray_dirs_robot, rot.transpose(0, 1));
+
+                auto normals = query.closest_normals;
+                auto normal_norms = torch::norm(normals, 2, /*dim=*/1).clamp_min(kObsWeightEps);
+                auto normals_unit = normals / normal_norms.unsqueeze(1);
+
+                auto incidence = torch::abs(torch::sum(ray_dirs_room * normals_unit, /*dim=*/1));
+                auto incidence_weights = torch::pow(incidence.clamp_min(kObsWeightEps),
+                                                    params.incidence_angle_exponent);
+                incidence_weights = incidence_weights.clamp_min(params.incidence_angle_min_weight);
+                weights = weights * incidence_weights;
+                any_weighting = true;
+            }
+
+            if (!any_weighting)
+                return weights;
+
+            return (weights / (weights.mean() + kObsWeightEps)).detach();
+        }
+
+        torch::Tensor compute_observation_loss_from_query(const Model& model,
+                                  const RoomConcept::Params& params,
+                                                          const torch::Tensor& points_robot,
+                                                          const torch::Tensor& pose_theta,
+                                                          const Model::SdfQueryResult& query)
+        {
+            if (!query.sdf.defined() || query.sdf.size(0) == 0)
+                return torch::zeros({}, points_robot.options());
+
+            const float inv_var = 1.0f / (params.rfe_obs_sigma * params.rfe_obs_sigma);
+            auto per_point = torch::nn::functional::huber_loss(
+                query.sdf,
+                torch::zeros_like(query.sdf),
+                torch::nn::functional::HuberLossFuncOptions()
+                    .reduction(torch::kNone).delta(params.rfe_huber_delta));
+
+            auto weights = build_observation_weights(model, params, points_robot, pose_theta, query);
+            return 0.5f * inv_var * (per_point * weights).mean();
+        }
+
+        torch::Tensor compute_observation_loss(const Model& model,
+                                               const RoomConcept::Params& params,
+                                               const torch::Tensor& points_robot,
+                                               const torch::Tensor& pose_xy,
+                                               const torch::Tensor& pose_theta)
+        {
+            const auto query = model.sdf_query_at_pose(points_robot, pose_xy, pose_theta);
+            return compute_observation_loss_from_query(model, params, points_robot, pose_theta, query);
+        }
     }
 
     // =====================================================================
@@ -808,11 +897,7 @@ namespace rc
                             opt.zero_grad();
                             auto xy = single_pose.index({torch::indexing::Slice(0, 2)});
                             auto th = single_pose.index({torch::indexing::Slice(2, 3)});
-                            auto loss = 0.5f * inv_var * torch::nn::functional::huber_loss(
-                                model_->sdf_at_pose(pts_tensor, xy, th),
-                                torch::zeros({pts_tensor.size(0)}, pts_tensor.options()),
-                                torch::nn::functional::HuberLossFuncOptions().reduction(torch::kMean)
-                                    .delta(params.rfe_huber_delta));
+                            auto loss = compute_observation_loss(*model_, params, pts_tensor, xy, th);
                             loss.backward();
                             opt.step();
                         }
@@ -2328,15 +2413,8 @@ namespace rc
             auto pose_xy = pose_for_hess.index({torch::indexing::Slice(0, 2)});
             auto pose_theta_h = pose_for_hess.index({torch::indexing::Slice(2, 3)});
 
-            const auto sdf_vals = model_->sdf_at_pose(points_tensor, pose_xy, pose_theta_h);
-            const float huber_delta = params.rfe_huber_delta;
-            const float inv_var = 1.0f / (params.rfe_obs_sigma * params.rfe_obs_sigma);
-            const torch::Tensor likelihood_loss = 0.5f * inv_var *
-                torch::nn::functional::huber_loss(
-                    sdf_vals,
-                    torch::zeros_like(sdf_vals),
-                    torch::nn::functional::HuberLossFuncOptions().reduction(torch::kMean).delta(huber_delta)
-                );
+            const torch::Tensor likelihood_loss =
+                compute_observation_loss(*model_, params, points_tensor, pose_xy, pose_theta_h);
 
             Eigen::Matrix3f H_likelihood = autograd_hessian_3x3(likelihood_loss, pose_for_hess);
 
@@ -3019,10 +3097,7 @@ namespace rc
             optimizer.zero_grad();
             auto xy = pose.index({torch::indexing::Slice(0, 2)});
             auto th = pose.index({torch::indexing::Slice(2, 3)});
-            auto sdf_vals = model_->sdf_at_pose(points_tensor, xy, th);
-            auto loss = 0.5f * inv_var * torch::nn::functional::huber_loss(
-                sdf_vals, torch::zeros_like(sdf_vals),
-                torch::nn::functional::HuberLossFuncOptions().reduction(torch::kMean).delta(huber_delta));
+            auto loss = compute_observation_loss(*model_, params, points_tensor, xy, th);
             loss.backward();
             optimizer.step();
         }
@@ -3167,40 +3242,9 @@ namespace rc
             auto pose_xy = slot.pose.index({torch::indexing::Slice(0, 2)});
             auto pose_theta = slot.pose.index({torch::indexing::Slice(2, 3)});
 
-            const auto sdf_vals = model.sdf_at_pose(slot.lidar_points, pose_xy, pose_theta);
-
-            torch::Tensor slot_obs_loss;
-            if (params.far_points_weight && slot.lidar_points.size(0) > 1)
-            {
-                // Distance-proportional weighting with configurable exponent α.
-                // w_i = dist_i^α / mean(dist^α)  →  mean(w) ≈ 1  →  no loss-scale shift.
-                // After clamping to [far_points_min_weight, ∞) we re-normalise so the
-                // mean stays at 1 even when many near points hit the floor.
-                auto pts_xy = slot.lidar_points.index(
-                    {torch::indexing::Slice(), torch::indexing::Slice(0, 2)});
-                auto dists       = torch::norm(pts_xy, 2, /*dim=*/1);                    // [N]
-                auto dists_alpha = torch::pow(dists, params.far_points_exponent);        // [N]
-                auto weights     = dists_alpha / (dists_alpha.mean() + 1e-6f);           // [N], mean≈1
-                weights          = weights.clamp_min(params.far_points_min_weight);      // floor
-                weights          = weights / (weights.mean() + 1e-6f);                   // re-normalise
-
-                auto per_point = torch::nn::functional::huber_loss(
-                    sdf_vals,
-                    torch::zeros_like(sdf_vals),
-                    torch::nn::functional::HuberLossFuncOptions()
-                        .reduction(torch::kNone).delta(huber_delta));                    // [N]
-
-                slot_obs_loss = 0.5f * inv_var * (per_point * weights).mean();
-            }
-            else
-            {
-                const auto obs_huber = torch::nn::functional::huber_loss(
-                    sdf_vals,
-                    torch::zeros({sdf_vals.size(0)}, sdf_vals.options()),
-                    torch::nn::functional::HuberLossFuncOptions()
-                        .reduction(torch::kMean).delta(huber_delta));
-                slot_obs_loss = 0.5f * inv_var * obs_huber;
-            }
+            const auto query = model.sdf_query_at_pose(slot.lidar_points, pose_xy, pose_theta);
+            const auto slot_obs_loss =
+                compute_observation_loss_from_query(model, params, slot.lidar_points, pose_theta, query);
             total_loss = total_loss + slot_obs_loss;
         }
 
@@ -3304,30 +3348,9 @@ namespace rc
                 continue;
             auto pose_xy    = slot.pose.detach().index({torch::indexing::Slice(0, 2)});
             auto pose_theta = slot.pose.detach().index({torch::indexing::Slice(2, 3)});
-            const auto sdf_vals = model.sdf_at_pose(slot.lidar_points, pose_xy, pose_theta);
-            float slot_loss;
-            if (params.far_points_weight && slot.lidar_points.size(0) > 1) {
-                auto pts_xy      = slot.lidar_points.index(
-                    {torch::indexing::Slice(), torch::indexing::Slice(0, 2)});
-                auto dists       = torch::norm(pts_xy, 2, 1);
-                auto dists_alpha = torch::pow(dists, params.far_points_exponent);
-                auto weights     = dists_alpha / (dists_alpha.mean() + 1e-6f);
-                weights          = weights.clamp_min(params.far_points_min_weight);
-                weights          = weights / (weights.mean() + 1e-6f);
-                auto per_point = torch::nn::functional::huber_loss(
-                    sdf_vals, torch::zeros_like(sdf_vals),
-                    torch::nn::functional::HuberLossFuncOptions()
-                        .reduction(torch::kNone).delta(huber_delta));
-                slot_loss = (0.5f * inv_var * (per_point * weights).mean()).item<float>();
-            } else {
-                slot_loss = (0.5f * inv_var *
-                    torch::nn::functional::huber_loss(
-                        sdf_vals,
-                        torch::zeros({sdf_vals.size(0)}, sdf_vals.options()),
-                        torch::nn::functional::HuberLossFuncOptions()
-                            .reduction(torch::kMean).delta(huber_delta)
-                    )).item<float>();
-            }
+            const auto query = model.sdf_query_at_pose(slot.lidar_points, pose_xy, pose_theta);
+            const float slot_loss = compute_observation_loss_from_query(
+                model, params, slot.lidar_points, pose_theta, query).item<float>();
             obs_acc += slot_loss;
         }
         bd.obs = obs_acc;
@@ -3417,11 +3440,7 @@ namespace rc
             auto pose_xy    = oldest_pose_for_hess.index({torch::indexing::Slice(0, 2)});
             auto pose_theta = oldest_pose_for_hess.index({torch::indexing::Slice(2, 3)});
 
-            const float inv_var = 1.0f / (params.rfe_obs_sigma * params.rfe_obs_sigma);
-            auto sdf_vals = model.sdf_at_pose(oldest.lidar_points, pose_xy, pose_theta);
-            auto loss = 0.5f * inv_var * torch::nn::functional::huber_loss(
-                sdf_vals, torch::zeros({sdf_vals.size(0)}, sdf_vals.options()),
-                torch::nn::functional::HuberLossFuncOptions().reduction(torch::kMean).delta(params.rfe_huber_delta));
+            auto loss = compute_observation_loss(model, params, oldest.lidar_points, pose_xy, pose_theta);
 
             if (window.size() > 1)
             {
