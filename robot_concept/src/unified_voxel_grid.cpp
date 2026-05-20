@@ -99,12 +99,29 @@ void UnifiedVoxelGrid::_track_inc(int track_id) noexcept
     ++_track_voxel_count[track_id];
 }
 
+void UnifiedVoxelGrid::_track_bind_key(int track_id, const VoxelKey& key)
+{
+    _track_keys[track_id].insert(key);
+}
+
+void UnifiedVoxelGrid::_track_unbind_key(int track_id, const VoxelKey& key)
+{
+    auto it = _track_keys.find(track_id);
+    if (it == _track_keys.end()) return;
+    it->second.erase(key);
+    if (it->second.empty())
+        _track_keys.erase(it);
+}
+
 int UnifiedVoxelGrid::_track_dec(int track_id) noexcept
 {
     auto it = _track_voxel_count.find(track_id);
     if (it == _track_voxel_count.end()) return 0;
     it->second = std::max(0, it->second - 1);
-    return it->second;
+    const int remaining = it->second;
+    if (remaining == 0)
+        _track_voxel_count.erase(it);
+    return remaining;
 }
 
 void UnifiedVoxelGrid::_reset_frame_bookkeeping()
@@ -135,6 +152,7 @@ void UnifiedVoxelGrid::_enforce_max_voxels(int /*frame*/)
         auto it = _grid.find(age_idx[i].second);
         if (it != _grid.end())
         {
+            _track_unbind_key(it->second.track_id, age_idx[i].second);
             _track_dec(it->second.track_id);
             _grid.erase(it);
         }
@@ -179,6 +197,7 @@ void UnifiedVoxelGrid::observe(int track_id,
             vs.alpha.assign(static_cast<std::size_t>(K), _cfg.alpha_prior);
             vs.track_id  = track_id;
             _grid.emplace(key, std::move(vs));
+            _track_bind_key(track_id, key);
             _track_inc(track_id);
             it = _grid.find(key);
         }
@@ -191,7 +210,9 @@ void UnifiedVoxelGrid::observe(int track_id,
             if (vs.track_id != track_id)
             {
                 // Ownership change
+                _track_unbind_key(vs.track_id, key);
                 _track_dec(vs.track_id);
+                _track_bind_key(track_id, key);
                 _track_inc(track_id);
                 const int new_K = std::max(K, static_cast<int>(vs.alpha.size()));
                 vs.alpha.assign(static_cast<std::size_t>(new_K), _cfg.alpha_prior);
@@ -479,6 +500,7 @@ UnifiedVoxelGrid::visibility_update(const Eigen::Vector3f& cam_pos,
         auto it = _grid.find(key);
         if (it != _grid.end())
         {
+            _track_unbind_key(it->second.track_id, key);
             _track_dec(it->second.track_id);
             _grid.erase(it);
         }
@@ -581,9 +603,16 @@ std::vector<int> UnifiedVoxelGrid::_dbscan(std::span<const Eigen::Vector3f> pts,
 std::vector<Eigen::Vector3f> UnifiedVoxelGrid::get_points(int track_id) const
 {
     std::vector<Eigen::Vector3f> out;
-    for (const auto& [k, vs] : _grid)
-        if (vs.track_id == track_id)
-            out.push_back(vs.centroid);
+    const auto it = _track_keys.find(track_id);
+    if (it == _track_keys.end()) return out;
+
+    out.reserve(it->second.size());
+    for (const auto& key : it->second)
+    {
+        const auto grid_it = _grid.find(key);
+        if (grid_it != _grid.end())
+            out.push_back(grid_it->second.centroid);
+    }
     return out;
 }
 
@@ -623,9 +652,15 @@ UnifiedVoxelGrid::get_filtered_points(int track_id,
     if (cat_idx < 0) return {};
 
     std::vector<Eigen::Vector3f> out;
-    for (const auto& [k, vs] : _grid)
+    const auto track_it = _track_keys.find(track_id);
+    if (track_it == _track_keys.end()) return out;
+
+    out.reserve(track_it->second.size());
+    for (const auto& key : track_it->second)
     {
-        if (vs.track_id != track_id) continue;
+        const auto grid_it = _grid.find(key);
+        if (grid_it == _grid.end()) continue;
+        const auto& vs = grid_it->second;
         if (cat_idx >= static_cast<int>(vs.alpha.size())) continue;
         const float a_sum = std::reduce(vs.alpha.begin(), vs.alpha.end(), 0.0f);
         if (a_sum > 0.0f && vs.alpha[static_cast<std::size_t>(cat_idx)] / a_sum >= thr)
@@ -709,9 +744,15 @@ std::vector<float> UnifiedVoxelGrid::object_category_belief(int track_id) const
     const int K = _reg.K();
     std::vector<double> total(static_cast<std::size_t>(K), 0.0);
 
-    for (const auto& [k, vs] : _grid)
+    const auto track_it = _track_keys.find(track_id);
+    if (track_it == _track_keys.end())
+        return std::vector<float>(static_cast<std::size_t>(K), 0.0f);
+
+    for (const auto& key : track_it->second)
     {
-        if (vs.track_id != track_id) continue;
+        const auto grid_it = _grid.find(key);
+        if (grid_it == _grid.end()) continue;
+        const auto& vs = grid_it->second;
         const std::size_t n = std::min(static_cast<std::size_t>(K), vs.alpha.size());
         for (std::size_t i = 0; i < n; ++i)
             total[i] += vs.alpha[i];
@@ -748,10 +789,13 @@ UnifiedVoxelGrid::object_dominant_category(int track_id) const
 
 void UnifiedVoxelGrid::remove(int track_id)
 {
-    std::erase_if(_grid, [&](const auto& kv){
-        if (kv.second.track_id == track_id) { _track_dec(track_id); return true; }
-        return false;
-    });
+    const auto track_it = _track_keys.find(track_id);
+    if (track_it != _track_keys.end())
+    {
+        for (const auto& key : track_it->second)
+            _grid.erase(key);
+        _track_keys.erase(track_it);
+    }
     _track_voxel_count.erase(track_id);
 }
 
@@ -761,9 +805,12 @@ int UnifiedVoxelGrid::cleanup_voxels(int track_id,
                                       std::optional<float> min_ratio)
 {
     std::vector<VoxelKey> keys;
-    for (const auto& [k, vs] : _grid)
-        if (vs.track_id == track_id)
-            keys.push_back(k);
+    if (const auto track_it = _track_keys.find(track_id); track_it != _track_keys.end())
+    {
+        keys.reserve(track_it->second.size());
+        for (const auto& key : track_it->second)
+            keys.push_back(key);
+    }
 
     if (static_cast<int>(keys.size()) < 4) return 0;
 
@@ -797,6 +844,7 @@ int UnifiedVoxelGrid::cleanup_voxels(int track_id,
     {
         if (labels[i] == -1 || !keep.contains(labels[i]))
         {
+            _track_unbind_key(track_id, keys[i]);
             _grid.erase(keys[i]);
             _track_dec(track_id);
             ++deleted;
@@ -812,11 +860,13 @@ int UnifiedVoxelGrid::prune_to_sdf(
 {
     std::vector<VoxelKey>         keys;
     std::vector<Eigen::Vector3f>  centroids;
-    for (const auto& [k, vs] : _grid)
-        if (vs.track_id == track_id)
+    if (const auto track_it = _track_keys.find(track_id); track_it != _track_keys.end())
+        for (const auto& key : track_it->second)
         {
-            keys.push_back(k);
-            centroids.push_back(vs.centroid);
+            const auto grid_it = _grid.find(key);
+            if (grid_it == _grid.end()) continue;
+            keys.push_back(key);
+            centroids.push_back(grid_it->second.centroid);
         }
     if (keys.empty()) return 0;
 
@@ -826,6 +876,7 @@ int UnifiedVoxelGrid::prune_to_sdf(
     {
         if (std::abs(sdf_vals[i]) > sdf_threshold)
         {
+            _track_unbind_key(track_id, keys[i]);
             _grid.erase(keys[i]);
             _track_dec(track_id);
             ++deleted;
@@ -836,30 +887,39 @@ int UnifiedVoxelGrid::prune_to_sdf(
 
 int UnifiedVoxelGrid::reassign_ownership(int from_id, int to_id)
 {
-    int n = 0;
-    for (auto& [k, vs] : _grid)
-        if (vs.track_id == from_id) { vs.track_id = to_id; ++n; }
-    if (n)
+    auto from_it = _track_keys.find(from_id);
+    if (from_it == _track_keys.end()) return 0;
+
+    const int n = static_cast<int>(from_it->second.size());
+    auto& to_keys = _track_keys[to_id];
+    for (const auto& key : from_it->second)
     {
-        _track_voxel_count[to_id] = get_n_voxels(to_id) + n;
-        _track_voxel_count.erase(from_id);
+        if (auto grid_it = _grid.find(key); grid_it != _grid.end())
+            grid_it->second.track_id = to_id;
+        to_keys.insert(key);
     }
+    _track_keys.erase(from_it);
+
+    _track_voxel_count[to_id] += n;
+    _track_voxel_count.erase(from_id);
     return n;
 }
 
 std::unordered_set<int> UnifiedVoxelGrid::get_all_track_ids() const
 {
     std::unordered_set<int> out;
-    for (const auto& [k, vs] : _grid)
-        out.insert(vs.track_id);
+    out.reserve(_track_keys.size());
+    for (const auto& [track_id, _] : _track_keys)
+        out.insert(track_id);
     return out;
 }
 
 std::unordered_map<int, int> UnifiedVoxelGrid::summary() const
 {
     std::unordered_map<int, int> out;
-    for (const auto& [k, vs] : _grid)
-        ++out[vs.track_id];
+    out.reserve(_track_voxel_count.size());
+    for (const auto& [track_id, count] : _track_voxel_count)
+        out.emplace(track_id, count);
     return out;
 }
 

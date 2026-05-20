@@ -63,6 +63,10 @@ dsr_depth_fps = 10   # Depth: 5 Hz (large blob, less time-critical)
 # DSR upload rate for lidar point cloud. 0 = every captured scan (no throttle).
 dsr_lidar_fps = 0
 
+[Transforms]
+# Use RT interpolation for timestamped graph transforms. Disable to fall back to nearest sample.
+interpolate_rt = true
+
 [Component.Debug]
 Verbose = false
 

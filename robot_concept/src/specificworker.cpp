@@ -52,17 +52,6 @@ namespace
 		Mat::Vector3d axis_z{0.0, 0.0, 0.0};
 	};
 
-	struct TrackBoxCandidate
-	{
-		int track_id = -1;
-		std::string category;
-		Eigen::Vector3f min = Eigen::Vector3f::Zero();
-		Eigen::Vector3f max = Eigen::Vector3f::Zero();
-		Eigen::Vector3f centroid = Eigen::Vector3f::Zero();
-		int voxel_count = 0;
-		int last_seen_frame = -1;
-	};
-
 	float axis_overlap(float amin, float amax, float bmin, float bmax)
 	{
 		return std::max(0.0f, std::min(amax, bmax) - std::max(amin, bmin));
@@ -137,15 +126,20 @@ namespace
 	                                 const std::string& camera_node_name,
 	                                 const std::string& room_frame_name,
 	                                 std::uint64_t rt_timestamp,
+	                                 bool interpolate_rt,
 	                                 RoomToCameraBasis& basis)
 	{
 		if (inner_eigen_api == nullptr)
 			return false;
 
-		const auto origin_opt = inner_eigen_api->transform(camera_node_name, Mat::Vector3d(0.0, 0.0, 0.0), room_frame_name, rt_timestamp);
-		const auto x_opt = inner_eigen_api->transform(camera_node_name, Mat::Vector3d(1.0, 0.0, 0.0), room_frame_name, rt_timestamp);
-		const auto y_opt = inner_eigen_api->transform(camera_node_name, Mat::Vector3d(0.0, 1.0, 0.0), room_frame_name, rt_timestamp);
-		const auto z_opt = inner_eigen_api->transform(camera_node_name, Mat::Vector3d(0.0, 0.0, 1.0), room_frame_name, rt_timestamp);
+		const auto time_query = interpolate_rt
+			? DSR::RT_API::TimeQuery::Interpolated
+			: DSR::RT_API::TimeQuery::Nearest;
+
+		const auto origin_opt = inner_eigen_api->transform(camera_node_name, Mat::Vector3d(0.0, 0.0, 0.0), room_frame_name, rt_timestamp, "RT", time_query);
+		const auto x_opt = inner_eigen_api->transform(camera_node_name, Mat::Vector3d(1.0, 0.0, 0.0), room_frame_name, rt_timestamp, "RT", time_query);
+		const auto y_opt = inner_eigen_api->transform(camera_node_name, Mat::Vector3d(0.0, 1.0, 0.0), room_frame_name, rt_timestamp, "RT", time_query);
+		const auto z_opt = inner_eigen_api->transform(camera_node_name, Mat::Vector3d(0.0, 0.0, 1.0), room_frame_name, rt_timestamp, "RT", time_query);
 		if (!origin_opt.has_value() || !x_opt.has_value() || !y_opt.has_value() || !z_opt.has_value())
 			return false;
 
@@ -224,6 +218,7 @@ void SpecificWorker::initialize()
 	try { params.DSR_RGB_FPS   = configLoader.get<int>("Camera.dsr_rgb_fps");   } catch (...) {}
 	try { params.DSR_DEPTH_FPS = configLoader.get<int>("Camera.dsr_depth_fps"); } catch (...) {}
 	try { params.DSR_LIDAR_FPS = configLoader.get<int>("Lidar.dsr_lidar_fps"); } catch (...) {}
+	try { params.TRANSFORMS_INTERPOLATE_RT = configLoader.get<bool>("Transforms.interpolate_rt"); } catch (...) {}
 	for (auto& label : params.YOLO_ACCEPTED_LABELS)
 		label = normalize_yolo_label(label);
 	std::sort(params.YOLO_ACCEPTED_LABELS.begin(), params.YOLO_ACCEPTED_LABELS.end());
@@ -867,6 +862,8 @@ void SpecificWorker::update_voxel_grid_from_rgbd(const RoboCompCameraRGBDSimple:
 			prune_stale_tracks(frame_id);
 		}
 
+		std::vector<TrackBoxCandidate> box_candidates;
+
 		if (voxel_grid)
 		{
 			const std::size_t voxel_decimation_step = std::max<std::size_t>(1, params.VOXEL_DECIMATION_FACTOR);
@@ -901,7 +898,8 @@ void SpecificWorker::update_voxel_grid_from_rgbd(const RoboCompCameraRGBDSimple:
 				                    detections[d].confidence);
 			}
 
-			merge_duplicate_tracks(frame_id);
+			box_candidates = build_track_box_candidates();
+			merge_duplicate_tracks(box_candidates, frame_id);
 		}
 
 		if (voxel_grid)
@@ -915,90 +913,7 @@ void SpecificWorker::update_voxel_grid_from_rgbd(const RoboCompCameraRGBDSimple:
 			{
 				voxel_viewer_gl->update_voxels(qpts, sem.categories, sem.probs);
 
-				std::vector<TrackBoxCandidate> box_candidates;
-
-				const auto track_ids = voxel_grid->get_all_track_ids();
-				box_candidates.reserve(track_ids.size());
-
-				for (const int tid : track_ids)
-				{
-					const auto [dom_cat, _] = voxel_grid->object_dominant_category(tid);
-					auto pts = voxel_grid->get_points_clustered(tid, dom_cat);
-					if (pts.size() < 10)
-						pts = voxel_grid->get_points(tid);
-					if (pts.size() < 10)
-						continue;
-
-					Eigen::Vector3f mn = pts.front();
-					Eigen::Vector3f mx = pts.front();
-					Eigen::Vector3f centroid = Eigen::Vector3f::Zero();
-					for (const auto& p : pts)
-					{
-						mn = mn.cwiseMin(p);
-						mx = mx.cwiseMax(p);
-						centroid += p;
-					}
-					centroid /= static_cast<float>(pts.size());
-
-					int last_seen_frame = -1;
-					if (const auto it = active_tracks.find(tid); it != active_tracks.end())
-						last_seen_frame = it->second.last_seen_frame;
-
-					box_candidates.push_back(TrackBoxCandidate{
-						.track_id = tid,
-						.category = dom_cat,
-						.min = mn,
-						.max = mx,
-						.centroid = centroid,
-						.voxel_count = voxel_grid->get_n_voxels(tid),
-						.last_seen_frame = last_seen_frame
-					});
-				}
-
-				std::sort(box_candidates.begin(), box_candidates.end(),
-				          [frame_id](const TrackBoxCandidate& lhs, const TrackBoxCandidate& rhs)
-				          {
-					          return prefer_candidate(lhs, rhs, frame_id);
-				          });
-
-				std::vector<TrackBoxCandidate> filtered_boxes;
-				filtered_boxes.reserve(box_candidates.size());
-				std::unordered_map<std::string, int> kept_per_category;
-				for (const auto& candidate : box_candidates)
-				{
-					bool is_duplicate = false;
-					for (const auto& kept : filtered_boxes)
-					{
-						if (!boxes_look_duplicate(candidate, kept))
-							continue;
-
-						is_duplicate = true;
-						if (verbose_debug_)
-							std::println("[TrackBox] suppressing duplicate box track={} category={} kept_track={} overlap_vol={:.3f}",
-							             candidate.track_id,
-							             candidate.category,
-							             kept.track_id,
-							             intersection_volume(candidate, kept));
-						break;
-					}
-					if (is_duplicate)
-						continue;
-
-					const int max_instances = max_instances_for_category(candidate.category);
-					const int kept_instances = kept_per_category[candidate.category];
-					if (kept_instances >= max_instances)
-					{
-						if (verbose_debug_)
-							std::println("[TrackBox] suppressing by category cap track={} category={} cap={}",
-							             candidate.track_id,
-							             candidate.category,
-							             max_instances);
-						continue;
-					}
-
-					filtered_boxes.push_back(candidate);
-					++kept_per_category[candidate.category];
-				}
+				const auto filtered_boxes = filter_track_boxes_for_viewer(box_candidates);
 
 				std::vector<QVector3D> box_mins;
 				std::vector<QVector3D> box_maxs;
@@ -1105,7 +1020,7 @@ void SpecificWorker::overlay_room_polygon_on_canvas(cv::Mat& canvas,
 		return;
 
 	RoomToCameraBasis basis;
-	if (!compute_room_to_camera_basis(inner_eigen_api.get(), "zed", room_data->room_name, frame_ts_ms, basis))
+	if (!compute_room_to_camera_basis(inner_eigen_api.get(), "zed", room_data->room_name, frame_ts_ms, params.TRANSFORMS_INTERPOLATE_RT, basis))
 		return;
 
 	Eigen::Matrix<double, 3, Eigen::Dynamic> room_points(3, static_cast<Eigen::Index>(n));
@@ -1409,12 +1324,15 @@ void SpecificWorker::update_viewer_lidar_points(const std::string& room_name,
 	Mat::RTMat room_T_robot = room_T_robot_fallback;
 	if (inner_eigen_api && lidar_timestamp_ms > 0)
 	{
+		const auto time_query = params.TRANSFORMS_INTERPOLATE_RT
+			? DSR::RT_API::TimeQuery::Interpolated
+			: DSR::RT_API::TimeQuery::Nearest;
 		if (auto interpolated = inner_eigen_api->get_transformation_matrix(
 				room_name,
 				robot_name,
 				lidar_timestamp_ms,
 				"RT",
-				DSR::RT_API::TimeQuery::Interpolated); interpolated.has_value())
+				time_query); interpolated.has_value())
 		{
 			room_T_robot = interpolated.value();
 		}
@@ -1964,12 +1882,12 @@ void SpecificWorker::prune_stale_tracks(int frame_id)
 	});
 }
 
-void SpecificWorker::merge_duplicate_tracks(int frame_id)
+std::vector<TrackBoxCandidate> SpecificWorker::build_track_box_candidates() const
 {
-	if (!voxel_grid)
-		return;
-
 	std::vector<TrackBoxCandidate> candidates;
+	if (!voxel_grid)
+		return candidates;
+
 	const auto track_ids = voxel_grid->get_all_track_ids();
 	candidates.reserve(track_ids.size());
 
@@ -2010,6 +1928,14 @@ void SpecificWorker::merge_duplicate_tracks(int frame_id)
 			.last_seen_frame = last_seen_frame
 		});
 	}
+
+	return candidates;
+}
+
+void SpecificWorker::merge_duplicate_tracks(std::vector<TrackBoxCandidate>& candidates, int frame_id)
+{
+	if (!voxel_grid || candidates.empty())
+		return;
 
 	std::sort(candidates.begin(), candidates.end(),
 	          [frame_id](const TrackBoxCandidate& lhs, const TrackBoxCandidate& rhs)
@@ -2075,6 +2001,57 @@ void SpecificWorker::merge_duplicate_tracks(int frame_id)
 				             moved);
 		}
 	}
+
+	if (!merged_tracks.empty())
+		std::erase_if(candidates, [&](const TrackBoxCandidate& candidate)
+		{
+			return merged_tracks.contains(candidate.track_id);
+		});
+}
+
+std::vector<TrackBoxCandidate> SpecificWorker::filter_track_boxes_for_viewer(const std::vector<TrackBoxCandidate>& candidates) const
+{
+	std::vector<TrackBoxCandidate> filtered_boxes;
+	filtered_boxes.reserve(candidates.size());
+	std::unordered_map<std::string, int> kept_per_category;
+
+	for (const auto& candidate : candidates)
+	{
+		bool is_duplicate = false;
+		for (const auto& kept : filtered_boxes)
+		{
+			if (!boxes_look_duplicate(candidate, kept))
+				continue;
+
+			is_duplicate = true;
+			if (verbose_debug_)
+				std::println("[TrackBox] suppressing duplicate box track={} category={} kept_track={} overlap_vol={:.3f}",
+				             candidate.track_id,
+				             candidate.category,
+				             kept.track_id,
+				             intersection_volume(candidate, kept));
+			break;
+		}
+		if (is_duplicate)
+			continue;
+
+		const int max_instances = max_instances_for_category(candidate.category);
+		const int kept_instances = kept_per_category[candidate.category];
+		if (kept_instances >= max_instances)
+		{
+			if (verbose_debug_)
+				std::println("[TrackBox] suppressing by category cap track={} category={} cap={}",
+				             candidate.track_id,
+				             candidate.category,
+				             max_instances);
+			continue;
+		}
+
+		filtered_boxes.push_back(candidate);
+		++kept_per_category[candidate.category];
+	}
+
+	return filtered_boxes;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////

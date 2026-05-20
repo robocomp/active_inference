@@ -42,6 +42,17 @@ namespace rc { class VoxelOpenGLViewer; }
 class QLabel;
 class QPushButton;
 
+struct TrackBoxCandidate
+{
+	int track_id = -1;
+	std::string category;
+	Eigen::Vector3f min = Eigen::Vector3f::Zero();
+	Eigen::Vector3f max = Eigen::Vector3f::Zero();
+	Eigen::Vector3f centroid = Eigen::Vector3f::Zero();
+	int voxel_count = 0;
+	int last_seen_frame = -1;
+};
+
 /**
  * \brief Class SpecificWorker implements the core functionality of the component.
  */
@@ -115,6 +126,9 @@ private:
             float ROBOT_WIDTH  = 0.460f;   // m
             float ROBOT_LENGTH = 0.480f;   // m
             float ROBOT_HEIGHT = 1.6f;     // m, obstacle cloud ceiling
+
+			  // Timestamped RT queries
+			  bool  TRANSFORMS_INTERPOLATE_RT = true;
 
 			  // Lidar
 			  int   LIDAR_DECIMATION_FACTOR = 1;
@@ -263,7 +277,9 @@ private:
 	std::vector<int> associate_detections_hungarian(const std::vector<DetectionObservation>& observations,
 	                                                int frame_id);
 	void prune_stale_tracks(int frame_id);
-	void merge_duplicate_tracks(int frame_id);
+	std::vector<TrackBoxCandidate> build_track_box_candidates() const;
+	void merge_duplicate_tracks(std::vector<TrackBoxCandidate>& candidates, int frame_id);
+	std::vector<TrackBoxCandidate> filter_track_boxes_for_viewer(const std::vector<TrackBoxCandidate>& candidates) const;
 	void update_voxel_grid_from_rgbd(const RoboCompCameraRGBDSimple::TRGBD& rgbd,
 	                                const std::vector<SegDetection>& detections,
 	                                const Mat::RTMat& room_T_robot,

@@ -255,6 +255,8 @@ class UnifiedVoxelGrid
             _dbscan(std::span<const Eigen::Vector3f> pts,
                     float eps, int min_samples) const;
 
+        void _track_bind_key(int track_id, const VoxelKey& key);
+        void _track_unbind_key(int track_id, const VoxelKey& key);
         int  _track_dec(int track_id) noexcept;   // decrement count, clamp ≥ 0
         void _track_inc(int track_id) noexcept;
 
@@ -265,6 +267,7 @@ class UnifiedVoxelGrid
 
         std::unordered_map<VoxelKey, VoxelState, VoxelKeyHash> _grid;
         std::unordered_map<int, int>  _track_voxel_count;
+        std::unordered_map<int, std::unordered_set<VoxelKey, VoxelKeyHash>> _track_keys;
 
         // Per-frame bookkeeping — flat_set for cache-friendly membership test
         std::flat_set<VoxelKey> _touched_this_frame;
