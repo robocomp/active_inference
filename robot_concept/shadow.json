@@ -13,11 +13,11 @@
                     },
                     "pos_x": {
                         "type": 2,
-                        "value": 0
+                        "value": 230.84668
                     },
                     "pos_y": {
                         "type": 2,
-                        "value": -100
+                        "value": 44.155533
                     }
                 },
                 "id": "100",
@@ -81,11 +81,11 @@
                     },
                     "pos_x": {
                         "type": 2,
-                        "value": 0
+                        "value": 172.597458
                     },
                     "pos_y": {
                         "type": 2,
-                        "value": 0
+                        "value": 86.476067
                     },
                     "robot_ref_adv_speed": {
                         "type": 2,
@@ -103,53 +103,7 @@
                 "id": "200",
                 "links": [
                     {
-                        "dst": "210",
-                        "label": "RT",
-                        "linkAttribute": {
-                            "rt_rotation_euler_xyz": {
-                                "type": 3,
-                                "value": [
-                                    0,
-                                    0,
-                                    0
-                                ]
-                            },
-                            "rt_translation": {
-                                "type": 3,
-                                "value": [
-                                    0,
-                                    -0.1550000011920929,
-                                    1.0750000476837158
-                                ]
-                            }
-                        },
-                        "src": "200"
-                    },
-                    {
-                        "dst": "220",
-                        "label": "RT",
-                        "linkAttribute": {
-                            "rt_rotation_euler_xyz": {
-                                "type": 3,
-                                "value": [
-                                    0,
-                                    0,
-                                    0
-                                ]
-                            },
-                            "rt_translation": {
-                                "type": 3,
-                                "value": [
-                                    0,
-                                    -0.07500000298023224,
-                                    0.9449999928474426
-                                ]
-                            }
-                        },
-                        "src": "200"
-                    },
-                    {
-                        "dst": "230",
+                        "dst": "250",
                         "label": "RT",
                         "linkAttribute": {
                             "rt_rotation_euler_xyz": {
@@ -172,7 +126,7 @@
                         "src": "200"
                     },
                     {
-                        "dst": "240",
+                        "dst": "260",
                         "label": "RT",
                         "linkAttribute": {
                             "rt_rotation_euler_xyz": {
@@ -221,23 +175,23 @@
                     },
                     "laser_timestamp": {
                         "type": 7,
-                        "value": "1779214261014"
+                        "value": "1779219459141"
                     },
                     "level": {
                         "type": 1,
-                        "value": 2
+                        "value": 3
                     },
                     "parent": {
                         "type": 7,
-                        "value": "200"
+                        "value": "250"
                     },
                     "pos_x": {
                         "type": 2,
-                        "value": 0
+                        "value": 289.095917
                     },
                     "pos_y": {
                         "type": 2,
-                        "value": 100
+                        "value": 171.117142
                     }
                 },
                 "id": "210",
@@ -284,7 +238,7 @@
                     },
                     "cam_rgb_alivetime": {
                         "type": 7,
-                        "value": "1779214260949"
+                        "value": "1779219459051"
                     },
                     "cam_rgb_cameraID": {
                         "type": 1,
@@ -316,23 +270,46 @@
                     },
                     "level": {
                         "type": 1,
-                        "value": 2
+                        "value": 3
                     },
                     "parent": {
                         "type": 7,
-                        "value": "200"
+                        "value": "250"
                     },
                     "pos_x": {
                         "type": 2,
-                        "value": 100
+                        "value": 128.099014
                     },
                     "pos_y": {
                         "type": 2,
-                        "value": 100
+                        "value": 223.428207
                     }
                 },
                 "id": "220",
                 "links": [
+                    {
+                        "dst": "240",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0,
+                                    0
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0,
+                                    0
+                                ]
+                            }
+                        },
+                        "src": "220"
+                    }
                 ],
                 "name": "zed",
                 "type": "rgbd"
@@ -345,19 +322,19 @@
                     },
                     "level": {
                         "type": 1,
-                        "value": 2
+                        "value": 3
                     },
                     "parent": {
                         "type": 7,
-                        "value": "200"
+                        "value": "250"
                     },
                     "pos_x": {
                         "type": 2,
-                        "value": -59.931175
+                        "value": 28.597462
                     },
                     "pos_y": {
                         "type": 2,
-                        "value": 45.970432
+                        "value": 86.476067
                     }
                 },
                 "id": "230",
@@ -374,6 +351,35 @@
                     },
                     "level": {
                         "type": 1,
+                        "value": 4
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "220"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": 105.849792
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": 291.904266
+                    }
+                },
+                "id": "240",
+                "links": [
+                ],
+                "name": "voxels",
+                "type": "semantic_grid"
+            },
+            "250": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "SteelBlue"
+                    },
+                    "level": {
+                        "type": 1,
                         "value": 2
                     },
                     "parent": {
@@ -382,18 +388,116 @@
                     },
                     "pos_x": {
                         "type": 2,
-                        "value": 93.543716
+                        "value": 150.348236
                     },
                     "pos_y": {
                         "type": 2,
-                        "value": 45.530407
+                        "value": 154.952133
                     }
                 },
-                "id": "240",
+                "id": "250",
+                "links": [
+                    {
+                        "dst": "210",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0,
+                                    0
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    -0.1550000011920929,
+                                    1.0750000476837158
+                                ]
+                            }
+                        },
+                        "src": "250"
+                    },
+                    {
+                        "dst": "220",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0,
+                                    0
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    -0.07500000298023224,
+                                    0.9449999928474426
+                                ]
+                            }
+                        },
+                        "src": "250"
+                    },
+                    {
+                        "dst": "230",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0,
+                                    0
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0,
+                                    0
+                                ]
+                            }
+                        },
+                        "src": "250"
+                    }
+                ],
+                "name": "body",
+                "type": "body"
+            },
+            "260": {
+                "attribute": {
+                    "color": {
+                        "type": 0,
+                        "value": "MediumPurple"
+                    },
+                    "level": {
+                        "type": 1,
+                        "value": 2
+                    },
+                    "parent": {
+                        "type": 7,
+                        "value": "200"
+                    },
+                    "pos_x": {
+                        "type": 2,
+                        "value": 150.348236
+                    },
+                    "pos_y": {
+                        "type": 2,
+                        "value": 18
+                    }
+                },
+                "id": "260",
                 "links": [
                 ],
-                "name": "voxels",
-                "type": "semantic_grid"
+                "name": "mind",
+                "type": "mind"
             }
         }
     }

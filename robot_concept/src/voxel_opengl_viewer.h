@@ -68,6 +68,8 @@ private:
 
     static QColor color_for_category(const std::string& category);
     void request_update_throttled();
+    void load_view_state();
+    void save_view_state() const;
     QOpenGLShaderProgram program_;
     QOpenGLVertexArrayObject vao_;
     QOpenGLBuffer vbo_{QOpenGLBuffer::VertexBuffer};

@@ -218,7 +218,9 @@ private:
 	void overlay_room_polygon_on_canvas(cv::Mat& canvas, const RoboCompCameraRGBDSimple::TRGBD& rgbd) const;
 	void update_yolo_tab_display(const RoboCompCameraRGBDSimple::TRGBD& rgbd, const std::vector<SegDetection>& detections);
 	void update_viewer_robot_pose(const Mat::RTMat& room_T_robot);
-	void update_viewer_lidar_points(const Mat::RTMat& room_T_robot);
+	void update_viewer_lidar_points(const std::string& room_name,
+	                              const std::string& robot_name,
+	                              const Mat::RTMat& room_T_robot_fallback);
 	std::pair<std::string, std::string> get_room_robot_names_for_compute();
 	bool ensure_room_and_robot_ready(FPSCounter& compute_fps,
 	                                const std::string& room_name,
@@ -256,6 +258,7 @@ private:
 	std::vector<int> associate_detections_hungarian(const std::vector<DetectionObservation>& observations,
 	                                                int frame_id);
 	void prune_stale_tracks(int frame_id);
+	void merge_duplicate_tracks(int frame_id);
 	void update_voxel_grid_from_rgbd(const RoboCompCameraRGBDSimple::TRGBD& rgbd,
 	                                const std::vector<SegDetection>& detections,
 	                                const Mat::RTMat& room_T_robot,

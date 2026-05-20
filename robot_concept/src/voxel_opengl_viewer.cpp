@@ -6,6 +6,7 @@
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QSettings>
 #include <QSurfaceFormat>
 #include <QTimer>
 #include <QWheelEvent>
@@ -21,6 +22,8 @@ namespace rc
 {
 namespace
 {
+constexpr auto kViewerSettingsGroup = "VoxelOpenGLViewer";
+
 struct ObjMeshData
 {
     std::vector<QVector3D> triangles;
@@ -156,6 +159,46 @@ VoxelOpenGLViewer::VoxelOpenGLViewer(QWidget* parent)
     setMinimumSize(420, 300);
     setFocusPolicy(Qt::StrongFocus);
     last_update_request_ = std::chrono::steady_clock::now() - kMinUpdateIntervalMs;
+    load_view_state();
+}
+
+void VoxelOpenGLViewer::load_view_state()
+{
+    QSettings settings("RoboComp", "robot_concept");
+    settings.beginGroup(kViewerSettingsGroup);
+
+    if (!(settings.contains("yaw") && settings.contains("pitch")
+          && settings.contains("distance") && settings.contains("target_x")
+          && settings.contains("target_y") && settings.contains("target_z")))
+    {
+        settings.endGroup();
+        return;
+    }
+
+    yaw_ = settings.value("yaw", yaw_).toFloat();
+    pitch_ = std::clamp(settings.value("pitch", pitch_).toFloat(), -1.45f, 1.45f);
+    distance_ = std::clamp(settings.value("distance", distance_).toFloat(), 0.2f, 250.0f);
+    target_.setX(settings.value("target_x", target_.x()).toFloat());
+    target_.setY(settings.value("target_y", target_.y()).toFloat());
+    target_.setZ(settings.value("target_z", target_.z()).toFloat());
+    first_cloud_received_ = true;
+    room_target_initialized_ = true;
+    camera_user_moved_ = true;
+    settings.endGroup();
+}
+
+void VoxelOpenGLViewer::save_view_state() const
+{
+    QSettings settings("RoboComp", "robot_concept");
+    settings.beginGroup(kViewerSettingsGroup);
+    settings.setValue("yaw", yaw_);
+    settings.setValue("pitch", pitch_);
+    settings.setValue("distance", distance_);
+    settings.setValue("target_x", target_.x());
+    settings.setValue("target_y", target_.y());
+    settings.setValue("target_z", target_.z());
+    settings.endGroup();
+    settings.sync();
 }
 
 void VoxelOpenGLViewer::request_update_throttled()
@@ -184,6 +227,7 @@ void VoxelOpenGLViewer::request_update_throttled()
 
 VoxelOpenGLViewer::~VoxelOpenGLViewer()
 {
+    save_view_state();
     makeCurrent();
     if (vbo_.isCreated())
         vbo_.destroy();
@@ -1023,9 +1067,10 @@ void VoxelOpenGLViewer::mouseMoveEvent(QMouseEvent* event)
     if (event->buttons() & Qt::LeftButton)
     {
         camera_user_moved_ = true;
-        yaw_   -= static_cast<float>(d.x()) * 0.01f;
-        pitch_ -= static_cast<float>(d.y()) * 0.01f;
+        yaw_   += static_cast<float>(d.x()) * 0.01f;
+        pitch_ += static_cast<float>(d.y()) * 0.01f;
         pitch_ = std::clamp(pitch_, -1.45f, 1.45f);
+        save_view_state();
         update();
     }
     else if (event->buttons() & Qt::RightButton)
@@ -1034,8 +1079,9 @@ void VoxelOpenGLViewer::mouseMoveEvent(QMouseEvent* event)
         const float pan_scale = 0.0025f * distance_;
         const QVector3D right(std::cos(yaw_), 0.f, -std::sin(yaw_));
         const QVector3D up(0.f, 1.f, 0.f);
-        target_ -= right * (static_cast<float>(d.x()) * pan_scale);
-        target_ += up    * (static_cast<float>(d.y()) * pan_scale);
+        target_ += right * (static_cast<float>(d.x()) * pan_scale);
+        target_ -= up    * (static_cast<float>(d.y()) * pan_scale);
+        save_view_state();
         update();
     }
 
@@ -1048,6 +1094,7 @@ void VoxelOpenGLViewer::wheelEvent(QWheelEvent* event)
     const float num_steps = static_cast<float>(event->angleDelta().y()) / 120.0f;
     const float scale = std::pow(0.87f, num_steps);
     distance_ = std::clamp(distance_ * scale, 0.2f, 250.0f);
+    save_view_state();
     update();
     QOpenGLWidget::wheelEvent(event);
 }
