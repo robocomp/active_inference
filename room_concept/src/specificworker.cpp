@@ -154,6 +154,13 @@ void SpecificWorker::initialize()
     try { params.STABLE_FRAMES_REQUIRED = configLoader.get<int>("DSR.StableFramesRequired"); } catch (...) {}
     try { params.STABLE_SDF_MSE_MAX     = static_cast<float>(configLoader.get<double>("DSR.StableSdfMseMax")); } catch (...) {}
     try { params.STABLE_COV_TT_MAX      = static_cast<float>(configLoader.get<double>("DSR.StableCovTtMax")); } catch (...) {}
+    try { params.BOOTSTRAP_TABLE_ENABLED = configLoader.get<bool>("DSR.BootstrapTableEnabled"); } catch (...) {}
+    try { params.BOOTSTRAP_TABLE_X = static_cast<float>(configLoader.get<double>("DSR.BootstrapTableX")); } catch (...) {}
+    try { params.BOOTSTRAP_TABLE_Y = static_cast<float>(configLoader.get<double>("DSR.BootstrapTableY")); } catch (...) {}
+    try { params.BOOTSTRAP_TABLE_YAW = static_cast<float>(configLoader.get<double>("DSR.BootstrapTableYaw")); } catch (...) {}
+    try { params.BOOTSTRAP_TABLE_WIDTH = static_cast<float>(configLoader.get<double>("DSR.BootstrapTableWidth")); } catch (...) {}
+    try { params.BOOTSTRAP_TABLE_DEPTH = static_cast<float>(configLoader.get<double>("DSR.BootstrapTableDepth")); } catch (...) {}
+    try { params.BOOTSTRAP_TABLE_HEIGHT = static_cast<float>(configLoader.get<double>("DSR.BootstrapTableHeight")); } catch (...) {}
 
     // ── EpistemicController params ─────────────────────────────────────────
     auto& ec = epistemic_controller_.params;
@@ -561,6 +568,8 @@ void SpecificWorker::dsr_create_room_and_reparent(const rc::RoomConcept::UpdateR
     room_node.attrs()[delimiting_polygon_x_str.data()] = DSR::Attribute{polygon_x, 0, 0};
     room_node.attrs()[delimiting_polygon_y_str.data()] = DSR::Attribute{polygon_y, 0, 0};
     room_node.attrs()[room_height_str.data()] = DSR::Attribute{params.room_height, 0, 0};
+    // TODO: change to add_or_modify_attrib_local once available
+
     const auto room_id_opt = G->insert_node(room_node);
     if (!room_id_opt.has_value())
     {
@@ -574,6 +583,60 @@ void SpecificWorker::dsr_create_room_and_reparent(const rc::RoomConcept::UpdateR
     qInfo() << "DSR: created room node id=" << dsr_room_id_ << "hanging from robot id=" << dsr_robot_id_;
 
     dsr_update_pose(res);
+    dsr_insert_bootstrap_table_if_missing();
+}
+
+///////////////////////////////////////////////////////////////////////////////
+void SpecificWorker::dsr_insert_bootstrap_table_if_missing()
+{
+    if (not G || not rt_api || not params.BOOTSTRAP_TABLE_ENABLED )
+        return;
+
+    if (G->get_node("bootstrap_table").has_value())
+        return;
+
+    auto room_node = G->get_node(dsr_room_id_);
+    if (not room_node.has_value())
+    {
+        qWarning() << "DSR: cannot insert bootstrap table because room node is missing";
+        return;
+    }
+
+    DSR::Node table_node = DSR::Node::create<object_node_type>("bootstrap_table");
+    G->add_or_modify_attrib_local<width_m_att>(table_node, params.BOOTSTRAP_TABLE_WIDTH);
+    G->add_or_modify_attrib_local<depth_m_att>(table_node, params.BOOTSTRAP_TABLE_DEPTH);
+    G->add_or_modify_attrib_local<height_m_att>(table_node, params.BOOTSTRAP_TABLE_HEIGHT);
+    G->add_or_modify_attrib_local<level_att>(table_node, 3);
+    G->add_or_modify_attrib_local<parent_att>(table_node, dsr_room_id_);
+    G->add_or_modify_attrib_local<pos_x_att>(table_node, 260.f);
+    G->add_or_modify_attrib_local<pos_y_att>(table_node, 120.f);
+
+    const auto table_id_opt = G->insert_node(table_node);
+    if (not table_id_opt.has_value())
+    {
+        qWarning() << "DSR: failed to create bootstrap table node";
+        return;
+    }
+
+    const float z = params.BOOTSTRAP_TABLE_HEIGHT * 0.5f;
+    rt_api->insert_or_assign_edge_RT(room_node.value(),
+                                     table_id_opt.value(),
+                                     {params.BOOTSTRAP_TABLE_X, params.BOOTSTRAP_TABLE_Y, z},
+                                     {0.f, 0.f, params.BOOTSTRAP_TABLE_YAW});
+
+    std::print("Inserted bootstrap table node id={} at room pose x={} y={} z={} yaw={}\n",
+               table_id_opt.value(), params.BOOTSTRAP_TABLE_X, params.BOOTSTRAP_TABLE_Y, z, params.BOOTSTRAP_TABLE_YAW);    
+
+    if (not G->get_edge(dsr_room_id_, table_id_opt.value(), "RT").has_value())
+    {
+        qWarning() << "DSR: bootstrap table node created but RT edge is missing"
+                   << "room_id=" << dsr_room_id_
+                   << "table_id=" << table_id_opt.value();
+        return;
+    }
+
+    qInfo() << "DSR: inserted bootstrap table node id=" << table_id_opt.value()
+            << "at room pose" << params.BOOTSTRAP_TABLE_X << params.BOOTSTRAP_TABLE_Y << z;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

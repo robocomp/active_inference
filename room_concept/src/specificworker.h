@@ -105,6 +105,15 @@ class SpecificWorker : public GenericWorker
 
             // Room height for DSR node attribute
             float room_height = 2.4f;  // meters
+
+            // Debug bootstrap table hanging from the room node
+            bool  BOOTSTRAP_TABLE_ENABLED = true;
+            float BOOTSTRAP_TABLE_X = 0.f;
+            float BOOTSTRAP_TABLE_Y = 0.f;
+            float BOOTSTRAP_TABLE_YAW = 0.f;
+            float BOOTSTRAP_TABLE_WIDTH = 1.5f;
+            float BOOTSTRAP_TABLE_DEPTH = 1.4f;
+            float BOOTSTRAP_TABLE_HEIGHT = 0.74f;
         };
         Params params;
 
@@ -168,6 +177,7 @@ class SpecificWorker : public GenericWorker
         void update_dsr(const rc::RoomConcept::UpdateResult& res);
         void dsr_update_pose(const rc::RoomConcept::UpdateResult& res);
         void dsr_create_room_and_reparent(const rc::RoomConcept::UpdateResult& res);
+        void dsr_insert_bootstrap_table_if_missing();
         std::unique_ptr<DSR::RT_API> rt_api;
 
     signals:
