@@ -316,9 +316,9 @@ std::optional<SceneProcessor::RoomPolygonData> SceneProcessor::get_room_polygon_
     return data;
 }
 
-std::optional<SceneProcessor::GraphObjectBox> SceneProcessor::build_graph_object_box(const DSR::Node& node,
-                                                                                     const std::string& room_name,
-                                                                                     std::uint64_t timestamp_ms) const
+std::optional<GraphObjectBox> SceneProcessor::build_graph_object_box(const DSR::Node& node,
+                                                                     const std::string& room_name,
+                                                                     std::uint64_t timestamp_ms) const
 {
     if (!graph_ || inner_eigen_api_ == nullptr || room_name.empty())
         return std::nullopt;
@@ -361,22 +361,18 @@ std::optional<SceneProcessor::GraphObjectBox> SceneProcessor::build_graph_object
         Eigen::Vector3d{-half_width,  half_depth,  half_height}
     };
 
-    QVector3D min_corner(std::numeric_limits<float>::max(),
-                         std::numeric_limits<float>::max(),
-                         std::numeric_limits<float>::max());
-    QVector3D max_corner(std::numeric_limits<float>::lowest(),
-                         std::numeric_limits<float>::lowest(),
-                         std::numeric_limits<float>::lowest());
+    Eigen::Vector3f min_corner = Eigen::Vector3f::Constant(std::numeric_limits<float>::max());
+    Eigen::Vector3f max_corner = Eigen::Vector3f::Constant(std::numeric_limits<float>::lowest());
 
     for (const auto& local_corner : local_corners)
     {
         const Eigen::Vector3d room_corner = room_T_object->linear() * local_corner + room_T_object->translation();
-        min_corner.setX(std::min(min_corner.x(), static_cast<float>(room_corner.x())));
-        min_corner.setY(std::min(min_corner.y(), static_cast<float>(room_corner.y())));
-        min_corner.setZ(std::min(min_corner.z(), static_cast<float>(room_corner.z())));
-        max_corner.setX(std::max(max_corner.x(), static_cast<float>(room_corner.x())));
-        max_corner.setY(std::max(max_corner.y(), static_cast<float>(room_corner.y())));
-        max_corner.setZ(std::max(max_corner.z(), static_cast<float>(room_corner.z())));
+        min_corner.x() = std::min(min_corner.x(), static_cast<float>(room_corner.x()));
+        min_corner.y() = std::min(min_corner.y(), static_cast<float>(room_corner.y()));
+        min_corner.z() = std::min(min_corner.z(), static_cast<float>(room_corner.z()));
+        max_corner.x() = std::max(max_corner.x(), static_cast<float>(room_corner.x()));
+        max_corner.y() = std::max(max_corner.y(), static_cast<float>(room_corner.y()));
+        max_corner.z() = std::max(max_corner.z(), static_cast<float>(room_corner.z()));
     }
 
     std::string category = node.name();
@@ -388,6 +384,24 @@ std::optional<SceneProcessor::GraphObjectBox> SceneProcessor::build_graph_object
         category = "model_table";
 
     return GraphObjectBox{min_corner, max_corner, std::move(category)};
+}
+
+std::vector<GraphObjectBox> SceneProcessor::get_graph_object_boxes(const std::string& room_name,
+                                                                   std::uint64_t timestamp_ms) const
+{
+    std::vector<GraphObjectBox> graph_boxes;
+    if (!graph_ || room_name.empty())
+        return graph_boxes;
+
+    const auto object_nodes = graph_->get_nodes_by_type("object");
+    graph_boxes.reserve(object_nodes.size());
+    for (const auto& node : object_nodes)
+    {
+        const auto box = build_graph_object_box(node, room_name, timestamp_ms);
+        if (box.has_value())
+            graph_boxes.push_back(box.value());
+    }
+    return graph_boxes;
 }
 
 void SceneProcessor::overlay_room_polygon_on_canvas(cv::Mat& canvas,
@@ -558,14 +572,12 @@ void SceneProcessor::update_room_polygon_in_viewers()
     }
 }
 
-void SceneProcessor::update_viewer_graph_object_boxes(const std::string& room_name,
-                                                      std::uint64_t timestamp_ms)
+void SceneProcessor::update_viewer_graph_object_boxes(std::span<const GraphObjectBox> graph_boxes)
 {
-    if (!graph_ || voxel_viewer_ == nullptr || room_name.empty())
+    if (voxel_viewer_ == nullptr)
         return;
 
-    const auto object_nodes = graph_->get_nodes_by_type("object");
-    if (object_nodes.empty())
+    if (graph_boxes.empty())
     {
         voxel_viewer_->update_graph_boxes({}, {}, {});
         return;
@@ -574,19 +586,15 @@ void SceneProcessor::update_viewer_graph_object_boxes(const std::string& room_na
     std::vector<QVector3D> mins;
     std::vector<QVector3D> maxs;
     std::vector<std::string> categories;
-    mins.reserve(object_nodes.size());
-    maxs.reserve(object_nodes.size());
-    categories.reserve(object_nodes.size());
+    mins.reserve(graph_boxes.size());
+    maxs.reserve(graph_boxes.size());
+    categories.reserve(graph_boxes.size());
 
-    for (const auto& node : object_nodes)
+    for (const auto& box : graph_boxes)
     {
-        const auto box = build_graph_object_box(node, room_name, timestamp_ms);
-        if (!box.has_value())
-            continue;
-
-        mins.push_back(box->min);
-        maxs.push_back(box->max);
-        categories.push_back(box->category);
+        mins.emplace_back(box.min.x(), box.min.y(), box.min.z());
+        maxs.emplace_back(box.max.x(), box.max.y(), box.max.z());
+        categories.push_back(box.category);
     }
 
     voxel_viewer_->update_graph_boxes(mins, maxs, categories);

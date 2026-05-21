@@ -321,7 +321,6 @@ void VoxelOpenGLViewer::update_graph_boxes(std::span<const QVector3D> mins,
         graph_box_maxs_.assign(maxs.begin(), maxs.end());
         graph_box_categories_.assign(categories.begin(), categories.end());
     }
-    request_update_throttled();
 }
 
 void VoxelOpenGLViewer::set_show_lidar(bool show)
@@ -1166,10 +1165,17 @@ void VoxelOpenGLViewer::mouseMoveEvent(QMouseEvent* event)
     {
         camera_user_moved_ = true;
         const float pan_scale = 0.0025f * distance_;
-        const QVector3D right(std::cos(yaw_), 0.f, -std::sin(yaw_));
-        const QVector3D up(0.f, 1.f, 0.f);
+        const float cp = std::cos(pitch_);
+        const QVector3D eye(
+            target_.x() + distance_ * cp * std::sin(yaw_),
+            target_.y() + distance_ * std::sin(pitch_),
+            target_.z() + distance_ * cp * std::cos(yaw_));
+        const QVector3D forward = (target_ - eye).normalized();
+        const QVector3D world_up(0.f, 1.f, 0.f);
+        const QVector3D right = QVector3D::crossProduct(forward, world_up).normalized();
+        const QVector3D camera_up = QVector3D::crossProduct(right, forward).normalized();
         target_ += right * (static_cast<float>(d.x()) * pan_scale);
-        target_ -= up    * (static_cast<float>(d.y()) * pan_scale);
+        target_ -= camera_up * (static_cast<float>(d.y()) * pan_scale);
         save_view_state();
         update();
     }

@@ -6,12 +6,12 @@
 #include <cstdint>
 #include <execution>
 #include <expected>
-#include <flat_set>
 #include <functional>
 #include <map>
 #include <optional>
 #include <print>
 #include <ranges>
+#include <set>
 #include <span>
 #include <string>
 #include <unordered_map>
@@ -286,8 +286,8 @@ class UnifiedVoxelGrid
         std::unordered_map<VoxelKey, std::size_t, VoxelKeyHash> _display_sample_index;
         std::size_t _display_sample_cursor = 0;
 
-        // Per-frame bookkeeping — flat_set for cache-friendly membership test
-        std::flat_set<VoxelKey> _touched_this_frame;
+        // Per-frame bookkeeping — hashed membership test, compatible with gcc14.
+        std::unordered_set<VoxelKey, VoxelKeyHash> _touched_this_frame;
         std::vector<Eigen::Vector3f> _observed_pts_this_frame;
 
         static constexpr int MAX_RAYS = 500;

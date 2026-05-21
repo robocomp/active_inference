@@ -1,16 +1,13 @@
-find_package(Qt6 COMPONENTS 3DCore 3DRender 3DExtras QUIET)
 find_package(Qt6 COMPONENTS OpenGL OpenGLWidgets QUIET)
 
 # Sources set
 LIST(APPEND SOURCES
   ../src/specificworker.cpp
-  ../src/specificworker_yolo.cpp
   ../src/specificworker_threads.cpp
   ../src/scene_processor.cpp
   ../src/voxel_processor.cpp
   ../src/yolo_processor.cpp
   ../src/unified_voxel_grid.cpp
-  ../src/yolo_seg_detector.cpp
   ../src/custom_widget.h
 )
 
@@ -21,7 +18,6 @@ LIST(APPEND HEADERS
   ../src/voxel_processor.h
   ../src/yolo_processor.h
   ../src/unified_voxel_grid.h
-  ../src/yolo_seg_detector.h
 )
 
 
@@ -88,5 +84,5 @@ find_package(OpenCV REQUIRED)
 LIST(APPEND LIBS ${LIBS} ${OpenCV_LIBS})
 
 # no-char8_t to avoid a problem with ICE Connection lib.
-add_definitions(-O3 -march=native -fmax-errors=1 -fno-char8_t)
+add_definitions(-g -O3 -march=native -fmax-errors=1 -fno-char8_t)
 

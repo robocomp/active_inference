@@ -49,6 +49,7 @@ void VoxelProcessor::process_rgbd_frame(const RoboCompCameraRGBDSimple::TRGBD& r
                                         const std::vector<SegDetection>& detections,
                                         const Mat::RTMat& room_T_robot,
                                         const Mat::RTMat& room_T_zed,
+                                        std::span<const GraphObjectBox> explained_boxes,
                                         rc::VoxelOpenGLViewer* voxel_viewer)
 {
     const auto& raw_pts = rgbd.points.points;
@@ -65,6 +66,15 @@ void VoxelProcessor::process_rgbd_frame(const RoboCompCameraRGBDSimple::TRGBD& r
     std::size_t selected_tables = 0;
     std::size_t selected_chairs = 0;
     std::size_t selected_monitors = 0;
+    std::size_t explained_points_skipped = 0;
+    const std::size_t graph_box_count = explained_boxes.size();
+    const std::size_t model_table_box_count = static_cast<std::size_t>(std::count_if(
+        explained_boxes.begin(),
+        explained_boxes.end(),
+        [](const GraphObjectBox& box)
+        {
+            return box.category == "model_table";
+        }));
     std::vector<float> det_median_range_m(detections.size(), std::numeric_limits<float>::quiet_NaN());
     std::vector<int32_t> pixel_owner(static_cast<std::size_t>(img_w * img_h), -1);
     const float point_scale = detect_point_scale_once(rgbd);
@@ -135,7 +145,7 @@ void VoxelProcessor::process_rgbd_frame(const RoboCompCameraRGBDSimple::TRGBD& r
             points_by_det[d].reserve(selected_points_per_det[d]);
 
         const std::size_t n_sel = selected_points_robot.size();
-        const Eigen::Matrix3f room_rotation = room_T_robot.linear().cast<float>();
+        const Eigen::Matrix3f room_rotation = room_T_zed.linear().cast<float>();
         const Eigen::Vector3f room_translation = room_T_zed.translation().cast<float>();
         std::vector<Eigen::Vector3f> selected_points_room(n_sel);
 
@@ -151,6 +161,11 @@ void VoxelProcessor::process_rgbd_frame(const RoboCompCameraRGBDSimple::TRGBD& r
         for (std::size_t i = 0; i < n_sel; ++i)
         {
             const std::size_t det_idx = selected_det_indices[i];
+            if (point_explained_by_model(selected_points_room[i], detections[det_idx].label, explained_boxes))
+            {
+                ++explained_points_skipped;
+                continue;
+            }
             points_by_det[det_idx].push_back(selected_points_room[i]);
             centroid_sums_by_det[det_idx] += selected_points_room[i];
             ++centroid_counts_by_det[det_idx];
@@ -228,6 +243,22 @@ void VoxelProcessor::process_rgbd_frame(const RoboCompCameraRGBDSimple::TRGBD& r
 
     box_candidates = build_track_box_candidates();
     merge_duplicate_tracks(box_candidates, frame_id);
+    const std::size_t residual_tracks_suppressed = suppress_residual_tracks_near_models(box_candidates, explained_boxes);
+    const std::size_t model_residual_table_track_count = static_cast<std::size_t>(std::count_if(
+        box_candidates.begin(),
+        box_candidates.end(),
+        [&](const TrackBoxCandidate& box)
+        {
+            if (box.category != "table")
+                return false;
+
+            return std::ranges::any_of(explained_boxes,
+                                        [&](const GraphObjectBox& model_box)
+                                        {
+                                            return model_matches_label(model_box, box.category)
+                                                && boxes_overlap(box.min, box.max, model_box.min, model_box.max, model_track_padding_m_);
+                                        });
+        }));
 
     if (voxel_viewer != nullptr)
     {
@@ -272,17 +303,31 @@ void VoxelProcessor::process_rgbd_frame(const RoboCompCameraRGBDSimple::TRGBD& r
         voxel_viewer->update_track_boxes(box_mins, box_maxs, box_categories);
     }
 
+    if (compute_frame_ % 30 == 0)
+    {
+        std::print("[ModelSuppression] graph_boxes={} model_table_boxes={} explained_pts={} selected_table_pts={} residual_table_tracks={} removed_residual_tracks={}\n",
+                   graph_box_count,
+                   model_table_box_count,
+                   explained_points_skipped,
+                   selected_tables,
+                   model_residual_table_track_count,
+                   residual_tracks_suppressed);
+    }
+
     if (config_.verbose_debug && compute_frame_ % 30 == 0)
     {
         const float ratio = valid_points > 0
             ? (100.0f * static_cast<float>(masked_points) / static_cast<float>(valid_points))
             : 0.0f;
         const int viewer_voxel_fps = config_.viewer_voxel_fps;
-        std::println("[VoxelDebug] valid_pts={} masked_pts={} ({:.1f}%) selected_pts={} decimated_pts={} table={} chair={} monitor={} detections={} active_tracks={}",
+        std::println("[VoxelDebug] valid_pts={} masked_pts={} ({:.1f}%) selected_pts={} graph_boxes={} model_table_boxes={} explained_pts={} decimated_pts={} table={} chair={} monitor={} detections={} active_tracks={}",
                      valid_points,
                      masked_points,
                      ratio,
                      selected_points,
+                     graph_box_count,
+                     model_table_box_count,
+                     explained_points_skipped,
                      decimated_points,
                      selected_tables,
                      selected_chairs,
@@ -299,6 +344,60 @@ void VoxelProcessor::process_rgbd_frame(const RoboCompCameraRGBDSimple::TRGBD& r
 bool VoxelProcessor::is_target_label(const std::string& label) const
 {
     return label == "table" || label == "chair" || label == "monitor";
+}
+
+std::optional<std::string> VoxelProcessor::observable_category_for_model(const std::string& model_category) const
+{
+    if (model_category == "model_table")
+        return std::string{"table"};
+
+    return std::nullopt;
+}
+
+bool VoxelProcessor::model_matches_label(const GraphObjectBox& box, const std::string& label) const
+{
+    const auto observable_category = observable_category_for_model(box.category);
+    return observable_category.has_value() && *observable_category == label;
+}
+
+bool VoxelProcessor::point_inside_box(const Eigen::Vector3f& point,
+                                     const GraphObjectBox& box,
+                                     float padding_m) const
+{
+    const Eigen::Vector3f min_with_padding = box.min.array() - padding_m;
+    const Eigen::Vector3f max_with_padding = box.max.array() + padding_m;
+    return (point.array() >= min_with_padding.array()).all()
+        && (point.array() <= max_with_padding.array()).all();
+}
+
+bool VoxelProcessor::boxes_overlap(const Eigen::Vector3f& min_a,
+                                   const Eigen::Vector3f& max_a,
+                                   const Eigen::Vector3f& min_b,
+                                   const Eigen::Vector3f& max_b,
+                                   float padding_m) const
+{
+    const Eigen::Vector3f expanded_min_a = min_a.array() - padding_m;
+    const Eigen::Vector3f expanded_max_a = max_a.array() + padding_m;
+    const Eigen::Vector3f expanded_min_b = min_b.array() - padding_m;
+    const Eigen::Vector3f expanded_max_b = max_b.array() + padding_m;
+
+    return expanded_min_a.x() <= expanded_max_b.x() && expanded_max_a.x() >= expanded_min_b.x()
+        && expanded_min_a.y() <= expanded_max_b.y() && expanded_max_a.y() >= expanded_min_b.y()
+        && expanded_min_a.z() <= expanded_max_b.z() && expanded_max_a.z() >= expanded_min_b.z();
+}
+
+bool VoxelProcessor::point_explained_by_model(const Eigen::Vector3f& point,
+                                             const std::string& label,
+                                             std::span<const GraphObjectBox> explained_boxes) const
+{
+    for (const auto& box : explained_boxes)
+    {
+        if (!model_matches_label(box, label))
+            continue;
+        if (point_inside_box(point, box, model_point_padding_m_))
+            return true;
+    }
+    return false;
 }
 
 float VoxelProcessor::detect_point_scale_once(const RoboCompCameraRGBDSimple::TRGBD& rgbd) const
@@ -740,6 +839,44 @@ void VoxelProcessor::merge_duplicate_tracks(std::vector<TrackBoxCandidate>& cand
             return merged_tracks.contains(candidate.track_id);
         });
     }
+}
+
+std::size_t VoxelProcessor::suppress_residual_tracks_near_models(std::vector<TrackBoxCandidate>& candidates,
+                                                                 std::span<const GraphObjectBox> explained_boxes)
+{
+    if (candidates.empty() || explained_boxes.empty())
+        return 0;
+
+    std::unordered_set<int> removed_tracks;
+    for (const auto& candidate : candidates)
+    {
+        const bool overlaps_model = std::ranges::any_of(explained_boxes,
+                                                        [&](const GraphObjectBox& model_box)
+                                                        {
+                                                            return model_matches_label(model_box, candidate.category)
+                                                                && boxes_overlap(candidate.min,
+                                                                                 candidate.max,
+                                                                                 model_box.min,
+                                                                                 model_box.max,
+                                                                                 model_track_padding_m_);
+                                                        });
+        if (!overlaps_model)
+            continue;
+
+        voxel_grid_.remove(candidate.track_id);
+        active_tracks_.erase(candidate.track_id);
+        removed_tracks.insert(candidate.track_id);
+    }
+
+    if (!removed_tracks.empty())
+    {
+        std::erase_if(candidates, [&](const TrackBoxCandidate& candidate)
+        {
+            return removed_tracks.contains(candidate.track_id);
+        });
+    }
+
+    return removed_tracks.size();
 }
 
 std::vector<VoxelProcessor::TrackBoxCandidate> VoxelProcessor::filter_track_boxes_for_viewer(const std::vector<TrackBoxCandidate>& candidates) const

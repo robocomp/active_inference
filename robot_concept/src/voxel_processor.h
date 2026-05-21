@@ -11,7 +11,8 @@
 #include <unordered_map>
 #include <vector>
 
-#include "yolo_seg_detector.h"
+#include "graph_object_box.h"
+#include "yolo_processor.h"
 
 class UnifiedVoxelGrid;
 
@@ -42,6 +43,7 @@ public:
                             const std::vector<SegDetection>& detections,
                             const Mat::RTMat& room_T_robot,
                             const Mat::RTMat& room_T_zed,
+                            std::span<const GraphObjectBox> explained_boxes,
                             rc::VoxelOpenGLViewer* voxel_viewer);
 
 private:
@@ -81,6 +83,19 @@ private:
     };
 
     bool is_target_label(const std::string& label) const;
+    std::optional<std::string> observable_category_for_model(const std::string& model_category) const;
+    bool model_matches_label(const GraphObjectBox& box, const std::string& label) const;
+    bool point_inside_box(const Eigen::Vector3f& point,
+                          const GraphObjectBox& box,
+                          float padding_m = 0.05f) const;
+    bool boxes_overlap(const Eigen::Vector3f& min_a,
+                       const Eigen::Vector3f& max_a,
+                       const Eigen::Vector3f& min_b,
+                       const Eigen::Vector3f& max_b,
+                       float padding_m = 0.0f) const;
+    bool point_explained_by_model(const Eigen::Vector3f& point,
+                                  const std::string& label,
+                                  std::span<const GraphObjectBox> explained_boxes) const;
     float detect_point_scale_once(const RoboCompCameraRGBDSimple::TRGBD& rgbd) const;
     void build_owner_map_and_medians(const RoboCompCameraRGBDSimple::TRGBD& rgbd,
                                      float point_scale,
@@ -94,6 +109,8 @@ private:
     PointCloudStats compute_point_cloud_stats(std::span<const Eigen::Vector3f> points) const;
     std::vector<TrackBoxCandidate> build_track_box_candidates() const;
     void merge_duplicate_tracks(std::vector<TrackBoxCandidate>& candidates, int frame_id);
+    std::size_t suppress_residual_tracks_near_models(std::vector<TrackBoxCandidate>& candidates,
+                                                     std::span<const GraphObjectBox> explained_boxes);
     std::vector<TrackBoxCandidate> filter_track_boxes_for_viewer(const std::vector<TrackBoxCandidate>& candidates) const;
 
     float axis_overlap(float amin, float amax, float bmin, float bmax) const;
@@ -106,6 +123,8 @@ private:
     UnifiedVoxelGrid& voxel_grid_;
     Config config_;
     static constexpr std::size_t max_clustered_box_points_ = 512;
+    static constexpr float model_point_padding_m_ = 0.08f;
+    static constexpr float model_track_padding_m_ = 0.12f;
     std::chrono::steady_clock::time_point last_voxel_viewer_update_{};
     int compute_frame_ = 0;
     int next_track_id_ = 1;

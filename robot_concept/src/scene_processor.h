@@ -9,9 +9,12 @@
 #include <cstdint>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
+
+#include "graph_object_box.h"
 
 namespace rc
 {
@@ -59,8 +62,9 @@ public:
     void update_viewer_lidar_points(const std::string& room_name,
                                     const std::string& robot_name,
                                     const Mat::RTMat& room_T_robot_fallback);
-    void update_viewer_graph_object_boxes(const std::string& room_name,
-                                          std::uint64_t timestamp_ms);
+    std::vector<GraphObjectBox> get_graph_object_boxes(const std::string& room_name,
+                                                       std::uint64_t timestamp_ms) const;
+    void update_viewer_graph_object_boxes(std::span<const GraphObjectBox> graph_boxes);
 
 private:
     struct RoomPolygonData
@@ -77,13 +81,6 @@ private:
         Mat::Vector3d axis_x{0.0, 0.0, 0.0};
         Mat::Vector3d axis_y{0.0, 0.0, 0.0};
         Mat::Vector3d axis_z{0.0, 0.0, 0.0};
-    };
-
-    struct GraphObjectBox
-    {
-        QVector3D min;
-        QVector3D max;
-        std::string category;
     };
 
     bool compute_room_to_camera_basis(const std::string& camera_node_name,

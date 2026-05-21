@@ -46,8 +46,8 @@
 #include <utility>
 #include <vector>
 
-#include "yolo_seg_detector.h"
 #include "custom_widget.h"
+#include "yolo_processor.h"
 
 class UnifiedVoxelGrid;
 class VoxelProcessor;
@@ -178,9 +178,6 @@ private:
 			  int DSR_LIDAR_FPS = 0;   // 0 = every captured scan (no throttle)
         };
         Params params;
-
-	// YOLO-seg detector (constructed in initialize() once model path is known)
-	std::optional<YoloSegDetector> yolo_detector;
 
 	// lidar
 	PointCloud_Buffer pointcloud_buffer;

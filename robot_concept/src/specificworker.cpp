@@ -28,7 +28,9 @@
 #include "voxel_opengl_viewer.h"
 
 #include <QHBoxLayout>
+#include <QImage>
 #include <QLabel>
+#include <QPixmap>
 #include <QPushButton>
 #include <QVBoxLayout>
 
@@ -103,7 +105,12 @@ void SpecificWorker::initialize()
 	try { params.DSR_DEPTH_FPS = configLoader.get<int>("Camera.dsr_depth_fps"); } catch (...) {}
 	try { params.DSR_LIDAR_FPS = configLoader.get<int>("Lidar.dsr_lidar_fps"); } catch (...) {}
 	try { params.TRANSFORMS_INTERPOLATE_RT = configLoader.get<bool>("Transforms.interpolate_rt"); } catch (...) {}
-	try { verbose_debug_ = configLoader.get<bool>("Debug.verbose"); } catch (...) { verbose_debug_ = false; }
+	try { verbose_debug_ = configLoader.get<bool>("Debug.verbose"); }
+	catch (...)
+	{
+		try { verbose_debug_ = configLoader.get<bool>("Component.Debug.Verbose"); }
+		catch (...) { verbose_debug_ = false; }
+	}
 	yolo_processor = std::make_unique<YoloProcessor>();
 	YoloProcessor::Config yolo_config;
 	yolo_config.model_path = params.YOLO_MODEL_PATH;
@@ -268,17 +275,61 @@ void SpecificWorker::compute()
 		return;
 	scene_processor->log_room_robot_pose_periodic(room_T_robot.value());
 	scene_processor->mark_room_rt_ready();
+	const auto graph_object_boxes = scene_processor->get_graph_object_boxes(room_name, frame_ts_ms);
 
 	scene_processor->update_viewer_robot_pose(room_T_robot.value());
 	scene_processor->update_viewer_lidar_points(room_name, robot_name, room_T_robot.value());
-	scene_processor->update_viewer_graph_object_boxes(room_name, frame_ts_ms);
+	scene_processor->update_viewer_graph_object_boxes(graph_object_boxes);
 	scene_processor->update_room_polygon_periodic();
 
 	if (voxel_processor)
-		voxel_processor->process_rgbd_frame(rgbd, detections, room_T_robot.value(), room_T_zed.value(), voxel_viewer_gl.get());
+		voxel_processor->process_rgbd_frame(rgbd, detections, room_T_robot.value(), room_T_zed.value(), graph_object_boxes, voxel_viewer_gl.get());
 
 	if (verbose_debug_)
 		compute_fps.print("[Compute]", 2000);
+}
+
+void SpecificWorker::update_yolo_tab_display(const RoboCompCameraRGBDSimple::TRGBD& rgbd,
+	                                          const std::vector<SegDetection>& detections)
+{
+	static auto last_display_update = std::chrono::steady_clock::time_point{};
+	static float display_fps = 0.f;
+
+	if (yolo_image_label_ == nullptr || rgbd.image.width == 0 || rgbd.image.height == 0
+		|| !custom_widget_yolo.isVisible() || !yolo_processor)
+		return;
+
+	const cv::Mat rgb_frame(rgbd.image.height, rgbd.image.width, CV_8UC3,
+		const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(rgbd.image.image.data())));
+	const cv::Mat masked_rgb_frame = yolo_processor->apply_tray_mask(rgb_frame);
+	cv::Mat yolo_canvas = yolo_processor->compose_detection_canvas(masked_rgb_frame, detections);
+	if (scene_processor)
+		scene_processor->overlay_room_polygon_on_canvas(yolo_canvas, rgbd);
+	cv::Mat yolo_canvas_rgb;
+	cv::cvtColor(yolo_canvas, yolo_canvas_rgb, cv::COLOR_BGR2RGB);
+	QImage yolo_qimg(yolo_canvas_rgb.data,
+		yolo_canvas_rgb.cols,
+		yolo_canvas_rgb.rows,
+		static_cast<int>(yolo_canvas_rgb.step),
+		QImage::Format_RGB888);
+	QPixmap yolo_pix = QPixmap::fromImage(yolo_qimg, Qt::NoFormatConversion);
+	yolo_image_label_->setPixmap(yolo_pix.scaled(yolo_image_label_->size(), Qt::KeepAspectRatio, Qt::FastTransformation));
+
+	if (yolo_fps_label_ != nullptr)
+	{
+		const auto now = std::chrono::steady_clock::now();
+		if (last_display_update != std::chrono::steady_clock::time_point{})
+		{
+			const auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_display_update).count();
+			if (dt_ms > 0)
+			{
+				const float inst_fps = 1000.0f / static_cast<float>(dt_ms);
+				display_fps = (display_fps > 0.f) ? (0.85f * display_fps + 0.15f * inst_fps) : inst_fps;
+			}
+		}
+		last_display_update = now;
+		yolo_fps_label_->setText(QString("YOLO display FPS: %1").arg(display_fps, 0, 'f', 1));
+	}
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////

@@ -47,7 +47,7 @@ SET (EXECUTABLE_OUTPUT_PATH ${RC_COMPONENT_DEVEL_PATH}/bin)
 
 # Specify construction and link process
 ADD_EXECUTABLE( robot_concept ${SOURCES} ${MOC_SOURCES} ${RC_SOURCES} ${UI_HEADERS} )
-TARGET_LINK_LIBRARIES( robot_concept ${LIBS}  dsr_core dsr_gui dsr_api fastcdr fastdds osgDB OpenThreads Eigen3::Eigen QGLViewer-qt6 Qt6OpenGLWidgets ${STATIC_LIBS} ${SPECIFIC_LIBS} ${QT_LIBRARIES} ${Ice_LIBRARIES} )
+TARGET_LINK_LIBRARIES( robot_concept ${LIBS}  dsr_core dsr_gui dsr_api fastcdr fastdds Eigen3::Eigen ${STATIC_LIBS} ${SPECIFIC_LIBS} ${QT_LIBRARIES} ${Ice_LIBRARIES} )
 SET_TARGET_PROPERTIES(robot_concept
         PROPERTIES
         CXX_STANDARD ${CXX_STANDARD}
