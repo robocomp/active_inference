@@ -31,6 +31,7 @@
 #include <genericworker.h>
 #include <Eigen/Dense>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -97,6 +98,7 @@ public slots:
 	void del_node_slot(std::uint64_t from){};     
 private:
 	using Polygon = std::vector<Eigen::Vector2f>;
+	using Polygons = std::vector<Polygon>;
 	using PathPlan = RoomPathPlanner::PathPlan;
 
 	struct Params
@@ -110,6 +112,8 @@ private:
 		float pos_gain = 1.2f;
 		float rot_gain = 1.5f;
 		bool interpolate_rt = true;
+		int max_lidar_draw_points = 600;
+		std::string lidar_name = "lidar3D";
 		std::string target_edge_type = "target";
 	};
 
@@ -142,6 +146,14 @@ private:
 		}
 	};
 
+	struct PlanningStep
+	{
+		RobotPose robot_pose;
+		TargetInfo target;
+		Eigen::Vector2f plan_origin = Eigen::Vector2f::Zero();
+		bool target_changed = false;
+	};
+
 	Params params;
 
 	/**
@@ -152,22 +164,37 @@ private:
 	std::unique_ptr<DSR::InnerEigenAPI> inner_eigen_api_;
 	std::vector<Eigen::Vector2f> room_polygon_;
 	std::vector<Eigen::Vector2f> inner_polygon_;
+	Polygons obstacle_polygons_;
+	rc::LidarPointBuffer lidar_room_buffer_{3};
 	std::optional<PathPlan> current_plan_;
 	std::optional<Eigen::Vector2f> manual_target_room_;
+	std::optional<Eigen::Vector2f> manual_target_origin_room_;
 	bool manual_target_dirty_ = false;
 	bool room_view_fitted_ = false;
 	uint64_t active_target_id_ = 0;
 	bool room_wait_logged_ = false;
 	bool target_wait_logged_ = false;
+	bool compute_debug_logged_ = false;
+	mutable std::string obstacle_debug_report_;
 	RoomPathPlanner planner_;
 	rc::TrajectoryController path_controller_;
 	std::unique_ptr<Custom_widget> custom_widget_;
 	std::unique_ptr<rc::Viewer2D> viewer_2d_;
 
 	void load_params();
+	void log_first_compute_once();
+	std::uint64_t current_time_ms() const;
+	bool sync_world_state(std::uint64_t timestamp_ms);
+	std::optional<PlanningStep> build_planning_step(std::uint64_t timestamp_ms);
+	bool ensure_current_plan(const PlanningStep &step);
 	bool refresh_graph_state();
 	void update_custom_widget(const std::optional<RobotPose> &robot_pose);
 	std::optional<std::vector<Eigen::Vector2f>> read_room_polygon() const;
+	Polygons read_obstacle_polygons(std::uint64_t timestamp_ms) const;
+	Polygon make_obstacle_polygon(const Eigen::Vector2f &center,
+	                             float yaw,
+	                             float width_m,
+	                             float depth_m) const;
 	std::optional<RobotPose> read_robot_pose_in_room(std::uint64_t timestamp_ms) const;
 	std::optional<TargetInfo> read_target_in_room(std::uint64_t timestamp_ms) const;
 	void set_manual_target(const QPointF &point);

@@ -24,287 +24,470 @@
 #include <limits>
 #include <queue>
 
-float RoomPathPlanner::signed_area(const Polygon &polygon)
+// =====================================================================
+// File-local helper: distance from point to nearest edge of a polygon
+// =====================================================================
+static float dist_to_boundary(const Eigen::Vector2f &p,
+                               const std::vector<Eigen::Vector2f> &poly)
 {
-    if (polygon.size() < 3)
-        return 0.f;
-
-    float area = 0.f;
-    for (std::size_t index = 0; index < polygon.size(); ++index)
+    float best = std::numeric_limits<float>::max();
+    const int n = static_cast<int>(poly.size());
+    for (int i = 0; i < n; ++i)
     {
-        const auto &current = polygon[index];
-        const auto &next = polygon[(index + 1) % polygon.size()];
-        area += current.x() * next.y() - next.x() * current.y();
+        const auto &a = poly[i];
+        const auto &b = poly[(i + 1) % n];
+        const Eigen::Vector2f ab = b - a;
+        const float len_sq = ab.squaredNorm();
+        const float t = len_sq > 1e-10f
+            ? std::clamp((p - a).dot(ab) / len_sq, 0.f, 1.f)
+            : 0.f;
+        best = std::min(best, (p - (a + t * ab)).norm());
     }
-    return 0.5f * area;
+    return best;
 }
 
-bool RoomPathPlanner::point_in_polygon(const Polygon &polygon, const Eigen::Vector2f &point)
+// =====================================================================
+// Point-in-polygon — ray casting (reference implementation)
+// =====================================================================
+bool RoomPathPlanner::point_in_polygon(const Polygon &poly, const Eigen::Vector2f &p)
 {
     bool inside = false;
-    for (std::size_t i = 0, j = polygon.size() - 1; i < polygon.size(); j = i++)
+    const int n = static_cast<int>(poly.size());
+    for (int i = 0, j = n - 1; i < n; j = i++)
     {
-        const auto &a = polygon[i];
-        const auto &b = polygon[j];
-        const bool intersects = ((a.y() > point.y()) != (b.y() > point.y()))
-            and (point.x() < (b.x() - a.x()) * (point.y() - a.y()) /
-                std::max(k_epsilon, b.y() - a.y()) + a.x());
-        if (intersects)
+        const auto &vi = poly[i];
+        const auto &vj = poly[j];
+        if (((vi.y() > p.y()) != (vj.y() > p.y())) &&
+            (p.x() < (vj.x() - vi.x()) * (p.y() - vi.y()) / (vj.y() - vi.y()) + vi.x()))
             inside = !inside;
     }
     return inside;
 }
 
-float RoomPathPlanner::distance_to_segment(const Eigen::Vector2f &point,
-                                           const Eigen::Vector2f &seg_a,
-                                           const Eigen::Vector2f &seg_b)
+// =====================================================================
+// Proper segment-segment intersection (endpoints excluded)
+// =====================================================================
+bool RoomPathPlanner::segments_intersect_proper(const Eigen::Vector2f &a1,
+                                                const Eigen::Vector2f &a2,
+                                                const Eigen::Vector2f &b1,
+                                                const Eigen::Vector2f &b2)
 {
-    const Eigen::Vector2f ab = seg_b - seg_a;
-    const float denom = ab.squaredNorm();
-    if (denom < k_epsilon)
-        return (point - seg_a).norm();
+    auto cross2 = [](const Eigen::Vector2f &u, const Eigen::Vector2f &v)
+    { return u.x() * v.y() - u.y() * v.x(); };
 
-    const float t = std::clamp((point - seg_a).dot(ab) / denom, 0.f, 1.f);
-    const Eigen::Vector2f projection = seg_a + t * ab;
-    return (point - projection).norm();
+    const Eigen::Vector2f d1 = a2 - a1, d2 = b2 - b1, d3 = b1 - a1;
+    const float denom = cross2(d1, d2);
+    if (std::abs(denom) < 1e-10f) return false;
+    const float t = cross2(d3, d2) / denom;
+    const float u = cross2(d3, d1) / denom;
+    return (t > k_epsilon && t < 1.f - k_epsilon &&
+            u > k_epsilon && u < 1.f - k_epsilon);
 }
 
-float RoomPathPlanner::distance_to_polygon_edges(const Polygon &polygon, const Eigen::Vector2f &point)
+// =====================================================================
+// Subdivide polygon: insert extra vertices on edges longer than max_edge_len
+// =====================================================================
+RoomPathPlanner::Polygon RoomPathPlanner::subdivide_polygon(const Polygon &poly, float max_edge_len)
 {
-    float min_distance = std::numeric_limits<float>::max();
-    for (std::size_t index = 0; index < polygon.size(); ++index)
+    const int n = static_cast<int>(poly.size());
+    if (n < 3) return poly;
+
+    Polygon result;
+    result.reserve(n * 3);
+    for (int i = 0; i < n; ++i)
     {
-        const auto &a = polygon[index];
-        const auto &b = polygon[(index + 1) % polygon.size()];
-        min_distance = std::min(min_distance, distance_to_segment(point, a, b));
-    }
-    return min_distance;
-}
-
-bool RoomPathPlanner::is_clear_point(const Polygon &polygon, const Eigen::Vector2f &point, float clearance)
-{
-    return point_in_polygon(polygon, point) and distance_to_polygon_edges(polygon, point) >= clearance;
-}
-
-bool RoomPathPlanner::line_intersection(const Eigen::Vector2f &point_a,
-                                        const Eigen::Vector2f &dir_a,
-                                        const Eigen::Vector2f &point_b,
-                                        const Eigen::Vector2f &dir_b,
-                                        Eigen::Vector2f &intersection)
-{
-    const float cross = dir_a.x() * dir_b.y() - dir_a.y() * dir_b.x();
-    if (std::abs(cross) < k_epsilon)
-        return false;
-
-    const Eigen::Vector2f delta = point_b - point_a;
-    const float t = (delta.x() * dir_b.y() - delta.y() * dir_b.x()) / cross;
-    intersection = point_a + t * dir_a;
-    return true;
-}
-
-bool RoomPathPlanner::segment_is_navigable(const Polygon &polygon,
-                                           const Eigen::Vector2f &from,
-                                           const Eigen::Vector2f &to,
-                                           float clearance,
-                                           float sample_step)
-{
-    const float length = (to - from).norm();
-    if (length < k_epsilon)
-        return true;
-
-    const int samples = std::max(2, static_cast<int>(std::ceil(length / std::max(sample_step, 0.05f))));
-    for (int step = 1; step < samples; ++step)
-    {
-        const float ratio = static_cast<float>(step) / static_cast<float>(samples);
-        const Eigen::Vector2f point = from + ratio * (to - from);
-        if (!is_clear_point(polygon, point, clearance))
-            return false;
-    }
-    return true;
-}
-
-RoomPathPlanner::Polygon RoomPathPlanner::deduplicate_points(Polygon points, float threshold)
-{
-    Polygon deduplicated;
-    for (const auto &point : points)
-    {
-        const bool exists = std::ranges::any_of(deduplicated, [&](const auto &other)
+        const auto &a = poly[i];
+        const auto &b = poly[(i + 1) % n];
+        result.push_back(a);
+        const float len = (b - a).norm();
+        if (len > max_edge_len)
         {
-            return (point - other).norm() < threshold;
-        });
-        if (!exists)
-            deduplicated.push_back(point);
+            const int segs = static_cast<int>(std::ceil(len / max_edge_len));
+            for (int s = 1; s < segs; ++s)
+                result.push_back(a + (static_cast<float>(s) / segs) * (b - a));
+        }
     }
-    return deduplicated;
+    return result;
 }
 
-std::vector<Eigen::Vector2f> RoomPathPlanner::compute_inner_polygon(const Polygon &polygon) const
+// =====================================================================
+// Sampling-based inward polygon offset (robust at concave corners).
+// For each vertex, sweeps 36 candidate directions at `offset` radius and
+// picks the interior candidate with maximum wall clearance.
+// Falls back to shorter radii for tight corners.
+// =====================================================================
+RoomPathPlanner::Polygon RoomPathPlanner::offset_polygon_inward(const Polygon &poly, float offset)
 {
-    if (polygon.size() < 3)
-        return {};
+    const int n = static_cast<int>(poly.size());
+    if (n < 3) return {};
 
-    const float orientation = signed_area(polygon);
-    if (std::abs(orientation) < k_epsilon)
-        return {};
+    Polygon result(n);
+    constexpr int num_angles = 36;
 
-    std::vector<Eigen::Vector2f> shifted_vertices;
-    shifted_vertices.reserve(polygon.size());
-
-    for (std::size_t index = 0; index < polygon.size(); ++index)
+    for (int i = 0; i < n; ++i)
     {
-        const Eigen::Vector2f prev = polygon[(index + polygon.size() - 1) % polygon.size()];
-        const Eigen::Vector2f curr = polygon[index];
-        const Eigen::Vector2f next = polygon[(index + 1) % polygon.size()];
+        Eigen::Vector2f best = poly[i];
+        float best_clearance = 0.f;
 
-        const Eigen::Vector2f edge_prev = (curr - prev).normalized();
-        const Eigen::Vector2f edge_next = (next - curr).normalized();
-        const Eigen::Vector2f normal_prev = orientation > 0.f
-            ? Eigen::Vector2f(-edge_prev.y(), edge_prev.x())
-            : Eigen::Vector2f(edge_prev.y(), -edge_prev.x());
-        const Eigen::Vector2f normal_next = orientation > 0.f
-            ? Eigen::Vector2f(-edge_next.y(), edge_next.x())
-            : Eigen::Vector2f(edge_next.y(), -edge_next.x());
-
-        Eigen::Vector2f intersection;
-        if (!line_intersection(prev + normal_prev * params.clearance_m,
-                               edge_prev,
-                               curr + normal_next * params.clearance_m,
-                               edge_next,
-                               intersection))
-            return {};
-
-        shifted_vertices.push_back(intersection);
-    }
-
-    for (const auto &vertex : shifted_vertices)
-    {
-        if (!is_clear_point(polygon, vertex, params.clearance_m * 0.5f))
-            return {};
-    }
-
-    return shifted_vertices;
-}
-
-std::optional<RoomPathPlanner::PathPlan> RoomPathPlanner::plan_path(const Polygon &room_polygon,
-                                                                    const Polygon &inner_polygon,
-                                                                    const Eigen::Vector2f &robot_pos,
-                                                                    const Eigen::Vector2f &target_room_pos) const
-{
-    if (room_polygon.size() < 3)
-        return std::nullopt;
-
-    const Polygon &collision_polygon = room_polygon;
-    Polygon nodes;
-    nodes.push_back(robot_pos);
-    nodes.push_back(target_room_pos);
-    nodes.insert(nodes.end(), inner_polygon.begin(), inner_polygon.end());
-
-    float min_x = std::numeric_limits<float>::max();
-    float min_y = std::numeric_limits<float>::max();
-    float max_x = std::numeric_limits<float>::lowest();
-    float max_y = std::numeric_limits<float>::lowest();
-    for (const auto &point : collision_polygon)
-    {
-        min_x = std::min(min_x, point.x());
-        min_y = std::min(min_y, point.y());
-        max_x = std::max(max_x, point.x());
-        max_y = std::max(max_y, point.y());
-    }
-
-    for (float x = min_x; x <= max_x; x += params.grid_resolution_m)
-        for (float y = min_y; y <= max_y; y += params.grid_resolution_m)
+        for (int a = 0; a < num_angles; ++a)
         {
-            Eigen::Vector2f point{x, y};
-            if (is_clear_point(collision_polygon, point, params.clearance_m))
-                nodes.push_back(point);
+            const float angle = 2.f * static_cast<float>(M_PI) * a / num_angles;
+            const Eigen::Vector2f cand = poly[i] + Eigen::Vector2f(std::cos(angle), std::sin(angle)) * offset;
+            if (!point_in_polygon(poly, cand)) continue;
+            const float c = dist_to_boundary(cand, poly);
+            if (c > best_clearance) { best = cand; best_clearance = c; }
         }
 
-    nodes = deduplicate_points(std::move(nodes));
-    if (nodes.size() < 2)
-        return std::nullopt;
-
-    auto nearest_navigable = [&](const Eigen::Vector2f &goal)
-    {
-        std::size_t best_index = 0;
-        float best_distance = std::numeric_limits<float>::max();
-        for (std::size_t index = 0; index < nodes.size(); ++index)
+        // Fallback: shorter radii when offset doesn't fit
+        if (best_clearance < 0.01f)
         {
-            if (!is_clear_point(collision_polygon, nodes[index], params.clearance_m))
-                continue;
-            const float distance = (nodes[index] - goal).squaredNorm();
-            if (distance < best_distance)
+            for (int a = 0; a < num_angles; ++a)
             {
-                best_distance = distance;
-                best_index = index;
+                const float angle = 2.f * static_cast<float>(M_PI) * a / num_angles;
+                const Eigen::Vector2f dir(std::cos(angle), std::sin(angle));
+                for (int r = 9; r >= 1; --r)
+                {
+                    const Eigen::Vector2f cand = poly[i] + dir * (offset * r / 10.f);
+                    if (!point_in_polygon(poly, cand)) continue;
+                    const float c = dist_to_boundary(cand, poly);
+                    if (c > best_clearance) { best = cand; best_clearance = c; }
+                }
             }
         }
-        return best_index;
-    };
-
-    constexpr std::size_t start_index = 0;
-    std::size_t goal_index = 1;
-    if (!is_clear_point(collision_polygon, target_room_pos, params.clearance_m))
-        goal_index = nearest_navigable(target_room_pos);
-
-    std::vector<std::vector<std::pair<int, float>>> adjacency(nodes.size());
-    for (std::size_t from = 0; from < nodes.size(); ++from)
-        for (std::size_t to = from + 1; to < nodes.size(); ++to)
-        {
-            const float distance = (nodes[to] - nodes[from]).norm();
-            if (distance > params.connection_radius_m and !(from < 2 or to < 2))
-                continue;
-            if (!segment_is_navigable(collision_polygon, nodes[from], nodes[to], params.clearance_m, params.grid_resolution_m * 0.5f))
-                continue;
-            adjacency[from].emplace_back(static_cast<int>(to), distance);
-            adjacency[to].emplace_back(static_cast<int>(from), distance);
-        }
-
-    const auto heuristic = [&](int index)
-    {
-        return (nodes[static_cast<std::size_t>(index)] - nodes[goal_index]).norm();
-    };
-
-    std::vector<float> g_score(nodes.size(), std::numeric_limits<float>::max());
-    std::vector<int> parent(nodes.size(), -1);
-    using QueueItem = std::pair<float, int>;
-    std::priority_queue<QueueItem, std::vector<QueueItem>, std::greater<>> open_set;
-    g_score[start_index] = 0.f;
-    open_set.emplace(heuristic(static_cast<int>(start_index)), static_cast<int>(start_index));
-
-    while (!open_set.empty())
-    {
-        const auto [_, current] = open_set.top();
-        open_set.pop();
-        if (current == static_cast<int>(goal_index))
-            break;
-
-        for (const auto &[neighbor, weight] : adjacency[static_cast<std::size_t>(current)])
-        {
-            const float tentative = g_score[static_cast<std::size_t>(current)] + weight;
-            if (tentative >= g_score[static_cast<std::size_t>(neighbor)])
-                continue;
-            g_score[static_cast<std::size_t>(neighbor)] = tentative;
-            parent[static_cast<std::size_t>(neighbor)] = current;
-            open_set.emplace(tentative + heuristic(neighbor), neighbor);
-        }
+        result[i] = best;
     }
-
-    if (!std::isfinite(g_score[goal_index]))
-        return std::nullopt;
-
-    std::vector<Eigen::Vector2f> path;
-    for (int current = static_cast<int>(goal_index); current >= 0; current = parent[static_cast<std::size_t>(current)])
-    {
-        path.push_back(nodes[static_cast<std::size_t>(current)]);
-        if (current == static_cast<int>(start_index))
-            break;
-    }
-    std::reverse(path.begin(), path.end());
-    if (path.empty())
-        return std::nullopt;
-
-    if ((path.back() - target_room_pos).norm() > params.waypoint_tolerance_m)
-        path.push_back(target_room_pos);
-
-    return PathPlan{.room_path = std::move(path), .graph_nodes = std::move(nodes)};
+    return result;
 }
+
+// =====================================================================
+// Sampling-based outward polygon offset (Minkowski expansion for obstacles).
+// For each vertex, sweeps 36 candidate directions and picks the exterior
+// candidate with maximum clearance from the obstacle boundary.
+// =====================================================================
+RoomPathPlanner::Polygon RoomPathPlanner::offset_polygon_outward(const Polygon &poly, float offset)
+{
+    const int n = static_cast<int>(poly.size());
+    if (n < 3) return poly;
+
+    Polygon result(n);
+    constexpr int num_angles = 36;
+
+    for (int i = 0; i < n; ++i)
+    {
+        Eigen::Vector2f best = poly[i];
+        float best_clearance = -1.f;
+
+        for (int a = 0; a < num_angles; ++a)
+        {
+            const float angle = 2.f * static_cast<float>(M_PI) * a / num_angles;
+            const Eigen::Vector2f cand = poly[i] + Eigen::Vector2f(std::cos(angle), std::sin(angle)) * offset;
+            if (point_in_polygon(poly, cand)) continue; // must be OUTSIDE obstacle
+            const float c = dist_to_boundary(cand, poly);
+            if (c > best_clearance) { best = cand; best_clearance = c; }
+        }
+
+        if (best_clearance < 0.01f)
+        {
+            for (int a = 0; a < num_angles; ++a)
+            {
+                const float angle = 2.f * static_cast<float>(M_PI) * a / num_angles;
+                const Eigen::Vector2f dir(std::cos(angle), std::sin(angle));
+                for (int r = 9; r >= 1; --r)
+                {
+                    const Eigen::Vector2f cand = poly[i] + dir * (offset * r / 10.f);
+                    if (point_in_polygon(poly, cand)) continue;
+                    const float c = dist_to_boundary(cand, poly);
+                    if (c > best_clearance) { best = cand; best_clearance = c; }
+                }
+            }
+        }
+        result[i] = best;
+    }
+    return result;
+}
+
+// =====================================================================
+// Densify a path to a given point spacing
+// =====================================================================
+RoomPathPlanner::Polygon RoomPathPlanner::densify_path(const Polygon &path, float spacing)
+{
+    if (path.size() < 2) return path;
+    const float sp = std::max(spacing, 0.05f);
+    Polygon dense;
+    dense.push_back(path.front());
+    for (std::size_t i = 0; i + 1 < path.size(); ++i)
+    {
+        const Eigen::Vector2f seg = path[i + 1] - path[i];
+        const float len = seg.norm();
+        const int nsamp = std::max(1, static_cast<int>(std::ceil(len / sp)));
+        for (int s = 1; s <= nsamp; ++s)
+            dense.push_back(path[i] + (static_cast<float>(s) / nsamp) * seg);
+    }
+    return dense;
+}
+
+// =====================================================================
+// compute_inner_polygon — sampling-based, robust for any room shape.
+// Subdivides long edges first to get more nav nodes along straight walls.
+// =====================================================================
+std::vector<Eigen::Vector2f> RoomPathPlanner::compute_inner_polygon(const Polygon &polygon)  const
+{
+    if (polygon.size() < 3) return {};
+    // Subdivide to add intermediate nodes on long edges
+    const float max_edge = std::max(params.clearance_m * 2.f, 0.5f);
+    const Polygon sub = subdivide_polygon(polygon, max_edge);
+    return offset_polygon_inward(sub, params.clearance_m);
+}
+
+// =====================================================================
+// plan_path — visibility-graph A* (reference approach):
+//   1. Expand obstacles (Minkowski)
+//   2. Build nav nodes from subdivided inner polygon + obstacle bypass nodes
+//   3. Build visibility graph with proper segment-intersection checks
+//   4. Add robot_pos and target temporarily as nodes n and n+1
+//   5. Dijkstra, reconstruct, densify
+// =====================================================================
+std::optional<RoomPathPlanner::PathPlan> RoomPathPlanner::plan_path(
+    const Polygon &room_polygon,
+    const Polygon &inner_polygon,
+    const Polygons &obstacle_polygons,
+    const Eigen::Vector2f &robot_pos,
+    const Eigen::Vector2f &target_room_pos) const
+{
+    if (room_polygon.size() < 3) return std::nullopt;
+
+    // ----- Expand obstacles outward by half the robot width -----
+    const float obs_clearance = std::max(0.01f, params.robot_width_m * 0.5f);
+    Polygons expanded_obs;
+    expanded_obs.reserve(obstacle_polygons.size());
+    for (const auto &obs : obstacle_polygons)
+        if (obs.size() >= 3)
+            expanded_obs.push_back(offset_polygon_outward(obs, obs_clearance));
+
+    // ----- Helpers -----
+    auto inside_any_obs = [&](const Eigen::Vector2f &p) -> bool
+    {
+        for (const auto &obs : expanded_obs)
+            if (point_in_polygon(obs, p)) return true;
+        for (const auto &obs : obstacle_polygons)
+            if (point_in_polygon(obs, p)) return true;
+        return false;
+    };
+
+    auto seg_crosses_poly = [&](const Eigen::Vector2f &a,
+                                const Eigen::Vector2f &b,
+                                const Polygon &poly) -> bool
+    {
+        const int n = static_cast<int>(poly.size());
+        for (int i = 0; i < n; ++i)
+            if (segments_intersect_proper(a, b, poly[i], poly[(i + 1) % n]))
+                return true;
+        return false;
+    };
+
+    // inner_boundary used only as a soft wall constraint (keeps path off walls)
+    const bool have_inner = inner_polygon.size() >= 3;
+
+    // Visibility: reference approach — proper intersection, no sampling false-negatives
+    auto is_visible = [&](const Eigen::Vector2f &a, const Eigen::Vector2f &b) -> bool
+    {
+        if (!point_in_polygon(room_polygon, a) || !point_in_polygon(room_polygon, b))
+            return false;
+        if (inside_any_obs(a) || inside_any_obs(b)) return false;
+        // Midpoint check (catches pass-through)
+        if (inside_any_obs(0.5f * (a + b))) return false;
+        // Must not cross room boundary
+        if (seg_crosses_poly(a, b, room_polygon)) return false;
+        // Must not cross inner polygon boundary (wall clearance constraint)
+        if (have_inner && seg_crosses_poly(a, b, inner_polygon)) return false;
+        // Must not cross any obstacle boundary
+        for (const auto &obs : expanded_obs)
+            if (seg_crosses_poly(a, b, obs)) return false;
+        for (const auto &obs : obstacle_polygons)
+            if (seg_crosses_poly(a, b, obs)) return false;
+        return true;
+    };
+
+    // ----- Sanity: robot must be inside the room -----
+    if (!point_in_polygon(room_polygon, robot_pos)) return std::nullopt;
+
+    // ----- Direct line-of-sight shortcut -----
+    if (is_visible(robot_pos, target_room_pos))
+    {
+        Polygon direct{robot_pos, target_room_pos};
+        return PathPlan{
+            .room_path = densify_path(direct, params.path_sample_spacing_m),
+            .graph_nodes = {robot_pos, target_room_pos}
+        };
+    }
+
+    // ----- Build nav nodes -----
+    // Use subdivided inner polygon (or room polygon offset-inward on the fly)
+    const Polygon &nav_boundary = have_inner ? inner_polygon : room_polygon;
+    const float max_edge = std::max(params.clearance_m * 2.f, 0.8f);
+    Polygon nodes = subdivide_polygon(nav_boundary, max_edge);
+
+    // Add bypass nodes around each obstacle vertex
+    constexpr int num_angles = 24;
+    for (std::size_t oi = 0; oi < obstacle_polygons.size(); ++oi)
+    {
+        const auto &obs = obstacle_polygons[oi];
+        if (obs.size() < 3) continue;
+        for (const auto &vertex : obs)
+        {
+            Eigen::Vector2f best = vertex;
+            float best_c = -1.f;
+            for (int a = 0; a < num_angles; ++a)
+            {
+                const float angle = 2.f * static_cast<float>(M_PI) * a / num_angles;
+                const Eigen::Vector2f cand =
+                    vertex + Eigen::Vector2f(std::cos(angle), std::sin(angle)) * obs_clearance * 1.3f;
+                if (!point_in_polygon(room_polygon, cand)) continue;
+                if (inside_any_obs(cand)) continue;
+                const float c = dist_to_boundary(cand, obs);
+                if (c > best_c) { best = cand; best_c = c; }
+            }
+            if (best_c > 0.f) nodes.push_back(best);
+        }
+    }
+
+    if (nodes.empty()) return std::nullopt;
+
+    // ----- Visibility graph over nav nodes (static part) -----
+    const int n = static_cast<int>(nodes.size());
+    struct Edge { int to; float cost; };
+    std::vector<std::vector<Edge>> adj(n);
+    for (int i = 0; i < n; ++i)
+        for (int j = i + 1; j < n; ++j)
+            if (is_visible(nodes[i], nodes[j]))
+            {
+                const float c = (nodes[i] - nodes[j]).norm();
+                adj[i].push_back({j, c});
+                adj[j].push_back({i, c});
+            }
+
+    // ----- Temporarily add robot_pos (si) and target_room_pos (gi) -----
+    const int si = n, gi = n + 1;
+    adj.resize(n + 2);
+    for (int i = 0; i < n; ++i)
+    {
+        if (is_visible(robot_pos, nodes[i]))
+        {
+            const float c = (robot_pos - nodes[i]).norm();
+            adj[si].push_back({i, c});
+            adj[i].push_back({si, c});
+        }
+        if (is_visible(target_room_pos, nodes[i]))
+        {
+            const float c = (target_room_pos - nodes[i]).norm();
+            adj[gi].push_back({i, c});
+            adj[i].push_back({gi, c});
+        }
+    }
+
+    // ----- Dijkstra from si to gi -----
+    const int total = n + 2;
+    std::vector<float> dist_v(total, std::numeric_limits<float>::infinity());
+    std::vector<int> parent(total, -1);
+    using QE = std::pair<float, int>;
+    std::priority_queue<QE, std::vector<QE>, std::greater<>> pq;
+    dist_v[si] = 0.f;
+    pq.push({0.f, si});
+
+    while (!pq.empty())
+    {
+        auto [d, u] = pq.top(); pq.pop();
+        if (d > dist_v[u]) continue;
+        if (u == gi) break;
+        for (const auto &[to, cost] : adj[u])
+        {
+            const float nd = d + cost;
+            if (nd < dist_v[to])
+            {
+                dist_v[to] = nd;
+                parent[to] = u;
+                pq.push({nd, to});
+            }
+        }
+    }
+
+    if (parent[gi] == -1) return std::nullopt;
+
+    // ----- Reconstruct path -----
+    std::vector<int> idx_path;
+    for (int v = gi; v != -1; v = parent[v])
+        idx_path.push_back(v);
+    std::reverse(idx_path.begin(), idx_path.end());
+
+    auto idx_to_pt = [&](int idx) -> Eigen::Vector2f
+    {
+        if (idx == si) return robot_pos;
+        if (idx == gi) return target_room_pos;
+        return nodes[idx];
+    };
+
+    Polygon path;
+    path.reserve(idx_path.size());
+    for (int idx : idx_path)
+        path.push_back(idx_to_pt(idx));
+
+    if (path.size() < 2) return std::nullopt;
+
+    // ----- Catmull-Rom spline smoothing -----
+    // Smooth the raw waypoints; fall back to straight segment on visibility failure.
+    if (path.size() >= 3)
+    {
+        const float sp = std::max(params.path_sample_spacing_m, 0.05f);
+        Polygon smoothed;
+        smoothed.push_back(path.front());
+
+        for (std::size_t i = 0; i + 1 < path.size(); ++i)
+        {
+            const auto &p0 = path[i > 0 ? i - 1 : 0];
+            const auto &p1 = path[i];
+            const auto &p2 = path[i + 1];
+            const auto &p3 = path[i + 2 < path.size() ? i + 2 : path.size() - 1];
+
+            const int samples = std::max(1, static_cast<int>(
+                std::ceil((p2 - p1).norm() / sp)));
+
+            Polygon curve;
+            curve.reserve(samples);
+            bool valid = true;
+            Eigen::Vector2f prev = p1;
+
+            for (int s = 1; s <= samples; ++s)
+            {
+                const float t  = static_cast<float>(s) / samples;
+                const float t2 = t * t, t3 = t2 * t;
+                const Eigen::Vector2f pt = 0.5f * (
+                    (2.f * p1) +
+                    (-p0 + p2) * t +
+                    (2.f * p0 - 5.f * p1 + 4.f * p2 - p3) * t2 +
+                    (-p0 + 3.f * p1 - 3.f * p2 + p3) * t3);
+                if (!is_visible(prev, pt)) { valid = false; break; }
+                curve.push_back(pt);
+                prev = pt;
+            }
+
+            if (valid)
+                smoothed.insert(smoothed.end(), curve.begin(), curve.end());
+            else
+                smoothed.push_back(p2); // fall back: keep original waypoint
+        }
+
+        if (smoothed.size() >= 2)
+            path = std::move(smoothed);
+    }
+
+    // Collect all nav nodes for visualization
+    Polygon all_nodes = nodes;
+    all_nodes.push_back(robot_pos);
+    all_nodes.push_back(target_room_pos);
+
+    return PathPlan{
+        .room_path = densify_path(path, params.path_sample_spacing_m),
+        .graph_nodes = std::move(all_nodes)
+    };
+}
+

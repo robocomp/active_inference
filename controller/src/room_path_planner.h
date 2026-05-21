@@ -29,12 +29,15 @@ class RoomPathPlanner
 {
 public:
     using Polygon = std::vector<Eigen::Vector2f>;
+    using Polygons = std::vector<Polygon>;
 
     struct Params
     {
         float clearance_m = 0.4f;
+        float robot_width_m = 0.4f;
         float grid_resolution_m = 0.35f;
         float connection_radius_m = 1.2f;
+        float path_sample_spacing_m = 0.15f;
         float waypoint_tolerance_m = 0.25f;
     };
 
@@ -49,30 +52,31 @@ public:
     std::vector<Eigen::Vector2f> compute_inner_polygon(const Polygon &polygon) const;
     std::optional<PathPlan> plan_path(const Polygon &room_polygon,
                                       const Polygon &inner_polygon,
+                                      const Polygons &obstacle_polygons,
                                       const Eigen::Vector2f &robot_pos,
                                       const Eigen::Vector2f &target_room_pos) const;
 
 private:
-    static constexpr float k_epsilon = 1e-4f;
+    static constexpr float k_epsilon = 1e-5f;
 
-    static float signed_area(const Polygon &polygon);
-    static bool point_in_polygon(const Polygon &polygon, const Eigen::Vector2f &point);
-    static float distance_to_segment(const Eigen::Vector2f &point,
-                                     const Eigen::Vector2f &seg_a,
-                                     const Eigen::Vector2f &seg_b);
-    static float distance_to_polygon_edges(const Polygon &polygon, const Eigen::Vector2f &point);
-    static bool is_clear_point(const Polygon &polygon, const Eigen::Vector2f &point, float clearance);
-    static bool line_intersection(const Eigen::Vector2f &point_a,
-                                  const Eigen::Vector2f &dir_a,
-                                  const Eigen::Vector2f &point_b,
-                                  const Eigen::Vector2f &dir_b,
-                                  Eigen::Vector2f &intersection);
-    static bool segment_is_navigable(const Polygon &polygon,
-                                     const Eigen::Vector2f &from,
-                                     const Eigen::Vector2f &to,
-                                     float clearance,
-                                     float sample_step);
-    static Polygon deduplicate_points(Polygon points, float threshold = 0.05f);
+    // Point-in-polygon (ray casting)
+    static bool point_in_polygon(const Polygon &poly, const Eigen::Vector2f &p);
+
+    // Proper (non-touching) segment-segment intersection
+    static bool segments_intersect_proper(const Eigen::Vector2f &a1, const Eigen::Vector2f &a2,
+                                          const Eigen::Vector2f &b1, const Eigen::Vector2f &b2);
+
+    // Insert extra vertices on long edges
+    static Polygon subdivide_polygon(const Polygon &poly, float max_edge_len);
+
+    // Sampling-based inward offset (robust at any polygon shape, including concave)
+    static Polygon offset_polygon_inward(const Polygon &poly, float offset);
+
+    // Sampling-based outward offset (Minkowski expansion for obstacles)
+    static Polygon offset_polygon_outward(const Polygon &poly, float offset);
+
+    // Densify a path to a given spacing
+    static Polygon densify_path(const Polygon &path, float spacing);
 };
 
 #endif

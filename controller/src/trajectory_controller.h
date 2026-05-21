@@ -5,6 +5,8 @@
 #include <random>
 #include <Eigen/Dense>
 
+#include "lidar_buffer_types.h"
+
 namespace rc
 {
 /**
@@ -268,9 +270,9 @@ public:
     TrajectoryController() = default;
 
     void set_path(const std::vector<Eigen::Vector2f>& path_room);
-    ControlOutput compute(const std::vector<Eigen::Vector3f>& lidar_points,
-                          const Eigen::Affine2f& robot_pose);
+    ControlOutput compute(const Eigen::Affine2f& robot_pose);
     void stop();
+    void set_lidar_buffer(LidarPointBuffer *buffer) { lidar_buffer_ = buffer; }
 
     void set_control_mode(ControlMode mode) { control_mode_ = mode; }
     ControlMode control_mode() const { return control_mode_; }
@@ -303,6 +305,7 @@ private:
     // ---- ESDF ----
     std::vector<float> esdf_data_;
     int esdf_N_ = 0;
+    LidarPointBuffer *lidar_buffer_ = nullptr;
 
     // Static obstacles (furniture) — pre-sampled points in room frame
     std::vector<Eigen::Vector2f> static_obstacle_points_room_;
@@ -376,6 +379,7 @@ private:
     // ---- Methods ----
     void build_esdf(const std::vector<Eigen::Vector3f>& lidar_points,
                     const Eigen::Affine2f& robot_pose);
+    std::vector<Eigen::Vector3f> read_lidar_points_robot(const Eigen::Affine2f& robot_pose) const;
     float query_esdf(float rx, float ry) const;
     Eigen::Vector2f query_esdf_gradient(float rx, float ry) const;
 

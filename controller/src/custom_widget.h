@@ -38,7 +38,7 @@
 class Custom_widget : public QWidget
 {
 public:
-    Custom_widget()
+    explicit Custom_widget(QWidget *parent = nullptr) : QWidget(parent)
     {
         auto *main_layout = new QVBoxLayout(this);
         main_layout->setContentsMargins(8, 8, 8, 8);
@@ -65,13 +65,23 @@ public:
 
         main_layout->addWidget(pose_panel);
 
+        // ---- toolbar row ----
+        auto *toolbar = new QFrame(this);
+        toolbar->setFrameShape(QFrame::StyledPanel);
+        auto *toolbar_layout = new QHBoxLayout(toolbar);
+        toolbar_layout->setContentsMargins(4, 2, 4, 2);
+        toolbar_layout->setSpacing(6);
+        lidar_toggle_btn = new QPushButton("Lidar points", toolbar);
+        lidar_toggle_btn->setCheckable(true);
+        lidar_toggle_btn->setChecked(true);
+        toolbar_layout->addWidget(lidar_toggle_btn);
+        toolbar_layout->addStretch();
+        main_layout->addWidget(toolbar);
+
         frame = new QFrame(this);
         frame->setFrameShape(QFrame::StyledPanel);
         frame->setFrameShadow(QFrame::Sunken);
         frame->setMinimumSize(320, 320);
-        auto *frame_layout = new QVBoxLayout(frame);
-        frame_layout->setContentsMargins(0, 0, 0, 0);
-        frame_layout->setSpacing(0);
         main_layout->addWidget(frame, 1);
     }
 	~Custom_widget()
@@ -87,6 +97,7 @@ public:
 
 public:
     QFrame *frame = nullptr;
+    QPushButton *lidar_toggle_btn = nullptr;
 
 private:
     QLabel *pose_value_ = nullptr;

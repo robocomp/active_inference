@@ -182,8 +182,6 @@ void TrajectoryController::set_path(const std::vector<Eigen::Vector2f>& path_roo
     blockage_streak_ = 0;
     blockage_cooldown_ = 0;
 
-    if (active_)
-        std::cout << "[TrajectoryCtrl] Path set: " << path_room_.size() << " waypoints\n";
 }
 
 void TrajectoryController::stop()
@@ -221,8 +219,6 @@ void TrajectoryController::set_static_obstacles(
             }
         }
     }
-    std::cout << "[TrajectoryCtrl] Set " << obstacles_room.size() << " static obstacles → "
-              << static_obstacle_points_room_.size() << " sampled points\n";
 }
 
 void TrajectoryController::set_room_boundary(const std::vector<Eigen::Vector2f>& polygon,
@@ -243,8 +239,6 @@ void TrajectoryController::set_room_boundary(const std::vector<Eigen::Vector2f>&
             room_boundary_points_room_.push_back(a + t * (b - a));
         }
     }
-    std::cout << "[TrajectoryCtrl] Room boundary: " << n << " vertices → "
-              << room_boundary_points_room_.size() << " sampled points\n";
 }
 
 // ============================================================================
@@ -338,8 +332,6 @@ void TrajectoryController::relax_path(int iterations)
         }
     }
 
-    std::cout << "[TrajectoryCtrl] Path relaxed: " << n << " waypoints, "
-              << iterations << " iterations\n";
 }
 
 std::optional<Eigen::Vector2f> TrajectoryController::current_waypoint_room() const
@@ -447,21 +439,20 @@ void TrajectoryController::smooth_path_spline()
     }
 
     path_room_ = std::move(smooth);
-    std::cout << "[TrajectoryCtrl] Path spline-smoothed: " << path_room_.size() << " points\n";
 }
 
 // ============================================================================
 // Main compute — Proper MPPI with warm-start + Gaussian perturbations
 // ============================================================================
 
-TrajectoryController::ControlOutput TrajectoryController::compute(
-    const std::vector<Eigen::Vector3f>& lidar_points,
-    const Eigen::Affine2f& robot_pose)
+TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::Affine2f& robot_pose)
 {
     refresh_active_params();
 
     ControlOutput out;
     if (!active_ || path_room_.empty()) { active_ = false; out.goal_reached = true; return out; }
+
+    const auto lidar_points = read_lidar_points_robot(robot_pose);
 
     const auto t_mppi_start = std::chrono::steady_clock::now();
 
@@ -477,7 +468,7 @@ TrajectoryController::ControlOutput TrajectoryController::compute(
     const Eigen::Vector2f goal_robot = room_to_robot(path_room_.back(), robot_pose);
     out.dist_to_goal = goal_robot.norm();
     if (out.dist_to_goal < active_params_.goal_threshold)
-    { active_ = false; out.goal_reached = true; std::cout << "[TrajectoryCtrl] Goal reached!\n"; return out; }
+    { active_ = false; out.goal_reached = true; return out; }
 
     out.min_esdf = query_esdf(0.f, 0.f);
 
@@ -1054,9 +1045,6 @@ TrajectoryController::ControlOutput TrajectoryController::compute(
                 out.blockage_radius = max_r + active_params_.robot_radius;
                 blockage_streak_ = 0;
                 blockage_cooldown_ = active_params_.blockage_cooldown_cycles;
-                std::cout << "[TrajectoryCtrl] PATH BLOCKED at ("
-                          << out.blockage_center_room.x() << ", " << out.blockage_center_room.y()
-                          << ") r=" << out.blockage_radius << "\n";
             }
         }
         else
@@ -1857,6 +1845,39 @@ void TrajectoryController::build_esdf(const std::vector<Eigen::Vector3f>& lidar_
         }
 
     for (auto& d : esdf_data_) d *= res;
+}
+
+std::vector<Eigen::Vector3f> TrajectoryController::read_lidar_points_robot(const Eigen::Affine2f& robot_pose) const
+{
+    if (lidar_buffer_ == nullptr)
+        return {};
+
+    const auto [cloud_opt] = lidar_buffer_->read_last();
+    if (!cloud_opt.has_value())
+        return {};
+
+    const auto &[xs_room, ys_room, zs_room] = cloud_opt.value();
+    const std::size_t count = std::min({xs_room.size(), ys_room.size(), zs_room.size()});
+    if (count == 0)
+        return {};
+
+    const Eigen::Affine2f robot_from_room = robot_pose.inverse();
+    std::vector<Eigen::Vector3f> lidar_points;
+    lidar_points.reserve(count);
+
+    for (std::size_t index = 0; index < count; ++index)
+    {
+        const float x_room = xs_room[index];
+        const float y_room = ys_room[index];
+        const float z_room = zs_room[index];
+        if (!std::isfinite(x_room) || !std::isfinite(y_room) || !std::isfinite(z_room))
+            continue;
+
+        const Eigen::Vector2f point_robot = robot_from_room * Eigen::Vector2f(x_room, y_room);
+        lidar_points.emplace_back(point_robot.x(), point_robot.y(), z_room);
+    }
+
+    return lidar_points;
 }
 
 float TrajectoryController::query_esdf(float rx, float ry) const

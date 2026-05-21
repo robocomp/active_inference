@@ -48,6 +48,7 @@ Viewer2D::Viewer2D(QWidget *parent, const QRectF &grid_dim, bool show_axis)
 
 Viewer2D::~Viewer2D()
 {
+    clear_lidar_items();
     clear_path_items();
     clear_polygon_item(inner_polygon_item_);
     clear_polygon_item(polygon_item_);
@@ -126,6 +127,89 @@ void Viewer2D::draw_room_polygon(const std::vector<Eigen::Vector2f> &verts)
     polygon_item_->setZValue(8);
 }
 
+void Viewer2D::set_lidar_buffer(LidarPointBuffer *buffer)
+{
+    lidar_buffer_ = buffer;
+}
+
+void Viewer2D::set_lidar_visible(bool visible)
+{
+    lidar_visible_ = visible;
+    if (!visible)
+        clear_lidar_items();
+}
+
+void Viewer2D::clear_lidar_items()
+{
+    for (auto *item : lidar_items_)
+    {
+        agv_->scene.removeItem(item);
+        delete item;
+    }
+    lidar_items_.clear();
+}
+
+void Viewer2D::draw_lidar_points_from_buffer(int max_points)
+{
+    if (!lidar_visible_)
+        return;
+    if (lidar_buffer_ == nullptr)
+        return;
+
+    const auto [cloud_opt] = lidar_buffer_->read_last();
+    if (!cloud_opt.has_value())
+    {
+        clear_lidar_items();
+        return;
+    }
+
+    const auto &[xs, ys, zs] = cloud_opt.value();
+    Q_UNUSED(zs)
+
+    const std::size_t count = std::min(xs.size(), ys.size());
+    if (count == 0)
+    {
+        clear_lidar_items();
+        return;
+    }
+
+    const int clamped_max_points = std::max(1, max_points);
+    const std::size_t stride = std::max<std::size_t>(1, count / static_cast<std::size_t>(clamped_max_points));
+    const std::size_t draw_count = (count + stride - 1) / stride;
+
+    while (lidar_items_.size() > draw_count)
+    {
+        auto *item = lidar_items_.back();
+        agv_->scene.removeItem(item);
+        delete item;
+        lidar_items_.pop_back();
+    }
+
+    static const QRectF ellipse_rect(-1.5, -1.5, 3.0, 3.0);
+    QPen pen(QColor("ForestGreen"));
+    pen.setWidthF(0.0);
+    pen.setCosmetic(true);
+    QBrush brush(QColor("ForestGreen"));
+
+    std::size_t draw_index = 0;
+    for (std::size_t point_index = 0; point_index < count and draw_index < draw_count; point_index += stride, ++draw_index)
+    {
+        if (draw_index < lidar_items_.size())
+        {
+            lidar_items_[draw_index]->setPos(xs[point_index], ys[point_index]);
+            lidar_items_[draw_index]->setVisible(true);
+        }
+        else
+        {
+            auto *item = agv_->scene.addEllipse(ellipse_rect, pen, brush);
+            item->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+            item->setPos(xs[point_index], ys[point_index]);
+            item->setZValue(5);
+            lidar_items_.push_back(item);
+        }
+    }
+}
+
 void Viewer2D::draw_path(const PathDrawData &data)
 {
     clear_path_items();
@@ -138,17 +222,66 @@ void Viewer2D::draw_path(const PathDrawData &data)
             qpoly << QPointF(vertex.x(), vertex.y());
         qpoly << QPointF(data.inner_poly.front().x(), data.inner_poly.front().y());
 
+        QPen inner_pen(QColor(255, 220, 0));
+        inner_pen.setWidthF(3.0);
+        inner_pen.setCosmetic(true);
+        inner_pen.setStyle(Qt::DashLine);
+
         inner_polygon_item_ = agv_->scene.addPolygon(
             qpoly,
-            QPen(QColor(201, 131, 55), 0.04, Qt::DashLine),
+            inner_pen,
             Qt::NoBrush);
-        inner_polygon_item_->setZValue(19);
+        inner_polygon_item_->setZValue(30);
+    }
+
+    if (!data.graph_nodes.empty())
+    {
+        constexpr float radius = 0.04f;
+        const QBrush graph_brush(QColor(0, 145, 199, 180));
+        for (const auto &point : data.graph_nodes)
+        {
+            auto *dot = agv_->scene.addEllipse(-radius, -radius, 2.f * radius, 2.f * radius,
+                                               Qt::NoPen, graph_brush);
+            dot->setPos(point.x(), point.y());
+            dot->setZValue(19);
+            path_draw_items_.push_back(dot);
+        }
+    }
+
+    if (!data.obstacle_polys.empty())
+    {
+        const QPen obstacle_pen(QColor(120, 73, 32), 0.04);
+        const QBrush obstacle_brush(QColor(181, 119, 58, 150));
+        const QBrush obstacle_center_brush(QColor(255, 0, 128, 220));
+        for (const auto &obstacle : data.obstacle_polys)
+        {
+            if (obstacle.size() < 3)
+                continue;
+
+            QPolygonF qpoly;
+            for (const auto &vertex : obstacle)
+                qpoly << QPointF(vertex.x(), vertex.y());
+            qpoly << QPointF(obstacle.front().x(), obstacle.front().y());
+
+            auto *polygon = agv_->scene.addPolygon(qpoly, obstacle_pen, obstacle_brush);
+            polygon->setZValue(18);
+            path_draw_items_.push_back(polygon);
+
+            QPointF center;
+            for (const auto &vertex : obstacle)
+                center += QPointF(vertex.x(), vertex.y());
+            center /= obstacle.size();
+            auto *dot = agv_->scene.addEllipse(-0.06, -0.06, 0.12, 0.12, Qt::NoPen, obstacle_center_brush);
+            dot->setPos(center);
+            dot->setZValue(19);
+            path_draw_items_.push_back(dot);
+        }
     }
 
     if (data.path.empty())
         return;
 
-    const QPen path_pen(QColor(56, 114, 219), 0.06);
+    const QPen path_pen(QColor(56, 114, 219), 0.08);
     for (std::size_t index = 0; index + 1 < data.path.size(); ++index)
     {
         auto *line = agv_->scene.addLine(data.path[index].x(), data.path[index].y(),
