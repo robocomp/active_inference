@@ -1,0 +1,11 @@
+
+Component table_concept
+{
+    Communications
+    {
+    };
+    language Cpp11;
+    options dsr;
+
+};
+
