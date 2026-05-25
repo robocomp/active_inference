@@ -17,25 +17,9 @@
  *    along with RoboComp.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "specificworker.h"
-#include "scene_processor.h"
-#include "voxel_processor.h"
-#include "yolo_processor.h"
-#ifdef emit
-#undef emit
-#endif
-
-#include "unified_voxel_grid.h"
-#include "voxel_opengl_viewer.h"
-
-#include <QHBoxLayout>
-#include <QImage>
-#include <QLabel>
-#include <QPixmap>
-#include <QPushButton>
-#include <QVBoxLayout>
 
 #include <algorithm>
-#include <limits>
+#include <chrono>
 #include <print>
 
 SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, bool startup_check) : GenericWorker(configLoader, tprx)
@@ -84,310 +68,27 @@ SpecificWorker::~SpecificWorker()
 
 void SpecificWorker::initialize()
 {
-	qInfo() << "initialize worker";
+	qInfo() << "initialize robot_concept worker";
 	GenericWorker::initialize();
 
-	try
-	{
-		params.YOLO_MODEL_PATH = configLoader.get<std::string>("Yolo.model_path");
-	}
-	catch (...) { }
-	try { params.YOLO_ACCEPTED_LABELS = configLoader.get<std::vector<std::string>>("Yolo.accepted_labels"); } catch (...) {}
-	try { params.YOLO_CONF_THRESH = static_cast<float>(configLoader.get<double>("Yolo.conf_thresh")); } catch (...) {}
-	try { params.YOLO_IOU_THRESH = static_cast<float>(configLoader.get<double>("Yolo.iou_thresh")); } catch (...) {}
-	try { params.YOLO_USE_GPU = configLoader.get<bool>("Yolo.use_gpu"); } catch (...) {}
-	try { params.YOLO_USE_TRT = configLoader.get<bool>("Yolo.use_trt"); } catch (...) {}
-	try { params.YOLO_MASK_ERODE_KERNEL = configLoader.get<int>("Yolo.mask_erode_kernel"); } catch (...) {}
-	try { params.TRACK_ASSOCIATION_MAX_DISTANCE_M = static_cast<float>(configLoader.get<double>("Yolo.track_association_max_distance_m")); } catch (...) {}
-	try { params.TRACK_MAX_MISSED_FRAMES = configLoader.get<int>("Yolo.track_max_missed_frames"); } catch (...) {}
-	try { params.VOXEL_VIEWER_MAX_RENDERED_VOXELS = static_cast<std::size_t>(configLoader.get<int>("Voxel.viewer_max_rendered_voxels")); } catch (...) {}
-	try { params.VOXEL_VIEWER_FPS = configLoader.get<int>("Voxel.viewer_fps"); } catch (...) {}
-	try { params.DSR_RGB_FPS = configLoader.get<int>("Camera.dsr_rgb_fps"); } catch (...) {}
+	try { params.DSR_RGB_FPS   = configLoader.get<int>("Camera.dsr_rgb_fps"); }   catch (...) {}
 	try { params.DSR_DEPTH_FPS = configLoader.get<int>("Camera.dsr_depth_fps"); } catch (...) {}
-	try { params.DSR_LIDAR_FPS = configLoader.get<int>("Lidar.dsr_lidar_fps"); } catch (...) {}
+	try { params.DSR_LIDAR_FPS = configLoader.get<int>("Lidar.dsr_lidar_fps"); }  catch (...) {}
+	try { params.LIDAR_DECIMATION_FACTOR = configLoader.get<int>("Lidar.decimation_factor"); } catch (...) {}
 	try { params.TRANSFORMS_INTERPOLATE_RT = configLoader.get<bool>("Transforms.interpolate_rt"); } catch (...) {}
 	try { verbose_debug_ = configLoader.get<bool>("Debug.verbose"); }
-	catch (...)
-	{
-		try { verbose_debug_ = configLoader.get<bool>("Component.Debug.Verbose"); }
-		catch (...) { verbose_debug_ = false; }
-	}
-	yolo_processor = std::make_unique<YoloProcessor>();
-	YoloProcessor::Config yolo_config;
-	yolo_config.model_path = params.YOLO_MODEL_PATH;
-	yolo_config.conf_thresh = params.YOLO_CONF_THRESH;
-	yolo_config.iou_thresh = params.YOLO_IOU_THRESH;
-	yolo_config.input_size = params.YOLO_INPUT_SIZE;
-	yolo_config.use_gpu = params.YOLO_USE_GPU;
-	yolo_config.use_trt = params.YOLO_USE_TRT;
-	yolo_config.mask_erode_kernel = params.YOLO_MASK_ERODE_KERNEL;
-	yolo_config.mask_tray = params.YOLO_MASK_TRAY;
-	yolo_config.tray_mask_ref_width = params.YOLO_TRAY_MASK_REF_WIDTH;
-	yolo_config.tray_mask_ref_height = params.YOLO_TRAY_MASK_REF_HEIGHT;
-	yolo_config.tray_mask_polygon_px = params.YOLO_TRAY_MASK_POLYGON_PX;
-	yolo_config.accepted_labels = params.YOLO_ACCEPTED_LABELS;
-	yolo_config.verbose_debug = verbose_debug_;
-	yolo_processor->configure(yolo_config);
+	catch (...) { verbose_debug_ = false; }
 
-	if (!graph_viewers.empty())
-	{
-		const std::string viewer_key = graph_viewers.contains("")
-			? std::string("")
-			: graph_viewers.begin()->first;
-		graph_viewers.at(viewer_key)->add_custom_widget_to_dock("Voxel3D", &custom_widget);
-		graph_viewers.at(viewer_key)->add_custom_widget_to_dock("ZED+YOLO", &custom_widget_yolo);
-
-		if (custom_widget.frame->layout() == nullptr)
-		{
-			auto* layout = new QVBoxLayout(custom_widget.frame);
-			layout->setContentsMargins(0, 0, 0, 0);
-			custom_widget.frame->setLayout(layout);
-		}
-
-		auto* controls_layout = new QHBoxLayout();
-		controls_layout->setContentsMargins(0, 0, 0, 0);
-		controls_layout->setSpacing(6);
-		custom_widget.frame->layout()->addItem(controls_layout);
-
-		voxel_lidar_toggle_button_ = new QPushButton("Hide LiDAR", custom_widget.frame);
-		voxel_lidar_toggle_button_->setCheckable(true);
-		voxel_lidar_toggle_button_->setChecked(false);
-		voxel_lidar_toggle_button_->setText("Show LiDAR");
-		controls_layout->addWidget(voxel_lidar_toggle_button_);
-
-		voxel_clear_button_ = new QPushButton("Clear Voxels", custom_widget.frame);
-		controls_layout->addWidget(voxel_clear_button_);
-		controls_layout->addStretch(1);
-
-		voxel_viewer_gl = std::make_unique<rc::VoxelOpenGLViewer>(custom_widget.frame);
-		voxel_viewer_gl->set_show_lidar(false);
-		std::string robot_mesh_path = "meshes/shadow.obj";
-		if (auto robot_node = G->get_node("Shadow"); robot_node.has_value())
-			if (auto mesh_path = G->get_attrib_by_name<path_att>(robot_node.value()); mesh_path.has_value() && !mesh_path.value().get().empty())
-				robot_mesh_path = mesh_path.value().get();
-		voxel_viewer_gl->load_robot_mesh(robot_mesh_path);
-		custom_widget.frame->layout()->addWidget(voxel_viewer_gl.get());
-		QObject::connect(voxel_lidar_toggle_button_, &QPushButton::toggled, custom_widget.frame,
-		                 [this](bool checked)
-		                 {
-			                 if (voxel_viewer_gl)
-				                 voxel_viewer_gl->set_show_lidar(checked);
-			                 if (voxel_lidar_toggle_button_)
-				                 voxel_lidar_toggle_button_->setText(checked ? "Hide LiDAR" : "Show LiDAR");
-		                 });
-		QObject::connect(voxel_clear_button_, &QPushButton::clicked, custom_widget.frame,
-		                 [this]
-		                 {
-			                 if (voxel_processor)
-				                 voxel_processor->clear_state(voxel_viewer_gl.get());
-		                 });
-		qInfo() << __FUNCTION__ << "Voxel OpenGL custom widget attached to graph viewer";
-
-		if (custom_widget_yolo.frame->layout() == nullptr)
-		{
-			auto* layout = new QVBoxLayout(custom_widget_yolo.frame);
-			layout->setContentsMargins(0, 0, 0, 0);
-			layout->setSpacing(4);
-			custom_widget_yolo.frame->setLayout(layout);
-		}
-
-		yolo_fps_label_ = new QLabel(custom_widget_yolo.frame);
-		yolo_fps_label_->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-		yolo_fps_label_->setText("YOLO display FPS: --");
-		custom_widget_yolo.frame->layout()->addWidget(yolo_fps_label_);
-
-		yolo_image_label_ = new QLabel(custom_widget_yolo.frame);
-		yolo_image_label_->setMinimumSize(320, 240);
-		yolo_image_label_->setAlignment(Qt::AlignCenter);
-		yolo_image_label_->setScaledContents(false);
-		yolo_image_label_->setText("ZED RGB + YOLO overlay");
-		custom_widget_yolo.frame->layout()->addWidget(yolo_image_label_);
-		qInfo() << __FUNCTION__ << "ZED+YOLO custom widget attached to graph viewer";
-	}
-	else
-		qWarning() << __FUNCTION__ << "No graph viewer available; Voxel3D widget not attached";
-
-	UnifiedGridConfig voxel_grid_config;
-	voxel_grid_config.max_display_voxels = static_cast<int>(params.VOXEL_VIEWER_MAX_RENDERED_VOXELS);
-	voxel_grid = std::make_unique<UnifiedVoxelGrid>(voxel_grid_config);
-	voxel_processor = std::make_unique<VoxelProcessor>(*voxel_grid);
-	VoxelProcessor::Config voxel_processor_config;
-	voxel_processor_config.voxel_decimation_factor = params.VOXEL_DECIMATION_FACTOR;
-	voxel_processor_config.viewer_max_rendered_voxels = params.VOXEL_VIEWER_MAX_RENDERED_VOXELS;
-	voxel_processor_config.track_association_max_distance_m = params.TRACK_ASSOCIATION_MAX_DISTANCE_M;
-	voxel_processor_config.track_max_missed_frames = params.TRACK_MAX_MISSED_FRAMES;
-	voxel_processor_config.viewer_voxel_fps = params.VOXEL_VIEWER_FPS;
-	voxel_processor_config.verbose_debug = verbose_debug_;
-	voxel_processor->configure(voxel_processor_config);
-	inner_eigen_api = G->get_inner_eigen_api();
-	scene_processor = std::make_unique<SceneProcessor>(G,
-	                                                  lidar_points_mutex_,
-	                                                  latest_lidar_xs_,
-	                                                  latest_lidar_ys_,
-	                                                  latest_lidar_zs_,
-	                                                  latest_lidar_timestamp_ms_,
-	                                                  lidar_stream_seen_,
-	                                                  rgbd_stream_seen_,
-	                                                  lidar_stream_wait_logged_,
-	                                                  rgbd_stream_wait_logged_);
-	scene_processor->configure(inner_eigen_api.get(), voxel_viewer_gl.get(), params.TRANSFORMS_INTERPOLATE_RT, verbose_debug_);
-
-	imu_thread = std::thread(&SpecificWorker::read_imu_thread, this);
-	qInfo() << __FUNCTION__ << "Started IMU reader";
-
-	lidar_thread = std::thread(&SpecificWorker::read_lidar_thread, this);
-	qInfo() << __FUNCTION__ << "Started lidar reader";
-
-	rgbd_thread = std::thread(&SpecificWorker::read_rgbd_thread, this);
-	qInfo() << __FUNCTION__ << "Started RGBD reader";
+	imu_thread   = std::thread(&SpecificWorker::read_imu_thread,   this);
+	lidar_thread = std::thread(&SpecificWorker::read_lidar_thread,  this);
+	rgbd_thread  = std::thread(&SpecificWorker::read_rgbd_thread,   this);
+	qInfo() << __FUNCTION__ << "Started IMU, lidar and RGBD reader threads";
 }
 
 void SpecificWorker::compute()
 {
-	static FPSCounter compute_fps;
-	if (scene_processor)
-		scene_processor->check_input_stream_startup_status();
-
-	const auto [room_name, robot_name] = scene_processor
-		? scene_processor->get_room_robot_names_for_compute()
-		: std::pair<std::string, std::string>{};
-
-	const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-		std::chrono::system_clock::now().time_since_epoch()).count();
-	const auto &[rgbd_opt] = rgbd_buffer.read(now_ms);
-	if (!rgbd_opt.has_value())
-		return;
-	const auto& rgbd = rgbd_opt.value();
-	const std::uint64_t frame_ts_ms = scene_processor
-		? scene_processor->get_rgbd_frame_timestamp_ms(rgbd)
-		: 0;
-
-	const auto detections = yolo_processor ? yolo_processor->detect_segmentation(rgbd) : std::vector<SegDetection>{};
-	update_yolo_tab_display(rgbd, detections);
-
-	if (!scene_processor || !scene_processor->ensure_room_and_robot_ready(compute_fps, room_name, robot_name))
-		return;
-
-	const auto room_T_robot = scene_processor->get_room_robot_transform(compute_fps, room_name, robot_name, frame_ts_ms);
-	if (!room_T_robot.has_value())
-		return;
-	const auto room_T_zed = scene_processor->get_room_zed_transform(compute_fps, room_name, frame_ts_ms);
-	if (!room_T_zed.has_value())
-		return;
-	scene_processor->log_room_robot_pose_periodic(room_T_robot.value());
-	scene_processor->mark_room_rt_ready();
-	const auto graph_object_boxes = scene_processor->get_graph_object_boxes(room_name, frame_ts_ms);
-
-	scene_processor->update_viewer_robot_pose(room_T_robot.value());
-	scene_processor->update_viewer_lidar_points(room_name, robot_name, room_T_robot.value());
-	scene_processor->update_viewer_graph_object_boxes(graph_object_boxes);
-	scene_processor->update_room_polygon_periodic();
-
-	if (voxel_processor)
-	{
-		voxel_processor->process_rgbd_frame(rgbd, detections, room_T_robot.value(), room_T_zed.value(), graph_object_boxes, voxel_viewer_gl.get());
-
-		// Write candidate points to DSR table nodes for table_concept inference
-		const auto& track_cands   = voxel_processor->last_track_candidates();
-		const int   sensing_frame = voxel_processor->last_frame_id();
-		const int   table_cand_count = static_cast<int>(std::count_if(track_cands.begin(), track_cands.end(), [](const auto& c){ return c.category == "table"; }));
-		const int   model_box_count  = static_cast<int>(std::count_if(graph_object_boxes.begin(), graph_object_boxes.end(), [](const auto& b){ return b.category == "model_table"; }));
-		if (sensing_frame % 30 == 0)
-			std::println("[TableCapture] frame={} model_boxes={} table_tracks={}", sensing_frame, model_box_count, table_cand_count);
-		for (auto table_node : G->get_nodes_by_type("table"))
-		{
-			// Find the model box centroid for this table node
-			Eigen::Vector3f model_centroid = Eigen::Vector3f::Zero();
-			bool has_model_box = false;
-			for (const auto& box : graph_object_boxes)
-			{
-				if (box.category == "model_table")
-				{
-					model_centroid = (box.min + box.max) * 0.5f;
-					has_model_box = true;
-					break;
-				}
-			}
-			if (!has_model_box)
-				continue;
-
-			// Find the nearest "table" voxel track (no distance cap: prior may be far from reality)
-			int   best_track_id = -1;
-			float best_dist     = std::numeric_limits<float>::max();
-			for (const auto& cand : track_cands)
-			{
-				if (cand.category != "table")
-					continue;
-				const float dist = (cand.centroid - model_centroid).norm();
-				if (dist < best_dist)
-				{
-					best_dist     = dist;
-					best_track_id = cand.track_id;
-				}
-			}
-			if (sensing_frame % 30 == 0)
-				std::println("[TableCapture] node='{}' model_centroid=({:.2f},{:.2f},{:.2f}) best_track={} best_dist={:.2f}", table_node.name(), model_centroid.x(), model_centroid.y(), model_centroid.z(), best_track_id, best_dist);
-			if (best_track_id < 0)
-				continue;
-
-			auto flat_pts = voxel_processor->get_flat_pts_for_track(best_track_id, 400);
-			if (flat_pts.empty())
-				continue;
-
-			G->add_or_modify_attrib_local<candidate_pts_att>(table_node, flat_pts);
-			G->add_or_modify_attrib_local<last_sensing_frame_att>(table_node, sensing_frame);
-			G->add_or_modify_attrib_local<explanation_ratio_att>(table_node, 0.0f);
-			G->update_node(table_node);
-			if (sensing_frame % 30 == 0)
-				std::println("[TableCapture] WROTE node='{}' frame={} pts={}", table_node.name(), sensing_frame, flat_pts.size() / 3);
-		}
-	}
-
-	if (verbose_debug_)
-		compute_fps.print("[Compute]", 2000);
-}
-
-void SpecificWorker::update_yolo_tab_display(const RoboCompCameraRGBDSimple::TRGBD& rgbd,
-	                                          const std::vector<SegDetection>& detections)
-{
-	static auto last_display_update = std::chrono::steady_clock::time_point{};
-	static float display_fps = 0.f;
-
-	if (yolo_image_label_ == nullptr || rgbd.image.width == 0 || rgbd.image.height == 0
-		|| !custom_widget_yolo.isVisible() || !yolo_processor)
-		return;
-
-	const cv::Mat rgb_frame(rgbd.image.height, rgbd.image.width, CV_8UC3,
-		const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(rgbd.image.image.data())));
-	const cv::Mat masked_rgb_frame = yolo_processor->apply_tray_mask(rgb_frame);
-	cv::Mat yolo_canvas = yolo_processor->compose_detection_canvas(masked_rgb_frame, detections);
-	if (scene_processor)
-		scene_processor->overlay_room_polygon_on_canvas(yolo_canvas, rgbd);
-	cv::Mat yolo_canvas_rgb;
-	cv::cvtColor(yolo_canvas, yolo_canvas_rgb, cv::COLOR_BGR2RGB);
-	QImage yolo_qimg(yolo_canvas_rgb.data,
-		yolo_canvas_rgb.cols,
-		yolo_canvas_rgb.rows,
-		static_cast<int>(yolo_canvas_rgb.step),
-		QImage::Format_RGB888);
-	QPixmap yolo_pix = QPixmap::fromImage(yolo_qimg, Qt::NoFormatConversion);
-	yolo_image_label_->setPixmap(yolo_pix.scaled(yolo_image_label_->size(), Qt::KeepAspectRatio, Qt::FastTransformation));
-
-	if (yolo_fps_label_ != nullptr)
-	{
-		const auto now = std::chrono::steady_clock::now();
-		if (last_display_update != std::chrono::steady_clock::time_point{})
-		{
-			const auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_display_update).count();
-			if (dt_ms > 0)
-			{
-				const float inst_fps = 1000.0f / static_cast<float>(dt_ms);
-				display_fps = (display_fps > 0.f) ? (0.85f * display_fps + 0.15f * inst_fps) : inst_fps;
-			}
-		}
-		last_display_update = now;
-		yolo_fps_label_->setText(QString("YOLO display FPS: %1").arg(display_fps, 0, 'f', 1));
-	}
+	// robot_concept's compute() is intentionally minimal:
+	// sensor reading is done in background threads; voxelizer agent handles perception.
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////
@@ -412,4 +113,269 @@ int SpecificWorker::startup_check()
 	qInfo() << "Startup check";
 	QTimer::singleShot(200, QCoreApplication::instance(), SLOT(quit()));
 	return 0;
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////
+namespace
+{
+	std::uint64_t get_imu_timestamp_ms(const RoboCompIMU::DataImu& data)
+	{
+		const long latest = std::max({data.acc.timestamp,
+		                             data.gyro.timestamp,
+		                             data.mag.timestamp,
+		                             data.rot.timestamp});
+		return latest > 0 ? static_cast<std::uint64_t>(latest) : 0ULL;
+	}
+}
+
+void SpecificWorker::read_lidar_thread()
+{
+	static FPSCounter lidar_fps;
+	bool empty_lidar_logged = false;
+	auto wait_period = std::chrono::milliseconds(getPeriod("Compute"));
+	while (!stop_lidar_thread)
+	{
+		RoboCompLidar3D::TData data;
+		try
+		{
+			data = lidar3d_proxy->getLidarData(
+				"", 0.f, static_cast<float>(M_PI) * 2.f, params.LIDAR_DECIMATION_FACTOR);
+		}
+		catch (const Ice::Exception& e)
+		{
+			qWarning() << "[read_lidar] getLidarData failed:" << e.what() << "retrying...";
+			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+			continue;
+		}
+
+		if (data.points.empty())
+		{
+			if (!empty_lidar_logged)
+			{
+				std::print(stderr, "[read_lidar] Empty LiDAR stream received. Waiting for points...\n");
+				empty_lidar_logged = true;
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+			continue;
+		}
+		else if (empty_lidar_logged)
+		{
+			std::print("[read_lidar] LiDAR stream recovered.\n");
+			empty_lidar_logged = false;
+		}
+
+		const auto n = data.points.size();
+		std::vector<float> xs(n), ys(n), zs(n);
+		for (std::size_t i = 0; i < n; ++i)
+		{
+			xs[i] = data.points[i].x/1000.f;
+			ys[i] = data.points[i].y/1000.f;
+			zs[i] = data.points[i].z/1000.f;
+		}
+
+		static auto last_lidar_upload = std::chrono::steady_clock::time_point{};
+		const auto  now_steady_lidar  = std::chrono::steady_clock::now();
+		const auto  lidar_interval_ms = params.DSR_LIDAR_FPS > 0
+			? std::chrono::milliseconds(1000 / params.DSR_LIDAR_FPS)
+			: std::chrono::milliseconds(0);
+		const bool do_lidar_upload = (lidar_interval_ms.count() == 0)
+			|| (now_steady_lidar - last_lidar_upload >= lidar_interval_ms);
+		if (do_lidar_upload)
+		{
+			last_lidar_upload = now_steady_lidar;
+			if (auto laser_node = G->get_node("lidar3D"); laser_node.has_value())
+			{
+				G->add_or_modify_attrib_local<laser_X_att>(laser_node.value(), xs);
+				G->add_or_modify_attrib_local<laser_Y_att>(laser_node.value(), ys);
+				G->add_or_modify_attrib_local<laser_Z_att>(laser_node.value(), zs);
+				G->add_or_modify_attrib_local<laser_timestamp_att>(laser_node.value(), static_cast<uint64_t>(data.timestamp));
+				G->update_node(laser_node.value());
+			}
+			else
+				qWarning() << "Laser node not found in DSR graph";
+		}
+
+		const long p_ms = static_cast<long>(data.period);
+		if (wait_period > std::chrono::milliseconds(p_ms + 2)) --wait_period;
+		else if (wait_period < std::chrono::milliseconds(p_ms - 2)) ++wait_period;
+
+		if (verbose_debug_)
+			lidar_fps.print("[LidarThread]", 2000);
+		std::this_thread::sleep_for(wait_period);
+	}
+}
+
+void SpecificWorker::read_imu_thread()
+{
+	static FPSCounter imu_fps;
+	auto wait_period = std::chrono::milliseconds(getPeriod("Compute"));
+	std::uint64_t prev_sensor_timestamp_ms = 0;
+	bool missing_imu_node_logged = false;
+
+	while (!stop_imu_thread)
+	{
+		RoboCompIMU::DataImu data;
+		try
+		{
+			data = imu_proxy->getDataImu();
+		}
+		catch (const Ice::Exception& e)
+		{
+			qWarning() << "[read_imu] getDataImu failed:" << e.what() << "retrying...";
+			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+			continue;
+		}
+
+		const std::uint64_t sensor_timestamp_ms = get_imu_timestamp_ms(data);
+		const std::vector<float> acceleration{data.acc.XAcc, data.acc.YAcc, data.acc.ZAcc};
+		const std::vector<float> gyroscope{data.gyro.XGyr, data.gyro.YGyr, data.gyro.ZGyr};
+		const std::vector<float> euler_xyz{data.rot.Roll, data.rot.Pitch, data.rot.Yaw};
+
+		if (auto imu_node = G->get_node("imu"); imu_node.has_value())
+		{
+			G->add_or_modify_attrib_local<imu_accelerometer_att>(imu_node.value(), acceleration);
+			G->add_or_modify_attrib_local<imu_linear_acceleration_att>(imu_node.value(), acceleration);
+			G->add_or_modify_attrib_local<imu_gyroscope_att>(imu_node.value(), gyroscope);
+			G->add_or_modify_attrib_local<imu_angular_velocity_att>(imu_node.value(), gyroscope);
+			G->add_or_modify_attrib_local<imu_angular_euler_xyz_pose_att>(imu_node.value(), euler_xyz);
+			G->add_or_modify_attrib_local<imu_compass_att>(imu_node.value(), data.rot.Yaw);
+			G->add_or_modify_attrib_local<imu_time_stamp_att>(imu_node.value(), sensor_timestamp_ms);
+			G->add_or_modify_attrib_local<imu_sensor_tick_att>(imu_node.value(), sensor_timestamp_ms);
+			G->update_node(imu_node.value());
+
+			if (missing_imu_node_logged)
+			{
+				qInfo() << "[read_imu] IMU node recovered in DSR graph.";
+				missing_imu_node_logged = false;
+			}
+		}
+		else if (!missing_imu_node_logged)
+		{
+			qWarning() << "[read_imu] IMU node not found in DSR graph.";
+			missing_imu_node_logged = true;
+		}
+
+		if (sensor_timestamp_ms > prev_sensor_timestamp_ms)
+		{
+			const auto sensor_period = std::chrono::milliseconds(sensor_timestamp_ms - prev_sensor_timestamp_ms);
+			if (sensor_period.count() > 0 && sensor_period <= std::chrono::seconds(1))
+			{
+				if (wait_period > sensor_period + std::chrono::milliseconds(2)) --wait_period;
+				else if (wait_period < sensor_period - std::chrono::milliseconds(2)) ++wait_period;
+			}
+		}
+		if (sensor_timestamp_ms > 0)
+			prev_sensor_timestamp_ms = sensor_timestamp_ms;
+
+		if (verbose_debug_)
+			imu_fps.print("[ImuThread]", 2000);
+		std::this_thread::sleep_for(wait_period);
+	}
+}
+
+void SpecificWorker::read_rgbd_thread()
+{
+	static FPSCounter rgbd_fps;
+	bool empty_rgbd_logged = false;
+	auto wait_period = std::chrono::milliseconds(getPeriod("Compute"));
+	while (!stop_rgbd_thread)
+	{
+		const auto loop_start = std::chrono::steady_clock::now();
+		try
+		{
+			RoboCompCameraRGBDSimple::TRGBD frame;
+			try
+			{
+				frame = camerargbdsimple_proxy->getAll("camera");
+			}
+			catch (const Ice::Exception& e)
+			{
+				qWarning() << "[read_rgbd] getAll failed:" << e.what() << "retrying...";
+				std::this_thread::sleep_for(std::chrono::milliseconds(100));
+				continue;
+			}
+
+			const bool empty_rgb = frame.image.width <= 0 || frame.image.height <= 0 || frame.image.image.empty();
+			const bool empty_depth = frame.depth.width <= 0 || frame.depth.height <= 0 || frame.depth.depth.empty();
+			const bool empty_points = frame.points.points.empty();
+			if (empty_rgb || empty_depth || empty_points)
+			{
+				if (!empty_rgbd_logged)
+				{
+					std::print("[read_rgbd] Empty RGBD stream received. Waiting for RGB, depth and point cloud data...\n");
+					empty_rgbd_logged = true;
+				}
+				std::this_thread::sleep_for(std::chrono::milliseconds(100));
+				continue;
+			}
+			else if (empty_rgbd_logged)
+			{
+				std::print("[read_rgbd] RGBD stream recovered.\n");
+				empty_rgbd_logged = false;
+			}
+
+			const long p_ms = static_cast<long>(frame.image.period);
+
+			static auto last_rgb_upload   = std::chrono::steady_clock::time_point{};
+			static auto last_depth_upload = std::chrono::steady_clock::time_point{};
+			const auto now_steady = std::chrono::steady_clock::now();
+			const auto rgb_interval_ms   = params.DSR_RGB_FPS   > 0
+				? std::chrono::milliseconds(1000 / params.DSR_RGB_FPS) : std::chrono::milliseconds(0);
+			const auto depth_interval_ms = params.DSR_DEPTH_FPS > 0
+				? std::chrono::milliseconds(1000 / params.DSR_DEPTH_FPS) : std::chrono::milliseconds(0);
+			const bool do_rgb   = (rgb_interval_ms.count()   == 0) || (now_steady - last_rgb_upload   >= rgb_interval_ms);
+			const bool do_depth = (depth_interval_ms.count() == 0) || (now_steady - last_depth_upload >= depth_interval_ms);
+			if (auto cam_node = G->get_node("zed"); cam_node.has_value())
+			{
+				G->add_or_modify_attrib_local<cam_rgb_width_att>(cam_node.value(), frame.image.width);
+				G->add_or_modify_attrib_local<cam_rgb_height_att>(cam_node.value(), frame.image.height);
+				G->add_or_modify_attrib_local<cam_rgb_focalx_att>(cam_node.value(), frame.image.focalx);
+				G->add_or_modify_attrib_local<cam_rgb_focaly_att>(cam_node.value(), frame.image.focaly);
+				G->add_or_modify_attrib_local<cam_rgb_depth_att>(cam_node.value(), 3);
+				G->add_or_modify_attrib_local<cam_rgb_cameraID_att>(cam_node.value(), 0);
+				if (do_rgb)
+				{
+					last_rgb_upload = now_steady;
+					G->add_or_modify_attrib_local<cam_rgb_att>(cam_node.value(),
+						std::vector<uint8_t>(frame.image.image.begin(), frame.image.image.end()));
+					G->add_or_modify_attrib_local<cam_rgb_alivetime_att>(cam_node.value(), static_cast<std::uint64_t>(frame.image.alivetime));
+					G->update_node(cam_node.value());
+				}
+
+				if (do_depth)
+				{
+					last_depth_upload = now_steady;
+					if (auto depth_node = G->get_node("zed"); depth_node.has_value())
+					{
+						G->add_or_modify_attrib_local<cam_depth_width_att>(depth_node.value(), frame.depth.width);
+						G->add_or_modify_attrib_local<cam_depth_height_att>(depth_node.value(), frame.depth.height);
+						G->add_or_modify_attrib_local<cam_depth_focalx_att>(depth_node.value(), frame.depth.focalx);
+						G->add_or_modify_attrib_local<cam_depth_focaly_att>(depth_node.value(), frame.depth.focaly);
+						G->add_or_modify_attrib_local<cam_depthFactor_att>(depth_node.value(), frame.depth.depthFactor);
+						G->add_or_modify_attrib_local<cam_depth_att>(depth_node.value(),
+							std::vector<uint8_t>(frame.depth.depth.begin(), frame.depth.depth.end()));
+						G->update_node(depth_node.value());
+					}
+				}
+			}
+			else
+				qWarning() << "Camera node not found in DSR graph";
+
+			if (p_ms > 0)
+			{
+				if (wait_period > std::chrono::milliseconds(p_ms + 2)) --wait_period;
+				else if (wait_period < std::chrono::milliseconds(p_ms - 2)) ++wait_period;
+			}
+
+			if (verbose_debug_)
+				rgbd_fps.print("[RGBDThread]", 2000);
+			const auto loop_elapsed = std::chrono::steady_clock::now() - loop_start;
+			if (loop_elapsed < wait_period)
+				std::this_thread::sleep_for(wait_period - loop_elapsed);
+		}
+		catch (const Ice::Exception& e)
+		{
+			qWarning() << "[read_rgbd] Ice exception:" << e.what();
+		}
+	}
 }
