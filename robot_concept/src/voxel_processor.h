@@ -39,6 +39,22 @@ public:
     void configure(const Config& config);
     void clear_state(rc::VoxelOpenGLViewer* voxel_viewer);
 
+    struct TrackBoxCandidate
+    {
+        int track_id = -1;
+        std::string category;
+        Eigen::Vector3f min = Eigen::Vector3f::Zero();
+        Eigen::Vector3f max = Eigen::Vector3f::Zero();
+        Eigen::Vector3f centroid = Eigen::Vector3f::Zero();
+        int voxel_count = 0;
+        int last_seen_frame = -1;
+    };
+
+    // Sensing data accessors — call after process_rgbd_frame each cycle
+    const std::vector<TrackBoxCandidate>& last_track_candidates() const { return last_box_candidates_; }
+    int                                   last_frame_id()         const { return last_frame_id_; }
+    std::vector<float> get_flat_pts_for_track(int track_id, int max_pts) const;
+
     void process_rgbd_frame(const RoboCompCameraRGBDSimple::TRGBD& rgbd,
                             const std::vector<SegDetection>& detections,
                             const Mat::RTMat& room_T_robot,
@@ -53,17 +69,6 @@ private:
         Eigen::Vector3f max = Eigen::Vector3f::Zero();
         Eigen::Vector3f sum = Eigen::Vector3f::Zero();
         std::size_t count = 0;
-    };
-
-    struct TrackBoxCandidate
-    {
-        int track_id = -1;
-        std::string category;
-        Eigen::Vector3f min = Eigen::Vector3f::Zero();
-        Eigen::Vector3f max = Eigen::Vector3f::Zero();
-        Eigen::Vector3f centroid = Eigen::Vector3f::Zero();
-        int voxel_count = 0;
-        int last_seen_frame = -1;
     };
 
     struct DetectionObservation
@@ -129,4 +134,6 @@ private:
     int compute_frame_ = 0;
     int next_track_id_ = 1;
     std::unordered_map<int, InstanceTrack> active_tracks_;
+    std::vector<TrackBoxCandidate> last_box_candidates_;
+    int last_frame_id_ = 0;
 };

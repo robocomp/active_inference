@@ -327,13 +327,22 @@ std::optional<GraphObjectBox> SceneProcessor::build_graph_object_box(const DSR::
     const auto depth_opt = graph_->get_attrib_by_name<depth_m_att>(node);
     const auto height_opt = graph_->get_attrib_by_name<height_m_att>(node);
     if (!width_opt.has_value() || !depth_opt.has_value() || !height_opt.has_value())
+    {
+        std::println("[build_graph_object_box] node='{}' type='{}': missing dimensions (w={} d={} h={})",
+                     node.name(), node.type(),
+                     width_opt.has_value(), depth_opt.has_value(), height_opt.has_value());
         return std::nullopt;
+    }
 
     const float width = width_opt.value();
     const float depth = depth_opt.value();
     const float height = height_opt.value();
     if (width <= 0.f || depth <= 0.f || height <= 0.f)
+    {
+        std::println("[build_graph_object_box] node='{}': non-positive dims w={} d={} h={}",
+                     node.name(), width, depth, height);
         return std::nullopt;
+    }
 
     const auto time_query = transforms_interpolate_rt_
         ? DSR::RT_API::TimeQuery::Interpolated
@@ -344,7 +353,11 @@ std::optional<GraphObjectBox> SceneProcessor::build_graph_object_box(const DSR::
                                                                            "RT",
                                                                            time_query);
     if (!room_T_object.has_value())
+    {
+        std::println("[build_graph_object_box] node='{}': no RT transform from room '{}'",
+                     node.name(), room_name);
         return std::nullopt;
+    }
 
     const float half_width = width * 0.5f;
     const float half_depth = depth * 0.5f;
@@ -380,7 +393,8 @@ std::optional<GraphObjectBox> SceneProcessor::build_graph_object_box(const DSR::
         category = it->second.str();
 
     // Keep graph/model tables visually distinct from YOLO-derived table tracks.
-    if (category == "table" || node.type() == "table" || node.name() == "bootstrap_table")
+    // node.type() == "table" covers all table_1, table_2, … nodes.
+    if (node.type() == "table")
         category = "model_table";
 
     return GraphObjectBox{min_corner, max_corner, std::move(category)};
@@ -394,13 +408,19 @@ std::vector<GraphObjectBox> SceneProcessor::get_graph_object_boxes(const std::st
         return graph_boxes;
 
     const auto object_nodes = graph_->get_nodes_by_type("object");
-    graph_boxes.reserve(object_nodes.size());
-    for (const auto& node : object_nodes)
+    const auto table_nodes  = graph_->get_nodes_by_type("table");
+    graph_boxes.reserve(object_nodes.size() + table_nodes.size());
+    auto add_boxes = [&](const auto& nodes)
     {
-        const auto box = build_graph_object_box(node, room_name, timestamp_ms);
-        if (box.has_value())
-            graph_boxes.push_back(box.value());
-    }
+        for (const auto& node : nodes)
+        {
+            const auto box = build_graph_object_box(node, room_name, timestamp_ms);
+            if (box.has_value())
+                graph_boxes.push_back(box.value());
+        }
+    };
+    add_boxes(object_nodes);
+    add_boxes(table_nodes);
     return graph_boxes;
 }
 

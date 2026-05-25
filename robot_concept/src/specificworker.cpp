@@ -35,6 +35,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <limits>
 #include <print>
 
 SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, bool startup_check) : GenericWorker(configLoader, tprx)
@@ -283,7 +284,64 @@ void SpecificWorker::compute()
 	scene_processor->update_room_polygon_periodic();
 
 	if (voxel_processor)
+	{
 		voxel_processor->process_rgbd_frame(rgbd, detections, room_T_robot.value(), room_T_zed.value(), graph_object_boxes, voxel_viewer_gl.get());
+
+		// Write candidate points to DSR table nodes for table_concept inference
+		const auto& track_cands   = voxel_processor->last_track_candidates();
+		const int   sensing_frame = voxel_processor->last_frame_id();
+		const int   table_cand_count = static_cast<int>(std::count_if(track_cands.begin(), track_cands.end(), [](const auto& c){ return c.category == "table"; }));
+		const int   model_box_count  = static_cast<int>(std::count_if(graph_object_boxes.begin(), graph_object_boxes.end(), [](const auto& b){ return b.category == "model_table"; }));
+		if (sensing_frame % 30 == 0)
+			std::println("[TableCapture] frame={} model_boxes={} table_tracks={}", sensing_frame, model_box_count, table_cand_count);
+		for (auto table_node : G->get_nodes_by_type("table"))
+		{
+			// Find the model box centroid for this table node
+			Eigen::Vector3f model_centroid = Eigen::Vector3f::Zero();
+			bool has_model_box = false;
+			for (const auto& box : graph_object_boxes)
+			{
+				if (box.category == "model_table")
+				{
+					model_centroid = (box.min + box.max) * 0.5f;
+					has_model_box = true;
+					break;
+				}
+			}
+			if (!has_model_box)
+				continue;
+
+			// Find the nearest "table" voxel track (no distance cap: prior may be far from reality)
+			int   best_track_id = -1;
+			float best_dist     = std::numeric_limits<float>::max();
+			for (const auto& cand : track_cands)
+			{
+				if (cand.category != "table")
+					continue;
+				const float dist = (cand.centroid - model_centroid).norm();
+				if (dist < best_dist)
+				{
+					best_dist     = dist;
+					best_track_id = cand.track_id;
+				}
+			}
+			if (sensing_frame % 30 == 0)
+				std::println("[TableCapture] node='{}' model_centroid=({:.2f},{:.2f},{:.2f}) best_track={} best_dist={:.2f}", table_node.name(), model_centroid.x(), model_centroid.y(), model_centroid.z(), best_track_id, best_dist);
+			if (best_track_id < 0)
+				continue;
+
+			auto flat_pts = voxel_processor->get_flat_pts_for_track(best_track_id, 400);
+			if (flat_pts.empty())
+				continue;
+
+			G->add_or_modify_attrib_local<candidate_pts_att>(table_node, flat_pts);
+			G->add_or_modify_attrib_local<last_sensing_frame_att>(table_node, sensing_frame);
+			G->add_or_modify_attrib_local<explanation_ratio_att>(table_node, 0.0f);
+			G->update_node(table_node);
+			if (sensing_frame % 30 == 0)
+				std::println("[TableCapture] WROTE node='{}' frame={} pts={}", table_node.name(), sensing_frame, flat_pts.size() / 3);
+		}
+	}
 
 	if (verbose_debug_)
 		compute_fps.print("[Compute]", 2000);

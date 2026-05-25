@@ -243,6 +243,11 @@ void VoxelProcessor::process_rgbd_frame(const RoboCompCameraRGBDSimple::TRGBD& r
 
     box_candidates = build_track_box_candidates();
     merge_duplicate_tracks(box_candidates, frame_id);
+    // Capture pre-suppression candidates for DSR sensing (TableCapture reads these).
+    // Must be stored before suppress_residual_tracks_near_models so that table tracks
+    // overlapping the model box are still available for candidate_pts_att writes.
+    last_box_candidates_ = box_candidates;
+    last_frame_id_       = frame_id;
     const std::size_t residual_tracks_suppressed = suppress_residual_tracks_near_models(box_candidates, explained_boxes);
     const std::size_t model_residual_table_track_count = static_cast<std::size_t>(std::count_if(
         box_candidates.begin(),
@@ -312,6 +317,26 @@ void VoxelProcessor::process_rgbd_frame(const RoboCompCameraRGBDSimple::TRGBD& r
                    selected_tables,
                    model_residual_table_track_count,
                    residual_tracks_suppressed);
+
+        // Print location of each model_table box (from DSR graph)
+        for (const auto& box : explained_boxes)
+        {
+            if (box.category != "model_table") continue;
+            const Eigen::Vector3f ctr = (box.min + box.max) * 0.5f;
+            std::println("  [ModelBox '{}'] centre=({:.2f},{:.2f},{:.2f})  min=({:.2f},{:.2f},{:.2f})  max=({:.2f},{:.2f},{:.2f})",
+                         box.category, ctr.x(), ctr.y(), ctr.z(),
+                         box.min.x(), box.min.y(), box.min.z(),
+                         box.max.x(), box.max.y(), box.max.z());
+        }
+        // Print location of each YOLO table track candidate
+        for (const auto& box : box_candidates)
+        {
+            if (box.category != "table") continue;
+            std::println("  [TrackBox '{}'] centre=({:.2f},{:.2f},{:.2f})  min=({:.2f},{:.2f},{:.2f})  max=({:.2f},{:.2f},{:.2f})",
+                         box.category, box.centroid.x(), box.centroid.y(), box.centroid.z(),
+                         box.min.x(), box.min.y(), box.min.z(),
+                         box.max.x(), box.max.y(), box.max.z());
+        }
     }
 
     if (config_.verbose_debug && compute_frame_ % 30 == 0)
@@ -339,6 +364,32 @@ void VoxelProcessor::process_rgbd_frame(const RoboCompCameraRGBDSimple::TRGBD& r
                          viewer_voxel_fps,
                          config_.viewer_max_rendered_voxels);
     }
+
+}
+
+std::vector<float> VoxelProcessor::get_flat_pts_for_track(int track_id, int max_pts) const
+{
+    auto pts = voxel_grid_.get_points(track_id);
+    if (pts.empty())
+        return {};
+    if (max_pts > 0 && static_cast<int>(pts.size()) > max_pts)
+    {
+        const std::size_t step = pts.size() / static_cast<std::size_t>(max_pts);
+        std::vector<Eigen::Vector3f> dec;
+        dec.reserve(static_cast<std::size_t>(max_pts));
+        for (std::size_t i = 0; i < pts.size(); i += step)
+            dec.push_back(pts[i]);
+        pts = std::move(dec);
+    }
+    std::vector<float> flat;
+    flat.reserve(pts.size() * 3);
+    for (const auto& p : pts)
+    {
+        flat.push_back(p.x());
+        flat.push_back(p.y());
+        flat.push_back(p.z());
+    }
+    return flat;
 }
 
 bool VoxelProcessor::is_target_label(const std::string& label) const
