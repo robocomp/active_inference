@@ -1,0 +1,13 @@
+import "KinovaArm.idsl";
+
+Component kinova_controller
+{
+    Communications
+    {
+        requires KinovaArm;
+    };
+    language Cpp11;
+    options dsr;
+
+};
+
