@@ -133,6 +133,10 @@ void SpecificWorker::read_lidar_thread()
 	static FPSCounter lidar_fps;
 	bool empty_lidar_logged = false;
 	auto wait_period = std::chrono::milliseconds(getPeriod("Compute"));
+	const auto lidar_interval_ms = params.DSR_LIDAR_FPS > 0
+		? std::chrono::milliseconds(1000 / params.DSR_LIDAR_FPS)
+		: std::chrono::milliseconds(0);
+	auto last_lidar_upload = std::chrono::steady_clock::time_point{};
 	while (!stop_lidar_thread)
 	{
 		RoboCompLidar3D::TData data;
@@ -164,30 +168,25 @@ void SpecificWorker::read_lidar_thread()
 			empty_lidar_logged = false;
 		}
 
-		const auto n = data.points.size();
-		std::vector<float> xs(n), ys(n), zs(n);
-		for (std::size_t i = 0; i < n; ++i)
-		{
-			xs[i] = data.points[i].x/1000.f;
-			ys[i] = data.points[i].y/1000.f;
-			zs[i] = data.points[i].z/1000.f;
-		}
-
-		static auto last_lidar_upload = std::chrono::steady_clock::time_point{};
 		const auto  now_steady_lidar  = std::chrono::steady_clock::now();
-		const auto  lidar_interval_ms = params.DSR_LIDAR_FPS > 0
-			? std::chrono::milliseconds(1000 / params.DSR_LIDAR_FPS)
-			: std::chrono::milliseconds(0);
 		const bool do_lidar_upload = (lidar_interval_ms.count() == 0)
 			|| (now_steady_lidar - last_lidar_upload >= lidar_interval_ms);
 		if (do_lidar_upload)
 		{
 			last_lidar_upload = now_steady_lidar;
+			const auto n = data.points.size();
+			std::vector<float> xs(n), ys(n), zs(n);
+			for (std::size_t i = 0; i < n; ++i)
+			{
+				xs[i] = data.points[i].x * 0.001f;
+				ys[i] = data.points[i].y * 0.001f;
+				zs[i] = data.points[i].z * 0.001f;
+			}
 			if (auto laser_node = G->get_node("lidar3D"); laser_node.has_value())
 			{
-				G->add_or_modify_attrib_local<laser_X_att>(laser_node.value(), xs);
-				G->add_or_modify_attrib_local<laser_Y_att>(laser_node.value(), ys);
-				G->add_or_modify_attrib_local<laser_Z_att>(laser_node.value(), zs);
+				G->add_or_modify_attrib_local<laser_X_att>(laser_node.value(), std::move(xs));
+				G->add_or_modify_attrib_local<laser_Y_att>(laser_node.value(), std::move(ys));
+				G->add_or_modify_attrib_local<laser_Z_att>(laser_node.value(), std::move(zs));
 				G->add_or_modify_attrib_local<laser_timestamp_att>(laser_node.value(), static_cast<uint64_t>(data.timestamp));
 				G->update_node(laser_node.value());
 			}
@@ -278,6 +277,14 @@ void SpecificWorker::read_rgbd_thread()
 	static FPSCounter rgbd_fps;
 	bool empty_rgbd_logged = false;
 	auto wait_period = std::chrono::milliseconds(getPeriod("Compute"));
+	const auto rgb_interval_ms = params.DSR_RGB_FPS > 0
+		? std::chrono::milliseconds(1000 / params.DSR_RGB_FPS)
+		: std::chrono::milliseconds(0);
+	const auto depth_interval_ms = params.DSR_DEPTH_FPS > 0
+		? std::chrono::milliseconds(1000 / params.DSR_DEPTH_FPS)
+		: std::chrono::milliseconds(0);
+	auto last_rgb_upload   = std::chrono::steady_clock::time_point{};
+	auto last_depth_upload = std::chrono::steady_clock::time_point{};
 	while (!stop_rgbd_thread)
 	{
 		const auto loop_start = std::chrono::steady_clock::now();
@@ -316,28 +323,21 @@ void SpecificWorker::read_rgbd_thread()
 
 			const long p_ms = static_cast<long>(frame.image.period);
 
-			static auto last_rgb_upload   = std::chrono::steady_clock::time_point{};
-			static auto last_depth_upload = std::chrono::steady_clock::time_point{};
 			const auto now_steady = std::chrono::steady_clock::now();
-			const auto rgb_interval_ms   = params.DSR_RGB_FPS   > 0
-				? std::chrono::milliseconds(1000 / params.DSR_RGB_FPS) : std::chrono::milliseconds(0);
-			const auto depth_interval_ms = params.DSR_DEPTH_FPS > 0
-				? std::chrono::milliseconds(1000 / params.DSR_DEPTH_FPS) : std::chrono::milliseconds(0);
 			const bool do_rgb   = (rgb_interval_ms.count()   == 0) || (now_steady - last_rgb_upload   >= rgb_interval_ms);
 			const bool do_depth = (depth_interval_ms.count() == 0) || (now_steady - last_depth_upload >= depth_interval_ms);
 			if (auto cam_node = G->get_node("zed"); cam_node.has_value())
 			{
-				G->add_or_modify_attrib_local<cam_rgb_width_att>(cam_node.value(), frame.image.width);
-				G->add_or_modify_attrib_local<cam_rgb_height_att>(cam_node.value(), frame.image.height);
-				G->add_or_modify_attrib_local<cam_rgb_focalx_att>(cam_node.value(), frame.image.focalx);
-				G->add_or_modify_attrib_local<cam_rgb_focaly_att>(cam_node.value(), frame.image.focaly);
-				G->add_or_modify_attrib_local<cam_rgb_depth_att>(cam_node.value(), 3);
-				G->add_or_modify_attrib_local<cam_rgb_cameraID_att>(cam_node.value(), 0);
 				if (do_rgb)
 				{
 					last_rgb_upload = now_steady;
-					G->add_or_modify_attrib_local<cam_rgb_att>(cam_node.value(),
-						std::vector<uint8_t>(frame.image.image.begin(), frame.image.image.end()));
+					G->add_or_modify_attrib_local<cam_rgb_width_att>(cam_node.value(), frame.image.width);
+					G->add_or_modify_attrib_local<cam_rgb_height_att>(cam_node.value(), frame.image.height);
+					G->add_or_modify_attrib_local<cam_rgb_focalx_att>(cam_node.value(), frame.image.focalx);
+					G->add_or_modify_attrib_local<cam_rgb_focaly_att>(cam_node.value(), frame.image.focaly);
+					G->add_or_modify_attrib_local<cam_rgb_depth_att>(cam_node.value(), 3);
+					G->add_or_modify_attrib_local<cam_rgb_cameraID_att>(cam_node.value(), 0);
+					G->add_or_modify_attrib_local<cam_rgb_att>(cam_node.value(), std::move(frame.image.image));
 					G->add_or_modify_attrib_local<cam_rgb_alivetime_att>(cam_node.value(), static_cast<std::uint64_t>(frame.image.alivetime));
 					G->update_node(cam_node.value());
 				}
@@ -345,17 +345,13 @@ void SpecificWorker::read_rgbd_thread()
 				if (do_depth)
 				{
 					last_depth_upload = now_steady;
-					if (auto depth_node = G->get_node("zed"); depth_node.has_value())
-					{
-						G->add_or_modify_attrib_local<cam_depth_width_att>(depth_node.value(), frame.depth.width);
-						G->add_or_modify_attrib_local<cam_depth_height_att>(depth_node.value(), frame.depth.height);
-						G->add_or_modify_attrib_local<cam_depth_focalx_att>(depth_node.value(), frame.depth.focalx);
-						G->add_or_modify_attrib_local<cam_depth_focaly_att>(depth_node.value(), frame.depth.focaly);
-						G->add_or_modify_attrib_local<cam_depthFactor_att>(depth_node.value(), frame.depth.depthFactor);
-						G->add_or_modify_attrib_local<cam_depth_att>(depth_node.value(),
-							std::vector<uint8_t>(frame.depth.depth.begin(), frame.depth.depth.end()));
-						G->update_node(depth_node.value());
-					}
+					G->add_or_modify_attrib_local<cam_depth_width_att>(cam_node.value(), frame.depth.width);
+					G->add_or_modify_attrib_local<cam_depth_height_att>(cam_node.value(), frame.depth.height);
+					G->add_or_modify_attrib_local<cam_depth_focalx_att>(cam_node.value(), frame.depth.focalx);
+					G->add_or_modify_attrib_local<cam_depth_focaly_att>(cam_node.value(), frame.depth.focaly);
+					G->add_or_modify_attrib_local<cam_depthFactor_att>(cam_node.value(), frame.depth.depthFactor);
+					G->add_or_modify_attrib_local<cam_depth_att>(cam_node.value(), std::move(frame.depth.depth));
+					G->update_node(cam_node.value());
 				}
 			}
 			else
