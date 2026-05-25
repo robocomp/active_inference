@@ -1,0 +1,11 @@
+
+Component voxelizer
+{
+    Communications
+    {
+    };
+    language Cpp11;
+    options dsr;
+
+};
+
