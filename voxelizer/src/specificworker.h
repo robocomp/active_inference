@@ -72,7 +72,7 @@ private:
         float       YOLO_IOU_THRESH         = 0.45f;
         int         YOLO_INPUT_SIZE         = 640;
         bool        YOLO_USE_GPU            = true;
-        bool        YOLO_USE_TRT            = false;
+        bool        YOLO_USE_TRT            = true;
         int         YOLO_MASK_ERODE_KERNEL  = 0;
         bool        YOLO_MASK_TRAY          = false;
         int         YOLO_TRAY_MASK_REF_WIDTH  = 0;

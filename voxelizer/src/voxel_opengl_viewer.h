@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QColor>
+#include <QCheckBox>
 #include <QMatrix4x4>
 #include <QOpenGLBuffer>
 #include <QOpenGLFunctions>
@@ -104,7 +105,8 @@ private:
     bool voxel_flip_x_ = true;
     bool voxel_flip_y_ = false;
     bool show_voxels_ = true;
-    bool show_lidar_ = true;
+    bool show_lidar_ = false;
+    QCheckBox* lidar_btn_ = nullptr;
     std::vector<QVector3D> robot_mesh_local_;
     std::mutex robot_mesh_mutex_;
 

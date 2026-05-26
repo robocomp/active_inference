@@ -158,6 +158,13 @@ VoxelOpenGLViewer::VoxelOpenGLViewer(QWidget* parent)
 
     setMinimumSize(420, 300);
     setFocusPolicy(Qt::StrongFocus);
+
+    lidar_btn_ = new QCheckBox("Draw Lidar", this);
+    lidar_btn_->setChecked(false);
+    lidar_btn_->move(8, 8);
+    lidar_btn_->raise();
+    connect(lidar_btn_, &QCheckBox::toggled, this, &VoxelOpenGLViewer::set_show_lidar);
+
     last_update_request_ = std::chrono::steady_clock::now() - kMinUpdateIntervalMs;
     load_view_state();
 }

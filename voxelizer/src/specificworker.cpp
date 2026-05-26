@@ -139,7 +139,7 @@ void SpecificWorker::compute()
     const auto detections = yolo_processor
         ? yolo_processor->detect_segmentation(frame->rgbd.rgb)
         : std::vector<SegDetection>{};
-
+  
     voxel_processor->process_rgbd_frame(frame->rgbd, detections,
                                         frame->room_T_robot, frame->room_T_zed,
                                         frame->graph_object_boxes, voxel_viewer_gl.get());
