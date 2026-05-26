@@ -36,21 +36,38 @@ std::array<double, Kinematics::N_ARM_JOINTS> efe_gradient_step(
     const Eigen::Vector3d& x_target,
     const EFEParams& params)
 {
-    // 1. Position error in world frame.
-    const Eigen::Vector3d x_ee = kin.forward_kinematics(q);
-    const Eigen::Vector3d err  = x_ee - x_target;
+    // 1. Pose + 6×7 Jacobian (linear rows 0-2, angular rows 3-5).
+    const auto pose = kin.tool_pose(q);
+    const auto J    = kin.arm_jacobian_full(q);
+    const auto J_lin = J.template topRows<3>();      // 3×7  d(pos)/dq
+    const auto J_ang = J.template bottomRows<3>();   // 3×7  d(ω)/dq
 
-    // 2. Instrumental gradient: q̇ = −α · J_linᵀ · err
-    const Eigen::Matrix<double, 3, Kinematics::N_ARM_JOINTS> J = kin.arm_jacobian_linear(q);
-    Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1> q_dot = -params.gain_pos * J.transpose() * err;
+    // 2. Position gradient: q̇_p = −α_p · J_linᵀ · (f(q) − x*).
+    const Eigen::Vector3d err_pos = pose.position - x_target;
+    Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1> q_dot =
+        -params.gain_pos * J_lin.transpose() * err_pos;
 
-    // 3. Joint-limit repulsion (only on revolute joints; continuous → no-op).
+    // 3. Orientation gradient (partial alignment of tool-z with z_des).
+    //    From C_orient(q) = 1 − z_tool(q) · z_des, the chain rule yields
+    //        ∂C/∂q = −J_angᵀ · (z_tool × z_des),
+    //    so gradient-descent gives q̇_o = +α_o · J_angᵀ · (z_tool × z_des).
+    //    Cross product vanishes both at perfect alignment (good) and at the
+    //    antipodal 180° case (singular); the position term perturbs us off
+    //    the singular point if we ever start there.
+    if (params.gain_orient > 0.0)
+    {
+        const Eigen::Vector3d z_tool = pose.rotation.col(2);
+        const Eigen::Vector3d cross  = z_tool.cross(params.desired_approach);
+        q_dot += params.gain_orient * J_ang.transpose() * cross;
+    }
+
+    // 4. Joint-limit repulsion (only on revolute joints; continuous → no-op).
     const auto lims = kin.arm_joint_position_limits();
     for (int i = 0; i < Kinematics::N_ARM_JOINTS; ++i)
         q_dot(i) += limit_repulsion_velocity(q[i], lims[i].first, lims[i].second,
                                               params.limit_margin, params.limit_gain);
 
-    // 4. Per-joint velocity clip — never exceed the URDF-declared limit
+    // 5. Per-joint velocity clip — never exceed the URDF-declared limit
     //    nor the user-configured ceiling.
     const auto vlim = kin.arm_joint_velocity_limits();
     std::array<double, Kinematics::N_ARM_JOINTS> out{};

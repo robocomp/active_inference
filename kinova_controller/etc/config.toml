@@ -27,7 +27,7 @@ graph = true
 # 3d = true
 
 [Period]
-Compute = 100
+Compute = 20
 Emergency = 500
 
 [Component.Debug]

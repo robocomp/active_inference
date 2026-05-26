@@ -84,6 +84,25 @@ Kinematics::arm_jacobian_linear(const std::array<double, N_ARM_JOINTS>& angles)
     return J_arm;
 }
 
+Eigen::Matrix<double, 6, Kinematics::N_ARM_JOINTS>
+Kinematics::arm_jacobian_full(const std::array<double, N_ARM_JOINTS>& angles)
+{
+    const auto J_full = jacobian(angles);
+    const auto idx_v  = arm_joint_idx_v();
+    Eigen::Matrix<double, 6, N_ARM_JOINTS> J_arm;
+    for (int i = 0; i < N_ARM_JOINTS; ++i)
+        J_arm.col(i) = J_full.col(idx_v[i]);
+    return J_arm;
+}
+
+Kinematics::ToolPose Kinematics::tool_pose(const std::array<double, N_ARM_JOINTS>& angles)
+{
+    const Eigen::VectorXd q = angles_to_q(angles);
+    pinocchio::framesForwardKinematics(model_, *data_, q);
+    const auto& T = data_->oMf[ee_frame_id_];
+    return ToolPose{T.translation(), T.rotation()};
+}
+
 std::array<int, Kinematics::N_ARM_JOINTS> Kinematics::arm_joint_idx_v() const
 {
     std::array<int, N_ARM_JOINTS> idx_v{};

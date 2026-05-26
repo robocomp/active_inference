@@ -18,6 +18,7 @@
  */
 #include "specificworker.h"
 
+#include <cmath>
 #include <print>
 #include <stdexcept>
 
@@ -27,6 +28,15 @@ namespace
     // confirmed Pinocchio loads the URDF correctly.
     constexpr auto URDF_PATH =
         "/home/pbustos/robocomp/components/active_inference/kinova_controller/gen3_robotiq_2f_85-mod.urdf";
+
+    /// Shortest angular distance |a − b| modulo 2π, in [0, π].
+    /// Needed because continuous joints accumulate revolutions across runs
+    /// (the Webots encoder can report +8.6 rad even though physically the
+    /// joint is at +8.6 − 2π = +2.32 rad).
+    inline double angular_distance(double a, double b)
+    {
+        return std::abs(std::atan2(std::sin(a - b), std::cos(a - b)));
+    }
 }
 
 SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, bool startup_check) : GenericWorker(configLoader, tprx)
@@ -41,22 +51,6 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
 		#ifdef HIBERNATION_ENABLED
 			hibernationChecker.start(500);
 		#endif
-		
-		// Example statemachine:
-		/***
-		//Your definition for the statesmachine (if you dont want use a execute function, use nullptr)
-		states["CustomState"] = std::make_unique<GRAFCETStep>("CustomState", period, 
-															std::bind(&SpecificWorker::customLoop, this),  // Cyclic function
-															std::bind(&SpecificWorker::customEnter, this), // On-enter function
-															std::bind(&SpecificWorker::customExit, this)); // On-exit function
-
-		//Add your definition of transitions (addTransition(originOfSignal, signal, dstState))
-		states["CustomState"]->addTransition(states["CustomState"].get(), SIGNAL(entered()), states["OtherState"].get());
-		states["Compute"]->addTransition(this, SIGNAL(customSignal()), states["CustomState"].get()); //Define your signal in the .h file under the "Signals" section.
-
-		//Add your custom state
-		statemachine.addState(states["CustomState"].get());
-		***/
 
 		statemachine.setChildMode(QState::ExclusiveStates);
 		statemachine.start();
@@ -72,11 +66,27 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
 SpecificWorker::~SpecificWorker()
 {
 	std::cout << "Destroying SpecificWorker" << std::endl;
-	/*
-	for (auto const& [name, g] : Graphs) {
-	    g->write_to_json_file("./"+agent_name+"_"+name+".json");
+
+	// Safety: send zero velocities so the arm halts when the agent exits.
+	// Without this the bridge holds the last commanded q̇ and the arm keeps
+	// drifting freely in Webots after Ctrl+C. Wrapped in try/catch because
+	// the proxy may already be unreachable on shutdown (bridge closed first,
+	// network gone, etc.) — in that case there is nothing we can do.
+	try
+	{
+		RoboCompKinovaArm::TJointSpeeds stop;
+		stop.jointSpeeds.assign(Kinematics::N_ARM_JOINTS, 0.0f);
+		kinovaarm_proxy->moveJointsWithSpeed(stop);
+		std::cout << "[shutdown] Sent zero velocities to arm." << std::endl;
 	}
-	*/
+	catch (const Ice::Exception& e)
+	{
+		std::cerr << "[shutdown] Could not send stop command: " << e.what() << std::endl;
+	}
+	catch (...)
+	{
+		std::cerr << "[shutdown] Unknown error sending stop command." << std::endl;
+	}
 }
 
 
@@ -155,19 +165,77 @@ void SpecificWorker::compute()
         for (int i = 0; i < Kinematics::N_ARM_JOINTS; ++i)
             q[i] = js.joints[i].angle;
 
+        if (joint_dump_pending_)
+        {
+            std::print("[joint-dump] received {} joints from KinovaArm proxy\n", js.joints.size());
+            for (size_t i = 0; i < js.joints.size(); ++i)
+                std::print("  [{}] id={} angle={:+.4f} rad  velocity={:+.4f}  torque={:+.3f}\n",
+                           i, js.joints[i].id, js.joints[i].angle,
+                           js.joints[i].velocity, js.joints[i].torque);
+            const auto ee_at_received = kinematics_->forward_kinematics(q);
+            std::print("[joint-dump] FK at received angles: tool_frame=[{:+.4f}, {:+.4f}, {:+.4f}] m\n",
+                       ee_at_received.x(), ee_at_received.y(), ee_at_received.z());
+            std::print("[joint-dump] Cross-check this position against Webots' viewer.\n"
+                       "             If they disagree we have a base-frame or sign-convention mismatch.\n");
+            joint_dump_pending_ = false;
+        }
+
+        // ── Lifecycle: home to rest pose, then run EFE ──────────────────────
+        if (phase_ == Phase::SendingRestPose)
+        {
+            RoboCompKinovaArm::TJointAngles target;
+            target.jointAngles.assign(rest_pose_angles_.begin(), rest_pose_angles_.end());
+            kinovaarm_proxy->moveJointsWithAngle(target);
+            std::print("[homing] Sent rest pose [{:+.3f} {:+.3f} {:+.3f} {:+.3f} {:+.3f} {:+.3f} {:+.3f}] rad\n",
+                       rest_pose_angles_[0], rest_pose_angles_[1], rest_pose_angles_[2],
+                       rest_pose_angles_[3], rest_pose_angles_[4], rest_pose_angles_[5],
+                       rest_pose_angles_[6]);
+            phase_ = Phase::Homing;
+            proxy_unreachable_warned_ = false;
+            return;
+        }
+
+        if (phase_ == Phase::Homing)
+        {
+            double max_err = 0.0;
+            for (int i = 0; i < Kinematics::N_ARM_JOINTS; ++i)
+                max_err = std::max(max_err, angular_distance(q[i], rest_pose_angles_[i]));
+            if (max_err < HOMING_TOLERANCE_RAD)
+                ++homing_settled_ticks_;
+            else
+                homing_settled_ticks_ = 0;
+
+            std::print("[homing] max joint err = {:.4f} rad  ({}/{} settled)\n",
+                       max_err, homing_settled_ticks_, HOMING_SETTLE_TICKS);
+
+            if (homing_settled_ticks_ >= HOMING_SETTLE_TICKS)
+            {
+                std::print("[homing] Rest pose reached — switching to EFE control.\n");
+                phase_ = Phase::ActiveEFE;
+            }
+            proxy_unreachable_warned_ = false;
+            return;   // do NOT run EFE while homing
+        }
+
+        // ── EFE-reach control (Phase::ActiveEFE) ────────────────────────────
         const auto q_dot = efe_gradient_step(*kinematics_, q, reach_target_);
 
         RoboCompKinovaArm::TJointSpeeds cmd;
         cmd.jointSpeeds.assign(q_dot.begin(), q_dot.end());
         kinovaarm_proxy->moveJointsWithSpeed(cmd);
 
-        const auto x_ee = kinematics_->forward_kinematics(q);
-        const double err = (x_ee - reach_target_).norm();
-        std::print("[reach] x_ee=[{:+.3f} {:+.3f} {:+.3f}]  target=[{:+.3f} {:+.3f} {:+.3f}]  "
-                   "err={:.4f} m  |q̇|={:.3f}\n",
+        const auto pose = kinematics_->tool_pose(q);
+        const Eigen::Vector3d x_ee = pose.position;
+        const Eigen::Vector3d z_tool = pose.rotation.col(2);
+        const double err_pos = (x_ee - reach_target_).norm();
+        // Angle (deg) between tool z-axis and (0,0,−1).
+        const double cos_align = std::clamp(z_tool.z() * -1.0, -1.0, 1.0);
+        const double err_orient_deg = std::acos(cos_align) * 180.0 / M_PI;
+        std::print("[reach] x_ee=[{:+.3f} {:+.3f} {:+.3f}]  z_tool=[{:+.2f} {:+.2f} {:+.2f}]  "
+                   "err_pos={:.4f} m  err_orient={:.2f}°  |q̇|={:.3f}\n",
                    x_ee.x(), x_ee.y(), x_ee.z(),
-                   reach_target_.x(), reach_target_.y(), reach_target_.z(),
-                   err,
+                   z_tool.x(), z_tool.y(), z_tool.z(),
+                   err_pos, err_orient_deg,
                    Eigen::Map<const Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1>>(q_dot.data()).norm());
         proxy_unreachable_warned_ = false;
     }
@@ -182,6 +250,7 @@ void SpecificWorker::compute()
     }
 }
 
+////////////////////////////////////////////////////////////////////////////////////////////////
 
 void SpecificWorker::emergency()
 {

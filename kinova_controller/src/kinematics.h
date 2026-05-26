@@ -52,6 +52,22 @@ public:
     Eigen::Matrix<double, 3, N_ARM_JOINTS> arm_jacobian_linear(
         const std::array<double, N_ARM_JOINTS>& angles);
 
+    /** Full 6×7 arm Jacobian: rows 0-2 = linear, rows 3-5 = angular.
+     *  Both expressed in the world frame (LOCAL_WORLD_ALIGNED convention).
+     *  Used by efe_gradient_step when an orientation constraint is active. */
+    Eigen::Matrix<double, 6, N_ARM_JOINTS> arm_jacobian_full(
+        const std::array<double, N_ARM_JOINTS>& angles);
+
+    /** Position + rotation of tool_frame in the world frame at the given
+     *  arm angles. `rotation` columns are the tool's local x/y/z axes
+     *  expressed in world coordinates — col(2) is the approach direction. */
+    struct ToolPose
+    {
+        Eigen::Vector3d position;
+        Eigen::Matrix3d rotation;
+    };
+    ToolPose tool_pose(const std::array<double, N_ARM_JOINTS>& angles);
+
     /** idx_v of each arm joint inside the full nv-vector (Pinocchio ordering). */
     std::array<int, N_ARM_JOINTS> arm_joint_idx_v() const;
 

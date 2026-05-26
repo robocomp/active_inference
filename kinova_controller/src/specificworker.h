@@ -100,9 +100,27 @@ private:
 
 	std::unique_ptr<Kinematics> kinematics_;
 
-	// EFE-reach test target (world frame, metres) and run state.
-	Eigen::Vector3d reach_target_{0.4, 0.0, 0.6};
+	// EFE-reach test target — arm-base frame, metres.
+	// The arm base is mounted on the desk top, so arm-base-z = 0 IS the
+	// table surface. (0.4, 0.0, 0.0) is 40 cm in front of the arm base,
+	// centred laterally, at table level — i.e. tool_frame touches the
+	// desk's top surface. In Webots world coords this maps to roughly
+	// (-0.303 + 0.4, -0.023, 0.71) ≈ (+0.10, -0.02, +0.71).
+	Eigen::Vector3d reach_target_{0.4, 0.0, 0.1};
 	bool proxy_unreachable_warned_ = false;
+	bool joint_dump_pending_ = true;     // dump first received TJoints, once
+
+	// Controller lifecycle: home to a known rest pose before enabling EFE.
+	// Same angles as the bridge's pre-homing — but the agent commands them
+	// itself so behaviour does not depend on whether the bridge pre-homed.
+	enum class Phase { SendingRestPose, Homing, ActiveEFE };
+	Phase phase_ = Phase::SendingRestPose;
+	std::array<double, Kinematics::N_ARM_JOINTS> rest_pose_angles_{
+		0.0, 0.3, 0.0, 1.5, 0.0, 1.4, 0.0
+	};
+	int homing_settled_ticks_ = 0;
+	static constexpr double HOMING_TOLERANCE_RAD = 0.05;  // ≈ 2.9°
+	static constexpr int    HOMING_SETTLE_TICKS  = 5;     // consecutive cycles within tolerance
 
 signals:
 	//void customSignal();
