@@ -259,26 +259,46 @@ std::optional<RGBDData> SceneProcessor::get_rgbd_frame_from_dsr() const
     if (!rgb_opt.has_value() || rgb_opt->empty())
         return std::nullopt;
 
-    // --- Dense 3D point cloud from depth stored in DSR (camera frame) ---
-    auto pts_opt = camera_api->get_pointcloud("", 1);
-    if (!pts_opt.has_value() || pts_opt->empty())
+    // --- Depth image from DSR (XYZ will be computed only for masked pixels) ---
+    auto depth_opt = camera_api->get_depth_image();
+    if (!depth_opt.has_value() || depth_opt->empty())
         return std::nullopt;
 
-    const int w = rgb_opt->cols;
-    const int h = rgb_opt->rows;
-    const auto& raw = pts_opt.value();
+    const int rgb_w = rgb_opt->cols;
+    const int rgb_h = rgb_opt->rows;
+
+    auto depth_w_opt = graph_->get_attrib_by_name<cam_depth_width_att>(zed_node.value());
+    auto depth_h_opt = graph_->get_attrib_by_name<cam_depth_height_att>(zed_node.value());
+    auto focal_x_opt = graph_->get_attrib_by_name<cam_depth_focalx_att>(zed_node.value());
+    auto focal_y_opt = graph_->get_attrib_by_name<cam_depth_focaly_att>(zed_node.value());
+    if (!depth_w_opt.has_value() || !depth_h_opt.has_value() || !focal_x_opt.has_value() || !focal_y_opt.has_value())
+        return std::nullopt;
+
+    const int depth_w = depth_w_opt.value();
+    const int depth_h = depth_h_opt.value();
+    if (depth_w <= 0 || depth_h <= 0)
+        return std::nullopt;
+
+    // Voxel pipeline assumes one xyz point per RGB pixel.
+    if (depth_w != rgb_w || depth_h != rgb_h)
+    {
+        qWarning() << "RGB/depth resolution mismatch. RGB=" << rgb_w << "x" << rgb_h
+                   << " depth=" << depth_w << "x" << depth_h;
+        return std::nullopt;
+    }
+
+    const auto& depth = depth_opt.value();
+    const std::size_t depth_size = static_cast<std::size_t>(depth_w) * static_cast<std::size_t>(depth_h);
+    if (depth.size() < depth_size)
+        return std::nullopt;
 
     RGBDData data;
-    data.rgb    = std::move(*rgb_opt);
-    data.width  = w;
-    data.height = h;
-    data.points.resize(raw.size());
-    for (std::size_t i = 0; i < raw.size(); ++i)
-    {
-        data.points[i].x = std::get<0>(raw[i]);
-        data.points[i].y = std::get<1>(raw[i]);
-        data.points[i].z = std::get<2>(raw[i]);
-    }
+    data.rgb     = std::move(*rgb_opt);
+    data.width   = rgb_w;
+    data.height  = rgb_h;
+    data.focal_x = focal_x_opt.value();
+    data.focal_y = focal_y_opt.value();
+    data.depth.assign(depth.begin(), depth.begin() + static_cast<std::ptrdiff_t>(depth_size));
     return data;
 }
 
@@ -487,7 +507,11 @@ std::optional<GraphObjectBox> SceneProcessor::build_graph_object_box(const DSR::
     if (node.type() == "table")
         category = "model_table";
 
-    return GraphObjectBox{min_corner, max_corner, std::move(category)};
+    const Eigen::Matrix3d& R = room_T_object->linear();
+    const float yaw = static_cast<float>(std::atan2(R(1, 0), R(0, 0)));
+    return GraphObjectBox{min_corner, max_corner,
+                          Eigen::Vector3f(half_width, half_depth, half_height),
+                          yaw, node.name(), std::move(category)};
 }
 
 std::vector<GraphObjectBox> SceneProcessor::get_graph_object_boxes(const std::string& room_name,
@@ -706,6 +730,21 @@ void SceneProcessor::update_viewer_graph_object_boxes(std::span<const GraphObjec
     }
 
     voxel_viewer_->update_graph_boxes(mins, maxs, categories);
+}
+
+void SceneProcessor::update_viewer_object_meshes()
+{
+    if (voxel_viewer_ == nullptr || graph_ == nullptr)
+        return;
+
+    std::vector<std::vector<float>> meshes;
+    for (const auto& node : graph_->get_nodes_by_type("table"))
+    {
+        auto opt = graph_->get_attrib_by_name<mesh_vertices_att>(node);
+        if (opt.has_value())
+            meshes.push_back(std::vector<float>(opt.value().get()));
+    }
+    voxel_viewer_->update_object_meshes(meshes);
 }
 
 void SceneProcessor::update_viewer_robot_pose(const Mat::RTMat& room_T_robot)

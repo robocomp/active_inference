@@ -25,10 +25,18 @@
 #endif
 #include "unified_voxel_grid.h"
 #include "voxel_opengl_viewer.h"
+#include "yolo_viewer.h"
+#include <dsr/gui/viewers/graph_viewer/graph_viewer.h>
+#include <QHBoxLayout>
+#include <QPushButton>
+#include <QVBoxLayout>
+#include <QWidget>
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <print>
+#include <unordered_map>
 
 SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, bool startup_check)
     : GenericWorker(configLoader, tprx)
@@ -54,6 +62,7 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
 SpecificWorker::~SpecificWorker()
 {
     qInfo() << "Destroying SpecificWorker";
+    cleanup_semantic_grid_nodes();
 }
 
 void SpecificWorker::initialize()
@@ -69,10 +78,22 @@ void SpecificWorker::initialize()
     try { params.YOLO_USE_GPU = configLoader.get<bool>("Yolo.use_gpu"); } catch (...) {}
     try { params.YOLO_USE_TRT = configLoader.get<bool>("Yolo.use_trt"); } catch (...) {}
     try { params.YOLO_MASK_ERODE_KERNEL = configLoader.get<int>("Yolo.mask_erode_kernel"); } catch (...) {}
+    try { params.YOLO_MASK_TRAY = configLoader.get<bool>("Yolo.mask_tray"); } catch (...) {}
+    try { params.YOLO_TRAY_MASK_REF_WIDTH  = configLoader.get<int>("Yolo.tray_mask_ref_width"); } catch (...) {}
+    try { params.YOLO_TRAY_MASK_REF_HEIGHT = configLoader.get<int>("Yolo.tray_mask_ref_height"); } catch (...) {}
+    try {
+        const auto flat = configLoader.get<std::vector<int>>("Yolo.tray_mask_polygon");
+        if (flat.size() >= 6 and flat.size() % 2 == 0) {
+            params.YOLO_TRAY_MASK_POLYGON_PX.clear();
+            for (std::size_t i = 0; i + 1 < flat.size(); i += 2)
+                params.YOLO_TRAY_MASK_POLYGON_PX.emplace_back(flat[i], flat[i + 1]);
+        }
+    } catch (...) {}
     try { params.TRACK_ASSOCIATION_MAX_DISTANCE_M = static_cast<float>(configLoader.get<double>("Yolo.track_association_max_distance_m")); } catch (...) {}
     try { params.TRACK_MAX_MISSED_FRAMES = configLoader.get<int>("Yolo.track_max_missed_frames"); } catch (...) {}
     try { params.VOXEL_VIEWER_MAX_RENDERED_VOXELS = static_cast<std::size_t>(configLoader.get<int>("Voxel.viewer_max_rendered_voxels")); } catch (...) {}
     try { params.VOXEL_VIEWER_FPS = configLoader.get<int>("Voxel.viewer_fps"); } catch (...) {}
+    try { params.VOXEL_Z_LIFT_M = static_cast<float>(configLoader.get<double>("Voxel.z_lift_m")); } catch (...) {}
     try { params.TRANSFORMS_INTERPOLATE_RT = configLoader.get<bool>("Transforms.interpolate_rt"); } catch (...) {}
     try { verbose_debug_ = configLoader.get<bool>("Debug.verbose"); }
     catch (...) { verbose_debug_ = false; }
@@ -100,8 +121,52 @@ void SpecificWorker::initialize()
     {
         const std::string viewer_key = graph_viewers.contains("")
             ? std::string("") : graph_viewers.begin()->first;
+
+        auto* voxel_panel = new QWidget(nullptr);
+        auto* panel_layout = new QVBoxLayout(voxel_panel);
+        panel_layout->setContentsMargins(6, 6, 6, 6);
+        panel_layout->setSpacing(6);
+
+        auto* controls_layout = new QHBoxLayout();
+        controls_layout->setContentsMargins(0, 0, 0, 0);
+        controls_layout->setSpacing(8);
+
+        auto* lidar_btn = new QPushButton("Lidar: OFF", voxel_panel);
+        lidar_btn->setCheckable(true);
+        lidar_btn->setCursor(Qt::PointingHandCursor);
+
+        auto* clear_voxels_btn = new QPushButton("Clear Voxels", voxel_panel);
+        clear_voxels_btn->setCursor(Qt::PointingHandCursor);
+
+        controls_layout->addWidget(lidar_btn);
+        controls_layout->addWidget(clear_voxels_btn);
+        controls_layout->addStretch(1);
+
         voxel_viewer_gl = std::make_unique<rc::VoxelOpenGLViewer>(nullptr);
-        graph_viewers.at(viewer_key)->add_custom_widget_to_dock("Voxel3D", voxel_viewer_gl.get());
+        voxel_viewer_gl->load_robot_mesh("meshes/shadow.obj");
+
+        panel_layout->addLayout(controls_layout);
+        panel_layout->addWidget(voxel_viewer_gl.get(), 1);
+
+        connect(lidar_btn, &QPushButton::toggled, this, [this, lidar_btn](bool checked)
+        {
+            if (voxel_viewer_gl)
+                voxel_viewer_gl->set_show_lidar(checked);
+            lidar_btn->setText(checked ? "Lidar: ON" : "Lidar: OFF");
+        });
+
+        connect(clear_voxels_btn, &QPushButton::clicked, this, [this]
+        {
+            if (!voxel_processor || !voxel_viewer_gl)
+                return;
+            voxel_processor->clear_state(voxel_viewer_gl.get());
+            ensure_voxels_node_in_dsr();
+            upload_voxel_grid_to_dsr();
+        });
+
+        graph_viewers.at(viewer_key)->add_custom_widget_to_dock("Voxel3D", voxel_panel);
+        yolo_viewer_ = std::make_unique<rc::YoloViewer>(nullptr);
+        graph_viewers.at(viewer_key)->add_custom_widget_to_dock("YOLO", yolo_viewer_.get());
         qInfo() << __FUNCTION__ << "Voxel3D viewer attached to DSR graph viewer";
     }
 
@@ -116,6 +181,7 @@ void SpecificWorker::initialize()
     voxel_processor_config.track_association_max_distance_m= params.TRACK_ASSOCIATION_MAX_DISTANCE_M;
     voxel_processor_config.track_max_missed_frames         = params.TRACK_MAX_MISSED_FRAMES;
     voxel_processor_config.viewer_voxel_fps                = params.VOXEL_VIEWER_FPS;
+    voxel_processor_config.z_lift_m                        = params.VOXEL_Z_LIFT_M;
     voxel_processor_config.verbose_debug                   = verbose_debug_;
     voxel_processor->configure(voxel_processor_config);
 
@@ -124,6 +190,8 @@ void SpecificWorker::initialize()
     scene_processor = std::make_unique<SceneProcessor>(G);
     scene_processor->configure(inner_eigen_api.get(), voxel_viewer_gl.get(),
                                params.TRANSFORMS_INTERPOLATE_RT, verbose_debug_);
+
+    cleanup_semantic_grid_nodes();
 }
 
 void SpecificWorker::compute()
@@ -144,7 +212,17 @@ void SpecificWorker::compute()
                                         frame->room_T_robot, frame->room_T_zed,
                                         frame->graph_object_boxes, voxel_viewer_gl.get());
 
+    if (yolo_viewer_) {
+        const cv::Mat viewer_rgb = yolo_processor
+            ? yolo_processor->apply_tray_mask(frame->rgbd.rgb)
+            : frame->rgbd.rgb;
+        yolo_viewer_->update_frame(viewer_rgb, detections);
+    }
+
     update_table_nodes_from_tracks(frame->graph_object_boxes);
+
+    ensure_voxels_node_in_dsr();
+    upload_voxel_grid_to_dsr();
 
     if (verbose_debug_)
         compute_fps.print("[Compute]", 2000);
@@ -178,6 +256,7 @@ std::optional<SpecificWorker::SceneFrame> SpecificWorker::process_scene_frame(FP
     scene_processor->update_viewer_robot_pose(room_T_robot.value());
     scene_processor->update_viewer_lidar_points(room_name, robot_name, room_T_robot.value());
     scene_processor->update_viewer_graph_object_boxes(graph_object_boxes);
+    scene_processor->update_viewer_object_meshes();
     scene_processor->update_room_polygon_periodic();
 
     return SceneFrame{rgbd_opt.value(), room_T_robot.value(), room_T_zed.value(), graph_object_boxes};
@@ -195,39 +274,89 @@ void SpecificWorker::update_table_nodes_from_tracks(const std::vector<GraphObjec
     if (sensing_frame % 30 == 0)
         std::println("[TableCapture] frame={} model_boxes={} table_tracks={}", sensing_frame, model_box_count, table_cand_count);
 
+    // Index model boxes by DSR node name so each table node finds its own box in O(1).
+    struct ModelBox
+    {
+        Eigen::Vector3f min, max, centroid, half_extents;
+        float yaw_rad = 0.f;
+    };
+    std::unordered_map<std::string, ModelBox> model_box_map;
+    for (const auto& box : graph_object_boxes)
+    {
+        if (box.category != "model_table" or box.node_name.empty())
+            continue;
+        model_box_map.emplace(box.node_name, ModelBox{
+            box.min, box.max, (box.min + box.max) * 0.5f, box.half_extents, box.yaw_rad
+        });
+    }
+    if (model_box_map.empty())
+        return;
+
     for (auto table_node : G->get_nodes_by_type("table"))
     {
-        Eigen::Vector3f model_centroid = Eigen::Vector3f::Zero();
-        bool has_model_box = false;
-        for (const auto& box : graph_object_boxes)
-        {
-            if (box.category == "model_table")
-            {
-                model_centroid = (box.min + box.max) * 0.5f;
-                has_model_box = true;
-                break;
-            }
-        }
-        if (!has_model_box)
+        const auto mb_it = model_box_map.find(table_node.name());
+        if (mb_it == model_box_map.end())
             continue;
+        const auto& mb = mb_it->second;
 
-        int   best_track_id = -1;
-        float best_dist     = std::numeric_limits<float>::max();
+        // OBB inside check — defined before the matching loop so it can be
+        // reused for both candidate scoring (50-pt sample) and explanation_ratio
+        // (400-pt full fetch).
+        const float cy = std::cos(-mb.yaw_rad);
+        const float sy = std::sin(-mb.yaw_rad);
+        auto inside_obb = [&](const Eigen::Vector3f& p) -> bool
+        {
+            const Eigen::Vector3f rel = p - mb.centroid;
+            const float lx = rel.x() * cy - rel.y() * sy;
+            const float ly = rel.x() * sy + rel.y() * cy;
+            return std::abs(lx) <= mb.half_extents.x()
+               and std::abs(ly) <= mb.half_extents.y()
+               and std::abs(rel.z()) <= mb.half_extents.z();
+        };
+
+        // Primary match: pick the table track with the most sample points inside
+        // the model OBB. A 50-point sample per candidate keeps cost low.
+        int best_track_id  = -1;
+        int best_obb_score = -1;
         for (const auto& cand : track_cands)
         {
-            if (cand.category != "table")
-                continue;
-            const float dist = (cand.centroid - model_centroid).norm();
-            if (dist < best_dist)
+            if (cand.category != "table") continue;
+            const auto sample = voxel_processor->get_flat_pts_for_track(cand.track_id, 50);
+            int score = 0;
+            for (std::size_t k = 0; k < sample.size() / 3; ++k)
+                if (inside_obb({sample[k*3], sample[k*3+1], sample[k*3+2]}))
+                    ++score;
+            if (score > best_obb_score)
             {
-                best_dist     = dist;
-                best_track_id = cand.track_id;
+                best_obb_score = score;
+                best_track_id  = cand.track_id;
+            }
+        }
+        // Fallback to XY centroid distance when no track has any OBB overlap yet
+        // (e.g. first frames before the voxel cloud covers the model footprint).
+        if (best_obb_score <= 0)
+        {
+            float best_dist = std::numeric_limits<float>::max();
+            best_track_id   = -1;
+            for (const auto& cand : track_cands)
+            {
+                if (cand.category != "table") continue;
+                const float dx = cand.centroid.x() - mb.centroid.x();
+                const float dy = cand.centroid.y() - mb.centroid.y();
+                const float dist = std::sqrt(dx*dx + dy*dy);
+                if (dist < best_dist) { best_dist = dist; best_track_id = cand.track_id; }
             }
         }
         if (sensing_frame % 30 == 0)
-            std::println("[TableCapture] node='{}' model_centroid=({:.2f},{:.2f},{:.2f}) best_track={} best_dist={:.2f}",
-                         table_node.name(), model_centroid.x(), model_centroid.y(), model_centroid.z(),
-                         best_track_id, best_dist);
+        {
+            if (best_track_id >= 0)
+                std::println("[TableCapture] node='{}' model_centroid=({:.2f},{:.2f},{:.2f}) best_track={} obb_score={}",
+                             table_node.name(), mb.centroid.x(), mb.centroid.y(), mb.centroid.z(),
+                             best_track_id, best_obb_score);
+            else
+                std::println("[TableCapture] node='{}' no table track visible this frame",
+                             table_node.name());
+        }
         if (best_track_id < 0)
             continue;
 
@@ -235,14 +364,135 @@ void SpecificWorker::update_table_nodes_from_tracks(const std::vector<GraphObjec
         if (flat_pts.empty())
             continue;
 
+        const std::size_t n_cands = flat_pts.size() / 3;
+        int inside_count = 0;
+        for (std::size_t k = 0; k < n_cands; ++k)
+        {
+            if (inside_obb(Eigen::Vector3f(flat_pts[k*3], flat_pts[k*3+1], flat_pts[k*3+2])))
+                ++inside_count;
+        }
+        const float explanation_ratio = n_cands > 0
+            ? static_cast<float>(inside_count) / static_cast<float>(n_cands)
+            : 0.0f;
+
+        // residual_pts: voxels NOT belonging to the matched track, within an expanded
+        // AABB neighbourhood of the model box (±0.3 m). Capped at 150 points.
+        constexpr float kNeighbourhoodMargin = 0.3f;
+        const Eigen::Vector3f nb_min = mb.min.array() - kNeighbourhoodMargin;
+        const Eigen::Vector3f nb_max = mb.max.array() + kNeighbourhoodMargin;
+        const auto exported = voxel_grid->export_semantic_voxels();
+        std::vector<float> residual_flat;
+        residual_flat.reserve(450);
+        for (std::size_t i = 0; i < exported.points.size() and residual_flat.size() < 450; ++i)
+        {
+            if (i < exported.track_ids.size() and exported.track_ids[i] == best_track_id)
+                continue;
+            const Eigen::Vector3f& p = exported.points[i];
+            if ((p.array() >= nb_min.array()).all() and (p.array() <= nb_max.array()).all())
+            {
+                residual_flat.push_back(p.x());
+                residual_flat.push_back(p.y());
+                residual_flat.push_back(p.z());
+            }
+        }
+        const int residual_mass = static_cast<int>(residual_flat.size() / 3);
+
         G->add_or_modify_attrib_local<candidate_pts_att>(table_node, flat_pts);
+        G->add_or_modify_attrib_local<residual_pts_att>(table_node, residual_flat);
+        G->add_or_modify_attrib_local<residual_mass_att>(table_node, residual_mass);
         G->add_or_modify_attrib_local<last_sensing_frame_att>(table_node, sensing_frame);
-        G->add_or_modify_attrib_local<explanation_ratio_att>(table_node, 0.0f);
+        G->add_or_modify_attrib_local<explanation_ratio_att>(table_node, explanation_ratio);
         G->update_node(table_node);
         if (sensing_frame % 30 == 0)
-            std::println("[TableCapture] WROTE node='{}' frame={} pts={}",
-                         table_node.name(), sensing_frame, flat_pts.size() / 3);
+            std::println("[TableCapture] WROTE node='{}' frame={} cands={} resid={} expl={:.2f}",
+                         table_node.name(), sensing_frame, n_cands, residual_mass, explanation_ratio);
     }
+}
+
+void SpecificWorker::ensure_voxels_node_in_dsr()
+{
+    if (voxels_node_ready_)
+        return;
+
+    // Require both room and robot nodes to be present before creating the voxels node.
+    if (G->get_nodes_by_type("room").empty() or G->get_nodes_by_type("robot").empty())
+        return;
+
+    // If the node already exists (created by another agent or a previous run), mark ready and return.
+    if (G->get_node("voxels").has_value())
+    {
+        voxels_node_ready_ = true;
+        return;
+    }
+
+    auto zed_node = G->get_node("zed");
+    if (!zed_node.has_value())
+    {
+        std::println("[Voxels] WARNING: 'zed' node not found in graph — cannot create RT edge");
+        return;
+    }
+
+    auto voxels_node = DSR::Node::create<semantic_grid_node_type>("voxels");
+    G->add_or_modify_attrib_local<color_att>(voxels_node, std::string{"Khaki"});
+    G->add_or_modify_attrib_local<level_att>(voxels_node, 4);
+    G->add_or_modify_attrib_local<parent_att>(voxels_node, zed_node.value().id());
+    G->add_or_modify_attrib_local<pos_x_att>(voxels_node, 105.849792f);
+    G->add_or_modify_attrib_local<pos_y_att>(voxels_node, 291.904266f);
+
+    if (const auto id = G->insert_node(voxels_node); id.has_value())
+    {
+        voxels_node_ready_ = true;
+        std::println("[Voxels] Created 'voxels' node id={} (semantic_grid) under room '{}'", *id, zed_node.value().name());
+
+        // Add an RT edge from "zed" to the new "voxels" node (identity transform).
+        auto rt_api = G->get_rt_api();
+        rt_api->insert_or_assign_edge_RT(zed_node.value(), *id,
+                                             {0.0f, 0.0f, 0.0f},
+                                             {0.0f, 0.0f, 0.0f});
+        std::println("[Voxels] RT edge inserted from 'zed' -> 'voxels'");
+        trigger_graph_layout_twopi();
+    }
+    else
+        std::println("[Voxels] ERROR: failed to insert 'voxels' node into DSR graph");
+}
+
+void SpecificWorker::upload_voxel_grid_to_dsr()
+{
+    if (!voxels_node_ready_)
+        return;
+
+    const int sensing_frame = voxel_processor->last_frame_id();
+    if (sensing_frame % 30 != 0)
+        return;
+
+    auto voxels_node_opt = G->get_node("voxels");
+    if (!voxels_node_opt.has_value())
+        return;
+    auto& voxels_node = voxels_node_opt.value();
+
+    const auto exported = voxel_grid->export_semantic_voxels();
+
+    // Stride-5 encoding per voxel: [x, y, z, prob, track_id].
+    // Receivers must interpret with stride 5.
+    const std::size_t n = exported.points.size();
+    std::vector<float> flat_pts;
+    flat_pts.reserve(n * 5);
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        const auto& pt = exported.points[i];
+        flat_pts.push_back(pt.x());
+        flat_pts.push_back(pt.y());
+        flat_pts.push_back(pt.z());
+        flat_pts.push_back(i < exported.probs.size()    ? exported.probs[i]                    : 0.0f);
+        flat_pts.push_back(i < exported.track_ids.size() ? static_cast<float>(exported.track_ids[i]) : -1.0f);
+    }
+
+    G->add_or_modify_attrib_local<candidate_pts_att>(voxels_node, flat_pts);
+    G->add_or_modify_attrib_local<last_sensing_frame_att>(voxels_node, sensing_frame);
+    G->update_node(voxels_node);
+
+    if (verbose_debug_)
+        std::println("[Voxels] Uploaded {} voxels (stride-5) to DSR (frame={})", n, sensing_frame);
 }
 
 void SpecificWorker::emergency()
@@ -260,5 +510,35 @@ int SpecificWorker::startup_check()
     qInfo() << "Startup check";
     QTimer::singleShot(200, QCoreApplication::instance(), SLOT(quit()));
     return 0;
+}
+
+void SpecificWorker::trigger_graph_layout_twopi()
+{
+    const auto it = graph_viewers.find("");
+    if (it == graph_viewers.end() || !it->second)
+        return;
+
+    QWidget* graph_widget = it->second->get_widget(DSR::DSRViewer::view::graph);
+    auto* graph_viewer = qobject_cast<DSR::GraphViewer*>(graph_widget);
+    if (!graph_viewer)
+        return;
+
+    // Run now and once queued, so layout also happens after pending node/edge
+    // update signals are processed by the viewer.
+    graph_viewer->compute_layout("twopi");
+    QMetaObject::invokeMethod(graph_viewer,
+                              [graph_viewer]() { graph_viewer->compute_layout("twopi"); },
+                              Qt::QueuedConnection);
+}
+
+void SpecificWorker::cleanup_semantic_grid_nodes()
+{
+    const auto nodes = G->get_nodes_by_type("semantic_grid");
+    for (const auto& node : nodes)
+    {
+        std::println("[Voxels] Removing stale '{}' node (id={}) from DSR graph", node.name(), node.id());
+        G->delete_node(node.id());
+    }
+    voxels_node_ready_ = false;
 }
 

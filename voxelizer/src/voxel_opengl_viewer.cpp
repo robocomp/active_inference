@@ -159,12 +159,6 @@ VoxelOpenGLViewer::VoxelOpenGLViewer(QWidget* parent)
     setMinimumSize(420, 300);
     setFocusPolicy(Qt::StrongFocus);
 
-    lidar_btn_ = new QCheckBox("Draw Lidar", this);
-    lidar_btn_->setChecked(false);
-    lidar_btn_->move(8, 8);
-    lidar_btn_->raise();
-    connect(lidar_btn_, &QCheckBox::toggled, this, &VoxelOpenGLViewer::set_show_lidar);
-
     last_update_request_ = std::chrono::steady_clock::now() - kMinUpdateIntervalMs;
     load_view_state();
 }
@@ -315,6 +309,13 @@ void VoxelOpenGLViewer::update_voxels(std::span<const QVector3D> positions,
         cpu_vertices_ = std::move(new_vertices);
         upload_pending_ = true;
     }
+    request_update_throttled();
+}
+
+void VoxelOpenGLViewer::update_object_meshes(std::span<const std::vector<float>> meshes)
+{
+    std::scoped_lock lk(object_meshes_mutex_);
+    object_meshes_.assign(meshes.begin(), meshes.end());
     request_update_throttled();
 }
 
@@ -728,7 +729,7 @@ void VoxelOpenGLViewer::paintGL()
         room_vbo_.bind();
         room_vbo_.allocate(lidar_draw_vertices.data(), static_cast<int>(lidar_draw_vertices.size() * sizeof(Vertex)));
         program_.setUniformValue("u_round_points", 1);
-        program_.setUniformValue("u_point_size", 3.0f);
+        program_.setUniformValue("u_point_size", 5.5f);
         glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(lidar_draw_vertices.size()));
         program_.setUniformValue("u_point_size", 4.5f);
         room_vbo_.release();
@@ -1131,6 +1132,35 @@ void VoxelOpenGLViewer::paintGL()
         }
     }
 
+    // ── Object meshes (flat triangle list, room frame) ────────────────────────
+    {
+        std::vector<std::vector<float>> local_meshes;
+        { std::scoped_lock lk(object_meshes_mutex_); local_meshes = object_meshes_; }
+
+        const float fx = voxel_flip_x_ ? -1.f : 1.f;
+        const float fy = voxel_flip_y_ ? -1.f : 1.f;
+        constexpr float mc_r = 1.f, mc_g = 200.f / 255.f, mc_b = 100.f / 255.f;
+
+        for (const auto& mesh : local_meshes)
+        {
+            if (mesh.size() < 9 || mesh.size() % 9 != 0) continue;
+
+            std::vector<Vertex> mv;
+            mv.reserve(mesh.size() / 3);
+            for (std::size_t i = 0; i + 2 < mesh.size(); i += 3)
+                mv.push_back(Vertex{fx * mesh[i], mesh[i + 2], fy * mesh[i + 1],
+                                    mc_r, mc_g, mc_b});
+
+            room_vao_.bind();
+            room_vbo_.bind();
+            room_vbo_.allocate(mv.data(), static_cast<int>(mv.size() * sizeof(Vertex)));
+            program_.setUniformValue("u_round_points", 0);
+            glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(mv.size()));
+            room_vbo_.release();
+            room_vao_.release();
+        }
+    }
+
     vao_.release();
     program_.release();
 
@@ -1181,8 +1211,8 @@ void VoxelOpenGLViewer::mouseMoveEvent(QMouseEvent* event)
         const QVector3D world_up(0.f, 1.f, 0.f);
         const QVector3D right = QVector3D::crossProduct(forward, world_up).normalized();
         const QVector3D camera_up = QVector3D::crossProduct(right, forward).normalized();
-        target_ += right * (static_cast<float>(d.x()) * pan_scale);
-        target_ -= camera_up * (static_cast<float>(d.y()) * pan_scale);
+        target_ -= right * (static_cast<float>(d.x()) * pan_scale);
+        target_ += camera_up * (static_cast<float>(d.y()) * pan_scale);
         save_view_state();
         update();
     }

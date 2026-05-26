@@ -1,7 +1,6 @@
 #pragma once
 
 #include <QColor>
-#include <QCheckBox>
 #include <QMatrix4x4>
 #include <QOpenGLBuffer>
 #include <QOpenGLFunctions>
@@ -50,6 +49,9 @@ public:
     void update_graph_boxes(std::span<const QVector3D> mins,
                             std::span<const QVector3D> maxs,
                             std::span<const std::string> categories = {});
+
+    // Flat triangle-list meshes in room frame [x0,y0,z0, x1,y1,z1, ...].
+    void update_object_meshes(std::span<const std::vector<float>> meshes);
 
     // Robot pose in room frame (x, y in meters; theta in radians).
     void set_robot_pose(float x, float y, float theta);
@@ -106,7 +108,6 @@ private:
     bool voxel_flip_y_ = false;
     bool show_voxels_ = true;
     bool show_lidar_ = false;
-    QCheckBox* lidar_btn_ = nullptr;
     std::vector<QVector3D> robot_mesh_local_;
     std::mutex robot_mesh_mutex_;
 
@@ -119,6 +120,8 @@ private:
     std::mutex room_polygon_mutex_;
     std::mutex track_boxes_mutex_;
     std::mutex graph_boxes_mutex_;
+    std::vector<std::vector<float>> object_meshes_;
+    std::mutex object_meshes_mutex_;
     void rebuild_polygon_locked_();
 
     bool gl_ready_ = false;

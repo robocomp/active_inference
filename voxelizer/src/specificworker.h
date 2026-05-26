@@ -41,6 +41,7 @@ class SceneProcessor;
 struct SegDetection;
 
 namespace rc { class VoxelOpenGLViewer; }
+namespace rc { class YoloViewer; }
 
 class SpecificWorker : public GenericWorker
 {
@@ -74,15 +75,23 @@ private:
         bool        YOLO_USE_GPU            = true;
         bool        YOLO_USE_TRT            = true;
         int         YOLO_MASK_ERODE_KERNEL  = 0;
-        bool        YOLO_MASK_TRAY          = false;
-        int         YOLO_TRAY_MASK_REF_WIDTH  = 0;
-        int         YOLO_TRAY_MASK_REF_HEIGHT = 0;
-        std::vector<cv::Point> YOLO_TRAY_MASK_POLYGON_PX;
+        bool        YOLO_MASK_TRAY          = true;
+        int         YOLO_TRAY_MASK_REF_WIDTH  = 1280;
+        int         YOLO_TRAY_MASK_REF_HEIGHT = 720;
+        // Default crescent polygon (outer arc + image bottom) for a 1280×720 robot camera.
+        // Tunable via config.toml: Yolo.tray_mask_polygon = [x0,y0, x1,y1, ...]
+        std::vector<cv::Point> YOLO_TRAY_MASK_POLYGON_PX = {
+            {195, 720}, {230, 694}, {286, 664}, {353, 640}, {428, 621},
+            {510, 608}, {596, 601}, {640, 600}, {684, 601}, {770, 608},
+            {852, 621}, {927, 640}, {994, 664}, {1050, 694}, {1086, 720},
+            {1280, 720}, {0, 720}
+        };
         float       TRACK_ASSOCIATION_MAX_DISTANCE_M = 0.7f;
         int         TRACK_MAX_MISSED_FRAMES          = 10;
         std::size_t VOXEL_VIEWER_MAX_RENDERED_VOXELS = 30'000;
         int         VOXEL_VIEWER_FPS                 = 10;
         std::size_t VOXEL_DECIMATION_FACTOR          = 2;
+        float       VOXEL_Z_LIFT_M                   = 0.0f;
         bool        TRANSFORMS_INTERPOLATE_RT        = true;
     } params;
 
@@ -96,9 +105,14 @@ private:
 
     std::optional<SceneFrame> process_scene_frame(FPSCounter& compute_fps);
     void update_table_nodes_from_tracks(const std::vector<GraphObjectBox>& graph_object_boxes);
+    void ensure_voxels_node_in_dsr();
+    void upload_voxel_grid_to_dsr();
+    void trigger_graph_layout_twopi();
+    void cleanup_semantic_grid_nodes();
 
-    bool startup_check_flag = false;
-    bool verbose_debug_     = false;
+    bool startup_check_flag  = false;
+    bool verbose_debug_      = false;
+    bool voxels_node_ready_  = false;
 
     std::shared_ptr<DSR::InnerEigenAPI> inner_eigen_api;
 
@@ -107,6 +121,7 @@ private:
     std::unique_ptr<VoxelProcessor>    voxel_processor;
     std::unique_ptr<SceneProcessor>    scene_processor;
     std::unique_ptr<rc::VoxelOpenGLViewer> voxel_viewer_gl;
+    std::unique_ptr<rc::YoloViewer>        yolo_viewer_;
 
 };
 

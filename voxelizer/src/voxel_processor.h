@@ -30,6 +30,7 @@ public:
         std::size_t voxel_decimation_factor = 2;
         std::size_t viewer_max_rendered_voxels = 30'000;
         float track_association_max_distance_m = 0.7f;
+        float z_lift_m = 0.0f;
         int track_max_missed_frames = 10;
         int viewer_voxel_fps = 10;
         bool verbose_debug = false;
@@ -102,9 +103,7 @@ private:
     bool point_explained_by_model(const Eigen::Vector3f& point,
                                   const std::string& label,
                                   std::span<const GraphObjectBox> explained_boxes) const;
-    float detect_point_scale_once(const RGBDData& rgbd) const;
     void build_owner_map_and_medians(const RGBDData& rgbd,
-                                     float point_scale,
                                      const std::vector<SegDetection>& detections,
                                      std::vector<int32_t>& pixel_owner,
                                      std::vector<float>& det_median_range_m) const;

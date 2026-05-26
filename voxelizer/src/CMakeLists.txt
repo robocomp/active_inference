@@ -27,6 +27,9 @@ else()
   message(WARNING "Qt OpenGL targets not found; building without voxel_opengl_viewer")
 endif()
 
+LIST(APPEND SOURCES ../src/yolo_viewer.cpp)
+LIST(APPEND HEADERS ../src/yolo_viewer.h)
+
 # TBB is required by std::execution::par_unseq (libstdc++ on Linux)
 find_package(TBB REQUIRED)
 LIST(APPEND LIBS ${LIBS} TBB::tbb)

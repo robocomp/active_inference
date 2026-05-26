@@ -52,11 +52,15 @@ void VoxelProcessor::process_rgbd_frame(const RGBDData& rgbd,
                                         std::span<const GraphObjectBox> explained_boxes,
                                         rc::VoxelOpenGLViewer* voxel_viewer)
 {
-    const auto& raw_pts = rgbd.points;
+    const auto& raw_depth = rgbd.depth;
     const int img_w = rgbd.width;
     const int img_h = rgbd.height;
+    const float fx = rgbd.focal_x;
+    const float fy = rgbd.focal_y;
 
-    if (raw_pts.empty() || img_w <= 0 || img_h <= 0 || static_cast<int>(raw_pts.size()) != img_w * img_h)
+    if (raw_depth.empty() || img_w <= 0 || img_h <= 0
+        || static_cast<int>(raw_depth.size()) != img_w * img_h
+        || fx <= 0.f || fy <= 0.f)
         return;
 
     std::size_t valid_points = 0;
@@ -77,40 +81,42 @@ void VoxelProcessor::process_rgbd_frame(const RGBDData& rgbd,
         }));
     std::vector<float> det_median_range_m(detections.size(), std::numeric_limits<float>::quiet_NaN());
     std::vector<int32_t> pixel_owner(static_cast<std::size_t>(img_w * img_h), -1);
-    const float point_scale = detect_point_scale_once(rgbd);
-    build_owner_map_and_medians(rgbd, point_scale, detections, pixel_owner, det_median_range_m);
+    build_owner_map_and_medians(rgbd, detections, pixel_owner, det_median_range_m);
+
+    const float cx = static_cast<float>(img_w) * 0.5f;
+    const float cy = static_cast<float>(img_h) * 0.5f;
 
     const std::size_t n_dets = detections.size();
     std::vector<std::vector<Eigen::Vector3f>> points_by_det(n_dets);
     std::vector<std::size_t> selected_points_per_det(n_dets, 0);
-    std::vector<Eigen::Vector3f> selected_points_robot;
+    std::vector<Eigen::Vector3f> selected_points_camera;
     std::vector<std::size_t> selected_det_indices;
-    selected_points_robot.reserve(static_cast<std::size_t>(img_w * img_h / 6));
-    selected_det_indices.reserve(selected_points_robot.capacity());
+    selected_points_camera.reserve(static_cast<std::size_t>(img_w * img_h / 6));
+    selected_det_indices.reserve(selected_points_camera.capacity());
 
     for (int row = 0; row < img_h; ++row)
     {
         for (int col = 0; col < img_w; ++col)
         {
             const std::size_t idx = static_cast<std::size_t>(row * img_w + col);
-            const auto& p = raw_pts[idx];
-
-            if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z))
+            const float depth_value = raw_depth[idx];
+            if (!std::isfinite(depth_value) || depth_value <= 0.f)
                 continue;
-
-            const float px = p.x * point_scale;
-            const float py = p.y * point_scale;
-            const float pz = p.z * point_scale;
-            const float rng_sq = px * px + py * py + pz * pz;
-            if (rng_sq < 0.01f || rng_sq > 100.0f)
-                continue;
-            const float rng = std::sqrt(rng_sq);
 
             ++valid_points;
 
             const int32_t owner = pixel_owner[idx];
             if (owner < 0)
                 continue;
+
+            // Camera frame convention in CameraAPI: +Y forward, +Z up.
+            const float px = (static_cast<float>(col) - cx) * depth_value / fx;
+            const float py = depth_value;
+            const float pz = (cy - static_cast<float>(row)) * depth_value / fy;
+            const float rng_sq = px * px + py * py + pz * pz;
+            if (rng_sq < 0.01f || rng_sq > 100.0f)
+                continue;
+            const float rng = std::sqrt(rng_sq);
 
             const std::size_t det_idx = static_cast<std::size_t>(owner);
             if (det_idx >= n_dets)
@@ -123,7 +129,7 @@ void VoxelProcessor::process_rgbd_frame(const RGBDData& rgbd,
 
             ++masked_points;
             ++selected_points;
-            selected_points_robot.emplace_back(px, py, pz);
+            selected_points_camera.emplace_back(px, py, pz);
             selected_det_indices.push_back(det_idx);
             ++selected_points_per_det[det_idx];
 
@@ -139,23 +145,27 @@ void VoxelProcessor::process_rgbd_frame(const RGBDData& rgbd,
     std::vector<Eigen::Vector3f> centroid_sums_by_det(n_dets, Eigen::Vector3f::Zero());
     std::vector<std::size_t> centroid_counts_by_det(n_dets, 0);
 
-    if (!selected_points_robot.empty())
+    if (!selected_points_camera.empty())
     {
         for (std::size_t d = 0; d < n_dets; ++d)
             points_by_det[d].reserve(selected_points_per_det[d]);
 
-        const std::size_t n_sel = selected_points_robot.size();
+        const std::size_t n_sel = selected_points_camera.size();
+        // Depth unprojection yields camera-frame points. Convert with room <- zed.
         const Eigen::Matrix3f room_rotation = room_T_zed.linear().cast<float>();
         const Eigen::Vector3f room_translation = room_T_zed.translation().cast<float>();
+        const float z_lift_m = config_.z_lift_m;
         std::vector<Eigen::Vector3f> selected_points_room(n_sel);
 
         std::transform(std::execution::par_unseq,
-                       selected_points_robot.begin(),
-                       selected_points_robot.end(),
+                       selected_points_camera.begin(),
+                       selected_points_camera.end(),
                        selected_points_room.begin(),
                        [&](const Eigen::Vector3f& point)
                        {
-                           return room_rotation * point + room_translation;
+                           Eigen::Vector3f room_point = room_rotation * point + room_translation;
+                           room_point.z() += z_lift_m;
+                           return room_point;
                        });
 
         for (std::size_t i = 0; i < n_sel; ++i)
@@ -451,27 +461,21 @@ bool VoxelProcessor::point_explained_by_model(const Eigen::Vector3f& point,
     return false;
 }
 
-float VoxelProcessor::detect_point_scale_once(const RGBDData& rgbd) const
-{
-    for (const auto& p : rgbd.points)
-    {
-        if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z))
-            continue;
-        const float max_abs = std::max({std::abs(p.x), std::abs(p.y), std::abs(p.z)});
-        return (max_abs > 50.0f) ? 0.001f : 1.0f;
-    }
-    return 1.0f;
-}
-
 void VoxelProcessor::build_owner_map_and_medians(const RGBDData& rgbd,
-                                                 float point_scale,
                                                  const std::vector<SegDetection>& detections,
                                                  std::vector<int32_t>& pixel_owner,
                                                  std::vector<float>& det_median_range_m) const
 {
-    const auto& raw_pts = rgbd.points;
+    const auto& raw_depth = rgbd.depth;
     const int img_w = rgbd.width;
     const int img_h = rgbd.height;
+    const float fx = rgbd.focal_x;
+    const float fy = rgbd.focal_y;
+    if (raw_depth.empty() || fx <= 0.f || fy <= 0.f)
+        return;
+
+    const float cx = static_cast<float>(img_w) * 0.5f;
+    const float cy = static_cast<float>(img_h) * 0.5f;
 
     for (std::size_t d = 0; d < detections.size(); ++d)
     {
@@ -507,13 +511,13 @@ void VoxelProcessor::build_owner_map_and_medians(const RGBDData& rgbd,
                 if (det.mask.at<uint8_t>(row, col) == 0)
                     continue;
 
-                const auto& p = raw_pts[static_cast<std::size_t>(row * img_w + col)];
-                if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z))
+                const float depth_value = raw_depth[static_cast<std::size_t>(row * img_w + col)];
+                if (!std::isfinite(depth_value) || depth_value <= 0.f)
                     continue;
 
-                const float px = p.x * point_scale;
-                const float py = p.y * point_scale;
-                const float pz = p.z * point_scale;
+                const float px = (static_cast<float>(col) - cx) * depth_value / fx;
+                const float py = depth_value;
+                const float pz = (static_cast<float>(row) - cy) * depth_value / fy;
                 const float rng_sq = px * px + py * py + pz * pz;
                 if (rng_sq >= 0.01f && rng_sq <= 100.0f)
                     ranges.push_back(std::sqrt(rng_sq));

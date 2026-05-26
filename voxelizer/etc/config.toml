@@ -30,6 +30,21 @@ Emergency = 500
 [Component.Debug]
 Verbose = false
 
+[Yolo]
+accepted_labels = ["table", "chair", "monitor", "tv"]
+mask_tray = true
+tray_mask_ref_width  = 1280
+tray_mask_ref_height = 720
+# Crescent polygon bounding the robot tray (flat x,y pairs, referenced to 1280×720).
+# Traces the outer arc from the left image-bottom intersection clockwise to the right,
+# then closes along the image bottom edge.  Adjust if the camera mount changes.
+tray_mask_polygon = [
+    195, 720,  230, 694,  286, 664,  353, 640,  428, 621,
+    510, 608,  596, 601,  640, 600,  684, 601,  770, 608,
+    852, 621,  927, 640,  994, 664, 1050, 694, 1086, 720,
+    1280, 720,  0, 720
+]
+
 [Ice]
 Warn.Connections = "0"
 Trace.Network = "0"

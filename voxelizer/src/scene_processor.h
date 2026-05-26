@@ -70,6 +70,7 @@ public:
     std::vector<GraphObjectBox> get_graph_object_boxes(const std::string& room_name,
                                                        std::uint64_t timestamp_ms) const;
     void update_viewer_graph_object_boxes(std::span<const GraphObjectBox> graph_boxes);
+    void update_viewer_object_meshes();
 
 private:
     struct RoomPolygonData
