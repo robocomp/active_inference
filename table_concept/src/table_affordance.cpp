@@ -1,0 +1,150 @@
+/*
+ * table_affordance.cpp
+ */
+
+#include "table_affordance.h"
+#include <QtGlobal>
+
+// ─── Public API ───────────────────────────────────────────────────────────────
+
+void TableAffordance::init(std::shared_ptr<DSR::DSRGraph> G,
+                            uint64_t    table_node_id,
+                            std::string table_node_name)
+{
+    G_               = std::move(G);
+    table_node_id_   = table_node_id;
+    table_node_name_ = std::move(table_node_name);
+}
+
+void TableAffordance::update(const EpistemicProposal& prop)
+{
+    if (!G_ || !prop.valid) return;
+
+    if (!node_created_)
+        create_node(prop);
+    else
+        update_node(prop);
+}
+
+void TableAffordance::remove()
+{
+    if (!G_ || !node_created_) return;
+
+    G_->delete_node(affordance_node_id_);
+    std::print("[affordance] removed node for '{}' (state={})\n",
+               table_node_name_, state_name(state_));
+    reset();
+    state_ = State::satisfied;
+    // Reset to idle so a new cycle can start if the model degrades later
+    state_ = State::idle;
+}
+
+void TableAffordance::on_node_modified(uint64_t id)
+{
+    if (!node_created_ || id != affordance_node_id_) return;
+
+    // Controller accepted the proposal: it sets epistemic_pending_att = false
+    auto node_opt = G_->get_node(affordance_node_id_);
+    if (!node_opt.has_value()) return;
+
+    const auto v = G_->get_attrib_by_name<epistemic_pending_att>(node_opt.value());
+    if (v.has_value() && !v.value() && state_ == State::pending)
+    {
+        state_ = State::executing;
+        std::print("[affordance] '{}' → executing (controller accepted)\n",
+                   table_node_name_);
+    }
+}
+
+void TableAffordance::on_node_deleted(uint64_t id)
+{
+    if (!node_created_ || id != affordance_node_id_) return;
+
+    std::print("[affordance] '{}' node deleted externally (state={}) → idle\n",
+               table_node_name_, state_name(state_));
+    reset();
+}
+
+std::string_view TableAffordance::state_name(State s)
+{
+    switch (s)
+    {
+        case State::idle:      return "idle";
+        case State::pending:   return "pending";
+        case State::executing: return "executing";
+        case State::satisfied: return "satisfied";
+        case State::aborted:   return "aborted";
+    }
+    return "unknown";
+}
+
+// ─── Private helpers ─────────────────────────────────────────────────────────
+
+void TableAffordance::create_node(const EpistemicProposal& prop)
+{
+    const std::string aff_name = "aff_" + table_node_name_;
+
+    DSR::Node aff_node = DSR::Node::create<affordance_node_type>(aff_name);
+    G_->add_or_modify_attrib_local<level_att>                   (aff_node, 4);
+    G_->add_or_modify_attrib_local<parent_att>                  (aff_node, table_node_id_);
+    G_->add_or_modify_attrib_local<pos_x_att>                   (aff_node, 300.f);
+    G_->add_or_modify_attrib_local<pos_y_att>                   (aff_node, 200.f);
+    G_->add_or_modify_attrib_local<active_att>                  (aff_node, true);
+    G_->add_or_modify_attrib_local<epistemic_target_x_m_att>    (aff_node, prop.target_x_m);
+    G_->add_or_modify_attrib_local<epistemic_target_y_m_att>    (aff_node, prop.target_y_m);
+    G_->add_or_modify_attrib_local<epistemic_target_yaw_rad_att>(aff_node, prop.target_yaw_rad);
+    G_->add_or_modify_attrib_local<epistemic_gain_att>          (aff_node, prop.gain);
+    G_->add_or_modify_attrib_local<epistemic_pending_att>       (aff_node, true);
+
+    const auto id_opt = G_->insert_node(aff_node);
+    if (!id_opt.has_value())
+    {
+        qWarning() << "[affordance] failed to insert DSR node for" << aff_name.c_str();
+        return;
+    }
+    affordance_node_id_ = id_opt.value();
+    node_created_       = true;
+    state_              = State::pending;
+
+    refresh_edge();
+
+    std::print("[affordance] created '{}' id={} target=({:.2f},{:.2f}) "
+               "yaw={:.2f} gain={:.4f}\n",
+               aff_name, affordance_node_id_,
+               prop.target_x_m, prop.target_y_m,
+               prop.target_yaw_rad, prop.gain);
+}
+
+void TableAffordance::update_node(const EpistemicProposal& prop)
+{
+    auto node_opt = G_->get_node(affordance_node_id_);
+    if (!node_opt.has_value())
+    {
+        // Node was deleted externally — recreate on next cycle
+        std::print("[affordance] '{}' node missing, will recreate\n", table_node_name_);
+        reset();
+        return;
+    }
+    auto& n = node_opt.value();
+    G_->add_or_modify_attrib_local<epistemic_target_x_m_att>    (n, prop.target_x_m);
+    G_->add_or_modify_attrib_local<epistemic_target_y_m_att>    (n, prop.target_y_m);
+    G_->add_or_modify_attrib_local<epistemic_target_yaw_rad_att>(n, prop.target_yaw_rad);
+    G_->add_or_modify_attrib_local<epistemic_gain_att>          (n, prop.gain);
+    // Keep epistemic_pending_att as-is so the controller's write is preserved
+    G_->update_node(n);
+
+    refresh_edge();
+}
+
+void TableAffordance::refresh_edge()
+{
+    auto edge = DSR::Edge::create<has_intention_edge_type>(table_node_id_, affordance_node_id_);
+    G_->insert_or_assign_edge(edge);
+}
+
+void TableAffordance::reset()
+{
+    affordance_node_id_ = 0;
+    node_created_       = false;
+    state_              = State::idle;
+}

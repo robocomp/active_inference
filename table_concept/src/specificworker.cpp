@@ -1,5 +1,5 @@
 /*
- *    Copyright (C) 2026 by YOUR NAME HERE
+ *    Copyright (C) 2026 by RoboComp CORTEX Team
  *
  *    This file is part of RoboComp
  *
@@ -16,136 +16,965 @@
  *    You should have received a copy of the GNU General Public License
  *    along with RoboComp.  If not, see <http://www.gnu.org/licenses/>.
  */
+
+/**
+ * SpecificWorker — table_concept agent
+ *
+ * Implements the Active Inference loop described in TABLE_CONCEPT.md §11.2:
+ *
+ *  ① Read sensing attributes from DSR table nodes
+ *  ② Update the historical sample queue with fresh near-surface candidates
+ *  ③ Run gradient-descent steps on the 7-param generative model (SDF + FE)
+ *  ④ Write updated model parameters back to DSR (RT edge + geometry attrs)
+ *  ⑤ Check convergence and set model_stable_att
+ *  ⑥ Compute epistemic action proposals (viewpoint → mission-controller)
+ *  ⑦ Detect divergence and set request_full_sample_att
+ */
+
 #include "specificworker.h"
 
-SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, bool startup_check) : GenericWorker(configLoader, tprx)
+#include <filesystem>
+#include <print>
+
+// DSR attribute name tags — generated from dsr_attr_name.h
+#include <dsr/api/dsr_api.h>
+
+// ─── Constructor / Destructor ─────────────────────────────────────────────────
+
+SpecificWorker::SpecificWorker(const ConfigLoader& configLoader,
+                               TuplePrx tprx,
+                               bool startup_check)
+    : GenericWorker(configLoader, tprx),
+      startup_check_flag(startup_check)
 {
-	this->startup_check_flag = startup_check;
-	if(this->startup_check_flag)
-	{
-		this->startup_check();
-	}
-	else
-	{
-		#ifdef HIBERNATION_ENABLED
-			hibernationChecker.start(500);
-		#endif
-		
-		// Example statemachine:
-		/***
-		//Your definition for the statesmachine (if you dont want use a execute function, use nullptr)
-		states["CustomState"] = std::make_unique<GRAFCETStep>("CustomState", period, 
-															std::bind(&SpecificWorker::customLoop, this),  // Cyclic function
-															std::bind(&SpecificWorker::customEnter, this), // On-enter function
-															std::bind(&SpecificWorker::customExit, this)); // On-exit function
+    if (startup_check_flag)
+    {
+        this->startup_check();
+        return;
+    }
 
-		//Add your definition of transitions (addTransition(originOfSignal, signal, dstState))
-		states["CustomState"]->addTransition(states["CustomState"].get(), SIGNAL(entered()), states["OtherState"].get());
-		states["Compute"]->addTransition(this, SIGNAL(customSignal()), states["CustomState"].get()); //Define your signal in the .h file under the "Signals" section.
+    load_config(configLoader);
 
-		//Add your custom state
-		statemachine.addState(states["CustomState"].get());
-		***/
+    statemachine.setChildMode(QState::ExclusiveStates);
+    statemachine.start();
 
-		statemachine.setChildMode(QState::ExclusiveStates);
-		statemachine.start();
-
-		auto error = statemachine.errorString();
-		if (error.length() > 0){
-			qWarning() << error;
-			throw error;
-		}
-	}
+    const auto err = statemachine.errorString();
+    if (err.length() > 0)
+    {
+        qWarning() << err;
+        throw err;
+    }
 }
 
 SpecificWorker::~SpecificWorker()
 {
-	std::cout << "Destroying SpecificWorker" << std::endl;
-	/*
-	for (auto const& [name, g] : Graphs) {
-	    g->write_to_json_file("./"+agent_name+"_"+name+".json");
-	}
-	*/
+    // Save convergence checkpoints for all instances
+    if (prior_store_)
+    {
+        for (const auto& [id, inst] : instances_)
+        {
+            prior_store_->save_checkpoint(TableCheckpoint{
+                inst.node_name,
+                inst.model.state().w,
+                inst.model.state().h,
+                inst.model.state().table_height,
+                inst.model.state().cx,
+                inst.model.state().cy,
+                inst.model.state().yaw,
+                inst.prev_free_energy,
+                inst.model_stable
+            });
+        }
+    }
+    // Remove affordance nodes first (children of table nodes)
+    if (G)
+    {
+        for (auto& [id, inst] : instances_)
+        {
+            if (inst.affordance.is_active())
+            {
+                G->delete_node(inst.affordance.node_id());
+                std::print("table_concept: removed affordance node for '{}'\n", inst.node_name);
+            }
+        }
+        // Remove table nodes themselves
+        for (const auto& [id, inst] : instances_)
+        {
+            G->delete_node(id);
+            std::print("table_concept: removed table node '{}'\n", inst.node_name);
+        }
+    }
+    std::print("table_concept: SpecificWorker destroyed, checkpoints saved.\n");
 }
 
+// ─── Initialisation ──────────────────────────────────────────────────────────
 
 void SpecificWorker::initialize()
 {
-    std::cout << "initialize worker" << std::endl;
-	GenericWorker::initialize();
+    std::print("table_concept: initialize()\n");
+    GenericWorker::initialize();
 
-	//Subscription to DSR graph update signals. 
-	// If multiple graphs exist, it is necessary to specify the graph name 
-	// using 'Graphs.at("name")' to connect its signals to the Worker's slots.
-	//connect(Graphs.at("").get(), &DSR::DSRGraph::update_node_signal, this, &SpecificWorker::modify_node_slot);
-	//connect(Graphs.at("").get(), &DSR::DSRGraph::update_edge_signal, this, &SpecificWorker::modify_edge_slot);
-	//connect(Graphs.at("").get(), &DSR::DSRGraph::update_node_attr_signal, this, &SpecificWorker::modify_node_attrs_slot);
-	//connect(Graphs.at("").get(), &DSR::DSRGraph::update_edge_attr_signal, this, &SpecificWorker::modify_edge_attrs_slot);
-	//connect(Graphs.at("").get(), &DSR::DSRGraph::del_edge_signal, this, &SpecificWorker::del_edge_slot);
-	//connect(Graphs.at("").get(), &DSR::DSRGraph::del_node_signal, this, &SpecificWorker::del_node_slot);
+    if (not G)
+    {
+        qWarning() << "table_concept: DSR graph not available in initialize()";
+        return;
+    }
 
-	/***
-	Custom Widget
-	In addition to the predefined viewers, Graph Viewer allows you to add various widgets designed by the developer.
-	The add_custom_widget_to_dock method is used. This widget can be defined like any other Qt widget,
-	either with a QtDesigner or directly from scratch in a class of its own.
-	The add_custom_widget_to_dock method receives a name for the widget and a reference to the class instance.
-	***/
-	//If you have more than one graph, you need to connect to the specific graph with the name
-	//graph_viewers.at("")->add_custom_widget_to_dock("CustomWidget", &custom_widget);
+    rt_api_ = G->get_rt_api();
 
-    //initializeCODE
-    /////////GET PARAMS, OPEND DEVICES....////////
-    //int period = configLoader.get<int>("Period.Compute") //NOTE: If you want get period of compute use getPeriod("compute")
-    //std::string device = configLoader.get<std::string>("Device.name") 
+    // Subscribe to graph signals
+    connect(G.get(), &DSR::DSRGraph::update_node_signal,
+            this, &SpecificWorker::modify_node_slot);
+    connect(G.get(), &DSR::DSRGraph::update_node_attr_signal,
+            this, &SpecificWorker::modify_node_attrs_slot);
+    connect(G.get(), &DSR::DSRGraph::del_node_signal,
+            this, &SpecificWorker::del_node_slot);
+
+    // Resolve room node
+    const auto rooms = G->get_nodes_by_type("room");
+    if (not rooms.empty())
+        room_node_id_ = rooms.front().id();
+    else
+        qWarning() << "table_concept: no room node found at startup";
+
+    // Setup prior store
+    prior_store_ = std::make_unique<PriorStore>(priors_path_, checkpoint_path_);
+
+    // Create any table nodes listed in priors that are absent from DSR
+    scaffold_missing_table_nodes();
+
+    // Build EpistemicPlanner with configured parameters
+    epistemic_planner_ = EpistemicPlanner(cfg_.delta_min, cfg_.gain_threshold, cfg_.obs_distance);
+
+    // Remove any stale affordance nodes left by a previous run
+    for (const auto& aff_node : G->get_nodes_by_type("affordance"))
+    {
+        std::print("table_concept: removing stale affordance node '{}' id={}\n",
+                   aff_node.name(), aff_node.id());
+        G->delete_node(aff_node.id());
+    }
+
+    // ── Time-series widget ──────────────────────────────────────────────────
+    if (not graph_viewers.empty())
+    {
+        custom_widget_ = new Custom_widget();
+        graph_viewers.at("")->add_custom_widget_to_dock("Table Inference", custom_widget_);
+
+        // Create plot inside frame_series
+        auto* series_layout = new QVBoxLayout(custom_widget_->frame_series);
+        series_layout->setContentsMargins(0, 0, 0, 0);
+        custom_widget_->frame_series->setLayout(series_layout);
+
+        ts_plot_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
+        ts_plot_->set_visible_window(60.f);
+        series_layout->addWidget(ts_plot_);
+
+        ts_cov_plot_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
+        ts_cov_plot_->set_visible_window(60.f);
+        series_layout->addWidget(ts_cov_plot_);
+    }
 }
 
+// ─── Main compute loop ───────────────────────────────────────────────────────
 
 void SpecificWorker::compute()
 {
-    std::cout << "Compute worker" << std::endl;
-	//computeCODE
-	//try
-	//{
-	//  camera_proxy->getYImage(0,img, cState, bState);
-    //    if (img.empty())
-    //        emit goToEmergency()
-	//  memcpy(image_gray.data, &img[0], m_width*m_height*sizeof(uchar));
-	//  searchTags(image_gray);
-	//}
-	//catch(const Ice::Exception &e)
-	//{
-	//  std::cout << "Error reading from Camera" << e << std::endl;
-	//}
+    if (not G or not rt_api_)
+        return;
+
+    // Refresh room node id if not yet found
+    if (room_node_id_ == 0)
+    {
+        const auto rooms = G->get_nodes_by_type("room");
+        if (rooms.empty()) return;
+        room_node_id_ = rooms.front().id();
+    }
+
+    // Process every table node in the graph
+    const auto table_nodes = G->get_nodes_by_type("table");
+    for (auto node : table_nodes)
+    {
+        ensure_instance(node);
+
+        auto& inst = instances_.at(node.id());
+
+        // ① Read sensing attributes
+        std::vector<Eigen::Vector3f> candidate_pts;
+        std::vector<Eigen::Vector3f> residual_pts;
+        float explanation_ratio = 1.0f;
+
+        // Read last frame stamp to detect fresh data
+        int last_frame = -1;
+        if (const auto v = G->get_attrib_by_name<last_sensing_frame_att>(node); v.has_value())
+            last_frame = v.value();
+
+        bool has_fresh_data = (last_frame > inst.last_frame_seen);
+
+        if (has_fresh_data)
+        {
+            inst.last_frame_seen = last_frame;
+
+            candidate_pts = read_pts_attrib(node, "candidate_pts_att");
+            residual_pts  = read_pts_attrib(node, "residual_pts_att");
+
+            if (const auto v = G->get_attrib_by_name<explanation_ratio_att>(node); v.has_value())
+                explanation_ratio = v.value();
+
+            // ↓ Bottom-up: new sensory evidence arriving from robot_concept
+            std::print("[{}] \u2193 frame={} cands={} resid={} expl={:.2f}\n",
+                       inst.node_name, last_frame,
+                       candidate_pts.size(), residual_pts.size(),
+                       explanation_ratio);
+        }
+
+        // Stale check: skip heavy update if data hasn't moved for too long
+        if (not has_fresh_data and inst.matched_frames < 5)
+            continue;
+
+        // ② Update queue with fresh candidates
+        if (has_fresh_data and not candidate_pts.empty())
+        {
+            // Cold-start: on first observation snap model & prior to voxel centroid
+            // so gradient descent begins at the right place rather than the prior.
+            if (inst.matched_frames == 0)
+            {
+                Eigen::Vector3f sum = Eigen::Vector3f::Zero();
+                for (const auto& p : candidate_pts)
+                    sum += p;
+                const Eigen::Vector3f cen = sum / static_cast<float>(candidate_pts.size());
+                auto s  = inst.model.state();
+                s.cx    = cen.x();
+                s.cy    = cen.y();
+                inst.model.set_state(s);
+                inst.model.set_prior(s);   // zero KL so data term dominates from the start
+                std::print("[{}] cold-start snap → cx={:.2f} cy={:.2f} ({} pts)\n",
+                           inst.node_name, s.cx, s.cy, candidate_pts.size());
+                // Pose is already correct: bypass warmup gate AND progress ramp
+                // so the queue admits up to max_new_points_per_frame immediately.
+                inst.matched_frames = cfg_.min_frames_before_historical
+                                    + cfg_.historical_warmup_frames + 1;
+            }
+            else
+                ++inst.matched_frames;
+            step_queue_update(inst, candidate_pts, residual_pts);
+        }
+
+        // ③ Model update (gradient steps over queue + residual points)
+        const float free_energy = step_model_update(inst, residual_pts);
+        {
+            // ↑ Top-down: model state after gradient descent
+            const auto& s = inst.model.state();
+            std::print("[{}] FE={:.4f}  cx={:.3f} cy={:.3f}  w={:.3f} h={:.3f} H={:.3f} L={:.3f} ψ={:.3f}  pts={}\n",
+                       inst.node_name, free_energy,
+                       s.cx, s.cy, s.w, s.h, s.table_height, s.leg_length, s.yaw,
+                       inst.queue.size() + static_cast<int>(residual_pts.size()));
+        }
+
+        // ④ Write model params to DSR
+        {
+            // Re-fetch node to get a fresh mutable copy
+            auto node_opt = G->get_node(node.id());
+            if (not node_opt.has_value()) continue;
+            step_write_model(inst, node_opt.value(), free_energy);
+        }
+
+        // ⑤ Convergence check
+        {
+            auto node_opt = G->get_node(node.id());
+            if (not node_opt.has_value()) continue;
+            step_convergence(inst, node_opt.value(), free_energy);
+        }
+
+        // ⑥ Feed time-series plot
+        if (ts_plot_)
+        {
+            ts_plot_->add_point(inst.node_name + "_fe",  free_energy);
+            if (ts_cov_plot_)
+                ts_cov_plot_->add_point(inst.node_name + "_cov", inst.last_coverage_deficit);
+        }
+
+        // ⑦ Epistemic planning — driven by coverage deficit, independent of stability
+        if (inst.last_coverage_deficit > 0.f)
+        {
+            auto node_opt = G->get_node(node.id());
+            if (node_opt.has_value())
+                step_epistemic(inst, node_opt.value());
+        }
+        else if (inst.affordance.is_active())
+        {
+            // All faces covered — remove the epistemic action request
+            inst.affordance.remove();
+        }
+
+        // ⑦ Refresh / divergence check
+        if (has_fresh_data)
+        {
+            auto node_opt = G->get_node(node.id());
+            if (node_opt.has_value())
+                step_refresh_check(inst, node_opt.value(), free_energy, explanation_ratio);
+        }
+
+        inst.prev_free_energy = free_energy;
+    }
 }
 
+// ─── Initialisation helpers ──────────────────────────────────────────────────
+
+void SpecificWorker::load_config(const ConfigLoader& cfg)
+{
+    // Helper lambdas to read with fallback (ConfigLoader::get has no default overload;
+    // TOML numeric floats are stored as double, so cast explicitly).
+    auto getf = [&](const std::string& k, float def) -> float {
+        return cfg.exists(k) ? static_cast<float>(cfg.get<double>(k)) : def;
+    };
+    auto geti = [&](const std::string& k, int def) -> int {
+        return cfg.exists(k) ? cfg.get<int>(k) : def;
+    };
+    auto gets = [&](const std::string& k, std::string def) -> std::string {
+        return cfg.exists(k) ? cfg.get<std::string>(k) : def;
+    };
+
+    // Paths
+    priors_path_     = gets("TableConcept.PriorsPath",     "etc/object_priors.toml");
+    checkpoint_path_ = gets("TableConcept.CheckpointPath", "etc/checkpoint.toml");
+
+    // Agent convergence
+    cfg_.fe_eps                   = getf("TableConcept.FEps",                   1e-3f);
+    cfg_.K_stable                 = geti("TableConcept.KStable",                30);
+    cfg_.M_diverge                = geti("TableConcept.MDiverge",               20);
+    cfg_.staleness_frames         = getf("TableConcept.StalenessFrames",        90.0f);
+    cfg_.explanation_ratio_thresh = getf("TableConcept.ExplanationRatioThresh", 0.3f);
+    cfg_.write_threshold          = getf("TableConcept.WriteThreshold",         1e-3f);
+    cfg_.obs_distance             = getf("TableConcept.ObsDistance",            1.8f);
+    cfg_.delta_min                = getf("TableConcept.DeltaMin",               20.0f);
+    cfg_.gain_threshold           = getf("TableConcept.GainThreshold",          0.1f);
+
+    // TableModel
+    cfg_.sigma_obs          = getf("TableModel.SigmaObs",          0.05f);
+    cfg_.lambda_size        = getf("TableModel.LambdaSize",        0.5f);
+    cfg_.lambda_pos         = getf("TableModel.LambdaPos",         0.05f);
+    cfg_.lambda_state       = getf("TableModel.LambdaState",       0.02f);
+    cfg_.lambda_angle       = getf("TableModel.LambdaAngle",       0.01f);
+    cfg_.optimization_iters = geti("TableModel.OptimizationIters", 10);
+    cfg_.optimization_lr    = getf("TableModel.OptimizationLr",    0.05f);
+    cfg_.grad_clip          = getf("TableModel.GradClip",          2.0f);
+    cfg_.optimizer_type     = gets("TableModel.OptimizerType",     "adam");
+    cfg_.sgd_momentum       = getf("TableModel.SgdMomentum",       0.9f);
+
+    // SampleQueue
+    cfg_.num_angle_bins               = geti("SampleQueue.NumAngleBins",              24);
+    cfg_.num_z_bins                   = geti("SampleQueue.NumZBins",                  10);
+    cfg_.max_per_bin                  = geti("SampleQueue.MaxPerBin",                 2);
+    cfg_.sdf_threshold_for_storage    = getf("SampleQueue.SdfThresholdForStorage",    0.30f);  // voxels are volumetric; admit pts within 30 cm of any surface
+    cfg_.min_frames_before_historical = geti("SampleQueue.MinFramesBeforeHistorical", 10);
+    cfg_.historical_warmup_frames     = geti("SampleQueue.HistoricalWarmupFrames",    5);   // reach full capacity quickly
+    cfg_.max_new_points_per_frame     = geti("SampleQueue.MaxNewPointsPerFrame",      30);  // enough pts to constrain gradient
+    cfg_.rfe_alpha                    = getf("SampleQueue.RfeAlpha",                  0.98f);
+    cfg_.rfe_max_threshold            = getf("SampleQueue.RfeMaxThreshold",           2.0f);
+    cfg_.edge_bonus_weight            = getf("SampleQueue.EdgeBonusWeight",           0.3f);
+    cfg_.edge_proximity_threshold     = getf("SampleQueue.EdgeProximityThreshold",    0.05f);
+
+    std::print("table_concept: configuration loaded.\n");
+}
+
+void SpecificWorker::scaffold_missing_table_nodes()
+{
+    if (not prior_store_) return;
+    const auto priors = prior_store_->load_priors();
+
+    for (const auto& p : priors)
+    {
+        if (G->get_node(p.node_name).has_value())
+        {
+            std::print("table_concept: node '{}' already in DSR\n", p.node_name);
+            continue;
+        }
+
+        // Node does not exist — create it from the prior
+        auto room_opt = G->get_node(room_node_id_);
+        if (not room_opt.has_value())
+        {
+            qWarning() << "table_concept: room node missing, cannot scaffold" << p.node_name.c_str();
+            continue;
+        }
+
+        DSR::Node table_node = DSR::Node::create<table_node_type>(p.node_name);
+        G->add_or_modify_attrib_local<width_m_att> (table_node, p.width_m);
+        G->add_or_modify_attrib_local<depth_m_att> (table_node, p.depth_m);
+        G->add_or_modify_attrib_local<height_m_att>(table_node, p.height_m);
+        G->add_or_modify_attrib_local<level_att>   (table_node, 3);
+        G->add_or_modify_attrib_local<parent_att>  (table_node, room_node_id_);
+        // Canvas position: derive from room node + fixed offset so the viewer
+        // doesn't randomize pos_x/pos_y on every render tick.
+        {
+            const float rpx = G->get_attrib_by_name<pos_x_att>(room_opt.value()).value_or(200.f);
+            const float rpy = G->get_attrib_by_name<pos_y_att>(room_opt.value()).value_or(200.f);
+            G->add_or_modify_attrib_local<pos_x_att>(table_node, rpx + 150.f);
+            G->add_or_modify_attrib_local<pos_y_att>(table_node, rpy +  50.f);
+        }
+
+        const auto id_opt = G->insert_node(table_node);
+        if (not id_opt.has_value())
+        {
+            qWarning() << "table_concept: failed to insert node" << p.node_name.c_str();
+            continue;
+        }
+
+        const float z = p.height_m * 0.5f;
+        rt_api_->insert_or_assign_edge_RT(room_opt.value(), id_opt.value(),
+                                          {p.room_x_m, p.room_y_m, z},
+                                          {0.0f, 0.0f, p.yaw_rad});
+
+        std::print("table_concept: created node '{}' id={} at ({}, {})\n",
+                   p.node_name, id_opt.value(), p.room_x_m, p.room_y_m);
+    }
+}
+
+void SpecificWorker::ensure_instance(const DSR::Node& node)
+{
+    if (instances_.count(node.id()))
+        return;
+
+    // Build initial state from prior (or from checkpoint if available)
+    TableState init_state;
+    init_state.cx  = 0.0f;
+    init_state.cy  = 0.0f;
+    init_state.yaw = 0.0f;
+
+    // Read geometry attributes that may already be in the node
+    if (auto v = G->get_attrib_by_name<width_m_att> (node); v.has_value()) init_state.w            = v.value();
+    if (auto v = G->get_attrib_by_name<depth_m_att> (node); v.has_value()) init_state.h            = v.value();
+    if (auto v = G->get_attrib_by_name<height_m_att>(node); v.has_value()) init_state.table_height = v.value();
+
+    // Read RT pose from room→table edge
+    if (room_node_id_ != 0)
+    {
+        if (const auto edge = G->get_edge(room_node_id_, node.id(), "RT"); edge.has_value())
+        {
+            if (const auto tr = G->get_attrib_by_name<rt_translation_att>(edge.value()); tr.has_value())
+            {
+                const auto& tvec = tr.value().get();
+                if (tvec.size() >= 2)
+                {
+                    init_state.cx = tvec[0];
+                    init_state.cy = tvec[1];
+                }
+            }
+            if (const auto rot = G->get_attrib_by_name<rt_rotation_euler_xyz_att>(edge.value()); rot.has_value())
+            {
+                const auto& rvec = rot.value().get();
+                if (rvec.size() >= 3)
+                    init_state.yaw = rvec[2];
+            }
+        }
+    }
+
+    init_state.leg_length = std::max(0.05f, init_state.table_height - TableModel::TOP_THICKNESS);
+
+    // Check for a convergence checkpoint
+    if (prior_store_)
+    {
+        const auto ckpt = prior_store_->load_checkpoint(node.name());
+        if (ckpt.has_value())
+        {
+            init_state.w            = ckpt->width_m;
+            init_state.h            = ckpt->depth_m;
+            init_state.table_height = ckpt->height_m;
+            init_state.cx           = ckpt->room_x_m;
+            init_state.cy           = ckpt->room_y_m;
+            init_state.yaw          = ckpt->yaw_rad;
+            init_state.leg_length   = std::max(0.05f, ckpt->height_m - TableModel::TOP_THICKNESS);
+            std::print("table_concept: restored checkpoint for '{}'\n", node.name());
+        }
+    }
+
+    TableInstance inst;
+    inst.node_id   = node.id();
+    inst.node_name = node.name();
+    inst.model     = TableModel(init_state, make_model_params());
+    inst.queue     = SampleQueue(make_queue_params());
+    inst.affordance.init(G, node.id(), node.name());
+
+    instances_.emplace(node.id(), std::move(inst));
+    std::print("table_concept: created instance for node '{}' id={}\n", node.name(), node.id());
+
+    // Register per-instance time-series (one FE + one coverage series per table)
+    if (ts_plot_)
+    {
+        ts_plot_->add_series(node.name() + "_fe",  QColor(255, 170,   0), 1.8f);
+        if (ts_cov_plot_)
+            ts_cov_plot_->add_series(node.name() + "_cov", QColor(  0, 190, 255), 1.6f);
+    }
+
+    // Ensure canvas position is set — viewer randomizes pos_x/pos_y if absent.
+    if (not G->get_attrib_by_name<pos_x_att>(node).has_value())
+    {
+        auto n_mut = node;
+        float rpx = 200.f, rpy = 200.f;
+        if (room_node_id_ != 0)
+            if (const auto rn = G->get_node(room_node_id_); rn.has_value())
+            {
+                rpx = G->get_attrib_by_name<pos_x_att>(rn.value()).value_or(200.f);
+                rpy = G->get_attrib_by_name<pos_y_att>(rn.value()).value_or(200.f);
+            }
+        G->add_or_modify_attrib_local<pos_x_att>(n_mut, rpx + 150.f);
+        G->add_or_modify_attrib_local<pos_y_att>(n_mut, rpy +  50.f);
+        G->update_node(n_mut);
+    }
+}
+
+// ─── Per-cycle steps ─────────────────────────────────────────────────────────
+
+void SpecificWorker::step_queue_update(TableInstance& inst,
+                                       const std::vector<Eigen::Vector3f>& candidate_pts,
+                                       const std::vector<Eigen::Vector3f>& /*residual_pts*/)
+{
+    // Compute SDF for candidates under the current model
+    const auto sdf_vals = inst.model.compute_sdf(candidate_pts);
+    const Eigen::Matrix2f robot_cov = read_robot_covariance();
+    const int q_before = inst.queue.size();
+    inst.queue.insert(candidate_pts, sdf_vals, robot_cov, inst.model, inst.matched_frames);
+    const int admitted = inst.queue.size() - q_before;
+    // New points from a fresh view → unlock the optimizer so it can re-converge.
+    if (admitted > 0 && inst.frames_converged >= cfg_.K_stable)
+        inst.frames_converged = cfg_.K_stable / 2;
+    std::print("[{}] queue: admitted={} size={}\n",
+               inst.node_name,
+               admitted,
+               inst.queue.size());
+}
+
+float SpecificWorker::step_model_update(TableInstance& inst,
+                                         const std::vector<Eigen::Vector3f>& residual_pts)
+{
+    // Combine historical queue points with fresh residual
+    auto pts     = inst.queue.points();
+    auto weights = inst.queue.weights();
+
+    for (const auto& rp : residual_pts)
+    {
+        pts.push_back(rp);
+        weights.push_back(1.0f);   // residual points get uniform weight
+    }
+
+    float fe = inst.model.compute_free_energy({}, {});
+    if (not pts.empty())
+    {
+        // Freeze gradient descent once converged to prevent oscillation.
+        // Unlocked automatically by step_queue_update when new points arrive.
+        if (inst.frames_converged < cfg_.K_stable)
+            fe = inst.model.gradient_step(pts, weights);
+        else
+            fe = inst.model.compute_free_energy(pts, weights);
+    }
+
+    // Update RFE for all stored points
+    const Eigen::Matrix2f robot_cov = read_robot_covariance();
+    inst.queue.update_rfe(inst.model, robot_cov);
+
+    return fe;
+}
+
+void SpecificWorker::step_write_model(TableInstance& inst,
+                                       DSR::Node& node,
+                                       float free_energy)
+{
+    const auto& s = inst.model.state();
+
+    // Geometry attributes
+    G->add_or_modify_attrib_local<width_m_att> (node, s.w);
+    G->add_or_modify_attrib_local<depth_m_att> (node, s.h);
+    G->add_or_modify_attrib_local<height_m_att>(node, s.table_height);
+    G->add_or_modify_attrib_local<free_energy_att>(node, free_energy);
+    G->add_or_modify_attrib_local<model_generation_att>(node, ++inst.model_generation);
+
+    // Mesh for voxelizer 3D viewer
+    write_table_mesh(inst, node);
+
+    // Export the current historical RFE queue as XYZ triples in table-node
+    // attributes dedicated to remembered evidence.
+    {
+        const auto qpts = inst.queue.points();
+        std::vector<float> qflat;
+        qflat.reserve(qpts.size() * 3);
+        for (const auto& p : qpts)
+        {
+            qflat.push_back(p.x());
+            qflat.push_back(p.y());
+            qflat.push_back(p.z());
+        }
+        G->runtime_checked_add_or_modify_attrib_local(node, "rfe_pts", qflat);
+    }
+
+    G->update_node(node);
+
+    // RT edge (pose)
+    write_rt_pose(room_node_id_, inst);
+}
+
+// ─── Table mesh generator ────────────────────────────────────────────────────
+//
+// Returns a flat triangle list in room frame:
+//   [x0,y0,z0, x1,y1,z1, x2,y2,z2, ...]  — every 9 floats = 1 triangle.
+//
+// Geometry: 1 top slab + 4 square legs = 5 boxes × 12 triangles = 540 floats.
+
+std::vector<float> SpecificWorker::make_table_mesh(const TableState& s)
+{
+    std::vector<float> verts;
+    verts.reserve(5 * 108);   // 5 boxes × 12 tri × 3 vtx × 3 floats
+
+    const float cy = std::cos(s.yaw);
+    const float sy = std::sin(s.yaw);
+
+    // Emit one box: centroid in room frame (bx,by,bz), local half-extents (hw,hd,hh).
+    auto push_box = [&](float bx, float by, float bz,
+                        float hw, float hd, float hh)
+    {
+        // Transform a local-frame corner to room frame and push xyz.
+        auto push = [&](float lx, float ly, float lz)
+        {
+            verts.push_back(bx + cy * lx - sy * ly);
+            verts.push_back(by + sy * lx + cy * ly);
+            verts.push_back(bz + lz);
+        };
+        // 6 faces × 2 triangles (winding consistent but not critical for wire/fill)
+        push(-hw,-hd,-hh); push( hw,-hd,-hh); push( hw, hd,-hh);  // bottom
+        push(-hw,-hd,-hh); push( hw, hd,-hh); push(-hw, hd,-hh);
+        push(-hw,-hd, hh); push( hw, hd, hh); push( hw,-hd, hh);  // top
+        push(-hw,-hd, hh); push(-hw, hd, hh); push( hw, hd, hh);
+        push(-hw,-hd,-hh); push( hw,-hd,-hh); push( hw,-hd, hh);  // front -y
+        push(-hw,-hd,-hh); push( hw,-hd, hh); push(-hw,-hd, hh);
+        push( hw, hd,-hh); push(-hw, hd,-hh); push(-hw, hd, hh);  // back  +y
+        push( hw, hd,-hh); push(-hw, hd, hh); push( hw, hd, hh);
+        push(-hw,-hd,-hh); push(-hw,-hd, hh); push(-hw, hd, hh);  // left  -x
+        push(-hw,-hd,-hh); push(-hw, hd, hh); push(-hw, hd,-hh);
+        push( hw,-hd,-hh); push( hw, hd,-hh); push( hw, hd, hh);  // right +x
+        push( hw,-hd,-hh); push( hw, hd, hh); push( hw,-hd, hh);
+    };
+
+    // Top slab — centred at floor + leg_length + half slab thickness
+    const float ht  = TableModel::TOP_THICKNESS * 0.5f;
+    push_box(s.cx, s.cy, s.leg_length + ht,
+             s.w * 0.5f, s.h * 0.5f, ht);
+
+    // 4 legs — square cross-section (2×LEG_RADIUS), inset from table corners
+    const float lr  = TableModel::LEG_RADIUS;
+    const float lhz = s.leg_length * 0.5f;
+    for (int ix : {-1, 1})
+        for (int iy : {-1, 1})
+        {
+            const float lx = ix * (s.w * 0.5f - lr);
+            const float ly = iy * (s.h * 0.5f - lr);
+            // Rotate leg offset to room frame
+            const float rx = s.cx + cy * lx - sy * ly;
+            const float ry = s.cy + sy * lx + cy * ly;
+            push_box(rx, ry, lhz,  lr, lr, lhz);
+        }
+
+    return verts;
+}
+
+void SpecificWorker::write_table_mesh(TableInstance& inst, DSR::Node& node)
+{
+    // Throttle: only update when the model generation changes (already guaranteed
+    // by the caller), but skip if the mesh would be identical to save DSR bandwidth.
+    const std::vector<float> verts = make_table_mesh(inst.model.state());
+    G->add_or_modify_attrib_local<mesh_vertices_att>(node, verts);
+}
+
+void SpecificWorker::step_convergence(TableInstance& inst,
+                                       DSR::Node& node,
+                                       float free_energy)
+{
+    const float fe_delta = std::abs(free_energy - inst.prev_free_energy);
+    if (fe_delta < cfg_.fe_eps)
+    {
+        inst.frames_converged = std::min(inst.frames_converged + 1, cfg_.K_stable);
+    }
+    else
+    {
+        inst.frames_converged = 0;
+        inst.model_stable     = false;
+    }
+
+    // Check all four vertical faces are covered (for affordance/uncertainty reporting only)
+    const auto coverage = inst.queue.face_coverage(inst.model);
+
+    // Compute per-face coverage deficit for model_uncertainty_att
+    float total_deficit = 0.0f;
+    for (int i = 0; i < 4; ++i)
+        total_deficit += std::max(0.0f, cfg_.delta_min - coverage[i]);
+    inst.last_coverage_deficit = total_deficit;   // expose to plot
+    G->add_or_modify_attrib_local<model_uncertainty_att>(node, total_deficit);
+
+    // ↑ Top-down: generative model prediction vs. coverage evidence
+    std::print("[{}] coverage: +x={:.1f} -x={:.1f} +y={:.1f} -y={:.1f}  "
+               "stable={}/{} U={:.1f}\n",
+               inst.node_name,
+               coverage[0], coverage[1], coverage[2], coverage[3],
+               inst.frames_converged, cfg_.K_stable,
+               total_deficit);
+
+    if (inst.frames_converged >= cfg_.K_stable)
+    {
+        if (not inst.model_stable)
+        {
+            inst.model_stable = true;
+            G->add_or_modify_attrib_local<model_stable_att>(node, true);
+            G->update_node(node);
+            std::print("table_concept: node '{}' STABLE (F={:.4f})\n",
+                       inst.node_name, free_energy);
+        }
+    }
+    else
+    {
+        if (inst.model_stable)
+        {
+            G->add_or_modify_attrib_local<model_stable_att>(node, false);
+            G->update_node(node);
+        }
+        inst.model_stable = false;
+    }
+}
+
+void SpecificWorker::step_epistemic(TableInstance& inst, DSR::Node& node)
+{
+    const auto prop = epistemic_planner_.compute(inst.model, inst.queue);
+    if (not prop.valid)
+        return;
+
+    // Write attributes to the table node (read by legacy consumers)
+    write_epistemic_proposal(node, prop);
+    // Publish / refresh dedicated affordance node
+    inst.affordance.update(prop);
+    inst.epistemic_pending = true;
+}
+
+void SpecificWorker::step_refresh_check(TableInstance& inst,
+                                         DSR::Node& node,
+                                         float free_energy,
+                                         float explanation_ratio)
+{
+    if (free_energy > inst.prev_free_energy)
+        ++inst.frames_rising;
+    else
+        inst.frames_rising = 0;
+
+    if (inst.frames_rising >= cfg_.M_diverge and explanation_ratio < cfg_.explanation_ratio_thresh)
+    {
+        G->add_or_modify_attrib_local<request_full_sample_att>(node, true);
+        G->update_node(node);
+        inst.frames_rising   = 0;
+        inst.queue.clear();
+        inst.matched_frames  = 0;
+        std::print("table_concept: divergence detected for '{}' — requesting full resample\n",
+                   inst.node_name);
+    }
+}
+
+// ─── DSR helpers ─────────────────────────────────────────────────────────────
+
+std::vector<Eigen::Vector3f> SpecificWorker::read_pts_attrib(
+    const DSR::Node& node, const std::string& att_name) const
+{
+    std::vector<Eigen::Vector3f> pts;
+
+    // Retrieve vector<float> attribute by name; interleaved XYZ
+    std::optional<std::reference_wrapper<const std::vector<float>>> opt;
+    if (att_name == "candidate_pts_att")
+        opt = G->get_attrib_by_name<candidate_pts_att>(node);
+    else if (att_name == "residual_pts_att")
+        opt = G->get_attrib_by_name<residual_pts_att>(node);
+    else
+        return pts;
+
+    if (not opt.has_value())
+        return pts;
+
+    const auto& data = opt.value().get();
+    const std::size_t n = data.size() / 3;
+    pts.reserve(n);
+    for (std::size_t i = 0; i < n; ++i)
+        pts.emplace_back(data[i*3], data[i*3+1], data[i*3+2]);
+
+    return pts;
+}
+
+Eigen::Matrix2f SpecificWorker::read_robot_covariance() const
+{
+    // Try to read SE2 covariance from the room→robot RT edge
+    const auto robots = G->get_nodes_by_type("robot");
+    if (not robots.empty() and room_node_id_ != 0)
+    {
+        const auto edge = G->get_edge(room_node_id_, robots.front().id(), "RT");
+        if (edge.has_value())
+        {
+            const auto cov_opt = G->get_attrib_by_name<rt_se2_covariance_att>(edge.value());
+            if (cov_opt.has_value())
+            {
+                const auto& c = cov_opt.value().get();
+                // rt_se2_covariance is a 9-vector (3×3 row-major for [x,y,θ])
+                if (c.size() >= 4)
+                {
+                    Eigen::Matrix2f m;
+                    m << c[0], c[1], c[3], c[4];
+                    return m;
+                }
+            }
+        }
+    }
+    // Fallback: small identity (high confidence)
+    return Eigen::Matrix2f::Identity() * 0.01f;
+}
+
+void SpecificWorker::write_rt_pose(uint64_t room_id, TableInstance& inst)
+{
+    if (room_id == 0 or not rt_api_)
+        return;
+
+    const auto& s = inst.model.state();
+
+    // Dead-band: suppress RT edge updates when position hasn't moved by more
+    // than 5 cm — prevents pos_x/pos_y churn from small gradient oscillations.
+    constexpr float kMinWriteDistSq = 0.05f * 0.05f;
+    const float dx = s.cx - inst.last_written_cx;
+    const float dy = s.cy - inst.last_written_cy;
+    if (dx*dx + dy*dy < kMinWriteDistSq)
+        return;
+
+    auto room_opt = G->get_node(room_id);
+    if (not room_opt.has_value())
+        return;
+
+    const float z = s.table_height * 0.5f;
+    rt_api_->insert_or_assign_edge_RT(room_opt.value(), inst.node_id,
+                                      {s.cx, s.cy, z},
+                                      {0.0f, 0.0f, s.yaw});
+    inst.last_written_cx = s.cx;
+    inst.last_written_cy = s.cy;
+}
+
+void SpecificWorker::write_epistemic_proposal(DSR::Node& node,
+                                               const EpistemicProposal& prop)
+{
+    G->add_or_modify_attrib_local<epistemic_target_x_m_att>  (node, prop.target_x_m);
+    G->add_or_modify_attrib_local<epistemic_target_y_m_att>  (node, prop.target_y_m);
+    G->add_or_modify_attrib_local<epistemic_target_yaw_rad_att>(node, prop.target_yaw_rad);
+    G->add_or_modify_attrib_local<epistemic_gain_att>        (node, prop.gain);
+    G->add_or_modify_attrib_local<epistemic_pending_att>     (node, true);
+    G->update_node(node);
+}
+
+// ─── Factory helpers ─────────────────────────────────────────────────────────
+
+TableModelParams SpecificWorker::make_model_params() const
+{
+    TableModelParams p;
+    p.sigma_obs          = cfg_.sigma_obs;
+    p.lambda_size        = cfg_.lambda_size;
+    p.lambda_pos         = cfg_.lambda_pos;
+    p.lambda_state       = cfg_.lambda_state;
+    p.lambda_angle       = cfg_.lambda_angle;
+    p.optimization_iters = cfg_.optimization_iters;
+    p.optimization_lr    = cfg_.optimization_lr;
+    p.grad_clip          = cfg_.grad_clip;
+    p.optimizer_type     = cfg_.optimizer_type;
+    p.sgd_momentum       = cfg_.sgd_momentum;
+    return p;
+}
+
+SampleQueueParams SpecificWorker::make_queue_params() const
+{
+    SampleQueueParams p;
+    p.num_angle_bins               = cfg_.num_angle_bins;
+    p.num_z_bins                   = cfg_.num_z_bins;
+    p.max_per_bin                  = cfg_.max_per_bin;
+    p.sdf_threshold_for_storage    = cfg_.sdf_threshold_for_storage;
+    p.min_frames_before_historical = cfg_.min_frames_before_historical;
+    p.historical_warmup_frames     = cfg_.historical_warmup_frames;
+    p.max_new_points_per_frame     = cfg_.max_new_points_per_frame;
+    p.rfe_alpha                    = cfg_.rfe_alpha;
+    p.rfe_max_threshold            = cfg_.rfe_max_threshold;
+    p.edge_bonus_weight            = cfg_.edge_bonus_weight;
+    p.edge_proximity_threshold     = cfg_.edge_proximity_threshold;
+    return p;
+}
+
+// ─── DSR signal slots ────────────────────────────────────────────────────────
+
+void SpecificWorker::modify_node_slot(std::uint64_t id, const std::string& type)
+{
+    if (type != "table")
+        return;
+
+    const auto node_opt = G->get_node(id);
+    if (not node_opt.has_value())
+        return;
+
+    ensure_instance(node_opt.value());
+}
+
+void SpecificWorker::modify_node_attrs_slot(std::uint64_t id,
+                                             const std::vector<std::string>& att_names)
+{
+    // Delegate to the affordance state machine for any instance whose affordance
+    // node was modified (controller setting epistemic_pending=false)
+    for (auto& [table_id, inst] : instances_)
+        if (inst.affordance.node_id() == id)
+            inst.affordance.on_node_modified(id);
+
+    // React to mission-controller clearing epistemic_pending on the table node itself
+    if (instances_.count(id))
+    {
+        const bool pending_cleared = std::any_of(att_names.begin(), att_names.end(),
+            [](const std::string& s) { return s == "epistemic_pending"; });
+
+        if (pending_cleared)
+        {
+            auto node_opt = G->get_node(id);
+            if (node_opt.has_value())
+            {
+                const auto v = G->get_attrib_by_name<epistemic_pending_att>(node_opt.value());
+                if (v.has_value() and not v.value())
+                    instances_.at(id).epistemic_pending = false;
+            }
+        }
+    }
+}
+
+void SpecificWorker::del_node_slot(std::uint64_t id)
+{
+    // Notify affordance in case its own DSR node was deleted externally
+    for (auto& [table_id, inst] : instances_)
+        if (inst.affordance.node_id() == id)
+            inst.affordance.on_node_deleted(id);
+
+    if (instances_.count(id))
+    {
+        std::print("table_concept: node {} removed from DSR, destroying instance\n", id);
+        instances_.erase(id);
+    }
+}
+
+// ─── Lifecycle stubs ─────────────────────────────────────────────────────────
 
 void SpecificWorker::emergency()
 {
-    std::cout << "Emergency worker" << std::endl;
-    //emergencyCODE
-    //
-    //if (SUCCESSFUL) //The componet is safe for continue
-    //  emmit goToRestore()
+    std::print("table_concept: emergency()\n");
 }
 
-
-//Execute one when exiting to emergencyState
 void SpecificWorker::restore()
 {
-    std::cout << "Restore worker" << std::endl;
-    //restoreCODE
-    //Restore emergency component
-
+    std::print("table_concept: restore()\n");
 }
-
 
 int SpecificWorker::startup_check()
 {
-	std::cout << "Startup check" << std::endl;
-	QTimer::singleShot(200, QCoreApplication::instance(), SLOT(quit()));
-	return 0;
+    std::print("table_concept: startup_check()\n");
+    return 0;
 }
+
 
 
 

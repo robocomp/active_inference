@@ -173,7 +173,7 @@ std::shared_ptr<DSR::DSRViewer> GenericWorker::setupViewer(std::shared_ptr<DSR::
     // Estructura de datos para iterar las opciones (más limpio que muchos IFs)
     const std::vector<std::pair<std::string, opts>> options = {
         {"tree", opts::tree}, {"graph", opts::graph}, 
-        {"2d", opts::scene},  {"3d", opts::osg}
+        {"2d", opts::scene}
     };
 
     for (const auto& [suffix, flag] : options) {

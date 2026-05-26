@@ -1,5 +1,5 @@
 /*
- *    Copyright (C) 2026 by YOUR NAME HERE
+ *    Copyright (C) 2026 by RoboComp CORTEX Team
  *
  *    This file is part of RoboComp
  *
@@ -18,82 +18,184 @@
  */
 
 /**
-	\brief
-	@author authorname
-*/
+ * table_concept — Active Inference agent for table instance detection and maintenance.
+ *
+ * Owns the generative model (7-param state + compound SDF) for every table
+ * node in the DSR graph.  Runs a free-energy minimisation loop, maintains a
+ * binned historical sample queue, and emits epistemic action proposals to
+ * mission-controller when table surfaces remain under-observed.
+ *
+ * See TABLE_CONCEPT.md for the full design specification.
+ */
 
 #ifndef SPECIFICWORKER_H
 #define SPECIFICWORKER_H
 
-// If you want to reduce the period automatically due to lack of use, you must uncomment the following line
-//#define HIBERNATION_ENABLED
+#include <limits>
+#include <memory>
+#include <string>
+#include <unordered_map>
 
 #include <genericworker.h>
+#include <Eigen/Dense>
 
-/**
- * \brief Class SpecificWorker implements the core functionality of the component.
- */
+#include "epistemic_planner.h"
+#include "prior_store.h"
+#include "sample_queue.h"
+#include "table_affordance.h"
+#include "table_model.h"
+#include "custom_widget.h"
+#include "timeseries_plot.h"
+
+// ─── Per-table instance state ────────────────────────────────────────────────
+
+struct TableInstance
+{
+    uint64_t    node_id;
+    std::string node_name;
+
+    TableModel  model;
+    SampleQueue queue;
+
+    int  last_frame_seen    = -1;     // last_sensing_frame_att value read
+    int  matched_frames     = 0;      // frames with fresh sensing data
+    int  frames_converged    = 0;      // consecutive frames with |ΔFE| < fe_eps
+    int  frames_rising      = 0;      // consecutive frames with F increasing
+    bool model_stable       = false;
+    int  model_generation   = 0;
+    bool epistemic_pending  = false;
+    float prev_free_energy  = std::numeric_limits<float>::max();
+    // Dead-band tracking for write_rt_pose — suppress tiny oscillations
+    float last_written_cx   = std::numeric_limits<float>::max();
+    float last_written_cy   = std::numeric_limits<float>::max();
+    // Last coverage deficit (written by step_convergence, read by plot)
+    float last_coverage_deficit = 0.f;
+    // Epistemic action request published to DSR
+    TableAffordance affordance;
+};
+
+// ─── Agent configuration ─────────────────────────────────────────────────────
+
+struct AgentConfig
+{
+    // Tunable via etc/config.toml
+    float fe_eps            = 1e-3f;   // |ΔFE| threshold for convergence
+    int   K_stable          = 30;
+    int   M_diverge         = 20;
+    float staleness_frames  = 90.0f;
+    float explanation_ratio_thresh = 0.3f;
+    float write_threshold   = 1e-3f;   // min ‖Δθ‖ before writing RT to DSR
+    float obs_distance      = 1.8f;    // d_obs for epistemic planner
+    float delta_min         = 20.0f;   // min face coverage count
+    float gain_threshold    = 0.1f;    // min ΔH for epistemic proposal
+
+    // TableModel parameters (forwarded to TableModelParams)
+    float sigma_obs         = 0.05f;
+    float lambda_size       = 0.5f;
+    float lambda_pos        = 0.05f;
+    float lambda_state      = 0.02f;
+    float lambda_angle      = 0.01f;
+    int   optimization_iters = 10;
+    float optimization_lr   = 0.05f;
+    float grad_clip         = 2.0f;
+    std::string optimizer_type = "adam";
+    float sgd_momentum     = 0.9f;
+
+    // SampleQueue parameters (forwarded to SampleQueueParams)
+    int   num_angle_bins               = 24;
+    int   num_z_bins                   = 10;
+    int   max_per_bin                  = 2;
+    float sdf_threshold_for_storage    = 0.08f;
+    int   min_frames_before_historical = 10;
+    int   historical_warmup_frames     = 50;
+    int   max_new_points_per_frame     = 5;
+    float rfe_alpha                    = 0.98f;
+    float rfe_max_threshold            = 2.0f;
+    float edge_bonus_weight            = 0.3f;
+    float edge_proximity_threshold     = 0.05f;
+};
+
+// ─── SpecificWorker ──────────────────────────────────────────────────────────
+
 class SpecificWorker : public GenericWorker
 {
 Q_OBJECT
 public:
-    /**
-     * \brief Constructor for SpecificWorker.
-     * \param configLoader Configuration loader for the component.
-     * \param tprx Tuple of proxies required for the component.
-     * \param startup_check Indicates whether to perform startup checks.
-     */
-	SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, bool startup_check);
-
-	/**
-     * \brief Destructor for SpecificWorker.
-     */
-	~SpecificWorker();
-
+    SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, bool startup_check);
+    ~SpecificWorker();
 
 public slots:
+    void initialize();
+    void compute();
+    void emergency();
+    void restore();
+    int  startup_check();
 
-	/**
-	 * \brief Initializes the worker one time.
-	 */
-	void initialize();
+    void modify_node_slot(std::uint64_t id, const std::string& type);
+    void modify_node_attrs_slot(std::uint64_t id, const std::vector<std::string>& att_names);
+    void modify_edge_slot(std::uint64_t from, std::uint64_t to, const std::string& type){};
+    void modify_edge_attrs_slot(std::uint64_t from, std::uint64_t to,
+                                const std::string& type, const std::vector<std::string>& att_names){};
+    void del_edge_slot(std::uint64_t from, std::uint64_t to, const std::string& edge_tag){};
+    void del_node_slot(std::uint64_t from);
 
-	/**
-	 * \brief Main compute loop of the worker.
-	 */
-	void compute();
-
-	/**
-	 * \brief Handles the emergency state loop.
-	 */
-	void emergency();
-
-	/**
-	 * \brief Restores the component from an emergency state.
-	 */
-	void restore();
-
-    /**
-     * \brief Performs startup checks for the component.
-     * \return An integer representing the result of the checks.
-     */
-	int startup_check();
-
-	void modify_node_slot(std::uint64_t, const std::string &type){};
-	void modify_node_attrs_slot(std::uint64_t id, const std::vector<std::string>& att_names){};
-	void modify_edge_slot(std::uint64_t from, std::uint64_t to,  const std::string &type){};
-	void modify_edge_attrs_slot(std::uint64_t from, std::uint64_t to, const std::string &type, const std::vector<std::string>& att_names){};
-	void del_edge_slot(std::uint64_t from, std::uint64_t to, const std::string &edge_tag){};
-	void del_node_slot(std::uint64_t from){};     
 private:
+    // ── Initialisation helpers ────────────────────────────────────────────────
+    void load_config(const ConfigLoader& cfg);
+    void scaffold_missing_table_nodes();
+    void ensure_instance(const DSR::Node& node);
 
-	/**
-     * \brief Flag indicating whether startup checks are enabled.
-     */
-	bool startup_check_flag;
+    // ── Per-table per-cycle steps (§11.2) ────────────────────────────────────
+    void step_read_sensing(TableInstance& inst, const DSR::Node& node);
+    void step_queue_update(TableInstance& inst,
+                           const std::vector<Eigen::Vector3f>& candidate_pts,
+                           const std::vector<Eigen::Vector3f>& residual_pts);
+    float step_model_update(TableInstance& inst,
+                            const std::vector<Eigen::Vector3f>& residual_pts);
+    void step_write_model(TableInstance& inst, DSR::Node& node, float free_energy);
+    void step_convergence(TableInstance& inst, DSR::Node& node, float free_energy);
+    void step_epistemic(TableInstance& inst, DSR::Node& node);
+    void step_refresh_check(TableInstance& inst, DSR::Node& node,
+                            float free_energy, float explanation_ratio);
+
+    // ── DSR helpers ──────────────────────────────────────────────────────────
+    std::vector<Eigen::Vector3f> read_pts_attrib(const DSR::Node& node,
+                                                  const std::string& att_name) const;
+    Eigen::Matrix2f read_robot_covariance() const;
+    void write_rt_pose(uint64_t room_id, TableInstance& inst);
+    void write_bool_att(DSR::Node& node, const std::string& key, bool val);
+    void write_float_att(DSR::Node& node, const std::string& key, float val);
+    void write_int_att(DSR::Node& node, const std::string& key, int val);
+    void write_epistemic_proposal(DSR::Node& node, const EpistemicProposal& prop);
+    void write_table_mesh(TableInstance& inst, DSR::Node& node);
+    static std::vector<float> make_table_mesh(const TableState& s);
+
+    // ── Instance management ──────────────────────────────────────────────────
+    TableModelParams  make_model_params() const;
+    SampleQueueParams make_queue_params() const;
+    TableState        prior_to_state(const TablePrior& p) const;
+
+    // ── Members ──────────────────────────────────────────────────────────────
+    bool startup_check_flag = false;
+
+    AgentConfig                                         cfg_;
+    std::unique_ptr<PriorStore>                         prior_store_;
+    EpistemicPlanner                                    epistemic_planner_;
+    std::unordered_map<uint64_t, TableInstance>         instances_;
+
+    Custom_widget*       custom_widget_ = nullptr;
+    rc::TimeSeriesPlot*  ts_plot_       = nullptr;   // FE
+    rc::TimeSeriesPlot*  ts_cov_plot_   = nullptr;   // coverage deficit
+
+    std::unique_ptr<DSR::RT_API>                        rt_api_;
+    uint64_t                                            room_node_id_ = 0;
+
+    // Paths resolved from ConfigLoader
+    std::string priors_path_;
+    std::string checkpoint_path_;
 
 signals:
-	//void customSignal();
+    // void customSignal();
 };
 
-#endif
+#endif // SPECIFICWORKER_H
