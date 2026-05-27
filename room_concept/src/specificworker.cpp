@@ -21,7 +21,6 @@
 #include <print>
 #include <random>
 #include <fstream>
-#include <string_view>
 #include <unordered_set>
 #include <QDir>
 #include <QFileInfo>
@@ -31,9 +30,6 @@
 namespace
 {
     constexpr auto kTimingReportInterval = std::chrono::seconds(10);
-    constexpr auto kAffordanceEdgeTypeStr = std::string_view("has_intention");
-    [[maybe_unused]] inline const bool kAffordanceEdgeTypeRegistered = edge_types::register_type(kAffordanceEdgeTypeStr);
-    using affordance_edge_type = EdgeType<kAffordanceEdgeTypeStr>;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -321,9 +317,8 @@ void SpecificWorker::initialize()
             }
         }
         room_node_created_ = false;
-        affordance_node_created_ = false;
         dsr_room_id_ = 0;
-        dsr_affordance_id_ = 0;
+        affordance_manager_.reset();
         stable_frames_ = 0;
     }
 
@@ -352,6 +347,8 @@ void SpecificWorker::initialize()
 ///////////////////////////////////////////////////////////////////////////////
 void SpecificWorker::compute()
 {
+    affordance_manager_.monitor_execution(G);
+
     const auto loc_res  = room_concept_.get_last_result();
     const bool have_loc = loc_res.has_value() && loc_res->ok;
 
@@ -758,12 +755,16 @@ void SpecificWorker::dsr_insert_bootstrap_table_if_missing()
 ///   epistemic_target_yaw_rad — desired robot heading at that point (rad)
 ///   epistemic_gain           — planner score (FIM × IoR × distance)
 ///   epistemic_pending        — true: target not yet reached by any agent
-///   active                   — true while the affordance is live
+///   active                   — false when published by this agent; sibling
+///                              controller sets it true while executing it
 ///
-/// The room→affordance relation is expressed with an edge of type "affordance".
+/// The room→affordance relation is expressed with an edge of type "has_intention".
 void SpecificWorker::dsr_update_affordance(const rc::RoomConcept::UpdateResult& res)
 {
     if (!G || !room_node_created_) return;
+
+    if (affordance_manager_.is_executing(G))
+        return;  // Sibling controller is executing current affordance.
 
     // Feed the planner with the latest robot state
     epistemic_controller_.set_robot_state(res.robot_pose, res.covariance);
@@ -782,71 +783,15 @@ void SpecificWorker::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
     const float cy  = (planner.room_min().y() + planner.room_max().y()) * 0.5f;
     const float yaw = std::atan2(cy - ty, cx - tx);
 
-    // ── Create node on first use ────────────────────────────────────────────
-    if (!affordance_node_created_)
-    {
-        auto room_node_opt = G->get_node(dsr_room_id_);
-        if (!room_node_opt.has_value()) return;
-
-        DSR::Node aff_node = DSR::Node::create<affordance_node_type>("e_aff");
-        G->add_or_modify_attrib_local<level_att>(aff_node, 3);
-        G->add_or_modify_attrib_local<parent_att>(aff_node, dsr_room_id_);
-        G->add_or_modify_attrib_local<pos_x_att>(aff_node, 300.f);
-        G->add_or_modify_attrib_local<pos_y_att>(aff_node, 200.f);
-        G->add_or_modify_attrib_local<active_att>(aff_node, true);
-        G->add_or_modify_attrib_local<epistemic_target_x_m_att>(aff_node, tx);
-        G->add_or_modify_attrib_local<epistemic_target_y_m_att>(aff_node, ty);
-        G->add_or_modify_attrib_local<epistemic_target_yaw_rad_att>(aff_node, yaw);
-        G->add_or_modify_attrib_local<epistemic_gain_att>(aff_node, gain);
-        G->add_or_modify_attrib_local<epistemic_pending_att>(aff_node, true);
-
-        const auto aff_id_opt = G->insert_node(aff_node);
-        if (!aff_id_opt.has_value())
-        {
-            qWarning() << "DSR: failed to create e_aff node";
-            return;
-        }
-
-        dsr_affordance_id_ = aff_id_opt.value();
-        affordance_node_created_ = true;
-        trigger_graph_layout_twopi();
-
-        if (G->get_edge(dsr_room_id_, dsr_affordance_id_, "RT").has_value())
-            G->delete_edge(dsr_room_id_, dsr_affordance_id_, "RT");
-
-        auto aff_edge = DSR::Edge::create<affordance_edge_type>(dsr_room_id_, dsr_affordance_id_);
-        G->insert_or_assign_edge(aff_edge);
-        trigger_graph_layout_twopi();
-
-        std::print("DSR: created e_aff node id={} at room ({:.2f}, {:.2f}) yaw={:.2f} gain={:.4f}\n",
-                   dsr_affordance_id_, tx, ty, yaw, gain);
-        return;
-    }
-
-    // ── Update existing node ────────────────────────────────────────────────
-    auto aff_node_opt = G->get_node(dsr_affordance_id_);
-    if (!aff_node_opt.has_value())
-    {
-        affordance_node_created_ = false;   // node was deleted externally; recreate next cycle
-        return;
-    }
-
-    auto& aff_node = aff_node_opt.value();
-    G->add_or_modify_attrib_local<epistemic_target_x_m_att>(aff_node, tx);
-    G->add_or_modify_attrib_local<epistemic_target_y_m_att>(aff_node, ty);
-    G->add_or_modify_attrib_local<epistemic_target_yaw_rad_att>(aff_node, yaw);
-    G->add_or_modify_attrib_local<epistemic_gain_att>(aff_node, gain);
-    G->add_or_modify_attrib_local<epistemic_pending_att>(aff_node, true);
-    G->update_node(aff_node);
-
-    auto room_node_opt = G->get_node(dsr_room_id_);
-    if (!room_node_opt.has_value()) return;
-
-    if (G->get_edge(dsr_room_id_, dsr_affordance_id_, "RT").has_value())
-        G->delete_edge(dsr_room_id_, dsr_affordance_id_, "RT");
-
-    auto aff_edge = DSR::Edge::create<affordance_edge_type>(dsr_room_id_, dsr_affordance_id_);
-    G->insert_or_assign_edge(aff_edge);
+    affordance_manager_.publish_target(
+        G,
+        dsr_room_id_,
+        tx,
+        ty,
+        yaw,
+        gain,
+        [this]() { trigger_graph_layout_twopi(); },
+        [this]() { trigger_graph_layout_twopi(); });
 }
 
 ///////////////////////////////////////////////////////////////////////////////

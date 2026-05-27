@@ -36,6 +36,7 @@
 #include "viewer_2d.h"
 #include "timeseries_plot.h"
 #include "camera_visualizer.h"
+#include "affordance_manager.h"
 #include <atomic>
 #include <thread>
 #include <fps/fps.h>
@@ -170,9 +171,8 @@ class SpecificWorker : public GenericWorker
         uint64_t dsr_robot_id_ = 0;
         uint64_t dsr_world_id_ = 0;
         uint64_t dsr_room_id_  = 0;
-        uint64_t dsr_affordance_id_ = 0;
         bool     room_node_created_ = false;
-        bool     affordance_node_created_ = false;
+        rc::AffordanceManager affordance_manager_;
         int      stable_frames_     = 0;
         std::int64_t last_dsr_published_ts_ms_ = 0;
         void check_init_graph_is_valid();

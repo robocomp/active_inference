@@ -47,6 +47,7 @@ LIST(APPEND SOURCES
   ../src/room_model.cpp
   ../src/pointcloud_center_estimator.cpp
   ../src/epistemic_controller.cpp
+  ../src/affordance_manager.cpp
   ../src/epistemic_planner.cpp
   ../src/timeseries_plot.cpp
   ../src/corner_detector.cpp
@@ -64,6 +65,7 @@ LIST(APPEND HEADERS
   ../src/room_model.h
   ../src/pointcloud_center_estimator.h
   ../src/epistemic_controller.h
+  ../src/affordance_manager.h
   ../src/epistemic_planner.h
   ../src/corner_visibility.h
   ../src/timeseries_plot.h
