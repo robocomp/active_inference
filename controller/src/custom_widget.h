@@ -48,20 +48,31 @@ public:
         pose_panel->setFrameShape(QFrame::StyledPanel);
         pose_panel->setFrameShadow(QFrame::Raised);
 
-        auto *pose_layout = new QHBoxLayout(pose_panel);
+        auto *pose_layout = new QVBoxLayout(pose_panel);
         pose_layout->setContentsMargins(8, 4, 8, 4);
-        pose_layout->setSpacing(8);
+        pose_layout->setSpacing(4);
 
-        auto *pose_title = new QLabel("Robot in room:", pose_panel);
+        auto *pose_row = new QHBoxLayout();
+        pose_row->setSpacing(8);
+        auto *pose_title = new QLabel("Pose:", pose_panel);
         pose_value_ = new QLabel("x 0.00 m   y 0.00 m   th 0.0 deg", pose_panel);
         pose_value_->setTextInteractionFlags(Qt::TextSelectableByMouse);
 
         QFont value_font = pose_value_->font();
         value_font.setBold(true);
         pose_value_->setFont(value_font);
+        pose_row->addWidget(pose_title);
+        pose_row->addWidget(pose_value_, 1);
+        pose_layout->addLayout(pose_row);
 
-        pose_layout->addWidget(pose_title);
-        pose_layout->addWidget(pose_value_, 1);
+        auto *cmd_row = new QHBoxLayout();
+        cmd_row->setSpacing(8);
+        auto *cmd_title = new QLabel("Cmd vel:", pose_panel);
+        cmd_vel_value_ = new QLabel("adv 0 mm/s   side 0 mm/s   rot 0.00 rad/s", pose_panel);
+        cmd_vel_value_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        cmd_row->addWidget(cmd_title);
+        cmd_row->addWidget(cmd_vel_value_, 1);
+        pose_layout->addLayout(cmd_row);
 
         main_layout->addWidget(pose_panel);
 
@@ -75,6 +86,14 @@ public:
         lidar_toggle_btn->setCheckable(true);
         lidar_toggle_btn->setChecked(true);
         toolbar_layout->addWidget(lidar_toggle_btn);
+
+        follow_toggle_btn = new QPushButton("Start", toolbar);
+        follow_toggle_btn->setCheckable(true);
+        follow_toggle_btn->setChecked(false);
+        follow_toggle_btn->setStyleSheet(
+            "QPushButton:checked { background-color: #c0392b; color: white; font-weight: bold; }"
+            "QPushButton:!checked { background-color: #27ae60; color: white; font-weight: bold; }");
+        toolbar_layout->addWidget(follow_toggle_btn);
         toolbar_layout->addStretch();
         main_layout->addWidget(toolbar);
 
@@ -95,11 +114,19 @@ public:
             pose_value_->setText(text);
     }
 
+    void set_cmd_vel_text(const QString &text)
+    {
+        if (cmd_vel_value_ != nullptr)
+            cmd_vel_value_->setText(text);
+    }
+
 public:
     QFrame *frame = nullptr;
     QPushButton *lidar_toggle_btn = nullptr;
+    QPushButton *follow_toggle_btn = nullptr;
 
 private:
     QLabel *pose_value_ = nullptr;
+    QLabel *cmd_vel_value_ = nullptr;
 };
 #endif

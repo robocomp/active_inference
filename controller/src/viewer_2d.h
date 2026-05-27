@@ -66,9 +66,12 @@ private:
     std::vector<QGraphicsEllipseItem *> lidar_items_;
     std::vector<QGraphicsItem *> path_draw_items_;
     QGraphicsEllipseItem *target_marker_ = nullptr;
+    std::vector<QGraphicsLineItem *> robot_traj_items_;
+    std::optional<Eigen::Vector2f> last_robot_pos_;
 
     void clear_polygon_item(QGraphicsPolygonItem *&item);
     void clear_lidar_items();
+    void clear_robot_trajectory();
 };
 
 } // namespace rc

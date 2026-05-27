@@ -1,10 +1,10 @@
 [Proxies]
 # Proxies for required interfaces
-OmniRobot = "omnirobot:tcp -h localhost -p 0"
+OmniRobot = "omnirobot:tcp -h localhost -p 10004"
 
 # --- Common Agent Data ---
 [Agent]
-id = 0 # Change id
+id = 8 
 name = "controller"
 
 # --- Single Instance Configuration ---

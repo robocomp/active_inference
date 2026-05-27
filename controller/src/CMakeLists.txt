@@ -1,6 +1,7 @@
 # Sources set
 LIST(APPEND SOURCES
   ../src/specificworker.cpp
+  ../src/affordance_manager.cpp
   ../src/room_path_planner.cpp
   ../src/trajectory_controller.cpp
   ../src/viewer_2d.cpp
@@ -9,6 +10,7 @@ LIST(APPEND SOURCES
 # Headers set
 LIST(APPEND HEADERS
   ../src/specificworker.h
+  ../src/affordance_manager.h
   ../src/custom_widget.h
   ../src/room_path_planner.h
   ../src/viewer_2d.h

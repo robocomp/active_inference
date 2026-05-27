@@ -50,6 +50,7 @@ Viewer2D::~Viewer2D()
 {
     clear_lidar_items();
     clear_path_items();
+    clear_robot_trajectory();
     clear_polygon_item(inner_polygon_item_);
     clear_polygon_item(polygon_item_);
 }
@@ -93,6 +94,34 @@ void Viewer2D::fit_view(float margin_ratio)
 void Viewer2D::update_robot(const Eigen::Affine2f &robot_pose)
 {
     const auto translation = robot_pose.translation();
+
+    if (last_robot_pos_.has_value())
+    {
+        const Eigen::Vector2f current_pos = translation;
+        const float distance = (current_pos - *last_robot_pos_).norm();
+        if (distance > 0.01f && distance < 1.5f)
+        {
+            const QPen traj_pen(QColor(255, 87, 34), 0.04);
+            auto *segment = agv_->scene.addLine(last_robot_pos_->x(),
+                                                last_robot_pos_->y(),
+                                                current_pos.x(),
+                                                current_pos.y(),
+                                                traj_pen);
+            segment->setZValue(17);
+            robot_traj_items_.push_back(segment);
+
+            constexpr std::size_t max_traj_segments = 4000;
+            while (robot_traj_items_.size() > max_traj_segments)
+            {
+                auto *old = robot_traj_items_.front();
+                agv_->scene.removeItem(old);
+                delete old;
+                robot_traj_items_.erase(robot_traj_items_.begin());
+            }
+        }
+    }
+
+    last_robot_pos_ = Eigen::Vector2f(translation.x(), translation.y());
     const float angle_rad = std::atan2(robot_pose.linear()(1, 0), robot_pose.linear()(0, 0));
     agv_->robot_poly()->setPos(translation.x(), translation.y());
     agv_->robot_poly()->setRotation(qRadiansToDegrees(angle_rad));
@@ -147,6 +176,17 @@ void Viewer2D::clear_lidar_items()
         delete item;
     }
     lidar_items_.clear();
+}
+
+void Viewer2D::clear_robot_trajectory()
+{
+    for (auto *item : robot_traj_items_)
+    {
+        agv_->scene.removeItem(item);
+        delete item;
+    }
+    robot_traj_items_.clear();
+    last_robot_pos_.reset();
 }
 
 void Viewer2D::draw_lidar_points_from_buffer(int max_points)
@@ -301,8 +341,6 @@ void Viewer2D::draw_path(const PathDrawData &data)
         path_draw_items_.push_back(dot);
     }
 
-    const auto &goal = data.path.back();
-    update_target_marker(goal.x(), goal.y(), true);
 }
 
 void Viewer2D::clear_path_items()
@@ -313,9 +351,6 @@ void Viewer2D::clear_path_items()
         delete item;
     }
     path_draw_items_.clear();
-
-    if (target_marker_ != nullptr)
-        target_marker_->setVisible(false);
 }
 
 void Viewer2D::update_target_marker(float x, float y, bool visible)

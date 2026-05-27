@@ -36,6 +36,7 @@
 #include <vector>
 
 #include "room_path_planner.h"
+#include "affordance_manager.h"
 #include "trajectory_controller.h"
 #include "viewer_2d.h"
 
@@ -131,6 +132,10 @@ private:
 		uint64_t node_id = 0;
 		std::string node_name;
 		Eigen::Vector2f room_pos = Eigen::Vector2f::Zero();
+		float yaw_rad = 0.f;
+		float epistemic_gain = 0.f;
+		bool epistemic_pending = false;
+		bool from_affordance = false;
 	};
 
 	struct RobotPose
@@ -167,14 +172,22 @@ private:
 	Polygons obstacle_polygons_;
 	rc::LidarPointBuffer lidar_room_buffer_{3};
 	std::optional<PathPlan> current_plan_;
+	std::optional<Eigen::Vector2f> current_target_room_;
 	std::optional<Eigen::Vector2f> manual_target_room_;
 	std::optional<Eigen::Vector2f> manual_target_origin_room_;
+	AffordanceManager affordance_manager_;
+	bool path_following_active_ = false;
+	bool stop_sent_when_paused_ = false;
+	bool stop_command_latched_ = false;
+	bool has_last_speed_command_ = false;
+	Eigen::Vector3f last_speed_command_ = Eigen::Vector3f::Zero();
 	bool manual_target_dirty_ = false;
 	bool room_view_fitted_ = false;
 	uint64_t active_target_id_ = 0;
 	bool room_wait_logged_ = false;
 	bool target_wait_logged_ = false;
 	bool compute_debug_logged_ = false;
+	mutable std::optional<std::uint64_t> last_lidar_timestamp_ms_;
 	mutable std::string obstacle_debug_report_;
 	RoomPathPlanner planner_;
 	rc::TrajectoryController path_controller_;
@@ -196,10 +209,11 @@ private:
 	                             float width_m,
 	                             float depth_m) const;
 	std::optional<RobotPose> read_robot_pose_in_room(std::uint64_t timestamp_ms) const;
-	std::optional<TargetInfo> read_target_in_room(std::uint64_t timestamp_ms) const;
+	std::optional<TargetInfo> read_target_in_room(std::uint64_t timestamp_ms);
 	void set_manual_target(const QPointF &point);
 	void clear_manual_target();
 	void execute_plan(const RobotPose &robot_pose);
+	void send_speed_command(float adv_mm_s, float side_mm_s, float rot_rps);
 	void stop_robot();
 
 signals:

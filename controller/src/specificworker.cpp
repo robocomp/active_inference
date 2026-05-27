@@ -127,6 +127,22 @@ void SpecificWorker::initialize()
 		        [this](const QPointF &) { clear_manual_target(); });
 		connect(custom_widget_->lidar_toggle_btn, &QPushButton::toggled, this,
 		        [this](bool checked) { if (viewer_2d_) viewer_2d_->set_lidar_visible(checked); });
+		connect(custom_widget_->follow_toggle_btn, &QPushButton::toggled, this,
+		        [this](bool checked)
+		        {
+		            path_following_active_ = checked;
+		            custom_widget_->follow_toggle_btn->setText(checked ? "Stop" : "Start");
+		            if (checked)
+		            {
+		                stop_sent_when_paused_ = false;
+		            }
+		            else if (!stop_sent_when_paused_)
+		            {
+		                path_controller_.stop();
+		                stop_robot();
+		                stop_sent_when_paused_ = true;
+		            }
+		        });
 	}
 	update_custom_widget(std::nullopt);
 
@@ -159,7 +175,17 @@ void SpecificWorker::compute()
 		return;
 
 	update_custom_widget(step->robot_pose);
-	execute_plan(step->robot_pose);
+	if (path_following_active_)
+	{
+		stop_sent_when_paused_ = false;
+		execute_plan(step->robot_pose);
+	}
+	else if (!stop_sent_when_paused_)
+	{
+		path_controller_.stop();
+		stop_robot();
+		stop_sent_when_paused_ = true;
+	}
 }
 
 /////////////////////////////////////////////////////////////////
@@ -240,6 +266,8 @@ std::optional<SpecificWorker::PlanningStep> SpecificWorker::build_planning_step(
 	{
 		step.target.node_name = "mouse_target";
 		step.target.room_pos = *manual_target_room_;
+		current_target_room_ = step.target.room_pos;
+		affordance_manager_.clear_current();
 		const bool use_snapped_manual_origin = manual_target_dirty_ and manual_target_origin_room_.has_value();
 		if (use_snapped_manual_origin)
 			step.plan_origin = *manual_target_origin_room_;
@@ -255,11 +283,13 @@ std::optional<SpecificWorker::PlanningStep> SpecificWorker::build_planning_step(
 	{
 		if (!target_wait_logged_)
 		{
-			qInfo() << "Controller waiting for a target edge in DSR";
+			qInfo() << "Controller waiting for an affordance target in DSR";
 			target_wait_logged_ = true;
 		}
 		current_plan_.reset();
 		active_target_id_ = 0;
+		current_target_room_.reset();
+		affordance_manager_.clear_current();
 		update_custom_widget(robot_pose);
 		stop_robot();
 		return std::nullopt;
@@ -267,6 +297,7 @@ std::optional<SpecificWorker::PlanningStep> SpecificWorker::build_planning_step(
 
 	target_wait_logged_ = false;
 	step.target = *target;
+	current_target_room_ = step.target.room_pos;
 	step.target_changed = active_target_id_ != target->node_id;
 	if (step.target_changed)
 		active_target_id_ = target->node_id;
@@ -405,9 +436,9 @@ void SpecificWorker::update_custom_widget(const std::optional<RobotPose> &robot_
 			room_view_fitted_ = true;
 		}
 
-		if (!current_plan_.has_value() && manual_target_room_.has_value())
-			viewer_2d_->update_target_marker(manual_target_room_->x(), manual_target_room_->y(), true);
-		else if (!current_plan_.has_value())
+		if (current_target_room_.has_value())
+			viewer_2d_->update_target_marker(current_target_room_->x(), current_target_room_->y(), true);
+		else
 			viewer_2d_->update_target_marker(0.f, 0.f, false);
 
 		if (robot_pose.has_value())
@@ -587,22 +618,57 @@ std::optional<SpecificWorker::RobotPose> SpecificWorker::read_robot_pose_in_room
 	if (!inner_eigen_api_ || !graph_state_.ready())
 		return std::nullopt;
 
-	const auto translation = inner_eigen_api_->transform(graph_state_.room_name, graph_state_.robot_name, timestamp_ms, "RT");
-	const auto euler = inner_eigen_api_->get_euler_xyz_angles(graph_state_.room_name, graph_state_.robot_name, timestamp_ms, "RT");
-	if (!translation.has_value() || !euler.has_value())
+	const auto time_query = params.interpolate_rt ? DSR::RT_API::TimeQuery::Interpolated
+	                                          : DSR::RT_API::TimeQuery::Nearest;
+	const std::uint64_t query_ts = last_lidar_timestamp_ms_.value_or(timestamp_ms);
+	auto room_T_robot = inner_eigen_api_->get_transformation_matrix(graph_state_.room_name,
+	                                                               graph_state_.robot_name,
+	                                                               query_ts,
+	                                                               "RT",
+	                                                               time_query);
+	if (!room_T_robot.has_value())
+		room_T_robot = inner_eigen_api_->get_transformation_matrix(graph_state_.room_name,
+	                                                          graph_state_.robot_name,
+	                                                          timestamp_ms,
+	                                                          "RT",
+	                                                          time_query);
+	if (!room_T_robot.has_value())
+		room_T_robot = inner_eigen_api_->get_transformation_matrix(graph_state_.room_name,
+	                                                          graph_state_.robot_name,
+	                                                          0,
+	                                                          "RT",
+	                                                          time_query);
+	if (!room_T_robot.has_value())
 		return std::nullopt;
 
+	const auto &matrix = room_T_robot->matrix();
+
 	RobotPose pose;
-	pose.pos = Eigen::Vector2f(static_cast<float>(translation->x()), static_cast<float>(translation->y()));
-	pose.theta = static_cast<float>(euler->z());
+	pose.pos = Eigen::Vector2f(static_cast<float>(matrix(0, 3)), static_cast<float>(matrix(1, 3)));
+	pose.theta = std::atan2(static_cast<float>(matrix(1, 0)), static_cast<float>(matrix(0, 0)));
 	return pose;
 }
 
-std::optional<SpecificWorker::TargetInfo> SpecificWorker::read_target_in_room(std::uint64_t timestamp_ms) const
+std::optional<SpecificWorker::TargetInfo> SpecificWorker::read_target_in_room(std::uint64_t timestamp_ms)
 {
 	if (!G || !inner_eigen_api_ || !graph_state_.ready())
 		return std::nullopt;
 
+	// 1) Main target source: affordance manager protocol.
+	if (const auto affordance_target = affordance_manager_.select_target(G); affordance_target.has_value())
+	{
+		TargetInfo info;
+		info.node_id = affordance_target->node_id;
+		info.node_name = affordance_target->node_name;
+		info.room_pos = affordance_target->room_pos;
+		info.yaw_rad = affordance_target->yaw_rad;
+		info.epistemic_gain = affordance_target->epistemic_gain;
+		info.epistemic_pending = affordance_target->epistemic_pending;
+		info.from_affordance = true;
+		return info;
+	}
+
+	// 2) Fallback: legacy target edge workflow.
 	const auto edges = G->get_edges_by_type(params.target_edge_type);
 	if (edges.empty())
 		return std::nullopt;
@@ -633,6 +699,7 @@ std::optional<SpecificWorker::TargetInfo> SpecificWorker::read_target_in_room(st
 		info.node_id = target_id;
 		info.node_name = *target_name;
 		info.room_pos = Eigen::Vector2f(static_cast<float>(translation->x()), static_cast<float>(translation->y()));
+		info.from_affordance = false;
 		return info;
 	}
 
@@ -663,7 +730,10 @@ void SpecificWorker::execute_plan(const RobotPose &robot_pose)
 
 	if (control_output.goal_reached)
 	{
+		affordance_manager_.mark_reached(G);
+
 		current_plan_.reset();
+		current_target_room_.reset();
 		if (manual_target_room_.has_value())
 			manual_target_room_.reset();
 		manual_target_origin_room_.reset();
@@ -679,19 +749,22 @@ void SpecificWorker::execute_plan(const RobotPose &robot_pose)
 		return;
 	}
 
-	try
+	const float adv_mm_s = control_output.adv * 1000.f;
+	const float side_mm_s = control_output.side * 1000.f;
+	const float rot_rps = -control_output.rot;
+	if (std::abs(adv_mm_s) < 0.5f && std::abs(side_mm_s) < 0.5f && std::abs(rot_rps) < 1e-3f)
 	{
-		omnirobot_proxy->setSpeedBase(control_output.adv * 1000.f, control_output.side * 1000.f, control_output.rot);
+		stop_robot();
+		return;
 	}
-	catch(const Ice::Exception &e)
-	{
-		qWarning() << "Controller setSpeedBase failed:" << e.what();
-	}
+
+	send_speed_command(adv_mm_s, side_mm_s, rot_rps);
 }
 
 void SpecificWorker::set_manual_target(const QPointF &point)
 {
 	manual_target_room_ = Eigen::Vector2f(static_cast<float>(point.x()), static_cast<float>(point.y()));
+	current_target_room_ = manual_target_room_;
 	manual_target_origin_room_.reset();
 	if (inner_eigen_api_ and (graph_state_.ready() || refresh_graph_state()))
 	{
@@ -710,6 +783,8 @@ void SpecificWorker::set_manual_target(const QPointF &point)
 void SpecificWorker::clear_manual_target()
 {
 	manual_target_room_.reset();
+	current_target_room_.reset();
+	affordance_manager_.clear_current();
 	manual_target_origin_room_.reset();
 	manual_target_dirty_ = false;
 	current_plan_.reset();
@@ -718,14 +793,52 @@ void SpecificWorker::clear_manual_target()
 	hibernationTick();
 }
 
-void SpecificWorker::stop_robot()
+void SpecificWorker::send_speed_command(float adv_mm_s, float side_mm_s, float rot_rps)
 {
-	path_controller_.stop();
+	if (custom_widget_)
+		custom_widget_->set_cmd_vel_text(QStringLiteral("adv %1 mm/s   side %2 mm/s   rot %3 rad/s")
+			.arg(adv_mm_s, 0, 'f', 0)
+			.arg(side_mm_s, 0, 'f', 0)
+			.arg(rot_rps, 0, 'f', 2));
 
 	if (!omnirobot_proxy)
 		return;
 
-	try { omnirobot_proxy->stopBase(); }
+	const Eigen::Vector3f cmd(adv_mm_s, side_mm_s, rot_rps);
+	if (has_last_speed_command_ && (cmd - last_speed_command_).cwiseAbs().maxCoeff() < 0.1f)
+		return;
+
+	try
+	{
+		omnirobot_proxy->setSpeedBase(side_mm_s, adv_mm_s, rot_rps);
+		last_speed_command_ = cmd;
+		has_last_speed_command_ = true;
+		stop_command_latched_ = false;
+	}
+	catch(const Ice::Exception &e)
+	{
+		qWarning() << "Controller setSpeedBase failed:" << e.what();
+	}
+}
+
+void SpecificWorker::stop_robot()
+{
+	path_controller_.stop();
+	if (custom_widget_)
+		custom_widget_->set_cmd_vel_text(QStringLiteral("adv 0 mm/s   side 0 mm/s   rot 0.00 rad/s"));
+
+	if (stop_command_latched_)
+		return;
+
+	if (!omnirobot_proxy)
+		return;
+
+	try
+	{
+		omnirobot_proxy->stopBase();
+		stop_command_latched_ = true;
+		has_last_speed_command_ = false;
+	}
 	catch(const Ice::Exception &) {}
 }
 
@@ -757,6 +870,7 @@ void SpecificWorker::modify_node_slot(std::uint64_t id, const std::string &type)
 		const std::uint64_t timestamp_ms = ts_it != attrs.end()
 			? static_cast<std::uint64_t>(std::max<std::int64_t>(0, static_cast<std::int64_t>(ts_it->second.uint64())))
 			: 0ULL;
+		last_lidar_timestamp_ms_ = timestamp_ms;
 		const auto interp = params.interpolate_rt ? DSR::RT_API::TimeQuery::Interpolated
 			                                     : DSR::RT_API::TimeQuery::Nearest;
 		const auto room_from_lidar = inner_eigen_api_->get_transformation_matrix(graph_state_.room_name,
