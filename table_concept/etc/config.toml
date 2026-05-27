@@ -30,6 +30,21 @@ Emergency = 500
 [Component.Debug]
 Verbose = false
 
+[WarmStart]
+PtsMin = 12.0            # point count where observability starts to become trustworthy
+PtsMax = 30.0            # point count where the point-count confidence saturates
+CoverageMinSide = 2.0    # minimum bilateral face coverage before size/yaw can adapt freely
+RhoFreeze = 0.25         # observability-ratio threshold below which one-sided dimensions are frozen
+LambdaPosBase = 0.15     # baseline gain for cx/cy acceptance even under weak evidence
+LambdaPosGain = 0.45     # extra positional gain added as observability improves
+LambdaSizeBase = 0.02    # baseline gain for shape/height acceptance under poor coverage
+LambdaSizeGain = 0.18    # extra shape gain added when bilateral coverage improves
+LambdaYawBase = 0.01     # baseline yaw gain when orientation evidence is weak
+LambdaYawGain = 0.12     # extra yaw gain added when both x/y face coverage are balanced
+ConfidenceDecay = 0.55            # how quickly the higher-level confidence state forgets old evidence
+ConfidenceCoverageGain = 1.00     # how much coverage evidence raises confidence
+ConfidenceResidualGain = 0.25     # how much unexplained residuals raise confidence
+
 [Ice]
 Warn.Connections = "0"
 Trace.Network = "0"

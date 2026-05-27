@@ -26,7 +26,7 @@ public:
         layout->setContentsMargins(4, 4, 4, 4);
         layout->setSpacing(4);
 
-        auto* title = new QLabel("Table Model — Free Energy & Coverage Deficit", this);
+        auto* title = new QLabel("Table Model — Free Energy, Coverage Deficit & Residuals", this);
         title->setMaximumHeight(22);
         QFont f = title->font();
         f.setBold(true);
@@ -36,10 +36,10 @@ public:
         frame_series = new QFrame(this);
         frame_series->setFrameShape(QFrame::StyledPanel);
         frame_series->setFrameShadow(QFrame::Raised);
-        frame_series->setMinimumHeight(300);
+        frame_series->setMinimumHeight(420);
         layout->addWidget(frame_series, 1);
 
         setLayout(layout);
-        setMinimumSize(300, 340);
+        setMinimumSize(300, 460);
     }
 };

@@ -36,8 +36,119 @@
 #include <filesystem>
 #include <print>
 
+#include <algorithm>
+
 // DSR attribute name tags — generated from dsr_attr_name.h
 #include <dsr/api/dsr_api.h>
+
+namespace
+{
+
+float clamp01(float value)
+{
+    return std::clamp(value, 0.0f, 1.0f);
+}
+
+float lerp(float start, float end, float gain)
+{
+    return start + gain * (end - start);
+}
+
+float wrap_angle(float angle)
+{
+    while (angle > M_PIf) angle -= 2.0f * M_PIf;
+    while (angle < -M_PIf) angle += 2.0f * M_PIf;
+    return angle;
+}
+
+float angle_lerp(float start, float end, float gain)
+{
+    return wrap_angle(start + gain * wrap_angle(end - start));
+}
+
+TableState apply_observability_warm_start(const TableState&            previous,
+                                          const TableState&            raw,
+                                          const TableModelParams&      params,
+                                          const AgentConfig&           cfg,
+                                          float                        confidence,
+                                          const std::array<float, 6>&  coverage,
+                                          int                          point_count)
+{
+    constexpr float kCoverageEps = 1e-3f;
+
+    const float cov_px = coverage[0];
+    const float cov_nx = coverage[1];
+    const float cov_py = coverage[2];
+    const float cov_ny = coverage[3];
+
+    const float rho_x = std::min(cov_px, cov_nx) / (std::max(cov_px, cov_nx) + kCoverageEps);
+    const float rho_y = std::min(cov_py, cov_ny) / (std::max(cov_py, cov_ny) + kCoverageEps);
+    const float pts_span = std::max(1e-3f, cfg.warm_pts_max - cfg.warm_pts_min);
+    const float rho_pts = clamp01((static_cast<float>(point_count) - cfg.warm_pts_min) / pts_span);
+
+    const float rho_pos = rho_pts * std::max(rho_x, rho_y);
+    const float rho_size_x = rho_pts * rho_x;
+    const float rho_size_y = rho_pts * rho_y;
+    const float rho_vertical = rho_pts;
+    const float yaw_support = clamp01(0.25f * std::max(rho_x, rho_y) + 0.75f * std::sqrt(rho_x * rho_y));
+
+    const float lambda_pos = lerp(cfg.warm_lambda_pos_base + cfg.warm_lambda_pos_gain * rho_pos, 0.95f, confidence);
+    const float lambda_size_x = lerp(cfg.warm_lambda_size_base + cfg.warm_lambda_size_gain * rho_size_x, 0.95f, confidence);
+    const float lambda_size_y = lerp(cfg.warm_lambda_size_base + cfg.warm_lambda_size_gain * rho_size_y, 0.95f, confidence);
+    const float lambda_vertical = lerp(cfg.warm_lambda_size_base + cfg.warm_lambda_size_gain * rho_vertical, 0.90f, confidence);
+    const float lambda_yaw = lerp(cfg.warm_lambda_yaw_base + cfg.warm_lambda_yaw_gain * (rho_pts * yaw_support), 0.70f, confidence);
+
+    const float effective_side_min = cfg.warm_coverage_min_side * (1.0f - 0.6f * confidence);
+    const float effective_rho_freeze = cfg.warm_rho_freeze * (1.0f - 0.7f * confidence);
+
+    const bool freeze_x = std::min(cov_px, cov_nx) < effective_side_min || rho_x < effective_rho_freeze;
+    const bool freeze_y = std::min(cov_py, cov_ny) < effective_side_min || rho_y < effective_rho_freeze;
+
+    TableState accepted = raw;
+    accepted.cx = lerp(previous.cx, raw.cx, lambda_pos);
+    accepted.cy = lerp(previous.cy, raw.cy, lambda_pos);
+    accepted.w = freeze_x ? previous.w : lerp(previous.w, raw.w, lambda_size_x);
+    accepted.h = freeze_y ? previous.h : lerp(previous.h, raw.h, lambda_size_y);
+    accepted.table_height = lerp(previous.table_height, raw.table_height, lambda_vertical);
+    accepted.leg_length = lerp(previous.leg_length, raw.leg_length, lambda_vertical);
+    accepted.yaw = angle_lerp(previous.yaw, raw.yaw, lambda_yaw);
+
+    return accepted;
+}
+
+float update_warm_confidence(float                        previous_confidence,
+                             const AgentConfig&           cfg,
+                             const std::array<float, 6>&  coverage,
+                             int                          point_count,
+                             int                          residual_count)
+{
+    constexpr float kCoverageEps = 1e-3f;
+
+    const float cov_px = coverage[0];
+    const float cov_nx = coverage[1];
+    const float cov_py = coverage[2];
+    const float cov_ny = coverage[3];
+
+    const float rho_x = std::min(cov_px, cov_nx) / (std::max(cov_px, cov_nx) + kCoverageEps);
+    const float rho_y = std::min(cov_py, cov_ny) / (std::max(cov_py, cov_ny) + kCoverageEps);
+    const float pts_span = std::max(1e-3f, cfg.warm_pts_max - cfg.warm_pts_min);
+    const float rho_pts = clamp01((static_cast<float>(point_count) - cfg.warm_pts_min) / pts_span);
+    const float residual_ratio = clamp01(static_cast<float>(residual_count) /
+                                         static_cast<float>(std::max(1, point_count)));
+
+    // Dense observations can raise confidence, but only balanced bilateral
+    // coverage should drive it close to one.
+    const float bilateral_support = 0.5f * (rho_x + rho_y);
+    const float coverage_evidence = rho_pts * lerp(0.15f, 1.0f, bilateral_support);
+    const float evidence = cfg.warm_confidence_coverage_gain * coverage_evidence +
+                           cfg.warm_confidence_residual_gain * residual_ratio;
+
+    const float updated = cfg.warm_confidence_decay * previous_confidence +
+                          (1.0f - cfg.warm_confidence_decay) * evidence;
+    return clamp01(updated);
+}
+
+} // namespace
 
 // ─── Constructor / Destructor ─────────────────────────────────────────────────
 
@@ -172,6 +283,19 @@ void SpecificWorker::initialize()
         ts_cov_plot_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
         ts_cov_plot_->set_visible_window(60.f);
         series_layout->addWidget(ts_cov_plot_);
+
+        ts_res_plot_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
+        ts_res_plot_->set_visible_window(60.f);
+        series_layout->addWidget(ts_res_plot_);
+
+        // GenericWorker::initialize() may have already started compute(), so
+        // some instances can exist before the plots are constructed.
+        for (const auto& [_, inst] : instances_)
+        {
+            ts_plot_->add_series(inst.node_name + "_fe", QColor(255, 170, 0), 1.1f);
+            ts_cov_plot_->add_series(inst.node_name + "_cov", QColor(0, 190, 255), 1.1f);
+            ts_res_plot_->add_series(inst.node_name + "_res", QColor(170, 80, 255), 1.1f);
+        }
     }
 }
 
@@ -260,7 +384,8 @@ void SpecificWorker::compute()
         }
 
         // ③ Model update (gradient steps over queue + residual points)
-        const float free_energy = step_model_update(inst, residual_pts);
+        const float residual_precision = clamp01(inst.warm_confidence * clamp01(explanation_ratio));
+        const float free_energy = step_model_update(inst, residual_pts, residual_precision);
         {
             // ↑ Top-down: model state after gradient descent
             const auto& s = inst.model.state();
@@ -291,7 +416,15 @@ void SpecificWorker::compute()
             ts_plot_->add_point(inst.node_name + "_fe",  free_energy);
             if (ts_cov_plot_)
                 ts_cov_plot_->add_point(inst.node_name + "_cov", inst.last_coverage_deficit);
+            if (ts_res_plot_)
+                ts_res_plot_->add_point(inst.node_name + "_res", static_cast<float>(residual_pts.size()));
         }
+
+        std::print("[{}] series: FE={:.4f} cov={:.1f} res={}\n",
+                   inst.node_name,
+                   free_energy,
+                   inst.last_coverage_deficit,
+                   residual_pts.size());
 
         // ⑦ Epistemic planning — driven by coverage deficit, independent of stability
         if (inst.last_coverage_deficit > 0.f)
@@ -373,6 +506,21 @@ void SpecificWorker::load_config(const ConfigLoader& cfg)
     cfg_.rfe_max_threshold            = getf("SampleQueue.RfeMaxThreshold",           2.0f);
     cfg_.edge_bonus_weight            = getf("SampleQueue.EdgeBonusWeight",           0.3f);
     cfg_.edge_proximity_threshold     = getf("SampleQueue.EdgeProximityThreshold",    0.05f);
+
+    // WarmStart
+    cfg_.warm_pts_min                 = getf("WarmStart.PtsMin",                 12.0f);
+    cfg_.warm_pts_max                 = getf("WarmStart.PtsMax",                 30.0f);
+    cfg_.warm_coverage_min_side       = getf("WarmStart.CoverageMinSide",        2.0f);
+    cfg_.warm_rho_freeze              = getf("WarmStart.RhoFreeze",              0.25f);
+    cfg_.warm_lambda_pos_base         = getf("WarmStart.LambdaPosBase",          0.15f);
+    cfg_.warm_lambda_pos_gain         = getf("WarmStart.LambdaPosGain",          0.45f);
+    cfg_.warm_lambda_size_base        = getf("WarmStart.LambdaSizeBase",         0.02f);
+    cfg_.warm_lambda_size_gain        = getf("WarmStart.LambdaSizeGain",         0.18f);
+    cfg_.warm_lambda_yaw_base         = getf("WarmStart.LambdaYawBase",          0.01f);
+    cfg_.warm_lambda_yaw_gain         = getf("WarmStart.LambdaYawGain",          0.12f);
+    cfg_.warm_confidence_decay         = getf("WarmStart.ConfidenceDecay",        0.70f);
+    cfg_.warm_confidence_coverage_gain  = getf("WarmStart.ConfidenceCoverageGain", 0.35f);
+    cfg_.warm_confidence_residual_gain  = getf("WarmStart.ConfidenceResidualGain", 0.65f);
 
     std::print("table_concept: configuration loaded.\n");
 }
@@ -501,9 +649,11 @@ void SpecificWorker::ensure_instance(const DSR::Node& node)
     // Register per-instance time-series (one FE + one coverage series per table)
     if (ts_plot_)
     {
-        ts_plot_->add_series(node.name() + "_fe",  QColor(255, 170,   0), 1.8f);
+        ts_plot_->add_series(node.name() + "_fe",  QColor(255, 170,   0), 1.1f);
         if (ts_cov_plot_)
-            ts_cov_plot_->add_series(node.name() + "_cov", QColor(  0, 190, 255), 1.6f);
+            ts_cov_plot_->add_series(node.name() + "_cov", QColor(  0, 190, 255), 1.1f);
+        if (ts_res_plot_)
+            ts_res_plot_->add_series(node.name() + "_res", QColor(170,  80, 255), 1.1f);
     }
 
     // Ensure canvas position is set — viewer randomizes pos_x/pos_y if absent.
@@ -545,27 +695,62 @@ void SpecificWorker::step_queue_update(TableInstance& inst,
 }
 
 float SpecificWorker::step_model_update(TableInstance& inst,
-                                         const std::vector<Eigen::Vector3f>& residual_pts)
+                                         const std::vector<Eigen::Vector3f>& residual_pts,
+                                         float residual_precision)
 {
-    // Combine historical queue points with fresh residual
-    auto pts     = inst.queue.points();
-    auto weights = inst.queue.weights();
+    const TableState previous_state = inst.model.state();
+
+    // Historical queue points are the trusted fitting set. Residuals are only
+    // used to steer the optimizer when they arrive together with explanatory
+    // support; otherwise they remain as evaluation-only mismatch evidence.
+    auto fit_pts     = inst.queue.points();
+    auto fit_weights = inst.queue.weights();
+    auto eval_pts    = fit_pts;
+    auto eval_weights = fit_weights;
 
     for (const auto& rp : residual_pts)
     {
-        pts.push_back(rp);
-        weights.push_back(1.0f);   // residual points get uniform weight
+        eval_pts.push_back(rp);
+        eval_weights.push_back(1.0f);   // residual points get uniform weight
+        if (residual_precision > 1e-3f)
+        {
+            fit_pts.push_back(rp);
+            fit_weights.push_back(residual_precision);
+        }
     }
 
     float fe = inst.model.compute_free_energy({}, {});
-    if (not pts.empty())
+    if (not eval_pts.empty())
     {
         // Freeze gradient descent once converged to prevent oscillation.
         // Unlocked automatically by step_queue_update when new points arrive.
-        if (inst.frames_converged < cfg_.K_stable)
-            fe = inst.model.gradient_step(pts, weights);
+        if (inst.frames_converged < cfg_.K_stable && not fit_pts.empty())
+            fe = inst.model.gradient_step(fit_pts, fit_weights);
         else
-            fe = inst.model.compute_free_energy(pts, weights);
+            fe = inst.model.compute_free_energy(fit_pts, fit_weights);
+
+        const TableState raw_state = inst.model.state();
+        const auto coverage = inst.queue.face_coverage(inst.model);
+        inst.warm_confidence = update_warm_confidence(inst.warm_confidence, cfg_, coverage,
+                                                       static_cast<int>(eval_pts.size()),
+                                                       static_cast<int>(residual_pts.size()));
+        const TableState accepted_state = apply_observability_warm_start(
+            previous_state, raw_state, inst.model.params(), cfg_, inst.warm_confidence,
+            coverage, static_cast<int>(eval_pts.size()));
+        inst.model.set_state(accepted_state);
+        inst.model.set_prior(accepted_state);
+        fe = inst.model.compute_free_energy(eval_pts, eval_weights);
+
+        std::print("[{}] warm-start: conf={:.2f} rho_x={:.2f} rho_y={:.2f} residual={} pts={} residual_precision={:.2f} raw(w={:.3f},h={:.3f},psi={:.3f}) accepted(w={:.3f},h={:.3f},psi={:.3f})\n",
+                   inst.node_name,
+                   inst.warm_confidence,
+                   std::min(coverage[0], coverage[1]) / (std::max(coverage[0], coverage[1]) + 1e-3f),
+                   std::min(coverage[2], coverage[3]) / (std::max(coverage[2], coverage[3]) + 1e-3f),
+                   residual_pts.size(),
+                   eval_pts.size(),
+               residual_precision,
+                   raw_state.w, raw_state.h, raw_state.yaw,
+                   accepted_state.w, accepted_state.h, accepted_state.yaw);
     }
 
     // Update RFE for all stored points

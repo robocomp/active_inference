@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <optional>
 
 namespace rc {
 
@@ -9,12 +10,26 @@ namespace
 {
 QString legend_label_for_series(const std::string& name)
 {
-    if (name == "cov_det_scaled")
+    if (name == "cov_det_scaled" || (name.size() >= 4 && name.substr(name.size() - 4) == "_cov"))
         return "cov";
-    if (name == "free_energy")
-        return "fr";
+    if (name == "free_energy" || (name.size() >= 3 && name.substr(name.size() - 3) == "_fe"))
+        return "FE";
+    if (name.size() >= 4 && name.substr(name.size() - 4) == "_res")
+        return "res";
     return QString::fromStdString(name);
 }
+
+std::optional<std::pair<float, float>> fixed_value_range_for_series(const std::string& name)
+{
+    if (name.size() >= 3 && name.substr(name.size() - 3) == "_fe")
+        return std::make_pair(0.0f, 1.5f);
+    if (name.size() >= 4 && name.substr(name.size() - 4) == "_cov")
+        return std::make_pair(0.0f, 100.0f);
+    if (name.size() >= 4 && name.substr(name.size() - 4) == "_res")
+        return std::make_pair(0.0f, 20.0f);
+    return std::nullopt;
+}
+
 }
 
 TimeSeriesPlot::TimeSeriesPlot(QWidget* parent)
@@ -113,24 +128,50 @@ void TimeSeriesPlot::paintEvent(QPaintEvent*)
     const float t_min = t_now - window_sec_;
     const float t_max = t_now;
 
-    // Determine value range across all visible series
-    float v_min = std::numeric_limits<float>::max();
-    float v_max = std::numeric_limits<float>::lowest();
-    for (const auto& [_, s] : series_)
+    // Determine value range across all visible series.
+    // Dedicated FE/cov/res panels get a stable range so flat or sparse data
+    // still remain visible.
+    std::optional<std::pair<float, float>> fixed_range;
+    for (const auto& [key, s] : series_)
     {
-        for (const auto& pt : s.samples)
+        if (s.samples.empty()) continue;
+        if (key.size() > 4 && key.substr(key.size() - 4) == "_avg") continue;
+        if (const auto hint = fixed_value_range_for_series(s.name); hint.has_value())
         {
-            if (pt.t < t_min) continue;
-            v_min = std::min(v_min, pt.v);
-            v_max = std::max(v_max, pt.v);
+            fixed_range = hint;
+            break;
         }
     }
-    if (v_min >= v_max) { v_min = 0.f; v_max = 1.f; }
+
+    float v_min = std::numeric_limits<float>::max();
+    float v_max = std::numeric_limits<float>::lowest();
+    if (fixed_range.has_value())
+    {
+        v_min = fixed_range->first;
+        v_max = fixed_range->second;
+    }
+    else
+    {
+        for (const auto& [key, s] : series_)
+        {
+            if (key.size() > 4 && key.substr(key.size() - 4) == "_avg") continue;
+            for (const auto& pt : s.samples)
+            {
+                if (pt.t < t_min) continue;
+                v_min = std::min(v_min, pt.v);
+                v_max = std::max(v_max, pt.v);
+            }
+        }
+        if (v_min >= v_max) { v_min = 0.f; v_max = 1.f; }
+    }
 
     // Add 5% padding
-    const float pad = (v_max - v_min) * 0.05f;
-    v_min -= pad;
-    v_max += pad;
+    if (!fixed_range.has_value())
+    {
+        const float pad = (v_max - v_min) * 0.05f;
+        v_min -= pad;
+        v_max += pad;
+    }
 
     draw_axes(p, t_min, t_max, v_min, v_max);
 
@@ -158,6 +199,14 @@ void TimeSeriesPlot::paintEvent(QPaintEvent*)
         }
         p.setPen(QPen(s.colour, s.line_width));
         p.drawPath(path);
+
+        // Mark the latest sample without drawing a full-width guide line.
+        const auto& last = s.samples.back();
+        const float last_x = map_x(last.t);
+        const float last_y = map_y(last.v);
+        p.setPen(QPen(s.colour, 1.0f));
+        p.setBrush(s.colour);
+        p.drawEllipse(QPointF(last_x, last_y), 2.5, 2.5);
     }
 
     draw_legend(p);

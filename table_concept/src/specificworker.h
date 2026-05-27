@@ -70,6 +70,8 @@ struct TableInstance
     float last_written_cy   = std::numeric_limits<float>::max();
     // Last coverage deficit (written by step_convergence, read by plot)
     float last_coverage_deficit = 0.f;
+    // Higher-level confidence state driving warm-start precision from above
+    float warm_confidence = 0.0f;
     // Epistemic action request published to DSR
     TableAffordance affordance;
 };
@@ -113,6 +115,21 @@ struct AgentConfig
     float rfe_max_threshold            = 2.0f;
     float edge_bonus_weight            = 0.3f;
     float edge_proximity_threshold     = 0.05f;
+
+    // Observability-aware warm-start acceptance
+    float warm_pts_min                 = 12.0f;
+    float warm_pts_max                 = 30.0f;
+    float warm_coverage_min_side       = 2.0f;
+    float warm_rho_freeze              = 0.25f;
+    float warm_lambda_pos_base         = 0.15f;
+    float warm_lambda_pos_gain         = 0.45f;
+    float warm_lambda_size_base        = 0.02f;
+    float warm_lambda_size_gain        = 0.18f;
+    float warm_lambda_yaw_base         = 0.01f;
+    float warm_lambda_yaw_gain         = 0.12f;
+    float warm_confidence_decay         = 0.70f;
+    float warm_confidence_coverage_gain = 0.35f;
+    float warm_confidence_residual_gain = 0.65f;
 };
 
 // ─── SpecificWorker ──────────────────────────────────────────────────────────
@@ -151,7 +168,8 @@ private:
                            const std::vector<Eigen::Vector3f>& candidate_pts,
                            const std::vector<Eigen::Vector3f>& residual_pts);
     float step_model_update(TableInstance& inst,
-                            const std::vector<Eigen::Vector3f>& residual_pts);
+                            const std::vector<Eigen::Vector3f>& residual_pts,
+                            float residual_precision);
     void step_write_model(TableInstance& inst, DSR::Node& node, float free_energy);
     void step_convergence(TableInstance& inst, DSR::Node& node, float free_energy);
     void step_epistemic(TableInstance& inst, DSR::Node& node);
@@ -186,6 +204,7 @@ private:
     Custom_widget*       custom_widget_ = nullptr;
     rc::TimeSeriesPlot*  ts_plot_       = nullptr;   // FE
     rc::TimeSeriesPlot*  ts_cov_plot_   = nullptr;   // coverage deficit
+    rc::TimeSeriesPlot*  ts_res_plot_   = nullptr;   // residual point count
 
     std::unique_ptr<DSR::RT_API>                        rt_api_;
     uint64_t                                            room_node_id_ = 0;
