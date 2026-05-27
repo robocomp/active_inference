@@ -26,12 +26,15 @@
 #include <opencv2/core.hpp>
 #include <opencv2/core/types.hpp>
 
+#include <Eigen/Core>
+
 #include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
 #include "graph_object_box.h"
+#include "lidar_track_attributor.h"
 #include "rgbd_data.h"
 
 class UnifiedVoxelGrid;
@@ -100,11 +103,13 @@ private:
         RGBDData                    rgbd;
         Mat::RTMat                  room_T_robot;
         Mat::RTMat                  room_T_zed;
+        std::vector<Eigen::Vector3f> lidar_points_room;
         std::vector<GraphObjectBox> graph_object_boxes;
     };
 
     std::optional<SceneFrame> process_scene_frame(FPSCounter& compute_fps);
-    void update_table_nodes_from_tracks(const std::vector<GraphObjectBox>& graph_object_boxes);
+    void update_table_nodes_from_tracks(const std::vector<GraphObjectBox>& graph_object_boxes,
+                                        std::span<const Eigen::Vector3f> lidar_points_room);
     void ensure_voxels_node_in_dsr();
     void upload_voxel_grid_to_dsr();
     void trigger_graph_layout_twopi();
@@ -117,6 +122,7 @@ private:
     std::shared_ptr<DSR::InnerEigenAPI> inner_eigen_api;
 
     std::unique_ptr<YoloProcessor>     yolo_processor;
+    std::unique_ptr<LidarTrackAttributor> lidar_track_attributor;
     std::unique_ptr<UnifiedVoxelGrid>  voxel_grid;
     std::unique_ptr<VoxelProcessor>    voxel_processor;
     std::unique_ptr<SceneProcessor>    scene_processor;

@@ -32,6 +32,7 @@ void VoxelProcessor::clear_state(rc::VoxelOpenGLViewer* voxel_viewer)
 {
     voxel_grid_.clear();
     active_tracks_.clear();
+    last_track_points_.clear();
     next_track_id_ = 1;
     compute_frame_ = 0;
     last_voxel_viewer_update_ = {};
@@ -43,6 +44,34 @@ void VoxelProcessor::clear_state(rc::VoxelOpenGLViewer* voxel_viewer)
     const std::vector<std::string> empty_categories;
     voxel_viewer->update_voxels(empty_points);
     voxel_viewer->update_track_boxes(empty_points, empty_points, empty_categories);
+}
+
+void VoxelProcessor::fuse_lidar_support_points(
+    const std::unordered_map<int, std::vector<Eigen::Vector3f>>& lidar_points_by_track)
+{
+    if (lidar_points_by_track.empty() || last_frame_id_ <= 0)
+        return;
+
+    for (const auto& [track_id, points] : lidar_points_by_track)
+    {
+        if (points.empty())
+            continue;
+
+        const auto track_it = active_tracks_.find(track_id);
+        if (track_it == active_tracks_.end())
+            continue;
+
+        if (track_it->second.label != "table")
+            continue;
+
+        voxel_grid_.observe(track_id,
+                            points,
+                            track_it->second.label,
+                            last_frame_id_,
+                            {},
+                            {},
+                            0.3f);
+    }
 }
 
 void VoxelProcessor::process_rgbd_frame(const RGBDData& rgbd,
@@ -88,6 +117,7 @@ void VoxelProcessor::process_rgbd_frame(const RGBDData& rgbd,
 
     const std::size_t n_dets = detections.size();
     std::vector<std::vector<Eigen::Vector3f>> points_by_det(n_dets);
+    std::vector<std::vector<Eigen::Vector3f>> sensed_points_by_det(n_dets);
     std::vector<std::size_t> selected_points_per_det(n_dets, 0);
     std::vector<Eigen::Vector3f> selected_points_camera;
     std::vector<std::size_t> selected_det_indices;
@@ -144,11 +174,16 @@ void VoxelProcessor::process_rgbd_frame(const RGBDData& rgbd,
 
     std::vector<Eigen::Vector3f> centroid_sums_by_det(n_dets, Eigen::Vector3f::Zero());
     std::vector<std::size_t> centroid_counts_by_det(n_dets, 0);
+    std::vector<Eigen::Vector3f> sensed_centroid_sums_by_det(n_dets, Eigen::Vector3f::Zero());
+    std::vector<std::size_t> sensed_centroid_counts_by_det(n_dets, 0);
 
     if (!selected_points_camera.empty())
     {
         for (std::size_t d = 0; d < n_dets; ++d)
+        {
             points_by_det[d].reserve(selected_points_per_det[d]);
+            sensed_points_by_det[d].reserve(selected_points_per_det[d]);
+        }
 
         const std::size_t n_sel = selected_points_camera.size();
         // Depth unprojection yields camera-frame points. Convert with room <- zed.
@@ -171,6 +206,9 @@ void VoxelProcessor::process_rgbd_frame(const RGBDData& rgbd,
         for (std::size_t i = 0; i < n_sel; ++i)
         {
             const std::size_t det_idx = selected_det_indices[i];
+            sensed_points_by_det[det_idx].push_back(selected_points_room[i]);
+            sensed_centroid_sums_by_det[det_idx] += selected_points_room[i];
+            ++sensed_centroid_counts_by_det[det_idx];
             if (point_explained_by_model(selected_points_room[i], detections[det_idx].label, explained_boxes))
             {
                 ++explained_points_skipped;
@@ -188,12 +226,12 @@ void VoxelProcessor::process_rgbd_frame(const RGBDData& rgbd,
 
     for (std::size_t d = 0; d < n_dets; ++d)
     {
-        if (points_by_det[d].empty())
+        if (sensed_points_by_det[d].empty())
             continue;
         if (!is_target_label(detections[d].label))
             continue;
 
-        const Eigen::Vector3f centroid = centroid_sums_by_det[d] / static_cast<float>(centroid_counts_by_det[d]);
+        const Eigen::Vector3f centroid = sensed_centroid_sums_by_det[d] / static_cast<float>(sensed_centroid_counts_by_det[d]);
 
         observations.push_back(DetectionObservation{
             .det_index = d,
@@ -213,6 +251,17 @@ void VoxelProcessor::process_rgbd_frame(const RGBDData& rgbd,
     else
     {
         prune_stale_tracks(frame_id);
+    }
+
+    last_track_points_.clear();
+    for (std::size_t d = 0; d < n_dets; ++d)
+    {
+        const int track_id = det_to_track[d];
+        if (track_id < 0 || sensed_points_by_det[d].empty())
+            continue;
+
+        auto& track_points = last_track_points_[track_id];
+        track_points.insert(track_points.end(), sensed_points_by_det[d].begin(), sensed_points_by_det[d].end());
     }
 
     std::vector<TrackBoxCandidate> box_candidates;
@@ -253,11 +302,56 @@ void VoxelProcessor::process_rgbd_frame(const RGBDData& rgbd,
 
     box_candidates = build_track_box_candidates();
     merge_duplicate_tracks(box_candidates, frame_id);
-    // Capture pre-suppression candidates for DSR sensing (TableCapture reads these).
-    // Must be stored before suppress_residual_tracks_near_models so that table tracks
-    // overlapping the model box are still available for candidate_pts_att writes.
+    // Capture pre-suppression candidates and points for DSR sensing (TableCapture reads these).
+    // The overlapping table track may be removed from the live voxel grid by model suppression,
+    // so candidate_pts_att must come from this snapshot instead of the post-suppression state.
     last_box_candidates_ = box_candidates;
-    last_frame_id_       = frame_id;
+    std::unordered_set<int> snapshot_track_ids;
+    snapshot_track_ids.reserve(last_box_candidates_.size() + last_track_points_.size());
+    for (auto& candidate : last_box_candidates_)
+    {
+        snapshot_track_ids.insert(candidate.track_id);
+        if (const auto it = last_track_points_.find(candidate.track_id); it != last_track_points_.end())
+        {
+            const auto stats = compute_point_cloud_stats(it->second);
+            if (stats.count > 0)
+            {
+                candidate.min = stats.min;
+                candidate.max = stats.max;
+                candidate.centroid = stats.sum / static_cast<float>(stats.count);
+                candidate.voxel_count = static_cast<int>(stats.count);
+            }
+            continue;
+        }
+
+        auto pts = voxel_grid_.get_points(candidate.track_id);
+        if (pts.empty())
+            continue;
+        last_track_points_[candidate.track_id] = std::move(pts);
+    }
+    for (const auto& [track_id, pts] : last_track_points_)
+    {
+        if (pts.empty() || snapshot_track_ids.contains(track_id))
+            continue;
+        const auto track_it = active_tracks_.find(track_id);
+        if (track_it == active_tracks_.end())
+            continue;
+
+        const auto stats = compute_point_cloud_stats(pts);
+        if (stats.count == 0)
+            continue;
+
+        last_box_candidates_.push_back(TrackBoxCandidate{
+            .track_id = track_id,
+            .category = track_it->second.label,
+            .min = stats.min,
+            .max = stats.max,
+            .centroid = stats.sum / static_cast<float>(stats.count),
+            .voxel_count = static_cast<int>(stats.count),
+            .last_seen_frame = track_it->second.last_seen_frame
+        });
+    }
+    last_frame_id_ = frame_id;
     const std::size_t residual_tracks_suppressed = suppress_residual_tracks_near_models(box_candidates, explained_boxes);
     const std::size_t model_residual_table_track_count = static_cast<std::size_t>(std::count_if(
         box_candidates.begin(),
@@ -380,6 +474,11 @@ void VoxelProcessor::process_rgbd_frame(const RGBDData& rgbd,
 std::vector<float> VoxelProcessor::get_flat_pts_for_track(int track_id, int max_pts) const
 {
     auto pts = voxel_grid_.get_points(track_id);
+    if (pts.empty())
+    {
+        if (const auto it = last_track_points_.find(track_id); it != last_track_points_.end())
+            pts = it->second;
+    }
     if (pts.empty())
         return {};
     if (max_pts > 0 && static_cast<int>(pts.size()) > max_pts)
@@ -918,8 +1017,10 @@ std::size_t VoxelProcessor::suppress_residual_tracks_near_models(std::vector<Tra
         if (!overlaps_model)
             continue;
 
+        // Keep the sensing-side track identity so Hungarian association can
+        // reattach the next full table observation to the same track id even
+        // though the residual voxels are suppressed from the live grid/viewer.
         voxel_grid_.remove(candidate.track_id);
-        active_tracks_.erase(candidate.track_id);
         removed_tracks.insert(candidate.track_id);
     }
 

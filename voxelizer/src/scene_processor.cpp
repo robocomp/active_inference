@@ -217,7 +217,7 @@ std::optional<cv::Mat> SceneProcessor::get_rgb_from_dsr() const
                    const_cast<void*>(static_cast<const void*>(bytes.data()))).clone();
 }
 
-std::optional<SceneProcessor::LidarData> SceneProcessor::get_lidar_from_dsr() const
+std::optional<SceneProcessor::LidarData> SceneProcessor::get_lidar3D_from_dsr() const
 {
     if (!graph_)
         return std::nullopt;
@@ -747,6 +747,72 @@ void SceneProcessor::update_viewer_object_meshes()
     voxel_viewer_->update_object_meshes(meshes);
 }
 
+void SceneProcessor::update_viewer_table_rfe_points()
+{
+    if (voxel_viewer_ == nullptr || graph_ == nullptr)
+        return;
+
+    static int debug_frame_counter = 0;
+    std::vector<QVector3D> residual_points;
+    std::vector<QVector3D> fallback_points;
+    std::size_t tables_seen = 0;
+    std::size_t tables_with_residual = 0;
+    std::size_t tables_with_rfe_fallback = 0;
+    std::size_t residual_point_count = 0;
+    std::size_t rfe_fallback_point_count = 0;
+
+    for (const auto& node : graph_->get_nodes_by_type("table"))
+    {
+        ++tables_seen;
+
+        // Prefer residual points (not explained by current model). Fall back to
+        // rfe_pts when residual memory is unavailable.
+        auto flat_opt = graph_->get_attrib_by_name<residual_pts_att>(node);
+        bool using_residual = flat_opt.has_value();
+        if (!using_residual)
+        {
+            flat_opt = graph_->get_attrib_by_name<rfe_pts_att>(node);
+            if (flat_opt.has_value())
+                ++tables_with_rfe_fallback;
+        }
+        else
+        {
+            ++tables_with_residual;
+        }
+
+        if (!flat_opt.has_value())
+            continue;
+
+        const auto& flat = flat_opt.value().get();
+        const std::size_t n = flat.size() / 3;
+        if (using_residual)
+            residual_point_count += n;
+        else
+            rfe_fallback_point_count += n;
+
+        auto& target_points = using_residual ? residual_points : fallback_points;
+        target_points.reserve(target_points.size() + n);
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            const std::size_t idx = i * 3;
+            target_points.emplace_back(flat[idx], flat[idx + 1], flat[idx + 2]);
+        }
+    }
+
+    if (++debug_frame_counter % 30 == 0)
+    {
+        std::println("[RFEViewer] tables={} residual_tables={} fallback_tables={} residual_pts={} fallback_pts={} total_draw_pts={}",
+                     tables_seen,
+                     tables_with_residual,
+                     tables_with_rfe_fallback,
+                     residual_point_count,
+                     rfe_fallback_point_count,
+                     residual_points.size() + fallback_points.size());
+    }
+
+    voxel_viewer_->update_rfe_points(residual_points, fallback_points);
+}
+
 void SceneProcessor::update_viewer_robot_pose(const Mat::RTMat& room_T_robot)
 {
     if (voxel_viewer_ == nullptr)
@@ -764,7 +830,7 @@ void SceneProcessor::update_viewer_lidar_points(const std::string& room_name,
     if (voxel_viewer_ == nullptr)
         return;
 
-    const auto lidar_data = get_lidar_from_dsr();
+    const auto lidar_data = get_lidar3D_from_dsr();
     if (!lidar_data.has_value() || lidar_data->xs.empty())
     {
         voxel_viewer_->update_lidar_points({});

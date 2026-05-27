@@ -30,6 +30,8 @@ public:
                        std::span<const float> confidences = {});
 
     void update_lidar_points(std::span<const QVector3D> positions);
+    void update_rfe_points(std::span<const QVector3D> residual_positions,
+                           std::span<const QVector3D> fallback_positions = {});
     void set_show_lidar(bool show);
 
     void update_room_polygon(std::span<const float> polygon_x,
@@ -86,6 +88,7 @@ private:
 
     std::vector<Vertex> cpu_vertices_;
     std::vector<Vertex> lidar_vertices_;
+    std::vector<Vertex> rfe_vertices_;
     std::mutex data_mutex_;
 
     // Store both floor and ceiling polygons

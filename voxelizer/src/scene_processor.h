@@ -55,7 +55,7 @@ public:
     // DSR-native data accessors (no proxy needed)
     std::uint64_t get_frame_timestamp_ms() const;
     std::optional<cv::Mat> get_rgb_from_dsr() const;
-    std::optional<LidarData> get_lidar_from_dsr() const;
+    std::optional<LidarData> get_lidar3D_from_dsr() const;
     std::optional<RGBDData> get_rgbd_frame_from_dsr() const;
 
     void check_input_stream_startup_status();
@@ -71,6 +71,7 @@ public:
                                                        std::uint64_t timestamp_ms) const;
     void update_viewer_graph_object_boxes(std::span<const GraphObjectBox> graph_boxes);
     void update_viewer_object_meshes();
+    void update_viewer_table_rfe_points();
 
 private:
     struct RoomPolygonData

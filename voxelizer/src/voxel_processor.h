@@ -40,6 +40,7 @@ public:
 
     void configure(const Config& config);
     void clear_state(rc::VoxelOpenGLViewer* voxel_viewer);
+    void fuse_lidar_support_points(const std::unordered_map<int, std::vector<Eigen::Vector3f>>& lidar_points_by_track);
 
     struct TrackBoxCandidate
     {
@@ -135,5 +136,6 @@ private:
     int next_track_id_ = 1;
     std::unordered_map<int, InstanceTrack> active_tracks_;
     std::vector<TrackBoxCandidate> last_box_candidates_;
+    std::unordered_map<int, std::vector<Eigen::Vector3f>> last_track_points_;
     int last_frame_id_ = 0;
 };

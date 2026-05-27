@@ -116,6 +116,9 @@ void SpecificWorker::initialize()
     yolo_config.verbose_debug       = verbose_debug_;
     yolo_processor->configure(yolo_config);
 
+    // --- Lidar secondary attributor (silent no-op when lidar3D data is absent) ---
+    lidar_track_attributor = std::make_unique<LidarTrackAttributor>();
+
     // --- Voxel viewer (attaches to DSR GUI if available) ---
     if (!graph_viewers.empty())
     {
@@ -212,6 +215,26 @@ void SpecificWorker::compute()
                                         frame->room_T_robot, frame->room_T_zed,
                                         frame->graph_object_boxes, voxel_viewer_gl.get());
 
+    if (lidar_track_attributor && !frame->lidar_points_room.empty())
+    {
+        std::vector<LidarTrackAttributor::TrackCandidate> track_candidates;
+        const auto& current_tracks = voxel_processor->last_track_candidates();
+        track_candidates.reserve(current_tracks.size());
+        for (const auto& track : current_tracks)
+        {
+            track_candidates.push_back(LidarTrackAttributor::TrackCandidate{
+                .track_id = track.track_id,
+                .category = track.category,
+                .min = track.min,
+                .max = track.max,
+                .centroid = track.centroid
+            });
+        }
+
+        auto attributed = lidar_track_attributor->attribute_points(frame->lidar_points_room, track_candidates);
+        voxel_processor->fuse_lidar_support_points(attributed);
+    }
+
     if (yolo_viewer_) {
         const cv::Mat viewer_rgb = yolo_processor
             ? yolo_processor->apply_tray_mask(frame->rgbd.rgb)
@@ -219,7 +242,7 @@ void SpecificWorker::compute()
         yolo_viewer_->update_frame(viewer_rgb, detections);
     }
 
-    update_table_nodes_from_tracks(frame->graph_object_boxes);
+    update_table_nodes_from_tracks(frame->graph_object_boxes, frame->lidar_points_room);
 
     ensure_voxels_node_in_dsr();
     upload_voxel_grid_to_dsr();
@@ -253,16 +276,53 @@ std::optional<SpecificWorker::SceneFrame> SpecificWorker::process_scene_frame(FP
     scene_processor->mark_room_rt_ready();
     const auto graph_object_boxes = scene_processor->get_graph_object_boxes(room_name, frame_ts_ms);
 
+    std::vector<Eigen::Vector3f> lidar_points_room;
+    if (auto lidar_data = scene_processor->get_lidar3D_from_dsr(); lidar_data.has_value())
+    {
+        Mat::RTMat room_T_robot_lidar = room_T_robot.value();
+        if (inner_eigen_api != nullptr && lidar_data->timestamp_ms > 0)
+        {
+            const auto time_query = params.TRANSFORMS_INTERPOLATE_RT
+                ? DSR::RT_API::TimeQuery::Interpolated
+                : DSR::RT_API::TimeQuery::Nearest;
+            if (auto interpolated = inner_eigen_api->get_transformation_matrix(
+                    room_name,
+                    robot_name,
+                    lidar_data->timestamp_ms,
+                    "RT",
+                    time_query); interpolated.has_value())
+            {
+                room_T_robot_lidar = interpolated.value();
+            }
+        }
+
+        const std::size_t count = std::min({lidar_data->xs.size(), lidar_data->ys.size(), lidar_data->zs.size()});
+        lidar_points_room.reserve(count);
+        const Eigen::Matrix3f room_rotation = room_T_robot_lidar.linear().cast<float>();
+        const Eigen::Vector3f room_translation = room_T_robot_lidar.translation().cast<float>();
+        for (std::size_t i = 0; i < count; ++i)
+        {
+            const Eigen::Vector3f point_robot(lidar_data->xs[i], lidar_data->ys[i], lidar_data->zs[i]);
+            lidar_points_room.emplace_back(room_rotation * point_robot + room_translation);
+        }
+    }
+
     scene_processor->update_viewer_robot_pose(room_T_robot.value());
     scene_processor->update_viewer_lidar_points(room_name, robot_name, room_T_robot.value());
     scene_processor->update_viewer_graph_object_boxes(graph_object_boxes);
     scene_processor->update_viewer_object_meshes();
+    scene_processor->update_viewer_table_rfe_points();
     scene_processor->update_room_polygon_periodic();
 
-    return SceneFrame{rgbd_opt.value(), room_T_robot.value(), room_T_zed.value(), graph_object_boxes};
+    return SceneFrame{rgbd_opt.value(),
+                      room_T_robot.value(),
+                      room_T_zed.value(),
+                      std::move(lidar_points_room),
+                      graph_object_boxes};
 }
 
-void SpecificWorker::update_table_nodes_from_tracks(const std::vector<GraphObjectBox>& graph_object_boxes)
+void SpecificWorker::update_table_nodes_from_tracks(const std::vector<GraphObjectBox>& graph_object_boxes,
+                                                    std::span<const Eigen::Vector3f> lidar_points_room)
 {
     const auto& track_cands   = voxel_processor->last_track_candidates();
     const int   sensing_frame = voxel_processor->last_frame_id();
@@ -314,27 +374,55 @@ void SpecificWorker::update_table_nodes_from_tracks(const std::vector<GraphObjec
                and std::abs(rel.z()) <= mb.half_extents.z();
         };
 
-        // Primary match: pick the table track with the most sample points inside
-        // the model OBB. A 50-point sample per candidate keeps cost low.
+        const float kTrackMatchPadding = 0.10f;
+        const Eigen::Vector3f match_min = mb.min.array() - kTrackMatchPadding;
+        const Eigen::Vector3f match_max = mb.max.array() + kTrackMatchPadding;
+        auto aabb_intersection_volume = [](const Eigen::Vector3f& min_a,
+                                           const Eigen::Vector3f& max_a,
+                                           const Eigen::Vector3f& min_b,
+                                           const Eigen::Vector3f& max_b) -> float
+        {
+            const Eigen::Vector3f overlap = (max_a.cwiseMin(max_b) - min_a.cwiseMax(min_b)).cwiseMax(0.0f);
+            return overlap.x() * overlap.y() * overlap.z();
+        };
+
+        // Primary match: pick the table track whose AABB overlaps the model box
+        // the most. This remains meaningful even when model-explained points are
+        // suppressed before track construction.
         int best_track_id  = -1;
         int best_obb_score = -1;
+        float best_overlap_volume = -1.0f;
+        float best_centroid_dist = std::numeric_limits<float>::max();
         for (const auto& cand : track_cands)
         {
             if (cand.category != "table") continue;
+
+            const float overlap_volume = aabb_intersection_volume(cand.min, cand.max, match_min, match_max);
             const auto sample = voxel_processor->get_flat_pts_for_track(cand.track_id, 50);
             int score = 0;
             for (std::size_t k = 0; k < sample.size() / 3; ++k)
                 if (inside_obb({sample[k*3], sample[k*3+1], sample[k*3+2]}))
                     ++score;
-            if (score > best_obb_score)
+
+            const float dx = cand.centroid.x() - mb.centroid.x();
+            const float dy = cand.centroid.y() - mb.centroid.y();
+            const float dist = std::sqrt(dx*dx + dy*dy);
+
+            if (overlap_volume > best_overlap_volume
+                || (std::abs(overlap_volume - best_overlap_volume) < 1e-6f && score > best_obb_score)
+                || (std::abs(overlap_volume - best_overlap_volume) < 1e-6f
+                    && score == best_obb_score
+                    && dist < best_centroid_dist))
             {
+                best_overlap_volume = overlap_volume;
                 best_obb_score = score;
                 best_track_id  = cand.track_id;
+                best_centroid_dist = dist;
             }
         }
-        // Fallback to XY centroid distance when no track has any OBB overlap yet
-        // (e.g. first frames before the voxel cloud covers the model footprint).
-        if (best_obb_score <= 0)
+        // Fallback to XY centroid distance only when no table track intersects the
+        // model neighbourhood at all.
+        if (best_overlap_volume <= 0.0f)
         {
             float best_dist = std::numeric_limits<float>::max();
             best_track_id   = -1;
@@ -350,19 +438,16 @@ void SpecificWorker::update_table_nodes_from_tracks(const std::vector<GraphObjec
         if (sensing_frame % 30 == 0)
         {
             if (best_track_id >= 0)
-                std::println("[TableCapture] node='{}' model_centroid=({:.2f},{:.2f},{:.2f}) best_track={} obb_score={}",
+                std::println("[TableCapture] node='{}' model_centroid=({:.2f},{:.2f},{:.2f}) best_track={} overlap={:.3f} obb_score={}",
                              table_node.name(), mb.centroid.x(), mb.centroid.y(), mb.centroid.z(),
-                             best_track_id, best_obb_score);
+                             best_track_id, best_overlap_volume, best_obb_score);
             else
                 std::println("[TableCapture] node='{}' no table track visible this frame",
                              table_node.name());
         }
-        if (best_track_id < 0)
-            continue;
-
-        auto flat_pts = voxel_processor->get_flat_pts_for_track(best_track_id, 400);
-        if (flat_pts.empty())
-            continue;
+        std::vector<float> flat_pts;
+        if (best_track_id >= 0)
+            flat_pts = voxel_processor->get_flat_pts_for_track(best_track_id, 400);
 
         const std::size_t n_cands = flat_pts.size() / 3;
         int inside_count = 0;
@@ -375,24 +460,45 @@ void SpecificWorker::update_table_nodes_from_tracks(const std::vector<GraphObjec
             ? static_cast<float>(inside_count) / static_cast<float>(n_cands)
             : 0.0f;
 
-        // residual_pts: voxels NOT belonging to the matched track, within an expanded
-        // AABB neighbourhood of the model box (±0.3 m). Capped at 150 points.
+        // residual_pts: lidar points NOT explained by the current model OBB,
+        // constrained to an expanded model neighbourhood. Capped at 150 points.
         constexpr float kNeighbourhoodMargin = 0.3f;
         const Eigen::Vector3f nb_min = mb.min.array() - kNeighbourhoodMargin;
         const Eigen::Vector3f nb_max = mb.max.array() + kNeighbourhoodMargin;
-        const auto exported = voxel_grid->export_semantic_voxels();
         std::vector<float> residual_flat;
         residual_flat.reserve(450);
-        for (std::size_t i = 0; i < exported.points.size() and residual_flat.size() < 450; ++i)
+        std::size_t lidar_in_neighbourhood = 0;
+
+        if (!lidar_points_room.empty())
         {
-            if (i < exported.track_ids.size() and exported.track_ids[i] == best_track_id)
-                continue;
-            const Eigen::Vector3f& p = exported.points[i];
-            if ((p.array() >= nb_min.array()).all() and (p.array() <= nb_max.array()).all())
+            for (const auto& p : lidar_points_room)
             {
+                if (residual_flat.size() >= 450)
+                    break;
+                if (!((p.array() >= nb_min.array()).all() and (p.array() <= nb_max.array()).all()))
+                    continue;
+                ++lidar_in_neighbourhood;
+                if (inside_obb(p))
+                    continue;
                 residual_flat.push_back(p.x());
                 residual_flat.push_back(p.y());
                 residual_flat.push_back(p.z());
+            }
+        }
+        else
+        {
+            // Fallback when no lidar frame is available.
+            for (std::size_t k = 0; k < n_cands && residual_flat.size() < 450; ++k)
+            {
+                const Eigen::Vector3f p(flat_pts[k*3], flat_pts[k*3+1], flat_pts[k*3+2]);
+                if (inside_obb(p))
+                    continue;
+                if ((p.array() >= nb_min.array()).all() and (p.array() <= nb_max.array()).all())
+                {
+                    residual_flat.push_back(p.x());
+                    residual_flat.push_back(p.y());
+                    residual_flat.push_back(p.z());
+                }
             }
         }
         const int residual_mass = static_cast<int>(residual_flat.size() / 3);
@@ -404,8 +510,8 @@ void SpecificWorker::update_table_nodes_from_tracks(const std::vector<GraphObjec
         G->add_or_modify_attrib_local<explanation_ratio_att>(table_node, explanation_ratio);
         G->update_node(table_node);
         if (sensing_frame % 30 == 0)
-            std::println("[TableCapture] WROTE node='{}' frame={} cands={} resid={} expl={:.2f}",
-                         table_node.name(), sensing_frame, n_cands, residual_mass, explanation_ratio);
+            std::println("[TableCapture] WROTE node='{}' frame={} cands={} resid={} expl={:.2f} lidar_in_nb={}",
+                         table_node.name(), sensing_frame, n_cands, residual_mass, explanation_ratio, lidar_in_neighbourhood);
     }
 }
 

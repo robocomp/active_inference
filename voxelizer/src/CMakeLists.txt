@@ -4,6 +4,7 @@ find_package(Qt6 COMPONENTS OpenGL OpenGLWidgets QUIET)
 LIST(APPEND SOURCES
   ../src/specificworker.cpp
   ../src/scene_processor.cpp
+  ../src/lidar_track_attributor.cpp
   ../src/voxel_processor.cpp
   ../src/yolo_processor.cpp
   ../src/unified_voxel_grid.cpp
@@ -13,6 +14,7 @@ LIST(APPEND SOURCES
 LIST(APPEND HEADERS
   ../src/specificworker.h
   ../src/scene_processor.h
+  ../src/lidar_track_attributor.h
   ../src/voxel_processor.h
   ../src/yolo_processor.h
   ../src/unified_voxel_grid.h
