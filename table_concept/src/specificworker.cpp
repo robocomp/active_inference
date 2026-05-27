@@ -120,7 +120,8 @@ float update_warm_confidence(float                        previous_confidence,
                              const AgentConfig&           cfg,
                              const std::array<float, 6>&  coverage,
                              int                          point_count,
-                             int                          residual_count)
+                             int                          residual_count,
+                             float                        residual_precision)
 {
     constexpr float kCoverageEps = 1e-3f;
 
@@ -133,8 +134,8 @@ float update_warm_confidence(float                        previous_confidence,
     const float rho_y = std::min(cov_py, cov_ny) / (std::max(cov_py, cov_ny) + kCoverageEps);
     const float pts_span = std::max(1e-3f, cfg.warm_pts_max - cfg.warm_pts_min);
     const float rho_pts = clamp01((static_cast<float>(point_count) - cfg.warm_pts_min) / pts_span);
-    const float residual_ratio = clamp01(static_cast<float>(residual_count) /
-                                         static_cast<float>(std::max(1, point_count)));
+    const float residual_ratio = clamp01(residual_precision * static_cast<float>(residual_count) /
+                                         static_cast<float>(std::max(1, point_count + residual_count)));
 
     // Dense observations can raise confidence, but only balanced bilateral
     // coverage should drive it close to one.
@@ -380,7 +381,7 @@ void SpecificWorker::compute()
             }
             else
                 ++inst.matched_frames;
-            step_queue_update(inst, candidate_pts, residual_pts);
+            step_queue_update(inst, candidate_pts, clamp01(explanation_ratio));
         }
 
         // ③ Model update (gradient steps over queue + residual points)
@@ -573,6 +574,8 @@ void SpecificWorker::scaffold_missing_table_nodes()
                                           {p.room_x_m, p.room_y_m, z},
                                           {0.0f, 0.0f, p.yaw_rad});
 
+        trigger_graph_layout_twopi();
+
         std::print("table_concept: created node '{}' id={} at ({}, {})\n",
                    p.node_name, id_opt.value(), p.room_x_m, p.room_y_m);
     }
@@ -677,21 +680,26 @@ void SpecificWorker::ensure_instance(const DSR::Node& node)
 
 void SpecificWorker::step_queue_update(TableInstance& inst,
                                        const std::vector<Eigen::Vector3f>& candidate_pts,
-                                       const std::vector<Eigen::Vector3f>& /*residual_pts*/)
+                                       float observation_precision)
 {
     // Compute SDF for candidates under the current model
     const auto sdf_vals = inst.model.compute_sdf(candidate_pts);
-    const Eigen::Matrix2f robot_cov = read_robot_covariance();
+    const float precision = std::max(0.05f, observation_precision);
+    Eigen::Matrix2f robot_cov = read_robot_covariance();
+    // In AIF terms, low explanatory adequacy means low sensory precision.
+    // Represent that by inflating the capture covariance of new evidence.
+    robot_cov /= precision;
     const int q_before = inst.queue.size();
     inst.queue.insert(candidate_pts, sdf_vals, robot_cov, inst.model, inst.matched_frames);
     const int admitted = inst.queue.size() - q_before;
     // New points from a fresh view → unlock the optimizer so it can re-converge.
     if (admitted > 0 && inst.frames_converged >= cfg_.K_stable)
         inst.frames_converged = cfg_.K_stable / 2;
-    std::print("[{}] queue: admitted={} size={}\n",
+    std::print("[{}] queue: admitted={} size={} obs_precision={:.2f}\n",
                inst.node_name,
                admitted,
-               inst.queue.size());
+               inst.queue.size(),
+               observation_precision);
 }
 
 float SpecificWorker::step_model_update(TableInstance& inst,
@@ -732,22 +740,23 @@ float SpecificWorker::step_model_update(TableInstance& inst,
         const TableState raw_state = inst.model.state();
         const auto coverage = inst.queue.face_coverage(inst.model);
         inst.warm_confidence = update_warm_confidence(inst.warm_confidence, cfg_, coverage,
-                                                       static_cast<int>(eval_pts.size()),
-                                                       static_cast<int>(residual_pts.size()));
+                                                       static_cast<int>(fit_pts.size()),
+                                                       static_cast<int>(residual_pts.size()),
+                                                       residual_precision);
         const TableState accepted_state = apply_observability_warm_start(
             previous_state, raw_state, inst.model.params(), cfg_, inst.warm_confidence,
-            coverage, static_cast<int>(eval_pts.size()));
+            coverage, static_cast<int>(fit_pts.size()));
         inst.model.set_state(accepted_state);
         inst.model.set_prior(accepted_state);
         fe = inst.model.compute_free_energy(eval_pts, eval_weights);
 
-        std::print("[{}] warm-start: conf={:.2f} rho_x={:.2f} rho_y={:.2f} residual={} pts={} residual_precision={:.2f} raw(w={:.3f},h={:.3f},psi={:.3f}) accepted(w={:.3f},h={:.3f},psi={:.3f})\n",
+        std::print("[{}] warm-start: conf={:.2f} rho_x={:.2f} rho_y={:.2f} residual={} trusted_pts={} residual_precision={:.2f} raw(w={:.3f},h={:.3f},psi={:.3f}) accepted(w={:.3f},h={:.3f},psi={:.3f})\n",
                    inst.node_name,
                    inst.warm_confidence,
                    std::min(coverage[0], coverage[1]) / (std::max(coverage[0], coverage[1]) + 1e-3f),
                    std::min(coverage[2], coverage[3]) / (std::max(coverage[2], coverage[3]) + 1e-3f),
                    residual_pts.size(),
-                   eval_pts.size(),
+               fit_pts.size(),
                residual_precision,
                    raw_state.w, raw_state.h, raw_state.yaw,
                    accepted_state.w, accepted_state.h, accepted_state.yaw);
@@ -932,7 +941,10 @@ void SpecificWorker::step_epistemic(TableInstance& inst, DSR::Node& node)
     // Write attributes to the table node (read by legacy consumers)
     write_epistemic_proposal(node, prop);
     // Publish / refresh dedicated affordance node
+    const auto affordance_node_before = inst.affordance.node_id();
     inst.affordance.update(prop);
+    if (affordance_node_before == 0 && inst.affordance.node_id() != 0)
+        trigger_graph_layout_twopi();
     inst.epistemic_pending = true;
 }
 
@@ -1086,6 +1098,24 @@ SampleQueueParams SpecificWorker::make_queue_params() const
     return p;
 }
 
+void SpecificWorker::trigger_graph_layout_twopi()
+{
+    const auto it = graph_viewers.find("");
+    if (it == graph_viewers.end() || !it->second)
+        return;
+
+    QWidget* graph_widget = it->second->get_widget(DSR::DSRViewer::view::graph);
+    auto* graph_viewer = qobject_cast<DSR::GraphViewer*>(graph_widget);
+    if (!graph_viewer)
+        return;
+
+    // Run now and once queued, so layout also happens after pending node/edge
+    // update signals are processed by the viewer.
+    graph_viewer->compute_layout("twopi");
+    QMetaObject::invokeMethod(graph_viewer,
+                              [graph_viewer]() { graph_viewer->compute_layout("twopi"); },
+                              Qt::QueuedConnection);
+}
 // ─── DSR signal slots ────────────────────────────────────────────────────────
 
 void SpecificWorker::modify_node_slot(std::uint64_t id, const std::string& type)

@@ -166,7 +166,7 @@ private:
     void step_read_sensing(TableInstance& inst, const DSR::Node& node);
     void step_queue_update(TableInstance& inst,
                            const std::vector<Eigen::Vector3f>& candidate_pts,
-                           const std::vector<Eigen::Vector3f>& residual_pts);
+                           float observation_precision);
     float step_model_update(TableInstance& inst,
                             const std::vector<Eigen::Vector3f>& residual_pts,
                             float residual_precision);
@@ -186,6 +186,7 @@ private:
     void write_int_att(DSR::Node& node, const std::string& key, int val);
     void write_epistemic_proposal(DSR::Node& node, const EpistemicProposal& prop);
     void write_table_mesh(TableInstance& inst, DSR::Node& node);
+    void trigger_graph_layout_twopi();
     static std::vector<float> make_table_mesh(const TableState& s);
 
     // ── Instance management ──────────────────────────────────────────────────
