@@ -127,7 +127,7 @@
                     },
                     {
                         "dst": "260",
-                        "label": "RT",
+                        "label": "has",
                         "linkAttribute": {
                             "rt_rotation_euler_xyz": {
                                 "type": 3,
@@ -286,31 +286,7 @@
                     }
                 },
                 "id": "220",
-                "links": [
-                    {
-                        "dst": "240",
-                        "label": "RT",
-                        "linkAttribute": {
-                            "rt_rotation_euler_xyz": {
-                                "type": 3,
-                                "value": [
-                                    0,
-                                    0,
-                                    0
-                                ]
-                            },
-                            "rt_translation": {
-                                "type": 3,
-                                "value": [
-                                    0,
-                                    0,
-                                    0
-                                ]
-                            }
-                        },
-                        "src": "220"
-                    }
-                ],
+                "links": [],
                 "name": "zed",
                 "type": "rgbd"
             },
@@ -342,35 +318,6 @@
                 ],
                 "name": "imu",
                 "type": "imu"
-            },
-            "240": {
-                "attribute": {
-                    "color": {
-                        "type": 0,
-                        "value": "Khaki"
-                    },
-                    "level": {
-                        "type": 1,
-                        "value": 4
-                    },
-                    "parent": {
-                        "type": 7,
-                        "value": "220"
-                    },
-                    "pos_x": {
-                        "type": 2,
-                        "value": 105.849792
-                    },
-                    "pos_y": {
-                        "type": 2,
-                        "value": 291.904266
-                    }
-                },
-                "id": "240",
-                "links": [
-                ],
-                "name": "voxels",
-                "type": "semantic_grid"
             },
             "250": {
                 "attribute": {
