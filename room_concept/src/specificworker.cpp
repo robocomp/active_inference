@@ -21,13 +21,19 @@
 #include <print>
 #include <random>
 #include <fstream>
+#include <string_view>
+#include <unordered_set>
 #include <QDir>
 #include <QFileInfo>
+#include <QMetaObject>
 #include <QVBoxLayout>
 
 namespace
 {
     constexpr auto kTimingReportInterval = std::chrono::seconds(10);
+    constexpr auto kAffordanceEdgeTypeStr = std::string_view("has_intention");
+    [[maybe_unused]] inline const bool kAffordanceEdgeTypeRegistered = edge_types::register_type(kAffordanceEdgeTypeStr);
+    using affordance_edge_type = EdgeType<kAffordanceEdgeTypeStr>;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -262,6 +268,65 @@ void SpecificWorker::initialize()
     // ── DSR: resolve existing graph node IDs ──────────────────────────────
     check_init_graph_is_valid();
 
+    // Ensure a clean startup: if a stale room node exists from previous runs,
+    // remove it so the room is recreated only after localization is stable.
+    if (G)
+    {
+        const auto room_nodes = G->get_nodes_by_type("room");
+        if (!room_nodes.empty())
+        {
+            for (const auto& room_node : room_nodes)
+            {
+                std::vector<uint64_t> descendants;
+                std::vector<uint64_t> pending{room_node.id()};
+                std::unordered_set<uint64_t> visited{room_node.id()};
+
+                // Collect all nodes hanging from this room through outgoing edges.
+                while (!pending.empty())
+                {
+                    const uint64_t from_id = pending.back();
+                    pending.pop_back();
+
+                    const auto edges_opt = G->get_edges(from_id);
+                    if (!edges_opt.has_value())
+                        continue;
+
+                    for (const auto& [key, edge] : edges_opt.value())
+                    {
+                        (void)key;
+                        const uint64_t child_id = edge.to();
+                        if (child_id == dsr_world_id_ || child_id == dsr_robot_id_)
+                            continue;
+                        if (visited.insert(child_id).second)
+                        {
+                            pending.push_back(child_id);
+                            descendants.push_back(child_id);
+                        }
+                    }
+                }
+
+                // Delete leaves first to avoid dependency/order issues.
+                for (auto it = descendants.rbegin(); it != descendants.rend(); ++it)
+                {
+                    const uint64_t child_id = *it;
+                    if (!G->get_node(child_id).has_value())
+                        continue;
+                    qInfo() << "DSR: deleting node hanging from room id=" << child_id;
+                    G->delete_node(child_id);
+                }
+
+                qInfo() << "DSR: deleting pre-existing room node id=" << room_node.id()
+                        << "name=" << room_node.name().c_str();
+                G->delete_node(room_node);
+            }
+        }
+        room_node_created_ = false;
+        affordance_node_created_ = false;
+        dsr_room_id_ = 0;
+        dsr_affordance_id_ = 0;
+        stable_frames_ = 0;
+    }
+
     // RT_API
     rt_api = G->get_rt_api();
 
@@ -319,6 +384,31 @@ void SpecificWorker::compute()
         .loc_pose         = loc_pose,
         .use_loc_pose     = use_loc,
     });
+
+    // Epistemic score grid heatmap overlay (drawn behind lidar/robot by z-order).
+    {
+        const auto& planner = epistemic_controller_.epistemic_planner();
+        const auto& cell_scores = planner.cell_scores();
+        std::vector<std::pair<Eigen::Vector2f, float>> score_cells;
+        score_cells.reserve(cell_scores.size());
+        for (const auto& cell : cell_scores)
+            score_cells.emplace_back(cell.center, cell.score);
+        viewer_2d_->draw_score_grid(score_cells, planner.cell_size());
+
+        const auto& current_target = planner.current_target();
+        if (current_target.has_value() && !current_target->rotate_in_place)
+        {
+            viewer_2d_->draw_selected_grid_cell(current_target->position, planner.cell_size());
+            viewer_2d_->update_target_marker(current_target->position.x(),
+                                             current_target->position.y(),
+                                             true);
+        }
+        else
+        {
+            viewer_2d_->draw_selected_grid_cell(std::nullopt, planner.cell_size());
+            viewer_2d_->update_target_marker(0.f, 0.f, false);
+        }
+    }
 
     if (have_loc && !loc_res->corner_matches.empty())
         viewer_2d_->draw_corners(loc_res->corner_matches, pose_for_draw);
@@ -471,6 +561,7 @@ void SpecificWorker::update_dsr(const rc::RoomConcept::UpdateResult& res)
     else
     {
         dsr_update_pose(res);       // robot->room RT once room node exists
+        dsr_update_affordance(res); // publish epistemic target affordance
     }
 }
 
@@ -581,9 +672,25 @@ void SpecificWorker::dsr_create_room_and_reparent(const rc::RoomConcept::UpdateR
     room_node_created_ = true;
     stable_frames_ = 0;
     qInfo() << "DSR: created room node id=" << dsr_room_id_ << "hanging from robot id=" << dsr_robot_id_;
+    trigger_graph_layout_twopi();
 
     dsr_update_pose(res);
-    dsr_insert_bootstrap_table_if_missing();
+    //dsr_insert_bootstrap_table_if_missing();
+
+    // Seed the epistemic planner with room geometry so it can generate candidates.
+    // room_polygon is already computed at the top of this function.
+    if (!room_polygon.empty())
+    {
+        Eigen::Vector2f pmin = room_polygon.front();
+        Eigen::Vector2f pmax = room_polygon.front();
+        for (const auto& v : room_polygon)
+        {
+            pmin = pmin.cwiseMin(v);
+            pmax = pmax.cwiseMax(v);
+        }
+        epistemic_controller_.set_room_bounds(pmin, pmax);
+        epistemic_controller_.set_room_polygon(room_polygon);
+    }
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -617,6 +724,7 @@ void SpecificWorker::dsr_insert_bootstrap_table_if_missing()
         qWarning() << "DSR: failed to create bootstrap table node";
         return;
     }
+    trigger_graph_layout_twopi();
 
     const float z = params.BOOTSTRAP_TABLE_HEIGHT * 0.5f;
     rt_api->insert_or_assign_edge_RT(room_node.value(),
@@ -637,6 +745,108 @@ void SpecificWorker::dsr_insert_bootstrap_table_if_missing()
 
     qInfo() << "DSR: inserted bootstrap table node id=" << table_id_opt.value()
             << "at room pose" << params.BOOTSTRAP_TABLE_X << params.BOOTSTRAP_TABLE_Y << z;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+/// Publish the epistemic planner's best navigation target as an "affordance"
+/// node hanging from the room node.  The node is created on the first call and
+/// its attributes + RT edge are refreshed every DSR update cycle.
+///
+/// Attributes written to the node:
+///   epistemic_target_x_m     — target X in room frame (m)
+///   epistemic_target_y_m     — target Y in room frame (m)
+///   epistemic_target_yaw_rad — desired robot heading at that point (rad)
+///   epistemic_gain           — planner score (FIM × IoR × distance)
+///   epistemic_pending        — true: target not yet reached by any agent
+///   active                   — true while the affordance is live
+///
+/// The room→affordance relation is expressed with an edge of type "affordance".
+void SpecificWorker::dsr_update_affordance(const rc::RoomConcept::UpdateResult& res)
+{
+    if (!G || !room_node_created_) return;
+
+    // Feed the planner with the latest robot state
+    epistemic_controller_.set_robot_state(res.robot_pose, res.covariance);
+
+    // Ask the planner for the current best target (handles dwell / arrival internally)
+    auto& planner = epistemic_controller_.epistemic_planner();
+    const auto target_opt = planner.update_target();
+    if (!target_opt.has_value()) return;
+
+    const float tx   = target_opt->position.x();
+    const float ty   = target_opt->position.y();
+    const float gain = target_opt->score;
+
+    // Heading: face toward room centre so the robot maximises wall/corner visibility
+    const float cx  = (planner.room_min().x() + planner.room_max().x()) * 0.5f;
+    const float cy  = (planner.room_min().y() + planner.room_max().y()) * 0.5f;
+    const float yaw = std::atan2(cy - ty, cx - tx);
+
+    // ── Create node on first use ────────────────────────────────────────────
+    if (!affordance_node_created_)
+    {
+        auto room_node_opt = G->get_node(dsr_room_id_);
+        if (!room_node_opt.has_value()) return;
+
+        DSR::Node aff_node = DSR::Node::create<affordance_node_type>("e_aff");
+        G->add_or_modify_attrib_local<level_att>(aff_node, 3);
+        G->add_or_modify_attrib_local<parent_att>(aff_node, dsr_room_id_);
+        G->add_or_modify_attrib_local<pos_x_att>(aff_node, 300.f);
+        G->add_or_modify_attrib_local<pos_y_att>(aff_node, 200.f);
+        G->add_or_modify_attrib_local<active_att>(aff_node, true);
+        G->add_or_modify_attrib_local<epistemic_target_x_m_att>(aff_node, tx);
+        G->add_or_modify_attrib_local<epistemic_target_y_m_att>(aff_node, ty);
+        G->add_or_modify_attrib_local<epistemic_target_yaw_rad_att>(aff_node, yaw);
+        G->add_or_modify_attrib_local<epistemic_gain_att>(aff_node, gain);
+        G->add_or_modify_attrib_local<epistemic_pending_att>(aff_node, true);
+
+        const auto aff_id_opt = G->insert_node(aff_node);
+        if (!aff_id_opt.has_value())
+        {
+            qWarning() << "DSR: failed to create e_aff node";
+            return;
+        }
+
+        dsr_affordance_id_ = aff_id_opt.value();
+        affordance_node_created_ = true;
+        trigger_graph_layout_twopi();
+
+        if (G->get_edge(dsr_room_id_, dsr_affordance_id_, "RT").has_value())
+            G->delete_edge(dsr_room_id_, dsr_affordance_id_, "RT");
+
+        auto aff_edge = DSR::Edge::create<affordance_edge_type>(dsr_room_id_, dsr_affordance_id_);
+        G->insert_or_assign_edge(aff_edge);
+        trigger_graph_layout_twopi();
+
+        std::print("DSR: created e_aff node id={} at room ({:.2f}, {:.2f}) yaw={:.2f} gain={:.4f}\n",
+                   dsr_affordance_id_, tx, ty, yaw, gain);
+        return;
+    }
+
+    // ── Update existing node ────────────────────────────────────────────────
+    auto aff_node_opt = G->get_node(dsr_affordance_id_);
+    if (!aff_node_opt.has_value())
+    {
+        affordance_node_created_ = false;   // node was deleted externally; recreate next cycle
+        return;
+    }
+
+    auto& aff_node = aff_node_opt.value();
+    G->add_or_modify_attrib_local<epistemic_target_x_m_att>(aff_node, tx);
+    G->add_or_modify_attrib_local<epistemic_target_y_m_att>(aff_node, ty);
+    G->add_or_modify_attrib_local<epistemic_target_yaw_rad_att>(aff_node, yaw);
+    G->add_or_modify_attrib_local<epistemic_gain_att>(aff_node, gain);
+    G->add_or_modify_attrib_local<epistemic_pending_att>(aff_node, true);
+    G->update_node(aff_node);
+
+    auto room_node_opt = G->get_node(dsr_room_id_);
+    if (!room_node_opt.has_value()) return;
+
+    if (G->get_edge(dsr_room_id_, dsr_affordance_id_, "RT").has_value())
+        G->delete_edge(dsr_room_id_, dsr_affordance_id_, "RT");
+
+    auto aff_edge = DSR::Edge::create<affordance_edge_type>(dsr_room_id_, dsr_affordance_id_);
+    G->insert_or_assign_edge(aff_edge);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -663,6 +873,26 @@ void SpecificWorker::check_init_graph_is_valid()
                 << "name=" << robot_nodes.front().name().c_str();
     }
     else { qWarning() << "dsr_init_graph: no 'robot' type node found in graph"; return; }
+}
+
+///////////////////////////////////////////////////////////////////////////////
+void SpecificWorker::trigger_graph_layout_twopi()
+{
+    const auto it = graph_viewers.find("");
+    if (it == graph_viewers.end() || !it->second)
+        return;
+
+    QWidget* graph_widget = it->second->get_widget(DSR::DSRViewer::view::graph);
+    auto* graph_viewer = qobject_cast<DSR::GraphViewer*>(graph_widget);
+    if (!graph_viewer)
+        return;
+
+    // Run now and once queued, so layout also happens after pending node/edge
+    // update signals are processed by the viewer.
+    graph_viewer->compute_layout("twopi");
+    QMetaObject::invokeMethod(graph_viewer,
+                              [graph_viewer]() { graph_viewer->compute_layout("twopi"); },
+                              Qt::QueuedConnection);
 }
 
 ///////////////////////////////////////////////////////////////////////////////

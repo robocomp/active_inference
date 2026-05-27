@@ -17,7 +17,7 @@
    <item>
     <widget class="QPushButton" name="btn_camera_viz">
      <property name="text">
-      <string>Show Camera Visualization</string>
+            <string>Camera</string>
      </property>
      <property name="maximumHeight">
       <number>35</number>

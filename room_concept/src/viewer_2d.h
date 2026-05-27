@@ -15,6 +15,7 @@
 #include <QGraphicsRectItem>
 #include <QGraphicsTextItem>
 #include <Eigen/Dense>
+#include <optional>
 #include <vector>
 #include "corner_detector.h"
 
@@ -131,6 +132,11 @@ class Viewer2D : public QObject
         void draw_score_grid(const std::vector<std::pair<Eigen::Vector2f, float>>& cells,
                              float cell_size);
 
+        /// Highlight the currently selected target cell.
+        /// Pass std::nullopt to hide the highlight.
+        void draw_selected_grid_cell(const std::optional<Eigen::Vector2f>& center,
+                         float cell_size);
+
     Q_SIGNALS:
         void robot_moved(QPointF);
         void robot_rotate(QPointF);
@@ -192,6 +198,7 @@ class Viewer2D : public QObject
 
         // Score grid overlay
         std::vector<QGraphicsRectItem*> score_grid_items_;
+        QGraphicsRectItem* selected_grid_cell_item_ = nullptr;
 
         void update_room_axes(const QRectF& room_bounds);
 

@@ -722,4 +722,28 @@ void Viewer2D::draw_score_grid(const std::vector<std::pair<Eigen::Vector2f, floa
         score_grid_items_[i]->setVisible(false);
 }
 
+void Viewer2D::draw_selected_grid_cell(const std::optional<Eigen::Vector2f>& center,
+                                       float cell_size)
+{
+    if (!center.has_value())
+    {
+        if (selected_grid_cell_item_ != nullptr)
+            selected_grid_cell_item_->setVisible(false);
+        return;
+    }
+
+    if (selected_grid_cell_item_ == nullptr)
+    {
+        selected_grid_cell_item_ = agv_->scene.addRect(0, 0, cell_size, cell_size);
+        selected_grid_cell_item_->setPen(QPen(QColor(255, 255, 80, 230), 0.06));
+        selected_grid_cell_item_->setBrush(QBrush(QColor(255, 255, 80, 40)));
+        selected_grid_cell_item_->setZValue(26);
+    }
+
+    selected_grid_cell_item_->setRect(center->x() - cell_size * 0.5f,
+                                      center->y() - cell_size * 0.5f,
+                                      cell_size, cell_size);
+    selected_grid_cell_item_->setVisible(true);
+}
+
 } // namespace rc

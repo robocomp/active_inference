@@ -52,7 +52,7 @@ public:
         pose_layout->setContentsMargins(8, 4, 8, 4);
         pose_layout->setSpacing(8);
 
-        auto *pose_title = new QLabel("Robot in room:", pose_panel);
+        auto *pose_title = new QLabel("Robot pose:", pose_panel);
         pose_value_ = new QLabel("x 0.00 m   y 0.00 m   th 0.0 deg", pose_panel);
         pose_value_->setTextInteractionFlags(Qt::TextSelectableByMouse);
 
