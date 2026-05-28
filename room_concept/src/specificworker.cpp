@@ -18,6 +18,7 @@
  */
 #include "specificworker.h"
 #include "camera_visualizer.h"
+#include <algorithm>
 #include <print>
 #include <random>
 #include <fstream>
@@ -32,10 +33,6 @@
 namespace
 {
     constexpr auto kTimingReportInterval = std::chrono::seconds(10);
-    constexpr auto kRobotRefAdvSpeedAttr = "robot_ref_adv_speed";
-    constexpr auto kRobotRefRotSpeedAttr = "robot_ref_rot_speed";
-    constexpr auto kRobotRefSideSpeedAttr = "robot_ref_side_speed";
-    constexpr auto kRobotRefSpeedTimestampAttr = "robot_ref_speed_timestamp";
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -88,6 +85,7 @@ void SpecificWorker::initialize()
     room_concept_.params.rfe_max_lidar_per_old_slot = configLoader.get<int>("RoomConcept.MaxLidarOldSlot");
     room_concept_.params.recovery_loss_threshold    = static_cast<float>(configLoader.get<double>("RoomConcept.RecoveryLossThreshold"));
     room_concept_.params.recovery_consecutive_count = configLoader.get<int>("RoomConcept.RecoveryConsecutiveCount");
+    try { params.ODOMETRY_NOISE_FACTOR = static_cast<float>(configLoader.get<double>("RoomConcept.OdometryNoiseFactor")); } catch (...) {}
     try { room_concept_.params.odom_noise_scale = static_cast<float>(configLoader.get<double>("RoomConcept.OdomNoiseScale")); } catch (...) {}
     try { room_concept_.params.differential_test_enabled = configLoader.get<bool>("RoomConcept.DifferentialTest"); } catch (...) {}
     try { room_concept_.params.sdf_current_slot_only = configLoader.get<bool>("RoomConcept.SdfCurrentSlotOnly"); } catch (...) {}
@@ -209,9 +207,6 @@ void SpecificWorker::initialize()
     try { ep.fim_max_range         = static_cast<float>(configLoader.get<double>("EpistemicController.FimMaxRange")); } catch (...) {}
     try { ep.arrival_distance      = static_cast<float>(configLoader.get<double>("EpistemicController.ArrivalDistance")); } catch (...) {}
     try { ep.dwell_time            = static_cast<float>(configLoader.get<double>("EpistemicController.DwellTime")); } catch (...) {}
-    try { max_lin_accel_           = static_cast<float>(configLoader.get<double>("EpistemicController.MaxLinAccel")); } catch (...) {}
-    try { max_rot_accel_           = static_cast<float>(configLoader.get<double>("EpistemicController.MaxRotAccel")); } catch (...) {}
-
     // ── Lidar reader thread disabled: lidar is read from compute() ─────────
     // read_lidar_th = std::thread(&SpecificWorker::read_lidar, this);
     // qInfo() << __FUNCTION__ << "Started lidar reader";
@@ -353,6 +348,16 @@ void SpecificWorker::initialize()
 ///////////////////////////////////////////////////////////////////////////////
 void SpecificWorker::compute()
 {
+    const auto compute_now = std::chrono::steady_clock::now();
+    ++compute_fps_window_frames_;
+    const float fps_elapsed_s = std::chrono::duration<float>(compute_now - compute_fps_window_start_).count();
+    if (fps_elapsed_s >= 0.5f)
+    {
+        compute_fps_display_ = compute_fps_window_frames_ / fps_elapsed_s;
+        compute_fps_window_frames_ = 0;
+        compute_fps_window_start_ = compute_now;
+    }
+
     affordance_manager_.monitor_execution(G);
 
     const auto loc_res  = room_concept_.get_last_result();
@@ -425,7 +430,7 @@ void SpecificWorker::compute()
         last_dsr_published_ts_ms_ = loc_res->timestamp_ms;
     }
 
-    update_ui(loc_res, pose_for_draw);
+    update_ui(loc_res);
     fps_counter_.print("[Compute]", 3000);
 }
 
@@ -547,11 +552,6 @@ void SpecificWorker::update_dsr(const rc::RoomConcept::UpdateResult& res)
     const bool stable   = (res.iterations_used == 0)
                           && sdf_mse < params.STABLE_SDF_MSE_MAX
                           && cov_tt  < params.STABLE_COV_TT_MAX;
-
-    qInfo() << "Localization stable:" << stable
-            << "| sdf_mse:" << sdf_mse << "(" << params.STABLE_SDF_MSE_MAX << ")"
-            << "| cov_tt:" << cov_tt << "(" << params.STABLE_COV_TT_MAX << ")"
-            << "| iterations_used:" << res.iterations_used;
 
     if (!room_node_created_)
     {
@@ -871,15 +871,9 @@ Eigen::Affine2f SpecificWorker::best_available_pose(
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-void SpecificWorker::update_ui(const std::optional<rc::RoomConcept::UpdateResult>& loc_res,
-                               const Eigen::Affine2f& pose_for_draw)
+void SpecificWorker::update_ui(const std::optional<rc::RoomConcept::UpdateResult>& loc_res)
 {
-    const Eigen::Vector2f pose_t = pose_for_draw.translation();
-    const float pose_theta_rad = std::atan2(pose_for_draw.linear()(1, 0), pose_for_draw.linear()(0, 0));
-    custom_widget.set_pose_text(QString("x %1 m   y %2 m   th %3 rad")
-                                .arg(pose_t.x(), 0, 'f', 2)
-                                .arg(pose_t.y(), 0, 'f', 2)
-                                .arg(pose_theta_rad, 0, 'f', 3));
+    custom_widget.set_fps_text(QString("%1 Hz").arg(compute_fps_display_, 0, 'f', 1));
 
     if (!loc_res.has_value()) return;
     if (ts_plot_sdf_) ts_plot_sdf_->add_point("sdf_mse", loc_res->sdf_mse);
@@ -987,41 +981,8 @@ std::string SpecificWorker::pose_file_path() const
 
 
 ///////////////////////////////////////////////////////////////////////////////
-void SpecificWorker::navigate_to_target(const std::optional<rc::RoomConcept::UpdateResult>& loc_res,
-                                        const std::optional<rc::ObstacleData>& obstacles)
-{
-    if (!loc_res.has_value() || !loc_res->ok) return;
-
-    epistemic_controller_.set_robot_state(loc_res->robot_pose, loc_res->covariance);
-    epistemic_controller_.set_localization_quality(loc_res->sdf_mse);
-    if (obstacles.has_value())
-        epistemic_controller_.set_lidar_obstacles(*obstacles);
-
-    auto plan = epistemic_controller_.plan();
-    if (!plan.has_value()) return;
-    auto cmd = plan->command;
-
-    const auto now = std::chrono::steady_clock::now();
-    const float dt = std::chrono::duration<float>(now - prev_cmd_time_).count();
-    prev_cmd_time_ = now;
-
-    auto ramp = [](float target, float current, float max_accel, float dt_s) -> float {
-        const float max_delta = max_accel * dt_s;
-        return std::clamp(target, current - max_delta, current + max_delta);
-    };
-    cmd.adv_x = ramp(cmd.adv_x, prev_cmd_.adv_x, max_lin_accel_, dt);
-    cmd.rot   = ramp(cmd.rot,   prev_cmd_.rot,   max_rot_accel_, dt);
-    prev_cmd_ = cmd;
-
-    try { omnirobot_proxy->setSpeedBase(cmd.adv_x * 1000.f, 0.f, cmd.rot); }
-    catch (const Ice::Exception& e)
-    { qWarning() << "[navigate_to_target] setSpeedBase failed:" << e.what(); }
-}
-
-
-///////////////////////////////////////////////////////////////////////////////
 /// SLOTS from GUI and DSR signals
-//////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
 
 void SpecificWorker::modify_node_slot(std::uint64_t id, const std::string &type)
 {
@@ -1183,6 +1144,8 @@ int SpecificWorker::startup_check()
     return 0;
 }
 
+/// @brief ///////////DSR callback triggered when a node is modified. We check if it's the robot node and if the current speed attributes have been updated, then we read them and push them to the odometry buffer with some optional noise added.
+
 void SpecificWorker::modify_node_attrs_slot(std::uint64_t id, const std::vector<std::string>& att_names)
 {
     if (!G || id == 0)
@@ -1191,58 +1154,128 @@ void SpecificWorker::modify_node_attrs_slot(std::uint64_t id, const std::vector<
     if (dsr_robot_id_ != 0 && id != dsr_robot_id_)
         return;
 
-    const auto touches_robot_ref_attr = [&att_names]() {
-        return std::ranges::any_of(att_names, [](const std::string &name) {
-            return name == kRobotRefAdvSpeedAttr
-                || name == kRobotRefRotSpeedAttr
-                || name == kRobotRefSideSpeedAttr
-                || name == kRobotRefSpeedTimestampAttr;
+    const auto touches_any = [&att_names](std::initializer_list<const char*> names)
+    {
+        return std::ranges::any_of(names, [&att_names](const char* name)
+        {
+            return std::find(att_names.begin(), att_names.end(), name) != att_names.end();
         });
     };
-    if (!touches_robot_ref_attr())
+
+    const bool touches_current_speed = touches_any({
+        "robot_current_advance_speed",
+        "robot_current_side_speed",
+        "robot_current_angular_speed",
+        "robot_current_speed_timestamp"
+    });
+    const bool touches_ref_speed = touches_any({
+        "robot_ref_adv_speed",
+        "robot_ref_side_speed",
+        "robot_ref_rot_speed",
+        "robot_ref_speed_timestamp"
+    });
+
+    if (not touches_current_speed and not touches_ref_speed)
         return;
 
     const auto node_opt = G->get_node(id);
     if (!node_opt.has_value())
         return;
 
-    const auto &attrs = node_opt->attrs();
-    const auto adv_it = attrs.find(kRobotRefAdvSpeedAttr);
-    const auto rot_it = attrs.find(kRobotRefRotSpeedAttr);
-    const auto side_it = attrs.find(kRobotRefSideSpeedAttr);
-    const auto ts_it = attrs.find(kRobotRefSpeedTimestampAttr);
-    if (adv_it == attrs.end() || rot_it == attrs.end() || side_it == attrs.end() || ts_it == attrs.end())
-        return;
+    const auto &robot_node = node_opt.value();
 
-    const auto *adv_value = std::get_if<float>(&adv_it->second.value());
-    const auto *rot_value = std::get_if<float>(&rot_it->second.value());
-    const auto *side_value = std::get_if<float>(&side_it->second.value());
-    const auto *ts_value = std::get_if<std::uint64_t>(&ts_it->second.value());
-    if (adv_value == nullptr || rot_value == nullptr || side_value == nullptr || ts_value == nullptr)
-        return;
+    if (touches_current_speed)
+    {
+        if (auto adv_value = G->get_attrib_by_name<robot_current_advance_speed_att>(robot_node); adv_value.has_value())
+        {
+            if (auto side_value = G->get_attrib_by_name<robot_current_side_speed_att>(robot_node); side_value.has_value())
+            {
+                if (auto rot_value = G->get_attrib_by_name<robot_current_angular_speed_att>(robot_node); rot_value.has_value())
+                {
+                    if (auto ts_value = G->get_attrib_by_name<robot_current_speed_timestamp_att>(robot_node); ts_value.has_value())
+                    {
+                        const auto source_ts = static_cast<std::uint64_t>(ts_value.value());
+                        if (source_ts > 0 and source_ts > last_robot_current_speed_timestamp_)
+                        {
+                            static std::mt19937 gen{std::random_device{}()};
+                            const float nf = params.ODOMETRY_NOISE_FACTOR;
 
-    if (*ts_value == 0 || *ts_value <= last_robot_ref_speed_timestamp_)
-        return;
+                            auto add_noise = [&](float value) -> float {
+                                if (nf <= 0.f || value == 0.f) return value;
+                                std::normal_distribution<float> dist(0.f, std::abs(value) * nf);
+                                return value + dist(gen);
+                            };
 
-    rc::VelocityCommand cmd;
-    cmd.adv_y = *adv_value;
-    cmd.rot = *rot_value;
-    cmd.adv_x = *side_value;
-    cmd.source_ts_ms = static_cast<std::int64_t>(*ts_value);
-    cmd.recv_ts_ms = static_cast<std::int64_t>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count());
-    cmd.timestamp = std::chrono::high_resolution_clock::time_point(
-        std::chrono::milliseconds(*ts_value));
+                            rc::OdometryReading odom;
+                            odom.adv = add_noise(adv_value.value());
+                            odom.side = add_noise(side_value.value());
+                            odom.rot = add_noise(rot_value.value());
+                            odom.source_ts_ms = static_cast<std::int64_t>(source_ts);
+                            odom.recv_ts_ms = static_cast<std::int64_t>(
+                                std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::system_clock::now().time_since_epoch()).count());
+                            odom.timestamp = std::chrono::high_resolution_clock::time_point(
+                                std::chrono::milliseconds(source_ts));
 
-    velocity_buffer_.put<0>(std::move(cmd), *ts_value);
-    last_robot_ref_speed_timestamp_ = *ts_value;
+                            room_concept_.record_odometry_ingress("dsr_current_speed",
+                                                                  adv_value.value(),
+                                                                  rot_value.value(),
+                                                                  odom.adv,
+                                                                  odom.rot,
+                                                                  odom.source_ts_ms);
+                            odometry_buffer_.put<0>(std::move(odom), static_cast<std::uint64_t>(odom.recv_ts_ms));
+                            last_robot_current_speed_timestamp_ = source_ts;
+                        }
+                    }
+                }
+            }
+        }
+    }
 
-    qInfo() << "Robot reference speed received from DSR"
-            << "adv=" << *adv_value
-            << "side=" << *side_value
-            << "rot=" << *rot_value
-            << "ts=" << *ts_value;
+    if (touches_ref_speed)
+    {
+        if (auto adv_value = G->get_attrib_by_name<robot_ref_adv_speed_att>(robot_node); adv_value.has_value())
+        {
+            if (auto side_value = G->get_attrib_by_name<robot_ref_side_speed_att>(robot_node); side_value.has_value())
+            {
+                if (auto rot_value = G->get_attrib_by_name<robot_ref_rot_speed_att>(robot_node); rot_value.has_value())
+                {
+                    if (auto ts_value = G->get_attrib_by_name<robot_ref_speed_timestamp_att>(robot_node); ts_value.has_value())
+                    {
+                        const auto source_ts = static_cast<std::uint64_t>(ts_value.value());
+                        if (source_ts > 0 and source_ts > last_robot_ref_speed_timestamp_)
+                        {
+                            rc::VelocityCommand cmd;
+                            cmd.adv_y = adv_value.value();
+                            cmd.adv_x = side_value.value();
+                            cmd.rot = rot_value.value();
+                            cmd.source_ts_ms = static_cast<std::int64_t>(source_ts);
+                            cmd.recv_ts_ms = static_cast<std::int64_t>(
+                                std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::system_clock::now().time_since_epoch()).count());
+                            cmd.timestamp = std::chrono::high_resolution_clock::time_point(
+                                std::chrono::milliseconds(source_ts));
+
+                            room_concept_.record_command_ingress("dsr_ref",
+                                                                 adv_value.value(),
+                                                                 rot_value.value(),
+                                                                 cmd.adv_y,
+                                                                 cmd.rot,
+                                                                 cmd.source_ts_ms);
+                            velocity_buffer_.put<0>(std::move(cmd), source_ts);
+                            last_robot_ref_speed_timestamp_ = source_ts;
+
+                            qInfo() << "Robot reference speed received from DSR"
+                                    << "adv=" << adv_value.value()
+                                    << "side=" << side_value.value()
+                                    << "rot=" << rot_value.value()
+                                    << "ts=" << source_ts;
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -1252,43 +1285,32 @@ void SpecificWorker::modify_node_attrs_slot(std::uint64_t id, const std::vector<
 void SpecificWorker::JoystickAdapter_sendData(RoboCompJoystickAdapter::TData data)
 {
     rc::VelocityCommand cmd;
+    float raw_adv_y = 0.f;
+    float raw_rot = 0.f;
     for (const auto& axis : data.axes)
     {
-        if      (axis.name == "rotate")  cmd.rot   = axis.value;
-        else if (axis.name == "advance") cmd.adv_y = axis.value / 1000.0f;
+        if      (axis.name == "rotate")
+        {
+            raw_rot = axis.value;
+            cmd.rot = axis.value;
+        }
+        else if (axis.name == "advance")
+        {
+            raw_adv_y = axis.value / 1000.0f;
+            cmd.adv_y = raw_adv_y;
+        }
         else if (axis.name == "side")    cmd.adv_x = 0.0f;
     }
     cmd.timestamp  = std::chrono::high_resolution_clock::now();
     cmd.recv_ts_ms = static_cast<std::int64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count());
+    room_concept_.record_command_ingress("joystick",
+                                         raw_adv_y,
+                                         raw_rot,
+                                         cmd.adv_y,
+                                         cmd.rot,
+                                         cmd.recv_ts_ms);
     velocity_buffer_.put<0>(std::move(cmd), static_cast<std::uint64_t>(cmd.recv_ts_ms));
 }
 
-void SpecificWorker::FullPoseEstimationPub_newFullPose(RoboCompFullPoseEstimation::FullPoseEuler pose)
-{
-    static std::mt19937 gen{std::random_device{}()};
-    const float nf = params.ODOMETRY_NOISE_FACTOR;
-
-    auto add_noise = [&](float value) -> float {
-        if (nf <= 0.f || value == 0.f) return value;
-        std::normal_distribution<float> dist(0.f, std::abs(value) * nf);
-        return value + dist(gen);
-    };
-
-    rc::OdometryReading odom;
-    // Webots reports adv with opposite sign of our body Y+ (forward) axis.
-    // Flipping one in-plane axis flips the right-hand-rule yaw sign as well,
-    // so pose.rot must also be negated to match the math-CCW convention used
-    // downstream (SDF rotation, Eigen::Rotation2Df, EKF Jacobian, DSR writer).
-    odom.adv          = add_noise(-pose.adv);
-    odom.side         = add_noise( pose.side);
-    odom.rot          = add_noise(-pose.rot);
-    odom.source_ts_ms = pose.timestamp;
-    odom.recv_ts_ms   = static_cast<std::int64_t>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count());
-    odom.timestamp    = std::chrono::high_resolution_clock::time_point(
-        std::chrono::milliseconds(pose.timestamp));
-    odometry_buffer_.put<0>(std::move(odom), static_cast<std::uint64_t>(odom.recv_ts_ms));
-}

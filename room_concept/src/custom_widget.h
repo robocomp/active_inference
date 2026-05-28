@@ -44,40 +44,45 @@ public:
     {
         setupUi(this);
 
-        auto *pose_panel = new QFrame(this);
-        pose_panel->setFrameShape(QFrame::StyledPanel);
-        pose_panel->setFrameShadow(QFrame::Raised);
+        auto *fps_panel = new QFrame(this);
+        fps_panel->setFrameShape(QFrame::StyledPanel);
+        fps_panel->setFrameShadow(QFrame::Raised);
 
-        auto *pose_layout = new QHBoxLayout(pose_panel);
-        pose_layout->setContentsMargins(8, 4, 8, 4);
-        pose_layout->setSpacing(8);
+        auto *panel_layout = new QVBoxLayout(fps_panel);
+        panel_layout->setContentsMargins(8, 4, 8, 4);
+        panel_layout->setSpacing(4);
 
-        auto *pose_title = new QLabel("Robot pose:", pose_panel);
-        pose_value_ = new QLabel("x 0.00 m   y 0.00 m   th 0.0 deg", pose_panel);
-        pose_value_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        auto *fps_layout = new QHBoxLayout();
+        fps_layout->setContentsMargins(0, 0, 0, 0);
+        fps_layout->setSpacing(8);
 
-        QFont value_font = pose_value_->font();
+        auto *fps_title = new QLabel("Compute FPS:", fps_panel);
+        fps_value_ = new QLabel("0.0 Hz", fps_panel);
+        fps_value_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        QFont value_font = fps_value_->font();
         value_font.setBold(true);
-        pose_value_->setFont(value_font);
+        fps_value_->setFont(value_font);
 
-        pose_layout->addWidget(pose_title);
-        pose_layout->addWidget(pose_value_, 1);
+        fps_layout->addWidget(fps_title);
+        fps_layout->addWidget(fps_value_, 1);
 
-        verticalLayout->insertWidget(1, pose_panel);
+        panel_layout->addLayout(fps_layout);
+
+        verticalLayout->insertWidget(1, fps_panel);
     }
 	~Custom_widget()
     {
 
     }
 
-    void set_pose_text(const QString &text)
+    void set_fps_text(const QString &text)
     {
-        if (pose_value_ != nullptr)
-            pose_value_->setText(text);
+        if (fps_value_ != nullptr)
+            fps_value_->setText(text);
     }
 
 private:
-    QLabel *pose_value_ = nullptr;
+    QLabel *fps_value_ = nullptr;
 
 
 

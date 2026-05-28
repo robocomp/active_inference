@@ -77,39 +77,16 @@
 #include "genericworker.h"
 #include "../src/specificworker.h"
 
-#include <fullposeestimationpubI.h>
 #include <joystickadapterI.h>
 
-#include <FullPoseEstimation.h>
-#include <FullPoseEstimationPub.h>
-#include <GenericBase.h>
 #include <JoystickAdapter.h>
 #include <Lidar3D.h>
-#include <OmniRobot.h>
 
 #define USE_QTGUI
 
 #define PROGRAM_NAME    "room_concept"
 #define SERVER_FULL_NAME   "RoboComp room_concept::room_concept"
 
-
-template <typename ProxyType, typename ProxyPointer>
-void require(const Ice::CommunicatorPtr& communicator,
-             const std::string& proxyConfig, 
-             const std::string& proxyName,
-             ProxyPointer& proxy)
-{
-    try
-    {
-        proxy = Ice::uncheckedCast<ProxyType>(communicator->stringToProxy(proxyConfig));
-        std::cout << proxyName << " initialized Ok!\n";
-    }
-    catch(const Ice::Exception& ex)
-    {
-        std::cout << "[" << PROGRAM_NAME << "]: Exception creating proxy " << proxyName << ": " << ex;
-        throw;
-    }
-}
 
 template <typename SubInterfaceType>
 void subscribe( const Ice::CommunicatorPtr& communicator,
@@ -235,20 +212,10 @@ int room_concept::run(int argc, char* argv[])
 
 	int status=EXIT_SUCCESS;
 
-	std::shared_ptr<IceStorm::TopicPrx> fullposeestimationpub_topic;
-	Ice::ObjectPrxPtr fullposeestimationpub;
 	std::shared_ptr<IceStorm::TopicPrx> joystickadapter_topic;
 	Ice::ObjectPrxPtr joystickadapter;
 
-	RoboCompLidar3D::Lidar3DPrxPtr lidar3d_proxy;
-	RoboCompOmniRobot::OmniRobotPrxPtr omnirobot_proxy;
 
-
-	//Require code
-	require<RoboCompLidar3D::Lidar3DPrx, RoboCompLidar3D::Lidar3DPrxPtr>(communicator(),
-	                    configLoader.get<std::string>("Proxies.Lidar3D"), "Lidar3DProxy", lidar3d_proxy);
-	require<RoboCompOmniRobot::OmniRobotPrx, RoboCompOmniRobot::OmniRobotPrxPtr>(communicator(),
-	                    configLoader.get<std::string>("Proxies.OmniRobot"), "OmniRobotProxy", omnirobot_proxy);
 
 	//Topic Manager code
 
@@ -269,7 +236,7 @@ int room_concept::run(int argc, char* argv[])
 		return EXIT_FAILURE;
 	}
 
-	tprx = std::make_tuple(lidar3d_proxy,omnirobot_proxy);
+	tprx = std::tuple<>();
 	SpecificWorker *worker = new SpecificWorker(this->configLoader, tprx, startup_check_flag);
 	QObject::connect(worker, SIGNAL(kill()), &a, SLOT(quit()));
 
@@ -277,10 +244,6 @@ int room_concept::run(int argc, char* argv[])
 	{
 
 		//Subscribe code
-		subscribe<FullPoseEstimationPubI>(communicator(),
-		                    topicManager, configLoader.get<std::string>("Endpoints.FullPoseEstimationPubTopic"),
-						    configLoader.get<std::string>("Endpoints.FullPoseEstimationPubPrefix"), "FullPoseEstimationPub", worker,  0,
-						    fullposeestimationpub_topic, fullposeestimationpub, PROGRAM_NAME);
 		subscribe<JoystickAdapterI>(communicator(),
 		                    topicManager, configLoader.get<std::string>("Endpoints.JoystickAdapterTopic"),
 						    configLoader.get<std::string>("Endpoints.JoystickAdapterPrefix"), "JoystickAdapter", worker,  0,
@@ -300,16 +263,9 @@ int room_concept::run(int argc, char* argv[])
 
 		try
 		{
-			if (fullposeestimationpub_topic)
-			{
-				std::cout << "Unsubscribing topic: fullposeestimationpub " <<std::endl;
-				fullposeestimationpub_topic->unsubscribe(fullposeestimationpub);
-			}
-			if (joystickadapter_topic)
-			{
-				std::cout << "Unsubscribing topic: joystickadapter " <<std::endl;
-				joystickadapter_topic->unsubscribe(joystickadapter);
-			}
+			std::cout << "Unsubscribing topic: joystickadapter " <<std::endl;
+			joystickadapter_topic->unsubscribe(joystickadapter);
+
 		}
 		catch(const Ice::Exception& ex)
 		{

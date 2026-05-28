@@ -79,6 +79,7 @@ RoomConcept.AngularVelocityThreshold = 0.10
 RoomConcept.WeightBoostFactor = 2.0
 RoomConcept.WeightReductionFactor = 0.5
 RoomConcept.WeightSmoothingAlpha = 0.3
+RoomConcept.OdometryNoiseFactor = 0.0
 RoomConcept.OdomNoiseScale = 1.0
 RoomConcept.CmdNoiseTrans = 0.20
 RoomConcept.CmdNoiseRot = 0.10

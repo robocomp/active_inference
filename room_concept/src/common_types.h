@@ -32,7 +32,7 @@ namespace rc
     };
 
     /// Measured odometry reading from encoders/IMU (robot frame velocities)
-    /// Received via FullPoseEstimationPub from real robot or Webots
+    /// Received from the active odometry ingestion path, currently DSR attrs.
     struct OdometryReading
     {
         float adv = 0.0f;    // forward velocity, m/s (robot frame)

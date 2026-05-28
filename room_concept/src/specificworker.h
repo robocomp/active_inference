@@ -57,7 +57,6 @@ class SpecificWorker : public GenericWorker
         SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, bool startup_check);
         ~SpecificWorker();
 
-        void FullPoseEstimationPub_newFullPose(RoboCompFullPoseEstimation::FullPoseEuler pose);
         void JoystickAdapter_sendData(RoboCompJoystickAdapter::TData data);
 
     public slots:
@@ -96,7 +95,7 @@ class SpecificWorker : public GenericWorker
             // Localizer
             bool  PREDICTION_EARLY_EXIT  = true;
             std::string OptimizerType    = "LBFGS";
-            float ODOMETRY_NOISE_FACTOR  = 1.0f;
+            float ODOMETRY_NOISE_FACTOR  = 0.0f;
 
             // DSR stabilization: require these many consecutive "stable" frames before
             // creating the room node and re-parenting robot under it.
@@ -125,6 +124,7 @@ class SpecificWorker : public GenericWorker
         rc::VelocityBuffer velocity_buffer_{20};
         rc::OdometryBuffer odometry_buffer_{20};
         std::uint64_t last_robot_ref_speed_timestamp_ = 0;
+        std::uint64_t last_robot_current_speed_timestamp_ = 0;
 
         // ── Lidar reader thread ─────────────────────────────────────────────────
         std::thread            read_lidar_th;
@@ -145,12 +145,6 @@ class SpecificWorker : public GenericWorker
         // ── Epistemic controller ────────────────────────────────────────────────
         rc::EpistemicController epistemic_controller_;
         bool self_target_active_ = false;
-        rc::EpistemicController::ControlCommand prev_cmd_{};
-        std::chrono::steady_clock::time_point prev_cmd_time_ = std::chrono::steady_clock::now();
-        float max_lin_accel_ = 1.5f;
-        float max_rot_accel_ = 3.0f;
-        void navigate_to_target(const std::optional<rc::RoomConcept::UpdateResult>& loc_res,
-                                const std::optional<rc::ObstacleData>& obstacles);
 
         // ── 2-D viewer ─────────────────────────────────────────────────────────
         Custom_widget custom_widget;
@@ -159,9 +153,11 @@ class SpecificWorker : public GenericWorker
         rc::TimeSeriesPlot* ts_plot_fe_  = nullptr;
         std::unique_ptr<rc::CameraVisualizer> camera_viz_;
         FPSCounter fps_counter_;
+        std::chrono::steady_clock::time_point compute_fps_window_start_ = std::chrono::steady_clock::now();
+        int compute_fps_window_frames_ = 0;
+        float compute_fps_display_ = 0.f;
         Eigen::Affine2f best_available_pose(const std::optional<rc::RoomConcept::UpdateResult>&, bool) const;
-        void update_ui(const std::optional<rc::RoomConcept::UpdateResult>& loc_res,
-                    const Eigen::Affine2f& pose_for_draw);
+        void update_ui(const std::optional<rc::RoomConcept::UpdateResult>& loc_res);
 
         // ── Mouse-driven pose reset (Shift+Left = translate, Ctrl+Left = rotate) ──
         void slot_mouse_translate(QPointF scene_pos);

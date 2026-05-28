@@ -29,6 +29,7 @@ QString settings_group_name(const std::string& graph_name, int agent_id)
     return QStringLiteral("windows/%1/%2").arg(agent_id).arg(graph_suffix);
 }
 }
+
 /**
 * \brief Default constructor
 */
@@ -37,10 +38,17 @@ GenericWorker::GenericWorker(const ConfigLoader& configLoader, TuplePrx tprx) : 
 
 	this->configLoader = configLoader;
     if (!this->configLoader.get<bool>("Component.Debug.Verbose")) {
-        qInstallMessageHandler([](QtMsgType, const QMessageLogContext&, const QString&) {});
+        std::cout << "\033[32mINFO\033[0m Verbose mode is disabled" << std::endl;
+        qInstallMessageHandler([](QtMsgType type, const QMessageLogContext& context, const QString& msg) {
+                switch (type) {
+                    case QtDebugMsg:   break; // Suppress qDebug()
+                    case QtInfoMsg:    qInfo().noquote() << msg; break;
+                    case QtWarningMsg: qWarning().noquote() << msg; break;
+                    case QtCriticalMsg: qCritical().noquote() << msg; break;
+                    case QtFatalMsg:   qFatal("%s", msg.toUtf8().constData()); break;
+                    default: qInfo().noquote() << msg; break;
+                }});
     }
-	lidar3d_proxy = std::get<0>(tprx);
-	omnirobot_proxy = std::get<1>(tprx);
 
 	states["Initialize"] = std::make_unique<GRAFCETStep>("Initialize", BASIC_PERIOD, nullptr, std::bind(&GenericWorker::initialize, this));
 	states["Compute"] = std::make_unique<GRAFCETStep>("Compute", configLoader.get<int>("Period.Compute"), std::bind(&GenericWorker::compute, this));
@@ -178,30 +186,6 @@ void GenericWorker::hibernationTick(){
 	hibernation = true;
 }
 
-std::shared_ptr<DSR::DSRViewer> GenericWorker::setupViewer(std::shared_ptr<DSR::DSRGraph> graph, const std::string& prefix, QMainWindow* parent)
-{
-    int current_opts = 0;
-    DSR::DSRViewer::view main = DSR::DSRViewer::view::none;
-    using opts = DSR::DSRViewer::view;
-
-    // Estructura de datos para iterar las opciones (más limpio que muchos IFs)
-    const std::vector<std::pair<std::string, opts>> options = {
-        {"tree", opts::tree}, {"graph", opts::graph},
-        {"2d", opts::scene}
-    };
-
-    for (const auto& [suffix, flag] : options) {
-        if (this->configLoader.get<bool>(prefix + "." + suffix)) {
-            current_opts |= flag;
-            if (suffix == "graph") main = opts::graph;
-        }
-    }
-    if (current_opts!=0)
-    	return std::make_shared<DSR::DSRViewer>(parent, graph, current_opts, main);
-	else
-		return nullptr;
-};
-
 void GenericWorker::restore_window_settings()
 {
     QSettings settings(QStringLiteral("RoboComp"), QString::fromStdString(agent_name));
@@ -211,8 +195,7 @@ void GenericWorker::restore_window_settings()
         if (window == nullptr)
             continue;
 
-        const QString group_name = settings_group_name(name, agent_id);
-        settings.beginGroup(group_name);
+        settings.beginGroup(settings_group_name(name, agent_id));
 
         const QByteArray geometry = settings.value(QStringLiteral("geometry")).toByteArray();
         if (!geometry.isEmpty())
@@ -235,18 +218,38 @@ void GenericWorker::save_window_settings() const
         if (window == nullptr)
             continue;
 
-        const QString group_name = settings_group_name(name, agent_id);
-        const QByteArray geometry = window->saveGeometry();
-        const QByteArray state = window->saveState(kWindowStateVersion);
-
-        settings.beginGroup(group_name);
-        settings.setValue(QStringLiteral("geometry"), geometry);
-        settings.setValue(QStringLiteral("state"), state);
+        settings.beginGroup(settings_group_name(name, agent_id));
+        settings.setValue(QStringLiteral("geometry"), window->saveGeometry());
+        settings.setValue(QStringLiteral("state"), window->saveState(kWindowStateVersion));
         settings.endGroup();
     }
 
     settings.sync();
 }
+
+std::shared_ptr<DSR::DSRViewer> GenericWorker::setupViewer(std::shared_ptr<DSR::DSRGraph> graph, const std::string& prefix, QMainWindow* parent)
+{
+    int current_opts = 0;
+    DSR::DSRViewer::view main = DSR::DSRViewer::view::none;
+    using opts = DSR::DSRViewer::view;
+
+    // Estructura de datos para iterar las opciones (más limpio que muchos IFs)
+    const std::vector<std::pair<std::string, opts>> options = {
+        {"tree", opts::tree}, {"graph", opts::graph}, 
+        {"2d", opts::scene}
+    };
+
+    for (const auto& [suffix, flag] : options) {
+        if (this->configLoader.get<bool>(prefix + "." + suffix)) {
+            current_opts |= flag;
+            if (suffix == "graph") main = opts::graph;
+        }
+    }
+    if (current_opts!=0)
+    	return std::make_shared<DSR::DSRViewer>(parent, graph, current_opts, main);
+	else
+		return nullptr;
+};
 
 void GenericWorker::initialize(){
     for (const auto& [name, Graph] : Graphs) {

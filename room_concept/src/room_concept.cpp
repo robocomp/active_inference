@@ -200,12 +200,19 @@ namespace rc
             << ",vel_rot"
             << ",odom_adv"
             << ",odom_rot"
+            << ",cmd_ingress_source,cmd_adv_raw,cmd_adv_norm,cmd_rot_raw,cmd_rot_norm,cmd_ingress_ts"
+            << ",odom_ingress_source,odom_adv_raw,odom_adv_norm,odom_rot_raw,odom_rot_norm,odom_ingress_ts"
             << ",cmd_valid"
+            << ",cmd_fresh"
             << ",cmd_dx,cmd_dy,cmd_dth"
             << ",cmd_cov_xx,cmd_cov_tt"
             << ",meas_valid"
+            << ",meas_fresh"
             << ",meas_dx,meas_dy,meas_dth"
             << ",meas_cov_xx,meas_cov_tt"
+            << ",sel_valid,sel_fresh,sel_source"
+            << ",sel_dx,sel_dy,sel_dth"
+            << ",sel_cov_xx,sel_cov_tt"
             << ",pred_x,pred_y,pred_theta"
             << ",slot_mcov_xx,slot_mcov_tt"
             << ",early_exit"
@@ -255,6 +262,44 @@ namespace rc
         if (last_result_.has_value() && last_result_->ok)
             return last_result_->state;
         return Eigen::Matrix<float,5,1>::Zero();
+    }
+
+    void RoomConcept::record_command_ingress(const std::string& source,
+                                             float raw_adv,
+                                             float raw_rot,
+                                             float normalized_adv,
+                                             float normalized_rot,
+                                             std::int64_t ts_ms)
+    {
+        std::lock_guard lock(motion_ingress_debug_mutex_);
+        motion_ingress_debug_.command_source = source;
+        motion_ingress_debug_.command_adv_raw = raw_adv;
+        motion_ingress_debug_.command_adv_normalized = normalized_adv;
+        motion_ingress_debug_.command_rot_raw = raw_rot;
+        motion_ingress_debug_.command_rot_normalized = normalized_rot;
+        motion_ingress_debug_.command_ts_ms = ts_ms;
+    }
+
+    void RoomConcept::record_odometry_ingress(const std::string& source,
+                                              float raw_adv,
+                                              float raw_rot,
+                                              float normalized_adv,
+                                              float normalized_rot,
+                                              std::int64_t ts_ms)
+    {
+        std::lock_guard lock(motion_ingress_debug_mutex_);
+        motion_ingress_debug_.odom_source = source;
+        motion_ingress_debug_.odom_adv_raw = raw_adv;
+        motion_ingress_debug_.odom_adv_normalized = normalized_adv;
+        motion_ingress_debug_.odom_rot_raw = raw_rot;
+        motion_ingress_debug_.odom_rot_normalized = normalized_rot;
+        motion_ingress_debug_.odom_ts_ms = ts_ms;
+    }
+
+    RoomConcept::MotionIngressDebug RoomConcept::get_motion_ingress_debug() const
+    {
+        std::lock_guard lock(motion_ingress_debug_mutex_);
+        return motion_ingress_debug_;
     }
 
     void RoomConcept::push_command(Command cmd)
@@ -741,11 +786,6 @@ namespace rc
             if (relocalization_enabled_.load())
             {
                 const float avg_sdf_err = std::sqrt(res.sdf_mse);
-                qInfo() << "[Recovery] avg_sdf_err=" << avg_sdf_err
-                        << "threshold=" << params.recovery_loss_threshold
-                        << "iters=" << res.iterations_used
-                        << "bad_frames=" << recovery_.consecutive_bad_frames
-                        << "cooldown=" << recovery_.cooldown;
                 if (recovery_.check(avg_sdf_err, res.iterations_used,
                                     params.recovery_loss_threshold, params.recovery_consecutive_count))
                 {
@@ -1594,8 +1634,9 @@ namespace rc
         }
 
         // ===== PREDICTION =====
-        auto odometry_prior = compute_odometry_prior(velocity_history, lidar);
-        const PredictionState prediction = predict_step(model_, odometry_prior, true);
+        const auto motion_prior_selection = build_motion_prior_selection(velocity_history, odometry_history, lidar);
+        const auto &selected_prior = motion_prior_selection.selected_prior;
+        const PredictionState prediction = predict_step(model_, selected_prior, true);
 
         if (prediction.have_propagated && prediction.propagated_cov.defined())
         {
@@ -1606,8 +1647,8 @@ namespace rc
                     current_covariance(i, j) = cov_acc[i][j];
         }
 
-        // ===== DUAL-PRIOR FUSION =====
-        auto [pred_pos, pred_theta] = apply_dual_prior_fusion(odometry_prior, odometry_history, lidar);
+        const auto pred_pos = motion_prior_selection.predicted_pos;
+        const auto pred_theta = motion_prior_selection.predicted_theta;
 
         // ===== BUILD NEW WINDOW SLOT =====
         const auto& all_points = lidar.first;
@@ -1634,15 +1675,10 @@ namespace rc
         // Adam to fight the motion factor during turns.
         Eigen::Vector3f slot_odom_delta = Eigen::Vector3f::Zero();
         Eigen::Matrix3f slot_motion_cov = Eigen::Matrix3f::Identity() * params.default_slot_motion_cov;
-        if (last_measured_prior_.valid)
+        if (selected_prior.valid)
         {
-            slot_odom_delta = last_measured_prior_.delta_pose;
-            slot_motion_cov = compute_motion_covariance(last_measured_prior_, true);  // tighter measured noise
-        }
-        else if (odometry_prior.valid)
-        {
-            slot_odom_delta = odometry_prior.delta_pose;
-            slot_motion_cov = compute_motion_covariance(odometry_prior, false);
+            slot_odom_delta = selected_prior.delta_pose;
+            slot_motion_cov = selected_prior.covariance_eigen;
         }
 
         WindowSlot new_slot;
@@ -1700,7 +1736,7 @@ namespace rc
         }
 
         // ===== EARLY EXIT CHECK =====
-        if (auto early = try_prediction_early_exit(points_tensor, slot_odom_delta, odometry_prior, lidar.second))
+        if (auto early = try_prediction_early_exit(points_tensor, slot_odom_delta, selected_prior, lidar.second))
         {
             // Store quality for future boundary prior gate (early exit = good pose).
             window_mgr_.newest().sdf_mse_final = early->sdf_mse;
@@ -1734,8 +1770,8 @@ namespace rc
 
             const auto t0 = std::chrono::high_resolution_clock::now();
             auto [last_loss, iterations] = (params.optimizer_type == "LBFGS")
-                ? run_lbfgs_loop(odometry_prior)
-                : run_adam_loop(odometry_prior);
+                ? run_lbfgs_loop(selected_prior)
+                : run_adam_loop(selected_prior);
             last_t_adam_ms_ = std::chrono::duration<float, std::milli>(
                 std::chrono::high_resolution_clock::now() - t0).count();
             res.final_loss     = last_loss;
@@ -1876,6 +1912,8 @@ namespace rc
                 meas_cov_xx = ma[0][0];
                 meas_cov_tt = ma[2][2];
             }
+            const float sel_cov_xx = last_selected_prior_.covariance_eigen(0, 0);
+            const float sel_cov_tt = last_selected_prior_.covariance_eigen(2, 2);
 
             std::string losses_str;
             for (size_t ai = 0; ai < last_adam_losses_.size(); ++ai)
@@ -1888,28 +1926,51 @@ namespace rc
 
             const float lr_eff = params.learning_rate_pos /
                 std::sqrt(static_cast<float>(std::max(1, (int)window_mgr_.size())));
+            const auto motion_ingress = get_motion_ingress_debug();
 
             debug_log_
                 << lidar.second
                 << ',' << wall_now_ms
-                << ',' << odometry_prior.dt
+                << ',' << selected_prior.dt
                 << ',' << sampled_points.size()
                 << ',' << vel_adv_y
                 << ',' << vel_rot
                 << ',' << odom_adv
                 << ',' << odom_rot
-                << ',' << (int)odometry_prior.valid
-                << ',' << odometry_prior.delta_pose[0]
-                << ',' << odometry_prior.delta_pose[1]
-                << ',' << odometry_prior.delta_pose[2]
+                << ',' << motion_ingress.command_source
+                << ',' << motion_ingress.command_adv_raw
+                << ',' << motion_ingress.command_adv_normalized
+                << ',' << motion_ingress.command_rot_raw
+                << ',' << motion_ingress.command_rot_normalized
+                << ',' << motion_ingress.command_ts_ms
+                << ',' << motion_ingress.odom_source
+                << ',' << motion_ingress.odom_adv_raw
+                << ',' << motion_ingress.odom_adv_normalized
+                << ',' << motion_ingress.odom_rot_raw
+                << ',' << motion_ingress.odom_rot_normalized
+                << ',' << motion_ingress.odom_ts_ms
+                << ',' << (int)motion_prior_selection.command_prior.valid
+                << ',' << (int)motion_prior_selection.command_prior.fresh
+                << ',' << motion_prior_selection.command_prior.delta_pose[0]
+                << ',' << motion_prior_selection.command_prior.delta_pose[1]
+                << ',' << motion_prior_selection.command_prior.delta_pose[2]
                 << ',' << cmd_cov_xx
                 << ',' << cmd_cov_tt
                 << ',' << (int)last_measured_prior_.valid
+                << ',' << (int)last_measured_prior_.fresh
                 << ',' << last_measured_prior_.delta_pose[0]
                 << ',' << last_measured_prior_.delta_pose[1]
                 << ',' << last_measured_prior_.delta_pose[2]
                 << ',' << meas_cov_xx
                 << ',' << meas_cov_tt
+                << ',' << (int)last_selected_prior_.valid
+                << ',' << (int)last_selected_prior_.fresh
+                << ',' << motion_prior_source_name(last_motion_prior_source_)
+                << ',' << last_selected_prior_.delta_pose[0]
+                << ',' << last_selected_prior_.delta_pose[1]
+                << ',' << last_selected_prior_.delta_pose[2]
+                << ',' << sel_cov_xx
+                << ',' << sel_cov_tt
                 << ',' << pred_pos.x()
                 << ',' << pred_pos.y()
                 << ',' << pred_theta
@@ -1989,76 +2050,136 @@ namespace rc
     //  update() helper methods
     // =========================================================================
 
-    std::pair<Eigen::Vector2f, float> RoomConcept::apply_dual_prior_fusion(
-        const OdometryPrior& odometry_prior,
+    std::string_view RoomConcept::motion_prior_source_name(MotionPriorSource source)
+    {
+        switch (source)
+        {
+            case MotionPriorSource::None: return "none";
+            case MotionPriorSource::Command: return "command";
+            case MotionPriorSource::Measured: return "measured";
+            case MotionPriorSource::Fused: return "fused";
+            case MotionPriorSource::FallbackZero: return "fallback_zero";
+        }
+        return "unknown";
+    }
+
+    RoomConcept::MotionPriorSelection RoomConcept::build_motion_prior_selection(
+        const std::vector<VelocityCommand>& velocity_history,
         const std::vector<OdometryReading>& odometry_history,
         const std::pair<std::vector<Eigen::Vector3f>, std::int64_t>& lidar)
     {
+        MotionPriorSelection selection;
         auto state = model_->get_state();
-        Eigen::Vector2f pred_pos(state[2], state[3]);
-        float pred_theta = state[4];
+        selection.predicted_pos = Eigen::Vector2f(state[2], state[3]);
+        selection.predicted_theta = state[4];
 
-        if (!last_update_result.ok || !odometry_prior.valid)
-            return {pred_pos, pred_theta};
+        selection.command_prior = compute_odometry_prior(velocity_history, lidar);
+        selection.measured_prior = compute_measured_odometry_prior(odometry_history, lidar);
+        last_measured_prior_ = selection.measured_prior;
+        last_command_prior_fresh_ = selection.command_prior.fresh;
+        last_measured_prior_fresh_ = selection.measured_prior.fresh;
+        last_cmd_cov_ = selection.command_prior.covariance_eigen;
 
-        // Command prior: predict from commanded velocity
-        const Eigen::Vector2f cmd_pos = last_update_result.robot_pose.translation()
-                 + odometry_prior.delta_pose.head<2>();
-        float cmd_theta = std::atan2(last_update_result.robot_pose.linear()(1, 0),
-                                last_update_result.robot_pose.linear()(0, 0))
-                   + odometry_prior.delta_pose[2];
-        while (cmd_theta > M_PI) cmd_theta -= 2.0f * M_PI;
-        while (cmd_theta < -M_PI) cmd_theta += 2.0f * M_PI;
-
-        const Eigen::Vector3f pred_cmd(cmd_pos.x(), cmd_pos.y(), cmd_theta);
-
-        // Measured odometry prior: predict from encoder/IMU readings
-        auto measured_prior = compute_measured_odometry_prior(odometry_history, lidar);
-        last_measured_prior_ = measured_prior;  // save for debug log
-
-        if (measured_prior.valid)
+        const auto wrap_angle = [](float angle)
         {
-            const Eigen::Vector2f odom_pos = last_update_result.robot_pose.translation()
-                     + measured_prior.delta_pose.head<2>();
-            float odom_theta = std::atan2(last_update_result.robot_pose.linear()(1, 0),
-                                    last_update_result.robot_pose.linear()(0, 0))
-                       + measured_prior.delta_pose[2];
-            while (odom_theta > M_PI) odom_theta -= 2.0f * M_PI;
-            while (odom_theta < -M_PI) odom_theta += 2.0f * M_PI;
+            while (angle > static_cast<float>(M_PI)) angle -= 2.f * static_cast<float>(M_PI);
+            while (angle < -static_cast<float>(M_PI)) angle += 2.f * static_cast<float>(M_PI);
+            return angle;
+        };
 
-            const Eigen::Vector3f pred_odom(odom_pos.x(), odom_pos.y(), odom_theta);
+        const auto matrix_to_tensor = [this](const Eigen::Matrix3f &matrix)
+        {
+            auto tensor = torch::zeros({3, 3}, torch::TensorOptions().dtype(torch::kFloat32).device(get_device()));
+            auto tensor_cpu = tensor.to(torch::kCPU);
+            auto acc = tensor_cpu.accessor<float, 2>();
+            for (int row = 0; row < 3; ++row)
+                for (int col = 0; col < 3; ++col)
+                    acc[row][col] = matrix(row, col);
+            return tensor_cpu.to(get_device());
+        };
 
-            const Eigen::Matrix3f cov_cmd = compute_motion_covariance(odometry_prior, false);
-            last_cmd_cov_ = cov_cmd;  // save for debug log
-            const Eigen::Matrix3f cov_odom = compute_motion_covariance(measured_prior, true);
+        const Eigen::Vector2f base_pos = last_update_result.ok
+            ? last_update_result.robot_pose.translation()
+            : Eigen::Vector2f(state[2], state[3]);
+        const float base_theta = last_update_result.ok
+            ? std::atan2(last_update_result.robot_pose.linear()(1, 0), last_update_result.robot_pose.linear()(0, 0))
+            : state[4];
 
+        const auto predicted_mean_from_prior = [&base_pos, base_theta, &wrap_angle](const OdometryPrior &prior)
+        {
+            Eigen::Vector3f predicted = Eigen::Vector3f::Zero();
+            predicted.head<2>() = base_pos + prior.delta_pose.head<2>();
+            predicted[2] = wrap_angle(base_theta + prior.delta_pose[2]);
+            return predicted;
+        };
+
+        const auto set_model_prediction = [this, &selection](const Eigen::Vector2f &pos,
+                                                             float theta,
+                                                             const Eigen::Matrix3f &precision)
+        {
+            selection.predicted_pos = pos;
+            selection.predicted_theta = theta;
+            selection.prediction_precision = precision;
+
+            model_->robot_pos.data().copy_(torch::tensor({pos.x(), pos.y()},
+                torch::TensorOptions().device(get_device())));
+            model_->robot_theta.data().copy_(torch::tensor({theta},
+                torch::TensorOptions().device(get_device())));
+            model_->set_prediction(pos, theta, precision);
+        };
+
+        if (selection.command_prior.valid && selection.command_prior.fresh
+            && selection.measured_prior.valid && selection.measured_prior.fresh
+            && last_update_result.ok)
+        {
+            const Eigen::Vector3f pred_cmd = predicted_mean_from_prior(selection.command_prior);
+            const Eigen::Vector3f pred_meas = predicted_mean_from_prior(selection.measured_prior);
             const auto [fused_mean, fused_precision] = fuse_priors(
-                pred_cmd, cov_cmd, pred_odom, cov_odom);
+                pred_cmd, selection.command_prior.covariance_eigen,
+                pred_meas, selection.measured_prior.covariance_eigen);
 
-            pred_pos = fused_mean.head<2>();
-            pred_theta = fused_mean[2];
-
-            model_->robot_pos.data().copy_(torch::tensor({pred_pos.x(), pred_pos.y()},
-                torch::TensorOptions().device(get_device())));
-            model_->robot_theta.data().copy_(torch::tensor({pred_theta},
-                torch::TensorOptions().device(get_device())));
-            model_->set_prediction(pred_pos, pred_theta, fused_precision);
+            selection.source = MotionPriorSource::Fused;
+            selection.selected_prior.valid = true;
+            selection.selected_prior.fresh = true;
+            selection.selected_prior.delta_pose.head<2>() = fused_mean.head<2>() - base_pos;
+            selection.selected_prior.delta_pose[2] = wrap_angle(fused_mean[2] - base_theta);
+            selection.selected_prior.dt = std::max(selection.command_prior.dt, selection.measured_prior.dt);
+            selection.selected_prior.covariance_eigen = fused_precision.inverse();
+            selection.selected_prior.covariance = matrix_to_tensor(selection.selected_prior.covariance_eigen);
+            set_model_prediction(fused_mean.head<2>(), fused_mean[2], fused_precision);
+        }
+        else if (selection.measured_prior.valid && selection.measured_prior.fresh && last_update_result.ok)
+        {
+            selection.source = MotionPriorSource::Measured;
+            selection.selected_prior = selection.measured_prior;
+            const Eigen::Vector3f predicted = predicted_mean_from_prior(selection.selected_prior);
+            set_model_prediction(predicted.head<2>(), predicted[2], selection.selected_prior.covariance_eigen.inverse());
+        }
+        else if (selection.command_prior.valid && selection.command_prior.fresh && last_update_result.ok)
+        {
+            selection.source = MotionPriorSource::Command;
+            selection.selected_prior = selection.command_prior;
+            const Eigen::Vector3f predicted = predicted_mean_from_prior(selection.selected_prior);
+            set_model_prediction(predicted.head<2>(), predicted[2], selection.selected_prior.covariance_eigen.inverse());
         }
         else
         {
-            pred_pos = cmd_pos;
-            pred_theta = cmd_theta;
-
-            model_->robot_pos.data().copy_(torch::tensor({pred_pos.x(), pred_pos.y()},
-                torch::TensorOptions().device(get_device())));
-            model_->robot_theta.data().copy_(torch::tensor({pred_theta},
-                torch::TensorOptions().device(get_device())));
-
-            Eigen::Matrix3f prior_precision = current_covariance.inverse();
-            model_->set_prediction(pred_pos, pred_theta, prior_precision);
+            selection.source = MotionPriorSource::FallbackZero;
+            selection.selected_prior.valid = true;
+            selection.selected_prior.fresh = false;
+            selection.selected_prior.is_measured = false;
+            selection.selected_prior.delta_pose = Eigen::Vector3f::Zero();
+            selection.selected_prior.dt = std::max(selection.command_prior.dt, selection.measured_prior.dt);
+            selection.selected_prior.covariance_eigen = compute_motion_covariance(selection.selected_prior, false);
+            selection.selected_prior.covariance = matrix_to_tensor(selection.selected_prior.covariance_eigen);
+            set_model_prediction(selection.predicted_pos,
+                                 selection.predicted_theta,
+                                 selection.selected_prior.covariance_eigen.inverse());
         }
 
-        return {pred_pos, pred_theta};
+        last_selected_prior_ = selection.selected_prior;
+        last_motion_prior_source_ = selection.source;
+        return selection;
     }
 
     std::optional<RoomConcept::UpdateResult> RoomConcept::try_prediction_early_exit(
@@ -2163,22 +2284,46 @@ namespace rc
                 auto ma = mc.accessor<float, 2>();
                 meas_cov_xx = ma[0][0]; meas_cov_tt = ma[2][2];
             }
+            const float sel_cov_xx = last_selected_prior_.covariance_eigen(0, 0);
+            const float sel_cov_tt = last_selected_prior_.covariance_eigen(2, 2);
+            const auto motion_ingress = get_motion_ingress_debug();
             debug_log_
                 << lidar_timestamp_ms
                 << ',' << wall_now_ms
                 << ',' << odometry_prior.dt
                 << ',' << 0           // n_lidar not available here
                 << ',' << 0 << ',' << 0 << ',' << 0 << ',' << 0  // vel/odom
+                << ',' << motion_ingress.command_source
+                << ',' << motion_ingress.command_adv_raw
+                << ',' << motion_ingress.command_adv_normalized
+                << ',' << motion_ingress.command_rot_raw
+                << ',' << motion_ingress.command_rot_normalized
+                << ',' << motion_ingress.command_ts_ms
+                << ',' << motion_ingress.odom_source
+                << ',' << motion_ingress.odom_adv_raw
+                << ',' << motion_ingress.odom_adv_normalized
+                << ',' << motion_ingress.odom_rot_raw
+                << ',' << motion_ingress.odom_rot_normalized
+                << ',' << motion_ingress.odom_ts_ms
                 << ',' << (int)odometry_prior.valid
+                << ',' << (int)odometry_prior.fresh
                 << ',' << odometry_prior.delta_pose[0]
                 << ',' << odometry_prior.delta_pose[1]
                 << ',' << odometry_prior.delta_pose[2]
                 << ',' << last_cmd_cov_(0,0) << ',' << last_cmd_cov_(2,2)
                 << ',' << (int)last_measured_prior_.valid
+                << ',' << (int)last_measured_prior_.fresh
                 << ',' << last_measured_prior_.delta_pose[0]
                 << ',' << last_measured_prior_.delta_pose[1]
                 << ',' << last_measured_prior_.delta_pose[2]
                 << ',' << meas_cov_xx << ',' << meas_cov_tt
+                << ',' << (int)last_selected_prior_.valid
+                << ',' << (int)last_selected_prior_.fresh
+                << ',' << motion_prior_source_name(last_motion_prior_source_)
+                << ',' << last_selected_prior_.delta_pose[0]
+                << ',' << last_selected_prior_.delta_pose[1]
+                << ',' << last_selected_prior_.delta_pose[2]
+                << ',' << sel_cov_xx << ',' << sel_cov_tt
                 << ',' << x << ',' << y << ',' << phi
                 << ',' << 0 << ',' << 0   // slot_mcov (not available here)
                 << ',' << 1               // early_exit = 1
@@ -2454,6 +2599,8 @@ namespace rc
     {
          OdometryPrior prior;
          prior.valid = false;
+            prior.fresh = false;
+            prior.is_measured = false;
          const auto &[points, lidar_timestamp] = lidar;
 
          if (last_lidar_timestamp == 0)
@@ -2471,6 +2618,31 @@ namespace rc
          }
          prior.dt = dt;
 
+        const auto has_fresh_command = [&velocity_history, this, lidar_timestamp]() -> bool
+        {
+            if (velocity_history.empty() || !last_update_result.ok)
+                return false;
+
+            for (size_t i = 0; i < velocity_history.size(); ++i)
+            {
+                const auto segment_start = velocity_history[i].effective_ts_ms();
+                const auto segment_end = (i + 1 < velocity_history.size())
+                    ? velocity_history[i + 1].effective_ts_ms()
+                    : lidar_timestamp;
+                if (segment_start <= 0 || segment_end <= segment_start)
+                    continue;
+
+                const auto effective_start = std::max(segment_start, last_lidar_timestamp);
+                const auto effective_end = std::min(segment_end, lidar_timestamp);
+                if (effective_end > effective_start)
+                    return true;
+            }
+            return false;
+        };
+        prior.fresh = has_fresh_command();
+        if (!velocity_history.empty())
+            prior.velocity_cmd = velocity_history.back();
+
         if (!velocity_history.empty() && last_update_result.ok)
             prior.delta_pose = integrate_velocity_over_window(last_update_result.robot_pose,
                                                               velocity_history,
@@ -2486,6 +2658,7 @@ namespace rc
 
         // Compute covariance
         Eigen::Matrix3f cov_eigen = compute_motion_covariance(prior);
+        prior.covariance_eigen = cov_eigen;
         prior.covariance = torch::eye(3, torch::TensorOptions().dtype(torch::kFloat32).device(get_device()));
         prior.covariance[0][0] = cov_eigen(0, 0);
         prior.covariance[1][1] = cov_eigen(1, 1);
@@ -2845,7 +3018,6 @@ namespace rc
 
         float dx_global = odometry_prior.delta_pose[0];
         float dy_global = odometry_prior.delta_pose[1];
-        float dtheta = odometry_prior.delta_pose[2];
 
         // Inverse rotation: robot_frame = R^T * global_frame
         float dx_local = dx_global * cos_t + dy_global * sin_t;
@@ -2875,69 +3047,15 @@ namespace rc
             F[3][4] =  dx_local * cos_t - dy_local * sin_t;
         }
 
-        // ===== PROCESS NOISE =====
-        // ANISOTROPIC: For Y=forward, X=right coordinate system:
-        //   dy_local = FORWARD motion (should get larger noise)
-        //   dx_local = LATERAL motion (should get smaller noise)
-
-        float forward_motion = std::abs(dy_local);   // Forward (Y in robot frame)
-        float lateral_motion = std::abs(dx_local);   // Lateral (X in robot frame)
-        const float angular_motion = std::abs(dtheta);
-
-        // odometry_prior.dt is stored in milliseconds in this pipeline.
-        // Convert to seconds so process-noise floor is time-consistent.
-        const float dt_s = std::max(0.001f, odometry_prior.dt * 0.001f);
-        const float linear_speed = (forward_motion + lateral_motion) / dt_s;
-        const float angular_speed = angular_motion / dt_s;
-        const bool near_stationary = linear_speed < params.stationary_speed_threshold && angular_speed < params.stationary_speed_threshold;
-
-        // Base noise grows with elapsed time (random-walk style) and is heavily reduced at rest.
-        // This keeps slow covariance inflation when stopped, avoiding constant re-minimization.
-        const float time_scale = std::sqrt(std::min(1.0f, 4.0f * dt_s));
-        float base_trans_noise = params.cmd_noise_base * time_scale;
-        if (near_stationary)
-            base_trans_noise *= params.stationary_noise_damping;
-
-        // Forward uncertainty: grows with forward motion
-        float forward_noise = base_trans_noise + params.cmd_noise_trans * forward_motion;
-
-        // Lateral uncertainty: smaller for differential drive
-        float lateral_noise = base_trans_noise + params.lateral_noise_fraction * params.cmd_noise_trans * lateral_motion;
-
-        // Rotation noise: base + motion-dependent
-        float base_rot_noise = params.base_rotation_noise_fraction * base_trans_noise;
-        float rot_noise = base_rot_noise + params.cmd_noise_rot * std::abs(dtheta);
-
         Q.zero_();
+        const auto prior_cov = odometry_prior.covariance.defined()
+            ? odometry_prior.covariance.to(device)
+            : torch::eye(3, torch::TensorOptions().dtype(torch::kFloat32).device(device));
 
-        if (is_localized) {
-            // Build noise covariance in robot frame: Q = diag(lateral², forward², theta²)
-            float sigma_x = lateral_noise;   // X = right/lateral (smaller)
-            float sigma_y = forward_noise;   // Y = forward (larger)
-            float sigma_theta = rot_noise;
-
-            // Transform to global frame: Q_global = R(θ) * Q_local * R(θ)^T
-            // Body X (lateral) → world via direction (cosθ, sinθ)
-            // Body Y (forward) → world via direction (−sinθ, cosθ)
-            // Q[0][0] = σ_x²·cos²θ + σ_y²·sin²θ  (world-X variance)
-            // Q[1][1] = σ_x²·sin²θ + σ_y²·cos²θ  (world-Y variance)
-            Q[0][0] = sigma_x*sigma_x * cos_t*cos_t + sigma_y*sigma_y * sin_t*sin_t;
-            Q[0][1] = (sigma_x*sigma_x - sigma_y*sigma_y) * cos_t * sin_t;
-            Q[1][0] = Q[0][1];
-            Q[1][1] = sigma_x*sigma_x * sin_t*sin_t + sigma_y*sigma_y * cos_t*cos_t;
-            Q[2][2] = sigma_theta * sigma_theta;
-        } else {
-            // Full state: room doesn't accumulate noise, only robot pose
-            float sigma_x = lateral_noise;
-            float sigma_y = forward_noise;
-            float sigma_theta = rot_noise;
-
-            Q[2][2] = sigma_x*sigma_x * cos_t*cos_t + sigma_y*sigma_y * sin_t*sin_t;
-            Q[2][3] = (sigma_x*sigma_x - sigma_y*sigma_y) * cos_t * sin_t;
-            Q[3][2] = Q[2][3];
-            Q[3][3] = sigma_x*sigma_x * sin_t*sin_t + sigma_y*sigma_y * cos_t*cos_t;
-            Q[4][4] = sigma_theta * sigma_theta;
-        }
+        if (is_localized)
+            Q.index_put_({torch::indexing::Slice(0, 3), torch::indexing::Slice(0, 3)}, prior_cov);
+        else
+            Q.index_put_({torch::indexing::Slice(2, 5), torch::indexing::Slice(2, 5)}, prior_cov);
 
         // ===== EKF PREDICTION =====
         // P_pred = F * P_prev * F^T + Q
@@ -3004,6 +3122,8 @@ namespace rc
     {
         OdometryPrior prior;
         prior.valid = false;
+        prior.fresh = false;
+        prior.is_measured = true;
         const auto& [points, lidar_timestamp] = lidar;
 
         const int64_t prev_ts = last_update_result.timestamp_ms;
@@ -3019,6 +3139,29 @@ namespace rc
             return prior;
         prior.dt = static_cast<float>(dt);
 
+        const auto has_fresh_measurement = [&odometry_history, prev_ts, lidar_timestamp]() -> bool
+        {
+            if (odometry_history.empty())
+                return false;
+
+            for (size_t i = 0; i < odometry_history.size(); ++i)
+            {
+                const auto segment_start = odometry_history[i].effective_ts_ms();
+                const auto segment_end = (i + 1 < odometry_history.size())
+                    ? odometry_history[i + 1].effective_ts_ms()
+                    : lidar_timestamp;
+                if (segment_start <= 0 || segment_end <= segment_start)
+                    continue;
+
+                const auto effective_start = std::max(segment_start, prev_ts);
+                const auto effective_end = std::min(segment_end, lidar_timestamp);
+                if (effective_end > effective_start)
+                    return true;
+            }
+            return false;
+        };
+        prior.fresh = has_fresh_measurement();
+
         prior.delta_pose = integrate_odometry_over_window(
             last_update_result.robot_pose,
             odometry_history,
@@ -3030,6 +3173,7 @@ namespace rc
         // Compute covariance using odometry noise model (tighter than command).
         // Diagonal 3×3 is sufficient here; the full prior fusion uses the fused covariance.
         Eigen::Matrix3f cov_eigen = compute_motion_covariance(prior, true);
+        prior.covariance_eigen = cov_eigen;
         prior.covariance = torch::eye(3, torch::TensorOptions().dtype(torch::kFloat32).device(get_device()));
         prior.covariance[0][0] = cov_eigen(0, 0);
         prior.covariance[1][1] = cov_eigen(1, 1);

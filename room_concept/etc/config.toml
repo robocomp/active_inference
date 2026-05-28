@@ -174,10 +174,10 @@ FarPointsExponent    = 2.0   # α — exponente de la distancia.
                               #   mejor precisión angular pero más sensible a puntos espurios.
 FarPointsMinWeight   = 0.1   # Floor de peso (evita anular puntos muy cercanos).
 UseCuda              = false   # Fallback automático a CPU si falla
-DebugLog             = true  # CSV → tmp/sdf_localizer/log.csv
+DebugLog             = false  # CSV → tmp/sdf_localizer/log.csv
 
 # ── Rerun (desactivado para timing limpio) ────────────────────────────────────
-RerunEnabled      = true     # OFF: elimina ~3 ms/frame de overhead de red
+RerunEnabled      = false     # OFF: elimina ~3 ms/frame de overhead de red
 RerunHost         = "127.0.0.1"
 RerunPort         = 9877
 RerunSdfEveryN    = 20

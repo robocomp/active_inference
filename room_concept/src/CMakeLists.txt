@@ -6,6 +6,9 @@ find_package(Qt6 COMPONENTS 3DCore 3DRender 3DExtras QUIET)
 # Find PyTorch
 set(CUDAToolkit_ROOT "/usr/local/cuda-13.2")
 find_package(CUDAToolkit REQUIRED)
+set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+set(CMAKE_CUDA_EXTENSIONS OFF)
 
 # Allow an external Torch_DIR/CMAKE_PREFIX_PATH to win, then try common local installs.
 if(NOT Torch_DIR)

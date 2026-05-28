@@ -172,6 +172,46 @@ private:
             cells[to_index(pos)].last_visit = std::chrono::steady_clock::now();
         }
 
+        void mark_visited_with_falloff(const Eigen::Vector2f& pos, float radius_m,
+                                       float decay_s, float edge_staleness = 0.35f)
+        {
+            if (!initialized) return;
+
+            const auto now = std::chrono::steady_clock::now();
+            const float radius = std::max(cell_size, radius_m);
+            const int radius_cells = std::max(1, static_cast<int>(std::ceil(radius / cell_size)));
+
+            int center_c = static_cast<int>((pos.x() - origin.x()) / cell_size);
+            int center_r = static_cast<int>((pos.y() - origin.y()) / cell_size);
+            center_c = std::clamp(center_c, 0, cols - 1);
+            center_r = std::clamp(center_r, 0, rows - 1);
+
+            for (int dr = -radius_cells; dr <= radius_cells; ++dr)
+            {
+                const int row = center_r + dr;
+                if (row < 0 || row >= rows) continue;
+
+                for (int dc = -radius_cells; dc <= radius_cells; ++dc)
+                {
+                    const int col = center_c + dc;
+                    if (col < 0 || col >= cols) continue;
+
+                    const int idx = row * cols + col;
+                    const float dist = (cell_center(idx) - pos).norm();
+                    if (dist > radius)
+                        continue;
+
+                    const float normalized = std::clamp(dist / std::max(radius, 1e-6f), 0.f, 1.f);
+                    const float staleness = normalized * std::clamp(edge_staleness, 0.f, 1.f);
+                    const float elapsed_s = staleness * std::max(0.1f, decay_s);
+                    const auto visit_tp = now - std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                                    std::chrono::duration<float>(elapsed_s));
+                    if (cells[idx].last_visit < visit_tp)
+                        cells[idx].last_visit = visit_tp;
+                }
+            }
+        }
+
         /// Update running-average FIM gain for the cell containing pos.
         void update_fim(const Eigen::Vector2f& pos, float gain, float alpha = 0.3f)
         {

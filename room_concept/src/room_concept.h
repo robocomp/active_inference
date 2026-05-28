@@ -335,8 +335,11 @@ public:
     struct OdometryPrior
     {
         bool valid = false;
+        bool fresh = false;
+        bool is_measured = false;
         Eigen::Vector3f delta_pose;      // [dx, dy, dtheta] in meters & radians
         torch::Tensor covariance;        // 3x3 covariance matrix
+        Eigen::Matrix3f covariance_eigen = Eigen::Matrix3f::Identity();
         VelocityCommand velocity_cmd;    // The actual velocity command
         float dt;                        // Time delta
         float prior_weight = 1.0f;      // How much to trust this prior
@@ -344,8 +347,45 @@ public:
         OdometryPrior()
             : delta_pose(Eigen::Vector3f::Zero())
             , covariance(torch::zeros({3,3}, torch::kFloat32))
+            , covariance_eigen(Eigen::Matrix3f::Identity())
             , dt(0.0f)
         {}
+    };
+
+    enum class MotionPriorSource
+    {
+        None,
+        Command,
+        Measured,
+        Fused,
+        FallbackZero
+    };
+
+    struct MotionPriorSelection
+    {
+        OdometryPrior command_prior;
+        OdometryPrior measured_prior;
+        OdometryPrior selected_prior;
+        MotionPriorSource source = MotionPriorSource::None;
+        Eigen::Vector2f predicted_pos = Eigen::Vector2f::Zero();
+        float predicted_theta = 0.f;
+        Eigen::Matrix3f prediction_precision = Eigen::Matrix3f::Identity();
+    };
+
+    struct MotionIngressDebug
+    {
+        std::string command_source = "na";
+        std::string odom_source = "na";
+        float command_rot_raw = 0.f;
+        float command_rot_normalized = 0.f;
+        float command_adv_raw = 0.f;
+        float command_adv_normalized = 0.f;
+        float odom_rot_raw = 0.f;
+        float odom_rot_normalized = 0.f;
+        float odom_adv_raw = 0.f;
+        float odom_adv_normalized = 0.f;
+        std::int64_t command_ts_ms = 0;
+        std::int64_t odom_ts_ms = 0;
     };
 
     // ===== Threading / Run Context =====
@@ -386,6 +426,22 @@ public:
 
     /// Thread-safe convenience: returns [half_w, half_h, x, y, theta] or zeros.
     Eigen::Matrix<float,5,1> get_loc_state() const;
+
+    /// Thread-safe: record the latest command sample entering the motion pipeline.
+    void record_command_ingress(const std::string& source,
+                                float raw_adv,
+                                float raw_rot,
+                                float normalized_adv,
+                                float normalized_rot,
+                                std::int64_t ts_ms);
+
+    /// Thread-safe: record the latest measured odometry sample entering the motion pipeline.
+    void record_odometry_ingress(const std::string& source,
+                                 float raw_adv,
+                                 float raw_rot,
+                                 float normalized_adv,
+                                 float normalized_rot,
+                                 std::int64_t ts_ms);
 
     /// Thread-safe: push a command to be executed on the localization thread.
     void push_command(Command cmd);
@@ -626,13 +682,20 @@ private:
    float              last_t_cov_ms_       = 0.f;
    float              last_t_breakdown_ms_ = 0.f;
    OdometryPrior      last_measured_prior_; // saved by apply_dual_prior_fusion for logging
+    OdometryPrior      last_selected_prior_;
+    MotionPriorSource  last_motion_prior_source_ = MotionPriorSource::None;
    Eigen::Matrix3f    last_cmd_cov_ = Eigen::Matrix3f::Identity();
+    bool               last_command_prior_fresh_ = false;
+    bool               last_measured_prior_fresh_ = false;
    std::int64_t       prev_lidar_ts_for_log_ = 0;
    std::string        slot_poses_pre_;    // packed slot poses before Adam  (debug log)
    std::string        slot_poses_post_;   // packed slot poses after Adam
    std::string        slot_sdf_mse_str_;  // packed sdf_mse_final per slot
    std::string        debug_log_path_;    // full path of the current log file (includes timestamp)
+    mutable std::mutex motion_ingress_debug_mutex_;
+    MotionIngressDebug motion_ingress_debug_;
    void init_debug_log();
+    MotionIngressDebug get_motion_ingress_debug() const;
 
    // ===== Online motion model learned state =====
    // Initialised to -1 (sentinel = "warmup not done; use static params").
@@ -731,10 +794,11 @@ private:
                                   bool is_localized);
 
     // ===== update() helper methods =====
-    /// Fuse command prior with measured odometry into a single prediction.
-    /// Returns {pred_pos, pred_theta} and sets model prediction state.
-    std::pair<Eigen::Vector2f, float> apply_dual_prior_fusion(
-        const OdometryPrior& odometry_prior,
+    static std::string_view motion_prior_source_name(MotionPriorSource source);
+
+    /// Compute command and measured priors, then select a single motion prior.
+    MotionPriorSelection build_motion_prior_selection(
+        const std::vector<VelocityCommand>& velocity_history,
         const std::vector<OdometryReading>& odometry_history,
         const std::pair<std::vector<Eigen::Vector3f>, std::int64_t>& lidar);
 

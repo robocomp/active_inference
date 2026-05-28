@@ -30,22 +30,18 @@
 #include <QtCore>
 #include <variant>
 #include <unordered_map>
+#include <fps/fps.h>
 
 #include "dsr/api/dsr_api.h"
 #include "dsr/gui/dsr_gui.h"
-
 #include <memory>
 
-#include <FullPoseEstimation.h>
-#include <FullPoseEstimationPub.h>
-#include <GenericBase.h>
 #include <JoystickAdapter.h>
 #include <Lidar3D.h>
-#include <OmniRobot.h>
 
 #define BASIC_PERIOD 100
 
-using TuplePrx = std::tuple<RoboCompLidar3D::Lidar3DPrxPtr,RoboCompOmniRobot::OmniRobotPrxPtr>;
+using TuplePrx = std::tuple<>;
 
 
 class GenericWorker : public QObject
@@ -64,10 +60,6 @@ public:
 	std::atomic_bool hibernation = false;
 
 
-	RoboCompLidar3D::Lidar3DPrxPtr lidar3d_proxy;
-	RoboCompOmniRobot::OmniRobotPrxPtr omnirobot_proxy;
-
-	virtual void FullPoseEstimationPub_newFullPose (RoboCompFullPoseEstimation::FullPoseEuler pose) = 0;
 
 	virtual void JoystickAdapter_sendData (RoboCompJoystickAdapter::TData data) = 0;
 
@@ -75,6 +67,7 @@ public:
 protected:
 	std::unordered_map<std::string, std::unique_ptr<GRAFCETStep>> states;
 	ConfigLoader configLoader;
+	FPSCounter fps;
 	//DSR params
 	std::string agent_name;
 	int agent_id;

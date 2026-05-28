@@ -1,15 +1,11 @@
-import "Lidar3D.idsl";
-import "FullPoseEstimationPub.idsl";
 import "JoystickAdapter.idsl";
-import "OmniRobot.idsl";
-
+import "Lidar3D.idsl";
 
 Component room_concept
 {
     Communications
     {
-       requires Lidar3D, OmniRobot;
-       subscribesTo FullPoseEstimationPub, JoystickAdapter;   	
+       subscribesTo JoystickAdapter;   	
  	
     };
     language Cpp11;

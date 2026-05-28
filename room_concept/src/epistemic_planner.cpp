@@ -256,6 +256,9 @@ std::optional<EpistemicPlanner::Target> EpistemicPlanner::update_target()
         const float dist = (current_target_->position - robot_pos()).norm();
         if (dist < params.arrival_distance)
         {
+            visit_grid_.mark_visited_with_falloff(current_target_->position,
+                                                  1.5f * params.ior_cell_size,
+                                                  params.ior_decay_time);
             dwelling_ = true;
             dwell_until_ = std::chrono::steady_clock::now()
                          + std::chrono::milliseconds(static_cast<int>(params.dwell_time * 1000.f));
