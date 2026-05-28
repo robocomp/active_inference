@@ -30,7 +30,7 @@ FIND_PACKAGE( Ice REQUIRED COMPONENTS Ice++11 IceStorm++11)
 # Sources set
 SET (SOURCES
   ${SOURCES}
-  ../src/affordance_manager.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/../../common/affordance_manager.cpp
   $ENV{ROBOCOMP}/classes/rapplication/rapplication.cpp
   $ENV{ROBOCOMP}/classes/sigwatch/sigwatch.cpp
   $ENV{ROBOCOMP}/classes/grafcetStep/GRAFCETStep.cpp

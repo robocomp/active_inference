@@ -763,6 +763,14 @@ void SpecificWorker::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
 {
     if (!G || !room_node_created_) return;
 
+    auto& planner = epistemic_controller_.epistemic_planner();
+    if (affordance_manager_.consume_completion_event())
+    {
+        qInfo() << "Affordance completed, clearing current planner target before selecting the next one";
+        planner.clear_target();
+        return;
+    }
+
     if (affordance_manager_.is_executing(G))
         return;  // Sibling controller is executing current affordance.
 
@@ -770,7 +778,6 @@ void SpecificWorker::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
     epistemic_controller_.set_robot_state(res.robot_pose, res.covariance);
 
     // Ask the planner for the current best target (handles dwell / arrival internally)
-    auto& planner = epistemic_controller_.epistemic_planner();
     const auto target_opt = planner.update_target();
     if (!target_opt.has_value()) return;
 

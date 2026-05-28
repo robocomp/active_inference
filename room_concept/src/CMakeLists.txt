@@ -37,6 +37,8 @@ find_package(Torch REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(Boost REQUIRED COMPONENTS system filesystem)
 
+set(ACTIVE_INFERENCE_COMMON_DIR "${CMAKE_CURRENT_LIST_DIR}/../../common")
+
 
 # ── Sources ────────────────────────────────────────────────────────────────────
 LIST(APPEND SOURCES
@@ -47,7 +49,7 @@ LIST(APPEND SOURCES
   ../src/room_model.cpp
   ../src/pointcloud_center_estimator.cpp
   ../src/epistemic_controller.cpp
-  ../src/affordance_manager.cpp
+  ${ACTIVE_INFERENCE_COMMON_DIR}/affordance_manager.cpp
   ../src/epistemic_planner.cpp
   ../src/timeseries_plot.cpp
   ../src/corner_detector.cpp
@@ -65,7 +67,7 @@ LIST(APPEND HEADERS
   ../src/room_model.h
   ../src/pointcloud_center_estimator.h
   ../src/epistemic_controller.h
-  ../src/affordance_manager.h
+  ${ACTIVE_INFERENCE_COMMON_DIR}/affordance_manager.h
   ../src/epistemic_planner.h
   ../src/corner_visibility.h
   ../src/timeseries_plot.h
