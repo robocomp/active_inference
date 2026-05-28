@@ -1,4 +1,0 @@
-# Hashes of file build rules.
-2b2edf1d28d9550ce848ab86626c5381 CMakeFiles/affordance_protocol_test_autogen
-2b2edf1d28d9550ce848ab86626c5381 CMakeFiles/affordance_protocol_test_autogen_timestamp_deps
-cab22fc521a95334472b22413dc18e48 affordance_protocol_test_autogen/timestamp
