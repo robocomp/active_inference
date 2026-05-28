@@ -46,6 +46,12 @@ Controller.PosePredictionHorizon = 0.4
 Controller.PoseXYStdGrowthPerMps = 0.5
 Controller.PoseThetaStdGrowthPerRps = 1.0
 Controller.AdvRotationCouplingExponent = 0.5
+Controller.GoalClearanceRelaxDist = 0.6
+Controller.GoalObstacleMargin = 0.08
+Controller.GoalClearanceMinRatio = 0.85
+Controller.StraightSpeedHeadingThreshold = 0.08
+Controller.StraightSpeedClearanceMargin = 0.20
+Controller.StraightSpeedMinGoalDist = 1.5
 
 Target.EdgeType = "target"
 Transforms.interpolate_rt = true

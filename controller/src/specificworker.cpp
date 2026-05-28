@@ -19,6 +19,7 @@
 #include "specificworker.h"
 
 #include "custom_widget.h"
+#include <fps/fps.h>
 
 #include <algorithm>
 #include <chrono>
@@ -30,6 +31,109 @@
 
 namespace
 {
+	constexpr auto kRobotRefAdvSpeedAttr = "robot_ref_adv_speed";
+	constexpr auto kRobotRefRotSpeedAttr = "robot_ref_rot_speed";
+	constexpr auto kRobotRefSideSpeedAttr = "robot_ref_side_speed";
+	constexpr auto kRobotRefSpeedTimestampAttr = "robot_ref_speed_timestamp";
+
+	float cross2d(const Eigen::Vector2f &origin, const Eigen::Vector2f &a, const Eigen::Vector2f &b)
+	{
+		return (a.x() - origin.x()) * (b.y() - origin.y()) - (a.y() - origin.y()) * (b.x() - origin.x());
+	}
+
+	std::vector<Eigen::Vector2f> convex_hull(std::vector<Eigen::Vector2f> points)
+	{
+		if (points.size() < 3)
+			return points;
+
+		std::sort(points.begin(), points.end(), [](const auto &lhs, const auto &rhs)
+		{
+			if (lhs.x() != rhs.x())
+				return lhs.x() < rhs.x();
+			return lhs.y() < rhs.y();
+		});
+		points.erase(std::unique(points.begin(), points.end(), [](const auto &lhs, const auto &rhs)
+		{
+			return (lhs - rhs).cwiseAbs().maxCoeff() < 1e-4f;
+		}), points.end());
+		if (points.size() < 3)
+			return points;
+
+		std::vector<Eigen::Vector2f> lower;
+		lower.reserve(points.size());
+		for (const auto &point : points)
+		{
+			while (lower.size() >= 2 && cross2d(lower[lower.size() - 2], lower.back(), point) <= 0.f)
+				lower.pop_back();
+			lower.push_back(point);
+		}
+
+		std::vector<Eigen::Vector2f> upper;
+		upper.reserve(points.size());
+		for (auto it = points.rbegin(); it != points.rend(); ++it)
+		{
+			while (upper.size() >= 2 && cross2d(upper[upper.size() - 2], upper.back(), *it) <= 0.f)
+				upper.pop_back();
+			upper.push_back(*it);
+		}
+
+		lower.pop_back();
+		upper.pop_back();
+		lower.insert(lower.end(), upper.begin(), upper.end());
+		return lower;
+	}
+
+	std::vector<Eigen::Vector2f> inflate_convex_polygon(const std::vector<Eigen::Vector2f> &polygon, float padding_m)
+	{
+		if (polygon.empty() || padding_m <= 0.f)
+			return polygon;
+
+		Eigen::Vector2f centroid = Eigen::Vector2f::Zero();
+		for (const auto &point : polygon)
+			centroid += point;
+		centroid /= static_cast<float>(polygon.size());
+
+		std::vector<Eigen::Vector2f> inflated;
+		inflated.reserve(polygon.size());
+		for (const auto &point : polygon)
+		{
+			Eigen::Vector2f dir = point - centroid;
+			const float norm = dir.norm();
+			if (norm > 1e-4f)
+				dir /= norm;
+			else
+				dir = Eigen::Vector2f::UnitX();
+			inflated.push_back(point + dir * padding_m);
+		}
+		return inflated;
+	}
+
+	void log_compute_perf(FPSCounter &counter)
+	{
+		counter.cont++;
+		const auto now = std::chrono::high_resolution_clock::now();
+		const auto elapsed_ms = std::chrono::duration<double, std::milli>(now - counter.begin).count();
+		if (elapsed_ms < 1000.0)
+			return;
+
+		counter.last_period = static_cast<float>(elapsed_ms / std::max(1u, counter.cont));
+		counter.period = 1000;
+		const float fps = counter.get_frequency();
+		const float cpu = std::max(0.f, counter.get_cpu_use());
+		std::cout << "[CTRL] fps=" << std::fixed << std::setprecision(1) << fps
+		          << " cpu=" << std::setprecision(0) << cpu << "%"
+		          << " period=" << std::setprecision(1) << counter.get_period() << "ms"
+		          << std::endl;
+		counter.begin = now;
+		counter.cont = 0;
+	}
+
+	struct ScopedComputePerfLog
+	{
+		FPSCounter &counter;
+		~ScopedComputePerfLog() { log_compute_perf(counter); }
+	};
+
 float ramp_uncertainty_scale(float value, float slow_threshold, float stop_threshold, float min_scale)
 {
 	if (stop_threshold <= slow_threshold)
@@ -179,6 +283,8 @@ void SpecificWorker::initialize()
 		                stop_sent_when_paused_ = true;
 		            }
 		        });
+		connect(custom_widget_->mppi_paths_toggle_btn, &QPushButton::toggled, this,
+		        [this](bool checked) { if (viewer_2d_) viewer_2d_->set_mppi_paths_visible(checked); });
 	}
 	update_custom_widget(std::nullopt);
 
@@ -191,6 +297,9 @@ void SpecificWorker::initialize()
 
 void SpecificWorker::compute()
 {
+	static FPSCounter compute_perf_counter;
+	ScopedComputePerfLog perf_log{compute_perf_counter};
+
 	log_first_compute_once();
 
 	if (!G)
@@ -210,7 +319,6 @@ void SpecificWorker::compute()
 	if (!ensure_current_plan(*step))
 		return;
 
-	update_custom_widget(step->robot_pose);
 	if (path_following_active_)
 	{
 		stop_sent_when_paused_ = false;
@@ -222,6 +330,7 @@ void SpecificWorker::compute()
 		stop_robot();
 		stop_sent_when_paused_ = true;
 	}
+	update_custom_widget(step->robot_pose);
 }
 
 /////////////////////////////////////////////////////////////////
@@ -279,7 +388,7 @@ bool SpecificWorker::sync_world_state(std::uint64_t timestamp_ms)
 
 	room_polygon_ = room_polygon.value();
 	inner_polygon_ = planner_.compute_inner_polygon(room_polygon_);
-	obstacle_polygons_ = read_obstacle_polygons(timestamp_ms);
+	update_active_obstacle_polygons(timestamp_ms);
 	return true;
 }
 
@@ -406,6 +515,18 @@ void SpecificWorker::load_params()
 	try { params.pose_xy_std_growth_per_mps = static_cast<float>(configLoader.get<double>("Controller.PoseXYStdGrowthPerMps")); } catch (...) {}
 	try { params.pose_theta_std_growth_per_rps = static_cast<float>(configLoader.get<double>("Controller.PoseThetaStdGrowthPerRps")); } catch (...) {}
 	try { params.adv_rotation_coupling_exponent = static_cast<float>(configLoader.get<double>("Controller.AdvRotationCouplingExponent")); } catch (...) {}
+	try { params.temporary_obstacle_front_distance_m = static_cast<float>(configLoader.get<double>("Controller.TemporaryObstacleFrontDistance")); } catch (...) {}
+	try { params.temporary_obstacle_half_width_m = static_cast<float>(configLoader.get<double>("Controller.TemporaryObstacleHalfWidth")); } catch (...) {}
+	try { params.temporary_obstacle_cluster_margin_m = static_cast<float>(configLoader.get<double>("Controller.TemporaryObstacleClusterMargin")); } catch (...) {}
+	try { params.temporary_obstacle_padding_m = static_cast<float>(configLoader.get<double>("Controller.TemporaryObstaclePadding")); } catch (...) {}
+	try { params.temporary_obstacle_min_points = configLoader.get<int>("Controller.TemporaryObstacleMinPoints"); } catch (...) {}
+	try { params.temporary_obstacle_ttl_ms = static_cast<std::uint64_t>(std::max(0, configLoader.get<int>("Controller.TemporaryObstacleTTLms"))); } catch (...) {}
+	try { params.goal_clearance_relax_dist_m = static_cast<float>(configLoader.get<double>("Controller.GoalClearanceRelaxDist")); } catch (...) {}
+	try { params.goal_obstacle_margin_m = static_cast<float>(configLoader.get<double>("Controller.GoalObstacleMargin")); } catch (...) {}
+	try { params.goal_clearance_min_ratio = static_cast<float>(configLoader.get<double>("Controller.GoalClearanceMinRatio")); } catch (...) {}
+	try { params.straight_speed_heading_threshold_rad = static_cast<float>(configLoader.get<double>("Controller.StraightSpeedHeadingThreshold")); } catch (...) {}
+	try { params.straight_speed_clearance_margin_m = static_cast<float>(configLoader.get<double>("Controller.StraightSpeedClearanceMargin")); } catch (...) {}
+	try { params.straight_speed_min_goal_dist_m = static_cast<float>(configLoader.get<double>("Controller.StraightSpeedMinGoalDist")); } catch (...) {}
 	planner_.params.clearance_m = params.clearance_m;
 	planner_.params.robot_width_m = 0.4f;
 	planner_.params.grid_resolution_m = params.grid_resolution_m;
@@ -418,6 +539,12 @@ void SpecificWorker::load_params()
 	path_controller_.params.robot_radius = std::max(0.15f, params.clearance_m * 0.5f);
 	path_controller_.params.d_safe = params.clearance_m;
 	path_controller_.params.min_adv_cmd = 0.f;
+	path_controller_.params.goal_clearance_relax_dist = std::max(0.05f, params.goal_clearance_relax_dist_m);
+	path_controller_.params.goal_obstacle_margin = std::max(0.f, params.goal_obstacle_margin_m);
+	path_controller_.params.goal_clearance_min_ratio = std::clamp(params.goal_clearance_min_ratio, 0.5f, 1.f);
+	path_controller_.params.straight_speed_heading_threshold = std::max(0.f, params.straight_speed_heading_threshold_rad);
+	path_controller_.params.straight_speed_clearance_margin = std::max(0.f, params.straight_speed_clearance_margin_m);
+	path_controller_.params.straight_speed_min_goal_dist = std::max(0.f, params.straight_speed_min_goal_dist_m);
 	path_controller_.set_control_mode(rc::TrajectoryController::ControlMode::MPPI);
 }
 
@@ -476,7 +603,9 @@ void SpecificWorker::update_custom_widget(const std::optional<RobotPose> &robot_
 			.path = std::move(display_path),
 			.inner_poly = inner_polygon_,
 			.graph_nodes = current_plan_.has_value() ? current_plan_->graph_nodes : Polygon{},
-			.obstacle_polys = obstacle_polygons_
+			.obstacle_polys = obstacle_polygons_,
+			.candidate_trajectories = last_mppi_trajectories_,
+			.best_trajectory_idx = last_best_mppi_trajectory_idx_
 		});
 		if (!room_view_fitted_ && !room_polygon_.empty())
 		{
@@ -641,6 +770,82 @@ SpecificWorker::Polygons SpecificWorker::read_obstacle_polygons(std::uint64_t ti
 	return obstacles;
 }
 
+void SpecificWorker::update_active_obstacle_polygons(std::uint64_t timestamp_ms)
+{
+	obstacle_polygons_ = read_obstacle_polygons(timestamp_ms);
+	if (temporary_obstacle_polygon_.has_value())
+	{
+		if (timestamp_ms < temporary_obstacle_expires_at_ms_)
+			obstacle_polygons_.push_back(*temporary_obstacle_polygon_);
+		else
+		{
+			temporary_obstacle_polygon_.reset();
+			temporary_obstacle_expires_at_ms_ = 0;
+		}
+	}
+	path_controller_.set_static_obstacles(obstacle_polygons_);
+}
+
+bool SpecificWorker::create_temporary_lidar_obstacle(std::uint64_t timestamp_ms,
+	                                                 const RobotPose &robot_pose,
+	                                                 const Eigen::Vector2f &blockage_center_room,
+	                                                 float blockage_radius_m)
+{
+	const auto [cloud_opt] = lidar_room_buffer_.read_last();
+	if (!cloud_opt.has_value())
+		return false;
+
+	const auto &[xs_room, ys_room, zs_room] = cloud_opt.value();
+	const std::size_t count = std::min({xs_room.size(), ys_room.size(), zs_room.size()});
+	if (count == 0)
+		return false;
+
+	const Eigen::Affine2f robot_from_room = robot_pose.as_transform().inverse();
+	std::vector<Eigen::Vector2f> candidate_points_room;
+	candidate_points_room.reserve(count);
+
+	const float max_front_distance = std::max(0.2f, params.temporary_obstacle_front_distance_m);
+	const float half_width = std::max(0.1f, params.temporary_obstacle_half_width_m);
+	const float cluster_margin = std::max(0.f, params.temporary_obstacle_cluster_margin_m);
+	const float max_blockage_distance = std::max(blockage_radius_m + cluster_margin, cluster_margin);
+
+	for (std::size_t index = 0; index < count; ++index)
+	{
+		const float x_room = xs_room[index];
+		const float y_room = ys_room[index];
+		const float z_room = zs_room[index];
+		if (!std::isfinite(x_room) || !std::isfinite(y_room) || !std::isfinite(z_room))
+			continue;
+		if (z_room < 0.05f || z_room > 1.8f)
+			continue;
+
+		const Eigen::Vector2f point_room(x_room, y_room);
+		const Eigen::Vector2f point_robot = robot_from_room * point_room;
+		if (point_robot.y() <= params.clearance_m * 0.5f)
+			continue;
+		if (point_robot.y() > max_front_distance)
+			continue;
+		if (std::abs(point_robot.x()) > half_width)
+			continue;
+		if (max_blockage_distance > 0.f && (point_room - blockage_center_room).norm() > max_blockage_distance)
+			continue;
+
+		candidate_points_room.push_back(point_room);
+	}
+
+	if (static_cast<int>(candidate_points_room.size()) < std::max(3, params.temporary_obstacle_min_points))
+		return false;
+
+	auto hull = convex_hull(std::move(candidate_points_room));
+	if (hull.size() < 3)
+		return false;
+
+	temporary_obstacle_polygon_ = inflate_convex_polygon(hull, std::max(0.f, params.temporary_obstacle_padding_m));
+	temporary_obstacle_expires_at_ms_ = timestamp_ms + params.temporary_obstacle_ttl_ms;
+	update_active_obstacle_polygons(timestamp_ms);
+	return true;
+}
+
 SpecificWorker::Polygon SpecificWorker::make_obstacle_polygon(const Eigen::Vector2f &center,
 	                                                          float yaw,
 	                                                          float width_m,
@@ -722,18 +927,29 @@ std::optional<SpecificWorker::PoseUncertainty> SpecificWorker::read_pose_uncerta
 	return uncertainty;
 }
 
-void SpecificWorker::apply_uncertainty_speed_limit(float &adv_mm_s, float &side_mm_s, float &rot_rps) const
+void SpecificWorker::apply_uncertainty_speed_limit(float &adv_mps, float &side_mps, float &rot_rps) const
 {
 	const auto uncertainty = read_pose_uncertainty();
 	if (!uncertainty.has_value())
 		return;
 
-	const float current_trans_speed_mps = std::hypot(adv_mm_s, side_mm_s) / 1000.f;
+	const float current_trans_speed_mps = std::hypot(adv_mps, side_mps);
 	const float current_rot_speed_rps = std::abs(rot_rps);
+	const float forward_ratio = (current_trans_speed_mps > 1e-3f)
+		? std::clamp(std::abs(adv_mps) / current_trans_speed_mps, 0.f, 1.f)
+		: 0.f;
+	const float lateral_ratio = (current_trans_speed_mps > 1e-3f)
+		? std::clamp(std::abs(side_mps) / current_trans_speed_mps, 0.f, 1.f)
+		: 0.f;
+	const float turning_ratio = std::clamp(current_rot_speed_rps / std::max(0.12f, 0.35f * params.max_rot_speed_rps), 0.f, 1.f);
+	const float straight_motion_ratio = std::clamp(forward_ratio * (1.f - lateral_ratio) * (1.f - turning_ratio), 0.f, 1.f);
+
+	const float effective_xy_slow_m = params.pose_xy_std_slow_m * (1.f + 1.0f * straight_motion_ratio);
+	const float effective_xy_stop_m = params.pose_xy_std_stop_m * (1.f + 0.6f * straight_motion_ratio);
 
 	float adv_scale = ramp_uncertainty_scale(uncertainty->xy_std_m,
-		params.pose_xy_std_slow_m,
-		params.pose_xy_std_stop_m,
+		effective_xy_slow_m,
+		effective_xy_stop_m,
 		params.min_adv_speed_scale);
 	float rot_scale = ramp_uncertainty_scale(uncertainty->theta_std_rad,
 		params.pose_theta_std_slow_rad,
@@ -741,12 +957,13 @@ void SpecificWorker::apply_uncertainty_speed_limit(float &adv_mm_s, float &side_
 		params.min_rot_speed_scale);
 
 	const float horizon_s = std::max(1e-3f, params.uncertainty_prediction_horizon_s);
-	const float xy_growth = std::max(1e-3f, params.pose_xy_std_growth_per_mps);
+	const float xy_growth = std::max(1e-3f,
+		params.pose_xy_std_growth_per_mps / (1.f + 1.5f * straight_motion_ratio));
 	const float theta_growth = std::max(1e-3f, params.pose_theta_std_growth_per_rps);
 
 	if (current_trans_speed_mps > 1e-3f)
 	{
-		const float xy_margin = std::max(0.f, params.pose_xy_std_stop_m - uncertainty->xy_std_m);
+		const float xy_margin = std::max(0.f, effective_xy_stop_m - uncertainty->xy_std_m);
 		const float max_predicted_trans_speed_mps = xy_margin / (horizon_s * xy_growth);
 		const float predictive_adv_scale = std::clamp(max_predicted_trans_speed_mps / current_trans_speed_mps,
 			params.min_adv_speed_scale,
@@ -765,11 +982,11 @@ void SpecificWorker::apply_uncertainty_speed_limit(float &adv_mm_s, float &side_
 	}
 
 	const float coupled_adv_scale = std::pow(std::max(rot_scale, 0.f),
-		std::max(0.f, params.adv_rotation_coupling_exponent));
+		std::max(0.f, params.adv_rotation_coupling_exponent) * turning_ratio);
 	adv_scale = std::min(adv_scale, coupled_adv_scale);
 
-	adv_mm_s *= adv_scale;
-	side_mm_s *= adv_scale;
+	adv_mps *= adv_scale;
+	side_mps *= adv_scale;
 	rot_rps = preserve_sign_clamp(rot_rps, current_rot_speed_rps * rot_scale);
 }
 
@@ -844,8 +1061,14 @@ void SpecificWorker::execute_plan(const RobotPose &robot_pose)
 		path_controller_.set_room_boundary(boundary_polygon);
 
 	const auto control_output = path_controller_.compute(robot_pose.as_transform());
+	last_mppi_trajectories_ = control_output.trajectories_room;
+	last_best_mppi_trajectory_idx_ = control_output.best_trajectory_idx;
 	if (control_output.path_blocked)
 	{
+		create_temporary_lidar_obstacle(current_time_ms(),
+		                              robot_pose,
+		                              control_output.blockage_center_room,
+		                              control_output.blockage_radius);
 		current_plan_.reset();
 		path_controller_.stop();
 		stop_robot();
@@ -875,17 +1098,17 @@ void SpecificWorker::execute_plan(const RobotPose &robot_pose)
 		return;
 	}
 
-	float adv_mm_s = control_output.adv * 1000.f;
-	float side_mm_s = control_output.side * 1000.f;
+	float adv_mps = control_output.adv;
+	float side_mps = control_output.side;
 	float rot_rps = -control_output.rot;
-	apply_uncertainty_speed_limit(adv_mm_s, side_mm_s, rot_rps);
-	if (std::abs(adv_mm_s) < 0.5f && std::abs(side_mm_s) < 0.5f && std::abs(rot_rps) < 1e-3f)
+	apply_uncertainty_speed_limit(adv_mps, side_mps, rot_rps);
+	if (std::abs(adv_mps) < 5e-4f && std::abs(side_mps) < 5e-4f && std::abs(rot_rps) < 1e-3f)
 	{
 		stop_robot();
 		return;
 	}
 
-	send_speed_command(adv_mm_s, side_mm_s, rot_rps);
+	send_speed_command(adv_mps, side_mps, rot_rps);
 }
 
 void SpecificWorker::set_manual_target(const QPointF &point)
@@ -922,8 +1145,31 @@ void SpecificWorker::clear_manual_target()
 	hibernationTick();
 }
 
-void SpecificWorker::send_speed_command(float adv_mm_s, float side_mm_s, float rot_rps)
+void SpecificWorker::publish_robot_reference_speed(float adv_mps, float side_mps, float rot_rps, std::uint64_t timestamp_ms)
 {
+	if (!G || graph_state_.robot_id == 0)
+		return;
+
+	auto robot_node_opt = G->get_node(graph_state_.robot_id);
+	if (!robot_node_opt.has_value())
+		return;
+
+	auto robot_node = robot_node_opt.value();
+	auto &attrs = robot_node.attrs();
+	attrs[kRobotRefAdvSpeedAttr] = DSR::Attribute{adv_mps, timestamp_ms, static_cast<std::uint32_t>(agent_id)};
+	attrs[kRobotRefSideSpeedAttr] = DSR::Attribute{side_mps, timestamp_ms, static_cast<std::uint32_t>(agent_id)};
+	attrs[kRobotRefRotSpeedAttr] = DSR::Attribute{rot_rps, timestamp_ms, static_cast<std::uint32_t>(agent_id)};
+	attrs[kRobotRefSpeedTimestampAttr] = DSR::Attribute{timestamp_ms, timestamp_ms, static_cast<std::uint32_t>(agent_id)};
+	if (!G->update_node(robot_node))
+		qWarning() << "Controller failed to publish robot reference speed attrs to DSR";
+}
+
+void SpecificWorker::send_speed_command(float adv_mps, float side_mps, float rot_rps)
+{
+	// Convert to mm/s for the robot proxy and for display.
+	const float adv_mm_s = adv_mps * 1000.f;
+	const float side_mm_s = side_mps * 1000.f;
+
 	if (custom_widget_)
 		custom_widget_->set_cmd_vel_text(QStringLiteral("adv %1 mm/s   side %2 mm/s   rot %3 rad/s")
 			.arg(adv_mm_s, 0, 'f', 0)
@@ -933,9 +1179,12 @@ void SpecificWorker::send_speed_command(float adv_mm_s, float side_mm_s, float r
 	if (!omnirobot_proxy)
 		return;
 
-	const Eigen::Vector3f cmd(adv_mm_s, side_mm_s, rot_rps);
-	if (has_last_speed_command_ && (cmd - last_speed_command_).cwiseAbs().maxCoeff() < 0.1f)
+	const Eigen::Vector3f cmd(adv_mps, side_mps, rot_rps);
+	if (has_last_speed_command_ && (cmd - last_speed_command_).cwiseAbs().maxCoeff() < 1e-4f)
 		return;
+
+	const auto timestamp_ms = current_time_ms();
+	publish_robot_reference_speed(adv_mps, side_mps, rot_rps, timestamp_ms);
 
 	try
 	{
@@ -953,6 +1202,8 @@ void SpecificWorker::send_speed_command(float adv_mm_s, float side_mm_s, float r
 void SpecificWorker::stop_robot()
 {
 	path_controller_.stop();
+	last_mppi_trajectories_.clear();
+	last_best_mppi_trajectory_idx_ = -1;
 	if (custom_widget_)
 		custom_widget_->set_cmd_vel_text(QStringLiteral("adv 0 mm/s   side 0 mm/s   rot 0.00 rad/s"));
 
@@ -961,6 +1212,8 @@ void SpecificWorker::stop_robot()
 
 	if (!omnirobot_proxy)
 		return;
+
+	publish_robot_reference_speed(0.f, 0.f, 0.f, current_time_ms());
 
 	try
 	{

@@ -94,6 +94,11 @@ public:
             "QPushButton:checked { background-color: #c0392b; color: white; font-weight: bold; }"
             "QPushButton:!checked { background-color: #27ae60; color: white; font-weight: bold; }");
         toolbar_layout->addWidget(follow_toggle_btn);
+
+        mppi_paths_toggle_btn = new QPushButton("MPPI paths", toolbar);
+        mppi_paths_toggle_btn->setCheckable(true);
+        mppi_paths_toggle_btn->setChecked(false);
+        toolbar_layout->addWidget(mppi_paths_toggle_btn);
         toolbar_layout->addStretch();
         main_layout->addWidget(toolbar);
 
@@ -124,6 +129,7 @@ public:
     QFrame *frame = nullptr;
     QPushButton *lidar_toggle_btn = nullptr;
     QPushButton *follow_toggle_btn = nullptr;
+    QPushButton *mppi_paths_toggle_btn = nullptr;
 
 private:
     QLabel *pose_value_ = nullptr;

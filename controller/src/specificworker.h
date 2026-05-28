@@ -126,6 +126,18 @@ private:
 		float pose_xy_std_growth_per_mps = 0.5f;
 		float pose_theta_std_growth_per_rps = 1.0f;
 		float adv_rotation_coupling_exponent = 0.5f;
+		float temporary_obstacle_front_distance_m = 1.8f;
+		float temporary_obstacle_half_width_m = 0.9f;
+		float temporary_obstacle_cluster_margin_m = 0.35f;
+		float temporary_obstacle_padding_m = 0.18f;
+		int temporary_obstacle_min_points = 12;
+		std::uint64_t temporary_obstacle_ttl_ms = 3000;
+		float goal_clearance_relax_dist_m = 0.6f;
+		float goal_obstacle_margin_m = 0.08f;
+		float goal_clearance_min_ratio = 0.85f;
+		float straight_speed_heading_threshold_rad = 0.08f;
+		float straight_speed_clearance_margin_m = 0.20f;
+		float straight_speed_min_goal_dist_m = 1.5f;
 	};
 
 	struct GraphState
@@ -193,6 +205,8 @@ private:
 	std::optional<Eigen::Vector2f> manual_target_origin_room_;
 	std::optional<TargetInfo> last_target_info_;
 	rc::AffordanceManager affordance_manager_;
+	std::vector<Polygon> last_mppi_trajectories_;
+	int last_best_mppi_trajectory_idx_ = -1;
 	bool path_following_active_ = false;
 	bool stop_sent_when_paused_ = false;
 	bool stop_command_latched_ = false;
@@ -206,6 +220,8 @@ private:
 	bool compute_debug_logged_ = false;
 	mutable std::optional<std::uint64_t> last_lidar_timestamp_ms_;
 	mutable std::string obstacle_debug_report_;
+	std::optional<Polygon> temporary_obstacle_polygon_;
+	std::uint64_t temporary_obstacle_expires_at_ms_ = 0;
 	RoomPathPlanner planner_;
 	rc::TrajectoryController path_controller_;
 	std::unique_ptr<Custom_widget> custom_widget_;
@@ -222,18 +238,24 @@ private:
 	static bool same_target_instance(const TargetInfo &lhs, const TargetInfo &rhs);
 	std::optional<std::vector<Eigen::Vector2f>> read_room_polygon() const;
 	Polygons read_obstacle_polygons(std::uint64_t timestamp_ms) const;
+	void update_active_obstacle_polygons(std::uint64_t timestamp_ms);
+	bool create_temporary_lidar_obstacle(std::uint64_t timestamp_ms,
+	                                   const RobotPose &robot_pose,
+	                                   const Eigen::Vector2f &blockage_center_room,
+	                                   float blockage_radius_m);
 	Polygon make_obstacle_polygon(const Eigen::Vector2f &center,
 	                             float yaw,
 	                             float width_m,
 	                             float depth_m) const;
 	std::optional<RobotPose> read_robot_pose_in_room(std::uint64_t timestamp_ms) const;
 	std::optional<PoseUncertainty> read_pose_uncertainty() const;
-	void apply_uncertainty_speed_limit(float &adv_mm_s, float &side_mm_s, float &rot_rps) const;
+	void apply_uncertainty_speed_limit(float &adv_mps, float &side_mps, float &rot_rps) const;
 	std::optional<TargetInfo> read_target_in_room(std::uint64_t timestamp_ms);
 	void set_manual_target(const QPointF &point);
 	void clear_manual_target();
 	void execute_plan(const RobotPose &robot_pose);
-	void send_speed_command(float adv_mm_s, float side_mm_s, float rot_rps);
+	void publish_robot_reference_speed(float adv_mps, float side_mps, float rot_rps, std::uint64_t timestamp_ms);
+	void send_speed_command(float adv_mps, float side_mps, float rot_rps);
 	void stop_robot();
 
 signals:

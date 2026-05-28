@@ -65,7 +65,7 @@ public:
         float ess_den_epsilon = 1e-20f;       // ESS denominator guard
 
         // Debug/diagnostics
-        int debug_print_period = 20;          // print MPPI diagnostics every N compute cycles
+        int debug_print_period = 50;          // print MPPI diagnostics every N compute cycles
 
         // ESS-based adaptive ranges
         int   K_min = 20,  K_max = 300;    // adaptive K bounds
@@ -121,7 +121,10 @@ public:
         // too close to side obstacles, helping recentring in narrow passages.
         float lambda_lateral_clearance = 5.0f;
         float lateral_probe_offset = 0.22f;         // side probe offset from trajectory centerline
+        float lateral_probe_front_offset = 0.22f;   // forward longitudinal probe station
+        float lateral_probe_rear_offset = 0.18f;    // rear longitudinal probe station
         float lateral_clearance_margin = 0.25;     // desired extra side clearance over robot radius
+        float lateral_balance_gain = 1.5f;          // penalize left-right side imbalance while passing obstacles
         float lateral_closing_gain = 0.0f;          // extra penalty when side clearance is decreasing
                                                     // (disabled: replaced by CBF term below)
 
@@ -135,9 +138,11 @@ public:
         float cbf_cost_cap        = 10.0f;  // per-step CBF cost cap
 
         // Continuous clearance relaxation near final goal (no hard switch):
-        // far from goal -> use d_safe, close to goal -> relax toward robot_radius + goal_obstacle_margin
-        float goal_clearance_relax_dist = 1.2f;
-        float goal_obstacle_margin = 0.02f;
+        // relax only in the last segment of the approach and never below a
+        // fixed fraction of d_safe, so the robot does not shave obstacles.
+        float goal_clearance_relax_dist = 0.6f;
+        float goal_obstacle_margin = 0.08f;
+        float goal_clearance_min_ratio = 0.85f;
 
         // Collision and velocity-shape penalties in rollout score
         float collision_penalty = 400.0f;
@@ -154,6 +159,9 @@ public:
         float nominal_alignment_floor = 0.1f; // minimum forward alignment when turning toward carrot
         float nominal_goal_dist_scale = 1.0f; // distance at which nominal speed reaches full scale
         float injection_adv_scale = 0.7f;     // forward speed scale used by structured injection seeds
+        float straight_speed_heading_threshold = 0.08f; // rad; below this, treat path as straight
+        float straight_speed_clearance_margin = 0.20f; // extra ESDF clearance over d_safe to allow max speed
+        float straight_speed_min_goal_dist = 1.5f;     // only force max speed while still far from goal
 
         // Structured exploration offsets (radians)
         float inject_offset_30 = 0.5f;
@@ -207,6 +215,10 @@ public:
         float esdf_init_distance = 9999.0f;     // initial large value used during ESDF passes
         float esdf_diag_step = 1.414f;          // diagonal neighbor cost in grid units
         float esdf_grad_min_norm = 1e-4f;       // gradient norm threshold to normalize ESDF gradient
+        float esdf_self_filter_radius = 0.40f;  // ignore lidar returns this close to robot center
+        float esdf_self_filter_half_width = 0.32f; // ignore returns inside the robot body width
+        float esdf_self_filter_front = 0.42f;   // ignore returns inside the robot body forward extent
+        float esdf_self_filter_rear = 0.24f;    // ignore returns inside the robot body rear extent
 
         // Path progression heuristics
         float waypoint_advance_lookahead_factor = 0.5f;

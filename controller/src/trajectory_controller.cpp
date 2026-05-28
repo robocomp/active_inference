@@ -86,12 +86,13 @@ void TrajectoryController::refresh_active_params()
 
 float TrajectoryController::effective_d_safe_for_goal_dist(float goal_dist) const
 {
-    const float near_safe = std::max(active_params_.robot_radius + active_params_.goal_obstacle_margin,
-                                     active_params_.robot_radius + 0.005f);
+    const float near_safe = std::max({active_params_.robot_radius + active_params_.goal_obstacle_margin,
+                                      active_params_.d_safe * active_params_.goal_clearance_min_ratio,
+                                      active_params_.robot_radius + 0.005f});
     const float far_safe = std::max(active_params_.d_safe, near_safe);
     const float tau = std::max(active_params_.goal_clearance_relax_dist, 1e-3f);
-    const float alpha = std::exp(-std::max(goal_dist, 0.f) / tau); // 1 near goal, 0 far
-    return std::clamp((1.f - alpha) * far_safe + alpha * near_safe, near_safe, far_safe);
+    const float blend = smoothstep01(std::max(goal_dist, 0.f) / tau); // 0 near goal, 1 far
+    return std::clamp(near_safe + blend * (far_safe - near_safe), near_safe, far_safe);
 }
 
 float TrajectoryController::obstacle_step_cost(float esdf_val, float d_safe_eff) const
@@ -577,8 +578,6 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
     float ess_current = 0.f;
     float lambda_used = adaptive_lambda_;
     float dominance_current = 0.f;
-    float p_free_current = 0.f;
-    float steering_concentration_current = 0.f;
     float clearance_quality_current = 0.f;
     int num_collisions = 0;
     {
@@ -665,8 +664,6 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
                 clearance_quality = clear_acc / w_acc;
             }
         }
-        p_free_current = p_free;
-        steering_concentration_current = steering_concentration;
         clearance_quality_current = clearance_quality;
 
         // Dominance: feasibility × directional concentration (clearance excluded
@@ -795,6 +792,20 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
         cmd_rot = sum_rot / static_cast<float>(n_avg);
     }
 
+    const float carrot_heading = std::atan2(carrot_robot.x(), carrot_robot.y());
+    const float straight_heading_limit = std::max(active_params_.straight_speed_heading_threshold * 2.5f, 0.12f);
+    const float straight_rot_limit = std::max(0.30f * active_params_.max_rot, 0.08f);
+    const float straight_clearance_gate = active_params_.d_safe
+                                        + std::min(active_params_.straight_speed_clearance_margin, 0.05f);
+    const bool straight_clear_segment = std::abs(carrot_heading) < straight_heading_limit
+                                     && out.dist_to_goal > active_params_.straight_speed_min_goal_dist
+                                     && out.min_esdf > straight_clearance_gate
+                                     && num_collisions == 0
+                                     && clearance_quality_current > 0.75f
+                                     && std::abs(cmd_rot) < straight_rot_limit;
+    if (straight_clear_segment)
+        cmd_adv = std::max(cmd_adv, active_params_.max_adv);
+
     // 12. Viz: trajectories in room frame (subsample for drawing)
     {
         const Eigen::Matrix2f R = robot_pose.linear();
@@ -818,7 +829,9 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
     }
 
     // 13. Smooth + Gaussian brake
-    const float eff_smoothing = active_params_.velocity_smoothing;
+    float eff_smoothing = active_params_.velocity_smoothing;
+    if (straight_clear_segment)
+        eff_smoothing = std::min(eff_smoothing, 0.15f);
 
     Eigen::Vector3f raw(cmd_adv, 0.f, cmd_rot);
     if (has_prev_vel_)
@@ -1058,24 +1071,15 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
     if (++dbg % std::max(1, active_params_.debug_print_period) == 0)
     {
         std::cout << "[MPPI] K=" << adaptive_K_ << " T=" << adaptive_T_
-                  << " λ=" << std::fixed << std::setprecision(1) << adaptive_lambda_
-                  << " λw=" << std::setprecision(1) << lambda_used
                   << " ESS=" << std::setprecision(0) << ess_smooth_ << "/" << adaptive_K_
-                  << " Draw=" << std::setprecision(2) << dominance_current
-                  << " Ds=" << std::setprecision(2) << dominance_smooth_
-                  << " Pf=" << std::setprecision(2) << p_free_current
-                  << " Rθ=" << std::setprecision(2) << steering_concentration_current
-                  << " C=" << std::setprecision(2) << clearance_quality_current
-                  << " E=" << std::setprecision(2) << explore_
-                  << " SG=" << std::setprecision(2) << sg_gate
-                  << " Ws(" << std::setprecision(2) << ws_adv_eff << "," << ws_rot_eff << ")"
                   << " ncol=" << num_collisions << "/" << actual_K
-                  << " σr=" << std::setprecision(2) << adaptive_sigma_rot_
-                  << " G=" << std::setprecision(1) << best_G
-                  << " ms=" << std::setprecision(1) << last_mppi_ms_
+                  << " C=" << std::setprecision(2) << clearance_quality_current
+                  << " SG=" << std::setprecision(2) << sg_gate
                   << " cmd(" << std::setprecision(2) << out.adv << "," << out.rot << ")"
                   << " dist=" << std::setprecision(1) << out.dist_to_goal
-                  << " esdf=" << out.min_esdf << "\n";
+                  << " esdf=" << out.min_esdf
+                  << " mppi_ms=" << std::setprecision(1) << last_mppi_ms_
+                  << "\n";
     }
 
     return out;
@@ -1425,21 +1429,35 @@ TrajectoryController::SimResult TrajectoryController::simulate_and_score(
         const float G_obs = obstacle_step_cost(esdf_val, d_safe_eff);
 
         // Lateral-clearance shaping (continuous, pre-SG):
-        // sample ESDF on both sides of the predicted body center and penalize
-        // low side clearance and worsening side clearance trend.
+        // sample ESDF on both sides of the predicted body at front/center/rear
+        // stations. This lets the rollout feel obstacles while surpassing them,
+        // not only when they align with the body center.
         {
             const float probe_offset = std::max(0.f, active_params_.lateral_probe_offset);
             const float ct = std::cos(theta);
             const float st = std::sin(theta);
 
-            const float x_right = x + probe_offset * ct;
-            const float y_right = y - probe_offset * st;
-            const float x_left  = x - probe_offset * ct;
-            const float y_left  = y + probe_offset * st;
+            const Eigen::Vector2f forward(st, ct);
+            const Eigen::Vector2f right(ct, -st);
+            const std::array<float, 3> longitudinal_offsets = {
+                -std::max(0.f, active_params_.lateral_probe_rear_offset),
+                0.f,
+                std::max(0.f, active_params_.lateral_probe_front_offset)
+            };
 
-            const float d_right = query_esdf(x_right, y_right);
-            const float d_left  = query_esdf(x_left, y_left);
-            const float side_min = std::min(d_left, d_right);
+            float d_right_min = std::numeric_limits<float>::infinity();
+            float d_left_min = std::numeric_limits<float>::infinity();
+            for (const float longitudinal_offset : longitudinal_offsets)
+            {
+                const Eigen::Vector2f station = Eigen::Vector2f(x, y) + longitudinal_offset * forward;
+                const Eigen::Vector2f right_probe = station + probe_offset * right;
+                const Eigen::Vector2f left_probe  = station - probe_offset * right;
+
+                d_right_min = std::min(d_right_min, query_esdf(right_probe.x(), right_probe.y()));
+                d_left_min = std::min(d_left_min, query_esdf(left_probe.x(), left_probe.y()));
+            }
+
+            const float side_min = std::min(d_left_min, d_right_min);
 
             const float side_target = active_params_.robot_radius
                                     + std::max(0.f, active_params_.lateral_clearance_margin);
@@ -1450,6 +1468,15 @@ TrajectoryController::SimResult TrajectoryController::simulate_and_score(
             {
                 const float deficit = (side_target - side_min) / side_span;
                 G_lat_step += active_params_.lambda_lateral_clearance * deficit * deficit;
+            }
+
+            const float imbalance = std::abs(d_left_min - d_right_min);
+            if (imbalance > 1e-3f)
+            {
+                const float imbalance_norm = std::clamp(imbalance / side_span, 0.f, 1.5f);
+                G_lat_step += active_params_.lambda_lateral_clearance
+                            * std::max(0.f, active_params_.lateral_balance_gain)
+                            * imbalance_norm * imbalance_norm;
             }
 
             // Lateral closing-gain term — disabled; replaced by CBF below.
@@ -1865,6 +1892,12 @@ std::vector<Eigen::Vector3f> TrajectoryController::read_lidar_points_robot(const
     std::vector<Eigen::Vector3f> lidar_points;
     lidar_points.reserve(count);
 
+    const float self_filter_radius = std::max(active_params_.esdf_self_filter_radius,
+                                             active_params_.robot_radius + 0.08f);
+    const float self_filter_half_width = std::max(0.05f, active_params_.esdf_self_filter_half_width);
+    const float self_filter_front = std::max(0.05f, active_params_.esdf_self_filter_front);
+    const float self_filter_rear = std::max(0.05f, active_params_.esdf_self_filter_rear);
+
     for (std::size_t index = 0; index < count; ++index)
     {
         const float x_room = xs_room[index];
@@ -1874,6 +1907,17 @@ std::vector<Eigen::Vector3f> TrajectoryController::read_lidar_points_robot(const
             continue;
 
         const Eigen::Vector2f point_robot = robot_from_room * Eigen::Vector2f(x_room, y_room);
+
+        // Remove returns that fall inside the robot body envelope. These points
+        // are typically self-reflections or very near-body clutter and should
+        // not collapse the local ESDF around the robot center.
+        if (point_robot.norm() < self_filter_radius)
+            continue;
+        if (std::abs(point_robot.x()) < self_filter_half_width
+            && point_robot.y() > -self_filter_rear
+            && point_robot.y() < self_filter_front)
+            continue;
+
         lidar_points.emplace_back(point_robot.x(), point_robot.y(), z_room);
     }
 

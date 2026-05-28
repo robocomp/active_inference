@@ -168,6 +168,11 @@ void Viewer2D::set_lidar_visible(bool visible)
         clear_lidar_items();
 }
 
+void Viewer2D::set_mppi_paths_visible(bool visible)
+{
+    mppi_paths_visible_ = visible;
+}
+
 void Viewer2D::clear_lidar_items()
 {
     for (auto *item : lidar_items_)
@@ -254,6 +259,33 @@ void Viewer2D::draw_path(const PathDrawData &data)
 {
     clear_path_items();
     clear_polygon_item(inner_polygon_item_);
+
+    if (mppi_paths_visible_ && !data.candidate_trajectories.empty())
+    {
+        const int total = static_cast<int>(data.candidate_trajectories.size());
+        for (int index = 0; index < total; ++index)
+        {
+            const auto &trajectory = data.candidate_trajectories[index];
+            if (trajectory.size() < 2)
+                continue;
+
+            const bool is_best = index == data.best_trajectory_idx;
+            QColor color = is_best
+                ? QColor(255, 99, 71, 230)
+                : QColor::fromHsv((205 + (index * 37) % 120) % 360, 190, 230, 90);
+
+            QPen pen(color, is_best ? 0.07 : 0.035);
+            pen.setCosmetic(false);
+            for (std::size_t point_index = 0; point_index + 1 < trajectory.size(); ++point_index)
+            {
+                auto *line = agv_->scene.addLine(trajectory[point_index].x(), trajectory[point_index].y(),
+                                                 trajectory[point_index + 1].x(), trajectory[point_index + 1].y(),
+                                                 pen);
+                line->setZValue(is_best ? 24 : 16);
+                path_draw_items_.push_back(line);
+            }
+        }
+    }
 
     if (data.inner_poly.size() >= 3)
     {
