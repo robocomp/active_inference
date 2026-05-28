@@ -27,9 +27,15 @@
 #include <QMetaObject>
 #include <QVBoxLayout>
 
+#include <variant>
+
 namespace
 {
     constexpr auto kTimingReportInterval = std::chrono::seconds(10);
+    constexpr auto kRobotRefAdvSpeedAttr = "robot_ref_adv_speed";
+    constexpr auto kRobotRefRotSpeedAttr = "robot_ref_rot_speed";
+    constexpr auto kRobotRefSideSpeedAttr = "robot_ref_side_speed";
+    constexpr auto kRobotRefSpeedTimestampAttr = "robot_ref_speed_timestamp";
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -328,7 +334,7 @@ void SpecificWorker::initialize()
     // ── Connect DSR signals ────────────────────────────────────────────────
     connect(G.get(), &DSR::DSRGraph::update_node_signal,      this, &SpecificWorker::modify_node_slot);
     // connect(G.get(), &DSR::DSRGraph::update_edge_signal,      this, &SpecificWorker::modify_edge_slot);
-    // connect(G.get(), &DSR::DSRGraph::update_node_attr_signal, this, &SpecificWorker::modify_node_attrs_slot);
+    connect(G.get(), &DSR::DSRGraph::update_node_attr_signal, this, &SpecificWorker::modify_node_attrs_slot);
     // connect(G.get(), &DSR::DSRGraph::update_edge_attr_signal, this, &SpecificWorker::modify_edge_attrs_slot);
     // connect(G.get(), &DSR::DSRGraph::del_edge_signal,         this, &SpecificWorker::del_edge_slot);
     // connect(G.get(), &DSR::DSRGraph::del_node_signal,         this, &SpecificWorker::del_node_slot);
@@ -1175,6 +1181,68 @@ int SpecificWorker::startup_check()
     std::cout << "Startup check" << std::endl;
     QTimer::singleShot(200, QCoreApplication::instance(), SLOT(quit()));
     return 0;
+}
+
+void SpecificWorker::modify_node_attrs_slot(std::uint64_t id, const std::vector<std::string>& att_names)
+{
+    if (!G || id == 0)
+        return;
+
+    if (dsr_robot_id_ != 0 && id != dsr_robot_id_)
+        return;
+
+    const auto touches_robot_ref_attr = [&att_names]() {
+        return std::ranges::any_of(att_names, [](const std::string &name) {
+            return name == kRobotRefAdvSpeedAttr
+                || name == kRobotRefRotSpeedAttr
+                || name == kRobotRefSideSpeedAttr
+                || name == kRobotRefSpeedTimestampAttr;
+        });
+    };
+    if (!touches_robot_ref_attr())
+        return;
+
+    const auto node_opt = G->get_node(id);
+    if (!node_opt.has_value())
+        return;
+
+    const auto &attrs = node_opt->attrs();
+    const auto adv_it = attrs.find(kRobotRefAdvSpeedAttr);
+    const auto rot_it = attrs.find(kRobotRefRotSpeedAttr);
+    const auto side_it = attrs.find(kRobotRefSideSpeedAttr);
+    const auto ts_it = attrs.find(kRobotRefSpeedTimestampAttr);
+    if (adv_it == attrs.end() || rot_it == attrs.end() || side_it == attrs.end() || ts_it == attrs.end())
+        return;
+
+    const auto *adv_value = std::get_if<float>(&adv_it->second.value());
+    const auto *rot_value = std::get_if<float>(&rot_it->second.value());
+    const auto *side_value = std::get_if<float>(&side_it->second.value());
+    const auto *ts_value = std::get_if<std::uint64_t>(&ts_it->second.value());
+    if (adv_value == nullptr || rot_value == nullptr || side_value == nullptr || ts_value == nullptr)
+        return;
+
+    if (*ts_value == 0 || *ts_value <= last_robot_ref_speed_timestamp_)
+        return;
+
+    rc::VelocityCommand cmd;
+    cmd.adv_y = *adv_value;
+    cmd.rot = *rot_value;
+    cmd.adv_x = *side_value;
+    cmd.source_ts_ms = static_cast<std::int64_t>(*ts_value);
+    cmd.recv_ts_ms = static_cast<std::int64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+    cmd.timestamp = std::chrono::high_resolution_clock::time_point(
+        std::chrono::milliseconds(*ts_value));
+
+    velocity_buffer_.put<0>(std::move(cmd), *ts_value);
+    last_robot_ref_speed_timestamp_ = *ts_value;
+
+    qInfo() << "Robot reference speed received from DSR"
+            << "adv=" << *adv_value
+            << "side=" << *side_value
+            << "rot=" << *rot_value
+            << "ts=" << *ts_value;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

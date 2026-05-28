@@ -68,7 +68,7 @@ class SpecificWorker : public GenericWorker
         int  startup_check();
 
         void modify_node_slot(std::uint64_t id, const std::string &type);
-        void modify_node_attrs_slot(std::uint64_t id, const std::vector<std::string>& att_names){};
+        void modify_node_attrs_slot(std::uint64_t id, const std::vector<std::string>& att_names);
         void modify_edge_slot(std::uint64_t from, std::uint64_t to,  const std::string &type){};
         void modify_edge_attrs_slot(std::uint64_t from, std::uint64_t to, const std::string &type, const std::vector<std::string>& att_names){};
         void del_edge_slot(std::uint64_t from, std::uint64_t to, const std::string &edge_tag){};
@@ -124,6 +124,7 @@ class SpecificWorker : public GenericWorker
         rc::HighLidarBuffer high_lidar_buffer_{3};
         rc::VelocityBuffer velocity_buffer_{20};
         rc::OdometryBuffer odometry_buffer_{20};
+        std::uint64_t last_robot_ref_speed_timestamp_ = 0;
 
         // ── Lidar reader thread ─────────────────────────────────────────────────
         std::thread            read_lidar_th;
