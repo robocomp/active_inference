@@ -36,7 +36,7 @@
 #include <vector>
 
 #include "room_path_planner.h"
-#include "affordance_manager.h"
+#include "../../common/affordance_manager.h"
 #include "trajectory_controller.h"
 #include "viewer_2d.h"
 
@@ -116,6 +116,16 @@ private:
 		int max_lidar_draw_points = 600;
 		std::string lidar_name = "lidar3D";
 		std::string target_edge_type = "target";
+		float pose_xy_std_slow_m = 0.03f;
+		float pose_xy_std_stop_m = 0.12f;
+		float pose_theta_std_slow_rad = 0.04f;
+		float pose_theta_std_stop_rad = 0.20f;
+		float min_adv_speed_scale = 0.15f;
+		float min_rot_speed_scale = 0.05f;
+		float uncertainty_prediction_horizon_s = 0.4f;
+		float pose_xy_std_growth_per_mps = 0.5f;
+		float pose_theta_std_growth_per_rps = 1.0f;
+		float adv_rotation_coupling_exponent = 0.5f;
 	};
 
 	struct GraphState
@@ -159,6 +169,12 @@ private:
 		bool target_changed = false;
 	};
 
+	struct PoseUncertainty
+	{
+		float xy_std_m = 0.f;
+		float theta_std_rad = 0.f;
+	};
+
 	Params params;
 
 	/**
@@ -175,7 +191,8 @@ private:
 	std::optional<Eigen::Vector2f> current_target_room_;
 	std::optional<Eigen::Vector2f> manual_target_room_;
 	std::optional<Eigen::Vector2f> manual_target_origin_room_;
-	AffordanceManager affordance_manager_;
+	std::optional<TargetInfo> last_target_info_;
+	rc::AffordanceManager affordance_manager_;
 	bool path_following_active_ = false;
 	bool stop_sent_when_paused_ = false;
 	bool stop_command_latched_ = false;
@@ -202,6 +219,7 @@ private:
 	bool ensure_current_plan(const PlanningStep &step);
 	bool refresh_graph_state();
 	void update_custom_widget(const std::optional<RobotPose> &robot_pose);
+	static bool same_target_instance(const TargetInfo &lhs, const TargetInfo &rhs);
 	std::optional<std::vector<Eigen::Vector2f>> read_room_polygon() const;
 	Polygons read_obstacle_polygons(std::uint64_t timestamp_ms) const;
 	Polygon make_obstacle_polygon(const Eigen::Vector2f &center,
@@ -209,6 +227,8 @@ private:
 	                             float width_m,
 	                             float depth_m) const;
 	std::optional<RobotPose> read_robot_pose_in_room(std::uint64_t timestamp_ms) const;
+	std::optional<PoseUncertainty> read_pose_uncertainty() const;
+	void apply_uncertainty_speed_limit(float &adv_mm_s, float &side_mm_s, float &rot_rps) const;
 	std::optional<TargetInfo> read_target_in_room(std::uint64_t timestamp_ms);
 	void set_manual_target(const QPointF &point);
 	void clear_manual_target();

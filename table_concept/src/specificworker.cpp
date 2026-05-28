@@ -41,38 +41,36 @@
 // DSR attribute name tags — generated from dsr_attr_name.h
 #include <dsr/api/dsr_api.h>
 
-namespace
-{
-
-float clamp01(float value)
+float SpecificWorker::TableBeliefPolicy::clamp01(float value)
 {
     return std::clamp(value, 0.0f, 1.0f);
 }
 
-float lerp(float start, float end, float gain)
+float SpecificWorker::TableBeliefPolicy::lerp(float start, float end, float gain)
 {
     return start + gain * (end - start);
 }
 
-float wrap_angle(float angle)
+float SpecificWorker::TableBeliefPolicy::wrap_angle(float angle)
 {
     while (angle > M_PIf) angle -= 2.0f * M_PIf;
     while (angle < -M_PIf) angle += 2.0f * M_PIf;
     return angle;
 }
 
-float angle_lerp(float start, float end, float gain)
+float SpecificWorker::TableBeliefPolicy::angle_lerp(float start, float end, float gain)
 {
     return wrap_angle(start + gain * wrap_angle(end - start));
 }
 
-TableState apply_observability_warm_start(const TableState&            previous,
-                                          const TableState&            raw,
-                                          const TableModelParams&      params,
-                                          const AgentConfig&           cfg,
-                                          float                        confidence,
-                                          const std::array<float, 6>&  coverage,
-                                          int                          point_count)
+TableState SpecificWorker::TableBeliefPolicy::apply_observability_warm_start(
+    const TableState& previous,
+    const TableState& raw,
+    const TableModelParams& params,
+    const AgentConfig& cfg,
+    float confidence,
+    const std::array<float, 6>& coverage,
+    int point_count)
 {
     constexpr float kCoverageEps = 1e-3f;
 
@@ -116,12 +114,13 @@ TableState apply_observability_warm_start(const TableState&            previous,
     return accepted;
 }
 
-float update_warm_confidence(float                        previous_confidence,
-                             const AgentConfig&           cfg,
-                             const std::array<float, 6>&  coverage,
-                             int                          point_count,
-                             int                          residual_count,
-                             float                        residual_precision)
+float SpecificWorker::TableBeliefPolicy::update_warm_confidence(
+    float previous_confidence,
+    const AgentConfig& cfg,
+    const std::array<float, 6>& coverage,
+    int point_count,
+    int residual_count,
+    float residual_precision)
 {
     constexpr float kCoverageEps = 1e-3f;
 
@@ -148,8 +147,6 @@ float update_warm_confidence(float                        previous_confidence,
                           (1.0f - cfg.warm_confidence_decay) * evidence;
     return clamp01(updated);
 }
-
-} // namespace
 
 // ─── Constructor / Destructor ─────────────────────────────────────────────────
 
@@ -315,140 +312,179 @@ void SpecificWorker::compute()
         room_node_id_ = rooms.front().id();
     }
 
-    // Process every table node in the graph
     const auto table_nodes = G->get_nodes_by_type("table");
-    for (auto node : table_nodes)
+    for (const auto& node : table_nodes)
+        process_table_node(node);
+}
+
+///////////////////////////////////////////////////////////////
+void SpecificWorker::process_table_node(const DSR::Node& node)
+{
+    ensure_instance(node);
+
+    auto& inst = instances_.at(node.id());
+    const auto observation = observe_table_node(inst, node);
+
+    // Stale check: skip heavy update if data hasn't moved for too long
+    if (not observation.has_fresh_data and inst.matched_frames < 5)
+        return;
+
+    const float free_energy = run_table_inference(inst, observation);
+    publish_table_cycle(inst, node, observation, free_energy);
+    inst.prev_free_energy = free_energy;
+}
+
+SpecificWorker::TableObservation SpecificWorker::observe_table_node(TableInstance& inst,
+                                                                    const DSR::Node& node)
+{
+    TableObservation observation;
+
+    int last_frame = -1;
+    if (const auto v = G->get_attrib_by_name<last_sensing_frame_att>(node); v.has_value())
+        last_frame = v.value();
+
+    observation.has_fresh_data = (last_frame > inst.last_frame_seen);
+    if (not observation.has_fresh_data)
+        return observation;
+
+    inst.last_frame_seen = last_frame;
+    observation.candidate_pts = read_pts_attrib(node, "candidate_pts_att");
+    observation.residual_pts  = read_pts_attrib(node, "residual_pts_att");
+
+    if (const auto v = G->get_attrib_by_name<explanation_ratio_att>(node); v.has_value())
+        observation.explanation_ratio = v.value();
+
+    // ↓ Bottom-up: new sensory evidence arriving from robot_concept
+    std::print("[{}] ↓ frame={} cands={} resid={} expl={:.2f}\n",
+               inst.node_name, last_frame,
+               observation.candidate_pts.size(), observation.residual_pts.size(),
+               observation.explanation_ratio);
+    return observation;
+}
+
+float SpecificWorker::run_table_inference(TableInstance& inst,
+                                          const TableObservation& observation)
+{
+    if (observation.has_fresh_data and not observation.candidate_pts.empty())
     {
-        ensure_instance(node);
-
-        auto& inst = instances_.at(node.id());
-
-        // ① Read sensing attributes
-        std::vector<Eigen::Vector3f> candidate_pts;
-        std::vector<Eigen::Vector3f> residual_pts;
-        float explanation_ratio = 1.0f;
-
-        // Read last frame stamp to detect fresh data
-        int last_frame = -1;
-        if (const auto v = G->get_attrib_by_name<last_sensing_frame_att>(node); v.has_value())
-            last_frame = v.value();
-
-        bool has_fresh_data = (last_frame > inst.last_frame_seen);
-
-        if (has_fresh_data)
+        // Cold-start: on first observation snap model & prior to voxel centroid
+        // so gradient descent begins at the right place rather than the prior.
+        if (inst.matched_frames == 0)
         {
-            inst.last_frame_seen = last_frame;
-
-            candidate_pts = read_pts_attrib(node, "candidate_pts_att");
-            residual_pts  = read_pts_attrib(node, "residual_pts_att");
-
-            if (const auto v = G->get_attrib_by_name<explanation_ratio_att>(node); v.has_value())
-                explanation_ratio = v.value();
-
-            // ↓ Bottom-up: new sensory evidence arriving from robot_concept
-            std::print("[{}] \u2193 frame={} cands={} resid={} expl={:.2f}\n",
-                       inst.node_name, last_frame,
-                       candidate_pts.size(), residual_pts.size(),
-                       explanation_ratio);
+            Eigen::Vector3f sum = Eigen::Vector3f::Zero();
+            for (const auto& p : observation.candidate_pts)
+                sum += p;
+            const Eigen::Vector3f cen = sum / static_cast<float>(observation.candidate_pts.size());
+            auto s  = inst.model.state();
+            s.cx    = cen.x();
+            s.cy    = cen.y();
+            inst.model.set_state(s);
+            inst.model.set_prior(s);   // zero KL so data term dominates from the start
+            std::print("[{}] cold-start snap → cx={:.2f} cy={:.2f} ({} pts)\n",
+                       inst.node_name, s.cx, s.cy, observation.candidate_pts.size());
+            // Pose is already correct: bypass warmup gate AND progress ramp
+            // so the queue admits up to max_new_points_per_frame immediately.
+            inst.matched_frames = cfg_.min_frames_before_historical
+                                + cfg_.historical_warmup_frames + 1;
         }
+        else
+            ++inst.matched_frames;
 
-        // Stale check: skip heavy update if data hasn't moved for too long
-        if (not has_fresh_data and inst.matched_frames < 5)
-            continue;
+        step_queue_update(inst, observation.candidate_pts,
+                          TableBeliefPolicy::clamp01(observation.explanation_ratio));
+    }
 
-        // ② Update queue with fresh candidates
-        if (has_fresh_data and not candidate_pts.empty())
-        {
-            // Cold-start: on first observation snap model & prior to voxel centroid
-            // so gradient descent begins at the right place rather than the prior.
-            if (inst.matched_frames == 0)
-            {
-                Eigen::Vector3f sum = Eigen::Vector3f::Zero();
-                for (const auto& p : candidate_pts)
-                    sum += p;
-                const Eigen::Vector3f cen = sum / static_cast<float>(candidate_pts.size());
-                auto s  = inst.model.state();
-                s.cx    = cen.x();
-                s.cy    = cen.y();
-                inst.model.set_state(s);
-                inst.model.set_prior(s);   // zero KL so data term dominates from the start
-                std::print("[{}] cold-start snap → cx={:.2f} cy={:.2f} ({} pts)\n",
-                           inst.node_name, s.cx, s.cy, candidate_pts.size());
-                // Pose is already correct: bypass warmup gate AND progress ramp
-                // so the queue admits up to max_new_points_per_frame immediately.
-                inst.matched_frames = cfg_.min_frames_before_historical
-                                    + cfg_.historical_warmup_frames + 1;
-            }
-            else
-                ++inst.matched_frames;
-            step_queue_update(inst, candidate_pts, clamp01(explanation_ratio));
-        }
+    const float residual_precision = TableBeliefPolicy::clamp01(
+        inst.warm_confidence * TableBeliefPolicy::clamp01(observation.explanation_ratio));
+    const float free_energy = step_model_update(inst, observation.residual_pts, residual_precision);
 
-        // ③ Model update (gradient steps over queue + residual points)
-        const float residual_precision = clamp01(inst.warm_confidence * clamp01(explanation_ratio));
-        const float free_energy = step_model_update(inst, residual_pts, residual_precision);
-        {
-            // ↑ Top-down: model state after gradient descent
-            const auto& s = inst.model.state();
-            std::print("[{}] FE={:.4f}  cx={:.3f} cy={:.3f}  w={:.3f} h={:.3f} H={:.3f} L={:.3f} ψ={:.3f}  pts={}\n",
-                       inst.node_name, free_energy,
-                       s.cx, s.cy, s.w, s.h, s.table_height, s.leg_length, s.yaw,
-                       inst.queue.size() + static_cast<int>(residual_pts.size()));
-        }
+    // ↑ Top-down: model state after gradient descent
+    const auto& s = inst.model.state();
+    std::print("[{}] FE={:.4f}  cx={:.3f} cy={:.3f}  w={:.3f} h={:.3f} H={:.3f} L={:.3f} ψ={:.3f}  pts={}\n",
+               inst.node_name, free_energy,
+               s.cx, s.cy, s.w, s.h, s.table_height, s.leg_length, s.yaw,
+               inst.queue.size() + static_cast<int>(observation.residual_pts.size()));
 
-        // ④ Write model params to DSR
-        {
-            // Re-fetch node to get a fresh mutable copy
-            auto node_opt = G->get_node(node.id());
-            if (not node_opt.has_value()) continue;
-            step_write_model(inst, node_opt.value(), free_energy);
-        }
+    return free_energy;
+}
 
-        // ⑤ Convergence check
-        {
-            auto node_opt = G->get_node(node.id());
-            if (not node_opt.has_value()) continue;
-            step_convergence(inst, node_opt.value(), free_energy);
-        }
+void SpecificWorker::publish_table_cycle(TableInstance& inst,
+                                         const DSR::Node& node,
+                                         const TableObservation& observation,
+                                         float free_energy)
+{
+    const auto node_id = node.id();
+    if (not persist_table_belief(inst, node_id, free_energy))
+        return;
+    if (not assess_table_state(inst, node_id, free_energy))
+        return;
+    publish_table_diagnostics(inst, observation, free_energy);
+    publish_table_intentions(inst, node_id, observation, free_energy);
+}
 
-        // ⑥ Feed time-series plot
-        if (ts_plot_)
-        {
-            ts_plot_->add_point(inst.node_name + "_fe",  free_energy);
-            if (ts_cov_plot_)
-                ts_cov_plot_->add_point(inst.node_name + "_cov", inst.last_coverage_deficit);
-            if (ts_res_plot_)
-                ts_res_plot_->add_point(inst.node_name + "_res", static_cast<float>(residual_pts.size()));
-        }
+bool SpecificWorker::persist_table_belief(TableInstance& inst, uint64_t node_id, float free_energy)
+{
+    auto node_opt = G->get_node(node_id);
+    if (not node_opt.has_value())
+        return false;
 
-        std::print("[{}] series: FE={:.4f} cov={:.1f} res={}\n",
-                   inst.node_name,
-                   free_energy,
-                   inst.last_coverage_deficit,
-                   residual_pts.size());
+    step_write_model(inst, node_opt.value(), free_energy);
+    return true;
+}
 
-        // ⑦ Epistemic planning — driven by coverage deficit, independent of stability
-        if (inst.last_coverage_deficit > 0.f)
-        {
-            auto node_opt = G->get_node(node.id());
-            if (node_opt.has_value())
-                step_epistemic(inst, node_opt.value());
-        }
-        else if (inst.affordance.is_active())
-        {
-            // All faces covered — remove the epistemic action request
-            inst.affordance.remove();
-        }
+bool SpecificWorker::assess_table_state(TableInstance& inst, uint64_t node_id, float free_energy)
+{
+    auto node_opt = G->get_node(node_id);
+    if (not node_opt.has_value())
+        return false;
 
-        // ⑦ Refresh / divergence check
-        if (has_fresh_data)
-        {
-            auto node_opt = G->get_node(node.id());
-            if (node_opt.has_value())
-                step_refresh_check(inst, node_opt.value(), free_energy, explanation_ratio);
-        }
+    step_convergence(inst, node_opt.value(), free_energy);
+    return true;
+}
 
-        inst.prev_free_energy = free_energy;
+void SpecificWorker::publish_table_diagnostics(const TableInstance& inst,
+                                               const TableObservation& observation,
+                                               float free_energy)
+{
+
+    if (ts_plot_)
+    {
+        ts_plot_->add_point(inst.node_name + "_fe",  free_energy);
+        if (ts_cov_plot_)
+            ts_cov_plot_->add_point(inst.node_name + "_cov", inst.last_coverage_deficit);
+        if (ts_res_plot_)
+            ts_res_plot_->add_point(inst.node_name + "_res", static_cast<float>(observation.residual_pts.size()));
+    }
+
+    std::print("[{}] series: FE={:.4f} cov={:.1f} res={}\n",
+               inst.node_name,
+               free_energy,
+               inst.last_coverage_deficit,
+               observation.residual_pts.size());
+}
+
+void SpecificWorker::publish_table_intentions(TableInstance& inst,
+                                              uint64_t node_id,
+                                              const TableObservation& observation,
+                                              float free_energy)
+{
+    if (inst.last_coverage_deficit > 0.f)
+    {
+        auto node_opt = G->get_node(node_id);
+        if (node_opt.has_value())
+            step_epistemic(inst, node_opt.value());
+    }
+    else if (inst.affordance.is_active())
+    {
+        // All faces covered — remove the epistemic action request
+        inst.affordance.remove();
+    }
+
+    if (observation.has_fresh_data)
+    {
+        auto node_opt = G->get_node(node_id);
+        if (node_opt.has_value())
+            step_refresh_check(inst, node_opt.value(), free_energy, observation.explanation_ratio);
     }
 }
 
@@ -494,6 +530,18 @@ void SpecificWorker::load_config(const ConfigLoader& cfg)
     cfg_.grad_clip          = getf("TableModel.GradClip",          2.0f);
     cfg_.optimizer_type     = gets("TableModel.OptimizerType",     "adam");
     cfg_.sgd_momentum       = getf("TableModel.SgdMomentum",       0.9f);
+    {
+        const auto loss_name = gets("TableModel.RobustLoss", "quadratic");
+        const auto loss_type = robust_loss_type_from_string(loss_name);
+        if (loss_type.has_value())
+            cfg_.robust_loss = loss_type.value();
+        else
+        {
+            qWarning() << "table_concept: unknown robust loss" << loss_name.c_str() << "- using quadratic";
+            cfg_.robust_loss = RobustLossType::Quadratic;
+        }
+    }
+    cfg_.robust_loss_scale  = getf("TableModel.RobustLossScale",  0.10f);
 
     // SampleQueue
     cfg_.num_angle_bins               = geti("SampleQueue.NumAngleBins",              24);
@@ -509,19 +557,19 @@ void SpecificWorker::load_config(const ConfigLoader& cfg)
     cfg_.edge_proximity_threshold     = getf("SampleQueue.EdgeProximityThreshold",    0.05f);
 
     // WarmStart
-    cfg_.warm_pts_min                 = getf("WarmStart.PtsMin",                 12.0f);
-    cfg_.warm_pts_max                 = getf("WarmStart.PtsMax",                 30.0f);
-    cfg_.warm_coverage_min_side       = getf("WarmStart.CoverageMinSide",        2.0f);
-    cfg_.warm_rho_freeze              = getf("WarmStart.RhoFreeze",              0.25f);
-    cfg_.warm_lambda_pos_base         = getf("WarmStart.LambdaPosBase",          0.15f);
-    cfg_.warm_lambda_pos_gain         = getf("WarmStart.LambdaPosGain",          0.45f);
-    cfg_.warm_lambda_size_base        = getf("WarmStart.LambdaSizeBase",         0.02f);
-    cfg_.warm_lambda_size_gain        = getf("WarmStart.LambdaSizeGain",         0.18f);
-    cfg_.warm_lambda_yaw_base         = getf("WarmStart.LambdaYawBase",          0.01f);
-    cfg_.warm_lambda_yaw_gain         = getf("WarmStart.LambdaYawGain",          0.12f);
-    cfg_.warm_confidence_decay         = getf("WarmStart.ConfidenceDecay",        0.70f);
-    cfg_.warm_confidence_coverage_gain  = getf("WarmStart.ConfidenceCoverageGain", 0.35f);
-    cfg_.warm_confidence_residual_gain  = getf("WarmStart.ConfidenceResidualGain", 0.65f);
+    cfg_.warm_pts_min                  = getf("WarmStart.PtsMin",                  12.0f);
+    cfg_.warm_pts_max                  = getf("WarmStart.PtsMax",                  30.0f);
+    cfg_.warm_coverage_min_side        = getf("WarmStart.CoverageMinSide",         2.0f);
+    cfg_.warm_rho_freeze               = getf("WarmStart.RhoFreeze",               0.25f);
+    cfg_.warm_lambda_pos_base          = getf("WarmStart.LambdaPosBase",           0.15f);
+    cfg_.warm_lambda_pos_gain          = getf("WarmStart.LambdaPosGain",           0.45f);
+    cfg_.warm_lambda_size_base         = getf("WarmStart.LambdaSizeBase",          0.02f);
+    cfg_.warm_lambda_size_gain         = getf("WarmStart.LambdaSizeGain",          0.18f);
+    cfg_.warm_lambda_yaw_base          = getf("WarmStart.LambdaYawBase",           0.01f);
+    cfg_.warm_lambda_yaw_gain          = getf("WarmStart.LambdaYawGain",           0.12f);
+    cfg_.warm_confidence_decay         = getf("WarmStart.ConfidenceDecay",         0.70f);
+    cfg_.warm_confidence_coverage_gain = getf("WarmStart.ConfidenceCoverageGain",  0.35f);
+    cfg_.warm_confidence_residual_gain = getf("WarmStart.ConfidenceResidualGain",  0.65f);
 
     std::print("table_concept: configuration loaded.\n");
 }
@@ -708,65 +756,96 @@ float SpecificWorker::step_model_update(TableInstance& inst,
 {
     const TableState previous_state = inst.model.state();
 
-    // Historical queue points are the trusted fitting set. Residuals are only
-    // used to steer the optimizer when they arrive together with explanatory
-    // support; otherwise they remain as evaluation-only mismatch evidence.
-    auto fit_pts     = inst.queue.points();
-    auto fit_weights = inst.queue.weights();
-    auto eval_pts    = fit_pts;
-    auto eval_weights = fit_weights;
-
-    for (const auto& rp : residual_pts)
+    const auto evidence = compose_belief_evidence(inst, residual_pts, residual_precision);
+    if (not evidence.has_evaluation())
     {
-        eval_pts.push_back(rp);
-        eval_weights.push_back(1.0f);   // residual points get uniform weight
+        refresh_table_memory(inst);
+        return inst.model.compute_free_energy({}, {});
+    }
+
+    evolve_table_belief(inst, evidence);
+    const float free_energy = accept_table_belief(inst, previous_state, evidence);
+    refresh_table_memory(inst);
+    return free_energy;
+}
+
+SpecificWorker::TableBeliefEvidence SpecificWorker::compose_belief_evidence(
+    const TableInstance& inst,
+    const std::vector<Eigen::Vector3f>& residual_pts,
+    float residual_precision) const
+{
+    TableBeliefEvidence evidence;
+    evidence.fit_pts = inst.queue.points();
+    evidence.fit_weights = inst.queue.weights();
+    evidence.eval_pts = evidence.fit_pts;
+    evidence.eval_weights = evidence.fit_weights;
+    evidence.residual_count = static_cast<int>(residual_pts.size());
+    evidence.residual_precision = residual_precision;
+
+    for (const auto& residual_pt : residual_pts)
+    {
+        evidence.eval_pts.push_back(residual_pt);
+        evidence.eval_weights.push_back(1.0f);
         if (residual_precision > 1e-3f)
         {
-            fit_pts.push_back(rp);
-            fit_weights.push_back(residual_precision);
+            evidence.fit_pts.push_back(residual_pt);
+            evidence.fit_weights.push_back(residual_precision);
         }
     }
 
-    float fe = inst.model.compute_free_energy({}, {});
-    if (not eval_pts.empty())
-    {
-        // Freeze gradient descent once converged to prevent oscillation.
-        // Unlocked automatically by step_queue_update when new points arrive.
-        if (inst.frames_converged < cfg_.K_stable && not fit_pts.empty())
-            fe = inst.model.gradient_step(fit_pts, fit_weights);
-        else
-            fe = inst.model.compute_free_energy(fit_pts, fit_weights);
+    evidence.trusted_point_count = static_cast<int>(evidence.fit_pts.size());
+    return evidence;
+}
 
-        const TableState raw_state = inst.model.state();
-        const auto coverage = inst.queue.face_coverage(inst.model);
-        inst.warm_confidence = update_warm_confidence(inst.warm_confidence, cfg_, coverage,
-                                                       static_cast<int>(fit_pts.size()),
-                                                       static_cast<int>(residual_pts.size()),
-                                                       residual_precision);
-        const TableState accepted_state = apply_observability_warm_start(
-            previous_state, raw_state, inst.model.params(), cfg_, inst.warm_confidence,
-            coverage, static_cast<int>(fit_pts.size()));
-        inst.model.set_state(accepted_state);
-        inst.model.set_prior(accepted_state);
-        fe = inst.model.compute_free_energy(eval_pts, eval_weights);
+void SpecificWorker::evolve_table_belief(TableInstance& inst, const TableBeliefEvidence& evidence)
+{
+    // Freeze gradient descent once converged to prevent oscillation.
+    // Unlocked automatically by step_queue_update when new points arrive.
+    if (inst.frames_converged < cfg_.K_stable && evidence.can_optimize())
+        inst.model.gradient_step(evidence.fit_pts, evidence.fit_weights);
+    else
+        inst.model.compute_free_energy(evidence.fit_pts, evidence.fit_weights);
+}
 
-        std::print("[{}] warm-start: conf={:.2f} rho_x={:.2f} rho_y={:.2f} residual={} trusted_pts={} residual_precision={:.2f} raw(w={:.3f},h={:.3f},psi={:.3f}) accepted(w={:.3f},h={:.3f},psi={:.3f})\n",
-                   inst.node_name,
-                   inst.warm_confidence,
-                   std::min(coverage[0], coverage[1]) / (std::max(coverage[0], coverage[1]) + 1e-3f),
-                   std::min(coverage[2], coverage[3]) / (std::max(coverage[2], coverage[3]) + 1e-3f),
-                   residual_pts.size(),
-               fit_pts.size(),
-               residual_precision,
-                   raw_state.w, raw_state.h, raw_state.yaw,
-                   accepted_state.w, accepted_state.h, accepted_state.yaw);
-    }
+float SpecificWorker::accept_table_belief(TableInstance& inst,
+                                          const TableState& previous_state,
+                                          const TableBeliefEvidence& evidence)
+{
+    const TableState raw_state = inst.model.state();
+    const auto coverage = inst.queue.face_coverage(inst.model);
 
-    // Update RFE for all stored points
+    inst.warm_confidence = TableBeliefPolicy::update_warm_confidence(
+        inst.warm_confidence, cfg_, coverage,
+        evidence.trusted_point_count,
+        evidence.residual_count,
+        evidence.residual_precision);
+
+    const TableState accepted_state = TableBeliefPolicy::apply_observability_warm_start(
+        previous_state, raw_state, inst.model.params(), cfg_, inst.warm_confidence,
+        coverage, evidence.trusted_point_count);
+    inst.model.set_state(accepted_state);
+    inst.model.set_prior(accepted_state);
+
+    const float free_energy = inst.model.compute_free_energy(evidence.eval_pts, evidence.eval_weights);
+
+    std::print("[{}] warm-start: conf={:.2f} rho_x={:.2f} rho_y={:.2f} residual={} trusted_pts={} residual_precision={:.2f} raw(w={:.3f},h={:.3f},psi={:.3f}) accepted(w={:.3f},h={:.3f},psi={:.3f})\n",
+               inst.node_name,
+               inst.warm_confidence,
+               std::min(coverage[0], coverage[1]) / (std::max(coverage[0], coverage[1]) + 1e-3f),
+               std::min(coverage[2], coverage[3]) / (std::max(coverage[2], coverage[3]) + 1e-3f),
+               evidence.residual_count,
+               evidence.trusted_point_count,
+               evidence.residual_precision,
+               raw_state.w, raw_state.h, raw_state.yaw,
+               accepted_state.w, accepted_state.h, accepted_state.yaw);
+
+    return free_energy;
+}
+
+void SpecificWorker::refresh_table_memory(TableInstance& inst)
+{
     const Eigen::Matrix2f robot_cov = read_robot_covariance();
     inst.queue.update_rfe(inst.model, robot_cov);
-
-    return fe;
 }
 
 void SpecificWorker::step_write_model(TableInstance& inst,
@@ -1078,6 +1157,8 @@ TableModelParams SpecificWorker::make_model_params() const
     p.grad_clip          = cfg_.grad_clip;
     p.optimizer_type     = cfg_.optimizer_type;
     p.sgd_momentum       = cfg_.sgd_momentum;
+    p.robust_loss        = cfg_.robust_loss;
+    p.robust_loss_scale  = cfg_.robust_loss_scale;
     return p;
 }
 

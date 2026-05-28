@@ -118,6 +118,7 @@ private:
     bool startup_check_flag  = false;
     bool verbose_debug_      = false;
     bool voxels_node_ready_  = false;
+    bool include_lidar3d_in_voxels_ = true;
 
     std::shared_ptr<DSR::InnerEigenAPI> inner_eigen_api;
 

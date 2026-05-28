@@ -3,9 +3,11 @@
 #include <pinocchio/multibody/model.hpp>
 #include <pinocchio/multibody/data.hpp>
 #include <Eigen/Dense>
+#include <Eigen/Geometry>
 #include <array>
 #include <memory>
 #include <string>
+#include <vector>
 
 /**
  * Rigid-body kinematics wrapper around Pinocchio for the Kinova Gen3
@@ -67,6 +69,21 @@ public:
         Eigen::Matrix3d rotation;
     };
     ToolPose tool_pose(const std::array<double, N_ARM_JOINTS>& angles);
+
+    struct MeshLinkPose
+    {
+        std::string mesh_filename;
+        Eigen::Isometry3d pose;
+    };
+
+    /** Mesh poses in world coordinates for visual arm links. */
+    std::vector<MeshLinkPose> arm_mesh_link_poses(
+        const std::array<double, N_ARM_JOINTS>& angles);
+
+    /** World-space points for a lightweight arm skeleton visualization.
+     *  Order: world origin, joint_1..joint_7 origins, tool_frame origin. */
+    std::vector<Eigen::Vector3d> arm_skeleton_points(
+        const std::array<double, N_ARM_JOINTS>& angles);
 
     /** idx_v of each arm joint inside the full nv-vector (Pinocchio ordering). */
     std::array<int, N_ARM_JOINTS> arm_joint_idx_v() const;

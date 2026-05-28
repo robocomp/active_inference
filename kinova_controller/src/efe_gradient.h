@@ -27,13 +27,21 @@
  */
 struct EFEParams
 {
-    /** α_p — scalar position gain. Equivalent to a diagonal C_inv = α_p I_3. */
-    double gain_pos = 4.0;
+    /** Per-axis position precision (the C⁻¹ diagonal in AIF terms).
+     *  Different weights per axis let orientation converge without fighting
+     *  the position gradient: relax x/y (arm reaches there easily) and
+     *  tighten z (approach direction matters most for table-surface tasks).
+     *  This is the principled fix for slow orientation convergence: once
+     *  x/y precision is relaxed, the orientation gradient dominates and
+     *  drives the tool to pointing down without being cancelled by position.
+     *  Default: x=4, y=4, z=8 — twice as precise on approach axis. */
+    Eigen::Vector3d C_pos{4.0, 4.0, 8.0};
 
     /** α_o — scalar orientation gain on the partial alignment cost
-     *  C_orient = 1 − z_tool · z_des. Set to 0 to disable orientation tracking
-     *  (pure position control as before). */
-    double gain_orient = 0.3;
+     *  C_orient = 1 − z_tool · z_des. Restored to 1.0 (was lowered to 0.3
+     *  to fight chatter caused by the old scalar gain_pos at 100 ms period;
+     *  with anisotropic C_pos and 20 ms period the conflict is resolved). */
+    double gain_orient = 1.0;
 
     /** Desired approach direction in world frame. The tool's local z-axis
      *  (its "approach" direction) is driven to align with this. Default
@@ -41,8 +49,10 @@ struct EFEParams
      *  table surface). */
     Eigen::Vector3d desired_approach{0.0, 0.0, -1.0};
 
-    /** Cap per-joint |q̇| (rad/s). Defaults below URDF's ~1.4 rad/s for safety. */
-    double max_joint_vel = 0.5;
+    /** Cap per-joint |q̇| (rad/s). Webots proto maxVelocity = 0.8727 rad/s;
+     *  bridge homing uses 0.8 safely. Setting to 0.8 here matches that and
+     *  roughly halves convergence time vs 0.5 (joints were already saturated). */
+    double max_joint_vel = 0.87;
 
     /** Distance (rad) from a joint limit at which repulsion activates. */
     double limit_margin = 0.10;

@@ -30,6 +30,7 @@ FIND_PACKAGE( Ice REQUIRED COMPONENTS Ice++11 IceStorm++11)
 # Sources set
 SET (SOURCES
   ${SOURCES}
+  ../src/arm_belief_viewer_3d.cpp
   $ENV{ROBOCOMP}/classes/rapplication/rapplication.cpp
   $ENV{ROBOCOMP}/classes/sigwatch/sigwatch.cpp
   $ENV{ROBOCOMP}/classes/grafcetStep/GRAFCETStep.cpp

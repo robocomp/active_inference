@@ -32,6 +32,7 @@
 
 #include "kinematics.h"
 #include "efe_gradient.h"
+#include "arm_belief_viewer_3d.h"
 
 #include <Eigen/Dense>
 #include <memory>
@@ -99,6 +100,7 @@ private:
 	bool startup_check_flag;
 
 	std::unique_ptr<Kinematics> kinematics_;
+	std::unique_ptr<ArmBeliefViewer3D> arm_belief_viewer_;
 
 	// EFE-reach test target — arm-base frame, metres.
 	// The arm base is mounted on the desk top, so arm-base-z = 0 IS the
@@ -121,6 +123,23 @@ private:
 	int homing_settled_ticks_ = 0;
 	static constexpr double HOMING_TOLERANCE_RAD = 0.05;  // ≈ 2.9°
 	static constexpr int    HOMING_SETTLE_TICKS  = 5;     // consecutive cycles within tolerance
+
+	// Extended cycle test:  random table spot  →  rest pose  ×  CYCLES_MAX
+	// CycleMode drives the sub-state machine inside Phase::ActiveEFE.
+	enum class CycleMode { ReachingTarget, SendingReturn, Returning, Done };
+	CycleMode cycle_mode_ = CycleMode::ReachingTarget;
+	int  cycles_done_     = 0;
+	static constexpr int    CYCLES_MAX        = 10;
+	static constexpr double REACH_TOLERANCE_M = 0.02;   // 2 cm — "arrived"
+	int  return_settled_ticks_ = 0;
+	Eigen::Vector3d rest_pose_ee_;    // FK at rest_pose_angles_, set in initialize()
+	// Random reachable table-surface targets (arm-base frame, z = 0.10):
+	//   x ∈ [0.20, 0.50],  y ∈ [−0.15, +0.15]
+	std::mt19937 rng_{std::random_device{}()};
+	Eigen::Vector3d pick_random_table_target();
+	static constexpr double TGT_X_MIN = 0.20, TGT_X_MAX = 0.50;
+	static constexpr double TGT_Y_MIN =-0.15, TGT_Y_MAX = 0.15;
+	static constexpr double TGT_Z     = 0.10;
 
 signals:
 	//void customSignal();

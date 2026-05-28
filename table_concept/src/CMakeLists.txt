@@ -22,6 +22,7 @@ find_package(Torch REQUIRED)
 
 # Sources set
 LIST(APPEND SOURCES
+  ../src/robust_loss.cpp
   ../src/specificworker.cpp
   ../src/table_model.cpp
   ../src/sample_queue.cpp
@@ -33,6 +34,8 @@ LIST(APPEND SOURCES
 
 # Headers set
 LIST(APPEND HEADERS
+  ../src/robust_loss.h
+  ../src/robust_loss_torch.h
   ../src/specificworker.h
   ../src/table_model.h
   ../src/sample_queue.h

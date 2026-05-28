@@ -20,7 +20,12 @@
 
 #include <cmath>
 #include <print>
+#include <random>
 #include <stdexcept>
+
+// The generated cbuild target is not materializing this source as a standalone
+// object, so compile it once here to keep the viewer implementation linked.
+#include "arm_belief_viewer_3d.cpp"
 
 namespace
 {
@@ -114,6 +119,10 @@ void SpecificWorker::initialize()
 	***/
 	//If you have more than one graph, you need to connect to the specific graph with the name
 	//graph_viewers.at("")->add_custom_widget_to_dock("CustomWidget", &custom_widget);
+    arm_belief_viewer_ = std::make_unique<ArmBeliefViewer3D>();
+    arm_belief_viewer_->set_mesh_root("/home/pbustos/robocomp/components/webots-p3bot/protos/kinova_arm_meshes");
+    if (graph_viewers.contains(""))
+        graph_viewers.at("")->add_custom_widget_to_dock("beliefs_3d", arm_belief_viewer_.get());
 
     //initializeCODE
     /////////GET PARAMS, OPEND DEVICES....////////
@@ -136,8 +145,27 @@ void SpecificWorker::initialize()
         std::print(stderr, "[Kinematics] FATAL: {}\n", e.what());
         throw;
     }
+
+    // Pre-compute FK at the rest pose so the cycle test knows where "home" is
+    // in task space without calling FK every return-checking cycle.
+    rest_pose_ee_ = kinematics_->forward_kinematics(rest_pose_angles_);
+    std::print("[init] rest_pose_ee = [{:+.4f}, {:+.4f}, {:+.4f}] m\n",
+               rest_pose_ee_.x(), rest_pose_ee_.y(), rest_pose_ee_.z());
+
+    // First target is random; subsequent ones are picked at the end of each
+    // return leg.
+    reach_target_ = pick_random_table_target();
+    std::print("[cycle 0/{} ] first target = [{:+.3f}, {:+.3f}, {:+.3f}]\n",
+               CYCLES_MAX, reach_target_.x(), reach_target_.y(), reach_target_.z());
 }
 
+
+Eigen::Vector3d SpecificWorker::pick_random_table_target()
+{
+    std::uniform_real_distribution<double> dx(TGT_X_MIN, TGT_X_MAX);
+    std::uniform_real_distribution<double> dy(TGT_Y_MIN, TGT_Y_MAX);
+    return {dx(rng_), dy(rng_), TGT_Z};
+}
 
 void SpecificWorker::compute()
 {
@@ -164,6 +192,15 @@ void SpecificWorker::compute()
         std::array<double, Kinematics::N_ARM_JOINTS> q{};
         for (int i = 0; i < Kinematics::N_ARM_JOINTS; ++i)
             q[i] = js.joints[i].angle;
+
+        const auto mesh_link_poses = kinematics_->arm_mesh_link_poses(q);
+        std::vector<ArmBeliefViewer3D::LinkPose> viewer_link_poses;
+        viewer_link_poses.reserve(mesh_link_poses.size());
+        for (const auto& lp : mesh_link_poses)
+            viewer_link_poses.push_back({lp.mesh_filename, lp.pose});
+        const auto ee_position = kinematics_->forward_kinematics(q);
+        if (arm_belief_viewer_)
+            arm_belief_viewer_->update_beliefs(q, viewer_link_poses, reach_target_, ee_position);
 
         if (joint_dump_pending_)
         {
@@ -217,7 +254,72 @@ void SpecificWorker::compute()
             return;   // do NOT run EFE while homing
         }
 
-        // ── EFE-reach control (Phase::ActiveEFE) ────────────────────────────
+        // ── Cycle test sub-state machine (Phase::ActiveEFE) ─────────────────
+
+        if (cycle_mode_ == CycleMode::Done)
+        {
+            // All cycles finished — send zero velocities and idle.
+            static bool done_printed = false;
+            if (not done_printed)
+            {
+                std::print("[cycle] All {}/{} cycles complete. Agent idling.\n",
+                           cycles_done_, CYCLES_MAX);
+                done_printed = true;
+            }
+            return;
+        }
+
+        if (cycle_mode_ == CycleMode::SendingReturn)
+        {
+            // Initiate joint-space return to rest pose (same mechanism as
+            // initial homing so the arm reliably recovers the elbow-up config).
+            RoboCompKinovaArm::TJointAngles target;
+            target.jointAngles.assign(rest_pose_angles_.begin(), rest_pose_angles_.end());
+            kinovaarm_proxy->moveJointsWithAngle(target);
+            std::print("[cycle {}/{}] Returning to rest pose…\n",
+                       cycles_done_, CYCLES_MAX);
+            return_settled_ticks_ = 0;
+            cycle_mode_ = CycleMode::Returning;
+            proxy_unreachable_warned_ = false;
+            return;
+        }
+
+        if (cycle_mode_ == CycleMode::Returning)
+        {
+            double max_err = 0.0;
+            for (int i = 0; i < Kinematics::N_ARM_JOINTS; ++i)
+                max_err = std::max(max_err, angular_distance(q[i], rest_pose_angles_[i]));
+            if (max_err < HOMING_TOLERANCE_RAD)
+                ++return_settled_ticks_;
+            else
+                return_settled_ticks_ = 0;
+
+            std::print("[return {}/{}] joint err max = {:.4f} rad  ({}/{} settled)\n",
+                       cycles_done_, CYCLES_MAX, max_err,
+                       return_settled_ticks_, HOMING_SETTLE_TICKS);
+
+            if (return_settled_ticks_ >= HOMING_SETTLE_TICKS)
+            {
+                ++cycles_done_;
+                if (cycles_done_ >= CYCLES_MAX)
+                {
+                    std::print("[cycle] All {}/{} cycles complete.\n", cycles_done_, CYCLES_MAX);
+                    cycle_mode_ = CycleMode::Done;
+                }
+                else
+                {
+                    reach_target_ = pick_random_table_target();
+                    std::print("[cycle {}/{}] New target = [{:+.3f}, {:+.3f}, {:+.3f}]\n",
+                               cycles_done_, CYCLES_MAX,
+                               reach_target_.x(), reach_target_.y(), reach_target_.z());
+                    cycle_mode_ = CycleMode::ReachingTarget;
+                }
+            }
+            proxy_unreachable_warned_ = false;
+            return;
+        }
+
+        // ── CycleMode::ReachingTarget ─────────────────────────────────────
         const auto q_dot = efe_gradient_step(*kinematics_, q, reach_target_);
 
         RoboCompKinovaArm::TJointSpeeds cmd;
@@ -228,15 +330,23 @@ void SpecificWorker::compute()
         const Eigen::Vector3d x_ee = pose.position;
         const Eigen::Vector3d z_tool = pose.rotation.col(2);
         const double err_pos = (x_ee - reach_target_).norm();
-        // Angle (deg) between tool z-axis and (0,0,−1).
         const double cos_align = std::clamp(z_tool.z() * -1.0, -1.0, 1.0);
         const double err_orient_deg = std::acos(cos_align) * 180.0 / M_PI;
-        std::print("[reach] x_ee=[{:+.3f} {:+.3f} {:+.3f}]  z_tool=[{:+.2f} {:+.2f} {:+.2f}]  "
-                   "err_pos={:.4f} m  err_orient={:.2f}°  |q̇|={:.3f}\n",
-                   x_ee.x(), x_ee.y(), x_ee.z(),
-                   z_tool.x(), z_tool.y(), z_tool.z(),
-                   err_pos, err_orient_deg,
-                   Eigen::Map<const Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1>>(q_dot.data()).norm());
+        // std::print("[reach {}/{}] x_ee=[{:+.3f} {:+.3f} {:+.3f}]  "
+        //            "target=[{:+.3f} {:+.3f} {:+.3f}]  "
+        //            "err_pos={:.4f} m  err_orient={:.1f}°  |q̇|={:.3f}\n",
+        //            cycles_done_, CYCLES_MAX,
+        //            x_ee.x(), x_ee.y(), x_ee.z(),
+        //            reach_target_.x(), reach_target_.y(), reach_target_.z(),
+        //            err_pos, err_orient_deg,
+        //            Eigen::Map<const Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1>>(q_dot.data()).norm());
+
+        if (err_pos < REACH_TOLERANCE_M)
+        {
+            std::print("[reach {}/{}] ✓ Arrived (err={:.4f} m) — returning to rest.\n",
+                       cycles_done_, CYCLES_MAX, err_pos);
+            cycle_mode_ = CycleMode::SendingReturn;
+        }
         proxy_unreachable_warned_ = false;
     }
     catch (const Ice::Exception& e)

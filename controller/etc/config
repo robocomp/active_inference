@@ -36,6 +36,16 @@ Controller.MaxAdvSpeed = 0.7
 Controller.MaxRotSpeed = 0.8
 Controller.PosGain = 1.2
 Controller.RotGain = 1.5
+Controller.PoseXYStdSlow = 0.03
+Controller.PoseXYStdStop = 0.12
+Controller.PoseThetaStdSlow = 0.04
+Controller.PoseThetaStdStop = 0.20
+Controller.MinAdvSpeedScale = 0.15
+Controller.MinRotSpeedScale = 0.05
+Controller.PosePredictionHorizon = 0.4
+Controller.PoseXYStdGrowthPerMps = 0.5
+Controller.PoseThetaStdGrowthPerRps = 1.0
+Controller.AdvRotationCouplingExponent = 0.5
 
 Target.EdgeType = "target"
 Transforms.interpolate_rt = true

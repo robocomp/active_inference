@@ -1,20 +1,98 @@
 # voxelizer
 A brief introduction to the component. Describe its purpose, functionality, and any specific features here.
-```
-<YOUR BRIEFING>
-```
+# voxelizer
+
+`voxelizer` consumes RGBD and lidar data, segments semantic objects with YOLO, voxelizes them in room coordinates, and publishes the resulting scene to DSR and the local OpenGL viewer.
+
+## Quick Start
+
+1. Install the system dependencies.
+2. Install ONNX Runtime.
+3. Verify the YOLO model path.
+4. Build the component.
+5. Copy and edit the config file.
+6. Run the agent.
 
 ## Dependencies
-The following dependencies are required to build and run voxelizer. Ensure they are installed and properly configured on your system before proceeding:
+
+Typical Ubuntu packages needed for build and runtime:
+
+```bash
+sudo apt update
+sudo apt install -y \
+    build-essential cmake pkg-config \
+    qt6-base-dev qt6-base-dev-tools qt6-declarative-dev qt6-scxml-dev \
+    libqt6opengl6-dev libopencv-dev libtbb-dev libeigen3-dev
 ```
-<YOUR DEPENDENCIES>
+
+This component also expects:
+
+- RoboComp / DSR runtime and generated interfaces available in the environment
+- ONNX Runtime for YOLO inference
+- Optional: CUDA and TensorRT if you want GPU / TensorRT execution
+
+## ONNX Runtime Installation
+
+This component does not assume a fixed ONNX Runtime location. CMake searches in this order:
+
+1. `-DONNXRUNTIME_ROOT=...`
+2. `ONNXRUNTIME_ROOT` environment variable
+3. Common prefixes such as `/usr/local/onnxruntime`, `/opt/onnxruntime`, `/opt/onnxruntime-gpu`, `/usr`, `/usr/local`
+
+Download ONNX Runtime from https://github.com/microsoft/onnxruntime/releases.
+
+Recommended layout:
+
+```bash
+sudo mkdir -p /opt
+sudo tar -C /opt -xzf onnxruntime-linux-x64-gpu-<version>.tgz
+sudo ln -sfn /opt/onnxruntime-linux-x64-gpu-<version> /opt/onnxruntime
 ```
+
+Then configure the build with:
+
+```bash
+cmake -S . -B build -DONNXRUNTIME_ROOT=/opt/onnxruntime
+```
+
+If you use a CPU-only build of ONNX Runtime, point `ONNXRUNTIME_ROOT` to that installation instead.
+
+## YOLO Setup
+
+The component uses ONNX-based YOLO segmentation through `YoloSegDetector`.
+
+By default, the code expects the model path to be:
+
+```text
+yolo26l-seg.onnx
+```
+
+This file is already present in the repository root. If you want to use another model, either replace that file or set the config entry:
+
+```toml
+[Yolo]
+model_path = "/absolute/or/relative/path/to/your-model.onnx"
+```
+
+Useful YOLO-related settings are:
+
+- `Yolo.model_path`
+- `Yolo.conf_thresh`
+- `Yolo.iou_thresh`
+- `Yolo.use_gpu`
+- `Yolo.use_trt`
+- `Yolo.accepted_labels`
+
+If TensorRT inference is enabled, ONNX Runtime, CUDA, and TensorRT must be ABI-compatible. If TensorRT cannot be initialized, the detector falls back to CUDA when available.
 
 ## Configuration parameters
 Like any other component, voxelizer requires a configuration file to start. In etc/config or etc/config.toml, you can find an example of the configuration file.
 
-## Starting the component
-To avoid modifying the config file directly in the repository, you can copy it to the component's home directory. This prevents changes from being overridden by future `git pull` commands:
+For normal use, copy one of them and edit the copy:
+
+```bash
+cp etc/config.toml etc/local_config.toml
+```
 
 ```bash
 cd <voxelizer's path> 
@@ -27,9 +105,30 @@ After editing the new config file we can run the component:
 cmake -B build && make -C build -j12 # Compile the component
 bin/voxelizer etc/yourConfig # Execute the component
 ```
------
------
+cmake -S . -B build -DONNXRUNTIME_ROOT=/opt/onnxruntime
+cmake --build build -j$(nproc)
+bin/voxelizer --Ice.Config=etc/local_config.toml
 # Developer Notes
+
+If you use the RoboComp helper in your shell environment, `cbuild` also works for rebuilding the component.
+
+## CUDA / TensorRT Notes
+
+- For CUDA-only inference, the normal CUDA runtime is usually enough.
+- For TensorRT inference, ONNX Runtime, CUDA, and TensorRT versions must match.
+- If multiple CUDA/TensorRT stacks are installed, use `LD_LIBRARY_PATH` to prioritize the intended one.
+
+Example:
+
+```bash
+export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/local/cuda-12.8/lib64:$LD_LIBRARY_PATH
+```
+
+Typical startup signals to check:
+
+- `[YOLO] effective flags: use_gpu=true use_trt=true`
+- `[YoloSegDetector] TensorRT EP registered ...`
+- `[YoloSegDetector] CUDA EP registered`
 This section explains how to work with the generated code of voxelizer, including what can be modified and how to use key features.
 ## Editable Files
 You can freely edit the following files:

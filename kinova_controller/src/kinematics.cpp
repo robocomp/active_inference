@@ -103,6 +103,50 @@ Kinematics::ToolPose Kinematics::tool_pose(const std::array<double, N_ARM_JOINTS
     return ToolPose{T.translation(), T.rotation()};
 }
 
+std::vector<Kinematics::MeshLinkPose>
+Kinematics::arm_mesh_link_poses(const std::array<double, N_ARM_JOINTS>& angles)
+{
+    const Eigen::VectorXd q = angles_to_q(angles);
+    pinocchio::forwardKinematics(model_, *data_, q);
+
+    std::vector<MeshLinkPose> poses;
+    poses.reserve(8);
+
+    auto to_iso = [](const pinocchio::SE3& T)
+    {
+        return Eigen::Isometry3d(T.toHomogeneousMatrix());
+    };
+
+    poses.push_back({"base_link.STL", Eigen::Isometry3d::Identity()});
+    poses.push_back(MeshLinkPose{"shoulder_link.STL", to_iso(data_->oMi[arm_joint_ids_[0]])});
+    poses.push_back(MeshLinkPose{"half_arm_1_link.STL", to_iso(data_->oMi[arm_joint_ids_[1]])});
+    poses.push_back(MeshLinkPose{"half_arm_2_link.STL", to_iso(data_->oMi[arm_joint_ids_[2]])});
+    poses.push_back(MeshLinkPose{"forearm_link.STL", to_iso(data_->oMi[arm_joint_ids_[3]])});
+    poses.push_back(MeshLinkPose{"spherical_wrist_1_link.STL", to_iso(data_->oMi[arm_joint_ids_[4]])});
+    poses.push_back(MeshLinkPose{"spherical_wrist_2_link.STL", to_iso(data_->oMi[arm_joint_ids_[5]])});
+    poses.push_back(MeshLinkPose{"bracelet_with_vision_link.STL", to_iso(data_->oMi[arm_joint_ids_[6]])});
+
+    return poses;
+}
+
+std::vector<Eigen::Vector3d>
+Kinematics::arm_skeleton_points(const std::array<double, N_ARM_JOINTS>& angles)
+{
+    const Eigen::VectorXd q = angles_to_q(angles);
+    pinocchio::forwardKinematics(model_, *data_, q);
+    pinocchio::updateFramePlacements(model_, *data_);
+
+    std::vector<Eigen::Vector3d> points;
+    points.reserve(N_ARM_JOINTS + 2);
+
+    points.emplace_back(Eigen::Vector3d::Zero());
+    for (int i = 0; i < N_ARM_JOINTS; ++i)
+        points.emplace_back(data_->oMi[arm_joint_ids_[i]].translation());
+    points.emplace_back(data_->oMf[ee_frame_id_].translation());
+
+    return points;
+}
+
 std::array<int, Kinematics::N_ARM_JOINTS> Kinematics::arm_joint_idx_v() const
 {
     std::array<int, N_ARM_JOINTS> idx_v{};

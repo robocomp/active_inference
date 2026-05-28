@@ -754,63 +754,77 @@ void SceneProcessor::update_viewer_table_rfe_points()
 
     static int debug_frame_counter = 0;
     std::vector<QVector3D> residual_points;
-    std::vector<QVector3D> fallback_points;
+    std::vector<QVector3D> rfe_points;
+    std::vector<QVector3D> candidate_points;
     std::size_t tables_seen = 0;
     std::size_t tables_with_residual = 0;
-    std::size_t tables_with_rfe_fallback = 0;
+    std::size_t tables_with_rfe = 0;
+    std::size_t tables_with_candidates = 0;
     std::size_t residual_point_count = 0;
-    std::size_t rfe_fallback_point_count = 0;
+    std::size_t rfe_point_count = 0;
+    std::size_t candidate_point_count = 0;
 
     for (const auto& node : graph_->get_nodes_by_type("table"))
     {
         ++tables_seen;
 
-        // Prefer residual points (not explained by current model). Fall back to
-        // rfe_pts when residual memory is unavailable.
-        auto flat_opt = graph_->get_attrib_by_name<residual_pts_att>(node);
-        bool using_residual = flat_opt.has_value();
-        if (!using_residual)
-        {
-            flat_opt = graph_->get_attrib_by_name<rfe_pts_att>(node);
-            if (flat_opt.has_value())
-                ++tables_with_rfe_fallback;
-        }
-        else
+        if (auto residual_opt = graph_->get_attrib_by_name<residual_pts_att>(node); residual_opt.has_value())
         {
             ++tables_with_residual;
+            const auto& flat = residual_opt.value().get();
+            const std::size_t n = flat.size() / 3;
+            residual_point_count += n;
+            residual_points.reserve(residual_points.size() + n);
+            for (std::size_t i = 0; i < n; ++i)
+            {
+                const std::size_t idx = i * 3;
+                residual_points.emplace_back(flat[idx], flat[idx + 1], flat[idx + 2]);
+            }
         }
 
-        if (!flat_opt.has_value())
-            continue;
-
-        const auto& flat = flat_opt.value().get();
-        const std::size_t n = flat.size() / 3;
-        if (using_residual)
-            residual_point_count += n;
-        else
-            rfe_fallback_point_count += n;
-
-        auto& target_points = using_residual ? residual_points : fallback_points;
-        target_points.reserve(target_points.size() + n);
-        for (std::size_t i = 0; i < n; ++i)
+        if (auto rfe_opt = graph_->get_attrib_by_name<rfe_pts_att>(node); rfe_opt.has_value())
         {
-            const std::size_t idx = i * 3;
-            target_points.emplace_back(flat[idx], flat[idx + 1], flat[idx + 2]);
+            ++tables_with_rfe;
+            const auto& flat = rfe_opt.value().get();
+            const std::size_t n = flat.size() / 3;
+            rfe_point_count += n;
+            rfe_points.reserve(rfe_points.size() + n);
+            for (std::size_t i = 0; i < n; ++i)
+            {
+                const std::size_t idx = i * 3;
+                rfe_points.emplace_back(flat[idx], flat[idx + 1], flat[idx + 2]);
+            }
+        }
+
+        if (auto candidate_opt = graph_->get_attrib_by_name<candidate_pts_att>(node); candidate_opt.has_value())
+        {
+            ++tables_with_candidates;
+            const auto& flat = candidate_opt.value().get();
+            const std::size_t n = flat.size() / 3;
+            candidate_point_count += n;
+            candidate_points.reserve(candidate_points.size() + n);
+            for (std::size_t i = 0; i < n; ++i)
+            {
+                const std::size_t idx = i * 3;
+                candidate_points.emplace_back(flat[idx], flat[idx + 1], flat[idx + 2]);
+            }
         }
     }
 
     if (++debug_frame_counter % 30 == 0)
     {
-        std::println("[RFEViewer] tables={} residual_tables={} fallback_tables={} residual_pts={} fallback_pts={} total_draw_pts={}",
+        std::println("[RFEViewer] tables={} residual_tables={} rfe_tables={} candidate_tables={} residual_pts={} rfe_pts={} candidate_pts={} total_draw_pts={}",
                      tables_seen,
                      tables_with_residual,
-                     tables_with_rfe_fallback,
+                     tables_with_rfe,
+                     tables_with_candidates,
                      residual_point_count,
-                     rfe_fallback_point_count,
-                     residual_points.size() + fallback_points.size());
+                     rfe_point_count,
+                     candidate_point_count,
+                     residual_points.size() + rfe_points.size() + candidate_points.size());
     }
 
-    voxel_viewer_->update_rfe_points(residual_points, fallback_points);
+    voxel_viewer_->update_rfe_points(residual_points, rfe_points, candidate_points);
 }
 
 void SceneProcessor::update_viewer_robot_pose(const Mat::RTMat& room_T_robot)

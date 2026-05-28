@@ -138,10 +138,16 @@ void SpecificWorker::initialize()
         lidar_btn->setCheckable(true);
         lidar_btn->setCursor(Qt::PointingHandCursor);
 
+        auto* lidar_voxels_btn = new QPushButton("Lidar3D Voxels: ON", voxel_panel);
+        lidar_voxels_btn->setCheckable(true);
+        lidar_voxels_btn->setChecked(include_lidar3d_in_voxels_);
+        lidar_voxels_btn->setCursor(Qt::PointingHandCursor);
+
         auto* clear_voxels_btn = new QPushButton("Clear Voxels", voxel_panel);
         clear_voxels_btn->setCursor(Qt::PointingHandCursor);
 
         controls_layout->addWidget(lidar_btn);
+        controls_layout->addWidget(lidar_voxels_btn);
         controls_layout->addWidget(clear_voxels_btn);
         controls_layout->addStretch(1);
 
@@ -156,6 +162,12 @@ void SpecificWorker::initialize()
             if (voxel_viewer_gl)
                 voxel_viewer_gl->set_show_lidar(checked);
             lidar_btn->setText(checked ? "Lidar: ON" : "Lidar: OFF");
+        });
+
+        connect(lidar_voxels_btn, &QPushButton::toggled, this, [this, lidar_voxels_btn](bool checked)
+        {
+            include_lidar3d_in_voxels_ = checked;
+            lidar_voxels_btn->setText(checked ? "Lidar3D Voxels: ON" : "Lidar3D Voxels: OFF");
         });
 
         connect(clear_voxels_btn, &QPushButton::clicked, this, [this]
@@ -215,7 +227,7 @@ void SpecificWorker::compute()
                                         frame->room_T_robot, frame->room_T_zed,
                                         frame->graph_object_boxes, voxel_viewer_gl.get());
 
-    if (lidar_track_attributor && !frame->lidar_points_room.empty())
+    if (include_lidar3d_in_voxels_ && lidar_track_attributor && !frame->lidar_points_room.empty())
     {
         std::vector<LidarTrackAttributor::TrackCandidate> track_candidates;
         const auto& current_tracks = voxel_processor->last_track_candidates();
@@ -235,7 +247,8 @@ void SpecificWorker::compute()
         voxel_processor->fuse_lidar_support_points(attributed);
     }
 
-    if (yolo_viewer_) {
+    if (yolo_viewer_) 
+    {    
         const cv::Mat viewer_rgb = yolo_processor
             ? yolo_processor->apply_tray_mask(frame->rgbd.rgb)
             : frame->rgbd.rgb;

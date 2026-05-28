@@ -20,12 +20,45 @@
 
 #include "custom_widget.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <print>
 #include <sstream>
+
+namespace
+{
+float ramp_uncertainty_scale(float value, float slow_threshold, float stop_threshold, float min_scale)
+{
+	if (stop_threshold <= slow_threshold)
+		return value <= slow_threshold ? 1.f : std::clamp(min_scale, 0.f, 1.f);
+
+	const float clamped_min_scale = std::clamp(min_scale, 0.f, 1.f);
+	const float alpha = std::clamp((value - slow_threshold) / (stop_threshold - slow_threshold), 0.f, 1.f);
+	return 1.f - alpha * (1.f - clamped_min_scale);
+}
+
+float preserve_sign_clamp(float value, float max_abs)
+{
+	return std::copysign(std::min(std::abs(value), std::max(0.f, max_abs)), value);
+}
+}
+
+bool SpecificWorker::same_target_instance(const TargetInfo &lhs, const TargetInfo &rhs)
+{
+	constexpr float pos_eps_m = 0.05f;
+	constexpr float yaw_eps_rad = 0.05f;
+	constexpr float gain_eps = 1e-3f;
+
+	return lhs.node_id == rhs.node_id
+		&& lhs.from_affordance == rhs.from_affordance
+		&& lhs.epistemic_pending == rhs.epistemic_pending
+		&& (lhs.room_pos - rhs.room_pos).cwiseAbs().maxCoeff() < pos_eps_m
+		&& std::abs(lhs.yaw_rad - rhs.yaw_rad) < yaw_eps_rad
+		&& std::abs(lhs.epistemic_gain - rhs.epistemic_gain) < gain_eps;
+}
 
 SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, bool startup_check) : GenericWorker(configLoader, tprx)
 {
@@ -119,6 +152,9 @@ void SpecificWorker::initialize()
 		viewer_2d_ = std::make_unique<rc::Viewer2D>(custom_widget_->frame, QRectF(-5.0, -5.0, 10.0, 10.0), true);
 		viewer_2d_->add_robot(0.5f, 0.6f, 0.f, 0.f, QColor("Tomato"));
 		viewer_2d_->set_lidar_buffer(&lidar_room_buffer_);
+		viewer_2d_->set_lidar_visible(custom_widget_->lidar_toggle_btn != nullptr
+		                             ? custom_widget_->lidar_toggle_btn->isChecked()
+		                             : false);
 		path_controller_.set_lidar_buffer(&lidar_room_buffer_);
 		viewer_2d_->show();
 		connect(viewer_2d_.get(), &rc::Viewer2D::new_mouse_coordinates, this,
@@ -273,6 +309,7 @@ std::optional<SpecificWorker::PlanningStep> SpecificWorker::build_planning_step(
 			step.plan_origin = *manual_target_origin_room_;
 		step.target_changed = manual_target_dirty_ || !current_plan_.has_value();
 		manual_target_dirty_ = false;
+		last_target_info_.reset();
 		active_target_id_ = 0;
 		target_wait_logged_ = false;
 		return step;
@@ -287,6 +324,7 @@ std::optional<SpecificWorker::PlanningStep> SpecificWorker::build_planning_step(
 			target_wait_logged_ = true;
 		}
 		current_plan_.reset();
+		last_target_info_.reset();
 		active_target_id_ = 0;
 		current_target_room_.reset();
 		affordance_manager_.clear_current();
@@ -298,9 +336,9 @@ std::optional<SpecificWorker::PlanningStep> SpecificWorker::build_planning_step(
 	target_wait_logged_ = false;
 	step.target = *target;
 	current_target_room_ = step.target.room_pos;
-	step.target_changed = active_target_id_ != target->node_id;
-	if (step.target_changed)
-		active_target_id_ = target->node_id;
+	step.target_changed = !last_target_info_.has_value() || !same_target_instance(*last_target_info_, step.target);
+	last_target_info_ = step.target;
+	active_target_id_ = target->node_id;
 	return step;
 }
 
@@ -358,6 +396,16 @@ void SpecificWorker::load_params()
 	try { params.max_lidar_draw_points = configLoader.get<int>("Viewer2D.MaxLidarDrawPoints"); } catch (...) {}
 	try { params.lidar_name = configLoader.get<std::string>("Lidar.Name"); } catch (...) {}
 	try { params.target_edge_type = configLoader.get<std::string>("Target.EdgeType"); } catch (...) {}
+	try { params.pose_xy_std_slow_m = static_cast<float>(configLoader.get<double>("Controller.PoseXYStdSlow")); } catch (...) {}
+	try { params.pose_xy_std_stop_m = static_cast<float>(configLoader.get<double>("Controller.PoseXYStdStop")); } catch (...) {}
+	try { params.pose_theta_std_slow_rad = static_cast<float>(configLoader.get<double>("Controller.PoseThetaStdSlow")); } catch (...) {}
+	try { params.pose_theta_std_stop_rad = static_cast<float>(configLoader.get<double>("Controller.PoseThetaStdStop")); } catch (...) {}
+	try { params.min_adv_speed_scale = static_cast<float>(configLoader.get<double>("Controller.MinAdvSpeedScale")); } catch (...) {}
+	try { params.min_rot_speed_scale = static_cast<float>(configLoader.get<double>("Controller.MinRotSpeedScale")); } catch (...) {}
+	try { params.uncertainty_prediction_horizon_s = static_cast<float>(configLoader.get<double>("Controller.PosePredictionHorizon")); } catch (...) {}
+	try { params.pose_xy_std_growth_per_mps = static_cast<float>(configLoader.get<double>("Controller.PoseXYStdGrowthPerMps")); } catch (...) {}
+	try { params.pose_theta_std_growth_per_rps = static_cast<float>(configLoader.get<double>("Controller.PoseThetaStdGrowthPerRps")); } catch (...) {}
+	try { params.adv_rotation_coupling_exponent = static_cast<float>(configLoader.get<double>("Controller.AdvRotationCouplingExponent")); } catch (...) {}
 	planner_.params.clearance_m = params.clearance_m;
 	planner_.params.robot_width_m = 0.4f;
 	planner_.params.grid_resolution_m = params.grid_resolution_m;
@@ -649,6 +697,82 @@ std::optional<SpecificWorker::RobotPose> SpecificWorker::read_robot_pose_in_room
 	return pose;
 }
 
+std::optional<SpecificWorker::PoseUncertainty> SpecificWorker::read_pose_uncertainty() const
+{
+	if (!G || !graph_state_.ready())
+		return std::nullopt;
+
+	auto rt_edge = G->get_edge(graph_state_.robot_id, graph_state_.room_id, "RT");
+	if (!rt_edge.has_value())
+		rt_edge = G->get_edge(graph_state_.room_id, graph_state_.robot_id, "RT");
+	if (!rt_edge.has_value())
+		return std::nullopt;
+
+	auto covariance_att = G->get_attrib_by_name<rt_covariance_att>(rt_edge.value());
+	if (!covariance_att.has_value())
+		return std::nullopt;
+
+	const auto &flat_covariance = covariance_att.value().get();
+	if (flat_covariance.size() < 15)
+		return std::nullopt;
+
+	PoseUncertainty uncertainty;
+	uncertainty.xy_std_m = std::sqrt(std::max(0.f, std::max(flat_covariance[0], flat_covariance[7])));
+	uncertainty.theta_std_rad = std::sqrt(std::max(0.f, flat_covariance[14]));
+	return uncertainty;
+}
+
+void SpecificWorker::apply_uncertainty_speed_limit(float &adv_mm_s, float &side_mm_s, float &rot_rps) const
+{
+	const auto uncertainty = read_pose_uncertainty();
+	if (!uncertainty.has_value())
+		return;
+
+	const float current_trans_speed_mps = std::hypot(adv_mm_s, side_mm_s) / 1000.f;
+	const float current_rot_speed_rps = std::abs(rot_rps);
+
+	float adv_scale = ramp_uncertainty_scale(uncertainty->xy_std_m,
+		params.pose_xy_std_slow_m,
+		params.pose_xy_std_stop_m,
+		params.min_adv_speed_scale);
+	float rot_scale = ramp_uncertainty_scale(uncertainty->theta_std_rad,
+		params.pose_theta_std_slow_rad,
+		params.pose_theta_std_stop_rad,
+		params.min_rot_speed_scale);
+
+	const float horizon_s = std::max(1e-3f, params.uncertainty_prediction_horizon_s);
+	const float xy_growth = std::max(1e-3f, params.pose_xy_std_growth_per_mps);
+	const float theta_growth = std::max(1e-3f, params.pose_theta_std_growth_per_rps);
+
+	if (current_trans_speed_mps > 1e-3f)
+	{
+		const float xy_margin = std::max(0.f, params.pose_xy_std_stop_m - uncertainty->xy_std_m);
+		const float max_predicted_trans_speed_mps = xy_margin / (horizon_s * xy_growth);
+		const float predictive_adv_scale = std::clamp(max_predicted_trans_speed_mps / current_trans_speed_mps,
+			params.min_adv_speed_scale,
+			1.f);
+		adv_scale = std::min(adv_scale, predictive_adv_scale);
+	}
+
+	if (current_rot_speed_rps > 1e-3f)
+	{
+		const float theta_margin = std::max(0.f, params.pose_theta_std_stop_rad - uncertainty->theta_std_rad);
+		const float max_predicted_rot_speed_rps = theta_margin / (horizon_s * theta_growth);
+		const float predictive_rot_scale = std::clamp(max_predicted_rot_speed_rps / current_rot_speed_rps,
+			params.min_rot_speed_scale,
+			1.f);
+		rot_scale = std::min(rot_scale, predictive_rot_scale);
+	}
+
+	const float coupled_adv_scale = std::pow(std::max(rot_scale, 0.f),
+		std::max(0.f, params.adv_rotation_coupling_exponent));
+	adv_scale = std::min(adv_scale, coupled_adv_scale);
+
+	adv_mm_s *= adv_scale;
+	side_mm_s *= adv_scale;
+	rot_rps = preserve_sign_clamp(rot_rps, current_rot_speed_rps * rot_scale);
+}
+
 std::optional<SpecificWorker::TargetInfo> SpecificWorker::read_target_in_room(std::uint64_t timestamp_ms)
 {
 	if (!G || !inner_eigen_api_ || !graph_state_.ready())
@@ -733,6 +857,8 @@ void SpecificWorker::execute_plan(const RobotPose &robot_pose)
 		affordance_manager_.mark_reached(G);
 
 		current_plan_.reset();
+		last_target_info_.reset();
+		active_target_id_ = 0;
 		current_target_room_.reset();
 		if (manual_target_room_.has_value())
 			manual_target_room_.reset();
@@ -749,9 +875,10 @@ void SpecificWorker::execute_plan(const RobotPose &robot_pose)
 		return;
 	}
 
-	const float adv_mm_s = control_output.adv * 1000.f;
-	const float side_mm_s = control_output.side * 1000.f;
-	const float rot_rps = -control_output.rot;
+	float adv_mm_s = control_output.adv * 1000.f;
+	float side_mm_s = control_output.side * 1000.f;
+	float rot_rps = -control_output.rot;
+	apply_uncertainty_speed_limit(adv_mm_s, side_mm_s, rot_rps);
 	if (std::abs(adv_mm_s) < 0.5f && std::abs(side_mm_s) < 0.5f && std::abs(rot_rps) < 1e-3f)
 	{
 		stop_robot();
@@ -775,6 +902,7 @@ void SpecificWorker::set_manual_target(const QPointF &point)
 	}
 	manual_target_dirty_ = true;
 	current_plan_.reset();
+	last_target_info_.reset();
 	active_target_id_ = 0;
 	path_controller_.stop();
 	hibernationTick();
@@ -788,6 +916,7 @@ void SpecificWorker::clear_manual_target()
 	manual_target_origin_room_.reset();
 	manual_target_dirty_ = false;
 	current_plan_.reset();
+	last_target_info_.reset();
 	active_target_id_ = 0;
 	stop_robot();
 	hibernationTick();

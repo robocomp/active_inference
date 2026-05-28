@@ -1,0 +1,3 @@
+affordance_protocol_test 2 0
+---
+affordance_protocol_test

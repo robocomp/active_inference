@@ -1,0 +1,62 @@
+Start testing: May 28 11:24 CEST
+----------------------------------------------------------
+1/1 Testing: affordance_protocol_test
+1/1 Test: affordance_protocol_test
+Command: "/home/pbustos/robocomp/components/active_inference/common/tests/build/affordance_protocol_test"
+Directory: /home/pbustos/robocomp/components/active_inference/common/tests/build
+"affordance_protocol_test" start time: May 28 11:24 CEST
+Output:
+----------------------------------------------------------
+Agent name:  "affordance_protocol_test_0"
+Publisher created, waiting for Subscribers.
+Publisher created, waiting for Subscribers.
+Publisher created, waiting for Subscribers.
+Publisher created, waiting for Subscribers.
+Publisher created, waiting for Subscribers.
+Publisher created, waiting for Subscribers.
+Subscriber [ DSR_NODE ] unmatched 0x7951f1fea070
+Publisher[ DSR_NODE ] unmatched  0x7951f1fea090
+Subscriber created, waiting for Publishers.
+Subscriber [ DSR_EDGE ] unmatched 0x7951f17e9070
+Publisher[ DSR_EDGE ] unmatched  0x7951f17e9090
+Subscriber created, waiting for Publishers.
+Subscriber [ DSR_NODE_ATTS ] unmatched 0x7951f0fe8070
+Publisher[ DSR_NODE_ATTS ] unmatched  0x7951f0fe8090
+Subscriber created, waiting for Publishers.
+Subscriber [ DSR_EDGE_ATTS ] unmatched 0x7951e3ffd070
+Publisher[ DSR_EDGE_ATTS ] unmatched  0x7951e3ffd090
+Subscriber created, waiting for Publishers.
+Subscriber [ GRAPH_ANSWER ] unmatched 0x7ffddee732b0
+Publisher[ GRAPH_ANSWER ] unmatched  0x7ffddee732d0
+Subscriber created, waiting for Publishers.
+ Requesting the complete graph 
+ Waiting for the graph ... seconds to timeout [ 1 / 15 ] 
+ Waiting for the graph ... seconds to timeout [ 2 / 15 ] 
+ Waiting for the graph ... seconds to timeout [ 3 / 15 ] 
+ Waiting for the graph ... seconds to timeout [ 4 / 15 ] 
+ Waiting for the graph ... seconds to timeout [ 5 / 15 ] 
+ Waiting for the graph ... seconds to timeout [ 6 / 15 ] 
+ Waiting for the graph ... seconds to timeout [ 7 / 15 ] 
+ Waiting for the graph ... seconds to timeout [ 8 / 15 ] 
+ Waiting for the graph ... seconds to timeout [ 9 / 15 ] 
+ Waiting for the graph ... seconds to timeout [ 10 / 15 ] 
+ Waiting for the graph ... seconds to timeout [ 11 / 15 ] 
+ Waiting for the graph ... seconds to timeout [ 12 / 15 ] 
+ Waiting for the graph ... seconds to timeout [ 13 / 15 ] 
+ Waiting for the graph ... seconds to timeout [ 14 / 15 ] 
+ Waiting for the graph ... seconds to timeout [ 15 / 15 ] 
+Subscriber [ GRAPH_ANSWER ] matched  0x7ffddee74b50
+Publisher[ DSR_EDGE ] unmatched  0x7ffddee74d30
+Publisher[ DSR_EDGE_ATTS ] unmatched  0x7ffddee74d30
+Publisher[ DSR_NODE ] unmatched  0x7ffddee74d30
+Publisher[ DSR_NODE_ATTS ] unmatched  0x7ffddee74d30
+DSRGraph aborting: could not get DSR from the network after timeout
+<end of output>
+Test time =  16.38 sec
+----------------------------------------------------------
+Test Failed.
+"affordance_protocol_test" end time: May 28 11:24 CEST
+"affordance_protocol_test" time elapsed: 00:00:16
+----------------------------------------------------------
+
+End testing: May 28 11:24 CEST

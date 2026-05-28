@@ -35,6 +35,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include <genericworker.h>
 #include <Eigen/Dense>
@@ -102,6 +103,8 @@ struct AgentConfig
     float grad_clip         = 2.0f;
     std::string optimizer_type = "adam";
     float sgd_momentum     = 0.9f;
+    RobustLossType robust_loss = RobustLossType::Quadratic;
+    float robust_loss_scale = 0.10f;
 
     // SampleQueue parameters (forwarded to SampleQueueParams)
     int   num_angle_bins               = 24;
@@ -157,13 +160,79 @@ public slots:
     void del_node_slot(std::uint64_t from);
 
 private:
+    struct TableObservation
+    {
+        bool has_fresh_data = false;
+        float explanation_ratio = 1.0f;
+        std::vector<Eigen::Vector3f> candidate_pts;
+        std::vector<Eigen::Vector3f> residual_pts;
+    };
+
+    struct TableBeliefEvidence
+    {
+        std::vector<Eigen::Vector3f> fit_pts;
+        std::vector<float> fit_weights;
+        std::vector<Eigen::Vector3f> eval_pts;
+        std::vector<float> eval_weights;
+        int residual_count = 0;
+        int trusted_point_count = 0;
+        float residual_precision = 0.0f;
+
+        [[nodiscard]] bool has_evaluation() const { return not eval_pts.empty(); }
+        [[nodiscard]] bool can_optimize() const { return not fit_pts.empty(); }
+    };
+
+    struct TableBeliefPolicy
+    {
+        static float clamp01(float value);
+        static float lerp(float start, float end, float gain);
+        static float wrap_angle(float angle);
+        static float angle_lerp(float start, float end, float gain);
+        static TableState apply_observability_warm_start(const TableState& previous,
+                                                         const TableState& raw,
+                                                         const TableModelParams& params,
+                                                         const AgentConfig& cfg,
+                                                         float confidence,
+                                                         const std::array<float, 6>& coverage,
+                                                         int point_count);
+        static float update_warm_confidence(float previous_confidence,
+                                            const AgentConfig& cfg,
+                                            const std::array<float, 6>& coverage,
+                                            int point_count,
+                                            int residual_count,
+                                            float residual_precision);
+    };
+
     // ── Initialisation helpers ────────────────────────────────────────────────
     void load_config(const ConfigLoader& cfg);
     void scaffold_missing_table_nodes();
     void ensure_instance(const DSR::Node& node);
+    void process_table_node(const DSR::Node& node);
+    TableObservation observe_table_node(TableInstance& inst, const DSR::Node& node);
+    float run_table_inference(TableInstance& inst, const TableObservation& observation);
+    void publish_table_cycle(TableInstance& inst,
+                             const DSR::Node& node,
+                             const TableObservation& observation,
+                             float free_energy);
+    bool persist_table_belief(TableInstance& inst, uint64_t node_id, float free_energy);
+    bool assess_table_state(TableInstance& inst, uint64_t node_id, float free_energy);
+    void publish_table_diagnostics(const TableInstance& inst,
+                                   const TableObservation& observation,
+                                   float free_energy);
+    void publish_table_intentions(TableInstance& inst,
+                                  uint64_t node_id,
+                                  const TableObservation& observation,
+                                  float free_energy);
+    TableBeliefEvidence compose_belief_evidence(const TableInstance& inst,
+                                                const std::vector<Eigen::Vector3f>& residual_pts,
+                                                float residual_precision) const;
+    void evolve_table_belief(TableInstance& inst, const TableBeliefEvidence& evidence);
+    float accept_table_belief(TableInstance& inst,
+                              const TableState& previous_state,
+                              const TableBeliefEvidence& evidence);
+    void refresh_table_memory(TableInstance& inst);
 
     // ── Per-table per-cycle steps (§11.2) ────────────────────────────────────
-    void step_read_sensing(TableInstance& inst, const DSR::Node& node);
     void step_queue_update(TableInstance& inst,
                            const std::vector<Eigen::Vector3f>& candidate_pts,
                            float observation_precision);

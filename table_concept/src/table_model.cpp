@@ -7,6 +7,7 @@
  */
 
 #include "table_model.h"
+#include "robust_loss_torch.h"
 #include <algorithm>
 #include <cmath>
 #include <numeric>
@@ -178,7 +179,8 @@ torch::Tensor fe_torch_impl(const TableModelParams& params,
     const auto sdf = torch::minimum(sdf_top, sdf_leg_min);
 
     const float inv_sigma2 = 1.0f / (params.sigma_obs * params.sigma_obs);
-    const auto likelihood = (weights_tensor * sdf * sdf * inv_sigma2).sum() /
+    const auto point_loss = robust_loss_value(sdf, params.robust_loss, params.robust_loss_scale);
+    const auto likelihood = (weights_tensor * point_loss * inv_sigma2).sum() /
                             weights_tensor.sum().clamp_min(1e-6f);
 
     const float sigma = prior.leg_length > 0.0f ? params.prior_size_std : 0.15f;
@@ -332,7 +334,7 @@ float TableModel::fe_at(const TableState& s,
     {
         const float sdf = sdf_point_at(pts[i], s);
         const float w   = uniform ? 1.0f : weights[i];
-        likelihood_energy += w * sdf * sdf * inv_sigma2;
+        likelihood_energy += w * robust_loss_value(sdf, params_.robust_loss, params_.robust_loss_scale) * inv_sigma2;
         weight_sum        += w;
     }
     if (weight_sum > 0.0f)

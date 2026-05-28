@@ -30,7 +30,7 @@ FIND_PACKAGE( Ice REQUIRED COMPONENTS Ice++11 IceStorm++11)
 # Sources set
 SET (SOURCES
   ${SOURCES}
-  ../src/affordance_manager.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/../../common/affordance_manager.cpp
   $ENV{ROBOCOMP}/classes/rapplication/rapplication.cpp
   $ENV{ROBOCOMP}/classes/sigwatch/sigwatch.cpp
   $ENV{ROBOCOMP}/classes/grafcetStep/GRAFCETStep.cpp
@@ -48,7 +48,7 @@ SET (EXECUTABLE_OUTPUT_PATH ${RC_COMPONENT_DEVEL_PATH}/bin)
 
 # Specify construction and link process
 ADD_EXECUTABLE( controller ${SOURCES} ${MOC_SOURCES} ${RC_SOURCES} ${UI_HEADERS} )
-target_sources(controller PRIVATE ../src/affordance_manager.cpp)
+target_sources(controller PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../../common/affordance_manager.cpp)
 TARGET_LINK_LIBRARIES( controller ${LIBS}  dsr_core dsr_gui dsr_api fastcdr fastdds osgDB OpenThreads Eigen3::Eigen QGLViewer-qt6 Qt6OpenGLWidgets ${STATIC_LIBS} ${SPECIFIC_LIBS} ${QT_LIBRARIES} ${Ice_LIBRARIES} )
 SET_TARGET_PROPERTIES(controller
         PROPERTIES

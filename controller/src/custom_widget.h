@@ -84,7 +84,7 @@ public:
         toolbar_layout->setSpacing(6);
         lidar_toggle_btn = new QPushButton("Lidar points", toolbar);
         lidar_toggle_btn->setCheckable(true);
-        lidar_toggle_btn->setChecked(true);
+        lidar_toggle_btn->setChecked(false);
         toolbar_layout->addWidget(lidar_toggle_btn);
 
         follow_toggle_btn = new QPushButton("Start", toolbar);

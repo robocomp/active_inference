@@ -30,6 +30,10 @@ Emergency = 500
 [Component.Debug]
 Verbose = false
 
+[TableModel]
+RobustLoss = "tukey_biweight"   # one of: quadratic, huber, geman_mcclure, welsch, tukey_biweight
+RobustLossScale = 0.10      # SDF residual scale in meters where robust losses start to saturate
+
 [WarmStart]
 PtsMin = 12.0            # point count where observability starts to become trustworthy
 PtsMax = 30.0            # point count where the point-count confidence saturates

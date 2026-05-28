@@ -7,6 +7,7 @@ LIST(APPEND SOURCES
   ../src/specificworker.cpp
   ../src/kinematics.cpp
   ../src/efe_gradient.cpp
+  ../src/arm_belief_viewer_3d.cpp
 )
 
 # Headers set
@@ -14,6 +15,7 @@ LIST(APPEND HEADERS
   ../src/specificworker.h
   ../src/kinematics.h
   ../src/efe_gradient.h
+  ../src/arm_belief_viewer_3d.h
 )
 
 

@@ -1,0 +1,26 @@
+
+# Consider dependencies only in project.
+set(CMAKE_DEPENDS_IN_PROJECT_ONLY OFF)
+
+# The set of languages for which implicit dependencies are needed:
+set(CMAKE_DEPENDS_LANGUAGES
+  )
+
+# The set of dependency files which are needed:
+set(CMAKE_DEPENDS_DEPENDENCY_FILES
+  "" "affordance_protocol_test_autogen/timestamp" "custom" "affordance_protocol_test_autogen/deps"
+  "/home/pbustos/robocomp/components/active_inference/common/tests/affordance_protocol_test.cpp" "CMakeFiles/affordance_protocol_test.dir/affordance_protocol_test.cpp.o" "gcc" "CMakeFiles/affordance_protocol_test.dir/affordance_protocol_test.cpp.o.d"
+  "/home/pbustos/robocomp/components/active_inference/common/tests/build/affordance_protocol_test_autogen/mocs_compilation.cpp" "CMakeFiles/affordance_protocol_test.dir/affordance_protocol_test_autogen/mocs_compilation.cpp.o" "gcc" "CMakeFiles/affordance_protocol_test.dir/affordance_protocol_test_autogen/mocs_compilation.cpp.o.d"
+  "/home/pbustos/robocomp/components/active_inference/common/affordance_manager.cpp" "CMakeFiles/affordance_protocol_test.dir/home/pbustos/robocomp/components/active_inference/common/affordance_manager.cpp.o" "gcc" "CMakeFiles/affordance_protocol_test.dir/home/pbustos/robocomp/components/active_inference/common/affordance_manager.cpp.o.d"
+  )
+
+# Targets to which this target links which contain Fortran sources.
+set(CMAKE_Fortran_TARGET_LINKED_INFO_FILES
+  )
+
+# Targets to which this target links which contain Fortran sources.
+set(CMAKE_Fortran_TARGET_FORWARD_LINKED_INFO_FILES
+  )
+
+# Fortran module output directory.
+set(CMAKE_Fortran_TARGET_MODULE_DIR "")

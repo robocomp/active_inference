@@ -7,7 +7,7 @@
  * Fixed geometry: TOP_THICKNESS = 0.03 m, LEG_RADIUS = 0.025 m
  *
  * Compound SDF = min(SDF_top, min_k SDF_leg_k)
- * Free Energy  = Σᵢ wᵢ · SDF(θ,yᵢ)² / σ²  +  λ‖θ−θ_prior‖²_Σ
+ * Free Energy  = Σᵢ wᵢ · ρ(SDF(θ,yᵢ)) / σ²  +  λ‖θ−θ_prior‖²_Σ
  * Gradient computed with PyTorch autograd and optimised with Adam/SGD.
  */
 
@@ -20,6 +20,8 @@
 #include <utility>
 #include <vector>
 #include <Eigen/Dense>
+
+#include "robust_loss.h"
 
 // ─── Parameter structs ────────────────────────────────────────────────────────
 
@@ -71,6 +73,9 @@ struct TableModelParams
     std::string optimizer_type = "adam";
     // Momentum used when optimizer_type == "sgd"
     float sgd_momentum = 0.9f;
+    // Robust loss applied to SDF residuals before scaling by 1 / sigma_obs^2
+    RobustLossType robust_loss = RobustLossType::Quadratic;
+    float robust_loss_scale = 0.10f;
 };
 
 // ─── TableModel ──────────────────────────────────────────────────────────────
@@ -97,7 +102,7 @@ public:
     // ── Free Energy ──────────────────────────────────────────────────────────
 
     /**
-     * F(θ) = Σᵢ wᵢ·SDF(yᵢ)²/σ²  +  KL(q‖p)
+    * F(θ) = Σᵢ wᵢ·ρ(SDF(yᵢ))/σ²  +  KL(q‖p)
      *
      * @param points   Room-frame 3-D observations.
      * @param weights  Per-point weights (1.0 = equal); pass empty for uniform.

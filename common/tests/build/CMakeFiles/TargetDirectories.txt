@@ -1,0 +1,6 @@
+/home/pbustos/robocomp/components/active_inference/common/tests/build/CMakeFiles/affordance_protocol_test.dir
+/home/pbustos/robocomp/components/active_inference/common/tests/build/CMakeFiles/test.dir
+/home/pbustos/robocomp/components/active_inference/common/tests/build/CMakeFiles/edit_cache.dir
+/home/pbustos/robocomp/components/active_inference/common/tests/build/CMakeFiles/rebuild_cache.dir
+/home/pbustos/robocomp/components/active_inference/common/tests/build/CMakeFiles/affordance_protocol_test_autogen_timestamp_deps.dir
+/home/pbustos/robocomp/components/active_inference/common/tests/build/CMakeFiles/affordance_protocol_test_autogen.dir
