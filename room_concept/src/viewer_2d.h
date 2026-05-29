@@ -81,6 +81,8 @@ class Viewer2D : public QObject
                        const std::vector<Eigen::Vector3f>& points_low,
                        const Eigen::Affine2f& robot_pose,
                        int max_points_high);
+        void set_lidar_points_visible(bool visible);
+        bool lidar_points_visible() const;
 
         // ----- Composite per-frame update -----
         struct FrameData
@@ -174,6 +176,7 @@ class Viewer2D : public QObject
         // Lidar point pools (reused each frame)
         std::vector<QGraphicsEllipseItem*> lidar_pool_high_;
         std::vector<QGraphicsEllipseItem*> lidar_pool_low_;
+        bool lidar_points_visible_ = true;
 
         // Path
         std::vector<QGraphicsItem*>         path_draw_items_;

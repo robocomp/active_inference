@@ -215,6 +215,8 @@ int room_concept::run(int argc, char* argv[])
 #else
 	QCoreApplication a(argc, argv);  // NON-GUI application
 #endif
+	install_component_log_format();
+	configure_component_logging(this->configLoader);
 
 
 	sigset_t sigs;

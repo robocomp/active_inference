@@ -288,6 +288,15 @@ void Viewer2D::draw_lidar_points(const std::vector<Eigen::Vector3f>& points_high
                                  const Eigen::Affine2f& robot_pose,
                                  int max_points_high)
 {
+    if (!lidar_points_visible_)
+    {
+        for (auto *item : lidar_pool_high_)
+            item->setVisible(false);
+        for (auto *item : lidar_pool_low_)
+            item->setVisible(false);
+        return;
+    }
+
     auto draw_layer = [&](const std::vector<Eigen::Vector3f>& points,
                           std::vector<QGraphicsEllipseItem*>& pool,
                           const QColor& color,
@@ -321,6 +330,7 @@ void Viewer2D::draw_lidar_points(const std::vector<Eigen::Vector3f>& points_high
             if (idx < pool.size())
             {
                 pool[idx]->setPos(pw.x(), pw.y());
+                pool[idx]->setVisible(true);
             }
             else
             {
@@ -335,6 +345,23 @@ void Viewer2D::draw_lidar_points(const std::vector<Eigen::Vector3f>& points_high
 
     draw_layer(points_high, lidar_pool_high_, QColor("Green"), max_points_high);
     draw_layer(points_low, lidar_pool_low_, QColor("Cyan"), max_points_high / 2);
+}
+
+void Viewer2D::set_lidar_points_visible(bool visible)
+{
+    lidar_points_visible_ = visible;
+    if (visible)
+        return;
+
+    for (auto *item : lidar_pool_high_)
+        item->setVisible(false);
+    for (auto *item : lidar_pool_low_)
+        item->setVisible(false);
+}
+
+bool Viewer2D::lidar_points_visible() const
+{
+    return lidar_points_visible_;
 }
 
 

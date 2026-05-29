@@ -20,7 +20,6 @@
 #include "camera_visualizer.h"
 
 #include "component_logging.h"
-#include "../../common/config/config_loader_utils.h"
 #include <algorithm>
 #include <print>
 #include <random>
@@ -47,6 +46,27 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
 #ifdef HIBERNATION_ENABLED
         hibernationChecker.start(500);
 #endif
+        const int period = configLoader.get<int>("Period.Compute");
+
+        states["Waiting"] = std::make_unique<GRAFCETStep>("Waiting", period,
+            std::bind(&SpecificWorker::waiting_loop, this),
+            std::bind(&SpecificWorker::waiting_enter, this));
+        states["Operating"] = std::make_unique<GRAFCETStep>("Operating", period,
+            std::bind(&SpecificWorker::operating_loop, this),
+            std::bind(&SpecificWorker::operating_enter, this));
+        states["Degraded"] = std::make_unique<GRAFCETStep>("Degraded", period,
+            std::bind(&SpecificWorker::degraded_loop, this),
+            std::bind(&SpecificWorker::degraded_enter, this));
+
+        states["Compute"]->addTransition(states["Compute"].get(), SIGNAL(entered()), states["Waiting"].get());
+        states["Waiting"]->addTransition(this, SIGNAL(presenceReady()), states["Operating"].get());
+        states["Operating"]->addTransition(this, SIGNAL(presenceLost()), states["Degraded"].get());
+        states["Degraded"]->addTransition(states["Degraded"].get(), SIGNAL(entered()), states["Waiting"].get());
+
+        statemachine.addState(states["Waiting"].get());
+        statemachine.addState(states["Operating"].get());
+        statemachine.addState(states["Degraded"].get());
+
         statemachine.setChildMode(QState::ExclusiveStates);
         statemachine.start();
         auto error = statemachine.errorString();
@@ -255,6 +275,8 @@ void SpecificWorker::initialize()
     // Camera visualizer
     camera_viz_ = std::make_unique<rc::CameraVisualizer>(G, room_polygon_for_viz, nullptr);
     connect(custom_widget.btn_camera_viz, &QPushButton::clicked, this, &SpecificWorker::slot_show_camera_visualization);
+    connect(custom_widget.btn_lidar_points_viz, &QPushButton::toggled, this, &SpecificWorker::slot_toggle_lidar_points_display);
+    viewer_2d_->set_lidar_points_visible(custom_widget.btn_lidar_points_viz->isChecked());
 
     // ── DSR: resolve existing graph node IDs ──────────────────────────────
     check_init_graph_is_valid();
@@ -326,6 +348,21 @@ void SpecificWorker::initialize()
     // connect(G.get(), &DSR::DSRGraph::del_node_signal,         this, &SpecificWorker::del_node_slot);
 
     room_concept_.start();
+
+    // ── Presence monitor ───────────────────────────────────────────────────
+    presence_monitor = std::make_unique<AgentPresenceMonitor>(configLoader, G, static_cast<std::uint32_t>(agent_id));
+    presence_monitor->on_required_ready = [this]() { emit presenceReady(); };
+    presence_monitor->on_required_lost  = [this]() { emit presenceLost(); };
+    presence_monitor->on_peer_restarted = [this](std::uint32_t id) {
+        std::cout << "[Presence] peer " << id << " restarted" << std::endl;
+    };
+    presence_monitor->on_optional_agent_lost  = [this](std::string name, std::uint32_t id) {
+        on_optional_peer_lost(name, id);
+    };
+    presence_monitor->on_optional_agent_ready = [this](std::string name, std::uint32_t id) {
+        on_optional_peer_ready(name, id);
+    };
+    presence_monitor->start();
 
     // ── Wire mouse-driven pose reset ───────────────────────────────────────
     connect(viewer_2d_.get(), &rc::Viewer2D::robot_moved,
@@ -1024,6 +1061,74 @@ void SpecificWorker::slot_show_camera_visualization()
         camera_viz_->raise();
         camera_viz_->activateWindow();
     }
+}
+
+///////////////////////////////////////////////////////////////////////////////
+void SpecificWorker::slot_toggle_lidar_points_display(bool checked)
+{
+    if (viewer_2d_)
+        viewer_2d_->set_lidar_points_visible(checked);
+}
+
+///////////////////////////////////////////////////////////////////////////////
+void SpecificWorker::waiting_enter()
+{
+    std::cout << "[SM] -> Waiting";
+    if (presence_monitor)
+    {
+        presence_monitor->set_local_ready(false);
+        const auto missing = presence_monitor->missing_required_names();
+        if (!missing.empty())
+        {
+            std::cout << " (missing:";
+            for (const auto &label : missing)
+                std::cout << ' ' << label;
+            std::cout << ')';
+        }
+    }
+    std::cout << std::endl;
+
+    if (presence_monitor && presence_monitor->all_required_ready())
+        emit presenceReady();
+}
+
+void SpecificWorker::waiting_loop()
+{
+    // PresenceMonitor drives transitions while required peers or nodes are missing.
+}
+
+void SpecificWorker::operating_enter()
+{
+    std::cout << "[SM] -> Operating: all required constraints satisfied" << std::endl;
+    if (presence_monitor)
+        presence_monitor->set_local_ready(true);
+}
+
+void SpecificWorker::operating_loop()
+{
+    compute();
+}
+
+void SpecificWorker::degraded_enter()
+{
+    std::cout << "[SM] -> Degraded: a required peer or node is no longer available" << std::endl;
+    if (presence_monitor)
+        presence_monitor->set_local_ready(false);
+}
+
+void SpecificWorker::degraded_loop()
+{
+    // Not reached: Degraded auto-transitions to Waiting on entered().
+}
+
+void SpecificWorker::on_optional_peer_lost(const std::string &name, std::uint32_t)
+{
+    std::cout << "[Presence] optional peer lost: " << name << std::endl;
+}
+
+void SpecificWorker::on_optional_peer_ready(const std::string &name, std::uint32_t)
+{
+    std::cout << "[Presence] optional peer ready: " << name << std::endl;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

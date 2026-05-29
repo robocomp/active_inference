@@ -36,6 +36,7 @@
 #include "timeseries_plot.h"
 #include "camera_visualizer.h"
 #include "../../common/affordance_manager/affordance_manager.h"
+#include "../../common/agent_presence_monitor/agent_presence_monitor.h"
 #include <atomic>
 #include <fps/fps.h>
 #include "custom_widget.h"
@@ -116,6 +117,7 @@ class SpecificWorker : public GenericWorker
         Params params;
 
         bool startup_check_flag;
+        std::unique_ptr<AgentPresenceMonitor> presence_monitor;
 
         // ── Velocity / odometry buffers (thread-safe) ──────────────────────────
         rc::HighLidarBuffer high_lidar_buffer_{3};
@@ -157,6 +159,16 @@ class SpecificWorker : public GenericWorker
         void slot_mouse_translate(QPointF scene_pos);
         void slot_mouse_rotate(QPointF scene_pos);
         void slot_show_camera_visualization();
+        void slot_toggle_lidar_points_display(bool checked);
+
+        void waiting_enter();
+        void waiting_loop();
+        void operating_enter();
+        void operating_loop();
+        void degraded_enter();
+        void degraded_loop();
+        void on_optional_peer_lost(const std::string &name, std::uint32_t id);
+        void on_optional_peer_ready(const std::string &name, std::uint32_t id);
 
         // ── DSR graph state ────────────────────────────────────────────────────
         uint64_t dsr_robot_id_ = 0;
@@ -177,7 +189,8 @@ class SpecificWorker : public GenericWorker
         std::unique_ptr<DSR::RT_API> rt_api;
 
     signals:
-        //void customSignal();
+        void presenceReady();
+        void presenceLost();
 };
 
 #endif // SPECIFICWORKER_H

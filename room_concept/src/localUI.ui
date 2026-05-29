@@ -15,14 +15,34 @@
   </property>
   <layout class="QVBoxLayout" name="verticalLayout">
    <item>
-    <widget class="QPushButton" name="btn_camera_viz">
-     <property name="text">
-            <string>Camera</string>
-     </property>
-     <property name="maximumHeight">
-      <number>35</number>
-     </property>
-    </widget>
+    <layout class="QHBoxLayout" name="controlsLayout">
+     <item>
+      <widget class="QPushButton" name="btn_camera_viz">
+       <property name="text">
+        <string>Camera</string>
+       </property>
+       <property name="maximumHeight">
+        <number>35</number>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="btn_lidar_points_viz">
+       <property name="text">
+        <string>Lidar</string>
+       </property>
+       <property name="checkable">
+        <bool>true</bool>
+       </property>
+       <property name="checked">
+        <bool>true</bool>
+       </property>
+       <property name="maximumHeight">
+        <number>35</number>
+       </property>
+      </widget>
+     </item>
+    </layout>
    </item>
    <item>
     <widget class="QSplitter" name="splitter">
