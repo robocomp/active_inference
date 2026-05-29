@@ -1,4 +1,5 @@
 #include "rerun_logger.h"
+#include "component_logging.h"
 
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -10,8 +11,6 @@
 #include <sstream>
 #include <iomanip>
 #include <cmath>
-#include <QDebug>
-
 // ──────────────────────────────────────────────────────────────────────────────
 // Minimal JSON helpers (no external library required)
 // ──────────────────────────────────────────────────────────────────────────────
@@ -145,7 +144,6 @@ void RerunLogger::init(const Config& cfg)
     stop_requested_ = false;
     frame_counter_ = 0;
     sender_thread_ = std::thread(&RerunLogger::sender_loop, this);
-    qInfo() << "[RerunLogger] started → " << cfg_.host.c_str() << ":" << cfg_.port;
 }
 
 void RerunLogger::stop()
@@ -192,8 +190,7 @@ void RerunLogger::sender_loop()
         }
 
         if (!send_frame(frame)) {
-            qWarning() << "[RerunLogger] send_frame failed:" << std::strerror(errno)
-                       << "— reconnecting";
+            qCWarning(logIo) << "RerunLogger send_frame failed:" << std::strerror(errno) << "reconnecting";
             ::close(sock_fd_);
             sock_fd_ = -1;
             connected_ = false;
@@ -223,8 +220,6 @@ bool RerunLogger::try_connect()
     }
 
     connected_ = true;
-    qInfo() << "[RerunLogger] connected to bridge at"
-            << cfg_.host.c_str() << ":" << cfg_.port;
     return true;
 }
 

@@ -65,6 +65,7 @@ public:
     void set_room_bounds(const Eigen::Vector2f& min_corner, const Eigen::Vector2f& max_corner);
     void set_room_polygon(const std::vector<Eigen::Vector2f>& vertices);
     void set_robot_state(const Eigen::Affine2f& pose, const Eigen::Matrix3f& covariance);
+    void set_robot_footprint(float width_m, float length_m);
 
     // ---- Target selection (public API) ----
     std::vector<Target> evaluate_targets() const;
@@ -117,6 +118,7 @@ private:
     Eigen::Affine2f robot_pose_ = Eigen::Affine2f::Identity();
     Eigen::Matrix3f robot_cov_ = Eigen::Matrix3f::Identity();
     bool robot_state_set_ = false;
+    float robot_footprint_radius_ = 0.f;
 
     // Persistent target
     std::optional<Target> current_target_;

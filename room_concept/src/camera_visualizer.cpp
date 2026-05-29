@@ -10,7 +10,6 @@
 
 #include <cmath>
 #include <limits>
-#include <print>
 
 namespace rc {
 
@@ -132,9 +131,6 @@ void CameraVisualizer::showEvent(QShowEvent* event)
     reset_timing_window();
     if (refresh_timer_ != nullptr && !refresh_timer_->isActive())
         refresh_timer_->start(50);  // target 20 Hz to guarantee >=10 Hz in practice
-    std::print("[CameraViz] show timer_interval_ms={} room_vertices={}\n",
-               refresh_timer_ != nullptr ? refresh_timer_->interval() : -1,
-               room_polygon_.size());
     update_frame();
 }
 
@@ -197,45 +193,7 @@ void CameraVisualizer::adapt_refresh_interval(std::uint64_t raw_delta)
 
 void CameraVisualizer::log_timing_summary(const char* reason)
 {
-    if (!timing_window_timer_.isValid())
-        return;
-
-    const double window_s = static_cast<double>(timing_window_timer_.elapsed()) / 1000.0;
-    if (window_s <= 0.0 || timing_stats_.timer_callbacks == 0)
-        return;
-
-    const auto avg_or_zero = [](float total, std::uint64_t count)
-    {
-        return count > 0 ? total / static_cast<float>(count) : 0.f;
-    };
-    const auto avg_or_zero_double = [](double total, std::uint64_t count)
-    {
-        return count > 0 ? total / static_cast<double>(count) : 0.0;
-    };
-
-    std::print(
-        "[Timing][CameraViz] reason={} window_s={:.2f} cb={} cb_hz={:.2f} rendered={} rendered_hz={:.2f} src_unique={} src_hz={:.2f} src_repeat={} src_zero={} src_backwards={} fetch_fail={} avg_gap_ms={:.2f} max_gap_ms={:.2f} avg_fetch_ms={:.2f} avg_draw_ms={:.2f} avg_present_ms={:.2f} avg_total_ms={:.2f} max_total_ms={:.2f} avg_src_delta_raw={:.1f} last_src_ts={}\n",
-        reason,
-        window_s,
-        timing_stats_.timer_callbacks,
-        static_cast<double>(timing_stats_.timer_callbacks) / window_s,
-        timing_stats_.rendered_frames,
-        static_cast<double>(timing_stats_.rendered_frames) / window_s,
-        timing_stats_.unique_source_frames,
-        static_cast<double>(timing_stats_.unique_source_frames) / window_s,
-        timing_stats_.repeated_source_frames,
-        timing_stats_.zero_timestamps,
-        timing_stats_.source_regressions,
-        timing_stats_.fetch_failures,
-        avg_or_zero(timing_stats_.total_callback_gap_ms, timing_stats_.callback_gap_samples),
-        timing_stats_.max_callback_gap_ms,
-        avg_or_zero(timing_stats_.total_fetch_ms, timing_stats_.timer_callbacks),
-        avg_or_zero(timing_stats_.total_draw_ms, timing_stats_.rendered_frames),
-        avg_or_zero(timing_stats_.total_present_ms, timing_stats_.rendered_frames),
-        avg_or_zero(timing_stats_.total_callback_ms, timing_stats_.timer_callbacks),
-        timing_stats_.max_callback_ms,
-        avg_or_zero_double(timing_stats_.total_source_delta, timing_stats_.source_delta_samples),
-        last_source_timestamp_);
+    (void)reason;
 }
 
 bool CameraVisualizer::fetch_rgb_from_dsr(QImage& rgb_image, std::uint64_t& frame_timestamp)

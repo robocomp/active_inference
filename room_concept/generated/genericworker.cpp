@@ -18,17 +18,8 @@
  */
 #include "genericworker.h"
 
-namespace
-{
-constexpr int kWindowStateVersion = 1;
+#include "component_logging.h"
 
-QString settings_group_name(const std::string& graph_name, int agent_id)
-{
-    const QString graph_suffix = graph_name.empty() ? QStringLiteral("default")
-                                                    : QString::fromStdString(graph_name);
-    return QStringLiteral("windows/%1/%2").arg(agent_id).arg(graph_suffix);
-}
-}
 
 /**
 * \brief Default constructor
@@ -37,18 +28,6 @@ GenericWorker::GenericWorker(const ConfigLoader& configLoader, TuplePrx tprx) : 
 {
 
 	this->configLoader = configLoader;
-    if (!this->configLoader.get<bool>("Component.Debug.Verbose")) {
-        std::cout << "\033[32mINFO\033[0m Verbose mode is disabled" << std::endl;
-        qInstallMessageHandler([](QtMsgType type, const QMessageLogContext& context, const QString& msg) {
-                switch (type) {
-                    case QtDebugMsg:   break; // Suppress qDebug()
-                    case QtInfoMsg:    qInfo().noquote() << msg; break;
-                    case QtWarningMsg: qWarning().noquote() << msg; break;
-                    case QtCriticalMsg: qCritical().noquote() << msg; break;
-                    case QtFatalMsg:   qFatal("%s", msg.toUtf8().constData()); break;
-                    default: qInfo().noquote() << msg; break;
-                }});
-    }
 
 	states["Initialize"] = std::make_unique<GRAFCETStep>("Initialize", BASIC_PERIOD, nullptr, std::bind(&GenericWorker::initialize, this));
 	states["Compute"] = std::make_unique<GRAFCETStep>("Compute", configLoader.get<int>("Period.Compute"), std::bind(&GenericWorker::compute, this));
@@ -80,11 +59,11 @@ GenericWorker::GenericWorker(const ConfigLoader& configLoader, TuplePrx tprx) : 
         auto [it, inserted] = Graphs.emplace("", std::make_shared<DSR::DSRGraph>(0, agent_name, agent_id, 
                                         this->configLoader.get<std::string>("Agent.configFile"), 
                                         true, domain));
-        std::cout << "Graph loaded" << std::endl;
+        qCInfo(logGraph) << "Default graph loaded";
         G = it->second;
     } 
     else {
-        std::cout << "Multiple graphs found: " << surNames.size() << std::endl;
+        qCInfo(logGraph) << "Multiple graphs found:" << surNames.size();
         for (std::string_view surName : surNames) {
             std::string name{surName};
             std::string prefix = "Agent." + name;
@@ -93,7 +72,7 @@ GenericWorker::GenericWorker(const ConfigLoader& configLoader, TuplePrx tprx) : 
                                             configLoader.get<std::string>(prefix + ".configFile"), 
                                             true, 
                                             configLoader.get<int>(prefix + ".domain")));
-            std::cout << "Graph " << name << " loaded" << std::endl;
+            qCInfo(logGraph) << "Graph loaded:" << QString::fromStdString(name);
         }
         G = Graphs.at(std::string(surNames.front()));
     }
@@ -114,7 +93,7 @@ GenericWorker::~GenericWorker()
 }
 void GenericWorker::killYourSelf()
 {
-	qDebug("Killing myself");
+    qCInfo(logLifecycle) << "Killing myself";
 	emit kill();
 }
 
@@ -129,10 +108,10 @@ void GenericWorker::setPeriod(const std::string& state, int period)
     if (it != states.end() && it->second != nullptr)
     {
 		it->second->setPeriod(period);
-		std::cout << "Period for state " << state << " changed to " << period << "ms" << std::endl << std::flush;
+		qCInfo(logLifecycle) << "Period for state" << QString::fromStdString(state) << "changed to" << period << "ms";
 	}
     else
-        std::cerr << "No change in the period, the state is not valid or not configured."<< std::endl;
+        qCWarning(logLifecycle) << "No change in the period; the state is not valid or not configured.";
 }
 
 int GenericWorker::getPeriod(const std::string& state)
@@ -141,7 +120,7 @@ int GenericWorker::getPeriod(const std::string& state)
 
     if (it == states.end() || it->second == nullptr)
     {
-        std::cerr << "Invalid or unconfigured state: " << state << std::endl;
+        qCWarning(logLifecycle) << "Invalid or unconfigured state:" << QString::fromStdString(state);
         return -1; 
 	}
     return it->second->getPeriod();
@@ -207,6 +186,8 @@ void GenericWorker::restore_window_settings()
 
         settings.endGroup();
     }
+
+    qCInfo(logUi) << "Window settings restored for" << windows.size() << "window(s)";
 }
 
 void GenericWorker::save_window_settings() const
@@ -225,6 +206,42 @@ void GenericWorker::save_window_settings() const
     }
 
     settings.sync();
+    qCInfo(logUi) << "Window settings saved for" << windows.size() << "window(s)";
+}
+
+QString GenericWorker::settings_group_name(const std::string& graph_name, int agent_id)
+{
+    const QString graph_suffix = graph_name.empty() ? QStringLiteral("default")
+                                                    : QString::fromStdString(graph_name);
+    return QStringLiteral("windows/%1/%2").arg(agent_id).arg(graph_suffix);
+}
+
+void GenericWorker::trigger_graph_layout_twopi()
+{
+    auto graph_viewer_owner = find_graph_viewer("");
+    if (!graph_viewer_owner)
+        return;
+
+    QWidget* graph_widget = graph_viewer_owner->get_widget(DSR::DSRViewer::view::graph);
+    auto* graph_viewer = qobject_cast<DSR::GraphViewer*>(graph_widget);
+    if (!graph_viewer)
+        return;
+
+    // Run now and once queued, so layout also happens after pending node/edge
+    // update signals are processed by the viewer.
+    graph_viewer->compute_layout("twopi");
+    QMetaObject::invokeMethod(graph_viewer,
+                              [graph_viewer]() { graph_viewer->compute_layout("twopi"); },
+                              Qt::QueuedConnection);
+}
+
+std::shared_ptr<DSR::DSRViewer> GenericWorker::find_graph_viewer(const std::string& name) const
+{
+    const auto it = graph_viewers.find(name);
+    if (it == graph_viewers.end())
+        return nullptr;
+
+    return it->second;
 }
 
 std::shared_ptr<DSR::DSRViewer> GenericWorker::setupViewer(std::shared_ptr<DSR::DSRGraph> graph, const std::string& prefix, QMainWindow* parent)

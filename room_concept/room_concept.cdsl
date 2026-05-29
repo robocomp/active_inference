@@ -1,5 +1,4 @@
 import "JoystickAdapter.idsl";
-import "Lidar3D.idsl";
 
 Component room_concept
 {

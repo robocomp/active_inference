@@ -18,22 +18,20 @@
  */
 #include "specificworker.h"
 #include "camera_visualizer.h"
+
+#include "component_logging.h"
+#include "../../common/config/config_loader_utils.h"
 #include <algorithm>
 #include <print>
 #include <random>
+#include <stdexcept>
 #include <fstream>
 #include <unordered_set>
 #include <QDir>
 #include <QFileInfo>
-#include <QMetaObject>
 #include <QVBoxLayout>
 
 #include <variant>
-
-namespace
-{
-    constexpr auto kTimingReportInterval = std::chrono::seconds(10);
-}
 
 ///////////////////////////////////////////////////////////////////////////////
 SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, bool startup_check)
@@ -59,158 +57,155 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
 ///////////////////////////////////////////////////////////////////////////////
 SpecificWorker::~SpecificWorker()
 {
-    // stop_lidar_thread = true;
-    // if (read_lidar_th.joinable())
-    //     read_lidar_th.join();
     save_window_settings();
     save_robot_pose_once();
     room_concept_.stop();
-    std::cout << "Destroying SpecificWorker" << std::endl;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 void SpecificWorker::initialize()
 {
-    std::cout << "initialize worker" << std::endl;
     GenericWorker::initialize();
 
     QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
                      this, &SpecificWorker::save_robot_pose_once, Qt::UniqueConnection);
 
     // ── RoomConcept params ─────────────────────────────────────────────────
-    params.PREDICTION_EARLY_EXIT = configLoader.get<bool>("RoomConcept.PredictionEarlyExit");
-    room_concept_.params.num_iterations             = configLoader.get<int>("RoomConcept.NumIterations");
-    room_concept_.params.rfe_window_size            = configLoader.get<int>("RoomConcept.WindowSize");
-    room_concept_.params.max_lidar_points           = configLoader.get<int>("RoomConcept.MaxLidarPoints");
-    room_concept_.params.rfe_max_lidar_per_old_slot = configLoader.get<int>("RoomConcept.MaxLidarOldSlot");
-    room_concept_.params.recovery_loss_threshold    = static_cast<float>(configLoader.get<double>("RoomConcept.RecoveryLossThreshold"));
-    room_concept_.params.recovery_consecutive_count = configLoader.get<int>("RoomConcept.RecoveryConsecutiveCount");
-    try { params.ODOMETRY_NOISE_FACTOR = static_cast<float>(configLoader.get<double>("RoomConcept.OdometryNoiseFactor")); } catch (...) {}
-    try { room_concept_.params.odom_noise_scale = static_cast<float>(configLoader.get<double>("RoomConcept.OdomNoiseScale")); } catch (...) {}
-    try { room_concept_.params.differential_test_enabled = configLoader.get<bool>("RoomConcept.DifferentialTest"); } catch (...) {}
-    try { room_concept_.params.sdf_current_slot_only = configLoader.get<bool>("RoomConcept.SdfCurrentSlotOnly"); } catch (...) {}
-    try { params.OptimizerType = configLoader.get<std::string>("RoomConcept.OptimizerType");
-          room_concept_.params.optimizer_type = params.OptimizerType; } catch (...) {}
+    rc::ConfigLoaderUtils::load_required<bool>(configLoader, "RoomConcept.PredictionEarlyExit", params.PREDICTION_EARLY_EXIT);
+    rc::ConfigLoaderUtils::load_required<int>(configLoader, "RoomConcept.NumIterations", room_concept_.params.num_iterations);
+    rc::ConfigLoaderUtils::load_required<int>(configLoader, "RoomConcept.WindowSize", room_concept_.params.rfe_window_size);
+    rc::ConfigLoaderUtils::load_required<int>(configLoader, "RoomConcept.MaxLidarPoints", room_concept_.params.max_lidar_points);
+    rc::ConfigLoaderUtils::load_required<int>(configLoader, "RoomConcept.MaxLidarOldSlot", room_concept_.params.rfe_max_lidar_per_old_slot);
+    rc::ConfigLoaderUtils::load_required<float, double>(configLoader, "RoomConcept.RecoveryLossThreshold", room_concept_.params.recovery_loss_threshold);
+    rc::ConfigLoaderUtils::load_required<int>(configLoader, "RoomConcept.RecoveryConsecutiveCount", room_concept_.params.recovery_consecutive_count);
 
-    try { room_concept_.params.sigma_sdf               = static_cast<float>(configLoader.get<double>("RoomConcept.SigmaSdf")); } catch (...) {}
-    try { room_concept_.params.prediction_trust_factor  = static_cast<float>(configLoader.get<double>("RoomConcept.PredictionTrustFactor")); } catch (...) {}
-    try { room_concept_.params.min_tracking_steps       = configLoader.get<int>("RoomConcept.MinTrackingSteps"); } catch (...) {}
-    try { room_concept_.params.rotation_sdf_coupling    = static_cast<float>(configLoader.get<double>("RoomConcept.RotationSdfCoupling")); } catch (...) {}
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RoomConcept.OdometryNoiseFactor", params.ODOMETRY_NOISE_FACTOR);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RoomConcept.OdomNoiseScale", room_concept_.params.odom_noise_scale);
+    rc::ConfigLoaderUtils::load_optional<bool>(configLoader, "RoomConcept.DifferentialTest", room_concept_.params.differential_test_enabled);
+    rc::ConfigLoaderUtils::load_optional<bool>(configLoader, "RoomConcept.SdfCurrentSlotOnly", room_concept_.params.sdf_current_slot_only);
+    rc::ConfigLoaderUtils::load_optional_apply<std::string>(configLoader, "RoomConcept.OptimizerType", [&](const std::string& optimizer_type)
+    {
+        params.OptimizerType = optimizer_type;
+        room_concept_.params.optimizer_type = optimizer_type;
+    });
 
-    try { room_concept_.params.lbfgs_lr               = static_cast<float>(configLoader.get<double>("RoomConcept.LbfgsLr")); } catch (...) {}
-    try { room_concept_.params.lbfgs_history_size     = configLoader.get<int>("RoomConcept.LbfgsHistorySize"); } catch (...) {}
-    try { room_concept_.params.lbfgs_tolerance_grad   = configLoader.get<double>("RoomConcept.LbfgsToleranceGrad"); } catch (...) {}
-    try { room_concept_.params.lbfgs_tolerance_change = configLoader.get<double>("RoomConcept.LbfgsToleranceChange"); } catch (...) {}
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RoomConcept.SigmaSdf", room_concept_.params.sigma_sdf);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RoomConcept.PredictionTrustFactor", room_concept_.params.prediction_trust_factor);
+    rc::ConfigLoaderUtils::load_optional<int>(configLoader, "RoomConcept.MinTrackingSteps", room_concept_.params.min_tracking_steps);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RoomConcept.RotationSdfCoupling", room_concept_.params.rotation_sdf_coupling);
 
-    try { room_concept_.params.learning_rate_pos        = static_cast<float>(configLoader.get<double>("RoomConcept.LearningRatePos")); } catch (...) {}
-    try { room_concept_.params.rfe_obs_sigma            = static_cast<float>(configLoader.get<double>("RoomConcept.ObsSigma")); } catch (...) {}
-    try { room_concept_.params.rfe_huber_delta          = static_cast<float>(configLoader.get<double>("RoomConcept.HuberDelta")); } catch (...) {}
-    try { room_concept_.params.convergence_relative_tol = static_cast<float>(configLoader.get<double>("RoomConcept.ConvergenceRelTol")); } catch (...) {}
-    try { room_concept_.params.convergence_min_iters    = configLoader.get<int>("RoomConcept.ConvergenceMinIters"); } catch (...) {}
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RoomConcept.LbfgsLr", room_concept_.params.lbfgs_lr);
+    rc::ConfigLoaderUtils::load_optional<int>(configLoader, "RoomConcept.LbfgsHistorySize", room_concept_.params.lbfgs_history_size);
+    rc::ConfigLoaderUtils::load_optional<double>(configLoader, "RoomConcept.LbfgsToleranceGrad", room_concept_.params.lbfgs_tolerance_grad);
+    rc::ConfigLoaderUtils::load_optional<double>(configLoader, "RoomConcept.LbfgsToleranceChange", room_concept_.params.lbfgs_tolerance_change);
 
-    try { room_concept_.params.rfe_boundary_quality_gate          = configLoader.get<bool>("RoomConcept.BoundaryQualityGate"); } catch (...) {}
-    try { room_concept_.params.boundary_hessian_quality_threshold = static_cast<float>(configLoader.get<double>("RoomConcept.BoundaryHessianQualityThreshold")); } catch (...) {}
-    try { room_concept_.params.boundary_mu_quality_threshold      = static_cast<float>(configLoader.get<double>("RoomConcept.BoundaryMuQualityThreshold")); } catch (...) {}
-    try { room_concept_.params.eigenvalue_clamp_boundary_max      = static_cast<float>(configLoader.get<double>("RoomConcept.EigenvalueClampBoundaryMax")); } catch (...) {}
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RoomConcept.LearningRatePos", room_concept_.params.learning_rate_pos);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RoomConcept.ObsSigma", room_concept_.params.rfe_obs_sigma);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RoomConcept.HuberDelta", room_concept_.params.rfe_huber_delta);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RoomConcept.ConvergenceRelTol", room_concept_.params.convergence_relative_tol);
+    rc::ConfigLoaderUtils::load_optional<int>(configLoader, "RoomConcept.ConvergenceMinIters", room_concept_.params.convergence_min_iters);
 
-    try { room_concept_.params.recovery_cooldown_frames = configLoader.get<int>("RoomConcept.RecoveryCooldownFrames"); } catch (...) {}
+    rc::ConfigLoaderUtils::load_optional<bool>(configLoader, "RoomConcept.BoundaryQualityGate", room_concept_.params.rfe_boundary_quality_gate);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RoomConcept.BoundaryHessianQualityThreshold", room_concept_.params.boundary_hessian_quality_threshold);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RoomConcept.BoundaryMuQualityThreshold", room_concept_.params.boundary_mu_quality_threshold);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RoomConcept.EigenvalueClampBoundaryMax", room_concept_.params.eigenvalue_clamp_boundary_max);
 
-    try { room_concept_.params.velocity_adaptive_weights  = configLoader.get<bool>("RoomConcept.VelocityAdaptiveWeights"); } catch (...) {}
-    try { room_concept_.params.linear_velocity_threshold  = static_cast<float>(configLoader.get<double>("RoomConcept.LinearVelocityThreshold")); } catch (...) {}
-    try { room_concept_.params.angular_velocity_threshold = static_cast<float>(configLoader.get<double>("RoomConcept.AngularVelocityThreshold")); } catch (...) {}
-    try { room_concept_.params.weight_boost_factor        = static_cast<float>(configLoader.get<double>("RoomConcept.WeightBoostFactor")); } catch (...) {}
-    try { room_concept_.params.weight_reduction_factor    = static_cast<float>(configLoader.get<double>("RoomConcept.WeightReductionFactor")); } catch (...) {}
-    try { room_concept_.params.weight_smoothing_alpha     = static_cast<float>(configLoader.get<double>("RoomConcept.WeightSmoothingAlpha")); } catch (...) {}
+    rc::ConfigLoaderUtils::load_optional<int>(configLoader, "RoomConcept.RecoveryCooldownFrames", room_concept_.params.recovery_cooldown_frames);
 
-    try { room_concept_.params.cmd_noise_trans             = static_cast<float>(configLoader.get<double>("RoomConcept.CmdNoiseTrans")); } catch (...) {}
-    try { room_concept_.params.cmd_noise_rot               = static_cast<float>(configLoader.get<double>("RoomConcept.CmdNoiseRot")); } catch (...) {}
-    try { room_concept_.params.cmd_noise_base              = static_cast<float>(configLoader.get<double>("RoomConcept.CmdNoiseBase")); } catch (...) {}
-    try { room_concept_.params.odom_noise_trans            = static_cast<float>(configLoader.get<double>("RoomConcept.OdomNoiseTrans")); } catch (...) {}
-    try { room_concept_.params.odom_noise_rot              = static_cast<float>(configLoader.get<double>("RoomConcept.OdomNoiseRot")); } catch (...) {}
-    try { room_concept_.params.odom_noise_base             = static_cast<float>(configLoader.get<double>("RoomConcept.OdomNoiseBase")); } catch (...) {}
-    try { room_concept_.params.encoder_rot_slip_k          = static_cast<float>(configLoader.get<double>("RoomConcept.EncoderRotSlipK")); } catch (...) {}
-    try { room_concept_.params.stationary_motion_threshold = static_cast<float>(configLoader.get<double>("RoomConcept.StationaryMotionThreshold")); } catch (...) {}
+    rc::ConfigLoaderUtils::load_optional<bool>(configLoader, "RoomConcept.VelocityAdaptiveWeights", room_concept_.params.velocity_adaptive_weights);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RoomConcept.LinearVelocityThreshold", room_concept_.params.linear_velocity_threshold);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RoomConcept.AngularVelocityThreshold", room_concept_.params.angular_velocity_threshold);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RoomConcept.WeightBoostFactor", room_concept_.params.weight_boost_factor);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RoomConcept.WeightReductionFactor", room_concept_.params.weight_reduction_factor);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RoomConcept.WeightSmoothingAlpha", room_concept_.params.weight_smoothing_alpha);
 
-    try { room_concept_.params.learn_motion_model      = configLoader.get<bool>("RoomConcept.LearnMotionModel"); } catch (...) {}
-    try { room_concept_.params.motion_learn_alpha      = static_cast<float>(configLoader.get<double>("RoomConcept.MotionLearnAlpha")); } catch (...) {}
-    try { room_concept_.params.motion_learn_beta       = static_cast<float>(configLoader.get<double>("RoomConcept.MotionLearnBeta")); } catch (...) {}
-    try { room_concept_.params.motion_learn_min_omega  = static_cast<float>(configLoader.get<double>("RoomConcept.MotionLearnMinOmega")); } catch (...) {}
-    try { room_concept_.params.motion_learn_min_trans  = static_cast<float>(configLoader.get<double>("RoomConcept.MotionLearnMinTrans")); } catch (...) {}
-    try { room_concept_.params.motion_learn_min_frames         = configLoader.get<int>("RoomConcept.MotionLearnMinFrames"); } catch (...) {}
-    try { room_concept_.params.motion_learn_quality_threshold  = static_cast<float>(configLoader.get<double>("RoomConcept.MotionLearnQualityThreshold")); } catch (...) {}
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RoomConcept.CmdNoiseTrans", room_concept_.params.cmd_noise_trans);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RoomConcept.CmdNoiseRot", room_concept_.params.cmd_noise_rot);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RoomConcept.CmdNoiseBase", room_concept_.params.cmd_noise_base);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RoomConcept.OdomNoiseTrans", room_concept_.params.odom_noise_trans);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RoomConcept.OdomNoiseRot", room_concept_.params.odom_noise_rot);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RoomConcept.OdomNoiseBase", room_concept_.params.odom_noise_base);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RoomConcept.EncoderRotSlipK", room_concept_.params.encoder_rot_slip_k);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RoomConcept.StationaryMotionThreshold", room_concept_.params.stationary_motion_threshold);
 
-    try { room_concept_.params.enable_corner_tracking = configLoader.get<bool>("RoomConcept.EnableCornerTracking"); } catch (...) {}
-    try { room_concept_.params.far_points_weight      = configLoader.get<bool>("RoomConcept.FarPointsWeight"); } catch (...) {}
-    try { room_concept_.params.far_points_exponent    = static_cast<float>(configLoader.get<double>("RoomConcept.FarPointsExponent")); } catch (...) {}
-    try { room_concept_.params.far_points_min_weight  = static_cast<float>(configLoader.get<double>("RoomConcept.FarPointsMinWeight")); } catch (...) {}
-    try { room_concept_.params.incidence_angle_weight = configLoader.get<bool>("RoomConcept.IncidenceAngleWeight"); } catch (...) {}
-    try { room_concept_.params.incidence_angle_exponent = static_cast<float>(configLoader.get<double>("RoomConcept.IncidenceAngleExponent")); } catch (...) {}
-    try { room_concept_.params.incidence_angle_min_weight = static_cast<float>(configLoader.get<double>("RoomConcept.IncidenceAngleMinWeight")); } catch (...) {}
-    try { room_concept_.params.use_cuda               = configLoader.get<bool>("RoomConcept.UseCuda"); } catch (...) {}
-    try { room_concept_.params.debug_log_enabled      = configLoader.get<bool>("RoomConcept.DebugLog"); } catch (...) {}
+    rc::ConfigLoaderUtils::load_optional<bool>(configLoader, "RoomConcept.LearnMotionModel", room_concept_.params.learn_motion_model);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RoomConcept.MotionLearnAlpha", room_concept_.params.motion_learn_alpha);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RoomConcept.MotionLearnBeta", room_concept_.params.motion_learn_beta);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RoomConcept.MotionLearnMinOmega", room_concept_.params.motion_learn_min_omega);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RoomConcept.MotionLearnMinTrans", room_concept_.params.motion_learn_min_trans);
+    rc::ConfigLoaderUtils::load_optional<int>(configLoader, "RoomConcept.MotionLearnMinFrames", room_concept_.params.motion_learn_min_frames);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RoomConcept.MotionLearnQualityThreshold", room_concept_.params.motion_learn_quality_threshold);
 
-    try { room_concept_.params.rerun_enabled        = configLoader.get<bool>("RoomConcept.RerunEnabled"); } catch (...) {}
-    try { room_concept_.params.rerun_host           = configLoader.get<std::string>("RoomConcept.RerunHost"); } catch (...) {}
-    try { room_concept_.params.rerun_port           = configLoader.get<int>("RoomConcept.RerunPort"); } catch (...) {}
-    try { room_concept_.params.rerun_sdf_every_n    = configLoader.get<int>("RoomConcept.RerunSdfEveryN"); } catch (...) {}
-    try { room_concept_.params.rerun_sdf_resolution = configLoader.get<int>("RoomConcept.RerunSdfResolution"); } catch (...) {}
-    try { room_concept_.params.rerun_max_queue      = configLoader.get<int>("RoomConcept.RerunMaxQueue"); } catch (...) {}
+    rc::ConfigLoaderUtils::load_optional<bool>(configLoader, "RoomConcept.EnableCornerTracking", room_concept_.params.enable_corner_tracking);
+    rc::ConfigLoaderUtils::load_optional<bool>(configLoader, "RoomConcept.FarPointsWeight", room_concept_.params.far_points_weight);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RoomConcept.FarPointsExponent", room_concept_.params.far_points_exponent);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RoomConcept.FarPointsMinWeight", room_concept_.params.far_points_min_weight);
+    rc::ConfigLoaderUtils::load_optional<bool>(configLoader, "RoomConcept.IncidenceAngleWeight", room_concept_.params.incidence_angle_weight);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RoomConcept.IncidenceAngleExponent", room_concept_.params.incidence_angle_exponent);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RoomConcept.IncidenceAngleMinWeight", room_concept_.params.incidence_angle_min_weight);
+    rc::ConfigLoaderUtils::load_optional<bool>(configLoader, "RoomConcept.UseCuda", room_concept_.params.use_cuda);
+    rc::ConfigLoaderUtils::load_optional<bool>(configLoader, "RoomConcept.DebugLog", room_concept_.params.debug_log_enabled);
+
+    rc::ConfigLoaderUtils::load_optional<bool>(configLoader, "RoomConcept.RerunEnabled", room_concept_.params.rerun_enabled);
+    rc::ConfigLoaderUtils::load_optional<std::string>(configLoader, "RoomConcept.RerunHost", room_concept_.params.rerun_host);
+    rc::ConfigLoaderUtils::load_optional<int>(configLoader, "RoomConcept.RerunPort", room_concept_.params.rerun_port);
+    rc::ConfigLoaderUtils::load_optional<int>(configLoader, "RoomConcept.RerunSdfEveryN", room_concept_.params.rerun_sdf_every_n);
+    rc::ConfigLoaderUtils::load_optional<int>(configLoader, "RoomConcept.RerunSdfResolution", room_concept_.params.rerun_sdf_resolution);
+    rc::ConfigLoaderUtils::load_optional<int>(configLoader, "RoomConcept.RerunMaxQueue", room_concept_.params.rerun_max_queue);
 
     // ── DSR stabilization thresholds ──────────────────────────────────────
-    try { params.STABLE_FRAMES_REQUIRED = configLoader.get<int>("DSR.StableFramesRequired"); } catch (...) {}
-    try { params.STABLE_SDF_MSE_MAX     = static_cast<float>(configLoader.get<double>("DSR.StableSdfMseMax")); } catch (...) {}
-    try { params.STABLE_COV_TT_MAX      = static_cast<float>(configLoader.get<double>("DSR.StableCovTtMax")); } catch (...) {}
-    try { params.BOOTSTRAP_TABLE_ENABLED = configLoader.get<bool>("DSR.BootstrapTableEnabled"); } catch (...) {}
-    try { params.BOOTSTRAP_TABLE_X = static_cast<float>(configLoader.get<double>("DSR.BootstrapTableX")); } catch (...) {}
-    try { params.BOOTSTRAP_TABLE_Y = static_cast<float>(configLoader.get<double>("DSR.BootstrapTableY")); } catch (...) {}
-    try { params.BOOTSTRAP_TABLE_YAW = static_cast<float>(configLoader.get<double>("DSR.BootstrapTableYaw")); } catch (...) {}
-    try { params.BOOTSTRAP_TABLE_WIDTH = static_cast<float>(configLoader.get<double>("DSR.BootstrapTableWidth")); } catch (...) {}
-    try { params.BOOTSTRAP_TABLE_DEPTH = static_cast<float>(configLoader.get<double>("DSR.BootstrapTableDepth")); } catch (...) {}
-    try { params.BOOTSTRAP_TABLE_HEIGHT = static_cast<float>(configLoader.get<double>("DSR.BootstrapTableHeight")); } catch (...) {}
+    rc::ConfigLoaderUtils::load_optional<int>(configLoader, "DSR.StableFramesRequired", params.STABLE_FRAMES_REQUIRED);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "DSR.StableSdfMseMax", params.STABLE_SDF_MSE_MAX);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "DSR.StableCovTtMax", params.STABLE_COV_TT_MAX);
+    rc::ConfigLoaderUtils::load_optional<bool>(configLoader, "DSR.BootstrapTableEnabled", params.BOOTSTRAP_TABLE_ENABLED);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "DSR.BootstrapTableX", params.BOOTSTRAP_TABLE_X);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "DSR.BootstrapTableY", params.BOOTSTRAP_TABLE_Y);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "DSR.BootstrapTableYaw", params.BOOTSTRAP_TABLE_YAW);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "DSR.BootstrapTableWidth", params.BOOTSTRAP_TABLE_WIDTH);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "DSR.BootstrapTableDepth", params.BOOTSTRAP_TABLE_DEPTH);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "DSR.BootstrapTableHeight", params.BOOTSTRAP_TABLE_HEIGHT);
 
     // ── EpistemicController params ─────────────────────────────────────────
     auto& ec = epistemic_controller_.params;
     auto& ep = epistemic_controller_.epistemic_planner().params;
-    try { ec.num_arc_curvatures    = configLoader.get<int>("EpistemicController.NumArcCurvatures"); } catch (...) {}
-    try { ec.horizon_steps         = configLoader.get<int>("EpistemicController.HorizonSteps"); } catch (...) {}
-    try { ec.dt                    = static_cast<float>(configLoader.get<double>("EpistemicController.Dt")); } catch (...) {}
-    try { ec.max_adv_speed         = static_cast<float>(configLoader.get<double>("EpistemicController.MaxAdvSpeed")); } catch (...) {}
-    try { ec.max_rot_speed         = static_cast<float>(configLoader.get<double>("EpistemicController.MaxRotSpeed")); } catch (...) {}
-    try { ec.w_epistemic           = static_cast<float>(configLoader.get<double>("EpistemicController.WEpistemic")); } catch (...) {}
-    try { ec.w_pragmatic           = static_cast<float>(configLoader.get<double>("EpistemicController.WPragmatic")); } catch (...) {}
-    try { ec.w_heading             = static_cast<float>(configLoader.get<double>("EpistemicController.WHeading")); } catch (...) {}
-    try { ec.w_boundary            = static_cast<float>(configLoader.get<double>("EpistemicController.WBoundary")); } catch (...) {}
-    try { ec.k_rot                 = static_cast<float>(configLoader.get<double>("EpistemicController.KRot")); } catch (...) {}
-    try { ec.gaussian_sigma        = static_cast<float>(configLoader.get<double>("EpistemicController.GaussianSigma")); } catch (...) {}
-    try { ec.speed_horizon_s       = static_cast<float>(configLoader.get<double>("EpistemicController.SpeedHorizonS")); } catch (...) {}
-    try { ec.obstacle_radius       = static_cast<float>(configLoader.get<double>("EpistemicController.ObstacleRadius")); } catch (...) {}
-    try { ec.obstacle_k            = static_cast<float>(configLoader.get<double>("EpistemicController.ObstacleK")); } catch (...) {}
-    try { ec.obstacle_step_cap     = static_cast<float>(configLoader.get<double>("EpistemicController.ObstacleStepCap")); } catch (...) {}
-    try { ec.w_obstacle            = static_cast<float>(configLoader.get<double>("EpistemicController.WObstacle")); } catch (...) {}
-    try { ec.wall_filter_margin    = static_cast<float>(configLoader.get<double>("EpistemicController.WallFilterMargin")); } catch (...) {}
-    try { ec.bandwidth_coupling    = static_cast<float>(configLoader.get<double>("EpistemicController.BandwidthCoupling")); } catch (...) {}
-    try { ec.sdf_safe              = static_cast<float>(configLoader.get<double>("EpistemicController.SdfSafe")); } catch (...) {}
-    try { ec.sdf_danger            = static_cast<float>(configLoader.get<double>("EpistemicController.SdfDanger")); } catch (...) {}
-    try { ec.governor_alpha_min    = static_cast<float>(configLoader.get<double>("EpistemicController.GovernorAlphaMin")); } catch (...) {}
-    try { ec.fim_corner_sigma      = static_cast<float>(configLoader.get<double>("EpistemicController.FimCornerSigma")); } catch (...) {}
-    try { ec.fim_max_range         = static_cast<float>(configLoader.get<double>("EpistemicController.FimMaxRange")); } catch (...) {}
-    try { ep.grid_resolution       = static_cast<float>(configLoader.get<double>("EpistemicController.GridResolution")); } catch (...) {}
-    try { ep.min_distance          = static_cast<float>(configLoader.get<double>("EpistemicController.MinDistance")); } catch (...) {}
-    try { ep.max_candidates        = configLoader.get<int>("EpistemicController.MaxCandidates"); } catch (...) {}
-    try { ep.target_wall_margin    = static_cast<float>(configLoader.get<double>("EpistemicController.TargetWallMargin")); } catch (...) {}
-    try { ep.angular_dominance_ratio = static_cast<float>(configLoader.get<double>("EpistemicController.AngularDominanceRatio")); } catch (...) {}
-    try { ep.w_exploration         = static_cast<float>(configLoader.get<double>("EpistemicController.WExploration")); } catch (...) {}
-    try { ep.ior_cell_size         = static_cast<float>(configLoader.get<double>("EpistemicController.IorCellSize")); } catch (...) {}
-    try { ep.ior_decay_time        = static_cast<float>(configLoader.get<double>("EpistemicController.IorDecayTime")); } catch (...) {}
-    try { ep.w_ior                 = static_cast<float>(configLoader.get<double>("EpistemicController.WIor")); } catch (...) {}
-    try { ep.fim_corner_sigma      = static_cast<float>(configLoader.get<double>("EpistemicController.FimCornerSigma")); } catch (...) {}
-    try { ep.fim_max_range         = static_cast<float>(configLoader.get<double>("EpistemicController.FimMaxRange")); } catch (...) {}
-    try { ep.arrival_distance      = static_cast<float>(configLoader.get<double>("EpistemicController.ArrivalDistance")); } catch (...) {}
-    try { ep.dwell_time            = static_cast<float>(configLoader.get<double>("EpistemicController.DwellTime")); } catch (...) {}
-    // ── Lidar reader thread disabled: lidar is read from compute() ─────────
-    // read_lidar_th = std::thread(&SpecificWorker::read_lidar, this);
-    // qInfo() << __FUNCTION__ << "Started lidar reader";
-
+    rc::ConfigLoaderUtils::load_optional<int>(configLoader, "EpistemicController.NumArcCurvatures", ec.num_arc_curvatures);
+    rc::ConfigLoaderUtils::load_optional<int>(configLoader, "EpistemicController.HorizonSteps", ec.horizon_steps);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.Dt", ec.dt);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.MaxAdvSpeed", ec.max_adv_speed);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.MaxRotSpeed", ec.max_rot_speed);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.WEpistemic", ec.w_epistemic);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.WPragmatic", ec.w_pragmatic);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.WHeading", ec.w_heading);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.WBoundary", ec.w_boundary);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.KRot", ec.k_rot);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.GaussianSigma", ec.gaussian_sigma);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.SpeedHorizonS", ec.speed_horizon_s);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.ObstacleRadius", ec.obstacle_radius);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.ObstacleK", ec.obstacle_k);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.ObstacleStepCap", ec.obstacle_step_cap);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.WObstacle", ec.w_obstacle);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.WallFilterMargin", ec.wall_filter_margin);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.BandwidthCoupling", ec.bandwidth_coupling);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.SdfSafe", ec.sdf_safe);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.SdfDanger", ec.sdf_danger);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.GovernorAlphaMin", ec.governor_alpha_min);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.FimCornerSigma", ec.fim_corner_sigma);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.FimMaxRange", ec.fim_max_range);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.GridResolution", ep.grid_resolution);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.MinDistance", ep.min_distance);
+    rc::ConfigLoaderUtils::load_optional<int>(configLoader, "EpistemicController.MaxCandidates", ep.max_candidates);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.TargetWallMargin", ep.target_wall_margin);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.AngularDominanceRatio", ep.angular_dominance_ratio);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.WExploration", ep.w_exploration);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.IorCellSize", ep.ior_cell_size);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.IorDecayTime", ep.ior_decay_time);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.WIor", ep.w_ior);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.FimCornerSigma", ep.fim_corner_sigma);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.FimMaxRange", ep.fim_max_range);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.ArrivalDistance", ep.arrival_distance);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.DwellTime", ep.dwell_time);
+    epistemic_controller_.set_robot_footprint(params.ROBOT_WIDTH, params.ROBOT_LENGTH);
+    
     // ── Wire RoomConcept run context ───────────────────────────────────────
     rc::RoomConcept::RunContext run_ctx;
     run_ctx.high_lidar_buffer = &high_lidar_buffer_;
@@ -218,17 +213,16 @@ void SpecificWorker::initialize()
     run_ctx.odometry_buffer = &odometry_buffer_;
     room_concept_.set_run_context(run_ctx);
     room_concept_.params.prediction_early_exit = params.PREDICTION_EARLY_EXIT;
-    rfe_saved_window_size_ = room_concept_.params.rfe_window_size;
 
     initialize_room_model_from_svg();
     const std::string pose_path = pose_file_path();
     room_concept_.set_seed_pose_file(pose_path);
-    std::cout << "Pose seed file: " << pose_path << "\n";
 
-    // custom widget
-    //graph_viewers[agent_name]->add_custom_widget_to_dock("room concept", &custom_widget);
-    qInfo() << __FUNCTION__ << "Adding custom widget to dock" << agent_name.c_str();
-    graph_viewers.at("")->add_custom_widget_to_dock("layout", &custom_widget);
+    auto default_viewer = find_graph_viewer("");
+    if (!default_viewer)
+        throw std::runtime_error("SpecificWorker requires a default DSR viewer. Enable at least one Agent viewer flag for the default graph.");
+
+    default_viewer->add_custom_widget_to_dock("layout", &custom_widget);
     viewer_2d_ = std::make_unique<rc::Viewer2D>(custom_widget.frame, params.GRID_MAX_DIM, true);
     viewer_2d_->show();
     viewer_2d_->add_robot(params.ROBOT_WIDTH, params.ROBOT_LENGTH, 0.f, 0.f, QColor("blue"));
@@ -308,12 +302,9 @@ void SpecificWorker::initialize()
                     const uint64_t child_id = *it;
                     if (!G->get_node(child_id).has_value())
                         continue;
-                    qInfo() << "DSR: deleting node hanging from room id=" << child_id;
                     G->delete_node(child_id);
                 }
 
-                qInfo() << "DSR: deleting pre-existing room node id=" << room_node.id()
-                        << "name=" << room_node.name().c_str();
                 G->delete_node(room_node);
             }
         }
@@ -393,30 +384,7 @@ void SpecificWorker::compute()
         .use_loc_pose     = use_loc,
     });
 
-    // Epistemic score grid heatmap overlay (drawn behind lidar/robot by z-order).
-    {
-        const auto& planner = epistemic_controller_.epistemic_planner();
-        const auto& cell_scores = planner.cell_scores();
-        std::vector<std::pair<Eigen::Vector2f, float>> score_cells;
-        score_cells.reserve(cell_scores.size());
-        for (const auto& cell : cell_scores)
-            score_cells.emplace_back(cell.center, cell.score);
-        viewer_2d_->draw_score_grid(score_cells, planner.cell_size());
-
-        const auto& current_target = planner.current_target();
-        if (current_target.has_value() && !current_target->rotate_in_place)
-        {
-            viewer_2d_->draw_selected_grid_cell(current_target->position, planner.cell_size());
-            viewer_2d_->update_target_marker(current_target->position.x(),
-                                             current_target->position.y(),
-                                             true);
-        }
-        else
-        {
-            viewer_2d_->draw_selected_grid_cell(std::nullopt, planner.cell_size());
-            viewer_2d_->update_target_marker(0.f, 0.f, false);
-        }
-    }
+    update_epistemic_overlay();
 
     if (have_loc && !loc_res->corner_matches.empty())
         viewer_2d_->draw_corners(loc_res->corner_matches, pose_for_draw);
@@ -475,21 +443,6 @@ std::optional<rc::LidarData> SpecificWorker::read_lidar_from_graph() const
     const auto &zs = lz.value().get();
     const std::size_t npts = std::min({xs.size(), ys.size(), zs.size()});
 
-    float z_min_raw = std::numeric_limits<float>::infinity();
-    float z_max_raw = -std::numeric_limits<float>::infinity();
-    std::size_t finite_count = 0;
-    // for (std::size_t i = 0; i < npts; ++i)
-    // {
-    //     const float xr = xs[i];
-    //     const float yr = ys[i];
-    //     const float zr = zs[i];
-    //     if (!std::isfinite(xr) || !std::isfinite(yr) || !std::isfinite(zr))
-    //         continue;
-    //     ++finite_count;
-    //     z_min_raw = std::min(z_min_raw, zr);
-    //     z_max_raw = std::max(z_max_raw, zr);
-    // }
-
     const float to_m = 1.f;
 
     std::vector<Eigen::Vector3f> points_high;
@@ -514,18 +467,6 @@ std::optional<rc::LidarData> SpecificWorker::read_lidar_from_graph() const
 
         if (z_m > min_h_m)
             points_high.emplace_back(x_m, y_m, z_m);
-    }
-
-    static auto last_diag = std::chrono::steady_clock::now() - kTimingReportInterval;
-    const auto now_diag = std::chrono::steady_clock::now();
-    if (now_diag - last_diag > kTimingReportInterval)
-    {
-        const float z_min_m = std::isfinite(z_min_raw) ? z_min_raw * to_m : 0.f;
-        const float z_max_m = std::isfinite(z_max_raw) ? z_max_raw * to_m : 0.f;
-        std::print("[RoomConcept][LidarGraph] node='{}' raw={} finite={} filtered={} inf={} scale_to_m={:.6f} z_raw=[{:.3f},{:.3f}] z_m=[{:.3f},{:.3f}]\n",
-                   lidar_node->name(), npts, finite_count, points_high.size(), infinite_count,
-                   to_m, z_min_raw, z_max_raw, z_min_m, z_max_m);
-        last_diag = now_diag;
     }
 
     const auto now_ts = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -653,7 +594,6 @@ void SpecificWorker::dsr_create_room_and_reparent(const rc::RoomConcept::UpdateR
         dsr_room_id_ = room_nodes.front().id();
         room_node_created_ = true;
         stable_frames_ = 0;
-        qInfo() << "DSR: reusing existing room node id=" << dsr_room_id_;
         dsr_update_pose(res);
         return;
     }
@@ -674,7 +614,6 @@ void SpecificWorker::dsr_create_room_and_reparent(const rc::RoomConcept::UpdateR
     dsr_room_id_ = room_id_opt.value();
     room_node_created_ = true;
     stable_frames_ = 0;
-    qInfo() << "DSR: created room node id=" << dsr_room_id_ << "hanging from robot id=" << dsr_robot_id_;
     trigger_graph_layout_twopi();
 
     dsr_update_pose(res);
@@ -735,9 +674,6 @@ void SpecificWorker::dsr_insert_bootstrap_table_if_missing()
                                      {params.BOOTSTRAP_TABLE_X, params.BOOTSTRAP_TABLE_Y, z},
                                      {0.f, 0.f, params.BOOTSTRAP_TABLE_YAW});
 
-    std::print("Inserted bootstrap table node id={} at room pose x={} y={} z={} yaw={}\n",
-               table_id_opt.value(), params.BOOTSTRAP_TABLE_X, params.BOOTSTRAP_TABLE_Y, z, params.BOOTSTRAP_TABLE_YAW);    
-
     if (not G->get_edge(dsr_room_id_, table_id_opt.value(), "RT").has_value())
     {
         qWarning() << "DSR: bootstrap table node created but RT edge is missing"
@@ -745,9 +681,6 @@ void SpecificWorker::dsr_insert_bootstrap_table_if_missing()
                    << "table_id=" << table_id_opt.value();
         return;
     }
-
-    qInfo() << "DSR: inserted bootstrap table node id=" << table_id_opt.value()
-            << "at room pose" << params.BOOTSTRAP_TABLE_X << params.BOOTSTRAP_TABLE_Y << z;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -772,7 +705,6 @@ void SpecificWorker::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
     auto& planner = epistemic_controller_.epistemic_planner();
     if (affordance_manager_.consume_completion_event())
     {
-        qInfo() << "Affordance completed, clearing current planner target before selecting the next one";
         planner.clear_target();
         return;
     }
@@ -808,52 +740,65 @@ void SpecificWorker::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+void SpecificWorker::load_robot_body_dimensions_from_graph()
+{
+    if (!G)
+        return;
+
+    std::optional<DSR::Node> body_node = std::nullopt;
+
+    const auto body_nodes = G->get_nodes_by_type("body");
+    if (!body_nodes.empty())
+        body_node = body_nodes.front();
+    else
+        body_node = G->get_node("body");
+
+    if (!body_node.has_value())
+    {
+        qCWarning(logGraph) << "dsr_init_graph: no 'body' node found; keeping default robot dimensions"
+                            << params.ROBOT_WIDTH << params.ROBOT_LENGTH << params.ROBOT_HEIGHT;
+        return;
+    }
+
+    dsr_body_id_ = body_node->id();
+
+    if (const auto width_value = G->get_attrib_by_name<width_m_att>(body_node.value()); width_value.has_value())
+        params.ROBOT_WIDTH = width_value.value();
+    if (const auto depth_value = G->get_attrib_by_name<depth_m_att>(body_node.value()); depth_value.has_value())
+        params.ROBOT_LENGTH = depth_value.value();
+    if (const auto height_value = G->get_attrib_by_name<height_m_att>(body_node.value()); height_value.has_value())
+        params.ROBOT_HEIGHT = height_value.value();
+
+    epistemic_controller_.set_robot_footprint(params.ROBOT_WIDTH, params.ROBOT_LENGTH);
+
+    qCInfo(logGraph) << "Robot dimensions from body node: width depth height ="
+                     << params.ROBOT_WIDTH << params.ROBOT_LENGTH << params.ROBOT_HEIGHT;
+}
+
+///////////////////////////////////////////////////////////////////////////////
 void SpecificWorker::check_init_graph_is_valid()
 {
-    if (!G) { qWarning() << "dsr_init_graph: DSR graph not available"; return; }
+    if (!G) { qCWarning(logGraph) << "dsr_init_graph: DSR graph not available"; return; }
 
     // Resolve the root/world node by type (name may vary, e.g. "root", "world")
     const auto root_nodes = G->get_nodes_by_type("root");
     if (!root_nodes.empty())
     {
         dsr_world_id_ = root_nodes.front().id();
-        qInfo() << "DSR: found root node id=" << dsr_world_id_
-                << "name=" << root_nodes.front().name().c_str();
     }
-    else { qWarning() << "dsr_init_graph: no 'root' type node found in graph"; return; }
+    else { qCWarning(logGraph) << "dsr_init_graph: no 'root' type node found in graph"; return; }
 
     // Resolve the robot node by type
     const auto robot_nodes = G->get_nodes_by_type("robot");
     if (!robot_nodes.empty())
     {
         dsr_robot_id_ = robot_nodes.front().id();
-        qInfo() << "DSR: found robot node id=" << dsr_robot_id_
-                << "name=" << robot_nodes.front().name().c_str();
     }
-    else { qWarning() << "dsr_init_graph: no 'robot' type node found in graph"; return; }
+    else { qCWarning(logGraph) << "dsr_init_graph: no 'robot' type node found in graph"; return; }
+
+    load_robot_body_dimensions_from_graph();
 }
 
-///////////////////////////////////////////////////////////////////////////////
-void SpecificWorker::trigger_graph_layout_twopi()
-{
-    const auto it = graph_viewers.find("");
-    if (it == graph_viewers.end() || !it->second)
-        return;
-
-    QWidget* graph_widget = it->second->get_widget(DSR::DSRViewer::view::graph);
-    auto* graph_viewer = qobject_cast<DSR::GraphViewer*>(graph_widget);
-    if (!graph_viewer)
-        return;
-
-    // Run now and once queued, so layout also happens after pending node/edge
-    // update signals are processed by the viewer.
-    graph_viewer->compute_layout("twopi");
-    QMetaObject::invokeMethod(graph_viewer,
-                              [graph_viewer]() { graph_viewer->compute_layout("twopi"); },
-                              Qt::QueuedConnection);
-}
-
-///////////////////////////////////////////////////////////////////////////////
 Eigen::Affine2f SpecificWorker::best_available_pose(
     const std::optional<rc::RoomConcept::UpdateResult>& loc_res, bool have_loc) const
 {
@@ -868,6 +813,33 @@ Eigen::Affine2f SpecificWorker::best_available_pose(
         return p;
     }
     return Eigen::Affine2f::Identity();
+}
+
+///////////////////////////////////////////////////////////////////////////////
+void SpecificWorker::update_epistemic_overlay()
+{
+    // Epistemic score grid heatmap overlay (drawn behind lidar/robot by z-order).
+    const auto& planner = epistemic_controller_.epistemic_planner();
+    const auto& cell_scores = planner.cell_scores();
+    std::vector<std::pair<Eigen::Vector2f, float>> score_cells;
+    score_cells.reserve(cell_scores.size());
+    for (const auto& cell : cell_scores)
+        score_cells.emplace_back(cell.center, cell.score);
+    viewer_2d_->draw_score_grid(score_cells, planner.cell_size());
+
+    const auto& current_target = planner.current_target();
+    if (current_target.has_value() && !current_target->rotate_in_place)
+    {
+        viewer_2d_->draw_selected_grid_cell(current_target->position, planner.cell_size());
+        viewer_2d_->update_target_marker(current_target->position.x(),
+                                         current_target->position.y(),
+                                         true);
+    }
+    else
+    {
+        viewer_2d_->draw_selected_grid_cell(std::nullopt, planner.cell_size());
+        viewer_2d_->update_target_marker(0.f, 0.f, false);
+    }
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -889,31 +861,6 @@ void SpecificWorker::update_ui(const std::optional<rc::RoomConcept::UpdateResult
     }
 }
 
-///////////////////////////////////////////////////////////////////////////////
-void SpecificWorker::read_lidar()
-{
-    FPSCounter lidar_fps;
-    auto wait_period = std::chrono::milliseconds(getPeriod("Compute"));
-    while (!stop_lidar_thread)
-    {
-        try
-        {
-            (void)read_lidar_from_graph();
-
-            lidar_fps.print("[LidarThread]", 2000);
-            std::this_thread::sleep_for(wait_period);
-        }
-        catch (const Ice::Exception& e)
-        { qWarning() << "[read_lidar] Ice exception:" << e.what(); }
-    }
-}
-
-
-
-///////////////////////////////////////////////////////////////////////////////
-/// Auxiliary methods for DSR graph management and other utilities
-//////////////////////////////////////////////////////////////////////////////
-
 void SpecificWorker::initialize_room_model_from_svg()
 {
     const auto room_polygon = rc::SvgRoomLoader::load_polygon_points(
@@ -922,7 +869,6 @@ void SpecificWorker::initialize_room_model_from_svg()
     {
         room_concept_.configure_room_from_polygon(room_polygon);
         room_initialized_from_svg_polygon_ = true;
-        qInfo() << "Configured RoomConcept from SVG polygon, vertices:" << room_polygon.size();
         return;
     }
     room_concept_.configure_room_from_rect(params.GRID_MAX_DIM.width(), params.GRID_MAX_DIM.height());
@@ -950,7 +896,6 @@ void SpecificWorker::save_robot_pose_on_exit() const
     std::ofstream out(qpath.toStdString(), std::ios::trunc);
     if (!out.is_open()) { qWarning() << "Cannot open pose file:" << qpath; return; }
     out << pose[0] << ' ' << pose[1] << ' ' << pose[2] << '\n';
-    std::cout << "Saved robot pose: " << pose[0] << " " << pose[1] << " " << pose[2] << "\n";
 }
 
 void SpecificWorker::save_robot_pose_once()
@@ -986,8 +931,6 @@ std::string SpecificWorker::pose_file_path() const
 
 void SpecificWorker::modify_node_slot(std::uint64_t id, const std::string &type)
 {
-    const auto t_cb_start = std::chrono::steady_clock::now();
-
     if (!G)
         return;
 
@@ -1022,7 +965,6 @@ void SpecificWorker::modify_node_slot(std::uint64_t id, const std::string &type)
         std::vector<Eigen::Vector3f> points_high;
         points_high.reserve(npts);
         const float min_h_m = params.LIDAR_HIGH_MIN_HEIGHT;
-        int infinite_count = 0;
 
         for (std::size_t i = 0; i < npts; ++i)
         {
@@ -1031,55 +973,17 @@ void SpecificWorker::modify_node_slot(std::uint64_t id, const std::string &type)
             const float z_raw = zs[i];
             if (!std::isfinite(x_raw) || !std::isfinite(y_raw) || !std::isfinite(z_raw))
             {
-                infinite_count++;
                 continue;
             }
 
             if (z_raw > min_h_m)
                 points_high.emplace_back(x_raw, y_raw, z_raw);
         }
-        const std::size_t out_count = points_high.size();
-        const auto t_filter_end = std::chrono::steady_clock::now();
         const std::uint64_t ts = static_cast<std::uint64_t>(std::max<std::int64_t>(0, static_cast<std::int64_t>(laser_ts.value_or(0))));
         rc::LidarData lidar_data{std::move(points_high), static_cast<std::int64_t>(laser_ts.value())};
 
         high_lidar_buffer_.put<0>(std::move(lidar_data), ts);
         room_concept_.notify_new_lidar(static_cast<std::int64_t>(ts));
-
-        const auto t_cb_end = std::chrono::steady_clock::now();
-        const float cb_ms = std::chrono::duration<float, std::milli>(t_cb_end - t_cb_start).count();
-        const float filter_ms = std::chrono::duration<float, std::milli>(t_filter_end - t_cb_start).count();
-
-        static auto last_timing = std::chrono::steady_clock::now();
-        static std::uint64_t callbacks = 0;
-        static std::uint64_t in_points = 0;
-        static std::uint64_t out_points = 0;
-        static float total_cb_ms = 0.f;
-        static float total_filter_ms = 0.f;
-
-        callbacks++;
-        in_points += npts;
-        out_points += out_count;
-        total_cb_ms += cb_ms;
-        total_filter_ms += filter_ms;
-
-        const auto now_timing = std::chrono::steady_clock::now();
-        if (now_timing - last_timing >= kTimingReportInterval)
-        {
-            const float avg_cb_ms = callbacks > 0 ? total_cb_ms / static_cast<float>(callbacks) : 0.f;
-            const float avg_filter_ms = callbacks > 0 ? total_filter_ms / static_cast<float>(callbacks) : 0.f;
-            const float avg_in = callbacks > 0 ? static_cast<float>(in_points) / static_cast<float>(callbacks) : 0.f;
-            const float avg_out = callbacks > 0 ? static_cast<float>(out_points) / static_cast<float>(callbacks) : 0.f;
-            std::print("[Timing][LidarSlot] calls={} avg_cb_ms={:.3f} avg_filter_ms={:.3f} avg_pts_in={:.1f} avg_pts_out={:.1f}\n",
-                       callbacks, avg_cb_ms, avg_filter_ms, avg_in, avg_out);
-
-            callbacks = 0;
-            in_points = 0;
-            out_points = 0;
-            total_cb_ms = 0.f;
-            total_filter_ms = 0.f;
-            last_timing = now_timing;
-        }
     }
 }
 
@@ -1096,7 +1000,6 @@ void SpecificWorker::slot_mouse_translate(QPointF scene_pos)
         static_cast<float>(scene_pos.x()),
         static_cast<float>(scene_pos.y()),
         theta});
-    qInfo() << "[mouse] Translate robot to" << scene_pos.x() << scene_pos.y();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -1109,8 +1012,6 @@ void SpecificWorker::slot_mouse_rotate(QPointF scene_pos)
     const float theta = std::atan2(static_cast<float>(scene_pos.y()) - ry,
                                    static_cast<float>(scene_pos.x()) - rx);
     room_concept_.push_command(rc::RoomConcept::CmdSetPose{rx, ry, theta});
-    qInfo() << "[mouse] Rotate robot toward" << scene_pos.x() << scene_pos.y()
-            << "-> theta" << qRadiansToDegrees(theta) << "deg";
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -1118,7 +1019,6 @@ void SpecificWorker::slot_show_camera_visualization()
 {
     if (camera_viz_)
     {
-        qInfo() << "[CameraViz] button clicked visible=" << camera_viz_->isVisible();
         camera_viz_->update_frame();
         camera_viz_->show();
         camera_viz_->raise();
@@ -1264,12 +1164,6 @@ void SpecificWorker::modify_node_attrs_slot(std::uint64_t id, const std::vector<
                                                                  cmd.source_ts_ms);
                             velocity_buffer_.put<0>(std::move(cmd), source_ts);
                             last_robot_ref_speed_timestamp_ = source_ts;
-
-                            qInfo() << "Robot reference speed received from DSR"
-                                    << "adv=" << adv_value.value()
-                                    << "side=" << side_value.value()
-                                    << "rot=" << rot_value.value()
-                                    << "ts=" << source_ts;
                         }
                     }
                 }

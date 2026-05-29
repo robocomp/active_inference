@@ -1,6 +1,6 @@
 #include "svg_room_loader.h"
+#include "component_logging.h"
 
-#include <QDebug>
 #include <QDomDocument>
 #include <QFile>
 #include <QFileInfo>
@@ -18,7 +18,7 @@ std::vector<Eigen::Vector2f> SvgRoomLoader::load_polygon_points(const std::strin
     QFile file(svg_path);
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
     {
-        qWarning() << "SvgRoomLoader: cannot open SVG file:" << svg_path;
+        qCWarning(logIo) << "SvgRoomLoader cannot open SVG file:" << svg_path;
         return {};
     }
 
@@ -28,7 +28,7 @@ std::vector<Eigen::Vector2f> SvgRoomLoader::load_polygon_points(const std::strin
     int error_col = 0;
     if (!doc.setContent(&file, &parse_error, &error_line, &error_col))
     {
-        qWarning() << "SvgRoomLoader: XML parse error in" << svg_path
+        qCWarning(logIo) << "SvgRoomLoader XML parse error in" << svg_path
                    << "line" << error_line << "col" << error_col << ":" << parse_error;
         return {};
     }
@@ -48,7 +48,7 @@ std::vector<Eigen::Vector2f> SvgRoomLoader::load_polygon_points(const std::strin
         auto points = parse_points_attribute(points_attr, flip_y, mirror_x);
         if (points.size() < 3)
         {
-            qWarning() << "SvgRoomLoader: polygon" << target_id
+            qCWarning(logIo) << "SvgRoomLoader polygon" << target_id
                        << "in" << svg_path << "has fewer than 3 points.";
             return {};
         }
@@ -60,7 +60,7 @@ std::vector<Eigen::Vector2f> SvgRoomLoader::load_polygon_points(const std::strin
         return points;
     }
 
-    qWarning() << "SvgRoomLoader: polygon id not found:" << target_id << "in" << svg_path;
+    qCWarning(logIo) << "SvgRoomLoader polygon id not found:" << target_id << "in" << svg_path;
     return {};
 }
 

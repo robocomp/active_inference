@@ -73,19 +73,31 @@
 #include <ConfigLoader/ConfigLoader.h>
 
 #include <sigwatch/sigwatch.h>
+#include <sstream>
 
+#include "component_logging.h"
 #include "genericworker.h"
 #include "../src/specificworker.h"
 
 #include <joystickadapterI.h>
 
 #include <JoystickAdapter.h>
-#include <Lidar3D.h>
+
 
 #define USE_QTGUI
 
 #define PROGRAM_NAME    "room_concept"
 #define SERVER_FULL_NAME   "RoboComp room_concept::room_concept"
+
+namespace
+{
+QString ice_exception_to_qstring(const Ice::Exception& ex)
+{
+	std::ostringstream stream;
+	stream << ex;
+	return QString::fromStdString(stream.str());
+}
+}
 
 
 template <typename SubInterfaceType>
@@ -107,33 +119,39 @@ void subscribe( const Ice::CommunicatorPtr& communicator,
 
         Ice::ObjectAdapterPtr adapter = communicator->createObjectAdapterWithEndpoints(name_topic, endpointConfig);
         auto servant = std::make_shared<SubInterfaceType>(worker, index);
-        auto proxy = adapter->addWithUUID(servant)->ice_oneway();
+		proxy = adapter->addWithUUID(servant)->ice_oneway();
 
-        std::cout << "[\033[1;36m" << programName << "\033[0m]: \033[32mINFO\033[0m Topic: " 
-                  << name_topic << " will be used in subscription. \033[0m\n";
+		qCInfo(logLifecycle).noquote() << QStringLiteral("%1 topic %2 will be used in subscription.")
+											  .arg(QString::fromStdString(programName),
+												   QString::fromStdString(name_topic));
 
-        std::shared_ptr<IceStorm::TopicPrx> topic;
         if(!topic)
         {
             try {
                 topic = topicManager->create(name_topic);
-                std::cout << "\n\n[\033[1;36m" << programName << "\033[0m]: \033[1;33mWARNING\033[0m " 
-                          << name_topic << " topic did not create. \033[32mTopic created\033[0m\n\n";
+				qCWarning(logLifecycle).noquote() << QStringLiteral("%1 topic %2 did not exist and was created.")
+														 .arg(QString::fromStdString(programName),
+															  QString::fromStdString(name_topic));
             }
             catch (const IceStorm::TopicExists&) {
                 try{
-                    std::cout << "[\033[31m" << programName << "\033[0m]: \033[1;33mWARNING\033[0m Probably other client already opened the topic. \033[32mTrying to connect.\033[0m\n";
+					qCWarning(logLifecycle).noquote() << QStringLiteral("%1 topic %2 already exists; connecting to the existing topic.")
+															 .arg(QString::fromStdString(programName),
+																  QString::fromStdString(name_topic));
                     topic = topicManager->retrieve(name_topic);
                 }
                 catch(const IceStorm::NoSuchTopic&)
                 {
-                    std::cout << "[" << programName << "]: Topic doesn't exists and couldn't be created.\n";
+					qCCritical(logLifecycle).noquote() << QStringLiteral("%1 topic %2 does not exist and could not be created.")
+															  .arg(QString::fromStdString(programName),
+																   QString::fromStdString(name_topic));
                     return;
                 }
             }
             catch(const IceUtil::NullHandleException&)
             {
-                std::cout << "[\033[31m" << programName << "\033[0m]: \033[31mERROR\033[0m TopicManager is Null.\n";
+				qCCritical(logLifecycle).noquote() << QStringLiteral("%1 topic manager proxy is null.")
+														  .arg(QString::fromStdString(programName));
                 throw;
             }
             IceStorm::QoS qos;
@@ -143,7 +161,7 @@ void subscribe( const Ice::CommunicatorPtr& communicator,
     }
     catch(const IceStorm::NoSuchTopic&)
     {
-        std::cout << "[" << PROGRAM_NAME << "]: Error creating topic.\n";
+		qCCritical(logLifecycle) << "Error creating topic.";
     }
 }
 
@@ -185,8 +203,9 @@ Ice::InitializationData room_concept::getInitializationDataIce(){
 void room_concept::initialize()
 {
     this->configLoader.load(this->configFile);
+	configure_component_logging(this->configLoader);
 	this->configLoader.printConfig();
-	std::cout<<std::endl;
+	qCInfo(logLifecycle) << "Configuration loaded from" << QString::fromStdString(this->configFile);
 }
 
 int room_concept::run(int argc, char* argv[])
@@ -225,14 +244,15 @@ int room_concept::run(int argc, char* argv[])
 		topicManager = Ice::checkedCast<IceStorm::TopicManagerPrx>(communicator()->stringToProxy(configLoader.get<std::string>("Proxies.TopicManager")));
 		if (!topicManager)
 		{
-		    std::cout << "[" << PROGRAM_NAME << "]: TopicManager.Proxy not defined in config file."<<std::endl;
-		    std::cout << "	 Config line example: TopicManager.Proxy=IceStorm/TopicManager:default -p 9999"<<std::endl;
+		    qCCritical(logLifecycle) << "TopicManager.Proxy not defined in config file.";
+		    qCCritical(logLifecycle) << "Config line example: TopicManager.Proxy=IceStorm/TopicManager:default -p 9999";
 	        return EXIT_FAILURE;
 		}
 	}
 	catch (const Ice::Exception &ex)
 	{
-		std::cout << "[" << PROGRAM_NAME << "]: Exception: 'rcnode' not running: " << ex << std::endl;
+		qCCritical(logLifecycle).noquote() << QStringLiteral("Exception: 'rcnode' not running: %1")
+		                                      .arg(ice_exception_to_qstring(ex));
 		return EXIT_FAILURE;
 	}
 
@@ -250,7 +270,7 @@ int room_concept::run(int argc, char* argv[])
 						    joystickadapter_topic, joystickadapter, PROGRAM_NAME);
 
 		// Server adapter creation and publication
-		std::cout << SERVER_FULL_NAME " started" << std::endl;
+			qCInfo(logLifecycle) << SERVER_FULL_NAME << "started";
 
 		// User defined QtGui elements ( main window, dialogs, etc )
 
@@ -263,13 +283,17 @@ int room_concept::run(int argc, char* argv[])
 
 		try
 		{
-			std::cout << "Unsubscribing topic: joystickadapter " <<std::endl;
-			joystickadapter_topic->unsubscribe(joystickadapter);
+			if(joystickadapter_topic && joystickadapter)
+			{
+				qCInfo(logLifecycle) << "Unsubscribing topic: joystickadapter";
+				joystickadapter_topic->unsubscribe(joystickadapter);
+			}
 
 		}
 		catch(const Ice::Exception& ex)
 		{
-			std::cout << "ERROR Unsubscribing" << ex.what()<<std::endl;
+			qCWarning(logLifecycle).noquote() << QStringLiteral("Error unsubscribing joystickadapter: %1")
+			                                     .arg(QString::fromUtf8(ex.what()));
 		}
 
 
@@ -279,8 +303,8 @@ int room_concept::run(int argc, char* argv[])
 	{
 		status = EXIT_FAILURE;
 
-		std::cerr << "[" << PROGRAM_NAME << "]: Exception raised on main thread: " << std::endl;
-		std::cerr << ex;
+		qCCritical(logLifecycle).noquote() << QStringLiteral("Exception raised on main thread: %1")
+		                                      .arg(ice_exception_to_qstring(ex));
 
 	}
 	#ifdef USE_QTGUI
@@ -294,6 +318,7 @@ int room_concept::run(int argc, char* argv[])
 
 int main(int argc, char* argv[])
 {
+	install_component_log_format();
 	std::string arg;
 
 	// Set config file
@@ -313,24 +338,24 @@ int main(int argc, char* argv[])
 			if (arg.find(startup.toStdString(), 0) != std::string::npos)
 			{
 				startup_check_flag = true;
-				std::cout << "Startup check = True"<< std::endl;
+				qCInfo(logLifecycle) << "Startup check enabled";
 			}
 			else if (arg.find(prfx.toStdString(), 0) != std::string::npos)
 			{
 				prefix = QString::fromStdString(arg).remove(0, prfx.size());
 				if (prefix.size()>0)
 					prefix += QString(".");
-				printf("Configuration prefix: <%s>\n", prefix.toStdString().c_str());
+				qCInfo(logLifecycle).noquote() << QStringLiteral("Configuration prefix: <%1>").arg(prefix);
 			}
 			else if (arg.find(initIC.toStdString(), 0) != std::string::npos)
 			{
 				configFile = QString::fromStdString(arg).remove(0, initIC.size());
-				qDebug()<<__LINE__<<"Starting with config file:"<<configFile;
+				qCInfo(logLifecycle) << "Starting with config file:" << configFile;
 			}
 			else if (i==1 and argc==2 and arg.find("--", 0) == std::string::npos)
 			{
 				configFile = QString::fromStdString(arg);
-				qDebug()<<__LINE__<<QString::fromStdString(arg)<<argc<<arg.find("--", 0)<<"Starting with config file:"<<configFile;
+				qCInfo(logLifecycle) << "Starting with config file:" << configFile;
 			}
 		}
 

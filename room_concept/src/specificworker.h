@@ -1,6 +1,5 @@
 /*
- *    Copyright (C) 2026 by YOUR NAME HERE
- *
+ *    Copyright (C) 2026 by RoboLab at the University of Extremadura
  *    This file is part of RoboComp
  *
  *    RoboComp is free software: you can redistribute it and/or modify
@@ -36,9 +35,8 @@
 #include "viewer_2d.h"
 #include "timeseries_plot.h"
 #include "camera_visualizer.h"
-#include "../../common/affordance_manager.h"
+#include "../../common/affordance_manager/affordance_manager.h"
 #include <atomic>
-#include <thread>
 #include <fps/fps.h>
 #include "custom_widget.h"
 #include "ui_localUI.h"
@@ -126,11 +124,7 @@ class SpecificWorker : public GenericWorker
         std::uint64_t last_robot_ref_speed_timestamp_ = 0;
         std::uint64_t last_robot_current_speed_timestamp_ = 0;
 
-        // ── Lidar reader thread ─────────────────────────────────────────────────
-        std::thread            read_lidar_th;
-        std::atomic<bool>      stop_lidar_thread{false};
         std::atomic<bool>      pose_saved_{false};
-        void read_lidar();
         std::optional<rc::LidarData> read_lidar_from_graph() const;
         void save_robot_pose_once();
         std::string pose_file_path() const;
@@ -138,7 +132,6 @@ class SpecificWorker : public GenericWorker
         // ── Localizer ──────────────────────────────────────────────────────────
         rc::RoomConcept room_concept_;
         bool room_initialized_from_svg_polygon_ = false;
-        int  rfe_saved_window_size_ = 10;
         void initialize_room_model_from_svg();
         void save_robot_pose_on_exit() const;
 
@@ -157,6 +150,7 @@ class SpecificWorker : public GenericWorker
         int compute_fps_window_frames_ = 0;
         float compute_fps_display_ = 0.f;
         Eigen::Affine2f best_available_pose(const std::optional<rc::RoomConcept::UpdateResult>&, bool) const;
+        void update_epistemic_overlay();
         void update_ui(const std::optional<rc::RoomConcept::UpdateResult>& loc_res);
 
         // ── Mouse-driven pose reset (Shift+Left = translate, Ctrl+Left = rotate) ──
@@ -166,6 +160,7 @@ class SpecificWorker : public GenericWorker
 
         // ── DSR graph state ────────────────────────────────────────────────────
         uint64_t dsr_robot_id_ = 0;
+        uint64_t dsr_body_id_  = 0;
         uint64_t dsr_world_id_ = 0;
         uint64_t dsr_room_id_  = 0;
         bool     room_node_created_ = false;
@@ -173,7 +168,7 @@ class SpecificWorker : public GenericWorker
         int      stable_frames_     = 0;
         std::int64_t last_dsr_published_ts_ms_ = 0;
         void check_init_graph_is_valid();
-        void trigger_graph_layout_twopi();
+        void load_robot_body_dimensions_from_graph();
         void update_dsr(const rc::RoomConcept::UpdateResult& res);
         void dsr_update_pose(const rc::RoomConcept::UpdateResult& res);
         void dsr_create_room_and_reparent(const rc::RoomConcept::UpdateResult& res);

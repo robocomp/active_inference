@@ -103,6 +103,7 @@ public:
     void set_room_bounds(const Eigen::Vector2f& min_corner, const Eigen::Vector2f& max_corner);
     void set_room_polygon(const std::vector<Eigen::Vector2f>& vertices);
     void set_robot_state(const Eigen::Affine2f& pose, const Eigen::Matrix3f& covariance);
+    void set_robot_footprint(float width_m, float length_m);
     void set_lidar_obstacles(std::vector<Eigen::Vector2f> points);
     void set_localization_quality(float sdf_mse);
 
@@ -126,6 +127,7 @@ private:
     void evaluate_policy_efe(Policy& policy, const EpistemicPlanner::Target& target,
                              const Eigen::Matrix3f& prior_precision) const;
     ControlCommand apply_speed_limit(ControlCommand cmd) const;
+    float nearest_wall_distance_sq(const Eigen::Vector2f& pos) const;
 
     // ---- Pre-computed edge segment data (set by set_room_polygon) ----
     struct EdgeSegment { Eigen::Vector2f a, ab; float ab_sq_norm; };
@@ -135,6 +137,7 @@ private:
     EpistemicPlanner epistemic_planner_;
     std::vector<Eigen::Vector2f> lidar_obstacles_;
     float governor_alpha_ = 1.f;   // current speed-governor scaling factor
+    float robot_footprint_radius_ = 0.f;
 };
 
 } // namespace rc

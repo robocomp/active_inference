@@ -237,7 +237,7 @@ WIor               = 2.0    # weight: staleness bonus
 ArrivalDistance    = 0.15   # target reached threshold (m)
 DwellTime          = 2.0    # seconds to pause after reaching target
 
-# ---- Acceleration ramp (SpecificWorker) ----
+# ---- Acceleration ramp (SpecificWorker) ---- MOVE THIS TO ROBOT
 MaxLinAccel        = 1.2    # m/s² max translational acceleration
 MaxRotAccel        = 2.0    # rad/s² max angular acceleration
 

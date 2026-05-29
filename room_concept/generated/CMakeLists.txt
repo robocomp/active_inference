@@ -37,6 +37,7 @@ SET (SOURCES
   $ENV{ROBOCOMP}/classes/sigwatch/sigwatch.cpp
   $ENV{ROBOCOMP}/classes/grafcetStep/GRAFCETStep.cpp
   $ENV{ROBOCOMP}/classes/ConfigLoader/ConfigLoader.cpp
+    component_logging.cpp
   main.cpp
   genericworker.cpp
   joystickadapterI.cpp

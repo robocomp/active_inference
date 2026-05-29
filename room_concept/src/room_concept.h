@@ -13,7 +13,6 @@
 #include <string>
 #include <fstream>
 #include <functional>
-#include <fps/fps.h>
 
 // ---- PyTorch vs Qt macros (slots/signals/emit) ----
 // Qt uses 'slots' as a macro. PyTorch/libtorch has methods named slots(), which breaks compilation.
@@ -659,10 +658,6 @@ private:
     float init_room_width_ = 10.f;
     float init_room_length_ = 10.f;
     std::string seed_pose_file_path_;
-
-   FPSCounter loc_fps_;  // Timing for the localization thread
-   float update_ms_accum_ = 0.f;
-   int   update_ms_count_ = 0;
 
    // ===== Debug Logging (localization thread only — no mutex needed) =====
    std::ofstream      debug_log_;

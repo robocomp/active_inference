@@ -1,11 +1,10 @@
 #include "room_concept.h"
 #include "pointcloud_center_estimator.h"
+#include "component_logging.h"
 
 #include <algorithm>
 #include <fstream>
-#include <iostream>
 #include <limits>
-#include <print>
 #include <sstream>
 #include <sys/stat.h>
 #include <QDebug>
@@ -14,8 +13,6 @@ namespace rc
 {
     namespace
     {
-        constexpr auto kTimingReportInterval = std::chrono::seconds(10);
-        constexpr int kLocFpsPrintPeriodMs = 10000;
         constexpr float kObsWeightEps = 1e-6f;
 
         torch::Tensor build_observation_weights(const Model& model,
@@ -145,10 +142,8 @@ namespace rc
                 // Warm-up: create and discard a tiny CUDA tensor to trigger CUDA init
                 auto tmp = torch::zeros({1}, torch::TensorOptions().device(torch::kCUDA));
                 (void)tmp;
-                qInfo() << "[RoomConcept] CUDA initialized successfully on calling thread.";
             } catch (const std::exception& e) {
-                qWarning() << "[RoomConcept] CUDA init failed:" << e.what()
-                           << "— falling back to CPU.";
+                qCWarning(logLocalizer) << "CUDA init failed:" << e.what() << "falling back to CPU.";
                 params.use_cuda = false;
             }
         }
@@ -186,7 +181,7 @@ namespace rc
         debug_log_.open(debug_log_path_, std::ios::out | std::ios::trunc);
         if (!debug_log_.is_open())
         {
-            std::cerr << "[DebugLog] ERROR: could not open " << debug_log_path_ << std::endl;
+            qCWarning(logIo) << "Debug log could not be opened:" << QString::fromStdString(debug_log_path_);
             return;
         }
 
@@ -247,7 +242,7 @@ namespace rc
             << ",ml_bias_x,ml_bias_y,ml_bias_theta"
             << "\n";
         debug_log_.flush();
-        std::cout << "[DebugLog] Logging to " << debug_log_path_ << std::endl;
+        qCInfo(logIo) << "Debug log writing to" << QString::fromStdString(debug_log_path_);
     }
 
     std::optional<RoomConcept::UpdateResult> RoomConcept::get_last_result() const
@@ -429,11 +424,10 @@ namespace rc
                 init_xy = Eigen::Vector2f(sx, sy);
                 init_phi = st;
                 have_saved_pose = true;
-                qInfo() << "RoomConcept bootstrap: using saved seed pose" << sx << sy << st;
             }
             else
             {
-                qWarning() << "RoomConcept bootstrap: seed pose not loaded from"
+                qCWarning(logLocalizer) << "RoomConcept bootstrap: seed pose not loaded from"
                            << QString::fromStdString(seed_pose_file_path_)
                            << "(file missing or parse error)";
             }
@@ -481,10 +475,9 @@ namespace rc
         bool used_grid_search = false;
         if (!have_saved_pose)
         {
-            qInfo() << "RoomConcept bootstrap: no saved seed pose. Running initial grid search.";
             used_grid_search = grid_search_initial_pose(pts, 0.5f, static_cast<float>(M_PI_4));
             if (!used_grid_search)
-                qWarning() << "RoomConcept bootstrap: grid search failed. Keeping estimator-based initialization.";
+                qCWarning(logLocalizer) << "RoomConcept bootstrap: grid search failed. Keeping estimator-based initialization.";
         }
 
         if (!used_grid_search)
@@ -495,7 +488,6 @@ namespace rc
 
     void RoomConcept::run()
     {
-        qInfo() << "[LocThread] Localization thread started";
         init_debug_log();
         rerun_frame_counter_ = 0;
 
@@ -515,14 +507,10 @@ namespace rc
         constexpr auto kMinWait = std::chrono::milliseconds(2);
         int same_frame_count = 0;
         std::int64_t last_lidar_ts_processed = std::numeric_limits<std::int64_t>::min();
-        float last_update_ms_report = 0.f;
 
         while (!stop_requested_.load())
         {
-            const auto t_loop_start = std::chrono::steady_clock::now();
-            bool did_update = false;
             float update_ms = 0.f;
-            std::size_t lidar_size = 0;
 
             // ===== 1. DRAIN PENDING COMMANDS =====
             {
@@ -586,42 +574,10 @@ namespace rc
                 if (lidar_from_buffer.has_value())
                 {
                     lidar_high = lidar_from_buffer.value();
-                    lidar_size = lidar_high.first.size();
                 }
                 else
                 {        
                     wait_period = std::chrono::milliseconds(0);
-
-                    static auto last_timing = std::chrono::steady_clock::now();
-                    static std::uint64_t loops = 0;
-                    static std::uint64_t no_lidar_loops = 0;
-                    static std::uint64_t update_loops = 0;
-                    static std::uint64_t lidar_points_acc = 0;
-                    static float loop_ms_acc = 0.f;
-                    static float update_ms_acc = 0.f;
-
-                    loops++;
-                    no_lidar_loops++;
-                    loop_ms_acc += std::chrono::duration<float, std::milli>(
-                        std::chrono::steady_clock::now() - t_loop_start).count();
-
-                    const auto now_timing = std::chrono::steady_clock::now();
-                    if (now_timing - last_timing >= kTimingReportInterval)
-                    {
-                        const float avg_loop_ms = loops > 0 ? loop_ms_acc / static_cast<float>(loops) : 0.f;
-                        const float avg_update_ms = update_loops > 0 ? update_ms_acc / static_cast<float>(update_loops) : 0.f;
-                        const float avg_lidar_points = update_loops > 0 ? static_cast<float>(lidar_points_acc) / static_cast<float>(update_loops) : 0.f;
-                        std::print("[Timing][LocLoop] loops={} updates={} no_lidar={} avg_loop_ms={:.3f} avg_update_ms={:.3f} avg_lidar_pts={:.1f} wait_ms={}\n",
-                                   loops, update_loops, no_lidar_loops, avg_loop_ms, avg_update_ms,
-                                   avg_lidar_points, wait_period.count());
-                        loops = 0;
-                        no_lidar_loops = 0;
-                        update_loops = 0;
-                        lidar_points_acc = 0;
-                        loop_ms_acc = 0.f;
-                        update_ms_acc = 0.f;
-                        last_timing = now_timing;
-                    }
                     continue;
                 }
             }
@@ -649,8 +605,6 @@ namespace rc
                 const auto res = update(lidar_high, vel_snap, odom_snap);
                 update_ms = std::chrono::duration<float, std::milli>(
                     std::chrono::high_resolution_clock::now() - t_update_start_).count();
-                did_update = true;
-                last_update_ms_report = update_ms;
 
             if (params.rerun_enabled)
             {
@@ -796,7 +750,6 @@ namespace rc
                     grid_search_initial_pose(pts, 0.5f, static_cast<float>(M_PI_4));
                     window_mgr_.clear();
                     recovery_.on_recovery_done(params.recovery_cooldown_frames);
-                    qInfo() << "[LocThread] Recovery complete.";
                     symmetry_check_counter_ = 0;
                 }
             }
@@ -858,13 +811,6 @@ namespace rc
                     for (const auto& c : cands)
                         if (c.loss < best->loss) best = &c;
 
-                    qInfo() << "[SymmetryCheck] cur=" << loss_cur
-                            << "rot180=" << cands[0].loss
-                            << "refl_y=" << cands[1].loss
-                            << "refl_x=" << cands[2].loss
-                            << "rot180_y=" << cands[3].loss
-                            << "best=" << best->name;
-
                     if (best->loss < loss_cur - params.symmetry_flip_min_improvement)
                     {
                         qWarning() << "[SymmetryCheck]" << best->name << "wins by"
@@ -877,8 +823,6 @@ namespace rc
             }
 
                 wait_period = std::chrono::milliseconds(0);
-                update_ms_accum_ += update_ms;
-                update_ms_count_++;
 
                 // ===== DIFFERENTIAL TEST: RFE vs single-step vs prediction-only =====
             // Compares SDF accuracy AND pose jitter (temporal consistency).
@@ -929,7 +873,6 @@ namespace rc
                     auto single_pose = torch::tensor({pred_x, pred_y, pred_theta},
                         torch::TensorOptions().dtype(torch::kFloat32).device(get_device())).requires_grad_(true);
                     {
-                        const float inv_var = 1.0f / (params.rfe_obs_sigma * params.rfe_obs_sigma);
                         torch::optim::Adam opt({torch::optim::OptimizerParamGroup({single_pose},
                             std::make_unique<torch::optim::AdamOptions>(params.learning_rate_pos))});
                         for (int i = 0; i < params.num_iterations; ++i)
@@ -1037,66 +980,10 @@ namespace rc
 
             // End of heavy localization update path (executed only for new lidar frames).
             }
-            const float avg_update_ms = update_ms_count_ > 0 ? (update_ms_accum_ / static_cast<float>(update_ms_count_))
-                                                              : last_update_ms_report;
-            const int last_update_ms_i = static_cast<int>(std::lround(last_update_ms_report));
-            const int avg_update_ms_i = static_cast<int>(std::lround(avg_update_ms));
-            const int fps = loc_fps_.print("[LocThread] update_ms(last/avg)=" + std::to_string(last_update_ms_i)
-                               + "/" + std::to_string(avg_update_ms_i), kLocFpsPrintPeriodMs);
-            if (fps > 0) { update_ms_accum_ = 0.f; update_ms_count_ = 0; }
-
-            {
-                static auto last_timing = std::chrono::steady_clock::now();
-                static std::uint64_t loops = 0;
-                static std::uint64_t no_lidar_loops = 0;
-                static std::uint64_t update_loops = 0;
-                static std::uint64_t same_frame_loops = 0;
-                static std::uint64_t lidar_points_acc = 0;
-                static float loop_ms_acc = 0.f;
-                static float update_ms_acc = 0.f;
-
-                loops++;
-                if (did_update)
-                {
-                    update_loops++;
-                    update_ms_acc += update_ms;
-                    lidar_points_acc += lidar_size;
-                }
-                else
-                {
-                    no_lidar_loops++;
-                    if (same_frame_count > 0)
-                        same_frame_loops++;
-                }
-
-                loop_ms_acc += std::chrono::duration<float, std::milli>(
-                    std::chrono::steady_clock::now() - t_loop_start).count();
-
-                const auto now_timing = std::chrono::steady_clock::now();
-                if (now_timing - last_timing >= kTimingReportInterval)
-                {
-                    const float avg_loop_ms = loops > 0 ? loop_ms_acc / static_cast<float>(loops) : 0.f;
-                    const float avg_update_ms = update_loops > 0 ? update_ms_acc / static_cast<float>(update_loops) : 0.f;
-                    const float avg_lidar_points = update_loops > 0 ? static_cast<float>(lidar_points_acc) / static_cast<float>(update_loops) : 0.f;
-                    std::print("[Timing][LocLoop] loops={} updates={} no_lidar={} same_frame={} avg_loop_ms={:.3f} avg_update_ms={:.3f} avg_lidar_pts={:.1f} wait_ms={} adam_ms={:.3f} cov_ms={:.3f} breakdown_ms={:.3f}\n",
-                               loops, update_loops, no_lidar_loops, same_frame_loops, avg_loop_ms, avg_update_ms,
-                               avg_lidar_points, wait_period.count(), last_t_adam_ms_, last_t_cov_ms_, last_t_breakdown_ms_);
-                    loops = 0;
-                    no_lidar_loops = 0;
-                    update_loops = 0;
-                    same_frame_loops = 0;
-                    lidar_points_acc = 0;
-                    loop_ms_acc = 0.f;
-                    update_ms_acc = 0.f;
-                    last_timing = now_timing;
-                }
-            }
-
         }
 
         rerun_logger_.stop();
         loc_running_ = false;
-        qInfo() << "[LocThread] Localization thread stopped";
     }
 
     float RoomConcept::find_best_initial_orientation(const std::vector<Eigen::Vector3f>& lidar_points,
@@ -1166,8 +1053,6 @@ namespace rc
         model_->robot_pos.data().copy_(torch::tensor({best_x, best_y},
             torch::TensorOptions().device(get_device())));
 
-        qInfo() << "Best initial pose: (" << best_x << "," << best_y << ") phi="
-                << qRadiansToDegrees(best_phi) << "° (loss=" << best_loss << ")";
         return best_phi;
     }
 
@@ -1177,8 +1062,6 @@ namespace rc
     {
         if (model_ == nullptr || lidar_points.empty())
             return false;
-
-        qInfo() << "Starting hierarchical grid search for pose...";
 
         // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -1281,15 +1164,11 @@ namespace rc
             {
                 const float theta = cth + dth;
                 const float loss  = eval_loss(pts_coarse, cx, cy, theta);
-                qInfo() << "  Stage0 flip" << qRadiansToDegrees(dth) << "° loss=" << loss;
                 if (loss < s0_best_loss) { s0_best_loss = loss; s0_best_theta = theta; }
             }
-            qInfo() << "Stage 0 best flip: theta=" << qRadiansToDegrees(s0_best_theta)
-                    << "° loss=" << s0_best_loss;
             if (s0_best_loss < good_thr)
             {
                 commit_pose(cx, cy, s0_best_theta);
-                qInfo() << "Stage 0 sufficient — early exit";
                 return true;
             }
         }
@@ -1322,13 +1201,10 @@ namespace rc
             if (static_cast<int>(candidates.size()) > TOP_K)
                 candidates.resize(TOP_K);
 
-            qInfo() << "Stage 1:" << total << "poses, top-" << TOP_K
-                    << "best loss=" << candidates.front().loss;
             if (candidates.front().loss < good_thr)
             {
                 const auto& b = candidates.front();
                 commit_pose(b.x, b.y, b.theta);
-                qInfo() << "Stage 1 sufficient — early exit";
                 return true;
             }
         }
@@ -1372,10 +1248,6 @@ namespace rc
             }
         }
 
-        qInfo() << "Stage 2:" << total2 << "poses refined";
-        qInfo() << "Best pose: (" << best_x << "," << best_y << ") theta="
-                << qRadiansToDegrees(best_theta) << "° (loss=" << best_loss << ")";
-
         commit_pose(best_x, best_y, best_theta);
         return best_loss < good_thr;
     }
@@ -1394,7 +1266,6 @@ namespace rc
         window_mgr_.clear();
         rerun_room_polygon_sent_ = false;
 
-        qInfo() << "RoomConcept using device:" << (get_device() == torch::kCUDA ? "CUDA" : "CPU");
     }
 
 
@@ -1441,8 +1312,6 @@ namespace rc
         // Initialize corner detector with model polygon
         corner_detector_.set_model_corners(polygon_vertices);
 
-        qInfo() << "RoomConcept initialized with polygon room:" << polygon_vertices.size()
-                << "vertices. Robot at (" << init_x << "," << init_y << "," << init_phi << ")";
     }
 
     void RoomConcept::set_robot_pose(float x, float y, float theta, bool manual_reset)
@@ -1618,7 +1487,6 @@ namespace rc
             res.timestamp_ms = lidar.second;
             last_update_result = res;
             last_lidar_timestamp = lidar.second;
-            qInfo() << "Manual reset: skipping optimization (" << manual_reset_frames_ << " frames remaining)";
             return res;
         }
 
@@ -1630,7 +1498,6 @@ namespace rc
             model_->robot_theta.data().copy_(torch::tensor({best_phi},
                 torch::TensorOptions().device(get_device())));
             needs_orientation_search_ = false;
-            qInfo() << "Initial orientation search complete. Using phi=" << qRadiansToDegrees(best_phi) << "°";
         }
 
         // ===== PREDICTION =====
@@ -3228,9 +3095,6 @@ namespace rc
         auto pose = torch::tensor({pred_x, pred_y, pred_theta},
             torch::TensorOptions().dtype(torch::kFloat32).device(device)).requires_grad_(true);
 
-        const float inv_var = 1.0f / (params.rfe_obs_sigma * params.rfe_obs_sigma);
-        const float huber_delta = params.rfe_huber_delta;
-
         torch::optim::Adam optimizer(
             {torch::optim::OptimizerParamGroup({pose},
                 std::make_unique<torch::optim::AdamOptions>(params.learning_rate_pos))});
@@ -3344,9 +3208,6 @@ namespace rc
     {
         if (window.empty())
             return torch::tensor(0.0f, torch::TensorOptions().device(device));
-
-        const float inv_var = 1.0f / (params.rfe_obs_sigma * params.rfe_obs_sigma);
-        const float huber_delta = params.rfe_huber_delta;
 
         torch::Tensor total_loss = torch::tensor(0.0f, torch::TensorOptions().device(device));
 
@@ -3463,9 +3324,6 @@ namespace rc
     {
         LossBreakdown bd;
         if (window.empty()) return bd;
-
-        const float inv_var      = 1.0f / (params.rfe_obs_sigma * params.rfe_obs_sigma);
-        const float huber_delta  = params.rfe_huber_delta;
 
         // 1. Boundary prior
         if (boundary_prior.valid) {

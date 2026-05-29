@@ -1,6 +1,5 @@
 #include "corner_detector.h"
 #include <cmath>
-#include <QDebug>
 
 namespace rc {
 
@@ -36,8 +35,6 @@ void CornerDetector::set_model_corners(const std::vector<Eigen::Vector2f>& polyg
             model_corners_.push_back(mc);
         }
     }
-    qInfo() << "CornerDetector: kept" << model_corners_.size() << "of"
-            << N << "polygon vertices as real corners";
 }
 
 // ---------------------------------------------------------------------------
@@ -51,8 +48,6 @@ CornerDetector::DetectionResult CornerDetector::detect(
     DetectionResult result;
     if (model_corners_.empty() || lidar_points.empty())
         return result;
-
-    const bool verbose = false;
 
     // Build 2D lidar points in robot frame (drop z)
     std::vector<Eigen::Vector2f> pts2d;
@@ -74,18 +69,12 @@ CornerDetector::DetectionResult CornerDetector::detect(
     const float search_r2 = params_.search_radius * params_.search_radius;
     const float max_range2 = max_range * max_range;
 
-    if (verbose)
-        qInfo() << "[CD] pts2d=" << pts2d.size() << "model=" << model_corners_.size()
-                << "pose=(" << robot_x << robot_y << robot_theta << ")"
-                << "search_r=" << params_.search_radius;
-
     for (const auto& mc : model_corners_)
     {
         // Project model corner into robot frame
         const Eigen::Vector2f dw = mc.position - t_world;
         if (dw.squaredNorm() > max_range2)
         {
-            if (verbose) qInfo() << "  corner" << mc.original_index << "too far:" << dw.norm() << "m";
             continue;
         }
 
@@ -119,16 +108,9 @@ CornerDetector::DetectionResult CornerDetector::detect(
                 group_out.push_back(p);
         }
 
-        if (verbose)
-            qInfo() << "  corner" << mc.original_index
-                    << "world=(" << mc.position.x() << mc.position.y()
-                    << ") pred=(" << predicted.x() << predicted.y()
-                    << ") in=" << group_in.size() << "out=" << group_out.size();
-
         if (static_cast<int>(group_in.size()) < params_.min_points_per_line ||
             static_cast<int>(group_out.size()) < params_.min_points_per_line)
         {
-            if (verbose) qInfo() << "    not enough points in one group";
             continue;
         }
 
@@ -137,7 +119,6 @@ CornerDetector::DetectionResult CornerDetector::detect(
         auto line_out = fit_line_pca(group_out, params_.min_points_per_line);
         if (!line_in || !line_out)
         {
-            if (verbose) qInfo() << "    PCA fit failed";
             continue;
         }
 
@@ -148,21 +129,18 @@ CornerDetector::DetectionResult CornerDetector::detect(
         auto intersection = intersect(*line_in, *line_out, &angle_deg);
         if (!intersection)
         {
-            if (verbose) qInfo() << "    intersect failed (parallel)";
             continue;
         }
 
         // --- Quality filters ---
         if (angle_deg < params_.min_corner_angle || angle_deg > params_.max_corner_angle)
         {
-            if (verbose) qInfo() << "    angle rejected:" << angle_deg;
             continue;
         }
 
         const float dist = (*intersection - predicted).norm();
         if (dist > params_.max_match_distance)
         {
-            if (verbose) qInfo() << "    distance rejected:" << dist;
             continue;
         }
 
@@ -173,8 +151,6 @@ CornerDetector::DetectionResult CornerDetector::detect(
             const float cos_thresh = std::cos(params_.max_orientation_dev * static_cast<float>(M_PI) / 180.f);
             if (std::abs(raw_dot_in) < cos_thresh || std::abs(raw_dot_out) < cos_thresh)
             {
-                if (verbose) qInfo() << "    orientation rejected: dot_in=" << std::abs(raw_dot_in)
-                                     << "dot_out=" << std::abs(raw_dot_out);
                 continue;
             }
         }
@@ -189,8 +165,6 @@ CornerDetector::DetectionResult CornerDetector::detect(
             const float min_cross = 0.50f * std::abs(mc.convexity_sign);
             if (mc.convexity_sign * detected_cross < min_cross)
             {
-                if (verbose) qInfo() << "    convexity rejected: model=" << mc.convexity_sign
-                                     << "detected=" << detected_cross << "min=" << min_cross;
                 continue;
             }
         }

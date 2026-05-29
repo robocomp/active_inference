@@ -37,7 +37,6 @@
 #include <memory>
 
 #include <JoystickAdapter.h>
-#include <Lidar3D.h>
 
 #define BASIC_PERIOD 100
 
@@ -79,6 +78,8 @@ protected:
 	std::unordered_map<std::string, std::shared_ptr<DSR::DSRViewer>> graph_viewers;
 	std::unordered_map<std::string, std::unique_ptr<QMainWindow>> windows;
 	std::shared_ptr<DSR::DSRViewer> setupViewer(std::shared_ptr<DSR::DSRGraph> graph, const std::string& prefix, QMainWindow* parent);
+	std::shared_ptr<DSR::DSRViewer> find_graph_viewer(const std::string& name) const;
+	void trigger_graph_layout_twopi();
 	void restore_window_settings();
 	void save_window_settings() const;
 
@@ -86,6 +87,8 @@ protected:
 
 
 private:
+	static constexpr int kWindowStateVersion = 1;
+	static QString settings_group_name(const std::string& graph_name, int agent_id);
 
 public slots:
 	virtual void initialize() = 0;

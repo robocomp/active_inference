@@ -39,6 +39,12 @@ void EpistemicController::set_robot_state(const Eigen::Affine2f& pose,
     epistemic_planner_.set_robot_state(pose, covariance);
 }
 
+void EpistemicController::set_robot_footprint(float width_m, float length_m)
+{
+    robot_footprint_radius_ = 0.5f * std::hypot(width_m, length_m);
+    epistemic_planner_.set_robot_footprint(width_m, length_m);
+}
+
 void EpistemicController::set_lidar_obstacles(std::vector<Eigen::Vector2f> points)
 {
     if (!edge_segments_.empty())
@@ -65,6 +71,20 @@ void EpistemicController::set_lidar_obstacles(std::vector<Eigen::Vector2f> point
     {
         lidar_obstacles_ = std::move(points);
     }
+}
+
+float EpistemicController::nearest_wall_distance_sq(const Eigen::Vector2f& pos) const
+{
+    float min_distance_sq = std::numeric_limits<float>::infinity();
+    for (const auto& e : edge_segments_)
+    {
+        if (e.ab_sq_norm <= 1e-9f)
+            continue;
+
+        const float t = std::clamp((pos - e.a).dot(e.ab) / e.ab_sq_norm, 0.f, 1.f);
+        min_distance_sq = std::min(min_distance_sq, (pos - (e.a + t * e.ab)).squaredNorm());
+    }
+    return min_distance_sq;
 }
 
 // ===========================================================================
@@ -211,7 +231,9 @@ void EpistemicController::evaluate_policy_efe(Policy& policy,
     float obstacle  = 0.f;
     float epistemic = 0.f;
 
-    const float obs_r2 = params.obstacle_radius * params.obstacle_radius;
+    const float collision_radius = std::max(params.obstacle_radius, robot_footprint_radius_);
+    const float obs_r2 = collision_radius * collision_radius;
+    const float footprint_r2 = robot_footprint_radius_ * robot_footprint_radius_;
     const auto& room_corners = epistemic_planner_.room_corners();
     const bool have_polygon = !room_corners.empty();
 
@@ -228,10 +250,15 @@ void EpistemicController::evaluate_policy_efe(Policy& policy,
         {
             if (!corner_visibility::point_in_polygon(pos, room_corners))
                 out_of_bounds = true;
+            else if (robot_footprint_radius_ > 0.f && !edge_segments_.empty() &&
+                     nearest_wall_distance_sq(pos) < footprint_r2)
+                out_of_bounds = true;
         }
         else if (epistemic_planner_.room_bounds_set() &&
-                 (pos.x() < epistemic_planner_.room_min().x() || pos.x() > epistemic_planner_.room_max().x() ||
-                  pos.y() < epistemic_planner_.room_min().y() || pos.y() > epistemic_planner_.room_max().y()))
+                 (pos.x() < epistemic_planner_.room_min().x() + robot_footprint_radius_ ||
+                  pos.x() > epistemic_planner_.room_max().x() - robot_footprint_radius_ ||
+                  pos.y() < epistemic_planner_.room_min().y() + robot_footprint_radius_ ||
+                  pos.y() > epistemic_planner_.room_max().y() - robot_footprint_radius_))
         {
             out_of_bounds = true;
         }
@@ -302,62 +329,11 @@ void EpistemicController::evaluate_policy_efe(Policy& policy,
 // ===========================================================================
 std::optional<EpistemicController::PlanResult> EpistemicController::plan()
 {
-    static int dbg_plan_ctr = 0;
-    const bool dbg = (++dbg_plan_ctr % 50 == 0);
-
-    // // ---- Level 1: update / select target ----
     auto target_opt = epistemic_planner_.update_target();
     if (!target_opt)
-    {
-        if (dbg) printf("[NAV-DBG] plan: no target returned (no candidates?)\n");
         return std::nullopt;
-    }
 
-    // // Dwell: if target selector is dwelling, return stop command
-    // // (update_target returns the current target during dwell)
     const auto& target = *target_opt;
-
-    // const float dist_to_target = (target.position - epistemic_planner_.robot_pos()).norm();
-    // if (dbg)
-    //     printf("[NAV-DBG] target=(%.2f,%.2f) robot=(%.2f,%.2f) dist=%.3f rotate=%d governor=%.2f\n",
-    //            target.position.x(), target.position.y(),
-    //            epistemic_planner_.robot_pos().x(), epistemic_planner_.robot_pos().y(),
-    //            dist_to_target, (int)target.rotate_in_place, governor_alpha_);
-
-    // // ---- Level 2: generate arcs, rollout, evaluate EFE, pick best ----
-    // const Eigen::Matrix3f reg_cov = epistemic_planner_.robot_cov() + 1e-6f * Eigen::Matrix3f::Identity();
-    // const Eigen::Matrix3f prior_precision = reg_cov.inverse();
-
-    // auto policies = generate_arc_policies(target);
-    // for (auto& p : policies)
-    // {
-    //     rollout_policy(p);
-    //     evaluate_policy_efe(p, target, prior_precision);
-    // }
-
-    // auto best = std::min_element(policies.begin(), policies.end(),
-    //     [](const Policy& a, const Policy& b) { return a.efe < b.efe; });
-
-    // if (best != policies.end() && !best->commands.empty())
-    // {
-    //     auto best_policy = *best;
-    //     const auto final_cmd = apply_speed_limit(best_policy.commands.front());
-
-    //     if (dbg)
-    //         printf("[NAV-DBG] best EFE=%.3f (prag=%.3f epist=%.3f bnd=%.3f obs=%.3f)  raw_cmd=(ax=%.3f ay=%.3f rot=%.3f)  lim_cmd=(ax=%.3f ay=%.3f rot=%.3f)\n",
-    //                best_policy.efe, best_policy.pragmatic_value, best_policy.epistemic_value,
-    //                best_policy.boundary_value, best_policy.obstacle_value,
-    //                best_policy.commands.front().adv_x, best_policy.commands.front().adv_y, best_policy.commands.front().rot,
-    //                final_cmd.adv_x, final_cmd.adv_y, final_cmd.rot);
-
-    //     return PlanResult{
-    //         .command       = final_cmd,
-    //         .target        = target,
-    //         .best_policy   = std::move(best_policy),
-    //         .all_policies  = std::move(policies),
-    //         .valid         = true
-    //     };
-    // }
 
     // ---- Fallback: simple proportional controller ----
     ControlCommand cmd{};

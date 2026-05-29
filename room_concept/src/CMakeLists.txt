@@ -1,5 +1,12 @@
 cmake_policy(SET CMP0074 NEW)
 
+# Keep generated CMake changes from pushing an unsupported host dialect into
+# libtorch/CUDA configure checks when templates are regenerated.
+if(NOT DEFINED CMAKE_CXX_STANDARD OR CMAKE_CXX_STANDARD GREATER 23)
+  set(CMAKE_CXX_STANDARD 23)
+endif()
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
 find_package(Qt6 COMPONENTS Xml PrintSupport REQUIRED)
 find_package(Qt6 COMPONENTS 3DCore 3DRender 3DExtras QUIET)
 
@@ -52,7 +59,7 @@ LIST(APPEND SOURCES
   ../src/room_model.cpp
   ../src/pointcloud_center_estimator.cpp
   ../src/epistemic_controller.cpp
-  ${ACTIVE_INFERENCE_COMMON_DIR}/affordance_manager.cpp
+  ${ACTIVE_INFERENCE_COMMON_DIR}/affordance_manager/affordance_manager.cpp
   ../src/epistemic_planner.cpp
   ../src/timeseries_plot.cpp
   ../src/corner_detector.cpp
@@ -70,13 +77,14 @@ LIST(APPEND HEADERS
   ../src/room_model.h
   ../src/pointcloud_center_estimator.h
   ../src/epistemic_controller.h
-  ${ACTIVE_INFERENCE_COMMON_DIR}/affordance_manager.h
+  ${ACTIVE_INFERENCE_COMMON_DIR}/affordance_manager/affordance_manager.h
   ../src/epistemic_planner.h
   ../src/corner_visibility.h
   ../src/timeseries_plot.h
   ../src/corner_detector.h
   ../src/rerun_logger.h
   ../src/camera_visualizer.h
+  ${ACTIVE_INFERENCE_COMMON_DIR}/config/config_loader_utils.h
 )
 
 LIST(APPEND LIBS ${LIBS} "${TORCH_LIBRARIES}" tbb Qt6PrintSupport Qt6Xml

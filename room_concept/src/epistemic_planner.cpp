@@ -38,6 +38,16 @@ void EpistemicPlanner::set_robot_state(const Eigen::Affine2f& pose,
     robot_state_set_ = true;
 }
 
+void EpistemicPlanner::set_robot_footprint(float width_m, float length_m)
+{
+    const float footprint_radius = 0.5f * std::hypot(width_m, length_m);
+    if (std::abs(robot_footprint_radius_ - footprint_radius) > 1e-6f)
+    {
+        robot_footprint_radius_ = footprint_radius;
+        grid_dirty_ = true;
+    }
+}
+
 // ===========================================================================
 // Candidate generation
 // ===========================================================================
@@ -51,7 +61,8 @@ std::vector<Eigen::Vector2f> EpistemicPlanner::generate_candidates() const
     {
         cached_grid_.clear();
         const float res = params.grid_resolution;
-        const float wm2 = params.target_wall_margin * params.target_wall_margin;
+        const float wall_margin = std::max(params.target_wall_margin, robot_footprint_radius_);
+        const float wm2 = wall_margin * wall_margin;
 
         for (float x = room_min_.x() + res * 0.5f; x < room_max_.x(); x += res)
         {
