@@ -41,6 +41,24 @@ graph = true
 Compute = 100
 Emergency = 500
 
+# ── [Presence] ────────────────────────────────────────────────────────────────
+# required_agent_names   = ["a","b"]  # Must be Ready before on_required_ready fires (blocks Operating state)
+# optional_agent_names   = ["a","b"]  # Tracked; fires on_optional_agent_ready/lost but never blocks
+# required_agent_ids     = [1,2]      # Same as required_agent_names but by numeric DSR agent ID
+# optional_agent_ids     = [1,2]      # Same as optional_agent_names but by ID
+# node_requires          = ["body"]   # DSR node names that must exist in graph (checked every tick)
+# monitor_period_ms      = 500        # Timer period for scan + timeout checks (ms)
+# heartbeat_timeout_ms   = 3000       # Silence after which a peer is downgraded to Stale (ms)
+# rejoin_grace_ms        = 1500       # Grace window after detected restart before peer is Ready again (ms)
+# agent_info_period_ms   = 1000       # How often this agent publishes its own heartbeat (ms)
+# config_dir             = "etc"      # Dir searched for {peer}.toml to clean up crashed peer's owned nodes
+#
+# ── [Owns] ────────────────────────────────────────────────────────────────────
+# nodes    = ["node_a","prefix_*"]    # DSR nodes deleted on clean shutdown; * is a prefix wildcard
+# subtrees = ["root_node"]            # Root nodes whose entire RT-edge subtree is deleted on shutdown
+# Note: other agents with config_dir set will also read this file on peer crash to clean up these nodes.
+# ──────────────────────────────────────────────────────────────────────────────
+
 [Presence]
 optional_agent_names = ["room_concept", "table_concept", "controller"]
 config_dir = "etc"

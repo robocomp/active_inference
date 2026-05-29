@@ -20,7 +20,7 @@
 
 #include "../../common/agent_presence_monitor/agent_presence_monitor.h"
 
-#include "../../common/config/config_loader_utils.h"
+#include <ConfigLoader/ConfigLoader.h>
 
 #include <chrono>
 #include <iostream>
