@@ -1,13 +1,22 @@
 [Proxies]
+# This property is used by the clients to connect to IceStorm.
+TopicManager = "IceStorm/TopicManager:default -p 9999"
+
 # Proxies for required interfaces
 CameraRGBDSimple = "camerargbdsimple:tcp -h localhost -p 12001"
-Lidar3D = "lidar3d:tcp -h localhost -p 11995"  # Filter
-IMU = "imu:tcp -h localhost -p 10007"
+IMU = "imu:tcp -h localhost -p 0"
+Lidar3D = "lidar3d:tcp -h localhost -p 11995"
+
+[Endpoints]
+# Endpoints for subscriptions interfaces
+FullPoseEstimationPubTopic = "tcp -p 0"
+FullPoseEstimationPubPrefix = ""
 
 # --- Common Agent Data ---
 [Agent]
 id = 6 # Change id
 name = "robot_concept"
+robot_name = "Shadow"
 
 # --- Single Instance Configuration ---
 # Use this if you only have one graph.
@@ -31,6 +40,18 @@ graph = true
 [Period]
 Compute = 100
 Emergency = 500
+
+[Presence]
+optional_agent_names = ["room_concept", "table_concept", "controller"]
+config_dir = "etc"
+monitor_period_ms = 500
+heartbeat_timeout_ms = 3000
+rejoin_grace_ms = 1500
+agent_info_period_ms = 1000
+
+[Owns]
+nodes = ["mind"]
+subtrees = ["Shadow"]
 
 [Yolo]
 model_path  = "yolo26l-seg.onnx"

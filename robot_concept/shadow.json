@@ -325,6 +325,14 @@
                         "type": 0,
                         "value": "SteelBlue"
                     },
+                    "depth_m": {
+                        "type": 2,
+                        "value": 0.47
+                    },
+                    "height_m": {
+                        "type": 2,
+                        "value": 1.6
+                    },
                     "level": {
                         "type": 1,
                         "value": 2
@@ -340,6 +348,10 @@
                     "pos_y": {
                         "type": 2,
                         "value": 154.952133
+                    },
+                    "width_m": {
+                        "type": 2,
+                        "value": 0.47
                     }
                 },
                 "id": "250",

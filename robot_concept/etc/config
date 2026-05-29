@@ -1,6 +1,11 @@
 # Proxies for required interfaces
 Proxies.CameraRGBDSimple = "camerargbdsimple:tcp -h localhost -p 0"
+Proxies.IMU = "imu:tcp -h localhost -p 0"
 Proxies.Lidar3D = "lidar3d:tcp -h localhost -p 0"
+
+# Endpoints for subscriptions interfaces
+Endpoints.FullPoseEstimationPubTopic = "tcp -p 0"
+Endpoints.FullPoseEstimationPubPrefix = ""
 
 
 # --- Common Agent Data ---

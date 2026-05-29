@@ -18,8 +18,12 @@
  */
 #include "specificworker.h"
 
-#include <algorithm>
+#include "../../common/agent_presence_monitor/agent_presence_monitor.h"
+
+#include "../../common/config/config_loader_utils.h"
+
 #include <chrono>
+#include <iostream>
 #include <print>
 
 SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, bool startup_check) : GenericWorker(configLoader, tprx)
@@ -34,6 +38,29 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
 		#ifdef HIBERNATION_ENABLED
 			hibernationChecker.start(500);
 		#endif
+
+		const int period = configLoader.get<int>("Period.Compute");
+
+		states["Waiting"] = std::make_unique<GRAFCETStep>("Waiting", period,
+			std::bind(&SpecificWorker::waiting_loop, this),
+			std::bind(&SpecificWorker::waiting_enter, this));
+
+		states["Operating"] = std::make_unique<GRAFCETStep>("Operating", period,
+			std::bind(&SpecificWorker::operating_loop, this),
+			std::bind(&SpecificWorker::operating_enter, this));
+
+		states["Degraded"] = std::make_unique<GRAFCETStep>("Degraded", period,
+			std::bind(&SpecificWorker::degraded_loop, this),
+			std::bind(&SpecificWorker::degraded_enter, this));
+
+		states["Compute"]->addTransition(states["Compute"].get(), SIGNAL(entered()), states["Waiting"].get());
+		states["Waiting"]->addTransition(this, SIGNAL(presenceReady()), states["Operating"].get());
+		states["Operating"]->addTransition(this, SIGNAL(presenceLost()), states["Degraded"].get());
+		states["Degraded"]->addTransition(states["Degraded"].get(), SIGNAL(entered()), states["Waiting"].get());
+
+		statemachine.addState(states["Waiting"].get());
+		statemachine.addState(states["Operating"].get());
+		statemachine.addState(states["Degraded"].get());
 
 		statemachine.setChildMode(QState::ExclusiveStates);
 		statemachine.start();
@@ -59,11 +86,7 @@ SpecificWorker::~SpecificWorker()
 		lidar_thread.join();
 	if (rgbd_thread.joinable())
 		rgbd_thread.join();
-	/*
-	for (auto const& [name, g] : Graphs) {
-	    g->write_to_json_file("./"+agent_name+"_"+name+".json");
-	}
-	*/
+	presence_monitor.reset();
 }
 
 void SpecificWorker::initialize()
@@ -71,24 +94,65 @@ void SpecificWorker::initialize()
 	qInfo() << "initialize robot_concept worker";
 	GenericWorker::initialize();
 
-	try { params.DSR_RGB_FPS   = configLoader.get<int>("Camera.dsr_rgb_fps"); }   catch (...) {}
-	try { params.DSR_DEPTH_FPS = configLoader.get<int>("Camera.dsr_depth_fps"); } catch (...) {}
-	try { params.DSR_LIDAR_FPS = configLoader.get<int>("Lidar.dsr_lidar_fps"); }  catch (...) {}
-	try { params.LIDAR_DECIMATION_FACTOR = configLoader.get<int>("Lidar.decimation_factor"); } catch (...) {}
-	try { params.TRANSFORMS_INTERPOLATE_RT = configLoader.get<bool>("Transforms.interpolate_rt"); } catch (...) {}
-	try { verbose_debug_ = configLoader.get<bool>("Debug.verbose"); }
-	catch (...) { verbose_debug_ = false; }
+	rc::ConfigLoaderUtils::load_optional(configLoader, "Camera.dsr_rgb_fps", params.DSR_RGB_FPS);
+	rc::ConfigLoaderUtils::load_optional(configLoader, "Camera.dsr_depth_fps", params.DSR_DEPTH_FPS);
+	rc::ConfigLoaderUtils::load_optional(configLoader, "Lidar.dsr_lidar_fps", params.DSR_LIDAR_FPS);
+	rc::ConfigLoaderUtils::load_optional(configLoader, "Lidar.decimation_factor", params.LIDAR_DECIMATION_FACTOR);
+	rc::ConfigLoaderUtils::load_optional(configLoader, "Transforms.interpolate_rt", params.TRANSFORMS_INTERPOLATE_RT);
+	rc::ConfigLoaderUtils::load_optional(configLoader, "Debug.verbose", verbose_debug_);
+	rc::ConfigLoaderUtils::load_optional(configLoader, "Component.Debug.Verbose", verbose_debug_);
 
-	imu_thread   = std::thread(&SpecificWorker::read_imu_thread,   this);
+	// Seed body node dimensions (read from graph/shadow.json; write defaults if absent).
+	if (auto body_node = G->get_node("body"); body_node.has_value())
+	{
+		// Re-write pos_x / pos_y with their current values to force a full node update.
+		const float px = G->get_attrib_by_name<pos_x_att>(body_node.value()).value_or(0.f);
+		const float py = G->get_attrib_by_name<pos_y_att>(body_node.value()).value_or(0.f);
+		G->add_or_modify_attrib_local<pos_x_att>(body_node.value(), px);
+		G->add_or_modify_attrib_local<pos_y_att>(body_node.value(), py);
+
+		bool seeded = false;
+		if (!G->get_attrib_by_name<width_m_att>(body_node.value()).has_value())
+		{ G->add_or_modify_attrib_local<width_m_att>(body_node.value(), 0.47f); seeded = true; }
+		if (!G->get_attrib_by_name<depth_m_att>(body_node.value()).has_value())
+		{ G->add_or_modify_attrib_local<depth_m_att>(body_node.value(), 0.47f); seeded = true; }
+		if (!G->get_attrib_by_name<height_m_att>(body_node.value()).has_value())
+		{ G->add_or_modify_attrib_local<height_m_att>(body_node.value(), 1.6f); seeded = true; }
+
+		G->update_node(body_node.value());
+		if (seeded)
+			qInfo() << __FUNCTION__ << "Seeded body node with default dimensions (width=0.47, depth=0.47, height=1.6)";
+		else
+			qInfo() << __FUNCTION__ << "Body node dimensions already present in graph";
+	}
+	else
+		qWarning() << __FUNCTION__ << "Body node not found in DSR graph";
+
 	lidar_thread = std::thread(&SpecificWorker::read_lidar_thread,  this);
 	rgbd_thread  = std::thread(&SpecificWorker::read_rgbd_thread,   this);
-	qInfo() << __FUNCTION__ << "Started IMU, lidar and RGBD reader threads";
+	qInfo() << __FUNCTION__ << "Started lidar and RGBD reader threads";
+
+	presence_monitor = std::make_unique<AgentPresenceMonitor>(configLoader, G, static_cast<std::uint32_t>(agent_id));
+	presence_monitor->on_required_ready = [this]() { emit presenceReady(); };
+	presence_monitor->on_required_lost = [this]() { emit presenceLost(); };
+	presence_monitor->on_peer_restarted = [this](std::uint32_t id) {
+		std::cout << "[Presence] peer " << id << " restarted" << std::endl;
+	};
+	presence_monitor->on_optional_agent_lost = [this](std::string name, std::uint32_t id) {
+		on_optional_peer_lost(name, id);
+	};
+	presence_monitor->on_optional_agent_ready = [this](std::string name, std::uint32_t id) {
+		on_optional_peer_ready(name, id);
+	};
+	presence_monitor->start();
 }
 
 void SpecificWorker::compute()
 {
 	// robot_concept's compute() is intentionally minimal:
-	// sensor reading is done in background threads; voxelizer agent handles perception.
+	// sensor reading is done in background threads;
+	static FPSCounter compute_fps;
+	compute_fps.print("Compute", 5000);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////
@@ -115,18 +179,67 @@ int SpecificWorker::startup_check()
 	return 0;
 }
 
-////////////////////////////////////////////////////////////////////////////////////////////////
-namespace
+void SpecificWorker::waiting_enter()
 {
-	std::uint64_t get_imu_timestamp_ms(const RoboCompIMU::DataImu& data)
+	std::cout << "[SM] -> Waiting";
+	if (presence_monitor)
 	{
-		const long latest = std::max({data.acc.timestamp,
-		                             data.gyro.timestamp,
-		                             data.mag.timestamp,
-		                             data.rot.timestamp});
-		return latest > 0 ? static_cast<std::uint64_t>(latest) : 0ULL;
+		presence_monitor->set_local_ready(false);
+		const auto missing = presence_monitor->missing_required_names();
+		if (!missing.empty())
+		{
+			std::cout << " (missing:";
+			for (const auto &label : missing)
+				std::cout << ' ' << label;
+			std::cout << ')';
+		}
 	}
+	std::cout << std::endl;
+
+	if (presence_monitor && presence_monitor->all_required_ready())
+		emit presenceReady();
 }
+
+void SpecificWorker::waiting_loop()
+{
+	// PresenceMonitor drives transitions while required peers or nodes are missing.
+}
+
+void SpecificWorker::operating_enter()
+{
+	std::cout << "[SM] -> Operating: all required constraints satisfied" << std::endl;
+	if (presence_monitor)
+		presence_monitor->set_local_ready(true);
+}
+
+void SpecificWorker::operating_loop()
+{
+	compute();
+}
+
+void SpecificWorker::degraded_enter()
+{
+	std::cout << "[SM] -> Degraded: a required peer or node is no longer available" << std::endl;
+	if (presence_monitor)
+		presence_monitor->set_local_ready(false);
+	// Do not delete Shadow here: robot_concept seeds its subtree only at startup via shadow.json.
+}
+
+void SpecificWorker::degraded_loop()
+{
+	// Not reached: Degraded auto-transitions to Waiting on entered().
+}
+
+void SpecificWorker::on_optional_peer_lost(const std::string &name, std::uint32_t)
+{
+	std::cout << "[Presence] optional peer lost: " << name << std::endl;
+}
+
+void SpecificWorker::on_optional_peer_ready(const std::string &name, std::uint32_t)
+{
+	std::cout << "[Presence] optional peer ready: " << name << std::endl;
+}
+
 
 void SpecificWorker::read_lidar_thread()
 {
@@ -200,74 +313,6 @@ void SpecificWorker::read_lidar_thread()
 
 		if (verbose_debug_)
 			lidar_fps.print("[LidarThread]", 2000);
-		std::this_thread::sleep_for(wait_period);
-	}
-}
-
-void SpecificWorker::read_imu_thread()
-{
-	static FPSCounter imu_fps;
-	auto wait_period = std::chrono::milliseconds(getPeriod("Compute"));
-	std::uint64_t prev_sensor_timestamp_ms = 0;
-	bool missing_imu_node_logged = false;
-
-	while (!stop_imu_thread)
-	{
-		RoboCompIMU::DataImu data;
-		try
-		{
-			data = imu_proxy->getDataImu();
-		}
-		catch (const Ice::Exception& e)
-		{
-			qWarning() << "[read_imu] getDataImu failed:" << e.what() << "retrying...";
-			std::this_thread::sleep_for(std::chrono::milliseconds(100));
-			continue;
-		}
-
-		const std::uint64_t sensor_timestamp_ms = get_imu_timestamp_ms(data);
-		const std::vector<float> acceleration{data.acc.XAcc, data.acc.YAcc, data.acc.ZAcc};
-		const std::vector<float> gyroscope{data.gyro.XGyr, data.gyro.YGyr, data.gyro.ZGyr};
-		const std::vector<float> euler_xyz{data.rot.Roll, data.rot.Pitch, data.rot.Yaw};
-
-		if (auto imu_node = G->get_node("imu"); imu_node.has_value())
-		{
-			G->add_or_modify_attrib_local<imu_accelerometer_att>(imu_node.value(), acceleration);
-			G->add_or_modify_attrib_local<imu_linear_acceleration_att>(imu_node.value(), acceleration);
-			G->add_or_modify_attrib_local<imu_gyroscope_att>(imu_node.value(), gyroscope);
-			G->add_or_modify_attrib_local<imu_angular_velocity_att>(imu_node.value(), gyroscope);
-			G->add_or_modify_attrib_local<imu_angular_euler_xyz_pose_att>(imu_node.value(), euler_xyz);
-			G->add_or_modify_attrib_local<imu_compass_att>(imu_node.value(), data.rot.Yaw);
-			G->add_or_modify_attrib_local<imu_time_stamp_att>(imu_node.value(), sensor_timestamp_ms);
-			G->add_or_modify_attrib_local<imu_sensor_tick_att>(imu_node.value(), sensor_timestamp_ms);
-			G->update_node(imu_node.value());
-
-			if (missing_imu_node_logged)
-			{
-				qInfo() << "[read_imu] IMU node recovered in DSR graph.";
-				missing_imu_node_logged = false;
-			}
-		}
-		else if (!missing_imu_node_logged)
-		{
-			qWarning() << "[read_imu] IMU node not found in DSR graph.";
-			missing_imu_node_logged = true;
-		}
-
-		if (sensor_timestamp_ms > prev_sensor_timestamp_ms)
-		{
-			const auto sensor_period = std::chrono::milliseconds(sensor_timestamp_ms - prev_sensor_timestamp_ms);
-			if (sensor_period.count() > 0 && sensor_period <= std::chrono::seconds(1))
-			{
-				if (wait_period > sensor_period + std::chrono::milliseconds(2)) --wait_period;
-				else if (wait_period < sensor_period - std::chrono::milliseconds(2)) ++wait_period;
-			}
-		}
-		if (sensor_timestamp_ms > 0)
-			prev_sensor_timestamp_ms = sensor_timestamp_ms;
-
-		if (verbose_debug_)
-			imu_fps.print("[ImuThread]", 2000);
 		std::this_thread::sleep_for(wait_period);
 	}
 }
@@ -374,4 +419,23 @@ void SpecificWorker::read_rgbd_thread()
 			qWarning() << "[read_rgbd] Ice exception:" << e.what();
 		}
 	}
+}
+
+
+/////////////////////////////////////////////////////////////////////////
+//SUBSCRIPTION to newFullPose method from FullPoseEstimationPub interface
+/////////////////////////////////////////////////////////////////////////
+void SpecificWorker::FullPoseEstimationPub_newFullPose(RoboCompFullPoseEstimation::FullPoseEuler pose)
+{
+	// we do not add any noise here. It is up to the users.
+	if (auto pose_node = G->get_node(robot_name); pose_node.has_value())
+	{
+		G->add_or_modify_attrib_local<robot_current_advance_speed_att>(pose_node.value(), pose.adv);
+		G->add_or_modify_attrib_local<robot_current_side_speed_att>(pose_node.value(), pose.side);
+		G->add_or_modify_attrib_local<robot_current_angular_speed_att>(pose_node.value(), pose.rot);
+		G->add_or_modify_attrib_local<robot_current_speed_timestamp_att>(pose_node.value(), static_cast<unsigned long>(pose.timestamp));
+		G->update_node(pose_node.value());
+	}
+	else
+		qWarning() << "FullPose node not found in DSR graph";
 }

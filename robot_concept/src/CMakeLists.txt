@@ -2,11 +2,13 @@ find_package(Qt6 COMPONENTS OpenGL OpenGLWidgets QUIET)
 
 # Sources set
 LIST(APPEND SOURCES
+  ../../common/agent_presence_monitor/agent_presence_monitor.cpp
   ../src/specificworker.cpp
 )
 
 # Headers set
 LIST(APPEND HEADERS
+  ../../common/agent_presence_monitor/agent_presence_monitor.h
   ../src/specificworker.h
 )
 

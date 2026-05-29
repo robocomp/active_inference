@@ -19,7 +19,7 @@
 #ifndef GENERICWORKER_H
 #define GENERICWORKER_H
 
-#include <stdint.h>
+#include <cstdint>
 #include <grafcetStep/GRAFCETStep.h>
 #include <ConfigLoader/ConfigLoader.h>
 #include <QStateMachine>
@@ -30,17 +30,18 @@
 #include <QtCore>
 #include <variant>
 #include <unordered_map>
+#include <unordered_set>
+#include <fps/fps.h>
 
 #include "dsr/api/dsr_api.h"
 #include "dsr/gui/dsr_gui.h"
-
 #include <memory>
 
 #include <CameraRGBDSimple.h>
+#include <FullPoseEstimation.h>
+#include <FullPoseEstimationPub.h>
 #include <IMU.h>
 #include <Lidar3D.h>
-
-#define BASIC_PERIOD 100
 
 using TuplePrx = std::tuple<RoboCompCameraRGBDSimple::CameraRGBDSimplePrxPtr,RoboCompIMU::IMUPrxPtr,RoboCompLidar3D::Lidar3DPrxPtr>;
 
@@ -65,6 +66,8 @@ public:
 	RoboCompIMU::IMUPrxPtr imu_proxy;
 	RoboCompLidar3D::Lidar3DPrxPtr lidar3d_proxy;
 
+	virtual void FullPoseEstimationPub_newFullPose (RoboCompFullPoseEstimation::FullPoseEuler pose) = 0;
+
 
 protected:
 	std::unordered_map<std::string, std::unique_ptr<GRAFCETStep>> states;
@@ -80,24 +83,29 @@ protected:
 	std::unordered_map<std::string, std::shared_ptr<DSR::DSRViewer>> graph_viewers;
 	std::unordered_map<std::string, std::unique_ptr<QMainWindow>> windows;
 	std::shared_ptr<DSR::DSRViewer> setupViewer(std::shared_ptr<DSR::DSRGraph> graph, const std::string& prefix, QMainWindow* parent);
-
-
+	void trigger_graph_layout_twopi();
+	void restore_window_settings();
+	void save_window_settings() const;
 
 
 private:
+	static constexpr int kWindowStateVersion = 1;
+	static constexpr int BASIC_PERIOD = 100;
+	static QString settings_group_name(const std::string& graph_name, int agent_id);
+	std::unordered_set<std::string> participant_layout_done_graphs;
 
-public slots:
-	virtual void initialize() = 0;
-	virtual void compute() = 0;
-	virtual void emergency() = 0;
-	virtual void restore() = 0;
-	void hibernationCheck();
-	void hibernationTick();
-	
-signals:
-	void kill();
-	void goToEmergency();
-	void goToRestore();
+	public slots:
+		virtual void initialize() = 0;
+		virtual void compute() = 0;
+		virtual void emergency() = 0;
+		virtual void restore() = 0;
+		void hibernationCheck();
+		void hibernationTick();
+		
+	signals:
+		void kill();
+		void goToEmergency();
+		void goToRestore();
 };
 
 #endif

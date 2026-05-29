@@ -25,10 +25,13 @@
 
 #include <atomic>
 #include <chrono>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
+
+class AgentPresenceMonitor;
 
 /**
  * \brief Class SpecificWorker implements the core functionality of the component.
@@ -40,6 +43,8 @@ public:
 	SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, bool startup_check);
 	~SpecificWorker();
 
+	void FullPoseEstimationPub_newFullPose(RoboCompFullPoseEstimation::FullPoseEuler pose);
+
 public slots:
 	void initialize();
 	void compute();
@@ -47,15 +52,16 @@ public slots:
 	void restore();
 	int  startup_check();
 
-	void modify_node_slot(std::uint64_t, const std::string &type){};
-	void modify_node_attrs_slot(std::uint64_t id, const std::vector<std::string>& att_names){};
-	void modify_edge_slot(std::uint64_t from, std::uint64_t to,  const std::string &type){};
-	void modify_edge_attrs_slot(std::uint64_t from, std::uint64_t to, const std::string &type, const std::vector<std::string>& att_names){};
-	void del_edge_slot(std::uint64_t from, std::uint64_t to, const std::string &edge_tag){};
-	void del_node_slot(std::uint64_t from){};
+	void modify_node_slot(std::uint64_t, const std::string&){}
+	void modify_node_attrs_slot(std::uint64_t, const std::vector<std::string>&){}
+	void modify_edge_slot(std::uint64_t, std::uint64_t, const std::string&){}
+	void modify_edge_attrs_slot(std::uint64_t, std::uint64_t, const std::string&, const std::vector<std::string>&){}
+	void del_edge_slot(std::uint64_t, std::uint64_t, const std::string&){}
+	void del_node_slot(std::uint64_t){}
 
 private:
 	bool startup_check_flag;
+	std::unique_ptr<AgentPresenceMonitor> presence_monitor;
 
 	struct Params
 	{
@@ -74,6 +80,7 @@ private:
 	Params params;
 
 	bool verbose_debug_ = false;
+	std::string robot_name = "Shadow";
 
 	// Lidar reader thread
 	void read_lidar_thread();
@@ -90,8 +97,19 @@ private:
 	std::thread rgbd_thread;
 	std::atomic<bool> stop_rgbd_thread{false};
 
+	void waiting_enter();
+	void waiting_loop();
+	void operating_enter();
+	void operating_loop();
+	void degraded_enter();
+	void degraded_loop();
+
+	void on_optional_peer_lost(const std::string &name, std::uint32_t id);
+	void on_optional_peer_ready(const std::string &name, std::uint32_t id);
+
 signals:
-	//void customSignal();
+	void presenceReady();
+	void presenceLost();
 };
 
 #endif
