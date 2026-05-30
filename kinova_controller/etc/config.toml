@@ -9,7 +9,7 @@ name = "kinova_controller"
 
 # --- Single Instance Configuration ---
 # Use this if you only have one graph.
-configFile = "/home/robocomp/robocomp/components/active_inference/kinova_controller/shadow.json"
+configFile = "/home/robocomp/robocomp/components/active_inference/kinova_controller/kinova2.json"
 domain = 0
 tree = false
 graph = true
