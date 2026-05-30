@@ -1,6 +1,5 @@
 #include "arm_belief_viewer_3d.h"
 
-#include <QBrush>
 #include <QColor>
 #include <QDebug>
 #include <QLabel>
@@ -14,13 +13,10 @@
 #include <QOpenGLVertexArrayObject>
 #include <QOpenGLWidget>
 #include <QMouseEvent>
-#include <QPainter>
-#include <QPen>
 #include <QPushButton>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 #include <QVector3D>
-#include <QVector4D>
 
 #include <algorithm>
 #include <cmath>
@@ -59,6 +55,12 @@ namespace
     {
         float px, py, pz;
         float nx, ny, nz;
+    };
+
+    struct LineVertex   // overlay GL_LINES, world-space, vertex colour.
+    {
+        float px, py, pz;
+        float r, g, b;
     };
 
     QMatrix4x4 to_qmatrix4x4(const Eigen::Isometry3d& transform)
@@ -220,6 +222,17 @@ public:
                      const Eigen::Vector3d& ee_position)
     {
         link_poses_ = link_poses;
+        // Cache the per-link conversions here, not inside paintGL — they only
+        // change when the agent posts new beliefs. linear() is fed directly as
+        // the normal matrix: arm link poses are rigid, so R⁻ᵀ = R and the
+        // explicit inverse-transpose was wasted work.
+        cached_model_.resize(link_poses_.size());
+        cached_normal_.resize(link_poses_.size());
+        for (size_t i = 0; i < link_poses_.size(); ++i)
+        {
+            cached_model_[i]  = to_qmatrix4x4(link_poses_[i].pose);
+            cached_normal_[i] = to_qmatrix3x3(link_poses_[i].pose.linear());
+        }
         target_ = target;
         ee_position_ = ee_position;
         update();
@@ -247,6 +260,8 @@ protected:
         glDisable(GL_CULL_FACE);
         glClearColor(0.06f, 0.07f, 0.09f, 1.0f);
         init_shader_program();
+        init_line_shader();
+        init_overlay_buffers();
     }
 
     void resizeGL(int width, int height) override
@@ -318,24 +333,21 @@ protected:
 
         QMatrix4x4 view;
         view.lookAt(camera_eye(), camera_target_, QVector3D(0.0f, 0.0f, 1.0f));
+        const QMatrix4x4 view_proj = projection * view;
 
         shader_->bind();
-        shader_->setUniformValue("u_view_proj", projection * view);
+        shader_->setUniformValue("u_view_proj", view_proj);
         shader_->setUniformValue("u_light_dir", QVector3D(0.35f, -0.45f, 1.0f));
 
         for (size_t link_idx = 0; link_idx < link_poses_.size(); ++link_idx)
         {
-            const auto& link = link_poses_[link_idx];
-            auto* mesh = load_mesh_if_needed(link.mesh_filename);
+            auto* mesh = load_mesh_if_needed(link_poses_[link_idx].mesh_filename);
             if (mesh == nullptr or mesh->vertex_count == 0)
                 continue;
 
             const QColor base_color = QColor::fromHsv((static_cast<int>(link_idx) * 35) % 360, 110, 230);
-            const auto model = to_qmatrix4x4(link.pose);
-            const auto normal_matrix = to_qmatrix3x3(link.pose.linear().inverse().transpose());
-
-            shader_->setUniformValue("u_model", model);
-            shader_->setUniformValue("u_normal_matrix", normal_matrix);
+            shader_->setUniformValue("u_model", cached_model_[link_idx]);
+            shader_->setUniformValue("u_normal_matrix", cached_normal_[link_idx]);
             shader_->setUniformValue("u_color", QVector3D(base_color.redF(), base_color.greenF(), base_color.blueF()));
 
             mesh->vao.bind();
@@ -344,7 +356,7 @@ protected:
         }
 
         shader_->release();
-        draw_overlay_markers(projection, view);
+        draw_overlay_lines(view_proj);
     }
 
 private:
@@ -406,107 +418,151 @@ private:
         }
     }
 
-    void draw_overlay_markers(const QMatrix4x4& projection, const QMatrix4x4& view)
+    // Build a single GL_LINES batch each frame and submit it with one draw
+    // call. Replaces a QPainter overlay, which on QOpenGLWidget pays a heavy
+    // per-frame state-flush cost regardless of how few primitives it draws.
+    void draw_overlay_lines(const QMatrix4x4& view_proj)
     {
-        auto project_point = [&](const Eigen::Vector3d& p, QPointF& out) -> bool
+        if (line_shader_ == nullptr)
+            return;
+
+        overlay_vertices_.clear();
+        const auto add_line = [&](const Eigen::Vector3d& a,
+                                  const Eigen::Vector3d& b,
+                                  float r, float g, float bl)
         {
-            const QVector4D world(static_cast<float>(p.x()),
-                                  static_cast<float>(p.y()),
-                                  static_cast<float>(p.z()),
-                                  1.0f);
-            const QVector4D clip = projection * view * world;
-            if (std::abs(clip.w()) < 1e-6f)
-                return false;
-            const QVector3D ndc = clip.toVector3DAffine();
-            if (ndc.z() < -1.0f or ndc.z() > 1.0f)
-                return false;
-            out.setX((ndc.x() * 0.5 + 0.5) * width());
-            out.setY((1.0 - (ndc.y() * 0.5 + 0.5)) * height());
-            return true;
+            overlay_vertices_.push_back({float(a.x()), float(a.y()), float(a.z()), r, g, bl});
+            overlay_vertices_.push_back({float(b.x()), float(b.y()), float(b.z()), r, g, bl});
         };
 
-        QPainter painter(this);
-        painter.setRenderHint(QPainter::Antialiasing, true);
-
-        // Table wireframe (8 corners: [bottom 0..3 CCW][top 4..7 CCW]).
+        // Table wireframe (12 edges).
         if (table_corners_.size() == 8)
         {
-            std::array<QPointF, 8> p;
-            std::array<bool, 8>    ok{};
-            for (int i = 0; i < 8; ++i)
-                ok[i] = project_point(table_corners_[i], p[i]);
-
-            QPen table_pen(QColor(170, 130, 90));
-            table_pen.setWidth(1);
-            painter.setPen(table_pen);
             static constexpr int edges[12][2] = {
-                {0, 1}, {1, 2}, {2, 3}, {3, 0},   // bottom loop
-                {4, 5}, {5, 6}, {6, 7}, {7, 4},   // top loop
-                {0, 4}, {1, 5}, {2, 6}, {3, 7}    // verticals
+                {0, 1}, {1, 2}, {2, 3}, {3, 0},
+                {4, 5}, {5, 6}, {6, 7}, {7, 4},
+                {0, 4}, {1, 5}, {2, 6}, {3, 7},
             };
             for (auto& e : edges)
-                if (ok[e[0]] and ok[e[1]])
-                    painter.drawLine(p[e[0]], p[e[1]]);
+                add_line(table_corners_[e[0]], table_corners_[e[1]],
+                         0.667f, 0.510f, 0.353f);
         }
 
-        // Bottle wireframe cylinder. Origin = bottom-centre, +axis = long axis.
+        // Bottle cylinder (two rims + four verticals).
         if (bottle_radius_ > 0.0 and bottle_height_ > 0.0)
         {
             const Eigen::Vector3d axis_n = bottle_axis_.normalized();
-            // Two basis vectors spanning the plane ⟂ axis. Pick the world axis
-            // that's most ⟂ to axis_n as the reference, then Gram–Schmidt.
-            const Eigen::Vector3d ref = std::abs(axis_n.z()) < 0.9
-                                        ? Eigen::Vector3d::UnitZ()
-                                        : Eigen::Vector3d::UnitX();
+            const Eigen::Vector3d ref    = std::abs(axis_n.z()) < 0.9
+                                           ? Eigen::Vector3d::UnitZ()
+                                           : Eigen::Vector3d::UnitX();
             const Eigen::Vector3d e1 = axis_n.cross(ref).normalized();
             const Eigen::Vector3d e2 = axis_n.cross(e1).normalized();
+            const Eigen::Vector3d top_centre = bottle_origin_ + axis_n * bottle_height_;
 
             constexpr int N = 20;
-            std::array<QPointF, N> bot{}, top{};
-            std::array<bool,    N> bot_ok{}, top_ok{};
-            const Eigen::Vector3d top_centre = bottle_origin_ + axis_n * bottle_height_;
+            std::array<Eigen::Vector3d, N> bot{}, top{};
             for (int i = 0; i < N; ++i)
             {
-                const double a = 2.0 * M_PI * static_cast<double>(i) / N;
-                const Eigen::Vector3d radial = bottle_radius_ * (std::cos(a) * e1 + std::sin(a) * e2);
-                bot_ok[i] = project_point(bottle_origin_ + radial, bot[i]);
-                top_ok[i] = project_point(top_centre      + radial, top[i]);
+                const double a = 2.0 * M_PI * double(i) / N;
+                const Eigen::Vector3d radial =
+                    bottle_radius_ * (std::cos(a) * e1 + std::sin(a) * e2);
+                bot[i] = bottle_origin_ + radial;
+                top[i] = top_centre     + radial;
             }
-
-            painter.setPen(QPen(QColor(80, 220, 220), 2));
-            painter.setBrush(Qt::NoBrush);
             for (int i = 0; i < N; ++i)
             {
                 const int j = (i + 1) % N;
-                if (bot_ok[i] and bot_ok[j]) painter.drawLine(bot[i], bot[j]);  // bottom rim
-                if (top_ok[i] and top_ok[j]) painter.drawLine(top[i], top[j]);  // top rim
+                add_line(bot[i], bot[j], 0.314f, 0.863f, 0.863f);
+                add_line(top[i], top[j], 0.314f, 0.863f, 0.863f);
             }
-            // A handful of verticals so the cylinder reads as a 3D shape.
-            constexpr int kVerts = 4;
-            for (int k = 0; k < kVerts; ++k)
-            {
-                const int i = (k * N) / kVerts;
-                if (bot_ok[i] and top_ok[i]) painter.drawLine(bot[i], top[i]);
-            }
+            for (int k = 0; k < 4; ++k)
+                add_line(bot[(k * N) / 4], top[(k * N) / 4], 0.314f, 0.863f, 0.863f);
         }
 
-        QPointF target_px;
-        if (project_point(target_, target_px))
-        {
-            QPen target_pen(QColor(255, 80, 80));
-            target_pen.setWidth(2);
-            painter.setPen(target_pen);
-            painter.drawLine(target_px + QPointF(-7.0, 0.0), target_px + QPointF(7.0, 0.0));
-            painter.drawLine(target_px + QPointF(0.0, -7.0), target_px + QPointF(0.0, 7.0));
-        }
+        // 3-axis cross markers in world space. Length scales with camera
+        // distance so the marker stays a consistent on-screen size regardless
+        // of zoom — the same intent the QPainter version had via its screen-
+        // space ±7 px lines.
+        const double m_per_px = double(camera_distance_) * 0.0009;
+        const double tgt_h    = 7.0 * m_per_px;
+        const double ee_h     = 4.0 * m_per_px;
 
-        QPointF ee_px;
-        if (project_point(ee_position_, ee_px))
+        const auto cross3d = [&](const Eigen::Vector3d& c, double h,
+                                 float r, float g, float b)
         {
-            painter.setPen(QPen(QColor(255, 200, 0), 2));
-            painter.setBrush(QBrush(QColor(255, 200, 0)));
-            painter.drawEllipse(ee_px, 4.0, 4.0);
+            add_line(c - Eigen::Vector3d(h, 0, 0), c + Eigen::Vector3d(h, 0, 0), r, g, b);
+            add_line(c - Eigen::Vector3d(0, h, 0), c + Eigen::Vector3d(0, h, 0), r, g, b);
+            add_line(c - Eigen::Vector3d(0, 0, h), c + Eigen::Vector3d(0, 0, h), r, g, b);
+        };
+        cross3d(target_,      tgt_h, 1.000f, 0.314f, 0.314f);  // target (red)
+        cross3d(ee_position_, ee_h,  1.000f, 0.784f, 0.000f);  // EE    (yellow)
+
+        if (overlay_vertices_.empty())
+            return;
+
+        line_shader_->bind();
+        line_shader_->setUniformValue("u_view_proj", view_proj);
+
+        overlay_vao_.bind();
+        overlay_vbo_.bind();
+        // Single dynamic upload; orphans the previous storage so the driver
+        // can pipeline frames without forcing a CPU↔GPU sync.
+        overlay_vbo_.allocate(overlay_vertices_.data(),
+                              int(overlay_vertices_.size() * sizeof(LineVertex)));
+        glLineWidth(1.5f);
+        glDrawArrays(GL_LINES, 0, int(overlay_vertices_.size()));
+        overlay_vbo_.release();
+        overlay_vao_.release();
+        line_shader_->release();
+    }
+
+    void init_line_shader()
+    {
+        line_shader_ = std::make_unique<QOpenGLShaderProgram>();
+        static constexpr const char* kV = R"(
+            #version 330 core
+            layout(location = 0) in vec3 a_pos;
+            layout(location = 1) in vec3 a_color;
+            uniform mat4 u_view_proj;
+            out vec3 v_color;
+            void main() {
+                gl_Position = u_view_proj * vec4(a_pos, 1.0);
+                v_color = a_color;
+            }
+        )";
+        static constexpr const char* kF = R"(
+            #version 330 core
+            in vec3 v_color;
+            out vec4 frag_color;
+            void main() { frag_color = vec4(v_color, 1.0); }
+        )";
+        if (not line_shader_->addShaderFromSourceCode(QOpenGLShader::Vertex,   kV) or
+            not line_shader_->addShaderFromSourceCode(QOpenGLShader::Fragment, kF) or
+            not line_shader_->link())
+        {
+            qWarning() << "ArmBeliefViewer3D line shader error:" << line_shader_->log();
+            line_shader_.reset();
         }
+    }
+
+    void init_overlay_buffers()
+    {
+        overlay_vao_.create();
+        overlay_vao_.bind();
+        overlay_vbo_.create();
+        overlay_vbo_.bind();
+        overlay_vbo_.setUsagePattern(QOpenGLBuffer::DynamicDraw);
+        // Allocate placeholder storage; draw_overlay_lines re-allocates per
+        // frame (cheap; the driver reuses orphaned VBOs).
+        overlay_vbo_.allocate(nullptr, int(256 * sizeof(LineVertex)));
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(LineVertex),
+                              reinterpret_cast<const void*>(offsetof(LineVertex, px)));
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(LineVertex),
+                              reinterpret_cast<const void*>(offsetof(LineVertex, r)));
+        glEnableVertexAttribArray(1);
+        overlay_vbo_.release();
+        overlay_vao_.release();
     }
 
     MeshGpu* load_mesh_if_needed(const std::string& mesh_filename)
@@ -581,10 +637,16 @@ private:
         destroy_cached_meshes();
         mesh_cache_.clear();
         shader_.reset();
+        line_shader_.reset();
+        if (overlay_vao_.isCreated()) overlay_vao_.destroy();
+        if (overlay_vbo_.isCreated()) overlay_vbo_.destroy();
         doneCurrent();
     }
 
     std::vector<ArmBeliefViewer3D::LinkPose> link_poses_;
+    // Cached Eigen → Qt conversions, refreshed only when set_beliefs() runs.
+    std::vector<QMatrix4x4> cached_model_;
+    std::vector<QMatrix3x3> cached_normal_;
     std::unordered_map<std::string, std::unique_ptr<MeshGpu>> mesh_cache_;
     std::unordered_set<std::string> mesh_load_errors_;
     std::string mesh_root_;
@@ -598,6 +660,10 @@ private:
     double                       bottle_radius_   = 0.0;
     double                       bottle_height_   = 0.0;
     std::unique_ptr<QOpenGLShaderProgram> shader_;
+    std::unique_ptr<QOpenGLShaderProgram> line_shader_;
+    QOpenGLVertexArrayObject overlay_vao_;
+    QOpenGLBuffer            overlay_vbo_{QOpenGLBuffer::VertexBuffer};
+    std::vector<LineVertex>  overlay_vertices_;   // refilled each frame, kept to amortise allocations
 
     // Orbital camera state (Webots convention).
     QVector3D camera_target_   = kInitialTarget;
