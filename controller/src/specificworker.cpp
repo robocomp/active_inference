@@ -29,141 +29,6 @@
 #include <print>
 #include <sstream>
 
-namespace
-{
-	constexpr auto kRobotRefAdvSpeedAttr = "robot_ref_adv_speed";
-	constexpr auto kRobotRefRotSpeedAttr = "robot_ref_rot_speed";
-	constexpr auto kRobotRefSideSpeedAttr = "robot_ref_side_speed";
-	constexpr auto kRobotRefSpeedTimestampAttr = "robot_ref_speed_timestamp";
-
-	float cross2d(const Eigen::Vector2f &origin, const Eigen::Vector2f &a, const Eigen::Vector2f &b)
-	{
-		return (a.x() - origin.x()) * (b.y() - origin.y()) - (a.y() - origin.y()) * (b.x() - origin.x());
-	}
-
-	std::vector<Eigen::Vector2f> convex_hull(std::vector<Eigen::Vector2f> points)
-	{
-		if (points.size() < 3)
-			return points;
-
-		std::sort(points.begin(), points.end(), [](const auto &lhs, const auto &rhs)
-		{
-			if (lhs.x() != rhs.x())
-				return lhs.x() < rhs.x();
-			return lhs.y() < rhs.y();
-		});
-		points.erase(std::unique(points.begin(), points.end(), [](const auto &lhs, const auto &rhs)
-		{
-			return (lhs - rhs).cwiseAbs().maxCoeff() < 1e-4f;
-		}), points.end());
-		if (points.size() < 3)
-			return points;
-
-		std::vector<Eigen::Vector2f> lower;
-		lower.reserve(points.size());
-		for (const auto &point : points)
-		{
-			while (lower.size() >= 2 && cross2d(lower[lower.size() - 2], lower.back(), point) <= 0.f)
-				lower.pop_back();
-			lower.push_back(point);
-		}
-
-		std::vector<Eigen::Vector2f> upper;
-		upper.reserve(points.size());
-		for (auto it = points.rbegin(); it != points.rend(); ++it)
-		{
-			while (upper.size() >= 2 && cross2d(upper[upper.size() - 2], upper.back(), *it) <= 0.f)
-				upper.pop_back();
-			upper.push_back(*it);
-		}
-
-		lower.pop_back();
-		upper.pop_back();
-		lower.insert(lower.end(), upper.begin(), upper.end());
-		return lower;
-	}
-
-	std::vector<Eigen::Vector2f> inflate_convex_polygon(const std::vector<Eigen::Vector2f> &polygon, float padding_m)
-	{
-		if (polygon.empty() || padding_m <= 0.f)
-			return polygon;
-
-		Eigen::Vector2f centroid = Eigen::Vector2f::Zero();
-		for (const auto &point : polygon)
-			centroid += point;
-		centroid /= static_cast<float>(polygon.size());
-
-		std::vector<Eigen::Vector2f> inflated;
-		inflated.reserve(polygon.size());
-		for (const auto &point : polygon)
-		{
-			Eigen::Vector2f dir = point - centroid;
-			const float norm = dir.norm();
-			if (norm > 1e-4f)
-				dir /= norm;
-			else
-				dir = Eigen::Vector2f::UnitX();
-			inflated.push_back(point + dir * padding_m);
-		}
-		return inflated;
-	}
-
-	void log_compute_perf(FPSCounter &counter)
-	{
-		counter.cont++;
-		const auto now = std::chrono::high_resolution_clock::now();
-		const auto elapsed_ms = std::chrono::duration<double, std::milli>(now - counter.begin).count();
-		if (elapsed_ms < 1000.0)
-			return;
-
-		counter.last_period = static_cast<float>(elapsed_ms / std::max(1u, counter.cont));
-		counter.period = 1000;
-		const float fps = counter.get_frequency();
-		const float cpu = std::max(0.f, counter.get_cpu_use());
-		std::cout << "[CTRL] fps=" << std::fixed << std::setprecision(1) << fps
-		          << " cpu=" << std::setprecision(0) << cpu << "%"
-		          << " period=" << std::setprecision(1) << counter.get_period() << "ms"
-		          << std::endl;
-		counter.begin = now;
-		counter.cont = 0;
-	}
-
-	struct ScopedComputePerfLog
-	{
-		FPSCounter &counter;
-		~ScopedComputePerfLog() { log_compute_perf(counter); }
-	};
-
-float ramp_uncertainty_scale(float value, float slow_threshold, float stop_threshold, float min_scale)
-{
-	if (stop_threshold <= slow_threshold)
-		return value <= slow_threshold ? 1.f : std::clamp(min_scale, 0.f, 1.f);
-
-	const float clamped_min_scale = std::clamp(min_scale, 0.f, 1.f);
-	const float alpha = std::clamp((value - slow_threshold) / (stop_threshold - slow_threshold), 0.f, 1.f);
-	return 1.f - alpha * (1.f - clamped_min_scale);
-}
-
-float preserve_sign_clamp(float value, float max_abs)
-{
-	return std::copysign(std::min(std::abs(value), std::max(0.f, max_abs)), value);
-}
-}
-
-bool SpecificWorker::same_target_instance(const TargetInfo &lhs, const TargetInfo &rhs)
-{
-	constexpr float pos_eps_m = 0.05f;
-	constexpr float yaw_eps_rad = 0.05f;
-	constexpr float gain_eps = 1e-3f;
-
-	return lhs.node_id == rhs.node_id
-		&& lhs.from_affordance == rhs.from_affordance
-		&& lhs.epistemic_pending == rhs.epistemic_pending
-		&& (lhs.room_pos - rhs.room_pos).cwiseAbs().maxCoeff() < pos_eps_m
-		&& std::abs(lhs.yaw_rad - rhs.yaw_rad) < yaw_eps_rad
-		&& std::abs(lhs.epistemic_gain - rhs.epistemic_gain) < gain_eps;
-}
-
 SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, bool startup_check) : GenericWorker(configLoader, tprx)
 {
 	this->startup_check_flag = startup_check;
@@ -177,21 +42,34 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
 			hibernationChecker.start(500);
 		#endif
 		
-		// Example statemachine:
-		/***
-		//Your definition for the statesmachine (if you dont want use a execute function, use nullptr)
-		states["CustomState"] = std::make_unique<GRAFCETStep>("CustomState", period, 
-															std::bind(&SpecificWorker::customLoop, this),  // Cyclic function
-															std::bind(&SpecificWorker::customEnter, this), // On-enter function
-															std::bind(&SpecificWorker::customExit, this)); // On-exit function
+		const int period = configLoader.get<int>("Period.Compute");
 
-		//Add your definition of transitions (addTransition(originOfSignal, signal, dstState))
-		states["CustomState"]->addTransition(states["CustomState"].get(), SIGNAL(entered()), states["OtherState"].get());
-		states["Compute"]->addTransition(this, SIGNAL(customSignal()), states["CustomState"].get()); //Define your signal in the .h file under the "Signals" section.
+		// State machine: Compute → Waiting → Operating → Degraded → Waiting
+		states["Waiting"] = std::make_unique<GRAFCETStep>("Waiting", period,
+		    std::bind(&SpecificWorker::waiting_loop, this),
+		    std::bind(&SpecificWorker::waiting_enter, this),
+		    nullptr);
+		states["Operating"] = std::make_unique<GRAFCETStep>("Operating", period,
+		    std::bind(&SpecificWorker::operating_loop, this),
+		    std::bind(&SpecificWorker::operating_enter, this),
+		    nullptr);
+		states["Degraded"] = std::make_unique<GRAFCETStep>("Degraded", period,
+		    std::bind(&SpecificWorker::degraded_loop, this),
+		    std::bind(&SpecificWorker::degraded_enter, this),
+		    nullptr);
 
-		//Add your custom state
-		statemachine.addState(states["CustomState"].get());
-		***/
+		// Compute → Waiting on start
+		states["Compute"]->addTransition(states["Compute"].get(), SIGNAL(entered()), states["Waiting"].get());
+		// Waiting → Operating when all required peers are ready
+		states["Waiting"]->addTransition(this, SIGNAL(presenceReady()), states["Operating"].get());
+		// Operating → Degraded when a required peer is lost
+		states["Operating"]->addTransition(this, SIGNAL(presenceLost()), states["Degraded"].get());
+		// Degraded → Waiting immediately (self-kill scheduled inside degraded_enter)
+		states["Degraded"]->addTransition(states["Degraded"].get(), SIGNAL(entered()), states["Waiting"].get());
+
+		statemachine.addState(states["Waiting"].get());
+		statemachine.addState(states["Operating"].get());
+		statemachine.addState(states["Degraded"].get());
 
 		statemachine.setChildMode(QState::ExclusiveStates);
 		statemachine.start();
@@ -222,6 +100,25 @@ void SpecificWorker::initialize()
 	std::print("controller debug: initialize() entered\n");
 	std::fflush(stdout);
 	GenericWorker::initialize();
+
+	// Presence monitor — watches robot_concept and room_concept
+	presence_monitor = std::make_unique<AgentPresenceMonitor>(configLoader, G, static_cast<std::uint32_t>(agent_id));
+	presence_monitor->on_required_ready = [this]() { emit presenceReady(); };
+	presence_monitor->on_required_lost = [this]() { emit presenceLost(); };
+	presence_monitor->on_peer_restarted = [this](std::uint32_t id) {
+	    std::cout << "[Presence] peer " << id << " restarted" << std::endl;
+	};
+	presence_monitor->on_optional_agent_lost = [this](std::string name, std::uint32_t id) {
+	    on_optional_peer_lost(name, id);
+	};
+	presence_monitor->on_optional_agent_ready = [this](std::string name, std::uint32_t id) {
+	    on_optional_peer_ready(name, id);
+	};
+	presence_monitor->start();
+
+	QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
+	                 this, &SpecificWorker::cleanup_owned_nodes, Qt::UniqueConnection);
+
 	load_params();
 	inner_eigen_api_ = G ? G->get_inner_eigen_api() : nullptr;
 	custom_widget_ = std::make_unique<Custom_widget>();
@@ -298,6 +195,11 @@ void SpecificWorker::initialize()
 void SpecificWorker::compute()
 {
 	static FPSCounter compute_perf_counter;
+	struct ScopedComputePerfLog
+	{
+		FPSCounter &counter;
+		~ScopedComputePerfLog() { SpecificWorker::log_compute_perf(counter); }
+	};
 	ScopedComputePerfLog perf_log{compute_perf_counter};
 
 	log_first_compute_once();
@@ -334,6 +236,205 @@ void SpecificWorker::compute()
 }
 
 /////////////////////////////////////////////////////////////////
+// ─── State machine ─────────────────────────────────────────────────────────
+
+void SpecificWorker::waiting_enter()
+{
+    std::cout << "[SM] -> Waiting";
+    if (presence_monitor)
+    {
+        presence_monitor->set_local_ready(false);
+        const auto missing = presence_monitor->missing_required_names();
+        if (!missing.empty())
+        {
+            std::cout << " (missing:";
+            for (const auto &label : missing)
+                std::cout << ' ' << label;
+            std::cout << ')';
+        }
+    }
+    std::cout << std::endl;
+
+    // In case all peers were already present before the monitor fired, self-transition.
+    if (presence_monitor && presence_monitor->all_required_ready())
+        emit presenceReady();
+}
+
+void SpecificWorker::waiting_loop()
+{
+    // PresenceMonitor drives the presenceReady signal when all required peers appear.
+}
+
+void SpecificWorker::operating_enter()
+{
+    std::cout << "[SM] -> Operating: all required peers present" << std::endl;
+    if (presence_monitor)
+        presence_monitor->set_local_ready(true);
+}
+
+void SpecificWorker::operating_loop()
+{
+    compute();
+}
+
+void SpecificWorker::degraded_enter()
+{
+    std::cout << "[SM] -> Degraded: required peer lost. Cleaning up and exiting." << std::endl;
+    if (presence_monitor)
+        presence_monitor->set_local_ready(false);
+    cleanup_owned_nodes();
+    QTimer::singleShot(500, QCoreApplication::instance(), SLOT(quit()));
+}
+
+void SpecificWorker::degraded_loop()
+{
+    // Not reached: Degraded auto-transitions to Waiting via entered() signal.
+}
+
+void SpecificWorker::cleanup_owned_nodes()
+{
+    if (!presence_monitor) return;
+    presence_monitor->set_local_ready(false);
+    presence_monitor->delete_owned_nodes();
+    presence_monitor.reset();
+}
+
+void SpecificWorker::on_optional_peer_lost(const std::string &name, std::uint32_t /*id*/)
+{
+    std::cout << "[Presence] optional peer lost: " << name << std::endl;
+}
+
+void SpecificWorker::on_optional_peer_ready(const std::string &name, std::uint32_t /*id*/)
+{
+    std::cout << "[Presence] optional peer ready: " << name << std::endl;
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+
+float SpecificWorker::cross2d(const Eigen::Vector2f &origin, const Eigen::Vector2f &a, const Eigen::Vector2f &b)
+{
+	return (a.x() - origin.x()) * (b.y() - origin.y()) - (a.y() - origin.y()) * (b.x() - origin.x());
+}
+
+SpecificWorker::Polygon SpecificWorker::convex_hull(Polygon points)
+{
+	if (points.size() < 3)
+		return points;
+
+	std::sort(points.begin(), points.end(), [](const auto &lhs, const auto &rhs)
+	{
+		if (lhs.x() != rhs.x())
+			return lhs.x() < rhs.x();
+		return lhs.y() < rhs.y();
+	});
+	points.erase(std::unique(points.begin(), points.end(), [](const auto &lhs, const auto &rhs)
+	{
+		return (lhs - rhs).cwiseAbs().maxCoeff() < 1e-4f;
+	}), points.end());
+	if (points.size() < 3)
+		return points;
+
+	Polygon lower;
+	lower.reserve(points.size());
+	for (const auto &point : points)
+	{
+		while (lower.size() >= 2 && cross2d(lower[lower.size() - 2], lower.back(), point) <= 0.f)
+			lower.pop_back();
+		lower.push_back(point);
+	}
+
+	Polygon upper;
+	upper.reserve(points.size());
+	for (auto it = points.rbegin(); it != points.rend(); ++it)
+	{
+		while (upper.size() >= 2 && cross2d(upper[upper.size() - 2], upper.back(), *it) <= 0.f)
+			upper.pop_back();
+		upper.push_back(*it);
+	}
+
+	lower.pop_back();
+	upper.pop_back();
+	lower.insert(lower.end(), upper.begin(), upper.end());
+	return lower;
+}
+
+SpecificWorker::Polygon SpecificWorker::inflate_convex_polygon(const Polygon &polygon, float padding_m)
+
+
+{
+	if (polygon.empty() || padding_m <= 0.f)
+		return polygon;
+
+	Eigen::Vector2f centroid = Eigen::Vector2f::Zero();
+	for (const auto &point : polygon)
+		centroid += point;
+	centroid /= static_cast<float>(polygon.size());
+
+	Polygon inflated;
+	inflated.reserve(polygon.size());
+	for (const auto &point : polygon)
+	{
+		Eigen::Vector2f dir = point - centroid;
+		const float norm = dir.norm();
+		if (norm > 1e-4f)
+			dir /= norm;
+		else
+			dir = Eigen::Vector2f::UnitX();
+		inflated.push_back(point + dir * padding_m);
+	}
+	return inflated;
+}
+
+void SpecificWorker::log_compute_perf(FPSCounter &counter)
+{
+	counter.cont++;
+	const auto now = std::chrono::high_resolution_clock::now();
+	const auto elapsed_ms = std::chrono::duration<double, std::milli>(now - counter.begin).count();
+	if (elapsed_ms < 1000.0)
+		return;
+
+	counter.last_period = static_cast<float>(elapsed_ms / std::max(1u, counter.cont));
+	counter.period = 1000;
+	const float fps = counter.get_frequency();
+	const float cpu = std::max(0.f, counter.get_cpu_use());
+	std::cout << "[CTRL] fps=" << std::fixed << std::setprecision(1) << fps
+	          << " cpu=" << std::setprecision(0) << cpu << "%"
+	          << " period=" << std::setprecision(1) << counter.get_period() << "ms"
+	          << std::endl;
+	counter.begin = now;
+	counter.cont = 0;
+}
+
+float SpecificWorker::ramp_uncertainty_scale(float value, float slow_threshold, float stop_threshold, float min_scale)
+{
+	if (stop_threshold <= slow_threshold)
+		return value <= slow_threshold ? 1.f : std::clamp(min_scale, 0.f, 1.f);
+
+	const float clamped_min_scale = std::clamp(min_scale, 0.f, 1.f);
+	const float alpha = std::clamp((value - slow_threshold) / (stop_threshold - slow_threshold), 0.f, 1.f);
+	return 1.f - alpha * (1.f - clamped_min_scale);
+}
+
+float SpecificWorker::preserve_sign_clamp(float value, float max_abs)
+{
+	return std::copysign(std::min(std::abs(value), std::max(0.f, max_abs)), value);
+}
+
+bool SpecificWorker::same_target_instance(const TargetInfo &lhs, const TargetInfo &rhs)
+{
+	constexpr float pos_eps_m = 0.05f;
+	constexpr float yaw_eps_rad = 0.05f;
+	constexpr float gain_eps = 1e-3f;
+
+	return lhs.node_id == rhs.node_id
+		&& lhs.from_affordance == rhs.from_affordance
+		&& lhs.epistemic_pending == rhs.epistemic_pending
+		&& (lhs.room_pos - rhs.room_pos).cwiseAbs().maxCoeff() < pos_eps_m
+		&& std::abs(lhs.yaw_rad - rhs.yaw_rad) < yaw_eps_rad
+		&& std::abs(lhs.epistemic_gain - rhs.epistemic_gain) < gain_eps;
+}
+
+////////////////////////////////////////////////////////////////////
 void SpecificWorker::log_first_compute_once()
 {
 	if (compute_debug_logged_)
@@ -446,6 +547,19 @@ std::optional<SpecificWorker::PlanningStep> SpecificWorker::build_planning_step(
 	step.target = *target;
 	current_target_room_ = step.target.room_pos;
 	step.target_changed = !last_target_info_.has_value() || !same_target_instance(*last_target_info_, step.target);
+	if (step.target_changed)
+	{
+		std::print("Target debug: source={} id={} name='{}' pos=({:.3f},{:.3f}) yaw={:.3f} epistemic_gain={:.4f} pending={}\n",
+		           step.target.from_affordance ? "affordance" : "legacy",
+		           step.target.node_id,
+		           step.target.node_name,
+		           step.target.room_pos.x(),
+		           step.target.room_pos.y(),
+		           step.target.yaw_rad,
+		           step.target.epistemic_gain,
+		           step.target.epistemic_pending ? 1 : 0);
+		std::fflush(stdout);
+	}
 	last_target_info_ = step.target;
 	active_target_id_ = target->node_id;
 	return step;
@@ -492,41 +606,43 @@ bool SpecificWorker::ensure_current_plan(const PlanningStep &step)
 /////////////////////////////////////////////////////////////////
 void SpecificWorker::load_params()
 {
-	try { params.clearance_m = static_cast<float>(configLoader.get<double>("Planner.Clearance")); } catch (...) {}
-	try { params.grid_resolution_m = static_cast<float>(configLoader.get<double>("Planner.GridResolution")); } catch (...) {}
-	try { params.clearance_m = static_cast<float>(configLoader.get<double>("Planner.Clearance")); } catch (...) {}
-	try { params.connection_radius_m = static_cast<float>(configLoader.get<double>("Planner.ConnectionRadius")); } catch (...) {}
-	try { params.waypoint_tolerance_m = static_cast<float>(configLoader.get<double>("Controller.WaypointTolerance")); } catch (...) {}
-	try { params.max_adv_speed_mps = static_cast<float>(configLoader.get<double>("Controller.MaxAdvSpeed")); } catch (...) {}
-	try { params.max_rot_speed_rps = static_cast<float>(configLoader.get<double>("Controller.MaxRotSpeed")); } catch (...) {}
-	try { params.pos_gain = static_cast<float>(configLoader.get<double>("Controller.PosGain")); } catch (...) {}
-	try { params.rot_gain = static_cast<float>(configLoader.get<double>("Controller.RotGain")); } catch (...) {}
-	try { params.interpolate_rt = configLoader.get<bool>("Transforms.interpolate_rt"); } catch (...) {}
-	try { params.max_lidar_draw_points = configLoader.get<int>("Viewer2D.MaxLidarDrawPoints"); } catch (...) {}
-	try { params.lidar_name = configLoader.get<std::string>("Lidar.Name"); } catch (...) {}
-	try { params.target_edge_type = configLoader.get<std::string>("Target.EdgeType"); } catch (...) {}
-	try { params.pose_xy_std_slow_m = static_cast<float>(configLoader.get<double>("Controller.PoseXYStdSlow")); } catch (...) {}
-	try { params.pose_xy_std_stop_m = static_cast<float>(configLoader.get<double>("Controller.PoseXYStdStop")); } catch (...) {}
-	try { params.pose_theta_std_slow_rad = static_cast<float>(configLoader.get<double>("Controller.PoseThetaStdSlow")); } catch (...) {}
-	try { params.pose_theta_std_stop_rad = static_cast<float>(configLoader.get<double>("Controller.PoseThetaStdStop")); } catch (...) {}
-	try { params.min_adv_speed_scale = static_cast<float>(configLoader.get<double>("Controller.MinAdvSpeedScale")); } catch (...) {}
-	try { params.min_rot_speed_scale = static_cast<float>(configLoader.get<double>("Controller.MinRotSpeedScale")); } catch (...) {}
-	try { params.uncertainty_prediction_horizon_s = static_cast<float>(configLoader.get<double>("Controller.PosePredictionHorizon")); } catch (...) {}
-	try { params.pose_xy_std_growth_per_mps = static_cast<float>(configLoader.get<double>("Controller.PoseXYStdGrowthPerMps")); } catch (...) {}
-	try { params.pose_theta_std_growth_per_rps = static_cast<float>(configLoader.get<double>("Controller.PoseThetaStdGrowthPerRps")); } catch (...) {}
-	try { params.adv_rotation_coupling_exponent = static_cast<float>(configLoader.get<double>("Controller.AdvRotationCouplingExponent")); } catch (...) {}
-	try { params.temporary_obstacle_front_distance_m = static_cast<float>(configLoader.get<double>("Controller.TemporaryObstacleFrontDistance")); } catch (...) {}
-	try { params.temporary_obstacle_half_width_m = static_cast<float>(configLoader.get<double>("Controller.TemporaryObstacleHalfWidth")); } catch (...) {}
-	try { params.temporary_obstacle_cluster_margin_m = static_cast<float>(configLoader.get<double>("Controller.TemporaryObstacleClusterMargin")); } catch (...) {}
-	try { params.temporary_obstacle_padding_m = static_cast<float>(configLoader.get<double>("Controller.TemporaryObstaclePadding")); } catch (...) {}
-	try { params.temporary_obstacle_min_points = configLoader.get<int>("Controller.TemporaryObstacleMinPoints"); } catch (...) {}
-	try { params.temporary_obstacle_ttl_ms = static_cast<std::uint64_t>(std::max(0, configLoader.get<int>("Controller.TemporaryObstacleTTLms"))); } catch (...) {}
-	try { params.goal_clearance_relax_dist_m = static_cast<float>(configLoader.get<double>("Controller.GoalClearanceRelaxDist")); } catch (...) {}
-	try { params.goal_obstacle_margin_m = static_cast<float>(configLoader.get<double>("Controller.GoalObstacleMargin")); } catch (...) {}
-	try { params.goal_clearance_min_ratio = static_cast<float>(configLoader.get<double>("Controller.GoalClearanceMinRatio")); } catch (...) {}
-	try { params.straight_speed_heading_threshold_rad = static_cast<float>(configLoader.get<double>("Controller.StraightSpeedHeadingThreshold")); } catch (...) {}
-	try { params.straight_speed_clearance_margin_m = static_cast<float>(configLoader.get<double>("Controller.StraightSpeedClearanceMargin")); } catch (...) {}
-	try { params.straight_speed_min_goal_dist_m = static_cast<float>(configLoader.get<double>("Controller.StraightSpeedMinGoalDist")); } catch (...) {}
+	load_optional_cast<double>("Planner.Clearance", params.clearance_m);
+	load_optional_cast<double>("Planner.GridResolution", params.grid_resolution_m);
+	load_optional_cast<double>("Planner.ConnectionRadius", params.connection_radius_m);
+	load_optional_cast<double>("Controller.WaypointTolerance", params.waypoint_tolerance_m);
+	load_optional_cast<double>("Controller.MaxAdvSpeed", params.max_adv_speed_mps);
+	load_optional_cast<double>("Controller.MaxRotSpeed", params.max_rot_speed_rps);
+	load_optional_cast<double>("Controller.PosGain", params.pos_gain);
+	load_optional_cast<double>("Controller.RotGain", params.rot_gain);
+	load_optional("Transforms.interpolate_rt", params.interpolate_rt);
+	load_optional("Viewer2D.MaxLidarDrawPoints", params.max_lidar_draw_points);
+	load_optional("Lidar.Name", params.lidar_name);
+	load_optional("Target.EdgeType", params.target_edge_type);
+	load_optional_cast<double>("Controller.PoseXYStdSlow", params.pose_xy_std_slow_m);
+	load_optional_cast<double>("Controller.PoseXYStdStop", params.pose_xy_std_stop_m);
+	load_optional_cast<double>("Controller.PoseThetaStdSlow", params.pose_theta_std_slow_rad);
+	load_optional_cast<double>("Controller.PoseThetaStdStop", params.pose_theta_std_stop_rad);
+	load_optional_cast<double>("Controller.MinAdvSpeedScale", params.min_adv_speed_scale);
+	load_optional_cast<double>("Controller.MinRotSpeedScale", params.min_rot_speed_scale);
+	load_optional_cast<double>("Controller.PosePredictionHorizon", params.uncertainty_prediction_horizon_s);
+	load_optional_cast<double>("Controller.PoseXYStdGrowthPerMps", params.pose_xy_std_growth_per_mps);
+	load_optional_cast<double>("Controller.PoseThetaStdGrowthPerRps", params.pose_theta_std_growth_per_rps);
+	load_optional_cast<double>("Controller.AdvRotationCouplingExponent", params.adv_rotation_coupling_exponent);
+	load_optional_cast<double>("Controller.TemporaryObstacleFrontDistance", params.temporary_obstacle_front_distance_m);
+	load_optional_cast<double>("Controller.TemporaryObstacleHalfWidth", params.temporary_obstacle_half_width_m);
+	load_optional_cast<double>("Controller.TemporaryObstacleClusterMargin", params.temporary_obstacle_cluster_margin_m);
+	load_optional_cast<double>("Controller.TemporaryObstaclePadding", params.temporary_obstacle_padding_m);
+	load_optional("Controller.TemporaryObstacleMinPoints", params.temporary_obstacle_min_points);
+	load_optional("Controller.TemporaryObstacleHistoryScans", params.temporary_obstacle_history_scans);
+	int temporary_obstacle_ttl_ms = static_cast<int>(params.temporary_obstacle_ttl_ms);
+	load_optional("Controller.TemporaryObstacleTTLms", temporary_obstacle_ttl_ms);
+	params.temporary_obstacle_ttl_ms = static_cast<std::uint64_t>(std::max(0, temporary_obstacle_ttl_ms));
+	load_optional_cast<double>("Controller.GoalClearanceRelaxDist", params.goal_clearance_relax_dist_m);
+	load_optional_cast<double>("Controller.GoalObstacleMargin", params.goal_obstacle_margin_m);
+	load_optional_cast<double>("Controller.GoalClearanceMinRatio", params.goal_clearance_min_ratio);
+	load_optional_cast<double>("Controller.StraightSpeedHeadingThreshold", params.straight_speed_heading_threshold_rad);
+	load_optional_cast<double>("Controller.StraightSpeedClearanceMargin", params.straight_speed_clearance_margin_m);
+	load_optional_cast<double>("Controller.StraightSpeedMinGoalDist", params.straight_speed_min_goal_dist_m);
 	planner_.params.clearance_m = params.clearance_m;
 	planner_.params.robot_width_m = 0.4f;
 	planner_.params.grid_resolution_m = params.grid_resolution_m;
@@ -595,7 +711,17 @@ void SpecificWorker::update_custom_widget(const std::optional<RobotPose> &robot_
 		if (current_plan_.has_value())
 			display_path = current_plan_->room_path;
 		if (robot_pose.has_value() and !display_path.empty())
-			display_path.front() = robot_pose->pos;
+		{
+			const int start_index = std::clamp(last_display_wp_index_, 0, static_cast<int>(display_path.size()) - 1);
+			auto suffix_begin = display_path.begin() + start_index;
+			Polygon remaining_path;
+			remaining_path.reserve(static_cast<std::size_t>(std::distance(suffix_begin, display_path.end())) + 1);
+			remaining_path.push_back(robot_pose->pos);
+			remaining_path.insert(remaining_path.end(), suffix_begin, display_path.end());
+			if (remaining_path.size() >= 2 && (remaining_path[1] - remaining_path[0]).norm() < 1e-3f)
+				remaining_path.erase(remaining_path.begin() + 1);
+			display_path = std::move(remaining_path);
+		}
 
 		viewer_2d_->draw_room_polygon(room_polygon_);
 		viewer_2d_->draw_lidar_points_from_buffer(params.max_lidar_draw_points);
@@ -605,6 +731,7 @@ void SpecificWorker::update_custom_widget(const std::optional<RobotPose> &robot_
 			.graph_nodes = current_plan_.has_value() ? current_plan_->graph_nodes : Polygon{},
 			.obstacle_polys = obstacle_polygons_,
 			.candidate_trajectories = last_mppi_trajectories_,
+			.average_trajectory = last_mppi_average_trajectory_,
 			.best_trajectory_idx = last_best_mppi_trajectory_idx_
 		});
 		if (!room_view_fitted_ && !room_polygon_.empty())
@@ -681,6 +808,14 @@ SpecificWorker::Polygons SpecificWorker::read_obstacle_polygons(std::uint64_t ti
 
 	const auto time_query = params.interpolate_rt ? DSR::RT_API::TimeQuery::Interpolated
 	                                          : DSR::RT_API::TimeQuery::Nearest;
+	auto is_robot_body_node = [this](const auto &node)
+	{
+		return node.id() == graph_state_.robot_id
+			|| node.name() == graph_state_.robot_name
+			|| node.type() == "robot"
+			|| node.type() == "body"
+			|| node.name() == "body";
+	};
 
 	auto obstacle_nodes = G->get_nodes_by_type("object");
 	bool using_fallback_nodes = false;
@@ -689,6 +824,9 @@ SpecificWorker::Polygons SpecificWorker::read_obstacle_polygons(std::uint64_t ti
 		using_fallback_nodes = true;
 		for (const auto &node : G->get_nodes())
 		{
+			if (is_robot_body_node(node))
+				continue;
+
 			const auto width_attr = G->get_attrib_by_name<width_m_att>(node);
 			const auto depth_attr = G->get_attrib_by_name<depth_m_att>(node);
 			if (!width_attr.has_value() || !depth_attr.has_value())
@@ -715,6 +853,12 @@ SpecificWorker::Polygons SpecificWorker::read_obstacle_polygons(std::uint64_t ti
 		report << " fallback=width_depth_rt";
 	for (const auto &node : obstacle_nodes)
 	{
+		if (is_robot_body_node(node))
+		{
+			report << " | node='" << node.name() << "' type='" << node.type() << "' skipped=self";
+			continue;
+		}
+
 		report << " | node='" << node.name() << "' type='" << node.type() << "'";
 		const auto width_attr = G->get_attrib_by_name<width_m_att>(node);
 		const auto depth_attr = G->get_attrib_by_name<depth_m_att>(node);
@@ -786,36 +930,66 @@ void SpecificWorker::update_active_obstacle_polygons(std::uint64_t timestamp_ms)
 	path_controller_.set_static_obstacles(obstacle_polygons_);
 }
 
+std::vector<Eigen::Vector3f> SpecificWorker::read_recent_lidar_points_in_room(std::uint64_t timestamp_ms,
+	                                                                          int max_scans)
+{
+	std::vector<Eigen::Vector3f> points;
+	const int scan_count = std::clamp(max_scans, 1, 5);
+	const std::uint64_t anchor_timestamp_ms = last_lidar_timestamp_ms_.value_or(timestamp_ms);
+	const std::uint64_t step_ms = std::clamp(lidar_period_ms_, std::uint64_t{20}, std::uint64_t{250});
+	const std::uint64_t max_diff_ms = std::max<std::uint64_t>(20ULL, step_ms / 2);
+
+	for (int scan_index = 0; scan_index < scan_count; ++scan_index)
+	{
+		const std::uint64_t offset_ms = static_cast<std::uint64_t>(scan_index) * step_ms;
+		const std::uint64_t query_timestamp_ms = anchor_timestamp_ms > offset_ms
+			? anchor_timestamp_ms - offset_ms
+			: 0ULL;
+
+		const auto [cloud_opt] = lidar_room_buffer_.read(query_timestamp_ms, max_diff_ms);
+		if (!cloud_opt.has_value())
+			continue;
+
+		const auto &[xs_room, ys_room, zs_room] = cloud_opt.value();
+		const std::size_t count = std::min({xs_room.size(), ys_room.size(), zs_room.size()});
+		for (std::size_t index = 0; index < count; ++index)
+		{
+			const float x_room = xs_room[index];
+			const float y_room = ys_room[index];
+			const float z_room = zs_room[index];
+			if (!std::isfinite(x_room) || !std::isfinite(y_room) || !std::isfinite(z_room))
+				continue;
+			points.emplace_back(x_room, y_room, z_room);
+		}
+	}
+
+	return points;
+}
+
 bool SpecificWorker::create_temporary_lidar_obstacle(std::uint64_t timestamp_ms,
 	                                                 const RobotPose &robot_pose,
 	                                                 const Eigen::Vector2f &blockage_center_room,
 	                                                 float blockage_radius_m)
 {
-	const auto [cloud_opt] = lidar_room_buffer_.read_last();
-	if (!cloud_opt.has_value())
-		return false;
-
-	const auto &[xs_room, ys_room, zs_room] = cloud_opt.value();
-	const std::size_t count = std::min({xs_room.size(), ys_room.size(), zs_room.size()});
-	if (count == 0)
+	const auto fused_points_room = read_recent_lidar_points_in_room(timestamp_ms,
+		params.temporary_obstacle_history_scans);
+	if (fused_points_room.empty())
 		return false;
 
 	const Eigen::Affine2f robot_from_room = robot_pose.as_transform().inverse();
 	std::vector<Eigen::Vector2f> candidate_points_room;
-	candidate_points_room.reserve(count);
+	candidate_points_room.reserve(fused_points_room.size());
 
 	const float max_front_distance = std::max(0.2f, params.temporary_obstacle_front_distance_m);
 	const float half_width = std::max(0.1f, params.temporary_obstacle_half_width_m);
 	const float cluster_margin = std::max(0.f, params.temporary_obstacle_cluster_margin_m);
 	const float max_blockage_distance = std::max(blockage_radius_m + cluster_margin, cluster_margin);
 
-	for (std::size_t index = 0; index < count; ++index)
+	for (const auto &point3d_room : fused_points_room)
 	{
-		const float x_room = xs_room[index];
-		const float y_room = ys_room[index];
-		const float z_room = zs_room[index];
-		if (!std::isfinite(x_room) || !std::isfinite(y_room) || !std::isfinite(z_room))
-			continue;
+		const float x_room = point3d_room.x();
+		const float y_room = point3d_room.y();
+		const float z_room = point3d_room.z();
 		if (z_room < 0.05f || z_room > 1.8f)
 			continue;
 
@@ -1051,6 +1225,10 @@ void SpecificWorker::execute_plan(const RobotPose &robot_pose)
 {
 	if (!current_plan_.has_value())
 	{
+		last_mppi_trajectories_.clear();
+		last_mppi_average_trajectory_.clear();
+		last_best_mppi_trajectory_idx_ = -1;
+		last_display_wp_index_ = 0;
 		path_controller_.stop();
 		stop_robot();
 		return;
@@ -1062,9 +1240,15 @@ void SpecificWorker::execute_plan(const RobotPose &robot_pose)
 
 	const auto control_output = path_controller_.compute(robot_pose.as_transform());
 	last_mppi_trajectories_ = control_output.trajectories_room;
+	last_mppi_average_trajectory_ = control_output.average_trajectory_room;
 	last_best_mppi_trajectory_idx_ = control_output.best_trajectory_idx;
+	last_display_wp_index_ = std::max(0, control_output.current_wp_index);
 	if (control_output.path_blocked)
 	{
+		last_mppi_trajectories_.clear();
+		last_mppi_average_trajectory_.clear();
+		last_best_mppi_trajectory_idx_ = -1;
+		last_display_wp_index_ = 0;
 		create_temporary_lidar_obstacle(current_time_ms(),
 		                              robot_pose,
 		                              control_output.blockage_center_room,
@@ -1078,6 +1262,12 @@ void SpecificWorker::execute_plan(const RobotPose &robot_pose)
 	if (control_output.goal_reached)
 	{
 		affordance_manager_.mark_reached(G);
+		last_mppi_trajectories_.clear();
+		last_mppi_average_trajectory_.clear();
+		last_best_mppi_trajectory_idx_ = -1;
+		last_display_wp_index_ = 0;
+		if (viewer_2d_ != nullptr)
+			viewer_2d_->clear_robot_trajectory();
 
 		current_plan_.reset();
 		last_target_info_.reset();
@@ -1094,6 +1284,10 @@ void SpecificWorker::execute_plan(const RobotPose &robot_pose)
 
 	if (!path_controller_.is_active())
 	{
+		last_mppi_trajectories_.clear();
+		last_mppi_average_trajectory_.clear();
+		last_best_mppi_trajectory_idx_ = -1;
+		last_display_wp_index_ = 0;
 		stop_robot();
 		return;
 	}
@@ -1252,6 +1446,16 @@ void SpecificWorker::modify_node_slot(std::uint64_t id, const std::string &type)
 		const std::uint64_t timestamp_ms = ts_it != attrs.end()
 			? static_cast<std::uint64_t>(std::max<std::int64_t>(0, static_cast<std::int64_t>(ts_it->second.uint64())))
 			: 0ULL;
+		if (timestamp_ms > 0 && last_lidar_timestamp_ms_.has_value() && timestamp_ms > last_lidar_timestamp_ms_.value())
+		{
+			const std::uint64_t diff_ms = timestamp_ms - last_lidar_timestamp_ms_.value();
+			if (diff_ms >= 20 && diff_ms <= 500)
+			{
+				const double blended_period_ms = 0.7 * static_cast<double>(lidar_period_ms_)
+				                               + 0.3 * static_cast<double>(diff_ms);
+				lidar_period_ms_ = static_cast<std::uint64_t>(std::clamp(blended_period_ms, 20.0, 500.0));
+			}
+		}
 		last_lidar_timestamp_ms_ = timestamp_ms;
 		const auto interp = params.interpolate_rt ? DSR::RT_API::TimeQuery::Interpolated
 			                                     : DSR::RT_API::TimeQuery::Nearest;

@@ -260,6 +260,9 @@ void Viewer2D::draw_path(const PathDrawData &data)
     clear_path_items();
     clear_polygon_item(inner_polygon_item_);
 
+    const bool showing_mppi_diagnostics = mppi_paths_visible_
+                                       && (!data.candidate_trajectories.empty() || !data.average_trajectory.empty());
+
     if (mppi_paths_visible_ && !data.candidate_trajectories.empty())
     {
         const int total = static_cast<int>(data.candidate_trajectories.size());
@@ -284,6 +287,21 @@ void Viewer2D::draw_path(const PathDrawData &data)
                 line->setZValue(is_best ? 24 : 16);
                 path_draw_items_.push_back(line);
             }
+        }
+    }
+
+    if (mppi_paths_visible_ && data.average_trajectory.size() >= 2)
+    {
+        QPen average_pen(QColor(0, 170, 255, 230), 0.09);
+        average_pen.setCosmetic(false);
+        average_pen.setStyle(Qt::DashLine);
+        for (std::size_t point_index = 0; point_index + 1 < data.average_trajectory.size(); ++point_index)
+        {
+            auto *line = agv_->scene.addLine(data.average_trajectory[point_index].x(), data.average_trajectory[point_index].y(),
+                                             data.average_trajectory[point_index + 1].x(), data.average_trajectory[point_index + 1].y(),
+                                             average_pen);
+            line->setZValue(23);
+            path_draw_items_.push_back(line);
         }
     }
 
@@ -322,9 +340,11 @@ void Viewer2D::draw_path(const PathDrawData &data)
 
     if (!data.obstacle_polys.empty())
     {
-        const QPen obstacle_pen(QColor(120, 73, 32), 0.04);
+        QPen obstacle_pen(QColor(120, 73, 32), 0.085);
+        obstacle_pen.setCosmetic(false);
         const QBrush obstacle_brush(QColor(181, 119, 58, 150));
         const QBrush obstacle_center_brush(QColor(255, 0, 128, 220));
+        const QBrush obstacle_edge_brush(QColor(92, 49, 16, 235));
         for (const auto &obstacle : data.obstacle_polys)
         {
             if (obstacle.size() < 3)
@@ -339,6 +359,25 @@ void Viewer2D::draw_path(const PathDrawData &data)
             polygon->setZValue(18);
             path_draw_items_.push_back(polygon);
 
+            for (std::size_t index = 0; index < obstacle.size(); ++index)
+            {
+                const auto &from = obstacle[index];
+                const auto &to = obstacle[(index + 1) % obstacle.size()];
+                const Eigen::Vector2f segment = to - from;
+                const float length = segment.norm();
+                const int subdivisions = std::max(1, static_cast<int>(std::ceil(length / 0.12f)));
+                for (int sample = 0; sample <= subdivisions; ++sample)
+                {
+                    const float t = static_cast<float>(sample) / static_cast<float>(subdivisions);
+                    const Eigen::Vector2f point = from + t * segment;
+                    auto *dot = agv_->scene.addEllipse(-0.028, -0.028, 0.056, 0.056,
+                                                       Qt::NoPen, obstacle_edge_brush);
+                    dot->setPos(point.x(), point.y());
+                    dot->setZValue(18.5);
+                    path_draw_items_.push_back(dot);
+                }
+            }
+
             QPointF center;
             for (const auto &vertex : obstacle)
                 center += QPointF(vertex.x(), vertex.y());
@@ -350,7 +389,7 @@ void Viewer2D::draw_path(const PathDrawData &data)
         }
     }
 
-    if (data.path.empty())
+    if (showing_mppi_diagnostics || data.path.empty())
         return;
 
     const QPen path_pen(QColor(56, 114, 219), 0.08);

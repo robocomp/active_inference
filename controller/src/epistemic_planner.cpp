@@ -43,7 +43,36 @@ Eigen::Vector2f EpistemicPlanner::VisitGrid::cell_center(int idx) const
 void EpistemicPlanner::VisitGrid::mark_visited(const Eigen::Vector2f& pos)
 {
     if (!initialized) return;
-    cells[to_index(pos)].last_visit = std::chrono::steady_clock::now();
+
+    const auto now = std::chrono::steady_clock::now();
+    const int center_idx = to_index(pos);
+    const int center_col = center_idx % cols;
+    const int center_row = center_idx / cols;
+
+    auto stamp_visit = [&](int col, int row, std::chrono::steady_clock::duration age)
+    {
+        if (col < 0 || col >= cols || row < 0 || row >= rows)
+            return;
+
+        auto &cell = cells[row * cols + col];
+        const auto visit_time = now - age;
+        if (cell.last_visit < visit_time)
+            cell.last_visit = visit_time;
+    };
+
+    stamp_visit(center_col, center_row, std::chrono::steady_clock::duration::zero());
+
+    for (int d_row = -1; d_row <= 1; ++d_row)
+        for (int d_col = -1; d_col <= 1; ++d_col)
+        {
+            if (d_row == 0 && d_col == 0)
+                continue;
+
+            const bool diagonal = d_row != 0 && d_col != 0;
+            stamp_visit(center_col + d_col,
+                        center_row + d_row,
+                        diagonal ? std::chrono::seconds(45) : std::chrono::seconds(30));
+        }
 }
 
 void EpistemicPlanner::VisitGrid::update_fim(const Eigen::Vector2f& pos, float gain, float alpha)

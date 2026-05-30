@@ -38,3 +38,47 @@ Warn.Connections = "0"
 Trace.Network = "0"
 Trace.Protocol = "0"
 MessageSizeMax = "20004800"
+
+[Presence]
+required_agent_names = ["robot_concept", "room_concept"]
+config_dir = "etc"
+monitor_period_ms = 500
+heartbeat_timeout_ms = 3000
+rejoin_grace_ms = 1500
+agent_info_period_ms = 1000
+
+[Owns]
+nodes = ["controller 8"]
+
+[Planner]
+Clearance = 0.4
+GridResolution = 0.35
+ConnectionRadius = 1.2
+
+[Controller]
+WaypointTolerance = 0.25
+MaxAdvSpeed = 0.7
+MaxRotSpeed = 0.8
+PosGain = 1.2
+RotGain = 1.5
+PoseXYStdSlow = 0.03
+PoseXYStdStop = 0.12
+PoseThetaStdSlow = 0.04
+PoseThetaStdStop = 0.20
+MinAdvSpeedScale = 0.15
+MinRotSpeedScale = 0.05
+PosePredictionHorizon = 0.4
+PoseXYStdGrowthPerMps = 0.5
+PoseThetaStdGrowthPerRps = 1.0
+AdvRotationCouplingExponent = 0.5
+TemporaryObstacleHistoryScans = 5
+GoalClearanceRelaxDist = 0.6
+GoalObstacleMargin = 0.08
+GoalClearanceMinRatio = 0.85
+StraightSpeedHeadingThreshold = 0.08
+StraightSpeedClearanceMargin = 0.20
+StraightSpeedMinGoalDist = 1.5
+
+Target.EdgeType = "target"
+Transforms.interpolate_rt = true
+

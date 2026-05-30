@@ -806,19 +806,28 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
     if (straight_clear_segment)
         cmd_adv = std::max(cmd_adv, active_params_.max_adv);
 
-    // 12. Viz: trajectories in room frame (subsample for drawing)
+    // 12. Viz: export top 3 trajectories and the weighted-average homotopy.
     {
         const Eigen::Matrix2f R = robot_pose.linear();
         const Eigen::Vector2f t_pos = robot_pose.translation();
 
-        const int requested_draw = std::max(1, active_params_.num_trajectories_to_draw);
-        const int n_draw = std::min(requested_draw, actual_K);
+        std::vector<int> ranked_indices;
+        ranked_indices.reserve(actual_K);
+        for (int k = 0; k < actual_K; ++k)
+            if (!results[k].collides)
+                ranked_indices.push_back(k);
+        if (ranked_indices.empty())
+            for (int k = 0; k < actual_K; ++k)
+                ranked_indices.push_back(k);
+
+        std::sort(ranked_indices.begin(), ranked_indices.end(),
+                  [&](int lhs, int rhs) { return results[lhs].G_total < results[rhs].G_total; });
+
+        const int n_draw = std::min(3, static_cast<int>(ranked_indices.size()));
         out.trajectories_room.resize(n_draw);
         for (int i = 0; i < n_draw; ++i)
         {
-            int k = (i == 0 && best_idx >= 0) ? best_idx
-                    : (i * actual_K) / std::max(n_draw, 1);
-            k = std::clamp(k, 0, actual_K - 1);
+            const int k = ranked_indices[i];
             auto& tr = out.trajectories_room[i];
             tr.reserve(results[k].positions.size() + 1);
             tr.push_back(t_pos);
@@ -826,6 +835,21 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
                 tr.push_back(R * p + t_pos);
         }
         out.best_trajectory_idx = (n_draw > 0) ? 0 : -1;
+
+        out.average_trajectory_room.clear();
+        out.average_trajectory_room.reserve(optimal.size() + 1);
+        out.average_trajectory_room.push_back(t_pos);
+        float avg_x = 0.f;
+        float avg_y = 0.f;
+        float avg_theta = 0.f;
+        const float dt = active_params_.trajectory_dt;
+        for (const auto &step : optimal)
+        {
+            avg_x += step.adv * std::sin(avg_theta) * dt;
+            avg_y += step.adv * std::cos(avg_theta) * dt;
+            avg_theta += step.rot * dt;
+            out.average_trajectory_room.push_back(R * Eigen::Vector2f(avg_x, avg_y) + t_pos);
+        }
     }
 
     // 13. Smooth + Gaussian brake
@@ -1070,6 +1094,7 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
     static int dbg = 0;
     if (++dbg % std::max(1, active_params_.debug_print_period) == 0)
     {
+        const SimResult *best_result = (best_idx >= 0 && best_idx < actual_K) ? &results[best_idx] : nullptr;
         std::cout << "[MPPI] K=" << adaptive_K_ << " T=" << adaptive_T_
                   << " ESS=" << std::setprecision(0) << ess_smooth_ << "/" << adaptive_K_
                   << " ncol=" << num_collisions << "/" << actual_K
@@ -1078,6 +1103,13 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
                   << " cmd(" << std::setprecision(2) << out.adv << "," << out.rot << ")"
                   << " dist=" << std::setprecision(1) << out.dist_to_goal
                   << " esdf=" << out.min_esdf
+                  << " best=" << best_idx
+                  << " G(goal/obs/lat/cbf/vel)="
+                  << (best_result ? best_result->G_goal : 0.f) << "/"
+                  << (best_result ? best_result->G_obs : 0.f) << "/"
+                  << (best_result ? best_result->G_lat : 0.f) << "/"
+                  << (best_result ? best_result->G_cbf : 0.f) << "/"
+                  << (best_result ? best_result->G_vel : 0.f)
                   << " mppi_ms=" << std::setprecision(1) << last_mppi_ms_
                   << "\n";
     }
@@ -1447,14 +1479,24 @@ TrajectoryController::SimResult TrajectoryController::simulate_and_score(
 
             float d_right_min = std::numeric_limits<float>::infinity();
             float d_left_min = std::numeric_limits<float>::infinity();
+            float front_right_min = std::numeric_limits<float>::infinity();
+            float front_left_min = std::numeric_limits<float>::infinity();
             for (const float longitudinal_offset : longitudinal_offsets)
             {
                 const Eigen::Vector2f station = Eigen::Vector2f(x, y) + longitudinal_offset * forward;
                 const Eigen::Vector2f right_probe = station + probe_offset * right;
                 const Eigen::Vector2f left_probe  = station - probe_offset * right;
 
-                d_right_min = std::min(d_right_min, query_esdf(right_probe.x(), right_probe.y()));
-                d_left_min = std::min(d_left_min, query_esdf(left_probe.x(), left_probe.y()));
+                const float d_right = query_esdf(right_probe.x(), right_probe.y());
+                const float d_left = query_esdf(left_probe.x(), left_probe.y());
+                d_right_min = std::min(d_right_min, d_right);
+                d_left_min = std::min(d_left_min, d_left);
+
+                if (longitudinal_offset > 0.f)
+                {
+                    front_right_min = std::min(front_right_min, d_right);
+                    front_left_min = std::min(front_left_min, d_left);
+                }
             }
 
             const float side_min = std::min(d_left_min, d_right_min);
@@ -1468,6 +1510,25 @@ TrajectoryController::SimResult TrajectoryController::simulate_and_score(
             {
                 const float deficit = (side_target - side_min) / side_span;
                 G_lat_step += active_params_.lambda_lateral_clearance * deficit * deficit;
+            }
+
+            const float bumper_target = active_params_.robot_radius
+                                      + std::max(0.f, active_params_.lateral_bumper_margin);
+            const float bumper_span = std::max(active_params_.lateral_bumper_margin, 1e-3f);
+            if (side_min < bumper_target)
+            {
+                const float bumper_deficit = (bumper_target - side_min) / bumper_span;
+                G_lat_step += active_params_.lambda_lateral_bumper
+                            * bumper_deficit * bumper_deficit * bumper_deficit;
+            }
+
+            const float front_corner_min = std::min(front_left_min, front_right_min);
+            if (std::isfinite(front_corner_min) && front_corner_min < bumper_target)
+            {
+                const float front_deficit = (bumper_target - front_corner_min) / bumper_span;
+                G_lat_step += active_params_.lambda_lateral_bumper
+                            * std::max(0.f, active_params_.lateral_corner_bias_gain)
+                            * front_deficit * front_deficit;
             }
 
             const float imbalance = std::abs(d_left_min - d_right_min);
@@ -1609,9 +1670,14 @@ TrajectoryController::SimResult TrajectoryController::simulate_and_score(
         G_info *= adaptive_lambda_;  // λ temperature
     }
 
-    res.G_total = G_goal + G_obs_total + G_lat_total + G_cbf_total + G_smooth + G_vel_mag + G_vel_delta + G_info
-                + active_params_.lambda_goal * G_progress
-                + (res.collides ? active_params_.collision_penalty : 0.f);
+    res.G_goal = G_goal + active_params_.lambda_goal * G_progress;
+    res.G_obs = G_obs_total + (res.collides ? active_params_.collision_penalty : 0.f);
+    res.G_lat = G_lat_total;
+    res.G_cbf = G_cbf_total;
+    res.G_smooth = G_smooth;
+    res.G_vel = G_vel_mag + G_vel_delta;
+    res.G_info = G_info;
+    res.G_total = res.G_goal + res.G_obs + res.G_lat + res.G_cbf + res.G_smooth + res.G_vel + res.G_info;
     return res;
 }
 

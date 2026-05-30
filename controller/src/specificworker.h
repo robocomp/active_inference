@@ -36,11 +36,13 @@
 #include <vector>
 
 #include "room_path_planner.h"
-#include "../../common/affordance_manager.h"
+#include "../../common/affordance_manager/affordance_manager.h"
 #include "trajectory_controller.h"
 #include "viewer_2d.h"
+#include "../../common/agent_presence_monitor/agent_presence_monitor.h"
 
 class Custom_widget;
+class FPSCounter;
 
 /**
  * \brief Class SpecificWorker implements the core functionality of the component.
@@ -101,6 +103,10 @@ private:
 	using Polygon = std::vector<Eigen::Vector2f>;
 	using Polygons = std::vector<Polygon>;
 	using PathPlan = RoomPathPlanner::PathPlan;
+	static constexpr const char *kRobotRefAdvSpeedAttr = "robot_ref_adv_speed";
+	static constexpr const char *kRobotRefRotSpeedAttr = "robot_ref_rot_speed";
+	static constexpr const char *kRobotRefSideSpeedAttr = "robot_ref_side_speed";
+	static constexpr const char *kRobotRefSpeedTimestampAttr = "robot_ref_speed_timestamp";
 
 	struct Params
 	{
@@ -131,6 +137,7 @@ private:
 		float temporary_obstacle_cluster_margin_m = 0.35f;
 		float temporary_obstacle_padding_m = 0.18f;
 		int temporary_obstacle_min_points = 12;
+		int temporary_obstacle_history_scans = 5;
 		std::uint64_t temporary_obstacle_ttl_ms = 3000;
 		float goal_clearance_relax_dist_m = 0.6f;
 		float goal_obstacle_margin_m = 0.08f;
@@ -198,7 +205,7 @@ private:
 	std::vector<Eigen::Vector2f> room_polygon_;
 	std::vector<Eigen::Vector2f> inner_polygon_;
 	Polygons obstacle_polygons_;
-	rc::LidarPointBuffer lidar_room_buffer_{3};
+	rc::LidarPointBuffer lidar_room_buffer_{5};
 	std::optional<PathPlan> current_plan_;
 	std::optional<Eigen::Vector2f> current_target_room_;
 	std::optional<Eigen::Vector2f> manual_target_room_;
@@ -206,7 +213,9 @@ private:
 	std::optional<TargetInfo> last_target_info_;
 	rc::AffordanceManager affordance_manager_;
 	std::vector<Polygon> last_mppi_trajectories_;
+	Polygon last_mppi_average_trajectory_;
 	int last_best_mppi_trajectory_idx_ = -1;
+	int last_display_wp_index_ = 0;
 	bool path_following_active_ = false;
 	bool stop_sent_when_paused_ = false;
 	bool stop_command_latched_ = false;
@@ -219,6 +228,7 @@ private:
 	bool target_wait_logged_ = false;
 	bool compute_debug_logged_ = false;
 	mutable std::optional<std::uint64_t> last_lidar_timestamp_ms_;
+	mutable std::uint64_t lidar_period_ms_ = 100;
 	mutable std::string obstacle_debug_report_;
 	std::optional<Polygon> temporary_obstacle_polygon_;
 	std::uint64_t temporary_obstacle_expires_at_ms_ = 0;
@@ -236,8 +246,16 @@ private:
 	bool refresh_graph_state();
 	void update_custom_widget(const std::optional<RobotPose> &robot_pose);
 	static bool same_target_instance(const TargetInfo &lhs, const TargetInfo &rhs);
+	static float cross2d(const Eigen::Vector2f &origin, const Eigen::Vector2f &a, const Eigen::Vector2f &b);
+	static Polygon convex_hull(Polygon points);
+	static Polygon inflate_convex_polygon(const Polygon &polygon, float padding_m);
+	static void log_compute_perf(FPSCounter &counter);
+	static float ramp_uncertainty_scale(float value, float slow_threshold, float stop_threshold, float min_scale);
+	static float preserve_sign_clamp(float value, float max_abs);
 	std::optional<std::vector<Eigen::Vector2f>> read_room_polygon() const;
 	Polygons read_obstacle_polygons(std::uint64_t timestamp_ms) const;
+	std::vector<Eigen::Vector3f> read_recent_lidar_points_in_room(std::uint64_t timestamp_ms,
+	                                                           int max_scans);
 	void update_active_obstacle_polygons(std::uint64_t timestamp_ms);
 	bool create_temporary_lidar_obstacle(std::uint64_t timestamp_ms,
 	                                   const RobotPose &robot_pose,
@@ -258,8 +276,23 @@ private:
 	void send_speed_command(float adv_mps, float side_mps, float rot_rps);
 	void stop_robot();
 
+        // State machine
+        void waiting_enter();
+        void waiting_loop();
+        void operating_enter();
+        void operating_loop();
+        void degraded_enter();
+        void degraded_loop();
+
+        void cleanup_owned_nodes();
+        void on_optional_peer_lost(const std::string &name, std::uint32_t id);
+        void on_optional_peer_ready(const std::string &name, std::uint32_t id);
+
+        std::unique_ptr<AgentPresenceMonitor> presence_monitor;
+
 signals:
-	//void customSignal();
+        void presenceReady();
+        void presenceLost();
 };
 
 #endif

@@ -34,6 +34,7 @@ class Viewer2D : public QObject
         std::vector<Eigen::Vector2f> graph_nodes;
         std::vector<std::vector<Eigen::Vector2f>> obstacle_polys;
         std::vector<std::vector<Eigen::Vector2f>> candidate_trajectories;
+        std::vector<Eigen::Vector2f> average_trajectory;
         int best_trajectory_idx = -1;
     };
 
@@ -54,6 +55,7 @@ class Viewer2D : public QObject
     void draw_lidar_points_from_buffer(int max_points);
     void draw_path(const PathDrawData &data);
     void clear_path_items();
+    void clear_robot_trajectory();
     void update_target_marker(float x, float y, bool visible);
 
 Q_SIGNALS:
@@ -75,7 +77,6 @@ private:
 
     void clear_polygon_item(QGraphicsPolygonItem *&item);
     void clear_lidar_items();
-    void clear_robot_trajectory();
 };
 
 } // namespace rc

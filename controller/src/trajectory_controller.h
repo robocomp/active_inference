@@ -125,6 +125,9 @@ public:
         float lateral_probe_rear_offset = 0.18f;    // rear longitudinal probe station
         float lateral_clearance_margin = 0.25;     // desired extra side clearance over robot radius
         float lateral_balance_gain = 1.5f;          // penalize left-right side imbalance while passing obstacles
+        float lateral_bumper_margin = 0.14f;        // hard side repulsion band over robot radius
+        float lambda_lateral_bumper = 18.0f;        // hard penalty inside side repulsion band
+        float lateral_corner_bias_gain = 2.5f;      // emphasize front-side grazing near corners
         float lateral_closing_gain = 0.0f;          // extra penalty when side clearance is decreasing
                                                     // (disabled: replaced by CBF term below)
 
@@ -271,6 +274,7 @@ public:
 
         // All candidate trajectories in room frame (fresh every tick)
         std::vector<std::vector<Eigen::Vector2f>> trajectories_room;
+        std::vector<Eigen::Vector2f> average_trajectory_room;
         int best_trajectory_idx = -1;
 
         // Path blockage detection output
@@ -384,6 +388,13 @@ private:
     {
         std::vector<Eigen::Vector2f> positions;
         float G_total = 0.f;
+        float G_goal = 0.f;
+        float G_obs = 0.f;
+        float G_lat = 0.f;
+        float G_cbf = 0.f;
+        float G_smooth = 0.f;
+        float G_vel = 0.f;
+        float G_info = 0.f;
         float min_esdf = 1e9f;
         bool  collides = false;
     };

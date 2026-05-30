@@ -46,6 +46,7 @@ Controller.PosePredictionHorizon = 0.4
 Controller.PoseXYStdGrowthPerMps = 0.5
 Controller.PoseThetaStdGrowthPerRps = 1.0
 Controller.AdvRotationCouplingExponent = 0.5
+Controller.TemporaryObstacleHistoryScans = 5
 Controller.GoalClearanceRelaxDist = 0.6
 Controller.GoalObstacleMargin = 0.08
 Controller.GoalClearanceMinRatio = 0.85
