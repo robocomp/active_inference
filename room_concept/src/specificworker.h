@@ -176,10 +176,11 @@ class SpecificWorker : public GenericWorker
         uint64_t dsr_world_id_ = 0;
         uint64_t dsr_room_id_  = 0;
         bool     room_node_created_ = false;
-        rc::AffordanceManager affordance_manager_{"room_concept_affordance"};
+        rc::AffordanceManager affordance_manager_{"afford"};
         int      stable_frames_     = 0;
         std::int64_t last_dsr_published_ts_ms_ = 0;
         void check_init_graph_is_valid();
+        void cleanup_room_graph_nodes();    // delete "affordance" nodes hanging from room via "has" edges
         void load_robot_body_dimensions_from_graph();
         void update_dsr(const rc::RoomConcept::UpdateResult& res);
         void dsr_update_pose(const rc::RoomConcept::UpdateResult& res);

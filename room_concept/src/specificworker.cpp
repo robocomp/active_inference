@@ -89,6 +89,8 @@ void SpecificWorker::initialize()
 
     QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
                      this, &SpecificWorker::save_robot_pose_once, Qt::UniqueConnection);
+    QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
+                     this, &SpecificWorker::cleanup_room_graph_nodes, Qt::UniqueConnection);
 
     // ── RoomConcept params ─────────────────────────────────────────────────
     rc::ConfigLoaderUtils::load_required<bool>(configLoader, "RoomConcept.PredictionEarlyExit", params.PREDICTION_EARLY_EXIT);
@@ -283,58 +285,7 @@ void SpecificWorker::initialize()
 
     // Ensure a clean startup: if a stale room node exists from previous runs,
     // remove it so the room is recreated only after localization is stable.
-    if (G)
-    {
-        const auto room_nodes = G->get_nodes_by_type("room");
-        if (!room_nodes.empty())
-        {
-            for (const auto& room_node : room_nodes)
-            {
-                std::vector<uint64_t> descendants;
-                std::vector<uint64_t> pending{room_node.id()};
-                std::unordered_set<uint64_t> visited{room_node.id()};
-
-                // Collect all nodes hanging from this room through outgoing edges.
-                while (!pending.empty())
-                {
-                    const uint64_t from_id = pending.back();
-                    pending.pop_back();
-
-                    const auto edges_opt = G->get_edges(from_id);
-                    if (!edges_opt.has_value())
-                        continue;
-
-                    for (const auto& [key, edge] : edges_opt.value())
-                    {
-                        (void)key;
-                        const uint64_t child_id = edge.to();
-                        if (child_id == dsr_world_id_ || child_id == dsr_robot_id_)
-                            continue;
-                        if (visited.insert(child_id).second)
-                        {
-                            pending.push_back(child_id);
-                            descendants.push_back(child_id);
-                        }
-                    }
-                }
-
-                // Delete leaves first to avoid dependency/order issues.
-                for (auto it = descendants.rbegin(); it != descendants.rend(); ++it)
-                {
-                    const uint64_t child_id = *it;
-                    if (!G->get_node(child_id).has_value())
-                        continue;
-                    G->delete_node(child_id);
-                }
-
-                G->delete_node(room_node);
-            }
-        }
-        room_node_created_ = false;
-        dsr_room_id_ = 0;
-        affordance_manager_.reset();
-        stable_frames_ = 0;
-    }
+    cleanup_room_graph_nodes();
 
     // RT_API
     rt_api = G->get_rt_api();
@@ -813,6 +764,27 @@ void SpecificWorker::load_robot_body_dimensions_from_graph()
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+void SpecificWorker::cleanup_room_graph_nodes()
+{
+    if (!G) return;
+    // Delete affordance nodes hanging from room via "has_intention" edges,
+    // then delete the room nodes themselves.
+    for (const auto& room_node : G->get_nodes_by_type("room"))
+    {
+        for (const auto& edge : G->get_node_edges_by_type(room_node, "has_intention"))
+            if (G->get_node(edge.to()).has_value())
+                G->delete_node(edge.to());
+        G->delete_node(room_node);
+    }
+    // Fallback: delete the affordance node by its known name in case it is orphaned.
+    if (auto n = G->get_node("afford"); n.has_value())
+        G->delete_node(n.value());
+    room_node_created_ = false;
+    dsr_room_id_ = 0;
+    affordance_manager_.reset();
+    stable_frames_ = 0;
+}
+
 void SpecificWorker::check_init_graph_is_valid()
 {
     if (!G) { qCWarning(logGraph) << "dsr_init_graph: DSR graph not available"; return; }
@@ -1100,6 +1072,10 @@ void SpecificWorker::waiting_loop()
 void SpecificWorker::operating_enter()
 {
     std::cout << "[SM] -> Operating: all required constraints satisfied" << std::endl;
+    // Restart the localization engine to flush stale RFE slots / lidar buffers
+    // from any previous session before accepting fresh DSR data.
+    room_concept_.stop();
+    room_concept_.start();
     if (presence_monitor)
         presence_monitor->set_local_ready(true);
 }
@@ -1111,9 +1087,16 @@ void SpecificWorker::operating_loop()
 
 void SpecificWorker::degraded_enter()
 {
-    std::cout << "[SM] -> Degraded: a required peer or node is no longer available" << std::endl;
+    std::cout << "[SM] -> Degraded: required peer lost. Cleaning up and exiting." << std::endl;
+    room_concept_.stop();
     if (presence_monitor)
         presence_monitor->set_local_ready(false);
+    // Remove all room-related nodes so the graph is clean before we exit.
+    cleanup_room_graph_nodes();
+    // Self-terminate: room_concept has no purpose without its required peers.
+    // A short delay lets the DSR node deletions propagate before the RTPS
+    // connection is torn down.
+    QTimer::singleShot(500, QCoreApplication::instance(), SLOT(quit()));
 }
 
 void SpecificWorker::degraded_loop()
