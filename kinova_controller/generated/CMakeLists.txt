@@ -5,13 +5,16 @@ if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 11)
     message(FATAL_ERROR "Version of g++ is lower than 11, g++ 11 or higher is required.")
 elseif(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 12)
     message(STATUS "Using g++ 11, setting C++20 standard.")
-    set(CXX_STANDARD 20)
+    set(CMAKE_CXX_STANDARD 20)
 elseif(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 13)
     message(STATUS "Using g++ 12, setting C++23 standard.")
-    set(CXX_STANDARD 23)
-else()
+    set(CMAKE_CXX_STANDARD 23)
+elseif(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 15)
     message(STATUS "Using g++ 13 or higher, setting the C++23 standard.")
-    set(CXX_STANDARD 23)
+    set(CMAKE_CXX_STANDARD 23)
+else()
+    message(STATUS "Using g++ 15 or higher, setting the C++26 standard.")
+    set(CMAKE_CXX_STANDARD 26)
 endif()
 
 
@@ -30,7 +33,6 @@ FIND_PACKAGE( Ice REQUIRED COMPONENTS Ice++11 IceStorm++11)
 # Sources set
 SET (SOURCES
   ${SOURCES}
-  ../src/arm_belief_viewer_3d.cpp
   $ENV{ROBOCOMP}/classes/rapplication/rapplication.cpp
   $ENV{ROBOCOMP}/classes/sigwatch/sigwatch.cpp
   $ENV{ROBOCOMP}/classes/grafcetStep/GRAFCETStep.cpp
@@ -42,19 +44,11 @@ SET (SOURCES
 
 #ROBOCOMP
 ROBOCOMP_INITIALIZE( $ENV{ROBOCOMP}/ )
-ROBOCOMP_IDSL_TO_ICE(KinovaArm)
-ROBOCOMP_ICE_TO_SRC(KinovaArm)
+ROBOCOMP_IDSL_TO_ICE(Webots2Robocomp Gridder KinovaArm)
+ROBOCOMP_ICE_TO_SRC(Webots2Robocomp Gridder KinovaArm)
 SET (EXECUTABLE_OUTPUT_PATH ${RC_COMPONENT_DEVEL_PATH}/bin)
 
 # Specify construction and link process
 ADD_EXECUTABLE( kinova_controller ${SOURCES} ${MOC_SOURCES} ${RC_SOURCES} ${UI_HEADERS} )
-TARGET_LINK_LIBRARIES( kinova_controller ${LIBS}  dsr_core dsr_gui dsr_api fastcdr fastdds osgDB OpenThreads Eigen3::Eigen QGLViewer-qt6 Qt6OpenGLWidgets ${STATIC_LIBS} ${SPECIFIC_LIBS} ${QT_LIBRARIES} ${Ice_LIBRARIES} )
-SET_TARGET_PROPERTIES(kinova_controller
-        PROPERTIES
-        CXX_STANDARD ${CXX_STANDARD}
-        CXX_STANDARD_REQUIRED ON
-        CXX_EXTENSIONS OFF
-        )
-
-
+TARGET_LINK_LIBRARIES( kinova_controller ${LIBS}  dsr_core dsr_gui dsr_api fastcdr fastdds OpenThreads Eigen3::Eigen QGLViewer-qt6 Qt6OpenGLWidgets ${STATIC_LIBS} ${SPECIFIC_LIBS} ${QT_LIBRARIES} ${Ice_LIBRARIES} )
 INSTALL(FILES ${EXECUTABLE_OUTPUT_PATH}/kinova_controller DESTINATION ${RC_COMPONENT_INSTALL_PATH}/bin/ PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE )

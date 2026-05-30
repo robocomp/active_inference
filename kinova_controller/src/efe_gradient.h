@@ -49,6 +49,18 @@ struct EFEParams
      *  table surface). */
     Eigen::Vector3d desired_approach{0.0, 0.0, -1.0};
 
+    /** α_x — gain on the secondary axis alignment cost 1 − x_tool · x_des.
+     *  Pinning a second tool axis fixes the roll about the approach axis,
+     *  which the single-axis term in C_orient cannot constrain. Default 0
+     *  preserves the previous behaviour (top-down grasps with free roll). */
+    double gain_secondary = 0.0;
+
+    /** Target for the tool's local +X axis (the Robotiq 2F-85 open/close
+     *  direction on this chain). For a side grasp of an upright object,
+     *  set this to the object's vertical axis expressed in world frame
+     *  so the fingers wrap around it. */
+    Eigen::Vector3d desired_secondary{1.0, 0.0, 0.0};
+
     /** Cap per-joint |q̇| (rad/s). Webots proto maxVelocity = 0.8727 rad/s;
      *  bridge homing uses 0.8 safely. Setting to 0.8 here matches that and
      *  roughly halves convergence time vs 0.5 (joints were already saturated). */

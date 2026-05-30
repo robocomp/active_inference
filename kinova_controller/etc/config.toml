@@ -1,6 +1,7 @@
 [Proxies]
 # Proxies for required interfaces
-KinovaArm = "kinovaarm:tcp -h localhost -p 10005"
+KinovaArm = "kinovaarm:tcp -h localhost -p 15005"
+Webots2Robocomp = "webots2robocomp:tcp -h localhost -p 15010"
 
 # --- Common Agent Data ---
 [Agent]
@@ -31,7 +32,7 @@ Compute = 20
 Emergency = 500
 
 [Component.Debug]
-Verbose = true
+Verbose = false
 
 [Ice]
 Warn.Connections = "0"

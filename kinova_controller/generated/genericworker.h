@@ -30,17 +30,19 @@
 #include <QtCore>
 #include <variant>
 #include <unordered_map>
+#include <fps/fps.h>
 
 #include "dsr/api/dsr_api.h"
 #include "dsr/gui/dsr_gui.h"
-#include <doublebuffer/DoubleBuffer.h>
 #include <memory>
 
+#include <Gridder.h>
 #include <KinovaArm.h>
+#include <Webots2Robocomp.h>
 
 #define BASIC_PERIOD 100
 
-using TuplePrx = std::tuple<RoboCompKinovaArm::KinovaArmPrxPtr>;
+using TuplePrx = std::tuple<RoboCompKinovaArm::KinovaArmPrxPtr,RoboCompWebots2Robocomp::Webots2RobocompPrxPtr>;
 
 
 class GenericWorker : public QObject
@@ -60,11 +62,13 @@ public:
 
 
 	RoboCompKinovaArm::KinovaArmPrxPtr kinovaarm_proxy;
+	RoboCompWebots2Robocomp::Webots2RobocompPrxPtr webots2robocomp_proxy;
 
 
 protected:
 	std::unordered_map<std::string, std::unique_ptr<GRAFCETStep>> states;
 	ConfigLoader configLoader;
+	FPSCounter fps;
 	//DSR params
 	std::string agent_name;
 	int agent_id;

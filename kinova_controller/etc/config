@@ -1,5 +1,6 @@
 # Proxies for required interfaces
 Proxies.KinovaArm = "kinovaarm:tcp -h localhost -p 0"
+Proxies.Webots2Robocomp = "webots2robocomp:tcp -h localhost -p 15010"
 
 
 # --- Common Agent Data ---

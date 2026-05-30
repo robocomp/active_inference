@@ -78,7 +78,9 @@
 #include "../src/specificworker.h"
 
 
+#include <Gridder.h>
 #include <KinovaArm.h>
+#include <Webots2Robocomp.h>
 
 #define USE_QTGUI
 
@@ -170,13 +172,16 @@ int kinova_controller::run(int argc, char* argv[])
 	int status=EXIT_SUCCESS;
 
 	RoboCompKinovaArm::KinovaArmPrxPtr kinovaarm_proxy;
+	RoboCompWebots2Robocomp::Webots2RobocompPrxPtr webots2robocomp_proxy;
 
 
 	//Require code
 	require<RoboCompKinovaArm::KinovaArmPrx, RoboCompKinovaArm::KinovaArmPrxPtr>(communicator(),
 	                    configLoader.get<std::string>("Proxies.KinovaArm"), "KinovaArmProxy", kinovaarm_proxy);
+	require<RoboCompWebots2Robocomp::Webots2RobocompPrx, RoboCompWebots2Robocomp::Webots2RobocompPrxPtr>(communicator(),
+	                    configLoader.get<std::string>("Proxies.Webots2Robocomp"), "Webots2RobocompProxy", webots2robocomp_proxy);
 
-	tprx = std::make_tuple(kinovaarm_proxy);
+	tprx = std::make_tuple(kinovaarm_proxy,webots2robocomp_proxy);
 	SpecificWorker *worker = new SpecificWorker(this->configLoader, tprx, startup_check_flag);
 	QObject::connect(worker, SIGNAL(kill()), &a, SLOT(quit()));
 

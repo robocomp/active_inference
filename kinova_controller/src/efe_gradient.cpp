@@ -65,6 +65,17 @@ std::array<double, Kinematics::N_ARM_JOINTS> efe_gradient_step(
         q_dot += params.gain_orient * J_ang.transpose() * cross;
     }
 
+    // 3b. Secondary-axis alignment for roll control (tool +X ↔ x_des).
+    //     Same form as the z-axis cost — the cross-product is the gradient
+    //     of (1 − x_tool · x_des). Lets us pin the gripper's open axis to,
+    //     e.g., the bottle's vertical axis for a side grasp.
+    if (params.gain_secondary > 0.0)
+    {
+        const Eigen::Vector3d x_tool = pose.rotation.col(0);
+        const Eigen::Vector3d cross  = x_tool.cross(params.desired_secondary);
+        q_dot += params.gain_secondary * J_ang.transpose() * cross;
+    }
+
     // 4. Uniform global scaling to respect velocity limits while preserving the
     //    gradient DIRECTION (ratio of position vs orientation contributions).
     //

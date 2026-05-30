@@ -23,10 +23,6 @@
 #include <random>
 #include <stdexcept>
 
-// The generated cbuild target is not materializing this source as a standalone
-// object, so compile it once here to keep the viewer implementation linked.
-#include "arm_belief_viewer_3d.cpp"
-
 namespace
 {
     // Hardcoded for the first sanity test.  Move to etc/config once we have
@@ -124,6 +120,14 @@ void SpecificWorker::initialize()
     if (graph_viewers.contains(""))
         graph_viewers.at("")->add_custom_widget_to_dock("beliefs_3d", arm_belief_viewer_.get());
 
+    // Mirror the viewer's checkable Start button: checked → arm EFE engages,
+    // unchecked → arm returns to rest and parks.
+    connect(arm_belief_viewer_.get(), &ArmBeliefViewer3D::run_state_changed,
+            this, [this](bool running) {
+                run_requested_ = running;
+                std::print("[ui] Run requested = {}\n", running);
+            });
+
     //initializeCODE
     /////////GET PARAMS, OPEND DEVICES....////////
     //int period = configLoader.get<int>("Period.Compute") //NOTE: If you want get period of compute use getPeriod("compute")
@@ -146,25 +150,172 @@ void SpecificWorker::initialize()
         throw;
     }
 
-    // Pre-compute FK at the rest pose so the cycle test knows where "home" is
-    // in task space without calling FK every return-checking cycle.
-    rest_pose_ee_ = kinematics_->forward_kinematics(rest_pose_angles_);
-    std::print("[init] rest_pose_ee = [{:+.4f}, {:+.4f}, {:+.4f}] m\n",
-               rest_pose_ee_.x(), rest_pose_ee_.y(), rest_pose_ee_.z());
-
-    // First target is random; subsequent ones are picked at the end of each
-    // return leg.
-    reach_target_ = pick_random_table_target();
-    std::print("[cycle 0/{} ] first target = [{:+.3f}, {:+.3f}, {:+.3f}]\n",
-               CYCLES_MAX, reach_target_.x(), reach_target_.y(), reach_target_.z());
+    // DSR sub-APIs for the bottle-approach loop.
+    if (G)
+    {
+        rt_api_          = G->get_rt_api();
+        inner_eigen_api_ = G->get_inner_eigen_api();
+    }
+    else
+    {
+        std::print(stderr, "[init] WARNING: DSR graph G is null — bottle-approach disabled.\n");
+    }
 }
 
 
-Eigen::Vector3d SpecificWorker::pick_random_table_target()
+void SpecificWorker::update_bottle_pose_in_dsr()
 {
-    std::uniform_real_distribution<double> dx(TGT_X_MIN, TGT_X_MAX);
-    std::uniform_real_distribution<double> dy(TGT_Y_MIN, TGT_Y_MAX);
-    return {dx(rng_), dy(rng_), TGT_Z};
+    if (not G or not rt_api_) return;
+
+    RoboCompWebots2Robocomp::ObjectPose bottle_w_pose;
+    RoboCompWebots2Robocomp::ObjectPose table_w_pose;
+    try
+    {
+        bottle_w_pose = webots2robocomp_proxy->getObjectPose(WEBOTS_BOTTLE_DEF);
+        table_w_pose  = webots2robocomp_proxy->getObjectPose(WEBOTS_TABLE_DEF);
+        webots_proxy_unreachable_warned_ = false;
+    }
+    catch (const Ice::Exception& e)
+    {
+        if (not webots_proxy_unreachable_warned_)
+        {
+            std::print(stderr, "[bottle] Webots2Robocomp proxy unreachable: {}\n", e.what());
+            webots_proxy_unreachable_warned_ = true;
+        }
+        return;
+    }
+
+    // Webots returns mm; DSR stores metres. Both axes are Z-up.
+    const Eigen::Vector3d bottle_w(bottle_w_pose.position.x / 1000.0,
+                                   bottle_w_pose.position.y / 1000.0,
+                                   bottle_w_pose.position.z / 1000.0);
+    const Eigen::Vector3d table_w (table_w_pose.position.x  / 1000.0,
+                                   table_w_pose.position.y  / 1000.0,
+                                   table_w_pose.position.z  / 1000.0);
+
+    const Eigen::Quaterniond q_table_w(table_w_pose.orientation.w,
+                                       table_w_pose.orientation.x,
+                                       table_w_pose.orientation.y,
+                                       table_w_pose.orientation.z);
+    const Eigen::Quaterniond q_bottle_w(bottle_w_pose.orientation.w,
+                                        bottle_w_pose.orientation.x,
+                                        bottle_w_pose.orientation.y,
+                                        bottle_w_pose.orientation.z);
+    const Eigen::Quaterniond q_table_inv = q_table_w.conjugate();
+    const Eigen::Vector3d    bottle_in_table = q_table_inv * (bottle_w - table_w);
+    const Eigen::Vector3d    euler_bt =
+        (q_table_inv * q_bottle_w).toRotationMatrix().eulerAngles(0, 1, 2);
+
+    auto table_node = G->get_node("table");
+    auto bottle_node = G->get_node("bottle");
+    if (not table_node.has_value() or not bottle_node.has_value()) return;
+
+    rt_api_->insert_or_assign_edge_RT(
+        table_node.value(), bottle_node.value().id(),
+        std::vector<float>{static_cast<float>(bottle_in_table.x()),
+                           static_cast<float>(bottle_in_table.y()),
+                           static_cast<float>(bottle_in_table.z())},
+        std::vector<float>{static_cast<float>(euler_bt.x()),
+                           static_cast<float>(euler_bt.y()),
+                           static_cast<float>(euler_bt.z())});
+}
+
+
+std::optional<SpecificWorker::SideGraspTarget>
+SpecificWorker::compute_side_grasp_target()
+{
+    if (not inner_eigen_api_) return std::nullopt;
+
+    // Full 4×4 robot ← bottle transform; the 3×3 rotation block is what we
+    // need to read the bottle's local axes in robot coordinates.
+    auto rt_opt = inner_eigen_api_->get_transformation_matrix("robot", "bottle");
+    if (not rt_opt.has_value()) return std::nullopt;
+    const auto& T_RB = rt_opt.value();   // Eigen::Isometry3d
+    const Eigen::Vector3d bottle_pos_R = T_RB.translation();
+    const Eigen::Vector3d z_bot_R      = T_RB.linear().col(2).normalized();
+
+    // Radial approach direction in the horizontal plane (robot frame).
+    // Reject the radial onto the plane ⟂ z_bot_R so the gripper stays
+    // perpendicular to the bottle's long axis even when the bottle is tilted.
+    const Eigen::Vector3d radial_xy(bottle_pos_R.x(), bottle_pos_R.y(), 0.0);
+    if (radial_xy.norm() < 1e-4) return std::nullopt;  // bottle on robot's z-axis: ambiguous
+
+    Eigen::Vector3d z_tool_des = radial_xy.normalized();
+    z_tool_des -= (z_tool_des.dot(z_bot_R)) * z_bot_R;  // project ⟂ bottle z
+    if (z_tool_des.norm() < 1e-4) return std::nullopt;
+    z_tool_des.normalize();
+
+    // Aim at the bottle's body, not its base. The WaterBottle PROTO origin is
+    // bottom-centre, so without this offset the EE drives the wrist down to
+    // table level and the arm folds onto the desk.
+    double bottle_height_m = 0.22;
+    if (auto bottle_node = G->get_node("bottle"); bottle_node.has_value())
+        if (auto h = G->get_attrib_by_name<height_m_att>(bottle_node.value()); h.has_value())
+            bottle_height_m = h.value();
+    const Eigen::Vector3d body_centre =
+        bottle_pos_R + z_bot_R * (bottle_height_m * BOTTLE_GRASP_HEIGHT_FRAC);
+
+    SideGraspTarget out;
+    out.x_tool_des    = z_bot_R;                                   // fingers wrap vertically
+    out.z_tool_des    = z_tool_des;                                // approach axis
+    out.stand_off_pos = body_centre - z_tool_des * APPROACH_STANDOFF_M;
+    return out;
+}
+
+
+
+void SpecificWorker::update_viewer_scene_objects()
+{
+    if (not arm_belief_viewer_ or not G or not inner_eigen_api_) return;
+
+    // Table size lives on the table node (width_m, depth_m, height_m).
+    auto table_node = G->get_node("table");
+    if (not table_node.has_value()) return;
+    const auto w_opt = G->get_attrib_by_name<width_m_att>(table_node.value());
+    const auto d_opt = G->get_attrib_by_name<depth_m_att>(table_node.value());
+    const auto h_opt = G->get_attrib_by_name<height_m_att>(table_node.value());
+    if (not w_opt.has_value() or not d_opt.has_value() or not h_opt.has_value()) return;
+    const double hw = w_opt.value() * 0.5;
+    const double hd = d_opt.value() * 0.5;
+    const double h  = h_opt.value();
+
+    // Box corners in the table frame. The table origin is bottom-center
+    // (matches Webots/PROTO convention and the DSR robot→table = [0,0,-0.7]
+    // translation, which places the table FLOOR 0.7 m below the arm base so
+    // the table TOP at +h coincides with the arm base at robot z = 0).
+    // Order: bottom CCW (0..3), then top CCW (4..7).
+    const std::array<Eigen::Vector3d, 8> corners_in_table{{
+        {-hw, -hd, 0}, {+hw, -hd, 0}, {+hw, +hd, 0}, {-hw, +hd, 0},
+        {-hw, -hd, h}, {+hw, -hd, h}, {+hw, +hd, h}, {-hw, +hd, h},
+    }};
+
+    std::vector<Eigen::Vector3d> corners_in_robot;
+    corners_in_robot.reserve(8);
+    for (const auto& c : corners_in_table)
+    {
+        auto p = inner_eigen_api_->transform("robot", c, "table");
+        if (not p.has_value()) return;
+        corners_in_robot.push_back(p.value());
+    }
+
+    // Bottle pose in robot frame: origin (translation) + long axis (Z column).
+    auto T_RB_opt = inner_eigen_api_->get_transformation_matrix("robot", "bottle");
+    if (not T_RB_opt.has_value()) return;
+    const Eigen::Vector3d bottle_origin_R = T_RB_opt.value().translation();
+    const Eigen::Vector3d bottle_axis_R   = T_RB_opt.value().linear().col(2);
+
+    // Bottle node carries width_m (diameter) and height_m. Defaults if absent
+    // so the viewer still draws something the first time the node is created.
+    auto bottle_node = G->get_node("bottle");
+    double diameter = 0.07, height = 0.22;
+    if (bottle_node.has_value())
+    {
+        if (auto v = G->get_attrib_by_name<width_m_att>(bottle_node.value());  v.has_value()) diameter = v.value();
+        if (auto v = G->get_attrib_by_name<height_m_att>(bottle_node.value()); v.has_value()) height   = v.value();
+    }
+
+    arm_belief_viewer_->update_scene_objects(corners_in_robot, bottle_origin_R,
+                                             bottle_axis_R, diameter * 0.5, height);
 }
 
 void SpecificWorker::compute()
@@ -227,6 +378,9 @@ void SpecificWorker::compute()
                        rest_pose_angles_[0], rest_pose_angles_[1], rest_pose_angles_[2],
                        rest_pose_angles_[3], rest_pose_angles_[4], rest_pose_angles_[5],
                        rest_pose_angles_[6]);
+            // Reset the settle counter so a re-entry from ActiveEFE (button
+            // unchecked) re-runs the full convergence check from scratch.
+            homing_settled_ticks_ = 0;
             phase_ = Phase::Homing;
             proxy_unreachable_warned_ = false;
             return;
@@ -247,105 +401,88 @@ void SpecificWorker::compute()
 
             if (homing_settled_ticks_ >= HOMING_SETTLE_TICKS)
             {
-                std::print("[homing] Rest pose reached — switching to EFE control.\n");
-                phase_ = Phase::ActiveEFE;
+                std::print("[homing] Rest pose reached — waiting for Start button.\n");
+                phase_ = Phase::WaitingForStart;
             }
             proxy_unreachable_warned_ = false;
             return;   // do NOT run EFE while homing
         }
 
-        // ── Cycle test sub-state machine (Phase::ActiveEFE) ─────────────────
+        // While idle or waiting for Start: keep the DSR bottle pose fresh and
+        // draw the scene, so the user can see where the bottle is before
+        // committing to the approach.
+        update_bottle_pose_in_dsr();
+        update_viewer_scene_objects();
 
-        if (cycle_mode_ == CycleMode::Done)
+        if (phase_ == Phase::WaitingForStart)
         {
-            // All cycles finished — send zero velocities and idle.
-            static bool done_printed = false;
-            if (not done_printed)
+            // Hold the arm still until the user toggles Start.
+            RoboCompKinovaArm::TJointSpeeds stop;
+            stop.jointSpeeds.assign(Kinematics::N_ARM_JOINTS, 0.0f);
+            kinovaarm_proxy->moveJointsWithSpeed(stop);
+            if (run_requested_)
             {
-                std::print("[cycle] All {}/{} cycles complete. Agent idling.\n",
-                           cycles_done_, CYCLES_MAX);
-                done_printed = true;
-            }
-            return;
-        }
-
-        if (cycle_mode_ == CycleMode::SendingReturn)
-        {
-            // Initiate joint-space return to rest pose (same mechanism as
-            // initial homing so the arm reliably recovers the elbow-up config).
-            RoboCompKinovaArm::TJointAngles target;
-            target.jointAngles.assign(rest_pose_angles_.begin(), rest_pose_angles_.end());
-            kinovaarm_proxy->moveJointsWithAngle(target);
-            std::print("[cycle {}/{}] Returning to rest pose…\n",
-                       cycles_done_, CYCLES_MAX);
-            return_settled_ticks_ = 0;
-            cycle_mode_ = CycleMode::Returning;
-            proxy_unreachable_warned_ = false;
-            return;
-        }
-
-        if (cycle_mode_ == CycleMode::Returning)
-        {
-            double max_err = 0.0;
-            for (int i = 0; i < Kinematics::N_ARM_JOINTS; ++i)
-                max_err = std::max(max_err, angular_distance(q[i], rest_pose_angles_[i]));
-            if (max_err < HOMING_TOLERANCE_RAD)
-                ++return_settled_ticks_;
-            else
-                return_settled_ticks_ = 0;
-
-            std::print("[return {}/{}] joint err max = {:.4f} rad  ({}/{} settled)\n",
-                       cycles_done_, CYCLES_MAX, max_err,
-                       return_settled_ticks_, HOMING_SETTLE_TICKS);
-
-            if (return_settled_ticks_ >= HOMING_SETTLE_TICKS)
-            {
-                ++cycles_done_;
-                if (cycles_done_ >= CYCLES_MAX)
-                {
-                    std::print("[cycle] All {}/{} cycles complete.\n", cycles_done_, CYCLES_MAX);
-                    cycle_mode_ = CycleMode::Done;
-                }
-                else
-                {
-                    reach_target_ = pick_random_table_target();
-                    std::print("[cycle {}/{}] New target = [{:+.3f}, {:+.3f}, {:+.3f}]\n",
-                               cycles_done_, CYCLES_MAX,
-                               reach_target_.x(), reach_target_.y(), reach_target_.z());
-                    cycle_mode_ = CycleMode::ReachingTarget;
-                }
+                std::print("[start] Entering EFE bottle-approach.\n");
+                phase_ = Phase::ActiveEFE;
             }
             proxy_unreachable_warned_ = false;
             return;
         }
 
-        // ── CycleMode::ReachingTarget ─────────────────────────────────────
-        const auto q_dot = efe_gradient_step(*kinematics_, q, reach_target_);
+        // If the user toggled the button off mid-approach, abandon EFE and
+        // command joint-space return to the rest pose. The existing
+        // SendingRestPose → Homing → WaitingForStart loop handles the rest.
+        if (not run_requested_)
+        {
+            std::print("[stop] Run unchecked — returning to rest pose.\n");
+            arrived_logged_ = false;
+            phase_ = Phase::SendingRestPose;
+            return;
+        }
 
+        // ── Phase::ActiveEFE: continuous side-grasp approach ────────────────
+        // 1. Bottle pose already refreshed in DSR above.
+        // 2. Build a side-grasp target: standoff next to the bottle, tool +Z
+        //    pointing into the bottle, tool +X aligned with the bottle's Z.
+        // 3. Step EFE; both axis-alignment terms drive the gripper into the
+        //    side-approach pose, and the gradient vanishes at the standoff.
+
+        auto grasp_opt = compute_side_grasp_target();
+        if (not grasp_opt.has_value())
+        {
+            // No usable target yet — halt the arm rather than command stale q̇.
+            RoboCompKinovaArm::TJointSpeeds stop;
+            stop.jointSpeeds.assign(Kinematics::N_ARM_JOINTS, 0.0f);
+            kinovaarm_proxy->moveJointsWithSpeed(stop);
+            return;
+        }
+        const auto& grasp = grasp_opt.value();
+        reach_target_ = grasp.stand_off_pos;
+
+        EFEParams params;
+        params.desired_approach  = grasp.z_tool_des;
+        params.desired_secondary = grasp.x_tool_des;
+        params.gain_secondary    = 1.0;  // match gain_orient
+
+        const auto q_dot = efe_gradient_step(*kinematics_, q, reach_target_, params);
         RoboCompKinovaArm::TJointSpeeds cmd;
         cmd.jointSpeeds.assign(q_dot.begin(), q_dot.end());
         kinovaarm_proxy->moveJointsWithSpeed(cmd);
 
-        const auto pose = kinematics_->tool_pose(q);
-        const Eigen::Vector3d x_ee = pose.position;
-        const Eigen::Vector3d z_tool = pose.rotation.col(2);
-        const double err_pos = (x_ee - reach_target_).norm();
-        const double cos_align = std::clamp(z_tool.z() * -1.0, -1.0, 1.0);
-        const double err_orient_deg = std::acos(cos_align) * 180.0 / M_PI;
-        // std::print("[reach {}/{}] x_ee=[{:+.3f} {:+.3f} {:+.3f}]  "
-        //            "target=[{:+.3f} {:+.3f} {:+.3f}]  "
-        //            "err_pos={:.4f} m  err_orient={:.1f}°  |q̇|={:.3f}\n",
-        //            cycles_done_, CYCLES_MAX,
-        //            x_ee.x(), x_ee.y(), x_ee.z(),
-        //            reach_target_.x(), reach_target_.y(), reach_target_.z(),
-        //            err_pos, err_orient_deg,
-        //            Eigen::Map<const Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1>>(q_dot.data()).norm());
-
+        const Eigen::Vector3d x_ee   = ee_position;
+        const double          err_pos = (x_ee - reach_target_).norm();
         if (err_pos < REACH_TOLERANCE_M)
         {
-            std::print("[reach {}/{}] ✓ Arrived (err={:.4f} m) — returning to rest.\n",
-                       cycles_done_, CYCLES_MAX, err_pos);
-            cycle_mode_ = CycleMode::SendingReturn;
+            if (not arrived_logged_)
+            {
+                std::print("[bottle-approach] ✓ Arrived (err={:.4f} m) — hovering above bottle.\n",
+                           err_pos);
+                arrived_logged_ = true;
+            }
+        }
+        else
+        {
+            arrived_logged_ = false;
         }
         proxy_unreachable_warned_ = false;
     }

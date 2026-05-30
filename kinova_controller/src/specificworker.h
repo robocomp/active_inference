@@ -34,8 +34,12 @@
 #include "efe_gradient.h"
 #include "arm_belief_viewer_3d.h"
 
+#include <dsr/api/dsr_inner_eigen_api.h>
+#include <dsr/api/dsr_rt_api.h>
+
 #include <Eigen/Dense>
 #include <memory>
+#include <optional>
 
 /**
  * \brief Class SpecificWorker implements the core functionality of the component.
@@ -102,21 +106,19 @@ private:
 	std::unique_ptr<Kinematics> kinematics_;
 	std::unique_ptr<ArmBeliefViewer3D> arm_belief_viewer_;
 
-	// EFE-reach test target — arm-base frame, metres.
-	// The arm base is mounted on the desk top, so arm-base-z = 0 IS the
-	// table surface. (0.4, 0.0, 0.0) is 40 cm in front of the arm base,
-	// centred laterally, at table level — i.e. tool_frame touches the
-	// desk's top surface. In Webots world coords this maps to roughly
-	// (-0.303 + 0.4, -0.023, 0.71) ≈ (+0.10, -0.02, +0.71).
+	// Active EFE target — arm-base frame, metres. Updated each compute() cycle
+	// from the bottle pose in DSR (which is in turn fed from Webots).
 	Eigen::Vector3d reach_target_{0.4, 0.0, 0.1};
-	bool proxy_unreachable_warned_ = false;
-	bool joint_dump_pending_ = true;     // dump first received TJoints, once
+	bool proxy_unreachable_warned_         = false;
+	bool webots_proxy_unreachable_warned_  = false;
+	bool joint_dump_pending_               = true;  // dump first received TJoints, once
 
-	// Controller lifecycle: home to a known rest pose before enabling EFE.
-	// Same angles as the bridge's pre-homing — but the agent commands them
-	// itself so behaviour does not depend on whether the bridge pre-homed.
-	enum class Phase { SendingRestPose, Homing, ActiveEFE };
+	// Controller lifecycle: home to a known rest pose, idle until the user
+	// arms the viewer's checkable button, then run continuous bottle-approach.
+	// Un-checking the button drops back to SendingRestPose → Homing → idle.
+	enum class Phase { SendingRestPose, Homing, WaitingForStart, ActiveEFE };
 	Phase phase_ = Phase::SendingRestPose;
+	bool  run_requested_ = false;   // mirrors the viewer button's checked state
 	std::array<double, Kinematics::N_ARM_JOINTS> rest_pose_angles_{
 		0.0, 0.3, 0.0, 1.5, 0.0, 1.4, 0.0
 	};
@@ -124,22 +126,47 @@ private:
 	static constexpr double HOMING_TOLERANCE_RAD = 0.05;  // ≈ 2.9°
 	static constexpr int    HOMING_SETTLE_TICKS  = 5;     // consecutive cycles within tolerance
 
-	// Extended cycle test:  random table spot  →  rest pose  ×  CYCLES_MAX
-	// CycleMode drives the sub-state machine inside Phase::ActiveEFE.
-	enum class CycleMode { ReachingTarget, SendingReturn, Returning, Done };
-	CycleMode cycle_mode_ = CycleMode::ReachingTarget;
-	int  cycles_done_     = 0;
-	static constexpr int    CYCLES_MAX        = 10;
-	static constexpr double REACH_TOLERANCE_M = 0.02;   // 2 cm — "arrived"
-	int  return_settled_ticks_ = 0;
-	Eigen::Vector3d rest_pose_ee_;    // FK at rest_pose_angles_, set in initialize()
-	// Random reachable table-surface targets (arm-base frame, z = 0.10):
-	//   x ∈ [0.20, 0.50],  y ∈ [−0.15, +0.15]
-	std::mt19937 rng_{std::random_device{}()};
-	Eigen::Vector3d pick_random_table_target();
-	static constexpr double TGT_X_MIN = 0.20, TGT_X_MAX = 0.50;
-	static constexpr double TGT_Y_MIN =-0.15, TGT_Y_MAX = 0.15;
-	static constexpr double TGT_Z     = 0.10;
+	// Bottle-approach behaviour (replaces the previous random-target cycle).
+	// Side grasp: standoff next to the bottle, tool +Z pointing into the bottle
+	// horizontally, tool +X aligned with the bottle's vertical axis so the
+	// Robotiq fingers wrap around the body.
+	static constexpr double APPROACH_STANDOFF_M = 0.12;  // standoff along approach axis
+	static constexpr double REACH_TOLERANCE_M   = 0.02;  // 2 cm — "arrived"
+	bool arrived_logged_ = false;
+
+	struct SideGraspTarget
+	{
+		Eigen::Vector3d stand_off_pos;  // position target (robot frame, m)
+		Eigen::Vector3d z_tool_des;     // unit vector, robot frame
+		Eigen::Vector3d x_tool_des;     // unit vector, robot frame
+	};
+
+	// Fraction of bottle height (measured from the base origin along the
+	// bottle's +Z axis) that we aim the EE at. 0.5 = mid-body.
+	static constexpr double BOTTLE_GRASP_HEIGHT_FRAC = 0.5;
+
+	// DSR sub-APIs used by the bottle-approach loop.
+	std::unique_ptr<DSR::RT_API>         rt_api_;
+	std::unique_ptr<DSR::InnerEigenAPI>  inner_eigen_api_;
+
+	// Webots scene-object DEF names.
+	static constexpr const char* WEBOTS_BOTTLE_DEF = "bottle";
+	static constexpr const char* WEBOTS_TABLE_DEF  = "table";
+
+	// Pull bottle+table world poses from Webots, project bottle into the table
+	// frame, and write the result as the DSR table→bottle RT edge.
+	void update_bottle_pose_in_dsr();
+
+	// Build a side-grasp target: read bottle pose in the DSR "robot" frame via
+	// InnerEigenAPI, derive a horizontal approach axis perpendicular to the
+	// bottle's vertical axis, and back the EE off by APPROACH_STANDOFF_M.
+	// Returns nullopt if the chain isn't resolvable or the bottle sits on the
+	// robot's vertical axis (radial direction undefined).
+	std::optional<SideGraspTarget> compute_side_grasp_target();
+
+	// Project the 8 table corners and the bottle origin into the robot frame
+	// via InnerEigenAPI, then push them to the viewer for drawing.
+	void update_viewer_scene_objects();
 
 signals:
 	//void customSignal();

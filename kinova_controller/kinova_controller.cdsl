@@ -1,10 +1,11 @@
 import "KinovaArm.idsl";
+import "Webots2Robocomp.idsl";
 
 Component kinova_controller
 {
     Communications
     {
-        requires KinovaArm;
+        requires KinovaArm, Webots2Robocomp;
     };
     language Cpp11;
     options dsr;

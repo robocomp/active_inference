@@ -1,0 +1,56 @@
+#pragma once
+
+#include <Eigen/Dense>
+#include <Eigen/Geometry>
+#include <QWidget>
+
+#include <array>
+#include <string>
+#include <vector>
+
+class QLabel;
+class QPushButton;
+
+class ArmBeliefViewer3D : public QWidget
+{
+    Q_OBJECT
+public:
+    struct LinkPose
+    {
+        std::string mesh_filename;
+        Eigen::Isometry3d pose;
+    };
+
+    explicit ArmBeliefViewer3D(QWidget* parent = nullptr);
+    ~ArmBeliefViewer3D() override;
+
+    void update_beliefs(const std::array<double, 7>& joint_angles,
+                        const std::vector<LinkPose>& link_poses,
+                        const Eigen::Vector3d& target,
+                        const Eigen::Vector3d& ee_position);
+
+    // table_corners must be 8 points in robot frame (m), ordered as
+    // [bottom 4 CCW] then [top 4 CCW] — the panel connects them as a wireframe.
+    // bottle_origin / bottle_axis are in the robot frame, m / unit-vector.
+    // bottle_radius and bottle_height come from the DSR bottle node.
+    void update_scene_objects(const std::vector<Eigen::Vector3d>& table_corners,
+                              const Eigen::Vector3d& bottle_origin,
+                              const Eigen::Vector3d& bottle_axis,
+                              double bottle_radius,
+                              double bottle_height);
+
+    void set_mesh_root(std::string mesh_root);
+
+signals:
+    // True when the user has armed the controller (button checked),
+    // false when they've toggled it back off (button unchecked).
+    void run_state_changed(bool running);
+
+private:
+    class GLPanel;
+
+    GLPanel*     gl_panel_     = nullptr;
+    QLabel*      status_label_ = nullptr;
+    QPushButton* start_button_ = nullptr;
+    std::string  mesh_root_;
+};
