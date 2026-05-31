@@ -152,7 +152,7 @@ void SpecificWorker::compute()
 	// robot_concept's compute() is intentionally minimal:
 	// sensor reading is done in background threads;
 	static FPSCounter compute_fps;
-	compute_fps.print("Compute", 5000);
+	compute_fps.print("Compute (void)", 5000);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////
@@ -214,7 +214,10 @@ void SpecificWorker::operating_enter()
 
 void SpecificWorker::operating_loop()
 {
-	compute();
+    compute();
+    auto it = graph_viewers.find("");
+    if (it != graph_viewers.end() && it->second)
+        it->second->set_external_fps(states.at("Operating")->getActualFps());
 }
 
 void SpecificWorker::degraded_enter()
