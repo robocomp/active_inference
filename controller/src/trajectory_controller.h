@@ -278,6 +278,7 @@ public:
         int best_trajectory_idx = -1;
 
         // Path blockage detection output
+        bool  blockage_detected_ahead = false;   // true when a blocked path segment is visible but not yet confirmed
         bool  path_blocked = false;              // true when persistent blockage detected
         Eigen::Vector2f blockage_center_room = Eigen::Vector2f::Zero(); // center of blocked region in room frame
         float blockage_radius = 0.f;             // approximate radius of blocked region

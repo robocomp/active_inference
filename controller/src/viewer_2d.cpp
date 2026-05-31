@@ -3,6 +3,7 @@
 #include <abstract_graphic_viewer/abstract_graphic_viewer.h>
 
 #include <QBrush>
+#include <QFont>
 #include <QMouseEvent>
 #include <QPen>
 #include <QPolygonF>
@@ -12,6 +13,35 @@
 
 namespace rc
 {
+
+namespace
+{
+Eigen::Vector2f polygon_centroid(const std::vector<Eigen::Vector2f> &verts)
+{
+    if (verts.empty())
+        return Eigen::Vector2f::Zero();
+
+    float signed_area_twice = 0.f;
+    Eigen::Vector2f centroid = Eigen::Vector2f::Zero();
+    for (std::size_t index = 0; index < verts.size(); ++index)
+    {
+        const auto &from = verts[index];
+        const auto &to = verts[(index + 1) % verts.size()];
+        const float cross = from.x() * to.y() - to.x() * from.y();
+        signed_area_twice += cross;
+        centroid += (from + to) * cross;
+    }
+
+    if (std::abs(signed_area_twice) < 1e-5f)
+    {
+        for (const auto &vertex : verts)
+            centroid += vertex;
+        return centroid / static_cast<float>(verts.size());
+    }
+
+    return centroid / (3.f * signed_area_twice);
+}
+}
 
 class ControllerGraphicViewer : public AbstractGraphicViewer
 {
@@ -50,6 +80,7 @@ Viewer2D::~Viewer2D()
 {
     clear_lidar_items();
     clear_path_items();
+    clear_room_axis_items();
     clear_robot_trajectory();
     clear_polygon_item(inner_polygon_item_);
     clear_polygon_item(polygon_item_);
@@ -140,6 +171,7 @@ void Viewer2D::clear_polygon_item(QGraphicsPolygonItem *&item)
 void Viewer2D::draw_room_polygon(const std::vector<Eigen::Vector2f> &verts)
 {
     clear_polygon_item(polygon_item_);
+    clear_room_axis_items();
 
     if (verts.size() < 2)
         return;
@@ -154,6 +186,53 @@ void Viewer2D::draw_room_polygon(const std::vector<Eigen::Vector2f> &verts)
                                            QPen(QColor(67, 87, 100), 0.06),
                                            QBrush(QColor(219, 227, 231, 80)));
     polygon_item_->setZValue(8);
+
+    if (verts.size() >= 3)
+    {
+        const Eigen::Vector2f center = polygon_centroid(verts);
+        Eigen::Vector2f min_corner = verts.front();
+        Eigen::Vector2f max_corner = verts.front();
+        for (const auto &vertex : verts)
+        {
+            min_corner = min_corner.cwiseMin(vertex);
+            max_corner = max_corner.cwiseMax(vertex);
+        }
+
+        const float axis_length = std::clamp(0.07f * (max_corner - min_corner).minCoeff(), 0.25f, 0.5f);
+        QPen x_pen(QColor(214, 64, 69), 0.04);
+        x_pen.setCosmetic(false);
+        QPen y_pen(QColor(44, 146, 88), 0.04);
+        y_pen.setCosmetic(false);
+
+        auto *x_axis = agv_->scene.addLine(center.x(), center.y(), center.x() + axis_length, center.y(), x_pen);
+        auto *y_axis = agv_->scene.addLine(center.x(), center.y(), center.x(), center.y() + axis_length, y_pen);
+        x_axis->setZValue(9);
+        y_axis->setZValue(9);
+        room_axis_items_.push_back(x_axis);
+        room_axis_items_.push_back(y_axis);
+
+        auto *origin = agv_->scene.addEllipse(-0.03, -0.03, 0.06, 0.06,
+                                              Qt::NoPen, QBrush(QColor(38, 50, 56, 220)));
+        origin->setPos(center.x(), center.y());
+        origin->setZValue(9.1);
+        room_axis_items_.push_back(origin);
+
+        QFont axis_font;
+        axis_font.setPointSizeF(9.0);
+        auto *x_label = agv_->scene.addSimpleText("x", axis_font);
+        x_label->setBrush(QBrush(QColor(214, 64, 69)));
+        x_label->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+        x_label->setPos(center.x() + axis_length + 0.04f, center.y() - 0.02f);
+        x_label->setZValue(9.2);
+        room_axis_items_.push_back(x_label);
+
+        auto *y_label = agv_->scene.addSimpleText("y", axis_font);
+        y_label->setBrush(QBrush(QColor(44, 146, 88)));
+        y_label->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+        y_label->setPos(center.x() - 0.02f, center.y() + axis_length + 0.04f);
+        y_label->setZValue(9.2);
+        room_axis_items_.push_back(y_label);
+    }
 }
 
 void Viewer2D::set_lidar_buffer(LidarPointBuffer *buffer)
@@ -181,6 +260,16 @@ void Viewer2D::clear_lidar_items()
         delete item;
     }
     lidar_items_.clear();
+}
+
+void Viewer2D::clear_room_axis_items()
+{
+    for (auto *item : room_axis_items_)
+    {
+        agv_->scene.removeItem(item);
+        delete item;
+    }
+    room_axis_items_.clear();
 }
 
 void Viewer2D::clear_robot_trajectory()
@@ -239,19 +328,22 @@ void Viewer2D::draw_lidar_points_from_buffer(int max_points)
     std::size_t draw_index = 0;
     for (std::size_t point_index = 0; point_index < count and draw_index < draw_count; point_index += stride, ++draw_index)
     {
-        if (draw_index < lidar_items_.size())
-        {
-            lidar_items_[draw_index]->setPos(xs[point_index], ys[point_index]);
-            lidar_items_[draw_index]->setVisible(true);
-        }
-        else
-        {
-            auto *item = agv_->scene.addEllipse(ellipse_rect, pen, brush);
-            item->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
-            item->setPos(xs[point_index], ys[point_index]);
-            item->setZValue(5);
-            lidar_items_.push_back(item);
-        }
+        if(zs[point_index]  > 0.2f) // filter out points that are too close (likely noise)
+            {
+                if (draw_index < lidar_items_.size())
+                {
+                    lidar_items_[draw_index]->setPos(xs[point_index], ys[point_index]);
+                    lidar_items_[draw_index]->setVisible(true);
+                }
+                else
+                {
+                    auto *item = agv_->scene.addEllipse(ellipse_rect, pen, brush);
+                    item->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+                    item->setPos(xs[point_index], ys[point_index]);
+                    item->setZValue(5);
+                    lidar_items_.push_back(item);
+                }
+            }
     }
 }
 
@@ -386,6 +478,23 @@ void Viewer2D::draw_path(const PathDrawData &data)
             dot->setPos(center);
             dot->setZValue(19);
             path_draw_items_.push_back(dot);
+        }
+    }
+
+    if (!data.obstacle_rfe_points.empty())
+    {
+        QPen rfe_pen(QColor(110, 92, 0, 230), 0.018);
+        rfe_pen.setCosmetic(false);
+        const QBrush rfe_brush(QColor(255, 225, 40, 245));
+        for (const auto &obstacle_points : data.obstacle_rfe_points)
+        {
+            for (const auto &point : obstacle_points)
+            {
+                auto *dot = agv_->scene.addEllipse(-0.045, -0.045, 0.09, 0.09, rfe_pen, rfe_brush);
+                dot->setPos(point.x(), point.y());
+                dot->setZValue(19.5);
+                path_draw_items_.push_back(dot);
+            }
         }
     }
 

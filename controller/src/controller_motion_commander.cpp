@@ -1,0 +1,194 @@
+#include "controller_motion_commander.h"
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+
+#include "controller_world_model.h"
+
+void ControllerMotionCommander::set_params(const ControllerParams *params)
+{
+    params_ = params;
+}
+
+void ControllerMotionCommander::set_dependencies(std::shared_ptr<DSR::DSRGraph> graph,
+                                                 const ControllerWorldModel *world_model,
+                                                 RoboCompOmniRobot::OmniRobotPrxPtr omnirobot_proxy,
+                                                 int agent_id,
+                                                 CommandTextSink command_text_sink)
+{
+    graph_ = std::move(graph);
+    world_model_ = world_model;
+    omnirobot_proxy_ = std::move(omnirobot_proxy);
+    agent_id_ = agent_id;
+    command_text_sink_ = std::move(command_text_sink);
+}
+
+float ControllerMotionCommander::ramp_uncertainty_scale(float value,
+                                                        float slow_threshold,
+                                                        float stop_threshold,
+                                                        float min_scale)
+{
+    if (stop_threshold <= slow_threshold)
+        return value <= slow_threshold ? 1.f : std::clamp(min_scale, 0.f, 1.f);
+
+    const float clamped_min_scale = std::clamp(min_scale, 0.f, 1.f);
+    const float alpha = std::clamp((value - slow_threshold) / (stop_threshold - slow_threshold), 0.f, 1.f);
+    return 1.f - alpha * (1.f - clamped_min_scale);
+}
+
+float ControllerMotionCommander::preserve_sign_clamp(float value, float max_abs)
+{
+    return std::copysign(std::min(std::abs(value), std::max(0.f, max_abs)), value);
+}
+
+std::uint64_t ControllerMotionCommander::current_time_ms()
+{
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+}
+
+void ControllerMotionCommander::apply_uncertainty_speed_limit(float &adv_mps, float &side_mps, float &rot_rps) const
+{
+    if (!world_model_ || !params_)
+        return;
+
+    const auto uncertainty = world_model_->read_pose_uncertainty();
+    if (!uncertainty.has_value())
+        return;
+
+    const float current_trans_speed_mps = std::hypot(adv_mps, side_mps);
+    const float current_rot_speed_rps = std::abs(rot_rps);
+    const float forward_ratio = (current_trans_speed_mps > 1e-3f)
+        ? std::clamp(std::abs(adv_mps) / current_trans_speed_mps, 0.f, 1.f)
+        : 0.f;
+    const float lateral_ratio = (current_trans_speed_mps > 1e-3f)
+        ? std::clamp(std::abs(side_mps) / current_trans_speed_mps, 0.f, 1.f)
+        : 0.f;
+    const float turning_ratio = std::clamp(current_rot_speed_rps / std::max(0.12f, 0.35f * params_->max_rot_speed_rps), 0.f, 1.f);
+    const float straight_motion_ratio = std::clamp(forward_ratio * (1.f - lateral_ratio) * (1.f - turning_ratio), 0.f, 1.f);
+
+    const float effective_xy_slow_m = params_->pose_xy_std_slow_m * (1.f + 1.0f * straight_motion_ratio);
+    const float effective_xy_stop_m = params_->pose_xy_std_stop_m * (1.f + 0.6f * straight_motion_ratio);
+
+    float adv_scale = ramp_uncertainty_scale(uncertainty->xy_std_m,
+                                             effective_xy_slow_m,
+                                             effective_xy_stop_m,
+                                             params_->min_adv_speed_scale);
+    float rot_scale = ramp_uncertainty_scale(uncertainty->theta_std_rad,
+                                             params_->pose_theta_std_slow_rad,
+                                             params_->pose_theta_std_stop_rad,
+                                             params_->min_rot_speed_scale);
+
+    const float horizon_s = std::max(1e-3f, params_->uncertainty_prediction_horizon_s);
+    const float xy_growth = std::max(1e-3f,
+                                     params_->pose_xy_std_growth_per_mps / (1.f + 1.5f * straight_motion_ratio));
+    const float theta_growth = std::max(1e-3f, params_->pose_theta_std_growth_per_rps);
+
+    if (current_trans_speed_mps > 1e-3f)
+    {
+        const float xy_margin = std::max(0.f, effective_xy_stop_m - uncertainty->xy_std_m);
+        const float max_predicted_trans_speed_mps = xy_margin / (horizon_s * xy_growth);
+        const float predictive_adv_scale = std::clamp(max_predicted_trans_speed_mps / current_trans_speed_mps,
+                                                      params_->min_adv_speed_scale,
+                                                      1.f);
+        adv_scale = std::min(adv_scale, predictive_adv_scale);
+    }
+
+    if (current_rot_speed_rps > 1e-3f)
+    {
+        const float theta_margin = std::max(0.f, params_->pose_theta_std_stop_rad - uncertainty->theta_std_rad);
+        const float max_predicted_rot_speed_rps = theta_margin / (horizon_s * theta_growth);
+        const float predictive_rot_scale = std::clamp(max_predicted_rot_speed_rps / current_rot_speed_rps,
+                                                      params_->min_rot_speed_scale,
+                                                      1.f);
+        rot_scale = std::min(rot_scale, predictive_rot_scale);
+    }
+
+    const float coupled_adv_scale = std::pow(std::max(rot_scale, 0.f),
+                                             std::max(0.f, params_->adv_rotation_coupling_exponent) * turning_ratio);
+    adv_scale = std::min(adv_scale, coupled_adv_scale);
+
+    adv_mps *= adv_scale;
+    side_mps *= adv_scale;
+    rot_rps = preserve_sign_clamp(rot_rps, current_rot_speed_rps * rot_scale);
+}
+
+void ControllerMotionCommander::publish_robot_reference_speed(float adv_mps,
+                                                              float side_mps,
+                                                              float rot_rps,
+                                                              std::uint64_t timestamp_ms)
+{
+    if (!graph_ || !world_model_ || world_model_->graph_state().robot_id == 0)
+        return;
+
+    auto robot_node_opt = graph_->get_node(world_model_->graph_state().robot_id);
+    if (!robot_node_opt.has_value())
+        return;
+
+    auto robot_node = robot_node_opt.value();
+    auto &attrs = robot_node.attrs();
+    attrs[kRobotRefAdvSpeedAttr] = DSR::Attribute{adv_mps, timestamp_ms, static_cast<std::uint32_t>(agent_id_)};
+    attrs[kRobotRefSideSpeedAttr] = DSR::Attribute{side_mps, timestamp_ms, static_cast<std::uint32_t>(agent_id_)};
+    attrs[kRobotRefRotSpeedAttr] = DSR::Attribute{rot_rps, timestamp_ms, static_cast<std::uint32_t>(agent_id_)};
+    attrs[kRobotRefSpeedTimestampAttr] = DSR::Attribute{timestamp_ms, timestamp_ms, static_cast<std::uint32_t>(agent_id_)};
+    if (!graph_->update_node(robot_node))
+        qWarning() << "Controller failed to publish robot reference speed attrs to DSR";
+}
+
+void ControllerMotionCommander::send_speed_command(float adv_mps, float side_mps, float rot_rps)
+{
+    const float adv_mm_s = adv_mps * 1000.f;
+    const float side_mm_s = side_mps * 1000.f;
+
+    if (command_text_sink_)
+    {
+        command_text_sink_(QStringLiteral("adv %1 mm/s   side %2 mm/s   rot %3 rad/s")
+                               .arg(adv_mm_s, 0, 'f', 0)
+                               .arg(side_mm_s, 0, 'f', 0)
+                               .arg(rot_rps, 0, 'f', 2));
+    }
+
+    if (!omnirobot_proxy_)
+        return;
+
+    const Eigen::Vector3f cmd(adv_mps, side_mps, rot_rps);
+    if (has_last_speed_command_ && (cmd - last_speed_command_).cwiseAbs().maxCoeff() < 1e-4f)
+        return;
+
+    const auto timestamp_ms = current_time_ms();
+    publish_robot_reference_speed(adv_mps, side_mps, rot_rps, timestamp_ms);
+
+    try
+    {
+        omnirobot_proxy_->setSpeedBase(side_mm_s, adv_mm_s, rot_rps);
+        last_speed_command_ = cmd;
+        has_last_speed_command_ = true;
+        stop_command_latched_ = false;
+    }
+    catch (const Ice::Exception &e)
+    {
+        qWarning() << "Controller setSpeedBase failed:" << e.what();
+    }
+}
+
+void ControllerMotionCommander::stop_robot()
+{
+    if (command_text_sink_)
+        command_text_sink_(QStringLiteral("adv 0 mm/s   side 0 mm/s   rot 0.00 rad/s"));
+
+    if (stop_command_latched_)
+        return;
+    if (!omnirobot_proxy_)
+        return;
+
+    publish_robot_reference_speed(0.f, 0.f, 0.f, current_time_ms());
+
+    try
+    {
+        omnirobot_proxy_->stopBase();
+        stop_command_latched_ = true;
+        has_last_speed_command_ = false;
+    }
+    catch (const Ice::Exception &) {}
+}

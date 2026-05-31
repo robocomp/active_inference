@@ -1,0 +1,100 @@
+#pragma once
+
+#include <QPointF>
+
+#include <functional>
+#include <memory>
+#include <optional>
+
+#include "controller_display.h"
+#include "controller_motion_commander.h"
+#include "controller_obstacle_tracker.h"
+#include "controller_runtime_types.h"
+#include "controller_world_model.h"
+#include "room_path_planner.h"
+#include "trajectory_controller.h"
+#include "../../common/affordance_manager/affordance_manager.h"
+
+class ControllerSession
+{
+public:
+    using WakeCallback = std::function<void()>;
+    using TimeSource = std::function<std::uint64_t()>;
+
+    void set_params(const ControllerParams *params);
+    void set_graph(std::shared_ptr<DSR::DSRGraph> graph);
+
+    bool sync_world_state(std::uint64_t timestamp_ms,
+                          ControllerWorldModel &world_model,
+                          RoomPathPlanner &planner,
+                          ControllerObstacleTracker &obstacle_tracker,
+                          rc::TrajectoryController &path_controller,
+                          ControllerMotionCommander &motion_commander,
+                          ControllerDisplay &display);
+
+    std::optional<ControllerPlanningStep> build_planning_step(std::uint64_t timestamp_ms,
+                                                              ControllerWorldModel &world_model,
+                                                              ControllerObstacleTracker &obstacle_tracker,
+                                                              rc::AffordanceManager &affordance_manager,
+                                                              rc::TrajectoryController &path_controller,
+                                                              ControllerMotionCommander &motion_commander,
+                                                              ControllerDisplay &display);
+
+    bool ensure_current_plan(const ControllerPlanningStep &step,
+                             RoomPathPlanner &planner,
+                             ControllerObstacleTracker &obstacle_tracker,
+                             rc::TrajectoryController &path_controller,
+                             ControllerMotionCommander &motion_commander,
+                             ControllerDisplay &display);
+
+    void update_display(const std::optional<ControllerRobotPose> &robot_pose,
+                        ControllerDisplay &display,
+                        const ControllerPolygons &obstacle_polys,
+                        const ControllerPolygons &obstacle_rfe_points,
+                        int max_lidar_draw_points) const;
+
+    void execute_plan(const ControllerRobotPose &robot_pose,
+                      rc::TrajectoryController &path_controller,
+                      ControllerObstacleTracker &obstacle_tracker,
+                      ControllerMotionCommander &motion_commander,
+                      ControllerDisplay &display,
+                      rc::AffordanceManager &affordance_manager,
+                      const TimeSource &time_source);
+
+    void set_manual_target(const QPointF &point,
+                           ControllerWorldModel &world_model,
+                           ControllerObstacleTracker &obstacle_tracker,
+                           rc::AffordanceManager &affordance_manager,
+                           rc::TrajectoryController &path_controller,
+                           const TimeSource &time_source,
+                           const WakeCallback &wake_callback);
+
+    void clear_manual_target(rc::AffordanceManager &affordance_manager,
+                             rc::TrajectoryController &path_controller,
+                             ControllerMotionCommander &motion_commander,
+                             const WakeCallback &wake_callback);
+
+    void stop(rc::TrajectoryController &path_controller,
+              ControllerMotionCommander &motion_commander);
+
+private:
+    void clear_tracking_state();
+
+    const ControllerParams *params_ = nullptr;
+    std::shared_ptr<DSR::DSRGraph> graph_;
+    ControllerPolygon room_polygon_;
+    ControllerPolygon inner_polygon_;
+    std::optional<ControllerPathPlan> current_plan_;
+    std::optional<Eigen::Vector2f> current_target_room_;
+    std::optional<Eigen::Vector2f> manual_target_room_;
+    std::optional<Eigen::Vector2f> manual_target_origin_room_;
+    std::optional<ControllerTargetInfo> last_target_info_;
+    std::vector<ControllerPolygon> last_mppi_trajectories_;
+    ControllerPolygon last_mppi_average_trajectory_;
+    int last_best_mppi_trajectory_idx_ = -1;
+    int last_display_wp_index_ = 0;
+    bool manual_target_dirty_ = false;
+    std::uint64_t active_target_id_ = 0;
+    bool room_wait_logged_ = false;
+    bool target_wait_logged_ = false;
+};

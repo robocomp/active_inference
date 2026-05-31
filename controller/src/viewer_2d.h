@@ -6,6 +6,7 @@
 #include <QGraphicsEllipseItem>
 #include <QGraphicsLineItem>
 #include <QGraphicsPolygonItem>
+#include <QGraphicsItem>
 #include <QPointF>
 #include <QRectF>
 #include <QTransform>
@@ -33,6 +34,7 @@ class Viewer2D : public QObject
         std::vector<Eigen::Vector2f> inner_poly;
         std::vector<Eigen::Vector2f> graph_nodes;
         std::vector<std::vector<Eigen::Vector2f>> obstacle_polys;
+        std::vector<std::vector<Eigen::Vector2f>> obstacle_rfe_points;
         std::vector<std::vector<Eigen::Vector2f>> candidate_trajectories;
         std::vector<Eigen::Vector2f> average_trajectory;
         int best_trajectory_idx = -1;
@@ -70,6 +72,7 @@ private:
     bool lidar_visible_ = true;
     bool mppi_paths_visible_ = false;
     std::vector<QGraphicsEllipseItem *> lidar_items_;
+    std::vector<QGraphicsItem *> room_axis_items_;
     std::vector<QGraphicsItem *> path_draw_items_;
     QGraphicsEllipseItem *target_marker_ = nullptr;
     std::vector<QGraphicsLineItem *> robot_traj_items_;
@@ -77,6 +80,7 @@ private:
 
     void clear_polygon_item(QGraphicsPolygonItem *&item);
     void clear_lidar_items();
+    void clear_room_axis_items();
 };
 
 } // namespace rc

@@ -1063,23 +1063,28 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
             }
         }
 
+        auto fill_blockage_region = [&]()
+        {
+            out.blockage_detected_ahead = true;
+            out.blockage_center_room = block_sum / static_cast<float>(block_count);
+
+            float max_r = 0.f;
+            for (int i = wp_index_; i < static_cast<int>(path_room_.size()); ++i)
+            {
+                const Eigen::Vector2f p_rob = room_to_robot(path_room_[i], robot_pose);
+                if (query_esdf(p_rob.x(), p_rob.y()) < thr)
+                    max_r = std::max(max_r, (path_room_[i] - out.blockage_center_room).norm());
+            }
+            out.blockage_radius = max_r + active_params_.robot_radius;
+        };
+
         if (consec_blocked >= min_wp)
         {
+            fill_blockage_region();
             ++blockage_streak_;
             if (blockage_streak_ >= active_params_.blockage_confirm_cycles)
             {
                 out.path_blocked = true;
-                out.blockage_center_room = block_sum / static_cast<float>(block_count);
-                // radius = max distance from center to any blocked waypoint + robot radius
-                // Recompute max dist from final center
-                float max_r = 0.f;
-                for (int i = wp_index_; i < static_cast<int>(path_room_.size()); ++i)
-                {
-                    const Eigen::Vector2f p_rob = room_to_robot(path_room_[i], robot_pose);
-                    if (query_esdf(p_rob.x(), p_rob.y()) < thr)
-                        max_r = std::max(max_r, (path_room_[i] - out.blockage_center_room).norm());
-                }
-                out.blockage_radius = max_r + active_params_.robot_radius;
                 blockage_streak_ = 0;
                 blockage_cooldown_ = active_params_.blockage_cooldown_cycles;
             }

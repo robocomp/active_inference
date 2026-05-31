@@ -51,7 +51,7 @@ agent_info_period_ms = 1000
 nodes = ["controller 8"]
 
 [Planner]
-Clearance = 0.4
+Clearance = 0.5
 GridResolution = 0.35
 ConnectionRadius = 1.2
 
@@ -72,6 +72,18 @@ PoseXYStdGrowthPerMps = 0.5
 PoseThetaStdGrowthPerRps = 1.0
 AdvRotationCouplingExponent = 0.5
 TemporaryObstacleHistoryScans = 5
+TemporaryObstacleOcclusionDepth = 0.35
+TemporaryObstacleRobustLoss = "huber"
+TemporaryObstacleRobustLossScale = 0.08
+TemporaryObstacleExistenceInitLogOdds = 1.6
+TemporaryObstacleExistenceMinLogOdds = -4.0
+TemporaryObstacleExistenceMaxLogOdds = 4.0
+TemporaryObstacleExistenceRemoveThresholdLogOdds = -2.2
+TemporaryObstacleExistenceObservationBias = 0.30
+TemporaryObstacleExistenceSupportGain = 0.06
+TemporaryObstacleExistenceRememberedGain = 0.02
+TemporaryObstacleExistenceWeakMissPenalty = 0.04
+TemporaryObstacleExistenceAbsencePenalty = 0.65
 GoalClearanceRelaxDist = 0.6
 GoalObstacleMargin = 0.08
 GoalClearanceMinRatio = 0.85

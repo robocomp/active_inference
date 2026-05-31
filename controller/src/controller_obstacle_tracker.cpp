@@ -1,0 +1,908 @@
+#include "controller_obstacle_tracker.h"
+
+#include <array>
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <numeric>
+#include <print>
+#include <sstream>
+
+namespace
+{
+constexpr int kRememberedEdgeCount = 4;
+constexpr int kRememberedSlotsPerEdge = 8;
+constexpr int kRememberedPointsPerSlot = 1;
+constexpr float kRememberedEdgeDistanceThreshold = 0.12f;
+constexpr float kRememberedRfeAlpha = 0.97f;
+constexpr float kRememberedRfeMax = 0.40f;
+constexpr int kRemovalEvidenceMinMissedUpdates = 4;
+constexpr int kRemovalEvidenceMinPenetratingPoints = 6;
+constexpr float kRemovalSupportDistanceThreshold = 0.14f;
+constexpr float kRemovalPenetrationMargin = 0.05f;
+constexpr float kRemovalCrossAxisMargin = 0.08f;
+
+struct RememberedEdgeSlot
+{
+    int edge_index = 0;
+    int slot_index = 0;
+    float distance_to_edge = 0.f;
+};
+
+std::array<Eigen::Vector2f, kRememberedEdgeCount> make_local_obstacle_corners(const ControllerObstacleState &state)
+{
+    const float half_width = state.width_m * 0.5f;
+    const float half_depth = state.depth_m * 0.5f;
+    return {Eigen::Vector2f(-half_width, -half_depth),
+            Eigen::Vector2f(half_width, -half_depth),
+            Eigen::Vector2f(half_width, half_depth),
+            Eigen::Vector2f(-half_width, half_depth)};
+}
+
+std::optional<RememberedEdgeSlot> classify_remembered_edge_slot(const ControllerObstacleState &state,
+                                                                const Eigen::Vector2f &local_point)
+{
+    const auto corners = make_local_obstacle_corners(state);
+    float best_distance = std::numeric_limits<float>::max();
+    float best_t = 0.f;
+    int best_edge = 0;
+
+    for (int edge_index = 0; edge_index < kRememberedEdgeCount; ++edge_index)
+    {
+        const Eigen::Vector2f &from = corners[edge_index];
+        const Eigen::Vector2f &to = corners[(edge_index + 1) % kRememberedEdgeCount];
+        const Eigen::Vector2f edge = to - from;
+        const float edge_length_sq = edge.squaredNorm();
+        if (edge_length_sq < 1e-6f)
+            continue;
+
+        const float projected_t = std::clamp((local_point - from).dot(edge) / edge_length_sq, 0.f, 1.f);
+        const Eigen::Vector2f projected = from + projected_t * edge;
+        const float distance = (local_point - projected).norm();
+        if (distance < best_distance)
+        {
+            best_distance = distance;
+            best_t = projected_t;
+            best_edge = edge_index;
+        }
+    }
+
+    if (best_distance > kRememberedEdgeDistanceThreshold)
+        return std::nullopt;
+
+    const int slot_index = std::min(kRememberedSlotsPerEdge - 1,
+                                    static_cast<int>(best_t * static_cast<float>(kRememberedSlotsPerEdge)));
+    return RememberedEdgeSlot{.edge_index = best_edge,
+                              .slot_index = slot_index,
+                              .distance_to_edge = best_distance};
+}
+
+int remembered_slot_index(const RememberedEdgeSlot &slot)
+{
+    return slot.edge_index * kRememberedSlotsPerEdge + slot.slot_index;
+}
+
+Eigen::Vector2f estimate_obstacle_center(const ControllerObstacleObservation &observation,
+                                         float width_m,
+                                         float depth_m)
+{
+    const Eigen::Vector2f view_dir = observation.centroid - observation.viewpoint;
+    const float view_norm = view_dir.norm();
+    if (view_norm < 1e-4f || observation.points.empty())
+        return observation.centroid;
+
+    const Eigen::Vector2f away_from_robot = view_dir / view_norm;
+    float observed_min = std::numeric_limits<float>::max();
+    float observed_max = -std::numeric_limits<float>::max();
+    for (const auto &point : observation.points)
+    {
+        const float projection = point.dot(away_from_robot);
+        observed_min = std::min(observed_min, projection);
+        observed_max = std::max(observed_max, projection);
+    }
+
+    const Eigen::Vector2f local_dir = Eigen::Rotation2Df(-observation.yaw_rad) * away_from_robot;
+    const float estimated_full_span = std::abs(local_dir.x()) * width_m
+                                    + std::abs(local_dir.y()) * depth_m;
+    const float observed_span = std::max(0.f, observed_max - observed_min);
+    const float hidden_span = std::max(0.f, estimated_full_span - observed_span);
+    const float observed_mid = 0.5f * (observed_min + observed_max);
+    const float target_projection = std::max(observed_max + 0.02f,
+                                             observed_mid + 0.5f * hidden_span);
+    const float centroid_projection = observation.centroid.dot(away_from_robot);
+    return observation.centroid + (target_projection - centroid_projection) * away_from_robot;
+}
+
+Eigen::Vector2f estimate_initial_obstacle_center(const ControllerObstacleObservation &observation)
+{
+    return estimate_obstacle_center(observation, observation.width_m, observation.depth_m);
+}
+
+void recompute_observation_summary(ControllerObstacleObservation &observation,
+                                   float padding_m,
+                                   float occlusion_depth_m)
+{
+    if (observation.points.size() < 3)
+        return;
+
+    float weight_sum = 0.f;
+    observation.centroid.setZero();
+    for (std::size_t index = 0; index < observation.points.size(); ++index)
+    {
+        const float weight = index < observation.weights.size() ? observation.weights[index] : 1.f;
+        observation.centroid += weight * observation.points[index];
+        weight_sum += weight;
+    }
+    observation.centroid /= std::max(1e-4f, weight_sum);
+
+    Eigen::Matrix2f covariance = Eigen::Matrix2f::Zero();
+    for (std::size_t index = 0; index < observation.points.size(); ++index)
+    {
+        const float weight = index < observation.weights.size() ? observation.weights[index] : 1.f;
+        const Eigen::Vector2f delta = observation.points[index] - observation.centroid;
+        covariance += weight * delta * delta.transpose();
+    }
+    covariance /= std::max(1e-4f, weight_sum);
+
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix2f> solver(covariance);
+    Eigen::Vector2f principal = Eigen::Vector2f::UnitX();
+    if (solver.info() == Eigen::Success)
+        principal = solver.eigenvectors().col(1).normalized();
+
+    observation.yaw_rad = std::atan2(principal.y(), principal.x());
+    const Eigen::Rotation2Df room_to_local(-observation.yaw_rad);
+    Eigen::Vector2f min_local = Eigen::Vector2f::Constant(std::numeric_limits<float>::max());
+    Eigen::Vector2f max_local = Eigen::Vector2f::Constant(-std::numeric_limits<float>::max());
+    for (const auto &point : observation.points)
+    {
+        const Eigen::Vector2f local = room_to_local * (point - observation.centroid);
+        min_local = min_local.cwiseMin(local);
+        max_local = max_local.cwiseMax(local);
+    }
+
+    observation.width_m = std::max(0.12f, max_local.x() - min_local.x() + 2.f * padding_m);
+    observation.depth_m = std::max(0.12f, max_local.y() - min_local.y() + 2.f * padding_m);
+
+    const Eigen::Vector2f view_local = room_to_local * (observation.viewpoint - observation.centroid);
+    const float view_norm = view_local.norm();
+    if (view_norm > 1e-4f && occlusion_depth_m > 0.f)
+    {
+        const Eigen::Vector2f dominant = view_local.cwiseAbs();
+        if (dominant.x() >= dominant.y())
+            observation.width_m += std::min(occlusion_depth_m, occlusion_depth_m * dominant.x() / view_norm);
+        else
+            observation.depth_m += std::min(occlusion_depth_m, occlusion_depth_m * dominant.y() / view_norm);
+    }
+}
+}
+
+void ControllerObstacleTracker::set_params(const ControllerParams *params)
+{
+    params_ = params;
+}
+
+void ControllerObstacleTracker::set_dependencies(std::shared_ptr<DSR::DSRGraph> graph,
+                                                 DSR::InnerEigenAPI *inner_eigen_api,
+                                                 const ControllerGraphState *graph_state)
+{
+    graph_ = std::move(graph);
+    inner_eigen_api_ = inner_eigen_api;
+    graph_state_ = graph_state;
+}
+
+ControllerObstacleModelParams ControllerObstacleTracker::make_model_params() const
+{
+    ControllerObstacleModelParams model_params;
+    if (!params_)
+        return model_params;
+
+    model_params.robust_loss = params_->temporary_obstacle_robust_loss;
+    model_params.robust_loss_scale_m = params_->temporary_obstacle_robust_loss_scale_m;
+    return model_params;
+}
+
+ControllerPolygons ControllerObstacleTracker::temporary_obstacle_rfe_points() const
+{
+    ControllerPolygons rfe_points;
+    rfe_points.reserve(temporary_obstacles_.size());
+
+    for (const auto &instance : temporary_obstacles_)
+    {
+        ControllerPolygon points;
+        points.reserve(instance.remembered_points.size());
+
+        const auto &state = instance.model.state();
+        for (const auto &remembered_point : instance.remembered_points)
+            points.push_back(to_room_point(state, remembered_point.local_point));
+
+        rfe_points.push_back(std::move(points));
+    }
+
+    return rfe_points;
+}
+
+std::vector<Eigen::Vector2f> ControllerObstacleTracker::read_temporary_obstacle_points(std::uint64_t timestamp_ms,
+                                                                                        const ControllerRobotPose &robot_pose,
+                                                                                        const Eigen::Vector2f &region_center_room,
+                                                                                        float region_radius_m,
+                                                                                        bool forward_only)
+{
+    std::vector<Eigen::Vector2f> candidate_points_room;
+    if (!params_)
+        return candidate_points_room;
+
+    const auto fused_points_room = read_recent_lidar_points_in_room(timestamp_ms,
+                                                                    params_->temporary_obstacle_history_scans);
+    if (fused_points_room.empty())
+        return candidate_points_room;
+
+    const Eigen::Affine2f robot_from_room = robot_pose.as_transform().inverse();
+    candidate_points_room.reserve(fused_points_room.size());
+
+    const float max_front_distance = std::max(0.2f, params_->temporary_obstacle_front_distance_m);
+    const float half_width = std::max(0.1f, params_->temporary_obstacle_half_width_m);
+    const float cluster_margin = std::max(0.f, params_->temporary_obstacle_cluster_margin_m);
+    const float search_radius = std::max(region_radius_m + cluster_margin, cluster_margin + 0.1f);
+    const float max_robot_distance = max_front_distance + search_radius + 0.25f;
+
+    for (const auto &point3d_room : fused_points_room)
+    {
+        const float z_room = point3d_room.z();
+        if (z_room < 0.05f || z_room > 1.8f)
+            continue;
+
+        const Eigen::Vector2f point_room(point3d_room.x(), point3d_room.y());
+        if ((point_room - region_center_room).norm() > search_radius)
+            continue;
+
+        const Eigen::Vector2f point_robot = robot_from_room * point_room;
+        if (forward_only)
+        {
+            if (point_robot.y() <= params_->clearance_m * 0.5f)
+                continue;
+            if (point_robot.y() > max_front_distance)
+                continue;
+            if (std::abs(point_robot.x()) > half_width)
+                continue;
+        }
+        else if (point_robot.norm() > max_robot_distance)
+        {
+            continue;
+        }
+
+        candidate_points_room.push_back(point_room);
+    }
+
+    return candidate_points_room;
+}
+
+std::optional<ControllerObstacleObservation> ControllerObstacleTracker::build_temporary_obstacle_observation(std::uint64_t timestamp_ms,
+                                                                                                              const ControllerRobotPose &robot_pose,
+                                                                                                              const Eigen::Vector2f &region_center_room,
+                                                                                                              float region_radius_m,
+                                                                                                              bool forward_only)
+{
+    if (!params_)
+        return std::nullopt;
+
+    const auto candidate_points_room = read_temporary_obstacle_points(timestamp_ms,
+                                                                      robot_pose,
+                                                                      region_center_room,
+                                                                      region_radius_m,
+                                                                      forward_only);
+    if (static_cast<int>(candidate_points_room.size()) < std::max(3, params_->temporary_obstacle_min_points))
+        return std::nullopt;
+
+    return ControllerObstacleModel::make_observation(candidate_points_room,
+                                                     robot_pose.pos,
+                                                     std::max(0.f, params_->temporary_obstacle_padding_m),
+                                                     std::max(0.f, params_->temporary_obstacle_occlusion_depth_m));
+}
+
+Eigen::Vector2f ControllerObstacleTracker::to_local_point(const ControllerObstacleState &state, const Eigen::Vector2f &point)
+{
+    return Eigen::Rotation2Df(-state.yaw_rad) * (point - state.center);
+}
+
+float ControllerObstacleTracker::obstacle_sdf(const ControllerObstacleState &state, const Eigen::Vector2f &point)
+{
+    const Eigen::Vector2f local_point = to_local_point(state, point);
+    const Eigen::Vector2f half_extents(state.width_m * 0.5f, state.depth_m * 0.5f);
+    const Eigen::Vector2f d = local_point.cwiseAbs() - half_extents;
+    const Eigen::Vector2f outside = d.cwiseMax(0.f);
+    return outside.norm() + std::min(std::max(d.x(), d.y()), 0.f);
+}
+
+Eigen::Vector2f ControllerObstacleTracker::to_room_point(const ControllerObstacleState &state, const Eigen::Vector2f &point)
+{
+    return state.center + Eigen::Rotation2Df(state.yaw_rad) * point;
+}
+
+ControllerObstacleObservation ControllerObstacleTracker::augment_with_remembered_points(const ControllerObstacleObservation &observation,
+                                                                                         const TemporaryObstacleInstance &instance) const
+{
+    ControllerObstacleObservation augmented = observation;
+    augmented.points.reserve(observation.points.size() + instance.remembered_points.size());
+    augmented.weights.reserve(augmented.points.capacity());
+
+    if (augmented.weights.size() < observation.points.size())
+        augmented.weights.resize(observation.points.size(), 1.f);
+
+    const auto &state = instance.model.state();
+    for (const auto &remembered_point : instance.remembered_points)
+    {
+        augmented.points.push_back(to_room_point(state, remembered_point.local_point));
+        augmented.weights.push_back(1.f / (1.f + 4.f * remembered_point.rfe));
+    }
+
+    recompute_observation_summary(augmented,
+                                  params_ ? std::max(0.f, params_->temporary_obstacle_padding_m) : 0.f,
+                                  params_ ? std::max(0.f, params_->temporary_obstacle_occlusion_depth_m) : 0.f);
+    return augmented;
+}
+
+void ControllerObstacleTracker::update_remembered_points(TemporaryObstacleInstance &instance,
+                                                         const ControllerObstacleObservation &observation)
+{
+    auto &remembered_points = instance.remembered_points;
+    const auto &state = instance.model.state();
+
+    for (auto &remembered_point : remembered_points)
+    {
+        const auto slot = classify_remembered_edge_slot(state, remembered_point.local_point);
+        if (!slot.has_value())
+        {
+            remembered_point.rfe = kRememberedRfeMax + 1.f;
+            continue;
+        }
+
+        const Eigen::Vector2f room_point = to_room_point(state, remembered_point.local_point);
+        const float sdf = obstacle_sdf(state, room_point);
+        remembered_point.rfe = kRememberedRfeAlpha * remembered_point.rfe + sdf * sdf;
+    }
+
+    std::array<std::vector<std::pair<RememberedPoint, float>>, kRememberedEdgeCount * kRememberedSlotsPerEdge> bins;
+    for (const auto &remembered_point : remembered_points)
+    {
+        if (remembered_point.rfe > kRememberedRfeMax)
+            continue;
+
+        const auto slot = classify_remembered_edge_slot(state, remembered_point.local_point);
+        if (!slot.has_value())
+            continue;
+
+        bins[remembered_slot_index(*slot)].emplace_back(remembered_point, remembered_point.rfe);
+    }
+
+    for (const auto &point : observation.points)
+    {
+        const Eigen::Vector2f local_point = to_local_point(state, point);
+        const auto slot = classify_remembered_edge_slot(state, local_point);
+        if (!slot.has_value())
+            continue;
+
+        const RememberedPoint candidate{.local_point = local_point, .rfe = 0.f};
+        bins[remembered_slot_index(*slot)].emplace_back(candidate, slot->distance_to_edge);
+    }
+
+    remembered_points.clear();
+    for (auto &bin : bins)
+    {
+        std::sort(bin.begin(), bin.end(), [](const auto &lhs, const auto &rhs)
+        {
+            return lhs.second < rhs.second;
+        });
+
+        const int keep = std::min<int>(kRememberedPointsPerSlot, bin.size());
+        for (int index = 0; index < keep; ++index)
+            remembered_points.push_back(bin[index].first);
+    }
+}
+
+bool ControllerObstacleTracker::has_compelling_absence_evidence(std::uint64_t timestamp_ms,
+                                                                const ControllerRobotPose &robot_pose,
+                                                                const TemporaryObstacleInstance &instance)
+{
+    if (!params_ || instance.missed_updates < kRemovalEvidenceMinMissedUpdates)
+        return false;
+
+    const auto &state = instance.model.state();
+    const Eigen::Vector2f center_robot = robot_pose.as_transform().inverse() * state.center;
+    if (center_robot.y() <= params_->clearance_m * 0.25f)
+        return false;
+
+    const auto points_room = read_temporary_obstacle_points(timestamp_ms,
+                                                            robot_pose,
+                                                            state.center,
+                                                            instance.model.association_radius(),
+                                                            false);
+    if (points_room.size() < static_cast<std::size_t>(std::max(3, params_->temporary_obstacle_min_points / 2)))
+        return false;
+
+    const Eigen::Vector2f view_dir_room = state.center - robot_pose.pos;
+    const float view_norm = view_dir_room.norm();
+    if (view_norm < 1e-4f)
+        return false;
+
+    const Eigen::Vector2f away_local = Eigen::Rotation2Df(-state.yaw_rad) * (view_dir_room / view_norm);
+    const bool dominant_x = std::abs(away_local.x()) >= std::abs(away_local.y());
+    const float away_sign = dominant_x ? (away_local.x() >= 0.f ? 1.f : -1.f)
+                                      : (away_local.y() >= 0.f ? 1.f : -1.f);
+    const float half_width = state.width_m * 0.5f;
+    const float half_depth = state.depth_m * 0.5f;
+
+    int support_points = 0;
+    int penetrating_points = 0;
+    for (const auto &point_room : points_room)
+    {
+        const Eigen::Vector2f local = to_local_point(state, point_room);
+        const float sdf = obstacle_sdf(state, point_room);
+        if (std::abs(sdf) < kRemovalSupportDistanceThreshold)
+            ++support_points;
+
+        if (dominant_x)
+        {
+            if (std::abs(local.y()) > half_depth + kRemovalCrossAxisMargin)
+                continue;
+            const float near_face = -away_sign * half_width;
+            const float penetration = away_sign * (local.x() - near_face);
+            if (penetration > kRemovalPenetrationMargin)
+                ++penetrating_points;
+        }
+        else
+        {
+            if (std::abs(local.x()) > half_width + kRemovalCrossAxisMargin)
+                continue;
+            const float near_face = -away_sign * half_depth;
+            const float penetration = away_sign * (local.y() - near_face);
+            if (penetration > kRemovalPenetrationMargin)
+                ++penetrating_points;
+        }
+    }
+
+    return support_points <= 1 && penetrating_points >= kRemovalEvidenceMinPenetratingPoints;
+}
+
+void ControllerObstacleTracker::prune_expired_temporary_obstacles(std::uint64_t timestamp_ms)
+{
+    Q_UNUSED(timestamp_ms)
+    if (!params_)
+        return;
+
+    temporary_obstacles_.erase(std::remove_if(temporary_obstacles_.begin(),
+                                              temporary_obstacles_.end(),
+                                              [this](const auto &instance)
+                                              {
+                                                  return instance.existence_log_odds
+                                                      < params_->temporary_obstacle_existence_remove_threshold_log_odds;
+                                              }),
+                               temporary_obstacles_.end());
+}
+
+std::optional<std::size_t> ControllerObstacleTracker::match_temporary_obstacle(const ControllerObstacleObservation &observation) const
+{
+    std::optional<std::size_t> best_index;
+    float best_distance = std::numeric_limits<float>::max();
+    const float observation_match_radius = 0.5f * std::sqrt(observation.width_m * observation.width_m
+                                                           + observation.depth_m * observation.depth_m);
+
+    for (std::size_t index = 0; index < temporary_obstacles_.size(); ++index)
+    {
+        const auto &instance = temporary_obstacles_[index];
+        const float distance = (instance.model.state().center - observation.centroid).norm();
+        const float max_distance = std::max(instance.model.association_radius(), observation_match_radius + 0.2f);
+        if (distance <= max_distance && distance < best_distance)
+        {
+            best_distance = distance;
+            best_index = index;
+        }
+    }
+
+    return best_index;
+}
+
+ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64_t timestamp_ms) const
+{
+    ControllerPolygons obstacles;
+    std::ostringstream report;
+    if (!graph_ || !inner_eigen_api_ || !graph_state_ || graph_state_->room_name.empty())
+    {
+        if (obstacle_debug_report_ != "Obstacle debug: graph or inner api not ready")
+        {
+            obstacle_debug_report_ = "Obstacle debug: graph or inner api not ready";
+            std::print("{}\n", obstacle_debug_report_);
+            std::fflush(stdout);
+        }
+        return obstacles;
+    }
+
+    const auto time_query = params_ && params_->interpolate_rt ? DSR::RT_API::TimeQuery::Interpolated
+                                                               : DSR::RT_API::TimeQuery::Nearest;
+    auto is_robot_body_node = [this](const auto &node)
+    {
+        return graph_state_ && (node.id() == graph_state_->robot_id
+            || node.name() == graph_state_->robot_name
+            || node.type() == "robot"
+            || node.type() == "body"
+            || node.name() == "body");
+    };
+
+    auto obstacle_nodes = graph_->get_nodes_by_type("object");
+    bool using_fallback_nodes = false;
+    if (obstacle_nodes.empty())
+    {
+        using_fallback_nodes = true;
+        for (const auto &node : graph_->get_nodes())
+        {
+            if (is_robot_body_node(node))
+                continue;
+
+            const auto width_attr = graph_->get_attrib_by_name<width_m_att>(node);
+            const auto depth_attr = graph_->get_attrib_by_name<depth_m_att>(node);
+            if (!width_attr.has_value() || !depth_attr.has_value())
+                continue;
+
+            const auto translation = inner_eigen_api_->transform(graph_state_->room_name,
+                                                                 node.name(),
+                                                                 timestamp_ms,
+                                                                 "RT",
+                                                                 time_query);
+            const auto euler = inner_eigen_api_->get_euler_xyz_angles(graph_state_->room_name,
+                                                                      node.name(),
+                                                                      timestamp_ms,
+                                                                      "RT",
+                                                                      time_query);
+            if (!translation.has_value() || !euler.has_value())
+                continue;
+
+            obstacle_nodes.push_back(node);
+        }
+    }
+
+    report << "Obstacle debug: room='" << graph_state_->room_name << "' nodes=" << obstacle_nodes.size();
+    if (using_fallback_nodes)
+        report << " fallback=width_depth_rt";
+
+    for (const auto &node : obstacle_nodes)
+    {
+        if (is_robot_body_node(node))
+        {
+            report << " | node='" << node.name() << "' type='" << node.type() << "' skipped=self";
+            continue;
+        }
+
+        report << " | node='" << node.name() << "' type='" << node.type() << "'";
+        const auto width_attr = graph_->get_attrib_by_name<width_m_att>(node);
+        const auto depth_attr = graph_->get_attrib_by_name<depth_m_att>(node);
+        if (!width_attr.has_value() || !depth_attr.has_value())
+        {
+            report << " missing_attrs";
+            continue;
+        }
+
+        const float width_m = width_attr.value();
+        const float depth_m = depth_attr.value();
+        report << " size=(" << width_m << "," << depth_m << ")";
+        if (width_m <= 0.f || depth_m <= 0.f)
+        {
+            report << " invalid_size";
+            continue;
+        }
+
+        const auto translation = inner_eigen_api_->transform(graph_state_->room_name,
+                                                             node.name(),
+                                                             timestamp_ms,
+                                                             "RT",
+                                                             time_query);
+        const auto euler = inner_eigen_api_->get_euler_xyz_angles(graph_state_->room_name,
+                                                                  node.name(),
+                                                                  timestamp_ms,
+                                                                  "RT",
+                                                                  time_query);
+        if (!translation.has_value() || !euler.has_value())
+        {
+            report << " missing_rt";
+            continue;
+        }
+
+        const Eigen::Vector2f center(static_cast<float>(translation->x()), static_cast<float>(translation->y()));
+        const float yaw = static_cast<float>(euler->z());
+        auto polygon = make_obstacle_polygon(center, yaw, width_m, depth_m);
+        report << " center=(" << center.x() << "," << center.y() << ") yaw=" << yaw;
+        if (!polygon.empty())
+            report << " first_vertex=(" << polygon.front().x() << "," << polygon.front().y() << ")";
+        obstacles.push_back(std::move(polygon));
+    }
+
+    report << " | drawn=" << obstacles.size();
+    if (const auto report_str = report.str(); report_str != obstacle_debug_report_)
+    {
+        obstacle_debug_report_ = report_str;
+        std::print("{}\n", obstacle_debug_report_);
+        std::fflush(stdout);
+    }
+
+    return obstacles;
+}
+
+void ControllerObstacleTracker::update_active_obstacle_polygons(std::uint64_t timestamp_ms,
+                                                                rc::TrajectoryController &path_controller)
+{
+    prune_expired_temporary_obstacles(timestamp_ms);
+    obstacle_polygons_ = read_obstacle_polygons(timestamp_ms);
+    for (const auto &instance : temporary_obstacles_)
+        obstacle_polygons_.push_back(instance.model.polygon());
+    path_controller.set_static_obstacles(obstacle_polygons_);
+}
+
+void ControllerObstacleTracker::refresh_temporary_lidar_obstacle(std::uint64_t timestamp_ms,
+                                                                 const ControllerRobotPose &robot_pose,
+                                                                 rc::TrajectoryController &path_controller)
+{
+    if (!params_ || temporary_obstacles_.empty())
+        return;
+
+    prune_expired_temporary_obstacles(timestamp_ms);
+    for (auto &instance : temporary_obstacles_)
+    {
+        const auto observation = build_temporary_obstacle_observation(timestamp_ms,
+                                                                      robot_pose,
+                                                                      instance.model.state().center,
+                                                                      instance.model.association_radius(),
+                                                                      false);
+        if (!observation.has_value()
+            || (observation->centroid - instance.model.state().center).norm() > instance.model.association_radius())
+        {
+            ++instance.missed_updates;
+            if (has_compelling_absence_evidence(timestamp_ms, robot_pose, instance))
+                instance.existence_log_odds = std::clamp(instance.existence_log_odds
+                                                             - params_->temporary_obstacle_existence_absence_penalty,
+                                                         params_->temporary_obstacle_existence_min_log_odds,
+                                                         params_->temporary_obstacle_existence_max_log_odds);
+            else
+                instance.existence_log_odds = std::clamp(instance.existence_log_odds
+                                                             - params_->temporary_obstacle_existence_weak_miss_penalty,
+                                                         params_->temporary_obstacle_existence_min_log_odds,
+                                                         params_->temporary_obstacle_existence_max_log_odds);
+            continue;
+        }
+
+        const auto augmented_observation = augment_with_remembered_points(*observation, instance);
+        instance.free_energy = instance.model.update(augmented_observation);
+        update_remembered_points(instance, *observation);
+        int support_points = 0;
+        for (const auto &point : observation->points)
+        {
+            if (std::abs(obstacle_sdf(instance.model.state(), point)) < kRemovalSupportDistanceThreshold)
+                ++support_points;
+        }
+        const float positive_delta = params_->temporary_obstacle_existence_observation_bias
+                       + params_->temporary_obstacle_existence_support_gain * static_cast<float>(support_points)
+                       + params_->temporary_obstacle_existence_remembered_gain * static_cast<float>(instance.remembered_points.size());
+        instance.existence_log_odds = std::clamp(instance.existence_log_odds + positive_delta,
+                             params_->temporary_obstacle_existence_min_log_odds,
+                             params_->temporary_obstacle_existence_max_log_odds);
+        instance.last_seen_ms = timestamp_ms;
+        instance.expires_at_ms = 0;
+        instance.missed_updates = 0;
+    }
+
+    update_active_obstacle_polygons(timestamp_ms, path_controller);
+}
+
+std::vector<Eigen::Vector3f> ControllerObstacleTracker::read_recent_lidar_points_in_room(std::uint64_t timestamp_ms,
+                                                                                          int max_scans)
+{
+    std::vector<Eigen::Vector3f> points;
+    const int scan_count = std::clamp(max_scans, 1, 5);
+    const std::uint64_t anchor_timestamp_ms = last_lidar_timestamp_ms_.value_or(timestamp_ms);
+    const std::uint64_t step_ms = std::clamp(lidar_period_ms_, std::uint64_t{20}, std::uint64_t{250});
+    const std::uint64_t max_diff_ms = std::max<std::uint64_t>(20ULL, step_ms / 2);
+
+    for (int scan_index = 0; scan_index < scan_count; ++scan_index)
+    {
+        const std::uint64_t offset_ms = static_cast<std::uint64_t>(scan_index) * step_ms;
+        const std::uint64_t query_timestamp_ms = anchor_timestamp_ms > offset_ms
+            ? anchor_timestamp_ms - offset_ms
+            : 0ULL;
+
+        const auto [cloud_opt] = lidar_room_buffer_.read(query_timestamp_ms, max_diff_ms);
+        if (!cloud_opt.has_value())
+            continue;
+
+        const auto &[xs_room, ys_room, zs_room] = cloud_opt.value();
+        const std::size_t count = std::min({xs_room.size(), ys_room.size(), zs_room.size()});
+        for (std::size_t index = 0; index < count; ++index)
+        {
+            const float x_room = xs_room[index];
+            const float y_room = ys_room[index];
+            const float z_room = zs_room[index];
+            if (!std::isfinite(x_room) || !std::isfinite(y_room) || !std::isfinite(z_room))
+                continue;
+            points.emplace_back(x_room, y_room, z_room);
+        }
+    }
+
+    return points;
+}
+
+bool ControllerObstacleTracker::create_temporary_lidar_obstacle(std::uint64_t timestamp_ms,
+                                                                const ControllerRobotPose &robot_pose,
+                                                                const Eigen::Vector2f &blockage_center_room,
+                                                                float blockage_radius_m,
+                                                                rc::TrajectoryController &path_controller)
+{
+    if (!params_)
+        return false;
+
+    prune_expired_temporary_obstacles(timestamp_ms);
+
+    const float cluster_margin = std::max(0.f, params_->temporary_obstacle_cluster_margin_m);
+    const auto observation = build_temporary_obstacle_observation(timestamp_ms,
+                                                                  robot_pose,
+                                                                  blockage_center_room,
+                                                                  std::max(blockage_radius_m + cluster_margin, cluster_margin),
+                                                                  true);
+    if (!observation.has_value())
+        return false;
+
+    if (const auto matched_index = match_temporary_obstacle(*observation); matched_index.has_value())
+    {
+        auto &instance = temporary_obstacles_[matched_index.value()];
+        const auto augmented_observation = augment_with_remembered_points(*observation, instance);
+        instance.free_energy = instance.model.update(augmented_observation);
+        update_remembered_points(instance, *observation);
+        int support_points = 0;
+        for (const auto &point : observation->points)
+        {
+            if (std::abs(obstacle_sdf(instance.model.state(), point)) < kRemovalSupportDistanceThreshold)
+                ++support_points;
+        }
+        const float positive_delta = params_->temporary_obstacle_existence_observation_bias
+                       + params_->temporary_obstacle_existence_support_gain * static_cast<float>(support_points)
+                       + params_->temporary_obstacle_existence_remembered_gain * static_cast<float>(instance.remembered_points.size());
+        instance.existence_log_odds = std::clamp(instance.existence_log_odds + positive_delta,
+                             params_->temporary_obstacle_existence_min_log_odds,
+                             params_->temporary_obstacle_existence_max_log_odds);
+        instance.last_seen_ms = timestamp_ms;
+        instance.expires_at_ms = 0;
+        instance.missed_updates = 0;
+    }
+    else
+    {
+        ControllerObstacleState initial_state{.center = estimate_initial_obstacle_center(*observation),
+                                              .yaw_rad = observation->yaw_rad,
+                                              .width_m = observation->width_m,
+                                              .depth_m = observation->depth_m};
+        TemporaryObstacleInstance instance;
+        instance.id = next_temporary_obstacle_id_++;
+        instance.model = ControllerObstacleModel(initial_state, make_model_params());
+        instance.free_energy = instance.model.update(*observation);
+        update_remembered_points(instance, *observation);
+        instance.existence_log_odds = params_->temporary_obstacle_existence_init_log_odds;
+        instance.last_seen_ms = timestamp_ms;
+        instance.expires_at_ms = 0;
+        temporary_obstacles_.push_back(std::move(instance));
+    }
+
+    update_active_obstacle_polygons(timestamp_ms, path_controller);
+    return true;
+}
+
+ControllerPolygon ControllerObstacleTracker::make_obstacle_polygon(const Eigen::Vector2f &center,
+                                                                   float yaw,
+                                                                   float width_m,
+                                                                   float depth_m) const
+{
+    const float half_width = width_m * 0.5f;
+    const float half_depth = depth_m * 0.5f;
+    const Eigen::Rotation2Df rotation(yaw);
+
+    ControllerPolygon polygon;
+    polygon.reserve(4);
+    for (const Eigen::Vector2f &corner : {Eigen::Vector2f(-half_width, -half_depth),
+                                          Eigen::Vector2f(half_width, -half_depth),
+                                          Eigen::Vector2f(half_width, half_depth),
+                                          Eigen::Vector2f(-half_width, half_depth)})
+        polygon.push_back(center + rotation * corner);
+
+    return polygon;
+}
+
+bool ControllerObstacleTracker::handle_lidar_node(DSR::Node node_copy)
+{
+    if (!params_ || !inner_eigen_api_ || !graph_state_ || !graph_state_->ready())
+        return false;
+
+    auto &attrs = node_copy.attrs();
+    auto xs_it = attrs.find(laser_X_att::attr_name.data());
+    auto ys_it = attrs.find(laser_Y_att::attr_name.data());
+    auto zs_it = attrs.find(laser_Z_att::attr_name.data());
+    if (xs_it == attrs.end() || ys_it == attrs.end() || zs_it == attrs.end())
+        return false;
+
+    auto ts_it = attrs.find(laser_timestamp_att::attr_name.data());
+    const std::uint64_t timestamp_ms = ts_it != attrs.end()
+        ? static_cast<std::uint64_t>(std::max<std::int64_t>(0, static_cast<std::int64_t>(ts_it->second.uint64())))
+        : 0ULL;
+    if (timestamp_ms > 0 && last_lidar_timestamp_ms_.has_value() && timestamp_ms > last_lidar_timestamp_ms_.value())
+    {
+        const std::uint64_t diff_ms = timestamp_ms - last_lidar_timestamp_ms_.value();
+        if (diff_ms >= 20 && diff_ms <= 500)
+        {
+            const double blended_period_ms = 0.7 * static_cast<double>(lidar_period_ms_)
+                                           + 0.3 * static_cast<double>(diff_ms);
+            lidar_period_ms_ = static_cast<std::uint64_t>(std::clamp(blended_period_ms, 20.0, 500.0));
+        }
+    }
+    last_lidar_timestamp_ms_ = timestamp_ms;
+
+    const auto interp = params_->interpolate_rt ? DSR::RT_API::TimeQuery::Interpolated
+                                                : DSR::RT_API::TimeQuery::Nearest;
+    const auto room_from_lidar = inner_eigen_api_->get_transformation_matrix(graph_state_->room_name,
+                                                                             node_copy.name(),
+                                                                             timestamp_ms,
+                                                                             "RT",
+                                                                             interp);
+    if (!room_from_lidar.has_value())
+        return false;
+
+    auto xs = std::move(xs_it->second.float_vec());
+    auto ys = std::move(ys_it->second.float_vec());
+    auto zs = std::move(zs_it->second.float_vec());
+    const std::size_t raw_count = std::min({xs.size(), ys.size(), zs.size()});
+    if (raw_count == 0)
+        return false;
+
+    const auto room_from_lidar_matrix = room_from_lidar->matrix();
+    lidar_room_buffer_.put<0>(
+        rc::RawLidarPointVectors{
+            .xs = std::move(xs),
+            .ys = std::move(ys),
+            .zs = std::move(zs)},
+        timestamp_ms,
+        [room_from_lidar_matrix, raw_count](rc::RawLidarPointVectors &&raw_points, rc::LidarPointVectors &room_points)
+        {
+            auto &[room_xs, room_ys, room_zs] = room_points;
+            const auto &xs_in = raw_points.xs;
+            const auto &ys_in = raw_points.ys;
+            const auto &zs_in = raw_points.zs;
+            const std::size_t count = std::min({raw_count, xs_in.size(), ys_in.size(), zs_in.size()});
+            if (count == 0)
+                return;
+
+            const double m00 = room_from_lidar_matrix(0, 0);
+            const double m01 = room_from_lidar_matrix(0, 1);
+            const double m02 = room_from_lidar_matrix(0, 2);
+            const double m03 = room_from_lidar_matrix(0, 3);
+            const double m10 = room_from_lidar_matrix(1, 0);
+            const double m11 = room_from_lidar_matrix(1, 1);
+            const double m12 = room_from_lidar_matrix(1, 2);
+            const double m13 = room_from_lidar_matrix(1, 3);
+            const double m20 = room_from_lidar_matrix(2, 0);
+            const double m21 = room_from_lidar_matrix(2, 1);
+            const double m22 = room_from_lidar_matrix(2, 2);
+            const double m23 = room_from_lidar_matrix(2, 3);
+
+            room_xs.reserve(count);
+            room_ys.reserve(count);
+            room_zs.reserve(count);
+
+            for (std::size_t index = 0; index < count; ++index)
+            {
+                const float x = xs_in[index];
+                const float y = ys_in[index];
+                const float z = zs_in[index];
+                if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
+                    continue;
+                if (z < 0.15f || z > 1.6f)
+                    continue;
+
+                room_xs.push_back(static_cast<float>(m00 * x + m01 * y + m02 * z + m03));
+                room_ys.push_back(static_cast<float>(m10 * x + m11 * y + m12 * z + m13));
+                room_zs.push_back(static_cast<float>(m20 * x + m21 * y + m22 * z + m23));
+            }
+        });
+    return true;
+}
