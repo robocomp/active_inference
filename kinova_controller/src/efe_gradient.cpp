@@ -28,6 +28,15 @@ namespace
         }
         return 0.0;
     }
+
+    /// Yoshikawa manipulability μ = √det(J · Jᵀ). Clamped at 0 to survive
+    /// the tiny negative determinants that occur near singularities due
+    /// to floating-point cancellation.
+    inline double yoshikawa_mu(const Eigen::Matrix<double, 6, Kinematics::N_ARM_JOINTS>& J)
+    {
+        const double det = (J * J.transpose()).determinant();
+        return det > 0.0 ? std::sqrt(det) : 0.0;
+    }
 }
 
 std::array<double, Kinematics::N_ARM_JOINTS> efe_gradient_step(
@@ -42,14 +51,22 @@ std::array<double, Kinematics::N_ARM_JOINTS> efe_gradient_step(
     const auto J_lin = J.template topRows<3>();      // 3×7  d(pos)/dq
     const auto J_ang = J.template bottomRows<3>();   // 3×7  d(ω)/dq
 
-    // 2. Position gradient: q̇_p = −J_linᵀ · C_pos · (f(q) − x*).
-    //    C_pos is a diagonal precision matrix (the C⁻¹ of AIF's Gaussian
-    //    preference on EE position). Anisotropic weights let orientation
-    //    converge without being dominated by the position gradient in the
-    //    directions where the arm already sits close to target.
+    // 2. Damped-least-squares position step (Corke RVC §8.4).
+    //    Q     = J_lin · J_linᵀ + λ²I_3                    (3×3, SPD).
+    //    q̇_p  = −J_linᵀ · Q⁻¹ · (C_pos ⊙ err).
+    //    λ does double duty: bounds q̇ in singular directions AND folds
+    //    the velocity-effort penalty (Corke's L2 on ‖q̇‖) into the same
+    //    solve. C_pos keeps its anisotropic-precision semantics.
+    //    Q's LDLT factorisation is reused below for the null-space
+    //    projector if manipulability is active.
     const Eigen::Vector3d err_pos = pose.position - x_target;
+    const double lambda_sq = params.dls_lambda * params.dls_lambda;
+    const Eigen::Matrix3d Q =
+        J_lin * J_lin.transpose() + lambda_sq * Eigen::Matrix3d::Identity();
+    const Eigen::LDLT<Eigen::Matrix3d> Q_ldlt(Q);
+    const Eigen::Vector3d weighted_err = params.C_pos.cwiseProduct(err_pos);
     Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1> q_dot =
-        -J_lin.transpose() * params.C_pos.asDiagonal() * err_pos;
+        -J_lin.transpose() * Q_ldlt.solve(weighted_err);
 
     // 3. Orientation gradient (partial alignment of tool-z with z_des).
     //    From C_orient(q) = 1 − z_tool(q) · z_des, the chain rule yields
@@ -74,6 +91,38 @@ std::array<double, Kinematics::N_ARM_JOINTS> efe_gradient_step(
         const Eigen::Vector3d x_tool = pose.rotation.col(0);
         const Eigen::Vector3d cross  = x_tool.cross(params.desired_secondary);
         q_dot += params.gain_secondary * J_ang.transpose() * cross;
+    }
+
+    // 3c. Manipulability ascent in the null space of the DLS position task
+    //     (Corke RVC §8.4 redundancy resolution). ∂μ/∂q via central
+    //     differences — 14 extra arm_jacobian_full calls, ≈ 0.5 ms total at
+    //     20 ms cadence. The soft null-space projector
+    //         N = I − J_linᵀ Q⁻¹ J_lin
+    //     reuses the LDLT factorisation built above. With this projection
+    //     the manipulability term cannot disturb the EE position task; it
+    //     only spends the 4 redundant DOFs of the 7-DOF arm.
+    //     N.B. arm_jacobian_full(q±h) mutates kin.data_, so this MUST run
+    //     after every place that still reads J/J_lin/J_ang (they are local
+    //     copies, so fine), and we don't depend on kin's internal state
+    //     after this block.
+    if (params.gain_mu > 0.0)
+    {
+        constexpr double h = 1e-4;
+        Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1> grad_mu;
+        auto q_pert = q;
+        for (int i = 0; i < Kinematics::N_ARM_JOINTS; ++i)
+        {
+            q_pert[i]  = q[i] + h;
+            const double mu_p = yoshikawa_mu(kin.arm_jacobian_full(q_pert));
+            q_pert[i]  = q[i] - h;
+            const double mu_m = yoshikawa_mu(kin.arm_jacobian_full(q_pert));
+            q_pert[i]  = q[i];                          // restore for next axis
+            grad_mu(i) = (mu_p - mu_m) / (2.0 * h);
+        }
+        const Eigen::Vector3d J_grad_mu = J_lin * grad_mu;
+        const Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1> projected =
+            J_lin.transpose() * Q_ldlt.solve(J_grad_mu);
+        q_dot += params.gain_mu * (grad_mu - projected);
     }
 
     // 4. Uniform global scaling to respect velocity limits while preserving the

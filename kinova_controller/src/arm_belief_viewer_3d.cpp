@@ -418,15 +418,22 @@ private:
         }
     }
 
-    // Build a single GL_LINES batch each frame and submit it with one draw
-    // call. Replaces a QPainter overlay, which on QOpenGLWidget pays a heavy
-    // per-frame state-flush cost regardless of how few primitives it draws.
+    // Build two batches each frame and submit them with two draw calls:
+    //   (1) translucent triangle fill for the table's six faces, drawn with
+    //       alpha blending and depth-writes disabled so the wireframe and
+    //       arm meshes stay visible through it;
+    //   (2) the existing opaque GL_LINES batch (wireframe edges, bottle,
+    //       crosses), drawn with u_alpha = 1.
+    // Same shader, same VBO — only the u_alpha uniform, blend state and
+    // the (offset, count) of glDrawArrays change between passes.
     void draw_overlay_lines(const QMatrix4x4& view_proj)
     {
         if (line_shader_ == nullptr)
             return;
 
         overlay_vertices_.clear();
+        overlay_triangles_.clear();
+
         const auto add_line = [&](const Eigen::Vector3d& a,
                                   const Eigen::Vector3d& b,
                                   float r, float g, float bl)
@@ -434,18 +441,45 @@ private:
             overlay_vertices_.push_back({float(a.x()), float(a.y()), float(a.z()), r, g, bl});
             overlay_vertices_.push_back({float(b.x()), float(b.y()), float(b.z()), r, g, bl});
         };
+        const auto add_tri = [&](const Eigen::Vector3d& a,
+                                 const Eigen::Vector3d& b,
+                                 const Eigen::Vector3d& c,
+                                 float r, float g, float bl)
+        {
+            overlay_triangles_.push_back({float(a.x()), float(a.y()), float(a.z()), r, g, bl});
+            overlay_triangles_.push_back({float(b.x()), float(b.y()), float(b.z()), r, g, bl});
+            overlay_triangles_.push_back({float(c.x()), float(c.y()), float(c.z()), r, g, bl});
+        };
 
-        // Table wireframe (12 edges).
+        // Table: translucent filled faces + brighter wireframe overlay.
         if (table_corners_.size() == 8)
         {
+            // 6 faces × 2 triangles each. Vertex ordering doesn't matter
+            // because GL_CULL_FACE is off (see initializeGL).
+            static constexpr int faces[6][4] = {
+                {0, 1, 2, 3}, {4, 5, 6, 7},   // bottom, top
+                {0, 1, 5, 4}, {1, 2, 6, 5},   // -y, +x
+                {2, 3, 7, 6}, {3, 0, 4, 7},   // +y, -x
+            };
+            // Warm wood tone, brighter than the wireframe so the fill reads
+            // even when blended at α≈0.3.
+            constexpr float fr = 0.78f, fg = 0.58f, fb = 0.35f;
+            for (auto& f : faces)
+            {
+                add_tri(table_corners_[f[0]], table_corners_[f[1]], table_corners_[f[2]], fr, fg, fb);
+                add_tri(table_corners_[f[0]], table_corners_[f[2]], table_corners_[f[3]], fr, fg, fb);
+            }
+
             static constexpr int edges[12][2] = {
                 {0, 1}, {1, 2}, {2, 3}, {3, 0},
                 {4, 5}, {5, 6}, {6, 7}, {7, 4},
                 {0, 4}, {1, 5}, {2, 6}, {3, 7},
             };
+            // Punch up the edge brightness so they stand out against the
+            // translucent fill, instead of the previous muted brown.
             for (auto& e : edges)
                 add_line(table_corners_[e[0]], table_corners_[e[1]],
-                         0.667f, 0.510f, 0.353f);
+                         0.95f, 0.78f, 0.50f);
         }
 
         // Bottle cylinder (two rims + four verticals).
@@ -497,20 +531,51 @@ private:
         cross3d(target_,      tgt_h, 1.000f, 0.314f, 0.314f);  // target (red)
         cross3d(ee_position_, ee_h,  1.000f, 0.784f, 0.000f);  // EE    (yellow)
 
-        if (overlay_vertices_.empty())
+        if (overlay_vertices_.empty() and overlay_triangles_.empty())
             return;
 
         line_shader_->bind();
         line_shader_->setUniformValue("u_view_proj", view_proj);
 
+        // Pack triangles first (offsets [0..n_tri)), then lines (offsets
+        // [n_tri..n_tri+n_line)), in a single VBO upload.
+        const int n_tri  = int(overlay_triangles_.size());
+        const int n_line = int(overlay_vertices_.size());
+
         overlay_vao_.bind();
         overlay_vbo_.bind();
-        // Single dynamic upload; orphans the previous storage so the driver
-        // can pipeline frames without forcing a CPU↔GPU sync.
-        overlay_vbo_.allocate(overlay_vertices_.data(),
-                              int(overlay_vertices_.size() * sizeof(LineVertex)));
-        glLineWidth(1.5f);
-        glDrawArrays(GL_LINES, 0, int(overlay_vertices_.size()));
+        overlay_vbo_.allocate(int((n_tri + n_line) * sizeof(LineVertex)));
+        if (n_tri > 0)
+            overlay_vbo_.write(0,
+                               overlay_triangles_.data(),
+                               int(n_tri * sizeof(LineVertex)));
+        if (n_line > 0)
+            overlay_vbo_.write(int(n_tri * sizeof(LineVertex)),
+                               overlay_vertices_.data(),
+                               int(n_line * sizeof(LineVertex)));
+
+        // Pass 1 — translucent table fill. Don't write depth: keeps the
+        // arm meshes visible through the fill and lets the wireframe edges
+        // (drawn next) layer cleanly on top instead of z-fighting.
+        if (n_tri > 0)
+        {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDepthMask(GL_FALSE);
+            line_shader_->setUniformValue("u_alpha", 0.28f);
+            glDrawArrays(GL_TRIANGLES, 0, n_tri);
+            glDepthMask(GL_TRUE);
+            glDisable(GL_BLEND);
+        }
+
+        // Pass 2 — opaque overlay lines (table edges, bottle, crosses).
+        if (n_line > 0)
+        {
+            line_shader_->setUniformValue("u_alpha", 1.0f);
+            glLineWidth(1.5f);
+            glDrawArrays(GL_LINES, n_tri, n_line);
+        }
+
         overlay_vbo_.release();
         overlay_vao_.release();
         line_shader_->release();
@@ -533,8 +598,9 @@ private:
         static constexpr const char* kF = R"(
             #version 330 core
             in vec3 v_color;
+            uniform float u_alpha;
             out vec4 frag_color;
-            void main() { frag_color = vec4(v_color, 1.0); }
+            void main() { frag_color = vec4(v_color, u_alpha); }
         )";
         if (not line_shader_->addShaderFromSourceCode(QOpenGLShader::Vertex,   kV) or
             not line_shader_->addShaderFromSourceCode(QOpenGLShader::Fragment, kF) or
@@ -664,6 +730,7 @@ private:
     QOpenGLVertexArrayObject overlay_vao_;
     QOpenGLBuffer            overlay_vbo_{QOpenGLBuffer::VertexBuffer};
     std::vector<LineVertex>  overlay_vertices_;   // refilled each frame, kept to amortise allocations
+    std::vector<LineVertex>  overlay_triangles_;  // translucent face fill (GL_TRIANGLES), packed in front of overlay_vertices_ in the VBO
 
     // Orbital camera state (Webots convention).
     QVector3D camera_target_   = kInitialTarget;

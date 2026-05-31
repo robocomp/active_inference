@@ -116,7 +116,7 @@ void SpecificWorker::initialize()
 	//If you have more than one graph, you need to connect to the specific graph with the name
 	//graph_viewers.at("")->add_custom_widget_to_dock("CustomWidget", &custom_widget);
     arm_belief_viewer_ = std::make_unique<ArmBeliefViewer3D>();
-    arm_belief_viewer_->set_mesh_root("/home/pbustos/robocomp/components/webots-p3bot/protos/kinova_arm_meshes");
+    arm_belief_viewer_->set_mesh_root("/home/pbustos/robocomp/components/webots-kinova/protos/kinova_arm_meshes");
     if (graph_viewers.contains(""))
         graph_viewers.at("")->add_custom_widget_to_dock("beliefs_3d", arm_belief_viewer_.get());
 
@@ -463,6 +463,10 @@ void SpecificWorker::compute()
         params.desired_approach  = grasp.z_tool_des;
         params.desired_secondary = grasp.x_tool_des;
         params.gain_secondary    = 1.0;  // match gain_orient
+        // DLS replaces pure Jᵀ; λ also acts as Corke's velocity-effort cost.
+        params.dls_lambda        = 0.05;
+        // Manipulability ascent in J's null space — keep low for first run.
+        params.gain_mu           = 0.5;
 
         const auto q_dot = efe_gradient_step(*kinematics_, q, reach_target_, params);
         RoboCompKinovaArm::TJointSpeeds cmd;

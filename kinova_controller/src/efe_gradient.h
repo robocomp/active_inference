@@ -71,6 +71,23 @@ struct EFEParams
 
     /** Repulsion strength. Higher → stronger push away from limits. */
     double limit_gain = 5.0;
+
+    /** Damped-least-squares λ for the position step:
+     *      q̇_p = −J_linᵀ (J_lin J_linᵀ + λ²I)⁻¹ · (C_pos ⊙ err).
+     *  Plays two roles at once — Corke's "velocity effort" penalty (an
+     *  implicit L2 cost on ‖q̇‖) and the singular-direction regulariser
+     *  that keeps q̇ bounded near singularities. 0.05 is a typical starting
+     *  value; raise toward 0.1–0.2 if you see twitchy near-singular q̇. */
+    double dls_lambda = 0.05;
+
+    /** α_μ — Yoshikawa-manipulability ascent gain. Adds
+     *      q̇ += α_μ · N · ∂μ/∂q
+     *  where μ = √det(J Jᵀ) and N = I − J_linᵀ Q⁻¹ J_lin is the soft
+     *  null-space projector of the DLS position task — so the secondary
+     *  objective cannot disturb the EE position. ∂μ/∂q is computed by
+     *  central differences (≈ 0.5 ms / cycle). 0 disables (default).
+     *  Useful range 0.3 – 1.0. */
+    double gain_mu = 0.0;
 };
 
 /**
