@@ -749,6 +749,43 @@ void Viewer2D::draw_score_grid(const std::vector<std::pair<Eigen::Vector2f, floa
         score_grid_items_[i]->setVisible(false);
 }
 
+void Viewer2D::draw_ior_grid(const std::vector<std::pair<Eigen::Vector2f, float>>& cells,
+                              float cell_size)
+{
+    const std::size_t n = cells.size();
+
+    while (ior_grid_items_.size() < n)
+    {
+        auto* item = agv_->scene.addRect(0, 0, cell_size, cell_size);
+        item->setZValue(-4);   // above score grid (z=-5), below lidar/robot
+        item->setPen(Qt::NoPen);
+        ior_grid_items_.push_back(item);
+    }
+
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        const auto& [center, freshness] = cells[i];
+        // Never visited / fully stale (f=0) → dark exploration fog
+        // Just visited                (f=1) → bright warm light
+        // Smooth gradient encodes coverage: the path the robot has taken lights up
+        const float f = freshness;  // 0..1
+        // Never visited (f=0) → dark blue fog;  just visited (f=1) → bright sky-blue
+        const int r = static_cast<int>( 10 +  70 * f);  //  10.. 80
+        const int g = static_cast<int>( 15 + 185 * f);  //  15..200
+        const int b = static_cast<int>( 25 + 230 * f);  //  25..255
+        const int a = static_cast<int>( 60 + 140 * f);  //  60..200
+        auto* item = ior_grid_items_[i];
+        item->setRect(center.x() - cell_size * 0.5f,
+                      center.y() - cell_size * 0.5f,
+                      cell_size, cell_size);
+        item->setBrush(QColor(r, g, b, a));
+        item->setVisible(true);
+    }
+
+    for (std::size_t i = n; i < ior_grid_items_.size(); ++i)
+        ior_grid_items_[i]->setVisible(false);
+}
+
 void Viewer2D::draw_selected_grid_cell(const std::optional<Eigen::Vector2f>& center,
                                        float cell_size)
 {

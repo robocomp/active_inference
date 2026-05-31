@@ -222,6 +222,7 @@ void SpecificWorker::initialize()
     rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.IorCellSize", ep.ior_cell_size);
     rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.IorDecayTime", ep.ior_decay_time);
     rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.WIor", ep.w_ior);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.WPathInterest", ep.w_path_interest);
     rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.FimCornerSigma", ep.fim_corner_sigma);
     rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.FimMaxRange", ep.fim_max_range);
     rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "EpistemicController.ArrivalDistance", ep.arrival_distance);
@@ -327,16 +328,6 @@ void SpecificWorker::initialize()
 ///////////////////////////////////////////////////////////////////////////////
 void SpecificWorker::compute()
 {
-    const auto compute_now = std::chrono::steady_clock::now();
-    ++compute_fps_window_frames_;
-    const float fps_elapsed_s = std::chrono::duration<float>(compute_now - compute_fps_window_start_).count();
-    if (fps_elapsed_s >= 0.5f)
-    {
-        compute_fps_display_ = compute_fps_window_frames_ / fps_elapsed_s;
-        compute_fps_window_frames_ = 0;
-        compute_fps_window_start_ = compute_now;
-    }
-
     affordance_manager_.monitor_execution(G);
 
     const auto loc_res  = room_concept_.get_last_result();
@@ -515,32 +506,23 @@ void SpecificWorker::dsr_update_pose(const rc::RoomConcept::UpdateResult& res)
 
     auto parent_opt = G->get_node(parent_id);
     if (!parent_opt.has_value()) return;
-    auto child_opt = G->get_node(child_id);
 
-    const float x = room_node_created_ ? t_robot_to_room.x() : t.x();
-    const float y = room_node_created_ ? t_robot_to_room.y() : t.y();
+    const float x     = room_node_created_ ? t_robot_to_room.x() : t.x();
+    const float y     = room_node_created_ ? t_robot_to_room.y() : t.y();
     const float theta = room_node_created_ ? theta_robot_to_room : theta_room_to_robot;
 
-    rt_api->insert_or_assign_edge_RT(parent_opt.value(), child_id,
-                                     {x, y, 0.f},
-                                     {0.f, 0.f, theta});
-
+    // ── Covariance (SE2 3×3 packed into 6×6 flat row-major) ───────────────
     Eigen::Matrix3f cov_se2 = Eigen::Matrix3f::Identity();
     if (res.covariance.rows() >= 3 && res.covariance.cols() >= 3)
         cov_se2 = res.covariance.topLeftCorner<3, 3>();
 
-    // If we invert pose (robot->room), propagate covariance through the inverse map.
     if (room_node_created_)
     {
         const float c = std::cos(theta_room_to_robot);
         const float s = std::sin(theta_room_to_robot);
         Eigen::Matrix3f J = Eigen::Matrix3f::Zero();
-        J(0, 0) = -c;
-        J(0, 1) = -s;
-        J(0, 2) =  s * t.x() - c * t.y();
-        J(1, 0) =  s;
-        J(1, 1) = -c;
-        J(1, 2) =  c * t.x() + s * t.y();
+        J(0, 0) = -c;  J(0, 1) = -s;  J(0, 2) =  s * t.x() - c * t.y();
+        J(1, 0) =  s;  J(1, 1) = -c;  J(1, 2) =  c * t.x() + s * t.y();
         J(2, 2) = -1.f;
         cov_se2 = J * cov_se2 * J.transpose();
     }
@@ -550,15 +532,33 @@ void SpecificWorker::dsr_update_pose(const rc::RoomConcept::UpdateResult& res)
         for (int c = 0; c < 3; ++c)
             cov_flat[r * 6 + c] = cov_se2(r, c);
 
+    // ── All attributes written in one shot via normal API ───────────────────
     auto edge_rt = G->get_edge(parent_id, child_id, "RT");
     if (!edge_rt.has_value())
     {
-        qWarning() << "dsr_update_pose: edge RT not found after insert_or_assign_edge_RT";
-        return;
+        rt_api->insert_or_assign_edge_RT(parent_opt.value(), child_id,
+                                         {x, y, 0.f},
+                                         {0.f, 0.f, theta});
+        edge_rt = G->get_edge(parent_id, child_id, "RT");
+        if (!edge_rt.has_value())
+        {
+            qWarning() << "dsr_update_pose: failed to create RT edge"
+                       << "parent_id=" << parent_id
+                       << "child_id=" << child_id;
+            return;
+        }
     }
-    G->add_or_modify_attrib_local<rt_covariance_att>(edge_rt.value(), cov_flat);
-    G->insert_or_assign_edge(edge_rt.value());
 
+    G->add_or_modify_attrib_local<rt_translation_att>(
+        edge_rt.value(), std::vector<float>{x, y, 0.f});
+    G->add_or_modify_attrib_local<rt_rotation_euler_xyz_att>(
+        edge_rt.value(), std::vector<float>{0.f, 0.f, theta});
+    G->add_or_modify_attrib_local<rt_covariance_att>(edge_rt.value(), cov_flat);
+    G->add_or_modify_attrib_local<rt_translation_velocity_att>(
+        edge_rt.value(), std::vector<float>{last_robot_adv_speed_, last_robot_side_speed_, 0.f});
+    G->add_or_modify_attrib_local<rt_rotation_euler_xyz_velocity_att>(
+        edge_rt.value(), std::vector<float>{0.f, 0.f, last_robot_rot_speed_});
+    G->insert_or_assign_edge(edge_rt.value());
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -691,17 +691,22 @@ void SpecificWorker::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
     if (!G || !room_node_created_) return;
 
     auto& planner = epistemic_controller_.epistemic_planner();
+
+    // Always update robot state so mark_and_refresh uses the correct position.
+    epistemic_controller_.set_robot_state(res.robot_pose, res.covariance);
+
     if (affordance_manager_.consume_completion_event())
     {
         planner.clear_target();
+        planner.mark_and_refresh();   // keep path trail live in viewer
         return;
     }
 
     if (affordance_manager_.is_executing(G))
-        return;  // Sibling controller is executing current affordance.
-
-    // Feed the planner with the latest robot state
-    epistemic_controller_.set_robot_state(res.robot_pose, res.covariance);
+    {
+        planner.mark_and_refresh();   // stamp path + refresh IoR overlay during navigation
+        return;
+    }
 
     // Ask the planner for the current best target (handles dwell / arrival internally)
     const auto target_opt = planner.update_target();
@@ -836,6 +841,14 @@ void SpecificWorker::update_epistemic_overlay()
         score_cells.emplace_back(cell.center, cell.score);
     viewer_2d_->draw_score_grid(score_cells, planner.cell_size());
 
+    // IoR inhibition overlay: warm red fades out as visited cells recover
+    const auto& ior = planner.ior_cells();
+    std::vector<std::pair<Eigen::Vector2f, float>> ior_cells;
+    ior_cells.reserve(ior.size());
+    for (const auto& cell : ior)
+        ior_cells.emplace_back(cell.center, cell.freshness);
+    viewer_2d_->draw_ior_grid(ior_cells, planner.cell_size());
+
     const auto& current_target = planner.current_target();
     if (current_target.has_value() && !current_target->rotate_in_place)
     {
@@ -854,8 +867,6 @@ void SpecificWorker::update_epistemic_overlay()
 ///////////////////////////////////////////////////////////////////////////////
 void SpecificWorker::update_ui(const std::optional<rc::RoomConcept::UpdateResult>& loc_res)
 {
-    custom_widget.set_fps_text(QString("%1 Hz").arg(compute_fps_display_, 0, 'f', 1));
-
     if (!loc_res.has_value()) return;
     if (ts_plot_sdf_) ts_plot_sdf_->add_point("sdf_mse", loc_res->sdf_mse);
     if (ts_plot_fe_)
@@ -1083,6 +1094,8 @@ void SpecificWorker::operating_enter()
 void SpecificWorker::operating_loop()
 {
     compute();
+    if (auto v = find_graph_viewer(""); v)
+        v->set_external_fps(states.at("Operating")->getActualFps());
 }
 
 void SpecificWorker::degraded_enter()
@@ -1213,6 +1226,9 @@ void SpecificWorker::modify_node_attrs_slot(std::uint64_t id, const std::vector<
                                                                   odom.source_ts_ms);
                             odometry_buffer_.put<0>(std::move(odom), static_cast<std::uint64_t>(odom.recv_ts_ms));
                             last_robot_current_speed_timestamp_ = source_ts;
+                            last_robot_adv_speed_  = adv_value.value();
+                            last_robot_side_speed_ = side_value.value();
+                            last_robot_rot_speed_  = rot_value.value();
                         }
                     }
                 }

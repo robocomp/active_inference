@@ -125,6 +125,9 @@ class SpecificWorker : public GenericWorker
         rc::OdometryBuffer odometry_buffer_{20};
         std::uint64_t last_robot_ref_speed_timestamp_ = 0;
         std::uint64_t last_robot_current_speed_timestamp_ = 0;
+        float last_robot_adv_speed_  = 0.f;   // robot-frame forward velocity (m/s), updated from DSR
+        float last_robot_side_speed_ = 0.f;   // robot-frame lateral velocity (m/s)
+        float last_robot_rot_speed_  = 0.f;   // robot-frame angular velocity (rad/s)
 
         std::atomic<bool>      pose_saved_{false};
         std::optional<rc::LidarData> read_lidar_from_graph() const;
@@ -148,9 +151,6 @@ class SpecificWorker : public GenericWorker
         rc::TimeSeriesPlot* ts_plot_fe_  = nullptr;
         std::unique_ptr<rc::CameraVisualizer> camera_viz_;
         FPSCounter fps_counter_;
-        std::chrono::steady_clock::time_point compute_fps_window_start_ = std::chrono::steady_clock::now();
-        int compute_fps_window_frames_ = 0;
-        float compute_fps_display_ = 0.f;
         Eigen::Affine2f best_available_pose(const std::optional<rc::RoomConcept::UpdateResult>&, bool) const;
         void update_epistemic_overlay();
         void update_ui(const std::optional<rc::RoomConcept::UpdateResult>& loc_res);

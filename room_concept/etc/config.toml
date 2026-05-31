@@ -65,6 +65,7 @@ config_dir             = "etc"
 monitor_period_ms      = 500
 heartbeat_timeout_ms   = 3000
 rejoin_grace_ms        = 1500
+stale_grace_ms           = 30000  # ms a required peer may stay Stale before triggering Degraded (hard-crash fallback; DSR node deletion triggers immediately)
 agent_info_period_ms   = 1000
 
 [Owns]
@@ -261,6 +262,7 @@ WExploration       = 0.5    # weight: distance bonus (explore farther)
 IorCellSize        = 0.5    # inhibition-of-return grid resolution (m)
 IorDecayTime       = 120.0  # seconds until visited cell is fully stale
 WIor               = 2.0    # weight: staleness bonus
+WPathInterest      = 0.7    # blend weight: 0=target staleness only, 1=path staleness only (multiplicative IoR)
 ArrivalDistance    = 0.15   # target reached threshold (m)
 DwellTime          = 2.0    # seconds to pause after reaching target
 

@@ -151,6 +151,7 @@ std::vector<EpistemicPlanner::Target> EpistemicPlanner::evaluate_targets() const
     if (!room_bounds_set_ || !robot_state_set_)
     {
         self.cell_scores_.clear();
+        self.ior_cells_.clear();
         return {};
     }
 
@@ -162,6 +163,7 @@ std::vector<EpistemicPlanner::Target> EpistemicPlanner::evaluate_targets() const
         rot.rotate_in_place = true;
         rot.score = robot_cov_(2, 2);
         self.cell_scores_.clear();
+        self.ior_cells_.clear();
         return {rot};
     }
 
@@ -169,6 +171,7 @@ std::vector<EpistemicPlanner::Target> EpistemicPlanner::evaluate_targets() const
     if (candidates.empty())
     {
         self.cell_scores_.clear();
+        self.ior_cells_.clear();
         return {};
     }
 
@@ -189,9 +192,33 @@ std::vector<EpistemicPlanner::Target> EpistemicPlanner::evaluate_targets() const
         // Update cell's running FIM average
         self.visit_grid_.update_fim(pos, fim_gain);
 
-        const float dist_bonus = 1.f + params.w_exploration * t.distance;
-        const float ior_bonus = 1.f + params.w_ior * visit_grid_.staleness(pos, params.ior_decay_time, now);
-        t.score = fim_gain * dist_bonus * ior_bonus;
+        // IoR: staleness of the target cell ∈ [0,1], 0=just visited, 1=fully stale
+        const float staleness = visit_grid_.staleness(pos, params.ior_decay_time, now);
+
+        // Path staleness: mean staleness of intermediate cells along the straight-line
+        // path from robot to target. High = path goes through unexplored territory.
+        const auto rpos = robot_pos();
+        const int n_path = std::max(3, static_cast<int>(t.distance / params.ior_cell_size));
+        float path_sum = 0.f;
+        for (int s = 1; s < n_path; ++s)
+        {
+            const float alpha = static_cast<float>(s) / n_path;
+            path_sum += visit_grid_.staleness(rpos + alpha * (pos - rpos), params.ior_decay_time, now);
+        }
+        const float path_staleness = path_sum / static_cast<float>(std::max(1, n_path - 1));  // ∈ [0,1]
+
+        // Route staleness: blend of target cell and path cells.
+        // w_path_interest=0 → target staleness only (old behaviour)
+        // w_path_interest=1 → path staleness only
+        // Use as multiplicative IoR suppressor so a visited path to an unvisited target
+        // is penalised by the same power as a visited target, not just a small additive nudge.
+        const float route_staleness = (1.f - params.w_path_interest) * staleness
+                                    + params.w_path_interest * path_staleness;
+        const float ior_suppressor = std::pow(route_staleness, params.w_ior);
+
+        const float bonus = 1.f + params.w_exploration * t.distance;
+        // 1e-6 floor: when IoR suppresses everything, tie-break by FIM gain
+        t.score = fim_gain * ior_suppressor * bonus + 1e-6f;
         t.eigenvector_score = fim_gain;
         targets.push_back(t);
     }
@@ -199,11 +226,12 @@ std::vector<EpistemicPlanner::Target> EpistemicPlanner::evaluate_targets() const
     std::sort(targets.begin(), targets.end(),
               [](const Target& a, const Target& b) { return a.score > b.score; });
 
-    // Build cell score cache for visualisation (use grid cells, not candidates)
+    // Build cell score + IoR freshness caches for visualisation (use grid cells)
     if (visit_grid_.initialized)
     {
         self.cell_scores_.clear();
         self.cell_scores_.reserve(visit_grid_.cells.size());
+        self.ior_cells_.clear();
         for (int i = 0; i < static_cast<int>(visit_grid_.cells.size()); ++i)
         {
             const auto center = visit_grid_.cell_center(i);
@@ -213,8 +241,11 @@ std::vector<EpistemicPlanner::Target> EpistemicPlanner::evaluate_targets() const
                 continue;
             const auto& cell = visit_grid_.cells[i];
             const float stale = visit_grid_.staleness(center, params.ior_decay_time, now);
-            const float combined = cell.fim_gain * (1.f + params.w_ior * stale);
+            const float combined = cell.fim_gain * std::pow(stale, params.w_ior);
             self.cell_scores_.push_back({center, combined});
+            // IoR freshness: 1=just visited, 0=stale/never; only store meaningful cells
+            const float freshness = 1.f - stale;
+            self.ior_cells_.push_back({center, freshness});  // include all: 0=dark fog, 1=bright visited
         }
     }
 
@@ -231,17 +262,41 @@ std::optional<EpistemicPlanner::Target> EpistemicPlanner::select_target()
     if (targets.front().rotate_in_place)
         return targets.front();
 
-    // Weighted random selection from all candidates
-    std::vector<float> weights(targets.size());
-    for (std::size_t i = 0; i < targets.size(); ++i)
-        weights[i] = std::max(0.f, targets[i].score);
+    // Greedy argmax: targets are already sorted descending by score.
+    // The highest-scored candidate maximises FIM gain under IoR suppression —
+    // i.e. "the spot that reduces most uncertainty that we haven't visited recently".
+    return targets.front();
+}
 
-    const float total = std::accumulate(weights.begin(), weights.end(), 0.f);
-    if (total < 1e-12f)
-        return targets.front();
+// ===========================================================================
+// mark_and_refresh — stamps current robot position + refreshes overlay.
+// Used when the full update_target() path is skipped during navigation.
+void EpistemicPlanner::mark_and_refresh()
+{
+    if (!robot_state_set_ || !visit_grid_.initialized) return;
+    visit_grid_.mark_visited_with_falloff(robot_pos(), params.ior_path_radius, params.ior_decay_time);
+    refresh_ior_overlay();
+}
 
-    std::discrete_distribution<std::size_t> dist(weights.begin(), weights.end());
-    return targets[dist(rng_)];
+// refresh_ior_overlay — rebuilds ior_cells_ from the live visit grid.
+// Cheap: no FIM computation.  Called every cycle so the path overlay
+// reflects the robot's current position without waiting for target selection.
+// ===========================================================================
+void EpistemicPlanner::refresh_ior_overlay()
+{
+    if (!visit_grid_.initialized || !room_bounds_set_) return;
+    const auto now = std::chrono::steady_clock::now();
+    ior_cells_.clear();
+    for (int i = 0; i < static_cast<int>(visit_grid_.cells.size()); ++i)
+    {
+        const auto center = visit_grid_.cell_center(i);
+        if (!room_corners_.empty() &&
+            !corner_visibility::point_in_polygon(center, room_corners_))
+            continue;
+        const float stale = visit_grid_.staleness(center, params.ior_decay_time, now);
+        const float freshness = 1.f - stale;
+        ior_cells_.push_back({center, freshness});  // include all: 0=dark fog, 1=bright visited
+    }
 }
 
 // ===========================================================================
@@ -258,8 +313,11 @@ std::optional<EpistemicPlanner::Target> EpistemicPlanner::update_target()
         current_target_.reset();
     }
 
-    // ---- Update visit grid ----
-    visit_grid_.mark_visited(robot_pos());
+    // ---- Update visit grid: mark robot position with neighbourhood falloff ----
+    visit_grid_.mark_visited_with_falloff(robot_pos(), params.ior_path_radius, params.ior_decay_time);
+
+    // ---- Refresh IoR overlay every cycle so the viewer shows live path ----
+    refresh_ior_overlay();
 
     // ---- Arrival check ----
     if (current_target_.has_value() && !current_target_->rotate_in_place)

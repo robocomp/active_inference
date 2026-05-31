@@ -37,7 +37,15 @@ public:
         // ---- Inhibition of Return (visit grid) ----
         float ior_cell_size   = 0.5f;        // spatial resolution of the visit grid (m)
         float ior_decay_time  = 120.0f;      // seconds until a visited cell is fully "stale" again
-        float w_ior           = 2.0f;        // weight: staleness bonus
+        float w_ior           = 2.0f;        // exponent for IoR suppressor: score *= staleness^w_ior
+                                             //   (0=no suppression, 1=linear, 2=quadratic, etc.)
+                                             //   just-visited → staleness=0 → score=0 (hard inhibition)
+        float ior_path_radius = 1.0f;        // receptive-field radius for continuous path marking (m)
+                                             //   = 2 grid cells at default ior_cell_size=0.5m
+                                             //   cells within this radius are suppressed as the robot advances
+        float w_path_interest = 0.3f;        // weight: bonus for paths that traverse unvisited cells
+                                             //   path_interest = mean staleness of intermediate path cells ∈ [0,1]
+                                             //   higher → prefer routes through unexplored territory
 
         // ---- FIM scoring ----
         float fim_corner_sigma  = 0.04f;     // isotropic corner detection noise σ (m)
@@ -79,6 +87,12 @@ public:
     void clear_target() { current_target_.reset(); }
     const std::optional<Target>& current_target() const { return current_target_; }
 
+    /// Lightweight per-cycle update: stamps the current robot position in the
+    /// visit grid and refreshes the IoR overlay. Call this when the full
+    /// update_target() path is skipped (e.g. while a sibling agent is
+    /// executing the affordance) so the path trail stays live in the viewer.
+    void mark_and_refresh();
+
     // ---- Cell score data for visualisation ----
     struct CellScore
     {
@@ -86,6 +100,13 @@ public:
         float score;          // combined probability weight
     };
     const std::vector<CellScore>& cell_scores() const { return cell_scores_; }
+    /// Per-cell visit freshness for IoR overlay (1 = just visited, 0 = stale/never)
+    struct IorCell
+    {
+        Eigen::Vector2f center;
+        float freshness;      // 1=just visited, fades to 0 over ior_decay_time
+    };
+    const std::vector<IorCell>& ior_cells() const { return ior_cells_; }
     float cell_size() const { return params.ior_cell_size; }
 
     // ---- Accessors needed by Level 2 ----
@@ -105,6 +126,7 @@ private:
     bool is_angular_dominated() const;
     float score_fim_gain(const Eigen::Vector2f& candidate,
                          const Eigen::Matrix3f& prior_precision) const;
+    void refresh_ior_overlay();   // lightweight per-cycle rebuild of ior_cells_
 
     // ---- State ----
     Eigen::Vector2f room_min_{0, 0};
@@ -236,6 +258,8 @@ private:
 
     // Cell score cache (updated each evaluate_targets call)
     std::vector<CellScore> cell_scores_;
+    // IoR freshness overlay (updated each evaluate_targets call)
+    std::vector<IorCell> ior_cells_;
 
     // RNG for weighted random selection
     mutable std::mt19937 rng_{std::random_device{}()};
