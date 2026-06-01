@@ -118,6 +118,23 @@ cd /path/to/robot_concept
 cp etc/config.toml etc/local_config.toml
 ```
 
+## DSR Graph — Sensor Frames (`shadow.json`)
+
+The initial DSR graph is seeded from `shadow.json`.  Sensor nodes hang off the
+`body` node (id 250) via **RT** edges.
+
+| Edge (src → dst) | Translation (x, y, z) m | Rotation (rx, ry, rz) rad | Notes |
+|---|---|---|---|
+| body → lidar3D | (0, 0, 0) | (0, 0, 0) | **Identity** — lidar points are already delivered in the robot frame by the driver |
+| body → zed     | (0, −0.075, 0.945) | (0, 0, 0) | Camera optical centre |
+| body → imu     | (0, 0, 0) | (0, 0, 0) | Identity |
+
+> **Why identity for lidar?**  The real Lidar3D driver pre-transforms each scan
+> into the robot (body) frame before publishing, so no additional geometric
+> offset is needed here.  If you switch to a driver that publishes in the
+> sensor's own frame, update the `rt_translation` / `rt_rotation_euler_xyz`
+> entries for node 210 in `shadow.json` accordingly.
+
 ## Run
 
 ```bash

@@ -68,7 +68,7 @@ rejoin_grace_ms = 1500
 agent_info_period_ms = 1000
 
 [Owns]
-nodes = ["mind"]
+nodes = ["mind", "robot_concept 6"]
 subtrees = ["Shadow"]
 
 [Yolo]
