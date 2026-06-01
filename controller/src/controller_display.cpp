@@ -113,18 +113,6 @@ void ControllerDisplay::update(const std::optional<ControllerRobotPose> &robot_p
             viewer_2d_->update_robot(robot_pose->as_transform());
     }
 
-    if (robot_pose.has_value())
-    {
-        const float theta_deg = robot_pose->theta * 180.f / static_cast<float>(M_PI);
-        custom_widget_->set_pose_text(QStringLiteral("x %1 m   y %2 m   th %3 deg")
-                                          .arg(robot_pose->pos.x(), 0, 'f', 2)
-                                          .arg(robot_pose->pos.y(), 0, 'f', 2)
-                                          .arg(theta_deg, 0, 'f', 1));
-    }
-    else
-    {
-        custom_widget_->set_pose_text(QStringLiteral("Waiting for robot pose"));
-    }
 }
 
 void ControllerDisplay::set_command_text(const QString &text)

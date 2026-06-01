@@ -326,24 +326,29 @@ void Viewer2D::draw_lidar_points_from_buffer(int max_points)
     QBrush brush(QColor("ForestGreen"));
 
     std::size_t draw_index = 0;
-    for (std::size_t point_index = 0; point_index < count and draw_index < draw_count; point_index += stride, ++draw_index)
+    for (std::size_t point_index = 0; point_index < count && draw_index < draw_count; point_index += stride)
     {
-        if(zs[point_index]  > 0.2f) // filter out points that are too close (likely noise)
-            {
-                if (draw_index < lidar_items_.size())
-                {
-                    lidar_items_[draw_index]->setPos(xs[point_index], ys[point_index]);
-                    lidar_items_[draw_index]->setVisible(true);
-                }
-                else
-                {
-                    auto *item = agv_->scene.addEllipse(ellipse_rect, pen, brush);
-                    item->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
-                    item->setPos(xs[point_index], ys[point_index]);
-                    item->setZValue(5);
-                    lidar_items_.push_back(item);
-                }
-            }
+        if (draw_index < lidar_items_.size())
+        {
+            lidar_items_[draw_index]->setPos(xs[point_index], ys[point_index]);
+            lidar_items_[draw_index]->setVisible(true);
+        }
+        else
+        {
+            auto *item = agv_->scene.addEllipse(ellipse_rect, pen, brush);
+            item->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+            item->setPos(xs[point_index], ys[point_index]);
+            item->setZValue(5);
+            lidar_items_.push_back(item);
+        }
+
+        ++draw_index;
+    }
+
+    while (draw_index < lidar_items_.size())
+    {
+        lidar_items_[draw_index]->setVisible(false);
+        ++draw_index;
     }
 }
 

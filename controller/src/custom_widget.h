@@ -52,19 +52,6 @@ public:
         pose_layout->setContentsMargins(8, 4, 8, 4);
         pose_layout->setSpacing(4);
 
-        auto *pose_row = new QHBoxLayout();
-        pose_row->setSpacing(8);
-        auto *pose_title = new QLabel("Pose:", pose_panel);
-        pose_value_ = new QLabel("x 0.00 m   y 0.00 m   th 0.0 deg", pose_panel);
-        pose_value_->setTextInteractionFlags(Qt::TextSelectableByMouse);
-
-        QFont value_font = pose_value_->font();
-        value_font.setBold(true);
-        pose_value_->setFont(value_font);
-        pose_row->addWidget(pose_title);
-        pose_row->addWidget(pose_value_, 1);
-        pose_layout->addLayout(pose_row);
-
         auto *cmd_row = new QHBoxLayout();
         cmd_row->setSpacing(8);
         auto *cmd_title = new QLabel("Cmd vel:", pose_panel);
@@ -113,12 +100,6 @@ public:
 
     }
 
-    void set_pose_text(const QString &text)
-    {
-        if (pose_value_ != nullptr)
-            pose_value_->setText(text);
-    }
-
     void set_cmd_vel_text(const QString &text)
     {
         if (cmd_vel_value_ != nullptr)
@@ -132,7 +113,6 @@ public:
     QPushButton *mppi_paths_toggle_btn = nullptr;
 
 private:
-    QLabel *pose_value_ = nullptr;
     QLabel *cmd_vel_value_ = nullptr;
 };
 #endif

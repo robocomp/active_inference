@@ -203,10 +203,11 @@ float ControllerObstacleModel::compute_free_energy(const ControllerObstacleObser
     return likelihood + prior_energy + compactness + support_penalty;
 }
 
-float ControllerObstacleModel::update(const ControllerObstacleObservation &observation)
+float ControllerObstacleModel::update(const ControllerObstacleObservation &observation, float size_evidence)
 {
     const ControllerObstacleState aligned_observation = align_observation_to_prior(state_, observation);
     ControllerObstacleState clamped = state_;
+    const float clamped_size_evidence = std::clamp(size_evidence, 0.f, 1.f);
     const float pose_precision = std::clamp(pose_precision_,
                                             params_.pose_precision_min,
                                             params_.pose_precision_max);
@@ -271,7 +272,7 @@ float ControllerObstacleModel::update(const ControllerObstacleObservation &obser
                               + (params_.pose_precision_max - params_.pose_precision_min)
                                   / (1.f + pose_prediction_error);
         const float target_size_precision = params_.size_precision_min
-                              + (params_.size_precision_max - params_.size_precision_min)
+                              + clamped_size_evidence * (params_.size_precision_max - params_.size_precision_min)
                                   / (1.f + size_prediction_error);
         pose_precision_ = params_.pose_precision_alpha * pose_precision_
                   + (1.f - params_.pose_precision_alpha) * target_pose_precision;

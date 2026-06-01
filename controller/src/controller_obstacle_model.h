@@ -66,7 +66,7 @@ public:
                                                                          float padding_m,
                                                                          float occlusion_depth_m);
 
-    float update(const ControllerObstacleObservation &observation);
+    float update(const ControllerObstacleObservation &observation, float size_evidence = 1.f);
     float compute_free_energy(const ControllerObstacleObservation &observation,
                               const ControllerObstacleState &candidate) const;
 

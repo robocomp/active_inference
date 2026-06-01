@@ -5,34 +5,14 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <numeric>
 #include <print>
 #include <sstream>
 #include <unordered_set>
 
-namespace
-{
-constexpr int kRememberedEdgeCount = 4;
-constexpr int kRememberedSlotsPerEdge = 8;
-constexpr int kRememberedPointsPerSlot = 1;
-constexpr float kRememberedEdgeDistanceThreshold = 0.12f;
-constexpr float kRememberedRfeAlpha = 0.97f;
-constexpr float kRememberedRfeMax = 0.40f;
-constexpr int kRemovalEvidenceMinMissedUpdates = 4;
-constexpr int kRemovalEvidenceMinPenetratingPoints = 6;
-constexpr float kRemovalSupportDistanceThreshold = 0.14f;
-constexpr float kRemovalPenetrationMargin = 0.05f;
-constexpr float kRemovalCrossAxisMargin = 0.08f;
-constexpr float kPublishedObstacleHeightM = 0.8f;
-
-struct RememberedEdgeSlot
-{
-    int edge_index = 0;
-    int slot_index = 0;
-    float distance_to_edge = 0.f;
-};
-
-std::array<Eigen::Vector2f, kRememberedEdgeCount> make_local_obstacle_corners(const ControllerObstacleState &state)
+std::array<Eigen::Vector2f, ControllerObstacleTracker::kRememberedEdgeCount>
+ControllerObstacleTracker::make_local_obstacle_corners(const ControllerObstacleState &state)
 {
     const float half_width = state.width_m * 0.5f;
     const float half_depth = state.depth_m * 0.5f;
@@ -42,8 +22,9 @@ std::array<Eigen::Vector2f, kRememberedEdgeCount> make_local_obstacle_corners(co
             Eigen::Vector2f(-half_width, half_depth)};
 }
 
-std::optional<RememberedEdgeSlot> classify_remembered_edge_slot(const ControllerObstacleState &state,
-                                                                const Eigen::Vector2f &local_point)
+std::optional<ControllerObstacleTracker::RememberedEdgeSlot>
+ControllerObstacleTracker::classify_remembered_edge_slot(const ControllerObstacleState &state,
+                                                         const Eigen::Vector2f &local_point)
 {
     const auto corners = make_local_obstacle_corners(state);
     float best_distance = std::numeric_limits<float>::max();
@@ -80,14 +61,14 @@ std::optional<RememberedEdgeSlot> classify_remembered_edge_slot(const Controller
                               .distance_to_edge = best_distance};
 }
 
-int remembered_slot_index(const RememberedEdgeSlot &slot)
+int ControllerObstacleTracker::remembered_slot_index(const RememberedEdgeSlot &slot)
 {
     return slot.edge_index * kRememberedSlotsPerEdge + slot.slot_index;
 }
 
-Eigen::Vector2f estimate_obstacle_center(const ControllerObstacleObservation &observation,
-                                         float width_m,
-                                         float depth_m)
+Eigen::Vector2f ControllerObstacleTracker::estimate_obstacle_center(const ControllerObstacleObservation &observation,
+                                                                    float width_m,
+                                                                    float depth_m)
 {
     const Eigen::Vector2f view_dir = observation.centroid - observation.viewpoint;
     const float view_norm = view_dir.norm();
@@ -116,19 +97,19 @@ Eigen::Vector2f estimate_obstacle_center(const ControllerObstacleObservation &ob
     return observation.centroid + (target_projection - centroid_projection) * away_from_robot;
 }
 
-Eigen::Vector2f estimate_initial_obstacle_center(const ControllerObstacleObservation &observation)
+Eigen::Vector2f ControllerObstacleTracker::estimate_initial_obstacle_center(const ControllerObstacleObservation &observation)
 {
     return estimate_obstacle_center(observation, observation.width_m, observation.depth_m);
 }
 
-std::string published_obstacle_name(std::uint64_t obstacle_id)
+std::string ControllerObstacleTracker::published_obstacle_name(std::uint64_t obstacle_id)
 {
     return "obs" + std::to_string(obstacle_id);
 }
 
-float distance_visibility_scale(const ControllerParams *params,
-                                const ControllerRobotPose &robot_pose,
-                                const ControllerObstacleState &state)
+float ControllerObstacleTracker::distance_visibility_scale(const ControllerParams *params,
+                                                           const ControllerRobotPose &robot_pose,
+                                                           const ControllerObstacleState &state)
 {
     if (params == nullptr)
         return 1.f;
@@ -140,9 +121,9 @@ float distance_visibility_scale(const ControllerParams *params,
                       1.f);
 }
 
-void recompute_observation_summary(ControllerObstacleObservation &observation,
-                                   float padding_m,
-                                   float occlusion_depth_m)
+void ControllerObstacleTracker::recompute_observation_summary(ControllerObstacleObservation &observation,
+                                                              float padding_m,
+                                                              float occlusion_depth_m)
 {
     if (observation.points.size() < 3)
         return;
@@ -195,7 +176,6 @@ void recompute_observation_summary(ControllerObstacleObservation &observation,
         else
             observation.depth_m += std::min(occlusion_depth_m, occlusion_depth_m * dominant.y() / view_norm);
     }
-}
 }
 
 void ControllerObstacleTracker::set_params(const ControllerParams *params)
@@ -285,6 +265,7 @@ void ControllerObstacleTracker::sync_temporary_obstacles_to_dsr(std::uint64_t ti
 
     const float room_pos_x = graph_->get_attrib_by_name<pos_x_att>(room_node.value()).value_or(200.f);
     const float room_pos_y = graph_->get_attrib_by_name<pos_y_att>(room_node.value()).value_or(200.f);
+    bool inserted_obstacle_node = false;
 
     for (auto &instance : temporary_obstacles_)
     {
@@ -313,8 +294,7 @@ void ControllerObstacleTracker::sync_temporary_obstacles_to_dsr(std::uint64_t ti
             if (!node_id.has_value())
                 continue;
             instance.published_node_id = node_id.value();
-            if (graph_layout_callback_)
-                graph_layout_callback_();
+            inserted_obstacle_node = true;
             node_opt = graph_->get_node(node_id.value());
             if (!node_opt.has_value())
                 continue;
@@ -335,6 +315,9 @@ void ControllerObstacleTracker::sync_temporary_obstacles_to_dsr(std::uint64_t ti
                                           {0.f, 0.f, state.yaw_rad},
                                           timestamp_ms);
     }
+
+    if (inserted_obstacle_node && graph_layout_callback_)
+        graph_layout_callback_();
 }
 
 std::vector<Eigen::Vector2f> ControllerObstacleTracker::read_temporary_obstacle_points(std::uint64_t timestamp_ms,
@@ -363,10 +346,6 @@ std::vector<Eigen::Vector2f> ControllerObstacleTracker::read_temporary_obstacle_
 
     for (const auto &point3d_room : fused_points_room)
     {
-        const float z_room = point3d_room.z();
-        if (z_room < 0.05f || z_room > 1.8f)
-            continue;
-
         const Eigen::Vector2f point_room(point3d_room.x(), point3d_room.y());
         if ((point_room - region_center_room).norm() > search_radius)
             continue;
@@ -513,6 +492,26 @@ void ControllerObstacleTracker::update_remembered_points(TemporaryObstacleInstan
         for (int index = 0; index < keep; ++index)
             remembered_points.push_back(bin[index].first);
     }
+}
+
+float ControllerObstacleTracker::size_hardening_evidence(const TemporaryObstacleInstance &instance) const
+{
+    std::array<float, kRememberedEdgeCount * kRememberedSlotsPerEdge> slot_scores{};
+    for (const auto &remembered_point : instance.remembered_points)
+    {
+        const auto slot = classify_remembered_edge_slot(instance.model.state(), remembered_point.local_point);
+        if (!slot.has_value())
+            continue;
+
+        const float score = 1.f - std::clamp(remembered_point.rfe / std::max(1e-4f, kRememberedRfeMax), 0.f, 1.f);
+        slot_scores[remembered_slot_index(*slot)] = std::max(slot_scores[remembered_slot_index(*slot)], score);
+    }
+
+    float slot_score_sum = 0.f;
+    for (float score : slot_scores)
+        slot_score_sum += score;
+
+    return slot_score_sum / static_cast<float>(slot_scores.size());
 }
 
 bool ControllerObstacleTracker::has_compelling_absence_evidence(std::uint64_t timestamp_ms,
@@ -815,7 +814,7 @@ void ControllerObstacleTracker::refresh_temporary_lidar_obstacle(std::uint64_t t
         }
 
         const auto augmented_observation = augment_with_remembered_points(*observation, instance);
-        instance.free_energy = instance.model.update(augmented_observation);
+        instance.free_energy = instance.model.update(augmented_observation, size_hardening_evidence(instance));
         update_remembered_points(instance, *observation);
         int support_points = 0;
         for (const auto &point : observation->points)
@@ -897,7 +896,7 @@ bool ControllerObstacleTracker::create_temporary_lidar_obstacle(std::uint64_t ti
     {
         auto &instance = temporary_obstacles_[matched_index.value()];
         const auto augmented_observation = augment_with_remembered_points(*observation, instance);
-        instance.free_energy = instance.model.update(augmented_observation);
+        instance.free_energy = instance.model.update(augmented_observation, size_hardening_evidence(instance));
         update_remembered_points(instance, *observation);
         int support_points = 0;
         for (const auto &point : observation->points)
@@ -924,7 +923,7 @@ bool ControllerObstacleTracker::create_temporary_lidar_obstacle(std::uint64_t ti
         TemporaryObstacleInstance instance;
         instance.id = next_temporary_obstacle_id_++;
         instance.model = ControllerObstacleModel(initial_state, make_model_params());
-        instance.free_energy = instance.model.update(*observation);
+        instance.free_energy = instance.model.update(*observation, 0.f);
         update_remembered_points(instance, *observation);
         instance.existence_log_odds = params_->temporary_obstacle_existence_init_log_odds;
         instance.last_seen_ms = timestamp_ms;
@@ -991,7 +990,12 @@ bool ControllerObstacleTracker::handle_lidar_node(DSR::Node node_copy)
                                                                              timestamp_ms,
                                                                              "RT",
                                                                              interp);
-    if (!room_from_lidar.has_value())
+    const auto robot_from_lidar = inner_eigen_api_->get_transformation_matrix(graph_state_->robot_name,
+                                                                               node_copy.name(),
+                                                                               timestamp_ms,
+                                                                               "RT",
+                                                                               interp);
+    if (!room_from_lidar.has_value() || !robot_from_lidar.has_value())
         return false;
 
     auto xs = std::move(xs_it->second.float_vec());
@@ -1002,13 +1006,15 @@ bool ControllerObstacleTracker::handle_lidar_node(DSR::Node node_copy)
         return false;
 
     const auto room_from_lidar_matrix = room_from_lidar->matrix();
+    const auto robot_from_lidar_matrix = robot_from_lidar->matrix();
+    const bool robot_from_lidar_is_identity = robot_from_lidar_matrix.isApprox(Eigen::Matrix4d::Identity(), 1e-5);
     lidar_room_buffer_.put<0>(
         rc::RawLidarPointVectors{
             .xs = std::move(xs),
             .ys = std::move(ys),
             .zs = std::move(zs)},
         timestamp_ms,
-        [room_from_lidar_matrix, raw_count](rc::RawLidarPointVectors &&raw_points, rc::LidarPointVectors &room_points)
+        [room_from_lidar_matrix, robot_from_lidar_matrix, robot_from_lidar_is_identity, raw_count](rc::RawLidarPointVectors &&raw_points, rc::LidarPointVectors &room_points)
         {
             auto &[room_xs, room_ys, room_zs] = room_points;
             const auto &xs_in = raw_points.xs;
@@ -1030,6 +1036,10 @@ bool ControllerObstacleTracker::handle_lidar_node(DSR::Node node_copy)
             const double m21 = room_from_lidar_matrix(2, 1);
             const double m22 = room_from_lidar_matrix(2, 2);
             const double m23 = room_from_lidar_matrix(2, 3);
+            const double r20 = robot_from_lidar_matrix(2, 0);
+            const double r21 = robot_from_lidar_matrix(2, 1);
+            const double r22 = robot_from_lidar_matrix(2, 2);
+            const double r23 = robot_from_lidar_matrix(2, 3);
 
             room_xs.reserve(count);
             room_ys.reserve(count);
@@ -1042,12 +1052,20 @@ bool ControllerObstacleTracker::handle_lidar_node(DSR::Node node_copy)
                 const float z = zs_in[index];
                 if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
                     continue;
-                if (z < 0.15f || z > 1.6f)
+
+                const float robot_z = robot_from_lidar_is_identity
+                    ? z
+                    : static_cast<float>(r20 * x + r21 * y + r22 * z + r23);
+                if (robot_z < kTemporaryObstacleMinHeightAboveFloorM || robot_z > kTemporaryObstacleMaxHeightAboveFloorM)
                     continue;
 
-                room_xs.push_back(static_cast<float>(m00 * x + m01 * y + m02 * z + m03));
-                room_ys.push_back(static_cast<float>(m10 * x + m11 * y + m12 * z + m13));
-                room_zs.push_back(static_cast<float>(m20 * x + m21 * y + m22 * z + m23));
+                const float room_x = static_cast<float>(m00 * x + m01 * y + m02 * z + m03);
+                const float room_y = static_cast<float>(m10 * x + m11 * y + m12 * z + m13);
+                const float room_z = static_cast<float>(m20 * x + m21 * y + m22 * z + m23);
+
+                room_xs.push_back(room_x);
+                room_ys.push_back(room_y);
+                room_zs.push_back(room_z);
             }
         });
     return true;
