@@ -422,6 +422,16 @@ std::optional<rc::LidarData> SpecificWorker::read_lidar_from_graph() const
     const auto &zs = lz.value().get();
     const std::size_t npts = std::min({xs.size(), ys.size(), zs.size()});
 
+    // Points are in lidar3D sensor frame; bring them into robot frame using
+    // the RT edge robot→lidar3D (T_rl: p_robot = T_rl * p_lidar).
+    std::optional<Eigen::Affine3d> T_rl;
+    if (rt_api)
+    {
+        auto pose = rt_api->get_RT_pose_from_parent(lidar_node.value());
+        if (pose.has_value() && !pose->isApprox(Eigen::Affine3d::Identity()))
+            T_rl = pose.value();
+    }
+
     const float to_m = 1.f;
 
     std::vector<Eigen::Vector3f> points_high;
@@ -440,12 +450,12 @@ std::optional<rc::LidarData> SpecificWorker::read_lidar_from_graph() const
             continue;
         }
 
-        const float x_m = x_raw * to_m;
-        const float y_m = y_raw * to_m;
-        const float z_m = z_raw * to_m;
+        Eigen::Vector3f p(x_raw * to_m, y_raw * to_m, z_raw * to_m);
+        if (T_rl.has_value())
+            p = (T_rl.value() * p.cast<double>()).cast<float>();
 
-        if (z_m > min_h_m)
-            points_high.emplace_back(x_m, y_m, z_m);
+        if (p.z() > min_h_m)
+            points_high.emplace_back(p);
     }
 
     const auto now_ts = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -605,7 +615,7 @@ void SpecificWorker::dsr_create_room_and_reparent(const rc::RoomConcept::UpdateR
     trigger_graph_layout_twopi();
 
     dsr_update_pose(res);
-    //dsr_insert_bootstrap_table_if_missing();
+    dsr_create_wall_nodes();
 
     // Seed the epistemic planner with room geometry so it can generate candidates.
     // room_polygon is already computed at the top of this function.
@@ -620,54 +630,6 @@ void SpecificWorker::dsr_create_room_and_reparent(const rc::RoomConcept::UpdateR
         }
         epistemic_controller_.set_room_bounds(pmin, pmax);
         epistemic_controller_.set_room_polygon(room_polygon);
-    }
-}
-
-///////////////////////////////////////////////////////////////////////////////
-void SpecificWorker::dsr_insert_bootstrap_table_if_missing()
-{
-    if (not G || not rt_api || not params.BOOTSTRAP_TABLE_ENABLED )
-        return;
-
-    if (G->get_node("bootstrap_table").has_value())
-        return;
-
-    auto room_node = G->get_node(dsr_room_id_);
-    if (not room_node.has_value())
-    {
-        qWarning() << "DSR: cannot insert bootstrap table because room node is missing";
-        return;
-    }
-
-    DSR::Node table_node = DSR::Node::create<object_node_type>("bootstrap_table");
-    G->add_or_modify_attrib_local<width_m_att>(table_node, params.BOOTSTRAP_TABLE_WIDTH);
-    G->add_or_modify_attrib_local<depth_m_att>(table_node, params.BOOTSTRAP_TABLE_DEPTH);
-    G->add_or_modify_attrib_local<height_m_att>(table_node, params.BOOTSTRAP_TABLE_HEIGHT);
-    G->add_or_modify_attrib_local<level_att>(table_node, 3);
-    G->add_or_modify_attrib_local<parent_att>(table_node, dsr_room_id_);
-    G->add_or_modify_attrib_local<pos_x_att>(table_node, 260.f);
-    G->add_or_modify_attrib_local<pos_y_att>(table_node, 120.f);
-
-    const auto table_id_opt = G->insert_node(table_node);
-    if (not table_id_opt.has_value())
-    {
-        qWarning() << "DSR: failed to create bootstrap table node";
-        return;
-    }
-    trigger_graph_layout_twopi();
-
-    const float z = params.BOOTSTRAP_TABLE_HEIGHT * 0.5f;
-    rt_api->insert_or_assign_edge_RT(room_node.value(),
-                                     table_id_opt.value(),
-                                     {params.BOOTSTRAP_TABLE_X, params.BOOTSTRAP_TABLE_Y, z},
-                                     {0.f, 0.f, params.BOOTSTRAP_TABLE_YAW});
-
-    if (not G->get_edge(dsr_room_id_, table_id_opt.value(), "RT").has_value())
-    {
-        qWarning() << "DSR: bootstrap table node created but RT edge is missing"
-                   << "room_id=" << dsr_room_id_
-                   << "table_id=" << table_id_opt.value();
-        return;
     }
 }
 
@@ -769,6 +731,85 @@ void SpecificWorker::load_robot_body_dimensions_from_graph()
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+/// Create one DSR node of type "wall" per polygon edge (static, set once) and
+/// one "floor" node at the room-frame origin, all hanging from the room node.
+///
+/// Convention (internal polygon frame, which is CW in screen/Y-down space):
+///   X+ = along wall (walk direction from P_i to P_{i+1})
+///   Y+ = outward from room (left-hand perp of direction = (-dy, dx) for CW)
+///   Yaw stored in RT edge = atan2(dir.y, dir.x)
+///////////////////////////////////////////////////////////////////////////////
+void SpecificWorker::dsr_create_wall_nodes()
+{
+    if (!G || !rt_api) return;
+
+    auto room_node_opt = G->get_node(dsr_room_id_);
+    if (!room_node_opt.has_value()) { qWarning() << "dsr_create_wall_nodes: room node missing"; return; }
+
+    // Guard — idempotent: if wall nodes already exist under this room, skip.
+    if (!G->get_nodes_by_type("wall").empty())
+        return;
+
+    const auto polygon = room_concept_.nominal_room_polygon();
+    const int n = static_cast<int>(polygon.size());
+    if (n < 3) { qWarning() << "dsr_create_wall_nodes: polygon has fewer than 3 vertices"; return; }
+
+    const float half_h = params.room_height * 0.5f;
+
+    // ── Walls ────────────────────────────────────────────────────────────────
+    for (int i = 0; i < n; ++i)
+    {
+        const Eigen::Vector2f& p0 = polygon[i];
+        const Eigen::Vector2f& p1 = polygon[(i + 1) % n];
+        const float L = (p1 - p0).norm();
+        if (L < 0.1f)
+        {
+            qWarning() << "dsr_create_wall_nodes: skipping degenerate wall" << i << "(length" << L << "m)";
+            continue;
+        }
+
+        const Eigen::Vector2f dir = (p1 - p0) / L;
+        const float yaw = std::atan2(dir.y(), dir.x());
+        const Eigen::Vector2f mid = (p0 + p1) * 0.5f;
+
+        DSR::Node wall_node = DSR::Node::create<wall_node_type>("wall_" + std::to_string(i));
+        G->add_or_modify_attrib_local<width_m_att>(wall_node, L);
+        G->add_or_modify_attrib_local<height_m_att>(wall_node, params.room_height);
+        G->add_or_modify_attrib_local<parent_att>(wall_node, dsr_room_id_);
+        G->add_or_modify_attrib_local<level_att>(wall_node, 4);
+
+        const auto wall_id = G->insert_node(wall_node);
+        if (!wall_id.has_value())
+        {
+            qWarning() << "dsr_create_wall_nodes: failed to insert wall_" + QString::number(i);
+            continue;
+        }
+
+        rt_api->insert_or_assign_edge_RT(room_node_opt.value(),
+                                         wall_id.value(),
+                                         {mid.x(), mid.y(), half_h},
+                                         {0.f, 0.f, yaw});
+    }
+
+    // ── Floor ─────────────────────────────────────────────────────────────────
+    // Purely semantic parent for floor-attached objects; placed at room origin.
+    DSR::Node floor_node = DSR::Node::create<floor_node_type>("floor");
+    G->add_or_modify_attrib_local<parent_att>(floor_node, dsr_room_id_);
+    G->add_or_modify_attrib_local<level_att>(floor_node, 4);
+
+    const auto floor_id = G->insert_node(floor_node);
+    if (!floor_id.has_value())
+        qWarning() << "dsr_create_wall_nodes: failed to insert floor node";
+    else
+        rt_api->insert_or_assign_edge_RT(room_node_opt.value(),
+                                         floor_id.value(),
+                                         {0.f, 0.f, 0.f},
+                                         {0.f, 0.f, 0.f});
+
+    trigger_graph_layout_twopi();
+}
+
+///////////////////////////////////////////////////////////////////////////////
 void SpecificWorker::cleanup_room_graph_nodes()
 {
     if (!G) return;
@@ -781,6 +822,11 @@ void SpecificWorker::cleanup_room_graph_nodes()
                 G->delete_node(edge.to());
         G->delete_node(room_node);
     }
+    // Delete wall and floor nodes owned by this agent.
+    for (const auto& n : G->get_nodes_by_type("wall"))
+        G->delete_node(n);
+    if (auto n = G->get_node("floor"); n.has_value())
+        G->delete_node(n.value());
     // Fallback: delete the affordance node by its known name in case it is orphaned.
     if (auto n = G->get_node("afford"); n.has_value())
         G->delete_node(n.value());

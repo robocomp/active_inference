@@ -29,6 +29,42 @@ bin/room_concept etc/yourConfig # Execute the component
 ```
 -----
 -----
+## Room Layout SVG (`beta_layout.svg`)
+
+The room boundary is defined by a polygon in `beta_layout.svg` using the element id `room_contour`.
+
+### Coordinate convention
+
+Coordinates in the SVG file are in **metres**, using a **Y-up world frame** (standard mathematical convention).  SVG's native Y axis is downward, so the raw values stored in the file already represent world Y-up coordinates — do **not** negate Y when reading.
+
+### Winding order
+
+**Vertices must be listed in counter-clockwise (CCW) order in world coordinates (Y-up).**
+
+The SVG loader (`svg_room_loader`) applies `mirror_x = true`, which negates X and then reverses the vertex order to preserve CCW.  The resulting internal polygon is therefore **CW in screen/SVG (Y-down) space**, which is equivalent to CCW in world (Y-up) space.
+
+Outward wall normals in the internal (Y-down) frame are the **left-hand perpendicular** of each directed edge:
+
+$$\hat{n}_{\text{out}} = (-\hat{u}_y,\; \hat{u}_x), \quad \hat{u} = \frac{P_{i+1} - P_i}{\|P_{i+1} - P_i\|}$$
+
+### Wall numbering
+
+Each consecutive pair of vertices `(V_i, V_{i+1})` defines `wall_i`.  Walls are created as DSR nodes of type `wall`, children of the `room` node, with a static RT edge set once at room initialisation.  The RT edge encodes:
+
+| Component | Value |
+|-----------|-------|
+| translation | midpoint of the segment, Z = wall_height / 2 |
+| rz (yaw) | `atan2(dir.y, dir.x)` — X+ of wall frame along the wall |
+
+Y+ of the wall frame points **outward** from the room (left-hand perp of the walk direction in internal coordinates).
+
+### Editing the SVG
+
+- Use Inkscape.  The viewport is centred at the room origin.
+- Add or move vertices freely; the polygon must remain **simple** (no self-intersections) and **CCW in world/Y-up space**.
+- Near-duplicate vertices (distance < 10 cm) produce degenerate walls and are skipped at load time.
+
+-----
 # Developer Notes
 This section explains how to work with the generated code of room_concept, including what can be modified and how to use key features.
 ## Editable Files

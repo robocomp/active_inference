@@ -63,9 +63,9 @@ graph = true
 required_agent_names   = ["robot_concept"]
 config_dir             = "etc"
 monitor_period_ms      = 500
-heartbeat_timeout_ms   = 3000
-rejoin_grace_ms        = 1500
-stale_grace_ms           = 30000  # ms a required peer may stay Stale before triggering Degraded (hard-crash fallback; DSR node deletion triggers immediately)
+heartbeat_timeout_ms   = 15000  # wider window: room_concept runs at >100% CPU, DSR signals queue up
+rejoin_grace_ms        = 5000
+stale_grace_ms         = 120000  # 2 min grace: covers robot_concept restart time
 agent_info_period_ms   = 1000
 
 [Owns]

@@ -185,7 +185,7 @@ class SpecificWorker : public GenericWorker
         void update_dsr(const rc::RoomConcept::UpdateResult& res);
         void dsr_update_pose(const rc::RoomConcept::UpdateResult& res);
         void dsr_create_room_and_reparent(const rc::RoomConcept::UpdateResult& res);
-        void dsr_insert_bootstrap_table_if_missing();
+        void dsr_create_wall_nodes();
         void dsr_update_affordance(const rc::RoomConcept::UpdateResult& res);
         std::unique_ptr<DSR::RT_API> rt_api;
 
