@@ -48,6 +48,11 @@ void EpistemicPlanner::set_robot_footprint(float width_m, float length_m)
     }
 }
 
+void EpistemicPlanner::set_obstacle_footprints(std::vector<ObstacleFootprint> footprints)
+{
+    obstacle_footprints_ = std::move(footprints);
+}
+
 // ===========================================================================
 // Candidate generation
 // ===========================================================================
@@ -100,6 +105,26 @@ std::vector<Eigen::Vector2f> EpistemicPlanner::generate_candidates() const
     {
         if ((p - robot_pos()).squaredNorm() < min_d2)
             continue;
+
+        // Reject candidates that fall inside (or too close to) any object/obstacle footprint.
+        // Clearance = robot_footprint_radius_ so the robot body won't overlap the object.
+        bool blocked = false;
+        for (const auto& obs : obstacle_footprints_)
+        {
+            const Eigen::Vector2f d = p - obs.center;
+            const float c = std::cos(-obs.yaw);
+            const float s = std::sin(-obs.yaw);
+            const float lx = c * d.x() - s * d.y();
+            const float ly = s * d.x() + c * d.y();
+            if (std::abs(lx) < obs.half_w + robot_footprint_radius_ &&
+                std::abs(ly) < obs.half_d + robot_footprint_radius_)
+            {
+                blocked = true;
+                break;
+            }
+        }
+        if (blocked) continue;
+
         candidates.emplace_back(p);
         if (static_cast<int>(candidates.size()) >= params.max_candidates)
             break;

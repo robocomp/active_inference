@@ -91,6 +91,7 @@ class AgentPresenceMonitor
         [[nodiscard]] static std::uint64_t current_time_ns();
         [[nodiscard]] static const char *to_string(PeerState state);
         [[nodiscard]] static std::vector<std::uint32_t> sorted_unique(std::vector<int> ids);
+        [[nodiscard]] static std::string join_ids(const std::vector<std::uint32_t> &ids);
 
         const ConfigLoader &config_loader;
         std::shared_ptr<DSR::DSRGraph> graph;
@@ -100,6 +101,7 @@ class AgentPresenceMonitor
         int heartbeat_timeout_ms;
         int rejoin_grace_ms;
         int agent_info_period_ms;
+        int stale_grace_ms;
 
         bool desired_local_ready = false;
         bool started = false;
@@ -126,6 +128,7 @@ class AgentPresenceMonitor
         std::vector<QMetaObject::Connection> connections;
         QTimer timer;
         std::unique_ptr<DSR::AgentInfoAPI> agent_info_api;
+        std::unordered_map<std::uint32_t, std::uint64_t> required_stale_since_;
 };
 
 #endif

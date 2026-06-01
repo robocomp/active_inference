@@ -10,23 +10,7 @@
 #include <sstream>
 #include <unordered_set>
 #include <utility>
-
 #include <QMetaType>
-
-namespace
-{
-std::string join_ids(const std::vector<std::uint32_t> &ids)
-{
-    std::ostringstream stream;
-    for (std::size_t index = 0; index < ids.size(); ++index)
-    {
-        if (index > 0)
-            stream << ", ";
-        stream << ids[index];
-    }
-    return stream.str();
-}
-}
 
 AgentPresenceMonitor::AgentPresenceMonitor(const ConfigLoader &config_loader,
                                            std::shared_ptr<DSR::DSRGraph> graph,
@@ -38,6 +22,7 @@ AgentPresenceMonitor::AgentPresenceMonitor(const ConfigLoader &config_loader,
     , heartbeat_timeout_ms(config_loader.exists("Presence.heartbeat_timeout_ms") ? config_loader.get<int>("Presence.heartbeat_timeout_ms") : 3000)
     , rejoin_grace_ms(config_loader.exists("Presence.rejoin_grace_ms") ? config_loader.get<int>("Presence.rejoin_grace_ms") : 1500)
     , agent_info_period_ms(config_loader.exists("Presence.agent_info_period_ms") ? config_loader.get<int>("Presence.agent_info_period_ms") : 1000)
+    , stale_grace_ms(config_loader.exists("Presence.stale_grace_ms") ? config_loader.get<int>("Presence.stale_grace_ms") : 120000)
     , required_agent_ids(config_loader.exists("Presence.required_agent_ids")
                              ? sorted_unique(config_loader.get<std::vector<int>>("Presence.required_agent_ids"))
                              : std::vector<std::uint32_t>{})
@@ -414,11 +399,43 @@ void AgentPresenceMonitor::recompute_required_status()
     const auto previous_missing = missing_required_ids;
 
     missing_required_ids.clear();
+    const auto now_ns = current_time_ns();
     for (const auto required_id : required_agent_ids)
     {
         const auto it = peers.find(required_id);
-        if (it == peers.end() || it->second.state != PeerState::Ready)
+
+        // Peer not seen or definitively Missing (DSR node gone): count as lost immediately
+        if (it == peers.end() || it->second.state == PeerState::Missing)
+        {
+            required_stale_since_.erase(required_id);
             missing_required_ids.push_back(required_id);
+            continue;
+        }
+
+        // Peer is Ready: clear any stale grace timer and move on
+        if (it->second.state == PeerState::Ready)
+        {
+            required_stale_since_.erase(required_id);
+            continue;
+        }
+
+        // Peer is Stale or Booting: apply a grace window before declaring lost.
+        // Stale = DSR node alive but heartbeat silent — almost always a transient CPU/network
+        // delay. Only raise required_lost here as a last resort (hard crash without DSR cleanup).
+        if (stale_grace_ms > 0)
+        {
+            auto [sit, inserted] = required_stale_since_.try_emplace(required_id, now_ns);
+            const auto elapsed_ms = static_cast<int>((now_ns - sit->second) / 1'000'000ULL);
+            if (inserted)
+                std::cout << "[Presence] required peer " << required_id
+                          << " entered stale grace (limit=" << stale_grace_ms << " ms)" << std::endl;
+            if (elapsed_ms < stale_grace_ms)
+                continue;  // still within grace — do not count as missing yet
+            std::cout << "[Presence] required peer " << required_id
+                      << " stale grace EXPIRED after " << elapsed_ms
+                      << " ms — declaring lost" << std::endl;
+        }
+        missing_required_ids.push_back(required_id);
     }
 
     for (const auto required_id : missing_required_ids)
@@ -702,4 +719,16 @@ std::vector<std::uint32_t> AgentPresenceMonitor::sorted_unique(std::vector<int> 
             normalized.push_back(static_cast<std::uint32_t>(id));
     }
     return normalized;
+}
+
+std::string AgentPresenceMonitor::join_ids(const std::vector<std::uint32_t> &ids)
+{
+    std::ostringstream stream;
+    for (std::size_t index = 0; index < ids.size(); ++index)
+    {
+        if (index > 0)
+            stream << ", ";
+        stream << ids[index];
+    }
+    return stream.str();
 }

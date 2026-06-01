@@ -21,7 +21,7 @@
 #include <vector>
 #include <Eigen/Dense>
 
-#include "robust_loss.h"
+#include "../../common/robust_metrics/robust_metrics.h"
 
 // ─── Parameter structs ────────────────────────────────────────────────────────
 

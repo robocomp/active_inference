@@ -90,7 +90,7 @@ void SpecificWorker::initialize()
     QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
                      this, &SpecificWorker::save_robot_pose_once, Qt::UniqueConnection);
     QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
-                     this, &SpecificWorker::cleanup_room_graph_nodes, Qt::UniqueConnection);
+                     this, &SpecificWorker::cleanup_owned_nodes, Qt::UniqueConnection);
 
     // ── RoomConcept params ─────────────────────────────────────────────────
     rc::ConfigLoaderUtils::load_required<bool>(configLoader, "RoomConcept.PredictionEarlyExit", params.PREDICTION_EARLY_EXIT);
@@ -301,20 +301,60 @@ void SpecificWorker::initialize()
 
     room_concept_.start();
 
-    // ── Presence monitor ───────────────────────────────────────────────────
-    presence_monitor = std::make_unique<AgentPresenceMonitor>(configLoader, G, static_cast<std::uint32_t>(agent_id));
-    presence_monitor->on_required_ready = [this]() { emit presenceReady(); };
-    presence_monitor->on_required_lost  = [this]() { emit presenceLost(); };
-    presence_monitor->on_peer_restarted = [this](std::uint32_t id) {
-        std::cout << "[Presence] peer " << id << " restarted" << std::endl;
-    };
-    presence_monitor->on_optional_agent_lost  = [this](std::string name, std::uint32_t id) {
-        on_optional_peer_lost(name, id);
-    };
-    presence_monitor->on_optional_agent_ready = [this](std::string name, std::uint32_t id) {
-        on_optional_peer_ready(name, id);
-    };
-    presence_monitor->start();
+    // ── Presence coordinator ────────────────────────────────────────────────
+    presence_coordinator_.configure(configLoader, G, static_cast<std::uint32_t>(agent_id));
+    presence_coordinator_.set_transition_hooks({
+        .request_presence_ready = [this]() { emit presenceReady(); },
+        .request_presence_lost  = [this]() { emit presenceLost(); },
+    });
+    presence_coordinator_.set_peer_hooks({
+        .on_peer_restarted = [](std::uint32_t id)
+        {
+            qInfo() << "[Presence] peer" << id << "restarted";
+        },
+        .on_optional_peer_lost = [this](const std::string &name, std::uint32_t id)
+        {
+            on_optional_peer_lost(name, id);
+        },
+        .on_optional_peer_ready = [this](const std::string &name, std::uint32_t id)
+        {
+            on_optional_peer_ready(name, id);
+        },
+    });
+    presence_coordinator_.set_lifecycle_hooks({
+        .on_waiting_enter = [this]()
+        {
+            qInfo() << "[SM] -> Waiting";
+            const auto missing = presence_coordinator_.missing_required_names();
+            if (!missing.empty())
+            {
+                QString m;
+                for (const auto &label : missing)
+                    m += " " + QString::fromStdString(label);
+                qInfo() << "  missing:" << m;
+            }
+        },
+        .on_operating_enter = [this]()
+        {
+            qInfo() << "[SM] -> Operating: all required constraints satisfied";
+            room_concept_.stop();
+            room_concept_.start();
+        },
+        .on_operating_loop = [this]()
+        {
+            compute();
+            if (auto v = find_graph_viewer(""); v)
+                v->set_external_fps(states.at("Operating")->getActualFps());
+        },
+        .on_degraded_enter = [this]()
+        {
+            qInfo() << "[SM] -> Degraded: required peer lost. Cleaning up and exiting.";
+            room_concept_.stop();
+            cleanup_owned_nodes();
+            QTimer::singleShot(500, QCoreApplication::instance(), SLOT(quit()));
+        },
+    });
+    presence_coordinator_.start();
 
     // ── Wire mouse-driven pose reset ───────────────────────────────────────
     connect(viewer_2d_.get(), &rc::Viewer2D::robot_moved,
@@ -670,6 +710,9 @@ void SpecificWorker::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
         return;
     }
 
+    // Refresh obstacle exclusion zones from DSR graph before selecting the target.
+    update_planner_obstacle_footprints();
+
     // Ask the planner for the current best target (handles dwell / arrival internally)
     const auto target_opt = planner.update_target();
     if (!target_opt.has_value()) return;
@@ -692,6 +735,51 @@ void SpecificWorker::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
         gain,
         [this]() { trigger_graph_layout_twopi(); },
         [this]() { trigger_graph_layout_twopi(); });
+}
+
+///////////////////////////////////////////////////////////////////////////////
+/// Query the DSR graph for all "object" and "obstacle" type nodes that are
+/// direct children of the room node, read their RT pose (position + yaw in
+/// room frame) and width_m / depth_m attributes, and pass them to the
+/// epistemic planner so that candidate targets that fall inside or too close
+/// to any such footprint are excluded from target selection.
+void SpecificWorker::update_planner_obstacle_footprints()
+{
+    if (!G || !rt_api || !room_node_created_) return;
+
+    std::vector<rc::EpistemicPlanner::ObstacleFootprint> footprints;
+
+    auto collect = [&](const std::string& node_type)
+    {
+        for (const auto& node : G->get_nodes_by_type(node_type))
+        {
+            const auto w_opt = G->get_attrib_by_name<width_m_att>(node);
+            const auto d_opt = G->get_attrib_by_name<depth_m_att>(node);
+            if (!w_opt.has_value() || !d_opt.has_value()) continue;
+            const float half_w = w_opt.value() * 0.5f;
+            const float half_d = d_opt.value() * 0.5f;
+            if (half_w <= 0.f || half_d <= 0.f) continue;
+
+            const auto rt_opt = rt_api->get_RT_pose_from_parent(node);
+            if (!rt_opt.has_value()) continue;
+
+            const Eigen::Vector3d t = rt_opt->translation();
+            const float yaw = static_cast<float>(
+                std::atan2(rt_opt->linear()(1, 0), rt_opt->linear()(0, 0)));
+
+            footprints.push_back({
+                .center = {static_cast<float>(t.x()), static_cast<float>(t.y())},
+                .half_w = half_w,
+                .half_d = half_d,
+                .yaw    = yaw
+            });
+        }
+    };
+
+    collect("object");
+    collect("obstacle");
+
+    epistemic_controller_.epistemic_planner().set_obstacle_footprints(std::move(footprints));
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -1097,80 +1185,6 @@ void SpecificWorker::slot_toggle_lidar_points_display(bool checked)
 {
     if (viewer_2d_)
         viewer_2d_->set_lidar_points_visible(checked);
-}
-
-///////////////////////////////////////////////////////////////////////////////
-void SpecificWorker::waiting_enter()
-{
-    std::cout << "[SM] -> Waiting";
-    if (presence_monitor)
-    {
-        presence_monitor->set_local_ready(false);
-        const auto missing = presence_monitor->missing_required_names();
-        if (!missing.empty())
-        {
-            std::cout << " (missing:";
-            for (const auto &label : missing)
-                std::cout << ' ' << label;
-            std::cout << ')';
-        }
-    }
-    std::cout << std::endl;
-
-    if (presence_monitor && presence_monitor->all_required_ready())
-        emit presenceReady();
-}
-
-void SpecificWorker::waiting_loop()
-{
-    // PresenceMonitor drives transitions while required peers or nodes are missing.
-}
-
-void SpecificWorker::operating_enter()
-{
-    std::cout << "[SM] -> Operating: all required constraints satisfied" << std::endl;
-    // Restart the localization engine to flush stale RFE slots / lidar buffers
-    // from any previous session before accepting fresh DSR data.
-    room_concept_.stop();
-    room_concept_.start();
-    if (presence_monitor)
-        presence_monitor->set_local_ready(true);
-}
-
-void SpecificWorker::operating_loop()
-{
-    compute();
-    if (auto v = find_graph_viewer(""); v)
-        v->set_external_fps(states.at("Operating")->getActualFps());
-}
-
-void SpecificWorker::degraded_enter()
-{
-    std::cout << "[SM] -> Degraded: required peer lost. Cleaning up and exiting." << std::endl;
-    room_concept_.stop();
-    if (presence_monitor)
-        presence_monitor->set_local_ready(false);
-    // Remove all room-related nodes so the graph is clean before we exit.
-    cleanup_room_graph_nodes();
-    // Self-terminate: room_concept has no purpose without its required peers.
-    // A short delay lets the DSR node deletions propagate before the RTPS
-    // connection is torn down.
-    QTimer::singleShot(500, QCoreApplication::instance(), SLOT(quit()));
-}
-
-void SpecificWorker::degraded_loop()
-{
-    // Not reached: Degraded auto-transitions to Waiting on entered().
-}
-
-void SpecificWorker::on_optional_peer_lost(const std::string &name, std::uint32_t)
-{
-    std::cout << "[Presence] optional peer lost: " << name << std::endl;
-}
-
-void SpecificWorker::on_optional_peer_ready(const std::string &name, std::uint32_t)
-{
-    std::cout << "[Presence] optional peer ready: " << name << std::endl;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

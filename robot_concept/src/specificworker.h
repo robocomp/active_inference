@@ -30,7 +30,7 @@
 #include <thread>
 #include <vector>
 
-class AgentPresenceMonitor;
+#include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 
 /**
  * \brief Class SpecificWorker implements the core functionality of the component.
@@ -60,7 +60,8 @@ public slots:
 
 private:
 	bool startup_check_flag;
-	std::unique_ptr<AgentPresenceMonitor> presence_monitor;
+	AgentPresenceCoordinator presence_coordinator_;
+	bool owned_nodes_cleaned_ = false;
 
 	struct Params
 	{
@@ -103,6 +104,7 @@ private:
 	void degraded_enter();
 	void degraded_loop();
 
+	void cleanup_owned_nodes();
 	void on_optional_peer_lost(const std::string &name, std::uint32_t id);
 	void on_optional_peer_ready(const std::string &name, std::uint32_t id);
 

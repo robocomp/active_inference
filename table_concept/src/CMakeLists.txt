@@ -1,3 +1,5 @@
+set(ACTIVE_INFERENCE_COMMON_DIR "${CMAKE_CURRENT_LIST_DIR}/../../common")
+
 # Find PyTorch (same resolution strategy used in room_concept)
 if(NOT Torch_DIR)
   if(EXISTS "/home/robocomp/software/libtorch/share/cmake/Torch/TorchConfig.cmake")
@@ -22,7 +24,6 @@ find_package(Torch REQUIRED)
 
 # Sources set
 LIST(APPEND SOURCES
-  ../src/robust_loss.cpp
   ../src/specificworker.cpp
   ../src/table_model.cpp
   ../src/sample_queue.cpp
@@ -30,12 +31,12 @@ LIST(APPEND SOURCES
   ../src/prior_store.cpp
   ../src/table_affordance.cpp
   ../src/timeseries_plot.cpp
+  ${ACTIVE_INFERENCE_COMMON_DIR}/robust_metrics/robust_metrics.cpp
+  ${ACTIVE_INFERENCE_COMMON_DIR}/robust_metrics/robust_metrics_torch.cpp
 )
 
 # Headers set
 LIST(APPEND HEADERS
-  ../src/robust_loss.h
-  ../src/robust_loss_torch.h
   ../src/specificworker.h
   ../src/table_model.h
   ../src/sample_queue.h
@@ -44,6 +45,8 @@ LIST(APPEND HEADERS
   ../src/table_affordance.h
   ../src/timeseries_plot.h
   ../src/custom_widget.h
+  ${ACTIVE_INFERENCE_COMMON_DIR}/robust_metrics/robust_metrics.h
+  ${ACTIVE_INFERENCE_COMMON_DIR}/robust_metrics/robust_metrics_torch.h
 )
 
 

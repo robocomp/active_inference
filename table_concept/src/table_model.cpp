@@ -7,7 +7,7 @@
  */
 
 #include "table_model.h"
-#include "robust_loss_torch.h"
+#include "../../common/robust_metrics/robust_metrics_torch.h"
 #include <algorithm>
 #include <cmath>
 #include <numeric>

@@ -39,6 +39,12 @@ public:
                               double bottle_radius,
                               double bottle_height);
 
+    // Vertical support column (the arm's mast in Webots), drawn as a cylinder
+    // from `base` to `top` (world frame, m). radius<=0 hides it.
+    void set_column(const Eigen::Vector3d& base,
+                    const Eigen::Vector3d& top,
+                    double radius);
+
     void set_mesh_root(std::string mesh_root);
 
 signals:

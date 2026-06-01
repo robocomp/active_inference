@@ -18,7 +18,7 @@
  */
 #include "specificworker.h"
 
-#include "../../common/agent_presence_monitor/agent_presence_monitor.h"
+#include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 
 #include <ConfigLoader/ConfigLoader.h>
 
@@ -86,8 +86,8 @@ SpecificWorker::~SpecificWorker()
 		lidar_thread.join();
 	if (rgbd_thread.joinable())
 		rgbd_thread.join();
-	presence_monitor.reset();
 }
+
 
 void SpecificWorker::initialize()
 {
@@ -132,19 +132,57 @@ void SpecificWorker::initialize()
 	rgbd_thread  = std::thread(&SpecificWorker::read_rgbd_thread,   this);
 	qInfo() << __FUNCTION__ << "Started lidar and RGBD reader threads";
 
-	presence_monitor = std::make_unique<AgentPresenceMonitor>(configLoader, G, static_cast<std::uint32_t>(agent_id));
-	presence_monitor->on_required_ready = [this]() { emit presenceReady(); };
-	presence_monitor->on_required_lost = [this]() { emit presenceLost(); };
-	presence_monitor->on_peer_restarted = [this](std::uint32_t id) {
-		std::cout << "[Presence] peer " << id << " restarted" << std::endl;
-	};
-	presence_monitor->on_optional_agent_lost = [this](std::string name, std::uint32_t id) {
-		on_optional_peer_lost(name, id);
-	};
-	presence_monitor->on_optional_agent_ready = [this](std::string name, std::uint32_t id) {
-		on_optional_peer_ready(name, id);
-	};
-	presence_monitor->start();
+	presence_coordinator_.configure(configLoader, G, static_cast<std::uint32_t>(agent_id));
+	presence_coordinator_.set_transition_hooks({
+		.request_presence_ready = [this]() { emit presenceReady(); },
+		.request_presence_lost  = [this]() { emit presenceLost(); },
+	});
+	presence_coordinator_.set_peer_hooks({
+		.on_peer_restarted = [](std::uint32_t id)
+		{
+			qInfo() << "[Presence] peer" << id << "restarted";
+		},
+		.on_optional_peer_lost = [this](const std::string &name, std::uint32_t id)
+		{
+			on_optional_peer_lost(name, id);
+		},
+		.on_optional_peer_ready = [this](const std::string &name, std::uint32_t id)
+		{
+			on_optional_peer_ready(name, id);
+		},
+	});
+	presence_coordinator_.set_lifecycle_hooks({
+		.on_waiting_enter = [this]()
+		{
+			qInfo() << "[SM] -> Waiting";
+			const auto missing = presence_coordinator_.missing_required_names();
+			if (!missing.empty())
+			{
+				QString m;
+				for (const auto &label : missing)
+					m += " " + QString::fromStdString(label);
+				qInfo() << "  missing:" << m;
+			}
+		},
+		.on_operating_enter = []()
+		{
+			qInfo() << "[SM] -> Operating: all required constraints satisfied";
+		},
+		.on_operating_loop = [this]()
+		{
+			compute();
+			if (auto it = graph_viewers.find(""); it != graph_viewers.end() && it->second)
+				it->second->set_external_fps(states.at("Operating")->getActualFps());
+		},
+		.on_degraded_enter = []()
+		{
+			qInfo() << "[SM] -> Degraded: a required peer or node is no longer available";
+		},
+	});
+	presence_coordinator_.start();
+
+	QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
+	                 this, &SpecificWorker::cleanup_owned_nodes, Qt::UniqueConnection);
 }
 
 void SpecificWorker::compute()
@@ -177,70 +215,6 @@ int SpecificWorker::startup_check()
 	qInfo() << "Startup check";
 	QTimer::singleShot(200, QCoreApplication::instance(), SLOT(quit()));
 	return 0;
-}
-
-void SpecificWorker::waiting_enter()
-{
-	std::cout << "[SM] -> Waiting";
-	if (presence_monitor)
-	{
-		presence_monitor->set_local_ready(false);
-		const auto missing = presence_monitor->missing_required_names();
-		if (!missing.empty())
-		{
-			std::cout << " (missing:";
-			for (const auto &label : missing)
-				std::cout << ' ' << label;
-			std::cout << ')';
-		}
-	}
-	std::cout << std::endl;
-
-	if (presence_monitor && presence_monitor->all_required_ready())
-		emit presenceReady();
-}
-
-void SpecificWorker::waiting_loop()
-{
-	// PresenceMonitor drives transitions while required peers or nodes are missing.
-}
-
-void SpecificWorker::operating_enter()
-{
-	std::cout << "[SM] -> Operating: all required constraints satisfied" << std::endl;
-	if (presence_monitor)
-		presence_monitor->set_local_ready(true);
-}
-
-void SpecificWorker::operating_loop()
-{
-    compute();
-    auto it = graph_viewers.find("");
-    if (it != graph_viewers.end() && it->second)
-        it->second->set_external_fps(states.at("Operating")->getActualFps());
-}
-
-void SpecificWorker::degraded_enter()
-{
-	std::cout << "[SM] -> Degraded: a required peer or node is no longer available" << std::endl;
-	if (presence_monitor)
-		presence_monitor->set_local_ready(false);
-	// Do not delete Shadow here: robot_concept seeds its subtree only at startup via shadow.json.
-}
-
-void SpecificWorker::degraded_loop()
-{
-	// Not reached: Degraded auto-transitions to Waiting on entered().
-}
-
-void SpecificWorker::on_optional_peer_lost(const std::string &name, std::uint32_t)
-{
-	std::cout << "[Presence] optional peer lost: " << name << std::endl;
-}
-
-void SpecificWorker::on_optional_peer_ready(const std::string &name, std::uint32_t)
-{
-	std::cout << "[Presence] optional peer ready: " << name << std::endl;
 }
 
 

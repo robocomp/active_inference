@@ -40,6 +40,7 @@
 #include <genericworker.h>
 #include <Eigen/Dense>
 
+#include "../../common/robust_metrics/robust_metrics.h"
 #include "epistemic_planner.h"
 #include "prior_store.h"
 #include "sample_queue.h"

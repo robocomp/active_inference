@@ -53,7 +53,9 @@ set(ACTIVE_INFERENCE_COMMON_DIR "${CMAKE_CURRENT_LIST_DIR}/../../common")
 # ── Sources ────────────────────────────────────────────────────────────────────
 LIST(APPEND SOURCES
   ../src/specificworker.cpp
+  ../src/specificworker_presence.cpp
   ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_monitor/agent_presence_monitor.cpp
+  ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_coordinator/agent_presence_coordinator.cpp
   ../src/viewer_2d.cpp
   ../src/svg_room_loader.cpp
   ../src/room_concept.cpp
@@ -73,6 +75,7 @@ LIST(APPEND SOURCES
 LIST(APPEND HEADERS
   ../src/specificworker.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_monitor/agent_presence_monitor.h
+  ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_coordinator/agent_presence_coordinator.h
   ../src/viewer_2d.h
   ../src/svg_room_loader.h
   ../src/room_concept.h

@@ -252,6 +252,14 @@ public:
         update();
     }
 
+    void set_column(const Eigen::Vector3d& base, const Eigen::Vector3d& top, double radius)
+    {
+        column_base_   = base;
+        column_top_    = top;
+        column_radius_ = radius;
+        update();
+    }
+
 protected:
     void initializeGL() override
     {
@@ -513,6 +521,44 @@ private:
                 add_line(bot[(k * N) / 4], top[(k * N) / 4], 0.314f, 0.863f, 0.863f);
         }
 
+        // Vertical support column (the Webots mast from shoulder to floor):
+        // grey cylinder, side-wall fill (so it reads as solid and occludes the
+        // table's far edges) + wireframe rings/verticals.
+        if (column_radius_ > 0.0)
+        {
+            const Eigen::Vector3d axis = column_top_ - column_base_;
+            const double len = axis.norm();
+            if (len > 1e-6)
+            {
+                const Eigen::Vector3d axis_n = axis / len;
+                const Eigen::Vector3d ref = std::abs(axis_n.z()) < 0.9
+                                            ? Eigen::Vector3d::UnitZ()
+                                            : Eigen::Vector3d::UnitX();
+                const Eigen::Vector3d e1 = axis_n.cross(ref).normalized();
+                const Eigen::Vector3d e2 = axis_n.cross(e1).normalized();
+                constexpr int N = 16;
+                std::array<Eigen::Vector3d, N> cbot{}, ctop{};
+                for (int i = 0; i < N; ++i)
+                {
+                    const double a = 2.0 * M_PI * double(i) / N;
+                    const Eigen::Vector3d radial =
+                        column_radius_ * (std::cos(a) * e1 + std::sin(a) * e2);
+                    cbot[i] = column_base_ + radial;
+                    ctop[i] = column_top_  + radial;
+                }
+                for (int i = 0; i < N; ++i)
+                {
+                    const int j = (i + 1) % N;
+                    add_tri(cbot[i], cbot[j], ctop[j], 0.60f, 0.62f, 0.66f);   // side wall
+                    add_tri(cbot[i], ctop[j], ctop[i], 0.60f, 0.62f, 0.66f);
+                    add_line(cbot[i], cbot[j], 0.80f, 0.82f, 0.86f);           // rings
+                    add_line(ctop[i], ctop[j], 0.80f, 0.82f, 0.86f);
+                }
+                for (int k = 0; k < 4; ++k)
+                    add_line(cbot[(k * N) / 4], ctop[(k * N) / 4], 0.80f, 0.82f, 0.86f);
+            }
+        }
+
         // 3-axis cross markers in world space. Length scales with camera
         // distance so the marker stays a consistent on-screen size regardless
         // of zoom — the same intent the QPainter version had via its screen-
@@ -554,21 +600,26 @@ private:
                                overlay_vertices_.data(),
                                int(n_line * sizeof(LineVertex)));
 
-        // Pass 1 — translucent table fill. Don't write depth: keeps the
-        // arm meshes visible through the fill and lets the wireframe edges
-        // (drawn next) layer cleanly on top instead of z-fighting.
+        // Pass 1 — translucent table/column fill, WRITING depth (with a polygon
+        // offset that pushes faces slightly back). This is the hidden-line step:
+        // the front faces occupy the depth buffer so the box/column far edges
+        // drawn next fail the depth test and are hidden, while the near edges —
+        // coincident with the offset-back faces — still pass and show on top.
         if (n_tri > 0)
         {
             glEnable(GL_BLEND);
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-            glDepthMask(GL_FALSE);
-            line_shader_->setUniformValue("u_alpha", 0.28f);
-            glDrawArrays(GL_TRIANGLES, 0, n_tri);
+            glEnable(GL_POLYGON_OFFSET_FILL);
+            glPolygonOffset(1.0f, 1.0f);
             glDepthMask(GL_TRUE);
+            line_shader_->setUniformValue("u_alpha", 0.45f);
+            glDrawArrays(GL_TRIANGLES, 0, n_tri);
+            glDisable(GL_POLYGON_OFFSET_FILL);
             glDisable(GL_BLEND);
         }
 
-        // Pass 2 — opaque overlay lines (table edges, bottle, crosses).
+        // Pass 2 — overlay lines (table/column edges, bottle, crosses), depth-
+        // tested against the fill above so self-occluded (far) edges are hidden.
         if (n_line > 0)
         {
             line_shader_->setUniformValue("u_alpha", 1.0f);
@@ -725,6 +776,10 @@ private:
     Eigen::Vector3d              bottle_axis_     = Eigen::Vector3d::UnitZ();
     double                       bottle_radius_   = 0.0;
     double                       bottle_height_   = 0.0;
+    // Vertical support column (Webots mast), world frame. radius<=0 → hidden.
+    Eigen::Vector3d              column_base_     = Eigen::Vector3d::Zero();
+    Eigen::Vector3d              column_top_      = Eigen::Vector3d::Zero();
+    double                       column_radius_   = 0.0;
     std::unique_ptr<QOpenGLShaderProgram> shader_;
     std::unique_ptr<QOpenGLShaderProgram> line_shader_;
     QOpenGLVertexArrayObject overlay_vao_;
@@ -791,6 +846,14 @@ void ArmBeliefViewer3D::update_scene_objects(const std::vector<Eigen::Vector3d>&
     if (gl_panel_ != nullptr)
         gl_panel_->set_scene_objects(table_corners, bottle_origin, bottle_axis,
                                      bottle_radius, bottle_height);
+}
+
+void ArmBeliefViewer3D::set_column(const Eigen::Vector3d& base,
+                                   const Eigen::Vector3d& top,
+                                   double radius)
+{
+    if (gl_panel_ != nullptr)
+        gl_panel_->set_column(base, top, radius);
 }
 
 void ArmBeliefViewer3D::update_beliefs(const std::array<double, 7>& joint_angles,

@@ -140,6 +140,13 @@ private:
 	static constexpr double REACH_TOLERANCE_M   = 0.02;  // 2 cm — "arrived"
 	bool arrived_logged_ = false;
 
+	// Phase-1 bring-up gate: when set (Controller.approach_only), the grasp FSM
+	// drives to the standoff with the gripper open + correctly oriented and then
+	// HOLDS there instead of committing to Inserting. Lets us validate the
+	// approach + gripper configuration in isolation before enabling the grasp.
+	bool approach_only_ = false;
+	bool approach_hold_logged_ = false;
+
 	// Tip-trajectory logging (diagnose approach speed/shape). When tip_log_ is
 	// set the ActiveEFE block prints one "[tiplog] ..." CSV line per cycle and
 	// tracks the previous tip pose to report the measured Cartesian speed.
@@ -200,12 +207,13 @@ private:
 	static constexpr float  GRASP_FORCE_THRESH   = 1.0f;  // finger force → object held (TUNE)
 	static constexpr int    CLOSING_TIMEOUT_TICKS = 100;  // ~2 s closing w/o force → miss
 	static constexpr double LIFT_HEIGHT_M        = 0.12;  // how high to pick the bottle
-	// Random place target box (robot/arm-base frame, m): a conservative
-	// reachable patch of the table. z is taken from the grasped bottle so its
-	// base lands back on the table surface.
-	static constexpr double PLACE_X_MIN = 0.35, PLACE_X_MAX = 0.55;
-	static constexpr double PLACE_Y_MIN = -0.20, PLACE_Y_MAX = 0.20;
+	// Place target = the grasp point displaced WITHIN the table plane (the plane
+	// ⟂ the bottle's long axis, which is the true table normal — the arm mount is
+	// tilted ~30° so arm-base z is NOT world-up). Displacing in-plane keeps the
+	// bottle at the same height above the real table surface, upright, regardless
+	// of mount tilt. Sampled as a random in-plane radius/heading.
 	static constexpr double PLACE_MIN_MOVE_M    = 0.10;  // ≥ this far from the pick spot
+	static constexpr double PLACE_MAX_MOVE_M    = 0.20;  // ≤ this far (stay reachable)
 	static constexpr int    PLACE_TIMEOUT_TICKS = 300;   // ~6 s safety per place move
 	static constexpr int    RELEASE_TICKS       = 25;    // ~0.5 s to let the bottle go
 
@@ -223,12 +231,30 @@ private:
 	std::unique_ptr<DSR::RT_API>         rt_api_;
 	std::unique_ptr<DSR::InnerEigenAPI>  inner_eigen_api_;
 
-	// Webots scene-object DEF names.
+	// World-frame state. The controller runs in WORLD coordinates: kinematics_'s
+	// base_tf_ is set to the arm's world pose (from the Webots P3Bot node) so FK
+	// reports world coords, and grasp/place targets are world poses pulled from
+	// Webots. arm_base_world_ is T_world_armbase; bottle_pos/axis_world_ are the
+	// latest bottle world position and long axis, refreshed each cycle.
+	Eigen::Isometry3d arm_base_world_   = Eigen::Isometry3d::Identity();
+	Eigen::Vector3d   bottle_pos_world_ {0.0, 0.0, 0.0};
+	Eigen::Vector3d   bottle_axis_world_{0.0, 0.0, 1.0};
+	Eigen::Isometry3d table_world_      = Eigen::Isometry3d::Identity();  // T_world_table
+	bool              scene_world_valid_ = false;   // table/bottle world poses populated
+	bool              base_tf_set_      = false;
+	// Install base_tf_ from the live P3Bot world pose; idempotent, safe to retry.
+	void refresh_arm_base_world();
+
+	// Webots scene-object DEF/name strings (find_scene_node resolves either).
 	static constexpr const char* WEBOTS_BOTTLE_DEF = "bottle";
 	static constexpr const char* WEBOTS_TABLE_DEF  = "table";
+	static constexpr const char* WEBOTS_ROBOT_DEF  = "P3Bot";        // body/mount node
+	static constexpr const char* WEBOTS_ARM_DEF    = "kinova_arm_r"; // arm base_link (child of P3Bot)
 
-	// Pull bottle+table world poses from Webots, project bottle into the table
-	// frame, and write the result as the DSR table→bottle RT edge.
+	// Pull robot+table+bottle world poses from Webots and refresh the DSR RT
+	// tree: robot→table (table expressed in the arm-base frame, so the viewer
+	// and grasp targeting match the real Webots mount height/rotation) and
+	// table→bottle. Replaces the stale static robot→table value in kinova2.json.
 	void update_bottle_pose_in_dsr();
 
 	// Build a side-grasp target: read bottle pose in the DSR "robot" frame via

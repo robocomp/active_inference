@@ -115,6 +115,13 @@ public:
     /** Per-joint velocity limit (rad/s) declared in the URDF, for the 7 arm joints. */
     std::array<double, N_ARM_JOINTS> arm_joint_velocity_limits() const;
 
+    /** Install the arm-base mount transform applied to every FK output. Set to
+     *  the arm's world pose (T_world_armbase, from the Webots P3Bot node) so FK,
+     *  the Jacobian, tool_pose and the viewer all report WORLD coordinates —
+     *  z is up, the table is at its true world height, and targets can be given
+     *  directly in world frame. Defaults to identity (raw URDF base_link frame). */
+    void set_base_transform(const Eigen::Isometry3d& T_world_base) { base_tf_ = T_world_base; }
+
     /** Dump model summary (nq, nv, joint names + their idx_q/nv) to std::cout. */
     void print_info() const;
 

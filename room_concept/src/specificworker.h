@@ -36,7 +36,7 @@
 #include "timeseries_plot.h"
 #include "camera_visualizer.h"
 #include "../../common/affordance_manager/affordance_manager.h"
-#include "../../common/agent_presence_monitor/agent_presence_monitor.h"
+#include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 #include <atomic>
 #include <fps/fps.h>
 #include "custom_widget.h"
@@ -117,7 +117,8 @@ class SpecificWorker : public GenericWorker
         Params params;
 
         bool startup_check_flag;
-        std::unique_ptr<AgentPresenceMonitor> presence_monitor;
+        AgentPresenceCoordinator presence_coordinator_;
+        bool owned_nodes_cleaned_ = false;
 
         // ── Velocity / odometry buffers (thread-safe) ──────────────────────────
         rc::HighLidarBuffer high_lidar_buffer_{3};
@@ -161,6 +162,7 @@ class SpecificWorker : public GenericWorker
         void slot_show_camera_visualization();
         void slot_toggle_lidar_points_display(bool checked);
 
+        void cleanup_owned_nodes();
         void waiting_enter();
         void waiting_loop();
         void operating_enter();
@@ -186,6 +188,7 @@ class SpecificWorker : public GenericWorker
         void dsr_update_pose(const rc::RoomConcept::UpdateResult& res);
         void dsr_create_room_and_reparent(const rc::RoomConcept::UpdateResult& res);
         void dsr_create_wall_nodes();
+        void update_planner_obstacle_footprints();
         void dsr_update_affordance(const rc::RoomConcept::UpdateResult& res);
         std::unique_ptr<DSR::RT_API> rt_api;
 

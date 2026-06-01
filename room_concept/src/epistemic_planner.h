@@ -21,6 +21,8 @@ namespace rc
  * Also handles angular-dominance detection (rotate-in-place), target
  * lifecycle (arrival, dwell timer), and visit-grid bookkeeping.
  */
+
+
 class EpistemicPlanner
 {
 public:
@@ -69,11 +71,24 @@ public:
     EpistemicPlanner();
     explicit EpistemicPlanner(Params params);
 
+    /// Axis-aligned oriented bounding box of an object/obstacle in room frame.
+    struct ObstacleFootprint
+    {
+        Eigen::Vector2f center;   // room-frame position (m)
+        float half_w = 0.f;       // half-width  along local X (m)
+        float half_d = 0.f;       // half-depth  along local Y (m)
+        float yaw    = 0.f;       // orientation relative to room frame (rad)
+    };
+
     // ---- State setters ----
     void set_room_bounds(const Eigen::Vector2f& min_corner, const Eigen::Vector2f& max_corner);
     void set_room_polygon(const std::vector<Eigen::Vector2f>& vertices);
     void set_robot_state(const Eigen::Affine2f& pose, const Eigen::Matrix3f& covariance);
     void set_robot_footprint(float width_m, float length_m);
+
+    /// Replace the list of occupied object/obstacle footprints used to exclude
+    /// candidate targets.  Typically refreshed every compute cycle from the DSR graph.
+    void set_obstacle_footprints(std::vector<ObstacleFootprint> footprints);
 
     // ---- Target selection (public API) ----
     std::vector<Target> evaluate_targets() const;
@@ -141,6 +156,9 @@ private:
     Eigen::Matrix3f robot_cov_ = Eigen::Matrix3f::Identity();
     bool robot_state_set_ = false;
     float robot_footprint_radius_ = 0.f;
+
+    // Object/obstacle exclusion zones (updated each cycle from DSR graph)
+    std::vector<ObstacleFootprint> obstacle_footprints_;
 
     // Persistent target
     std::optional<Target> current_target_;

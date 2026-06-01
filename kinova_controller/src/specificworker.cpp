@@ -134,7 +134,9 @@ void SpecificWorker::initialize()
     // unchanged; flip them in etc/config for headless diagnosis.
     try { run_requested_ = configLoader.get<bool>("Controller.auto_start"); } catch (...) {}
     try { tip_log_        = configLoader.get<bool>("Controller.tip_log");   } catch (...) {}
+    try { approach_only_  = configLoader.get<bool>("Controller.approach_only"); } catch (...) {}
     if (run_requested_) std::print("[ui] auto_start: run requested from config\n");
+    if (approach_only_) std::print("[ui] approach_only: FSM will hold at the standoff\n");
 
     // Rest pose, tunable without recompiling: Controller.rest_pose = "j1 .. j7"
     // (rad). Lets us iterate the "ready over the table, camera-up" posture by
@@ -164,6 +166,8 @@ void SpecificWorker::initialize()
     {
         kinematics_ = std::make_unique<Kinematics>(URDF_PATH);
         kinematics_->print_info();
+        // Put FK into world frame using the live P3Bot pose before any metric.
+        refresh_arm_base_world();
         const auto ee_neutral = kinematics_->forward_kinematics_neutral();
         std::print("[Kinematics] tool_frame at neutral config (world frame): "
                    "[{:+.4f}, {:+.4f}, {:+.4f}] m\n",
@@ -183,6 +187,53 @@ void SpecificWorker::initialize()
                        sk[4].z() - sk[2].z(), p.rotation(2, 1), p.rotation(2, 2), mu);
         }
 
+        // ── One-shot scored rest-pose search (TEMPORARY), in WORLD frame now
+        // that base_tf_ is the live arm pose. Want a "ready over the table"
+        // posture: EE hovering ~0.18 m above the 0.74 m table near the bottle
+        // workspace (world target below), with good manipulability so the
+        // approach starts close and dexterous.
+        if (base_tf_set_)
+        {
+            // Diagnostic: can the arm reach the standoff WITH the side-grasp
+            // orientation (tool +Z toward the bottle horizontally, tool +Y up)?
+            // Score = position-to-standoff + orientation mismatch − μ bonus. If
+            // the best score still has large angle/low μ, the side-grasp pose is
+            // near-singular here and we need a different strategy, not a re-tune.
+            // TOP-DOWN feasibility: hover above the bottle, tool +Z pointing
+            // straight down at the cap. ydes left free-ish (any horizontal).
+            const Eigen::Vector3d standoff(-0.07, -0.11, 1.00);   // world, above bottle
+            const Eigen::Vector3d zdes(0.0, 0.0, -1.0);
+            const Eigen::Vector3d ydes(0.0, 0.0, 1.0);
+            struct Cand { double score; std::array<double,7> a; Eigen::Vector3d ee;
+                          double mu, zang, yang; };
+            std::vector<Cand> cands;
+            for (double j1 : {-1.6,-1.2,-0.8,-0.4,0.0,0.4,0.8})
+             for (double j2 : {0.4,0.8,1.2,1.6,2.0})
+              for (double j4 : {0.6,1.0,1.4,1.8,2.2})
+               for (double j5 : {-1.6,-0.8,0.0,0.8,1.6})
+                for (double j6 : {0.4,0.9,1.4,1.9})
+                {
+                    const std::array<double,7> a{j1,j2,0.0,j4,j5,j6,0.0};
+                    const auto pp = kinematics_->tool_pose(a);
+                    const auto JJ = kinematics_->arm_jacobian_full(a);
+                    const double mu = std::sqrt(std::max(0.0,(JJ*JJ.transpose()).determinant()));
+                    const double zang = std::acos(std::clamp(pp.rotation.col(2).dot(zdes),-1.0,1.0));
+                    const double yang = std::acos(std::clamp(pp.rotation.col(1).dot(ydes),-1.0,1.0));
+                    const double score = (pp.position - standoff).squaredNorm()
+                                       + 0.10*zang*zang - 0.10*mu;   // top-down: yaw free
+                    cands.push_back({score, a, pp.position, mu, zang, yang});
+                }
+            std::sort(cands.begin(), cands.end(),
+                      [](const Cand&l,const Cand&r){ return l.score < r.score; });
+            for (int i=0; i<6 and i<(int)cands.size(); ++i)
+            {
+                const auto&c=cands[i];
+                std::print("[rest-search] #{} q=[{:+.2f} {:+.2f} 0 {:+.2f} {:+.2f} {:+.2f} 0] "
+                           "EE=({:+.3f},{:+.3f},{:+.3f}) dpos={:.3f} zang={:.0f}° yang={:.0f}° mu={:.4f}\n",
+                           i,c.a[0],c.a[1],c.a[3],c.a[4],c.a[5],c.ee.x(),c.ee.y(),c.ee.z(),
+                           (c.ee-standoff).norm(), c.zang*57.3, c.yang*57.3, c.mu);
+            }
+        }
     }
     catch (const std::exception& e)
     {
@@ -203,14 +254,71 @@ void SpecificWorker::initialize()
 }
 
 
+void SpecificWorker::refresh_arm_base_world()
+{
+    // Install kinematics_'s base_tf_ = T_world_armbase so FK reports WORLD coords.
+    // CRITICAL: the URDF base_link is NOT the P3Bot node — the KinovaGen3 (arm
+    // base_link) is a child of P3Bot with its OWN mount offset+rotation (a 90°
+    // rotation about Y in arm_table.wbt). So compose both:
+    //     base_tf_ = T_world_P3Bot · T_P3Bot_kinova
+    // Missing the second factor rotates the whole model ~90°, which is why the
+    // viewer arm looked nothing like Webots and FK was meters off.
+    if (not kinematics_) return;
+    auto to_iso = [](const RoboCompWebots2Robocomp::ObjectPose& p)
+    {
+        Eigen::Isometry3d T = Eigen::Isometry3d::Identity();
+        T.linear() = Eigen::Quaterniond(p.orientation.w, p.orientation.x,
+                                        p.orientation.y, p.orientation.z)
+                         .normalized().toRotationMatrix();
+        T.translation() = Eigen::Vector3d(p.position.x / 1000.0,
+                                          p.position.y / 1000.0,
+                                          p.position.z / 1000.0);
+        return T;
+    };
+    // Fixed arm→body mount (KinovaGen3 child pose inside the P3Bot Robot node in
+    // arm_table.wbt): a 7 cm drop and a 90° rotation about Y. The arm is bolted
+    // to the body so this is constant; only the body (P3Bot) pose is read live.
+    // (The bridge's getObjectPose can't return child-node poses — find_scene_node
+    // scans only top-level world children — so we can't query kinova_arm_r.)
+    static const Eigen::Isometry3d T_p3bot_arm = []
+    {
+        Eigen::Isometry3d T = Eigen::Isometry3d::Identity();
+        T.linear()      = Eigen::AngleAxisd(1.5711172845720163,
+                                            Eigen::Vector3d(0.0, 1.0, 0.0)).toRotationMatrix();
+        T.translation() = Eigen::Vector3d(-2.0036834417203053e-05,
+                                          -7.905216286097083e-05,
+                                          -0.07119293708923391);
+        return T;
+    }();
+    try
+    {
+        // P3Bot is top-level → its field pose is world.
+        const Eigen::Isometry3d T_world_p3bot = to_iso(webots2robocomp_proxy->getObjectPose(WEBOTS_ROBOT_DEF));
+        arm_base_world_ = T_world_p3bot * T_p3bot_arm;
+        kinematics_->set_base_transform(arm_base_world_);
+        if (not base_tf_set_)
+        {
+            const Eigen::Vector3d t = arm_base_world_.translation();
+            const Eigen::Vector3d e = arm_base_world_.linear().eulerAngles(0, 1, 2);
+            std::print("[base] arm base_link world pose installed: t=({:.3f},{:.3f},{:.3f}) "
+                       "rpy=({:+.2f},{:+.2f},{:+.2f}) — FK now in world frame\n",
+                       t.x(), t.y(), t.z(), e.x(), e.y(), e.z());
+            base_tf_set_ = true;
+        }
+    }
+    catch (const Ice::Exception&) { /* Webots not ready yet; retry next call */ }
+}
+
 void SpecificWorker::update_bottle_pose_in_dsr()
 {
     if (not G or not rt_api_) return;
 
+    RoboCompWebots2Robocomp::ObjectPose robot_w_pose;
     RoboCompWebots2Robocomp::ObjectPose bottle_w_pose;
     RoboCompWebots2Robocomp::ObjectPose table_w_pose;
     try
     {
+        robot_w_pose  = webots2robocomp_proxy->getObjectPose(WEBOTS_ROBOT_DEF);
         bottle_w_pose = webots2robocomp_proxy->getObjectPose(WEBOTS_BOTTLE_DEF);
         table_w_pose  = webots2robocomp_proxy->getObjectPose(WEBOTS_TABLE_DEF);
         webots_proxy_unreachable_warned_ = false;
@@ -226,6 +334,9 @@ void SpecificWorker::update_bottle_pose_in_dsr()
     }
 
     // Webots returns mm; DSR stores metres. Both axes are Z-up.
+    const Eigen::Vector3d robot_w (robot_w_pose.position.x  / 1000.0,
+                                   robot_w_pose.position.y  / 1000.0,
+                                   robot_w_pose.position.z  / 1000.0);
     const Eigen::Vector3d bottle_w(bottle_w_pose.position.x / 1000.0,
                                    bottle_w_pose.position.y / 1000.0,
                                    bottle_w_pose.position.z / 1000.0);
@@ -233,6 +344,10 @@ void SpecificWorker::update_bottle_pose_in_dsr()
                                    table_w_pose.position.y  / 1000.0,
                                    table_w_pose.position.z  / 1000.0);
 
+    const Eigen::Quaterniond q_robot_w(robot_w_pose.orientation.w,
+                                       robot_w_pose.orientation.x,
+                                       robot_w_pose.orientation.y,
+                                       robot_w_pose.orientation.z);
     const Eigen::Quaterniond q_table_w(table_w_pose.orientation.w,
                                        table_w_pose.orientation.x,
                                        table_w_pose.orientation.y,
@@ -241,15 +356,57 @@ void SpecificWorker::update_bottle_pose_in_dsr()
                                         bottle_w_pose.orientation.x,
                                         bottle_w_pose.orientation.y,
                                         bottle_w_pose.orientation.z);
+
+    // Cache world poses for grasp targeting + the viewer (both run in world
+    // frame). Bottle long axis = bottle local +Z in world.
+    bottle_pos_world_  = bottle_w;
+    bottle_axis_world_ = (q_bottle_w * Eigen::Vector3d::UnitZ()).normalized();
+    table_world_.linear()      = q_table_w.normalized().toRotationMatrix();
+    table_world_.translation() = table_w;
+    scene_world_valid_ = true;
+
+    auto robot_node  = G->get_node("robot");
+    auto table_node  = G->get_node("table");
+    auto bottle_node = G->get_node("bottle");
+    if (not robot_node.has_value() or not table_node.has_value() or not bottle_node.has_value())
+        return;
+
+    // robot→table: express the table in the arm-base frame, so the kinova2.json
+    // static value (stale p3bot geometry) is replaced by the live Webots mount.
+    // The P3Bot Robot node is the arm-base mount (KinovaGen3 is its child at
+    // identity), and the KinovaGen3 proto frame is the URDF base_link the
+    // controller uses, so its local frame *is* our arm-base frame.
+    const Eigen::Quaterniond q_robot_inv  = q_robot_w.conjugate();
+    const Eigen::Vector3d    table_in_robot = q_robot_inv * (table_w - robot_w);
+    const Eigen::Vector3d    euler_rt =
+        (q_robot_inv * q_table_w).toRotationMatrix().eulerAngles(0, 1, 2);
+    // One-shot startup diagnostic: the live Webots mount geometry. Mismatches
+    // here (e.g. a stale arm height) are exactly what silently breaks the viewer
+    // and grasp targeting, so surface it once.
+    static bool geom_logged = false;
+    if (not geom_logged)
+    {
+        std::print("[geom] robot_w=({:.3f},{:.3f},{:.3f}) table_w=({:.3f},{:.3f},{:.3f}) "
+                   "-> robot→table=({:+.3f},{:+.3f},{:+.3f}) euler=({:+.2f},{:+.2f},{:+.2f})\n",
+                   robot_w.x(), robot_w.y(), robot_w.z(), table_w.x(), table_w.y(), table_w.z(),
+                   table_in_robot.x(), table_in_robot.y(), table_in_robot.z(),
+                   euler_rt.x(), euler_rt.y(), euler_rt.z());
+        geom_logged = true;
+    }
+    rt_api_->insert_or_assign_edge_RT(
+        robot_node.value(), table_node.value().id(),
+        std::vector<float>{static_cast<float>(table_in_robot.x()),
+                           static_cast<float>(table_in_robot.y()),
+                           static_cast<float>(table_in_robot.z())},
+        std::vector<float>{static_cast<float>(euler_rt.x()),
+                           static_cast<float>(euler_rt.y()),
+                           static_cast<float>(euler_rt.z())});
+
+    // table→bottle: bottle expressed in the table frame.
     const Eigen::Quaterniond q_table_inv = q_table_w.conjugate();
     const Eigen::Vector3d    bottle_in_table = q_table_inv * (bottle_w - table_w);
     const Eigen::Vector3d    euler_bt =
         (q_table_inv * q_bottle_w).toRotationMatrix().eulerAngles(0, 1, 2);
-
-    auto table_node = G->get_node("table");
-    auto bottle_node = G->get_node("bottle");
-    if (not table_node.has_value() or not bottle_node.has_value()) return;
-
     rt_api_->insert_or_assign_edge_RT(
         table_node.value(), bottle_node.value().id(),
         std::vector<float>{static_cast<float>(bottle_in_table.x()),
@@ -264,51 +421,55 @@ void SpecificWorker::update_bottle_pose_in_dsr()
 std::optional<SpecificWorker::SideGraspTarget>
 SpecificWorker::compute_side_grasp_target()
 {
-    if (not inner_eigen_api_) return std::nullopt;
+    // Everything here is WORLD frame (FK reports world coords). The bottle world
+    // pose is cached each cycle by update_bottle_pose_in_dsr(); the arm base is
+    // at arm_base_world_.translation().
+    if (not base_tf_set_) return std::nullopt;            // FK not yet world-calibrated
+    const Eigen::Vector3d bottle_pos = bottle_pos_world_;
+    const Eigen::Vector3d z_bot      = bottle_axis_world_.normalized();  // ≈ +Z (upright)
+    const Eigen::Vector3d base_pos   = arm_base_world_.translation();
 
-    // Full 4×4 robot ← bottle transform; the 3×3 rotation block is what we
-    // need to read the bottle's local axes in robot coordinates.
-    auto rt_opt = inner_eigen_api_->get_transformation_matrix("robot", "bottle");
-    if (not rt_opt.has_value()) return std::nullopt;
-    const auto& T_RB = rt_opt.value();   // Eigen::Isometry3d
-    const Eigen::Vector3d bottle_pos_R = T_RB.translation();
-    const Eigen::Vector3d z_bot_R      = T_RB.linear().col(2).normalized();
+    // Horizontal approach direction: from the arm base toward the bottle, in the
+    // world horizontal plane, then projected ⟂ the bottle axis so the gripper
+    // stays perpendicular to the bottle even if it is tilted.
+    Eigen::Vector3d radial = bottle_pos - base_pos;
+    radial.z() = 0.0;
+    if (radial.norm() < 1e-4) return std::nullopt;        // bottle directly under base: ambiguous
 
-    // Radial approach direction in the horizontal plane (robot frame).
-    // Reject the radial onto the plane ⟂ z_bot_R so the gripper stays
-    // perpendicular to the bottle's long axis even when the bottle is tilted.
-    const Eigen::Vector3d radial_xy(bottle_pos_R.x(), bottle_pos_R.y(), 0.0);
-    if (radial_xy.norm() < 1e-4) return std::nullopt;  // bottle on robot's z-axis: ambiguous
-
-    Eigen::Vector3d z_tool_des = radial_xy.normalized();
-    z_tool_des -= (z_tool_des.dot(z_bot_R)) * z_bot_R;  // project ⟂ bottle z
+    Eigen::Vector3d z_tool_des = radial.normalized();
+    z_tool_des -= (z_tool_des.dot(z_bot)) * z_bot;        // project ⟂ bottle axis
     if (z_tool_des.norm() < 1e-4) return std::nullopt;
     z_tool_des.normalize();
 
     // Aim at the bottle's body, not its base. The WaterBottle PROTO origin is
-    // bottom-centre, so without this offset the EE drives the wrist down to
-    // table level and the arm folds onto the desk.
+    // bottom-centre, so offset up the bottle axis by a fraction of its height.
     double bottle_height_m = 0.22;
     if (auto bottle_node = G->get_node("bottle"); bottle_node.has_value())
         if (auto h = G->get_attrib_by_name<height_m_att>(bottle_node.value()); h.has_value())
             bottle_height_m = h.value();
     const Eigen::Vector3d body_centre =
-        bottle_pos_R + z_bot_R * (bottle_height_m * BOTTLE_GRASP_HEIGHT_FRAC);
+        bottle_pos + z_bot * (bottle_height_m * BOTTLE_GRASP_HEIGHT_FRAC);
 
     // Full grasp frame at convergence:
-    //   tool +Z = z_tool_des            approach axis, horizontal into bottle
-    //   tool +X = z_bot_R × z_tool_des  horizontal tangent — fingers close
-    //                                   horizontally around the bottle body
-    //   tool +Y = Z × X = z_bot_R       up (wrist camera on the upper side)
-    // x_tool_des is the *correct* (horizontal-finger) target; it only became
-    // a "disaster" under the old two-cross-term controller, which flailed on
-    // the 90° roll. The geodesic orientation term (gain_secondary>0) now
-    // reaches it as one coordinated motion. See efe_gradient.cpp §3(b).
+    //   tool +Z = z_tool_des          approach axis, horizontal into bottle
+    //   tool +X = z_bot × z_tool_des  horizontal tangent — fingers close around body
+    //   tool +Y = Z × X = z_bot       up (wrist camera on the upper side)
     SideGraspTarget out;
     out.z_tool_des    = z_tool_des;
-    out.x_tool_des    = z_bot_R.cross(z_tool_des).normalized();
-    out.grasp_pos     = body_centre;                              // the grasp point
+    out.x_tool_des    = z_bot.cross(z_tool_des).normalized();
+    out.grasp_pos     = body_centre;                              // the grasp point (world)
     out.stand_off_pos = body_centre - z_tool_des * APPROACH_STANDOFF_M;
+
+    // One-shot reachability check: distances from the arm base (world). The Gen3
+    // reaches ~0.90 m to the tool; beyond that the approach stalls at extension.
+    static bool reach_logged = false;
+    if (not reach_logged)
+    {
+        std::print("[reach] bottle={:.3f} m  grasp(body)={:.3f} m  standoff={:.3f} m  (Gen3 reach ≈0.90 m)\n",
+                   (bottle_pos - base_pos).norm(), (out.grasp_pos - base_pos).norm(),
+                   (out.stand_off_pos - base_pos).norm());
+        reach_logged = true;
+    }
     return out;
 }
 
@@ -316,7 +477,11 @@ SpecificWorker::compute_side_grasp_target()
 
 void SpecificWorker::update_viewer_scene_objects()
 {
-    if (not arm_belief_viewer_ or not G or not inner_eigen_api_) return;
+    // The viewer renders the arm in WORLD coords (FK via base_tf_), so the table
+    // and bottle must be in WORLD too — otherwise they float apart. Use the live
+    // Webots world poses (table_world_, bottle_*_world_) cached by
+    // update_bottle_pose_in_dsr(), NOT the DSR robot-frame transforms.
+    if (not arm_belief_viewer_ or not G or not scene_world_valid_) return;
 
     // Table size lives on the table node (width_m, depth_m, height_m).
     auto table_node = G->get_node("table");
@@ -329,33 +494,19 @@ void SpecificWorker::update_viewer_scene_objects()
     const double hd = d_opt.value() * 0.5;
     const double h  = h_opt.value();
 
-    // Box corners in the table frame. The table origin is bottom-center
-    // (matches Webots/PROTO convention and the DSR robot→table = [0,0,-0.7]
-    // translation, which places the table FLOOR 0.7 m below the arm base so
-    // the table TOP at +h coincides with the arm base at robot z = 0).
+    // Box corners in the table-local frame (origin bottom-centre, Webots PROTO
+    // convention), transformed to WORLD by the live table pose.
     // Order: bottom CCW (0..3), then top CCW (4..7).
     const std::array<Eigen::Vector3d, 8> corners_in_table{{
         {-hw, -hd, 0}, {+hw, -hd, 0}, {+hw, +hd, 0}, {-hw, +hd, 0},
         {-hw, -hd, h}, {+hw, -hd, h}, {+hw, +hd, h}, {-hw, +hd, h},
     }};
-
-    std::vector<Eigen::Vector3d> corners_in_robot;
-    corners_in_robot.reserve(8);
+    std::vector<Eigen::Vector3d> corners_world;
+    corners_world.reserve(8);
     for (const auto& c : corners_in_table)
-    {
-        auto p = inner_eigen_api_->transform("robot", c, "table");
-        if (not p.has_value()) return;
-        corners_in_robot.push_back(p.value());
-    }
+        corners_world.push_back(table_world_ * c);
 
-    // Bottle pose in robot frame: origin (translation) + long axis (Z column).
-    auto T_RB_opt = inner_eigen_api_->get_transformation_matrix("robot", "bottle");
-    if (not T_RB_opt.has_value()) return;
-    const Eigen::Vector3d bottle_origin_R = T_RB_opt.value().translation();
-    const Eigen::Vector3d bottle_axis_R   = T_RB_opt.value().linear().col(2);
-
-    // Bottle node carries width_m (diameter) and height_m. Defaults if absent
-    // so the viewer still draws something the first time the node is created.
+    // Bottle node carries width_m (diameter) and height_m. Defaults if absent.
     auto bottle_node = G->get_node("bottle");
     double diameter = 0.07, height = 0.22;
     if (bottle_node.has_value())
@@ -364,8 +515,15 @@ void SpecificWorker::update_viewer_scene_objects()
         if (auto v = G->get_attrib_by_name<height_m_att>(bottle_node.value()); v.has_value()) height   = v.value();
     }
 
-    arm_belief_viewer_->update_scene_objects(corners_in_robot, bottle_origin_R,
-                                             bottle_axis_R, diameter * 0.5, height);
+    arm_belief_viewer_->update_scene_objects(corners_world, bottle_pos_world_,
+                                             bottle_axis_world_, diameter * 0.5, height);
+
+    // Support column (the Webots mast): a vertical cylinder from the floor (z=0)
+    // up to the shoulder (arm base), at the arm-base xy. Matches the SolidPipe in
+    // arm_table.wbt (radius 0.05) — the obstacle the arm must reach around.
+    const Eigen::Vector3d shoulder = arm_base_world_.translation();
+    const Eigen::Vector3d col_base(shoulder.x(), shoulder.y(), 0.0);
+    arm_belief_viewer_->set_column(col_base, shoulder, 0.05);
 }
 
 void SpecificWorker::compute()
@@ -521,6 +679,7 @@ void SpecificWorker::compute()
         // While idle or waiting for Start: keep the DSR bottle pose fresh and
         // draw the scene, so the user can see where the bottle is before
         // committing to the approach.
+        if (not base_tf_set_) refresh_arm_base_world();   // retry until installed
         update_bottle_pose_in_dsr();
         update_viewer_scene_objects();
 
@@ -626,10 +785,11 @@ void SpecificWorker::compute()
                     std::sqrt(2.0 * params.a_approach * std::max(0.0, e_pos - params.arrive_deadband)));
                 const double vmeas = tip_log_prev_pos_.has_value()
                     ? (ee_position - tip_log_prev_pos_.value()).norm() / dt : 0.0;
-                std::print("[tiplog] {},{:.3f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f}\n",
+                std::print("[tiplog] {},{:.3f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},eang={:.1f}\n",
                            tip_log_cycle_, tip_log_cycle_ * dt,
                            ee_position.x(), ee_position.y(), ee_position.z(),
-                           target.x(), target.y(), target.z(), e_pos, vcmd, vmeas);
+                           target.x(), target.y(), target.z(), e_pos, vcmd, vmeas,
+                           e_ang * 57.29578);
                 tip_log_prev_pos_ = ee_position;
                 ++tip_log_cycle_;
             }
@@ -667,12 +827,29 @@ void SpecificWorker::compute()
 
                 if (e_pos < REACH_TOLERANCE_M and e_ang < GRASP_ALIGN_TOL_RAD)
                 {
+                    // Phase-1 bring-up: converged at the standoff with the gripper
+                    // open and correctly oriented — hold here, don't grasp.
+                    if (approach_only_)
+                    {
+                        if (not approach_hold_logged_)
+                        {
+                            std::print("[approach] standoff reached & aligned "
+                                       "(e={:.3f} m, {:.1f}°), gripper open — HOLDING.\n",
+                                       e_pos, e_ang * 57.29578);
+                            approach_hold_logged_ = true;
+                        }
+                        break;
+                    }
                     if (++grasp_settle_ticks_ >= GRASP_SETTLE_TICKS)
                     {
                         // Commit: latch the grasp frame so contact can't make
                         // the target chase its own disturbance.
                         latched_grasp_ = g;
-                        lift_target_   = g.grasp_pos + Eigen::Vector3d(0.0, 0.0, LIFT_HEIGHT_M);
+                        // Lift along the true up (bottle long axis = table normal),
+                        // not arm-base +Z — the mount is tilted ~30°, so a +Z lift
+                        // would drag the bottle sideways.
+                        const Eigen::Vector3d up = g.z_tool_des.cross(g.x_tool_des).normalized();
+                        lift_target_   = g.grasp_pos + up * LIFT_HEIGHT_M;
                         grasp_phase_   = GraspPhase::Inserting;
                         grasp_settle_ticks_ = 0;
                         std::print("[grasp] standoff settled (e={:.3f} m, {:.1f}°) → Inserting\n",
@@ -732,29 +909,33 @@ void SpecificWorker::compute()
                 (void) e_ang;
                 if (e_pos < REACH_TOLERANCE_M)
                 {
-                    // Pick a random reachable table spot ≥ PLACE_MIN_MOVE_M from
-                    // the pick point; z = grasp height so the base lands on the
-                    // table. Orientation stays latched (pure translation keeps
-                    // the bottle upright).
-                    std::uniform_real_distribution<double> ux(PLACE_X_MIN, PLACE_X_MAX);
-                    std::uniform_real_distribution<double> uy(PLACE_Y_MIN, PLACE_Y_MAX);
-                    Eigen::Vector3d p;
-                    for (int k = 0; k < 10; ++k)
-                    {
-                        p = Eigen::Vector3d(ux(rng_), uy(rng_), g.grasp_pos.z());
-                        if ((p.head<2>() - g.grasp_pos.head<2>()).norm() > PLACE_MIN_MOVE_M) break;
-                    }
-                    place_pos_   = p;
-                    place_hover_ = p + Eigen::Vector3d(0.0, 0.0, LIFT_HEIGHT_M);
-                    // Re-point the approach radially toward the place spot, +Y up
-                    // (bottle upright). Yaw-only change from the grasp frame, so
-                    // the arm reaches the spot comfortably instead of contorting.
-                    place_z_des_ = Eigen::Vector3d(place_pos_.x(), place_pos_.y(), 0.0).normalized();
-                    place_x_des_ = Eigen::Vector3d(0.0, 0.0, 1.0).cross(place_z_des_).normalized();
+                    // True "up" = the bottle's long axis (tool +Y = z_bot at the
+                    // latched grasp). The arm mount is tilted ~30°, so this is the
+                    // real table normal, not arm-base +Z. Place by displacing the
+                    // grasp point WITHIN the table plane (⟂ up): the bottle stays
+                    // upright and at the same height above the real table surface,
+                    // so its base lands back on the table regardless of tilt.
+                    const Eigen::Vector3d up = g.z_tool_des.cross(g.x_tool_des).normalized();
+                    Eigen::Vector3d e1 = (std::abs(up.z()) < 0.9 ? Eigen::Vector3d::UnitZ()
+                                                                 : Eigen::Vector3d::UnitX());
+                    e1 = (e1 - up * e1.dot(up)).normalized();   // in-plane basis
+                    const Eigen::Vector3d e2 = up.cross(e1);
+                    std::uniform_real_distribution<double> ur(PLACE_MIN_MOVE_M, PLACE_MAX_MOVE_M);
+                    std::uniform_real_distribution<double> uphi(0.0, 2.0 * M_PI);
+                    const double r = ur(rng_), phi = uphi(rng_);
+                    const Eigen::Vector3d delta = r * (std::cos(phi) * e1 + std::sin(phi) * e2);
+                    place_pos_   = g.grasp_pos + delta;
+                    place_hover_ = place_pos_ + up * LIFT_HEIGHT_M;   // lift along true up
+                    // Re-point the approach radially toward the place spot in the
+                    // table plane, bottle upright (tool +Y = up). Mirrors the grasp
+                    // frame with `up` in place of arm-base +Z.
+                    Eigen::Vector3d radial = place_pos_ - up * place_pos_.dot(up);
+                    place_z_des_ = (radial.norm() > 1e-6) ? radial.normalized() : g.z_tool_des;
+                    place_x_des_ = up.cross(place_z_des_).normalized();
                     grasp_phase_ = GraspPhase::PlaceMoving;
                     place_ticks_ = 0;
-                    std::print("[place] lifted → carry to ({:.3f}, {:.3f}) → PlaceMoving\n",
-                               place_pos_.x(), place_pos_.y());
+                    std::print("[place] lifted → carry {:.2f} m in-plane to ({:.3f},{:.3f},{:.3f}) → PlaceMoving\n",
+                               r, place_pos_.x(), place_pos_.y(), place_pos_.z());
                 }
                 break;
             }
