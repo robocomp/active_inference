@@ -43,16 +43,29 @@ struct EFEParams
      *  with anisotropic C_pos and 20 ms period the conflict is resolved). */
     double gain_orient = 1.0;
 
+    /** Cap (rad/s) on the desired tool angular speed in the coordinated 6-DOF
+     *  twist. Bounds the orientation half of the resolved-rate solve so a large
+     *  reorientation (the camera-up roll has geodesic angle ≈ π) is a smooth,
+     *  bounded turn that descends alongside the position approach rather than a
+     *  joint-saturating lunge. ω_des = min(omega_max, gain_orient·angle)·axis.
+     *  ~1.0 lets a 90° roll finish in ≈1.5 s. */
+    double omega_max = 1.0;
+
     /** Desired approach direction in world frame. The tool's local z-axis
      *  (its "approach" direction) is driven to align with this. Default
      *  (0, 0, −1): tool points straight down (perpendicular to a horizontal
      *  table surface). */
     Eigen::Vector3d desired_approach{0.0, 0.0, -1.0};
 
-    /** α_x — gain on the secondary axis alignment cost 1 − x_tool · x_des.
-     *  Pinning a second tool axis fixes the roll about the approach axis,
-     *  which the single-axis term in C_orient cannot constrain. Default 0
-     *  preserves the previous behaviour (top-down grasps with free roll). */
+    /** Selects the orientation regime (the actual gain is gain_orient):
+     *   == 0  →  pin only the approach axis (tool +Z), roll free — top-down
+     *           grasps. Uses the single-axis cross-product gradient.
+     *   >  0  →  pin the full tool frame via a single SO(3) geodesic error
+     *           toward R_des = [desired_secondary⟂, Z×X, desired_approach].
+     *           The geodesic is one consistent shortest-path rotation, so a
+     *           large roll correction (e.g. a 90° side-grasp) is spread across
+     *           the whole reach instead of fighting the approach term and
+     *           spinning the wrist at the end. */
     double gain_secondary = 0.0;
 
     /** Target for the tool's local +X axis (the Robotiq 2F-85 open/close
@@ -80,6 +93,45 @@ struct EFEParams
      *  value; raise toward 0.1–0.2 if you see twitchy near-singular q̇. */
     double dls_lambda = 0.05;
 
+    /** Preferred-flow attractor — the continuous-active-inference upgrade from
+     *  "preference over end-effector POSITION only" to a preference over
+     *  position AND velocity, with the attractor at the goal (x*, ẋ=0).
+     *
+     *  The raw-error gradient drives q̇ ∝ −(C_pos ⊙ err), whose magnitude
+     *  saturates the joints, so the EE cruises at full speed until the very
+     *  end and overshoots — shoving whatever it is reaching for. Instead the
+     *  model prefers a Cartesian velocity toward the target whose SPEED is a
+     *  constant-deceleration profile:
+     *      ẋ* = −min(v_approach, √(2·a_approach·‖err‖)) · ê
+     *  i.e. cruise at v_approach far away, then decelerate at a_approach to
+     *  reach ZERO speed exactly at the target — in FINITE time, the natural
+     *  ease-in feel. (A proportional ramp v∝‖err‖ instead decays
+     *  exponentially and crawls forever near the goal — avoid it.) The decel
+     *  zone spans v_approach²/(2·a_approach).
+     *
+     *  ê is the unit error direction. With an ISOTROPIC C_pos this is a
+     *  straight line to the target; the old {4,4,8} anisotropy (relax x/y so
+     *  orientation dominates the approach axis) is no longer needed because
+     *  the speed cap already keeps the position term from drowning the
+     *  orientation term, and it produced an unnatural "vertical-leg-first"
+     *  L-path. Set C_pos anisotropically only if you deliberately want a
+     *  curved, axis-biased approach.
+     *
+     *  a_approach→∞, v_approach→∞ recovers the old raw-error gradient. */
+    double v_approach = 0.15;  ///< Cartesian cruise-speed cap [m/s]
+    double a_approach = 0.15;  ///< deceleration [m/s²]; decel zone = v_approach²/(2·a_approach)
+
+    /** Hold zone. The √ deceleration profile has INFINITE slope at the origin,
+     *  so without a deadband a sub-mm error still commands several cm/s and the
+     *  arm dithers/limit-cycles at the goal (amplified by target-pose noise) —
+     *  bad for a stable hand-off to the next approach/grasp step. These shift
+     *  the linear/angular speed ramps so they reach zero at the band edge and
+     *  stay zero inside: the tool settles and holds dead still. Equivalent to
+     *  giving the preference its finite tolerance width (no gradient pressure
+     *  inside). arrive_deadband should be ≲ the grasp position tolerance. */
+    double arrive_deadband = 0.005;  ///< m;   hold (zero linear flow) within this radius
+    double orient_deadband = 0.03;   ///< rad; hold (zero angular flow) within this angle (~1.7°)
+
     /** α_μ — Yoshikawa-manipulability ascent gain. Adds
      *      q̇ += α_μ · N · ∂μ/∂q
      *  where μ = √det(J Jᵀ) and N = I − J_linᵀ Q⁻¹ J_lin is the soft
@@ -87,7 +139,7 @@ struct EFEParams
      *  objective cannot disturb the EE position. ∂μ/∂q is computed by
      *  central differences (≈ 0.5 ms / cycle). 0 disables (default).
      *  Useful range 0.3 – 1.0. */
-    double gain_mu = 0.0;
+    double gain_mu = 0.3;
 };
 
 /**

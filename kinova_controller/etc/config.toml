@@ -11,7 +11,7 @@ name = "kinova_controller"
 # --- Single Instance Configuration ---
 # Use this if you only have one graph.
 configFile = "/home/robocomp/robocomp/components/active_inference/kinova_controller/kinova2.json"
-domain = 0
+domain = 1 # so it does not interfere with other experiments
 tree = false
 graph = true
 2d = false
@@ -26,6 +26,10 @@ graph = true
 # graph = true
 # 2d = true
 # 3d = true
+
+[Controller]
+auto_start = true   # arm EFE without waiting for the viewer Start button
+tip_log    = true   # stream "[tiplog] cycle,t,ee_xyz,tgt_xyz,dist,v_cmd,v_meas"
 
 [Period]
 Compute = 20

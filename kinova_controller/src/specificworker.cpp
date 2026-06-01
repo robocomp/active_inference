@@ -128,6 +128,13 @@ void SpecificWorker::initialize()
                 std::print("[ui] Run requested = {}\n", running);
             });
 
+    // Optional config: auto-arm the run (as if the Start button were checked)
+    // and stream tip-trajectory CSV. Both default off so normal runs are
+    // unchanged; flip them in etc/config for headless diagnosis.
+    try { run_requested_ = configLoader.get<bool>("Controller.auto_start"); } catch (...) {}
+    try { tip_log_        = configLoader.get<bool>("Controller.tip_log");   } catch (...) {}
+    if (run_requested_) std::print("[ui] auto_start: run requested from config\n");
+
     //initializeCODE
     /////////GET PARAMS, OPEND DEVICES....////////
     //int period = configLoader.get<int>("Period.Compute") //NOTE: If you want get period of compute use getPeriod("compute")
@@ -255,9 +262,19 @@ SpecificWorker::compute_side_grasp_target()
     const Eigen::Vector3d body_centre =
         bottle_pos_R + z_bot_R * (bottle_height_m * BOTTLE_GRASP_HEIGHT_FRAC);
 
+    // Full grasp frame at convergence:
+    //   tool +Z = z_tool_des            approach axis, horizontal into bottle
+    //   tool +X = z_bot_R × z_tool_des  horizontal tangent — fingers close
+    //                                   horizontally around the bottle body
+    //   tool +Y = Z × X = z_bot_R       up (wrist camera on the upper side)
+    // x_tool_des is the *correct* (horizontal-finger) target; it only became
+    // a "disaster" under the old two-cross-term controller, which flailed on
+    // the 90° roll. The geodesic orientation term (gain_secondary>0) now
+    // reaches it as one coordinated motion. See efe_gradient.cpp §3(b).
     SideGraspTarget out;
-    out.x_tool_des    = z_bot_R;                                   // fingers wrap vertically
-    out.z_tool_des    = z_tool_des;                                // approach axis
+    out.z_tool_des    = z_tool_des;
+    out.x_tool_des    = z_bot_R.cross(z_tool_des).normalized();
+    out.grasp_pos     = body_centre;                              // the grasp point
     out.stand_off_pos = body_centre - z_tool_des * APPROACH_STANDOFF_M;
     return out;
 }
@@ -344,6 +361,24 @@ void SpecificWorker::compute()
         for (int i = 0; i < Kinematics::N_ARM_JOINTS; ++i)
             q[i] = js.joints[i].angle;
 
+        // Drive the gripper to whatever the current FSM sub-state wants.
+        // setGripperPos takes [0, 1] where 1 = fully open in the bridge.
+        // Wrapped in its own try so a gripper-side fault doesn't abort the
+        // joint-velocity loop above.
+        try
+        {
+            kinovaarm_proxy->setGripperPos(gripper_command_);
+            gripper_proxy_warned_ = false;
+        }
+        catch (const Ice::Exception& e)
+        {
+            if (not gripper_proxy_warned_)
+            {
+                std::print(stderr, "[gripper] setGripperPos failed: {}\n", e.what());
+                gripper_proxy_warned_ = true;
+            }
+        }
+
         const auto mesh_link_poses = kinematics_->arm_mesh_link_poses(q);
         std::vector<ArmBeliefViewer3D::LinkPose> viewer_link_poses;
         viewer_link_poses.reserve(mesh_link_poses.size());
@@ -423,7 +458,10 @@ void SpecificWorker::compute()
             if (run_requested_)
             {
                 std::print("[start] Entering EFE bottle-approach.\n");
-                phase_ = Phase::ActiveEFE;
+                phase_              = Phase::ActiveEFE;
+                grasp_phase_        = GraspPhase::Tracking;  // fresh grasp sequence
+                grasp_settle_ticks_ = 0;
+                gripper_command_    = 1.0f;                  // open
             }
             proxy_unreachable_warned_ = false;
             return;
@@ -435,58 +473,197 @@ void SpecificWorker::compute()
         if (not run_requested_)
         {
             std::print("[stop] Run unchecked — returning to rest pose.\n");
-            arrived_logged_ = false;
-            phase_ = Phase::SendingRestPose;
+            arrived_logged_     = false;
+            grasp_phase_        = GraspPhase::Tracking;  // reset FSM
+            grasp_settle_ticks_ = 0;
+            gripper_command_    = 1.0f;                  // release / open
+            phase_              = Phase::SendingRestPose;
             return;
         }
 
-        // ── Phase::ActiveEFE: continuous side-grasp approach ────────────────
-        // 1. Bottle pose already refreshed in DSR above.
-        // 2. Build a side-grasp target: standoff next to the bottle, tool +Z
-        //    pointing into the bottle, tool +X aligned with the bottle's Z.
-        // 3. Step EFE; both axis-alignment terms drive the gripper into the
-        //    side-approach pose, and the gradient vanishes at the standoff.
+        // ── Phase::ActiveEFE: grasp FSM ─────────────────────────────────────
+        // Hierarchical active inference: each GraspPhase installs a preferred
+        // pose + gripper state that the EFE controller realises; transitions
+        // fire when the lower level converges (error inside the deadband) or a
+        // finger-force observation confirms the grasp. See specificworker.h.
 
-        auto grasp_opt = compute_side_grasp_target();
-        if (not grasp_opt.has_value())
+        // Build the shared EFE parameters; per-state code varies only the
+        // target, the desired tool axes, and the cruise speed.
+        const auto make_params = [](const Eigen::Vector3d& z_des,
+                                    const Eigen::Vector3d& x_des,
+                                    double v_app)
         {
-            // No usable target yet — halt the arm rather than command stale q̇.
-            RoboCompKinovaArm::TJointSpeeds stop;
-            stop.jointSpeeds.assign(Kinematics::N_ARM_JOINTS, 0.0f);
-            kinovaarm_proxy->moveJointsWithSpeed(stop);
-            return;
-        }
-        const auto& grasp = grasp_opt.value();
-        reach_target_ = grasp.stand_off_pos;
+            EFEParams p;
+            p.desired_approach  = z_des;
+            p.desired_secondary = x_des;
+            p.gain_secondary    = 1.0;
+            p.C_pos             = Eigen::Vector3d::Ones();  // straight-line flow
+            p.dls_lambda        = 0.05;
+            p.v_approach        = v_app;
+            p.a_approach        = 0.60;
+            p.omega_max         = 2.0;
+            p.gain_mu           = 0.0;
+            return p;
+        };
 
-        EFEParams params;
-        params.desired_approach  = grasp.z_tool_des;
-        params.desired_secondary = grasp.x_tool_des;
-        params.gain_secondary    = 1.0;  // match gain_orient
-        // DLS replaces pure Jᵀ; λ also acts as Corke's velocity-effort cost.
-        params.dls_lambda        = 0.05;
-        // Manipulability ascent in J's null space — keep low for first run.
-        params.gain_mu           = 0.5;
-
-        const auto q_dot = efe_gradient_step(*kinematics_, q, reach_target_, params);
-        RoboCompKinovaArm::TJointSpeeds cmd;
-        cmd.jointSpeeds.assign(q_dot.begin(), q_dot.end());
-        kinovaarm_proxy->moveJointsWithSpeed(cmd);
-
-        const Eigen::Vector3d x_ee   = ee_position;
-        const double          err_pos = (x_ee - reach_target_).norm();
-        if (err_pos < REACH_TOLERANCE_M)
+        // Run one coordinated EFE step toward (target, z_des, x_des) at v_app,
+        // send it, and return {position error, orientation geodesic angle}.
+        const auto drive = [&](const Eigen::Vector3d& target,
+                               const Eigen::Vector3d& z_des,
+                               const Eigen::Vector3d& x_des,
+                               double v_app) -> std::pair<double, double>
         {
-            if (not arrived_logged_)
+            reach_target_ = target;
+            const EFEParams params = make_params(z_des, x_des, v_app);
+            const auto q_dot = efe_gradient_step(*kinematics_, q, reach_target_, params);
+            RoboCompKinovaArm::TJointSpeeds cmd;
+            cmd.jointSpeeds.assign(q_dot.begin(), q_dot.end());
+            kinovaarm_proxy->moveJointsWithSpeed(cmd);
+
+            const double e_pos = (ee_position - target).norm();
+
+            // Orientation residual: geodesic angle between the current tool
+            // frame and R_des = [x⟂, z×x, z], matching efe_gradient's metric.
+            double e_ang = 3.1416;
+            const Eigen::Vector3d zc = z_des.normalized();
+            Eigen::Vector3d xc = x_des - x_des.dot(zc) * zc;
+            if (xc.norm() > 1e-6)
             {
-                std::print("[bottle-approach] ✓ Arrived (err={:.4f} m) — hovering above bottle.\n",
-                           err_pos);
-                arrived_logged_ = true;
+                xc.normalize();
+                Eigen::Matrix3d R_des;
+                R_des.col(0) = xc;
+                R_des.col(1) = zc.cross(xc);
+                R_des.col(2) = zc;
+                const auto tool = kinematics_->tool_pose(q);
+                const Eigen::AngleAxisd er(R_des * tool.rotation.transpose());
+                e_ang = std::abs(er.angle());
             }
-        }
-        else
+
+            if (tip_log_)
+            {
+                const double dt   = std::max(1, getPeriod("Compute")) / 1000.0;
+                const double vcmd = std::min(params.v_approach,
+                    std::sqrt(2.0 * params.a_approach * std::max(0.0, e_pos - params.arrive_deadband)));
+                const double vmeas = tip_log_prev_pos_.has_value()
+                    ? (ee_position - tip_log_prev_pos_.value()).norm() / dt : 0.0;
+                std::print("[tiplog] {},{:.3f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f}\n",
+                           tip_log_cycle_, tip_log_cycle_ * dt,
+                           ee_position.x(), ee_position.y(), ee_position.z(),
+                           target.x(), target.y(), target.z(), e_pos, vcmd, vmeas);
+                tip_log_prev_pos_ = ee_position;
+                ++tip_log_cycle_;
+            }
+            return {e_pos, e_ang};
+        };
+
+        // Largest finger/tip force from the gripper; 0 if the proxy hiccups.
+        const auto gripper_force = [&]() -> float
         {
-            arrived_logged_ = false;
+            try
+            {
+                const auto gs = kinovaarm_proxy->getGripperState();
+                return std::max({gs.lforce, gs.rforce, gs.ltipforce, gs.rtipforce});
+            }
+            catch (const Ice::Exception&) { return 0.0f; }
+        };
+
+        switch (grasp_phase_)
+        {
+            case GraspPhase::Tracking:
+            {
+                // Approach the LIVE standoff, gripper open, bottle pose tracked.
+                auto grasp_opt = compute_side_grasp_target();
+                if (not grasp_opt.has_value())
+                {
+                    RoboCompKinovaArm::TJointSpeeds stop;
+                    stop.jointSpeeds.assign(Kinematics::N_ARM_JOINTS, 0.0f);
+                    kinovaarm_proxy->moveJointsWithSpeed(stop);
+                    return;
+                }
+                const auto& g = grasp_opt.value();
+                gripper_command_ = 1.0f;  // open
+                const auto [e_pos, e_ang] =
+                    drive(g.stand_off_pos, g.z_tool_des, g.x_tool_des, 0.35);
+
+                if (e_pos < REACH_TOLERANCE_M and e_ang < GRASP_ALIGN_TOL_RAD)
+                {
+                    if (++grasp_settle_ticks_ >= GRASP_SETTLE_TICKS)
+                    {
+                        // Commit: latch the grasp frame so contact can't make
+                        // the target chase its own disturbance.
+                        latched_grasp_ = g;
+                        lift_target_   = g.grasp_pos + Eigen::Vector3d(0.0, 0.0, LIFT_HEIGHT_M);
+                        grasp_phase_   = GraspPhase::Inserting;
+                        grasp_settle_ticks_ = 0;
+                        std::print("[grasp] standoff settled (e={:.3f} m, {:.1f}°) → Inserting\n",
+                                   e_pos, e_ang * 57.29578);
+                    }
+                }
+                else grasp_settle_ticks_ = 0;
+                break;
+            }
+            case GraspPhase::Inserting:
+            {
+                // Ease into the bottle body along the latched approach axis.
+                const auto& g = latched_grasp_;
+                gripper_command_ = 1.0f;  // stay open
+                const auto [e_pos, e_ang] =
+                    drive(g.grasp_pos, g.z_tool_des, g.x_tool_des, INSERT_VEL_MS);
+                (void) e_ang;
+                const float f = gripper_force();
+                if (e_pos < REACH_TOLERANCE_M or f > GRASP_FORCE_THRESH)
+                {
+                    grasp_phase_   = GraspPhase::Closing;
+                    closing_ticks_ = 0;
+                    std::print("[grasp] at grasp point (e={:.3f} m, f={:.2f}) → Closing\n", e_pos, f);
+                }
+                break;
+            }
+            case GraspPhase::Closing:
+            {
+                // Hold the grasp pose (deadband keeps it still) and close.
+                const auto& g = latched_grasp_;
+                gripper_command_ = 0.0f;  // close
+                drive(g.grasp_pos, g.z_tool_des, g.x_tool_des, INSERT_VEL_MS);
+                const float f = gripper_force();
+                if (tip_log_ and closing_ticks_ % 10 == 0)
+                    std::print("[grasp] closing… f={:.3f} (thresh {:.2f})\n", f, GRASP_FORCE_THRESH);
+                if (f > GRASP_FORCE_THRESH)
+                {
+                    grasp_phase_ = GraspPhase::Lifting;
+                    std::print("[grasp] grasped (f={:.2f}) → Lifting\n", f);
+                }
+                else if (++closing_ticks_ > CLOSING_TIMEOUT_TICKS)
+                {
+                    std::print("[grasp] MISS — no contact in {} cycles → reopen, back to Tracking\n",
+                               CLOSING_TIMEOUT_TICKS);
+                    gripper_command_    = 1.0f;  // reopen
+                    grasp_phase_        = GraspPhase::Tracking;
+                    grasp_settle_ticks_ = 0;
+                }
+                break;
+            }
+            case GraspPhase::Lifting:
+            {
+                const auto& g = latched_grasp_;
+                gripper_command_ = 0.0f;  // keep holding the bottle
+                const auto [e_pos, e_ang] =
+                    drive(lift_target_, g.z_tool_des, g.x_tool_des, 0.20);
+                (void) e_ang;
+                if (e_pos < REACH_TOLERANCE_M)
+                {
+                    grasp_phase_ = GraspPhase::Holding;
+                    std::print("[grasp] lifted +{:.0f} cm → Holding\n", LIFT_HEIGHT_M * 100.0);
+                }
+                break;
+            }
+            case GraspPhase::Holding:
+            {
+                const auto& g = latched_grasp_;
+                gripper_command_ = 0.0f;  // keep holding
+                drive(lift_target_, g.z_tool_des, g.x_tool_des, 0.20);
+                break;
+            }
         }
         proxy_unreachable_warned_ = false;
     }

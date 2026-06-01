@@ -113,8 +113,7 @@ private:
 	bool webots_proxy_unreachable_warned_  = false;
 	bool joint_dump_pending_               = true;  // dump first received TJoints, once
 
-	// Controller lifecycle: home to a known rest pose, idle until the user
-	// arms the viewer's checkable button, then run continuous bottle-approach.
+	// Controller lifecycle: home → wait for Start → run continuous EFE.
 	// Un-checking the button drops back to SendingRestPose → Homing → idle.
 	enum class Phase { SendingRestPose, Homing, WaitingForStart, ActiveEFE };
 	Phase phase_ = Phase::SendingRestPose;
@@ -134,9 +133,17 @@ private:
 	static constexpr double REACH_TOLERANCE_M   = 0.02;  // 2 cm — "arrived"
 	bool arrived_logged_ = false;
 
+	// Tip-trajectory logging (diagnose approach speed/shape). When tip_log_ is
+	// set the ActiveEFE block prints one "[tiplog] ..." CSV line per cycle and
+	// tracks the previous tip pose to report the measured Cartesian speed.
+	bool                           tip_log_ = false;
+	long                           tip_log_cycle_ = 0;
+	std::optional<Eigen::Vector3d> tip_log_prev_pos_;
+
 	struct SideGraspTarget
 	{
-		Eigen::Vector3d stand_off_pos;  // position target (robot frame, m)
+		Eigen::Vector3d stand_off_pos;  // approach target (robot frame, m)
+		Eigen::Vector3d grasp_pos;      // bottle body-centre: the grasp point, m
 		Eigen::Vector3d z_tool_des;     // unit vector, robot frame
 		Eigen::Vector3d x_tool_des;     // unit vector, robot frame
 	};
@@ -144,6 +151,43 @@ private:
 	// Fraction of bottle height (measured from the base origin along the
 	// bottle's +Z axis) that we aim the EE at. 0.5 = mid-body.
 	static constexpr double BOTTLE_GRASP_HEIGHT_FRAC = 0.5;
+
+	// ── Grasp FSM (inner state machine of Phase::ActiveEFE) ─────────────────
+	// Hierarchical active inference: each state installs a prior (preferred
+	// pose + gripper state) that the continuous EFE controller realises; a
+	// transition fires when the lower level reports the prior is satisfied
+	// (error inside the deadband tolerance) or an observation (finger force)
+	// confirms the outcome. See EFE_CONTROLLER_MATH.md §1, §6.
+	//   Tracking  : approach the live standoff, gripper open, bottle tracked.
+	//   Inserting : commit — latch the grasp frame, ease into the bottle body.
+	//   Closing   : hold pose, close gripper, watch finger force.
+	//   Lifting   : raise +Δz holding the grasped bottle.
+	//   Holding   : hold up and idle until Start is unchecked.
+	enum class GraspPhase { Tracking, Inserting, Closing, Lifting, Holding };
+	GraspPhase grasp_phase_ = GraspPhase::Tracking;
+	int        grasp_settle_ticks_ = 0;   // consecutive converged cycles before committing
+	int        closing_ticks_      = 0;   // cycles spent closing (miss timeout)
+	// Grasp frame latched at Tracking→Inserting so gripper/bottle contact can't
+	// make the target chase its own disturbance.
+	SideGraspTarget latched_grasp_{};
+	Eigen::Vector3d lift_target_{};       // latched grasp_pos + LIFT_HEIGHT·ẑ_world
+
+	static constexpr int    GRASP_SETTLE_TICKS   = 8;     // converged cycles to commit
+	static constexpr double GRASP_ALIGN_TOL_RAD  = 0.10;  // ≈5.7° orientation tolerance to commit
+	static constexpr double INSERT_VEL_MS        = 0.05;  // gentle approach speed for soft contact
+	static constexpr float  GRASP_FORCE_THRESH   = 1.0f;  // finger force → object held (TUNE)
+	static constexpr int    CLOSING_TIMEOUT_TICKS = 100;  // ~2 s closing w/o force → miss
+	static constexpr double LIFT_HEIGHT_M        = 0.12;  // how high to pick the bottle
+
+	// Gripper command sent every compute() cycle through
+	//   kinovaarm_proxy->setGripperPos(gripper_command_).
+	// 1.0 = fully open, 0.0 = fully closed (matching the bridge's KinovaArm
+	// implementation, which internally inverts to motor position). The
+	// upcoming grasp FSM (Approach / Grasp / Lift) just writes to this.
+	// Default open so the controller starts and idles in a safe, harmless
+	// configuration.
+	float gripper_command_ = 1.0f;
+	bool  gripper_proxy_warned_ = false;
 
 	// DSR sub-APIs used by the bottle-approach loop.
 	std::unique_ptr<DSR::RT_API>         rt_api_;
