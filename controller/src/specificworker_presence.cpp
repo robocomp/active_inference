@@ -34,6 +34,11 @@ void SpecificWorker::degraded_loop()
 
 void SpecificWorker::cleanup_owned_nodes()
 {
+    if (owned_nodes_cleaned_)
+        return;
+    owned_nodes_cleaned_ = true;
+
+    obstacle_tracker_.clear_published_obstacles();
     presence_coordinator_.cleanup_owned_nodes();
 }
 

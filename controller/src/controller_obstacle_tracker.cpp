@@ -8,6 +8,7 @@
 #include <numeric>
 #include <print>
 #include <sstream>
+#include <unordered_set>
 
 namespace
 {
@@ -22,6 +23,7 @@ constexpr int kRemovalEvidenceMinPenetratingPoints = 6;
 constexpr float kRemovalSupportDistanceThreshold = 0.14f;
 constexpr float kRemovalPenetrationMargin = 0.05f;
 constexpr float kRemovalCrossAxisMargin = 0.08f;
+constexpr float kPublishedObstacleHeightM = 0.8f;
 
 struct RememberedEdgeSlot
 {
@@ -119,6 +121,25 @@ Eigen::Vector2f estimate_initial_obstacle_center(const ControllerObstacleObserva
     return estimate_obstacle_center(observation, observation.width_m, observation.depth_m);
 }
 
+std::string published_obstacle_name(std::uint64_t obstacle_id)
+{
+    return "obs" + std::to_string(obstacle_id);
+}
+
+float distance_visibility_scale(const ControllerParams *params,
+                                const ControllerRobotPose &robot_pose,
+                                const ControllerObstacleState &state)
+{
+    if (params == nullptr)
+        return 1.f;
+
+    const float distance_to_obstacle = (state.center - robot_pose.pos).norm();
+    const float reference_distance = std::max(0.5f, params->temporary_obstacle_front_distance_m);
+    return std::clamp(reference_distance / std::max(reference_distance, distance_to_obstacle),
+                      0.2f,
+                      1.f);
+}
+
 void recompute_observation_summary(ControllerObstacleObservation &observation,
                                    float padding_m,
                                    float occlusion_depth_m)
@@ -188,7 +209,22 @@ void ControllerObstacleTracker::set_dependencies(std::shared_ptr<DSR::DSRGraph> 
 {
     graph_ = std::move(graph);
     inner_eigen_api_ = inner_eigen_api;
+    rt_api_ = graph_ ? graph_->get_rt_api() : nullptr;
     graph_state_ = graph_state;
+}
+
+void ControllerObstacleTracker::set_graph_layout_callback(std::function<void()> callback)
+{
+    graph_layout_callback_ = std::move(callback);
+}
+
+void ControllerObstacleTracker::clear_published_obstacles()
+{
+    for (auto &instance : temporary_obstacles_)
+    {
+        delete_published_obstacle_node(instance);
+        instance.published_node_id = 0;
+    }
 }
 
 ControllerObstacleModelParams ControllerObstacleTracker::make_model_params() const
@@ -220,6 +256,85 @@ ControllerPolygons ControllerObstacleTracker::temporary_obstacle_rfe_points() co
     }
 
     return rfe_points;
+}
+
+void ControllerObstacleTracker::delete_published_obstacle_node(const TemporaryObstacleInstance &instance)
+{
+    if (!graph_)
+        return;
+
+    if (instance.published_node_id != 0 && graph_->delete_node(instance.published_node_id))
+    {
+        if (graph_layout_callback_)
+            graph_layout_callback_();
+        return;
+    }
+
+    if (graph_->delete_node(published_obstacle_name(instance.id)) && graph_layout_callback_)
+        graph_layout_callback_();
+}
+
+void ControllerObstacleTracker::sync_temporary_obstacles_to_dsr(std::uint64_t timestamp_ms)
+{
+    if (!graph_ || !rt_api_ || !graph_state_ || graph_state_->room_id == 0)
+        return;
+
+    auto room_node = graph_->get_node(graph_state_->room_id);
+    if (!room_node.has_value())
+        return;
+
+    const float room_pos_x = graph_->get_attrib_by_name<pos_x_att>(room_node.value()).value_or(200.f);
+    const float room_pos_y = graph_->get_attrib_by_name<pos_y_att>(room_node.value()).value_or(200.f);
+
+    for (auto &instance : temporary_obstacles_)
+    {
+        const auto &state = instance.model.state();
+        const std::string node_name = published_obstacle_name(instance.id);
+
+        std::optional<DSR::Node> node_opt;
+        if (instance.published_node_id != 0)
+            node_opt = graph_->get_node(instance.published_node_id);
+        if (!node_opt.has_value())
+        {
+            instance.published_node_id = 0;
+            node_opt = graph_->get_node(node_name);
+            if (node_opt.has_value())
+                instance.published_node_id = node_opt->id();
+        }
+
+        if (!node_opt.has_value())
+        {
+            DSR::Node obstacle_node = DSR::Node::create<obstacle_node_type>(node_name);
+            graph_->add_or_modify_attrib_local<level_att>(obstacle_node, 3);
+            graph_->add_or_modify_attrib_local<parent_att>(obstacle_node, graph_state_->room_id);
+            graph_->add_or_modify_attrib_local<pos_x_att>(obstacle_node, room_pos_x + 120.f + 18.f * static_cast<float>(instance.id % 6));
+            graph_->add_or_modify_attrib_local<pos_y_att>(obstacle_node, room_pos_y + 40.f + 18.f * static_cast<float>(instance.id / 6));
+            const auto node_id = graph_->insert_node(obstacle_node);
+            if (!node_id.has_value())
+                continue;
+            instance.published_node_id = node_id.value();
+            if (graph_layout_callback_)
+                graph_layout_callback_();
+            node_opt = graph_->get_node(node_id.value());
+            if (!node_opt.has_value())
+                continue;
+        }
+
+        auto node = node_opt.value();
+        graph_->add_or_modify_attrib_local<width_m_att>(node, state.width_m);
+        graph_->add_or_modify_attrib_local<depth_m_att>(node, state.depth_m);
+        graph_->add_or_modify_attrib_local<height_m_att>(node, kPublishedObstacleHeightM);
+        graph_->add_or_modify_attrib_local<level_att>(node, 3);
+        graph_->add_or_modify_attrib_local<parent_att>(node, graph_state_->room_id);
+        if (!graph_->update_node(node))
+            continue;
+
+        rt_api_->insert_or_assign_edge_RT(room_node.value(),
+                                          instance.published_node_id,
+                                          {state.center.x(), state.center.y(), 0.5f * kPublishedObstacleHeightM},
+                                          {0.f, 0.f, state.yaw_rad},
+                                          timestamp_ms);
+    }
 }
 
 std::vector<Eigen::Vector2f> ControllerObstacleTracker::read_temporary_obstacle_points(std::uint64_t timestamp_ms,
@@ -425,6 +540,11 @@ bool ControllerObstacleTracker::has_compelling_absence_evidence(std::uint64_t ti
     if (view_norm < 1e-4f)
         return false;
 
+    const float visibility_scale = distance_visibility_scale(params_, robot_pose, state);
+    const int required_penetrating_points = std::max(kRemovalEvidenceMinPenetratingPoints,
+                                                     static_cast<int>(std::ceil(static_cast<float>(kRemovalEvidenceMinPenetratingPoints)
+                                                                                 / visibility_scale)));
+
     const Eigen::Vector2f away_local = Eigen::Rotation2Df(-state.yaw_rad) * (view_dir_room / view_norm);
     const bool dominant_x = std::abs(away_local.x()) >= std::abs(away_local.y());
     const float away_sign = dominant_x ? (away_local.x() >= 0.f ? 1.f : -1.f)
@@ -461,7 +581,7 @@ bool ControllerObstacleTracker::has_compelling_absence_evidence(std::uint64_t ti
         }
     }
 
-    return support_points <= 1 && penetrating_points >= kRemovalEvidenceMinPenetratingPoints;
+    return support_points <= 1 && penetrating_points >= required_penetrating_points;
 }
 
 void ControllerObstacleTracker::prune_expired_temporary_obstacles(std::uint64_t timestamp_ms)
@@ -470,14 +590,16 @@ void ControllerObstacleTracker::prune_expired_temporary_obstacles(std::uint64_t 
     if (!params_)
         return;
 
-    temporary_obstacles_.erase(std::remove_if(temporary_obstacles_.begin(),
-                                              temporary_obstacles_.end(),
-                                              [this](const auto &instance)
-                                              {
-                                                  return instance.existence_log_odds
-                                                      < params_->temporary_obstacle_existence_remove_threshold_log_odds;
-                                              }),
-                               temporary_obstacles_.end());
+    auto first_removed = std::remove_if(temporary_obstacles_.begin(),
+                                        temporary_obstacles_.end(),
+                                        [this](const auto &instance)
+                                        {
+                                            return instance.existence_log_odds
+                                                < params_->temporary_obstacle_existence_remove_threshold_log_odds;
+                                        });
+    for (auto it = first_removed; it != temporary_obstacles_.end(); ++it)
+        delete_published_obstacle_node(*it);
+    temporary_obstacles_.erase(first_removed, temporary_obstacles_.end());
 }
 
 std::optional<std::size_t> ControllerObstacleTracker::match_temporary_obstacle(const ControllerObstacleObservation &observation) const
@@ -529,6 +651,17 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
     };
 
     auto obstacle_nodes = graph_->get_nodes_by_type("object");
+    std::unordered_set<std::uint64_t> obstacle_node_ids;
+    obstacle_node_ids.reserve(obstacle_nodes.size() + temporary_obstacles_.size());
+    for (const auto &node : obstacle_nodes)
+        obstacle_node_ids.insert(node.id());
+
+    for (const auto &node : graph_->get_nodes_by_type("obstacle"))
+    {
+        if (obstacle_node_ids.insert(node.id()).second)
+            obstacle_nodes.push_back(node);
+    }
+
     bool using_fallback_nodes = false;
     if (obstacle_nodes.empty())
     {
@@ -569,6 +702,17 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
         if (is_robot_body_node(node))
         {
             report << " | node='" << node.name() << "' type='" << node.type() << "' skipped=self";
+            continue;
+        }
+
+        const bool is_tracker_published_obstacle = node.type() == "obstacle"
+            && std::any_of(temporary_obstacles_.begin(), temporary_obstacles_.end(), [&node](const auto &instance)
+               {
+                   return instance.published_node_id != 0 && instance.published_node_id == node.id();
+               });
+        if (is_tracker_published_obstacle)
+        {
+            report << " | node='" << node.name() << "' type='" << node.type() << "' skipped=local_tmp";
             continue;
         }
 
@@ -633,6 +777,7 @@ void ControllerObstacleTracker::update_active_obstacle_polygons(std::uint64_t ti
     obstacle_polygons_ = read_obstacle_polygons(timestamp_ms);
     for (const auto &instance : temporary_obstacles_)
         obstacle_polygons_.push_back(instance.model.polygon());
+    sync_temporary_obstacles_to_dsr(timestamp_ms);
     path_controller.set_static_obstacles(obstacle_polygons_);
 }
 
@@ -655,14 +800,15 @@ void ControllerObstacleTracker::refresh_temporary_lidar_obstacle(std::uint64_t t
             || (observation->centroid - instance.model.state().center).norm() > instance.model.association_radius())
         {
             ++instance.missed_updates;
+            const float visibility_scale = distance_visibility_scale(params_, robot_pose, instance.model.state());
             if (has_compelling_absence_evidence(timestamp_ms, robot_pose, instance))
                 instance.existence_log_odds = std::clamp(instance.existence_log_odds
-                                                             - params_->temporary_obstacle_existence_absence_penalty,
+                                                             - params_->temporary_obstacle_existence_absence_penalty * visibility_scale,
                                                          params_->temporary_obstacle_existence_min_log_odds,
                                                          params_->temporary_obstacle_existence_max_log_odds);
             else
                 instance.existence_log_odds = std::clamp(instance.existence_log_odds
-                                                             - params_->temporary_obstacle_existence_weak_miss_penalty,
+                                                             - params_->temporary_obstacle_existence_weak_miss_penalty * visibility_scale,
                                                          params_->temporary_obstacle_existence_min_log_odds,
                                                          params_->temporary_obstacle_existence_max_log_odds);
             continue;

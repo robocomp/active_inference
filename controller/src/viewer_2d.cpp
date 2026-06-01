@@ -352,9 +352,6 @@ void Viewer2D::draw_path(const PathDrawData &data)
     clear_path_items();
     clear_polygon_item(inner_polygon_item_);
 
-    const bool showing_mppi_diagnostics = mppi_paths_visible_
-                                       && (!data.candidate_trajectories.empty() || !data.average_trajectory.empty());
-
     if (mppi_paths_visible_ && !data.candidate_trajectories.empty())
     {
         const int total = static_cast<int>(data.candidate_trajectories.size());
@@ -498,7 +495,7 @@ void Viewer2D::draw_path(const PathDrawData &data)
         }
     }
 
-    if (showing_mppi_diagnostics || data.path.empty())
+    if (data.path.empty())
         return;
 
     const QPen path_pen(QColor(56, 114, 219), 0.08);

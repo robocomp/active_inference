@@ -86,6 +86,7 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
 
 SpecificWorker::~SpecificWorker()
 {
+	cleanup_owned_nodes();
 	stop_robot();
 	std::cout << "Destroying SpecificWorker" << std::endl;
 	/*
@@ -162,6 +163,7 @@ void SpecificWorker::initialize()
 	world_model_.set_affordance_manager(&affordance_manager_);
 	world_model_.set_dependencies(G, inner_eigen_api_.get());
 	obstacle_tracker_.set_dependencies(G, inner_eigen_api_.get(), &world_model_.graph_state());
+	obstacle_tracker_.set_graph_layout_callback([this]() { trigger_graph_layout_twopi(); });
 	motion_commander_.set_dependencies(G,
 	                                 &world_model_,
 	                                 omnirobot_proxy,

@@ -85,18 +85,6 @@ void ControllerDisplay::update(const std::optional<ControllerRobotPose> &robot_p
         ControllerPolygon display_path;
         if (current_plan.has_value())
             display_path = current_plan->room_path;
-        if (robot_pose.has_value() && !display_path.empty())
-        {
-            const int start_index = std::clamp(last_display_wp_index, 0, static_cast<int>(display_path.size()) - 1);
-            auto suffix_begin = display_path.begin() + start_index;
-            ControllerPolygon remaining_path;
-            remaining_path.reserve(static_cast<std::size_t>(std::distance(suffix_begin, display_path.end())) + 1);
-            remaining_path.push_back(robot_pose->pos);
-            remaining_path.insert(remaining_path.end(), suffix_begin, display_path.end());
-            if (remaining_path.size() >= 2 && (remaining_path[1] - remaining_path[0]).norm() < 1e-3f)
-                remaining_path.erase(remaining_path.begin() + 1);
-            display_path = std::move(remaining_path);
-        }
 
         viewer_2d_->draw_room_polygon(room_polygon);
         viewer_2d_->draw_lidar_points_from_buffer(max_lidar_draw_points);

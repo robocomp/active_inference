@@ -128,6 +128,7 @@ private:
 	bool path_following_active_ = false;
 	bool stop_sent_when_paused_ = false;
 	bool compute_debug_logged_ = false;
+	bool owned_nodes_cleaned_ = false;
 	RoomPathPlanner planner_;
 	rc::TrajectoryController path_controller_;
 
