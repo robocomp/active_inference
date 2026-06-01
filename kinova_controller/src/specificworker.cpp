@@ -21,6 +21,7 @@
 #include <cmath>
 #include <print>
 #include <random>
+#include <sstream>
 #include <stdexcept>
 
 namespace
@@ -135,6 +136,23 @@ void SpecificWorker::initialize()
     try { tip_log_        = configLoader.get<bool>("Controller.tip_log");   } catch (...) {}
     if (run_requested_) std::print("[ui] auto_start: run requested from config\n");
 
+    // Rest pose, tunable without recompiling: Controller.rest_pose = "j1 .. j7"
+    // (rad). Lets us iterate the "ready over the table, camera-up" posture by
+    // editing config.toml and relaunching. Falls back to the hard-coded default.
+    try
+    {
+        std::istringstream iss(configLoader.get<std::string>("Controller.rest_pose"));
+        std::array<double, Kinematics::N_ARM_JOINTS> v{};
+        int n = 0; double x;
+        while (n < Kinematics::N_ARM_JOINTS and (iss >> x)) v[n++] = x;
+        if (n == Kinematics::N_ARM_JOINTS)
+        {
+            rest_pose_angles_ = v;
+            std::print("[config] rest_pose = [{:+.3f} {:+.3f} {:+.3f} {:+.3f} {:+.3f} {:+.3f} {:+.3f}]\n",
+                       v[0], v[1], v[2], v[3], v[4], v[5], v[6]);
+        }
+    } catch (...) {}
+
     //initializeCODE
     /////////GET PARAMS, OPEND DEVICES....////////
     //int period = configLoader.get<int>("Period.Compute") //NOTE: If you want get period of compute use getPeriod("compute")
@@ -150,6 +168,21 @@ void SpecificWorker::initialize()
         std::print("[Kinematics] tool_frame at neutral config (world frame): "
                    "[{:+.4f}, {:+.4f}, {:+.4f}] m\n",
                    ee_neutral.x(), ee_neutral.y(), ee_neutral.z());
+
+        // Metrics for the chosen rest pose, to tune the posture numerically
+        // alongside the Webots view: EE position, upper-arm tilt (0=parallel to
+        // table), tool-+Y up-component (camera-up ≈ +1), approach z, and μ.
+        {
+            const auto p  = kinematics_->tool_pose(rest_pose_angles_);
+            const auto sk = kinematics_->arm_skeleton_points(rest_pose_angles_);
+            const auto J  = kinematics_->arm_jacobian_full(rest_pose_angles_);
+            const double mu = std::sqrt(std::max(0.0, (J * J.transpose()).determinant()));
+            std::print("[rest-pose] EE=({:+.3f},{:+.3f},{:+.3f}) upperarm_dz={:+.3f} "
+                       "toolY_up={:+.2f} approach_z={:+.2f} mu={:.4f}\n",
+                       p.position.x(), p.position.y(), p.position.z(),
+                       sk[4].z() - sk[2].z(), p.rotation(2, 1), p.rotation(2, 2), mu);
+        }
+
     }
     catch (const std::exception& e)
     {
@@ -358,8 +391,23 @@ void SpecificWorker::compute()
         }
 
         std::array<double, Kinematics::N_ARM_JOINTS> q{};
+        std::array<double, Kinematics::N_ARM_JOINTS> tau{};
         for (int i = 0; i < Kinematics::N_ARM_JOINTS; ++i)
-            q[i] = js.joints[i].angle;
+        {
+            q[i]   = js.joints[i].angle;
+            tau[i] = js.joints[i].torque;     // motor torque feedback from the bridge
+        }
+
+        // Wrist 6-axis wrench estimate from joint torques (Webots has no native
+        // F/T node): w = (J Jᵀ + λ²I)⁻¹ J (g(q) − τ), in the base-aligned frame
+        // at the tool point. Logged for now (not yet consumed by the FSM); a
+        // no-contact reading is the bias to tare against. See EFE_CONTROLLER_MATH.md.
+        if (tip_log_)
+        {
+            const Eigen::Matrix<double, 6, 1> w = kinematics_->estimate_tool_wrench(q, tau);
+            std::print("[wrench] F=({:.2f},{:.2f},{:.2f}) N  T=({:.3f},{:.3f},{:.3f}) N·m\n",
+                       w(0), w(1), w(2), w(3), w(4), w(5));
+        }
 
         // Drive the gripper to whatever the current FSM sub-state wants.
         // setGripperPos takes [0, 1] where 1 = fully open in the bridge.
@@ -406,8 +454,21 @@ void SpecificWorker::compute()
         // ── Lifecycle: home to rest pose, then run EFE ──────────────────────
         if (phase_ == Phase::SendingRestPose)
         {
+            // Command continuous joints to the equivalent of the rest angle
+            // NEAREST the current encoder value, so the motor doesn't unwind
+            // accumulated revolutions (j5 can read +26 rad ≈ 4 turns). Bounded
+            // joints (finite limits) are commanded as-is.
+            constexpr double TWO_PI = 6.283185307179586;
+            const auto lims = kinematics_->arm_joint_position_limits();
             RoboCompKinovaArm::TJointAngles target;
-            target.jointAngles.assign(rest_pose_angles_.begin(), rest_pose_angles_.end());
+            target.jointAngles.resize(Kinematics::N_ARM_JOINTS);
+            for (int i = 0; i < Kinematics::N_ARM_JOINTS; ++i)
+            {
+                double t = rest_pose_angles_[i];
+                if (not std::isfinite(lims[i].first) or not std::isfinite(lims[i].second))
+                    t += std::round((q[i] - t) / TWO_PI) * TWO_PI;   // nearest equivalent
+                target.jointAngles[i] = static_cast<float>(t);
+            }
             kinovaarm_proxy->moveJointsWithAngle(target);
             std::print("[homing] Sent rest pose [{:+.3f} {:+.3f} {:+.3f} {:+.3f} {:+.3f} {:+.3f} {:+.3f}] rad\n",
                        rest_pose_angles_[0], rest_pose_angles_[1], rest_pose_angles_[2],
@@ -436,8 +497,22 @@ void SpecificWorker::compute()
 
             if (homing_settled_ticks_ >= HOMING_SETTLE_TICKS)
             {
-                std::print("[homing] Rest pose reached — waiting for Start button.\n");
-                phase_ = Phase::WaitingForStart;
+                if (returning_for_cycle_ and run_requested_)
+                {
+                    // Autonomous loop: rest reached after a place — pick again.
+                    returning_for_cycle_ = false;
+                    grasp_phase_         = GraspPhase::Tracking;
+                    grasp_settle_ticks_  = 0;
+                    gripper_command_     = 1.0f;
+                    phase_               = Phase::ActiveEFE;
+                    std::print("[cycle] rest reached → starting next pick-and-place\n");
+                }
+                else
+                {
+                    returning_for_cycle_ = false;
+                    std::print("[homing] Rest pose reached — waiting for Start button.\n");
+                    phase_ = Phase::WaitingForStart;
+                }
             }
             proxy_unreachable_warned_ = false;
             return;   // do NOT run EFE while homing
@@ -473,11 +548,12 @@ void SpecificWorker::compute()
         if (not run_requested_)
         {
             std::print("[stop] Run unchecked — returning to rest pose.\n");
-            arrived_logged_     = false;
-            grasp_phase_        = GraspPhase::Tracking;  // reset FSM
-            grasp_settle_ticks_ = 0;
-            gripper_command_    = 1.0f;                  // release / open
-            phase_              = Phase::SendingRestPose;
+            arrived_logged_      = false;
+            grasp_phase_         = GraspPhase::Tracking;  // reset FSM
+            grasp_settle_ticks_  = 0;
+            returning_for_cycle_ = false;
+            gripper_command_     = 1.0f;                  // release / open
+            phase_               = Phase::SendingRestPose;
             return;
         }
 
@@ -502,7 +578,11 @@ void SpecificWorker::compute()
             p.v_approach        = v_app;
             p.a_approach        = 0.60;
             p.omega_max         = 2.0;
-            p.gain_mu           = 0.0;
+            // Manipulability null-space ascent: keep the arm in the dexterous
+            // region (with the new rest pose) through the whole pick-and-place,
+            // so it doesn't drift into the near-singular contortions that tip
+            // the bottle. Spends only the redundant DOF — can't disturb the pose.
+            p.gain_mu           = 0.3;
             return p;
         };
 
@@ -652,16 +732,93 @@ void SpecificWorker::compute()
                 (void) e_ang;
                 if (e_pos < REACH_TOLERANCE_M)
                 {
-                    grasp_phase_ = GraspPhase::Holding;
-                    std::print("[grasp] lifted +{:.0f} cm → Holding\n", LIFT_HEIGHT_M * 100.0);
+                    // Pick a random reachable table spot ≥ PLACE_MIN_MOVE_M from
+                    // the pick point; z = grasp height so the base lands on the
+                    // table. Orientation stays latched (pure translation keeps
+                    // the bottle upright).
+                    std::uniform_real_distribution<double> ux(PLACE_X_MIN, PLACE_X_MAX);
+                    std::uniform_real_distribution<double> uy(PLACE_Y_MIN, PLACE_Y_MAX);
+                    Eigen::Vector3d p;
+                    for (int k = 0; k < 10; ++k)
+                    {
+                        p = Eigen::Vector3d(ux(rng_), uy(rng_), g.grasp_pos.z());
+                        if ((p.head<2>() - g.grasp_pos.head<2>()).norm() > PLACE_MIN_MOVE_M) break;
+                    }
+                    place_pos_   = p;
+                    place_hover_ = p + Eigen::Vector3d(0.0, 0.0, LIFT_HEIGHT_M);
+                    // Re-point the approach radially toward the place spot, +Y up
+                    // (bottle upright). Yaw-only change from the grasp frame, so
+                    // the arm reaches the spot comfortably instead of contorting.
+                    place_z_des_ = Eigen::Vector3d(place_pos_.x(), place_pos_.y(), 0.0).normalized();
+                    place_x_des_ = Eigen::Vector3d(0.0, 0.0, 1.0).cross(place_z_des_).normalized();
+                    grasp_phase_ = GraspPhase::PlaceMoving;
+                    place_ticks_ = 0;
+                    std::print("[place] lifted → carry to ({:.3f}, {:.3f}) → PlaceMoving\n",
+                               place_pos_.x(), place_pos_.y());
                 }
                 break;
             }
-            case GraspPhase::Holding:
+            case GraspPhase::PlaceMoving:
             {
-                const auto& g = latched_grasp_;
-                gripper_command_ = 0.0f;  // keep holding
-                drive(lift_target_, g.z_tool_des, g.x_tool_des, 0.20);
+                gripper_command_ = 0.0f;  // hold the bottle
+                const auto [e_pos, e_ang] =
+                    drive(place_hover_, place_z_des_, place_x_des_, 0.20);
+                (void) e_ang;
+                if (e_pos < REACH_TOLERANCE_M or ++place_ticks_ > PLACE_TIMEOUT_TICKS)
+                {
+                    grasp_phase_ = GraspPhase::PlaceLowering;
+                    place_ticks_ = 0;
+                    std::print("[place] above spot → PlaceLowering\n");
+                }
+                break;
+            }
+            case GraspPhase::PlaceLowering:
+            {
+                gripper_command_ = 0.0f;  // still holding
+                const auto [e_pos, e_ang] =
+                    drive(place_pos_, place_z_des_, place_x_des_, 0.08);  // gentle set-down
+                (void) e_ang;
+                if (e_pos < REACH_TOLERANCE_M or ++place_ticks_ > PLACE_TIMEOUT_TICKS)
+                {
+                    grasp_phase_ = GraspPhase::PlaceReleasing;
+                    place_ticks_ = 0;
+                    std::print("[place] on table → PlaceReleasing (open)\n");
+                }
+                break;
+            }
+            case GraspPhase::PlaceReleasing:
+            {
+                gripper_command_ = 1.0f;  // open — let the bottle go
+                drive(place_pos_, place_z_des_, place_x_des_, 0.05);  // hold still while opening
+                if (++place_ticks_ > RELEASE_TICKS)
+                {
+                    grasp_phase_ = GraspPhase::PlaceRetreating;
+                    place_ticks_ = 0;
+                    std::print("[place] released → PlaceRetreating\n");
+                }
+                break;
+            }
+            case GraspPhase::PlaceRetreating:
+            {
+                gripper_command_ = 1.0f;  // stay open
+                const auto [e_pos, e_ang] =
+                    drive(place_hover_, place_z_des_, place_x_des_, 0.20);
+                (void) e_ang;
+                if (e_pos < REACH_TOLERANCE_M or ++place_ticks_ > PLACE_TIMEOUT_TICKS)
+                {
+                    // Return to rest via the outer Homing path, then auto-restart
+                    // the whole pick-and-place (handled in the Homing branch).
+                    RoboCompKinovaArm::TJointAngles target;
+                    target.jointAngles.assign(rest_pose_angles_.begin(), rest_pose_angles_.end());
+                    kinovaarm_proxy->moveJointsWithAngle(target);
+                    returning_for_cycle_  = true;
+                    homing_settled_ticks_ = 0;
+                    grasp_phase_          = GraspPhase::Tracking;  // for the next cycle
+                    place_ticks_          = 0;
+                    phase_                = Phase::Homing;
+                    std::print("[place] retreated → returning to rest, then new cycle\n");
+                    return;
+                }
                 break;
             }
         }

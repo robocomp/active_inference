@@ -85,6 +85,25 @@ public:
     std::vector<Eigen::Vector3d> arm_skeleton_points(
         const std::array<double, N_ARM_JOINTS>& angles);
 
+    /** Generalised gravity torque g(q) at the 7 arm joints (N·m). The torque
+     *  each motor must apply just to hold the arm against gravity. */
+    std::array<double, N_ARM_JOINTS> arm_gravity_torque(
+        const std::array<double, N_ARM_JOINTS>& angles);
+
+    /** Estimate the external 6-axis wrench on the tool from measured joint
+     *  torques — the joint-torque-sensing route to a wrist F/T sensor (Webots
+     *  has no native 6-axis F/T node). In static equilibrium Pinocchio's
+     *  dynamics give g(q) = τ_motor + Jᵀ·w_ext, so
+     *      w_ext = (J Jᵀ + λ²I)⁻¹ J (g(q) − τ_measured),
+     *  a damped least-squares solve (J is the 6×7 tool Jacobian). Returned as
+     *  [fx,fy,fz, tx,ty,tz] in the world/base-aligned frame at the tool point.
+     *  Approximate: any URDF↔sim mass mismatch shows up as a slowly-varying
+     *  bias, so tare it (subtract a no-contact reading) for absolute values. */
+    Eigen::Matrix<double, 6, 1> estimate_tool_wrench(
+        const std::array<double, N_ARM_JOINTS>& angles,
+        const std::array<double, N_ARM_JOINTS>& joint_torque,
+        double damping = 1e-2);
+
     /** idx_v of each arm joint inside the full nv-vector (Pinocchio ordering). */
     std::array<int, N_ARM_JOINTS> arm_joint_idx_v() const;
 
@@ -116,4 +135,9 @@ private:
     // Map of arm joint name → joint index in the model, in the order
     // joint_1..joint_7. Initialised once in the constructor.
     std::array<pinocchio::JointIndex, N_ARM_JOINTS> arm_joint_ids_{};
+
+    // Base mount rotation, applied to every FK output so the controller's model
+    // and 3D viewer match the arm's orientation in the Webots world (the arm is
+    // mounted tilted 90° as if on a chest). Must match arm_table.wbt.
+    Eigen::Isometry3d base_tf_ = Eigen::Isometry3d::Identity();
 };

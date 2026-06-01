@@ -40,6 +40,7 @@
 #include <Eigen/Dense>
 #include <memory>
 #include <optional>
+#include <random>
 
 /**
  * \brief Class SpecificWorker implements the core functionality of the component.
@@ -118,8 +119,14 @@ private:
 	enum class Phase { SendingRestPose, Homing, WaitingForStart, ActiveEFE };
 	Phase phase_ = Phase::SendingRestPose;
 	bool  run_requested_ = false;   // mirrors the viewer button's checked state
+	// "Ready over the table" rest pose, in the arm-base frame (base_tf_=identity:
+	// +X forward, +Y left, +Z up, z=0 at the desk). Base yaw j1=0.30 centres the
+	// hand on +X; it hovers ~10 cm above the table in front (EE≈(0.47,0.04,0.10))
+	// with manipulability μ≈0.106 — far from the near-singular contortions that
+	// were tipping the bottle (old extended pose μ≈0.03). Chosen by the scored
+	// FK search in initialize(); override at runtime via Controller.rest_pose.
 	std::array<double, Kinematics::N_ARM_JOINTS> rest_pose_angles_{
-		0.0, 0.3, 0.0, 1.5, 0.0, 1.4, 0.0
+		0.30, 1.20, 0.0, 1.20, -0.80, 1.70, 0.0
 	};
 	int homing_settled_ticks_ = 0;
 	static constexpr double HOMING_TOLERANCE_RAD = 0.05;  // ≈ 2.9°
@@ -158,19 +165,34 @@ private:
 	// transition fires when the lower level reports the prior is satisfied
 	// (error inside the deadband tolerance) or an observation (finger force)
 	// confirms the outcome. See EFE_CONTROLLER_MATH.md §1, §6.
-	//   Tracking  : approach the live standoff, gripper open, bottle tracked.
-	//   Inserting : commit — latch the grasp frame, ease into the bottle body.
-	//   Closing   : hold pose, close gripper, watch finger force.
-	//   Lifting   : raise +Δz holding the grasped bottle.
-	//   Holding   : hold up and idle until Start is unchecked.
-	enum class GraspPhase { Tracking, Inserting, Closing, Lifting, Holding };
+	//   Tracking      : approach the live standoff, gripper open, bottle tracked.
+	//   Inserting     : commit — latch the grasp frame, ease into the bottle body.
+	//   Closing       : hold pose, close gripper, watch finger force.
+	//   Lifting       : raise +Δz holding the grasped bottle.
+	//   PlaceMoving   : carry the bottle to a hover above a random table spot.
+	//   PlaceLowering : lower onto the table spot.
+	//   PlaceReleasing: open gripper, let the bottle settle.
+	//   PlaceRetreating: rise off the placed bottle.
+	//   (then) return to rest pose via the outer Homing path, and loop.
+	enum class GraspPhase { Tracking, Inserting, Closing, Lifting,
+	                        PlaceMoving, PlaceLowering, PlaceReleasing, PlaceRetreating };
 	GraspPhase grasp_phase_ = GraspPhase::Tracking;
 	int        grasp_settle_ticks_ = 0;   // consecutive converged cycles before committing
 	int        closing_ticks_      = 0;   // cycles spent closing (miss timeout)
+	int        place_ticks_        = 0;   // watchdog within a place sub-state
+	bool       returning_for_cycle_ = false;  // auto-restart Tracking after the rest-return
 	// Grasp frame latched at Tracking→Inserting so gripper/bottle contact can't
 	// make the target chase its own disturbance.
 	SideGraspTarget latched_grasp_{};
 	Eigen::Vector3d lift_target_{};       // latched grasp_pos + LIFT_HEIGHT·ẑ_world
+	Eigen::Vector3d place_pos_{};         // random place point on the table (robot frame)
+	Eigen::Vector3d place_hover_{};       // place_pos_ + LIFT_HEIGHT·ẑ_world
+	// Place orientation: tool +Z re-pointed radially toward the place spot with
+	// tool +Y kept up (bottle upright). Yaw is free, so this avoids the arm
+	// contorting to hold the original grasp yaw across the table.
+	Eigen::Vector3d place_z_des_{};
+	Eigen::Vector3d place_x_des_{};
+	std::mt19937    rng_{std::random_device{}()};
 
 	static constexpr int    GRASP_SETTLE_TICKS   = 8;     // converged cycles to commit
 	static constexpr double GRASP_ALIGN_TOL_RAD  = 0.10;  // ≈5.7° orientation tolerance to commit
@@ -178,6 +200,14 @@ private:
 	static constexpr float  GRASP_FORCE_THRESH   = 1.0f;  // finger force → object held (TUNE)
 	static constexpr int    CLOSING_TIMEOUT_TICKS = 100;  // ~2 s closing w/o force → miss
 	static constexpr double LIFT_HEIGHT_M        = 0.12;  // how high to pick the bottle
+	// Random place target box (robot/arm-base frame, m): a conservative
+	// reachable patch of the table. z is taken from the grasped bottle so its
+	// base lands back on the table surface.
+	static constexpr double PLACE_X_MIN = 0.35, PLACE_X_MAX = 0.55;
+	static constexpr double PLACE_Y_MIN = -0.20, PLACE_Y_MAX = 0.20;
+	static constexpr double PLACE_MIN_MOVE_M    = 0.10;  // ≥ this far from the pick spot
+	static constexpr int    PLACE_TIMEOUT_TICKS = 300;   // ~6 s safety per place move
+	static constexpr int    RELEASE_TICKS       = 25;    // ~0.5 s to let the bottle go
 
 	// Gripper command sent every compute() cycle through
 	//   kinovaarm_proxy->setGripperPos(gripper_command_).

@@ -5,6 +5,7 @@
 #include <pinocchio/algorithm/frames.hpp>
 #include <pinocchio/algorithm/jacobian.hpp>
 #include <pinocchio/algorithm/joint-configuration.hpp>
+#include <pinocchio/algorithm/rnea.hpp>
 
 #include <limits>
 #include <print>
@@ -28,6 +29,15 @@ Kinematics::Kinematics(const std::string& urdf_path, const std::string& ee_frame
             throw std::runtime_error("Kinematics: arm joint '" + name + "' not in URDF");
         arm_joint_ids_[i] = model_.getJointId(name);
     }
+
+    // The controller and the KinovaArm proxy both work in the arm-base frame
+    // (URDF base_link: +X forward, +Y left, +Z up, z=0 at the table the arm
+    // stands on). The Webots Robot-node world rotation never enters the control
+    // loop — getCenterOfTool(base) is base-relative and targets are sampled in
+    // this same frame — and the KinovaGen3 proto frame is generated from this
+    // very URDF. So base_tf_ is identity; FK already matches Webots in the
+    // arm-base frame.
+    base_tf_ = Eigen::Isometry3d::Identity();
 }
 
 Eigen::VectorXd Kinematics::angles_to_q(const std::array<double, N_ARM_JOINTS>& angles) const
@@ -52,14 +62,14 @@ Eigen::Vector3d Kinematics::forward_kinematics(const std::array<double, N_ARM_JO
 {
     const Eigen::VectorXd q = angles_to_q(angles);
     pinocchio::framesForwardKinematics(model_, *data_, q);
-    return data_->oMf[ee_frame_id_].translation();
+    return base_tf_ * data_->oMf[ee_frame_id_].translation();
 }
 
 Eigen::Vector3d Kinematics::forward_kinematics_neutral()
 {
     const Eigen::VectorXd q = pinocchio::neutral(model_);
     pinocchio::framesForwardKinematics(model_, *data_, q);
-    return data_->oMf[ee_frame_id_].translation();
+    return base_tf_ * data_->oMf[ee_frame_id_].translation();
 }
 
 Eigen::Matrix<double, 6, Eigen::Dynamic>
@@ -70,6 +80,11 @@ Kinematics::jacobian(const std::array<double, N_ARM_JOINTS>& angles)
     J.setZero();
     pinocchio::computeFrameJacobian(model_, *data_, q, ee_frame_id_,
                                      pinocchio::LOCAL_WORLD_ALIGNED, J);
+    // Rotate the world-aligned Jacobian into the base-mount frame so velocities
+    // are expressed consistently with the (rotated) FK poses.
+    const Eigen::Matrix3d R = base_tf_.linear();
+    J.topRows(3)    = R * J.topRows(3);
+    J.bottomRows(3) = R * J.bottomRows(3);
     return J;
 }
 
@@ -100,7 +115,7 @@ Kinematics::ToolPose Kinematics::tool_pose(const std::array<double, N_ARM_JOINTS
     const Eigen::VectorXd q = angles_to_q(angles);
     pinocchio::framesForwardKinematics(model_, *data_, q);
     const auto& T = data_->oMf[ee_frame_id_];
-    return ToolPose{T.translation(), T.rotation()};
+    return ToolPose{base_tf_ * T.translation(), base_tf_.linear() * T.rotation()};
 }
 
 std::vector<Kinematics::MeshLinkPose>
@@ -112,12 +127,12 @@ Kinematics::arm_mesh_link_poses(const std::array<double, N_ARM_JOINTS>& angles)
     std::vector<MeshLinkPose> poses;
     poses.reserve(8);
 
-    auto to_iso = [](const pinocchio::SE3& T)
+    auto to_iso = [this](const pinocchio::SE3& T)
     {
-        return Eigen::Isometry3d(T.toHomogeneousMatrix());
+        return base_tf_ * Eigen::Isometry3d(T.toHomogeneousMatrix());
     };
 
-    poses.push_back({"base_link.STL", Eigen::Isometry3d::Identity()});
+    poses.push_back({"base_link.STL", base_tf_});
     poses.push_back(MeshLinkPose{"shoulder_link.STL", to_iso(data_->oMi[arm_joint_ids_[0]])});
     poses.push_back(MeshLinkPose{"half_arm_1_link.STL", to_iso(data_->oMi[arm_joint_ids_[1]])});
     poses.push_back(MeshLinkPose{"half_arm_2_link.STL", to_iso(data_->oMi[arm_joint_ids_[2]])});
@@ -139,12 +154,40 @@ Kinematics::arm_skeleton_points(const std::array<double, N_ARM_JOINTS>& angles)
     std::vector<Eigen::Vector3d> points;
     points.reserve(N_ARM_JOINTS + 2);
 
-    points.emplace_back(Eigen::Vector3d::Zero());
+    points.emplace_back(base_tf_ * Eigen::Vector3d::Zero());
     for (int i = 0; i < N_ARM_JOINTS; ++i)
-        points.emplace_back(data_->oMi[arm_joint_ids_[i]].translation());
-    points.emplace_back(data_->oMf[ee_frame_id_].translation());
+        points.emplace_back(base_tf_ * data_->oMi[arm_joint_ids_[i]].translation());
+    points.emplace_back(base_tf_ * data_->oMf[ee_frame_id_].translation());
 
     return points;
+}
+
+std::array<double, Kinematics::N_ARM_JOINTS>
+Kinematics::arm_gravity_torque(const std::array<double, N_ARM_JOINTS>& angles)
+{
+    const Eigen::VectorXd q = angles_to_q(angles);
+    pinocchio::computeGeneralizedGravity(model_, *data_, q);   // fills data_->g (nv)
+    const auto idx_v = arm_joint_idx_v();
+    std::array<double, N_ARM_JOINTS> g{};
+    for (int i = 0; i < N_ARM_JOINTS; ++i)
+        g[i] = data_->g(idx_v[i]);
+    return g;
+}
+
+Eigen::Matrix<double, 6, 1>
+Kinematics::estimate_tool_wrench(const std::array<double, N_ARM_JOINTS>& angles,
+                                const std::array<double, N_ARM_JOINTS>& joint_torque,
+                                double damping)
+{
+    // Capture J BEFORE arm_gravity_torque (both write data_; J is a local copy).
+    const auto J = arm_jacobian_full(angles);                  // 6×7, LOCAL_WORLD_ALIGNED
+    const auto g = arm_gravity_torque(angles);
+    Eigen::Matrix<double, N_ARM_JOINTS, 1> tau_ext;
+    for (int i = 0; i < N_ARM_JOINTS; ++i)
+        tau_ext(i) = g[i] - joint_torque[i];                   // Jᵀ w_ext = g − τ
+    const Eigen::Matrix<double, 6, 6> A =
+        J * J.transpose() + damping * damping * Eigen::Matrix<double, 6, 6>::Identity();
+    return A.ldlt().solve(J * tau_ext);
 }
 
 std::array<int, Kinematics::N_ARM_JOINTS> Kinematics::arm_joint_idx_v() const
