@@ -179,6 +179,51 @@ std::array<double, Kinematics::N_ARM_JOINTS> efe_gradient_step(
         q_dot += params.gain_mu * (grad_mu - projected);
     }
 
+    // 3b. Null-space elbow placement (Corke RVC §8.4 redundancy resolution).
+    //     Park the elbow at elbow_target using the SAME 6-DOF null-space
+    //     projector, so it cannot disturb the tool pose. Horizontal error only
+    //     (Δz zeroed) → bias the elbow "behind the mast" without forcing height.
+    //     N.B. mutates kin.data_; runs after every read of J/J_lin/J6 (local copies).
+    if (params.gain_elbow > 0.0)
+    {
+        const Eigen::Matrix<double, 3, Kinematics::N_ARM_JOINTS> J_el =
+            kin.arm_jacobian_elbow_linear(q);
+        Eigen::Vector3d err = params.elbow_target - kin.elbow_position(q);
+        err.z() = 0.0;                                   // horizontal placement only
+        const Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1> grad_el =
+            J_el.transpose() * err;
+        const Eigen::Matrix<double, 6, 1> J6_grad_el = J6 * grad_el;
+        const Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1> projected =
+            J6.transpose() * Q6_ldlt.solve(J6_grad_el);
+        q_dot += params.gain_elbow * (grad_el - projected);
+    }
+
+    // 3c. Soft obstacle repulsions (potential field), added before scaling so the
+    //     command stays velocity-bounded and the constraint negotiates with the
+    //     task. Quadratic ramp, exactly zero outside the margin.
+    if (params.gain_mast > 0.0)            // elbow ↔ vertical mast
+    {
+        const Eigen::Vector3d p_el = kin.elbow_position(q);
+        const Eigen::Vector2d d_xy = p_el.head<2>() - params.mast_xy;
+        const double d = d_xy.norm();
+        if (d > 1e-6 and d < params.mast_safe)
+        {
+            const auto J_el = kin.arm_jacobian_elbow_linear(q);
+            const double e = (params.mast_safe - d) / params.mast_safe;   // (0,1]
+            const Eigen::Vector3d v(d_xy.x() / d, d_xy.y() / d, 0.0);      // radial outward
+            q_dot += params.gain_mast * e * e * (J_el.transpose() * v);
+        }
+    }
+    if (params.gain_table > 0.0)           // hand ↔ table top
+    {
+        const double d = pose.position.z() - params.table_z;
+        if (d < params.table_safe)
+        {
+            const double e = std::clamp((params.table_safe - d) / params.table_safe, 0.0, 1.0);
+            q_dot += params.gain_table * e * e * (J_lin.transpose() * Eigen::Vector3d(0, 0, 1));
+        }
+    }
+
     // 4. Uniform global scaling to respect velocity limits while preserving the
     //    gradient DIRECTION (ratio of position vs orientation contributions).
     //

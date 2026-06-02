@@ -119,14 +119,14 @@ private:
 	enum class Phase { SendingRestPose, Homing, WaitingForStart, ActiveEFE };
 	Phase phase_ = Phase::SendingRestPose;
 	bool  run_requested_ = false;   // mirrors the viewer button's checked state
-	// "Ready over the table" rest pose, in the arm-base frame (base_tf_=identity:
-	// +X forward, +Y left, +Z up, z=0 at the desk). Base yaw j1=0.30 centres the
-	// hand on +X; it hovers ~10 cm above the table in front (EE≈(0.47,0.04,0.10))
-	// with manipulability μ≈0.106 — far from the near-singular contortions that
-	// were tipping the bottle (old extended pose μ≈0.03). Chosen by the scored
-	// FK search in initialize(); override at runtime via Controller.rest_pose.
+	// "Ready, off-the-table" rest pose for the horizontal-first-link mounting.
+	// Chosen by the edge-tucked search in initialize(): the hand is pulled back
+	// to the table's NEAR edge (world EE ≈ (−0.50, −0.33, 0.94)) with no link
+	// reaching forward over the usable surface, camera up (tool +Y·world+Z ≈ 0.74),
+	// elbow ~0.33 m clear of the support column, μ≈0.079. Override via
+	// Controller.rest_pose; values are arm joint angles j1..j7 (rad).
 	std::array<double, Kinematics::N_ARM_JOINTS> rest_pose_angles_{
-		0.30, 1.20, 0.0, 1.20, -0.80, 1.70, 0.0
+		0.754, 1.113, 1.290, -1.691, -2.611, 1.556, 1.216
 	};
 	int homing_settled_ticks_ = 0;
 	static constexpr double HOMING_TOLERANCE_RAD = 0.05;  // ≈ 2.9°
@@ -163,7 +163,9 @@ private:
 	};
 
 	// Fraction of bottle height (measured from the base origin along the
-	// bottle's +Z axis) that we aim the EE at. 0.5 = mid-body.
+	// bottle's +Z axis) that we aim the EE at. 0.5 = mid-body (the value that
+	// grasped+placed reliably; tipping is now handled by the heavy bottle, not
+	// by grasping lower, which only hurt reach on this high-mounted arm).
 	static constexpr double BOTTLE_GRASP_HEIGHT_FRAC = 0.5;
 
 	// ── Grasp FSM (inner state machine of Phase::ActiveEFE) ─────────────────
@@ -180,9 +182,13 @@ private:
 	//   PlaceLowering : lower onto the table spot.
 	//   PlaceReleasing: open gripper, let the bottle settle.
 	//   PlaceRetreating: rise off the placed bottle.
+	//   Retracting    : tilt-reflex withdrawal — bottle started to tip during the
+	//                   approach/contact, so reopen and back off to let it settle,
+	//                   then re-track. A fast protective loop, not a planned step.
 	//   (then) return to rest pose via the outer Homing path, and loop.
 	enum class GraspPhase { Tracking, Inserting, Closing, Lifting,
-	                        PlaceMoving, PlaceLowering, PlaceReleasing, PlaceRetreating };
+	                        PlaceMoving, PlaceLowering, PlaceReleasing, PlaceRetreating,
+	                        Retracting };
 	GraspPhase grasp_phase_ = GraspPhase::Tracking;
 	int        grasp_settle_ticks_ = 0;   // consecutive converged cycles before committing
 	int        closing_ticks_      = 0;   // cycles spent closing (miss timeout)
@@ -201,19 +207,39 @@ private:
 	Eigen::Vector3d place_x_des_{};
 	std::mt19937    rng_{std::random_device{}()};
 
+	// Tilt reflex (protective): watch the live bottle tilt during the approach/
+	// contact phases; if it starts to go over, reopen and back off to this
+	// retract target, let it settle, then re-track. reflex_count_ caps retries.
+	Eigen::Vector3d retract_target_{};
+	int             reflex_count_   = 0;
+	int             retract_ticks_  = 0;
+
 	static constexpr int    GRASP_SETTLE_TICKS   = 8;     // converged cycles to commit
 	static constexpr double GRASP_ALIGN_TOL_RAD  = 0.10;  // ≈5.7° orientation tolerance to commit
 	static constexpr double INSERT_VEL_MS        = 0.05;  // gentle approach speed for soft contact
 	static constexpr float  GRASP_FORCE_THRESH   = 1.0f;  // finger force → object held (TUNE)
+	// Insert-stop force: end the approach-into-bottle on the LIGHTEST touch so the
+	// gripper stops a hair into contact and closes, instead of shoving the bottle
+	// over (the side-insert was reaching f≈1.6 N — enough to tip it). Much smaller
+	// than GRASP_FORCE_THRESH, which still gates the actual grasp confirmation.
+	static constexpr float  INSERT_TOUCH_FORCE   = 0.3f;
 	static constexpr int    CLOSING_TIMEOUT_TICKS = 100;  // ~2 s closing w/o force → miss
 	static constexpr double LIFT_HEIGHT_M        = 0.12;  // how high to pick the bottle
-	// Place target = the grasp point displaced WITHIN the table plane (the plane
-	// ⟂ the bottle's long axis, which is the true table normal — the arm mount is
-	// tilted ~30° so arm-base z is NOT world-up). Displacing in-plane keeps the
-	// bottle at the same height above the real table surface, upright, regardless
-	// of mount tilt. Sampled as a random in-plane radius/heading.
-	static constexpr double PLACE_MIN_MOVE_M    = 0.10;  // ≥ this far from the pick spot
-	static constexpr double PLACE_MAX_MOVE_M    = 0.20;  // ≤ this far (stay reachable)
+	// Tilt reflex. DISABLED for now: with the heavy bottle it can't tip, and the
+	// reflex was looping retract→re-track whenever it saw an already-leaning
+	// bottle (the "back and forth"). Flip to true to re-enable.
+	static constexpr bool   TILT_REFLEX_ENABLED = false;
+	static constexpr double TILT_REFLEX_RAD   = 0.14;  // ≈8° of bottle tilt from vertical → abort
+	static constexpr double RETRACT_DIST_M    = 0.12;  // back off this far along −approach
+	static constexpr int    RETRACT_SETTLE_TICKS = 30; // ~0.6 s backed off to let it settle
+	static constexpr int    MAX_REFLEXES      = 3;     // give up (→ hold) after this many tips
+	// Place targets: a box on the RIGHT side of the table (WORLD frame, m), the
+	// dexterous zone of this right arm (left/centre is the left arm's job). The
+	// controller runs in world frame, so up = +Z and the table is horizontal; the
+	// EE keeps the grasp height so the bottle base re-seats on the table top.
+	static constexpr double PLACE_X_MIN = 0.00, PLACE_X_MAX = 0.18;   // forward extent (world +X)
+	static constexpr double PLACE_Y_MIN = -0.28, PLACE_Y_MAX = -0.06; // right side (world −Y)
+	static constexpr double PLACE_MIN_MOVE_M    = 0.08;  // ≥ this far from the pick spot
 	static constexpr int    PLACE_TIMEOUT_TICKS = 300;   // ~6 s safety per place move
 	static constexpr int    RELEASE_TICKS       = 25;    // ~0.5 s to let the bottle go
 
@@ -240,6 +266,7 @@ private:
 	Eigen::Vector3d   bottle_pos_world_ {0.0, 0.0, 0.0};
 	Eigen::Vector3d   bottle_axis_world_{0.0, 0.0, 1.0};
 	Eigen::Isometry3d table_world_      = Eigen::Isometry3d::Identity();  // T_world_table
+	double            table_top_z_     = 0.74;      // world z of the table surface (for hand-table soft constraint)
 	bool              scene_world_valid_ = false;   // table/bottle world poses populated
 	bool              base_tf_set_      = false;
 	// Install base_tf_ from the live P3Bot world pose; idempotent, safe to retry.

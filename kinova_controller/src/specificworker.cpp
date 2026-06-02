@@ -187,53 +187,6 @@ void SpecificWorker::initialize()
                        sk[4].z() - sk[2].z(), p.rotation(2, 1), p.rotation(2, 2), mu);
         }
 
-        // ── One-shot scored rest-pose search (TEMPORARY), in WORLD frame now
-        // that base_tf_ is the live arm pose. Want a "ready over the table"
-        // posture: EE hovering ~0.18 m above the 0.74 m table near the bottle
-        // workspace (world target below), with good manipulability so the
-        // approach starts close and dexterous.
-        if (base_tf_set_)
-        {
-            // Diagnostic: can the arm reach the standoff WITH the side-grasp
-            // orientation (tool +Z toward the bottle horizontally, tool +Y up)?
-            // Score = position-to-standoff + orientation mismatch − μ bonus. If
-            // the best score still has large angle/low μ, the side-grasp pose is
-            // near-singular here and we need a different strategy, not a re-tune.
-            // TOP-DOWN feasibility: hover above the bottle, tool +Z pointing
-            // straight down at the cap. ydes left free-ish (any horizontal).
-            const Eigen::Vector3d standoff(-0.07, -0.11, 1.00);   // world, above bottle
-            const Eigen::Vector3d zdes(0.0, 0.0, -1.0);
-            const Eigen::Vector3d ydes(0.0, 0.0, 1.0);
-            struct Cand { double score; std::array<double,7> a; Eigen::Vector3d ee;
-                          double mu, zang, yang; };
-            std::vector<Cand> cands;
-            for (double j1 : {-1.6,-1.2,-0.8,-0.4,0.0,0.4,0.8})
-             for (double j2 : {0.4,0.8,1.2,1.6,2.0})
-              for (double j4 : {0.6,1.0,1.4,1.8,2.2})
-               for (double j5 : {-1.6,-0.8,0.0,0.8,1.6})
-                for (double j6 : {0.4,0.9,1.4,1.9})
-                {
-                    const std::array<double,7> a{j1,j2,0.0,j4,j5,j6,0.0};
-                    const auto pp = kinematics_->tool_pose(a);
-                    const auto JJ = kinematics_->arm_jacobian_full(a);
-                    const double mu = std::sqrt(std::max(0.0,(JJ*JJ.transpose()).determinant()));
-                    const double zang = std::acos(std::clamp(pp.rotation.col(2).dot(zdes),-1.0,1.0));
-                    const double yang = std::acos(std::clamp(pp.rotation.col(1).dot(ydes),-1.0,1.0));
-                    const double score = (pp.position - standoff).squaredNorm()
-                                       + 0.10*zang*zang - 0.10*mu;   // top-down: yaw free
-                    cands.push_back({score, a, pp.position, mu, zang, yang});
-                }
-            std::sort(cands.begin(), cands.end(),
-                      [](const Cand&l,const Cand&r){ return l.score < r.score; });
-            for (int i=0; i<6 and i<(int)cands.size(); ++i)
-            {
-                const auto&c=cands[i];
-                std::print("[rest-search] #{} q=[{:+.2f} {:+.2f} 0 {:+.2f} {:+.2f} {:+.2f} 0] "
-                           "EE=({:+.3f},{:+.3f},{:+.3f}) dpos={:.3f} zang={:.0f}° yang={:.0f}° mu={:.4f}\n",
-                           i,c.a[0],c.a[1],c.a[3],c.a[4],c.a[5],c.ee.x(),c.ee.y(),c.ee.z(),
-                           (c.ee-standoff).norm(), c.zang*57.3, c.yang*57.3, c.mu);
-            }
-        }
     }
     catch (const std::exception& e)
     {
@@ -302,6 +255,9 @@ void SpecificWorker::refresh_arm_base_world()
             const Eigen::Vector3d e = arm_base_world_.linear().eulerAngles(0, 1, 2);
             std::print("[base] arm base_link world pose installed: t=({:.3f},{:.3f},{:.3f}) "
                        "rpy=({:+.2f},{:+.2f},{:+.2f}) — FK now in world frame\n",
+                       t.x(), t.y(), t.z(), e.x(), e.y(), e.z());
+            std::print("[base-json] root→robot RT for kinova2.json: "
+                       "rt_translation=[{:.6f}, {:.6f}, {:.6f}]  rt_rotation_euler_xyz=[{:.6f}, {:.6f}, {:.6f}]\n",
                        t.x(), t.y(), t.z(), e.x(), e.y(), e.z());
             base_tf_set_ = true;
         }
@@ -501,6 +457,8 @@ void SpecificWorker::update_viewer_scene_objects()
         {-hw, -hd, 0}, {+hw, -hd, 0}, {+hw, +hd, 0}, {-hw, +hd, 0},
         {-hw, -hd, h}, {+hw, -hd, h}, {+hw, +hd, h}, {-hw, +hd, h},
     }};
+    table_top_z_ = (table_world_ * Eigen::Vector3d(0.0, 0.0, h)).z();   // world z of the table surface
+
     std::vector<Eigen::Vector3d> corners_world;
     corners_world.reserve(8);
     for (const auto& c : corners_in_table)
@@ -724,9 +682,18 @@ void SpecificWorker::compute()
 
         // Build the shared EFE parameters; per-state code varies only the
         // target, the desired tool axes, and the cruise speed.
-        const auto make_params = [](const Eigen::Vector3d& z_des,
-                                    const Eigen::Vector3d& x_des,
-                                    double v_app)
+        // Park the elbow BEHIND the mast: target = column xy (arm-base xy) pushed
+        // ELBOW_BACK_M in −X (world back, toward the robot). The null-space term
+        // uses only the horizontal error, so it tucks the elbow behind the column
+        // without disturbing the hand. Replaces the manipulability objective as
+        // the redundancy resolution (both spend the single redundant DOF).
+        constexpr double ELBOW_BACK_M = 0.20;
+        constexpr double ELBOW_GAIN   = 1.5;
+        const Eigen::Vector3d elbow_target(arm_base_world_.translation().x() - ELBOW_BACK_M,
+                                           arm_base_world_.translation().y(), 0.0);
+        const auto make_params = [&](const Eigen::Vector3d& z_des,
+                                     const Eigen::Vector3d& x_des,
+                                     double v_app)
         {
             EFEParams p;
             p.desired_approach  = z_des;
@@ -737,11 +704,17 @@ void SpecificWorker::compute()
             p.v_approach        = v_app;
             p.a_approach        = 0.60;
             p.omega_max         = 2.0;
-            // Manipulability null-space ascent: keep the arm in the dexterous
-            // region (with the new rest pose) through the whole pick-and-place,
-            // so it doesn't drift into the near-singular contortions that tip
-            // the bottle. Spends only the redundant DOF — can't disturb the pose.
-            p.gain_mu           = 0.3;
+            p.gain_mu           = 0.0;            // elbow placement is the redundancy use now
+            p.gain_elbow        = ELBOW_GAIN;
+            p.elbow_target      = elbow_target;
+            // Soft obstacle constraints: keep the elbow off the mast and the hand
+            // off the table (potential-field repulsions, zero outside the margin).
+            p.gain_mast         = 2.0;
+            p.mast_xy           = arm_base_world_.translation().head<2>();
+            p.mast_safe         = 0.15;           // column r≈0.05 + ~0.10 margin
+            p.gain_table        = 2.0;
+            p.table_z           = table_top_z_;
+            p.table_safe        = 0.06;           // start pushing up within 6 cm of the surface
             return p;
         };
 
@@ -785,11 +758,12 @@ void SpecificWorker::compute()
                     std::sqrt(2.0 * params.a_approach * std::max(0.0, e_pos - params.arrive_deadband)));
                 const double vmeas = tip_log_prev_pos_.has_value()
                     ? (ee_position - tip_log_prev_pos_.value()).norm() / dt : 0.0;
-                std::print("[tiplog] {},{:.3f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},eang={:.1f}\n",
+                const Eigen::Vector3d elb = kinematics_->elbow_position(q);
+                std::print("[tiplog] {},{:.3f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},eang={:.1f},elbow=({:+.3f},{:+.3f},{:+.3f})\n",
                            tip_log_cycle_, tip_log_cycle_ * dt,
                            ee_position.x(), ee_position.y(), ee_position.z(),
                            target.x(), target.y(), target.z(), e_pos, vcmd, vmeas,
-                           e_ang * 57.29578);
+                           e_ang * 57.29578, elb.x(), elb.y(), elb.z());
                 tip_log_prev_pos_ = ee_position;
                 ++tip_log_cycle_;
             }
@@ -807,8 +781,61 @@ void SpecificWorker::compute()
             catch (const Ice::Exception&) { return 0.0f; }
         };
 
+        // ── Tilt reflex ────────────────────────────────────────────────────
+        // The bottle pose is refreshed live every cycle (update_bottle_pose_in_dsr).
+        // During the approach/contact phases, if the bottle's axis tips past
+        // TILT_REFLEX_RAD from vertical, abort immediately: reopen and back off
+        // along −approach so we don't knock it over, let it settle, then re-track.
+        if (TILT_REFLEX_ENABLED and base_tf_set_ and (grasp_phase_ == GraspPhase::Tracking
+                          or  grasp_phase_ == GraspPhase::Inserting
+                          or  grasp_phase_ == GraspPhase::Closing))
+        {
+            const double tilt = std::acos(std::clamp(std::abs(bottle_axis_world_.z()), 0.0, 1.0));
+            if (tilt > TILT_REFLEX_RAD)
+            {
+                gripper_command_ = 1.0f;                       // release
+                Eigen::Vector3d away = ee_position - bottle_pos_world_;
+                away.z() = 0.0;
+                away = (away.norm() > 1e-6) ? away.normalized() : Eigen::Vector3d(1, 0, 0);
+                retract_target_ = ee_position + away * RETRACT_DIST_M + Eigen::Vector3d(0, 0, 0.04);
+                retract_ticks_  = 0;
+                ++reflex_count_;
+                grasp_phase_    = GraspPhase::Retracting;
+                std::print("[reflex] bottle tilting {:.0f}° → reopen + retract (#{}/{})\n",
+                           tilt * 57.29578, reflex_count_, MAX_REFLEXES);
+            }
+        }
+
         switch (grasp_phase_)
         {
+            case GraspPhase::Retracting:
+            {
+                // Protective withdrawal after a tilt: stay open, back off to the
+                // retract point, hold to let the bottle settle, then re-track —
+                // or give up (return to rest) after too many tips.
+                gripper_command_ = 1.0f;
+                Eigen::Vector3d zdes = bottle_pos_world_ - retract_target_;
+                zdes.z() = 0.0;
+                zdes = (zdes.norm() > 1e-6) ? zdes.normalized() : Eigen::Vector3d(1, 0, 0);
+                const Eigen::Vector3d xdes = Eigen::Vector3d(0, 0, 1).cross(zdes).normalized();
+                const auto [e_pos, e_ang] = drive(retract_target_, zdes, xdes, 0.30);
+                (void) e_ang;
+                if (e_pos < REACH_TOLERANCE_M or ++retract_ticks_ > RETRACT_SETTLE_TICKS)
+                {
+                    if (reflex_count_ >= MAX_REFLEXES)
+                    {
+                        std::print("[reflex] {} tips — giving up; returning to rest.\n", reflex_count_);
+                        reflex_count_  = 0;
+                        run_requested_ = false;               // abort → outer loop homes to rest
+                    }
+                    else
+                    {
+                        std::print("[reflex] settled → re-tracking\n");
+                        grasp_phase_ = GraspPhase::Tracking;
+                    }
+                }
+                break;
+            }
             case GraspPhase::Tracking:
             {
                 // Approach the LIVE standoff, gripper open, bottle pose tracked.
@@ -887,7 +914,8 @@ void SpecificWorker::compute()
                     std::print("[grasp] closing… f={:.3f} (thresh {:.2f})\n", f, GRASP_FORCE_THRESH);
                 if (f > GRASP_FORCE_THRESH)
                 {
-                    grasp_phase_ = GraspPhase::Lifting;
+                    grasp_phase_  = GraspPhase::Lifting;
+                    reflex_count_ = 0;   // clean grasp — clear the tilt-reflex tally
                     std::print("[grasp] grasped (f={:.2f}) → Lifting\n", f);
                 }
                 else if (++closing_ticks_ > CLOSING_TIMEOUT_TICKS)
@@ -909,33 +937,31 @@ void SpecificWorker::compute()
                 (void) e_ang;
                 if (e_pos < REACH_TOLERANCE_M)
                 {
-                    // True "up" = the bottle's long axis (tool +Y = z_bot at the
-                    // latched grasp). The arm mount is tilted ~30°, so this is the
-                    // real table normal, not arm-base +Z. Place by displacing the
-                    // grasp point WITHIN the table plane (⟂ up): the bottle stays
-                    // upright and at the same height above the real table surface,
-                    // so its base lands back on the table regardless of tilt.
-                    const Eigen::Vector3d up = g.z_tool_des.cross(g.x_tool_des).normalized();
-                    Eigen::Vector3d e1 = (std::abs(up.z()) < 0.9 ? Eigen::Vector3d::UnitZ()
-                                                                 : Eigen::Vector3d::UnitX());
-                    e1 = (e1 - up * e1.dot(up)).normalized();   // in-plane basis
-                    const Eigen::Vector3d e2 = up.cross(e1);
-                    std::uniform_real_distribution<double> ur(PLACE_MIN_MOVE_M, PLACE_MAX_MOVE_M);
-                    std::uniform_real_distribution<double> uphi(0.0, 2.0 * M_PI);
-                    const double r = ur(rng_), phi = uphi(rng_);
-                    const Eigen::Vector3d delta = r * (std::cos(phi) * e1 + std::sin(phi) * e2);
-                    place_pos_   = g.grasp_pos + delta;
-                    place_hover_ = place_pos_ + up * LIFT_HEIGHT_M;   // lift along true up
-                    // Re-point the approach radially toward the place spot in the
-                    // table plane, bottle upright (tool +Y = up). Mirrors the grasp
-                    // frame with `up` in place of arm-base +Z.
-                    Eigen::Vector3d radial = place_pos_ - up * place_pos_.dot(up);
+                    // Pick a place spot on the RIGHT side of the table (world box),
+                    // ≥ PLACE_MIN_MOVE_M from the pick. We run in world frame, so
+                    // up = +Z and the table is horizontal: keep the EE at the grasp
+                    // height (grasp_pos.z) so the bottle base sets back on the table.
+                    const Eigen::Vector3d up(0.0, 0.0, 1.0);
+                    std::uniform_real_distribution<double> ux(PLACE_X_MIN, PLACE_X_MAX);
+                    std::uniform_real_distribution<double> uy(PLACE_Y_MIN, PLACE_Y_MAX);
+                    Eigen::Vector3d p = g.grasp_pos;
+                    for (int k = 0; k < 12; ++k)
+                    {
+                        p = Eigen::Vector3d(ux(rng_), uy(rng_), g.grasp_pos.z());
+                        if ((p.head<2>() - g.grasp_pos.head<2>()).norm() > PLACE_MIN_MOVE_M) break;
+                    }
+                    place_pos_   = p;
+                    place_hover_ = p + up * LIFT_HEIGHT_M;
+                    // Side approach re-pointed toward the place spot, bottle upright
+                    // (tool +Z horizontal toward the spot, tool +Y = up).
+                    Eigen::Vector3d radial = place_pos_ - arm_base_world_.translation();
+                    radial.z() = 0.0;
                     place_z_des_ = (radial.norm() > 1e-6) ? radial.normalized() : g.z_tool_des;
                     place_x_des_ = up.cross(place_z_des_).normalized();
                     grasp_phase_ = GraspPhase::PlaceMoving;
                     place_ticks_ = 0;
-                    std::print("[place] lifted → carry {:.2f} m in-plane to ({:.3f},{:.3f},{:.3f}) → PlaceMoving\n",
-                               r, place_pos_.x(), place_pos_.y(), place_pos_.z());
+                    std::print("[place] lifted → carry to right-side spot ({:.3f},{:.3f},{:.3f}) → PlaceMoving\n",
+                               place_pos_.x(), place_pos_.y(), place_pos_.z());
                 }
                 break;
             }

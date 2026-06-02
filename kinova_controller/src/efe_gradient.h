@@ -140,6 +140,33 @@ struct EFEParams
      *  central differences (≈ 0.5 ms / cycle). 0 disables (default).
      *  Useful range 0.3 – 1.0. */
     double gain_mu = 0.3;
+
+    /** α_elbow — null-space elbow-placement gain. Adds
+     *      q̇ += α_elbow · N · J_elbowᵀ · (p_elbow* − p_elbow)
+     *  where J_elbow is the 3×7 elbow (joint_4) linear Jacobian and N is the
+     *  6-DOF pose-task null-space projector (same N as the μ term), so parking
+     *  the elbow cannot disturb the tool pose. Only the HORIZONTAL error is used
+     *  (the term zeroes Δz), to bias the elbow "behind the mast" without forcing
+     *  a height. elbow_target is the desired elbow position in world frame.
+     *  0 disables (default). Mutually exclusive in practice with gain_mu (both
+     *  spend the single redundant DOF). */
+    double          gain_elbow = 0.0;
+    Eigen::Vector3d elbow_target{0.0, 0.0, 0.0};
+
+    /** Soft obstacle repulsions (potential field). Each is a quadratic ramp that
+     *  is ZERO beyond its margin and grows as the obstacle is approached; added
+     *  to q̇ BEFORE the velocity scaling so the command stays within limits and
+     *  the constraint negotiates smoothly with the task (a soft, not hard, wall).
+     *  - Mast: push the ELBOW radially away from the vertical column at mast_xy
+     *    when its horizontal distance to the axis is below mast_safe.
+     *  - Table: push the HAND (tool) up (+Z world) when its height above table_z
+     *    drops below table_safe — keeps the hand from diving into the table. */
+    double          gain_mast  = 0.0;
+    Eigen::Vector2d mast_xy{0.0, 0.0};
+    double          mast_safe  = 0.15;
+    double          gain_table = 0.0;
+    double          table_z    = 0.0;
+    double          table_safe = 0.05;
 };
 
 /**
