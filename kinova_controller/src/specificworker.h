@@ -129,8 +129,15 @@ private:
 		1.189, 0.244, 0.300, -2.101, 0.651, -1.502, 3.141
 	};
 	int homing_settled_ticks_ = 0;
+	int homing_elapsed_ticks_ = 0;                        // cycles spent in the current homing attempt
 	static constexpr double HOMING_TOLERANCE_RAD = 0.05;  // ≈ 2.9°
 	static constexpr int    HOMING_SETTLE_TICKS  = 5;     // consecutive cycles within tolerance
+	// Safety timeout: if homing cannot converge within this many cycles (e.g. the
+	// target pose is unreachable or the arm is jammed against an obstacle), give up
+	// instead of slewing forever — send zero velocities and drop to WaitingForStart.
+	// A normal home at ~0.8 rad/s clears even a π move in a few seconds; at a 20 ms
+	// period 600 cycles ≈ 12 s is a generous ceiling that only fires on a real jam.
+	static constexpr int    HOMING_TIMEOUT_TICKS = 600;
 
 	// Bottle-approach behaviour (replaces the previous random-target cycle).
 	// Side grasp: standoff next to the bottle, tool +Z pointing into the bottle
@@ -194,6 +201,8 @@ private:
 	int        closing_ticks_      = 0;   // cycles spent closing (miss timeout)
 	int        place_ticks_        = 0;   // watchdog within a place sub-state
 	bool       returning_for_cycle_ = false;  // auto-restart Tracking after the rest-return
+	int        round_cycles_       = 0;       // Controller.round_cycles: stop after N picks (0 = loop forever)
+	int        pick_place_cycles_done_ = 0;   // completed picks in the current round
 	// Grasp frame latched at Tracking→Inserting so gripper/bottle contact can't
 	// make the target chase its own disturbance.
 	SideGraspTarget latched_grasp_{};
@@ -213,11 +222,19 @@ private:
 	Eigen::Vector3d retract_target_{};
 	int             reflex_count_   = 0;
 	int             retract_ticks_  = 0;
+	double          bottle_z_at_lift_start_ = 0.0;  // bottle height when the lift began (for lift-confirm)
+	int             grasp_force_ticks_      = 0;     // consecutive cycles with force over threshold
 
 	static constexpr int    GRASP_SETTLE_TICKS   = 8;     // converged cycles to commit
 	static constexpr double GRASP_ALIGN_TOL_RAD  = 0.10;  // ≈5.7° orientation tolerance to commit
 	static constexpr double INSERT_VEL_MS        = 0.05;  // gentle approach speed for soft contact
-	static constexpr float  GRASP_FORCE_THRESH   = 1.0f;  // finger force → object held (TUNE)
+	// Finger force → object MAY be held. Coarse contact gate only: an empty close
+	// still registers ~1.3–2.2 N (fingers loading against each other), while a real
+	// grasp reaches tens of N, so this is set above the empty-close band. It is NOT
+	// trusted on its own — the authoritative check is the post-lift confirmation
+	// below (the bottle must actually rise with the gripper).
+	static constexpr float  GRASP_FORCE_THRESH   = 3.0f;
+	static constexpr int    GRASP_FORCE_HOLD_TICKS = 3;   // force must persist this many cycles (debounce transients)
 	// Insert-stop force: end the approach-into-bottle on the LIGHTEST touch so the
 	// gripper stops a hair into contact and closes, instead of shoving the bottle
 	// over (the side-insert was reaching f≈1.6 N — enough to tip it). Much smaller
@@ -225,6 +242,16 @@ private:
 	static constexpr float  INSERT_TOUCH_FORCE   = 0.3f;
 	static constexpr int    CLOSING_TIMEOUT_TICKS = 100;  // ~2 s closing w/o force → miss
 	static constexpr double LIFT_HEIGHT_M        = 0.12;  // how high to pick the bottle
+	// Authoritative grasp confirmation (ground truth, sensor-independent). After the
+	// lift completes, the bottle's world pose (live via getObjectPose) must show that
+	// it actually came up WITH the gripper, otherwise the close grabbed air. Two
+	// conditions, both must hold:
+	//   1. the bottle rose at least this fraction of the commanded lift height, and
+	//   2. the bottle is still co-located with the tool (it didn't slip out).
+	// If either fails the grasp is a MISS: reopen and re-track, don't place an empty
+	// gripper and don't count the cycle.
+	static constexpr double LIFT_CONFIRM_RISE_M  = 0.06;  // bottle must rise ≥ this (≈½ the lift)
+	static constexpr double LIFT_CONFIRM_HOLD_M  = 0.12;  // bottle centre must stay within this of the tool
 	// Tilt reflex. DISABLED for now: with the heavy bottle it can't tip, and the
 	// reflex was looping retract→re-track whenever it saw an already-leaning
 	// bottle (the "back and forth"). Flip to true to re-enable.
@@ -237,9 +264,14 @@ private:
 	// dexterous zone of this right arm (left/centre is the left arm's job). The
 	// controller runs in world frame, so up = +Z and the table is horizontal; the
 	// EE keeps the grasp height so the bottle base re-seats on the table top.
-	static constexpr double PLACE_X_MIN = 0.00, PLACE_X_MAX = 0.18;   // forward extent (world +X)
-	static constexpr double PLACE_Y_MIN = -0.28, PLACE_Y_MAX = -0.06; // right side (world −Y)
-	static constexpr double PLACE_MIN_MOVE_M    = 0.08;  // ≥ this far from the pick spot
+	static constexpr double PLACE_X_MIN = 0.06, PLACE_X_MAX = 0.30;   // forward extent (world +X) — pushed out
+	static constexpr double PLACE_Y_MIN = -0.38, PLACE_Y_MAX = -0.05; // right side (world −Y) — widened
+	static constexpr double PLACE_MIN_MOVE_M    = 0.20;  // ≥ this far from the pick spot (more distant placements)
+	// Reachability filter on the chosen place EE: the box now extends past the arm's
+	// reach, so reject samples whose set-down point is farther than this from the arm
+	// base. 0.90 m is the observed working edge (the 10-fold round placed reliably out
+	// to ~0.90 m). Keeps "more distant" spots that are still grabbable.
+	static constexpr double PLACE_REACH_MAX_M   = 0.90;
 	static constexpr int    PLACE_TIMEOUT_TICKS = 300;   // ~6 s safety per place move
 	static constexpr int    RELEASE_TICKS       = 25;    // ~0.5 s to let the bottle go
 

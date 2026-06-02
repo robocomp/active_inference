@@ -153,6 +153,8 @@ void SpecificWorker::initialize()
     try { run_requested_ = configLoader.get<bool>("Controller.auto_start"); } catch (...) {}
     try { tip_log_        = configLoader.get<bool>("Controller.tip_log");   } catch (...) {}
     try { approach_only_  = configLoader.get<bool>("Controller.approach_only"); } catch (...) {}
+    try { round_cycles_   = configLoader.get<int>("Controller.round_cycles");   } catch (...) {}
+    if (round_cycles_ > 0) std::print("[ui] round_cycles: stop after {} pick-and-place cycles\n", round_cycles_);
     if (run_requested_) std::print("[ui] auto_start: run requested from config\n");
     if (approach_only_) std::print("[ui] approach_only: FSM will hold at the standoff\n");
 
@@ -614,6 +616,7 @@ void SpecificWorker::compute()
             // Reset the settle counter so a re-entry from ActiveEFE (button
             // unchecked) re-runs the full convergence check from scratch.
             homing_settled_ticks_ = 0;
+            homing_elapsed_ticks_ = 0;
             phase_ = Phase::Homing;
             proxy_unreachable_warned_ = false;
             return;
@@ -632,9 +635,29 @@ void SpecificWorker::compute()
             std::print("[homing] max joint err = {:.4f} rad  ({}/{} settled)\n",
                        max_err, homing_settled_ticks_, HOMING_SETTLE_TICKS);
 
+            // Safety: abort a homing that cannot converge instead of slewing forever.
+            // Leaving the arm straining toward an unreachable/jammed pose is exactly
+            // what makes it thrash in "large displacements"; halt and wait instead.
+            if (homing_settled_ticks_ < HOMING_SETTLE_TICKS
+                and ++homing_elapsed_ticks_ > HOMING_TIMEOUT_TICKS)
+            {
+                RoboCompKinovaArm::TJointSpeeds stop;
+                stop.jointSpeeds.assign(Kinematics::N_ARM_JOINTS, 0.0f);
+                try { kinovaarm_proxy->moveJointsWithSpeed(stop); }
+                catch (const Ice::Exception&) {}
+                std::print("[homing] TIMEOUT after {} cycles (max err {:.4f} rad) — "
+                           "pose unreachable/jammed; halting, waiting for Start.\n",
+                           HOMING_TIMEOUT_TICKS, max_err);
+                run_requested_       = false;   // abort any autonomous round
+                returning_for_cycle_ = false;
+                phase_               = Phase::WaitingForStart;
+                return;
+            }
+
             if (homing_settled_ticks_ >= HOMING_SETTLE_TICKS)
             {
-                if (returning_for_cycle_ and run_requested_)
+                if (returning_for_cycle_ and run_requested_
+                    and (round_cycles_ <= 0 or pick_place_cycles_done_ < round_cycles_))
                 {
                     // Autonomous loop: rest reached after a place — pick again.
                     returning_for_cycle_ = false;
@@ -642,7 +665,18 @@ void SpecificWorker::compute()
                     grasp_settle_ticks_  = 0;
                     gripper_command_     = 1.0f;
                     phase_               = Phase::ActiveEFE;
-                    std::print("[cycle] rest reached → starting next pick-and-place\n");
+                    std::print("[cycle] rest reached → starting pick-and-place {}\n",
+                               pick_place_cycles_done_ + 1);
+                }
+                else if (returning_for_cycle_ and round_cycles_ > 0
+                         and pick_place_cycles_done_ >= round_cycles_)
+                {
+                    // Round complete — park at rest, stop the loop.
+                    returning_for_cycle_ = false;
+                    run_requested_       = false;
+                    std::print("[round] {}/{} pick-and-place cycles complete — round done, parked at rest.\n",
+                               pick_place_cycles_done_, round_cycles_);
+                    phase_ = Phase::WaitingForStart;
                 }
                 else
                 {
@@ -671,10 +705,11 @@ void SpecificWorker::compute()
             if (run_requested_)
             {
                 std::print("[start] Entering EFE bottle-approach.\n");
-                phase_              = Phase::ActiveEFE;
-                grasp_phase_        = GraspPhase::Tracking;  // fresh grasp sequence
-                grasp_settle_ticks_ = 0;
-                gripper_command_    = 1.0f;                  // open
+                phase_                   = Phase::ActiveEFE;
+                grasp_phase_             = GraspPhase::Tracking;  // fresh grasp sequence
+                grasp_settle_ticks_      = 0;
+                gripper_command_         = 1.0f;                  // open
+                pick_place_cycles_done_  = 0;                     // fresh round
             }
             proxy_unreachable_warned_ = false;
             return;
@@ -948,8 +983,9 @@ void SpecificWorker::compute()
                 const float f = gripper_force();
                 if (e_pos < REACH_TOLERANCE_M or f > GRASP_FORCE_THRESH)
                 {
-                    grasp_phase_   = GraspPhase::Closing;
-                    closing_ticks_ = 0;
+                    grasp_phase_       = GraspPhase::Closing;
+                    closing_ticks_     = 0;
+                    grasp_force_ticks_ = 0;
                     std::print("[grasp] at grasp point (e={:.3f} m, f={:.2f}) → Closing\n", e_pos, f);
                 }
                 break;
@@ -963,11 +999,18 @@ void SpecificWorker::compute()
                 const float f = gripper_force();
                 if (tip_log_ and closing_ticks_ % 10 == 0)
                     std::print("[grasp] closing… f={:.3f} (thresh {:.2f})\n", f, GRASP_FORCE_THRESH);
-                if (f > GRASP_FORCE_THRESH)
+                // Debounce: the force must persist, not just spike for one cycle, before
+                // we even tentatively call it a grasp. The real confirmation is the
+                // post-lift bottle-rise check below.
+                grasp_force_ticks_ = (f > GRASP_FORCE_THRESH) ? grasp_force_ticks_ + 1 : 0;
+                if (grasp_force_ticks_ >= GRASP_FORCE_HOLD_TICKS)
                 {
-                    grasp_phase_  = GraspPhase::Lifting;
-                    reflex_count_ = 0;   // clean grasp — clear the tilt-reflex tally
-                    std::print("[grasp] grasped (f={:.2f}) → Lifting\n", f);
+                    grasp_phase_           = GraspPhase::Lifting;
+                    reflex_count_          = 0;   // clean grasp — clear the tilt-reflex tally
+                    grasp_force_ticks_     = 0;
+                    bottle_z_at_lift_start_ = bottle_pos_world_.z();  // baseline for lift-confirm
+                    std::print("[grasp] contact (f={:.2f}, held {} cy) → Lifting (will confirm by bottle rise)\n",
+                               f, GRASP_FORCE_HOLD_TICKS);
                 }
                 else if (++closing_ticks_ > CLOSING_TIMEOUT_TICKS)
                 {
@@ -988,6 +1031,34 @@ void SpecificWorker::compute()
                 (void) e_ang;
                 if (e_pos < REACH_TOLERANCE_M)
                 {
+                    // ── Authoritative grasp confirmation ──────────────────────────
+                    // The gripper is now LIFT_HEIGHT_M above the grasp point. If the
+                    // bottle is truly held it rose with us; if we closed on air it
+                    // stayed on the table (rise ≈ 0), and a bottle that slipped out
+                    // mid-lift falls (rise < 0). Force alone lied (an empty close reads
+                    // a few N), so decide on the bottle's own vertical motion — ground
+                    // truth from getObjectPose, refreshed live every cycle. Rise is
+                    // origin-offset-free (only the Δz of the bottle base matters), so
+                    // it's robust regardless of where the bottle frame sits.
+                    const double rise = bottle_pos_world_.z() - bottle_z_at_lift_start_;
+                    // Horizontal co-location also guards against having scooped the
+                    // bottle sideways without holding it (lift is straight up, so a
+                    // held bottle stays under the tool; LIFT_CONFIRM_HOLD_M is a slack
+                    // ceiling, the rise above is the decisive test).
+                    const double xy_gap =
+                        (bottle_pos_world_.head<2>() - ee_position.head<2>()).norm();
+                    if (rise < LIFT_CONFIRM_RISE_M or xy_gap > LIFT_CONFIRM_HOLD_M)
+                    {
+                        std::print("[grasp] MISS — bottle not held (rose {:.3f} m, need {:.2f}; "
+                                   "xy gap {:.3f} m, max {:.2f}) → reopen, back to Tracking\n",
+                                   rise, LIFT_CONFIRM_RISE_M, xy_gap, LIFT_CONFIRM_HOLD_M);
+                        gripper_command_    = 1.0f;   // reopen
+                        grasp_phase_        = GraspPhase::Tracking;
+                        grasp_settle_ticks_ = 0;
+                        break;                        // do NOT place an empty gripper; cycle not counted
+                    }
+                    std::print("[grasp] CONFIRMED held (bottle rose {:.3f} m, xy gap {:.3f} m) → place\n",
+                               rise, xy_gap);
                     // Pick a place spot on the RIGHT side of the table (world box),
                     // ≥ PLACE_MIN_MOVE_M from the pick. We run in world frame, so
                     // up = +Z and the table is horizontal: keep the EE at the grasp
@@ -995,12 +1066,29 @@ void SpecificWorker::compute()
                     const Eigen::Vector3d up(0.0, 0.0, 1.0);
                     std::uniform_real_distribution<double> ux(PLACE_X_MIN, PLACE_X_MAX);
                     std::uniform_real_distribution<double> uy(PLACE_Y_MIN, PLACE_Y_MAX);
+                    // Sample the right-side box for a spot that is (a) ≥ PLACE_MIN_MOVE_M
+                    // from the pick and (b) within reach of the arm (the box now extends
+                    // past the reach edge — see PLACE_REACH_MAX_M). Among the valid draws
+                    // keep the FARTHEST-from-base one, so placements bias toward the distant
+                    // edge of the reachable workspace as requested.
+                    const Eigen::Vector3d base_xyz = arm_base_world_.translation();
                     Eigen::Vector3d p = g.grasp_pos;
-                    for (int k = 0; k < 12; ++k)
+                    double best_reach = -1.0;
+                    bool   have = false;
+                    for (int k = 0; k < 40; ++k)
                     {
-                        p = Eigen::Vector3d(ux(rng_), uy(rng_), g.grasp_pos.z());
-                        if ((p.head<2>() - g.grasp_pos.head<2>()).norm() > PLACE_MIN_MOVE_M) break;
+                        Eigen::Vector3d c(ux(rng_), uy(rng_), g.grasp_pos.z());
+                        const double far_from_pick = (c.head<2>() - g.grasp_pos.head<2>()).norm();
+                        const double reach = (c - base_xyz).norm();
+                        if (far_from_pick < PLACE_MIN_MOVE_M or reach > PLACE_REACH_MAX_M) continue;
+                        if (reach > best_reach) { best_reach = reach; p = c; have = true; }
                     }
+                    if (not have)   // degenerate box/pick combo — fall back to nearest reachable
+                        for (int k = 0; k < 40; ++k)
+                        {
+                            Eigen::Vector3d c(ux(rng_), uy(rng_), g.grasp_pos.z());
+                            if ((c - base_xyz).norm() <= PLACE_REACH_MAX_M) { p = c; break; }
+                        }
                     place_pos_   = p;
                     place_hover_ = p + up * LIFT_HEIGHT_M;
                     // Side approach re-pointed toward the place spot, bottle upright
@@ -1071,10 +1159,13 @@ void SpecificWorker::compute()
                     kinovaarm_proxy->moveJointsWithAngle(target);
                     returning_for_cycle_  = true;
                     homing_settled_ticks_ = 0;
+                    homing_elapsed_ticks_ = 0;
                     grasp_phase_          = GraspPhase::Tracking;  // for the next cycle
                     place_ticks_          = 0;
                     phase_                = Phase::Homing;
-                    std::print("[place] retreated → returning to rest, then new cycle\n");
+                    ++pick_place_cycles_done_;
+                    std::print("[cycle] {}/{} pick-and-place complete → returning to rest\n",
+                               pick_place_cycles_done_, round_cycles_ > 0 ? round_cycles_ : pick_place_cycles_done_);
                     return;
                 }
                 break;
