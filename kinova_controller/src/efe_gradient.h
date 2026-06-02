@@ -151,19 +151,24 @@ struct EFEParams
      *  0 disables (default). Mutually exclusive in practice with gain_mu (both
      *  spend the single redundant DOF). */
     double          gain_elbow = 0.0;
-    Eigen::Vector3d elbow_target{0.0, 0.0, 0.0};
+    Eigen::Vector3d elbow_target{0.0, 0.0, 0.0};  // null-space pull target for the elbow (world); horizontal error only
 
     /** Soft obstacle repulsions (potential field). Each is a quadratic ramp that
      *  is ZERO beyond its margin and grows as the obstacle is approached; added
      *  to q̇ BEFORE the velocity scaling so the command stays within limits and
      *  the constraint negotiates smoothly with the task (a soft, not hard, wall).
-     *  - Mast: push the ELBOW radially away from the vertical column at mast_xy
-     *    when its horizontal distance to the axis is below mast_safe.
+     *  - Column: WHOLE-ARM repulsion — every movable arm joint (j3..j7) is pushed
+     *    away from the vertical column (a finite cylinder: axis col_xy, radius
+     *    col_radius, z∈[col_z_lo,col_z_hi]) when its clearance to the surface
+     *    drops below col_margin. Covers the wrist/forearm, not just the elbow.
      *  - Table: push the HAND (tool) up (+Z world) when its height above table_z
      *    drops below table_safe — keeps the hand from diving into the table. */
     double          gain_mast  = 0.0;
-    Eigen::Vector2d mast_xy{0.0, 0.0};
-    double          mast_safe  = 0.15;
+    Eigen::Vector2d col_xy{0.0, 0.0};
+    double          col_radius = 0.05;
+    double          col_z_lo   = -0.10;
+    double          col_z_hi   =  1.30;
+    double          col_margin = 0.10;
     double          gain_table = 0.0;
     double          table_z    = 0.0;
     double          table_safe = 0.05;

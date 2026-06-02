@@ -60,14 +60,19 @@ public:
     Eigen::Matrix<double, 6, N_ARM_JOINTS> arm_jacobian_full(
         const std::array<double, N_ARM_JOINTS>& angles);
 
-    /** Linear (3×7) Jacobian of the ELBOW (joint_4 origin) in world coords —
-     *  ∂p_elbow/∂q_arm. Used by the null-space elbow-placement term so the
-     *  redundant DOF can park the elbow without disturbing the tool pose. */
-    Eigen::Matrix<double, 3, N_ARM_JOINTS> arm_jacobian_elbow_linear(
-        const std::array<double, N_ARM_JOINTS>& angles);
+    /** Linear (3×7) Jacobian of arm joint `idx` (0-based: 0=joint_1 … 6=joint_7)
+     *  origin, in world coords — ∂p_joint/∂q_arm. Used by the whole-arm obstacle
+     *  repulsion to push any arm joint away from the column. */
+    Eigen::Matrix<double, 3, N_ARM_JOINTS> arm_jacobian_joint_linear(
+        const std::array<double, N_ARM_JOINTS>& angles, int idx);
 
-    /** Elbow (joint_4 origin) position in world coords. */
-    Eigen::Vector3d elbow_position(const std::array<double, N_ARM_JOINTS>& angles);
+    /** World position of arm joint `idx` (0-based: 0=joint_1 … 6=joint_7). */
+    Eigen::Vector3d joint_position(const std::array<double, N_ARM_JOINTS>& angles, int idx);
+
+    /** Convenience wrappers for the elbow (joint_4 = idx 3). */
+    Eigen::Matrix<double, 3, N_ARM_JOINTS> arm_jacobian_elbow_linear(
+        const std::array<double, N_ARM_JOINTS>& angles) { return arm_jacobian_joint_linear(angles, 3); }
+    Eigen::Vector3d elbow_position(const std::array<double, N_ARM_JOINTS>& angles) { return joint_position(angles, 3); }
 
     /** Position + rotation of tool_frame in the world frame at the given
      *  arm angles. `rotation` columns are the tool's local x/y/z axes

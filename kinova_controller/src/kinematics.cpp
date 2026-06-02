@@ -111,14 +111,13 @@ Kinematics::arm_jacobian_full(const std::array<double, N_ARM_JOINTS>& angles)
 }
 
 Eigen::Matrix<double, 3, Kinematics::N_ARM_JOINTS>
-Kinematics::arm_jacobian_elbow_linear(const std::array<double, N_ARM_JOINTS>& angles)
+Kinematics::arm_jacobian_joint_linear(const std::array<double, N_ARM_JOINTS>& angles, int idx)
 {
     const Eigen::VectorXd q = angles_to_q(angles);
     pinocchio::computeJointJacobians(model_, *data_, q);
     Eigen::Matrix<double, 6, Eigen::Dynamic> J(6, model_.nv);
     J.setZero();
-    // joint_4 is the elbow (arm_joint_ids_[3]); LOCAL_WORLD_ALIGNED → world axes.
-    pinocchio::getJointJacobian(model_, *data_, arm_joint_ids_[3],
+    pinocchio::getJointJacobian(model_, *data_, arm_joint_ids_[idx],
                                 pinocchio::LOCAL_WORLD_ALIGNED, J);
     const Eigen::Matrix3d R = base_tf_.linear();
     const auto idx_v = arm_joint_idx_v();
@@ -128,11 +127,11 @@ Kinematics::arm_jacobian_elbow_linear(const std::array<double, N_ARM_JOINTS>& an
     return J_arm;
 }
 
-Eigen::Vector3d Kinematics::elbow_position(const std::array<double, N_ARM_JOINTS>& angles)
+Eigen::Vector3d Kinematics::joint_position(const std::array<double, N_ARM_JOINTS>& angles, int idx)
 {
     const Eigen::VectorXd q = angles_to_q(angles);
     pinocchio::framesForwardKinematics(model_, *data_, q);
-    return base_tf_ * data_->oMi[arm_joint_ids_[3]].translation();   // joint_4 origin
+    return base_tf_ * data_->oMi[arm_joint_ids_[idx]].translation();
 }
 
 Kinematics::ToolPose Kinematics::tool_pose(const std::array<double, N_ARM_JOINTS>& angles)

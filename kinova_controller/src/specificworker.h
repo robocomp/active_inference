@@ -119,14 +119,14 @@ private:
 	enum class Phase { SendingRestPose, Homing, WaitingForStart, ActiveEFE };
 	Phase phase_ = Phase::SendingRestPose;
 	bool  run_requested_ = false;   // mirrors the viewer button's checked state
-	// "Ready, off-the-table" rest pose for the horizontal-first-link mounting.
-	// Chosen by the edge-tucked search in initialize(): the hand is pulled back
-	// to the table's NEAR edge (world EE ≈ (−0.50, −0.33, 0.94)) with no link
-	// reaching forward over the usable surface, camera up (tool +Y·world+Z ≈ 0.74),
-	// elbow ~0.33 m clear of the support column, μ≈0.079. Override via
-	// Controller.rest_pose; values are arm joint angles j1..j7 (rad).
+	// Retracted "elbow-behind" ready rest pose: arm pulled back off the table,
+	// elbow BEHIND the column and UP, FAR from the mast — elbow at world
+	// ≈(−0.72,−0.72,1.23) (0.70 m from the column axis), hand pulled back to
+	// ≈(−0.46,−0.39,1.11) (not over the table), camera up. Low μ (≈0.04) — this
+	// retracted posture is near-singular, but it's only the parking pose; the arm
+	// gains conditioning as it extends to grasp. Override via Controller.rest_pose.
 	std::array<double, Kinematics::N_ARM_JOINTS> rest_pose_angles_{
-		0.754, 1.113, 1.290, -1.691, -2.611, 1.556, 1.216
+		1.189, 0.244, 0.300, -2.101, 0.651, -1.502, 3.141
 	};
 	int homing_settled_ticks_ = 0;
 	static constexpr double HOMING_TOLERANCE_RAD = 0.05;  // ≈ 2.9°

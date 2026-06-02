@@ -31,6 +31,24 @@ namespace
     constexpr auto URDF_PATH =
         "/home/pbustos/robocomp/components/active_inference/kinova_controller/gen3_robotiq_2f_85-mod.urdf";
 
+    /// Minimum distance between two 3D segments [p1,p2] and [q1,q2].
+    /// Used to measure arm-link clearance to the (vertical) column segment.
+    double segment_segment_distance(const Eigen::Vector3d& p1, const Eigen::Vector3d& p2,
+                                    const Eigen::Vector3d& q1, const Eigen::Vector3d& q2)
+    {
+        const Eigen::Vector3d d1 = p2 - p1, d2 = q2 - q1, r = p1 - q1;
+        const double a = d1.dot(d1), e = d2.dot(d2), f = d2.dot(r);
+        double s, t;
+        const double c = d1.dot(r);
+        const double b = d1.dot(d2);
+        const double den = a * e - b * b;
+        s = (den > 1e-12) ? std::clamp((b * f - c * e) / den, 0.0, 1.0) : 0.0;
+        t = (e > 1e-12) ? (b * s + f) / e : 0.0;
+        if (t < 0.0) { t = 0.0; s = std::clamp(-c / a, 0.0, 1.0); }
+        else if (t > 1.0) { t = 1.0; s = std::clamp((b - c) / a, 0.0, 1.0); }
+        return ((p1 + s * d1) - (q1 + t * d2)).norm();
+    }
+
     /// Shortest angular distance |a − b| modulo 2π, in [0, π].
     /// Needed because continuous joints accumulate revolutions across runs
     /// (the Webots encoder can report +8.6 rad even though physically the
@@ -385,18 +403,6 @@ SpecificWorker::compute_side_grasp_target()
     const Eigen::Vector3d z_bot      = bottle_axis_world_.normalized();  // ≈ +Z (upright)
     const Eigen::Vector3d base_pos   = arm_base_world_.translation();
 
-    // Horizontal approach direction: from the arm base toward the bottle, in the
-    // world horizontal plane, then projected ⟂ the bottle axis so the gripper
-    // stays perpendicular to the bottle even if it is tilted.
-    Eigen::Vector3d radial = bottle_pos - base_pos;
-    radial.z() = 0.0;
-    if (radial.norm() < 1e-4) return std::nullopt;        // bottle directly under base: ambiguous
-
-    Eigen::Vector3d z_tool_des = radial.normalized();
-    z_tool_des -= (z_tool_des.dot(z_bot)) * z_bot;        // project ⟂ bottle axis
-    if (z_tool_des.norm() < 1e-4) return std::nullopt;
-    z_tool_des.normalize();
-
     // Aim at the bottle's body, not its base. The WaterBottle PROTO origin is
     // bottom-centre, so offset up the bottle axis by a fraction of its height.
     double bottle_height_m = 0.22;
@@ -405,6 +411,21 @@ SpecificWorker::compute_side_grasp_target()
             bottle_height_m = h.value();
     const Eigen::Vector3d body_centre =
         bottle_pos + z_bot * (bottle_height_m * BOTTLE_GRASP_HEIGHT_FRAC);
+
+    // Approach azimuth is FREE for a vertical cylinder. Instead of base→bottle
+    // (which drags the arm across the front of the column), approach PERPENDICULAR
+    // to the column→bottle line, from the robot's RIGHT — same grasp, but the
+    // forearm stays off the mast. Of the two perpendicular sides, pick the one
+    // whose standoff sits farther to the robot's right (smaller world Y).
+    const Eigen::Vector2d col_xy(-0.62477, -0.056064);   // real SolidPipe column
+    Eigen::Vector3d u = bottle_pos - Eigen::Vector3d(col_xy.x(), col_xy.y(), bottle_pos.z());
+    u -= u.dot(z_bot) * z_bot;                            // column→bottle, ⟂ bottle axis
+    if (u.norm() < 1e-4) return std::nullopt;
+    u.normalize();
+    const Eigen::Vector3d perp = z_bot.cross(u).normalized();   // side direction (⟂ both)
+    const auto standoff_y = [&](const Eigen::Vector3d& zt)
+    { return (body_centre - zt * APPROACH_STANDOFF_M).y(); };
+    Eigen::Vector3d z_tool_des = (standoff_y(perp) < standoff_y(-perp)) ? perp : -perp;
 
     // Full grasp frame at convergence:
     //   tool +Z = z_tool_des          approach axis, horizontal into bottle
@@ -682,15 +703,6 @@ void SpecificWorker::compute()
 
         // Build the shared EFE parameters; per-state code varies only the
         // target, the desired tool axes, and the cruise speed.
-        // Park the elbow BEHIND the mast: target = column xy (arm-base xy) pushed
-        // ELBOW_BACK_M in −X (world back, toward the robot). The null-space term
-        // uses only the horizontal error, so it tucks the elbow behind the column
-        // without disturbing the hand. Replaces the manipulability objective as
-        // the redundancy resolution (both spend the single redundant DOF).
-        constexpr double ELBOW_BACK_M = 0.20;
-        constexpr double ELBOW_GAIN   = 1.5;
-        const Eigen::Vector3d elbow_target(arm_base_world_.translation().x() - ELBOW_BACK_M,
-                                           arm_base_world_.translation().y(), 0.0);
         const auto make_params = [&](const Eigen::Vector3d& z_des,
                                      const Eigen::Vector3d& x_des,
                                      double v_app)
@@ -698,20 +710,33 @@ void SpecificWorker::compute()
             EFEParams p;
             p.desired_approach  = z_des;
             p.desired_secondary = x_des;
-            p.gain_secondary    = 1.0;
+            // TEST: relax orientation to the approach axis only (roll free) → 5-DOF
+            // task, 2 redundant DOF, so the null-space elbow-off-mast preference
+            // has room to keep the elbow clear of the column.
+            p.gain_secondary    = 0.0;
             p.C_pos             = Eigen::Vector3d::Ones();  // straight-line flow
             p.dls_lambda        = 0.05;
             p.v_approach        = v_app;
             p.a_approach        = 0.60;
             p.omega_max         = 2.0;
-            p.gain_mu           = 0.0;            // elbow placement is the redundancy use now
-            p.gain_elbow        = ELBOW_GAIN;
-            p.elbow_target      = elbow_target;
-            // Soft obstacle constraints: keep the elbow off the mast and the hand
-            // off the table (potential-field repulsions, zero outside the margin).
-            p.gain_mast         = 2.0;
-            p.mast_xy           = arm_base_world_.translation().head<2>();
-            p.mast_safe         = 0.15;           // column r≈0.05 + ~0.10 margin
+            // Null-space elbow placement: pull the elbow into the BACK-RIGHT zone
+            // (behind the column and to the robot's right, away from the mast)
+            // using the redundant DOF — doesn't disturb the hand. Target = column
+            // xy pushed −0.25 m in X (back) and −0.30 m in Y (right).
+            p.gain_mu           = 0.0;
+            p.gain_elbow        = 2.0;
+            p.elbow_target      = Eigen::Vector3d(-0.62477 - 0.25, -0.056064 - 0.30, 0.0);
+            // WHOLE-ARM column repulsion: push every movable joint (j3..j7) off the
+            // REAL column (SolidPipe in arm_table.wbt) — axis, radius, z-extent —
+            // not just the elbow. This catches the wrist/forearm, which was the
+            // part actually grazing the mast.
+            p.gain_mast         = 3.0;
+            p.col_xy            = Eigen::Vector2d(-0.62477, -0.056064);  // SolidPipe axis
+            p.col_radius        = 0.05;
+            p.col_z_lo          = -0.10;          // SolidPipe: center z=0.6, height 1.4
+            p.col_z_hi          =  1.30;
+            p.col_margin        = 0.10;           // repel within 10 cm of the column surface
+            // Hand-table repulsion: keep the tool from diving into the table.
             p.gain_table        = 2.0;
             p.table_z           = table_top_z_;
             p.table_safe        = 0.06;           // start pushing up within 6 cm of the surface
@@ -759,11 +784,23 @@ void SpecificWorker::compute()
                 const double vmeas = tip_log_prev_pos_.has_value()
                     ? (ee_position - tip_log_prev_pos_.value()).norm() / dt : 0.0;
                 const Eigen::Vector3d elb = kinematics_->elbow_position(q);
-                std::print("[tiplog] {},{:.3f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},eang={:.1f},elbow=({:+.3f},{:+.3f},{:+.3f})\n",
+                // Whole-arm clearance to the ACTUAL column (SolidPipe): min over
+                // all arm links of segment-segment distance to the column axis,
+                // minus the column radius. Negative ⇒ penetrating.
+                const auto sk = kinematics_->arm_skeleton_points(q);
+                const Eigen::Vector3d col_lo(-0.62477, -0.056064, -0.10);
+                const Eigen::Vector3d col_hi(-0.62477, -0.056064,  1.30);
+                double col_min = 1e9; int col_link = -1;
+                for (int k = 2; k + 1 < (int)sk.size(); ++k)   // skip base→j1→j2 (the mount, always at the column)
+                {
+                    const double dseg = segment_segment_distance(sk[k], sk[k+1], col_lo, col_hi) - 0.05;
+                    if (dseg < col_min) { col_min = dseg; col_link = k; }
+                }
+                std::print("[tiplog] {},{:.3f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},{:.4f},eang={:.1f},elbow=({:+.3f},{:+.3f},{:+.3f}),colClr={:+.3f},colLink={}\n",
                            tip_log_cycle_, tip_log_cycle_ * dt,
                            ee_position.x(), ee_position.y(), ee_position.z(),
                            target.x(), target.y(), target.z(), e_pos, vcmd, vmeas,
-                           e_ang * 57.29578, elb.x(), elb.y(), elb.z());
+                           e_ang * 57.29578, elb.x(), elb.y(), elb.z(), col_min, col_link);
                 tip_log_prev_pos_ = ee_position;
                 ++tip_log_cycle_;
             }

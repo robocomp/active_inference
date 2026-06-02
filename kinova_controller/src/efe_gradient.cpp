@@ -180,16 +180,17 @@ std::array<double, Kinematics::N_ARM_JOINTS> efe_gradient_step(
     }
 
     // 3b. Null-space elbow placement (Corke RVC §8.4 redundancy resolution).
-    //     Park the elbow at elbow_target using the SAME 6-DOF null-space
-    //     projector, so it cannot disturb the tool pose. Horizontal error only
-    //     (Δz zeroed) → bias the elbow "behind the mast" without forcing height.
+    //     Pull the elbow toward elbow_target (the back-right zone, away from the
+    //     column) using the SAME 6-DOF null-space projector, so it cannot disturb
+    //     the tool pose. Horizontal error only (Δz free). Self-limits via the
+    //     projection when the elbow can't move there without moving the hand.
     //     N.B. mutates kin.data_; runs after every read of J/J_lin/J6 (local copies).
     if (params.gain_elbow > 0.0)
     {
         const Eigen::Matrix<double, 3, Kinematics::N_ARM_JOINTS> J_el =
             kin.arm_jacobian_elbow_linear(q);
         Eigen::Vector3d err = params.elbow_target - kin.elbow_position(q);
-        err.z() = 0.0;                                   // horizontal placement only
+        err.z() = 0.0;                                   // horizontal placement (back-right)
         const Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1> grad_el =
             J_el.transpose() * err;
         const Eigen::Matrix<double, 6, 1> J6_grad_el = J6 * grad_el;
@@ -201,17 +202,27 @@ std::array<double, Kinematics::N_ARM_JOINTS> efe_gradient_step(
     // 3c. Soft obstacle repulsions (potential field), added before scaling so the
     //     command stays velocity-bounded and the constraint negotiates with the
     //     task. Quadratic ramp, exactly zero outside the margin.
-    if (params.gain_mast > 0.0)            // elbow ↔ vertical mast
+    if (params.gain_mast > 0.0)            // WHOLE-ARM ↔ vertical column
     {
-        const Eigen::Vector3d p_el = kin.elbow_position(q);
-        const Eigen::Vector2d d_xy = p_el.head<2>() - params.mast_xy;
-        const double d = d_xy.norm();
-        if (d > 1e-6 and d < params.mast_safe)
+        // Repel every movable arm joint (j3..j7, idx 2..6 — skip the shoulder/
+        // mount which is always at the column) away from the finite cylinder.
+        // Applied directly (not null-space): if the wrist nears the column the
+        // hand must back off, which is the intended soft-wall behaviour.
+        for (int j = 2; j <= 6; ++j)
         {
-            const auto J_el = kin.arm_jacobian_elbow_linear(q);
-            const double e = (params.mast_safe - d) / params.mast_safe;   // (0,1]
-            const Eigen::Vector3d v(d_xy.x() / d, d_xy.y() / d, 0.0);      // radial outward
-            q_dot += params.gain_mast * e * e * (J_el.transpose() * v);
+            const Eigen::Vector3d p_j = kin.joint_position(q, j);
+            const double cz = std::clamp(p_j.z(), params.col_z_lo, params.col_z_hi);
+            const Eigen::Vector3d colpt(params.col_xy.x(), params.col_xy.y(), cz);
+            const Eigen::Vector3d diff = p_j - colpt;
+            const double dist = diff.norm();
+            const double clr  = dist - params.col_radius;        // clearance to the surface
+            if (clr < params.col_margin and dist > 1e-6)
+            {
+                const auto J_j = kin.arm_jacobian_joint_linear(q, j);
+                const double e = (params.col_margin - clr) / params.col_margin;   // (0,1]
+                const Eigen::Vector3d v = diff / dist;                            // push away
+                q_dot += params.gain_mast * e * e * (J_j.transpose() * v);
+            }
         }
     }
     if (params.gain_table > 0.0)           // hand ↔ table top
