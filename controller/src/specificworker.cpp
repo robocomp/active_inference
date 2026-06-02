@@ -27,8 +27,6 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
-#include <cstdio>
-#include <print>
 #include <sstream>
 
 SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, bool startup_check) : GenericWorker(configLoader, tprx)
@@ -49,16 +47,13 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
 		// State machine: Compute → Waiting → Operating → Degraded → Waiting
 		states["Waiting"] = std::make_unique<GRAFCETStep>("Waiting", period,
 		    std::bind(&SpecificWorker::waiting_loop, this),
-		    std::bind(&SpecificWorker::waiting_enter, this),
-		    nullptr);
+		    std::bind(&SpecificWorker::waiting_enter, this));
 		states["Operating"] = std::make_unique<GRAFCETStep>("Operating", period,
 		    std::bind(&SpecificWorker::operating_loop, this),
-		    std::bind(&SpecificWorker::operating_enter, this),
-		    nullptr);
+		    std::bind(&SpecificWorker::operating_enter, this));
 		states["Degraded"] = std::make_unique<GRAFCETStep>("Degraded", period,
 		    std::bind(&SpecificWorker::degraded_loop, this),
-		    std::bind(&SpecificWorker::degraded_enter, this),
-		    nullptr);
+		    std::bind(&SpecificWorker::degraded_enter, this));
 
 		// Compute → Waiting on start
 		states["Compute"]->addTransition(states["Compute"].get(), SIGNAL(entered()), states["Waiting"].get());
@@ -88,7 +83,7 @@ SpecificWorker::~SpecificWorker()
 {
 	cleanup_owned_nodes();
 	stop_robot();
-	std::cout << "Destroying SpecificWorker" << std::endl;
+	qInfo() << "Destroying SpecificWorker";
 	/*
 	for (auto const& [name, g] : Graphs) {
 	    g->write_to_json_file("./"+agent_name+"_"+name+".json");
@@ -99,9 +94,7 @@ SpecificWorker::~SpecificWorker()
 
 void SpecificWorker::initialize()
 {
-    std::cout << "initialize worker" << std::endl;
-	std::print("controller debug: initialize() entered\n");
-	std::fflush(stdout);
+    qInfo() << "initialize worker";
 	GenericWorker::initialize();
 
 	presence_coordinator_.configure(configLoader, G, static_cast<std::uint32_t>(agent_id));
@@ -112,7 +105,7 @@ void SpecificWorker::initialize()
 	presence_coordinator_.set_peer_hooks({
 	    .on_peer_restarted = [this](std::uint32_t id)
 	    {
-	        std::cout << "[Presence] peer " << id << " restarted" << std::endl;
+	        qInfo() << "[Presence] peer" << id << "restarted";
 	    },
 	    .on_optional_peer_lost = [this](const std::string &name, std::uint32_t id)
 	    {
@@ -126,20 +119,19 @@ void SpecificWorker::initialize()
 	presence_coordinator_.set_lifecycle_hooks({
 	    .on_waiting_enter = [this]()
 	    {
-	        std::cout << "[SM] -> Waiting";
 	        const auto missing = presence_coordinator_.missing_required_names();
-	        if (!missing.empty())
+	        if (missing.empty())
+	            qInfo("[SM] -> Waiting");
+	        else
 	        {
-	            std::cout << " (missing:";
-	            for (const auto &label : missing)
-	                std::cout << ' ' << label;
-	            std::cout << ')';
+	            QString m;
+	            for (const auto &label : missing) m += " " + QString::fromStdString(label);
+	            qInfo() << "[SM] -> Waiting (missing:" << m.trimmed() << ")";
 	        }
-	        std::cout << std::endl;
 	    },
 	    .on_operating_enter = []()
 	    {
-	        std::cout << "[SM] -> Operating: all required peers present" << std::endl;
+	        qInfo("[SM] -> Operating: all required peers present");
 	    },
 	    .on_operating_loop = [this]()
 	    {
@@ -147,7 +139,7 @@ void SpecificWorker::initialize()
 	    },
 	    .on_degraded_enter = [this]()
 	    {
-	        std::cout << "[SM] -> Degraded: required peer lost. Cleaning up and exiting." << std::endl;
+	        qInfo("[SM] -> Degraded: required peer lost. Cleaning up and exiting.");
 	        cleanup_owned_nodes();
 	        QTimer::singleShot(500, QCoreApplication::instance(), SLOT(quit()));
 	    },
@@ -276,10 +268,7 @@ void SpecificWorker::log_compute_perf(FPSCounter &counter)
 	counter.period = 1000;
 	const float fps = counter.get_frequency();
 	const float cpu = std::max(0.f, counter.get_cpu_use());
-	std::cout << "[CTRL] fps=" << std::fixed << std::setprecision(1) << fps
-	          << " cpu=" << std::setprecision(0) << cpu << "%"
-	          << " period=" << std::setprecision(1) << counter.get_period() << "ms"
-	          << std::endl;
+	qInfo("[CTRL] fps=%.1f cpu=%.0f%% period=%.1fms", fps, cpu, counter.get_period());
 	counter.begin = now;
 	counter.cont = 0;
 }
@@ -291,12 +280,10 @@ void SpecificWorker::log_first_compute_once()
 		return;
 
 	compute_debug_logged_ = true;
-	std::print("controller debug: first compute() entered G={} inner_api={} room_name='{}' robot_name='{}'\n",
-	           G ? 1 : 0,
-	           inner_eigen_api_ ? 1 : 0,
-	           world_model_.graph_state().room_name,
-	           world_model_.graph_state().robot_name);
-	std::fflush(stdout);
+	qInfo() << "[CTRL] first compute() G=" << (G ? 1 : 0)
+	        << "inner_api=" << (inner_eigen_api_ ? 1 : 0)
+	        << "room='" << QString::fromStdString(world_model_.graph_state().room_name) << "'"
+	        << "robot='" << QString::fromStdString(world_model_.graph_state().robot_name) << "'";
 }
 
 std::uint64_t SpecificWorker::current_time_ms() const

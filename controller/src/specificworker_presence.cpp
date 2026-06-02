@@ -44,27 +44,27 @@ void SpecificWorker::cleanup_owned_nodes()
 
 void SpecificWorker::on_optional_peer_lost(const std::string &name, std::uint32_t /*id*/)
 {
-    std::cout << "[Presence] optional peer lost: " << name << std::endl;
+    qInfo() << "[Presence] optional peer lost:" << QString::fromStdString(name);
 }
 
 void SpecificWorker::on_optional_peer_ready(const std::string &name, std::uint32_t /*id*/)
 {
-    std::cout << "[Presence] optional peer ready: " << name << std::endl;
+    qInfo() << "[Presence] optional peer ready:" << QString::fromStdString(name);
 }
 
 void SpecificWorker::emergency()
 {
-    std::cout << "Emergency worker" << std::endl;
+    qInfo() << "Emergency worker";
 }
 
 void SpecificWorker::restore()
 {
-    std::cout << "Restore worker" << std::endl;
+    qInfo() << "Restore worker";
 }
 
 int SpecificWorker::startup_check()
 {
-	std::cout << "Startup check" << std::endl;
+	qInfo() << "Startup check";
 	QTimer::singleShot(200, QCoreApplication::instance(), SLOT(quit()));
 	return 0;
 }

@@ -45,6 +45,7 @@ config_dir = "etc"
 monitor_period_ms = 500
 heartbeat_timeout_ms = 3000
 rejoin_grace_ms = 1500
+stale_grace_ms = 120000  # 2 min grace: covers peer restart time before declaring lost
 agent_info_period_ms = 1000
 
 [Owns]
