@@ -3,6 +3,9 @@ find_package(Qt6 COMPONENTS OpenGL OpenGLWidgets QUIET)
 # Sources set
 LIST(APPEND SOURCES
   ../src/specificworker.cpp
+  ../src/specificworker_presence.cpp
+  ../../common/agent_presence_monitor/agent_presence_monitor.cpp
+  ../../common/agent_presence_coordinator/agent_presence_coordinator.cpp
   ../src/scene_processor.cpp
   ../src/lidar_track_attributor.cpp
   ../src/voxel_processor.cpp
@@ -19,6 +22,8 @@ LIST(APPEND HEADERS
   ../src/yolo_processor.h
   ../src/unified_voxel_grid.h
   ../src/graph_object_box.h
+  ../../common/agent_presence_monitor/agent_presence_monitor.h
+  ../../common/agent_presence_coordinator/agent_presence_coordinator.h
 )
 
 if(TARGET Qt6::OpenGL AND TARGET Qt6::OpenGLWidgets)

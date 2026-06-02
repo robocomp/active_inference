@@ -22,6 +22,7 @@
 
 #include <genericworker.h>
 #include <fps/fps.h>
+#include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 
 #include <opencv2/core.hpp>
 #include <opencv2/core/types.hpp>
@@ -66,6 +67,17 @@ public slots:
     void modify_edge_attrs_slot(std::uint64_t from, std::uint64_t to, const std::string &type, const std::vector<std::string>& att_names){};
     void del_edge_slot(std::uint64_t from, std::uint64_t to, const std::string &edge_tag){};
     void del_node_slot(std::uint64_t from){};
+
+    void waiting_enter();
+    void waiting_loop();
+    void operating_enter();
+    void operating_loop();
+    void degraded_enter();
+    void degraded_loop();
+
+    void cleanup_owned_nodes();
+    void on_optional_peer_lost(const std::string &name, std::uint32_t id);
+    void on_optional_peer_ready(const std::string &name, std::uint32_t id);
 
 private:
     struct Params
@@ -115,6 +127,10 @@ private:
     void trigger_graph_layout_twopi();
     void cleanup_semantic_grid_nodes();
 
+    AgentPresenceCoordinator presence_coordinator_;
+    bool owned_nodes_cleaned_ = false;
+    FPSCounter fps_counter_;
+
     bool startup_check_flag  = false;
     bool verbose_debug_      = false;
     bool voxels_node_ready_  = false;
@@ -130,6 +146,9 @@ private:
     std::unique_ptr<rc::VoxelOpenGLViewer> voxel_viewer_gl;
     std::unique_ptr<rc::YoloViewer>        yolo_viewer_;
 
+signals:
+    void presenceReady();
+    void presenceLost();
 };
 
 #endif

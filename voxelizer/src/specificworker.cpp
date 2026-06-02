@@ -35,7 +35,6 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
-#include <print>
 #include <unordered_map>
 
 SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, bool startup_check)
@@ -48,9 +47,33 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
     }
     else
     {
+        const int period = configLoader.get<int>("Period.Compute");
+
+        states["Waiting"] = std::make_unique<GRAFCETStep>("Waiting", period,
+            std::bind(&SpecificWorker::waiting_loop, this),
+            std::bind(&SpecificWorker::waiting_enter, this));
+
+        states["Operating"] = std::make_unique<GRAFCETStep>("Operating", period,
+            std::bind(&SpecificWorker::operating_loop, this),
+            std::bind(&SpecificWorker::operating_enter, this));
+
+        states["Degraded"] = std::make_unique<GRAFCETStep>("Degraded", period,
+            std::bind(&SpecificWorker::degraded_loop, this),
+            std::bind(&SpecificWorker::degraded_enter, this));
+
+        states["Compute"]->addTransition(states["Compute"].get(), SIGNAL(entered()), states["Waiting"].get());
+        states["Waiting"]->addTransition(this, SIGNAL(presenceReady()), states["Operating"].get());
+        states["Operating"]->addTransition(this, SIGNAL(presenceLost()), states["Degraded"].get());
+        states["Degraded"]->addTransition(states["Degraded"].get(), SIGNAL(entered()), states["Waiting"].get());
+
+        statemachine.addState(states["Waiting"].get());
+        statemachine.addState(states["Operating"].get());
+        statemachine.addState(states["Degraded"].get());
+
         statemachine.setChildMode(QState::ExclusiveStates);
         statemachine.start();
-        const auto error = statemachine.errorString();
+
+        auto error = statemachine.errorString();
         if (error.length() > 0)
         {
             qWarning() << error;
@@ -62,7 +85,6 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
 SpecificWorker::~SpecificWorker()
 {
     qInfo() << "Destroying SpecificWorker";
-    cleanup_semantic_grid_nodes();
 }
 
 void SpecificWorker::initialize()
@@ -71,32 +93,34 @@ void SpecificWorker::initialize()
     GenericWorker::initialize();
 
     // --- Configuration ---
-    try { params.YOLO_MODEL_PATH = configLoader.get<std::string>("Yolo.model_path"); } catch (...) {}
-    try { params.YOLO_ACCEPTED_LABELS = configLoader.get<std::vector<std::string>>("Yolo.accepted_labels"); } catch (...) {}
-    try { params.YOLO_CONF_THRESH = static_cast<float>(configLoader.get<double>("Yolo.conf_thresh")); } catch (...) {}
-    try { params.YOLO_IOU_THRESH = static_cast<float>(configLoader.get<double>("Yolo.iou_thresh")); } catch (...) {}
-    try { params.YOLO_USE_GPU = configLoader.get<bool>("Yolo.use_gpu"); } catch (...) {}
-    try { params.YOLO_USE_TRT = configLoader.get<bool>("Yolo.use_trt"); } catch (...) {}
-    try { params.YOLO_MASK_ERODE_KERNEL = configLoader.get<int>("Yolo.mask_erode_kernel"); } catch (...) {}
-    try { params.YOLO_MASK_TRAY = configLoader.get<bool>("Yolo.mask_tray"); } catch (...) {}
-    try { params.YOLO_TRAY_MASK_REF_WIDTH  = configLoader.get<int>("Yolo.tray_mask_ref_width"); } catch (...) {}
-    try { params.YOLO_TRAY_MASK_REF_HEIGHT = configLoader.get<int>("Yolo.tray_mask_ref_height"); } catch (...) {}
-    try {
-        const auto flat = configLoader.get<std::vector<int>>("Yolo.tray_mask_polygon");
-        if (flat.size() >= 6 and flat.size() % 2 == 0) {
-            params.YOLO_TRAY_MASK_POLYGON_PX.clear();
-            for (std::size_t i = 0; i + 1 < flat.size(); i += 2)
-                params.YOLO_TRAY_MASK_POLYGON_PX.emplace_back(flat[i], flat[i + 1]);
-        }
-    } catch (...) {}
-    try { params.TRACK_ASSOCIATION_MAX_DISTANCE_M = static_cast<float>(configLoader.get<double>("Yolo.track_association_max_distance_m")); } catch (...) {}
-    try { params.TRACK_MAX_MISSED_FRAMES = configLoader.get<int>("Yolo.track_max_missed_frames"); } catch (...) {}
-    try { params.VOXEL_VIEWER_MAX_RENDERED_VOXELS = static_cast<std::size_t>(configLoader.get<int>("Voxel.viewer_max_rendered_voxels")); } catch (...) {}
-    try { params.VOXEL_VIEWER_FPS = configLoader.get<int>("Voxel.viewer_fps"); } catch (...) {}
-    try { params.VOXEL_Z_LIFT_M = static_cast<float>(configLoader.get<double>("Voxel.z_lift_m")); } catch (...) {}
-    try { params.TRANSFORMS_INTERPOLATE_RT = configLoader.get<bool>("Transforms.interpolate_rt"); } catch (...) {}
-    try { verbose_debug_ = configLoader.get<bool>("Debug.verbose"); }
-    catch (...) { verbose_debug_ = false; }
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Yolo.model_path", params.YOLO_MODEL_PATH);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Yolo.accepted_labels", params.YOLO_ACCEPTED_LABELS);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Yolo.conf_thresh", params.YOLO_CONF_THRESH);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Yolo.iou_thresh", params.YOLO_IOU_THRESH);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Yolo.use_gpu", params.YOLO_USE_GPU);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Yolo.use_trt", params.YOLO_USE_TRT);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Yolo.mask_erode_kernel", params.YOLO_MASK_ERODE_KERNEL);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Yolo.mask_tray", params.YOLO_MASK_TRAY);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Yolo.tray_mask_ref_width", params.YOLO_TRAY_MASK_REF_WIDTH);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Yolo.tray_mask_ref_height", params.YOLO_TRAY_MASK_REF_HEIGHT);
+    rc::ConfigLoaderUtils::load_optional_apply<std::vector<int>>(configLoader, "Yolo.tray_mask_polygon",
+        [&](const std::vector<int>& flat)
+        {
+            if (flat.size() >= 6 && flat.size() % 2 == 0)
+            {
+                params.YOLO_TRAY_MASK_POLYGON_PX.clear();
+                for (std::size_t i = 0; i + 1 < flat.size(); i += 2)
+                    params.YOLO_TRAY_MASK_POLYGON_PX.emplace_back(flat[i], flat[i + 1]);
+            }
+        });
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Yolo.track_association_max_distance_m", params.TRACK_ASSOCIATION_MAX_DISTANCE_M);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Yolo.track_max_missed_frames", params.TRACK_MAX_MISSED_FRAMES);
+    rc::ConfigLoaderUtils::load_optional<std::size_t, int>(configLoader, "Voxel.viewer_max_rendered_voxels", params.VOXEL_VIEWER_MAX_RENDERED_VOXELS);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Voxel.viewer_fps", params.VOXEL_VIEWER_FPS);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Voxel.z_lift_m", params.VOXEL_Z_LIFT_M);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Transforms.interpolate_rt", params.TRANSFORMS_INTERPOLATE_RT);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Component.Debug.Verbose", verbose_debug_);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Debug.verbose", verbose_debug_);
 
     // --- YOLO ---
     yolo_processor = std::make_unique<YoloProcessor>();
@@ -207,15 +231,66 @@ void SpecificWorker::initialize()
                                params.TRANSFORMS_INTERPOLATE_RT, verbose_debug_);
 
     cleanup_semantic_grid_nodes();
+
+    presence_coordinator_.configure(configLoader, G, static_cast<std::uint32_t>(agent_id));
+    presence_coordinator_.set_transition_hooks({
+        .request_presence_ready = [this]() { Q_EMIT presenceReady(); },
+        .request_presence_lost  = [this]() { Q_EMIT presenceLost(); },
+    });
+    presence_coordinator_.set_peer_hooks({
+        .on_peer_restarted = [](std::uint32_t id)
+        {
+            qInfo() << "[Presence] peer" << id << "restarted";
+        },
+        .on_optional_peer_lost = [this](const std::string &name, std::uint32_t id)
+        {
+            on_optional_peer_lost(name, id);
+        },
+        .on_optional_peer_ready = [this](const std::string &name, std::uint32_t id)
+        {
+            on_optional_peer_ready(name, id);
+        },
+    });
+    presence_coordinator_.set_lifecycle_hooks({
+        .on_waiting_enter = [this]()
+        {
+            qInfo() << "[SM] -> Waiting";
+            const auto missing = presence_coordinator_.missing_required_names();
+            if (!missing.empty())
+            {
+                QString m;
+                for (const auto &label : missing)
+                    m += " " + QString::fromStdString(label);
+                qInfo() << "  missing:" << m;
+            }
+        },
+        .on_operating_enter = []()
+        {
+            qInfo() << "[SM] -> Operating: all required constraints satisfied";
+        },
+        .on_operating_loop = [this]()
+        {
+            compute();
+            if (auto it = graph_viewers.find(""); it != graph_viewers.end() && it->second)
+                it->second->set_external_fps(states.at("Operating")->getActualFps());
+        },
+        .on_degraded_enter = []()
+        {
+            qInfo() << "[SM] -> Degraded: a required peer or node is no longer available";
+        },
+    });
+    presence_coordinator_.start();
+
+    QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
+                     this, &SpecificWorker::cleanup_owned_nodes, Qt::UniqueConnection);
 }
 
 void SpecificWorker::compute()
 {
-    static FPSCounter compute_fps;
     if (!scene_processor or !voxel_processor)
         return;
 
-    const auto frame = process_scene_frame(compute_fps);
+    const auto frame = process_scene_frame(fps_counter_);
     if (!frame.has_value())
         return;
 
@@ -260,8 +335,7 @@ void SpecificWorker::compute()
     ensure_voxels_node_in_dsr();
     upload_voxel_grid_to_dsr();
 
-    if (verbose_debug_)
-        compute_fps.print("[Compute]", 2000);
+    fps_counter_.print("[Compute]", 3000);
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -345,7 +419,7 @@ void SpecificWorker::update_table_nodes_from_tracks(const std::vector<GraphObjec
         graph_object_boxes.begin(), graph_object_boxes.end(), [](const auto& b){ return b.category == "model_table"; }));
 
     if (sensing_frame % 30 == 0)
-        std::println("[TableCapture] frame={} model_boxes={} table_tracks={}", sensing_frame, model_box_count, table_cand_count);
+        qInfo() << "[TableCapture] frame=" << sensing_frame << " model_boxes=" << model_box_count << " table_tracks=" << table_cand_count;
 
     // Index model boxes by DSR node name so each table node finds its own box in O(1).
     struct ModelBox
@@ -451,12 +525,11 @@ void SpecificWorker::update_table_nodes_from_tracks(const std::vector<GraphObjec
         if (sensing_frame % 30 == 0)
         {
             if (best_track_id >= 0)
-                std::println("[TableCapture] node='{}' model_centroid=({:.2f},{:.2f},{:.2f}) best_track={} overlap={:.3f} obb_score={}",
-                             table_node.name(), mb.centroid.x(), mb.centroid.y(), mb.centroid.z(),
-                             best_track_id, best_overlap_volume, best_obb_score);
+                qInfo() << "[TableCapture] node='" << table_node.name().c_str()
+                        << "' model_centroid=(" << mb.centroid.x() << "," << mb.centroid.y() << "," << mb.centroid.z()
+                        << ") best_track=" << best_track_id << " overlap=" << best_overlap_volume << " obb_score=" << best_obb_score;
             else
-                std::println("[TableCapture] node='{}' no table track visible this frame",
-                             table_node.name());
+                qInfo() << "[TableCapture] node='" << table_node.name().c_str() << "' no table track visible this frame";
         }
         std::vector<float> flat_pts;
         if (best_track_id >= 0)
@@ -523,8 +596,9 @@ void SpecificWorker::update_table_nodes_from_tracks(const std::vector<GraphObjec
         G->add_or_modify_attrib_local<explanation_ratio_att>(table_node, explanation_ratio);
         G->update_node(table_node);
         if (sensing_frame % 30 == 0)
-            std::println("[TableCapture] WROTE node='{}' frame={} cands={} resid={} expl={:.2f} lidar_in_nb={}",
-                         table_node.name(), sensing_frame, n_cands, residual_mass, explanation_ratio, lidar_in_neighbourhood);
+            qInfo() << "[TableCapture] WROTE node='" << table_node.name().c_str()
+                    << "' frame=" << sensing_frame << " cands=" << n_cands
+                    << " resid=" << residual_mass << " expl=" << explanation_ratio << " lidar_in_nb=" << lidar_in_neighbourhood;
     }
 }
 
@@ -547,7 +621,7 @@ void SpecificWorker::ensure_voxels_node_in_dsr()
     auto zed_node = G->get_node("zed");
     if (!zed_node.has_value())
     {
-        std::println("[Voxels] WARNING: 'zed' node not found in graph — cannot create RT edge");
+        qWarning() << "[Voxels] WARNING: 'zed' node not found in graph — cannot create RT edge";
         return;
     }
 
@@ -561,18 +635,18 @@ void SpecificWorker::ensure_voxels_node_in_dsr()
     if (const auto id = G->insert_node(voxels_node); id.has_value())
     {
         voxels_node_ready_ = true;
-        std::println("[Voxels] Created 'voxels' node id={} (semantic_grid) under room '{}'", *id, zed_node.value().name());
+        qInfo() << "[Voxels] Created 'voxels' node id=" << *id << " (semantic_grid) under room '" << zed_node.value().name().c_str() << "'";
 
         // Add an RT edge from "zed" to the new "voxels" node (identity transform).
         auto rt_api = G->get_rt_api();
         rt_api->insert_or_assign_edge_RT(zed_node.value(), *id,
                                              {0.0f, 0.0f, 0.0f},
                                              {0.0f, 0.0f, 0.0f});
-        std::println("[Voxels] RT edge inserted from 'zed' -> 'voxels'");
+        qInfo() << "[Voxels] RT edge inserted from 'zed' -> 'voxels'";
         trigger_graph_layout_twopi();
     }
     else
-        std::println("[Voxels] ERROR: failed to insert 'voxels' node into DSR graph");
+        qWarning() << "[Voxels] ERROR: failed to insert 'voxels' node into DSR graph";
 }
 
 void SpecificWorker::upload_voxel_grid_to_dsr()
@@ -611,7 +685,7 @@ void SpecificWorker::upload_voxel_grid_to_dsr()
     G->update_node(voxels_node);
 
     if (verbose_debug_)
-        std::println("[Voxels] Uploaded {} voxels (stride-5) to DSR (frame={})", n, sensing_frame);
+        qInfo() << "[Voxels] Uploaded" << n << "voxels (stride-5) to DSR (frame=" << sensing_frame << ")";
 }
 
 void SpecificWorker::emergency()
@@ -655,7 +729,7 @@ void SpecificWorker::cleanup_semantic_grid_nodes()
     const auto nodes = G->get_nodes_by_type("semantic_grid");
     for (const auto& node : nodes)
     {
-        std::println("[Voxels] Removing stale '{}' node (id={}) from DSR graph", node.name(), node.id());
+        qInfo() << "[Voxels] Removing stale '" << node.name().c_str() << "' node (id=" << node.id() << ") from DSR graph";
         G->delete_node(node.id());
     }
     voxels_node_ready_ = false;

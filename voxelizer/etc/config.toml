@@ -1,7 +1,7 @@
 
 # --- Common Agent Data ---
 [Agent]
-id = 8 # Change id
+id = 9
 name = "voxelizer"
 
 # --- Single Instance Configuration ---
@@ -26,6 +26,19 @@ graph = true
 [Period]
 Compute = 100
 Emergency = 500
+
+[Presence]
+required_agent_names = ["robot_concept", "room_concept"]
+config_dir           = "etc"
+monitor_period_ms    = 500
+heartbeat_timeout_ms = 3000
+rejoin_grace_ms      = 1500
+stale_grace_ms       = 120000
+agent_info_period_ms = 1000
+
+[Owns]
+nodes    = ["voxels"]
+
 
 [Component.Debug]
 Verbose = false
