@@ -100,7 +100,22 @@ std::array<double, Kinematics::N_ARM_JOINTS> efe_gradient_step(
 
         Eigen::Vector3d x_des = params.desired_secondary
                                 - params.desired_secondary.dot(z_des) * z_des;
-        if (params.gain_secondary <= 0.0 or x_des.norm() < 1e-6)
+        if (params.align_tool_y)
+        {
+            // Pin tool +Y to the bottle axis (fingers ⟂ bottle), YAW FREE: single-
+            // axis alignment on tool +Y, so the approach azimuth is left to the
+            // redundancy (the arm spends it to stay clear of the column).
+            const Eigen::Vector3d y_des  = params.desired_tool_y.normalized();
+            const Eigen::Vector3d y_tool = pose.rotation.col(1);
+            const Eigen::Vector3d c = y_tool.cross(y_des);
+            const double s = c.norm();
+            if (s > 1e-9)
+            {
+                axis  = c / s;
+                angle = std::atan2(s, y_tool.dot(y_des));   // ∈ [0, π]
+            }
+        }
+        else if (params.gain_secondary <= 0.0 or x_des.norm() < 1e-6)
         {
             // Approach-axis only (or secondary unusable): align tool +Z → z_des.
             const Eigen::Vector3d z_tool = pose.rotation.col(2);

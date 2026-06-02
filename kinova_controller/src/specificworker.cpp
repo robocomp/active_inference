@@ -710,10 +710,13 @@ void SpecificWorker::compute()
             EFEParams p;
             p.desired_approach  = z_des;
             p.desired_secondary = x_des;
-            // TEST: relax orientation to the approach axis only (roll free) → 5-DOF
-            // task, 2 redundant DOF, so the null-space elbow-off-mast preference
-            // has room to keep the elbow clear of the column.
-            p.gain_secondary    = 0.0;
+            // Yaw-free grasp: pin tool +Y to the bottle axis (fingers stay ⟂ the
+            // bottle, a valid cylinder grasp) and leave the YAW (approach azimuth)
+            // FREE — the arm spends that DOF to stay clear of the column. tool +Y
+            // in the grasp frame is z_des × x_des (= the bottle's up axis).
+            p.align_tool_y      = true;
+            p.desired_tool_y    = z_des.cross(x_des).normalized();
+            p.gain_secondary    = 1.0;   // ignored while align_tool_y is set
             p.C_pos             = Eigen::Vector3d::Ones();  // straight-line flow
             p.dls_lambda        = 0.05;
             p.v_approach        = v_app;
@@ -759,21 +762,32 @@ void SpecificWorker::compute()
 
             const double e_pos = (ee_position - target).norm();
 
-            // Orientation residual: geodesic angle between the current tool
-            // frame and R_des = [x⟂, z×x, z], matching efe_gradient's metric.
+            // Orientation residual matching the controller's metric. With the
+            // yaw-free (pin tool +Y) grasp mode, "aligned" = fingers ⟂ the bottle,
+            // i.e. the angle between tool +Y and the bottle axis — yaw is ignored,
+            // so the grasp can commit at any azimuth.
             double e_ang = 3.1416;
-            const Eigen::Vector3d zc = z_des.normalized();
-            Eigen::Vector3d xc = x_des - x_des.dot(zc) * zc;
-            if (xc.norm() > 1e-6)
+            if (params.align_tool_y)
             {
-                xc.normalize();
-                Eigen::Matrix3d R_des;
-                R_des.col(0) = xc;
-                R_des.col(1) = zc.cross(xc);
-                R_des.col(2) = zc;
                 const auto tool = kinematics_->tool_pose(q);
-                const Eigen::AngleAxisd er(R_des * tool.rotation.transpose());
-                e_ang = std::abs(er.angle());
+                e_ang = std::acos(std::clamp(
+                    tool.rotation.col(1).dot(params.desired_tool_y.normalized()), -1.0, 1.0));
+            }
+            else
+            {
+                const Eigen::Vector3d zc = z_des.normalized();
+                Eigen::Vector3d xc = x_des - x_des.dot(zc) * zc;
+                if (xc.norm() > 1e-6)
+                {
+                    xc.normalize();
+                    Eigen::Matrix3d R_des;
+                    R_des.col(0) = xc;
+                    R_des.col(1) = zc.cross(xc);
+                    R_des.col(2) = zc;
+                    const auto tool = kinematics_->tool_pose(q);
+                    const Eigen::AngleAxisd er(R_des * tool.rotation.transpose());
+                    e_ang = std::abs(er.angle());
+                }
             }
 
             if (tip_log_)

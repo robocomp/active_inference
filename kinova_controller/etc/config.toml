@@ -30,7 +30,7 @@ graph = true
 [Controller]
 auto_start = false   # arm EFE without waiting for the viewer Start button
 tip_log    = true   # stream "[tiplog] cycle,t,ee_xyz,tgt_xyz,dist,v_cmd,v_meas"
-approach_only = true # hold at the standoff (first FSM stage only)
+approach_only = false # full FSM: approach → insert → close → lift → place
 # Rest pose "j1 .. j7" (rad). Tune the "ready over the table, camera-up" posture
 # here without recompiling; relaunch to apply. Startup prints [rest-pose] metrics
 # (EE pos, upperarm_dz≈0 = first link parallel to table, toolY_up≈+1 = camera up).

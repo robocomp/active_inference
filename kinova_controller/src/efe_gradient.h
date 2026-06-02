@@ -139,6 +139,14 @@ struct EFEParams
      *  objective cannot disturb the EE position. ∂μ/∂q is computed by
      *  central differences (≈ 0.5 ms / cycle). 0 disables (default).
      *  Useful range 0.3 – 1.0. */
+    /** Orientation regime override for a symmetric (cylinder) grasp: pin only the
+     *  tool **+Y** axis to `desired_tool_y` (the bottle's long axis) and leave the
+     *  YAW about it free. Fingers stay perpendicular to the bottle (a valid grasp)
+     *  while the approach azimuth is a free DOF the arm spends to stay clear of the
+     *  column. Takes precedence over gain_secondary when true. */
+    bool            align_tool_y = false;
+    Eigen::Vector3d desired_tool_y{0.0, 0.0, 1.0};
+
     double gain_mu = 0.3;
 
     /** α_elbow — null-space elbow-placement gain. Adds
