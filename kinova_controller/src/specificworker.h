@@ -41,6 +41,7 @@
 #include <memory>
 #include <optional>
 #include <random>
+#include <fstream>
 
 /**
  * \brief Class SpecificWorker implements the core functionality of the component.
@@ -199,10 +200,107 @@ private:
 	GraspPhase grasp_phase_ = GraspPhase::Tracking;
 	int        grasp_settle_ticks_ = 0;   // consecutive converged cycles before committing
 	int        closing_ticks_      = 0;   // cycles spent closing (miss timeout)
+	int        lift_ticks_         = 0;   // watchdog: cycles spent trying to lift
 	int        place_ticks_        = 0;   // watchdog within a place sub-state
+	// If the lift can't reach its target in this many cycles the arm grabbed
+	// something it can't raise (a toppled/jammed bottle) — treat as a grasp miss
+	// instead of looping in Lifting forever. ~5 s at a 20 ms period.
+	static constexpr int LIFT_TIMEOUT_TICKS = 250;
 	bool       returning_for_cycle_ = false;  // auto-restart Tracking after the rest-return
 	int        round_cycles_       = 0;       // Controller.round_cycles: stop after N picks (0 = loop forever)
 	int        pick_place_cycles_done_ = 0;   // completed picks in the current round
+
+	// ── Skill-learning instrumentation ──────────────────────────────────────
+	// First step toward the novice→skilled (closed-loop → model-based open-loop)
+	// transition: probe each rep with a small STRUCTURED perturbation of the grasp
+	// command (not noise — a low-discrepancy sweep that EXCITES the parameters we
+	// want to identify and measures outcome SENSITIVITY), and log one row per rep
+	// to a dataset. Offline this gives the grasp-pose bias, the actuation response,
+	// and the per-region tolerance budget that licenses going open-loop. All OFF by
+	// default (zero perturbation, no file) so behaviour is unchanged unless enabled.
+	struct GraspPerturbation
+	{
+		double dx_perp     = 0.0;   // m,  offset along tool +X (tangent to the bottle)
+		double dz_axis     = 0.0;   // m,  offset along the bottle long axis
+		double dazi        = 0.0;   // rad, approach-azimuth rotation about the bottle axis
+		double speed_scale = 1.0;   // multiplies the approach/insert speed caps
+	};
+	GraspPerturbation rep_perturb_{};         // active this rep (applied in compute_side_grasp_target)
+	bool   probe_enabled_   = false;          // Controller.probe_variations
+	double probe_pos_amp_   = 0.015;          // Controller.probe_pos_amp  [m]   half-range of dx/dz
+	double probe_azi_amp_   = 0.15;           // Controller.probe_azi_amp  [rad] half-range of dazi
+	double probe_speed_amp_ = 0.25;           // Controller.probe_speed_amp      ± fraction of nominal speed
+	long   probe_index_     = 0;              // monotonic rep/attempt counter → Halton index
+	int    rep_track_ticks_ = 0;              // Tracking cycles this attempt (convergence time)
+	int    rep_attempts_    = 0;              // grasp attempts spent on the current rep
+	// A rep keeps the SAME perturbation across retries, so a hard probe point can
+	// miss forever. Cap the retries: after this many misses, record the failure,
+	// count the rep as a (failed) cycle and move on — keeps probe rounds bounded
+	// and the dataset honest about which perturbations are ungraspable.
+	static constexpr int MAX_REP_ATTEMPTS = 3;
+	double rep_commit_epos_ = 0.0;            // standoff terminal position error at commit
+	double rep_commit_eang_ = 0.0;            // standoff terminal orientation error at commit
+	std::ofstream dataset_;                   // per-rep CSV sink (Controller.dataset_path)
+	bool   dataset_open_    = false;
+	// Joint-level actuation log: commanded vs measured q̇ per cycle, the clean signal
+	// for identifying the actuation model (G, τ) — Cartesian v_cmd is only a speed cap
+	// and gave a nonsense gain. last_q_dot_cmd_ holds the previous cycle's command, so
+	// pairing it with this cycle's measured velocity aligns command→response.
+	std::array<double, Kinematics::N_ARM_JOINTS> last_q_dot_cmd_{};
+	std::ofstream joint_log_;                 // Controller.joint_log_path
+	bool   joint_log_open_  = false;
+	long   joint_log_cycle_ = 0;
+	void   begin_rep_probe();                                       // new attempt → next perturbation
+	void   log_rep_outcome(bool success, double rise, double xy_gap); // one CSV row
+
+	// ── Precision re-weighting: the novice→skilled (closed→open-loop) transition ──
+	// The grasp target the controller drives toward is the precision-weighted fusion
+	// of the live observation (x_obs, precision Π_s = 1/σ_obs²) and the model belief
+	// (x_model, precision Π_m). `confidence_` is the normalised model precision
+	// Π_m/(Π_m+Π_s) ∈ [0,1]; it rises with each confirmed grasp (learning) and is
+	// PERSISTED across rounds. High confidence ⇒ (a) sample the bottle far less often
+	// (the EFE observation schedule: a fresh look gains ~no information once the model
+	// predicts well) and (b) move faster (trust the model, less corrective caution) —
+	// which is precisely the measured "skill". A large prediction error on a sample
+	// (surprise) drops confidence and re-engages feedback. All OFF unless enabled.
+	bool   precision_reweighting_ = false;   // Controller.precision_reweighting
+	double perception_noise_std_  = 0.0;     // Controller.perception_noise_std  σ_obs [m] (sim2real)
+	double confidence_            = 0.0;     // Π_m/(Π_m+Π_s), persisted
+	double conf_gain_             = 0.15;    // += per confirmed grasp
+	double conf_decay_            = 0.5;     // ×= per miss / surprise
+	int    skilled_sample_period_ = 12;      // cycles between observations at full confidence
+	double speed_conf_gain_       = 0.6;     // approach-speed boost at full confidence
+	double surprise_gate_m_       = 0.05;    // obs−belief beyond this [m] ⇒ surprise → re-engage
+	std::string confidence_path_;            // Controller.confidence_path (persist the learned skill)
+	// Per-rep working state for the fusion + metrics.
+	SideGraspTarget belief_grasp_{};         // x_model: committed/fused grasp belief this rep
+	bool   belief_valid_     = false;
+	int    cycles_since_obs_ = 0;
+	int    obs_count_rep_    = 0;            // observations taken this rep (the metric)
+	double rep_t0_           = 0.0;          // rep start wall-clock [s]
+	std::ofstream metrics_;                  // Controller.metrics_path
+	bool   metrics_open_     = false;
+	void   load_confidence();
+	void   save_confidence();
+
+	// Bottle respawn (needs the bridge setObjectPose). Teleport a fresh, upright
+	// bottle to a deterministic pickup spot at the start of each rep, so a round
+	// survives a toppled/fallen/placed-away bottle AND each rep picks from a known,
+	// controlled location (clean experiment design). A mid-rep topple still becomes
+	// a recorded MISS (bounded by the give-up cap) — the next rep re-stands it.
+	void   respawn_bottle(double x, double y);                       // upright, on the table
+	bool   respawn_each_rep_ = false;            // Controller.respawn_each_rep
+	Eigen::Vector2d last_spawn_xy_{0.0, -0.14}; // last commanded spawn (world x,y)
+	// Pickup spawn box (world frame), sampled with an R2 low-discrepancy sequence
+	// for uniform 2-D coverage. Sized to the COMFORTABLY reachable right half of the
+	// table: arm base is at world (-0.623,-0.023), table top z≈0.742, Gen3 reach
+	// ≈0.90 m — so the grasp distance here stays ≲0.83 m (the old box pushed bottles
+	// out to the 0.90 m limit). Right side = negative world Y.
+	static constexpr double SPAWN_X_MIN = -0.08, SPAWN_X_MAX = 0.06;
+	static constexpr double SPAWN_Y_MIN = -0.26, SPAWN_Y_MAX = -0.02;
+	// Continuous fall detection: bottle long axis tilted past this from vertical
+	// (or dropped below the table) ⇒ it toppled; abort the current grasp phase.
+	static constexpr double FALL_TILT_RAD = 0.60;   // ≈34°
 	// Grasp frame latched at Tracking→Inserting so gripper/bottle contact can't
 	// make the target chase its own disturbance.
 	SideGraspTarget latched_grasp_{};

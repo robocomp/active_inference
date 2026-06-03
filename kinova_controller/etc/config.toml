@@ -28,14 +28,45 @@ graph = true
 # 3d = true
 
 [Controller]
-auto_start = false   # arm EFE without waiting for the viewer Start button
+auto_start = true   # probe round
 tip_log    = true   # stream "[tiplog] cycle,t,ee_xyz,tgt_xyz,dist,v_cmd,v_meas"
 approach_only = false # full FSM: approach → insert → close → lift → place
-round_cycles = 5  # do a 5-fold pick-and-place round, return to rest between each
+round_cycles = 20  # probe round for skill-learning dataset
 # Rest pose "j1 .. j7" (rad). Tune the "ready over the table, camera-up" posture
 # here without recompiling; relaunch to apply. Startup prints [rest-pose] metrics
 # (EE pos, upperarm_dz≈0 = first link parallel to table, toolY_up≈+1 = camera up).
 rest_pose = "0.3 0.8 1.5 -2.101 0.651 -1.02 3.141"
+
+# ── Skill-learning instrumentation ───────────────────────────────────────────
+# Probe each pick with a small STRUCTURED perturbation of the grasp command
+# (Halton sweep, not noise) and log one row per rep to dataset_path. Offline this
+# yields the grasp-pose bias, the actuation response, and the per-region tolerance
+# budget needed to move from closed-loop to model-based open-loop reaching.
+# Leave probe_variations = false for a plain round (zero perturbation).
+probe_variations = true       # PROBE ROUND
+probe_pos_amp    = 0.015      # m,   half-range of tangential/axial grasp offset
+probe_azi_amp    = 0.15       # rad, half-range of approach-azimuth rotation
+probe_speed_amp  = 0.25       # ±fraction of nominal approach/insert speed
+dataset_path     = "/tmp/kinova_skill_dataset.csv"
+# Per-cycle commanded-vs-measured joint velocity log (for the actuation model G, τ).
+joint_log_path   = "/tmp/kinova_joint_actuation.csv"
+
+# ── Precision re-weighting: novice→skilled (closed-loop → model-based open-loop) ──
+# Drives the grasp target as a precision-weighted fusion of observation (Π_s) and
+# model belief (Π_m). confidence_ = Π_m/(Π_m+Π_s) rises with each confirmed grasp;
+# high confidence ⇒ sample the bottle less (EFE schedule) and move faster. Persisted.
+precision_reweighting = true       # true → enable the transition
+perception_noise_std  = 0.0        # m, σ of injected bottle-observation noise (sim2real; 0 = ideal sim)
+conf_gain             = 0.15       # confidence += this per confirmed grasp
+skilled_sample_period = 12         # cycles between observations at full confidence
+speed_conf_gain       = 0.6        # approach speed ×(1+this·confidence) — "more speed" when skilled
+confidence_path       = "/tmp/kinova_confidence.txt"   # persist the learned skill across rounds
+metrics_path          = "/tmp/kinova_skill_metrics.csv" # per-rep: cycle time, observations
+# Teleport a fresh upright bottle to a deterministic pickup spot at each rep start
+# (via the bridge setObjectPose). Makes probe rounds immune to toppled/fallen
+# bottles and gives controlled pickup locations. Needs the kinova-bridge built
+# with setObjectPose.
+respawn_each_rep = true
 
 [Period]
 Compute = 20
