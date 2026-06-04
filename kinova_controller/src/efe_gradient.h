@@ -100,6 +100,19 @@ struct EFEParams
      *  hard QP constraints. Set from Controller.solver = "dls" | "qp". */
     bool use_qp = false;
 
+    /** QP path only: max APPROACH speed (m/s) permitted at the edge of an obstacle's
+     *  influence band, for the collision velocity-dampers (mast/table). The admissible
+     *  approach speed ramps linearly from this at the band edge to 0 at the surface,
+     *  a HARD non-penetration constraint replacing the soft repulsion. */
+    double obs_damper_xi = 0.5;
+
+    /** QP path only: weight on the μ/elbow LINEAR term, g_lin = −w·Σ gain·∇. The free-
+     *  space redundancy contribution is (w/λ²)·gain·N·∇, so w = λ² reproduces the old
+     *  null-space projection (redundancy strictly off the task), while w > λ² lets μ/elbow
+     *  genuinely assert in the objective and the task slack δ yields — the real NEO trade.
+     *  ≤ 0 means "use λ²" (projection-equivalent default). */
+    double redundancy_weight = 0.0;
+
     /** Preferred-flow attractor — the continuous-active-inference upgrade from
      *  "preference over end-effector POSITION only" to a preference over
      *  position AND velocity, with the attractor at the goal (x*, ẋ=0).

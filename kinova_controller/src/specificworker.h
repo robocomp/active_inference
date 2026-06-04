@@ -159,6 +159,19 @@ private:
 	// Controller.solver: false → closed-form DLS, true → proxQP (reproduces DLS now;
 	// scaffold for migrating joint-limit/obstacle terms to hard QP constraints).
 	bool use_qp_ = false;
+	// Controller.qp_redundancy_weight: weight on the QP's μ/elbow linear term. ≤0 ⇒ λ²
+	// (projection-equivalent); larger ⇒ genuine NEO soft competition (task slack yields).
+	double qp_redundancy_weight_ = 0.0;
+	// Controller.fixed_pick_xy = "x y" (world m): if set, respawn the bottle at this
+	// fixed spot every rep instead of the R2 sweep — for controlled A/B experiments
+	// (hold the pick constant, vary one knob).
+	bool   fixed_pick_set_ = false;
+	Eigen::Vector2d fixed_pick_xy_{0.0, 0.0};
+	// Controller.elbow_gain (default 2.0; 0 ⇒ drop the elbow posture term) and
+	// Controller.elbow_target_xy = "x y" (world m; empty ⇒ built-in default).
+	double elbow_gain_ = 2.0;
+	bool   elbow_target_set_ = false;
+	Eigen::Vector2d elbow_target_xy_{0.0, 0.0};
 
 	// Tip-trajectory logging (diagnose approach speed/shape). When tip_log_ is
 	// set the ActiveEFE block prints one "[tiplog] ..." CSV line per cycle and

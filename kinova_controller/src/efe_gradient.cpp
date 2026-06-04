@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <vector>
 #include <proxsuite/proxqp/dense/dense.hpp>
 
 namespace
@@ -39,30 +40,139 @@ namespace
         return det > 0.0 ? std::sqrt(det) : 0.0;
     }
 
-    /// Pragmatic resolved-rate step solved as a QP (proxQP), the migration foothold.
-    /// Reproduces the closed-form DLS q̇ = J6ᵀ(J6J6ᵀ+λ²I)⁻¹ξ EXACTLY: that is the
-    /// stationary point of the unconstrained
-    ///     min_q̇ ½ q̇ᵀ(J6ᵀJ6 + λ²I) q̇ − (J6ᵀξ)ᵀ q̇.
-    /// With no inequalities the solver returns the same vector as the LDLT solve (to
-    /// its tolerance). Joint-limit / obstacle dampers enter later as the C,l,u block.
-    Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1>
-    solve_pragmatic_qp(const Eigen::Matrix<double, 6, Kinematics::N_ARM_JOINTS>& J6,
-                       const Eigen::Matrix<double, 6, 1>& twist,
-                       double lambda_sq)
+    using QpRow = Eigen::Matrix<double, 1, Kinematics::N_ARM_JOINTS>;
+
+    /// Append one inequality row  lo ≤ aᵀq̇ ≤ hi  to a growing (C, l, u) block.
+    void append_row(Eigen::MatrixXd& C, Eigen::VectorXd& l, Eigen::VectorXd& u,
+                    const QpRow& a, double lo, double hi)
+    {
+        const int r = static_cast<int>(C.rows());
+        C.conservativeResize(r + 1, Kinematics::N_ARM_JOINTS); C.row(r) = a;
+        l.conservativeResize(r + 1); l(r) = lo;
+        u.conservativeResize(r + 1); u(r) = hi;
+    }
+
+    /// Joint-limit velocity dampers (Haviland & Corke). For a finite-limit joint inside
+    /// the influence band d_infl: q̇_i ≤ η·(q^max−q_i)/d_infl and q̇_i ≥ −η·(q_i−q^min)/d_infl,
+    /// ramping the admissible velocity toward the wall to 0 (η = full joint speed at the
+    /// band edge, d_s = 0). Rows added ONLY for joints inside the band ⇒ far from limits
+    /// no constraint = identical to DLS. Continuous joints (±inf) are never constrained.
+    void add_joint_limit_dampers(const std::array<double, Kinematics::N_ARM_JOINTS>& q,
+                                 const std::array<std::pair<double, double>, Kinematics::N_ARM_JOINTS>& lims,
+                                 double d_infl, double eta,
+                                 Eigen::MatrixXd& C, Eigen::VectorXd& l, Eigen::VectorXd& u)
     {
         constexpr int N = Kinematics::N_ARM_JOINTS;
-        Eigen::MatrixXd H = J6.transpose() * J6;          // N×N, SPD once λ²I added
-        H.diagonal().array() += lambda_sq;
-        const Eigen::VectorXd g = -(J6.transpose() * twist);
-        proxsuite::proxqp::dense::QP<double> qp(N, 0, 0); // n vars, 0 eq, 0 in
-        qp.settings.eps_abs = 1e-10;                       // tight → matches DLS to ~3e-9
+        constexpr double INF = 1e20;
+        for (int i = 0; i < N; ++i)
+        {
+            if (not std::isfinite(lims[i].first) or not std::isfinite(lims[i].second))
+                continue;                                  // continuous joint: no wall
+            double li = -INF, ui = INF;
+            const double d_up = lims[i].second - q[i];
+            const double d_lo = q[i] - lims[i].first;
+            if (d_up < d_infl) ui =  eta * (d_up / d_infl); // → 0 at wall, < 0 if overshot
+            if (d_lo < d_infl) li = -eta * (d_lo / d_infl);
+            if (ui < INF or li > -INF)
+            {
+                QpRow a = QpRow::Zero(); a(i) = 1.0;
+                append_row(C, l, u, a, li, ui);
+            }
+        }
+    }
+
+    /// Obstacle collision velocity-dampers (Haviland & Corke), replacing the soft
+    /// potential-field repulsions on the QP path. For a robot point near an obstacle,
+    /// bound its APPROACH speed:  −n̂ᵀ J_point q̇ ≤ ξ·clr/d_infl  (clamped ≥ 0 so q̇=0 is
+    /// always feasible — a "no deeper penetration" guarantee, not active retreat), where
+    /// n̂ is the outward surface normal and clr the clearance. Admissible approach speed
+    /// ramps to 0 at the surface.
+    void add_obstacle_dampers(Kinematics& kin,
+                              const std::array<double, Kinematics::N_ARM_JOINTS>& q,
+                              const Kinematics::ToolPose& pose,
+                              const Eigen::Matrix<double, 3, Kinematics::N_ARM_JOINTS>& J_lin,
+                              const EFEParams& p,
+                              Eigen::MatrixXd& C, Eigen::VectorXd& l, Eigen::VectorXd& u)
+    {
+        constexpr int N = Kinematics::N_ARM_JOINTS;
+        constexpr double INF = 1e20;
+        // Mast: every movable joint (j3..j7, idx 2..6) vs the finite vertical cylinder.
+        if (p.gain_mast > 0.0)
+            for (int j = 2; j <= 6; ++j)
+            {
+                const Eigen::Vector3d pj = kin.joint_position(q, j);
+                const double cz = std::clamp(pj.z(), p.col_z_lo, p.col_z_hi);
+                const Eigen::Vector3d colpt(p.col_xy.x(), p.col_xy.y(), cz);
+                const Eigen::Vector3d diff = pj - colpt;
+                const double dist = diff.norm();
+                const double clr  = dist - p.col_radius;                 // clearance to surface
+                if (clr < p.col_margin and dist > 1e-6)
+                {
+                    const Eigen::Vector3d n = diff / dist;               // outward normal
+                    const Eigen::Matrix<double, 3, N> Jj = kin.arm_jacobian_joint_linear(q, j);
+                    const QpRow a = -(n.transpose() * Jj);               // approach speed = a·q̇
+                    const double zeta = std::max(0.0, p.obs_damper_xi * (clr / p.col_margin));
+                    append_row(C, l, u, a, -INF, zeta);
+                }
+            }
+        // Table: tool point vs the horizontal plane (approach = downward).
+        if (p.gain_table > 0.0)
+        {
+            const double d = pose.position.z() - p.table_z;
+            if (d < p.table_safe)
+            {
+                const QpRow a = -(Eigen::RowVector3d(0, 0, 1) * J_lin);
+                const double zeta = std::max(0.0, p.obs_damper_xi * (d / p.table_safe));
+                append_row(C, l, u, a, -INF, zeta);
+            }
+        }
+    }
+
+    /// Canonical NEO (Haviland & Corke) reactive QP. Decision vars x = [q̇; δ], δ∈ℝ⁶ the
+    /// task slack:
+    ///   min ½(λ² ‖q̇‖² + ‖δ‖²) + g_linᵀ q̇   s.t.  J6 q̇ − δ = ξ,  l ≤ C_damp q̇ ≤ u.
+    /// - Q = diag(λ²I₇, I₆): joint-velocity effort + slack regularisers (λ_δ = 1).
+    /// - g_lin = −λ²·Σ gain·∇(redundancy): μ-ascent + elbow as the LINEAR objective term.
+    ///   With this weight and NO active inequality the solution is exactly the DLS task
+    ///   plus the null-space-projected redundancy (since (J6ᵀJ6+λ²I)⁻¹ = (1/λ²)·N), so it
+    ///   reproduces the pre-QP controller in free space. When a damper binds, δ and the
+    ///   redundancy terms yield optimally to respect the HARD constraint — now on the full
+    ///   q̇, which is what makes the joint-limit / collision guarantees exact.
+    Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1>
+    solve_neo_qp(const Eigen::Matrix<double, 6, Kinematics::N_ARM_JOINTS>& J6,
+                 const Eigen::Matrix<double, 6, 1>& twist,
+                 double lambda_sq,
+                 const Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1>& g_lin,
+                 const Eigen::MatrixXd& C_damp, const Eigen::VectorXd& l, const Eigen::VectorXd& u)
+    {
+        constexpr int N = Kinematics::N_ARM_JOINTS;
+        const int dim  = N + 6;                            // q̇ (7) + slack δ (6)
+        const int n_in = static_cast<int>(C_damp.rows());
+
+        Eigen::MatrixXd H = Eigen::MatrixXd::Zero(dim, dim);
+        H.topLeftCorner(N, N)     = lambda_sq * Eigen::MatrixXd::Identity(N, N);  // λ² I on q̇
+        H.bottomRightCorner(6, 6) = Eigen::MatrixXd::Identity(6, 6);              // I on δ
+        Eigen::VectorXd g = Eigen::VectorXd::Zero(dim);
+        g.head(N) = g_lin;
+        Eigen::MatrixXd A = Eigen::MatrixXd::Zero(6, dim);                        // [J6 | −I₆]
+        A.leftCols(N)  = J6;
+        A.rightCols(6) = -Eigen::MatrixXd::Identity(6, 6);
+        const Eigen::VectorXd b = twist;
+
+        proxsuite::proxqp::dense::QP<double> qp(dim, 6, n_in);
+        qp.settings.eps_abs = 1e-10;
         qp.settings.eps_rel = 0.0;
         qp.settings.verbose = false;
-        qp.init(H, g,
-                proxsuite::nullopt, proxsuite::nullopt,    // A, b   (no equalities)
-                proxsuite::nullopt, proxsuite::nullopt, proxsuite::nullopt); // C, l, u
+        if (n_in == 0)
+            qp.init(H, g, A, b, proxsuite::nullopt, proxsuite::nullopt, proxsuite::nullopt);
+        else
+        {
+            Eigen::MatrixXd C = Eigen::MatrixXd::Zero(n_in, dim);                 // [C_damp | 0]
+            C.leftCols(N) = C_damp;
+            qp.init(H, g, A, b, C, l, u);
+        }
         qp.solve();
-        return qp.results.x;
+        return qp.results.x.head(N);
     }
 }
 
@@ -192,62 +302,75 @@ std::array<double, Kinematics::N_ARM_JOINTS> efe_gradient_step(
     const Eigen::Matrix<double, 6, 6> Q6 =
         J6 * J6.transpose() + lambda_sq * Eigen::Matrix<double, 6, 6>::Identity();
     const Eigen::LDLT<Eigen::Matrix<double, 6, 6>> Q6_ldlt(Q6);   // also reused below for N
-    // Pragmatic term: closed-form DLS (default) or the equivalent QP (migration path).
-    // Q6_ldlt is still built either way — the null-space projector below needs it.
-    Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1> q_dot =
-        params.use_qp ? solve_pragmatic_qp(J6, twist, lambda_sq)
-                      : (J6.transpose() * Q6_ldlt.solve(twist)).eval();
+    const auto pos_lims = kin.arm_joint_position_limits();
 
-    // 3. Manipulability ascent in the null space of the 6-DOF pose task (Corke
-    //    RVC §8.4 redundancy resolution). A 7-DOF arm on a 6-DOF task has one
-    //    redundant DOF; the soft projector N = I − J6ᵀ Q6⁻¹ J6 confines this
-    //    term to it so it cannot disturb the pose. ∂μ/∂q by central differences.
-    //    N.B. arm_jacobian_full(q±h) mutates kin.data_, so this MUST run after
-    //    every read of J/J_lin/J_ang (all local copies, so fine).
+    // Redundancy gradients (RAW, unprojected): manipulability μ-ascent and the elbow
+    // posture pull. Computed once; the DLS path projects them into the task null space
+    // and adds them post-solve, while the QP path folds them into the NEO linear term
+    // g_lin. ∂μ/∂q by central differences. N.B. arm_jacobian_full(q±h) mutates kin.data_,
+    // so this runs after every read of J/J_lin/J_ang (all local copies, so fine).
+    Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1> grad_mu =
+        Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1>::Zero();
     if (params.gain_mu > 0.0)
     {
         constexpr double h = 1e-4;
-        Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1> grad_mu;
         auto q_pert = q;
         for (int i = 0; i < Kinematics::N_ARM_JOINTS; ++i)
         {
-            q_pert[i]  = q[i] + h;
-            const double mu_p = yoshikawa_mu(kin.arm_jacobian_full(q_pert));
-            q_pert[i]  = q[i] - h;
-            const double mu_m = yoshikawa_mu(kin.arm_jacobian_full(q_pert));
-            q_pert[i]  = q[i];                          // restore for next axis
+            q_pert[i] = q[i] + h; const double mu_p = yoshikawa_mu(kin.arm_jacobian_full(q_pert));
+            q_pert[i] = q[i] - h; const double mu_m = yoshikawa_mu(kin.arm_jacobian_full(q_pert));
+            q_pert[i] = q[i];                              // restore for next axis
             grad_mu(i) = (mu_p - mu_m) / (2.0 * h);
         }
-        const Eigen::Matrix<double, 6, 1> J6_grad_mu = J6 * grad_mu;
-        const Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1> projected =
-            J6.transpose() * Q6_ldlt.solve(J6_grad_mu);
-        q_dot += params.gain_mu * (grad_mu - projected);
     }
-
-    // 3b. Null-space elbow placement (Corke RVC §8.4 redundancy resolution).
-    //     Pull the elbow toward elbow_target (the back-right zone, away from the
-    //     column) using the SAME 6-DOF null-space projector, so it cannot disturb
-    //     the tool pose. Horizontal error only (Δz free). Self-limits via the
-    //     projection when the elbow can't move there without moving the hand.
-    //     N.B. mutates kin.data_; runs after every read of J/J_lin/J6 (local copies).
+    Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1> grad_el =
+        Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1>::Zero();
     if (params.gain_elbow > 0.0)
     {
-        const Eigen::Matrix<double, 3, Kinematics::N_ARM_JOINTS> J_el =
-            kin.arm_jacobian_elbow_linear(q);
+        const Eigen::Matrix<double, 3, Kinematics::N_ARM_JOINTS> J_el = kin.arm_jacobian_elbow_linear(q);
         Eigen::Vector3d err = params.elbow_target - kin.elbow_position(q);
-        err.z() = 0.0;                                   // horizontal placement (back-right)
-        const Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1> grad_el =
-            J_el.transpose() * err;
-        const Eigen::Matrix<double, 6, 1> J6_grad_el = J6 * grad_el;
-        const Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1> projected =
-            J6.transpose() * Q6_ldlt.solve(J6_grad_el);
-        q_dot += params.gain_elbow * (grad_el - projected);
+        err.z() = 0.0;                                     // horizontal placement (back-right)
+        grad_el = J_el.transpose() * err;
+    }
+
+    Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1> q_dot;
+    if (params.use_qp)
+    {
+        // NEO QP (step 4): task as a slacked equality, μ + elbow as the linear objective
+        // term, joint-limit + obstacle velocity-dampers as hard inequalities. In free
+        // space (no damper active) g_lin = −λ²·Σ gain·∇ reproduces DLS-plus-projection
+        // exactly; when a damper binds, the slack + redundancy yield to the HARD
+        // constraint on the full q̇.
+        Eigen::MatrixXd C(0, Kinematics::N_ARM_JOINTS);
+        Eigen::VectorXd l(0), u(0);
+        add_joint_limit_dampers(q, pos_lims, params.limit_margin, params.max_joint_vel, C, l, u);
+        add_obstacle_dampers(kin, q, pose, J_lin, params, C, l, u);
+        // w = λ² reproduces the null-space projection; w > λ² lets μ/elbow assert and the
+        // task slack yield (genuine NEO). ≤ 0 ⇒ projection-equivalent default.
+        const double w = params.redundancy_weight > 0.0 ? params.redundancy_weight : lambda_sq;
+        const Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1> g_lin =
+            -w * (params.gain_mu * grad_mu + params.gain_elbow * grad_el);
+        q_dot = solve_neo_qp(J6, twist, lambda_sq, g_lin, C, l, u);
+    }
+    else
+    {
+        // DLS path (fallback): closed-form pragmatic term + null-space-projected
+        // redundancy. The soft projector N = I − J6ᵀ Q6⁻¹ J6 confines μ/elbow to the
+        // redundant DOF so they cannot disturb the tool pose.
+        q_dot = (J6.transpose() * Q6_ldlt.solve(twist)).eval();
+        if (params.gain_mu > 0.0)
+            q_dot += params.gain_mu * (grad_mu - J6.transpose() * Q6_ldlt.solve(J6 * grad_mu));
+        if (params.gain_elbow > 0.0)
+            q_dot += params.gain_elbow * (grad_el - J6.transpose() * Q6_ldlt.solve(J6 * grad_el));
     }
 
     // 3c. Soft obstacle repulsions (potential field), added before scaling so the
     //     command stays velocity-bounded and the constraint negotiates with the
     //     task. Quadratic ramp, exactly zero outside the margin.
-    if (params.gain_mast > 0.0)            // WHOLE-ARM ↔ vertical column
+    //     DLS path only: the QP path (step 3) enforces these as hard collision
+    //     velocity-damper inequalities inside the solve (add_obstacle_dampers), so the
+    //     soft push would double-count here.
+    if (not params.use_qp and params.gain_mast > 0.0)  // WHOLE-ARM ↔ vertical column
     {
         // Repel every movable arm joint (j3..j7, idx 2..6 — skip the shoulder/
         // mount which is always at the column) away from the finite cylinder.
@@ -270,7 +393,7 @@ std::array<double, Kinematics::N_ARM_JOINTS> efe_gradient_step(
             }
         }
     }
-    if (params.gain_table > 0.0)           // hand ↔ table top
+    if (not params.use_qp and params.gain_table > 0.0)  // hand ↔ table top
     {
         const double d = pose.position.z() - params.table_z;
         if (d < params.table_safe)
@@ -303,12 +426,14 @@ std::array<double, Kinematics::N_ARM_JOINTS> efe_gradient_step(
     }
     q_dot *= scale;
 
-    // 5. Joint-limit repulsion added AFTER scaling so it's not diluted by
-    //    the scale factor — it's a safety push that must act at full strength.
-    const auto lims = kin.arm_joint_position_limits();
-    for (int i = 0; i < Kinematics::N_ARM_JOINTS; ++i)
-        q_dot(i) += limit_repulsion_velocity(q[i], lims[i].first, lims[i].second,
-                                              params.limit_margin, params.limit_gain);
+    // 5. Joint-limit repulsion added AFTER scaling so it's not diluted by the scale
+    //    factor — a safety push that must act at full strength. DLS path only: the QP
+    //    path (step 2) enforces joint limits as hard velocity-damper inequalities
+    //    inside the solve instead, so the soft push would double-count here.
+    if (not params.use_qp)
+        for (int i = 0; i < Kinematics::N_ARM_JOINTS; ++i)
+            q_dot(i) += limit_repulsion_velocity(q[i], pos_lims[i].first, pos_lims[i].second,
+                                                 params.limit_margin, params.limit_gain);
 
     std::array<double, Kinematics::N_ARM_JOINTS> out{};
     Eigen::Map<Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1>>(out.data()) = q_dot;

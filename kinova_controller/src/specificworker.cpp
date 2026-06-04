@@ -188,7 +188,25 @@ void SpecificWorker::initialize()
     // inequality constraints the QP reproduces DLS — the foothold for migrating
     // joint-limit / obstacle terms to hard constraints. See EFE_CONTROLLER_MATH.md §4.
     try { use_qp_ = (configLoader.get<std::string>("Controller.solver") == "qp"); } catch (...) {}
-    std::print("[solver] pragmatic resolved-rate backend = {}\n", use_qp_ ? "QP (proxQP)" : "DLS (closed form)");
+    try { qp_redundancy_weight_ = configLoader.get<double>("Controller.qp_redundancy_weight"); } catch (...) {}
+    try {
+        std::istringstream fp(configLoader.get<std::string>("Controller.fixed_pick_xy"));
+        double fx, fy;
+        if (fp >> fx >> fy) { fixed_pick_xy_ = {fx, fy}; fixed_pick_set_ = true;
+            std::print("[experiment] fixed pick spot = ({:.3f}, {:.3f}) world\n", fx, fy); }
+    } catch (...) {}
+    try { elbow_gain_ = configLoader.get<double>("Controller.elbow_gain"); } catch (...) {}
+    try {
+        std::istringstream et(configLoader.get<std::string>("Controller.elbow_target_xy"));
+        double ex, ey;
+        if (et >> ex >> ey) { elbow_target_xy_ = {ex, ey}; elbow_target_set_ = true;
+            std::print("[experiment] elbow_target = ({:.3f}, {:.3f}) world\n", ex, ey); }
+    } catch (...) {}
+    std::print("[solver] pragmatic resolved-rate backend = {}{}\n",
+               use_qp_ ? "QP (proxQP)" : "DLS (closed form)",
+               (use_qp_ and qp_redundancy_weight_ > 0.0)
+                   ? std::format("  redundancy_weight={:.4f} (genuine NEO)", qp_redundancy_weight_)
+                   : std::string{"  redundancy=projection-equivalent"});
     if (respawn_each_rep_)
         std::print("[spawn] per-rep bottle respawn ON (deterministic pickup, survives falls)\n");
     if (probe_enabled_)
@@ -628,7 +646,13 @@ void SpecificWorker::begin_rep_probe()
     // Deterministic pickup location for this rep (Halton sweep over the right-side
     // spawn box), teleported in via the bridge — guarantees a fresh upright bottle
     // at a known spot regardless of where the last rep left/dropped it.
-    if (respawn_each_rep_)
+    if (respawn_each_rep_ and fixed_pick_set_)
+    {
+        // Controlled-experiment override: same pick spot every rep, so an A/B over one
+        // knob (e.g. qp_redundancy_weight) isn't confounded by pick-location variance.
+        respawn_bottle(fixed_pick_xy_.x(), fixed_pick_xy_.y());
+    }
+    else if (respawn_each_rep_)
     {
         // R2 (Roberts) low-discrepancy sequence — uniform 2-D coverage without the
         // axis-correlation Halton suffers at low indices with large bases (which made
@@ -1078,6 +1102,8 @@ void SpecificWorker::compute()
             p.C_pos             = Eigen::Vector3d::Ones();  // straight-line flow
             p.dls_lambda        = 0.05;
             p.use_qp            = use_qp_;   // Controller.solver: "qp" routes the pragmatic term through proxQP
+            p.obs_damper_xi     = 0.5;       // QP path: max approach speed (m/s) at the obstacle band edge
+            p.redundancy_weight = qp_redundancy_weight_;  // QP: μ/elbow linear-term weight (≤0 ⇒ λ²)
             p.v_approach        = v_app;
             p.a_approach        = 0.60;
             p.omega_max         = 2.0;
@@ -1086,8 +1112,18 @@ void SpecificWorker::compute()
             // using the redundant DOF — doesn't disturb the hand. Target = column
             // xy pushed −0.25 m in X (back) and −0.30 m in Y (right).
             p.gain_mu           = 0.0;
-            p.gain_elbow        = 2.0;
-            p.elbow_target      = Eigen::Vector3d(-0.62477 - 0.25, -0.056064 - 0.30, 0.0);
+            p.gain_elbow        = elbow_gain_;   // Controller.elbow_gain (0 ⇒ no elbow term)
+            // Posture prior target. Controllable via Controller.elbow_target_xy for tuning.
+            // Default = far −Y (the natural away-from-mast direction: the elbow hangs to
+            // the robot's right at world y≈−0.6, same x as the mast). A far, saturating
+            // target makes the redundant DOF push the elbow as far right as the null space
+            // allows ⇒ MAX mast clearance. The old back-left target (−0.875,−0.356) was
+            // only 0.34 m from the mast and actively dragged the elbow inward (0.47 m);
+            // this raises it to ~0.57 m at the same pick with grasps intact (controlled
+            // sweep, see EFE_CONTROLLER_MATH.md / experiments).
+            p.elbow_target      = elbow_target_set_
+                ? Eigen::Vector3d(elbow_target_xy_.x(), elbow_target_xy_.y(), 0.0)
+                : Eigen::Vector3d(-0.625, -1.5, 0.0);
             // WHOLE-ARM column repulsion: push every movable joint (j3..j7) off the
             // REAL column (SolidPipe in arm_table.wbt) — axis, radius, z-extent —
             // not just the elbow. This catches the wrist/forearm, which was the
@@ -1540,37 +1576,42 @@ void SpecificWorker::compute()
                     std::print("[grasp] CONFIRMED held (rose {:.3f} m, gap {:.3f} m, conf {:.2f}, "
                                "{} obs, {:.1f}s) → place\n",
                                rise, xy_gap, confidence_, obs_count_rep_, now_seconds() - rep_t0_);
+                    // Elbow clearance to the mast at the grasp — the redundancy term's job.
+                    // Lets the projector-equivalent vs genuine-NEO A/B show the elbow effect.
+                    {
+                        const Eigen::Vector3d elb = kinematics_->elbow_position(q);
+                        const double mast_clr = std::hypot(elb.x() + 0.62477, elb.y() + 0.056064) - 0.05;
+                        std::print("[elbow] clearance to mast = {:.3f} m  pos=({:.3f},{:.3f},{:.3f})\n",
+                                   mast_clr, elb.x(), elb.y(), elb.z());
+                    }
                     lift_ticks_ = 0;
                     // Pick a place spot on the RIGHT side of the table (world box),
                     // ≥ PLACE_MIN_MOVE_M from the pick. We run in world frame, so
                     // up = +Z and the table is horizontal: keep the EE at the grasp
                     // height (grasp_pos.z) so the bottle base sets back on the table.
                     const Eigen::Vector3d up(0.0, 0.0, 1.0);
-                    std::uniform_real_distribution<double> ux(PLACE_X_MIN, PLACE_X_MAX);
-                    std::uniform_real_distribution<double> uy(PLACE_Y_MIN, PLACE_Y_MAX);
-                    // Sample the right-side box for a spot that is (a) ≥ PLACE_MIN_MOVE_M
-                    // from the pick and (b) within reach of the arm (the box now extends
-                    // past the reach edge — see PLACE_REACH_MAX_M). Among the valid draws
-                    // keep the FARTHEST-from-base one, so placements bias toward the distant
-                    // edge of the reachable workspace as requested.
+                    // Sample a place spot that is (a) ≥ PLACE_MIN_MOVE_M from the pick and
+                    // (b) within reach (≤ PLACE_REACH_MAX_M). Use the R2 (Roberts)
+                    // low-discrepancy sequence — one fresh point per rep — and ACCEPT THE
+                    // FIRST VALID draw, so placements cover the reachable box uniformly
+                    // across a round instead of clustering at the distant reach edge. The
+                    // index is offset off the spawn's R2 stream so pick and place spots
+                    // don't correlate.
+                    constexpr double a1 = 0.7548776662466927, a2 = 0.5698402909980532;
                     const Eigen::Vector3d base_xyz = arm_base_world_.translation();
                     Eigen::Vector3d p = g.grasp_pos;
-                    double best_reach = -1.0;
-                    bool   have = false;
-                    for (int k = 0; k < 40; ++k)
+                    for (int k = 0; k < 24; ++k)
                     {
-                        Eigen::Vector3d c(ux(rng_), uy(rng_), g.grasp_pos.z());
+                        const double idx = static_cast<double>(probe_index_ + 104729 + k * 11939);
+                        const double uu = std::fmod(0.5 + a1 * idx, 1.0);
+                        const double vv = std::fmod(0.5 + a2 * idx, 1.0);
+                        const Eigen::Vector3d c(PLACE_X_MIN + uu * (PLACE_X_MAX - PLACE_X_MIN),
+                                                PLACE_Y_MIN + vv * (PLACE_Y_MAX - PLACE_Y_MIN),
+                                                g.grasp_pos.z());
                         const double far_from_pick = (c.head<2>() - g.grasp_pos.head<2>()).norm();
                         const double reach = (c - base_xyz).norm();
-                        if (far_from_pick < PLACE_MIN_MOVE_M or reach > PLACE_REACH_MAX_M) continue;
-                        if (reach > best_reach) { best_reach = reach; p = c; have = true; }
+                        if (far_from_pick >= PLACE_MIN_MOVE_M and reach <= PLACE_REACH_MAX_M) { p = c; break; }
                     }
-                    if (not have)   // degenerate box/pick combo — fall back to nearest reachable
-                        for (int k = 0; k < 40; ++k)
-                        {
-                            Eigen::Vector3d c(ux(rng_), uy(rng_), g.grasp_pos.z());
-                            if ((c - base_xyz).norm() <= PLACE_REACH_MAX_M) { p = c; break; }
-                        }
                     place_pos_   = p;
                     place_world_xy_ = p;                 // for the retreat dataset
                     place_hover_ = p + up * LIFT_HEIGHT_M;
