@@ -42,6 +42,8 @@
 #include <optional>
 #include <random>
 #include <fstream>
+#include <cmath>
+#include <algorithm>
 
 /**
  * \brief Class SpecificWorker implements the core functionality of the component.
@@ -131,7 +133,7 @@ private:
 	};
 	int homing_settled_ticks_ = 0;
 	int homing_elapsed_ticks_ = 0;                        // cycles spent in the current homing attempt
-	static constexpr double HOMING_TOLERANCE_RAD = 0.05;  // ≈ 2.9°
+	static constexpr double HOMING_TOLERANCE_RAD = 0.09;  // ≈ 5.2° — forgiving enough that a joint drooping a hair short under gravity still counts as "home" (it was jamming the round ~3° short)
 	static constexpr int    HOMING_SETTLE_TICKS  = 5;     // consecutive cycles within tolerance
 	// Safety timeout: if homing cannot converge within this many cycles (e.g. the
 	// target pose is unreachable or the arm is jammed against an obstacle), give up
@@ -202,6 +204,7 @@ private:
 	int        closing_ticks_      = 0;   // cycles spent closing (miss timeout)
 	int        lift_ticks_         = 0;   // watchdog: cycles spent trying to lift
 	int        place_ticks_        = 0;   // watchdog within a place sub-state
+	int        place_settle_ticks_ = 0;   // consecutive settled+upright cycles before releasing
 	// If the lift can't reach its target in this many cycles the arm grabbed
 	// something it can't raise (a toppled/jammed bottle) — treat as a grasp miss
 	// instead of looping in Lifting forever. ~5 s at a 20 ms period.
@@ -233,6 +236,13 @@ private:
 	long   probe_index_     = 0;              // monotonic rep/attempt counter → Halton index
 	int    rep_track_ticks_ = 0;              // Tracking cycles this attempt (convergence time)
 	int    rep_attempts_    = 0;              // grasp attempts spent on the current rep
+	// Watchdog: Tracking is the one grasp phase with no natural timeout, so an arm
+	// jammed during the approach (e.g. wedged against the table) loops there forever.
+	// If Tracking can't converge within this many cycles, treat it as a jam: teleport
+	// the arm back to rest via Webots2Robocomp_setArmJointsInstant and retry/give up.
+	// ~18 s at the 20 ms period — generously longer than any healthy approach.
+	int    track_stuck_ticks_ = 0;
+	static constexpr int TRACK_TIMEOUT_TICKS = 900;
 	// A rep keeps the SAME perturbation across retries, so a hard probe point can
 	// miss forever. Cap the retries: after this many misses, record the failure,
 	// count the rep as a (failed) cycle and move on — keeps probe rounds bounded
@@ -253,6 +263,36 @@ private:
 	void   begin_rep_probe();                                       // new attempt → next perturbation
 	void   log_rep_outcome(bool success, double rise, double xy_gap); // one CSV row
 
+	// ── Retreat sub-skill (leaving the placed bottle) — learnable like the grasp ──────
+	// A side grasp leaves the open fingers wrapped around the bottle; backing out badly
+	// (before the fingers are open, or too fast) drags and topples it. The retreat is a
+	// PURE TRANSLATION straight back along the gripper's own forward axis (the live tool
+	// +Z from FK, horizontal = perpendicular to the upright bottle), orientation held —
+	// any deviation from that axis sweeps a finger across the bottle. It also waits for
+	// the gripper to actually OPEN first. The free outcome signal is the bottle's tilt
+	// AFTER the retreat, so the per-rep probe can perturb the timing/speed params and a
+	// round LEARNS the tip-free retreat. The direction is fixed (the gripper axis), so
+	// what is explored is when-to-move (open threshold) and how-fast.
+	double retreat_speed_      = 0.06;   // Controller.retreat_speed      gentle back-off speed [m/s] (NOT skill-boosted)
+	double gripper_open_conf_  = 0.85;   // Controller.gripper_open_conf  gs.opening ≥ this ⇒ fingers clear → safe to move
+	struct RetreatPerturbation { double dspeed = 0.0; double dopen = 0.0; };
+	RetreatPerturbation retreat_perturb_{};   // active this rep
+	bool   probe_retreat_      = false;  // Controller.probe_retreat    explore retreat params per rep
+	double probe_rspeed_amp_   = 0.50;   // Controller.probe_rspeed_amp ± fraction on retreat speed
+	double probe_open_amp_     = 0.10;   // Controller.probe_open_amp   ± on the gripper-open threshold
+	// Retreat frame latched at PlaceReleasing→PlaceRetreating from the LIVE tool pose,
+	// so the move is a fixed pure back-translation along the real gripper forward axis.
+	Eigen::Vector3d retreat_target_pos_{0.0, 0.0, 0.0};
+	Eigen::Vector3d retreat_z_des_{0.0, 0.0, 1.0};
+	Eigen::Vector3d retreat_x_des_{1.0, 0.0, 0.0};
+	Eigen::Vector3d place_world_xy_{0.0, 0.0, 0.0};  // last place spot (world), for the retreat dataset
+	std::ofstream retreat_log_;          // Controller.retreat_log_path (params → post-retreat tilt)
+	bool   retreat_log_open_   = false;
+	void   log_retreat_outcome(double tilt_deg, bool tipped);   // one retreat-dataset row
+	// Bottle tilt from vertical [rad], from the live world long axis (0 = upright).
+	double bottle_tilt_rad() const
+	{ return std::acos(std::clamp(std::abs(bottle_axis_world_.normalized().z()), 0.0, 1.0)); }
+
 	// ── Precision re-weighting: the novice→skilled (closed→open-loop) transition ──
 	// The grasp target the controller drives toward is the precision-weighted fusion
 	// of the live observation (x_obs, precision Π_s = 1/σ_obs²) and the model belief
@@ -271,6 +311,14 @@ private:
 	int    skilled_sample_period_ = 12;      // cycles between observations at full confidence
 	double speed_conf_gain_       = 0.6;     // approach-speed boost at full confidence
 	double surprise_gate_m_       = 0.05;    // obs−belief beyond this [m] ⇒ surprise → re-engage
+	// Skill-scheduled FSM geometry/timing. The same confidence scalar that thins the
+	// observation stream also reshapes the *action*: as it rises the controller commits
+	// sooner (shorter settle dwell) and reaches more directly (the slow standoff→grasp
+	// crawl shrinks), turning the novice's staccato reach-settle-creep into one fluid
+	// motion. That is where the measured "skill" turns into shorter cycle time — sensing
+	// less is necessary but not sufficient; the FSM gates were the real time sink.
+	double standoff_collapse_     = 0.0;     // Controller.standoff_collapse: slide the Tracking waypoint this fraction toward the grasp point at full confidence (0 = always full standoff)
+	double insert_conf_gain_      = 0.0;     // Controller.insert_conf_gain: insert speed ×(1+this·confidence)
 	std::string confidence_path_;            // Controller.confidence_path (persist the learned skill)
 	// Per-rep working state for the fusion + metrics.
 	SideGraspTarget belief_grasp_{};         // x_model: committed/fused grasp belief this rep
@@ -282,6 +330,12 @@ private:
 	bool   metrics_open_     = false;
 	void   load_confidence();
 	void   save_confidence();
+	// Effective skill ∈ [0,1]: the confidence when re-weighting is enabled, else 0
+	// (novice) so every schedule below collapses to the original constants when the
+	// feature is off — the changes are inert until precision_reweighting is on.
+	double skill_c() const { return precision_reweighting_ ? confidence_ : 0.0; }
+	// A transport/approach speed cap boosted with skill (trust the model ⇒ move faster).
+	double skilled_speed(double base) const { return base * (1.0 + speed_conf_gain_ * skill_c()); }
 
 	// Bottle respawn (needs the bridge setObjectPose). Teleport a fresh, upright
 	// bottle to a deterministic pickup spot at the start of each rep, so a round
@@ -296,8 +350,18 @@ private:
 	// table: arm base is at world (-0.623,-0.023), table top z≈0.742, Gen3 reach
 	// ≈0.90 m — so the grasp distance here stays ≲0.83 m (the old box pushed bottles
 	// out to the 0.90 m limit). Right side = negative world Y.
-	static constexpr double SPAWN_X_MIN = -0.08, SPAWN_X_MAX = 0.06;
-	static constexpr double SPAWN_Y_MIN = -0.26, SPAWN_Y_MAX = -0.02;
+	// Cover the arm's half of the table within reach (Webots world frame). The table is
+	// 1.8 m wide (X) × 1.0 m deep (Y); the arm lives on the negative-Y half, so its half
+	// spans the full ±X width and ~0.5 m of −Y depth. This box is generous in X (the
+	// reach band trims the unreachable wings) and stops just shy of the −Y table edge so
+	// no bottle spawns off the table. R2 sampling + the reach band fill the reachable half.
+	static constexpr double SPAWN_X_MIN = -0.55, SPAWN_X_MAX = 0.55;   // ±X — full reachable width
+	static constexpr double SPAWN_Y_MIN = -0.48, SPAWN_Y_MAX = -0.02;  // the arm's −Y half, inside the table edge
+	// Reach band from the arm base (world XY): reject spawns nearer than MIN (almost on
+	// the column) or past MAX (ungraspable far corner). MAX ≈ the comfortable working
+	// edge — the bottle, not the closer standoff, is the farthest the EE must reach.
+	static constexpr double SPAWN_REACH_MIN_M = 0.45;
+	static constexpr double SPAWN_REACH_MAX_M = 0.86;
 	// Continuous fall detection: bottle long axis tilted past this from vertical
 	// (or dropped below the table) ⇒ it toppled; abort the current grasp phase.
 	static constexpr double FALL_TILT_RAD = 0.60;   // ≈34°
@@ -372,6 +436,15 @@ private:
 	static constexpr double PLACE_REACH_MAX_M   = 0.90;
 	static constexpr int    PLACE_TIMEOUT_TICKS = 300;   // ~6 s safety per place move
 	static constexpr int    RELEASE_TICKS       = 25;    // ~0.5 s to let the bottle go
+	// Safer set-down: open the fingers only once the bottle is both at the table
+	// (position converged) AND upright, held for a short dwell — so a fast transport or
+	// overshoot can't release it mid-air or while it leans (which would topple it).
+	static constexpr int    PLACE_SETTLE_TICKS    = 5;     // settled+upright cycles to confirm before opening
+	static constexpr double PLACE_UPRIGHT_TOL_RAD = 0.15;  // ≈8.6° bottle tilt from vertical still "upright"
+	// Leave the placed bottle by backing straight out along the approach axis (−tool +Z,
+	// horizontal) instead of lifting up over it: a shorter move that pulls the open
+	// fingers clear sideways with no risk of catching the bottle top and tipping it.
+	static constexpr double PLACE_RETREAT_DIST_M  = 0.14;  // horizontal back-off off the bottle
 
 	// Gripper command sent every compute() cycle through
 	//   kinovaarm_proxy->setGripperPos(gripper_command_).

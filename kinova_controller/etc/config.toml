@@ -35,7 +35,7 @@ round_cycles = 20  # probe round for skill-learning dataset
 # Rest pose "j1 .. j7" (rad). Tune the "ready over the table, camera-up" posture
 # here without recompiling; relaunch to apply. Startup prints [rest-pose] metrics
 # (EE pos, upperarm_dz≈0 = first link parallel to table, toolY_up≈+1 = camera up).
-rest_pose = "0.3 0.8 1.5 -2.101 0.651 -1.02 3.141"
+rest_pose = "0.30 0.80 1.50 -2.101 0.651 -1.02 3.141"
 
 # ── Skill-learning instrumentation ───────────────────────────────────────────
 # Probe each pick with a small STRUCTURED perturbation of the grasp command
@@ -60,6 +60,9 @@ perception_noise_std  = 0.0        # m, σ of injected bottle-observation noise 
 conf_gain             = 0.15       # confidence += this per confirmed grasp
 skilled_sample_period = 12         # cycles between observations at full confidence
 speed_conf_gain       = 0.6        # approach speed ×(1+this·confidence) — "more speed" when skilled
+# Skill-scheduled FSM geometry/timing (turns "fewer observations" into "less time"):
+standoff_collapse     = 0.6        # at full confidence, slide the Tracking waypoint 60% of the way from the standoff toward the grasp point (0 = always full standoff)
+insert_conf_gain      = 1.0        # insert speed ×(1+this·confidence) — skilled creeps in twice as fast
 confidence_path       = "/tmp/kinova_confidence.txt"   # persist the learned skill across rounds
 metrics_path          = "/tmp/kinova_skill_metrics.csv" # per-rep: cycle time, observations
 # Teleport a fresh upright bottle to a deterministic pickup spot at each rep start
@@ -67,6 +70,17 @@ metrics_path          = "/tmp/kinova_skill_metrics.csv" # per-rep: cycle time, o
 # bottles and gives controlled pickup locations. Needs the kinova-bridge built
 # with setObjectPose.
 respawn_each_rep = true
+
+# ── Retreat sub-skill (leaving the placed bottle) — learnable like the grasp ──────
+# Retreat is a pure back-off along the gripper's own forward axis (perpendicular to the
+# upright bottle), started only once the fingers are confirmed open. Explore the timing/
+# speed per rep and score by the bottle's post-retreat tilt to LEARN a tip-free retreat.
+retreat_speed     = 0.18        # m/s — envelope showed tip-free to 0.20
+gripper_open_conf = 0.85        # gs.opening ≥ this ⇒ fingers clear → safe to move
+probe_retreat     = false       # exploration done; retreat envelope is wide-open
+probe_rspeed_amp  = 0.8         # speed sweep 0.024..0.216 m/s
+probe_open_amp    = 0.25        # open-threshold sweep ~0.60..0.99
+retreat_log_path  = "/tmp/kinova_retreat.csv"   # params → post-retreat tilt ("" disables)
 
 [Period]
 Compute = 20

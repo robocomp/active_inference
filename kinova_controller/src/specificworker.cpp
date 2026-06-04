@@ -233,11 +233,34 @@ void SpecificWorker::initialize()
     try { skilled_sample_period_ = configLoader.get<int>   ("Controller.skilled_sample_period");  } catch (...) {}
     try { speed_conf_gain_       = configLoader.get<double>("Controller.speed_conf_gain");         } catch (...) {}
     try { confidence_path_       = configLoader.get<std::string>("Controller.confidence_path");    } catch (...) {}
+    try { standoff_collapse_     = configLoader.get<double>("Controller.standoff_collapse");        } catch (...) {}
+    try { insert_conf_gain_      = configLoader.get<double>("Controller.insert_conf_gain");         } catch (...) {}
+    standoff_collapse_ = std::clamp(standoff_collapse_, 0.0, 1.0);
+    // Retreat sub-skill params + exploration.
+    try { retreat_speed_         = configLoader.get<double>("Controller.retreat_speed");            } catch (...) {}
+    try { gripper_open_conf_     = configLoader.get<double>("Controller.gripper_open_conf");        } catch (...) {}
+    try { probe_retreat_         = configLoader.get<bool>  ("Controller.probe_retreat");            } catch (...) {}
+    try { probe_rspeed_amp_      = configLoader.get<double>("Controller.probe_rspeed_amp");         } catch (...) {}
+    try { probe_open_amp_        = configLoader.get<double>("Controller.probe_open_amp");           } catch (...) {}
+    try
+    {
+        const auto rpath = configLoader.get<std::string>("Controller.retreat_log_path");
+        if (not rpath.empty())
+        {
+            retreat_log_.open(rpath, std::ios::out | std::ios::trunc);
+            if ((retreat_log_open_ = retreat_log_.is_open()))
+            {
+                retreat_log_ << "probe_idx,retreat_speed,open_thresh,place_x,place_y,post_tilt_deg,tipped\n";
+                std::print("[retreat] outcome dataset → {}\n", rpath);
+            }
+        }
+    } catch (...) {}
     load_confidence();
     if (precision_reweighting_)
         std::print("[skill] precision re-weighting ON (confidence={:.2f}, σ_obs={:.3f} m, "
-                   "skilled sample/{} cy, speed +{:.0f}%)\n",
-                   confidence_, perception_noise_std_, skilled_sample_period_, speed_conf_gain_*100.0);
+                   "skilled sample/{} cy, speed +{:.0f}%, standoff collapse {:.0f}%, insert +{:.0f}%)\n",
+                   confidence_, perception_noise_std_, skilled_sample_period_, speed_conf_gain_*100.0,
+                   standoff_collapse_*100.0, insert_conf_gain_*100.0);
     try
     {
         const auto mpath = configLoader.get<std::string>("Controller.metrics_path");
@@ -589,6 +612,7 @@ void SpecificWorker::begin_rep_probe()
     // is identically zero, so the grasp is exactly the nominal one.
     rep_track_ticks_ = 0;
     rep_attempts_    = 0;
+    track_stuck_ticks_ = 0;
     // Reset the per-rep fusion belief + metrics. cycles_since_obs_ large ⇒ the first
     // Tracking cycle takes an observation to seed the model belief.
     belief_valid_     = false;
@@ -605,10 +629,22 @@ void SpecificWorker::begin_rep_probe()
         // axis-correlation Halton suffers at low indices with large bases (which made
         // earlier spawns march in a diagonal line). a1,a2 = 1/φ₂, 1/φ₂² (plastic).
         constexpr double a1 = 0.7548776662466927, a2 = 0.5698402909980532;
-        const double u = std::fmod(0.5 + a1 * static_cast<double>(probe_index_), 1.0);
-        const double v = std::fmod(0.5 + a2 * static_cast<double>(probe_index_), 1.0);
-        const double sx = SPAWN_X_MIN + u * (SPAWN_X_MAX - SPAWN_X_MIN);
-        const double sy = SPAWN_Y_MIN + v * (SPAWN_Y_MAX - SPAWN_Y_MIN);
+        // Sample the (far-reaching) box but reject points outside the reach band, so the
+        // far half-table gets used without ever spawning an ungraspable bottle. On a
+        // reject, skip far ahead on the R2 sequence (coprime stride) so kept points stay
+        // low-discrepancy instead of clustering at the first valid neighbour.
+        const Eigen::Vector3d base_xyz = arm_base_world_.translation();
+        double sx = 0.0, sy = SPAWN_Y_MAX;
+        for (int k = 0; k < 24; ++k)
+        {
+            const double idx = static_cast<double>(probe_index_ + k * 11939);
+            const double u = std::fmod(0.5 + a1 * idx, 1.0);
+            const double v = std::fmod(0.5 + a2 * idx, 1.0);
+            sx = SPAWN_X_MIN + u * (SPAWN_X_MAX - SPAWN_X_MIN);
+            sy = SPAWN_Y_MIN + v * (SPAWN_Y_MAX - SPAWN_Y_MIN);
+            const double reach = std::hypot(sx - base_xyz.x(), sy - base_xyz.y());
+            if (reach >= SPAWN_REACH_MIN_M and reach <= SPAWN_REACH_MAX_M) break;
+        }
         respawn_bottle(sx, sy);
     }
 
@@ -625,6 +661,18 @@ void SpecificWorker::begin_rep_probe()
                    rep_perturb_.dazi, rep_perturb_.speed_scale);
     }
     else rep_perturb_ = GraspPerturbation{};
+
+    if (probe_retreat_)
+    {
+        // Explore the retreat's timing/speed (direction is fixed = the gripper axis).
+        // Halton bases 11/13, disjoint from the grasp probe's bases, so the two probes
+        // stay decorrelated within a rep.
+        retreat_perturb_.dspeed = (halton(probe_index_, 11) - 0.5) * 2.0 * probe_rspeed_amp_;
+        retreat_perturb_.dopen  = (halton(probe_index_, 13) - 0.5) * 2.0 * probe_open_amp_;
+        std::print("[probe] rep {} retreat: speed×{:.2f} open_thresh{:+.2f}\n",
+                   probe_index_, 1.0 + retreat_perturb_.dspeed, retreat_perturb_.dopen);
+    }
+    else retreat_perturb_ = RetreatPerturbation{};
 
     ++probe_index_;
 }
@@ -662,6 +710,17 @@ void SpecificWorker::log_rep_outcome(bool success, double rise, double xy_gap)
              << rep_commit_epos_ << ',' << rep_commit_eang_ << ',' << rep_track_ticks_ << ','
              << rise << ',' << xy_gap << '\n';
     dataset_.flush();
+}
+
+void SpecificWorker::log_retreat_outcome(double tilt_deg, bool tipped)
+{
+    if (not retreat_log_open_) return;
+    retreat_log_ << (probe_index_ - 1) << ','
+                 << (retreat_speed_ * (1.0 + retreat_perturb_.dspeed)) << ','
+                 << (gripper_open_conf_ + retreat_perturb_.dopen) << ','
+                 << place_world_xy_.x() << ',' << place_world_xy_.y() << ','
+                 << tilt_deg << ',' << (tipped ? 1 : 0) << '\n';
+    retreat_log_.flush();
 }
 
 void SpecificWorker::update_viewer_scene_objects()
@@ -749,6 +808,44 @@ void SpecificWorker::compute()
             qd_meas[i] = js.joints[i].velocity;   // measured joint velocity (rad/s)
         }
 
+        // Map a desired joint-target onto the nearest equivalent angle for the four
+        // CONTINUOUS joints (the infinite-limit revolutes), so a position command
+        // never asks the motor to unwind — or wind up — accumulated revolutions: the
+        // commanded target stays within ±π of the current encoder value (j5 has been
+        // seen at +26 rad ≈ 4 turns). Bounded joints are passed through untouched.
+        // Routing every moveJointsWithAngle below through this keeps the continuous
+        // joints from accumulating turns during normal operation, without putting
+        // hard stops in the model.
+        auto nearest_equiv_target = [&](const std::array<double, Kinematics::N_ARM_JOINTS> &desired)
+        {
+            constexpr double TWO_PI = 6.283185307179586;
+            const auto lims = kinematics_->arm_joint_position_limits();
+            RoboCompKinovaArm::TJointAngles target;
+            target.jointAngles.resize(Kinematics::N_ARM_JOINTS);
+            for (int i = 0; i < Kinematics::N_ARM_JOINTS; ++i)
+            {
+                double t = desired[i];
+                if (not std::isfinite(lims[i].first) or not std::isfinite(lims[i].second))
+                    t += std::round((q[i] - t) / TWO_PI) * TWO_PI;   // nearest equivalent
+                target.jointAngles[i] = static_cast<float>(t);
+            }
+            return target;
+        };
+
+        // Recovery primitive: snap the arm straight back to the rest pose through the
+        // supervisor (no dynamics, no swept collision), used when a jam is detected so
+        // a single stuck grasp can't hang a long unattended round. Unlike a driven
+        // re-home, this works even from a pose wedged against the table.
+        auto teleport_to_rest = [&]()
+        {
+            RoboCompKinovaArm::TJointAngles rest;
+            rest.jointAngles.assign(rest_pose_angles_.begin(), rest_pose_angles_.end());
+            try { webots2robocomp_proxy->setArmJointsInstant(rest); }
+            catch (const Ice::Exception &e)
+            { std::print(stderr, "[recovery] setArmJointsInstant failed: {}\n", e.what()); }
+            std::print("[recovery] arm teleported to rest pose (jam recovery)\n");
+        };
+
         // Actuation log: pair the PREVIOUS cycle's commanded q̇ (last_q_dot_cmd_) with
         // this cycle's measured q̇ — the response to it. Only while actively driving
         // in velocity mode (ActiveEFE), so position-mode homing doesn't pollute the fit.
@@ -817,21 +914,9 @@ void SpecificWorker::compute()
         if (phase_ == Phase::SendingRestPose)
         {
             // Command continuous joints to the equivalent of the rest angle
-            // NEAREST the current encoder value, so the motor doesn't unwind
-            // accumulated revolutions (j5 can read +26 rad ≈ 4 turns). Bounded
-            // joints (finite limits) are commanded as-is.
-            constexpr double TWO_PI = 6.283185307179586;
-            const auto lims = kinematics_->arm_joint_position_limits();
-            RoboCompKinovaArm::TJointAngles target;
-            target.jointAngles.resize(Kinematics::N_ARM_JOINTS);
-            for (int i = 0; i < Kinematics::N_ARM_JOINTS; ++i)
-            {
-                double t = rest_pose_angles_[i];
-                if (not std::isfinite(lims[i].first) or not std::isfinite(lims[i].second))
-                    t += std::round((q[i] - t) / TWO_PI) * TWO_PI;   // nearest equivalent
-                target.jointAngles[i] = static_cast<float>(t);
-            }
-            kinovaarm_proxy->moveJointsWithAngle(target);
+            // NEAREST the current encoder value (see nearest_equiv_target above),
+            // so the motor doesn't unwind accumulated revolutions.
+            kinovaarm_proxy->moveJointsWithAngle(nearest_equiv_target(rest_pose_angles_));
             std::print("[homing] Sent rest pose [{:+.3f} {:+.3f} {:+.3f} {:+.3f} {:+.3f} {:+.3f} {:+.3f}] rad\n",
                        rest_pose_angles_[0], rest_pose_angles_[1], rest_pose_angles_[2],
                        rest_pose_angles_[3], rest_pose_angles_[4], rest_pose_angles_[5],
@@ -847,6 +932,14 @@ void SpecificWorker::compute()
 
         if (phase_ == Phase::Homing)
         {
+            // Re-assert the rest-pose target every cycle. Sending it once is not enough:
+            // if the arm drifts (e.g. it sagged under gravity while no controller was
+            // commanding it, between rounds/restarts), a one-shot position command does
+            // not pull it back and the error climbs. Continuously commanding the target
+            // keeps driving the arm home and holds it there. Continuous joints are mapped
+            // to the nearest equivalent of the current encoder value so they don't unwind.
+            kinovaarm_proxy->moveJointsWithAngle(nearest_equiv_target(rest_pose_angles_));
+
             double max_err = 0.0;
             for (int i = 0; i < Kinematics::N_ARM_JOINTS; ++i)
                 max_err = std::max(max_err, angular_distance(q[i], rest_pose_angles_[i]));
@@ -1109,6 +1202,7 @@ void SpecificWorker::compute()
                 // instead of chasing a fallen bottle.
                 if (respawn_each_rep_) respawn_bottle(last_spawn_xy_.x(), last_spawn_xy_.y());
                 grasp_phase_ = GraspPhase::Tracking;   // retry same rep
+                track_stuck_ticks_ = 0;                // fresh approach-watchdog window
                 return false;
             }
             std::print("[probe] rep {} GIVE UP after {} attempts ({}) → failed cycle, re-home\n",
@@ -1122,9 +1216,10 @@ void SpecificWorker::compute()
             if (metrics_open_)
                 metrics_ << (probe_index_ - 1) << ",0," << confidence_ << ','
                          << (now_seconds() - rep_t0_) << ',' << obs_count_rep_ << '\n', metrics_.flush();
-            RoboCompKinovaArm::TJointAngles rest;
-            rest.jointAngles.assign(rest_pose_angles_.begin(), rest_pose_angles_.end());
-            try { kinovaarm_proxy->moveJointsWithAngle(rest); } catch (const Ice::Exception&) {}
+            // Teleport back to rest (collision-free) rather than a driven re-home: a
+            // give-up often follows a jam, and driving home from a wedged pose can just
+            // sweep the gripper through the table again. Homing below then holds it.
+            teleport_to_rest();
             returning_for_cycle_  = true;          // next rep starts after homing
             homing_settled_ticks_ = 0;
             homing_elapsed_ticks_ = 0;
@@ -1216,6 +1311,19 @@ void SpecificWorker::compute()
             {
                 gripper_command_ = 1.0f;  // open
                 ++rep_track_ticks_;       // convergence-time sample for the dataset
+                // Jam watchdog: Tracking is the only grasp phase with no natural
+                // timeout, so an arm wedged against the table during the approach would
+                // loop here forever (this is what hung the unattended round). On stall,
+                // teleport-recover to rest and route into the normal miss handling.
+                if (++track_stuck_ticks_ > TRACK_TIMEOUT_TICKS)
+                {
+                    std::print("[recovery] Tracking stalled {} cy — possible jam; "
+                               "teleport to rest, then retry/give up\n", track_stuck_ticks_);
+                    teleport_to_rest();
+                    track_stuck_ticks_ = 0;
+                    miss_or_give_up("track stalled — possible jam");
+                    break;
+                }
                 const auto stop_if_no_target = [&](auto& opt) -> bool
                 {
                     if (opt.has_value()) return false;
@@ -1269,8 +1377,17 @@ void SpecificWorker::compute()
                     if (stop_if_no_target(grasp_opt)) return;
                     g = grasp_opt.value();
                 }
+                // Phase-collapse: slide the Tracking waypoint from the full standoff
+                // toward the grasp point as skill rises, so the slow Inserting crawl that
+                // follows shrinks (skilled = one continuous reach; novice = reach to a
+                // safe standoff, then creep in). The EFE deadband still decelerates into
+                // the now-closer waypoint, and Inserting's force/contact gate is unchanged,
+                // so a collapsed approach still seats softly.
+                const double c = skill_c();
+                const Eigen::Vector3d track_target =
+                    g.grasp_pos + (g.stand_off_pos - g.grasp_pos) * (1.0 - standoff_collapse_ * c);
                 const auto [e_pos, e_ang] =
-                    drive(g.stand_off_pos, g.z_tool_des, g.x_tool_des, 0.35 * vscale);
+                    drive(track_target, g.z_tool_des, g.x_tool_des, 0.35 * vscale);
 
                 if (e_pos < REACH_TOLERANCE_M and e_ang < GRASP_ALIGN_TOL_RAD)
                 {
@@ -1287,7 +1404,13 @@ void SpecificWorker::compute()
                         }
                         break;
                     }
-                    if (++grasp_settle_ticks_ >= GRASP_SETTLE_TICKS)
+                    // Confidence-scheduled dwell: a novice settles for GRASP_SETTLE_TICKS
+                    // cycles to re-verify before committing; a skilled agent trusts the
+                    // model and commits almost at once (≥1 cycle). This removes the dead
+                    // time spent decelerated-to-near-zero at the standoff.
+                    const long settle_need = std::max(1L,
+                        std::lround(GRASP_SETTLE_TICKS * (1.0 - c)));
+                    if (++grasp_settle_ticks_ >= settle_need)
                     {
                         // Commit: latch the grasp frame so contact can't make
                         // the target chase its own disturbance.
@@ -1313,8 +1436,13 @@ void SpecificWorker::compute()
                 // Ease into the bottle body along the latched approach axis.
                 const auto& g = latched_grasp_;
                 gripper_command_ = 1.0f;  // stay open
+                // Skilled inserts faster: trust the model, so the gentle creep into the
+                // bottle no longer dominates the cycle (deadband + INSERT_TOUCH_FORCE
+                // still arrest it at contact).
+                const double insert_vel = INSERT_VEL_MS * rep_perturb_.speed_scale
+                                          * (1.0 + insert_conf_gain_ * skill_c());
                 const auto [e_pos, e_ang] =
-                    drive(g.grasp_pos, g.z_tool_des, g.x_tool_des, INSERT_VEL_MS * rep_perturb_.speed_scale);
+                    drive(g.grasp_pos, g.z_tool_des, g.x_tool_des, insert_vel);
                 (void) e_ang;
                 const float f = gripper_force();
                 if (e_pos < REACH_TOLERANCE_M or f > GRASP_FORCE_THRESH)
@@ -1363,7 +1491,7 @@ void SpecificWorker::compute()
                 const auto& g = latched_grasp_;
                 gripper_command_ = 0.0f;  // keep holding the bottle
                 const auto [e_pos, e_ang] =
-                    drive(lift_target_, g.z_tool_des, g.x_tool_des, 0.20);
+                    drive(lift_target_, g.z_tool_des, g.x_tool_des, skilled_speed(0.20));
                 (void) e_ang;
                 if (e_pos < REACH_TOLERANCE_M)
                 {
@@ -1438,6 +1566,7 @@ void SpecificWorker::compute()
                             if ((c - base_xyz).norm() <= PLACE_REACH_MAX_M) { p = c; break; }
                         }
                     place_pos_   = p;
+                    place_world_xy_ = p;                 // for the retreat dataset
                     place_hover_ = p + up * LIFT_HEIGHT_M;
                     // Side approach re-pointed toward the place spot, bottle upright
                     // (tool +Z horizontal toward the spot, tool +Y = up).
@@ -1466,12 +1595,13 @@ void SpecificWorker::compute()
             {
                 gripper_command_ = 0.0f;  // hold the bottle
                 const auto [e_pos, e_ang] =
-                    drive(place_hover_, place_z_des_, place_x_des_, 0.20);
+                    drive(place_hover_, place_z_des_, place_x_des_, skilled_speed(0.20));
                 (void) e_ang;
                 if (e_pos < REACH_TOLERANCE_M or ++place_ticks_ > PLACE_TIMEOUT_TICKS)
                 {
                     grasp_phase_ = GraspPhase::PlaceLowering;
                     place_ticks_ = 0;
+                    place_settle_ticks_ = 0;
                     std::print("[place] above spot → PlaceLowering\n");
                 }
                 break;
@@ -1479,14 +1609,26 @@ void SpecificWorker::compute()
             case GraspPhase::PlaceLowering:
             {
                 gripper_command_ = 0.0f;  // still holding
+                // Brisk set-down. The settled+upright gate below + the EFE deadband (which
+                // decelerates into the target) keep the placement clean, so the old crawl
+                // (0.08) was needlessly slow; the heavy bottle tolerates a firmer set-down.
                 const auto [e_pos, e_ang] =
-                    drive(place_pos_, place_z_des_, place_x_des_, 0.08);  // gentle set-down
+                    drive(place_pos_, place_z_des_, place_x_des_, 0.18);
                 (void) e_ang;
-                if (e_pos < REACH_TOLERANCE_M or ++place_ticks_ > PLACE_TIMEOUT_TICKS)
+                // Confirm the bottle is set down (EE converged to the table height) AND
+                // still upright before opening the fingers, held for a short dwell to
+                // debounce overshoot — releasing it mid-air or while it leans would topple
+                // it. The timeout remains a safety fallback.
+                const double tilt = std::acos(std::clamp(std::abs(bottle_axis_world_.normalized().z()), 0.0, 1.0));
+                const bool settled = e_pos < REACH_TOLERANCE_M and tilt < PLACE_UPRIGHT_TOL_RAD;
+                place_settle_ticks_ = settled ? place_settle_ticks_ + 1 : 0;
+                if (place_settle_ticks_ >= PLACE_SETTLE_TICKS or ++place_ticks_ > PLACE_TIMEOUT_TICKS)
                 {
                     grasp_phase_ = GraspPhase::PlaceReleasing;
                     place_ticks_ = 0;
-                    std::print("[place] on table → PlaceReleasing (open)\n");
+                    place_settle_ticks_ = 0;
+                    std::print("[place] set down (e={:.3f} m, tilt {:.1f}°) → PlaceReleasing (open)\n",
+                               e_pos, tilt * 57.29578);
                 }
                 break;
             }
@@ -1494,27 +1636,51 @@ void SpecificWorker::compute()
             {
                 gripper_command_ = 1.0f;  // open — let the bottle go
                 drive(place_pos_, place_z_des_, place_x_des_, 0.05);  // hold still while opening
-                if (++place_ticks_ > RELEASE_TICKS)
+                // Give the fingers a short FIXED moment to open, then retreat. The bridge
+                // does not report a usable gripper aperture (getGripperState().opening
+                // reads 0), so the previous opening-threshold confirm silently fell through
+                // to the 6 s PLACE_TIMEOUT every cycle — that was the long dead-stand after
+                // each place. The probe showed the gripper-axis retreat is tip-free even
+                // from a partly-open gripper, so RELEASE_TICKS (~0.5 s) is plenty.
+                if (++place_ticks_ >= RELEASE_TICKS)
                 {
+                    // Latch the retreat as a pure back-translation along the gripper's OWN
+                    // forward axis (live tool +Z), orientation held — perpendicular to the
+                    // upright bottle and precisely on the gripper axis, so no part of the
+                    // move sweeps a finger sideways across the bottle.
+                    const auto tp = kinematics_->tool_pose(q);
+                    retreat_z_des_      = tp.rotation.col(2).normalized();  // gripper forward
+                    retreat_x_des_      = tp.rotation.col(0).normalized();
+                    retreat_target_pos_ = tp.position - retreat_z_des_ * PLACE_RETREAT_DIST_M;
                     grasp_phase_ = GraspPhase::PlaceRetreating;
                     place_ticks_ = 0;
-                    std::print("[place] released → PlaceRetreating\n");
+                    place_settle_ticks_ = 0;
+                    std::print("[place] released ({} cy) → PlaceRetreating along gripper axis\n", RELEASE_TICKS);
                 }
                 break;
             }
             case GraspPhase::PlaceRetreating:
             {
                 gripper_command_ = 1.0f;  // stay open
+                // Pure translation straight back along the latched gripper forward axis,
+                // orientation held — gentle (NOT skill-boosted: speed here only risks
+                // catching the bottle). Explored speed comes from the retreat probe.
+                const double rspeed = retreat_speed_ * (1.0 + retreat_perturb_.dspeed);
                 const auto [e_pos, e_ang] =
-                    drive(place_hover_, place_z_des_, place_x_des_, 0.20);
+                    drive(retreat_target_pos_, retreat_z_des_, retreat_x_des_, rspeed);
                 (void) e_ang;
                 if (e_pos < REACH_TOLERANCE_M or ++place_ticks_ > PLACE_TIMEOUT_TICKS)
                 {
+                    // Score this retreat by the bottle's tilt now that the fingers are
+                    // clear — the free outcome signal the retreat probe learns from.
+                    const double tilt_deg = bottle_tilt_rad() * 57.29578;
+                    const bool   tipped   = tilt_deg > (FALL_TILT_RAD * 57.29578);
+                    log_retreat_outcome(tilt_deg, tipped);
+                    std::print("[retreat] done — bottle tilt {:.1f}°{}\n",
+                               tilt_deg, tipped ? "  TIPPED" : " (upright)");
                     // Return to rest via the outer Homing path, then auto-restart
                     // the whole pick-and-place (handled in the Homing branch).
-                    RoboCompKinovaArm::TJointAngles target;
-                    target.jointAngles.assign(rest_pose_angles_.begin(), rest_pose_angles_.end());
-                    kinovaarm_proxy->moveJointsWithAngle(target);
+                    kinovaarm_proxy->moveJointsWithAngle(nearest_equiv_target(rest_pose_angles_));
                     returning_for_cycle_  = true;
                     homing_settled_ticks_ = 0;
                     homing_elapsed_ticks_ = 0;
