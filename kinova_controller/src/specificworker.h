@@ -156,6 +156,9 @@ private:
 	// approach + gripper configuration in isolation before enabling the grasp.
 	bool approach_only_ = false;
 	bool approach_hold_logged_ = false;
+	// Controller.solver: false → closed-form DLS, true → proxQP (reproduces DLS now;
+	// scaffold for migrating joint-limit/obstacle terms to hard QP constraints).
+	bool use_qp_ = false;
 
 	// Tip-trajectory logging (diagnose approach speed/shape). When tip_log_ is
 	// set the ActiveEFE block prints one "[tiplog] ..." CSV line per cycle and

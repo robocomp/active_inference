@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <proxsuite/proxqp/dense/dense.hpp>
 
 namespace
 {
@@ -36,6 +37,32 @@ namespace
     {
         const double det = (J * J.transpose()).determinant();
         return det > 0.0 ? std::sqrt(det) : 0.0;
+    }
+
+    /// Pragmatic resolved-rate step solved as a QP (proxQP), the migration foothold.
+    /// Reproduces the closed-form DLS q̇ = J6ᵀ(J6J6ᵀ+λ²I)⁻¹ξ EXACTLY: that is the
+    /// stationary point of the unconstrained
+    ///     min_q̇ ½ q̇ᵀ(J6ᵀJ6 + λ²I) q̇ − (J6ᵀξ)ᵀ q̇.
+    /// With no inequalities the solver returns the same vector as the LDLT solve (to
+    /// its tolerance). Joint-limit / obstacle dampers enter later as the C,l,u block.
+    Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1>
+    solve_pragmatic_qp(const Eigen::Matrix<double, 6, Kinematics::N_ARM_JOINTS>& J6,
+                       const Eigen::Matrix<double, 6, 1>& twist,
+                       double lambda_sq)
+    {
+        constexpr int N = Kinematics::N_ARM_JOINTS;
+        Eigen::MatrixXd H = J6.transpose() * J6;          // N×N, SPD once λ²I added
+        H.diagonal().array() += lambda_sq;
+        const Eigen::VectorXd g = -(J6.transpose() * twist);
+        proxsuite::proxqp::dense::QP<double> qp(N, 0, 0); // n vars, 0 eq, 0 in
+        qp.settings.eps_abs = 1e-10;                       // tight → matches DLS to ~3e-9
+        qp.settings.eps_rel = 0.0;
+        qp.settings.verbose = false;
+        qp.init(H, g,
+                proxsuite::nullopt, proxsuite::nullopt,    // A, b   (no equalities)
+                proxsuite::nullopt, proxsuite::nullopt, proxsuite::nullopt); // C, l, u
+        qp.solve();
+        return qp.results.x;
     }
 }
 
@@ -164,9 +191,12 @@ std::array<double, Kinematics::N_ARM_JOINTS> efe_gradient_step(
     const double lambda_sq = params.dls_lambda * params.dls_lambda;
     const Eigen::Matrix<double, 6, 6> Q6 =
         J6 * J6.transpose() + lambda_sq * Eigen::Matrix<double, 6, 6>::Identity();
-    const Eigen::LDLT<Eigen::Matrix<double, 6, 6>> Q6_ldlt(Q6);
+    const Eigen::LDLT<Eigen::Matrix<double, 6, 6>> Q6_ldlt(Q6);   // also reused below for N
+    // Pragmatic term: closed-form DLS (default) or the equivalent QP (migration path).
+    // Q6_ldlt is still built either way — the null-space projector below needs it.
     Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1> q_dot =
-        J6.transpose() * Q6_ldlt.solve(twist);
+        params.use_qp ? solve_pragmatic_qp(J6, twist, lambda_sq)
+                      : (J6.transpose() * Q6_ldlt.solve(twist)).eval();
 
     // 3. Manipulability ascent in the null space of the 6-DOF pose task (Corke
     //    RVC §8.4 redundancy resolution). A 7-DOF arm on a 6-DOF task has one

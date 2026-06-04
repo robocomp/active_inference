@@ -93,6 +93,13 @@ struct EFEParams
      *  value; raise toward 0.1–0.2 if you see twitchy near-singular q̇. */
     double dls_lambda = 0.05;
 
+    /** Resolve the pragmatic twist via a QP (proxQP) instead of the closed-form
+     *  DLS. With no inequality constraints the QP is the SAME problem
+     *  (min ½q̇ᵀ(J6ᵀJ6+λ²I)q̇ − (J6ᵀξ)ᵀq̇), so behaviour is identical — this is the
+     *  scaffold for migrating joint-limit / obstacle terms from soft penalties to
+     *  hard QP constraints. Set from Controller.solver = "dls" | "qp". */
+    bool use_qp = false;
+
     /** Preferred-flow attractor — the continuous-active-inference upgrade from
      *  "preference over end-effector POSITION only" to a preference over
      *  position AND velocity, with the attractor at the goal (x*, ẋ=0).

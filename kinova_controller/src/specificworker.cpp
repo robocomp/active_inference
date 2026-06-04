@@ -184,6 +184,11 @@ void SpecificWorker::initialize()
     try { probe_azi_amp_   = configLoader.get<double>("Controller.probe_azi_amp");     } catch (...) {}
     try { probe_speed_amp_ = configLoader.get<double>("Controller.probe_speed_amp");   } catch (...) {}
     try { respawn_each_rep_ = configLoader.get<bool>("Controller.respawn_each_rep");    } catch (...) {}
+    // Pragmatic-solve backend: "dls" (closed-form, default) or "qp" (proxQP). With no
+    // inequality constraints the QP reproduces DLS — the foothold for migrating
+    // joint-limit / obstacle terms to hard constraints. See EFE_CONTROLLER_MATH.md §4.
+    try { use_qp_ = (configLoader.get<std::string>("Controller.solver") == "qp"); } catch (...) {}
+    std::print("[solver] pragmatic resolved-rate backend = {}\n", use_qp_ ? "QP (proxQP)" : "DLS (closed form)");
     if (respawn_each_rep_)
         std::print("[spawn] per-rep bottle respawn ON (deterministic pickup, survives falls)\n");
     if (probe_enabled_)
@@ -1072,6 +1077,7 @@ void SpecificWorker::compute()
             p.gain_secondary    = 1.0;   // ignored while align_tool_y is set
             p.C_pos             = Eigen::Vector3d::Ones();  // straight-line flow
             p.dls_lambda        = 0.05;
+            p.use_qp            = use_qp_;   // Controller.solver: "qp" routes the pragmatic term through proxQP
             p.v_approach        = v_app;
             p.a_approach        = 0.60;
             p.omega_max         = 2.0;
