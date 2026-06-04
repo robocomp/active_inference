@@ -4,6 +4,10 @@ A brief introduction to the component. Describe its purpose, functionality, and 
 <YOUR BRIEFING>
 ```
 
+## Localization internals
+
+For the implemented robot-localization pipeline, including the mathematical model, motion-prior fusion, sliding-window objective, corner factors, covariance propagation, recovery logic, and DSR publication flow, see [ROOM_CONCEPT.md](ROOM_CONCEPT.md).
+
 ## Dependencies
 The following dependencies are required to build and run room_concept. Ensure they are installed and properly configured on your system before proceeding:
 ```

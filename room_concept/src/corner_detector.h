@@ -75,6 +75,8 @@ private:
         Eigen::Vector2f edge_in_dir;    // unit direction of wall arriving at this corner
         Eigen::Vector2f edge_out_dir;   // unit direction of wall leaving this corner
         float convexity_sign;           // sign of edge_in × edge_out (positive = CCW turn)
+        float wall_in_length;           // length of the incoming wall (prev→curr)
+        float wall_out_length;          // length of the outgoing wall (curr→next)
         int original_index;             // index in original polygon
     };
     std::vector<ModelCorner> model_corners_;

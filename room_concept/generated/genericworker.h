@@ -32,8 +32,8 @@
 #include <unordered_map>
 #include <fps/fps.h>
 
-#include "dsr/api/dsr_api.h"
-#include "dsr/gui/dsr_gui.h"
+#include "../../../cortex/api/include/dsr/api/dsr_api.h"
+#include "../../../cortex/gui/include/dsr/gui/dsr_gui.h"
 #include <memory>
 
 #include <JoystickAdapter.h>

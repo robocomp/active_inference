@@ -79,6 +79,12 @@ SpecificWorker::~SpecificWorker()
 {
     save_window_settings();
     save_robot_pose_once();
+    // Stop the lidar ingestion thread BEFORE tearing down RoomConcept (it calls
+    // room_concept_.notify_new_lidar) and while G is still alive.
+    lidar_ingest_running_.store(false);
+    lidar_ingest_cv_.notify_all();
+    if (lidar_ingest_thread_.joinable())
+        lidar_ingest_thread_.join();
     room_concept_.stop();
 }
 
@@ -86,6 +92,10 @@ SpecificWorker::~SpecificWorker()
 void SpecificWorker::initialize()
 {
     GenericWorker::initialize();
+
+    // Ignore payload attributes in local graph updates to avoid unnecessary copying and processing of potentially large data
+    G->set_ignored_attributes<cam_rgb_att, cam_depth_att>();
+    qInfo() << "Ignoring DSR RGBD payload attributes cam_rgb/cam_depth in local graph updates";
 
     QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
                      this, &SpecificWorker::save_robot_pose_once, Qt::UniqueConnection);
@@ -292,12 +302,22 @@ void SpecificWorker::initialize()
     rt_api = G->get_rt_api();
 
     // ── Connect DSR signals ────────────────────────────────────────────────
-    connect(G.get(), &DSR::DSRGraph::update_node_signal,      this, &SpecificWorker::modify_node_slot);
+    // Laser updates use a DirectConnection so the trigger runs on the DDS emitter
+    // thread (a cheap CV notify) instead of being queued onto the GUI thread. The
+    // heavy point-cloud decode is done on the dedicated lidar ingestion thread
+    // (lidar_ingest_loop), keeping the localization inner loop at full rate even when
+    // the GUI thread is busy rendering.
+    connect(G.get(), &DSR::DSRGraph::update_node_signal,      this, &SpecificWorker::modify_node_slot, Qt::DirectConnection);
     // connect(G.get(), &DSR::DSRGraph::update_edge_signal,      this, &SpecificWorker::modify_edge_slot);
     connect(G.get(), &DSR::DSRGraph::update_node_attr_signal, this, &SpecificWorker::modify_node_attrs_slot);
     // connect(G.get(), &DSR::DSRGraph::update_edge_attr_signal, this, &SpecificWorker::modify_edge_attrs_slot);
     // connect(G.get(), &DSR::DSRGraph::del_edge_signal,         this, &SpecificWorker::del_edge_slot);
     // connect(G.get(), &DSR::DSRGraph::del_node_signal,         this, &SpecificWorker::del_node_slot);
+
+    // Start the decoupled lidar ingestion thread before the localizer so the buffer
+    // is filled as soon as data arrives.
+    lidar_ingest_running_.store(true);
+    lidar_ingest_thread_ = std::thread(&SpecificWorker::lidar_ingest_loop, this);
 
     room_concept_.start();
 
@@ -543,6 +563,50 @@ void SpecificWorker::dsr_update_pose(const rc::RoomConcept::UpdateResult& res)
 {
     if (!G || !rt_api) return;
 
+    const auto describe_node = [this](uint64_t id) -> QString
+    {
+        if (id == 0)
+            return "0:<unset>";
+        if (const auto node = G->get_node(id); node.has_value())
+            return QString::number(id) + ":" + QString::fromStdString(node->name());
+        return QString::number(id) + ":<missing>";
+    };
+
+    const auto log_cached_ids = [this, &describe_node](const char *reason, uint64_t missing_child_id)
+    {
+        const char *missing_child_kind = "other";
+        if (missing_child_id == dsr_room_id_)
+            missing_child_kind = "room";
+        else if (missing_child_id == dsr_robot_id_)
+            missing_child_kind = "robot";
+        else if (missing_child_id == dsr_world_id_)
+            missing_child_kind = "world";
+
+        qWarning() << "dsr_update_pose:" << reason
+                   << "missing_child_kind=" << missing_child_kind
+                   << "missing_child_id=" << missing_child_id
+                   << "world=" << describe_node(dsr_world_id_)
+                   << "robot=" << describe_node(dsr_robot_id_)
+                   << "room=" << describe_node(dsr_room_id_);
+    };
+
+    if ((dsr_world_id_ == 0 || !G->get_node(dsr_world_id_).has_value()) ||
+        (dsr_robot_id_ == 0 || !G->get_node(dsr_robot_id_).has_value()))
+    {
+        check_init_graph_is_valid();
+    }
+
+    if (room_node_created_ && !G->get_node(dsr_room_id_).has_value())
+    {
+        qWarning() << "dsr_update_pose: cached room node missing, resetting room state"
+                   << "room_id=" << dsr_room_id_;
+        log_cached_ids("cached room node missing", dsr_room_id_);
+        room_node_created_ = false;
+        dsr_room_id_ = 0;
+        affordance_manager_.reset();
+        stable_frames_ = 0;
+    }
+
     const Eigen::Matrix2f R = res.robot_pose.linear();
     const Eigen::Vector2f t = res.robot_pose.translation();
     const float theta_room_to_robot = std::atan2(R(1, 0), R(0, 0));
@@ -556,6 +620,23 @@ void SpecificWorker::dsr_update_pose(const rc::RoomConcept::UpdateResult& res)
 
     auto parent_opt = G->get_node(parent_id);
     if (!parent_opt.has_value()) return;
+
+    if (!G->get_node(child_id).has_value())
+    {
+        qWarning() << "dsr_update_pose: destination node missing, skipping RT update"
+                   << "parent_id=" << parent_id
+                   << "child_id=" << child_id
+                   << "room_node_created=" << room_node_created_;
+        log_cached_ids("destination node missing", child_id);
+        if (room_node_created_ && child_id == dsr_room_id_)
+        {
+            room_node_created_ = false;
+            dsr_room_id_ = 0;
+            affordance_manager_.reset();
+            stable_frames_ = 0;
+        }
+        return;
+    }
 
     const float x     = room_node_created_ ? t_robot_to_room.x() : t.x();
     const float y     = room_node_created_ ? t_robot_to_room.y() : t.y();
@@ -586,9 +667,26 @@ void SpecificWorker::dsr_update_pose(const rc::RoomConcept::UpdateResult& res)
     auto edge_rt = G->get_edge(parent_id, child_id, "RT");
     if (!edge_rt.has_value())
     {
-        rt_api->insert_or_assign_edge_RT(parent_opt.value(), child_id,
-                                         {x, y, 0.f},
-                                         {0.f, 0.f, theta});
+        try
+        {
+            rt_api->insert_or_assign_edge_RT(parent_opt.value(), child_id,
+                                             {x, y, 0.f},
+                                             {0.f, 0.f, theta});
+        }
+        catch (const std::exception &error)
+        {
+            qWarning() << "dsr_update_pose: insert_or_assign_edge_RT failed:"
+                       << error.what();
+            log_cached_ids("insert_or_assign_edge_RT failed", child_id);
+            if (room_node_created_ && child_id == dsr_room_id_)
+            {
+                room_node_created_ = false;
+                dsr_room_id_ = 0;
+                affordance_manager_.reset();
+                stable_frames_ = 0;
+            }
+            return;
+        }
         edge_rt = G->get_edge(parent_id, child_id, "RT");
         if (!edge_rt.has_value())
         {
@@ -916,7 +1014,7 @@ void SpecificWorker::cleanup_room_graph_nodes()
     if (auto n = G->get_node("floor"); n.has_value())
         G->delete_node(n.value());
     // Fallback: delete the affordance node by its known name in case it is orphaned.
-    if (auto n = G->get_node("afford"); n.has_value())
+    if (auto n = G->get_node("afford_room"); n.has_value())
         G->delete_node(n.value());
     room_node_created_ = false;
     dsr_room_id_ = 0;
@@ -1083,62 +1181,81 @@ std::string SpecificWorker::pose_file_path() const
 /// SLOTS from GUI and DSR signals
 ///////////////////////////////////////////////////////////////////////////////
 
-void SpecificWorker::modify_node_slot(std::uint64_t id, const std::string &type)
+void SpecificWorker::modify_node_slot(std::uint64_t /*id*/, const std::string &type)
+{
+    // Runs on the DDS emitter thread (DirectConnection). Keep it cheap: just wake the
+    // dedicated lidar ingestion thread, which performs the heavy point-cloud decode off
+    // the Qt/GUI thread so the localization inner loop never starves under rendering load.
+    if (type != "laser")
+        return;
+    lidar_ingest_dirty_.store(true, std::memory_order_release);
+    lidar_ingest_cv_.notify_one();
+}
+
+void SpecificWorker::lidar_ingest_loop()
+{
+    while (lidar_ingest_running_.load(std::memory_order_acquire))
+    {
+        {
+            std::unique_lock lk(lidar_ingest_mutex_);
+            lidar_ingest_cv_.wait_for(lk, std::chrono::milliseconds(50), [this]
+            {
+                return !lidar_ingest_running_.load(std::memory_order_acquire)
+                    || lidar_ingest_dirty_.load(std::memory_order_acquire);
+            });
+            lidar_ingest_dirty_.store(false, std::memory_order_release);
+        }
+        if (!lidar_ingest_running_.load(std::memory_order_acquire))
+            break;
+        ingest_latest_lidar();
+    }
+}
+
+void SpecificWorker::ingest_latest_lidar()
 {
     if (!G)
         return;
 
-    if (type != "laser")
-        return;
-
-    const auto node_opt = G->get_node(id);
+    const auto node_opt = G->get_node(params.LIDAR_NAME);
     if (!node_opt.has_value())
         return;
-
     const auto& lidar3D = node_opt.value();
-    const std::string& name = lidar3D.name();
-    if (name != params.LIDAR_NAME)
-        return;
 
     const auto lx = G->get_attrib_by_name<laser_X_att>(lidar3D);
     const auto ly = G->get_attrib_by_name<laser_Y_att>(lidar3D);
     const auto lz = G->get_attrib_by_name<laser_Z_att>(lidar3D);
     const auto laser_ts = G->get_attrib_by_name<laser_timestamp_att>(lidar3D);
     if (!lx.has_value() || !ly.has_value() || !lz.has_value() || !laser_ts.has_value())
-    { 
-        std::print("[modify_node_slot] Node '{}' missing laser_X/Y/Z attributes\n", name);
         return;
-    }
-    else
+
+    // Skip if we've already ingested this scan (notify_new_lidar also dedupes downstream).
+    const std::int64_t src_ts = static_cast<std::int64_t>(laser_ts.value());
+    if (src_ts <= last_ingested_lidar_ts_)
+        return;
+    last_ingested_lidar_ts_ = src_ts;
+
+    const auto &xs = lx.value().get();
+    const auto &ys = ly.value().get();
+    const auto &zs = lz.value().get();
+    const std::size_t npts = std::min({xs.size(), ys.size(), zs.size()});
+
+    std::vector<Eigen::Vector3f> points_high;
+    points_high.reserve(npts);
+    const float min_h_m = params.LIDAR_HIGH_MIN_HEIGHT;
+    for (std::size_t i = 0; i < npts; ++i)
     {
-        const auto &xs = lx.value().get();
-        const auto &ys = ly.value().get();
-        const auto &zs = lz.value().get();
-        const std::size_t npts = std::min({xs.size(), ys.size(), zs.size()});
-
-        std::vector<Eigen::Vector3f> points_high;
-        points_high.reserve(npts);
-        const float min_h_m = params.LIDAR_HIGH_MIN_HEIGHT;
-
-        for (std::size_t i = 0; i < npts; ++i)
-        {
-            const float x_raw = xs[i];
-            const float y_raw = ys[i];
-            const float z_raw = zs[i];
-            if (!std::isfinite(x_raw) || !std::isfinite(y_raw) || !std::isfinite(z_raw))
-            {
-                continue;
-            }
-
-            if (z_raw > min_h_m)
-                points_high.emplace_back(x_raw, y_raw, z_raw);
-        }
-        const std::uint64_t ts = static_cast<std::uint64_t>(std::max<std::int64_t>(0, static_cast<std::int64_t>(laser_ts.value_or(0))));
-        rc::LidarData lidar_data{std::move(points_high), static_cast<std::int64_t>(laser_ts.value())};
-
-        high_lidar_buffer_.put<0>(std::move(lidar_data), ts);
-        room_concept_.notify_new_lidar(static_cast<std::int64_t>(ts));
+        const float x_raw = xs[i];
+        const float y_raw = ys[i];
+        const float z_raw = zs[i];
+        if (!std::isfinite(x_raw) || !std::isfinite(y_raw) || !std::isfinite(z_raw))
+            continue;
+        if (z_raw > min_h_m)
+            points_high.emplace_back(x_raw, y_raw, z_raw);
     }
+
+    const std::uint64_t ts = static_cast<std::uint64_t>(std::max<std::int64_t>(0, src_ts));
+    high_lidar_buffer_.put<0>(rc::LidarData{std::move(points_high), src_ts}, ts);
+    room_concept_.notify_new_lidar(static_cast<std::int64_t>(ts));
 }
 
 

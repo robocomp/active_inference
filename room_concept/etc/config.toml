@@ -61,6 +61,7 @@ graph = true
 
 [Presence]
 required_agent_names   = ["robot_concept"]
+optional_agent_names   = ["controller"]
 config_dir             = "etc"
 monitor_period_ms      = 500
 heartbeat_timeout_ms   = 15000  # wider window: room_concept runs at >100% CPU, DSR signals queue up
@@ -69,7 +70,8 @@ stale_grace_ms         = 120000  # 2 min grace: covers robot_concept restart tim
 agent_info_period_ms   = 1000
 
 [Owns]
-nodes = ["room_concept 5"]  # deleted from DSR graph on clean shutdown
+nodes    = ["room_concept 5", "afford_room"]  # deleted from DSR graph on clean shutdown
+subtrees = ["room"]                       # deletes room node + all RT children (wall_*, floor)
 
 [RoomConcept]  
 PredictionEarlyExit    = true  # Skip optimization when prediction error < threshold

@@ -38,6 +38,10 @@
 #include "../../common/affordance_manager/affordance_manager.h"
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 #include <atomic>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <limits>
 #include <fps/fps.h>
 #include "custom_widget.h"
 #include "ui_localUI.h"
@@ -133,6 +137,22 @@ class SpecificWorker : public GenericWorker
         std::atomic<bool>      pose_saved_{false};
         std::optional<rc::LidarData> read_lidar_from_graph() const;
         void save_robot_pose_once();
+
+        // ── Lidar ingestion thread (decoupled from the Qt/GUI thread) ──────────
+        // The heavy point-cloud decode used to run inside modify_node_slot, a queued
+        // Qt slot on the GUI thread. Under rendering load that thread starved and the
+        // localization inner loop stopped receiving fresh lidar. This dedicated thread
+        // does the decode + buffer fill + notify independently, so the inner loop runs
+        // at full rate regardless of GUI load. It is woken by a DirectConnection trigger
+        // on the DDS thread, with a periodic timeout fallback.
+        std::thread             lidar_ingest_thread_;
+        std::atomic<bool>       lidar_ingest_running_{false};
+        std::atomic<bool>       lidar_ingest_dirty_{false};
+        std::mutex              lidar_ingest_mutex_;
+        std::condition_variable lidar_ingest_cv_;
+        std::int64_t            last_ingested_lidar_ts_ = std::numeric_limits<std::int64_t>::min();
+        void lidar_ingest_loop();
+        void ingest_latest_lidar();
         std::string pose_file_path() const;
 
         // ── Localizer ──────────────────────────────────────────────────────────
@@ -178,7 +198,7 @@ class SpecificWorker : public GenericWorker
         uint64_t dsr_world_id_ = 0;
         uint64_t dsr_room_id_  = 0;
         bool     room_node_created_ = false;
-        rc::AffordanceManager affordance_manager_{"afford"};
+        rc::AffordanceManager affordance_manager_{"afford_room"};
         int      stable_frames_     = 0;
         std::int64_t last_dsr_published_ts_ms_ = 0;
         void check_init_graph_is_valid();
