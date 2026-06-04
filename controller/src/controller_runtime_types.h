@@ -14,6 +14,21 @@ using ControllerPolygon = std::vector<Eigen::Vector2f>;
 using ControllerPolygons = std::vector<ControllerPolygon>;
 using ControllerPathPlan = RoomPathPlanner::PathPlan;
 
+enum class ControllerObstacleKind
+{
+    Object,
+    Obstacle,
+    Temporary
+};
+
+struct ControllerObstacleVisual
+{
+    ControllerPolygon polygon;
+    ControllerObstacleKind kind = ControllerObstacleKind::Obstacle;
+};
+
+using ControllerObstacleVisuals = std::vector<ControllerObstacleVisual>;
+
 struct ControllerParams
 {
     float clearance_m = 0.4f;

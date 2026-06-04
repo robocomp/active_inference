@@ -68,7 +68,7 @@ void ControllerDisplay::update(const std::optional<ControllerRobotPose> &robot_p
                                const ControllerPolygon &room_polygon,
                                const ControllerPolygon &inner_polygon,
                                const std::optional<ControllerPathPlan> &current_plan,
-                               const ControllerPolygons &obstacle_polys,
+                               const ControllerObstacleVisuals &obstacle_polys,
                                const ControllerPolygons &obstacle_rfe_points,
                                const std::optional<Eigen::Vector2f> &current_target_room,
                                const std::vector<ControllerPolygon> &last_mppi_trajectories,

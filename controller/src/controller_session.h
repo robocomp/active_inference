@@ -49,7 +49,7 @@ public:
 
     void update_display(const std::optional<ControllerRobotPose> &robot_pose,
                         ControllerDisplay &display,
-                        const ControllerPolygons &obstacle_polys,
+                        const ControllerObstacleVisuals &obstacle_polys,
                         const ControllerPolygons &obstacle_rfe_points,
                         int max_lidar_draw_points) const;
 

@@ -24,6 +24,7 @@ class ControllerObstacleTracker
 
         rc::LidarPointBuffer *lidar_buffer() { return &lidar_room_buffer_; }
         const ControllerPolygons &obstacle_polygons() const { return obstacle_polygons_; }
+        const ControllerObstacleVisuals &display_obstacle_polygons() const { return display_obstacle_polygons_; }
         ControllerPolygons temporary_obstacle_rfe_points() const;
         const std::optional<std::uint64_t> &last_lidar_timestamp_ms() const { return last_lidar_timestamp_ms_; }
         void clear_published_obstacles();
@@ -81,6 +82,14 @@ class ControllerObstacleTracker
             float free_energy = 0.f;
         };
 
+        struct GraphObstacleRecord
+        {
+            std::uint64_t node_id = 0;
+            std::string node_name;
+            ControllerObstacleState state;
+            ControllerObstacleKind kind = ControllerObstacleKind::Obstacle;
+        };
+
         std::vector<Eigen::Vector2f> read_temporary_obstacle_points(std::uint64_t timestamp_ms,
                                                                     const ControllerRobotPose &robot_pose,
                                                                     const Eigen::Vector2f &region_center_room,
@@ -116,14 +125,24 @@ class ControllerObstacleTracker
                                             const ControllerRobotPose &robot_pose,
                                             const TemporaryObstacleInstance &instance);
         static float obstacle_sdf(const ControllerObstacleState &state, const Eigen::Vector2f &point);
+        static bool point_explained_by_obstacle(const ControllerObstacleState &state,
+                            const Eigen::Vector2f &point,
+                            float margin_m);
+        static bool obstacles_overlap(const ControllerObstacleState &lhs,
+                          const ControllerObstacleState &rhs,
+                          float margin_m);
+        static float obstacle_distance_shape_metric(const ControllerObstacleState &reference,
+                                const ControllerObstacleState &candidate,
+                                bool candidate_has_shape);
         static Eigen::Vector2f to_local_point(const ControllerObstacleState &state, const Eigen::Vector2f &point);
         static Eigen::Vector2f to_room_point(const ControllerObstacleState &state, const Eigen::Vector2f &point);
         void sync_temporary_obstacles_to_dsr(std::uint64_t timestamp_ms);
         void delete_published_obstacle_node(const TemporaryObstacleInstance &instance);
         void prune_expired_temporary_obstacles(std::uint64_t timestamp_ms);
+        void retire_temporary_obstacles_explained_by_graph();
         std::optional<std::size_t> match_temporary_obstacle(const ControllerObstacleObservation &observation) const;
 
-        ControllerPolygons read_obstacle_polygons(std::uint64_t timestamp_ms) const;
+        ControllerPolygons read_obstacle_polygons(std::uint64_t timestamp_ms);
         std::vector<Eigen::Vector3f> read_recent_lidar_points_in_room(std::uint64_t timestamp_ms, int max_scans);
         ControllerPolygon make_obstacle_polygon(const Eigen::Vector2f &center,
                                                 float yaw,
@@ -137,10 +156,14 @@ class ControllerObstacleTracker
         const ControllerGraphState *graph_state_ = nullptr;
         std::function<void()> graph_layout_callback_;
         rc::LidarPointBuffer lidar_room_buffer_{5};
+        std::vector<GraphObstacleRecord> known_graph_obstacles_;
         ControllerPolygons obstacle_polygons_;
+        ControllerObstacleVisuals display_obstacle_polygons_;
         std::vector<TemporaryObstacleInstance> temporary_obstacles_;
         std::uint64_t next_temporary_obstacle_id_ = 1;
         mutable std::optional<std::uint64_t> last_lidar_timestamp_ms_;
         mutable std::uint64_t lidar_period_ms_ = 100;
         mutable std::string obstacle_debug_report_;
+        mutable std::string graph_object_debug_report_;
+        mutable std::string current_obstacles_debug_report_;
 };

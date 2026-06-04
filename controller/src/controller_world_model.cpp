@@ -3,6 +3,17 @@
 #include <algorithm>
 #include <cmath>
 
+namespace
+{
+bool finite_target_info(const ControllerTargetInfo &info)
+{
+    return std::isfinite(info.room_pos.x())
+        && std::isfinite(info.room_pos.y())
+        && std::isfinite(info.yaw_rad)
+        && std::isfinite(info.epistemic_gain);
+}
+}
+
 void ControllerWorldModel::set_params(const ControllerParams *params)
 {
     params_ = params;
@@ -163,6 +174,8 @@ std::optional<ControllerTargetInfo> ControllerWorldModel::read_target_in_room(st
             info.epistemic_gain = affordance_target->epistemic_gain;
             info.epistemic_pending = affordance_target->epistemic_pending;
             info.from_affordance = true;
+            if (!finite_target_info(info))
+                return std::nullopt;
             return info;
         }
     }
@@ -201,6 +214,8 @@ std::optional<ControllerTargetInfo> ControllerWorldModel::read_target_in_room(st
         info.node_name = *target_name;
         info.room_pos = Eigen::Vector2f(static_cast<float>(translation->x()), static_cast<float>(translation->y()));
         info.from_affordance = false;
+        if (!finite_target_info(info))
+            continue;
         return info;
     }
 

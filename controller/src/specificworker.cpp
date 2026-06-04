@@ -412,7 +412,7 @@ void SpecificWorker::update_custom_widget(const std::optional<RobotPose> &robot_
 {
 	session_.update_display(robot_pose,
 	                      display_,
-	                      obstacle_tracker_.obstacle_polygons(),
+	                      obstacle_tracker_.display_obstacle_polygons(),
 	                      obstacle_tracker_.temporary_obstacle_rfe_points(),
 	                      params.max_lidar_draw_points);
 }

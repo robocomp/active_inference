@@ -578,6 +578,8 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
     float ess_current = 0.f;
     float lambda_used = adaptive_lambda_;
     float dominance_current = 0.f;
+    float p_free_current = 0.f;
+    float steering_concentration_current = 0.f;
     float clearance_quality_current = 0.f;
     int num_collisions = 0;
     {
@@ -664,6 +666,8 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
                 clearance_quality = clear_acc / w_acc;
             }
         }
+        p_free_current = p_free;
+        steering_concentration_current = steering_concentration;
         clearance_quality_current = clearance_quality;
 
         // Dominance: feasibility × directional concentration (clearance excluded
@@ -868,6 +872,9 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
     out.adv  = smoothed_vel_[0] * brake;
     out.side = smoothed_vel_[1];
     out.rot  = smoothed_vel_[2];
+    const float pre_safety_guard_adv = out.adv;
+    const float pre_safety_guard_rot = out.rot;
+    bool safety_guard_modified_command = false;
 
     // 14. Safety gate on top of MPPI output (short forward prediction on inflated ESDF)
     {
@@ -1016,6 +1023,10 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
         }
     }
 
+    safety_guard_modified_command = out.safety_guard_triggered
+        && (std::abs(out.adv - pre_safety_guard_adv) > 1e-4f
+            || std::abs(out.rot - pre_safety_guard_rot) > 1e-4f);
+
     // ── 15. Path blockage detection ──────────────────────────────────
     // Look ahead along the planned path in room frame and query ESDF at each
     // waypoint.  If several consecutive waypoints are blocked (ESDF < threshold)
@@ -1095,29 +1106,38 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
         }
     }
 
-    // Debug (every ~1 second)
-    static int dbg = 0;
-    if (++dbg % std::max(1, active_params_.debug_print_period) == 0)
-    {
-        const SimResult *best_result = (best_idx >= 0 && best_idx < actual_K) ? &results[best_idx] : nullptr;
-        std::cout << "[MPPI] K=" << adaptive_K_ << " T=" << adaptive_T_
-                  << " ESS=" << std::setprecision(0) << ess_smooth_ << "/" << adaptive_K_
-                  << " ncol=" << num_collisions << "/" << actual_K
-                  << " C=" << std::setprecision(2) << clearance_quality_current
-                  << " SG=" << std::setprecision(2) << sg_gate
-                  << " cmd(" << std::setprecision(2) << out.adv << "," << out.rot << ")"
-                  << " dist=" << std::setprecision(1) << out.dist_to_goal
-                  << " esdf=" << out.min_esdf
-                  << " best=" << best_idx
-                  << " G(goal/obs/lat/cbf/vel)="
-                  << (best_result ? best_result->G_goal : 0.f) << "/"
-                  << (best_result ? best_result->G_obs : 0.f) << "/"
-                  << (best_result ? best_result->G_lat : 0.f) << "/"
-                  << (best_result ? best_result->G_cbf : 0.f) << "/"
-                  << (best_result ? best_result->G_vel : 0.f)
-                  << " mppi_ms=" << std::setprecision(1) << last_mppi_ms_
-                  << "\n";
-    }
+//    // Debug (every ~1 second)
+//    static int dbg = 0;
+//    if (++dbg % std::max(1, active_params_.debug_print_period) == 0)
+//    {
+//        const SimResult *best_result = (best_idx >= 0 && best_idx < actual_K) ? &results[best_idx] : nullptr;
+//        const float sg_front = std::isfinite(frontal_min_dist) ? frontal_min_dist : -1.f;
+//        std::cout << "[MPPI] K=" << adaptive_K_ << " T=" << adaptive_T_
+//                  << " ESS=" << std::setprecision(0) << ess_smooth_ << "/" << adaptive_K_
+//                  << " ncol=" << num_collisions << "/" << actual_K
+//                  << " pf=" << std::setprecision(2) << p_free_current
+//                  << " sc=" << std::setprecision(2) << steering_concentration_current
+//                  << " C=" << std::setprecision(2) << clearance_quality_current
+//                  << " SG=" << std::setprecision(2) << sg_gate
+//                  << " fmin=" << std::setprecision(2) << sg_front
+//                  << " cmd(" << std::setprecision(2) << out.adv << "," << out.rot << ")"
+//                  << " sgmod=" << (safety_guard_modified_command ? 1 : 0)
+//                  << " dist=" << std::setprecision(1) << out.dist_to_goal
+//                  << " esdf=" << out.min_esdf
+//                  << " best=" << best_idx
+//                  << " Gtot=" << (best_result ? best_result->G_total : 0.f)
+//                  << " G(goal/obs/lat/cbf/vel)="
+//                  << (best_result ? best_result->G_goal : 0.f) << "/"
+//                  << (best_result ? best_result->G_obs : 0.f) << "/"
+//                  << (best_result ? best_result->G_lat : 0.f) << "/"
+//                  << (best_result ? best_result->G_cbf : 0.f) << "/"
+//                  << (best_result ? best_result->G_vel : 0.f)
+//                  << " mppi_ms=" << std::setprecision(1) << last_mppi_ms_
+//                  << "\n";
+//    }
+    (void)p_free_current;
+    (void)steering_concentration_current;
+    (void)safety_guard_modified_command;
 
     return out;
 }

@@ -341,6 +341,9 @@ std::vector<Eigen::Vector2f> ControllerObstacleTracker::read_temporary_obstacle_
     const float max_front_distance = std::max(0.2f, params_->temporary_obstacle_front_distance_m);
     const float half_width = std::max(0.1f, params_->temporary_obstacle_half_width_m);
     const float cluster_margin = std::max(0.f, params_->temporary_obstacle_cluster_margin_m);
+    const float known_obstacle_explanation_margin_m = std::clamp(0.5f * std::max(0.f, params_->temporary_obstacle_padding_m),
+                                                                 0.05f,
+                                                                 0.14f);
     const float search_radius = std::max(region_radius_m + cluster_margin, cluster_margin + 0.1f);
     const float max_robot_distance = max_front_distance + search_radius + 0.25f;
 
@@ -364,6 +367,17 @@ std::vector<Eigen::Vector2f> ControllerObstacleTracker::read_temporary_obstacle_
         {
             continue;
         }
+
+        const bool explained_by_known_obstacle = std::any_of(known_graph_obstacles_.cbegin(),
+                                                             known_graph_obstacles_.cend(),
+                                                             [&point_room, known_obstacle_explanation_margin_m](const auto &state)
+                                                             {
+                                                                 return point_explained_by_obstacle(state.state,
+                                                                                                    point_room,
+                                                                                                    known_obstacle_explanation_margin_m);
+                                                             });
+        if (explained_by_known_obstacle)
+            continue;
 
         candidate_points_room.push_back(point_room);
     }
@@ -408,9 +422,91 @@ float ControllerObstacleTracker::obstacle_sdf(const ControllerObstacleState &sta
     return outside.norm() + std::min(std::max(d.x(), d.y()), 0.f);
 }
 
+bool ControllerObstacleTracker::point_explained_by_obstacle(const ControllerObstacleState &state,
+                                                            const Eigen::Vector2f &point,
+                                                            float margin_m)
+{
+    return obstacle_sdf(state, point) <= std::max(0.f, margin_m);
+}
+
+bool ControllerObstacleTracker::obstacles_overlap(const ControllerObstacleState &lhs,
+                                                  const ControllerObstacleState &rhs,
+                                                  float margin_m)
+{
+    const float margin = std::max(0.f, margin_m);
+    if (point_explained_by_obstacle(lhs, rhs.center, margin)
+        || point_explained_by_obstacle(rhs, lhs.center, margin))
+        return true;
+
+    const auto lhs_polygon = ControllerObstacleModel::polygon_from_state(lhs);
+    for (const auto &vertex : lhs_polygon)
+    {
+        if (point_explained_by_obstacle(rhs, vertex, margin))
+            return true;
+    }
+
+    const auto rhs_polygon = ControllerObstacleModel::polygon_from_state(rhs);
+    for (const auto &vertex : rhs_polygon)
+    {
+        if (point_explained_by_obstacle(lhs, vertex, margin))
+            return true;
+    }
+
+    return false;
+}
+
+float ControllerObstacleTracker::obstacle_distance_shape_metric(const ControllerObstacleState &reference,
+                                                                const ControllerObstacleState &candidate,
+                                                                bool candidate_has_shape)
+{
+    const float ref_diag = std::hypot(reference.width_m, reference.depth_m);
+    const float cand_diag = std::hypot(std::max(candidate.width_m, 0.f), std::max(candidate.depth_m, 0.f));
+    const float center_scale = std::max(0.25f, 0.5f * (ref_diag + std::max(cand_diag, 0.25f)));
+    const float center_term = (reference.center - candidate.center).norm() / center_scale;
+    const float yaw_delta = std::abs(std::atan2(std::sin(reference.yaw_rad - candidate.yaw_rad),
+                                                std::cos(reference.yaw_rad - candidate.yaw_rad)));
+
+    float metric = center_term + 0.35f * (yaw_delta / static_cast<float>(M_PI));
+    if (candidate_has_shape)
+    {
+        metric += 0.5f * std::abs(reference.width_m - candidate.width_m) / std::max(reference.width_m, 0.1f);
+        metric += 0.5f * std::abs(reference.depth_m - candidate.depth_m) / std::max(reference.depth_m, 0.1f);
+    }
+    return metric;
+}
+
 Eigen::Vector2f ControllerObstacleTracker::to_room_point(const ControllerObstacleState &state, const Eigen::Vector2f &point)
 {
     return state.center + Eigen::Rotation2Df(state.yaw_rad) * point;
+}
+
+void ControllerObstacleTracker::retire_temporary_obstacles_explained_by_graph()
+{
+    if (temporary_obstacles_.empty() || known_graph_obstacles_.empty())
+        return;
+
+    const float overlap_margin_m = std::max(0.08f,
+                                            params_ ? 0.5f * std::max(params_->temporary_obstacle_padding_m, 0.f)
+                                                    : 0.08f);
+
+    auto first_retired = std::remove_if(temporary_obstacles_.begin(),
+                                        temporary_obstacles_.end(),
+                                        [this, overlap_margin_m](const auto &instance)
+                                        {
+                                            const auto &state = instance.model.state();
+                                            const bool explained = std::any_of(known_graph_obstacles_.cbegin(),
+                                                                               known_graph_obstacles_.cend(),
+                                                                               [&state, overlap_margin_m](const auto &known_state)
+                                                                               {
+                                                                                   return obstacles_overlap(known_state.state,
+                                                                                                            state,
+                                                                                                            overlap_margin_m);
+                                                                               });
+                                            if (explained)
+                                                delete_published_obstacle_node(instance);
+                                            return explained;
+                                        });
+    temporary_obstacles_.erase(first_retired, temporary_obstacles_.end());
 }
 
 ControllerObstacleObservation ControllerObstacleTracker::augment_with_remembered_points(const ControllerObstacleObservation &observation,
@@ -623,10 +719,13 @@ std::optional<std::size_t> ControllerObstacleTracker::match_temporary_obstacle(c
     return best_index;
 }
 
-ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64_t timestamp_ms) const
+ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64_t timestamp_ms)
 {
     ControllerPolygons obstacles;
+    known_graph_obstacles_.clear();
+    display_obstacle_polygons_.clear();
     std::ostringstream report;
+    std::ostringstream object_report;
     if (!graph_ || !inner_eigen_api_ || !graph_state_ || graph_state_->room_name.empty())
     {
         if (obstacle_debug_report_ != "Obstacle debug: graph or inner api not ready")
@@ -637,6 +736,8 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
         }
         return obstacles;
     }
+
+    auto room_node = graph_state_->room_id != 0 ? graph_->get_node(graph_state_->room_id) : std::optional<DSR::Node>{};
 
     const auto time_query = params_ && params_->interpolate_rt ? DSR::RT_API::TimeQuery::Interpolated
                                                                : DSR::RT_API::TimeQuery::Nearest;
@@ -693,8 +794,33 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
     }
 
     report << "Obstacle debug: room='" << graph_state_->room_name << "' nodes=" << obstacle_nodes.size();
+    object_report << "Graph objects debug: room='" << graph_state_->room_name << "'";
     if (using_fallback_nodes)
         report << " fallback=width_depth_rt";
+
+    std::vector<bool> adopted_temporary_obstacles(temporary_obstacles_.size(), false);
+    auto adopt_temporary_obstacle_into_object = [this, &room_node, timestamp_ms](DSR::Node &node, const ControllerObstacleState &state)
+    {
+        if (!graph_ || !rt_api_ || !room_node.has_value())
+            return false;
+
+        const auto parent_id = room_node->id();
+
+        graph_->add_or_modify_attrib_local<width_m_att>(node, state.width_m);
+        graph_->add_or_modify_attrib_local<depth_m_att>(node, state.depth_m);
+        graph_->add_or_modify_attrib_local<height_m_att>(node, kPublishedObstacleHeightM);
+        graph_->add_or_modify_attrib_local<level_att>(node, 3);
+        graph_->add_or_modify_attrib_local<parent_att>(node, parent_id);
+        if (!graph_->update_node(node))
+            return false;
+
+        rt_api_->insert_or_assign_edge_RT(room_node.value(),
+                                          node.id(),
+                                          {state.center.x(), state.center.y(), 0.5f * kPublishedObstacleHeightM},
+                                          {0.f, 0.f, state.yaw_rad},
+                                          timestamp_ms);
+        return true;
+    };
 
     for (const auto &node : obstacle_nodes)
     {
@@ -716,23 +842,6 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
         }
 
         report << " | node='" << node.name() << "' type='" << node.type() << "'";
-        const auto width_attr = graph_->get_attrib_by_name<width_m_att>(node);
-        const auto depth_attr = graph_->get_attrib_by_name<depth_m_att>(node);
-        if (!width_attr.has_value() || !depth_attr.has_value())
-        {
-            report << " missing_attrs";
-            continue;
-        }
-
-        const float width_m = width_attr.value();
-        const float depth_m = depth_attr.value();
-        report << " size=(" << width_m << "," << depth_m << ")";
-        if (width_m <= 0.f || depth_m <= 0.f)
-        {
-            report << " invalid_size";
-            continue;
-        }
-
         const auto translation = inner_eigen_api_->transform(graph_state_->room_name,
                                                              node.name(),
                                                              timestamp_ms,
@@ -751,11 +860,125 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
 
         const Eigen::Vector2f center(static_cast<float>(translation->x()), static_cast<float>(translation->y()));
         const float yaw = static_cast<float>(euler->z());
-        auto polygon = make_obstacle_polygon(center, yaw, width_m, depth_m);
-        report << " center=(" << center.x() << "," << center.y() << ") yaw=" << yaw;
+        ControllerObstacleState state{.center = center,
+                                      .yaw_rad = yaw,
+                                      .width_m = 0.f,
+                                      .depth_m = 0.f};
+        const auto width_attr = graph_->get_attrib_by_name<width_m_att>(node);
+        const auto depth_attr = graph_->get_attrib_by_name<depth_m_att>(node);
+        const bool has_shape = width_attr.has_value() && depth_attr.has_value()
+            && std::isfinite(width_attr.value()) && std::isfinite(depth_attr.value())
+            && width_attr.value() > 0.f && depth_attr.value() > 0.f;
+        if (has_shape)
+        {
+            state.width_m = width_attr.value();
+            state.depth_m = depth_attr.value();
+            report << " size=(" << state.width_m << "," << state.depth_m << ")";
+        }
+
+        if (node.type() == "object")
+        {
+            std::optional<std::size_t> best_match;
+            float best_metric = std::numeric_limits<float>::max();
+            for (std::size_t index = 0; index < temporary_obstacles_.size(); ++index)
+            {
+                if (adopted_temporary_obstacles[index])
+                    continue;
+
+                const auto &candidate_state = temporary_obstacles_[index].model.state();
+                const bool close_enough = point_explained_by_obstacle(candidate_state, state.center, 0.2f)
+                    || (candidate_state.center - state.center).norm() <= std::max(0.6f, std::hypot(candidate_state.width_m, candidate_state.depth_m));
+                if (!close_enough)
+                    continue;
+
+                const float metric = obstacle_distance_shape_metric(candidate_state, state, has_shape);
+                if (metric < best_metric)
+                {
+                    best_metric = metric;
+                    best_match = index;
+                }
+            }
+
+            if (best_match.has_value() && best_metric <= 1.6f)
+            {
+                const auto &matched_state = temporary_obstacles_[best_match.value()].model.state();
+                auto updated_node = node;
+                if (adopt_temporary_obstacle_into_object(updated_node, matched_state))
+                {
+                    state = matched_state;
+                    adopted_temporary_obstacles[best_match.value()] = true;
+                    std::print("Obstacle adoption trace: object='{}' id={} <- temp='{}' temp_id={} metric={:.3f} center=({:.3f},{:.3f}) size=({:.3f},{:.3f}) yaw={:.3f}\n",
+                               node.name(),
+                               node.id(),
+                               published_obstacle_name(temporary_obstacles_[best_match.value()].id),
+                               temporary_obstacles_[best_match.value()].id,
+                               best_metric,
+                               state.center.x(),
+                               state.center.y(),
+                               state.width_m,
+                               state.depth_m,
+                               state.yaw_rad);
+                    std::fflush(stdout);
+                    report << " adopted_tmp='" << published_obstacle_name(temporary_obstacles_[best_match.value()].id)
+                           << "' metric=" << best_metric;
+                }
+            }
+
+            if (state.width_m <= 0.f || state.depth_m <= 0.f)
+            {
+                report << (has_shape ? " invalid_size" : " missing_attrs");
+                continue;
+            }
+        }
+        else if (!has_shape)
+        {
+            report << " missing_attrs";
+            continue;
+        }
+
+        if (state.width_m <= 0.f || state.depth_m <= 0.f)
+        {
+            report << " invalid_size";
+            continue;
+        }
+
+        auto polygon = ControllerObstacleModel::polygon_from_state(state);
+        report << " center=(" << state.center.x() << "," << state.center.y() << ") yaw=" << state.yaw_rad;
         if (!polygon.empty())
             report << " first_vertex=(" << polygon.front().x() << "," << polygon.front().y() << ")";
+        const ControllerObstacleKind kind = node.type() == "object"
+            ? ControllerObstacleKind::Object
+            : ControllerObstacleKind::Obstacle;
+        if (kind == ControllerObstacleKind::Object)
+        {
+            object_report << " | object='" << node.name() << "' id=" << node.id()
+                          << " pos=(" << state.center.x() << "," << state.center.y() << ")"
+                          << " size=(" << state.width_m << "," << state.depth_m << ")"
+                          << " yaw=" << state.yaw_rad;
+        }
+        known_graph_obstacles_.push_back(GraphObstacleRecord{.node_id = node.id(),
+                                                             .node_name = node.name(),
+                                                             .state = state,
+                                                             .kind = kind});
+        display_obstacle_polygons_.push_back(ControllerObstacleVisual{.polygon = polygon,
+                                                                      .kind = kind});
         obstacles.push_back(std::move(polygon));
+    }
+
+    if (!adopted_temporary_obstacles.empty())
+    {
+        std::vector<TemporaryObstacleInstance> surviving_obstacles;
+        surviving_obstacles.reserve(temporary_obstacles_.size());
+        for (std::size_t index = 0; index < temporary_obstacles_.size(); ++index)
+        {
+            if (adopted_temporary_obstacles[index])
+            {
+                delete_published_obstacle_node(temporary_obstacles_[index]);
+                continue;
+            }
+            surviving_obstacles.push_back(std::move(temporary_obstacles_[index]));
+        }
+        temporary_obstacles_ = std::move(surviving_obstacles);
     }
 
     report << " | drawn=" << obstacles.size();
@@ -763,6 +986,12 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
     {
         obstacle_debug_report_ = report_str;
         std::print("{}\n", obstacle_debug_report_);
+        std::fflush(stdout);
+    }
+    if (const auto object_report_str = object_report.str(); object_report_str != graph_object_debug_report_)
+    {
+        graph_object_debug_report_ = object_report_str;
+        std::print("{}\n", graph_object_debug_report_);
         std::fflush(stdout);
     }
 
@@ -774,8 +1003,37 @@ void ControllerObstacleTracker::update_active_obstacle_polygons(std::uint64_t ti
 {
     prune_expired_temporary_obstacles(timestamp_ms);
     obstacle_polygons_ = read_obstacle_polygons(timestamp_ms);
+    retire_temporary_obstacles_explained_by_graph();
+    std::ostringstream current_obstacles_report;
+    current_obstacles_report << "Current obstacles debug:";
+    for (const auto &record : known_graph_obstacles_)
+    {
+        current_obstacles_report << " | kind="
+                                 << (record.kind == ControllerObstacleKind::Object ? "object" : "obstacle")
+                                 << " name='" << record.node_name << "' id=" << record.node_id
+                                 << " pos=(" << record.state.center.x() << "," << record.state.center.y() << ")"
+                                 << " size=(" << record.state.width_m << "," << record.state.depth_m << ")"
+                                 << " yaw=" << record.state.yaw_rad;
+    }
     for (const auto &instance : temporary_obstacles_)
-        obstacle_polygons_.push_back(instance.model.polygon());
+    {
+        const auto &state = instance.model.state();
+        current_obstacles_report << " | kind=temporary"
+                                 << " name='" << published_obstacle_name(instance.id) << "' id=" << instance.id
+                                 << " pos=(" << state.center.x() << "," << state.center.y() << ")"
+                                 << " size=(" << state.width_m << "," << state.depth_m << ")"
+                                 << " yaw=" << state.yaw_rad;
+        const auto polygon = instance.model.polygon();
+        obstacle_polygons_.push_back(polygon);
+        display_obstacle_polygons_.push_back(ControllerObstacleVisual{.polygon = polygon,
+                                                                      .kind = ControllerObstacleKind::Temporary});
+    }
+    if (const auto report = current_obstacles_report.str(); report != current_obstacles_debug_report_)
+    {
+        current_obstacles_debug_report_ = report;
+        std::print("{}\n", current_obstacles_debug_report_);
+        std::fflush(stdout);
+    }
     sync_temporary_obstacles_to_dsr(timestamp_ms);
     path_controller.set_static_obstacles(obstacle_polygons_);
 }

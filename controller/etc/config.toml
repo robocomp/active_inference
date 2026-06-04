@@ -43,7 +43,12 @@ MessageSizeMax = "20004800"
 required_agent_names = ["robot_concept", "room_concept"]
 config_dir = "etc"
 monitor_period_ms = 500
-heartbeat_timeout_ms = 3000
+# Controller is the heaviest compute agent (MPPI/torch runs on the Qt main thread, which also
+# drives the presence monitor). Its own compute bursts were observed freezing the monitor for up
+# to 14 s, so a 3 s timeout caused constant false Ready<->Stale churn against perfectly-alive
+# peers. 15 s tolerates those bursts + normal 3-4 s heartbeat jitter. No safety cost: Stale never
+# triggers node deletion (only DSR-node removal / Missing does), so a longer timeout is harmless.
+heartbeat_timeout_ms = 15000
 rejoin_grace_ms = 1500
 stale_grace_ms = 120000  # 2 min grace: covers peer restart time before declaring lost
 agent_info_period_ms = 1000

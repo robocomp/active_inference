@@ -14,6 +14,7 @@
 
 #include <Eigen/Dense>
 
+#include "controller_runtime_types.h"
 #include "lidar_buffer_types.h"
 
 #include <optional>
@@ -30,13 +31,13 @@ class Viewer2D : public QObject
     public:
     struct PathDrawData
     {
-        std::vector<Eigen::Vector2f> path;
-        std::vector<Eigen::Vector2f> inner_poly;
-        std::vector<Eigen::Vector2f> graph_nodes;
-        std::vector<std::vector<Eigen::Vector2f>> obstacle_polys;
-        std::vector<std::vector<Eigen::Vector2f>> obstacle_rfe_points;
-        std::vector<std::vector<Eigen::Vector2f>> candidate_trajectories;
-        std::vector<Eigen::Vector2f> average_trajectory;
+        ControllerPolygon path;
+        ControllerPolygon inner_poly;
+        ControllerPolygon graph_nodes;
+        ControllerObstacleVisuals obstacle_polys;
+        ControllerPolygons obstacle_rfe_points;
+        ControllerPolygons candidate_trajectories;
+        ControllerPolygon average_trajectory;
         int best_trajectory_idx = -1;
     };
 

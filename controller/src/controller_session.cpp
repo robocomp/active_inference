@@ -44,7 +44,7 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
         }
         update_display(std::nullopt,
                        display,
-                       obstacle_tracker.obstacle_polygons(),
+                       obstacle_tracker.display_obstacle_polygons(),
                        obstacle_tracker.temporary_obstacle_rfe_points(),
                        params_ ? params_->max_lidar_draw_points : 0);
         stop(path_controller, motion_commander);
@@ -61,7 +61,7 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
         qInfo() << "Controller waiting for delimiting polygon attributes on room node";
         update_display(std::nullopt,
                        display,
-                       obstacle_tracker.obstacle_polygons(),
+                       obstacle_tracker.display_obstacle_polygons(),
                        obstacle_tracker.temporary_obstacle_rfe_points(),
                        params_ ? params_->max_lidar_draw_points : 0);
         stop(path_controller, motion_commander);
@@ -88,7 +88,7 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         qInfo() << "Controller waiting for robot pose in room frame";
         update_display(std::nullopt,
                        display,
-                       obstacle_tracker.obstacle_polygons(),
+                       obstacle_tracker.display_obstacle_polygons(),
                        obstacle_tracker.temporary_obstacle_rfe_points(),
                        params_ ? params_->max_lidar_draw_points : 0);
         stop(path_controller, motion_commander);
@@ -131,7 +131,7 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         affordance_manager.clear_current();
         update_display(robot_pose,
                        display,
-                       obstacle_tracker.obstacle_polygons(),
+                       obstacle_tracker.display_obstacle_polygons(),
                        obstacle_tracker.temporary_obstacle_rfe_points(),
                        params_ ? params_->max_lidar_draw_points : 0);
         stop(path_controller, motion_commander);
@@ -143,19 +143,6 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     current_target_room_ = step.target.room_pos;
     step.target_changed = !last_target_info_.has_value()
                        || !ControllerWorldModel::same_target_instance(*last_target_info_, step.target);
-    if (step.target_changed)
-    {
-        std::print("Target debug: source={} id={} name='{}' pos=({:.3f},{:.3f}) yaw={:.3f} epistemic_gain={:.4f} pending={}\n",
-                   step.target.from_affordance ? "affordance" : "legacy",
-                   step.target.node_id,
-                   step.target.node_name,
-                   step.target.room_pos.x(),
-                   step.target.room_pos.y(),
-                   step.target.yaw_rad,
-                   step.target.epistemic_gain,
-                   step.target.epistemic_pending ? 1 : 0);
-        std::fflush(stdout);
-    }
     last_target_info_ = step.target;
     active_target_id_ = target->node_id;
     return step;
@@ -175,23 +162,6 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
                                           obstacle_tracker.obstacle_polygons(),
                                           step.plan_origin,
                                           step.target.room_pos);
-        std::ostringstream out;
-        out << "Path debug: target='" << step.target.node_name << "'"
-            << " target_pos=(" << step.target.room_pos.x() << "," << step.target.room_pos.y() << ")"
-            << " origin=(" << step.plan_origin.x() << "," << step.plan_origin.y() << ")";
-        if (!current_plan_.has_value() || current_plan_->room_path.empty())
-            out << " waypoints=0";
-        else
-        {
-            out << " waypoints=" << current_plan_->room_path.size();
-            for (std::size_t index = 0; index < current_plan_->room_path.size(); ++index)
-            {
-                const auto &point = current_plan_->room_path[index];
-                out << " | p" << index << "=(" << point.x() << "," << point.y() << ")";
-            }
-        }
-        std::print("{}\n", out.str());
-        std::fflush(stdout);
     }
 
     if (!current_plan_.has_value() || current_plan_->room_path.empty())
@@ -199,7 +169,7 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
         qWarning() << "Controller could not produce a path to target" << step.target.node_name.c_str();
         update_display(step.robot_pose,
                        display,
-                       obstacle_tracker.obstacle_polygons(),
+                       obstacle_tracker.display_obstacle_polygons(),
                        obstacle_tracker.temporary_obstacle_rfe_points(),
                        params_ ? params_->max_lidar_draw_points : 0);
         stop(path_controller, motion_commander);
@@ -214,7 +184,7 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
 
 void ControllerSession::update_display(const std::optional<ControllerRobotPose> &robot_pose,
                                        ControllerDisplay &display,
-                                       const ControllerPolygons &obstacle_polys,
+                                       const ControllerObstacleVisuals &obstacle_polys,
                                        const ControllerPolygons &obstacle_rfe_points,
                                        int max_lidar_draw_points) const
 {

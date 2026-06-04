@@ -16,6 +16,37 @@ namespace rc
 
 namespace
 {
+struct ObstaclePalette
+{
+    QColor pen;
+    QColor fill;
+    QColor center;
+    QColor edge;
+};
+
+ObstaclePalette obstacle_palette(ControllerObstacleKind kind)
+{
+    switch (kind)
+    {
+        case ControllerObstacleKind::Object:
+            return {QColor(17, 92, 138),
+                    QColor(74, 160, 201, 110),
+                    QColor(0, 173, 239, 220),
+                    QColor(10, 68, 103, 235)};
+        case ControllerObstacleKind::Temporary:
+            return {QColor(149, 75, 0),
+                    QColor(219, 143, 67, 150),
+                    QColor(255, 0, 128, 220),
+                    QColor(110, 61, 19, 235)};
+        case ControllerObstacleKind::Obstacle:
+        default:
+            return {QColor(120, 73, 32),
+                    QColor(181, 119, 58, 150),
+                    QColor(255, 0, 128, 220),
+                    QColor(92, 49, 16, 235)};
+    }
+}
+
 Eigen::Vector2f polygon_centroid(const std::vector<Eigen::Vector2f> &verts)
 {
     if (verts.empty())
@@ -434,15 +465,18 @@ void Viewer2D::draw_path(const PathDrawData &data)
 
     if (!data.obstacle_polys.empty())
     {
-        QPen obstacle_pen(QColor(120, 73, 32), 0.085);
-        obstacle_pen.setCosmetic(false);
-        const QBrush obstacle_brush(QColor(181, 119, 58, 150));
-        const QBrush obstacle_center_brush(QColor(255, 0, 128, 220));
-        const QBrush obstacle_edge_brush(QColor(92, 49, 16, 235));
-        for (const auto &obstacle : data.obstacle_polys)
+        for (const auto &obstacle_visual : data.obstacle_polys)
         {
+            const auto &obstacle = obstacle_visual.polygon;
             if (obstacle.size() < 3)
                 continue;
+
+            const auto palette = obstacle_palette(obstacle_visual.kind);
+            QPen obstacle_pen(palette.pen, 0.085);
+            obstacle_pen.setCosmetic(false);
+            const QBrush obstacle_brush(palette.fill);
+            const QBrush obstacle_center_brush(palette.center);
+            const QBrush obstacle_edge_brush(palette.edge);
 
             QPolygonF qpoly;
             for (const auto &vertex : obstacle)
