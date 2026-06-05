@@ -162,6 +162,20 @@ private:
 	// Controller.qp_redundancy_weight: weight on the QP's μ/elbow linear term. ≤0 ⇒ λ²
 	// (projection-equivalent); larger ⇒ genuine NEO soft competition (task slack yields).
 	double qp_redundancy_weight_ = 0.0;
+	// Controller.force_confidence: if ≥0, PIN confidence_ to this every cycle (overrides
+	// learning + decay) for controlled fluidity/skill experiments. <0 ⇒ normal learning.
+	double force_confidence_ = -1.0;
+	// Controller.blend_radius: look-ahead coarticulation radius [m]. Within this distance of
+	// a transit via-point (lift-top, place-hover) the commanded EE velocity is steered toward
+	// the NEXT waypoint so the EE rounds the corner instead of stopping. Effective radius =
+	// skill_c()·this, so it is 0 for a novice (= baseline exact stops) and rounds the corners
+	// as skill rises. 0 = off. Keep ≤ ~0.05 so the lift corner-cut still clears the rise check.
+	double blend_radius_ = 0.0;
+	// Closest-approach tracker for the blended-via gate: a corner-cut never reaches the via
+	// exactly, so a leg with an active blend advances once e_pos passes its minimum (corner
+	// rounded) rather than waiting for e_pos < REACH_TOLERANCE. Reset on entry to each leg.
+	double blend_min_dist_ = 1e9;
+	void   sample_place_spot();   // pick the place spot from latched_grasp_ (called at Closing→Lifting)
 	// Controller.fixed_pick_xy = "x y" (world m): if set, respawn the bottle at this
 	// fixed spot every rep instead of the R2 sweep — for controlled A/B experiments
 	// (hold the pick constant, vary one knob).
@@ -275,6 +289,12 @@ private:
 	std::array<double, Kinematics::N_ARM_JOINTS> last_q_dot_cmd_{};
 	std::ofstream joint_log_;                 // Controller.joint_log_path
 	bool   joint_log_open_  = false;
+	// Per-cycle EE-speed log over the WHOLE pick-place (Controller.fluid_log_path),
+	// for offline fluidity metrics: SPARC (spectral arc length) + stop-count vs
+	// confidence — the "more fluid as skill rises" measurement.
+	std::ofstream fluid_log_;
+	bool   fluid_log_open_  = false;
+	std::optional<Eigen::Vector3d> fluid_prev_pos_;
 	long   joint_log_cycle_ = 0;
 	void   begin_rep_probe();                                       // new attempt → next perturbation
 	void   log_rep_outcome(bool success, double rise, double xy_gap); // one CSV row

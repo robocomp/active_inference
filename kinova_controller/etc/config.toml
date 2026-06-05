@@ -39,6 +39,15 @@ solver = "qp"
 # null-space projection (redundancy strictly off the task). Larger ⇒ genuine NEO: μ/elbow
 # assert in the objective and the task slack yields. Try ~0.05–0.2 to A/B the difference.
 qp_redundancy_weight = 0.0
+force_confidence = -1.0   # normal learning
+# Look-ahead coarticulation: within this radius (m) of a transit via-point (lift-top,
+# place-hover) the EE velocity is steered toward the NEXT waypoint so it ROUNDS the corner
+# instead of stopping. Effective = skill_c()·this (0 for novice = baseline exact stops).
+# Usable band is REACH_TOLERANCE(0.02) < r ≲ 0.05: below 0.02 the gate fires before the
+# blend acts (inert); above ~0.05 the lift corner-cut nears the rise confirm and speed
+# carried into the set-down hurts SPARC. 0.04 = swept optimum (skilled-rep J=time−SPARC
+# best of {0,0.02,0.04,0.06}; SPARC −5.48→−4.77, cycle 6.1→5.3s, success 19/20). 0 = off.
+blend_radius = 0.04
 elbow_gain = 2.0
 elbow_target_xy = ""
 fixed_pick_xy = ""
@@ -54,13 +63,15 @@ rest_pose = "0.30 0.80 1.50 -2.101 0.651 -1.02 3.141"
 # yields the grasp-pose bias, the actuation response, and the per-region tolerance
 # budget needed to move from closed-loop to model-based open-loop reaching.
 # Leave probe_variations = false for a plain round (zero perturbation).
-probe_variations = true
+probe_variations = true       # PROBE ROUND
 probe_pos_amp    = 0.015      # m,   half-range of tangential/axial grasp offset
 probe_azi_amp    = 0.15       # rad, half-range of approach-azimuth rotation
 probe_speed_amp  = 0.25       # ±fraction of nominal approach/insert speed
 dataset_path     = "/tmp/kinova_skill_dataset.csv"
 # Per-cycle commanded-vs-measured joint velocity log (for the actuation model G, τ).
 joint_log_path   = "/tmp/kinova_joint_actuation.csv"
+# Per-cycle EE speed over the whole pick-place → offline SPARC + stop-count (fluidity).
+fluid_log_path   = "/tmp/kinova_fluidity.csv"
 
 # ── Precision re-weighting: novice→skilled (closed-loop → model-based open-loop) ──
 # Drives the grasp target as a precision-weighted fusion of observation (Π_s) and
@@ -68,7 +79,7 @@ joint_log_path   = "/tmp/kinova_joint_actuation.csv"
 # high confidence ⇒ sample the bottle less (EFE schedule) and move faster. Persisted.
 precision_reweighting = true       # true → enable the transition
 perception_noise_std  = 0.0        # m, σ of injected bottle-observation noise (sim2real; 0 = ideal sim)
-conf_gain             = 0.15       # confidence += this per confirmed grasp
+conf_gain             = 0.15       # normal
 skilled_sample_period = 12         # cycles between observations at full confidence
 speed_conf_gain       = 0.6        # approach speed ×(1+this·confidence) — "more speed" when skilled
 # Skill-scheduled FSM geometry/timing (turns "fewer observations" into "less time"):

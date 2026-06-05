@@ -213,9 +213,24 @@ std::array<double, Kinematics::N_ARM_JOINTS> efe_gradient_step(
     const double dist   = err_pos.norm();
     const double w_norm = weighted_dir.norm();
     Eigen::Vector3d v_des = Eigen::Vector3d::Zero();
-    if (dist > params.arrive_deadband and w_norm > 1e-9)
+    if (params.blend_next.has_value() and params.blend_radius > 0.0 and dist < params.blend_radius)
+    {
+        // Coarticulation: inside the blend zone rotate the commanded velocity from "into
+        // this via" toward "toward the next waypoint" at cruise, so the direction is
+        // CONTINUOUS through the corner — the EE rounds it instead of stopping. s goes 1 at
+        // the zone edge → 0 at the via, so v_des goes dir_in → dir_out (tangent at the via).
+        const Eigen::Vector3d dir_out = (params.blend_next.value() - x_target).normalized();  // via → next
+        const Eigen::Vector3d dir_in  = (dist > 1e-9) ? (-err_pos / dist) : dir_out;          // EE → via
+        const double s = std::clamp(dist / params.blend_radius, 0.0, 1.0);
+        const Eigen::Vector3d blended = s * dir_in + (1.0 - s) * dir_out;
+        const double bn = blended.norm();
+        if (bn > 1e-9)
+            v_des = params.v_approach * (blended / bn);
+    }
+    else if (dist > params.arrive_deadband and w_norm > 1e-9)
     {
         const double reach = dist - params.arrive_deadband;
+        // Shifted √ ramp decelerating to ZERO at the deadband edge: a precise terminal stop.
         const double v_mag = std::min(params.v_approach,
                                       std::sqrt(2.0 * params.a_approach * reach));
         v_des = -v_mag * (weighted_dir / w_norm);

@@ -3,6 +3,7 @@
 #include "kinematics.h"
 #include <Eigen/Dense>
 #include <array>
+#include <optional>
 
 /**
  * Continuous-action EFE-gradient controller for the Kinova arm.
@@ -140,6 +141,18 @@ struct EFEParams
      *  a_approach→∞, v_approach→∞ recovers the old raw-error gradient. */
     double v_approach = 0.15;  ///< Cartesian cruise-speed cap [m/s]
     double a_approach = 0.15;  ///< deceleration [m/s²]; decel zone = v_approach²/(2·a_approach)
+
+    /** Look-ahead coarticulation. When `blend_next` is set and the EE is within
+     *  `blend_radius` of the current target (a transit via-point), the COMMANDED velocity
+     *  is steered continuously from "toward this via" to "toward the next waypoint" at
+     *  cruise — so the EE rounds the corner instead of decelerating to 0 here and reversing
+     *  direction at the next leg's handoff. (A scalar terminal speed pointed at THIS via,
+     *  as an earlier carry-through did, leaves a velocity the next leg must cancel — adding
+     *  the corner it meant to remove; steering toward the NEXT waypoint removes it.)
+     *  No `blend_next` or `blend_radius`=0 ⇒ the original √-to-zero stop (precise terminal
+     *  goal). Skill-gated by the caller (inert for a novice), so the A/B baseline is intact. */
+    std::optional<Eigen::Vector3d> blend_next;
+    double blend_radius = 0.0;
 
     /** Hold zone. The √ deceleration profile has INFINITE slope at the origin,
      *  so without a deadband a sub-mm error still commands several cm/s and the

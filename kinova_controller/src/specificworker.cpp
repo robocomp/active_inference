@@ -189,6 +189,10 @@ void SpecificWorker::initialize()
     // joint-limit / obstacle terms to hard constraints. See EFE_CONTROLLER_MATH.md §4.
     try { use_qp_ = (configLoader.get<std::string>("Controller.solver") == "qp"); } catch (...) {}
     try { qp_redundancy_weight_ = configLoader.get<double>("Controller.qp_redundancy_weight"); } catch (...) {}
+    try { force_confidence_ = configLoader.get<double>("Controller.force_confidence"); } catch (...) {}
+    try { blend_radius_ = configLoader.get<double>("Controller.blend_radius"); } catch (...) {}
+    if (force_confidence_ >= 0.0)
+        std::print("[experiment] confidence PINNED at {:.2f} (overrides learning/decay)\n", force_confidence_);
     try {
         std::istringstream fp(configLoader.get<std::string>("Controller.fixed_pick_xy"));
         double fx, fy;
@@ -245,6 +249,20 @@ void SpecificWorker::initialize()
                 for (int i = 0; i < Kinematics::N_ARM_JOINTS; ++i) joint_log_ << ",qd_meas" << i;
                 joint_log_ << '\n';
                 std::print("[probe] joint-q̇ actuation log → {}\n", jpath);
+            }
+        }
+    } catch (...) {}
+    try
+    {
+        const auto fpath = configLoader.get<std::string>("Controller.fluid_log_path");
+        if (not fpath.empty())
+        {
+            fluid_log_.open(fpath, std::ios::out | std::ios::trunc);
+            if (fluid_log_.is_open())
+            {
+                fluid_log_open_ = true;
+                fluid_log_ << "rep,confidence,phase,ee_speed\n";   // one row per ActiveEFE cycle
+                std::print("[fluid] per-cycle EE-speed log → {}\n", fpath);
             }
         }
     } catch (...) {}
@@ -628,6 +646,42 @@ void SpecificWorker::save_confidence()
     if (f) f << confidence_ << '\n';
 }
 
+void SpecificWorker::sample_place_spot()
+{
+    // Sampled at Closing→Lifting (was: at lift-confirm) so place_hover_ is known DURING the
+    // lift — the look-ahead blend needs the next waypoint while still rising. Picks a spot on
+    // the RIGHT-side table box (world frame, up=+Z, table horizontal): (a) ≥ PLACE_MIN_MOVE_M
+    // from the pick and (b) within reach (≤ PLACE_REACH_MAX_M), at the grasp height so the
+    // bottle base sets back on the table. R2 (Roberts) low-discrepancy, first valid draw, the
+    // index offset off the spawn stream so pick and place spots don't correlate.
+    const auto& g = latched_grasp_;
+    const Eigen::Vector3d up(0.0, 0.0, 1.0);
+    constexpr double a1 = 0.7548776662466927, a2 = 0.5698402909980532;
+    const Eigen::Vector3d base_xyz = arm_base_world_.translation();
+    Eigen::Vector3d p = g.grasp_pos;
+    for (int k = 0; k < 24; ++k)
+    {
+        const double idx = static_cast<double>(probe_index_ + 104729 + k * 11939);
+        const double uu = std::fmod(0.5 + a1 * idx, 1.0);
+        const double vv = std::fmod(0.5 + a2 * idx, 1.0);
+        const Eigen::Vector3d c(PLACE_X_MIN + uu * (PLACE_X_MAX - PLACE_X_MIN),
+                                PLACE_Y_MIN + vv * (PLACE_Y_MAX - PLACE_Y_MIN),
+                                g.grasp_pos.z());
+        const double far_from_pick = (c.head<2>() - g.grasp_pos.head<2>()).norm();
+        const double reach = (c - base_xyz).norm();
+        if (far_from_pick >= PLACE_MIN_MOVE_M and reach <= PLACE_REACH_MAX_M) { p = c; break; }
+    }
+    place_pos_      = p;
+    place_world_xy_ = p;                       // for the retreat dataset
+    place_hover_    = p + up * LIFT_HEIGHT_M;
+    // Side approach re-pointed toward the place spot, bottle upright (tool +Z horizontal
+    // toward the spot, tool +Y = up).
+    Eigen::Vector3d radial = place_pos_ - arm_base_world_.translation();
+    radial.z() = 0.0;
+    place_z_des_ = (radial.norm() > 1e-6) ? radial.normalized() : g.z_tool_des;
+    place_x_des_ = up.cross(place_z_des_).normalized();
+}
+
 void SpecificWorker::begin_rep_probe()
 {
     // Called once at the start of each pick attempt. Advances the low-discrepancy
@@ -636,6 +690,7 @@ void SpecificWorker::begin_rep_probe()
     rep_track_ticks_ = 0;
     rep_attempts_    = 0;
     track_stuck_ticks_ = 0;
+    fluid_prev_pos_.reset();   // don't carry EE speed across the homing gap between reps
     // Reset the per-rep fusion belief + metrics. cycles_since_obs_ large ⇒ the first
     // Tracking cycle takes an observation to seed the model belief.
     belief_valid_     = false;
@@ -924,6 +979,21 @@ void SpecificWorker::compute()
         if (arm_belief_viewer_)
             arm_belief_viewer_->update_beliefs(q, viewer_link_poses, reach_target_, ee_position);
 
+        if (force_confidence_ >= 0.0) confidence_ = force_confidence_;  // controlled experiments: pin
+
+        // Fluidity instrumentation: one row per ActiveEFE cycle (rep, confidence, FSM
+        // sub-phase, EE speed). Offline → SPARC + stop-count over the whole pick-place,
+        // measured against confidence. fluid_prev_pos_ is reset at each rep start.
+        if (fluid_log_open_ and phase_ == Phase::ActiveEFE)
+        {
+            const double dt = std::max(1, getPeriod("Compute")) / 1000.0;
+            const double sp = fluid_prev_pos_.has_value()
+                ? (ee_position - fluid_prev_pos_.value()).norm() / dt : 0.0;
+            fluid_log_ << (probe_index_ - 1) << ',' << confidence_ << ','
+                       << static_cast<int>(grasp_phase_) << ',' << sp << '\n';
+            fluid_prev_pos_ = ee_position;
+        }
+
         if (joint_dump_pending_)
         {
             std::print("[joint-dump] received {} joints from KinovaArm proxy\n", js.joints.size());
@@ -1146,10 +1216,15 @@ void SpecificWorker::compute()
         const auto drive = [&](const Eigen::Vector3d& target,
                                const Eigen::Vector3d& z_des,
                                const Eigen::Vector3d& x_des,
-                               double v_app) -> std::pair<double, double>
+                               double v_app,
+                               std::optional<Eigen::Vector3d> blend_next = std::nullopt) -> std::pair<double, double>
         {
             reach_target_ = target;
-            const EFEParams params = make_params(z_des, x_des, v_app);
+            EFEParams params = make_params(z_des, x_des, v_app);
+            // Look-ahead coarticulation at a transit via-point: steer toward `blend_next`
+            // within a skill-gated radius (inert for a novice ⇒ exact terminal stop).
+            params.blend_next   = blend_next;
+            params.blend_radius = blend_next.has_value() ? skill_c() * blend_radius_ : 0.0;
             const auto q_dot = efe_gradient_step(*kinematics_, q, reach_target_, params);
             RoboCompKinovaArm::TJointSpeeds cmd;
             cmd.jointSpeeds.assign(q_dot.begin(), q_dot.end());
@@ -1216,6 +1291,19 @@ void SpecificWorker::compute()
                 ++tip_log_cycle_;
             }
             return {e_pos, e_ang};
+        };
+
+        // Arrival gate for a transit leg whose drive() has an active look-ahead blend. A
+        // rounded corner never reaches the via exactly, so advance once the distance to the
+        // via passes its minimum (corner rounded). With no blend (novice, or blend off) the
+        // min keeps falling to the target and this reduces to the plain e_pos<REACH gate.
+        // blend_min_dist_ is reset to 1e9 on entry to each blended leg.
+        const auto via_reached = [&](double e_pos) -> bool
+        {
+            const double br = skill_c() * blend_radius_;
+            blend_min_dist_ = std::min(blend_min_dist_, e_pos);
+            if (e_pos < REACH_TOLERANCE_M) return true;
+            return br > 0.0 and e_pos < br and e_pos > blend_min_dist_ + 1e-4;
         };
 
         // Largest finger/tip force from the gripper; 0 if the proxy hiccups.
@@ -1428,6 +1516,9 @@ void SpecificWorker::compute()
                 const double c = skill_c();
                 const Eigen::Vector3d track_target =
                     g.grasp_pos + (g.stand_off_pos - g.grasp_pos) * (1.0 - standoff_collapse_ * c);
+                // No coarticulation here: standoff→grasp is collinear (not a corner) and
+                // ends in a precision contact needing alignment — its smoothness is the
+                // standoff_collapse merge's job, not the look-ahead blend's.
                 const auto [e_pos, e_ang] =
                     drive(track_target, g.z_tool_des, g.x_tool_des, 0.35 * vscale);
 
@@ -1516,6 +1607,8 @@ void SpecificWorker::compute()
                     grasp_force_ticks_     = 0;
                     lift_ticks_            = 0;   // start the lift watchdog
                     bottle_z_at_lift_start_ = bottle_pos_world_.z();  // baseline for lift-confirm
+                    sample_place_spot();          // choose place_hover_ NOW so Lifting can blend toward it
+                    blend_min_dist_        = 1e9; // fresh closest-approach tracker for the Lift corner
                     std::print("[grasp] contact (f={:.2f}, held {} cy) → Lifting (will confirm by bottle rise)\n",
                                f, GRASP_FORCE_HOLD_TICKS);
                 }
@@ -1533,9 +1626,10 @@ void SpecificWorker::compute()
                 const auto& g = latched_grasp_;
                 gripper_command_ = 0.0f;  // keep holding the bottle
                 const auto [e_pos, e_ang] =
-                    drive(lift_target_, g.z_tool_des, g.x_tool_des, skilled_speed(0.20));
+                    drive(lift_target_, g.z_tool_des, g.x_tool_des, skilled_speed(0.20),
+                          place_hover_);   // look-ahead blend: round the up→lateral corner into PlaceMoving
                 (void) e_ang;
-                if (e_pos < REACH_TOLERANCE_M)
+                if (via_reached(e_pos))
                 {
                     // ── Authoritative grasp confirmation ──────────────────────────
                     // The gripper is now LIFT_HEIGHT_M above the grasp point. If the
@@ -1585,44 +1679,11 @@ void SpecificWorker::compute()
                                    mast_clr, elb.x(), elb.y(), elb.z());
                     }
                     lift_ticks_ = 0;
-                    // Pick a place spot on the RIGHT side of the table (world box),
-                    // ≥ PLACE_MIN_MOVE_M from the pick. We run in world frame, so
-                    // up = +Z and the table is horizontal: keep the EE at the grasp
-                    // height (grasp_pos.z) so the bottle base sets back on the table.
-                    const Eigen::Vector3d up(0.0, 0.0, 1.0);
-                    // Sample a place spot that is (a) ≥ PLACE_MIN_MOVE_M from the pick and
-                    // (b) within reach (≤ PLACE_REACH_MAX_M). Use the R2 (Roberts)
-                    // low-discrepancy sequence — one fresh point per rep — and ACCEPT THE
-                    // FIRST VALID draw, so placements cover the reachable box uniformly
-                    // across a round instead of clustering at the distant reach edge. The
-                    // index is offset off the spawn's R2 stream so pick and place spots
-                    // don't correlate.
-                    constexpr double a1 = 0.7548776662466927, a2 = 0.5698402909980532;
-                    const Eigen::Vector3d base_xyz = arm_base_world_.translation();
-                    Eigen::Vector3d p = g.grasp_pos;
-                    for (int k = 0; k < 24; ++k)
-                    {
-                        const double idx = static_cast<double>(probe_index_ + 104729 + k * 11939);
-                        const double uu = std::fmod(0.5 + a1 * idx, 1.0);
-                        const double vv = std::fmod(0.5 + a2 * idx, 1.0);
-                        const Eigen::Vector3d c(PLACE_X_MIN + uu * (PLACE_X_MAX - PLACE_X_MIN),
-                                                PLACE_Y_MIN + vv * (PLACE_Y_MAX - PLACE_Y_MIN),
-                                                g.grasp_pos.z());
-                        const double far_from_pick = (c.head<2>() - g.grasp_pos.head<2>()).norm();
-                        const double reach = (c - base_xyz).norm();
-                        if (far_from_pick >= PLACE_MIN_MOVE_M and reach <= PLACE_REACH_MAX_M) { p = c; break; }
-                    }
-                    place_pos_   = p;
-                    place_world_xy_ = p;                 // for the retreat dataset
-                    place_hover_ = p + up * LIFT_HEIGHT_M;
-                    // Side approach re-pointed toward the place spot, bottle upright
-                    // (tool +Z horizontal toward the spot, tool +Y = up).
-                    Eigen::Vector3d radial = place_pos_ - arm_base_world_.translation();
-                    radial.z() = 0.0;
-                    place_z_des_ = (radial.norm() > 1e-6) ? radial.normalized() : g.z_tool_des;
-                    place_x_des_ = up.cross(place_z_des_).normalized();
+                    // place_pos_/place_hover_ were already sampled at Closing→Lifting so the
+                    // lift could blend toward the hover; just hand over to PlaceMoving here.
                     grasp_phase_ = GraspPhase::PlaceMoving;
                     place_ticks_ = 0;
+                    blend_min_dist_ = 1e9;   // fresh closest-approach tracker for the PlaceMoving corner
                     std::print("[place] lifted → carry to right-side spot ({:.3f},{:.3f},{:.3f}) → PlaceMoving\n",
                                place_pos_.x(), place_pos_.y(), place_pos_.z());
                 }
@@ -1642,9 +1703,10 @@ void SpecificWorker::compute()
             {
                 gripper_command_ = 0.0f;  // hold the bottle
                 const auto [e_pos, e_ang] =
-                    drive(place_hover_, place_z_des_, place_x_des_, skilled_speed(0.20));
+                    drive(place_hover_, place_z_des_, place_x_des_, skilled_speed(0.20),
+                          place_pos_);   // look-ahead blend: round the lateral→down corner into PlaceLowering
                 (void) e_ang;
-                if (e_pos < REACH_TOLERANCE_M or ++place_ticks_ > PLACE_TIMEOUT_TICKS)
+                if (via_reached(e_pos) or ++place_ticks_ > PLACE_TIMEOUT_TICKS)
                 {
                     grasp_phase_ = GraspPhase::PlaceLowering;
                     place_ticks_ = 0;
