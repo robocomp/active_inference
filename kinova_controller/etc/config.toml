@@ -48,6 +48,39 @@ force_confidence = -1.0   # normal learning
 # carried into the set-down hurts SPARC. 0.04 = swept optimum (skilled-rep J=time−SPARC
 # best of {0,0.02,0.04,0.06}; SPARC −5.48→−4.77, cycle 6.1→5.3s, success 19/20). 0 = off.
 blend_radius = 0.04
+# ── Preference-field mode (option (c) prototype, steps 1–2) ───────────────────────────
+# Replace the hand-coded look-ahead blend on the transit legs with a 2-via Gaussian-mixture
+# preference field. ONE precision per via expresses stop-vs-pass: λ=exp(−Π/ref) is the
+# terminal-speed fraction at the via. The current transit via's Π interpolates stop→pass
+# with skill: novice ⇒ field_prec_stop ⇒ exact stop (PARITY with the discrete leg, step 1);
+# skilled ⇒ field_prec_pass ⇒ cruise-through (EMERGENT blend, step 2). A/B: leave false to
+# use the committed blend; set true to drive the same legs from the field instead. To check
+# step-1 parity in isolation, set field_prec_pass = field_prec_stop (always-stop).
+use_preference_field = false
+field_prec_pass = 1.0     # Π of a transit via at full skill (low ⇒ pass through)
+field_prec_stop = 30.0    # Π at novice / of the next attractor (high ⇒ stop)
+field_prec_ref  = 6.0     # λ = exp(−Π/ref): precision → terminal-speed map
+field_overlap   = 0.06    # [m] RBF width: how near the via the next-via pull ramps in
+# ── Tactile re-centering (anti-tip grasp) ─────────────────────────────────────────────
+# Use the per-finger fingertip tip-force asymmetry (ltipforce−rtipforce) during Inserting to
+# shift the seat target laterally toward the harder-pushing finger, centring the bottle
+# between the pads instead of pushing it over, and commit to Closing only when seated AND not
+# pushing. Off ⇒ the old gate (commit on any single contact). recenter_sign maps the L/R
+# force-asymmetry sign onto tool +X — flip it if re-centring makes tipping worse.
+tactile_recenter = false
+recenter_gain    = 0.02   # [m] max lateral seat shift at full L/R asymmetry
+recenter_sign    = 1.0    # ±1: calibrate in sim
+# Stop-and-rectify reflex on a tip-BUMPER collision during Inserting: halt, back off, and
+# shift laterally toward the contacting finger so the object enters the gripper on retry.
+# Needs the tip bumpers + TGripper.{l,r}tipcontact. recenter_sign also flips this reflex's
+# lateral direction — if it makes misalignment worse, flip the sign.
+tip_reflex = false
+# ── Bottle-as-obstacle (approach safety) ──────────────────────────────────────────────
+# Treat the target bottle as a soft cylinder obstacle for the TOOL during the FIRST
+# (Tracking) phase only, so the gripper rounds to the standoff without clipping/tipping it.
+# OFF from Inserting on (the grasp must move into the bottle). QP solver only.
+bottle_obstacle        = false
+bottle_obstacle_margin = 0.04   # [m] repel within this distance of the bottle surface
 elbow_gain = 2.0
 elbow_target_xy = ""
 fixed_pick_xy = ""
@@ -56,6 +89,7 @@ round_cycles = 20
 # here without recompiling; relaunch to apply. Startup prints [rest-pose] metrics
 # (EE pos, upperarm_dz≈0 = first link parallel to table, toolY_up≈+1 = camera up).
 rest_pose = "0.30 0.80 1.50 -2.101 0.651 -1.02 3.141"
+grasp_align_tol_deg = 8.0   # final-orientation tolerance to commit the grasp (relaxed from 5.7° to reduce approach oscillation)
 
 # ── Skill-learning instrumentation ───────────────────────────────────────────
 # Probe each pick with a small STRUCTURED perturbation of the grasp command
@@ -98,6 +132,7 @@ respawn_each_rep = true
 # upright bottle), started only once the fingers are confirmed open. Explore the timing/
 # speed per rep and score by the bottle's post-retreat tilt to LEARN a tip-free retreat.
 retreat_speed     = 0.18        # m/s — envelope showed tip-free to 0.20
+release_ticks     = 8           # cycles opening-in-place before the retreat latches (overlaps the open); was 25
 gripper_open_conf = 0.85        # gs.opening ≥ this ⇒ fingers clear → safe to move
 probe_retreat     = false       # exploration done; retreat envelope is wide-open
 probe_rspeed_amp  = 0.8         # speed sweep 0.024..0.216 m/s

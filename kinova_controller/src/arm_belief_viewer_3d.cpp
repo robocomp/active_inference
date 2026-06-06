@@ -13,6 +13,8 @@
 #include <QOpenGLVertexArrayObject>
 #include <QOpenGLWidget>
 #include <QMouseEvent>
+#include <QPainter>
+#include <QPen>
 #include <QPushButton>
 #include <QVBoxLayout>
 #include <QWheelEvent>
@@ -804,6 +806,99 @@ private:
     }
 };
 
+// Rolling time-series of the gripper sensors under the 3D view: 4 autoscaled force channels
+// (motor grip L/R + fingertip tactile L/R) plus 2 BINARY tip-bumper contacts drawn as steps
+// in a strip at the top — a step = the distal tip touched the object (misaligned approach).
+// Fixed ring buffer + polylines; no QtCharts dependency.
+class ArmBeliefViewer3D::ForcePlot : public QWidget
+{
+public:
+    explicit ForcePlot(QWidget* parent = nullptr) : QWidget(parent)
+    {
+        setMinimumHeight(130);
+        setMaximumHeight(170);
+    }
+    // Channels 0..3 = forces (N), 4..5 = tip contacts (0/1).
+    void push(float l, float r, float ltip, float rtip, float lcontact, float rcontact)
+    {
+        const std::array<float, NCH> s{l, r, ltip, rtip, lcontact, rcontact};
+        for (int c = 0; c < NCH; ++c)
+            buf_[c][head_] = s[c];
+        head_ = (head_ + 1) % CAP;
+        if (count_ < CAP) ++count_;
+        update();   // schedule repaint
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override
+    {
+        QPainter p(this);
+        const int W = width(), H = height();
+        p.fillRect(rect(), QColor(20, 20, 24));
+        p.setPen(QColor(60, 60, 70));
+        p.drawLine(0, H - 1, W, H - 1);                 // force baseline
+        p.drawLine(0, STRIP_H, W, STRIP_H);             // strip divider
+
+        const int last = (head_ - 1 + CAP) % CAP;
+        const auto xof = [&](int i) { return (count_ > 1) ? float(i) / (count_ - 1) * (W - 1) : 0.0f; };
+
+        // ── Top strip: the two binary tip-bumper contacts, as steps (0 = low, 1 = up) ──
+        static const QColor ccol[2] = {QColor(0, 230, 230), QColor(255, 0, 200)};
+        static const char*  cnm[2]  = {"Ltip-contact", "Rtip-contact"};
+        for (int k = 0; k < 2; ++k)
+        {
+            const int c = 4 + k;
+            const float lo = (k == 0) ? STRIP_H - 3.0f : STRIP_H - 3.0f;  // both ride the strip floor
+            const float hi = 3.0f;
+            p.setPen(QPen(ccol[k], 1.6));
+            QPointF prev;
+            for (int i = 0; i < count_; ++i)
+            {
+                const int idx = (head_ - count_ + i + CAP) % CAP;
+                const float y = (buf_[c][idx] > 0.5f) ? hi + k * 2 : lo - k * 2;  // tiny offset so both visible
+                const QPointF pt(xof(i), y);
+                if (i > 0) p.drawLine(prev, pt);
+                prev = pt;
+            }
+            const bool on = count_ and buf_[c][last] > 0.5f;
+            p.drawText(6 + k * 100, STRIP_H - 4, QString(cnm[k]) + (on ? " ON" : " -"));
+        }
+
+        // ── Force region (below the strip): 4 autoscaled channels ──
+        float fmax = 1e-3f;
+        for (int c = 0; c < 4; ++c)
+            for (int i = 0; i < count_; ++i)
+                fmax = std::max(fmax, std::abs(buf_[c][i]));
+        static const QColor col[4] = {QColor(80, 160, 255), QColor(255, 120, 120),
+                                      QColor(120, 255, 160), QColor(255, 210, 90)};
+        static const char*  nm[4]  = {"Lforce", "Rforce", "Ltip", "Rtip"};
+        for (int c = 0; c < 4; ++c)
+        {
+            p.setPen(QPen(col[c], 1.5));
+            QPointF prev;
+            for (int i = 0; i < count_; ++i)
+            {
+                const int   idx = (head_ - count_ + i + CAP) % CAP;
+                const float y   = (H - 3) - std::abs(buf_[c][idx]) / fmax * (H - STRIP_H - 16);
+                const QPointF pt(xof(i), y);
+                if (i > 0) p.drawLine(prev, pt);
+                prev = pt;
+            }
+            p.drawText(6, STRIP_H + 13 + c * 12,
+                       QString("%1 %2").arg(nm[c]).arg(count_ ? buf_[c][last] : 0.0f, 0, 'f', 2));
+        }
+        p.setPen(QColor(150, 150, 160));
+        p.drawText(W - 78, STRIP_H + 13, QString("max %1 N").arg(fmax, 0, 'f', 1));
+    }
+
+private:
+    static constexpr int CAP    = 300;   // ~6 s at the 50 Hz compute rate
+    static constexpr int NCH    = 6;     // 4 forces + 2 contacts
+    static constexpr int STRIP_H = 26;   // px: top strip height for the contact steps
+    std::array<std::array<float, CAP>, NCH> buf_{};
+    int head_ = 0, count_ = 0;
+};
+
 ArmBeliefViewer3D::ArmBeliefViewer3D(QWidget* parent)
     : QWidget(parent)
 {
@@ -828,11 +923,22 @@ ArmBeliefViewer3D::ArmBeliefViewer3D(QWidget* parent)
     gl_panel_ = new GLPanel(this);
     status_label_ = new QLabel("Waiting for first belief update...", this);
     status_label_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    force_plot_ = new ForcePlot(this);
 
     main_layout->addWidget(title);
     main_layout->addWidget(start_button_);
     main_layout->addWidget(gl_panel_, 1);
     main_layout->addWidget(status_label_);
+    main_layout->addWidget(force_plot_);
+}
+
+void ArmBeliefViewer3D::update_forces(float lforce, float rforce,
+                                      float ltipforce, float rtipforce,
+                                      bool ltipcontact, bool rtipcontact)
+{
+    if (force_plot_ != nullptr)
+        force_plot_->push(lforce, rforce, ltipforce, rtipforce,
+                          ltipcontact ? 1.0f : 0.0f, rtipcontact ? 1.0f : 0.0f);
 }
 
 ArmBeliefViewer3D::~ArmBeliefViewer3D() = default;
@@ -864,13 +970,12 @@ void ArmBeliefViewer3D::update_beliefs(const std::array<double, 7>& joint_angles
     if (gl_panel_ != nullptr)
         gl_panel_->set_beliefs(link_poses, target, ee_position);
 
+    (void) joint_angles;   // q-values dropped from the label: their varying widths/signs
+                           // jittered the layout each frame. Show only the (fixed-width) error.
     if (status_label_ != nullptr)
     {
         const double err = (ee_position - target).norm();
-        status_label_->setText(QString::asprintf(
-            "q1 %.2f  q2 %.2f  q3 %.2f  q4 %.2f  q5 %.2f  q6 %.2f  q7 %.2f   |err| %.3f m",
-            joint_angles[0], joint_angles[1], joint_angles[2], joint_angles[3],
-            joint_angles[4], joint_angles[5], joint_angles[6], err));
+        status_label_->setText(QString::asprintf("|err| %6.3f m", err));
     }
 }
 

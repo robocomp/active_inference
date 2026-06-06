@@ -44,8 +44,8 @@ SET (SOURCES
 
 #ROBOCOMP
 ROBOCOMP_INITIALIZE( $ENV{ROBOCOMP}/ )
-ROBOCOMP_IDSL_TO_ICE(KinovaArm Webots2Robocomp Gridder)
-ROBOCOMP_ICE_TO_SRC(KinovaArm Webots2Robocomp Gridder)
+ROBOCOMP_IDSL_TO_ICE(KinovaArm Gridder Webots2Robocomp)
+ROBOCOMP_ICE_TO_SRC(KinovaArm Gridder Webots2Robocomp)
 SET (EXECUTABLE_OUTPUT_PATH ${RC_COMPONENT_DEVEL_PATH}/bin)
 
 # Specify construction and link process

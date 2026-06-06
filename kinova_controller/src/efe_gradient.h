@@ -154,6 +154,24 @@ struct EFEParams
     std::optional<Eigen::Vector3d> blend_next;
     double blend_radius = 0.0;
 
+    /** Preference-field mode (option (c) prototype, steps 1–2). When `use_field` and
+     *  `blend_next` are set, v_des is the natural-gradient resultant of a 2-via Gaussian
+     *  mixture preference over {current via μ_c=x_target with precision `prec_current`,
+     *  next via μ_n=blend_next with precision `prec_next`}. ONE precision per via expresses
+     *  BOTH stop-vs-pass and straight-vs-bend, via λ_c = exp(−prec_current/prec_ref) ∈ (0,1]
+     *  ("pass-throughness"):
+     *    • high prec_current ⇒ λ_c→0 ⇒ terminal speed→0 and heading→straight at μ_c
+     *      = the √-to-zero STOP (parity with the discrete FSM leg, step 1);
+     *    • low  prec_current ⇒ λ_c→~1 ⇒ cruise terminal speed and heading bends toward μ_n
+     *      = the look-ahead BLEND, emergent (step 2).
+     *  `field_overlap` [m] localizes how near μ_c the next-via pull ramps in (the RBF width
+     *  standing in for the phase variable τ of step 3). use_field=false ⇒ the blend/√ paths. */
+    bool   use_field    = false;
+    double prec_current = 30.0;   ///< Π_c of the current via (high ⇒ stop, low ⇒ pass through)
+    double prec_next    = 30.0;   ///< Π_n of the next via (the attractor steered toward)
+    double prec_ref     = 6.0;    ///< sets λ_c=exp(−Π_c/prec_ref): the precision→terminal-speed map
+    double field_overlap = 0.06;  ///< [m] RBF width: how near μ_c the next-via pull ramps in
+
     /** Hold zone. The √ deceleration profile has INFINITE slope at the origin,
      *  so without a deadband a sub-mm error still commands several cm/s and the
      *  arm dithers/limit-cycles at the goal (amplified by target-pose noise) —
@@ -213,6 +231,19 @@ struct EFEParams
     double          gain_table = 0.0;
     double          table_z    = 0.0;
     double          table_safe = 0.05;
+
+    /** Bottle-as-obstacle (approach safety). A finite vertical cylinder (axis bottle_xy,
+     *  radius bottle_radius, z∈[bottle_z_lo,bottle_z_hi]) that bounds the TOOL's radial
+     *  approach speed so the gripper can't clip/tip the target bottle. The caller enables
+     *  it (gain_bottle>0) ONLY in the first/approach phase, where the tool goes to the
+     *  standoff (outside the cylinder); it is OFF from Inserting on, when the gripper must
+     *  move into the bottle to grasp. */
+    double          gain_bottle  = 0.0;
+    Eigen::Vector2d bottle_xy{0.0, 0.0};
+    double          bottle_radius = 0.04;
+    double          bottle_z_lo   = 0.0;
+    double          bottle_z_hi   = 0.25;
+    double          bottle_margin = 0.04;
 };
 
 /**

@@ -191,6 +191,29 @@ void SpecificWorker::initialize()
     try { qp_redundancy_weight_ = configLoader.get<double>("Controller.qp_redundancy_weight"); } catch (...) {}
     try { force_confidence_ = configLoader.get<double>("Controller.force_confidence"); } catch (...) {}
     try { blend_radius_ = configLoader.get<double>("Controller.blend_radius"); } catch (...) {}
+    try { use_preference_field_ = configLoader.get<bool>  ("Controller.use_preference_field"); } catch (...) {}
+    try { field_prec_pass_      = configLoader.get<double>("Controller.field_prec_pass"); } catch (...) {}
+    try { field_prec_stop_      = configLoader.get<double>("Controller.field_prec_stop"); } catch (...) {}
+    try { field_prec_ref_       = configLoader.get<double>("Controller.field_prec_ref");  } catch (...) {}
+    try { field_overlap_        = configLoader.get<double>("Controller.field_overlap");   } catch (...) {}
+    if (use_preference_field_)
+        std::print("[field] preference-field mode ON (prec pass={:.1f} stop={:.1f} ref={:.1f} overlap={:.3f})\n",
+                   field_prec_pass_, field_prec_stop_, field_prec_ref_, field_overlap_);
+    try { tactile_recenter_ = configLoader.get<bool>  ("Controller.tactile_recenter"); } catch (...) {}
+    try { recenter_gain_    = configLoader.get<double>("Controller.recenter_gain");    } catch (...) {}
+    try { recenter_sign_    = configLoader.get<double>("Controller.recenter_sign");    } catch (...) {}
+    if (tactile_recenter_)
+        std::print("[tactile] anti-tip re-centering ON (gain={:.3f} m, sign={:+.0f})\n",
+                   recenter_gain_, recenter_sign_);
+    try { tip_reflex_             = configLoader.get<bool>  ("Controller.tip_reflex");              } catch (...) {}
+    if (tip_reflex_)
+        std::print("[reflex] tip-bumper stop-and-rectify ON (step={:.3f} max={:.3f} backoff={:.3f} sign={:+.0f})\n",
+                   TIP_REFLEX_STEP_M, TIP_REFLEX_MAX_M, TIP_REFLEX_BACKOFF_M, recenter_sign_);
+    try { bottle_obstacle_        = configLoader.get<bool>  ("Controller.bottle_obstacle");        } catch (...) {}
+    try { bottle_obstacle_margin_ = configLoader.get<double>("Controller.bottle_obstacle_margin"); } catch (...) {}
+    if (bottle_obstacle_)
+        std::print("[obstacle] bottle-as-obstacle ON in approach phase (margin={:.3f} m)\n",
+                   bottle_obstacle_margin_);
     if (force_confidence_ >= 0.0)
         std::print("[experiment] confidence PINNED at {:.2f} (overrides learning/decay)\n", force_confidence_);
     try {
@@ -280,6 +303,8 @@ void SpecificWorker::initialize()
     // Retreat sub-skill params + exploration.
     try { retreat_speed_         = configLoader.get<double>("Controller.retreat_speed");            } catch (...) {}
     try { gripper_open_conf_     = configLoader.get<double>("Controller.gripper_open_conf");        } catch (...) {}
+    try { release_ticks_         = configLoader.get<int>   ("Controller.release_ticks");            } catch (...) {}
+    try { grasp_align_tol_rad_   = configLoader.get<double>("Controller.grasp_align_tol_deg") * M_PI / 180.0; } catch (...) {}
     try { probe_retreat_         = configLoader.get<bool>  ("Controller.probe_retreat");            } catch (...) {}
     try { probe_rspeed_amp_      = configLoader.get<double>("Controller.probe_rspeed_amp");         } catch (...) {}
     try { probe_open_amp_        = configLoader.get<double>("Controller.probe_open_amp");           } catch (...) {}
@@ -690,6 +715,7 @@ void SpecificWorker::begin_rep_probe()
     rep_track_ticks_ = 0;
     rep_attempts_    = 0;
     track_stuck_ticks_ = 0;
+    track_noprog_ticks_ = 0; track_best_dist_ = 1e9;   // fresh no-progress abort window
     fluid_prev_pos_.reset();   // don't carry EE speed across the homing gap between reps
     // Reset the per-rep fusion belief + metrics. cycles_since_obs_ large ⇒ the first
     // Tracking cycle takes an observation to seed the model belief.
@@ -848,6 +874,8 @@ void SpecificWorker::update_viewer_scene_objects()
         if (auto v = G->get_attrib_by_name<width_m_att>(bottle_node.value());  v.has_value()) diameter = v.value();
         if (auto v = G->get_attrib_by_name<height_m_att>(bottle_node.value()); v.has_value()) height   = v.value();
     }
+    bottle_radius_m_ = diameter * 0.5;   // cache for the approach-phase bottle obstacle
+    bottle_height_m_ = height;
 
     arm_belief_viewer_->update_scene_objects(corners_world, bottle_pos_world_,
                                              bottle_axis_world_, diameter * 0.5, height);
@@ -977,7 +1005,17 @@ void SpecificWorker::compute()
             viewer_link_poses.push_back({lp.mesh_filename, lp.pose});
         const auto ee_position = kinematics_->forward_kinematics(q);
         if (arm_belief_viewer_)
+        {
             arm_belief_viewer_->update_beliefs(q, viewer_link_poses, reach_target_, ee_position);
+            // Stream the four gripper force channels into the viewer's time-series plot.
+            try
+            {
+                const auto gs = kinovaarm_proxy->getGripperState();
+                arm_belief_viewer_->update_forces(gs.lforce, gs.rforce, gs.ltipforce, gs.rtipforce,
+                                                  gs.ltipcontact, gs.rtipcontact);
+            }
+            catch (const Ice::Exception&) { /* proxy hiccup — skip this sample */ }
+        }
 
         if (force_confidence_ >= 0.0) confidence_ = force_confidence_;  // controlled experiments: pin
 
@@ -1208,6 +1246,18 @@ void SpecificWorker::compute()
             p.gain_table        = 2.0;
             p.table_z           = table_top_z_;
             p.table_safe        = 0.06;           // start pushing up within 6 cm of the surface
+            // Bottle-as-obstacle: ONLY in the first (Tracking) approach phase — the tool goes
+            // to the standoff (outside the bottle), so the damper just stops the gripper
+            // clipping/tipping it; OFF from Inserting on (the grasp must move into the bottle).
+            if (use_qp_ and bottle_obstacle_ and grasp_phase_ == GraspPhase::Tracking)
+            {
+                p.gain_bottle   = 1.0;
+                p.bottle_xy     = bottle_pos_world_.head<2>();
+                p.bottle_radius = bottle_radius_m_;
+                p.bottle_z_lo   = bottle_pos_world_.z();
+                p.bottle_z_hi   = bottle_pos_world_.z() + bottle_height_m_;
+                p.bottle_margin = bottle_obstacle_margin_;
+            }
             return p;
         };
 
@@ -1217,14 +1267,30 @@ void SpecificWorker::compute()
                                const Eigen::Vector3d& z_des,
                                const Eigen::Vector3d& x_des,
                                double v_app,
-                               std::optional<Eigen::Vector3d> blend_next = std::nullopt) -> std::pair<double, double>
+                               std::optional<Eigen::Vector3d> blend_next = std::nullopt,
+                               double orient_gain = 1.0) -> std::pair<double, double>
         {
             reach_target_ = target;
             EFEParams params = make_params(z_des, x_des, v_app);
+            params.gain_orient = orient_gain;   // <1 relaxes the orientation pull (place needs less precision than pick)
             // Look-ahead coarticulation at a transit via-point: steer toward `blend_next`
             // within a skill-gated radius (inert for a novice ⇒ exact terminal stop).
             params.blend_next   = blend_next;
             params.blend_radius = blend_next.has_value() ? skill_c() * blend_radius_ : 0.0;
+            // Option (c) prototype: the SAME transit via, as a 2-via precision field instead
+            // of the hand-coded blend. The current via's precision interpolates stop→pass with
+            // skill (novice ⇒ prec_stop ⇒ exact stop = parity; skilled ⇒ prec_pass ⇒ cruise-
+            // through = emergent blend). Mutually exclusive with the blend branch (use_field
+            // is checked first in efe_gradient_step).
+            if (use_preference_field_ and blend_next.has_value())
+            {
+                params.use_field    = true;
+                params.prec_current = field_prec_stop_
+                                    + skill_c() * (field_prec_pass_ - field_prec_stop_);
+                params.prec_next    = field_prec_stop_;
+                params.prec_ref     = field_prec_ref_;
+                params.field_overlap = field_overlap_;
+            }
             const auto q_dot = efe_gradient_step(*kinematics_, q, reach_target_, params);
             RoboCompKinovaArm::TJointSpeeds cmd;
             cmd.jointSpeeds.assign(q_dot.begin(), q_dot.end());
@@ -1316,6 +1382,32 @@ void SpecificWorker::compute()
             }
             catch (const Ice::Exception&) { return 0.0f; }
         };
+        // Per-finger TIP (tactile) force {left, right} from the fingertip force-3d
+        // TouchSensors — kept SEPARATE (unlike gripper_force's max) so the Inserting phase
+        // can read the left/right asymmetry: a single finger pushing the bottle = off-centre =
+        // about to tip it. {0,0} on a proxy hiccup. (Tip force-3d is reliable for this
+        // TRANSIENT approach contact; it nets to ~0 in a static squeezed hold, so the HOLD is
+        // still confirmed by motor force + bottle-rise.)
+        const auto tip_forces = [&]() -> std::pair<float, float>
+        {
+            try
+            {
+                const auto gs = kinovaarm_proxy->getGripperState();
+                return {gs.ltipforce, gs.rtipforce};
+            }
+            catch (const Ice::Exception&) { return {0.0f, 0.0f}; }
+        };
+        // Per-finger distal-tip BUMPER contact {left, right} — binary "this tip hit the object"
+        // (a misaligned approach), the trigger for the stop-and-rectify reflex.
+        const auto tip_contacts = [&]() -> std::pair<bool, bool>
+        {
+            try
+            {
+                const auto gs = kinovaarm_proxy->getGripperState();
+                return {gs.ltipcontact, gs.rtipcontact};
+            }
+            catch (const Ice::Exception&) { return {false, false}; }
+        };
 
         // A grasp miss either retries the SAME rep (perturbation unchanged) or, once
         // the per-rep attempt cap is hit, gives up: count it as a failed cycle and
@@ -1333,6 +1425,7 @@ void SpecificWorker::compute()
                 if (respawn_each_rep_) respawn_bottle(last_spawn_xy_.x(), last_spawn_xy_.y());
                 grasp_phase_ = GraspPhase::Tracking;   // retry same rep
                 track_stuck_ticks_ = 0;                // fresh approach-watchdog window
+                track_noprog_ticks_ = 0; track_best_dist_ = 1e9;
                 return false;
             }
             std::print("[probe] rep {} GIVE UP after {} attempts ({}) → failed cycle, re-home\n",
@@ -1522,7 +1615,28 @@ void SpecificWorker::compute()
                 const auto [e_pos, e_ang] =
                     drive(track_target, g.z_tool_des, g.x_tool_des, 0.35 * vscale);
 
-                if (e_pos < REACH_TOLERANCE_M and e_ang < GRASP_ALIGN_TOL_RAD)
+                // Fast non-convergence abort: if the EE stops making progress toward the target
+                // while still far from it, the pose is effectively unreachable (singularity /
+                // obstacle-damper conflict / yaw-free redundancy with no smooth solution). Give
+                // up NOW with a clear message instead of thrashing in front of the bottle until
+                // the 18 s jam watchdog × 3 attempts (≈ the 47 s "bubbling" reported).
+                if (e_pos < track_best_dist_ - 0.004)
+                {
+                    track_best_dist_ = e_pos;
+                    track_noprog_ticks_ = 0;
+                }
+                else if (e_pos > 3.0 * REACH_TOLERANCE_M and ++track_noprog_ticks_ > TRACK_NOPROGRESS_TICKS)
+                {
+                    std::print("[recovery] Tracking NOT converging (best {:.3f} m, no progress {} cy, "
+                               "e_ang {:.1f}°) — pose unreachable/over-constrained → give up\n",
+                               track_best_dist_, track_noprog_ticks_, e_ang * 57.29578);
+                    teleport_to_rest();
+                    track_stuck_ticks_ = 0; track_noprog_ticks_ = 0; track_best_dist_ = 1e9;
+                    miss_or_give_up("not converging");
+                    break;
+                }
+
+                if (e_pos < REACH_TOLERANCE_M and e_ang < grasp_align_tol_rad_)
                 {
                     // Phase-1 bring-up: converged at the standoff with the gripper
                     // open and correctly oriented — hold here, don't grasp.
@@ -1557,6 +1671,8 @@ void SpecificWorker::compute()
                         rep_commit_eang_ = e_ang;
                         grasp_phase_   = GraspPhase::Inserting;
                         grasp_settle_ticks_ = 0;
+                        insert_ticks_       = 0;
+                        tip_reflex_offset_  = 0.0;   // fresh stop-and-rectify correction per attempt
                         std::print("[grasp] standoff settled (e={:.3f} m, {:.1f}°) → Inserting\n",
                                    e_pos, e_ang * 57.29578);
                     }
@@ -1574,6 +1690,100 @@ void SpecificWorker::compute()
                 // still arrest it at contact).
                 const double insert_vel = INSERT_VEL_MS * rep_perturb_.speed_scale
                                           * (1.0 + insert_conf_gain_ * skill_c());
+                const double e_grasp = (ee_position - g.grasp_pos).norm();
+
+                if (tip_reflex_)
+                {
+                    // ── Stop-and-rectify reflex (tip bumpers) ───────────────────────────────
+                    // A distal-tip bumper firing = a finger hit the object on a misaligned
+                    // approach (it won't slide into the gripper). HALT forward motion, back off
+                    // along −approach, and grow a lateral offset TOWARD the contacting finger so
+                    // the object can enter the gap on the retry. The offset accumulates to cancel
+                    // the misalignment; commit to Closing only when seated AND no tip in contact.
+                    const auto [lc, rc] = tip_contacts();
+                    const Eigen::Vector3d lat      = kinematics_->tool_pose(q).rotation.col(0);
+                    const Eigen::Vector3d approach  = g.z_tool_des.normalized();
+                    const Eigen::Vector3d off       = recenter_sign_ * tip_reflex_offset_ * lat;
+                    if (lc or rc)
+                    {
+                        // Shift toward the side that hit (one finger ⇒ signed; both ⇒ pure back-off).
+                        const double dir = (rc and not lc) ? +1.0 : (lc and not rc) ? -1.0 : 0.0;
+                        tip_reflex_offset_ = std::clamp(tip_reflex_offset_ + dir * TIP_REFLEX_STEP_M,
+                                                        -TIP_REFLEX_MAX_M, TIP_REFLEX_MAX_M);
+                        const Eigen::Vector3d target = g.grasp_pos + off - approach * TIP_REFLEX_BACKOFF_M;
+                        drive(target, g.z_tool_des, g.x_tool_des, insert_vel);
+                        if (tip_log_ and insert_ticks_ % 5 == 0)
+                            std::print("[reflex] tip L{} R{} → back off + shift {:+.3f} m\n",
+                                       int(lc), int(rc), tip_reflex_offset_);
+                    }
+                    else
+                    {
+                        const Eigen::Vector3d target = g.grasp_pos + off;
+                        drive(target, g.z_tool_des, g.x_tool_des, insert_vel);
+                        if ((ee_position - target).norm() < REACH_TOLERANCE_M)
+                        {
+                            grasp_phase_       = GraspPhase::Closing;
+                            closing_ticks_     = 0;
+                            grasp_force_ticks_ = 0;
+                            insert_ticks_      = 0;
+                            std::print("[grasp] seated (reflex offset {:+.3f} m) → Closing\n", tip_reflex_offset_);
+                        }
+                    }
+                    if (grasp_phase_ == GraspPhase::Inserting and ++insert_ticks_ > INSERT_TIMEOUT_TICKS)
+                    {
+                        std::print("[grasp] MISS — reflex could not seat in {} cy (offset {:+.3f}) → reopen\n",
+                                   INSERT_TIMEOUT_TICKS, tip_reflex_offset_);
+                        log_rep_outcome(false, 0.0, 0.0);
+                        miss_or_give_up("reflex stuck");
+                    }
+                    break;
+                }
+
+                if (tactile_recenter_)
+                {
+                    // ── Tactile re-centering (anti-tip) ─────────────────────────────────────
+                    // Fingertips straddle the bottle along tool +X (the finger-closing axis,
+                    // x_tool_des = z_bot×z_tool_des). If the gripper is off-centre, ONE finger
+                    // contacts and PUSHES the bottle sideways → it tips, and the old gate
+                    // (f>GRASP_FORCE_THRESH) would commit to Closing on the now-displaced
+                    // bottle. Instead: read the L/R tip asymmetry and shift the insert target
+                    // laterally toward the harder-pushing finger to centre the bottle between
+                    // the pads; slow the approach while in contact; and commit to Closing only
+                    // when SEATED and NOT pushing (symmetric/clear). Re-centre uses the LIVE
+                    // tool X (yaw is free in the grasp, so the commanded x_tool_des may differ).
+                    const auto [fl, fr] = tip_forces();
+                    const float contact = fl + fr;
+                    const float rel_asym = (contact > 1e-3f) ? (fl - fr) / contact : 0.0f;  // ∈[-1,1]
+                    const Eigen::Vector3d lat = kinematics_->tool_pose(q).rotation.col(0);
+                    const Eigen::Vector3d target =
+                        g.grasp_pos + recenter_sign_ * recenter_gain_ * rel_asym * lat;
+                    // Creep while a finger is loaded so centring leads seating (don't ram).
+                    const double v_app = (contact > INSERT_TOUCH_FORCE) ? insert_vel * 0.3 : insert_vel;
+                    const auto [e_tgt, e_ang] = drive(target, g.z_tool_des, g.x_tool_des, v_app);
+                    (void) e_ang; (void) e_tgt;
+                    if (tip_log_ and insert_ticks_ % 10 == 0)
+                        std::print("[grasp] insert e={:.3f} tipL={:.2f} tipR={:.2f} asym={:+.2f}\n",
+                                   e_grasp, fl, fr, rel_asym);
+                    // Seated AND not actively pushing the bottle → safe to close.
+                    if (e_grasp < REACH_TOLERANCE_M and contact <= INSERT_TOUCH_FORCE)
+                    {
+                        grasp_phase_       = GraspPhase::Closing;
+                        closing_ticks_     = 0;
+                        grasp_force_ticks_ = 0;
+                        insert_ticks_      = 0;
+                        std::print("[grasp] seated & centred (e={:.3f} m, tipL={:.2f} R={:.2f}) → Closing\n",
+                                   e_grasp, fl, fr);
+                    }
+                    else if (++insert_ticks_ > INSERT_TIMEOUT_TICKS)
+                    {
+                        std::print("[grasp] MISS — could not seat/centre in {} cy (e={:.3f}, asym={:+.2f}) → reopen\n",
+                                   INSERT_TIMEOUT_TICKS, e_grasp, rel_asym);
+                        log_rep_outcome(false, 0.0, 0.0);
+                        miss_or_give_up("insert stuck");
+                    }
+                    break;
+                }
+
                 const auto [e_pos, e_ang] =
                     drive(g.grasp_pos, g.z_tool_des, g.x_tool_des, insert_vel);
                 (void) e_ang;
@@ -1704,13 +1914,14 @@ void SpecificWorker::compute()
                 gripper_command_ = 0.0f;  // hold the bottle
                 const auto [e_pos, e_ang] =
                     drive(place_hover_, place_z_des_, place_x_des_, skilled_speed(0.20),
-                          place_pos_);   // look-ahead blend: round the lateral→down corner into PlaceLowering
+                          place_pos_, PLACE_ORIENT_GAIN);   // blend into PlaceLowering, relaxed orientation
                 (void) e_ang;
                 if (via_reached(e_pos) or ++place_ticks_ > PLACE_TIMEOUT_TICKS)
                 {
                     grasp_phase_ = GraspPhase::PlaceLowering;
                     place_ticks_ = 0;
                     place_settle_ticks_ = 0;
+                    place_bottle_z_prev_ = 1e9;   // fresh "rested on table" tracker
                     std::print("[place] above spot → PlaceLowering\n");
                 }
                 break;
@@ -1718,19 +1929,27 @@ void SpecificWorker::compute()
             case GraspPhase::PlaceLowering:
             {
                 gripper_command_ = 0.0f;  // still holding
-                // Brisk set-down. The settled+upright gate below + the EFE deadband (which
-                // decelerates into the target) keep the placement clean, so the old crawl
-                // (0.08) was needlessly slow; the heavy bottle tolerates a firmer set-down.
+                // Brisk set-down, skill-scheduled (skilled places faster). RELAXED gripper
+                // orientation: near the column the arm can't hit the exact pose, so a strong
+                // orientation pull just makes it oscillate; placing needs far less orientation
+                // precision than picking (the bottle only has to end vertical on the table).
                 const auto [e_pos, e_ang] =
-                    drive(place_pos_, place_z_des_, place_x_des_, 0.18);
+                    drive(place_pos_, place_z_des_, place_x_des_, skilled_speed(0.18),
+                          std::nullopt, PLACE_ORIENT_GAIN);
                 (void) e_ang;
-                // Confirm the bottle is set down (EE converged to the table height) AND
-                // still upright before opening the fingers, held for a short dwell to
-                // debounce overshoot — releasing it mid-air or while it leans would topple
-                // it. The timeout remains a safety fallback.
                 const double tilt = std::acos(std::clamp(std::abs(bottle_axis_world_.normalized().z()), 0.0, 1.0));
-                const bool settled = e_pos < REACH_TOLERANCE_M and tilt < PLACE_UPRIGHT_TOL_RAD;
-                place_settle_ticks_ = settled ? place_settle_ticks_ + 1 : 0;
+                // RELEASE when the BOTTLE itself is reasonably placed — its base resting on the
+                // table (ground truth: within PLACE_ON_TABLE_M of the table top) + stopped
+                // descending + upright — REGARDLESS of whether the EE reached place_pos with the
+                // commanded orientation. This stops the "dozens of seconds oscillating to perfect
+                // the gripper pose" near the column once the bottle is already down and vertical.
+                // e_pos<REACH stays as a fast path when the pose IS cleanly reachable.
+                const double dz = std::abs(bottle_pos_world_.z() - place_bottle_z_prev_);
+                place_bottle_z_prev_ = bottle_pos_world_.z();
+                const bool upright    = tilt < PLACE_UPRIGHT_TOL_RAD;
+                const bool bottle_down = (bottle_pos_world_.z() - table_top_z_) < PLACE_ON_TABLE_M and dz < 0.0008;
+                const bool ok = (bottle_down or e_pos < REACH_TOLERANCE_M) and upright;
+                place_settle_ticks_ = ok ? place_settle_ticks_ + 1 : 0;
                 if (place_settle_ticks_ >= PLACE_SETTLE_TICKS or ++place_ticks_ > PLACE_TIMEOUT_TICKS)
                 {
                     grasp_phase_ = GraspPhase::PlaceReleasing;
@@ -1751,7 +1970,7 @@ void SpecificWorker::compute()
                 // to the 6 s PLACE_TIMEOUT every cycle — that was the long dead-stand after
                 // each place. The probe showed the gripper-axis retreat is tip-free even
                 // from a partly-open gripper, so RELEASE_TICKS (~0.5 s) is plenty.
-                if (++place_ticks_ >= RELEASE_TICKS)
+                if (++place_ticks_ >= release_ticks_)
                 {
                     // Latch the retreat as a pure back-translation along the gripper's OWN
                     // forward axis (live tool +Z), orientation held — perpendicular to the
@@ -1764,7 +1983,7 @@ void SpecificWorker::compute()
                     grasp_phase_ = GraspPhase::PlaceRetreating;
                     place_ticks_ = 0;
                     place_settle_ticks_ = 0;
-                    std::print("[place] released ({} cy) → PlaceRetreating along gripper axis\n", RELEASE_TICKS);
+                    std::print("[place] released ({} cy) → PlaceRetreating along gripper axis\n", release_ticks_);
                 }
                 break;
             }

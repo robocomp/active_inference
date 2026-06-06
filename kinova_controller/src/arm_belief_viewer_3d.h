@@ -29,6 +29,12 @@ public:
                         const Eigen::Vector3d& target,
                         const Eigen::Vector3d& ee_position);
 
+    // Push one sample of the gripper sensors into the rolling time-series plot under the 3D
+    // view: 4 force channels (motor grip L/R + fingertip tactile L/R) + the 2 binary tip
+    // bumper contacts (drawn as steps).
+    void update_forces(float lforce, float rforce, float ltipforce, float rtipforce,
+                       bool ltipcontact, bool rtipcontact);
+
     // table_corners must be 8 points in robot frame (m), ordered as
     // [bottom 4 CCW] then [top 4 CCW] — the panel connects them as a wireframe.
     // bottle_origin / bottle_axis are in the robot frame, m / unit-vector.
@@ -54,9 +60,11 @@ signals:
 
 private:
     class GLPanel;
+    class ForcePlot;
 
     GLPanel*     gl_panel_     = nullptr;
     QLabel*      status_label_ = nullptr;
     QPushButton* start_button_ = nullptr;
+    ForcePlot*   force_plot_   = nullptr;
     std::string  mesh_root_;
 };

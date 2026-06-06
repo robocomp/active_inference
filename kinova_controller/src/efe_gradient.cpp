@@ -115,14 +115,39 @@ namespace
                     append_row(C, l, u, a, -INF, zeta);
                 }
             }
-        // Table: tool point vs the horizontal plane (approach = downward).
+        // Table: keep the arm above the horizontal plane (approach = downward, +Z normal).
         if (p.gain_table > 0.0)
         {
+            // Tool point.
             const double d = pose.position.z() - p.table_z;
             if (d < p.table_safe)
             {
                 const QpRow a = -(Eigen::RowVector3d(0, 0, 1) * J_lin);
                 const double zeta = std::max(0.0, p.obs_damper_xi * (d / p.table_safe));
+                append_row(C, l, u, a, -INF, zeta);
+            }
+            // NOTE: no per-joint table damper here. Constraining the elbow/wrist vs the table
+            // plane froze the grasp descent (the arm legitimately approaches the table to grasp,
+            // and the elbow comes near it on a low reach) → the arm oscillated over the bottle
+            // without seating. The elbow-on-table at awkward PLACE spots must be handled
+            // separately (place-phase-only), not with a blanket plane constraint here.
+        }
+        // Bottle (approach phase only): TOOL point vs the target's finite vertical cylinder.
+        // Bounds the tool's radial approach speed so the gripper rounds to the standoff
+        // without clipping/tipping the bottle; clr→0 still lets it reach the surface (the
+        // grasp itself runs with this OFF). Same velocity-damper form as the mast.
+        if (p.gain_bottle > 0.0)
+        {
+            const double cz = std::clamp(pose.position.z(), p.bottle_z_lo, p.bottle_z_hi);
+            const Eigen::Vector3d c(p.bottle_xy.x(), p.bottle_xy.y(), cz);
+            const Eigen::Vector3d diff = pose.position - c;     // ≈ horizontal (radial)
+            const double dist = diff.norm();
+            const double clr  = dist - p.bottle_radius;
+            if (clr < p.bottle_margin and dist > 1e-6)
+            {
+                const Eigen::Vector3d n = diff / dist;
+                const QpRow a = -(n.transpose() * J_lin);
+                const double zeta = std::max(0.0, p.obs_damper_xi * (clr / p.bottle_margin));
                 append_row(C, l, u, a, -INF, zeta);
             }
         }
@@ -213,7 +238,34 @@ std::array<double, Kinematics::N_ARM_JOINTS> efe_gradient_step(
     const double dist   = err_pos.norm();
     const double w_norm = weighted_dir.norm();
     Eigen::Vector3d v_des = Eigen::Vector3d::Zero();
-    if (params.blend_next.has_value() and params.blend_radius > 0.0 and dist < params.blend_radius)
+    if (params.use_field and params.blend_next.has_value())
+    {
+        // ── Preference-field twist (option (c), steps 1–2) ──────────────────────────────
+        // A 2-via Gaussian-mixture preference: μ_c=x_target (Π_c), μ_n=blend_next (Π_n). The
+        // precision-weighted natural-gradient resultant gives the HEADING, and λ_c =
+        // exp(−Π_c/prec_ref) ∈ (0,1] ("pass-throughness" of μ_c) sets the TERMINAL speed.
+        //   • Π_c high ⇒ λ_c→0 ⇒ v_term→0 and the next-via term vanishes ⇒ straight to μ_c,
+        //     √-decelerate to a stop = PARITY with the discrete leg (step 1).
+        //   • Π_c low  ⇒ λ_c→~1 ⇒ cruise v_term and the heading bends toward μ_n near μ_c
+        //     ⇒ the look-ahead blend, EMERGENT (step 2).
+        // w_n (RBF in dist, width field_overlap) localizes the bend near μ_c — the Euclidean
+        // stand-in for the phase variable τ (step 3). Both limits reduce to known-good code.
+        const Eigen::Vector3d to_c = -err_pos;                                  // EE → μ_c
+        const Eigen::Vector3d to_n = params.blend_next.value() - pose.position; // EE → μ_n
+        const double lambda_c = std::exp(-params.prec_current / std::max(1e-9, params.prec_ref));
+        const double w_n = std::exp(-(dist * dist) /
+                                    (params.field_overlap * params.field_overlap));
+        const Eigen::Vector3d g = params.prec_current * to_c
+                                + lambda_c * w_n * params.prec_next * to_n;
+        const double gn = g.norm();
+        const double v_term = params.v_approach * lambda_c;                     // terminal speed at μ_c
+        const double reach  = dist - params.arrive_deadband;
+        const double v_mag  = std::min(params.v_approach,
+            std::sqrt(v_term * v_term + 2.0 * params.a_approach * std::max(0.0, reach)));
+        if (gn > 1e-9)
+            v_des = v_mag * (g / gn);
+    }
+    else if (params.blend_next.has_value() and params.blend_radius > 0.0 and dist < params.blend_radius)
     {
         // Coarticulation: inside the blend zone rotate the commanded velocity from "into
         // this via" toward "toward the next waypoint" at cruise, so the direction is

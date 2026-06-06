@@ -176,6 +176,31 @@ private:
 	// rounded) rather than waiting for e_pos < REACH_TOLERANCE. Reset on entry to each leg.
 	double blend_min_dist_ = 1e9;
 	void   sample_place_spot();   // pick the place spot from latched_grasp_ (called at Closing→Lifting)
+	// ── Preference-field mode (option (c) prototype, steps 1–2) ──────────────────────────
+	// Controller.use_preference_field: on the transit legs (lift-top, place-hover) replace the
+	// hand-coded look-ahead blend with the 2-via Gaussian-mixture field (EFEParams::use_field).
+	// The per-via precision expresses stop-vs-pass; field_prec_pass/stop are the two endpoints,
+	// interpolated by skill_c() so a novice sees prec_stop (exact stops = parity, step 1) and a
+	// skilled agent sees prec_pass (cruise-through = emergent blend, step 2). off ⇒ blend path.
+	bool   use_preference_field_ = false;
+	double field_prec_pass_ = 1.0;    // Π of a transit via at full skill (low ⇒ pass through)
+	double field_prec_stop_ = 30.0;   // Π of a transit via at novice / of the next attractor (high ⇒ stop)
+	double field_prec_ref_  = 6.0;    // λ_c = exp(−Π/ref): precision→terminal-speed map
+	double field_overlap_   = 0.06;   // [m] RBF width: how near μ_c the next-via pull ramps in
+	// ── Tactile re-centering (anti-tip grasp) ────────────────────────────────────────────
+	// Controller.tactile_recenter: in Inserting, use the per-finger tip-force asymmetry
+	// (ltipforce−rtipforce) to shift the seat target laterally (along live tool +X, the
+	// finger-closing axis) toward the harder-pushing finger, centring the bottle between the
+	// pads instead of pushing it over; commit to Closing only when seated AND not pushing.
+	bool   tactile_recenter_ = false;
+	double recenter_gain_    = 0.02;  // [m] max lateral seat shift at full L/R asymmetry
+	double recenter_sign_    = 1.0;   // ±1: maps tip-force asymmetry sign to the +X direction (calibrate in sim)
+	// Controller.tip_reflex: stop-and-rectify on a tip-BUMPER collision during Inserting — halt
+	// forward motion, back off along −approach, and grow a lateral offset TOWARD the contacting
+	// finger so the object enters the gap on retry; commit only when seated AND not in contact.
+	// The offset accumulates to cancel the misalignment. Needs TGripper.{l,r}tipcontact.
+	bool   tip_reflex_        = false;
+	double tip_reflex_offset_ = 0.0;  // accumulated lateral correction [m] along tool +X (per attempt)
 	// Controller.fixed_pick_xy = "x y" (world m): if set, respawn the bottle at this
 	// fixed spot every rep instead of the R2 sweep — for controlled A/B experiments
 	// (hold the pick constant, vary one knob).
@@ -232,9 +257,11 @@ private:
 	GraspPhase grasp_phase_ = GraspPhase::Tracking;
 	int        grasp_settle_ticks_ = 0;   // consecutive converged cycles before committing
 	int        closing_ticks_      = 0;   // cycles spent closing (miss timeout)
+	int        insert_ticks_       = 0;   // watchdog: cycles spent seating/centring in Inserting
 	int        lift_ticks_         = 0;   // watchdog: cycles spent trying to lift
 	int        place_ticks_        = 0;   // watchdog within a place sub-state
 	int        place_settle_ticks_ = 0;   // consecutive settled+upright cycles before releasing
+	double     place_bottle_z_prev_ = 1e9;// previous bottle-z in PlaceLowering: detect "rested on table" (Δz≈0)
 	// If the lift can't reach its target in this many cycles the arm grabbed
 	// something it can't raise (a toppled/jammed bottle) — treat as a grasp miss
 	// instead of looping in Lifting forever. ~5 s at a 20 ms period.
@@ -273,6 +300,12 @@ private:
 	// ~18 s at the 20 ms period — generously longer than any healthy approach.
 	int    track_stuck_ticks_ = 0;
 	static constexpr int TRACK_TIMEOUT_TICKS = 900;
+	static constexpr int TRACK_NOPROGRESS_TICKS = 150;  // ~3 s of no approach progress ⇒ unreachable, give up fast
+	double track_best_dist_   = 1e9;   // best (min) Tracking distance this attempt — for the no-progress abort
+	int    track_noprog_ticks_ = 0;    // cycles since track_best_dist_ last improved
+	// Controller.grasp_align_tol_deg: final-orientation tolerance to COMMIT the grasp. Relaxing
+	// it lets a yaw-free approach commit instead of oscillating to perfect a few last degrees.
+	double grasp_align_tol_rad_ = 0.14;  // ≈8° (was a fixed 5.7°); config overrides in degrees
 	// A rep keeps the SAME perturbation across retries, so a hard probe point can
 	// miss forever. Cap the retries: after this many misses, record the failure,
 	// count the rep as a (failed) cycle and move on — keeps probe rounds bounded
@@ -311,6 +344,11 @@ private:
 	// what is explored is when-to-move (open threshold) and how-fast.
 	double retreat_speed_      = 0.06;   // Controller.retreat_speed      gentle back-off speed [m/s] (NOT skill-boosted)
 	double gripper_open_conf_  = 0.85;   // Controller.gripper_open_conf  gs.opening ≥ this ⇒ fingers clear → safe to move
+	// Controller.release_ticks: cycles the gripper opens-in-place before the retreat latches.
+	// The retreat keeps the gripper open and backs off SLOWER than the fingers open, so the
+	// two overlap — this only needs to be long enough for the fingers to start clearing the
+	// bottle. Lower ⇒ quicker place tail. Was a fixed 25 (~0.5 s); now tunable for the sweep.
+	int    release_ticks_      = 8;      // ~0.16 s
 	struct RetreatPerturbation { double dspeed = 0.0; double dopen = 0.0; };
 	RetreatPerturbation retreat_perturb_{};   // active this rep
 	bool   probe_retreat_      = false;  // Controller.probe_retreat    explore retreat params per rep
@@ -439,6 +477,10 @@ private:
 	// than GRASP_FORCE_THRESH, which still gates the actual grasp confirmation.
 	static constexpr float  INSERT_TOUCH_FORCE   = 0.3f;
 	static constexpr int    CLOSING_TIMEOUT_TICKS = 100;  // ~2 s closing w/o force → miss
+	static constexpr int    INSERT_TIMEOUT_TICKS  = 150;  // ~3 s seating/centring → miss (tactile re-centre)
+	static constexpr double TIP_REFLEX_STEP_M     = 0.005; // lateral shift per tip-contact cycle
+	static constexpr double TIP_REFLEX_MAX_M      = 0.05;  // cap on the accumulated reflex correction
+	static constexpr double TIP_REFLEX_BACKOFF_M  = 0.02;  // retreat along −approach while a tip is in contact
 	static constexpr double LIFT_HEIGHT_M        = 0.12;  // how high to pick the bottle
 	// Authoritative grasp confirmation (ground truth, sensor-independent). After the
 	// lift completes, the bottle's world pose (live via getObjectPose) must show that
@@ -477,6 +519,8 @@ private:
 	// overshoot can't release it mid-air or while it leans (which would topple it).
 	static constexpr int    PLACE_SETTLE_TICKS    = 5;     // settled+upright cycles to confirm before opening
 	static constexpr double PLACE_UPRIGHT_TOL_RAD = 0.15;  // ≈8.6° bottle tilt from vertical still "upright"
+	static constexpr double PLACE_ON_TABLE_M      = 0.04;  // bottle base within this of the table top ⇒ "resting" → release
+	static constexpr double PLACE_ORIENT_GAIN     = 0.4;   // relaxed gripper-orientation pull while placing (vs 1.0 to pick)
 	// Leave the placed bottle by backing straight out along the approach axis (−tool +Z,
 	// horizontal) instead of lifting up over it: a shorter move that pulls the open
 	// fingers clear sideways with no risk of catching the bottle top and tipping it.
@@ -504,6 +548,13 @@ private:
 	Eigen::Isometry3d arm_base_world_   = Eigen::Isometry3d::Identity();
 	Eigen::Vector3d   bottle_pos_world_ {0.0, 0.0, 0.0};
 	Eigen::Vector3d   bottle_axis_world_{0.0, 0.0, 1.0};
+	double            bottle_radius_m_  = 0.035;  // from DSR bottle width_m (diameter/2); for the approach obstacle
+	double            bottle_height_m_  = 0.22;   // from DSR bottle height_m
+	// Controller.bottle_obstacle: treat the target bottle as a soft cylinder obstacle for the
+	// TOOL during the FIRST (Tracking) phase only, so the gripper rounds to the standoff
+	// without clipping/tipping it. Off from Inserting on (the grasp needs to move in).
+	bool              bottle_obstacle_        = false;
+	double            bottle_obstacle_margin_ = 0.04;  // [m] repel within this of the bottle surface
 	Eigen::Isometry3d table_world_      = Eigen::Isometry3d::Identity();  // T_world_table
 	double            table_top_z_     = 0.74;      // world z of the table surface (for hand-table soft constraint)
 	bool              scene_world_valid_ = false;   // table/bottle world poses populated
