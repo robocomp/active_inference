@@ -283,20 +283,8 @@ int room_concept::run(int argc, char* argv[])
 		// Run QT Application Event Loop
 		a.exec();
 
-		try
-		{
-			if(joystickadapter_topic && joystickadapter)
-			{
-				qCInfo(logLifecycle) << "Unsubscribing topic: joystickadapter";
-				joystickadapter_topic->unsubscribe(joystickadapter);
-			}
-
-		}
-		catch(const Ice::Exception& ex)
-		{
-			qCWarning(logLifecycle).noquote() << QStringLiteral("Error unsubscribing joystickadapter: %1")
-			                                     .arg(QString::fromUtf8(ex.what()));
-		}
+		// Avoid late IceStorm unsubscribe during process teardown; we already
+		// perform component shutdown on aboutToQuit.
 
 
 		status = EXIT_SUCCESS;
@@ -314,7 +302,8 @@ int room_concept::run(int argc, char* argv[])
 	#endif
 
 	status = EXIT_SUCCESS;
-	delete worker;
+	// Worker shutdown is executed from aboutToQuit via SpecificWorker::request_shutdown().
+	// Avoid explicit deletion here to prevent late teardown crashes.
 	return status;
 }
 
