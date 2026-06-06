@@ -133,6 +133,7 @@ respawn_each_rep = true
 # speed per rep and score by the bottle's post-retreat tilt to LEARN a tip-free retreat.
 retreat_speed     = 0.18        # m/s — envelope showed tip-free to 0.20
 release_ticks     = 8           # cycles opening-in-place before the retreat latches (overlaps the open); was 25
+predictive_place  = true    # score candidate place spots by predicted manipulability+clearance; pick best-conditioned
 gripper_open_conf = 0.85        # gs.opening ≥ this ⇒ fingers clear → safe to move
 probe_retreat     = false       # exploration done; retreat envelope is wide-open
 probe_rspeed_amp  = 0.8         # speed sweep 0.024..0.216 m/s

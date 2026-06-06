@@ -305,6 +305,8 @@ void SpecificWorker::initialize()
     try { gripper_open_conf_     = configLoader.get<double>("Controller.gripper_open_conf");        } catch (...) {}
     try { release_ticks_         = configLoader.get<int>   ("Controller.release_ticks");            } catch (...) {}
     try { grasp_align_tol_rad_   = configLoader.get<double>("Controller.grasp_align_tol_deg") * M_PI / 180.0; } catch (...) {}
+    try { predictive_place_      = configLoader.get<bool>  ("Controller.predictive_place");          } catch (...) {}
+    if (predictive_place_) std::print("[predict] predictive place-spot selection ON (μ + mast clearance)\n");
     try { probe_retreat_         = configLoader.get<bool>  ("Controller.probe_retreat");            } catch (...) {}
     try { probe_rspeed_amp_      = configLoader.get<double>("Controller.probe_rspeed_amp");         } catch (...) {}
     try { probe_open_amp_        = configLoader.get<double>("Controller.probe_open_amp");           } catch (...) {}
@@ -671,6 +673,55 @@ void SpecificWorker::save_confidence()
     if (f) f << confidence_ << '\n';
 }
 
+SpecificWorker::ReachScore
+SpecificWorker::predict_reach(const Eigen::Vector3d& pos,
+                             const Eigen::Vector3d& z_des, const Eigen::Vector3d& x_des)
+{
+    // Desired tool frame R_des = [x⟂, z×x, z] (z = approach).
+    const Eigen::Vector3d zc = z_des.normalized();
+    Eigen::Vector3d xc = x_des - x_des.dot(zc) * zc;
+    xc = (xc.norm() > 1e-6) ? xc.normalized() : zc.unitOrthogonal();
+    Eigen::Matrix3d R_des; R_des.col(0) = xc; R_des.col(1) = zc.cross(xc); R_des.col(2) = zc;
+
+    // Damped-least-squares IK from the current config — predicts the config to reach `pos`.
+    std::array<double, Kinematics::N_ARM_JOINTS> q = cur_q_;
+    const auto lims = kinematics_->arm_joint_position_limits();
+    double pe = 1e9, oe = 1e9;
+    for (int it = 0; it < 40; ++it)
+    {
+        const auto tp = kinematics_->tool_pose(q);
+        const Eigen::Vector3d ep = pos - tp.position;
+        const Eigen::AngleAxisd aa(R_des * tp.rotation.transpose());
+        const Eigen::Vector3d eo = aa.angle() * aa.axis();
+        pe = ep.norm(); oe = eo.norm();
+        if (pe < 0.005 and oe < 0.05) break;
+        Eigen::Matrix<double, 6, 1> e; e << ep, eo;
+        const Eigen::Matrix<double, 6, Kinematics::N_ARM_JOINTS> J = kinematics_->arm_jacobian_full(q);
+        const Eigen::Matrix<double, 6, 6> A =
+            J * J.transpose() + 0.01 * Eigen::Matrix<double, 6, 6>::Identity();
+        Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1> dq = J.transpose() * A.ldlt().solve(e);
+        const double n = dq.norm();
+        if (n > 0.4) dq *= 0.4 / n;                       // step clamp for stability
+        for (int j = 0; j < Kinematics::N_ARM_JOINTS; ++j)
+        {
+            q[j] += dq[j];
+            if (lims[j].first < lims[j].second)            // skip the continuous (limit-less) joints
+                q[j] = std::clamp(q[j], lims[j].first, lims[j].second);
+        }
+    }
+    // Manipulability + clearances at the predicted config.
+    const Eigen::Matrix<double, 6, Kinematics::N_ARM_JOINTS> Jf = kinematics_->arm_jacobian_full(q);
+    const double manip = std::sqrt(std::max(0.0, (Jf * Jf.transpose()).determinant()));
+    double col = 1e9, tab = 1e9;
+    for (int j = 2; j <= 6; ++j)
+    {
+        const Eigen::Vector3d pj = kinematics_->joint_position(q, j);
+        col = std::min(col, std::hypot(pj.x() + 0.62477, pj.y() + 0.056064) - 0.05);  // to mast surface
+        tab = std::min(tab, pj.z() - table_top_z_);                                   // above table
+    }
+    return { (pe < 0.012 and oe < 0.12), manip, col, tab };
+}
+
 void SpecificWorker::sample_place_spot()
 {
     // Sampled at Closing→Lifting (was: at lift-confirm) so place_hover_ is known DURING the
@@ -683,7 +734,15 @@ void SpecificWorker::sample_place_spot()
     const Eigen::Vector3d up(0.0, 0.0, 1.0);
     constexpr double a1 = 0.7548776662466927, a2 = 0.5698402909980532;
     const Eigen::Vector3d base_xyz = arm_base_world_.translation();
+    // Place orientation for a candidate spot c: tool +Z horizontal toward c, +Y = up.
+    const auto place_frame = [&](const Eigen::Vector3d& c) {
+        Eigen::Vector3d r = c - base_xyz; r.z() = 0.0;
+        const Eigen::Vector3d z = (r.norm() > 1e-6) ? r.normalized() : g.z_tool_des;
+        return std::pair{z, up.cross(z).normalized()};
+    };
     Eigen::Vector3d p = g.grasp_pos;
+    bool have_valid = false;     // geometric fallback = the first reachable draw (always a valid spot)
+    double best = -1e18;
     for (int k = 0; k < 24; ++k)
     {
         const double idx = static_cast<double>(probe_index_ + 104729 + k * 11939);
@@ -694,8 +753,20 @@ void SpecificWorker::sample_place_spot()
                                 g.grasp_pos.z());
         const double far_from_pick = (c.head<2>() - g.grasp_pos.head<2>()).norm();
         const double reach = (c - base_xyz).norm();
-        if (far_from_pick >= PLACE_MIN_MOVE_M and reach <= PLACE_REACH_MAX_M) { p = c; break; }
+        if (far_from_pick < PLACE_MIN_MOVE_M or reach > PLACE_REACH_MAX_M) continue;
+        if (not predictive_place_) { p = c; break; }   // legacy: first valid draw
+        if (not have_valid) { p = c; have_valid = true; }   // fall back to first reachable if none score
+        // Predictive selection: score the candidate by predicted manipulability + mast
+        // clearance, so column-side / near-singular spots (the "twist and struggle" traps)
+        // are SKIPPED for a better-conditioned reachable one instead of attempted+failing.
+        const auto [zc, xc] = place_frame(c);
+        const ReachScore s = predict_reach(c, zc, xc);
+        if (not s.feasible) continue;
+        const double score = s.manip - 3.0 * std::max(0.0, 0.10 - s.col_clear);  // μ, penalise mast-crowding
+        if (score > best) { best = score; p = c; }
     }
+    if (predictive_place_)
+        std::print("[place] predictive spot ({:.3f},{:.3f}) score {:.4f}\n", p.x(), p.y(), best);
     place_pos_      = p;
     place_world_xy_ = p;                       // for the retreat dataset
     place_hover_    = p + up * LIFT_HEIGHT_M;
@@ -919,6 +990,7 @@ void SpecificWorker::compute()
             tau[i]     = js.joints[i].torque;     // motor torque feedback from the bridge
             qd_meas[i] = js.joints[i].velocity;   // measured joint velocity (rad/s)
         }
+        cur_q_ = q;   // latest config — IK seed for the predictive target scorer
 
         // Map a desired joint-target onto the nearest equivalent angle for the four
         // CONTINUOUS joints (the infinite-limit revolutes), so a position command

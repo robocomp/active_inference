@@ -176,6 +176,16 @@ private:
 	// rounded) rather than waiting for e_pos < REACH_TOLERANCE. Reset on entry to each leg.
 	double blend_min_dist_ = 1e9;
 	void   sample_place_spot();   // pick the place spot from latched_grasp_ (called at Closing→Lifting)
+	// ── Predictive target selection (forward-model scoring of candidate poses) ───────────
+	// "Will this target make the arm twist/struggle?" — a lightweight DLS-IK from the current
+	// config predicts the joint config to reach a candidate (pose), then its manipulability
+	// μ=√det(J6J6ᵀ) (low ⇒ near-singular ⇒ the twisting) and clearance to the column/table.
+	// Lets the place-spot (and later grasp) selector AVOID traps instead of attempting+failing.
+	std::array<double, Kinematics::N_ARM_JOINTS> cur_q_{};   // latest measured arm config (IK seed)
+	struct ReachScore { bool feasible; double manip; double col_clear; double table_clear; };
+	ReachScore predict_reach(const Eigen::Vector3d& pos,
+	                         const Eigen::Vector3d& z_des, const Eigen::Vector3d& x_des);
+	bool   predictive_place_ = false;   // Controller.predictive_place: score candidate place spots, pick best-conditioned
 	// ── Preference-field mode (option (c) prototype, steps 1–2) ──────────────────────────
 	// Controller.use_preference_field: on the transit legs (lift-top, place-hover) replace the
 	// hand-coded look-ahead blend with the 2-via Gaussian-mixture field (EFEParams::use_field).
