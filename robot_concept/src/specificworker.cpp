@@ -19,10 +19,12 @@
 #include "specificworker.h"
 
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
+#include "../../common/media_transport/media_transport.h"
 
 #include <ConfigLoader/ConfigLoader.h>
 
 #include <chrono>
+#include <cstring>
 #include <iostream>
 #include <print>
 
@@ -77,15 +79,31 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
 SpecificWorker::~SpecificWorker()
 {
 	qInfo() << "Destroying SpecificWorker";
+	request_shutdown();
+}
+
+void SpecificWorker::request_shutdown()
+{
+	if (shutting_down_.exchange(true))
+		return;
+
 	stop_imu_thread = true;
 	stop_lidar_thread = true;
 	stop_rgbd_thread = true;
+
 	if (imu_thread.joinable())
 		imu_thread.join();
 	if (lidar_thread.joinable())
 		lidar_thread.join();
 	if (rgbd_thread.joinable())
 		rgbd_thread.join();
+
+	// Tear down DDS endpoints after producer threads are fully stopped.
+	media_publishers_ready_ = false;
+	media_rgb_pub_.reset();
+	media_depth_pub_.reset();
+
+	cleanup_owned_nodes();
 }
 
 
@@ -101,6 +119,15 @@ void SpecificWorker::initialize()
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Transforms.interpolate_rt", params.TRANSFORMS_INTERPOLATE_RT);
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Debug.verbose", verbose_debug_);
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Component.Debug.Verbose", verbose_debug_);
+
+	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.domain_id", params.MEDIA_DOMAIN_ID);
+	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.rgb_topic", params.MEDIA_RGB_TOPIC);
+	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.depth_topic", params.MEDIA_DEPTH_TOPIC);
+
+	qInfo() << "[DSR Upload Rates] rgb=" << params.DSR_RGB_FPS
+	        << "depth=" << params.DSR_DEPTH_FPS
+	        << "lidar=" << params.DSR_LIDAR_FPS
+	        << "(Hz; 0=every frame, <0=disabled)";
 
 	// Seed body node dimensions (read from graph/shadow.json; write defaults if absent).
 	if (auto body_node = G->get_node("body"); body_node.has_value())
@@ -127,6 +154,33 @@ void SpecificWorker::initialize()
 	}
 	else
 		qWarning() << __FUNCTION__ << "Body node not found in DSR graph";
+
+	// Media plane: initialize zero-copy DDS publishers for RGB and depth pixels.
+	// These carry the heavy RGBD payload OUT of the DSR/CRDT graph (shared-memory,
+	// RELIABLE, data-sharing). The DSR cam_rgb/cam_depth blob writes below remain
+	// governed by DSR_RGB_FPS/DSR_DEPTH_FPS (<0 disables them once consumers migrate).
+	{
+		media_rgb_pub_   = std::make_unique<rc::media::MediaPublisher>();
+		media_depth_pub_ = std::make_unique<rc::media::MediaPublisher>();
+		rc::media::PublisherConfig rgb_cfg;
+		rgb_cfg.domain_id     = static_cast<std::uint32_t>(params.MEDIA_DOMAIN_ID);
+		rgb_cfg.topic_name    = params.MEDIA_RGB_TOPIC;
+		rgb_cfg.history_depth = 8;
+		rc::media::PublisherConfig depth_cfg = rgb_cfg;
+		depth_cfg.topic_name = params.MEDIA_DEPTH_TOPIC;
+
+		const bool rgb_ok   = media_rgb_pub_->init(rgb_cfg);
+		const bool depth_ok = media_depth_pub_->init(depth_cfg);
+		media_publishers_ready_ = rgb_ok && depth_ok;
+		if (media_publishers_ready_)
+			qInfo() << "[Media] publishers ready domain=" << params.MEDIA_DOMAIN_ID
+			        << "rgb=" << QString::fromStdString(params.MEDIA_RGB_TOPIC)
+			        << "depth=" << QString::fromStdString(params.MEDIA_DEPTH_TOPIC)
+			        << "data_sharing=" << (media_rgb_pub_->data_sharing_active() && media_depth_pub_->data_sharing_active());
+		else
+			qWarning() << "[Media] publisher init FAILED (rgb=" << rgb_ok << "depth=" << depth_ok
+			           << ") - RGBD will only flow through the DSR graph";
+	}
 
 	lidar_thread = std::thread(&SpecificWorker::read_lidar_thread,  this);
 	rgbd_thread  = std::thread(&SpecificWorker::read_rgbd_thread,   this);
@@ -182,7 +236,7 @@ void SpecificWorker::initialize()
 	presence_coordinator_.start();
 
 	QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
-	                 this, &SpecificWorker::cleanup_owned_nodes, Qt::UniqueConnection);
+	                 this, &SpecificWorker::request_shutdown, Qt::UniqueConnection);
 }
 
 void SpecificWorker::compute()
@@ -223,11 +277,12 @@ void SpecificWorker::read_lidar_thread()
 	static FPSCounter lidar_fps;
 	bool empty_lidar_logged = false;
 	auto wait_period = std::chrono::milliseconds(getPeriod("Compute"));
+	const bool lidar_upload_enabled = params.DSR_LIDAR_FPS >= 0;
 	const auto lidar_interval_ms = params.DSR_LIDAR_FPS > 0
 		? std::chrono::milliseconds(1000 / params.DSR_LIDAR_FPS)
 		: std::chrono::milliseconds(0);
 	auto last_lidar_upload = std::chrono::steady_clock::time_point{};
-	while (!stop_lidar_thread)
+	while (!stop_lidar_thread && !shutting_down_.load())
 	{
 		RoboCompLidar3D::TData data;
 		try
@@ -259,8 +314,8 @@ void SpecificWorker::read_lidar_thread()
 		}
 
 		const auto  now_steady_lidar  = std::chrono::steady_clock::now();
-		const bool do_lidar_upload = (lidar_interval_ms.count() == 0)
-			|| (now_steady_lidar - last_lidar_upload >= lidar_interval_ms);
+		const bool do_lidar_upload = lidar_upload_enabled && ((lidar_interval_ms.count() == 0)
+			|| (now_steady_lidar - last_lidar_upload >= lidar_interval_ms));
 		if (do_lidar_upload)
 		{
 			last_lidar_upload = now_steady_lidar;
@@ -278,9 +333,11 @@ void SpecificWorker::read_lidar_thread()
 				G->add_or_modify_attrib_local<laser_Y_att>(laser_node.value(), std::move(ys));
 				G->add_or_modify_attrib_local<laser_Z_att>(laser_node.value(), std::move(zs));
 				G->add_or_modify_attrib_local<laser_timestamp_att>(laser_node.value(), static_cast<uint64_t>(data.timestamp));
-				G->update_node(laser_node.value());
+				// Last use of laser_node: move it in so the (multi-MB) laser blobs are
+				// moved into the engine instead of deep-copied under the graph write lock.
+				G->update_node(std::move(laser_node.value()));
 			}
-			else
+			else if (!shutting_down_.load())
 				qWarning() << "Laser node not found in DSR graph";
 		}
 
@@ -299,6 +356,8 @@ void SpecificWorker::read_rgbd_thread()
 	static FPSCounter rgbd_fps;
 	bool empty_rgbd_logged = false;
 	auto wait_period = std::chrono::milliseconds(getPeriod("Compute"));
+	const bool rgb_upload_enabled = params.DSR_RGB_FPS >= 0;
+	const bool depth_upload_enabled = params.DSR_DEPTH_FPS >= 0;
 	const auto rgb_interval_ms = params.DSR_RGB_FPS > 0
 		? std::chrono::milliseconds(1000 / params.DSR_RGB_FPS)
 		: std::chrono::milliseconds(0);
@@ -307,7 +366,7 @@ void SpecificWorker::read_rgbd_thread()
 		: std::chrono::milliseconds(0);
 	auto last_rgb_upload   = std::chrono::steady_clock::time_point{};
 	auto last_depth_upload = std::chrono::steady_clock::time_point{};
-	while (!stop_rgbd_thread)
+	while (!stop_rgbd_thread && !shutting_down_.load())
 	{
 		const auto loop_start = std::chrono::steady_clock::now();
 		try
@@ -343,11 +402,61 @@ void SpecificWorker::read_rgbd_thread()
 				empty_rgbd_logged = false;
 			}
 
+			// --- Media plane: publish full-rate RGB + depth pixels via zero-copy DDS ---
+			// This carries the heavy payload OUT of the DSR graph. We copy into the loaned
+			// SHM slot here, leaving the source buffers intact for the (optional) DSR writes
+			// below, which can still std::move them.
+			if (media_publishers_ready_)
+			{
+				const auto &img = frame.image;
+				if (const std::size_t nbytes = img.image.size();
+					nbytes > 0 && nbytes <= rc::media::MAX_IMAGE_BYTES && media_rgb_pub_)
+				{
+					if (auto *s = media_rgb_pub_->loan())
+					{
+						s->stream_id(rc::media::STREAM_ZED_RGB);
+						s->frame_id(media_rgb_frame_id_++);
+						s->stamp_ns(static_cast<std::uint64_t>(img.alivetime));
+						s->width(static_cast<std::uint32_t>(img.width));
+						s->height(static_cast<std::uint32_t>(img.height));
+						s->step(static_cast<std::uint32_t>(img.width) * 3u);
+						s->format(rc::media::FORMAT_BGR8);
+						s->size(static_cast<std::uint32_t>(nbytes));
+						std::memcpy(s->data().data(), img.image.data(), nbytes);
+						media_rgb_pub_->publish(s);
+					}
+				}
+
+				const auto &dep = frame.depth;
+				const std::size_t dep_bytes = dep.depth.size();
+				const std::size_t dep_pix = static_cast<std::size_t>(dep.width) * static_cast<std::size_t>(dep.height);
+				if (dep_bytes > 0 && dep_pix > 0 && dep_bytes <= rc::media::MAX_IMAGE_BYTES && media_depth_pub_)
+				{
+					const std::size_t bpp = dep_bytes / dep_pix;
+					std::uint32_t fmt  = rc::media::FORMAT_Z16;
+					std::uint32_t step = static_cast<std::uint32_t>(dep.width) * 2u;
+					if (bpp == 4) { fmt = rc::media::FORMAT_DEPTH_F32; step = static_cast<std::uint32_t>(dep.width) * 4u; }
+					if (auto *s = media_depth_pub_->loan())
+					{
+						s->stream_id(rc::media::STREAM_ZED_DEPTH);
+						s->frame_id(media_depth_frame_id_++);
+						s->stamp_ns(static_cast<std::uint64_t>(dep.alivetime));
+						s->width(static_cast<std::uint32_t>(dep.width));
+						s->height(static_cast<std::uint32_t>(dep.height));
+						s->step(step);
+						s->format(fmt);
+						s->size(static_cast<std::uint32_t>(dep_bytes));
+						std::memcpy(s->data().data(), dep.depth.data(), dep_bytes);
+						media_depth_pub_->publish(s);
+					}
+				}
+			}
+
 			const long p_ms = static_cast<long>(frame.image.period);
 
 			const auto now_steady = std::chrono::steady_clock::now();
-			const bool do_rgb   = (rgb_interval_ms.count()   == 0) || (now_steady - last_rgb_upload   >= rgb_interval_ms);
-			const bool do_depth = (depth_interval_ms.count() == 0) || (now_steady - last_depth_upload >= depth_interval_ms);
+			const bool do_rgb   = rgb_upload_enabled && ((rgb_interval_ms.count()   == 0) || (now_steady - last_rgb_upload   >= rgb_interval_ms));
+			const bool do_depth = depth_upload_enabled && ((depth_interval_ms.count() == 0) || (now_steady - last_depth_upload >= depth_interval_ms));
 			if (auto cam_node = G->get_node("zed"); cam_node.has_value())
 			{
 				if (do_rgb)
@@ -373,10 +482,12 @@ void SpecificWorker::read_rgbd_thread()
 					G->add_or_modify_attrib_local<cam_depth_focaly_att>(cam_node.value(), frame.depth.focaly);
 					G->add_or_modify_attrib_local<cam_depthFactor_att>(cam_node.value(), frame.depth.depthFactor);
 					G->add_or_modify_attrib_local<cam_depth_att>(cam_node.value(), std::move(frame.depth.depth));
-					G->update_node(cam_node.value());
+					// Last use of cam_node in this block: move it in so the camera blobs are
+					// moved into the engine instead of deep-copied under the graph write lock.
+					G->update_node(std::move(cam_node.value()));
 				}
 			}
-			else
+			else if (!shutting_down_.load())
 				qWarning() << "Camera node not found in DSR graph";
 
 			if (p_ms > 0)
@@ -404,6 +515,9 @@ void SpecificWorker::read_rgbd_thread()
 /////////////////////////////////////////////////////////////////////////
 void SpecificWorker::FullPoseEstimationPub_newFullPose(RoboCompFullPoseEstimation::FullPoseEuler pose)
 {
+	if (shutting_down_.load())
+		return;
+
 	// we do not add any noise here. It is up to the users.
 	if (auto pose_node = G->get_node(robot_name); pose_node.has_value())
 	{
@@ -413,6 +527,6 @@ void SpecificWorker::FullPoseEstimationPub_newFullPose(RoboCompFullPoseEstimatio
 		G->add_or_modify_attrib_local<robot_current_speed_timestamp_att>(pose_node.value(), static_cast<unsigned long>(pose.timestamp));
 		G->update_node(pose_node.value());
 	}
-	else
+	else if (!shutting_down_.load())
 		qWarning() << "FullPose node not found in DSR graph";
 }

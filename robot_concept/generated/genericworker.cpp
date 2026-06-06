@@ -101,15 +101,11 @@ GenericWorker::GenericWorker(const ConfigLoader& configLoader, TuplePrx tprx) : 
 */
 GenericWorker::~GenericWorker()
 {
-    save_window_settings();
-
-    for (auto& [name, graphPtr] : Graphs) {
-        if (!graphPtr) continue;
-        auto grid_nodes = graphPtr->get_nodes_by_type("grid");
-        for (auto grid : grid_nodes) {
-            graphPtr->delete_node(grid);
-        }
-    }
+    // Settings are already persisted on aboutToQuit. During teardown, avoid
+    // mutating graph state from the destructor because viewers/Qt objects may
+    // be in shutdown and graph callbacks can race with object destruction.
+    graph_viewers.clear();
+    windows.clear();
 }
 void GenericWorker::killYourSelf()
 {

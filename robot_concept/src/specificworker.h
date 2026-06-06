@@ -25,12 +25,16 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
+
+namespace rc::media { class MediaPublisher; }
 
 /**
  * \brief Class SpecificWorker implements the core functionality of the component.
@@ -43,6 +47,7 @@ public:
 	~SpecificWorker();
 
 	void FullPoseEstimationPub_newFullPose(RoboCompFullPoseEstimation::FullPoseEuler pose);
+	bool is_shutting_down() const noexcept { return shutting_down_.load(); }
 
 public slots:
 	void initialize();
@@ -72,10 +77,18 @@ private:
 		bool  TRANSFORMS_INTERPOLATE_RT = true;
 		int   LIDAR_DECIMATION_FACTOR   = 1;
 
-		// DSR upload rates (Hz); 0 = every frame
+		// DSR upload rates (Hz):
+		//   >0: throttle to that rate
+		//    0: upload every captured frame
+		//   <0: disable upload
 		int DSR_RGB_FPS   = 0;
 		int DSR_DEPTH_FPS = 5;
 		int DSR_LIDAR_FPS = 0;
+
+		// Media plane (zero-copy DDS) for RGBD pixels carried OUT of the graph.
+		int         MEDIA_DOMAIN_ID  = 0;
+		std::string MEDIA_RGB_TOPIC   = "rc/zed/rgb";
+		std::string MEDIA_DEPTH_TOPIC = "rc/zed/depth";
 	};
 	Params params;
 
@@ -97,16 +110,25 @@ private:
 	std::thread rgbd_thread;
 	std::atomic<bool> stop_rgbd_thread{false};
 
+	// Media plane publishers (zero-copy DDS); pixels leave the DSR graph here.
+	std::unique_ptr<rc::media::MediaPublisher> media_rgb_pub_;
+	std::unique_ptr<rc::media::MediaPublisher> media_depth_pub_;
+	bool media_publishers_ready_ = false;
+	std::uint64_t media_rgb_frame_id_   = 0;
+	std::uint64_t media_depth_frame_id_ = 0;
+
 	void waiting_enter();
 	void waiting_loop();
 	void operating_enter();
 	void operating_loop();
 	void degraded_enter();
 	void degraded_loop();
+	void request_shutdown();
 
 	void cleanup_owned_nodes();
 	void on_optional_peer_lost(const std::string &name, std::uint32_t id);
 	void on_optional_peer_ready(const std::string &name, std::uint32_t id);
+	std::atomic<bool> shutting_down_{false};
 
 signals:
 	void presenceReady();

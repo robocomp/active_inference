@@ -60,10 +60,10 @@ Emergency = 500
 # ──────────────────────────────────────────────────────────────────────────────
 
 [Presence]
-optional_agent_names = ["room_concept", "table_concept", "controller", "voxelizer"]
+optional_agent_names = ["room_concept", "table_concept", "controller", "voxelizer", "table_concept"]
 config_dir = "etc"
 monitor_period_ms = 500
-heartbeat_timeout_ms = 3000
+heartbeat_timeout_ms = 15000  # match controller/room_concept; 3s was hypersensitive to graph-publish stalls
 rejoin_grace_ms = 1500
 stale_grace_ms = 120000  # 2 min grace: covers peer restart time before declaring lost
 agent_info_period_ms = 1000
@@ -72,36 +72,34 @@ agent_info_period_ms = 1000
 nodes = ["mind", "robot_concept 6"]
 subtrees = ["Shadow"]
 
-[Yolo]
-model_path  = "yolo26l-seg.onnx"
-conf_thresh = 0.25
-iou_thresh  = 0.45
-use_gpu     = true
-use_trt     = true
-accepted_labels = [
-	"backpack", "handbag", "suitcase",
-	"bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl",
-	"banana", "apple", "sandwich", "orange", "broccoli", "carrot",
-	"hot dog", "pizza", "donut", "cake",
-	"chair", "couch", "potted plant", "bed", "dining table", "toilet", "tv",
-	"laptop", "mouse", "remote", "keyboard", "cell phone",
-	"microwave", "oven", "toaster", "sink", "refrigerator",
-	"book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush"
-]
-
-# Hungarian association and mask erosion parameters
-mask_erode_kernel = 2
-track_association_max_distance_m = 0.7
-track_max_missed_frames = 10
-
 [Camera]
-# DSR upload frame rates. 0 = every captured frame (no throttle).
-dsr_rgb_fps   = 10   # RGB: every frame by default
-dsr_depth_fps = 10   # Depth: 5 Hz (large blob, less time-critical)
+# DSR upload frame rates:
+#   >0: throttle to that rate
+#    0: upload every captured frame
+#   <0: disable upload
+# RGBD pixels now travel on the zero-copy media plane (rc/zed/rgb + rc/zed/depth);
+# DSR cam_rgb/cam_depth blob uploads are decommissioned to keep large payloads off
+# the shared CRDT graph / liveliness path. Set >=0 only to temporarily re-enable
+# the legacy DSR path for debugging.
+dsr_rgb_fps   = -1
+dsr_depth_fps = -1
+
+# Zero-copy RGBD media plane. Kept on a DEDICATED DDS domain (NOT the DSR
+# Agent.domain = 0) so media participant churn (e.g. a voxelizer restart) can
+# never perturb the cortex/DSR discovery + graph-resync path. Must MATCH across
+# robot_concept (producer), voxelizer and room_concept (consumers).
+[Media]
+domain_id   = 7
+rgb_topic   = "rc/zed/rgb"
+depth_topic = "rc/zed/depth"
 
 [Lidar]
 # DSR upload rate for lidar point cloud. 0 = every captured scan (no throttle).
-dsr_lidar_fps = 0
+# NOTE: 0 (unthrottled) floods the shared DSR/FastDDS writer with the full point
+# cloud every scan. Under load this blocks G->update_node and starves the agent
+# heartbeat (timestamp_agent_att), causing false "stale peer" detection. Keep a
+# bounded rate so bulk lidar data cannot saturate the liveliness path.
+dsr_lidar_fps = 20
 
 [Transforms]
 # Use RT interpolation for timestamped graph transforms. Disable to fall back to nearest sample.
