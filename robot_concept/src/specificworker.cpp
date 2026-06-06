@@ -354,6 +354,25 @@ void SpecificWorker::read_lidar_thread()
 void SpecificWorker::read_rgbd_thread()
 {
 	static FPSCounter rgbd_fps;
+	struct MediaStats
+	{
+		std::uint64_t rgb_ok = 0;
+		std::uint64_t depth_ok = 0;
+		std::uint64_t rgb_bytes = 0;
+		std::uint64_t depth_bytes = 0;
+		std::uint64_t rgb_loan_fail = 0;
+		std::uint64_t depth_loan_fail = 0;
+		std::uint64_t rgb_publish_fail = 0;
+		std::uint64_t depth_publish_fail = 0;
+		auto reset_window() -> void
+		{
+			rgb_ok = depth_ok = rgb_bytes = depth_bytes = 0;
+			rgb_loan_fail = depth_loan_fail = 0;
+			rgb_publish_fail = depth_publish_fail = 0;
+		}
+	};
+	MediaStats media_stats;
+	auto last_media_report = std::chrono::steady_clock::now();
 	bool empty_rgbd_logged = false;
 	auto wait_period = std::chrono::milliseconds(getPeriod("Compute"));
 	const bool rgb_upload_enabled = params.DSR_RGB_FPS >= 0;
@@ -423,8 +442,16 @@ void SpecificWorker::read_rgbd_thread()
 						s->format(rc::media::FORMAT_BGR8);
 						s->size(static_cast<std::uint32_t>(nbytes));
 						std::memcpy(s->data().data(), img.image.data(), nbytes);
-						media_rgb_pub_->publish(s);
+						if (media_rgb_pub_->publish(s))
+						{
+							++media_stats.rgb_ok;
+							media_stats.rgb_bytes += nbytes;
+						}
+						else
+							++media_stats.rgb_publish_fail;
 					}
+					else
+						++media_stats.rgb_loan_fail;
 				}
 
 				const auto &dep = frame.depth;
@@ -447,9 +474,37 @@ void SpecificWorker::read_rgbd_thread()
 						s->format(fmt);
 						s->size(static_cast<std::uint32_t>(dep_bytes));
 						std::memcpy(s->data().data(), dep.depth.data(), dep_bytes);
-						media_depth_pub_->publish(s);
+						if (media_depth_pub_->publish(s))
+						{
+							++media_stats.depth_ok;
+							media_stats.depth_bytes += dep_bytes;
+						}
+						else
+							++media_stats.depth_publish_fail;
 					}
+					else
+						++media_stats.depth_loan_fail;
 				}
+			}
+
+			const auto now_report = std::chrono::steady_clock::now();
+			if (now_report - last_media_report >= std::chrono::seconds(5))
+			{
+				if (media_stats.rgb_loan_fail > 0 || media_stats.depth_loan_fail > 0
+				 || media_stats.rgb_publish_fail > 0 || media_stats.depth_publish_fail > 0)
+				{
+					qWarning() << "[Media] 5s stats"
+					           << "rgb_ok=" << media_stats.rgb_ok
+					           << "depth_ok=" << media_stats.depth_ok
+					           << "rgb_MB=" << (static_cast<double>(media_stats.rgb_bytes) / 1e6)
+					           << "depth_MB=" << (static_cast<double>(media_stats.depth_bytes) / 1e6)
+					           << "rgb_loan_fail=" << media_stats.rgb_loan_fail
+					           << "depth_loan_fail=" << media_stats.depth_loan_fail
+					           << "rgb_publish_fail=" << media_stats.rgb_publish_fail
+					           << "depth_publish_fail=" << media_stats.depth_publish_fail;
+				}
+				media_stats.reset_window();
+				last_media_report = now_report;
 			}
 
 			const long p_ms = static_cast<long>(frame.image.period);
