@@ -83,13 +83,8 @@ GenericWorker::GenericWorker(const ConfigLoader& configLoader, TuplePrx tprx) : 
 */
 GenericWorker::~GenericWorker()
 {
-    for (auto& [name, graphPtr] : Graphs) {
-        if (!graphPtr) continue;
-        auto grid_nodes = graphPtr->get_nodes_by_type("grid");
-        for (auto grid : grid_nodes) {
-            graphPtr->delete_node(grid);
-        }
-    }
+    // Avoid mutating graph state from the base destructor during process
+    // teardown; shutdown-owned node cleanup is handled earlier.
 }
 void GenericWorker::killYourSelf()
 {

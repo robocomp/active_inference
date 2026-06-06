@@ -41,6 +41,7 @@
 #include <thread>
 #include <mutex>
 #include <condition_variable>
+#include <deque>
 #include <limits>
 #include <fps/fps.h>
 #include "custom_widget.h"
@@ -61,6 +62,7 @@ class SpecificWorker : public GenericWorker
         ~SpecificWorker();
 
         void JoystickAdapter_sendData(RoboCompJoystickAdapter::TData data);
+        bool is_shutting_down() const noexcept { return shutting_down_.load(); }
 
     public slots:
         void initialize();
@@ -117,6 +119,10 @@ class SpecificWorker : public GenericWorker
             float BOOTSTRAP_TABLE_WIDTH = 1.5f;
             float BOOTSTRAP_TABLE_DEPTH = 1.4f;
             float BOOTSTRAP_TABLE_HEIGHT = 0.74f;
+
+            // Media plane (zero-copy DDS RGBD transport)
+            int         MEDIA_DOMAIN_ID = 0;
+            std::string MEDIA_RGB_TOPIC = "rc/zed/rgb";
         };
         Params params;
 
@@ -138,6 +144,30 @@ class SpecificWorker : public GenericWorker
         std::optional<rc::LidarData> read_lidar_from_graph() const;
         void save_robot_pose_once();
 
+        // ── Lidar/state health telemetry ─────────────────────────────────────
+        std::atomic<std::uint64_t> lidar_signal_events_{0};
+        std::atomic<std::uint64_t> lidar_copied_frames_{0};
+        std::atomic<std::uint64_t> lidar_ingested_frames_{0};
+        std::atomic<std::uint64_t> lidar_watchdog_pulls_{0};
+        std::atomic<std::uint64_t> lidar_ingest_wakeups_{0};
+        std::atomic<std::uint64_t> lidar_copy_mutex_busy_{0};
+        std::atomic<std::uint64_t> lidar_ingest_loop_beats_{0};
+        std::atomic<bool>          lidar_copy_queued_{false};
+        std::atomic<bool>          operating_compute_queued_{false};
+        std::atomic<std::int64_t>  lidar_last_signal_ms_{0};
+        std::atomic<std::int64_t>  lidar_last_ingest_ms_{0};
+        std::atomic<std::int64_t>  lidar_last_ingest_loop_beat_ms_{0};
+        std::atomic<bool>          lidar_notify_inflight_{false};
+        std::atomic<std::int64_t>  lidar_notify_inflight_since_ms_{0};
+        std::int64_t               last_lidar_health_log_ms_ = 0;
+        std::int64_t               last_lidar_stall_dump_ms_ = 0;
+        std::int64_t               last_lidar_watchdog_pull_ms_ = 0;
+        std::int64_t               last_waiting_heartbeat_log_ms_ = 0;
+        std::int64_t               last_degraded_heartbeat_log_ms_ = 0;
+        std::int64_t               last_affordance_monitor_ms_ = 0;
+        std::int64_t               last_dsr_publish_try_ms_ = 0;
+        std::deque<std::int64_t>   lidar_recent_source_ts_;
+
         // ── Lidar ingestion thread (decoupled from the Qt/GUI thread) ──────────
         // The heavy point-cloud decode used to run inside modify_node_slot, a queued
         // Qt slot on the GUI thread. Under rendering load that thread starved and the
@@ -151,8 +181,19 @@ class SpecificWorker : public GenericWorker
         std::mutex              lidar_ingest_mutex_;
         std::condition_variable lidar_ingest_cv_;
         std::int64_t            last_ingested_lidar_ts_ = std::numeric_limits<std::int64_t>::min();
+        struct PendingLidarScan
+        {
+            std::vector<float> xs;
+            std::vector<float> ys;
+            std::vector<float> zs;
+            std::int64_t source_ts = std::numeric_limits<std::int64_t>::min();
+            bool has_data = false;
+        };
+        PendingLidarScan pending_lidar_scan_;
         void lidar_ingest_loop();
         void ingest_latest_lidar();
+        void schedule_lidar_copy_to_pending(std::optional<std::uint64_t> node_id, const char *origin, bool count_signal_event);
+        bool copy_latest_lidar_to_pending(std::optional<std::uint64_t> node_id, const char *origin, bool count_signal_event);
         std::string pose_file_path() const;
 
         // ── Localizer ──────────────────────────────────────────────────────────
@@ -171,6 +212,7 @@ class SpecificWorker : public GenericWorker
         rc::TimeSeriesPlot* ts_plot_sdf_ = nullptr;
         rc::TimeSeriesPlot* ts_plot_fe_  = nullptr;
         std::unique_ptr<rc::CameraVisualizer> camera_viz_;
+        bool camera_media_plane_initialized_ = false;
         FPSCounter fps_counter_;
         Eigen::Affine2f best_available_pose(const std::optional<rc::RoomConcept::UpdateResult>&, bool) const;
         void update_epistemic_overlay();
@@ -182,6 +224,7 @@ class SpecificWorker : public GenericWorker
         void slot_show_camera_visualization();
         void slot_toggle_lidar_points_display(bool checked);
 
+        void request_shutdown();
         void cleanup_owned_nodes();
         void waiting_enter();
         void waiting_loop();
@@ -191,6 +234,7 @@ class SpecificWorker : public GenericWorker
         void degraded_loop();
         void on_optional_peer_lost(const std::string &name, std::uint32_t id);
         void on_optional_peer_ready(const std::string &name, std::uint32_t id);
+        void cleanup_self_agent_node();
 
         // ── DSR graph state ────────────────────────────────────────────────────
         uint64_t dsr_robot_id_ = 0;
@@ -211,6 +255,7 @@ class SpecificWorker : public GenericWorker
         void update_planner_obstacle_footprints();
         void dsr_update_affordance(const rc::RoomConcept::UpdateResult& res);
         std::unique_ptr<DSR::RT_API> rt_api;
+        std::atomic<bool> shutting_down_{false};
 
     signals:
         void presenceReady();

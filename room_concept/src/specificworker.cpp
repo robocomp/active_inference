@@ -27,7 +27,9 @@
 #include <fstream>
 #include <unordered_set>
 #include <QDir>
+#include <QDateTime>
 #include <QFileInfo>
+#include <QThread>
 #include <QVBoxLayout>
 
 #include <variant>
@@ -77,15 +79,26 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
 ///////////////////////////////////////////////////////////////////////////////
 SpecificWorker::~SpecificWorker()
 {
+    request_shutdown();
+}
+
+void SpecificWorker::request_shutdown()
+{
+    if (shutting_down_.exchange(true))
+        return;
+
     save_window_settings();
     save_robot_pose_once();
+
     // Stop the lidar ingestion thread BEFORE tearing down RoomConcept (it calls
     // room_concept_.notify_new_lidar) and while G is still alive.
     lidar_ingest_running_.store(false);
     lidar_ingest_cv_.notify_all();
     if (lidar_ingest_thread_.joinable())
         lidar_ingest_thread_.join();
+
     room_concept_.stop();
+    cleanup_owned_nodes();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -98,9 +111,7 @@ void SpecificWorker::initialize()
     qInfo() << "Ignoring DSR RGBD payload attributes cam_rgb/cam_depth in local graph updates";
 
     QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
-                     this, &SpecificWorker::save_robot_pose_once, Qt::UniqueConnection);
-    QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
-                     this, &SpecificWorker::cleanup_owned_nodes, Qt::UniqueConnection);
+                     this, &SpecificWorker::request_shutdown, Qt::UniqueConnection);
 
     // ── RoomConcept params ─────────────────────────────────────────────────
     rc::ConfigLoaderUtils::load_required<bool>(configLoader, "RoomConcept.PredictionEarlyExit", params.PREDICTION_EARLY_EXIT);
@@ -323,6 +334,11 @@ void SpecificWorker::initialize()
 
     // ── Presence coordinator ────────────────────────────────────────────────
     presence_coordinator_.configure(configLoader, G, static_cast<std::uint32_t>(agent_id));
+    AgentPresenceCoordinator::Policy presence_policy;
+    presence_policy.set_local_ready_false_on_waiting_enter = false;
+    presence_policy.set_local_ready_true_on_operating_enter = false;
+    presence_policy.set_local_ready_false_on_degraded_enter = false;
+    presence_coordinator_.set_policy(presence_policy);
     presence_coordinator_.set_transition_hooks({
         .request_presence_ready = [this]() { emit presenceReady(); },
         .request_presence_lost  = [this]() { emit presenceLost(); },
@@ -345,6 +361,7 @@ void SpecificWorker::initialize()
         .on_waiting_enter = [this]()
         {
             qInfo() << "[SM] -> Waiting";
+            QTimer::singleShot(0, this, [this]() { presence_coordinator_.set_local_ready(false); });
             const auto missing = presence_coordinator_.missing_required_names();
             if (!missing.empty())
             {
@@ -357,18 +374,36 @@ void SpecificWorker::initialize()
         .on_operating_enter = [this]()
         {
             qInfo() << "[SM] -> Operating: all required constraints satisfied";
-            room_concept_.stop();
-            room_concept_.start();
+            QTimer::singleShot(0, this, [this]() { presence_coordinator_.set_local_ready(true); });
+            if (!room_concept_.is_running())
+            {
+                qWarning() << "[SM] Operating enter: RoomConcept thread was not running, starting it";
+                room_concept_.start();
+            }
         },
         .on_operating_loop = [this]()
         {
-            compute();
-            if (auto v = find_graph_viewer(""); v)
-                v->set_external_fps(states.at("Operating")->getActualFps());
+            const auto run_operating_tick = [this]()
+            {
+                operating_compute_queued_.store(false, std::memory_order_release);
+                compute();
+                if (auto v = find_graph_viewer(""); v)
+                    v->set_external_fps(states.at("Operating")->getActualFps());
+            };
+
+            if (QThread::currentThread() == this->thread())
+            {
+                run_operating_tick();
+                return;
+            }
+
+            if (!operating_compute_queued_.exchange(true, std::memory_order_acq_rel))
+                QMetaObject::invokeMethod(this, run_operating_tick, Qt::QueuedConnection);
         },
         .on_degraded_enter = [this]()
         {
             qInfo() << "[SM] -> Degraded: required peer lost. Cleaning up and exiting.";
+            QTimer::singleShot(0, this, [this]() { presence_coordinator_.set_local_ready(false); });
             room_concept_.stop();
             cleanup_owned_nodes();
             QTimer::singleShot(500, QCoreApplication::instance(), SLOT(quit()));
@@ -388,7 +423,12 @@ void SpecificWorker::initialize()
 ///////////////////////////////////////////////////////////////////////////////
 void SpecificWorker::compute()
 {
-    affordance_manager_.monitor_execution(G);
+    const auto now_ms = QDateTime::currentMSecsSinceEpoch();
+    if (last_affordance_monitor_ms_ == 0 || now_ms - last_affordance_monitor_ms_ >= 200)
+    {
+        affordance_manager_.monitor_execution(G);
+        last_affordance_monitor_ms_ = now_ms;
+    }
 
     const auto loc_res  = room_concept_.get_last_result();
     const bool have_loc = loc_res.has_value() && loc_res->ok;
@@ -409,35 +449,109 @@ void SpecificWorker::compute()
             lidar_for_canvas = lidar_from_buffer->first;
     }
 
-    viewer_2d_->update_frame({
-        .lidar_points     = lidar_for_canvas,
-        .display_pose     = pose_for_draw,
-        .covariance       = have_loc ? loc_res->covariance : Eigen::Matrix3f::Identity(),
-        .max_lidar_points = params.MAX_LIDAR_DRAW_POINTS,
-        .have_loc         = have_loc,
-        .is_initialized   = room_concept_.is_initialized(),
-        .has_room_polygon = room_initialized_from_svg_polygon_,
-        .room_width       = have_loc ? loc_res->state[0] : 0.f,
-        .room_length      = have_loc ? loc_res->state[1] : 0.f,
-        .loc_pose         = loc_pose,
-        .use_loc_pose     = use_loc,
-    });
+    const bool on_gui_thread = (QThread::currentThread() == this->thread());
+    if (on_gui_thread && viewer_2d_)
+    {
+        viewer_2d_->update_frame({
+            .lidar_points     = lidar_for_canvas,
+            .display_pose     = pose_for_draw,
+            .covariance       = have_loc ? loc_res->covariance : Eigen::Matrix3f::Identity(),
+            .max_lidar_points = params.MAX_LIDAR_DRAW_POINTS,
+            .have_loc         = have_loc,
+            .is_initialized   = room_concept_.is_initialized(),
+            .has_room_polygon = room_initialized_from_svg_polygon_,
+            .room_width       = have_loc ? loc_res->state[0] : 0.f,
+            .room_length      = have_loc ? loc_res->state[1] : 0.f,
+            .loc_pose         = loc_pose,
+            .use_loc_pose     = use_loc,
+        });
 
-    update_epistemic_overlay();
+        update_epistemic_overlay();
 
-    if (have_loc && !loc_res->corner_matches.empty())
-        viewer_2d_->draw_corners(loc_res->corner_matches, pose_for_draw);
-    else
-        viewer_2d_->draw_corners({}, pose_for_draw);
+        if (have_loc && !loc_res->corner_matches.empty())
+            viewer_2d_->draw_corners(loc_res->corner_matches, pose_for_draw);
+        else
+            viewer_2d_->draw_corners({}, pose_for_draw);
+    }
 
     // ── DSR graph update (only on fresh localization frames) ──────────────
-    if (have_loc && loc_res->timestamp_ms > 0 && loc_res->timestamp_ms != last_dsr_published_ts_ms_)
+    if (have_loc && loc_res->timestamp_ms > 0 && loc_res->timestamp_ms != last_dsr_published_ts_ms_
+        && (last_dsr_publish_try_ms_ == 0 || now_ms - last_dsr_publish_try_ms_ >= 200))
     {
+        last_dsr_publish_try_ms_ = now_ms;
         update_dsr(*loc_res);
         last_dsr_published_ts_ms_ = loc_res->timestamp_ms;
     }
 
-    update_ui(loc_res);
+    if (on_gui_thread)
+        update_ui(loc_res);
+
+    const auto last_signal_ms = lidar_last_signal_ms_.load(std::memory_order_relaxed);
+    const auto last_ingest_ms = lidar_last_ingest_ms_.load(std::memory_order_relaxed);
+    const auto signal_age_ms = (last_signal_ms > 0) ? (now_ms - last_signal_ms) : -1;
+    const auto ingest_age_ms = (last_ingest_ms > 0) ? (now_ms - last_ingest_ms) : -1;
+
+    if (last_lidar_health_log_ms_ == 0 || now_ms - last_lidar_health_log_ms_ >= 3000)
+    {
+        last_lidar_health_log_ms_ = now_ms;
+        if (ingest_age_ms < 0 || ingest_age_ms > 2000)
+        {
+            qWarning() << "[Lidar][health] stale ingest in Operating"
+                       << "signal_events=" << lidar_signal_events_.load(std::memory_order_relaxed)
+                       << "copied_frames=" << lidar_copied_frames_.load(std::memory_order_relaxed)
+                       << "ingested_frames=" << lidar_ingested_frames_.load(std::memory_order_relaxed)
+                       << "watchdog_pulls=" << lidar_watchdog_pulls_.load(std::memory_order_relaxed)
+                       << "ingest_wakeups=" << lidar_ingest_wakeups_.load(std::memory_order_relaxed)
+                       << "copy_mutex_busy=" << lidar_copy_mutex_busy_.load(std::memory_order_relaxed)
+                       << "ingest_loop_beats=" << lidar_ingest_loop_beats_.load(std::memory_order_relaxed)
+                       << "ingest_loop_beat_age_ms="
+                       << ((lidar_last_ingest_loop_beat_ms_.load(std::memory_order_relaxed) > 0)
+                            ? (now_ms - lidar_last_ingest_loop_beat_ms_.load(std::memory_order_relaxed)) : -1)
+                       << "last_signal_age_ms=" << signal_age_ms
+                       << "last_ingest_age_ms=" << ingest_age_ms
+                       << "dirty=" << lidar_ingest_dirty_.load(std::memory_order_relaxed);
+        }
+        else
+        {
+            qInfo() << "[Lidar][health] ok"
+                    << "signal_events=" << lidar_signal_events_.load(std::memory_order_relaxed)
+                    << "copied_frames=" << lidar_copied_frames_.load(std::memory_order_relaxed)
+                    << "ingested_frames=" << lidar_ingested_frames_.load(std::memory_order_relaxed)
+                    << "watchdog_pulls=" << lidar_watchdog_pulls_.load(std::memory_order_relaxed)
+                    << "ingest_wakeups=" << lidar_ingest_wakeups_.load(std::memory_order_relaxed)
+                    << "copy_mutex_busy=" << lidar_copy_mutex_busy_.load(std::memory_order_relaxed)
+                    << "ingest_loop_beats=" << lidar_ingest_loop_beats_.load(std::memory_order_relaxed)
+                    << "ingest_loop_beat_age_ms="
+                    << ((lidar_last_ingest_loop_beat_ms_.load(std::memory_order_relaxed) > 0)
+                        ? (now_ms - lidar_last_ingest_loop_beat_ms_.load(std::memory_order_relaxed)) : -1)
+                    << "last_signal_age_ms=" << signal_age_ms
+                    << "last_ingest_age_ms=" << ingest_age_ms;
+        }
+    }
+
+    if (lidar_notify_inflight_.load(std::memory_order_relaxed))
+    {
+        const auto since_ms = lidar_notify_inflight_since_ms_.load(std::memory_order_relaxed);
+        if (since_ms > 0 && now_ms - since_ms > 2000)
+        {
+            qWarning() << "[Lidar][health] ingest thread appears blocked in notify_new_lidar"
+                       << "blocked_ms=" << (now_ms - since_ms);
+        }
+    }
+
+    if (on_gui_thread &&
+        (signal_age_ms < 0 || signal_age_ms > 2000) &&
+        (last_lidar_watchdog_pull_ms_ == 0 || now_ms - last_lidar_watchdog_pull_ms_ >= 1000))
+    {
+        last_lidar_watchdog_pull_ms_ = now_ms;
+        if (copy_latest_lidar_to_pending(std::nullopt, "watchdog", false))
+        {
+            lidar_watchdog_pulls_.fetch_add(1, std::memory_order_relaxed);
+            qWarning() << "[Lidar][watchdog] recovered pending scan from graph poll"
+                       << "signal_age_ms=" << signal_age_ms
+                       << "ingest_age_ms=" << ingest_age_ms;
+        }
+    }
     fps_counter_.print("[Compute]", 3000);
 }
 
@@ -1183,26 +1297,112 @@ std::string SpecificWorker::pose_file_path() const
 
 void SpecificWorker::modify_node_slot(std::uint64_t /*id*/, const std::string &type)
 {
-    // Runs on the DDS emitter thread (DirectConnection). Keep it cheap: just wake the
-    // dedicated lidar ingestion thread, which performs the heavy point-cloud decode off
-    // the Qt/GUI thread so the localization inner loop never starves under rendering load.
     if (type != "laser")
         return;
+    schedule_lidar_copy_to_pending(std::nullopt, "update_node_signal", true);
+}
+
+void SpecificWorker::schedule_lidar_copy_to_pending(std::optional<std::uint64_t> node_id, const char *origin, bool count_signal_event)
+{
+    if (count_signal_event)
+    {
+        lidar_signal_events_.fetch_add(1, std::memory_order_relaxed);
+        lidar_last_signal_ms_.store(QDateTime::currentMSecsSinceEpoch(), std::memory_order_relaxed);
+    }
+
+    // Coalesce bursts of graph signals into a single queued pull from the Qt thread.
+    if (lidar_copy_queued_.exchange(true, std::memory_order_acq_rel))
+        return;
+
+    QTimer::singleShot(0, this, [this, node_id, origin]()
+    {
+        lidar_copy_queued_.store(false, std::memory_order_release);
+        copy_latest_lidar_to_pending(node_id, origin, false);
+    });
+}
+
+bool SpecificWorker::copy_latest_lidar_to_pending(std::optional<std::uint64_t> node_id, const char *origin, bool count_signal_event)
+{
+    (void)origin;
+
+    if (count_signal_event)
+    {
+        lidar_signal_events_.fetch_add(1, std::memory_order_relaxed);
+        lidar_last_signal_ms_.store(QDateTime::currentMSecsSinceEpoch(), std::memory_order_relaxed);
+    }
+
+    if (!G)
+        return false;
+
+    std::optional<DSR::Node> node_opt;
+    if (node_id.has_value())
+        node_opt = G->get_node(node_id.value());
+    if (!node_opt.has_value())
+    {
+        node_opt = G->get_node(params.LIDAR_NAME);
+        if (!node_opt.has_value())
+        {
+            node_opt = G->get_node("lidar3d");
+            if (!node_opt.has_value())
+                node_opt = G->get_node("lidar3D");
+        }
+    }
+    if (!node_opt.has_value())
+        return false;
+
+    const auto &lidar3D = node_opt.value();
+    const auto lx = G->get_attrib_by_name<laser_X_att>(lidar3D);
+    const auto ly = G->get_attrib_by_name<laser_Y_att>(lidar3D);
+    const auto lz = G->get_attrib_by_name<laser_Z_att>(lidar3D);
+    const auto laser_ts = G->get_attrib_by_name<laser_timestamp_att>(lidar3D);
+    if (!lx.has_value() || !ly.has_value() || !lz.has_value() || !laser_ts.has_value())
+        return false;
+
+    const auto source_ts = static_cast<std::int64_t>(laser_ts.value());
+
+    {
+        std::unique_lock<std::mutex> lk(lidar_ingest_mutex_, std::try_to_lock);
+        if (!lk.owns_lock())
+        {
+            // Avoid blocking DDS/update callback threads if ingest thread is inside
+            // a long operation while holding the mutex.
+            lidar_copy_mutex_busy_.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+        if (source_ts <= last_ingested_lidar_ts_)
+            return false;
+        if (pending_lidar_scan_.has_data && source_ts <= pending_lidar_scan_.source_ts)
+            return false;
+
+        pending_lidar_scan_.xs = lx.value().get();
+        pending_lidar_scan_.ys = ly.value().get();
+        pending_lidar_scan_.zs = lz.value().get();
+        pending_lidar_scan_.source_ts = source_ts;
+        pending_lidar_scan_.has_data = true;
+        lidar_copied_frames_.fetch_add(1, std::memory_order_relaxed);
+    }
+
     lidar_ingest_dirty_.store(true, std::memory_order_release);
     lidar_ingest_cv_.notify_one();
+    return true;
 }
 
 void SpecificWorker::lidar_ingest_loop()
 {
     while (lidar_ingest_running_.load(std::memory_order_acquire))
     {
+        lidar_ingest_loop_beats_.fetch_add(1, std::memory_order_relaxed);
+        lidar_last_ingest_loop_beat_ms_.store(QDateTime::currentMSecsSinceEpoch(), std::memory_order_relaxed);
+
         {
             std::unique_lock lk(lidar_ingest_mutex_);
-            lidar_ingest_cv_.wait_for(lk, std::chrono::milliseconds(50), [this]
+            const bool woke_for_work = lidar_ingest_cv_.wait_for(lk, std::chrono::milliseconds(50), [this]
             {
                 return !lidar_ingest_running_.load(std::memory_order_acquire)
                     || lidar_ingest_dirty_.load(std::memory_order_acquire);
             });
+            if (woke_for_work)
+                lidar_ingest_wakeups_.fetch_add(1, std::memory_order_relaxed);
             lidar_ingest_dirty_.store(false, std::memory_order_release);
         }
         if (!lidar_ingest_running_.load(std::memory_order_acquire))
@@ -1213,30 +1413,27 @@ void SpecificWorker::lidar_ingest_loop()
 
 void SpecificWorker::ingest_latest_lidar()
 {
-    if (!G)
-        return;
+    std::vector<float> xs;
+    std::vector<float> ys;
+    std::vector<float> zs;
+    std::int64_t src_ts = 0;
 
-    const auto node_opt = G->get_node(params.LIDAR_NAME);
-    if (!node_opt.has_value())
-        return;
-    const auto& lidar3D = node_opt.value();
+    {
+        std::scoped_lock lk(lidar_ingest_mutex_);
+        if (!pending_lidar_scan_.has_data)
+            return;
 
-    const auto lx = G->get_attrib_by_name<laser_X_att>(lidar3D);
-    const auto ly = G->get_attrib_by_name<laser_Y_att>(lidar3D);
-    const auto lz = G->get_attrib_by_name<laser_Z_att>(lidar3D);
-    const auto laser_ts = G->get_attrib_by_name<laser_timestamp_att>(lidar3D);
-    if (!lx.has_value() || !ly.has_value() || !lz.has_value() || !laser_ts.has_value())
-        return;
+        xs = std::move(pending_lidar_scan_.xs);
+        ys = std::move(pending_lidar_scan_.ys);
+        zs = std::move(pending_lidar_scan_.zs);
+        src_ts = pending_lidar_scan_.source_ts;
+        pending_lidar_scan_.has_data = false;
 
-    // Skip if we've already ingested this scan (notify_new_lidar also dedupes downstream).
-    const std::int64_t src_ts = static_cast<std::int64_t>(laser_ts.value());
-    if (src_ts <= last_ingested_lidar_ts_)
-        return;
-    last_ingested_lidar_ts_ = src_ts;
+        if (src_ts <= last_ingested_lidar_ts_)
+            return;
+        last_ingested_lidar_ts_ = src_ts;
+    }
 
-    const auto &xs = lx.value().get();
-    const auto &ys = ly.value().get();
-    const auto &zs = lz.value().get();
     const std::size_t npts = std::min({xs.size(), ys.size(), zs.size()});
 
     std::vector<Eigen::Vector3f> points_high;
@@ -1255,7 +1452,25 @@ void SpecificWorker::ingest_latest_lidar()
 
     const std::uint64_t ts = static_cast<std::uint64_t>(std::max<std::int64_t>(0, src_ts));
     high_lidar_buffer_.put<0>(rc::LidarData{std::move(points_high), src_ts}, ts);
+    const auto notify_start_ms = QDateTime::currentMSecsSinceEpoch();
+    lidar_notify_inflight_.store(true, std::memory_order_relaxed);
+    lidar_notify_inflight_since_ms_.store(notify_start_ms, std::memory_order_relaxed);
     room_concept_.notify_new_lidar(static_cast<std::int64_t>(ts));
+    lidar_notify_inflight_.store(false, std::memory_order_relaxed);
+    lidar_notify_inflight_since_ms_.store(0, std::memory_order_relaxed);
+    const auto notify_dt_ms = QDateTime::currentMSecsSinceEpoch() - notify_start_ms;
+    if (notify_dt_ms > 200)
+        qWarning() << "[Lidar][ingest] notify_new_lidar slow" << "dt_ms=" << notify_dt_ms;
+
+    {
+        std::scoped_lock lk(lidar_ingest_mutex_);
+        lidar_recent_source_ts_.push_back(src_ts);
+        while (lidar_recent_source_ts_.size() > 5)
+            lidar_recent_source_ts_.pop_front();
+    }
+
+    lidar_ingested_frames_.fetch_add(1, std::memory_order_relaxed);
+    lidar_last_ingest_ms_.store(QDateTime::currentMSecsSinceEpoch(), std::memory_order_relaxed);
 }
 
 
@@ -1329,9 +1544,6 @@ void SpecificWorker::modify_node_attrs_slot(std::uint64_t id, const std::vector<
     if (!G || id == 0)
         return;
 
-    if (dsr_robot_id_ != 0 && id != dsr_robot_id_)
-        return;
-
     const auto touches_any = [&att_names](std::initializer_list<const char*> names)
     {
         return std::ranges::any_of(names, [&att_names](const char* name)
@@ -1339,6 +1551,22 @@ void SpecificWorker::modify_node_attrs_slot(std::uint64_t id, const std::vector<
             return std::find(att_names.begin(), att_names.end(), name) != att_names.end();
         });
     };
+
+    const bool touches_lidar_payload = touches_any({
+        "laser_X",
+        "laser_Y",
+        "laser_Z",
+        "laser_timestamp"
+    });
+
+    if (touches_lidar_payload)
+    {
+        if (const auto node_opt = G->get_node(id); node_opt.has_value() && node_opt->type() == "laser")
+            schedule_lidar_copy_to_pending(id, "update_node_attr_signal", true);
+    }
+
+    if (dsr_robot_id_ != 0 && id != dsr_robot_id_)
+        return;
 
     const bool touches_current_speed = touches_any({
         "robot_current_advance_speed",
