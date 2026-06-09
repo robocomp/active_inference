@@ -154,8 +154,11 @@ private:
 	// drives to the standoff with the gripper open + correctly oriented and then
 	// HOLDS there instead of committing to Inserting. Lets us validate the
 	// approach + gripper configuration in isolation before enabling the grasp.
-	bool approach_only_ = false;
+	bool approach_only_ = true;   // validate approach+hold; set false to re-enable grasp
 	bool approach_hold_logged_ = false;
+	Eigen::Vector3d held_track_target_{0,0,0};
+	Eigen::Vector3d held_z_des_{0,0,1};
+	Eigen::Vector3d held_x_des_{1,0,0};
 	// Controller.solver: false → closed-form DLS, true → proxQP (reproduces DLS now;
 	// scaffold for migrating joint-limit/obstacle terms to hard QP constraints).
 	bool use_qp_ = false;
@@ -184,8 +187,28 @@ private:
 	std::array<double, Kinematics::N_ARM_JOINTS> cur_q_{};   // latest measured arm config (IK seed)
 	struct ReachScore { bool feasible; double manip; double col_clear; double table_clear; };
 	ReachScore predict_reach(const Eigen::Vector3d& pos,
-	                         const Eigen::Vector3d& z_des, const Eigen::Vector3d& x_des);
+	                         const Eigen::Vector3d& z_des, const Eigen::Vector3d& x_des,
+	                         const std::array<double, Kinematics::N_ARM_JOINTS>& seed);
 	bool   predictive_place_ = false;   // Controller.predictive_place: score candidate place spots, pick best-conditioned
+	// Controller.precompute_reach_map: at startup, sweep the table on a grid, run multi-seed IK +
+	// manipulability per cell, and SAVE the capability map to reach_map_path_ — a reliable O(1)
+	// pre-filter for target selection (vs the flaky single-seed online IK). Computed once, timed.
+	bool        precompute_reach_map_ = true;   // 0.1 s → recompute every startup (per static scene)
+	bool        reach_map_done_       = false;
+	std::string reach_map_path_       = "experiments/reach_map.csv";
+	void        compute_reach_map();
+	// In-memory capability map for O(1) runtime lookup (filled by compute_reach_map): μ per
+	// grid cell, or -1 where unreachable / column-blocked / off-table.
+	std::vector<float> rm_mu_;
+	double rm_x0_ = -0.40, rm_y0_ = -0.90, rm_res_ = 0.05;
+	int    rm_nx_ = 0, rm_ny_ = 0;
+	float  reach_lookup(double x, double y) const;   // μ at the nearest cell; -1 = unusable; 1 if no map
+	// Controller.predictive_grasp: choose the grasp (side azimuth or TOP-DOWN) by scoring
+	// candidates with predict_reach — a bottle in the corner near the column, with no reachable
+	// side approach, is grasped from above instead of attempted-and-failed.
+	bool   predictive_grasp_ = false;   // enable the REACTIVE top-down fallback (try side; on real abort, retry above)
+	bool   force_top_down_   = false;   // set when the side approach failed to converge → this attempt grasps from above
+	static constexpr double BOTTLE_TOP_GRASP_FRAC = 0.88; // top-down grasp height as a fraction of bottle height
 	// ── Preference-field mode (option (c) prototype, steps 1–2) ──────────────────────────
 	// Controller.use_preference_field: on the transit legs (lift-top, place-hover) replace the
 	// hand-coded look-ahead blend with the 2-via Gaussian-mixture field (EFEParams::use_field).
@@ -215,7 +238,11 @@ private:
 	// fixed spot every rep instead of the R2 sweep — for controlled A/B experiments
 	// (hold the pick constant, vary one knob).
 	bool   fixed_pick_set_ = false;
-	Eigen::Vector2d fixed_pick_xy_{0.0, 0.0};
+	Eigen::Vector2d fixed_pick_xy_{0.1, -0.25};
+	// Controlled-experiment override for the PLACE spot too: pin it to a fixed world
+	// xy instead of the R2/predictive draw, so a full pick→place cycle is repeatable.
+	bool   fixed_place_set_ = false;
+	Eigen::Vector2d fixed_place_xy_{0.15, -0.25};
 	// Controller.elbow_gain (default 2.0; 0 ⇒ drop the elbow posture term) and
 	// Controller.elbow_target_xy = "x y" (world m; empty ⇒ built-in default).
 	double elbow_gain_ = 2.0;
@@ -235,6 +262,8 @@ private:
 		Eigen::Vector3d grasp_pos;      // bottle body-centre: the grasp point, m
 		Eigen::Vector3d z_tool_des;     // unit vector, robot frame
 		Eigen::Vector3d x_tool_des;     // unit vector, robot frame
+		Eigen::Vector3d up_axis{0,0,1}; // bottle long axis (= true up): lift/place along THIS, not tool+Y
+		bool            top_down = false; // approach from above (gripper points down) vs side
 	};
 
 	// Fraction of bottle height (measured from the base origin along the
@@ -439,13 +468,15 @@ private:
 	// spans the full ±X width and ~0.5 m of −Y depth. This box is generous in X (the
 	// reach band trims the unreachable wings) and stops just shy of the −Y table edge so
 	// no bottle spawns off the table. R2 sampling + the reach band fill the reachable half.
-	static constexpr double SPAWN_X_MIN = -0.55, SPAWN_X_MAX = 0.55;   // ±X — full reachable width
-	static constexpr double SPAWN_Y_MIN = -0.48, SPAWN_Y_MAX = -0.02;  // the arm's −Y half, inside the table edge
+	// Vertical-mount workspace (base at (-0.553,-0.193,0.42), table X[-0.4,0.4] Y[-0.9,0.9]
+	// top z=0.74): the reachable region is the near-X half, full Y span. See the reach map.
+	static constexpr double SPAWN_X_MIN = -0.40, SPAWN_X_MAX = 0.05;   // near-X reachable strip
+	static constexpr double SPAWN_Y_MIN = -0.82, SPAWN_Y_MAX = 0.45;   // full reachable Y (incl. the right side)
 	// Reach band from the arm base (world XY): reject spawns nearer than MIN (almost on
 	// the column) or past MAX (ungraspable far corner). MAX ≈ the comfortable working
 	// edge — the bottle, not the closer standoff, is the farthest the EE must reach.
-	static constexpr double SPAWN_REACH_MIN_M = 0.45;
-	static constexpr double SPAWN_REACH_MAX_M = 0.86;
+	static constexpr double SPAWN_REACH_MIN_M = 0.35;
+	static constexpr double SPAWN_REACH_MAX_M = 0.82;   // 3-D; capped below 0.90 to stay off the singular rim
 	// Continuous fall detection: bottle long axis tilted past this from vertical
 	// (or dropped below the table) ⇒ it toppled; abort the current grasp phase.
 	static constexpr double FALL_TILT_RAD = 0.60;   // ≈34°
@@ -514,14 +545,14 @@ private:
 	// dexterous zone of this right arm (left/centre is the left arm's job). The
 	// controller runs in world frame, so up = +Z and the table is horizontal; the
 	// EE keeps the grasp height so the bottle base re-seats on the table top.
-	static constexpr double PLACE_X_MIN = 0.06, PLACE_X_MAX = 0.30;   // forward extent (world +X) — pushed out
-	static constexpr double PLACE_Y_MIN = -0.38, PLACE_Y_MAX = -0.05; // right side (world −Y) — widened
+	static constexpr double PLACE_X_MIN = -0.35, PLACE_X_MAX = 0.05;  // near-X reachable strip (new vertical mount)
+	static constexpr double PLACE_Y_MIN = -0.85, PLACE_Y_MAX = 0.45;  // full reachable Y — uses the right side now
 	static constexpr double PLACE_MIN_MOVE_M    = 0.20;  // ≥ this far from the pick spot (more distant placements)
 	// Reachability filter on the chosen place EE: the box now extends past the arm's
 	// reach, so reject samples whose set-down point is farther than this from the arm
 	// base. 0.90 m is the observed working edge (the 10-fold round placed reliably out
 	// to ~0.90 m). Keeps "more distant" spots that are still grabbable.
-	static constexpr double PLACE_REACH_MAX_M   = 0.90;
+	static constexpr double PLACE_REACH_MAX_M   = 0.85;   // capped below 0.90 to stay off the singular rim
 	static constexpr int    PLACE_TIMEOUT_TICKS = 300;   // ~6 s safety per place move
 	static constexpr int    RELEASE_TICKS       = 25;    // ~0.5 s to let the bottle go
 	// Safer set-down: open the fingers only once the bottle is both at the table

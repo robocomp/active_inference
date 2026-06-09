@@ -819,9 +819,9 @@ public:
         setMaximumHeight(170);
     }
     // Channels 0..3 = forces (N), 4..5 = tip contacts (0/1).
-    void push(float l, float r, float ltip, float rtip, float lcontact, float rcontact)
+    void push(float l, float r, float ltip, float rtip, float wrist, float lcontact, float rcontact)
     {
-        const std::array<float, NCH> s{l, r, ltip, rtip, lcontact, rcontact};
+        const std::array<float, NCH> s{l, r, ltip, rtip, wrist, lcontact, rcontact};
         for (int c = 0; c < NCH; ++c)
             buf_[c][head_] = s[c];
         head_ = (head_ + 1) % CAP;
@@ -847,7 +847,7 @@ protected:
         static const char*  cnm[2]  = {"Ltip-contact", "Rtip-contact"};
         for (int k = 0; k < 2; ++k)
         {
-            const int c = 4 + k;
+            const int c = NFORCE + k;
             const float lo = (k == 0) ? STRIP_H - 3.0f : STRIP_H - 3.0f;  // both ride the strip floor
             const float hi = 3.0f;
             p.setPen(QPen(ccol[k], 1.6));
@@ -864,15 +864,16 @@ protected:
             p.drawText(6 + k * 100, STRIP_H - 4, QString(cnm[k]) + (on ? " ON" : " -"));
         }
 
-        // ── Force region (below the strip): 4 autoscaled channels ──
+        // ── Force region (below the strip): autoscaled channels (4 gripper + wrist Fz) ──
         float fmax = 1e-3f;
-        for (int c = 0; c < 4; ++c)
+        for (int c = 0; c < NFORCE; ++c)
             for (int i = 0; i < count_; ++i)
                 fmax = std::max(fmax, std::abs(buf_[c][i]));
-        static const QColor col[4] = {QColor(80, 160, 255), QColor(255, 120, 120),
-                                      QColor(120, 255, 160), QColor(255, 210, 90)};
-        static const char*  nm[4]  = {"Lforce", "Rforce", "Ltip", "Rtip"};
-        for (int c = 0; c < 4; ++c)
+        static const QColor col[NFORCE] = {QColor(80, 160, 255), QColor(255, 120, 120),
+                                           QColor(120, 255, 160), QColor(255, 210, 90),
+                                           QColor(230, 230, 230)};
+        static const char*  nm[NFORCE]  = {"Lforce", "Rforce", "Ltip", "Rtip", "wristFz"};
+        for (int c = 0; c < NFORCE; ++c)
         {
             p.setPen(QPen(col[c], 1.5));
             QPointF prev;
@@ -893,7 +894,8 @@ protected:
 
 private:
     static constexpr int CAP    = 300;   // ~6 s at the 50 Hz compute rate
-    static constexpr int NCH    = 6;     // 4 forces + 2 contacts
+    static constexpr int NFORCE = 5;     // Lforce, Rforce, Ltip, Rtip, wristFz
+    static constexpr int NCH    = 7;     // 5 forces + 2 contacts
     static constexpr int STRIP_H = 26;   // px: top strip height for the contact steps
     std::array<std::array<float, CAP>, NCH> buf_{};
     int head_ = 0, count_ = 0;
@@ -933,11 +935,11 @@ ArmBeliefViewer3D::ArmBeliefViewer3D(QWidget* parent)
 }
 
 void ArmBeliefViewer3D::update_forces(float lforce, float rforce,
-                                      float ltipforce, float rtipforce,
+                                      float ltipforce, float rtipforce, float wrist_force,
                                       bool ltipcontact, bool rtipcontact)
 {
     if (force_plot_ != nullptr)
-        force_plot_->push(lforce, rforce, ltipforce, rtipforce,
+        force_plot_->push(lforce, rforce, ltipforce, rtipforce, wrist_force,
                           ltipcontact ? 1.0f : 0.0f, rtipcontact ? 1.0f : 0.0f);
 }
 

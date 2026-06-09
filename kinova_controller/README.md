@@ -4,6 +4,9 @@ A brief introduction to the component. Describe its purpose, functionality, and 
 <YOUR BRIEFING>
 ```
 
+last session : claude --resume 355bdb54-c7c4-488e-8f6c-653c99b5dbcc
+
+
 ## Dependencies
 The following dependencies are required to build and run kinova_controller. Ensure they are installed and properly configured on your system before proceeding:
 ```
