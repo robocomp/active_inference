@@ -29,7 +29,7 @@ graph = true
 
 [Controller]
 auto_start = true
-tip_log    = true   # stream "[tiplog] cycle,t,ee_xyz,tgt_xyz,dist,v_cmd,v_meas"
+tip_log    = false  # disabled: [ctrl] lines below are the validation log
 approach_only = true  # VALIDATION: approach to standoff and hold — no grasp/place
 # Pragmatic resolved-rate backend: "dls" (closed form, default) or "qp" (proxQP).
 # The QP with no inequalities reproduces DLS exactly — A/B it, then later steps move

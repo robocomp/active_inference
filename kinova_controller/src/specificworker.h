@@ -255,6 +255,7 @@ private:
 	bool                           tip_log_ = false;
 	long                           tip_log_cycle_ = 0;
 	std::optional<Eigen::Vector3d> tip_log_prev_pos_;
+	long                           ctrl_cycle_ = 0;   // approach-validation cycle counter
 
 	struct SideGraspTarget
 	{

@@ -937,116 +937,79 @@ void SpecificWorker::compute()
             return {e_pos, e_ang};
         };
 
-        // Lambdas below are only used in the grasp/place FSM (disabled for approach-only validation).
-        // Defined here to keep the code structure intact; suppressed with (void) to avoid warnings.
-        const auto via_reached = [&](double e_pos) -> bool
-        {
-            const double br = skill_c() * blend_radius_;
-            blend_min_dist_ = std::min(blend_min_dist_, e_pos);
-            if (e_pos < REACH_TOLERANCE_M) return true;
-            return br > 0.0 and e_pos < br and e_pos > blend_min_dist_ + 1e-4;
-        };
-        const auto gripper_force = [&]() -> float
-        {
-            try
-            {
-                const auto gs = kinovaarm_proxy->getGripperState();
-                return std::max({gs.lforce, gs.rforce, gs.ltipforce, gs.rtipforce});
-            }
-            catch (const Ice::Exception&) { return 0.0f; }
-        };
-        const auto tip_forces = [&]() -> std::pair<float, float>
-        {
-            try
-            {
-                const auto gs = kinovaarm_proxy->getGripperState();
-                return {gs.ltipforce, gs.rtipforce};
-            }
-            catch (const Ice::Exception&) { return {0.0f, 0.0f}; }
-        };
-        const auto tip_contacts = [&]() -> std::pair<bool, bool>
-        {
-            try
-            {
-                const auto gs = kinovaarm_proxy->getGripperState();
-                return {gs.ltipcontact, gs.rtipcontact};
-            }
-            catch (const Ice::Exception&) { return {false, false}; }
-        };
-        (void)via_reached; (void)gripper_force; (void)tip_forces; (void)tip_contacts;
+        // ── APPROACH-ONLY VALIDATION: flat EFE step + dense instrument log ────────────
+        gripper_command_ = 1.0f;  // open throughout
 
-        // A grasp miss either retries the SAME rep (perturbation unchanged) or, once
-        // the per-rep attempt cap is hit, gives up: count it as a failed cycle and
-        // return to rest so the round advances (otherwise a hard probe point loops
-        // forever). Returns true if it gave up (caller should break).
-        const auto miss_or_give_up = [&](const char* why) -> bool
+        auto g_opt = compute_side_grasp_target();
+        if (not g_opt.has_value())
         {
-            gripper_command_    = 1.0f;            // reopen
-            grasp_settle_ticks_ = 0;
-            if (++rep_attempts_ < MAX_REP_ATTEMPTS)
-            {
-                // A miss often means the bottle was toppled/nudged; re-stand a fresh
-                // upright one at this rep's spot so the retry faces a clean target
-                // instead of chasing a fallen bottle.
-                if (respawn_each_rep_) respawn_bottle(last_spawn_xy_.x(), last_spawn_xy_.y());
-                grasp_phase_ = GraspPhase::Tracking;   // retry same rep
-                track_stuck_ticks_ = 0;                // fresh approach-watchdog window
-                track_noprog_ticks_ = 0; track_best_dist_ = 1e9;
-                return false;
-            }
-            std::print("[probe] rep {} GIVE UP after {} attempts ({}) → failed cycle, re-home\n",
-                       probe_index_ - 1, rep_attempts_, why);
-            // Learning: a failed rep lowers confidence (Π_m), re-engaging feedback.
-            if (precision_reweighting_)
-            {
-                confidence_ = std::max(0.0, confidence_ * conf_decay_);
-                save_confidence();
-            }
-            if (metrics_open_)
-                metrics_ << (probe_index_ - 1) << ",0," << confidence_ << ','
-                         << (now_seconds() - rep_t0_) << ',' << obs_count_rep_ << '\n', metrics_.flush();
-            // Teleport back to rest (collision-free) rather than a driven re-home: a
-            // give-up often follows a jam, and driving home from a wedged pose can just
-            // sweep the gripper through the table again. Homing below then holds it.
-            teleport_to_rest();
-            returning_for_cycle_  = true;          // next rep starts after homing
-            homing_settled_ticks_ = 0;
-            homing_elapsed_ticks_ = 0;
-            grasp_phase_          = GraspPhase::Tracking;
-            place_ticks_          = 0;
-            ++pick_place_cycles_done_;             // count the failed rep toward the round
-            phase_                = Phase::Homing;
-            return true;
-        };
-
-        // ── Tilt reflex ────────────────────────────────────────────────────
-        // The bottle pose is refreshed live every cycle (update_bottle_pose_in_dsr).
-        // During the approach/contact phases, if the bottle's axis tips past
-        // TILT_REFLEX_RAD from vertical, abort immediately: reopen and back off
-        // along −approach so we don't knock it over, let it settle, then re-track.
-        if (TILT_REFLEX_ENABLED and base_tf_set_ and (grasp_phase_ == GraspPhase::Tracking
-                          or  grasp_phase_ == GraspPhase::Inserting
-                          or  grasp_phase_ == GraspPhase::Closing))
-        {
-            const double tilt = std::acos(std::clamp(std::abs(bottle_axis_world_.z()), 0.0, 1.0));
-            if (tilt > TILT_REFLEX_RAD)
-            {
-                gripper_command_ = 1.0f;                       // release
-                Eigen::Vector3d away = ee_position - bottle_pos_world_;
-                away.z() = 0.0;
-                away = (away.norm() > 1e-6) ? away.normalized() : Eigen::Vector3d(1, 0, 0);
-                retract_target_ = ee_position + away * RETRACT_DIST_M + Eigen::Vector3d(0, 0, 0.04);
-                retract_ticks_  = 0;
-                ++reflex_count_;
-                grasp_phase_    = GraspPhase::Retracting;
-                std::print("[reflex] bottle tilting {:.0f}° → reopen + retract (#{}/{})\n",
-                           tilt * 57.29578, reflex_count_, MAX_REFLEXES);
-            }
+            RoboCompKinovaArm::TJointSpeeds stop;
+            stop.jointSpeeds.assign(Kinematics::N_ARM_JOINTS, 0.0f);
+            kinovaarm_proxy->moveJointsWithSpeed(stop);
+            if (ctrl_cycle_ % 25 == 0)
+                std::print("[ctrl] cy={} NO TARGET — "
+                           "base_tf={} scene={} "
+                           "bottle=({:.3f},{:.3f},{:.3f})\n",
+                           ctrl_cycle_, base_tf_set_, scene_world_valid_,
+                           bottle_pos_world_.x(), bottle_pos_world_.y(), bottle_pos_world_.z());
+            ++ctrl_cycle_;
+            return;
         }
+        const auto& g = g_opt.value();
 
+        // EFE step (DLS resolved-rate with elbow+mast+table constraints).
+        const auto [e_pos, e_ang] = drive(g.stand_off_pos, g.z_tool_des, g.x_tool_des, 0.25);
+
+        // ── Dense per-cycle instrument ────────────────────────────────────────────────
+        {
+            const auto J6   = kinematics_->arm_jacobian_full(q);
+            const double mu = std::sqrt(std::max(0.0, (J6 * J6.transpose()).determinant()));
+            const auto elb  = kinematics_->elbow_position(q);
+            // Whole-arm column clearance (min over links 2..N-1)
+            const auto sk   = kinematics_->arm_skeleton_points(q);
+            const Eigen::Vector3d col_lo(-0.56477, -0.056064, -0.10);
+            const Eigen::Vector3d col_hi(-0.56477, -0.056064,  1.30);
+            double col_min = 1e9;
+            for (int k = 2; k + 1 < (int)sk.size(); ++k)
+                col_min = std::min(col_min,
+                    segment_segment_distance(sk[k], sk[k+1], col_lo, col_hi) - 0.05);
+
+            const bool arrived = e_pos < REACH_TOLERANCE_M and e_ang < grasp_align_tol_rad_;
+            std::print("[ctrl] cy={:4d}  "
+                       "bot({:.3f},{:.3f},{:.3f})  "
+                       "tgt({:.3f},{:.3f},{:.3f})  "
+                       "ee({:.3f},{:.3f},{:.3f})  "
+                       "e={:.4f}m {:.1f}°  "
+                       "mu={:.4f}  col={:.3f}m{}\n",
+                       ctrl_cycle_,
+                       bottle_pos_world_.x(), bottle_pos_world_.y(), bottle_pos_world_.z(),
+                       g.stand_off_pos.x(),   g.stand_off_pos.y(),   g.stand_off_pos.z(),
+                       ee_position.x(),       ee_position.y(),       ee_position.z(),
+                       e_pos, e_ang * 57.29578, mu, col_min,
+                       arrived ? "  *** AT STANDOFF ***" : "");
+            // Full joint data every 10 cycles or when converged
+            if (ctrl_cycle_ % 10 == 0 or arrived)
+            {
+                std::print("[ctrl]  q  =[{:+.3f},{:+.3f},{:+.3f},{:+.3f},{:+.3f},{:+.3f},{:+.3f}]\n",
+                           q[0],q[1],q[2],q[3],q[4],q[5],q[6]);
+                std::print("[ctrl]  cmd=[{:+.3f},{:+.3f},{:+.3f},{:+.3f},{:+.3f},{:+.3f},{:+.3f}]\n",
+                           last_q_dot_cmd_[0],last_q_dot_cmd_[1],last_q_dot_cmd_[2],
+                           last_q_dot_cmd_[3],last_q_dot_cmd_[4],last_q_dot_cmd_[5],
+                           last_q_dot_cmd_[6]);
+                std::print("[ctrl]  meas=[{:+.3f},{:+.3f},{:+.3f},{:+.3f},{:+.3f},{:+.3f},{:+.3f}]\n",
+                           qd_meas[0],qd_meas[1],qd_meas[2],
+                           qd_meas[3],qd_meas[4],qd_meas[5],qd_meas[6]);
+                std::print("[ctrl]  elb=({:.3f},{:.3f},{:.3f})  "
+                           "z_tool_des=({:.3f},{:.3f},{:.3f})\n",
+                           elb.x(), elb.y(), elb.z(),
+                           g.z_tool_des.x(), g.z_tool_des.y(), g.z_tool_des.z());
+            }
+            ++ctrl_cycle_;
+        }
+#if 0  // entire FSM disabled for approach-only validation
         switch (grasp_phase_)
         {
-#if 0  // approach-only validation: tilt-reflex Retracting not needed
+// ── Retracting ──
             case GraspPhase::Retracting:
             {
                 // Protective withdrawal after a tilt: stay open, back off to the
@@ -1075,7 +1038,6 @@ void SpecificWorker::compute()
                 }
                 break;
             }
-#endif  // approach-only validation
             case GraspPhase::Tracking:
             {
                 gripper_command_ = 1.0f;  // open
@@ -1619,8 +1581,9 @@ void SpecificWorker::compute()
                 }
                 break;
             }
-#endif  // approach-only validation
-        }
+#endif  // inner: Inserting..PlaceRetreating
+        }  // end switch
+#endif  // outer: entire FSM disabled for approach-only validation
         proxy_unreachable_warned_ = false;
     }
     catch (const Ice::Exception& e)
