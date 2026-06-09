@@ -937,11 +937,8 @@ void SpecificWorker::compute()
             return {e_pos, e_ang};
         };
 
-        // Arrival gate for a transit leg whose drive() has an active look-ahead blend. A
-        // rounded corner never reaches the via exactly, so advance once the distance to the
-        // via passes its minimum (corner rounded). With no blend (novice, or blend off) the
-        // min keeps falling to the target and this reduces to the plain e_pos<REACH gate.
-        // blend_min_dist_ is reset to 1e9 on entry to each blended leg.
+        // Lambdas below are only used in the grasp/place FSM (disabled for approach-only validation).
+        // Defined here to keep the code structure intact; suppressed with (void) to avoid warnings.
         const auto via_reached = [&](double e_pos) -> bool
         {
             const double br = skill_c() * blend_radius_;
@@ -949,8 +946,6 @@ void SpecificWorker::compute()
             if (e_pos < REACH_TOLERANCE_M) return true;
             return br > 0.0 and e_pos < br and e_pos > blend_min_dist_ + 1e-4;
         };
-
-        // Largest finger/tip force from the gripper; 0 if the proxy hiccups.
         const auto gripper_force = [&]() -> float
         {
             try
@@ -960,12 +955,6 @@ void SpecificWorker::compute()
             }
             catch (const Ice::Exception&) { return 0.0f; }
         };
-        // Per-finger TIP (tactile) force {left, right} from the fingertip force-3d
-        // TouchSensors — kept SEPARATE (unlike gripper_force's max) so the Inserting phase
-        // can read the left/right asymmetry: a single finger pushing the bottle = off-centre =
-        // about to tip it. {0,0} on a proxy hiccup. (Tip force-3d is reliable for this
-        // TRANSIENT approach contact; it nets to ~0 in a static squeezed hold, so the HOLD is
-        // still confirmed by motor force + bottle-rise.)
         const auto tip_forces = [&]() -> std::pair<float, float>
         {
             try
@@ -975,8 +964,6 @@ void SpecificWorker::compute()
             }
             catch (const Ice::Exception&) { return {0.0f, 0.0f}; }
         };
-        // Per-finger distal-tip BUMPER contact {left, right} — binary "this tip hit the object"
-        // (a misaligned approach), the trigger for the stop-and-rectify reflex.
         const auto tip_contacts = [&]() -> std::pair<bool, bool>
         {
             try
@@ -986,6 +973,7 @@ void SpecificWorker::compute()
             }
             catch (const Ice::Exception&) { return {false, false}; }
         };
+        (void)via_reached; (void)gripper_force; (void)tip_forces; (void)tip_contacts;
 
         // A grasp miss either retries the SAME rep (perturbation unchanged) or, once
         // the per-rep attempt cap is hit, gives up: count it as a failed cycle and
@@ -1284,6 +1272,7 @@ void SpecificWorker::compute()
                 else grasp_settle_ticks_ = 0;
                 break;
             }
+#if 0  // approach-only validation: grasp/place FSM disabled
             case GraspPhase::Inserting:
             {
                 // Ease into the bottle body along the latched approach axis.
@@ -1630,6 +1619,7 @@ void SpecificWorker::compute()
                 }
                 break;
             }
+#endif  // approach-only validation
         }
         proxy_unreachable_warned_ = false;
     }
