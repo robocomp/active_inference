@@ -5,11 +5,15 @@
 #include <dsr/api/dsr_inner_eigen_api.h>
 #include <dsr/core/types/type_checking/dsr_attr_name.h>
 
+#include "../../common/media_transport/media_transport.h"
+
 #include <QPainter>
 #include <QVBoxLayout>
 
 #include <cmath>
+#include <cstring>
 #include <limits>
+#include <print>
 
 namespace rc {
 
@@ -120,6 +124,75 @@ CameraVisualizer::CameraVisualizer(std::shared_ptr<DSRGraph> graph, const std::v
     timing_window_timer_.start();
 }
 
+CameraVisualizer::~CameraVisualizer() = default;
+
+void CameraVisualizer::init_media_plane(std::uint32_t domain_id, const std::string& rgb_topic)
+{
+    media_rgb_sub_ = std::make_unique<rc::media::MediaSubscriber>();
+    rc::media::SubscriberConfig cfg;
+    cfg.domain_id     = domain_id;
+    cfg.topic_name    = rgb_topic;
+    cfg.history_depth = 8;
+    if (!media_rgb_sub_->init(cfg))
+    {
+        std::print(stderr, "[room_concept] CameraVisualizer media plane RGB subscriber init FAILED (topic='{}')\n", rgb_topic);
+        media_rgb_sub_.reset();
+        return;
+    }
+    std::print("[room_concept] CameraVisualizer media plane RGB ready domain={} topic='{}' data_sharing={}\n",
+               domain_id, rgb_topic, media_rgb_sub_->data_sharing_active());
+
+    // Drain the subscriber continuously, even while the dialog is hidden. With a
+    // RELIABLE reader, samples that are never take()'d stay pinned in the
+    // producer's preallocated SHM pool; once the pool fills, the producer's
+    // loan_sample() starts failing and it silently stops publishing, freezing
+    // every other consumer (e.g. the voxelizer). A lightweight ~30 Hz drain
+    // keeps this reader's cache empty regardless of visibility; rendering is
+    // still gated by isVisible() in update_frame().
+    if (media_drain_timer_ == nullptr)
+    {
+        media_drain_timer_ = new QTimer(this);
+        media_drain_timer_->setTimerType(Qt::CoarseTimer);
+        connect(media_drain_timer_, &QTimer::timeout, this, &CameraVisualizer::drain_media_plane);
+    }
+    if (!media_drain_timer_->isActive())
+        media_drain_timer_->start(30);  // ~33 Hz, ahead of the 30 fps producer
+}
+
+void CameraVisualizer::drain_media_plane()
+{
+    if (!media_rgb_sub_)
+        return;
+
+    media_rgb_sub_->poll([this](const rc::media::ImageFrame& f, std::int64_t)
+    {
+        const int w = static_cast<int>(f.width());
+        const int h = static_cast<int>(f.height());
+        if (w <= 0 || h <= 0)
+            return;
+
+        const std::size_t npix = static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
+        std::size_t expected = 0;
+        switch (f.format())
+        {
+            case rc::media::FORMAT_BGR8:
+            case rc::media::FORMAT_RGB8:  expected = npix * 3; break;
+            case rc::media::FORMAT_GRAY8: expected = npix;     break;
+            default: return;  // depth / unknown formats are not consumed here
+        }
+        if (f.size() < expected)
+            return;
+
+        media_rgb_.bytes.resize(expected);
+        std::memcpy(media_rgb_.bytes.data(), f.data().data(), expected);
+        media_rgb_.width  = w;
+        media_rgb_.height = h;
+        media_rgb_.format = f.format();
+        media_rgb_.stamp  = f.stamp_ns();
+        media_rgb_.valid  = true;
+    });
+}
+
 void CameraVisualizer::showEvent(QShowEvent* event)
 {
     QDialog::showEvent(event);
@@ -200,13 +273,9 @@ bool CameraVisualizer::fetch_rgb_from_dsr(QImage& rgb_image, std::uint64_t& fram
 {
     frame_timestamp = 0;
 
-    if (!graph_)
-    {
-        image_label_->setText("No DSR graph available");
-        return false;
-    }
-
-    if (!camera_api_)
+    // Camera intrinsics still come from the static 'zed' DSR node (cam_rgb_width/focalx
+    // descriptor attributes survive even after the cam_rgb blob is off the graph).
+    if (graph_ && !camera_api_)
     {
         if (auto zed_node = graph_->get_node(camera_node_name_); zed_node.has_value())
         {
@@ -214,74 +283,60 @@ bool CameraVisualizer::fetch_rgb_from_dsr(QImage& rgb_image, std::uint64_t& fram
             inner_eigen_api_ = graph_->get_inner_eigen_api();
             fetch_camera_intrinsics();
         }
-        else
-        {
-            image_label_->setText("No 'zed' node found in DSR");
-            return false;
-        }
     }
-
     if (!camera_data_.valid)
-    {
         fetch_camera_intrinsics();
-    }
 
-    if (auto zed_node = graph_->get_node(camera_node_name_); zed_node.has_value())
+    // Pixels come from the zero-copy media plane (replaces camera_api_->get_rgb_image()).
+    if (!media_rgb_sub_)
     {
-        if (auto alive_opt = graph_->get_attrib_by_name<cam_rgb_alivetime_att>(zed_node.value()); alive_opt.has_value())
-            frame_timestamp = static_cast<std::uint64_t>(alive_opt.value());
-        else if (auto ts_opt = graph_->get_attrib_timestamp_by_name(zed_node.value(), "cam_rgb"); ts_opt.has_value())
-            frame_timestamp = ts_opt.value();
-    }
-
-    const auto rgb_opt = camera_api_->get_rgb_image();
-    if (!rgb_opt.has_value())
-    {
-        image_label_->setText("No cam_rgb data in 'zed' node");
+        image_label_->setText("Media plane RGB subscriber not initialized");
         return false;
     }
 
-    const auto& rgb = rgb_opt.value();
-    const int width = camera_data_.width;
-    const int height = camera_data_.height;
+    drain_media_plane();
+
+    if (!media_rgb_.valid)
+    {
+        image_label_->setText("Waiting for RGB frames on media plane...");
+        return false;
+    }
+
+    const int width = media_rgb_.width;
+    const int height = media_rgb_.height;
     if (width <= 0 || height <= 0)
     {
-        image_label_->setText("Invalid camera dimensions");
+        image_label_->setText("Invalid media-plane frame dimensions");
         return false;
     }
 
-    const std::size_t px_count = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
-    if (rgb.size() == px_count * 4)
-    {
-        QImage img(reinterpret_cast<const uchar*>(rgb.data()), width, height, width * 4, QImage::Format_RGBA8888);
-        rgb_image = img.copy();
-        return true;
-    }
+    frame_timestamp = media_rgb_.stamp;
 
-    if (rgb.size() == px_count * 3)
+    const uchar* data = reinterpret_cast<const uchar*>(media_rgb_.bytes.data());
+    switch (media_rgb_.format)
     {
-        // cam_rgb is expected as interleaved RGB888.
-        QImage img(reinterpret_cast<const uchar*>(rgb.data()), width, height, width * 3, QImage::Format_RGB888);
-        rgb_image = img.copy();
-        return true;
+        case rc::media::FORMAT_BGR8:
+        {
+            QImage img(data, width, height, width * 3, QImage::Format_BGR888);
+            rgb_image = img.copy();
+            return true;
+        }
+        case rc::media::FORMAT_RGB8:
+        {
+            QImage img(data, width, height, width * 3, QImage::Format_RGB888);
+            rgb_image = img.copy();
+            return true;
+        }
+        case rc::media::FORMAT_GRAY8:
+        {
+            QImage img(data, width, height, width, QImage::Format_Grayscale8);
+            rgb_image = img.copy();
+            return true;
+        }
+        default:
+            image_label_->setText(QString("Unsupported media RGB format: %1").arg(media_rgb_.format));
+            return false;
     }
-
-    if (rgb.size() == px_count)
-    {
-        QImage img(reinterpret_cast<const uchar*>(rgb.data()), width, height, width, QImage::Format_Grayscale8);
-        rgb_image = img.copy();
-        return true;
-    }
-
-    if (rgb.size() > px_count * 3)
-    {
-        QImage img(reinterpret_cast<const uchar*>(rgb.data()), width, height, width * 3, QImage::Format_RGB888);
-        rgb_image = img.copy();
-        return true;
-    }
-
-    image_label_->setText(QString("cam_rgb payload too small: %1 bytes").arg(rgb.size()));
-    return false;
 }
 
 bool CameraVisualizer::fetch_camera_intrinsics()

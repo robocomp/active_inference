@@ -6,12 +6,18 @@
 #include <QBrush>
 #include <QPolygonF>
 #include <QLayout>
+#include <QDateTime>
 #include <QtMath>
+
+#include <dsr/api/dsr_api.h>
+#include <dsr/api/dsr_rt_api.h>
+#include <dsr/core/types/type_checking/dsr_attr_name.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <limits>
+#include <unordered_set>
 
 namespace rc {
 
@@ -808,6 +814,129 @@ void Viewer2D::draw_selected_grid_cell(const std::optional<Eigen::Vector2f>& cen
                                       center->y() - cell_size * 0.5f,
                                       cell_size, cell_size);
     selected_grid_cell_item_->setVisible(true);
+}
+
+void Viewer2D::refresh_semantic_bboxes(const std::shared_ptr<DSR::DSRGraph>& graph)
+{
+    // Temporarily disabled: object/obstacle BB drawing and graph polling.
+    Q_UNUSED(graph);
+    return;
+
+    // Keep implementation below for quick re-enable.
+    const qint64 now_ms = QDateTime::currentMSecsSinceEpoch();
+    if (last_semantic_bbox_refresh_ms_ != 0 &&
+        now_ms - last_semantic_bbox_refresh_ms_ < semantic_bbox_refresh_period_ms_)
+        return;
+    last_semantic_bbox_refresh_ms_ = now_ms;
+
+    auto clear_map = [this](std::unordered_map<std::uint64_t, QGraphicsPolygonItem*>& items)
+    {
+        for (auto& [id, item] : items)
+        {
+            Q_UNUSED(id);
+            if (item != nullptr)
+            {
+                agv_->scene.removeItem(item);
+                delete item;
+            }
+        }
+        items.clear();
+    };
+
+    if (!graph)
+    {
+        clear_map(object_bbox_items_);
+        clear_map(obstacle_bbox_items_);
+        return;
+    }
+
+    const auto rt_api = graph->get_rt_api();
+    if (!rt_api)
+        return;
+
+    auto refresh_type = [this, &graph, &rt_api](const std::string& type,
+                                                 std::unordered_map<std::uint64_t, QGraphicsPolygonItem*>& items,
+                                                 const QColor& stroke,
+                                                 const QColor& fill,
+                                                 qreal z)
+    {
+        std::unordered_set<std::uint64_t> seen;
+        for (const auto& node : graph->get_nodes_by_type(type))
+        {
+            const auto w_opt = graph->get_attrib_by_name<width_m_att>(node);
+            const auto d_opt = graph->get_attrib_by_name<depth_m_att>(node);
+            if (!w_opt.has_value() || !d_opt.has_value())
+                continue;
+
+            const float width = w_opt.value();
+            const float depth = d_opt.value();
+            if (width <= 0.f || depth <= 0.f)
+                continue;
+
+            const auto rt_opt = rt_api->get_RT_pose_from_parent(node);
+            if (!rt_opt.has_value())
+                continue;
+
+            const Eigen::Vector3d tr = rt_opt->translation();
+            const float yaw = static_cast<float>(std::atan2(rt_opt->linear()(1, 0), rt_opt->linear()(0, 0)));
+            const float c = std::cos(yaw);
+            const float s = std::sin(yaw);
+            const float hw = 0.5f * width;
+            const float hd = 0.5f * depth;
+
+            auto rot_tr = [c, s, tr](float lx, float ly)
+            {
+                return QPointF(tr.x() + c * lx - s * ly,
+                               tr.y() + s * lx + c * ly);
+            };
+
+            QPolygonF poly;
+            poly << rot_tr(-hw, -hd)
+                 << rot_tr( hw, -hd)
+                 << rot_tr( hw,  hd)
+                 << rot_tr(-hw,  hd)
+                 << rot_tr(-hw, -hd);
+
+            auto it = items.find(node.id());
+            if (it == items.end())
+            {
+                auto* item = agv_->scene.addPolygon(poly,
+                                                    QPen(stroke, 0.05),
+                                                    QBrush(fill));
+                item->setOpacity(1.0);
+                item->setZValue(z);
+                items.emplace(node.id(), item);
+            }
+            else
+            {
+                it->second->setPolygon(poly);
+                it->second->setOpacity(1.0);
+                it->second->setVisible(true);
+            }
+
+            seen.insert(node.id());
+        }
+
+        for (auto it = items.begin(); it != items.end(); )
+        {
+            if (!seen.contains(it->first))
+            {
+                if (it->second != nullptr)
+                {
+                    agv_->scene.removeItem(it->second);
+                    delete it->second;
+                }
+                it = items.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+    };
+
+    refresh_type("object", object_bbox_items_, QColor(255, 170, 0), QColor(255, 170, 0, 255), 26);
+    refresh_type("obstacle", obstacle_bbox_items_, QColor(220, 50, 50), QColor(220, 50, 50, 255), 27);
 }
 
 } // namespace rc

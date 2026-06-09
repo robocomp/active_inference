@@ -15,11 +15,15 @@
 #include <QGraphicsRectItem>
 #include <QGraphicsTextItem>
 #include <Eigen/Dense>
+#include <cstdint>
 #include <optional>
 #include <vector>
+#include <memory>
+#include <unordered_map>
 #include "corner_detector.h"
 
 class AbstractGraphicViewer;
+namespace DSR { class DSRGraph; }
 
 namespace rc {
 
@@ -144,6 +148,10 @@ class Viewer2D : public QObject
         void draw_selected_grid_cell(const std::optional<Eigen::Vector2f>& center,
                          float cell_size);
 
+        /// Low-rate poll of DSR graph nodes of type object/obstacle and draw their BBs.
+        /// Missing nodes are automatically removed from the canvas.
+        void refresh_semantic_bboxes(const std::shared_ptr<DSR::DSRGraph>& graph);
+
     Q_SIGNALS:
         void robot_moved(QPointF);
         void robot_rotate(QPointF);
@@ -210,6 +218,12 @@ class Viewer2D : public QObject
 
         // IoR inhibition overlay (warm-red freshness map)
         std::vector<QGraphicsRectItem*> ior_grid_items_;
+
+        // Object/obstacle semantic BB overlay
+        std::unordered_map<std::uint64_t, QGraphicsPolygonItem*> object_bbox_items_;
+        std::unordered_map<std::uint64_t, QGraphicsPolygonItem*> obstacle_bbox_items_;
+        qint64 last_semantic_bbox_refresh_ms_ = 0;
+        int semantic_bbox_refresh_period_ms_ = 1000;
 
         void update_room_axes(const QRectF& room_bounds);
 

@@ -157,7 +157,15 @@ namespace rc
         stop_requested_ = true;
         wake_cv_.notify_all();
         if (loc_thread_.joinable())
-            loc_thread_.join();
+        {
+            if (loc_thread_.get_id() == std::this_thread::get_id())
+            {
+                qCWarning(logLocalizer) << "RoomConcept::stop called from localization thread; detaching to avoid self-join deadlock";
+                loc_thread_.detach();
+            }
+            else
+                loc_thread_.join();
+        }
         loc_running_ = false;
     }
 

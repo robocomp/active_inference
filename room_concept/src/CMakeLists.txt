@@ -68,6 +68,9 @@ LIST(APPEND SOURCES
   ../src/corner_detector.cpp
   ../src/rerun_logger.cpp
   ../src/camera_visualizer.cpp
+  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/media_transport.cpp
+  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/image_framePubSubTypes.cxx
+  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/image_frameTypeObjectSupport.cxx
   ../src/custom_widget.h
 )
 
@@ -89,11 +92,14 @@ LIST(APPEND HEADERS
   ../src/corner_detector.h
   ../src/rerun_logger.h
   ../src/camera_visualizer.h
+  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/media_transport.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/config/config_loader_utils.h
 )
 
 LIST(APPEND LIBS ${LIBS} "${TORCH_LIBRARIES}" tbb Qt6PrintSupport Qt6Xml
             Boost::system Boost::filesystem)
+
+include_directories(${CMAKE_CURRENT_LIST_DIR}/../../common/media_transport)
 
 # no-char8_t to avoid a problem with ICE Connection lib.
 add_definitions(-O3 -march=native -fmax-errors=1 -fno-char8_t)

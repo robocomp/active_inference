@@ -266,24 +266,25 @@ void SpecificWorker::initialize()
     if (!default_viewer)
         throw std::runtime_error("SpecificWorker requires a default DSR viewer. Enable at least one Agent viewer flag for the default graph.");
 
-    default_viewer->add_custom_widget_to_dock("layout", &custom_widget);
-    viewer_2d_ = std::make_unique<rc::Viewer2D>(custom_widget.frame, params.GRID_MAX_DIM, true);
+    custom_widget_ = new Custom_widget();
+    default_viewer->add_custom_widget_to_dock("layout", custom_widget_);
+    viewer_2d_ = new rc::Viewer2D(custom_widget_->frame, params.GRID_MAX_DIM, true);
     viewer_2d_->show();
     viewer_2d_->add_robot(params.ROBOT_WIDTH, params.ROBOT_LENGTH, 0.f, 0.f, QColor("blue"));
 
     // Free-Energy time series in the lower frame of the custom widget.
-    if (custom_widget.frame_series->layout() == nullptr)
+    if (custom_widget_->frame_series->layout() == nullptr)
     {
-        auto* series_layout = new QVBoxLayout(custom_widget.frame_series);
+        auto* series_layout = new QVBoxLayout(custom_widget_->frame_series);
         series_layout->setContentsMargins(2, 2, 2, 2);
         series_layout->setSpacing(2);
-        custom_widget.frame_series->setLayout(series_layout);
+        custom_widget_->frame_series->setLayout(series_layout);
     }
-    ts_plot_fe_ = new rc::TimeSeriesPlot(custom_widget.frame_series);
+    ts_plot_fe_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
     ts_plot_fe_->set_visible_window(60.f);
     ts_plot_fe_->add_series("free_energy", QColor(255, 170, 0), 1.8f, 0);
     ts_plot_fe_->add_series("cov_det_scaled", QColor(0, 190, 255), 1.6f, 0);
-    custom_widget.frame_series->layout()->addWidget(ts_plot_fe_);
+    custom_widget_->frame_series->layout()->addWidget(ts_plot_fe_);
     
     // Load room polygon for visualizations
     std::vector<Eigen::Vector2f> room_polygon_for_viz;
@@ -298,9 +299,9 @@ void SpecificWorker::initialize()
 
     // Camera visualizer
     camera_viz_ = std::make_unique<rc::CameraVisualizer>(G, room_polygon_for_viz, nullptr);
-    connect(custom_widget.btn_camera_viz, &QPushButton::clicked, this, &SpecificWorker::slot_show_camera_visualization);
-    connect(custom_widget.btn_lidar_points_viz, &QPushButton::toggled, this, &SpecificWorker::slot_toggle_lidar_points_display);
-    viewer_2d_->set_lidar_points_visible(custom_widget.btn_lidar_points_viz->isChecked());
+    connect(custom_widget_->btn_camera_viz, &QPushButton::clicked, this, &SpecificWorker::slot_show_camera_visualization);
+    connect(custom_widget_->btn_lidar_points_viz, &QPushButton::toggled, this, &SpecificWorker::slot_toggle_lidar_points_display);
+    viewer_2d_->set_lidar_points_visible(custom_widget_->btn_lidar_points_viz->isChecked());
 
     // ── DSR: resolve existing graph node IDs ──────────────────────────────
     check_init_graph_is_valid();
@@ -412,9 +413,9 @@ void SpecificWorker::initialize()
     presence_coordinator_.start();
 
     // ── Wire mouse-driven pose reset ───────────────────────────────────────
-    connect(viewer_2d_.get(), &rc::Viewer2D::robot_moved,
+        connect(viewer_2d_, &rc::Viewer2D::robot_moved,
             this, [this](QPointF p){ slot_mouse_translate(p); });
-    connect(viewer_2d_.get(), &rc::Viewer2D::robot_rotate,
+        connect(viewer_2d_, &rc::Viewer2D::robot_rotate,
             this, [this](QPointF p){ slot_mouse_rotate(p); });
 
         restore_window_settings();
@@ -424,14 +425,30 @@ void SpecificWorker::initialize()
 void SpecificWorker::compute()
 {
     const auto now_ms = QDateTime::currentMSecsSinceEpoch();
+    QElapsedTimer compute_timer;
+    compute_timer.start();
+    auto init_time = std::chrono::steady_clock::now();
+    qint64 t_affordance_ms = 0;
+    qint64 t_loc_fetch_ms = 0;
+    qint64 t_viewer_ms = 0;
+    qint64 t_dsr_ms = 0;
+    qint64 t_ui_ms = 0;
+    qint64 t_health_ms = 0;
+
     if (last_affordance_monitor_ms_ == 0 || now_ms - last_affordance_monitor_ms_ >= 200)
     {
+        QElapsedTimer section_timer;
+        section_timer.start();
         affordance_manager_.monitor_execution(G);
+        t_affordance_ms = section_timer.elapsed();
         last_affordance_monitor_ms_ = now_ms;
     }
 
+    QElapsedTimer section_timer;
+    section_timer.start();
     const auto loc_res  = room_concept_.get_last_result();
     const bool have_loc = loc_res.has_value() && loc_res->ok;
+    t_loc_fetch_ms = section_timer.elapsed();
 
     const Eigen::Affine2f pose_for_draw = best_available_pose(loc_res, have_loc);
 
@@ -452,6 +469,7 @@ void SpecificWorker::compute()
     const bool on_gui_thread = (QThread::currentThread() == this->thread());
     if (on_gui_thread && viewer_2d_)
     {
+        section_timer.restart();
         viewer_2d_->update_frame({
             .lidar_points     = lidar_for_canvas,
             .display_pose     = pose_for_draw,
@@ -472,20 +490,28 @@ void SpecificWorker::compute()
             viewer_2d_->draw_corners(loc_res->corner_matches, pose_for_draw);
         else
             viewer_2d_->draw_corners({}, pose_for_draw);
+        t_viewer_ms = section_timer.elapsed();
     }
 
     // ── DSR graph update (only on fresh localization frames) ──────────────
     if (have_loc && loc_res->timestamp_ms > 0 && loc_res->timestamp_ms != last_dsr_published_ts_ms_
         && (last_dsr_publish_try_ms_ == 0 || now_ms - last_dsr_publish_try_ms_ >= 200))
     {
+        section_timer.restart();
         last_dsr_publish_try_ms_ = now_ms;
         update_dsr(*loc_res);
         last_dsr_published_ts_ms_ = loc_res->timestamp_ms;
+        t_dsr_ms = section_timer.elapsed();
     }
 
     if (on_gui_thread)
+    {
+        section_timer.restart();
         update_ui(loc_res);
+        t_ui_ms = section_timer.elapsed();
+    }
 
+    section_timer.restart();
     const auto last_signal_ms = lidar_last_signal_ms_.load(std::memory_order_relaxed);
     const auto last_ingest_ms = lidar_last_ingest_ms_.load(std::memory_order_relaxed);
     const auto signal_age_ms = (last_signal_ms > 0) ? (now_ms - last_signal_ms) : -1;
@@ -527,6 +553,7 @@ void SpecificWorker::compute()
                     << "last_signal_age_ms=" << signal_age_ms
                     << "last_ingest_age_ms=" << ingest_age_ms;
         }
+        t_health_ms = section_timer.elapsed();
     }
 
     if (lidar_notify_inflight_.load(std::memory_order_relaxed))
@@ -551,6 +578,23 @@ void SpecificWorker::compute()
                        << "signal_age_ms=" << signal_age_ms
                        << "ingest_age_ms=" << ingest_age_ms;
         }
+    }
+
+    const auto total_ms = compute_timer.elapsed();
+    const auto elapsed_since_init_ms = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - init_time).count();
+    if (last_compute_timing_log_ms_ == 0 || now_ms - last_compute_timing_log_ms_ >= 3000 || total_ms > 50)
+    {
+        last_compute_timing_log_ms_ = now_ms;
+        qInfo() << "[Timing][compute]"
+                << "total_ms=" << elapsed_since_init_ms
+                << "affordance_ms=" << t_affordance_ms
+                << "loc_fetch_ms=" << t_loc_fetch_ms
+                << "viewer_ms=" << t_viewer_ms
+                << "dsr_ms=" << t_dsr_ms
+                << "ui_ms=" << t_ui_ms
+                << "health_ms=" << t_health_ms
+                << "gui_thread=" << on_gui_thread;
     }
     fps_counter_.print("[Compute]", 3000);
 }
@@ -1716,4 +1760,3 @@ void SpecificWorker::JoystickAdapter_sendData(RoboCompJoystickAdapter::TData dat
                                          cmd.recv_ts_ms);
     velocity_buffer_.put<0>(std::move(cmd), static_cast<std::uint64_t>(cmd.recv_ts_ms));
 }
-

@@ -43,6 +43,7 @@
 #include <condition_variable>
 #include <deque>
 #include <limits>
+#include <QPointer>
 #include <fps/fps.h>
 #include "custom_widget.h"
 #include "ui_localUI.h"
@@ -166,6 +167,7 @@ class SpecificWorker : public GenericWorker
         std::int64_t               last_degraded_heartbeat_log_ms_ = 0;
         std::int64_t               last_affordance_monitor_ms_ = 0;
         std::int64_t               last_dsr_publish_try_ms_ = 0;
+        std::int64_t               last_compute_timing_log_ms_ = 0;
         std::deque<std::int64_t>   lidar_recent_source_ts_;
 
         // ── Lidar ingestion thread (decoupled from the Qt/GUI thread) ──────────
@@ -207,10 +209,10 @@ class SpecificWorker : public GenericWorker
         bool self_target_active_ = false;
 
         // ── 2-D viewer ─────────────────────────────────────────────────────────
-        Custom_widget custom_widget;
-        std::unique_ptr<rc::Viewer2D> viewer_2d_;
-        rc::TimeSeriesPlot* ts_plot_sdf_ = nullptr;
-        rc::TimeSeriesPlot* ts_plot_fe_  = nullptr;
+        QPointer<Custom_widget> custom_widget_;
+        QPointer<rc::Viewer2D> viewer_2d_;
+        QPointer<rc::TimeSeriesPlot> ts_plot_sdf_;
+        QPointer<rc::TimeSeriesPlot> ts_plot_fe_;
         std::unique_ptr<rc::CameraVisualizer> camera_viz_;
         bool camera_media_plane_initialized_ = false;
         FPSCounter fps_counter_;

@@ -22,6 +22,8 @@ namespace DSR {
 }
 using DSRGraph = DSR::DSRGraph;
 
+namespace rc::media { class MediaSubscriber; }  // media-plane RGB consumer (keeps fastdds out of MOC header)
+
 namespace rc {
 
 /**
@@ -34,7 +36,10 @@ class CameraVisualizer : public QDialog
 
     public:
         explicit CameraVisualizer(std::shared_ptr<DSRGraph> graph, const std::vector<Eigen::Vector2f>& room_polygon, QWidget* parent = nullptr);
-        ~CameraVisualizer() = default;
+        ~CameraVisualizer();  // defined in .cpp for unique_ptr<MediaSubscriber> of incomplete type
+
+        // Subscribe to the zero-copy media plane for RGB frames (replaces DSR cam_rgb blob reads).
+        void init_media_plane(std::uint32_t domain_id, const std::string& rgb_topic);
 
         void update_frame();  // Call this periodically to refresh the visualization
 
@@ -63,6 +68,23 @@ class CameraVisualizer : public QDialog
         std::unique_ptr<DSR::InnerEigenAPI> inner_eigen_api_;
         std::string camera_node_name_ = "zed";
         std::string room_frame_name_ = "room";
+
+        // ── Media-plane RGB consumer ──────────────────────────────────────────
+        std::unique_ptr<rc::media::MediaSubscriber> media_rgb_sub_;
+        struct MediaRgbCache
+        {
+            std::vector<std::uint8_t> bytes;
+            int width = 0;
+            int height = 0;
+            std::uint32_t format = 0;
+            std::uint64_t stamp = 0;
+            bool valid = false;
+        };
+        MediaRgbCache media_rgb_;
+        void drain_media_plane();
+        // Always-on drain so an idle (hidden) dialog never backs up the RELIABLE
+        // writer's shared-memory pool and stalls the whole media plane.
+        QTimer* media_drain_timer_ = nullptr;
 
         struct TimingStats
         {

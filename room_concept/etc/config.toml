@@ -73,6 +73,13 @@ agent_info_period_ms   = 1000
 nodes    = ["room_concept 5", "afford_room"]  # deleted from DSR graph on clean shutdown
 subtrees = ["room"]                       # deletes room node + all RT children (wall_*, floor)
 
+# Zero-copy RGBD media plane (RGB consumer). DEDICATED DDS domain, isolated from
+# the DSR Agent.domain = 0 so media discovery churn never perturbs cortex/DSR
+# resync. Must MATCH the robot_concept producer.
+[Media]
+domain_id = 7
+rgb_topic = "rc/zed/rgb"
+
 [RoomConcept]  
 PredictionEarlyExit    = true  # Skip optimization when prediction error < threshold
 SigmaSdf               = 0.15  # σ_obs del SDF para el umbral de early exit (m)
