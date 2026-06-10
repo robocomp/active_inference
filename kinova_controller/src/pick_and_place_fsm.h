@@ -199,6 +199,17 @@ private:
     double speed_conf_gain_ = 0.6, surprise_gate_m_ = 0.05;
     double standoff_collapse_ = 0.0, insert_conf_gain_ = 0.0;
     std::string confidence_path_;
+    // ── Precision learning from doing (the "natural fine-tuning") ─────────────
+    // confidence_ = c = Π_m/(Π_m+Π_s) is NOT a scripted ramp: Π_m is MODEL precision
+    // ACCUMULATED from confirmed outcomes. Each rep whose result matches the model's
+    // prediction deposits evidence (Π_m += unit·quality); a surprise (miss) deflates it
+    // (Π_m *= conf_decay). So skill rises purely as a byproduct of acting, and self-
+    // calibrates — it only speeds up as fast as the outcomes keep confirming. Π_s is the
+    // fixed sensory precision; with it, c saturates ~n/(n+Π_s) over n clean reps.
+    double pi_m_ = 0.0;            // accumulated model precision (evidence)
+    double pi_s_ = 2.0;            // Controller.sensory_precision (fixed)
+    double evidence_unit_ = 1.0;   // Controller.evidence_unit: Π_m added by one clean rep
+    void   update_confidence_from_outcome(bool success, double pe_norm, double rise_frac);
     SideGraspTarget belief_grasp_{};
     bool   belief_valid_ = false;
     int    cycles_since_obs_ = 0, obs_count_rep_ = 0;
@@ -216,6 +227,10 @@ private:
     std::ofstream retreat_log_;   bool retreat_log_open_ = false;
 
     // ── Experiment overrides ──────────────────────────────────────────────────
+    // Controller.learn_pick_place: false ⇒ Tracking holds at the standoff (the validated
+    // approach baseline). true ⇒ Tracking commits and runs the full pick→place→retreat
+    // loop, so the Lifting confirm fires and precision (c) accumulates from doing.
+    bool   learn_pick_place_ = false;
     bool   respawn_each_rep_ = false;
     bool   fixed_pick_set_ = false;   Eigen::Vector2d fixed_pick_xy_{0.1, -0.25};
     bool   fixed_place_set_ = false;  Eigen::Vector2d fixed_place_xy_{0.15, -0.25};

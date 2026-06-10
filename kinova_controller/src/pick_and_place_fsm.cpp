@@ -116,9 +116,13 @@ PickandPlaceFSM::PickandPlaceFSM(SpecificWorker& w, const ConfigLoader& cfg) : w
         }
     } catch (...) {}
 
+    try { learn_pick_place_      = cfg.get<bool>  ("Controller.learn_pick_place");        } catch (...) {}
     try { precision_reweighting_ = cfg.get<bool>  ("Controller.precision_reweighting"); } catch (...) {}
     try { perception_noise_std_  = cfg.get<double>("Controller.perception_noise_std");   } catch (...) {}
     try { conf_gain_             = cfg.get<double>("Controller.conf_gain");               } catch (...) {}
+    try { conf_decay_            = cfg.get<double>("Controller.conf_decay");              } catch (...) {}
+    try { pi_s_                  = cfg.get<double>("Controller.sensory_precision");       } catch (...) {}
+    try { evidence_unit_         = cfg.get<double>("Controller.evidence_unit");           } catch (...) {}
     try { skilled_sample_period_ = cfg.get<int>   ("Controller.skilled_sample_period");  } catch (...) {}
     try { speed_conf_gain_       = cfg.get<double>("Controller.speed_conf_gain");         } catch (...) {}
     try { confidence_path_       = cfg.get<std::string>("Controller.confidence_path");    } catch (...) {}
@@ -231,8 +235,9 @@ void PickandPlaceFSM::run_tracking(const std::array<double, Kinematics::N_ARM_JO
 {
     w_.gripper_command_ = 1.0f;
 
-    // Repeatable validation: place the bottle at the configured fixed-pick spot once.
-    if (fixed_pick_set_ and not approach_respawn_done_ and w_.scene_world_valid_)
+    // Baseline-hold only: place the bottle at the fixed-pick spot once. In learn mode the
+    // per-rep respawn is done by begin_rep_probe (fresh bottle at the pick spot each rep).
+    if (not learn_pick_place_ and fixed_pick_set_ and not approach_respawn_done_ and w_.scene_world_valid_)
     {
         w_.respawn_bottle(fixed_pick_xy_.x(), fixed_pick_xy_.y());
         approach_respawn_done_ = true;
@@ -254,8 +259,55 @@ void PickandPlaceFSM::run_tracking(const std::array<double, Kinematics::N_ARM_JO
     }
     const auto& g = g_opt.value();
 
-    // Full rotation target; the QP rotation slack keeps the solver from sacrificing
-    // position/manipulability to perfect an orientation it can barely reach.
+    // ── Learn mode: commit the grasp; skill c reshapes the approach (geometry + dwell) ──
+    if (learn_pick_place_)
+    {
+        ++rep_track_ticks_;
+        const double c = skill_c();
+
+        // Jam / no-progress watchdogs: a wedged approach can't loop forever.
+        if (++track_stuck_ticks_ > TRACK_TIMEOUT_TICKS)
+        {
+            w_.teleport_to_rest();
+            track_stuck_ticks_ = 0;
+            miss_or_give_up("track stalled — possible jam");
+            return;
+        }
+        // standoff_collapse: skilled reaches more directly (slide the waypoint toward the grasp).
+        const Eigen::Vector3d track_target =
+            g.grasp_pos + (g.stand_off_pos - g.grasp_pos) * (1.0 - standoff_collapse_ * c);
+        const auto [ep, ea] = efe_drive(q, ee_position, track_target,
+                                        g.z_tool_des, g.x_tool_des, skilled_speed(0.25));
+        if (ep < track_best_dist_ - 0.004) { track_best_dist_ = ep; track_noprog_ticks_ = 0; }
+        else if (ep > 3.0 * REACH_TOLERANCE_M and ++track_noprog_ticks_ > TRACK_NOPROGRESS_TICKS)
+        {
+            w_.teleport_to_rest();
+            track_stuck_ticks_ = 0; track_noprog_ticks_ = 0; track_best_dist_ = 1e9;
+            miss_or_give_up("not converging");
+            return;
+        }
+        if (ep < REACH_TOLERANCE_M and ea < grasp_align_tol_rad_)
+        {
+            // Skilled commits sooner (shorter settle dwell); novice re-verifies longer.
+            const long settle_need = std::max(1L, std::lround(GRASP_SETTLE_TICKS * (1.0 - c)));
+            if (++grasp_settle_ticks_ >= settle_need)
+            {
+                latched_grasp_   = g;
+                lift_target_     = g.grasp_pos + g.up_axis.normalized() * LIFT_HEIGHT_M;
+                rep_commit_epos_ = ep;
+                rep_commit_eang_ = ea;
+                grasp_phase_     = GraspPhase::Inserting;
+                grasp_settle_ticks_ = 0; insert_ticks_ = 0; tip_reflex_offset_ = 0.0;
+                std::print("[grasp] standoff settled (e={:.3f} m, {:.1f}°, c={:.2f}) → Inserting\n",
+                           ep, ea * 57.29578, c);
+            }
+        }
+        else grasp_settle_ticks_ = 0;
+        ++ctrl_cycle_;
+        return;
+    }
+
+    // ── Baseline: validated QP approach-to-bottle, then hold (no commit) ──
     const auto [e_pos, e_ang] = efe_drive(q, ee_position,
                                           g.stand_off_pos, g.z_tool_des, g.x_tool_des, 0.25);
 
@@ -318,9 +370,14 @@ EFEParams PickandPlaceFSM::build_efe_params(const Eigen::Vector3d& z_des,
     p.v_approach        = v_app;
     p.a_approach        = 0.60;
     p.omega_max         = 2.0;
-    // Hold tolerance width: settle dead-still within ~2 cm / ~9° instead of hunting.
-    p.arrive_deadband   = 0.02;
-    p.orient_deadband   = 0.16;
+    // Hold tolerance width: in Tracking the arm settles dead-still at the standoff within
+    // ~2 cm / ~9° instead of hunting. The grasp/place phases keep the TIGHT EFEParams
+    // defaults (0.005 / 0.03) — insertion and set-down need to reach their target precisely.
+    if (grasp_phase_ == GraspPhase::Tracking)
+    {
+        p.arrive_deadband = 0.02;
+        p.orient_deadband = 0.16;
+    }
     p.gain_mu           = 0.0;
     p.gain_elbow        = elbow_gain_;
     p.elbow_target      = elbow_target_set_
@@ -630,17 +687,42 @@ void PickandPlaceFSM::compute_reach_map()
 
 void PickandPlaceFSM::load_confidence()
 {
-    if (confidence_path_.empty()) return;
-    std::ifstream f(confidence_path_);
-    double c;
-    if (f >> c) confidence_ = std::clamp(c, 0.0, 1.0);
+    // Persist the accumulated MODEL precision Π_m (the learned quantity); c is derived.
+    if (not confidence_path_.empty())
+    {
+        std::ifstream f(confidence_path_);
+        double v;
+        if (f >> v and v >= 0.0) pi_m_ = v;
+    }
+    confidence_ = pi_m_ / (pi_m_ + pi_s_);
 }
 
 void PickandPlaceFSM::save_confidence()
 {
     if (confidence_path_.empty()) return;
     std::ofstream f(confidence_path_, std::ios::out | std::ios::trunc);
-    if (f) f << confidence_ << '\n';
+    if (f) f << pi_m_ << '\n';
+}
+
+// The natural fine-tuning: model precision accumulates from confirmed outcomes, and
+// confidence c = Π_m/(Π_m+Π_s) is its normalised form. No reward, no schedule — c rises
+// because the act of doing keeps confirming the model, and deflates on surprise.
+void PickandPlaceFSM::update_confidence_from_outcome(bool success, double pe_norm, double rise_frac)
+{
+    if (not precision_reweighting_) return;
+    if (success)
+    {
+        // Evidence quality ∈ (0,1]: 1 when the outcome matched the model's prediction
+        // (clean standoff convergence + full lift), → 0 as it barely confirmed.
+        const double quality = std::exp(-0.5 * pe_norm * pe_norm) * std::clamp(rise_frac, 0.0, 1.0);
+        pi_m_ += evidence_unit_ * quality;
+    }
+    else
+        pi_m_ *= conf_decay_;   // surprise → lose accumulated precision, re-engage feedback
+    confidence_ = pi_m_ / (pi_m_ + pi_s_);
+    save_confidence();
+    std::print("[skill] outcome {} → Π_m={:.3f}  c={:.3f}\n",
+               success ? "CONFIRMED" : "SURPRISE", pi_m_, confidence_);
 }
 
 void PickandPlaceFSM::log_rep_outcome(bool success, double rise, double xy_gap)
@@ -780,6 +862,7 @@ void PickandPlaceFSM::begin_rep_probe()
 void PickandPlaceFSM::miss_or_give_up(const std::string& reason)
 {
     std::print("[grasp] MISS — {}; reopening gripper, returning to rest\n", reason);
+    update_confidence_from_outcome(false, 0, 0);   // every miss is a surprise → deflate Π_m once
     w_.gripper_command_ = 1.0f;
     RoboCompKinovaArm::TJointAngles rest;
     rest.jointAngles.assign(w_.rest_pose_angles_.begin(), w_.rest_pose_angles_.end());
@@ -968,19 +1051,20 @@ void PickandPlaceFSM::run_grasp_phases(const std::array<double, Kinematics::N_AR
         const auto [e_pos, e_ang] = efe_drive(q, ee_position, lift_target_,
                                               lg.z_tool_des, lg.x_tool_des, skilled_speed(0.20), place_hover_);
         (void) e_ang;
-        if (via_reached(e_pos))
+        const double rise   = w_.bottle_pos_world_.z() - bottle_z_at_lift_start_;
+        const double xy_gap = (w_.bottle_pos_world_.head<2>() - ee_position.head<2>()).norm();
+        // Confirm on the ACTUAL outcome — the bottle is genuinely up and still co-located —
+        // the moment it's true, instead of first waiting for the EE to reach the full lift
+        // target (an over-strict kinematic proxy: a slow lift tripped the timeout even
+        // though the bottle was firmly held). The arm still aims for the full LIFT_HEIGHT,
+        // we just don't BLOCK convergence on reaching it.
+        if (rise >= LIFT_CONFIRM_RISE_M and xy_gap <= LIFT_CONFIRM_HOLD_M)
         {
-            const double rise  = w_.bottle_pos_world_.z() - bottle_z_at_lift_start_;
-            const double xy_gap = (w_.bottle_pos_world_.head<2>() - ee_position.head<2>()).norm();
-            if (rise < LIFT_CONFIRM_RISE_M or xy_gap > LIFT_CONFIRM_HOLD_M)
-            {
-                std::print("[grasp] MISS — bottle not held (rose {:.3f} m, gap {:.3f} m) → reopen\n", rise, xy_gap);
-                log_rep_outcome(false, rise, xy_gap);
-                miss_or_give_up("bottle not held");
-                break;
-            }
             log_rep_outcome(true, rise, xy_gap);
-            if (precision_reweighting_) { confidence_ = std::min(1.0, confidence_ + conf_gain_); save_confidence(); }
+            // Natural fine-tuning: a confirmed grasp is evidence the model predicted the
+            // outcome. Deposit precision weighted by how cleanly it matched (terminal
+            // standoff error vs tolerance, lift fraction) — NOT a fixed increment.
+            update_confidence_from_outcome(true, rep_commit_epos_ / REACH_TOLERANCE_M, rise / LIFT_HEIGHT_M);
             if (metrics_open_)
                 metrics_ << (probe_index_ - 1) << ",1," << confidence_ << ','
                          << (now_seconds() - rep_t0_) << ',' << obs_count_rep_ << '\n', metrics_.flush();
@@ -989,9 +1073,15 @@ void PickandPlaceFSM::run_grasp_phases(const std::array<double, Kinematics::N_AR
             std::print("[place] lifted → carry to spot ({:.3f},{:.3f},{:.3f}) → PlaceMoving\n",
                        place_pos_.x(), place_pos_.y(), place_pos_.z());
         }
+        // EE reached the lift target but the bottle did NOT come up → closed on air.
+        else if (via_reached(e_pos))
+        {
+            std::print("[grasp] MISS — bottle not held (rose {:.3f} m, gap {:.3f} m) → reopen\n", rise, xy_gap);
+            log_rep_outcome(false, rise, xy_gap);
+            miss_or_give_up("bottle not held");
+        }
         else if (++lift_ticks_ > LIFT_TIMEOUT_TICKS)
         {
-            const double rise = w_.bottle_pos_world_.z() - bottle_z_at_lift_start_;
             log_rep_outcome(false, rise, 0.0);
             miss_or_give_up("lift stalled");
         }

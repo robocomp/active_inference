@@ -30,7 +30,10 @@ graph = true
 [Controller]
 auto_start = true
 tip_log    = false  # disabled: [ctrl] lines below are the validation log
-approach_only = true  # VALIDATION: approach to standoff and hold — no grasp/place
+# EXPERIMENT 1 — natural fine-tuning from a specialized sequence:
+# run the full pick→place loop and let model precision (c) accumulate from confirmed
+# grasps over round_cycles reps. false ⇒ the approach+hold baseline (Tracking holds).
+learn_pick_place = true
 # Pragmatic resolved-rate backend: "dls" (closed form, default) or "qp" (proxQP).
 # The QP with no inequalities reproduces DLS exactly — A/B it, then later steps move
 # joint-limit/obstacle terms into hard QP constraints. See EFE_CONTROLLER_MATH.md §4.
@@ -111,25 +114,27 @@ joint_log_path   = "/tmp/kinova_joint_actuation.csv"
 # Per-cycle EE speed over the whole pick-place → offline SPARC + stop-count (fluidity).
 fluid_log_path   = "/tmp/kinova_fluidity.csv"
 
-# ── Precision re-weighting: novice→skilled (closed-loop → model-based open-loop) ──
-# Drives the grasp target as a precision-weighted fusion of observation (Π_s) and
-# model belief (Π_m). confidence_ = Π_m/(Π_m+Π_s) rises with each confirmed grasp;
-# high confidence ⇒ sample the bottle less (EFE schedule) and move faster. Persisted.
-precision_reweighting = false      # VALIDATION: no learning/skill scheduling
+# ── Precision learning from doing (novice→skilled = accumulated model precision) ──
+# confidence c = Π_m/(Π_m+Π_s) is NOT a scripted ramp: Π_m accumulates from CONFIRMED
+# outcomes (Π_m += evidence_unit·quality per clean grasp) and deflates by conf_decay on a
+# surprise (miss). c then reshapes the action geometry/timing (standoff_collapse, settle
+# dwell, speed) — so the agent gets skilled purely by doing, and self-calibrates (it only
+# speeds up as fast as the outcomes keep confirming). Π_m is persisted across rounds.
+precision_reweighting = true       # EXP1: precision learning ON
+sensory_precision     = 2.0        # Π_s (fixed): c ≈ n/(n+Π_s) over n clean reps → gradual saturation
+evidence_unit         = 1.0        # Π_m added by one cleanly-confirmed rep
+conf_decay            = 0.5        # Π_m ×= this on a surprise (miss)
 perception_noise_std  = 0.0        # m, σ of injected bottle-observation noise (sim2real; 0 = ideal sim)
-conf_gain             = 0.15       # normal
+conf_gain             = 0.15       # (legacy ramp; unused by the surprise-driven update)
 skilled_sample_period = 12         # cycles between observations at full confidence
 speed_conf_gain       = 0.6        # approach speed ×(1+this·confidence) — "more speed" when skilled
-# Skill-scheduled FSM geometry/timing (turns "fewer observations" into "less time"):
-standoff_collapse     = 0.6        # at full confidence, slide the Tracking waypoint 60% of the way from the standoff toward the grasp point (0 = always full standoff)
+standoff_collapse     = 0.6        # at full c, slide the Tracking waypoint 60% from standoff toward grasp
 insert_conf_gain      = 1.0        # insert speed ×(1+this·confidence) — skilled creeps in twice as fast
-confidence_path       = "/tmp/kinova_confidence.txt"   # persist the learned skill across rounds
-metrics_path          = "/tmp/kinova_skill_metrics.csv" # per-rep: cycle time, observations
-# Teleport a fresh upright bottle to a deterministic pickup spot at each rep start
-# (via the bridge setObjectPose). Makes probe rounds immune to toppled/fallen
-# bottles and gives controlled pickup locations. Needs the kinova-bridge built
-# with setObjectPose.
-respawn_each_rep = false      # VALIDATION: bottle stays in place
+confidence_path       = "/tmp/kinova_confidence.txt"   # persist Π_m across rounds
+metrics_path          = "/tmp/kinova_skill_metrics.csv" # per-rep: success, c, cycle time
+# Fresh upright bottle teleported to the fixed pick spot at each rep start — REQUIRED for
+# the 10-rep loop (after a place the pick spot would otherwise be empty).
+respawn_each_rep = true       # EXP1: re-stand the bottle at the fixed pick each rep
 
 # ── Retreat sub-skill (leaving the placed bottle) — learnable like the grasp ──────
 # Retreat is a pure back-off along the gripper's own forward axis (perpendicular to the
