@@ -902,19 +902,6 @@ void SceneProcessor::update_viewer_table_rfe_points()
         }
     }
 
-    if (++debug_frame_counter % 30 == 0)
-    {
-        std::println("[RFEViewer] tables={} residual_tables={} rfe_tables={} candidate_tables={} residual_pts={} rfe_pts={} candidate_pts={} total_draw_pts={}",
-                     tables_seen,
-                     tables_with_residual,
-                     tables_with_rfe,
-                     tables_with_candidates,
-                     residual_point_count,
-                     rfe_point_count,
-                     candidate_point_count,
-                     residual_points.size() + rfe_points.size() + candidate_points.size());
-    }
-
     voxel_viewer_->update_rfe_points(residual_points, rfe_points, candidate_points);
 }
 

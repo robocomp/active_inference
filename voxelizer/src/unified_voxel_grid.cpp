@@ -186,30 +186,49 @@ void UnifiedVoxelGrid::_reset_frame_bookkeeping()
     _observed_pts_this_frame.clear();
 }
 
-void UnifiedVoxelGrid::_enforce_max_voxels(int /*frame*/)
+float UnifiedVoxelGrid::_voxel_salience(const VoxelState& vs, int frame) const
 {
-    if (static_cast<int>(_grid.size()) <= _cfg.max_voxels) return;
+    const int   age     = std::max(0, frame - vs.last_frame);
+    const float recency = 1.0f / (1.0f + _cfg.evict_recency_age_k * static_cast<float>(age));
+    const float persist = std::min(1.0f, static_cast<float>(vs.n_frames_seen) /
+                                         std::max(1.0f, _cfg.evict_persist_ref));
+    const float conf    = std::clamp(vs.best_confidence, 0.0f, 1.0f);
+    const float assigned= (vs.track_id != 0) ? 1.0f : 0.0f;
 
-    // Evict up to 5 % of max_voxels starting from oldest observations.
-    // Simple approach: collect all keys, sort by last_frame, delete oldest.
-    const int to_evict = _cfg.max_voxels / 20;
-    std::vector<std::pair<int,VoxelKey>> age_idx;
-    age_idx.reserve(_grid.size());
+    return _cfg.evict_w_recency  * recency
+         + _cfg.evict_w_persist  * persist
+         + _cfg.evict_w_conf     * conf
+         + _cfg.evict_w_assigned * assigned;
+}
+
+void UnifiedVoxelGrid::_enforce_max_voxels(int frame)
+{
+    const int size = static_cast<int>(_grid.size());
+    if (size <= _cfg.max_voxels) return;
+
+    // Evict the LEAST-salient voxels. Bring size down to the cap plus a 5 %
+    // headroom in a single sweep so a sudden cap drop (FPS regulator backing
+    // off) is honoured promptly without re-triggering every frame.
+    const int overflow = size - _cfg.max_voxels;
+    const int to_evict = std::min(size, overflow + std::max(1, _cfg.max_voxels / 20));
+
+    std::vector<std::pair<float, VoxelKey>> sal_idx;   // (salience, key)
+    sal_idx.reserve(_grid.size());
     for (const auto& [k, vs] : _grid)
-        age_idx.emplace_back(vs.last_frame, k);
+        sal_idx.emplace_back(_voxel_salience(vs, frame), k);
 
-    std::partial_sort(age_idx.begin(),
-                      age_idx.begin() + to_evict,
-                      age_idx.end(),
+    std::partial_sort(sal_idx.begin(),
+                      sal_idx.begin() + to_evict,
+                      sal_idx.end(),
                       [](const auto& a, const auto& b){ return a.first < b.first; });
 
     for (int i = 0; i < to_evict; ++i)
     {
-        auto it = _grid.find(age_idx[i].second);
+        auto it = _grid.find(sal_idx[i].second);
         if (it != _grid.end())
         {
-            _display_remove_key(age_idx[i].second);
-            _track_unbind_key(it->second.track_id, age_idx[i].second);
+            _display_remove_key(sal_idx[i].second);
+            _track_unbind_key(it->second.track_id, sal_idx[i].second);
             _track_dec(it->second.track_id);
             _grid.erase(it);
         }

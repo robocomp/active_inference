@@ -414,14 +414,7 @@ void VoxelProcessor::process_rgbd_frame(const RGBDData& rgbd,
 
     if (compute_frame_ % 30 == 0)
     {
-        std::print("[ModelSuppression] graph_boxes={} model_table_boxes={} explained_pts={} selected_table_pts={} residual_table_tracks={} removed_residual_tracks={}\n",
-                   graph_box_count,
-                   model_table_box_count,
-                   explained_points_skipped,
-                   selected_tables,
-                   model_residual_table_track_count,
-                   residual_tracks_suppressed);
-
+       
         // Print location of each model_table box (from DSR graph)
         for (const auto& box : explained_boxes)
         {

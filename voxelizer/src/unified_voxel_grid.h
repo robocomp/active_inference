@@ -81,9 +81,21 @@ class CategoryRegistry
 struct UnifiedGridConfig
 {
     float resolution            = 0.05f;
-    int   max_voxels            = 250'000;
+    int   max_voxels            = 25'000;
     int   max_voxels_per_track  = 3'000;
     int   max_display_voxels    = 30'000;
+
+    // ── Salience-weighted eviction (WS3.1) ──────────────────────────────────
+    // When over budget, evict the LEAST salient voxels, not just the oldest.
+    // salience = w_recency·recency + w_persist·persistence + w_conf·confidence
+    //          + w_assigned·(track_id != 0). Recently-seen, long-confirmed,
+    // high-confidence, track-assigned voxels are protected; transient clutter goes.
+    float evict_w_recency       = 1.0f;
+    float evict_w_persist       = 1.0f;
+    float evict_w_conf          = 1.0f;
+    float evict_w_assigned      = 2.0f;
+    float evict_recency_age_k   = 0.05f;   // recency = 1/(1 + k·age_frames)
+    float evict_persist_ref     = 30.0f;   // frames-seen that count as fully confirmed
 
     float alpha_prior           = 0.1f;
     float centroid_ema          = 0.3f;
@@ -157,6 +169,13 @@ class UnifiedVoxelGrid
         // ── Construction ──────────────────────────────────────────────────────
         explicit UnifiedVoxelGrid(UnifiedGridConfig cfg = {},
                                 CategoryRegistry  reg = CategoryRegistry{});
+
+        // ── Runtime budget control (homeostatic FPS regulation) ───────────────
+        // Adjust the population cap live; the next observe()/visibility_update()
+        // will enforce it via _enforce_max_voxels.
+        void set_max_voxels(int n)        { _cfg.max_voxels = std::max(1, n); }
+        [[nodiscard]] int  max_voxels() const { return _cfg.max_voxels; }
+        [[nodiscard]] int  size() const      { return static_cast<int>(_grid.size()); }
 
         // ── 1. Positive observation ───────────────────────────────────────────
         void observe(int track_id,
@@ -249,6 +268,7 @@ class UnifiedVoxelGrid
         [[nodiscard]] VoxelKey make_key(const Eigen::Vector3f& pt) const noexcept;
         [[nodiscard]] bool _is_categorized(const VoxelState& vs) const noexcept;
         void _enforce_max_voxels(int frame);
+        [[nodiscard]] float _voxel_salience(const VoxelState& vs, int frame) const;
         void _reset_frame_bookkeeping();
 
         // AABB slab test: returns keys of voxels traversed (not endpoints).

@@ -37,6 +37,9 @@
 #include "graph_object_box.h"
 #include "lidar_track_attributor.h"
 #include "rgbd_data.h"
+#include "voxel_budget_regulator.h"
+
+#include <chrono>
 
 class UnifiedVoxelGrid;
 class VoxelProcessor;
@@ -127,8 +130,12 @@ class SpecificWorker : public GenericWorker
         };
 
         std::optional<SceneFrame> process_scene_frame(FPSCounter& compute_fps);
-        void update_table_nodes_from_tracks(const std::vector<GraphObjectBox>& graph_object_boxes,
-                                            std::span<const Eigen::Vector3f> lidar_points_room);
+        // Feed-forward, class-agnostic track publisher. Replaces the old
+        // update_table_nodes_from_tracks loop: the voxelizer no longer reads any
+        // concept's model box — it just exports its tracks; concept agents do
+        // their own instance assignment against these.
+        void ensure_tracks_node_in_dsr();
+        void publish_tracks_to_dsr();
         void ensure_voxels_node_in_dsr();
         void ensure_masks_node_in_dsr();
         void upload_voxel_grid_to_dsr();
@@ -140,10 +147,16 @@ class SpecificWorker : public GenericWorker
         bool owned_nodes_cleaned_ = false;
         FPSCounter fps_counter_;
 
+        // Homeostatic voxel-budget control: adapt max_voxels to hold target FPS.
+        VoxelBudgetRegulator voxel_budget_;
+        std::chrono::steady_clock::time_point last_budget_tick_{};
+        void regulate_voxel_budget(float fps);   // call once per compute(); self-throttled
+
         bool startup_check_flag  = false;
         bool verbose_debug_      = false;
         bool voxels_node_ready_  = false;
         bool masks_node_ready_   = false;
+        bool tracks_node_ready_  = false;
         std::atomic<bool> shutting_down_{false};
         bool include_lidar3d_in_voxels_ = true;
         std::uint64_t last_masks_uploaded_frame_ = 0;

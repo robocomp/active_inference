@@ -35,6 +35,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <print>
 #include <sstream>
 #include <unordered_map>
 
@@ -211,12 +212,11 @@ void SpecificWorker::initialize()
 
         connect(clear_voxels_btn, &QPushButton::clicked, this, [this]
         {
-            // TEMPORARY DISABLE: voxel grid reset/upload is paused.
             if (!voxel_processor || !voxel_viewer_gl)
                 return;
             voxel_processor->clear_state(voxel_viewer_gl.get());
-            // ensure_voxels_node_in_dsr();
-            // upload_voxel_grid_to_dsr();
+            ensure_voxels_node_in_dsr();
+            upload_voxel_grid_to_dsr();
         });
 
         graph_viewers.at(viewer_key)->add_custom_widget_to_dock("Voxel3D", voxel_panel);
@@ -311,6 +311,13 @@ void SpecificWorker::compute()
         return;
 
     const auto frame = process_scene_frame(fps_counter_);
+
+    // Budget regulation is a heartbeat: run it every cycle (self-throttled),
+    // even when no RGBD frame arrived, so the cap/gauge keep working while the
+    // robot explores away from the table. FPS comes from the shared counter,
+    // which scene_processor also ticks on the not-ready path.
+    regulate_voxel_budget(fps_counter_.get_frequency());
+
     if (!frame.has_value())
         return;
 
@@ -353,14 +360,46 @@ void SpecificWorker::compute()
     ensure_masks_node_in_dsr();
     upload_masks_to_dsr(*frame, detections);
 
-    // TEMPORARY DISABLE: writing candidate/residual evidence into table nodes is paused.
-    // update_table_nodes_from_tracks(frame->graph_object_boxes, frame->lidar_points_room);
+    ensure_tracks_node_in_dsr();
+    publish_tracks_to_dsr();
 
-    // TEMPORARY DISABLE: publishing voxel-grid payload to the voxels node is paused.
     ensure_voxels_node_in_dsr();
     upload_voxel_grid_to_dsr();
 
     fps_counter_.print("[Compute]", 3000);
+}
+
+// Homeostatic FPS regulation: once per control period, read the measured compute
+// FPS and let the AIMD regulator resize the voxel-grid population cap so the
+// frame-rate holds its target band. Self-throttled — safe to call every cycle.
+void SpecificWorker::regulate_voxel_budget(float fps)
+{
+    if (!voxel_grid)
+        return;
+
+    // Self-throttle to one control tick per period (regardless of compute rate).
+    constexpr auto kControlPeriod = std::chrono::seconds(2);
+    const auto now = std::chrono::steady_clock::now();
+    if (last_budget_tick_.time_since_epoch().count() != 0 &&
+        now - last_budget_tick_ < kControlPeriod)
+        return;
+    last_budget_tick_ = now;
+
+    const int live = voxel_grid->size();
+
+    if (!std::isfinite(fps) || fps <= 0.0f)   // FPS not measured yet (first ~3 s) → hold, but show life
+    {
+        std::println("[VoxelBudget] warming up (no fps yet)  cap={} live={}",
+                     voxel_grid->max_voxels(), live);
+        return;
+    }
+
+    const int new_cap = voxel_budget_.update(fps);
+    voxel_grid->set_max_voxels(new_cap);
+
+    std::println("[VoxelBudget] fps={:.1f} target={:.1f} cap={} live={} [{}..{}]",
+                 fps, voxel_budget_.target_fps, new_cap, live,
+                 voxel_budget_.floor, voxel_budget_.ceiling);
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -433,203 +472,119 @@ std::optional<SpecificWorker::SceneFrame> SpecificWorker::process_scene_frame(FP
                       graph_object_boxes};
 }
 
-void SpecificWorker::update_table_nodes_from_tracks(const std::vector<GraphObjectBox>& graph_object_boxes,
-                                                    std::span<const Eigen::Vector3f> lidar_points_room)
+void SpecificWorker::ensure_tracks_node_in_dsr()
 {
-    // TEMPORARY DISABLE: table node evidence writing is paused.
-    (void)graph_object_boxes;
-    (void)lidar_points_room;
-    return;
-
-    const auto& track_cands   = voxel_processor->last_track_candidates();
-    const int   sensing_frame = voxel_processor->last_frame_id();
-    const int   table_cand_count = static_cast<int>(std::count_if(
-        track_cands.begin(), track_cands.end(), [](const auto& c){ return c.category == "table"; }));
-    const int   model_box_count  = static_cast<int>(std::count_if(
-        graph_object_boxes.begin(), graph_object_boxes.end(), [](const auto& b){ return b.category == "model_table"; }));
-
-    if (sensing_frame % 30 == 0)
-        qInfo() << "[TableCapture] frame=" << sensing_frame << " model_boxes=" << model_box_count << " table_tracks=" << table_cand_count;
-
-    // Index model boxes by DSR node name so each table node finds its own box in O(1).
-    struct ModelBox
-    {
-        Eigen::Vector3f min, max, centroid, half_extents;
-        float yaw_rad = 0.f;
-    };
-    std::unordered_map<std::string, ModelBox> model_box_map;
-    for (const auto& box : graph_object_boxes)
-    {
-        if (box.category != "model_table" or box.node_name.empty())
-            continue;
-        model_box_map.emplace(box.node_name, ModelBox{
-            box.min, box.max, (box.min + box.max) * 0.5f, box.half_extents, box.yaw_rad
-        });
-    }
-    if (model_box_map.empty())
+    if (tracks_node_ready_)
         return;
 
-    for (auto table_node : G->get_nodes_by_type("table"))
+    if (G->get_nodes_by_type("room").empty() or G->get_nodes_by_type("robot").empty())
+        return;
+
+    if (G->get_node("tracks").has_value())
     {
-        const auto mb_it = model_box_map.find(table_node.name());
-        if (mb_it == model_box_map.end())
-            continue;
-        const auto& mb = mb_it->second;
-
-        // OBB inside check — defined before the matching loop so it can be
-        // reused for both candidate scoring (50-pt sample) and explanation_ratio
-        // (400-pt full fetch).
-        const float cy = std::cos(-mb.yaw_rad);
-        const float sy = std::sin(-mb.yaw_rad);
-        auto inside_obb = [&](const Eigen::Vector3f& p) -> bool
-        {
-            const Eigen::Vector3f rel = p - mb.centroid;
-            const float lx = rel.x() * cy - rel.y() * sy;
-            const float ly = rel.x() * sy + rel.y() * cy;
-            return std::abs(lx) <= mb.half_extents.x()
-               and std::abs(ly) <= mb.half_extents.y()
-               and std::abs(rel.z()) <= mb.half_extents.z();
-        };
-
-        const float kTrackMatchPadding = 0.10f;
-        const Eigen::Vector3f match_min = mb.min.array() - kTrackMatchPadding;
-        const Eigen::Vector3f match_max = mb.max.array() + kTrackMatchPadding;
-        auto aabb_intersection_volume = [](const Eigen::Vector3f& min_a,
-                                           const Eigen::Vector3f& max_a,
-                                           const Eigen::Vector3f& min_b,
-                                           const Eigen::Vector3f& max_b) -> float
-        {
-            const Eigen::Vector3f overlap = (max_a.cwiseMin(max_b) - min_a.cwiseMax(min_b)).cwiseMax(0.0f);
-            return overlap.x() * overlap.y() * overlap.z();
-        };
-
-        // Primary match: pick the table track whose AABB overlaps the model box
-        // the most. This remains meaningful even when model-explained points are
-        // suppressed before track construction.
-        int best_track_id  = -1;
-        int best_obb_score = -1;
-        float best_overlap_volume = -1.0f;
-        float best_centroid_dist = std::numeric_limits<float>::max();
-        for (const auto& cand : track_cands)
-        {
-            if (cand.category != "table") continue;
-
-            const float overlap_volume = aabb_intersection_volume(cand.min, cand.max, match_min, match_max);
-            const auto sample = voxel_processor->get_flat_pts_for_track(cand.track_id, 50);
-            int score = 0;
-            for (std::size_t k = 0; k < sample.size() / 3; ++k)
-                if (inside_obb({sample[k*3], sample[k*3+1], sample[k*3+2]}))
-                    ++score;
-
-            const float dx = cand.centroid.x() - mb.centroid.x();
-            const float dy = cand.centroid.y() - mb.centroid.y();
-            const float dist = std::sqrt(dx*dx + dy*dy);
-
-            if (overlap_volume > best_overlap_volume
-                || (std::abs(overlap_volume - best_overlap_volume) < 1e-6f && score > best_obb_score)
-                || (std::abs(overlap_volume - best_overlap_volume) < 1e-6f
-                    && score == best_obb_score
-                    && dist < best_centroid_dist))
-            {
-                best_overlap_volume = overlap_volume;
-                best_obb_score = score;
-                best_track_id  = cand.track_id;
-                best_centroid_dist = dist;
-            }
-        }
-        // Fallback to XY centroid distance only when no table track intersects the
-        // model neighbourhood at all.
-        if (best_overlap_volume <= 0.0f)
-        {
-            float best_dist = std::numeric_limits<float>::max();
-            best_track_id   = -1;
-            for (const auto& cand : track_cands)
-            {
-                if (cand.category != "table") continue;
-                const float dx = cand.centroid.x() - mb.centroid.x();
-                const float dy = cand.centroid.y() - mb.centroid.y();
-                const float dist = std::sqrt(dx*dx + dy*dy);
-                if (dist < best_dist) { best_dist = dist; best_track_id = cand.track_id; }
-            }
-        }
-        if (sensing_frame % 30 == 0)
-        {
-            if (best_track_id >= 0)
-                qInfo() << "[TableCapture] node='" << table_node.name().c_str()
-                        << "' model_centroid=(" << mb.centroid.x() << "," << mb.centroid.y() << "," << mb.centroid.z()
-                        << ") best_track=" << best_track_id << " overlap=" << best_overlap_volume << " obb_score=" << best_obb_score;
-            else
-                qInfo() << "[TableCapture] node='" << table_node.name().c_str() << "' no table track visible this frame";
-        }
-        std::vector<float> flat_pts;
-        if (best_track_id >= 0)
-            flat_pts = voxel_processor->get_flat_pts_for_track(best_track_id, 400);
-
-        const std::size_t n_cands = flat_pts.size() / 3;
-        int inside_count = 0;
-        for (std::size_t k = 0; k < n_cands; ++k)
-        {
-            if (inside_obb(Eigen::Vector3f(flat_pts[k*3], flat_pts[k*3+1], flat_pts[k*3+2])))
-                ++inside_count;
-        }
-        const float explanation_ratio = n_cands > 0
-            ? static_cast<float>(inside_count) / static_cast<float>(n_cands)
-            : 0.0f;
-
-        // residual_pts: lidar points NOT explained by the current model OBB,
-        // constrained to an expanded model neighbourhood. Capped at 150 points.
-        constexpr float kNeighbourhoodMargin = 0.3f;
-        const Eigen::Vector3f nb_min = mb.min.array() - kNeighbourhoodMargin;
-        const Eigen::Vector3f nb_max = mb.max.array() + kNeighbourhoodMargin;
-        std::vector<float> residual_flat;
-        residual_flat.reserve(450);
-        std::size_t lidar_in_neighbourhood = 0;
-
-        if (!lidar_points_room.empty())
-        {
-            for (const auto& p : lidar_points_room)
-            {
-                if (residual_flat.size() >= 450)
-                    break;
-                if (!((p.array() >= nb_min.array()).all() and (p.array() <= nb_max.array()).all()))
-                    continue;
-                ++lidar_in_neighbourhood;
-                if (inside_obb(p))
-                    continue;
-                residual_flat.push_back(p.x());
-                residual_flat.push_back(p.y());
-                residual_flat.push_back(p.z());
-            }
-        }
-        else
-        {
-            // Fallback when no lidar frame is available.
-            for (std::size_t k = 0; k < n_cands && residual_flat.size() < 450; ++k)
-            {
-                const Eigen::Vector3f p(flat_pts[k*3], flat_pts[k*3+1], flat_pts[k*3+2]);
-                if (inside_obb(p))
-                    continue;
-                if ((p.array() >= nb_min.array()).all() and (p.array() <= nb_max.array()).all())
-                {
-                    residual_flat.push_back(p.x());
-                    residual_flat.push_back(p.y());
-                    residual_flat.push_back(p.z());
-                }
-            }
-        }
-        const int residual_mass = static_cast<int>(residual_flat.size() / 3);
-
-        G->add_or_modify_attrib_local<candidate_pts_att>(table_node, flat_pts);
-        G->add_or_modify_attrib_local<residual_pts_att>(table_node, residual_flat);
-        G->add_or_modify_attrib_local<residual_mass_att>(table_node, residual_mass);
-        G->add_or_modify_attrib_local<last_sensing_frame_att>(table_node, sensing_frame);
-        G->add_or_modify_attrib_local<explanation_ratio_att>(table_node, explanation_ratio);
-        G->update_node(table_node);
-        if (sensing_frame % 30 == 0)
-            qInfo() << "[TableCapture] WROTE node='" << table_node.name().c_str()
-                    << "' frame=" << sensing_frame << " cands=" << n_cands
-                    << " resid=" << residual_mass << " expl=" << explanation_ratio << " lidar_in_nb=" << lidar_in_neighbourhood;
+        tracks_node_ready_ = true;
+        return;
     }
+
+    auto zed_node = G->get_node("zed");
+    if (!zed_node.has_value())
+    {
+        qWarning() << "[Tracks] WARNING: 'zed' node not found in graph — cannot create RT edge";
+        return;
+    }
+
+    auto tracks_node = DSR::Node::create<semantic_grid_node_type>("tracks");
+    G->add_or_modify_attrib_local<color_att>(tracks_node, std::string{"SteelBlue"});
+    G->add_or_modify_attrib_local<level_att>(tracks_node, 4);
+    G->add_or_modify_attrib_local<parent_att>(tracks_node, zed_node.value().id());
+    G->add_or_modify_attrib_local<pos_x_att>(tracks_node, 105.849792f);
+    G->add_or_modify_attrib_local<pos_y_att>(tracks_node, 291.904266f);
+
+    if (const auto id = G->insert_node(tracks_node); id.has_value())
+    {
+        tracks_node_ready_ = true;
+        qInfo() << "[Tracks] Created 'tracks' node id=" << *id << " (semantic_grid) under room '" << zed_node.value().name().c_str() << "'";
+
+        auto rt_api = G->get_rt_api();
+        rt_api->insert_or_assign_edge_RT(zed_node.value(), *id,
+                                             {0.0f, 0.0f, 0.0f},
+                                             {0.0f, 0.0f, 0.0f});
+        qInfo() << "[Tracks] RT edge inserted from 'zed' -> 'tracks'";
+        trigger_graph_layout_twopi();
+    }
+    else
+        qWarning() << "[Tracks] ERROR: failed to insert 'tracks' node into DSR graph";
+}
+
+// Feed-forward, class-agnostic publisher. Exports ALL current voxel tracks (every
+// category) into the 'tracks' node, room frame, as a struct-of-arrays keyed by
+// persistent track id. The voxelizer no longer reads any concept's model box;
+// concept agents read these tracks and do their own instance assignment.
+// Uses runtime/dynamic attributes (like the 'masks' node) — no REGISTER_TYPE.
+void SpecificWorker::publish_tracks_to_dsr()
+{
+    if (!tracks_node_ready_)
+        return;
+
+    auto node_opt = G->get_node("tracks");
+    if (!node_opt.has_value())
+        return;
+    auto& node = node_opt.value();
+
+    const auto& tracks        = voxel_processor->last_track_candidates();
+    const int   sensing_frame = voxel_processor->last_frame_id();
+    constexpr int kMaxPtsPerTrack = 400;
+
+    std::vector<float> ids, label_ids, confidences, last_seen, voxel_counts;
+    std::vector<float> centroids_xyz, bbox_min_xyz, bbox_max_xyz;
+    std::vector<float> support_offsets{0.0f};   // prefix offsets, in POINTS
+    std::vector<float> support_points;
+    std::ostringstream labels_joined;
+    int published = 0;
+
+    for (const auto& t : tracks)
+    {
+        const auto pts = voxel_processor->get_flat_pts_for_track(t.track_id, kMaxPtsPerTrack);
+        if (pts.empty())
+            continue;
+
+        if (!labels_joined.str().empty())
+            labels_joined << '|';
+        labels_joined << t.category;
+
+        ids.push_back(static_cast<float>(t.track_id));
+        label_ids.push_back(0.0f);                 // class id slot (category string carries the label)
+        confidences.push_back(1.0f);               // label-vote confidence (placeholder)
+        last_seen.push_back(static_cast<float>(t.last_seen_frame));
+        voxel_counts.push_back(static_cast<float>(t.voxel_count));
+
+        centroids_xyz.insert(centroids_xyz.end(), {t.centroid.x(), t.centroid.y(), t.centroid.z()});
+        bbox_min_xyz.insert(bbox_min_xyz.end(),   {t.min.x(), t.min.y(), t.min.z()});
+        bbox_max_xyz.insert(bbox_max_xyz.end(),   {t.max.x(), t.max.y(), t.max.z()});
+
+        support_points.insert(support_points.end(), pts.begin(), pts.end());
+        support_offsets.push_back(static_cast<float>(support_points.size() / 3));
+        ++published;
+    }
+
+    G->runtime_checked_add_or_modify_attrib_local(node, "track_frame_id",      sensing_frame);
+    G->runtime_checked_add_or_modify_attrib_local(node, "track_count",         published);
+    G->runtime_checked_add_or_modify_attrib_local(node, "track_ids",           ids);
+    G->runtime_checked_add_or_modify_attrib_local(node, "track_labels",        labels_joined.str());
+    G->runtime_checked_add_or_modify_attrib_local(node, "track_label_ids",     label_ids);
+    G->runtime_checked_add_or_modify_attrib_local(node, "track_confidences",   confidences);
+    G->runtime_checked_add_or_modify_attrib_local(node, "track_last_seen",     last_seen);
+    G->runtime_checked_add_or_modify_attrib_local(node, "track_voxel_counts",  voxel_counts);
+    G->runtime_checked_add_or_modify_attrib_local(node, "track_centroids_xyz", centroids_xyz);
+    G->runtime_checked_add_or_modify_attrib_local(node, "track_bbox_min_xyz",  bbox_min_xyz);
+    G->runtime_checked_add_or_modify_attrib_local(node, "track_bbox_max_xyz",  bbox_max_xyz);
+    G->runtime_checked_add_or_modify_attrib_local(node, "track_support_offsets", support_offsets);
+    G->runtime_checked_add_or_modify_attrib_local(node, "track_support_points",  support_points);
+    G->update_node(std::move(node));
+
+    if (sensing_frame % 30 == 0)
+        std::println("[Tracks] frame={} published={} support_pts={}",
+                     sensing_frame, published, support_points.size() / 3);
 }
 
 void SpecificWorker::ensure_voxels_node_in_dsr()
@@ -725,9 +680,6 @@ void SpecificWorker::ensure_masks_node_in_dsr()
 
 void SpecificWorker::upload_voxel_grid_to_dsr()
 {
-    // TEMPORARY DISABLE: voxels node publishing is paused.
-    return;
-
     if (!voxels_node_ready_)
         return;
 
@@ -962,5 +914,7 @@ void SpecificWorker::cleanup_semantic_grid_nodes()
         G->delete_node(node.id());
     }
     voxels_node_ready_ = false;
+    masks_node_ready_  = false;
+    tracks_node_ready_ = false;
 }
 
