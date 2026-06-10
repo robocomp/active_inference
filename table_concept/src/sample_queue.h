@@ -23,6 +23,8 @@
 #include "table_model.h"
 
 #include <array>
+#include <cstdint>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 #include <Eigen/Dense>
@@ -43,6 +45,10 @@ struct SampleQueueParams
     float edge_bonus_weight            = 0.3f;    // Priority boost for edge/corner pts
     float edge_proximity_threshold     = 0.05f;   // Distance to face = "close"
     float z_bin_size                   = 0.1f;    // Height slice width
+    float current_sdf_weight           = 1.0f;    // Utility penalty for current-model mismatch
+    float edge_anchor_score_threshold  = 0.3f;    // Diagnostic threshold for edge-like anchors
+    float rfe_weight_gain              = 0.25f;   // Scale RFE impact in anchor weights/utility
+    float min_anchor_weight            = 0.12f;   // Keep historical anchors from vanishing
 };
 
 // ─── SamplePoint ─────────────────────────────────────────────────────────────
@@ -52,6 +58,36 @@ struct SamplePoint
     Eigen::Vector3f position;       // Observed voxel centroid, room frame
     Eigen::Matrix2f capture_cov;    // Robot XY covariance at capture time
     float           rfe = 0.0f;     // Remembered Free Energy
+    Eigen::Vector3f local_position = Eigen::Vector3f::Zero();
+    float           last_abs_sdf   = 0.0f;
+    float           edge_score_cache = 0.0f;
+    float           utility_score  = 0.0f;
+    std::uint64_t   insertion_id   = 0;
+};
+
+struct SampleQueueCounters
+{
+    int accepted_new        = 0;
+    int rejected_warmup     = 0;
+    int rejected_sdf        = 0;
+    int rejected_frame_cap  = 0;
+    int rejected_bin_rank   = 0;
+    int evicted_bin_rank    = 0;
+    int evicted_rfe         = 0;
+};
+
+struct SampleQueueMetrics
+{
+    int   anchor_count           = 0;
+    int   capacity               = 0;
+    float effective_weight_mass  = 0.0f;
+    float rfe_mean               = 0.0f;
+    float rfe_p50                = 0.0f;
+    float rfe_p90                = 0.0f;
+    float bin_occupancy_ratio    = 0.0f;
+    float edge_anchor_ratio      = 0.0f;
+    float mean_abs_sdf           = 0.0f;
+    SampleQueueCounters counters;
 };
 
 // ─── SampleQueue ─────────────────────────────────────────────────────────────
@@ -60,6 +96,8 @@ class SampleQueue
 {
 public:
     explicit SampleQueue(const SampleQueueParams& params = {});
+
+    void begin_cycle();
 
     /**
      * Admit new near-surface candidates.
@@ -85,6 +123,8 @@ public:
      */
     void update_rfe(const TableModel& model, const Eigen::Matrix2f& robot_cov);
 
+    void refresh_scores(const TableModel& model);
+
     /** All stored positions (room frame). */
     std::vector<Eigen::Vector3f> points()  const;
 
@@ -105,15 +145,33 @@ public:
     int  size()  const { return static_cast<int>(pts_.size()); }
     bool empty() const { return pts_.empty(); }
     void clear()       { pts_.clear(); }
+    int  capacity() const { return params_.num_angle_bins * params_.num_z_bins * params_.max_per_bin; }
+
+    const SampleQueueMetrics& metrics() const { return metrics_; }
 
 private:
+    struct BinEntry
+    {
+        SamplePoint point;
+        float       utility = 0.0f;
+        bool        from_existing = false;
+    };
+
     // ── bin helpers ──────────────────────────────────────────────────────────
     int  bin_index(const Eigen::Vector3f& p, float cx, float cy) const;
     float edge_score(const Eigen::Vector3f& p, const TableModel& model) const;
+    Eigen::Vector3f to_local_frame(const Eigen::Vector3f& p, const TableState& s) const;
+    void refresh_sample_score(SamplePoint& sp, const TableModel& model,
+                              const std::optional<float>& abs_sdf_override = std::nullopt);
+    void update_metrics(const TableModel* model = nullptr);
+    static float percentile(std::vector<float> values, float q);
 
     /** Rebuild pts_ from a bin map (sorts each bin by quality, keeps max_per_bin). */
-    void flush_bins(std::unordered_map<int, std::vector<std::tuple<SamplePoint, float>>>& bins);
+    void flush_bins(std::unordered_map<int, std::vector<BinEntry>>& bins, const TableModel& model);
 
     std::vector<SamplePoint>  pts_;
     SampleQueueParams         params_;
+    SampleQueueCounters       counters_;
+    SampleQueueMetrics        metrics_;
+    std::uint64_t             next_insertion_id_ = 1;
 };

@@ -25,6 +25,7 @@ find_package(Torch REQUIRED)
 # Sources set
 LIST(APPEND SOURCES
   ../src/specificworker.cpp
+  ../src/specificworker_presence.cpp
   ../src/table_model.cpp
   ../src/sample_queue.cpp
   ../src/epistemic_planner.cpp
@@ -33,6 +34,8 @@ LIST(APPEND SOURCES
   ../src/timeseries_plot.cpp
   ${ACTIVE_INFERENCE_COMMON_DIR}/robust_metrics/robust_metrics.cpp
   ${ACTIVE_INFERENCE_COMMON_DIR}/robust_metrics/robust_metrics_torch.cpp
+  ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_monitor/agent_presence_monitor.cpp
+  ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_coordinator/agent_presence_coordinator.cpp
 )
 
 # Headers set
@@ -47,6 +50,8 @@ LIST(APPEND HEADERS
   ../src/custom_widget.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/robust_metrics/robust_metrics.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/robust_metrics/robust_metrics_torch.h
+  ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_monitor/agent_presence_monitor.h
+  ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_coordinator/agent_presence_coordinator.h
 )
 
 

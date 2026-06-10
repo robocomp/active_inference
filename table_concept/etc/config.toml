@@ -23,6 +23,18 @@ graph = true
 # 2d = true
 # 3d = true
 
+[Presence]
+required_agent_names = ["robot_concept", "room_concept"]
+config_dir = "etc"
+monitor_period_ms = 500
+heartbeat_timeout_ms = 3000
+rejoin_grace_ms = 1500
+stale_grace_ms = 120000
+agent_info_period_ms = 1000
+
+[Owns]
+nodes = ["table_concept 7"]
+
 [Period]
 Compute = 100
 Emergency = 500
@@ -31,8 +43,19 @@ Emergency = 500
 Verbose = false
 
 [TableModel]
+LambdaSize = 0.05         # weaker KL pull on w/h/height so evidence can expand the table model
+PriorSizeStd = 0.60       # broader 1-sigma size prior (m); higher means weaker size prior
 RobustLoss = "tukey_biweight"   # one of: quadratic, huber, geman_mcclure, welsch, tukey_biweight
 RobustLossScale = 0.10      # SDF residual scale in meters where robust losses start to saturate
+
+[TableConcept]
+ObsDistance = 1.8           # comfortable maximum stand-off from the target face for epistemic poses
+DeltaMin = 20.0             # minimum per-face coverage before stopping epistemic proposals
+GainThreshold = 0.1         # minimum gain proxy required to emit a proposal
+VoxelBankMaxPoints = 4000   # max number of table-owned voxels kept in memory
+VoxelBankQuantizationM = 0.02 # dedup grid (m) for voxel-bank hashing
+VoxelSelectRadiusMarginM = 0.50 # per-table XY ownership gate margin for mixed proto-tables
+VoxelSelectHeightMarginM = 0.25 # extra Z margin above table height when selecting owned voxels
 
 [WarmStart]
 PtsMin = 12.0            # point count where observability starts to become trustworthy
@@ -41,13 +64,17 @@ CoverageMinSide = 2.0    # minimum bilateral face coverage before size/yaw can a
 RhoFreeze = 0.25         # observability-ratio threshold below which one-sided dimensions are frozen
 LambdaPosBase = 0.15     # baseline gain for cx/cy acceptance even under weak evidence
 LambdaPosGain = 0.45     # extra positional gain added as observability improves
-LambdaSizeBase = 0.02    # baseline gain for shape/height acceptance under poor coverage
-LambdaSizeGain = 0.18    # extra shape gain added when bilateral coverage improves
+LambdaSizeBase = 0.05    # baseline gain for shape/height acceptance under poor coverage
+LambdaSizeGain = 0.35    # extra shape gain added when bilateral coverage improves
 LambdaYawBase = 0.01     # baseline yaw gain when orientation evidence is weak
 LambdaYawGain = 0.12     # extra yaw gain added when both x/y face coverage are balanced
 ConfidenceDecay = 0.55            # how quickly the higher-level confidence state forgets old evidence
 ConfidenceCoverageGain = 1.00     # how much coverage evidence raises confidence
 ConfidenceResidualGain = 0.25     # how much unexplained residuals raise confidence
+
+[SampleQueue]
+RfeWeightGain = 0.25      # lower than 1.0 keeps historical RFE anchors influential
+MinAnchorWeight = 0.12    # floor for anchor weight in optimization/coverage
 
 [Ice]
 Warn.Connections = "0"

@@ -17,6 +17,8 @@
  *    along with RoboComp.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "genericworker.h"
+
+#include <QSettings>
 /**
 * \brief Default constructor
 */
@@ -82,13 +84,7 @@ GenericWorker::GenericWorker(const ConfigLoader& configLoader, TuplePrx tprx) : 
 */
 GenericWorker::~GenericWorker()
 {
-    for (auto& [name, graphPtr] : Graphs) {
-        if (!graphPtr) continue;
-        auto grid_nodes = graphPtr->get_nodes_by_type("grid");
-        for (auto grid : grid_nodes) {
-            graphPtr->delete_node(grid);
-        }
-    }
+	save_window_settings();
 }
 void GenericWorker::killYourSelf()
 {
@@ -188,6 +184,72 @@ std::shared_ptr<DSR::DSRViewer> GenericWorker::setupViewer(std::shared_ptr<DSR::
 		return nullptr;
 };
 
+    void GenericWorker::trigger_graph_layout_twopi()
+    {
+        for (const auto &[graph_name, viewer] : graph_viewers)
+        {
+            if (!viewer)
+                continue;
+
+            QWidget *graph_widget = viewer->get_widget(DSR::DSRViewer::view::graph);
+            auto *graph_viewer = qobject_cast<DSR::GraphViewer *>(graph_widget);
+            if (!graph_viewer)
+                continue;
+
+            QMetaObject::invokeMethod(graph_viewer,
+                                      [graph_viewer]() { graph_viewer->compute_layout("twopi"); },
+                                      Qt::QueuedConnection);
+        }
+    }
+
+    void GenericWorker::restore_window_settings()
+    {
+        QSettings settings(QStringLiteral("RoboComp"), QString::fromStdString(agent_name));
+
+        for (const auto &[name, window] : windows)
+        {
+            if (window == nullptr)
+                continue;
+
+            settings.beginGroup(settings_group_name(name, agent_id));
+
+            const QByteArray geometry = settings.value(QStringLiteral("geometry")).toByteArray();
+            if (!geometry.isEmpty())
+                window->restoreGeometry(geometry);
+
+            const QByteArray state = settings.value(QStringLiteral("state")).toByteArray();
+            if (!state.isEmpty())
+                window->restoreState(state, kWindowStateVersion);
+
+            settings.endGroup();
+        }
+    }
+
+    void GenericWorker::save_window_settings() const
+    {
+        QSettings settings(QStringLiteral("RoboComp"), QString::fromStdString(agent_name));
+
+        for (const auto &[name, window] : windows)
+        {
+            if (window == nullptr)
+                continue;
+
+            settings.beginGroup(settings_group_name(name, agent_id));
+            settings.setValue(QStringLiteral("geometry"), window->saveGeometry());
+            settings.setValue(QStringLiteral("state"), window->saveState(kWindowStateVersion));
+            settings.endGroup();
+        }
+
+        settings.sync();
+    }
+
+    QString GenericWorker::settings_group_name(const std::string& graph_name, int agent_id)
+    {
+        const QString graph_suffix = graph_name.empty() ? QStringLiteral("default")
+                                                        : QString::fromStdString(graph_name);
+        return QStringLiteral("windows/%1/%2").arg(agent_id).arg(graph_suffix);
+    }
+
 void GenericWorker::initialize(){
     for (const auto& [name, Graph] : Graphs) {
         std::unique_ptr<QMainWindow> window = std::make_unique<QMainWindow>();
@@ -202,5 +264,31 @@ void GenericWorker::initialize(){
             graph_viewers.emplace(name, std::move(viewer));
             windows.emplace(name, std::move(window));
         }
+
+        QObject::connect(Graph.get(),
+                         &DSR::DSRGraph::update_node_signal,
+                         this,
+                         [this, graph_name = name](std::uint64_t, const std::string &type, DSR::SignalInfo) {
+                             if (participant_layout_done_graphs.contains(graph_name))
+                                 return;
+                             if (type != "agent")
+                                 return;
+                             participant_layout_done_graphs.insert(graph_name);
+                             QTimer::singleShot(500, this, [this]() {
+                                 trigger_graph_layout_twopi();
+                             });
+                         },
+                         Qt::QueuedConnection);
     }
+
+    if (auto *application = QCoreApplication::instance(); application != nullptr)
+    {
+        QObject::connect(application, &QCoreApplication::aboutToQuit, this, [this]() {
+            save_window_settings();
+        });
+    }
+
+    QTimer::singleShot(0, this, [this]() {
+        restore_window_settings();
+    });
 };

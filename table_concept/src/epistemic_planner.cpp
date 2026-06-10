@@ -13,6 +13,7 @@
 
 #include "epistemic_planner.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <numbers>
@@ -26,6 +27,10 @@ EpistemicPlanner::EpistemicPlanner(float delta_min, float gain_threshold, float 
 EpistemicProposal EpistemicPlanner::compute(const TableModel&  model,
                                              const SampleQueue& queue) const
 {
+    constexpr float kEffectiveHorizontalFovRad = 70.0f * std::numbers::pi_v<float> / 180.0f;
+    constexpr float kMinimumStandOffM = 0.90f;
+    constexpr float kStandOffSafetyMarginM = 0.25f;
+
     const auto coverage = queue.face_coverage(model);
     const auto& s       = model.state();
 
@@ -80,21 +85,37 @@ EpistemicProposal EpistemicPlanner::compute(const TableModel&  model,
 
     const auto& f = faces[best_idx];
 
-    // Viewpoint: face centre + outward normal × d_obs
-    const float vx = f.centre.x() + f.normal.x() * d_obs_;
-    const float vy = f.centre.y() + f.normal.y() * d_obs_;
+    const float face_fit_distance = f.half_span /
+        std::tan(kEffectiveHorizontalFovRad * 0.5f);
+    const float max_stand_off = std::max(kMinimumStandOffM, d_obs_);
+    const float stand_off = std::clamp(face_fit_distance + kStandOffSafetyMarginM,
+                                       kMinimumStandOffM,
+                                       max_stand_off);
 
-    // Heading: face the table (inverse of outward normal)
-    const float yaw_to_face = std::atan2(-f.normal.y(), -f.normal.x());
+    // Place the robot just outside the selected face, close enough to orbit the
+    // table but far enough for the face to remain comfortably inside the ZED FOV.
+    const float vx = f.centre.x() + f.normal.x() * stand_off;
+    const float vy = f.centre.y() + f.normal.y() * stand_off;
+
+    // Heading: point the robot at the table centre so the camera sees the full
+    // table body rather than grazing only the selected face point.
+    const float yaw_to_face = std::atan2(s.cy - vy, s.cx - vx);
 
     // Gain proxy: face area × coverage deficit / σ²
     const float face_area   = 2.0f * f.half_span * s.table_height;
     const float deficit     = 1.0f - std::min(1.0f, best_cov / delta_min_);
     const float sigma2      = model.params().sigma_obs * model.params().sigma_obs;
-    const float gain        = face_area * deficit / sigma2;
-
-    if (gain < gain_threshold_)
+    if (!std::isfinite(sigma2) || sigma2 <= std::numeric_limits<float>::epsilon())
         return {};
 
-    return EpistemicProposal{vx, vy, yaw_to_face, gain, true};
+    const float epistemic_gain = face_area * deficit / sigma2;
+
+    if (epistemic_gain < gain_threshold_)
+        return {};
+
+    EpistemicProposal proposal{vx, vy, yaw_to_face, epistemic_gain, true};
+    if (!proposal.is_finite())
+        return {};
+
+    return proposal;
 }

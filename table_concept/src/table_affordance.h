@@ -6,9 +6,11 @@
  * maximises epistemic value for this table, and tracks the mission-controller's
  * progress through a simple state machine:
  *
- *   idle ──update()──► pending ──controller sets pending=false──► executing
- *                                                                      │
- *                        ◄──remove() or on_node_deleted()──── satisfied/aborted
+ *   idle ──update()──► pending/offered ──controller sets active=true──► executing
+ *                                                                             │
+ *                              controller sets active=false,pending=false ───► satisfied
+ *                                                                             │
+ *                         ◄──── update() republishes offered state or remove()/on_node_deleted()
  *
  * DSR node type  : affordance
  * DSR edge type  : has_intention   (table_node → affordance_node)
@@ -18,8 +20,8 @@
  *   epistemic_target_y_m_att    float  target robot Y in room frame (m)
  *   epistemic_target_yaw_rad_att float  robot heading at target (rad)
  *   epistemic_gain_att          float  expected information gain
- *   epistemic_pending_att       bool   true=waiting, false=controller accepted
- *   active_att                  bool   true while live
+ *   epistemic_pending_att       bool   true=offered/executing, false=completed
+ *   active_att                  bool   false=offered/completed, true=controller executing
  */
 
 #pragma once
@@ -57,8 +59,8 @@ public:
 
     // ── DSR slot callbacks ───────────────────────────────────────────────────
 
-    /// Called from modify_node_attrs_slot.  Transitions pending→executing when
-    /// the controller clears epistemic_pending_att on the affordance node.
+    /// Called from modify_node_attrs_slot. Tracks controller-owned protocol
+    /// state transitions on the affordance node.
     void on_node_modified(uint64_t id);
 
     /// Called from del_node_slot.  If the affordance node was deleted externally

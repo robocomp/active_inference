@@ -187,7 +187,7 @@ int table_concept::run(int argc, char* argv[])
 	#endif
 
 	status = EXIT_SUCCESS;
-	delete worker;
+	// Worker shutdown is handled via aboutToQuit.
 	return status;
 }
 

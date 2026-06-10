@@ -18,7 +18,14 @@ void TableAffordance::init(std::shared_ptr<DSR::DSRGraph> G,
 
 void TableAffordance::update(const EpistemicProposal& prop)
 {
-    if (!G_ || !prop.valid) return;
+    if (!G_) return;
+    if (!prop.valid || !prop.is_finite())
+    {
+        if (prop.valid)
+            qWarning() << "[affordance] rejecting non-finite epistemic proposal for"
+                       << table_node_name_.c_str();
+        return;
+    }
 
     if (!node_created_)
         create_node(prop);
@@ -43,15 +50,44 @@ void TableAffordance::on_node_modified(uint64_t id)
 {
     if (!node_created_ || id != affordance_node_id_) return;
 
-    // Controller accepted the proposal: it sets epistemic_pending_att = false
     auto node_opt = G_->get_node(affordance_node_id_);
     if (!node_opt.has_value()) return;
 
-    const auto v = G_->get_attrib_by_name<epistemic_pending_att>(node_opt.value());
-    if (v.has_value() && !v.value() && state_ == State::pending)
+    const bool active = G_->get_attrib_by_name<active_att>(node_opt.value()).value_or(false);
+    const bool pending = G_->get_attrib_by_name<epistemic_pending_att>(node_opt.value()).value_or(true);
+
+    if (active && pending)
     {
-        state_ = State::executing;
-        std::print("[affordance] '{}' → executing (controller accepted)\n",
+        if (state_ != State::executing)
+        {
+            state_ = State::executing;
+            std::print("[affordance] '{}' → executing (controller claimed)\n",
+                       table_node_name_);
+        }
+        return;
+    }
+
+    if (!active && pending)
+    {
+        state_ = State::pending;
+        return;
+    }
+
+    if (!active && !pending)
+    {
+        if (state_ != State::satisfied)
+        {
+            state_ = State::satisfied;
+            std::print("[affordance] '{}' → satisfied (controller completed)\n",
+                       table_node_name_);
+        }
+        return;
+    }
+
+    if (state_ != State::aborted)
+    {
+        state_ = State::aborted;
+        std::print("[affordance] '{}' → aborted (invalid protocol state active=1 pending=0)\n",
                    table_node_name_);
     }
 }
@@ -89,11 +125,11 @@ void TableAffordance::create_node(const EpistemicProposal& prop)
     G_->add_or_modify_attrib_local<parent_att>                  (aff_node, table_node_id_);
     G_->add_or_modify_attrib_local<pos_x_att>                   (aff_node, 300.f);
     G_->add_or_modify_attrib_local<pos_y_att>                   (aff_node, 200.f);
-    G_->add_or_modify_attrib_local<active_att>                  (aff_node, true);
-    G_->add_or_modify_attrib_local<epistemic_target_x_m_att>    (aff_node, prop.target_x_m);
-    G_->add_or_modify_attrib_local<epistemic_target_y_m_att>    (aff_node, prop.target_y_m);
-    G_->add_or_modify_attrib_local<epistemic_target_yaw_rad_att>(aff_node, prop.target_yaw_rad);
-    G_->add_or_modify_attrib_local<epistemic_gain_att>          (aff_node, prop.gain);
+    G_->add_or_modify_attrib_local<active_att>                  (aff_node, false);
+    G_->add_or_modify_attrib_local<epistemic_target_x_m_att>    (aff_node, prop.epistemic_target_x_m);
+    G_->add_or_modify_attrib_local<epistemic_target_y_m_att>    (aff_node, prop.epistemic_target_y_m);
+    G_->add_or_modify_attrib_local<epistemic_target_yaw_rad_att>(aff_node, prop.epistemic_target_yaw_rad);
+    G_->add_or_modify_attrib_local<epistemic_gain_att>          (aff_node, prop.epistemic_gain);
     G_->add_or_modify_attrib_local<epistemic_pending_att>       (aff_node, true);
 
     const auto id_opt = G_->insert_node(aff_node);
@@ -111,8 +147,8 @@ void TableAffordance::create_node(const EpistemicProposal& prop)
     std::print("[affordance] created '{}' id={} target=({:.2f},{:.2f}) "
                "yaw={:.2f} gain={:.4f}\n",
                aff_name, affordance_node_id_,
-               prop.target_x_m, prop.target_y_m,
-               prop.target_yaw_rad, prop.gain);
+               prop.epistemic_target_x_m, prop.epistemic_target_y_m,
+               prop.epistemic_target_yaw_rad, prop.epistemic_gain);
 }
 
 void TableAffordance::update_node(const EpistemicProposal& prop)
@@ -126,11 +162,28 @@ void TableAffordance::update_node(const EpistemicProposal& prop)
         return;
     }
     auto& n = node_opt.value();
-    G_->add_or_modify_attrib_local<epistemic_target_x_m_att>    (n, prop.target_x_m);
-    G_->add_or_modify_attrib_local<epistemic_target_y_m_att>    (n, prop.target_y_m);
-    G_->add_or_modify_attrib_local<epistemic_target_yaw_rad_att>(n, prop.target_yaw_rad);
-    G_->add_or_modify_attrib_local<epistemic_gain_att>          (n, prop.gain);
-    // Keep epistemic_pending_att as-is so the controller's write is preserved
+    const bool active = G_->get_attrib_by_name<active_att>(n).value_or(false);
+    const bool pending = G_->get_attrib_by_name<epistemic_pending_att>(n).value_or(true);
+
+    if (active && pending)
+    {
+        state_ = State::executing;
+        refresh_edge();
+        return;
+    }
+
+    G_->add_or_modify_attrib_local<epistemic_target_x_m_att>    (n, prop.epistemic_target_x_m);
+    G_->add_or_modify_attrib_local<epistemic_target_y_m_att>    (n, prop.epistemic_target_y_m);
+    G_->add_or_modify_attrib_local<epistemic_target_yaw_rad_att>(n, prop.epistemic_target_yaw_rad);
+    G_->add_or_modify_attrib_local<epistemic_gain_att>          (n, prop.epistemic_gain);
+
+    if (!pending || active)
+    {
+        G_->add_or_modify_attrib_local<active_att>              (n, false);
+        G_->add_or_modify_attrib_local<epistemic_pending_att>   (n, true);
+    }
+
+    state_ = State::pending;
     G_->update_node(n);
 
     refresh_edge();

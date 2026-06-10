@@ -15,6 +15,7 @@
 
 #include <array>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <string>
 #include <utility>
@@ -78,11 +79,24 @@ struct TableModelParams
     float robust_loss_scale = 0.10f;
 };
 
+struct FreeEnergyDecomposition
+{
+    float likelihood_current   = 0.0f;
+    float likelihood_historical = 0.0f;
+    float prior                = 0.0f;
+    float total_fe             = 0.0f;
+    float effective_weight_mass = 0.0f;
+    float current_weight_mass  = 0.0f;
+    float historical_weight_mass = 0.0f;
+};
+
 // ─── TableModel ──────────────────────────────────────────────────────────────
 
 class TableModel
 {
 public:
+    using IterationObserver = std::function<void(int, const TableState&, const FreeEnergyDecomposition&)>;
+
     static constexpr float TOP_THICKNESS = 0.03f;
     static constexpr float LEG_RADIUS    = 0.025f;
     static constexpr float SDF_SMOOTH_K  = 0.02f;
@@ -110,6 +124,11 @@ public:
     float compute_free_energy(const std::vector<Eigen::Vector3f>& points,
                               const std::vector<float>& weights) const;
 
+    FreeEnergyDecomposition compute_free_energy_decomposition(
+        const std::vector<Eigen::Vector3f>& points,
+        const std::vector<float>& weights,
+        std::size_t historical_count) const;
+
     // ── Gradient step ────────────────────────────────────────────────────────
 
     /**
@@ -117,7 +136,9 @@ public:
      * Returns the free energy after the last step.
      */
     float gradient_step(const std::vector<Eigen::Vector3f>& points,
-                        const std::vector<float>& weights);
+                        const std::vector<float>& weights,
+                        std::size_t historical_count = 0,
+                        const IterationObserver& observer = {});
 
     // ── State access ─────────────────────────────────────────────────────────
 
@@ -145,6 +166,11 @@ private:
     float fe_at(const TableState& s,
                 const std::vector<Eigen::Vector3f>& pts,
                 const std::vector<float>& weights) const;
+
+    FreeEnergyDecomposition fe_terms_at(const TableState& s,
+                                        const std::vector<Eigen::Vector3f>& pts,
+                                        const std::vector<float>& weights,
+                                        std::size_t historical_count) const;
 
     // Prior (size regularisation) energy for a given state
     float prior_energy(const TableState& s) const;

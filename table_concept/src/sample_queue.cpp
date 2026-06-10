@@ -16,13 +16,29 @@
 #include <cmath>
 #include <numbers>
 #include <numeric>
+#include <set>
 #include <tuple>
+
+namespace
+{
+float anchor_weight(const SamplePoint& sp, const SampleQueueParams& params)
+{
+    const float denom = 1.0f + sp.capture_cov.trace() + params.rfe_weight_gain * sp.rfe;
+    return std::max(params.min_anchor_weight, 1.0f / std::max(1e-6f, denom));
+}
+}
 
 // ─── Constructor ─────────────────────────────────────────────────────────────
 
 SampleQueue::SampleQueue(const SampleQueueParams& params)
     : params_(params)
 {}
+
+void SampleQueue::begin_cycle()
+{
+    counters_ = {};
+    metrics_.counters = counters_;
+}
 
 // ─── Bin index ───────────────────────────────────────────────────────────────
 
@@ -83,23 +99,133 @@ float SampleQueue::edge_score(const Eigen::Vector3f& p, const TableModel& model)
     return std::min(score, 1.0f);
 }
 
+Eigen::Vector3f SampleQueue::to_local_frame(const Eigen::Vector3f& p, const TableState& s) const
+{
+    const float cos_t = std::cos(-s.yaw);
+    const float sin_t = std::sin(-s.yaw);
+    const float px = p.x() - s.cx;
+    const float py = p.y() - s.cy;
+    return {
+        px * cos_t - py * sin_t,
+        px * sin_t + py * cos_t,
+        p.z()
+    };
+}
+
+void SampleQueue::refresh_sample_score(SamplePoint& sp, const TableModel& model,
+                                       const std::optional<float>& abs_sdf_override)
+{
+    sp.local_position = to_local_frame(sp.position, model.state());
+    sp.last_abs_sdf = abs_sdf_override.has_value() ? abs_sdf_override.value() : std::abs(model.sdf_point(sp.position));
+    sp.edge_score_cache = edge_score(sp.position, model);
+    sp.utility_score = sp.capture_cov.trace()
+                     + params_.rfe_weight_gain * sp.rfe
+                     + params_.current_sdf_weight * sp.last_abs_sdf
+                     - params_.edge_bonus_weight * sp.edge_score_cache;
+}
+
+float SampleQueue::percentile(std::vector<float> values, float q)
+{
+    if (values.empty())
+        return 0.0f;
+
+    std::sort(values.begin(), values.end());
+    const float clamped_q = std::clamp(q, 0.0f, 1.0f);
+    const float idx = clamped_q * static_cast<float>(values.size() - 1);
+    const std::size_t lo = static_cast<std::size_t>(std::floor(idx));
+    const std::size_t hi = static_cast<std::size_t>(std::ceil(idx));
+    if (lo == hi)
+        return values[lo];
+    const float frac = idx - static_cast<float>(lo);
+    return values[lo] + frac * (values[hi] - values[lo]);
+}
+
+void SampleQueue::update_metrics(const TableModel* model)
+{
+    metrics_ = {};
+    metrics_.capacity = capacity();
+    metrics_.anchor_count = static_cast<int>(pts_.size());
+    metrics_.counters = counters_;
+
+    if (pts_.empty())
+        return;
+
+    std::vector<float> rfe_values;
+    rfe_values.reserve(pts_.size());
+    std::set<int> occupied_bins;
+    float weight_sum = 0.0f;
+    float edge_like_count = 0.0f;
+    float abs_sdf_sum = 0.0f;
+
+    const TableState* state = model ? &model->state() : nullptr;
+    for (const auto& sp : pts_)
+    {
+        const float weight = anchor_weight(sp, params_);
+        weight_sum += weight;
+        rfe_values.push_back(sp.rfe);
+        abs_sdf_sum += sp.last_abs_sdf;
+        if (sp.edge_score_cache >= params_.edge_anchor_score_threshold)
+            edge_like_count += 1.0f;
+
+        if (state != nullptr)
+            occupied_bins.insert(bin_index(sp.position, state->cx, state->cy));
+        else
+        {
+            const float angle = std::atan2(sp.local_position.y(), sp.local_position.x());
+            int ab = static_cast<int>((angle + std::numbers::pi_v<float>) / (2.0f * std::numbers::pi_v<float>) * params_.num_angle_bins) % params_.num_angle_bins;
+            if (ab < 0) ab += params_.num_angle_bins;
+            int zb = static_cast<int>(sp.local_position.z() / params_.z_bin_size);
+            zb = std::clamp(zb, 0, params_.num_z_bins - 1);
+            occupied_bins.insert(ab * params_.num_z_bins + zb);
+        }
+    }
+
+    metrics_.effective_weight_mass = weight_sum;
+    metrics_.rfe_mean = std::accumulate(rfe_values.begin(), rfe_values.end(), 0.0f) /
+                        static_cast<float>(rfe_values.size());
+    metrics_.rfe_p50 = percentile(rfe_values, 0.5f);
+    metrics_.rfe_p90 = percentile(rfe_values, 0.9f);
+    metrics_.bin_occupancy_ratio = static_cast<float>(occupied_bins.size()) /
+                                   static_cast<float>(std::max(1, params_.num_angle_bins * params_.num_z_bins));
+    metrics_.edge_anchor_ratio = edge_like_count / static_cast<float>(pts_.size());
+    metrics_.mean_abs_sdf = abs_sdf_sum / static_cast<float>(pts_.size());
+}
+
 // ─── Flush bins ──────────────────────────────────────────────────────────────
 
-void SampleQueue::flush_bins(
-    std::unordered_map<int, std::vector<std::tuple<SamplePoint, float>>>& bins)
+void SampleQueue::flush_bins(std::unordered_map<int, std::vector<BinEntry>>& bins,
+                             const TableModel& model)
 {
-    pts_.clear();
+    std::vector<SamplePoint> next_pts;
+    next_pts.reserve(capacity());
     for (auto& [idx, entries] : bins)
     {
         // Sort by quality ascending (lower quality = better point)
         std::sort(entries.begin(), entries.end(),
                   [](const auto& a, const auto& b) {
-                      return std::get<1>(a) < std::get<1>(b);
+                      if (a.utility == b.utility)
+                          return a.point.insertion_id < b.point.insertion_id;
+                      return a.utility < b.utility;
                   });
         const int keep = std::min(static_cast<int>(entries.size()), params_.max_per_bin);
         for (int i = 0; i < keep; ++i)
-            pts_.push_back(std::get<0>(entries[i]));
+        {
+            next_pts.push_back(entries[i].point);
+            if (!entries[i].from_existing)
+                ++counters_.accepted_new;
+        }
+
+        for (std::size_t i = keep; i < entries.size(); ++i)
+        {
+            if (entries[i].from_existing)
+                ++counters_.evicted_bin_rank;
+            else
+                ++counters_.rejected_bin_rank;
+        }
     }
+
+    pts_ = std::move(next_pts);
+    refresh_scores(model);
 }
 
 // ─── Insert ──────────────────────────────────────────────────────────────────
@@ -112,7 +238,13 @@ void SampleQueue::insert(const std::vector<Eigen::Vector3f>& new_pts,
 {
     // Admission warmup: wait for pose to converge first
     if (frame_count < params_.min_frames_before_historical)
+    {
+        counters_.rejected_warmup += static_cast<int>(new_pts.size());
+        metrics_.counters = counters_;
         return;
+    }
+
+    refresh_scores(model);
 
     // Maximum points this frame (gradual ramp)
     const float progress = std::min(1.0f,
@@ -128,11 +260,14 @@ void SampleQueue::insert(const std::vector<Eigen::Vector3f>& new_pts,
         const float abs_sdf = std::abs(sdf_values[i]);
         if (abs_sdf < params_.sdf_threshold_for_storage)
             eligible.emplace_back(abs_sdf, static_cast<int>(i));
+        else
+            ++counters_.rejected_sdf;
     }
 
     // Keep the max_this_frame candidates with smallest |SDF|
     if (static_cast<int>(eligible.size()) > max_this_frame)
     {
+        counters_.rejected_frame_cap += static_cast<int>(eligible.size()) - max_this_frame;
         std::partial_sort(eligible.begin(),
                           eligible.begin() + max_this_frame,
                           eligible.end());
@@ -140,19 +275,20 @@ void SampleQueue::insert(const std::vector<Eigen::Vector3f>& new_pts,
     }
 
     if (eligible.empty())
+    {
+        update_metrics(&model);
         return;
+    }
 
     const float cx = model.state().cx;
     const float cy = model.state().cy;
 
     // Build bins from existing stored points
-    std::unordered_map<int, std::vector<std::tuple<SamplePoint, float>>> bins;
+    std::unordered_map<int, std::vector<BinEntry>> bins;
     for (const auto& sp : pts_)
     {
         const int idx = bin_index(sp.position, cx, cy);
-        const float es = edge_score(sp.position, model);
-        const float quality = sp.capture_cov.trace() + sp.rfe - params_.edge_bonus_weight * es;
-        bins[idx].emplace_back(sp, quality);
+        bins[idx].push_back(BinEntry{sp, sp.utility_score, true});
     }
 
     // Insert new candidates into bins
@@ -162,14 +298,14 @@ void SampleQueue::insert(const std::vector<Eigen::Vector3f>& new_pts,
         sp.position    = new_pts[i];
         sp.capture_cov = robot_cov;
         sp.rfe         = 0.0f;
+        sp.insertion_id = next_insertion_id_++;
+        refresh_sample_score(sp, model, abs_sdf);
 
         const int idx = bin_index(sp.position, cx, cy);
-        const float es = edge_score(sp.position, model);
-        const float quality = robot_cov.trace() + 0.0f - params_.edge_bonus_weight * es;
-        bins[idx].emplace_back(sp, quality);
+        bins[idx].push_back(BinEntry{sp, sp.utility_score, false});
     }
 
-    flush_bins(bins);
+    flush_bins(bins, model);
 }
 
 // ─── Update RFE ──────────────────────────────────────────────────────────────
@@ -177,7 +313,10 @@ void SampleQueue::insert(const std::vector<Eigen::Vector3f>& new_pts,
 void SampleQueue::update_rfe(const TableModel& model, const Eigen::Matrix2f& robot_cov)
 {
     if (pts_.empty())
+    {
+        update_metrics(&model);
         return;
+    }
 
     const float alpha    = params_.rfe_alpha;
     const float max_rfe  = params_.rfe_max_threshold;
@@ -195,9 +334,19 @@ void SampleQueue::update_rfe(const TableModel& model, const Eigen::Matrix2f& rob
 
         if (sp.rfe < max_rfe)
             survivors.push_back(sp);
+        else
+            ++counters_.evicted_rfe;
     }
 
     pts_ = std::move(survivors);
+    refresh_scores(model);
+}
+
+void SampleQueue::refresh_scores(const TableModel& model)
+{
+    for (auto& sp : pts_)
+        refresh_sample_score(sp, model);
+    update_metrics(&model);
 }
 
 // ─── Points / weights ────────────────────────────────────────────────────────
@@ -217,8 +366,7 @@ std::vector<float> SampleQueue::weights() const
     out.reserve(pts_.size());
     for (const auto& sp : pts_)
     {
-        const float cov_trace = sp.capture_cov.trace();
-        out.push_back(1.0f / (1.0f + cov_trace + sp.rfe));
+        out.push_back(anchor_weight(sp, params_));
     }
     return out;
 }
@@ -248,7 +396,7 @@ std::array<float, 6> SampleQueue::face_coverage(const TableModel& model) const
         const float lx = px * cos_t - py * sin_t;
         const float ly = px * sin_t + py * cos_t;
 
-        const float w_i = 1.0f / (1.0f + sp.capture_cov.trace() + sp.rfe);
+        const float w_i = anchor_weight(sp, params_);
 
         if (std::abs(lx - hw)  < eps) coverage[0] += w_i;  // +x face
         if (std::abs(lx + hw)  < eps) coverage[1] += w_i;  // -x face

@@ -21,6 +21,14 @@ using namespace torch::indexing;
 namespace
 {
 
+bool finite_state(const TableState& state)
+{
+    return std::isfinite(state.cx) && std::isfinite(state.cy) &&
+           std::isfinite(state.w) && std::isfinite(state.h) &&
+           std::isfinite(state.table_height) && std::isfinite(state.leg_length) &&
+           std::isfinite(state.yaw);
+}
+
 /** Standard box SDF with smooth interior (log-sum-exp inside). */
 float box_sdf(float dx, float dy, float dz)
 {
@@ -180,8 +188,10 @@ torch::Tensor fe_torch_impl(const TableModelParams& params,
 
     const float inv_sigma2 = 1.0f / (params.sigma_obs * params.sigma_obs);
     const auto point_loss = robust_loss_value(sdf, params.robust_loss, params.robust_loss_scale);
+    // Normalise by point count to match Python prototype (belief_manager.py line 385):
+    //   weighted_likelihood = torch.sum(weights * sdf**2) / len(points)
     const auto likelihood = (weights_tensor * point_loss * inv_sigma2).sum() /
-                            weights_tensor.sum().clamp_min(1e-6f);
+                            static_cast<double>(points_tensor.size(0));
 
     const float sigma = prior.leg_length > 0.0f ? params.prior_size_std : 0.15f;
     const float inv_prior_sigma2 = 1.0f / (sigma * sigma);
@@ -325,22 +335,47 @@ float TableModel::fe_at(const TableState& s,
                          const std::vector<Eigen::Vector3f>& pts,
                          const std::vector<float>& weights) const
 {
+    return fe_terms_at(s, pts, weights, 0).total_fe;
+}
+
+FreeEnergyDecomposition TableModel::fe_terms_at(const TableState& s,
+                                                const std::vector<Eigen::Vector3f>& pts,
+                                                const std::vector<float>& weights,
+                                                std::size_t historical_count) const
+{
+    FreeEnergyDecomposition terms;
     const float inv_sigma2 = 1.0f / (params_.sigma_obs * params_.sigma_obs);
     const bool uniform = weights.empty();
+    const std::size_t split = std::min(historical_count, pts.size());
 
-    float likelihood_energy = 0.0f;
-    float weight_sum        = 0.0f;
     for (std::size_t i = 0; i < pts.size(); ++i)
     {
         const float sdf = sdf_point_at(pts[i], s);
-        const float w   = uniform ? 1.0f : weights[i];
-        likelihood_energy += w * robust_loss_value(sdf, params_.robust_loss, params_.robust_loss_scale) * inv_sigma2;
-        weight_sum        += w;
-    }
-    if (weight_sum > 0.0f)
-        likelihood_energy /= weight_sum;   // normalise
+        const float w = uniform ? 1.0f : weights[i];
+        const float contribution = w * robust_loss_value(sdf, params_.robust_loss, params_.robust_loss_scale) * inv_sigma2;
 
-    return likelihood_energy + prior_energy(s);
+        terms.effective_weight_mass += w;
+        if (i < split)
+        {
+            terms.likelihood_historical += contribution;
+            terms.historical_weight_mass += w;
+        }
+        else
+        {
+            terms.likelihood_current += contribution;
+            terms.current_weight_mass += w;
+        }
+    }
+
+    // Normalise by point count to match Python prototype (belief_manager.py line 385):
+    //   weighted_likelihood = torch.sum(weights * sdf**2) / len(points)
+    const float inv_N = 1.0f / static_cast<float>(std::max(pts.size(), std::size_t{1}));
+    terms.likelihood_current *= inv_N;
+    terms.likelihood_historical *= inv_N;
+
+    terms.prior = prior_energy(s);
+    terms.total_fe = terms.likelihood_current + terms.likelihood_historical + terms.prior;
+    return terms;
 }
 
 float TableModel::compute_free_energy(const std::vector<Eigen::Vector3f>& points,
@@ -351,10 +386,20 @@ float TableModel::compute_free_energy(const std::vector<Eigen::Vector3f>& points
     return fe_at(state_, points, weights);
 }
 
+FreeEnergyDecomposition TableModel::compute_free_energy_decomposition(
+    const std::vector<Eigen::Vector3f>& points,
+    const std::vector<float>& weights,
+    std::size_t historical_count) const
+{
+    return fe_terms_at(state_, points, weights, historical_count);
+}
+
 // ─── Gradient step ───────────────────────────────────────────────────────────
 
 float TableModel::gradient_step(const std::vector<Eigen::Vector3f>& points,
-                                 const std::vector<float>& weights)
+                                 const std::vector<float>& weights,
+                                 std::size_t historical_count,
+                                 const IterationObserver& observer)
 {
     if (points.empty())
         return prior_energy(state_);
@@ -390,12 +435,24 @@ float TableModel::gradient_step(const std::vector<Eigen::Vector3f>& points,
         {arr[0], arr[1], arr[2], arr[3], arr[4], arr[5], arr[6]},
         options).set_requires_grad(true);
 
-    auto run_loop = [&](auto& optimizer)
+    auto theta_to_state = [&](const torch::Tensor& tensor) -> TableState
+    {
+        auto cpu = tensor.detach().to(torch::kCPU);
+        auto acc = cpu.accessor<float, 1>();
+        return TableState{acc[0], acc[1], acc[2], acc[3], acc[4], acc[5], acc[6]};
+    };
+
+    const TableState fallback_state = state_;
+
+    auto run_loop = [&](auto& optimizer) -> bool
     {
         for (int iter = 0; iter < params_.optimization_iters; ++iter)
         {
             optimizer.zero_grad();
             auto loss = fe_torch_impl(params_, prior_, theta, points_tensor, weights_tensor);
+            const float loss_value = loss.item<float>();
+            if (!std::isfinite(loss_value))
+                return false;
             loss.backward();
 
             if (theta.grad().defined() && params_.grad_clip > 0.0f)
@@ -406,31 +463,61 @@ float TableModel::gradient_step(const std::vector<Eigen::Vector3f>& points,
 
             optimizer.step();
             apply_constraints_to_tensor(theta);
+
+            const TableState iter_state = theta_to_state(theta);
+            if (!finite_state(iter_state))
+                return false;
+
+            if (observer)
+            {
+                observer(iter, iter_state, fe_terms_at(iter_state, points, weights, historical_count));
+            }
         }
+        return true;
     };
 
+    bool ok = false;
     const std::string opt = params_.optimizer_type;
     if (opt == "sgd")
     {
         torch::optim::SGD optimizer(
             {theta},
             torch::optim::SGDOptions(params_.optimization_lr).momentum(params_.sgd_momentum));
-        run_loop(optimizer);
+        ok = run_loop(optimizer);
     }
     else
     {
         torch::optim::Adam optimizer(
             {theta},
             torch::optim::AdamOptions(params_.optimization_lr));
-        run_loop(optimizer);
+        ok = run_loop(optimizer);
     }
 
-    auto theta_cpu = theta.detach().to(torch::kCPU);
-    auto t = theta_cpu.accessor<float, 1>();
-    state_ = TableState{t[0], t[1], t[2], t[3], t[4], t[5], t[6]};
+    if (!ok)
+    {
+        state_ = fallback_state;
+        apply_constraints();
+        return fe_at(state_, points, weights);
+    }
+
+    state_ = theta_to_state(theta);
+    if (!finite_state(state_))
+    {
+        state_ = fallback_state;
+        apply_constraints();
+        return fe_at(state_, points, weights);
+    }
     apply_constraints();
 
-    return fe_torch_impl(params_, prior_, theta.detach(), points_tensor, weights_tensor).item<float>();
+    const float final_fe = fe_torch_impl(params_, prior_, theta.detach(), points_tensor, weights_tensor).item<float>();
+    if (!std::isfinite(final_fe))
+    {
+        state_ = fallback_state;
+        apply_constraints();
+        return fe_at(state_, points, weights);
+    }
+
+    return final_fe;
 }
 
 // ─── Constraints ─────────────────────────────────────────────────────────────
