@@ -78,11 +78,12 @@ recenter_sign    = 1.0    # ±1: calibrate in sim
 # Needs the tip bumpers + TGripper.{l,r}tipcontact. recenter_sign also flips this reflex's
 # lateral direction — if it makes misalignment worse, flip the sign.
 tip_reflex = false
-# ── Bottle-as-obstacle (approach safety) ──────────────────────────────────────────────
-# Treat the target bottle as a soft cylinder obstacle for the TOOL during the FIRST
-# (Tracking) phase only, so the gripper rounds to the standoff without clipping/tipping it.
-# OFF from Inserting on (the grasp must move into the bottle). QP solver only.
-bottle_obstacle        = false
+# ── Bottle-as-obstacle (set-down withdrawal safety) ───────────────────────────────────
+# Hard QP velocity-damper constraint on the TOOL vs the bottle cylinder, active ONLY in
+# PlaceRetreating — the gripper has released the bottle on the table and is backing off to
+# rest, so it must not knock the standing bottle over. OFF during the pick approach/grasp.
+# QP solver only.
+bottle_obstacle        = true   # ON: don't tip the just-placed bottle on the way back to rest
 bottle_obstacle_margin = 0.04   # [m] repel within this distance of the bottle surface
 elbow_gain = 2.0
 elbow_target_xy = ""

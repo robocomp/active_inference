@@ -392,7 +392,13 @@ EFEParams PickandPlaceFSM::build_efe_params(const Eigen::Vector3d& z_des,
     p.gain_table        = 2.0;
     p.table_z           = w_.table_top_z_;
     p.table_safe        = 0.06;
-    if (use_qp_ and bottle_obstacle_ and grasp_phase_ == GraspPhase::Tracking)
+    // Bottle-as-obstacle ONLY while withdrawing from the JUST-PLACED bottle
+    // (PlaceRetreating): the gripper has released and is backing off to rest, so the
+    // bottle standing on the table must not be knocked over. bottle_pos_world_ is the
+    // live pose, which at this point is the placed bottle. It is OFF during the pick
+    // approach (Tracking) — there the gripper must reach the standoff and grasp — and
+    // off during the grasp/lift/place legs that move toward the bottle.
+    if (use_qp_ and bottle_obstacle_ and grasp_phase_ == GraspPhase::PlaceRetreating)
     {
         p.gain_bottle   = 1.0;
         p.bottle_xy     = w_.bottle_pos_world_.head<2>();
