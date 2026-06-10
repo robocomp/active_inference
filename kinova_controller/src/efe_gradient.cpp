@@ -126,11 +126,28 @@ namespace
                 const double zeta = std::max(0.0, p.obs_damper_xi * (d / p.table_safe));
                 append_row(C, l, u, a, -INF, zeta);
             }
-            // NOTE: no per-joint table damper here. Constraining the elbow/wrist vs the table
-            // plane froze the grasp descent (the arm legitimately approaches the table to grasp,
-            // and the elbow comes near it on a low reach) → the arm oscillated over the bottle
-            // without seating. The elbow-on-table at awkward PLACE spots must be handled
-            // separately (place-phase-only), not with a blanket plane constraint here.
+            // ELBOW-only table damper. A blanket per-joint plane constraint froze the grasp
+            // descent (the WRIST legitimately nears the table on a low reach), but the elbow
+            // (joint_4) never needs to touch the table even while grasping — the null-space
+            // elbow-placement pull can swing it down into the surface. Bound just the elbow
+            // point's downward speed near the plane; q̇=0 stays feasible (no penetration), and
+            // the tool/wrist are untouched so this does not stall the descent.
+            //
+            // CRITICAL: a SMALL dedicated margin. The elbow legitimately holds only ~6 cm
+            // above the table at the converged standoff, so using the tool's table_safe (6 cm)
+            // makes the damper bind at the HOLD pose — and since position is only a soft slack
+            // in the NEO QP, it then yields to the hard constraint and the EE drifts off. A
+            // 3 cm band sits below the hold clearance (no fight at convergence) yet still
+            // arrests a genuine dive toward the surface.
+            constexpr double ELBOW_TABLE_SAFE = 0.03;
+            const double de = kin.elbow_position(q).z() - p.table_z;
+            if (de < ELBOW_TABLE_SAFE)
+            {
+                const Eigen::Matrix<double, 3, N> Je = kin.arm_jacobian_elbow_linear(q);
+                const QpRow a = -(Eigen::RowVector3d(0, 0, 1) * Je);   // elbow downward speed
+                const double zeta = std::max(0.0, p.obs_damper_xi * (de / ELBOW_TABLE_SAFE));
+                append_row(C, l, u, a, -INF, zeta);
+            }
         }
         // Bottle (approach phase only): TOOL point vs the target's finite vertical cylinder.
         // Bounds the tool's radial approach speed so the gripper rounds to the standoff
@@ -168,15 +185,21 @@ namespace
                  const Eigen::Matrix<double, 6, 1>& twist,
                  double lambda_sq,
                  const Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1>& g_lin,
-                 const Eigen::MatrixXd& C_damp, const Eigen::VectorXd& l, const Eigen::VectorXd& u)
+                 const Eigen::MatrixXd& C_damp, const Eigen::VectorXd& l, const Eigen::VectorXd& u,
+                 double orient_slack = 1.0)
     {
         constexpr int N = Kinematics::N_ARM_JOINTS;
         const int dim  = N + 6;                            // q̇ (7) + slack δ (6)
         const int n_in = static_cast<int>(C_damp.rows());
 
         Eigen::MatrixXd H = Eigen::MatrixXd::Zero(dim, dim);
-        H.topLeftCorner(N, N)     = lambda_sq * Eigen::MatrixXd::Identity(N, N);  // λ² I on q̇
-        H.bottomRightCorner(6, 6) = Eigen::MatrixXd::Identity(6, 6);              // I on δ
+        H.topLeftCorner(N, N) = lambda_sq * Eigen::MatrixXd::Identity(N, N);      // λ² I on q̇
+        // Slack weight: 1 on the 3 position rows, orient_slack on the 3 orientation
+        // rows. orient_slack < 1 makes leaving orientation error CHEAP, so the QP
+        // gives the rotation slack instead of driving q̇ into a singularity to hit it.
+        Eigen::Matrix<double, 6, 1> w_delta;
+        w_delta << 1.0, 1.0, 1.0, orient_slack, orient_slack, orient_slack;
+        H.bottomRightCorner(6, 6) = w_delta.asDiagonal();                         // W_δ on δ
         Eigen::VectorXd g = Eigen::VectorXd::Zero(dim);
         g.head(N) = g_lin;
         Eigen::MatrixXd A = Eigen::MatrixXd::Zero(6, dim);                        // [J6 | −I₆]
@@ -417,7 +440,7 @@ std::array<double, Kinematics::N_ARM_JOINTS> efe_gradient_step(
         const double w = params.redundancy_weight > 0.0 ? params.redundancy_weight : lambda_sq;
         const Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1> g_lin =
             -w * (params.gain_mu * grad_mu + params.gain_elbow * grad_el);
-        q_dot = solve_neo_qp(J6, twist, lambda_sq, g_lin, C, l, u);
+        q_dot = solve_neo_qp(J6, twist, lambda_sq, g_lin, C, l, u, params.orient_slack);
     }
     else
     {

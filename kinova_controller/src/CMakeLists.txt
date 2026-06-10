@@ -5,6 +5,8 @@ find_package(pinocchio REQUIRED)
 # Sources set
 LIST(APPEND SOURCES
   ../src/specificworker.cpp
+  ../src/specificworker_approach.cpp
+  ../src/specificworker_grasp.cpp
   ../src/kinematics.cpp
   ../src/efe_gradient.cpp
   ../src/arm_belief_viewer_3d.cpp

@@ -156,6 +156,10 @@ private:
 	// approach + gripper configuration in isolation before enabling the grasp.
 	bool approach_only_ = true;   // validate approach+hold; set false to re-enable grasp
 	bool approach_hold_logged_ = false;
+	// One-shot: in approach-only validation with a fixed pick spot configured,
+	// teleport the bottle to that (known reachable) spot once so the experiment is
+	// repeatable regardless of where the bottle drifted to in Webots.
+	bool approach_respawn_done_ = false;
 	Eigen::Vector3d held_track_target_{0,0,0};
 	Eigen::Vector3d held_z_des_{0,0,1};
 	Eigen::Vector3d held_x_des_{1,0,0};
@@ -626,6 +630,68 @@ private:
 	// Project the 8 table corners and the bottle origin into the robot frame
 	// via InnerEigenAPI, then push them to the viewer for drawing.
 	void update_viewer_scene_objects();
+
+	// ── compute() sub-functions ──────────────────────────────────────────────
+	// Map desired joint angles to nearest equivalents for continuous joints
+	// (avoids motor unwinding accumulated encoder revolutions).
+	RoboCompKinovaArm::TJointAngles nearest_equiv_target(
+	    const std::array<double, Kinematics::N_ARM_JOINTS>& q,
+	    const std::array<double, Kinematics::N_ARM_JOINTS>& desired) const;
+	// Teleport arm to rest pose via the supervisor (jam recovery, no dynamics).
+	void teleport_to_rest();
+	// Build EFE solver parameters from a desired tool orientation + approach speed.
+	EFEParams build_efe_params(const Eigen::Vector3d& z_des,
+	                            const Eigen::Vector3d& x_des,
+	                            double v_app) const;
+	// Run one coordinated EFE step: build params, solve DLS, send velocities,
+	// return {position error, orientation error}.
+	std::pair<double,double> efe_drive(
+	    const std::array<double, Kinematics::N_ARM_JOINTS>& q,
+	    const Eigen::Vector3d& ee_position,
+	    const Eigen::Vector3d& target,
+	    const Eigen::Vector3d& z_des,
+	    const Eigen::Vector3d& x_des,
+	    double v_app,
+	    std::optional<Eigen::Vector3d> blend_next = std::nullopt,
+	    double orient_gain = 1.0);
+	// Outer lifecycle phase handlers.
+	void run_sending_rest_pose(const std::array<double, Kinematics::N_ARM_JOINTS>& q);
+	void run_homing(const std::array<double, Kinematics::N_ARM_JOINTS>& q);
+	void update_scene();
+	void run_waiting_for_start();
+	void abort_to_rest();
+	// Per-cycle instrumentation helpers (extracted from compute() body).
+	void log_joint_actuation(const std::array<double, Kinematics::N_ARM_JOINTS>& qd_meas);
+	void send_gripper_command();
+	void update_viewer(const std::array<double, Kinematics::N_ARM_JOINTS>& q,
+	                    const std::array<double, Kinematics::N_ARM_JOINTS>& tau,
+	                    const Eigen::Vector3d& ee_position);
+#ifndef Q_MOC_RUN
+	void handle_joint_dump(const std::array<double, Kinematics::N_ARM_JOINTS>& q,
+	                        const Eigen::Vector3d& ee_position,
+	                        const RoboCompKinovaArm::TJoints& js);
+#endif
+	void log_fluidity(const Eigen::Vector3d& ee_position);
+	// ActiveEFE dispatch: approach-only validation or full pick-and-place FSM.
+	void run_approach_only(const std::array<double, Kinematics::N_ARM_JOINTS>& q,
+	                        const Eigen::Vector3d& ee_position,
+	                        const std::array<double, Kinematics::N_ARM_JOINTS>& qd_meas);
+	void run_grasp_fsm(const std::array<double, Kinematics::N_ARM_JOINTS>& q,
+	                    const Eigen::Vector3d& ee_position);
+
+	// When simple_track_ is true, bypass all FSM/approach-only logic and simply
+	// track the bottle with a grasping-ready orientation (tool +Z into bottle,
+	// tool +X vertical). Read from Controller.simple_track.
+	bool simple_track_ = false;
+	void run_simple_track(const std::array<double, Kinematics::N_ARM_JOINTS>& q,
+	                      const Eigen::Vector3d& ee_position);
+
+	// Grasp-FSM helpers (defined in specificworker_grasp.cpp).
+	void miss_or_give_up(const std::string& reason);
+	std::pair<bool,bool> tip_contacts() const;
+	std::pair<float,float> tip_forces() const;
+	float gripper_force() const;
+	bool via_reached(double e_pos);
 
 signals:
 	//void customSignal();

@@ -107,6 +107,16 @@ struct EFEParams
      *  a HARD non-penetration constraint replacing the soft repulsion. */
     double obs_damper_xi = 0.5;
 
+    /** QP path only: relative weight on the ORIENTATION slack δ[3:6] in the NEO task
+     *  (the position slack δ[0:3] is weighted 1.0). The NEO QP minimises δᵀW_δδ with
+     *  W_δ = diag(1,1,1, orient_slack×3), so a value < 1 lets the achieved tool
+     *  rotation slip away from the desired twist CHEAPLY — the solver no longer
+     *  contorts the arm into a near-singular pose to perfect an orientation it can
+     *  barely reach (which made the EE touch the standoff then drift ~13 cm back out).
+     *  Position stays tightly enforced; rotation is targeted but with slack. 1.0 =
+     *  the original equal-weight behaviour. */
+    double orient_slack = 1.0;
+
     /** QP path only: weight on the μ/elbow LINEAR term, g_lin = −w·Σ gain·∇. The free-
      *  space redundancy contribution is (w/λ²)·gain·N·∇, so w = λ² reproduces the old
      *  null-space projection (redundancy strictly off the task), while w > λ² lets μ/elbow

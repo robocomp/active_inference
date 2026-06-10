@@ -11,6 +11,7 @@
 class QLabel;
 class QPushButton;
 
+// A 3D viewer widget for the arm belief state, with an embedded time-series plot for the gripper sensor readings.  The 3D view shows the arm pose and the scene geometry (table, bottle) as the controller sees it, and the plot tracks the gripper forces and contacts over time.  The viewer also has a big "Start" button that arms/disarms the controller, emitting a signal when toggled.
 class ArmBeliefViewer3D : public QWidget
 {
     Q_OBJECT
