@@ -318,31 +318,29 @@ void SpecificWorker::compute()
         ? yolo_processor->detect_segmentation(frame->rgbd.rgb)
         : std::vector<SegDetection>{};
   
-    // TEMPORARY DISABLE: voxel grid processing is paused.
-    // voxel_processor->process_rgbd_frame(frame->rgbd, detections,
-    //                                     frame->room_T_robot, frame->room_T_zed,
-    //                                     frame->graph_object_boxes, voxel_viewer_gl.get());
+    voxel_processor->process_rgbd_frame(frame->rgbd, detections,
+                                         frame->room_T_robot, frame->room_T_zed,
+                                         frame->graph_object_boxes, voxel_viewer_gl.get());
 
-    // TEMPORARY DISABLE: lidar-to-voxel fusion is paused together with voxel processing.
-    // if (include_lidar3d_in_voxels_ && lidar_track_attributor && !frame->lidar_points_room.empty())
-    // {
-    //     std::vector<LidarTrackAttributor::TrackCandidate> track_candidates;
-    //     const auto& current_tracks = voxel_processor->last_track_candidates();
-    //     track_candidates.reserve(current_tracks.size());
-    //     for (const auto& track : current_tracks)
-    //     {
-    //         track_candidates.push_back(LidarTrackAttributor::TrackCandidate{
-    //             .track_id = track.track_id,
-    //             .category = track.category,
-    //             .min = track.min,
-    //             .max = track.max,
-    //             .centroid = track.centroid
-    //         });
-    //     }
-    //
-    //     auto attributed = lidar_track_attributor->attribute_points(frame->lidar_points_room, track_candidates);
-    //     voxel_processor->fuse_lidar_support_points(attributed);
-    // }
+    if (include_lidar3d_in_voxels_ && lidar_track_attributor && !frame->lidar_points_room.empty())
+    {
+        std::vector<LidarTrackAttributor::TrackCandidate> track_candidates;
+        const auto& current_tracks = voxel_processor->last_track_candidates();
+        track_candidates.reserve(current_tracks.size());
+        for (const auto& track : current_tracks)
+        {
+            track_candidates.push_back(LidarTrackAttributor::TrackCandidate{
+                .track_id = track.track_id,
+                .category = track.category,
+                .min = track.min,
+                .max = track.max,
+                .centroid = track.centroid
+            });
+        }
+    
+        auto attributed = lidar_track_attributor->attribute_points(frame->lidar_points_room, track_candidates);
+        voxel_processor->fuse_lidar_support_points(attributed);
+    }
 
     if (yolo_viewer_) 
     {    
@@ -359,8 +357,8 @@ void SpecificWorker::compute()
     // update_table_nodes_from_tracks(frame->graph_object_boxes, frame->lidar_points_room);
 
     // TEMPORARY DISABLE: publishing voxel-grid payload to the voxels node is paused.
-    // ensure_voxels_node_in_dsr();
-    // upload_voxel_grid_to_dsr();
+    ensure_voxels_node_in_dsr();
+    upload_voxel_grid_to_dsr();
 
     fps_counter_.print("[Compute]", 3000);
 }

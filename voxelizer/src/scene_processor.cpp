@@ -275,12 +275,15 @@ std::optional<Mat::RTMat> SceneProcessor::get_room_zed_transform(FPSCounter& com
 
 std::uint64_t SceneProcessor::get_frame_timestamp_ms() const
 {
-    // The media-plane RGB stamp carries the camera alivetime (ms). It is refreshed
-    // by drain_media_plane() inside get_rgbd_frame_from_dsr(), which runs first.
     if (media_rgb_.valid && media_rgb_.stamp != 0)
         return media_rgb_.stamp;
-    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count());
+    else if (media_depth_.valid && media_depth_.stamp != 0)
+        return media_depth_.stamp;
+    else
+    {
+        return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+    }
 }
 
 std::optional<cv::Mat> SceneProcessor::get_rgb_from_dsr() const
