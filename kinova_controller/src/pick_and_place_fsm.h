@@ -1,0 +1,260 @@
+/*
+ *    Copyright (C) 2026 by pbustos
+ *
+ *    This file is part of RoboComp
+ *
+ *    RoboComp is free software: you can redistribute it and/or modify
+ *    it under the terms of the GNU General Public License as published by
+ *    the Free Software Foundation, either version 3 of the License, or
+ *    (at your option) any later version.
+ */
+
+#ifndef PICK_AND_PLACE_FSM_H
+#define PICK_AND_PLACE_FSM_H
+
+#include "specificworker.h"
+#include "kinematics.h"
+#include "efe_gradient.h"
+
+#include <Eigen/Dense>
+#include <array>
+#include <optional>
+#include <random>
+#include <fstream>
+#include <string>
+#include <utility>
+
+class ConfigLoader;
+
+/**
+ * \brief Hierarchical pick-and-place state machine for the Kinova arm.
+ *
+ * Owns the whole manipulation behaviour layer: the EFE/QP controller primitives
+ * (build_efe_params, efe_drive), the grasp-target perception (compute_side_grasp_target,
+ * the capability/reach map), and the grasp→place→retreat state machine, plus the
+ * skill-learning / probe / retreat instrumentation.
+ *
+ * The first phase, Tracking, is the validated QP approach-to-bottle (full-frame camera-up,
+ * deadband hold). For now `step()` runs Tracking and HOLDS there — it does not commit to
+ * Inserting — so the current functionality (reach the bottle pose and track it) is preserved
+ * while the downstream grasp/place phases stay wired for later.
+ *
+ * It is a friend of SpecificWorker and reaches the robot-I/O + scene-perception services
+ * (kinematics, proxies, live bottle/arm/table world poses, viewer) through a reference `w_`.
+ */
+class PickandPlaceFSM
+{
+public:
+    PickandPlaceFSM(SpecificWorker& w, const ConfigLoader& cfg);
+
+    // Run the current phase for this control cycle.
+    void step(const std::array<double, Kinematics::N_ARM_JOINTS>& q,
+              const Eigen::Vector3d& ee_position);
+
+    // Lifecycle hooks called by SpecificWorker's outer state machine.
+    void start();                            // run engaged → begin a fresh pick sequence
+    void reset();                            // run disengaged → reset the FSM
+    SpecificWorker::Phase on_rest_reached(); // homing settled → restart pick or park
+    void maybe_compute_reach_map();          // one-shot capability-map precompute
+
+private:
+    SpecificWorker& w_;
+
+    // ── Grasp FSM phases ─────────────────────────────────────────────────────
+    enum class GraspPhase { Tracking, Inserting, Closing, Lifting,
+                            PlaceMoving, PlaceLowering, PlaceReleasing, PlaceRetreating,
+                            Retracting };
+    GraspPhase grasp_phase_ = GraspPhase::Tracking;
+
+    // ── Grasp-target descriptor ──────────────────────────────────────────────
+    struct SideGraspTarget
+    {
+        Eigen::Vector3d stand_off_pos;
+        Eigen::Vector3d grasp_pos;
+        Eigen::Vector3d z_tool_des;
+        Eigen::Vector3d x_tool_des;
+        Eigen::Vector3d up_axis{0, 0, 1};
+        bool            top_down = false;
+    };
+    struct ReachScore { bool feasible; double manip; double col_clear; double table_clear; };
+
+    // ── Phase logic ──────────────────────────────────────────────────────────
+    void run_tracking(const std::array<double, Kinematics::N_ARM_JOINTS>& q,
+                      const Eigen::Vector3d& ee_position);   // = validated QP approach + hold
+    void run_grasp_phases(const std::array<double, Kinematics::N_ARM_JOINTS>& q,
+                          const Eigen::Vector3d& ee_position); // Inserting..Retreating (dormant)
+
+    // ── Controller primitives ────────────────────────────────────────────────
+    EFEParams build_efe_params(const Eigen::Vector3d& z_des,
+                               const Eigen::Vector3d& x_des,
+                               double v_app) const;
+    std::pair<double,double> efe_drive(
+        const std::array<double, Kinematics::N_ARM_JOINTS>& q,
+        const Eigen::Vector3d& ee_position,
+        const Eigen::Vector3d& target,
+        const Eigen::Vector3d& z_des,
+        const Eigen::Vector3d& x_des,
+        double v_app,
+        std::optional<Eigen::Vector3d> blend_next = std::nullopt,
+        double orient_gain = 1.0);
+
+    // ── Grasp-target perception + capability map ──────────────────────────────
+    std::optional<SideGraspTarget> compute_side_grasp_target();
+    ReachScore predict_reach(const Eigen::Vector3d& pos,
+                             const Eigen::Vector3d& z_des, const Eigen::Vector3d& x_des,
+                             const std::array<double, Kinematics::N_ARM_JOINTS>& seed);
+    void  compute_reach_map();
+    float reach_lookup(double x, double y) const;
+    void  sample_place_spot();
+
+    // ── Skill / probe / retreat instrumentation ──────────────────────────────
+    void begin_rep_probe();
+    void load_confidence();
+    void save_confidence();
+    void log_rep_outcome(bool success, double rise, double xy_gap);
+    void log_retreat_outcome(double tilt_deg, bool tipped);
+    void miss_or_give_up(const std::string& reason);
+    std::pair<bool,bool>  tip_contacts() const;
+    std::pair<float,float> tip_forces() const;
+    float gripper_force() const;
+    bool  via_reached(double e_pos);
+    double bottle_tilt_rad() const;
+    double skill_c() const { return precision_reweighting_ ? confidence_ : 0.0; }
+    double skilled_speed(double base) const { return base * (1.0 + speed_conf_gain_ * skill_c()); }
+
+    // ── Approach (Tracking) constants + state ─────────────────────────────────
+    static constexpr double APPROACH_STANDOFF_M = 0.12;
+    static constexpr double REACH_TOLERANCE_M   = 0.02;
+    static constexpr double BOTTLE_GRASP_HEIGHT_FRAC = 0.5;
+    static constexpr double BOTTLE_TOP_GRASP_FRAC    = 0.88;
+    bool   approach_hold_logged_ = false;
+    bool   approach_respawn_done_ = false;
+    long   ctrl_cycle_ = 0;
+    double grasp_align_tol_rad_ = 0.14;
+
+    // ── Controller config ─────────────────────────────────────────────────────
+    bool   use_qp_ = false;
+    double qp_redundancy_weight_ = 0.0;
+    double force_confidence_ = -1.0;
+    double blend_radius_ = 0.0;
+    double blend_min_dist_ = 1e9;
+    bool   use_preference_field_ = false;
+    double field_prec_pass_ = 1.0, field_prec_stop_ = 30.0, field_prec_ref_ = 6.0, field_overlap_ = 0.06;
+    bool   tactile_recenter_ = false;
+    double recenter_gain_ = 0.02, recenter_sign_ = 1.0;
+    bool   tip_reflex_ = false;
+    double tip_reflex_offset_ = 0.0;
+    bool   bottle_obstacle_ = false;
+    double bottle_obstacle_margin_ = 0.04;
+    double elbow_gain_ = 2.0;
+    bool   elbow_target_set_ = false;
+    Eigen::Vector2d elbow_target_xy_{0.0, 0.0};
+    bool   tip_log_ = false;
+    long   tip_log_cycle_ = 0;
+    std::optional<Eigen::Vector3d> tip_log_prev_pos_;
+    std::array<double, Kinematics::N_ARM_JOINTS> last_q_dot_cmd_{};
+
+    // ── Predictive selection / reach map ─────────────────────────────────────
+    bool   predictive_place_ = false;
+    bool   predictive_grasp_ = false;
+    bool   force_top_down_   = false;
+    bool   precompute_reach_map_ = true;
+    bool   reach_map_done_       = false;
+    std::string reach_map_path_  = "experiments/reach_map.csv";
+    std::vector<float> rm_mu_;
+    double rm_x0_ = -0.40, rm_y0_ = -0.90, rm_res_ = 0.05;
+    int    rm_nx_ = 0, rm_ny_ = 0;
+
+    // ── Round / cycle bookkeeping ────────────────────────────────────────────
+    bool returning_for_cycle_   = false;
+    int  round_cycles_          = 0;
+    int  pick_place_cycles_done_ = 0;
+
+    // ── Grasp-phase tick counters + latched frame ────────────────────────────
+    int grasp_settle_ticks_ = 0, closing_ticks_ = 0, insert_ticks_ = 0, lift_ticks_ = 0;
+    int place_ticks_ = 0, place_settle_ticks_ = 0;
+    double place_bottle_z_prev_ = 1e9;
+    int track_stuck_ticks_ = 0, track_noprog_ticks_ = 0, rep_track_ticks_ = 0, rep_attempts_ = 0;
+    double track_best_dist_ = 1e9;
+    SideGraspTarget latched_grasp_{};
+    Eigen::Vector3d lift_target_{}, place_pos_{}, place_hover_{}, place_z_des_{}, place_x_des_{};
+    Eigen::Vector3d retract_target_{};
+    int    reflex_count_ = 0, retract_ticks_ = 0, grasp_force_ticks_ = 0;
+    double bottle_z_at_lift_start_ = 0.0;
+    double rep_commit_epos_ = 0.0, rep_commit_eang_ = 0.0;
+    std::mt19937 rng_{std::random_device{}()};
+
+    // ── Probe / skill structs + state ────────────────────────────────────────
+    struct GraspPerturbation { double dx_perp = 0, dz_axis = 0, dazi = 0, speed_scale = 1.0; };
+    GraspPerturbation rep_perturb_{};
+    bool   probe_enabled_ = false;
+    double probe_pos_amp_ = 0.015, probe_azi_amp_ = 0.15, probe_speed_amp_ = 0.25;
+    long   probe_index_ = 0;
+    std::ofstream dataset_;   bool dataset_open_ = false;
+
+    bool   precision_reweighting_ = false;
+    double perception_noise_std_ = 0.0;
+    double confidence_ = 0.0, conf_gain_ = 0.15, conf_decay_ = 0.5;
+    int    skilled_sample_period_ = 12;
+    double speed_conf_gain_ = 0.6, surprise_gate_m_ = 0.05;
+    double standoff_collapse_ = 0.0, insert_conf_gain_ = 0.0;
+    std::string confidence_path_;
+    SideGraspTarget belief_grasp_{};
+    bool   belief_valid_ = false;
+    int    cycles_since_obs_ = 0, obs_count_rep_ = 0;
+    double rep_t0_ = 0.0;
+    std::ofstream metrics_;   bool metrics_open_ = false;
+
+    struct RetreatPerturbation { double dspeed = 0.0; double dopen = 0.0; };
+    RetreatPerturbation retreat_perturb_{};
+    double retreat_speed_ = 0.06, gripper_open_conf_ = 0.85;
+    int    release_ticks_ = 8;
+    bool   probe_retreat_ = false;
+    double probe_rspeed_amp_ = 0.50, probe_open_amp_ = 0.10;
+    Eigen::Vector3d retreat_target_pos_{0,0,0}, retreat_z_des_{0,0,1}, retreat_x_des_{1,0,0};
+    Eigen::Vector3d place_world_xy_{0,0,0};
+    std::ofstream retreat_log_;   bool retreat_log_open_ = false;
+
+    // ── Experiment overrides ──────────────────────────────────────────────────
+    bool   respawn_each_rep_ = false;
+    bool   fixed_pick_set_ = false;   Eigen::Vector2d fixed_pick_xy_{0.1, -0.25};
+    bool   fixed_place_set_ = false;  Eigen::Vector2d fixed_place_xy_{0.15, -0.25};
+
+    // ── Grasp / place tuning constants ───────────────────────────────────────
+    static constexpr int    GRASP_SETTLE_TICKS   = 8;
+    static constexpr float  GRASP_FORCE_THRESH   = 3.0f;
+    static constexpr int    GRASP_FORCE_HOLD_TICKS = 3;
+    static constexpr float  INSERT_TOUCH_FORCE   = 0.3f;
+    static constexpr double INSERT_VEL_MS        = 0.05;
+    static constexpr int    CLOSING_TIMEOUT_TICKS = 100;
+    static constexpr int    INSERT_TIMEOUT_TICKS  = 150;
+    static constexpr double TIP_REFLEX_STEP_M     = 0.005;
+    static constexpr double TIP_REFLEX_MAX_M      = 0.05;
+    static constexpr double TIP_REFLEX_BACKOFF_M  = 0.02;
+    static constexpr double LIFT_HEIGHT_M        = 0.12;
+    static constexpr int    LIFT_TIMEOUT_TICKS   = 250;
+    static constexpr double LIFT_CONFIRM_RISE_M  = 0.06;
+    static constexpr double LIFT_CONFIRM_HOLD_M  = 0.12;
+    static constexpr int    TRACK_TIMEOUT_TICKS  = 900;
+    static constexpr int    TRACK_NOPROGRESS_TICKS = 150;
+    static constexpr int    MAX_REP_ATTEMPTS     = 3;
+    static constexpr double FALL_TILT_RAD        = 0.60;
+    static constexpr int    RETRACT_SETTLE_TICKS = 30;
+    static constexpr int    MAX_REFLEXES         = 3;
+    static constexpr double PLACE_X_MIN = -0.35, PLACE_X_MAX = 0.05;
+    static constexpr double PLACE_Y_MIN = -0.85, PLACE_Y_MAX = 0.45;
+    static constexpr double PLACE_MIN_MOVE_M    = 0.20;
+    static constexpr double PLACE_REACH_MAX_M   = 0.85;
+    static constexpr int    PLACE_TIMEOUT_TICKS = 300;
+    static constexpr int    PLACE_SETTLE_TICKS    = 5;
+    static constexpr double PLACE_UPRIGHT_TOL_RAD = 0.15;
+    static constexpr double PLACE_ON_TABLE_M      = 0.04;
+    static constexpr double PLACE_ORIENT_GAIN     = 0.4;
+    static constexpr double PLACE_RETREAT_DIST_M  = 0.14;
+    static constexpr double SPAWN_X_MIN = -0.40, SPAWN_X_MAX = 0.05;
+    static constexpr double SPAWN_Y_MIN = -0.82, SPAWN_Y_MAX = 0.45;
+    static constexpr double SPAWN_REACH_MIN_M = 0.35;
+    static constexpr double SPAWN_REACH_MAX_M = 0.82;
+};
+
+#endif
