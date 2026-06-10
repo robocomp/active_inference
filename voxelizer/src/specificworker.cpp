@@ -35,6 +35,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <sstream>
 #include <unordered_map>
 
 SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, bool startup_check)
@@ -84,7 +85,18 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
 
 SpecificWorker::~SpecificWorker()
 {
+    request_shutdown();
     qInfo() << "Destroying SpecificWorker";
+}
+
+void SpecificWorker::request_shutdown()
+{
+    if (shutting_down_.exchange(true))
+        return;
+
+    save_window_settings();
+    scene_processor.reset();
+    cleanup_owned_nodes();
 }
 
 void SpecificWorker::initialize()
@@ -119,6 +131,9 @@ void SpecificWorker::initialize()
     rc::ConfigLoaderUtils::load_optional(configLoader, "Voxel.viewer_fps", params.VOXEL_VIEWER_FPS);
     rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Voxel.z_lift_m", params.VOXEL_Z_LIFT_M);
     rc::ConfigLoaderUtils::load_optional(configLoader, "Transforms.interpolate_rt", params.TRANSFORMS_INTERPOLATE_RT);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Media.domain_id", params.MEDIA_DOMAIN_ID);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Media.rgb_topic", params.MEDIA_RGB_TOPIC);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Media.depth_topic", params.MEDIA_DEPTH_TOPIC);
     rc::ConfigLoaderUtils::load_optional(configLoader, "Component.Debug.Verbose", verbose_debug_);
     rc::ConfigLoaderUtils::load_optional(configLoader, "Debug.verbose", verbose_debug_);
 
@@ -196,11 +211,12 @@ void SpecificWorker::initialize()
 
         connect(clear_voxels_btn, &QPushButton::clicked, this, [this]
         {
+            // TEMPORARY DISABLE: voxel grid reset/upload is paused.
             if (!voxel_processor || !voxel_viewer_gl)
                 return;
             voxel_processor->clear_state(voxel_viewer_gl.get());
-            ensure_voxels_node_in_dsr();
-            upload_voxel_grid_to_dsr();
+            // ensure_voxels_node_in_dsr();
+            // upload_voxel_grid_to_dsr();
         });
 
         graph_viewers.at(viewer_key)->add_custom_widget_to_dock("Voxel3D", voxel_panel);
@@ -229,6 +245,8 @@ void SpecificWorker::initialize()
     scene_processor = std::make_unique<SceneProcessor>(G);
     scene_processor->configure(inner_eigen_api.get(), voxel_viewer_gl.get(),
                                params.TRANSFORMS_INTERPOLATE_RT, verbose_debug_);
+    scene_processor->init_media_plane(static_cast<std::uint32_t>(params.MEDIA_DOMAIN_ID),
+                                      params.MEDIA_RGB_TOPIC, params.MEDIA_DEPTH_TOPIC);
 
     cleanup_semantic_grid_nodes();
 
@@ -282,7 +300,9 @@ void SpecificWorker::initialize()
     presence_coordinator_.start();
 
     QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
-                     this, &SpecificWorker::cleanup_owned_nodes, Qt::UniqueConnection);
+                     this, &SpecificWorker::request_shutdown, Qt::UniqueConnection);
+
+    restore_window_settings();
 }
 
 void SpecificWorker::compute()
@@ -298,29 +318,31 @@ void SpecificWorker::compute()
         ? yolo_processor->detect_segmentation(frame->rgbd.rgb)
         : std::vector<SegDetection>{};
   
-    voxel_processor->process_rgbd_frame(frame->rgbd, detections,
-                                        frame->room_T_robot, frame->room_T_zed,
-                                        frame->graph_object_boxes, voxel_viewer_gl.get());
+    // TEMPORARY DISABLE: voxel grid processing is paused.
+    // voxel_processor->process_rgbd_frame(frame->rgbd, detections,
+    //                                     frame->room_T_robot, frame->room_T_zed,
+    //                                     frame->graph_object_boxes, voxel_viewer_gl.get());
 
-    if (include_lidar3d_in_voxels_ && lidar_track_attributor && !frame->lidar_points_room.empty())
-    {
-        std::vector<LidarTrackAttributor::TrackCandidate> track_candidates;
-        const auto& current_tracks = voxel_processor->last_track_candidates();
-        track_candidates.reserve(current_tracks.size());
-        for (const auto& track : current_tracks)
-        {
-            track_candidates.push_back(LidarTrackAttributor::TrackCandidate{
-                .track_id = track.track_id,
-                .category = track.category,
-                .min = track.min,
-                .max = track.max,
-                .centroid = track.centroid
-            });
-        }
-
-        auto attributed = lidar_track_attributor->attribute_points(frame->lidar_points_room, track_candidates);
-        voxel_processor->fuse_lidar_support_points(attributed);
-    }
+    // TEMPORARY DISABLE: lidar-to-voxel fusion is paused together with voxel processing.
+    // if (include_lidar3d_in_voxels_ && lidar_track_attributor && !frame->lidar_points_room.empty())
+    // {
+    //     std::vector<LidarTrackAttributor::TrackCandidate> track_candidates;
+    //     const auto& current_tracks = voxel_processor->last_track_candidates();
+    //     track_candidates.reserve(current_tracks.size());
+    //     for (const auto& track : current_tracks)
+    //     {
+    //         track_candidates.push_back(LidarTrackAttributor::TrackCandidate{
+    //             .track_id = track.track_id,
+    //             .category = track.category,
+    //             .min = track.min,
+    //             .max = track.max,
+    //             .centroid = track.centroid
+    //         });
+    //     }
+    //
+    //     auto attributed = lidar_track_attributor->attribute_points(frame->lidar_points_room, track_candidates);
+    //     voxel_processor->fuse_lidar_support_points(attributed);
+    // }
 
     if (yolo_viewer_) 
     {    
@@ -330,10 +352,15 @@ void SpecificWorker::compute()
         yolo_viewer_->update_frame(viewer_rgb, detections);
     }
 
-    update_table_nodes_from_tracks(frame->graph_object_boxes, frame->lidar_points_room);
+    ensure_masks_node_in_dsr();
+    upload_masks_to_dsr(*frame, detections);
 
-    ensure_voxels_node_in_dsr();
-    upload_voxel_grid_to_dsr();
+    // TEMPORARY DISABLE: writing candidate/residual evidence into table nodes is paused.
+    // update_table_nodes_from_tracks(frame->graph_object_boxes, frame->lidar_points_room);
+
+    // TEMPORARY DISABLE: publishing voxel-grid payload to the voxels node is paused.
+    // ensure_voxels_node_in_dsr();
+    // upload_voxel_grid_to_dsr();
 
     fps_counter_.print("[Compute]", 3000);
 }
@@ -411,6 +438,11 @@ std::optional<SpecificWorker::SceneFrame> SpecificWorker::process_scene_frame(FP
 void SpecificWorker::update_table_nodes_from_tracks(const std::vector<GraphObjectBox>& graph_object_boxes,
                                                     std::span<const Eigen::Vector3f> lidar_points_room)
 {
+    // TEMPORARY DISABLE: table node evidence writing is paused.
+    (void)graph_object_boxes;
+    (void)lidar_points_room;
+    return;
+
     const auto& track_cands   = voxel_processor->last_track_candidates();
     const int   sensing_frame = voxel_processor->last_frame_id();
     const int   table_cand_count = static_cast<int>(std::count_if(
@@ -649,8 +681,55 @@ void SpecificWorker::ensure_voxels_node_in_dsr()
         qWarning() << "[Voxels] ERROR: failed to insert 'voxels' node into DSR graph";
 }
 
+void SpecificWorker::ensure_masks_node_in_dsr()
+{
+    if (masks_node_ready_)
+        return;
+
+    if (G->get_nodes_by_type("room").empty() or G->get_nodes_by_type("robot").empty())
+        return;
+
+    if (G->get_node("masks").has_value())
+    {
+        masks_node_ready_ = true;
+        return;
+    }
+
+    auto zed_node = G->get_node("zed");
+    if (!zed_node.has_value())
+    {
+        qWarning() << "[Masks] WARNING: 'zed' node not found in graph — cannot create RT edge";
+        return;
+    }
+
+    auto masks_node = DSR::Node::create<semantic_grid_node_type>("masks");
+    G->add_or_modify_attrib_local<color_att>(masks_node, std::string{"Plum"});
+    G->add_or_modify_attrib_local<level_att>(masks_node, 4);
+    G->add_or_modify_attrib_local<parent_att>(masks_node, zed_node.value().id());
+    G->add_or_modify_attrib_local<pos_x_att>(masks_node, 105.849792f);
+    G->add_or_modify_attrib_local<pos_y_att>(masks_node, 291.904266f);
+
+    if (const auto id = G->insert_node(masks_node); id.has_value())
+    {
+        masks_node_ready_ = true;
+        qInfo() << "[Masks] Created 'masks' node id=" << *id << " (semantic_grid) under room '" << zed_node.value().name().c_str() << "'";
+
+        auto rt_api = G->get_rt_api();
+        rt_api->insert_or_assign_edge_RT(zed_node.value(), *id,
+                                             {0.0f, 0.0f, 0.0f},
+                                             {0.0f, 0.0f, 0.0f});
+        qInfo() << "[Masks] RT edge inserted from 'zed' -> 'masks'";
+        trigger_graph_layout_twopi();
+    }
+    else
+        qWarning() << "[Masks] ERROR: failed to insert 'masks' node into DSR graph";
+}
+
 void SpecificWorker::upload_voxel_grid_to_dsr()
 {
+    // TEMPORARY DISABLE: voxels node publishing is paused.
+    return;
+
     if (!voxels_node_ready_)
         return;
 
@@ -682,10 +761,162 @@ void SpecificWorker::upload_voxel_grid_to_dsr()
 
     G->add_or_modify_attrib_local<candidate_pts_att>(voxels_node, flat_pts);
     G->add_or_modify_attrib_local<last_sensing_frame_att>(voxels_node, sensing_frame);
-    G->update_node(voxels_node);
+    G->update_node(std::move(voxels_node));   // last use: move the voxel-grid blob into the engine (no deep copy under _mutex)
 
     if (verbose_debug_)
         qInfo() << "[Voxels] Uploaded" << n << "voxels (stride-5) to DSR (frame=" << sensing_frame << ")";
+}
+
+void SpecificWorker::upload_masks_to_dsr(const SceneFrame& frame, const std::vector<SegDetection>& detections)
+{
+    if (!masks_node_ready_)
+        return;
+
+    // Keep masks stream progressing even when voxel grid processing is paused.
+    const std::uint64_t sensing_frame = ++masks_publish_seq_;
+    if (sensing_frame == last_masks_uploaded_frame_)
+        return;
+    last_masks_uploaded_frame_ = sensing_frame;
+
+    auto masks_node_opt = G->get_node("masks");
+    if (!masks_node_opt.has_value())
+        return;
+    auto& masks_node = masks_node_opt.value();
+
+    const auto& rgbd = frame.rgbd;
+    if (rgbd.depth.empty() || rgbd.width <= 0 || rgbd.height <= 0 || rgbd.focal_x <= 0.f || rgbd.focal_y <= 0.f)
+    {
+        G->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_frame_id", static_cast<int>(sensing_frame));
+        G->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_count", 0);
+        G->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_labels", std::string{});
+        G->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_label_ids", std::vector<float>{});
+        G->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_confidences", std::vector<float>{});
+        G->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_support_offsets", std::vector<float>{0.0f});
+        G->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_support_points", std::vector<float>{});
+        G->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_centroids_xyz", std::vector<float>{});
+        G->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_bbox_min_xyz", std::vector<float>{});
+        G->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_bbox_max_xyz", std::vector<float>{});
+        G->update_node(std::move(masks_node));
+        return;
+    }
+
+    const Eigen::Matrix3f room_rotation = frame.room_T_zed.linear().cast<float>();
+    const Eigen::Vector3f room_translation = frame.room_T_zed.translation().cast<float>();
+    const float z_lift_m = params.VOXEL_Z_LIFT_M;
+    const float fx = rgbd.focal_x;
+    const float fy = rgbd.focal_y;
+    const float cx = static_cast<float>(rgbd.width) * 0.5f;
+    const float cy = static_cast<float>(rgbd.height) * 0.5f;
+
+    std::vector<float> label_ids;
+    std::vector<float> confidences;
+    std::vector<float> support_offsets;
+    std::vector<float> support_points;
+    std::vector<float> centroids_xyz;
+    std::vector<float> bbox_min_xyz;
+    std::vector<float> bbox_max_xyz;
+    std::ostringstream labels_joined;
+    std::size_t total_support_points = 0;
+    support_offsets.push_back(0.0f);
+
+    const std::size_t mask_stride = std::max<std::size_t>(1, params.VOXEL_DECIMATION_FACTOR);
+
+    for (std::size_t det_idx = 0; det_idx < detections.size(); ++det_idx)
+    {
+        const auto& det = detections[det_idx];
+        if (det.mask.empty())
+            continue;
+
+        cv::Mat mask_bin;
+        cv::threshold(det.mask, mask_bin, 127, 255, cv::THRESH_BINARY);
+        const int min_x = std::max(0, det.bbox.x);
+        const int min_y = std::max(0, det.bbox.y);
+        const int max_x = std::min(rgbd.width, det.bbox.x + det.bbox.width);
+        const int max_y = std::min(rgbd.height, det.bbox.y + det.bbox.height);
+
+        std::vector<Eigen::Vector3f> mask_points_room;
+        mask_points_room.reserve(static_cast<std::size_t>(det.bbox.area() / std::max<int>(1, static_cast<int>(mask_stride * mask_stride))));
+
+        Eigen::Vector3f min_pt = Eigen::Vector3f::Constant(std::numeric_limits<float>::max());
+        Eigen::Vector3f max_pt = Eigen::Vector3f::Constant(std::numeric_limits<float>::lowest());
+        Eigen::Vector3f sum_pt = Eigen::Vector3f::Zero();
+
+        for (int row = min_y; row < max_y; row += static_cast<int>(mask_stride))
+        {
+            for (int col = min_x; col < max_x; col += static_cast<int>(mask_stride))
+            {
+                if (mask_bin.at<std::uint8_t>(row, col) == 0)
+                    continue;
+
+                const std::size_t depth_idx = static_cast<std::size_t>(row * rgbd.width + col);
+                if (depth_idx >= rgbd.depth.size())
+                    continue;
+
+                const float depth = rgbd.depth[depth_idx];
+                if (!std::isfinite(depth) || depth <= 0.0f)
+                    continue;
+
+                const float px = (static_cast<float>(col) - cx) * depth / fx;
+                const float py = depth;
+                const float pz = (cy - static_cast<float>(row)) * depth / fy;
+                Eigen::Vector3f point_room = room_rotation * Eigen::Vector3f(px, py, pz) + room_translation;
+                point_room.z() += z_lift_m;
+
+                mask_points_room.push_back(point_room);
+                sum_pt += point_room;
+                min_pt = min_pt.cwiseMin(point_room);
+                max_pt = max_pt.cwiseMax(point_room);
+            }
+        }
+
+        if (mask_points_room.empty())
+            continue;
+
+        if (!labels_joined.str().empty())
+            labels_joined << '|';
+        labels_joined << det.label;
+
+        label_ids.push_back(static_cast<float>(det.class_id));
+        confidences.push_back(det.confidence);
+        support_offsets.push_back(static_cast<float>(support_offsets.back() + static_cast<float>(mask_points_room.size())));
+
+        const Eigen::Vector3f centroid = sum_pt / static_cast<float>(mask_points_room.size());
+        centroids_xyz.push_back(centroid.x());
+        centroids_xyz.push_back(centroid.y());
+        centroids_xyz.push_back(centroid.z());
+
+        bbox_min_xyz.push_back(min_pt.x());
+        bbox_min_xyz.push_back(min_pt.y());
+        bbox_min_xyz.push_back(min_pt.z());
+        bbox_max_xyz.push_back(max_pt.x());
+        bbox_max_xyz.push_back(max_pt.y());
+        bbox_max_xyz.push_back(max_pt.z());
+
+        for (const auto& point : mask_points_room)
+        {
+            support_points.push_back(point.x());
+            support_points.push_back(point.y());
+            support_points.push_back(point.z());
+        }
+
+        total_support_points += mask_points_room.size();
+    }
+
+    const int mask_count = static_cast<int>(label_ids.size());
+    G->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_frame_id", static_cast<int>(sensing_frame));
+    G->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_count", mask_count);
+    G->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_labels", labels_joined.str());
+    G->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_label_ids", label_ids);
+    G->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_confidences", confidences);
+    G->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_support_offsets", support_offsets);
+    G->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_support_points", support_points);
+    G->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_centroids_xyz", centroids_xyz);
+    G->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_bbox_min_xyz", bbox_min_xyz);
+    G->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_bbox_max_xyz", bbox_max_xyz);
+    G->update_node(std::move(masks_node));
+
+    if (verbose_debug_)
+        qInfo() << "[Masks] Uploaded" << mask_count << "masks and" << total_support_points << "support points to DSR (frame=" << sensing_frame << ")";
 }
 
 void SpecificWorker::emergency()

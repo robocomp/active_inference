@@ -23,6 +23,14 @@ graph = true
 # 2d = true
 # 3d = true
 
+# Zero-copy RGBD media plane (consumer). DEDICATED DDS domain, isolated from the
+# DSR Agent.domain = 0 so media discovery churn never perturbs cortex/DSR resync.
+# Must MATCH the robot_concept producer.
+[Media]
+domain_id   = 7
+rgb_topic   = "rc/zed/rgb"
+depth_topic = "rc/zed/depth"
+
 [Period]
 Compute = 100
 Emergency = 500

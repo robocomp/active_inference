@@ -6,6 +6,9 @@ LIST(APPEND SOURCES
   ../src/specificworker_presence.cpp
   ../../common/agent_presence_monitor/agent_presence_monitor.cpp
   ../../common/agent_presence_coordinator/agent_presence_coordinator.cpp
+  ../../common/media_transport/media_transport.cpp
+  ../../common/media_transport/generated/idl/image_framePubSubTypes.cxx
+  ../../common/media_transport/generated/idl/image_frameTypeObjectSupport.cxx
   ../src/scene_processor.cpp
   ../src/lidar_track_attributor.cpp
   ../src/voxel_processor.cpp
@@ -24,7 +27,11 @@ LIST(APPEND HEADERS
   ../src/graph_object_box.h
   ../../common/agent_presence_monitor/agent_presence_monitor.h
   ../../common/agent_presence_coordinator/agent_presence_coordinator.h
+  ../../common/media_transport/media_transport.h
 )
+
+# Media transport plane: zero-copy DDS for RGBD pixels (carried OUT of the DSR graph).
+include_directories(${CMAKE_CURRENT_LIST_DIR}/../../common/media_transport)
 
 if(TARGET Qt6::OpenGL AND TARGET Qt6::OpenGLWidgets)
   LIST(APPEND SOURCES ../src/voxel_opengl_viewer.cpp)

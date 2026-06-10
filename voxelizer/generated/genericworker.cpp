@@ -17,6 +17,8 @@
  *    along with RoboComp.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "genericworker.h"
+#include <QLoggingCategory>
+Q_LOGGING_CATEGORY(logUi, "voxelizer.ui")
 /**
 * \brief Default constructor
 */
@@ -82,13 +84,6 @@ GenericWorker::GenericWorker(const ConfigLoader& configLoader, TuplePrx tprx) : 
 */
 GenericWorker::~GenericWorker()
 {
-    for (auto& [name, graphPtr] : Graphs) {
-        if (!graphPtr) continue;
-        auto grid_nodes = graphPtr->get_nodes_by_type("grid");
-        for (auto grid : grid_nodes) {
-            graphPtr->delete_node(grid);
-        }
-    }
 }
 void GenericWorker::killYourSelf()
 {
@@ -187,6 +182,83 @@ std::shared_ptr<DSR::DSRViewer> GenericWorker::setupViewer(std::shared_ptr<DSR::
 	else
 		return nullptr;
 };
+
+void GenericWorker::trigger_graph_layout_twopi()
+{
+    auto graph_viewer_owner = find_graph_viewer("");
+    if (!graph_viewer_owner)
+        return;
+
+    QWidget* graph_widget = graph_viewer_owner->get_widget(DSR::DSRViewer::view::graph);
+    auto* graph_viewer = qobject_cast<DSR::GraphViewer*>(graph_widget);
+    if (!graph_viewer)
+        return;
+
+    // Run now and once queued, so layout also happens after pending node/edge
+    // update signals are processed by the viewer.
+    graph_viewer->compute_layout("twopi");
+    QMetaObject::invokeMethod(graph_viewer,
+                              [graph_viewer]() { graph_viewer->compute_layout("twopi"); },
+                              Qt::QueuedConnection);
+}
+
+
+QString GenericWorker::settings_group_name(const std::string& graph_name, int agent_id)
+{
+    const QString graph_suffix = graph_name.empty() ? QStringLiteral("default")
+                                                    : QString::fromStdString(graph_name);
+    return QStringLiteral("windows/%1/%2").arg(agent_id).arg(graph_suffix);
+}
+
+std::shared_ptr<DSR::DSRViewer> GenericWorker::find_graph_viewer(const std::string& name) const
+{
+    const auto it = graph_viewers.find(name);
+    if (it == graph_viewers.end())
+        return nullptr;
+
+    return it->second;
+}
+
+void GenericWorker::restore_window_settings()
+{
+    QSettings settings(QStringLiteral("RoboComp"), QString::fromStdString(agent_name));
+
+    for (const auto &[name, window] : windows)
+    {
+        if (window == nullptr)
+            continue;
+
+        settings.beginGroup(settings_group_name(name, agent_id));
+
+        const QByteArray geometry = settings.value(QStringLiteral("geometry")).toByteArray();
+        if (!geometry.isEmpty())
+            window->restoreGeometry(geometry);
+
+        const QByteArray state = settings.value(QStringLiteral("state")).toByteArray();
+        if (!state.isEmpty())
+            window->restoreState(state, kWindowStateVersion);
+
+        settings.endGroup();
+    }
+}
+
+void GenericWorker::save_window_settings() const
+{
+    QSettings settings(QStringLiteral("RoboComp"), QString::fromStdString(agent_name));
+
+    for (const auto &[name, window] : windows)
+    {
+        if (window == nullptr)
+            continue;
+
+        settings.beginGroup(settings_group_name(name, agent_id));
+        settings.setValue(QStringLiteral("geometry"), window->saveGeometry());
+        settings.setValue(QStringLiteral("state"), window->saveState(kWindowStateVersion));
+        settings.endGroup();
+    }
+
+    settings.sync();
+}
 
 void GenericWorker::initialize(){
     for (const auto& [name, Graph] : Graphs) {

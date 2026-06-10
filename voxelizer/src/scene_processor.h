@@ -7,6 +7,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -22,6 +23,8 @@ namespace rc
     class VoxelOpenGLViewer;
 }
 
+namespace rc::media { class MediaSubscriber; }
+
 class SceneProcessor
 {
 public:
@@ -35,11 +38,18 @@ public:
     };
 
     explicit SceneProcessor(const std::shared_ptr<DSR::DSRGraph>& graph);
+    ~SceneProcessor();
 
     void configure(DSR::InnerEigenAPI* inner_eigen_api,
                    rc::VoxelOpenGLViewer* voxel_viewer,
                    bool transforms_interpolate_rt,
                    bool verbose_debug);
+
+    // Media plane (zero-copy DDS): RGBD pixels arrive here instead of via the DSR
+    // graph. Camera intrinsics (focal) are still read from the static 'zed' node.
+    bool init_media_plane(std::uint32_t domain_id,
+                          const std::string& rgb_topic,
+                          const std::string& depth_topic);
 
     std::pair<std::string, std::string> get_room_robot_names_for_compute();
     bool ensure_room_and_robot_ready(FPSCounter& compute_fps,
@@ -114,4 +124,29 @@ private:
     mutable std::mutex node_names_mutex_;
     std::string room_node_name_;
     std::string robot_node_name_;
+
+    // --- Media plane RGBD source (replaces cam_rgb/cam_depth DSR blobs) ---
+    void drain_media_plane() const;  // polls subscribers, refreshes the caches
+    std::unique_ptr<rc::media::MediaSubscriber> media_rgb_sub_;
+    std::unique_ptr<rc::media::MediaSubscriber> media_depth_sub_;
+    struct MediaRgbCache
+    {
+        bool          valid = false;
+        std::uint64_t frame_id = 0;
+        std::uint64_t stamp = 0;   // camera alivetime (ms), opaque timestamp
+        int           width = 0;
+        int           height = 0;
+        cv::Mat       bgr;         // CV_8UC3
+    };
+    struct MediaDepthCache
+    {
+        bool          valid = false;
+        std::uint64_t frame_id = 0;
+        std::uint64_t stamp = 0;
+        int           width = 0;
+        int           height = 0;
+        std::vector<float> depth;  // metric, row*width+col
+    };
+    mutable MediaRgbCache   media_rgb_;
+    mutable MediaDepthCache media_depth_;
 };

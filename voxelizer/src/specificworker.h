@@ -53,6 +53,7 @@ Q_OBJECT
 public:
     SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, bool startup_check);
     ~SpecificWorker();
+    bool is_shutting_down() const noexcept { return shutting_down_.load(); }
 
 public slots:
     void initialize();
@@ -76,6 +77,7 @@ public slots:
     void degraded_loop();
 
     void cleanup_owned_nodes();
+    void request_shutdown();
     void on_optional_peer_lost(const std::string &name, std::uint32_t id);
     void on_optional_peer_ready(const std::string &name, std::uint32_t id);
 
@@ -108,6 +110,11 @@ private:
         std::size_t VOXEL_DECIMATION_FACTOR          = 2;
         float       VOXEL_Z_LIFT_M                   = 0.0f;
         bool        TRANSFORMS_INTERPOLATE_RT        = true;
+
+        // Media plane (zero-copy DDS) for RGBD pixels carried OUT of the graph.
+        int         MEDIA_DOMAIN_ID   = 0;
+        std::string MEDIA_RGB_TOPIC   = "rc/zed/rgb";
+        std::string MEDIA_DEPTH_TOPIC = "rc/zed/depth";
     } params;
 
     struct SceneFrame
@@ -123,7 +130,9 @@ private:
     void update_table_nodes_from_tracks(const std::vector<GraphObjectBox>& graph_object_boxes,
                                         std::span<const Eigen::Vector3f> lidar_points_room);
     void ensure_voxels_node_in_dsr();
+    void ensure_masks_node_in_dsr();
     void upload_voxel_grid_to_dsr();
+    void upload_masks_to_dsr(const SceneFrame& frame, const std::vector<SegDetection>& detections);
     void trigger_graph_layout_twopi();
     void cleanup_semantic_grid_nodes();
 
@@ -134,7 +143,11 @@ private:
     bool startup_check_flag  = false;
     bool verbose_debug_      = false;
     bool voxels_node_ready_  = false;
+    bool masks_node_ready_   = false;
+    std::atomic<bool> shutting_down_{false};
     bool include_lidar3d_in_voxels_ = true;
+    std::uint64_t last_masks_uploaded_frame_ = 0;
+    std::uint64_t masks_publish_seq_ = 0;
 
     std::shared_ptr<DSR::InnerEigenAPI> inner_eigen_api;
 

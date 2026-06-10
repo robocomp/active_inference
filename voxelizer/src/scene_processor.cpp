@@ -3,6 +3,8 @@
 #include "rgbd_data.h"
 #include "voxel_opengl_viewer.h"
 
+#include "../../common/media_transport/media_transport.h"
+
 #include <dsr/api/dsr_camera_api.h>
 
 #include <Eigen/Geometry>
@@ -11,12 +13,107 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <print>
 #include <variant>
 
 SceneProcessor::SceneProcessor(const std::shared_ptr<DSR::DSRGraph>& graph)
     : graph_(graph)
 {
+}
+
+SceneProcessor::~SceneProcessor() = default;
+
+bool SceneProcessor::init_media_plane(std::uint32_t domain_id,
+                                      const std::string& rgb_topic,
+                                      const std::string& depth_topic)
+{
+    media_rgb_sub_   = std::make_unique<rc::media::MediaSubscriber>();
+    media_depth_sub_ = std::make_unique<rc::media::MediaSubscriber>();
+
+    rc::media::SubscriberConfig rgb_cfg;
+    rgb_cfg.domain_id     = domain_id;
+    rgb_cfg.topic_name    = rgb_topic;
+    rgb_cfg.history_depth = 8;
+    rc::media::SubscriberConfig depth_cfg = rgb_cfg;
+    depth_cfg.topic_name = depth_topic;
+
+    const bool rgb_ok   = media_rgb_sub_->init(rgb_cfg);
+    const bool depth_ok = media_depth_sub_->init(depth_cfg);
+    if (!rgb_ok || !depth_ok)
+    {
+        std::print(stderr, "[voxelizer] media plane subscriber init FAILED (rgb={}, depth={})\n", rgb_ok, depth_ok);
+        return false;
+    }
+    std::print("[voxelizer] media plane ready domain={} rgb='{}' depth='{}' data_sharing={}\n",
+               domain_id, rgb_topic, depth_topic,
+               media_rgb_sub_->data_sharing_active() && media_depth_sub_->data_sharing_active());
+    return true;
+}
+
+void SceneProcessor::drain_media_plane() const
+{
+    if (media_rgb_sub_)
+    {
+        media_rgb_sub_->poll([this](const rc::media::ImageFrame& f, std::int64_t)
+        {
+            const int w = static_cast<int>(f.width());
+            const int h = static_cast<int>(f.height());
+            if (w <= 0 || h <= 0)
+                return;
+            const std::size_t npix = static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
+            if (f.format() == rc::media::FORMAT_BGR8 || f.format() == rc::media::FORMAT_RGB8)
+            {
+                if (f.size() < npix * 3)
+                    return;
+                cv::Mat view(h, w, CV_8UC3, const_cast<std::uint8_t*>(f.data().data()));
+                if (f.format() == rc::media::FORMAT_RGB8)
+                    cv::cvtColor(view, media_rgb_.bgr, cv::COLOR_RGB2BGR);
+                else
+                    media_rgb_.bgr = view.clone();
+                media_rgb_.width    = w;
+                media_rgb_.height   = h;
+                media_rgb_.stamp    = f.stamp_ns();
+                media_rgb_.frame_id = f.frame_id();
+                media_rgb_.valid    = true;
+            }
+        });
+    }
+
+    if (media_depth_sub_)
+    {
+        media_depth_sub_->poll([this](const rc::media::ImageFrame& f, std::int64_t)
+        {
+            const int w = static_cast<int>(f.width());
+            const int h = static_cast<int>(f.height());
+            if (w <= 0 || h <= 0)
+                return;
+            const std::size_t npix = static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
+            if (f.format() == rc::media::FORMAT_DEPTH_F32)
+            {
+                if (f.size() < npix * sizeof(float))
+                    return;
+                const float* p = reinterpret_cast<const float*>(f.data().data());
+                media_depth_.depth.assign(p, p + npix);
+            }
+            else if (f.format() == rc::media::FORMAT_Z16)
+            {
+                if (f.size() < npix * sizeof(std::uint16_t))
+                    return;
+                const std::uint16_t* p = reinterpret_cast<const std::uint16_t*>(f.data().data());
+                media_depth_.depth.resize(npix);
+                for (std::size_t i = 0; i < npix; ++i)
+                    media_depth_.depth[i] = static_cast<float>(p[i]) * 0.001f;  // mm -> m fallback
+            }
+            else
+                return;
+            media_depth_.width    = w;
+            media_depth_.height   = h;
+            media_depth_.stamp    = f.stamp_ns();
+            media_depth_.frame_id = f.frame_id();
+            media_depth_.valid    = true;
+        });
+    }
 }
 
 void SceneProcessor::configure(DSR::InnerEigenAPI* inner_eigen_api,
@@ -178,14 +275,10 @@ std::optional<Mat::RTMat> SceneProcessor::get_room_zed_transform(FPSCounter& com
 
 std::uint64_t SceneProcessor::get_frame_timestamp_ms() const
 {
-    if (graph_)
-    {
-        if (auto zed_node = graph_->get_node("zed"); zed_node.has_value())
-        {
-            if (auto ts = graph_->get_attrib_by_name<cam_rgb_alivetime_att>(zed_node.value()); ts.has_value())
-                return ts.value();
-        }
-    }
+    // The media-plane RGB stamp carries the camera alivetime (ms). It is refreshed
+    // by drain_media_plane() inside get_rgbd_frame_from_dsr(), which runs first.
+    if (media_rgb_.valid && media_rgb_.stamp != 0)
+        return media_rgb_.stamp;
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count());
 }
@@ -244,39 +337,21 @@ std::optional<SceneProcessor::LidarData> SceneProcessor::get_lidar3D_from_dsr() 
 
 std::optional<RGBDData> SceneProcessor::get_rgbd_frame_from_dsr() const
 {
-    if (!graph_)
-        return std::nullopt;
-    auto zed_node = graph_->get_node("zed");
-    if (!zed_node.has_value())
-        return std::nullopt;
+    // Pixels now arrive over the zero-copy media plane (not the DSR graph). Pull
+    // the latest RGB and depth frames; camera intrinsics (focal) remain in the
+    // static 'zed' node descriptor.
+    drain_media_plane();
 
-    auto camera_api = graph_->get_camera_api(zed_node.value());
-    if (!camera_api)
+    if (!media_rgb_.valid || media_rgb_.bgr.empty())
         return std::nullopt;
-
-    // --- RGB ---
-    auto rgb_opt = get_rgb_from_dsr();
-    if (!rgb_opt.has_value() || rgb_opt->empty())
+    if (!media_depth_.valid || media_depth_.depth.empty())
         return std::nullopt;
 
-    // --- Depth image from DSR (XYZ will be computed only for masked pixels) ---
-    auto depth_opt = camera_api->get_depth_image();
-    if (!depth_opt.has_value() || depth_opt->empty())
-        return std::nullopt;
-
-    const int rgb_w = rgb_opt->cols;
-    const int rgb_h = rgb_opt->rows;
-
-    auto depth_w_opt = graph_->get_attrib_by_name<cam_depth_width_att>(zed_node.value());
-    auto depth_h_opt = graph_->get_attrib_by_name<cam_depth_height_att>(zed_node.value());
-    auto focal_x_opt = graph_->get_attrib_by_name<cam_depth_focalx_att>(zed_node.value());
-    auto focal_y_opt = graph_->get_attrib_by_name<cam_depth_focaly_att>(zed_node.value());
-    if (!depth_w_opt.has_value() || !depth_h_opt.has_value() || !focal_x_opt.has_value() || !focal_y_opt.has_value())
-        return std::nullopt;
-
-    const int depth_w = depth_w_opt.value();
-    const int depth_h = depth_h_opt.value();
-    if (depth_w <= 0 || depth_h <= 0)
+    const int rgb_w = media_rgb_.width;
+    const int rgb_h = media_rgb_.height;
+    const int depth_w = media_depth_.width;
+    const int depth_h = media_depth_.height;
+    if (rgb_w <= 0 || rgb_h <= 0 || depth_w <= 0 || depth_h <= 0)
         return std::nullopt;
 
     // Voxel pipeline assumes one xyz point per RGB pixel.
@@ -287,18 +362,34 @@ std::optional<RGBDData> SceneProcessor::get_rgbd_frame_from_dsr() const
         return std::nullopt;
     }
 
-    const auto& depth = depth_opt.value();
     const std::size_t depth_size = static_cast<std::size_t>(depth_w) * static_cast<std::size_t>(depth_h);
-    if (depth.size() < depth_size)
+    if (media_depth_.depth.size() < depth_size)
+        return std::nullopt;
+
+    // Camera intrinsics from the static 'zed' node (not per-frame).
+    float focal_x = 0.f;
+    float focal_y = 0.f;
+    if (graph_)
+    {
+        if (auto zed_node = graph_->get_node("zed"); zed_node.has_value())
+        {
+            if (auto fx = graph_->get_attrib_by_name<cam_depth_focalx_att>(zed_node.value()); fx.has_value())
+                focal_x = static_cast<float>(fx.value());
+            if (auto fy = graph_->get_attrib_by_name<cam_depth_focaly_att>(zed_node.value()); fy.has_value())
+                focal_y = static_cast<float>(fy.value());
+        }
+    }
+    if (focal_x <= 0.f || focal_y <= 0.f)
         return std::nullopt;
 
     RGBDData data;
-    data.rgb     = std::move(*rgb_opt);
+    data.rgb     = media_rgb_.bgr.clone();
     data.width   = rgb_w;
     data.height  = rgb_h;
-    data.focal_x = focal_x_opt.value();
-    data.focal_y = focal_y_opt.value();
-    data.depth.assign(depth.begin(), depth.begin() + static_cast<std::ptrdiff_t>(depth_size));
+    data.focal_x = focal_x;
+    data.focal_y = focal_y;
+    data.depth.assign(media_depth_.depth.begin(),
+                      media_depth_.depth.begin() + static_cast<std::ptrdiff_t>(depth_size));
     return data;
 }
 
@@ -311,16 +402,13 @@ void SceneProcessor::check_input_stream_startup_status()
 
     if (graph_)
     {
-        if (auto zed = graph_->get_node("zed"); zed.has_value())
-        {
-            const bool has_rgb = graph_->get_attrib_by_name<cam_rgb_att>(zed.value()).has_value();
-            if (!has_rgb)
-                std::print(stderr, "[voxelizer] DSR 'zed' node exists but cam_rgb_att is empty. Waiting for robot_concept to populate it...\n");
-        }
-        else
-        {
+        if (!media_rgb_.valid)
+            std::print(stderr, "[voxelizer] No RGB frame on the media plane yet. Waiting for robot_concept producer...\n");
+        if (!media_depth_.valid)
+            std::print(stderr, "[voxelizer] No depth frame on the media plane yet. Waiting for robot_concept producer...\n");
+
+        if (auto zed = graph_->get_node("zed"); !zed.has_value())
             std::print(stderr, "[voxelizer] DSR 'zed' node not found. Waiting...\n");
-        }
 
         if (auto lidar = graph_->get_node("lidar3D"); lidar.has_value())
         {
