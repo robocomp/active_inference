@@ -5,8 +5,7 @@ find_package(pinocchio REQUIRED)
 # Sources set
 LIST(APPEND SOURCES
   ../src/specificworker.cpp
-  ../src/specificworker_approach.cpp
-  ../src/specificworker_grasp.cpp
+  ../src/pick_and_place_fsm.cpp
   ../src/kinematics.cpp
   ../src/efe_gradient.cpp
   ../src/arm_belief_viewer_3d.cpp
@@ -15,6 +14,7 @@ LIST(APPEND SOURCES
 # Headers set
 LIST(APPEND HEADERS
   ../src/specificworker.h
+  ../src/pick_and_place_fsm.h
   ../src/kinematics.h
   ../src/efe_gradient.h
   ../src/arm_belief_viewer_3d.h
