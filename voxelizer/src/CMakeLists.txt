@@ -98,5 +98,5 @@ find_package(OpenCV REQUIRED)
 LIST(APPEND LIBS ${LIBS} ${OpenCV_LIBS})
 
 # no-char8_t to avoid a problem with ICE Connection lib.
-add_definitions(-O3 -march=native -fmax-errors=1 -fno-char8_t)
+add_definitions(-g -O3 -march=native -fmax-errors=1 -fno-char8_t)
 

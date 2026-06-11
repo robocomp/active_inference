@@ -4,6 +4,7 @@
 #include <ConfigLoader/ConfigLoader.h>
 
 #include <QMetaObject>
+#include <QElapsedTimer>
 #include <QTimer>
 
 #include <cstdint>
@@ -83,10 +84,14 @@ class AgentPresenceMonitor
         void delete_subtree(const std::string &root_name);
         void delete_peer_owned_nodes(const std::string &peer_clean_name);
         void check_node_requires();
+        void maybe_log_debug_snapshot(std::uint64_t now_ns, const char *reason);
+        void log_required_peer_detail(std::uint32_t required_id, std::uint64_t now_ns, const char *reason) const;
 
         [[nodiscard]] PeerState derive_state(const PeerSnapshot &peer, std::uint64_t now_ns) const;
         void log_peer_transition(const PeerSnapshot &before, const PeerSnapshot &after) const;
         void log_required_status_change(bool previous_ready, const std::vector<std::uint32_t> &previous_missing) const;
+        [[nodiscard]] std::string peer_debug_string(const PeerSnapshot &peer, std::uint64_t now_ns) const;
+        [[nodiscard]] std::uint64_t heartbeat_age_ms(const PeerSnapshot &peer, std::uint64_t now_ns) const;
 
         [[nodiscard]] static std::uint64_t current_time_ns();
         [[nodiscard]] static const char *to_string(PeerState state);
@@ -102,6 +107,8 @@ class AgentPresenceMonitor
         int rejoin_grace_ms;
         int agent_info_period_ms;
         int stale_grace_ms;
+        bool debug_logging_;
+        int debug_snapshot_period_ms;
 
         bool desired_local_ready = false;
         bool started = false;
@@ -129,6 +136,10 @@ class AgentPresenceMonitor
         QTimer timer;
         std::unique_ptr<DSR::AgentInfoAPI> agent_info_api;
         std::unordered_map<std::uint32_t, std::uint64_t> required_stale_since_;
+        std::uint64_t last_debug_snapshot_ns_ = 0;
+        std::uint64_t last_tick_ns_ = 0;
+        std::uint64_t last_timing_log_ns_ = 0;
+        bool suppress_peer_loss_ = false;
 };
 
 #endif

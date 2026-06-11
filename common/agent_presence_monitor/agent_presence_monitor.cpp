@@ -10,6 +10,7 @@
 #include <sstream>
 #include <unordered_set>
 #include <utility>
+#include <QElapsedTimer>
 #include <QMetaType>
 
 AgentPresenceMonitor::AgentPresenceMonitor(const ConfigLoader &config_loader,
@@ -23,6 +24,8 @@ AgentPresenceMonitor::AgentPresenceMonitor(const ConfigLoader &config_loader,
     , rejoin_grace_ms(config_loader.exists("Presence.rejoin_grace_ms") ? config_loader.get<int>("Presence.rejoin_grace_ms") : 1500)
     , agent_info_period_ms(config_loader.exists("Presence.agent_info_period_ms") ? config_loader.get<int>("Presence.agent_info_period_ms") : 1000)
     , stale_grace_ms(config_loader.exists("Presence.stale_grace_ms") ? config_loader.get<int>("Presence.stale_grace_ms") : 120000)
+    , debug_logging_(config_loader.exists("Presence.debug") ? config_loader.get<bool>("Presence.debug") : false)
+    , debug_snapshot_period_ms(config_loader.exists("Presence.debug_snapshot_period_ms") ? config_loader.get<int>("Presence.debug_snapshot_period_ms") : 5000)
     , required_agent_ids(config_loader.exists("Presence.required_agent_ids")
                              ? sorted_unique(config_loader.get<std::vector<int>>("Presence.required_agent_ids"))
                              : std::vector<std::uint32_t>{})
@@ -136,7 +139,10 @@ void AgentPresenceMonitor::start()
               << " required=" << req_desc.str()
               << " optional=[" << join_ids(optional_agent_ids) << "]"
               << " timeout_ms=" << heartbeat_timeout_ms
-              << " rejoin_grace_ms=" << rejoin_grace_ms << std::endl;
+              << " rejoin_grace_ms=" << rejoin_grace_ms;
+    if (debug_logging_)
+        std::cout << " debug_snapshot_period_ms=" << debug_snapshot_period_ms;
+    std::cout << std::endl;
 }
 
 void AgentPresenceMonitor::stop()
@@ -358,7 +364,25 @@ void AgentPresenceMonitor::handle_deleted_node(std::uint64_t graph_node_id)
 
 void AgentPresenceMonitor::refresh_timeouts()
 {
+    QElapsedTimer loop_timer;
+    loop_timer.start();
     const auto now_ns = current_time_ns();
+
+    // Starvation guard: heartbeat ages are measured against the LOCAL clock but are
+    // only meaningful while this monitor loop is actually running. If our own Qt event
+    // loop was blocked far longer than the monitor period (heavy MPPI/torch compute,
+    // GC, GUI freeze, or system-wide CPU saturation), every peer's last-processed
+    // heartbeat ages simultaneously and all peers would be declared Stale at once — a
+    // false positive that here cascaded into deletion of peer-owned graph subtrees.
+    // Detect the stall and refuse to count this frozen interval against any peer.
+    const auto expected_gap_ns = static_cast<std::uint64_t>(monitor_period_ms) * 1'000'000ULL;
+    const auto stall_threshold_ns = std::max<std::uint64_t>(
+        expected_gap_ns * 4,
+        static_cast<std::uint64_t>(heartbeat_timeout_ms) * 1'000'000ULL);
+    const auto tick_gap_ms = last_tick_ns_ == 0 ? 0 : (now_ns - last_tick_ns_) / 1'000'000ULL;
+    const bool loop_stalled = last_tick_ns_ != 0 && now_ns > last_tick_ns_ + stall_threshold_ns;
+    last_tick_ns_ = now_ns;
+
     for (auto &[agent_id, peer] : peers)
     {
         auto before = peer;
@@ -372,7 +396,31 @@ void AgentPresenceMonitor::refresh_timeouts()
             log_peer_transition(before, peer);
     }
 
+    if (loop_stalled)
+    {
+        std::cout << "[Presence] monitor loop stall detected (gap=" << tick_gap_ms
+                  << " ms >> period=" << monitor_period_ms
+                  << " ms) — suppressing false peer loss and resetting grace timers" << std::endl;
+        required_stale_since_.clear();
+    }
+
+    suppress_peer_loss_ = loop_stalled;
     recompute_required_status();
+    suppress_peer_loss_ = false;
+    maybe_log_debug_snapshot(now_ns, "timer");
+
+    // const auto loop_ms = loop_timer.elapsed();
+    // if (last_timing_log_ns_ == 0 || now_ns - last_timing_log_ns_ >= 500ULL * 1000ULL * 1000ULL || loop_ms > 5)
+    // {
+    //     last_timing_log_ns_ = now_ns;
+    //     std::cout << "[Timing][presence]"
+    //               << " loop_ms=" << loop_ms
+    //               << " tick_gap_ms=" << tick_gap_ms
+    //               << " stalled=" << (loop_stalled ? "true" : "false")
+    //               << " required_ready=" << (required_ready ? "true" : "false")
+    //               << " missing_required=" << missing_required_ids.size()
+    //               << std::endl;
+    // }
 }
 
 void AgentPresenceMonitor::update_local_ready_flag()
@@ -419,23 +467,23 @@ void AgentPresenceMonitor::recompute_required_status()
             continue;
         }
 
-        // Peer is Stale or Booting: apply a grace window before declaring lost.
-        // Stale = DSR node alive but heartbeat silent — almost always a transient CPU/network
-        // delay. Only raise required_lost here as a last resort (hard crash without DSR cleanup).
-        if (stale_grace_ms > 0)
+        // Peer is Stale or Booting: its DSR presence node is STILL in the graph, so the
+        // agent has NOT departed. Under this system's CPU load, heartbeat silence — even
+        // for minutes — is a recoverable freeze, not a crash, so heartbeat age alone is NOT
+        // reliable evidence of death. We log the condition and wait for the heartbeat to
+        // resume; we do NOT declare the peer lost and do NOT delete its owned nodes here.
+        // Destructive cleanup is reserved for a genuine departure (PeerState::Missing — the
+        // node was removed from the graph, e.g. by a clean shutdown — handled above).
+        auto [sit, inserted] = required_stale_since_.try_emplace(required_id, now_ns);
+        (void) sit;
+        if (inserted)
         {
-            auto [sit, inserted] = required_stale_since_.try_emplace(required_id, now_ns);
-            const auto elapsed_ms = static_cast<int>((now_ns - sit->second) / 1'000'000ULL);
-            if (inserted)
-                std::cout << "[Presence] required peer " << required_id
-                          << " entered stale grace (limit=" << stale_grace_ms << " ms)" << std::endl;
-            if (elapsed_ms < stale_grace_ms)
-                continue;  // still within grace — do not count as missing yet
             std::cout << "[Presence] required peer " << required_id
-                      << " stale grace EXPIRED after " << elapsed_ms
-                      << " ms — declaring lost" << std::endl;
+                      << " is stale (heartbeat silent, DSR node still present) — waiting for "
+                         "recovery, NOT declaring lost" << std::endl;
+            log_required_peer_detail(required_id, now_ns, "stale-waiting");
         }
-        missing_required_ids.push_back(required_id);
+        // Node-present peers are never counted as missing — fall through without pushing.
     }
 
     for (const auto required_id : missing_required_ids)
@@ -477,6 +525,12 @@ void AgentPresenceMonitor::recompute_required_status()
         if (now_ready == was_ready)
             continue;
 
+        // Optional peers have no stale grace, so a single starved tick would delete their
+        // nodes outright. During a detected loop stall, skip the not-ready transition and
+        // leave optional_last_ready unchanged so it re-evaluates on the next healthy tick.
+        if (!now_ready && suppress_peer_loss_)
+            continue;
+
         optional_last_ready[opt_id] = now_ready;
 
         std::string opt_name = "id:" + std::to_string(opt_id);
@@ -491,9 +545,17 @@ void AgentPresenceMonitor::recompute_required_status()
 
         if (!now_ready)
         {
-            delete_peer_owned_nodes(opt_name);
+            // Only delete an optional peer's owned nodes on a genuine departure (its DSR
+            // node was actually removed from the graph). A Stale-but-present peer is just
+            // frozen and will recover — deleting a live peer's nodes here is exactly what
+            // corrupted the graph before, so we never do it on heartbeat silence alone.
+            const bool departed = it == peers.end() || it->second.state == PeerState::Missing;
+            if (departed)
+                delete_peer_owned_nodes(opt_name);
             std::cout << "[Presence] optional peer " << opt_id
-                      << " (" << opt_name << ") lost" << std::endl;
+                      << " (" << opt_name << ") "
+                      << (departed ? "lost (node removed)" : "stale (frozen, node present)")
+                      << std::endl;
             if (on_optional_agent_lost)
                 on_optional_agent_lost(opt_name, opt_id);
         }
@@ -644,6 +706,50 @@ void AgentPresenceMonitor::check_node_requires()
     recompute_required_status();
 }
 
+void AgentPresenceMonitor::maybe_log_debug_snapshot(std::uint64_t now_ns, const char *reason)
+{
+    if (!debug_logging_ || debug_snapshot_period_ms <= 0)
+        return;
+
+    const auto period_ns = static_cast<std::uint64_t>(debug_snapshot_period_ms) * 1'000'000ULL;
+    if (last_debug_snapshot_ns_ != 0 && now_ns < last_debug_snapshot_ns_ + period_ns)
+        return;
+
+    last_debug_snapshot_ns_ = now_ns;
+    std::cout << "[Presence][debug] snapshot reason=" << reason
+              << " peers=" << peers.size()
+              << " required_ready=" << (required_ready ? "true" : "false")
+              << " missing=[" << join_ids(missing_required_ids) << "]"
+              << " node_requires_ok=" << (node_requires_ok_ ? "true" : "false")
+              << std::endl;
+    for (const auto &[agent_id, peer] : peers)
+    {
+        if (agent_id == local_agent_id)
+            continue;
+        std::cout << "[Presence][debug]   " << peer_debug_string(peer, now_ns) << std::endl;
+    }
+}
+
+void AgentPresenceMonitor::log_required_peer_detail(std::uint32_t required_id, std::uint64_t now_ns, const char *reason) const
+{
+    const auto it = peers.find(required_id);
+    if (it == peers.end())
+    {
+        std::cout << "[Presence][debug] required detail reason=" << reason
+                  << " id=" << required_id << " unseen" << std::endl;
+        return;
+    }
+
+    std::cout << "[Presence][debug] required detail reason=" << reason << " "
+              << peer_debug_string(it->second, now_ns);
+    if (const auto stale_it = required_stale_since_.find(required_id); stale_it != required_stale_since_.end())
+    {
+        const auto stale_ms = (now_ns - stale_it->second) / 1'000'000ULL;
+        std::cout << " stale_grace_elapsed_ms=" << stale_ms;
+    }
+    std::cout << std::endl;
+}
+
 AgentPresenceMonitor::PeerState AgentPresenceMonitor::derive_state(const PeerSnapshot &peer, std::uint64_t now_ns) const
 {
     if (peer.graph_node_id == 0)
@@ -660,17 +766,48 @@ AgentPresenceMonitor::PeerState AgentPresenceMonitor::derive_state(const PeerSna
     return PeerState::Ready;
 }
 
+std::string AgentPresenceMonitor::peer_debug_string(const PeerSnapshot &peer, std::uint64_t now_ns) const
+{
+    std::ostringstream stream;
+    stream << "peer=" << peer.agent_id
+           << " name=\"" << peer.agent_name << "\""
+           << " state=" << to_string(peer.state)
+           << " node=" << peer.graph_node_id
+           << " hb_age_ms=" << heartbeat_age_ms(peer, now_ns)
+           << " alive_s=" << peer.alive_time
+           << " active=" << (peer.active_flag ? "true" : "false")
+           << " has_active=" << (peer.has_active_flag ? "true" : "false")
+           << " restart_grace=" << (peer.restart_grace_active ? "true" : "false")
+           << " creation_ts=" << peer.creation_timestamp
+           << " heartbeat_ts=" << peer.heartbeat_timestamp;
+    return stream.str();
+}
+
+std::uint64_t AgentPresenceMonitor::heartbeat_age_ms(const PeerSnapshot &peer, std::uint64_t now_ns) const
+{
+    if (peer.heartbeat_timestamp == 0 || now_ns <= peer.heartbeat_timestamp)
+        return 0;
+    return (now_ns - peer.heartbeat_timestamp) / 1'000'000ULL;
+}
+
 void AgentPresenceMonitor::log_peer_transition(const PeerSnapshot &before, const PeerSnapshot &after) const
 {
     if (before.state == after.state && before.creation_timestamp == after.creation_timestamp)
         return;
 
+    const auto now_ns = current_time_ns();
     std::cout << "[Presence] peer " << after.agent_id
               << " (" << after.agent_name << ") "
               << to_string(before.state) << " -> " << to_string(after.state);
     if (before.creation_timestamp != 0 && before.creation_timestamp != after.creation_timestamp)
         std::cout << " [restart detected]";
     std::cout << std::endl;
+
+    if (debug_logging_ || after.state == PeerState::Stale || after.state == PeerState::Missing)
+    {
+        std::cout << "[Presence][debug] transition before: " << peer_debug_string(before, now_ns) << std::endl;
+        std::cout << "[Presence][debug] transition after:  " << peer_debug_string(after, now_ns) << std::endl;
+    }
 }
 
 void AgentPresenceMonitor::log_required_status_change(bool previous_ready, const std::vector<std::uint32_t> &previous_missing) const
@@ -682,6 +819,13 @@ void AgentPresenceMonitor::log_required_status_change(bool previous_ready, const
         std::cout << "[Presence] all required agents are ready" << std::endl;
     else
         std::cout << "[Presence] required agents not ready: [" << join_ids(missing_required_ids) << "]" << std::endl;
+
+    if (!required_ready)
+    {
+        const auto now_ns = current_time_ns();
+        for (const auto required_id : missing_required_ids)
+            log_required_peer_detail(required_id, now_ns, "required-status-change");
+    }
 }
 
 std::uint64_t AgentPresenceMonitor::current_time_ns()

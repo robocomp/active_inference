@@ -510,7 +510,10 @@ void SpecificWorker::ensure_tracks_node_in_dsr()
                                              {0.0f, 0.0f, 0.0f},
                                              {0.0f, 0.0f, 0.0f});
         qInfo() << "[Tracks] RT edge inserted from 'zed' -> 'tracks'";
-        trigger_graph_layout_twopi();
+        // NOTE: deliberately NOT calling trigger_graph_layout_twopi() here. A full
+        // twopi relayout reshuffles every graph item and, when it overlaps with
+        // another agent (table_concept) inserting/removing nodes, the graph viewer
+        // can paint a freed QGraphicsItem → SIGSEGV in QRegion/flush. Cosmetic only.
     }
     else
         qWarning() << "[Tracks] ERROR: failed to insert 'tracks' node into DSR graph";

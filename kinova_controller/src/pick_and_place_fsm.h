@@ -131,8 +131,17 @@ private:
     // Per-segment skill. c_seg(k) = Π_m[k]/(Π_m[k]+Π_s) (force_confidence pins all).
     // skill_c() is the CURRENT segment's c (cur_seg_ is set at the top of each phase),
     // so every existing knob that reads skill_c()/skilled_speed() is now segment-local.
+    // Controller.global_confidence: A/B baseline. true ⇒ all segments share a single Π_m
+    // (index 0), so c is one global scalar driven by every outcome (a miss anywhere deflates
+    // the whole skill); false ⇒ the per-segment partition. Per-deposit evidence is scaled by
+    // 1/N_SEG in global mode so the per-episode accumulation rate matches the partition.
+    bool   global_confidence_ = false;
     double c_seg(Segment s) const
-    { return force_confidence_ >= 0.0 ? force_confidence_ : pi_m_[s] / (pi_m_[s] + pi_s_); }
+    {
+        if (force_confidence_ >= 0.0) return force_confidence_;
+        const int k = global_confidence_ ? 0 : static_cast<int>(s);
+        return pi_m_[k] / (pi_m_[k] + pi_s_);
+    }
     double skill_c() const { return precision_reweighting_ ? c_seg(cur_seg_) : 0.0; }
     double skilled_speed(double base) const { return base * (1.0 + speed_conf_gain_ * skill_c()); }
     double c_overall() const;                       // mean c over segments (for logs)
@@ -229,6 +238,7 @@ private:
     bool   belief_valid_ = false;
     int    cycles_since_obs_ = 0, obs_count_rep_ = 0;
     double rep_t0_ = 0.0;
+    double rep_pick_s_ = 0.0;   // time from rep start to grasp-confirm (the c-scheduled portion)
     std::ofstream metrics_;   bool metrics_open_ = false;
 
     struct RetreatPerturbation { double dspeed = 0.0; double dopen = 0.0; };

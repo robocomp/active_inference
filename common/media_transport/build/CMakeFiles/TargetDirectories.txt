@@ -1,0 +1,3 @@
+/home/pbustos/robocomp/components/active_inference/common/media_transport/build/CMakeFiles/media_bench.dir
+/home/pbustos/robocomp/components/active_inference/common/media_transport/build/CMakeFiles/edit_cache.dir
+/home/pbustos/robocomp/components/active_inference/common/media_transport/build/CMakeFiles/rebuild_cache.dir

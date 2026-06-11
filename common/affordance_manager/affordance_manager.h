@@ -29,6 +29,12 @@ public:
         float yaw_rad = 0.f;
         float epistemic_gain = 0.f;
         bool epistemic_pending = false;
+        std::uint64_t parent_node_id = 0;
+        std::string parent_node_name;
+        std::string parent_node_type;
+        float shape_width_m = 0.f;
+        float shape_depth_m = 0.f;
+        bool has_shape = false;
     };
 
     explicit AffordanceManager(std::string managed_node_name = {});
@@ -46,11 +52,13 @@ public:
                         float gain,
                         const std::function<void()> &on_node_inserted = {},
                         const std::function<void()> &on_edge_inserted = {});
+    bool release_execution_claim(const std::shared_ptr<DSR::DSRGraph> &graph);
 
     std::optional<Target> select_target(const std::shared_ptr<DSR::DSRGraph> &graph);
     void mark_reached(const std::shared_ptr<DSR::DSRGraph> &graph);
     void clear_current();
     bool has_current() const;
+    std::string current_name() const;
 
 private:
     enum class State
@@ -102,6 +110,7 @@ private:
     State state_ = State::Idle;
     std::optional<bool> last_observed_active_;
     std::optional<bool> last_observed_pending_;
+    std::string selected_target_debug_report_;
 };
 
 } // namespace rc

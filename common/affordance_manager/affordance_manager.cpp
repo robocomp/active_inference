@@ -4,14 +4,69 @@
 
 #include <QDebug>
 
+#include <cstdio>
 #include <cmath>
+#include <print>
+#include <sstream>
 #include <utility>
 
 namespace
 {
 constexpr auto kAffordanceEdgeTypeStr = std::string_view("has_intention");
+constexpr auto kTableAffordanceName = std::string_view("afford_table");
+constexpr auto kRoomAffordanceName = std::string_view("afford_room");
 [[maybe_unused]] inline const bool kAffordanceEdgeTypeRegistered = edge_types::register_type(kAffordanceEdgeTypeStr);
 using affordance_edge_type = EdgeType<kAffordanceEdgeTypeStr>;
+
+bool finite_target_values(float tx, float ty, float yaw, float gain)
+{
+    return std::isfinite(tx) && std::isfinite(ty) && std::isfinite(yaw) && std::isfinite(gain);
+}
+
+bool affordance_name_matches(std::string_view name, std::string_view preferred_name)
+{
+    return name == preferred_name || name.find(preferred_name) != std::string_view::npos;
+}
+
+int affordance_priority(std::string_view name)
+{
+    if (affordance_name_matches(name, kTableAffordanceName))
+        return 0;
+    if (affordance_name_matches(name, kRoomAffordanceName))
+        return 1;
+    return 2;
+}
+
+bool better_affordance_candidate(const rc::AffordanceManager::Target &candidate,
+                                 const rc::AffordanceManager::Target &current)
+{
+    const int candidate_priority = affordance_priority(candidate.node_name);
+    const int current_priority = affordance_priority(current.node_name);
+    if (candidate_priority != current_priority)
+        return candidate_priority < current_priority;
+
+    if (candidate.epistemic_gain != current.epistemic_gain)
+        return candidate.epistemic_gain > current.epistemic_gain;
+
+    return candidate.node_id < current.node_id;
+}
+
+std::string make_affordance_debug_report(const rc::AffordanceManager::Target &target)
+{
+    std::ostringstream out;
+    out << "Affordance debug: selected='" << target.node_name << "' id=" << target.node_id
+        << " pose=(" << target.room_pos.x() << "," << target.room_pos.y() << ")"
+        << " yaw=" << target.yaw_rad
+        << " gain=" << target.epistemic_gain
+        << " pending=" << (target.epistemic_pending ? 1 : 0)
+        << " parent='" << target.parent_node_name << "'"
+        << " parent_type='" << target.parent_node_type << "'";
+    if (target.has_shape)
+        out << " shape=(" << target.shape_width_m << "," << target.shape_depth_m << ")";
+    else
+        out << " shape=none";
+    return out.str();
+}
 }
 
 namespace rc
@@ -109,6 +164,7 @@ void AffordanceManager::reset()
 
     current_affordance_id_ = 0;
     current_affordance_name_.clear();
+    selected_target_debug_report_.clear();
     reset_observation();
     transition_to(State::Idle, "reset called");
 }
@@ -135,6 +191,9 @@ std::optional<AffordanceManager::Target> AffordanceManager::read_target(const st
     if (!tx.has_value() || !ty.has_value() || !yaw.has_value() || !gain.has_value() || !pending.has_value() || !active.has_value())
         return std::nullopt;
 
+    if (!finite_target_values(tx.value(), ty.value(), yaw.value(), gain.value()))
+        return std::nullopt;
+
     Target target;
     target.node_id = node.id();
     target.node_name = node.name();
@@ -142,6 +201,26 @@ std::optional<AffordanceManager::Target> AffordanceManager::read_target(const st
     target.yaw_rad = yaw.value();
     target.epistemic_gain = gain.value();
     target.epistemic_pending = pending.value();
+    const auto parent_id = graph->get_attrib_by_name<parent_att>(node);
+    if (parent_id.has_value())
+    {
+        target.parent_node_id = parent_id.value();
+        if (const auto parent_node = graph->get_node(target.parent_node_id); parent_node.has_value())
+        {
+            target.parent_node_name = parent_node->name();
+            target.parent_node_type = parent_node->type();
+            const auto width_attr = graph->get_attrib_by_name<width_m_att>(parent_node.value());
+            const auto depth_attr = graph->get_attrib_by_name<depth_m_att>(parent_node.value());
+            if (width_attr.has_value() && depth_attr.has_value()
+                && std::isfinite(width_attr.value()) && std::isfinite(depth_attr.value())
+                && width_attr.value() > 0.f && depth_attr.value() > 0.f)
+            {
+                target.shape_width_m = width_attr.value();
+                target.shape_depth_m = depth_attr.value();
+                target.has_shape = true;
+            }
+        }
+    }
     return target;
 }
 
@@ -342,6 +421,36 @@ bool AffordanceManager::publish_target(const std::shared_ptr<DSR::DSRGraph> &gra
     return true;
 }
 
+bool AffordanceManager::release_execution_claim(const std::shared_ptr<DSR::DSRGraph> &graph)
+{
+    if (!graph)
+        return false;
+
+    const auto node_opt = get_managed_node(graph);
+    if (!node_opt.has_value())
+        return false;
+
+    auto node = node_opt.value();
+    const bool active = graph->get_attrib_by_name<active_att>(node).value_or(false);
+    const bool pending = graph->get_attrib_by_name<epistemic_pending_att>(node).value_or(true);
+    if (decode_protocol_state(active, pending) != ProtocolState::Executing)
+        return false;
+
+    graph->add_or_modify_attrib_local<active_att>(node, false);
+    graph->update_node(node);
+
+    waiting_completion_ = false;
+    completion_detected_ = false;
+    last_managed_active_ = false;
+    last_managed_pending_ = true;
+    current_affordance_id_ = 0;
+    current_affordance_name_.clear();
+    selected_target_debug_report_.clear();
+    reset_observation();
+    transition_to(State::Idle, "execution claim released", node.id(), node.name());
+    return true;
+}
+
 std::optional<AffordanceManager::Target> AffordanceManager::select_target(const std::shared_ptr<DSR::DSRGraph> &graph)
 {
     transition_to(State::Searching, "select_target called", current_affordance_id_, current_affordance_name_);
@@ -366,6 +475,12 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
             const auto pending = graph->get_attrib_by_name<epistemic_pending_att>(node).value_or(true);
             if (target.has_value() && decode_protocol_state(active, pending) == ProtocolState::Executing)
             {
+                if (const auto report = make_affordance_debug_report(*target); report != selected_target_debug_report_)
+                {
+                    selected_target_debug_report_ = report;
+                    std::print("{}\n", selected_target_debug_report_);
+                    std::fflush(stdout);
+                }
                 log_observation(target->node_id,
                                 target->node_name,
                                 active,
@@ -397,13 +512,19 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
         if (decode_protocol_state(active, pending) != ProtocolState::Executing)
             continue;
 
-        if (!resumed_target.has_value() || target->epistemic_gain > resumed_target->epistemic_gain)
+        if (!resumed_target.has_value() || better_affordance_candidate(*target, *resumed_target))
             resumed_target = target;
     }
     if (resumed_target.has_value())
     {
         current_affordance_id_ = resumed_target->node_id;
         current_affordance_name_ = resumed_target->node_name;
+        if (const auto report = make_affordance_debug_report(*resumed_target); report != selected_target_debug_report_)
+        {
+            selected_target_debug_report_ = report;
+            std::print("{}\n", selected_target_debug_report_);
+            std::fflush(stdout);
+        }
         reset_observation();
         log_observation(resumed_target->node_id,
                         resumed_target->node_name,
@@ -429,12 +550,18 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
         if (decode_protocol_state(active, pending) != ProtocolState::Offered)
             continue;
 
-        if (!best_target.has_value() || target->epistemic_gain > best_target->epistemic_gain)
+        if (!best_target.has_value() || better_affordance_candidate(*target, *best_target))
             best_target = target;
     }
 
     if (!best_target.has_value())
     {
+        if (selected_target_debug_report_ != "Affordance debug: selected=none")
+        {
+            selected_target_debug_report_ = "Affordance debug: selected=none";
+            std::print("{}\n", selected_target_debug_report_);
+            std::fflush(stdout);
+        }
         transition_to(State::Idle, "no eligible affordance found");
         return std::nullopt;
     }
@@ -457,6 +584,12 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
 
         current_affordance_id_ = best_target->node_id;
         current_affordance_name_ = best_target->node_name;
+        if (const auto report = make_affordance_debug_report(*best_target); report != selected_target_debug_report_)
+        {
+            selected_target_debug_report_ = report;
+            std::print("{}\n", selected_target_debug_report_);
+            std::fflush(stdout);
+        }
         reset_observation();
         log_observation(best_target->node_id,
                         best_target->node_name,
@@ -499,6 +632,7 @@ void AffordanceManager::clear_current()
 {
     current_affordance_id_ = 0;
     current_affordance_name_.clear();
+    selected_target_debug_report_.clear();
     reset_observation();
     transition_to(State::Idle, "clear_current called");
 }
@@ -506,6 +640,11 @@ void AffordanceManager::clear_current()
 bool AffordanceManager::has_current() const
 {
     return current_affordance_id_ != 0;
+}
+
+std::string AffordanceManager::current_name() const
+{
+    return current_affordance_name_;
 }
 
 } // namespace rc
