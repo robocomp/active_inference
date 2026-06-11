@@ -66,6 +66,15 @@ private:
                             Retracting };
     GraspPhase grasp_phase_ = GraspPhase::Tracking;
 
+    // ── Motion SEGMENTS (partition of c) ──────────────────────────────────────
+    // Skill is partitioned per motion segment, not one global scalar: each segment
+    // learns its OWN precision c_k = Π_m[k]/(Π_m[k]+Π_s) from its OWN outcome, so the
+    // safe legs (transport) cruise while the risky legs (set-down) stay careful — the
+    // decoupling a single c can't express. Commit events (close/release) stay hard.
+    enum Segment { SEG_APPROACH, SEG_INSERT, SEG_LIFT, SEG_PLACE, SEG_RETREAT, N_SEG };
+    static Segment seg_of(GraspPhase p);
+    Segment cur_seg_ = SEG_APPROACH;   // segment driving skill_c() this cycle
+
     // ── Grasp-target descriptor ──────────────────────────────────────────────
     struct SideGraspTarget
     {
@@ -119,8 +128,16 @@ private:
     float gripper_force() const;
     bool  via_reached(double e_pos);
     double bottle_tilt_rad() const;
-    double skill_c() const { return precision_reweighting_ ? confidence_ : 0.0; }
+    // Per-segment skill. c_seg(k) = Π_m[k]/(Π_m[k]+Π_s) (force_confidence pins all).
+    // skill_c() is the CURRENT segment's c (cur_seg_ is set at the top of each phase),
+    // so every existing knob that reads skill_c()/skilled_speed() is now segment-local.
+    double c_seg(Segment s) const
+    { return force_confidence_ >= 0.0 ? force_confidence_ : pi_m_[s] / (pi_m_[s] + pi_s_); }
+    double skill_c() const { return precision_reweighting_ ? c_seg(cur_seg_) : 0.0; }
     double skilled_speed(double base) const { return base * (1.0 + speed_conf_gain_ * skill_c()); }
+    double c_overall() const;                       // mean c over segments (for logs)
+    void   deposit(Segment s, double quality);      // confirmed outcome → Π_m[s] += unit·quality
+    void   deflate(Segment s);                      // surprise → Π_m[s] *= conf_decay
 
     // ── Approach (Tracking) constants + state ─────────────────────────────────
     static constexpr double APPROACH_STANDOFF_M = 0.12;
@@ -194,22 +211,20 @@ private:
 
     bool   precision_reweighting_ = false;
     double perception_noise_std_ = 0.0;
-    double confidence_ = 0.0, conf_gain_ = 0.15, conf_decay_ = 0.5;
+    double conf_gain_ = 0.15, conf_decay_ = 0.5;
     int    skilled_sample_period_ = 12;
     double speed_conf_gain_ = 0.6, surprise_gate_m_ = 0.05;
     double standoff_collapse_ = 0.0, insert_conf_gain_ = 0.0;
     std::string confidence_path_;
-    // ── Precision learning from doing (the "natural fine-tuning") ─────────────
-    // confidence_ = c = Π_m/(Π_m+Π_s) is NOT a scripted ramp: Π_m is MODEL precision
-    // ACCUMULATED from confirmed outcomes. Each rep whose result matches the model's
-    // prediction deposits evidence (Π_m += unit·quality); a surprise (miss) deflates it
-    // (Π_m *= conf_decay). So skill rises purely as a byproduct of acting, and self-
-    // calibrates — it only speeds up as fast as the outcomes keep confirming. Π_s is the
-    // fixed sensory precision; with it, c saturates ~n/(n+Π_s) over n clean reps.
-    double pi_m_ = 0.0;            // accumulated model precision (evidence)
-    double pi_s_ = 2.0;            // Controller.sensory_precision (fixed)
-    double evidence_unit_ = 1.0;   // Controller.evidence_unit: Π_m added by one clean rep
-    void   update_confidence_from_outcome(bool success, double pe_norm, double rise_frac);
+    // ── Per-segment precision learning from doing ────────────────────────────
+    // c_k = Π_m[k]/(Π_m[k]+Π_s) is NOT a scripted ramp: each segment's Π_m ACCUMULATES
+    // from ITS confirmed outcomes (Π_m[k] += unit·quality) and DEFLATES on its surprise
+    // (×conf_decay). So each leg gets skilled purely by doing and self-calibrates, and
+    // the partition decouples speed from reliability — safe legs (transport) cruise while
+    // risky legs (set-down) stay careful. Π_s fixed ⇒ c_k saturates ~n/(n+Π_s). Persisted.
+    double pi_m_[N_SEG] = {0, 0, 0, 0, 0};   // per-segment accumulated model precision
+    double pi_s_ = 2.0;                       // Controller.sensory_precision (fixed)
+    double evidence_unit_ = 1.0;              // Controller.evidence_unit: Π_m added per clean leg
     SideGraspTarget belief_grasp_{};
     bool   belief_valid_ = false;
     int    cycles_since_obs_ = 0, obs_count_rep_ = 0;

@@ -159,7 +159,7 @@ PickandPlaceFSM::PickandPlaceFSM(SpecificWorker& w, const ConfigLoader& cfg) : w
             metrics_.open(mpath, std::ios::out | std::ios::trunc);
             if (metrics_.is_open()) {
                 metrics_open_ = true;
-                metrics_ << "rep,success,confidence,cycle_time_s,observations\n";
+                metrics_ << "rep,success,c_approach,c_insert,c_lift,c_place,c_retreat,cycle_time_s\n";
                 std::print("[skill] per-rep metrics → {}\n", mpath);
             }
         }
@@ -170,7 +170,7 @@ PickandPlaceFSM::PickandPlaceFSM(SpecificWorker& w, const ConfigLoader& cfg) : w
 void PickandPlaceFSM::step(const std::array<double, Kinematics::N_ARM_JOINTS>& q,
                            const Eigen::Vector3d& ee_position)
 {
-    if (force_confidence_ >= 0.0) confidence_ = force_confidence_;
+    cur_seg_ = seg_of(grasp_phase_);   // skill_c() now reflects the active segment
     if (grasp_phase_ == GraspPhase::Tracking) run_tracking(q, ee_position);
     else                                      run_grasp_phases(q, ee_position);
 }
@@ -691,44 +691,70 @@ void PickandPlaceFSM::compute_reach_map()
                ncells, nreach, 100.0 * nreach / std::max(1, ncells), seeds.size(), reach_map_path_, dt);
 }
 
+PickandPlaceFSM::Segment PickandPlaceFSM::seg_of(GraspPhase p)
+{
+    switch (p)
+    {
+        case GraspPhase::Tracking:
+        case GraspPhase::Retracting:      return SEG_APPROACH;
+        case GraspPhase::Inserting:
+        case GraspPhase::Closing:         return SEG_INSERT;
+        case GraspPhase::Lifting:         return SEG_LIFT;
+        case GraspPhase::PlaceMoving:
+        case GraspPhase::PlaceLowering:
+        case GraspPhase::PlaceReleasing:  return SEG_PLACE;
+        case GraspPhase::PlaceRetreating: return SEG_RETREAT;
+    }
+    return SEG_APPROACH;
+}
+
+double PickandPlaceFSM::c_overall() const
+{
+    double s = 0.0;
+    for (int k = 0; k < N_SEG; ++k) s += c_seg(static_cast<Segment>(k));
+    return s / N_SEG;
+}
+
 void PickandPlaceFSM::load_confidence()
 {
-    // Persist the accumulated MODEL precision Π_m (the learned quantity); c is derived.
+    // Persist the per-segment model precisions Π_m[k] (the learned quantities); c is derived.
     if (not confidence_path_.empty())
     {
         std::ifstream f(confidence_path_);
-        double v;
-        if (f >> v and v >= 0.0) pi_m_ = v;
+        for (int k = 0; k < N_SEG; ++k) { double v; if (f >> v and v >= 0.0) pi_m_[k] = v; }
     }
-    confidence_ = pi_m_ / (pi_m_ + pi_s_);
 }
 
 void PickandPlaceFSM::save_confidence()
 {
     if (confidence_path_.empty()) return;
     std::ofstream f(confidence_path_, std::ios::out | std::ios::trunc);
-    if (f) f << pi_m_ << '\n';
+    if (not f) return;
+    for (int k = 0; k < N_SEG; ++k) f << pi_m_[k] << (k + 1 < N_SEG ? ' ' : '\n');
 }
 
-// The natural fine-tuning: model precision accumulates from confirmed outcomes, and
-// confidence c = Π_m/(Π_m+Π_s) is its normalised form. No reward, no schedule — c rises
-// because the act of doing keeps confirming the model, and deflates on surprise.
-void PickandPlaceFSM::update_confidence_from_outcome(bool success, double pe_norm, double rise_frac)
+// The natural fine-tuning, now PER SEGMENT: a confirmed leg deposits evidence into ITS
+// own Π_m (quality ∈ (0,1] = how cleanly the outcome matched the model's prediction); a
+// surprise on that leg deflates ITS Π_m. No reward, no schedule — each leg's skill rises
+// by doing and self-calibrates independently, so the partition lets the safe legs cruise
+// while the risky legs stay careful.
+void PickandPlaceFSM::deposit(Segment s, double quality)
 {
     if (not precision_reweighting_) return;
-    if (success)
-    {
-        // Evidence quality ∈ (0,1]: 1 when the outcome matched the model's prediction
-        // (clean standoff convergence + full lift), → 0 as it barely confirmed.
-        const double quality = std::exp(-0.5 * pe_norm * pe_norm) * std::clamp(rise_frac, 0.0, 1.0);
-        pi_m_ += evidence_unit_ * quality;
-    }
-    else
-        pi_m_ *= conf_decay_;   // surprise → lose accumulated precision, re-engage feedback
-    confidence_ = pi_m_ / (pi_m_ + pi_s_);
+    pi_m_[s] += evidence_unit_ * std::clamp(quality, 0.0, 1.0);
     save_confidence();
-    std::print("[skill] outcome {} → Π_m={:.3f}  c={:.3f}\n",
-               success ? "CONFIRMED" : "SURPRISE", pi_m_, confidence_);
+    static const char* nm[N_SEG] = {"approach","insert","lift","place","retreat"};
+    std::print("[skill] {} CONFIRMED (q={:.2f}) → Π_m={:.2f} c={:.2f}\n",
+               nm[s], quality, pi_m_[s], c_seg(s));
+}
+
+void PickandPlaceFSM::deflate(Segment s)
+{
+    if (not precision_reweighting_) return;
+    pi_m_[s] *= conf_decay_;
+    save_confidence();
+    static const char* nm[N_SEG] = {"approach","insert","lift","place","retreat"};
+    std::print("[skill] {} SURPRISE → Π_m={:.2f} c={:.2f}\n", nm[s], pi_m_[s], c_seg(s));
 }
 
 void PickandPlaceFSM::log_rep_outcome(bool success, double rise, double xy_gap)
@@ -868,7 +894,7 @@ void PickandPlaceFSM::begin_rep_probe()
 void PickandPlaceFSM::miss_or_give_up(const std::string& reason)
 {
     std::print("[grasp] MISS — {}; reopening gripper, returning to rest\n", reason);
-    update_confidence_from_outcome(false, 0, 0);   // every miss is a surprise → deflate Π_m once
+    deflate(seg_of(grasp_phase_));   // surprise on the segment that failed → deflate ITS Π_m
     w_.gripper_command_ = 1.0f;
     RoboCompKinovaArm::TJointAngles rest;
     rest.jointAngles.assign(w_.rest_pose_angles_.begin(), w_.rest_pose_angles_.end());
@@ -881,8 +907,10 @@ void PickandPlaceFSM::miss_or_give_up(const std::string& reason)
     {
         log_rep_outcome(false, 0.0, 0.0);
         if (metrics_open_)
-            metrics_ << (probe_index_ - 1) << ",0," << confidence_ << ','
-                     << (now_seconds() - rep_t0_) << ',' << obs_count_rep_ << '\n', metrics_.flush();
+            metrics_ << (probe_index_ - 1) << ",0,"
+                     << c_seg(SEG_APPROACH) << ',' << c_seg(SEG_INSERT) << ',' << c_seg(SEG_LIFT) << ','
+                     << c_seg(SEG_PLACE) << ',' << c_seg(SEG_RETREAT) << ','
+                     << (now_seconds() - rep_t0_) << '\n', metrics_.flush();
         w_.run_requested_ = false;
         std::print("[probe] rep {} failed after {} attempts — moving on\n", probe_index_ - 1, rep_attempts_);
     }
@@ -1067,14 +1095,19 @@ void PickandPlaceFSM::run_grasp_phases(const std::array<double, Kinematics::N_AR
         if (rise >= LIFT_CONFIRM_RISE_M and xy_gap <= LIFT_CONFIRM_HOLD_M)
         {
             log_rep_outcome(true, rise, xy_gap);
-            // Natural fine-tuning: a confirmed grasp is evidence the model predicted the
-            // outcome. Deposit precision weighted by how cleanly it matched (terminal
-            // standoff error vs tolerance, lift fraction) — NOT a fixed increment.
-            update_confidence_from_outcome(true, rep_commit_epos_ / REACH_TOLERANCE_M, rise / LIFT_HEIGHT_M);
+            // A confirmed grasp credits the three legs that produced it, each weighted by
+            // how cleanly ITS own outcome matched the model: the approach by its terminal
+            // standoff error, the insert by reaching contact, the lift by the rise fraction.
+            const double q_app = std::exp(-0.5 * std::pow(rep_commit_epos_ / REACH_TOLERANCE_M, 2));
+            deposit(SEG_APPROACH, q_app);
+            deposit(SEG_INSERT,   1.0);
+            deposit(SEG_LIFT,     std::clamp(rise / LIFT_HEIGHT_M, 0.0, 1.0));
             if (metrics_open_)
-                metrics_ << (probe_index_ - 1) << ",1," << confidence_ << ','
-                         << (now_seconds() - rep_t0_) << ',' << obs_count_rep_ << '\n', metrics_.flush();
-            std::print("[grasp] CONFIRMED held (rose {:.3f} m, conf {:.2f}) → place\n", rise, confidence_);
+                metrics_ << (probe_index_ - 1) << ",1,"
+                         << c_seg(SEG_APPROACH) << ',' << c_seg(SEG_INSERT) << ',' << c_seg(SEG_LIFT) << ','
+                         << c_seg(SEG_PLACE) << ',' << c_seg(SEG_RETREAT) << ','
+                         << (now_seconds() - rep_t0_) << '\n', metrics_.flush();
+            std::print("[grasp] CONFIRMED held (rose {:.3f} m) → place\n", rise);
             lift_ticks_ = 0; grasp_phase_ = GraspPhase::PlaceMoving; place_ticks_ = 0; blend_min_dist_ = 1e9;
             std::print("[place] lifted → carry to spot ({:.3f},{:.3f},{:.3f}) → PlaceMoving\n",
                        place_pos_.x(), place_pos_.y(), place_pos_.z());
@@ -1124,6 +1157,9 @@ void PickandPlaceFSM::run_grasp_phases(const std::array<double, Kinematics::N_AR
         place_settle_ticks_ = ok ? place_settle_ticks_ + 1 : 0;
         if (place_settle_ticks_ >= PLACE_SETTLE_TICKS or ++place_ticks_ > PLACE_TIMEOUT_TICKS)
         {
+            // Set-down outcome credits SEG_PLACE: a clean set-down leaves the bottle upright.
+            if (tilt > FALL_TILT_RAD) deflate(SEG_PLACE);
+            else deposit(SEG_PLACE, std::exp(-0.5 * std::pow(tilt / PLACE_UPRIGHT_TOL_RAD, 2)));
             grasp_phase_ = GraspPhase::PlaceReleasing; place_ticks_ = 0; place_settle_ticks_ = 0;
             std::print("[place] set down (e={:.3f} m, tilt {:.1f}°) → PlaceReleasing\n", e_pos, tilt * 57.29578);
         }
@@ -1149,15 +1185,20 @@ void PickandPlaceFSM::run_grasp_phases(const std::array<double, Kinematics::N_AR
     case GraspPhase::PlaceRetreating:
     {
         w_.gripper_command_ = 1.0f;
-        const double rspeed = retreat_speed_ * (1.0 + retreat_perturb_.dspeed);
+        // Retreat speed is now skill-scheduled by SEG_RETREAT's own c (cur_seg_=SEG_RETREAT).
+        const double rspeed = skilled_speed(retreat_speed_) * (1.0 + retreat_perturb_.dspeed);
         const auto [e_pos, e_ang] = efe_drive(q, ee_position, retreat_target_pos_,
                                               retreat_z_des_, retreat_x_des_, rspeed);
         (void) e_ang;
         if (e_pos < REACH_TOLERANCE_M or ++place_ticks_ > PLACE_TIMEOUT_TICKS)
         {
-            const double tilt_deg = bottle_tilt_rad() * 57.29578;
+            const double tilt_rad = bottle_tilt_rad();
+            const double tilt_deg = tilt_rad * 57.29578;
             const bool   tipped   = tilt_deg > (FALL_TILT_RAD * 57.29578);
             log_retreat_outcome(tilt_deg, tipped);
+            // Retreat outcome credits SEG_RETREAT: a clean withdrawal leaves the bottle upright.
+            if (tipped) deflate(SEG_RETREAT);
+            else deposit(SEG_RETREAT, std::exp(-0.5 * std::pow(tilt_rad / PLACE_UPRIGHT_TOL_RAD, 2)));
             std::print("[retreat] done — bottle tilt {:.1f}°{}\n", tilt_deg, tipped ? "  TIPPED" : " (upright)");
             w_.kinovaarm_proxy->moveJointsWithAngle(w_.nearest_equiv_target(q, w_.rest_pose_angles_));
             returning_for_cycle_   = true;
