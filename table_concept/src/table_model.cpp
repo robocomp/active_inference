@@ -79,7 +79,10 @@ torch::Tensor box_sdf_tensor(const torch::Tensor& dx,
     const auto ox = torch::clamp_min(dx, 0.0f);
     const auto oy = torch::clamp_min(dy, 0.0f);
     const auto oz = torch::clamp_min(dz, 0.0f);
-    const auto outside = torch::sqrt(ox * ox + oy * oy + oz * oz);
+    // +eps under sqrt: gradient of sqrt(x) is infinite at x=0 (point inside the
+    // box → ox=oy=oz=0), which produces NaN gradients in autograd and locks the
+    // optimizer. The eps offset (~3e-5 m) is negligible for a table SDF.
+    const auto outside = torch::sqrt(ox * ox + oy * oy + oz * oz + 1e-9f);
 
     constexpr float k = TableModel::SDF_SMOOTH_K;
     constexpr float s = TableModel::SDF_INSIDE_SCALE;
@@ -104,12 +107,12 @@ torch::Tensor cylinder_sdf_tensor(const torch::Tensor& dx_local,
                                    float r,
                                    float hh)
 {
-    const auto d_radial = torch::sqrt(dx_local * dx_local + dy_local * dy_local) - r;
+    const auto d_radial = torch::sqrt(dx_local * dx_local + dy_local * dy_local + 1e-9f) - r;
     const auto d_vertical = torch::abs(dz_local) - hh;
 
     const auto or_ = torch::clamp_min(d_radial, 0.0f);
     const auto ov = torch::clamp_min(d_vertical, 0.0f);
-    const auto outside = torch::sqrt(or_ * or_ + ov * ov);
+    const auto outside = torch::sqrt(or_ * or_ + ov * ov + 1e-9f);
     const auto inside = torch::clamp_max(torch::max(d_radial, d_vertical), 0.0f);
     return outside + inside;
 }

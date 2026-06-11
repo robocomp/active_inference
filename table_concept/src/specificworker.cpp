@@ -1264,6 +1264,28 @@ void SpecificWorker::ensure_instance(const DSR::Node& node)
         }
     }
 
+    // Sanitize: a NaN/Inf loaded from a corrupted checkpoint or RT edge would
+    // poison the SDF (NaN gradients) and lock the optimizer permanently. Replace
+    // any non-finite field with a safe default before it reaches the model.
+    {
+        const auto fix = [&](float& v, float fallback, const char* name)
+        {
+            if (!std::isfinite(v))
+            {
+                std::print("table_concept: WARNING non-finite {} for '{}' → reset to {:.3f}\n",
+                           name, node.name(), fallback);
+                v = fallback;
+            }
+        };
+        fix(init_state.cx, 0.0f, "cx");
+        fix(init_state.cy, 0.0f, "cy");
+        fix(init_state.yaw, 0.0f, "yaw");
+        fix(init_state.w, 1.0f, "w");
+        fix(init_state.h, 0.6f, "h");
+        fix(init_state.table_height, 0.75f, "table_height");
+        init_state.leg_length = std::max(0.05f, init_state.table_height - TableModel::TOP_THICKNESS);
+    }
+
     TableInstance inst;
     inst.node_id   = node.id();
     inst.node_name = node.name();
