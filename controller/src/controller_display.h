@@ -4,6 +4,11 @@
 
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <optional>
+#include <vector>
+
+#include <QString>
 
 #include "controller_runtime_types.h"
 #include "custom_widget.h"
@@ -24,6 +29,8 @@ public:
 
     Custom_widget *widget() const { return custom_widget_.get(); }
 
+    // Staging API — safe to call from any thread. These only copy data into an
+    // internal snapshot; no Qt objects are touched here.
     void update(const std::optional<ControllerRobotPose> &robot_pose,
                 const ControllerPolygon &room_polygon,
                 const ControllerPolygon &inner_polygon,
@@ -38,10 +45,41 @@ public:
                 int max_lidar_draw_points);
 
     void set_command_text(const QString &text);
+    void set_selected_affordance_text(const QString &text);
     void clear_robot_trajectory();
 
+    // Presentation — MUST be called on the GUI thread only. Reads the latest
+    // staged snapshot and performs all Qt scene drawing.
+    void present();
+
 private:
+    struct DisplaySnapshot
+    {
+        std::optional<ControllerRobotPose> robot_pose;
+        ControllerPolygon room_polygon;
+        ControllerPolygon inner_polygon;
+        std::optional<ControllerPathPlan> current_plan;
+        ControllerObstacleVisuals obstacle_polys;
+        ControllerPolygons obstacle_rfe_points;
+        std::optional<Eigen::Vector2f> current_target_room;
+        std::vector<ControllerPolygon> last_mppi_trajectories;
+        ControllerPolygon last_mppi_average_trajectory;
+        int last_best_mppi_trajectory_idx = -1;
+        int last_display_wp_index = 0;
+        int max_lidar_draw_points = 0;
+        bool valid = false;
+
+        QString command_text;
+        bool command_text_pending = false;
+        QString selected_affordance_text;
+        bool selected_affordance_text_pending = false;
+        bool clear_trajectory_pending = false;
+    };
+
     std::unique_ptr<Custom_widget> custom_widget_;
     std::unique_ptr<rc::Viewer2D> viewer_2d_;
     bool room_view_fitted_ = false;
+
+    mutable std::mutex snapshot_mutex_;
+    DisplaySnapshot snapshot_;
 };

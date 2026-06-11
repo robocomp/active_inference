@@ -29,21 +29,23 @@ ObstaclePalette obstacle_palette(ControllerObstacleKind kind)
     switch (kind)
     {
         case ControllerObstacleKind::Object:
-            return {QColor(17, 92, 138),
-                    QColor(74, 160, 201, 110),
-                    QColor(0, 173, 239, 220),
-                    QColor(10, 68, 103, 235)};
+        // Objects (e.g., table) are rendered in blue tones.
+        return {QColor(25, 99, 170),
+            QColor(76, 164, 232, 120),
+            QColor(56, 189, 248, 230),
+            QColor(12, 74, 140, 240)};
         case ControllerObstacleKind::Temporary:
-            return {QColor(149, 75, 0),
-                    QColor(219, 143, 67, 150),
-                    QColor(255, 0, 128, 220),
-                    QColor(110, 61, 19, 235)};
+        // Temporary lidar obstacles also belong to the obstacle family.
+        return {QColor(194, 103, 25),
+            QColor(245, 158, 11, 150),
+            QColor(251, 146, 60, 230),
+            QColor(154, 52, 18, 240)};
         case ControllerObstacleKind::Obstacle:
         default:
-            return {QColor(120, 73, 32),
-                    QColor(181, 119, 58, 150),
-                    QColor(255, 0, 128, 220),
-                    QColor(92, 49, 16, 235)};
+        return {QColor(194, 103, 25),
+            QColor(245, 158, 11, 150),
+            QColor(251, 146, 60, 230),
+            QColor(154, 52, 18, 240)};
     }
 }
 

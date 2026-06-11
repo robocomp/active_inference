@@ -212,7 +212,7 @@ int controller::run(int argc, char* argv[])
 	#endif
 
 	status = EXIT_SUCCESS;
-	delete worker;
+	// Worker shutdown is already handled from aboutToQuit.
 	return status;
 }
 

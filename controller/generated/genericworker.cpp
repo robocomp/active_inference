@@ -87,14 +87,6 @@ GenericWorker::GenericWorker(const ConfigLoader& configLoader, TuplePrx tprx) : 
 GenericWorker::~GenericWorker()
 {
 	save_window_settings();
-
-    for (auto& [name, graphPtr] : Graphs) {
-        if (!graphPtr) continue;
-        auto grid_nodes = graphPtr->get_nodes_by_type("grid");
-        for (auto grid : grid_nodes) {
-            graphPtr->delete_node(grid);
-        }
-    }
 }
 void GenericWorker::killYourSelf()
 {

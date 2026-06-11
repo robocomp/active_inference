@@ -30,9 +30,14 @@
 
 #include <genericworker.h>
 #include <Eigen/Dense>
+#include <atomic>
+#include <condition_variable>
+#include <functional>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "controller_display.h"
@@ -67,6 +72,7 @@ public:
      * \brief Destructor for SpecificWorker.
      */
 	~SpecificWorker();
+	bool is_shutting_down() const noexcept { return shutting_down_.load(); }
 
 
 public slots:
@@ -154,10 +160,33 @@ private:
         void degraded_loop();
 
         void cleanup_owned_nodes();
+		void request_shutdown();
         void on_optional_peer_lost(const std::string &name, std::uint32_t id);
         void on_optional_peer_ready(const std::string &name, std::uint32_t id);
 
 		AgentPresenceCoordinator presence_coordinator_;
+
+		// ─── Control thread: runs compute() off the GUI / presence-SM thread ───
+		// The MPPI optimisation in compute() can take hundreds of ms to seconds.
+		// Running it here keeps the presence heartbeat loop and the Qt event loop
+		// responsive. The GUI thread only renders (display_.present()) and feeds
+		// user commands through command_queue_.
+		std::thread control_thread_;
+		std::atomic<bool> control_running_{false};
+		std::atomic<bool> control_operating_{false};
+		std::atomic<bool> lidar_dirty_{false};
+		std::mutex control_mutex_;
+		std::condition_variable control_cv_;
+		std::mutex command_mutex_;
+		std::vector<std::function<void()>> command_queue_;
+		std::atomic<bool> command_pending_{false};
+		QTimer *render_timer_ = nullptr;
+		std::atomic<bool> shutting_down_{false};
+
+		void control_loop();
+		void stop_control_thread();
+		void enqueue_command(std::function<void()> command);
+		void ingest_latest_lidar();
 
 signals:
         void presenceReady();

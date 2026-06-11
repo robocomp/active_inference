@@ -61,6 +61,15 @@ public:
         cmd_row->addWidget(cmd_vel_value_, 1);
         pose_layout->addLayout(cmd_row);
 
+        auto *affordance_row = new QHBoxLayout();
+        affordance_row->setSpacing(8);
+        auto *affordance_title = new QLabel("Selected affordance:", pose_panel);
+        selected_affordance_value_ = new QLabel("none", pose_panel);
+        selected_affordance_value_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        affordance_row->addWidget(affordance_title);
+        affordance_row->addWidget(selected_affordance_value_, 1);
+        pose_layout->addLayout(affordance_row);
+
         main_layout->addWidget(pose_panel);
 
         // ---- toolbar row ----
@@ -106,6 +115,12 @@ public:
             cmd_vel_value_->setText(text);
     }
 
+    void set_selected_affordance_text(const QString &text)
+    {
+        if (selected_affordance_value_ != nullptr)
+            selected_affordance_value_->setText(text);
+    }
+
 public:
     QFrame *frame = nullptr;
     QPushButton *lidar_toggle_btn = nullptr;
@@ -114,5 +129,6 @@ public:
 
 private:
     QLabel *cmd_vel_value_ = nullptr;
+    QLabel *selected_affordance_value_ = nullptr;
 };
 #endif

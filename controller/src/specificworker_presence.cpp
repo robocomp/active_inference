@@ -38,6 +38,9 @@ void SpecificWorker::cleanup_owned_nodes()
         return;
     owned_nodes_cleaned_ = true;
 
+    // Stop the control thread before tearing down nodes/obstacles it touches.
+    stop_control_thread();
+
     obstacle_tracker_.clear_published_obstacles();
     presence_coordinator_.cleanup_owned_nodes();
 }

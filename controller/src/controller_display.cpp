@@ -77,52 +77,97 @@ void ControllerDisplay::update(const std::optional<ControllerRobotPose> &robot_p
                                int last_display_wp_index,
                                int max_lidar_draw_points)
 {
-    if (!custom_widget_)
-        return;
-
-    if (viewer_2d_)
-    {
-        ControllerPolygon display_path;
-        if (current_plan.has_value())
-            display_path = current_plan->room_path;
-
-        viewer_2d_->draw_room_polygon(room_polygon);
-        viewer_2d_->draw_lidar_points_from_buffer(max_lidar_draw_points);
-        viewer_2d_->draw_path({
-            .path = std::move(display_path),
-            .inner_poly = inner_polygon,
-            .graph_nodes = current_plan.has_value() ? current_plan->graph_nodes : ControllerPolygon{},
-            .obstacle_polys = obstacle_polys,
-            .obstacle_rfe_points = obstacle_rfe_points,
-            .candidate_trajectories = last_mppi_trajectories,
-            .average_trajectory = last_mppi_average_trajectory,
-            .best_trajectory_idx = last_best_mppi_trajectory_idx
-        });
-        if (!room_view_fitted_ && !room_polygon.empty())
-        {
-            viewer_2d_->fit_view();
-            room_view_fitted_ = true;
-        }
-
-        if (current_target_room.has_value())
-            viewer_2d_->update_target_marker(current_target_room->x(), current_target_room->y(), true);
-        else
-            viewer_2d_->update_target_marker(0.f, 0.f, false);
-
-        if (robot_pose.has_value())
-            viewer_2d_->update_robot(robot_pose->as_transform());
-    }
-
+    // Staging only — copy into the snapshot, no Qt access. Safe from any thread.
+    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+    snapshot_.robot_pose = robot_pose;
+    snapshot_.room_polygon = room_polygon;
+    snapshot_.inner_polygon = inner_polygon;
+    snapshot_.current_plan = current_plan;
+    snapshot_.obstacle_polys = obstacle_polys;
+    snapshot_.obstacle_rfe_points = obstacle_rfe_points;
+    snapshot_.current_target_room = current_target_room;
+    snapshot_.last_mppi_trajectories = last_mppi_trajectories;
+    snapshot_.last_mppi_average_trajectory = last_mppi_average_trajectory;
+    snapshot_.last_best_mppi_trajectory_idx = last_best_mppi_trajectory_idx;
+    snapshot_.last_display_wp_index = last_display_wp_index;
+    snapshot_.max_lidar_draw_points = max_lidar_draw_points;
+    snapshot_.valid = true;
 }
 
 void ControllerDisplay::set_command_text(const QString &text)
 {
-    if (custom_widget_)
-        custom_widget_->set_cmd_vel_text(text);
+    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+    snapshot_.command_text = text;
+    snapshot_.command_text_pending = true;
+}
+
+void ControllerDisplay::set_selected_affordance_text(const QString &text)
+{
+    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+    snapshot_.selected_affordance_text = text;
+    snapshot_.selected_affordance_text_pending = true;
 }
 
 void ControllerDisplay::clear_robot_trajectory()
 {
-    if (viewer_2d_)
+    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+    snapshot_.clear_trajectory_pending = true;
+}
+
+void ControllerDisplay::present()
+{
+    // GUI thread only. Consume the latest staged snapshot and draw it.
+    DisplaySnapshot snap;
+    {
+        std::lock_guard<std::mutex> lock(snapshot_mutex_);
+        snap = snapshot_;
+        snapshot_.command_text_pending = false;
+        snapshot_.selected_affordance_text_pending = false;
+        snapshot_.clear_trajectory_pending = false;
+    }
+
+    if (!custom_widget_)
+        return;
+
+    if (snap.clear_trajectory_pending && viewer_2d_)
         viewer_2d_->clear_robot_trajectory();
+
+    if (snap.command_text_pending)
+        custom_widget_->set_cmd_vel_text(snap.command_text);
+
+    if (snap.selected_affordance_text_pending)
+        custom_widget_->set_selected_affordance_text(snap.selected_affordance_text);
+
+    if (!snap.valid || !viewer_2d_)
+        return;
+
+    ControllerPolygon display_path;
+    if (snap.current_plan.has_value())
+        display_path = snap.current_plan->room_path;
+
+    viewer_2d_->draw_room_polygon(snap.room_polygon);
+    viewer_2d_->draw_lidar_points_from_buffer(snap.max_lidar_draw_points);
+    viewer_2d_->draw_path({
+        .path = std::move(display_path),
+        .inner_poly = snap.inner_polygon,
+        .graph_nodes = snap.current_plan.has_value() ? snap.current_plan->graph_nodes : ControllerPolygon{},
+        .obstacle_polys = snap.obstacle_polys,
+        .obstacle_rfe_points = snap.obstacle_rfe_points,
+        .candidate_trajectories = snap.last_mppi_trajectories,
+        .average_trajectory = snap.last_mppi_average_trajectory,
+        .best_trajectory_idx = snap.last_best_mppi_trajectory_idx
+    });
+    if (!room_view_fitted_ && !snap.room_polygon.empty())
+    {
+        viewer_2d_->fit_view();
+        room_view_fitted_ = true;
+    }
+
+    if (snap.current_target_room.has_value())
+        viewer_2d_->update_target_marker(snap.current_target_room->x(), snap.current_target_room->y(), true);
+    else
+        viewer_2d_->update_target_marker(0.f, 0.f, false);
+
+    if (snap.robot_pose.has_value())
+        viewer_2d_->update_robot(snap.robot_pose->as_transform());
 }

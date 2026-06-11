@@ -23,6 +23,8 @@
 #include "custom_widget.h"
 #include <fps/fps.h>
 
+#include <QTimer>
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -81,8 +83,7 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
 
 SpecificWorker::~SpecificWorker()
 {
-	cleanup_owned_nodes();
-	stop_robot();
+	request_shutdown();
 	qInfo() << "Destroying SpecificWorker";
 	/*
 	for (auto const& [name, g] : Graphs) {
@@ -91,11 +92,25 @@ SpecificWorker::~SpecificWorker()
 	*/
 }
 
+void SpecificWorker::request_shutdown()
+{
+	if (shutting_down_.exchange(true))
+		return;
+
+	cleanup_owned_nodes();
+	stop_robot();
+}
+
 
 void SpecificWorker::initialize()
 {
     qInfo() << "initialize worker";
 	GenericWorker::initialize();
+
+	 // Ignore payload attributes in local graph updates to avoid unnecessary copying and processing of potentially large data
+    G->set_ignored_attributes<cam_rgb_att, cam_depth_att>();
+    qInfo() << "Ignoring DSR RGBD payload attributes cam_rgb/cam_depth in local graph updates";
+
 
 	presence_coordinator_.configure(configLoader, G, static_cast<std::uint32_t>(agent_id));
 	presence_coordinator_.set_transition_hooks({
@@ -135,7 +150,11 @@ void SpecificWorker::initialize()
 	    },
 	    .on_operating_loop = [this]()
 	    {
-	        compute();
+	        // Do NOT run compute() here: this hook executes on the presence-SM /
+	        // GUI thread and compute() (MPPI) can block for hundreds of ms. Just
+	        // wake the control thread, which runs compute() asynchronously.
+	        control_operating_.store(true, std::memory_order_release);
+	        control_cv_.notify_one();
 	    },
 	    .on_degraded_enter = [this]()
 	    {
@@ -147,7 +166,7 @@ void SpecificWorker::initialize()
 	presence_coordinator_.start();
 
 	QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
-	                 this, &SpecificWorker::cleanup_owned_nodes, Qt::UniqueConnection);
+	                 this, &SpecificWorker::request_shutdown, Qt::UniqueConnection);
 
 	load_params();
 	inner_eigen_api_ = G ? G->get_inner_eigen_api() : nullptr;
@@ -169,7 +188,10 @@ void SpecificWorker::initialize()
 	//connect(Graphs.at("").get(), &DSR::DSRGraph::update_node_signal, this, &SpecificWorker::modify_node_slot);
 	connect(G.get(), &DSR::DSRGraph::update_edge_signal, this, &SpecificWorker::modify_edge_slot);
 	//connect(Graphs.at("").get(), &DSR::DSRGraph::update_node_attr_signal, this, &SpecificWorker::modify_node_attrs_slot);
-	connect(G.get(), &DSR::DSRGraph::update_node_signal, this, &SpecificWorker::modify_node_slot);
+	// DirectConnection: modify_node_slot runs on the DDS reader thread and is a
+	// cheap trigger (sets a flag + wakes the control thread). The heavy lidar
+	// decode happens on the control thread, not the GUI thread.
+	connect(G.get(), &DSR::DSRGraph::update_node_signal, this, &SpecificWorker::modify_node_slot, Qt::DirectConnection);
 	//connect(Graphs.at("").get(), &DSR::DSRGraph::update_edge_attr_signal, this, &SpecificWorker::modify_edge_attrs_slot);
 	//connect(Graphs.at("").get(), &DSR::DSRGraph::del_edge_signal, this, &SpecificWorker::del_edge_slot);
 	//connect(Graphs.at("").get(), &DSR::DSRGraph::del_node_signal, this, &SpecificWorker::del_node_slot);
@@ -183,23 +205,29 @@ void SpecificWorker::initialize()
 	***/
 	//If you have more than one graph, you need to connect to the specific graph with the name
 	//graph_viewers.at("")->add_custom_widget_to_dock("CustomWidget", &custom_widget);
+	// User-input callbacks fire on the GUI thread but mutate session_/path_controller_
+	// state owned by the control thread. Marshal them through the command queue so
+	// they execute on the control thread, avoiding data races with compute().
 	display_.initialize(graph_viewers,
 	                  obstacle_tracker_.lidar_buffer(),
-	                  [this](const QPointF &point) { set_manual_target(point); },
-	                  [this]() { clear_manual_target(); },
+	                  [this](const QPointF &point) { enqueue_command([this, point]() { set_manual_target(point); }); },
+	                  [this]() { enqueue_command([this]() { clear_manual_target(); }); },
 	                  [this](bool checked)
 	                  {
-	                      path_following_active_ = checked;
-	                      if (checked)
+	                      enqueue_command([this, checked]()
 	                      {
-	                          stop_sent_when_paused_ = false;
-	                      }
-	                      else if (!stop_sent_when_paused_)
-	                      {
-	                          path_controller_.stop();
-	                          stop_robot();
-	                          stop_sent_when_paused_ = true;
-	                      }
+	                          path_following_active_ = checked;
+	                          if (checked)
+	                          {
+	                              stop_sent_when_paused_ = false;
+	                          }
+	                          else if (!stop_sent_when_paused_)
+	                          {
+	                              path_controller_.stop();
+	                              stop_robot();
+	                              stop_sent_when_paused_ = true;
+	                          }
+	                      });
 	                  });
 	update_custom_widget(std::nullopt);
 
@@ -207,6 +235,17 @@ void SpecificWorker::initialize()
     /////////GET PARAMS, OPEND DEVICES....////////
     //int period = configLoader.get<int>("Period.Compute") //NOTE: If you want get period of compute use getPeriod("compute")
     //std::string device = configLoader.get<std::string>("Device.name") 
+
+	// GUI-thread render timer: draws the latest snapshot staged by the control
+	// thread. Decoupled from compute(), so rendering and the event loop stay
+	// responsive even while MPPI is busy.
+	render_timer_ = new QTimer(this);
+	connect(render_timer_, &QTimer::timeout, this, [this]() { display_.present(); });
+	render_timer_->start(33);
+
+	// Start the control thread last, once all dependencies are wired up.
+	control_running_.store(true, std::memory_order_release);
+	control_thread_ = std::thread(&SpecificWorker::control_loop, this);
 }
 
 
@@ -219,6 +258,15 @@ void SpecificWorker::compute()
 		~ScopedComputePerfLog() { SpecificWorker::log_compute_perf(counter); }
 	};
 	ScopedComputePerfLog perf_log{compute_perf_counter};
+
+	auto update_selected_affordance_label = [this]()
+	{
+		const auto current_affordance_name = affordance_manager_.current_name();
+		display_.set_selected_affordance_text(current_affordance_name.empty()
+		    ? QStringLiteral("none")
+		    : QString::fromStdString(current_affordance_name));
+	};
+	update_selected_affordance_label();
 
 	log_first_compute_once();
 
@@ -233,6 +281,7 @@ void SpecificWorker::compute()
 		return;
 
 	const auto step = build_planning_step(now_ms);
+	update_selected_affordance_label();
 	if (!step.has_value())
 		return;
 
@@ -453,10 +502,13 @@ void SpecificWorker::stop_robot()
 
 void SpecificWorker::modify_node_slot(std::uint64_t id, const std::string &type)
 {
-	if (G)
+	// Runs on the DDS reader thread (DirectConnection). Keep it cheap: flag the
+	// lidar update and wake the control thread, which performs the heavy decode.
+	(void)id;
+	if (type == "laser")
 	{
-		if (auto node_opt = G->get_node(id); node_opt.has_value())
-			obstacle_tracker_.handle_lidar_node(node_opt.value());
+		lidar_dirty_.store(true, std::memory_order_release);
+		control_cv_.notify_one();
 	}
 
 	if (type == "room" or type == "robot")
@@ -467,6 +519,73 @@ void SpecificWorker::modify_edge_slot(std::uint64_t, std::uint64_t, const std::s
 {
 	if (type == params.target_edge_type || type == "RT")
 		hibernationTick();
+}
+
+void SpecificWorker::control_loop()
+{
+	using namespace std::chrono_literals;
+	while (control_running_.load(std::memory_order_acquire))
+	{
+		{
+			std::unique_lock<std::mutex> lock(control_mutex_);
+			control_cv_.wait_for(lock, 20ms, [this]()
+			{
+				return !control_running_.load(std::memory_order_acquire)
+				    || lidar_dirty_.load(std::memory_order_acquire)
+				    || control_operating_.load(std::memory_order_acquire)
+				    || command_pending_.load(std::memory_order_acquire);
+			});
+		}
+		if (!control_running_.load(std::memory_order_acquire))
+			break;
+
+		// 1) Drain user commands (target clicks, follow toggle) on the owning thread.
+		if (command_pending_.load(std::memory_order_acquire))
+		{
+			std::vector<std::function<void()>> commands;
+			{
+				std::lock_guard<std::mutex> lock(command_mutex_);
+				commands.swap(command_queue_);
+				command_pending_.store(false, std::memory_order_release);
+			}
+			for (auto &command : commands)
+				if (command) command();
+		}
+
+		// 2) Lidar decode off the GUI thread.
+		if (lidar_dirty_.exchange(false, std::memory_order_acq_rel))
+			ingest_latest_lidar();
+
+		// 3) The heavy pipeline (planning + MPPI + command emission).
+		if (control_operating_.exchange(false, std::memory_order_acq_rel))
+			compute();
+	}
+}
+
+void SpecificWorker::ingest_latest_lidar()
+{
+	if (!G)
+		return;
+	if (auto node_opt = G->get_node(params.lidar_name); node_opt.has_value())
+		obstacle_tracker_.handle_lidar_node(node_opt.value());
+}
+
+void SpecificWorker::stop_control_thread()
+{
+	control_running_.store(false, std::memory_order_release);
+	control_cv_.notify_all();
+	if (control_thread_.joinable())
+		control_thread_.join();
+}
+
+void SpecificWorker::enqueue_command(std::function<void()> command)
+{
+	{
+		std::lock_guard<std::mutex> lock(command_mutex_);
+		command_queue_.push_back(std::move(command));
+		command_pending_.store(true, std::memory_order_release);
+	}
+	control_cv_.notify_one();
 }
 /**************************************/
 // From the RoboCompOmniRobot you can call this methods:
