@@ -19,6 +19,7 @@
 #include "specificworker.h"
 #include "pick_and_place_fsm.h"
 
+#include <chrono>
 #include <cmath>
 #include <print>
 #include <sstream>
@@ -210,6 +211,15 @@ void SpecificWorker::compute()
     if (not kinematics_) return;
     try
     {
+        // Per-section wall-clock timing to attribute control-loop hitches (the cause of the
+        // approach oscillation: a long compute() blocks the RoboComp timer, the bridge holds
+        // the last q̇ for that whole interval, the arm overshoots). A [loophitch] line is
+        // emitted only when the cycle exceeds the budget, so the slow-cycle culprit is named.
+        using clk = std::chrono::steady_clock;
+        const auto ms = [](clk::time_point a, clk::time_point b)
+        { return std::chrono::duration<double, std::milli>(b - a).count(); };
+        const auto t0 = clk::now();
+
         // The one and only call to the KinovaArm proxy in the main loop.  All data
         const auto js = kinovaarm_proxy->getJointsState();
         if (static_cast<int>(js.joints.size()) < Kinematics::N_ARM_JOINTS)
@@ -218,6 +228,7 @@ void SpecificWorker::compute()
                        js.joints.size(), Kinematics::N_ARM_JOINTS);
             return;
         }
+        const auto t_read = clk::now();
 
         std::array<double, Kinematics::N_ARM_JOINTS> q{}, tau{};
         for (int i = 0; i < Kinematics::N_ARM_JOINTS; ++i)
@@ -228,9 +239,15 @@ void SpecificWorker::compute()
         cur_q_ = q;
 
         send_gripper_command();
+        const auto t_grip = clk::now();
 
         const auto ee_position = kinematics_->forward_kinematics(q);
-        update_viewer(q, tau, ee_position);
+        // OpenGL belief viewer disabled while diagnosing control-loop hitches: its per-cycle
+        // repaint (and the getGripperState round-trip inside it) is a prime suspect for the
+        // 0.2–1.1 s cycle stalls that make the held-velocity arm overshoot/oscillate.
+        // update_viewer(q, tau, ee_position);
+        (void) tau;
+        const auto t_view = clk::now();
         handle_joint_dump(q, ee_position, js);
 
         // Outer lifecycle: home → wait for Start → run the manipulation FSM.
@@ -238,11 +255,19 @@ void SpecificWorker::compute()
         if (phase_ == Phase::Homing)          { run_homing(q); return; }
 
         update_scene();
+        const auto t_scene = clk::now();
 
         if (phase_ == Phase::WaitingForStart) { run_waiting_for_start(); return; }
         if (not run_requested_)               { abort_to_rest(); return; }
 
         fsm_->step(q, ee_position);   // ActiveEFE: pick-and-place behaviour (currently: approach + hold)
+        const auto t_fsm = clk::now();
+
+        if (const double tot = ms(t0, t_fsm); tot > 40.0)
+            std::print("[loophitch] cycle={:.1f}ms  read={:.1f}  grip={:.1f}  viewer={:.1f}  "
+                       "scene={:.1f}  fsm={:.1f}\n",
+                       tot, ms(t0, t_read), ms(t_read, t_grip), ms(t_grip, t_view),
+                       ms(t_view, t_scene), ms(t_scene, t_fsm));
         proxy_unreachable_warned_ = false;
     }
     catch (const Ice::Exception& e)
@@ -286,9 +311,15 @@ void SpecificWorker::teleport_to_rest()
 
 void SpecificWorker::send_gripper_command()
 {
+    // EXPERIMENT (loop-hitch isolation): skip the setGripperPos round-trip when the command
+    // is unchanged — during approach/transit the gripper is static, so this is a pure
+    // redundant Ice call every cycle.
+    static float last_sent = 2.0f;   // out of [0,1] range ⇒ first call always sends
+    if (gripper_command_ == last_sent) return;
     try
     {
         kinovaarm_proxy->setGripperPos(gripper_command_);
+        last_sent = gripper_command_;
         gripper_proxy_warned_ = false;
     }
     catch (const Ice::Exception& e)
@@ -404,7 +435,7 @@ void SpecificWorker::update_scene()
 {
     if (not base_tf_set_) refresh_arm_base_world();
     update_bottle_pose_in_dsr();
-    update_viewer_scene_objects();
+    // update_viewer_scene_objects();   // OpenGL viewer disabled (loop-hitch diagnosis)
     fsm_->maybe_compute_reach_map();
 }
 
@@ -483,14 +514,22 @@ void SpecificWorker::update_bottle_pose_in_dsr()
 {
     if (not G or not rt_api_) return;
 
-    RoboCompWebots2Robocomp::ObjectPose robot_w_pose;
+    // robot + table are STATIC scene geometry: each getObjectPose is a slow,
+    // step-synchronized Webots SUPERVISOR round-trip (the dominant loop-hitch source), so
+    // query them ONCE and cache. Only the bottle moves ⇒ the only per-cycle supervisor call.
+    static bool static_scene_cached = false;
+    static RoboCompWebots2Robocomp::ObjectPose robot_w_pose;
+    static RoboCompWebots2Robocomp::ObjectPose table_w_pose;
     RoboCompWebots2Robocomp::ObjectPose bottle_w_pose;
-    RoboCompWebots2Robocomp::ObjectPose table_w_pose;
     try
     {
-        robot_w_pose  = webots2robocomp_proxy->getObjectPose(WEBOTS_ROBOT_DEF);
+        if (not static_scene_cached)
+        {
+            robot_w_pose = webots2robocomp_proxy->getObjectPose(WEBOTS_ROBOT_DEF);
+            table_w_pose = webots2robocomp_proxy->getObjectPose(WEBOTS_TABLE_DEF);
+            static_scene_cached = true;
+        }
         bottle_w_pose = webots2robocomp_proxy->getObjectPose(WEBOTS_BOTTLE_DEF);
-        table_w_pose  = webots2robocomp_proxy->getObjectPose(WEBOTS_TABLE_DEF);
         webots_proxy_unreachable_warned_ = false;
     }
     catch (const Ice::Exception& e)
@@ -534,6 +573,14 @@ void SpecificWorker::update_bottle_pose_in_dsr()
     table_world_.linear()      = q_table_w.normalized().toRotationMatrix();
     table_world_.translation() = table_w;
     scene_world_valid_ = true;
+
+    // DSR scene publishing disabled (loop-hitch diagnosis): this controller does NOT read the
+    // graph for control — its DSR signal slots are stubs — so the per-cycle
+    // insert_or_assign_edge_RT writes below only publish over DDS for other agents/viewer.
+    // DDS publishing is a controller-side per-cycle stall source; the pose caching above is
+    // what the FSM actually consumes. Re-enable if a sibling agent needs the live edges.
+    (void) robot_w; (void) q_robot_w;
+    return;
 
     auto robot_node  = G->get_node("robot");
     auto table_node  = G->get_node("table");

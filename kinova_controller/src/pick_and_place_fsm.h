@@ -61,7 +61,7 @@ private:
     SpecificWorker& w_;
 
     // ── Grasp FSM phases ─────────────────────────────────────────────────────
-    enum class GraspPhase { Tracking, Inserting, Closing, Lifting,
+    enum class GraspPhase { Tracking, Inserting, Closing, Leveling, Lifting,
                             PlaceMoving, PlaceLowering, PlaceReleasing, PlaceRetreating,
                             Retracting };
     GraspPhase grasp_phase_ = GraspPhase::Tracking;
@@ -125,6 +125,7 @@ private:
     void miss_or_give_up(const std::string& reason);
     std::pair<bool,bool>  tip_contacts() const;
     std::pair<float,float> tip_forces() const;
+    std::pair<float,float> pad_forces() const;   // (lforce, rforce) — grip strength on the body
     float gripper_force() const;
     bool  via_reached(double e_pos);
     double bottle_tilt_rad() const;
@@ -151,12 +152,37 @@ private:
     // ── Approach (Tracking) constants + state ─────────────────────────────────
     static constexpr double APPROACH_STANDOFF_M = 0.12;
     static constexpr double REACH_TOLERANCE_M   = 0.02;
-    static constexpr double BOTTLE_GRASP_HEIGHT_FRAC = 0.5;
+    // Grasp ABOVE the bottle's centre of mass so gravity pendulums it upright in the gripper
+    // instead of letting an off-centre grip tip it (raised 0.5→0.6 of bottle height).
+    static constexpr double BOTTLE_GRASP_HEIGHT_FRAC = 0.6;
+    // Insertion depth: tool origin relative to the bottle axis along the approach. The old
+    // +15 mm BACK-off (to keep the body out of the void behind the then-back-less gripper) left
+    // the bottle at the FINGERTIPS, where closing pinches it into a pivot/tilt. The proto now
+    // has a PALM/backstop, so we can seat deep: 0 = tool at the bottle axis; NEGATIVE drives a
+    // few mm PAST the axis to wedge the body against the palm/finger-base (the stable seat).
+    // Re-testing from 0 now that the steady 20 ms loop no longer lurches the tool during insert.
+    static constexpr double GRASP_DEPTH_BACKOFF_M    = 0.0;
     static constexpr double BOTTLE_TOP_GRASP_FRAC    = 0.88;
     bool   approach_hold_logged_ = false;
     bool   approach_respawn_done_ = false;
     long   ctrl_cycle_ = 0;
     double grasp_align_tol_rad_ = 0.14;
+
+    // ── Per-cycle motion monitor (debug elbow-table dives + approach/place oscillation) ──
+    // A single throttled [mon] line, emitted from efe_drive (the common chokepoint every
+    // moving phase passes through), so EVERY phase — not just Tracking — gets telemetry.
+    // Shows the elbow/lowest-link height above the table (elbow-dive watch), the bottle
+    // tilt, and oscillation signals (Δe sign-flips, measured EE speed, |q̇|).
+    bool   monitor_log_    = true;
+    int    monitor_period_ = 10;     // print every N efe_drive calls
+    long   mon_cycle_      = 0;
+    double mon_prev_epos_  = 1e9;
+    double mon_prev_time_  = 0.0;
+    std::optional<Eigen::Vector3d> mon_prev_ee_;
+    static const char* phase_name(GraspPhase p);
+    void log_monitor(const std::array<double, Kinematics::N_ARM_JOINTS>& q,
+                     const Eigen::Vector3d& ee_position, const Eigen::Vector3d& target,
+                     double e_pos, double e_ang, const EFEDebug& dbg);
 
     // ── Controller config ─────────────────────────────────────────────────────
     bool   use_qp_ = false;
@@ -197,7 +223,7 @@ private:
     int  pick_place_cycles_done_ = 0;
 
     // ── Grasp-phase tick counters + latched frame ────────────────────────────
-    int grasp_settle_ticks_ = 0, closing_ticks_ = 0, insert_ticks_ = 0, lift_ticks_ = 0;
+    int grasp_settle_ticks_ = 0, closing_ticks_ = 0, insert_ticks_ = 0, lift_ticks_ = 0, level_ticks_ = 0;
     int place_ticks_ = 0, place_settle_ticks_ = 0;
     double place_bottle_z_prev_ = 1e9;
     int track_stuck_ticks_ = 0, track_noprog_ticks_ = 0, rep_track_ticks_ = 0, rep_attempts_ = 0;
@@ -208,6 +234,9 @@ private:
     int    reflex_count_ = 0, retract_ticks_ = 0, grasp_force_ticks_ = 0;
     double bottle_z_at_lift_start_ = 0.0;
     double rep_commit_epos_ = 0.0, rep_commit_eang_ = 0.0;
+    // Failure diagnostics (why grasps slip — esp. with a heavier object):
+    Eigen::Vector3d bottle_at_grasp_{0,0,0};   // bottle pose when the grasp was committed
+    float  close_lf_ = 0.0f, close_rf_ = 0.0f; // L/R pad forces at the close→lift transition
     std::mt19937 rng_{std::random_device{}()};
 
     // ── Probe / skill structs + state ────────────────────────────────────────
@@ -271,10 +300,16 @@ private:
     static constexpr double TIP_REFLEX_STEP_M     = 0.005;
     static constexpr double TIP_REFLEX_MAX_M      = 0.05;
     static constexpr double TIP_REFLEX_BACKOFF_M  = 0.02;
+    // Post-grasp Leveling: lift a small clearance off the table AND rotate the gripper to the
+    // (horizontal) grasp frame with orientation ENFORCED, so the ~15° canted commit is undone
+    // while the bottle hangs free and low — before the main lift, which then stays upright.
+    static constexpr double LEVEL_CLEAR_M        = 0.04;   // clearance lifted during leveling (m)
+    static constexpr double LEVEL_TOL_RAD        = 0.10;   // ~5.7°: leveled enough → Lifting
+    static constexpr int    LEVEL_TIMEOUT_TICKS  = 80;     // give up leveling, lift anyway
     static constexpr double LIFT_HEIGHT_M        = 0.12;
     static constexpr int    LIFT_TIMEOUT_TICKS   = 250;
     static constexpr double LIFT_CONFIRM_RISE_M  = 0.06;
-    static constexpr double LIFT_CONFIRM_HOLD_M  = 0.12;
+    static constexpr double LIFT_CONFIRM_HOLD_M  = 0.18;  // relaxed: a held bottle may pivot/tilt as it lifts
     static constexpr int    TRACK_TIMEOUT_TICKS  = 900;
     static constexpr int    TRACK_NOPROGRESS_TICKS = 150;
     static constexpr int    MAX_REP_ATTEMPTS     = 3;

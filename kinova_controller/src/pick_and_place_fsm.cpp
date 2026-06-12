@@ -44,6 +44,10 @@ namespace
 PickandPlaceFSM::PickandPlaceFSM(SpecificWorker& w, const ConfigLoader& cfg) : w_(w)
 {
     try { tip_log_         = cfg.get<bool>("Controller.tip_log");   } catch (...) {}
+    try { monitor_log_     = cfg.get<bool>("Controller.monitor_log");    } catch (...) {}
+    try { monitor_period_  = cfg.get<int> ("Controller.monitor_period"); } catch (...) {}
+    if (monitor_log_)
+        std::print("[mon] per-cycle motion monitor ON (every {} cycles)\n", monitor_period_);
     try { round_cycles_    = cfg.get<int>("Controller.round_cycles"); } catch (...) {}
     if (round_cycles_ > 0) std::print("[ui] round_cycles: stop after {} pick-and-place cycles\n", round_cycles_);
 
@@ -297,6 +301,7 @@ void PickandPlaceFSM::run_tracking(const std::array<double, Kinematics::N_ARM_JO
                 lift_target_     = g.grasp_pos + g.up_axis.normalized() * LIFT_HEIGHT_M;
                 rep_commit_epos_ = ep;
                 rep_commit_eang_ = ea;
+                bottle_at_grasp_ = w_.bottle_pos_world_;   // diag: detect bottle knocked during the grasp
                 grasp_phase_     = GraspPhase::Inserting;
                 grasp_settle_ticks_ = 0; insert_ticks_ = 0; tip_reflex_offset_ = 0.0;
                 std::print("[grasp] standoff settled (e={:.3f} m, {:.1f}°, c={:.2f}) → Inserting\n",
@@ -364,9 +369,32 @@ EFEParams PickandPlaceFSM::build_efe_params(const Eigen::Vector3d& z_des,
     p.dls_lambda        = 0.05;
     p.use_qp            = use_qp_;
     p.obs_damper_xi     = 0.5;
-    // Rotation slack (QP): orientation task-slack weighted well below position so the
-    // solver targets the rotation but does not sacrifice position to perfect it.
-    p.orient_slack      = 0.05;
+    // Rotation slack (QP): orientation task-slack weighted relative to position (1.0).
+    // During the APPROACH a low weight (0.05) is right — a hard-to-reach standoff
+    // orientation should yield as cheap slack rather than contort the arm into a
+    // singularity (which made the EE drift ~13 cm back off the standoff). But once a
+    // bottle is being CARRIED (PlaceMoving → set-down) orientation must be MAINTAINED: at
+    // 0.05 the QP abandons the upright target and the position-driven carry motion freely
+    // tilts the gripper, flopping the held bottle to ~85° and writhing the arm. The place
+    // target keeps tool+Y vertical, so the only real carry change is a yaw about vertical —
+    // which preserves uprightness PROVIDED orientation is enforced. Weight it near position
+    // for the carry so tool+Y rides vertical and the bottle stays upright.
+    //   Lifting is DELIBERATELY excluded: the lift-off starts from the low, near-singular
+    //   grasp pose, and enforcing the grasp orientation there fights the climb — the arm
+    //   stalls for ~150 cycles unable to rise. The lift keeps the low (0.05) slack so it can
+    //   leave the grasp freely; PlaceMoving then rights any residual tilt under enforcement.
+    // Leveling enforces orientation via the soft slack (it must ROTATE the canted grip level,
+    // so it needs roll/pitch freedom). Lifting instead uses the HARD no-tilt constraint below
+    // (it must HOLD level while rising) — a soft slack there only trades level vs. rise and
+    // stalls. Place transport keeps the soft enforcement that already holds the bottle upright.
+    const bool carrying = grasp_phase_ == GraspPhase::Leveling
+                       or grasp_phase_ == GraspPhase::PlaceMoving
+                       or grasp_phase_ == GraspPhase::PlaceLowering
+                       or grasp_phase_ == GraspPhase::PlaceReleasing;
+    p.orient_slack      = carrying ? 0.5 : 0.05;
+    // Vertical lift: pin ω about world X,Y to zero (hard) so the rise can't pitch the wrist
+    // and tilt the held bottle; the redundant arm finds the vertical motion that respects it.
+    p.hard_level_hold   = (grasp_phase_ == GraspPhase::Lifting);
     p.redundancy_weight = qp_redundancy_weight_;
     p.v_approach        = v_app;
     p.a_approach        = 0.60;
@@ -434,7 +462,8 @@ std::pair<double,double> PickandPlaceFSM::efe_drive(
         params.prec_ref     = field_prec_ref_;
         params.field_overlap = field_overlap_;
     }
-    auto q_dot = efe_gradient_step(*w_.kinematics_, q, w_.reach_target_, params);
+    EFEDebug dbg;
+    auto q_dot = efe_gradient_step(*w_.kinematics_, q, w_.reach_target_, params, &dbg);
     {
         double scale = 1.0;
         for (const auto& v : q_dot)
@@ -509,7 +538,104 @@ std::pair<double,double> PickandPlaceFSM::efe_drive(
         tip_log_prev_pos_ = ee_position;
         ++tip_log_cycle_;
     }
+
+    if (monitor_log_)
+        log_monitor(q, ee_position, target, e_pos, e_ang, dbg);
     return {e_pos, e_ang};
+}
+
+const char* PickandPlaceFSM::phase_name(GraspPhase p)
+{
+    switch (p)
+    {
+        case GraspPhase::Tracking:        return "Tracking";
+        case GraspPhase::Inserting:       return "Inserting";
+        case GraspPhase::Closing:         return "Closing";
+        case GraspPhase::Leveling:        return "Leveling";
+        case GraspPhase::Lifting:         return "Lifting";
+        case GraspPhase::PlaceMoving:     return "PlaceMoving";
+        case GraspPhase::PlaceLowering:   return "PlaceLowering";
+        case GraspPhase::PlaceReleasing:  return "PlaceReleasing";
+        case GraspPhase::PlaceRetreating: return "PlaceRetreating";
+        case GraspPhase::Retracting:      return "Retracting";
+    }
+    return "?";
+}
+
+// Single throttled telemetry line shared by ALL moving phases. Built to expose the two
+// reported faults at a glance:
+//   • elbow/forearm diving into the table → eTab (elbow joint height above table) and loZ
+//     (LOWEST skeleton point above table, with its link index — catches the forearm link
+//     dipping below the elbow joint, which the elbow-only table damper does not guard);
+//   • oscillation before grasp/place → Δe (per-cycle change in position error: a clean
+//     approach is monotonically negative; sign-flips = back-and-forth) plus the measured EE
+//     speed vEE and the commanded |q̇|, which stay non-zero while the arm hunts.
+//   • bottle tilt (requested) → tilt, in degrees, every cycle of every phase.
+void PickandPlaceFSM::log_monitor(const std::array<double, Kinematics::N_ARM_JOINTS>& q,
+                                  const Eigen::Vector3d& ee_position, const Eigen::Vector3d& target,
+                                  double e_pos, double e_ang, const EFEDebug& dbg)
+{
+    const long cy = mon_cycle_++;
+    // REAL elapsed loop time (wall clock), not the configured period: a hitched cycle moves
+    // the EE further, so dividing a real Δpos by the nominal period inflates vEE into spurious
+    // "oscillation". Measure dt so vEE is physical and so dt jitter itself is visible.
+    const double tnow = now_seconds();
+    const double dt   = mon_prev_time_ > 0.0 ? std::max(1e-4, tnow - mon_prev_time_)
+                                             : std::max(1, w_.getPeriod("Compute")) / 1000.0;
+    mon_prev_time_ = tnow;
+    const double de    = (mon_prev_epos_ < 1e8) ? (e_pos - mon_prev_epos_) : 0.0;
+    const double vmeas = mon_prev_ee_.has_value() ? (ee_position - mon_prev_ee_.value()).norm() / dt : 0.0;
+    mon_prev_epos_ = e_pos;
+    mon_prev_ee_   = ee_position;
+    // Dense (every-cycle) logging in the phases under investigation for oscillation —
+    // approach and retreat — so chatter is resolved instead of aliased; the slower phases
+    // keep the throttled period to stay readable.
+    const bool dense_phase = grasp_phase_ == GraspPhase::Tracking
+                          or grasp_phase_ == GraspPhase::PlaceRetreating
+                          or grasp_phase_ == GraspPhase::Retracting;
+    const int period = dense_phase ? 1 : std::max(1, monitor_period_);
+    if (cy % period != 0) return;
+
+    const Eigen::Vector3d elb = w_.kinematics_->elbow_position(q);
+    const double e_tab = elb.z() - w_.table_top_z_;
+
+    // Lowest DISTAL arm point above the table — scanned from the elbow (L4) outward, the only
+    // links that can dive into the surface; the proximal shoulder joints (L0..L3) sit at a
+    // fixed low height near the mount and would just mask the elbow. Skeleton order: 0=world
+    // origin, 1..7=joint_1..7, 8=tool; elbow=joint_4=L4. The @L index says which link is
+    // lowest, so an elbow/forearm dip (L4/L5) is distinguishable from the tool reaching down
+    // to grasp (L8, expected). eTab above reports the elbow joint specifically.
+    const auto sk = w_.kinematics_->arm_skeleton_points(q);
+    double lo_z = 1e9; int lo_link = -1;
+    for (int k = 4; k < (int)sk.size(); ++k)
+        if (sk[k].z() - w_.table_top_z_ < lo_z) { lo_z = sk[k].z() - w_.table_top_z_; lo_link = k; }
+    const Eigen::Vector3d col_lo(-0.56477, -0.056064, -0.10);
+    const Eigen::Vector3d col_hi(-0.56477, -0.056064,  1.30);
+    double col_min = 1e9;
+    for (int k = 2; k + 1 < (int)sk.size(); ++k)
+        col_min = std::min(col_min, segment_segment_distance(sk[k], sk[k+1], col_lo, col_hi) - 0.05);
+
+    double qd_norm = 0.0;
+    for (const double v : last_q_dot_cmd_) qd_norm += v * v;
+    qd_norm = std::sqrt(qd_norm);
+
+    const double tilt_deg = bottle_tilt_rad() * 57.29578;
+
+    // Per-joint commanded q̇: the cleanest oscillation signal. Sign-flips cycle-to-cycle here
+    // = the CONTROLLER is chattering (resolved-rate instability); smooth q̇ with a shaking arm
+    // = a tracking/bridge problem instead. |v|/|ω| are the commanded twist magnitudes (the
+    // controller's INTENT); if the twist itself oscillates the cause is upstream (EE-estimate
+    // jumps or the preference/error term), not the solve.
+    std::print("[mon] cy={:5d} {:<15} dt={:.3f} e={:.4f}m {:5.1f}° de={:+.4f} vEE={:.3f} "
+               "|v|={:.3f} |w|={:.3f} mu={:.4f} | "
+               "qd=[{:+.2f} {:+.2f} {:+.2f} {:+.2f} {:+.2f} {:+.2f} {:+.2f}] | "
+               "ee({:+.3f},{:+.3f},{:+.3f}) eTab={:+.3f} loZ={:+.3f}@L{} col={:+.3f} tilt={:.1f}°\n",
+               cy, phase_name(grasp_phase_), dt, e_pos, e_ang * 57.29578, de, vmeas,
+               dbg.v_des.norm(), dbg.omega_des.norm(), dbg.manip,
+               last_q_dot_cmd_[0], last_q_dot_cmd_[1], last_q_dot_cmd_[2], last_q_dot_cmd_[3],
+               last_q_dot_cmd_[4], last_q_dot_cmd_[5], last_q_dot_cmd_[6],
+               ee_position.x(), ee_position.y(), ee_position.z(),
+               e_tab, lo_z, lo_link, col_min, tilt_deg);
 }
 
 // ── Grasp-target perception ──────────────────────────────────────────────────
@@ -570,7 +696,9 @@ std::optional<PickandPlaceFSM::SideGraspTarget> PickandPlaceFSM::compute_side_gr
     out.x_tool_des    = x_tool_des;
     out.up_axis       = z_bot;
     out.top_down      = top_down;
-    out.grasp_pos     = grasp_pt;
+    // Seat the tool SHORT of the bottle axis (along −approach) so the body stays in the finger
+    // gap, not pushed past the back-less gripper. Standoff is still measured from the axis.
+    out.grasp_pos     = grasp_pt - z_tool_des * (top_down ? 0.0 : GRASP_DEPTH_BACKOFF_M);
     out.stand_off_pos = grasp_pt - z_tool_des * APPROACH_STANDOFF_M;
 
     static bool reach_logged = false;
@@ -700,6 +828,7 @@ PickandPlaceFSM::Segment PickandPlaceFSM::seg_of(GraspPhase p)
         case GraspPhase::Retracting:      return SEG_APPROACH;
         case GraspPhase::Inserting:
         case GraspPhase::Closing:         return SEG_INSERT;
+        case GraspPhase::Leveling:
         case GraspPhase::Lifting:         return SEG_LIFT;
         case GraspPhase::PlaceMoving:
         case GraspPhase::PlaceLowering:
@@ -953,6 +1082,12 @@ std::pair<float,float> PickandPlaceFSM::tip_forces() const
     catch (const Ice::Exception&) { return {0.0f, 0.0f}; }
 }
 
+std::pair<float,float> PickandPlaceFSM::pad_forces() const
+{
+    try { const auto gs = w_.kinovaarm_proxy->getGripperState(); return {gs.lforce, gs.rforce}; }
+    catch (const Ice::Exception&) { return {0.0f, 0.0f}; }
+}
+
 float PickandPlaceFSM::gripper_force() const
 {
     try { const auto gs = w_.kinovaarm_proxy->getGripperState(); return gs.lforce + gs.rforce; }
@@ -1074,14 +1209,42 @@ void PickandPlaceFSM::run_grasp_phases(const std::array<double, Kinematics::N_AR
         grasp_force_ticks_ = (f > GRASP_FORCE_THRESH) ? grasp_force_ticks_ + 1 : 0;
         if (grasp_force_ticks_ >= GRASP_FORCE_HOLD_TICKS)
         {
-            grasp_phase_ = GraspPhase::Lifting; reflex_count_ = 0; grasp_force_ticks_ = 0; lift_ticks_ = 0;
+            // Straight to Lifting under the hard level-hold (the QP keeps the gripper level on
+            // its own). The separate Leveling phase is bypassed: rotating the gripper to level
+            // near the table dragged/pivoted the bottle (tilt 1°→11°) instead of helping.
+            grasp_phase_ = GraspPhase::Lifting; reflex_count_ = 0; grasp_force_ticks_ = 0;
+            level_ticks_ = 0; lift_ticks_ = 0;
             bottle_z_at_lift_start_ = w_.bottle_pos_world_.z();
+            { const auto [lf, rf] = pad_forces(); close_lf_ = lf; close_rf_ = rf; }  // diag: grip symmetry
             sample_place_spot();
             blend_min_dist_ = 1e9;
             std::print("[grasp] contact (f={:.2f}, held {} cy) → Lifting\n", f, GRASP_FORCE_HOLD_TICKS);
         }
         else if (++closing_ticks_ > CLOSING_TIMEOUT_TICKS)
         { log_rep_outcome(false, 0.0, 0.0); miss_or_give_up("no contact"); }
+        break;
+    }
+
+    case GraspPhase::Leveling:
+    {
+        // Post-grasp: rotate the (~15° canted) grip to the level grasp frame while lifting a
+        // small clearance off the table, with orientation ENFORCED (carrying-phase slack). The
+        // bottle hangs free and low, so leveling the gripper re-stands it BEFORE the main lift —
+        // decoupling 'rotate to level' from 'rise' (doing both at once stalled the solve).
+        const auto& lg = latched_grasp_;
+        w_.gripper_command_ = 0.0f;   // hold the grasp
+        const Eigen::Vector3d level_target = lg.grasp_pos + lg.up_axis.normalized() * LEVEL_CLEAR_M;
+        const auto [e_pos, e_ang] = efe_drive(q, ee_position, level_target,
+                                              lg.z_tool_des, lg.x_tool_des, 0.10);
+        (void) e_pos;
+        if (e_ang < LEVEL_TOL_RAD or ++level_ticks_ > LEVEL_TIMEOUT_TICKS)
+        {
+            const double tilt = bottle_tilt_rad() * 57.29578;
+            grasp_phase_ = GraspPhase::Lifting; lift_ticks_ = 0;
+            std::print("[grasp] leveled (gripper {:.1f}°, bottle tilt {:.1f}°{}) → Lifting\n",
+                       e_ang * 57.29578, tilt,
+                       level_ticks_ > LEVEL_TIMEOUT_TICKS ? ", TIMEOUT" : "");
+        }
         break;
     }
 
@@ -1094,6 +1257,22 @@ void PickandPlaceFSM::run_grasp_phases(const std::array<double, Kinematics::N_AR
         (void) e_ang;
         const double rise   = w_.bottle_pos_world_.z() - bottle_z_at_lift_start_;
         const double xy_gap = (w_.bottle_pos_world_.head<2>() - ee_position.head<2>()).norm();
+        // Failure diagnostics, emitted once per lift outcome. Knock = how far the bottle's xy
+        // moved between grasp-commit and now (the gripper shoved it); close(L,R) + asym = grip
+        // strength/symmetry at contact; holdF = grip force now. For a heavy object a clean
+        // commit with weak/asymmetric grip and a large knock is the slip signature.
+        auto lift_diag = [&](const char* outcome)
+        {
+            const auto [hl, hr] = pad_forces();
+            const double knock = (w_.bottle_pos_world_.head<2>() - bottle_at_grasp_.head<2>()).norm();
+            const double tilt  = bottle_tilt_rad() * 57.29578;
+            const float sum = close_lf_ + close_rf_;
+            const double asym = sum > 1e-3f ? std::abs(close_lf_ - close_rf_) / sum : 0.0;
+            std::print("[diag] lift={} c_lift={:.2f} commit_ang={:.1f}° close(L,R)=({:.2f},{:.2f}) "
+                       "asym={:.2f} holdF=({:.2f},{:.2f}) tilt={:.1f}° knock={:.3f}m rise={:.3f}m gap={:.3f}m\n",
+                       outcome, c_seg(SEG_LIFT), rep_commit_eang_ * 57.29578, close_lf_, close_rf_,
+                       asym, hl, hr, tilt, knock, rise, xy_gap);
+        };
         // Confirm on the ACTUAL outcome — the bottle is genuinely up and still co-located —
         // the moment it's true, instead of first waiting for the EE to reach the full lift
         // target (an over-strict kinematic proxy: a slow lift tripped the timeout even
@@ -1101,6 +1280,7 @@ void PickandPlaceFSM::run_grasp_phases(const std::array<double, Kinematics::N_AR
         // we just don't BLOCK convergence on reaching it.
         if (rise >= LIFT_CONFIRM_RISE_M and xy_gap <= LIFT_CONFIRM_HOLD_M)
         {
+            lift_diag("HELD");
             log_rep_outcome(true, rise, xy_gap);
             // A confirmed grasp credits the three legs that produced it, each weighted by
             // how cleanly ITS own outcome matched the model: the approach by its terminal
@@ -1117,15 +1297,17 @@ void PickandPlaceFSM::run_grasp_phases(const std::array<double, Kinematics::N_AR
             std::print("[place] lifted → carry to spot ({:.3f},{:.3f},{:.3f}) → PlaceMoving\n",
                        place_pos_.x(), place_pos_.y(), place_pos_.z());
         }
-        // EE reached the lift target but the bottle did NOT come up → closed on air.
+        // EE reached the lift target but the bottle did NOT come up → closed on air / slipped.
         else if (via_reached(e_pos))
         {
+            lift_diag("SLIP");
             std::print("[grasp] MISS — bottle not held (rose {:.3f} m, gap {:.3f} m) → reopen\n", rise, xy_gap);
             log_rep_outcome(false, rise, xy_gap);
             miss_or_give_up("bottle not held");
         }
         else if (++lift_ticks_ > LIFT_TIMEOUT_TICKS)
         {
+            lift_diag("STALL");
             log_rep_outcome(false, rise, 0.0);
             miss_or_give_up("lift stalled");
         }

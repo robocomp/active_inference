@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <vector>
 #include <proxsuite/proxqp/dense/dense.hpp>
 
@@ -186,11 +187,17 @@ namespace
                  double lambda_sq,
                  const Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1>& g_lin,
                  const Eigen::MatrixXd& C_damp, const Eigen::VectorXd& l, const Eigen::VectorXd& u,
-                 double orient_slack = 1.0)
+                 double orient_slack = 1.0,
+                 const Eigen::MatrixXd& C_hard = Eigen::MatrixXd())
     {
         constexpr int N = Kinematics::N_ARM_JOINTS;
         const int dim  = N + 6;                            // q̇ (7) + slack δ (6)
         const int n_in = static_cast<int>(C_damp.rows());
+        // Extra HARD equality rows on q̇ (no slack): C_hard q̇ = 0. Used for the lift's
+        // no-tilt constraint (ω about world X,Y pinned to 0). The task equality (6 rows,
+        // J6 q̇ − δ = ξ) stays slacked; these rows are unconditional.
+        const int n_hard = static_cast<int>(C_hard.rows());
+        const int n_eq   = 6 + n_hard;
 
         Eigen::MatrixXd H = Eigen::MatrixXd::Zero(dim, dim);
         H.topLeftCorner(N, N) = lambda_sq * Eigen::MatrixXd::Identity(N, N);      // λ² I on q̇
@@ -202,12 +209,15 @@ namespace
         H.bottomRightCorner(6, 6) = w_delta.asDiagonal();                         // W_δ on δ
         Eigen::VectorXd g = Eigen::VectorXd::Zero(dim);
         g.head(N) = g_lin;
-        Eigen::MatrixXd A = Eigen::MatrixXd::Zero(6, dim);                        // [J6 | −I₆]
-        A.leftCols(N)  = J6;
-        A.rightCols(6) = -Eigen::MatrixXd::Identity(6, 6);
-        const Eigen::VectorXd b = twist;
+        Eigen::MatrixXd A = Eigen::MatrixXd::Zero(n_eq, dim);                     // [J6 | −I₆] (+ hard)
+        A.topLeftCorner(6, N)  = J6;
+        A.block(0, N, 6, 6)    = -Eigen::MatrixXd::Identity(6, 6);
+        if (n_hard > 0)
+            A.bottomLeftCorner(n_hard, N) = C_hard;       // hard rows act on q̇ only (δ cols = 0)
+        Eigen::VectorXd b = Eigen::VectorXd::Zero(n_eq);
+        b.head<6>() = twist;                              // hard rows: = 0
 
-        proxsuite::proxqp::dense::QP<double> qp(dim, 6, n_in);
+        proxsuite::proxqp::dense::QP<double> qp(dim, n_eq, n_in);
         qp.settings.eps_abs = 1e-10;
         qp.settings.eps_rel = 0.0;
         qp.settings.verbose = false;
@@ -220,7 +230,16 @@ namespace
             qp.init(H, g, A, b, C, l, u);
         }
         qp.solve();
-        return qp.results.x.head(N);
+        const Eigen::Matrix<double, N, 1> qd = qp.results.x.head(N);
+        if (n_hard > 0)
+        {
+            const Eigen::VectorXd resid = A.bottomRows(n_hard).leftCols(N) * qd;
+            static long dbg = 0;
+            if (dbg++ % 10 == 0)
+                std::fprintf(stderr, "[qp-hard] status=%d  hard_resid=%.5f  |qd|=%.4f\n",
+                             static_cast<int>(qp.results.info.status), resid.norm(), qd.norm());
+        }
+        return qd;
     }
 }
 
@@ -228,7 +247,8 @@ std::array<double, Kinematics::N_ARM_JOINTS> efe_gradient_step(
     Kinematics& kin,
     const std::array<double, Kinematics::N_ARM_JOINTS>& q,
     const Eigen::Vector3d& x_target,
-    const EFEParams& params)
+    const EFEParams& params,
+    EFEDebug* dbg)
 {
     // 1. Pose + 6×7 Jacobian (linear rows 0-2, angular rows 3-5).
     const auto pose = kin.tool_pose(q);
@@ -440,7 +460,16 @@ std::array<double, Kinematics::N_ARM_JOINTS> efe_gradient_step(
         const double w = params.redundancy_weight > 0.0 ? params.redundancy_weight : lambda_sq;
         const Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1> g_lin =
             -w * (params.gain_mu * grad_mu + params.gain_elbow * grad_el);
-        q_dot = solve_neo_qp(J6, twist, lambda_sq, g_lin, C, l, u, params.orient_slack);
+        // Hard pure-translation lift: pin the WHOLE EE angular velocity to 0 (all 3 rows of the
+        // world angular Jacobian), so the rise carries the gripper straight up holding its exact
+        // orientation — no pitch/roll (tilt) AND no yaw. (Pinning only roll/pitch left yaw free,
+        // and the slacked orientation task yawed the gripper hard, precessing/slipping the held
+        // bottle around several axes.) 7 DoF − 3 position − 3 orientation-hold = 1 free DoF, so a
+        // straight-up translation with fixed orientation stays feasible.
+        Eigen::MatrixXd C_hard(0, Kinematics::N_ARM_JOINTS);
+        if (params.hard_level_hold)
+            C_hard = J_ang;
+        q_dot = solve_neo_qp(J6, twist, lambda_sq, g_lin, C, l, u, params.orient_slack, C_hard);
     }
     else
     {
@@ -452,6 +481,16 @@ std::array<double, Kinematics::N_ARM_JOINTS> efe_gradient_step(
             q_dot += params.gain_mu * (grad_mu - J6.transpose() * Q6_ldlt.solve(J6 * grad_mu));
         if (params.gain_elbow > 0.0)
             q_dot += params.gain_elbow * (grad_el - J6.transpose() * Q6_ldlt.solve(J6 * grad_el));
+    }
+
+    // Capture controller INTENT before the null-space/obstacle extras and the velocity
+    // clip mangle it: the commanded twist, the manipulability, and the pure task q̇.
+    if (dbg != nullptr)
+    {
+        dbg->v_des      = v_des;
+        dbg->omega_des  = omega_des;
+        dbg->manip      = yoshikawa_mu(J6);
+        dbg->q_dot_task = q_dot;
     }
 
     // 3c. Soft obstacle repulsions (potential field), added before scaling so the

@@ -117,6 +117,17 @@ struct EFEParams
      *  the original equal-weight behaviour. */
     double orient_slack = 1.0;
 
+    /** Hard pure-translation constraint (QP path only). When true, the FULL EE angular
+     *  velocity (all 3 components, ω about world X, Y AND Z) is pinned to ZERO as a HARD
+     *  equality in the QP, so the EE can only TRANSLATE — the gripper carries its exact
+     *  orientation rigidly. Used during the LIFT: the rise then cannot pitch/roll the wrist
+     *  (tilting the held bottle) NOR yaw it (which precessed/slipped the bottle around several
+     *  axes). Unlike a soft orient_slack weight (which only TRADES orient vs. rise and stalls
+     *  in a degenerate equilibrium), the constraint forces fixed orientation and lets the
+     *  redundant 7-DoF arm (1 DoF spare after 3 position + 3 orient-hold) find the straight-up
+     *  motion that respects it. Ignored on DLS. */
+    bool hard_level_hold = false;
+
     /** QP path only: weight on the μ/elbow LINEAR term, g_lin = −w·Σ gain·∇. The free-
      *  space redundancy contribution is (w/λ²)·gain·N·∇, so w = λ² reproduces the old
      *  null-space projection (redundancy strictly off the task), while w > λ² lets μ/elbow
@@ -256,6 +267,20 @@ struct EFEParams
     double          bottle_margin = 0.04;
 };
 
+/** Optional diagnostics filled by efe_gradient_step when a non-null pointer is passed.
+ *  Lets the caller see the controller's INTENT (the commanded Cartesian twist and the
+ *  raw task q̇ before null-space/obstacle/clip post-processing) separately from the final
+ *  q̇ — the only way to tell "controller commands an oscillation" (twist itself chatters)
+ *  from "controller smooth, the resolved-rate q̇ chatters near a singularity". */
+struct EFEDebug
+{
+    Eigen::Vector3d v_des       = Eigen::Vector3d::Zero();   ///< desired linear twist (m/s)
+    Eigen::Vector3d omega_des   = Eigen::Vector3d::Zero();   ///< desired angular twist (rad/s)
+    double          manip       = 0.0;                        ///< Yoshikawa μ at this q
+    Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1> q_dot_task =
+        Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1>::Zero();  ///< pure task q̇ (pre extras)
+};
+
 /**
  * One step of EFE-gradient on the arm.
  *
@@ -263,6 +288,7 @@ struct EFEParams
  * @param q        Current 7 arm joint angles, rad.
  * @param x_target Desired tool_frame position, world frame, m.
  * @param params   Gain/limit parameters.
+ * @param dbg      Optional out: controller intent (twist, μ, task q̇). Ignored if null.
  *
  * @return         7-vector of commanded arm joint velocities, rad/s, clipped.
  *                 Index order matches q (joint_1..joint_7).
@@ -271,4 +297,5 @@ std::array<double, Kinematics::N_ARM_JOINTS> efe_gradient_step(
     Kinematics& kin,
     const std::array<double, Kinematics::N_ARM_JOINTS>& q,
     const Eigen::Vector3d& x_target,
-    const EFEParams& params = {});
+    const EFEParams& params = {},
+    EFEDebug* dbg = nullptr);

@@ -97,7 +97,7 @@ round_cycles = 10
 # here without recompiling; relaunch to apply. Startup prints [rest-pose] metrics
 # (EE pos, upperarm_dz≈0 = first link parallel to table, toolY_up≈+1 = camera up).
 rest_pose = "1.5705 0.0 3.1415 1.0 0.0 1.65 -1.5705"   # vertical-shoulder mount: in sync with kinova-bridge startup pose
-grasp_align_tol_deg = 15.0  # approach-axis only metric (tool+Z angle); 15° gives headroom for the new mount
+grasp_align_tol_deg = 11.0  # commit near the ~9.5° alignment floor (kinematic plateau at this grasp pose): 8° never reaches and stalls; 15° committed early at the worst-allowed cant. 11° = best reachable alignment without stalling.
 
 # ── Skill-learning instrumentation ───────────────────────────────────────────
 # Probe each pick with a small STRUCTURED perturbation of the grasp command
