@@ -165,6 +165,13 @@ private:
     static constexpr double BOTTLE_TOP_GRASP_FRAC    = 0.88;
     bool   approach_hold_logged_ = false;
     bool   approach_respawn_done_ = false;
+    // Lift-aware azimuth chosen once per pick episode (the symmetric-cylinder approach direction
+    // whose manipulability stays high through BOTH the grasp and the straight-up lift).
+    std::optional<Eigen::Vector3d> grasp_azimuth_z_;
+    int    azimuth_retries_ = 0;   // real-μ standoff guard re-approaches this episode
+    static constexpr double LIFT_MU_MIN        = 0.07;  // commit only above this manipulability
+    static constexpr int    MAX_AZIMUTH_RETRIES = 4;
+    static constexpr double AZIMUTH_RETRY_STEP  = 0.35; // ~20° azimuth rotation per re-approach
     long   ctrl_cycle_ = 0;
     double grasp_align_tol_rad_ = 0.14;
 

@@ -293,6 +293,26 @@ void PickandPlaceFSM::run_tracking(const std::array<double, Kinematics::N_ARM_JO
         }
         if (ep < REACH_TOLERANCE_M and ea < grasp_align_tol_rad_)
         {
+            // Real-μ standoff guard (IK-free safety net for the lift-aware azimuth). We are now
+            // at the standoff with the ACTUAL arm config, so measure the real manipulability. If
+            // it is too low, the IK over-predicted for this azimuth and the lift would twist —
+            // rotate the azimuth and re-approach (re-measured next time we arrive). Capped, then
+            // commit best-effort. This catches the cases the look-ahead IK got wrong.
+            const auto J6m = w_.kinematics_->arm_jacobian_full(q);
+            const double mu_now = std::sqrt(std::max(0.0, (J6m * J6m.transpose()).determinant()));
+            if (mu_now < LIFT_MU_MIN and azimuth_retries_ < MAX_AZIMUTH_RETRIES
+                and grasp_azimuth_z_.has_value())
+            {
+                ++azimuth_retries_;
+                grasp_azimuth_z_ = (Eigen::AngleAxisd(AZIMUTH_RETRY_STEP, g.up_axis.normalized())
+                                    * grasp_azimuth_z_.value()).normalized();
+                grasp_settle_ticks_ = 0;
+                track_best_dist_ = 1e9; track_noprog_ticks_ = 0;
+                std::print("[grasp] standoff μ={:.4f} < {:.3f} → rotate azimuth, re-approach ({}/{})\n",
+                           mu_now, LIFT_MU_MIN, azimuth_retries_, MAX_AZIMUTH_RETRIES);
+                ++ctrl_cycle_;
+                return;
+            }
             // Skilled commits sooner (shorter settle dwell); novice re-verifies longer.
             const long settle_need = std::max(1L, std::lround(GRASP_SETTLE_TICKS * (1.0 - c)));
             if (++grasp_settle_ticks_ >= settle_need)
@@ -684,6 +704,41 @@ std::optional<PickandPlaceFSM::SideGraspTarget> PickandPlaceFSM::compute_side_gr
         }
     }
 
+    // ── Lift-aware predictive azimuth (anticipation) ──────────────────────────────────────
+    // The bottle is a symmetric cylinder, so any approach azimuth about its axis is an equally
+    // valid side grasp — but most put the wrist near a singularity where the straight-up LIFT
+    // can't pull (μ collapses, the arm twists and tips the bottle). So LOOK AHEAD: score
+    // candidate azimuths by the manipulability at BOTH the grasp pose AND the lift endpoint, and
+    // commit to one that stays manipulable through the lift. Cached per episode (bottle static).
+    // This is the fix for committing to a grasp the arm then can't lift from.
+    if (not top_down)
+    {
+        if (not grasp_azimuth_z_.has_value())
+        {
+            const Eigen::Vector3d lift_up = Eigen::Vector3d::UnitZ();
+            double best = -1.0;
+            Eigen::Vector3d best_z = z_tool_des;
+            for (int i = -16; i <= 16; ++i)   // ±120° about the bottle axis, 7.5° steps
+            {
+                const Eigen::Vector3d zt =
+                    (Eigen::AngleAxisd(i * (M_PI / 24.0), z_bot) * z_tool_des).normalized();
+                Eigen::Vector3d xt = z_bot.cross(zt);
+                if (xt.norm() < 1e-3) continue;
+                xt.normalize();
+                const Eigen::Vector3d gp = body_centre - zt * GRASP_DEPTH_BACKOFF_M;
+                const ReachScore sg = predict_reach(gp,                          zt, xt, w_.cur_q_);
+                const ReachScore sl = predict_reach(gp + lift_up * LIFT_HEIGHT_M, zt, xt, w_.cur_q_);
+                if (not sg.feasible or not sl.feasible) continue;
+                if (sg.col_clear < 0.02 or sl.col_clear < 0.02) continue;   // keep clear of the column
+                const double score = std::min(sg.manip, sl.manip);          // weakest point of grasp→lift
+                if (score > best) { best = score; best_z = zt; }
+            }
+            grasp_azimuth_z_ = best_z;
+            std::print("[grasp] lift-aware azimuth: min(grasp,lift) μ={:.4f}\n", best);
+        }
+        z_tool_des = grasp_azimuth_z_.value();
+    }
+
     if (std::abs(rep_perturb_.dazi) > 1e-9 and not top_down)
         z_tool_des = (Eigen::AngleAxisd(rep_perturb_.dazi, z_bot) * z_tool_des).normalized();
     Eigen::Vector3d x_tool_des = z_bot.cross(z_tool_des);
@@ -974,6 +1029,8 @@ void PickandPlaceFSM::begin_rep_probe()
 {
     rep_track_ticks_ = 0;
     rep_attempts_    = 0;
+    grasp_azimuth_z_.reset();          // re-pick the lift-aware azimuth for the new bottle pose
+    azimuth_retries_ = 0;
     track_stuck_ticks_ = 0;
     track_noprog_ticks_ = 0; track_best_dist_ = 1e9;
     force_top_down_ = false;
