@@ -466,6 +466,57 @@ The live controller (`Controller.solver = "qp"`) is now this NEO QP; `"dls"` sel
 closed-form fallback. proxQP (`/opt/openrobots`, header-only) solves the 13-var QP each
 20 ms cycle with no timing impact.
 
+### 4.10 Hard pose-subspace constraints: the pure-translation lift
+
+The slacked-task NEO form lets a phase pin an arbitrary linear subspace of the EE twist as a
+**hard equality on `q̇`**, independent of the slacked pragmatic task (`EFEParams.hard_level_hold`).
+The **lift** uses this. After grasping, the bottle must be raised straight up while the gripper is
+held **rigidly**: any wrist rotation lets the off-axis-held 0.5 kg mass pivot in the friction grip
+and tilt. A *soft* orientation weight (`orient_slack`) only **trades** "stay level" against "rise"
+and stalls in a degenerate equilibrium (the EE neither rises nor levels — observed). So during
+`Lifting` we append the rows
+
+$$ J_\omega\,\dot q = 0,\qquad J_\omega = \text{the three world-frame angular rows of }J_6, $$
+
+making the achievable twist **pure translation**: the EE can only move linearly, carrying its exact
+grasp orientation. With 3 position + 3 orientation-hold = 6 task rows on 7 joints, one redundant DOF
+remains, so a straight-up translation stays feasible (verified: hard-constraint residual ≡ 0, the
+gripper holds orientation to machine precision while rising). **AIF reading:** a hard constraint is
+the **infinite-precision limit** of a Gaussian preference — pinning `ω` is "the orientation
+preference has `Π→∞`". A phase is therefore a *precision-structured preference*, and the soft/hard
+knobs (`orient_slack ∈ (0,∞)`) are one continuum, not two mechanisms.
+
+### 4.11 Anticipatory EFE: a phase's preference set by the *next* phase's expected free energy
+
+Greedy phase selection minimises free energy **now** ("reach this target"). But a grasp pose that
+is locally fine can leave the arm where the **lift** is near-singular — manipulability `μ` collapses
+`0.09→0` and the pure-translation solve (§4.10) thrashes, twisting the bottle. The fix is the active-
+inference **policy** principle: select to minimise **expected free energy over the policy** (the
+*sequence* of phases), not instantaneous free energy.
+
+The bottle is a symmetric cylinder, so the approach **azimuth** `θ` about its axis is a free choice
+(a one-parameter family of equally-valid grasps). For each candidate `θ` we predict, via DLS-IK
+(`predict_reach`), the configuration at **both** the grasp pose and the lift endpoint, and score
+
+$$ S(\theta)=\min\big(\mu(q_{\text{grasp}}(\theta)),\,\mu(q_{\text{lift}}(\theta))\big), $$
+
+committing to `argmax_θ S(θ)` (cached per episode). This is a **one-step EFE-over-policies**: the
+grasp's preference (its azimuth) is shaped by a generative model of the *next* phase's surprise — a
+low-`μ` lift is high expected free energy, it *will* fail. Greedy grasp had low free energy now but
+high EFE; the anticipatory grasp trades a hair of grasp-optimality for a *feasible policy*. An
+IK-free **real-`μ` guard** at the standoff (rotate the azimuth + re-approach if the actual
+`μ < μ_min`) backstops the cases the predictive IK over-scores — the IK is trusted only for
+*relative* ranking (`μ` is exact given a config), never absolute reachability. Result: **8/8 clean
+vertical lifts** vs ~0/6 greedy.
+
+This is the controller's first concrete instance of the sequencer principle *"each phase anticipates
+and frames the next"* (`[[anticipatory-efe-sequencer]]`). Generalised: every phase's preferred
+outcome — **and the coarticulated velocity at the handoff** — is set by the requirements of the
+phase that follows; the boundary velocity preference is not zero (stop) but points into the next via
+(the per-via-precision preference field). Anticipation and execution-time reduction are then the
+**same** property: a phase that ends where the next begins has neither stop-and-go nor dead-end
+recovery.
+
 ---
 
 ## 5. Parameters (with roles)
@@ -515,9 +566,14 @@ closed-form fallback. proxQP (`/opt/openrobots`, header-only) solves the 13-var 
 
 **Honest caveats (where it is AIF-*flavoured* engineering)**
 
-- There is **no explicit policy posterior** `σ(−G)` over a set of policies and no
-  Monte-Carlo rollout of `G`. This is a single-policy, continuous-time
-  controller — the gradient-descent limit of EFE minimisation, not a tree search.
+- There is **no full policy posterior** `σ(−G)` over a deep policy tree and no
+  Monte-Carlo rollout. The continuous control law is single-policy (the gradient-descent
+  limit of EFE minimisation). **But** the sequencer now does a genuine **one-step
+  EFE-over-policies** at the grasp→lift boundary (§4.11): it scores a candidate set of
+  grasp azimuths by the *predicted* manipulability of the downstream lift and commits to
+  the `argmax` — a discrete `argmax_θ` over expected downstream surprise, not a softmax
+  posterior, but a real look-ahead rather than a greedy pick. The roadmap (`§9`,
+  `[[anticipatory-efe-sequencer]]`) extends this to every phase boundary.
 - The epistemic term is a **proxy** (manipulability), not a literally computed
   expected information gain integral.
 - The DLS, uniform scaling, and barrier are standard robotics constructs; the AIF

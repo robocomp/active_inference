@@ -138,6 +138,7 @@ PickandPlaceFSM::PickandPlaceFSM(SpecificWorker& w, const ConfigLoader& cfg) : w
     try { gripper_open_conf_     = cfg.get<double>("Controller.gripper_open_conf");        } catch (...) {}
     try { release_ticks_         = cfg.get<int>   ("Controller.release_ticks");            } catch (...) {}
     try { grasp_align_tol_rad_   = cfg.get<double>("Controller.grasp_align_tol_deg") * M_PI / 180.0; } catch (...) {}
+    try { align_tol_conf_gain_   = cfg.get<double>("Controller.align_tol_conf_gain"); } catch (...) {}
     try { predictive_place_      = cfg.get<bool>  ("Controller.predictive_place");          } catch (...) {}
     if (predictive_place_) std::print("[predict] predictive place-spot selection ON\n");
     try { predictive_grasp_      = cfg.get<bool>  ("Controller.predictive_grasp");          } catch (...) {}
@@ -291,7 +292,14 @@ void PickandPlaceFSM::run_tracking(const std::array<double, Kinematics::N_ARM_JO
             miss_or_give_up("not converging");
             return;
         }
-        if (ep < REACH_TOLERANCE_M and ea < grasp_align_tol_rad_)
+        // Orientation-commit gate, WIDENED by approach skill (anticipatory; FSM.md §5D). The
+        // approach is orientation-bound: the camera-up frame crawls asymptotically to the tight
+        // gate, ~75% of the episode. A skilled approach commits at a LOOSER e_ang and hands the
+        // residual alignment to the insert — which runs the SAME orientation target and finishes
+        // it while travelling. Safe now that (i) the lift-aware azimuth makes the lift cant-
+        // insensitive and (ii) the insert overlaps the convergence. c=0 ⇒ the base (tight) gate.
+        const double align_tol = grasp_align_tol_rad_ * (1.0 + align_tol_conf_gain_ * c);
+        if (ep < REACH_TOLERANCE_M and ea < align_tol)
         {
             // Real-μ standoff guard (IK-free safety net for the lift-aware azimuth). We are now
             // at the standoff with the ACTUAL arm config, so measure the real manipulability. If

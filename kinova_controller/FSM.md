@@ -112,6 +112,9 @@ precision across the whole cycle.
   - `standoff_collapse·c` slides the Tracking waypoint toward the grasp → **less creep**;
   - `blend_radius·c` → **more coarticulation** (fluidity);
   - settle dwell `GRASP_SETTLE_TICKS·(1−c)` → **commits sooner**;
+  - **orientation-commit gate widens with `c`** → the skilled approach commits at a looser
+    `e_ang` and lets the insert finish the alignment → **cuts the orientation crawl** (the
+    approach's dominant time cost); anticipatory, see (D);
   - observation period grows with `c` → **samples vision less** (closed-loop → open-loop).
 
 One knob takes a novice (slow, careful, closed-loop) to a skilled agent (fast, collapsed, open-loop).
@@ -126,7 +129,8 @@ Overrides that fire on sensed conditions, independent of skill:
 ### (C) Grasp-frame orientation — pin the FULL frame, not yaw-free
 `compute_side_grasp_target()` returns a fully-determined grasp frame: tool **+Z** = approach
 (`z_tool_des`), tool **+X** = finger-closing (`x_tool_des = z_bot × z_tool_des`), tool **+Y** = up.
-The azimuth (which side to approach from) is already chosen there to keep the forearm off the mast,
+The azimuth (which side to approach from) is chosen **anticipatorily** — see (D) below — to keep the
+*downstream lift* manipulable (not just the forearm off the mast),
 so **all three axes are committed** and the EFE step must pin the whole frame:
 `make_params` sets `p.align_tool_y = false` ⇒ `efe_gradient` takes the full-frame branch
 (`R_des = [x⟂, z×x, z]`), driving tool +X → `x_tool_des` so the jaws seat **⟂ the approach** and
@@ -142,6 +146,32 @@ straddle the body.
 > orientation. The "any azimuth grasps a cylinder" intuition is true only for *choosing the side*;
 > once the standoff is fixed the yaw must orient the jaws ⟂ the approach. See
 > `[[grasp-yaw-free-misorient-bug]]`.
+
+### (D) Anticipatory selection — each phase frames the next (EFE over the policy)
+The sequencer's organising principle: a phase chooses its preference to minimise the **expected**
+free energy of the *next* phase, not its own free energy now (`[[anticipatory-efe-sequencer]]`,
+`EFE_CONTROLLER_MATH.md §4.11`). Two instances are live:
+
+- **Grasp anticipates lift (azimuth selection).** Because the cylinder is symmetric, the approach
+  azimuth is free. `compute_side_grasp_target()` sweeps candidate azimuths (±120°, 7.5° steps) and
+  scores each by `min(μ_grasp, μ_lift)` — the *weakest* manipulability across grasp **and** the
+  straight-up lift endpoint (`predict_reach` IK) — committing to the `argmax` (cached per episode,
+  `grasp_azimuth_z_`). This stopped the arm grabbing in a pose it then couldn't lift from (μ
+  collapsing `0.09→0`, the bottle twisting to 40°). An IK-free **real-μ standoff guard** rotates the
+  azimuth + re-approaches if the *actual* μ at the standoff `< LIFT_MU_MIN`, backstopping IK
+  over-scores. → **8/8 clean vertical lifts** vs ~0/6 greedy.
+- **Lift holds orientation as a hard constraint.** `Lifting` pins the whole EE angular velocity to
+  zero (`hard_level_hold`) so the rise is a pure translation — the infinite-precision limit of the
+  orientation preference (`EFE §4.10`).
+
+> **Next (in progress): the approach anticipates the insert.** The approach is **orientation-bound**
+> — position reaches the standoff fast, then the camera-up frame *crawls* asymptotically to the tight
+> commit gate (`grasp_align_tol_deg`), ~75% of the episode time, with `c_approach` already saturated
+> so the *speed* knob is maxed. Since (i) the lift no longer cares about the residual cant and (ii)
+> the insert runs the *same* orientation target and so finishes the alignment while travelling, the
+> commit gate is being **wired to `c_approach`**: a skilled approach commits with a **looser**
+> orientation gate and hands the residual to the insert — precision learning applied to the
+> *orientation-commit tolerance* (a precision), not just speed.
 
 ---
 
@@ -166,6 +196,7 @@ Candidates to expose to **online / opportunistic learning** (per-rep precision l
 | Knob | Class | Why |
 |---|---|---|
 | `standoff_collapse` | **learnable** | fluidity/time trade-off; already skill-scheduled — learn the schedule |
+| orientation-commit gate (`grasp_align_tol`) | **learnable** | the approach's *dominant* time cost; skilled → looser gate, insert finishes the alignment. A precision, anticipatory (set by what the insert tolerates) |
 | `blend_radius` | **learnable** | coarticulation amount; swept optimum 0.04, but scene-dependent |
 | per-leg speeds (Track/Lift/Place) | **learnable** | time vs. reliability; reward = cycle-time − SPARC |
 | `release_ticks_` | **learnable** | place-tail time; bounded below by finger-clear time |
@@ -189,9 +220,19 @@ Candidates to expose to **online / opportunistic learning** (per-rep precision l
 ## 8. Where this is heading
 
 Both the skill scheduler (A) and the reactive layer (B) are bolted onto a **hand-coded discrete
-FSM**. The refactor under discussion replaces the fixed gates with a **continuous, optimizable
-representation**: a small set of via-points with per-via **precisions** (option-c preference field,
-`[[preference-field-prototype]]`) selected by a **predictive forward model** (the capability map +
-a learned execution-quality model). Then the table's gates above become *learned parameters of one
-representation* rather than ~30 hand-set constants — and the planner picks targets by predicted
-expected free energy, with the reactive layer as the safety net.
+FSM**. The direction (now partly realised by (D)) replaces the fixed gates with a **continuous,
+optimizable representation**: a small set of via-points with per-via **precisions** (option-c
+preference field, `[[preference-field-prototype]]`) selected by a **predictive forward model** (the
+capability map + `predict_reach`). Then the table's gates above become *learned parameters of one
+representation* rather than ~30 hand-set constants — and each phase picks its target/precision by
+**predicted expected free energy of the phases that follow** (D), with the reactive layer (B) as the
+safety net.
+
+The unifying view (`[[anticipatory-efe-sequencer]]`): a phase is a **Gaussian preference with a
+precision structure** (hard constraints = infinite precision, `EFE §4.10`); the sequence is selected
+by **EFE over the policy** so each phase frames the next (`EFE §4.11`); and the **coarticulated
+handoff** — terminal velocity preference pointing into the next via, not zero — is the per-via
+precision field. In this view *anticipation and execution-time reduction are the same property*: a
+phase that ends where the next begins has neither stop-and-go nor dead-end recovery. The current
+target is the **approach→insert** handoff (D, in progress): the approach's orientation-commit gate
+is the single largest time cost, and it is precisely a precision to learn and hand off.

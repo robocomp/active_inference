@@ -174,6 +174,9 @@ private:
     static constexpr double AZIMUTH_RETRY_STEP  = 0.35; // ~20° azimuth rotation per re-approach
     long   ctrl_cycle_ = 0;
     double grasp_align_tol_rad_ = 0.14;
+    // Skilled approach commits at a looser orientation gate (the insert finishes the alignment):
+    // effective tol = grasp_align_tol_rad_·(1 + align_tol_conf_gain_·c_approach). 0 ⇒ fixed gate.
+    double align_tol_conf_gain_ = 1.0;
 
     // ── Per-cycle motion monitor (debug elbow-table dives + approach/place oscillation) ──
     // A single throttled [mon] line, emitted from efe_drive (the common chokepoint every
