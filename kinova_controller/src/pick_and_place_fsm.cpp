@@ -130,6 +130,7 @@ PickandPlaceFSM::PickandPlaceFSM(SpecificWorker& w, const ConfigLoader& cfg) : w
     try { evidence_unit_         = cfg.get<double>("Controller.evidence_unit");           } catch (...) {}
     try { skilled_sample_period_ = cfg.get<int>   ("Controller.skilled_sample_period");  } catch (...) {}
     try { speed_conf_gain_       = cfg.get<double>("Controller.speed_conf_gain");         } catch (...) {}
+    try { orient_conf_gain_      = cfg.get<double>("Controller.orient_conf_gain");        } catch (...) {}
     try { confidence_path_       = cfg.get<std::string>("Controller.confidence_path");    } catch (...) {}
     try { standoff_collapse_     = cfg.get<double>("Controller.standoff_collapse");        } catch (...) {}
     try { insert_conf_gain_      = cfg.get<double>("Controller.insert_conf_gain");         } catch (...) {}
@@ -282,8 +283,12 @@ void PickandPlaceFSM::run_tracking(const std::array<double, Kinematics::N_ARM_JO
         // standoff_collapse: skilled reaches more directly (slide the waypoint toward the grasp).
         const Eigen::Vector3d track_target =
             g.grasp_pos + (g.stand_off_pos - g.grasp_pos) * (1.0 - standoff_collapse_ * c);
+        // skilled_orient front-loads the wrist slew (gain_orient ×(1+orient_conf_gain·c)) so the
+        // free-space reorientation FINISHES during the travel and the gripper arrives oriented —
+        // no asymptotic orientation crawl. ω_max is lifted to match in build_efe_params (Tracking).
         const auto [ep, ea] = efe_drive(q, ee_position, track_target,
-                                        g.z_tool_des, g.x_tool_des, skilled_speed(0.25));
+                                        g.z_tool_des, g.x_tool_des, skilled_speed(0.25),
+                                        std::nullopt, skilled_orient(1.0));
         if (ep < track_best_dist_ - 0.004) { track_best_dist_ = ep; track_noprog_ticks_ = 0; }
         else if (ep > 3.0 * REACH_TOLERANCE_M and ++track_noprog_ticks_ > TRACK_NOPROGRESS_TICKS)
         {
@@ -434,6 +439,9 @@ EFEParams PickandPlaceFSM::build_efe_params(const Eigen::Vector3d& z_des,
     {
         p.arrive_deadband = 0.02;
         p.orient_deadband = 0.16;
+        // Lift ω_max with skill to match the front-loaded gain_orient (skilled_orient), so the
+        // faster wrist slew isn't re-clipped by the cap — the reorientation finishes in travel.
+        p.omega_max = 2.0 * (1.0 + orient_conf_gain_ * skill_c());
     }
     p.gain_mu           = 0.0;
     p.gain_elbow        = elbow_gain_;

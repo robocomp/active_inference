@@ -145,6 +145,11 @@ private:
     }
     double skill_c() const { return precision_reweighting_ ? c_seg(cur_seg_) : 0.0; }
     double skilled_speed(double base) const { return base * (1.0 + speed_conf_gain_ * skill_c()); }
+    // Free-space wrist slew rate: skilled → faster reorientation DURING the approach travel, so
+    // the gripper arrives already oriented (no asymptotic orientation "crawl" after the EE
+    // reaches the standoff). Safe because the reorientation is in free space (no contact) — a
+    // "fast where safe" leg. Scales gain_orient (and ω_max, in build_efe_params) for Tracking.
+    double skilled_orient(double base) const { return base * (1.0 + orient_conf_gain_ * skill_c()); }
     double c_overall() const;                       // mean c over segments (for logs)
     void   deposit(Segment s, double quality);      // confirmed outcome → Π_m[s] += unit·quality
     void   deflate(Segment s);                      // surprise → Π_m[s] *= conf_decay
@@ -262,6 +267,7 @@ private:
     double conf_gain_ = 0.15, conf_decay_ = 0.5;
     int    skilled_sample_period_ = 12;
     double speed_conf_gain_ = 0.6, surprise_gate_m_ = 0.05;
+    double orient_conf_gain_ = 1.5;   // skilled → faster free-space wrist slew during the approach
     double standoff_collapse_ = 0.0, insert_conf_gain_ = 0.0;
     std::string confidence_path_;
     // ── Per-segment precision learning from doing ────────────────────────────
