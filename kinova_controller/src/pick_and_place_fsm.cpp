@@ -166,7 +166,7 @@ PickandPlaceFSM::PickandPlaceFSM(SpecificWorker& w, const ConfigLoader& cfg) : w
             metrics_.open(mpath, std::ios::out | std::ios::trunc);
             if (metrics_.is_open()) {
                 metrics_open_ = true;
-                metrics_ << "rep,success,c_approach,c_insert,c_lift,c_place,c_retreat,pick_s,episode_s\n";
+                metrics_ << "rep,success,c_approach,c_insert,c_lift,c_place,c_retreat,pick_s,episode_s,observations\n";
                 std::print("[skill] per-rep metrics → {}\n", mpath);
             }
         }
@@ -251,8 +251,7 @@ void PickandPlaceFSM::run_tracking(const std::array<double, Kinematics::N_ARM_JO
         return;
     }
 
-    auto g_opt = compute_side_grasp_target();
-    if (not g_opt.has_value())
+    auto stop_no_target = [&]
     {
         RoboCompKinovaArm::TJointSpeeds stop;
         stop.jointSpeeds.assign(Kinematics::N_ARM_JOINTS, 0.0f);
@@ -262,9 +261,54 @@ void PickandPlaceFSM::run_tracking(const std::array<double, Kinematics::N_ARM_JO
                        ctrl_cycle_, w_.base_tf_set_, w_.scene_world_valid_,
                        w_.bottle_pos_world_.x(), w_.bottle_pos_world_.y(), w_.bottle_pos_world_.z());
         ++ctrl_cycle_;
-        return;
+    };
+
+    // ── Precision-gated look-up: the closed→open-loop transition ──────────────────────────
+    // The SAME approach precision c that scales the speed (skilled_speed) also lengthens the
+    // observation period P = 1 + round(c·(N−1)): novice (c≈0) LOOKS every cycle and acts
+    // closed-loop on the fresh observation; skilled (c→1) looks once per skilled_sample_period_
+    // and acts on the MODEL (belief) in between, in open loop. A real look-up has a cost that
+    // caps the loop rate, so acting on the model between looks keeps perception OFF the control
+    // critical path. Fusion gain w = Π_s/(Π_m+Π_s) = 1−c (floored), so vision is never fully
+    // ignored; a surprise re-engages full feedback and deflates the approach precision. "Slow &
+    // looking" and "fast & open-loop" are thus one state — see RAL-Kinova-followup/PAPER_NOTES.md.
+    SideGraspTarget g;
+    if (precision_reweighting_)
+    {
+        const double c_app  = c_seg(SEG_APPROACH);
+        const int    period = 1 + static_cast<int>(std::lround(c_app * (skilled_sample_period_ - 1)));
+        if (not belief_valid_ or ++cycles_since_obs_ >= period)
+        {
+            auto obs_opt = compute_side_grasp_target();   // a real look-up (x_obs, possibly noisy)
+            if (not obs_opt.has_value()) { stop_no_target(); return; }
+            const auto& obs = obs_opt.value();
+            cycles_since_obs_ = 0;
+            ++obs_count_rep_;
+            if (not belief_valid_) { belief_grasp_ = obs; belief_valid_ = true; }
+            else
+            {
+                double w = std::max(0.05, 1.0 - c_app);
+                if ((obs.grasp_pos - belief_grasp_.grasp_pos).norm() > surprise_gate_m_)
+                {   // surprise → re-engage feedback and drop the approach precision
+                    w = 1.0;
+                    deflate(SEG_APPROACH);
+                }
+                belief_grasp_.grasp_pos     += w * (obs.grasp_pos     - belief_grasp_.grasp_pos);
+                belief_grasp_.stand_off_pos += w * (obs.stand_off_pos - belief_grasp_.stand_off_pos);
+                belief_grasp_.z_tool_des = (belief_grasp_.z_tool_des + w * (obs.z_tool_des - belief_grasp_.z_tool_des)).normalized();
+                belief_grasp_.x_tool_des = (belief_grasp_.x_tool_des + w * (obs.x_tool_des - belief_grasp_.x_tool_des)).normalized();
+                belief_grasp_.up_axis  = obs.up_axis;     // (static) bottle-axis geometry, not fused
+                belief_grasp_.top_down = obs.top_down;
+            }
+        }
+        g = belief_grasp_;   // act on the belief (open-loop between looks)
     }
-    const auto& g = g_opt.value();
+    else
+    {
+        auto g_opt = compute_side_grasp_target();
+        if (not g_opt.has_value()) { stop_no_target(); return; }
+        g = g_opt.value();
+    }
 
     // ── Learn mode: commit the grasp; skill c reshapes the approach (geometry + dwell) ──
     if (learn_pick_place_)
@@ -321,6 +365,7 @@ void PickandPlaceFSM::run_tracking(const std::array<double, Kinematics::N_ARM_JO
                                     * grasp_azimuth_z_.value()).normalized();
                 grasp_settle_ticks_ = 0;
                 track_best_dist_ = 1e9; track_noprog_ticks_ = 0;
+                belief_valid_ = false;   // azimuth changed ⇒ force a fresh look-up to re-seed the belief frame
                 std::print("[grasp] standoff μ={:.4f} < {:.3f} → rotate azimuth, re-approach ({}/{})\n",
                            mu_now, LIFT_MU_MIN, azimuth_retries_, MAX_AZIMUTH_RETRIES);
                 ++ctrl_cycle_;
@@ -1119,7 +1164,8 @@ void PickandPlaceFSM::miss_or_give_up(const std::string& reason)
             metrics_ << (probe_index_ - 1) << ",0,"
                      << c_seg(SEG_APPROACH) << ',' << c_seg(SEG_INSERT) << ',' << c_seg(SEG_LIFT) << ','
                      << c_seg(SEG_PLACE) << ',' << c_seg(SEG_RETREAT) << ','
-                     << rep_pick_s_ << ',' << (now_seconds() - rep_t0_) << '\n', metrics_.flush();
+                     << rep_pick_s_ << ',' << (now_seconds() - rep_t0_) << ',' << obs_count_rep_
+                     << '\n', metrics_.flush();
         w_.run_requested_ = false;
         std::print("[probe] rep {} failed after {} attempts — moving on\n", probe_index_ - 1, rep_attempts_);
     }
@@ -1465,7 +1511,8 @@ void PickandPlaceFSM::run_grasp_phases(const std::array<double, Kinematics::N_AR
                 metrics_ << (probe_index_ - 1) << ",1,"
                          << c_seg(SEG_APPROACH) << ',' << c_seg(SEG_INSERT) << ',' << c_seg(SEG_LIFT) << ','
                          << c_seg(SEG_PLACE) << ',' << c_seg(SEG_RETREAT) << ','
-                         << rep_pick_s_ << ',' << (now_seconds() - rep_t0_) << '\n', metrics_.flush();
+                         << rep_pick_s_ << ',' << (now_seconds() - rep_t0_) << ',' << obs_count_rep_
+                         << '\n', metrics_.flush();
             std::print("[retreat] done — bottle tilt {:.1f}°{}  episode {:.1f}s\n",
                        tilt_deg, tipped ? "  TIPPED" : " (upright)", now_seconds() - rep_t0_);
             w_.kinovaarm_proxy->moveJointsWithAngle(w_.nearest_equiv_target(q, w_.rest_pose_angles_));
