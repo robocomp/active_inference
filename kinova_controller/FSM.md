@@ -112,9 +112,14 @@ precision across the whole cycle.
   - `standoff_collapse·c` slides the Tracking waypoint toward the grasp → **less creep**;
   - `blend_radius·c` → **more coarticulation** (fluidity);
   - settle dwell `GRASP_SETTLE_TICKS·(1−c)` → **commits sooner**;
+  - **orientation slew rate widens with `c`** (`skilled_orient`: `gain_orient` and `ω_max`
+    `×(1+orient_conf_gain·c)`) → the wrist reorients **faster during the free-space travel** and
+    **arrives oriented** (no asymptotic orientation *crawl* after the EE reaches the standoff).
+    Free-space = no contact ⇒ "fast where safe"; partly joint-velocity-limited, so it shaves the
+    on-arrival residual (~25°→17°), the gate (below) absorbs the rest;
   - **orientation-commit gate widens with `c`** → the skilled approach commits at a looser
-    `e_ang` and lets the insert finish the alignment → **cuts the orientation crawl** (the
-    approach's dominant time cost); anticipatory, see (D);
+    `e_ang` and lets the insert finish the alignment → together with the slew, the approach's
+    dominant time cost (the orientation crawl) is gone; anticipatory, see (D);
   - observation period grows with `c` → **samples vision less** (closed-loop → open-loop).
 
 One knob takes a novice (slow, careful, closed-loop) to a skilled agent (fast, collapsed, open-loop).
@@ -164,14 +169,16 @@ free energy of the *next* phase, not its own free energy now (`[[anticipatory-ef
   zero (`hard_level_hold`) so the rise is a pure translation — the infinite-precision limit of the
   orientation preference (`EFE §4.10`).
 
-> **Next (in progress): the approach anticipates the insert.** The approach is **orientation-bound**
-> — position reaches the standoff fast, then the camera-up frame *crawls* asymptotically to the tight
-> commit gate (`grasp_align_tol_deg`), ~75% of the episode time, with `c_approach` already saturated
-> so the *speed* knob is maxed. Since (i) the lift no longer cares about the residual cant and (ii)
-> the insert runs the *same* orientation target and so finishes the alignment while travelling, the
-> commit gate is being **wired to `c_approach`**: a skilled approach commits with a **looser**
-> orientation gate and hands the residual to the insert — precision learning applied to the
-> *orientation-commit tolerance* (a precision), not just speed.
+> **The approach anticipates the insert (DONE).** The approach is **orientation-bound** — position
+> reaches the standoff fast, then the camera-up frame *crawls* asymptotically to the tight commit
+> gate, ~75% of the episode time, with `c_approach` saturated so the *speed* knob was maxed; the
+> bottleneck was a **precision** (the orientation-commit tolerance + the slew rate), not speed. Two
+> coupled, skill-learned precisions fixed it, both "fast where safe" (free space) and anticipatory
+> (set by what the insert/lift tolerate, now that the lift-aware azimuth makes the lift cant-
+> insensitive): **(1) the slew rate** (`orient_conf_gain`) front-loads the reorientation so the
+> wrist *arrives* oriented; **(2) the commit gate** (`align_tol_conf_gain`) absorbs the joint-limited
+> residual and hands it to the insert, which finishes it while travelling. **Result: episode
+> 7.0→5.1 s (~27%); cold-start learning curve floor 6.1→5.3 s** (`experiments/learning_curve.png`).
 
 ---
 
@@ -197,6 +204,7 @@ Candidates to expose to **online / opportunistic learning** (per-rep precision l
 |---|---|---|
 | `standoff_collapse` | **learnable** | fluidity/time trade-off; already skill-scheduled — learn the schedule |
 | orientation-commit gate (`grasp_align_tol`) | **learnable** | the approach's *dominant* time cost; skilled → looser gate, insert finishes the alignment. A precision, anticipatory (set by what the insert tolerates) |
+| orientation slew rate (`gain_orient`,`ω_max`) | **learnable** | `orient_conf_gain`: skilled → faster free-space wrist slew, arrives oriented. "Fast where safe"; pairs with the gate above |
 | `blend_radius` | **learnable** | coarticulation amount; swept optimum 0.04, but scene-dependent |
 | per-leg speeds (Track/Lift/Place) | **learnable** | time vs. reliability; reward = cycle-time − SPARC |
 | `release_ticks_` | **learnable** | place-tail time; bounded below by finger-clear time |
@@ -233,6 +241,10 @@ precision structure** (hard constraints = infinite precision, `EFE §4.10`); the
 by **EFE over the policy** so each phase frames the next (`EFE §4.11`); and the **coarticulated
 handoff** — terminal velocity preference pointing into the next via, not zero — is the per-via
 precision field. In this view *anticipation and execution-time reduction are the same property*: a
-phase that ends where the next begins has neither stop-and-go nor dead-end recovery. The current
-target is the **approach→insert** handoff (D, in progress): the approach's orientation-commit gate
-is the single largest time cost, and it is precisely a precision to learn and hand off.
+phase that ends where the next begins has neither stop-and-go nor dead-end recovery. The
+**approach→insert** handoff (D) is done — two skill-learned precisions (slew rate + commit gate)
+took the episode 7.0→5.1 s with no quality loss. The **next** targets: the downstream legs
+(place/lower/retreat, ~2 s now) and the **coarticulated inter-leg handoffs** — turning the
+zero-terminal-velocity stops between legs into pass-through vias via the per-via-precision
+preference field (`use_preference_field` is still off), keeping the lift a deliberate hard stop
+(grasp integrity) while transit/retreat flow through.

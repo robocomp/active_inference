@@ -517,6 +517,17 @@ phase that follows; the boundary velocity preference is not zero (stop) but poin
 **same** property: a phase that ends where the next begins has neither stop-and-go nor dead-end
 recovery.
 
+The **approach→insert** handoff is the first realised case. The approach is orientation-bound — the
+camera-up proportional flow `ω = min(ω_max, γ·angle)` converges asymptotically, so position arrives
+at the standoff and *holds* while the wrist crawls. Two skill-learned precisions, both "fast where
+safe" (free space) and anticipatory (the insert/lift tolerate residual now that the lift-aware
+azimuth removed the cant-sensitivity), close it: **(i)** the *slew rate* `γ,ω_max ×(1+k_o·c)`
+front-loads the reorientation so the wrist arrives oriented; **(ii)** the *commit-tolerance* gate
+`tol·(1+k_t·c)` absorbs the joint-limited residual and the insert finishes it while travelling.
+Same precision-learning machinery as the linear speed — a precision applied to a *rate* and a
+*tolerance*, not just velocity. Measured: episode `7.0→5.1 s` (~27%), cold-start learning-curve
+floor `6.1→5.3 s` with no quality loss (`experiments/learning_curve.png`).
+
 ---
 
 ## 5. Parameters (with roles)
