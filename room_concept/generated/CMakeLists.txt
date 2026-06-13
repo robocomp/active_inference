@@ -37,7 +37,6 @@ SET (SOURCES
   $ENV{ROBOCOMP}/classes/sigwatch/sigwatch.cpp
   $ENV{ROBOCOMP}/classes/grafcetStep/GRAFCETStep.cpp
   $ENV{ROBOCOMP}/classes/ConfigLoader/ConfigLoader.cpp
-    component_logging.cpp
   main.cpp
   genericworker.cpp
   joystickadapterI.cpp
@@ -52,10 +51,6 @@ SET (EXECUTABLE_OUTPUT_PATH ${RC_COMPONENT_DEVEL_PATH}/bin)
 
 # Specify construction and link process
 ADD_EXECUTABLE( room_concept ${SOURCES} ${MOC_SOURCES} ${RC_SOURCES} ${UI_HEADERS} )
-TARGET_INCLUDE_DIRECTORIES(room_concept BEFORE PRIVATE
-  /home/pbustos/robocomp/components/cortex/api/include
-  /home/pbustos/robocomp/components/cortex/core/include
-  /home/pbustos/robocomp/components/cortex/gui/include
-)
+
 TARGET_LINK_LIBRARIES( room_concept ${LIBS}  dsr_core dsr_gui dsr_api fastcdr fastdds OpenThreads Eigen3::Eigen QGLViewer-qt6 Qt6OpenGLWidgets ${STATIC_LIBS} ${SPECIFIC_LIBS} ${QT_LIBRARIES} ${Ice_LIBRARIES} )
 INSTALL(FILES ${EXECUTABLE_OUTPUT_PATH}/room_concept DESTINATION ${RC_COMPONENT_INSTALL_PATH}/bin/ PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE )

@@ -75,7 +75,6 @@
 #include <sigwatch/sigwatch.h>
 #include <sstream>
 
-#include "component_logging.h"
 #include "genericworker.h"
 #include "../src/specificworker.h"
 
@@ -121,7 +120,7 @@ void subscribe( const Ice::CommunicatorPtr& communicator,
         auto servant = std::make_shared<SubInterfaceType>(worker, index);
 		proxy = adapter->addWithUUID(servant)->ice_oneway();
 
-		qCInfo(logLifecycle).noquote() << QStringLiteral("%1 topic %2 will be used in subscription.")
+		qInfo() << QStringLiteral("%1 topic %2 will be used in subscription.")
 											  .arg(QString::fromStdString(programName),
 												   QString::fromStdString(name_topic));
 
@@ -129,20 +128,20 @@ void subscribe( const Ice::CommunicatorPtr& communicator,
         {
             try {
                 topic = topicManager->create(name_topic);
-				qCWarning(logLifecycle).noquote() << QStringLiteral("%1 topic %2 did not exist and was created.")
+				qWarning().noquote() << QStringLiteral("%1 topic %2 did not exist and was created.")
 														 .arg(QString::fromStdString(programName),
 															  QString::fromStdString(name_topic));
             }
             catch (const IceStorm::TopicExists&) {
                 try{
-					qCWarning(logLifecycle).noquote() << QStringLiteral("%1 topic %2 already exists; connecting to the existing topic.")
+					qWarning().noquote() << QStringLiteral("%1 topic %2 already exists; connecting to the existing topic.")
 															 .arg(QString::fromStdString(programName),
 																  QString::fromStdString(name_topic));
                     topic = topicManager->retrieve(name_topic);
                 }
                 catch(const IceStorm::NoSuchTopic&)
                 {
-					qCCritical(logLifecycle).noquote() << QStringLiteral("%1 topic %2 does not exist and could not be created.")
+					qCritical() << QStringLiteral("%1 topic %2 does not exist and could not be created.")
 															  .arg(QString::fromStdString(programName),
 																   QString::fromStdString(name_topic));
                     return;
@@ -150,7 +149,7 @@ void subscribe( const Ice::CommunicatorPtr& communicator,
             }
             catch(const IceUtil::NullHandleException&)
             {
-				qCCritical(logLifecycle).noquote() << QStringLiteral("%1 topic manager proxy is null.")
+				qCritical() << QStringLiteral("%1 topic manager proxy is null.")
 														  .arg(QString::fromStdString(programName));
                 throw;
             }
@@ -161,7 +160,7 @@ void subscribe( const Ice::CommunicatorPtr& communicator,
     }
     catch(const IceStorm::NoSuchTopic&)
     {
-		qCCritical(logLifecycle) << "Error creating topic.";
+		qCritical() << "Error creating topic.";
     }
 }
 
@@ -203,9 +202,8 @@ Ice::InitializationData room_concept::getInitializationDataIce(){
 void room_concept::initialize()
 {
     this->configLoader.load(this->configFile);
-	configure_component_logging(this->configLoader);
 	this->configLoader.printConfig();
-	qCInfo(logLifecycle) << "Configuration loaded from" << QString::fromStdString(this->configFile);
+	qInfo() << "Configuration loaded from" << QString::fromStdString(this->configFile);
 }
 
 int room_concept::run(int argc, char* argv[])
@@ -215,9 +213,6 @@ int room_concept::run(int argc, char* argv[])
 #else
 	QCoreApplication a(argc, argv);  // NON-GUI application
 #endif
-	install_component_log_format();
-	configure_component_logging(this->configLoader);
-
 
 	sigset_t sigs;
 	sigemptyset(&sigs);
@@ -246,14 +241,14 @@ int room_concept::run(int argc, char* argv[])
 		topicManager = Ice::checkedCast<IceStorm::TopicManagerPrx>(communicator()->stringToProxy(configLoader.get<std::string>("Proxies.TopicManager")));
 		if (!topicManager)
 		{
-		    qCCritical(logLifecycle) << "TopicManager.Proxy not defined in config file.";
-		    qCCritical(logLifecycle) << "Config line example: TopicManager.Proxy=IceStorm/TopicManager:default -p 9999";
+		    qCritical() << "TopicManager.Proxy not defined in config file.";
+		    qCritical() << "Config line example: TopicManager.Proxy=IceStorm/TopicManager:default -p 9999";
 	        return EXIT_FAILURE;
 		}
 	}
 	catch (const Ice::Exception &ex)
 	{
-		qCCritical(logLifecycle).noquote() << QStringLiteral("Exception: 'rcnode' not running: %1")
+		qCritical().noquote() << QStringLiteral("Exception: 'rcnode' not running: %1")
 		                                      .arg(ice_exception_to_qstring(ex));
 		return EXIT_FAILURE;
 	}
@@ -272,7 +267,7 @@ int room_concept::run(int argc, char* argv[])
 						    joystickadapter_topic, joystickadapter, PROGRAM_NAME);
 
 		// Server adapter creation and publication
-			qCInfo(logLifecycle) << SERVER_FULL_NAME << "started";
+			qInfo() << SERVER_FULL_NAME << "started";
 
 		// User defined QtGui elements ( main window, dialogs, etc )
 
@@ -293,7 +288,7 @@ int room_concept::run(int argc, char* argv[])
 	{
 		status = EXIT_FAILURE;
 
-		qCCritical(logLifecycle).noquote() << QStringLiteral("Exception raised on main thread: %1")
+		qCritical() << QStringLiteral("Exception raised on main thread: %1")
 		                                      .arg(ice_exception_to_qstring(ex));
 
 	}
@@ -309,7 +304,6 @@ int room_concept::run(int argc, char* argv[])
 
 int main(int argc, char* argv[])
 {
-	install_component_log_format();
 	std::string arg;
 
 	// Set config file
@@ -329,24 +323,24 @@ int main(int argc, char* argv[])
 			if (arg.find(startup.toStdString(), 0) != std::string::npos)
 			{
 				startup_check_flag = true;
-				qCInfo(logLifecycle) << "Startup check enabled";
+				qInfo() << "Startup check enabled";
 			}
 			else if (arg.find(prfx.toStdString(), 0) != std::string::npos)
 			{
 				prefix = QString::fromStdString(arg).remove(0, prfx.size());
 				if (prefix.size()>0)
 					prefix += QString(".");
-				qCInfo(logLifecycle).noquote() << QStringLiteral("Configuration prefix: <%1>").arg(prefix);
+				qInfo().noquote() << QStringLiteral("Configuration prefix: <%1>").arg(prefix);
 			}
 			else if (arg.find(initIC.toStdString(), 0) != std::string::npos)
 			{
 				configFile = QString::fromStdString(arg).remove(0, initIC.size());
-				qCInfo(logLifecycle) << "Starting with config file:" << configFile;
+				qInfo() << "Starting with config file:" << configFile;
 			}
 			else if (i==1 and argc==2 and arg.find("--", 0) == std::string::npos)
 			{
 				configFile = QString::fromStdString(arg);
-				qCInfo(logLifecycle) << "Starting with config file:" << configFile;
+				qInfo() << "Starting with config file:" << configFile;
 			}
 		}
 

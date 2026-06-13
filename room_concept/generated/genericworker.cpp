@@ -18,9 +18,6 @@
  */
 #include "genericworker.h"
 
-#include "component_logging.h"
-
-
 /**
 * \brief Default constructor
 */
@@ -59,11 +56,11 @@ GenericWorker::GenericWorker(const ConfigLoader& configLoader, TuplePrx tprx) : 
         auto [it, inserted] = Graphs.emplace("", std::make_shared<DSR::DSRGraph>(0, agent_name, agent_id, 
                                         this->configLoader.get<std::string>("Agent.configFile"), 
                                         true, domain));
-        qCInfo(logGraph) << "Default graph loaded";
+        qInfo() << "Default graph loaded";
         G = it->second;
     } 
     else {
-        qCInfo(logGraph) << "Multiple graphs found:" << surNames.size();
+        qInfo() << "Multiple graphs found:" << surNames.size();
         for (std::string_view surName : surNames) {
             std::string name{surName};
             std::string prefix = "Agent." + name;
@@ -72,7 +69,7 @@ GenericWorker::GenericWorker(const ConfigLoader& configLoader, TuplePrx tprx) : 
                                             configLoader.get<std::string>(prefix + ".configFile"), 
                                             true, 
                                             configLoader.get<int>(prefix + ".domain")));
-            qCInfo(logGraph) << "Graph loaded:" << QString::fromStdString(name);
+            qInfo() << "Graph loaded:" << QString::fromStdString(name);
         }
         G = Graphs.at(std::string(surNames.front()));
     }
@@ -88,7 +85,7 @@ GenericWorker::~GenericWorker()
 }
 void GenericWorker::killYourSelf()
 {
-    qCInfo(logLifecycle) << "Killing myself";
+    qInfo() << "Killing myself";
 	emit kill();
 }
 
@@ -103,10 +100,10 @@ void GenericWorker::setPeriod(const std::string& state, int period)
     if (it != states.end() && it->second != nullptr)
     {
 		it->second->setPeriod(period);
-		qCInfo(logLifecycle) << "Period for state" << QString::fromStdString(state) << "changed to" << period << "ms";
+		qInfo() << "Period for state" << QString::fromStdString(state) << "changed to" << period << "ms";
 	}
     else
-        qCWarning(logLifecycle) << "No change in the period; the state is not valid or not configured.";
+        qWarning() << "No change in the period; the state is not valid or not configured.";
 }
 
 int GenericWorker::getPeriod(const std::string& state)
@@ -115,7 +112,7 @@ int GenericWorker::getPeriod(const std::string& state)
 
     if (it == states.end() || it->second == nullptr)
     {
-        qCWarning(logLifecycle) << "Invalid or unconfigured state:" << QString::fromStdString(state);
+        qWarning() << "Invalid or unconfigured state:" << QString::fromStdString(state);
         return -1; 
 	}
     return it->second->getPeriod();
@@ -182,7 +179,7 @@ void GenericWorker::restore_window_settings()
         settings.endGroup();
     }
 
-    qCInfo(logUi) << "Window settings restored for" << windows.size() << "window(s)";
+    qInfo() << "Window settings restored for" << windows.size() << "window(s)";
 }
 
 void GenericWorker::save_window_settings() const
@@ -201,7 +198,7 @@ void GenericWorker::save_window_settings() const
     }
 
     settings.sync();
-    qCInfo(logUi) << "Window settings saved for" << windows.size() << "window(s)";
+    qInfo() << "Window settings saved for" << windows.size() << "window(s)";
 }
 
 QString GenericWorker::settings_group_name(const std::string& graph_name, int agent_id)
