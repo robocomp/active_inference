@@ -1,0 +1,73 @@
+
+# --- Common Agent Data ---
+Agent.id = 0 # Change id
+Agent.name = "bottle_concept"
+
+# --- Single Instance Configuration ---
+# Use this if you only have one graph.
+Agent.configFile = ""
+Agent.domain = 0
+Agent.tree = true
+Agent.graph = true
+Agent.2d = true
+Agent.3d = true
+
+# --- Multiple Instance Template ---
+# If you define sub-instances, the single instance config above will be ignored.
+# Agent.instance_name.configFile = ""
+# Agent.instance_name.domain = 1
+# Agent.instance_name.tree = true
+# Agent.instance_name.graph = true
+# Agent.instance_name.2d = true
+# Agent.instance_name.3d = true
+
+Period.Compute = 100
+Period.Emergency = 500
+
+Component.Debug.Verbose = true
+
+Ice.Warn.Connections = "0"
+Ice.Trace.Network = "0"
+Ice.Trace.Protocol = "0"
+Ice.MessageSizeMax = "20004800"
+
+# ── bottle_concept agent ──────────────────────────────────────────────────────
+[BottleConcept]
+PriorsPath = "etc/object_priors.toml"
+CheckpointPath = "etc/checkpoint.toml"
+KStable = 30
+LogPeriodFrames = 30
+VoxelBankMaxPoints = 4000
+VoxelBankQuantizationM = 0.01      # dedup grid (m) for the voxel-bank hash
+VoxelSelectRadiusMarginM = 0.10    # XY ownership gate margin around the bottle
+VoxelSelectHeightMarginM = 0.10    # extra Z margin above/below the cylinder span
+YawVariance = 9.87                 # ≈π² — yaw is unobservable for a symmetric cylinder
+
+[BottleModel]
+SigmaObs = 0.02            # SDF likelihood width (m); tight — a bottle is small
+LambdaSize = 0.5          # KL toward prior dimensions (radius, height)
+LambdaPos = 0.05          # KL toward prior centre
+LambdaState = 0.02        # size transition
+PriorRadius = 0.035
+PriorHeight = 0.20
+PriorSizeStd = 0.03
+OptimizationIters = 15
+OptimizationLr = 0.005
+GradClip = 2.0
+OptimizerType = "adam"
+RobustLoss = "quadratic"
+RobustLossScale = 0.05
+
+[SampleQueue]
+NumAngleBins = 16
+NumZBins = 6
+MaxPerBin = 2
+SdfThresholdForStorage = 0.03      # admit points within 3 cm of the surface
+MinFramesBeforeHistorical = 10
+HistoricalWarmupFrames = 5
+MaxNewPointsPerFrame = 20
+ZBinSize = 0.04
+RfeWeightGain = 0.25
+MinAnchorWeight = 0.12
+EdgeBonusWeight = 0.3
+EdgeProximityThreshold = 0.01

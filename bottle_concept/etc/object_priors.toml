@@ -1,0 +1,19 @@
+# object_priors.toml
+#
+# Prior bottle definitions for the bottle_concept agent.
+# Each [[bottles]] entry is checked at startup; if the node named `node_name`
+# is absent from the DSR graph it is created (as a `cylinder` node) once a YOLO
+# mask labelled "bottle" appears near the prior position.
+#
+# After fitting converges, the agent writes a [checkpoint.<node_name>] section
+# to etc/checkpoint.toml with the refined parameters.
+
+[[bottles]]
+node_name  = "bottle_1"
+radius_m   = 0.035        # Prior cylinder radius
+height_m   = 0.20         # Prior cylinder height
+room_x_m   = 0.40         # Initial room-frame X (refined by active inference)
+room_y_m   = 0.00         # Initial room-frame Y
+room_z_m   = 0.85         # Initial cylinder centre Z (table_top + height/2)
+sigma_pose = 0.10         # Prior uncertainty on position (m) — KL regulariser
+sigma_size = 0.03         # Prior uncertainty on dimensions (m)
