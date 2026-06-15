@@ -125,6 +125,19 @@ private:
 	Eigen::Isometry3d table_world_      = Eigen::Isometry3d::Identity();
 	double            table_top_z_      = 0.74;
 	bool              scene_world_valid_ = false;
+	// Source of the bottle pose. false (default): query Webots ground truth (getObjectPose).
+	// true: READ the bottle pose from the DSR graph (the table->bottle RT edge written by an
+	// external perception agent, e.g. bottle_concept fusing ZED+YOLO), composed with the cached
+	// table_world_ to stay in the controller's world frame. A missing/stale edge ⇒ keep the last
+	// belief (a dropped detection the look-up belief predicts through).
+	bool              bottle_from_graph_ = false;
+	bool              bottle_valid_      = false;   // a bottle pose has been obtained at least once
+	// OPT-IN scene publishing (default off): write robot->table->bottle RT edges from Webots ground
+	// truth so other agents/viewer see a live scene. With bottle_from_graph also on, this gives a
+	// self-contained ROUND-TRIP test of the graph read path before bottle_concept exists. In
+	// production bottle_concept is the writer and this stays OFF (else graph mode reads back ground
+	// truth and bypasses real perception).
+	bool              publish_scene_to_graph_ = false;
 	bool              base_tf_set_       = false;
 	std::array<double, Kinematics::N_ARM_JOINTS> cur_q_{};   // latest measured config (IK seed)
 	Eigen::Vector2d   last_spawn_xy_{0.0, -0.14};            // last commanded bottle respawn (world xy)

@@ -31,6 +31,8 @@ graph = true
 auto_start = true
 exit_on_homing_timeout = false   # unattended sweeps set true ⇒ quit on a homing jam instead of idling
 monitor_log = true               # dense per-cycle [mon] line; set false for batch runs (fills disk)
+bottle_from_graph = false   # true ⇒ read bottle pose from the DSR graph (perception agent) instead of Webots ground truth
+publish_scene_to_graph = false  # opt-in: write robot->table->bottle to graph (round-trip test / siblings)
 tip_log    = false  # disabled: [ctrl] lines below are the validation log
 # EXPERIMENT 1 — natural fine-tuning from a specialized sequence:
 # run the full pick→place loop and let model precision (c) accumulate from confirmed

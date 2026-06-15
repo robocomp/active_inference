@@ -134,6 +134,10 @@ void SpecificWorker::initialize()
     try { run_requested_ = configLoader.get<bool>("Controller.auto_start"); } catch (...) {}
     if (run_requested_) std::print("[ui] auto_start: run requested from config\n");
     try { exit_on_homing_timeout_ = configLoader.get<bool>("Controller.exit_on_homing_timeout"); } catch (...) {}
+    try { bottle_from_graph_ = configLoader.get<bool>("Controller.bottle_from_graph"); } catch (...) {}
+    if (bottle_from_graph_) std::print("[scene] bottle pose READ from DSR graph (table->bottle edge), not Webots\n");
+    try { publish_scene_to_graph_ = configLoader.get<bool>("Controller.publish_scene_to_graph"); } catch (...) {}
+    if (publish_scene_to_graph_) std::print("[scene] publishing robot->table->bottle to DSR graph (Webots ground truth)\n");
 
     // Rest pose, tunable without recompiling: Controller.rest_pose = "j1 .. j7"
     // (rad). Lets us iterate the "ready over the table, camera-up" posture by
@@ -538,7 +542,8 @@ void SpecificWorker::update_bottle_pose_in_dsr()
             table_w_pose = webots2robocomp_proxy->getObjectPose(WEBOTS_TABLE_DEF);
             static_scene_cached = true;
         }
-        bottle_w_pose = webots2robocomp_proxy->getObjectPose(WEBOTS_BOTTLE_DEF);
+        if (not bottle_from_graph_ or publish_scene_to_graph_)   // need the Webots bottle as control source and/or to publish
+            bottle_w_pose = webots2robocomp_proxy->getObjectPose(WEBOTS_BOTTLE_DEF);
         webots_proxy_unreachable_warned_ = false;
     }
     catch (const Ice::Exception& e)
@@ -577,11 +582,36 @@ void SpecificWorker::update_bottle_pose_in_dsr()
 
     // Cache world poses for grasp targeting + the viewer (both run in world
     // frame). Bottle long axis = bottle local +Z in world.
-    bottle_pos_world_  = bottle_w;
-    bottle_axis_world_ = (q_bottle_w * Eigen::Vector3d::UnitZ()).normalized();
     table_world_.linear()      = q_table_w.normalized().toRotationMatrix();
     table_world_.translation() = table_w;
-    scene_world_valid_ = true;
+
+    if (bottle_from_graph_)
+    {
+        // Read the bottle in the table frame from the graph (the table->bottle RT edge written by
+        // the perception agent) and lift it into the world frame via the cached table_world_, so the
+        // FSM still operates in the controller's world frame. A missing edge = no detection this
+        // cycle: keep the previous belief (a dropout the look-up belief predicts through).
+        if (inner_eigen_api_)
+            if (auto bt = inner_eigen_api_->transform_axis("table", "bottle"); bt.has_value())
+            {
+                const auto& v = bt.value();   // [x,y,z, rx,ry,rz]: metres + xyz-euler in the table frame
+                const Eigen::Vector3d p_table(v[0], v[1], v[2]);
+                const Eigen::Matrix3d R_tb =
+                    (Eigen::AngleAxisd(v[3], Eigen::Vector3d::UnitX())
+                   * Eigen::AngleAxisd(v[4], Eigen::Vector3d::UnitY())
+                   * Eigen::AngleAxisd(v[5], Eigen::Vector3d::UnitZ())).toRotationMatrix();
+                bottle_pos_world_  = table_world_ * p_table;
+                bottle_axis_world_ = (table_world_.linear() * R_tb * Eigen::Vector3d::UnitZ()).normalized();
+                bottle_valid_ = true;
+            }
+    }
+    else
+    {
+        bottle_pos_world_  = bottle_w;
+        bottle_axis_world_ = (q_bottle_w * Eigen::Vector3d::UnitZ()).normalized();
+        bottle_valid_ = true;
+    }
+    scene_world_valid_ = bottle_valid_;   // table cached (above) + at least one bottle pose seen
 
     // DSR scene publishing disabled (loop-hitch diagnosis): this controller does NOT read the
     // graph for control — its DSR signal slots are stubs — so the per-cycle
@@ -589,7 +619,7 @@ void SpecificWorker::update_bottle_pose_in_dsr()
     // DDS publishing is a controller-side per-cycle stall source; the pose caching above is
     // what the FSM actually consumes. Re-enable if a sibling agent needs the live edges.
     (void) robot_w; (void) q_robot_w;
-    return;
+    if (not publish_scene_to_graph_) return;   // opt-in: write the scene to the graph (test / siblings)
 
     auto robot_node  = G->get_node("robot");
     auto table_node  = G->get_node("table");
