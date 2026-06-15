@@ -133,6 +133,7 @@ void SpecificWorker::initialize()
     // Auto-arm the run as if the Start button were checked (default off).
     try { run_requested_ = configLoader.get<bool>("Controller.auto_start"); } catch (...) {}
     if (run_requested_) std::print("[ui] auto_start: run requested from config\n");
+    try { exit_on_homing_timeout_ = configLoader.get<bool>("Controller.exit_on_homing_timeout"); } catch (...) {}
 
     // Rest pose, tunable without recompiling: Controller.rest_pose = "j1 .. j7"
     // (rad). Lets us iterate the "ready over the table, camera-up" posture by
@@ -417,10 +418,18 @@ void SpecificWorker::run_homing(
         RoboCompKinovaArm::TJointSpeeds stop;
         stop.jointSpeeds.assign(Kinematics::N_ARM_JOINTS, 0.0f);
         try { kinovaarm_proxy->moveJointsWithSpeed(stop); } catch (const Ice::Exception&) {}
+        run_requested_ = false;
+        if (exit_on_homing_timeout_)
+        {
+            std::print("[homing] TIMEOUT after {} cycles (max err {:.4f} rad) — jammed; "
+                       "exit_on_homing_timeout ⇒ quitting (fail-fast for unattended runs).\n",
+                       HOMING_TIMEOUT_TICKS, max_err);
+            QTimer::singleShot(200, QCoreApplication::instance(), SLOT(quit()));
+            return;
+        }
         std::print("[homing] TIMEOUT after {} cycles (max err {:.4f} rad) — "
                    "pose unreachable/jammed; halting, waiting for Start.\n",
                    HOMING_TIMEOUT_TICKS, max_err);
-        run_requested_ = false;
         phase_         = Phase::WaitingForStart;
         return;
     }

@@ -29,6 +29,8 @@ graph = true
 
 [Controller]
 auto_start = true
+exit_on_homing_timeout = false   # unattended sweeps set true ⇒ quit on a homing jam instead of idling
+monitor_log = true               # dense per-cycle [mon] line; set false for batch runs (fills disk)
 tip_log    = false  # disabled: [ctrl] lines below are the validation log
 # EXPERIMENT 1 — natural fine-tuning from a specialized sequence:
 # run the full pick→place loop and let model precision (c) accumulate from confirmed
@@ -122,12 +124,25 @@ fluid_log_path   = "/tmp/kinova_fluidity.csv"
 # dwell, speed) — so the agent gets skilled purely by doing, and self-calibrates (it only
 # speeds up as fast as the outcomes keep confirming). Π_m is persisted across rounds.
 precision_reweighting = true       # EXP1: precision learning ON
+# WAF ablation toggles (defaults = current full system). global_confidence: true ⇒ one shared Π_m
+# (A/B vs per-segment). anticipation: false ⇒ greedy grasp azimuth + tight gate (isolate anticipation
+# from precision). success_rate_baseline: true ⇒ drive knobs from a Beta(1,1) success rate, not precision.
+global_confidence     = false
+anticipation          = true
+success_rate_baseline = false
 sensory_precision     = 2.0        # Π_s (fixed): c ≈ n/(n+Π_s) over n clean reps → gradual saturation
 evidence_unit         = 1.0        # Π_m added by one cleanly-confirmed rep
 conf_decay            = 0.5        # Π_m ×= this on a surprise (miss)
-perception_noise_std  = 0.0        # m, σ of injected bottle-observation noise (sim2real; 0 = ideal sim)
+perception_noise_std  = 0.0        # m, σ_obs of injected bottle-pose noise (sim2real; 0 = ideal sim, unchanged behaviour)
+surprise_chi          = 3.0        # Mahalanobis k: a look-up is a surprise (re-acquire+deflate) only if ‖innov‖ > k·√(P+σ_obs²)
+rng_seed              = -1         # >=0 ⇒ reproducible noise realization for experiment seeds; -1 = random
 conf_gain             = 0.15       # (legacy ramp; unused by the surprise-driven update)
 skilled_sample_period = 12         # cycles between observations at full confidence
+# Synthetic perception-latency harness: ms a real look-up (segmentation+pose) would cost. > 0 makes
+# each actual look-up sleep this long, so the loop genuinely slows when it looks; as look-ups thin
+# with skill the effective approach rate recovers toward 1/T_ctrl. 0 = free look-up (default).
+perception_latency_ms = 0.0
+latency_log_path      = "/tmp/kinova_latency.csv"  # per-episode effective approach control rate
 speed_conf_gain       = 0.6        # approach speed ×(1+this·confidence) — "more speed" when skilled
 standoff_collapse     = 0.6        # at full c, slide the Tracking waypoint 60% from standoff toward grasp
 insert_conf_gain      = 1.0        # insert speed ×(1+this·confidence) — skilled creeps in twice as fast

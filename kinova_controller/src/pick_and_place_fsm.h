@@ -137,13 +137,29 @@ private:
     // the whole skill); false ⇒ the per-segment partition. Per-deposit evidence is scaled by
     // 1/N_SEG in global mode so the per-episode accumulation rate matches the partition.
     bool   global_confidence_ = false;
+    // ── Ablation toggles (WAF reviewer #3/#4/#7) ──────────────────────────────────────────────
+    // anticipation_: gate the lift-aware grasp azimuth sweep AND the approach→insert handoff
+    //   (orient/align conf gains). false ⇒ greedy geometric grasp + tight gate = the non-
+    //   anticipatory baseline that chronically fails the lift (isolates anticipation's reliability
+    //   contribution from precision's speed contribution — reviewer #4).
+    // success_rate_baseline_: drive EVERY skill knob from a global Beta(1,1) success-rate estimator
+    //   instead of model precision — the apples-to-apples test of "what does precision buy over a
+    //   success score?" (#2). succ_count_/attempt_count_ accumulate per attempt within a round.
+    bool   anticipation_          = true;
+    bool   success_rate_baseline_ = false;
+    long   succ_count_ = 0, attempt_count_ = 0;
     double c_seg(Segment s) const
     {
         if (force_confidence_ >= 0.0) return force_confidence_;
         const int k = global_confidence_ ? 0 : static_cast<int>(s);
         return pi_m_[k] / (pi_m_[k] + pi_s_);
     }
-    double skill_c() const { return precision_reweighting_ ? c_seg(cur_seg_) : 0.0; }
+    double skill_c() const
+    {
+        if (success_rate_baseline_)
+            return (1.0 + succ_count_) / (2.0 + attempt_count_);   // Beta(1,1) posterior-mean success rate
+        return precision_reweighting_ ? c_seg(cur_seg_) : 0.0;
+    }
     double skilled_speed(double base) const { return base * (1.0 + speed_conf_gain_ * skill_c()); }
     // Free-space wrist slew rate: skilled → faster reorientation DURING the approach travel, so
     // the gripper arrives already oriented (no asymptotic orientation "crawl" after the EE
@@ -234,6 +250,7 @@ private:
 
     // ── Round / cycle bookkeeping ────────────────────────────────────────────
     bool returning_for_cycle_   = false;
+    bool retrying_              = false;   // a homing return is a RETRY of the same rep (not a new rep)
     int  round_cycles_          = 0;
     int  pick_place_cycles_done_ = 0;
 
@@ -263,9 +280,20 @@ private:
     std::ofstream dataset_;   bool dataset_open_ = false;
 
     bool   precision_reweighting_ = false;
-    double perception_noise_std_ = 0.0;
+    double perception_noise_std_ = 0.0;   // σ_obs (m): injected bottle-pose observation noise (sim2real)
+    double surprise_chi_         = 3.0;    // Mahalanobis k: surprise if ‖innov‖ > k·√(P+σ_obs²)
     double conf_gain_ = 0.15, conf_decay_ = 0.5;
     int    skilled_sample_period_ = 12;
+    // Synthetic perception-latency harness: a real look-up (segmentation + pose) costs tens of ms;
+    // in sim compute_side_grasp_target() is free, so the timing benefit of looking LESS is invisible.
+    // When > 0, each actual look-up sleeps this long, genuinely slowing the loop on look-up cycles
+    // (the arm holds q̇ for that interval — the real held-velocity exposure). As c_approach rises and
+    // look-ups thin out, the effective approach control rate recovers toward 1/T_ctrl. The per-episode
+    // effective rate is logged so the decoupling is MEASURED, not assumed. 0 = off (unchanged).
+    double      perception_latency_ms_ = 0.0;
+    std::string latency_log_path_;
+    std::ofstream latency_log_;   bool latency_log_open_ = false;
+    double      approach_t0_ = 0.0;   // wall-clock at the first Tracking cycle of the episode
     double speed_conf_gain_ = 0.6, surprise_gate_m_ = 0.05;
     double orient_conf_gain_ = 1.5;   // skilled → faster free-space wrist slew during the approach
     double standoff_collapse_ = 0.0, insert_conf_gain_ = 0.0;
@@ -281,6 +309,7 @@ private:
     double evidence_unit_ = 1.0;              // Controller.evidence_unit: Π_m added per clean leg
     SideGraspTarget belief_grasp_{};
     bool   belief_valid_ = false;
+    double belief_var_   = 1e9;   // scalar Kalman pose-belief variance P (m²); set on first look
     int    cycles_since_obs_ = 0, obs_count_rep_ = 0;
     double rep_t0_ = 0.0;
     double rep_pick_s_ = 0.0;   // time from rep start to grasp-confirm (the c-scheduled portion)

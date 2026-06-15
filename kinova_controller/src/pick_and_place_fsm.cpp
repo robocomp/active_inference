@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <chrono>
+#include <thread>
 #include <print>
 #include <format>
 #include <sstream>
@@ -122,13 +123,23 @@ PickandPlaceFSM::PickandPlaceFSM(SpecificWorker& w, const ConfigLoader& cfg) : w
 
     try { learn_pick_place_      = cfg.get<bool>  ("Controller.learn_pick_place");        } catch (...) {}
     try { global_confidence_     = cfg.get<bool>  ("Controller.global_confidence");        } catch (...) {}
+    try { anticipation_          = cfg.get<bool>  ("Controller.anticipation");             } catch (...) {}
+    try { success_rate_baseline_ = cfg.get<bool>  ("Controller.success_rate_baseline");    } catch (...) {}
     try { precision_reweighting_ = cfg.get<bool>  ("Controller.precision_reweighting"); } catch (...) {}
     try { perception_noise_std_  = cfg.get<double>("Controller.perception_noise_std");   } catch (...) {}
+    try { surprise_chi_          = cfg.get<double>("Controller.surprise_chi");           } catch (...) {}
+    // Reproducible noise realization: seed the RNG from config (>=0) for repeatable seeds in
+    // experiment sweeps; <0 keeps the random_device seed (default).
+    try { const int rseed = cfg.get<int>("Controller.rng_seed");
+          if (rseed >= 0) { rng_.seed(static_cast<unsigned>(rseed));
+                            std::print("[rng] seeded with {}\n", rseed); } } catch (...) {}
     try { conf_gain_             = cfg.get<double>("Controller.conf_gain");               } catch (...) {}
     try { conf_decay_            = cfg.get<double>("Controller.conf_decay");              } catch (...) {}
     try { pi_s_                  = cfg.get<double>("Controller.sensory_precision");       } catch (...) {}
     try { evidence_unit_         = cfg.get<double>("Controller.evidence_unit");           } catch (...) {}
     try { skilled_sample_period_ = cfg.get<int>   ("Controller.skilled_sample_period");  } catch (...) {}
+    try { perception_latency_ms_ = cfg.get<double>("Controller.perception_latency_ms");  } catch (...) {}
+    try { latency_log_path_      = cfg.get<std::string>("Controller.latency_log_path");  } catch (...) {}
     try { speed_conf_gain_       = cfg.get<double>("Controller.speed_conf_gain");         } catch (...) {}
     try { orient_conf_gain_      = cfg.get<double>("Controller.orient_conf_gain");        } catch (...) {}
     try { confidence_path_       = cfg.get<std::string>("Controller.confidence_path");    } catch (...) {}
@@ -159,6 +170,16 @@ PickandPlaceFSM::PickandPlaceFSM(SpecificWorker& w, const ConfigLoader& cfg) : w
             }
         }
     } catch (...) {}
+    // Anticipation OFF also disables the approach→insert handoff (slew front-loading + commit-gate
+    // widening), so the "no anticipation" ablation uses the tight gate and no skilled slew.
+    if (not anticipation_)
+    {
+        orient_conf_gain_    = 0.0;
+        align_tol_conf_gain_ = 0.0;
+        std::print("[ablation] anticipation OFF — greedy grasp azimuth, tight commit gate, no slew\n");
+    }
+    if (success_rate_baseline_)
+        std::print("[ablation] success-rate baseline ON — knobs driven by Beta(1,1) success rate, not precision\n");
     load_confidence();
     try {
         const auto mpath = cfg.get<std::string>("Controller.metrics_path");
@@ -168,6 +189,18 @@ PickandPlaceFSM::PickandPlaceFSM(SpecificWorker& w, const ConfigLoader& cfg) : w
                 metrics_open_ = true;
                 metrics_ << "rep,success,c_approach,c_insert,c_lift,c_place,c_retreat,pick_s,episode_s,observations\n";
                 std::print("[skill] per-rep metrics → {}\n", mpath);
+            }
+        }
+    } catch (...) {}
+    try {
+        if (not latency_log_path_.empty()) {
+            latency_log_.open(latency_log_path_, std::ios::out | std::ios::trunc);
+            if (latency_log_.is_open()) {
+                latency_log_open_ = true;
+                latency_log_ << "rep,c_approach,latency_ms,approach_cycles,lookups,"
+                                "approach_wall_s,eff_rate_hz,lookup_frac,v_cruise_ms\n";
+                std::print("[latency] perception-latency harness {:.0f} ms/look-up → {}\n",
+                           perception_latency_ms_, latency_log_path_);
             }
         }
     } catch (...) {}
@@ -210,8 +243,21 @@ SpecificWorker::Phase PickandPlaceFSM::on_rest_reached()
         grasp_phase_         = GraspPhase::Tracking;
         grasp_settle_ticks_  = 0;
         w_.gripper_command_  = 1.0f;
-        begin_rep_probe();
-        std::print("[cycle] rest reached → starting pick-and-place {}\n", pick_place_cycles_done_ + 1);
+        if (retrying_)
+        {   // RETRY of the same rep: re-track WITHOUT a fresh begin_rep_probe, so rep_attempts_
+            // (and probe_index_, rep_t0_, the respawn) are preserved and the give-up threshold is
+            // actually reached. Only the per-attempt state is reset.
+            retrying_           = false;
+            grasp_azimuth_z_.reset();   azimuth_retries_ = 0;
+            belief_valid_       = false; belief_var_ = 1e9; cycles_since_obs_ = 1 << 20;
+            track_stuck_ticks_  = 0; track_noprog_ticks_ = 0; track_best_dist_ = 1e9;
+            std::print("[grasp] retry {}/{} — re-tracking same rep\n", rep_attempts_, MAX_REP_ATTEMPTS);
+        }
+        else
+        {
+            begin_rep_probe();
+            std::print("[cycle] rest reached → starting pick-and-place {}\n", pick_place_cycles_done_ + 1);
+        }
         return SpecificWorker::Phase::ActiveEFE;
     }
     if (returning_for_cycle_ and round_cycles_ > 0 and pick_place_cycles_done_ >= round_cycles_)
@@ -279,14 +325,52 @@ void PickandPlaceFSM::run_tracking(const std::array<double, Kinematics::N_ARM_JO
         const int    period = 1 + static_cast<int>(std::lround(c_app * (skilled_sample_period_ - 1)));
         if (not belief_valid_ or ++cycles_since_obs_ >= period)
         {
+            // Synthetic perception cost: a real look-up takes time, blocking the control loop for
+            // this interval (the arm holds its last q̇ meanwhile — the genuine held-velocity exposure
+            // the v·τ≤βΔ contract bounds). Acting on the belief between looks pays this cost LESS
+            // often as skill rises. 0 ⇒ free look-up (unchanged sim behaviour).
+            if (perception_latency_ms_ > 0.0)
+                std::this_thread::sleep_for(
+                    std::chrono::duration<double, std::milli>(perception_latency_ms_));
             auto obs_opt = compute_side_grasp_target();   // a real look-up (x_obs, possibly noisy)
             if (not obs_opt.has_value()) { stop_no_target(); return; }
             const auto& obs = obs_opt.value();
             cycles_since_obs_ = 0;
             ++obs_count_rep_;
-            if (not belief_valid_) { belief_grasp_ = obs; belief_valid_ = true; }
+            if (not belief_valid_)
+            {
+                belief_grasp_ = obs; belief_valid_ = true;
+                belief_var_ = std::max(1e-9, perception_noise_std_ * perception_noise_std_);
+            }
+            else if (perception_noise_std_ > 0.0)
+            {
+                // Precision spine: a scalar Kalman on the (static) bottle pose. The measurement
+                // precision IS the sensory precision Π_s = 1/σ_obs² (R = σ_obs²); a noisy look moves
+                // the belief by the Kalman gain K = P/(P+R), and repeated looks average the noise down
+                // (P→0). The surprise gate is the Mahalanobis test ‖innov‖ > k·√(P+R): a deviation
+                // explainable by noise is fused, only a genuine pose change re-acquires and deflates
+                // the approach precision (so sensor noise no longer false-deflates skill).
+                const double R = perception_noise_std_ * perception_noise_std_;
+                const double d = (obs.grasp_pos - belief_grasp_.grasp_pos).norm();
+                if (d > surprise_chi_ * std::sqrt(belief_var_ + R))
+                {   // genuine surprise (object moved / mis-detected) → re-acquire + deflate
+                    belief_grasp_ = obs; belief_var_ = R;
+                    deflate(SEG_APPROACH);
+                }
+                else
+                {
+                    const double K = belief_var_ / (belief_var_ + R);
+                    belief_grasp_.grasp_pos     += K * (obs.grasp_pos     - belief_grasp_.grasp_pos);
+                    belief_grasp_.stand_off_pos += K * (obs.stand_off_pos - belief_grasp_.stand_off_pos);
+                    belief_grasp_.z_tool_des = (belief_grasp_.z_tool_des + K * (obs.z_tool_des - belief_grasp_.z_tool_des)).normalized();
+                    belief_grasp_.x_tool_des = (belief_grasp_.x_tool_des + K * (obs.x_tool_des - belief_grasp_.x_tool_des)).normalized();
+                    belief_var_ = (1.0 - K) * belief_var_;
+                }
+                belief_grasp_.up_axis = obs.up_axis; belief_grasp_.top_down = obs.top_down;
+            }
             else
             {
+                // Noiseless sim: the validated skill-weighted fusion + fixed surprise gate (unchanged).
                 double w = std::max(0.05, 1.0 - c_app);
                 if ((obs.grasp_pos - belief_grasp_.grasp_pos).norm() > surprise_gate_m_)
                 {   // surprise → re-engage feedback and drop the approach precision
@@ -314,6 +398,7 @@ void PickandPlaceFSM::run_tracking(const std::array<double, Kinematics::N_ARM_JO
     if (learn_pick_place_)
     {
         ++rep_track_ticks_;
+        if (rep_track_ticks_ == 1) approach_t0_ = now_seconds();   // latch approach wall-clock start
         const double c = skill_c();
 
         // Jam / no-progress watchdogs: a wedged approach can't loop forever.
@@ -384,6 +469,20 @@ void PickandPlaceFSM::run_tracking(const std::array<double, Kinematics::N_ARM_JO
                 grasp_settle_ticks_ = 0; insert_ticks_ = 0; tip_reflex_offset_ = 0.0;
                 std::print("[grasp] standoff settled (e={:.3f} m, {:.1f}°, c={:.2f}) → Inserting\n",
                            ep, ea * 57.29578, c);
+                // Latency harness: the approach is the only phase that looks, so its effective
+                // control rate = tracking cycles / tracking wall-time captures the perception-cost
+                // payoff. As c_approach rises and look-ups thin, eff_rate climbs back toward 1/T_ctrl.
+                if (latency_log_open_)
+                {
+                    const double wall     = std::max(1e-6, now_seconds() - approach_t0_);
+                    const double eff_rate = rep_track_ticks_ / wall;
+                    const double lf       = rep_track_ticks_ > 0
+                                          ? static_cast<double>(obs_count_rep_) / rep_track_ticks_ : 0.0;
+                    latency_log_ << (probe_index_ - 1) << ',' << c_seg(SEG_APPROACH) << ','
+                                 << perception_latency_ms_ << ',' << rep_track_ticks_ << ','
+                                 << obs_count_rep_ << ',' << wall << ',' << eff_rate << ','
+                                 << lf << ',' << skilled_speed(0.25) << '\n', latency_log_.flush();
+                }
             }
         }
         else grasp_settle_ticks_ = 0;
@@ -772,7 +871,7 @@ std::optional<PickandPlaceFSM::SideGraspTarget> PickandPlaceFSM::compute_side_gr
     // candidate azimuths by the manipulability at BOTH the grasp pose AND the lift endpoint, and
     // commit to one that stays manipulable through the lift. Cached per episode (bottle static).
     // This is the fix for committing to a grasp the arm then can't lift from.
-    if (not top_down)
+    if (anticipation_ and not top_down)
     {
         if (not grasp_azimuth_z_.has_value())
         {
@@ -816,6 +915,19 @@ std::optional<PickandPlaceFSM::SideGraspTarget> PickandPlaceFSM::compute_side_gr
     // gap, not pushed past the back-less gripper. Standoff is still measured from the axis.
     out.grasp_pos     = grasp_pt - z_tool_des * (top_down ? 0.0 : GRASP_DEPTH_BACKOFF_M);
     out.stand_off_pos = grasp_pt - z_tool_des * APPROACH_STANDOFF_M;
+
+    // Synthetic perception noise: each look-up is an independent noisy pose estimate. One Gaussian
+    // offset (σ=perception_noise_std) shifts BOTH targets together (a single bottle-pose error, not
+    // independent per-point), so it propagates like a real detector error and the Kalman fusion in
+    // run_tracking averages it down over looks. This is the failure-prone regime that lets the
+    // per-segment, surprise-gated precision distinguish itself from a global success-rate gain.
+    if (perception_noise_std_ > 0.0)
+    {
+        std::normal_distribution<double> nz(0.0, perception_noise_std_);
+        const Eigen::Vector3d noise(nz(rng_), nz(rng_), nz(rng_));
+        out.grasp_pos     += noise;
+        out.stand_off_pos += noise;
+    }
 
     static bool reach_logged = false;
     if (not reach_logged)
@@ -1011,6 +1123,10 @@ void PickandPlaceFSM::deflate(Segment s)
 
 void PickandPlaceFSM::log_rep_outcome(bool success, double rise, double xy_gap)
 {
+    // Global success-rate accumulator for the success_rate_baseline_ ablation (counts every grasp
+    // attempt, success or miss). Always tracked; only consumed when the baseline drives skill_c().
+    ++attempt_count_;
+    if (success) ++succ_count_;
     if (not dataset_open_) return;
     const auto& g = latched_grasp_;
     dataset_ << (probe_index_ - 1) << ',' << pick_place_cycles_done_ << ','
@@ -1096,6 +1212,7 @@ void PickandPlaceFSM::begin_rep_probe()
     track_noprog_ticks_ = 0; track_best_dist_ = 1e9;
     force_top_down_ = false;
     belief_valid_     = false;
+    belief_var_       = 1e9;
     cycles_since_obs_ = 1 << 20;
     obs_count_rep_    = 0;
     rep_t0_           = now_seconds();
@@ -1166,11 +1283,19 @@ void PickandPlaceFSM::miss_or_give_up(const std::string& reason)
                      << c_seg(SEG_PLACE) << ',' << c_seg(SEG_RETREAT) << ','
                      << rep_pick_s_ << ',' << (now_seconds() - rep_t0_) << ',' << obs_count_rep_
                      << '\n', metrics_.flush();
-        w_.run_requested_ = false;
-        std::print("[probe] rep {} failed after {} attempts — moving on\n", probe_index_ - 1, rep_attempts_);
+        // Give up on this rep but COUNT it and advance to the next (mirrors the success path),
+        // so a round runs round_cycles TOTAL reps and a hard failure no longer halts the round.
+        ++pick_place_cycles_done_;
+        returning_for_cycle_     = true;
+        w_.phase_                = SpecificWorker::Phase::Homing;
+        w_.homing_settled_ticks_ = 0;
+        w_.homing_elapsed_ticks_ = 0;
+        grasp_phase_             = GraspPhase::Tracking;
+        std::print("[probe] rep {} failed after {} attempts -> next rep\n", probe_index_ - 1, rep_attempts_);
     }
     else
     {
+        retrying_              = true;   // RETRY of the SAME rep: on_rest_reached must keep rep_attempts_
         grasp_phase_           = GraspPhase::Tracking;
         grasp_settle_ticks_    = 0;
         insert_ticks_          = 0;

@@ -94,6 +94,10 @@ private:
 	// ── Outer lifecycle state ────────────────────────────────────────────────
 	Phase phase_ = Phase::SendingRestPose;
 	bool  run_requested_ = false;            // mirrors the viewer Start button
+	// Fail-fast for UNATTENDED runs: on a homing timeout (arm jammed) quit cleanly instead of
+	// idling in WaitingForStart forever (which wasted 15 min/variant in the ablation sweep).
+	// Default false ⇒ interactive halt-and-wait behaviour unchanged. Set in sweep configs.
+	bool  exit_on_homing_timeout_ = false;
 	// Rest / parking pose (rad). Override via Controller.rest_pose.
 	std::array<double, Kinematics::N_ARM_JOINTS> rest_pose_angles_{
 		1.189, 0.244, 0.300, -2.101, 0.651, -1.502, 3.141
