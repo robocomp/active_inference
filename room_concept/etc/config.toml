@@ -61,7 +61,7 @@ graph = true
 
 [Presence]
 required_agent_names   = ["robot_concept"]
-optional_agent_names   = ["controller"]
+optional_agent_names   = ["controller", "bottle_concept"]
 config_dir             = "etc"
 monitor_period_ms      = 500
 heartbeat_timeout_ms   = 15000  # wider window: room_concept runs at >100% CPU, DSR signals queue up
@@ -70,8 +70,12 @@ stale_grace_ms         = 120000  # 2 min grace: covers robot_concept restart tim
 agent_info_period_ms   = 1000
 
 [Owns]
-nodes    = ["room_concept 5", "afford_room"]  # deleted from DSR graph on clean shutdown
-subtrees = ["room"]                       # deletes room node + all RT children (wall_*, floor)
+# static-room phase (PreserveBootstrapRoom=true): room_concept does NOT own the room — it is a
+# pre-seeded static prior. Keep "room" OUT of subtrees so neither a clean shutdown NOR a peer
+# reading this file on our crash deletes it; afford_room isn't created in static mode either.
+# When going DYNAMIC, restore: nodes=["room_concept 5","afford_room"], subtrees=["room"].
+nodes    = ["room_concept 5"]  # our own agent presence node (cleaned on shutdown / peer-crash)
+#subtrees = []                  # was ["room"]; room is a static prior, not owned, in static-room mode
 
 # Zero-copy RGBD media plane (RGB consumer). DEDICATED DDS domain, isolated from
 # the DSR Agent.domain = 0 so media discovery churn never perturbs cortex/DSR
@@ -80,7 +84,9 @@ subtrees = ["room"]                       # deletes room node + all RT children 
 domain_id = 7
 rgb_topic = "rc/zed/rgb"
 
-[RoomConcept]  
+[RoomConcept]
+RoomLayoutSvg          = "room_4x4.svg"  # room polygon (room_contour) loaded at start; was hardcoded beta_layout.svg
+PreserveBootstrapRoom  = true  # static-room phase: adopt the pre-seeded room/table from the bootstrap graph; do NOT delete on start or overwrite robot->room. Set false to go dynamic (localize + create room).
 PredictionEarlyExit    = true  # Skip optimization when prediction error < threshold
 SigmaSdf               = 0.15  # σ_obs del SDF para el umbral de early exit (m)
 PredictionTrustFactor  = 0.7   # threshold = SigmaSdf × factor  → 12 cm

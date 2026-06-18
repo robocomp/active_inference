@@ -101,6 +101,7 @@ class SpecificWorker : public GenericWorker
             // Localizer
             bool  PREDICTION_EARLY_EXIT  = true;
             std::string OptimizerType    = "LBFGS";
+            std::string ROOM_LAYOUT_SVG  = "beta_layout.svg";  // room polygon file (config: RoomConcept.RoomLayoutSvg)
             float ODOMETRY_NOISE_FACTOR  = 0.0f;
 
             // DSR stabilization: require these many consecutive "stable" frames before
@@ -108,6 +109,13 @@ class SpecificWorker : public GenericWorker
             int   STABLE_FRAMES_REQUIRED = 30;
             float STABLE_SDF_MSE_MAX     = 0.06f;   // sdf_mse must be below this
             float STABLE_COV_TT_MAX      = 0.001f;  // angular covariance must be below this
+
+            // Static-room mode: when true, room_concept ADOPTS a pre-seeded room/table from the
+            // bootstrap graph instead of deleting+recreating it on start, and does NOT write room
+            // pose / robot->room (so the fixed low-cov bootstrap edge survives). The agent stays
+            // alive to satisfy the presence protocol while the room is a static prior. Flip false
+            // to go dynamic (full localization + room creation).
+            bool  PRESERVE_BOOTSTRAP_ROOM = false;
 
             // Room height for DSR node attribute
             float room_height = 2.4f;  // meters

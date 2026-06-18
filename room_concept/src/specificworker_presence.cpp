@@ -36,8 +36,19 @@ void SpecificWorker::cleanup_owned_nodes()
         return;
     owned_nodes_cleaned_ = true;
 
-    cleanup_room_graph_nodes();
-    presence_coordinator_.cleanup_owned_nodes();
+    // In PreserveBootstrapRoom (static-room) mode the room/table are a pre-seeded prior this
+    // agent does NOT own, so do not delete them on exit: skip both the type-based room cleanup
+    // and the [Owns]-driven owned-node cleanup (which lists subtrees=["room"]). We still remove
+    // our own agent presence node so peers detect our departure.
+    if (params.PRESERVE_BOOTSTRAP_ROOM)
+    {
+        qInfo() << "[room] PreserveBootstrapRoom=true: keeping static room/table on exit (skipping owned-node deletion).";
+    }
+    else
+    {
+        cleanup_room_graph_nodes();
+        presence_coordinator_.cleanup_owned_nodes();
+    }
     cleanup_self_agent_node();
 }
 

@@ -39,11 +39,6 @@ endif()
 
 find_package(Torch REQUIRED)
 
-# Enable CUDA language so CMake initializes detection scripts
-#enable_language(CUDA)
-#find_package(Torch REQUIRED)
-#set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
-
 find_package(Eigen3 REQUIRED)
 find_package(Boost REQUIRED COMPONENTS system filesystem)
 
@@ -103,4 +98,20 @@ include_directories(${CMAKE_CURRENT_LIST_DIR}/../../common/media_transport)
 
 # no-char8_t to avoid a problem with ICE Connection lib.
 add_definitions(-O3 -march=native -fmax-errors=1 -fno-char8_t)
+
+# AddressSanitizer (opt-in, separate build dir):
+#   cmake -B build-asan -DENABLE_ASAN=ON && cmake --build build-asan -j
+# Instruments room_concept's OWN code so we catch the corrupting WRITE behind the bottle-churn
+# segfault (the bad-free that surfaces in Qt paint), not just the later free. See run_asan.sh.
+option(ENABLE_ASAN "Build room_concept with AddressSanitizer" OFF)
+if(ENABLE_ASAN)
+  message(STATUS "AddressSanitizer ENABLED for room_concept (-O1, frame pointers; -lasan-direct link)")
+  add_compile_options(-fsanitize=address -fno-omit-frame-pointer -O1)
+  # Link libasan DIRECTLY (not via the -fsanitize driver). The driver injects an __asan_init entry
+  # into .preinit_array, which runs BEFORE any shared-library init -> ASan is active during
+  # libIceStorm's static init and trips a latent Ice FactoryTable init-order SEGV (before main).
+  # -lasan resolves __asan_* as UND dynamic symbols WITHOUT a preinit entry; run_asan.sh then strips
+  # the libasan DT_NEEDED and LD_PRELOADs it, so ASan inits first while Ice's init order stays normal.
+  add_link_options(-fno-omit-frame-pointer -Wl,--no-as-needed -lasan -Wl,--as-needed)
+endif()
 

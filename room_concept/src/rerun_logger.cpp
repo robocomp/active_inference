@@ -1,6 +1,4 @@
 #include "rerun_logger.h"
-#include "component_logging.h"
-
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -11,6 +9,8 @@
 #include <sstream>
 #include <iomanip>
 #include <cmath>
+#include <QDebug>
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Minimal JSON helpers (no external library required)
 // ──────────────────────────────────────────────────────────────────────────────
@@ -190,7 +190,7 @@ void RerunLogger::sender_loop()
         }
 
         if (!send_frame(frame)) {
-            qCWarning(logIo) << "RerunLogger send_frame failed:" << std::strerror(errno) << "reconnecting";
+            qWarning() << "RerunLogger send_frame failed:" << std::strerror(errno) << "reconnecting";
             ::close(sock_fd_);
             sock_fd_ = -1;
             connected_ = false;

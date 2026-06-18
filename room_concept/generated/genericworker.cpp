@@ -26,6 +26,19 @@ GenericWorker::GenericWorker(const ConfigLoader& configLoader, TuplePrx tprx) : 
 
 	this->configLoader = configLoader;
 
+    if (!this->configLoader.get<bool>("Component.Debug.Verbose")) {
+        std::cout << "\033[32mINFO\033[0m Verbose mode is disabled" << std::endl;
+        qInstallMessageHandler([](QtMsgType type, const QMessageLogContext& context, const QString& msg) {
+                switch (type) {
+                    case QtDebugMsg:   break; // Suppress qDebug()
+                    case QtInfoMsg:    qInfo().noquote() << msg; break;
+                    case QtWarningMsg: qWarning().noquote() << msg; break;
+                    case QtCriticalMsg: qCritical().noquote() << msg; break;
+                    case QtFatalMsg:   qFatal("%s", msg.toUtf8().constData()); break;
+                    default: qInfo().noquote() << msg; break;
+                }});
+    }
+
 	states["Initialize"] = std::make_unique<GRAFCETStep>("Initialize", BASIC_PERIOD, nullptr, std::bind(&GenericWorker::initialize, this));
 	states["Compute"] = std::make_unique<GRAFCETStep>("Compute", configLoader.get<int>("Period.Compute"), std::bind(&GenericWorker::compute, this));
 	states["Emergency"] = std::make_unique<GRAFCETStep>("Emergency", configLoader.get<int>("Period.Emergency"), std::bind(&GenericWorker::emergency, this));

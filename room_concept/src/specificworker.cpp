@@ -19,7 +19,6 @@
 #include "specificworker.h"
 #include "camera_visualizer.h"
 
-#include "component_logging.h"
 #include <algorithm>
 #include <print>
 #include <random>
@@ -126,10 +125,15 @@ void SpecificWorker::initialize()
     rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RoomConcept.OdomNoiseScale", room_concept_.params.odom_noise_scale);
     rc::ConfigLoaderUtils::load_optional<bool>(configLoader, "RoomConcept.DifferentialTest", room_concept_.params.differential_test_enabled);
     rc::ConfigLoaderUtils::load_optional<bool>(configLoader, "RoomConcept.SdfCurrentSlotOnly", room_concept_.params.sdf_current_slot_only);
+    rc::ConfigLoaderUtils::load_optional<bool>(configLoader, "RoomConcept.PreserveBootstrapRoom", params.PRESERVE_BOOTSTRAP_ROOM);
     rc::ConfigLoaderUtils::load_optional_apply<std::string>(configLoader, "RoomConcept.OptimizerType", [&](const std::string& optimizer_type)
     {
         params.OptimizerType = optimizer_type;
         room_concept_.params.optimizer_type = optimizer_type;
+    });
+    rc::ConfigLoaderUtils::load_optional_apply<std::string>(configLoader, "RoomConcept.RoomLayoutSvg", [&](const std::string& svg_file)
+    {
+        params.ROOM_LAYOUT_SVG = svg_file;
     });
 
     rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RoomConcept.SigmaSdf", room_concept_.params.sigma_sdf);
@@ -291,8 +295,7 @@ void SpecificWorker::initialize()
     if (room_initialized_from_svg_polygon_)
     {
          room_polygon_for_viz = rc::SvgRoomLoader::load_polygon_points(
-
-            "beta_layout.svg", "room_contour", false, true);
+            params.ROOM_LAYOUT_SVG, "room_contour", false, true);
          if (room_polygon_for_viz.size() >= 3)
              viewer_2d_->draw_room_polygon(room_polygon_for_viz, false);
     }
@@ -308,7 +311,12 @@ void SpecificWorker::initialize()
 
     // Ensure a clean startup: if a stale room node exists from previous runs,
     // remove it so the room is recreated only after localization is stable.
-    cleanup_room_graph_nodes();
+    // In PreserveBootstrapRoom (static-room) mode, skip this: the room/table are a
+    // pre-seeded static prior in the bootstrap graph and must NOT be deleted.
+    if (params.PRESERVE_BOOTSTRAP_ROOM)
+        qInfo() << "[room] PreserveBootstrapRoom=true: skipping start cleanup; adopting pre-seeded room/table as a static prior.";
+    else
+        cleanup_room_graph_nodes();
 
     // RT_API
     rt_api = G->get_rt_api();
@@ -451,7 +459,7 @@ void SpecificWorker::compute()
     t_loc_fetch_ms = section_timer.elapsed();
 
     const Eigen::Affine2f pose_for_draw = best_available_pose(loc_res, have_loc);
-
+    
     // ── Update 2-D viewer ─────────────────────────────────────────────────
     const Eigen::Affine2f loc_pose = have_loc ? loc_res->robot_pose : pose_for_draw;
     const bool use_loc = have_loc && !loc_res->lidar_scan.empty();
@@ -494,7 +502,11 @@ void SpecificWorker::compute()
     }
 
     // ── DSR graph update (only on fresh localization frames) ──────────────
-    if (have_loc && loc_res->timestamp_ms > 0 && loc_res->timestamp_ms != last_dsr_published_ts_ms_
+    // In PreserveBootstrapRoom mode the room is a static prior: do NOT create/reparent the
+    // room or write robot->room (that would clobber the fixed low-cov bootstrap edge). The
+    // localizer still runs for the viewer; it just doesn't touch the graph.
+    if (!params.PRESERVE_BOOTSTRAP_ROOM
+        && have_loc && loc_res->timestamp_ms > 0 && loc_res->timestamp_ms != last_dsr_published_ts_ms_
         && (last_dsr_publish_try_ms_ == 0 || now_ms - last_dsr_publish_try_ms_ >= 200))
     {
         section_timer.restart();
@@ -1054,7 +1066,7 @@ void SpecificWorker::load_robot_body_dimensions_from_graph()
 
     if (!body_node.has_value())
     {
-        qCWarning(logGraph) << "dsr_init_graph: no 'body' node found; keeping default robot dimensions"
+        qWarning() << "dsr_init_graph: no 'body' node found; keeping default robot dimensions"
                             << params.ROBOT_WIDTH << params.ROBOT_LENGTH << params.ROBOT_HEIGHT;
         return;
     }
@@ -1070,7 +1082,7 @@ void SpecificWorker::load_robot_body_dimensions_from_graph()
 
     epistemic_controller_.set_robot_footprint(params.ROBOT_WIDTH, params.ROBOT_LENGTH);
 
-    qCInfo(logGraph) << "Robot dimensions from body node: width depth height ="
+    qInfo() << "Robot dimensions from body node: width depth height ="
                      << params.ROBOT_WIDTH << params.ROBOT_LENGTH << params.ROBOT_HEIGHT;
 }
 
@@ -1182,7 +1194,7 @@ void SpecificWorker::cleanup_room_graph_nodes()
 
 void SpecificWorker::check_init_graph_is_valid()
 {
-    if (!G) { qCWarning(logGraph) << "dsr_init_graph: DSR graph not available"; return; }
+    if (!G) { qWarning() << "dsr_init_graph: DSR graph not available"; return; }
 
     // Resolve the root/world node by type (name may vary, e.g. "root", "world")
     const auto root_nodes = G->get_nodes_by_type("root");
@@ -1190,7 +1202,7 @@ void SpecificWorker::check_init_graph_is_valid()
     {
         dsr_world_id_ = root_nodes.front().id();
     }
-    else { qCWarning(logGraph) << "dsr_init_graph: no 'root' type node found in graph"; return; }
+    else { qWarning() << "dsr_init_graph: no 'root' type node found in graph"; return; }
 
     // Resolve the robot node by type
     const auto robot_nodes = G->get_nodes_by_type("robot");
@@ -1198,7 +1210,7 @@ void SpecificWorker::check_init_graph_is_valid()
     {
         dsr_robot_id_ = robot_nodes.front().id();
     }
-    else { qCWarning(logGraph) << "dsr_init_graph: no 'robot' type node found in graph"; return; }
+    else { qWarning() << "dsr_init_graph: no 'robot' type node found in graph"; return; }
 
     load_robot_body_dimensions_from_graph();
 }
@@ -1274,7 +1286,7 @@ void SpecificWorker::update_ui(const std::optional<rc::RoomConcept::UpdateResult
 void SpecificWorker::initialize_room_model_from_svg()
 {
     const auto room_polygon = rc::SvgRoomLoader::load_polygon_points(
-        "beta_layout.svg", "room_contour", false, true);
+        params.ROOM_LAYOUT_SVG, "room_contour", false, true);
     if (room_polygon.size() >= 3)
     {
         room_concept_.configure_room_from_polygon(room_polygon);
@@ -1345,6 +1357,7 @@ void SpecificWorker::modify_node_slot(std::uint64_t /*id*/, const std::string &t
         return;
     schedule_lidar_copy_to_pending(std::nullopt, "update_node_signal", true);
 }
+
 
 void SpecificWorker::schedule_lidar_copy_to_pending(std::optional<std::uint64_t> node_id, const char *origin, bool count_signal_event)
 {

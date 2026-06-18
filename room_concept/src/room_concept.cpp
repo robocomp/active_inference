@@ -1,7 +1,5 @@
 #include "room_concept.h"
 #include "pointcloud_center_estimator.h"
-#include "component_logging.h"
-
 #include <algorithm>
 #include <fstream>
 #include <limits>
@@ -143,7 +141,7 @@ namespace rc
                 auto tmp = torch::zeros({1}, torch::TensorOptions().device(torch::kCUDA));
                 (void)tmp;
             } catch (const std::exception& e) {
-                qCWarning(logLocalizer) << "CUDA init failed:" << e.what() << "falling back to CPU.";
+                qWarning() << "CUDA init failed:" << e.what() << "falling back to CPU.";
                 params.use_cuda = false;
             }
         }
@@ -160,7 +158,7 @@ namespace rc
         {
             if (loc_thread_.get_id() == std::this_thread::get_id())
             {
-                qCWarning(logLocalizer) << "RoomConcept::stop called from localization thread; detaching to avoid self-join deadlock";
+                qWarning() << "RoomConcept::stop called from localization thread; detaching to avoid self-join deadlock";
                 loc_thread_.detach();
             }
             else
@@ -189,7 +187,7 @@ namespace rc
         debug_log_.open(debug_log_path_, std::ios::out | std::ios::trunc);
         if (!debug_log_.is_open())
         {
-            qCWarning(logIo) << "Debug log could not be opened:" << QString::fromStdString(debug_log_path_);
+            qWarning() << "Debug log could not be opened:" << QString::fromStdString(debug_log_path_);
             return;
         }
 
@@ -250,7 +248,7 @@ namespace rc
             << ",ml_bias_x,ml_bias_y,ml_bias_theta"
             << "\n";
         debug_log_.flush();
-        qCInfo(logIo) << "Debug log writing to" << QString::fromStdString(debug_log_path_);
+        qInfo() << "Debug log writing to" << QString::fromStdString(debug_log_path_);
     }
 
     std::optional<RoomConcept::UpdateResult> RoomConcept::get_last_result() const
@@ -435,7 +433,7 @@ namespace rc
             }
             else
             {
-                qCWarning(logLocalizer) << "RoomConcept bootstrap: seed pose not loaded from"
+                qWarning() << "RoomConcept bootstrap: seed pose not loaded from"
                            << QString::fromStdString(seed_pose_file_path_)
                            << "(file missing or parse error)";
             }
@@ -485,7 +483,7 @@ namespace rc
         {
             used_grid_search = grid_search_initial_pose(pts, 0.5f, static_cast<float>(M_PI_4));
             if (!used_grid_search)
-                qCWarning(logLocalizer) << "RoomConcept bootstrap: grid search failed. Keeping estimator-based initialization.";
+                qWarning() << "RoomConcept bootstrap: grid search failed. Keeping estimator-based initialization.";
         }
 
         if (!used_grid_search)

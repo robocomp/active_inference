@@ -1,5 +1,5 @@
 cmake_minimum_required( VERSION 3.10 )
-PROJECT( room_concept )
+PROJECT(room_concept)
 
 IF ( "$ENV{ROBOCOMP}" STREQUAL "")
   MESSAGE(WARNING "ROBOCOMP variable not set. Using the default value: /home/robocomp/robocomp")

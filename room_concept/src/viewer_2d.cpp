@@ -308,7 +308,7 @@ void Viewer2D::draw_lidar_points(const std::vector<Eigen::Vector3f>& points_high
                           const QColor& color,
                           int max_points)
     {
-        static const qreal radius_px = 1.5;
+        static const qreal radius_px = 2.5;
         const QRectF ellipse_rect(-radius_px, -radius_px, 2 * radius_px, 2 * radius_px);
         QPen pen(color);
         pen.setWidthF(0.0);
