@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstring>
 #include <print>
+#include <sstream>
 #include <variant>
 
 SceneProcessor::SceneProcessor(const std::shared_ptr<DSR::DSRGraph>& graph)
@@ -53,9 +54,15 @@ bool SceneProcessor::init_media_plane(std::uint32_t domain_id,
 
 void SceneProcessor::drain_media_plane() const
 {
+    // Diagnostic: positively confirm media-plane reception (mirrors robot_concept's
+    // producer-side "[Media] 5s stats"). Accumulate poll() delivery counts and print
+    // every 5 s on stdout, alongside [Tracks].
+    static std::uint64_t rx_rgb = 0, rx_depth = 0;
+    static auto last_rx_report = std::chrono::steady_clock::now();
+
     if (media_rgb_sub_)
     {
-        media_rgb_sub_->poll([this](const rc::media::ImageFrame& f, std::int64_t)
+        rx_rgb += media_rgb_sub_->poll([this](const rc::media::ImageFrame& f, std::int64_t)
         {
             const int w = static_cast<int>(f.width());
             const int h = static_cast<int>(f.height());
@@ -82,7 +89,7 @@ void SceneProcessor::drain_media_plane() const
 
     if (media_depth_sub_)
     {
-        media_depth_sub_->poll([this](const rc::media::ImageFrame& f, std::int64_t)
+        rx_depth += media_depth_sub_->poll([this](const rc::media::ImageFrame& f, std::int64_t)
         {
             const int w = static_cast<int>(f.width());
             const int h = static_cast<int>(f.height());
@@ -113,6 +120,16 @@ void SceneProcessor::drain_media_plane() const
             media_depth_.frame_id = f.frame_id();
             media_depth_.valid    = true;
         });
+    }
+
+    const auto now_rx = std::chrono::steady_clock::now();
+    if (now_rx - last_rx_report >= std::chrono::seconds(5))
+    {
+        std::println("[MediaRx] 5s stats rgb={} depth={} rgb_valid={} depth_valid={} ({}x{} / {}x{})",
+                     rx_rgb, rx_depth, media_rgb_.valid, media_depth_.valid,
+                     media_rgb_.width, media_rgb_.height, media_depth_.width, media_depth_.height);
+        rx_rgb = rx_depth = 0;
+        last_rx_report = now_rx;
     }
 }
 
@@ -219,15 +236,14 @@ std::optional<Mat::RTMat> SceneProcessor::get_room_robot_transform(FPSCounter& c
     auto room_T_robot = inner_eigen_api_->get_transformation_matrix(room_name, robot_name, timestamp_ms);
     if (!room_T_robot.has_value())
     {
-        if (!room_rt_wait_logged_)
+        static auto last = std::chrono::steady_clock::time_point{};
+        if (const auto now = std::chrono::steady_clock::now(); now - last >= std::chrono::seconds(2))
         {
-            qWarning() << "robot->room RTMat not available in InnerEigen API. Voxelization paused until transform is available."
-                       << "room=" << QString::fromStdString(room_name)
-                       << "robot=" << QString::fromStdString(robot_name)
-                       << "ts_ms=" << timestamp_ms;
-            room_rt_wait_logged_ = true;
-            room_rt_ready_logged_ = false;
+            last = now;
+            std::println("[RT] get_transformation_matrix('{}'<-'{}', ts={}) FAILED (room->robot)",
+                         room_name, robot_name, timestamp_ms);
         }
+        room_rt_ready_logged_ = false;
         if (verbose_debug_)
             compute_fps.print("[Compute]", 2000);
         return std::nullopt;
@@ -237,8 +253,8 @@ std::optional<Mat::RTMat> SceneProcessor::get_room_robot_transform(FPSCounter& c
 }
 
 std::optional<Mat::RTMat> SceneProcessor::get_room_zed_transform(FPSCounter& compute_fps,
-                                                                 const std::string& room_name,
-                                                                 std::uint64_t timestamp_ms)
+                                                                 const std::string& robot_name,
+                                                                 const Mat::RTMat& room_T_robot)
 {
     if (inner_eigen_api_ == nullptr)
     {
@@ -253,24 +269,33 @@ std::optional<Mat::RTMat> SceneProcessor::get_room_zed_transform(FPSCounter& com
         return std::nullopt;
     }
 
-    auto room_T_zed = inner_eigen_api_->get_transformation_matrix(room_name, "zed", timestamp_ms);
-    if (!room_T_zed.has_value())
+    // robot→zed is the rigid camera mount. It carries only its bootstrap timestamp, so a
+    // Nearest query pinned to a per-frame timestamp fails on it — query "latest" (0). The
+    // robot pose (room→robot) is already resolved at frame time by the caller, so this stays
+    // correct when the room/robot become dynamic without any per-frame timestamp here.
+    auto robot_T_zed = inner_eigen_api_->get_transformation_matrix(robot_name, "zed", 0);
+    if (!robot_T_zed.has_value())
     {
-        if (!room_rt_wait_logged_)
+        static auto last = std::chrono::steady_clock::time_point{};
+        if (const auto now = std::chrono::steady_clock::now(); now - last >= std::chrono::seconds(2))
         {
-            qWarning() << "zed->room RTMat not available in InnerEigen API. Voxelization paused until transform is available."
-                       << "room=" << QString::fromStdString(room_name)
-                       << "zed=zed"
-                       << "ts_ms=" << timestamp_ms;
-            room_rt_wait_logged_ = true;
-            room_rt_ready_logged_ = false;
+            last = now;
+            // Re-probe the chain each tick: localize the broken node/hop in robot→body→zed.
+            const bool has_body = graph_ and graph_->get_node("body").has_value();
+            const bool has_zed  = graph_ and graph_->get_node("zed").has_value();
+            const bool sh_body  = inner_eigen_api_->get_transformation_matrix(robot_name, "body", 0).has_value();
+            const bool body_zed = inner_eigen_api_->get_transformation_matrix("body", "zed", 0).has_value();
+            std::println("[RT] get_transformation_matrix('{}'<-'zed', ts=0) FAILED (robot->zed) | "
+                         "node(body)={} node(zed)={} {}->body={} body->zed={}",
+                         robot_name, has_body, has_zed, robot_name, sh_body, body_zed);
         }
+        room_rt_ready_logged_ = false;
         if (verbose_debug_)
             compute_fps.print("[Compute]", 2000);
         return std::nullopt;
     }
 
-    return room_T_zed;
+    return room_T_robot * robot_T_zed.value();
 }
 
 std::uint64_t SceneProcessor::get_frame_timestamp_ms() const
@@ -564,15 +589,22 @@ std::optional<GraphObjectBox> SceneProcessor::build_graph_object_box(const DSR::
     const float half_depth = depth * 0.5f;
     const float half_height = height * 0.5f;
 
+    // Furniture like the table stands ON the floor: its node origin is the base, so the box
+    // must extend upward (z in [origin, origin+height]). Free objects (e.g. a fitted bottle
+    // cylinder) are center-anchored, so they keep z in [origin-h/2, origin+h/2].
+    const bool stands_on_floor = (node.type() == "table") or (node.name().rfind("table", 0) == 0);
+    const float z_lo = stands_on_floor ? 0.f : -half_height;
+    const float z_hi = stands_on_floor ? height : half_height;
+
     const std::array<Eigen::Vector3d, 8> local_corners = {
-        Eigen::Vector3d{-half_width, -half_depth, -half_height},
-        Eigen::Vector3d{ half_width, -half_depth, -half_height},
-        Eigen::Vector3d{ half_width,  half_depth, -half_height},
-        Eigen::Vector3d{-half_width,  half_depth, -half_height},
-        Eigen::Vector3d{-half_width, -half_depth,  half_height},
-        Eigen::Vector3d{ half_width, -half_depth,  half_height},
-        Eigen::Vector3d{ half_width,  half_depth,  half_height},
-        Eigen::Vector3d{-half_width,  half_depth,  half_height}
+        Eigen::Vector3d{-half_width, -half_depth, z_lo},
+        Eigen::Vector3d{ half_width, -half_depth, z_lo},
+        Eigen::Vector3d{ half_width,  half_depth, z_lo},
+        Eigen::Vector3d{-half_width,  half_depth, z_lo},
+        Eigen::Vector3d{-half_width, -half_depth, z_hi},
+        Eigen::Vector3d{ half_width, -half_depth, z_hi},
+        Eigen::Vector3d{ half_width,  half_depth, z_hi},
+        Eigen::Vector3d{-half_width,  half_depth, z_hi}
     };
 
     Eigen::Vector3f min_corner = Eigen::Vector3f::Constant(std::numeric_limits<float>::max());
@@ -598,6 +630,11 @@ std::optional<GraphObjectBox> SceneProcessor::build_graph_object_box(const DSR::
     if (node.type() == "table")
         category = "model_table";
 
+    // bottle_concept publishes bottles as `cylinder` nodes (bottle_1, …); tag them so
+    // the viewer paints their bounding box in a colour distinct from the table.
+    if (node.type() == "cylinder")
+        category = "bottle";
+
     const Eigen::Matrix3d& R = room_T_object->linear();
     const float yaw = static_cast<float>(std::atan2(R(1, 0), R(0, 0)));
     return GraphObjectBox{min_corner, max_corner,
@@ -612,9 +649,10 @@ std::vector<GraphObjectBox> SceneProcessor::get_graph_object_boxes(const std::st
     if (!graph_ || room_name.empty())
         return graph_boxes;
 
-    const auto object_nodes = graph_->get_nodes_by_type("object");
-    const auto table_nodes  = graph_->get_nodes_by_type("table");
-    graph_boxes.reserve(object_nodes.size() + table_nodes.size());
+    const auto object_nodes   = graph_->get_nodes_by_type("object");
+    const auto table_nodes    = graph_->get_nodes_by_type("table");
+    const auto cylinder_nodes = graph_->get_nodes_by_type("cylinder");   // bottle_concept bottles
+    graph_boxes.reserve(object_nodes.size() + table_nodes.size() + cylinder_nodes.size());
     auto add_boxes = [&](const auto& nodes)
     {
         for (const auto& node : nodes)
@@ -626,6 +664,7 @@ std::vector<GraphObjectBox> SceneProcessor::get_graph_object_boxes(const std::st
     };
     add_boxes(object_nodes);
     add_boxes(table_nodes);
+    add_boxes(cylinder_nodes);
     return graph_boxes;
 }
 
@@ -903,6 +942,48 @@ void SceneProcessor::update_viewer_table_rfe_points()
     }
 
     voxel_viewer_->update_rfe_points(residual_points, rfe_points, candidate_points);
+}
+
+void SceneProcessor::update_viewer_mask_points()
+{
+    if (voxel_viewer_ == nullptr || graph_ == nullptr)
+        return;
+
+    // The masks node carries the YOLO support points (flat xyz, room frame) as a runtime
+    // attribute. Draw only the "bottle"-labelled slices — masks of other detections (and
+    // their depth dropout) are just clutter here. Per-mask point ranges come from
+    // mask_support_offsets; the i-th label in mask_labels ('|'-joined) owns range
+    // [offsets[i], offsets[i+1]).
+    std::vector<QVector3D> mask_points;
+    if (const auto masks_node = graph_->get_node("masks"); masks_node.has_value())
+    {
+        const auto& attrs = masks_node->attrs();
+        const auto pts_it     = attrs.find("mask_support_points");
+        const auto off_it     = attrs.find("mask_support_offsets");
+        const auto labels_it  = attrs.find("mask_labels");
+        if (pts_it != attrs.end() and off_it != attrs.end() and labels_it != attrs.end())
+        {
+            const auto& flat    = pts_it->second.float_vec();
+            const auto& offsets = off_it->second.float_vec();
+
+            std::vector<std::string> labels;
+            std::stringstream ls(labels_it->second.str());
+            for (std::string lbl; std::getline(ls, lbl, '|'); )
+                labels.push_back(lbl);
+
+            const std::size_t n_masks = labels.size();
+            for (std::size_t m = 0; m < n_masks and m + 1 < offsets.size(); ++m)
+            {
+                if (labels[m] != "bottle")
+                    continue;
+                const std::size_t begin = static_cast<std::size_t>(offsets[m]);
+                const std::size_t end   = static_cast<std::size_t>(offsets[m + 1]);
+                for (std::size_t i = begin; i < end and (i * 3 + 2) < flat.size(); ++i)
+                    mask_points.emplace_back(flat[i * 3], flat[i * 3 + 1], flat[i * 3 + 2]);
+            }
+        }
+    }
+    voxel_viewer_->update_mask_points(mask_points);
 }
 
 void SceneProcessor::update_viewer_robot_pose(const Mat::RTMat& room_T_robot)

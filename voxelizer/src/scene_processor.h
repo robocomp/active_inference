@@ -58,9 +58,13 @@ public:
                                                        const std::string& room_name,
                                                        const std::string& robot_name,
                                                        std::uint64_t timestamp_ms);
+    // room→zed = room→robot (already resolved at frame time) ∘ robot→zed (static
+    // camera extrinsics, queried at latest). Decomposing this way keeps the robot
+    // pose time-correct for a dynamic room while the rigid extrinsics — which carry
+    // only their bootstrap timestamp — are never pinned to a per-frame timestamp.
     std::optional<Mat::RTMat> get_room_zed_transform(FPSCounter& compute_fps,
-                                                     const std::string& room_name,
-                                                     std::uint64_t timestamp_ms);
+                                                     const std::string& robot_name,
+                                                     const Mat::RTMat& room_T_robot);
     // DSR-native data accessors (no proxy needed)
     std::uint64_t get_frame_timestamp_ms() const;
     std::optional<cv::Mat> get_rgb_from_dsr() const;
@@ -81,6 +85,8 @@ public:
     void update_viewer_graph_object_boxes(std::span<const GraphObjectBox> graph_boxes);
     void update_viewer_object_meshes();
     void update_viewer_table_rfe_points();
+    // Feed the YOLO mask support points (room frame) from the "masks" node to the 3D viewer.
+    void update_viewer_mask_points();
 
 private:
     struct RoomPolygonData

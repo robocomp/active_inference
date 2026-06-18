@@ -44,6 +44,10 @@ void VoxelProcessor::clear_state(rc::VoxelOpenGLViewer* voxel_viewer)
     const std::vector<std::string> empty_categories;
     voxel_viewer->update_voxels(empty_points);
     voxel_viewer->update_track_boxes(empty_points, empty_points, empty_categories);
+    // Also wipe the transient point clouds so "Clear Voxels" empties the view (these are
+    // re-fed each frame from live data, so they return on the next compute cycle).
+    voxel_viewer->update_rfe_points(empty_points, empty_points, empty_points);
+    voxel_viewer->update_mask_points(empty_points);
 }
 
 void VoxelProcessor::fuse_lidar_support_points(
@@ -496,6 +500,10 @@ std::vector<float> VoxelProcessor::get_flat_pts_for_track(int track_id, int max_
 
 bool VoxelProcessor::is_target_label(const std::string& label) const
 {
+    // NOTE: "bottle" intentionally excluded. The bottle is modeled by bottle_concept
+    // (cylinder node + box), so voxelizing it here is redundant; and making it a target
+    // rewrites the shared `tracks` node every frame, whose high-frequency deltas crash the
+    // DSR graph viewer (Qt repaint off the DDS thread) in every GUI agent. See FRAMES/notes.
     return label == "table" || label == "chair" || label == "monitor";
 }
 

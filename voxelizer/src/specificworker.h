@@ -113,6 +113,16 @@ class SpecificWorker : public GenericWorker
             std::size_t VOXEL_DECIMATION_FACTOR          = 2;
             float       VOXEL_Z_LIFT_M                   = 0.0f;
             bool        TRANSFORMS_INTERPOLATE_RT        = true;
+            // Per-mask depth gate: reject mask pixels whose depth exceeds the mask's near
+            // surface by more than this band (m). Kills transparent-object depth dropout —
+            // pixels that see THROUGH the object to the background and deproject into a line.
+            // <= 0 disables the gate.
+            float       MASK_DEPTH_GATE_BAND_M           = 0.20f;
+            // Per-mask radius outlier removal: drop points with fewer than MIN_NEIGHBORS
+            // others within RADIUS_M. Trims the sparse silhouette-edge "tail" the depth gate
+            // leaves behind, while the dense object body survives. <= 0 disables.
+            float       MASK_OUTLIER_RADIUS_M            = 0.03f;
+            int         MASK_OUTLIER_MIN_NEIGHBORS       = 4;
 
             // Media plane (zero-copy DDS) for RGBD pixels carried OUT of the graph.
             int         MEDIA_DOMAIN_ID   = 0;

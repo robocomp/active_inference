@@ -98,5 +98,35 @@ find_package(OpenCV REQUIRED)
 LIST(APPEND LIBS ${LIBS} ${OpenCV_LIBS})
 
 # no-char8_t to avoid a problem with ICE Connection lib.
-add_definitions(-g -O3 -march=native -fmax-errors=1 -fno-char8_t)
+# NOTE: do NOT add -march=native. It promotes Eigen's required alignment to 32 bytes
+# (AVX2/AVX-512) and emits vectorized block accesses that assume it, but Mat::RTMat
+# (Eigen::Transform) reaching them through std::optional/temporaries is only 16-aligned
+# -> ".translation() data is not aligned" abort. Same hazard documented for kinova_controller.
+add_definitions(-g -O3 -fmax-errors=1 -fno-char8_t)
+
+# AddressSanitizer (opt-in, separate build dir):
+#   cmake -B build-asan -DENABLE_ASAN=ON && cmake --build build-asan -j
+# Instruments voxelizer's code AND intercepts global malloc/free, so it catches the bad
+# free()/use-after-free that crashes paintAndFlush even when it happens inside the
+# (non-instrumented) libdsr_gui — no need to ASan-build/install the shared lib.
+option(ENABLE_ASAN "Build voxelizer with AddressSanitizer" OFF)
+if(ENABLE_ASAN)
+  message(STATUS "AddressSanitizer ENABLED for voxelizer (-O1, frame pointers; preload-libasan link model)")
+  add_compile_options(-fsanitize=address -fno-omit-frame-pointer -O1)
+  # Do NOT put -fsanitize=address on the LINK line. It makes libasan the first DT_NEEDED and the
+  # first static initializer, which trips an Ice/IceStorm static-init-order SEGV in FactoryTable
+  # during _dl_init (before main) -> the binary never starts. Instead keep the NORMAL link order
+  # (Ice-safe) and leave the __asan_* symbols that the instrumented .o reference UNDEFINED in the
+  # executable; they are resolved at runtime by LD_PRELOAD=libasan (run_asan.sh), which also makes
+  # ASan initialise and install its malloc/free interceptors first. Net result: full redzone
+  # checking of voxelizer's OWN code (so we catch the corrupting WRITE, not just the later free)
+  # AND a binary that actually boots.
+  # Link libasan DIRECTLY (not via the -fsanitize driver). The driver injects an __asan_init
+  # entry into .preinit_array, which runs BEFORE any shared-library init -> ASan is active during
+  # libIceStorm's static init and trips a latent Ice FactoryTable init-order SEGV (before main).
+  # Linking -lasan ourselves resolves the __asan_* symbols (as UND dynamic, satisfied by libasan)
+  # WITHOUT a preinit entry. The run script then strips the libasan DT_NEEDED and LD_PRELOADs it,
+  # so ASan initialises first (interceptors up) while the Ice/IceStorm init order stays normal.
+  add_link_options(-fno-omit-frame-pointer -Wl,--no-as-needed -lasan -Wl,--as-needed)
+endif()
 

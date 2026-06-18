@@ -131,6 +131,9 @@ void SpecificWorker::initialize()
     rc::ConfigLoaderUtils::load_optional<std::size_t, int>(configLoader, "Voxel.viewer_max_rendered_voxels", params.VOXEL_VIEWER_MAX_RENDERED_VOXELS);
     rc::ConfigLoaderUtils::load_optional(configLoader, "Voxel.viewer_fps", params.VOXEL_VIEWER_FPS);
     rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Voxel.z_lift_m", params.VOXEL_Z_LIFT_M);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Voxel.mask_depth_gate_band_m", params.MASK_DEPTH_GATE_BAND_M);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Voxel.mask_outlier_radius_m", params.MASK_OUTLIER_RADIUS_M);
+    rc::ConfigLoaderUtils::load_optional<int>(configLoader, "Voxel.mask_outlier_min_neighbors", params.MASK_OUTLIER_MIN_NEIGHBORS);
     rc::ConfigLoaderUtils::load_optional(configLoader, "Transforms.interpolate_rt", params.TRANSFORMS_INTERPOLATE_RT);
     rc::ConfigLoaderUtils::load_optional(configLoader, "Media.domain_id", params.MEDIA_DOMAIN_ID);
     rc::ConfigLoaderUtils::load_optional(configLoader, "Media.rgb_topic", params.MEDIA_RGB_TOPIC);
@@ -183,11 +186,16 @@ void SpecificWorker::initialize()
         lidar_voxels_btn->setChecked(include_lidar3d_in_voxels_);
         lidar_voxels_btn->setCursor(Qt::PointingHandCursor);
 
+        auto* masks_btn = new QPushButton("Masks: OFF", voxel_panel);
+        masks_btn->setCheckable(true);
+        masks_btn->setCursor(Qt::PointingHandCursor);
+
         auto* clear_voxels_btn = new QPushButton("Clear Voxels", voxel_panel);
         clear_voxels_btn->setCursor(Qt::PointingHandCursor);
 
         controls_layout->addWidget(lidar_btn);
         controls_layout->addWidget(lidar_voxels_btn);
+        controls_layout->addWidget(masks_btn);
         controls_layout->addWidget(clear_voxels_btn);
         controls_layout->addStretch(1);
 
@@ -208,6 +216,13 @@ void SpecificWorker::initialize()
         {
             include_lidar3d_in_voxels_ = checked;
             lidar_voxels_btn->setText(checked ? "Lidar3D Voxels: ON" : "Lidar3D Voxels: OFF");
+        });
+
+        connect(masks_btn, &QPushButton::toggled, this, [this, masks_btn](bool checked)
+        {
+            if (voxel_viewer_gl)
+                voxel_viewer_gl->set_show_masks(checked);
+            masks_btn->setText(checked ? "Masks: ON" : "Masks: OFF");
         });
 
         connect(clear_voxels_btn, &QPushButton::clicked, this, [this]
@@ -316,10 +331,18 @@ void SpecificWorker::compute()
     // even when no RGBD frame arrived, so the cap/gauge keep working while the
     // robot explores away from the table. FPS comes from the shared counter,
     // which scene_processor also ticks on the not-ready path.
+    qInfo() << fps_counter_.get_frequency();
     regulate_voxel_budget(fps_counter_.get_frequency());
 
+    // No RGBD frame this cycle (sensor not ready / gated transforms). The budget heartbeat
+    // above already ran; everything below dereferences `frame`, so we MUST stop here.
+    // Falling through accessed frame->rgbd on an empty optional → garbage cv::Mat → SEGV in
+    // cv::Mat::release() and heap corruption that later crashed paintAndFlush.
     if (!frame.has_value())
+    {
+        qWarning() << __FUNCTION__ << "frame has no value";
         return;
+    }
 
     const auto detections = yolo_processor
         ? yolo_processor->detect_segmentation(frame->rgbd.rgb)
@@ -408,20 +431,32 @@ std::optional<SpecificWorker::SceneFrame> SpecificWorker::process_scene_frame(FP
     scene_processor->check_input_stream_startup_status();
     const auto [room_name, robot_name] = scene_processor->get_room_robot_names_for_compute();
 
+    // Diagnostic: throttled (every ~2s) report of which gate drops the frame.
+    static auto last_gate_report = std::chrono::steady_clock::now();
+    const auto gate_log = [&](const char* gate)
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_gate_report >= std::chrono::seconds(2))
+        {
+            std::println("[SceneGate] dropped at '{}' (room='{}' robot='{}')", gate, room_name, robot_name);
+            last_gate_report = now;
+        }
+    };
+
     const auto rgbd_opt = scene_processor->get_rgbd_frame_from_dsr();
     if (!rgbd_opt.has_value())
-        return std::nullopt;
+        { gate_log("get_rgbd_frame"); return std::nullopt; }
     const std::uint64_t frame_ts_ms = scene_processor->get_frame_timestamp_ms();
 
     if (!scene_processor->ensure_room_and_robot_ready(compute_fps, room_name, robot_name))
-        return std::nullopt;
+        { gate_log("ensure_room_and_robot_ready"); return std::nullopt; }
 
     const auto room_T_robot = scene_processor->get_room_robot_transform(compute_fps, room_name, robot_name, frame_ts_ms);
     if (!room_T_robot.has_value())
-        return std::nullopt;
-    const auto room_T_zed = scene_processor->get_room_zed_transform(compute_fps, room_name, frame_ts_ms);
+        { gate_log("get_room_robot_transform"); return std::nullopt; }
+    const auto room_T_zed = scene_processor->get_room_zed_transform(compute_fps, robot_name, room_T_robot.value());
     if (!room_T_zed.has_value())
-        return std::nullopt;
+        { gate_log("get_room_zed_transform"); return std::nullopt; }
 
     scene_processor->log_room_robot_pose_periodic(room_T_robot.value());
     scene_processor->mark_room_rt_ready();
@@ -463,6 +498,7 @@ std::optional<SpecificWorker::SceneFrame> SpecificWorker::process_scene_frame(FP
     scene_processor->update_viewer_graph_object_boxes(graph_object_boxes);
     scene_processor->update_viewer_object_meshes();
     scene_processor->update_viewer_table_rfe_points();
+    scene_processor->update_viewer_mask_points();
     scene_processor->update_room_polygon_periodic();
 
     return SceneFrame{rgbd_opt.value(),
@@ -787,12 +823,9 @@ void SpecificWorker::upload_masks_to_dsr(const SceneFrame& frame, const std::vec
         const int max_x = std::min(rgbd.width, det.bbox.x + det.bbox.width);
         const int max_y = std::min(rgbd.height, det.bbox.y + det.bbox.height);
 
-        std::vector<Eigen::Vector3f> mask_points_room;
-        mask_points_room.reserve(static_cast<std::size_t>(det.bbox.area() / std::max<int>(1, static_cast<int>(mask_stride * mask_stride))));
-
-        Eigen::Vector3f min_pt = Eigen::Vector3f::Constant(std::numeric_limits<float>::max());
-        Eigen::Vector3f max_pt = Eigen::Vector3f::Constant(std::numeric_limits<float>::lowest());
-        Eigen::Vector3f sum_pt = Eigen::Vector3f::Zero();
+        // Pass 1: gather valid masked (depth, room point) candidates.
+        std::vector<std::pair<float, Eigen::Vector3f>> candidates;
+        candidates.reserve(static_cast<std::size_t>(det.bbox.area() / std::max<int>(1, static_cast<int>(mask_stride * mask_stride))));
 
         for (int row = min_y; row < max_y; row += static_cast<int>(mask_stride))
         {
@@ -815,15 +848,69 @@ void SpecificWorker::upload_masks_to_dsr(const SceneFrame& frame, const std::vec
                 Eigen::Vector3f point_room = room_rotation * Eigen::Vector3f(px, py, pz) + room_translation;
                 point_room.z() += z_lift_m;
 
-                mask_points_room.push_back(point_room);
-                sum_pt += point_room;
-                min_pt = min_pt.cwiseMin(point_room);
-                max_pt = max_pt.cwiseMax(point_room);
+                candidates.emplace_back(depth, point_room);
             }
         }
 
+        if (candidates.empty())
+            continue;
+
+        // Robust near-surface depth (20th percentile): the object is the NEAREST surface, so
+        // this picks it even when most pixels drop through to the background. Reject pixels
+        // beyond near + band — the transparent-object dropout line that the 2D mask hides.
+        float depth_gate = std::numeric_limits<float>::max();
+        if (params.MASK_DEPTH_GATE_BAND_M > 0.0f)
+        {
+            std::vector<float> depths;
+            depths.reserve(candidates.size());
+            for (const auto& [d, p] : candidates) depths.push_back(d);
+            const std::size_t k = depths.size() / 5;   // 20th percentile
+            std::nth_element(depths.begin(), depths.begin() + k, depths.end());
+            depth_gate = depths[k] + params.MASK_DEPTH_GATE_BAND_M;
+        }
+
+        std::vector<Eigen::Vector3f> gated;
+        gated.reserve(candidates.size());
+        for (const auto& [d, point_room] : candidates)
+            if (d <= depth_gate)
+                gated.push_back(point_room);
+
+        if (gated.empty())
+            continue;
+
+        // Radius outlier removal: keep points that have enough neighbours nearby. The dense
+        // object body survives; the sparse silhouette-edge tail is trimmed.
+        std::vector<Eigen::Vector3f> mask_points_room;
+        if (params.MASK_OUTLIER_MIN_NEIGHBORS > 0 and params.MASK_OUTLIER_RADIUS_M > 0.0f
+            and gated.size() > static_cast<std::size_t>(params.MASK_OUTLIER_MIN_NEIGHBORS))
+        {
+            const float r2 = params.MASK_OUTLIER_RADIUS_M * params.MASK_OUTLIER_RADIUS_M;
+            mask_points_room.reserve(gated.size());
+            for (std::size_t i = 0; i < gated.size(); ++i)
+            {
+                int neighbours = 0;
+                for (std::size_t j = 0; j < gated.size() and neighbours < params.MASK_OUTLIER_MIN_NEIGHBORS; ++j)
+                    if (i != j and (gated[i] - gated[j]).squaredNorm() <= r2)
+                        ++neighbours;
+                if (neighbours >= params.MASK_OUTLIER_MIN_NEIGHBORS)
+                    mask_points_room.push_back(gated[i]);
+            }
+        }
+        else
+            mask_points_room = std::move(gated);
+
         if (mask_points_room.empty())
             continue;
+
+        Eigen::Vector3f min_pt = Eigen::Vector3f::Constant(std::numeric_limits<float>::max());
+        Eigen::Vector3f max_pt = Eigen::Vector3f::Constant(std::numeric_limits<float>::lowest());
+        Eigen::Vector3f sum_pt = Eigen::Vector3f::Zero();
+        for (const auto& point_room : mask_points_room)
+        {
+            sum_pt += point_room;
+            min_pt = min_pt.cwiseMin(point_room);
+            max_pt = max_pt.cwiseMax(point_room);
+        }
 
         if (!labels_joined.str().empty())
             labels_joined << '|';

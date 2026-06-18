@@ -337,6 +337,12 @@ void VoxelOpenGLViewer::set_show_lidar(bool show)
     request_update_throttled();
 }
 
+void VoxelOpenGLViewer::set_show_masks(bool show)
+{
+    show_masks_ = show;
+    request_update_throttled();
+}
+
 void VoxelOpenGLViewer::update_lidar_points(std::span<const QVector3D> positions)
 {
     std::vector<Vertex> new_vertices;
@@ -389,6 +395,24 @@ void VoxelOpenGLViewer::update_rfe_points(std::span<const QVector3D> residual_po
         std::scoped_lock lk(data_mutex_);
         rfe_vertices_ = std::move(new_vertices);
         candidate_vertices_ = std::move(candidate_vertices);
+    }
+    request_update_throttled();
+}
+
+void VoxelOpenGLViewer::update_mask_points(std::span<const QVector3D> positions)
+{
+    std::vector<Vertex> new_vertices;
+    new_vertices.reserve(positions.size());
+    for (const QVector3D& p : positions)
+    {
+        const float fx = voxel_flip_x_ ? -1.f : 1.f;
+        const float fy = voxel_flip_y_ ? -1.f : 1.f;
+        const QVector3D mapped{fx * p.x(), p.z(), fy * p.y()};
+        new_vertices.push_back(Vertex{mapped.x(), mapped.y(), mapped.z(), 1.0f, 0.85f, 0.10f});
+    }
+    {
+        std::scoped_lock lk(data_mutex_);
+        mask_vertices_ = std::move(new_vertices);
     }
     request_update_throttled();
 }
@@ -702,25 +726,30 @@ void VoxelOpenGLViewer::paintGL()
     std::size_t n_lidar_vertices = 0;
     std::size_t n_rfe_vertices = 0;
     std::size_t n_candidate_vertices = 0;
+    std::size_t n_mask_vertices = 0;
     std::vector<Vertex> draw_vertices;
     std::vector<Vertex> lidar_draw_vertices;
     std::vector<Vertex> rfe_draw_vertices;
     std::vector<Vertex> candidate_draw_vertices;
+    std::vector<Vertex> mask_draw_vertices;
     {
         std::scoped_lock lk(data_mutex_);
         n_vertices = cpu_vertices_.size();
         n_lidar_vertices = lidar_vertices_.size();
         n_rfe_vertices = rfe_vertices_.size();
         n_candidate_vertices = candidate_vertices_.size();
+        n_mask_vertices = mask_vertices_.size();
         draw_vertices = cpu_vertices_;
         lidar_draw_vertices = lidar_vertices_;
         rfe_draw_vertices = rfe_vertices_;
         candidate_draw_vertices = candidate_vertices_;
+        mask_draw_vertices = mask_vertices_;
     }
     const bool has_voxels = n_vertices > 0;
     const bool has_lidar = n_lidar_vertices > 0;
     const bool has_rfe = n_rfe_vertices > 0;
     const bool has_candidate = n_candidate_vertices > 0;
+    const bool has_mask = n_mask_vertices > 0;
 
     const bool draw_voxels = show_voxels_;
 
@@ -792,6 +821,21 @@ void VoxelOpenGLViewer::paintGL()
         program_.setUniformValue("u_round_points", 1);
         program_.setUniformValue("u_point_size", 6.0f);
         glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(rfe_draw_vertices.size()));
+        program_.setUniformValue("u_point_size", 4.5f);
+        room_vbo_.release();
+        room_vao_.release();
+        glEnable(GL_DEPTH_TEST);
+    }
+
+    if (has_mask && show_masks_)
+    {
+        glDisable(GL_DEPTH_TEST);
+        room_vao_.bind();
+        room_vbo_.bind();
+        room_vbo_.allocate(mask_draw_vertices.data(), static_cast<int>(mask_draw_vertices.size() * sizeof(Vertex)));
+        program_.setUniformValue("u_round_points", 1);
+        program_.setUniformValue("u_point_size", 6.0f);
+        glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(mask_draw_vertices.size()));
         program_.setUniformValue("u_point_size", 4.5f);
         room_vbo_.release();
         room_vao_.release();
@@ -1370,6 +1414,7 @@ QColor VoxelOpenGLViewer::color_for_category(const std::string& category)
     if (category == "chair") return QColor(0, 170, 255);   // cyan-blue
     if (category == "table") return QColor(255, 125, 0);   // orange
     if (category == "model_table") return QColor(80, 220, 120); // green for graph/model tables
+    if (category == "bottle") return QColor(255, 0, 200);  // hot magenta — bottle cylinder boxes
     if (category == "monitor") return QColor(186, 85, 211); // orchid-violet
 
     static const std::array<QColor, 20> palette = {

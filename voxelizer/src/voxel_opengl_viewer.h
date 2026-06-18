@@ -33,7 +33,10 @@ public:
     void update_rfe_points(std::span<const QVector3D> residual_positions,
                            std::span<const QVector3D> fallback_positions = {},
                            std::span<const QVector3D> candidate_positions = {});
+    // YOLO mask support points (room frame), drawn as a distinct point cloud.
+    void update_mask_points(std::span<const QVector3D> positions);
     void set_show_lidar(bool show);
+    void set_show_masks(bool show);
 
     void update_room_polygon(std::span<const float> polygon_x,
                              std::span<const float> polygon_y);
@@ -91,6 +94,7 @@ private:
     std::vector<Vertex> lidar_vertices_;
     std::vector<Vertex> rfe_vertices_;
     std::vector<Vertex> candidate_vertices_;
+    std::vector<Vertex> mask_vertices_;
     std::mutex data_mutex_;
 
     // Store both floor and ceiling polygons
@@ -113,6 +117,7 @@ private:
     bool voxel_flip_y_ = false;
     bool show_voxels_ = true;
     bool show_lidar_ = false;
+    bool show_masks_ = false;
     std::vector<QVector3D> robot_mesh_local_;
     std::mutex robot_mesh_mutex_;
 

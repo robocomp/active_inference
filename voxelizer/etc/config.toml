@@ -37,6 +37,7 @@ Emergency = 500
 
 [Presence]
 required_agent_names = ["robot_concept", "room_concept"]
+optional_agent_names = ["bottle_concept"]
 config_dir           = "etc"
 monitor_period_ms    = 500
 heartbeat_timeout_ms = 3000
@@ -52,7 +53,7 @@ nodes    = ["voxels"]
 Verbose = false
 
 [Yolo]
-accepted_labels = ["table", "chair", "monitor", "tv"]
+accepted_labels = ["table", "chair", "monitor", "tv", "bottle"]
 mask_tray = true
 tray_mask_ref_width  = 1280
 tray_mask_ref_height = 720
