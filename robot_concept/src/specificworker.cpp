@@ -155,6 +155,34 @@ void SpecificWorker::initialize()
 	else
 		qWarning() << __FUNCTION__ << "Body node not found in DSR graph";
 
+	// ── One-shot dump of the static mount edges (both directions) ─────────────
+	// Prints Shadow->room and body->kinova_arm_r once at startup so they can be
+	// eyeballed against the Webots scene. get_RT_pose_from_parent(child) is the
+	// parent->child transform; the inverse (child->parent) is what the DSR viewer
+	// tends to display, so we print both. Planar mounts → translation + yaw is enough.
+	if (auto rt = G->get_rt_api())
+	{
+		auto yaw_deg = [](const Eigen::Affine3d &M)
+		{ const auto R = M.linear(); return std::atan2(R(1, 0), R(0, 0)) * 180.0 / M_PI; };
+		auto dump = [&](const char *child, const char *parent)
+		{
+			const auto cn = G->get_node(child);
+			if (!cn.has_value()) { qInfo() << "[mount]" << parent << "->" << child << ": node missing"; return; }
+			const auto pose = rt->get_RT_pose_from_parent(cn.value());
+			if (!pose.has_value()) { qInfo() << "[mount]" << parent << "->" << child << ": no RT edge"; return; }
+			const Eigen::Affine3d T = pose.value();
+			const Eigen::Affine3d Ti = T.inverse();
+			const Eigen::Vector3d t = T.translation();
+			const Eigen::Vector3d ti = Ti.translation();
+			qInfo().noquote() << QString::asprintf(
+				"[mount] %s->%s t=(%.4f, %.4f, %.4f) yaw=%.2f deg | inv %s->%s t=(%.4f, %.4f, %.4f) yaw=%.2f deg",
+				parent, child, t.x(), t.y(), t.z(), yaw_deg(T),
+				child, parent, ti.x(), ti.y(), ti.z(), yaw_deg(Ti));
+		};
+		dump("room", "Shadow");
+		dump("kinova_arm_r", "body");
+	}
+
 	// Media plane: initialize zero-copy DDS publishers for RGB and depth pixels.
 	// These carry the heavy RGBD payload OUT of the DSR/CRDT graph (shared-memory,
 	// RELIABLE, data-sharing). The DSR cam_rgb/cam_depth blob writes below remain
@@ -404,12 +432,12 @@ void SpecificWorker::read_rgbd_thread()
 
 			const bool empty_rgb = frame.image.width <= 0 || frame.image.height <= 0 || frame.image.image.empty();
 			const bool empty_depth = frame.depth.width <= 0 || frame.depth.height <= 0 || frame.depth.depth.empty();
-			const bool empty_points = frame.points.points.empty();
-			if (empty_rgb || empty_depth || empty_points)
+			// Point cloud is disabled in the webots_bridge (unused now); gate on rgb+depth only.
+			if (empty_rgb || empty_depth)
 			{
 				if (!empty_rgbd_logged)
 				{
-					std::print("[read_rgbd] Empty RGBD stream received. Waiting for RGB, depth and point cloud data...\n");
+					std::print("[read_rgbd] Empty RGBD stream received. Waiting for RGB and depth data...\n");
 					empty_rgbd_logged = true;
 				}
 				std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -490,19 +518,17 @@ void SpecificWorker::read_rgbd_thread()
 			const auto now_report = std::chrono::steady_clock::now();
 			if (now_report - last_media_report >= std::chrono::seconds(5))
 			{
-				if (media_stats.rgb_loan_fail > 0 || media_stats.depth_loan_fail > 0
-				 || media_stats.rgb_publish_fail > 0 || media_stats.depth_publish_fail > 0)
-				{
-					qWarning() << "[Media] 5s stats"
-					           << "rgb_ok=" << media_stats.rgb_ok
-					           << "depth_ok=" << media_stats.depth_ok
-					           << "rgb_MB=" << (static_cast<double>(media_stats.rgb_bytes) / 1e6)
-					           << "depth_MB=" << (static_cast<double>(media_stats.depth_bytes) / 1e6)
-					           << "rgb_loan_fail=" << media_stats.rgb_loan_fail
-					           << "depth_loan_fail=" << media_stats.depth_loan_fail
-					           << "rgb_publish_fail=" << media_stats.rgb_publish_fail
-					           << "depth_publish_fail=" << media_stats.depth_publish_fail;
-				}
+				// Always report ok-counts so we can positively confirm the producer is
+				// publishing (not just see failures). Empty points no longer gate this.
+				qInfo() << "[Media] 5s stats"
+				        << "rgb_ok=" << media_stats.rgb_ok
+				        << "depth_ok=" << media_stats.depth_ok
+				        << "rgb_MB=" << (static_cast<double>(media_stats.rgb_bytes) / 1e6)
+				        << "depth_MB=" << (static_cast<double>(media_stats.depth_bytes) / 1e6)
+				        << "rgb_loan_fail=" << media_stats.rgb_loan_fail
+				        << "depth_loan_fail=" << media_stats.depth_loan_fail
+				        << "rgb_publish_fail=" << media_stats.rgb_publish_fail
+				        << "depth_publish_fail=" << media_stats.depth_publish_fail;
 				media_stats.reset_window();
 				last_media_report = now_report;
 			}

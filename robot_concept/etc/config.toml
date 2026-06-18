@@ -20,7 +20,7 @@ robot_name = "Shadow"
 
 # --- Single Instance Configuration ---
 # Use this if you only have one graph.
-configFile = "shadow.json"   
+configFile = "shadow_arm.json"   
 domain = 0
 tree = false
 graph = true
@@ -60,7 +60,7 @@ Emergency = 500
 # ──────────────────────────────────────────────────────────────────────────────
 
 [Presence]
-optional_agent_names = ["room_concept", "table_concept", "controller", "voxelizer", "table_concept"]
+optional_agent_names = ["room_concept", "table_concept", "controller", "voxelizer", "bottle_concept"]
 config_dir = "etc"
 monitor_period_ms = 500
 heartbeat_timeout_ms = 15000  # match controller/room_concept; 3s was hypersensitive to graph-publish stalls
