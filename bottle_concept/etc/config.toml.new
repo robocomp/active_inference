@@ -1,3 +1,6 @@
+[Proxies]
+# Proxies for required interfaces
+Webots2Robocomp = "webots2robocomp:tcp -h localhost -p 0"
 
 # --- Common Agent Data ---
 [Agent]

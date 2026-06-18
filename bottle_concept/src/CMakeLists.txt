@@ -40,11 +40,14 @@ find_package(Torch REQUIRED)
 # Sources set
 LIST(APPEND SOURCES
   ../src/specificworker.cpp
+  ../src/specificworker_presence.cpp
   ../src/bottle_model.cpp
   ../src/sample_queue.cpp
   ../src/prior_store.cpp
   ${ACTIVE_INFERENCE_COMMON_DIR}/robust_metrics/robust_metrics.cpp
   ${ACTIVE_INFERENCE_COMMON_DIR}/robust_metrics/robust_metrics_torch.cpp
+  ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_monitor/agent_presence_monitor.cpp
+  ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_coordinator/agent_presence_coordinator.cpp
 )
 
 # Headers set
@@ -55,6 +58,8 @@ LIST(APPEND HEADERS
   ../src/prior_store.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/robust_metrics/robust_metrics.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/robust_metrics/robust_metrics_torch.h
+  ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_monitor/agent_presence_monitor.h
+  ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_coordinator/agent_presence_coordinator.h
 )
 
 
@@ -69,3 +74,18 @@ add_link_options(-Wl,--no-as-needed)
 
 # no-char8_t to avoid a problem with ICE Connection lib.
 add_definitions(-O3 -march=native -fmax-errors=1 -fno-char8_t)
+
+# AddressSanitizer (opt-in, separate build dir):
+#   cmake -B build-asan -DENABLE_ASAN=ON && cmake --build build-asan -j
+# Instruments bottle_concept's OWN code to pin the Ctrl-C shutdown segfault. See run_asan.sh.
+option(ENABLE_ASAN "Build bottle_concept with AddressSanitizer" OFF)
+if(ENABLE_ASAN)
+  message(STATUS "AddressSanitizer ENABLED for bottle_concept (-O1, frame pointers; -lasan-direct link)")
+  add_compile_options(-fsanitize=address -fno-omit-frame-pointer -O1)
+  # Link libasan DIRECTLY (not via the -fsanitize driver). The driver injects an __asan_init entry
+  # into .preinit_array, which runs BEFORE any shared-library init -> ASan is active during
+  # libIceStorm's static init and trips a latent Ice FactoryTable init-order SEGV (before main).
+  # -lasan resolves __asan_* as UND dynamic symbols WITHOUT a preinit entry; run_asan.sh then strips
+  # the libasan DT_NEEDED and LD_PRELOADs it, so ASan inits first while Ice's init order stays normal.
+  add_link_options(-fno-omit-frame-pointer -Wl,--no-as-needed -lasan -Wl,--as-needed)
+endif()

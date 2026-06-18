@@ -1,3 +1,6 @@
+# Proxies for required interfaces
+Proxies.Webots2Robocomp = "webots2robocomp:tcp -h localhost -p 0"
+
 
 # --- Common Agent Data ---
 Agent.id = 0 # Change id

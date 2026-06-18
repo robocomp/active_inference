@@ -37,6 +37,8 @@
 #ifndef SPECIFICWORKER_H
 #define SPECIFICWORKER_H
 
+#include <atomic>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -49,7 +51,9 @@
 #include <Eigen/Dense>
 
 #include <dsr/api/dsr_rt_api.h>
+#include <dsr/api/dsr_inner_eigen_api.h>
 
+#include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 #include "../../common/robust_metrics/robust_metrics.h"
 #include "bottle_model.h"
 #include "prior_store.h"
@@ -74,6 +78,13 @@ struct BottleInstance
     // Dead-band tracking for write_rt_pose — suppress tiny oscillations
     float last_written_cx = std::numeric_limits<float>::max();
     float last_written_cy = std::numeric_limits<float>::max();
+    // Last model PUBLISHED to the graph — gate node/edge writes to meaningful changes so a
+    // stable fit stops rewriting the node (big mesh + model_generation) and the RT edge.
+    float last_pub_radius = std::numeric_limits<float>::max();
+    float last_pub_height = std::numeric_limits<float>::max();
+    float last_pub_cx     = std::numeric_limits<float>::max();
+    float last_pub_cy     = std::numeric_limits<float>::max();
+    float last_pub_cz     = std::numeric_limits<float>::max();
     SampleQueueMetrics      last_queue_metrics;
     FreeEnergyDecomposition last_fe_terms;
     // Bottle-owned voxel memory bank (room frame), independent of per-frame uploads.
@@ -128,6 +139,18 @@ struct AgentConfig
 
     // Covariance write
     float yaw_variance = 9.87f;   // ≈π² — yaw is unobservable for a symmetric cylinder
+
+    // ── Static ground-truth evaluation (Webots) ────────────────────────────────
+    // The bottle is stationary during perception, so its Webots pose is a constant
+    // expressed in the room frame (DEF bottle → Shadow→room). When enabled, the
+    // tracker logs per-cycle position/size error and NEES (covariance calibration).
+    bool        eval_enabled = false;
+    std::string eval_log_path = "etc/bottle_eval.csv";
+    std::string eval_gt_source = "webots";   // "webots" (live getObjectPose) | "config"
+    std::string eval_bottle_def = "bottle";  // Webots DEF of the bottle
+    std::string eval_robot_def  = "shadow";  // Webots DEF of the Shadow robot (== DSR body frame)
+    float gt_cx = 0.0f, gt_cy = 0.0f, gt_cz = 0.0f;   // cylinder CENTRE, room frame
+    float gt_radius = 0.0f, gt_height = 0.0f;
 };
 
 // ─── SpecificWorker ──────────────────────────────────────────────────────────
@@ -183,6 +206,20 @@ private:
         std::vector<Eigen::Vector3f> support_points;
     };
 
+    // ── Presence protocol ──────────────────────────────────────────────────────
+    void waiting_enter();
+    void waiting_loop();
+    void operating_enter();
+    void operating_loop();
+    void degraded_enter();
+    void degraded_loop();
+    void cleanup_owned_nodes();
+    void request_shutdown();
+    void on_optional_peer_lost(const std::string& name, std::uint32_t id);
+    void on_optional_peer_ready(const std::string& name, std::uint32_t id);
+    // Delete every "bottle*" cylinder node this agent owns (startup sweep + teardown).
+    void remove_owned_bottle_nodes();
+
     // ── Initialisation helpers ────────────────────────────────────────────────
     void load_config(const ConfigLoader& cfg);
     void scaffold_missing_bottle_nodes();
@@ -204,6 +241,11 @@ private:
                             const std::vector<Eigen::Vector3f>& residual_pts,
                             float residual_precision);
     void step_write_model(BottleInstance& inst, DSR::Node& node, float free_energy);
+    // Append one fit-vs-ground-truth row (position/size error + NEES) to the eval CSV.
+    void log_eval(const BottleInstance& inst, float free_energy);
+    // One-shot: query the bottle's static Webots pose and express its CENTRE in the room
+    // frame, storing it in cfg_.gt_*. Returns false if the bridge/transforms aren't ready.
+    bool acquire_webots_gt();
 
     // ── DSR helpers ──────────────────────────────────────────────────────────
     std::vector<Eigen::Vector3f> read_pts_attrib(const DSR::Node& node,
@@ -219,6 +261,9 @@ private:
 
     // ── Members ──────────────────────────────────────────────────────────────
     bool startup_check_flag = false;
+    bool owned_nodes_cleaned_ = false;
+    std::atomic<bool> shutting_down_{false};
+    AgentPresenceCoordinator presence_coordinator_;
 
     AgentConfig                                 cfg_;
     std::unique_ptr<PriorStore>                 prior_store_;
@@ -226,6 +271,8 @@ private:
     std::unordered_map<uint64_t, BottleInstance> instances_;
 
     std::unique_ptr<DSR::RT_API> rt_api_;
+    std::unique_ptr<DSR::InnerEigenAPI> inner_eigen_;
+    bool                         gt_acquired_ = false;
     uint64_t                     room_node_id_ = 0;
     int                          last_masks_frame_seen_ = -1;
     MasksPacket                  masks_packet_;
@@ -233,8 +280,11 @@ private:
     std::string priors_path_;
     std::string checkpoint_path_;
 
+    std::ofstream eval_log_;   // open when cfg_.eval_enabled; header written on first row
+
 signals:
-    //void customSignal();
+    void presenceReady();
+    void presenceLost();
 };
 
 #endif // SPECIFICWORKER_H

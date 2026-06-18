@@ -78,12 +78,33 @@
 #include "../src/specificworker.h"
 
 
+#include <Gridder.h>
+#include <KinovaArm.h>
+#include <Webots2Robocomp.h>
 
 #define USE_QTGUI
 
 #define PROGRAM_NAME    "bottle_concept"
 #define SERVER_FULL_NAME   "RoboComp bottle_concept::bottle_concept"
 
+
+template <typename ProxyType, typename ProxyPointer>
+void require(const Ice::CommunicatorPtr& communicator,
+             const std::string& proxyConfig, 
+             const std::string& proxyName,
+             ProxyPointer& proxy)
+{
+    try
+    {
+        proxy = Ice::uncheckedCast<ProxyType>(communicator->stringToProxy(proxyConfig));
+        std::cout << proxyName << " initialized Ok!\n";
+    }
+    catch(const Ice::Exception& ex)
+    {
+        std::cout << "[" << PROGRAM_NAME << "]: Exception creating proxy " << proxyName << ": " << ex;
+        throw;
+    }
+}
 
 
 class bottle_concept : public Ice::Application
@@ -150,9 +171,14 @@ int bottle_concept::run(int argc, char* argv[])
 
 	int status=EXIT_SUCCESS;
 
+	RoboCompWebots2Robocomp::Webots2RobocompPrxPtr webots2robocomp_proxy;
 
 
-	tprx = std::tuple<>();
+	//Require code
+	require<RoboCompWebots2Robocomp::Webots2RobocompPrx, RoboCompWebots2Robocomp::Webots2RobocompPrxPtr>(communicator(),
+	                    configLoader.get<std::string>("Proxies.Webots2Robocomp"), "Webots2RobocompProxy", webots2robocomp_proxy);
+
+	tprx = std::make_tuple(webots2robocomp_proxy);
 	SpecificWorker *worker = new SpecificWorker(this->configLoader, tprx, startup_check_flag);
 	QObject::connect(worker, SIGNAL(kill()), &a, SLOT(quit()));
 

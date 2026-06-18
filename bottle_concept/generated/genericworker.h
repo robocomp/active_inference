@@ -36,10 +36,13 @@
 #include "dsr/gui/dsr_gui.h"
 #include <memory>
 
+#include <Gridder.h>
+#include <KinovaArm.h>
+#include <Webots2Robocomp.h>
 
 #define BASIC_PERIOD 100
 
-using TuplePrx = std::tuple<>;
+using TuplePrx = std::tuple<RoboCompWebots2Robocomp::Webots2RobocompPrxPtr>;
 
 
 class GenericWorker : public QObject
@@ -58,6 +61,7 @@ public:
 	std::atomic_bool hibernation = false;
 
 
+	RoboCompWebots2Robocomp::Webots2RobocompPrxPtr webots2robocomp_proxy;
 
 
 protected:

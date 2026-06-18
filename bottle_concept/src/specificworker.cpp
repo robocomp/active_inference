@@ -37,6 +37,9 @@
 #include <print>
 #include <sstream>
 
+#include <QCoreApplication>
+#include <QTimer>
+
 #include <dsr/api/dsr_api.h>
 
 // ─── Constructor / Destructor ─────────────────────────────────────────────────
@@ -57,6 +60,32 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
     hibernationChecker.start(500);
 #endif
 
+    // ── Agent-presence state machine (Waiting → Operating → Degraded) ──────────
+    const int period = configLoader.get<int>("Period.Compute");
+
+    states["Waiting"] = std::make_unique<GRAFCETStep>("Waiting", period,
+        std::bind(&SpecificWorker::waiting_loop, this),
+        std::bind(&SpecificWorker::waiting_enter, this));
+    states["Operating"] = std::make_unique<GRAFCETStep>("Operating", period,
+        std::bind(&SpecificWorker::operating_loop, this),
+        std::bind(&SpecificWorker::operating_enter, this));
+    states["Degraded"] = std::make_unique<GRAFCETStep>("Degraded", period,
+        std::bind(&SpecificWorker::degraded_loop, this),
+        std::bind(&SpecificWorker::degraded_enter, this));
+
+    // Compute → Waiting on start
+    states["Compute"]->addTransition(states["Compute"].get(), SIGNAL(entered()), states["Waiting"].get());
+    // Waiting → Operating when all required peers are ready
+    states["Waiting"]->addTransition(this, SIGNAL(presenceReady()), states["Operating"].get());
+    // Operating → Degraded when a required peer is lost
+    states["Operating"]->addTransition(this, SIGNAL(presenceLost()), states["Degraded"].get());
+    // Degraded → Waiting immediately (self-kill scheduled inside degraded_enter)
+    states["Degraded"]->addTransition(states["Degraded"].get(), SIGNAL(entered()), states["Waiting"].get());
+
+    statemachine.addState(states["Waiting"].get());
+    statemachine.addState(states["Operating"].get());
+    statemachine.addState(states["Degraded"].get());
+
     statemachine.setChildMode(QState::ExclusiveStates);
     statemachine.start();
 
@@ -70,6 +99,23 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
 
 SpecificWorker::~SpecificWorker()
 {
+    request_shutdown();
+    std::print("bottle_concept: SpecificWorker destroyed, checkpoints saved.\n");
+}
+
+void SpecificWorker::request_shutdown()
+{
+    if (shutting_down_.exchange(true))
+        return;
+
+    // Sever graph callbacks BEFORE any teardown. On Ctrl+C a del_node delta can be
+    // delivered from a DSR/DDS internal thread and invoke del_node_slot (instances_.erase)
+    // on this already-destructing object — the exit segfault. Dropping inner_eigen_ here
+    // (while G is still fully alive) also unsubscribes its internal graph signals cleanly.
+    if (G)
+        disconnect(G.get(), nullptr, this, nullptr);
+    inner_eigen_.reset();
+
     if (prior_store_)
     {
         for (const auto& [id, inst] : instances_)
@@ -80,7 +126,8 @@ SpecificWorker::~SpecificWorker()
                 inst.prev_free_energy, inst.frames_converged >= cfg_.K_stable});
         }
     }
-    std::print("bottle_concept: SpecificWorker destroyed, checkpoints saved.\n");
+
+    cleanup_owned_nodes();
 }
 
 // ─── Initialisation ──────────────────────────────────────────────────────────
@@ -96,13 +143,68 @@ void SpecificWorker::initialize()
         return;
     }
 
-    // Ignore RGBD payloads in local graph updates — this agent reads only the
-    // masks node (3D support points already in room frame), never raw streams.
-    G->set_ignored_attributes<cam_rgb_att, cam_depth_att>();
+    // ── Agent-presence protocol wiring ─────────────────────────────────────────
+    presence_coordinator_.configure(configLoader, G, static_cast<std::uint32_t>(agent_id));
+    presence_coordinator_.set_transition_hooks({
+        .request_presence_ready = [this]() { emit presenceReady(); },
+        .request_presence_lost  = [this]() { emit presenceLost(); },
+    });
+    presence_coordinator_.set_peer_hooks({
+        .on_peer_restarted = [](std::uint32_t id)
+        {
+            qInfo() << "[Presence] peer" << id << "restarted";
+        },
+        .on_optional_peer_lost = [this](const std::string& name, std::uint32_t id)
+        {
+            on_optional_peer_lost(name, id);
+        },
+        .on_optional_peer_ready = [this](const std::string& name, std::uint32_t id)
+        {
+            on_optional_peer_ready(name, id);
+        },
+    });
+    presence_coordinator_.set_lifecycle_hooks({
+        .on_waiting_enter = [this]()
+        {
+            const auto missing = presence_coordinator_.missing_required_names();
+            if (missing.empty())
+                qInfo("[SM] -> Waiting");
+            else
+            {
+                QString m;
+                for (const auto& label : missing)
+                    m += " " + QString::fromStdString(label);
+                qInfo() << "[SM] -> Waiting (missing:" << m.trimmed() << ")";
+            }
+        },
+        .on_operating_enter = []()
+        {
+            qInfo("[SM] -> Operating: all required peers present");
+        },
+        .on_operating_loop = [this]()
+        {
+            compute();
+        },
+        .on_degraded_enter = [this]()
+        {
+            qInfo("[SM] -> Degraded: required peer lost. Cleaning up and exiting.");
+            request_shutdown();
+            QTimer::singleShot(500, QCoreApplication::instance(), SLOT(quit()));
+        },
+    });
+    presence_coordinator_.start();
+
+    QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
+                     this, &SpecificWorker::request_shutdown, Qt::UniqueConnection);
 
     rt_api_ = G->get_rt_api();
+    inner_eigen_ = G->get_inner_eigen_api();
 
     connect(G.get(), &DSR::DSRGraph::del_node_signal, this, &SpecificWorker::del_node_slot);
+
+    // Remove any "bottle*" cylinder nodes left behind by a previous (crashed) run
+    // so this agent always starts from a clean slate and never double-scaffolds.
+    remove_owned_bottle_nodes();
 
     const auto rooms = G->get_nodes_by_type("room");
     if (not rooms.empty())
@@ -154,6 +256,9 @@ void SpecificWorker::process_bottle_node(const DSR::Node& node)
 
     if (auto node_opt = G->get_node(node.id()); node_opt.has_value())
         step_write_model(inst, node_opt.value(), free_energy);
+
+    // Eval logs every compute cycle, independent of the graph-write change-gate above.
+    log_eval(inst, free_energy);
 
     inst.prev_free_energy = free_energy;
 }
@@ -659,16 +764,31 @@ void SpecificWorker::ensure_instance(const DSR::Node& node)
         }
     }
 
-    // Checkpoint overrides RT/attrs if present.
+    // Checkpoint overrides RT/attrs if present — but only when its size is physically
+    // plausible. A checkpoint saved from a diverged fit (e.g. radius blown up by sensor
+    // outliers) would otherwise poison BOTH the initial state AND the size prior below
+    // (mparams.prior_radius = init_state.radius), anchoring the KL term at the bad value.
     if (prior_store_)
     {
         if (const auto ckpt = prior_store_->load_checkpoint(node.name()); ckpt.has_value())
         {
-            init_state.radius = ckpt->radius_m;
-            init_state.height = ckpt->height_m;
-            init_state.cx     = ckpt->room_x_m;
-            init_state.cy     = ckpt->room_y_m;
-            init_state.cz     = ckpt->room_z_m;
+            constexpr float kMaxRadius = 0.20f;   // generous "is this a bottle?" bound (m)
+            constexpr float kMaxHeight = 0.60f;
+            const bool size_ok = std::isfinite(ckpt->radius_m) and std::isfinite(ckpt->height_m)
+                and ckpt->radius_m > 0.0f and ckpt->radius_m <= kMaxRadius
+                and ckpt->height_m > 0.0f and ckpt->height_m <= kMaxHeight;
+            if (size_ok)
+            {
+                init_state.radius = ckpt->radius_m;
+                init_state.height = ckpt->height_m;
+            }
+            else
+                std::print("bottle_concept: REJECTED out-of-range checkpoint size for '{}' "
+                           "(r={:.3f} h={:.3f}); falling back to prior (r={:.3f} h={:.3f})\n",
+                           node.name(), ckpt->radius_m, ckpt->height_m, cfg_.prior_radius, cfg_.prior_height);
+            init_state.cx = ckpt->room_x_m;
+            init_state.cy = ckpt->room_y_m;
+            init_state.cz = ckpt->room_z_m;
             std::print("bottle_concept: restored checkpoint for '{}'\n", node.name());
         }
     }
@@ -717,6 +837,27 @@ void SpecificWorker::step_write_model(BottleInstance& inst, DSR::Node& node, flo
 {
     const auto& s = inst.model.state();
 
+    // Publish to the graph only when the model meaningfully changed. Once the fit is stable this
+    // stops the per-cycle rewrite of the node (incl. the large mesh + the ever-incrementing
+    // model_generation) and the RT edge — sparing the DSR network and every agent's graph viewer.
+    // FE jitter is deliberately NOT a trigger (it never fully settles), only pose/size do.
+    constexpr float kPosEps  = 0.005f;   // 5 mm
+    constexpr float kSizeEps = 0.002f;   // 2 mm
+    const bool changed =
+        std::abs(s.radius - inst.last_pub_radius) > kSizeEps or
+        std::abs(s.height - inst.last_pub_height) > kSizeEps or
+        std::abs(s.cx     - inst.last_pub_cx)     > kPosEps  or
+        std::abs(s.cy     - inst.last_pub_cy)     > kPosEps  or
+        std::abs(s.cz     - inst.last_pub_cz)     > kPosEps;
+    if (not changed)
+        return;
+
+    inst.last_pub_radius = s.radius;
+    inst.last_pub_height = s.height;
+    inst.last_pub_cx     = s.cx;
+    inst.last_pub_cy     = s.cy;
+    inst.last_pub_cz     = s.cz;
+
     G->add_or_modify_attrib_local<width_m_att> (node, 2.0f * s.radius);
     G->add_or_modify_attrib_local<depth_m_att> (node, 2.0f * s.radius);
     G->add_or_modify_attrib_local<height_m_att>(node, s.height);
@@ -736,6 +877,110 @@ void SpecificWorker::step_write_model(BottleInstance& inst, DSR::Node& node, flo
     G->update_node(node);
 
     write_rt_pose(room_node_id_, inst);
+}
+
+bool SpecificWorker::acquire_webots_gt()
+{
+    if (not inner_eigen_ or not webots2robocomp_proxy)
+        return false;
+
+    RoboCompWebots2Robocomp::ObjectPose bottle_w, robot_w;
+    try
+    {
+        bottle_w = webots2robocomp_proxy->getObjectPose(cfg_.eval_bottle_def);
+        robot_w  = webots2robocomp_proxy->getObjectPose(cfg_.eval_robot_def);
+    }
+    catch (const std::exception& e)
+    {
+        std::print("bottle_concept: [eval] getObjectPose failed ({}); will retry\n", e.what());
+        return false;
+    }
+
+    auto to_iso = [](const RoboCompWebots2Robocomp::ObjectPose& p)
+    {
+        Eigen::Isometry3d T = Eigen::Isometry3d::Identity();
+        T.linear() = Eigen::Quaterniond(p.orientation.w, p.orientation.x,
+                                        p.orientation.y, p.orientation.z).normalized().toRotationMatrix();
+        T.translation() = Eigen::Vector3d(p.position.x / 1000.0,   // Webots reports mm
+                                          p.position.y / 1000.0,
+                                          p.position.z / 1000.0);
+        return T;
+    };
+
+    // The WaterBottle proto origin is the bottle BASE (geometry shifted +height/2), so the
+    // queried pose is the base. Express the base in the DSR `body` frame (== Webots Shadow
+    // frame), then walk the graph room←body to land in the room frame the tracker fits in.
+    const Eigen::Isometry3d T_world_bottle = to_iso(bottle_w);
+    const Eigen::Isometry3d T_world_body   = to_iso(robot_w);
+    const Eigen::Vector3d base_in_body = (T_world_body.inverse() * T_world_bottle).translation();
+
+    const auto room_T_body = inner_eigen_->get_transformation_matrix("room", "body", 0);
+    if (not room_T_body.has_value())
+        return false;
+
+    const Eigen::Vector3d base_in_room =
+        room_T_body.value().linear() * base_in_body + room_T_body.value().translation();
+
+    cfg_.gt_cx = static_cast<float>(base_in_room.x());
+    cfg_.gt_cy = static_cast<float>(base_in_room.y());
+    cfg_.gt_cz = static_cast<float>(base_in_room.z()) + 0.5f * cfg_.gt_height;   // base → centre
+    std::print("bottle_concept: [eval] Webots GT (room frame, centre) = ({:.3f}, {:.3f}, {:.3f})\n",
+               cfg_.gt_cx, cfg_.gt_cy, cfg_.gt_cz);
+    return true;
+}
+
+void SpecificWorker::log_eval(const BottleInstance& inst, float free_energy)
+{
+    if (not cfg_.eval_enabled)
+        return;
+
+    // Live GT: acquire the static bottle pose from Webots once (lazy — the bridge/transforms
+    // may not be ready at startup). Until acquired, skip logging.
+    if (cfg_.eval_gt_source == "webots" and not gt_acquired_)
+    {
+        if (acquire_webots_gt())
+            gt_acquired_ = true;
+        else
+            return;
+    }
+
+    if (not eval_log_.is_open())
+    {
+        eval_log_.open(cfg_.eval_log_path, std::ios::out | std::ios::trunc);
+        if (not eval_log_.is_open())
+        {
+            std::print("bottle_concept: [eval] cannot open log '{}'\n", cfg_.eval_log_path);
+            cfg_.eval_enabled = false;   // don't retry every cycle
+            return;
+        }
+        eval_log_ << "frame,node,fe,cx,cy,cz,radius,height,"
+                     "gt_cx,gt_cy,gt_cz,gt_radius,gt_height,"
+                     "ex,ey,ez,pos_err,radius_err,height_err,nees,trace_P\n";
+    }
+
+    const auto& s = inst.model.state();
+
+    // 3×3 Laplace position covariance (same P_bottle written on the RT edge).
+    const auto fit_pts = inst.queue.points();
+    if (fit_pts.empty())
+        return;
+    const Eigen::Matrix3f cov = inst.model.pose_covariance(fit_pts, inst.queue.weights());
+
+    const Eigen::Vector3f e(s.cx - cfg_.gt_cx, s.cy - cfg_.gt_cy, s.cz - cfg_.gt_cz);
+
+    // NEES = eᵀ P⁻¹ e (3-DOF position; χ² expectation ≈ 3 when P is calibrated).
+    // Guard a singular/ill-conditioned P with a tiny isotropic regulariser.
+    const Eigen::Matrix3f cov_reg = cov + Eigen::Matrix3f::Identity() * 1e-9f;
+    const float nees = e.dot(cov_reg.ldlt().solve(e));
+
+    eval_log_ << inst.processed_cycles << ',' << inst.node_name << ',' << free_energy << ','
+              << s.cx << ',' << s.cy << ',' << s.cz << ',' << s.radius << ',' << s.height << ','
+              << cfg_.gt_cx << ',' << cfg_.gt_cy << ',' << cfg_.gt_cz << ','
+              << cfg_.gt_radius << ',' << cfg_.gt_height << ','
+              << e.x() << ',' << e.y() << ',' << e.z() << ',' << e.norm() << ','
+              << (s.radius - cfg_.gt_radius) << ',' << (s.height - cfg_.gt_height) << ','
+              << nees << ',' << cov.trace() << '\n';
+    eval_log_.flush();
 }
 
 // ─── DSR helpers ───────────────────────────────────────────────────────────────
@@ -988,6 +1233,21 @@ void SpecificWorker::load_config(const ConfigLoader& cfg)
     cfg_.z_bin_size                   = getf("SampleQueue.ZBinSize",                  0.04f);
 
     cfg_.yaw_variance = getf("BottleConcept.YawVariance", 9.87f);
+
+    // Static Webots ground-truth evaluation (room frame; cylinder centre).
+    auto getb = [&](const std::string& k, bool def) -> bool {
+        return cfg.exists(k) ? cfg.get<bool>(k) : def;
+    };
+    cfg_.eval_enabled    = getb("Eval.Enabled",  false);
+    cfg_.eval_log_path   = gets("Eval.LogPath",  "etc/bottle_eval.csv");
+    cfg_.eval_gt_source  = gets("Eval.GtSource", "webots");
+    cfg_.eval_bottle_def = gets("Eval.BottleDef", "bottle");
+    cfg_.eval_robot_def  = gets("Eval.RobotDef",  "shadow");
+    cfg_.gt_cx     = getf("Eval.GtCx",     0.0f);
+    cfg_.gt_cy     = getf("Eval.GtCy",     0.0f);
+    cfg_.gt_cz     = getf("Eval.GtCz",     0.0f);
+    cfg_.gt_radius = getf("Eval.GtRadius", 0.0f);
+    cfg_.gt_height = getf("Eval.GtHeight", 0.0f);
 
     std::print("bottle_concept: configuration loaded.\n");
 }
