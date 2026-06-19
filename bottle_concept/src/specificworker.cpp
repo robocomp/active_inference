@@ -444,11 +444,135 @@ float SpecificWorker::run_bottle_inference(BottleInstance& inst, const BottleObs
 
     const auto& s = inst.model.state();
     if (should_log(inst))
+    {
         std::print("[{}] FE={:.4f}  c=({:.3f},{:.3f},{:.3f}) r={:.3f} h={:.3f}  pts={}\n",
                    inst.node_name, free_energy, s.cx, s.cy, s.cz, s.radius, s.height,
                    inst.queue.size() + static_cast<int>(observation.residual_pts.size()));
+        mask_silhouette_diagnostic(inst, observation);
+    }
 
     return free_energy;
+}
+
+// ── RGB-mask-silhouette diagnostic ──────────────────────────────────────────────
+// Does the YOLO mask carry usable radius/shape information independent of the depth points?
+// Project the fitted cylinder and the measured support points into the ZED image and compare
+// their 2D footprints (coarse-cell IoU). A second synthetic at GT radius (same centre/height)
+// isolates whether a TIGHTER cylinder matches the observed mask better — the precondition for
+// adding a 2D silhouette likelihood. Intrinsics come from the DSR CameraAPI bound to the "zed"
+// node; the room→camera extrinsic is the affine room→zed basis (handles a dynamic camera pose).
+void SpecificWorker::mask_silhouette_diagnostic(const BottleInstance& inst, const BottleObservation& obs)
+{
+    if (not inner_eigen_)
+        return;
+    if (not camera_api_)
+    {
+        const auto zed = G->get_node("zed");
+        if (not zed.has_value())
+        {
+            static bool warned = false;
+            if (not warned) { std::print("[mask-IoU] no 'zed' node in graph — diagnostic disabled\n"); warned = true; }
+            return;
+        }
+        camera_api_ = G->get_camera_api(zed.value());
+        if (not camera_api_)
+        {
+            static bool w=false; if(not w){ std::print("[mask-IoU] get_camera_api(zed) returned null\n"); w=true; }
+            return;
+        }
+    }
+
+    // Compose room→camera manually: a single-walk transform("zed",·,"room") fails because the
+    // body→zed mount edge carries only a bootstrap timestamp (a Nearest query over the multi-hop
+    // chain misses), so resolve each hop at ts=0 and compose — exactly how the voxelizer builds
+    // room_T_zed. The camera mounts on "body" (no "robot" node in this graph).
+    const auto room_T_body = inner_eigen_->get_transformation_matrix("room", "body", 0);
+    const auto body_T_zed  = inner_eigen_->get_transformation_matrix("body", "zed", 0);
+    if (not (room_T_body.has_value() and body_T_zed.has_value()))
+    {
+        static bool w=false;
+        if(not w){ std::print("[mask-IoU] extrinsic unavailable (room<-body={} body<-zed={})\n",
+                              room_T_body.has_value(), body_T_zed.has_value()); w=true; }
+        return;
+    }
+    const Mat::RTMat zed_T_room = (room_T_body.value() * body_T_zed.value()).inverse();
+
+    constexpr double CELL_PX = 4.0;   // coarse occupancy bucket; dense point sets fill it
+    const auto key = [](long c, long r) -> unsigned long long
+    {
+        return (static_cast<unsigned long long>(static_cast<unsigned int>(c)) << 32)
+             |  static_cast<unsigned int>(r);
+    };
+    const auto project_cell = [&](const Eigen::Vector3f& p, unsigned long long& out) -> bool
+    {
+        const Mat::Vector3d pc = zed_T_room * Mat::Vector3d(p.x(), p.y(), p.z());
+        if (pc.y() <= 1e-6)              // CameraAPI::project uses Y as the depth axis
+            return false;
+        const Eigen::Vector2d uv = camera_api_->project(pc);
+        out = key(static_cast<long>(std::floor(uv.x() / CELL_PX)),
+                  static_cast<long>(std::floor(uv.y() / CELL_PX)));
+        return true;
+    };
+
+    std::unordered_set<unsigned long long> meas, synth_fit, synth_gt;
+    unsigned long long k = 0;
+
+    // Measured silhouette = the RAW YOLO mask (independent RGB evidence) when the voxelizer ships
+    // it; these are already pixel coords, so bucket directly (no projection). Else fall back to
+    // projecting the depth-derived support points (NOT independent of the depth likelihood).
+    const auto slice = select_mask_for_bottle(inst);
+    const bool have_raw = slice.has_value() and slice->pixel_end > slice->pixel_begin
+                          and slice->pixel_end <= masks_packet_.mask_pixels.size();
+    if (have_raw)
+        for (std::size_t i = slice->pixel_begin; i < slice->pixel_end; ++i)
+            meas.insert(key(static_cast<long>(std::floor(masks_packet_.mask_pixels[i].x() / CELL_PX)),
+                            static_cast<long>(std::floor(masks_packet_.mask_pixels[i].y() / CELL_PX))));
+    else
+    {
+        for (const auto& p : obs.candidate_pts) if (project_cell(p, k)) meas.insert(k);
+        for (const auto& p : obs.residual_pts)  if (project_cell(p, k)) meas.insert(k);
+    }
+
+    const auto& s = inst.model.state();
+    const auto rasterize_cylinder = [&](float radius, std::unordered_set<unsigned long long>& cells)
+    {
+        // Dense enough that adjacent samples land < CELL_PX apart at typical range, else the
+        // synthetic silhouette under-fills and IoU is meaningless (a vertical-gap artifact).
+        constexpr int NZ = 64, NR = 8, NT = 48;   // solid fill: caps→span × centre→rim × angle
+        for (int iz = 0; iz < NZ; ++iz)
+        {
+            const float z = s.cz - 0.5f * s.height + s.height * iz / float(NZ - 1);
+            for (int ir = 0; ir < NR; ++ir)
+            {
+                const float rr = radius * float(ir) / float(NR - 1);
+                for (int it = 0; it < NT; ++it)
+                {
+                    const float th = 2.0f * float(std::numbers::pi) * it / NT;
+                    const Eigen::Vector3f p(s.cx + rr * std::cos(th), s.cy + rr * std::sin(th), z);
+                    if (project_cell(p, k)) cells.insert(k);
+                }
+            }
+        }
+    };
+    rasterize_cylinder(s.radius, synth_fit);
+    if (cfg_.gt_radius > 0.0f) rasterize_cylinder(cfg_.gt_radius, synth_gt);
+
+    const auto iou = [](const std::unordered_set<unsigned long long>& a,
+                        const std::unordered_set<unsigned long long>& b) -> float
+    {
+        if (a.empty() or b.empty()) return 0.0f;
+        const auto& small = a.size() < b.size() ? a : b;
+        const auto& large = a.size() < b.size() ? b : a;
+        std::size_t inter = 0;
+        for (auto e : small) if (large.count(e)) ++inter;
+        const std::size_t uni = a.size() + b.size() - inter;
+        return uni ? float(inter) / float(uni) : 0.0f;
+    };
+
+    std::print("[{}] mask-IoU[{}]  fit_r={:.3f} iou_fit={:.2f}   gt_r={:.3f} iou_gtR={:.2f}   "
+               "(meas_cells={} fit_cells={})\n",
+               inst.node_name, have_raw ? "raw" : "proj", s.radius, iou(meas, synth_fit),
+               cfg_.gt_radius, iou(meas, synth_gt), meas.size(), synth_fit.size());
 }
 
 void SpecificWorker::step_queue_update(BottleInstance& inst,
@@ -615,6 +739,10 @@ bool SpecificWorker::refresh_masks_packet()
     const DSR::Attribute* centroids_attr = find_attr("mask_centroids_xyz");
     const DSR::Attribute* bbox_min_attr  = find_attr("mask_bbox_min_xyz");
     const DSR::Attribute* bbox_max_attr  = find_attr("mask_bbox_max_xyz");
+    // Optional (newer voxelizer): raw 2D mask silhouette, depth-independent. Absent → diagnostic
+    // falls back to projecting the support points, so don't gate the parse on these.
+    const DSR::Attribute* px_attr        = find_attr("mask_pixels_xy");
+    const DSR::Attribute* px_off_attr    = find_attr("mask_pixel_offsets");
 
     if (frame_attr == nullptr or count_attr == nullptr or labels_attr == nullptr or
         label_ids_attr == nullptr or confs_attr == nullptr or offsets_attr == nullptr or
@@ -659,6 +787,14 @@ bool SpecificWorker::refresh_masks_packet()
     for (std::size_t i = 0; i < support_count; ++i)
         packet.support_points.emplace_back(support_flat[i*3], support_flat[i*3+1], support_flat[i*3+2]);
 
+    static const std::vector<float> kEmptyF;
+    const auto& px_flat = px_attr     ? px_attr->float_vec()     : kEmptyF;
+    const auto& px_off  = px_off_attr ? px_off_attr->float_vec() : kEmptyF;
+    const std::size_t pixel_count = px_flat.size() / 2;
+    packet.mask_pixels.reserve(pixel_count);
+    for (std::size_t i = 0; i < pixel_count; ++i)
+        packet.mask_pixels.emplace_back(px_flat[i*2], px_flat[i*2+1]);
+
     packet.slices.reserve(static_cast<std::size_t>(mask_count));
     for (int i = 0; i < mask_count; ++i)
     {
@@ -683,6 +819,10 @@ bool SpecificWorker::refresh_masks_packet()
             slice.confidence = confidences[static_cast<std::size_t>(i)];
         slice.support_begin = clamped_begin;
         slice.support_end = clamped_end;
+        const std::size_t pbegin = (i < static_cast<int>(px_off.size())) ? static_cast<std::size_t>(std::max(0.0f, px_off[static_cast<std::size_t>(i)])) : 0;
+        const std::size_t pend   = (i + 1 < static_cast<int>(px_off.size())) ? static_cast<std::size_t>(std::max(0.0f, px_off[static_cast<std::size_t>(i + 1)])) : pbegin;
+        slice.pixel_begin = std::min(pbegin, packet.mask_pixels.size());
+        slice.pixel_end   = std::min(pend,   packet.mask_pixels.size());
         slice.centroid = fetch_vec3(centroids_flat, centroid_count);
         slice.bbox_min = fetch_vec3(bbox_min_flat, bbox_min_count);
         slice.bbox_max = fetch_vec3(bbox_max_flat, bbox_max_count);

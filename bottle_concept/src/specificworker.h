@@ -52,6 +52,7 @@
 
 #include <dsr/api/dsr_rt_api.h>
 #include <dsr/api/dsr_inner_eigen_api.h>
+#include <dsr/api/dsr_camera_api.h>
 
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 #include "../../common/robust_metrics/robust_metrics.h"
@@ -151,6 +152,24 @@ struct AgentConfig
     std::string eval_robot_def  = "shadow";  // Webots DEF of the Shadow robot (== DSR body frame)
     float gt_cx = 0.0f, gt_cy = 0.0f, gt_cz = 0.0f;   // cylinder CENTRE, room frame
     float gt_radius = 0.0f, gt_height = 0.0f;
+
+    // ── Moving-bottle validation experiment ──────────────────────────────────
+    // Steps the REAL bottle across the table in Webots (setObjectPose) through a grid of
+    // poses, holding each for move_settle_cycles so the fitted model converges, and logs the
+    // fitted pose/shape vs the live Webots ground truth at every cycle. GT is re-acquired each
+    // cycle (the bottle is moving), so the static-pose latch is bypassed while this is on.
+    bool  move_experiment   = false;   // Eval.MoveExperiment
+    int   move_settle_cycles = 25;     // cycles held at each grid pose before stepping
+    float move_step_m        = 0.06f;  // grid spacing over the table (metres, world frame)
+    int   move_grid_n        = 5;      // grid is move_grid_n × move_grid_n positions
+
+    // ── Static-restart validation ─────────────────────────────────────────────
+    // Real scenario: the object is STATIC until grasped. So validate the fit at independent
+    // static positions, restarting the agent for each (fresh voxel bank — no cross-position
+    // accumulation). One run = move the bottle to grid pose BOTTLE_TEST_POSE (env), fit it from
+    // scratch, append the converged fit-vs-GT to the log. Takes precedence over move_experiment.
+    bool  static_pose_test  = false;   // Eval.StaticPoseTest
+    int   static_pose_index = 0;       // grid index for THIS run (env BOTTLE_TEST_POSE)
 };
 
 // ─── SpecificWorker ──────────────────────────────────────────────────────────
@@ -196,6 +215,8 @@ private:
         Eigen::Vector3f bbox_max = Eigen::Vector3f::Zero();
         std::size_t support_begin = 0;
         std::size_t support_end = 0;
+        std::size_t pixel_begin = 0;   // raw 2D mask pixels (into MasksPacket::mask_pixels)
+        std::size_t pixel_end = 0;
     };
 
     struct MasksPacket
@@ -204,6 +225,7 @@ private:
         int frame_id = -1;
         std::vector<MaskSlice> slices;
         std::vector<Eigen::Vector3f> support_points;
+        std::vector<Eigen::Vector2f> mask_pixels;   // raw YOLO foreground (col,row), depth-independent
     };
 
     // ── Presence protocol ──────────────────────────────────────────────────────
@@ -215,6 +237,13 @@ private:
     void degraded_loop();
     void cleanup_owned_nodes();
     void request_shutdown();
+    // Terminal, crash-free exit: runs request_shutdown() then std::_Exit() to bypass the fragile
+    // Ice communicator/static teardown that aborts (IceUtil::Mutex EINVAL). Single exit point for
+    // both the confirmed-degraded path and SIGTERM/Ctrl-C (aboutToQuit).
+    void terminal_shutdown();
+    // Grace before a required-peer loss is treated as terminal: a transient presence flap (startup
+    // handshake, brief node churn) must NOT kill the agent or destroy its graph state.
+    static constexpr int REQUIRED_LOSS_GRACE_MS = 3000;
     void on_optional_peer_lost(const std::string& name, std::uint32_t id);
     void on_optional_peer_ready(const std::string& name, std::uint32_t id);
     // Delete every "bottle*" cylinder node this agent owns (startup sweep + teardown).
@@ -246,6 +275,13 @@ private:
     // One-shot: query the bottle's static Webots pose and express its CENTRE in the room
     // frame, storing it in cfg_.gt_*. Returns false if the bridge/transforms aren't ready.
     bool acquire_webots_gt();
+    // Moving-bottle validation: drive the real bottle across the table (setObjectPose) and step
+    // through the grid once each pose's fit has settled. No-op unless Eval.MoveExperiment.
+    void step_move_experiment();
+    // Static-restart validation: on the first cycle, move the bottle to grid pose
+    // static_pose_index (using a persisted home as the grid origin) so this fresh agent fits it
+    // from scratch. No-op unless Eval.StaticPoseTest. Returns true once the move has been issued.
+    bool place_static_test_pose();
 
     // ── DSR helpers ──────────────────────────────────────────────────────────
     std::vector<Eigen::Vector3f> read_pts_attrib(const DSR::Node& node,
@@ -258,6 +294,14 @@ private:
     // ── Factory helpers ────────────────────────────────────────────────────────
     BottleModelParams make_model_params() const;
     SampleQueueParams make_queue_params() const;
+
+    // ── RGB-mask-silhouette diagnostic ────────────────────────────────────────
+    // Projects the fitted cylinder AND the measured support points into the ZED image
+    // (intrinsics via DSR CameraAPI on the "zed" node, extrinsic via the room→zed RT chain)
+    // and compares their 2D footprints (IoU). A second synthetic at GT radius tests whether a
+    // tighter cylinder matches the observed mask better — de-risks the mask-as-likelihood idea
+    // before wiring a 2D silhouette term into the free energy.
+    void mask_silhouette_diagnostic(const BottleInstance& inst, const BottleObservation& obs);
 
     // ── Members ──────────────────────────────────────────────────────────────
     bool startup_check_flag = false;
@@ -272,6 +316,7 @@ private:
 
     std::unique_ptr<DSR::RT_API> rt_api_;
     std::unique_ptr<DSR::InnerEigenAPI> inner_eigen_;
+    std::unique_ptr<DSR::CameraAPI> camera_api_;   // ZED intrinsics, lazily bound to the "zed" node
     bool                         gt_acquired_ = false;
     uint64_t                     room_node_id_ = 0;
     int                          last_masks_frame_seen_ = -1;
@@ -281,6 +326,13 @@ private:
     std::string checkpoint_path_;
 
     std::ofstream eval_log_;   // open when cfg_.eval_enabled; header written on first row
+
+    // Moving-bottle experiment runtime state (see step_move_experiment / Cfg::move_*).
+    bool                                   move_started_ = false;
+    RoboCompWebots2Robocomp::ObjectPose    move_home_{};       // bottle's world pose at experiment start
+    std::vector<std::pair<float,float>>    move_offsets_;      // (dx,dy) grid in world mm
+    std::size_t                            move_idx_ = 0;      // current grid index
+    int                                    move_settle_ = 0;   // cycles held at the current pose
 
 signals:
     void presenceReady();

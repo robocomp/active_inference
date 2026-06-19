@@ -162,8 +162,19 @@ void SpecificWorker::initialize()
     // --- Lidar secondary attributor (silent no-op when lidar3D data is absent) ---
     lidar_track_attributor = std::make_unique<LidarTrackAttributor>();
 
-    // --- Voxel viewer (attaches to DSR GUI if available) ---
-    if (!graph_viewers.empty())
+    // --- Custom drawing windows (attach to the DSR GUI if available) ---
+    // Both default ON. Set them false to run voxelizer WITH the DSR graph viewer but WITHOUT the
+    // custom drawing windows. The voxel viewer is a QOpenGLWidget; a GL surface compositing under
+    // the graph view's churn-driven repaints (on bottle join/leave) corrupts the backing store and
+    // crashes the process — room_concept's raster QGraphicsView custom widget does not. Disabling the
+    // GL window is the robust production setting (graph stays available for debugging). All
+    // voxel_viewer_gl / yolo_viewer_ consumers are null-guarded, so a null viewer is safe.
+    const bool show_voxel_viewer = configLoader.exists("Voxel.show_voxel_viewer")
+        ? configLoader.get<bool>("Voxel.show_voxel_viewer") : true;
+    const bool show_yolo_viewer = configLoader.exists("Voxel.show_yolo_viewer")
+        ? configLoader.get<bool>("Voxel.show_yolo_viewer") : true;
+
+    if (!graph_viewers.empty() and show_voxel_viewer)
     {
         const std::string viewer_key = graph_viewers.contains("")
             ? std::string("") : graph_viewers.begin()->first;
@@ -234,10 +245,19 @@ void SpecificWorker::initialize()
             upload_voxel_grid_to_dsr();
         });
 
-        graph_viewers.at(viewer_key)->add_custom_widget_to_dock("Voxel3D", voxel_panel);
+        // Own top-level window, NOT docked into the DSR graph-viewer window.
+        graph_viewers.at(viewer_key)->add_custom_widget_in_own_window("Voxel3D", voxel_panel);
+        qInfo() << __FUNCTION__ << "Voxel3D GL viewer attached in its own window";
+    }
+
+    // YOLO viewer (raster QLabel) — independently gated.
+    if (!graph_viewers.empty() and show_yolo_viewer)
+    {
+        const std::string viewer_key = graph_viewers.contains("")
+            ? std::string("") : graph_viewers.begin()->first;
         yolo_viewer_ = std::make_unique<rc::YoloViewer>(nullptr);
-        graph_viewers.at(viewer_key)->add_custom_widget_to_dock("YOLO", yolo_viewer_.get());
-        qInfo() << __FUNCTION__ << "Voxel3D viewer attached to DSR graph viewer";
+        graph_viewers.at(viewer_key)->add_custom_widget_in_own_window("YOLO", yolo_viewer_.get());
+        qInfo() << __FUNCTION__ << "YOLO viewer attached in its own window";
     }
 
     // --- Voxel grid + processor ---
@@ -785,6 +805,8 @@ void SpecificWorker::upload_masks_to_dsr(const SceneFrame& frame, const std::vec
         G->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_centroids_xyz", std::vector<float>{});
         G->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_bbox_min_xyz", std::vector<float>{});
         G->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_bbox_max_xyz", std::vector<float>{});
+        G->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_pixels_xy", std::vector<float>{});
+        G->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_pixel_offsets", std::vector<float>{0.0f});
         G->update_node(std::move(masks_node));
         return;
     }
@@ -804,9 +826,15 @@ void SpecificWorker::upload_masks_to_dsr(const SceneFrame& frame, const std::vec
     std::vector<float> centroids_xyz;
     std::vector<float> bbox_min_xyz;
     std::vector<float> bbox_max_xyz;
+    // Raw 2D mask silhouette (foreground pixels, BEFORE the depth gate) so downstream agents have
+    // the RGB mask as an evidence channel independent of depth — flat (col,row) pairs per mask,
+    // delimited by mask_pixel_offsets exactly like support_points/support_offsets.
+    std::vector<float> mask_pixels_xy;
+    std::vector<float> mask_pixel_offsets;
     std::ostringstream labels_joined;
     std::size_t total_support_points = 0;
     support_offsets.push_back(0.0f);
+    mask_pixel_offsets.push_back(0.0f);
 
     const std::size_t mask_stride = std::max<std::size_t>(1, params.VOXEL_DECIMATION_FACTOR);
 
@@ -826,6 +854,7 @@ void SpecificWorker::upload_masks_to_dsr(const SceneFrame& frame, const std::vec
         // Pass 1: gather valid masked (depth, room point) candidates.
         std::vector<std::pair<float, Eigen::Vector3f>> candidates;
         candidates.reserve(static_cast<std::size_t>(det.bbox.area() / std::max<int>(1, static_cast<int>(mask_stride * mask_stride))));
+        std::vector<float> det_pixels;   // raw 2D foreground (col,row), depth-independent
 
         for (int row = min_y; row < max_y; row += static_cast<int>(mask_stride))
         {
@@ -833,6 +862,9 @@ void SpecificWorker::upload_masks_to_dsr(const SceneFrame& frame, const std::vec
             {
                 if (mask_bin.at<std::uint8_t>(row, col) == 0)
                     continue;
+
+                det_pixels.push_back(static_cast<float>(col));
+                det_pixels.push_back(static_cast<float>(row));
 
                 const std::size_t depth_idx = static_cast<std::size_t>(row * rgbd.width + col);
                 if (depth_idx >= rgbd.depth.size())
@@ -919,6 +951,8 @@ void SpecificWorker::upload_masks_to_dsr(const SceneFrame& frame, const std::vec
         label_ids.push_back(static_cast<float>(det.class_id));
         confidences.push_back(det.confidence);
         support_offsets.push_back(static_cast<float>(support_offsets.back() + static_cast<float>(mask_points_room.size())));
+        mask_pixels_xy.insert(mask_pixels_xy.end(), det_pixels.begin(), det_pixels.end());
+        mask_pixel_offsets.push_back(static_cast<float>(mask_pixel_offsets.back() + static_cast<float>(det_pixels.size() / 2)));
 
         const Eigen::Vector3f centroid = sum_pt / static_cast<float>(mask_points_room.size());
         centroids_xyz.push_back(centroid.x());
@@ -953,6 +987,8 @@ void SpecificWorker::upload_masks_to_dsr(const SceneFrame& frame, const std::vec
     G->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_centroids_xyz", centroids_xyz);
     G->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_bbox_min_xyz", bbox_min_xyz);
     G->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_bbox_max_xyz", bbox_max_xyz);
+    G->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_pixels_xy", mask_pixels_xy);
+    G->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_pixel_offsets", mask_pixel_offsets);
     G->update_node(std::move(masks_node));
 
     if (verbose_debug_)

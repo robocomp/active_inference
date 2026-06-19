@@ -68,8 +68,10 @@ RobotDef  = "shadow"           # Webots DEF of the Shadow robot (== DSR body fra
 # Bottle dimensions: getObjectPose returns POSE only, so size GT comes from the proto.
 # GtHeight also sets the base→centre Z lift, so it must match the WaterBottle proto.
 # ⚠ VERIFY against shadow_arm.wbt's WaterBottle (these are the WaterBottleOpaque values).
-GtRadius = 0.022
-GtHeight = 0.22
+# Scene bottle is the cyberbotics WaterBottle (Evian MESH, shadow_arm.wbt) — NOT WaterBottleOpaque.
+# Data-driven best-fit cylinder (2026-06-20): radius 0.047 (depth 0.050 + mask 0.046), body height ~0.23.
+GtRadius = 0.047
+GtHeight = 0.23
 # Manual room-frame centre fallback, used only when GtSource = "config".
 GtCx = 0.0
 GtCy = 0.0
@@ -104,8 +106,8 @@ SigmaObs = 0.02            # SDF likelihood width (m); tight — a bottle is sma
 LambdaSize = 0.5          # KL toward prior dimensions (radius, height)
 LambdaPos = 0.05          # KL toward prior centre
 LambdaState = 0.02        # size transition
-PriorRadius = 0.022       # true WaterBottle radius. Radius is unobservable from one depth view (front arc only), so the size prior governs it — assert GT. See specificworker.cpp:885.
-PriorHeight = 0.20
+PriorRadius = 0.047       # data-driven best-fit cylinder radius for the scene's cyberbotics WaterBottle (Evian MESH, tapered — no parametric radius). Measured 2026-06-20: depth-fit 0.050 + mask-calibrated 0.046 → 0.047. NOT the WaterBottleOpaque 0.022. See specificworker.cpp:885.
+PriorHeight = 0.23
 PriorSizeStd = 0.03
 OptimizationIters = 15
 OptimizationLr = 0.005
