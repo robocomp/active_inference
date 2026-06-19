@@ -170,11 +170,31 @@ float BottleModel::prior_energy(const BottleState& s) const
     return size_energy + pos_energy + state_energy;
 }
 
+float BottleModel::silhouette_energy_at(const BottleState& s) const
+{
+    if (params_.mask_precision <= 0.0f or sil_dirs_.empty())
+        return 0.0f;
+
+    // Occluding-contour residual for a vertical cylinder: δ(ray) − radius, where δ is the
+    // horizontal distance from the axis (cx,cy) to the back-projected edge ray. The vertical
+    // axis cancels the ray's z-component, so δ depends only on (cx,cy) — independent of cz/height.
+    const float Cx = sil_cam_xy_.x(), Cy = sil_cam_xy_.y();
+    float acc = 0.0f;
+    for (const auto& d : sil_dirs_)
+    {
+        const float den = std::hypot(d.x(), d.y());
+        if (den < 1e-6f) continue;
+        const float delta = std::abs(d.x() * (Cy - s.cy) - d.y() * (Cx - s.cx)) / den;
+        acc += robust_loss_value(delta - s.radius, params_.robust_loss, params_.robust_loss_scale);
+    }
+    return params_.mask_precision * acc / static_cast<float>(sil_dirs_.size());
+}
+
 float BottleModel::fe_at(const BottleState& s,
                          const std::vector<Eigen::Vector3f>& pts,
                          const std::vector<float>& weights) const
 {
-    return fe_terms_at(s, pts, weights, 0).total_fe;
+    return fe_terms_at(s, pts, weights, 0).total_fe + silhouette_energy_at(s);
 }
 
 FreeEnergyDecomposition BottleModel::fe_terms_at(const BottleState& s,
@@ -281,12 +301,35 @@ float BottleModel::gradient_step(const std::vector<Eigen::Vector3f>& points,
 
     const BottleState fallback_state = state_;
 
+    // Silhouette (RGB-mask) edge rays → a differentiable tangent-distance term δ(ray;cx,cy) − radius,
+    // added to the loss so the mask drives (cx,cy,radius) jointly with the depth points.
+    const bool sil_on = params_.mask_precision > 0.0f and not sil_dirs_.empty();
+    torch::Tensor sil_dx, sil_dy;
+    if (sil_on)
+    {
+        sil_dx = torch::empty({static_cast<long>(sil_dirs_.size())}, options);
+        sil_dy = torch::empty({static_cast<long>(sil_dirs_.size())}, options);
+        auto ax = sil_dx.accessor<float, 1>();
+        auto ay = sil_dy.accessor<float, 1>();
+        for (std::size_t i = 0; i < sil_dirs_.size(); ++i) { ax[i] = sil_dirs_[i].x(); ay[i] = sil_dirs_[i].y(); }
+    }
+    const float sil_Cx = sil_cam_xy_.x(), sil_Cy = sil_cam_xy_.y();
+    auto silhouette_loss = [&](const torch::Tensor& th) -> torch::Tensor
+    {
+        if (not sil_on) return torch::zeros({}, options);
+        const auto cx = th.index({0}), cy = th.index({1}), radius = th.index({3});
+        const auto den   = (sil_dx * sil_dx + sil_dy * sil_dy).sqrt();
+        const auto delta = (sil_dx * (sil_Cy - cy) - sil_dy * (sil_Cx - cx)).abs() / den;
+        const auto loss  = robust_loss_value(delta - radius, params_.robust_loss, params_.robust_loss_scale);
+        return params_.mask_precision * loss.mean();
+    };
+
     auto run_loop = [&](auto& optimizer) -> bool
     {
         for (int iter = 0; iter < params_.optimization_iters; ++iter)
         {
             optimizer.zero_grad();
-            auto loss = fe_torch_impl(params_, prior_, theta, points_tensor, weights_tensor);
+            auto loss = fe_torch_impl(params_, prior_, theta, points_tensor, weights_tensor) + silhouette_loss(theta);
             const float loss_value = loss.item<float>();
             if (!std::isfinite(loss_value))
                 return false;
@@ -346,7 +389,8 @@ float BottleModel::gradient_step(const std::vector<Eigen::Vector3f>& points,
     }
     apply_constraints();
 
-    const float final_fe = fe_torch_impl(params_, prior_, theta.detach(), points_tensor, weights_tensor).item<float>();
+    const float final_fe = (fe_torch_impl(params_, prior_, theta.detach(), points_tensor, weights_tensor)
+                            + silhouette_loss(theta.detach())).item<float>();
     if (!std::isfinite(final_fe))
     {
         state_ = fallback_state;
@@ -392,6 +436,7 @@ Eigen::Matrix3f BottleModel::pose_covariance(const std::vector<Eigen::Vector3f>&
         for (const float w : weights) eff_n += w;
     }
     eff_n = std::max(1.0f, eff_n);
+    eff_n *= std::max(1e-4f, params_.cov_eff_scale);   // correlated-evidence discount → NEES-calibrated P
 
     const float inv_h2 = eff_n / (h * h);
     Eigen::Matrix3f H = Eigen::Matrix3f::Zero();

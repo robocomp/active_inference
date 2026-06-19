@@ -113,6 +113,8 @@ OptimizationIters = 15
 OptimizationLr = 0.005
 GradClip = 2.0
 OptimizerType = "adam"
+MaskPrecision = 100.0    # RGB-mask silhouette likelihood weight (0=off). cf. depth inv_sigma2=1/0.02²=2500. Constrains (cx,cy,radius) — the front-arc-degenerate direction.
+CovEffScale = 0.036    # covariance calibration: N_eff = N*scale → NEES≈3 (depth points are spatially correlated, N over-counts)
 RobustLoss = "quadratic"
 RobustLossScale = 0.05
 

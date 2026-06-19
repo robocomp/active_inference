@@ -440,6 +440,7 @@ float SpecificWorker::run_bottle_inference(BottleInstance& inst, const BottleObs
     else
         residual_precision = std::clamp(1.0f - explanation_confidence, 0.0f, 1.0f);
 
+    feed_silhouette(inst);   // attach the RGB-mask edge rays before the model + covariance update
     const float free_energy = step_model_update(inst, observation.residual_pts, residual_precision);
 
     const auto& s = inst.model.state();
@@ -452,6 +453,84 @@ float SpecificWorker::run_bottle_inference(BottleInstance& inst, const BottleObs
     }
 
     return free_energy;
+}
+
+std::optional<Eigen::Matrix4d> SpecificWorker::room_T_zed_matrix() const
+{
+    if (not inner_eigen_)
+        return std::nullopt;
+    const auto rtb = inner_eigen_->get_transformation_matrix("room", "body", 0);
+    const auto btz = inner_eigen_->get_transformation_matrix("body", "zed", 0);
+    if (not (rtb.has_value() and btz.has_value()))
+        return std::nullopt;
+    const auto to_mat4 = [](const Mat::RTMat& T)
+    {
+        Eigen::Matrix4d m;
+        const auto& s = T.matrix();
+        for (int i = 0; i < 4; ++i) for (int j = 0; j < 4; ++j) m(i, j) = s(i, j);   // element-wise: no aligned load
+        return m;
+    };
+    return to_mat4(rtb.value()) * to_mat4(btz.value());
+}
+
+void SpecificWorker::feed_silhouette(BottleInstance& inst)
+{
+    inst.model.clear_silhouette();
+    if (cfg_.mask_precision <= 0.0f or not inner_eigen_)
+        return;
+    if (not camera_api_)
+    {
+        const auto zed = G->get_node("zed");
+        if (not zed.has_value()) return;
+        camera_api_ = G->get_camera_api(zed.value());
+        if (not camera_api_) return;
+    }
+
+    const auto slice = select_mask_for_bottle(inst);
+    if (not slice.has_value() or slice->pixel_end <= slice->pixel_begin
+        or slice->pixel_end > masks_packet_.mask_pixels.size())
+        return;
+
+    const auto Mopt = room_T_zed_matrix();   // room_T_zed (camera→room), plain 4×4
+    if (not Mopt.has_value())
+        return;
+    const Eigen::Matrix4d& M = Mopt.value();
+    const double Cx = M(0, 3), Cy = M(1, 3);   // camera centre (translation) in room
+
+    const float fx = camera_api_->get_focal_x();
+    const float fy = camera_api_->get_focal_y();
+    const float cx_px = static_cast<float>(camera_api_->get_width())  * 0.5f;
+    const float cy_px = static_cast<float>(camera_api_->get_height()) * 0.5f;
+
+    // Per image row, the min & max column = the mask's left/right occluding-contour edges.
+    std::unordered_map<int, std::pair<float, float>> row_minmax;
+    for (std::size_t i = slice->pixel_begin; i < slice->pixel_end; ++i)
+    {
+        const float col = masks_packet_.mask_pixels[i].x();
+        const int   row = static_cast<int>(masks_packet_.mask_pixels[i].y());
+        auto it = row_minmax.find(row);
+        if (it == row_minmax.end()) row_minmax.emplace(row, std::pair{col, col});
+        else { it->second.first = std::min(it->second.first, col); it->second.second = std::max(it->second.second, col); }
+    }
+
+    std::vector<Eigen::Vector2f> dirs;
+    dirs.reserve(row_minmax.size() * 2);
+    const auto add_edge = [&](float col, float row)
+    {
+        // d_cam = ((col-cx)/fx, 1, (cy-row)/fy); rotate to room (rotation only, no translation).
+        const double dx = (col - cx_px) / fx, dz = (cy_px - row) / fy;
+        const double rx = M(0, 0) * dx + M(0, 1) + M(0, 2) * dz;
+        const double ry = M(1, 0) * dx + M(1, 1) + M(1, 2) * dz;
+        dirs.emplace_back(static_cast<float>(rx), static_cast<float>(ry));
+    };
+    for (const auto& [row, mm] : row_minmax)
+    {
+        add_edge(mm.first,  static_cast<float>(row));
+        add_edge(mm.second, static_cast<float>(row));
+    }
+    if (not dirs.empty())
+        inst.model.set_silhouette(Eigen::Vector2f(static_cast<float>(Cx), static_cast<float>(Cy)),
+                                  std::move(dirs));
 }
 
 // ── RGB-mask-silhouette diagnostic ──────────────────────────────────────────────
@@ -486,16 +565,14 @@ void SpecificWorker::mask_silhouette_diagnostic(const BottleInstance& inst, cons
     // body→zed mount edge carries only a bootstrap timestamp (a Nearest query over the multi-hop
     // chain misses), so resolve each hop at ts=0 and compose — exactly how the voxelizer builds
     // room_T_zed. The camera mounts on "body" (no "robot" node in this graph).
-    const auto room_T_body = inner_eigen_->get_transformation_matrix("room", "body", 0);
-    const auto body_T_zed  = inner_eigen_->get_transformation_matrix("body", "zed", 0);
-    if (not (room_T_body.has_value() and body_T_zed.has_value()))
+    const auto Mopt = room_T_zed_matrix();
+    if (not Mopt.has_value())
     {
         static bool w=false;
-        if(not w){ std::print("[mask-IoU] extrinsic unavailable (room<-body={} body<-zed={})\n",
-                              room_T_body.has_value(), body_T_zed.has_value()); w=true; }
+        if(not w){ std::print("[mask-IoU] extrinsic unavailable (room<-body<-zed)\n"); w=true; }
         return;
     }
-    const Mat::RTMat zed_T_room = (room_T_body.value() * body_T_zed.value()).inverse();
+    const Eigen::Matrix4d zed_T_room = Mopt.value().inverse();   // plain 4×4 inverse (alignment-safe)
 
     constexpr double CELL_PX = 4.0;   // coarse occupancy bucket; dense point sets fill it
     const auto key = [](long c, long r) -> unsigned long long
@@ -505,10 +582,13 @@ void SpecificWorker::mask_silhouette_diagnostic(const BottleInstance& inst, cons
     };
     const auto project_cell = [&](const Eigen::Vector3f& p, unsigned long long& out) -> bool
     {
-        const Mat::Vector3d pc = zed_T_room * Mat::Vector3d(p.x(), p.y(), p.z());
-        if (pc.y() <= 1e-6)              // CameraAPI::project uses Y as the depth axis
+        const double X = p.x(), Y = p.y(), Z = p.z();   // element access only (alignment-safe)
+        const double px = zed_T_room(0,0)*X + zed_T_room(0,1)*Y + zed_T_room(0,2)*Z + zed_T_room(0,3);
+        const double py = zed_T_room(1,0)*X + zed_T_room(1,1)*Y + zed_T_room(1,2)*Z + zed_T_room(1,3);
+        const double pz = zed_T_room(2,0)*X + zed_T_room(2,1)*Y + zed_T_room(2,2)*Z + zed_T_room(2,3);
+        if (py <= 1e-6)                  // CameraAPI::project uses Y as the depth axis
             return false;
-        const Eigen::Vector2d uv = camera_api_->project(pc);
+        const Eigen::Vector2d uv = camera_api_->project(Mat::Vector3d(px, py, pz));
         out = key(static_cast<long>(std::floor(uv.x() / CELL_PX)),
                   static_cast<long>(std::floor(uv.y() / CELL_PX)));
         return true;
@@ -1503,6 +1583,8 @@ BottleModelParams SpecificWorker::make_model_params() const
     p.sgd_momentum       = cfg_.sgd_momentum;
     p.robust_loss        = cfg_.robust_loss;
     p.robust_loss_scale  = cfg_.robust_loss_scale;
+    p.mask_precision     = cfg_.mask_precision;
+    p.cov_eff_scale      = cfg_.cov_eff_scale;
     return p;
 }
 
@@ -1562,6 +1644,8 @@ void SpecificWorker::load_config(const ConfigLoader& cfg)
     cfg_.optimization_iters = geti("BottleModel.OptimizationIters", 15);
     cfg_.optimization_lr    = getf("BottleModel.OptimizationLr",    0.005f);
     cfg_.grad_clip          = getf("BottleModel.GradClip",          2.0f);
+    cfg_.mask_precision     = getf("BottleModel.MaskPrecision",     0.0f);
+    cfg_.cov_eff_scale      = getf("BottleModel.CovEffScale",       1.0f);
     cfg_.optimizer_type     = gets("BottleModel.OptimizerType",     "adam");
     cfg_.sgd_momentum       = getf("BottleModel.SgdMomentum",       0.9f);
     {

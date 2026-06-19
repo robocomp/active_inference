@@ -85,6 +85,16 @@ struct BottleModelParams
     // Robust loss applied to SDF residuals before scaling by 1 / sigma_obs^2
     RobustLossType robust_loss = RobustLossType::Quadratic;
     float robust_loss_scale = 0.05f;
+
+    // Independent RGB-mask silhouette likelihood precision (1/σ²-like weight, metres⁻²-ish).
+    // 0 disables the term. The silhouette constrains (cx,cy,radius) — the direction depth is
+    // blind to (front-arc degeneracy) — so it tightens radius and breaks ownership-gate inflation.
+    float mask_precision = 0.0f;
+
+    // Covariance calibration: the Laplace P scales curvature by the effective sample size (Σwᵢ≈N),
+    // but dense surface points are spatially CORRELATED, so N over-counts independent evidence and P
+    // comes out overconfident (NEES≫3). N_eff = N·cov_eff_scale. Tune to NEES≈3 (≈1/over-count).
+    float cov_eff_scale = 1.0f;
 };
 
 struct FreeEnergyDecomposition
@@ -172,6 +182,16 @@ class BottleModel
         void set_state(const BottleState& s) { state_ = s; apply_constraints(); }
         void set_prior(const BottleState& p) { prior_ = p; }
 
+        // ── Silhouette (RGB-mask) observation ──────────────────────────────────────
+        // Edge rays from the mask's left/right silhouette, in the ROOM frame: a shared camera
+        // centre (Cx,Cy) and one horizontal direction (dx,dy) per edge pixel. The occluding-
+        // contour condition is "ray tangent to the vertical cylinder" → δ(ray;cx,cy) = radius.
+        // Cleared each cycle; set when a fresh bottle mask + camera model are available.
+        void set_silhouette(const Eigen::Vector2f& cam_xy, std::vector<Eigen::Vector2f> edge_dirs_xy)
+        { sil_cam_xy_ = cam_xy; sil_dirs_ = std::move(edge_dirs_xy); }
+        void clear_silhouette() { sil_dirs_.clear(); }
+        std::size_t silhouette_ray_count() const { return sil_dirs_.size(); }
+
         /** Enforce positive, physically plausible radius and height. */
         void apply_constraints();
 
@@ -195,10 +215,17 @@ class BottleModel
         // Prior (size + position) energy for a given state
         float prior_energy(const BottleState& s) const;
 
+        // Precision-weighted silhouette energy: Σ_j π·ρ(δ_j − radius) / N_rays (0 if disabled).
+        float silhouette_energy_at(const BottleState& s) const;
+
         // SDF evaluated for a given explicit state
         float sdf_point_at(const Eigen::Vector3f& p, const BottleState& s) const;
 
         BottleState        state_;
         BottleState        prior_;
         BottleModelParams  params_;
+
+        // Silhouette observation (room frame); empty ⇒ term inactive.
+        Eigen::Vector2f                 sil_cam_xy_ = Eigen::Vector2f::Zero();
+        std::vector<Eigen::Vector2f>    sil_dirs_;
 };

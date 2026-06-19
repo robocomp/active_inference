@@ -121,6 +121,8 @@ struct AgentConfig
     float sgd_momentum      = 0.9f;
     RobustLossType robust_loss = RobustLossType::Quadratic;
     float robust_loss_scale = 0.05f;
+    float mask_precision    = 0.0f;   // RGB-mask silhouette likelihood weight (0 = off)
+    float cov_eff_scale     = 1.0f;   // covariance calibration: N_eff = N·scale (NEES → ~3)
 
     // SampleQueue parameters (forwarded to SampleQueueParams)
     int   num_angle_bins               = 16;
@@ -302,6 +304,14 @@ private:
     // tighter cylinder matches the observed mask better — de-risks the mask-as-likelihood idea
     // before wiring a 2D silhouette term into the free energy.
     void mask_silhouette_diagnostic(const BottleInstance& inst, const BottleObservation& obs);
+    // Feed the fitted model the RGB-mask silhouette as a likelihood: extract the mask's left/right
+    // edge pixels, back-project to room-frame edge rays, and hand them to inst.model (cleared if the
+    // mask/camera are unavailable or MaskPrecision==0). Must run before the per-cycle model update.
+    void feed_silhouette(BottleInstance& inst);
+    // room_T_zed (camera→room) as a plain 4×4, composed room→body→zed at ts=0. Read element-wise out
+    // of the DSR Transforms (which live in std::optional and aren't Eigen-over-aligned, so block/vector
+    // ops on them assert) and multiplied as plain Matrix4d. std::nullopt if a hop is unavailable.
+    std::optional<Eigen::Matrix4d> room_T_zed_matrix() const;
 
     // ── Members ──────────────────────────────────────────────────────────────
     bool startup_check_flag = false;
