@@ -30,6 +30,9 @@
  */
 
 #include "specificworker.h"
+#include <cstdlib>   // std::_Exit for the crash-free terminal shutdown
+#include <thread>    // std::this_thread::sleep_for — let DDS flush before _Exit
+#include <chrono>
 
 #include <algorithm>
 #include <cmath>
@@ -130,6 +133,41 @@ void SpecificWorker::request_shutdown()
     cleanup_owned_nodes();
 }
 
+void SpecificWorker::terminal_shutdown()
+{
+    static std::atomic<bool> terminating{false};
+    if (terminating.exchange(true))
+        return;   // _Exit is coming; never run this twice
+
+    // 1) Save checkpoints, sever our graph callbacks, delete our owned DSR nodes (publishes
+    //    del-deltas) and notify peers. Idempotent (shutting_down_ guard).
+    request_shutdown();
+
+    // 2) Cleanly remove THIS agent's DDS participant and entities from the shared graph. This is the
+    //    crucial step that a bare _Exit skips: without it, peers (voxelizer) keep seeing our
+    //    half-deleted 'bottle_*' node (node present, room->bottle RT edge gone) and SEGV walking the
+    //    RT tree, and a fast restart hits "agent id 10 already connected". DSRGraph::reset() runs
+    //    remove_participant_and_entities() (the clean "Publisher unmatched" path) WITHOUT touching
+    //    the Ice communicator, so it does not trip the IceUtil::Mutex teardown abort.
+    if (G)
+    {
+        try { G->reset(); }
+        catch (...) { /* best-effort: we are exiting regardless */ }
+    }
+
+    // 3) Give the DDS writers a brief window to actually transmit the entity removals + participant
+    //    departure to peers before the process vanishes, so no peer is left reading a stale node.
+    std::cout.flush();
+    std::cerr.flush();
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    // 4) Hard-exit, skipping C++ static destruction and the Ice::Application communicator teardown
+    //    that races an Ice worker thread against IceUtil::Mutex destruction (ThreadSyscallException
+    //    EINVAL) — bottle is the only agent with an active OUTGOING Ice client proxy, so the only one
+    //    that hits it. State is persisted, graph presence cleanly removed; the OS reclaims the rest.
+    std::_Exit(EXIT_SUCCESS);
+}
+
 // ─── Initialisation ──────────────────────────────────────────────────────────
 
 void SpecificWorker::initialize()
@@ -187,15 +225,35 @@ void SpecificWorker::initialize()
         },
         .on_degraded_enter = [this]()
         {
-            qInfo("[SM] -> Degraded: required peer lost. Cleaning up and exiting.");
-            request_shutdown();
-            QTimer::singleShot(500, QCoreApplication::instance(), SLOT(quit()));
+            if (shutting_down_)
+                return;
+            // DEBOUNCE — do NOT cleanup/exit on entry. A transient required-peer flap (startup
+            // handshake, brief DSR node churn, a peer restarting) fires presenceLost momentarily and
+            // then recovers; tearing down here deleted our own node and disconnected the graph, then
+            // the agent "recovered" into a broken half-shutdown state and later aborted. Instead wait
+            // a grace period and only shut down if a required peer is STILL genuinely missing.
+            qInfo("[SM] -> Degraded: required peer lost — %d ms grace before shutdown",
+                  REQUIRED_LOSS_GRACE_MS);
+            QTimer::singleShot(REQUIRED_LOSS_GRACE_MS, this, [this]()
+            {
+                if (shutting_down_)
+                    return;
+                if (presence_coordinator_.all_required_ready())
+                {
+                    qInfo("[SM] required peers recovered during grace — staying alive");
+                    return;
+                }
+                qWarning("[SM] required peer still missing after grace — shutting down cleanly");
+                terminal_shutdown();
+            });
         },
     });
     presence_coordinator_.start();
 
+    // Route SIGTERM/Ctrl+C (sigwatch -> a.quit() -> aboutToQuit) through the crash-free terminal
+    // shutdown so the intentional exit never hits the Ice teardown abort either.
     QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
-                     this, &SpecificWorker::request_shutdown, Qt::UniqueConnection);
+                     this, &SpecificWorker::terminal_shutdown, Qt::UniqueConnection);
 
     rt_api_ = G->get_rt_api();
     inner_eigen_ = G->get_inner_eigen_api();
@@ -237,6 +295,12 @@ void SpecificWorker::compute()
     for (const auto& node : G->get_nodes_by_type("cylinder"))
         if (node.name().starts_with("bottle"))
             process_bottle_node(node);
+
+    // Validation drivers (Webots). Static-restart takes precedence over the continuous sweep.
+    if (cfg_.static_pose_test)
+        place_static_test_pose();
+    else
+        step_move_experiment();
 }
 
 // ─── Per-bottle pipeline ───────────────────────────────────────────────────────
@@ -308,10 +372,23 @@ SpecificWorker::BottleObservation SpecificWorker::observe_bottle_node(BottleInst
                 inst.last_masks_frame_seen = masks_packet_.frame_id;
 
                 if (should_log(inst))
-                    std::print("[{}] masks={} label='{}' conf={:.2f} support={} cand={} resid={} centroid=({:.2f},{:.2f},{:.2f})\n",
+                {
+                    // DIAG: per-axis extent of the received cloud — tells us whether the 6× radius
+                    // blob is a depth slab (one axis) or a too-wide mask (lateral/both axes).
+                    Eigen::Vector3f lo = Eigen::Vector3f::Constant(std::numeric_limits<float>::max());
+                    Eigen::Vector3f hi = Eigen::Vector3f::Constant(std::numeric_limits<float>::lowest());
+                    for (std::size_t i = begin; i < end; ++i)
+                    {
+                        lo = lo.cwiseMin(masks_packet_.support_points[i]);
+                        hi = hi.cwiseMax(masks_packet_.support_points[i]);
+                    }
+                    const Eigen::Vector3f ext = hi - lo;
+                    std::print("[{}] masks={} label='{}' conf={:.2f} support={} cand={} resid={} centroid=({:.2f},{:.2f},{:.2f}) ext=({:.3f},{:.3f},{:.3f})\n",
                                inst.node_name, masks_packet_.frame_id, slice.label, slice.confidence,
                                end - begin, observation.candidate_pts.size(), observation.residual_pts.size(),
-                               slice.centroid.x(), slice.centroid.y(), slice.centroid.z());
+                               slice.centroid.x(), slice.centroid.y(), slice.centroid.z(),
+                               ext.x(), ext.y(), ext.z());
+                }
                 return observation;
             }
         }
@@ -805,8 +882,13 @@ void SpecificWorker::ensure_instance(const DSR::Node& node)
     fix(init_state.height, cfg_.prior_height);
 
     BottleModelParams mparams = make_model_params();
-    mparams.prior_radius = init_state.radius;
-    mparams.prior_height = init_state.height;
+    // The size PRIOR is a fixed generative-model belief ("a bottle is ~2 cm"), NOT the restored
+    // estimate. Anchoring it to init_state.radius let a diverged/checkpointed radius become its own
+    // prior (size_energy≈0 there) → locked forever. A single depth view cannot observe radius (only
+    // the front arc), so the prior must govern that direction; keep it pinned to config. The warm-
+    // started init_state still seeds the optimizer, but is now regularized back toward the prior.
+    mparams.prior_radius = cfg_.prior_radius;
+    mparams.prior_height = cfg_.prior_height;
     if (prior_store_)
     {
         const auto it = std::find_if(priors_cache_.begin(), priors_cache_.end(),
@@ -929,33 +1011,163 @@ bool SpecificWorker::acquire_webots_gt()
     return true;
 }
 
+void SpecificWorker::step_move_experiment()
+{
+    if (not cfg_.move_experiment or not webots2robocomp_proxy)
+        return;
+
+    // Place the bottle at home + (dx,dy) in the WORLD frame (Webots), keeping z/orientation.
+    const auto place = [this](float dx_mm, float dy_mm)
+    {
+        RoboCompWebots2Robocomp::ObjectPose p = move_home_;
+        p.position.x = move_home_.position.x + dx_mm;
+        p.position.y = move_home_.position.y + dy_mm;
+        try { webots2robocomp_proxy->setObjectPose(cfg_.eval_bottle_def, p); }
+        catch (const std::exception& e) { std::print("bottle_concept: [move-exp] setObjectPose failed ({})\n", e.what()); }
+    };
+
+    // Lazy start: capture the home pose and build a centred N×N grid over the table.
+    if (not move_started_)
+    {
+        try { move_home_ = webots2robocomp_proxy->getObjectPose(cfg_.eval_bottle_def); }
+        catch (const std::exception& e)
+        {
+            std::print("bottle_concept: [move-exp] getObjectPose(home) failed ({}); retrying\n", e.what());
+            return;
+        }
+        const int n = std::max(1, cfg_.move_grid_n);
+        const float step_mm = cfg_.move_step_m * 1000.0f;
+        const float c = (n - 1) / 2.0f;     // centre the grid on home
+        move_offsets_.clear();
+        for (int iy = 0; iy < n; ++iy)
+            for (int ix = 0; ix < n; ++ix)
+                move_offsets_.emplace_back((ix - c) * step_mm, (iy - c) * step_mm);
+        move_idx_ = 0;
+        move_settle_ = 0;
+        move_started_ = true;
+        place(move_offsets_[0].first, move_offsets_[0].second);
+        std::print("bottle_concept: [move-exp] started — {} poses, step {:.3f} m, settle {} cycles, log -> {}\n",
+                   move_offsets_.size(), cfg_.move_step_m, cfg_.move_settle_cycles, cfg_.eval_log_path);
+        return;
+    }
+
+    if (move_idx_ >= move_offsets_.size())
+        return;   // finished
+
+    // Hold each pose for move_settle_cycles so the fit converges (logged every cycle with the
+    // 'settled' flag set once the hold completes), then step to the next grid pose.
+    if (++move_settle_ < cfg_.move_settle_cycles)
+        return;
+
+    ++move_idx_;
+    move_settle_ = 0;
+    if (move_idx_ >= move_offsets_.size())
+    {
+        std::print("bottle_concept: [move-exp] DONE ({} poses) — returning bottle home\n", move_offsets_.size());
+        try { webots2robocomp_proxy->setObjectPose(cfg_.eval_bottle_def, move_home_); } catch (...) {}
+        cfg_.move_experiment = false;   // stop stepping; static eval (if enabled) continues
+        return;
+    }
+    place(move_offsets_[move_idx_].first, move_offsets_[move_idx_].second);
+}
+
+bool SpecificWorker::place_static_test_pose()
+{
+    if (not cfg_.static_pose_test or not webots2robocomp_proxy)
+        return false;
+    if (move_started_)
+        return true;   // already placed for this run
+
+    // Home = persisted grid origin. Captured the first time the home file is absent, then reused
+    // across restarts so the grid targets stay consistent even though prior runs left the bottle
+    // elsewhere. (Before starting the sweep, delete the file with the bottle at its true home.)
+    const std::string home_path = "etc/bottle_home_pose.txt";
+    bool have_home = false;
+    {
+        std::ifstream hf(home_path);
+        if (hf and (hf >> move_home_.position.x >> move_home_.position.y >> move_home_.position.z
+                       >> move_home_.orientation.x >> move_home_.orientation.y
+                       >> move_home_.orientation.z >> move_home_.orientation.w))
+            have_home = true;
+    }
+    if (not have_home)
+    {
+        try { move_home_ = webots2robocomp_proxy->getObjectPose(cfg_.eval_bottle_def); }
+        catch (const std::exception& e)
+        {
+            std::print("bottle_concept: [static-test] getObjectPose(home) failed ({}); retrying\n", e.what());
+            return false;
+        }
+        std::ofstream hf(home_path);
+        hf << move_home_.position.x << ' ' << move_home_.position.y << ' ' << move_home_.position.z << ' '
+           << move_home_.orientation.x << ' ' << move_home_.orientation.y << ' '
+           << move_home_.orientation.z << ' ' << move_home_.orientation.w << '\n';
+        std::print("bottle_concept: [static-test] captured home ({:.0f},{:.0f},{:.0f}) mm -> {}\n",
+                   move_home_.position.x, move_home_.position.y, move_home_.position.z, home_path);
+    }
+
+    // This run's grid pose (same centred N×N grid as the moving experiment).
+    const int n = std::max(1, cfg_.move_grid_n);
+    const int idx = std::clamp(cfg_.static_pose_index, 0, n * n - 1);
+    const float step_mm = cfg_.move_step_m * 1000.0f;
+    const float c = (n - 1) / 2.0f;
+    const int ix = idx % n, iy = idx / n;
+    RoboCompWebots2Robocomp::ObjectPose target = move_home_;
+    target.position.x = move_home_.position.x + (ix - c) * step_mm;
+    target.position.y = move_home_.position.y + (iy - c) * step_mm;
+    try { webots2robocomp_proxy->setObjectPose(cfg_.eval_bottle_def, target); }
+    catch (const std::exception& e)
+    {
+        std::print("bottle_concept: [static-test] setObjectPose failed ({})\n", e.what());
+        return false;
+    }
+    move_idx_ = idx;
+    move_started_ = true;
+    std::print("bottle_concept: [static-test] pose {}/{} -> bottle at ({:.0f},{:.0f},{:.0f}) mm\n",
+               idx, n * n, target.position.x, target.position.y, target.position.z);
+    return true;
+}
+
 void SpecificWorker::log_eval(const BottleInstance& inst, float free_energy)
 {
     if (not cfg_.eval_enabled)
         return;
 
-    // Live GT: acquire the static bottle pose from Webots once (lazy — the bridge/transforms
-    // may not be ready at startup). Until acquired, skip logging.
-    if (cfg_.eval_gt_source == "webots" and not gt_acquired_)
+    // Live GT from Webots. In the moving-bottle experiment the bottle changes pose, so refresh
+    // GT EVERY cycle; otherwise acquire the static pose once (lazy — the bridge/transforms may not
+    // be ready at startup). Until GT is available, skip logging.
+    if (cfg_.eval_gt_source == "webots")
     {
-        if (acquire_webots_gt())
-            gt_acquired_ = true;
-        else
-            return;
+        if (cfg_.move_experiment or cfg_.static_pose_test)
+        {
+            // Bottle was just moved (this run / this step): read its actual pose every cycle.
+            if (not acquire_webots_gt())
+                return;
+        }
+        else if (not gt_acquired_)
+        {
+            if (acquire_webots_gt())
+                gt_acquired_ = true;
+            else
+                return;
+        }
     }
 
     if (not eval_log_.is_open())
     {
-        eval_log_.open(cfg_.eval_log_path, std::ios::out | std::ios::trunc);
+        // Static-restart test APPENDS (each restart adds rows to the same CSV); otherwise truncate.
+        const bool append = cfg_.static_pose_test;
+        eval_log_.open(cfg_.eval_log_path, std::ios::out | (append ? std::ios::app : std::ios::trunc));
         if (not eval_log_.is_open())
         {
             std::print("bottle_concept: [eval] cannot open log '{}'\n", cfg_.eval_log_path);
             cfg_.eval_enabled = false;   // don't retry every cycle
             return;
         }
-        eval_log_ << "frame,node,fe,cx,cy,cz,radius,height,"
-                     "gt_cx,gt_cy,gt_cz,gt_radius,gt_height,"
-                     "ex,ey,ez,pos_err,radius_err,height_err,nees,trace_P\n";
+        if (not append or eval_log_.tellp() == std::streampos(0))
+            eval_log_ << "frame,node,move_idx,settled,fe,cx,cy,cz,radius,height,"
+                         "gt_cx,gt_cy,gt_cz,gt_radius,gt_height,"
+                         "ex,ey,ez,pos_err,radius_err,height_err,nees,trace_P\n";
     }
 
     const auto& s = inst.model.state();
@@ -973,7 +1185,9 @@ void SpecificWorker::log_eval(const BottleInstance& inst, float free_energy)
     const Eigen::Matrix3f cov_reg = cov + Eigen::Matrix3f::Identity() * 1e-9f;
     const float nees = e.dot(cov_reg.ldlt().solve(e));
 
-    eval_log_ << inst.processed_cycles << ',' << inst.node_name << ',' << free_energy << ','
+    const int settled = (cfg_.move_experiment and move_settle_ >= cfg_.move_settle_cycles) ? 1 : 0;
+    eval_log_ << inst.processed_cycles << ',' << inst.node_name << ','
+              << move_idx_ << ',' << settled << ',' << free_energy << ','
               << s.cx << ',' << s.cy << ',' << s.cz << ',' << s.radius << ',' << s.height << ','
               << cfg_.gt_cx << ',' << cfg_.gt_cy << ',' << cfg_.gt_cz << ','
               << cfg_.gt_radius << ',' << cfg_.gt_height << ','
@@ -1248,6 +1462,20 @@ void SpecificWorker::load_config(const ConfigLoader& cfg)
     cfg_.gt_cz     = getf("Eval.GtCz",     0.0f);
     cfg_.gt_radius = getf("Eval.GtRadius", 0.0f);
     cfg_.gt_height = getf("Eval.GtHeight", 0.0f);
+
+    // Moving-bottle validation experiment.
+    cfg_.move_experiment    = getb("Eval.MoveExperiment", false);
+    cfg_.move_settle_cycles = geti("Eval.MoveSettleCycles", 25);
+    cfg_.move_step_m        = getf("Eval.MoveStep", 0.06f);
+    cfg_.move_grid_n        = geti("Eval.MoveGridN", 5);
+    // Static-restart validation (one grid pose per run; index from env BOTTLE_TEST_POSE).
+    cfg_.static_pose_test   = getb("Eval.StaticPoseTest", false);
+    if (const char* p = std::getenv("BOTTLE_TEST_POSE"))
+        cfg_.static_pose_index = std::atoi(p);
+    if (cfg_.static_pose_test)
+        cfg_.move_experiment = false;          // static-restart takes precedence
+    if (cfg_.move_experiment or cfg_.static_pose_test)
+        cfg_.eval_enabled = true;              // the experiment is pointless without logging
 
     std::print("bottle_concept: configuration loaded.\n");
 }

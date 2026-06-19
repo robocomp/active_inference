@@ -1,7 +1,7 @@
 
 [Proxies]
 # Proxies for required interfaces
-Webots2Robocomp = "webots2robocomp:tcp -h localhost -p 10006"
+Webots2Robocomp = "webots2robocomp:tcp -h localhost -p 15010"
 
 # --- Common Agent Data ---
 [Agent]
@@ -62,7 +62,7 @@ nodes = ["bottle_concept 10", "bottle*"]
 [Eval]
 Enabled  = true
 GtSource = "webots"            # "webots" (live getObjectPose) | "config" (manual Gt* below)
-LogPath  = "etc/bottle_eval.csv"
+LogPath  = "etc/bottle_static_eval.csv"
 BottleDef = "bottle"           # Webots DEF in shadow_arm.wbt
 RobotDef  = "shadow"           # Webots DEF of the Shadow robot (== DSR body frame)
 # Bottle dimensions: getObjectPose returns POSE only, so size GT comes from the proto.
@@ -74,6 +74,18 @@ GtHeight = 0.22
 GtCx = 0.0
 GtCy = 0.0
 GtCz = 0.0
+# ── Moving-bottle validation experiment ──────────────────────────────────────
+# When on, the agent drives the real bottle across the table in Webots (setObjectPose) through a
+# MoveGridN×MoveGridN grid centred on its start pose, holding each pose MoveSettleCycles compute
+# cycles so the fitted model converges, and logs fit-vs-GT (pose + shape) every cycle to LogPath.
+# Returns the bottle home when done. Forces Enabled=true.
+MoveExperiment   = false   # continuous sweep (accumulates across poses) — off
+MoveGridN        = 3       # 3×3 = 9 poses
+MoveStep         = 0.08    # grid spacing, metres (world frame, over the table)
+MoveSettleCycles = 25      # (continuous mode only)
+# Static-restart validation: ONE grid pose per run (env BOTTLE_TEST_POSE), fresh agent each time
+# (no cross-pose accumulation). Driven by bottle_static_test.sh. Real scenario = static-until-grasped.
+StaticPoseTest   = true
 
 # ── bottle_concept agent ──────────────────────────────────────────────────────
 [BottleConcept]
@@ -92,7 +104,7 @@ SigmaObs = 0.02            # SDF likelihood width (m); tight — a bottle is sma
 LambdaSize = 0.5          # KL toward prior dimensions (radius, height)
 LambdaPos = 0.05          # KL toward prior centre
 LambdaState = 0.02        # size transition
-PriorRadius = 0.035
+PriorRadius = 0.022       # true WaterBottle radius. Radius is unobservable from one depth view (front arc only), so the size prior governs it — assert GT. See specificworker.cpp:885.
 PriorHeight = 0.20
 PriorSizeStd = 0.03
 OptimizationIters = 15
