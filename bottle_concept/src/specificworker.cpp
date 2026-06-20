@@ -311,12 +311,30 @@ void SpecificWorker::process_bottle_node(const DSR::Node& node)
 
     auto& inst = instances_.at(node.id());
     ++inst.processed_cycles;
+
+    // Resolve the table the bottle stands on (from its current centre) BEFORE ingest/fit, so the
+    // surface filter (is_voxel_owned_by_bottle) and the post-fit cz anchor both have it. NaN ⇒ no
+    // table → bottle hangs from the room (no anchor / no surface filter).
+    {
+        const auto& s0 = inst.model.state();
+        inst.table_top_z = find_table_top(s0.cx, s0.cy).value_or(std::numeric_limits<float>::quiet_NaN());
+    }
+
     const auto observation = observe_bottle_node(inst, node);
 
     if (not observation.has_fresh_data and inst.matched_frames < 5)
         return;
 
     const float free_energy = run_bottle_inference(inst, observation);
+
+    // Hang the bottle from the table: standing on the surface fixes cz = table_top + height/2, so z
+    // is determined (not fitted) — removes the z DOF and the systematic z error the free fit carried.
+    if (std::isfinite(inst.table_top_z))
+    {
+        auto s = inst.model.state();
+        s.cz = inst.table_top_z + 0.5f * s.height;
+        inst.model.set_state(s);
+    }
 
     if (auto node_opt = G->get_node(node.id()); node_opt.has_value())
         step_write_model(inst, node_opt.value(), free_energy);
@@ -788,9 +806,37 @@ bool SpecificWorker::is_voxel_owned_by_bottle(const BottleInstance& inst, const 
         return false;
 
     // Height gate around the cylinder span.
-    const float z_min = s.cz - s.height * 0.5f - cfg_.voxel_select_height_margin_m;
+    float z_min = s.cz - s.height * 0.5f - cfg_.voxel_select_height_margin_m;
     const float z_max = s.cz + s.height * 0.5f + cfg_.voxel_select_height_margin_m;
+    // Surface filter: when standing on a table, reject points at/below the table top (+1 cm slack to
+    // keep the base ring). These are table-surface deprojections the mask depth-gate let in; they drag
+    // the depth/centroid and inflate the lateral spread.
+    if (std::isfinite(inst.table_top_z))
+        z_min = std::max(z_min, inst.table_top_z + 0.01f);
     return point.z() >= z_min and point.z() <= z_max;
+}
+
+std::optional<float> SpecificWorker::find_table_top(float bx, float by) const
+{
+    if (not inner_eigen_)
+        return std::nullopt;
+    const auto t = G->get_node("table");           // bootstrap/room-created static surface
+    if (not t.has_value())
+        return std::nullopt;
+    const float h = G->get_attrib_by_name<height_m_att>(t.value()).value_or(0.0f);
+    const float w = G->get_attrib_by_name<width_m_att> (t.value()).value_or(0.0f);
+    const float d = G->get_attrib_by_name<depth_m_att> (t.value()).value_or(0.0f);
+    if (h <= 0.0f)
+        return std::nullopt;
+    // Table origin (its base) expressed in the room frame — a Vector3d, so no Transform-block hazard.
+    const auto org = inner_eigen_->transform("room", Mat::Vector3d(0.0, 0.0, 0.0), "table", 0);
+    if (not org.has_value())
+        return std::nullopt;
+    // Footprint gate (loose, yaw-agnostic): the bottle centre must lie over the table.
+    const float half = 0.5f * std::max(w, d) + 0.10f;
+    if (std::hypot(bx - static_cast<float>(org->x()), by - static_cast<float>(org->y())) > half)
+        return std::nullopt;
+    return static_cast<float>(org->z()) + h;       // table top = base origin z + height
 }
 
 // ─── Masks reading (verbatim from table_concept) ───────────────────────────────
@@ -1230,6 +1276,11 @@ bool SpecificWorker::acquire_webots_gt()
     cfg_.gt_cx = static_cast<float>(base_in_room.x());
     cfg_.gt_cy = static_cast<float>(base_in_room.y());
     cfg_.gt_cz = static_cast<float>(base_in_room.z()) + 0.5f * cfg_.gt_height;   // base → centre
+    // The room←body localization carries a ~4 cm z offset (the GT base lands BELOW the table top —
+    // physically impossible), so the z above is unreliable. The bottle stands ON the table, so its
+    // true base-z is the table top in the room frame: derive gt_cz from there when a table is found.
+    if (const auto tt = find_table_top(cfg_.gt_cx, cfg_.gt_cy); tt.has_value())
+        cfg_.gt_cz = *tt + 0.5f * cfg_.gt_height;
     std::print("bottle_concept: [eval] Webots GT (room frame, centre) = ({:.3f}, {:.3f}, {:.3f})\n",
                cfg_.gt_cx, cfg_.gt_cy, cfg_.gt_cz);
     return true;

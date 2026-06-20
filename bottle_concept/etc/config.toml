@@ -97,7 +97,7 @@ KStable = 30
 LogPeriodFrames = 30
 VoxelBankMaxPoints = 4000
 VoxelBankQuantizationM = 0.01      # dedup grid (m) for the voxel-bank hash
-VoxelSelectRadiusMarginM = 0.10    # XY ownership gate margin around the bottle
+VoxelSelectRadiusMarginM = 0.04    # XY ownership gate margin around the bottle
 VoxelSelectHeightMarginM = 0.10    # extra Z margin above/below the cylinder span
 YawVariance = 9.87                 # ≈π² — yaw is unobservable for a symmetric cylinder
 
@@ -113,10 +113,10 @@ OptimizationIters = 15
 OptimizationLr = 0.005
 GradClip = 2.0
 OptimizerType = "adam"
-MaskPrecision = 100.0    # RGB-mask silhouette likelihood weight (0=off). cf. depth inv_sigma2=1/0.02²=2500. Constrains (cx,cy,radius) — the front-arc-degenerate direction.
+MaskPrecision = 500.0    # RGB-mask silhouette likelihood weight (0=off). cf. depth inv_sigma2=1/0.02²=2500. Constrains (cx,cy,radius) — the front-arc-degenerate direction.
 CovEffScale = 0.036    # covariance calibration: N_eff = N*scale → NEES≈3 (depth points are spatially correlated, N over-counts)
-RobustLoss = "quadratic"
-RobustLossScale = 0.05
+RobustLoss = "welsch"        # redescending: far-from-surface (noisy) points get ~0 weight, so the mask owns geometry
+RobustLossScale = 0.04         # welsch c: points >~3-4cm from the cylinder surface are strongly down-weighted
 
 [SampleQueue]
 NumAngleBins = 16

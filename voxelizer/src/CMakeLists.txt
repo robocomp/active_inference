@@ -98,13 +98,13 @@ find_package(OpenCV REQUIRED)
 LIST(APPEND LIBS ${LIBS} ${OpenCV_LIBS})
 
 # no-char8_t to avoid a problem with ICE Connection lib.
-# EIGEN_MAX_ALIGN_BYTES=0 disables Eigen's over-alignment requirement, so Eigen types reaching us via
-# std::optional/temporaries (e.g. Mat::RTMat from get_transformation_matrix) can't trip an aligned-load
-# SIGBUS — the hazard the note below describes. With this set, -march=native would also be safe again
-# (left off here; the other agents keep it). Keep EIGEN_MAX_ALIGN_BYTES consistent across all agents.
-# Prior NOTE (now neutralised by the define): -march=native promoted Eigen alignment to 32 bytes and
-# emitted vectorized block accesses that aborted on the only-16-aligned Mat::RTMat.
-add_definitions(-g -O3 -fmax-errors=1 -fno-char8_t -DEIGEN_MAX_ALIGN_BYTES=0)
+# CRITICAL — match the prebuilt libdsr's Eigen ABI: use DEFAULT alignment (alignof(Transform)=16).
+# Do NOT add -march=native (→32) NOR -DEIGEN_MAX_ALIGN_BYTES=0 (→8): either changes
+# sizeof(std::optional<Eigen::Transform>) (160 / 136) vs libdsr's 144, so get_transformation_matrix
+# returning std::optional<Mat::RTMat> overruns the caller's stack slot (stack smash in
+# build_graph_object_box) — or misaligns it (SIGBUS). libdsr is built with default Eigen alignment;
+# we must too.
+add_definitions(-g -O3 -fmax-errors=1 -fno-char8_t)
 
 # AddressSanitizer (opt-in, separate build dir):
 #   cmake -B build-asan -DENABLE_ASAN=ON && cmake --build build-asan -j

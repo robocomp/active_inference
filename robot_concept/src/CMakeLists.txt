@@ -23,8 +23,9 @@ LIST(APPEND HEADERS
 include_directories(${CMAKE_CURRENT_LIST_DIR}/../../common/media_transport)
 
 # no-char8_t to avoid a problem with ICE Connection lib.
-# EIGEN_MAX_ALIGN_BYTES=0: disable Eigen's over-alignment requirement so Eigen types reaching us via
-# std::optional/temporaries (e.g. DSR Mat::RTMat from get_transformation_matrix) can't trip an
-# aligned-load SIGBUS — neutralises the -march=native alignment hazard. Keep consistent across agents.
-add_definitions(-O3 -march=native -fmax-errors=1 -fno-char8_t -DEIGEN_MAX_ALIGN_BYTES=0)
+# CRITICAL — match the prebuilt libdsr's Eigen ABI: use DEFAULT alignment (alignof(Transform)=16).
+# NEITHER -march=native (→32) NOR -DEIGEN_MAX_ALIGN_BYTES=0 (→8): either changes
+# sizeof(std::optional<Eigen::Transform>) vs libdsr's 144 → get_transformation_matrix overruns the
+# caller's stack slot (stack smash) or misaligns it (SIGBUS). libdsr uses default Eigen alignment; match it.
+add_definitions(-O3 -fmax-errors=1 -fno-char8_t)
 

@@ -91,6 +91,10 @@ struct BottleInstance
     // Bottle-owned voxel memory bank (room frame), independent of per-frame uploads.
     std::vector<Eigen::Vector3f>      voxel_bank_pts;
     std::unordered_set<std::uint64_t> voxel_bank_keys;
+    // Table-top z (room frame) the bottle stands on, when a "table" node is found under it; NaN
+    // otherwise (bottle then "hangs from the room", no z anchor / no surface filter). Refreshed
+    // each cycle. Anchors cz = table_top_z + height/2 and floors point ingestion at the surface.
+    float table_top_z = std::numeric_limits<float>::quiet_NaN();
 };
 
 // ─── Agent configuration ─────────────────────────────────────────────────────
@@ -264,6 +268,10 @@ private:
     BottleObservation observe_bottle_node(BottleInstance& inst, const DSR::Node& node);
     void ingest_observation_voxels(BottleInstance& inst, const BottleObservation& observation);
     bool is_voxel_owned_by_bottle(const BottleInstance& inst, const Eigen::Vector3f& point) const;
+    // Table-top z (room frame) of the "table" node when the bottle's (bx,by) is over its footprint.
+    // The bottle stands on it: cz is anchored to table_top+height/2 and surface points are filtered.
+    // std::nullopt if no table node (bottle hangs from the room instead).
+    std::optional<float> find_table_top(float bx, float by) const;
     float run_bottle_inference(BottleInstance& inst, const BottleObservation& observation);
     void step_queue_update(BottleInstance& inst,
                            const std::vector<Eigen::Vector3f>& candidate_pts,
