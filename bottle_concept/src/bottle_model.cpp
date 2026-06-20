@@ -187,7 +187,7 @@ float BottleModel::silhouette_energy_at(const BottleState& s) const
         const float delta = std::abs(d.x() * (Cy - s.cy) - d.y() * (Cx - s.cx)) / den;
         acc += robust_loss_value(delta - s.radius, params_.robust_loss, params_.robust_loss_scale);
     }
-    return params_.mask_precision * acc / static_cast<float>(sil_dirs_.size());
+    return params_.mask_precision * sil_conf_ * acc / static_cast<float>(sil_dirs_.size());
 }
 
 float BottleModel::fe_at(const BottleState& s,
@@ -321,7 +321,7 @@ float BottleModel::gradient_step(const std::vector<Eigen::Vector3f>& points,
         const auto den   = (sil_dx * sil_dx + sil_dy * sil_dy).sqrt();
         const auto delta = (sil_dx * (sil_Cy - cy) - sil_dy * (sil_Cx - cx)).abs() / den;
         const auto loss  = robust_loss_value(delta - radius, params_.robust_loss, params_.robust_loss_scale);
-        return params_.mask_precision * loss.mean();
+        return params_.mask_precision * sil_conf_ * loss.mean();
     };
 
     auto run_loop = [&](auto& optimizer) -> bool

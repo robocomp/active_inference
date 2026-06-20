@@ -187,8 +187,11 @@ class BottleModel
         // centre (Cx,Cy) and one horizontal direction (dx,dy) per edge pixel. The occluding-
         // contour condition is "ray tangent to the vertical cylinder" → δ(ray;cx,cy) = radius.
         // Cleared each cycle; set when a fresh bottle mask + camera model are available.
-        void set_silhouette(const Eigen::Vector2f& cam_xy, std::vector<Eigen::Vector2f> edge_dirs_xy)
-        { sil_cam_xy_ = cam_xy; sil_dirs_ = std::move(edge_dirs_xy); }
+        // confidence ∈ [0,1] (YOLO detection score) scales the effective silhouette precision: an
+        // unreliable / over-segmented mask (low conf) must not pull radius toward its bloat.
+        void set_silhouette(const Eigen::Vector2f& cam_xy, std::vector<Eigen::Vector2f> edge_dirs_xy,
+                            float confidence = 1.0f)
+        { sil_cam_xy_ = cam_xy; sil_dirs_ = std::move(edge_dirs_xy); sil_conf_ = std::clamp(confidence, 0.0f, 1.0f); }
         void clear_silhouette() { sil_dirs_.clear(); }
         std::size_t silhouette_ray_count() const { return sil_dirs_.size(); }
 
@@ -228,4 +231,5 @@ class BottleModel
         // Silhouette observation (room frame); empty ⇒ term inactive.
         Eigen::Vector2f                 sil_cam_xy_ = Eigen::Vector2f::Zero();
         std::vector<Eigen::Vector2f>    sil_dirs_;
+        float                           sil_conf_ = 1.0f;   // YOLO confidence → precision scale
 };

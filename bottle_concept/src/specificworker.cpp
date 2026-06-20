@@ -530,7 +530,7 @@ void SpecificWorker::feed_silhouette(BottleInstance& inst)
     }
     if (not dirs.empty())
         inst.model.set_silhouette(Eigen::Vector2f(static_cast<float>(Cx), static_cast<float>(Cy)),
-                                  std::move(dirs));
+                                  std::move(dirs), slice->confidence);
 }
 
 // ── RGB-mask-silhouette diagnostic ──────────────────────────────────────────────
@@ -776,8 +776,12 @@ bool SpecificWorker::is_voxel_owned_by_bottle(const BottleInstance& inst, const 
 {
     const auto& s = inst.model.state();
 
-    // XY ownership gate: bottle-centred radius + margin.
-    const float gate_radius = s.radius + cfg_.voxel_select_radius_margin_m;
+    // XY ownership gate: centred on the live pose, but sized by the FIXED prior radius — NOT the live
+    // estimate. Gating on s.radius is a feedback loop: depth points just outside the cylinder get
+    // admitted → support a larger radius → widen the gate next frame → "invent" radius from edge-pixel
+    // depth noise (the pose-3/6 inflation). A fixed gate caps how far depth alone can grow the bottle;
+    // the mask silhouette owns the actual radius.
+    const float gate_radius = cfg_.prior_radius + cfg_.voxel_select_radius_margin_m;
     const float dx = point.x() - s.cx;
     const float dy = point.y() - s.cy;
     if (std::hypot(dx, dy) > gate_radius)
