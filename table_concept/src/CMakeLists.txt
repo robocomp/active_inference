@@ -58,5 +58,5 @@ LIST(APPEND HEADERS
 LIST(APPEND LIBS ${LIBS} "${TORCH_LIBRARIES}")
 
 # no-char8_t to avoid a problem with ICE Connection lib.
-add_definitions(-O3 -march=native -fmax-errors=1 -fno-char8_t)
+add_definitions(-O3 -march=native -fmax-errors=1 -fno-char8_t  -DEIGEN_MAX_ALIGN_BYTES=0)
 

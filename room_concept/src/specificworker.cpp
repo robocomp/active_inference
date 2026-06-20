@@ -21,6 +21,9 @@
 
 #include <algorithm>
 #include <print>
+#include <cstdlib>   // std::_Exit — crash-free terminal shutdown
+#include <thread>    // brief DDS flush before _Exit
+#include <chrono>
 #include <random>
 #include <stdexcept>
 #include <fstream>
@@ -98,6 +101,19 @@ void SpecificWorker::request_shutdown()
 
     room_concept_.stop();
     cleanup_owned_nodes();
+
+    // Crash-free terminal exit. After our cleanup (state saved, self agent node deleted, peers
+    // notified) we hard-exit instead of returning into Ice::Application's communicator teardown +
+    // C++ static destruction. Those run with UNDEFINED cross-TU order: a global/DDS holder copies a
+    // graph Node (e.g. type "mind") AFTER the node-type registry static is destroyed, so Node::type()
+    // throws "<type> is not a valid node type" -> std::terminate/abort on every exit. _Exit skips all
+    // of that; the OS reclaims memory/sockets/threads and peers detect departure via the presence
+    // protocol. Only reached on a real shutdown (shutting_down_ latched above). Brief pause lets the
+    // self-agent-node deletion delta reach peers first.
+    std::cout.flush();
+    std::cerr.flush();
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    std::_Exit(EXIT_SUCCESS);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -411,11 +427,27 @@ void SpecificWorker::initialize()
         },
         .on_degraded_enter = [this]()
         {
-            qInfo() << "[SM] -> Degraded: required peer lost. Cleaning up and exiting.";
-            QTimer::singleShot(0, this, [this]() { presence_coordinator_.set_local_ready(false); });
-            room_concept_.stop();
-            cleanup_owned_nodes();
-            QTimer::singleShot(500, QCoreApplication::instance(), SLOT(quit()));
+            if (shutting_down_)
+                return;
+            // DEBOUNCE — do NOT tear down on entry. A transient required-peer flap (startup
+            // handshake, brief DSR node churn, a peer restarting) momentarily fires presenceLost and
+            // then recovers; the old code deleted room's OWN agent node + stopped RoomConcept here,
+            // then "recovered" to Operating in a half-broken state and exited anyway. Wait a grace
+            // period and shut down only if a required peer is STILL genuinely missing.
+            constexpr int REQUIRED_LOSS_GRACE_MS = 3000;
+            qInfo() << "[SM] -> Degraded: required peer lost —" << REQUIRED_LOSS_GRACE_MS << "ms grace before shutdown";
+            QTimer::singleShot(REQUIRED_LOSS_GRACE_MS, this, [this]()
+            {
+                if (shutting_down_)
+                    return;
+                if (presence_coordinator_.all_required_ready())
+                {
+                    qInfo() << "[SM] required peers recovered during grace — staying alive";
+                    return;
+                }
+                qWarning() << "[SM] required peer still missing after grace — shutting down cleanly";
+                request_shutdown();   // does cleanup + crash-free _Exit (terminal)
+            });
         },
     });
     presence_coordinator_.start();
@@ -1350,6 +1382,150 @@ std::string SpecificWorker::pose_file_path() const
 ///////////////////////////////////////////////////////////////////////////////
 /// SLOTS from GUI and DSR signals
 ///////////////////////////////////////////////////////////////////////////////
+/// @brief ///////////DSR callback triggered when a node is modified. We check if it's the robot node and if the current speed attributes have been updated, then we read them and push them to the odometry buffer with some optional noise added.
+
+void SpecificWorker::modify_node_attrs_slot(std::uint64_t id, const std::vector<std::string>& att_names)
+{
+    if (!G || id == 0)
+        return;
+
+    const auto touches_any = [&att_names](std::initializer_list<const char*> names)
+    {
+        return std::ranges::any_of(names, [&att_names](const char* name)
+        {
+            return std::find(att_names.begin(), att_names.end(), name) != att_names.end();
+        });
+    };
+
+    const bool touches_lidar_payload = touches_any({
+        "laser_X",
+        "laser_Y",
+        "laser_Z",
+        "laser_timestamp"
+    });
+
+    if (touches_lidar_payload)
+    {
+        if (const auto node_opt = G->get_node(id); node_opt.has_value() && node_opt->type() == "laser")
+            schedule_lidar_copy_to_pending(id, "update_node_attr_signal", true);
+    }
+
+    if (dsr_robot_id_ != 0 && id != dsr_robot_id_)
+        return;
+
+    const bool touches_current_speed = touches_any({
+        "robot_current_advance_speed",
+        "robot_current_side_speed",
+        "robot_current_angular_speed",
+        "robot_current_speed_timestamp"
+    });
+    const bool touches_ref_speed = touches_any({
+        "robot_ref_adv_speed",
+        "robot_ref_side_speed",
+        "robot_ref_rot_speed",
+        "robot_ref_speed_timestamp"
+    });
+
+    if (not touches_current_speed and not touches_ref_speed)
+        return;
+
+    const auto node_opt = G->get_node(id);
+    if (!node_opt.has_value())
+        return;
+
+    const auto &robot_node = node_opt.value();
+
+    if (touches_current_speed)
+    {
+        if (auto adv_value = G->get_attrib_by_name<robot_current_advance_speed_att>(robot_node); adv_value.has_value())
+        {
+            if (auto side_value = G->get_attrib_by_name<robot_current_side_speed_att>(robot_node); side_value.has_value())
+            {
+                if (auto rot_value = G->get_attrib_by_name<robot_current_angular_speed_att>(robot_node); rot_value.has_value())
+                {
+                    if (auto ts_value = G->get_attrib_by_name<robot_current_speed_timestamp_att>(robot_node); ts_value.has_value())
+                    {
+                        const auto source_ts = static_cast<std::uint64_t>(ts_value.value());
+                        if (source_ts > 0 and source_ts > last_robot_current_speed_timestamp_)
+                        {
+                            static std::mt19937 gen{std::random_device{}()};
+                            const float nf = params.ODOMETRY_NOISE_FACTOR;
+
+                            auto add_noise = [&](float value) -> float {
+                                if (nf <= 0.f || value == 0.f) return value;
+                                std::normal_distribution<float> dist(0.f, std::abs(value) * nf);
+                                return value + dist(gen);
+                            };
+
+                            rc::OdometryReading odom;
+                            odom.adv = add_noise(adv_value.value());
+                            odom.side = add_noise(side_value.value());
+                            odom.rot = add_noise(rot_value.value());
+                            odom.source_ts_ms = static_cast<std::int64_t>(source_ts);
+                            odom.recv_ts_ms = static_cast<std::int64_t>(
+                                std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::system_clock::now().time_since_epoch()).count());
+                            odom.timestamp = std::chrono::high_resolution_clock::time_point(
+                                std::chrono::milliseconds(source_ts));
+
+                            room_concept_.record_odometry_ingress("dsr_current_speed",
+                                                                  adv_value.value(),
+                                                                  rot_value.value(),
+                                                                  odom.adv,
+                                                                  odom.rot,
+                                                                  odom.source_ts_ms);
+                            odometry_buffer_.put<0>(std::move(odom), static_cast<std::uint64_t>(odom.recv_ts_ms));
+                            last_robot_current_speed_timestamp_ = source_ts;
+                            last_robot_adv_speed_  = adv_value.value();
+                            last_robot_side_speed_ = side_value.value();
+                            last_robot_rot_speed_  = rot_value.value();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (touches_ref_speed)
+    {
+        if (auto adv_value = G->get_attrib_by_name<robot_ref_adv_speed_att>(robot_node); adv_value.has_value())
+        {
+            if (auto side_value = G->get_attrib_by_name<robot_ref_side_speed_att>(robot_node); side_value.has_value())
+            {
+                if (auto rot_value = G->get_attrib_by_name<robot_ref_rot_speed_att>(robot_node); rot_value.has_value())
+                {
+                    if (auto ts_value = G->get_attrib_by_name<robot_ref_speed_timestamp_att>(robot_node); ts_value.has_value())
+                    {
+                        const auto source_ts = static_cast<std::uint64_t>(ts_value.value());
+                        if (source_ts > 0 and source_ts > last_robot_ref_speed_timestamp_)
+                        {
+                            rc::VelocityCommand cmd;
+                            cmd.adv_y = adv_value.value();
+                            cmd.adv_x = side_value.value();
+                            cmd.rot = rot_value.value();
+                            cmd.source_ts_ms = static_cast<std::int64_t>(source_ts);
+                            cmd.recv_ts_ms = static_cast<std::int64_t>(
+                                std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::system_clock::now().time_since_epoch()).count());
+                            cmd.timestamp = std::chrono::high_resolution_clock::time_point(
+                                std::chrono::milliseconds(source_ts));
+
+                            room_concept_.record_command_ingress("dsr_ref",
+                                                                 adv_value.value(),
+                                                                 rot_value.value(),
+                                                                 cmd.adv_y,
+                                                                 cmd.rot,
+                                                                 cmd.source_ts_ms);
+                            velocity_buffer_.put<0>(std::move(cmd), source_ts);
+                            last_robot_ref_speed_timestamp_ = source_ts;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 
 void SpecificWorker::modify_node_slot(std::uint64_t /*id*/, const std::string &type)
 {
@@ -1594,149 +1770,6 @@ int SpecificWorker::startup_check()
     return 0;
 }
 
-/// @brief ///////////DSR callback triggered when a node is modified. We check if it's the robot node and if the current speed attributes have been updated, then we read them and push them to the odometry buffer with some optional noise added.
-
-void SpecificWorker::modify_node_attrs_slot(std::uint64_t id, const std::vector<std::string>& att_names)
-{
-    if (!G || id == 0)
-        return;
-
-    const auto touches_any = [&att_names](std::initializer_list<const char*> names)
-    {
-        return std::ranges::any_of(names, [&att_names](const char* name)
-        {
-            return std::find(att_names.begin(), att_names.end(), name) != att_names.end();
-        });
-    };
-
-    const bool touches_lidar_payload = touches_any({
-        "laser_X",
-        "laser_Y",
-        "laser_Z",
-        "laser_timestamp"
-    });
-
-    if (touches_lidar_payload)
-    {
-        if (const auto node_opt = G->get_node(id); node_opt.has_value() && node_opt->type() == "laser")
-            schedule_lidar_copy_to_pending(id, "update_node_attr_signal", true);
-    }
-
-    if (dsr_robot_id_ != 0 && id != dsr_robot_id_)
-        return;
-
-    const bool touches_current_speed = touches_any({
-        "robot_current_advance_speed",
-        "robot_current_side_speed",
-        "robot_current_angular_speed",
-        "robot_current_speed_timestamp"
-    });
-    const bool touches_ref_speed = touches_any({
-        "robot_ref_adv_speed",
-        "robot_ref_side_speed",
-        "robot_ref_rot_speed",
-        "robot_ref_speed_timestamp"
-    });
-
-    if (not touches_current_speed and not touches_ref_speed)
-        return;
-
-    const auto node_opt = G->get_node(id);
-    if (!node_opt.has_value())
-        return;
-
-    const auto &robot_node = node_opt.value();
-
-    if (touches_current_speed)
-    {
-        if (auto adv_value = G->get_attrib_by_name<robot_current_advance_speed_att>(robot_node); adv_value.has_value())
-        {
-            if (auto side_value = G->get_attrib_by_name<robot_current_side_speed_att>(robot_node); side_value.has_value())
-            {
-                if (auto rot_value = G->get_attrib_by_name<robot_current_angular_speed_att>(robot_node); rot_value.has_value())
-                {
-                    if (auto ts_value = G->get_attrib_by_name<robot_current_speed_timestamp_att>(robot_node); ts_value.has_value())
-                    {
-                        const auto source_ts = static_cast<std::uint64_t>(ts_value.value());
-                        if (source_ts > 0 and source_ts > last_robot_current_speed_timestamp_)
-                        {
-                            static std::mt19937 gen{std::random_device{}()};
-                            const float nf = params.ODOMETRY_NOISE_FACTOR;
-
-                            auto add_noise = [&](float value) -> float {
-                                if (nf <= 0.f || value == 0.f) return value;
-                                std::normal_distribution<float> dist(0.f, std::abs(value) * nf);
-                                return value + dist(gen);
-                            };
-
-                            rc::OdometryReading odom;
-                            odom.adv = add_noise(adv_value.value());
-                            odom.side = add_noise(side_value.value());
-                            odom.rot = add_noise(rot_value.value());
-                            odom.source_ts_ms = static_cast<std::int64_t>(source_ts);
-                            odom.recv_ts_ms = static_cast<std::int64_t>(
-                                std::chrono::duration_cast<std::chrono::milliseconds>(
-                                    std::chrono::system_clock::now().time_since_epoch()).count());
-                            odom.timestamp = std::chrono::high_resolution_clock::time_point(
-                                std::chrono::milliseconds(source_ts));
-
-                            room_concept_.record_odometry_ingress("dsr_current_speed",
-                                                                  adv_value.value(),
-                                                                  rot_value.value(),
-                                                                  odom.adv,
-                                                                  odom.rot,
-                                                                  odom.source_ts_ms);
-                            odometry_buffer_.put<0>(std::move(odom), static_cast<std::uint64_t>(odom.recv_ts_ms));
-                            last_robot_current_speed_timestamp_ = source_ts;
-                            last_robot_adv_speed_  = adv_value.value();
-                            last_robot_side_speed_ = side_value.value();
-                            last_robot_rot_speed_  = rot_value.value();
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if (touches_ref_speed)
-    {
-        if (auto adv_value = G->get_attrib_by_name<robot_ref_adv_speed_att>(robot_node); adv_value.has_value())
-        {
-            if (auto side_value = G->get_attrib_by_name<robot_ref_side_speed_att>(robot_node); side_value.has_value())
-            {
-                if (auto rot_value = G->get_attrib_by_name<robot_ref_rot_speed_att>(robot_node); rot_value.has_value())
-                {
-                    if (auto ts_value = G->get_attrib_by_name<robot_ref_speed_timestamp_att>(robot_node); ts_value.has_value())
-                    {
-                        const auto source_ts = static_cast<std::uint64_t>(ts_value.value());
-                        if (source_ts > 0 and source_ts > last_robot_ref_speed_timestamp_)
-                        {
-                            rc::VelocityCommand cmd;
-                            cmd.adv_y = adv_value.value();
-                            cmd.adv_x = side_value.value();
-                            cmd.rot = rot_value.value();
-                            cmd.source_ts_ms = static_cast<std::int64_t>(source_ts);
-                            cmd.recv_ts_ms = static_cast<std::int64_t>(
-                                std::chrono::duration_cast<std::chrono::milliseconds>(
-                                    std::chrono::system_clock::now().time_since_epoch()).count());
-                            cmd.timestamp = std::chrono::high_resolution_clock::time_point(
-                                std::chrono::milliseconds(source_ts));
-
-                            room_concept_.record_command_ingress("dsr_ref",
-                                                                 adv_value.value(),
-                                                                 rot_value.value(),
-                                                                 cmd.adv_y,
-                                                                 cmd.rot,
-                                                                 cmd.source_ts_ms);
-                            velocity_buffer_.put<0>(std::move(cmd), source_ts);
-                            last_robot_ref_speed_timestamp_ = source_ts;
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
 
 ///////////////////////////////////////////////////////////////////////////////
 /// ICE INTERFACE CALLBACKS

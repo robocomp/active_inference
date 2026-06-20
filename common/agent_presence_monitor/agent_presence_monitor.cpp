@@ -3,6 +3,7 @@
 #include <dsr/api/dsr_agent_info_api.h>
 #include <dsr/api/dsr_api.h>
 
+#include <QTimer>
 #include <algorithm>
 #include <chrono>
 #include <iostream>
@@ -80,31 +81,15 @@ void AgentPresenceMonitor::start()
 
     agent_info_api = std::make_unique<DSR::AgentInfoAPI>(graph.get(), static_cast<std::uint32_t>(agent_info_period_ms));
 
-    connections.emplace_back(QObject::connect(graph.get(),
-                                              &DSR::DSRGraph::update_node_signal,
-                                              &timer,
-                                              [this](std::uint64_t id, const std::string &type, DSR::SignalInfo) {
-                                                  if (type == "agent")
-                                                      refresh_agent_node(id);
-                                              },
-                                              Qt::QueuedConnection));
-
-    connections.emplace_back(QObject::connect(graph.get(),
-                                              &DSR::DSRGraph::update_node_attr_signal,
-                                              &timer,
-                                              [this](std::uint64_t id, const std::vector<std::string> &, DSR::SignalInfo) {
-                                                  refresh_agent_node(id);
-                                              },
-                                              Qt::QueuedConnection));
-
-    connections.emplace_back(QObject::connect(graph.get(),
-                                              &DSR::DSRGraph::del_node_signal,
-                                              &timer,
-                                              [this](std::uint64_t id, DSR::SignalInfo) {
-                                                  handle_deleted_node(id);
-                                              },
-                                              Qt::QueuedConnection));
-
+    // NOTE: this monitor deliberately does NOT connect to update_node_signal /
+    // update_node_attr_signal / del_node_signal. Those DSR Qt signals carry std::string /
+    // std::vector<std::string> payloads that, under QueuedConnection, are marshaled across the
+    // emitter thread (DDS reader / heartbeat) and the receiver thread — a TSan-confirmed heap-
+    // corruption race that crashed heavy-heap peers (voxelizer) on participant churn. Presence is
+    // inherently a polling problem anyway (you cannot receive a signal for a heartbeat that
+    // STOPPED), so the 500 ms timer below already does a full scan; the slots were only a sub-period
+    // latency optimization. Departed-node detection (formerly the del_node slot) is folded into
+    // initial_scan().
     QObject::connect(&timer, &QTimer::timeout, [&]() {
         initial_scan();
         refresh_timeouts();
@@ -275,8 +260,27 @@ void AgentPresenceMonitor::resolve_name_dependencies(const std::string &peer_nam
 
 void AgentPresenceMonitor::initial_scan()
 {
+    std::unordered_set<std::uint64_t> live_agent_node_ids;
     for (const auto &node : graph->get_nodes_by_type("agent"))
+    {
+        live_agent_node_ids.insert(node.id());
         refresh_agent_node(node);
+    }
+
+    // Poll-based replacement for the removed del_node_signal slot: a peer whose DSR agent node is
+    // no longer present has genuinely departed (clean shutdown removed the node). Detect it here so
+    // it still becomes PeerState::Missing and triggers delete_peer_owned_nodes, instead of decaying
+    // to a 3 s Stale "frozen, wait for recovery" (which never cleans up). Collect first, then act,
+    // since handle_deleted_node() mutates graph_node_to_agent_id.
+    std::vector<std::uint64_t> departed_node_ids;
+    for (const auto &[node_id, agent_id] : graph_node_to_agent_id)
+    {
+        (void) agent_id;
+        if (!live_agent_node_ids.contains(node_id))
+            departed_node_ids.push_back(node_id);
+    }
+    for (const auto node_id : departed_node_ids)
+        handle_deleted_node(node_id);
 }
 
 void AgentPresenceMonitor::refresh_agent_node(std::uint64_t graph_node_id)
@@ -509,10 +513,15 @@ void AgentPresenceMonitor::recompute_required_status()
     if (required_ready != previous_ready || previous_missing != missing_required_ids)
     {
         log_required_status_change(previous_ready, previous_missing);
+        // DEFER lifecycle callbacks to the next event-loop turn. on_required_lost() drives the
+        // agent's Degraded -> request_shutdown() path, which frees THIS monitor's state; invoking it
+        // synchronously here returns into recompute_required_status() (and the optional-peer loop
+        // below) with everything freed -> heap-use-after-free + IceUtil::Mutex EINVAL on shutdown.
+        // Copy the std::function so the deferred call is independent of the monitor's lifetime.
         if (required_ready && !previous_ready && on_required_ready)
-            on_required_ready();
+            QTimer::singleShot(0, [cb = on_required_ready]{ if (cb) cb(); });
         else if (!required_ready && previous_ready && on_required_lost)
-            on_required_lost();
+            QTimer::singleShot(0, [cb = on_required_lost]{ if (cb) cb(); });
     }
 
     for (const auto opt_id : optional_agent_ids)
@@ -556,14 +565,14 @@ void AgentPresenceMonitor::recompute_required_status()
                       << " (" << opt_name << ") "
                       << (departed ? "lost (node removed)" : "stale (frozen, node present)")
                       << std::endl;
-            if (on_optional_agent_lost)
-                on_optional_agent_lost(opt_name, opt_id);
+            if (on_optional_agent_lost)  // deferred: see note above (may run arbitrary teardown)
+                QTimer::singleShot(0, [cb = on_optional_agent_lost, opt_name, opt_id]{ if (cb) cb(opt_name, opt_id); });
         }
         else if (on_optional_agent_ready)
         {
             std::cout << "[Presence] optional peer " << opt_id
                       << " (" << opt_name << ") ready" << std::endl;
-            on_optional_agent_ready(opt_name, opt_id);
+            QTimer::singleShot(0, [cb = on_optional_agent_ready, opt_name, opt_id]{ if (cb) cb(opt_name, opt_id); });
         }
     }
 }

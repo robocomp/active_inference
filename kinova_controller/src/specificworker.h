@@ -145,7 +145,7 @@ private:
 	// Webots scene-object DEF/name strings.
 	static constexpr const char* WEBOTS_BOTTLE_DEF = "bottle";
 	static constexpr const char* WEBOTS_TABLE_DEF  = "table";
-	static constexpr const char* WEBOTS_ROBOT_DEF  = "P3Bot";
+	static constexpr const char* WEBOTS_ROBOT_DEF  = "KINOVA";  // shadow_arm.wbt: the arm's own top-level Robot (DEF KINOVA); its world pose IS the arm base
 	static constexpr const char* WEBOTS_ARM_DEF    = "kinova_arm_r";
 
 	// ── Perception / scene services (used by the FSM via the friend reference) ─

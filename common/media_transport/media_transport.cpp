@@ -186,10 +186,12 @@ bool MediaPublisher::init(const PublisherConfig& cfg)
     wqos.resource_limits().extra_samples = 2;  // headroom for in-flight loans
     wqos.endpoint().history_memory_policy =
         eprosima::fastdds::rtps::PREALLOCATED_MEMORY_MODE;
-    if (std::getenv("MEDIA_NO_DATASHARING"))
-        wqos.data_sharing().off();
-    else
+    // Zero-copy data-sharing only when explicitly opted in AND not force-disabled by env.
+    // Default (cfg.data_sharing=false) is OFF — churn-safe; see PublisherConfig::data_sharing.
+    if (cfg.data_sharing and not std::getenv("MEDIA_NO_DATASHARING"))
         wqos.data_sharing().automatic();  // zero-copy on same board for plain types
+    else
+        wqos.data_sharing().off();
 
     writer_ = publisher_->create_datawriter(topic_, wqos);
     if (!writer_)
@@ -314,10 +316,12 @@ bool MediaSubscriber::init(const SubscriberConfig& cfg)
         cfg.max_instances * cfg.history_depth + 2;
     rqos.endpoint().history_memory_policy =
         eprosima::fastdds::rtps::PREALLOCATED_MEMORY_MODE;
-    if (std::getenv("MEDIA_NO_DATASHARING"))
-        rqos.data_sharing().off();
-    else
+    // Zero-copy data-sharing only when explicitly opted in AND not force-disabled by env.
+    // Default (cfg.data_sharing=false) is OFF — churn-safe; see SubscriberConfig::data_sharing.
+    if (cfg.data_sharing and not std::getenv("MEDIA_NO_DATASHARING"))
         rqos.data_sharing().automatic();
+    else
+        rqos.data_sharing().off();
 
     reader_ = subscriber_->create_datareader(topic_, rqos);
     if (!reader_)

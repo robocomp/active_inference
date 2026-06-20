@@ -85,6 +85,41 @@ Useful YOLO-related settings are:
 
 If TensorRT inference is enabled, ONNX Runtime, CUDA, and TensorRT must be ABI-compatible. If TensorRT cannot be initialized, the detector falls back to CUDA when available.
 
+### TensorRT version lock (and the Ubuntu-upgrade gotcha)
+
+The TensorRT version is **pinned by the ONNX Runtime build**, not chosen freely. ORT's TensorRT
+Execution Provider is compiled against one TensorRT **major** version; you cannot substitute another
+(different SONAME + ABI). Per the ORT compatibility matrix
+(https://onnxruntime.ai/docs/execution-providers/TensorRT-ExecutionProvider.html), ORT **1.22–1.23**
+require **TensorRT 10.9** (`libnvinfer.so.10`, `libnvinfer_builder_resource.so.10.9.0`). **No ORT
+release supports TensorRT 11** — a system `libnvinfer.so.11` is unusable here regardless.
+
+`YoloSegDetector` (`src/yolo_processor.cpp`, `prefer_system_tensorrt_stack`) preloads the TRT-10 stack
+by **absolute path** from `/usr/lib/x86_64-linux-gnu/`:
+`libnvinfer.so.10`, `libnvonnxparser.so.10`, `libnvinfer_plugin.so.10` (plus
+`libnvinfer_builder_resource.so.10.9.0`, found via the loader path / a probe of
+`/usr/local/cuda-13.2/lib64`).
+
+**Gotcha:** an `apt upgrade` of the system `tensorrt` packages replaces those `.so.10` libs in
+`/usr/lib/x86_64-linux-gnu` with `.so.11`. YOLO then crashes inside `detect_segmentation` (a
+half-initialised TRT EP corrupting memory). The CUDA toolkit's own copy of TRT 10.9 survives the apt
+upgrade, so restore the `.so.10` libs from there:
+
+```bash
+# Point SRC at the CUDA toolkit dir that still has TensorRT 10.9 (adjust the CUDA version):
+SRC=/usr/local/cuda-12.8/targets/x86_64-linux/lib
+sudo bash -c "for f in $SRC/libnvinfer*.so.10* $SRC/libnvonnxparser*.so.10*; do ln -sfv \"\$f\" /usr/lib/x86_64-linux-gnu/; done; ldconfig"
+# verify the three hardcoded preloads resolve:
+for l in libnvinfer.so.10 libnvonnxparser.so.10 libnvinfer_plugin.so.10; do ls -lL /usr/lib/x86_64-linux-gnu/$l; done
+```
+
+Then hold the apt packages so the next upgrade doesn't re-break it:
+`sudo apt-mark hold libnvinfer10 libnvinfer-plugin10 libnvonnxparsers10` (names vary by distro).
+
+**Escape hatch:** set `Yolo.use_trt = false` in `etc/config.toml`. The detector then runs on the CUDA
+EP only — version-independent, identical masks, just no FP16/TensorRT speedup. Use this if the TRT
+stack can't be reconciled.
+
 ## Configuration parameters
 Like any other component, voxelizer requires a configuration file to start. In etc/config or etc/config.toml, you can find an example of the configuration file.
 

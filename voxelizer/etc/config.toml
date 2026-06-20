@@ -53,6 +53,10 @@ nodes    = ["voxels"]
 Verbose = false
 
 [Yolo]
+# TensorRT EP (FP16) for YOLO. Requires the TRT 10.9 stack the linked ONNX Runtime is built against
+# (see README "TensorRT version lock"). Set false to run on the CUDA EP only — version-independent,
+# same masks, no TRT speedup — if the TRT libs can't be reconciled (e.g. after an apt upgrade).
+use_trt = false
 accepted_labels = ["table", "chair", "monitor", "tv", "bottle"]
 mask_tray = true
 tray_mask_ref_width  = 1280

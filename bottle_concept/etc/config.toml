@@ -115,7 +115,7 @@ GradClip = 2.0
 OptimizerType = "adam"
 MaskPrecision = 500.0    # RGB-mask silhouette likelihood weight (0=off). cf. depth inv_sigma2=1/0.02²=2500. Constrains (cx,cy,radius) — the front-arc-degenerate direction.
 CovEffScale = 0.036    # covariance calibration: N_eff = N*scale → NEES≈3 (depth points are spatially correlated, N over-counts)
-RobustLoss = "welsch"        # redescending: far-from-surface (noisy) points get ~0 weight, so the mask owns geometry
+RobustLoss = "welsch"        # redescending (soft): far-from-surface points ~0 weight; beats Tukey (hard cutoff over-rejects, depth drifts at bad-mask poses)
 RobustLossScale = 0.04         # welsch c: points >~3-4cm from the cylinder surface are strongly down-weighted
 
 [SampleQueue]

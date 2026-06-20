@@ -494,12 +494,13 @@ void SpecificWorker::refresh_arm_base_world()
                                           p.position.z / 1000.0);
         return T;
     };
-    // Fixed arm→body mount = the KinovaGen3 child pose inside the P3Bot Robot node in the
-    // world file. In the current arm_base.wbt the KinovaGen3 child is IDENTITY (no
-    // translation/rotation), so the arm base coincides with the P3Bot Robot frame — and the
-    // Robot is yaw-only about Z, giving a VERTICAL shoulder. (The earlier value baked a 90°
-    // rotation about Y + 7 cm drop from the old side-mounted .wbt; that tipped the shoulder
-    // horizontal and no joint values could fix it.) Keep this in sync with the .wbt child pose.
+    // Fixed offset from the queried Webots robot node to the arm base_link = the KinovaGen3
+    // child pose inside that Robot node. In shadow_arm.wbt the bridge is attached to the arm's
+    // OWN top-level Robot (DEF KINOVA), and its KinovaGen3 child is IDENTITY — so the queried
+    // world pose already IS the arm base and this stays IDENTITY. Do NOT fold the Shadow-body→
+    // arm mount (T_mount, Rz(+90°)+t=(0.272385,0.014412,0.520)) in here: that transform lives
+    // in shadow_arm.json (body→kinova RT edge) for the arm-FRAME servo refactor, and applying
+    // it here too would double-count (the controller queries KINOVA, not the Shadow body).
     static const Eigen::Isometry3d T_p3bot_arm = Eigen::Isometry3d::Identity();
     try
     {
@@ -539,7 +540,12 @@ void SpecificWorker::update_bottle_pose_in_dsr()
         if (not static_scene_cached)
         {
             robot_w_pose = webots2robocomp_proxy->getObjectPose(WEBOTS_ROBOT_DEF);
-            table_w_pose = webots2robocomp_proxy->getObjectPose(WEBOTS_TABLE_DEF);
+            // The table is queried from Webots ground truth ONLY when we publish the scene to
+            // the graph. In bottle_from_graph (Option-A) mode the perception stack owns the
+            // table node, so its pose is read from the graph below — and there is no DEF
+            // "table" in shadow_arm.wbt, so this call would throw.
+            if (not bottle_from_graph_)
+                table_w_pose = webots2robocomp_proxy->getObjectPose(WEBOTS_TABLE_DEF);
             static_scene_cached = true;
         }
         if (not bottle_from_graph_ or publish_scene_to_graph_)   // need the Webots bottle as control source and/or to publish
@@ -580,38 +586,60 @@ void SpecificWorker::update_bottle_pose_in_dsr()
                                         bottle_w_pose.orientation.y,
                                         bottle_w_pose.orientation.z);
 
-    // Cache world poses for grasp targeting + the viewer (both run in world
-    // frame). Bottle long axis = bottle local +Z in world.
-    table_world_.linear()      = q_table_w.normalized().toRotationMatrix();
-    table_world_.translation() = table_w;
-
+    // Cache world poses for grasp targeting + the viewer (both run in world frame).
+    // Bottle long axis = bottle local +Z in world.
     if (bottle_from_graph_)
     {
-        // Read the bottle in the table frame from the graph (the table->bottle RT edge written by
-        // the perception agent) and lift it into the world frame via the cached table_world_, so the
-        // FSM still operates in the controller's world frame. A missing edge = no detection this
-        // cycle: keep the previous belief (a dropout the look-up belief predicts through).
-        if (inner_eigen_api_)
-            if (auto bt = inner_eigen_api_->transform_axis("table", "bottle"); bt.has_value())
+        // Option-A: the perception stack owns the scene. Read the table in the arm-base frame
+        // from the graph (inner_eigen walks root→…→table and root→…→kinova_arm_r) and lift it to
+        // the controller's world frame via arm_base_world_ — node 280 (kinova_arm_r) is the URDF
+        // base_link, so arm_base_world_ is exactly its arm-base→world map. Then read the bottle in
+        // the table frame and lift via the fresh table_world_, so the FSM still operates in world
+        // frame. A missing edge = no detection this cycle: keep the previous belief (a dropout the
+        // look-up belief predicts through).
+        if (base_tf_set_ and inner_eigen_api_)
+        {
+            if (auto tt = inner_eigen_api_->transform_axis("kinova_arm_r", "table"); tt.has_value())
             {
-                const auto& v = bt.value();   // [x,y,z, rx,ry,rz]: metres + xyz-euler in the table frame
-                const Eigen::Vector3d p_table(v[0], v[1], v[2]);
-                const Eigen::Matrix3d R_tb =
+                const auto& v = tt.value();   // [x,y,z, rx,ry,rz]: metres + xyz-euler in the arm-base frame
+                const Eigen::Matrix3d R_at =
                     (Eigen::AngleAxisd(v[3], Eigen::Vector3d::UnitX())
                    * Eigen::AngleAxisd(v[4], Eigen::Vector3d::UnitY())
                    * Eigen::AngleAxisd(v[5], Eigen::Vector3d::UnitZ())).toRotationMatrix();
-                bottle_pos_world_  = table_world_ * p_table;
-                bottle_axis_world_ = (table_world_.linear() * R_tb * Eigen::Vector3d::UnitZ()).normalized();
-                bottle_valid_ = true;
+                table_world_.linear()      = arm_base_world_.linear() * R_at;
+                table_world_.translation() = arm_base_world_ * Eigen::Vector3d(v[0], v[1], v[2]);
             }
+            // bottle_concept publishes the bottle as a `cylinder` node named bottle_* (parented to
+            // room), so resolve it by TYPE, not a literal name; express it in the table frame and
+            // lift via table_world_.
+            std::string bottle_name;
+            if (G)
+                if (const auto cyls = G->get_nodes_by_type("cylinder"); not cyls.empty())
+                    bottle_name = cyls.front().name();
+            if (not bottle_name.empty())
+                if (auto bt = inner_eigen_api_->transform_axis("table", bottle_name); bt.has_value())
+                {
+                    const auto& v = bt.value();   // [x,y,z, rx,ry,rz]: metres + xyz-euler in the table frame
+                    const Eigen::Vector3d p_table(v[0], v[1], v[2]);
+                    const Eigen::Matrix3d R_tb =
+                        (Eigen::AngleAxisd(v[3], Eigen::Vector3d::UnitX())
+                       * Eigen::AngleAxisd(v[4], Eigen::Vector3d::UnitY())
+                       * Eigen::AngleAxisd(v[5], Eigen::Vector3d::UnitZ())).toRotationMatrix();
+                    bottle_pos_world_  = table_world_ * p_table;
+                    bottle_axis_world_ = (table_world_.linear() * R_tb * Eigen::Vector3d::UnitZ()).normalized();
+                    bottle_valid_ = true;
+                }
+        }
     }
     else
     {
+        table_world_.linear()      = q_table_w.normalized().toRotationMatrix();
+        table_world_.translation() = table_w;
         bottle_pos_world_  = bottle_w;
         bottle_axis_world_ = (q_bottle_w * Eigen::Vector3d::UnitZ()).normalized();
         bottle_valid_ = true;
     }
-    scene_world_valid_ = bottle_valid_;   // table cached (above) + at least one bottle pose seen
+    scene_world_valid_ = bottle_valid_;   // table + at least one bottle pose seen
 
     // DSR scene publishing disabled (loop-hitch diagnosis): this controller does NOT read the
     // graph for control — its DSR signal slots are stubs — so the per-cycle

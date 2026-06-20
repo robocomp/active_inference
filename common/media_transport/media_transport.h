@@ -36,6 +36,13 @@ struct PublisherConfig
     int           history_depth = 4;    // KEEP_LAST depth
     int           max_instances = 4;    // distinct stream_id keys
     bool          shared_memory_only = true;  // SHM transport for same-board
+    // Zero-copy SHM data-sharing. Default OFF: data-sharing maps a fixed SHM segment shared with
+    // peers, and FastDDS reconfigures it on participant discovery. In CORTEX, concept agents join/
+    // leave constantly, so a media CONSUMER holding a mapped frame across a discovery event reads a
+    // remapped/freed segment -> heap corruption (random SEGVs in cv::Mat/onnx/paint). The SHM
+    // TRANSPORT (shared_memory_only) still gives same-board speed; only the zero-copy loan layer is
+    // disabled, costing one ~2.7MB memcpy/frame. Opt in only for a static, non-churning topology.
+    bool          data_sharing = false;
 };
 
 struct SubscriberConfig
@@ -45,6 +52,7 @@ struct SubscriberConfig
     int           history_depth = 4;
     int           max_instances = 4;
     bool          shared_memory_only = true;
+    bool          data_sharing = false;  // see PublisherConfig::data_sharing — OFF = churn-safe
 };
 
 // One writer per topic. Not thread-safe: call from a single producer thread.

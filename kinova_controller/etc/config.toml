@@ -10,8 +10,8 @@ name = "kinova_controller"
 
 # --- Single Instance Configuration ---
 # Use this if you only have one graph.
-configFile = "/home/robocomp/robocomp/components/active_inference/kinova_controller/kinova2.json"
-domain = 1 # so it does not interfere with other experiments
+configFile = ""  # Option-A: JOIN the shared graph bootstrapped by robot_concept (robot_concept/shadow.json holds Shadow/body/room/table/kinova_arm_r). Empty ⇒ no local bootstrap. (kinova2.json was the old standalone world for bottle_from_graph=false)
+domain = 0 # Option-A: MUST match the perception agents (room/robot_concept, voxelizer, bottle_concept all on 0) to share the DSR graph. Was 1 for isolated standalone runs.
 tree = false
 graph = true
 2d = false
@@ -31,7 +31,7 @@ graph = true
 auto_start = true
 exit_on_homing_timeout = false   # unattended sweeps set true ⇒ quit on a homing jam instead of idling
 monitor_log = true               # dense per-cycle [mon] line; set false for batch runs (fills disk)
-bottle_from_graph = false   # true ⇒ read bottle pose from the DSR graph (perception agent) instead of Webots ground truth
+bottle_from_graph = true    # true ⇒ read bottle pose from the DSR graph (perception agent) instead of Webots ground truth
 publish_scene_to_graph = false  # opt-in: write robot->table->bottle to graph (round-trip test / siblings)
 tip_log    = false  # disabled: [ctrl] lines below are the validation log
 # EXPERIMENT 1 — natural fine-tuning from a specialized sequence:
@@ -100,7 +100,7 @@ round_cycles = 10
 # Rest pose "j1 .. j7" (rad). Tune the "ready over the table, camera-up" posture
 # here without recompiling; relaunch to apply. Startup prints [rest-pose] metrics
 # (EE pos, upperarm_dz≈0 = first link parallel to table, toolY_up≈+1 = camera up).
-rest_pose = "1.5705 0.0 3.1415 1.0 0.0 1.65 -1.5705"   # vertical-shoulder mount: in sync with kinova-bridge startup pose
+rest_pose = "0.0 0.0 0.0 1.0 0.0 1.65 -1.5705"   # in sync with kinova-bridge startup pose
 grasp_align_tol_deg = 11.0  # commit near the ~9.5° alignment floor (kinematic plateau at this grasp pose): 8° never reaches and stalls; 15° committed early at the worst-allowed cant. 11° = best reachable alignment without stalling.
 
 # ── Skill-learning instrumentation ───────────────────────────────────────────
@@ -171,7 +171,7 @@ probe_open_amp    = 0.25        # open-threshold sweep ~0.60..0.99
 retreat_log_path  = "/tmp/kinova_retreat.csv"   # params → post-retreat tilt ("" disables)
 
 [Period]
-Compute = 20
+Compute = 10
 Emergency = 500
 
 [Component.Debug]
