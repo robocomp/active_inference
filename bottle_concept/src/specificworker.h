@@ -95,6 +95,10 @@ struct BottleInstance
     // otherwise (bottle then "hangs from the room", no z anchor / no surface filter). Refreshed
     // each cycle. Anchors cz = table_top_z + height/2 and floors point ingestion at the surface.
     float table_top_z = std::numeric_limits<float>::quiet_NaN();
+    // RT-tree parent the bottle "hangs from": the table node when found, else the room. The fit is
+    // always in the room frame; the RT edge (parent→bottle) is written in the parent frame.
+    std::uint64_t parent_id = 0;
+    std::string   parent_name = "room";
 };
 
 // ─── Agent configuration ─────────────────────────────────────────────────────
@@ -272,6 +276,9 @@ private:
     // The bottle stands on it: cz is anchored to table_top+height/2 and surface points are filtered.
     // std::nullopt if no table node (bottle hangs from the room instead).
     std::optional<float> find_table_top(float bx, float by) const;
+    // The "table" node when the bottle's (bx,by) is over its footprint — the RT-tree parent the
+    // bottle hangs from (re-parents room→bottle to table→bottle). std::nullopt ⇒ hang from the room.
+    std::optional<DSR::Node> find_table_node(float bx, float by) const;
     float run_bottle_inference(BottleInstance& inst, const BottleObservation& observation);
     void step_queue_update(BottleInstance& inst,
                            const std::vector<Eigen::Vector3f>& candidate_pts,
@@ -298,7 +305,7 @@ private:
                                                  const std::string& att_name) const;
     static std::uint64_t voxel_key(const Eigen::Vector3f& point, float quantization_m);
     Eigen::Matrix2f read_robot_covariance() const;
-    void write_rt_pose(uint64_t room_id, BottleInstance& inst);
+    void write_rt_pose(BottleInstance& inst);
     static std::vector<float> make_cylinder_mesh(const BottleState& s, int segments = 16);
 
     // ── Factory helpers ────────────────────────────────────────────────────────

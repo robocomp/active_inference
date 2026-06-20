@@ -816,16 +816,16 @@ bool SpecificWorker::is_voxel_owned_by_bottle(const BottleInstance& inst, const 
     return point.z() >= z_min and point.z() <= z_max;
 }
 
-std::optional<float> SpecificWorker::find_table_top(float bx, float by) const
+std::optional<DSR::Node> SpecificWorker::find_table_node(float bx, float by) const
 {
     if (not inner_eigen_)
         return std::nullopt;
     const auto t = G->get_node("table");           // bootstrap/room-created static surface
     if (not t.has_value())
         return std::nullopt;
-    const float h = G->get_attrib_by_name<height_m_att>(t.value()).value_or(0.0f);
     const float w = G->get_attrib_by_name<width_m_att> (t.value()).value_or(0.0f);
     const float d = G->get_attrib_by_name<depth_m_att> (t.value()).value_or(0.0f);
+    const float h = G->get_attrib_by_name<height_m_att>(t.value()).value_or(0.0f);
     if (h <= 0.0f)
         return std::nullopt;
     // Table origin (its base) expressed in the room frame — a Vector3d, so no Transform-block hazard.
@@ -835,6 +835,18 @@ std::optional<float> SpecificWorker::find_table_top(float bx, float by) const
     // Footprint gate (loose, yaw-agnostic): the bottle centre must lie over the table.
     const float half = 0.5f * std::max(w, d) + 0.10f;
     if (std::hypot(bx - static_cast<float>(org->x()), by - static_cast<float>(org->y())) > half)
+        return std::nullopt;
+    return t;
+}
+
+std::optional<float> SpecificWorker::find_table_top(float bx, float by) const
+{
+    const auto t = find_table_node(bx, by);
+    if (not t.has_value())
+        return std::nullopt;
+    const float h = G->get_attrib_by_name<height_m_att>(t.value()).value_or(0.0f);
+    const auto org = inner_eigen_->transform("room", Mat::Vector3d(0.0, 0.0, 0.0), "table", 0);
+    if (not org.has_value())
         return std::nullopt;
     return static_cast<float>(org->z()) + h;       // table top = base origin z + height
 }
@@ -1054,8 +1066,15 @@ void SpecificWorker::scaffold_missing_bottle_nodes()
         G->add_or_modify_attrib_local<width_m_att> (bottle_node, 2.0f * p.radius_m);
         G->add_or_modify_attrib_local<depth_m_att> (bottle_node, 2.0f * p.radius_m);
         G->add_or_modify_attrib_local<height_m_att>(bottle_node, p.height_m);
-        G->add_or_modify_attrib_local<level_att>   (bottle_node, 3);
-        G->add_or_modify_attrib_local<parent_att>  (bottle_node, room_node_id_);
+
+        // Hang the bottle from the TABLE it sits on (room→bottle ⇒ table→bottle) when one is under it;
+        // else from the room. parent/level follow the anchor; the RT edge is written in its frame.
+        const float cz = matched_slice.centroid.z() > 1e-3f ? matched_slice.centroid.z() : p.room_z_m;
+        const auto table = find_table_node(matched_slice.centroid.x(), matched_slice.centroid.y());
+        DSR::Node parent_node = table.value_or(room_opt.value());
+        const int parent_level = G->get_attrib_by_name<level_att>(parent_node).value_or(2);
+        G->add_or_modify_attrib_local<level_att> (bottle_node, parent_level + 1);
+        G->add_or_modify_attrib_local<parent_att>(bottle_node, parent_node.id());
         {
             const float rpx = G->get_attrib_by_name<pos_x_att>(room_opt.value()).value_or(200.f);
             const float rpy = G->get_attrib_by_name<pos_y_att>(room_opt.value()).value_or(200.f);
@@ -1070,13 +1089,17 @@ void SpecificWorker::scaffold_missing_bottle_nodes()
             continue;
         }
 
-        const float cz = matched_slice.centroid.z() > 1e-3f ? matched_slice.centroid.z() : p.room_z_m;
-        rt_api_->insert_or_assign_edge_RT(room_opt.value(), id_opt.value(),
-                                          {matched_slice.centroid.x(), matched_slice.centroid.y(), cz},
+        // Centroid is room-frame; express it in the parent's frame for the RT edge (identity if room).
+        Mat::Vector3d c_parent(matched_slice.centroid.x(), matched_slice.centroid.y(), cz);
+        if (const auto cp = inner_eigen_->transform(parent_node.name(), c_parent, "room", 0); cp.has_value())
+            c_parent = cp.value();
+        rt_api_->insert_or_assign_edge_RT(parent_node, id_opt.value(),
+                                          {static_cast<float>(c_parent.x()), static_cast<float>(c_parent.y()),
+                                           static_cast<float>(c_parent.z())},
                                           {0.0f, 0.0f, 0.0f});
 
-        std::print("bottle_concept: created node '{}' id={} from masks frame={} at ({:.2f}, {:.2f}, {:.2f})\n",
-                   p.node_name, id_opt.value(), masks_packet_.frame_id,
+        std::print("bottle_concept: created node '{}' id={} parent='{}' (lvl {}) from masks frame={} at room ({:.2f}, {:.2f}, {:.2f})\n",
+                   p.node_name, id_opt.value(), parent_node.name(), parent_level + 1, masks_packet_.frame_id,
                    matched_slice.centroid.x(), matched_slice.centroid.y(), cz);
     }
 }
@@ -1093,21 +1116,16 @@ void SpecificWorker::ensure_instance(const DSR::Node& node)
     if (auto v = G->get_attrib_by_name<width_m_att> (node); v.has_value()) init_state.radius = 0.5f * v.value();
     if (auto v = G->get_attrib_by_name<height_m_att>(node); v.has_value()) init_state.height = v.value();
 
-    // Read RT pose from the room→bottle edge.
-    if (room_node_id_ != 0)
+    // Read the bottle's current room-frame pose via the RT tree (parent-agnostic: works whether the
+    // bottle is parented to the room or the table — room←…←bottle is composed for us).
+    if (inner_eigen_)
     {
-        if (const auto edge = G->get_edge(room_node_id_, node.id(), "RT"); edge.has_value())
+        if (const auto p = inner_eigen_->transform("room", Mat::Vector3d(0.0, 0.0, 0.0), node.name(), 0);
+            p.has_value())
         {
-            if (const auto tr = G->get_attrib_by_name<rt_translation_att>(edge.value()); tr.has_value())
-            {
-                const auto& tvec = tr.value().get();
-                if (tvec.size() >= 3)
-                {
-                    init_state.cx = tvec[0];
-                    init_state.cy = tvec[1];
-                    init_state.cz = tvec[2];
-                }
-            }
+            init_state.cx = static_cast<float>(p->x());
+            init_state.cy = static_cast<float>(p->y());
+            init_state.cz = static_cast<float>(p->z());
         }
     }
 
@@ -1172,6 +1190,10 @@ void SpecificWorker::ensure_instance(const DSR::Node& node)
     inst.node_name = node.name();
     inst.model     = BottleModel(init_state, mparams);
     inst.queue     = SampleQueue(make_queue_params());
+    // RT-tree parent (table when hung from it, else room) — write_rt_pose writes in the parent frame.
+    inst.parent_id = G->get_attrib_by_name<parent_att>(node).value_or(room_node_id_);
+    if (const auto pn = G->get_node(inst.parent_id); pn.has_value())
+        inst.parent_name = pn.value().name();
 
     instances_.emplace(node.id(), std::move(inst));
     std::print("bottle_concept: created instance for node '{}' id={}\n", node.name(), node.id());
@@ -1228,7 +1250,7 @@ void SpecificWorker::step_write_model(BottleInstance& inst, DSR::Node& node, flo
 
     G->update_node(node);
 
-    write_rt_pose(room_node_id_, inst);
+    write_rt_pose(inst);
 }
 
 bool SpecificWorker::acquire_webots_gt()
@@ -1540,26 +1562,33 @@ Eigen::Matrix2f SpecificWorker::read_robot_covariance() const
     return Eigen::Matrix2f::Identity() * 0.01f;
 }
 
-void SpecificWorker::write_rt_pose(uint64_t room_id, BottleInstance& inst)
+void SpecificWorker::write_rt_pose(BottleInstance& inst)
 {
-    if (room_id == 0 or not rt_api_)
+    if (inst.parent_id == 0 or not rt_api_ or not inner_eigen_)
         return;
 
     const auto& s = inst.model.state();
 
-    // Dead-band: suppress RT updates below ~1 cm to avoid pos churn from jitter.
+    // Dead-band: suppress RT updates below ~1 cm to avoid pos churn from jitter (room-frame state).
     constexpr float kMinWriteDistSq = 0.01f * 0.01f;
     const float dx = s.cx - inst.last_written_cx;
     const float dy = s.cy - inst.last_written_cy;
     if (dx*dx + dy*dy < kMinWriteDistSq)
         return;
 
-    auto room_opt = G->get_node(room_id);
-    if (not room_opt.has_value())
+    auto parent_opt = G->get_node(inst.parent_id);
+    if (not parent_opt.has_value())
         return;
 
-    rt_api_->insert_or_assign_edge_RT(room_opt.value(), inst.node_id,
-                                      {s.cx, s.cy, s.cz},
+    // Express the room-frame fit in the PARENT frame for the RT edge (identity if parent==room;
+    // table→bottle when hung from the table). The table is a pure translation from room, so the
+    // pose_covariance (room frame) carries unchanged to the table-frame edge below.
+    Mat::Vector3d p_parent(s.cx, s.cy, s.cz);
+    if (const auto pp = inner_eigen_->transform(inst.parent_name, p_parent, "room", 0); pp.has_value())
+        p_parent = pp.value();
+    rt_api_->insert_or_assign_edge_RT(parent_opt.value(), inst.node_id,
+                                      {static_cast<float>(p_parent.x()), static_cast<float>(p_parent.y()),
+                                       static_cast<float>(p_parent.z())},
                                       {0.0f, 0.0f, 0.0f});
 
     // Attach P_bottle (Laplace covariance) on the RT edge as the 6×6 SE3
@@ -1567,7 +1596,7 @@ void SpecificWorker::write_rt_pose(uint64_t room_id, BottleInstance& inst)
     // translation block comes from the model; orientation is unobservable for a
     // symmetric upright cylinder, so its diagonal is large. The controller reads
     // this to set its closed→open-loop look-up rate.
-    if (auto edge = G->get_edge(room_id, inst.node_id, "RT"); edge.has_value())
+    if (auto edge = G->get_edge(inst.parent_id, inst.node_id, "RT"); edge.has_value())
     {
         const auto fit_pts = inst.queue.points();
         const Eigen::Matrix3f cov = inst.model.pose_covariance(fit_pts, inst.queue.weights());
