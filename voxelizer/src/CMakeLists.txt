@@ -98,11 +98,13 @@ find_package(OpenCV REQUIRED)
 LIST(APPEND LIBS ${LIBS} ${OpenCV_LIBS})
 
 # no-char8_t to avoid a problem with ICE Connection lib.
-# NOTE: do NOT add -march=native. It promotes Eigen's required alignment to 32 bytes
-# (AVX2/AVX-512) and emits vectorized block accesses that assume it, but Mat::RTMat
-# (Eigen::Transform) reaching them through std::optional/temporaries is only 16-aligned
-# -> ".translation() data is not aligned" abort. Same hazard documented for kinova_controller.
-add_definitions(-g -O3 -fmax-errors=1 -fno-char8_t)
+# EIGEN_MAX_ALIGN_BYTES=0 disables Eigen's over-alignment requirement, so Eigen types reaching us via
+# std::optional/temporaries (e.g. Mat::RTMat from get_transformation_matrix) can't trip an aligned-load
+# SIGBUS — the hazard the note below describes. With this set, -march=native would also be safe again
+# (left off here; the other agents keep it). Keep EIGEN_MAX_ALIGN_BYTES consistent across all agents.
+# Prior NOTE (now neutralised by the define): -march=native promoted Eigen alignment to 32 bytes and
+# emitted vectorized block accesses that aborted on the only-16-aligned Mat::RTMat.
+add_definitions(-g -O3 -fmax-errors=1 -fno-char8_t -DEIGEN_MAX_ALIGN_BYTES=0)
 
 # AddressSanitizer (opt-in, separate build dir):
 #   cmake -B build-asan -DENABLE_ASAN=ON && cmake --build build-asan -j
@@ -128,5 +130,17 @@ if(ENABLE_ASAN)
   # WITHOUT a preinit entry. The run script then strips the libasan DT_NEEDED and LD_PRELOADs it,
   # so ASan initialises first (interceptors up) while the Ice/IceStorm init order stays normal.
   add_link_options(-fno-omit-frame-pointer -Wl,--no-as-needed -lasan -Wl,--as-needed)
+endif()
+
+# ThreadSanitizer (opt-in, separate build dir) — to pin the bottle-join DATA RACE that corrupts the
+# heap (random SEGVs in paint/cv::Mat/onnx). Same -ltsan-direct link model as ASan above so the
+# binary boots past the Ice static-init wall; run_tsan.sh strips the libtsan DT_NEEDED + LD_PRELOADs
+# it. Build against the TSan cortex (cmake passes LIBRARY_PATH to build-tsan libs).
+#   cmake -B build-tsan -DENABLE_TSAN=ON && cmake --build build-tsan -j
+option(ENABLE_TSAN "Build voxelizer with ThreadSanitizer" OFF)
+if(ENABLE_TSAN)
+  message(STATUS "ThreadSanitizer ENABLED for voxelizer (frame pointers; -ltsan-direct link)")
+  add_compile_options(-fsanitize=thread -fno-omit-frame-pointer -O1)
+  add_link_options(-fno-omit-frame-pointer -Wl,--no-as-needed -ltsan -Wl,--as-needed)
 endif()
 
