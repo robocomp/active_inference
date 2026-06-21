@@ -73,25 +73,33 @@ SpecificWorker::~SpecificWorker()
 {
 	std::cout << "Destroying SpecificWorker" << std::endl;
 
-	// Safety: send zero velocities so the arm halts when the agent exits.
-	// Without this the bridge holds the last commanded q̇ and the arm keeps
-	// drifting freely in Webots after Ctrl+C. Wrapped in try/catch because
-	// the proxy may already be unreachable on shutdown (bridge closed first,
-	// network gone, etc.) — in that case there is nothing we can do.
+	// On exit, PARK the arm at the rest pose: send a POSITION command the bridge holds and servos to,
+	// so the arm travels home and stays there even after this agent is gone — rather than being left
+	// over the table mid-grasp. nearest_equiv_target wraps the continuous joints to the nearest
+	// revolution of the measured config so it doesn't unwind a full turn. A bare zero-velocity only
+	// halts in place, so it's kept solely as a fallback if the position command can't be delivered.
+	// Wrapped in try/catch because the proxy may already be unreachable on shutdown — nothing we can do.
 	try
 	{
-		RoboCompKinovaArm::TJointSpeeds stop;
-		stop.jointSpeeds.assign(Kinematics::N_ARM_JOINTS, 0.0f);
-		kinovaarm_proxy->moveJointsWithSpeed(stop);
-		std::cout << "[shutdown] Sent zero velocities to arm." << std::endl;
+		kinovaarm_proxy->moveJointsWithAngle(nearest_equiv_target(cur_q_, rest_pose_angles_));
+		std::cout << "[shutdown] Commanded arm to rest pose." << std::endl;
 	}
 	catch (const Ice::Exception& e)
 	{
-		std::cerr << "[shutdown] Could not send stop command: " << e.what() << std::endl;
+		std::cerr << "[shutdown] Could not command rest pose: " << e.what() << std::endl;
+		// Fallback: at least halt drift in place with zero velocity.
+		try
+		{
+			RoboCompKinovaArm::TJointSpeeds stop;
+			stop.jointSpeeds.assign(Kinematics::N_ARM_JOINTS, 0.0f);
+			kinovaarm_proxy->moveJointsWithSpeed(stop);
+			std::cout << "[shutdown] Fallback: sent zero velocities." << std::endl;
+		}
+		catch (...) {}
 	}
 	catch (...)
 	{
-		std::cerr << "[shutdown] Unknown error sending stop command." << std::endl;
+		std::cerr << "[shutdown] Unknown error commanding rest pose." << std::endl;
 	}
 }
 
@@ -237,6 +245,7 @@ void SpecificWorker::init_self_projection(const ConfigLoader& configLoader)
 
     std::string camera_node = "zed";
     try { camera_node = configLoader.get<std::string>("SelfProjection.camera_node"); } catch (...) {}
+    try { ts_probe_ = configLoader.get<bool>("SelfProjection.timestamp_probe"); } catch (...) {}
 
     const auto desc = rc::media::descriptor_from_graph(*G, camera_node);
     if (not desc.has_value())
@@ -268,13 +277,87 @@ void SpecificWorker::init_self_projection(const ConfigLoader& configLoader)
         return;
     }
 
-    self_projection_viewer_ = std::make_unique<SelfProjectionViewer>(media_source_.get());
+    self_projection_viewer_ = std::make_unique<SelfProjectionViewer>(
+        media_source_.get(),
+        [this] { return self_projection_snapshot(); },   // GUI thread pulls control-thread state
+        URDF_PATH);
     // Own top-level window: keeps these ~30 Hz image repaints out of the graph
     // view's shared backing store (the churn-driven repaint storm corrupts it).
     if (graph_viewers.contains(""))
         graph_viewers.at("")->add_custom_widget_in_own_window("self_projection", self_projection_viewer_.get());
     std::print("[self-proj] RGB viewer up: domain={} topic='{}'\n",
                rgb_cfg->domain_id, rgb_cfg->topic_name);
+}
+
+SelfProjSnapshot SpecificWorker::self_projection_snapshot() const
+{
+    std::lock_guard lock(self_proj_mutex_);
+    return self_proj_snapshot_;
+}
+
+// Control-thread producer of the viewer's projection inputs. Reads the camera
+// intrinsics (once) and the arm-base→camera extrinsic from the graph, pairs them
+// with the latest measured q, and publishes the bundle under the mutex. Throttled
+// by the caller so the inner_eigen tree-walks never load the 100 Hz loop.
+void SpecificWorker::update_self_projection_snapshot(const std::array<double, Kinematics::N_ARM_JOINTS>& q)
+{
+    SelfProjSnapshot s;
+    s.q = q;
+    s.q_valid = true;
+
+    // Intrinsics are static: focal lengths from the zed node, principal point at
+    // the image centre (cx,cy = w/2,h/2 — the CameraAPI convention). Read once.
+    {
+        std::lock_guard lock(self_proj_mutex_);
+        if (self_proj_snapshot_.intrinsics_valid)
+        {
+            s.fx = self_proj_snapshot_.fx; s.fy = self_proj_snapshot_.fy;
+            s.cx = self_proj_snapshot_.cx; s.cy = self_proj_snapshot_.cy;
+            s.intrinsics_valid = true;
+        }
+    }
+    if (not s.intrinsics_valid and G)
+    {
+        if (auto zed = G->get_node("zed"); zed.has_value())
+        {
+            const auto fx = G->get_attrib_by_name<cam_rgb_focalx_att>(zed.value());
+            const auto fy = G->get_attrib_by_name<cam_rgb_focaly_att>(zed.value());
+            const auto w  = G->get_attrib_by_name<cam_rgb_width_att>(zed.value());
+            const auto h  = G->get_attrib_by_name<cam_rgb_height_att>(zed.value());
+            if (fx.has_value() and fy.has_value() and w.has_value() and h.has_value())
+            {
+                s.fx = fx.value();  s.fy = fy.value();
+                s.cx = w.value() / 2.0;  s.cy = h.value() / 2.0;
+                s.intrinsics_valid = true;
+            }
+        }
+    }
+
+    // Extrinsic arm-base→camera. "zed" and the arm node both hang off "body", so
+    //   zed_T_arm = body_T_zed⁻¹ · body_T_arm   (the room/world factor cancels).
+    // Compose manually (element-wise copy) — a single multi-hop walk is unreliable
+    // here (mount edges carry only a bootstrap timestamp), and it dodges Eigen's
+    // aligned-load on RTMat. Same pattern bottle_concept uses for its mask IoU.
+    if (inner_eigen_api_)
+    {
+        const auto btz = inner_eigen_api_->get_transformation_matrix("body", "zed", 0);
+        const auto bta = inner_eigen_api_->get_transformation_matrix("body", WEBOTS_ARM_DEF, 0);
+        if (btz.has_value() and bta.has_value())
+        {
+            const auto to_m4 = [](const Mat::RTMat& T)
+            {
+                Eigen::Matrix4d m;
+                const auto& src = T.matrix();
+                for (int i = 0; i < 4; ++i) for (int j = 0; j < 4; ++j) m(i, j) = src(i, j);
+                return m;
+            };
+            s.zed_T_arm = to_m4(btz.value()).inverse() * to_m4(bta.value());
+            s.extrinsic_valid = true;
+        }
+    }
+
+    std::lock_guard lock(self_proj_mutex_);
+    self_proj_snapshot_ = s;
 }
 
 void SpecificWorker::compute()
@@ -309,15 +392,37 @@ void SpecificWorker::compute()
         }
         cur_q_ = q;
 
+        // Feed the self-projection viewer (P2 FK aura). Throttled to ~20 Hz so the
+        // inner_eigen tree-walks + intrinsics read never sit on the 100 Hz loop;
+        // the ~50 ms q staleness is invisible at the 30 Hz repaint. No-op unless
+        // the viewer is up.
+        if (self_projection_viewer_ and (++self_proj_tick_ % 5 == 0))
+            update_self_projection_snapshot(q);
+
+        // Clock sanity probe: joints carry epoch ms (system_clock), the media stamp
+        // is now epoch ms too (robot_concept down-converts). A small, stable, POSITIVE
+        // diff (image older than the joint read) ⇒ same epoch and ≈ the pipeline
+        // latency (a τ prior); huge/negative/drifting ⇒ different clocks.
+        if (ts_probe_ and media_source_ and (self_proj_tick_ % 100 == 0))
+        {
+            const std::uint64_t img_ms = media_source_->latest_stamp_ms();
+            const auto joint_ms = static_cast<std::uint64_t>(js.timestamp);
+            std::print("[ts-probe] joint_ms={} img_ms={} joint-img={} ms\n",
+                       joint_ms, img_ms,
+                       static_cast<std::int64_t>(joint_ms) - static_cast<std::int64_t>(img_ms));
+        }
+
         send_gripper_command();
         const auto t_grip = clk::now();
 
         const auto ee_position = kinematics_->forward_kinematics(q);
-        // OpenGL belief viewer disabled while diagnosing control-loop hitches: its per-cycle
-        // repaint (and the getGripperState round-trip inside it) is a prime suspect for the
-        // 0.2–1.1 s cycle stalls that make the held-velocity arm overshoot/oscillate.
-        // update_viewer(q, tau, ee_position);
-        (void) tau;
+        // Time-series sensor plot: fed EVERY cycle (100 Hz) so a brief contact transient is captured,
+        // not aliased. Cheap (ring-buffer push; the plot self-throttles its repaint to ~33 Hz).
+        feed_force_plot(q, tau);
+        // Heavy 3D belief view (per-link FK for the meshes) throttled to ~20 Hz — keeps it off the
+        // 100 Hz loop (the original per-cycle update was a loop-hitch suspect).
+        if (arm_belief_viewer_ and (++viewer_tick_ % 5 == 0))
+            update_viewer(q, tau, ee_position);
         const auto t_view = clk::now();
         handle_joint_dump(q, ee_position, js);
 
@@ -415,25 +520,36 @@ void SpecificWorker::update_viewer(
     viewer_link_poses.reserve(mesh_link_poses.size());
     for (const auto& lp : mesh_link_poses)
         viewer_link_poses.push_back({lp.mesh_filename, lp.pose});
+    (void) tau;   // wrist-force feed moved to feed_force_plot (per-cycle); 3D view is throttled
     if (arm_belief_viewer_)
-    {
         arm_belief_viewer_->update_beliefs(q, viewer_link_poses, reach_target_, ee_position);
-        const auto g_tau = kinematics_->arm_gravity_torque(q);
-        Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1> tau_ext;
-        for (int i = 0; i < Kinematics::N_ARM_JOINTS; ++i) tau_ext[i] = tau[i] - g_tau[i];
-        const auto J6 = kinematics_->arm_jacobian_full(q);
-        const Eigen::Matrix<double, 6, 1> wrench =
-            (J6 * J6.transpose() + 1e-6 * Eigen::Matrix<double, 6, 6>::Identity())
-                .ldlt().solve(J6 * tau_ext);
-        const float wrist_force = static_cast<float>(wrench.head<3>().norm());
-        try
-        {
-            const auto gs = kinovaarm_proxy->getGripperState();
-            arm_belief_viewer_->update_forces(gs.lforce, gs.rforce, gs.ltipforce, gs.rtipforce,
-                                              wrist_force, gs.ltipcontact, gs.rtipcontact);
-        }
-        catch (const Ice::Exception&) {}
+}
+
+void SpecificWorker::feed_force_plot(
+    const std::array<double, Kinematics::N_ARM_JOINTS>& q,
+    const std::array<double, Kinematics::N_ARM_JOINTS>& tau)
+{
+    if (not arm_belief_viewer_) return;
+    // wristFz channel: external wrench estimate from the gravity-compensated torque residual.
+    // Pinocchio RNEA + Jacobian are microseconds — negligible vs the gripper Ice read below.
+    const auto g_tau = kinematics_->arm_gravity_torque(q);
+    Eigen::Matrix<double, Kinematics::N_ARM_JOINTS, 1> tau_ext;
+    for (int i = 0; i < Kinematics::N_ARM_JOINTS; ++i) tau_ext[i] = tau[i] - g_tau[i];
+    const auto J6 = kinematics_->arm_jacobian_full(q);
+    const Eigen::Matrix<double, 6, 1> wrench =
+        (J6 * J6.transpose() + 1e-6 * Eigen::Matrix<double, 6, 6>::Identity())
+            .ldlt().solve(J6 * tau_ext);
+    const float wrist_force = static_cast<float>(wrench.head<3>().norm());
+    // Signed vertical component (base +Z up): a held bottle adds ~m·g, shifting this. The FSM reads
+    // it to weight-confirm the lift independently of the simulator ground-truth rise.
+    wrist_fz_ = static_cast<float>(wrench[2]);
+    try
+    {   // one localhost gripper read per cycle (100 Hz) so the tip-force impact spike is captured
+        const auto gs = kinovaarm_proxy->getGripperState();
+        arm_belief_viewer_->update_forces(gs.lforce, gs.rforce, gs.ltipforce, gs.rtipforce,
+                                          wrist_force, gs.ltipcontact, gs.rtipcontact, gs.distance);
     }
+    catch (const Ice::Exception&) {}
 }
 
 void SpecificWorker::handle_joint_dump(
@@ -823,6 +939,9 @@ bool SpecificWorker::monitor_bottle_and_recover()
     catch (const Ice::Exception&) { return false; }   // bridge hiccup: skip this cycle
 
     const double z = b.position.z / 1000.0;
+    // Publish the GT bottle position for the FSM lift-confirm (tracks the bottle while it is held).
+    gt_bottle_pos_world_ = Eigen::Vector3d(b.position.x / 1000.0, b.position.y / 1000.0, z);
+    gt_bottle_valid_     = true;
     const Eigen::Quaterniond q(b.orientation.w, b.orientation.x, b.orientation.y, b.orientation.z);
     const double tilt = std::acos(std::clamp(std::abs((q.normalized() * Eigen::Vector3d::UnitZ()).z()), 0.0, 1.0));
 

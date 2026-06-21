@@ -28,12 +28,14 @@
 #include "kinematics.h"
 #include "efe_gradient.h"
 #include "arm_belief_viewer_3d.h"
+#include "self_projection_types.h"
 
 #include <dsr/api/dsr_inner_eigen_api.h>
 #include <dsr/api/dsr_rt_api.h>
 
 #include <Eigen/Dense>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <array>
 
@@ -87,13 +89,28 @@ private:
 	std::unique_ptr<ArmBeliefViewer3D> arm_belief_viewer_;
 	std::unique_ptr<PickandPlaceFSM>   fsm_;
 
-	// ── Self-projection RGB viewer (P1) ───────────────────────────────────────
+	// ── Self-projection RGB viewer ────────────────────────────────────────────
 	// Off the 100 Hz loop: a ThreadedMediaSource owns an RX thread on the
 	// zero-copy media plane (discovered from the DSR graph), the dock polls it at
 	// ~30 Hz. Disabled by default (SelfProjection.enable). See media_source.h.
 	std::unique_ptr<rc::media::ThreadedMediaSource> media_source_;
 	std::unique_ptr<SelfProjectionViewer>           self_projection_viewer_;
 	void init_self_projection(const ConfigLoader& configLoader);
+
+	// P2 FK aura: the control thread publishes the latest q + arm→camera extrinsic
+	// + intrinsics here (throttled), the viewer's GUI thread reads it under the
+	// mutex and does its own FK/projection. All DSR access stays on this thread.
+	void update_self_projection_snapshot(const std::array<double, Kinematics::N_ARM_JOINTS>& q);
+	mutable std::mutex self_proj_mutex_;
+	SelfProjSnapshot   self_proj_snapshot_;
+	int                self_proj_tick_ = 0;
+	// Debug: print joint-stamp vs media-stamp (both epoch ms) + their diff, ~1 Hz,
+	// to confirm the two clocks share an epoch before building the t↔q matcher.
+	bool               ts_probe_ = false;
+public:
+	// Thread-safe snapshot accessor for the viewer (GUI thread).
+	[[nodiscard]] SelfProjSnapshot self_projection_snapshot() const;
+private:
 
 	// Current EFE target (world frame, m) — set by the FSM controller, drawn by the viewer.
 	Eigen::Vector3d reach_target_{0.4, 0.0, 0.1};
@@ -122,6 +139,10 @@ private:
 	float gripper_command_ = 1.0f;
 	bool  gripper_proxy_warned_ = false;
 
+	// Latest estimated wrist vertical wrench (N, base frame; +up). Written by feed_force_plot each
+	// cycle, read by the FSM to weight-confirm a held bottle on lift (m·g signature).
+	float wrist_fz_ = 0.0f;
+
 	// DSR sub-APIs for the perception loop.
 	std::unique_ptr<DSR::RT_API>        rt_api_;
 	std::unique_ptr<DSR::InnerEigenAPI> inner_eigen_api_;
@@ -129,6 +150,11 @@ private:
 	// ── World-frame scene state (FK reports world coords via base_tf_) ────────
 	Eigen::Isometry3d arm_base_world_   = Eigen::Isometry3d::Identity();
 	Eigen::Vector3d   bottle_pos_world_ {0.0, 0.0, 0.0};
+	// GROUND-TRUTH bottle pose (Webots supervisor, m), refreshed by monitor_bottle_and_recover. Unlike
+	// the perceived bottle_pos_world_, this tracks the bottle while it is lifted/occluded by the gripper,
+	// so the FSM uses its z to confirm a real lift (the perceived z freezes at the table → false SLIP).
+	Eigen::Vector3d   gt_bottle_pos_world_ {0.0, 0.0, 0.0};
+	bool              gt_bottle_valid_ = false;
 	Eigen::Vector3d   bottle_axis_world_{0.0, 0.0, 1.0};
 	double            bottle_radius_m_  = 0.035;
 	double            bottle_height_m_  = 0.22;
@@ -204,6 +230,13 @@ private:
 	void update_viewer(const std::array<double, Kinematics::N_ARM_JOINTS>& q,
 	                   const std::array<double, Kinematics::N_ARM_JOINTS>& tau,
 	                   const Eigen::Vector3d& ee_position);
+	// Per-cycle (100 Hz) feed of the gripper sensors into the belief viewer's time-series plot, so a
+	// brief contact TRANSIENT (the force-3d tip spike) is captured, not aliased. Cheap: one gripper
+	// read + O(1) ring-buffer push; the plot self-throttles its repaint. Separate from update_viewer
+	// (the heavy per-link FK 3D update), which stays throttled.
+	void feed_force_plot(const std::array<double, Kinematics::N_ARM_JOINTS>& q,
+	                     const std::array<double, Kinematics::N_ARM_JOINTS>& tau);
+	int  viewer_tick_ = 0;   // throttle counter for the heavy 3D belief-view update
 #ifndef Q_MOC_RUN
 	void handle_joint_dump(const std::array<double, Kinematics::N_ARM_JOINTS>& q,
 	                       const Eigen::Vector3d& ee_position,

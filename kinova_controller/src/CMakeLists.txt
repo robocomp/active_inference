@@ -26,6 +26,8 @@ LIST(APPEND HEADERS
   ../src/efe_gradient.h
   ../src/arm_belief_viewer_3d.h
   ../src/self_projection_viewer.h
+  ../src/self_projection_types.h
+  ../src/self_projection_capsules.h
   ../../common/media_transport/media_transport.h
   ../../common/media_transport/media_source.h
 )

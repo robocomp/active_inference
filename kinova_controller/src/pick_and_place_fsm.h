@@ -68,6 +68,9 @@ private:
     // Controller.stop_after_grasp: halt the FSM once the grasp is confirmed (Closing) and HOLD it —
     // no Lifting/place. The "stop at grasp" experiment mode for testing the perceived-bottle grasp.
     bool stop_after_grasp_ = false;
+    // Controller.stop_after_lift: the experiment goal — once the LIFT is confirmed (bottle risen),
+    // count the success and home for the next rep, skipping the place/retreat phases entirely.
+    bool stop_after_lift_  = false;
     bool grasp_held_       = false;
 
     // ── Motion SEGMENTS (partition of c) ──────────────────────────────────────
@@ -233,6 +236,18 @@ private:
     double recenter_gain_ = 0.02, recenter_sign_ = 1.0;
     bool   tip_reflex_ = false;
     double tip_reflex_offset_ = 0.0;
+    // Deliberate tactile reflex sub-machine inside Inserting: on a fingertip touch, STOP, back off a
+    // little (Retreat), step laterally away from the contacting finger (Shift), then re-descend
+    // (Descend). reflex_force_thresh = the tip-FORCE level that counts as a touch — far more sensitive
+    // than the bridge's binary 0.5 N bool, so a graze is caught before the light bottle tips.
+    enum class InsertSub { Descend, Retreat, Shift };
+    InsertSub insert_sub_ = InsertSub::Descend;
+    Eigen::Vector3d reflex_retreat_target_{0.0, 0.0, 0.0};   // backed-off pose to reach during Retreat
+    Eigen::Vector3d reflex_shift_target_{0.0, 0.0, 0.0};     // lateral pose at backed-off depth (Shift)
+    int    insert_reflex_count_ = 0;     // reflex maneuvers this insert (capped by MAX_INSERT_REFLEXES)
+    double reflex_force_thresh_ = 0.15;  // N — tip force that triggers the reflex (configurable)
+    float  insert_tip_peak_     = 0.0f;  // diag: peak fingertip force seen during the current insert
+    Eigen::Vector3d closing_hold_pos_{0.0, 0.0, 0.0};  // EE pose frozen at seat: close HERE, don't ram deeper
     // Persistent tactile CALIBRATION: the lateral reflex offset that finally seated the grasp is
     // accumulated here (world frame) and added to the committed grasp target on every future rep, so
     // the systematic perception bias (model drawn in front of / beside the points) is learned out.
@@ -277,6 +292,7 @@ private:
     // Failure diagnostics (why grasps slip — esp. with a heavier object):
     Eigen::Vector3d bottle_at_grasp_{0,0,0};   // bottle pose when the grasp was committed
     float  close_lf_ = 0.0f, close_rf_ = 0.0f; // L/R pad forces at the close→lift transition
+    double lift_wrist_fz0_ = 0.0;              // wrist vertical-wrench baseline captured at lift start
     std::mt19937 rng_{std::random_device{}()};
 
     // ── Probe / skill structs + state ────────────────────────────────────────
@@ -310,6 +326,26 @@ private:
     double speed_conf_gain_ = 0.6, surprise_gate_m_ = 0.05;
     double orient_conf_gain_ = 1.5;   // skilled → faster free-space wrist slew during the approach
     double standoff_collapse_ = 0.0, insert_conf_gain_ = 0.0;
+    // ── Tactile-safe insertion (novice slow → skilled fast) ──────────────────────────────
+    // Until the insert segment's precision (skill_c) builds from confirmed grasps, creep the
+    // insert so a fingertip graze is caught and rectified BEFORE the light bottle is tipped. The
+    // insert speed is scaled by insert_novice_frac at c=0, ramping to full at c=1 — the same
+    // precision that the perception look-up uses, so "slow & feeling" and "fast & confident" are
+    // one state. 1.0 ⇒ old behaviour (no novice slowdown).
+    double insert_novice_frac_ = 0.4;
+    // ── Palm-proximity grasp gate ────────────────────────────────────────────────────────
+    // Commit to Closing only when the palm sensor confirms the bottle is actually in the throat,
+    // killing the "close on empty air" failures. Auto-bypassed if the sensor is absent (reads 0 →
+    // palm_active_ never set). palm_grasp_dist = the throat depth (m) below which the bottle counts
+    // as seated between the jaws.
+    bool   use_palm_gate_   = true;
+    double palm_grasp_dist_ = 0.08;
+    bool   palm_active_     = false;   // set once a nonzero palm reading proves the sensor exists
+    // Palm-depth SEAT trigger: stop the insert and close the moment the palm ray first sees the bottle
+    // at grasp depth (palm_d < palm_seat_dist), so the bottle is captured BETWEEN the finger pads
+    // instead of being rammed all the way to the palm (palm≈0.01) where the pads close on empty air
+    // (gap≈0.004, every lift slips). Only used when the palm sensor is present; else fall back to e<tol.
+    double palm_seat_dist_  = 0.04;
     std::string confidence_path_;
     // ── Per-segment precision learning from doing ────────────────────────────
     // c_k = Π_m[k]/(Π_m[k]+Π_s) is NOT a scripted ramp: each segment's Π_m ACCUMULATES
@@ -319,6 +355,13 @@ private:
     // risky legs (set-down) stay careful. Π_s fixed ⇒ c_k saturates ~n/(n+Π_s). Persisted.
     double pi_m_[N_SEG] = {0, 0, 0, 0, 0};   // per-segment accumulated model precision
     double pi_s_ = 2.0;                       // Controller.sensory_precision (fixed)
+    // Prior-precision FLOOR: a segment never becomes infinitely unskilled. Without it, repeated
+    // insert misses multiply Π_m by conf_decay every time (0.5×) → Π_m→0 → c→0 → the novice-slow
+    // insert creeps too slowly to seat → it times out → deflates again: a death-spiral (run 2026-06-21
+    // collapsed reps 5-9, c_insert 0.11→3e-5). The floor pins c_seg ≥ c_floor_, keeping the insert at
+    // the speed that grasped reliably in the early reps. pi_m_floor_ = pi_s_·c_floor/(1−c_floor).
+    double c_floor_     = 0.3;                 // Controller.c_floor
+    double pi_m_floor_  = 0.0;                 // derived from pi_s_ and c_floor_ at init
     double evidence_unit_ = 1.0;              // Controller.evidence_unit: Π_m added per clean leg
     SideGraspTarget belief_grasp_{};
     bool   belief_valid_ = false;
@@ -354,13 +397,28 @@ private:
     static constexpr float  INSERT_TOUCH_FORCE   = 0.3f;
     static constexpr double INSERT_VEL_MS        = 0.06;
     static constexpr int    CLOSING_TIMEOUT_TICKS = 100;
+    // The Robotiq 2F-85 takes ~0.5 s to physically close. A 3-tick (30 ms) force blip during the
+    // close MOTION used to fire the Lifting transition while the jaws were still moving — the arm
+    // "moved up without closing", knocking the bottle. HOLD the seated pose for at least this many
+    // ticks so the jaws fully close+settle BEFORE the grasp is judged or the lift starts.
+    static constexpr int    MIN_CLOSE_DWELL_TICKS = 55;   // ~0.55 s at 100 Hz; < CLOSING_TIMEOUT_TICKS
+    // After the dwell, require a sustained two-finger load: both pads must read above this (N), so an
+    // empty close (jaws meet each other) or a one-sided graze does NOT count as a grasp.
+    static constexpr float  GRASP_PAD_MIN_N      = 5.0f;
+    // Lift weight-confirmation: a truly held bottle adds ~m·g to the wrist wrench (0.4 kg ≈ 3.9 N).
+    // Require at least this vertical-wrench gain over the pre-lift baseline to confirm a real lift.
+    static constexpr double LIFT_WEIGHT_MIN_N    = 2.0;
     // The insert creeps the full APPROACH_STANDOFF_M (0.12 m) at INSERT_VEL_MS. At 0.06 m/s that is
     // ~200 ticks (10 ms each); 150 timed out MID-descent (the spurious "reflex stuck" MISS that made
     // it retreat from good positions). Budget the real travel time + margin.
     static constexpr int    INSERT_TIMEOUT_TICKS  = 300;
     static constexpr double TIP_REFLEX_STEP_M     = 0.005;
     static constexpr double TIP_REFLEX_MAX_M      = 0.05;
-    static constexpr double TIP_REFLEX_BACKOFF_M  = 0.02;
+    static constexpr double TIP_REFLEX_BACKOFF_M  = 0.04;   // MUST exceed REACH_TOLERANCE_M (0.02): a 0.02 backoff
+                                                            // target is already within tolerance the instant it is
+                                                            // set, so the retreat completes immediately and the arm
+                                                            // shows no visible stop-and-back-off on a tip graze.
+    static constexpr int    MAX_INSERT_REFLEXES   = 6;   // touch→retreat→shift→retry cycles before MISS
     // A fingertip graze this close to the seated grasp point is the canted-finger graze (the wrist
     // commits ~10° off the vertical floor, so the lower fingertip always touches just before seating).
     // The jaws straddle the bottle here, so CLOSE on it (the gripper self-centres) instead of backing

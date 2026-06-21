@@ -818,15 +818,20 @@ public:
         setMinimumHeight(130);
         setMaximumHeight(170);
     }
-    // Channels 0..3 = forces (N), 4..5 = tip contacts (0/1).
-    void push(float l, float r, float ltip, float rtip, float wrist, float lcontact, float rcontact)
+    // Channels 0..4 = forces (N), 5..6 = tip contacts (0/1), 7 = palm distance (m, own scale).
+    void push(float l, float r, float ltip, float rtip, float wrist, float lcontact, float rcontact,
+              float palm)
     {
-        const std::array<float, NCH> s{l, r, ltip, rtip, wrist, lcontact, rcontact};
+        // Sample stored EVERY call (100 Hz) so a brief contact TRANSIENT isn't aliased away; the
+        // force-3d tip sensors net to ~0 in static equilibrium but spike on impact, and that spike
+        // is the collision cue. Repaint is requested only every REPAINT_EVERY samples so the GUI
+        // refresh (~33 Hz) never sits on the 100 Hz control loop — storing is O(1), painting isn't.
+        const std::array<float, NCH> s{l, r, ltip, rtip, wrist, lcontact, rcontact, palm};
         for (int c = 0; c < NCH; ++c)
             buf_[c][head_] = s[c];
         head_ = (head_ + 1) % CAP;
         if (count_ < CAP) ++count_;
-        update();   // schedule repaint
+        if (++since_repaint_ >= REPAINT_EVERY) { since_repaint_ = 0; update(); }
     }
 
 protected:
@@ -890,15 +895,34 @@ protected:
         }
         p.setPen(QColor(150, 150, 160));
         p.drawText(W - 78, STRIP_H + 13, QString("max %1 N").arg(fmax, 0, 'f', 1));
+
+        // ── Palm distance (m): own autoscale (mm-range, would be invisible against 40 N forces) ──
+        const int pc = NFORCE + 2;            // channel 7
+        float pmax = 1e-3f;
+        for (int i = 0; i < count_; ++i) pmax = std::max(pmax, std::abs(buf_[pc][i]));
+        p.setPen(QPen(QColor(255, 140, 40), 1.6, Qt::DashLine));
+        QPointF pprev;
+        for (int i = 0; i < count_; ++i)
+        {
+            const int   idx = (head_ - count_ + i + CAP) % CAP;
+            const float y   = (H - 3) - std::abs(buf_[pc][idx]) / pmax * (H - STRIP_H - 16);
+            const QPointF pt(xof(i), y);
+            if (i > 0) p.drawLine(pprev, pt);
+            pprev = pt;
+        }
+        p.setPen(QColor(255, 140, 40));
+        p.drawText(6, STRIP_H + 13 + NFORCE * 12,
+                   QString("palm %1 m").arg(count_ ? buf_[pc][last] : 0.0f, 0, 'f', 3));
     }
 
 private:
-    static constexpr int CAP    = 300;   // ~6 s at the 50 Hz compute rate
+    static constexpr int CAP    = 600;   // ~6 s at the 100 Hz compute rate
     static constexpr int NFORCE = 5;     // Lforce, Rforce, Ltip, Rtip, wristFz
-    static constexpr int NCH    = 7;     // 5 forces + 2 contacts
+    static constexpr int NCH    = 8;     // 5 forces + 2 contacts + palm distance
     static constexpr int STRIP_H = 26;   // px: top strip height for the contact steps
+    static constexpr int REPAINT_EVERY = 3;   // request a repaint every 3 samples ⇒ ~33 Hz, off the loop
     std::array<std::array<float, CAP>, NCH> buf_{};
-    int head_ = 0, count_ = 0;
+    int head_ = 0, count_ = 0, since_repaint_ = 0;
 };
 
 ArmBeliefViewer3D::ArmBeliefViewer3D(QWidget* parent)
@@ -936,11 +960,11 @@ ArmBeliefViewer3D::ArmBeliefViewer3D(QWidget* parent)
 
 void ArmBeliefViewer3D::update_forces(float lforce, float rforce,
                                       float ltipforce, float rtipforce, float wrist_force,
-                                      bool ltipcontact, bool rtipcontact)
+                                      bool ltipcontact, bool rtipcontact, float palm_distance)
 {
     if (force_plot_ != nullptr)
         force_plot_->push(lforce, rforce, ltipforce, rtipforce, wrist_force,
-                          ltipcontact ? 1.0f : 0.0f, rtipcontact ? 1.0f : 0.0f);
+                          ltipcontact ? 1.0f : 0.0f, rtipcontact ? 1.0f : 0.0f, palm_distance);
 }
 
 ArmBeliefViewer3D::~ArmBeliefViewer3D() = default;
