@@ -93,7 +93,7 @@ public:
     {
                     m_frame_id = x.m_frame_id;
 
-                    m_stamp_ns = x.m_stamp_ns;
+                    m_stamp_ms = x.m_stamp_ms;
 
                     m_stream_id = x.m_stream_id;
 
@@ -119,7 +119,7 @@ public:
             ImageFrame&& x) noexcept
     {
         m_frame_id = x.m_frame_id;
-        m_stamp_ns = x.m_stamp_ns;
+        m_stamp_ms = x.m_stamp_ms;
         m_stream_id = x.m_stream_id;
         m_width = x.m_width;
         m_height = x.m_height;
@@ -139,7 +139,7 @@ public:
 
                     m_frame_id = x.m_frame_id;
 
-                    m_stamp_ns = x.m_stamp_ns;
+                    m_stamp_ms = x.m_stamp_ms;
 
                     m_stream_id = x.m_stream_id;
 
@@ -167,7 +167,7 @@ public:
     {
 
         m_frame_id = x.m_frame_id;
-        m_stamp_ns = x.m_stamp_ns;
+        m_stamp_ms = x.m_stamp_ms;
         m_stream_id = x.m_stream_id;
         m_width = x.m_width;
         m_height = x.m_height;
@@ -186,7 +186,7 @@ public:
             const ImageFrame& x) const
     {
         return (m_frame_id == x.m_frame_id &&
-           m_stamp_ns == x.m_stamp_ns &&
+           m_stamp_ms == x.m_stamp_ms &&
            m_stream_id == x.m_stream_id &&
            m_width == x.m_width &&
            m_height == x.m_height &&
@@ -236,31 +236,31 @@ public:
 
 
     /*!
-     * @brief This function sets a value in member stamp_ns
-     * @param _stamp_ns New value for member stamp_ns
+     * @brief This function sets a value in member stamp_ms
+     * @param _stamp_ms New value for member stamp_ms
      */
-    eProsima_user_DllExport void stamp_ns(
-            uint64_t _stamp_ns)
+    eProsima_user_DllExport void stamp_ms(
+            uint64_t _stamp_ms)
     {
-        m_stamp_ns = _stamp_ns;
+        m_stamp_ms = _stamp_ms;
     }
 
     /*!
-     * @brief This function returns the value of member stamp_ns
-     * @return Value of member stamp_ns
+     * @brief This function returns the value of member stamp_ms
+     * @return Value of member stamp_ms
      */
-    eProsima_user_DllExport uint64_t stamp_ns() const
+    eProsima_user_DllExport uint64_t stamp_ms() const
     {
-        return m_stamp_ns;
+        return m_stamp_ms;
     }
 
     /*!
-     * @brief This function returns a reference to member stamp_ns
-     * @return Reference to member stamp_ns
+     * @brief This function returns a reference to member stamp_ms
+     * @return Reference to member stamp_ms
      */
-    eProsima_user_DllExport uint64_t& stamp_ns()
+    eProsima_user_DllExport uint64_t& stamp_ms()
     {
-        return m_stamp_ns;
+        return m_stamp_ms;
     }
 
 
@@ -481,7 +481,7 @@ public:
 private:
 
     uint64_t m_frame_id{0};
-    uint64_t m_stamp_ns{0};
+    uint64_t m_stamp_ms{0};
     uint32_t m_stream_id{0};
     uint32_t m_width{0};
     uint32_t m_height{0};

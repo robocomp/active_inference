@@ -2,10 +2,12 @@
 
 #include "media_transport.h"
 
+#include <cctype>
 #include <chrono>
 #include <cstring>
 #include <cstdlib>
 #include <mutex>
+#include <string_view>
 #include <unordered_map>
 
 #include <fastdds/dds/domain/DomainParticipant.hpp>
@@ -397,6 +399,147 @@ void MediaSubscriber::close()
     }
 
     data_sharing_active_ = false;
+}
+
+// ---------------------------------------------------------------------------
+// MediaDescriptor: flat-JSON (de)serialization + config builders
+// ---------------------------------------------------------------------------
+namespace
+{
+// Minimal scanner for a FLAT JSON object: {"k": "str", "k2": 3, "k3": true}.
+// No nesting/arrays (the descriptor schema is deliberately flat), so this stays
+// small and robust. Every value is returned as its raw string token; typed
+// fields are converted by the caller.
+std::map<std::string, std::string> parse_flat_json(const std::string& s)
+{
+    std::map<std::string, std::string> out;
+    const std::size_t n = s.size();
+    std::size_t i = 0;
+    auto skip_ws = [&] { while (i < n and std::isspace(static_cast<unsigned char>(s[i]))) ++i; };
+    auto parse_string = [&](std::string& dst) -> bool
+    {
+        if (i >= n or s[i] != '"') return false;
+        ++i;
+        std::string r;
+        while (i < n and s[i] != '"')
+        {
+            if (s[i] == '\\' and i + 1 < n)
+            {
+                ++i;
+                const char c = s[i];
+                r += (c == 'n') ? '\n' : (c == 't') ? '\t' : c;   // covers \" \\ too
+            }
+            else
+                r += s[i];
+            ++i;
+        }
+        if (i >= n) return false;
+        ++i;                                                       // closing quote
+        dst = std::move(r);
+        return true;
+    };
+    skip_ws();
+    if (i < n and s[i] == '{') ++i;
+    while (true)
+    {
+        skip_ws();
+        if (i >= n or s[i] == '}') break;
+        std::string key;
+        if (not parse_string(key)) break;
+        skip_ws();
+        if (i < n and s[i] == ':') ++i; else break;
+        skip_ws();
+        std::string val;
+        if (i < n and s[i] == '"')
+        {
+            if (not parse_string(val)) break;
+        }
+        else                                                       // number / bool / null token
+        {
+            const std::size_t start = i;
+            while (i < n and s[i] != ',' and s[i] != '}') ++i;
+            val = s.substr(start, i - start);
+            while (not val.empty() and std::isspace(static_cast<unsigned char>(val.back()))) val.pop_back();
+        }
+        out.emplace(std::move(key), std::move(val));
+        skip_ws();
+        if (i < n and s[i] == ',') { ++i; continue; }
+    }
+    return out;
+}
+
+bool as_bool(const std::string& v) { return v == "true" or v == "1"; }
+int  as_int (const std::string& v, int def) { try { return std::stoi(v); } catch (...) { return def; } }
+} // namespace
+
+std::string MediaDescriptor::to_json() const
+{
+    auto esc = [](const std::string& v)
+    {
+        std::string r;
+        for (char c : v) { if (c == '"' or c == '\\') r += '\\'; r += c; }
+        return r;
+    };
+    std::string s = "{";
+    s += "\"version\":" + std::to_string(version);
+    s += ",\"domain_id\":" + std::to_string(domain_id);
+    s += ",\"type_name\":\"" + esc(type_name) + "\"";
+    s += ",\"type_tag\":\"" + esc(type_tag) + "\"";
+    s += ",\"history_depth\":" + std::to_string(history_depth);
+    s += ",\"shared_memory_only\":" + std::string(shared_memory_only ? "true" : "false");
+    s += ",\"data_sharing\":" + std::string(data_sharing ? "true" : "false");
+    s += ",\"ready\":" + std::string(ready ? "true" : "false");
+    for (const auto& [key, topic] : streams)
+        s += ",\"" + esc(key) + "_topic\":\"" + esc(topic) + "\"";
+    s += "}";
+    return s;
+}
+
+std::optional<MediaDescriptor> MediaDescriptor::from_json(const std::string& s)
+{
+    const auto kv = parse_flat_json(s);
+    if (kv.empty()) return std::nullopt;
+    MediaDescriptor d;
+    if (auto it = kv.find("version");            it != kv.end()) d.version            = as_int(it->second, d.version);
+    if (auto it = kv.find("domain_id");          it != kv.end()) d.domain_id          = static_cast<std::uint32_t>(as_int(it->second, 0));
+    if (auto it = kv.find("type_name");          it != kv.end()) d.type_name          = it->second;
+    if (auto it = kv.find("type_tag");           it != kv.end()) d.type_tag           = it->second;
+    if (auto it = kv.find("history_depth");      it != kv.end()) d.history_depth      = as_int(it->second, d.history_depth);
+    if (auto it = kv.find("shared_memory_only"); it != kv.end()) d.shared_memory_only = as_bool(it->second);
+    if (auto it = kv.find("data_sharing");       it != kv.end()) d.data_sharing       = as_bool(it->second);
+    if (auto it = kv.find("ready");              it != kv.end()) d.ready              = as_bool(it->second);
+    // Any "<name>_topic" key is a stream advertisement.
+    constexpr std::string_view suffix = "_topic";
+    for (const auto& [k, v] : kv)
+        if (k.size() > suffix.size() and k.compare(k.size() - suffix.size(), suffix.size(), suffix) == 0)
+            d.streams.emplace(k.substr(0, k.size() - suffix.size()), v);
+    return d;
+}
+
+std::optional<SubscriberConfig> MediaDescriptor::subscriber_config(const std::string& stream_key) const
+{
+    auto it = streams.find(stream_key);
+    if (it == streams.end()) return std::nullopt;
+    SubscriberConfig cfg;
+    cfg.domain_id          = domain_id;
+    cfg.topic_name         = it->second;
+    cfg.history_depth      = history_depth;
+    cfg.shared_memory_only = shared_memory_only;
+    cfg.data_sharing       = data_sharing;
+    return cfg;
+}
+
+std::optional<PublisherConfig> MediaDescriptor::publisher_config(const std::string& stream_key) const
+{
+    auto it = streams.find(stream_key);
+    if (it == streams.end()) return std::nullopt;
+    PublisherConfig cfg;
+    cfg.domain_id          = domain_id;
+    cfg.topic_name         = it->second;
+    cfg.history_depth      = history_depth;
+    cfg.shared_memory_only = shared_memory_only;
+    cfg.data_sharing       = data_sharing;
+    return cfg;
 }
 
 }  // namespace rc::media

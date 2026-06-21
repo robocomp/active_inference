@@ -98,34 +98,34 @@ void register_ImageFrame_type_identifier(
             TypeObjectUtils::add_complete_struct_member(member_seq_ImageFrame, member_frame_id);
         }
         {
-            TypeIdentifierPair type_ids_stamp_ns;
-            ReturnCode_t return_code_stamp_ns {eprosima::fastdds::dds::RETCODE_OK};
-            return_code_stamp_ns =
+            TypeIdentifierPair type_ids_stamp_ms;
+            ReturnCode_t return_code_stamp_ms {eprosima::fastdds::dds::RETCODE_OK};
+            return_code_stamp_ms =
                 eprosima::fastdds::dds::DomainParticipantFactory::get_instance()->type_object_registry().get_type_identifiers(
-                "_uint64_t", type_ids_stamp_ns);
+                "_uint64_t", type_ids_stamp_ms);
 
-            if (eprosima::fastdds::dds::RETCODE_OK != return_code_stamp_ns)
+            if (eprosima::fastdds::dds::RETCODE_OK != return_code_stamp_ms)
             {
                 EPROSIMA_LOG_ERROR(XTYPES_TYPE_REPRESENTATION,
-                        "stamp_ns Structure member TypeIdentifier unknown to TypeObjectRegistry.");
+                        "stamp_ms Structure member TypeIdentifier unknown to TypeObjectRegistry.");
                 return;
             }
-            StructMemberFlag member_flags_stamp_ns = TypeObjectUtils::build_struct_member_flag(eprosima::fastdds::dds::xtypes::TryConstructFailAction::DISCARD,
+            StructMemberFlag member_flags_stamp_ms = TypeObjectUtils::build_struct_member_flag(eprosima::fastdds::dds::xtypes::TryConstructFailAction::DISCARD,
                     false, false, false, false);
-            MemberId member_id_stamp_ns = 0x00000001;
-            bool common_stamp_ns_ec {false};
-            CommonStructMember common_stamp_ns {TypeObjectUtils::build_common_struct_member(member_id_stamp_ns, member_flags_stamp_ns, TypeObjectUtils::retrieve_complete_type_identifier(type_ids_stamp_ns, common_stamp_ns_ec))};
-            if (!common_stamp_ns_ec)
+            MemberId member_id_stamp_ms = 0x00000001;
+            bool common_stamp_ms_ec {false};
+            CommonStructMember common_stamp_ms {TypeObjectUtils::build_common_struct_member(member_id_stamp_ms, member_flags_stamp_ms, TypeObjectUtils::retrieve_complete_type_identifier(type_ids_stamp_ms, common_stamp_ms_ec))};
+            if (!common_stamp_ms_ec)
             {
-                EPROSIMA_LOG_ERROR(XTYPES_TYPE_REPRESENTATION, "Structure stamp_ns member TypeIdentifier inconsistent.");
+                EPROSIMA_LOG_ERROR(XTYPES_TYPE_REPRESENTATION, "Structure stamp_ms member TypeIdentifier inconsistent.");
                 return;
             }
-            MemberName name_stamp_ns = "stamp_ns";
-            eprosima::fastcdr::optional<AppliedBuiltinMemberAnnotations> member_ann_builtin_stamp_ns;
+            MemberName name_stamp_ms = "stamp_ms";
+            eprosima::fastcdr::optional<AppliedBuiltinMemberAnnotations> member_ann_builtin_stamp_ms;
             ann_custom_ImageFrame.reset();
-            CompleteMemberDetail detail_stamp_ns = TypeObjectUtils::build_complete_member_detail(name_stamp_ns, member_ann_builtin_stamp_ns, ann_custom_ImageFrame);
-            CompleteStructMember member_stamp_ns = TypeObjectUtils::build_complete_struct_member(common_stamp_ns, detail_stamp_ns);
-            TypeObjectUtils::add_complete_struct_member(member_seq_ImageFrame, member_stamp_ns);
+            CompleteMemberDetail detail_stamp_ms = TypeObjectUtils::build_complete_member_detail(name_stamp_ms, member_ann_builtin_stamp_ms, ann_custom_ImageFrame);
+            CompleteStructMember member_stamp_ms = TypeObjectUtils::build_complete_struct_member(common_stamp_ms, detail_stamp_ms);
+            TypeObjectUtils::add_complete_struct_member(member_seq_ImageFrame, member_stamp_ms);
         }
         {
             TypeIdentifierPair type_ids_stream_id;

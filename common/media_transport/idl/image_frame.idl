@@ -32,7 +32,7 @@ module rc { module media {
         // member would insert 4 padding bytes in C++ but not in XCDR2, making
         // is_plain(XCDR2)==false and silently disabling data-sharing zero-copy.
         unsigned long long       frame_id;    // monotonic, set by producer
-        unsigned long long       stamp_ns;    // capture timestamp
+        unsigned long long       stamp_ms;    // capture timestamp, epoch milliseconds
         @key unsigned long       stream_id;   // one DDS instance per stream
         unsigned long            width;
         unsigned long            height;

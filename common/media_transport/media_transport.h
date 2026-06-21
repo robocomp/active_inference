@@ -13,6 +13,8 @@
 
 #include <cstdint>
 #include <functional>
+#include <map>
+#include <optional>
 #include <string>
 
 #include "generated/idl/image_framePubSubTypes.hpp"
@@ -54,6 +56,66 @@ struct SubscriberConfig
     bool          shared_memory_only = true;
     bool          data_sharing = false;  // see PublisherConfig::data_sharing — OFF = churn-safe
 };
+
+// ---------------------------------------------------------------------------
+// Self-describing media plane (graph-based discovery)
+// ---------------------------------------------------------------------------
+// A publisher advertises HOW to attach to its media plane by writing a JSON
+// MediaDescriptor into a DSR node attribute (the descriptor lives in the graph;
+// the heavy frames stay out-of-band on the zero-copy DDS plane). Any agent reads
+// that string and builds a matching Subscriber/Publisher config with no hardcoded
+// topic/domain. Only the *configurable* QoS is carried — reliability/durability/
+// history-kind are fixed in this lib, so both ends agree by construction.
+
+// Default DSR attribute name that carries the descriptor JSON string.
+inline constexpr const char* MEDIA_DESCRIPTOR_ATTR = "media_descriptor";
+
+// Type-compatibility tag for the zero-copy bounded-plain ImageFrame. Zero-copy
+// maps the SHM segment byte-for-byte, so a subscriber MUST refuse a stream whose
+// tag differs. BUMP THIS whenever image_frame.idl changes (bounds/fields).
+inline constexpr const char* IMAGE_FRAME_TYPE_TAG = "ImageFrame.v2";
+
+struct MediaDescriptor
+{
+    int           version = 1;
+    std::uint32_t domain_id = 0;
+    std::string   type_name = "ImageFrame";
+    std::string   type_tag  = IMAGE_FRAME_TYPE_TAG;  // schema guard for zero-copy
+    int           history_depth = 8;
+    bool          shared_memory_only = true;
+    bool          data_sharing = false;
+    bool          ready = false;                      // lifecycle: false until the stream is live
+    std::map<std::string, std::string> streams;       // stream key ("rgb","depth",…) -> topic name
+
+    // Flat JSON ({"key": value}, streams emitted as "<key>_topic"). No external deps.
+    [[nodiscard]] std::string to_json() const;
+    [[nodiscard]] static std::optional<MediaDescriptor> from_json(const std::string& s);
+
+    // Build a config for one advertised stream key. nullopt if the key is absent.
+    [[nodiscard]] std::optional<SubscriberConfig> subscriber_config(const std::string& stream_key) const;
+    [[nodiscard]] std::optional<PublisherConfig>  publisher_config(const std::string& stream_key) const;
+};
+
+// Discovery convenience: read the descriptor JSON from a DSR node attribute and
+// parse it. Templated on the graph type so this header stays DSR-free (the
+// standalone media_bench never instantiates it, so it links no DSR). Graph must
+// expose get_node(name)->optional<Node> and Node::attrs(); the attribute value is
+// read as a string via Attribute::str().
+template <class Graph>
+[[nodiscard]] std::optional<MediaDescriptor>
+descriptor_from_graph(Graph& graph, const std::string& node_name,
+                      const char* attr_name = MEDIA_DESCRIPTOR_ATTR)
+{
+    auto node = graph.get_node(node_name);
+    if (not node.has_value())
+        return std::nullopt;
+    const auto& attrs = node->attrs();
+    auto it = attrs.find(attr_name);
+    if (it == attrs.end())
+        return std::nullopt;
+    try { return MediaDescriptor::from_json(it->second.str()); }
+    catch (...) { return std::nullopt; }   // attribute present but not a string / malformed
+}
 
 // One writer per topic. Not thread-safe: call from a single producer thread.
 class MediaPublisher

@@ -80,7 +80,7 @@ void SceneProcessor::drain_media_plane() const
                     media_rgb_.bgr = view.clone();
                 media_rgb_.width    = w;
                 media_rgb_.height   = h;
-                media_rgb_.stamp    = f.stamp_ns();
+                media_rgb_.stamp    = f.stamp_ms();
                 media_rgb_.frame_id = f.frame_id();
                 media_rgb_.valid    = true;
             }
@@ -116,7 +116,7 @@ void SceneProcessor::drain_media_plane() const
                 return;
             media_depth_.width    = w;
             media_depth_.height   = h;
-            media_depth_.stamp    = f.stamp_ns();
+            media_depth_.stamp    = f.stamp_ms();
             media_depth_.frame_id = f.frame_id();
             media_depth_.valid    = true;
         });

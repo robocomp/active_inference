@@ -106,7 +106,9 @@ int run_pub(const Args& a)
             ++fid;
             f->stream_id(rc::media::STREAM_ZED_RGB);
             f->frame_id(fid);
-            f->stamp_ns(static_cast<std::uint64_t>(now_ns()));
+            // Standalone loopback: use the stamp field as a raw ns stopwatch for
+            // sub-ms transport latency (isolated from the agents' epoch-ms convention).
+            f->stamp_ms(static_cast<std::uint64_t>(now_ns()));
             f->width(kWidth);
             f->height(kHeight);
             f->step(kWidth * 3);
@@ -173,7 +175,7 @@ int run_sub(const Args& a)
                 if (last_fid != 0 && f.frame_id() > last_fid + 1)
                     drops += (f.frame_id() - last_fid - 1);
                 last_fid = f.frame_id();
-                lat_sum_us += (recv - static_cast<std::int64_t>(f.stamp_ns())) / 1000.0L;
+                lat_sum_us += (recv - static_cast<std::int64_t>(f.stamp_ms())) / 1000.0L;
             },
             200);
         (void)n;

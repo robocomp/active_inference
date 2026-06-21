@@ -478,6 +478,17 @@ void SpecificWorker::read_rgbd_thread()
 			// below, which can still std::move them.
 			if (media_publishers_ready_)
 			{
+				// Normalize the camera alivetime to epoch MILLISECONDS so the media
+				// stamp matches the rest of the system (joints, lidar timestamp_ms).
+				// The ZED SDK reports epoch ns (~1.7e18); a Webots bridge may already
+				// report ms (~1.7e12). Scale down only ns-magnitude values, so this is
+				// correct whichever source is live (and a no-op if already ms).
+				constexpr auto to_epoch_ms = [](long long t) -> std::uint64_t
+				{
+					return t > 1'000'000'000'000'000LL
+					           ? static_cast<std::uint64_t>(t / 1'000'000)   // ns -> ms
+					           : static_cast<std::uint64_t>(t);              // already ms
+				};
 				const auto &img = frame.image;
 				if (const std::size_t nbytes = img.image.size();
 					nbytes > 0 && nbytes <= rc::media::MAX_IMAGE_BYTES && media_rgb_pub_)
@@ -486,7 +497,7 @@ void SpecificWorker::read_rgbd_thread()
 					{
 						s->stream_id(rc::media::STREAM_ZED_RGB);
 						s->frame_id(media_rgb_frame_id_++);
-						s->stamp_ns(static_cast<std::uint64_t>(img.alivetime));
+						s->stamp_ms(to_epoch_ms(img.alivetime));
 						s->width(static_cast<std::uint32_t>(img.width));
 						s->height(static_cast<std::uint32_t>(img.height));
 						s->step(static_cast<std::uint32_t>(img.width) * 3u);
@@ -518,7 +529,7 @@ void SpecificWorker::read_rgbd_thread()
 					{
 						s->stream_id(rc::media::STREAM_ZED_DEPTH);
 						s->frame_id(media_depth_frame_id_++);
-						s->stamp_ns(static_cast<std::uint64_t>(dep.alivetime));
+						s->stamp_ms(to_epoch_ms(dep.alivetime));
 						s->width(static_cast<std::uint32_t>(dep.width));
 						s->height(static_cast<std::uint32_t>(dep.height));
 						s->step(step);
