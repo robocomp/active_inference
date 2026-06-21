@@ -18,6 +18,8 @@
  */
 #include "specificworker.h"
 #include "pick_and_place_fsm.h"
+#include "self_projection_viewer.h"
+#include "media_source.h"
 
 #include <chrono>
 #include <cmath>
@@ -136,6 +138,7 @@ void SpecificWorker::initialize()
     try { exit_on_homing_timeout_ = configLoader.get<bool>("Controller.exit_on_homing_timeout"); } catch (...) {}
     try { bottle_from_graph_ = configLoader.get<bool>("Controller.bottle_from_graph"); } catch (...) {}
     if (bottle_from_graph_) std::print("[scene] bottle pose READ from DSR graph (table->bottle edge), not Webots\n");
+    try { bottle_monitor_ = configLoader.get<bool>("Controller.bottle_monitor"); } catch (...) {}
     try { publish_scene_to_graph_ = configLoader.get<bool>("Controller.publish_scene_to_graph"); } catch (...) {}
     if (publish_scene_to_graph_) std::print("[scene] publishing robot->table->bottle to DSR graph (Webots ground truth)\n");
 
@@ -209,6 +212,69 @@ void SpecificWorker::initialize()
     // The manipulation behaviour layer: EFE/QP controller + grasp-target perception +
     // pick-and-place state machine. Loads its own Controller.* behaviour config.
     fsm_ = std::make_unique<PickandPlaceFSM>(*this, configLoader);
+
+    // Self-projection RGB viewer (opt-in). Discovers the media plane from the
+    // graph and spins up an isolated RX thread + dock. Never on the control loop.
+    init_self_projection(configLoader);
+}
+
+// Discover the zero-copy media plane from the DSR graph (the camera node carries
+// a MediaDescriptor JSON written by robot_concept) and bring up the threaded RGB
+// source + its own-window dock. All failures are soft: the controller runs
+// unchanged without the viewer. P1 = bare RGB; FK "aura" overlay comes in P2.
+void SpecificWorker::init_self_projection(const ConfigLoader& configLoader)
+{
+    bool enabled = false;
+    try { enabled = configLoader.get<bool>("SelfProjection.enable"); } catch (...) {}
+    if (not enabled)
+        return;
+
+    if (not G)
+    {
+        std::print(stderr, "[self-proj] DSR graph G is null — cannot discover media plane.\n");
+        return;
+    }
+
+    std::string camera_node = "zed";
+    try { camera_node = configLoader.get<std::string>("SelfProjection.camera_node"); } catch (...) {}
+
+    const auto desc = rc::media::descriptor_from_graph(*G, camera_node);
+    if (not desc.has_value())
+    {
+        std::print(stderr, "[self-proj] no media_descriptor on node '{}' — is robot_concept up?\n", camera_node);
+        return;
+    }
+    if (not desc->ready)
+        std::print("[self-proj] media plane on '{}' advertises ready=false; subscribing anyway.\n", camera_node);
+    if (desc->type_tag != rc::media::IMAGE_FRAME_TYPE_TAG)
+    {
+        std::print(stderr, "[self-proj] type_tag mismatch ('{}' != '{}') — refusing zero-copy stream.\n",
+                   desc->type_tag, rc::media::IMAGE_FRAME_TYPE_TAG);
+        return;
+    }
+
+    const auto rgb_cfg = desc->subscriber_config("rgb");
+    if (not rgb_cfg.has_value())
+    {
+        std::print(stderr, "[self-proj] descriptor on '{}' advertises no 'rgb' stream.\n", camera_node);
+        return;
+    }
+
+    media_source_ = std::make_unique<rc::media::ThreadedMediaSource>(*rgb_cfg);
+    if (not media_source_->start())
+    {
+        std::print(stderr, "[self-proj] media source failed to start; disabling viewer.\n");
+        media_source_.reset();
+        return;
+    }
+
+    self_projection_viewer_ = std::make_unique<SelfProjectionViewer>(media_source_.get());
+    // Own top-level window: keeps these ~30 Hz image repaints out of the graph
+    // view's shared backing store (the churn-driven repaint storm corrupts it).
+    if (graph_viewers.contains(""))
+        graph_viewers.at("")->add_custom_widget_in_own_window("self_projection", self_projection_viewer_.get());
+    std::print("[self-proj] RGB viewer up: domain={} topic='{}'\n",
+               rgb_cfg->domain_id, rgb_cfg->topic_name);
 }
 
 void SpecificWorker::compute()
@@ -264,6 +330,8 @@ void SpecificWorker::compute()
 
         if (phase_ == Phase::WaitingForStart) { run_waiting_for_start(); return; }
         if (not run_requested_)               { abort_to_rest(); return; }
+
+        if (monitor_bottle_and_recover()) return;   // GT bottle tipped/rolled → aborted + re-stood
 
         fsm_->step(q, ee_position);   // ActiveEFE: pick-and-place behaviour (currently: approach + hold)
         const auto t_fsm = clk::now();
@@ -390,10 +458,6 @@ void SpecificWorker::run_sending_rest_pose(
     const std::array<double, Kinematics::N_ARM_JOINTS>& q)
 {
     kinovaarm_proxy->moveJointsWithAngle(nearest_equiv_target(q, rest_pose_angles_));
-    std::print("[homing] Sent rest pose [{:+.3f} {:+.3f} {:+.3f} {:+.3f} {:+.3f} {:+.3f} {:+.3f}] rad\n",
-               rest_pose_angles_[0], rest_pose_angles_[1], rest_pose_angles_[2],
-               rest_pose_angles_[3], rest_pose_angles_[4], rest_pose_angles_[5],
-               rest_pose_angles_[6]);
     homing_settled_ticks_ = 0;
     homing_elapsed_ticks_ = 0;
     phase_ = Phase::Homing;
@@ -413,9 +477,6 @@ void SpecificWorker::run_homing(
     else
         homing_settled_ticks_ = 0;
 
-    std::print("[homing] max joint err = {:.4f} rad  ({}/{} settled)\n",
-               max_err, homing_settled_ticks_, HOMING_SETTLE_TICKS);
-
     if (homing_settled_ticks_ < HOMING_SETTLE_TICKS
         and ++homing_elapsed_ticks_ > HOMING_TIMEOUT_TICKS)
     {
@@ -425,13 +486,13 @@ void SpecificWorker::run_homing(
         run_requested_ = false;
         if (exit_on_homing_timeout_)
         {
-            std::print("[homing] TIMEOUT after {} cycles (max err {:.4f} rad) — jammed; "
+            std::print(stderr, "[warn] homing TIMEOUT after {} cycles (max err {:.4f} rad) — jammed; "
                        "exit_on_homing_timeout ⇒ quitting (fail-fast for unattended runs).\n",
                        HOMING_TIMEOUT_TICKS, max_err);
             QTimer::singleShot(200, QCoreApplication::instance(), SLOT(quit()));
             return;
         }
-        std::print("[homing] TIMEOUT after {} cycles (max err {:.4f} rad) — "
+        std::print(stderr, "[warn] homing TIMEOUT after {} cycles (max err {:.4f} rad) — "
                    "pose unreachable/jammed; halting, waiting for Start.\n",
                    HOMING_TIMEOUT_TICKS, max_err);
         phase_         = Phase::WaitingForStart;
@@ -528,6 +589,8 @@ void SpecificWorker::update_bottle_pose_in_dsr()
 {
     if (not G or not rt_api_) return;
 
+    bottle_obs_fresh_ = false;   // set true below only if the producer bumped model_generation this cycle
+
     // robot + table are STATIC scene geometry: each getObjectPose is a slow,
     // step-synchronized Webots SUPERVISOR round-trip (the dominant loop-hitch source), so
     // query them ONCE and cache. Only the bottle moves ⇒ the only per-cycle supervisor call.
@@ -615,7 +678,33 @@ void SpecificWorker::update_bottle_pose_in_dsr()
             std::string bottle_name;
             if (G)
                 if (const auto cyls = G->get_nodes_by_type("cylinder"); not cyls.empty())
-                    bottle_name = cyls.front().name();
+                {
+                    const auto& bnode = cyls.front();
+                    bottle_name = bnode.name();
+                    // model_generation is the perception clock: it advances only when bottle_concept
+                    // re-fits the bottle, so an unchanged value means this read is the SAME info as
+                    // last cycle (the loop is necessarily open-loop until the next bump). Measure the
+                    // wall-time between bumps = the real τ_perc the lag-safety contract needs.
+                    if (const auto gen = G->get_attrib_by_name<model_generation_att>(bnode); gen.has_value())
+                    {
+                        const int g_now = gen.value();
+                        if (g_now != bottle_model_generation_)
+                        {
+                            const auto t_now = std::chrono::steady_clock::now();
+                            if (bottle_gen_time_valid_)
+                            {
+                                const double dt = std::chrono::duration<double>(t_now - bottle_last_gen_time_).count();
+                                bottle_refresh_period_s_ = bottle_refresh_period_s_ > 0.0
+                                    ? 0.8 * bottle_refresh_period_s_ + 0.2 * dt   // EWMA, smooths jitter
+                                    : dt;
+                            }
+                            bottle_last_gen_time_    = t_now;
+                            bottle_gen_time_valid_   = true;
+                            bottle_model_generation_ = g_now;
+                            bottle_obs_fresh_        = true;
+                        }
+                    }
+                }
             if (not bottle_name.empty())
                 if (auto bt = inner_eigen_api_->transform_axis("table", bottle_name); bt.has_value())
                 {
@@ -718,6 +807,43 @@ void SpecificWorker::respawn_bottle(double x, double y)
     }
     last_spawn_xy_ = Eigen::Vector2d(x, y);
     std::print("[spawn] bottle → ({:.3f},{:.3f},{:.3f}) upright\n", x, y, table_top_z_ + 0.002);
+}
+
+bool SpecificWorker::monitor_bottle_and_recover()
+{
+    if (not bottle_monitor_ or not scene_world_valid_) return false;
+    if (monitor_cooldown_ > 0) { --monitor_cooldown_; return false; }
+    // Throttle the GT read off the per-cycle control path: an Ice round-trip every cycle compounds
+    // the bridge's loop-jitter stall (the held-velocity arm then lurches and mis-grasps). Every ~12
+    // cycles is still well within the time a tip/roll takes to develop.
+    if (++monitor_tick_ % 12 != 0) return false;
+
+    RoboCompWebots2Robocomp::ObjectPose b;
+    try { b = webots2robocomp_proxy->getObjectPose(WEBOTS_BOTTLE_DEF); }
+    catch (const Ice::Exception&) { return false; }   // bridge hiccup: skip this cycle
+
+    const double z = b.position.z / 1000.0;
+    const Eigen::Quaterniond q(b.orientation.w, b.orientation.x, b.orientation.y, b.orientation.z);
+    const double tilt = std::acos(std::clamp(std::abs((q.normalized() * Eigen::Vector3d::UnitZ()).z()), 0.0, 1.0));
+
+    // Standing on the table (upright, z≈table): remember the spot to re-stand at.
+    if (tilt < BOTTLE_TIP_RAD and std::abs(z - table_top_z_) < 0.05)
+    {
+        last_upright_bottle_xy_ = Eigen::Vector2d(b.position.x / 1000.0, b.position.y / 1000.0);
+        return false;
+    }
+    // Lifted/held (z well above the table, still upright): a legitimate carry — don't abort.
+    if (z > table_top_z_ + 0.05 and tilt < BOTTLE_TIP_RAD)
+        return false;
+
+    // Otherwise it has TIPPED (tilt large) or ROLLED off (z below the table). Abort + re-stand.
+    std::print("[monitor] GT bottle FELL (tilt={:.0f}° z={:.3f}) — abort + re-stand at ({:.3f},{:.3f})\n",
+               tilt * 57.29578, z, last_upright_bottle_xy_.x(), last_upright_bottle_xy_.y());
+    gripper_command_ = 1.0f;                                  // open the gripper
+    respawn_bottle(last_upright_bottle_xy_.x(), last_upright_bottle_xy_.y());
+    if (fsm_) fsm_->reset();                                  // abort the attempt → back to Tracking
+    monitor_cooldown_ = 80;                                   // let the re-stand settle + GT update
+    return true;
 }
 
 void SpecificWorker::update_viewer_scene_objects()

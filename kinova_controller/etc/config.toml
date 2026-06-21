@@ -5,7 +5,7 @@ Webots2Robocomp = "webots2robocomp:tcp -h localhost -p 15010"
 
 # --- Common Agent Data ---
 [Agent]
-id = 9 # Change id
+id = 11 # MUST be unique across the shared graph: room=5 robot=6 voxelizer=9 bottle=10. id=9 collided with the voxelizer → CRDT actor-id clash → voxelizer SIGSEGV when the controller joined.
 name = "kinova_controller"
 
 # --- Single Instance Configuration ---
@@ -30,14 +30,17 @@ graph = true
 [Controller]
 auto_start = true
 exit_on_homing_timeout = false   # unattended sweeps set true ⇒ quit on a homing jam instead of idling
-monitor_log = true               # dense per-cycle [mon] line; set false for batch runs (fills disk)
-bottle_from_graph = true    # true ⇒ read bottle pose from the DSR graph (perception agent) instead of Webots ground truth
+monitor_log = true   # TEMP diagnostic
+monitor_period = 40  # cycles between log lines; loop is 100 Hz so 40 → ~2.5 Hz
+bottle_from_graph = true    # OPEN-LOOP result: read the PERCEIVED bottle (real P_bottle covariance) from the graph, with the look-up cost on, to show the closed→open-loop transition
 publish_scene_to_graph = false  # opt-in: write robot->table->bottle to graph (round-trip test / siblings)
-tip_log    = false  # disabled: [ctrl] lines below are the validation log
+tip_log    = true  # TEMP diagnostic
 # EXPERIMENT 1 — natural fine-tuning from a specialized sequence:
 # run the full pick→place loop and let model precision (c) accumulate from confirmed
 # grasps over round_cycles reps. false ⇒ the approach+hold baseline (Tracking holds).
-learn_pick_place = true
+learn_pick_place = true    # full pick cycle: approach → grasp → lift/retrieve → home, repeating
+stop_after_grasp = false  # set true (with learn_pick_place=true) to grasp the bottle then HOLD (no lift)
+grasp_height_frac = -0.15  # offset ABOVE model CENTER (bottle_pos=center): NEGATIVE = below the middle. -0.15 ≈ 3 cm below center (lower body)
 # Pragmatic resolved-rate backend: "dls" (closed form, default) or "qp" (proxQP).
 # The QP with no inequalities reproduces DLS exactly — A/B it, then later steps move
 # joint-limit/obstacle terms into hard QP constraints. See EFE_CONTROLLER_MATH.md §4.
@@ -76,12 +79,12 @@ field_overlap   = 0.06    # [m] RBF width: how near the via the next-via pull ra
 # force-asymmetry sign onto tool +X — flip it if re-centring makes tipping worse.
 tactile_recenter = false
 recenter_gain    = 0.02   # [m] max lateral seat shift at full L/R asymmetry
-recenter_sign    = 1.0    # ±1: calibrate in sim
+recenter_sign    = -1.0   # ±1: flipped — at +1 the tip-reflex grew the offset the wrong way ("reflex stuck")
 # Stop-and-rectify reflex on a tip-BUMPER collision during Inserting: halt, back off, and
 # shift laterally toward the contacting finger so the object enters the gripper on retry.
 # Needs the tip bumpers + TGripper.{l,r}tipcontact. recenter_sign also flips this reflex's
 # lateral direction — if it makes misalignment worse, flip the sign.
-tip_reflex = false
+tip_reflex = true   # tactile loopback: on fingertip contact, back off + nudge toward the contacting finger; the working offset is accumulated as a persistent perception calibration (tactile_calib_)
 # ── Bottle-as-obstacle (set-down withdrawal safety) ───────────────────────────────────
 # Hard QP velocity-damper constraint on the TOOL vs the bottle cylinder, active ONLY in
 # PlaceRetreating — the gripper has released the bottle on the table and is backing off to
@@ -90,17 +93,23 @@ tip_reflex = false
 bottle_obstacle        = true   # ON: don't tip the just-placed bottle on the way back to rest
 bottle_obstacle_margin = 0.04   # [m] repel within this distance of the bottle surface
 elbow_gain = 2.0
-elbow_target_xy = ""
+col_radius = 0.225   # body-collision cylinder radius (m) → 0.45 m diameter for the wide tray (was 0.03 column). Tune for the tray footprint.
+elbow_target_xy = "-0.625 -1.5"   # null-space elbow placement target (world). Back to the default sign.
 # Controlled-experiment harness: pin pick AND place so every rep repeats the same
 # pick→place motion (isolates a regression from pick/place-location variance). Empty
 # string ⇒ normal R2/predictive sweep. Pick = arm_base.wbt authored bottle xy.
-fixed_pick_xy = "0.1 -0.25"
+fixed_pick_xy = ""   # empty ⇒ vary the bottle position each rep over the spawn region below (was 0.1 -0.25 = table EDGE → bottle fell off)
+# Bottle respawn region (Webots/world m), must be ON the table + reachable. Table is x∈[0.1,0.9], y∈[-1.1,0.7].
+spawn_x_min = 0.25
+spawn_x_max = 0.55
+spawn_y_min = -0.78    # arm side of the table (arm base at y=-0.58); biased toward -Y
+spawn_y_max = -0.35
 fixed_place_xy = "0.15 -0.25"
-round_cycles = 10
+round_cycles = 20
 # Rest pose "j1 .. j7" (rad). Tune the "ready over the table, camera-up" posture
 # here without recompiling; relaunch to apply. Startup prints [rest-pose] metrics
 # (EE pos, upperarm_dz≈0 = first link parallel to table, toolY_up≈+1 = camera up).
-rest_pose = "0.0 0.0 0.0 1.0 0.0 1.65 -1.5705"   # in sync with kinova-bridge startup pose
+rest_pose = "3.14159 0.0 3.14159 1.0 0.0 1.65 -1.5705"   # PAPER rest pose (recovered from last week's experiment videos). j0=π, j2=π. bridge startup synced to this.
 grasp_align_tol_deg = 11.0  # commit near the ~9.5° alignment floor (kinematic plateau at this grasp pose): 8° never reaches and stalls; 15° committed early at the worst-allowed cant. 11° = best reachable alignment without stalling.
 
 # ── Skill-learning instrumentation ───────────────────────────────────────────
@@ -126,6 +135,7 @@ fluid_log_path   = "/tmp/kinova_fluidity.csv"
 # dwell, speed) — so the agent gets skilled purely by doing, and self-calibrates (it only
 # speeds up as fast as the outcomes keep confirming). Π_m is persisted across rounds.
 precision_reweighting = true       # EXP1: precision learning ON
+
 # WAF ablation toggles (defaults = current full system). global_confidence: true ⇒ one shared Π_m
 # (A/B vs per-segment). anticipation: false ⇒ greedy grasp azimuth + tight gate (isolate anticipation
 # from precision). success_rate_baseline: true ⇒ drive knobs from a Beta(1,1) success rate, not precision.
@@ -140,10 +150,17 @@ surprise_chi          = 3.0        # Mahalanobis k: a look-up is a surprise (re-
 rng_seed              = -1         # >=0 ⇒ reproducible noise realization for experiment seeds; -1 = random
 conf_gain             = 0.15       # (legacy ramp; unused by the surprise-driven update)
 skilled_sample_period = 12         # cycles between observations at full confidence
+
 # Synthetic perception-latency harness: ms a real look-up (segmentation+pose) would cost. > 0 makes
 # each actual look-up sleep this long, so the loop genuinely slows when it looks; as look-ups thin
 # with skill the effective approach rate recovers toward 1/T_ctrl. 0 = free look-up (default).
-perception_latency_ms = 0.0
+# Perception cost model. Default: use the REAL producer bandwidth — a graph read is free but only
+# carries new info when bottle_concept bumps model_generation, so the loop is open-loop between
+# producer frames (τ_perc measured live as bottle_refresh_period_s_). Set use_synthetic_latency=true
+# to instead pay perception_latency_ms as a literal sleep on each look-up (reproducible cost sweeps
+# that don't depend on the live perception rate).
+use_synthetic_latency = false
+perception_latency_ms = 50.0   # only used when use_synthetic_latency=true. Closed-loop ~17 Hz, open-loop (every 12) ~70 Hz.
 latency_log_path      = "/tmp/kinova_latency.csv"  # per-episode effective approach control rate
 speed_conf_gain       = 0.6        # approach speed ×(1+this·confidence) — "more speed" when skilled
 standoff_collapse     = 0.6        # at full c, slide the Tracking waypoint 60% from standoff toward grasp
@@ -169,6 +186,14 @@ probe_retreat     = false       # exploration done; retreat envelope is wide-ope
 probe_rspeed_amp  = 0.8         # speed sweep 0.024..0.216 m/s
 probe_open_amp    = 0.25        # open-threshold sweep ~0.60..0.99
 retreat_log_path  = "/tmp/kinova_retreat.csv"   # params → post-retreat tilt ("" disables)
+
+# ── Self-projection RGB viewer (P1) ──────────────────────────────────────────
+# Subscribes to the arm camera's zero-copy media plane (discovered from the DSR
+# graph: MediaDescriptor JSON on the camera node) on a dedicated RX thread, and
+# shows the RGB stream in its own window. Strictly off the 100 Hz control loop.
+[SelfProjection]
+enable = true        # opt-in; A/B the control-loop jitter OFF vs ON
+camera_node = "zed"   # DSR node carrying the media_descriptor (written by robot_concept)
 
 [Period]
 Compute = 10

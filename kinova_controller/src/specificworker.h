@@ -38,6 +38,8 @@
 #include <array>
 
 class PickandPlaceFSM;   // manipulation behaviour layer (src/pick_and_place_fsm.{h,cpp})
+class SelfProjectionViewer;                      // self-projection RGB dock (src/self_projection_viewer.{h,cpp})
+namespace rc::media { class ThreadedMediaSource; }   // threaded media-plane subscriber (common/media_transport)
 
 /**
  * \brief Robot-I/O + scene-perception + lifecycle host for the Kinova controller.
@@ -84,6 +86,14 @@ private:
 	std::unique_ptr<Kinematics>        kinematics_;
 	std::unique_ptr<ArmBeliefViewer3D> arm_belief_viewer_;
 	std::unique_ptr<PickandPlaceFSM>   fsm_;
+
+	// ── Self-projection RGB viewer (P1) ───────────────────────────────────────
+	// Off the 100 Hz loop: a ThreadedMediaSource owns an RX thread on the
+	// zero-copy media plane (discovered from the DSR graph), the dock polls it at
+	// ~30 Hz. Disabled by default (SelfProjection.enable). See media_source.h.
+	std::unique_ptr<rc::media::ThreadedMediaSource> media_source_;
+	std::unique_ptr<SelfProjectionViewer>           self_projection_viewer_;
+	void init_self_projection(const ConfigLoader& configLoader);
 
 	// Current EFE target (world frame, m) — set by the FSM controller, drawn by the viewer.
 	Eigen::Vector3d reach_target_{0.4, 0.0, 0.1};
@@ -132,6 +142,17 @@ private:
 	// belief (a dropped detection the look-up belief predicts through).
 	bool              bottle_from_graph_ = false;
 	bool              bottle_valid_      = false;   // a bottle pose has been obtained at least once
+	// Perception refresh tracking. Reading the graph is free and happens every cycle, but the bottle
+	// pose is only genuinely NEW when the producer (bottle_concept) bumps model_generation on the node.
+	// So model_generation, not the read, is the real perception clock: bottle_obs_fresh_ flags the
+	// cycle a new generation arrived, and bottle_refresh_period_s_ is the measured inter-generation
+	// interval — the true held-velocity exposure τ_perc for the v·τ≤βΔ lag-safety contract. This
+	// replaces the synthetic perception_latency_ms sleep with the producer's actual bandwidth.
+	int               bottle_model_generation_ = -1;
+	bool              bottle_obs_fresh_        = false;
+	double            bottle_refresh_period_s_ = 0.0;
+	std::chrono::steady_clock::time_point bottle_last_gen_time_{};
+	bool              bottle_gen_time_valid_   = false;
 	// OPT-IN scene publishing (default off): write robot->table->bottle RT edges from Webots ground
 	// truth so other agents/viewer see a live scene. With bottle_from_graph also on, this gives a
 	// self-contained ROUND-TRIP test of the graph read path before bottle_concept exists. In
@@ -153,6 +174,17 @@ private:
 	void update_bottle_pose_in_dsr();     // pull robot/table/bottle world poses into DSR
 	void update_viewer_scene_objects();   // draw table corners + bottle in the viewer
 	void respawn_bottle(double x, double y);   // teleport an upright bottle (bridge setObjectPose)
+
+	// Continuous GROUND-TRUTH bottle monitor (runs every compute, all phases, both modes). Reads the
+	// real bottle pose from Webots — NOT the perceived belief, which stays locked thinking a bottle is
+	// on the table while the real one rolled off. If the bottle tips or rolls, abort the attempt
+	// (open gripper + fsm reset) and re-stand it at its last upright spot. Returns true if it aborted.
+	bool monitor_bottle_and_recover();
+	bool              bottle_monitor_     = true;
+	int               monitor_cooldown_   = 0;     // settle ticks after a re-stand before re-checking
+	int               monitor_tick_       = 0;     // throttle counter for the GT read
+	Eigen::Vector2d   last_upright_bottle_xy_{0.44, -0.55};   // last GT xy seen standing on the table
+	static constexpr double BOTTLE_TIP_RAD = 0.6;  // ~34°: tilt beyond this ⇒ tipped
 
 	// ── Recovery / kinematic helpers ─────────────────────────────────────────
 	RoboCompKinovaArm::TJointAngles nearest_equiv_target(

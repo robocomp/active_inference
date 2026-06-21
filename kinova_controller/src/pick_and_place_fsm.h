@@ -65,6 +65,10 @@ private:
                             PlaceMoving, PlaceLowering, PlaceReleasing, PlaceRetreating,
                             Retracting };
     GraspPhase grasp_phase_ = GraspPhase::Tracking;
+    // Controller.stop_after_grasp: halt the FSM once the grasp is confirmed (Closing) and HOLD it —
+    // no Lifting/place. The "stop at grasp" experiment mode for testing the perceived-bottle grasp.
+    bool stop_after_grasp_ = false;
+    bool grasp_held_       = false;
 
     // ── Motion SEGMENTS (partition of c) ──────────────────────────────────────
     // Skill is partitioned per motion segment, not one global scalar: each segment
@@ -127,6 +131,8 @@ private:
     std::pair<float,float> tip_forces() const;
     std::pair<float,float> pad_forces() const;   // (lforce, rforce) — grip strength on the body
     float gripper_force() const;
+    float palm_distance() const;   // palm proximity (m) down the throat; 0 if sensor absent
+    float gripper_opening() const; // aperture [0,1] (0=closed, 1=open)
     bool  via_reached(double e_pos);
     double bottle_tilt_rad() const;
     // Per-segment skill. c_seg(k) = Π_m[k]/(Π_m[k]+Π_s) (force_confidence pins all).
@@ -173,9 +179,9 @@ private:
     // ── Approach (Tracking) constants + state ─────────────────────────────────
     static constexpr double APPROACH_STANDOFF_M = 0.12;
     static constexpr double REACH_TOLERANCE_M   = 0.02;
-    // Grasp ABOVE the bottle's centre of mass so gravity pendulums it upright in the gripper
-    // instead of letting an off-centre grip tip it (raised 0.5→0.6 of bottle height).
-    static constexpr double BOTTLE_GRASP_HEIGHT_FRAC = 0.6;
+    // Fraction up the bottle axis to aim the grasp. 0.6 grasped the NECK of the tapered BeerBottle
+    // (body is the lower ~half); lowered to grab the wide body. Config: Controller.grasp_height_frac.
+    double bottle_grasp_height_frac_ = 0.35;
     // Insertion depth: tool origin relative to the bottle axis along the approach. The old
     // +15 mm BACK-off (to keep the body out of the void behind the then-back-less gripper) left
     // the bottle at the FINGERTIPS, where closing pinches it into a pivot/tilt. The proto now
@@ -205,7 +211,7 @@ private:
     // Shows the elbow/lowest-link height above the table (elbow-dive watch), the bottle
     // tilt, and oscillation signals (Δe sign-flips, measured EE speed, |q̇|).
     bool   monitor_log_    = true;
-    int    monitor_period_ = 10;     // print every N efe_drive calls
+    int    monitor_period_ = 40;     // print every N efe_drive calls (100 Hz loop → ~2.5 Hz)
     long   mon_cycle_      = 0;
     double mon_prev_epos_  = 1e9;
     double mon_prev_time_  = 0.0;
@@ -227,14 +233,16 @@ private:
     double recenter_gain_ = 0.02, recenter_sign_ = 1.0;
     bool   tip_reflex_ = false;
     double tip_reflex_offset_ = 0.0;
+    // Persistent tactile CALIBRATION: the lateral reflex offset that finally seated the grasp is
+    // accumulated here (world frame) and added to the committed grasp target on every future rep, so
+    // the systematic perception bias (model drawn in front of / beside the points) is learned out.
+    Eigen::Vector3d tactile_calib_{0.0, 0.0, 0.0};
     bool   bottle_obstacle_ = false;
     double bottle_obstacle_margin_ = 0.04;
     double elbow_gain_ = 2.0;
+    double col_radius_ = 0.225;   // body-collision cylinder radius (m). 0.225 → 0.45 m dia for the wide tray (was 0.03 column). Config: Controller.col_radius.
     bool   elbow_target_set_ = false;
     Eigen::Vector2d elbow_target_xy_{0.0, 0.0};
-    bool   tip_log_ = false;
-    long   tip_log_cycle_ = 0;
-    std::optional<Eigen::Vector3d> tip_log_prev_pos_;
     std::array<double, Kinematics::N_ARM_JOINTS> last_q_dot_cmd_{};
 
     // ── Predictive selection / reach map ─────────────────────────────────────
@@ -291,6 +299,11 @@ private:
     // look-ups thin out, the effective approach control rate recovers toward 1/T_ctrl. The per-episode
     // effective rate is logged so the decoupling is MEASURED, not assumed. 0 = off (unchanged).
     double      perception_latency_ms_ = 0.0;
+    // Legacy synthetic-latency harness. Default OFF: the real perception cost is now the producer's
+    // refresh bandwidth (model_generation bumps, w_.bottle_refresh_period_s_), not a CPU sleep — so a
+    // graph read is only fused when it carries new info. Set true to restore the old sleep(perception_
+    // latency_ms) for reproducible cost sweeps that don't depend on the live perception rate.
+    bool        use_synthetic_latency_ = false;
     std::string latency_log_path_;
     std::ofstream latency_log_;   bool latency_log_open_ = false;
     double      approach_t0_ = 0.0;   // wall-clock at the first Tracking cycle of the episode
@@ -339,12 +352,20 @@ private:
     static constexpr float  GRASP_FORCE_THRESH   = 3.0f;
     static constexpr int    GRASP_FORCE_HOLD_TICKS = 3;
     static constexpr float  INSERT_TOUCH_FORCE   = 0.3f;
-    static constexpr double INSERT_VEL_MS        = 0.05;
+    static constexpr double INSERT_VEL_MS        = 0.06;
     static constexpr int    CLOSING_TIMEOUT_TICKS = 100;
-    static constexpr int    INSERT_TIMEOUT_TICKS  = 150;
+    // The insert creeps the full APPROACH_STANDOFF_M (0.12 m) at INSERT_VEL_MS. At 0.06 m/s that is
+    // ~200 ticks (10 ms each); 150 timed out MID-descent (the spurious "reflex stuck" MISS that made
+    // it retreat from good positions). Budget the real travel time + margin.
+    static constexpr int    INSERT_TIMEOUT_TICKS  = 300;
     static constexpr double TIP_REFLEX_STEP_M     = 0.005;
     static constexpr double TIP_REFLEX_MAX_M      = 0.05;
     static constexpr double TIP_REFLEX_BACKOFF_M  = 0.02;
+    // A fingertip graze this close to the seated grasp point is the canted-finger graze (the wrist
+    // commits ~10° off the vertical floor, so the lower fingertip always touches just before seating).
+    // The jaws straddle the bottle here, so CLOSE on it (the gripper self-centres) instead of backing
+    // off — backing off never re-seats, times out, and retreats from an otherwise-good grasp.
+    static constexpr double GRASP_TOUCH_COMMIT_M  = 0.045;
     // Post-grasp Leveling: lift a small clearance off the table AND rotate the gripper to the
     // (horizontal) grasp frame with orientation ENFORCED, so the ~15° canted commit is undone
     // while the bottle hangs free and low — before the main lift, which then stays upright.
@@ -371,10 +392,22 @@ private:
     static constexpr double PLACE_ON_TABLE_M      = 0.04;
     static constexpr double PLACE_ORIENT_GAIN     = 0.4;
     static constexpr double PLACE_RETREAT_DIST_M  = 0.14;
-    static constexpr double SPAWN_X_MIN = -0.40, SPAWN_X_MAX = 0.05;
-    static constexpr double SPAWN_Y_MIN = -0.82, SPAWN_Y_MAX = 0.45;
+    // Bottle respawn region (Webots/world frame). MUST be ON the table (Webots x∈[0.1,0.9],
+    // y∈[-1.1,0.7]) with edge margins, AND within arm reach. Old paper values (x[-0.40,0.05]) were
+    // off this table → the bottle fell off the front edge. Config: Controller.spawn_{x,y}_{min,max}.
+    double spawn_x_min_ = 0.25, spawn_x_max_ = 0.55;
+    double spawn_y_min_ = -0.65, spawn_y_max_ = -0.15;
     static constexpr double SPAWN_REACH_MIN_M = 0.35;
     static constexpr double SPAWN_REACH_MAX_M = 0.82;
+
+    // Tip-over recovery: if the standing bottle's axis tilts past this, it has fallen — re-stand it
+    // at the rep's spawn spot and restart the attempt. (GT mode only; uses the live bottle axis.)
+    static constexpr double TIP_OVER_RAD = 0.52;   // ~30°
+    static constexpr int    TIP_SETTLE_TICKS = 80; // after any respawn, wait this long before re-checking
+                                                   // tilt — setObjectPose is buffered + the bottle must
+                                                   // settle + the GT snapshot must update (else infinite loop)
+    int             tip_cooldown_ = 0;
+    Eigen::Vector2d rep_spawn_xy_{0.1, -0.25};     // where the current rep's bottle was placed (for re-standing)
 };
 
 #endif
