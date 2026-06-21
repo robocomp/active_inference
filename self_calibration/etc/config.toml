@@ -1,17 +1,17 @@
 
 # --- Common Agent Data ---
 [Agent]
-id = 0 # Change id
+id = 12 # MUST be unique across the shared graph: room=5 robot=6 voxelizer=9 bottle=10 controller=11. A collision = CRDT actor-id clash → SIGSEGV.
 name = "self_calibration"
 
 # --- Single Instance Configuration ---
 # Use this if you only have one graph.
 configFile = ""
 domain = 0
-tree = true
+tree =false 
 graph = true
-2d = true
-3d = true
+2d = false
+3d = false
 
 # --- Multiple Instance Template ---
 # If you define multiple instances, the single instance config above will be ignored.
@@ -23,12 +23,18 @@ graph = true
 # 2d = true
 # 3d = true
 
+# Self-calibration: subscribe to the arm camera's media plane (discovered from the
+# DSR MediaDescriptor on this node) for the reprojection residual.
+[SelfCalib]
+camera_node = "zed"
+residual_gate_m = 0.06   # depth inlier band (m): reject samples beyond this |pred−obs| (model breakdown / occlusion)
+
 [Period]
 Compute = 100
 Emergency = 500
 
 [Component.Debug]
-Verbose = true
+Verbose = false
 
 [Ice]
 Warn.Connections = "0"
