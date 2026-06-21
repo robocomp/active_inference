@@ -131,6 +131,15 @@ struct AgentConfig
     float robust_loss_scale = 0.05f;
     float mask_precision    = 0.0f;   // RGB-mask silhouette likelihood weight (0 = off)
     float cov_eff_scale     = 1.0f;   // covariance calibration: N_eff = N·scale (NEES → ~3)
+    // Cold-start seed de-projection: the visible (front-arc-only) point centroid sits ~one radius
+    // toward the camera from the true cylinder axis, so snapping the seed to it biases the model
+    // camera-ward (perceived "closer than real"; the observed points fall behind its bbox). Push the
+    // seed AWAY from the camera by frac·radius in the horizontal plane to recover the axis. 0 = off.
+    float seed_deproject_frac = 1.0f;
+    // Free-space / visibility FE term (BottleModelParams): penalise the model occupying the space
+    // between the camera and the observed points. The source cure for the camera-ward depth bias.
+    float lambda_freespace = 0.0f;     // 0 = off
+    float freespace_margin = 0.01f;    // m: carve-sample offset in front of each point
 
     // SampleQueue parameters (forwarded to SampleQueueParams)
     int   num_angle_bins               = 16;
@@ -162,6 +171,15 @@ struct AgentConfig
     std::string eval_robot_def  = "shadow";  // Webots DEF of the Shadow robot (== DSR body frame)
     float gt_cx = 0.0f, gt_cy = 0.0f, gt_cz = 0.0f;   // cylinder CENTRE, room frame
     float gt_radius = 0.0f, gt_height = 0.0f;
+
+    // ── One-shot bottle placement on start (Scene.*) ─────────────────────────────
+    // setObjectPose the real bottle to a fixed Webots-WORLD x,y ONCE at startup (z and
+    // orientation kept from its current pose), so the arm approaches from its own side and
+    // the reaching arm occludes the camera less. Done before perception converges, so the
+    // fit follows the new pose (a live move is blocked by the XY ownership gate).
+    bool  place_on_start = false;   // Scene.PlaceBottleOnStart
+    float place_world_x  = 0.0f;    // Scene.PlaceBottleWorldX (Webots world metres, +X front)
+    float place_world_y  = 0.0f;    // Scene.PlaceBottleWorldY (Webots world metres, +Y right)
 
     // ── Moving-bottle validation experiment ──────────────────────────────────
     // Steps the REAL bottle across the table in Webots (setObjectPose) through a grid of
@@ -351,6 +369,10 @@ private:
     std::string checkpoint_path_;
 
     std::ofstream eval_log_;   // open when cfg_.eval_enabled; header written on first row
+
+    bool place_bottle_done_ = false;   // one-shot guard for cfg_.place_on_start
+    int  place_settle_      = 0;       // cycles waited after placing, before fitting (gate-lock guard)
+    void place_bottle_on_start();      // setObjectPose the bottle to the configured world x,y once
 
     // Moving-bottle experiment runtime state (see step_move_experiment / Cfg::move_*).
     bool                                   move_started_ = false;

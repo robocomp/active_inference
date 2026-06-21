@@ -276,6 +276,31 @@ void SpecificWorker::initialize()
 
 // ─── Main compute loop ───────────────────────────────────────────────────────
 
+namespace { constexpr int PLACE_SETTLE_CYCLES = 30; }   // ~settle time after a start-placement move
+
+// One-shot: teleport the real bottle to its configured Webots-WORLD x,y (z + orientation kept),
+// so the arm approaches from its own side and occludes the camera less. Done once at startup,
+// before perception creates the node, so the fit follows the new pose (a live move would be
+// rejected by the XY ownership gate). Coords are Webots-world for now (raw-Webots bridge); when
+// the bridge is switched to RoboComp coords this should move to the RoboComp convention.
+void SpecificWorker::place_bottle_on_start()
+{
+    place_bottle_done_ = true;   // one-shot regardless of outcome — never fight perception with retries
+    if (not webots2robocomp_proxy)
+        return;
+    try
+    {
+        RoboCompWebots2Robocomp::ObjectPose p = webots2robocomp_proxy->getObjectPose(cfg_.eval_bottle_def);
+        p.position.x = cfg_.place_world_x * 1000.0f;   // config metres → bridge mm
+        p.position.y = cfg_.place_world_y * 1000.0f;   // z + orientation kept from current pose
+        webots2robocomp_proxy->setObjectPose(cfg_.eval_bottle_def, p);
+        std::print("bottle_concept: placed '{}' on start at Webots world ({:.3f}, {:.3f}) m (arm-side approach)\n",
+                   cfg_.eval_bottle_def, cfg_.place_world_x, cfg_.place_world_y);
+    }
+    catch (const std::exception& e)
+    { std::print("bottle_concept: place_bottle_on_start setObjectPose failed ({})\n", e.what()); }
+}
+
 void SpecificWorker::compute()
 {
     if (not G or not rt_api_)
@@ -288,6 +313,20 @@ void SpecificWorker::compute()
         room_node_id_ = rooms.front().id();
     }
 
+    // One-shot: place the bottle on its arm-side spot BEFORE any fit, then let the scene settle so
+    // the voxelizer captures it there before scaffold_missing_bottle_nodes() creates the node — a
+    // node created from a pre-move camera frame would lock the XY ownership gate at the old pose.
+    if (cfg_.place_on_start and not place_bottle_done_)
+    {
+        place_bottle_on_start();
+        return;
+    }
+    if (cfg_.place_on_start and place_settle_ < PLACE_SETTLE_CYCLES)
+    {
+        ++place_settle_;
+        return;
+    }
+
     refresh_masks_packet();
     scaffold_missing_bottle_nodes();
 
@@ -296,11 +335,16 @@ void SpecificWorker::compute()
         if (node.name().starts_with("bottle"))
             process_bottle_node(node);
 
-    // Validation drivers (Webots). Static-restart takes precedence over the continuous sweep.
-    if (cfg_.static_pose_test)
-        place_static_test_pose();
-    else
-        step_move_experiment();
+    // Validation drivers (Webots) also teleport the bottle, so they are mutually exclusive with the
+    // arm-side start placement — skip them when place_on_start owns the bottle pose.
+    if (not cfg_.place_on_start)
+    {
+        // Static-restart takes precedence over the continuous sweep.
+        if (cfg_.static_pose_test)
+            place_static_test_pose();
+        else
+            step_move_experiment();
+    }
 }
 
 // ─── Per-bottle pipeline ───────────────────────────────────────────────────────
@@ -439,10 +483,29 @@ float SpecificWorker::run_bottle_inference(BottleInstance& inst, const BottleObs
             const Eigen::Vector3f cen = sum / static_cast<float>(src.size());
             auto s = inst.model.state();
             s.cx = cen.x(); s.cy = cen.y(); s.cz = cen.z();
+            // De-project the visible-arc centroid onto the cylinder AXIS. The camera sees only the
+            // near arc, so the centroid lies ~one radius camera-ward of the axis; snapping the seed
+            // there biases the whole fit forward (the symmetric SDF is depth-degenerate for a one-
+            // sided cloud, so this seed/prior decides depth). Push the seed away from the camera by
+            // frac·radius in the horizontal plane (axis is vertical → bias is purely radial in XY).
+            float deproj = 0.0f;
+            if (const auto Mopt = room_T_zed_matrix();
+                Mopt.has_value() and cfg_.seed_deproject_frac > 0.0f and s.radius > 0.0f)
+            {
+                const Eigen::Vector2f cam_xy(static_cast<float>((*Mopt)(0, 3)),
+                                             static_cast<float>((*Mopt)(1, 3)));
+                const Eigen::Vector2f ray = Eigen::Vector2f(s.cx, s.cy) - cam_xy;   // camera → centroid (horizontal)
+                if (ray.norm() > 1e-4f)
+                {
+                    deproj = cfg_.seed_deproject_frac * s.radius;
+                    const Eigen::Vector2f back = deproj * ray.normalized();
+                    s.cx += back.x(); s.cy += back.y();   // axis pushed AWAY from the camera by ~radius
+                }
+            }
             inst.model.set_state(s);
             inst.model.set_prior(s);   // zero KL so the data term dominates from the start
-            std::print("[{}] cold-start snap → ({:.2f},{:.2f},{:.2f}) ({} pts)\n",
-                       inst.node_name, s.cx, s.cy, s.cz, src.size());
+            std::print("[{}] cold-start snap → ({:.2f},{:.2f},{:.2f}) ({} pts, de-proj {:+.3f} m away from cam)\n",
+                       inst.node_name, s.cx, s.cy, s.cz, src.size(), deproj);
             inst.matched_frames = cfg_.min_frames_before_historical + cfg_.historical_warmup_frames + 1;
         }
         else
@@ -1068,13 +1131,12 @@ void SpecificWorker::scaffold_missing_bottle_nodes()
         G->add_or_modify_attrib_local<height_m_att>(bottle_node, p.height_m);
 
         // Hang the bottle from the TABLE it sits on (room→bottle ⇒ table→bottle) when one is under it;
-        // else from the room. parent/level follow the anchor; the RT edge is written in its frame.
+        // else from the room. insert_or_assign_edge_RT (below) sets the bottle's parent + level
+        // (= anchor.level + 1) authoritatively from the RT edge, so we don't bookkeep them here.
         const float cz = matched_slice.centroid.z() > 1e-3f ? matched_slice.centroid.z() : p.room_z_m;
         const auto table = find_table_node(matched_slice.centroid.x(), matched_slice.centroid.y());
         DSR::Node parent_node = table.value_or(room_opt.value());
-        const int parent_level = G->get_attrib_by_name<level_att>(parent_node).value_or(2);
-        G->add_or_modify_attrib_local<level_att> (bottle_node, parent_level + 1);
-        G->add_or_modify_attrib_local<parent_att>(bottle_node, parent_node.id());
+        const int parent_level = G->get_node_level(parent_node).value_or(-1);   // for the log line only
         {
             const float rpx = G->get_attrib_by_name<pos_x_att>(room_opt.value()).value_or(200.f);
             const float rpy = G->get_attrib_by_name<pos_y_att>(room_opt.value()).value_or(200.f);
@@ -1303,8 +1365,8 @@ bool SpecificWorker::acquire_webots_gt()
     // true base-z is the table top in the room frame: derive gt_cz from there when a table is found.
     if (const auto tt = find_table_top(cfg_.gt_cx, cfg_.gt_cy); tt.has_value())
         cfg_.gt_cz = *tt + 0.5f * cfg_.gt_height;
-    std::print("bottle_concept: [eval] Webots GT (room frame, centre) = ({:.3f}, {:.3f}, {:.3f})\n",
-               cfg_.gt_cx, cfg_.gt_cy, cfg_.gt_cz);
+    // std::print("bottle_concept: [eval] Webots GT (room frame, centre) = ({:.3f}, {:.3f}, {:.3f})\n",
+    //            cfg_.gt_cx, cfg_.gt_cy, cfg_.gt_cz);
     return true;
 }
 
@@ -1669,6 +1731,8 @@ BottleModelParams SpecificWorker::make_model_params() const
     p.robust_loss_scale  = cfg_.robust_loss_scale;
     p.mask_precision     = cfg_.mask_precision;
     p.cov_eff_scale      = cfg_.cov_eff_scale;
+    p.lambda_freespace   = cfg_.lambda_freespace;
+    p.freespace_margin   = cfg_.freespace_margin;
     return p;
 }
 
@@ -1730,6 +1794,9 @@ void SpecificWorker::load_config(const ConfigLoader& cfg)
     cfg_.grad_clip          = getf("BottleModel.GradClip",          2.0f);
     cfg_.mask_precision     = getf("BottleModel.MaskPrecision",     0.0f);
     cfg_.cov_eff_scale      = getf("BottleModel.CovEffScale",       1.0f);
+    cfg_.seed_deproject_frac = getf("BottleModel.SeedDeprojectFrac", 1.0f);
+    cfg_.lambda_freespace   = getf("BottleModel.LambdaFreeSpace",   0.0f);
+    cfg_.freespace_margin   = getf("BottleModel.FreeSpaceMargin",   0.01f);
     cfg_.optimizer_type     = gets("BottleModel.OptimizerType",     "adam");
     cfg_.sgd_momentum       = getf("BottleModel.SgdMomentum",       0.9f);
     {
@@ -1770,6 +1837,11 @@ void SpecificWorker::load_config(const ConfigLoader& cfg)
     cfg_.gt_cz     = getf("Eval.GtCz",     0.0f);
     cfg_.gt_radius = getf("Eval.GtRadius", 0.0f);
     cfg_.gt_height = getf("Eval.GtHeight", 0.0f);
+
+    // One-shot bottle placement on start (Webots world coords; setObjectPose's native frame).
+    cfg_.place_on_start = getb("Scene.PlaceBottleOnStart", false);
+    cfg_.place_world_x  = getf("Scene.PlaceBottleWorldX", 0.0f);
+    cfg_.place_world_y  = getf("Scene.PlaceBottleWorldY", 0.0f);
 
     // Moving-bottle validation experiment.
     cfg_.move_experiment    = getb("Eval.MoveExperiment", false);

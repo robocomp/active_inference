@@ -324,12 +324,38 @@ float BottleModel::gradient_step(const std::vector<Eigen::Vector3f>& points,
         return params_.mask_precision * sil_conf_ * loss.mean();
     };
 
+    // Free-space / visibility term: carve a sample `freespace_margin` IN FRONT of each point (toward
+    // the camera, horizontal ray — the axis is vertical) and penalise it being INSIDE the cylinder.
+    // One-sided ⇒ the surface may sit at/behind the points but not bulge forward into observed free
+    // space, which is exactly the depth freedom the symmetric SDF leaves open. Reuses the silhouette
+    // camera (sil_cam_xy_), so it is active on the same frames the mask is.
+    using torch::indexing::Slice;
+    const bool fs_on = params_.lambda_freespace > 0.0f and sil_on;
+    auto freespace_loss = [&](const torch::Tensor& th) -> torch::Tensor
+    {
+        if (not fs_on) return torch::zeros({}, options);
+        const auto cx = th.index({0}), cy = th.index({1}), cz = th.index({2});
+        const auto radius = th.index({3}), half_h = th.index({4}) * 0.5f;
+        const auto px = points_tensor.index({Slice(), 0});
+        const auto py = points_tensor.index({Slice(), 1});
+        const auto pz = points_tensor.index({Slice(), 2});
+        const auto rx = px - sil_Cx, ry = py - sil_Cy;                 // camera → point (horizontal)
+        const auto rn = (rx * rx + ry * ry + 1e-9f).sqrt();
+        const auto sx = px - params_.freespace_margin * rx / rn;       // carve sample, in front of p
+        const auto sy = py - params_.freespace_margin * ry / rn;
+        const auto sdf = cylinder_sdf_tensor(sx - cx, sy - cy, pz - cz, radius, half_h);
+        const auto viol = torch::clamp_min(-sdf, 0.0f);               // penalise carve sample INSIDE
+        return params_.lambda_freespace * (weights_tensor * viol).sum()
+             / static_cast<double>(points_tensor.size(0));
+    };
+
     auto run_loop = [&](auto& optimizer) -> bool
     {
         for (int iter = 0; iter < params_.optimization_iters; ++iter)
         {
             optimizer.zero_grad();
-            auto loss = fe_torch_impl(params_, prior_, theta, points_tensor, weights_tensor) + silhouette_loss(theta);
+            auto loss = fe_torch_impl(params_, prior_, theta, points_tensor, weights_tensor)
+                      + silhouette_loss(theta) + freespace_loss(theta);
             const float loss_value = loss.item<float>();
             if (!std::isfinite(loss_value))
                 return false;

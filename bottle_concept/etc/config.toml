@@ -12,8 +12,8 @@ name = "bottle_concept"
 # Use this if you only have one graph.
 configFile = ""
 domain = 0
-tree =false 
-graph = true
+tree =false
+graph = false   # headless perception agent: the shared DSR node-link viewer crashes in paintAndFlush under participant churn (QRegion::~QRegion). Same fix as voxelizer.
 2d = false
 3d = false
 
@@ -45,8 +45,8 @@ MessageSizeMax = "20004800"
 required_agent_names = ["robot_concept", "room_concept", "voxelizer"]
 config_dir = "etc"
 monitor_period_ms = 500
-heartbeat_timeout_ms = 3000
-rejoin_grace_ms = 1500
+heartbeat_timeout_ms = 25000   # was 3000 — ride through the voxelizer's churn-crash auto-restart (latent Eigen-align SIGBUS) instead of self-shutting-down before it rejoins
+rejoin_grace_ms = 8000         # was 1500
 stale_grace_ms = 120000
 agent_info_period_ms = 1000
 
@@ -65,17 +65,20 @@ GtSource = "webots"            # "webots" (live getObjectPose) | "config" (manua
 LogPath  = "etc/bottle_static_eval.csv"
 BottleDef = "bottle"           # Webots DEF in shadow_arm.wbt
 RobotDef  = "shadow"           # Webots DEF of the Shadow robot (== DSR body frame)
+
 # Bottle dimensions: getObjectPose returns POSE only, so size GT comes from the proto.
 # GtHeight also sets the base→centre Z lift, so it must match the WaterBottle proto.
 # ⚠ VERIFY against shadow_arm.wbt's WaterBottle (these are the WaterBottleOpaque values).
 # Scene bottle is the cyberbotics WaterBottle (Evian MESH, shadow_arm.wbt) — NOT WaterBottleOpaque.
 # Data-driven best-fit cylinder (2026-06-20): radius 0.047 (depth 0.050 + mask 0.046), body height ~0.23.
-GtRadius = 0.047
-GtHeight = 0.23
+GtRadius = 0.031
+GtHeight = 0.20
+
 # Manual room-frame centre fallback, used only when GtSource = "config".
 GtCx = 0.0
 GtCy = 0.0
 GtCz = 0.0
+
 # ── Moving-bottle validation experiment ──────────────────────────────────────
 # When on, the agent drives the real bottle across the table in Webots (setObjectPose) through a
 # MoveGridN×MoveGridN grid centred on its start pose, holding each pose MoveSettleCycles compute
@@ -88,6 +91,17 @@ MoveSettleCycles = 25      # (continuous mode only)
 # Static-restart validation: ONE grid pose per run (env BOTTLE_TEST_POSE), fresh agent each time
 # (no cross-pose accumulation). Driven by bottle_static_test.sh. Real scenario = static-until-grasped.
 StaticPoseTest   = true
+
+# ── Scene setup: place the real bottle on start (Webots WORLD coords) ──────────
+# When on, the bottle is teleported once at startup to (PlaceBottleWorldX, PlaceBottleWorldY)
+# in Webots world (X+ front, Y+ right; z + orientation kept), so it sits on the arm's side and
+# the reaching arm occludes the camera less. Takes precedence over Eval.StaticPoseTest /
+# MoveExperiment (those also move the bottle). Set false to run the grid-validation drivers.
+[Scene]
+PlaceBottleOnStart = true
+PlaceBottleWorldX  = 0.438    # m, Webots world (+X front) — EXPERIMENT INITIAL POSITION (logged 2026-06-20)
+PlaceBottleWorldY  = -0.575   # m, Webots world (+Y right). reach 0.648 m from arm base. (Verify perception:
+                              # -0.45 was rejected by YOLO tray-mask earlier; confirm conf>0 at this spot.)
 
 # ── bottle_concept agent ──────────────────────────────────────────────────────
 [BottleConcept]
@@ -104,10 +118,10 @@ YawVariance = 9.87                 # ≈π² — yaw is unobservable for a symme
 [BottleModel]
 SigmaObs = 0.02            # SDF likelihood width (m); tight — a bottle is small
 LambdaSize = 0.5          # KL toward prior dimensions (radius, height)
-LambdaPos = 0.05          # KL toward prior centre
+LambdaPos = 0.5          # KL toward prior centre
 LambdaState = 0.02        # size transition
-PriorRadius = 0.047       # data-driven best-fit cylinder radius for the scene's cyberbotics WaterBottle (Evian MESH, tapered — no parametric radius). Measured 2026-06-20: depth-fit 0.050 + mask-calibrated 0.046 → 0.047. NOT the WaterBottleOpaque 0.022. See specificworker.cpp:885.
-PriorHeight = 0.23
+PriorRadius = 0.031       # cyberbotics BeerBottle (Heineken) body radius — naturally 62mm (no mesh distortion), well-detected by YOLO. height ~0.20 body.
+PriorHeight = 0.20
 PriorSizeStd = 0.03
 OptimizationIters = 15
 OptimizationLr = 0.005
@@ -115,6 +129,9 @@ GradClip = 2.0
 OptimizerType = "adam"
 MaskPrecision = 500.0    # RGB-mask silhouette likelihood weight (0=off). cf. depth inv_sigma2=1/0.02²=2500. Constrains (cx,cy,radius) — the front-arc-degenerate direction.
 CovEffScale = 0.036    # covariance calibration: N_eff = N*scale → NEES≈3 (depth points are spatially correlated, N over-counts)
+SeedDeprojectFrac = 2.0   # cold-start: push the visible-centroid seed away from the camera by frac·radius to recover the cylinder axis (front-arc centroid sits ~1 radius camera-ward → model parks forward, points fall behind its bbox). 0=off.
+LambdaFreeSpace = 100.0   # free-space/visibility FE term: penalise the model occupying space between camera and observed points (carve sample in front of each point must be OUTSIDE the cylinder). Breaks the symmetric-SDF depth degeneracy → removes the camera-ward bias for ANY position, no drift-back. 0=off. 2.0 was ~250× too weak vs mask(500)/likelihood(2500) — the fit kept ey≈6cm; cranked to 100 to actually bite (watch eval ey shrink; back off if unstable).
+FreeSpaceMargin = 0.01    # m: how far in front of each point the carve sample sits (small ⇒ tight depth pin).
 RobustLoss = "welsch"        # redescending (soft): far-from-surface points ~0 weight; beats Tukey (hard cutoff over-rejects, depth drifts at bad-mask poses)
 RobustLossScale = 0.04         # welsch c: points >~3-4cm from the cylinder surface are strongly down-weighted
 

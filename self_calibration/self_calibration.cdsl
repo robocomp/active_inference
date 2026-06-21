@@ -1,0 +1,11 @@
+
+Component self_calibration
+{
+    Communications
+    {
+    };
+    language Cpp11;
+    options dsr;
+
+};
+

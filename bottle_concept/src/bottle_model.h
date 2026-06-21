@@ -95,6 +95,17 @@ struct BottleModelParams
     // but dense surface points are spatially CORRELATED, so N over-counts independent evidence and P
     // comes out overconfident (NEES≫3). N_eff = N·cov_eff_scale. Tune to NEES≈3 (≈1/over-count).
     float cov_eff_scale = 1.0f;
+
+    // ── Free-space / visibility term ──────────────────────────────────────────────
+    // The depth points are surface samples seen ALONG camera rays, so the model must not occupy the
+    // free space between the camera and each point. The symmetric SDF likelihood is blind to this and
+    // is depth-degenerate for a one-sided (front-arc) cloud → the fit drifts camera-ward (perceived
+    // "closer than real"). This term carves a sample a little IN FRONT of each point (toward the
+    // camera) and penalises it being INSIDE the model. One-sided ⇒ the cylinder may sit at/behind the
+    // points but not bulge forward → breaks the degeneracy and removes the camera-ward bias.
+    // Needs the camera position (reuses the silhouette camera, so it rides on the same extrinsic).
+    float lambda_freespace  = 0.0f;    // 0 = off. Weight of the free-space violation penalty.
+    float freespace_margin  = 0.01f;   // m: how far in front of each point the carve sample sits.
 };
 
 struct FreeEnergyDecomposition
