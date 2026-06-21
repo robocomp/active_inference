@@ -208,6 +208,29 @@ void SpecificWorker::initialize()
 		else
 			qWarning() << "[Media] publisher init FAILED (rgb=" << rgb_ok << "depth=" << depth_ok
 			           << ") - RGBD will only flow through the DSR graph";
+
+		// Advertise the media plane in the graph so ANY agent can discover and subscribe
+		// without hardcoding topic/domain/QoS (rc::media::MediaDescriptor). Written on the
+		// camera node ("zed") that already carries cam_rgb_*; consumers read it generically
+		// via rc::media::descriptor_from_graph(G, "zed"). The heavy frames stay out-of-band
+		// on the zero-copy plane — only this small JSON string lives in the graph.
+		if (auto cam_node = G->get_node("zed"); cam_node.has_value())
+		{
+			rc::media::MediaDescriptor desc;
+			desc.domain_id          = static_cast<std::uint32_t>(params.MEDIA_DOMAIN_ID);
+			desc.history_depth      = rgb_cfg.history_depth;       // same QoS the publishers use
+			desc.shared_memory_only = rgb_cfg.shared_memory_only;
+			desc.data_sharing       = rgb_cfg.data_sharing;
+			desc.ready              = media_publishers_ready_;     // false ⇒ consumers should wait
+			desc.streams["rgb"]     = params.MEDIA_RGB_TOPIC;
+			desc.streams["depth"]   = params.MEDIA_DEPTH_TOPIC;
+			G->runtime_checked_add_or_modify_attrib_local(cam_node.value(),
+			                                              rc::media::MEDIA_DESCRIPTOR_ATTR, desc.to_json());
+			G->update_node(cam_node.value());
+			qInfo() << "[Media] descriptor advertised on 'zed':" << QString::fromStdString(desc.to_json());
+		}
+		else
+			qWarning() << "[Media] 'zed' node not found at init — media descriptor NOT advertised";
 	}
 
 	lidar_thread = std::thread(&SpecificWorker::read_lidar_thread,  this);
