@@ -18,8 +18,6 @@
  */
 #include "specificworker.h"
 #include "pick_and_place_fsm.h"
-#include "self_projection_viewer.h"
-#include "media_source.h"
 
 #include <chrono>
 #include <cmath>
@@ -32,7 +30,7 @@ namespace
     // Hardcoded for the first sanity test.  Move to etc/config once we have
     // confirmed Pinocchio loads the URDF correctly.
     constexpr auto URDF_PATH =
-        "/home/pbustos/robocomp/components/active_inference/kinova_controller/gen3_robotiq_2f_85-mod.urdf";
+        "/home/pbustos/robocomp/components/active_inference/common/kinematics/gen3_robotiq_2f_85-mod.urdf";
 
     /// Shortest angular distance |a − b| modulo 2π, in [0, π].
     /// Needed because continuous joints accumulate revolutions across runs
@@ -149,6 +147,8 @@ void SpecificWorker::initialize()
     try { bottle_monitor_ = configLoader.get<bool>("Controller.bottle_monitor"); } catch (...) {}
     try { publish_scene_to_graph_ = configLoader.get<bool>("Controller.publish_scene_to_graph"); } catch (...) {}
     if (publish_scene_to_graph_) std::print("[scene] publishing robot->table->bottle to DSR graph (Webots ground truth)\n");
+    try { joint_buffer_enabled_ = configLoader.get<bool>("Controller.publish_joint_buffer"); } catch (...) {}
+    if (joint_buffer_enabled_) std::print("[joint-buffer] publishing (stamp_ms,q) ring on kinova_arm_r for self_calibration\n");
 
     // Rest pose, tunable without recompiling: Controller.rest_pose = "j1 .. j7"
     // (rad). Lets us iterate the "ready over the table, camera-up" posture by
@@ -221,143 +221,60 @@ void SpecificWorker::initialize()
     // pick-and-place state machine. Loads its own Controller.* behaviour config.
     fsm_ = std::make_unique<PickandPlaceFSM>(*this, configLoader);
 
-    // Self-projection RGB viewer (opt-in). Discovers the media plane from the
-    // graph and spins up an isolated RX thread + dock. Never on the control loop.
-    init_self_projection(configLoader);
+    // Loop-rate guard: the control law assumes a ~100 Hz cadence (the velocity commands are held by
+    // the bridge until the next cycle). Make sure the compute period actually targets 100 Hz — if the
+    // config left it slower, tighten it to LOOP_TARGET_PERIOD_MS and say so.
+    const int cfg_period = getPeriod("Compute");
+    if (cfg_period > LOOP_TARGET_PERIOD_MS)
+    {
+        std::print("[looprate] Period.Compute={} ms is slower than the {} ms (100 Hz) target — setting it to {} ms\n",
+                   cfg_period, LOOP_TARGET_PERIOD_MS, LOOP_TARGET_PERIOD_MS);
+        setPeriod("Compute", LOOP_TARGET_PERIOD_MS);
+    }
+    std::print("[looprate] control loop target = {} Hz (Period.Compute = {} ms)\n",
+               1000 / std::max(1, getPeriod("Compute")), getPeriod("Compute"));
 }
 
-// Discover the zero-copy media plane from the DSR graph (the camera node carries
-// a MediaDescriptor JSON written by robot_concept) and bring up the threaded RGB
-// source + its own-window dock. All failures are soft: the controller runs
-// unchanged without the viewer. P1 = bare RGB; FK "aura" overlay comes in P2.
-void SpecificWorker::init_self_projection(const ConfigLoader& configLoader)
+// Publish the rolling (stamp_ms, q) ring onto the kinova_arm_r node so the
+// self_calibration agent can nearest-match q to an image stamp_ms. Flattened to
+// float vectors (the voxelizer-proven runtime-attr path); stamps are float OFFSETS
+// from a uint64 base so ms precision survives float32. The graph write is throttled
+// to ~20 Hz to bound the update_node signal cascade on the arm node's subscribers
+// (escape hatch if it still churns: a dedicated (stamp,q) DDS stream — see memory).
+void SpecificWorker::publish_joint_buffer(std::uint64_t stamp_ms,
+                                          const std::array<double, Kinematics::N_ARM_JOINTS>& q)
 {
-    bool enabled = false;
-    try { enabled = configLoader.get<bool>("SelfProjection.enable"); } catch (...) {}
-    if (not enabled)
+    std::array<float, Kinematics::N_ARM_JOINTS> qf{};
+    for (int i = 0; i < Kinematics::N_ARM_JOINTS; ++i)
+        qf[i] = static_cast<float>(q[i]);
+    joint_ring_.emplace_back(stamp_ms, qf);
+    while (joint_ring_.size() > JOINT_BUFFER_N)
+        joint_ring_.pop_front();
+
+    if (++joint_buffer_tick_ % JOINT_BUFFER_WRITE_EVERY != 0)
+        return;
+    if (not G or joint_ring_.empty())
+        return;
+    auto node = G->get_node(WEBOTS_ARM_DEF);   // "kinova_arm_r"
+    if (not node.has_value())
         return;
 
-    if (not G)
+    const std::uint64_t base_ms = joint_ring_.front().first;
+    std::vector<float> stamp_off;
+    std::vector<float> qflat;
+    stamp_off.reserve(joint_ring_.size());
+    qflat.reserve(joint_ring_.size() * Kinematics::N_ARM_JOINTS);
+    for (const auto& [s, a] : joint_ring_)
     {
-        std::print(stderr, "[self-proj] DSR graph G is null — cannot discover media plane.\n");
-        return;
+        stamp_off.push_back(static_cast<float>(s - base_ms));   // ms offset, exact in float (< 2^24)
+        for (float v : a)
+            qflat.push_back(v);
     }
-
-    std::string camera_node = "zed";
-    try { camera_node = configLoader.get<std::string>("SelfProjection.camera_node"); } catch (...) {}
-    try { ts_probe_ = configLoader.get<bool>("SelfProjection.timestamp_probe"); } catch (...) {}
-
-    const auto desc = rc::media::descriptor_from_graph(*G, camera_node);
-    if (not desc.has_value())
-    {
-        std::print(stderr, "[self-proj] no media_descriptor on node '{}' — is robot_concept up?\n", camera_node);
-        return;
-    }
-    if (not desc->ready)
-        std::print("[self-proj] media plane on '{}' advertises ready=false; subscribing anyway.\n", camera_node);
-    if (desc->type_tag != rc::media::IMAGE_FRAME_TYPE_TAG)
-    {
-        std::print(stderr, "[self-proj] type_tag mismatch ('{}' != '{}') — refusing zero-copy stream.\n",
-                   desc->type_tag, rc::media::IMAGE_FRAME_TYPE_TAG);
-        return;
-    }
-
-    const auto rgb_cfg = desc->subscriber_config("rgb");
-    if (not rgb_cfg.has_value())
-    {
-        std::print(stderr, "[self-proj] descriptor on '{}' advertises no 'rgb' stream.\n", camera_node);
-        return;
-    }
-
-    media_source_ = std::make_unique<rc::media::ThreadedMediaSource>(*rgb_cfg);
-    if (not media_source_->start())
-    {
-        std::print(stderr, "[self-proj] media source failed to start; disabling viewer.\n");
-        media_source_.reset();
-        return;
-    }
-
-    self_projection_viewer_ = std::make_unique<SelfProjectionViewer>(
-        media_source_.get(),
-        [this] { return self_projection_snapshot(); },   // GUI thread pulls control-thread state
-        URDF_PATH);
-    // Own top-level window: keeps these ~30 Hz image repaints out of the graph
-    // view's shared backing store (the churn-driven repaint storm corrupts it).
-    if (graph_viewers.contains(""))
-        graph_viewers.at("")->add_custom_widget_in_own_window("self_projection", self_projection_viewer_.get());
-    std::print("[self-proj] RGB viewer up: domain={} topic='{}'\n",
-               rgb_cfg->domain_id, rgb_cfg->topic_name);
-}
-
-SelfProjSnapshot SpecificWorker::self_projection_snapshot() const
-{
-    std::lock_guard lock(self_proj_mutex_);
-    return self_proj_snapshot_;
-}
-
-// Control-thread producer of the viewer's projection inputs. Reads the camera
-// intrinsics (once) and the arm-base→camera extrinsic from the graph, pairs them
-// with the latest measured q, and publishes the bundle under the mutex. Throttled
-// by the caller so the inner_eigen tree-walks never load the 100 Hz loop.
-void SpecificWorker::update_self_projection_snapshot(const std::array<double, Kinematics::N_ARM_JOINTS>& q)
-{
-    SelfProjSnapshot s;
-    s.q = q;
-    s.q_valid = true;
-
-    // Intrinsics are static: focal lengths from the zed node, principal point at
-    // the image centre (cx,cy = w/2,h/2 — the CameraAPI convention). Read once.
-    {
-        std::lock_guard lock(self_proj_mutex_);
-        if (self_proj_snapshot_.intrinsics_valid)
-        {
-            s.fx = self_proj_snapshot_.fx; s.fy = self_proj_snapshot_.fy;
-            s.cx = self_proj_snapshot_.cx; s.cy = self_proj_snapshot_.cy;
-            s.intrinsics_valid = true;
-        }
-    }
-    if (not s.intrinsics_valid and G)
-    {
-        if (auto zed = G->get_node("zed"); zed.has_value())
-        {
-            const auto fx = G->get_attrib_by_name<cam_rgb_focalx_att>(zed.value());
-            const auto fy = G->get_attrib_by_name<cam_rgb_focaly_att>(zed.value());
-            const auto w  = G->get_attrib_by_name<cam_rgb_width_att>(zed.value());
-            const auto h  = G->get_attrib_by_name<cam_rgb_height_att>(zed.value());
-            if (fx.has_value() and fy.has_value() and w.has_value() and h.has_value())
-            {
-                s.fx = fx.value();  s.fy = fy.value();
-                s.cx = w.value() / 2.0;  s.cy = h.value() / 2.0;
-                s.intrinsics_valid = true;
-            }
-        }
-    }
-
-    // Extrinsic arm-base→camera. "zed" and the arm node both hang off "body", so
-    //   zed_T_arm = body_T_zed⁻¹ · body_T_arm   (the room/world factor cancels).
-    // Compose manually (element-wise copy) — a single multi-hop walk is unreliable
-    // here (mount edges carry only a bootstrap timestamp), and it dodges Eigen's
-    // aligned-load on RTMat. Same pattern bottle_concept uses for its mask IoU.
-    if (inner_eigen_api_)
-    {
-        const auto btz = inner_eigen_api_->get_transformation_matrix("body", "zed", 0);
-        const auto bta = inner_eigen_api_->get_transformation_matrix("body", WEBOTS_ARM_DEF, 0);
-        if (btz.has_value() and bta.has_value())
-        {
-            const auto to_m4 = [](const Mat::RTMat& T)
-            {
-                Eigen::Matrix4d m;
-                const auto& src = T.matrix();
-                for (int i = 0; i < 4; ++i) for (int j = 0; j < 4; ++j) m(i, j) = src(i, j);
-                return m;
-            };
-            s.zed_T_arm = to_m4(btz.value()).inverse() * to_m4(bta.value());
-            s.extrinsic_valid = true;
-        }
-    }
-
-    std::lock_guard lock(self_proj_mutex_);
-    self_proj_snapshot_ = s;
+    G->runtime_checked_add_or_modify_attrib_local(node.value(), "joint_buffer_base_ms",      base_ms);
+    G->runtime_checked_add_or_modify_attrib_local(node.value(), "joint_buffer_stamp_off_ms", stamp_off);
+    G->runtime_checked_add_or_modify_attrib_local(node.value(), "joint_buffer_q",            qflat);
+    G->runtime_checked_add_or_modify_attrib_local(node.value(), "joint_buffer_dof",          static_cast<int>(Kinematics::N_ARM_JOINTS));
+    G->update_node(node.value());
 }
 
 void SpecificWorker::compute()
@@ -373,6 +290,22 @@ void SpecificWorker::compute()
         const auto ms = [](clk::time_point a, clk::time_point b)
         { return std::chrono::duration<double, std::milli>(b - a).count(); };
         const auto t0 = clk::now();
+
+        // Loop-rate guard: measure the ACTUAL call-to-call period and EMA-smooth it. Warn (throttled)
+        // if the loop sustains below ~80% of target — a sag the per-cycle [loophitch] check misses.
+        if (have_last_compute_t0_)
+        {
+            const double dt_ms = ms(last_compute_t0_, t0);
+            loop_period_ema_ms_ = loop_period_ema_ms_ > 0.0 ? 0.97 * loop_period_ema_ms_ + 0.03 * dt_ms
+                                                            : dt_ms;
+            const double target = static_cast<double>(getPeriod("Compute"));
+            if (++loop_rate_log_cycle_ % 200 == 0 and loop_period_ema_ms_ > 1.25 * target)
+                std::print("[looprate] loop running at {:.0f} Hz (mean period {:.1f} ms vs {:.0f} ms target) "
+                           "— compute() or system load is stretching the cycle\n",
+                           1000.0 / loop_period_ema_ms_, loop_period_ema_ms_, target);
+        }
+        last_compute_t0_      = t0;
+        have_last_compute_t0_ = true;
 
         // The one and only call to the KinovaArm proxy in the main loop.  All data
         const auto js = kinovaarm_proxy->getJointsState();
@@ -392,25 +325,11 @@ void SpecificWorker::compute()
         }
         cur_q_ = q;
 
-        // Feed the self-projection viewer (P2 FK aura). Throttled to ~20 Hz so the
-        // inner_eigen tree-walks + intrinsics read never sit on the 100 Hz loop;
-        // the ~50 ms q staleness is invisible at the 30 Hz repaint. No-op unless
-        // the viewer is up.
-        if (self_projection_viewer_ and (++self_proj_tick_ % 5 == 0))
-            update_self_projection_snapshot(q);
-
-        // Clock sanity probe: joints carry epoch ms (system_clock), the media stamp
-        // is now epoch ms too (robot_concept down-converts). A small, stable, POSITIVE
-        // diff (image older than the joint read) ⇒ same epoch and ≈ the pipeline
-        // latency (a τ prior); huge/negative/drifting ⇒ different clocks.
-        if (ts_probe_ and media_source_ and (self_proj_tick_ % 100 == 0))
-        {
-            const std::uint64_t img_ms = media_source_->latest_stamp_ms();
-            const auto joint_ms = static_cast<std::uint64_t>(js.timestamp);
-            std::print("[ts-probe] joint_ms={} img_ms={} joint-img={} ms\n",
-                       joint_ms, img_ms,
-                       static_cast<std::int64_t>(joint_ms) - static_cast<std::int64_t>(img_ms));
-        }
+        // Publish the rolling (stamp_ms, q) ring for the self_calibration agent.
+        // js.timestamp is epoch ms (same clock as the media stamp_ms — confirmed by
+        // [ts-probe]); the ring keeps filling at 100 Hz, the graph write is throttled.
+        if (joint_buffer_enabled_)
+            publish_joint_buffer(static_cast<std::uint64_t>(js.timestamp), q);
 
         send_gripper_command();
         const auto t_grip = clk::now();

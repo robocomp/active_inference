@@ -28,20 +28,19 @@
 #include "kinematics.h"
 #include "efe_gradient.h"
 #include "arm_belief_viewer_3d.h"
-#include "self_projection_types.h"
 
 #include <dsr/api/dsr_inner_eigen_api.h>
 #include <dsr/api/dsr_rt_api.h>
 
 #include <Eigen/Dense>
 #include <memory>
-#include <mutex>
 #include <optional>
+#include <chrono>
 #include <array>
+#include <cstdint>
+#include <deque>
 
 class PickandPlaceFSM;   // manipulation behaviour layer (src/pick_and_place_fsm.{h,cpp})
-class SelfProjectionViewer;                      // self-projection RGB dock (src/self_projection_viewer.{h,cpp})
-namespace rc::media { class ThreadedMediaSource; }   // threaded media-plane subscriber (common/media_transport)
 
 /**
  * \brief Robot-I/O + scene-perception + lifecycle host for the Kinova controller.
@@ -89,34 +88,38 @@ private:
 	std::unique_ptr<ArmBeliefViewer3D> arm_belief_viewer_;
 	std::unique_ptr<PickandPlaceFSM>   fsm_;
 
-	// ── Self-projection RGB viewer ────────────────────────────────────────────
-	// Off the 100 Hz loop: a ThreadedMediaSource owns an RX thread on the
-	// zero-copy media plane (discovered from the DSR graph), the dock polls it at
-	// ~30 Hz. Disabled by default (SelfProjection.enable). See media_source.h.
-	std::unique_ptr<rc::media::ThreadedMediaSource> media_source_;
-	std::unique_ptr<SelfProjectionViewer>           self_projection_viewer_;
-	void init_self_projection(const ConfigLoader& configLoader);
-
-	// P2 FK aura: the control thread publishes the latest q + arm→camera extrinsic
-	// + intrinsics here (throttled), the viewer's GUI thread reads it under the
-	// mutex and does its own FK/projection. All DSR access stays on this thread.
-	void update_self_projection_snapshot(const std::array<double, Kinematics::N_ARM_JOINTS>& q);
-	mutable std::mutex self_proj_mutex_;
-	SelfProjSnapshot   self_proj_snapshot_;
-	int                self_proj_tick_ = 0;
-	// Debug: print joint-stamp vs media-stamp (both epoch ms) + their diff, ~1 Hz,
-	// to confirm the two clocks share an epoch before building the t↔q matcher.
-	bool               ts_probe_ = false;
-public:
-	// Thread-safe snapshot accessor for the viewer (GUI thread).
-	[[nodiscard]] SelfProjSnapshot self_projection_snapshot() const;
-private:
+	// ── Joint buffer for the self_calibration agent ───────────────────────────
+	// A rolling (stamp_ms, q) ring published on the kinova_arm_r node so the
+	// calibrator can nearest-match q to an image stamp_ms (the t↔q lookup). DSR has
+	// no nested-vector attr type, so it is flattened to FLOAT vectors + a uint64
+	// base (the voxelizer-proven path): stamps go as float OFFSETS from base_ms so
+	// ms precision survives float32 (raw epoch-ms ~1.78e12 would not). Opt-in
+	// (Controller.publish_joint_buffer) and throttled to bound churn on the arm node.
+	void publish_joint_buffer(std::uint64_t stamp_ms,
+	                          const std::array<double, Kinematics::N_ARM_JOINTS>& q);
+	bool joint_buffer_enabled_ = false;
+	int  joint_buffer_tick_    = 0;
+	std::deque<std::pair<std::uint64_t, std::array<float, Kinematics::N_ARM_JOINTS>>> joint_ring_;
+	static constexpr std::size_t JOINT_BUFFER_N           = 48;   // ~480 ms at 100 Hz
+	static constexpr int         JOINT_BUFFER_WRITE_EVERY = 5;    // publish at ~20 Hz
 
 	// Current EFE target (world frame, m) — set by the FSM controller, drawn by the viewer.
 	Eigen::Vector3d reach_target_{0.4, 0.0, 0.1};
 	bool proxy_unreachable_warned_        = false;
 	bool webots_proxy_unreachable_warned_ = false;
 	bool joint_dump_pending_              = true;   // dump the first received TJoints, once
+
+	// ── Loop-rate guard (keep the control loop near 100 Hz) ───────────────────
+	// The GRAFCET timer fires every Period.Compute ms, but a heavy cycle or system load stretches the
+	// REAL call-to-call interval; the bridge then holds the last q̇ for that whole interval and the arm
+	// overshoots. Track the actual inter-cycle period (EMA) and warn, throttled, when it sags below the
+	// target so a sustained slow-down is visible (distinct from [loophitch], which only flags a single
+	// 40 ms+ cycle). target = getPeriod("Compute"); 100 Hz ⇒ 10 ms.
+	static constexpr int    LOOP_TARGET_PERIOD_MS = 10;     // 100 Hz
+	bool   have_last_compute_t0_  = false;
+	std::chrono::steady_clock::time_point last_compute_t0_{};
+	double loop_period_ema_ms_    = 0.0;
+	long   loop_rate_log_cycle_   = 0;
 
 	// ── Outer lifecycle state ────────────────────────────────────────────────
 	Phase phase_ = Phase::SendingRestPose;

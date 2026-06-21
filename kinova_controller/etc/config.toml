@@ -34,23 +34,32 @@ monitor_log = true   # TEMP diagnostic
 monitor_period = 40  # cycles between log lines; loop is 100 Hz so 40 → ~2.5 Hz
 bottle_from_graph = true    # OPEN-LOOP result: read the PERCEIVED bottle (real P_bottle covariance) from the graph, with the look-up cost on, to show the closed→open-loop transition
 publish_scene_to_graph = false  # opt-in: write robot->table->bottle to graph (round-trip test / siblings)
+publish_joint_buffer = true  # write the rolling (stamp_ms,q) ring on kinova_arm_r for the self_calibration agent (~20Hz)
 tip_log    = true  # TEMP diagnostic
+
 # EXPERIMENT 1 — natural fine-tuning from a specialized sequence:
 # run the full pick→place loop and let model precision (c) accumulate from confirmed
 # grasps over round_cycles reps. false ⇒ the approach+hold baseline (Tracking holds).
 learn_pick_place = true    # full pick cycle: approach → grasp → lift/retrieve → home, repeating
 stop_after_grasp = false  # set true (with learn_pick_place=true) to grasp the bottle then HOLD (no lift)
 stop_after_lift  = true   # EXPERIMENT GOAL: success = a CONFIRMED lift (GT bottle risen); then release + home for the next rep, skip place/retreat
+generative_lift  = true   # A/B: true ⇒ two-hypothesis generative lift confirm (grasped vs empty, sequential log-Bayes, cam-open active correction); false ⇒ legacy rise/via thresholds
+lift_speed       = 0.10   # [m/s] vertical rise speed during Lifting. Deliberately slow + NOT skill-boosted (lift is the risky leg); the rise is straight up, no place-blend, gentle wrist (ω≤0.5) so it doesn't cam the grip open or twist the bottle
+lift_min_confirm_rise = 0.12   # [m] keep rising until the bottle has come up this much before confirming the lift (even after the generative TRACK channel decides "grasped") — makes the vertical motion clearly observable. Must be < LIFT_HEIGHT_M (0.18).
 grasp_height_frac = -0.15  # offset ABOVE model CENTER (bottle_pos=center): NEGATIVE = below the middle. -0.15 ≈ 3 cm below center (lower body)
+perception_bias_ff_xy = "0 0"   # #3 OFF: the source fix (bottle_concept LambdaFreeSpace=100) now de-biases the FIT to ~1.2cm, so the controller hand-offset is no longer needed (would over-correct). Kept as a knob for residual/real-robot calibration. Was "0.035 -0.025" when the fit bias was ~6cm.
+
 # Pragmatic resolved-rate backend: "dls" (closed form, default) or "qp" (proxQP).
 # The QP with no inequalities reproduces DLS exactly — A/B it, then later steps move
 # joint-limit/obstacle terms into hard QP constraints. See EFE_CONTROLLER_MATH.md §4.
 solver = "qp"
+
 # QP only: weight on the μ/elbow linear term. 0 (or ≤0) ⇒ λ² = reproduces the old
 # null-space projection (redundancy strictly off the task). Larger ⇒ genuine NEO: μ/elbow
 # assert in the objective and the task slack yields. Try ~0.05–0.2 to A/B the difference.
 qp_redundancy_weight = 0.0
 force_confidence = -1.0   # normal learning
+
 # Look-ahead coarticulation: within this radius (m) of a transit via-point (lift-top,
 # place-hover) the EE velocity is steered toward the NEXT waypoint so it ROUNDS the corner
 # instead of stopping. Effective = skill_c()·this (0 for novice = baseline exact stops).
@@ -59,6 +68,7 @@ force_confidence = -1.0   # normal learning
 # carried into the set-down hurts SPARC. 0.04 = swept optimum (skilled-rep J=time−SPARC
 # best of {0,0.02,0.04,0.06}; SPARC −5.48→−4.77, cycle 6.1→5.3s, success 19/20). 0 = off.
 blend_radius = 0.04
+
 # ── Preference-field mode (option (c) prototype, steps 1–2) ───────────────────────────
 # Replace the hand-coded look-ahead blend on the transit legs with a 2-via Gaussian-mixture
 # preference field. ONE precision per via expresses stop-vs-pass: λ=exp(−Π/ref) is the
@@ -72,6 +82,7 @@ field_prec_pass = 1.0     # Π of a transit via at full skill (low ⇒ pass thro
 field_prec_stop = 30.0    # Π at novice / of the next attractor (high ⇒ stop)
 field_prec_ref  = 6.0     # λ = exp(−Π/ref): precision → terminal-speed map
 field_overlap   = 0.06    # [m] RBF width: how near the via the next-via pull ramps in
+
 # ── Tactile re-centering (anti-tip grasp) ─────────────────────────────────────────────
 # Use the per-finger fingertip tip-force asymmetry (ltipforce−rtipforce) during Inserting to
 # shift the seat target laterally toward the harder-pushing finger, centring the bottle
@@ -85,28 +96,46 @@ recenter_sign    = 1.0   # ±1. Now that dir comes from the BINARY bumper (cl/cr
                           # Verified in run v3: at -1 the left bumper kept firing and the offset walked
                           # monotonically to the cap (never cleared) ⇒ wrong way; +1 moves toward the
                           # contacting finger. (The old "-1 / +1 grew wrong way" note predates the binary dir.)
+
 # Stop-and-rectify reflex on a tip-BUMPER collision during Inserting: halt, back off, and
 # shift laterally toward the contacting finger so the object enters the gripper on retry.
 # Needs the tip bumpers + TGripper.{l,r}tipcontact. recenter_sign also flips this reflex's
 # lateral direction — if it makes misalignment worse, flip the sign.
 tip_reflex = true   # tactile loopback: on fingertip touch → STOP, retreat a bit, shift laterally, re-descend; the working offset accumulates as a persistent perception calibration (tactile_calib_)
 reflex_force_thresh = 0.05   # [N] fingertip force that counts as a touch. Light bottle tips below the bridge's 0.5 N bool AND below 0.15, so trigger on the gentle contact spike directly. Lower = more sensitive.
+tip_reflex_step = 0.012   # [m] lateral seat shift per fingertip hit (was 0.005). Bigger = move decisively off the contacting finger in one maneuver; clamped to TIP_REFLEX_MAX_M (0.05).
+
+# ── Compliant close (centre the bottle during the grip) ────────────────────────────────
+# While the jaws close, micro-translate the gripper laterally to NULL the L−R pad-force asymmetry so
+# the bottle ends CENTRED between the pads instead of edge-gripped (the off-centre grip tips the light
+# bottle on lift = the per-grasp ~50% slip that retries currently mask). Force-balance servo coupled to
+# the close; gentle (slow capped accumulation) so it does not drag the bottle over. Aims to make the
+# FIRST grasp reliable, not retry-padded.
+compliant_close       = true
+compliant_close_gain  = 0.00002   # m lateral per (N·tick) of L−R asymmetry — raise to centre faster, lower if it knocks the bottle
+compliant_close_max   = 0.03      # m cap on the accumulated lateral shift
+compliant_close_speed = 0.05      # m/s EE tracking of the shifting hold target
+compliant_close_sign  = 1.0       # ±1 maps L−R asymmetry onto tool +X — FLIP if centring makes tipping worse (cf. recenter_sign)
+
 # ── Tactile-safe insertion (novice slow → skilled fast) ───────────────────────────────
 # Insert speed at novice (insert-segment c=0) as a fraction of INSERT_VEL_MS, ramping to full at
 # c=1. Low ⇒ the finger has time to stop + move laterally on a graze before tipping the bottle.
 # 1.0 ⇒ no novice slowdown (old behaviour).
 insert_novice_frac = 0.4
+
 # ── Palm-proximity grasp gate ─────────────────────────────────────────────────────────
 # Commit to Closing only when the palm DistanceSensor sees the bottle in the throat (< palm_grasp_dist
 # metres). Kills "close the fingers before the bottle". Auto-bypassed if the sensor reads 0 (absent /
 # world not reloaded with the new PROTO).
 use_palm_gate   = true
 palm_grasp_dist = 0.08
+
 # Palm-depth SEAT trigger: close the gripper the moment the palm ray first sees the bottle at this
 # distance (m) — the depth where the bottle sits BETWEEN the finger pads. Driving deeper (to e<tol)
 # rams the bottle to the palm (~0.01) and the pads close empty (gap≈0.004) → every lift slips. Raise
 # to grab earlier/shallower, lower to grab deeper. Watch the [grasp] seated palm=.. and gap=.. lines.
 palm_seat_dist  = 0.03
+
 # ── Bottle-as-obstacle (set-down withdrawal safety) ───────────────────────────────────
 # Hard QP velocity-damper constraint on the TOOL vs the bottle cylinder, active ONLY in
 # PlaceRetreating — the gripper has released the bottle on the table and is backing off to
@@ -117,10 +146,12 @@ bottle_obstacle_margin = 0.04   # [m] repel within this distance of the bottle s
 elbow_gain = 2.0
 col_radius = 0.225   # body-collision cylinder radius (m) → 0.45 m diameter for the wide tray (was 0.03 column). Tune for the tray footprint.
 elbow_target_xy = "-0.625 -1.5"   # null-space elbow placement target (world). Back to the default sign.
+
 # Controlled-experiment harness: pin pick AND place so every rep repeats the same
 # pick→place motion (isolates a regression from pick/place-location variance). Empty
 # string ⇒ normal R2/predictive sweep. Pick = arm_base.wbt authored bottle xy.
 fixed_pick_xy = ""   # empty ⇒ vary the bottle position each rep over the spawn region below (was 0.1 -0.25 = table EDGE → bottle fell off)
+
 # Bottle respawn region (Webots/world m), must be ON the table + reachable. Table is x∈[0.1,0.9], y∈[-1.1,0.7].
 spawn_x_min = 0.25
 spawn_x_max = 0.55
@@ -128,6 +159,7 @@ spawn_y_min = -0.78    # arm side of the table (arm base at y=-0.58); biased tow
 spawn_y_max = -0.35
 fixed_place_xy = "0.40 -0.25"   # world m; high-manip reachable cell (reach_map manip≈0.098). 0.15 -0.25 was near-singular (manip 0.036) ⇒ unreachable. (moot while stop_after_lift=true)
 round_cycles = 10
+
 # Rest pose "j1 .. j7" (rad). Tune the "ready over the table, camera-up" posture
 # here without recompiling; relaunch to apply. Startup prints [rest-pose] metrics
 # (EE pos, upperarm_dz≈0 = first link parallel to table, toolY_up≈+1 = camera up).
@@ -211,15 +243,6 @@ probe_retreat     = false       # exploration done; retreat envelope is wide-ope
 probe_rspeed_amp  = 0.8         # speed sweep 0.024..0.216 m/s
 probe_open_amp    = 0.25        # open-threshold sweep ~0.60..0.99
 retreat_log_path  = "/tmp/kinova_retreat.csv"   # params → post-retreat tilt ("" disables)
-
-# ── Self-projection RGB viewer (P1) ──────────────────────────────────────────
-# Subscribes to the arm camera's zero-copy media plane (discovered from the DSR
-# graph: MediaDescriptor JSON on the camera node) on a dedicated RX thread, and
-# shows the RGB stream in its own window. Strictly off the 100 Hz control loop.
-[SelfProjection]
-enable = true        # opt-in; A/B the control-loop jitter OFF vs ON
-camera_node = "zed"   # DSR node carrying the media_descriptor (written by robot_concept)
-timestamp_probe = true   # ~1 Hz [ts-probe] line: joint vs media epoch-ms diff (clock sanity)
 
 [Period]
 Compute = 10

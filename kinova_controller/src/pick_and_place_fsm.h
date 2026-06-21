@@ -18,6 +18,7 @@
 
 #include <Eigen/Dense>
 #include <array>
+#include <cmath>
 #include <optional>
 #include <random>
 #include <fstream>
@@ -93,6 +94,74 @@ private:
         bool            top_down = false;
     };
     struct ReachScore { bool feasible; double manip; double col_clear; double table_clear; };
+
+    // ── Generative lift confirm (two-hypothesis sensory model) ────────────────
+    // Replaces the discriminative rise/via/weight thresholds with a sequential
+    // log Bayes factor: predict each sensory channel under H_grasped vs H_empty,
+    // accumulate precision-weighted log-evidence, decide when it crosses ONE bound.
+    // Predictions are parameterized by the EE's OWN vertical rise (ee_rise, from FK),
+    // not by a fixed distance — so the decision boundary scales with how far we lift.
+    // An occluded/absent channel inflates its σ → it abstains (the false-SLIP fix made
+    // principled: a frozen perceived-z no longer votes "empty", the grip/pad channels do).
+    struct LiftHypothesis
+    {
+        // Baselines latched at the close→lift transition.
+        double ee_z0 = 0, bottle_z0 = 0, aperture0 = 0, pad0 = 0;
+        double log_evidence = 0.0;          // + favours grasped, − favours empty
+        // Channel precisions (σ): grasped-world is tight, empty-world is loose. Tunable
+        // from the logged dataset; c_lift can tighten σ_track for a skilled lift.
+        double sigma_track    = 0.012;      // m: bottle_rise about its prediction (held world)
+        double sigma_aper_g   = 0.03;       // aperture frozen when the body blocks the jaws
+        double sigma_aper_e   = 0.10;       // aperture wanders when there is nothing between them
+        double sigma_pad      = 2.0;        // N: min-pad load about its prediction
+        double decide_bound   = 3.0;        // log(~20) → 20:1 odds; the ONE decision knob
+
+        enum class Verdict { Undecided, Grasped, Empty };
+
+        void latch(double ee_z, double bottle_z, double aperture, double pad)
+        { ee_z0 = ee_z; bottle_z0 = bottle_z; aperture0 = aperture; pad0 = pad; log_evidence = 0.0; }
+
+        // One Gaussian channel's log-likelihood ratio logN(obs|μ_g,σ) − logN(obs|μ_e,σ).
+        static double llr(double obs, double mu_g, double mu_e, double sigma)
+        {
+            const double inv2s2 = 1.0 / (2.0 * sigma * sigma);
+            return (std::pow(obs - mu_e, 2) - std::pow(obs - mu_g, 2)) * inv2s2;
+        }
+
+        Verdict update(double ee_z, double bottle_z, double aperture, double min_pad,
+                       bool bottle_observable)
+        {
+            const double ee_rise     = ee_z - ee_z0;
+            const double bottle_rise = bottle_z - bottle_z0;
+            // 1) TRACK: held bottle rises WITH the EE (μ_g = ee_rise); empty bottle stays (μ_e = 0).
+            //    Occluded → σ huge → the channel abstains.
+            const double s_track = bottle_observable ? sigma_track : 1e3;
+            log_evidence += llr(bottle_rise, ee_rise, 0.0, s_track);
+            // 2) GRIP-CONSTRAINT: held → jaws blocked at the body, aperture frozen (tight σ);
+            //    empty/cam-open → aperture wanders (loose σ). Variance-ratio test on the increment.
+            const double daper = aperture - aperture0;
+            log_evidence += std::pow(daper, 2)
+                          * (1.0 / (2 * sigma_aper_e * sigma_aper_e) - 1.0 / (2 * sigma_aper_g * sigma_aper_g));
+            // 3) PAD LOAD: a SLIP detector only — pads are loaded from t=0 (it's the precondition of
+            //    lifting), so loaded pads are NOT evidence the bottle rose. One-sided: contribute only
+            //    NEGATIVE (toward empty) when the force DROPS below pad0; never positive. Otherwise the
+            //    +pad0²/2σ² term confirms instantly at rise=0. (Grip channel is already ≤0 by construction.)
+            log_evidence += std::min(0.0, llr(min_pad, pad0, 0.0, sigma_pad));
+
+            if (log_evidence >  decide_bound) return Verdict::Grasped;
+            if (log_evidence < -decide_bound) return Verdict::Empty;
+            return Verdict::Undecided;
+        }
+    };
+    LiftHypothesis lift_hyp_{};
+    // Controller.generative_lift: A/B toggle. true ⇒ the LiftHypothesis confirm above;
+    // false ⇒ the legacy rise/via/weight threshold confirm (the validated baseline).
+    bool   generative_lift_ = false;
+    // Eased-rise scale set by the cam-open active correction (re-clamp + slow the lift so
+    // the grip re-seats), reset to 1.0 at each latch. Multiplies the Lifting v_app.
+    double lift_vel_scale_  = 1.0;
+    // Aperture increase over aperture0 that trips the cam-open correction before the verdict.
+    static constexpr double CAM_OPEN_RESIDUAL = 0.06;
 
     // ── Phase logic ──────────────────────────────────────────────────────────
     void run_tracking(const std::array<double, Kinematics::N_ARM_JOINTS>& q,
@@ -234,6 +303,19 @@ private:
     double field_prec_pass_ = 1.0, field_prec_stop_ = 30.0, field_prec_ref_ = 6.0, field_overlap_ = 0.06;
     bool   tactile_recenter_ = false;
     double recenter_gain_ = 0.02, recenter_sign_ = 1.0;
+    // Compliant close: during Closing, micro-translate the gripper laterally to NULL the pad-force
+    // asymmetry so the bottle centres between the pads instead of edge-gripping (the off-centre/canted
+    // grip tips the light free-standing bottle on lift — the per-grasp ~50% slip that retries mask).
+    // A force-balance servo coupled to the finger close; gentle (small accumulation rate) so it does
+    // not drag the bottle over. Sign maps L−R asymmetry onto tool +X — flip if centring worsens it
+    // (cf. recenter_sign history). Opt-in via Controller.compliant_close.
+    bool   compliant_close_       = false;
+    double compliant_close_gain_  = 0.00002;  // m lateral per (N·tick) of L−R pad asymmetry
+    double compliant_close_max_   = 0.03;      // m cap on the accumulated lateral shift
+    double compliant_close_speed_ = 0.05;      // m/s EE tracking of the shifting hold target
+    double compliant_close_sign_  = 1.0;       // ±1: maps L−R asymmetry onto tool +X
+    Eigen::Vector3d compliant_close_offset_{0.0, 0.0, 0.0};   // accumulated lateral shift this close
+    static constexpr float COMPLIANT_CONTACT_MIN_N = 3.0f;    // min pad load to trust the asymmetry signal
     bool   tip_reflex_ = false;
     double tip_reflex_offset_ = 0.0;
     // Deliberate tactile reflex sub-machine inside Inserting: on a fingertip touch, STOP, back off a
@@ -246,6 +328,11 @@ private:
     Eigen::Vector3d reflex_shift_target_{0.0, 0.0, 0.0};     // lateral pose at backed-off depth (Shift)
     int    insert_reflex_count_ = 0;     // reflex maneuvers this insert (capped by MAX_INSERT_REFLEXES)
     double reflex_force_thresh_ = 0.15;  // N — tip force that triggers the reflex (configurable)
+    // Lateral seat step per fingertip hit (m). Raised from the old 0.005: a 5 mm nudge per
+    // contact barely cleared the off-centre collision before the next graze, so the reflex
+    // crept sideways over many hits (and often hit MAX_INSERT_REFLEXES first). A bigger step
+    // moves decisively off the contacting finger in one maneuver. Clamped to TIP_REFLEX_MAX_M.
+    double tip_reflex_step_ = 0.012;     // Controller.tip_reflex_step
     float  insert_tip_peak_     = 0.0f;  // diag: peak fingertip force seen during the current insert
     Eigen::Vector3d closing_hold_pos_{0.0, 0.0, 0.0};  // EE pose frozen at seat: close HERE, don't ram deeper
     // Persistent tactile CALIBRATION: the lateral reflex offset that finally seated the grasp is
@@ -324,6 +411,15 @@ private:
     std::ofstream latency_log_;   bool latency_log_open_ = false;
     double      approach_t0_ = 0.0;   // wall-clock at the first Tracking cycle of the episode
     double speed_conf_gain_ = 0.6, surprise_gate_m_ = 0.05;
+    // Lift is the risky leg: a slow, deliberate, straight-up rise that does NOT cam the grip open
+    // or twist the held bottle. Deliberately NOT skill-boosted (skilled_speed) — the lift stays
+    // careful regardless of c. Configurable via Controller.lift_speed.
+    double lift_speed_ = 0.10;        // m/s vertical rise during Lifting
+    // Minimum confirmed rise (m): even once the generative TRACK channel has decided "grasped", keep
+    // rising until the bottle has visibly come up by this much before declaring the lift done. Makes
+    // the vertical motion clearly observable and matches the preference (lift TO a height, not just
+    // "it started to move"). Must be < LIFT_HEIGHT_M (the target the arm climbs toward).
+    double lift_min_confirm_rise_ = 0.12;   // Controller.lift_min_confirm_rise
     double orient_conf_gain_ = 1.5;   // skilled → faster free-space wrist slew during the approach
     double standoff_collapse_ = 0.0, insert_conf_gain_ = 0.0;
     // ── Tactile-safe insertion (novice slow → skilled fast) ──────────────────────────────
@@ -388,6 +484,10 @@ private:
     bool   learn_pick_place_ = false;
     bool   respawn_each_rep_ = false;
     bool   fixed_pick_set_ = false;   Eigen::Vector2d fixed_pick_xy_{0.1, -0.25};
+    // #3 feed-forward perception-bias cancel (world-frame XY, m), added to the perceived bottle in
+    // compute_side_grasp_target so the grasp target lands on the REAL bottle. Set = −biasPG (the
+    // measured perceived−GT). Controller.perception_bias_ff_xy. Zero = off.
+    Eigen::Vector2d perception_bias_ff_{0.0, 0.0};
     bool   fixed_place_set_ = false;  Eigen::Vector2d fixed_place_xy_{0.15, -0.25};
 
     // ── Grasp / place tuning constants ───────────────────────────────────────
@@ -412,7 +512,6 @@ private:
     // ~200 ticks (10 ms each); 150 timed out MID-descent (the spurious "reflex stuck" MISS that made
     // it retreat from good positions). Budget the real travel time + margin.
     static constexpr int    INSERT_TIMEOUT_TICKS  = 300;
-    static constexpr double TIP_REFLEX_STEP_M     = 0.005;
     static constexpr double TIP_REFLEX_MAX_M      = 0.05;
     static constexpr double TIP_REFLEX_BACKOFF_M  = 0.04;   // MUST exceed REACH_TOLERANCE_M (0.02): a 0.02 backoff
                                                             // target is already within tolerance the instant it is
@@ -430,8 +529,12 @@ private:
     static constexpr double LEVEL_CLEAR_M        = 0.04;   // clearance lifted during leveling (m)
     static constexpr double LEVEL_TOL_RAD        = 0.10;   // ~5.7°: leveled enough → Lifting
     static constexpr int    LEVEL_TIMEOUT_TICKS  = 80;     // give up leveling, lift anyway
-    static constexpr double LIFT_HEIGHT_M        = 0.12;
+    static constexpr double LIFT_HEIGHT_M        = 0.18;
     static constexpr int    LIFT_TIMEOUT_TICKS   = 250;
+    // Soft-start: the √ position-ramp eases IN near the target but saturates v_des instantly when the
+    // target is far, so the close→lift target jump steps the commanded velocity from 0 → full = a jerk.
+    // Ramp the lift speed up over this many ticks (~0.25 s at 100 Hz) for a smooth, jerk-free departure.
+    static constexpr int    LIFT_SOFT_TICKS      = 25;
     static constexpr double LIFT_CONFIRM_RISE_M  = 0.06;
     static constexpr double LIFT_CONFIRM_HOLD_M  = 0.18;  // relaxed: a held bottle may pivot/tilt as it lifts
     static constexpr int    TRACK_TIMEOUT_TICKS  = 900;
