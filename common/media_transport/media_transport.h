@@ -18,6 +18,8 @@
 #include <string>
 
 #include "generated/idl/image_framePubSubTypes.hpp"
+#include "generated/idl/lidar_framePubSubTypes.hpp"
+#include "generated/idl/imu_framePubSubTypes.hpp"
 
 namespace eprosima::fastdds::dds {
 class DomainParticipant;
@@ -70,10 +72,12 @@ struct SubscriberConfig
 // Default DSR attribute name that carries the descriptor JSON string.
 inline constexpr const char* MEDIA_DESCRIPTOR_ATTR = "media_descriptor";
 
-// Type-compatibility tag for the zero-copy bounded-plain ImageFrame. Zero-copy
+// Type-compatibility tags for the zero-copy bounded-plain frame types. Zero-copy
 // maps the SHM segment byte-for-byte, so a subscriber MUST refuse a stream whose
-// tag differs. BUMP THIS whenever image_frame.idl changes (bounds/fields).
+// tag differs. BUMP THE RELEVANT TAG whenever the matching .idl changes.
 inline constexpr const char* IMAGE_FRAME_TYPE_TAG = "ImageFrame.v2";
+inline constexpr const char* LIDAR_FRAME_TYPE_TAG = "LidarFrame.v1";
+inline constexpr const char* IMU_FRAME_TYPE_TAG   = "ImuFrame.v1";
 
 struct MediaDescriptor
 {
@@ -85,7 +89,11 @@ struct MediaDescriptor
     bool          shared_memory_only = true;
     bool          data_sharing = false;
     bool          ready = false;                      // lifecycle: false until the stream is live
-    std::map<std::string, std::string> streams;       // stream key ("rgb","depth",…) -> topic name
+    std::map<std::string, std::string> streams;       // stream key ("rgb","depth","lidar","imu") -> topic name
+    // Per-stream IDL type name ("ImageFrame","LidarFrame","ImuFrame"). Lets a
+    // consumer pick the right reader when a plane carries mixed payloads. Absent
+    // entries default to `type_name` (back-compat: an all-image plane needs none).
+    std::map<std::string, std::string> stream_types;
 
     // Flat JSON ({"key": value}, streams emitted as "<key>_topic"). No external deps.
     [[nodiscard]] std::string to_json() const;
@@ -117,29 +125,28 @@ descriptor_from_graph(Graph& graph, const std::string& node_name,
     catch (...) { return std::nullopt; }   // attribute present but not a string / malformed
 }
 
-// One writer per topic. Not thread-safe: call from a single producer thread.
-class MediaPublisher
+namespace detail
+{
+// Type-agnostic writer plumbing shared by every typed publisher below. All the
+// participant/QoS/loan logic lives here once; the typed wrappers only add the
+// FrameKind selector (which PubSubType to register) and the loan/publish casts.
+// Not thread-safe: drive from a single producer thread.
+enum class FrameKind { Image, Lidar, Imu };
+
+class WriterCore
 {
 public:
-    MediaPublisher() = default;
-    ~MediaPublisher();
-    MediaPublisher(const MediaPublisher&) = delete;
-    MediaPublisher& operator=(const MediaPublisher&) = delete;
+    WriterCore() = default;
+    ~WriterCore();
+    WriterCore(const WriterCore&) = delete;
+    WriterCore& operator=(const WriterCore&) = delete;
 
-    bool init(const PublisherConfig& cfg);
-    void close();
-
-    // Zero-copy path: borrow a loaned sample living in the SHM segment, fill it
-    // in place (set fields + memcpy pixels into frame->data()), then publish().
-    // Returns nullptr if no loan is available (pool exhausted) -> caller may
-    // skip the frame or fall back to publish_copy().
-    ImageFrame* loan();
-    bool        publish(ImageFrame* loaned_sample);
-    void        discard(ImageFrame* loaned_sample);
-
-    // Fallback copy path (serializes/copies). Useful when the source buffer is
-    // already owned and zero-copy loans are unavailable.
-    bool publish_copy(const ImageFrame& frame);
+    bool  init(const PublisherConfig& cfg, FrameKind kind);
+    void  close();
+    void* loan_raw();
+    bool  publish_raw(void* loaned_sample);
+    void  discard_raw(void* loaned_sample);
+    bool  publish_copy_raw(const void* sample);
 
     [[nodiscard]] bool data_sharing_active() const { return data_sharing_active_; }
 
@@ -152,6 +159,55 @@ private:
     bool participant_shm_only_ = true;
     bool has_participant_ = false;
     bool data_sharing_active_ = false;
+};
+}  // namespace detail
+
+// One writer per topic, one class per payload type. The fill pattern is the same
+// for all: loan() a SHM-resident sample, set its fields + memcpy the payload into
+// the inline array, then publish(). loan() returns nullptr if the pool is
+// exhausted -> the caller skips the frame. Not thread-safe per instance.
+class MediaPublisher
+{
+public:
+    MediaPublisher() = default;
+    bool init(const PublisherConfig& cfg) { return core_.init(cfg, detail::FrameKind::Image); }
+    void close() { core_.close(); }
+    ImageFrame* loan() { return static_cast<ImageFrame*>(core_.loan_raw()); }
+    bool        publish(ImageFrame* s) { return core_.publish_raw(s); }
+    void        discard(ImageFrame* s) { core_.discard_raw(s); }
+    // Fallback copy path (serializes/copies) when the source buffer is owned.
+    bool        publish_copy(const ImageFrame& frame) { return core_.publish_copy_raw(&frame); }
+    [[nodiscard]] bool data_sharing_active() const { return core_.data_sharing_active(); }
+private:
+    detail::WriterCore core_;
+};
+
+class LidarPublisher
+{
+public:
+    LidarPublisher() = default;
+    bool init(const PublisherConfig& cfg) { return core_.init(cfg, detail::FrameKind::Lidar); }
+    void close() { core_.close(); }
+    LidarFrame* loan() { return static_cast<LidarFrame*>(core_.loan_raw()); }
+    bool        publish(LidarFrame* s) { return core_.publish_raw(s); }
+    void        discard(LidarFrame* s) { core_.discard_raw(s); }
+    [[nodiscard]] bool data_sharing_active() const { return core_.data_sharing_active(); }
+private:
+    detail::WriterCore core_;
+};
+
+class ImuPublisher
+{
+public:
+    ImuPublisher() = default;
+    bool init(const PublisherConfig& cfg) { return core_.init(cfg, detail::FrameKind::Imu); }
+    void close() { core_.close(); }
+    ImuFrame* loan() { return static_cast<ImuFrame*>(core_.loan_raw()); }
+    bool      publish(ImuFrame* s) { return core_.publish_raw(s); }
+    void      discard(ImuFrame* s) { core_.discard_raw(s); }
+    [[nodiscard]] bool data_sharing_active() const { return core_.data_sharing_active(); }
+private:
+    detail::WriterCore core_;
 };
 
 // One reader per topic. The callback receives a const ImageFrame& that is valid

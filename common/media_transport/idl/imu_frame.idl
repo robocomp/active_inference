@@ -1,0 +1,29 @@
+// RoboComp active_inference - media transport plane
+// Bounded, FINAL, plain (is_plain()==true) IMU sample so FastDDS can use
+// shared-memory data-sharing + zero-copy loans. Tiny fixed payload — NEVER ride
+// IMU on the 3.6MB ImageFrame: with data-sharing off every sample is serialized,
+// so the slot size is the per-sample cost. One ImuFrame per getDataImu() call.
+
+module rc { module media {
+
+    // Stream identifier (also the DDS instance key). Shares the constant space
+    // with STREAM_ZED_RGB(0)/STREAM_ZED_DEPTH(1)/STREAM_LIDAR(3).
+    const unsigned long STREAM_IMU = 2;
+
+    @extensibility(FINAL)
+    struct ImuFrame
+    {
+        // 64-bit members FIRST so the C++ in-memory layout matches the XCDR2
+        // serialized layout (XCDR2 caps alignment at 4) — keeps is_plain()==true.
+        unsigned long long frame_id;     // monotonic, set by producer
+        unsigned long long stamp_ms;     // capture timestamp, epoch milliseconds
+        @key unsigned long stream_id;    // one DDS instance for the IMU stream
+
+        float acc_x;  float acc_y;  float acc_z;    // linear acceleration
+        float gyro_x; float gyro_y; float gyro_z;   // angular velocity
+        float mag_x;  float mag_y;  float mag_z;     // magnetic field
+        float roll;   float pitch;  float yaw;       // orientation (Euler)
+        float temperature;
+    };
+
+}; };

@@ -136,7 +136,21 @@ namespace rc::media
 
 // ───────────────────────────── Publisher ─────────────────────────────
 
-bool MediaPublisher::init(const PublisherConfig& cfg)
+namespace
+{
+efd::TypeSupport make_type_support(detail::FrameKind kind)
+{
+    switch (kind)
+    {
+        case detail::FrameKind::Lidar: return efd::TypeSupport(new LidarFramePubSubType());
+        case detail::FrameKind::Imu:   return efd::TypeSupport(new ImuFramePubSubType());
+        case detail::FrameKind::Image:
+        default:                       return efd::TypeSupport(new ImageFramePubSubType());
+    }
+}
+}  // namespace
+
+bool detail::WriterCore::init(const PublisherConfig& cfg, detail::FrameKind kind)
 {
     close();
 
@@ -147,7 +161,7 @@ bool MediaPublisher::init(const PublisherConfig& cfg)
     participant_shm_only_ = cfg.shared_memory_only;
     has_participant_ = true;
 
-    efd::TypeSupport type(new ImageFramePubSubType());
+    efd::TypeSupport type = make_type_support(kind);
     type.register_type(participant_);
 
     publisher_ = participant_->create_publisher(efd::PUBLISHER_QOS_DEFAULT);
@@ -207,17 +221,17 @@ bool MediaPublisher::init(const PublisherConfig& cfg)
     return true;
 }
 
-ImageFrame* MediaPublisher::loan()
+void* detail::WriterCore::loan_raw()
 {
     if (!writer_)
         return nullptr;
     void* sample = nullptr;
     if (writer_->loan_sample(sample) != efd::RETCODE_OK)
         return nullptr;
-    return static_cast<ImageFrame*>(sample);
+    return sample;
 }
 
-bool MediaPublisher::publish(ImageFrame* loaned_sample)
+bool detail::WriterCore::publish_raw(void* loaned_sample)
 {
     if (!writer_ || !loaned_sample)
         return false;
@@ -225,27 +239,25 @@ bool MediaPublisher::publish(ImageFrame* loaned_sample)
         return true;
 
     // Keep the loan pool healthy on write failures.
-    void* sample = loaned_sample;
-    writer_->discard_loan(sample);
+    writer_->discard_loan(loaned_sample);
     return false;
 }
 
-void MediaPublisher::discard(ImageFrame* loaned_sample)
+void detail::WriterCore::discard_raw(void* loaned_sample)
 {
     if (!writer_ || !loaned_sample)
         return;
-    void* sample = loaned_sample;
-    writer_->discard_loan(sample);
+    writer_->discard_loan(loaned_sample);
 }
 
-bool MediaPublisher::publish_copy(const ImageFrame& frame)
+bool detail::WriterCore::publish_copy_raw(const void* sample)
 {
-    if (!writer_)
+    if (!writer_ || !sample)
         return false;
-    return writer_->write(const_cast<ImageFrame*>(&frame)) == efd::RETCODE_OK;
+    return writer_->write(const_cast<void*>(sample)) == efd::RETCODE_OK;
 }
 
-void MediaPublisher::close()
+void detail::WriterCore::close()
 {
     if (publisher_ != nullptr && writer_ != nullptr)
         publisher_->delete_datawriter(writer_);
@@ -269,7 +281,7 @@ void MediaPublisher::close()
     data_sharing_active_ = false;
 }
 
-MediaPublisher::~MediaPublisher()
+detail::WriterCore::~WriterCore()
 {
     close();
 }
@@ -491,6 +503,8 @@ std::string MediaDescriptor::to_json() const
     s += ",\"ready\":" + std::string(ready ? "true" : "false");
     for (const auto& [key, topic] : streams)
         s += ",\"" + esc(key) + "_topic\":\"" + esc(topic) + "\"";
+    for (const auto& [key, tname] : stream_types)
+        s += ",\"" + esc(key) + "_type\":\"" + esc(tname) + "\"";
     s += "}";
     return s;
 }
@@ -508,11 +522,18 @@ std::optional<MediaDescriptor> MediaDescriptor::from_json(const std::string& s)
     if (auto it = kv.find("shared_memory_only"); it != kv.end()) d.shared_memory_only = as_bool(it->second);
     if (auto it = kv.find("data_sharing");       it != kv.end()) d.data_sharing       = as_bool(it->second);
     if (auto it = kv.find("ready");              it != kv.end()) d.ready              = as_bool(it->second);
-    // Any "<name>_topic" key is a stream advertisement.
-    constexpr std::string_view suffix = "_topic";
+    // Any "<name>_topic" key is a stream advertisement; "<name>_type" its IDL type.
+    auto ends_with = [](const std::string& k, std::string_view sfx)
+    { return k.size() > sfx.size() and k.compare(k.size() - sfx.size(), sfx.size(), sfx) == 0; };
+    constexpr std::string_view topic_sfx = "_topic";
+    constexpr std::string_view type_sfx  = "_type";
     for (const auto& [k, v] : kv)
-        if (k.size() > suffix.size() and k.compare(k.size() - suffix.size(), suffix.size(), suffix) == 0)
-            d.streams.emplace(k.substr(0, k.size() - suffix.size()), v);
+    {
+        if (ends_with(k, topic_sfx))
+            d.streams.emplace(k.substr(0, k.size() - topic_sfx.size()), v);
+        else if (ends_with(k, type_sfx))
+            d.stream_types.emplace(k.substr(0, k.size() - type_sfx.size()), v);
+    }
     return d;
 }
 
