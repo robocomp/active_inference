@@ -133,6 +133,85 @@ void SceneProcessor::drain_media_plane() const
     }
 }
 
+bool SceneProcessor::init_lidar_media_plane(std::uint32_t domain_id, const std::string& topic, bool use_media)
+{
+    lidar_use_media_ = use_media;
+    if (!use_media)
+    {
+        std::print("[voxelizer] lidar media plane DISABLED — using DSR graph 'lidar3D'\n");
+        return false;
+    }
+
+    lidar_sub_ = std::make_unique<rc::media::LidarSubscriber>();
+    rc::media::SubscriberConfig cfg;
+    cfg.domain_id     = domain_id;
+    cfg.topic_name    = topic;
+    cfg.history_depth = 4;
+    if (!lidar_sub_->init(cfg))
+    {
+        std::print(stderr, "[voxelizer] lidar media subscriber init FAILED — falling back to DSR graph 'lidar3D'\n");
+        lidar_sub_.reset();
+        lidar_use_media_ = false;
+        return false;
+    }
+    std::print("[voxelizer] lidar media plane ready domain={} topic='{}' data_sharing={}\n",
+               domain_id, topic, lidar_sub_->data_sharing_active());
+    return true;
+}
+
+std::optional<SceneProcessor::LidarData> SceneProcessor::get_lidar3D()
+{
+    if (!lidar_use_media_ || !lidar_sub_)
+        return std::nullopt;
+
+    // Diagnostic (every 5 s): fresh = LidarFrames drained this window; served = cycles that returned a
+    // scan. fresh==0 while served>0 ⇒ serving a STALE scan (producer stopped publishing).
+    static std::uint64_t fresh = 0, served = 0;
+    static auto last_report = std::chrono::steady_clock::now();
+
+    // Drain the media plane (non-blocking) and keep the latest scan.
+    const int got = lidar_sub_->poll([this](const rc::media::LidarFrame& f, std::int64_t)
+    {
+        const std::uint32_t stride = f.stride() ? f.stride() : 3u;
+        const auto& pts = f.points();
+        const std::uint32_t count = f.count();
+        LidarData ld;
+        ld.xs.reserve(count);
+        ld.ys.reserve(count);
+        ld.zs.reserve(count);
+        for (std::uint32_t i = 0; i < count; ++i)
+        {
+            const std::size_t base = static_cast<std::size_t>(i) * stride;
+            if (base + 2 >= pts.size())
+                break;
+            ld.xs.push_back(pts[base]);
+            ld.ys.push_back(pts[base + 1]);
+            ld.zs.push_back(pts[base + 2]);
+        }
+        ld.timestamp_ms = f.stamp_ms();
+        media_lidar_ = std::move(ld);
+        media_lidar_valid_ = true;
+    });
+    fresh += static_cast<std::uint64_t>(std::max(0, got));
+
+    std::optional<LidarData> out;
+    if (media_lidar_valid_ && !media_lidar_.xs.empty())
+    {
+        out = media_lidar_;
+        ++served;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_report >= std::chrono::seconds(5))
+    {
+        std::println("[LidarSrc] 5s media fresh={} served={} ({} pts)",
+                     fresh, served, out ? out->xs.size() : 0u);
+        fresh = served = 0;
+        last_report = now;
+    }
+    return out;
+}
+
 void SceneProcessor::configure(DSR::InnerEigenAPI* inner_eigen_api,
                                rc::VoxelOpenGLViewer* voxel_viewer,
                                bool transforms_interpolate_rt,
@@ -338,31 +417,6 @@ std::optional<cv::Mat> SceneProcessor::get_rgb_from_dsr() const
                    const_cast<void*>(static_cast<const void*>(bytes.data()))).clone();
 }
 
-std::optional<SceneProcessor::LidarData> SceneProcessor::get_lidar3D_from_dsr() const
-{
-    if (!graph_)
-        return std::nullopt;
-    auto lidar_node = graph_->get_node("lidar3D");
-    if (!lidar_node.has_value())
-        return std::nullopt;
-
-    auto xs_opt = graph_->get_attrib_by_name<laser_X_att>(lidar_node.value());
-    auto ys_opt = graph_->get_attrib_by_name<laser_Y_att>(lidar_node.value());
-    auto zs_opt = graph_->get_attrib_by_name<laser_Z_att>(lidar_node.value());
-    auto ts_opt = graph_->get_attrib_by_name<laser_timestamp_att>(lidar_node.value());
-    if (!xs_opt.has_value() || !ys_opt.has_value() || !zs_opt.has_value())
-        return std::nullopt;
-
-    LidarData ld;
-    ld.xs = std::vector<float>(xs_opt.value().get().begin(), xs_opt.value().get().end());
-    ld.ys = std::vector<float>(ys_opt.value().get().begin(), ys_opt.value().get().end());
-    ld.zs = std::vector<float>(zs_opt.value().get().begin(), zs_opt.value().get().end());
-    ld.timestamp_ms = ts_opt.has_value() ? ts_opt.value() : 0;
-    if (ld.xs.empty())
-        return std::nullopt;
-    return ld;
-}
-
 std::optional<RGBDData> SceneProcessor::get_rgbd_frame_from_dsr() const
 {
     // Pixels now arrive over the zero-copy media plane (not the DSR graph). Pull
@@ -437,17 +491,6 @@ void SceneProcessor::check_input_stream_startup_status()
 
         if (auto zed = graph_->get_node("zed"); !zed.has_value())
             std::print(stderr, "[voxelizer] DSR 'zed' node not found. Waiting...\n");
-
-        if (auto lidar = graph_->get_node("lidar3D"); lidar.has_value())
-        {
-            const bool has_pts = graph_->get_attrib_by_name<laser_X_att>(lidar.value()).has_value();
-            if (!has_pts)
-                std::print(stderr, "[voxelizer] DSR 'lidar3D' node exists but laser_X_att is empty. Waiting...\n");
-        }
-        else
-        {
-            std::print(stderr, "[voxelizer] DSR 'lidar3D' node not found. Waiting...\n");
-        }
     }
 }
 
@@ -1003,7 +1046,7 @@ void SceneProcessor::update_viewer_lidar_points(const std::string& room_name,
     if (voxel_viewer_ == nullptr)
         return;
 
-    const auto lidar_data = get_lidar3D_from_dsr();
+    const auto lidar_data = get_lidar3D();
     if (!lidar_data.has_value() || lidar_data->xs.empty())
     {
         voxel_viewer_->update_lidar_points({});

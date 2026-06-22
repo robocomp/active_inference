@@ -23,6 +23,7 @@ namespace rc
 }
 
 namespace rc::media { class MediaSubscriber; }
+namespace rc::media { class LidarSubscriber; }
 
 class SceneProcessor
 {
@@ -50,6 +51,11 @@ public:
                           const std::string& rgb_topic,
                           const std::string& depth_topic);
 
+    // LiDAR over the same zero-copy media plane (robot_concept's LidarFrame stream). When use_media is
+    // false (or init fails) the DSR graph 'lidar3D' node remains the source. Points share the sensor
+    // frame of the graph laser_* attrs, so the downstream room_T_robot transform is unchanged.
+    bool init_lidar_media_plane(std::uint32_t domain_id, const std::string& topic, bool use_media);
+
     std::pair<std::string, std::string> get_room_robot_names_for_compute();
     bool ensure_room_and_robot_ready(FPSCounter& compute_fps,
                                      const std::string& room_name,
@@ -68,7 +74,8 @@ public:
     // DSR-native data accessors (no proxy needed)
     std::uint64_t get_frame_timestamp_ms() const;
     std::optional<cv::Mat> get_rgb_from_dsr() const;
-    std::optional<LidarData> get_lidar3D_from_dsr() const;
+    // Latest LiDAR scan from the media plane (LidarFrame). std::nullopt if disabled or nothing received.
+    std::optional<LidarData> get_lidar3D();
     std::optional<RGBDData> get_rgbd_frame_from_dsr() const;
 
     void check_input_stream_startup_status();
@@ -134,6 +141,13 @@ private:
     void drain_media_plane() const;  // polls subscribers, refreshes the caches
     std::unique_ptr<rc::media::MediaSubscriber> media_rgb_sub_;
     std::unique_ptr<rc::media::MediaSubscriber> media_depth_sub_;
+
+    // LiDAR media-plane source (preferred over the DSR graph when up). Latest scan cached in
+    // sensor frame, refreshed by draining the subscriber inside get_lidar3D().
+    std::unique_ptr<rc::media::LidarSubscriber> lidar_sub_;
+    bool      lidar_use_media_ = false;
+    LidarData media_lidar_;
+    bool      media_lidar_valid_ = false;
     struct MediaRgbCache
     {
         bool          valid = false;

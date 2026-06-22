@@ -30,6 +30,8 @@ graph = true
 domain_id   = 7
 rgb_topic   = "rc/zed/rgb"
 depth_topic = "rc/zed/depth"
+lidar_topic = "rc/lidar3d/points"
+lidar_use_media = true   # false ⇒ DSR graph 'lidar3D' node only
 
 [Period]
 Compute = 100

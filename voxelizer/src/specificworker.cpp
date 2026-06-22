@@ -157,6 +157,8 @@ void SpecificWorker::initialize()
                                params.TRANSFORMS_INTERPOLATE_RT, verbose_debug_);
     scene_processor->init_media_plane(static_cast<std::uint32_t>(params.MEDIA_DOMAIN_ID),
                                       params.MEDIA_RGB_TOPIC, params.MEDIA_DEPTH_TOPIC);
+    scene_processor->init_lidar_media_plane(static_cast<std::uint32_t>(params.MEDIA_DOMAIN_ID),
+                                            params.MEDIA_LIDAR_TOPIC, params.LIDAR_USE_MEDIA);
 
     // All DSR semantic_grid exports (masks always; tracks/voxels config-gated). Relayout is injected
     // so the publisher stays decoupled from the GUI (graph_viewers).
@@ -357,7 +359,7 @@ std::optional<SpecificWorker::SceneFrame> SpecificWorker::process_scene_frame(FP
     const auto graph_object_boxes = scene_processor->get_graph_object_boxes(room_name, frame_ts_ms);
 
     std::vector<Eigen::Vector3f> lidar_points_room;
-    if (auto lidar_data = scene_processor->get_lidar3D_from_dsr(); lidar_data.has_value())
+    if (auto lidar_data = scene_processor->get_lidar3D(); lidar_data.has_value())
     {
         Mat::RTMat room_T_robot_lidar = room_T_robot.value();
         if (inner_eigen_api != nullptr && lidar_data->timestamp_ms > 0)
