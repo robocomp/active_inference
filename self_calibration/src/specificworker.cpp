@@ -94,7 +94,7 @@ namespace
     // Robust line fit r = intercept + slope·v via IRLS with Huber weights, so the
     // fast-motion model-breakdown samples can't lever the slope. ok=false if too few
     // points or no v-spread (τ is then unseparable from the bias).
-    LineFit huber_fit(const std::deque<std::pair<float, float>>& pts)
+    LineFit huber_fit(const std::deque<std::pair<float, float>>& pts, double vspread_min)
     {
         LineFit f;
         const std::size_t n = pts.size();
@@ -103,7 +103,10 @@ namespace
         double mv = 0.0; for (const auto& p : pts) mv += p.first; mv /= static_cast<double>(n);
         double vv = 0.0; for (const auto& p : pts) vv += (p.first - mv) * (p.first - mv);
         f.vspread = std::sqrt(vv / static_cast<double>(n));
-        if (f.vspread < 1e-3) return f;   // no motion variety → slope undetermined
+        // Below this depth-velocity leverage τ is unseparable from the bias: the slope
+        // just fits noise and emits a confident-looking but meaningless value (e.g. +220 ms
+        // at vspread≈0.04). Gate it so τ only reports when the arm moves enough.
+        if (f.vspread < vspread_min) return f;
 
         double sv=0,sr=0,svv=0,svr=0;     // OLS seed
         for (const auto& p : pts){ sv+=p.first; sr+=p.second; svv+=p.first*p.first; svr+=p.first*p.second; }
@@ -219,6 +222,7 @@ void SpecificWorker::initialize()
     //initializeCODE
     init_media_plane();
     try { residual_gate_m_ = configLoader.get<double>("SelfCalib.residual_gate_m"); } catch (...) {}
+    try { tau_vspread_min_ = configLoader.get<double>("SelfCalib.tau_vspread_min"); } catch (...) {}
 
     // FK model (the SAME Kinematics the controller uses) + the graph extrinsic API.
     if (G) inner_eigen_ = G->get_inner_eigen_api();
@@ -540,13 +544,14 @@ void SpecificWorker::compute_depth_residual()
 
     if (++reg_frames_ % REG_REPORT_EVERY == 0)
     {
-        const auto f = huber_fit(reg_samples_);
+        const auto f = huber_fit(reg_samples_, tau_vspread_min_);
         if (f.ok)
             std::print("[calib-tau] τ={:+.1f}ms  spatial_bias={:+.4f}m  (n={}, inliers={:.0f}%, scale={:.4f}m, vspread={:.3f})\n",
                        -f.slope * 1000.0, f.intercept, reg_samples_.size(),
                        100.0 * f.inlier_frac, f.scale, f.vspread);
         else
-            std::print("[calib-tau] fit not ready (n={}, need motion spread)\n", reg_samples_.size());
+            std::print("[calib-tau] τ unidentifiable (n={}, vspread={:.3f} < {:.3f} m/s — move the arm more)\n",
+                       reg_samples_.size(), f.vspread, tau_vspread_min_);
     }
 }
 
@@ -598,7 +603,7 @@ void SpecificWorker::build_self_projection()
         const double X = pc.x(), Y = pc.y(), Z = pc.z();
         if (Y <= 1e-3) return false;
         uv  = QPointF(rcx_ + rfx_ * X / Y, rcy_ - rfy_ * Z / Y);
-        rpx = std::clamp(rfx_ * r_m / Y, 1.0, 400.0);
+        rpx = std::clamp(rfx_ * r_m / Y, 1.0, 80.0);   // ceiling: near links (small Y) would otherwise balloon
         return true;
     };
 

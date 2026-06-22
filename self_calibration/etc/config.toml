@@ -28,6 +28,7 @@ graph = true
 [SelfCalib]
 camera_node = "zed"
 residual_gate_m = 0.06   # depth inlier band (m): reject samples beyond this |pred−obs| (model breakdown / occlusion)
+tau_vspread_min = 0.1    # min depth-velocity std (m/s) to report τ; below this τ is unseparable from bias (skip, don't print garbage)
 
 [Period]
 Compute = 100

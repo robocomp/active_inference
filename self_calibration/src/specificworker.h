@@ -173,6 +173,7 @@ private:
 	std::deque<std::pair<float, float>> reg_samples_;     // (vdepth, residual)
 	int    reg_frames_      = 0;
 	double residual_gate_m_ = 0.06;                       // inlier band (SelfCalib.residual_gate_m)
+	double tau_vspread_min_ = 0.1;                        // min depth-velocity std (m/s) to identify τ (SelfCalib.tau_vspread_min)
 	static constexpr std::size_t REG_MAX          = 3000; // ~2–3 s of inlier samples
 	static constexpr int         REG_REPORT_EVERY = 20;
 
