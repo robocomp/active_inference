@@ -38,6 +38,7 @@
 #include "lidar_track_attributor.h"
 #include "rgbd_data.h"
 #include "voxel_budget_regulator.h"
+#include "voxelizer_params.h"
 
 #include <chrono>
 
@@ -45,6 +46,7 @@ class UnifiedVoxelGrid;
 class VoxelProcessor;
 class YoloProcessor;
 class SceneProcessor;
+class GraphPublisher;
 struct SegDetection;
 
 namespace rc { class VoxelOpenGLViewer; }
@@ -85,50 +87,7 @@ class SpecificWorker : public GenericWorker
         void on_optional_peer_ready(const std::string &name, std::uint32_t id);
 
     private:
-        struct Params
-        {
-            std::string YOLO_MODEL_PATH         = "yolo26l-seg.onnx";
-            std::vector<std::string> YOLO_ACCEPTED_LABELS;
-            float       YOLO_CONF_THRESH        = 0.25f;
-            float       YOLO_IOU_THRESH         = 0.45f;
-            int         YOLO_INPUT_SIZE         = 640;
-            bool        YOLO_USE_GPU            = true;
-            bool        YOLO_USE_TRT            = true;
-            int         YOLO_MASK_ERODE_KERNEL  = 0;
-            bool        YOLO_MASK_TRAY          = true;
-            int         YOLO_TRAY_MASK_REF_WIDTH  = 1280;
-            int         YOLO_TRAY_MASK_REF_HEIGHT = 720;
-            // Default crescent polygon (outer arc + image bottom) for a 1280×720 robot camera.
-            // Tunable via config.toml: Yolo.tray_mask_polygon = [x0,y0, x1,y1, ...]
-            std::vector<cv::Point> YOLO_TRAY_MASK_POLYGON_PX = {
-                {195, 720}, {230, 694}, {286, 664}, {353, 640}, {428, 621},
-                {510, 608}, {596, 601}, {640, 600}, {684, 601}, {770, 608},
-                {852, 621}, {927, 640}, {994, 664}, {1050, 694}, {1086, 720},
-                {1280, 720}, {0, 720}
-            };
-            float       TRACK_ASSOCIATION_MAX_DISTANCE_M = 0.7f;
-            int         TRACK_MAX_MISSED_FRAMES          = 10;
-            std::size_t VOXEL_VIEWER_MAX_RENDERED_VOXELS = 30'000;
-            int         VOXEL_VIEWER_FPS                 = 10;
-            std::size_t VOXEL_DECIMATION_FACTOR          = 2;
-            float       VOXEL_Z_LIFT_M                   = 0.0f;
-            bool        TRANSFORMS_INTERPOLATE_RT        = true;
-            // Per-mask depth gate: reject mask pixels whose depth exceeds the mask's near
-            // surface by more than this band (m). Kills transparent-object depth dropout —
-            // pixels that see THROUGH the object to the background and deproject into a line.
-            // <= 0 disables the gate.
-            float       MASK_DEPTH_GATE_BAND_M           = 0.20f;
-            // Per-mask radius outlier removal: drop points with fewer than MIN_NEIGHBORS
-            // others within RADIUS_M. Trims the sparse silhouette-edge "tail" the depth gate
-            // leaves behind, while the dense object body survives. <= 0 disables.
-            float       MASK_OUTLIER_RADIUS_M            = 0.03f;
-            int         MASK_OUTLIER_MIN_NEIGHBORS       = 4;
-
-            // Media plane (zero-copy DDS) for RGBD pixels carried OUT of the graph.
-            int         MEDIA_DOMAIN_ID   = 0;
-            std::string MEDIA_RGB_TOPIC   = "rc/zed/rgb";
-            std::string MEDIA_DEPTH_TOPIC = "rc/zed/depth";
-        } params;
+        VoxelizerParams params;   // loaded via load_voxelizer_params() in initialize()
 
         struct SceneFrame
         {
@@ -140,18 +99,8 @@ class SpecificWorker : public GenericWorker
         };
 
         std::optional<SceneFrame> process_scene_frame(FPSCounter& compute_fps);
-        // Feed-forward, class-agnostic track publisher. Replaces the old
-        // update_table_nodes_from_tracks loop: the voxelizer no longer reads any
-        // concept's model box — it just exports its tracks; concept agents do
-        // their own instance assignment against these.
-        void ensure_tracks_node_in_dsr();
-        void publish_tracks_to_dsr();
-        void ensure_voxels_node_in_dsr();
-        void ensure_masks_node_in_dsr();
-        void upload_voxel_grid_to_dsr();
-        void upload_masks_to_dsr(const SceneFrame& frame, const std::vector<SegDetection>& detections);
-        void trigger_graph_layout_twopi();
-        void cleanup_semantic_grid_nodes();
+        void setup_custom_viewers();         // Voxel3D GL + YOLO windows (specificworker_viewers.cpp)
+        void trigger_graph_layout_twopi();   // injected into GraphPublisher as the relayout callback
 
         AgentPresenceCoordinator presence_coordinator_;
         bool owned_nodes_cleaned_ = false;
@@ -164,13 +113,8 @@ class SpecificWorker : public GenericWorker
 
         bool startup_check_flag  = false;
         bool verbose_debug_      = false;
-        bool voxels_node_ready_  = false;
-        bool masks_node_ready_   = false;
-        bool tracks_node_ready_  = false;
         std::atomic<bool> shutting_down_{false};
         bool include_lidar3d_in_voxels_ = true;
-        std::uint64_t last_masks_uploaded_frame_ = 0;
-        std::uint64_t masks_publish_seq_ = 0;
 
         std::shared_ptr<DSR::InnerEigenAPI> inner_eigen_api;
 
@@ -179,6 +123,7 @@ class SpecificWorker : public GenericWorker
         std::unique_ptr<UnifiedVoxelGrid>  voxel_grid;
         std::unique_ptr<VoxelProcessor>    voxel_processor;
         std::unique_ptr<SceneProcessor>    scene_processor;
+        std::unique_ptr<GraphPublisher>    graph_publisher_;   // all DSR semantic_grid exports
         std::unique_ptr<rc::VoxelOpenGLViewer> voxel_viewer_gl;
         std::unique_ptr<rc::YoloViewer>        yolo_viewer_;
 

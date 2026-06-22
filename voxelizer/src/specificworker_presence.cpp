@@ -1,4 +1,5 @@
 #include "specificworker.h"
+#include "graph_publisher.h"
 
 void SpecificWorker::waiting_enter()
 {
@@ -36,7 +37,8 @@ void SpecificWorker::cleanup_owned_nodes()
         return;
     owned_nodes_cleaned_ = true;
 
-    cleanup_semantic_grid_nodes();
+    if (graph_publisher_)
+        graph_publisher_->cleanup_semantic_grid_nodes();
     presence_coordinator_.cleanup_owned_nodes();
 }
 

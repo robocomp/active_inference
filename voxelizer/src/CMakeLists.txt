@@ -4,11 +4,18 @@ find_package(Qt6 COMPONENTS OpenGL OpenGLWidgets QUIET)
 LIST(APPEND SOURCES
   ../src/specificworker.cpp
   ../src/specificworker_presence.cpp
+  ../src/specificworker_viewers.cpp
+  ../src/voxelizer_params.cpp
+  ../src/graph_publisher.cpp
   ../../common/agent_presence_monitor/agent_presence_monitor.cpp
   ../../common/agent_presence_coordinator/agent_presence_coordinator.cpp
   ../../common/media_transport/media_transport.cpp
   ../../common/media_transport/generated/idl/image_framePubSubTypes.cxx
   ../../common/media_transport/generated/idl/image_frameTypeObjectSupport.cxx
+  ../../common/media_transport/generated/idl/lidar_framePubSubTypes.cxx
+  ../../common/media_transport/generated/idl/lidar_frameTypeObjectSupport.cxx
+  ../../common/media_transport/generated/idl/imu_framePubSubTypes.cxx
+  ../../common/media_transport/generated/idl/imu_frameTypeObjectSupport.cxx
   ../src/scene_processor.cpp
   ../src/lidar_track_attributor.cpp
   ../src/voxel_processor.cpp
@@ -19,6 +26,8 @@ LIST(APPEND SOURCES
 # Headers set
 LIST(APPEND HEADERS
   ../src/specificworker.h
+  ../src/voxelizer_params.h
+  ../src/graph_publisher.h
   ../src/scene_processor.h
   ../src/lidar_track_attributor.h
   ../src/voxel_processor.h
