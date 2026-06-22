@@ -73,7 +73,7 @@ struct AgentConfig
     // Covariance write
     float yaw_variance = 9.87f;   // ≈π² — yaw is unobservable for a symmetric cylinder
 
-    // ── Static ground-truth evaluation (Webots) ────────────────────────────────
+    // Static ground-truth evaluation (Webots)
     // The bottle is stationary during perception, so its Webots pose is a constant expressed in the
     // room frame (DEF bottle → Shadow→room). When enabled, the tracker logs per-cycle position/size
     // error and NEES (covariance calibration). Consumed by BottleEvaluator.
@@ -85,14 +85,14 @@ struct AgentConfig
     float gt_cx = 0.0f, gt_cy = 0.0f, gt_cz = 0.0f;   // cylinder CENTRE, room frame
     float gt_radius = 0.0f, gt_height = 0.0f;
 
-    // ── One-shot bottle placement on start (Scene.*) ─────────────────────────────
+    // One-shot bottle placement on start (Scene.*)
     // setObjectPose the real bottle to a fixed Webots-WORLD x,y ONCE at startup (z and orientation
     // kept), so the arm approaches from its own side and occludes the camera less.
     bool  place_on_start = false;   // Scene.PlaceBottleOnStart
     float place_world_x  = 0.0f;    // Scene.PlaceBottleWorldX (Webots world metres, +X front)
     float place_world_y  = 0.0f;    // Scene.PlaceBottleWorldY (Webots world metres, +Y right)
 
-    // ── Moving-bottle validation experiment ──────────────────────────────────
+    // Moving-bottle validation experiment
     bool  move_experiment   = false;   // Eval.MoveExperiment
     int   move_settle_cycles = 25;     // cycles held at each grid pose before stepping
     float move_step_m        = 0.06f;  // grid spacing over the table (metres, world frame)
@@ -102,7 +102,7 @@ struct AgentConfig
     bool  move_absolute = false;       // Eval.MoveAbsolute
     float move_xmin = 0.0f, move_xmax = 0.0f, move_ymin = 0.0f, move_ymax = 0.0f;   // world bounds (m)
 
-    // ── Static-restart validation ─────────────────────────────────────────────
+    // Static-restart validation
     // Validate the fit at independent static positions, restarting the agent per pose (fresh voxel
     // bank). One run = move the bottle to grid pose BOTTLE_TEST_POSE (env), fit from scratch, log.
     bool  static_pose_test  = false;   // Eval.StaticPoseTest

@@ -8,8 +8,7 @@
  *     residuals against the current SDF (observe_bottle_node),
  *   - inference: voxel-bank ingest + cold-start seed (with camera-ward de-projection)
  *     + queue update + RGB silhouette likelihood + the gradient/free-energy step,
- *   - the bottle-owned voxel memory (ownership gate + FNV voxel keys),
- *   - the RGB-mask-silhouette IoU diagnostic.
+ *   - the bottle-owned voxel memory (ownership gate + FNV voxel keys).
  *
  * Collaborates with BottlePerception (masks), BottleSceneGraph (table lookups, model
  * write-back, robot covariance) and BottleEvaluator (per-cycle eval logging). Plain
@@ -84,9 +83,8 @@ private:
     bool is_voxel_owned_by_bottle(const BottleInstance& inst, const Eigen::Vector3f& point) const;
     static std::uint64_t voxel_key(const Eigen::Vector3f& point, float quantization_m);
 
-    // RGB silhouette: edge-ray likelihood (feed_silhouette) + IoU diagnostic.
+    // Feed the fitted model the RGB-mask edge rays as a silhouette likelihood.
     void feed_silhouette(BottleInstance& inst);
-    void mask_silhouette_diagnostic(const BottleInstance& inst, const BottleObservation& obs);
     // room_T_zed (camera→room) as a plain 4×4, composed room→body→zed at ts=0 (alignment-safe).
     std::optional<Eigen::Matrix4d> room_T_zed_matrix() const;
 

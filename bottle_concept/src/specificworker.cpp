@@ -18,15 +18,10 @@
  */
 
 /**
- * SpecificWorker — bottle_concept agent.
- *
- *  ① Read the YOLO masks node from DSR ("masks", written by the voxelizer)
- *  ② Select the slice labelled "bottle", split its support points into
- *     near-surface candidates (queue anchors) and residuals (drive expansion)
- *  ③ Update the historical sample queue + run gradient descent on the cylinder
- *     generative model (SDF + FE)
- *  ④ Write the fitted pose AND its Laplace covariance (P_bottle) on the
- *     room→bottle RT edge, plus geometry attrs + a cylinder mesh
+ * SpecificWorker — bottle_concept agent: RoboComp lifecycle + presence protocol +
+ * orchestration only. compute() wires the collaborators into the per-cycle pipeline:
+ *   perception_ (read masks) → scene_graph_ (scaffold bottle nodes) →
+ *   fitter_ (per-bottle free-energy fit + write-back) → evaluator_ (validation drivers).
  */
 
 #include "specificworker.h"
@@ -45,8 +40,6 @@
 
 #include <dsr/api/dsr_api.h>
 
-// ─── Constructor / Destructor ─────────────────────────────────────────────────
-
 SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, bool startup_check)
     : GenericWorker(configLoader, tprx)
 {
@@ -63,7 +56,7 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
     hibernationChecker.start(500);
 #endif
 
-    // ── Agent-presence state machine (Waiting → Operating → Degraded) ──────────
+    // Agent-presence state machine: Waiting → Operating → Degraded.
     const int period = configLoader.get<int>("Period.Compute");
 
     states["Waiting"] = std::make_unique<GRAFCETStep>("Waiting", period,
@@ -157,8 +150,6 @@ void SpecificWorker::terminal_shutdown()
     std::_Exit(EXIT_SUCCESS);
 }
 
-// ─── Initialisation ──────────────────────────────────────────────────────────
-
 void SpecificWorker::initialize()
 {
     std::print("bottle_concept: initialize()\n");
@@ -170,7 +161,7 @@ void SpecificWorker::initialize()
         return;
     }
 
-    // ── Agent-presence protocol wiring ─────────────────────────────────────────
+    // Agent-presence protocol wiring.
     presence_coordinator_.configure(configLoader, G, static_cast<std::uint32_t>(agent_id));
     presence_coordinator_.set_transition_hooks({
         .request_presence_ready = [this]() { emit presenceReady(); },
@@ -276,8 +267,6 @@ void SpecificWorker::initialize()
         perception_.get(), scene_graph_.get(), evaluator_.get());
 }
 
-// ─── Main compute loop ───────────────────────────────────────────────────────
-
 namespace { constexpr int PLACE_SETTLE_CYCLES = 30; }   // ~settle time after a start-placement move
 
 void SpecificWorker::compute()
@@ -325,8 +314,6 @@ void SpecificWorker::compute()
             evaluator_->step_move_experiment(fitter_->instances());
     }
 }
-
-// ─── Graph slots / lifecycle ───────────────────────────────────────────────────
 
 void SpecificWorker::del_node_slot(std::uint64_t id)
 {
