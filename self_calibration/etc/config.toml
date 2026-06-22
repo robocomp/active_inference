@@ -30,6 +30,13 @@ camera_node = "zed"
 residual_gate_m = 0.06   # depth inlier band (m): reject samples beyond this |pred−obs| (model breakdown / occlusion)
 tau_vspread_min = 0.1    # min depth-velocity std (m/s) to report τ; below this τ is unseparable from bias (skip, don't print garbage)
 
+# Probabilistic FK / predictive depth covariance — per-sample residual weight = 1/σ_d².
+encoder_sigma_deg    = 0.02    # per-joint encoder σ (deg). Gen3 publishes no σ; seeded from repeatability 1mm@2σ. Swamped in sim; re-measure on HW (hold arm still, take per-joint std)
+depth_sensor_sigma_m = 0.005   # base depth-sensor noise floor (m)
+depth_sensor_range_k = 0.001   # depth noise grows ≈ k·range² (per m)
+geom_sigma_m         = 0.008   # single-capsule model floor (m)
+grazing_cos_min      = 0.2     # clamp on |ray·surface-normal|; grazing/silhouette samples inflate σ_geom up to 1/this (downweights unreliable edge samples)
+
 [Period]
 Compute = 100
 Emergency = 500

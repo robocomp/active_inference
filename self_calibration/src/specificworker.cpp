@@ -49,13 +49,18 @@ namespace
     // meets the capsule (segment A..B, radius R) — the proper ray–capsule intersection
     // that replaces the crude Y−R: cylinder body, with sphere caps past the ends.
     // Returns `fallback` when the ray grazes/misses (numerically degenerate).
+    // Optionally writes the hit point and outward surface normal (for the grazing-
+    // incidence weight). On a ray miss/graze it returns `fallback` and leaves the
+    // outputs untouched (caller treats a zero normal as nominal incidence).
     double capsule_near_depth(const Eigen::Vector3d& P, const Eigen::Vector3d& A,
-                              const Eigen::Vector3d& B, double R, double fallback)
+                              const Eigen::Vector3d& B, double R, double fallback,
+                              Eigen::Vector3d* hit_out = nullptr, Eigen::Vector3d* normal_out = nullptr)
     {
         const Eigen::Vector3d d  = P.normalized();   // ray dir from the camera origin (O=0)
         const Eigen::Vector3d ab = B - A;
         const double L = ab.norm();
         double tau = -1.0;
+        Eigen::Vector3d normal = Eigen::Vector3d::Zero();
         if (L > 1e-6)                                 // infinite-cylinder body, clamped to [A,B]
         {
             const Eigen::Vector3d u = ab / L;
@@ -71,7 +76,11 @@ namespace
                 {
                     const double t = (-beta - std::sqrt(disc)) / (2.0 * alpha);
                     const double sproj = (t * d - A).dot(u);   // axial coord of the hit
-                    if (t > 1e-6 and sproj >= 0.0 and sproj <= L) tau = t;
+                    if (t > 1e-6 and sproj >= 0.0 and sproj <= L)
+                    {
+                        tau = t;
+                        normal = (t * d - (A + sproj * u)).normalized();  // hit − closest axis point
+                    }
                 }
             }
         }
@@ -83,10 +92,13 @@ namespace
             if (disc >= 0.0)
             {
                 const double t = dC - std::sqrt(disc);
-                if (t > 1e-6) tau = t;
+                if (t > 1e-6) { tau = t; normal = (t * d - C).normalized(); }
             }
         }
-        return tau < 0.0 ? fallback : (tau * d).y();
+        if (tau < 0.0) return fallback;
+        if (hit_out)    *hit_out    = tau * d;
+        if (normal_out) *normal_out = normal;
+        return (tau * d).y();
     }
 
     struct LineFit { double slope = 0, intercept = 0, scale = 0, vspread = 0, inlier_frac = 0; bool ok = false; };
@@ -223,6 +235,11 @@ void SpecificWorker::initialize()
     init_media_plane();
     try { residual_gate_m_ = configLoader.get<double>("SelfCalib.residual_gate_m"); } catch (...) {}
     try { tau_vspread_min_ = configLoader.get<double>("SelfCalib.tau_vspread_min"); } catch (...) {}
+    try { encoder_sigma_rad_    = configLoader.get<double>("SelfCalib.encoder_sigma_deg") * 0.017453292519943295; } catch (...) {}
+    try { depth_sensor_sigma_m_ = configLoader.get<double>("SelfCalib.depth_sensor_sigma_m"); } catch (...) {}
+    try { depth_sensor_range_k_ = configLoader.get<double>("SelfCalib.depth_sensor_range_k"); } catch (...) {}
+    try { geom_sigma_m_         = configLoader.get<double>("SelfCalib.geom_sigma_m"); } catch (...) {}
+    try { grazing_cos_min_      = configLoader.get<double>("SelfCalib.grazing_cos_min"); } catch (...) {}
 
     // FK model (the SAME Kinematics the controller uses) + the graph extrinsic API.
     if (G) inner_eigen_ = G->get_inner_eigen_api();
@@ -450,12 +467,23 @@ void SpecificWorker::compute_depth_residual()
 {
     if (not kin_ or not ensure_depth_intrinsics())
         return;
+    // Throttle the "blocked" heartbeats so a missing prerequisite is never silent
+    // (frames arriving but no [calib] output ⇒ this fires) — ~once/2s at 54 fps.
+    static int blocked_throttle = 0;
+    const bool say = (blocked_throttle++ % 100) == 0;
+    const bool print_now = last_depth_stamp_ms_ >= last_calib_print_ms_ + 350;  // ~2.8 Hz
     const auto js = match_joint(last_depth_stamp_ms_);
     if (not js.valid)
+    {
+        if (say) std::print("[calib] no q for this frame: (stamp_ms,q) ring absent on kinova_arm_r — is kinova_controller running with publish_joint_buffer=true?\n");
         return;
+    }
     Eigen::Matrix4d zed_T_arm;
     if (not build_extrinsic(zed_T_arm))
+    {
+        if (say) std::print("[calib] extrinsic unavailable: inner_eigen body→arm / body→zed walk failed (graph not fully joined?)\n");
         return;
+    }
 
     const int w = static_cast<int>(last_depth_w_), h = static_cast<int>(last_depth_h_);
     const auto depth_at = [&](int u, int v) -> double          // observed forward distance, m (<0 = invalid)
@@ -490,9 +518,23 @@ void SpecificWorker::compute_depth_residual()
     const auto links_prev = have_prev ? kin_->arm_mesh_link_poses(js.q_prev)
                                       : std::vector<Kinematics::MeshLinkPose>{};
 
+    // Probabilistic FK: perturb each joint by ε once → reuse the perturbed link
+    // poses per sample to numerically propagate encoder noise into the predicted
+    // depth (∂d_pred/∂q_j along the fixed pixel ray). 7 extra FK evals/frame.
+    constexpr double EPS = 1e-5;                 // rad finite-diff step
+    std::array<std::vector<Kinematics::MeshLinkPose>, 7> links_pert;
+    for (int j = 0; j < 7; ++j)
+    {
+        auto qj = js.q; qj[static_cast<std::size_t>(j)] += EPS;
+        links_pert[static_cast<std::size_t>(j)] = kin_->arm_mesh_link_poses(qj);
+    }
+
     constexpr int    S    = 12;                 // samples along each capsule axis
     const double     gate = residual_gate_m_;   // m inlier band (tightened; rejects model breakdown)
     int n_in = 0; double sum2 = 0.0, sum_signed = 0.0;
+    // Precision-weighted accumulators (probabilistic FK) + σ_d distribution probe.
+    double wsum = 0.0, wr = 0.0, wr2 = 0.0;
+    std::vector<double> sigma_d_list, fk_frac_list;
 
     for (std::size_t li = 0; li < links.size(); ++li)
     {
@@ -516,10 +558,38 @@ void SpecificWorker::compute_depth_residual()
             const int v = static_cast<int>(std::lround(dcy_ - dfy_ * Z / Y));
             const double d_obs = depth_at(u, v);
             if (d_obs < 0.0) continue;
-            const double d_pred = capsule_near_depth(P, e0c, e1c, cap->radius, Y - cap->radius);
+            Eigen::Vector3d hit, nrm = Eigen::Vector3d::Zero();
+            const double d_pred = capsule_near_depth(P, e0c, e1c, cap->radius, Y - cap->radius, &hit, &nrm);
             const double r = d_pred - d_obs;                    // ray–capsule near surface − observed
             if (std::abs(r) > gate) continue;
             sum2 += r * r; sum_signed += r; ++n_in;
+
+            // Predictive depth variance σ_d² = encoder noise through FK (numeric
+            // ∂d_pred/∂q_j along THIS fixed ray) + capsule-model floor + range-
+            // dependent sensor noise → per-sample precision w = 1/σ_d². Silhouette/
+            // grazing & ill-conditioned configs get large ∂d_pred/∂q ⇒ downweighted.
+            double var_fk = 0.0;
+            for (int j = 0; j < 7; ++j)
+            {
+                const auto& lp_j = links_pert[static_cast<std::size_t>(j)];
+                if (li >= lp_j.size()) continue;
+                const Eigen::Vector3d e0j = (zed_T_arm * (lp_j[li].pose * a0).homogeneous()).head<3>();
+                const Eigen::Vector3d e1j = (zed_T_arm * (lp_j[li].pose * a1).homogeneous()).head<3>();
+                const double g = (capsule_near_depth(P, e0j, e1j, cap->radius, d_pred) - d_pred) / EPS;
+                var_fk += g * g;
+            }
+            var_fk *= encoder_sigma_rad_ * encoder_sigma_rad_;
+            const double sig_sensor = depth_sensor_sigma_m_ + depth_sensor_range_k_ * Y * Y;
+            // Grazing incidence: at a near-tangent ray (|d̂·n|→0) a small radius/position
+            // error swings the surface depth a lot → inflate the model floor by 1/cosθ
+            // (clamped). Zero normal = ray missed the capsule → nominal incidence.
+            const double cos_inc  = nrm.squaredNorm() > 0.5 ? std::abs(P.normalized().dot(nrm)) : 1.0;
+            const double sig_geom = geom_sigma_m_ / std::max(cos_inc, grazing_cos_min_);
+            const double var_d = var_fk + sig_geom * sig_geom + sig_sensor * sig_sensor;
+            const double wts   = 1.0 / var_d;
+            wsum += wts; wr += wts * r; wr2 += wts * r * r;
+            sigma_d_list.push_back(std::sqrt(var_d));
+            fk_frac_list.push_back(var_fk / var_d);
 
             // τ regressor = ∂d_pred/∂t along the SAME pixel ray: the q_prev capsule's
             // near-surface depth at this ray, differenced. Consistent with d_pred (the
@@ -536,11 +606,38 @@ void SpecificWorker::compute_depth_residual()
 
     if (n_in < 5)
     {
-        std::print("[calib] depth residual: too few inliers ({}) — arm out of view / extrinsic off?\n", n_in);
+        if (print_now)
+        {
+            last_calib_print_ms_ = last_depth_stamp_ms_;
+            std::print("[calib] depth residual: too few inliers ({}) — arm out of view / extrinsic off?\n", n_in);
+        }
         return;
     }
-    std::print("[calib] depth rms={:.4f}m bias={:+.4f}m n={} | qdot={:.3f}rad/s match_dt={}ms\n",
-               std::sqrt(sum2 / n_in), sum_signed / n_in, n_in, js.qdot_norm, js.match_err_ms);
+    if (print_now)
+    {
+        last_calib_print_ms_ = last_depth_stamp_ms_;
+        std::print("[calib] depth rms={:.4f}m bias={:+.4f}m n={} | qdot={:.3f}rad/s match_dt={}ms\n",
+                   std::sqrt(sum2 / n_in), sum_signed / n_in, n_in, js.qdot_norm, js.match_err_ms);
+    }
+
+    // Probabilistic-FK precision-weighted residual + the σ_d distribution, so we can
+    // sanity-check the predictive covariance against the flat stats above before the
+    // information filter consumes it. fk_frac = encoder-share of σ_d² (≈0 in sim ⇒
+    // floor-dominated, as expected; grows on HW where q noise matters).
+    if (print_now and wsum > 0.0 and not sigma_d_list.empty())
+    {
+        const double bias_w = wr / wsum, rms_w = std::sqrt(wr2 / wsum);
+        const auto pct = [](std::vector<double>& v, double p)
+        {
+            const std::size_t k = std::min(v.size() - 1, static_cast<std::size_t>(p * (v.size() - 1)));
+            std::nth_element(v.begin(), v.begin() + k, v.end());
+            return v[k];
+        };
+        double mf = 0.0; for (double f : fk_frac_list) mf += f; mf /= fk_frac_list.size();
+        const double s10 = pct(sigma_d_list, 0.10), s50 = pct(sigma_d_list, 0.50), s90 = pct(sigma_d_list, 0.90);
+        std::print("[calib-pfk] rms_w={:.4f}m bias_w={:+.4f}m | sigma_d p10/med/p90={:.4f}/{:.4f}/{:.4f}m  fk_frac_mean={:.1f}%\n",
+                   rms_w, bias_w, s10, s50, s90, 100.0 * mf);
+    }
 
     if (++reg_frames_ % REG_REPORT_EVERY == 0)
     {

@@ -13,6 +13,12 @@ LIST(APPEND SOURCES
   ../../common/media_transport/media_transport.cpp
   ../../common/media_transport/generated/idl/image_framePubSubTypes.cxx
   ../../common/media_transport/generated/idl/image_frameTypeObjectSupport.cxx
+  # media_transport's WriterCore::init/make_type_support reference ALL FrameKind
+  # PubSubTypes unconditionally, so even a subscriber-only consumer must link these.
+  ../../common/media_transport/generated/idl/lidar_framePubSubTypes.cxx
+  ../../common/media_transport/generated/idl/lidar_frameTypeObjectSupport.cxx
+  ../../common/media_transport/generated/idl/imu_framePubSubTypes.cxx
+  ../../common/media_transport/generated/idl/imu_frameTypeObjectSupport.cxx
 )
 
 # Headers set

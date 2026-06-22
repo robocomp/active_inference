@@ -151,6 +151,7 @@ private:
 	std::unique_ptr<Kinematics>         kin_;
 	std::unique_ptr<DSR::InnerEigenAPI> inner_eigen_;
 	std::uint64_t last_processed_depth_stamp_ = 0;
+	std::uint64_t last_calib_print_ms_ = 0;   // throttle [calib]/[calib-pfk] to ~2-3 Hz (compute stays per-frame)
 	double dfx_ = 0.0, dfy_ = 0.0, dcx_ = 0.0, dcy_ = 0.0;
 	bool   depth_intr_ok_ = false;
 
@@ -174,6 +175,19 @@ private:
 	int    reg_frames_      = 0;
 	double residual_gate_m_ = 0.06;                       // inlier band (SelfCalib.residual_gate_m)
 	double tau_vspread_min_ = 0.1;                        // min depth-velocity std (m/s) to identify τ (SelfCalib.tau_vspread_min)
+
+	// ── Probabilistic FK: predictive depth covariance (per-sample precision) ──
+	// Each inlier depth sample gets weight 1/σ_d², with σ_d² = encoder noise
+	// propagated through FK (numeric ∂d_pred/∂q) + a single-capsule model floor +
+	// a range-dependent depth-sensor term. This is the predictive-covariance
+	// precision-weighting the self-model design calls for (replaces the flat σ +
+	// hard gate). encoder_sigma is swamped in sim (q ~exact) but its DIRECTIONS
+	// are what make the written-back extrinsic covariance trustworthy on HW.
+	double encoder_sigma_rad_    = 3.49e-4;  // 0.02° per-joint q noise (SelfCalib.encoder_sigma_deg; Gen3 has no published σ → from 1mm@2σ repeatability)
+	double depth_sensor_sigma_m_ = 0.005;    // base depth-sensor noise floor      (SelfCalib.depth_sensor_sigma_m)
+	double depth_sensor_range_k_ = 0.001;    // depth noise grows ≈ k·range² (/m)  (SelfCalib.depth_sensor_range_k)
+	double geom_sigma_m_         = 0.008;    // single-capsule model floor         (SelfCalib.geom_sigma_m)
+	double grazing_cos_min_      = 0.2;      // clamp on |ray·surface-normal|: grazing samples inflate σ_geom ≤1/this (SelfCalib.grazing_cos_min)
 	static constexpr std::size_t REG_MAX          = 3000; // ~2–3 s of inlier samples
 	static constexpr int         REG_REPORT_EVERY = 20;
 
