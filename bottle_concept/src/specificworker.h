@@ -52,160 +52,19 @@
 
 #include <dsr/api/dsr_rt_api.h>
 #include <dsr/api/dsr_inner_eigen_api.h>
-#include <dsr/api/dsr_camera_api.h>
 
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 #include "../../common/robust_metrics/robust_metrics.h"
-#include "bottle_model.h"
 #include "prior_store.h"
-#include "sample_queue.h"
+#include "bottle_instance.h"    // BottleInstance
+#include "agent_config.h"       // AgentConfig + load_agent_config
+#include "bottle_evaluator.h"   // BottleEvaluator (validation harness)
+#include "bottle_perception.h"  // BottlePerception (masks reading)
+#include "bottle_scene_graph.h" // BottleSceneGraph (DSR node/RT I/O)
+#include "bottle_fitter.h"      // BottleFitter (active-inference fit core)
 
-// ─── Per-bottle instance state ────────────────────────────────────────────────
+// ─── (BottleInstance / AgentConfig moved to bottle_instance.h / agent_config.h) ─
 
-struct BottleInstance
-{
-    uint64_t    node_id = 0;
-    std::string node_name;
-
-    BottleModel model;
-    SampleQueue queue;
-
-    int  matched_frames        = 0;     // frames with fresh sensing data
-    bool reseed_requested      = false; // move-experiment: force a fresh cold-start at the next pose
-    int  frames_converged      = 0;     // consecutive frames with |ΔFE| < fe_eps
-    int  last_masks_frame_seen = -1;    // last masks packet frame consumed
-    int  processed_cycles      = 0;     // per-bottle compute cycles for log throttling
-    int  model_generation      = 0;
-    float prev_free_energy     = std::numeric_limits<float>::max();
-    // Dead-band tracking for write_rt_pose — suppress tiny oscillations
-    float last_written_cx = std::numeric_limits<float>::max();
-    float last_written_cy = std::numeric_limits<float>::max();
-    // Last model PUBLISHED to the graph — gate node/edge writes to meaningful changes so a
-    // stable fit stops rewriting the node (big mesh + model_generation) and the RT edge.
-    float last_pub_radius = std::numeric_limits<float>::max();
-    float last_pub_height = std::numeric_limits<float>::max();
-    float last_pub_cx     = std::numeric_limits<float>::max();
-    float last_pub_cy     = std::numeric_limits<float>::max();
-    float last_pub_cz     = std::numeric_limits<float>::max();
-    SampleQueueMetrics      last_queue_metrics;
-    FreeEnergyDecomposition last_fe_terms;
-    // Bottle-owned voxel memory bank (room frame), independent of per-frame uploads.
-    std::vector<Eigen::Vector3f>      voxel_bank_pts;
-    std::unordered_set<std::uint64_t> voxel_bank_keys;
-    // Table-top z (room frame) the bottle stands on, when a "table" node is found under it; NaN
-    // otherwise (bottle then "hangs from the room", no z anchor / no surface filter). Refreshed
-    // each cycle. Anchors cz = table_top_z + height/2 and floors point ingestion at the surface.
-    float table_top_z = std::numeric_limits<float>::quiet_NaN();
-    // RT-tree parent the bottle "hangs from": the table node when found, else the room. The fit is
-    // always in the room frame; the RT edge (parent→bottle) is written in the parent frame.
-    std::uint64_t parent_id = 0;
-    std::string   parent_name = "room";
-};
-
-// ─── Agent configuration ─────────────────────────────────────────────────────
-
-struct AgentConfig
-{
-    float fe_eps           = 1e-3f;
-    int   K_stable         = 30;
-    float write_threshold  = 1e-3f;
-    int   log_period_frames = 30;
-    int   voxel_bank_max_points     = 4000;
-    float voxel_bank_quantization_m = 0.01f;
-    float voxel_select_radius_margin_m = 0.10f;
-    float voxel_select_height_margin_m = 0.10f;
-
-    // BottleModel parameters (forwarded to BottleModelParams)
-    float sigma_obs         = 0.02f;
-    float lambda_size       = 0.5f;
-    float lambda_pos        = 0.05f;
-    float lambda_state      = 0.02f;
-    float prior_radius      = 0.035f;
-    float prior_height      = 0.20f;
-    float prior_size_std    = 0.03f;
-    int   optimization_iters = 15;
-    float optimization_lr   = 0.005f;   // cm-scale object: 10× smaller than the table's
-    float grad_clip         = 2.0f;
-    std::string optimizer_type = "adam";
-    float sgd_momentum      = 0.9f;
-    RobustLossType robust_loss = RobustLossType::Quadratic;
-    float robust_loss_scale = 0.05f;
-    float mask_precision    = 0.0f;   // RGB-mask silhouette likelihood weight (0 = off)
-    float cov_eff_scale     = 1.0f;   // covariance calibration: N_eff = N·scale (NEES → ~3)
-    // Cold-start seed de-projection: the visible (front-arc-only) point centroid sits ~one radius
-    // toward the camera from the true cylinder axis, so snapping the seed to it biases the model
-    // camera-ward (perceived "closer than real"; the observed points fall behind its bbox). Push the
-    // seed AWAY from the camera by frac·radius in the horizontal plane to recover the axis. 0 = off.
-    float seed_deproject_frac = 1.0f;
-    // Free-space / visibility FE term (BottleModelParams): penalise the model occupying the space
-    // between the camera and the observed points. The source cure for the camera-ward depth bias.
-    float lambda_freespace = 0.0f;     // 0 = off
-    float freespace_margin = 0.01f;    // m: carve-sample offset in front of each point
-
-    // SampleQueue parameters (forwarded to SampleQueueParams)
-    int   num_angle_bins               = 16;
-    int   num_z_bins                   = 6;
-    int   max_per_bin                  = 2;
-    float sdf_threshold_for_storage    = 0.03f;
-    int   min_frames_before_historical = 10;
-    int   historical_warmup_frames     = 5;
-    int   max_new_points_per_frame     = 20;
-    float rfe_alpha                    = 0.98f;
-    float rfe_max_threshold            = 2.0f;
-    float rfe_weight_gain              = 0.25f;
-    float min_anchor_weight            = 0.12f;
-    float edge_bonus_weight            = 0.3f;
-    float edge_proximity_threshold     = 0.01f;
-    float z_bin_size                   = 0.04f;
-
-    // Covariance write
-    float yaw_variance = 9.87f;   // ≈π² — yaw is unobservable for a symmetric cylinder
-
-    // ── Static ground-truth evaluation (Webots) ────────────────────────────────
-    // The bottle is stationary during perception, so its Webots pose is a constant
-    // expressed in the room frame (DEF bottle → Shadow→room). When enabled, the
-    // tracker logs per-cycle position/size error and NEES (covariance calibration).
-    bool        eval_enabled = false;
-    std::string eval_log_path = "etc/bottle_eval.csv";
-    std::string eval_gt_source = "webots";   // "webots" (live getObjectPose) | "config"
-    std::string eval_bottle_def = "bottle";  // Webots DEF of the bottle
-    std::string eval_robot_def  = "shadow";  // Webots DEF of the Shadow robot (== DSR body frame)
-    float gt_cx = 0.0f, gt_cy = 0.0f, gt_cz = 0.0f;   // cylinder CENTRE, room frame
-    float gt_radius = 0.0f, gt_height = 0.0f;
-
-    // ── One-shot bottle placement on start (Scene.*) ─────────────────────────────
-    // setObjectPose the real bottle to a fixed Webots-WORLD x,y ONCE at startup (z and
-    // orientation kept from its current pose), so the arm approaches from its own side and
-    // the reaching arm occludes the camera less. Done before perception converges, so the
-    // fit follows the new pose (a live move is blocked by the XY ownership gate).
-    bool  place_on_start = false;   // Scene.PlaceBottleOnStart
-    float place_world_x  = 0.0f;    // Scene.PlaceBottleWorldX (Webots world metres, +X front)
-    float place_world_y  = 0.0f;    // Scene.PlaceBottleWorldY (Webots world metres, +Y right)
-
-    // ── Moving-bottle validation experiment ──────────────────────────────────
-    // Steps the REAL bottle across the table in Webots (setObjectPose) through a grid of
-    // poses, holding each for move_settle_cycles so the fitted model converges, and logs the
-    // fitted pose/shape vs the live Webots ground truth at every cycle. GT is re-acquired each
-    // cycle (the bottle is moving), so the static-pose latch is bypassed while this is on.
-    bool  move_experiment   = false;   // Eval.MoveExperiment
-    int   move_settle_cycles = 25;     // cycles held at each grid pose before stepping
-    float move_step_m        = 0.06f;  // grid spacing over the table (metres, world frame)
-    int   move_grid_n        = 5;      // grid is move_grid_n × move_grid_n positions
-    // Absolute-world grid (Eval.MoveAbsolute): sweep the rectangle [xmin,xmax]×[ymin,ymax] in WORLD
-    // coords at move_step_m spacing, instead of a home-centred N×N. Lets the grid cover the whole
-    // ZED-visible table (incl. the +y/right side a home-centred grid can't reach). z/orientation kept
-    // from the captured home pose. Poses out of the camera view simply yield no detection (filtered).
-    bool  move_absolute = false;       // Eval.MoveAbsolute
-    float move_xmin = 0.0f, move_xmax = 0.0f, move_ymin = 0.0f, move_ymax = 0.0f;   // world bounds (m)
-
-    // ── Static-restart validation ─────────────────────────────────────────────
-    // Real scenario: the object is STATIC until grasped. So validate the fit at independent
-    // static positions, restarting the agent for each (fresh voxel bank — no cross-position
-    // accumulation). One run = move the bottle to grid pose BOTTLE_TEST_POSE (env), fit it from
-    // scratch, append the converged fit-vs-GT to the log. Takes precedence over move_experiment.
-    bool  static_pose_test  = false;   // Eval.StaticPoseTest
-    int   static_pose_index = 0;       // grid index for THIS run (env BOTTLE_TEST_POSE)
-};
 
 // ─── SpecificWorker ──────────────────────────────────────────────────────────
 
@@ -232,36 +91,7 @@ public slots:
     void del_node_slot(std::uint64_t from);
 
 private:
-    struct BottleObservation
-    {
-        bool has_fresh_data = false;
-        float explanation_ratio = 1.0f;
-        std::vector<Eigen::Vector3f> candidate_pts;
-        std::vector<Eigen::Vector3f> residual_pts;
-    };
-
-    struct MaskSlice
-    {
-        std::string label;
-        float class_id = -1.0f;
-        float confidence = 0.0f;
-        Eigen::Vector3f centroid = Eigen::Vector3f::Zero();
-        Eigen::Vector3f bbox_min = Eigen::Vector3f::Zero();
-        Eigen::Vector3f bbox_max = Eigen::Vector3f::Zero();
-        std::size_t support_begin = 0;
-        std::size_t support_end = 0;
-        std::size_t pixel_begin = 0;   // raw 2D mask pixels (into MasksPacket::mask_pixels)
-        std::size_t pixel_end = 0;
-    };
-
-    struct MasksPacket
-    {
-        bool valid = false;
-        int frame_id = -1;
-        std::vector<MaskSlice> slices;
-        std::vector<Eigen::Vector3f> support_points;
-        std::vector<Eigen::Vector2f> mask_pixels;   // raw YOLO foreground (col,row), depth-independent
-    };
+    // (BottleObservation moved to bottle_fitter.h; MaskSlice/MasksPacket to bottle_perception.h)
 
     // ── Presence protocol ──────────────────────────────────────────────────────
     void waiting_enter();
@@ -284,75 +114,6 @@ private:
     // Delete every "bottle*" cylinder node this agent owns (startup sweep + teardown).
     void remove_owned_bottle_nodes();
 
-    // ── Initialisation helpers ────────────────────────────────────────────────
-    void load_config(const ConfigLoader& cfg);
-    void scaffold_missing_bottle_nodes();
-    void ensure_instance(const DSR::Node& node);
-    bool should_log(const BottleInstance& inst) const;
-    bool refresh_masks_packet();
-    std::optional<MaskSlice> select_mask_for_bottle(const BottleInstance& inst) const;
-
-    // ── Per-bottle pipeline ────────────────────────────────────────────────────
-    void process_bottle_node(const DSR::Node& node);
-    BottleObservation observe_bottle_node(BottleInstance& inst, const DSR::Node& node);
-    void ingest_observation_voxels(BottleInstance& inst, const BottleObservation& observation);
-    bool is_voxel_owned_by_bottle(const BottleInstance& inst, const Eigen::Vector3f& point) const;
-    // Table-top z (room frame) of the "table" node when the bottle's (bx,by) is over its footprint.
-    // The bottle stands on it: cz is anchored to table_top+height/2 and surface points are filtered.
-    // std::nullopt if no table node (bottle hangs from the room instead).
-    std::optional<float> find_table_top(float bx, float by) const;
-    // The "table" node when the bottle's (bx,by) is over its footprint — the RT-tree parent the
-    // bottle hangs from (re-parents room→bottle to table→bottle). std::nullopt ⇒ hang from the room.
-    std::optional<DSR::Node> find_table_node(float bx, float by) const;
-    float run_bottle_inference(BottleInstance& inst, const BottleObservation& observation);
-    void step_queue_update(BottleInstance& inst,
-                           const std::vector<Eigen::Vector3f>& candidate_pts,
-                           float observation_precision);
-    float step_model_update(BottleInstance& inst,
-                            const std::vector<Eigen::Vector3f>& residual_pts,
-                            float residual_precision);
-    void step_write_model(BottleInstance& inst, DSR::Node& node, float free_energy);
-    // Append one fit-vs-ground-truth row (position/size error + NEES) to the eval CSV.
-    void log_eval(const BottleInstance& inst, float free_energy);
-    // One-shot: query the bottle's static Webots pose and express its CENTRE in the room
-    // frame, storing it in cfg_.gt_*. Returns false if the bridge/transforms aren't ready.
-    bool acquire_webots_gt();
-    // Moving-bottle validation: drive the real bottle across the table (setObjectPose) and step
-    // through the grid once each pose's fit has settled. No-op unless Eval.MoveExperiment.
-    void step_move_experiment();
-    // Static-restart validation: on the first cycle, move the bottle to grid pose
-    // static_pose_index (using a persisted home as the grid origin) so this fresh agent fits it
-    // from scratch. No-op unless Eval.StaticPoseTest. Returns true once the move has been issued.
-    bool place_static_test_pose();
-
-    // ── DSR helpers ──────────────────────────────────────────────────────────
-    std::vector<Eigen::Vector3f> read_pts_attrib(const DSR::Node& node,
-                                                 const std::string& att_name) const;
-    static std::uint64_t voxel_key(const Eigen::Vector3f& point, float quantization_m);
-    Eigen::Matrix2f read_robot_covariance() const;
-    void write_rt_pose(BottleInstance& inst);
-    static std::vector<float> make_cylinder_mesh(const BottleState& s, int segments = 16);
-
-    // ── Factory helpers ────────────────────────────────────────────────────────
-    BottleModelParams make_model_params() const;
-    SampleQueueParams make_queue_params() const;
-
-    // ── RGB-mask-silhouette diagnostic ────────────────────────────────────────
-    // Projects the fitted cylinder AND the measured support points into the ZED image
-    // (intrinsics via DSR CameraAPI on the "zed" node, extrinsic via the room→zed RT chain)
-    // and compares their 2D footprints (IoU). A second synthetic at GT radius tests whether a
-    // tighter cylinder matches the observed mask better — de-risks the mask-as-likelihood idea
-    // before wiring a 2D silhouette term into the free energy.
-    void mask_silhouette_diagnostic(const BottleInstance& inst, const BottleObservation& obs);
-    // Feed the fitted model the RGB-mask silhouette as a likelihood: extract the mask's left/right
-    // edge pixels, back-project to room-frame edge rays, and hand them to inst.model (cleared if the
-    // mask/camera are unavailable or MaskPrecision==0). Must run before the per-cycle model update.
-    void feed_silhouette(BottleInstance& inst);
-    // room_T_zed (camera→room) as a plain 4×4, composed room→body→zed at ts=0. Read element-wise out
-    // of the DSR Transforms (which live in std::optional and aren't Eigen-over-aligned, so block/vector
-    // ops on them assert) and multiplied as plain Matrix4d. std::nullopt if a hop is unavailable.
-    std::optional<Eigen::Matrix4d> room_T_zed_matrix() const;
-
     // ── Members ──────────────────────────────────────────────────────────────
     bool startup_check_flag = false;
     bool owned_nodes_cleaned_ = false;
@@ -362,31 +123,19 @@ private:
     AgentConfig                                 cfg_;
     std::unique_ptr<PriorStore>                 prior_store_;
     std::vector<BottlePrior>                    priors_cache_;
-    std::unordered_map<uint64_t, BottleInstance> instances_;
 
     std::unique_ptr<DSR::RT_API> rt_api_;
     std::unique_ptr<DSR::InnerEigenAPI> inner_eigen_;
-    std::unique_ptr<DSR::CameraAPI> camera_api_;   // ZED intrinsics, lazily bound to the "zed" node
-    bool                         gt_acquired_ = false;
     uint64_t                     room_node_id_ = 0;
-    int                          last_masks_frame_seen_ = -1;
-    MasksPacket                  masks_packet_;
 
-    std::string priors_path_;
+    // Collaborators (constructed in initialize(), after G + the DSR APIs are ready). Declared in
+    // dependency order — the fitter holds raw pointers to the three above it, so it is destroyed first.
+    std::unique_ptr<BottlePerception> perception_;   // masks reading (owns the parsed MasksPacket)
+    std::unique_ptr<BottleSceneGraph> scene_graph_;  // DSR node/RT I/O (table, scaffold, write-back)
+    std::unique_ptr<BottleEvaluator>  evaluator_;    // Webots-GT / sweep / eval CSV (no-op unless flagged)
+    std::unique_ptr<BottleFitter>     fitter_;       // active-inference fit core (owns the instance map)
 
-    std::ofstream eval_log_;   // open when cfg_.eval_enabled; header written on first row
-
-    bool place_bottle_done_ = false;   // one-shot guard for cfg_.place_on_start
-    int  place_settle_      = 0;       // cycles waited after placing, before fitting (gate-lock guard)
-    void place_bottle_on_start();      // setObjectPose the bottle to the configured world x,y once
-
-    // Moving-bottle experiment runtime state (see step_move_experiment / Cfg::move_*).
-    bool                                   move_started_ = false;
-    RoboCompWebots2Robocomp::ObjectPose    move_home_{};       // bottle's world pose at experiment start
-    std::vector<std::pair<float,float>>    move_offsets_;      // (dx,dy) grid in world mm
-    std::size_t                            move_idx_ = 0;      // current grid index
-    int                                    move_settle_ = 0;   // cycles held at the current pose
-    int                                    move_reseed_in_ = 0; // countdown to forcing a fresh cold-start after a teleport
+    int place_settle_ = 0;   // cycles waited after a start-placement move, before fitting (gate-lock guard)
 
 signals:
     void presenceReady();

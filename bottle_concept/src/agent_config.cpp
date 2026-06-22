@@ -1,0 +1,121 @@
+/*
+ * agent_config.cpp — fill AgentConfig from a RoboComp ConfigLoader.
+ */
+
+#include "agent_config.h"
+
+#include <cstdlib>   // std::getenv, std::atoi
+#include <print>
+
+#include <genericworker.h>   // ConfigLoader
+
+#include "../../common/robust_metrics/robust_metrics.h"   // robust_loss_type_from_string
+
+AgentConfig load_agent_config(const ConfigLoader& cfg)
+{
+    AgentConfig out;
+
+    auto getf = [&](const std::string& k, float def) -> float {
+        return cfg.exists(k) ? static_cast<float>(cfg.get<double>(k)) : def;
+    };
+    auto geti = [&](const std::string& k, int def) -> int {
+        return cfg.exists(k) ? cfg.get<int>(k) : def;
+    };
+    auto gets = [&](const std::string& k, std::string def) -> std::string {
+        return cfg.exists(k) ? cfg.get<std::string>(k) : def;
+    };
+    auto getb = [&](const std::string& k, bool def) -> bool {
+        return cfg.exists(k) ? cfg.get<bool>(k) : def;
+    };
+
+    out.priors_path = gets("BottleConcept.PriorsPath", "etc/object_priors.toml");
+
+    out.fe_eps            = getf("BottleConcept.FEps",            1e-3f);
+    out.K_stable          = geti("BottleConcept.KStable",         30);
+    out.write_threshold   = getf("BottleConcept.WriteThreshold",  1e-3f);
+    out.log_period_frames = geti("BottleConcept.LogPeriodFrames", 30);
+    out.voxel_bank_max_points        = geti("BottleConcept.VoxelBankMaxPoints",        4000);
+    out.voxel_bank_quantization_m    = getf("BottleConcept.VoxelBankQuantizationM",    0.01f);
+    out.voxel_select_radius_margin_m = getf("BottleConcept.VoxelSelectRadiusMarginM",  0.10f);
+    out.voxel_select_height_margin_m = getf("BottleConcept.VoxelSelectHeightMarginM",  0.10f);
+
+    out.sigma_obs          = getf("BottleModel.SigmaObs",          0.02f);
+    out.lambda_size        = getf("BottleModel.LambdaSize",        0.5f);
+    out.lambda_pos         = getf("BottleModel.LambdaPos",         0.05f);
+    out.lambda_state       = getf("BottleModel.LambdaState",       0.02f);
+    out.prior_radius       = getf("BottleModel.PriorRadius",       0.035f);
+    out.prior_height       = getf("BottleModel.PriorHeight",       0.20f);
+    out.prior_size_std     = getf("BottleModel.PriorSizeStd",      0.03f);
+    out.optimization_iters = geti("BottleModel.OptimizationIters", 15);
+    out.optimization_lr    = getf("BottleModel.OptimizationLr",    0.005f);
+    out.grad_clip          = getf("BottleModel.GradClip",          2.0f);
+    out.mask_precision     = getf("BottleModel.MaskPrecision",     0.0f);
+    out.cov_eff_scale      = getf("BottleModel.CovEffScale",       1.0f);
+    out.seed_deproject_frac = getf("BottleModel.SeedDeprojectFrac", 1.0f);
+    out.lambda_freespace   = getf("BottleModel.LambdaFreeSpace",   0.0f);
+    out.freespace_margin   = getf("BottleModel.FreeSpaceMargin",   0.01f);
+    out.optimizer_type     = gets("BottleModel.OptimizerType",     "adam");
+    out.sgd_momentum       = getf("BottleModel.SgdMomentum",       0.9f);
+    {
+        const auto loss_name = gets("BottleModel.RobustLoss", "quadratic");
+        const auto loss_type = robust_loss_type_from_string(loss_name);
+        out.robust_loss = loss_type.value_or(RobustLossType::Quadratic);
+    }
+    out.robust_loss_scale  = getf("BottleModel.RobustLossScale",  0.05f);
+
+    out.num_angle_bins               = geti("SampleQueue.NumAngleBins",              16);
+    out.num_z_bins                   = geti("SampleQueue.NumZBins",                  6);
+    out.max_per_bin                  = geti("SampleQueue.MaxPerBin",                 2);
+    out.sdf_threshold_for_storage    = getf("SampleQueue.SdfThresholdForStorage",    0.03f);
+    out.min_frames_before_historical = geti("SampleQueue.MinFramesBeforeHistorical", 10);
+    out.historical_warmup_frames     = geti("SampleQueue.HistoricalWarmupFrames",    5);
+    out.max_new_points_per_frame     = geti("SampleQueue.MaxNewPointsPerFrame",      20);
+    out.rfe_alpha                    = getf("SampleQueue.RfeAlpha",                  0.98f);
+    out.rfe_max_threshold            = getf("SampleQueue.RfeMaxThreshold",           2.0f);
+    out.rfe_weight_gain              = getf("SampleQueue.RfeWeightGain",             0.25f);
+    out.min_anchor_weight            = getf("SampleQueue.MinAnchorWeight",           0.12f);
+    out.edge_bonus_weight            = getf("SampleQueue.EdgeBonusWeight",           0.3f);
+    out.edge_proximity_threshold     = getf("SampleQueue.EdgeProximityThreshold",    0.01f);
+    out.z_bin_size                   = getf("SampleQueue.ZBinSize",                  0.04f);
+
+    out.yaw_variance = getf("BottleConcept.YawVariance", 9.87f);
+
+    // Static Webots ground-truth evaluation (room frame; cylinder centre).
+    out.eval_enabled    = getb("Eval.Enabled",  false);
+    out.eval_log_path   = gets("Eval.LogPath",  "etc/bottle_eval.csv");
+    out.eval_gt_source  = gets("Eval.GtSource", "webots");
+    out.eval_bottle_def = gets("Eval.BottleDef", "bottle");
+    out.eval_robot_def  = gets("Eval.RobotDef",  "shadow");
+    out.gt_cx     = getf("Eval.GtCx",     0.0f);
+    out.gt_cy     = getf("Eval.GtCy",     0.0f);
+    out.gt_cz     = getf("Eval.GtCz",     0.0f);
+    out.gt_radius = getf("Eval.GtRadius", 0.0f);
+    out.gt_height = getf("Eval.GtHeight", 0.0f);
+
+    // One-shot bottle placement on start (Webots world coords; setObjectPose's native frame).
+    out.place_on_start = getb("Scene.PlaceBottleOnStart", false);
+    out.place_world_x  = getf("Scene.PlaceBottleWorldX", 0.0f);
+    out.place_world_y  = getf("Scene.PlaceBottleWorldY", 0.0f);
+
+    // Moving-bottle validation experiment.
+    out.move_experiment    = getb("Eval.MoveExperiment", false);
+    out.move_settle_cycles = geti("Eval.MoveSettleCycles", 25);
+    out.move_step_m        = getf("Eval.MoveStep", 0.06f);
+    out.move_grid_n        = geti("Eval.MoveGridN", 5);
+    out.move_absolute      = getb("Eval.MoveAbsolute", false);
+    out.move_xmin          = getf("Eval.MoveXmin", 0.0f);
+    out.move_xmax          = getf("Eval.MoveXmax", 0.0f);
+    out.move_ymin          = getf("Eval.MoveYmin", 0.0f);
+    out.move_ymax          = getf("Eval.MoveYmax", 0.0f);
+    // Static-restart validation (one grid pose per run; index from env BOTTLE_TEST_POSE).
+    out.static_pose_test   = getb("Eval.StaticPoseTest", false);
+    if (const char* p = std::getenv("BOTTLE_TEST_POSE"))
+        out.static_pose_index = std::atoi(p);
+    if (out.static_pose_test)
+        out.move_experiment = false;          // static-restart takes precedence
+    if (out.move_experiment or out.static_pose_test)
+        out.eval_enabled = true;              // the experiment is pointless without logging
+
+    std::print("bottle_concept: configuration loaded.\n");
+    return out;
+}
