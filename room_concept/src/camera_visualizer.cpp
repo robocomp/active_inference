@@ -188,7 +188,7 @@ void CameraVisualizer::drain_media_plane()
         media_rgb_.width  = w;
         media_rgb_.height = h;
         media_rgb_.format = f.format();
-        media_rgb_.stamp  = f.stamp_ns();
+        media_rgb_.stamp  = f.stamp_ms();
         media_rgb_.valid  = true;
     });
 }
