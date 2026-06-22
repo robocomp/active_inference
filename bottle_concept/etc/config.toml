@@ -62,7 +62,7 @@ nodes = ["bottle_concept 10", "bottle*"]
 [Eval]
 Enabled  = true
 GtSource = "webots"            # "webots" (live getObjectPose) | "config" (manual Gt* below)
-LogPath  = "etc/bottle_static_eval.csv"
+LogPath  = "etc/bottle_fulltable2_eval.csv"
 BottleDef = "bottle"           # Webots DEF in shadow_arm.wbt
 RobotDef  = "shadow"           # Webots DEF of the Shadow robot (== DSR body frame)
 
@@ -84,13 +84,21 @@ GtCz = 0.0
 # MoveGridN×MoveGridN grid centred on its start pose, holding each pose MoveSettleCycles compute
 # cycles so the fitted model converges, and logs fit-vs-GT (pose + shape) every cycle to LogPath.
 # Returns the bottle home when done. Forces Enabled=true.
-MoveExperiment   = false   # continuous sweep (accumulates across poses) — off
-MoveGridN        = 3       # 3×3 = 9 poses
-MoveStep         = 0.08    # grid spacing, metres (world frame, over the table)
-MoveSettleCycles = 25      # (continuous mode only)
+MoveExperiment   = false   # sweep off — normal operation
+MoveGridN        = 5       # (unused in absolute mode)
+MoveStep         = 0.16    # grid spacing, metres (world frame)
+# Absolute-world grid over the ZED-visible table (table top z=0.74, world X∈[0.1,0.9] Y∈[-1.1,0.7]).
+# Camera ~(-0.22,-0.38,0.98), HFOV 1.9198 rad (~110°) looking +x/down. Sweep near→far × left→right
+# incl. the +y/right side; out-of-view corners self-exclude (no detection). ~5×9 = 45 poses.
+MoveAbsolute     = false
+MoveXmin         = 0.22
+MoveXmax         = 0.86
+MoveYmin         = -0.95
+MoveYmax         = 0.35
+MoveSettleCycles = 45      # (continuous mode only) — extra time after the candidate-gated re-seed
 # Static-restart validation: ONE grid pose per run (env BOTTLE_TEST_POSE), fresh agent each time
 # (no cross-pose accumulation). Driven by bottle_static_test.sh. Real scenario = static-until-grasped.
-StaticPoseTest   = true
+StaticPoseTest   = false   # sweep mode: MoveExperiment drives the grid (StaticPoseTest would pin pose 0)
 
 # ── Scene setup: place the real bottle on start (Webots WORLD coords) ──────────
 # When on, the bottle is teleported once at startup to (PlaceBottleWorldX, PlaceBottleWorldY)
@@ -98,7 +106,7 @@ StaticPoseTest   = true
 # the reaching arm occludes the camera less. Takes precedence over Eval.StaticPoseTest /
 # MoveExperiment (those also move the bottle). Set false to run the grid-validation drivers.
 [Scene]
-PlaceBottleOnStart = true
+PlaceBottleOnStart = true    # bottle at grasp home (normal)
 PlaceBottleWorldX  = 0.438    # m, Webots world (+X front) — EXPERIMENT INITIAL POSITION (logged 2026-06-20)
 PlaceBottleWorldY  = -0.575   # m, Webots world (+Y right). reach 0.648 m from arm base. (Verify perception:
                               # -0.45 was rejected by YOLO tray-mask earlier; confirm conf>0 at this spot.)
@@ -106,7 +114,6 @@ PlaceBottleWorldY  = -0.575   # m, Webots world (+Y right). reach 0.648 m from a
 # ── bottle_concept agent ──────────────────────────────────────────────────────
 [BottleConcept]
 PriorsPath = "etc/object_priors.toml"
-CheckpointPath = "etc/checkpoint.toml"
 KStable = 30
 LogPeriodFrames = 30
 VoxelBankMaxPoints = 4000

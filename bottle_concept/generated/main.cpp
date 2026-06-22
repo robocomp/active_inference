@@ -213,15 +213,7 @@ int bottle_concept::run(int argc, char* argv[])
 	#endif
 
 	status = EXIT_SUCCESS;
-	// Do NOT `delete worker` at process exit. Running ~GenericWorker tears down the DSRGraph/DDS
-	// participant and the Ice proxies while Ice::Application is about to destroy the communicator;
-	// that ordering races an Ice worker thread against IceUtil::Mutex destruction ->
-	// ThreadSyscallException(EINVAL)/abort. The clean agents (voxelizer, room_concept) intentionally
-	// leak the worker here and exit cleanly — the OS reclaims everything. (NOTE: generated file; if
-	// robocompdsl regenerates main.cpp it may re-add `delete worker;` — remove it again, or fix the
-	// template. SpecificWorker::request_shutdown already runs all real cleanup via aboutToQuit.)
-	// delete worker;
-	(void) worker;
+	delete worker;
 	return status;
 }
 

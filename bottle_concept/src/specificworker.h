@@ -71,6 +71,7 @@ struct BottleInstance
     SampleQueue queue;
 
     int  matched_frames        = 0;     // frames with fresh sensing data
+    bool reseed_requested      = false; // move-experiment: force a fresh cold-start at the next pose
     int  frames_converged      = 0;     // consecutive frames with |ΔFE| < fe_eps
     int  last_masks_frame_seen = -1;    // last masks packet frame consumed
     int  processed_cycles      = 0;     // per-bottle compute cycles for log throttling
@@ -190,6 +191,12 @@ struct AgentConfig
     int   move_settle_cycles = 25;     // cycles held at each grid pose before stepping
     float move_step_m        = 0.06f;  // grid spacing over the table (metres, world frame)
     int   move_grid_n        = 5;      // grid is move_grid_n × move_grid_n positions
+    // Absolute-world grid (Eval.MoveAbsolute): sweep the rectangle [xmin,xmax]×[ymin,ymax] in WORLD
+    // coords at move_step_m spacing, instead of a home-centred N×N. Lets the grid cover the whole
+    // ZED-visible table (incl. the +y/right side a home-centred grid can't reach). z/orientation kept
+    // from the captured home pose. Poses out of the camera view simply yield no detection (filtered).
+    bool  move_absolute = false;       // Eval.MoveAbsolute
+    float move_xmin = 0.0f, move_xmax = 0.0f, move_ymin = 0.0f, move_ymax = 0.0f;   // world bounds (m)
 
     // ── Static-restart validation ─────────────────────────────────────────────
     // Real scenario: the object is STATIC until grasped. So validate the fit at independent
@@ -366,7 +373,6 @@ private:
     MasksPacket                  masks_packet_;
 
     std::string priors_path_;
-    std::string checkpoint_path_;
 
     std::ofstream eval_log_;   // open when cfg_.eval_enabled; header written on first row
 
@@ -380,6 +386,7 @@ private:
     std::vector<std::pair<float,float>>    move_offsets_;      // (dx,dy) grid in world mm
     std::size_t                            move_idx_ = 0;      // current grid index
     int                                    move_settle_ = 0;   // cycles held at the current pose
+    int                                    move_reseed_in_ = 0; // countdown to forcing a fresh cold-start after a teleport
 
 signals:
     void presenceReady();

@@ -103,7 +103,7 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
 SpecificWorker::~SpecificWorker()
 {
     request_shutdown();
-    std::print("bottle_concept: SpecificWorker destroyed, checkpoints saved.\n");
+    std::print("bottle_concept: SpecificWorker destroyed.\n");
 }
 
 void SpecificWorker::request_shutdown()
@@ -119,17 +119,6 @@ void SpecificWorker::request_shutdown()
         disconnect(G.get(), nullptr, this, nullptr);
     inner_eigen_.reset();
 
-    if (prior_store_)
-    {
-        for (const auto& [id, inst] : instances_)
-        {
-            const auto& s = inst.model.state();
-            prior_store_->save_checkpoint(BottleCheckpoint{
-                inst.node_name, s.radius, s.height, s.cx, s.cy, s.cz,
-                inst.prev_free_energy, inst.frames_converged >= cfg_.K_stable});
-        }
-    }
-
     cleanup_owned_nodes();
 }
 
@@ -139,8 +128,8 @@ void SpecificWorker::terminal_shutdown()
     if (terminating.exchange(true))
         return;   // _Exit is coming; never run this twice
 
-    // 1) Save checkpoints, sever our graph callbacks, delete our owned DSR nodes (publishes
-    //    del-deltas) and notify peers. Idempotent (shutting_down_ guard).
+    // 1) Sever our graph callbacks, delete our owned DSR nodes (publishes del-deltas) and notify
+    //    peers. Idempotent (shutting_down_ guard).
     request_shutdown();
 
     // 2) Cleanly remove THIS agent's DDS participant and entities from the shared graph. This is the
@@ -270,7 +259,7 @@ void SpecificWorker::initialize()
     else
         qWarning() << "bottle_concept: no room node found at startup";
 
-    prior_store_  = std::make_unique<PriorStore>(priors_path_, checkpoint_path_);
+    prior_store_  = std::make_unique<PriorStore>(priors_path_);
     priors_cache_ = prior_store_->load_priors();
 }
 
@@ -470,15 +459,24 @@ float SpecificWorker::run_bottle_inference(BottleInstance& inst, const BottleObs
     if (observation.has_fresh_data)
         ingest_observation_voxels(inst, observation);
 
-    if (observation.has_fresh_data and not inst.voxel_bank_pts.empty())
+    const bool have_obs = not observation.candidate_pts.empty() or not observation.residual_pts.empty();
+    if (observation.has_fresh_data and (not inst.voxel_bank_pts.empty() or have_obs))
     {
         // Cold-start: snap model & prior to the first observation centroid so
         // gradient descent begins at the right place rather than the prior.
         if (inst.matched_frames == 0)
         {
+            // Seed from the freshest mask points: candidate first, else RESIDUAL, else the bank. The
+            // candidate/residual split is gated by the CURRENT (possibly stale) model — when the model is
+            // far (a fresh start or a move-experiment teleport) ALL mask points land in residual, so a
+            // candidate-only seed would deadlock (it never moves to where the bottle actually is). The
+            // residual points ARE the current mask, so their centroid is the true bottle location.
+            const auto& src = not observation.candidate_pts.empty() ? observation.candidate_pts
+                            : not observation.residual_pts.empty()  ? observation.residual_pts
+                                                                     : inst.voxel_bank_pts;
+            if (src.empty())
+                return inst.prev_free_energy;   // genuinely nothing to seed from yet — retry next frame
             Eigen::Vector3f sum = Eigen::Vector3f::Zero();
-            const auto& src = observation.candidate_pts.empty() ? inst.voxel_bank_pts
-                                                                : observation.candidate_pts;
             for (const auto& p : src) sum += p;
             const Eigen::Vector3f cen = sum / static_cast<float>(src.size());
             auto s = inst.model.state();
@@ -504,6 +502,17 @@ float SpecificWorker::run_bottle_inference(BottleInstance& inst, const BottleObs
             }
             inst.model.set_state(s);
             inst.model.set_prior(s);   // zero KL so the data term dominates from the start
+            // Move-experiment re-seed: the model has just snapped to the NEW pose's mask centroid, so the
+            // ownership gate is now correct — purge the stale bank (it holds the PREVIOUS pose's voxels;
+            // the bank is append-only and would otherwise drag the fit back). Refills from the new pose
+            // over the next cycles. Without this the fit is stranded near the prior pose (gate never
+            // admits the moved-away voxels) — the sweep "pins" the fit and inflates the error vs GT.
+            if (inst.reseed_requested)
+            {
+                inst.voxel_bank_pts.clear();
+                inst.voxel_bank_keys.clear();
+                inst.reseed_requested = false;
+            }
             std::print("[{}] cold-start snap → ({:.2f},{:.2f},{:.2f}) ({} pts, de-proj {:+.3f} m away from cam)\n",
                        inst.node_name, s.cx, s.cy, s.cz, src.size(), deproj);
             inst.matched_frames = cfg_.min_frames_before_historical + cfg_.historical_warmup_frames + 1;
@@ -1191,36 +1200,11 @@ void SpecificWorker::ensure_instance(const DSR::Node& node)
         }
     }
 
-    // Checkpoint overrides RT/attrs if present — but only when its size is physically
-    // plausible. A checkpoint saved from a diverged fit (e.g. radius blown up by sensor
-    // outliers) would otherwise poison BOTH the initial state AND the size prior below
-    // (mparams.prior_radius = init_state.radius), anchoring the KL term at the bad value.
-    if (prior_store_)
-    {
-        if (const auto ckpt = prior_store_->load_checkpoint(node.name()); ckpt.has_value())
-        {
-            constexpr float kMaxRadius = 0.20f;   // generous "is this a bottle?" bound (m)
-            constexpr float kMaxHeight = 0.60f;
-            const bool size_ok = std::isfinite(ckpt->radius_m) and std::isfinite(ckpt->height_m)
-                and ckpt->radius_m > 0.0f and ckpt->radius_m <= kMaxRadius
-                and ckpt->height_m > 0.0f and ckpt->height_m <= kMaxHeight;
-            if (size_ok)
-            {
-                init_state.radius = ckpt->radius_m;
-                init_state.height = ckpt->height_m;
-            }
-            else
-                std::print("bottle_concept: REJECTED out-of-range checkpoint size for '{}' "
-                           "(r={:.3f} h={:.3f}); falling back to prior (r={:.3f} h={:.3f})\n",
-                           node.name(), ckpt->radius_m, ckpt->height_m, cfg_.prior_radius, cfg_.prior_height);
-            init_state.cx = ckpt->room_x_m;
-            init_state.cy = ckpt->room_y_m;
-            init_state.cz = ckpt->room_z_m;
-            std::print("bottle_concept: restored checkpoint for '{}'\n", node.name());
-        }
-    }
+    // No checkpoints: the model ALWAYS cold-starts at the fresh masks-detected pose (init_state, set
+    // above) and the cold-start centroid snap. Persisted fits reloaded as a stale, drifted start that
+    // could deadlock the fit past the voxel-ownership gate (cand=0, "model won't move") — removed.
 
-    // Sanitize non-finite fields (a corrupted checkpoint would poison the SDF).
+    // Sanitize non-finite fields so a bad detection can't poison the SDF.
     const auto fix = [&](float& v, float fallback)
     {
         if (not std::isfinite(v)) v = fallback;
@@ -1232,11 +1216,10 @@ void SpecificWorker::ensure_instance(const DSR::Node& node)
     fix(init_state.height, cfg_.prior_height);
 
     BottleModelParams mparams = make_model_params();
-    // The size PRIOR is a fixed generative-model belief ("a bottle is ~2 cm"), NOT the restored
-    // estimate. Anchoring it to init_state.radius let a diverged/checkpointed radius become its own
-    // prior (size_energy≈0 there) → locked forever. A single depth view cannot observe radius (only
-    // the front arc), so the prior must govern that direction; keep it pinned to config. The warm-
-    // started init_state still seeds the optimizer, but is now regularized back toward the prior.
+    // The size PRIOR is a fixed generative-model belief ("a bottle is ~2 cm"), NOT the live estimate.
+    // Anchoring it to init_state.radius would let a diverged radius become its own prior (size_energy≈0
+    // there) → locked forever. A single depth view cannot observe radius (only the front arc), so the
+    // prior must govern that direction; keep it pinned to config.
     mparams.prior_radius = cfg_.prior_radius;
     mparams.prior_height = cfg_.prior_height;
     if (prior_store_)
@@ -1375,15 +1358,27 @@ void SpecificWorker::step_move_experiment()
     if (not cfg_.move_experiment or not webots2robocomp_proxy)
         return;
 
-    // Place the bottle at home + (dx,dy) in the WORLD frame (Webots), keeping z/orientation.
-    const auto place = [this](float dx_mm, float dy_mm)
+    // Place the bottle in the WORLD frame (Webots), keeping the home z/orientation. In absolute mode the
+    // pair is the world (x,y) target directly; otherwise it is a (dx,dy) offset from the home pose.
+    const auto place = [this](float ax_mm, float ay_mm)
     {
         RoboCompWebots2Robocomp::ObjectPose p = move_home_;
-        p.position.x = move_home_.position.x + dx_mm;
-        p.position.y = move_home_.position.y + dy_mm;
+        p.position.x = cfg_.move_absolute ? ax_mm : move_home_.position.x + ax_mm;
+        p.position.y = cfg_.move_absolute ? ay_mm : move_home_.position.y + ay_mm;
         try { webots2robocomp_proxy->setObjectPose(cfg_.eval_bottle_def, p); }
         catch (const std::exception& e) { std::print("bottle_concept: [move-exp] setObjectPose failed ({})\n", e.what()); }
     };
+
+    // Re-seed countdown: a few cycles after each teleport (so the mask + voxels have refreshed at the new
+    // pose), force a fresh cold-start so the fit re-snaps to the new position instead of being stranded
+    // near the previous pose by the model-centred ownership gate. Makes each grid pose per-pose-honest.
+    constexpr int MOVE_RESEED_DELAY = 8;
+    if (move_reseed_in_ > 0 and --move_reseed_in_ == 0)
+        for (auto& [id, inst] : instances_)
+        {
+            inst.matched_frames  = 0;      // re-arm cold-start; the bank is purged inside it post-snap
+            inst.reseed_requested = true;
+        }
 
     // Lazy start: capture the home pose and build a centred N×N grid over the table.
     if (not move_started_)
@@ -1394,17 +1389,28 @@ void SpecificWorker::step_move_experiment()
             std::print("bottle_concept: [move-exp] getObjectPose(home) failed ({}); retrying\n", e.what());
             return;
         }
-        const int n = std::max(1, cfg_.move_grid_n);
         const float step_mm = cfg_.move_step_m * 1000.0f;
-        const float c = (n - 1) / 2.0f;     // centre the grid on home
         move_offsets_.clear();
-        for (int iy = 0; iy < n; ++iy)
-            for (int ix = 0; ix < n; ++ix)
-                move_offsets_.emplace_back((ix - c) * step_mm, (iy - c) * step_mm);
+        if (cfg_.move_absolute)
+        {
+            // Absolute world rectangle [xmin,xmax]×[ymin,ymax] at step spacing (mm), row-major in y.
+            for (float y = cfg_.move_ymin; y <= cfg_.move_ymax + 1e-4f; y += cfg_.move_step_m)
+                for (float x = cfg_.move_xmin; x <= cfg_.move_xmax + 1e-4f; x += cfg_.move_step_m)
+                    move_offsets_.emplace_back(x * 1000.0f, y * 1000.0f);
+        }
+        else
+        {
+            const int n = std::max(1, cfg_.move_grid_n);
+            const float c = (n - 1) / 2.0f;     // centre the grid on home
+            for (int iy = 0; iy < n; ++iy)
+                for (int ix = 0; ix < n; ++ix)
+                    move_offsets_.emplace_back((ix - c) * step_mm, (iy - c) * step_mm);
+        }
         move_idx_ = 0;
         move_settle_ = 0;
         move_started_ = true;
         place(move_offsets_[0].first, move_offsets_[0].second);
+        move_reseed_in_ = MOVE_RESEED_DELAY;
         std::print("bottle_concept: [move-exp] started — {} poses, step {:.3f} m, settle {} cycles, log -> {}\n",
                    move_offsets_.size(), cfg_.move_step_m, cfg_.move_settle_cycles, cfg_.eval_log_path);
         return;
@@ -1428,6 +1434,7 @@ void SpecificWorker::step_move_experiment()
         return;
     }
     place(move_offsets_[move_idx_].first, move_offsets_[move_idx_].second);
+    move_reseed_in_ = MOVE_RESEED_DELAY;
 }
 
 bool SpecificWorker::place_static_test_pose()
@@ -1771,7 +1778,6 @@ void SpecificWorker::load_config(const ConfigLoader& cfg)
     };
 
     priors_path_     = gets("BottleConcept.PriorsPath",     "etc/object_priors.toml");
-    checkpoint_path_ = gets("BottleConcept.CheckpointPath", "etc/checkpoint.toml");
 
     cfg_.fe_eps            = getf("BottleConcept.FEps",            1e-3f);
     cfg_.K_stable          = geti("BottleConcept.KStable",         30);
@@ -1848,6 +1854,11 @@ void SpecificWorker::load_config(const ConfigLoader& cfg)
     cfg_.move_settle_cycles = geti("Eval.MoveSettleCycles", 25);
     cfg_.move_step_m        = getf("Eval.MoveStep", 0.06f);
     cfg_.move_grid_n        = geti("Eval.MoveGridN", 5);
+    cfg_.move_absolute      = getb("Eval.MoveAbsolute", false);
+    cfg_.move_xmin          = getf("Eval.MoveXmin", 0.0f);
+    cfg_.move_xmax          = getf("Eval.MoveXmax", 0.0f);
+    cfg_.move_ymin          = getf("Eval.MoveYmin", 0.0f);
+    cfg_.move_ymax          = getf("Eval.MoveYmax", 0.0f);
     // Static-restart validation (one grid pose per run; index from env BOTTLE_TEST_POSE).
     cfg_.static_pose_test   = getb("Eval.StaticPoseTest", false);
     if (const char* p = std::getenv("BOTTLE_TEST_POSE"))
