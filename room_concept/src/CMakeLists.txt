@@ -57,6 +57,10 @@ LIST(APPEND SOURCES
   ../src/room_model.cpp
   ../src/pointcloud_center_estimator.cpp
   ../src/epistemic_controller.cpp
+  ../src/room_graph_publisher.cpp
+  ../src/lidar_ingestor.cpp
+  ../src/room_view_controller.cpp
+  ../src/room_agent_params.cpp
   ${ACTIVE_INFERENCE_COMMON_DIR}/affordance_manager/affordance_manager.cpp
   ../src/epistemic_planner.cpp
   ../src/timeseries_plot.cpp
@@ -84,6 +88,10 @@ LIST(APPEND HEADERS
   ../src/room_model.h
   ../src/pointcloud_center_estimator.h
   ../src/epistemic_controller.h
+  ../src/room_graph_publisher.h
+  ../src/lidar_ingestor.h
+  ../src/room_view_controller.h
+  ../src/room_agent_params.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/affordance_manager/affordance_manager.h
   ../src/epistemic_planner.h
   ../src/corner_visibility.h

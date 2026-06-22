@@ -46,7 +46,7 @@ void SpecificWorker::cleanup_owned_nodes()
     }
     else
     {
-        cleanup_room_graph_nodes();
+        graph_publisher_.cleanup_room_graph_nodes();
         presence_coordinator_.cleanup_owned_nodes();
     }
     cleanup_self_agent_node();
@@ -104,11 +104,7 @@ void SpecificWorker::on_optional_peer_lost(const std::string &name, std::uint32_
     if (name != "controller" || !G)
         return;
 
-    if (affordance_manager_.release_execution_claim(G))
-    {
-        epistemic_controller_.epistemic_planner().clear_target();
-        qWarning() << "[Presence] released stale afford_room execution claim after controller loss";
-    }
+    graph_publisher_.on_controller_lost();
 }
 
 void SpecificWorker::on_optional_peer_ready(const std::string &name, std::uint32_t /*id*/)
