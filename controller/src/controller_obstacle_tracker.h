@@ -29,11 +29,9 @@ class ControllerObstacleTracker
         const std::optional<std::uint64_t> &last_lidar_timestamp_ms() const { return last_lidar_timestamp_ms_; }
         void clear_published_obstacles();
 
-        bool handle_lidar_node(DSR::Node node_copy);
-        // Shared ingest core: transform a raw LiDAR point cloud (lidar frame) into the
-        // room buffer via the RT tree. Used by both the DSR-node path (handle_lidar_node)
-        // and the zero-copy media plane. lidar_node_name is the graph node the RT
-        // transforms are queried against (e.g. "lidar3D").
+        // Ingest a raw LiDAR point cloud (lidar frame, from the zero-copy media plane)
+        // into the room buffer via the RT tree. lidar_node_name is the graph node the RT
+        // transforms are queried against (e.g. "lidar3D"). Dedups by timestamp.
         bool handle_lidar_points(const std::string &lidar_node_name,
                                  std::vector<float> xs,
                                  std::vector<float> ys,

@@ -215,15 +215,18 @@ void SpecificWorker::initialize()
 	// back to the DSR laser_* path.
 	init_lidar_media();
 
-	// IMPORTANT — POLL, do NOT connect to DSR update signals.
-	// DSR emits update_node_signal/update_edge_signal (std::string payloads) from the
-	// raw FastDDS reader threads. Connecting slots to them (especially DirectConnection,
-	// which runs the slot ON the reader thread) corrupts the heap under peer graph churn
-	// — the classic symptom is a smashed AgentInfo heartbeat (get_agent_id on a garbage
-	// DSRGraph) once required peers come online. bottle_concept (working) connects NONE
-	// of these and polls instead; we do the same: LiDAR arrives via the media plane (or
-	// is polled from the laser node), and room/robot/RT transforms are read on demand in
-	// compute. (See [[dsr-graphviewer-crash-fixes]] / poll-not-connect.)
+	// DSR graph update signals — QUEUED connections only. NEVER Qt::DirectConnection:
+	// DSR emits update_node_signal/update_edge_signal from the raw FastDDS reader threads,
+	// and a DirectConnection runs the slot ON that reader thread, corrupting the heap
+	// under peer graph churn (symptom: smashed AgentInfo heartbeat — get_agent_id on a
+	// garbage DSRGraph — once required peers come online). A plain (default/Auto →
+	// Queued) connection marshals the slot to the main thread and is safe: verified with
+	// 5/5 clean startups under live peers on 2026-06-23, after the DirectConnection
+	// version crashed every time. (See [[dsr-graphviewer-crash-fixes]].)
+	connect(G.get(), &DSR::DSRGraph::update_node_signal, this,
+	        &SpecificWorker::modify_node_slot, Qt::QueuedConnection);
+	connect(G.get(), &DSR::DSRGraph::update_edge_signal, this,
+	        &SpecificWorker::modify_edge_slot, Qt::QueuedConnection);
 
 	/***
 	Custom Widget
@@ -532,15 +535,10 @@ void SpecificWorker::stop_robot()
 
 void SpecificWorker::modify_node_slot(std::uint64_t id, const std::string &type)
 {
-	// Runs on the DDS reader thread (DirectConnection). Keep it cheap: flag the
-	// lidar update and wake the control thread, which performs the heavy decode.
+	// Runs on the MAIN thread (QueuedConnection — never DirectConnection; see the
+	// connect note in initialize). LiDAR is NOT read from the graph (media plane only),
+	// so there is no "laser" handling here.
 	(void)id;
-	if (type == "laser")
-	{
-		lidar_dirty_.store(true, std::memory_order_release);
-		control_cv_.notify_one();
-	}
-
 	if (type == "room" or type == "robot")
 		hibernationTick();
 }
@@ -561,7 +559,6 @@ void SpecificWorker::control_loop()
 			control_cv_.wait_for(lock, 20ms, [this]()
 			{
 				return !control_running_.load(std::memory_order_acquire)
-				    || lidar_dirty_.load(std::memory_order_acquire)
 				    || control_operating_.load(std::memory_order_acquire)
 				    || command_pending_.load(std::memory_order_acquire);
 			});
@@ -582,15 +579,12 @@ void SpecificWorker::control_loop()
 				if (command) command();
 		}
 
-		// 2) Lidar decode off the GUI thread. The media subscriber (brought up at init
-		//    on the main thread) is the source when present; otherwise POLL the DSR
-		//    laser_* node directly (no signal connect — see the poll-not-connect note in
-		//    initialize). handle_lidar_points dedups by timestamp, so polling is cheap.
+		// 2) Lidar decode off the GUI thread. LiDAR comes ONLY from the zero-copy media
+		//    plane (robot_concept no longer publishes the laser_* node to DSR), so there
+		//    is no DSR fallback. handle_lidar_points dedups by timestamp.
 		bool fresh_lidar = false;
 		if (lidar_media_sub_)
 			fresh_lidar = poll_lidar_media();
-		else
-			fresh_lidar = ingest_latest_lidar();
 		if (fresh_lidar)
 		{
 			last_lidar_rx_ = std::chrono::steady_clock::now();
@@ -628,15 +622,6 @@ void SpecificWorker::control_loop()
 				compute();
 		}
 	}
-}
-
-bool SpecificWorker::ingest_latest_lidar()
-{
-	if (!G)
-		return false;
-	if (auto node_opt = G->get_node(params.lidar_name); node_opt.has_value())
-		return obstacle_tracker_.handle_lidar_node(node_opt.value());
-	return false;
 }
 
 void SpecificWorker::init_lidar_media()

@@ -179,7 +179,6 @@ private:
 		std::thread control_thread_;
 		std::atomic<bool> control_running_{false};
 		std::atomic<bool> control_operating_{false};
-		std::atomic<bool> lidar_dirty_{false};
 		std::mutex control_mutex_;
 		std::condition_variable control_cv_;
 		std::mutex command_mutex_;
@@ -191,10 +190,9 @@ private:
 		void control_loop();
 		void stop_control_thread();
 		void enqueue_command(std::function<void()> command);
-		bool ingest_latest_lidar();   // returns true if a fresh scan was ingested
 
 		// ─── LiDAR stream watchdog ────────────────────────────────────────────
-		// If the LiDAR stream (media plane or DSR) stops producing while operating,
+		// If the LiDAR media stream stops producing while operating,
 		// hold the robot in a local emergency state until it recovers — never plan on
 		// stale perception. Transitions are logged so the user sees what happened.
 		std::chrono::steady_clock::time_point last_lidar_rx_{};

@@ -1213,30 +1213,6 @@ ControllerPolygon ControllerObstacleTracker::make_obstacle_polygon(const Eigen::
     return polygon;
 }
 
-bool ControllerObstacleTracker::handle_lidar_node(DSR::Node node_copy)
-{
-    if (!params_ || !inner_eigen_api_ || !graph_state_ || !graph_state_->ready())
-        return false;
-
-    auto &attrs = node_copy.attrs();
-    auto xs_it = attrs.find(laser_X_att::attr_name.data());
-    auto ys_it = attrs.find(laser_Y_att::attr_name.data());
-    auto zs_it = attrs.find(laser_Z_att::attr_name.data());
-    if (xs_it == attrs.end() || ys_it == attrs.end() || zs_it == attrs.end())
-        return false;
-
-    auto ts_it = attrs.find(laser_timestamp_att::attr_name.data());
-    const std::uint64_t timestamp_ms = ts_it != attrs.end()
-        ? static_cast<std::uint64_t>(std::max<std::int64_t>(0, static_cast<std::int64_t>(ts_it->second.uint64())))
-        : 0ULL;
-
-    return handle_lidar_points(node_copy.name(),
-                               std::move(xs_it->second.float_vec()),
-                               std::move(ys_it->second.float_vec()),
-                               std::move(zs_it->second.float_vec()),
-                               timestamp_ms);
-}
-
 bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_node_name,
                                                     std::vector<float> xs,
                                                     std::vector<float> ys,
