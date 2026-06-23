@@ -200,14 +200,25 @@ void SpecificWorker::initialize()
 		media_.init(mcfg);
 	}
 
-	// Advertise the plane on the camera node ("zed") so ANY agent can discover and
-	// subscribe without hardcoding topic/domain/QoS — consumers read it generically
-	// via rc::media::descriptor_from_graph(G, "zed"). Only this small JSON string
-	// lives in the graph; the heavy frames stay out-of-band on the zero-copy plane.
-	if (media_.advertise(*G, "zed"))
-		qInfo() << "[Media] descriptor advertised on 'zed':" << QString::fromStdString(media_.descriptor_json());
-	else
-		qWarning() << "[Media] 'zed' node not found at init — media descriptor NOT advertised";
+	// Advertise the plane PER SENSOR NODE so ANY agent can discover and subscribe
+	// without hardcoding topic/domain/QoS — consumers read it generically via
+	// rc::media::descriptor_from_graph(G, "<node>"). Each node carries only its own
+	// stream(s): rgb+depth on "zed", lidar on "lidar3D", imu on "imu". Only these
+	// small JSON strings live in the graph; the heavy frames stay out-of-band on the
+	// zero-copy plane. (Registering a new stream = one more (node, keys) line here.)
+	struct { const char* node; std::vector<std::string> keys; } media_ads[] = {
+		{"zed",     {"rgb", "depth"}},
+		{"lidar3D", {"lidar"}},
+		{"imu",     {"imu"}},
+	};
+	for (const auto& ad : media_ads)
+	{
+		if (media_.advertise(*G, ad.node, ad.keys))
+			qInfo() << "[Media] descriptor advertised on" << ad.node << ":"
+			        << QString::fromStdString(media_.descriptor_json(ad.keys));
+		else
+			qWarning() << "[Media]" << ad.node << "node not found at init — media descriptor NOT advertised";
+	}
 
 	lidar_thread = std::thread(&SpecificWorker::read_lidar_thread,  this);
 	rgbd_thread  = std::thread(&SpecificWorker::read_rgbd_thread,   this);
