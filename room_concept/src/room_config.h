@@ -77,7 +77,6 @@ struct RoomConfig
     int         MEDIA_DOMAIN_ID   = 0;
     std::string MEDIA_RGB_TOPIC   = "rc/zed/rgb";
     std::string MEDIA_LIDAR_TOPIC = "rc/lidar3d/points";
-    std::string MEDIA_IMU_TOPIC   = "rc/imu/data";
     bool        LIDAR_USE_MEDIA   = true;   // false ⇒ DSR graph laser_* only
 };
 
