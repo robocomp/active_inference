@@ -57,12 +57,12 @@ void SpecificWorker::on_optional_peer_ready(const std::string &name, std::uint32
 
 void SpecificWorker::emergency()
 {
-    qInfo() << "Emergency worker";
+    qWarning() << "[SM] -> EMERGENCY: entered emergency state — robot halted until restore.";
 }
 
 void SpecificWorker::restore()
 {
-    qInfo() << "Restore worker";
+    qInfo() << "[SM] -> Restore: leaving emergency state, resuming normal operation.";
 }
 
 int SpecificWorker::startup_check()

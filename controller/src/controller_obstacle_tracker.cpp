@@ -1229,6 +1229,30 @@ bool ControllerObstacleTracker::handle_lidar_node(DSR::Node node_copy)
     const std::uint64_t timestamp_ms = ts_it != attrs.end()
         ? static_cast<std::uint64_t>(std::max<std::int64_t>(0, static_cast<std::int64_t>(ts_it->second.uint64())))
         : 0ULL;
+
+    return handle_lidar_points(node_copy.name(),
+                               std::move(xs_it->second.float_vec()),
+                               std::move(ys_it->second.float_vec()),
+                               std::move(zs_it->second.float_vec()),
+                               timestamp_ms);
+}
+
+bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_node_name,
+                                                    std::vector<float> xs,
+                                                    std::vector<float> ys,
+                                                    std::vector<float> zs,
+                                                    std::uint64_t timestamp_ms)
+{
+    if (!params_ || !inner_eigen_api_ || !graph_state_ || !graph_state_->ready())
+        return false;
+
+    // Dedup by source timestamp: when the laser node is polled (DSR fallback), the same
+    // scan would otherwise be reprocessed every cycle (and read as "fresh", defeating the
+    // stall watchdog). A 0 timestamp can't be deduped, so it always passes.
+    if (timestamp_ms != 0 && last_lidar_timestamp_ms_.has_value()
+        && timestamp_ms <= last_lidar_timestamp_ms_.value())
+        return false;
+
     if (timestamp_ms > 0 && last_lidar_timestamp_ms_.has_value() && timestamp_ms > last_lidar_timestamp_ms_.value())
     {
         const std::uint64_t diff_ms = timestamp_ms - last_lidar_timestamp_ms_.value();
@@ -1244,21 +1268,18 @@ bool ControllerObstacleTracker::handle_lidar_node(DSR::Node node_copy)
     const auto interp = params_->interpolate_rt ? DSR::RT_API::TimeQuery::Interpolated
                                                 : DSR::RT_API::TimeQuery::Nearest;
     const auto room_from_lidar = inner_eigen_api_->get_transformation_matrix(graph_state_->room_name,
-                                                                             node_copy.name(),
+                                                                             lidar_node_name,
                                                                              timestamp_ms,
                                                                              "RT",
                                                                              interp);
     const auto robot_from_lidar = inner_eigen_api_->get_transformation_matrix(graph_state_->robot_name,
-                                                                               node_copy.name(),
+                                                                               lidar_node_name,
                                                                                timestamp_ms,
                                                                                "RT",
                                                                                interp);
     if (!room_from_lidar.has_value() || !robot_from_lidar.has_value())
         return false;
 
-    auto xs = std::move(xs_it->second.float_vec());
-    auto ys = std::move(ys_it->second.float_vec());
-    auto zs = std::move(zs_it->second.float_vec());
     const std::size_t raw_count = std::min({xs.size(), ys.size(), zs.size()});
     if (raw_count == 0)
         return false;

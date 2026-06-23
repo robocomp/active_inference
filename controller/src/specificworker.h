@@ -51,7 +51,12 @@
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 #include "trajectory_controller.h"
 
+#include <chrono>
+#include <cstdint>
+#include <memory>
+
 class FPSCounter;
+namespace rc::media { class LidarSubscriber; }  // zero-copy media-plane LiDAR consumer (keeps fastdds out of MOC)
 
 /**
  * \brief Class SpecificWorker implements the core functionality of the component.
@@ -186,7 +191,33 @@ private:
 		void control_loop();
 		void stop_control_thread();
 		void enqueue_command(std::function<void()> command);
-		void ingest_latest_lidar();
+		bool ingest_latest_lidar();   // returns true if a fresh scan was ingested
+
+		// ─── LiDAR stream watchdog ────────────────────────────────────────────
+		// If the LiDAR stream (media plane or DSR) stops producing while operating,
+		// hold the robot in a local emergency state until it recovers — never plan on
+		// stale perception. Transitions are logged so the user sees what happened.
+		std::chrono::steady_clock::time_point last_lidar_rx_{};
+		bool lidar_ever_received_ = false;
+		bool lidar_stalled_ = false;
+
+		// Grace period before a Degraded (required-peer-lost) state actually tears down.
+		// A transient flap during startup handshake / DSR churn must NOT delete our own
+		// node and exit — debounce and only shut down if a peer is STILL missing.
+		static constexpr int kRequiredLossGraceMs = 3000;
+
+		// ─── Zero-copy media-plane LiDAR source ───────────────────────────────
+		// When params.lidar_use_media is set, the LiDAR point cloud is drained from
+		// the DDS media plane instead of the DSR laser_* graph attributes. The
+		// subscriber is created ONCE in initialize() (main thread, before the control
+		// thread starts): it verifies the producer's lidar node + media descriptor
+		// exist and reads the DDS domain/topic straight from that JSON (no config). If
+		// absent, it falls back to the DSR laser_* path. poll drains the newest frame
+		// (control thread) into the tracker.
+		std::unique_ptr<rc::media::LidarSubscriber> lidar_media_sub_;
+		std::uint64_t last_media_lidar_ts_ = 0;   // dedup by source stamp
+		void init_lidar_media();
+		bool poll_lidar_media();
 
 signals:
         void presenceReady();

@@ -42,6 +42,17 @@ struct ControllerParams
     bool interpolate_rt = true;
     int max_lidar_draw_points = 600;
     std::string lidar_name = "lidar3D";
+    // Zero-copy media plane (LiDAR). When lidar_use_media is true, the LiDAR point
+    // cloud is drained from the DDS media plane instead of the DSR laser_* attrs.
+    // The DDS domain + topic are NOT configured here: they are read from the media
+    // descriptor JSON attribute authored by the producer on the lidar_name node, so
+    // the consumer always uses the producer's actual (dedicated) domain. The
+    // subscriber is created lazily, only once that node + descriptor exist.
+    bool lidar_use_media = true;
+    // Stream watchdog: if no fresh LiDAR frame arrives for this long while operating,
+    // the controller enters a local emergency hold (stops the robot, waits for the
+    // stream to recover) instead of planning on stale perception.
+    int lidar_stall_timeout_ms = 2000;
     std::string target_edge_type = "target";
     float pose_xy_std_slow_m = 0.03f;
     float pose_xy_std_stop_m = 0.12f;

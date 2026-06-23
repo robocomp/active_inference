@@ -17,6 +17,13 @@ LIST(APPEND SOURCES
   ../src/room_path_planner.cpp
   ../src/trajectory_controller.cpp
   ../src/viewer_2d.cpp
+  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/media_transport.cpp
+  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/image_framePubSubTypes.cxx
+  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/image_frameTypeObjectSupport.cxx
+  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/lidar_framePubSubTypes.cxx
+  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/lidar_frameTypeObjectSupport.cxx
+  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/imu_framePubSubTypes.cxx
+  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/imu_frameTypeObjectSupport.cxx
 )
 
 # Headers set
@@ -29,6 +36,7 @@ LIST(APPEND HEADERS
   ../src/controller_session.h
   ../src/controller_world_model.h
   ../src/specificworker.h
+  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/media_transport.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/affordance_manager/affordance_manager.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_coordinator/agent_presence_coordinator.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_monitor/agent_presence_monitor.h
@@ -41,6 +49,11 @@ LIST(APPEND HEADERS
 
 LIST(APPEND LIBS ${LIBS})
 
+include_directories(${CMAKE_CURRENT_LIST_DIR}/../../common/media_transport)
+
 # no-char8_t to avoid a problem with ICE Connection lib.
-add_definitions(-O3 -march=native -fmax-errors=1 -fno-char8_t  -DEIGEN_MAX_ALIGN_BYTES=0)
+# NEITHER -march=native NOR -DEIGEN_MAX_ALIGN_BYTES=0: both change sizeof(optional<Eigen::Transform>)
+# away from libdsr's default alignment (144) → get_transformation_matrix overruns the caller's stack
+# slot → 0x17ff… SIGBUS in whatever agent shares the graph. Match libdsr's default. (See crash notes.)
+add_definitions(-O3 -fmax-errors=1 -fno-char8_t)
 

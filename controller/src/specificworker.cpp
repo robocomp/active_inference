@@ -19,6 +19,7 @@
 #include "specificworker.h"
 
 #include "../../common/robust_metrics/robust_metrics.h"
+#include "../../common/media_transport/media_transport.h"
 
 #include "custom_widget.h"
 #include <fps/fps.h>
@@ -158,9 +159,32 @@ void SpecificWorker::initialize()
 	    },
 	    .on_degraded_enter = [this]()
 	    {
-	        qInfo("[SM] -> Degraded: required peer lost. Cleaning up and exiting.");
-	        cleanup_owned_nodes();
-	        QTimer::singleShot(500, QCoreApplication::instance(), SLOT(quit()));
+	        if (shutting_down_.load())
+	            return;
+	        QString m;
+	        for (const auto &label : presence_coordinator_.missing_required_names())
+	            m += " " + QString::fromStdString(label);
+	        // DEBOUNCE — do NOT cleanup/exit on entry. A transient required-peer flap
+	        // (startup handshake, brief DSR node churn, a peer restarting) fires
+	        // presenceLost momentarily and then recovers; tearing down here deletes our
+	        // own node ('controller 8') and disconnects the graph, leaving a broken
+	        // half-shutdown. Wait a grace period and only shut down if a required peer
+	        // is STILL genuinely missing. (Matches bottle_concept's presence protocol.)
+	        qWarning() << "[SM] -> DEGRADED: required peer lost (missing:" << m.trimmed()
+	                   << ") —" << kRequiredLossGraceMs << "ms grace before shutdown.";
+	        QTimer::singleShot(kRequiredLossGraceMs, this, [this]()
+	        {
+	            if (shutting_down_.load())
+	                return;
+	            if (presence_coordinator_.all_required_ready())
+	            {
+	                qInfo() << "[SM] required peers recovered during grace — staying alive.";
+	                return;
+	            }
+	            qWarning() << "[SM] required peer still missing after grace — shutting down cleanly.";
+	            cleanup_owned_nodes();
+	            QTimer::singleShot(500, QCoreApplication::instance(), SLOT(quit()));
+	        });
 	    },
 	});
 	presence_coordinator_.start();
@@ -182,19 +206,24 @@ void SpecificWorker::initialize()
 	                                 [this](const QString &text) { display_.set_command_text(text); });
 	path_controller_.set_lidar_buffer(obstacle_tracker_.lidar_buffer());
 
-	//Subscription to DSR graph update signals. 
-	// If multiple graphs exist, it is necessary to specify the graph name 
-	// using 'Graphs.at("name")' to connect its signals to the Worker's slots.
-	//connect(Graphs.at("").get(), &DSR::DSRGraph::update_node_signal, this, &SpecificWorker::modify_node_slot);
-	connect(G.get(), &DSR::DSRGraph::update_edge_signal, this, &SpecificWorker::modify_edge_slot);
-	//connect(Graphs.at("").get(), &DSR::DSRGraph::update_node_attr_signal, this, &SpecificWorker::modify_node_attrs_slot);
-	// DirectConnection: modify_node_slot runs on the DDS reader thread and is a
-	// cheap trigger (sets a flag + wakes the control thread). The heavy lidar
-	// decode happens on the control thread, not the GUI thread.
-	connect(G.get(), &DSR::DSRGraph::update_node_signal, this, &SpecificWorker::modify_node_slot, Qt::DirectConnection);
-	//connect(Graphs.at("").get(), &DSR::DSRGraph::update_edge_attr_signal, this, &SpecificWorker::modify_edge_attrs_slot);
-	//connect(Graphs.at("").get(), &DSR::DSRGraph::del_edge_signal, this, &SpecificWorker::del_edge_slot);
-	//connect(Graphs.at("").get(), &DSR::DSRGraph::del_node_signal, this, &SpecificWorker::del_node_slot);
+	// Media-plane LiDAR: the graph is already loaded here, so verify the producer's
+	// sensor node + its media descriptor exist and bring up the subscriber NOW — on
+	// the main thread, BEFORE the control thread starts. This keeps every graph access
+	// on the main thread during startup (a worker thread touching the graph while it
+	// is still joining corrupts the DSR / AgentInfo heartbeat). The DDS domain + topic
+	// come from the descriptor JSON; if the node/descriptor is absent we log and fall
+	// back to the DSR laser_* path.
+	init_lidar_media();
+
+	// IMPORTANT — POLL, do NOT connect to DSR update signals.
+	// DSR emits update_node_signal/update_edge_signal (std::string payloads) from the
+	// raw FastDDS reader threads. Connecting slots to them (especially DirectConnection,
+	// which runs the slot ON the reader thread) corrupts the heap under peer graph churn
+	// — the classic symptom is a smashed AgentInfo heartbeat (get_agent_id on a garbage
+	// DSRGraph) once required peers come online. bottle_concept (working) connects NONE
+	// of these and polls instead; we do the same: LiDAR arrives via the media plane (or
+	// is polled from the laser node), and room/robot/RT transforms are read on demand in
+	// compute. (See [[dsr-graphviewer-crash-fixes]] / poll-not-connect.)
 
 	/***
 	Custom Widget
@@ -387,6 +416,7 @@ void SpecificWorker::load_params()
 	load_optional("Transforms.interpolate_rt", params.interpolate_rt);
 	load_optional("Viewer2D.MaxLidarDrawPoints", params.max_lidar_draw_points);
 	load_optional("Lidar.Name", params.lidar_name);
+	load_optional("Lidar.StallTimeoutMs", params.lidar_stall_timeout_ms);
 	load_optional("Target.EdgeType", params.target_edge_type);
 	load_optional_cast<double>("Controller.PoseXYStdSlow", params.pose_xy_std_slow_m);
 	load_optional_cast<double>("Controller.PoseXYStdStop", params.pose_xy_std_stop_m);
@@ -552,22 +582,140 @@ void SpecificWorker::control_loop()
 				if (command) command();
 		}
 
-		// 2) Lidar decode off the GUI thread.
-		if (lidar_dirty_.exchange(false, std::memory_order_acq_rel))
-			ingest_latest_lidar();
+		// 2) Lidar decode off the GUI thread. The media subscriber (brought up at init
+		//    on the main thread) is the source when present; otherwise POLL the DSR
+		//    laser_* node directly (no signal connect — see the poll-not-connect note in
+		//    initialize). handle_lidar_points dedups by timestamp, so polling is cheap.
+		bool fresh_lidar = false;
+		if (lidar_media_sub_)
+			fresh_lidar = poll_lidar_media();
+		else
+			fresh_lidar = ingest_latest_lidar();
+		if (fresh_lidar)
+		{
+			last_lidar_rx_ = std::chrono::steady_clock::now();
+			lidar_ever_received_ = true;
+		}
 
-		// 3) The heavy pipeline (planning + MPPI + command emission).
+		// 3) Heavy pipeline (planning + MPPI + command emission), guarded by the LiDAR
+		//    stream watchdog: if the stream stalls, hold the robot in a local emergency
+		//    state and wait for recovery rather than planning on stale perception.
 		if (control_operating_.exchange(false, std::memory_order_acq_rel))
-			compute();
+		{
+			if (lidar_ever_received_)
+			{
+				const auto age = std::chrono::steady_clock::now() - last_lidar_rx_;
+				const bool stalled = age > std::chrono::milliseconds(params.lidar_stall_timeout_ms);
+				if (stalled && !lidar_stalled_)
+				{
+					lidar_stalled_ = true;
+					stop_robot();
+					const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(age).count();
+					qWarning() << "[EMERGENCY] LiDAR stream stalled — no data for" << ms
+					           << "ms (>" << params.lidar_stall_timeout_ms
+					           << "). Robot stopped; waiting for the stream to recover.";
+					display_.set_command_text("EMERGENCY: LiDAR stream stalled — waiting for recovery");
+				}
+				else if (!stalled && lidar_stalled_)
+				{
+					lidar_stalled_ = false;
+					qInfo() << "[EMERGENCY] LiDAR stream recovered — resuming control.";
+					display_.set_command_text("LiDAR stream recovered — resuming");
+				}
+			}
+
+			if (!lidar_stalled_)
+				compute();
+		}
 	}
 }
 
-void SpecificWorker::ingest_latest_lidar()
+bool SpecificWorker::ingest_latest_lidar()
 {
 	if (!G)
-		return;
+		return false;
 	if (auto node_opt = G->get_node(params.lidar_name); node_opt.has_value())
-		obstacle_tracker_.handle_lidar_node(node_opt.value());
+		return obstacle_tracker_.handle_lidar_node(node_opt.value());
+	return false;
+}
+
+void SpecificWorker::init_lidar_media()
+{
+	// One-shot, on the main thread, before the control thread starts.
+	if (!params.lidar_use_media || lidar_media_sub_ || !G)
+		return;
+
+	// 1) Verify the producer's sensor node exists in the (already-loaded) graph.
+	if (not G->get_node(params.lidar_name).has_value())
+	{
+		qWarning() << "[Lidar] sensor node" << QString::fromStdString(params.lidar_name)
+		           << "absent from the graph at init — media plane disabled, using DSR laser_* path"
+		           << "(is robot_concept running first?)";
+		return;
+	}
+	// 2) Its media descriptor carries the DDS domain + topic (authored by the producer).
+	//    No config: the consumer always uses the producer's dedicated media domain.
+	auto desc = rc::media::descriptor_from_graph(*G, params.lidar_name);
+	auto sub_cfg = desc.has_value() ? desc->subscriber_config("lidar") : std::nullopt;
+	if (not sub_cfg.has_value())
+	{
+		qWarning() << "[Lidar] node" << QString::fromStdString(params.lidar_name)
+		           << "has no LiDAR media descriptor at init — using DSR laser_* path"
+		           << "(is robot_concept running first?)";
+		return;
+	}
+
+	// 3) Create the subscriber on the descriptor's domain/topic.
+	auto sub = std::make_unique<rc::media::LidarSubscriber>();
+	rc::media::SubscriberConfig scfg;
+	scfg.domain_id     = sub_cfg->domain_id;
+	scfg.topic_name    = sub_cfg->topic_name;
+	scfg.history_depth = 8;
+	if (sub->init(scfg))
+	{
+		lidar_media_sub_ = std::move(sub);
+		qInfo() << "[Lidar] media-plane source up (from"
+		        << QString::fromStdString(params.lidar_name) << "descriptor) domain="
+		        << scfg.domain_id << "topic=" << QString::fromStdString(scfg.topic_name);
+	}
+	else
+		qWarning() << "[Lidar] media-plane subscriber init FAILED — using DSR laser_* path";
+}
+
+bool SpecificWorker::poll_lidar_media()
+{
+	if (!lidar_media_sub_)
+		return false;
+
+	bool ingested = false;
+	// Drain all pending frames (non-blocking); dedup by source stamp so only fresh
+	// scans reach the tracker. The RT transforms still come from the DSR graph.
+	lidar_media_sub_->poll([this, &ingested](const rc::media::LidarFrame &f, std::int64_t)
+	{
+		const auto ts = static_cast<std::uint64_t>(f.stamp_ms());
+		if (ts != 0 && ts <= last_media_lidar_ts_)
+			return;
+		last_media_lidar_ts_ = ts;
+
+		const std::uint32_t stride = f.stride() ? f.stride() : 3u;
+		const std::uint32_t count  = f.count();
+		const auto &pts = f.points();
+		std::vector<float> xs, ys, zs;
+		xs.reserve(count); ys.reserve(count); zs.reserve(count);
+		for (std::uint32_t i = 0; i < count; ++i)
+		{
+			const std::size_t base = static_cast<std::size_t>(i) * stride;
+			if (base + 2 >= pts.size())
+				break;
+			xs.push_back(pts[base]);
+			ys.push_back(pts[base + 1]);
+			zs.push_back(pts[base + 2]);
+		}
+		if (obstacle_tracker_.handle_lidar_points(params.lidar_name,
+		                                          std::move(xs), std::move(ys), std::move(zs), ts))
+			ingested = true;
+	});
+	return ingested;
 }
 
 void SpecificWorker::stop_control_thread()
