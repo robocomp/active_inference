@@ -33,8 +33,7 @@
 #include <vector>
 
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
-
-namespace rc::media { class MediaPublisher; }
+#include "sensor_media_publisher.h"
 
 /**
  * \brief Class SpecificWorker implements the core functionality of the component.
@@ -83,12 +82,17 @@ private:
 		//   <0: disable upload
 		int DSR_RGB_FPS   = 0;
 		int DSR_DEPTH_FPS = 5;
-		int DSR_LIDAR_FPS = 0;
+		// Legacy DSR-graph lidar upload rate. <0 DISABLES it (default): lidar now flows over the media
+		// plane (SensorMediaPublisher LidarFrame). Set >=0 to re-enable the graph write at that fps
+		// (0 = unthrottled) for consumers still reading laser_* (e.g. controller_obstacle_tracker).
+		int DSR_LIDAR_FPS = -1;
 
-		// Media plane (zero-copy DDS) for RGBD pixels carried OUT of the graph.
-		int         MEDIA_DOMAIN_ID  = 0;
+		// Media plane (zero-copy DDS) for raw sensor streams carried OUT of the graph.
+		int         MEDIA_DOMAIN_ID   = 0;
 		std::string MEDIA_RGB_TOPIC   = "rc/zed/rgb";
 		std::string MEDIA_DEPTH_TOPIC = "rc/zed/depth";
+		std::string MEDIA_LIDAR_TOPIC = "rc/lidar3d/points";
+		std::string MEDIA_IMU_TOPIC   = "rc/imu/data";
 	};
 	Params params;
 
@@ -105,17 +109,19 @@ private:
 	std::thread imu_thread;
 	std::atomic<bool> stop_imu_thread{false};
 
+	// Per-thread frame counters (relaxed); compute() turns deltas into a 3 Hz
+	// [RGBDThread]/[LidarThread]/[IMUThread] Hz readout without needing Verbose.
+	std::atomic<std::uint64_t> rgbd_frames_{0};
+	std::atomic<std::uint64_t> lidar_frames_{0};
+	std::atomic<std::uint64_t> imu_frames_{0};
+
 	// RGBD camera reader thread
 	void read_rgbd_thread();
 	std::thread rgbd_thread;
 	std::atomic<bool> stop_rgbd_thread{false};
 
-	// Media plane publishers (zero-copy DDS); pixels leave the DSR graph here.
-	std::unique_ptr<rc::media::MediaPublisher> media_rgb_pub_;
-	std::unique_ptr<rc::media::MediaPublisher> media_depth_pub_;
-	bool media_publishers_ready_ = false;
-	std::uint64_t media_rgb_frame_id_   = 0;
-	std::uint64_t media_depth_frame_id_ = 0;
+	// Media plane (zero-copy DDS); RGBD pixels leave the DSR graph here.
+	SensorMediaPublisher media_;
 
 	void waiting_enter();
 	void waiting_loop();

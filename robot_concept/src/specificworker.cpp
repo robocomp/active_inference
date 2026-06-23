@@ -99,9 +99,7 @@ void SpecificWorker::request_shutdown()
 		rgbd_thread.join();
 
 	// Tear down DDS endpoints after producer threads are fully stopped.
-	media_publishers_ready_ = false;
-	media_rgb_pub_.reset();
-	media_depth_pub_.reset();
+	media_.shutdown();
 
 	cleanup_owned_nodes();
 }
@@ -123,6 +121,8 @@ void SpecificWorker::initialize()
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.domain_id", params.MEDIA_DOMAIN_ID);
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.rgb_topic", params.MEDIA_RGB_TOPIC);
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.depth_topic", params.MEDIA_DEPTH_TOPIC);
+	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.lidar_topic", params.MEDIA_LIDAR_TOPIC);
+	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.imu_topic", params.MEDIA_IMU_TOPIC);
 
 	qInfo() << "[DSR Upload Rates] rgb=" << params.DSR_RGB_FPS
 	        << "depth=" << params.DSR_DEPTH_FPS
@@ -183,59 +183,36 @@ void SpecificWorker::initialize()
 		dump("kinova_arm_r", "body");
 	}
 
-	// Media plane: initialize zero-copy DDS publishers for RGB and depth pixels.
-	// These carry the heavy RGBD payload OUT of the DSR/CRDT graph (shared-memory,
-	// RELIABLE, data-sharing). The DSR cam_rgb/cam_depth blob writes below remain
-	// governed by DSR_RGB_FPS/DSR_DEPTH_FPS (<0 disables them once consumers migrate).
+	// Media plane: zero-copy DDS publishers carrying the raw sensor streams OUT of
+	// the DSR/CRDT graph — RGB + depth images, the LiDAR scan and the IMU sample,
+	// each stamped per-frame so consumers can realign them upstream. The DSR
+	// cam_rgb/cam_depth/laser_* blob writes below remain governed by the DSR_*_FPS
+	// knobs (<0 disables them once consumers migrate to the plane). Registering
+	// another image-like stream is one extra StreamSpec — see SensorMediaPublisher.
 	{
-		media_rgb_pub_   = std::make_unique<rc::media::MediaPublisher>();
-		media_depth_pub_ = std::make_unique<rc::media::MediaPublisher>();
-		rc::media::PublisherConfig rgb_cfg;
-		rgb_cfg.domain_id     = static_cast<std::uint32_t>(params.MEDIA_DOMAIN_ID);
-		rgb_cfg.topic_name    = params.MEDIA_RGB_TOPIC;
-		rgb_cfg.history_depth = 8;
-		rc::media::PublisherConfig depth_cfg = rgb_cfg;
-		depth_cfg.topic_name = params.MEDIA_DEPTH_TOPIC;
-
-		const bool rgb_ok   = media_rgb_pub_->init(rgb_cfg);
-		const bool depth_ok = media_depth_pub_->init(depth_cfg);
-		media_publishers_ready_ = rgb_ok && depth_ok;
-		if (media_publishers_ready_)
-			qInfo() << "[Media] publishers ready domain=" << params.MEDIA_DOMAIN_ID
-			        << "rgb=" << QString::fromStdString(params.MEDIA_RGB_TOPIC)
-			        << "depth=" << QString::fromStdString(params.MEDIA_DEPTH_TOPIC)
-			        << "data_sharing=" << (media_rgb_pub_->data_sharing_active() && media_depth_pub_->data_sharing_active());
-		else
-			qWarning() << "[Media] publisher init FAILED (rgb=" << rgb_ok << "depth=" << depth_ok
-			           << ") - RGBD will only flow through the DSR graph";
-
-		// Advertise the media plane in the graph so ANY agent can discover and subscribe
-		// without hardcoding topic/domain/QoS (rc::media::MediaDescriptor). Written on the
-		// camera node ("zed") that already carries cam_rgb_*; consumers read it generically
-		// via rc::media::descriptor_from_graph(G, "zed"). The heavy frames stay out-of-band
-		// on the zero-copy plane — only this small JSON string lives in the graph.
-		if (auto cam_node = G->get_node("zed"); cam_node.has_value())
-		{
-			rc::media::MediaDescriptor desc;
-			desc.domain_id          = static_cast<std::uint32_t>(params.MEDIA_DOMAIN_ID);
-			desc.history_depth      = rgb_cfg.history_depth;       // same QoS the publishers use
-			desc.shared_memory_only = rgb_cfg.shared_memory_only;
-			desc.data_sharing       = rgb_cfg.data_sharing;
-			desc.ready              = media_publishers_ready_;     // false ⇒ consumers should wait
-			desc.streams["rgb"]     = params.MEDIA_RGB_TOPIC;
-			desc.streams["depth"]   = params.MEDIA_DEPTH_TOPIC;
-			G->runtime_checked_add_or_modify_attrib_local(cam_node.value(),
-			                                              rc::media::MEDIA_DESCRIPTOR_ATTR, desc.to_json());
-			G->update_node(cam_node.value());
-			qInfo() << "[Media] descriptor advertised on 'zed':" << QString::fromStdString(desc.to_json());
-		}
-		else
-			qWarning() << "[Media] 'zed' node not found at init — media descriptor NOT advertised";
+		SensorMediaPublisher::Config mcfg;
+		mcfg.domain_id     = static_cast<std::uint32_t>(params.MEDIA_DOMAIN_ID);
+		mcfg.history_depth = 8;
+		mcfg.image_streams = {{"rgb",   params.MEDIA_RGB_TOPIC,   rc::media::STREAM_ZED_RGB},
+		                      {"depth", params.MEDIA_DEPTH_TOPIC, rc::media::STREAM_ZED_DEPTH}};
+		mcfg.lidar_stream  = {{"lidar", params.MEDIA_LIDAR_TOPIC, rc::media::STREAM_LIDAR}};
+		mcfg.imu_stream    = {{"imu",   params.MEDIA_IMU_TOPIC,   rc::media::STREAM_IMU}};
+		media_.init(mcfg);
 	}
+
+	// Advertise the plane on the camera node ("zed") so ANY agent can discover and
+	// subscribe without hardcoding topic/domain/QoS — consumers read it generically
+	// via rc::media::descriptor_from_graph(G, "zed"). Only this small JSON string
+	// lives in the graph; the heavy frames stay out-of-band on the zero-copy plane.
+	if (media_.advertise(*G, "zed"))
+		qInfo() << "[Media] descriptor advertised on 'zed':" << QString::fromStdString(media_.descriptor_json());
+	else
+		qWarning() << "[Media] 'zed' node not found at init — media descriptor NOT advertised";
 
 	lidar_thread = std::thread(&SpecificWorker::read_lidar_thread,  this);
 	rgbd_thread  = std::thread(&SpecificWorker::read_rgbd_thread,   this);
-	qInfo() << __FUNCTION__ << "Started lidar and RGBD reader threads";
+	imu_thread   = std::thread(&SpecificWorker::read_imu_thread,    this);
+	qInfo() << __FUNCTION__ << "Started lidar, RGBD and IMU reader threads";
 
 	presence_coordinator_.configure(configLoader, G, static_cast<std::uint32_t>(agent_id));
 	presence_coordinator_.set_transition_hooks({
@@ -292,10 +269,38 @@ void SpecificWorker::initialize()
 
 void SpecificWorker::compute()
 {
-	// robot_concept's compute() is intentionally minimal:
-	// sensor reading is done in background threads;
+	// robot_concept's compute() is intentionally minimal: sensor reading runs in
+	// background threads. We only turn their atomic frame counters into a 3 Hz
+	// rate readout here (unconditional qInfo, so no Verbose/DSR/DDS log flood).
 	static FPSCounter compute_fps;
 	compute_fps.print("Compute (void)", 5000);
+
+	static auto   last      = std::chrono::steady_clock::now();
+	static std::uint64_t last_rgbd = 0, last_lidar = 0, last_imu = 0;
+	const auto    now = std::chrono::steady_clock::now();
+	const double  dt  = std::chrono::duration<double>(now - last).count();
+	if (dt >= 1.0 / 3.0)   // sample at ~3 Hz, but only PRINT when the rates change (no repeated blocks)
+	{
+		const std::uint64_t r = rgbd_frames_.load(std::memory_order_relaxed);
+		const std::uint64_t l = lidar_frames_.load(std::memory_order_relaxed);
+		const std::uint64_t i = imu_frames_.load(std::memory_order_relaxed);
+		const double f_rgbd  = static_cast<double>(r - last_rgbd)  / dt;
+		const double f_lidar = static_cast<double>(l - last_lidar) / dt;
+		const double f_imu   = static_cast<double>(i - last_imu)   / dt;
+		// Print only when a rate moves by >= this many Hz, so steady-state jitter doesn't tick every sample.
+		constexpr double kHzPrintDelta = 1.0;
+		static double p_rgbd = -1e9, p_lidar = -1e9, p_imu = -1e9;
+		if (std::abs(f_rgbd - p_rgbd) >= kHzPrintDelta
+			or std::abs(f_lidar - p_lidar) >= kHzPrintDelta
+			or std::abs(f_imu - p_imu) >= kHzPrintDelta)
+		{
+			qInfo().noquote() << QString::asprintf(
+				"[RGBDThread] %5.1f Hz | [LidarThread] %5.1f Hz | [IMUThread] %5.1f Hz",
+				f_rgbd, f_lidar, f_imu);
+			p_rgbd = f_rgbd; p_lidar = f_lidar; p_imu = f_imu;
+		}
+		last = now; last_rgbd = r; last_lidar = l; last_imu = i;
+	}
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////
@@ -325,9 +330,20 @@ int SpecificWorker::startup_check()
 
 void SpecificWorker::read_lidar_thread()
 {
-	static FPSCounter lidar_fps;
 	bool empty_lidar_logged = false;
-	auto wait_period = std::chrono::milliseconds(getPeriod("Compute"));
+	// Normalize a source timestamp (ns or ms) to epoch ms; see read_rgbd_thread.
+	constexpr auto to_epoch_ms = [](long long t) -> std::uint64_t
+	{
+		return t > 1'000'000'000'000'000LL
+		           ? static_cast<std::uint64_t>(t / 1'000'000)   // ns -> ms
+		           : static_cast<std::uint64_t>(t);              // already ms
+	};
+	std::vector<float> lidar_xyz;   // reused interleaved xyz scratch for the media plane
+	// Start fast so the loop oversamples the source and the EMA below can measure the TRUE source
+	// period (starting slow would lock the loop to its own rate); it then converges up to ~1× period.
+	auto wait_period = std::chrono::milliseconds(5);
+	std::uint64_t last_lidar_stamp_ms = 0;   // self-sync: dedup by source stamp
+	double lidar_src_period_ms = -1.0;       // self-sync: source period from stamp deltas (NOT wall clock)
 	const bool lidar_upload_enabled = params.DSR_LIDAR_FPS >= 0;
 	const auto lidar_interval_ms = params.DSR_LIDAR_FPS > 0
 		? std::chrono::milliseconds(1000 / params.DSR_LIDAR_FPS)
@@ -364,6 +380,52 @@ void SpecificWorker::read_lidar_thread()
 			empty_lidar_logged = false;
 		}
 
+		// Self-synchronize with the source: advance only on a genuinely new scan (dedup by timestamp)
+		// and poll at ~2× the source period — derived from the SOURCE stamp deltas, not our own loop
+		// timing (using wall-clock between our ingests is circular and death-spirals the rate down).
+		const std::uint64_t stamp_ms = to_epoch_ms(data.timestamp);
+		if (stamp_ms != 0 && stamp_ms == last_lidar_stamp_ms)
+		{
+			std::this_thread::sleep_for(wait_period);   // duplicate: wait one poll period, re-check
+			continue;
+		}
+		if (stamp_ms != 0)
+		{
+			if (last_lidar_stamp_ms != 0)
+			{
+				const double src_dt = static_cast<double>(stamp_ms - last_lidar_stamp_ms);   // source period (ms)
+				if (src_dt > 0.5 && src_dt < 2000.0)
+				{
+					lidar_src_period_ms = (lidar_src_period_ms < 0.0) ? src_dt : 0.8 * lidar_src_period_ms + 0.2 * src_dt;
+					wait_period = std::chrono::milliseconds(std::max<long>(1, static_cast<long>(0.5 * lidar_src_period_ms + 0.5)));
+				}
+			}
+			last_lidar_stamp_ms = stamp_ms;
+		}
+
+		// --- Media plane: publish the full-rate LiDAR scan (interleaved xyz, metres) ---
+		// Carried OUT of the DSR graph, stamped per-frame. Independent of the throttled
+		// DSR laser_* upload below (which may be decimated/disabled via DSR_LIDAR_FPS).
+		if (media_.lidar_ready())
+		{
+			const std::size_t n = data.points.size();
+			lidar_xyz.resize(n * 3);
+			for (std::size_t i = 0; i < n; ++i)
+			{
+				lidar_xyz[3 * i + 0] = data.points[i].x * 0.001f;
+				lidar_xyz[3 * i + 1] = data.points[i].y * 0.001f;
+				lidar_xyz[3 * i + 2] = data.points[i].z * 0.001f;
+			}
+			SensorMediaPublisher::LidarFrameView v;
+			v.stamp_ms = to_epoch_ms(data.timestamp);
+			v.points   = lidar_xyz.data();
+			v.count    = static_cast<std::uint32_t>(n);
+			v.stride   = 3;
+			v.format   = rc::media::LIDAR_FORMAT_XYZ_F32;
+			media_.publish_lidar(v);
+		}
+		media_.maybe_report_stats(SensorMediaPublisher::StatsGroup::Lidar, std::chrono::seconds(5));
+
 		const auto  now_steady_lidar  = std::chrono::steady_clock::now();
 		const bool do_lidar_upload = lidar_upload_enabled && ((lidar_interval_ms.count() == 0)
 			|| (now_steady_lidar - last_lidar_upload >= lidar_interval_ms));
@@ -392,40 +454,17 @@ void SpecificWorker::read_lidar_thread()
 				qWarning() << "Laser node not found in DSR graph";
 		}
 
-		const long p_ms = static_cast<long>(data.period);
-		if (wait_period > std::chrono::milliseconds(p_ms + 2)) --wait_period;
-		else if (wait_period < std::chrono::milliseconds(p_ms - 2)) ++wait_period;
-
-		if (verbose_debug_)
-			lidar_fps.print("[LidarThread]", 2000);
+		lidar_frames_.fetch_add(1, std::memory_order_relaxed);
 		std::this_thread::sleep_for(wait_period);
 	}
 }
 
 void SpecificWorker::read_rgbd_thread()
 {
-	static FPSCounter rgbd_fps;
-	struct MediaStats
-	{
-		std::uint64_t rgb_ok = 0;
-		std::uint64_t depth_ok = 0;
-		std::uint64_t rgb_bytes = 0;
-		std::uint64_t depth_bytes = 0;
-		std::uint64_t rgb_loan_fail = 0;
-		std::uint64_t depth_loan_fail = 0;
-		std::uint64_t rgb_publish_fail = 0;
-		std::uint64_t depth_publish_fail = 0;
-		auto reset_window() -> void
-		{
-			rgb_ok = depth_ok = rgb_bytes = depth_bytes = 0;
-			rgb_loan_fail = depth_loan_fail = 0;
-			rgb_publish_fail = depth_publish_fail = 0;
-		}
-	};
-	MediaStats media_stats;
-	auto last_media_report = std::chrono::steady_clock::now();
 	bool empty_rgbd_logged = false;
-	auto wait_period = std::chrono::milliseconds(getPeriod("Compute"));
+	// Start fast so the loop oversamples the camera and the EMA below measures the TRUE frame period
+	// (starting slow would lock it to its own rate); it then converges up to ~1× the camera period.
+	auto wait_period = std::chrono::milliseconds(5);
 	const bool rgb_upload_enabled = params.DSR_RGB_FPS >= 0;
 	const bool depth_upload_enabled = params.DSR_DEPTH_FPS >= 0;
 	const auto rgb_interval_ms = params.DSR_RGB_FPS > 0
@@ -436,6 +475,8 @@ void SpecificWorker::read_rgbd_thread()
 		: std::chrono::milliseconds(0);
 	auto last_rgb_upload   = std::chrono::steady_clock::time_point{};
 	auto last_depth_upload = std::chrono::steady_clock::time_point{};
+	std::uint64_t last_rgbd_stamp_ms = 0;   // self-sync: dedup by source stamp
+	double rgbd_src_period_ms = -1.0;       // self-sync: source period from stamp deltas (NOT wall clock)
 	while (!stop_rgbd_thread && !shutting_down_.load())
 	{
 		const auto loop_start = std::chrono::steady_clock::now();
@@ -472,11 +513,39 @@ void SpecificWorker::read_rgbd_thread()
 				empty_rgbd_logged = false;
 			}
 
+			// Self-synchronize with the source: advance only on a genuinely new frame (dedup by the RGB
+			// capture stamp) and poll at ~2× the source period — derived from the SOURCE stamp deltas,
+			// not our own loop timing (wall-clock between ingests is circular and death-spirals the rate
+			// down). getAll() returns a full image even for a duplicate, so this also stops re-publishing.
+			{
+				const long long rgb_t = frame.image.alivetime;
+				const std::uint64_t stamp_ms = rgb_t > 1'000'000'000'000'000LL
+					? static_cast<std::uint64_t>(rgb_t / 1'000'000) : static_cast<std::uint64_t>(rgb_t);
+				if (stamp_ms != 0 && stamp_ms == last_rgbd_stamp_ms)
+				{
+					std::this_thread::sleep_for(wait_period);   // duplicate: wait one poll period, re-check
+					continue;
+				}
+				if (stamp_ms != 0)
+				{
+					if (last_rgbd_stamp_ms != 0)
+					{
+						const double src_dt = static_cast<double>(stamp_ms - last_rgbd_stamp_ms);   // source period (ms)
+						if (src_dt > 0.5 && src_dt < 2000.0)
+						{
+							rgbd_src_period_ms = (rgbd_src_period_ms < 0.0) ? src_dt : 0.8 * rgbd_src_period_ms + 0.2 * src_dt;
+							wait_period = std::chrono::milliseconds(std::max<long>(1, static_cast<long>(0.5 * rgbd_src_period_ms + 0.5)));
+						}
+					}
+					last_rgbd_stamp_ms = stamp_ms;
+				}
+			}
+
 			// --- Media plane: publish full-rate RGB + depth pixels via zero-copy DDS ---
-			// This carries the heavy payload OUT of the DSR graph. We copy into the loaned
-			// SHM slot here, leaving the source buffers intact for the (optional) DSR writes
-			// below, which can still std::move them.
-			if (media_publishers_ready_)
+			// This carries the heavy payload OUT of the DSR graph. SensorMediaPublisher
+			// copies into the loaned SHM slot, leaving the source buffers intact for the
+			// (optional) DSR writes below, which can still std::move them.
+			if (media_.ready())
 			{
 				// Normalize the camera alivetime to epoch MILLISECONDS so the media
 				// stamp matches the rest of the system (joints, lidar timestamp_ms).
@@ -490,84 +559,32 @@ void SpecificWorker::read_rgbd_thread()
 					           : static_cast<std::uint64_t>(t);              // already ms
 				};
 				const auto &img = frame.image;
-				if (const std::size_t nbytes = img.image.size();
-					nbytes > 0 && nbytes <= rc::media::MAX_IMAGE_BYTES && media_rgb_pub_)
-				{
-					if (auto *s = media_rgb_pub_->loan())
-					{
-						s->stream_id(rc::media::STREAM_ZED_RGB);
-						s->frame_id(media_rgb_frame_id_++);
-						s->stamp_ms(to_epoch_ms(img.alivetime));
-						s->width(static_cast<std::uint32_t>(img.width));
-						s->height(static_cast<std::uint32_t>(img.height));
-						s->step(static_cast<std::uint32_t>(img.width) * 3u);
-						s->format(rc::media::FORMAT_BGR8);
-						s->size(static_cast<std::uint32_t>(nbytes));
-						std::memcpy(s->data().data(), img.image.data(), nbytes);
-						if (media_rgb_pub_->publish(s))
-						{
-							++media_stats.rgb_ok;
-							media_stats.rgb_bytes += nbytes;
-						}
-						else
-							++media_stats.rgb_publish_fail;
-					}
-					else
-						++media_stats.rgb_loan_fail;
-				}
+				media_.publish_image("rgb", {
+					.stamp_ms = to_epoch_ms(img.alivetime),
+					.width    = static_cast<std::uint32_t>(img.width),
+					.height   = static_cast<std::uint32_t>(img.height),
+					.step     = static_cast<std::uint32_t>(img.width) * 3u,
+					.format   = rc::media::FORMAT_BGR8,
+					.data     = reinterpret_cast<const std::uint8_t*>(img.image.data()),
+					.nbytes   = img.image.size()});
 
 				const auto &dep = frame.depth;
-				const std::size_t dep_bytes = dep.depth.size();
 				const std::size_t dep_pix = static_cast<std::size_t>(dep.width) * static_cast<std::size_t>(dep.height);
-				if (dep_bytes > 0 && dep_pix > 0 && dep_bytes <= rc::media::MAX_IMAGE_BYTES && media_depth_pub_)
+				if (dep_pix > 0)
 				{
-					const std::size_t bpp = dep_bytes / dep_pix;
-					std::uint32_t fmt  = rc::media::FORMAT_Z16;
-					std::uint32_t step = static_cast<std::uint32_t>(dep.width) * 2u;
-					if (bpp == 4) { fmt = rc::media::FORMAT_DEPTH_F32; step = static_cast<std::uint32_t>(dep.width) * 4u; }
-					if (auto *s = media_depth_pub_->loan())
-					{
-						s->stream_id(rc::media::STREAM_ZED_DEPTH);
-						s->frame_id(media_depth_frame_id_++);
-						s->stamp_ms(to_epoch_ms(dep.alivetime));
-						s->width(static_cast<std::uint32_t>(dep.width));
-						s->height(static_cast<std::uint32_t>(dep.height));
-						s->step(step);
-						s->format(fmt);
-						s->size(static_cast<std::uint32_t>(dep_bytes));
-						std::memcpy(s->data().data(), dep.depth.data(), dep_bytes);
-						if (media_depth_pub_->publish(s))
-						{
-							++media_stats.depth_ok;
-							media_stats.depth_bytes += dep_bytes;
-						}
-						else
-							++media_stats.depth_publish_fail;
-					}
-					else
-						++media_stats.depth_loan_fail;
+					const std::size_t bpp = dep.depth.size() / dep_pix;
+					const bool f32 = (bpp == 4);
+					media_.publish_image("depth", {
+						.stamp_ms = to_epoch_ms(dep.alivetime),
+						.width    = static_cast<std::uint32_t>(dep.width),
+						.height   = static_cast<std::uint32_t>(dep.height),
+						.step     = static_cast<std::uint32_t>(dep.width) * (f32 ? 4u : 2u),
+						.format   = f32 ? rc::media::FORMAT_DEPTH_F32 : rc::media::FORMAT_Z16,
+						.data     = reinterpret_cast<const std::uint8_t*>(dep.depth.data()),
+						.nbytes   = dep.depth.size()});
 				}
 			}
-
-			const auto now_report = std::chrono::steady_clock::now();
-			if (now_report - last_media_report >= std::chrono::seconds(5))
-			{
-				// Always report ok-counts so we can positively confirm the producer is
-				// publishing (not just see failures). Empty points no longer gate this.
-				qInfo() << "[Media] 5s stats"
-				        << "rgb_ok=" << media_stats.rgb_ok
-				        << "depth_ok=" << media_stats.depth_ok
-				        << "rgb_MB=" << (static_cast<double>(media_stats.rgb_bytes) / 1e6)
-				        << "depth_MB=" << (static_cast<double>(media_stats.depth_bytes) / 1e6)
-				        << "rgb_loan_fail=" << media_stats.rgb_loan_fail
-				        << "depth_loan_fail=" << media_stats.depth_loan_fail
-				        << "rgb_publish_fail=" << media_stats.rgb_publish_fail
-				        << "depth_publish_fail=" << media_stats.depth_publish_fail;
-				media_stats.reset_window();
-				last_media_report = now_report;
-			}
-
-			const long p_ms = static_cast<long>(frame.image.period);
+			media_.maybe_report_stats(SensorMediaPublisher::StatsGroup::Image, std::chrono::seconds(5));
 
 			const auto now_steady = std::chrono::steady_clock::now();
 			const bool do_rgb   = rgb_upload_enabled && ((rgb_interval_ms.count()   == 0) || (now_steady - last_rgb_upload   >= rgb_interval_ms));
@@ -605,14 +622,7 @@ void SpecificWorker::read_rgbd_thread()
 			else if (!shutting_down_.load())
 				qWarning() << "Camera node not found in DSR graph";
 
-			if (p_ms > 0)
-			{
-				if (wait_period > std::chrono::milliseconds(p_ms + 2)) --wait_period;
-				else if (wait_period < std::chrono::milliseconds(p_ms - 2)) ++wait_period;
-			}
-
-			if (verbose_debug_)
-				rgbd_fps.print("[RGBDThread]", 2000);
+			rgbd_frames_.fetch_add(1, std::memory_order_relaxed);
 			const auto loop_elapsed = std::chrono::steady_clock::now() - loop_start;
 			if (loop_elapsed < wait_period)
 				std::this_thread::sleep_for(wait_period - loop_elapsed);
@@ -621,6 +631,94 @@ void SpecificWorker::read_rgbd_thread()
 		{
 			qWarning() << "[read_rgbd] Ice exception:" << e.what();
 		}
+	}
+}
+
+void SpecificWorker::read_imu_thread()
+{
+	if (imu_proxy == nullptr)
+	{
+		qWarning() << "[read_imu] no IMU proxy configured — IMU media stream disabled";
+		return;
+	}
+	bool error_logged = false;
+	// Pace by the measured IMU interval (NOT the Compute period, which hard-capped it). Start small
+	// so it ramps up to the source rate rather than down from a slow 10 Hz.
+	auto wait_period = std::chrono::milliseconds(5);
+	std::uint64_t last_imu_stamp_ms = 0;   // self-sync: dedup by source stamp
+	double imu_src_period_ms = -1.0;       // self-sync: source period from stamp deltas (NOT wall clock)
+	// Normalize a source timestamp (ns or ms) to epoch ms; see read_rgbd_thread.
+	constexpr auto to_epoch_ms = [](long long t) -> std::uint64_t
+	{
+		return t > 1'000'000'000'000'000LL
+		           ? static_cast<std::uint64_t>(t / 1'000'000)   // ns -> ms
+		           : static_cast<std::uint64_t>(t);              // already ms
+	};
+	while (!stop_imu_thread && !shutting_down_.load())
+	{
+		RoboCompIMU::DataImu data;
+		try
+		{
+			data = imu_proxy->getDataImu();
+		}
+		catch (const Ice::Exception& e)
+		{
+			if (!error_logged)
+			{
+				qWarning() << "[read_imu] getDataImu failed:" << e.what() << "retrying...";
+				error_logged = true;
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(200));
+			continue;
+		}
+		if (error_logged)
+		{
+			std::print("[read_imu] IMU stream recovered.\n");
+			error_logged = false;
+		}
+
+		// Self-synchronize with the source: advance only on a genuinely new sample (dedup by stamp) and
+		// poll at ~2× the source period — derived from the SOURCE stamp deltas, not our own loop timing
+		// (wall-clock between ingests is circular and death-spirals the rate down; the old fixed
+		// Compute-period sleep also hard-capped it at ~10 Hz).
+		const std::uint64_t stamp_ms = to_epoch_ms(data.acc.timestamp);
+		if (stamp_ms != 0 && stamp_ms == last_imu_stamp_ms)
+		{
+			std::this_thread::sleep_for(wait_period);   // duplicate: wait one poll period, re-check
+			continue;
+		}
+		if (stamp_ms != 0)
+		{
+			if (last_imu_stamp_ms != 0)
+			{
+				const double src_dt = static_cast<double>(stamp_ms - last_imu_stamp_ms);   // source period (ms)
+				if (src_dt > 0.5 && src_dt < 2000.0)
+				{
+					imu_src_period_ms = (imu_src_period_ms < 0.0) ? src_dt : 0.8 * imu_src_period_ms + 0.2 * src_dt;
+					wait_period = std::chrono::milliseconds(std::max<long>(1, static_cast<long>(0.5 * imu_src_period_ms + 0.5)));
+				}
+			}
+			last_imu_stamp_ms = stamp_ms;
+		}
+
+		// --- Media plane: publish the IMU sample (tiny fixed payload), stamped per-frame ---
+		if (media_.imu_ready())
+		{
+			SensorMediaPublisher::ImuFrameView v;
+			// The acc substruct carries the freshest capture stamp; all substructs
+			// share a clock, so use it as the frame timestamp.
+			v.stamp_ms = to_epoch_ms(data.acc.timestamp);
+			v.acc[0]  = data.acc.XAcc;  v.acc[1]  = data.acc.YAcc;  v.acc[2]  = data.acc.ZAcc;
+			v.gyro[0] = data.gyro.XGyr; v.gyro[1] = data.gyro.YGyr; v.gyro[2] = data.gyro.ZGyr;
+			v.mag[0]  = data.mag.XMag;  v.mag[1]  = data.mag.YMag;  v.mag[2]  = data.mag.ZMag;
+			v.rpy[0]  = data.rot.Roll;  v.rpy[1]  = data.rot.Pitch; v.rpy[2]  = data.rot.Yaw;
+			v.temperature = data.temperature;
+			media_.publish_imu(v);
+		}
+		media_.maybe_report_stats(SensorMediaPublisher::StatsGroup::Imu, std::chrono::seconds(5));
+
+		imu_frames_.fetch_add(1, std::memory_order_relaxed);
+		std::this_thread::sleep_for(wait_period);
 	}
 }
 

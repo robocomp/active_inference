@@ -4,7 +4,7 @@ TopicManager = "IceStorm/TopicManager:default -p 9999"
 
 # Proxies for required interfaces
 CameraRGBDSimple = "camerargbdsimple:tcp -h localhost -p 12001"
-IMU = "imu:tcp -h localhost -p 0"
+IMU = "imu:tcp -h localhost -p 10007"
 Lidar3D = "lidar3d:tcp -h localhost -p 11995"
 
 [Endpoints]
@@ -92,14 +92,17 @@ dsr_depth_fps = -1
 domain_id   = 7
 rgb_topic   = "rc/zed/rgb"
 depth_topic = "rc/zed/depth"
+lidar_topic = "rc/lidar3d/points"
+imu_topic   = "rc/imu/data"
 
 [Lidar]
-# DSR upload rate for lidar point cloud. 0 = every captured scan (no throttle).
-# NOTE: 0 (unthrottled) floods the shared DSR/FastDDS writer with the full point
-# cloud every scan. Under load this blocks G->update_node and starves the agent
-# heartbeat (timestamp_agent_att), causing false "stale peer" detection. Keep a
-# bounded rate so bulk lidar data cannot saturate the liveliness path.
-dsr_lidar_fps = 20
+# Legacy DSR-graph lidar upload. <0 DISABLES it (default): lidar is published on the zero-copy
+# media plane (rc/lidar3d/points) and consumed there by room_concept + voxelizer. Set >=0 to
+# re-enable the graph laser_* write at that fps (0 = unthrottled) for any consumer still reading the
+# graph — currently controller_obstacle_tracker. NOTE: 0 (unthrottled) floods the shared DSR/FastDDS
+# writer with the full cloud every scan, blocking G->update_node and starving the agent heartbeat
+# (timestamp_agent_att) → false "stale peer" detection; prefer a bounded rate (e.g. 20) if re-enabled.
+dsr_lidar_fps = -1
 
 [Transforms]
 # Use RT interpolation for timestamped graph transforms. Disable to fall back to nearest sample.

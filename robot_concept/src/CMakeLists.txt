@@ -7,6 +7,11 @@ LIST(APPEND SOURCES
   ../../common/media_transport/media_transport.cpp
   ../../common/media_transport/generated/idl/image_framePubSubTypes.cxx
   ../../common/media_transport/generated/idl/image_frameTypeObjectSupport.cxx
+  ../../common/media_transport/generated/idl/lidar_framePubSubTypes.cxx
+  ../../common/media_transport/generated/idl/lidar_frameTypeObjectSupport.cxx
+  ../../common/media_transport/generated/idl/imu_framePubSubTypes.cxx
+  ../../common/media_transport/generated/idl/imu_frameTypeObjectSupport.cxx
+  ../src/sensor_media_publisher.cpp
   ../src/specificworker.cpp
   ../src/specificworker_presence.cpp
 )
@@ -16,6 +21,7 @@ LIST(APPEND HEADERS
   ../../common/agent_presence_monitor/agent_presence_monitor.h
   ../../common/agent_presence_coordinator/agent_presence_coordinator.h
   ../../common/media_transport/media_transport.h
+  ../src/sensor_media_publisher.h
   ../src/specificworker.h
 )
 
