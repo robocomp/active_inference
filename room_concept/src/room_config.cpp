@@ -40,10 +40,8 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
         p.ROOM_LAYOUT_SVG = svg_file;
     });
 
-    // Media plane (RGB for the camera window + LiDAR stream for LidarIngestor).
-    rc::ConfigLoaderUtils::load_optional<int>(cl, "Media.domain_id", p.MEDIA_DOMAIN_ID);
-    rc::ConfigLoaderUtils::load_optional<std::string>(cl, "Media.rgb_topic", p.MEDIA_RGB_TOPIC);
-    rc::ConfigLoaderUtils::load_optional<std::string>(cl, "Media.lidar_topic", p.MEDIA_LIDAR_TOPIC);
+    // Media plane (RGB for the camera window + LiDAR for LidarIngestor). DDS domain +
+    // topics are read from the producer's media descriptor on the graph, not config.
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "Media.lidar_use_media", p.LIDAR_USE_MEDIA);
 
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.SigmaSdf", room_concept.params.sigma_sdf);

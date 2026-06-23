@@ -8,6 +8,7 @@
 #include <QShowEvent>
 #include <QTimer>
 #include <QElapsedTimer>
+#include <chrono>
 #include <cstdint>
 #include <Eigen/Dense>
 #include <vector>
@@ -38,8 +39,10 @@ class CameraVisualizer : public QDialog
         explicit CameraVisualizer(std::shared_ptr<DSRGraph> graph, const std::vector<Eigen::Vector2f>& room_polygon, QWidget* parent = nullptr);
         ~CameraVisualizer();  // defined in .cpp for unique_ptr<MediaSubscriber> of incomplete type
 
-        // Subscribe to the zero-copy media plane for RGB frames (replaces DSR cam_rgb blob reads).
-        void init_media_plane(std::uint32_t domain_id, const std::string& rgb_topic);
+        // Start the always-on media-plane drain timer. The RGB subscriber itself is
+        // created lazily (shared descriptor-driven factory) once the "zed" node + media
+        // descriptor exist (domain/topic from that JSON — no config). Call once after construction.
+        void start_media_plane();
 
         void update_frame();  // Call this periodically to refresh the visualization
 
@@ -82,6 +85,9 @@ class CameraVisualizer : public QDialog
         };
         MediaRgbCache media_rgb_;
         void drain_media_plane();
+        // Lazily create the RGB subscriber from the "zed" media descriptor (self-throttled).
+        bool try_discover_media_plane();
+        std::chrono::steady_clock::time_point last_media_discovery_attempt_{};
         // Always-on drain so an idle (hidden) dialog never backs up the RELIABLE
         // writer's shared-memory pool and stalls the whole media plane.
         QTimer* media_drain_timer_ = nullptr;

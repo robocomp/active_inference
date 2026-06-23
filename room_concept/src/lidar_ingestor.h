@@ -20,6 +20,7 @@
 // CV/signal/watchdog ingest-thread scaffolding was crash-hunting for what turned out to be the Eigen
 // alignment ABI bug (now fixed), so it is gone.
 
+#include <chrono>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -40,7 +41,9 @@ namespace rc
 class LidarIngestor
 {
 public:
-    // Brings up the media subscriber (domain/topic from the "zed" descriptor, else config).
+    // Lightweight: stores deps + creates the room-side buffer. The DDS subscriber is
+    // NOT created here — it is brought up lazily in pump() once the "lidar3D" node +
+    // its media descriptor exist, reading the DDS domain/topic from that JSON (no config).
     LidarIngestor(std::shared_ptr<DSR::DSRGraph> graph, rc::RoomConcept& room_concept,
                   const rc::RoomConfig& params);
     ~LidarIngestor();
@@ -56,11 +59,15 @@ public:
 
 private:
     void ingest_scan(std::vector<Eigen::Vector3f>&& points_high, std::int64_t src_ts);
+    // Lazily create the subscriber from the "lidar3D" media descriptor (self-throttled).
+    // Returns true once it is up. Until the node + descriptor exist, returns false.
+    bool ensure_subscriber();
 
     std::shared_ptr<DSR::DSRGraph> G_;
     rc::RoomConcept*      room_concept_ = nullptr;
     const rc::RoomConfig* params_       = nullptr;
     std::unique_ptr<rc::media::LidarSubscriber> lidar_sub_;
+    std::chrono::steady_clock::time_point last_init_attempt_{};
 
     rc::HighLidarBuffer high_lidar_buffer_{3};
     std::int64_t last_ingested_lidar_ts_ = std::numeric_limits<std::int64_t>::min();

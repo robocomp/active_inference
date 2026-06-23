@@ -23,36 +23,9 @@ LidarIngestor::LidarIngestor(std::shared_ptr<DSR::DSRGraph> graph, rc::RoomConce
     : G_(std::move(graph)), room_concept_(&room_concept), params_(&params)
 {
     if (!params_->LIDAR_USE_MEDIA)
-    {
         qWarning() << "[Lidar] LIDAR_USE_MEDIA=false and the DSR-graph path was removed — no LiDAR source";
-        return;
-    }
-
-    // Prefer the self-describing descriptor on the "lidar3D" node (domain/topic authored
-    // by the producer, which advertises the lidar stream there); fall back to config.
-    std::uint32_t domain = static_cast<std::uint32_t>(params_->MEDIA_DOMAIN_ID);
-    std::string   topic  = params_->MEDIA_LIDAR_TOPIC;
-    if (G_)
-        if (auto desc = rc::media::descriptor_from_graph(*G_, "lidar3D"); desc.has_value())
-            if (auto sub = desc->subscriber_config("lidar"); sub.has_value())
-            {
-                domain = sub->domain_id;
-                topic  = sub->topic_name;
-            }
-
-    auto sub = std::make_unique<rc::media::LidarSubscriber>();
-    rc::media::SubscriberConfig scfg;
-    scfg.domain_id     = domain;
-    scfg.topic_name    = topic;
-    scfg.history_depth = 8;
-    if (sub->init(scfg))
-    {
-        lidar_sub_ = std::move(sub);
-        qInfo() << "[Lidar] media-plane source up domain=" << domain
-                << "topic=" << QString::fromStdString(topic);
-    }
-    else
-        qWarning() << "[Lidar] media-plane subscriber init FAILED — no LiDAR source";
+    // The DDS subscriber is created lazily in pump()/ensure_subscriber() once the
+    // "lidar3D" node + media descriptor exist; nothing to bring up here.
 }
 
 LidarIngestor::~LidarIngestor()
@@ -60,9 +33,28 @@ LidarIngestor::~LidarIngestor()
     lidar_sub_.reset();
 }
 
+bool LidarIngestor::ensure_subscriber()
+{
+    if (lidar_sub_)
+        return true;
+    if (!params_->LIDAR_USE_MEDIA || !G_)
+        return false;
+
+    // Self-throttle the discovery attempts (compute thread, every cycle).
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_init_attempt_ < std::chrono::seconds(1))
+        return false;
+    last_init_attempt_ = now;
+
+    // Shared descriptor-driven factory (same init code as every other agent): verifies
+    // the "lidar3D" node + descriptor exist and reads the DDS domain/topic from the JSON.
+    lidar_sub_ = rc::media::make_lidar_subscriber_from_graph(*G_, "lidar3D", "lidar");
+    return lidar_sub_ != nullptr;
+}
+
 bool LidarIngestor::pump()
 {
-    if (!lidar_sub_)
+    if (!ensure_subscriber())
         return false;
 
     const float min_h_m = params_->LIDAR_HIGH_MIN_HEIGHT;

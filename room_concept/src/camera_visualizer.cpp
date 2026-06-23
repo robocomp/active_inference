@@ -126,29 +126,15 @@ CameraVisualizer::CameraVisualizer(std::shared_ptr<DSRGraph> graph, const std::v
 
 CameraVisualizer::~CameraVisualizer() = default;
 
-void CameraVisualizer::init_media_plane(std::uint32_t domain_id, const std::string& rgb_topic)
+void CameraVisualizer::start_media_plane()
 {
-    media_rgb_sub_ = std::make_unique<rc::media::MediaSubscriber>();
-    rc::media::SubscriberConfig cfg;
-    cfg.domain_id     = domain_id;
-    cfg.topic_name    = rgb_topic;
-    cfg.history_depth = 8;
-    if (!media_rgb_sub_->init(cfg))
-    {
-        std::print(stderr, "[room_concept] CameraVisualizer media plane RGB subscriber init FAILED (topic='{}')\n", rgb_topic);
-        media_rgb_sub_.reset();
-        return;
-    }
-    std::print("[room_concept] CameraVisualizer media plane RGB ready domain={} topic='{}' data_sharing={}\n",
-               domain_id, rgb_topic, media_rgb_sub_->data_sharing_active());
-
-    // Drain the subscriber continuously, even while the dialog is hidden. With a
-    // RELIABLE reader, samples that are never take()'d stay pinned in the
-    // producer's preallocated SHM pool; once the pool fills, the producer's
-    // loan_sample() starts failing and it silently stops publishing, freezing
-    // every other consumer (e.g. the voxelizer). A lightweight ~30 Hz drain
-    // keeps this reader's cache empty regardless of visibility; rendering is
-    // still gated by isVisible() in update_frame().
+    // Start the always-on drain timer even before the subscriber exists. With a
+    // RELIABLE reader, samples that are never take()'d stay pinned in the producer's
+    // preallocated SHM pool; once it fills, the producer's loan_sample() fails and it
+    // silently stops publishing, freezing every other consumer (e.g. the voxelizer).
+    // A lightweight ~30 Hz drain keeps this reader's cache empty regardless of
+    // visibility; rendering is still gated by isVisible() in update_frame(). Until the
+    // subscriber is up the timer just retries lazy discovery (drain_media_plane).
     if (media_drain_timer_ == nullptr)
     {
         media_drain_timer_ = new QTimer(this);
@@ -159,10 +145,30 @@ void CameraVisualizer::init_media_plane(std::uint32_t domain_id, const std::stri
         media_drain_timer_->start(30);  // ~33 Hz, ahead of the 30 fps producer
 }
 
+bool CameraVisualizer::try_discover_media_plane()
+{
+    if (media_rgb_sub_ || !graph_)
+        return false;
+
+    // Self-throttle discovery attempts (timer thread, ~33 Hz).
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_media_discovery_attempt_ < std::chrono::seconds(1))
+        return false;
+    last_media_discovery_attempt_ = now;
+
+    // Shared descriptor-driven factory (same init code as every other agent): verifies
+    // the "zed" node + descriptor exist and reads the DDS domain/topic from the JSON.
+    media_rgb_sub_ = rc::media::make_image_subscriber_from_graph(*graph_, camera_node_name_, "rgb");
+    return media_rgb_sub_ != nullptr;
+}
+
 void CameraVisualizer::drain_media_plane()
 {
     if (!media_rgb_sub_)
+    {
+        try_discover_media_plane();   // lazy: brings the subscriber up once "zed" descriptor exists
         return;
+    }
 
     media_rgb_sub_->poll([this](const rc::media::ImageFrame& f, std::int64_t)
     {

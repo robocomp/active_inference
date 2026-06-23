@@ -57,24 +57,13 @@ RoomViewer::RoomViewer(DSR::DSRViewer* default_viewer,
     // Camera-projection window: overlays the room layout on the live RGB image.
     camera_viz_ = std::make_unique<rc::CameraVisualizer>(graph, room_polygon, nullptr);
 
-    // Bring up the RGB media plane so the image button shows live frames. Prefer
-    // the self-describing MediaDescriptor on the "zed" node (domain/topic authored
-    // by the producer); fall back to config when the descriptor is not yet present.
-    std::uint32_t domain = static_cast<std::uint32_t>(params_->MEDIA_DOMAIN_ID);
-    std::string   topic  = params_->MEDIA_RGB_TOPIC;
-    if (graph)
-    {
-        if (auto desc = rc::media::descriptor_from_graph(*graph, "zed"); desc.has_value())
-            if (auto sub = desc->subscriber_config("rgb"); sub.has_value())
-            {
-                domain = sub->domain_id;
-                topic  = sub->topic_name;
-            }
-    }
-    camera_viz_->init_media_plane(domain, topic);
+    // Bring up the RGB media plane. The subscriber is created lazily by the camera
+    // visualizer once the "zed" node + media descriptor exist, reading the DDS
+    // domain/topic straight from that JSON descriptor (no config). This just starts
+    // the always-on drain/discovery timer.
+    camera_viz_->start_media_plane();
     camera_media_plane_initialized_ = true;
-    qInfo() << "[room][camera] RGB media plane subscriber up domain=" << domain
-            << "topic=" << QString::fromStdString(topic);
+    qInfo() << "[room][camera] RGB media plane discovery started (waits for 'zed' descriptor)";
 }
 
 Eigen::Affine2f RoomViewer::best_available_pose(

@@ -72,11 +72,11 @@ struct RoomConfig
     float BOOTSTRAP_TABLE_DEPTH   = 1.4f;
     float BOOTSTRAP_TABLE_HEIGHT  = 0.74f;
 
-    // Media plane (zero-copy DDS) — RGB consumer for the camera-projection window
-    // and the LiDAR stream consumed by LidarIngestor.
-    int         MEDIA_DOMAIN_ID   = 0;
-    std::string MEDIA_RGB_TOPIC   = "rc/zed/rgb";
-    std::string MEDIA_LIDAR_TOPIC = "rc/lidar3d/points";
+    // Media plane (zero-copy DDS) — RGB (camera window) + LiDAR (LidarIngestor).
+    // DDS domain + topics are NOT configured: they are read from the media descriptor
+    // JSON the producer authors on the "zed"/"lidar3D" nodes, so the consumer always
+    // uses the producer's dedicated domain. Subscribers are created lazily once those
+    // nodes + descriptors exist.
     bool        LIDAR_USE_MEDIA   = true;   // false ⇒ DSR graph laser_* only
 };
 

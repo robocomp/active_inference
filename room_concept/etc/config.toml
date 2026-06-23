@@ -77,12 +77,11 @@ agent_info_period_ms   = 1000
 nodes    = ["room_concept 5"]  # our own agent presence node (cleaned on shutdown / peer-crash)
 #subtrees = []                  # was ["room"]; room is a static prior, not owned, in static-room mode
 
-# Zero-copy RGBD media plane (RGB consumer). DEDICATED DDS domain, isolated from
-# the DSR Agent.domain = 0 so media discovery churn never perturbs cortex/DSR
-# resync. Must MATCH the robot_concept producer.
-[Media]
-domain_id = 7
-rgb_topic = "rc/zed/rgb"
+# NOTE: the zero-copy media plane (RGB + LiDAR consumers) needs NO domain/topic
+# config. They are read from the media descriptor JSON the producer (robot_concept)
+# writes on the "zed"/"lidar3D" nodes, so the consumer always uses the producer's
+# dedicated media domain (isolated from Agent.domain = 0). Subscribers are created
+# lazily, only once those nodes + descriptors exist.
 
 [RoomConcept]
 RoomLayoutSvg          = "room_4x4.svg"  # room polygon (room_contour) loaded at start; was hardcoded beta_layout.svg

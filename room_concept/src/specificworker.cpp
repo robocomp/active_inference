@@ -182,13 +182,11 @@ void SpecificWorker::initialize()
         scene_graph_->cleanup_room_graph_nodes();
 
     // ── Connect DSR signals ────────────────────────────────────────────────
-    // Laser updates use a DirectConnection so the trigger runs on the DDS emitter
-    // thread (a cheap CV notify) instead of being queued onto the GUI thread. The
-    // heavy point-cloud decode is done on the dedicated lidar ingestion thread
-    // (lidar_ingest_loop), keeping the localization inner loop at full rate even when
-    // the GUI thread is busy rendering.
-    connect(G.get(), &DSR::DSRGraph::update_node_signal,      this, &SpecificWorker::modify_node_slot, Qt::DirectConnection);
-    // connect(G.get(), &DSR::DSRGraph::update_edge_signal,      this, &SpecificWorker::modify_edge_slot);
+    // NEVER Qt::DirectConnection on DSR update signals: it runs the slot on the raw
+    // FastDDS reader thread and corrupts the heap under peer churn (smashed AgentInfo
+    // heartbeat). modify_node_slot is empty now (LiDAR is media-only), so we simply do
+    // NOT connect update_node_signal. The attrs slot below uses the default (Queued)
+    // connection — it runs on the main thread and only reads velocity/odometry attrs.
     connect(G.get(), &DSR::DSRGraph::update_node_attr_signal, this, &SpecificWorker::modify_node_attrs_slot);
     // connect(G.get(), &DSR::DSRGraph::update_edge_attr_signal, this, &SpecificWorker::modify_edge_attrs_slot);
     // connect(G.get(), &DSR::DSRGraph::del_edge_signal,         this, &SpecificWorker::del_edge_slot);
