@@ -39,6 +39,16 @@ bool SceneProcessor::init_media_plane(std::uint32_t domain_id,
     rc::media::SubscriberConfig depth_cfg = rgb_cfg;
     depth_cfg.topic_name = depth_topic;
 
+    // Prefer the producer's media descriptor on the "zed" node (its authored domain/topic, on the
+    // dedicated media domain isolated from Agent.domain) — the same discovery the other agents use;
+    // fall back to the configured domain/topic if the descriptor isn't advertised yet.
+    if (graph_)
+        if (auto desc = rc::media::descriptor_from_graph(*graph_, "zed"); desc.has_value())
+        {
+            if (auto c = desc->subscriber_config("rgb");   c.has_value()) { rgb_cfg.domain_id = c->domain_id;   rgb_cfg.topic_name = c->topic_name; }
+            if (auto c = desc->subscriber_config("depth"); c.has_value()) { depth_cfg.domain_id = c->domain_id; depth_cfg.topic_name = c->topic_name; }
+        }
+
     const bool rgb_ok   = media_rgb_sub_->init(rgb_cfg);
     const bool depth_ok = media_depth_sub_->init(depth_cfg);
     if (!rgb_ok || !depth_ok)
@@ -46,8 +56,8 @@ bool SceneProcessor::init_media_plane(std::uint32_t domain_id,
         std::print(stderr, "[voxelizer] media plane subscriber init FAILED (rgb={}, depth={})\n", rgb_ok, depth_ok);
         return false;
     }
-    std::print("[voxelizer] media plane ready domain={} rgb='{}' depth='{}' data_sharing={}\n",
-               domain_id, rgb_topic, depth_topic,
+    std::print("[voxelizer] media plane ready rgb domain={} '{}' | depth domain={} '{}' data_sharing={}\n",
+               rgb_cfg.domain_id, rgb_cfg.topic_name, depth_cfg.domain_id, depth_cfg.topic_name,
                media_rgb_sub_->data_sharing_active() && media_depth_sub_->data_sharing_active());
     return true;
 }
@@ -138,24 +148,34 @@ bool SceneProcessor::init_lidar_media_plane(std::uint32_t domain_id, const std::
     lidar_use_media_ = use_media;
     if (!use_media)
     {
-        std::print("[voxelizer] lidar media plane DISABLED — using DSR graph 'lidar3D'\n");
+        std::print("[voxelizer] lidar media plane DISABLED (Voxel.lidar_use_media=false) — no LiDAR source\n");
         return false;
     }
 
-    lidar_sub_ = std::make_unique<rc::media::LidarSubscriber>();
     rc::media::SubscriberConfig cfg;
     cfg.domain_id     = domain_id;
     cfg.topic_name    = topic;
     cfg.history_depth = 4;
+    // Prefer the producer's media descriptor on the "lidar3D" node (its authored domain/topic) — the
+    // same discovery the other agents use; fall back to the configured domain/topic if not advertised.
+    if (graph_)
+        if (auto desc = rc::media::descriptor_from_graph(*graph_, "lidar3D"); desc.has_value())
+            if (auto c = desc->subscriber_config("lidar"); c.has_value())
+            {
+                cfg.domain_id  = c->domain_id;
+                cfg.topic_name = c->topic_name;
+            }
+
+    lidar_sub_ = std::make_unique<rc::media::LidarSubscriber>();
     if (!lidar_sub_->init(cfg))
     {
-        std::print(stderr, "[voxelizer] lidar media subscriber init FAILED — falling back to DSR graph 'lidar3D'\n");
+        std::print(stderr, "[voxelizer] lidar media subscriber init FAILED — no LiDAR source\n");
         lidar_sub_.reset();
         lidar_use_media_ = false;
         return false;
     }
     std::print("[voxelizer] lidar media plane ready domain={} topic='{}' data_sharing={}\n",
-               domain_id, topic, lidar_sub_->data_sharing_active());
+               cfg.domain_id, cfg.topic_name, lidar_sub_->data_sharing_active());
     return true;
 }
 
