@@ -10,7 +10,7 @@
 
 #pragma once
 
-// RoomViewController — all GUI/visualization state for room_concept.
+// RoomViewer — all GUI/visualization state for room_concept.
 //
 // Owns the docked 2-D layout viewer, the free-energy time-series plot, and the
 // camera-projection window (CameraVisualizer, which overlays the room layout on
@@ -32,6 +32,7 @@
 #include <genericworker.h>            // DSR::DSRGraph / DSR::DSRViewer
 
 #include "room_concept.h"            // rc::RoomConcept (+ UpdateResult)
+#include "room_config.h"       // rc::RoomConfig (shared config)
 #include "viewer_2d.h"
 #include "timeseries_plot.h"
 #include "custom_widget.h"
@@ -41,31 +42,20 @@ namespace rc { class EpistemicController; class CameraVisualizer; }
 namespace rc
 {
 
-class RoomViewController
+class RoomViewer
 {
 public:
-    struct Config
-    {
-        QRectF      grid_max_dim{-5, -5, 10, 10};
-        float       robot_width  = 0.460f;
-        float       robot_length = 0.480f;
-        int         max_lidar_draw_points = 500;
-        bool        has_room_polygon = false;
-        // Media plane fallback (used if the graph descriptor on "zed" is absent).
-        std::uint32_t media_domain_id = 7;
-        std::string   media_rgb_topic = "rc/zed/rgb";
-    };
-
-    RoomViewController();           // out-of-line (unique_ptr<CameraVisualizer> incomplete in callers)
-    ~RoomViewController();
-
-    // Build the docked widgets + camera window and bring up the RGB media plane.
-    void setup(DSR::DSRViewer* default_viewer,
-               std::shared_ptr<DSR::DSRGraph> graph,
-               const Config& cfg,
-               const std::vector<Eigen::Vector2f>& room_polygon,
-               rc::RoomConcept* room_concept,
-               rc::EpistemicController* epistemic);
+    // Constructor injection (out-of-line — unique_ptr<CameraVisualizer> incomplete in
+    // callers). Builds the docked widgets + camera-projection window and brings up the
+    // RGB media plane. Fully constructed == ready.
+    RoomViewer(DSR::DSRViewer*          default_viewer,
+                       std::shared_ptr<DSR::DSRGraph> graph,
+                       rc::RoomConfig&     params,
+                       const std::vector<Eigen::Vector2f>& room_polygon,
+                       bool                     has_room_polygon,
+                       rc::RoomConcept&         room_concept,
+                       rc::EpistemicController& epistemic);
+    ~RoomViewer();
 
     // Accessors so the worker (the QObject) can connect widget signals.
     [[nodiscard]] Custom_widget* widget()  const { return custom_widget_; }
@@ -96,7 +86,8 @@ public:
 private:
     void update_epistemic_overlay();
 
-    Config cfg_;
+    rc::RoomConfig*     params_       = nullptr;   // shared config
+    bool                     has_room_polygon_ = false;
     rc::RoomConcept*         room_concept_ = nullptr;
     rc::EpistemicController* epistemic_    = nullptr;
 

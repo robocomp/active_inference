@@ -10,7 +10,7 @@
 
 #pragma once
 
-// RoomGraphPublisher — DSR scene-graph writer for room_concept.
+// RoomSceneGraph — DSR scene-graph writer for room_concept.
 //
 // Owns everything that turns a RoomConcept::UpdateResult into graph mutations:
 // the robot-pose RT edge (world→robot before the room is stable, robot→room
@@ -27,37 +27,26 @@
 
 #include "room_concept.h"                  // rc::RoomConcept (+ UpdateResult)
 #include "epistemic_controller.h"
+#include "room_config.h"             // rc::RoomConfig (shared config)
 #include "../../common/affordance_manager/affordance_manager.h"
 
 namespace rc
 {
 
-class RoomGraphPublisher
+class RoomSceneGraph
 {
 public:
-    struct Config
-    {
-        int   stable_frames_required = 30;
-        float stable_sdf_mse_max     = 0.06f;
-        float stable_cov_tt_max      = 0.001f;
-        float room_height            = 2.4f;   // m, room node attribute
-        // Robot footprint; defaults overwritten by the graph "body" node when present.
-        float robot_width  = 0.460f;
-        float robot_length = 0.480f;
-        float robot_height = 1.6f;
-    };
-
-    struct Deps
-    {
-        std::shared_ptr<DSR::DSRGraph> graph;
-        rc::RoomConcept*               room_concept         = nullptr;
-        rc::EpistemicController*       epistemic_controller = nullptr;
-        std::function<void()>          trigger_layout;       // GenericWorker::trigger_graph_layout_twopi
-    };
-
-    RoomGraphPublisher() = default;
-
-    void init(const Config& cfg, Deps deps);
+    // Constructor injection: graph + the worker-owned rt_api + shared params + the
+    // localizer/planner + the graph-layout trigger. Fully constructed == ready.
+    RoomSceneGraph(std::shared_ptr<DSR::DSRGraph> graph,
+                       DSR::RT_API*             rt_api,
+                       rc::RoomConfig&     params,
+                       rc::RoomConcept&         room_concept,
+                       rc::EpistemicController& epistemic,
+                       std::function<void()>    trigger_layout)
+        : G_(std::move(graph)), rt_api_(rt_api), params_(&params),
+          room_concept_(&room_concept), epistemic_(&epistemic),
+          trigger_layout_(trigger_layout ? std::move(trigger_layout) : [] {}) {}
 
     // Resolve root/robot ids and read body dimensions (updates the planner footprint).
     void check_init_graph_is_valid();
@@ -77,9 +66,6 @@ public:
 
     [[nodiscard]] bool  room_node_created() const noexcept { return room_node_created_; }
     [[nodiscard]] std::uint64_t robot_id() const noexcept { return dsr_robot_id_; }
-    [[nodiscard]] float robot_width()  const noexcept { return cfg_.robot_width; }
-    [[nodiscard]] float robot_length() const noexcept { return cfg_.robot_length; }
-    [[nodiscard]] float robot_height() const noexcept { return cfg_.robot_height; }
 
 private:
     void dsr_update_pose(const rc::RoomConcept::UpdateResult& res);
@@ -89,9 +75,9 @@ private:
     void load_robot_body_dimensions_from_graph();
     void dsr_create_wall_nodes();
 
-    Config cfg_;
     std::shared_ptr<DSR::DSRGraph> G_;
-    std::unique_ptr<DSR::RT_API>   rt_api_;
+    DSR::RT_API*                   rt_api_       = nullptr;   // worker-owned, injected
+    rc::RoomConfig*           params_       = nullptr;   // shared config (read + body-dim write-back)
     rc::RoomConcept*               room_concept_ = nullptr;
     rc::EpistemicController*       epistemic_    = nullptr;
     std::function<void()>          trigger_layout_;

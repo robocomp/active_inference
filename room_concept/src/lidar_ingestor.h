@@ -10,35 +10,27 @@
 
 #pragma once
 
-// LidarIngestor — decoupled LiDAR acquisition for room_concept.
+// LidarIngestor — media-plane LiDAR acquisition for room_concept.
 //
-// The heavy point-cloud decode used to run inside a queued Qt slot on the GUI
-// thread; under rendering load that thread starved and the localization inner
-// loop stopped receiving fresh lidar. This class moves the decode + buffer fill
-// + RoomConcept notify onto a dedicated thread, woken by a cheap CV trigger from
-// the DDS/Qt signal path (with a periodic timeout + a GUI-thread watchdog poll).
-// It owns the HighLidarBuffer the localizer reads from, plus all the lidar health
-// telemetry. SpecificWorker forwards the DSR laser signals here and calls
-// tick_health() once per compute cycle.
+// Drains robot_concept's zero-copy LidarFrame stream synchronously via pump(), called once per
+// compute cycle from the compute thread: it fills the HighLidarBuffer the localizer reads and wakes
+// the localizer (RoomConcept::notify_new_lidar). No dedicated ingest thread and no DSR-graph path —
+// a single-caller non-blocking poll() is the one thread-safe procedure every agent uses to read the
+// media infrastructure (mirrors the voxelizer's SceneProcessor::get_lidar3D()). The earlier
+// CV/signal/watchdog ingest-thread scaffolding was crash-hunting for what turned out to be the Eigen
+// alignment ABI bug (now fixed), so it is gone.
 
-#include <atomic>
-#include <condition_variable>
 #include <cstdint>
-#include <deque>
 #include <limits>
 #include <memory>
-#include <mutex>
-#include <optional>
 #include <string>
-#include <thread>
 #include <vector>
 
-#include <genericworker.h>          // DSR API + att type tags
+#include <genericworker.h>          // DSR API
 
-#include "buffer_types.h"           // rc::HighLidarBuffer, rc::LidarData
+#include "buffer_types.h"           // rc::HighLidarBuffer, rc::LidarData (+ Eigen)
 #include "room_concept.h"           // rc::RoomConcept (notify_new_lidar)
-
-class QObject;
+#include "room_config.h"            // rc::RoomConfig (shared config)
 
 namespace rc::media { class LidarSubscriber; }
 
@@ -48,90 +40,35 @@ namespace rc
 class LidarIngestor
 {
 public:
-    struct Config
-    {
-        std::string lidar_name      = "lidar3D";
-        float       high_min_height = 1.5f;   // m, floor/ceiling cutoff for the "high" cloud
-        // Media plane (preferred source): subscribe to robot_concept's LidarFrame stream
-        // instead of polling the DSR graph. The graph path stays as a watchdog fallback.
-        bool          use_media        = true;
-        std::uint32_t media_domain_id  = 7;
-        std::string   media_lidar_topic = "rc/lidar3d/points";
-    };
-
-    struct Deps
-    {
-        std::shared_ptr<DSR::DSRGraph> graph;
-        rc::RoomConcept*               room_concept = nullptr;
-        QObject*                       qt_owner     = nullptr;   // QTimer::singleShot target (GUI thread)
-    };
-
-    LidarIngestor();    // out-of-line (unique_ptr<LidarSubscriber> incomplete in callers)
+    // Brings up the media subscriber (domain/topic from the "zed" descriptor, else config).
+    LidarIngestor(std::shared_ptr<DSR::DSRGraph> graph, rc::RoomConcept& room_concept,
+                  const rc::RoomConfig& params);
     ~LidarIngestor();
     LidarIngestor(const LidarIngestor&) = delete;
     LidarIngestor& operator=(const LidarIngestor&) = delete;
 
-    void init(const Config& cfg, Deps deps);
-    void start();   // launch the ingest thread
-    void stop();    // signal + join (idempotent)
+    // Drain the media plane (non-blocking), push the newest scan to the buffer + wake the localizer.
+    // Call once per compute cycle from the compute thread. Returns true if a fresh scan was ingested.
+    bool pump();
 
-    // The localizer reads its lidar from here; also wired into RoomConcept::RunContext.
+    // The localizer reads its lidar from here (also wired into RoomConcept::RunContext).
     [[nodiscard]] rc::HighLidarBuffer& buffer() noexcept { return high_lidar_buffer_; }
 
-    // DSR signal entry points (called from SpecificWorker's Qt slots).
-    void on_laser_node_signal();                  // update_node_signal, type "laser"
-    void on_laser_attrs_signal(std::uint64_t id); // update_node_attr_signal, laser payload
-
-    // Health log + (GUI-thread) watchdog poll; call once per compute tick.
-    void tick_health(std::int64_t now_ms, bool on_gui_thread);
-
 private:
-    void lidar_ingest_loop();
-    void ingest_latest_lidar();                                          // drain graph-fed pending scan
-    void ingest_scan(std::vector<Eigen::Vector3f>&& points_high, std::int64_t src_ts);  // shared tail
-    void schedule_lidar_copy_to_pending(std::optional<std::uint64_t> node_id, const char* origin, bool count_signal_event);
-    bool copy_latest_lidar_to_pending(std::optional<std::uint64_t> node_id, const char* origin, bool count_signal_event);
+    void ingest_scan(std::vector<Eigen::Vector3f>&& points_high, std::int64_t src_ts);
 
-    Config cfg_;
     std::shared_ptr<DSR::DSRGraph> G_;
-    rc::RoomConcept* room_concept_ = nullptr;
-    QObject*         qt_owner_     = nullptr;
-    std::unique_ptr<rc::media::LidarSubscriber> lidar_sub_;   // primary source when cfg_.use_media
+    rc::RoomConcept*      room_concept_ = nullptr;
+    const rc::RoomConfig* params_       = nullptr;
+    std::unique_ptr<rc::media::LidarSubscriber> lidar_sub_;
 
     rc::HighLidarBuffer high_lidar_buffer_{3};
+    std::int64_t last_ingested_lidar_ts_ = std::numeric_limits<std::int64_t>::min();
 
-    // ── Health telemetry ───────────────────────────────────────────────────
-    std::atomic<std::uint64_t> lidar_signal_events_{0};
-    std::atomic<std::uint64_t> lidar_copied_frames_{0};
-    std::atomic<std::uint64_t> lidar_ingested_frames_{0};
-    std::atomic<std::uint64_t> lidar_watchdog_pulls_{0};
-    std::atomic<std::uint64_t> lidar_ingest_wakeups_{0};
-    std::atomic<std::uint64_t> lidar_copy_mutex_busy_{0};
-    std::atomic<std::uint64_t> lidar_ingest_loop_beats_{0};
-    std::atomic<bool>          lidar_copy_queued_{false};
-    std::atomic<std::int64_t>  lidar_last_signal_ms_{0};
-    std::atomic<std::int64_t>  lidar_last_ingest_ms_{0};
-    std::atomic<std::int64_t>  lidar_last_ingest_loop_beat_ms_{0};
-    std::atomic<bool>          lidar_notify_inflight_{false};
-    std::atomic<std::int64_t>  lidar_notify_inflight_since_ms_{0};
-    std::int64_t               last_lidar_health_log_ms_   = 0;
-    std::int64_t               last_lidar_watchdog_pull_ms_ = 0;
-    std::deque<std::int64_t>   lidar_recent_source_ts_;
-
-    // ── Ingest thread ──────────────────────────────────────────────────────
-    std::thread             lidar_ingest_thread_;
-    std::atomic<bool>       lidar_ingest_running_{false};
-    std::atomic<bool>       lidar_ingest_dirty_{false};
-    std::mutex              lidar_ingest_mutex_;
-    std::condition_variable lidar_ingest_cv_;
-    std::int64_t            last_ingested_lidar_ts_ = std::numeric_limits<std::int64_t>::min();
-    struct PendingLidarScan
-    {
-        std::vector<float> xs, ys, zs;
-        std::int64_t source_ts = std::numeric_limits<std::int64_t>::min();
-        bool has_data = false;
-    };
-    PendingLidarScan pending_lidar_scan_;
+    // Source-attribution telemetry (compute thread only): 5 s "[LidarSrc]" log.
+    std::uint64_t fresh_frames_      = 0;   // LidarFrames drained from the plane
+    std::uint64_t served_            = 0;   // scans actually pushed to the buffer
+    std::int64_t  last_src_report_ms_ = 0;
 };
 
 }  // namespace rc

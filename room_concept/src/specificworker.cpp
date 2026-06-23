@@ -91,9 +91,9 @@ void SpecificWorker::request_shutdown()
     save_window_settings();
     save_robot_pose_once();
 
-    // Stop the lidar ingestion thread BEFORE tearing down RoomConcept (it calls
+    // Drop the lidar media subscriber BEFORE tearing down RoomConcept (pump() calls
     // room_concept_.notify_new_lidar) and while G is still alive.
-    lidar_ingestor_.stop();
+    lidar_ingestor_.reset();
 
     room_concept_.stop();
     cleanup_owned_nodes();
@@ -126,9 +126,17 @@ void SpecificWorker::initialize()
 
     // ── Load all config (agent + RoomConcept + EpistemicController params) ──
     rc::load_room_config(configLoader, params, room_concept_, epistemic_controller_);
+
+    // ── Collaborators (constructor injection; worker owns rt_api + shared params) ──
+    rt_api_ = G->get_rt_api();
+    scene_graph_ = std::make_unique<rc::RoomSceneGraph>(
+        G, rt_api_.get(), params, room_concept_, epistemic_controller_,
+        [this] { trigger_graph_layout_twopi(); });
+    lidar_ingestor_ = std::make_unique<rc::LidarIngestor>(G, room_concept_, params);
+
     // ── Wire RoomConcept run context ───────────────────────────────────────
     rc::RoomConcept::RunContext run_ctx;
-    run_ctx.high_lidar_buffer = &lidar_ingestor_.buffer();
+    run_ctx.high_lidar_buffer = &lidar_ingestor_->buffer();
     run_ctx.velocity_buffer = &velocity_buffer_;
     run_ctx.odometry_buffer = &odometry_buffer_;
     room_concept_.set_run_context(run_ctx);
@@ -149,40 +157,20 @@ void SpecificWorker::initialize()
             params.ROOM_LAYOUT_SVG, "room_contour", false, true);
 
     // GUI / visualization (2-D viewer, FE plot, camera-projection window + RGB media plane).
-    rc::RoomViewController::Config view_cfg;
-    view_cfg.grid_max_dim          = params.GRID_MAX_DIM;
-    view_cfg.robot_width           = params.ROBOT_WIDTH;
-    view_cfg.robot_length          = params.ROBOT_LENGTH;
-    view_cfg.max_lidar_draw_points = params.MAX_LIDAR_DRAW_POINTS;
-    view_cfg.has_room_polygon      = room_initialized_from_svg_polygon_;
-    view_cfg.media_domain_id       = static_cast<std::uint32_t>(params.MEDIA_DOMAIN_ID);
-    view_cfg.media_rgb_topic       = params.MEDIA_RGB_TOPIC;
-    view_.setup(default_viewer.get(), G, view_cfg, room_polygon_for_viz, &room_concept_, &epistemic_controller_);
+    viewer_ = std::make_unique<rc::RoomViewer>(
+        default_viewer.get(), G, params, room_polygon_for_viz,
+        room_initialized_from_svg_polygon_, room_concept_, epistemic_controller_);
 
-    if (auto* w = view_.widget())
+    if (auto* w = viewer_->widget())
     {
-        connect(w->btn_camera_viz, &QPushButton::clicked, this, [this] { view_.show_camera(); });
-        connect(w->btn_lidar_points_viz, &QPushButton::toggled, this, [this](bool on) { view_.toggle_lidar_points(on); });
-        if (auto* v = view_.viewer())
+        connect(w->btn_camera_viz, &QPushButton::clicked, this, [this] { viewer_->show_camera(); });
+        connect(w->btn_lidar_points_viz, &QPushButton::toggled, this, [this](bool on) { viewer_->toggle_lidar_points(on); });
+        if (auto* v = viewer_->viewer())
             v->set_lidar_points_visible(w->btn_lidar_points_viz->isChecked());
     }
 
-    // ── DSR scene-graph writer ─────────────────────────────────────────────
-    rc::RoomGraphPublisher::Config gp_cfg;
-    gp_cfg.stable_frames_required = params.STABLE_FRAMES_REQUIRED;
-    gp_cfg.stable_sdf_mse_max     = params.STABLE_SDF_MSE_MAX;
-    gp_cfg.stable_cov_tt_max      = params.STABLE_COV_TT_MAX;
-    gp_cfg.room_height            = params.room_height;
-    gp_cfg.robot_width            = params.ROBOT_WIDTH;
-    gp_cfg.robot_length           = params.ROBOT_LENGTH;
-    gp_cfg.robot_height           = params.ROBOT_HEIGHT;
-    graph_publisher_.init(gp_cfg, {
-        .graph                = G,
-        .room_concept         = &room_concept_,
-        .epistemic_controller = &epistemic_controller_,
-        .trigger_layout       = [this] { trigger_graph_layout_twopi(); },
-    });
-    graph_publisher_.check_init_graph_is_valid();
+    // ── DSR scene-graph writer: resolve graph ids + body dims ──────────────
+    scene_graph_->check_init_graph_is_valid();
 
     // Ensure a clean startup: if a stale room node exists from previous runs,
     // remove it so the room is recreated only after localization is stable.
@@ -191,7 +179,7 @@ void SpecificWorker::initialize()
     if (params.PRESERVE_BOOTSTRAP_ROOM)
         qInfo() << "[room] PreserveBootstrapRoom=true: skipping start cleanup; adopting pre-seeded room/table as a static prior.";
     else
-        graph_publisher_.cleanup_room_graph_nodes();
+        scene_graph_->cleanup_room_graph_nodes();
 
     // ── Connect DSR signals ────────────────────────────────────────────────
     // Laser updates use a DirectConnection so the trigger runs on the DDS emitter
@@ -206,13 +194,7 @@ void SpecificWorker::initialize()
     // connect(G.get(), &DSR::DSRGraph::del_edge_signal,         this, &SpecificWorker::del_edge_slot);
     // connect(G.get(), &DSR::DSRGraph::del_node_signal,         this, &SpecificWorker::del_node_slot);
 
-    // Start the decoupled lidar ingestion thread before the localizer so the buffer
-    // is filled as soon as data arrives.
-    lidar_ingestor_.init({.lidar_name = params.LIDAR_NAME, .high_min_height = params.LIDAR_HIGH_MIN_HEIGHT,
-                          .media_domain_id = static_cast<std::uint32_t>(params.MEDIA_DOMAIN_ID)},
-                         {.graph = G, .room_concept = &room_concept_, .qt_owner = this});
-    lidar_ingestor_.start();
-
+    // LiDAR is pumped synchronously from compute() (no ingest thread); just start the localizer.
     room_concept_.start();
 
     // ── Presence coordinator ────────────────────────────────────────────────
@@ -311,10 +293,10 @@ void SpecificWorker::initialize()
     presence_coordinator_.start();
 
     // ── Wire mouse-driven pose reset ───────────────────────────────────────
-    if (auto* v = view_.viewer())
+    if (auto* v = viewer_->viewer())
     {
-        connect(v, &rc::Viewer2D::robot_moved,  this, [this](QPointF p){ view_.on_robot_moved(p); });
-        connect(v, &rc::Viewer2D::robot_rotate, this, [this](QPointF p){ view_.on_robot_rotated(p); });
+        connect(v, &rc::Viewer2D::robot_moved,  this, [this](QPointF p){ viewer_->on_robot_moved(p); });
+        connect(v, &rc::Viewer2D::robot_rotate, this, [this](QPointF p){ viewer_->on_robot_rotated(p); });
     }
 
     restore_window_settings();
@@ -338,10 +320,13 @@ void SpecificWorker::compute()
     {
         QElapsedTimer section_timer;
         section_timer.start();
-        graph_publisher_.monitor_affordance();
+        scene_graph_->monitor_affordance();
         t_affordance_ms = section_timer.elapsed();
         last_affordance_monitor_ms_ = now_ms;
     }
+
+    // Drain the LiDAR media plane and wake the localizer (replaces the old ingest thread).
+    lidar_ingestor_->pump();
 
     QElapsedTimer section_timer;
     section_timer.start();
@@ -349,7 +334,7 @@ void SpecificWorker::compute()
     const bool have_loc = loc_res.has_value() && loc_res->ok;
     t_loc_fetch_ms = section_timer.elapsed();
 
-    const Eigen::Affine2f pose_for_draw = view_.best_available_pose(loc_res, have_loc);
+    const Eigen::Affine2f pose_for_draw = viewer_->best_available_pose(loc_res, have_loc);
     
     // ── Update 2-D viewer ─────────────────────────────────────────────────
     const Eigen::Affine2f loc_pose = have_loc ? loc_res->robot_pose : pose_for_draw;
@@ -360,7 +345,7 @@ void SpecificWorker::compute()
         lidar_for_canvas = loc_res->lidar_scan;
     else
     {
-        const auto& [lidar_from_buffer] = lidar_ingestor_.buffer().read_last();
+        const auto& [lidar_from_buffer] = lidar_ingestor_->buffer().read_last();
         if (lidar_from_buffer.has_value())
             lidar_for_canvas = lidar_from_buffer->first;
     }
@@ -369,7 +354,7 @@ void SpecificWorker::compute()
     if (on_gui_thread)
     {
         section_timer.restart();
-        view_.update_viewer(loc_res, have_loc, pose_for_draw, lidar_for_canvas, loc_pose, use_loc);
+        viewer_->update_viewer(loc_res, have_loc, pose_for_draw, lidar_for_canvas, loc_pose, use_loc);
         t_viewer_ms = section_timer.elapsed();
     }
 
@@ -383,7 +368,7 @@ void SpecificWorker::compute()
     {
         section_timer.restart();
         last_dsr_publish_try_ms_ = now_ms;
-        graph_publisher_.update(*loc_res, last_robot_adv_speed_, last_robot_side_speed_, last_robot_rot_speed_);
+        scene_graph_->update(*loc_res, last_robot_adv_speed_, last_robot_side_speed_, last_robot_rot_speed_);
         last_dsr_published_ts_ms_ = loc_res->timestamp_ms;
         t_dsr_ms = section_timer.elapsed();
     }
@@ -391,13 +376,11 @@ void SpecificWorker::compute()
     if (on_gui_thread)
     {
         section_timer.restart();
-        view_.update_ui(loc_res);
+        viewer_->update_ui(loc_res);
         t_ui_ms = section_timer.elapsed();
     }
 
-    section_timer.restart();
-    lidar_ingestor_.tick_health(now_ms, on_gui_thread);
-    t_health_ms = section_timer.elapsed();
+    t_health_ms = 0;
 
     const auto total_ms = compute_timer.elapsed();
     const auto elapsed_since_init_ms = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -500,17 +483,9 @@ void SpecificWorker::modify_node_attrs_slot(std::uint64_t id, const std::vector<
         });
     };
 
-    const bool touches_lidar_payload = touches_any({
-        "laser_X",
-        "laser_Y",
-        "laser_Z",
-        "laser_timestamp"
-    });
+    // LiDAR is read from the media plane (pumped in compute), not the DSR graph laser_* attrs.
 
-    if (touches_lidar_payload)
-        lidar_ingestor_.on_laser_attrs_signal(id);
-
-    if (const auto robot_id = graph_publisher_.robot_id(); robot_id != 0 && id != robot_id)
+    if (const auto robot_id = scene_graph_->robot_id(); robot_id != 0 && id != robot_id)
         return;
 
     const bool touches_current_speed = touches_any({
@@ -627,11 +602,9 @@ void SpecificWorker::modify_node_attrs_slot(std::uint64_t id, const std::vector<
 }
 
 
-void SpecificWorker::modify_node_slot(std::uint64_t /*id*/, const std::string &type)
+void SpecificWorker::modify_node_slot(std::uint64_t /*id*/, const std::string& /*type*/)
 {
-    if (type != "laser")
-        return;
-    lidar_ingestor_.on_laser_node_signal();
+    // LiDAR now arrives via the media plane (pumped in compute); the graph 'laser' node is not read.
 }
 ///////////////////////////////////////////////////////////////////////////////
 void SpecificWorker::emergency()

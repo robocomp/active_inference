@@ -1,9 +1,9 @@
 /*
  *    Copyright (C) 2026 by RoboLab at the University of Extremadura
- *    This file is part of RoboComp — see room_view_controller.h.
+ *    This file is part of RoboComp — see room_viewer.h.
  */
 
-#include "room_view_controller.h"
+#include "room_viewer.h"
 
 #include <algorithm>
 #include <cmath>
@@ -19,25 +19,23 @@
 namespace rc
 {
 
-RoomViewController::RoomViewController() = default;
-RoomViewController::~RoomViewController() = default;
+RoomViewer::~RoomViewer() = default;
 
-void RoomViewController::setup(DSR::DSRViewer* default_viewer,
-                               std::shared_ptr<DSR::DSRGraph> graph,
-                               const Config& cfg,
-                               const std::vector<Eigen::Vector2f>& room_polygon,
-                               rc::RoomConcept* room_concept,
-                               rc::EpistemicController* epistemic)
+RoomViewer::RoomViewer(DSR::DSRViewer* default_viewer,
+                                       std::shared_ptr<DSR::DSRGraph> graph,
+                                       rc::RoomConfig& params,
+                                       const std::vector<Eigen::Vector2f>& room_polygon,
+                                       bool has_room_polygon,
+                                       rc::RoomConcept& room_concept,
+                                       rc::EpistemicController& epistemic)
+    : params_(&params), has_room_polygon_(has_room_polygon),
+      room_concept_(&room_concept), epistemic_(&epistemic)
 {
-    cfg_          = cfg;
-    room_concept_ = room_concept;
-    epistemic_    = epistemic;
-
     custom_widget_ = new Custom_widget();
     default_viewer->add_custom_widget_to_dock("layout", custom_widget_);
-    viewer_2d_ = new rc::Viewer2D(custom_widget_->frame, cfg_.grid_max_dim, true);
+    viewer_2d_ = new rc::Viewer2D(custom_widget_->frame, params_->GRID_MAX_DIM, true);
     viewer_2d_->show();
-    viewer_2d_->add_robot(cfg_.robot_width, cfg_.robot_length, 0.f, 0.f, QColor("blue"));
+    viewer_2d_->add_robot(params_->ROBOT_WIDTH, params_->ROBOT_LENGTH, 0.f, 0.f, QColor("blue"));
 
     // Free-Energy time series in the lower frame of the custom widget.
     if (custom_widget_->frame_series->layout() == nullptr)
@@ -53,7 +51,7 @@ void RoomViewController::setup(DSR::DSRViewer* default_viewer,
     ts_plot_fe_->add_series("cov_det_scaled", QColor(0, 190, 255), 1.6f, 0);
     custom_widget_->frame_series->layout()->addWidget(ts_plot_fe_);
 
-    if (cfg_.has_room_polygon && room_polygon.size() >= 3)
+    if (has_room_polygon_ && room_polygon.size() >= 3)
         viewer_2d_->draw_room_polygon(room_polygon, false);
 
     // Camera-projection window: overlays the room layout on the live RGB image.
@@ -62,8 +60,8 @@ void RoomViewController::setup(DSR::DSRViewer* default_viewer,
     // Bring up the RGB media plane so the image button shows live frames. Prefer
     // the self-describing MediaDescriptor on the "zed" node (domain/topic authored
     // by the producer); fall back to config when the descriptor is not yet present.
-    std::uint32_t domain = cfg_.media_domain_id;
-    std::string   topic  = cfg_.media_rgb_topic;
+    std::uint32_t domain = static_cast<std::uint32_t>(params_->MEDIA_DOMAIN_ID);
+    std::string   topic  = params_->MEDIA_RGB_TOPIC;
     if (graph)
     {
         if (auto desc = rc::media::descriptor_from_graph(*graph, "zed"); desc.has_value())
@@ -79,7 +77,7 @@ void RoomViewController::setup(DSR::DSRViewer* default_viewer,
             << "topic=" << QString::fromStdString(topic);
 }
 
-Eigen::Affine2f RoomViewController::best_available_pose(
+Eigen::Affine2f RoomViewer::best_available_pose(
     const std::optional<rc::RoomConcept::UpdateResult>& loc_res, bool have_loc) const
 {
     if (have_loc)
@@ -95,7 +93,7 @@ Eigen::Affine2f RoomViewController::best_available_pose(
     return Eigen::Affine2f::Identity();
 }
 
-void RoomViewController::update_viewer(const std::optional<rc::RoomConcept::UpdateResult>& loc_res, bool have_loc,
+void RoomViewer::update_viewer(const std::optional<rc::RoomConcept::UpdateResult>& loc_res, bool have_loc,
                                        const Eigen::Affine2f& pose_for_draw,
                                        const std::vector<Eigen::Vector3f>& lidar_for_canvas,
                                        const Eigen::Affine2f& loc_pose, bool use_loc)
@@ -107,10 +105,10 @@ void RoomViewController::update_viewer(const std::optional<rc::RoomConcept::Upda
         .lidar_points     = lidar_for_canvas,
         .display_pose     = pose_for_draw,
         .covariance       = have_loc ? loc_res->covariance : Eigen::Matrix3f::Identity(),
-        .max_lidar_points = cfg_.max_lidar_draw_points,
+        .max_lidar_points = params_->MAX_LIDAR_DRAW_POINTS,
         .have_loc         = have_loc,
         .is_initialized   = room_concept_ && room_concept_->is_initialized(),
-        .has_room_polygon = cfg_.has_room_polygon,
+        .has_room_polygon = has_room_polygon_,
         .room_width       = have_loc ? loc_res->state[0] : 0.f,
         .room_length      = have_loc ? loc_res->state[1] : 0.f,
         .loc_pose         = loc_pose,
@@ -125,7 +123,7 @@ void RoomViewController::update_viewer(const std::optional<rc::RoomConcept::Upda
         viewer_2d_->draw_corners({}, pose_for_draw);
 }
 
-void RoomViewController::update_epistemic_overlay()
+void RoomViewer::update_epistemic_overlay()
 {
     if (!viewer_2d_ || !epistemic_)
         return;
@@ -162,7 +160,7 @@ void RoomViewController::update_epistemic_overlay()
     }
 }
 
-void RoomViewController::update_ui(const std::optional<rc::RoomConcept::UpdateResult>& loc_res)
+void RoomViewer::update_ui(const std::optional<rc::RoomConcept::UpdateResult>& loc_res)
 {
     if (!loc_res.has_value() || !ts_plot_fe_)
         return;
@@ -175,7 +173,7 @@ void RoomViewController::update_ui(const std::optional<rc::RoomConcept::UpdateRe
     ts_plot_fe_->add_point("cov_det_scaled", det_scaled);
 }
 
-void RoomViewController::show_camera()
+void RoomViewer::show_camera()
 {
     if (camera_viz_)
     {
@@ -186,13 +184,13 @@ void RoomViewController::show_camera()
     }
 }
 
-void RoomViewController::toggle_lidar_points(bool checked)
+void RoomViewer::toggle_lidar_points(bool checked)
 {
     if (viewer_2d_)
         viewer_2d_->set_lidar_points_visible(checked);
 }
 
-void RoomViewController::on_robot_moved(QPointF scene_pos)
+void RoomViewer::on_robot_moved(QPointF scene_pos)
 {
     // Shift+Left: move robot to clicked position, keep current heading. push_command
     // (thread-safe queue) — never set_robot_pose() directly from the GUI thread while
@@ -204,7 +202,7 @@ void RoomViewController::on_robot_moved(QPointF scene_pos)
         static_cast<float>(scene_pos.x()), static_cast<float>(scene_pos.y()), state[4]});
 }
 
-void RoomViewController::on_robot_rotated(QPointF scene_pos)
+void RoomViewer::on_robot_rotated(QPointF scene_pos)
 {
     // Ctrl+Left: rotate robot to face the clicked point, keep current position.
     if (!room_concept_)

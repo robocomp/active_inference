@@ -10,7 +10,7 @@
 
 #pragma once
 
-// RoomAgentParams — the room_concept agent's worker-level configuration, plus a
+// RoomConfig — the room_concept agent's worker-level configuration, plus a
 // single entry point that loads EVERY config block (the agent's own params, the
 // RoomConcept localizer params and the EpistemicController/planner params) from
 // the ConfigLoader. Keeps the ~150 lines of load_* boilerplate out of
@@ -27,7 +27,7 @@ namespace rc
 class RoomConcept;
 class EpistemicController;
 
-struct RoomAgentParams
+struct RoomConfig
 {
     float ROBOT_WIDTH  = 0.460f;   // m
     float ROBOT_LENGTH = 0.480f;   // m
@@ -72,14 +72,17 @@ struct RoomAgentParams
     float BOOTSTRAP_TABLE_DEPTH   = 1.4f;
     float BOOTSTRAP_TABLE_HEIGHT  = 0.74f;
 
-    // Media plane (zero-copy DDS) — RGB consumer for the camera-projection window.
-    int         MEDIA_DOMAIN_ID = 0;
-    std::string MEDIA_RGB_TOPIC = "rc/zed/rgb";
+    // Media plane (zero-copy DDS) — RGB consumer for the camera-projection window
+    // and the LiDAR stream consumed by LidarIngestor.
+    int         MEDIA_DOMAIN_ID   = 0;
+    std::string MEDIA_RGB_TOPIC   = "rc/zed/rgb";
+    std::string MEDIA_LIDAR_TOPIC = "rc/lidar3d/points";
+    bool        LIDAR_USE_MEDIA   = true;   // false ⇒ DSR graph laser_* only
 };
 
 // Load the agent params + RoomConcept params + EpistemicController/planner params,
 // and seed the planner's robot footprint. Call once from initialize().
-void load_room_config(const ConfigLoader& cl, RoomAgentParams& p,
+void load_room_config(const ConfigLoader& cl, RoomConfig& p,
                       RoomConcept& room_concept, EpistemicController& epistemic);
 
 }  // namespace rc

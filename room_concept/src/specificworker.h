@@ -32,10 +32,10 @@
 #include "room_concept.h"
 #include "svg_room_loader.h"
 #include "epistemic_controller.h"
-#include "room_graph_publisher.h"
+#include "room_scene_graph.h"
 #include "lidar_ingestor.h"
-#include "room_view_controller.h"
-#include "room_agent_params.h"
+#include "room_viewer.h"
+#include "room_config.h"
 #include "../../common/affordance_manager/affordance_manager.h"
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 #include <atomic>
@@ -81,7 +81,7 @@ class SpecificWorker : public GenericWorker
         void del_node_slot(std::uint64_t from){};
 
     private:
-        rc::RoomAgentParams params;   // worker config; loaded by rc::load_room_config()
+        rc::RoomConfig params;   // worker config; loaded by rc::load_room_config()
 
         bool startup_check_flag;
         AgentPresenceCoordinator presence_coordinator_;
@@ -100,7 +100,7 @@ class SpecificWorker : public GenericWorker
         void save_robot_pose_once();
 
         // ── LiDAR acquisition (decoupled ingest thread + buffer + health) ──────
-        rc::LidarIngestor lidar_ingestor_;
+        std::unique_ptr<rc::LidarIngestor> lidar_ingestor_;
 
         // ── Compute-loop pacing / timing telemetry (worker-owned) ──────────────
         std::atomic<bool> operating_compute_queued_{false};
@@ -120,7 +120,7 @@ class SpecificWorker : public GenericWorker
         bool self_target_active_ = false;
 
         // ── GUI / visualization (2-D viewer, plots, camera projection window) ───
-        rc::RoomViewController view_;
+        std::unique_ptr<rc::RoomViewer> viewer_;
         FPSCounter fps_counter_;
 
         void request_shutdown();
@@ -136,7 +136,8 @@ class SpecificWorker : public GenericWorker
         void cleanup_self_agent_node();
 
         // ── DSR scene-graph writer (robot-pose RT, room/wall/affordance nodes) ──
-        rc::RoomGraphPublisher graph_publisher_;
+        std::unique_ptr<DSR::RT_API>            rt_api_;          // worker-owned, injected
+        std::unique_ptr<rc::RoomSceneGraph> scene_graph_;
         std::int64_t last_dsr_published_ts_ms_ = 0;
         std::atomic<bool> shutting_down_{false};
 

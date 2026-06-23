@@ -1,9 +1,9 @@
 /*
  *    Copyright (C) 2026 by RoboLab at the University of Extremadura
- *    This file is part of RoboComp — see room_graph_publisher.h.
+ *    This file is part of RoboComp — see room_scene_graph.h.
  */
 
-#include "room_graph_publisher.h"
+#include "room_scene_graph.h"
 
 #include <cmath>
 #include <string>
@@ -15,24 +15,13 @@
 namespace rc
 {
 
-void RoomGraphPublisher::init(const Config& cfg, Deps deps)
-{
-    cfg_           = cfg;
-    G_             = deps.graph;
-    room_concept_  = deps.room_concept;
-    epistemic_     = deps.epistemic_controller;
-    trigger_layout_ = deps.trigger_layout ? std::move(deps.trigger_layout) : [] {};
-    if (G_)
-        rt_api_ = G_->get_rt_api();
-}
-
-void RoomGraphPublisher::monitor_affordance()
+void RoomSceneGraph::monitor_affordance()
 {
     if (G_)
         affordance_manager_.monitor_execution(G_);
 }
 
-void RoomGraphPublisher::on_controller_lost()
+void RoomSceneGraph::on_controller_lost()
 {
     if (!G_)
         return;
@@ -45,7 +34,7 @@ void RoomGraphPublisher::on_controller_lost()
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-void RoomGraphPublisher::update(const rc::RoomConcept::UpdateResult& res, float adv, float side, float rot)
+void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv, float side, float rot)
 {
     last_adv_  = adv;
     last_side_ = side;
@@ -55,13 +44,13 @@ void RoomGraphPublisher::update(const rc::RoomConcept::UpdateResult& res, float 
     const float cov_tt  = (res.covariance.rows() > 2 && res.covariance.cols() > 2)
                           ? res.covariance(2, 2) : 1.f;
     const bool stable   = (res.iterations_used == 0)
-                          && sdf_mse < cfg_.stable_sdf_mse_max
-                          && cov_tt  < cfg_.stable_cov_tt_max;
+                          && sdf_mse < params_->STABLE_SDF_MSE_MAX
+                          && cov_tt  < params_->STABLE_COV_TT_MAX;
 
     if (!room_node_created_)
     {
         stable_frames_ = stable ? stable_frames_ + 1 : 0;
-        if (stable_frames_ >= cfg_.stable_frames_required)
+        if (stable_frames_ >= params_->STABLE_FRAMES_REQUIRED)
             dsr_create_room_and_reparent(res);
         else
             dsr_update_pose(res);   // world->robot RT while waiting for stable room creation
@@ -74,7 +63,7 @@ void RoomGraphPublisher::update(const rc::RoomConcept::UpdateResult& res, float 
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-void RoomGraphPublisher::dsr_update_pose(const rc::RoomConcept::UpdateResult& res)
+void RoomSceneGraph::dsr_update_pose(const rc::RoomConcept::UpdateResult& res)
 {
     if (!G_ || !rt_api_) return;
 
@@ -225,7 +214,7 @@ void RoomGraphPublisher::dsr_update_pose(const rc::RoomConcept::UpdateResult& re
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-void RoomGraphPublisher::dsr_create_room_and_reparent(const rc::RoomConcept::UpdateResult& res)
+void RoomSceneGraph::dsr_create_room_and_reparent(const rc::RoomConcept::UpdateResult& res)
 {
     if (!G_) return;
 
@@ -252,7 +241,7 @@ void RoomGraphPublisher::dsr_create_room_and_reparent(const rc::RoomConcept::Upd
     DSR::Node room_node = DSR::Node::create<room_node_type>("room");
     room_node.attrs()[delimiting_polygon_x_str.data()] = DSR::Attribute{polygon_x, 0, 0};
     room_node.attrs()[delimiting_polygon_y_str.data()] = DSR::Attribute{polygon_y, 0, 0};
-    room_node.attrs()[room_height_str.data()] = DSR::Attribute{cfg_.room_height, 0, 0};
+    room_node.attrs()[room_height_str.data()] = DSR::Attribute{params_->room_height, 0, 0};
     // TODO: change to add_or_modify_attrib_local once available
 
     const auto room_id_opt = G_->insert_node(room_node);
@@ -286,7 +275,7 @@ void RoomGraphPublisher::dsr_create_room_and_reparent(const rc::RoomConcept::Upd
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-void RoomGraphPublisher::dsr_update_affordance(const rc::RoomConcept::UpdateResult& res)
+void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& res)
 {
     if (!G_ || !room_node_created_ || !epistemic_) return;
 
@@ -336,7 +325,7 @@ void RoomGraphPublisher::dsr_update_affordance(const rc::RoomConcept::UpdateResu
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-void RoomGraphPublisher::update_planner_obstacle_footprints()
+void RoomSceneGraph::update_planner_obstacle_footprints()
 {
     if (!G_ || !rt_api_ || !room_node_created_ || !epistemic_) return;
 
@@ -376,7 +365,7 @@ void RoomGraphPublisher::update_planner_obstacle_footprints()
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-void RoomGraphPublisher::load_robot_body_dimensions_from_graph()
+void RoomSceneGraph::load_robot_body_dimensions_from_graph()
 {
     if (!G_)
         return;
@@ -392,28 +381,28 @@ void RoomGraphPublisher::load_robot_body_dimensions_from_graph()
     if (!body_node.has_value())
     {
         qWarning() << "dsr_init_graph: no 'body' node found; keeping default robot dimensions"
-                   << cfg_.robot_width << cfg_.robot_length << cfg_.robot_height;
+                   << params_->ROBOT_WIDTH << params_->ROBOT_LENGTH << params_->ROBOT_HEIGHT;
         return;
     }
 
     dsr_body_id_ = body_node->id();
 
     if (const auto width_value = G_->get_attrib_by_name<width_m_att>(body_node.value()); width_value.has_value())
-        cfg_.robot_width = width_value.value();
+        params_->ROBOT_WIDTH = width_value.value();
     if (const auto depth_value = G_->get_attrib_by_name<depth_m_att>(body_node.value()); depth_value.has_value())
-        cfg_.robot_length = depth_value.value();
+        params_->ROBOT_LENGTH = depth_value.value();
     if (const auto height_value = G_->get_attrib_by_name<height_m_att>(body_node.value()); height_value.has_value())
-        cfg_.robot_height = height_value.value();
+        params_->ROBOT_HEIGHT = height_value.value();
 
     if (epistemic_)
-        epistemic_->set_robot_footprint(cfg_.robot_width, cfg_.robot_length);
+        epistemic_->set_robot_footprint(params_->ROBOT_WIDTH, params_->ROBOT_LENGTH);
 
     qInfo() << "Robot dimensions from body node: width depth height ="
-            << cfg_.robot_width << cfg_.robot_length << cfg_.robot_height;
+            << params_->ROBOT_WIDTH << params_->ROBOT_LENGTH << params_->ROBOT_HEIGHT;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-void RoomGraphPublisher::dsr_create_wall_nodes()
+void RoomSceneGraph::dsr_create_wall_nodes()
 {
     if (!G_ || !rt_api_) return;
 
@@ -428,7 +417,7 @@ void RoomGraphPublisher::dsr_create_wall_nodes()
     const int n = static_cast<int>(polygon.size());
     if (n < 3) { qWarning() << "dsr_create_wall_nodes: polygon has fewer than 3 vertices"; return; }
 
-    const float half_h = cfg_.room_height * 0.5f;
+    const float half_h = params_->room_height * 0.5f;
 
     // ── Walls ────────────────────────────────────────────────────────────────
     for (int i = 0; i < n; ++i)
@@ -448,7 +437,7 @@ void RoomGraphPublisher::dsr_create_wall_nodes()
 
         DSR::Node wall_node = DSR::Node::create<wall_node_type>("wall_" + std::to_string(i));
         G_->add_or_modify_attrib_local<width_m_att>(wall_node, L);
-        G_->add_or_modify_attrib_local<height_m_att>(wall_node, cfg_.room_height);
+        G_->add_or_modify_attrib_local<height_m_att>(wall_node, params_->room_height);
         G_->add_or_modify_attrib_local<parent_att>(wall_node, dsr_room_id_);
         G_->add_or_modify_attrib_local<level_att>(wall_node, 4);
 
@@ -484,7 +473,7 @@ void RoomGraphPublisher::dsr_create_wall_nodes()
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-void RoomGraphPublisher::cleanup_room_graph_nodes()
+void RoomSceneGraph::cleanup_room_graph_nodes()
 {
     if (!G_) return;
     // Delete affordance nodes hanging from room via "has_intention" edges,
@@ -511,7 +500,7 @@ void RoomGraphPublisher::cleanup_room_graph_nodes()
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-void RoomGraphPublisher::check_init_graph_is_valid()
+void RoomSceneGraph::check_init_graph_is_valid()
 {
     if (!G_) { qWarning() << "dsr_init_graph: DSR graph not available"; return; }
 

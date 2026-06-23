@@ -1,9 +1,9 @@
 /*
  *    Copyright (C) 2026 by RoboLab at the University of Extremadura
- *    This file is part of RoboComp — see room_agent_params.h.
+ *    This file is part of RoboComp — see room_config.h.
  */
 
-#include "room_agent_params.h"
+#include "room_config.h"
 
 #include <ConfigLoader/ConfigLoader.h>
 
@@ -13,7 +13,7 @@
 namespace rc
 {
 
-void load_room_config(const ConfigLoader& cl, RoomAgentParams& p,
+void load_room_config(const ConfigLoader& cl, RoomConfig& p,
                       rc::RoomConcept& room_concept, rc::EpistemicController& epistemic)
 {
     // ── RoomConcept params ─────────────────────────────────────────────────
@@ -40,9 +40,11 @@ void load_room_config(const ConfigLoader& cl, RoomAgentParams& p,
         p.ROOM_LAYOUT_SVG = svg_file;
     });
 
-    // Media plane (RGB consumer for the camera-projection window).
+    // Media plane (RGB for the camera window + LiDAR stream for LidarIngestor).
     rc::ConfigLoaderUtils::load_optional<int>(cl, "Media.domain_id", p.MEDIA_DOMAIN_ID);
     rc::ConfigLoaderUtils::load_optional<std::string>(cl, "Media.rgb_topic", p.MEDIA_RGB_TOPIC);
+    rc::ConfigLoaderUtils::load_optional<std::string>(cl, "Media.lidar_topic", p.MEDIA_LIDAR_TOPIC);
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "Media.lidar_use_media", p.LIDAR_USE_MEDIA);
 
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.SigmaSdf", room_concept.params.sigma_sdf);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.PredictionTrustFactor", room_concept.params.prediction_trust_factor);
