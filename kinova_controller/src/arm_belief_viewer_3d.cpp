@@ -818,15 +818,17 @@ public:
         setMinimumHeight(130);
         setMaximumHeight(170);
     }
-    // Channels 0..4 = forces (N), 5..6 = tip contacts (0/1), 7 = palm distance (m, own scale).
-    void push(float l, float r, float ltip, float rtip, float wrist, float lcontact, float rcontact,
-              float palm)
+    // Channels 0..6 = forces (N), 7..8 = tip contacts (0/1), 9 = palm distance (m, own scale).
+    // lside/rside = the pad-WIDTH shear (force-3d Fy) per pad — the SIDE force the |force-3d| magnitude
+    // (ltip/rtip) hides; this is the lateral signal the compliant-close centring acts on.
+    void push(float l, float r, float ltip, float rtip, float lside, float rside, float wrist,
+              float lcontact, float rcontact, float palm)
     {
         // Sample stored EVERY call (100 Hz) so a brief contact TRANSIENT isn't aliased away; the
         // force-3d tip sensors net to ~0 in static equilibrium but spike on impact, and that spike
         // is the collision cue. Repaint is requested only every REPAINT_EVERY samples so the GUI
         // refresh (~33 Hz) never sits on the 100 Hz control loop — storing is O(1), painting isn't.
-        const std::array<float, NCH> s{l, r, ltip, rtip, wrist, lcontact, rcontact, palm};
+        const std::array<float, NCH> s{l, r, ltip, rtip, lside, rside, wrist, lcontact, rcontact, palm};
         for (int c = 0; c < NCH; ++c)
             buf_[c][head_] = s[c];
         head_ = (head_ + 1) % CAP;
@@ -869,15 +871,21 @@ protected:
             p.drawText(6 + k * 100, STRIP_H - 4, QString(cnm[k]) + (on ? " ON" : " -"));
         }
 
-        // ── Force region (below the strip): autoscaled channels (4 gripper + wrist Fz) ──
+        // ── Force region (below the strip): autoscaled channels (4 gripper + 2 side + wrist Fz) ──
+        // The side (pad-width shear) channels are ~100× smaller than the 40 N motor grip and spike only
+        // briefly on first contact, so they are drawn with a large DISPLAY gain to make the transient
+        // visible against the motor forces. The numeric readout still shows the TRUE (un-gained) N.
+        static const float disp[NFORCE] = {1, 1, 1, 1, SIDE_DISPLAY_GAIN, SIDE_DISPLAY_GAIN, 1};
         float fmax = 1e-3f;
         for (int c = 0; c < NFORCE; ++c)
             for (int i = 0; i < count_; ++i)
-                fmax = std::max(fmax, std::abs(buf_[c][i]));
+                fmax = std::max(fmax, std::abs(buf_[c][i] * disp[c]));
         static const QColor col[NFORCE] = {QColor(80, 160, 255), QColor(255, 120, 120),
                                            QColor(120, 255, 160), QColor(255, 210, 90),
+                                           QColor(0, 230, 230),   QColor(255, 0, 200),
                                            QColor(230, 230, 230)};
-        static const char*  nm[NFORCE]  = {"Lforce", "Rforce", "Ltip", "Rtip", "wristFz"};
+        static const char*  nm[NFORCE]  = {"Lforce", "Rforce", "Ltip", "Rtip",
+                                           "Lside", "Rside", "wristFz"};
         for (int c = 0; c < NFORCE; ++c)
         {
             p.setPen(QPen(col[c], 1.5));
@@ -885,13 +893,14 @@ protected:
             for (int i = 0; i < count_; ++i)
             {
                 const int   idx = (head_ - count_ + i + CAP) % CAP;
-                const float y   = (H - 3) - std::abs(buf_[c][idx]) / fmax * (H - STRIP_H - 16);
+                const float y   = (H - 3) - std::abs(buf_[c][idx] * disp[c]) / fmax * (H - STRIP_H - 16);
                 const QPointF pt(xof(i), y);
                 if (i > 0) p.drawLine(prev, pt);
                 prev = pt;
             }
+            const QString gtag = (disp[c] > 1.0f) ? QString(" ×%1").arg(int(disp[c])) : QString();
             p.drawText(6, STRIP_H + 13 + c * 12,
-                       QString("%1 %2").arg(nm[c]).arg(count_ ? buf_[c][last] : 0.0f, 0, 'f', 2));
+                       QString("%1%2 %3").arg(nm[c]).arg(gtag).arg(count_ ? buf_[c][last] : 0.0f, 0, 'f', 2));
         }
         p.setPen(QColor(150, 150, 160));
         p.drawText(W - 78, STRIP_H + 13, QString("max %1 N").arg(fmax, 0, 'f', 1));
@@ -917,8 +926,9 @@ protected:
 
 private:
     static constexpr int CAP    = 600;   // ~6 s at the 100 Hz compute rate
-    static constexpr int NFORCE = 5;     // Lforce, Rforce, Ltip, Rtip, wristFz
-    static constexpr int NCH    = 8;     // 5 forces + 2 contacts + palm distance
+    static constexpr int NFORCE = 7;     // Lforce, Rforce, Ltip, Rtip, Lside, Rside, wristFz
+    static constexpr int NCH    = 10;    // 7 forces + 2 contacts + palm distance
+    static constexpr float SIDE_DISPLAY_GAIN = 30.0f;   // visual amplification of the small side-shear curves
     static constexpr int STRIP_H = 26;   // px: top strip height for the contact steps
     static constexpr int REPAINT_EVERY = 3;   // request a repaint every 3 samples ⇒ ~33 Hz, off the loop
     std::array<std::array<float, CAP>, NCH> buf_{};
@@ -959,11 +969,12 @@ ArmBeliefViewer3D::ArmBeliefViewer3D(QWidget* parent)
 }
 
 void ArmBeliefViewer3D::update_forces(float lforce, float rforce,
-                                      float ltipforce, float rtipforce, float wrist_force,
+                                      float ltipforce, float rtipforce,
+                                      float lside, float rside, float wrist_force,
                                       bool ltipcontact, bool rtipcontact, float palm_distance)
 {
     if (force_plot_ != nullptr)
-        force_plot_->push(lforce, rforce, ltipforce, rtipforce, wrist_force,
+        force_plot_->push(lforce, rforce, ltipforce, rtipforce, lside, rside, wrist_force,
                           ltipcontact ? 1.0f : 0.0f, rtipcontact ? 1.0f : 0.0f, palm_distance);
 }
 

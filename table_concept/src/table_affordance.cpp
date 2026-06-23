@@ -7,6 +7,8 @@
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
+
+namespace rc {
 void TableAffordance::init(std::shared_ptr<DSR::DSRGraph> G,
                             uint64_t    table_node_id,
                             std::string table_node_name)
@@ -201,3 +203,5 @@ void TableAffordance::reset()
     node_created_       = false;
     state_              = State::idle;
 }
+
+}  // namespace rc

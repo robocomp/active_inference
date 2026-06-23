@@ -44,6 +44,11 @@
 #include <unordered_set>
 
 #include "../../common/robust_metrics/robust_metrics.h"
+#include "table_config.h"      // rc::TableConfig + load_table_config
+#include "table_instance.h"    // rc::TableInstance
+#include "mask_ingestor.h"     // rc::MaskIngestor (perception)
+#include "table_scene_graph.h" // rc::TableSceneGraph (DSR node/RT I/O)
+#include "table_fitter.h"      // rc::TableFitter (active-inference core)
 #include "epistemic_planner.h"
 #include "prior_store.h"
 #include "sample_queue.h"
@@ -52,110 +57,6 @@
 #include "custom_widget.h"
 #include "timeseries_plot.h"
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
-
-// ─── Per-table instance state ────────────────────────────────────────────────
-
-struct TableInstance
-{
-    uint64_t    node_id;
-    std::string node_name;
-
-    TableModel  model;
-    SampleQueue queue;
-
-    int  last_frame_seen    = -1;     // last_sensing_frame_att value read
-    int  matched_frames     = 0;      // frames with fresh sensing data
-    int  frames_converged    = 0;      // consecutive frames with |ΔFE| < fe_eps
-    int  frames_rising      = 0;      // consecutive frames with F increasing
-    int  last_masks_frame_seen = -1;   // last masks packet frame consumed
-    int  last_tracks_frame_seen = -1;  // last tracks packet frame consumed
-    int  committed_track_id = -1;      // sticky instance↔track association
-    int  processed_cycles   = 0;      // per-table compute cycles for log throttling
-    bool model_stable       = false;
-    int  model_generation   = 0;
-    bool epistemic_pending  = false;
-    float prev_free_energy  = std::numeric_limits<float>::max();
-    // Dead-band tracking for write_rt_pose — suppress tiny oscillations
-    float last_written_cx   = std::numeric_limits<float>::max();
-    float last_written_cy   = std::numeric_limits<float>::max();
-    // Last coverage deficit (written by step_convergence, read by plot)
-    float last_coverage_deficit = 0.f;
-    // Higher-level confidence state driving warm-start precision from above
-    float warm_confidence = 0.0f;
-    SampleQueueMetrics last_queue_metrics;
-    FreeEnergyDecomposition last_fe_terms;
-    // Table-owned voxel memory bank (room frame), independent of per-frame uploads.
-    std::vector<Eigen::Vector3f> voxel_bank_pts;
-    std::unordered_set<std::uint64_t> voxel_bank_keys;
-    // Epistemic action request published to DSR
-    TableAffordance affordance;
-};
-
-// ─── Agent configuration ─────────────────────────────────────────────────────
-
-struct AgentConfig
-{
-    // Tunable via etc/config.toml
-    float fe_eps            = 1e-3f;   // |ΔFE| threshold for convergence
-    int   K_stable          = 30;
-    int   M_diverge         = 20;
-    float staleness_frames  = 90.0f;
-    float explanation_ratio_thresh = 0.3f;
-    float write_threshold   = 1e-3f;   // min ‖Δθ‖ before writing RT to DSR
-    float obs_distance      = 1.8f;    // d_obs for epistemic planner
-    float delta_min         = 20.0f;   // min face coverage count
-    float gain_threshold    = 0.1f;    // min ΔH for epistemic proposal
-    int   table_log_period_frames = 30;
-    int   voxel_bank_max_points = 4000;
-    float voxel_bank_quantization_m = 0.02f;
-    float voxel_select_radius_margin_m = 0.50f;
-    float voxel_select_height_margin_m = 0.25f;
-
-    // TableModel parameters (forwarded to TableModelParams)
-    float sigma_obs         = 0.05f;
-    float lambda_size       = 0.15f;
-    float lambda_pos        = 0.05f;
-    float lambda_state      = 0.02f;
-    float lambda_angle      = 0.01f;
-    float prior_size_std    = 0.30f;
-    int   optimization_iters = 10;
-    float optimization_lr   = 0.05f;
-    float grad_clip         = 2.0f;
-    std::string optimizer_type = "adam";
-    float sgd_momentum     = 0.9f;
-    RobustLossType robust_loss = RobustLossType::Quadratic;
-    float robust_loss_scale = 0.10f;
-
-    // SampleQueue parameters (forwarded to SampleQueueParams)
-    int   num_angle_bins               = 24;
-    int   num_z_bins                   = 10;
-    int   max_per_bin                  = 2;
-    float sdf_threshold_for_storage    = 0.08f;
-    int   min_frames_before_historical = 10;
-    int   historical_warmup_frames     = 50;
-    int   max_new_points_per_frame     = 5;
-    float rfe_alpha                    = 0.98f;
-    float rfe_max_threshold            = 2.0f;
-    float rfe_weight_gain              = 0.25f;
-    float min_anchor_weight            = 0.12f;
-    float edge_bonus_weight            = 0.3f;
-    float edge_proximity_threshold     = 0.05f;
-
-    // Observability-aware warm-start acceptance
-    float warm_pts_min                 = 12.0f;
-    float warm_pts_max                 = 30.0f;
-    float warm_coverage_min_side       = 2.0f;
-    float warm_rho_freeze              = 0.25f;
-    float warm_lambda_pos_base         = 0.15f;
-    float warm_lambda_pos_gain         = 0.45f;
-    float warm_lambda_size_base        = 0.02f;
-    float warm_lambda_size_gain        = 0.18f;
-    float warm_lambda_yaw_base         = 0.01f;
-    float warm_lambda_yaw_gain         = 0.12f;
-    float warm_confidence_decay         = 0.70f;
-    float warm_confidence_coverage_gain = 0.35f;
-    float warm_confidence_residual_gain = 0.65f;
-};
 
 // ─── SpecificWorker ──────────────────────────────────────────────────────────
 
@@ -183,162 +84,31 @@ public slots:
     void del_node_slot(std::uint64_t from);
 
 private:
-    struct TableObservation
-    {
-        bool has_fresh_data = false;
-        float explanation_ratio = 1.0f;
-        std::vector<Eigen::Vector3f> candidate_pts;
-        std::vector<Eigen::Vector3f> residual_pts;
-    };
+    // The fit (observe/infer/belief/voxel-bank) lives in rc::TableFitter; perception in
+    // rc::MaskIngestor; DSR I/O in rc::TableSceneGraph. The worker keeps orchestration + the
+    // post-fit epistemic/affordance/Qt-diagnostics steps.
+    using TableObservation = rc::TableFitter::TableObservation;
 
-    struct MaskSlice
-    {
-        std::string label;
-        float class_id = -1.0f;
-        float confidence = 0.0f;
-        Eigen::Vector3f centroid = Eigen::Vector3f::Zero();
-        Eigen::Vector3f bbox_min = Eigen::Vector3f::Zero();
-        Eigen::Vector3f bbox_max = Eigen::Vector3f::Zero();
-        std::size_t support_begin = 0;
-        std::size_t support_end = 0;
-    };
-
-    struct MasksPacket
-    {
-        bool valid = false;
-        int frame_id = -1;
-        std::vector<MaskSlice> slices;
-        std::vector<Eigen::Vector3f> support_points;
-    };
-
-    // Generic, class-agnostic track published by the voxelizer (room frame).
-    // Carries a persistent temporal id; the label is a vote, not authority.
-    struct TrackSlice
-    {
-        int track_id = -1;
-        std::string label;
-        float confidence = 0.0f;
-        int last_seen = -1;
-        Eigen::Vector3f centroid = Eigen::Vector3f::Zero();
-        Eigen::Vector3f bbox_min = Eigen::Vector3f::Zero();
-        Eigen::Vector3f bbox_max = Eigen::Vector3f::Zero();
-        std::size_t support_begin = 0;
-        std::size_t support_end = 0;
-    };
-
-    struct TracksPacket
-    {
-        bool valid = false;
-        int frame_id = -1;
-        std::vector<TrackSlice> slices;
-        std::vector<Eigen::Vector3f> support_points;
-    };
-
-    struct TableBeliefEvidence
-    {
-        std::vector<Eigen::Vector3f> fit_pts;
-        std::vector<float> fit_weights;
-        std::vector<Eigen::Vector3f> eval_pts;
-        std::vector<float> eval_weights;
-        int residual_count = 0;
-        int trusted_point_count = 0;
-        int historical_anchor_count = 0;
-        float residual_precision = 0.0f;
-
-        [[nodiscard]] bool has_evaluation() const { return not eval_pts.empty(); }
-        [[nodiscard]] bool can_optimize() const { return not fit_pts.empty(); }
-    };
-
-    struct TableBeliefPolicy
-    {
-        static float clamp01(float value);
-        static float lerp(float start, float end, float gain);
-        static float wrap_angle(float angle);
-        static float angle_lerp(float start, float end, float gain);
-        static TableState apply_observability_warm_start(const TableState& previous,
-                                                         const TableState& raw,
-                                                         const TableModelParams& params,
-                                                         const AgentConfig& cfg,
-                                                         float confidence,
-                                                         const std::array<float, 6>& coverage,
-                                                         int point_count);
-        static float update_warm_confidence(float previous_confidence,
-                                            const AgentConfig& cfg,
-                                            const std::array<float, 6>& coverage,
-                                            int point_count,
-                                            int residual_count,
-                                            float residual_precision);
-    };
-
-    // ── Initialisation helpers ────────────────────────────────────────────────
+    // ── Orchestration + post-fit steps ────────────────────────────────────────
     void load_config(const ConfigLoader& cfg);
-    void scaffold_missing_table_nodes();
-    void ensure_instance(const DSR::Node& node);
-    bool should_log_table(const TableInstance& inst) const;
-    bool refresh_masks_packet();
-    std::optional<MaskSlice> select_mask_for_table(const TableInstance& inst) const;
-    bool refresh_tracks_packet();
-    // Predictive instance assignment: pick the track best explained by THIS
-    // instance's current model OBB. Updates inst.committed_track_id (sticky).
-    std::optional<TrackSlice> select_track_for_table(TableInstance& inst) const;
     void process_table_node(const DSR::Node& node);
-    TableObservation observe_table_node(TableInstance& inst, const DSR::Node& node);
-    void ingest_observation_voxels(TableInstance& inst, const TableObservation& observation);
-    bool is_voxel_owned_by_table(const TableInstance& inst, const Eigen::Vector3f& point) const;
-    float run_table_inference(TableInstance& inst, const TableObservation& observation);
-    void publish_table_cycle(TableInstance& inst,
+    void publish_table_cycle(rc::TableInstance& inst,
                              const DSR::Node& node,
                              const TableObservation& observation,
                              float free_energy);
-    bool persist_table_belief(TableInstance& inst, uint64_t node_id, float free_energy);
-    bool assess_table_state(TableInstance& inst, uint64_t node_id, float free_energy);
-    void publish_table_diagnostics(const TableInstance& inst,
+    bool assess_table_state(rc::TableInstance& inst, uint64_t node_id, float free_energy);
+    void publish_table_diagnostics(const rc::TableInstance& inst,
                                    const TableObservation& observation,
                                    float free_energy);
-    void publish_table_intentions(TableInstance& inst,
+    void publish_table_intentions(rc::TableInstance& inst,
                                   uint64_t node_id,
                                   const TableObservation& observation,
                                   float free_energy);
-    TableBeliefEvidence compose_belief_evidence(const TableInstance& inst,
-                                                const std::vector<Eigen::Vector3f>& residual_pts,
-                                                float residual_precision) const;
-    void evolve_table_belief(TableInstance& inst, const TableBeliefEvidence& evidence);
-    float accept_table_belief(TableInstance& inst,
-                              const TableState& previous_state,
-                              const TableBeliefEvidence& evidence);
-    void refresh_table_memory(TableInstance& inst);
-
-    // ── Per-table per-cycle steps (§11.2) ────────────────────────────────────
-    void step_queue_update(TableInstance& inst,
-                           const std::vector<Eigen::Vector3f>& candidate_pts,
-                           float observation_precision);
-    float step_model_update(TableInstance& inst,
-                            const std::vector<Eigen::Vector3f>& residual_pts,
-                            float residual_precision);
-    void step_write_model(TableInstance& inst, DSR::Node& node, float free_energy);
-    void step_convergence(TableInstance& inst, DSR::Node& node, float free_energy);
-    void step_epistemic(TableInstance& inst, DSR::Node& node);
-    void step_refresh_check(TableInstance& inst, DSR::Node& node,
+    void step_convergence(rc::TableInstance& inst, DSR::Node& node, float free_energy);
+    void step_epistemic(rc::TableInstance& inst, DSR::Node& node);
+    void step_refresh_check(rc::TableInstance& inst, DSR::Node& node,
                             float free_energy, float explanation_ratio);
-
-    // ── DSR helpers ──────────────────────────────────────────────────────────
-    std::vector<Eigen::Vector3f> read_pts_attrib(const DSR::Node& node,
-                                                  const std::string& att_name) const;
-    static std::uint64_t voxel_key(const Eigen::Vector3f& point, float quantization_m);
-    Eigen::Matrix2f read_robot_covariance() const;
-    void write_rt_pose(uint64_t room_id, TableInstance& inst);
-    void write_bool_att(DSR::Node& node, const std::string& key, bool val);
-    void write_float_att(DSR::Node& node, const std::string& key, float val);
-    void write_int_att(DSR::Node& node, const std::string& key, int val);
-    void write_epistemic_proposal(DSR::Node& node, const EpistemicProposal& prop);
-    void write_table_mesh(TableInstance& inst, DSR::Node& node);
-    void trigger_graph_layout_twopi();
-    static std::vector<float> make_table_mesh(const TableState& s);
-
-    // ── Instance management ──────────────────────────────────────────────────
-    TableModelParams  make_model_params() const;
-    SampleQueueParams make_queue_params() const;
-    TableState        prior_to_state(const TablePrior& p) const;
+    void trigger_graph_layout_twopi();   // injected into TableSceneGraph as the relayout callback
 
     // ── Presence protocol ────────────────────────────────────────────────────
     void waiting_enter();
@@ -349,6 +119,10 @@ private:
     void degraded_loop();
     void cleanup_owned_nodes();
     void request_shutdown();
+    // Crash-free exit (request_shutdown + DDS reset + _Exit), bypassing the Ice/static teardown abort.
+    void terminal_shutdown();
+    // Grace before a required-peer loss is treated as terminal (debounce transient presence flaps).
+    static constexpr int REQUIRED_LOSS_GRACE_MS = 3000;
     void on_optional_peer_lost(const std::string &name, std::uint32_t id);
     void on_optional_peer_ready(const std::string &name, std::uint32_t id);
 
@@ -358,11 +132,11 @@ private:
     std::atomic<bool> shutting_down_{false};
     AgentPresenceCoordinator presence_coordinator_;
 
-    AgentConfig                                         cfg_;
-    std::unique_ptr<PriorStore>                         prior_store_;
-    std::vector<TablePrior>                             priors_cache_;
-    EpistemicPlanner                                    epistemic_planner_;
-    std::unordered_map<uint64_t, TableInstance>         instances_;
+    rc::TableConfig                                         cfg_;
+    std::unique_ptr<rc::PriorStore>                         prior_store_;
+    std::vector<rc::TablePrior>                             priors_cache_;
+    rc::EpistemicPlanner                                    epistemic_planner_;
+    std::unique_ptr<rc::TableFitter>                    fitter_;   // active-inference fit core (owns instances)
 
     Custom_widget*       custom_widget_ = nullptr;
     rc::TimeSeriesPlot*  ts_plot_       = nullptr;   // FE
@@ -370,15 +144,13 @@ private:
     rc::TimeSeriesPlot*  ts_res_plot_   = nullptr;   // residual point count
 
     std::unique_ptr<DSR::RT_API>                        rt_api_;
+    std::unique_ptr<DSR::InnerEigenAPI>                inner_eigen_;     // for room↔body↔zed extrinsic (silhouette)
+    std::unique_ptr<rc::MaskIngestor>                   mask_ingestor_;   // perception (masks-only)
+    std::unique_ptr<rc::TableSceneGraph>               scene_graph_;     // DSR node/RT I/O
     uint64_t                                            room_node_id_ = 0;
-    int                                                 last_masks_frame_seen_ = -1;
-    MasksPacket                                          masks_packet_;
-    int                                                 last_tracks_frame_seen_ = -1;
-    TracksPacket                                         tracks_packet_;
 
     // Paths resolved from ConfigLoader
     std::string priors_path_;
-    std::string checkpoint_path_;
 
 signals:
     void presenceReady();

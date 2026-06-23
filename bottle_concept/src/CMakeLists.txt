@@ -41,9 +41,9 @@ find_package(Torch REQUIRED)
 LIST(APPEND SOURCES
   ../src/specificworker.cpp
   ../src/specificworker_presence.cpp
-  ../src/agent_config.cpp
+  ../src/bottle_config.cpp
   ../src/bottle_evaluator.cpp
-  ../src/bottle_perception.cpp
+  ../src/mask_ingestor.cpp
   ../src/bottle_scene_graph.cpp
   ../src/bottle_fitter.cpp
   ../src/bottle_model.cpp
@@ -58,10 +58,10 @@ LIST(APPEND SOURCES
 # Headers set
 LIST(APPEND HEADERS
   ../src/specificworker.h
-  ../src/agent_config.h
+  ../src/bottle_config.h
   ../src/bottle_instance.h
   ../src/bottle_evaluator.h
-  ../src/bottle_perception.h
+  ../src/mask_ingestor.h
   ../src/bottle_scene_graph.h
   ../src/bottle_fitter.h
   ../src/bottle_model.h

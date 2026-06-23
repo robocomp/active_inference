@@ -21,6 +21,8 @@
 #include <string>
 #include <vector>
 
+namespace rc {
+
 // ─── Data structs ─────────────────────────────────────────────────────────────
 
 struct BottlePrior
@@ -49,3 +51,5 @@ public:
 private:
     std::string priors_path_;
 };
+
+}  // namespace rc

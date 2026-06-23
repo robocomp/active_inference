@@ -31,6 +31,8 @@
 
 // ─── Parameters ──────────────────────────────────────────────────────────────
 
+
+namespace rc {
 struct SampleQueueParams
 {
     int   num_angle_bins               = 24;
@@ -175,3 +177,5 @@ private:
     SampleQueueMetrics        metrics_;
     std::uint64_t             next_insertion_id_ = 1;
 };
+
+}  // namespace rc

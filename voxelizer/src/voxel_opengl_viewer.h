@@ -33,6 +33,9 @@ public:
     void update_rfe_points(std::span<const QVector3D> residual_positions,
                            std::span<const QVector3D> fallback_positions = {},
                            std::span<const QVector3D> candidate_positions = {});
+    // Accumulated RFE voxel bank (room frame), drawn as a persistent point cloud
+    // distinct from the per-frame residual/rfe/candidate points.
+    void update_voxel_bank_points(std::span<const QVector3D> positions);
     // YOLO mask support points (room frame), drawn as a distinct point cloud.
     void update_mask_points(std::span<const QVector3D> positions);
     void set_show_lidar(bool show);
@@ -51,9 +54,12 @@ public:
                             std::span<const QVector3D> maxs,
                             std::span<const std::string> categories = {});
 
-    // DSR graph object boxes in room frame (min/max corners per object).
-    void update_graph_boxes(std::span<const QVector3D> mins,
-                            std::span<const QVector3D> maxs,
+    // DSR graph object boxes in room frame. Each box is oriented: it is drawn as
+    // a wireframe rotated about Z by its yaw (room-frame orientation from the RT
+    // edge), rather than an axis-aligned AABB.
+    void update_graph_boxes(std::span<const QVector3D> centers,
+                            std::span<const QVector3D> half_extents,
+                            std::span<const float> yaws,
                             std::span<const std::string> categories = {});
 
     // Flat triangle-list meshes in room frame [x0,y0,z0, x1,y1,z1, ...].
@@ -94,6 +100,7 @@ private:
     std::vector<Vertex> lidar_vertices_;
     std::vector<Vertex> rfe_vertices_;
     std::vector<Vertex> candidate_vertices_;
+    std::vector<Vertex> bank_vertices_;
     std::vector<Vertex> mask_vertices_;
     std::mutex data_mutex_;
 
@@ -103,8 +110,9 @@ private:
     std::vector<QVector3D> track_box_mins_;
     std::vector<QVector3D> track_box_maxs_;
     std::vector<std::string> track_box_categories_;
-    std::vector<QVector3D> graph_box_mins_;
-    std::vector<QVector3D> graph_box_maxs_;
+    std::vector<QVector3D> graph_box_centers_;
+    std::vector<QVector3D> graph_box_half_extents_;
+    std::vector<float> graph_box_yaws_;
     std::vector<std::string> graph_box_categories_;
     // Raw polygon coordinates (room frame) plus current debug rotation in 90deg steps.
     std::vector<float> raw_polygon_x_;

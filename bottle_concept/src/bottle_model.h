@@ -35,6 +35,8 @@
 
 #include "../../common/robust_metrics/robust_metrics.h"
 
+namespace rc {
+
 // ─── Parameter structs ────────────────────────────────────────────────────────
 
 struct BottleState
@@ -244,3 +246,5 @@ class BottleModel
         std::vector<Eigen::Vector2f>    sil_dirs_;
         float                           sil_conf_ = 1.0f;   // YOLO confidence → precision scale
 };
+
+}  // namespace rc

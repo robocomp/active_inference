@@ -101,6 +101,30 @@ namespace
         return (tau * d).y();
     }
 
+    // se(3) exponential (ξ=[ρ;φ]) → SE(3). Used to apply the filter's finite δξ correction
+    // to the extrinsic; first-order won't do at ~8cm/8°. Matches the Jacobian's generator basis.
+    Eigen::Matrix4d se3_exp(const Eigen::Matrix<double, 6, 1>& xi)
+    {
+        const Eigen::Vector3d rho = xi.head<3>(), phi = xi.tail<3>();
+        const double th = phi.norm();
+        Eigen::Matrix3d Wx;
+        Wx <<       0.0, -phi.z(),  phi.y(),
+               phi.z(),       0.0, -phi.x(),
+              -phi.y(),  phi.x(),       0.0;
+        Eigen::Matrix3d R, V;
+        if (th < 1e-9) { R = Eigen::Matrix3d::Identity() + Wx; V = Eigen::Matrix3d::Identity() + 0.5 * Wx; }
+        else
+        {
+            const double a = std::sin(th) / th, b = (1.0 - std::cos(th)) / (th * th), c = (th - std::sin(th)) / (th * th * th);
+            R = Eigen::Matrix3d::Identity() + a * Wx + b * Wx * Wx;
+            V = Eigen::Matrix3d::Identity() + b * Wx + c * Wx * Wx;
+        }
+        Eigen::Matrix4d T = Eigen::Matrix4d::Identity();
+        T.topLeftCorner<3, 3>()  = R;
+        T.topRightCorner<3, 1>() = V * rho;
+        return T;
+    }
+
     struct LineFit { double slope = 0, intercept = 0, scale = 0, vspread = 0, inlier_frac = 0; bool ok = false; };
 
     // Robust line fit r = intercept + slope·v via IRLS with Huber weights, so the
@@ -240,6 +264,32 @@ void SpecificWorker::initialize()
     try { depth_sensor_range_k_ = configLoader.get<double>("SelfCalib.depth_sensor_range_k"); } catch (...) {}
     try { geom_sigma_m_         = configLoader.get<double>("SelfCalib.geom_sigma_m"); } catch (...) {}
     try { grazing_cos_min_      = configLoader.get<double>("SelfCalib.grazing_cos_min"); } catch (...) {}
+    try { filter_enabled_       = configLoader.get<bool>("SelfCalib.filter_enabled"); } catch (...) {}
+    { double m = 0.020; try { m = configLoader.get<double>("SelfCalib.model_sigma_m"); } catch (...) {} model_sigma_sq_ = m * m; }
+    try { prior_sigma_trans_    = configLoader.get<double>("SelfCalib.prior_sigma_trans_m"); } catch (...) {}
+    try { prior_sigma_rot_      = configLoader.get<double>("SelfCalib.prior_sigma_rot_deg") * 0.017453292519943295; } catch (...) {}
+    try { pose_min_dq_          = configLoader.get<double>("SelfCalib.pose_min_dq"); } catch (...) {}
+    try { apply_filter_to_overlay_ = configLoader.get<bool>("SelfCalib.apply_filter_to_overlay"); } catch (...) {}
+    {
+        const double D = 0.017453292519943295;
+        double tx=0, ty=0, tz=0, rx=0, ry=0, rz=0;
+        try { tx = configLoader.get<double>("SelfCalib.inject_tx_m"); } catch (...) {}
+        try { ty = configLoader.get<double>("SelfCalib.inject_ty_m"); } catch (...) {}
+        try { tz = configLoader.get<double>("SelfCalib.inject_tz_m"); } catch (...) {}
+        try { rx = configLoader.get<double>("SelfCalib.inject_rx_deg") * D; } catch (...) {}
+        try { ry = configLoader.get<double>("SelfCalib.inject_ry_deg") * D; } catch (...) {}
+        try { rz = configLoader.get<double>("SelfCalib.inject_rz_deg") * D; } catch (...) {}
+        const Eigen::Matrix3d R = (Eigen::AngleAxisd(rz, Eigen::Vector3d::UnitZ())
+                                 * Eigen::AngleAxisd(ry, Eigen::Vector3d::UnitY())
+                                 * Eigen::AngleAxisd(rx, Eigen::Vector3d::UnitX())).matrix();
+        inject_ext_.setIdentity();
+        inject_ext_.topLeftCorner<3, 3>()  = R;
+        inject_ext_.topRightCorner<3, 1>() = Eigen::Vector3d(tx, ty, tz);
+        if (tx or ty or tz or rx or ry or rz)
+            std::print("[calib-filter] INJECTING extrinsic corruption t=({:.3f},{:.3f},{:.3f})m rpy=({:.2f},{:.2f},{:.2f})° — filter should recover δξ≈−this\n",
+                       tx, ty, tz, rx/D, ry/D, rz/D);
+    }
+    init_filter_prior();
 
     // FK model (the SAME Kinematics the controller uses) + the graph extrinsic API.
     if (G) inner_eigen_ = G->get_inner_eigen_api();
@@ -463,6 +513,18 @@ bool SpecificWorker::ensure_depth_intrinsics()
 // predicted near-surface depth (axis depth − radius) to the observed depth. An
 // inlier gate rejects background/occlusion. Prints rms + signed bias (the spatial
 // calibration error) alongside q̇ (the residual's q̇-slope is τ).
+// Seed the information matrix with the extrinsic prior: large variance ⇒ small information,
+// so unobservable DOFs relax to the graph value (δξ=0) while observable ones move.
+void SpecificWorker::init_filter_prior()
+{
+    filt_Lambda_.setZero();
+    for (int i = 0; i < 3; ++i) filt_Lambda_(i, i) = 1.0 / (prior_sigma_trans_ * prior_sigma_trans_);
+    for (int i = 3; i < 6; ++i) filt_Lambda_(i, i) = 1.0 / (prior_sigma_rot_ * prior_sigma_rot_);
+    filt_eta_.setZero();
+    filt_poses_ = 0;
+    have_folded_pose_ = false;
+}
+
 void SpecificWorker::compute_depth_residual()
 {
     if (not kin_ or not ensure_depth_intrinsics())
@@ -484,6 +546,31 @@ void SpecificWorker::compute_depth_residual()
         if (say) std::print("[calib] extrinsic unavailable: inner_eigen body→arm / body→zed walk failed (graph not fully joined?)\n");
         return;
     }
+    zed_T_arm = zed_T_arm * inject_ext_;   // identity unless the validation injection is on
+
+    // Information-filter Jacobian needs the extrinsic right-perturbed in se(3): zed_T_arm·Exp(ε·eₖ).
+    // First-order generators (k<3 translation, k≥3 rotation = skew) suffice at EXT_EPS scale.
+    constexpr double EXT_EPS = 1e-5;
+    std::array<Eigen::Matrix4d, 6> zed_T_arm_dxi;
+    if (filter_enabled_)
+        for (int k = 0; k < 6; ++k)
+        {
+            Eigen::Matrix4d G = Eigen::Matrix4d::Zero();
+            if (k < 3) G(k, 3) = 1.0;                                  // translation generator
+            else                                                       // rotation generator = skew(e_{k-3})
+            {
+                const Eigen::Vector3d w = Eigen::Vector3d::Unit(k - 3);
+                G(0, 1) = -w.z(); G(0, 2) =  w.y();
+                G(1, 0) =  w.z(); G(1, 2) = -w.x();
+                G(2, 0) = -w.y(); G(2, 1) =  w.x();
+            }
+            zed_T_arm_dxi[static_cast<std::size_t>(k)] = zed_T_arm * (Eigen::Matrix4d::Identity() + EXT_EPS * G);
+        }
+    // Per-pose GLS accumulators (folded once per distinct pose, with the b_pose nuisance).
+    Eigen::Matrix<double, 6, 6> pose_A    = Eigen::Matrix<double, 6, 6>::Zero();
+    Eigen::Matrix<double, 6, 1> pose_g    = Eigen::Matrix<double, 6, 1>::Zero();
+    Eigen::Matrix<double, 6, 1> pose_hsum = Eigen::Matrix<double, 6, 1>::Zero();
+    double pose_rsum = 0.0, pose_s = 0.0; int pose_n = 0;
 
     const int w = static_cast<int>(last_depth_w_), h = static_cast<int>(last_depth_h_);
     const auto depth_at = [&](int u, int v) -> double          // observed forward distance, m (<0 = invalid)
@@ -591,6 +678,26 @@ void SpecificWorker::compute_depth_residual()
             sigma_d_list.push_back(std::sqrt(var_d));
             fk_frac_list.push_back(var_fk / var_d);
 
+            // Information filter: H = ∂d_pred/∂δξ via the 6 right-perturbed extrinsics, along the
+            // SAME ray. Lateral/tilt DOFs → H≈0 → no information → stay at prior (the depth-blindness).
+            if (filter_enabled_)
+            {
+                Eigen::Matrix<double, 6, 1> H;
+                for (int k = 0; k < 6; ++k)
+                {
+                    const auto& M = zed_T_arm_dxi[static_cast<std::size_t>(k)];
+                    const Eigen::Vector3d e0k = (M * (links[li].pose * a0).homogeneous()).head<3>();
+                    const Eigen::Vector3d e1k = (M * (links[li].pose * a1).homogeneous()).head<3>();
+                    H(k) = (capsule_near_depth(P, e0k, e1k, cap->radius, d_pred) - d_pred) / EXT_EPS;
+                }
+                pose_A.noalias()    += (H * H.transpose()) * wts;
+                pose_g.noalias()    += H * (r * wts);
+                pose_hsum.noalias() += H * wts;
+                pose_rsum += r * wts;
+                pose_s    += wts;
+                ++pose_n;
+            }
+
             // τ regressor = ∂d_pred/∂t along the SAME pixel ray: the q_prev capsule's
             // near-surface depth at this ray, differenced. Consistent with d_pred (the
             // earlier axis-Y velocity was not, and injected a spurious slope).
@@ -650,6 +757,71 @@ void SpecificWorker::compute_depth_residual()
             std::print("[calib-tau] τ unidentifiable (n={}, vspread={:.3f} < {:.3f} m/s — move the arm more)\n",
                        reg_samples_.size(), f.vspread, tau_vspread_min_);
     }
+
+    // ── Information filter: fold THIS pose (if a distinct viewpoint) and report ──────
+    if (filter_enabled_ and pose_n >= 8)
+    {
+        double dq = 0.0;
+        if (have_folded_pose_) for (int j = 0; j < 7; ++j) { const double d = js.q[j] - last_folded_q_[j]; dq += d * d; }
+        if (not have_folded_pose_ or std::sqrt(dq) > pose_min_dq_)
+        {
+            // Marginalize the per-pose nuisance bias b_pose~N(0,σ_model²) via Sherman-Morrison on
+            // C = diag(σ_d²) + σ_model²·11ᵀ: the κ·hsum·hsumᵀ term removes the COMMON mode, so the
+            // ±22mm shared model offset can't masquerade as evidence about the extrinsic.
+            const double kappa = model_sigma_sq_ / (1.0 + model_sigma_sq_ * pose_s);
+            filt_Lambda_.noalias() += pose_A - kappa * (pose_hsum * pose_hsum.transpose());
+            filt_eta_.noalias()    += -(pose_g - kappa * pose_hsum * pose_rsum);
+            last_folded_q_ = js.q;
+            have_folded_pose_ = true;
+            ++filt_poses_;
+        }
+    }
+    if (filter_enabled_ and print_now and filt_poses_ >= 3)
+    {
+        const Eigen::Matrix<double, 6, 6> Sigma = filt_Lambda_.inverse();
+        const Eigen::Matrix<double, 6, 1> dxi   = Sigma * filt_eta_;
+        filt_dxi_ = dxi; filt_have_dxi_ = true;   // republish to the overlay
+        const double D = 57.29577951308232;       // rad→deg
+
+        // One-shot ground-truth decomposition: print the graph's body_T_zed / body_T_arm, the
+        // composed extrinsic, and the filter-CORRECTED extrinsic, so we can see which transform
+        // carries the error. (body_T_arm truth = T_mount (0.272385,0.014412,0.520) Rz90, from the
+        // Webots scene; body_T_zed truth lives in the Shadow proto — read the corrected value here.)
+        if (not gt_printed_ and filt_poses_ >= 50 and inner_eigen_)
+        {
+            const auto rd = [&](const char* a, const char* b) -> std::optional<Eigen::Matrix4d>
+            {
+                const auto o = inner_eigen_->get_transformation_matrix(a, b, 0);
+                if (not o.has_value()) return std::nullopt;
+                Eigen::Matrix4d m; const auto& s = o.value().matrix();
+                for (int i = 0; i < 4; ++i) for (int j = 0; j < 4; ++j) m(i, j) = s(i, j);
+                return m;
+            };
+            const auto show = [D](const char* name, const Eigen::Matrix4d& T)
+            {
+                const Eigen::Vector3d t = T.topRightCorner<3, 1>();
+                const Eigen::Vector3d e = T.topLeftCorner<3, 3>().eulerAngles(0, 1, 2) * D;
+                std::print("[calib-gt] {:<22} t=({:+.4f},{:+.4f},{:+.4f})m rpy_xyz=({:+.1f},{:+.1f},{:+.1f})deg\n",
+                           name, t.x(), t.y(), t.z(), e.x(), e.y(), e.z());
+            };
+            const auto btz = rd("body", "zed"), bta = rd("body", "kinova_arm_r");
+            if (btz and bta)
+            {
+                const Eigen::Matrix4d zTa = btz->inverse() * (*bta);
+                show("body_T_zed (graph)", *btz);
+                show("body_T_arm (graph)", *bta);   // truth = (0.272385,0.014412,0.520) Rz90 ⇒ json z off ~-31mm
+                show("zed_T_arm (graph)", zTa);
+                show("zed_T_arm (corrected)", zTa * se3_exp(filt_dxi_));
+                gt_printed_ = true;
+            }
+        }
+        std::print("[calib-filter] poses={} | dxi_t=({:+.1f},{:+.1f},{:+.1f})mm dxi_r=({:+.2f},{:+.2f},{:+.2f})deg | "
+                   "sig_t=({:.1f},{:.1f},{:.1f})mm sig_r=({:.2f},{:.2f},{:.2f})deg\n",
+                   filt_poses_,
+                   1000.0 * dxi(0), 1000.0 * dxi(1), 1000.0 * dxi(2), D * dxi(3), D * dxi(4), D * dxi(5),
+                   1000.0 * std::sqrt(Sigma(0,0)), 1000.0 * std::sqrt(Sigma(1,1)), 1000.0 * std::sqrt(Sigma(2,2)),
+                   D * std::sqrt(Sigma(3,3)), D * std::sqrt(Sigma(4,4)), D * std::sqrt(Sigma(5,5)));
+    }
 }
 
 // RGB intrinsics from the zed node (once): focal from cam_rgb_focalx/y, principal
@@ -683,6 +855,11 @@ void SpecificWorker::build_self_projection()
     Eigen::Matrix4d zed_T_arm;
     if (not js.valid or not build_extrinsic(zed_T_arm))
         return;
+    zed_T_arm = zed_T_arm * inject_ext_;   // mirror the residual's extrinsic (identity unless injecting)
+    // Decisive test: draw with the CORRECTED extrinsic. If the skeleton snaps onto the arm across
+    // poses, the filter's dxi is a REAL extrinsic error (not absorbed model error).
+    if (apply_filter_to_overlay_ and filt_have_dxi_)
+        zed_T_arm = zed_T_arm * se3_exp(filt_dxi_);
 
     const int w = static_cast<int>(last_rgb_w_), h = static_cast<int>(last_rgb_h_);
     QImage::Format qfmt = QImage::Format_Invalid;

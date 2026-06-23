@@ -158,7 +158,7 @@ void VoxelProcessor::process_rgbd_frame(const RGBDData& rgbd,
 
             const auto& det = detections[det_idx];
             const float ref_rng = det_median_range_m[det_idx];
-            if (std::isfinite(ref_rng) && std::abs(rng - ref_rng) > 0.35f)
+            if (std::isfinite(ref_rng) && std::abs(rng - ref_rng) > config_.mask_surface_band_m)
                 continue;
 
             ++masked_points;
@@ -213,11 +213,8 @@ void VoxelProcessor::process_rgbd_frame(const RGBDData& rgbd,
             sensed_points_by_det[det_idx].push_back(selected_points_room[i]);
             sensed_centroid_sums_by_det[det_idx] += selected_points_room[i];
             ++sensed_centroid_counts_by_det[det_idx];
-            if (point_explained_by_model(selected_points_room[i], detections[det_idx].label, explained_boxes))
-            {
-                ++explained_points_skipped;
-                continue;
-            }
+            // Keep every point: voxels under a graph model (e.g. the table) are no
+            // longer skipped, so the raw voxels remain visible alongside the model.
             points_by_det[det_idx].push_back(selected_points_room[i]);
             centroid_sums_by_det[det_idx] += selected_points_room[i];
             ++centroid_counts_by_det[det_idx];
@@ -356,22 +353,9 @@ void VoxelProcessor::process_rgbd_frame(const RGBDData& rgbd,
         });
     }
     last_frame_id_ = frame_id;
-    const std::size_t residual_tracks_suppressed = suppress_residual_tracks_near_models(box_candidates, explained_boxes);
-    const std::size_t model_residual_table_track_count = static_cast<std::size_t>(std::count_if(
-        box_candidates.begin(),
-        box_candidates.end(),
-        [&](const TrackBoxCandidate& box)
-        {
-            if (box.category != "table")
-                return false;
-
-            return std::ranges::any_of(explained_boxes,
-                                        [&](const GraphObjectBox& model_box)
-                                        {
-                                            return model_matches_label(model_box, box.category)
-                                                && boxes_overlap(box.min, box.max, model_box.min, model_box.max, model_track_padding_m_);
-                                        });
-        }));
+    // The voxelizer no longer removes or cancels voxels/tracks that overlap a graph
+    // model (e.g. the table): objects are read from the graph and drawn as-is, and
+    // the raw voxels under them are kept so both are visible.
 
     if (voxel_viewer != nullptr)
     {

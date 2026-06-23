@@ -30,6 +30,8 @@
 #include <vector>
 #include <Eigen/Dense>
 
+namespace rc {
+
 // ─── Parameters ──────────────────────────────────────────────────────────────
 
 struct SampleQueueParams
@@ -171,3 +173,5 @@ private:
     SampleQueueMetrics        metrics_;
     std::uint64_t             next_insertion_id_ = 1;
 };
+
+}  // namespace rc

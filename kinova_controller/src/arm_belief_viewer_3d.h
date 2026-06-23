@@ -34,8 +34,8 @@ public:
     // view: 4 force channels (motor grip L/R + fingertip tactile L/R) + the 2 binary tip
     // bumper contacts (drawn as steps).
     void update_forces(float lforce, float rforce, float ltipforce, float rtipforce,
-                       float wrist_force, bool ltipcontact, bool rtipcontact,
-                       float palm_distance);
+                       float lside, float rside, float wrist_force,
+                       bool ltipcontact, bool rtipcontact, float palm_distance);
 
     // table_corners must be 8 points in robot frame (m), ordered as
     // [bottom 4 CCW] then [top 4 CCW] — the panel connects them as a wireframe.

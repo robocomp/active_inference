@@ -37,6 +37,21 @@ depth_sensor_range_k = 0.001   # depth noise grows ≈ k·range² (per m)
 geom_sigma_m         = 0.008   # single-capsule model floor (m)
 grazing_cos_min      = 0.2     # clamp on |ray·surface-normal|; grazing/silhouette samples inflate σ_geom up to 1/this (downweights unreliable edge samples)
 
+# Information filter — belief on the T_body_arm correction δξ∈se(3), written from the depth residual.
+filter_enabled       = true
+model_sigma_m        = 0.020   # per-pose nuisance bias σ (m): the ±22mm config-dependent single-capsule model error, correlated within a pose
+prior_sigma_trans_m  = 0.05    # extrinsic prior σ, translation (m) — how far the mount may be off; loose = let observable DOFs move
+prior_sigma_rot_deg  = 5.0     # extrinsic prior σ, rotation (deg)
+pose_min_dq          = 0.05    # min ‖Δq‖ (rad) for a frame to count as a NEW pose (viewpoint), so sitting still doesn't over-count
+apply_filter_to_overlay = false # draw the self-projection skeleton with the CORRECTED extrinsic (zed_T_arm·Exp(dxi)) — toggle to test if dxi snaps the overlay onto the arm
+# Validation (active-vs-passive): corrupt the working extrinsic by a KNOWN offset; the filter should recover δξ ≈ −offset on observable DOFs.
+inject_tx_m          = 0.0
+inject_ty_m          = 0.0
+inject_tz_m          = 0.0
+inject_rx_deg        = 0.0
+inject_ry_deg        = 0.0
+inject_rz_deg        = 0.0
+
 [Period]
 Compute = 100
 Emergency = 500

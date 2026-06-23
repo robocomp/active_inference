@@ -1,8 +1,8 @@
 /*
- * bottle_perception.cpp — YOLO masks reading (verbatim port from table_concept).
+ * mask_ingestor.cpp — YOLO masks reading (verbatim port from table_concept).
  */
 
-#include "bottle_perception.h"
+#include "mask_ingestor.h"
 
 #include <algorithm>
 #include <cmath>
@@ -10,11 +10,13 @@
 #include <sstream>
 #include <utility>
 
-BottlePerception::BottlePerception(std::shared_ptr<DSR::DSRGraph> graph)
+namespace rc {
+
+MaskIngestor::MaskIngestor(std::shared_ptr<DSR::DSRGraph> graph)
     : G_(std::move(graph))
 {}
 
-bool BottlePerception::refresh()
+bool MaskIngestor::refresh()
 {
     const auto masks_node_opt = G_->get_node("masks");
     if (not masks_node_opt.has_value())
@@ -137,8 +139,8 @@ bool BottlePerception::refresh()
     return true;
 }
 
-std::optional<BottlePerception::MaskSlice>
-BottlePerception::select_for_bottle(const BottleInstance& inst) const
+std::optional<MaskIngestor::MaskSlice>
+MaskIngestor::select_for_bottle(const BottleInstance& inst) const
 {
     if (not masks_packet_.valid or masks_packet_.slices.empty())
         return std::nullopt;
@@ -168,7 +170,7 @@ BottlePerception::select_for_bottle(const BottleInstance& inst) const
 }
 
 std::vector<Eigen::Vector3f>
-BottlePerception::read_pts_attrib(const DSR::Node& node, const std::string& att_name) const
+MaskIngestor::read_pts_attrib(const DSR::Node& node, const std::string& att_name) const
 {
     std::vector<Eigen::Vector3f> pts;
 
@@ -191,3 +193,5 @@ BottlePerception::read_pts_attrib(const DSR::Node& node, const std::string& att_
 
     return pts;
 }
+
+}  // namespace rc

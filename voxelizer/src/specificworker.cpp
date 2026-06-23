@@ -147,6 +147,7 @@ void SpecificWorker::initialize()
     voxel_processor_config.track_max_missed_frames         = params.TRACK_MAX_MISSED_FRAMES;
     voxel_processor_config.viewer_voxel_fps                = params.VOXEL_VIEWER_FPS;
     voxel_processor_config.z_lift_m                        = params.VOXEL_Z_LIFT_M;
+    voxel_processor_config.mask_surface_band_m             = params.MASK_SURFACE_BAND_M;
     voxel_processor_config.verbose_debug                   = verbose_debug_;
     voxel_processor->configure(voxel_processor_config);
 

@@ -11,6 +11,8 @@
 
 #include <toml++/toml.hpp>
 
+namespace rc {
+
 // ─── Constructor ─────────────────────────────────────────────────────────────
 
 PriorStore::PriorStore(std::string priors_path)
@@ -67,3 +69,5 @@ std::vector<BottlePrior> PriorStore::load_priors() const
     std::print("PriorStore: loaded {} prior(s) from '{}'\n", result.size(), priors_path_);
     return result;
 }
+
+}  // namespace rc

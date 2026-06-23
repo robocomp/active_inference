@@ -14,6 +14,8 @@
 #include <print>
 #include <torch/torch.h>
 
+
+namespace rc {
 using namespace torch::indexing;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -26,7 +28,7 @@ bool finite_state(const TableState& state)
     return std::isfinite(state.cx) && std::isfinite(state.cy) &&
            std::isfinite(state.w) && std::isfinite(state.h) &&
            std::isfinite(state.table_height) && std::isfinite(state.leg_length) &&
-           std::isfinite(state.yaw);
+           std::isfinite(state.yaw) && std::isfinite(state.leg_inset);
 }
 
 /** Standard box SDF with smooth interior (log-sum-exp inside). */
@@ -52,6 +54,45 @@ float box_sdf(float dx, float dy, float dz)
     }
 
     return outside + inside;
+}
+
+/** Robust percentile of a copy of `vals` (q in [0,1]); `vals` is consumed. */
+float percentile_inplace(std::vector<float>& vals, float q)
+{
+    if (vals.empty()) return 0.0f;
+    const std::size_t k = std::min(vals.size() - 1,
+                                   static_cast<std::size_t>(q * static_cast<float>(vals.size())));
+    std::nth_element(vals.begin(), vals.begin() + static_cast<std::ptrdiff_t>(k), vals.end());
+    return vals[k];
+}
+
+/**
+ * Footprint-extent energy: the top-face rectangle (centre offset + half-extents) should match the
+ * observed point extent in the table-local frame. Penalises the box being off-centre or larger/
+ * smaller than the 2–98 percentile point span. This is what makes position/size non-degenerate
+ * when only the (flat) top face is observed. Scalar mirror of the autograd term in fe_torch_impl.
+ */
+float footprint_extent_energy(const TableState& s, const std::vector<Eigen::Vector3f>& pts, float lambda)
+{
+    if (lambda <= 0.0f || pts.size() < 8) return 0.0f;
+    const float c = std::cos(s.yaw), sn = std::sin(s.yaw);
+    std::vector<float> lx, ly;
+    lx.reserve(pts.size());
+    ly.reserve(pts.size());
+    for (const auto& p : pts)
+    {
+        const float px = p.x() - s.cx, py = p.y() - s.cy;
+        lx.push_back(px * c + py * sn);
+        ly.push_back(-px * sn + py * c);
+    }
+    const float lx_lo = percentile_inplace(lx, 0.02f);
+    const float lx_hi = percentile_inplace(lx, 0.98f);
+    const float ly_lo = percentile_inplace(ly, 0.02f);
+    const float ly_hi = percentile_inplace(ly, 0.98f);
+    const float ex = (lx_hi - lx_lo) * 0.5f, ey = (ly_hi - ly_lo) * 0.5f;
+    const float mx = (lx_hi + lx_lo) * 0.5f, my = (ly_hi + ly_lo) * 0.5f;
+    const float dw = s.w * 0.5f - ex, dh = s.h * 0.5f - ey;
+    return lambda * (dw * dw + dh * dh + mx * mx + my * my);
 }
 
 /** Finite cylinder SDF (radius r, half-height hh, centred at origin). */
@@ -125,13 +166,19 @@ void apply_constraints_to_tensor(torch::Tensor& arr)
     arr.index_put_({4}, torch::clamp_min(arr.index({4}), 0.05f + TableModel::TOP_THICKNESS));
     const auto max_leg = arr.index({4}) - TableModel::TOP_THICKNESS;
     arr.index_put_({5}, torch::clamp(arr.index({5}), 0.05f, max_leg.item<float>()));
+    // leg_inset ∈ [LEG_RADIUS, min(half_w, half_h) − LEG_RADIUS]: leg stays under the top and
+    // inside the footprint.
+    const float half_min = 0.5f * std::min(arr.index({2}).item<float>(), arr.index({3}).item<float>());
+    const float max_inset = std::max(TableModel::LEG_RADIUS, half_min - TableModel::LEG_RADIUS);
+    arr.index_put_({7}, torch::clamp(arr.index({7}), TableModel::LEG_RADIUS, max_inset));
 }
 
 torch::Tensor fe_torch_impl(const TableModelParams& params,
                              const TableState& prior,
                              const torch::Tensor& state_tensor,
                              const torch::Tensor& points_tensor,
-                             const torch::Tensor& weights_tensor)
+                             const torch::Tensor& weights_tensor,
+                             float robust_scale)
 {
     const auto cx = state_tensor.index({0});
     const auto cy = state_tensor.index({1});
@@ -140,6 +187,7 @@ torch::Tensor fe_torch_impl(const TableModelParams& params,
     const auto table_height = state_tensor.index({4});
     const auto leg_length = state_tensor.index({5});
     const auto yaw = state_tensor.index({6});
+    const auto leg_inset = state_tensor.index({7});
 
     const auto px = points_tensor.index({Slice(), 0}) - cx;
     const auto py = points_tensor.index({Slice(), 1}) - cy;
@@ -161,7 +209,6 @@ torch::Tensor fe_torch_impl(const TableModelParams& params,
     const auto dz_top = torch::abs(local_z - top_cz) - half_t;
     const auto sdf_top = box_sdf_tensor(dx_top, dy_top, dz_top);
 
-    const float leg_inset = TableModel::LEG_RADIUS + 0.02f;
     const auto leg_center_z = leg_length * 0.5f;
     const auto leg_half_h = leg_length * 0.5f;
 
@@ -190,7 +237,7 @@ torch::Tensor fe_torch_impl(const TableModelParams& params,
     const auto sdf = torch::minimum(sdf_top, sdf_leg_min);
 
     const float inv_sigma2 = 1.0f / (params.sigma_obs * params.sigma_obs);
-    const auto point_loss = robust_loss_value(sdf, params.robust_loss, params.robust_loss_scale);
+    const auto point_loss = robust_loss_value(sdf, params.robust_loss, robust_scale);
     // Normalise by point count to match Python prototype (belief_manager.py line 385):
     //   weighted_likelihood = torch.sum(weights * sdf**2) / len(points)
     const auto likelihood = (weights_tensor * point_loss * inv_sigma2).sum() /
@@ -212,13 +259,33 @@ torch::Tensor fe_torch_impl(const TableModelParams& params,
     const auto dsh = h - prior.h;
     const auto dst = table_height - prior.table_height;
     const auto dsl = leg_length - prior.leg_length;
-    const auto state_energy = params.lambda_state * (dsw * dsw + dsh * dsh + dst * dst + dsl * dsl);
+    const auto dsi = leg_inset - prior.leg_inset;
+    const auto state_energy = params.lambda_state * (dsw * dsw + dsh * dsh + dst * dst + dsl * dsl + dsi * dsi);
 
     auto dyaw = yaw - prior.yaw;
     dyaw = dyaw - (2.0f * M_PIf) * torch::floor((dyaw + M_PIf) / (2.0f * M_PIf));
     const auto angle_energy = params.lambda_angle * dyaw * dyaw;
 
-    return likelihood + size_energy + pos_energy + state_energy + angle_energy;
+    auto total = likelihood + size_energy + pos_energy + state_energy + angle_energy;
+
+    // Footprint-extent term — see footprint_extent_energy(): pulls the top rectangle (centre +
+    // half-extents) onto the observed 2–98 percentile point span in table-local frame, removing
+    // the flat-interior degeneracy that otherwise lets the box drift/oversize at ~zero energy.
+    if (params.lambda_extent > 0.0f && points_tensor.size(0) >= 8)
+    {
+        const auto q = torch::tensor({0.02f, 0.98f}, points_tensor.options());
+        const auto qx = torch::quantile(local_x, q);
+        const auto qy = torch::quantile(local_y, q);
+        const auto ex = (qx.index({1}) - qx.index({0})) * 0.5f;
+        const auto ey = (qy.index({1}) - qy.index({0})) * 0.5f;
+        const auto mx = (qx.index({1}) + qx.index({0})) * 0.5f;
+        const auto my = (qy.index({1}) + qy.index({0})) * 0.5f;
+        const auto dw = half_w - ex;
+        const auto dh = half_h - ey;
+        total = total + params.lambda_extent * (dw * dw + dh * dh + mx * mx + my * my);
+    }
+
+    return total;
 }
 
 } // anonymous namespace
@@ -263,7 +330,7 @@ float TableModel::sdf_point_at(const Eigen::Vector3f& p, const TableState& s) co
     const float sdf_top = box_sdf(dx_top, dy_top, dz_top);
 
     // ── LEGS (4 cylinders at corners) ────────────────────────────────────────
-    const float leg_inset    = LEG_RADIUS + 0.02f;
+    const float leg_inset    = s.leg_inset;
     const float leg_center_z = leg_length * 0.5f;
     const float leg_half_h   = leg_length * 0.5f;
 
@@ -323,7 +390,8 @@ float TableModel::prior_energy(const TableState& s) const
     float dsh = s.h            - prior_.h;
     float dst = s.table_height - prior_.table_height;
     float dsl = s.leg_length   - prior_.leg_length;
-    float state_energy = params_.lambda_state * (dsw*dsw + dsh*dsh + dst*dst + dsl*dsl);
+    float dsi = s.leg_inset    - prior_.leg_inset;
+    float state_energy = params_.lambda_state * (dsw*dsw + dsh*dsh + dst*dst + dsl*dsl + dsi*dsi);
 
     // Angle transition prior
     float dyaw = s.yaw - prior_.yaw;
@@ -332,6 +400,29 @@ float TableModel::prior_energy(const TableState& s) const
     float angle_energy = params_.lambda_angle * dyaw * dyaw;
 
     return size_energy + pos_energy + state_energy + angle_energy;
+}
+
+float TableModel::silhouette_energy_at(const TableState& s) const
+{
+    if (params_.mask_precision <= 0.0f || sil_dirs_.empty())
+        return 0.0f;
+    const float cx = s.cx, cy = s.cy, half_w = s.w * 0.5f, half_h = s.h * 0.5f;
+    const float c = std::cos(s.yaw), sn = std::sin(s.yaw);
+    float acc = 0.0f;
+    for (const auto& d : sil_dirs_)
+    {
+        if (std::abs(d.z()) < 1e-6f) continue;
+        const float t = (s.table_height - sil_cam_.z()) / d.z();
+        const float bx = sil_cam_.x() + t * d.x() - cx;
+        const float by = sil_cam_.y() + t * d.y() - cy;
+        const float lx = bx * c + by * sn;
+        const float ly = -bx * sn + by * c;
+        const float dx = std::abs(lx) - half_w, dy = std::abs(ly) - half_h;
+        const float ox = std::max(dx, 0.0f), oy = std::max(dy, 0.0f);
+        const float sdf2d = std::sqrt(ox * ox + oy * oy) + std::min(std::max(dx, dy), 0.0f);
+        acc += robust_loss_value(sdf2d, params_.robust_loss, params_.robust_loss_scale);
+    }
+    return params_.mask_precision * sil_conf_ * acc / static_cast<float>(sil_dirs_.size());
 }
 
 float TableModel::fe_at(const TableState& s,
@@ -376,7 +467,8 @@ FreeEnergyDecomposition TableModel::fe_terms_at(const TableState& s,
     terms.likelihood_current *= inv_N;
     terms.likelihood_historical *= inv_N;
 
-    terms.prior = prior_energy(s);
+    terms.prior = prior_energy(s) + footprint_extent_energy(s, pts, params_.lambda_extent)
+                + silhouette_energy_at(s);
     terms.total_fe = terms.likelihood_current + terms.likelihood_historical + terms.prior;
     return terms;
 }
@@ -402,7 +494,8 @@ FreeEnergyDecomposition TableModel::compute_free_energy_decomposition(
 float TableModel::gradient_step(const std::vector<Eigen::Vector3f>& points,
                                  const std::vector<float>& weights,
                                  std::size_t historical_count,
-                                 const IterationObserver& observer)
+                                 const IterationObserver& observer,
+                                 float gnc_start_override)
 {
     if (points.empty())
         return prior_energy(state_);
@@ -435,24 +528,82 @@ float TableModel::gradient_step(const std::vector<Eigen::Vector3f>& points,
 
     auto arr = state_.to_array();
     auto theta = torch::tensor(
-        {arr[0], arr[1], arr[2], arr[3], arr[4], arr[5], arr[6]},
+        {arr[0], arr[1], arr[2], arr[3], arr[4], arr[5], arr[6], arr[7]},
         options).set_requires_grad(true);
 
     auto theta_to_state = [&](const torch::Tensor& tensor) -> TableState
     {
         auto cpu = tensor.detach().to(torch::kCPU);
         auto acc = cpu.accessor<float, 1>();
-        return TableState{acc[0], acc[1], acc[2], acc[3], acc[4], acc[5], acc[6]};
+        return TableState{acc[0], acc[1], acc[2], acc[3], acc[4], acc[5], acc[6], acc[7]};
     };
 
     const TableState fallback_state = state_;
+
+    // Graduated non-convexity: geometric anneal of the robust-loss scale from the wide start
+    // down to the target across the iterations. A flat top-face SDF gives covered points zero
+    // gradient, and a sharp Tukey scale hard-rejects the uncovered points as outliers (constant
+    // loss, zero gradient) — together a half-offset pose is a flat local minimum. Starting wide
+    // keeps those uncovered points inside the robust band so they pull the box over before the
+    // scale sharpens. Disabled (start == target) when robust_gnc_start_scale <= robust_loss_scale.
+    const float gnc_target = params_.robust_loss_scale;
+    // The fitter decays the start scale over the instance lifetime (wide → target) so coarse
+    // alignment happens early and the converged pose stops being re-widened; -1 = use the param.
+    const float gnc_start  = (gnc_start_override >= 0.0f) ? gnc_start_override : params_.robust_gnc_start_scale;
+    const bool  gnc_active = gnc_start > gnc_target && params_.optimization_iters > 1;
+    auto scale_for_iter = [&](int iter) -> float
+    {
+        if (!gnc_active)
+            return gnc_target;
+        const float t = static_cast<float>(iter) / static_cast<float>(params_.optimization_iters - 1);
+        return gnc_start * std::pow(gnc_target / gnc_start, t);   // start → target, geometric
+    };
+
+    // RGB-mask silhouette term: each back-projected contour ray (dir d from camera C) is intersected
+    // with the table-top plane z=H → room-XY point B; B should lie on the top rectangle boundary, so
+    // its 2-D box-SDF is driven to 0. Differentiable in cx,cy,w,h,yaw (and H via the intersection).
+    const bool sil_on = params_.mask_precision > 0.0f && !sil_dirs_.empty();
+    torch::Tensor sil_dx, sil_dy, sil_dz;
+    if (sil_on)
+    {
+        const long n = static_cast<long>(sil_dirs_.size());
+        sil_dx = torch::empty({n}, options);
+        sil_dy = torch::empty({n}, options);
+        sil_dz = torch::empty({n}, options);
+        auto ax = sil_dx.accessor<float, 1>();
+        auto ay = sil_dy.accessor<float, 1>();
+        auto az = sil_dz.accessor<float, 1>();
+        for (long i = 0; i < n; ++i) { ax[i] = sil_dirs_[i].x(); ay[i] = sil_dirs_[i].y(); az[i] = sil_dirs_[i].z(); }
+    }
+    const float sil_Cx = sil_cam_.x(), sil_Cy = sil_cam_.y(), sil_Cz = sil_cam_.z();
+    auto silhouette_loss = [&](const torch::Tensor& th, float robust_scale) -> torch::Tensor
+    {
+        if (!sil_on) return torch::zeros({}, options);
+        const auto cx = th.index({0}), cy = th.index({1});
+        const auto half_w = th.index({2}) * 0.5f, half_h = th.index({3}) * 0.5f;
+        const auto H = th.index({4}), yaw = th.index({6});
+        const auto t = (H - sil_Cz) / sil_dz;                 // ray param to the table-top plane
+        const auto bx = sil_Cx + t * sil_dx;                  // intersection, room XY
+        const auto by = sil_Cy + t * sil_dy;
+        const auto c = torch::cos(yaw), s = torch::sin(yaw);
+        const auto px = bx - cx, py = by - cy;
+        const auto lx = px * c + py * s;
+        const auto ly = -px * s + py * c;
+        const auto dx = torch::abs(lx) - half_w;
+        const auto dy = torch::abs(ly) - half_h;
+        const auto ox = torch::clamp_min(dx, 0.0f), oy = torch::clamp_min(dy, 0.0f);
+        const auto sdf2d = torch::sqrt(ox * ox + oy * oy + 1e-9f) + torch::clamp_max(torch::max(dx, dy), 0.0f);
+        const auto loss = robust_loss_value(sdf2d, params_.robust_loss, robust_scale);
+        return params_.mask_precision * sil_conf_ * loss.mean();
+    };
 
     auto run_loop = [&](auto& optimizer) -> bool
     {
         for (int iter = 0; iter < params_.optimization_iters; ++iter)
         {
             optimizer.zero_grad();
-            auto loss = fe_torch_impl(params_, prior_, theta, points_tensor, weights_tensor);
+            auto loss = fe_torch_impl(params_, prior_, theta, points_tensor, weights_tensor, scale_for_iter(iter))
+                      + silhouette_loss(theta, scale_for_iter(iter));
             const float loss_value = loss.item<float>();
             if (!std::isfinite(loss_value))
                 return false;
@@ -512,7 +663,11 @@ float TableModel::gradient_step(const std::vector<Eigen::Vector3f>& points,
     }
     apply_constraints();
 
-    const float final_fe = fe_torch_impl(params_, prior_, theta.detach(), points_tensor, weights_tensor).item<float>();
+    // Report the final FE at the SHARP target scale (matches fe_terms_at / acceptance), not the
+    // annealed scale, so convergence/acceptance see the true objective.
+    const float final_fe = (fe_torch_impl(params_, prior_, theta.detach(), points_tensor, weights_tensor,
+                                          params_.robust_loss_scale)
+                            + silhouette_loss(theta.detach(), params_.robust_loss_scale)).item<float>();
     if (!std::isfinite(final_fe))
     {
         state_ = fallback_state;
@@ -532,6 +687,9 @@ void TableModel::apply_constraints()
     state_.table_height = std::max(state_.table_height, 0.05f + TOP_THICKNESS);
     const float max_leg = state_.table_height - TOP_THICKNESS;
     state_.leg_length   = std::clamp(state_.leg_length, 0.05f, max_leg);
+    const float half_min  = 0.5f * std::min(state_.w, state_.h);
+    const float max_inset = std::max(LEG_RADIUS, half_min - LEG_RADIUS);
+    state_.leg_inset    = std::clamp(state_.leg_inset, LEG_RADIUS, max_inset);
 }
 
 // ─── Bounding box ────────────────────────────────────────────────────────────
@@ -569,3 +727,5 @@ std::pair<Eigen::Vector3f, Eigen::Vector3f> TableModel::bounding_box() const
         Eigen::Vector3f{max_x, max_y, state_.table_height}
     };
 }
+
+}  // namespace rc

@@ -20,7 +20,7 @@
 /**
  * SpecificWorker — bottle_concept agent: RoboComp lifecycle + presence protocol +
  * orchestration only. compute() wires the collaborators into the per-cycle pipeline:
- *   perception_ (read masks) → scene_graph_ (scaffold bottle nodes) →
+ *   mask_ingestor_ (read masks) → scene_graph_ (scaffold bottle nodes) →
  *   fitter_ (per-bottle free-energy fit + write-back) → evaluator_ (validation drivers).
  */
 
@@ -50,7 +50,7 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
         return;
     }
 
-    cfg_ = load_agent_config(configLoader);
+    cfg_ = rc::load_bottle_config(configLoader);
 
 #ifdef HIBERNATION_ENABLED
     hibernationChecker.start(500);
@@ -237,8 +237,8 @@ void SpecificWorker::initialize()
 
     rt_api_ = G->get_rt_api();
     inner_eigen_ = G->get_inner_eigen_api();
-    perception_ = std::make_unique<BottlePerception>(G);
-    scene_graph_ = std::make_unique<BottleSceneGraph>(G, rt_api_.get(), inner_eigen_.get(), cfg_);
+    mask_ingestor_ = std::make_unique<rc::MaskIngestor>(G);
+    scene_graph_ = std::make_unique<rc::BottleSceneGraph>(G, rt_api_.get(), inner_eigen_.get(), cfg_);
 
     connect(G.get(), &DSR::DSRGraph::del_node_signal, this, &SpecificWorker::del_node_slot);
 
@@ -252,19 +252,19 @@ void SpecificWorker::initialize()
     else
         qWarning() << "bottle_concept: no room node found at startup";
 
-    prior_store_  = std::make_unique<PriorStore>(cfg_.priors_path);
+    prior_store_  = std::make_unique<rc::PriorStore>(cfg_.priors_path);
     priors_cache_ = prior_store_->load_priors();
 
     // Validation harness (no-op unless an Eval.*/Scene.* flag is set). Table-top lookup injected as a
     // callback so the evaluator stays decoupled from the scene-graph layer.
-    evaluator_ = std::make_unique<BottleEvaluator>(
+    evaluator_ = std::make_unique<rc::BottleEvaluator>(
         cfg_, webots2robocomp_proxy, inner_eigen_.get(),
         [this](float bx, float by) { return scene_graph_->find_table_top(bx, by); });
 
     // Active-inference fit core. Owns the instance map; collaborates with the three layers above.
-    fitter_ = std::make_unique<BottleFitter>(
+    fitter_ = std::make_unique<rc::BottleFitter>(
         G, inner_eigen_.get(), cfg_, priors_cache_,
-        perception_.get(), scene_graph_.get(), evaluator_.get());
+        mask_ingestor_.get(), scene_graph_.get(), evaluator_.get());
 }
 
 namespace { constexpr int PLACE_SETTLE_CYCLES = 30; }   // ~settle time after a start-placement move
@@ -295,8 +295,8 @@ void SpecificWorker::compute()
         return;
     }
 
-    perception_->refresh();
-    scene_graph_->scaffold_missing_bottle_nodes(priors_cache_, perception_->packet(), room_node_id_);
+    mask_ingestor_->refresh();
+    scene_graph_->scaffold_missing_bottle_nodes(priors_cache_, mask_ingestor_->packet(), room_node_id_);
 
     // Bottle instances are DSR `cylinder` nodes named "bottle_*".
     for (const auto& node : G->get_nodes_by_type("cylinder"))

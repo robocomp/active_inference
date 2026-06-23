@@ -25,8 +25,10 @@
 #include <genericworker.h>                    // RoboCompWebots2Robocomp proxy + ObjectPose
 #include <dsr/api/dsr_inner_eigen_api.h>
 
-#include "agent_config.h"
+#include "bottle_config.h"
 #include "bottle_instance.h"
+
+namespace rc {
 
 class BottleEvaluator
 {
@@ -34,7 +36,7 @@ public:
     // table_top(bx,by) → table-top z in the room frame when the bottle stands on a table (else nullopt).
     using TableTopFn = std::function<std::optional<float>(float, float)>;
 
-    BottleEvaluator(AgentConfig& cfg,
+    BottleEvaluator(BottleConfig& cfg,
                     RoboCompWebots2Robocomp::Webots2RobocompPrxPtr proxy,
                     DSR::InnerEigenAPI* inner_eigen,
                     TableTopFn table_top);
@@ -56,7 +58,7 @@ private:
     // One-shot: query the bottle's Webots pose and express its CENTRE in the room frame → cfg_.gt_*.
     bool acquire_webots_gt();
 
-    AgentConfig&                                   cfg_;
+    BottleConfig&                                   cfg_;
     RoboCompWebots2Robocomp::Webots2RobocompPrxPtr proxy_;
     DSR::InnerEigenAPI*                            inner_eigen_ = nullptr;
     TableTopFn                                     table_top_;
@@ -73,3 +75,5 @@ private:
     int                                 move_settle_ = 0;    // cycles held at the current pose
     int                                 move_reseed_in_ = 0; // countdown to forcing a fresh cold-start
 };
+
+}  // namespace rc

@@ -52,6 +52,9 @@ public:
     void step(const std::array<double, Kinematics::N_ARM_JOINTS>& q,
               const Eigen::Vector3d& ee_position);
 
+    // Current grasp sub-phase name (host diagnostics, e.g. the side-force probe).
+    const char* current_grasp_phase_name() const;
+
     // Lifecycle hooks called by SpecificWorker's outer state machine.
     void start();                            // run engaged → begin a fresh pick sequence
     void reset();                            // run disengaged → reset the FSM
@@ -163,6 +166,34 @@ private:
     // Aperture increase over aperture0 that trips the cam-open correction before the verdict.
     static constexpr double CAM_OPEN_RESIDUAL = 0.06;
 
+    // ── Generative insert (palm-OCCUPANCY model) ──────────────────────────────
+    // MEASURED: the palm DistanceSensor is a bimodal/noisy ray — ≈0.15 (max range) when it MISSES the
+    // bottle, 0.03-0.09 when it SEES it in the throat. There is NO smooth 1:1 closing trajectory, so a
+    // residual/trajectory model produces garbage (the v1 regression: it slowed every insert). The right
+    // generative read is OCCUPANCY of the throat: palm low ⇒ bottle in the throat (on-axis); palm at
+    // max while close to the grasp point ⇒ throat empty (off-axis). Drives the descent SPEED: fast
+    // while the bottle is genuinely far (far from the grasp point AND palm not yet acquired = nothing
+    // close to disturb), slow through the whole near zone (gentle seat whether on- or off-axis). The
+    // directional reflex stays contact-driven (single ray gives "something/nothing", not the side).
+    // The discriminating signal is the SENSORIMOTOR CONTINGENCY: the close-rate = −d(palm)/d(advance)
+    // over a window long enough to beat the per-tick noise. On-axis (bottle in the throat ahead) ⇒
+    // close_rate ≈ 1 (the palm closes 1:1 with my forward motion); off-axis / not-acquired ⇒ ≈ 0 (I
+    // advance but the palm doesn't respond). The derivative cancels the bimodal offset, so it's robust
+    // where the absolute reading isn't. Control law: advance FAST while the palm is closing productively
+    // (rate high), FIXED-GENTLE otherwise (about to seat, or off-axis — both want a soft touch). Speeds
+    // are FIXED (not the skill-ramped insert_vel, which had gone to ~0.095 = not gentle).
+    bool   generative_insert_   = false;   // Controller.generative_insert (A/B vs the threshold insert)
+    double insert_palm_near_    = 0.08;    // m: palm reading below this ⇒ bottle acquired in the throat
+    double insert_near_zone_    = 0.05;    // m: within this EE-distance of the grasp point ⇒ never go fast
+    double insert_fast_vel_     = 0.06;    // m/s while the palm is closing productively + bottle far
+    double insert_gentle_vel_   = 0.03;    // m/s near the bottle / when the palm is NOT closing (soft touch)
+    double insert_rate_gate_    = 0.4;     // close_rate above this ⇒ productive closing (advance fast)
+    Eigen::Vector3d insert_win_ee0_ = Eigen::Vector3d::Zero();   // window baseline EE
+    double insert_win_palm0_    = 0.0;     // window baseline palm reading
+    double insert_close_rate_   = 0.0;     // EMA of −d(palm)/d(advance)
+    int    insert_throat_miss_  = 0;       // debounce: cycles at grasp depth, palm not closing (off-axis)
+    static constexpr double INSERT_RATE_WINDOW_M = 0.012;   // advance per close-rate estimate (beats palm noise)
+
     // ── Phase logic ──────────────────────────────────────────────────────────
     void run_tracking(const std::array<double, Kinematics::N_ARM_JOINTS>& q,
                       const Eigen::Vector3d& ee_position);   // = validated QP approach + hold
@@ -202,6 +233,9 @@ private:
     std::pair<bool,bool>  tip_contacts() const;
     std::pair<float,float> tip_forces() const;
     std::pair<float,float> pad_forces() const;   // (lforce, rforce) — grip strength on the body
+    // Raw fingertip force-3d vectors {Fx,Fy,Fz} (N) per pad, in the finger-sensor frame (= tool axes:
+    // X closing, Y pad-width, −Z approach). The lateral (X,Y) components drive the shear-based centring.
+    std::pair<Eigen::Vector3f, Eigen::Vector3f> pad_force_vecs() const;
     float gripper_force() const;
     float palm_distance() const;   // palm proximity (m) down the throat; 0 if sensor absent
     float gripper_opening() const; // aperture [0,1] (0=closed, 1=open)
@@ -316,6 +350,29 @@ private:
     double compliant_close_sign_  = 1.0;       // ±1: maps L−R asymmetry onto tool +X
     Eigen::Vector3d compliant_close_offset_{0.0, 0.0, 0.0};   // accumulated lateral shift this close
     static constexpr float COMPLIANT_CONTACT_MIN_N = 3.0f;    // min pad load to trust the asymmetry signal
+    // Force-3d SHEAR close (opt-in A/B vs the motor-torque magnitude law above). The fingertip force-3d
+    // vectors carry the LATERAL direction the scalar motor-torque difference is blind to. The finger-
+    // sensor frame shares the tool axes (col0 = closing / sensor X, col1 = pad-width / sensor Y, col2 ≈
+    // −approach). Summed over both pads the closing-axis (X) components of the two opposed pads cancel and
+    // leave the residual asymmetry, while the pad-WIDTH (Y) shear ADDS — the off-centre direction along
+    // the pad face. Decompose the net pad force onto col0 + col1 and shift the EE to null it, so centring
+    // works in BOTH lateral axes, not just along the assumed tool +X. Sign still via compliant_close_sign_.
+    bool   compliant_close_shear_      = false;
+    double compliant_close_shear_gain_ = 0.004;    // m lateral per N of the PEAK first-contact lateral spike
+    // The force-3d nets to ~0 in static grip but SPIKES at first contact (the slider reacts steady load,
+    // not impact). Peak-HOLD the net lateral force over the close (world frame) and drive a decisive HELD
+    // offset to null it — integrating the instantaneous value washes the transient out (it's ~0 between
+    // spikes). Captured WITHOUT the motor-force gate: the spike precedes motor-torque build-up.
+    Eigen::Vector3d compliant_close_side_peak_{0.0, 0.0, 0.0};
+    // Generative compliant close: a forward model predicts SYMMETRIC pad loading on a centred bottle.
+    // The prediction error is the FRACTIONAL asymmetry (lf−rf)/(lf+rf) — ≈±1 at FIRST contact (one pad
+    // only), so the lateral correction is strongest EARLY, when forces are low and the light bottle is
+    // easiest to recentre (the raw force-difference is weak there). And the commit is SYMMETRY-GATED:
+    // only a centred (balanced + loaded) grip advances to Lifting — an off-centre grip is corrected or
+    // rejected, never lifted (that was the slip cause). A/B via Controller.generative_close.
+    bool   generative_close_   = false;
+    double close_asym_gain_    = 0.0008;   // lateral m per (fractional-asym · tick)
+    double close_balance_tol_  = 0.12;     // commit only when |lf−rf|/(lf+rf) < this (centred)
     bool   tip_reflex_ = false;
     double tip_reflex_offset_ = 0.0;
     // Deliberate tactile reflex sub-machine inside Inserting: on a fingertip touch, STOP, back off a
@@ -415,6 +472,14 @@ private:
     // or twist the held bottle. Deliberately NOT skill-boosted (skilled_speed) — the lift stays
     // careful regardless of c. Configurable via Controller.lift_speed.
     double lift_speed_ = 0.10;        // m/s vertical rise during Lifting
+    // Soft-start ramp length (loop ticks) over which the lift velocity rises 0→full. LONGER = gentler
+    // lift-off acceleration ⇒ the bottle is not jerked out of the grip at the instant of departure (the
+    // sub-throat slide). Configurable via Controller.lift_soft_ticks. 100 Hz loop ⇒ ticks·10 ms.
+    double lift_soft_ticks_ = 60.0;   // was a fixed 25 (≈0.25 s); 60 ≈ 0.6 s gentler ramp
+    // DIAGNOSTIC observe mode: during Lifting, keep rising to full height and HOLD there with the gripper
+    // clamped — ignore the confirm/slip/timeout aborts (no MISS/reopen/home) — so the physical outcome
+    // (does the bottle rise, tilt, slide out?) is directly visible. Controller.lift_observe.
+    bool   lift_observe_ = false;
     // Minimum confirmed rise (m): even once the generative TRACK channel has decided "grasped", keep
     // rising until the bottle has visibly come up by this much before declaring the lift done. Makes
     // the vertical motion clearly observable and matches the preference (lift TO a height, not just
@@ -533,8 +598,7 @@ private:
     static constexpr int    LIFT_TIMEOUT_TICKS   = 250;
     // Soft-start: the √ position-ramp eases IN near the target but saturates v_des instantly when the
     // target is far, so the close→lift target jump steps the commanded velocity from 0 → full = a jerk.
-    // Ramp the lift speed up over this many ticks (~0.25 s at 100 Hz) for a smooth, jerk-free departure.
-    static constexpr int    LIFT_SOFT_TICKS      = 25;
+    // The lift-speed ramp length now lives in lift_soft_ticks_ (Controller.lift_soft_ticks, tunable).
     static constexpr double LIFT_CONFIRM_RISE_M  = 0.06;
     static constexpr double LIFT_CONFIRM_HOLD_M  = 0.18;  // relaxed: a held bottle may pivot/tilt as it lifts
     static constexpr int    TRACK_TIMEOUT_TICKS  = 900;

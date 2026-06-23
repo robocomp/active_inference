@@ -24,6 +24,8 @@
 
 // ─── Proposal ────────────────────────────────────────────────────────────────
 
+
+namespace rc {
 struct EpistemicProposal
 {
     float epistemic_target_x_m = 0.0f;
@@ -70,3 +72,5 @@ private:
     float gain_threshold_;
     float d_obs_;
 };
+
+}  // namespace rc

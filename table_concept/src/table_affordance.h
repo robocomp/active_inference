@@ -36,6 +36,8 @@
 #include "epistemic_planner.h"
 
 // ─────────────────────────────────────────────────────────────────────────────
+
+namespace rc {
 class TableAffordance
 {
 public:
@@ -89,3 +91,5 @@ private:
     void refresh_edge();
     void reset();
 };
+
+}  // namespace rc

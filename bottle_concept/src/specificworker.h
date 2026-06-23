@@ -56,14 +56,14 @@
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 #include "../../common/robust_metrics/robust_metrics.h"
 #include "prior_store.h"
-#include "bottle_instance.h"    // BottleInstance
-#include "agent_config.h"       // AgentConfig + load_agent_config
-#include "bottle_evaluator.h"   // BottleEvaluator (validation harness)
-#include "bottle_perception.h"  // BottlePerception (masks reading)
-#include "bottle_scene_graph.h" // BottleSceneGraph (DSR node/RT I/O)
-#include "bottle_fitter.h"      // BottleFitter (active-inference fit core)
+#include "bottle_instance.h"    // rc::BottleInstance
+#include "bottle_config.h"       // rc::BottleConfig + rc::load_bottle_config
+#include "bottle_evaluator.h"   // rc::BottleEvaluator (validation harness)
+#include "mask_ingestor.h"  // rc::MaskIngestor (masks reading)
+#include "bottle_scene_graph.h" // rc::BottleSceneGraph (DSR node/RT I/O)
+#include "bottle_fitter.h"      // rc::BottleFitter (active-inference fit core)
 
-// ─── (BottleInstance / AgentConfig moved to bottle_instance.h / agent_config.h) ─
+// ─── (rc::BottleInstance / rc::BottleConfig moved to bottle_instance.h / bottle_config.h) ─
 
 
 // ─── SpecificWorker ──────────────────────────────────────────────────────────
@@ -91,7 +91,7 @@ public slots:
     void del_node_slot(std::uint64_t from);
 
 private:
-    // (BottleObservation moved to bottle_fitter.h; MaskSlice/MasksPacket to bottle_perception.h)
+    // (BottleObservation moved to bottle_fitter.h; MaskSlice/MasksPacket to mask_ingestor.h)
 
     // ── Presence protocol ──────────────────────────────────────────────────────
     void waiting_enter();
@@ -120,9 +120,9 @@ private:
     std::atomic<bool> shutting_down_{false};
     AgentPresenceCoordinator presence_coordinator_;
 
-    AgentConfig                                 cfg_;
-    std::unique_ptr<PriorStore>                 prior_store_;
-    std::vector<BottlePrior>                    priors_cache_;
+    rc::BottleConfig                                 cfg_;
+    std::unique_ptr<rc::PriorStore>                 prior_store_;
+    std::vector<rc::BottlePrior>                    priors_cache_;
 
     std::unique_ptr<DSR::RT_API> rt_api_;
     std::unique_ptr<DSR::InnerEigenAPI> inner_eigen_;
@@ -130,10 +130,10 @@ private:
 
     // Collaborators (constructed in initialize(), after G + the DSR APIs are ready). Declared in
     // dependency order — the fitter holds raw pointers to the three above it, so it is destroyed first.
-    std::unique_ptr<BottlePerception> perception_;   // masks reading (owns the parsed MasksPacket)
-    std::unique_ptr<BottleSceneGraph> scene_graph_;  // DSR node/RT I/O (table, scaffold, write-back)
-    std::unique_ptr<BottleEvaluator>  evaluator_;    // Webots-GT / sweep / eval CSV (no-op unless flagged)
-    std::unique_ptr<BottleFitter>     fitter_;       // active-inference fit core (owns the instance map)
+    std::unique_ptr<rc::MaskIngestor> mask_ingestor_;   // masks reading (owns the parsed MasksPacket)
+    std::unique_ptr<rc::BottleSceneGraph> scene_graph_;  // DSR node/RT I/O (table, scaffold, write-back)
+    std::unique_ptr<rc::BottleEvaluator>  evaluator_;    // Webots-GT / sweep / eval CSV (no-op unless flagged)
+    std::unique_ptr<rc::BottleFitter>     fitter_;       // active-inference fit core (owns the instance map)
 
     int place_settle_ = 0;   // cycles waited after a start-placement move, before fitting (gate-lock guard)
 

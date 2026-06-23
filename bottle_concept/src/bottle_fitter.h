@@ -10,7 +10,7 @@
  *     + queue update + RGB silhouette likelihood + the gradient/free-energy step,
  *   - the bottle-owned voxel memory (ownership gate + FNV voxel keys).
  *
- * Collaborates with BottlePerception (masks), BottleSceneGraph (table lookups, model
+ * Collaborates with MaskIngestor (masks), BottleSceneGraph (table lookups, model
  * write-back, robot covariance) and BottleEvaluator (per-cycle eval logging). Plain
  * class (no Q_OBJECT) constructed by SpecificWorker after the other collaborators.
  */
@@ -29,23 +29,25 @@
 #include <dsr/api/dsr_inner_eigen_api.h>
 #include <dsr/api/dsr_camera_api.h>
 
-#include "agent_config.h"
+#include "bottle_config.h"
 #include "bottle_instance.h"
 #include "bottle_model.h"        // BottleModel / BottleState / BottleModelParams
 #include "sample_queue.h"        // SampleQueue / SampleQueueParams
 #include "prior_store.h"         // BottlePrior
-#include "bottle_perception.h"
+#include "mask_ingestor.h"
 #include "bottle_scene_graph.h"
 #include "bottle_evaluator.h"
+
+namespace rc {
 
 class BottleFitter
 {
 public:
     BottleFitter(std::shared_ptr<DSR::DSRGraph> graph,
                  DSR::InnerEigenAPI* inner_eigen,
-                 AgentConfig& cfg,
+                 BottleConfig& cfg,
                  const std::vector<BottlePrior>& priors,
-                 BottlePerception* perception,
+                 MaskIngestor* perception,
                  BottleSceneGraph* scene_graph,
                  BottleEvaluator* evaluator);
 
@@ -94,9 +96,9 @@ private:
 
     std::shared_ptr<DSR::DSRGraph>  G_;
     DSR::InnerEigenAPI*             inner_eigen_ = nullptr;
-    AgentConfig&                    cfg_;
+    BottleConfig&                    cfg_;
     const std::vector<BottlePrior>& priors_;
-    BottlePerception*               perception_  = nullptr;
+    MaskIngestor*               mask_ingestor_  = nullptr;
     BottleSceneGraph*               scene_graph_ = nullptr;
     BottleEvaluator*                evaluator_   = nullptr;
 
@@ -104,3 +106,5 @@ private:
     std::unordered_map<std::uint64_t, BottleInstance> instances_;
     std::uint64_t                   room_node_id_ = 0;   // refreshed each process_bottle_node call
 };
+
+}  // namespace rc

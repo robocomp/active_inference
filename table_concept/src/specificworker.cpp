@@ -35,6 +35,10 @@
 
 #include <filesystem>
 #include <print>
+#include <cstdlib>   // std::_Exit — crash-free terminal shutdown
+#include <thread>    // brief DDS flush before _Exit
+#include <chrono>
+#include <iostream>  // std::cout/cerr flush
 
 #include <algorithm>
 #include <cmath>
@@ -43,112 +47,6 @@
 // DSR attribute name tags — generated from dsr_attr_name.h
 #include <dsr/api/dsr_api.h>
 
-float SpecificWorker::TableBeliefPolicy::clamp01(float value)
-{
-    return std::clamp(value, 0.0f, 1.0f);
-}
-
-float SpecificWorker::TableBeliefPolicy::lerp(float start, float end, float gain)
-{
-    return start + gain * (end - start);
-}
-
-float SpecificWorker::TableBeliefPolicy::wrap_angle(float angle)
-{
-    while (angle > M_PIf) angle -= 2.0f * M_PIf;
-    while (angle < -M_PIf) angle += 2.0f * M_PIf;
-    return angle;
-}
-
-float SpecificWorker::TableBeliefPolicy::angle_lerp(float start, float end, float gain)
-{
-    return wrap_angle(start + gain * wrap_angle(end - start));
-}
-
-TableState SpecificWorker::TableBeliefPolicy::apply_observability_warm_start(
-    const TableState& previous,
-    const TableState& raw,
-    const TableModelParams& params,
-    const AgentConfig& cfg,
-    float confidence,
-    const std::array<float, 6>& coverage,
-    int point_count)
-{
-    constexpr float kCoverageEps = 1e-3f;
-
-    const float cov_px = coverage[0];
-    const float cov_nx = coverage[1];
-    const float cov_py = coverage[2];
-    const float cov_ny = coverage[3];
-
-    const float rho_x = std::min(cov_px, cov_nx) / (std::max(cov_px, cov_nx) + kCoverageEps);
-    const float rho_y = std::min(cov_py, cov_ny) / (std::max(cov_py, cov_ny) + kCoverageEps);
-    const float pts_span = std::max(1e-3f, cfg.warm_pts_max - cfg.warm_pts_min);
-    const float rho_pts = clamp01((static_cast<float>(point_count) - cfg.warm_pts_min) / pts_span);
-
-    const float rho_pos = rho_pts * std::max(rho_x, rho_y);
-    const float rho_size_x = rho_pts * rho_x;
-    const float rho_size_y = rho_pts * rho_y;
-    const float rho_vertical = rho_pts;
-    const float yaw_support = clamp01(0.25f * std::max(rho_x, rho_y) + 0.75f * std::sqrt(rho_x * rho_y));
-
-    const float lambda_pos = lerp(cfg.warm_lambda_pos_base + cfg.warm_lambda_pos_gain * rho_pos, 0.95f, confidence);
-    const float lambda_size_x = lerp(cfg.warm_lambda_size_base + cfg.warm_lambda_size_gain * rho_size_x, 0.95f, confidence);
-    const float lambda_size_y = lerp(cfg.warm_lambda_size_base + cfg.warm_lambda_size_gain * rho_size_y, 0.95f, confidence);
-    const float lambda_vertical = lerp(cfg.warm_lambda_size_base + cfg.warm_lambda_size_gain * rho_vertical, 0.90f, confidence);
-    const float lambda_yaw = lerp(cfg.warm_lambda_yaw_base + cfg.warm_lambda_yaw_gain * (rho_pts * yaw_support), 0.70f, confidence);
-
-    const float effective_side_min = cfg.warm_coverage_min_side * (1.0f - 0.6f * confidence);
-    const float effective_rho_freeze = cfg.warm_rho_freeze * (1.0f - 0.7f * confidence);
-
-    const bool freeze_x = std::min(cov_px, cov_nx) < effective_side_min || rho_x < effective_rho_freeze;
-    const bool freeze_y = std::min(cov_py, cov_ny) < effective_side_min || rho_y < effective_rho_freeze;
-
-    TableState accepted = raw;
-    accepted.cx = lerp(previous.cx, raw.cx, lambda_pos);
-    accepted.cy = lerp(previous.cy, raw.cy, lambda_pos);
-    accepted.w = freeze_x ? previous.w : lerp(previous.w, raw.w, lambda_size_x);
-    accepted.h = freeze_y ? previous.h : lerp(previous.h, raw.h, lambda_size_y);
-    accepted.table_height = lerp(previous.table_height, raw.table_height, lambda_vertical);
-    accepted.leg_length = lerp(previous.leg_length, raw.leg_length, lambda_vertical);
-    accepted.yaw = angle_lerp(previous.yaw, raw.yaw, lambda_yaw);
-
-    return accepted;
-}
-
-float SpecificWorker::TableBeliefPolicy::update_warm_confidence(
-    float previous_confidence,
-    const AgentConfig& cfg,
-    const std::array<float, 6>& coverage,
-    int point_count,
-    int residual_count,
-    float residual_precision)
-{
-    constexpr float kCoverageEps = 1e-3f;
-
-    const float cov_px = coverage[0];
-    const float cov_nx = coverage[1];
-    const float cov_py = coverage[2];
-    const float cov_ny = coverage[3];
-
-    const float rho_x = std::min(cov_px, cov_nx) / (std::max(cov_px, cov_nx) + kCoverageEps);
-    const float rho_y = std::min(cov_py, cov_ny) / (std::max(cov_py, cov_ny) + kCoverageEps);
-    const float pts_span = std::max(1e-3f, cfg.warm_pts_max - cfg.warm_pts_min);
-    const float rho_pts = clamp01((static_cast<float>(point_count) - cfg.warm_pts_min) / pts_span);
-    const float residual_ratio = clamp01(residual_precision * static_cast<float>(residual_count) /
-                                         static_cast<float>(std::max(1, point_count + residual_count)));
-
-    // Dense observations can raise confidence, but only balanced bilateral
-    // coverage should drive it close to one.
-    const float bilateral_support = 0.5f * (rho_x + rho_y);
-    const float coverage_evidence = rho_pts * lerp(0.15f, 1.0f, bilateral_support);
-    const float evidence = cfg.warm_confidence_coverage_gain * coverage_evidence +
-                           cfg.warm_confidence_residual_gain * residual_ratio;
-
-    const float updated = cfg.warm_confidence_decay * previous_confidence +
-                          (1.0f - cfg.warm_confidence_decay) * evidence;
-    return clamp01(updated);
-}
 
 // ─── Constructor / Destructor ─────────────────────────────────────────────────
 
@@ -205,7 +103,7 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader,
 SpecificWorker::~SpecificWorker()
 {
     request_shutdown();
-    std::print("table_concept: SpecificWorker destroyed, checkpoints saved.\n");
+    std::print("table_concept: SpecificWorker destroyed.\n");
 }
 
 void SpecificWorker::request_shutdown()
@@ -215,25 +113,33 @@ void SpecificWorker::request_shutdown()
 
     save_window_settings();
 
-    if (prior_store_)
-    {
-        for (const auto& [id, inst] : instances_)
-        {
-            prior_store_->save_checkpoint(TableCheckpoint{
-                inst.node_name,
-                inst.model.state().w,
-                inst.model.state().h,
-                inst.model.state().table_height,
-                inst.model.state().cx,
-                inst.model.state().cy,
-                inst.model.state().yaw,
-                inst.prev_free_energy,
-                inst.model_stable
-            });
-        }
-    }
-
     cleanup_owned_nodes();
+
+    // Drop the InnerEigenAPI now (the fitter only holds a raw pointer and is null-guarded): letting it
+    // destruct later with the rest of the object can fault inside DSR. Mirrors bottle_concept.
+    inner_eigen_.reset();
+}
+
+void SpecificWorker::terminal_shutdown()
+{
+    static std::atomic<bool> terminating{false};
+    if (terminating.exchange(true))
+        return;   // _Exit is coming; never run this twice
+
+    // Crash-free terminal exit (matches bottle_concept). After our cleanup (owned
+    // nodes deleted, peers notified) hard-exit instead of returning into the Ice communicator teardown +
+    // C++ static destruction, which run with undefined cross-TU order and abort (a global/DDS holder
+    // copies a graph Node after the node-type registry static is gone → Node::type() throws).
+    request_shutdown();
+    if (G)
+    {
+        try { G->reset(); }   // clean DDS participant/entity removal without touching the Ice communicator
+        catch (...) { /* best-effort: we are exiting regardless */ }
+    }
+    std::cout.flush();
+    std::cerr.flush();
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));   // let the del-deltas reach peers
+    std::_Exit(EXIT_SUCCESS);
 }
 
 // ─── Initialisation ──────────────────────────────────────────────────────────
@@ -297,17 +203,36 @@ void SpecificWorker::initialize()
         },
         .on_degraded_enter = [this]()
         {
-            qInfo("[SM] -> Degraded: required peer lost. Cleaning up and exiting.");
-            request_shutdown();
-            QTimer::singleShot(500, QCoreApplication::instance(), SLOT(quit()));
+            if (shutting_down_)
+                return;
+            // Debounce: a transient required-peer flap (startup handshake, brief node churn) fires
+            // presenceLost momentarily and then recovers; tearing down here would kill the agent on a
+            // blip. Wait a grace period and only shut down if a required peer is STILL missing.
+            qInfo("[SM] -> Degraded: required peer lost — %d ms grace before shutdown", REQUIRED_LOSS_GRACE_MS);
+            QTimer::singleShot(REQUIRED_LOSS_GRACE_MS, this, [this]()
+            {
+                if (shutting_down_)
+                    return;
+                if (presence_coordinator_.all_required_ready())
+                {
+                    qInfo("[SM] required peers recovered during grace — staying alive");
+                    return;
+                }
+                qWarning("[SM] required peer still missing after grace — shutting down cleanly");
+                terminal_shutdown();
+            });
         },
     });
     presence_coordinator_.start();
 
     QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
-                     this, &SpecificWorker::request_shutdown, Qt::UniqueConnection);
+                     this, &SpecificWorker::terminal_shutdown, Qt::UniqueConnection);
 
     rt_api_ = G->get_rt_api();
+    inner_eigen_ = G->get_inner_eigen_api();
+    mask_ingestor_ = std::make_unique<rc::MaskIngestor>(G);
+    scene_graph_ = std::make_unique<rc::TableSceneGraph>(
+        G, rt_api_.get(), [this] { trigger_graph_layout_twopi(); });
 
     // Subscribe to graph signals
     connect(G.get(), &DSR::DSRGraph::update_node_signal,
@@ -325,14 +250,18 @@ void SpecificWorker::initialize()
         qWarning() << "table_concept: no room node found at startup";
 
     // Setup prior store
-    prior_store_ = std::make_unique<PriorStore>(priors_path_, checkpoint_path_);
+    prior_store_ = std::make_unique<rc::PriorStore>(priors_path_);
     priors_cache_ = prior_store_->load_priors();
+
+    // Active-inference fit core. Owns the instance map; collaborates with the ingestor + scene graph.
+    fitter_ = std::make_unique<rc::TableFitter>(
+        G, inner_eigen_.get(), cfg_, priors_cache_, mask_ingestor_.get(), scene_graph_.get());
 
     // Missing table nodes are scaffolded lazily from priors only after masks
     // provide some table evidence in the current scene.
 
-    // Build EpistemicPlanner with configured parameters
-    epistemic_planner_ = EpistemicPlanner(cfg_.delta_min, cfg_.gain_threshold, cfg_.obs_distance);
+    // Build rc::EpistemicPlanner with configured parameters
+    epistemic_planner_ = rc::EpistemicPlanner(cfg_.delta_min, cfg_.gain_threshold, cfg_.obs_distance);
 
     // Remove stale affordance nodes created by this agent only.
     // Keep foreign affordance nodes untouched.
@@ -372,7 +301,7 @@ void SpecificWorker::initialize()
 
         // GenericWorker::initialize() may have already started compute(), so
         // some instances can exist before the plots are constructed.
-        for (const auto& [_, inst] : instances_)
+        for (const auto& [_, inst] : fitter_->instances())
         {
             ts_plot_->add_series(inst.node_name + "_fe", QColor(255, 170, 0), 1.1f);
             ts_cov_plot_->add_series(inst.node_name + "_cov", QColor(0, 190, 255), 1.1f);
@@ -396,9 +325,8 @@ void SpecificWorker::compute()
         room_node_id_ = rooms.front().id();
     }
 
-    refresh_masks_packet();
-    refresh_tracks_packet();
-    scaffold_missing_table_nodes();
+    mask_ingestor_->refresh();
+    scene_graph_->scaffold_missing_table_nodes(priors_cache_, mask_ingestor_->packet(), room_node_id_);
 
     const auto table_nodes = G->get_nodes_by_type("table");
     for (const auto& node : table_nodes)
@@ -408,531 +336,55 @@ void SpecificWorker::compute()
 ///////////////////////////////////////////////////////////////
 void SpecificWorker::process_table_node(const DSR::Node& node)
 {
-    ensure_instance(node);
+    const bool created = fitter_->ensure_instance(node, room_node_id_);
+    auto& inst = fitter_->instances().at(node.id());
 
-    auto& inst = instances_.at(node.id());
+    if (created)
+    {
+        // Register per-instance time-series (Qt dashboards stay in the worker).
+        if (ts_plot_)
+        {
+            ts_plot_->add_series(inst.node_name + "_fe",  QColor(255, 170,   0), 1.1f);
+            if (ts_cov_plot_) ts_cov_plot_->add_series(inst.node_name + "_cov", QColor(  0, 190, 255), 1.1f);
+            if (ts_res_plot_) ts_res_plot_->add_series(inst.node_name + "_res", QColor(170,  80, 255), 1.1f);
+        }
+        // Canvas position — viewer randomizes pos_x/pos_y if absent.
+        if (not G->get_attrib_by_name<pos_x_att>(node).has_value())
+        {
+            auto n_mut = node;
+            float rpx = 200.f, rpy = 200.f;
+            if (room_node_id_ != 0)
+                if (const auto rn = G->get_node(room_node_id_); rn.has_value())
+                {
+                    rpx = G->get_attrib_by_name<pos_x_att>(rn.value()).value_or(200.f);
+                    rpy = G->get_attrib_by_name<pos_y_att>(rn.value()).value_or(200.f);
+                }
+            G->add_or_modify_attrib_local<pos_x_att>(n_mut, rpx + 150.f);
+            G->add_or_modify_attrib_local<pos_y_att>(n_mut, rpy +  50.f);
+            G->update_node(n_mut);
+        }
+    }
+
     ++inst.processed_cycles;
-    const auto observation = observe_table_node(inst, node);
+    const auto observation = fitter_->observe(inst, node);
 
     // Stale check: skip heavy update if data hasn't moved for too long
     if (not observation.has_fresh_data and inst.matched_frames < 5)
         return;
 
-    const float free_energy = run_table_inference(inst, observation);
+    const float free_energy = fitter_->run_inference(inst, observation);
     publish_table_cycle(inst, node, observation, free_energy);
     inst.prev_free_energy = free_energy;
 }
 
-SpecificWorker::TableObservation SpecificWorker::observe_table_node(TableInstance& inst,
-                                                                    const DSR::Node& node)
-{
-    TableObservation observation;
 
-    // ── Primary path: generic tracks (persistent ids, room frame). The concept
-    // owns instance assignment via select_track_for_table; classify-don't-destroy
-    // SDF split keeps inliers as candidates (queue anchors). No model feedback to
-    // the voxelizer, so the old cross-agent loop is broken.
-    if (tracks_packet_.valid && tracks_packet_.frame_id > inst.last_tracks_frame_seen)
-    {
-        const auto selected_track = select_track_for_table(inst);
-        if (selected_track.has_value())
-        {
-            const auto& slice = selected_track.value();
-            const std::size_t begin = std::min(slice.support_begin, tracks_packet_.support_points.size());
-            const std::size_t end   = std::min(slice.support_end,   tracks_packet_.support_points.size());
-
-            std::vector<Eigen::Vector3f> candidate_pts;
-            std::vector<Eigen::Vector3f> residual_pts;
-            candidate_pts.reserve(end > begin ? end - begin : 0);
-            residual_pts.reserve(end > begin ? end - begin : 0);
-
-            for (std::size_t i = begin; i < end; ++i)
-            {
-                const auto& p = tracks_packet_.support_points[i];
-                const float sdf = inst.model.sdf_point(p);
-                if (std::abs(sdf) < cfg_.sdf_threshold_for_storage)
-                    candidate_pts.push_back(p);
-                else
-                    residual_pts.push_back(p);
-            }
-
-            observation.has_fresh_data = true;
-            observation.candidate_pts = std::move(candidate_pts);
-            observation.residual_pts  = std::move(residual_pts);
-
-            if (!observation.candidate_pts.empty() || !observation.residual_pts.empty())
-            {
-                const float total = static_cast<float>(observation.candidate_pts.size() + observation.residual_pts.size());
-                observation.explanation_ratio = total > 0.0f
-                    ? static_cast<float>(observation.candidate_pts.size()) / total
-                    : 0.0f;
-
-                inst.last_tracks_frame_seen = tracks_packet_.frame_id;
-
-                if (should_log_table(inst))
-                    std::print("[{}] tracks={} track_id={} label='{}' support={} cand={} resid={} centroid=({:.2f},{:.2f},{:.2f})\n",
-                               inst.node_name,
-                               tracks_packet_.frame_id,
-                               slice.track_id,
-                               slice.label,
-                               end - begin,
-                               observation.candidate_pts.size(),
-                               observation.residual_pts.size(),
-                               slice.centroid.x(), slice.centroid.y(), slice.centroid.z());
-                return observation;
-            }
-        }
-    }
-
-    if (masks_packet_.valid && masks_packet_.frame_id > inst.last_masks_frame_seen)
-    {
-        const auto selected_mask = select_mask_for_table(inst);
-        if (selected_mask.has_value())
-        {
-            const auto& slice = selected_mask.value();
-            const std::size_t begin = std::min(slice.support_begin, masks_packet_.support_points.size());
-            const std::size_t end = std::min(slice.support_end, masks_packet_.support_points.size());
-
-            std::vector<Eigen::Vector3f> candidate_pts;
-            std::vector<Eigen::Vector3f> residual_pts;
-            candidate_pts.reserve(end > begin ? end - begin : 0);
-            residual_pts.reserve(end > begin ? end - begin : 0);
-
-            for (std::size_t i = begin; i < end; ++i)
-            {
-                const auto& p = masks_packet_.support_points[i];
-                const float sdf = inst.model.sdf_point(p);
-                if (std::abs(sdf) < cfg_.sdf_threshold_for_storage)
-                    candidate_pts.push_back(p);
-                else
-                    residual_pts.push_back(p);
-            }
-
-            observation.has_fresh_data = true;
-            observation.candidate_pts = std::move(candidate_pts);
-            observation.residual_pts = std::move(residual_pts);
-
-            if (!observation.candidate_pts.empty() || !observation.residual_pts.empty())
-            {
-                const float total = static_cast<float>(observation.candidate_pts.size() + observation.residual_pts.size());
-                observation.explanation_ratio = total > 0.0f
-                    ? static_cast<float>(observation.candidate_pts.size()) / total
-                    : 0.0f;
-
-                inst.last_masks_frame_seen = masks_packet_.frame_id;
-
-                if (should_log_table(inst))
-                    std::print("[{}] masks={} label='{}' conf={:.2f} support={} cand={} resid={} centroid=({:.2f},{:.2f},{:.2f})\n",
-                               inst.node_name,
-                               masks_packet_.frame_id,
-                               slice.label,
-                               slice.confidence,
-                               end - begin,
-                               observation.candidate_pts.size(),
-                               observation.residual_pts.size(),
-                               slice.centroid.x(), slice.centroid.y(), slice.centroid.z());
-                return observation;
-            }
-        }
-    }
-
-    int last_frame = -1;
-    if (const auto v = G->get_attrib_by_name<last_sensing_frame_att>(node); v.has_value())
-        last_frame = v.value();
-
-    observation.has_fresh_data = (last_frame > inst.last_frame_seen);
-    if (not observation.has_fresh_data)
-        return observation;
-
-    inst.last_frame_seen = last_frame;
-    observation.candidate_pts = read_pts_attrib(node, "candidate_pts_att");
-    observation.residual_pts  = read_pts_attrib(node, "residual_pts_att");
-
-    if (const auto v = G->get_attrib_by_name<explanation_ratio_att>(node); v.has_value())
-        observation.explanation_ratio = v.value();
-
-    // ↓ Bottom-up: new sensory evidence arriving from robot_concept
-    if (should_log_table(inst))
-        std::print("[{}] ↓ frame={} cands={} resid={} expl={:.2f}\n",
-                   inst.node_name, last_frame,
-                   observation.candidate_pts.size(), observation.residual_pts.size(),
-                   observation.explanation_ratio);
-    return observation;
-}
-
-bool SpecificWorker::should_log_table(const TableInstance& inst) const
-{
-    const int period = std::max(1, cfg_.table_log_period_frames);
-    return (inst.processed_cycles % period) == 0;
-}
-
-bool SpecificWorker::refresh_masks_packet()
-{
-    const auto masks_node_opt = G->get_node("masks");
-    if (!masks_node_opt.has_value())
-    {
-        masks_packet_ = {};
-        return false;
-    }
-
-    const auto& masks_node = masks_node_opt.value();
-    const auto& attrs = masks_node.attrs();
-
-    const auto find_attr = [&](const std::string& key) -> const DSR::Attribute*
-    {
-        const auto it = attrs.find(key);
-        return (it != attrs.end()) ? &it->second : nullptr;
-    };
-
-    const DSR::Attribute* frame_attr = find_attr("mask_frame_id");
-    const DSR::Attribute* count_attr = find_attr("mask_count");
-    const DSR::Attribute* labels_attr = find_attr("mask_labels");
-    const DSR::Attribute* label_ids_attr = find_attr("mask_label_ids");
-    const DSR::Attribute* confs_attr = find_attr("mask_confidences");
-    const DSR::Attribute* offsets_attr = find_attr("mask_support_offsets");
-    const DSR::Attribute* points_attr = find_attr("mask_support_points");
-    const DSR::Attribute* centroids_attr = find_attr("mask_centroids_xyz");
-    const DSR::Attribute* bbox_min_attr = find_attr("mask_bbox_min_xyz");
-    const DSR::Attribute* bbox_max_attr = find_attr("mask_bbox_max_xyz");
-
-    if (frame_attr == nullptr || count_attr == nullptr || labels_attr == nullptr ||
-        label_ids_attr == nullptr || confs_attr == nullptr || offsets_attr == nullptr ||
-        points_attr == nullptr || centroids_attr == nullptr || bbox_min_attr == nullptr ||
-        bbox_max_attr == nullptr)
-    {
-        masks_packet_ = {};
-        return false;
-    }
-
-    const int frame_id = frame_attr->dec();
-    if (frame_id <= last_masks_frame_seen_)
-        return false;
-
-    const int mask_count = std::max(0, count_attr->dec());
-    const auto& labels = labels_attr->str();
-    const auto& label_ids = label_ids_attr->float_vec();
-    const auto& confidences = confs_attr->float_vec();
-    const auto& offsets = offsets_attr->float_vec();
-    const auto& support_flat = points_attr->float_vec();
-    const auto& centroids_flat = centroids_attr->float_vec();
-    const auto& bbox_min_flat = bbox_min_attr->float_vec();
-    const auto& bbox_max_flat = bbox_max_attr->float_vec();
-
-    const std::size_t support_count = support_flat.size() / 3;
-    const std::size_t centroid_count = centroids_flat.size() / 3;
-    const std::size_t bbox_min_count = bbox_min_flat.size() / 3;
-    const std::size_t bbox_max_count = bbox_max_flat.size() / 3;
-
-    std::vector<std::string> label_tokens;
-    {
-        std::stringstream ss(labels);
-        std::string token;
-        while (std::getline(ss, token, '|'))
-            label_tokens.push_back(token);
-    }
-
-    MasksPacket packet;
-    packet.valid = true;
-    packet.frame_id = frame_id;
-    packet.support_points.reserve(support_count);
-    for (std::size_t i = 0; i < support_count; ++i)
-        packet.support_points.emplace_back(support_flat[i*3], support_flat[i*3+1], support_flat[i*3+2]);
-
-    packet.slices.reserve(static_cast<std::size_t>(mask_count));
-    for (int i = 0; i < mask_count; ++i)
-    {
-        const std::size_t begin = (i < static_cast<int>(offsets.size())) ? static_cast<std::size_t>(std::max(0.0f, offsets[static_cast<std::size_t>(i)])) : 0;
-        const std::size_t end = (i + 1 < static_cast<int>(offsets.size())) ? static_cast<std::size_t>(std::max(0.0f, offsets[static_cast<std::size_t>(i + 1)])) : begin;
-        const std::size_t clamped_begin = std::min(begin, packet.support_points.size());
-        const std::size_t clamped_end = std::min(end, packet.support_points.size());
-
-        const auto fetch_vec3 = [&](const std::vector<float>& flat, std::size_t count) -> Eigen::Vector3f
-        {
-            if (static_cast<std::size_t>(i) >= count)
-                return Eigen::Vector3f::Zero();
-            return {flat[i*3], flat[i*3+1], flat[i*3+2]};
-        };
-
-        MaskSlice slice;
-        if (static_cast<std::size_t>(i) < label_tokens.size())
-            slice.label = label_tokens[static_cast<std::size_t>(i)];
-        if (static_cast<std::size_t>(i) < label_ids.size())
-            slice.class_id = label_ids[static_cast<std::size_t>(i)];
-        if (static_cast<std::size_t>(i) < confidences.size())
-            slice.confidence = confidences[static_cast<std::size_t>(i)];
-        slice.support_begin = clamped_begin;
-        slice.support_end = clamped_end;
-        slice.centroid = fetch_vec3(centroids_flat, centroid_count);
-        slice.bbox_min = fetch_vec3(bbox_min_flat, bbox_min_count);
-        slice.bbox_max = fetch_vec3(bbox_max_flat, bbox_max_count);
-        packet.slices.push_back(slice);
-    }
-
-    masks_packet_ = std::move(packet);
-    last_masks_frame_seen_ = frame_id;
-    return true;
-}
-
-std::optional<SpecificWorker::MaskSlice> SpecificWorker::select_mask_for_table(const TableInstance& inst) const
-{
-    if (!masks_packet_.valid || masks_packet_.slices.empty())
-        return std::nullopt;
-
-    const auto& state = inst.model.state();
-    const Eigen::Vector3f table_centroid(state.cx, state.cy, state.table_height);
-
-    float best_cost = std::numeric_limits<float>::max();
-    std::optional<MaskSlice> best;
-    for (const auto& slice : masks_packet_.slices)
-    {
-        if (slice.label != "table")
-            continue;
-
-        const float dx = slice.centroid.x() - table_centroid.x();
-        const float dy = slice.centroid.y() - table_centroid.y();
-        const float dz = slice.centroid.z() - table_centroid.z();
-        const float dist = std::sqrt(dx*dx + dy*dy + dz*dz);
-        if (dist < best_cost)
-        {
-            best_cost = dist;
-            best = slice;
-        }
-    }
-
-    return best;
-}
-
-bool SpecificWorker::refresh_tracks_packet()
-{
-    const auto tracks_node_opt = G->get_node("tracks");
-    if (!tracks_node_opt.has_value())
-    {
-        tracks_packet_ = {};
-        return false;
-    }
-
-    const auto& tracks_node = tracks_node_opt.value();
-    const auto& attrs = tracks_node.attrs();
-
-    const auto find_attr = [&](const std::string& key) -> const DSR::Attribute*
-    {
-        const auto it = attrs.find(key);
-        return (it != attrs.end()) ? &it->second : nullptr;
-    };
-
-    const DSR::Attribute* frame_attr     = find_attr("track_frame_id");
-    const DSR::Attribute* count_attr     = find_attr("track_count");
-    const DSR::Attribute* ids_attr       = find_attr("track_ids");
-    const DSR::Attribute* labels_attr    = find_attr("track_labels");
-    const DSR::Attribute* confs_attr     = find_attr("track_confidences");
-    const DSR::Attribute* last_seen_attr = find_attr("track_last_seen");
-    const DSR::Attribute* offsets_attr   = find_attr("track_support_offsets");
-    const DSR::Attribute* points_attr    = find_attr("track_support_points");
-    const DSR::Attribute* centroids_attr = find_attr("track_centroids_xyz");
-    const DSR::Attribute* bbox_min_attr  = find_attr("track_bbox_min_xyz");
-    const DSR::Attribute* bbox_max_attr  = find_attr("track_bbox_max_xyz");
-
-    if (frame_attr == nullptr || count_attr == nullptr || ids_attr == nullptr ||
-        labels_attr == nullptr || offsets_attr == nullptr || points_attr == nullptr ||
-        centroids_attr == nullptr || bbox_min_attr == nullptr || bbox_max_attr == nullptr)
-    {
-        tracks_packet_ = {};
-        return false;
-    }
-
-    const int frame_id = frame_attr->dec();
-    if (frame_id <= last_tracks_frame_seen_)
-        return false;
-
-    const int track_count = std::max(0, count_attr->dec());
-    const auto& ids = ids_attr->float_vec();
-    const auto& labels = labels_attr->str();
-    const auto& confidences = confs_attr ? confs_attr->float_vec() : std::vector<float>{};
-    const auto& last_seen = last_seen_attr ? last_seen_attr->float_vec() : std::vector<float>{};
-    const auto& offsets = offsets_attr->float_vec();
-    const auto& support_flat = points_attr->float_vec();
-    const auto& centroids_flat = centroids_attr->float_vec();
-    const auto& bbox_min_flat = bbox_min_attr->float_vec();
-    const auto& bbox_max_flat = bbox_max_attr->float_vec();
-
-    const std::size_t support_count = support_flat.size() / 3;
-    const std::size_t centroid_count = centroids_flat.size() / 3;
-    const std::size_t bbox_min_count = bbox_min_flat.size() / 3;
-    const std::size_t bbox_max_count = bbox_max_flat.size() / 3;
-
-    std::vector<std::string> label_tokens;
-    {
-        std::stringstream ss(labels);
-        std::string token;
-        while (std::getline(ss, token, '|'))
-            label_tokens.push_back(token);
-    }
-
-    TracksPacket packet;
-    packet.valid = true;
-    packet.frame_id = frame_id;
-    packet.support_points.reserve(support_count);
-    for (std::size_t i = 0; i < support_count; ++i)
-        packet.support_points.emplace_back(support_flat[i*3], support_flat[i*3+1], support_flat[i*3+2]);
-
-    packet.slices.reserve(static_cast<std::size_t>(track_count));
-    for (int i = 0; i < track_count; ++i)
-    {
-        const std::size_t begin = (i < static_cast<int>(offsets.size())) ? static_cast<std::size_t>(std::max(0.0f, offsets[static_cast<std::size_t>(i)])) : 0;
-        const std::size_t end = (i + 1 < static_cast<int>(offsets.size())) ? static_cast<std::size_t>(std::max(0.0f, offsets[static_cast<std::size_t>(i + 1)])) : begin;
-
-        const auto fetch_vec3 = [&](const std::vector<float>& flat, std::size_t count) -> Eigen::Vector3f
-        {
-            if (static_cast<std::size_t>(i) >= count)
-                return Eigen::Vector3f::Zero();
-            return {flat[i*3], flat[i*3+1], flat[i*3+2]};
-        };
-
-        TrackSlice slice;
-        if (static_cast<std::size_t>(i) < ids.size())
-            slice.track_id = static_cast<int>(ids[static_cast<std::size_t>(i)]);
-        if (static_cast<std::size_t>(i) < label_tokens.size())
-            slice.label = label_tokens[static_cast<std::size_t>(i)];
-        if (static_cast<std::size_t>(i) < confidences.size())
-            slice.confidence = confidences[static_cast<std::size_t>(i)];
-        if (static_cast<std::size_t>(i) < last_seen.size())
-            slice.last_seen = static_cast<int>(last_seen[static_cast<std::size_t>(i)]);
-        slice.support_begin = std::min(begin, packet.support_points.size());
-        slice.support_end   = std::min(end,   packet.support_points.size());
-        slice.centroid = fetch_vec3(centroids_flat, centroid_count);
-        slice.bbox_min = fetch_vec3(bbox_min_flat, bbox_min_count);
-        slice.bbox_max = fetch_vec3(bbox_max_flat, bbox_max_count);
-        packet.slices.push_back(slice);
-    }
-
-    tracks_packet_ = std::move(packet);
-    last_tracks_frame_seen_ = frame_id;
-    return true;
-}
-
-std::optional<SpecificWorker::TrackSlice> SpecificWorker::select_track_for_table(TableInstance& inst) const
-{
-    if (!tracks_packet_.valid || tracks_packet_.slices.empty())
-        return std::nullopt;
-
-    const auto& s = inst.model.state();
-    const Eigen::Vector2f model_c(s.cx, s.cy);
-    // Predicted OBB footprint + padding, rotated by model yaw.
-    const float half_x = 0.5f * std::abs(s.w) + 0.10f;
-    const float half_y = 0.5f * std::abs(s.h) + 0.10f;
-    const float cyaw = std::cos(-s.yaw);
-    const float syaw = std::sin(-s.yaw);
-    const auto inside_obb_xy = [&](const Eigen::Vector3f& p) -> bool
-    {
-        const float rx = p.x() - model_c.x();
-        const float ry = p.y() - model_c.y();
-        const float lx = rx * cyaw - ry * syaw;
-        const float ly = rx * syaw + ry * cyaw;
-        return std::abs(lx) <= half_x && std::abs(ly) <= half_y;
-    };
-
-    int   best_track_id = -1;
-    float best_score    = -std::numeric_limits<float>::max();
-    std::optional<TrackSlice> best;
-    for (const auto& t : tracks_packet_.slices)
-    {
-        if (t.label != "table")          // label is a vote: prefer table-labelled tracks
-            continue;
-
-        // Score = #support points explained by my predicted OBB, minus a small
-        // centroid-distance penalty as a tie-breaker.
-        int hits = 0;
-        for (std::size_t i = t.support_begin; i < t.support_end; ++i)
-            if (inside_obb_xy(tracks_packet_.support_points[i]))
-                ++hits;
-        const float dist = (t.centroid.head<2>() - model_c).norm();
-        float score = static_cast<float>(hits) - 0.01f * dist;
-
-        // Sticky hysteresis: bias toward the track we already committed to.
-        if (t.track_id == inst.committed_track_id)
-            score += 2.0f;
-
-        if (score > best_score)
-        {
-            best_score    = score;
-            best_track_id = t.track_id;
-            best          = t;
-        }
-    }
-
-    if (best.has_value())
-        inst.committed_track_id = best_track_id;
-    return best;
-}
-
-float SpecificWorker::run_table_inference(TableInstance& inst,
-                                          const TableObservation& observation)
-{
-    inst.queue.begin_cycle();
-
-    if (observation.has_fresh_data)
-        ingest_observation_voxels(inst, observation);
-
-    if (observation.has_fresh_data and not inst.voxel_bank_pts.empty())
-    {
-        // Cold-start: on first observation snap model & prior to voxel centroid
-        // so gradient descent begins at the right place rather than the prior.
-        if (inst.matched_frames == 0)
-        {
-            Eigen::Vector3f sum = Eigen::Vector3f::Zero();
-            const auto& centroid_source = observation.candidate_pts.empty() ? inst.voxel_bank_pts
-                                                                             : observation.candidate_pts;
-            for (const auto& p : centroid_source)
-                sum += p;
-            const Eigen::Vector3f cen = sum / static_cast<float>(centroid_source.size());
-            auto s  = inst.model.state();
-            s.cx    = cen.x();
-            s.cy    = cen.y();
-            inst.model.set_state(s);
-            inst.model.set_prior(s);   // zero KL so data term dominates from the start
-            std::print("[{}] cold-start snap → cx={:.2f} cy={:.2f} ({} pts)\n",
-                       inst.node_name, s.cx, s.cy, centroid_source.size());
-            // Pose is already correct: bypass warmup gate AND progress ramp
-            // so the queue admits up to max_new_points_per_frame immediately.
-            inst.matched_frames = cfg_.min_frames_before_historical
-                                + cfg_.historical_warmup_frames + 1;
-        }
-        else
-            ++inst.matched_frames;
-
-        step_queue_update(inst, inst.voxel_bank_pts,
-                          TableBeliefPolicy::clamp01(observation.explanation_ratio));
-    }
-
-    const float explanation_confidence = TableBeliefPolicy::clamp01(observation.explanation_ratio);
-    float residual_precision = TableBeliefPolicy::clamp01(
-        inst.warm_confidence * (1.0f - explanation_confidence));
-    if (observation.has_fresh_data && observation.candidate_pts.empty() && !observation.residual_pts.empty())
-    {
-        // If upstream delivers only residuals, keep a small non-zero precision so
-        // the optimizer can still expand toward unexplained geometry.
-        residual_precision = std::max(residual_precision, 0.10f);
-    }
-    const float free_energy = step_model_update(inst, observation.residual_pts, residual_precision);
-
-    // ↑ Top-down: model state after gradient descent
-    const auto& s = inst.model.state();
-    if (should_log_table(inst))
-        std::print("[{}] FE={:.4f}  cx={:.3f} cy={:.3f}  w={:.3f} h={:.3f} H={:.3f} L={:.3f} ψ={:.3f}  pts={}\n",
-                   inst.node_name, free_energy,
-                   s.cx, s.cy, s.w, s.h, s.table_height, s.leg_length, s.yaw,
-                   inst.queue.size() + static_cast<int>(observation.residual_pts.size()));
-
-    return free_energy;
-}
-
-void SpecificWorker::publish_table_cycle(TableInstance& inst,
+void SpecificWorker::publish_table_cycle(rc::TableInstance& inst,
                                          const DSR::Node& node,
                                          const TableObservation& observation,
                                          float free_energy)
 {
     const auto node_id = node.id();
-    if (not persist_table_belief(inst, node_id, free_energy))
+    if (not scene_graph_->persist_table_belief(inst, node_id, room_node_id_, free_energy))
         return;
     if (not assess_table_state(inst, node_id, free_energy))
         return;
@@ -940,17 +392,7 @@ void SpecificWorker::publish_table_cycle(TableInstance& inst,
     publish_table_intentions(inst, node_id, observation, free_energy);
 }
 
-bool SpecificWorker::persist_table_belief(TableInstance& inst, uint64_t node_id, float free_energy)
-{
-    auto node_opt = G->get_node(node_id);
-    if (not node_opt.has_value())
-        return false;
-
-    step_write_model(inst, node_opt.value(), free_energy);
-    return true;
-}
-
-bool SpecificWorker::assess_table_state(TableInstance& inst, uint64_t node_id, float free_energy)
+bool SpecificWorker::assess_table_state(rc::TableInstance& inst, uint64_t node_id, float free_energy)
 {
     auto node_opt = G->get_node(node_id);
     if (not node_opt.has_value())
@@ -960,7 +402,7 @@ bool SpecificWorker::assess_table_state(TableInstance& inst, uint64_t node_id, f
     return true;
 }
 
-void SpecificWorker::publish_table_diagnostics(const TableInstance& inst,
+void SpecificWorker::publish_table_diagnostics(const rc::TableInstance& inst,
                                                const TableObservation& observation,
                                                float free_energy)
 {
@@ -974,7 +416,7 @@ void SpecificWorker::publish_table_diagnostics(const TableInstance& inst,
             ts_res_plot_->add_point(inst.node_name + "_res", static_cast<float>(observation.residual_pts.size()));
     }
 
-    if (should_log_table(inst))
+    if (fitter_->should_log_table(inst))
         std::print("[{}] series: FE={:.4f} cov={:.1f} res={}\n",
                    inst.node_name,
                    free_energy,
@@ -982,7 +424,7 @@ void SpecificWorker::publish_table_diagnostics(const TableInstance& inst,
                    observation.residual_pts.size());
 }
 
-void SpecificWorker::publish_table_intentions(TableInstance& inst,
+void SpecificWorker::publish_table_intentions(rc::TableInstance& inst,
                                               uint64_t node_id,
                                               const TableObservation& observation,
                                               float free_energy)
@@ -1011,685 +453,30 @@ void SpecificWorker::publish_table_intentions(TableInstance& inst,
 
 void SpecificWorker::load_config(const ConfigLoader& cfg)
 {
-    // Helper lambdas to read with fallback (ConfigLoader::get has no default overload;
-    // TOML numeric floats are stored as double, so cast explicitly).
-    auto getf = [&](const std::string& k, float def) -> float {
-        return cfg.exists(k) ? static_cast<float>(cfg.get<double>(k)) : def;
-    };
-    auto geti = [&](const std::string& k, int def) -> int {
-        return cfg.exists(k) ? cfg.get<int>(k) : def;
-    };
-    auto gets = [&](const std::string& k, std::string def) -> std::string {
-        return cfg.exists(k) ? cfg.get<std::string>(k) : def;
-    };
-
-    // Paths
-    priors_path_     = gets("TableConcept.PriorsPath",     "etc/object_priors.toml");
-    checkpoint_path_ = gets("TableConcept.CheckpointPath", "etc/checkpoint.toml");
-
-    // Agent convergence
-    cfg_.fe_eps                   = getf("TableConcept.FEps",                   1e-3f);
-    cfg_.K_stable                 = geti("TableConcept.KStable",                30);
-    cfg_.M_diverge                = geti("TableConcept.MDiverge",               20);
-    cfg_.staleness_frames         = getf("TableConcept.StalenessFrames",        90.0f);
-    cfg_.explanation_ratio_thresh = getf("TableConcept.ExplanationRatioThresh", 0.3f);
-    cfg_.write_threshold          = getf("TableConcept.WriteThreshold",         1e-3f);
-    cfg_.obs_distance             = getf("TableConcept.ObsDistance",            1.8f);
-    cfg_.delta_min                = getf("TableConcept.DeltaMin",               20.0f);
-    cfg_.gain_threshold           = getf("TableConcept.GainThreshold",          0.1f);
-    cfg_.table_log_period_frames  = geti("TableConcept.TableLogPeriodFrames",   30);
-    cfg_.voxel_bank_max_points    = geti("TableConcept.VoxelBankMaxPoints",     4000);
-    cfg_.voxel_bank_quantization_m= getf("TableConcept.VoxelBankQuantizationM", 0.02f);
-    cfg_.voxel_select_radius_margin_m = getf("TableConcept.VoxelSelectRadiusMarginM", 0.50f);
-    cfg_.voxel_select_height_margin_m = getf("TableConcept.VoxelSelectHeightMarginM", 0.25f);
-
-    // TableModel
-    cfg_.sigma_obs          = getf("TableModel.SigmaObs",          0.05f);
-    cfg_.lambda_size        = getf("TableModel.LambdaSize",        0.15f);
-    cfg_.lambda_pos         = getf("TableModel.LambdaPos",         0.05f);
-    cfg_.lambda_state       = getf("TableModel.LambdaState",       0.02f);
-    cfg_.lambda_angle       = getf("TableModel.LambdaAngle",       0.01f);
-    cfg_.prior_size_std     = getf("TableModel.PriorSizeStd",      0.30f);
-    cfg_.optimization_iters = geti("TableModel.OptimizationIters", 10);
-    cfg_.optimization_lr    = getf("TableModel.OptimizationLr",    0.05f);
-    cfg_.grad_clip          = getf("TableModel.GradClip",          2.0f);
-    cfg_.optimizer_type     = gets("TableModel.OptimizerType",     "adam");
-    cfg_.sgd_momentum       = getf("TableModel.SgdMomentum",       0.9f);
-    {
-        const auto loss_name = gets("TableModel.RobustLoss", "quadratic");
-        const auto loss_type = robust_loss_type_from_string(loss_name);
-        if (loss_type.has_value())
-            cfg_.robust_loss = loss_type.value();
-        else
-        {
-            qWarning() << "table_concept: unknown robust loss" << loss_name.c_str() << "- using quadratic";
-            cfg_.robust_loss = RobustLossType::Quadratic;
-        }
-    }
-    cfg_.robust_loss_scale  = getf("TableModel.RobustLossScale",  0.10f);
-
-    // SampleQueue
-    cfg_.num_angle_bins               = geti("SampleQueue.NumAngleBins",              24);
-    cfg_.num_z_bins                   = geti("SampleQueue.NumZBins",                  10);
-    cfg_.max_per_bin                  = geti("SampleQueue.MaxPerBin",                 2);
-    cfg_.sdf_threshold_for_storage    = getf("SampleQueue.SdfThresholdForStorage",    0.30f);  // voxels are volumetric; admit pts within 30 cm of any surface
-    cfg_.min_frames_before_historical = geti("SampleQueue.MinFramesBeforeHistorical", 10);
-    cfg_.historical_warmup_frames     = geti("SampleQueue.HistoricalWarmupFrames",    5);   // reach full capacity quickly
-    cfg_.max_new_points_per_frame     = geti("SampleQueue.MaxNewPointsPerFrame",      30);  // enough pts to constrain gradient
-    cfg_.rfe_alpha                    = getf("SampleQueue.RfeAlpha",                  0.98f);
-    cfg_.rfe_max_threshold            = getf("SampleQueue.RfeMaxThreshold",           2.0f);
-    cfg_.rfe_weight_gain              = getf("SampleQueue.RfeWeightGain",             0.25f);
-    cfg_.min_anchor_weight            = getf("SampleQueue.MinAnchorWeight",           0.12f);
-    cfg_.edge_bonus_weight            = getf("SampleQueue.EdgeBonusWeight",           0.3f);
-    cfg_.edge_proximity_threshold     = getf("SampleQueue.EdgeProximityThreshold",    0.05f);
-
-    // WarmStart
-    cfg_.warm_pts_min                  = getf("WarmStart.PtsMin",                  12.0f);
-    cfg_.warm_pts_max                  = getf("WarmStart.PtsMax",                  30.0f);
-    cfg_.warm_coverage_min_side        = getf("WarmStart.CoverageMinSide",         2.0f);
-    cfg_.warm_rho_freeze               = getf("WarmStart.RhoFreeze",               0.25f);
-    cfg_.warm_lambda_pos_base          = getf("WarmStart.LambdaPosBase",           0.15f);
-    cfg_.warm_lambda_pos_gain          = getf("WarmStart.LambdaPosGain",           0.45f);
-    cfg_.warm_lambda_size_base         = getf("WarmStart.LambdaSizeBase",          0.02f);
-    cfg_.warm_lambda_size_gain         = getf("WarmStart.LambdaSizeGain",          0.18f);
-    cfg_.warm_lambda_yaw_base          = getf("WarmStart.LambdaYawBase",           0.01f);
-    cfg_.warm_lambda_yaw_gain          = getf("WarmStart.LambdaYawGain",           0.12f);
-    cfg_.warm_confidence_decay         = getf("WarmStart.ConfidenceDecay",         0.70f);
-    cfg_.warm_confidence_coverage_gain = getf("WarmStart.ConfidenceCoverageGain",  0.35f);
-    cfg_.warm_confidence_residual_gain = getf("WarmStart.ConfidenceResidualGain",  0.65f);
-
-    std::print("table_concept: configuration loaded.\n");
+    cfg_ = rc::load_table_config(cfg);
+    priors_path_ = cfg_.priors_path;           // mirrored into the existing members for now
 }
 
-void SpecificWorker::scaffold_missing_table_nodes()
-{
-    if (not prior_store_) return;
-    if (!masks_packet_.valid)
-        return;
-
-    if (priors_cache_.empty())
-        return;
-
-    std::vector<bool> mask_used(masks_packet_.slices.size(), false);
-
-    for (const auto& p : priors_cache_)
-    {
-        if (G->get_node(p.node_name).has_value())
-        {
-            continue;
-        }
-
-        int best_mask_idx = -1;
-        int fallback_mask_idx = -1;
-        float best_dist_xy = std::numeric_limits<float>::max();
-        const float prior_half_diag = 0.5f * std::sqrt(p.width_m * p.width_m + p.depth_m * p.depth_m);
-        const float max_match_dist_xy = std::max(1.0f, 3.0f * p.sigma_pose + prior_half_diag);
-        for (std::size_t i = 0; i < masks_packet_.slices.size(); ++i)
-        {
-            if (mask_used[i])
-                continue;
-
-            const auto& slice = masks_packet_.slices[i];
-            if (slice.label != "table")
-                continue;
-            if (slice.support_end <= slice.support_begin)
-                continue;
-
-            if (fallback_mask_idx < 0)
-                fallback_mask_idx = static_cast<int>(i);
-
-            const float dx = slice.centroid.x() - p.room_x_m;
-            const float dy = slice.centroid.y() - p.room_y_m;
-            const float dist_xy = std::hypot(dx, dy);
-            if (dist_xy <= max_match_dist_xy && dist_xy < best_dist_xy)
-            {
-                best_dist_xy = dist_xy;
-                best_mask_idx = static_cast<int>(i);
-            }
-        }
-
-        if (best_mask_idx < 0)
-            best_mask_idx = fallback_mask_idx;
-
-        if (best_mask_idx < 0)
-        {
-            std::print("table_concept: no usable table mask for '{}' yet\n", p.node_name);
-            continue;
-        }
-
-        const auto& matched_slice = masks_packet_.slices[static_cast<std::size_t>(best_mask_idx)];
-        mask_used[static_cast<std::size_t>(best_mask_idx)] = true;
-
-        // Node does not exist — create it from the prior
-        auto room_opt = G->get_node(room_node_id_);
-        if (not room_opt.has_value())
-        {
-            qWarning() << "table_concept: room node missing, cannot scaffold" << p.node_name.c_str();
-            continue;
-        }
-
-        DSR::Node table_node = DSR::Node::create<table_node_type>(p.node_name);
-        G->add_or_modify_attrib_local<width_m_att> (table_node, p.width_m);
-        G->add_or_modify_attrib_local<depth_m_att> (table_node, p.depth_m);
-        G->add_or_modify_attrib_local<height_m_att>(table_node, p.height_m);
-        G->add_or_modify_attrib_local<level_att>   (table_node, 3);
-        G->add_or_modify_attrib_local<parent_att>  (table_node, room_node_id_);
-        // Canvas position: derive from room node + fixed offset so the viewer
-        // doesn't randomize pos_x/pos_y on every render tick.
-        {
-            const float rpx = G->get_attrib_by_name<pos_x_att>(room_opt.value()).value_or(200.f);
-            const float rpy = G->get_attrib_by_name<pos_y_att>(room_opt.value()).value_or(200.f);
-            G->add_or_modify_attrib_local<pos_x_att>(table_node, rpx + 150.f);
-            G->add_or_modify_attrib_local<pos_y_att>(table_node, rpy +  50.f);
-        }
-
-        const auto id_opt = G->insert_node(table_node);
-        if (not id_opt.has_value())
-        {
-            qWarning() << "table_concept: failed to insert node" << p.node_name.c_str();
-            continue;
-        }
-
-        const float z = p.height_m * 0.5f;
-        rt_api_->insert_or_assign_edge_RT(room_opt.value(), id_opt.value(),
-                                          {matched_slice.centroid.x(), matched_slice.centroid.y(), z},
-                                          {0.0f, 0.0f, p.yaw_rad});
-
-        trigger_graph_layout_twopi();
-
-        std::print("table_concept: created node '{}' id={} from masks frame={} at ({:.2f}, {:.2f})\n",
-                   p.node_name,
-                   id_opt.value(),
-                   masks_packet_.frame_id,
-                   matched_slice.centroid.x(),
-                   matched_slice.centroid.y());
-    }
-}
-
-void SpecificWorker::ensure_instance(const DSR::Node& node)
-{
-    if (instances_.count(node.id()))
-        return;
-
-    // Build initial state from prior (or from checkpoint if available)
-    TableState init_state;
-    init_state.cx  = 0.0f;
-    init_state.cy  = 0.0f;
-    init_state.yaw = 0.0f;
-
-    // Read geometry attributes that may already be in the node
-    if (auto v = G->get_attrib_by_name<width_m_att> (node); v.has_value()) init_state.w            = v.value();
-    if (auto v = G->get_attrib_by_name<depth_m_att> (node); v.has_value()) init_state.h            = v.value();
-    if (auto v = G->get_attrib_by_name<height_m_att>(node); v.has_value()) init_state.table_height = v.value();
-
-    // Read RT pose from room→table edge
-    if (room_node_id_ != 0)
-    {
-        if (const auto edge = G->get_edge(room_node_id_, node.id(), "RT"); edge.has_value())
-        {
-            if (const auto tr = G->get_attrib_by_name<rt_translation_att>(edge.value()); tr.has_value())
-            {
-                const auto& tvec = tr.value().get();
-                if (tvec.size() >= 2)
-                {
-                    init_state.cx = tvec[0];
-                    init_state.cy = tvec[1];
-                }
-            }
-            if (const auto rot = G->get_attrib_by_name<rt_rotation_euler_xyz_att>(edge.value()); rot.has_value())
-            {
-                const auto& rvec = rot.value().get();
-                if (rvec.size() >= 3)
-                    init_state.yaw = rvec[2];
-            }
-        }
-    }
-
-    init_state.leg_length = std::max(0.05f, init_state.table_height - TableModel::TOP_THICKNESS);
-
-    // Check for a convergence checkpoint
-    if (prior_store_)
-    {
-        const auto ckpt = prior_store_->load_checkpoint(node.name());
-        if (ckpt.has_value())
-        {
-            init_state.w            = ckpt->width_m;
-            init_state.h            = ckpt->depth_m;
-            init_state.table_height = ckpt->height_m;
-            init_state.cx           = ckpt->room_x_m;
-            init_state.cy           = ckpt->room_y_m;
-            init_state.yaw          = ckpt->yaw_rad;
-            init_state.leg_length   = std::max(0.05f, ckpt->height_m - TableModel::TOP_THICKNESS);
-            std::print("table_concept: restored checkpoint for '{}'\n", node.name());
-        }
-    }
-
-    // Sanitize: a NaN/Inf loaded from a corrupted checkpoint or RT edge would
-    // poison the SDF (NaN gradients) and lock the optimizer permanently. Replace
-    // any non-finite field with a safe default before it reaches the model.
-    {
-        const auto fix = [&](float& v, float fallback, const char* name)
-        {
-            if (!std::isfinite(v))
-            {
-                std::print("table_concept: WARNING non-finite {} for '{}' → reset to {:.3f}\n",
-                           name, node.name(), fallback);
-                v = fallback;
-            }
-        };
-        fix(init_state.cx, 0.0f, "cx");
-        fix(init_state.cy, 0.0f, "cy");
-        fix(init_state.yaw, 0.0f, "yaw");
-        fix(init_state.w, 1.0f, "w");
-        fix(init_state.h, 0.6f, "h");
-        fix(init_state.table_height, 0.75f, "table_height");
-        init_state.leg_length = std::max(0.05f, init_state.table_height - TableModel::TOP_THICKNESS);
-    }
-
-    TableInstance inst;
-    inst.node_id   = node.id();
-    inst.node_name = node.name();
-
-    // Anchor the size prior to this table's actual prior/checkpoint geometry.
-    // Otherwise the KL size term pulls every table toward the hardcoded
-    // TableModelParams defaults (1.0 x 0.6 x 0.75), keeping the box far smaller
-    // than the real object regardless of the loaded prior or the observations.
-    TableModelParams mparams = make_model_params();
-    mparams.prior_w            = init_state.w;
-    mparams.prior_h            = init_state.h;
-    mparams.prior_table_height = init_state.table_height;
-    if (prior_store_)
-    {
-        const auto it = std::find_if(priors_cache_.begin(), priors_cache_.end(), [&](const TablePrior& prior)
-        {
-            return prior.node_name == node.name();
-        });
-        if (it != priors_cache_.end())
-            mparams.prior_size_std = std::max(mparams.prior_size_std, it->sigma_size);
-    }
-
-    inst.model     = TableModel(init_state, mparams);
-    inst.queue     = SampleQueue(make_queue_params());
-    inst.affordance.init(G, node.id(), node.name());
-
-    instances_.emplace(node.id(), std::move(inst));
-    std::print("table_concept: created instance for node '{}' id={}\n", node.name(), node.id());
-
-    // Register per-instance time-series (one FE + one coverage series per table)
-    if (ts_plot_)
-    {
-        ts_plot_->add_series(node.name() + "_fe",  QColor(255, 170,   0), 1.1f);
-        if (ts_cov_plot_)
-            ts_cov_plot_->add_series(node.name() + "_cov", QColor(  0, 190, 255), 1.1f);
-        if (ts_res_plot_)
-            ts_res_plot_->add_series(node.name() + "_res", QColor(170,  80, 255), 1.1f);
-    }
-
-    // Ensure canvas position is set — viewer randomizes pos_x/pos_y if absent.
-    if (not G->get_attrib_by_name<pos_x_att>(node).has_value())
-    {
-        auto n_mut = node;
-        float rpx = 200.f, rpy = 200.f;
-        if (room_node_id_ != 0)
-            if (const auto rn = G->get_node(room_node_id_); rn.has_value())
-            {
-                rpx = G->get_attrib_by_name<pos_x_att>(rn.value()).value_or(200.f);
-                rpy = G->get_attrib_by_name<pos_y_att>(rn.value()).value_or(200.f);
-            }
-        G->add_or_modify_attrib_local<pos_x_att>(n_mut, rpx + 150.f);
-        G->add_or_modify_attrib_local<pos_y_att>(n_mut, rpy +  50.f);
-        G->update_node(n_mut);
-    }
-}
 
 // ─── Per-cycle steps ─────────────────────────────────────────────────────────
 
-void SpecificWorker::step_queue_update(TableInstance& inst,
-                                       const std::vector<Eigen::Vector3f>& candidate_pts,
-                                       float observation_precision)
-{
-    // Compute SDF for candidates under the current model
-    const auto sdf_vals = inst.model.compute_sdf(candidate_pts);
-    const float precision = std::max(0.05f, observation_precision);
-    Eigen::Matrix2f robot_cov = read_robot_covariance();
-    // In AIF terms, low explanatory adequacy means low sensory precision.
-    // Represent that by inflating the capture covariance of new evidence.
-    robot_cov /= precision;
-    const int q_before = inst.queue.size();
-    inst.queue.insert(candidate_pts, sdf_vals, robot_cov, inst.model, inst.matched_frames);
-    const int admitted = inst.queue.size() - q_before;
-    // New points from a fresh view → unlock the optimizer so it can re-converge.
-    if (admitted > 0 && inst.frames_converged >= cfg_.K_stable)
-        inst.frames_converged = cfg_.K_stable / 2;
-    if (should_log_table(inst))
-        std::print("[{}] queue: admitted={} size={} obs_precision={:.2f}\n",
-                   inst.node_name,
-                   admitted,
-                   inst.queue.size(),
-                   observation_precision);
-}
 
-float SpecificWorker::step_model_update(TableInstance& inst,
-                                         const std::vector<Eigen::Vector3f>& residual_pts,
-                                         float residual_precision)
-{
-    const TableState previous_state = inst.model.state();
-
-    const auto evidence = compose_belief_evidence(inst, residual_pts, residual_precision);
-    if (not evidence.has_evaluation())
-    {
-        refresh_table_memory(inst);
-        inst.last_queue_metrics = inst.queue.metrics();
-        return inst.model.compute_free_energy({}, {});
-    }
-
-    evolve_table_belief(inst, evidence);
-    const float free_energy = accept_table_belief(inst, previous_state, evidence);
-    refresh_table_memory(inst);
-    inst.last_queue_metrics = inst.queue.metrics();
-
-    const auto& fe = inst.last_fe_terms;
-    const auto& qm = inst.last_queue_metrics;
-    if (should_log_table(inst))
-        std::print("[{}] objective: Lc={:.4f} Lh={:.4f} P={:.4f} FE={:.4f} | anchors={}/{} mass={:.2f} "
-                   "rfe=({:.4f},{:.4f},{:.4f}) occ={:.2f} edge={:.2f} | acc={} rej[warm={},sdf={},cap={},bin={}] "
-                   "evict[bin={},rfe={}] mean|sdf|={:.4f}\n",
-                   inst.node_name,
-                   fe.likelihood_current,
-                   fe.likelihood_historical,
-                   fe.prior,
-                   fe.total_fe,
-                   qm.anchor_count,
-                   qm.capacity,
-                   qm.effective_weight_mass,
-                   qm.rfe_mean,
-                   qm.rfe_p50,
-                   qm.rfe_p90,
-                   qm.bin_occupancy_ratio,
-                   qm.edge_anchor_ratio,
-                   qm.counters.accepted_new,
-                   qm.counters.rejected_warmup,
-                   qm.counters.rejected_sdf,
-                   qm.counters.rejected_frame_cap,
-                   qm.counters.rejected_bin_rank,
-                   qm.counters.evicted_bin_rank,
-                   qm.counters.evicted_rfe,
-                   qm.mean_abs_sdf);
-    return free_energy;
-}
-
-SpecificWorker::TableBeliefEvidence SpecificWorker::compose_belief_evidence(
-    const TableInstance& inst,
-    const std::vector<Eigen::Vector3f>& residual_pts,
-    float residual_precision) const
-{
-    TableBeliefEvidence evidence;
-    evidence.fit_pts = inst.queue.points();
-    evidence.fit_weights = inst.queue.weights();
-    evidence.eval_pts = evidence.fit_pts;
-    evidence.eval_weights = evidence.fit_weights;
-    evidence.historical_anchor_count = static_cast<int>(evidence.fit_pts.size());
-    evidence.residual_count = static_cast<int>(residual_pts.size());
-    evidence.residual_precision = residual_precision;
-
-    for (const auto& residual_pt : residual_pts)
-    {
-        evidence.eval_pts.push_back(residual_pt);
-        evidence.eval_weights.push_back(1.0f);
-        if (residual_precision > 1e-3f)
-        {
-            evidence.fit_pts.push_back(residual_pt);
-            evidence.fit_weights.push_back(residual_precision);
-        }
-    }
-
-    evidence.trusted_point_count = static_cast<int>(evidence.fit_pts.size());
-    return evidence;
-}
-
-void SpecificWorker::evolve_table_belief(TableInstance& inst, const TableBeliefEvidence& evidence)
-{
-    // Freeze gradient descent once converged to prevent oscillation.
-    // Unlocked automatically by step_queue_update when new points arrive.
-    if (inst.frames_converged < cfg_.K_stable && evidence.can_optimize())
-    {
-        auto observer = [&](int /*iter*/, const TableState& state, const FreeEnergyDecomposition& /*terms*/)
-        {
-            TableModel shadow = inst.model;
-            shadow.set_state(state);
-            inst.queue.refresh_scores(shadow);
-        };
-        inst.model.gradient_step(evidence.fit_pts,
-                                 evidence.fit_weights,
-                                 static_cast<std::size_t>(evidence.historical_anchor_count),
-                                 observer);
-    }
-    else
-    {
-        inst.model.compute_free_energy(evidence.fit_pts, evidence.fit_weights);
-        inst.queue.refresh_scores(inst.model);
-    }
-}
-
-float SpecificWorker::accept_table_belief(TableInstance& inst,
-                                          const TableState& previous_state,
-                                          const TableBeliefEvidence& evidence)
-{
-    const auto finite_state = [](const TableState& state)
-    {
-        return std::isfinite(state.cx) && std::isfinite(state.cy) &&
-               std::isfinite(state.w) && std::isfinite(state.h) &&
-               std::isfinite(state.table_height) && std::isfinite(state.leg_length) &&
-               std::isfinite(state.yaw);
-    };
-
-    const TableState raw_state = inst.model.state();
-    if (!finite_state(raw_state))
-    {
-        inst.model.set_state(previous_state);
-        inst.model.set_prior(previous_state);
-        inst.last_fe_terms = inst.model.compute_free_energy_decomposition(
-            evidence.eval_pts,
-            evidence.eval_weights,
-            static_cast<std::size_t>(evidence.historical_anchor_count));
-        return inst.last_fe_terms.total_fe;
-    }
-
-    const auto coverage = inst.queue.face_coverage(inst.model);
-
-    inst.warm_confidence = TableBeliefPolicy::update_warm_confidence(
-        inst.warm_confidence, cfg_, coverage,
-        evidence.trusted_point_count,
-        evidence.residual_count,
-        evidence.residual_precision);
-
-    const TableState accepted_state = TableBeliefPolicy::apply_observability_warm_start(
-        previous_state, raw_state, inst.model.params(), cfg_, inst.warm_confidence,
-        coverage, evidence.trusted_point_count);
-    if (!finite_state(accepted_state))
-    {
-        inst.model.set_state(previous_state);
-        inst.model.set_prior(previous_state);
-        inst.last_fe_terms = inst.model.compute_free_energy_decomposition(
-            evidence.eval_pts,
-            evidence.eval_weights,
-            static_cast<std::size_t>(evidence.historical_anchor_count));
-        return inst.last_fe_terms.total_fe;
-    }
-
-    inst.model.set_state(accepted_state);
-    // Do NOT update prior_ to accepted_state — keep prior anchored to the
-    // previous frame's state so the state-transition prior (lambda_state,
-    // lambda_pos, lambda_angle) acts as a true per-frame dampener rather than
-    // being a no-op.  The fixed size prior (params_.prior_w/h/table_height)
-    // already provides a constant pull toward typical table dimensions.
-    // This matches the Python prototype (belief.py compute_prior_term) where
-    // mu_prev_robot is the previous belief, not the just-updated one.
-
-    inst.last_fe_terms = inst.model.compute_free_energy_decomposition(
-        evidence.eval_pts,
-        evidence.eval_weights,
-        static_cast<std::size_t>(evidence.historical_anchor_count));
-    const float free_energy = inst.last_fe_terms.total_fe;
-    if (!std::isfinite(free_energy))
-    {
-        inst.model.set_state(previous_state);
-        inst.model.set_prior(previous_state);
-        inst.last_fe_terms = inst.model.compute_free_energy_decomposition(
-            evidence.eval_pts,
-            evidence.eval_weights,
-            static_cast<std::size_t>(evidence.historical_anchor_count));
-        return inst.last_fe_terms.total_fe;
-    }
-
-    if (should_log_table(inst))
-        std::print("[{}] warm-start: conf={:.2f} rho_x={:.2f} rho_y={:.2f} residual={} trusted_pts={} residual_precision={:.2f} raw(w={:.3f},h={:.3f},psi={:.3f}) accepted(w={:.3f},h={:.3f},psi={:.3f})\n",
-                   inst.node_name,
-                   inst.warm_confidence,
-                   std::min(coverage[0], coverage[1]) / (std::max(coverage[0], coverage[1]) + 1e-3f),
-                   std::min(coverage[2], coverage[3]) / (std::max(coverage[2], coverage[3]) + 1e-3f),
-                   evidence.residual_count,
-                   evidence.trusted_point_count,
-                   evidence.residual_precision,
-                   raw_state.w, raw_state.h, raw_state.yaw,
-                   accepted_state.w, accepted_state.h, accepted_state.yaw);
-
-    return free_energy;
-}
-
-void SpecificWorker::refresh_table_memory(TableInstance& inst)
-{
-    const Eigen::Matrix2f robot_cov = read_robot_covariance();
-    inst.queue.update_rfe(inst.model, robot_cov);
-}
-
-void SpecificWorker::step_write_model(TableInstance& inst,
+void SpecificWorker::step_convergence(rc::TableInstance& inst,
                                        DSR::Node& node,
                                        float free_energy)
 {
+    // Convergence on STATE stability, not |ΔFE|: the free energy keeps jittering with queue
+    // churn / point-count even when the fitted geometry is settled, so it never latched. Track
+    // how much the accepted state moved between cycles instead.
     const auto& s = inst.model.state();
-
-    // Geometry attributes
-    G->add_or_modify_attrib_local<width_m_att> (node, s.w);
-    G->add_or_modify_attrib_local<depth_m_att> (node, s.h);
-    G->add_or_modify_attrib_local<height_m_att>(node, s.table_height);
-    G->add_or_modify_attrib_local<free_energy_att>(node, free_energy);
-    G->add_or_modify_attrib_local<model_generation_att>(node, ++inst.model_generation);
-
-    // Mesh for voxelizer 3D viewer
-    write_table_mesh(inst, node);
-
-    // Export the current historical RFE queue as XYZ triples in table-node
-    // attributes dedicated to remembered evidence.
-    {
-        const auto qpts = inst.queue.points();
-        std::vector<float> qflat;
-        qflat.reserve(qpts.size() * 3);
-        for (const auto& p : qpts)
-        {
-            qflat.push_back(p.x());
-            qflat.push_back(p.y());
-            qflat.push_back(p.z());
-        }
-        G->runtime_checked_add_or_modify_attrib_local(node, "rfe_pts", qflat);
-    }
-
-    // Export full table-owned voxel memory (room frame) as XYZ triples.
-    {
-        std::vector<float> bank_flat;
-        bank_flat.reserve(inst.voxel_bank_pts.size() * 3);
-        for (const auto& p : inst.voxel_bank_pts)
-        {
-            bank_flat.push_back(p.x());
-            bank_flat.push_back(p.y());
-            bank_flat.push_back(p.z());
-        }
-        G->runtime_checked_add_or_modify_attrib_local(node, "table_voxel_bank_pts", bank_flat);
-    }
-
-    G->update_node(node);
-
-    // RT edge (pose)
-    write_rt_pose(room_node_id_, inst);
-}
-
-// ─── Table mesh generator ────────────────────────────────────────────────────
-//
-// Returns a flat triangle list in room frame:
-//   [x0,y0,z0, x1,y1,z1, x2,y2,z2, ...]  — every 9 floats = 1 triangle.
-//
-// Geometry: 1 top slab + 4 square legs = 5 boxes × 12 triangles = 540 floats.
-
-std::vector<float> SpecificWorker::make_table_mesh(const TableState& s)
-{
-    std::vector<float> verts;
-    verts.reserve(5 * 108);   // 5 boxes × 12 tri × 3 vtx × 3 floats
-
-    const float cy = std::cos(s.yaw);
-    const float sy = std::sin(s.yaw);
-
-    // Emit one box: centroid in room frame (bx,by,bz), local half-extents (hw,hd,hh).
-    auto push_box = [&](float bx, float by, float bz,
-                        float hw, float hd, float hh)
-    {
-        // Transform a local-frame corner to room frame and push xyz.
-        auto push = [&](float lx, float ly, float lz)
-        {
-            verts.push_back(bx + cy * lx - sy * ly);
-            verts.push_back(by + sy * lx + cy * ly);
-            verts.push_back(bz + lz);
-        };
-        // 6 faces × 2 triangles (winding consistent but not critical for wire/fill)
-        push(-hw,-hd,-hh); push( hw,-hd,-hh); push( hw, hd,-hh);  // bottom
-        push(-hw,-hd,-hh); push( hw, hd,-hh); push(-hw, hd,-hh);
-        push(-hw,-hd, hh); push( hw, hd, hh); push( hw,-hd, hh);  // top
-        push(-hw,-hd, hh); push(-hw, hd, hh); push( hw, hd, hh);
-        push(-hw,-hd,-hh); push( hw,-hd,-hh); push( hw,-hd, hh);  // front -y
-        push(-hw,-hd,-hh); push( hw,-hd, hh); push(-hw,-hd, hh);
-        push( hw, hd,-hh); push(-hw, hd,-hh); push(-hw, hd, hh);  // back  +y
-        push( hw, hd,-hh); push(-hw, hd, hh); push( hw, hd, hh);
-        push(-hw,-hd,-hh); push(-hw,-hd, hh); push(-hw, hd, hh);  // left  -x
-        push(-hw,-hd,-hh); push(-hw, hd, hh); push(-hw, hd,-hh);
-        push( hw,-hd,-hh); push( hw, hd,-hh); push( hw, hd, hh);  // right +x
-        push( hw,-hd,-hh); push( hw, hd, hh); push( hw,-hd, hh);
-    };
-
-    // Top slab — centred at floor + leg_length + half slab thickness
-    const float ht  = TableModel::TOP_THICKNESS * 0.5f;
-    push_box(s.cx, s.cy, s.leg_length + ht,
-             s.w * 0.5f, s.h * 0.5f, ht);
-
-    // 4 legs — square cross-section (2×LEG_RADIUS), inset from table corners
-    const float lr  = TableModel::LEG_RADIUS;
-    const float lhz = s.leg_length * 0.5f;
-    for (int ix : {-1, 1})
-        for (int iy : {-1, 1})
-        {
-            const float lx = ix * (s.w * 0.5f - lr);
-            const float ly = iy * (s.h * 0.5f - lr);
-            // Rotate leg offset to room frame
-            const float rx = s.cx + cy * lx - sy * ly;
-            const float ry = s.cy + sy * lx + cy * ly;
-            push_box(rx, ry, lhz,  lr, lr, lhz);
-        }
-
-    return verts;
-}
-
-void SpecificWorker::write_table_mesh(TableInstance& inst, DSR::Node& node)
-{
-    // Throttle: only update when the model generation changes (already guaranteed
-    // by the caller), but skip if the mesh would be identical to save DSR bandwidth.
-    const std::vector<float> verts = make_table_mesh(inst.model.state());
-    G->add_or_modify_attrib_local<mesh_vertices_att>(node, verts);
-}
-
-void SpecificWorker::step_convergence(TableInstance& inst,
-                                       DSR::Node& node,
-                                       float free_energy)
-{
-    const float fe_delta = std::abs(free_energy - inst.prev_free_energy);
-    if (fe_delta < cfg_.fe_eps)
+    const auto& p = inst.prev_conv_state;
+    const float state_delta = inst.has_prev_conv_state
+        ? (std::abs(s.cx - p.cx) + std::abs(s.cy - p.cy) + std::abs(s.w - p.w) + std::abs(s.h - p.h) +
+           std::abs(s.table_height - p.table_height) + std::abs(s.yaw - p.yaw) + std::abs(s.leg_inset - p.leg_inset))
+        : std::numeric_limits<float>::max();
+    inst.prev_conv_state = s;
+    inst.has_prev_conv_state = true;
+    if (state_delta < cfg_.state_eps)
     {
         inst.frames_converged = std::min(inst.frames_converged + 1, cfg_.K_stable);
     }
@@ -1710,7 +497,7 @@ void SpecificWorker::step_convergence(TableInstance& inst,
     G->add_or_modify_attrib_local<model_uncertainty_att>(node, total_deficit);
 
     // ↑ Top-down: generative model prediction vs. coverage evidence
-    if (should_log_table(inst))
+    if (fitter_->should_log_table(inst))
         std::print("[{}] coverage: +x={:.1f} -x={:.1f} +y={:.1f} -y={:.1f}  "
                    "stable={}/{} U={:.1f}\n",
                    inst.node_name,
@@ -1740,7 +527,7 @@ void SpecificWorker::step_convergence(TableInstance& inst,
     }
 }
 
-void SpecificWorker::step_epistemic(TableInstance& inst, DSR::Node& node)
+void SpecificWorker::step_epistemic(rc::TableInstance& inst, DSR::Node& node)
 {
     const auto prop = epistemic_planner_.compute(inst.model, inst.queue);
     if (not prop.valid)
@@ -1754,7 +541,7 @@ void SpecificWorker::step_epistemic(TableInstance& inst, DSR::Node& node)
     }
 
     // Write attributes to the table node (read by legacy consumers)
-    write_epistemic_proposal(node, prop);
+    scene_graph_->write_epistemic_proposal(node, prop);
     // Publish / refresh dedicated affordance node
     const auto affordance_node_before = inst.affordance.node_id();
     inst.affordance.update(prop);
@@ -1763,7 +550,7 @@ void SpecificWorker::step_epistemic(TableInstance& inst, DSR::Node& node)
     inst.epistemic_pending = true;
 }
 
-void SpecificWorker::step_refresh_check(TableInstance& inst,
+void SpecificWorker::step_refresh_check(rc::TableInstance& inst,
                                          DSR::Node& node,
                                          float free_energy,
                                          float explanation_ratio)
@@ -1787,214 +574,6 @@ void SpecificWorker::step_refresh_check(TableInstance& inst,
 
 // ─── DSR helpers ─────────────────────────────────────────────────────────────
 
-std::uint64_t SpecificWorker::voxel_key(const Eigen::Vector3f& point, float quantization_m)
-{
-    const float q = std::max(1e-4f, quantization_m);
-    const int ix = static_cast<int>(std::floor(point.x() / q));
-    const int iy = static_cast<int>(std::floor(point.y() / q));
-    const int iz = static_cast<int>(std::floor(point.z() / q));
-
-    std::uint64_t h = 1469598103934665603ULL;  // FNV-1a offset basis
-    auto mix = [&](std::uint64_t v)
-    {
-        h ^= v;
-        h *= 1099511628211ULL;
-    };
-    mix(static_cast<std::uint64_t>(ix));
-    mix(static_cast<std::uint64_t>(iy));
-    mix(static_cast<std::uint64_t>(iz));
-    return h;
-}
-
-void SpecificWorker::ingest_observation_voxels(TableInstance& inst,
-                                               const TableObservation& observation)
-{
-    std::size_t inserted = 0;
-    std::size_t rejected_foreign = 0;
-    const auto max_points = static_cast<std::size_t>(std::max(1, cfg_.voxel_bank_max_points));
-
-    auto ingest = [&](const std::vector<Eigen::Vector3f>& src)
-    {
-        for (const auto& p : src)
-        {
-            if (inst.voxel_bank_pts.size() >= max_points)
-                break;
-            if (not is_voxel_owned_by_table(inst, p))
-            {
-                ++rejected_foreign;
-                continue;
-            }
-            const auto key = voxel_key(p, cfg_.voxel_bank_quantization_m);
-            if (inst.voxel_bank_keys.insert(key).second)
-            {
-                inst.voxel_bank_pts.push_back(p);
-                ++inserted;
-            }
-        }
-    };
-
-    ingest(observation.candidate_pts);
-    ingest(observation.residual_pts);
-
-    if (inserted > 0 && should_log_table(inst))
-        std::print("[{}] voxel-bank: +{} total={} (cap={}) reject_foreign={}\n",
-                   inst.node_name,
-                   inserted,
-                   inst.voxel_bank_pts.size(),
-                   max_points,
-                   rejected_foreign);
-}
-
-bool SpecificWorker::is_voxel_owned_by_table(const TableInstance& inst,
-                                             const Eigen::Vector3f& point) const
-{
-    const auto& s = inst.model.state();
-
-    // XY ownership gate: table-centered radius with a configurable margin.
-    const float half_diag = 0.5f * std::sqrt(s.w * s.w + s.h * s.h);
-    const float gate_radius = std::max(1.0f, half_diag + cfg_.voxel_select_radius_margin_m);
-    const float dx = point.x() - s.cx;
-    const float dy = point.y() - s.cy;
-    const float dist_xy = std::hypot(dx, dy);
-    if (dist_xy > gate_radius)
-        return false;
-
-    // Height gate to reject floor / distant clutter points in mixed scenes.
-    const float z_min = -0.05f;
-    const float z_max = s.table_height + cfg_.voxel_select_height_margin_m;
-    return point.z() >= z_min && point.z() <= z_max;
-}
-
-std::vector<Eigen::Vector3f> SpecificWorker::read_pts_attrib(
-    const DSR::Node& node, const std::string& att_name) const
-{
-    std::vector<Eigen::Vector3f> pts;
-
-    // Retrieve vector<float> attribute by name; interleaved XYZ
-    std::optional<std::reference_wrapper<const std::vector<float>>> opt;
-    if (att_name == "candidate_pts_att")
-        opt = G->get_attrib_by_name<candidate_pts_att>(node);
-    else if (att_name == "residual_pts_att")
-        opt = G->get_attrib_by_name<residual_pts_att>(node);
-    else
-        return pts;
-
-    if (not opt.has_value())
-        return pts;
-
-    const auto& data = opt.value().get();
-    const std::size_t n = data.size() / 3;
-    pts.reserve(n);
-    for (std::size_t i = 0; i < n; ++i)
-        pts.emplace_back(data[i*3], data[i*3+1], data[i*3+2]);
-
-    return pts;
-}
-
-Eigen::Matrix2f SpecificWorker::read_robot_covariance() const
-{
-    // Try to read SE2 covariance from the room→robot RT edge
-    const auto robots = G->get_nodes_by_type("robot");
-    if (not robots.empty() and room_node_id_ != 0)
-    {
-        const auto edge = G->get_edge(room_node_id_, robots.front().id(), "RT");
-        if (edge.has_value())
-        {
-            const auto cov_opt = G->get_attrib_by_name<rt_se2_covariance_att>(edge.value());
-            if (cov_opt.has_value())
-            {
-                const auto& c = cov_opt.value().get();
-                // rt_se2_covariance is a 9-vector (3×3 row-major for [x,y,θ])
-                if (c.size() >= 4)
-                {
-                    Eigen::Matrix2f m;
-                    m << c[0], c[1], c[3], c[4];
-                    return m;
-                }
-            }
-        }
-    }
-    // Fallback: small identity (high confidence)
-    return Eigen::Matrix2f::Identity() * 0.01f;
-}
-
-void SpecificWorker::write_rt_pose(uint64_t room_id, TableInstance& inst)
-{
-    if (room_id == 0 or not rt_api_)
-        return;
-
-    const auto& s = inst.model.state();
-
-    // Dead-band: suppress RT edge updates when position hasn't moved by more
-    // than 5 cm — prevents pos_x/pos_y churn from small gradient oscillations.
-    constexpr float kMinWriteDistSq = 0.05f * 0.05f;
-    const float dx = s.cx - inst.last_written_cx;
-    const float dy = s.cy - inst.last_written_cy;
-    if (dx*dx + dy*dy < kMinWriteDistSq)
-        return;
-
-    auto room_opt = G->get_node(room_id);
-    if (not room_opt.has_value())
-        return;
-
-    const float z = s.table_height * 0.5f;
-    rt_api_->insert_or_assign_edge_RT(room_opt.value(), inst.node_id,
-                                      {s.cx, s.cy, z},
-                                      {0.0f, 0.0f, s.yaw});
-    inst.last_written_cx = s.cx;
-    inst.last_written_cy = s.cy;
-}
-
-void SpecificWorker::write_epistemic_proposal(DSR::Node& node,
-                                               const EpistemicProposal& prop)
-{
-    G->add_or_modify_attrib_local<epistemic_target_x_m_att>  (node, prop.epistemic_target_x_m);
-    G->add_or_modify_attrib_local<epistemic_target_y_m_att>  (node, prop.epistemic_target_y_m);
-    G->add_or_modify_attrib_local<epistemic_target_yaw_rad_att>(node, prop.epistemic_target_yaw_rad);
-    G->add_or_modify_attrib_local<epistemic_gain_att>        (node, prop.epistemic_gain);
-    G->add_or_modify_attrib_local<epistemic_pending_att>     (node, true);
-    G->update_node(node);
-}
-
-// ─── Factory helpers ─────────────────────────────────────────────────────────
-
-TableModelParams SpecificWorker::make_model_params() const
-{
-    TableModelParams p;
-    p.sigma_obs          = cfg_.sigma_obs;
-    p.lambda_size        = cfg_.lambda_size;
-    p.lambda_pos         = cfg_.lambda_pos;
-    p.lambda_state       = cfg_.lambda_state;
-    p.lambda_angle       = cfg_.lambda_angle;
-    p.prior_size_std     = cfg_.prior_size_std;
-    p.optimization_iters = cfg_.optimization_iters;
-    p.optimization_lr    = cfg_.optimization_lr;
-    p.grad_clip          = cfg_.grad_clip;
-    p.optimizer_type     = cfg_.optimizer_type;
-    p.sgd_momentum       = cfg_.sgd_momentum;
-    p.robust_loss        = cfg_.robust_loss;
-    p.robust_loss_scale  = cfg_.robust_loss_scale;
-    return p;
-}
-
-SampleQueueParams SpecificWorker::make_queue_params() const
-{
-    SampleQueueParams p;
-    p.num_angle_bins               = cfg_.num_angle_bins;
-    p.num_z_bins                   = cfg_.num_z_bins;
-    p.max_per_bin                  = cfg_.max_per_bin;
-    p.sdf_threshold_for_storage    = cfg_.sdf_threshold_for_storage;
-    p.min_frames_before_historical = cfg_.min_frames_before_historical;
-    p.historical_warmup_frames     = cfg_.historical_warmup_frames;
-    p.max_new_points_per_frame     = cfg_.max_new_points_per_frame;
-    p.rfe_alpha                    = cfg_.rfe_alpha;
-    p.rfe_max_threshold            = cfg_.rfe_max_threshold;
-    p.rfe_weight_gain              = cfg_.rfe_weight_gain;
-    p.min_anchor_weight            = cfg_.min_anchor_weight;
-    p.edge_bonus_weight            = cfg_.edge_bonus_weight;
-    p.edge_proximity_threshold     = cfg_.edge_proximity_threshold;
-    return p;
-}
 
 void SpecificWorker::trigger_graph_layout_twopi()
 {
@@ -2025,7 +604,7 @@ void SpecificWorker::modify_node_slot(std::uint64_t id, const std::string& type)
     if (not node_opt.has_value())
         return;
 
-    ensure_instance(node_opt.value());
+    fitter_->ensure_instance(node_opt.value(), room_node_id_);
 }
 
 void SpecificWorker::modify_node_attrs_slot(std::uint64_t id,
@@ -2033,12 +612,12 @@ void SpecificWorker::modify_node_attrs_slot(std::uint64_t id,
 {
     // Delegate to the affordance state machine for any instance whose affordance
     // node was modified (controller claim/completion updates active/pending)
-    for (auto& [table_id, inst] : instances_)
+    for (auto& [table_id, inst] : fitter_->instances())
         if (inst.affordance.node_id() == id)
             inst.affordance.on_node_modified(id);
 
     // React to mission-controller clearing epistemic_pending on the table node itself
-    if (instances_.count(id))
+    if (fitter_->instances().count(id))
     {
         const bool pending_cleared = std::any_of(att_names.begin(), att_names.end(),
             [](const std::string& s) { return s == "epistemic_pending"; });
@@ -2050,7 +629,7 @@ void SpecificWorker::modify_node_attrs_slot(std::uint64_t id,
             {
                 const auto v = G->get_attrib_by_name<epistemic_pending_att>(node_opt.value());
                 if (v.has_value() and not v.value())
-                    instances_.at(id).epistemic_pending = false;
+                    fitter_->instances().at(id).epistemic_pending = false;
             }
         }
     }
@@ -2059,14 +638,14 @@ void SpecificWorker::modify_node_attrs_slot(std::uint64_t id,
 void SpecificWorker::del_node_slot(std::uint64_t id)
 {
     // Notify affordance in case its own DSR node was deleted externally
-    for (auto& [table_id, inst] : instances_)
+    for (auto& [table_id, inst] : fitter_->instances())
         if (inst.affordance.node_id() == id)
             inst.affordance.on_node_deleted(id);
 
-    if (instances_.count(id))
+    if (fitter_->instances().count(id))
     {
         std::print("table_concept: node {} removed from DSR, destroying instance\n", id);
-        instances_.erase(id);
+        fitter_->instances().erase(id);
     }
 }
 

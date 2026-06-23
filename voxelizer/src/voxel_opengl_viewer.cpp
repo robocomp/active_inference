@@ -319,14 +319,16 @@ void VoxelOpenGLViewer::update_object_meshes(std::span<const std::vector<float>>
     request_update_throttled();
 }
 
-void VoxelOpenGLViewer::update_graph_boxes(std::span<const QVector3D> mins,
-                                           std::span<const QVector3D> maxs,
+void VoxelOpenGLViewer::update_graph_boxes(std::span<const QVector3D> centers,
+                                           std::span<const QVector3D> half_extents,
+                                           std::span<const float> yaws,
                                            std::span<const std::string> categories)
 {
     {
         std::scoped_lock lk(graph_boxes_mutex_);
-        graph_box_mins_.assign(mins.begin(), mins.end());
-        graph_box_maxs_.assign(maxs.begin(), maxs.end());
+        graph_box_centers_.assign(centers.begin(), centers.end());
+        graph_box_half_extents_.assign(half_extents.begin(), half_extents.end());
+        graph_box_yaws_.assign(yaws.begin(), yaws.end());
         graph_box_categories_.assign(categories.begin(), categories.end());
     }
 }
@@ -395,6 +397,27 @@ void VoxelOpenGLViewer::update_rfe_points(std::span<const QVector3D> residual_po
         std::scoped_lock lk(data_mutex_);
         rfe_vertices_ = std::move(new_vertices);
         candidate_vertices_ = std::move(candidate_vertices);
+    }
+    request_update_throttled();
+}
+
+void VoxelOpenGLViewer::update_voxel_bank_points(std::span<const QVector3D> positions)
+{
+    std::vector<Vertex> new_vertices;
+    new_vertices.reserve(positions.size());
+
+    for (const QVector3D& p : positions)
+    {
+        const float fx = voxel_flip_x_ ? -1.f : 1.f;
+        const float fy = voxel_flip_y_ ? -1.f : 1.f;
+        const QVector3D mapped{fx * p.x(), p.z(), fy * p.y()};
+        // Orange, distinct from residual (magenta) / rfe (green) / candidate (cyan).
+        new_vertices.push_back(Vertex{mapped.x(), mapped.y(), mapped.z(), 1.00f, 0.55f, 0.10f});
+    }
+
+    {
+        std::scoped_lock lk(data_mutex_);
+        bank_vertices_ = std::move(new_vertices);
     }
     request_update_throttled();
 }
@@ -726,11 +749,13 @@ void VoxelOpenGLViewer::paintGL()
     std::size_t n_lidar_vertices = 0;
     std::size_t n_rfe_vertices = 0;
     std::size_t n_candidate_vertices = 0;
+    std::size_t n_bank_vertices = 0;
     std::size_t n_mask_vertices = 0;
     std::vector<Vertex> draw_vertices;
     std::vector<Vertex> lidar_draw_vertices;
     std::vector<Vertex> rfe_draw_vertices;
     std::vector<Vertex> candidate_draw_vertices;
+    std::vector<Vertex> bank_draw_vertices;
     std::vector<Vertex> mask_draw_vertices;
     {
         std::scoped_lock lk(data_mutex_);
@@ -738,17 +763,20 @@ void VoxelOpenGLViewer::paintGL()
         n_lidar_vertices = lidar_vertices_.size();
         n_rfe_vertices = rfe_vertices_.size();
         n_candidate_vertices = candidate_vertices_.size();
+        n_bank_vertices = bank_vertices_.size();
         n_mask_vertices = mask_vertices_.size();
         draw_vertices = cpu_vertices_;
         lidar_draw_vertices = lidar_vertices_;
         rfe_draw_vertices = rfe_vertices_;
         candidate_draw_vertices = candidate_vertices_;
+        bank_draw_vertices = bank_vertices_;
         mask_draw_vertices = mask_vertices_;
     }
     const bool has_voxels = n_vertices > 0;
     const bool has_lidar = n_lidar_vertices > 0;
     const bool has_rfe = n_rfe_vertices > 0;
     const bool has_candidate = n_candidate_vertices > 0;
+    const bool has_bank = n_bank_vertices > 0;
     const bool has_mask = n_mask_vertices > 0;
 
     const bool draw_voxels = show_voxels_;
@@ -1161,21 +1189,23 @@ void VoxelOpenGLViewer::paintGL()
         }
     }
 
-    // Draw DSR graph object bounding boxes (wireframe).
+    // Draw DSR graph object bounding boxes (wireframe), oriented by their room yaw.
     {
-        std::vector<QVector3D> local_mins, local_maxs;
+        std::vector<QVector3D> local_centers, local_half;
+        std::vector<float> local_yaws;
         std::vector<std::string> local_cats;
         {
             std::scoped_lock lk(graph_boxes_mutex_);
-            local_mins = graph_box_mins_;
-            local_maxs = graph_box_maxs_;
+            local_centers = graph_box_centers_;
+            local_half = graph_box_half_extents_;
+            local_yaws = graph_box_yaws_;
             local_cats = graph_box_categories_;
         }
 
-        if (!local_mins.empty() && local_mins.size() == local_maxs.size())
+        if (!local_centers.empty() && local_centers.size() == local_half.size())
         {
             std::vector<Vertex> box_lines;
-            box_lines.reserve(local_mins.size() * 24);
+            box_lines.reserve(local_centers.size() * 24);
 
             const auto map_room_to_ogl = [&](float x, float y, float z) -> QVector3D
             {
@@ -1189,11 +1219,20 @@ void VoxelOpenGLViewer::paintGL()
                 {4,5}, {5,6}, {6,7}, {7,4},
                 {0,4}, {1,5}, {2,6}, {3,7}
             };
+            // Local corner sign pattern (matches the AABB ordering above so the
+            // edge table stays valid): bottom face then top face.
+            constexpr float sgn[8][3] = {
+                {-1,-1,-1}, { 1,-1,-1}, { 1, 1,-1}, {-1, 1,-1},
+                {-1,-1, 1}, { 1,-1, 1}, { 1, 1, 1}, {-1, 1, 1}
+            };
 
-            for (std::size_t i = 0; i < local_mins.size(); ++i)
+            for (std::size_t i = 0; i < local_centers.size(); ++i)
             {
-                const auto& mn = local_mins[i];
-                const auto& mx = local_maxs[i];
+                const auto& ctr = local_centers[i];
+                const auto& he = local_half[i];
+                const float yaw = (i < local_yaws.size()) ? local_yaws[i] : 0.f;
+                const float cy = std::cos(yaw);
+                const float sy = std::sin(yaw);
                 std::string cat;
                 if (i < local_cats.size()) cat = local_cats[i];
                 const QColor c = color_for_category(cat);
@@ -1201,16 +1240,18 @@ void VoxelOpenGLViewer::paintGL()
                 const float g = c.greenF();
                 const float b = c.blueF();
 
-                QVector3D corners[8] = {
-                    map_room_to_ogl(mn.x(), mn.y(), mn.z()),
-                    map_room_to_ogl(mx.x(), mn.y(), mn.z()),
-                    map_room_to_ogl(mx.x(), mx.y(), mn.z()),
-                    map_room_to_ogl(mn.x(), mx.y(), mn.z()),
-                    map_room_to_ogl(mn.x(), mn.y(), mx.z()),
-                    map_room_to_ogl(mx.x(), mn.y(), mx.z()),
-                    map_room_to_ogl(mx.x(), mx.y(), mx.z()),
-                    map_room_to_ogl(mn.x(), mx.y(), mx.z())
-                };
+                // Rotate each local corner about Z by yaw, translate to the room-frame
+                // center, then map to the OpenGL frame.
+                QVector3D corners[8];
+                for (int k = 0; k < 8; ++k)
+                {
+                    const float lx = sgn[k][0] * he.x();
+                    const float ly = sgn[k][1] * he.y();
+                    const float lz = sgn[k][2] * he.z();
+                    const float rx = cy * lx - sy * ly;
+                    const float ry = sy * lx + cy * ly;
+                    corners[k] = map_room_to_ogl(ctr.x() + rx, ctr.y() + ry, ctr.z() + lz);
+                }
 
                 for (const auto& e : edges)
                 {
@@ -1275,6 +1316,21 @@ void VoxelOpenGLViewer::paintGL()
         program_.setUniformValue("u_round_points", 1);
         program_.setUniformValue("u_point_size", 4.0f);
         glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(candidate_draw_vertices.size()));
+        program_.setUniformValue("u_point_size", 4.5f);
+        room_vbo_.release();
+        room_vao_.release();
+        glEnable(GL_DEPTH_TEST);
+    }
+
+    if (has_bank)
+    {
+        glDisable(GL_DEPTH_TEST);
+        room_vao_.bind();
+        room_vbo_.bind();
+        room_vbo_.allocate(bank_draw_vertices.data(), static_cast<int>(bank_draw_vertices.size() * sizeof(Vertex)));
+        program_.setUniformValue("u_round_points", 1);
+        program_.setUniformValue("u_point_size", 3.0f);
+        glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(bank_draw_vertices.size()));
         program_.setUniformValue("u_point_size", 4.5f);
         room_vbo_.release();
         room_vao_.release();

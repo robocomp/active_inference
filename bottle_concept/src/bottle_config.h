@@ -1,5 +1,5 @@
 /*
- * agent_config.h
+ * bottle_config.h
  *
  * Plain-data configuration for the bottle_concept agent, plus a loader that
  * fills it from a RoboComp ConfigLoader. Kept separate from SpecificWorker so a
@@ -14,7 +14,9 @@
 
 class ConfigLoader;   // RoboComp config façade (defined in genericworker.h)
 
-struct AgentConfig
+namespace rc {
+
+struct BottleConfig
 {
     std::string priors_path = "etc/object_priors.toml";
 
@@ -109,5 +111,7 @@ struct AgentConfig
     int   static_pose_index = 0;       // grid index for THIS run (env BOTTLE_TEST_POSE)
 };
 
-// Fill an AgentConfig from a RoboComp ConfigLoader (all keys + defaults).
-AgentConfig load_agent_config(const ConfigLoader& cfg);
+// Fill an BottleConfig from a RoboComp ConfigLoader (all keys + defaults).
+BottleConfig load_bottle_config(const ConfigLoader& cfg);
+
+}  // namespace rc

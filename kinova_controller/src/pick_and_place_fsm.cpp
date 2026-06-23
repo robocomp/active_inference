@@ -49,7 +49,18 @@ PickandPlaceFSM::PickandPlaceFSM(SpecificWorker& w, const ConfigLoader& cfg) : w
     try { stop_after_lift_  = cfg.get<bool>("Controller.stop_after_lift");  } catch (...) {}
     try { generative_lift_  = cfg.get<bool>("Controller.generative_lift");  } catch (...) {}
     try { lift_speed_       = cfg.get<double>("Controller.lift_speed");      } catch (...) {}
+    try { lift_soft_ticks_  = cfg.get<double>("Controller.lift_soft_ticks"); } catch (...) {}
+    try { lift_observe_     = cfg.get<bool>  ("Controller.lift_observe");     } catch (...) {}
     try { lift_min_confirm_rise_ = cfg.get<double>("Controller.lift_min_confirm_rise"); } catch (...) {}
+    try { generative_insert_ = cfg.get<bool>  ("Controller.generative_insert");  } catch (...) {}
+    try { insert_palm_near_  = cfg.get<double>("Controller.insert_palm_near");   } catch (...) {}
+    try { insert_near_zone_  = cfg.get<double>("Controller.insert_near_zone");   } catch (...) {}
+    try { insert_fast_vel_   = cfg.get<double>("Controller.insert_fast_vel");    } catch (...) {}
+    try { insert_gentle_vel_ = cfg.get<double>("Controller.insert_gentle_vel");  } catch (...) {}
+    try { insert_rate_gate_  = cfg.get<double>("Controller.insert_rate_gate");   } catch (...) {}
+    if (generative_insert_)
+        std::print("[grasp] generative insert ON (close-rate −d(palm)/d(advance): fast={:.3f} gentle={:.3f} rate_gate={:.2f})\n",
+                   insert_fast_vel_, insert_gentle_vel_, insert_rate_gate_);
     if (generative_lift_)
         std::print("[lift] generative two-hypothesis confirm ON (bound={:.1f})\n", lift_hyp_.decide_bound);
     try { monitor_period_  = cfg.get<int> ("Controller.monitor_period"); } catch (...) {}
@@ -84,9 +95,17 @@ PickandPlaceFSM::PickandPlaceFSM(SpecificWorker& w, const ConfigLoader& cfg) : w
     try { compliant_close_max_   = cfg.get<double>("Controller.compliant_close_max");   } catch (...) {}
     try { compliant_close_speed_ = cfg.get<double>("Controller.compliant_close_speed"); } catch (...) {}
     try { compliant_close_sign_  = cfg.get<double>("Controller.compliant_close_sign");  } catch (...) {}
+    try { compliant_close_shear_      = cfg.get<bool>  ("Controller.compliant_close_shear");      } catch (...) {}
+    try { compliant_close_shear_gain_ = cfg.get<double>("Controller.compliant_close_shear_gain"); } catch (...) {}
+    try { generative_close_      = cfg.get<bool>  ("Controller.generative_close");      } catch (...) {}
+    try { close_asym_gain_       = cfg.get<double>("Controller.close_asym_gain");       } catch (...) {}
+    try { close_balance_tol_     = cfg.get<double>("Controller.close_balance_tol");     } catch (...) {}
     if (compliant_close_)
-        std::print("[grasp] compliant close ON (gain={:.5f} max={:.3f} sign={:+.0f}) — centre the bottle during close\n",
-                   compliant_close_gain_, compliant_close_max_, compliant_close_sign_);
+        std::print("[grasp] compliant close ON ({} gain={:.5f}{}, max={:.3f} sign={:+.0f})\n",
+                   compliant_close_shear_ ? "FORCE-3D SHEAR" : "gentle motor-torque",
+                   compliant_close_shear_ ? compliant_close_shear_gain_ : compliant_close_gain_,
+                   generative_close_ ? std::format(" + GENERATIVE symmetry-commit balance_tol={:.2f}", close_balance_tol_) : std::string{},
+                   compliant_close_max_, compliant_close_sign_);
     try { tip_reflex_             = cfg.get<bool>  ("Controller.tip_reflex");              } catch (...) {}
     try { insert_novice_frac_    = cfg.get<double>("Controller.insert_novice_frac");      } catch (...) {}
     try { use_palm_gate_         = cfg.get<bool>  ("Controller.use_palm_gate");           } catch (...) {}
@@ -537,6 +556,8 @@ void PickandPlaceFSM::run_tracking(const std::array<double, Kinematics::N_ARM_JO
                 grasp_phase_     = GraspPhase::Inserting;
                 grasp_settle_ticks_ = 0; insert_ticks_ = 0; tip_reflex_offset_ = 0.0;
                 insert_sub_ = InsertSub::Descend; insert_reflex_count_ = 0; insert_tip_peak_ = 0.0f;
+                insert_win_ee0_ = ee_position; insert_win_palm0_ = palm_distance();   // fresh close-rate window
+                insert_close_rate_ = 0.0; insert_throat_miss_ = 0;
                 std::print("[grasp] standoff settled (e={:.3f} m, {:.1f}°, c={:.2f}) → Inserting\n",
                            ep, ea * 57.29578, c);
                 // Latency harness: the approach is the only phase that looks, so its effective
@@ -1340,9 +1361,11 @@ void PickandPlaceFSM::miss_or_give_up(const std::string& reason)
     std::print("[grasp] MISS — {}; reopening gripper, returning to rest\n", reason);
     deflate(seg_of(grasp_phase_));   // surprise on the segment that failed → deflate ITS Π_m
     w_.gripper_command_ = 1.0f;
-    RoboCompKinovaArm::TJointAngles rest;
-    rest.jointAngles.assign(w_.rest_pose_angles_.begin(), w_.rest_pose_angles_.end());
-    try { w_.kinovaarm_proxy->moveJointsWithAngle(rest); }
+    // SAFETY: home via nearest_equiv_target — the continuous joints carry accumulated revolutions
+    // from tracking, so commanding the RAW rest_pose_angles_ unwinds them up to a full turn the long
+    // way round, sweeping the arm violently across the table THROUGH the bottle. Match the success/
+    // shutdown homes (specificworker.cpp:82, lines 1883/2001), which wrap to the nearest revolution.
+    try { w_.kinovaarm_proxy->moveJointsWithAngle(w_.nearest_equiv_target(w_.cur_q_, w_.rest_pose_angles_)); }
     catch (const Ice::Exception& e)
     { std::print(stderr, "[grasp] moveJointsWithAngle failed: {}\n", e.what()); }
 
@@ -1395,7 +1418,9 @@ std::pair<bool,bool> PickandPlaceFSM::tip_contacts() const
 
 std::pair<float,float> PickandPlaceFSM::tip_forces() const
 {
-    try { const auto gs = w_.kinovaarm_proxy->getGripperState(); return {gs.ltipforce, gs.rtipforce}; }
+    try { const auto gs = w_.kinovaarm_proxy->getGripperState();
+          return {std::sqrt(gs.lfx*gs.lfx + gs.lfy*gs.lfy + gs.lfz*gs.lfz),    // tip-force magnitude = |force-3d|
+                  std::sqrt(gs.rfx*gs.rfx + gs.rfy*gs.rfy + gs.rfz*gs.rfz)}; }
     catch (const Ice::Exception&) { return {0.0f, 0.0f}; }
 }
 
@@ -1403,6 +1428,15 @@ std::pair<float,float> PickandPlaceFSM::pad_forces() const
 {
     try { const auto gs = w_.kinovaarm_proxy->getGripperState(); return {gs.lforce, gs.rforce}; }
     catch (const Ice::Exception&) { return {0.0f, 0.0f}; }
+}
+
+const char* PickandPlaceFSM::current_grasp_phase_name() const { return phase_name(grasp_phase_); }
+
+std::pair<Eigen::Vector3f, Eigen::Vector3f> PickandPlaceFSM::pad_force_vecs() const
+{
+    try { const auto gs = w_.kinovaarm_proxy->getGripperState();
+          return { {gs.lfx, gs.lfy, gs.lfz}, {gs.rfx, gs.rfy, gs.rfz} }; }
+    catch (const Ice::Exception&) { return { Eigen::Vector3f::Zero(), Eigen::Vector3f::Zero() }; }
 }
 
 float PickandPlaceFSM::gripper_force() const
@@ -1503,7 +1537,36 @@ void PickandPlaceFSM::run_grasp_phases(const std::array<double, Kinematics::N_AR
             {
             case InsertSub::Descend:
             {
-                efe_drive(q, ee_position, lg.grasp_pos + off, lg.z_tool_des, lg.x_tool_des, insert_vel);
+                // Generative insert (close-rate control law): −d(palm)/d(advance) over a window. High
+                // (palm closing 1:1 with my advance) ⇒ on-axis, productive ⇒ advance FAST. Low (palm not
+                // responding to my advance) ⇒ either seated or off-axis ⇒ FIXED-GENTLE soft touch. Fixed
+                // speeds, so the skill ramp can't make "gentle" fast. The derivative is robust to the
+                // bimodal absolute reading (cancels the offset).
+                double desc_vel = insert_vel;
+                if (generative_insert_)
+                {
+                    const double advance = (ee_position - insert_win_ee0_).dot(approach);
+                    if (advance > INSERT_RATE_WINDOW_M)   // enough motion to estimate the gradient over the noise
+                    {
+                        const double rate = -(palm_d - insert_win_palm0_) / advance;   // ≈1 on-axis, ≈0 off-axis
+                        insert_close_rate_ = 0.6 * insert_close_rate_ + 0.4 * rate;
+                        insert_win_ee0_ = ee_position; insert_win_palm0_ = palm_d;      // slide the window
+                    }
+                    // Speed from the palm LEVEL (instantaneous): fast only while the bottle is genuinely
+                    // far (not yet in the throat AND far from the grasp point); fixed-gentle otherwise.
+                    const bool acquired = palm_active_ and palm_d > 1e-4f and palm_d < insert_palm_near_;
+                    const bool far      = e_grasp > insert_near_zone_;
+                    desc_vel = (far and not acquired) ? insert_fast_vel_ : insert_gentle_vel_;
+                    // Off-axis debounce: near the grasp point, advancing, but the palm is NOT closing
+                    // (rate ~0) and not seated = the bottle is off to a side (throat empty).
+                    const bool off_axis = (e_grasp < insert_near_zone_) and palm_active_
+                                          and palm_d > insert_palm_near_ and insert_close_rate_ < 0.2;
+                    insert_throat_miss_ = off_axis ? insert_throat_miss_ + 1 : 0;
+                    if (monitor_log_ and (insert_ticks_ % 15 == 0))
+                        std::print("[gins] e={:.3f} palm={:.3f} rate={:+.2f} vel={:.3f} miss={}\n",
+                                   e_grasp, palm_d, insert_close_rate_, desc_vel, insert_throat_miss_);
+                }
+                efe_drive(q, ee_position, lg.grasp_pos + off, lg.z_tool_des, lg.x_tool_des, desc_vel);
                 insert_tip_peak_ = std::max(insert_tip_peak_, touch);   // diag: peak fingertip force this insert
                 // The bottle is at grasp DEPTH (between the finger pads) when the palm ray first sees it
                 // inside the seat band. Driving to e<tol instead rams it to the palm and the pads close
@@ -1537,7 +1600,16 @@ void PickandPlaceFSM::run_grasp_phases(const std::array<double, Kinematics::N_AR
 
                 // 2) Bottle reached grasp depth (palm band) → CLOSE on it. A benign graze AT depth is fine
                 //    (the bottle is between the pads). Sensor absent ⇒ fall back to the old e<tol seat.
-                const bool seated = palm_active_ ? palm_seat : (e_grasp < REACH_TOLERANCE_M);
+                // Reaching the PLANNED grasp depth with a bottle in the throat is ALSO a valid seat: on a
+                // canted approach (wider commit gate at high skill) the throat ray reads long, so palm can
+                // plateau just above palm_seat_dist while the gripper is already at grasp_pos and cannot
+                // advance further — waiting for palm<seat_dist then times out a perfectly-placed gripper
+                // (the consecutive insert-timeouts at high c). grasp_pos IS the planned depth, so closing
+                // here is not "too shallow"; the palm<palm_grasp_dist check still rejects an empty throat.
+                const bool depth_seat = (e_grasp < REACH_TOLERANCE_M) and palm_active_
+                                        and palm_d > 1e-4f and palm_d < palm_grasp_dist_;
+                const bool seated = palm_active_ ? (palm_seat or depth_seat)
+                                                 : (e_grasp < REACH_TOLERANCE_M);
                 if (seated)
                 {
                     grasp_phase_ = GraspPhase::Closing; closing_ticks_ = 0;
@@ -1568,7 +1640,11 @@ void PickandPlaceFSM::run_grasp_phases(const std::array<double, Kinematics::N_AR
             case InsertSub::Shift:     // move laterally to the new seat at the backed-off depth
                 efe_drive(q, ee_position, reflex_shift_target_, lg.z_tool_des, lg.x_tool_des, insert_vel);
                 if ((ee_position - reflex_shift_target_).norm() < REACH_TOLERANCE_M)
+                {
+                    insert_win_ee0_ = ee_position; insert_win_palm0_ = palm_distance();   // fresh close-rate window
+                    insert_close_rate_ = 0.0; insert_throat_miss_ = 0;
                     insert_sub_ = InsertSub::Descend;   // re-descend onto the shifted seat
+                }
                 break;
             }
             break;
@@ -1613,7 +1689,8 @@ void PickandPlaceFSM::run_grasp_phases(const std::array<double, Kinematics::N_AR
         // Freeze the seated pose on the first Closing cycle and HOLD it (zero approach) while the fingers
         // close. Driving on toward grasp_pos — which sits deeper, where the palm would read ~0.01 —
         // rammed the bottle forward as the jaws shut and flipped it (the 90° tips after a clean seat).
-        if (closing_ticks_ == 0) { closing_hold_pos_ = ee_position; compliant_close_offset_.setZero(); }
+        if (closing_ticks_ == 0) { closing_hold_pos_ = ee_position; compliant_close_offset_.setZero();
+                                   compliant_close_side_peak_.setZero(); }
         // stop_after_grasp: once the grasp is confirmed, HOLD it in place (zero approach velocity) and
         // never advance to Lifting — the "stop at grasp" experiment mode.
         if (grasp_held_)
@@ -1629,14 +1706,48 @@ void PickandPlaceFSM::run_grasp_phases(const std::array<double, Kinematics::N_AR
         double          close_v     = 0.0;
         if (compliant_close_ and closing_ticks_ < MIN_CLOSE_DWELL_TICKS)
         {
-            const auto [clf, crf] = pad_forces();
-            if (std::max(clf, crf) > COMPLIANT_CONTACT_MIN_N)
+            const auto            R       = w_.kinematics_->tool_pose(q).rotation;
+            const Eigen::Vector3d x_close = R.col(0);   // finger-closing axis (sensor X)
+            if (compliant_close_shear_)
             {
-                const double asym = clf - crf;                                         // >0 ⇒ left pad harder
-                const Eigen::Vector3d lat = w_.kinematics_->tool_pose(q).rotation.col(0);   // tool +X
-                compliant_close_offset_ -= compliant_close_sign_ * compliant_close_gain_ * asym * lat;
+                // Force-3d nets to ~0 in a static grip but SPIKES at FIRST CONTACT (the slider reacts the
+                // steady load, not the impact). Sample EVERY tick — NO motor-force gate, the spike precedes
+                // motor-torque build-up — and PEAK-HOLD the net lateral force (world frame): its direction
+                // is the off-centre direction. Drive a decisive HELD offset to null the peak; integrating
+                // the instantaneous value washes the transient out (≈0 between spikes). Closing-axis (sensor
+                // X) components of the opposed pads cancel → residual asymmetry; the pad-WIDTH (sensor Y)
+                // shear ADDS → the lateral miss the magnitude can't see.
+                const Eigen::Vector3d y_width = R.col(1);   // pad-width axis (sensor Y)
+                const auto [lv, rv] = pad_force_vecs();
+                const Eigen::Vector3f net = lv + rv;        // sensor frame {Fx,Fy,Fz}
+                const Eigen::Vector3d lat_force = double(net.x()) * x_close + double(net.y()) * y_width;
+                if (lat_force.norm() > compliant_close_side_peak_.norm())
+                    compliant_close_side_peak_ = lat_force;   // hold the strongest first-contact spike
+                compliant_close_offset_ = -compliant_close_sign_ * compliant_close_shear_gain_
+                                          * compliant_close_side_peak_;
                 const double m = compliant_close_offset_.norm();
                 if (m > compliant_close_max_) compliant_close_offset_ *= compliant_close_max_ / m;
+                if (monitor_log_ and (closing_ticks_ % 10 == 0))
+                    std::print("[cshear] net=({:+.2f},{:+.2f}) peak|{:.2f}|=({:+.2f},{:+.2f}) "
+                               "off=({:+.3f},{:+.3f},{:+.3f})\n",
+                               net.x(), net.y(), compliant_close_side_peak_.norm(),
+                               compliant_close_side_peak_.x(), compliant_close_side_peak_.y(),
+                               compliant_close_offset_.x(), compliant_close_offset_.y(), compliant_close_offset_.z());
+            }
+            else
+            {
+                const auto [clf, crf] = pad_forces();
+                if (std::max(clf, crf) > COMPLIANT_CONTACT_MIN_N)
+                {
+                    // The CORRECTION stays the proven GENTLE raw-force servo (builds with force) — the
+                    // FRACTIONAL/anticipatory version corrects hardest at first contact, exactly when the
+                    // light free-standing bottle is least stable, and knocked it over (24 falls). The
+                    // generative contribution is the SYMMETRY-GATED COMMIT below, not the correction law.
+                    const double step = compliant_close_gain_ * (clf - crf);
+                    compliant_close_offset_ -= compliant_close_sign_ * step * x_close;
+                    const double m = compliant_close_offset_.norm();
+                    if (m > compliant_close_max_) compliant_close_offset_ *= compliant_close_max_ / m;
+                }
             }
             close_target = closing_hold_pos_ + compliant_close_offset_;
             close_v      = compliant_close_speed_;
@@ -1652,7 +1763,12 @@ void PickandPlaceFSM::run_grasp_phases(const std::array<double, Kinematics::N_AR
         // then caught by the wrist weight-check on lift.
         const auto [lf, rf] = pad_forces();
         const bool two_finger = std::min(lf, rf) > GRASP_PAD_MIN_N;
-        grasp_force_ticks_ = two_finger ? grasp_force_ticks_ + 1 : 0;
+        // Generative commit is SYMMETRY-GATED: only a CENTRED grip (fractional asymmetry below tol)
+        // advances to Lifting. An off-centre but loaded grip — the slip cause — is NOT lifted; it keeps
+        // closing (correcting) or times out to a retry, instead of being lifted and slipping.
+        const double commit_asym = (lf + rf > 1e-3f) ? std::abs(lf - rf) / (lf + rf) : 1.0;
+        const bool balanced = (not generative_close_) or (commit_asym < close_balance_tol_);
+        grasp_force_ticks_ = (two_finger and balanced) ? grasp_force_ticks_ + 1 : 0;
         if (grasp_force_ticks_ >= GRASP_FORCE_HOLD_TICKS)
         {
             close_lf_ = lf; close_rf_ = rf;   // diag: grip symmetry at the close→lift transition
@@ -1724,7 +1840,7 @@ void PickandPlaceFSM::run_grasp_phases(const std::array<double, Kinematics::N_AR
         ++lift_ticks_;
         // Soft-start: ramp 0→full over LIFT_SOFT_TICKS so the departure velocity rises smoothly instead
         // of stepping (the jerk). lift_vel_scale_ (cam-open correction) still scales on top.
-        const double lift_soft = std::min(1.0, lift_ticks_ / static_cast<double>(LIFT_SOFT_TICKS));
+        const double lift_soft = std::min(1.0, lift_ticks_ / std::max(1.0, lift_soft_ticks_));
         const std::optional<Eigen::Vector3d> lift_blend =
             stop_after_lift_ ? std::nullopt : std::optional<Eigen::Vector3d>(place_hover_);
         const auto [e_pos, e_ang] = efe_drive(q, ee_position, lift_target_,
@@ -1758,6 +1874,15 @@ void PickandPlaceFSM::run_grasp_phases(const std::array<double, Kinematics::N_AR
                        outcome, c_seg(SEG_LIFT), rep_commit_eang_ * 57.29578, close_lf_, close_rf_,
                        asym, hl, hr, gripper_opening(), weight_gain, tilt, knock, rise, xy_gap);
         };
+        // DIAGNOSTIC: keep lifting to full height and HOLD there, ignoring every confirm/slip/timeout
+        // abort, so the real physical outcome is visible (gripper stays clamped via the case-top command).
+        // efe_drive above already steers toward lift_target_; once reached it holds. No MISS/reopen/home.
+        if (lift_observe_)
+        {
+            static int obs_log = 0;
+            if (obs_log++ % 20 == 0) lift_diag("OBSERVE");
+            break;
+        }
         // Confirm on the ACTUAL outcome — the bottle is genuinely up and still co-located —
         // the moment it's true, instead of first waiting for the EE to reach the full lift
         // target (an over-strict kinematic proxy: a slow lift tripped the timeout even
@@ -1780,17 +1905,23 @@ void PickandPlaceFSM::run_grasp_phases(const std::array<double, Kinematics::N_AR
             // ACTIVE correction: if the grip cams open BEFORE the verdict is final, re-clamp and
             // ease the rise so it re-seats — act on the residual instead of waiting to classify a slip.
             if (verdict == LiftHypothesis::Verdict::Undecided
-                and gripper_opening() - lift_hyp_.aperture0 > CAM_OPEN_RESIDUAL)
+                and gripper_opening() - lift_hyp_.aperture0 > CAM_OPEN_RESIDUAL
+                and rise < lift_min_confirm_rise_)   // a bottle that is RISING is held, not camming open
             {
                 w_.gripper_command_ = 0.0f;
                 lift_vel_scale_     = 0.3;
                 std::print("[lift] cam-open residual (Δaper={:.3f}, L={:.2f}) → re-clamp + ease\n",
                            gripper_opening() - lift_hyp_.aperture0, lift_hyp_.log_evidence);
             }
-            // Grasped evidence is necessary but not sufficient: keep climbing until the bottle has
-            // actually risen by lift_min_confirm_rise_ so the vertical motion is real and observable.
-            confirmed = (verdict == LiftHypothesis::Verdict::Grasped) and (rise >= lift_min_confirm_rise_);
-            slipped   = (verdict == LiftHypothesis::Verdict::Empty);
+            (void) verdict;   // verdict still drives the cam-open active correction above; NOT the confirm
+            // The bottle physically rising with the gripper (GT z) is the ground truth of a hold and is
+            // RELIABLE here, so confirm/slip on the RISE — NOT the verdict, whose aperture mis-reads on an
+            // off-centre grip (it false-fired BOTH ways: "Empty" aborted real holds at rise≈0, and "Grasped"
+            // confirmed-and-released at rise≈0.01 before any actual lift = the discarded good grips). Require
+            // a REAL rise to confirm so the bottle is genuinely lifted; only slip once the EE has COMPLETED
+            // the full lift and the bottle still hasn't followed (it slipped through the grip).
+            confirmed = rise >= lift_min_confirm_rise_;
+            slipped   = (not confirmed) and via_reached(e_pos);
         }
         else
         {

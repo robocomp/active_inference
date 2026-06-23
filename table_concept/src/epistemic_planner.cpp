@@ -20,6 +20,8 @@
 
 // ─── EpistemicPlanner ────────────────────────────────────────────────────────
 
+
+namespace rc {
 EpistemicPlanner::EpistemicPlanner(float delta_min, float gain_threshold, float d_obs)
     : delta_min_(delta_min), gain_threshold_(gain_threshold), d_obs_(d_obs)
 {}
@@ -119,3 +121,5 @@ EpistemicProposal EpistemicPlanner::compute(const TableModel&  model,
 
     return proposal;
 }
+
+}  // namespace rc

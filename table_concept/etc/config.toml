@@ -47,6 +47,14 @@ LambdaSize = 0.05         # weaker KL pull on w/h/height so evidence can expand 
 PriorSizeStd = 0.60       # broader 1-sigma size prior (m); higher means weaker size prior
 RobustLoss = "tukey_biweight"   # one of: quadratic, huber, geman_mcclure, welsch, tukey_biweight
 RobustLossScale = 0.10      # SDF residual scale in meters where robust losses start to saturate
+MaskPrecision = 0.30        # RGB-mask silhouette term weight: back-projects the 2D table contour and
+                            # pulls the top rectangle onto it (constrains occluded faces + yaw). 0 disables.
+RobustGncStartScale = 0.80  # GNC: wide initial robust scale, annealed to RobustLossScale across the
+                            # optimizer iters so a half-offset table still produces gradient during
+                            # coarse alignment. Set <= RobustLossScale to disable annealing.
+RobustGncDecayCycles = 20   # GNC start scale ramps from RobustGncStartScale down to RobustLossScale
+                            # over this many compute cycles, then anneals off so the converged pose
+                            # stops being re-widened each frame and can settle. 0 = no lifetime decay.
 
 [TableConcept]
 ObsDistance = 1.8           # comfortable maximum stand-off from the target face for epistemic poses

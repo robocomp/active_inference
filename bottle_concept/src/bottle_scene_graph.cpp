@@ -13,10 +13,12 @@
 
 #include <QDebug>
 
+namespace rc {
+
 BottleSceneGraph::BottleSceneGraph(std::shared_ptr<DSR::DSRGraph> graph,
                                    DSR::RT_API* rt_api,
                                    DSR::InnerEigenAPI* inner_eigen,
-                                   AgentConfig& cfg)
+                                   BottleConfig& cfg)
     : G_(std::move(graph)), rt_api_(rt_api), inner_eigen_(inner_eigen), cfg_(cfg)
 {}
 
@@ -56,7 +58,7 @@ std::optional<float> BottleSceneGraph::find_table_top(float bx, float by) const
 }
 
 void BottleSceneGraph::scaffold_missing_bottle_nodes(const std::vector<BottlePrior>& priors,
-                                                     const BottlePerception::MasksPacket& masks,
+                                                     const MaskIngestor::MasksPacket& masks,
                                                      std::uint64_t room_node_id)
 {
     if (not masks.valid or priors.empty())
@@ -310,3 +312,5 @@ std::vector<float> BottleSceneGraph::make_cylinder_mesh(const BottleState& s, in
 
     return verts;
 }
+
+}  // namespace rc

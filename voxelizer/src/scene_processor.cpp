@@ -12,10 +12,12 @@
 #include <opencv2/imgproc.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <print>
 #include <sstream>
+#include <string_view>
 #include <variant>
 
 SceneProcessor::SceneProcessor(const std::shared_ptr<DSR::DSRGraph>& graph)
@@ -700,7 +702,18 @@ std::optional<GraphObjectBox> SceneProcessor::build_graph_object_box(const DSR::
 
     const Eigen::Matrix3d& R = room_T_object->linear();
     const float yaw = static_cast<float>(std::atan2(R(1, 0), R(0, 0)));
-    return GraphObjectBox{min_corner, max_corner,
+
+    // Room-frame box center. The vertical center is half_height above the node
+    // origin for floor-standing furniture, and at the origin for center-anchored
+    // objects. A yaw-only rotation leaves z unchanged, so the center's z is simply
+    // the translation z plus that local offset.
+    const Eigen::Vector3d& t = room_T_object->translation();
+    const float z_center_local = stands_on_floor ? half_height : 0.f;
+    const Eigen::Vector3f center(static_cast<float>(t.x()),
+                                 static_cast<float>(t.y()),
+                                 static_cast<float>(t.z()) + z_center_local);
+
+    return GraphObjectBox{min_corner, max_corner, center,
                           Eigen::Vector3f(half_width, half_depth, half_height),
                           yaw, node.name(), std::move(category)};
 }
@@ -904,25 +917,28 @@ void SceneProcessor::update_viewer_graph_object_boxes(std::span<const GraphObjec
 
     if (graph_boxes.empty())
     {
-        voxel_viewer_->update_graph_boxes({}, {}, {});
+        voxel_viewer_->update_graph_boxes({}, {}, {}, {});
         return;
     }
 
-    std::vector<QVector3D> mins;
-    std::vector<QVector3D> maxs;
+    std::vector<QVector3D> centers;
+    std::vector<QVector3D> half_extents;
+    std::vector<float> yaws;
     std::vector<std::string> categories;
-    mins.reserve(graph_boxes.size());
-    maxs.reserve(graph_boxes.size());
+    centers.reserve(graph_boxes.size());
+    half_extents.reserve(graph_boxes.size());
+    yaws.reserve(graph_boxes.size());
     categories.reserve(graph_boxes.size());
 
     for (const auto& box : graph_boxes)
     {
-        mins.emplace_back(box.min.x(), box.min.y(), box.min.z());
-        maxs.emplace_back(box.max.x(), box.max.y(), box.max.z());
+        centers.emplace_back(box.center.x(), box.center.y(), box.center.z());
+        half_extents.emplace_back(box.half_extents.x(), box.half_extents.y(), box.half_extents.z());
+        yaws.push_back(box.yaw_rad);
         categories.push_back(box.category);
     }
 
-    voxel_viewer_->update_graph_boxes(mins, maxs, categories);
+    voxel_viewer_->update_graph_boxes(centers, half_extents, yaws, categories);
 }
 
 void SceneProcessor::update_viewer_object_meshes()
@@ -949,6 +965,7 @@ void SceneProcessor::update_viewer_table_rfe_points()
     std::vector<QVector3D> residual_points;
     std::vector<QVector3D> rfe_points;
     std::vector<QVector3D> candidate_points;
+    std::vector<QVector3D> bank_points;
     std::size_t tables_seen = 0;
     std::size_t tables_with_residual = 0;
     std::size_t tables_with_rfe = 0;
@@ -1002,9 +1019,25 @@ void SceneProcessor::update_viewer_table_rfe_points()
                 candidate_points.emplace_back(flat[idx], flat[idx + 1], flat[idx + 2]);
             }
         }
+
+        // The accumulated voxel bank is published as a runtime (string-named) attr,
+        // so read it directly off the node attributes rather than a typed *_att.
+        const auto& attrs = node.attrs();
+        if (const auto bank_it = attrs.find("table_voxel_bank_pts"); bank_it != attrs.end())
+        {
+            const auto& flat = bank_it->second.float_vec();
+            const std::size_t n = flat.size() / 3;
+            bank_points.reserve(bank_points.size() + n);
+            for (std::size_t i = 0; i < n; ++i)
+            {
+                const std::size_t idx = i * 3;
+                bank_points.emplace_back(flat[idx], flat[idx + 1], flat[idx + 2]);
+            }
+        }
     }
 
     voxel_viewer_->update_rfe_points(residual_points, rfe_points, candidate_points);
+    voxel_viewer_->update_voxel_bank_points(bank_points);
 }
 
 void SceneProcessor::update_viewer_mask_points()
@@ -1013,10 +1046,12 @@ void SceneProcessor::update_viewer_mask_points()
         return;
 
     // The masks node carries the YOLO support points (flat xyz, room frame) as a runtime
-    // attribute. Draw only the "bottle"-labelled slices — masks of other detections (and
-    // their depth dropout) are just clutter here. Per-mask point ranges come from
-    // mask_support_offsets; the i-th label in mask_labels ('|'-joined) owns range
-    // [offsets[i], offsets[i+1]).
+    // attribute. Draw the slices that downstream fitters actually consume — "bottle"
+    // (bottle_concept) and "table" (table_concept) — so the Masks toggle shows exactly the
+    // support points reaching those agents; other detections are clutter here. Per-mask
+    // point ranges come from mask_support_offsets; the i-th label in mask_labels
+    // ('|'-joined) owns range [offsets[i], offsets[i+1]).
+    static const std::array<std::string_view, 2> kDrawnMaskLabels{"bottle", "table"};
     std::vector<QVector3D> mask_points;
     if (const auto masks_node = graph_->get_node("masks"); masks_node.has_value())
     {
@@ -1037,7 +1072,7 @@ void SceneProcessor::update_viewer_mask_points()
             const std::size_t n_masks = labels.size();
             for (std::size_t m = 0; m < n_masks and m + 1 < offsets.size(); ++m)
             {
-                if (labels[m] != "bottle")
+                if (std::find(kDrawnMaskLabels.begin(), kDrawnMaskLabels.end(), labels[m]) == kDrawnMaskLabels.end())
                     continue;
                 const std::size_t begin = static_cast<std::size_t>(offsets[m]);
                 const std::size_t end   = static_cast<std::size_t>(offsets[m + 1]);

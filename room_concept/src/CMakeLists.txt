@@ -114,7 +114,7 @@ include_directories(${CMAKE_CURRENT_LIST_DIR}/../../common/media_transport)
 # sizeof(std::optional<Eigen::Transform>) vs libdsr's 144 → get_transformation_matrix overruns the
 # caller's stack slot (stack smash, e.g. camera_visualizer) or misaligns it (SIGBUS). libdsr is built
 # with default Eigen alignment; the agents must too.
-add_definitions(-O3 -fmax-errors=1 -fno-char8_t)
+add_definitions(-g -O3 -fmax-errors=1 -fno-char8_t)
 
 # AddressSanitizer (opt-in, separate build dir):
 #   cmake -B build-asan -DENABLE_ASAN=ON && cmake --build build-asan -j

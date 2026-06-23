@@ -1,8 +1,8 @@
 /*
- * agent_config.cpp — fill AgentConfig from a RoboComp ConfigLoader.
+ * bottle_config.cpp — fill BottleConfig from a RoboComp ConfigLoader.
  */
 
-#include "agent_config.h"
+#include "bottle_config.h"
 
 #include <cstdlib>   // std::getenv, std::atoi
 #include <print>
@@ -11,9 +11,11 @@
 
 #include "../../common/robust_metrics/robust_metrics.h"   // robust_loss_type_from_string
 
-AgentConfig load_agent_config(const ConfigLoader& cfg)
+namespace rc {
+
+BottleConfig load_bottle_config(const ConfigLoader& cfg)
 {
-    AgentConfig out;
+    BottleConfig out;
 
     auto getf = [&](const std::string& k, float def) -> float {
         return cfg.exists(k) ? static_cast<float>(cfg.get<double>(k)) : def;
@@ -119,3 +121,5 @@ AgentConfig load_agent_config(const ConfigLoader& cfg)
     std::print("bottle_concept: configuration loaded.\n");
     return out;
 }
+
+}  // namespace rc

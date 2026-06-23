@@ -465,8 +465,21 @@ void SpecificWorker::feed_force_plot(
     try
     {   // one localhost gripper read per cycle (100 Hz) so the tip-force impact spike is captured
         const auto gs = kinovaarm_proxy->getGripperState();
-        arm_belief_viewer_->update_forces(gs.lforce, gs.rforce, gs.ltipforce, gs.rtipforce,
-                                          wrist_force, gs.ltipcontact, gs.rtipcontact, gs.distance);
+        const float ltip = std::sqrt(gs.lfx*gs.lfx + gs.lfy*gs.lfy + gs.lfz*gs.lfz);   // |force-3d| (was gs.ltipforce)
+        const float rtip = std::sqrt(gs.rfx*gs.rfx + gs.rfy*gs.rfy + gs.rfz*gs.rfz);
+        // Side (lateral) force = the pad-WIDTH shear, sensor-frame Fy — the off-centre signal the
+        // |force-3d| magnitude hides and the compliant-close centring acts on. Signed (direction matters).
+        arm_belief_viewer_->update_forces(gs.lforce, gs.rforce, ltip, rtip,
+                                          gs.lfy, gs.rfy, wrist_force,
+                                          gs.ltipcontact, gs.rtipcontact, gs.distance);
+        // Side-force probe: the force-3d nets to ~0 in static grip but SPIKES on first contact. Catch
+        // that spike WHEREVER it occurs (which grasp phase, what magnitude/sign) — the throttled Closing
+        // [cshear] log aliases it. Triggered on the spike (not the rate) so it doesn't flood.
+        static int side_probe_n = 0;
+        const float sidemag = std::max({std::abs(gs.lfx), std::abs(gs.lfy), std::abs(gs.rfx), std::abs(gs.rfy)});
+        if (sidemag > 0.003f and (side_probe_n++ % 4 == 0) and fsm_)
+            std::print("[side-probe] phase={} |{:.4f}| Lxy=({:+.4f},{:+.4f}) Rxy=({:+.4f},{:+.4f}) |tip|=({:.4f},{:.4f})\n",
+                       fsm_->current_grasp_phase_name(), sidemag, gs.lfx, gs.lfy, gs.rfx, gs.rfy, ltip, rtip);
     }
     catch (const Ice::Exception&) {}
 }

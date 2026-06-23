@@ -19,6 +19,8 @@
 #include <set>
 #include <tuple>
 
+
+namespace rc {
 namespace
 {
 float anchor_weight(const SamplePoint& sp, const SampleQueueParams& params)
@@ -409,3 +411,5 @@ std::array<float, 6> SampleQueue::face_coverage(const TableModel& model) const
 
     return coverage;
 }
+
+}  // namespace rc

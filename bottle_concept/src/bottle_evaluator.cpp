@@ -10,7 +10,9 @@
 
 #include <Eigen/Dense>
 
-BottleEvaluator::BottleEvaluator(AgentConfig& cfg,
+namespace rc {
+
+BottleEvaluator::BottleEvaluator(BottleConfig& cfg,
                                  RoboCompWebots2Robocomp::Webots2RobocompPrxPtr proxy,
                                  DSR::InnerEigenAPI* inner_eigen,
                                  TableTopFn table_top)
@@ -293,3 +295,5 @@ void BottleEvaluator::log_eval(const BottleInstance& inst, float free_energy)
               << nees << ',' << cov.trace() << '\n';
     eval_log_.flush();
 }
+
+}  // namespace rc

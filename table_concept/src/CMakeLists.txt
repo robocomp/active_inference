@@ -26,6 +26,10 @@ find_package(Torch REQUIRED)
 LIST(APPEND SOURCES
   ../src/specificworker.cpp
   ../src/specificworker_presence.cpp
+  ../src/table_config.cpp
+  ../src/mask_ingestor.cpp
+  ../src/table_scene_graph.cpp
+  ../src/table_fitter.cpp
   ../src/table_model.cpp
   ../src/sample_queue.cpp
   ../src/epistemic_planner.cpp
@@ -41,6 +45,11 @@ LIST(APPEND SOURCES
 # Headers set
 LIST(APPEND HEADERS
   ../src/specificworker.h
+  ../src/table_config.h
+  ../src/table_instance.h
+  ../src/mask_ingestor.h
+  ../src/table_scene_graph.h
+  ../src/table_fitter.h
   ../src/table_model.h
   ../src/sample_queue.h
   ../src/epistemic_planner.h
@@ -58,5 +67,8 @@ LIST(APPEND HEADERS
 LIST(APPEND LIBS ${LIBS} "${TORCH_LIBRARIES}")
 
 # no-char8_t to avoid a problem with ICE Connection lib.
-add_definitions(-O3 -march=native -fmax-errors=1 -fno-char8_t  -DEIGEN_MAX_ALIGN_BYTES=0)
+# NEITHER -march=native NOR -DEIGEN_MAX_ALIGN_BYTES=0: both change sizeof(optional<Eigen::Transform>)
+# away from libdsr's default alignment (144) → get_transformation_matrix overruns the caller's stack
+# slot → 0x17ff… SIGBUS in whatever agent shares the graph. Match libdsr's default. (See crash notes.)
+add_definitions(-O3 -fmax-errors=1 -fno-char8_t)
 

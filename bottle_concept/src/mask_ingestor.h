@@ -1,5 +1,5 @@
 /*
- * bottle_perception.h
+ * mask_ingestor.h
  *
  * Perception input layer for bottle_concept: reads the YOLO "masks" DSR node
  * (written by the voxelizer), parses it into per-instance mask slices + support
@@ -25,7 +25,9 @@
 
 #include "bottle_instance.h"
 
-class BottlePerception
+namespace rc {
+
+class MaskIngestor
 {
 public:
     struct MaskSlice
@@ -51,7 +53,7 @@ public:
         std::vector<Eigen::Vector2f> mask_pixels;   // raw YOLO foreground (col,row), depth-independent
     };
 
-    explicit BottlePerception(std::shared_ptr<DSR::DSRGraph> graph);
+    explicit MaskIngestor(std::shared_ptr<DSR::DSRGraph> graph);
 
     // Re-read the "masks" node. Returns true only when a NEW frame was ingested
     // (stale frames and a missing/incomplete node leave the packet reset/unchanged).
@@ -71,3 +73,5 @@ private:
     MasksPacket                    masks_packet_;
     int                            last_masks_frame_seen_ = -1;
 };
+
+}  // namespace rc

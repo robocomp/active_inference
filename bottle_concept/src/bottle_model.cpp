@@ -14,6 +14,8 @@
 #include <print>
 #include <torch/torch.h>
 
+namespace rc {
+
 using namespace torch::indexing;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -527,3 +529,5 @@ std::pair<Eigen::Vector3f, Eigen::Vector3f> BottleModel::bounding_box() const
         Eigen::Vector3f{state_.cx + r, state_.cy + r, state_.cz + hh}
     };
 }
+
+}  // namespace rc

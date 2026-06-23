@@ -11,15 +11,17 @@
 #include <unordered_map>
 #include <utility>
 
+namespace rc {
+
 BottleFitter::BottleFitter(std::shared_ptr<DSR::DSRGraph> graph,
                            DSR::InnerEigenAPI* inner_eigen,
-                           AgentConfig& cfg,
+                           BottleConfig& cfg,
                            const std::vector<BottlePrior>& priors,
-                           BottlePerception* perception,
+                           MaskIngestor* perception,
                            BottleSceneGraph* scene_graph,
                            BottleEvaluator* evaluator)
     : G_(std::move(graph)), inner_eigen_(inner_eigen), cfg_(cfg), priors_(priors),
-      perception_(perception), scene_graph_(scene_graph), evaluator_(evaluator)
+      mask_ingestor_(perception), scene_graph_(scene_graph), evaluator_(evaluator)
 {}
 
 void BottleFitter::process_bottle_node(const DSR::Node& node, std::uint64_t room_node_id)
@@ -70,14 +72,14 @@ BottleFitter::BottleObservation BottleFitter::observe_bottle_node(BottleInstance
 
     // Primary path: YOLO masks (room frame). Classify-don't-destroy SDF split —
     // inliers become queue anchors, the rest drive model expansion.
-    if (perception_->packet().valid and perception_->packet().frame_id > inst.last_masks_frame_seen)
+    if (mask_ingestor_->packet().valid and mask_ingestor_->packet().frame_id > inst.last_masks_frame_seen)
     {
-        const auto selected_mask = perception_->select_for_bottle(inst);
+        const auto selected_mask = mask_ingestor_->select_for_bottle(inst);
         if (selected_mask.has_value())
         {
             const auto& slice = selected_mask.value();
-            const std::size_t begin = std::min(slice.support_begin, perception_->packet().support_points.size());
-            const std::size_t end   = std::min(slice.support_end,   perception_->packet().support_points.size());
+            const std::size_t begin = std::min(slice.support_begin, mask_ingestor_->packet().support_points.size());
+            const std::size_t end   = std::min(slice.support_end,   mask_ingestor_->packet().support_points.size());
 
             std::vector<Eigen::Vector3f> candidate_pts;
             std::vector<Eigen::Vector3f> residual_pts;
@@ -86,7 +88,7 @@ BottleFitter::BottleObservation BottleFitter::observe_bottle_node(BottleInstance
 
             for (std::size_t i = begin; i < end; ++i)
             {
-                const auto& p = perception_->packet().support_points[i];
+                const auto& p = mask_ingestor_->packet().support_points[i];
                 const float sdf = inst.model.sdf_point(p);
                 if (std::abs(sdf) < cfg_.sdf_threshold_for_storage)
                     candidate_pts.push_back(p);
@@ -105,11 +107,11 @@ BottleFitter::BottleObservation BottleFitter::observe_bottle_node(BottleInstance
                     ? static_cast<float>(observation.candidate_pts.size()) / total
                     : 0.0f;
 
-                inst.last_masks_frame_seen = perception_->packet().frame_id;
+                inst.last_masks_frame_seen = mask_ingestor_->packet().frame_id;
 
                 if (should_log(inst))
                     std::print("[{}] masks={} label='{}' conf={:.2f} support={} cand={} resid={} centroid=({:.2f},{:.2f},{:.2f})\n",
-                               inst.node_name, perception_->packet().frame_id, slice.label, slice.confidence,
+                               inst.node_name, mask_ingestor_->packet().frame_id, slice.label, slice.confidence,
                                end - begin, observation.candidate_pts.size(), observation.residual_pts.size(),
                                slice.centroid.x(), slice.centroid.y(), slice.centroid.z());
                 return observation;
@@ -118,8 +120,8 @@ BottleFitter::BottleObservation BottleFitter::observe_bottle_node(BottleInstance
     }
 
     // Fallback: candidate/residual point attributes written directly on the node.
-    observation.candidate_pts = perception_->read_pts_attrib(node, "candidate_pts_att");
-    observation.residual_pts  = perception_->read_pts_attrib(node, "residual_pts_att");
+    observation.candidate_pts = mask_ingestor_->read_pts_attrib(node, "candidate_pts_att");
+    observation.residual_pts  = mask_ingestor_->read_pts_attrib(node, "residual_pts_att");
     observation.has_fresh_data = not observation.candidate_pts.empty() or not observation.residual_pts.empty();
     return observation;
 }
@@ -245,9 +247,9 @@ void BottleFitter::feed_silhouette(BottleInstance& inst)
         if (not camera_api_) return;
     }
 
-    const auto slice = perception_->select_for_bottle(inst);
+    const auto slice = mask_ingestor_->select_for_bottle(inst);
     if (not slice.has_value() or slice->pixel_end <= slice->pixel_begin
-        or slice->pixel_end > perception_->packet().mask_pixels.size())
+        or slice->pixel_end > mask_ingestor_->packet().mask_pixels.size())
         return;
 
     const auto Mopt = room_T_zed_matrix();   // room_T_zed (camera→room), plain 4×4
@@ -265,8 +267,8 @@ void BottleFitter::feed_silhouette(BottleInstance& inst)
     std::unordered_map<int, std::pair<float, float>> row_minmax;
     for (std::size_t i = slice->pixel_begin; i < slice->pixel_end; ++i)
     {
-        const float col = perception_->packet().mask_pixels[i].x();
-        const int   row = static_cast<int>(perception_->packet().mask_pixels[i].y());
+        const float col = mask_ingestor_->packet().mask_pixels[i].x();
+        const int   row = static_cast<int>(mask_ingestor_->packet().mask_pixels[i].y());
         auto it = row_minmax.find(row);
         if (it == row_minmax.end()) row_minmax.emplace(row, std::pair{col, col});
         else { it->second.first = std::min(it->second.first, col); it->second.second = std::max(it->second.second, col); }
@@ -565,3 +567,5 @@ SampleQueueParams BottleFitter::make_queue_params() const
     p.z_bin_size                   = cfg_.z_bin_size;
     return p;
 }
+
+}  // namespace rc

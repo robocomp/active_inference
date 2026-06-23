@@ -31,6 +31,7 @@ public:
         std::size_t viewer_max_rendered_voxels = 30'000;
         float track_association_max_distance_m = 0.7f;
         float z_lift_m = 0.0f;
+        float mask_surface_band_m = 0.35f;   // |range - median| gate for opaque masked points
         int track_max_missed_frames = 10;
         int viewer_voxel_fps = 10;
         bool verbose_debug = false;

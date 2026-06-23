@@ -51,6 +51,13 @@ public:
         float carrot_curve_release_heading_change = 0.04f; // hysteresis release threshold (straight again)
         float goal_threshold   = 0.25f;
 
+        // Final in-place alignment: after reaching the goal position, rotate the
+        // base to face the target's commanded yaw (so e.g. the robot looks AT the
+        // table at an epistemic affordance) before declaring the goal reached.
+        float align_yaw_tol_rad = 0.06f;   // |yaw error| under which alignment is done (~3.4 deg)
+        float align_kp          = 1.5f;    // P gain on yaw error -> rot command
+        float align_min_rot     = 0.10f;   // rad/s floor to overcome stiction while aligning
+
         // MPPI sampling — initial / baseline values (adapted by ESS)
         int   num_samples      = 100;       // K baseline
         int   trajectory_steps = 50;       // T baseline
@@ -287,6 +294,10 @@ public:
     TrajectoryController() = default;
 
     void set_path(const std::vector<Eigen::Vector2f>& path_room);
+    // Optional room-frame heading (atan2(dy,dx) direction) the robot's forward axis
+    // should face once the goal position is reached. Empty = legacy behaviour:
+    // declare the goal reached immediately on arrival, no final rotation.
+    void set_goal_facing_yaw(std::optional<float> yaw_rad);
     ControlOutput compute(const Eigen::Affine2f& robot_pose);
     void stop();
     void set_lidar_buffer(LidarPointBuffer *buffer) { lidar_buffer_ = buffer; }
@@ -318,6 +329,8 @@ private:
     ControlMode control_mode_ = ControlMode::MPPI;
     std::vector<Eigen::Vector2f> path_room_;
     int wp_index_ = 0;
+    std::optional<float> goal_facing_yaw_;  // desired room-frame facing dir after arrival
+    bool aligning_ = false;                 // true while doing the final in-place rotation
 
     // ---- ESDF ----
     std::vector<float> esdf_data_;

@@ -6,9 +6,21 @@
 #include <iomanip>
 #include <limits>
 #include <chrono>
+#include <print>
 
 namespace rc
 {
+
+namespace
+{
+// Wrap an angle to (-pi, pi].
+float wrap_pi(float a)
+{
+    while (a > static_cast<float>(M_PI)) a -= 2.f * static_cast<float>(M_PI);
+    while (a < -static_cast<float>(M_PI)) a += 2.f * static_cast<float>(M_PI);
+    return a;
+}
+} // namespace
 
 float TrajectoryController::clamp01(float x)
 {
@@ -183,6 +195,13 @@ void TrajectoryController::set_path(const std::vector<Eigen::Vector2f>& path_roo
     blockage_streak_ = 0;
     blockage_cooldown_ = 0;
 
+    // A fresh path means we are navigating again, not doing the final rotation.
+    aligning_ = false;
+}
+
+void TrajectoryController::set_goal_facing_yaw(std::optional<float> yaw_rad)
+{
+    goal_facing_yaw_ = yaw_rad;
 }
 
 void TrajectoryController::stop()
@@ -468,8 +487,48 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
     // 3. Goal check
     const Eigen::Vector2f goal_robot = room_to_robot(path_room_.back(), robot_pose);
     out.dist_to_goal = goal_robot.norm();
-    if (out.dist_to_goal < active_params_.goal_threshold)
-    { active_ = false; out.goal_reached = true; return out; }
+    if (out.dist_to_goal < active_params_.goal_threshold or aligning_)
+    {
+        // Position reached. If the target carries a commanded facing yaw, rotate in
+        // place to face it before finishing (so e.g. the robot looks AT the table at
+        // an epistemic affordance). active_ stays true while aligning, so the session
+        // keeps re-entering here and does not replan.
+        if (goal_facing_yaw_.has_value())
+        {
+            // Body frame is +X right, +Y forward, so the forward axis points along
+            // (theta + pi/2) in the room; to face goal_facing_yaw_ the body angle
+            // theta must equal facing - pi/2.
+            const float robot_theta = std::atan2(robot_pose.linear()(1, 0), robot_pose.linear()(0, 0));
+            const float theta_des = wrap_pi(*goal_facing_yaw_ - static_cast<float>(M_PI_2));
+            const float yaw_err = wrap_pi(theta_des - robot_theta);
+            if (std::abs(yaw_err) <= active_params_.align_yaw_tol_rad)
+            {
+                aligning_ = false;
+                active_ = false;
+                out.goal_reached = true;
+                return out;
+            }
+            if (not aligning_)
+                std::println("[TrajectoryController] final align: facing={:.3f} theta={:.3f} theta_des={:.3f} err={:.3f} rad",
+                             *goal_facing_yaw_, robot_theta, theta_des, yaw_err);
+            aligning_ = true;
+            out.adv = 0.f;
+            out.side = 0.f;
+            // The session sends rot_rps = -out.rot; in the OmniRobot convention a
+            // positive sent rot turns the base CCW (theta increases). Drive theta
+            // toward theta_des, with a floor to overcome stiction.
+            float sent_rot = std::clamp(active_params_.align_kp * yaw_err,
+                                        -active_params_.max_rot, active_params_.max_rot);
+            if (std::abs(sent_rot) < active_params_.align_min_rot)
+                sent_rot = std::copysign(active_params_.align_min_rot, sent_rot);
+            out.rot = -sent_rot;
+            out.goal_reached = false;
+            return out;
+        }
+        active_ = false;
+        out.goal_reached = true;
+        return out;
+    }
 
     out.min_esdf = query_esdf(0.f, 0.f);
 

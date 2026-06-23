@@ -14,7 +14,9 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
+#include <print>
 #include <string>
 
 #include "generated/idl/image_framePubSubTypes.hpp"
@@ -278,5 +280,66 @@ private:
     bool has_participant_ = false;
     bool data_sharing_active_ = false;
 };
+
+// ── Descriptor-driven subscriber factories ───────────────────────────────────
+// THE single, shared way every agent brings up a media-plane consumer, so the
+// initialization code is identical everywhere (easier maintenance). Each factory:
+//   1. reads the producer's descriptor on `node_name` (verifies the sensor node +
+//      stream exist — returns nullptr if not, so callers can fall back / retry),
+//   2. takes the DDS domain + topic STRAIGHT from that descriptor (never config —
+//      always the producer's dedicated media domain),
+//   3. creates the typed subscriber and init()s it,
+//   4. logs a uniform one-line result.
+// Call from the MAIN thread once the graph is loaded (never from a free-running
+// worker thread during the DSR join). Returns the ready subscriber, or nullptr.
+template <class Graph>
+[[nodiscard]] std::unique_ptr<LidarSubscriber>
+make_lidar_subscriber_from_graph(Graph& graph, const std::string& node_name,
+                                 const std::string& stream_key = "lidar")
+{
+    auto desc = descriptor_from_graph(graph, node_name);
+    auto cfg  = desc.has_value() ? desc->subscriber_config(stream_key) : std::nullopt;
+    if (not cfg.has_value())
+    {
+        std::print(stderr, "[media] no '{}' stream descriptor on node '{}' — LiDAR subscriber not created\n",
+                   stream_key, node_name);
+        return nullptr;
+    }
+    auto sub = std::make_unique<LidarSubscriber>();
+    if (not sub->init(*cfg))
+    {
+        std::print(stderr, "[media] LiDAR subscriber init FAILED (node '{}' topic '{}')\n",
+                   node_name, cfg->topic_name);
+        return nullptr;
+    }
+    std::print("[media] LiDAR subscriber up from '{}' descriptor: domain={} topic='{}'\n",
+               node_name, cfg->domain_id, cfg->topic_name);
+    return sub;
+}
+
+template <class Graph>
+[[nodiscard]] std::unique_ptr<MediaSubscriber>
+make_image_subscriber_from_graph(Graph& graph, const std::string& node_name,
+                                 const std::string& stream_key)
+{
+    auto desc = descriptor_from_graph(graph, node_name);
+    auto cfg  = desc.has_value() ? desc->subscriber_config(stream_key) : std::nullopt;
+    if (not cfg.has_value())
+    {
+        std::print(stderr, "[media] no '{}' stream descriptor on node '{}' — image subscriber not created\n",
+                   stream_key, node_name);
+        return nullptr;
+    }
+    auto sub = std::make_unique<MediaSubscriber>();
+    if (not sub->init(*cfg))
+    {
+        std::print(stderr, "[media] image subscriber init FAILED (node '{}' topic '{}')\n",
+                   node_name, cfg->topic_name);
+        return nullptr;
+    }
+    std::print("[media] image subscriber up from '{}' descriptor ('{}'): domain={} topic='{}'\n",
+               node_name, stream_key, cfg->domain_id, cfg->topic_name);
+    return sub;
+}
 
 }  // namespace rc::media

@@ -19,6 +19,8 @@
 #include "bottle_model.h"
 #include "sample_queue.h"
 
+namespace rc {
+
 struct BottleInstance
 {
     uint64_t    node_id = 0;
@@ -58,3 +60,5 @@ struct BottleInstance
     std::uint64_t parent_id = 0;
     std::string   parent_name = "room";
 };
+
+}  // namespace rc

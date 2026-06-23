@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> **⚠ Working agreement: never `git commit` (or push) on your own. Always ask first and wait for explicit approval before committing.**
+
 ## What This Component Is
 
 `kinova_controller` is a RoboComp/CORTEX agent that runs an **active-inference (EFE-gradient) controller** for a Kinova Gen3 7-DoF arm + Robotiq 2F-85 gripper. It treats arm motion as gradient descent on a Gaussian preference distribution over end-effector position (plus an orientation alignment term), and drives the arm by sending joint velocity commands through the `KinovaArm` Ice proxy (typically backed by a Webots bridge).

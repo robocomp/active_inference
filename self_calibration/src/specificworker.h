@@ -188,6 +188,31 @@ private:
 	double depth_sensor_range_k_ = 0.001;    // depth noise grows ≈ k·range² (/m)  (SelfCalib.depth_sensor_range_k)
 	double geom_sigma_m_         = 0.008;    // single-capsule model floor         (SelfCalib.geom_sigma_m)
 	double grazing_cos_min_      = 0.2;      // clamp on |ray·surface-normal|: grazing samples inflate σ_geom ≤1/this (SelfCalib.grazing_cos_min)
+
+	// ── Information filter: belief on the T_body_arm correction δξ∈se(3) ──────
+	// GLS normal-equation (Λ,η) accumulated over DISTINCT poses. Each pose marginalizes a
+	// per-pose nuisance bias b_pose~N(0,σ_model²): the ±22mm config-dependent single-capsule
+	// model error is CORRELATED within a pose, so Sherman-Morrison down-weights the common mode
+	// (else n≈30 samples ⇒ wildly overconfident vs the true ±22mm). δξ = right-perturbation of
+	// T_body_arm in the arm-base frame; Σ=Λ⁻¹ exposes the depth-blind (lateral/tilt) DOFs.
+	bool   filter_enabled_   = true;                                         // SelfCalib.filter_enabled
+	Eigen::Matrix<double, 6, 6> filt_Lambda_ = Eigen::Matrix<double, 6, 6>::Zero();  // information (incl. prior)
+	Eigen::Matrix<double, 6, 1> filt_eta_    = Eigen::Matrix<double, 6, 1>::Zero();  // information vector
+	int    filt_poses_       = 0;
+	bool   have_folded_pose_ = false;
+	std::array<double, 7> last_folded_q_{};
+	double model_sigma_sq_   = 0.020 * 0.020;  // per-pose nuisance σ²  (SelfCalib.model_sigma_m)
+	double prior_sigma_trans_= 0.05;           // extrinsic prior σ, translation m   (SelfCalib.prior_sigma_trans_m)
+	double prior_sigma_rot_  = 0.087;          // extrinsic prior σ, rotation rad ≈5° (SelfCalib.prior_sigma_rot_deg)
+	double pose_min_dq_      = 0.05;           // min ‖Δq‖ rad to count a NEW pose    (SelfCalib.pose_min_dq)
+	Eigen::Matrix4d inject_ext_ = Eigen::Matrix4d::Identity();  // optional known extrinsic corruption (active-vs-passive validation)
+	// Latest filter estimate, republished to the overlay so the yellow skeleton can be drawn with the
+	// CORRECTED extrinsic — the decisive "is dxi a real extrinsic error?" test (does it snap onto the arm?).
+	Eigen::Matrix<double, 6, 1> filt_dxi_ = Eigen::Matrix<double, 6, 1>::Zero();
+	bool   filt_have_dxi_          = false;
+	bool   apply_filter_to_overlay_ = false;   // SelfCalib.apply_filter_to_overlay
+	bool   gt_printed_              = false;    // one-shot graph-vs-corrected extrinsic decomposition
+	void init_filter_prior();                  // seed Λ with the prior, build inject_ext_ from config
 	static constexpr std::size_t REG_MAX          = 3000; // ~2–3 s of inlier samples
 	static constexpr int         REG_REPORT_EVERY = 20;
 

@@ -177,7 +177,14 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
     }
 
     if (step.target_changed || !path_controller.is_active())
+    {
         path_controller.set_path(current_plan_->room_path);
+        // Affordance targets carry a desired facing yaw (point AT the table); manual
+        // mouse targets do not, so they keep the legacy stop-on-arrival behaviour.
+        path_controller.set_goal_facing_yaw(step.target.from_affordance
+                                                ? std::optional<float>(step.target.yaw_rad)
+                                                : std::nullopt);
+    }
 
     return true;
 }

@@ -27,11 +27,13 @@
 #include <dsr/api/dsr_rt_api.h>
 #include <dsr/api/dsr_inner_eigen_api.h>
 
-#include "agent_config.h"
+#include "bottle_config.h"
 #include "bottle_instance.h"
 #include "bottle_model.h"        // BottleState
-#include "bottle_perception.h"   // BottlePerception::MasksPacket
+#include "mask_ingestor.h"   // MaskIngestor::MasksPacket
 #include "prior_store.h"         // BottlePrior
+
+namespace rc {
 
 class BottleSceneGraph
 {
@@ -39,7 +41,7 @@ public:
     BottleSceneGraph(std::shared_ptr<DSR::DSRGraph> graph,
                      DSR::RT_API* rt_api,
                      DSR::InnerEigenAPI* inner_eigen,
-                     AgentConfig& cfg);
+                     BottleConfig& cfg);
 
     // The "table" node when the bottle's (bx,by) is over its footprint — the RT parent the bottle
     // hangs from (re-parents room→bottle to table→bottle). std::nullopt ⇒ hang from the room.
@@ -50,7 +52,7 @@ public:
     // Create any "bottle_N" cylinder node named in priors that doesn't exist yet, matching each prior
     // to the nearest unused "bottle" mask slice and anchoring it to the table (or room) under it.
     void scaffold_missing_bottle_nodes(const std::vector<BottlePrior>& priors,
-                                       const BottlePerception::MasksPacket& masks,
+                                       const MaskIngestor::MasksPacket& masks,
                                        std::uint64_t room_node_id);
 
     // Publish the instance's fitted model to its DSR node (geometry attrs + FE + mesh + RFE queue) and
@@ -69,5 +71,7 @@ private:
     std::shared_ptr<DSR::DSRGraph> G_;
     DSR::RT_API*        rt_api_      = nullptr;
     DSR::InnerEigenAPI* inner_eigen_ = nullptr;
-    AgentConfig&        cfg_;
+    BottleConfig&        cfg_;
 };
+
+}  // namespace rc
