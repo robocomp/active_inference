@@ -626,45 +626,16 @@ void SpecificWorker::control_loop()
 
 void SpecificWorker::init_lidar_media()
 {
-	// One-shot, on the main thread, before the control thread starts.
+	// One-shot, on the main thread, before the control thread starts. Uses the shared
+	// descriptor-driven factory (rc::media::make_lidar_subscriber_from_graph) so every
+	// agent's subscriber init is identical: it verifies the sensor node + descriptor
+	// exist and reads the DDS domain/topic from that JSON (no config).
 	if (!params.lidar_use_media || lidar_media_sub_ || !G)
 		return;
-
-	// 1) Verify the producer's sensor node exists in the (already-loaded) graph.
-	if (not G->get_node(params.lidar_name).has_value())
-	{
-		qWarning() << "[Lidar] sensor node" << QString::fromStdString(params.lidar_name)
-		           << "absent from the graph at init — media plane disabled, using DSR laser_* path"
-		           << "(is robot_concept running first?)";
-		return;
-	}
-	// 2) Its media descriptor carries the DDS domain + topic (authored by the producer).
-	//    No config: the consumer always uses the producer's dedicated media domain.
-	auto desc = rc::media::descriptor_from_graph(*G, params.lidar_name);
-	auto sub_cfg = desc.has_value() ? desc->subscriber_config("lidar") : std::nullopt;
-	if (not sub_cfg.has_value())
-	{
-		qWarning() << "[Lidar] node" << QString::fromStdString(params.lidar_name)
-		           << "has no LiDAR media descriptor at init — using DSR laser_* path"
-		           << "(is robot_concept running first?)";
-		return;
-	}
-
-	// 3) Create the subscriber on the descriptor's domain/topic.
-	auto sub = std::make_unique<rc::media::LidarSubscriber>();
-	rc::media::SubscriberConfig scfg;
-	scfg.domain_id     = sub_cfg->domain_id;
-	scfg.topic_name    = sub_cfg->topic_name;
-	scfg.history_depth = 8;
-	if (sub->init(scfg))
-	{
-		lidar_media_sub_ = std::move(sub);
-		qInfo() << "[Lidar] media-plane source up (from"
-		        << QString::fromStdString(params.lidar_name) << "descriptor) domain="
-		        << scfg.domain_id << "topic=" << QString::fromStdString(scfg.topic_name);
-	}
-	else
-		qWarning() << "[Lidar] media-plane subscriber init FAILED — using DSR laser_* path";
+	lidar_media_sub_ = rc::media::make_lidar_subscriber_from_graph(*G, params.lidar_name, "lidar");
+	if (!lidar_media_sub_)
+		qWarning() << "[Lidar] media-plane LiDAR not available at init (is robot_concept up first?)"
+		           << "— no LiDAR source; the stream watchdog will hold the robot until it appears";
 }
 
 bool SpecificWorker::poll_lidar_media()
