@@ -246,4 +246,37 @@ private:
     bool data_sharing_active_ = false;
 };
 
+// One reader per LiDAR topic. The callback receives a const LidarFrame& valid only
+// for the duration of the call (a loaned view into the SHM segment). Mirror of
+// MediaSubscriber for the LidarFrame type — kept a separate concrete class so the
+// ImageFrame MediaSubscriber that other agents forward-declare stays unchanged.
+class LidarSubscriber
+{
+public:
+    using FrameCallback = std::function<void(const LidarFrame& frame, std::int64_t recv_ns)>;
+
+    LidarSubscriber() = default;
+    ~LidarSubscriber();
+    LidarSubscriber(const LidarSubscriber&) = delete;
+    LidarSubscriber& operator=(const LidarSubscriber&) = delete;
+
+    bool init(const SubscriberConfig& cfg);
+    void close();
+
+    int poll(const FrameCallback& cb);                          // non-blocking drain
+    int wait_and_poll(const FrameCallback& cb, int timeout_ms); // block-then-drain
+
+    [[nodiscard]] bool data_sharing_active() const { return data_sharing_active_; }
+
+private:
+    eprosima::fastdds::dds::DomainParticipant* participant_ = nullptr;
+    eprosima::fastdds::dds::Subscriber*        subscriber_  = nullptr;
+    eprosima::fastdds::dds::Topic*             topic_       = nullptr;
+    eprosima::fastdds::dds::DataReader*        reader_      = nullptr;
+    std::uint32_t participant_domain_id_ = 0;
+    bool participant_shm_only_ = true;
+    bool has_participant_ = false;
+    bool data_sharing_active_ = false;
+};
+
 }  // namespace rc::media
