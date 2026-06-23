@@ -44,6 +44,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<int>(cl, "Media.domain_id", p.MEDIA_DOMAIN_ID);
     rc::ConfigLoaderUtils::load_optional<std::string>(cl, "Media.rgb_topic", p.MEDIA_RGB_TOPIC);
     rc::ConfigLoaderUtils::load_optional<std::string>(cl, "Media.lidar_topic", p.MEDIA_LIDAR_TOPIC);
+    rc::ConfigLoaderUtils::load_optional<std::string>(cl, "Media.imu_topic", p.MEDIA_IMU_TOPIC);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "Media.lidar_use_media", p.LIDAR_USE_MEDIA);
 
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.SigmaSdf", room_concept.params.sigma_sdf);

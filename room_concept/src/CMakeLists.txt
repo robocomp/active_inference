@@ -59,6 +59,7 @@ LIST(APPEND SOURCES
   ../src/epistemic_controller.cpp
   ../src/room_scene_graph.cpp
   ../src/lidar_ingestor.cpp
+  ../src/imu_ingestor.cpp
   ../src/room_viewer.cpp
   ../src/room_config.cpp
   ${ACTIVE_INFERENCE_COMMON_DIR}/affordance_manager/affordance_manager.cpp
@@ -90,6 +91,7 @@ LIST(APPEND HEADERS
   ../src/epistemic_controller.h
   ../src/room_scene_graph.h
   ../src/lidar_ingestor.h
+  ../src/imu_ingestor.h
   ../src/room_viewer.h
   ../src/room_config.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/affordance_manager/affordance_manager.h

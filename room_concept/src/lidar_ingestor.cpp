@@ -28,12 +28,12 @@ LidarIngestor::LidarIngestor(std::shared_ptr<DSR::DSRGraph> graph, rc::RoomConce
         return;
     }
 
-    // Prefer the self-describing descriptor on "zed" (domain/topic authored by the producer);
-    // fall back to the configured domain/topic.
+    // Prefer the self-describing descriptor on the "lidar3D" node (domain/topic authored
+    // by the producer, which advertises the lidar stream there); fall back to config.
     std::uint32_t domain = static_cast<std::uint32_t>(params_->MEDIA_DOMAIN_ID);
     std::string   topic  = params_->MEDIA_LIDAR_TOPIC;
     if (G_)
-        if (auto desc = rc::media::descriptor_from_graph(*G_, "zed"); desc.has_value())
+        if (auto desc = rc::media::descriptor_from_graph(*G_, "lidar3D"); desc.has_value())
             if (auto sub = desc->subscriber_config("lidar"); sub.has_value())
             {
                 domain = sub->domain_id;
