@@ -87,6 +87,27 @@ struct TableConfig
     int   warm_reopen_admit            = 8;       // net new queue anchors in a cycle that count as a fresh viewpoint (reset maturity)
     float warm_settle_floor            = 0.05f;   // acceptance-gain multiplier once mature (lower = stiffer lock; recovers on new evidence)
     float warm_info_half               = 20.0f;   // accumulated per-face view-info at which the w/h gain halves (lower = hardens faster)
+    // Fisher information filter: replaces the face-coverage view-info PROXY with the real per-DOF
+    // observation Fisher information (curvature of the SDF data-likelihood). Each fresh mask
+    // contributes calibrated, anisotropic evidence per DOF; the accumulated info stiffens the
+    // acceptance gain so a well-observed extent hardens (belief→knowledge) while an unseen face
+    // stays plastic — the stabiliser for successive viewpoints as the robot orbits the table.
+    bool  fisher_filter_enabled        = true;
+    // Kalman-gain stiffness: drive each DOF's acceptance lerp gain directly from the calibrated
+    // information filter as λ_j = obs_info_j / (Y_pred_j + obs_info_j) — the per-DOF Kalman gain —
+    // instead of the coverage/confidence/InfoHalf heuristic stack. Well-observed DOFs get a small
+    // gain (stiff) yet still snap to a genuinely high-information view; uniform across all 8 DOFs.
+    bool  fisher_kalman_stiffness      = false;
+    float fisher_info_decay            = 1.0f;    // stiffener (acc): scalar fading memory; <1 forgets, 1 = pure accumulation
+    // Calibrated-covariance branch (fisher_info_raw): the information-filter PREDICT step inflates
+    // each DOF's covariance by process noise Q per fresh frame — Y_pred = (Y_prev⁻¹ + Q)⁻¹ — so the
+    // posterior precision reaches a finite STEADY state (belief converges to a real uncertainty floor)
+    // instead of the scalar-decay collapse toward zero. Physically Q = how much the table pose/size
+    // knowledge stales per re-observation (dominated by the robot's localization jitter). Per-frame
+    // process-noise std in each DOF's native units; variance Q = std².
+    float fisher_process_std_m         = 0.005f;  // length DOFs (cx,cy,w,h,H,leg,inset): 5 mm / fresh frame
+    float fisher_process_std_yaw       = 0.01f;   // yaw: ~0.57° / fresh frame
+    std::string fisher_csv_path        = "";      // if non-empty, append per-cycle Fisher-filter evolution to this CSV (for plotting)
     float warm_lambda_pos_base         = 0.15f;
     float warm_lambda_pos_gain         = 0.45f;
     float warm_lambda_size_base        = 0.02f;

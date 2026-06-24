@@ -81,6 +81,12 @@ LambdaYawGain = 0.12     # extra yaw gain added when both x/y face coverage are 
 ConfidenceDecay = 0.55            # how quickly the higher-level confidence state forgets old evidence
 ConfidenceCoverageGain = 1.00     # how much coverage evidence raises confidence
 ConfidenceResidualGain = 0.25     # how much unexplained residuals raise confidence
+FisherFilterEnabled = true        # use the real per-DOF SDF Fisher information (vs the face-coverage view-info proxy)
+KalmanGainStiffness = true        # drive each DOF's acceptance gain from the Kalman gain K=obs/(Y_pred+obs) (vs the InfoHalf/coverage heuristic)
+FisherInfoDecay = 0.95            # stiffener (acc): scalar fading memory; 0.95 ≈ 20 fresh-frame window → steady stiffness
+FisherProcessStdM = 0.005        # calibrated-cov predict: process-noise std per fresh frame for length DOFs (m) → std floor
+FisherProcessStdYaw = 0.01       # calibrated-cov predict: process-noise std per fresh frame for yaw (rad)
+FisherCsvPath = "etc/fisher_filter_log.csv"   # per-cycle evolution log for plotting (empty = off)
 
 [SampleQueue]
 RfeWeightGain = 0.25      # lower than 1.0 keeps historical RFE anchors influential

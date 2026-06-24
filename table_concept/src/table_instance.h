@@ -46,6 +46,18 @@ struct TableInstance
     // unobserved face stays plastic until first seen. info_w ← x-faces, info_h ← y-faces.
     float      info_w = 0.0f;
     float      info_h = 0.0f;
+    // ── Fisher information filter ─────────────────────────────────────────────────
+    // The principled replacement for info_w/info_h: a per-DOF information filter over
+    // [cx,cy,w,h,H,leg,yaw,inset]. Each fresh mask measures the observation Fisher information
+    // (curvature of the SDF data-likelihood); the filter accumulates it across viewpoints so a
+    // well-seen DOF hardens while an unobserved one stays plastic — the stabiliser for successive
+    // gatherings of evidence as the robot orbits the table. info_w/info_h are mirrors of the
+    // (normalised) accumulators for DOFs w/h, feeding the existing acceptance-gain stiffener.
+    std::array<float, 8> fisher_info{};        // normalised "equivalent views" accumulator (drives stiffness)
+    std::array<float, 8> fisher_info_raw{};    // raw accumulated Fisher precision Σ⁻¹ (for posterior std / EFE)
+    std::array<float, 8> fisher_info_peak{};   // per-DOF adaptive normaliser (best single-view info seen)
+    std::array<float, 8> last_obs_info{};      // most recent frame's raw Fisher diagonal
+    std::array<float, 8> last_kalman_gain{};   // per-DOF acceptance gain K=obs/(Y_pred+obs) (the calibrated stiffness)
     bool epistemic_pending  = false;
     float prev_free_energy  = std::numeric_limits<float>::max();
     // Dead-band tracking for write_rt_pose — suppress tiny oscillations

@@ -56,9 +56,29 @@ TableState TableFitter::TableBeliefPolicy::apply_observability_warm_start(
     int point_count,
     float settle_gain,
     float info_w,
-    float info_h)
+    float info_h,
+    const std::array<float, 8>* kalman_gain)
 {
     constexpr float kCoverageEps = 1e-3f;
+
+    // Calibrated stiffness: drive every DOF's acceptance lerp directly from the per-DOF Kalman gain
+    // K_j = obs_info_j / (Y_pred_j + obs_info_j) supplied by the information filter. Bypasses the
+    // coverage/confidence/InfoHalf/freeze heuristic entirely — a well-observed DOF (large Y_pred)
+    // gets a small gain so it barely moves, while a high-information view (large obs) still moves it.
+    if (kalman_gain)
+    {
+        const auto& K = *kalman_gain;
+        TableState accepted = raw;
+        accepted.cx           = lerp(previous.cx,           raw.cx,           K[0]);
+        accepted.cy           = lerp(previous.cy,           raw.cy,           K[1]);
+        accepted.w            = lerp(previous.w,            raw.w,            K[2]);
+        accepted.h            = lerp(previous.h,            raw.h,            K[3]);
+        accepted.table_height = lerp(previous.table_height, raw.table_height, K[4]);
+        accepted.leg_length   = lerp(previous.leg_length,   raw.leg_length,   K[5]);
+        accepted.yaw          = angle_lerp(previous.yaw,    raw.yaw,          K[6]);
+        accepted.leg_inset    = lerp(previous.leg_inset,    raw.leg_inset,    K[7]);
+        return accepted;
+    }
 
     const float cov_px = coverage[0];
     const float cov_nx = coverage[1];
@@ -391,30 +411,125 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
     inst.detection_alive = inst.frames_since_detection < cfg_.detection_alive_max_frames;
 
     // Per-DOF observation info ("times viewed") accumulates only on frames with a FRESH mask, so it
-    // hardens w/h by views, not wall-clock. info_w ← x-faces, info_h ← y-faces (saturating).
+    // hardens the belief by views, not wall-clock.
     if (observation.has_fresh_data)
     {
-        const auto cov = inst.queue.face_coverage(inst.model);
-        const float dm = std::max(1.0f, cfg_.delta_min);
-        inst.info_w += TableBeliefPolicy::clamp01(std::max(cov[0], cov[1]) / dm);
-        inst.info_h += TableBeliefPolicy::clamp01(std::max(cov[2], cov[3]) / dm);
+        if (cfg_.fisher_filter_enabled)
+        {
+            // Fisher information filter: fold this viewpoint's calibrated per-DOF Fisher information
+            // into the accumulators. Each DOF's raw curvature is normalised by the best single-view
+            // info seen for that DOF, so a fresh face that finally constrains a dimension counts as
+            // ~1 "equivalent view" and redundant views add proportionally less — anisotropic, and on
+            // the same scale as the proven InfoHalf stiffener. fisher_info_raw keeps the un-normalised
+            // posterior precision for the calibrated Σ (posterior std below).
+            const float decay = std::clamp(cfg_.fisher_info_decay, 0.0f, 1.0f);
+            const float q_len = cfg_.fisher_process_std_m   * cfg_.fisher_process_std_m;
+            const float q_ang = cfg_.fisher_process_std_yaw * cfg_.fisher_process_std_yaw;
+            for (int j = 0; j < 8; ++j)
+            {
+                const float oi = inst.last_obs_info[j];
+
+                // (a) stiffness driver — normalised "equivalent views", scalar fading memory.
+                inst.fisher_info_peak[j] = std::max(inst.fisher_info_peak[j], oi);
+                const float incr = inst.fisher_info_peak[j] > 1e-6f
+                                 ? TableBeliefPolicy::clamp01(oi / inst.fisher_info_peak[j]) : 0.0f;
+                inst.fisher_info[j] = inst.fisher_info[j] * decay + incr;
+
+                // (b) calibrated covariance — proper information-filter predict + update.
+                //   predict (static state, F=I): inflate covariance by Q → Y_pred = (Y_prev⁻¹ + Q)⁻¹,
+                //                                 i.e. precision bleeds a fixed amount each fresh frame.
+                //   update:                       Y_post = Y_pred + obs_info (measurement adds precision).
+                // The per-frame Q-bleed balances the measurement gain at a finite steady precision, so
+                // the posterior std converges to a physical floor instead of collapsing toward zero.
+                const float q     = (j == 6) ? q_ang : q_len;
+                const float Yprev = inst.fisher_info_raw[j];
+                const float Ypred = 1.0f / (1.0f / std::max(Yprev, 1e-9f) + q);
+                inst.fisher_info_raw[j] = Ypred + oi;
+            }
+            inst.info_w = inst.fisher_info[2];   // DOF index 2 = w
+            inst.info_h = inst.fisher_info[3];   // DOF index 3 = h
+        }
+        else
+        {
+            // Legacy face-coverage PROXY (kept for A/B): info_w ← x-faces, info_h ← y-faces.
+            const auto cov = inst.queue.face_coverage(inst.model);
+            const float dm = std::max(1.0f, cfg_.delta_min);
+            inst.info_w += TableBeliefPolicy::clamp01(std::max(cov[0], cov[1]) / dm);
+            inst.info_h += TableBeliefPolicy::clamp01(std::max(cov[2], cov[3]) / dm);
+        }
         inst.last_residual_pts = observation.residual_pts;   // hold for the voxelizer residual layer
     }
 
     const auto& s = inst.model.state();
+    // Data-only posterior std (mm) from the accumulated Fisher precision — shrinks as evidence
+    // gathers; ∞ (shown as -1) until a DOF is first observed. Diagnostic for the EFE epistemic value.
+    const auto post_std_mm = [&](int j) -> float {
+        return inst.fisher_info_raw[j] > 1e-6f ? 1000.0f / std::sqrt(inst.fisher_info_raw[j]) : -1.0f;
+    };
     if (should_log_table(inst))
-        std::print("[{}] FE={:.4f}  cx={:.3f} cy={:.3f}  w={:.3f} h={:.3f} H={:.3f} L={:.3f} ψ={:.3f} inset={:.3f}  pts={} sil={} silres={:.4f} info=({:.0f},{:.0f})\n",
+        std::print("[{}] FE={:.4f}  cx={:.3f} cy={:.3f}  w={:.3f} h={:.3f} H={:.3f} L={:.3f} ψ={:.3f} inset={:.3f}  pts={} sil={} silres={:.4f} info=({:.1f},{:.1f}) σ(w,h)mm=({:.1f},{:.1f})\n",
                    inst.node_name, free_energy,
                    s.cx, s.cy, s.w, s.h, s.table_height, s.leg_length, s.yaw, s.leg_inset,
                    inst.queue.size() + static_cast<int>(observation.residual_pts.size()),
                    inst.model.silhouette_ray_count(), inst.model.silhouette_residual(),
-                   inst.info_w, inst.info_h);
+                   inst.info_w, inst.info_h, post_std_mm(2), post_std_mm(3));
     if (should_log_table(inst))
         std::print("[{}] roi: valid={} offset=({:.2f},{:.2f}) fill={:.2f} | detect alive={} conf={:.2f} since={}\n",
                    inst.node_name, inst.roi_valid, inst.roi_offset_x, inst.roi_offset_y, inst.roi_fill,
                    inst.detection_alive, inst.last_mask_confidence, inst.frames_since_detection);
 
+    log_fisher_csv(inst, observation.has_fresh_data, free_energy,
+                   inst.queue.size() + static_cast<int>(observation.residual_pts.size()),
+                   inst.model.silhouette_residual());
+
     return free_energy;
+}
+
+void TableFitter::log_fisher_csv(const TableInstance& inst, bool fresh, float free_energy,
+                                 int point_count, float silres)
+{
+    if (cfg_.fisher_csv_path.empty())
+        return;
+
+    static const std::array<const char*, 8> kDof =
+        {"cx", "cy", "w", "h", "H", "leg", "yaw", "inset"};
+
+    if (not fisher_csv_.is_open())
+    {
+        fisher_csv_.open(cfg_.fisher_csv_path, std::ios::out | std::ios::trunc);
+        if (not fisher_csv_.is_open())
+        {
+            std::print("table_concept: [fisher] cannot open CSV '{}'\n", cfg_.fisher_csv_path);
+            cfg_.fisher_csv_path.clear();   // disable further attempts
+            return;
+        }
+        fisher_csv_ << "cycle,node,fresh,fe,warm_conf,settle_maturity,frames_converged,pts,silres";
+        for (const auto* d : kDof) fisher_csv_ << ",state_" << d;
+        for (const auto* d : kDof) fisher_csv_ << ",obs_"   << d;   // this frame's raw Fisher diag
+        for (const auto* d : kDof) fisher_csv_ << ",acc_"   << d;   // normalised accumulated info (drives stiffness)
+        for (const auto* d : kDof) fisher_csv_ << ",raw_"   << d;   // un-normalised accumulated precision Σ⁻¹
+        for (const auto* d : kDof) fisher_csv_ << ",std_"   << d;   // posterior std (mm for lengths, mrad for yaw); -1 = unobserved
+        for (const auto* d : kDof) fisher_csv_ << ",gain_"  << d;   // per-DOF Kalman acceptance gain (the calibrated stiffness)
+        fisher_csv_ << '\n';
+    }
+
+    const auto s = inst.model.state().to_array();
+    fisher_csv_ << inst.processed_cycles << ',' << inst.node_name << ',' << (fresh ? 1 : 0) << ','
+                << free_energy << ',' << inst.warm_confidence << ',' << inst.settle_maturity << ','
+                << inst.frames_converged << ',' << point_count << ',' << silres;
+    for (int j = 0; j < 8; ++j) fisher_csv_ << ',' << s[j];
+    for (int j = 0; j < 8; ++j) fisher_csv_ << ',' << inst.last_obs_info[j];
+    for (int j = 0; j < 8; ++j) fisher_csv_ << ',' << inst.fisher_info[j];
+    for (int j = 0; j < 8; ++j) fisher_csv_ << ',' << inst.fisher_info_raw[j];
+    for (int j = 0; j < 8; ++j)
+    {
+        // 1/sqrt(precision) ×1000: mm for length DOFs, mrad for yaw (index 6); -1 if never observed.
+        const float prec = inst.fisher_info_raw[j];
+        fisher_csv_ << ',' << (prec > 1e-6f ? 1000.0f / std::sqrt(prec) : -1.0f);
+    }
+    for (int j = 0; j < 8; ++j) fisher_csv_ << ',' << inst.last_kalman_gain[j];
+    fisher_csv_ << '\n';
+    fisher_csv_.flush();   // flush each row so a plot can tail the file during a live run
 }
 
 void TableFitter::step_queue_update(TableInstance& inst,
@@ -583,6 +698,25 @@ float TableFitter::accept_table_belief(TableInstance& inst,
     if (!finite_state(raw_state))
         return revert();
 
+    // Measure this viewpoint's observation Fisher information (per DOF) at the raw fit, and derive
+    // the per-DOF Kalman gain K_j = obs_j / (Y_pred_j + obs_j) from the calibrated filter (Y_pred =
+    // previous posterior precision after the Q-bleed predict). Always computed (logged); only used as
+    // the acceptance stiffness when fisher_kalman_stiffness is on. The filter STATE update (predict +
+    // posterior) stays in run_inference's fresh-mask block — here we only READ the prior precision.
+    inst.last_obs_info = inst.model.observation_information(evidence.eval_pts, evidence.eval_weights);
+    {
+        const float q_len = cfg_.fisher_process_std_m   * cfg_.fisher_process_std_m;
+        const float q_ang = cfg_.fisher_process_std_yaw * cfg_.fisher_process_std_yaw;
+        for (int j = 0; j < 8; ++j)
+        {
+            const float q     = (j == 6) ? q_ang : q_len;
+            const float Yprev = inst.fisher_info_raw[j];
+            const float Ypred = 1.0f / (1.0f / std::max(Yprev, 1e-9f) + q);
+            const float oi    = inst.last_obs_info[j];
+            inst.last_kalman_gain[j] = (oi > 0.0f) ? oi / (Ypred + oi) : 0.0f;
+        }
+    }
+
     const auto coverage = inst.queue.face_coverage(inst.model);
 
     inst.warm_confidence = TableBeliefPolicy::update_warm_confidence(
@@ -599,9 +733,11 @@ float TableFitter::accept_table_belief(TableInstance& inst,
                                                       static_cast<float>(std::max(1, cfg_.warm_settle_cycles)));
     const float settle_gain = TableBeliefPolicy::lerp(1.0f, cfg_.warm_settle_floor, maturity);
 
+    const bool use_kalman = cfg_.fisher_filter_enabled && cfg_.fisher_kalman_stiffness;
     const TableState accepted_state = TableBeliefPolicy::apply_observability_warm_start(
         previous_state, raw_state, inst.model.params(), cfg_, inst.warm_confidence,
-        coverage, evidence.trusted_point_count, settle_gain, inst.info_w, inst.info_h);
+        coverage, evidence.trusted_point_count, settle_gain, inst.info_w, inst.info_h,
+        use_kalman ? &inst.last_kalman_gain : nullptr);
     if (!finite_state(accepted_state))
         return revert();
 

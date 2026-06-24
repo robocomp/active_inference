@@ -24,6 +24,9 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     auto gets = [&](const std::string& k, std::string def) -> std::string {
         return cfg.exists(k) ? cfg.get<std::string>(k) : def;
     };
+    auto getb = [&](const std::string& k, bool def) -> bool {
+        return cfg.exists(k) ? cfg.get<bool>(k) : def;
+    };
 
     // Paths
     out.priors_path = gets("TableConcept.PriorsPath", "etc/object_priors.toml");
@@ -103,6 +106,12 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.warm_reopen_admit             = geti("WarmStart.ReopenAdmit",             8);
     out.warm_settle_floor             = getf("WarmStart.SettleFloor",             0.05f);
     out.warm_info_half                = getf("WarmStart.InfoHalf",                20.0f);
+    out.fisher_filter_enabled         = getb("WarmStart.FisherFilterEnabled",     true);
+    out.fisher_kalman_stiffness       = getb("WarmStart.KalmanGainStiffness",     false);
+    out.fisher_info_decay             = getf("WarmStart.FisherInfoDecay",          1.0f);
+    out.fisher_process_std_m          = getf("WarmStart.FisherProcessStdM",        0.005f);
+    out.fisher_process_std_yaw        = getf("WarmStart.FisherProcessStdYaw",      0.01f);
+    out.fisher_csv_path               = gets("WarmStart.FisherCsvPath",            "");
     out.warm_lambda_pos_base          = getf("WarmStart.LambdaPosBase",           0.15f);
     out.warm_lambda_pos_gain          = getf("WarmStart.LambdaPosGain",           0.45f);
     out.warm_lambda_size_base         = getf("WarmStart.LambdaSizeBase",          0.02f);

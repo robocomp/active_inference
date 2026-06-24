@@ -18,6 +18,7 @@
 
 #include <array>
 #include <cstdint>
+#include <fstream>
 #include <memory>
 #include <unordered_map>
 #include <vector>
@@ -101,7 +102,8 @@ private:
                                                          int point_count,
                                                          float settle_gain = 1.0f,
                                                          float info_w = 0.0f,
-                                                         float info_h = 0.0f);
+                                                         float info_h = 0.0f,
+                                                         const std::array<float, 8>* kalman_gain = nullptr);
         static float update_warm_confidence(float previous_confidence,
                                             const TableConfig& cfg,
                                             const std::array<float, 6>& coverage,
@@ -142,6 +144,11 @@ private:
     TableModelParams  make_model_params() const;
     SampleQueueParams make_queue_params() const;
 
+    // Append one row of Fisher-filter evolution (state + per-DOF obs/accumulated info + posterior
+    // std) to cfg_.fisher_csv_path. No-op if the path is empty. Lazily opens + writes the header.
+    void log_fisher_csv(const TableInstance& inst, bool fresh, float free_energy,
+                        int point_count, float silres);
+
     std::shared_ptr<DSR::DSRGraph> G_;
     DSR::InnerEigenAPI*            inner_eigen_ = nullptr;
     TableConfig&                   cfg_;
@@ -152,6 +159,7 @@ private:
 
     std::unordered_map<std::uint64_t, TableInstance> instances_;
     std::uint64_t                  room_node_id_ = 0;   // latched per ensure_instance call
+    std::ofstream                  fisher_csv_;         // per-cycle Fisher-filter evolution log (optional)
 };
 
 }  // namespace rc
