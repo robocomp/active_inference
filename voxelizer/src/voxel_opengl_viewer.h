@@ -33,13 +33,14 @@ public:
     void update_rfe_points(std::span<const QVector3D> residual_positions,
                            std::span<const QVector3D> fallback_positions = {},
                            std::span<const QVector3D> candidate_positions = {});
-    // Accumulated RFE voxel bank (room frame), drawn as a persistent point cloud
-    // distinct from the per-frame residual/rfe/candidate points.
-    void update_voxel_bank_points(std::span<const QVector3D> positions);
     // YOLO mask support points (room frame), drawn as a distinct point cloud.
     void update_mask_points(std::span<const QVector3D> positions);
     void set_show_lidar(bool show);
     void set_show_masks(bool show);
+    void set_show_voxels(bool show);
+    void set_show_residual(bool show);
+    void set_show_rfe(bool show);
+    void set_show_candidate(bool show);
 
     void update_room_polygon(std::span<const float> polygon_x,
                              std::span<const float> polygon_y);
@@ -98,9 +99,9 @@ private:
 
     std::vector<Vertex> cpu_vertices_;
     std::vector<Vertex> lidar_vertices_;
+    std::vector<Vertex> residual_vertices_;
     std::vector<Vertex> rfe_vertices_;
     std::vector<Vertex> candidate_vertices_;
-    std::vector<Vertex> bank_vertices_;
     std::vector<Vertex> mask_vertices_;
     std::mutex data_mutex_;
 
@@ -126,6 +127,9 @@ private:
     bool show_voxels_ = true;
     bool show_lidar_ = false;
     bool show_masks_ = false;
+    bool show_residual_ = true;
+    bool show_rfe_ = true;
+    bool show_candidate_ = true;
     std::vector<QVector3D> robot_mesh_local_;
     std::mutex robot_mesh_mutex_;
 

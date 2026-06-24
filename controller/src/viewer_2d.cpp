@@ -35,12 +35,17 @@ ObstaclePalette obstacle_palette(ControllerObstacleKind kind)
             QColor(56, 189, 248, 230),
             QColor(12, 74, 140, 240)};
         case ControllerObstacleKind::Temporary:
-        // Temporary lidar obstacles also belong to the obstacle family.
+        // The controller's OWN temporary lidar obstacles (unexplained returns) — orange.
         return {QColor(194, 103, 25),
             QColor(245, 158, 11, 150),
             QColor(251, 146, 60, 230),
             QColor(154, 52, 18, 240)};
         case ControllerObstacleKind::Obstacle:
+        // Graph "obstacle" nodes — red, distinct from temporary (orange) and objects (blue).
+        return {QColor(170, 40, 40),
+            QColor(230, 76, 76, 130),
+            QColor(248, 80, 80, 230),
+            QColor(120, 20, 20, 240)};
         default:
         return {QColor(194, 103, 25),
             QColor(245, 158, 11, 150),

@@ -27,6 +27,7 @@ struct TableConfig
     float state_eps         = 0.04f;   // Σ|Δstate| threshold between cycles for convergence (m+rad)
     int   K_stable          = 30;
     int   max_direct_fit_points = 400; // strided live points fed straight into the gradient each frame (0=off)
+    int   detection_alive_max_frames = 40; // cycles without a fresh table mask before detection_alive=false
     int   M_diverge         = 20;
     float staleness_frames  = 90.0f;
     float explanation_ratio_thresh = 0.3f;

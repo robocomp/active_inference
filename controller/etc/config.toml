@@ -97,6 +97,21 @@ StraightSpeedHeadingThreshold = 0.08
 StraightSpeedClearanceMargin = 0.20
 StraightSpeedMinGoalDist = 1.5
 
+# Affordance servo ("lock-on") executor — HOW (gains/caps/timing). The WHAT/WHEN (which feedback
+# attributes, completion predicate, scalar target, timeout) is per-affordance and declared by the
+# producing agent via the affordance_protocol Contract. Room affordances are policy=Reach (this is
+# inert for them); the table affordance is policy=Servo and uses this loop.
+LockOnEnabled = true
+LockOnSweepSpeedMps = 0.12   # PRIMARY: distance-sweep advance speed (detectability ~ distance)
+LockOnSweepRangeM = 0.45     # oscillate ± this far (m) from the arrival pose
+LockOnOffsetTol = 0.15       # |normalized centre offset| deadband for yaw centring (secondary)
+LockOnKYaw = 0.8             # rps per unit centre error
+LockOnMaxYawRps = 0.12       # tiny caps: micro-search, not navigation
+LockOnDitherYawRps = 0.10
+LockOnSettleMs = 400.0       # dwell before each measurement (kills motion blur / detection flicker)
+LockOnStepMs = 400.0         # duration of one sweep step
+LockOnMaxAttempts = 30
+
 Target.EdgeType = "target"
 Transforms.interpolate_rt = true
 

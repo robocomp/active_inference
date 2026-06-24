@@ -57,6 +57,21 @@ struct TableInstance
     std::unordered_set<std::uint64_t> voxel_bank_keys;
     // Epistemic action request published to DSR (filled by the epistemic planner).
     TableAffordance affordance;
+
+    // ── Active-perception aids for the controller's local lock-on search ──────────
+    // Detection aliveness: how recently YOLO produced a "table" mask for this instance, and the
+    // confidence of the last one. The controller hill-climbs these during the micro-search.
+    int   frames_since_detection = 100000;   // cycles since last fresh table mask (0 = just detected)
+    float last_mask_confidence   = 0.0f;      // YOLO confidence of the last table detection
+    bool  detection_alive        = false;     // frames_since_detection < threshold
+
+    // Predicted in-image table ROI from projecting the current model through the camera extrinsic.
+    // Normalised so the controller is resolution-agnostic: drive offset→0 (centre the table in the
+    // frame) and fill→target (stand-off sweet spot) to maximise YOLO's firing probability.
+    bool  roi_valid    = false;
+    float roi_offset_x = 0.0f;   // [-1,1], 0 = horizontally centred in the image
+    float roi_offset_y = 0.0f;   // [-1,1], 0 = vertically centred
+    float roi_fill     = 0.0f;   // max(w/W, h/H): projected extent as a fraction of the image
 };
 
 }  // namespace rc

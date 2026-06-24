@@ -129,6 +129,9 @@ private:
     // the model for its differentiable silhouette term. No-op if mask_precision<=0 or no camera.
     void feed_silhouette(TableInstance& inst);
     std::optional<Eigen::Matrix4d> room_T_zed_matrix() const;
+    // Project the current model through the camera extrinsic → normalised in-image ROI (centre
+    // offset + fill), stored on the instance for the controller's centring/dwell lock-on search.
+    void compute_projected_roi(TableInstance& inst);
 
     void ingest_observation_voxels(TableInstance& inst, const TableObservation& observation);
     bool is_voxel_owned_by_table(const TableInstance& inst, const Eigen::Vector3f& point) const;

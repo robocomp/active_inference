@@ -339,6 +339,30 @@ void VoxelOpenGLViewer::set_show_lidar(bool show)
     request_update_throttled();
 }
 
+void VoxelOpenGLViewer::set_show_residual(bool show)
+{
+    show_residual_ = show;
+    request_update_throttled();
+}
+
+void VoxelOpenGLViewer::set_show_rfe(bool show)
+{
+    show_rfe_ = show;
+    request_update_throttled();
+}
+
+void VoxelOpenGLViewer::set_show_candidate(bool show)
+{
+    show_candidate_ = show;
+    request_update_throttled();
+}
+
+void VoxelOpenGLViewer::set_show_voxels(bool show)
+{
+    show_voxels_ = show;
+    request_update_throttled();
+}
+
 void VoxelOpenGLViewer::set_show_masks(bool show)
 {
     show_masks_ = show;
@@ -369,9 +393,12 @@ void VoxelOpenGLViewer::update_rfe_points(std::span<const QVector3D> residual_po
                                           std::span<const QVector3D> fallback_positions,
                                           std::span<const QVector3D> candidate_positions)
 {
-    std::vector<Vertex> new_vertices;
+    // Each cloud goes to its own buffer so it can be toggled independently.
+    std::vector<Vertex> residual_vertices;
+    std::vector<Vertex> rfe_vertices;
     std::vector<Vertex> candidate_vertices;
-    new_vertices.reserve(residual_positions.size() + fallback_positions.size());
+    residual_vertices.reserve(residual_positions.size());
+    rfe_vertices.reserve(fallback_positions.size());
     candidate_vertices.reserve(candidate_positions.size());
 
     auto append_points = [this](std::vector<Vertex>& target,
@@ -389,35 +416,15 @@ void VoxelOpenGLViewer::update_rfe_points(std::span<const QVector3D> residual_po
         }
     };
 
-    append_points(new_vertices, residual_positions, 0.95f, 0.20f, 0.85f);  // residual: magenta
-    append_points(new_vertices, fallback_positions, 1.00f, 0.92f, 0.10f);  // rfe: yellow
-    append_points(candidate_vertices, candidate_positions, 0.20f, 0.85f, 1.00f);  // candidate: cyan
+    append_points(residual_vertices, residual_positions, 0.95f, 0.20f, 0.85f);  // residual: magenta
+    append_points(rfe_vertices, fallback_positions, 1.00f, 0.55f, 0.10f);       // rfe: orange
+    append_points(candidate_vertices, candidate_positions, 0.20f, 0.85f, 1.00f); // candidate: cyan
 
     {
         std::scoped_lock lk(data_mutex_);
-        rfe_vertices_ = std::move(new_vertices);
+        residual_vertices_ = std::move(residual_vertices);
+        rfe_vertices_ = std::move(rfe_vertices);
         candidate_vertices_ = std::move(candidate_vertices);
-    }
-    request_update_throttled();
-}
-
-void VoxelOpenGLViewer::update_voxel_bank_points(std::span<const QVector3D> positions)
-{
-    std::vector<Vertex> new_vertices;
-    new_vertices.reserve(positions.size());
-
-    for (const QVector3D& p : positions)
-    {
-        const float fx = voxel_flip_x_ ? -1.f : 1.f;
-        const float fy = voxel_flip_y_ ? -1.f : 1.f;
-        const QVector3D mapped{fx * p.x(), p.z(), fy * p.y()};
-        // Orange, distinct from residual (magenta) / rfe (green) / candidate (cyan).
-        new_vertices.push_back(Vertex{mapped.x(), mapped.y(), mapped.z(), 1.00f, 0.55f, 0.10f});
-    }
-
-    {
-        std::scoped_lock lk(data_mutex_);
-        bank_vertices_ = std::move(new_vertices);
     }
     request_update_throttled();
 }
@@ -747,36 +754,36 @@ void VoxelOpenGLViewer::paintGL()
 
     std::size_t n_vertices = 0;
     std::size_t n_lidar_vertices = 0;
+    std::size_t n_residual_vertices = 0;
     std::size_t n_rfe_vertices = 0;
     std::size_t n_candidate_vertices = 0;
-    std::size_t n_bank_vertices = 0;
     std::size_t n_mask_vertices = 0;
     std::vector<Vertex> draw_vertices;
     std::vector<Vertex> lidar_draw_vertices;
+    std::vector<Vertex> residual_draw_vertices;
     std::vector<Vertex> rfe_draw_vertices;
     std::vector<Vertex> candidate_draw_vertices;
-    std::vector<Vertex> bank_draw_vertices;
     std::vector<Vertex> mask_draw_vertices;
     {
         std::scoped_lock lk(data_mutex_);
         n_vertices = cpu_vertices_.size();
         n_lidar_vertices = lidar_vertices_.size();
+        n_residual_vertices = residual_vertices_.size();
         n_rfe_vertices = rfe_vertices_.size();
         n_candidate_vertices = candidate_vertices_.size();
-        n_bank_vertices = bank_vertices_.size();
         n_mask_vertices = mask_vertices_.size();
         draw_vertices = cpu_vertices_;
         lidar_draw_vertices = lidar_vertices_;
+        residual_draw_vertices = residual_vertices_;
         rfe_draw_vertices = rfe_vertices_;
         candidate_draw_vertices = candidate_vertices_;
-        bank_draw_vertices = bank_vertices_;
         mask_draw_vertices = mask_vertices_;
     }
     const bool has_voxels = n_vertices > 0;
     const bool has_lidar = n_lidar_vertices > 0;
+    const bool has_residual = n_residual_vertices > 0;
     const bool has_rfe = n_rfe_vertices > 0;
     const bool has_candidate = n_candidate_vertices > 0;
-    const bool has_bank = n_bank_vertices > 0;
     const bool has_mask = n_mask_vertices > 0;
 
     const bool draw_voxels = show_voxels_;
@@ -807,8 +814,9 @@ void VoxelOpenGLViewer::paintGL()
         glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(n_vertices));
 
     // Compatibility fallback: if shader path silently fails on some drivers,
-    // draw a second pass using fixed-function calls when available.
-    if (has_voxels && context() && context()->format().profile() != QSurfaceFormat::CoreProfile)
+    // draw a second pass using fixed-function calls when available. Must honour
+    // the voxel toggle too, else voxels reappear when hidden on compat contexts.
+    if (draw_voxels && has_voxels && context() && context()->format().profile() != QSurfaceFormat::CoreProfile)
     {
         glUseProgram(0);
         glMatrixMode(GL_PROJECTION);
@@ -840,7 +848,22 @@ void VoxelOpenGLViewer::paintGL()
         glEnable(GL_DEPTH_TEST);
     }
 
-    if (has_rfe)
+    if (has_residual && show_residual_)
+    {
+        glDisable(GL_DEPTH_TEST);
+        room_vao_.bind();
+        room_vbo_.bind();
+        room_vbo_.allocate(residual_draw_vertices.data(), static_cast<int>(residual_draw_vertices.size() * sizeof(Vertex)));
+        program_.setUniformValue("u_round_points", 1);
+        program_.setUniformValue("u_point_size", 6.0f);
+        glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(residual_draw_vertices.size()));
+        program_.setUniformValue("u_point_size", 4.5f);
+        room_vbo_.release();
+        room_vao_.release();
+        glEnable(GL_DEPTH_TEST);
+    }
+
+    if (has_rfe && show_rfe_)
     {
         glDisable(GL_DEPTH_TEST);
         room_vao_.bind();
@@ -1307,7 +1330,7 @@ void VoxelOpenGLViewer::paintGL()
         }
     }
 
-    if (has_candidate)
+    if (has_candidate && show_candidate_)
     {
         glDisable(GL_DEPTH_TEST);
         room_vao_.bind();
@@ -1316,21 +1339,6 @@ void VoxelOpenGLViewer::paintGL()
         program_.setUniformValue("u_round_points", 1);
         program_.setUniformValue("u_point_size", 4.0f);
         glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(candidate_draw_vertices.size()));
-        program_.setUniformValue("u_point_size", 4.5f);
-        room_vbo_.release();
-        room_vao_.release();
-        glEnable(GL_DEPTH_TEST);
-    }
-
-    if (has_bank)
-    {
-        glDisable(GL_DEPTH_TEST);
-        room_vao_.bind();
-        room_vbo_.bind();
-        room_vbo_.allocate(bank_draw_vertices.data(), static_cast<int>(bank_draw_vertices.size() * sizeof(Vertex)));
-        program_.setUniformValue("u_round_points", 1);
-        program_.setUniformValue("u_point_size", 3.0f);
-        glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(bank_draw_vertices.size()));
         program_.setUniformValue("u_point_size", 4.5f);
         room_vbo_.release();
         room_vao_.release();

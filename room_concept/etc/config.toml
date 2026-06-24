@@ -28,7 +28,7 @@ configFile = ""
 domain = 0
 tree = false
 graph = true
-2d = false
+2d = false 
 3d = false
 
 # --- Multiple Instance Template ---

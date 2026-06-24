@@ -29,7 +29,7 @@ RoomViewer::RoomViewer(DSR::DSRViewer* default_viewer,
                                        rc::RoomConcept& room_concept,
                                        rc::EpistemicController& epistemic)
     : params_(&params), has_room_polygon_(has_room_polygon),
-      room_concept_(&room_concept), epistemic_(&epistemic)
+      room_concept_(&room_concept), epistemic_(&epistemic), graph_(graph)
 {
     custom_widget_ = new Custom_widget();
     default_viewer->add_custom_widget_to_dock("layout", custom_widget_);
@@ -110,6 +110,9 @@ void RoomViewer::update_viewer(const std::optional<rc::RoomConcept::UpdateResult
         viewer_2d_->draw_corners(loc_res->corner_matches, pose_for_draw);
     else
         viewer_2d_->draw_corners({}, pose_for_draw);
+
+    // Draw object/obstacle BBs from the graph (self-throttled to ~1 Hz). Main-thread poll.
+    viewer_2d_->refresh_semantic_bboxes(graph_);
 }
 
 void RoomViewer::update_epistemic_overlay()

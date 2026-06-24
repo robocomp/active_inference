@@ -965,7 +965,6 @@ void SceneProcessor::update_viewer_table_rfe_points()
     std::vector<QVector3D> residual_points;
     std::vector<QVector3D> rfe_points;
     std::vector<QVector3D> candidate_points;
-    std::vector<QVector3D> bank_points;
     std::size_t tables_seen = 0;
     std::size_t tables_with_residual = 0;
     std::size_t tables_with_rfe = 0;
@@ -1019,25 +1018,9 @@ void SceneProcessor::update_viewer_table_rfe_points()
                 candidate_points.emplace_back(flat[idx], flat[idx + 1], flat[idx + 2]);
             }
         }
-
-        // The accumulated voxel bank is published as a runtime (string-named) attr,
-        // so read it directly off the node attributes rather than a typed *_att.
-        const auto& attrs = node.attrs();
-        if (const auto bank_it = attrs.find("table_voxel_bank_pts"); bank_it != attrs.end())
-        {
-            const auto& flat = bank_it->second.float_vec();
-            const std::size_t n = flat.size() / 3;
-            bank_points.reserve(bank_points.size() + n);
-            for (std::size_t i = 0; i < n; ++i)
-            {
-                const std::size_t idx = i * 3;
-                bank_points.emplace_back(flat[idx], flat[idx + 1], flat[idx + 2]);
-            }
-        }
     }
 
     voxel_viewer_->update_rfe_points(residual_points, rfe_points, candidate_points);
-    voxel_viewer_->update_voxel_bank_points(bank_points);
 }
 
 void SceneProcessor::update_viewer_mask_points()

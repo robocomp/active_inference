@@ -471,6 +471,19 @@ void SpecificWorker::load_params()
 	planner_.params.connection_radius_m = params.connection_radius_m;
 	planner_.params.path_sample_spacing_m = std::max(0.1f, params.grid_resolution_m * 1.5f);
 	planner_.params.waypoint_tolerance_m = params.waypoint_tolerance_m;
+
+	// Affordance servo ("lock-on") executor — HOW only; WHAT/WHEN is per-affordance (contract).
+	load_optional("Controller.LockOnEnabled", params.lockon_enabled);
+	load_optional_cast<double>("Controller.LockOnSweepSpeedMps", params.lockon_sweep_speed_mps);
+	load_optional_cast<double>("Controller.LockOnSweepRangeM",   params.lockon_sweep_range_m);
+	load_optional_cast<double>("Controller.LockOnOffsetTol",    params.lockon_offset_tol);
+	load_optional_cast<double>("Controller.LockOnKYaw",         params.lockon_k_yaw);
+	load_optional_cast<double>("Controller.LockOnMaxYawRps",    params.lockon_max_yaw_rps);
+	load_optional_cast<double>("Controller.LockOnDitherYawRps", params.lockon_dither_yaw_rps);
+	load_optional_cast<double>("Controller.LockOnSettleMs",     params.lockon_settle_ms);
+	load_optional_cast<double>("Controller.LockOnStepMs",       params.lockon_step_ms);
+	load_optional("Controller.LockOnMaxAttempts",              params.lockon_max_attempts);
+
 	world_model_.set_params(&params);
 	obstacle_tracker_.set_params(&params);
 	motion_commander_.set_params(&params);

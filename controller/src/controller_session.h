@@ -7,6 +7,8 @@
 #include <optional>
 
 #include "controller_display.h"
+#include "controller_lockon.h"
+#include "../../common/affordance_protocol/affordance_protocol.h"
 #include "controller_motion_commander.h"
 #include "controller_obstacle_tracker.h"
 #include "controller_runtime_types.h"
@@ -80,7 +82,20 @@ public:
 private:
     void clear_tracking_state();
 
+    // Contract-driven servo ("lock-on") on reaching an affordance pose. Returns true once finished
+    // (LOCKED or GIVE_UP); drives the base directly via the motion commander.
+    bool step_lockon(ControllerMotionCommander &motion_commander, const TimeSource &time_source);
+    rc::LockOn::Reading read_servo_reading(std::uint64_t feedback_node_id) const;
+    bool goal_met(std::uint64_t feedback_node_id) const;
+    void finalize_reached(rc::AffordanceManager &affordance_manager,
+                          rc::TrajectoryController &path_controller,
+                          ControllerMotionCommander &motion_commander,
+                          ControllerDisplay &display);
+
     const ControllerParams *params_ = nullptr;
+    rc::LockOn lockon_;
+    rc::affordance::Contract active_contract_;     // resolved contract of the affordance in lock-on
+    std::uint64_t feedback_node_id_ = 0;           // node carrying the contract's feedback attributes
     std::shared_ptr<DSR::DSRGraph> graph_;
     ControllerPolygon room_polygon_;
     ControllerPolygon inner_polygon_;

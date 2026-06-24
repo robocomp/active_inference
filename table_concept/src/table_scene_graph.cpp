@@ -163,6 +163,20 @@ void TableSceneGraph::step_write_model(TableInstance& inst, DSR::Node& node,
         G_->runtime_checked_add_or_modify_attrib_local(node, "table_voxel_bank_pts", bank_flat);
     }
 
+    // Active-perception channel for the controller's local lock-on search:
+    //  - table_roi_offset [ox, oy]: normalised image-centre offset of the projected model
+    //    (drive →0 to centre the table in the frame).
+    //  - table_roi_fill: projected extent fraction (drive toward a sweet-spot for stand-off/scale).
+    //  - table_roi_valid: model currently projects in front of the camera.
+    //  - table_detection_alive / _confidence / _frames_since: is YOLO firing here, and how strongly.
+    G_->runtime_checked_add_or_modify_attrib_local(node, "table_roi_offset",
+        std::vector<float>{inst.roi_offset_x, inst.roi_offset_y});
+    G_->runtime_checked_add_or_modify_attrib_local(node, "table_roi_fill", inst.roi_fill);
+    G_->runtime_checked_add_or_modify_attrib_local(node, "table_roi_valid", inst.roi_valid ? 1 : 0);
+    G_->runtime_checked_add_or_modify_attrib_local(node, "table_detection_alive", inst.detection_alive ? 1 : 0);
+    G_->runtime_checked_add_or_modify_attrib_local(node, "table_detection_confidence", inst.last_mask_confidence);
+    G_->runtime_checked_add_or_modify_attrib_local(node, "table_frames_since_detection", inst.frames_since_detection);
+
     G_->update_node(node);
 
     write_rt_pose(room_id, inst);

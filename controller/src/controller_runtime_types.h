@@ -89,6 +89,20 @@ struct ControllerParams
     float straight_speed_heading_threshold_rad = 0.08f;
     float straight_speed_clearance_margin_m = 0.20f;
     float straight_speed_min_goal_dist_m = 1.5f;
+
+    // Affordance servo ("lock-on") executor — the HOW (gains/caps/timing). The WHAT/WHEN
+    // (scalar_target, completion predicate, stable_n, timeout) is per-affordance and comes from the
+    // affordance_protocol Contract. Off by default. See controller_lockon.h / affordance_protocol.h.
+    bool  lockon_enabled         = false;
+    float lockon_sweep_speed_mps = 0.12f;   // PRIMARY: distance-sweep advance speed
+    float lockon_sweep_range_m   = 0.45f;   // oscillate ± this far from the arrival pose
+    float lockon_offset_tol      = 0.15f;
+    float lockon_k_yaw           = 0.8f;
+    float lockon_max_yaw_rps     = 0.12f;
+    float lockon_dither_yaw_rps  = 0.10f;
+    float lockon_settle_ms       = 400.0f;
+    float lockon_step_ms         = 400.0f;
+    int   lockon_max_attempts    = 30;
 };
 
 struct ControllerGraphState
@@ -113,6 +127,7 @@ struct ControllerTargetInfo
     float epistemic_gain = 0.f;
     bool epistemic_pending = false;
     bool from_affordance = false;
+    std::uint64_t parent_node_id = 0;   // object the affordance hangs from (carries feedback attrs)
 };
 
 struct ControllerRobotPose

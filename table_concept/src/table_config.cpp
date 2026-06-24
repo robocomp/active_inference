@@ -33,6 +33,7 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.state_eps                = getf("TableConcept.StateEps",               0.04f);
     out.K_stable                 = geti("TableConcept.KStable",                30);
     out.max_direct_fit_points    = geti("TableConcept.MaxDirectFitPoints",     400);
+    out.detection_alive_max_frames = geti("TableConcept.DetectionAliveMaxFrames", 40);
     out.M_diverge                = geti("TableConcept.MDiverge",               20);
     out.staleness_frames         = getf("TableConcept.StalenessFrames",        90.0f);
     out.explanation_ratio_thresh = getf("TableConcept.ExplanationRatioThresh", 0.3f);

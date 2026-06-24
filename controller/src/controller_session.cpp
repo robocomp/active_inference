@@ -9,6 +9,22 @@
 void ControllerSession::set_params(const ControllerParams *params)
 {
     params_ = params;
+    if (params_)
+    {
+        // HOW (gains/caps/timing) — controller-owned. WHAT/WHEN (scalar_target, stable_n, timeout)
+        // are per-affordance and come from the contract at begin() time.
+        rc::LockOnConfig c;
+        c.sweep_speed_mps = params_->lockon_sweep_speed_mps;
+        c.sweep_range_m   = params_->lockon_sweep_range_m;
+        c.k_yaw           = params_->lockon_k_yaw;
+        c.max_yaw_rps     = params_->lockon_max_yaw_rps;
+        c.dither_yaw_rps  = params_->lockon_dither_yaw_rps;
+        c.settle_ms       = params_->lockon_settle_ms;
+        c.step_ms         = params_->lockon_step_ms;
+        c.offset_tol      = params_->lockon_offset_tol;
+        c.max_attempts    = params_->lockon_max_attempts;
+        lockon_.configure(c);
+    }
 }
 
 void ControllerSession::set_graph(std::shared_ptr<DSR::DSRGraph> graph)
@@ -228,6 +244,15 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         return;
     }
 
+    // A lock-on micro-search in progress owns the base until it locks or gives up — bypass the path
+    // follower so it isn't disturbed by goal_reached re-evaluation while we quasi-statically servo.
+    if (lockon_.active())
+    {
+        if (step_lockon(motion_commander, time_source))
+            finalize_reached(affordance_manager, path_controller, motion_commander, display);
+        return;
+    }
+
     const auto &boundary_polygon = inner_polygon_.empty() ? room_polygon_ : inner_polygon_;
     if (boundary_polygon.size() >= 3)
         path_controller.set_room_boundary(boundary_polygon);
@@ -253,20 +278,40 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
 
     if (control_output.goal_reached)
     {
-        if (graph_)
-            affordance_manager.mark_reached(graph_);
-        clear_tracking_state();
-        display.clear_robot_trajectory();
-
-        current_plan_.reset();
-        last_target_info_.reset();
-        active_target_id_ = 0;
-        current_target_room_.reset();
-        manual_target_room_.reset();
-        manual_target_origin_room_.reset();
-        manual_target_dirty_ = false;
-        path_controller.stop();
-        motion_commander.stop_robot();
+        // Reached an affordance pose. Resolve its contract (type-level defaults + per-node
+        // overrides). A Servo policy runs the lock-on micro-search to satisfy the contract's
+        // completion predicate before consuming the target; Reach (and non-affordance targets like a
+        // mouse click) finalise immediately.
+        bool want_servo = false;
+        if (params_ && params_->lockon_enabled && graph_
+            && last_target_info_.has_value() && last_target_info_->from_affordance && active_target_id_ != 0)
+        {
+            if (const auto aff_node = graph_->get_node(active_target_id_); aff_node.has_value())
+            {
+                active_contract_ = rc::affordance::read_contract(aff_node.value());
+                feedback_node_id_ = active_contract_.feedback_node_id != 0
+                                  ? active_contract_.feedback_node_id
+                                  : last_target_info_->parent_node_id;   // default: the parent object
+                want_servo = active_contract_.policy == rc::affordance::Policy::Servo
+                          && feedback_node_id_ != 0;
+            }
+        }
+        if (want_servo)
+        {
+            qInfo() << "[affordance]" << last_target_info_->node_name.c_str()
+                    << "reached -> SERVO lock-on | feedback node" << feedback_node_id_
+                    << "| goal clauses" << static_cast<int>(active_contract_.goal.size())
+                    << "| timeout(ms)" << active_contract_.timeout_ms;
+            lockon_.begin(time_source(), active_contract_.scalar_target,
+                          active_contract_.stable_n, active_contract_.timeout_ms);
+            path_controller.stop();
+            if (step_lockon(motion_commander, time_source))
+                finalize_reached(affordance_manager, path_controller, motion_commander, display);
+            return;
+        }
+        qInfo() << "[affordance]" << (last_target_info_.has_value() ? last_target_info_->node_name.c_str() : "?")
+                << "reached -> REACH (consume immediately)";
+        finalize_reached(affordance_manager, path_controller, motion_commander, display);
         return;
     }
 
@@ -311,6 +356,86 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     }
 
     motion_commander.send_speed_command(adv_mps, side_mps, rot_rps);
+}
+
+// ─── Lock-on micro-search ─────────────────────────────────────────────────────
+
+// Fill the normalised servo Reading from the contract-named feedback attributes (object-agnostic).
+rc::LockOn::Reading ControllerSession::read_servo_reading(std::uint64_t feedback_node_id) const
+{
+    rc::LockOn::Reading r;
+    if (!graph_ || feedback_node_id == 0)
+        return r;
+    const auto node = graph_->get_node(feedback_node_id);
+    if (!node.has_value())
+        return r;
+    const auto &attrs = node->attrs();
+    const auto &c = active_contract_;
+
+    r.valid = c.valid_attr.empty();   // no gate attr ⇒ always valid
+    if (!c.valid_attr.empty())
+        if (const auto it = attrs.find(c.valid_attr); it != attrs.end())
+            if (const auto v = rc::affordance::detail::attr_scalar(it->second)) r.valid = *v != 0.0f;
+    if (!c.scalar_attr.empty())
+        if (const auto it = attrs.find(c.scalar_attr); it != attrs.end())
+            if (const auto v = rc::affordance::detail::attr_scalar(it->second)) r.scalar = *v;
+    if (!c.err_vec_attr.empty())
+        if (const auto it = attrs.find(c.err_vec_attr); it != attrs.end() && it->second.selected() == 3)
+        {
+            const auto &v = it->second.float_vec();
+            if (v.size() >= 1) r.err_x = v[0];
+            if (v.size() >= 2) r.err_y = v[1];
+        }
+    return r;
+}
+
+// Evaluate the contract's completion predicate against the current feedback-node attributes.
+bool ControllerSession::goal_met(std::uint64_t feedback_node_id) const
+{
+    if (!graph_ || feedback_node_id == 0)
+        return false;
+    const auto node = graph_->get_node(feedback_node_id);
+    if (!node.has_value())
+        return false;
+    return rc::affordance::evaluate_goal(node.value(), active_contract_.goal);
+}
+
+bool ControllerSession::step_lockon(ControllerMotionCommander &motion_commander, const TimeSource &time_source)
+{
+    const auto reading = read_servo_reading(feedback_node_id_);
+    const bool met = goal_met(feedback_node_id_);
+    const auto cmd = lockon_.update(reading, met, time_source());
+    // Quasi-static: drive the (tiny, capped) nudge only during STEP; hold still while SETTLING/done.
+    if (lockon_.active() && (cmd.adv != 0.0f || cmd.side != 0.0f || cmd.rot != 0.0f))
+        motion_commander.send_speed_command(cmd.adv, cmd.side, cmd.rot);
+    else
+        motion_commander.stop_robot();
+    if (lockon_.done())
+        qInfo() << "[affordance] lock-on" << (lockon_.locked() ? "LOCKED" : "GIVE_UP")
+                << "| node" << active_target_id_;
+    return lockon_.done();
+}
+
+void ControllerSession::finalize_reached(rc::AffordanceManager &affordance_manager,
+                                         rc::TrajectoryController &path_controller,
+                                         ControllerMotionCommander &motion_commander,
+                                         ControllerDisplay &display)
+{
+    if (graph_)
+        affordance_manager.mark_reached(graph_);
+    lockon_.reset();
+    feedback_node_id_ = 0;
+    clear_tracking_state();
+    display.clear_robot_trajectory();
+    current_plan_.reset();
+    last_target_info_.reset();
+    active_target_id_ = 0;
+    current_target_room_.reset();
+    manual_target_room_.reset();
+    manual_target_origin_room_.reset();
+    manual_target_dirty_ = false;
+    path_controller.stop();
+    motion_commander.stop_robot();
 }
 
 void ControllerSession::set_manual_target(const QPointF &point,

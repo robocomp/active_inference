@@ -818,11 +818,8 @@ void Viewer2D::draw_selected_grid_cell(const std::optional<Eigen::Vector2f>& cen
 
 void Viewer2D::refresh_semantic_bboxes(const std::shared_ptr<DSR::DSRGraph>& graph)
 {
-    // Temporarily disabled: object/obstacle BB drawing and graph polling.
-    Q_UNUSED(graph);
-    return;
-
-    // Keep implementation below for quick re-enable.
+    // Poll (low-rate) DSR nodes of type object/obstacle on the main thread and draw their
+    // oriented BBs. Objects and obstacles use distinct colours so they're distinguishable.
     const qint64 now_ms = QDateTime::currentMSecsSinceEpoch();
     if (last_semantic_bbox_refresh_ms_ != 0 &&
         now_ms - last_semantic_bbox_refresh_ms_ < semantic_bbox_refresh_period_ms_)
@@ -935,8 +932,9 @@ void Viewer2D::refresh_semantic_bboxes(const std::shared_ptr<DSR::DSRGraph>& gra
         }
     };
 
-    refresh_type("object", object_bbox_items_, QColor(255, 170, 0), QColor(255, 170, 0, 255), 26);
-    refresh_type("obstacle", obstacle_bbox_items_, QColor(220, 50, 50), QColor(220, 50, 50, 255), 27);
+    // Objects: blue. Obstacles: red. Translucent fill so overlaps stay readable.
+    refresh_type("object",   object_bbox_items_,   QColor(0, 160, 255), QColor(0, 160, 255, 60), 26);
+    refresh_type("obstacle", obstacle_bbox_items_, QColor(230, 60, 60), QColor(230, 60, 60, 60), 27);
 }
 
 } // namespace rc

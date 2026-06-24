@@ -5,6 +5,8 @@
 #include "table_affordance.h"
 #include <QtGlobal>
 
+#include "../../common/affordance_protocol/affordance_protocol.h"
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 
@@ -133,6 +135,11 @@ void TableAffordance::create_node(const EpistemicProposal& prop)
     G_->add_or_modify_attrib_local<epistemic_target_yaw_rad_att>(aff_node, prop.epistemic_target_yaw_rad);
     G_->add_or_modify_attrib_local<epistemic_gain_att>          (aff_node, prop.epistemic_gain);
     G_->add_or_modify_attrib_local<epistemic_pending_att>       (aff_node, true);
+
+    // Declare the execution contract: how the controller should complete this affordance (Servo
+    // lock-on bound to the table's projected-ROI / detection feedback attributes + completion
+    // predicate). Uses the shared type-level default; producers can override per node here.
+    rc::affordance::write_contract(*G_, aff_node, rc::affordance::default_contract_for(aff_name));
 
     const auto id_opt = G_->insert_node(aff_node);
     if (!id_opt.has_value())
