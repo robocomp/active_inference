@@ -416,8 +416,8 @@ void VoxelOpenGLViewer::update_rfe_points(std::span<const QVector3D> residual_po
         }
     };
 
-    append_points(residual_vertices, residual_positions, 0.95f, 0.20f, 0.85f);  // residual: magenta
-    append_points(rfe_vertices, fallback_positions, 1.00f, 0.55f, 0.10f);       // rfe: orange
+    append_points(residual_vertices, residual_positions, 0.15f, 0.20f, 0.80f);  // residual: dark blue
+    append_points(rfe_vertices, fallback_positions, 0.95f, 0.20f, 0.85f);       // rfe: magenta
     append_points(candidate_vertices, candidate_positions, 0.20f, 0.85f, 1.00f); // candidate: cyan
 
     {
@@ -1171,6 +1171,10 @@ void VoxelOpenGLViewer::paintGL()
                 const auto& mx = local_maxs[i];
                 std::string cat;
                 if (i < local_cats.size()) cat = local_cats[i];
+                // Skip the green table BBs (per request) — the table is shown via its
+                // mesh + voxels + RFE points, so its bounding boxes are just clutter.
+                if (cat == "table" or cat == "model_table")
+                    continue;
                 const QColor c = color_for_category(cat);
                 const float r = c.redF();
                 const float g = c.greenF();
@@ -1258,6 +1262,9 @@ void VoxelOpenGLViewer::paintGL()
                 const float sy = std::sin(yaw);
                 std::string cat;
                 if (i < local_cats.size()) cat = local_cats[i];
+                // Skip the green table BBs (per request) — shown via mesh/voxels/RFE points.
+                if (cat == "table" or cat == "model_table")
+                    continue;
                 const QColor c = color_for_category(cat);
                 const float r = c.redF();
                 const float g = c.greenF();

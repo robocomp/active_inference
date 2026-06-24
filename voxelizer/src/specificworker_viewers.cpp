@@ -124,8 +124,8 @@ void SpecificWorker::setup_custom_viewers()
         accent(lidar_btn,     "#8C9EC7");  // lidar: slate blue-gray
         accent(masks_btn,     "#EBEBF2");  // mask: white
         accent(candidate_btn, "#33D9FF");  // candidate: cyan
-        accent(rfe_btn,       "#FF8C1A");  // rfe: orange
-        accent(residual_btn,  "#F233D9");  // residual: magenta
+        accent(rfe_btn,       "#F233D9");  // rfe: magenta
+        accent(residual_btn,  "#2633CC");  // residual: dark blue
 
         controls_layout->addWidget(lidar_btn);
         controls_layout->addWidget(lidar_voxels_btn);
