@@ -360,6 +360,7 @@ void RoomSceneGraph::update_planner_obstacle_footprints()
 
     collect("object");
     collect("obstacle");
+    collect("table");   // tables (table_concept) are type "table", not "object" — avoid them too
 
     epistemic_->epistemic_planner().set_obstacle_footprints(std::move(footprints));
 }

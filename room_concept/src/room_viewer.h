@@ -96,7 +96,6 @@ private:
     QPointer<rc::TimeSeriesPlot> ts_plot_fe_;
     std::unique_ptr<rc::CameraVisualizer> camera_viz_;
     bool camera_media_plane_initialized_ = false;
-    std::shared_ptr<DSR::DSRGraph> graph_;   // for low-rate object/obstacle BB polling
 };
 
 }  // namespace rc

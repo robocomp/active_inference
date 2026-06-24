@@ -14,6 +14,7 @@
 #include <QGraphicsLineItem>
 #include <QGraphicsRectItem>
 #include <QGraphicsTextItem>
+#include <QTimer>
 #include <Eigen/Dense>
 #include <cstdint>
 #include <optional>
@@ -152,6 +153,12 @@ class Viewer2D : public QObject
         /// Missing nodes are automatically removed from the canvas.
         void refresh_semantic_bboxes(const std::shared_ptr<DSR::DSRGraph>& graph);
 
+        /// Thread-safe, self-driven object/obstacle BB overlay: starts a QTimer owned by
+        /// this viewer (so it fires on the GUI thread, where the DSR reads and the
+        /// QGraphicsScene mutation are both safe) that polls the graph every period_ms.
+        /// Decoupled from the compute loop; call once after construction (main thread).
+        void start_semantic_bbox_overlay(std::shared_ptr<DSR::DSRGraph> graph, int period_ms = 1000);
+
     Q_SIGNALS:
         void robot_moved(QPointF);
         void robot_rotate(QPointF);
@@ -222,8 +229,9 @@ class Viewer2D : public QObject
         // Object/obstacle semantic BB overlay
         std::unordered_map<std::uint64_t, QGraphicsPolygonItem*> object_bbox_items_;
         std::unordered_map<std::uint64_t, QGraphicsPolygonItem*> obstacle_bbox_items_;
-        qint64 last_semantic_bbox_refresh_ms_ = 0;
-        int semantic_bbox_refresh_period_ms_ = 1000;
+        std::unordered_map<std::uint64_t, QGraphicsPolygonItem*> table_bbox_items_;
+        std::shared_ptr<DSR::DSRGraph> semantic_graph_;   // graph polled by the BB overlay timer
+        QTimer* semantic_bbox_timer_ = nullptr;           // self-driven 1 Hz overlay (GUI thread)
 
         void update_room_axes(const QRectF& room_bounds);
 

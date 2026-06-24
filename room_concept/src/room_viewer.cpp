@@ -29,13 +29,17 @@ RoomViewer::RoomViewer(DSR::DSRViewer* default_viewer,
                                        rc::RoomConcept& room_concept,
                                        rc::EpistemicController& epistemic)
     : params_(&params), has_room_polygon_(has_room_polygon),
-      room_concept_(&room_concept), epistemic_(&epistemic), graph_(graph)
+      room_concept_(&room_concept), epistemic_(&epistemic)
 {
     custom_widget_ = new Custom_widget();
     default_viewer->add_custom_widget_to_dock("layout", custom_widget_);
     viewer_2d_ = new rc::Viewer2D(custom_widget_->frame, params_->GRID_MAX_DIM, true);
     viewer_2d_->show();
     viewer_2d_->add_robot(params_->ROBOT_WIDTH, params_->ROBOT_LENGTH, 0.f, 0.f, QColor("blue"));
+
+    // Self-driven 1 Hz object/obstacle BB overlay (GUI-thread timer; thread-safe, decoupled
+    // from the compute loop). Objects render blue, obstacles red.
+    viewer_2d_->start_semantic_bbox_overlay(graph, 1000);
 
     // Free-Energy time series in the lower frame of the custom widget.
     if (custom_widget_->frame_series->layout() == nullptr)
@@ -110,9 +114,6 @@ void RoomViewer::update_viewer(const std::optional<rc::RoomConcept::UpdateResult
         viewer_2d_->draw_corners(loc_res->corner_matches, pose_for_draw);
     else
         viewer_2d_->draw_corners({}, pose_for_draw);
-
-    // Draw object/obstacle BBs from the graph (self-throttled to ~1 Hz). Main-thread poll.
-    viewer_2d_->refresh_semantic_bboxes(graph_);
 }
 
 void RoomViewer::update_epistemic_overlay()

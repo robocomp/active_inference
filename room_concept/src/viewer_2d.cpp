@@ -818,14 +818,8 @@ void Viewer2D::draw_selected_grid_cell(const std::optional<Eigen::Vector2f>& cen
 
 void Viewer2D::refresh_semantic_bboxes(const std::shared_ptr<DSR::DSRGraph>& graph)
 {
-    // Poll (low-rate) DSR nodes of type object/obstacle on the main thread and draw their
-    // oriented BBs. Objects and obstacles use distinct colours so they're distinguishable.
-    const qint64 now_ms = QDateTime::currentMSecsSinceEpoch();
-    if (last_semantic_bbox_refresh_ms_ != 0 &&
-        now_ms - last_semantic_bbox_refresh_ms_ < semantic_bbox_refresh_period_ms_)
-        return;
-    last_semantic_bbox_refresh_ms_ = now_ms;
-
+    // Poll DSR nodes of type object/obstacle/table on the main thread and draw their oriented
+    // BBs. Cadence is driven by the overlay's QTimer (no internal throttle).
     auto clear_map = [this](std::unordered_map<std::uint64_t, QGraphicsPolygonItem*>& items)
     {
         for (auto& [id, item] : items)
@@ -844,6 +838,7 @@ void Viewer2D::refresh_semantic_bboxes(const std::shared_ptr<DSR::DSRGraph>& gra
     {
         clear_map(object_bbox_items_);
         clear_map(obstacle_bbox_items_);
+        clear_map(table_bbox_items_);
         return;
     }
 
@@ -932,9 +927,26 @@ void Viewer2D::refresh_semantic_bboxes(const std::shared_ptr<DSR::DSRGraph>& gra
         }
     };
 
-    // Objects: blue. Obstacles: red. Translucent fill so overlaps stay readable.
+    // Objects: blue. Obstacles: green. Tables: orange. Translucent fill so overlaps stay readable.
+    // table_concept publishes tables as type "table" (table_1, …), not "object".
     refresh_type("object",   object_bbox_items_,   QColor(0, 160, 255), QColor(0, 160, 255, 60), 26);
-    refresh_type("obstacle", obstacle_bbox_items_, QColor(230, 60, 60), QColor(230, 60, 60, 60), 27);
+    refresh_type("obstacle", obstacle_bbox_items_, QColor(0, 200, 80),  QColor(0, 200, 80, 60),  27);
+    refresh_type("table",    table_bbox_items_,    QColor(255, 140, 0), QColor(255, 140, 0, 60), 28);
+}
+
+void Viewer2D::start_semantic_bbox_overlay(std::shared_ptr<DSR::DSRGraph> graph, int period_ms)
+{
+    semantic_graph_ = std::move(graph);
+    if (semantic_bbox_timer_ == nullptr)
+    {
+        // Parented to this viewer (a QObject living on the GUI thread), so timeout()
+        // is delivered on the GUI thread — the only thread allowed to touch the scene
+        // and the safe thread for the DSR reads. No locks needed.
+        semantic_bbox_timer_ = new QTimer(this);
+        connect(semantic_bbox_timer_, &QTimer::timeout, this,
+                [this]() { refresh_semantic_bboxes(semantic_graph_); });
+    }
+    semantic_bbox_timer_->start(period_ms);
 }
 
 } // namespace rc
