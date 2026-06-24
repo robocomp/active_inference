@@ -280,7 +280,15 @@ void SpecificWorker::initialize()
     if (not graph_viewers.empty())
     {
         custom_widget_ = new Custom_widget();
-        graph_viewers.at("")->add_custom_widget_to_dock("Table Inference", custom_widget_);
+        // Own top-level window (not docked into the graph view): the dock gets tabbed/hidden behind
+        // the DSR graph scene, and docking custom widgets onto the churn-repainting graph view is the
+        // crash surface we want to avoid. Mirrors the voxelizer's Voxel3D window.
+        graph_viewers.at("")->add_custom_widget_in_own_window("Table Inference", custom_widget_);
+        // libdsr opens the holder at 900×650; shrink to ~half side. (This own-window is not in the
+        // GenericWorker `windows` map, so its geometry is not persisted across restarts — unlike the
+        // main graph window, which is saved/restored via QSettings.)
+        if (auto* win = custom_widget_->window())
+            win->resize(450, 325);
 
         // Create plot inside frame_series
         auto* series_layout = new QVBoxLayout(custom_widget_->frame_series);
@@ -407,13 +415,23 @@ void SpecificWorker::publish_table_diagnostics(const rc::TableInstance& inst,
                                                float free_energy)
 {
 
+    // Register lazily & idempotently HERE (same thread/object that adds points). The instance is
+    // often created via the graph-signal path before the plots exist (created=false in the compute
+    // loop), so the old `if (created)` registration never fired and every point was dropped.
     if (ts_plot_)
     {
-        ts_plot_->add_point(inst.node_name + "_fe",  free_energy);
+        ts_plot_->add_series(inst.node_name + "_fe", QColor(255, 170, 0), 1.1f);
+        ts_plot_->add_point (inst.node_name + "_fe", free_energy);
         if (ts_cov_plot_)
-            ts_cov_plot_->add_point(inst.node_name + "_cov", inst.last_coverage_deficit);
+        {
+            ts_cov_plot_->add_series(inst.node_name + "_cov", QColor(0, 190, 255), 1.1f);
+            ts_cov_plot_->add_point (inst.node_name + "_cov", inst.last_coverage_deficit);
+        }
         if (ts_res_plot_)
-            ts_res_plot_->add_point(inst.node_name + "_res", static_cast<float>(observation.residual_pts.size()));
+        {
+            ts_res_plot_->add_series(inst.node_name + "_res", QColor(170, 80, 255), 1.1f);
+            ts_res_plot_->add_point (inst.node_name + "_res", static_cast<float>(observation.residual_pts.size()));
+        }
     }
 
     if (fitter_->should_log_table(inst))

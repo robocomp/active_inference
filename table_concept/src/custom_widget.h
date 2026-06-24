@@ -36,10 +36,10 @@ public:
         frame_series = new QFrame(this);
         frame_series->setFrameShape(QFrame::StyledPanel);
         frame_series->setFrameShadow(QFrame::Raised);
-        frame_series->setMinimumHeight(420);
+        frame_series->setMinimumHeight(200);
         layout->addWidget(frame_series, 1);
 
         setLayout(layout);
-        setMinimumSize(300, 460);
+        setMinimumSize(220, 240);
     }
 };

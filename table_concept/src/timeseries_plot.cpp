@@ -3,6 +3,7 @@
 #include <cmath>
 #include <limits>
 #include <optional>
+#include <cstdio>
 
 namespace rc {
 
@@ -35,7 +36,7 @@ std::optional<std::pair<float, float>> fixed_value_range_for_series(const std::s
 TimeSeriesPlot::TimeSeriesPlot(QWidget* parent)
     : QWidget(parent)
 {
-    setMinimumHeight(80);
+    setMinimumHeight(55);
     setAutoFillBackground(true);
     QPalette pal = palette();
     pal.setColor(QPalette::Window, QColor(255, 255, 255));
@@ -49,6 +50,8 @@ void TimeSeriesPlot::add_series(const std::string& name, QColor colour,
                                 float line_width, int avg_window)
 {
     std::lock_guard lk(mu_);
+    if (series_.find(name) != series_.end())
+        return;   // idempotent: keep the existing series (and its samples) on repeat calls
     auto& s = series_[name];
     s.name = name;
     s.colour = colour;
