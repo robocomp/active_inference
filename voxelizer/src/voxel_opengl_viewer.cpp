@@ -355,7 +355,7 @@ void VoxelOpenGLViewer::update_lidar_points(std::span<const QVector3D> positions
         const float fx = voxel_flip_x_ ? -1.f : 1.f;
         const float fy = voxel_flip_y_ ? -1.f : 1.f;
         const QVector3D mapped{fx * p.x(), p.z(), fy * p.y()};
-        new_vertices.push_back(Vertex{mapped.x(), mapped.y(), mapped.z(), 0.35f, 0.95f, 0.25f});
+        new_vertices.push_back(Vertex{mapped.x(), mapped.y(), mapped.z(), 0.55f, 0.62f, 0.78f});  // lidar: slate blue-gray
     }
 
     {
@@ -389,9 +389,9 @@ void VoxelOpenGLViewer::update_rfe_points(std::span<const QVector3D> residual_po
         }
     };
 
-    append_points(new_vertices, residual_positions, 0.95f, 0.20f, 0.85f);
-    append_points(new_vertices, fallback_positions, 0.20f, 0.92f, 0.30f);
-    append_points(candidate_vertices, candidate_positions, 0.20f, 0.85f, 1.00f);
+    append_points(new_vertices, residual_positions, 0.95f, 0.20f, 0.85f);  // residual: magenta
+    append_points(new_vertices, fallback_positions, 1.00f, 0.92f, 0.10f);  // rfe: yellow
+    append_points(candidate_vertices, candidate_positions, 0.20f, 0.85f, 1.00f);  // candidate: cyan
 
     {
         std::scoped_lock lk(data_mutex_);
@@ -431,7 +431,7 @@ void VoxelOpenGLViewer::update_mask_points(std::span<const QVector3D> positions)
         const float fx = voxel_flip_x_ ? -1.f : 1.f;
         const float fy = voxel_flip_y_ ? -1.f : 1.f;
         const QVector3D mapped{fx * p.x(), p.z(), fy * p.y()};
-        new_vertices.push_back(Vertex{mapped.x(), mapped.y(), mapped.z(), 1.0f, 0.85f, 0.10f});
+        new_vertices.push_back(Vertex{mapped.x(), mapped.y(), mapped.z(), 0.92f, 0.92f, 0.95f});  // mask: white
     }
     {
         std::scoped_lock lk(data_mutex_);
@@ -1468,7 +1468,7 @@ void VoxelOpenGLViewer::keyPressEvent(QKeyEvent* event)
 QColor VoxelOpenGLViewer::color_for_category(const std::string& category)
 {
     if (category == "chair") return QColor(0, 170, 255);   // cyan-blue
-    if (category == "table") return QColor(255, 125, 0);   // orange
+    if (category == "table") return QColor(0, 200, 60);    // green
     if (category == "model_table") return QColor(80, 220, 120); // green for graph/model tables
     if (category == "bottle") return QColor(255, 0, 200);  // hot magenta — bottle cylinder boxes
     if (category == "monitor") return QColor(186, 85, 211); // orchid-violet

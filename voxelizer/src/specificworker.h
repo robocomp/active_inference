@@ -127,6 +127,13 @@ class SpecificWorker : public GenericWorker
         std::unique_ptr<rc::VoxelOpenGLViewer> voxel_viewer_gl;
         std::unique_ptr<rc::YoloViewer>        yolo_viewer_;
 
+        // Own-window holders returned by add_custom_widget_in_own_window. Borrowed (parented to the
+        // DSR main window); we only read/persist their geometry, we do not own them.
+        QMainWindow* voxel3d_window_ = nullptr;
+        QMainWindow* yolo_window_ = nullptr;
+        bool yolo_window_needs_image_size_ = false;  // size the RGB window to the image on first frame
+        void save_external_window_geometry() const;
+
     signals:
         void presenceReady();
         void presenceLost();

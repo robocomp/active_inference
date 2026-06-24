@@ -97,6 +97,7 @@ void SpecificWorker::request_shutdown()
         return;
 
     save_window_settings();
+    save_external_window_geometry();
     scene_processor.reset();
     cleanup_owned_nodes();
 }
@@ -282,6 +283,12 @@ void SpecificWorker::compute()
             ? yolo_processor->apply_tray_mask(frame->rgbd.rgb)
             : frame->rgbd.rgb;
         yolo_viewer_->update_frame(viewer_rgb, detections);
+        // Size the RGB window to the image once (only when no saved geometry was restored).
+        if (yolo_window_needs_image_size_ and yolo_window_ != nullptr and not viewer_rgb.empty())
+        {
+            yolo_window_->resize(viewer_rgb.cols, viewer_rgb.rows);
+            yolo_window_needs_image_size_ = false;
+        }
     }
 
     graph_publisher_->publish(frame->rgbd, frame->room_T_zed, detections);
