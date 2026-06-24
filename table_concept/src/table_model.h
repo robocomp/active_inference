@@ -88,6 +88,10 @@ struct TableModelParams
     // table-top rectangle onto the back-projected 2D mask contour — constrains the footprint
     // (incl. occluded faces & yaw) from the image where depth is missing.
     float mask_precision = 0.0f;
+    // Silhouette mode: >0 = height-agnostic occluding-contour (sample each back-projected mask-edge
+    // ray over the table's vertical band, drive the closest approach to the box+legs SDF → 0, so the
+    // ray grazes the model — top, sides AND legs). 0 = legacy table-top-plane intersection only.
+    int   sil_tangent_samples = 8;
     // Graduated non-convexity (GNC): within each gradient_step, anneal the robust-loss scale
     // geometrically from robust_gnc_start_scale down to robust_loss_scale across the iterations.
     // A wide start keeps far points (e.g. a table half-offset past the box edge) inside the
@@ -129,6 +133,21 @@ public:
 
     /** SDF for a batch of points. Returns one value per point. */
     std::vector<float> compute_sdf(const std::vector<Eigen::Vector3f>& points) const;
+
+    /**
+     * Per-DOF observation Fisher information (diagonal of the Gauss-Newton Hessian of the SDF
+     * data-likelihood) at the current state, in the state order [cx,cy,w,h,H,leg,yaw,inset].
+     *
+     *   I_jj = (1/σ²) · Σᵢ wᵢ · ω(rᵢ) · (∂SDF(yᵢ)/∂θ_j)²
+     *
+     * with rᵢ = SDF(yᵢ) the residual, ω the robust IRLS weight (so outliers contribute little
+     * curvature), and ∂SDF/∂θ_j a central finite difference on the scalar SDF path. UN-normalised
+     * (no /N) so it accumulates with the number of supporting points — the calibrated "amount of
+     * evidence this viewpoint provides about each DOF". This is the per-frame measurement of the
+     * Fisher information filter that hardens the belief as the robot orbits the table.
+     */
+    std::array<float, 8> observation_information(const std::vector<Eigen::Vector3f>& points,
+                                                 const std::vector<float>& weights) const;
 
     // ── Free Energy ──────────────────────────────────────────────────────────
 
@@ -174,6 +193,9 @@ public:
     { sil_cam_ = cam_room; sil_dirs_ = std::move(ray_dirs_room); sil_conf_ = std::clamp(confidence, 0.0f, 1.0f); }
     void clear_silhouette() { sil_dirs_.clear(); }
     std::size_t silhouette_ray_count() const { return sil_dirs_.size(); }
+    // Raw mean closest-approach of the silhouette rays to the model at the current state (metres);
+    // 0 = perfectly on the contour. Diagnostic, independent of mask_precision / robust loss.
+    float silhouette_residual() const;
 
     /**
      * Clamp leg_length so that leg_length ≤ table_height − TOP_THICKNESS,
@@ -203,6 +225,8 @@ private:
 
     // RGB-mask silhouette energy for a given state (scalar mirror of the autograd term).
     float silhouette_energy_at(const TableState& s) const;
+    // Per-ray silhouette residual (closest approach, tangent mode; or top-plane 2-D box-SDF).
+    float silhouette_ray_metric(const Eigen::Vector3f& d, const TableState& s) const;
 
     // SDF evaluated for a given explicit state
     float sdf_point_at(const Eigen::Vector3f& p, const TableState& s) const;

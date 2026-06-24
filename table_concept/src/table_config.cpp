@@ -74,6 +74,8 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.robust_loss_scale  = getf("TableModel.RobustLossScale",  0.10f);
     out.robust_gnc_start_scale = getf("TableModel.RobustGncStartScale", 0.80f);
     out.mask_precision     = getf("TableModel.MaskPrecision",     0.30f);
+    out.sil_tangent_samples = geti("TableModel.MaskSilhouetteSamples", 8);
+    out.sil_reopen_residual_m = getf("TableModel.SilReopenResidualM", 0.15f);
     out.robust_gnc_decay_cycles = geti("TableModel.RobustGncDecayCycles", 20);
 
     // SampleQueue
@@ -100,6 +102,7 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.warm_settle_cycles            = geti("WarmStart.SettleCycles",            40);
     out.warm_reopen_admit             = geti("WarmStart.ReopenAdmit",             8);
     out.warm_settle_floor             = getf("WarmStart.SettleFloor",             0.05f);
+    out.warm_info_half                = getf("WarmStart.InfoHalf",                20.0f);
     out.warm_lambda_pos_base          = getf("WarmStart.LambdaPosBase",           0.15f);
     out.warm_lambda_pos_gain          = getf("WarmStart.LambdaPosGain",           0.45f);
     out.warm_lambda_size_base         = getf("WarmStart.LambdaSizeBase",          0.02f);

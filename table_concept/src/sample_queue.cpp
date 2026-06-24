@@ -266,13 +266,27 @@ void SampleQueue::insert(const std::vector<Eigen::Vector3f>& new_pts,
             ++counters_.rejected_sdf;
     }
 
-    // Keep the max_this_frame candidates with smallest |SDF|
+    // Per-frame selection prioritises SPATIAL DIVERSITY, not globally-smallest |SDF|. The angle×z
+    // bins are diverse, but keeping the lowest-|SDF| points before binning always re-admits the
+    // well-fit top face (sdf≈0) and starves edge/leg/new-face points (slightly larger |SDF|), so the
+    // queue never accumulates them as the robot orbits. Instead prefer points that fall into
+    // UNDER-FILLED bins (empty bins = unseen faces/legs), then smallest |SDF| within that.
+    {
+        const float cx0 = model.state().cx, cy0 = model.state().cy;
+        std::unordered_map<int, int> occ;
+        for (const auto& sp : pts_) ++occ[bin_index(sp.position, cx0, cy0)];
+        std::sort(eligible.begin(), eligible.end(),
+                  [&](const std::pair<float, int>& a, const std::pair<float, int>& b)
+                  {
+                      const bool fa = occ[bin_index(new_pts[a.second], cx0, cy0)] >= params_.max_per_bin;
+                      const bool fb = occ[bin_index(new_pts[b.second], cx0, cy0)] >= params_.max_per_bin;
+                      if (fa != fb) return !fa;          // under-filled bins first
+                      return a.first < b.first;          // then smallest |SDF|
+                  });
+    }
     if (static_cast<int>(eligible.size()) > max_this_frame)
     {
         counters_.rejected_frame_cap += static_cast<int>(eligible.size()) - max_this_frame;
-        std::partial_sort(eligible.begin(),
-                          eligible.begin() + max_this_frame,
-                          eligible.end());
         eligible.resize(max_this_frame);
     }
 

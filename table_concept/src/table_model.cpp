@@ -402,27 +402,60 @@ float TableModel::prior_energy(const TableState& s) const
     return size_energy + pos_energy + state_energy + angle_energy;
 }
 
+// Per-ray silhouette residual: closest approach of the ray to the box+legs SDF (tangent mode), or
+// the table-top-plane 2-D box-SDF (legacy). 0 on the boundary; >0 outside; <0 piercing.
+float TableModel::silhouette_ray_metric(const Eigen::Vector3f& d, const TableState& s) const
+{
+    const int N = params_.sil_tangent_samples;
+    if (N > 0)
+    {
+        const float t_top = std::max(0.0f, (s.table_height - sil_cam_.z()) / d.z());
+        const float t_flr = (0.0f - sil_cam_.z()) / d.z();
+        float best = std::numeric_limits<float>::max();
+        for (int k = 0; k < N; ++k)
+        {
+            const float a = (N > 1) ? static_cast<float>(k) / static_cast<float>(N - 1) : 0.0f;
+            const float t = t_top + a * (t_flr - t_top);
+            best = std::min(best, sdf_point_at(sil_cam_ + t * d, s));
+        }
+        return best;
+    }
+    const float c = std::cos(s.yaw), sn = std::sin(s.yaw);
+    const float t = (s.table_height - sil_cam_.z()) / d.z();
+    const float bx = sil_cam_.x() + t * d.x() - s.cx;
+    const float by = sil_cam_.y() + t * d.y() - s.cy;
+    const float lx = bx * c + by * sn, ly = -bx * sn + by * c;
+    const float dx = std::abs(lx) - s.w * 0.5f, dy = std::abs(ly) - s.h * 0.5f;
+    const float ox = std::max(dx, 0.0f), oy = std::max(dy, 0.0f);
+    return std::sqrt(ox * ox + oy * oy) + std::min(std::max(dx, dy), 0.0f);
+}
+
 float TableModel::silhouette_energy_at(const TableState& s) const
 {
     if (params_.mask_precision <= 0.0f || sil_dirs_.empty())
         return 0.0f;
-    const float cx = s.cx, cy = s.cy, half_w = s.w * 0.5f, half_h = s.h * 0.5f;
-    const float c = std::cos(s.yaw), sn = std::sin(s.yaw);
     float acc = 0.0f;
     for (const auto& d : sil_dirs_)
     {
         if (std::abs(d.z()) < 1e-6f) continue;
-        const float t = (s.table_height - sil_cam_.z()) / d.z();
-        const float bx = sil_cam_.x() + t * d.x() - cx;
-        const float by = sil_cam_.y() + t * d.y() - cy;
-        const float lx = bx * c + by * sn;
-        const float ly = -bx * sn + by * c;
-        const float dx = std::abs(lx) - half_w, dy = std::abs(ly) - half_h;
-        const float ox = std::max(dx, 0.0f), oy = std::max(dy, 0.0f);
-        const float sdf2d = std::sqrt(ox * ox + oy * oy) + std::min(std::max(dx, dy), 0.0f);
-        acc += robust_loss_value(sdf2d, params_.robust_loss, params_.robust_loss_scale);
+        acc += robust_loss_value(silhouette_ray_metric(d, s), params_.robust_loss, params_.robust_loss_scale);
     }
     return params_.mask_precision * sil_conf_ * acc / static_cast<float>(sil_dirs_.size());
+}
+
+float TableModel::silhouette_residual() const
+{
+    if (sil_dirs_.empty())
+        return 0.0f;
+    float acc = 0.0f;
+    int n = 0;
+    for (const auto& d : sil_dirs_)
+    {
+        if (std::abs(d.z()) < 1e-6f) continue;
+        acc += std::abs(silhouette_ray_metric(d, state_));
+        ++n;
+    }
+    return n > 0 ? acc / static_cast<float>(n) : 0.0f;
 }
 
 float TableModel::fe_at(const TableState& s,
@@ -576,24 +609,63 @@ float TableModel::gradient_step(const std::vector<Eigen::Vector3f>& points,
         for (long i = 0; i < n; ++i) { ax[i] = sil_dirs_[i].x(); ay[i] = sil_dirs_[i].y(); az[i] = sil_dirs_[i].z(); }
     }
     const float sil_Cx = sil_cam_.x(), sil_Cy = sil_cam_.y(), sil_Cz = sil_cam_.z();
+    using torch::indexing::Slice;
     auto silhouette_loss = [&](const torch::Tensor& th, float robust_scale) -> torch::Tensor
     {
         if (!sil_on) return torch::zeros({}, options);
         const auto cx = th.index({0}), cy = th.index({1});
-        const auto half_w = th.index({2}) * 0.5f, half_h = th.index({3}) * 0.5f;
-        const auto H = th.index({4}), yaw = th.index({6});
-        const auto t = (H - sil_Cz) / sil_dz;                 // ray param to the table-top plane
-        const auto bx = sil_Cx + t * sil_dx;                  // intersection, room XY
-        const auto by = sil_Cy + t * sil_dy;
+        const auto w = th.index({2}), h = th.index({3});
+        const auto half_w = w * 0.5f, half_h = h * 0.5f;
+        const auto H = th.index({4}), leg_len = th.index({5}), yaw = th.index({6}), inset = th.index({7});
         const auto c = torch::cos(yaw), s = torch::sin(yaw);
-        const auto px = bx - cx, py = by - cy;
-        const auto lx = px * c + py * s;
-        const auto ly = -px * s + py * c;
-        const auto dx = torch::abs(lx) - half_w;
-        const auto dy = torch::abs(ly) - half_h;
-        const auto ox = torch::clamp_min(dx, 0.0f), oy = torch::clamp_min(dy, 0.0f);
-        const auto sdf2d = torch::sqrt(ox * ox + oy * oy + 1e-9f) + torch::clamp_max(torch::max(dx, dy), 0.0f);
-        const auto loss = robust_loss_value(sdf2d, params_.robust_loss, robust_scale);
+
+        torch::Tensor metric;   // [Nrays] per-ray contour residual, driven to 0
+        const int Nsamp = params_.sil_tangent_samples;
+        if (Nsamp > 0)
+        {
+            // Height-agnostic occluding contour: sample each ray over the table's vertical band
+            // [z=H .. z=0] and take the closest approach to the box+legs SDF (tangent ⇒ 0). This
+            // matches top, sides AND legs in one term, with no plane assumption.
+            const int N = std::max(2, Nsamp);
+            const auto t_top = torch::clamp_min((H - sil_Cz) / sil_dz, 0.0f);   // [Nrays]
+            const auto t_flr = (0.0f - sil_Cz) / sil_dz;                        // [Nrays]
+            const auto a = torch::linspace(0.0f, 1.0f, N, options);             // [N]
+            const auto t  = t_top.index({Slice(), torch::indexing::None})
+                          + a.index({torch::indexing::None, Slice()}) * (t_flr - t_top).index({Slice(), torch::indexing::None});  // [Nrays,N]
+            const auto px = sil_Cx + t * sil_dx.index({Slice(), torch::indexing::None});   // [Nrays,N]
+            const auto py = sil_Cy + t * sil_dy.index({Slice(), torch::indexing::None});
+            const auto pz = sil_Cz + t * sil_dz.index({Slice(), torch::indexing::None});
+            const auto rx = px - cx, ry = py - cy;
+            const auto lx = rx * c + ry * s;
+            const auto ly = -rx * s + ry * c;
+            // top slab
+            const float half_t = TableModel::TOP_THICKNESS * 0.5f;
+            const auto top_cz = H - half_t;
+            auto sdf = box_sdf_tensor(torch::abs(lx) - half_w, torch::abs(ly) - half_h, torch::abs(pz - top_cz) - half_t);
+            // 4 legs (vertical extent detached as a scalar, consistent with the data term)
+            const float lr = TableModel::LEG_RADIUS;
+            const float leg_hh = (leg_len * 0.5f).item<float>();
+            const auto  leg_cz = leg_len * 0.5f;
+            const std::array<std::array<float, 2>, 4> sg = {{ {1, 1}, {-1, 1}, {-1, -1}, {1, -1} }};
+            for (const auto& g : sg)
+            {
+                const auto off_x = g[0] * (half_w - inset);
+                const auto off_y = g[1] * (half_h - inset);
+                sdf = torch::minimum(sdf, cylinder_sdf_tensor(lx - off_x, ly - off_y, pz - leg_cz, lr, leg_hh));
+            }
+            metric = std::get<0>(sdf.min(1));   // [Nrays] closest approach along each ray
+        }
+        else
+        {
+            // Legacy: intersect the table-top plane; 2-D box-SDF to the footprint rectangle.
+            const auto t = (H - sil_Cz) / sil_dz;
+            const auto rx = (sil_Cx + t * sil_dx) - cx, ry = (sil_Cy + t * sil_dy) - cy;
+            const auto lx = rx * c + ry * s, ly = -rx * s + ry * c;
+            const auto dx = torch::abs(lx) - half_w, dy = torch::abs(ly) - half_h;
+            const auto ox = torch::clamp_min(dx, 0.0f), oy = torch::clamp_min(dy, 0.0f);
+            metric = torch::sqrt(ox * ox + oy * oy + 1e-9f) + torch::clamp_max(torch::max(dx, dy), 0.0f);
+        }
+        const auto loss = robust_loss_value(metric, params_.robust_loss, robust_scale);
         return params_.mask_precision * sil_conf_ * loss.mean();
     };
 

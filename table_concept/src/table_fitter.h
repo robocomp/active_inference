@@ -99,7 +99,9 @@ private:
                                                          float confidence,
                                                          const std::array<float, 6>& coverage,
                                                          int point_count,
-                                                         float settle_gain = 1.0f);
+                                                         float settle_gain = 1.0f,
+                                                         float info_w = 0.0f,
+                                                         float info_h = 0.0f);
         static float update_warm_confidence(float previous_confidence,
                                             const TableConfig& cfg,
                                             const std::array<float, 6>& coverage,

@@ -54,7 +54,9 @@ TableState TableFitter::TableBeliefPolicy::apply_observability_warm_start(
     float confidence,
     const std::array<float, 6>& coverage,
     int point_count,
-    float settle_gain)
+    float settle_gain,
+    float info_w,
+    float info_h)
 {
     constexpr float kCoverageEps = 1e-3f;
 
@@ -79,9 +81,16 @@ TableState TableFitter::TableBeliefPolicy::apply_observability_warm_start(
     const float rho_vertical = rho_pts;
     const float yaw_support = clamp01(0.25f * std::max(rho_x, rho_y) + 0.75f * std::sqrt(rho_x * rho_y));
 
+    // Evidence-hardening: a well-observed extent (high accumulated per-face info) STIFFENS — its
+    // acceptance gain shrinks toward 0, so re-encountered masks barely move it (belief→knowledge).
+    // An unobserved face has info≈0 → stiffness≈1 → it stays plastic until first seen.
+    const float ih = std::max(1e-3f, cfg.warm_info_half);
+    const float stiff_w = ih / (ih + info_w);
+    const float stiff_h = ih / (ih + info_h);
+
     const float lambda_pos = settle_gain * lerp(cfg.warm_lambda_pos_base + cfg.warm_lambda_pos_gain * rho_pos, 0.95f, confidence);
-    const float lambda_size_x = settle_gain * lerp(cfg.warm_lambda_size_base + cfg.warm_lambda_size_gain * rho_size_x, 0.95f, confidence);
-    const float lambda_size_y = settle_gain * lerp(cfg.warm_lambda_size_base + cfg.warm_lambda_size_gain * rho_size_y, 0.95f, confidence);
+    const float lambda_size_x = settle_gain * stiff_w * lerp(cfg.warm_lambda_size_base + cfg.warm_lambda_size_gain * rho_size_x, 0.95f, confidence);
+    const float lambda_size_y = settle_gain * stiff_h * lerp(cfg.warm_lambda_size_base + cfg.warm_lambda_size_gain * rho_size_y, 0.95f, confidence);
     const float lambda_vertical = settle_gain * lerp(cfg.warm_lambda_size_base + cfg.warm_lambda_size_gain * rho_vertical, 0.90f, confidence);
     const float lambda_yaw = settle_gain * lerp(cfg.warm_lambda_yaw_base + cfg.warm_lambda_yaw_gain * (rho_pts * yaw_support), 0.70f, confidence);
 
@@ -358,6 +367,21 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
 
     feed_silhouette(inst);   // set the RGB-mask contour rays before the gradient step
 
+    // A fresh mask whose contour disagrees with the (possibly frozen) model — high silhouette
+    // residual — is NEW evidence: re-open the converged fit and re-energise the acceptance gain so
+    // the silhouette term can actually pull w/h/pose onto the mask (e.g. expand an undersized box),
+    // instead of merely reporting the mismatch. Mirrors the queue-admission re-open.
+    if (inst.frames_converged >= cfg_.K_stable
+        && inst.model.silhouette_ray_count() > 0
+        && inst.model.silhouette_residual() > cfg_.sil_reopen_residual_m)
+    {
+        if (should_log_table(inst))
+            std::print("[{}] silhouette re-open: silres={:.3f} > {:.3f} → reopen fit\n",
+                       inst.node_name, inst.model.silhouette_residual(), cfg_.sil_reopen_residual_m);
+        inst.frames_converged = cfg_.K_stable / 2;
+        inst.settle_maturity = 0;
+    }
+
     const float free_energy = step_model_update(inst, observation.residual_pts,
                                                 observation.candidate_pts, residual_precision);
 
@@ -366,13 +390,25 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
     compute_projected_roi(inst);
     inst.detection_alive = inst.frames_since_detection < cfg_.detection_alive_max_frames;
 
+    // Per-DOF observation info ("times viewed") accumulates only on frames with a FRESH mask, so it
+    // hardens w/h by views, not wall-clock. info_w ← x-faces, info_h ← y-faces (saturating).
+    if (observation.has_fresh_data)
+    {
+        const auto cov = inst.queue.face_coverage(inst.model);
+        const float dm = std::max(1.0f, cfg_.delta_min);
+        inst.info_w += TableBeliefPolicy::clamp01(std::max(cov[0], cov[1]) / dm);
+        inst.info_h += TableBeliefPolicy::clamp01(std::max(cov[2], cov[3]) / dm);
+        inst.last_residual_pts = observation.residual_pts;   // hold for the voxelizer residual layer
+    }
+
     const auto& s = inst.model.state();
     if (should_log_table(inst))
-        std::print("[{}] FE={:.4f}  cx={:.3f} cy={:.3f}  w={:.3f} h={:.3f} H={:.3f} L={:.3f} ψ={:.3f} inset={:.3f}  pts={} sil={}\n",
+        std::print("[{}] FE={:.4f}  cx={:.3f} cy={:.3f}  w={:.3f} h={:.3f} H={:.3f} L={:.3f} ψ={:.3f} inset={:.3f}  pts={} sil={} silres={:.4f} info=({:.0f},{:.0f})\n",
                    inst.node_name, free_energy,
                    s.cx, s.cy, s.w, s.h, s.table_height, s.leg_length, s.yaw, s.leg_inset,
                    inst.queue.size() + static_cast<int>(observation.residual_pts.size()),
-                   inst.model.silhouette_ray_count());
+                   inst.model.silhouette_ray_count(), inst.model.silhouette_residual(),
+                   inst.info_w, inst.info_h);
     if (should_log_table(inst))
         std::print("[{}] roi: valid={} offset=({:.2f},{:.2f}) fill={:.2f} | detect alive={} conf={:.2f} since={}\n",
                    inst.node_name, inst.roi_valid, inst.roi_offset_x, inst.roi_offset_y, inst.roi_fill,
@@ -565,7 +601,7 @@ float TableFitter::accept_table_belief(TableInstance& inst,
 
     const TableState accepted_state = TableBeliefPolicy::apply_observability_warm_start(
         previous_state, raw_state, inst.model.params(), cfg_, inst.warm_confidence,
-        coverage, evidence.trusted_point_count, settle_gain);
+        coverage, evidence.trusted_point_count, settle_gain, inst.info_w, inst.info_h);
     if (!finite_state(accepted_state))
         return revert();
 
@@ -840,6 +876,7 @@ TableModelParams TableFitter::make_model_params() const
     p.robust_loss_scale  = cfg_.robust_loss_scale;
     p.robust_gnc_start_scale = cfg_.robust_gnc_start_scale;
     p.mask_precision     = cfg_.mask_precision;
+    p.sil_tangent_samples = cfg_.sil_tangent_samples;
     return p;
 }
 

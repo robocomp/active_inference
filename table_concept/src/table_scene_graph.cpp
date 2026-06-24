@@ -163,6 +163,15 @@ void TableSceneGraph::step_write_model(TableInstance& inst, DSR::Node& node,
         G_->runtime_checked_add_or_modify_attrib_local(node, "table_voxel_bank_pts", bank_flat);
     }
 
+    // Latest residual points (model-unexplained) for the voxelizer's residual layer — it reads
+    // residual_pts_att but nothing was writing it, so that layer was always empty.
+    {
+        std::vector<float> res_flat;
+        res_flat.reserve(inst.last_residual_pts.size() * 3);
+        for (const auto& p : inst.last_residual_pts) { res_flat.push_back(p.x()); res_flat.push_back(p.y()); res_flat.push_back(p.z()); }
+        G_->runtime_checked_add_or_modify_attrib_local(node, "residual_pts", res_flat);
+    }
+
     // Active-perception channel for the controller's local lock-on search:
     //  - table_roi_offset [ox, oy]: normalised image-centre offset of the projected model
     //    (drive →0 to centre the table in the frame).

@@ -430,7 +430,11 @@ void SpecificWorker::publish_table_diagnostics(const rc::TableInstance& inst,
         if (ts_res_plot_)
         {
             ts_res_plot_->add_series(inst.node_name + "_res", QColor(170, 80, 255), 1.1f);
-            ts_res_plot_->add_point (inst.node_name + "_res", static_cast<float>(observation.residual_pts.size()));
+            // Residual points only exist on FRESH-mask frames; plotting 0 on every idle cycle made the
+            // series crash thousands→0 between masks. Only sample on fresh frames so the line holds
+            // the last real value between detections (a meaningful per-mask residual-count trend).
+            if (observation.has_fresh_data)
+                ts_res_plot_->add_point (inst.node_name + "_res", static_cast<float>(observation.residual_pts.size()));
         }
     }
 

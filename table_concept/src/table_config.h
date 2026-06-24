@@ -58,6 +58,8 @@ struct TableConfig
     float robust_loss_scale = 0.10f;
     float robust_gnc_start_scale = 0.80f;   // GNC: wide initial robust scale annealed to robust_loss_scale
     float mask_precision = 0.30f;           // RGB-mask silhouette term weight (0 disables)
+    int   sil_tangent_samples = 8;          // >0 = height-agnostic occluding-contour (samples/ray); 0 = top-plane only
+    float sil_reopen_residual_m = 0.15f;    // a fresh mask with silhouette residual above this re-opens a converged fit
     int   robust_gnc_decay_cycles = 20;     // GNC start scale ramps to target over this many cycles, then off
 
     // SampleQueue parameters (forwarded to SampleQueueParams)
@@ -84,6 +86,7 @@ struct TableConfig
     int   warm_settle_cycles           = 40;      // cycles for acceptance gain to decay full→floor after a new-evidence burst
     int   warm_reopen_admit            = 8;       // net new queue anchors in a cycle that count as a fresh viewpoint (reset maturity)
     float warm_settle_floor            = 0.05f;   // acceptance-gain multiplier once mature (lower = stiffer lock; recovers on new evidence)
+    float warm_info_half               = 20.0f;   // accumulated per-face view-info at which the w/h gain halves (lower = hardens faster)
     float warm_lambda_pos_base         = 0.15f;
     float warm_lambda_pos_gain         = 0.45f;
     float warm_lambda_size_base        = 0.02f;

@@ -48,7 +48,9 @@ PriorSizeStd = 0.60       # broader 1-sigma size prior (m); higher means weaker 
 RobustLoss = "tukey_biweight"   # one of: quadratic, huber, geman_mcclure, welsch, tukey_biweight
 RobustLossScale = 0.10      # SDF residual scale in meters where robust losses start to saturate
 MaskPrecision = 0.30        # RGB-mask silhouette term weight: back-projects the 2D table contour and
-                            # pulls the top rectangle onto it (constrains occluded faces + yaw). 0 disables.
+                            # pulls the model onto it (constrains occluded faces + yaw). 0 disables.
+MaskSilhouetteSamples = 8   # >0 = height-agnostic occluding-contour (samples/ray vs box+legs SDF);
+                            # 0 = legacy table-top-plane intersection (top rectangle only).
 RobustGncStartScale = 0.80  # GNC: wide initial robust scale, annealed to RobustLossScale across the
                             # optimizer iters so a half-offset table still produces gradient during
                             # coarse alignment. Set <= RobustLossScale to disable annealing.

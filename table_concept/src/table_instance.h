@@ -41,6 +41,11 @@ struct TableInstance
     TableState prev_conv_state{};      // accepted state at the previous cycle (for state-delta convergence)
     bool       has_prev_conv_state = false;
     int        settle_maturity = 0;    // cycles since last genuine new-evidence burst; drives acceptance-gain decay
+    // Per-DOF accumulated observation info ("times viewed"): grows with integrated face coverage and
+    // STIFFENS the w/h acceptance gain — a well-seen extent hardens (belief→knowledge) while an
+    // unobserved face stays plastic until first seen. info_w ← x-faces, info_h ← y-faces.
+    float      info_w = 0.0f;
+    float      info_h = 0.0f;
     bool epistemic_pending  = false;
     float prev_free_energy  = std::numeric_limits<float>::max();
     // Dead-band tracking for write_rt_pose — suppress tiny oscillations
@@ -54,6 +59,8 @@ struct TableInstance
     FreeEnergyDecomposition last_fe_terms;
     // Table-owned voxel memory bank (room frame), independent of per-frame uploads.
     std::vector<Eigen::Vector3f> voxel_bank_pts;
+    // Most recent fresh-frame residual points (model-unexplained), held for the viewer.
+    std::vector<Eigen::Vector3f> last_residual_pts;
     std::unordered_set<std::uint64_t> voxel_bank_keys;
     // Epistemic action request published to DSR (filled by the epistemic planner).
     TableAffordance affordance;
