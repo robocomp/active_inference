@@ -8,7 +8,6 @@
 #include <Eigen/Dense>
 #include <vector>
 #include <optional>
-#include <Lidar3D.h>
 
 namespace rc
 {

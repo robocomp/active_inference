@@ -46,7 +46,6 @@
 #endif
 
 #include <Eigen/Dense>
-#include <Lidar3D.h>
 #include "common_types.h"
 #include "buffer_types.h"
 #include "room_model.h"
@@ -837,24 +836,6 @@ private:
         // Eigen::Vector3f is 3 contiguous floats — bulk-copy each point
         for (long i = 0; i < N; ++i)
             std::memcpy(ptr + i * 3, points[i].data(), 3 * sizeof(float));
-        return tensor;
-    }
-
-    // points to tensor [N,3] - overload for RoboCompLidar3D::TPoints
-    static torch::Tensor points_to_tensor_xyz(const RoboCompLidar3D::TPoints &points,
-                                               torch::Device device = torch::kCPU)
-    {
-        const auto N = static_cast<long>(points.size());
-        auto tensor = torch::empty({N, 3},
-            torch::TensorOptions().dtype(torch::kFloat32).device(device));
-        auto ptr = tensor.data_ptr<float>();
-        for (long i = 0; i < N; ++i)
-        {
-            const auto &p = points[i];
-            ptr[i * 3 + 0] = p.x;
-            ptr[i * 3 + 1] = p.y;
-            ptr[i * 3 + 2] = p.z;
-        }
         return tensor;
     }
 
