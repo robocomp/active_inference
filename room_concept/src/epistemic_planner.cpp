@@ -22,12 +22,28 @@ void EpistemicPlanner::set_room_bounds(const Eigen::Vector2f& min_corner,
     grid_dirty_ = true;
     if (!visit_grid_.initialized)
         visit_grid_.init(room_min_, room_max_, params.ior_cell_size);
+    // occupancy belief is configured from set_room_polygon() (called right after this at
+    // room creation) so its in-room mask uses the actual polygon and isn't reset each cycle.
 }
 
 void EpistemicPlanner::set_room_polygon(const std::vector<Eigen::Vector2f>& vertices)
 {
     room_corners_ = vertices;
     grid_dirty_ = true;
+    maybe_configure_occupancy();
+}
+
+// (Re)build the occupancy belief grid once the room extent is known. The polygon
+// (room_corners_) bounds the in-room cells; harmless to call repeatedly.
+void EpistemicPlanner::maybe_configure_occupancy()
+{
+    if (!room_bounds_set_) return;
+    OccupancyBelief::Params op;
+    op.cell_size    = params.map_cell_size;
+    op.sensor_range = params.map_sensor_range;
+    op.n_rays       = params.map_rays;
+    op.free_logodds = params.map_free_logodds;
+    occ_.configure(room_min_, room_max_, room_corners_, op);
 }
 
 void EpistemicPlanner::set_robot_state(const Eigen::Affine2f& pose,
@@ -36,6 +52,10 @@ void EpistemicPlanner::set_robot_state(const Eigen::Affine2f& pose,
     robot_pose_ = pose;
     robot_cov_ = covariance;
     robot_state_set_ = true;
+    // Fold what the robot actually sees from here into the occupancy belief — this is
+    // the per-cycle "observation" that drives the entropy down over the explored area.
+    if (occ_.configured())
+        occ_.observe_from(robot_pose_.translation());
 }
 
 void EpistemicPlanner::set_robot_footprint(float width_m, float length_m)
@@ -51,6 +71,14 @@ void EpistemicPlanner::set_robot_footprint(float width_m, float length_m)
 void EpistemicPlanner::set_obstacle_footprints(std::vector<ObstacleFootprint> footprints)
 {
     obstacle_footprints_ = std::move(footprints);
+
+    // Mirror them as circle occluders so the occupancy belief casts object shadows
+    // (unobserved cells behind objects the robot must move around to resolve).
+    std::vector<OccupancyBelief::Obstacle> occ_obs;
+    occ_obs.reserve(obstacle_footprints_.size());
+    for (const auto& f : obstacle_footprints_)
+        occ_obs.push_back({f.center, std::hypot(f.half_w, f.half_d)});
+    occ_.set_obstacles(std::move(occ_obs));
 }
 
 // ===========================================================================
@@ -151,18 +179,50 @@ float EpistemicPlanner::score_fim_gain(const Eigen::Vector2f& candidate,
 {
     if (room_corners_.empty()) return 0.f;
 
-    auto vis = corner_visibility::visible_corners(candidate, room_corners_,
-                                                   params.fim_max_range);
-    if (vis.empty()) return 0.f;
+    Eigen::Matrix3f fim = Eigen::Matrix3f::Zero();
 
-    const Eigen::Vector2f dir = candidate - robot_pos();
-    const float heading = (dir.squaredNorm() > 1e-4f)
-        ? std::atan2(-dir.x(), dir.y())
-        : robot_theta();
+    // (1) Corner landmarks — full 2D fixes (rank-2 each).
+    if (const auto vis = corner_visibility::visible_corners(candidate, room_corners_,
+                                                            params.fim_max_range);
+        !vis.empty())
+    {
+        const Eigen::Vector2f dir = candidate - robot_pos();
+        const float heading = (dir.squaredNorm() > 1e-4f)   // heading-independent for JᵀJ; kept for API
+            ? std::atan2(-dir.x(), dir.y()) : robot_theta();
+        fim += corner_visibility::corner_fim(candidate, heading, vis,
+                                             room_corners_, params.fim_corner_sigma);
+    }
 
-    const auto fim = corner_visibility::corner_fim(candidate, heading, vis,
-                                                    room_corners_, params.fim_corner_sigma);
-    return corner_visibility::d_optimality_gain(prior_precision, fim);
+    // (2) Wall surfaces — the localizer's actual point-to-wall SDF likelihood over a
+    //     360° scan (rank-1, perpendicular-only). Captures the parallel-wall ambiguity.
+    if (params.fim_use_walls)
+        fim += corner_visibility::wall_fim(candidate, room_corners_, params.fim_wall_sigma,
+                                           params.fim_max_range, params.fim_wall_rays,
+                                           params.fim_wall_incidence_weight,
+                                           params.fim_wall_incidence_min);
+
+    if (fim.isZero(1e-12f)) return 0.f;
+    // ΔH = ½·log det(I + Y_prior⁻¹·I_pred) in NATS — the expected reduction in DIFFERENTIAL
+    // ENTROPY of the pose-belief Gaussian (the common EFE currency shared with aff_table).
+    // d_optimality_gain returns the full log-det ( = 2·ΔH ), so apply ½. Mathematically ≥0 for a
+    // PD prior + PSD FIM; clamp guards float roundoff so epistemic_gain is a non-negative benefit.
+    return std::max(0.f, 0.5f * corner_visibility::d_optimality_gain(prior_precision, fim));
+}
+
+Eigen::Matrix3f EpistemicPlanner::current_prior_precision() const
+{
+    const Eigen::Matrix3f reg_cov = robot_cov_ + 1e-6f * Eigen::Matrix3f::Identity();
+    // Floor Y_prior eigenvalues at a small prior precision. A degenerate/lost prior (huge
+    // covariance → near-zero precision → det→0) then yields a LARGE-BUT-FINITE ΔH instead of
+    // ∞/NaN: log det is bounded below by 3·log(floor), not by a determinant clamp artifact.
+    // Equivalent to capping the assumed max covariance at 1/floor. Negligible once localized.
+    return reg_cov.inverse() + params.fim_prior_precision_floor * Eigen::Matrix3f::Identity();
+}
+
+float EpistemicPlanner::live_epistemic_gain(const Eigen::Vector2f& viewpoint) const
+{
+    if (!robot_state_set_ || room_corners_.empty()) return 0.f;
+    return score_fim_gain(viewpoint, current_prior_precision());
 }
 
 // ===========================================================================
@@ -187,6 +247,11 @@ std::vector<EpistemicPlanner::Target> EpistemicPlanner::evaluate_targets() const
         rot.distance = 0.f;
         rot.rotate_in_place = true;
         rot.score = robot_cov_(2, 2);
+        // Advertise the same grounded ΔH currency for the recovery action: rotating in place
+        // sweeps a 360° scan from the current vantage, so its expected pose-entropy reduction is
+        // the FIM gain here. Without this the heading-recovery action — needed exactly when the
+        // robot is most lost — would publish gain=0 and lose every cross-affordance EFE compare.
+        rot.eigenvector_score = live_epistemic_gain(robot_pos());
         self.cell_scores_.clear();
         self.ior_cells_.clear();
         return {rot};
@@ -200,8 +265,7 @@ std::vector<EpistemicPlanner::Target> EpistemicPlanner::evaluate_targets() const
         return {};
     }
 
-    const Eigen::Matrix3f reg_cov = robot_cov_ + 1e-6f * Eigen::Matrix3f::Identity();
-    const Eigen::Matrix3f prior_precision = reg_cov.inverse();
+    const Eigen::Matrix3f prior_precision = current_prior_precision();
     const auto now = std::chrono::steady_clock::now();
 
     std::vector<Target> targets;
@@ -242,8 +306,16 @@ std::vector<EpistemicPlanner::Target> EpistemicPlanner::evaluate_targets() const
         const float ior_suppressor = std::pow(route_staleness, params.w_ior);
 
         const float bonus = 1.f + params.w_exploration * t.distance;
-        // 1e-6 floor: when IoR suppresses everything, tie-break by FIM gain
-        t.score = fim_gain * ior_suppressor * bonus + 1e-6f;
+
+        // Expected occupancy-entropy resolved by a scan from this vantage (bits). This is
+        // the NON-saturating epistemic term: 0 once a cell is covered, regardless of how
+        // well the pose is known. Additive with the (saturating) pose-FIM term — both are
+        // information. w_map=0 ⇒ exactly the legacy IoR behaviour.
+        const float map_gain = (params.w_map > 0.f && occ_.configured())
+                               ? occ_.expected_info_gain(pos) : 0.f;
+
+        // 1e-6 floor: when both terms vanish, tie-break by FIM gain.
+        t.score = (fim_gain * ior_suppressor + params.w_map * map_gain) * bonus + 1e-6f;
         t.eigenvector_score = fim_gain;
         targets.push_back(t);
     }
@@ -266,7 +338,10 @@ std::vector<EpistemicPlanner::Target> EpistemicPlanner::evaluate_targets() const
                 continue;
             const auto& cell = visit_grid_.cells[i];
             const float stale = visit_grid_.staleness(center, params.ior_decay_time, now);
-            const float combined = cell.fim_gain * std::pow(stale, params.w_ior);
+            // Heatmap = pose-info (FIM × staleness) + unresolved map entropy (the fog of
+            // unexplored interior). Cheap per-cell entropy proxy of the candidate map term.
+            const float combined = cell.fim_gain * std::pow(stale, params.w_ior)
+                                 + params.w_map * occ_.entropy_at(center);
             self.cell_scores_.push_back({center, combined});
             // IoR freshness: 1=just visited, 0=stale/never; only store meaningful cells
             const float freshness = 1.f - stale;

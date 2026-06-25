@@ -158,6 +158,17 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.WPathInterest", ep.w_path_interest);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.FimCornerSigma", ep.fim_corner_sigma);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.FimMaxRange", ep.fim_max_range);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.FimPriorPrecisionFloor", ep.fim_prior_precision_floor);
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "EpistemicController.FimUseWalls", ep.fim_use_walls);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.FimWallSigma", ep.fim_wall_sigma);
+    rc::ConfigLoaderUtils::load_optional<int>(cl, "EpistemicController.FimWallRays", ep.fim_wall_rays);
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "EpistemicController.FimWallIncidenceWeight", ep.fim_wall_incidence_weight);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.FimWallIncidenceMin", ep.fim_wall_incidence_min);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.WMap", ep.w_map);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.MapCellSize", ep.map_cell_size);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.MapSensorRange", ep.map_sensor_range);
+    rc::ConfigLoaderUtils::load_optional<int>(cl, "EpistemicController.MapRays", ep.map_rays);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.MapFreeLogodds", ep.map_free_logodds);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.ArrivalDistance", ep.arrival_distance);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.DwellTime", ep.dwell_time);
     epistemic.set_robot_footprint(p.ROBOT_WIDTH, p.ROBOT_LENGTH);

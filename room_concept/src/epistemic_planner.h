@@ -6,6 +6,7 @@
 #include <random>
 #include <Eigen/Dense>
 #include "corner_visibility.h"
+#include "occupancy_belief.h"
 
 namespace rc
 {
@@ -51,7 +52,35 @@ public:
 
         // ---- FIM scoring ----
         float fim_corner_sigma  = 0.04f;     // isotropic corner detection noise σ (m)
-        float fim_max_range     = 10.0f;     // max range for corner visibility (m)
+        float fim_max_range     = 10.0f;     // max range for corner/wall visibility (m)
+        float fim_prior_precision_floor = 1e-4f;  // floor on Y_prior eigenvalues (caps assumed max
+                                                  // covariance at 1/floor) → degenerate prior gives a
+                                                  // large-but-FINITE ΔH, no ∞/NaN
+
+        // ---- Wall-surface SDF observations (match the localizer's likelihood) ----
+        // Corners alone are full 2D fixes (rank-2) and miss the parallel-wall ambiguity.
+        // The real localizer fits point-to-wall SDF over a 360° scan: each wall hit is a
+        // rank-1 (perpendicular-only) constraint. Summing these makes the planner's
+        // "evidence" match what the localizer actually gains, so it correctly prefers
+        // vantage points that break the along-wall / heading ambiguity (corners, walls
+        // seen at good incidence, far walls for heading leverage).
+        bool  fim_use_walls             = true;
+        float fim_wall_sigma            = 0.15f;  // SDF obs noise σ (m); ≈ RoomConcept.sigma_sdf
+        int   fim_wall_rays             = 64;     // simulated 360° lidar rays for wall coverage
+        bool  fim_wall_incidence_weight = true;   // down-weight grazing hits (|n·ray|)
+        float fim_wall_incidence_min    = 0.2f;   // floor for the incidence weight
+
+        // ---- Map occupancy-entropy epistemics (the NON-saturating exploration term) ----
+        // Pose info (FIM) self-extinguishes once localized (fixed map). This scores the
+        // expected reduction of the room's *interior* occupancy entropy — a term that
+        // → 0 only when the room is COVERED, not when the pose is known. It is the
+        // principled replacement for the IoR heuristic. w_map=0 ⇒ off (legacy behaviour);
+        // raise w_map (and lower w_ior) to drive exploration by information gain.
+        float w_map            = 0.0f;   // weight of expected occupancy-entropy reduction (bits)
+        float map_cell_size    = 0.5f;   // occupancy grid resolution (m)
+        float map_sensor_range = 8.0f;   // visibility range for coverage (m)
+        int   map_rays         = 64;     // simulated 360° scan density
+        float map_free_logodds = 0.9f;   // |Δ log-odds| toward "known" per cell observation
 
         // ---- Target lifecycle ----
         float arrival_distance = 0.15f;      // target reached threshold (m)
@@ -94,6 +123,14 @@ public:
     std::vector<Target> evaluate_targets() const;
     std::optional<Target> select_target();
 
+    /// Live grounded epistemic value (nats) of observing from `viewpoint`, evaluated
+    /// against the CURRENT pose precision Y_prior: ΔH = ½·log det(I + Y_prior⁻¹·I_pred).
+    /// This is the common EFE currency advertised on afford_room — recompute it every
+    /// publish cycle so it decays as localization tightens (Y_prior grows ⇒ ΔH → 0) and
+    /// falls through the consumer's withdrawal threshold. Returns 0 when nothing is
+    /// visible. For a rotate-in-place recovery, pass robot_pos().
+    float live_epistemic_gain(const Eigen::Vector2f& viewpoint) const;
+
     /// Called every plan cycle.  Returns the current navigation target,
     /// handling dwell and arrival logic internally.  Returns std::nullopt
     /// only when no valid target can be found.
@@ -124,6 +161,11 @@ public:
     const std::vector<IorCell>& ior_cells() const { return ior_cells_; }
     float cell_size() const { return params.ior_cell_size; }
 
+    // ---- Occupancy-entropy belief (route-2 epistemics) ----
+    const OccupancyBelief& occupancy() const { return occ_; }
+    std::vector<OccupancyBelief::EntropyCell> map_entropy_field() const { return occ_.entropy_field(); }
+    float map_entropy() const { return occ_.total_entropy(); }   // total unresolved bits
+
     // ---- Accessors needed by Level 2 ----
     Eigen::Vector2f robot_pos() const { return robot_pose_.translation(); }
     float robot_theta() const { return std::atan2(robot_pose_.linear()(1,0), robot_pose_.linear()(0,0)); }
@@ -141,7 +183,14 @@ private:
     bool is_angular_dominated() const;
     float score_fim_gain(const Eigen::Vector2f& candidate,
                          const Eigen::Matrix3f& prior_precision) const;
+    /// Y_prior = inverse pose covariance with eigenvalues floored at
+    /// fim_prior_precision_floor (a degenerate/lost prior then yields a
+    /// large-but-finite ΔH, no ∞/NaN). Shared by evaluate_targets and live_epistemic_gain.
+    Eigen::Matrix3f current_prior_precision() const;
     void refresh_ior_overlay();   // lightweight per-cycle rebuild of ior_cells_
+    void maybe_configure_occupancy();   // (re)build occ_ grid once room bounds are known
+
+    OccupancyBelief occ_;   // non-saturating epistemic state (room interior occupancy/visibility)
 
     // ---- State ----
     Eigen::Vector2f room_min_{0, 0};

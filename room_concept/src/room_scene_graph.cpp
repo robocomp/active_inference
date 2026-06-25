@@ -302,11 +302,31 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
 
     // Ask the planner for the current best target (handles dwell / arrival internally)
     const auto target_opt = planner.update_target();
+
+    // Route-2 readout: total unresolved interior occupancy entropy (the NON-saturating
+    // epistemic budget). Unlike the pose covariance, this only falls as the room gets
+    // COVERED — watch it decay as the robot explores. Throttled to ~every 3 s.
+    if (static int tick = 0; (tick++ % 15) == 0)
+        qInfo().noquote() << QString::asprintf("[Epistemic] map_entropy=%.1f bits  w_map=%.2f%s",
+                          planner.map_entropy(), planner.params.w_map,
+                          planner.params.w_map > 0.f ? "" : " (map term OFF — set EpistemicController.WMap>0)");
+
     if (!target_opt.has_value()) return;
 
     const float tx   = target_opt->position.x();
     const float ty   = target_opt->position.y();
-    const float gain = target_opt->score;
+    // Advertise the GROUNDED epistemic value in nats: the raw FIM D-optimality gain
+    // ΔH = ½·log det(I + Y_prior⁻¹·I_pred) = expected pose-entropy reduction from observing
+    // corners/walls at this viewpoint. NOT target.score (which folds in IoR-staleness × path
+    // heuristics used only for the room's own target ranking). This puts afford_room's gain in the
+    // same currency as afford_table's ΔH so the controller can compare them as one EFE term.
+    //
+    // Recompute LIVE against the current pose precision (do not reuse the value frozen at target
+    // selection): as the robot drives in and localization tightens, Y_prior grows ⇒ ΔH decays
+    // toward 0, falling through the consumer's withdrawal threshold and releasing the claim. The
+    // recompute at target_opt->position also gives the rotate-in-place recovery a real gain (its
+    // position is robot_pos), which the frozen eigenvector_score left at 0.
+    const float gain = planner.live_epistemic_gain(target_opt->position);
 
     // Heading: face toward room centre so the robot maximises wall/corner visibility
     const float cx  = (planner.room_min().x() + planner.room_max().x()) * 0.5f;

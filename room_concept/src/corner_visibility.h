@@ -2,6 +2,8 @@
 
 #include <vector>
 #include <cmath>
+#include <optional>
+#include <algorithm>
 #include <Eigen/Dense>
 
 namespace rc {
@@ -135,6 +137,81 @@ inline float d_optimality_gain(const Eigen::Matrix3f& prior_precision,
     const float ld_prior = std::log(std::max(prior_precision.determinant(), 1e-30f));
     const float ld_post  = std::log(std::max((prior_precision + corner_fim_mat).determinant(), 1e-30f));
     return ld_post - ld_prior;
+}
+
+// ---------------------------------------------------------------------------
+// Wall-surface SDF observations (match the localizer's actual likelihood)
+// ---------------------------------------------------------------------------
+// RoomConcept does NOT localize on corners — it fits a point-to-wall *signed-
+// distance* (SDF) likelihood over the full 360° lidar scan. A single wall hit
+// constrains the pose ONLY perpendicular to that wall: it is a RANK-1 row
+//     h = [n_x, n_y,  n·perp(W − p)]
+// (sliding the robot along an infinite wall leaves the SDF residual unchanged —
+// the "aperture" ambiguity), plus a heading lever via perp(W−p). Summing these
+// over a simulated scan reproduces the information the localizer truly gets,
+// INCLUDING the parallel-wall ambiguity that a corner-only FIM cannot represent.
+// Heading-independent for a 360° sensor (h depends only on n, W, p).
+
+/// Ray (origin o, unit dir d) vs segment (a→b). Returns the ray parameter
+/// t > eps (= hit distance, d unit) if the ray crosses the segment, else nullopt.
+inline std::optional<float> ray_segment_t(const Eigen::Vector2f& o, const Eigen::Vector2f& d,
+                                          const Eigen::Vector2f& a, const Eigen::Vector2f& b)
+{
+    const Eigen::Vector2f e = b - a;
+    const float denom = d.x() * e.y() - d.y() * e.x();
+    if (std::abs(denom) < 1e-9f) return std::nullopt;            // ray ∥ wall
+    const Eigen::Vector2f ao = a - o;
+    const float t = (ao.x() * e.y() - ao.y() * e.x()) / denom;   // along ray
+    const float u = (ao.x() * d.y() - ao.y() * d.x()) / denom;   // along segment
+    if (t > 1e-3f && u >= 0.f && u <= 1.f) return t;
+    return std::nullopt;
+}
+
+/// Fisher information a robot at `robot_pos` gathers from the wall-surface SDF
+/// likelihood, simulated as a 360° lidar: cast `n_rays` uniformly, and for the
+/// NEAREST wall hit of each ray within `max_range` add the rank-1 contribution
+/// (w/σ²)·hᵀh, with w the incidence weight |n·d| (grazing → less info, matching
+/// the localizer's incidence weighting) when `incidence_weight` is set.
+inline Eigen::Matrix3f wall_fim(const Eigen::Vector2f& robot_pos,
+                                const std::vector<Eigen::Vector2f>& polygon,
+                                float sdf_sigma, float max_range, int n_rays,
+                                bool incidence_weight, float incidence_min_w)
+{
+    Eigen::Matrix3f fim = Eigen::Matrix3f::Zero();
+    const int N = static_cast<int>(polygon.size());
+    if (N < 3 || n_rays < 1 || sdf_sigma <= 0.f) return fim;
+    const float inv_var = 1.f / (sdf_sigma * sdf_sigma);
+
+    for (int k = 0; k < n_rays; ++k)
+    {
+        const float ang = (2.f * static_cast<float>(M_PI) * k) / static_cast<float>(n_rays);
+        const Eigen::Vector2f d{std::cos(ang), std::sin(ang)};
+
+        // Nearest wall hit along this ray (handles occlusion in a non-convex room).
+        float best_t = max_range;
+        int   best_edge = -1;
+        for (int i = 0; i < N; ++i)
+            if (auto t = ray_segment_t(robot_pos, d, polygon[i], polygon[(i + 1) % N]);
+                t && *t < best_t)
+            { best_t = *t; best_edge = i; }
+        if (best_edge < 0) continue;
+
+        Eigen::Vector2f e = polygon[(best_edge + 1) % N] - polygon[best_edge];
+        const float elen = e.norm();
+        if (elen < 1e-6f) continue;
+        e /= elen;
+        const Eigen::Vector2f n{e.y(), -e.x()};       // wall normal (sign irrelevant for hᵀh)
+
+        float w = 1.f;
+        if (incidence_weight)
+            w = std::clamp(std::abs(n.dot(d)), std::clamp(incidence_min_w, 0.f, 1.f), 1.f);
+
+        const Eigen::Vector2f dW = best_t * d;         // W − robot_pos
+        Eigen::Vector3f h;
+        h << n.x(), n.y(), n.dot(Eigen::Vector2f(-dW.y(), dW.x()));
+        fim.noalias() += (w * inv_var) * (h * h.transpose());
+    }
+    return fim;
 }
 
 } // namespace corner_visibility
