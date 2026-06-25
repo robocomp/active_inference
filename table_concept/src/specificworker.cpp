@@ -281,15 +281,11 @@ void SpecificWorker::initialize()
     if (not graph_viewers.empty())
     {
         custom_widget_ = new Custom_widget();
-        // Own top-level window (not docked into the graph view): the dock gets tabbed/hidden behind
-        // the DSR graph scene, and docking custom widgets onto the churn-repainting graph view is the
-        // crash surface we want to avoid. Mirrors the voxelizer's Voxel3D window.
-        graph_viewers.at("")->add_custom_widget_in_own_window("Table Inference", custom_widget_);
-        // libdsr opens the holder at 900×650; shrink to ~half side. (This own-window is not in the
-        // GenericWorker `windows` map, so its geometry is not persisted across restarts — unlike the
-        // main graph window, which is saved/restored via QSettings.)
-        if (auto* win = custom_widget_->window())
-            win->resize(450, 325);
+        // Dock into the main DSR graph window (tab alongside the graph/tree views). The TimeSeriesPlot
+        // is a plain QWidget (no QOpenGLWidget backing store), so it doesn't hit the shared-backing-store
+        // repaint crash that pushed the heavy Voxel3D GL view into its own window — docking it here is
+        // safe and keeps the dashboard together with the graph it annotates.
+        graph_viewers.at("")->add_custom_widget_to_dock("Table Inference", custom_widget_);
 
         // Create plot inside frame_series
         auto* series_layout = new QVBoxLayout(custom_widget_->frame_series);
@@ -567,81 +563,44 @@ void SpecificWorker::step_epistemic(rc::TableInstance& inst, DSR::Node& node)
     if (inst.epistemic_cooldown > 0)
         --inst.epistemic_cooldown;
 
-    // Controller-completion cooldown (anti-oscillation): the table affordance completes on a weak
-    // detection (contract goal conf≥0.20), which fires almost instantly — long before ΔH decays. If we
-    // re-offer immediately the controller re-claims, re-completes, and the selection churns
-    // table→room→table every cycle. So when the affordance is Completed (!active && !pending) by the
-    // controller, treat it like satisfaction: latch + start the cooldown so it stays withdrawn (the
-    // grounded EFE selection then sticks to the next-best affordance) until cooldown elapses AND ΔH
-    // exceeds the re-arm threshold.
+    // Controller-completion hold (anti-churn): the table affordance completes on a weak detection
+    // (contract goal conf≥0.20), which fires almost instantly — before ΔH has decayed. Start a short
+    // cooldown so we don't re-offer a just-completed table while its gain is still high. We do NOT
+    // delete the node (that is what made the affordance vanish from the graph): it stays and keeps
+    // refreshing; we only suppress its published gain during the hold so the controller's EFE selection
+    // won't immediately re-claim it.
     if (const auto aid = inst.affordance.node_id(); aid != 0)
-    {
         if (auto an = G->get_node(aid); an.has_value())
         {
             const bool a = G->get_attrib_by_name<active_att>(an.value()).value_or(false);
             const bool p = G->get_attrib_by_name<epistemic_pending_att>(an.value()).value_or(true);
-            if (!a && !p)   // Completed by the controller
+            if (not a and not p and inst.epistemic_cooldown == 0)   // just completed by the controller
             {
-                inst.affordance.remove();
-                inst.epistemic_satisfied = true;
-                inst.epistemic_cooldown  = cfg_.epistemic_cooldown_cycles;
-                inst.epistemic_pending   = false;
-                std::print("[{}] controller completed affordance → cooldown {} cycles (ΔH not yet exhausted)\n",
+                inst.epistemic_cooldown = cfg_.epistemic_cooldown_cycles;
+                std::print("[{}] controller completed affordance → hold {} cycles (node kept, gain suppressed)\n",
                            inst.node_name, cfg_.epistemic_cooldown_cycles);
-                return;
             }
         }
-    }
 
-    const auto prop = epistemic_planner_.compute(inst.model, inst.queue, inst.fisher_info_raw);
-    if (not prop.valid)
-    {
-        // ΔH fell below the WITHDRAW threshold ⇒ nothing left to learn. Withdraw the affordance (even
-        // mid-execution) so the controller releases its claim and the grounded EFE selection hands off
-        // (belief→knowledge governor). Latch "satisfied" + start the cooldown so it can't immediately
-        // re-offer.
-        if (inst.affordance.is_active())
-        {
-            inst.affordance.remove();
-            std::print("[{}] epistemic ΔH below threshold → withdrew affordance (belief→knowledge)\n",
-                       inst.node_name);
-        }
-        inst.epistemic_satisfied = true;
-        inst.epistemic_cooldown  = cfg_.epistemic_cooldown_cycles;
-        inst.epistemic_pending   = false;
-        return;
-    }
+    auto prop = epistemic_planner_.compute(inst.model, inst.queue, inst.fisher_info_raw);
+    if (not prop.valid or not prop.is_finite())
+        return;   // degenerate (non-finite) fit — leave the existing affordance node as-is, retry next cycle
 
-    // Schmitt hysteresis: a satisfied table stays withdrawn until the cooldown elapses AND ΔH climbs
-    // back above the (higher) re-arm threshold — this is what breaks the withdraw/re-offer limit cycle
-    // (the table re-proposing the instant ΔH jitters back over the low withdraw threshold).
-    if (inst.epistemic_satisfied)
-    {
-        if (inst.epistemic_cooldown > 0 || prop.epistemic_gain < cfg_.epistemic_rearm_info_gain)
-        {
-            if (inst.affordance.is_active())
-                inst.affordance.remove();
-            inst.epistemic_pending = false;
-            return;
-        }
-        inst.epistemic_satisfied = false;   // genuinely uncertain again → re-arm
-        std::print("[{}] epistemic re-armed: ΔH={:.2f} > {:.2f} nats\n",
-                   inst.node_name, prop.epistemic_gain, cfg_.epistemic_rearm_info_gain);
-    }
-
-    if (not prop.is_finite())
-    {
-        qWarning() << "table_concept: rejecting non-finite epistemic proposal for"
-                   << inst.node_name.c_str();
-        return;
-    }
+    // Belief→knowledge governor WITHOUT deleting the node: keep publishing the affordance every cycle
+    // with its TRUE expected information gain ΔH (nats). A low gain is published as-is so the controller's
+    // grounded EFE selection simply doesn't pick it (cost outweighs the small epistemic value), and it
+    // re-arms automatically when the belief degrades and ΔH climbs again — no satisfy-latch to get stuck
+    // in, no node churn. During the post-completion hold the gain is forced to 0 so a just-finished table
+    // isn't re-claimed before its belief has settled.
+    if (inst.epistemic_cooldown > 0)
+        prop.epistemic_gain = 0.0f;
 
     // Write attributes to the table node (read by legacy consumers)
     scene_graph_->write_epistemic_proposal(node, prop);
-    // Publish / refresh dedicated affordance node
+    // Publish / refresh dedicated affordance node (persists; update_node refreshes target+gain)
     const auto affordance_node_before = inst.affordance.node_id();
     inst.affordance.update(prop);
-    if (affordance_node_before == 0 && inst.affordance.node_id() != 0)
+    if (affordance_node_before == 0 and inst.affordance.node_id() != 0)
         trigger_graph_layout_twopi();
     inst.epistemic_pending = true;
 }

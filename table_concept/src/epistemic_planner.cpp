@@ -160,9 +160,14 @@ EpistemicProposal EpistemicPlanner::compute(const TableModel&  model,
         }
     }
 
-    // Below threshold ⇒ nothing worth observing (ΔH→0 = belief has become knowledge).
-    const float threshold = use_info_gain_ ? min_info_gain_ : gain_threshold_;
-    if (!std::isfinite(best_gain) || best_gain < threshold)
+    // Reject only a degenerate (non-finite) score. A LOW but finite ΔH is NOT withdrawn here: the
+    // planner keeps returning the best-face proposal carrying its true gain so the affordance node
+    // persists and refreshes, and the controller's EFE selection simply doesn't pick a low-nat target
+    // (the belief→knowledge governor, expressed as a small gain rather than a deleted node). The legacy
+    // coverage-deficit proxy keeps its hard cutoff — it has no calibrated gain for the controller to weigh.
+    if (!std::isfinite(best_gain))
+        return {};
+    if (not use_info_gain_ && best_gain < gain_threshold_)
         return {};
 
     const auto& f = faces[best_idx];
