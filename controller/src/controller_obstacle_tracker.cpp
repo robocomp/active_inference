@@ -982,18 +982,8 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
     }
 
     report << " | drawn=" << obstacles.size();
-    if (const auto report_str = report.str(); report_str != obstacle_debug_report_)
-    {
-        obstacle_debug_report_ = report_str;
-        std::print("{}\n", obstacle_debug_report_);
-        std::fflush(stdout);
-    }
-    if (const auto object_report_str = object_report.str(); object_report_str != graph_object_debug_report_)
-    {
-        graph_object_debug_report_ = object_report_str;
-        std::print("{}\n", graph_object_debug_report_);
-        std::fflush(stdout);
-    }
+    // Per-cycle obstacle/object debug prints removed (they embedded the table's wobbling size/center,
+    // so the dedup reprinted every frame and clogged the console).
 
     return obstacles;
 }
@@ -1028,12 +1018,7 @@ void ControllerObstacleTracker::update_active_obstacle_polygons(std::uint64_t ti
         display_obstacle_polygons_.push_back(ControllerObstacleVisual{.polygon = polygon,
                                                                       .kind = ControllerObstacleKind::Temporary});
     }
-    if (const auto report = current_obstacles_report.str(); report != current_obstacles_debug_report_)
-    {
-        current_obstacles_debug_report_ = report;
-        std::print("{}\n", current_obstacles_debug_report_);
-        std::fflush(stdout);
-    }
+    // Per-cycle "Current obstacles debug" print removed (wobbling geometry → reprinted every frame).
     sync_temporary_obstacles_to_dsr(timestamp_ms);
     path_controller.set_static_obstacles(obstacle_polygons_);
 }

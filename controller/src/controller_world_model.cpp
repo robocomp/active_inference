@@ -164,7 +164,13 @@ std::optional<ControllerTargetInfo> ControllerWorldModel::read_target_in_room(st
 
     if (affordance_manager_)
     {
-        if (const auto affordance_target = affordance_manager_->select_target(graph_); affordance_target.has_value())
+        // Robot room-frame position feeds the grounded EFE nav-cost term in select_target.
+        // Leave it unset (nullopt) until a live pose is available so the nav-cost is ignored,
+        // rather than scoring affordances by their distance from the room origin.
+        std::optional<Eigen::Vector2f> robot_pos;
+        if (const auto pose = read_robot_pose_in_room(timestamp_ms, std::nullopt); pose.has_value())
+            robot_pos = pose->pos;
+        if (const auto affordance_target = affordance_manager_->select_target(graph_, robot_pos); affordance_target.has_value())
         {
             ControllerTargetInfo info;
             info.node_id = affordance_target->node_id;

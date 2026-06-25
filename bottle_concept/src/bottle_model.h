@@ -186,6 +186,19 @@ class BottleModel
                                         float fd_step = 0.005f,
                                         float max_var = 1.0f) const;
 
+        /**
+         * Per-DOF observation Fisher information (diagonal of the data-likelihood Hessian) at the
+         * current state: I_j = Σᵢ wᵢ · (1/σ²) · (∂SDF/∂θ_j)², θ = [cx,cy,cz,radius,height]. Each
+         * point's contribution is down-weighted by the robust-loss IRLS weight, so an outlier adds
+         * little curvature (exactly as it contributes little gradient). This is the calibrated,
+         * anisotropic per-DOF evidence the Fisher information filter accumulates across viewpoints
+         * (the principled replacement for a "times viewed" proxy). Central-difference; cheap (5
+         * two-sided SDF evaluations per point). Unlike pose_covariance this also covers the SIZE
+         * DOFs (radius, height) the position-only Laplace Hessian ignores.
+         */
+        std::array<float, 5> observation_information(const std::vector<Eigen::Vector3f>& points,
+                                                     const std::vector<float>& weights) const;
+
         // ── State access ─────────────────────────────────────────────────────────
 
         const BottleState& state()  const { return state_; }

@@ -46,6 +46,17 @@ struct BottleConfig
     float robust_loss_scale = 0.05f;
     float mask_precision    = 0.0f;   // RGB-mask silhouette likelihood weight (0 = off)
     float cov_eff_scale     = 1.0f;   // covariance calibration: N_eff = N·scale (NEES → ~3)
+    // ── Fisher information filter (per-DOF stabiliser; currently diagnostic) ──────────────────────
+    // Accumulate the real per-DOF SDF observation Fisher information across viewpoints instead of a
+    // "times viewed" proxy. The info-filter predict step bleeds a fixed process-noise Q each fresh
+    // frame so the posterior precision reaches a finite STEADY state (a physical uncertainty floor)
+    // rather than collapsing toward zero — the principled fix for the documented P_bottle
+    // overconfidence. Phase 1–2: computed + logged only (no behaviour change); feeding it into
+    // P_bottle / the acceptance gain is a later, controller-facing step.
+    bool        fisher_filter_enabled = true;   // compute + accumulate (and log); false = zero cost
+    float       fisher_info_decay     = 1.0f;   // stiffener accumulator fading memory; <1 forgets, 1 = pure accumulation
+    float       fisher_process_std_m  = 0.005f; // predict process-noise std per fresh frame (m); all 5 DOF are lengths
+    std::string fisher_csv_path       = "";     // non-empty → append per-cycle Fisher evolution CSV (for plotting)
     // Cold-start seed de-projection: the visible (front-arc-only) point centroid sits ~one radius
     // toward the camera from the true cylinder axis, so snapping the seed to it biases the model
     // camera-ward (perceived "closer than real"; the observed points fall behind its bbox). Push the

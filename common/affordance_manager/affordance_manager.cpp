@@ -4,6 +4,7 @@
 
 #include <QDebug>
 
+#include <algorithm>
 #include <cstdio>
 #include <cmath>
 #include <print>
@@ -13,8 +14,6 @@
 namespace
 {
 constexpr auto kAffordanceEdgeTypeStr = std::string_view("has_intention");
-constexpr auto kTableAffordanceName = std::string_view("afford_table");
-constexpr auto kRoomAffordanceName = std::string_view("afford_room");
 [[maybe_unused]] inline const bool kAffordanceEdgeTypeRegistered = edge_types::register_type(kAffordanceEdgeTypeStr);
 using affordance_edge_type = EdgeType<kAffordanceEdgeTypeStr>;
 
@@ -23,48 +22,23 @@ bool finite_target_values(float tx, float ty, float yaw, float gain)
     return std::isfinite(tx) && std::isfinite(ty) && std::isfinite(yaw) && std::isfinite(gain);
 }
 
-bool affordance_name_matches(std::string_view name, std::string_view preferred_name)
+// Dedup KEY: identity only (name + parent type). The log is throttled by comparing this against the
+// previous key, so it must NOT embed gain/shape/pending — those wobble every cycle and would reprint.
+std::string make_affordance_key(const rc::AffordanceManager::Target &target)
 {
-    return name == preferred_name || name.find(preferred_name) != std::string_view::npos;
+    std::ostringstream out;
+    out << target.node_name << '|' << target.parent_node_type;
+    return out.str();
 }
 
-int affordance_priority(std::string_view name)
-{
-    if (affordance_name_matches(name, kTableAffordanceName))
-        return 0;
-    if (affordance_name_matches(name, kRoomAffordanceName))
-        return 1;
-    return 2;
-}
-
-bool better_affordance_candidate(const rc::AffordanceManager::Target &candidate,
-                                 const rc::AffordanceManager::Target &current)
-{
-    const int candidate_priority = affordance_priority(candidate.node_name);
-    const int current_priority = affordance_priority(current.node_name);
-    if (candidate_priority != current_priority)
-        return candidate_priority < current_priority;
-
-    if (candidate.epistemic_gain != current.epistemic_gain)
-        return candidate.epistemic_gain > current.epistemic_gain;
-
-    return candidate.node_id < current.node_id;
-}
-
+// Display LINE: printed once per identity switch (keyed by make_affordance_key), but carries the live
+// gain so the value at the moment of each switch is visible.
 std::string make_affordance_debug_report(const rc::AffordanceManager::Target &target)
 {
     std::ostringstream out;
-    out << "Affordance debug: selected='" << target.node_name << "' id=" << target.node_id
-        << " pose=(" << target.room_pos.x() << "," << target.room_pos.y() << ")"
-        << " yaw=" << target.yaw_rad
-        << " gain=" << target.epistemic_gain
-        << " pending=" << (target.epistemic_pending ? 1 : 0)
-        << " parent='" << target.parent_node_name << "'"
-        << " parent_type='" << target.parent_node_type << "'";
-    if (target.has_shape)
-        out << " shape=(" << target.shape_width_m << "," << target.shape_depth_m << ")";
-    else
-        out << " shape=none";
+    out << "[aff-select] -> '" << target.node_name << "' (" << target.parent_node_type << ")"
+        << " gain=" << target.epistemic_gain << " nats"
+        << " pending=" << (target.epistemic_pending ? 1 : 0);
     return out.str();
 }
 }
@@ -75,6 +49,12 @@ namespace rc
 AffordanceManager::AffordanceManager(std::string managed_node_name)
     : managed_node_name_(std::move(managed_node_name))
 {
+}
+
+void AffordanceManager::set_selection_params(float lambda_cost, float switch_margin)
+{
+    select_lambda_cost_ = std::max(0.0f, lambda_cost);
+    select_switch_margin_ = std::max(0.0f, switch_margin);
 }
 
 std::string_view AffordanceManager::state_name(State state)
@@ -451,7 +431,8 @@ bool AffordanceManager::release_execution_claim(const std::shared_ptr<DSR::DSRGr
     return true;
 }
 
-std::optional<AffordanceManager::Target> AffordanceManager::select_target(const std::shared_ptr<DSR::DSRGraph> &graph)
+std::optional<AffordanceManager::Target> AffordanceManager::select_target(const std::shared_ptr<DSR::DSRGraph> &graph,
+                                                                          std::optional<Eigen::Vector2f> robot_pos)
 {
     transition_to(State::Searching, "select_target called", current_affordance_id_, current_affordance_name_);
 
@@ -460,6 +441,27 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
         transition_to(State::Idle, "graph unavailable");
         return std::nullopt;
     }
+
+    // Grounded EFE selection: pick the affordance minimising G = λ_cost·nav_dist − epistemic_gain,
+    // i.e. maximising the negated score below. epistemic_gain is now a common currency across
+    // producers (expected entropy reduction in nats: afford_table = shape-belief ΔH, afford_room =
+    // pose-belief ΔH). The previously-selected affordance gets a switch-margin bonus so the choice
+    // commits and does not thrash (hysteresis).
+    const auto neg_efe = [&](const Target &t) -> float
+    {
+        // No robot position ⇒ nav-cost disabled (rank by epistemic_gain + hysteresis only).
+        const float nav_dist = robot_pos ? (t.room_pos - *robot_pos).norm() : 0.f;
+        float score = t.epistemic_gain - select_lambda_cost_ * nav_dist;
+        if (t.node_id == last_selected_id_)
+            score += select_switch_margin_;
+        return score;
+    };
+    const auto better = [&](const Target &candidate, const Target &current) -> bool
+    {
+        const float dc = neg_efe(candidate), dk = neg_efe(current);
+        if (dc != dk) return dc > dk;
+        return candidate.node_id < current.node_id;   // stable tie-break
+    };
 
     const auto affordances = graph->get_nodes_by_type("affordance");
 
@@ -475,10 +477,10 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
             const auto pending = graph->get_attrib_by_name<epistemic_pending_att>(node).value_or(true);
             if (target.has_value() && decode_protocol_state(active, pending) == ProtocolState::Executing)
             {
-                if (const auto report = make_affordance_debug_report(*target); report != selected_target_debug_report_)
+                if (const auto key = make_affordance_key(*target); key != selected_target_debug_report_)
                 {
-                    selected_target_debug_report_ = report;
-                    std::print("{}\n", selected_target_debug_report_);
+                    selected_target_debug_report_ = key;
+                    std::print("{}\n", make_affordance_debug_report(*target));
                     std::fflush(stdout);
                 }
                 log_observation(target->node_id,
@@ -490,6 +492,7 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
                                 target->yaw_rad,
                                 target->epistemic_gain);
                 transition_to(State::Following, "keeping current active affordance", target->node_id, target->node_name);
+                last_selected_id_ = target->node_id;
                 return target;
             }
 
@@ -512,17 +515,17 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
         if (decode_protocol_state(active, pending) != ProtocolState::Executing)
             continue;
 
-        if (!resumed_target.has_value() || better_affordance_candidate(*target, *resumed_target))
+        if (!resumed_target.has_value() || better(*target, *resumed_target))
             resumed_target = target;
     }
     if (resumed_target.has_value())
     {
         current_affordance_id_ = resumed_target->node_id;
         current_affordance_name_ = resumed_target->node_name;
-        if (const auto report = make_affordance_debug_report(*resumed_target); report != selected_target_debug_report_)
+        if (const auto key = make_affordance_key(*resumed_target); key != selected_target_debug_report_)
         {
-            selected_target_debug_report_ = report;
-            std::print("{}\n", selected_target_debug_report_);
+            selected_target_debug_report_ = key;
+            std::print("{}\n", make_affordance_debug_report(*resumed_target));
             std::fflush(stdout);
         }
         reset_observation();
@@ -535,10 +538,12 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
                         resumed_target->yaw_rad,
                         resumed_target->epistemic_gain);
         transition_to(State::Following, "resuming executing affordance", resumed_target->node_id, resumed_target->node_name);
+        last_selected_id_ = resumed_target->node_id;
         return resumed_target;
     }
 
     std::optional<Target> best_target;
+    std::ostringstream options;   // all eligible candidates with gain + EFE score, for the log
     for (const auto &node : affordances)
     {
         const auto target = read_target(graph, node);
@@ -550,15 +555,19 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
         if (decode_protocol_state(active, pending) != ProtocolState::Offered)
             continue;
 
-        if (!best_target.has_value() || better_affordance_candidate(*target, *best_target))
+        const float nav_dist = robot_pos ? (target->room_pos - *robot_pos).norm() : 0.f;
+        options << " '" << target->node_name << "' gain=" << target->epistemic_gain
+                << " d=" << nav_dist << " score=" << neg_efe(*target) << " |";
+
+        if (!best_target.has_value() || better(*target, *best_target))
             best_target = target;
     }
 
     if (!best_target.has_value())
     {
-        if (selected_target_debug_report_ != "Affordance debug: selected=none")
+        if (selected_target_debug_report_ != "[aff-select] none")
         {
-            selected_target_debug_report_ = "Affordance debug: selected=none";
+            selected_target_debug_report_ = "[aff-select] none";
             std::print("{}\n", selected_target_debug_report_);
             std::fflush(stdout);
         }
@@ -584,10 +593,10 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
 
         current_affordance_id_ = best_target->node_id;
         current_affordance_name_ = best_target->node_name;
-        if (const auto report = make_affordance_debug_report(*best_target); report != selected_target_debug_report_)
+        if (const auto key = make_affordance_key(*best_target); key != selected_target_debug_report_)
         {
-            selected_target_debug_report_ = report;
-            std::print("{}\n", selected_target_debug_report_);
+            selected_target_debug_report_ = key;
+            std::print("{}  [candidates:{} ]\n", make_affordance_debug_report(*best_target), options.str());
             std::fflush(stdout);
         }
         reset_observation();
@@ -600,6 +609,7 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
                         best_target->yaw_rad,
                         best_target->epistemic_gain);
         transition_to(State::Following, "affordance claimed", best_target->node_id, best_target->node_name);
+        last_selected_id_ = best_target->node_id;
         return best_target;
     }
 

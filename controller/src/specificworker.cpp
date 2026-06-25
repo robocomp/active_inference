@@ -411,6 +411,16 @@ void SpecificWorker::load_params()
 	load_optional_cast<double>("Planner.Clearance", params.clearance_m);
 	load_optional_cast<double>("Planner.GridResolution", params.grid_resolution_m);
 	load_optional_cast<double>("Planner.ConnectionRadius", params.connection_radius_m);
+	// Grounded EFE affordance selection (common/affordance_manager): nav-cost weight (nats/m) +
+	// commitment hysteresis (nats). G = λ_cost·dist − epistemic_gain; the room/table choice is now
+	// in one information currency instead of a hard table>room priority.
+	{
+		double aff_lambda_cost = 0.2, aff_switch_margin = 0.5;
+		load_optional_cast<double>("Controller.AffordanceLambdaCost", aff_lambda_cost);
+		load_optional_cast<double>("Controller.AffordanceSwitchMargin", aff_switch_margin);
+		affordance_manager_.set_selection_params(static_cast<float>(aff_lambda_cost),
+		                                         static_cast<float>(aff_switch_margin));
+	}
 	load_optional_cast<double>("Controller.WaypointTolerance", params.waypoint_tolerance_m);
 	load_optional_cast<double>("Controller.MaxAdvSpeed", params.max_adv_speed_mps);
 	load_optional_cast<double>("Controller.MaxRotSpeed", params.max_rot_speed_rps);

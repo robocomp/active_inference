@@ -141,6 +141,14 @@ LambdaFreeSpace = 100.0   # free-space/visibility FE term: penalise the model oc
 FreeSpaceMargin = 0.01    # m: how far in front of each point the carve sample sits (small ⇒ tight depth pin).
 RobustLoss = "welsch"        # redescending (soft): far-from-surface points ~0 weight; beats Tukey (hard cutoff over-rejects, depth drifts at bad-mask poses)
 RobustLossScale = 0.04         # welsch c: points >~3-4cm from the cylinder surface are strongly down-weighted
+# Fisher information filter (per-DOF stabiliser; currently DIAGNOSTIC — logged, not yet driving the fit).
+# Real per-DOF SDF observation Fisher info accumulated across viewpoints (incl. radius/height, which the
+# position-only Laplace Hessian ignores). The Q-bleed predict gives a finite STEADY-STATE precision — the
+# principled fix for the P_bottle overconfidence. Set FisherCsvPath to tail the per-cycle evolution.
+FisherFilterEnabled = true    # compute + accumulate + log; false = zero cost
+FisherInfoDecay = 1.0         # stiffener fading memory; <1 forgets old views, 1 = pure accumulation
+FisherProcessStdM = 0.005     # predict process-noise std per fresh frame (m) → posterior std floor (all 5 DOF are lengths)
+FisherCsvPath = "etc/bottle_fisher_log.csv"   # per-cycle Fisher evolution log for plotting (empty = off)
 
 [SampleQueue]
 NumAngleBins = 16

@@ -508,9 +508,6 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
                 out.goal_reached = true;
                 return out;
             }
-            if (not aligning_)
-                std::println("[TrajectoryController] final align: facing={:.3f} theta={:.3f} theta_des={:.3f} err={:.3f} rad",
-                             *goal_facing_yaw_, robot_theta, theta_des, yaw_err);
             aligning_ = true;
             out.adv = 0.f;
             out.side = 0.f;

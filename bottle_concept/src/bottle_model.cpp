@@ -42,6 +42,40 @@ namespace
         return outside + inside;
     }
 
+    /**
+     * Robust IRLS weight ω(r) = ρ'(r)/(2r), normalised so the quadratic loss gives ω≡1. This is the
+     * per-residual multiplier turning a squared error into the M-estimator's effective precision;
+     * used to down-weight outliers in the Fisher information (an outlier should contribute little
+     * curvature, exactly as it contributes little gradient). Mirrors TableModel's robust_irls_weight.
+     */
+    float robust_irls_weight(float residual, RobustLossType type, float scale)
+    {
+        const float c  = std::max(scale, 1e-6f);
+        const float c2 = c * c;
+        const float r2 = residual * residual;
+        switch (type)
+        {
+            case RobustLossType::Quadratic:
+                return 1.0f;
+            case RobustLossType::Huber:
+                return std::abs(residual) <= c ? 1.0f : c / std::max(std::abs(residual), 1e-9f);
+            case RobustLossType::GemanMcClure:
+            {
+                const float d = r2 + c2;
+                return (c2 * c2) / (d * d);
+            }
+            case RobustLossType::Welsch:
+                return std::exp(-r2 / c2);
+            case RobustLossType::TukeyBiweight:
+            {
+                if (r2 >= c2) return 0.0f;
+                const float u = 1.0f - r2 / c2;
+                return u * u;
+            }
+        }
+        return 1.0f;
+    }
+
     // radius / half-height carried as tensors so the optimiser can size the bottle.
     torch::Tensor cylinder_sdf_tensor(const torch::Tensor& dx,
                                     const torch::Tensor& dy,
@@ -508,6 +542,46 @@ Eigen::Matrix3f BottleModel::pose_covariance(const std::vector<Eigen::Vector3f>&
 
     const Eigen::Matrix3f V = es.eigenvectors();
     return V * inv_eig.asDiagonal() * V.transpose();
+}
+
+// ─── Observation Fisher information (per-DOF) ──────────────────────────────────
+
+std::array<float, 5> BottleModel::observation_information(
+    const std::vector<Eigen::Vector3f>& points,
+    const std::vector<float>& weights) const
+{
+    std::array<float, 5> info{};
+    const std::size_t n = points.size();
+    if (n == 0)
+        return info;
+
+    const float inv_sigma2 = 1.0f / (params_.sigma_obs * params_.sigma_obs);
+
+    // Central-difference step per DOF (metres — all 5 DOF are lengths). Small enough that the
+    // linearisation is local, large enough to stay clear of float-cancellation noise.
+    const std::array<float, 5> eps = {1e-3f, 1e-3f, 1e-3f, 1e-3f, 1e-3f};
+
+    const auto base = state_.to_array();
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        const Eigen::Vector3f& p = points[i];
+        const float r  = sdf_point_at(p, state_);
+        const float wi = (weights.empty() ? 1.0f : weights[i]) *
+                         robust_irls_weight(r, params_.robust_loss, params_.robust_loss_scale);
+        if (wi <= 0.0f)
+            continue;                       // hard-rejected outlier — no curvature contribution
+        for (int j = 0; j < 5; ++j)
+        {
+            auto plus = base, minus = base;
+            plus[j]  += eps[j];
+            minus[j] -= eps[j];
+            const float gp = sdf_point_at(p, BottleState::from_array(plus));
+            const float gm = sdf_point_at(p, BottleState::from_array(minus));
+            const float g  = (gp - gm) / (2.0f * eps[j]);   // ∂SDF/∂θ_j
+            info[j] += wi * inv_sigma2 * g * g;
+        }
+    }
+    return info;
 }
 
 // ─── Constraints ─────────────────────────────────────────────────────────────

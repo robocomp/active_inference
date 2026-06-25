@@ -53,6 +53,10 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
     out.grad_clip          = getf("BottleModel.GradClip",          2.0f);
     out.mask_precision     = getf("BottleModel.MaskPrecision",     0.0f);
     out.cov_eff_scale      = getf("BottleModel.CovEffScale",       1.0f);
+    out.fisher_filter_enabled = getb("BottleModel.FisherFilterEnabled", true);
+    out.fisher_info_decay     = getf("BottleModel.FisherInfoDecay",     1.0f);
+    out.fisher_process_std_m  = getf("BottleModel.FisherProcessStdM",   0.005f);
+    out.fisher_csv_path       = gets("BottleModel.FisherCsvPath",       "");
     out.seed_deproject_frac = getf("BottleModel.SeedDeprojectFrac", 1.0f);
     out.lambda_freespace   = getf("BottleModel.LambdaFreeSpace",   0.0f);
     out.freespace_margin   = getf("BottleModel.FreeSpaceMargin",   0.01f);

@@ -54,7 +54,16 @@ public:
                         const std::function<void()> &on_edge_inserted = {});
     bool release_execution_claim(const std::shared_ptr<DSR::DSRGraph> &graph);
 
-    std::optional<Target> select_target(const std::shared_ptr<DSR::DSRGraph> &graph);
+    // Grounded EFE selection weights: G = λ_cost·nav_dist − epistemic_gain (nats). switch_margin is
+    // the commitment hysteresis (a held affordance must be beaten by this many nats to be dropped).
+    void set_selection_params(float lambda_cost, float switch_margin);
+
+    // robot_pos (room frame) feeds the nav-cost term. Pass std::nullopt (the default) to ignore
+    // distance entirely — selection then uses epistemic_gain + hysteresis only. Do NOT pass a
+    // Zero vector to mean "unknown": that would score every affordance by its distance from the
+    // room origin (0,0), a real coordinate bias, not a disabled nav-cost.
+    std::optional<Target> select_target(const std::shared_ptr<DSR::DSRGraph> &graph,
+                                        std::optional<Eigen::Vector2f> robot_pos = std::nullopt);
     void mark_reached(const std::shared_ptr<DSR::DSRGraph> &graph);
     void clear_current();
     bool has_current() const;
@@ -107,6 +116,10 @@ private:
 
     std::uint64_t current_affordance_id_ = 0;
     std::string current_affordance_name_;
+    // Grounded EFE selection (set_selection_params): nav-cost weight (nats/m) + hysteresis (nats).
+    float select_lambda_cost_ = 0.2f;
+    float select_switch_margin_ = 0.5f;
+    std::uint64_t last_selected_id_ = 0;   // for commitment hysteresis across cycles
     State state_ = State::Idle;
     std::optional<bool> last_observed_active_;
     std::optional<bool> last_observed_pending_;

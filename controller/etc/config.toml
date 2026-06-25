@@ -62,6 +62,8 @@ GridResolution = 0.35
 ConnectionRadius = 1.2
 
 [Controller]
+AffordanceLambdaCost = 0.2    # grounded EFE selection nav-cost weight (nats per metre): G = λ·dist − ΔH
+AffordanceSwitchMargin = 0.5  # commitment hysteresis (nats): held affordance must be beaten by this much to switch
 WaypointTolerance = 0.25
 MaxAdvSpeed = 0.7
 MaxRotSpeed = 0.8

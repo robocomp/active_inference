@@ -18,6 +18,7 @@
 #pragma once
 
 #include <cstdint>
+#include <fstream>
 #include <memory>
 #include <optional>
 #include <unordered_map>
@@ -85,6 +86,14 @@ private:
     bool is_voxel_owned_by_bottle(const BottleInstance& inst, const Eigen::Vector3f& point) const;
     static std::uint64_t voxel_key(const Eigen::Vector3f& point, float quantization_m);
 
+    // Fisher information filter (diagnostic): fold this fresh frame's per-DOF observation Fisher
+    // information (inst.last_obs_info, measured in step_model_update) into the instance accumulators
+    // — normalised "equivalent views" stiffener + the Q-bleed precision filter (finite steady state).
+    void update_fisher_filter(BottleInstance& inst);
+    // Append one row of Fisher-filter evolution (state + per-DOF obs/accumulated info + posterior std
+    // mm) to cfg_.fisher_csv_path. No-op if the path is empty. Lazily opens + writes the header.
+    void log_fisher_csv(const BottleInstance& inst, bool fresh, float free_energy, int point_count);
+
     // Feed the fitted model the RGB-mask edge rays as a silhouette likelihood.
     void feed_silhouette(BottleInstance& inst);
     // room_T_zed (camera→room) as a plain 4×4, composed room→body→zed at ts=0 (alignment-safe).
@@ -105,6 +114,7 @@ private:
     std::unique_ptr<DSR::CameraAPI> camera_api_;   // ZED intrinsics, lazily bound to the "zed" node
     std::unordered_map<std::uint64_t, BottleInstance> instances_;
     std::uint64_t                   room_node_id_ = 0;   // refreshed each process_bottle_node call
+    std::ofstream                   fisher_csv_;         // per-cycle Fisher-filter evolution log (optional)
 };
 
 }  // namespace rc

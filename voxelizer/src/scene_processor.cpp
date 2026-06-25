@@ -946,14 +946,13 @@ void SceneProcessor::update_viewer_object_meshes()
     if (voxel_viewer_ == nullptr || graph_ == nullptr)
         return;
 
-    std::vector<std::vector<float>> meshes;
-    for (const auto& node : graph_->get_nodes_by_type("table"))
-    {
-        auto opt = graph_->get_attrib_by_name<mesh_vertices_att>(node);
-        if (opt.has_value())
-            meshes.push_back(std::vector<float>(opt.value().get()));
-    }
-    voxel_viewer_->update_object_meshes(meshes);
+    // Tables are drawn as the dead-banded oriented box reconstructed from the table node's
+    // width/depth/height + the room→table RT edge (see build_graph_object_box → "model_table"),
+    // which is coherent with the shared belief and only moves when the written pose clears the
+    // dead-band. The per-cycle mesh_vertices_att baked the full pose (cx,cy,yaw) with no dead-band
+    // and jittered, so it is no longer rendered — feed an empty set to clear any prior mesh.
+    const std::vector<std::vector<float>> none;
+    voxel_viewer_->update_object_meshes(none);
 }
 
 void SceneProcessor::update_viewer_table_rfe_points()

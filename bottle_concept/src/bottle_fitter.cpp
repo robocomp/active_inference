@@ -5,6 +5,7 @@
 #include "bottle_fitter.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <print>
@@ -207,11 +208,24 @@ float BottleFitter::run_bottle_inference(BottleInstance& inst, const BottleObser
     feed_silhouette(inst);   // attach the RGB-mask edge rays before the model + covariance update
     const float free_energy = step_model_update(inst, observation.residual_pts, residual_precision);
 
+    // Fold this viewpoint's Fisher information into the cross-frame filter — fresh masks only, so the
+    // belief hardens by VIEWS, not wall-clock (a frozen scene must not keep accruing precision).
+    if (cfg_.fisher_filter_enabled and observation.has_fresh_data)
+        update_fisher_filter(inst);
+
     const auto& s = inst.model.state();
+    const int point_count = inst.queue.size() + static_cast<int>(observation.residual_pts.size());
+    // Data-only posterior std (mm) from the accumulated Fisher precision — shrinks as evidence
+    // gathers; -1 until a DOF is first observed. Diagnostic for the EFE epistemic value / P_bottle.
+    const auto post_std_mm = [&](int j) -> float {
+        return inst.fisher_info_raw[j] > 1e-6f ? 1000.0f / std::sqrt(inst.fisher_info_raw[j]) : -1.0f;
+    };
     if (should_log(inst))
-        std::print("[{}] FE={:.4f}  c=({:.3f},{:.3f},{:.3f}) r={:.3f} h={:.3f}  pts={}\n",
+        std::print("[{}] FE={:.4f}  c=({:.3f},{:.3f},{:.3f}) r={:.3f} h={:.3f}  pts={} σ(r,h)mm=({:.1f},{:.1f})\n",
                    inst.node_name, free_energy, s.cx, s.cy, s.cz, s.radius, s.height,
-                   inst.queue.size() + static_cast<int>(observation.residual_pts.size()));
+                   point_count, post_std_mm(3), post_std_mm(4));
+
+    log_fisher_csv(inst, observation.has_fresh_data, free_energy, point_count);
 
     return free_energy;
 }
@@ -372,7 +386,84 @@ float BottleFitter::step_model_update(BottleInstance& inst,
 
     inst.last_fe_terms = inst.model.compute_free_energy_decomposition(fit_pts, fit_weights, historical_anchor_count);
     inst.last_queue_metrics = inst.queue.metrics();
+
+    // Measure this frame's per-DOF observation Fisher information at the accepted state on the same
+    // evidence used for the fit — the calibrated, anisotropic "how well is each DOF seen". Stored
+    // raw; run_bottle_inference folds it into the cross-frame filter on fresh-mask frames only.
+    if (cfg_.fisher_filter_enabled)
+        inst.last_obs_info = inst.model.observation_information(fit_pts, fit_weights);
+
     return free_energy;
+}
+
+void BottleFitter::update_fisher_filter(BottleInstance& inst)
+{
+    // Fold the latest fresh frame's per-DOF Fisher diagonal (inst.last_obs_info, measured in
+    // step_model_update) into the cross-frame accumulators. Two parallel views, mirroring TableModel:
+    //   (a) stiffener  — normalised "equivalent views" with a scalar fading memory (decay): a fresh
+    //                    view that finally constrains a DOF counts ~1 view, redundant views add less.
+    //   (b) precision  — information-filter predict (Y_pred = (Y_prev⁻¹ + Q)⁻¹) + update (Y_post =
+    //                    Y_pred + obs). The per-frame Q-bleed balances the measurement gain at a
+    //                    finite steady precision, so the posterior std converges to a physical floor
+    //                    instead of collapsing toward zero.
+    const float decay = std::clamp(cfg_.fisher_info_decay, 0.0f, 1.0f);
+    const float q     = cfg_.fisher_process_std_m * cfg_.fisher_process_std_m;   // all 5 DOF are lengths
+    for (int j = 0; j < 5; ++j)
+    {
+        const float oi = inst.last_obs_info[j];
+
+        // (a) normalised equivalent-views accumulator.
+        inst.fisher_info_peak[j] = std::max(inst.fisher_info_peak[j], oi);
+        const float incr = inst.fisher_info_peak[j] > 1e-6f
+                         ? std::clamp(oi / inst.fisher_info_peak[j], 0.0f, 1.0f) : 0.0f;
+        inst.fisher_info[j] = inst.fisher_info[j] * decay + incr;
+
+        // (b) calibrated precision — predict (Q-bleed) then update.
+        const float Yprev = inst.fisher_info_raw[j];
+        const float Ypred = 1.0f / (1.0f / std::max(Yprev, 1e-9f) + q);
+        inst.fisher_info_raw[j] = Ypred + oi;
+    }
+}
+
+void BottleFitter::log_fisher_csv(const BottleInstance& inst, bool fresh, float free_energy, int point_count)
+{
+    if (cfg_.fisher_csv_path.empty())
+        return;
+
+    static const std::array<const char*, 5> kDof = {"cx", "cy", "cz", "r", "h"};
+
+    if (not fisher_csv_.is_open())
+    {
+        fisher_csv_.open(cfg_.fisher_csv_path, std::ios::out | std::ios::trunc);
+        if (not fisher_csv_.is_open())
+        {
+            std::print("bottle_concept: [fisher] cannot open CSV '{}'\n", cfg_.fisher_csv_path);
+            cfg_.fisher_csv_path.clear();   // disable further attempts
+            return;
+        }
+        fisher_csv_ << "cycle,node,fresh,fe,frames_converged,pts";
+        for (const auto* d : kDof) fisher_csv_ << ",state_" << d;
+        for (const auto* d : kDof) fisher_csv_ << ",obs_"   << d;   // this frame's raw Fisher diag
+        for (const auto* d : kDof) fisher_csv_ << ",acc_"   << d;   // normalised accumulated info (stiffener)
+        for (const auto* d : kDof) fisher_csv_ << ",raw_"   << d;   // un-normalised accumulated precision Σ⁻¹
+        for (const auto* d : kDof) fisher_csv_ << ",std_"   << d;   // posterior std (mm); -1 = unobserved
+        fisher_csv_ << '\n';
+    }
+
+    const auto s = inst.model.state().to_array();
+    fisher_csv_ << inst.processed_cycles << ',' << inst.node_name << ',' << (fresh ? 1 : 0) << ','
+                << free_energy << ',' << inst.frames_converged << ',' << point_count;
+    for (int j = 0; j < 5; ++j) fisher_csv_ << ',' << s[j];
+    for (int j = 0; j < 5; ++j) fisher_csv_ << ',' << inst.last_obs_info[j];
+    for (int j = 0; j < 5; ++j) fisher_csv_ << ',' << inst.fisher_info[j];
+    for (int j = 0; j < 5; ++j) fisher_csv_ << ',' << inst.fisher_info_raw[j];
+    for (int j = 0; j < 5; ++j)
+    {
+        const float prec = inst.fisher_info_raw[j];
+        fisher_csv_ << ',' << (prec > 1e-6f ? 1000.0f / std::sqrt(prec) : -1.0f);
+    }
+    fisher_csv_ << '\n';
+    fisher_csv_.flush();   // flush each row so a plot can tail the file during a live run
 }
 
 void BottleFitter::ingest_observation_voxels(BottleInstance& inst, const BottleObservation& observation)

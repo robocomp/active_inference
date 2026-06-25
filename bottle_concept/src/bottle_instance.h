@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -48,6 +49,18 @@ struct BottleInstance
     float last_pub_cz     = std::numeric_limits<float>::max();
     SampleQueueMetrics      last_queue_metrics;
     FreeEnergyDecomposition last_fe_terms;
+    // ── Fisher information filter (per-DOF; currently DIAGNOSTIC) ──────────────────────────────────
+    // The principled replacement for a "times viewed" proxy: a per-DOF information filter over
+    // [cx,cy,cz,radius,height] (matches BottleState::to_array()). Each fresh mask measures the
+    // observation Fisher information (curvature of the SDF data-likelihood); the filter accumulates
+    // it across viewpoints so a well-seen DOF hardens while an unobserved one stays plastic — the
+    // stabiliser for successive gatherings of evidence as the robot orbits the table. The Q-bleed
+    // predict keeps the precision at a finite steady state (the fix for P_bottle overconfidence).
+    // Phase 1–2: folded + logged only — not yet driving acceptance or the published covariance.
+    std::array<float, 5> fisher_info{};        // normalised "equivalent views" accumulator (fading memory)
+    std::array<float, 5> fisher_info_raw{};    // raw accumulated precision Σ⁻¹ (Q-bleed → finite steady state)
+    std::array<float, 5> fisher_info_peak{};   // per-DOF adaptive normaliser (best single-view info seen)
+    std::array<float, 5> last_obs_info{};      // most recent fresh frame's raw Fisher diagonal
     // Bottle-owned voxel memory bank (room frame), independent of per-frame uploads.
     std::vector<Eigen::Vector3f>      voxel_bank_pts;
     std::unordered_set<std::uint64_t> voxel_bank_keys;
