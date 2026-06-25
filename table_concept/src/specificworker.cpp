@@ -308,6 +308,12 @@ void SpecificWorker::initialize()
         ts_res_plot_->set_visible_window(60.f);
         series_layout->addWidget(ts_res_plot_);
 
+        // Inferred table dimensions (w, h) — the size DOFs the stabiliser targets. Watch these to
+        // confirm the belief has stopped jittering between fresh masks (flat = stable).
+        ts_state_plot_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
+        ts_state_plot_->set_visible_window(60.f);
+        series_layout->addWidget(ts_state_plot_);
+
         // GenericWorker::initialize() may have already started compute(), so
         // some instances can exist before the plots are constructed.
         for (const auto& [_, inst] : fitter_->instances())
@@ -315,6 +321,8 @@ void SpecificWorker::initialize()
             ts_plot_->add_series(inst.node_name + "_fe", QColor(255, 170, 0), 1.1f);
             ts_cov_plot_->add_series(inst.node_name + "_cov", QColor(0, 190, 255), 1.1f);
             ts_res_plot_->add_series(inst.node_name + "_res", QColor(170, 80, 255), 1.1f);
+            ts_state_plot_->add_series(inst.node_name + "_w", QColor(255, 90, 90), 1.1f);
+            ts_state_plot_->add_series(inst.node_name + "_h", QColor(90, 200, 90), 1.1f);
         }
     }
 }
@@ -437,6 +445,16 @@ void SpecificWorker::publish_table_diagnostics(const rc::TableInstance& inst,
             if (observation.has_fresh_data)
                 ts_res_plot_->add_point (inst.node_name + "_res", static_cast<float>(observation.residual_pts.size()));
         }
+        if (ts_state_plot_)
+        {
+            // Sample EVERY cycle (not just fresh frames): the whole point is to see whether the accepted
+            // dimensions hold flat between masks (stabiliser working) or drift/jitter on stale data.
+            const auto& s = inst.model.state();
+            ts_state_plot_->add_series(inst.node_name + "_w", QColor(255, 90, 90), 1.1f);
+            ts_state_plot_->add_series(inst.node_name + "_h", QColor(90, 200, 90), 1.1f);
+            ts_state_plot_->add_point (inst.node_name + "_w", s.w);
+            ts_state_plot_->add_point (inst.node_name + "_h", s.h);
+        }
     }
 
     if (fitter_->should_log_table(inst))
@@ -548,6 +566,32 @@ void SpecificWorker::step_epistemic(rc::TableInstance& inst, DSR::Node& node)
 {
     if (inst.epistemic_cooldown > 0)
         --inst.epistemic_cooldown;
+
+    // Controller-completion cooldown (anti-oscillation): the table affordance completes on a weak
+    // detection (contract goal conf≥0.20), which fires almost instantly — long before ΔH decays. If we
+    // re-offer immediately the controller re-claims, re-completes, and the selection churns
+    // table→room→table every cycle. So when the affordance is Completed (!active && !pending) by the
+    // controller, treat it like satisfaction: latch + start the cooldown so it stays withdrawn (the
+    // grounded EFE selection then sticks to the next-best affordance) until cooldown elapses AND ΔH
+    // exceeds the re-arm threshold.
+    if (const auto aid = inst.affordance.node_id(); aid != 0)
+    {
+        if (auto an = G->get_node(aid); an.has_value())
+        {
+            const bool a = G->get_attrib_by_name<active_att>(an.value()).value_or(false);
+            const bool p = G->get_attrib_by_name<epistemic_pending_att>(an.value()).value_or(true);
+            if (!a && !p)   // Completed by the controller
+            {
+                inst.affordance.remove();
+                inst.epistemic_satisfied = true;
+                inst.epistemic_cooldown  = cfg_.epistemic_cooldown_cycles;
+                inst.epistemic_pending   = false;
+                std::print("[{}] controller completed affordance → cooldown {} cycles (ΔH not yet exhausted)\n",
+                           inst.node_name, cfg_.epistemic_cooldown_cycles);
+                return;
+            }
+        }
+    }
 
     const auto prop = epistemic_planner_.compute(inst.model, inst.queue, inst.fisher_info_raw);
     if (not prop.valid)

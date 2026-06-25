@@ -142,6 +142,7 @@ private:
     rc::TimeSeriesPlot*  ts_plot_       = nullptr;   // FE
     rc::TimeSeriesPlot*  ts_cov_plot_   = nullptr;   // coverage deficit
     rc::TimeSeriesPlot*  ts_res_plot_   = nullptr;   // residual point count
+    rc::TimeSeriesPlot*  ts_state_plot_ = nullptr;   // inferred dimensions w/h (stability check)
 
     std::unique_ptr<DSR::RT_API>                        rt_api_;
     std::unique_ptr<DSR::InnerEigenAPI>                inner_eigen_;     // for room↔body↔zed extrinsic (silhouette)

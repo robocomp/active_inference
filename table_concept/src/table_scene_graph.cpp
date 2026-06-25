@@ -357,7 +357,12 @@ void TableSceneGraph::write_rt_pose(std::uint64_t room_id, TableInstance& inst)
     if (not room_opt.has_value())
         return;
 
-    const float z = s.table_height * 0.5f;
+    // Table node origin = BASE on the floor (z=0), NOT the mid-height. Every consumer assumes a
+    // base origin: the voxelizer box (z∈[origin, origin+height]), and bottle_concept's table-top
+    // lookup + support decision (top = origin.z + height). Publishing z=table_height/2 put the
+    // origin at mid-height → table_top came out as 1.5·height → bottles failed the support test,
+    // parented to the room and floated. Keep the base on the floor so top = 0 + height = height.
+    const float z = 0.0f;
     rt_api_->insert_or_assign_edge_RT(room_opt.value(), inst.node_id,
                                       {s.cx, s.cy, z},
                                       {0.0f, 0.0f, s.yaw});
