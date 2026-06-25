@@ -291,7 +291,7 @@ void SpecificWorker::compute()
         }
     }
 
-    graph_publisher_->publish(frame->rgbd, frame->room_T_zed, detections);
+    graph_publisher_->publish(frame->rgbd, frame->room_T_zed, detections, frame->frame_ts_ms);
 
     fps_counter_.print("[Compute]", 3000);
 }
@@ -409,7 +409,8 @@ std::optional<SpecificWorker::SceneFrame> SpecificWorker::process_scene_frame(FP
                       room_T_robot.value(),
                       room_T_zed.value(),
                       std::move(lidar_points_room),
-                      graph_object_boxes};
+                      graph_object_boxes,
+                      frame_ts_ms};
 }
 
 void SpecificWorker::emergency()

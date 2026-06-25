@@ -29,10 +29,10 @@ GraphPublisher::GraphPublisher(std::shared_ptr<DSR::DSRGraph> graph,
 {}
 
 void GraphPublisher::publish(const RGBDData& rgbd, const Mat::RTMat& room_T_zed,
-                             const std::vector<SegDetection>& detections)
+                             const std::vector<SegDetection>& detections, std::uint64_t frame_ts_ms)
 {
     if (ensure_node("masks", "Plum", masks_ready_, /*relayout=*/true))
-        upload_masks(rgbd, room_T_zed, detections);
+        upload_masks(rgbd, room_T_zed, detections, frame_ts_ms);
 
     // tracks deliberately does NOT relayout: a full twopi reshuffle racing another agent's node
     // insert/remove can paint a freed QGraphicsItem → SIGSEGV in the viewer. Cosmetic only.
@@ -91,7 +91,7 @@ bool GraphPublisher::ensure_node(const char* name, const char* color, bool& read
 }
 
 void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T_zed,
-                                  const std::vector<SegDetection>& detections)
+                                  const std::vector<SegDetection>& detections, std::uint64_t frame_ts_ms)
 {
     // Keep masks stream progressing even when voxel grid processing is paused.
     const std::uint64_t sensing_frame = ++masks_publish_seq_;
@@ -107,6 +107,7 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
     if (rgbd.depth.empty() || rgbd.width <= 0 || rgbd.height <= 0 || rgbd.focal_x <= 0.f || rgbd.focal_y <= 0.f)
     {
         G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_frame_id", static_cast<int>(sensing_frame));
+        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_timestamp_ms", frame_ts_ms);
         G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_count", 0);
         G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_labels", std::string{});
         G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_label_ids", std::vector<float>{});
@@ -268,6 +269,7 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
 
     const int mask_count = static_cast<int>(label_ids.size());
     G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_frame_id", static_cast<int>(sensing_frame));
+    G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_timestamp_ms", frame_ts_ms);
     G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_count", mask_count);
     G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_labels", labels_joined.str());
     G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_label_ids", label_ids);

@@ -33,8 +33,11 @@ public:
     void update_rfe_points(std::span<const QVector3D> residual_positions,
                            std::span<const QVector3D> fallback_positions = {},
                            std::span<const QVector3D> candidate_positions = {});
-    // YOLO mask support points (room frame), drawn as a distinct point cloud.
-    void update_mask_points(std::span<const QVector3D> positions);
+    // YOLO mask support points (room frame), drawn as a distinct point cloud. Optional per-point
+    // categories colour them by class (color_for_category, matching the voxel/box palette); empty
+    // → fall back to off-white.
+    void update_mask_points(std::span<const QVector3D> positions,
+                            std::span<const std::string> categories = {});
     void set_show_lidar(bool show);
     void set_show_masks(bool show);
     void set_show_voxels(bool show);

@@ -96,6 +96,7 @@ class SpecificWorker : public GenericWorker
             Mat::RTMat                  room_T_zed;
             std::vector<Eigen::Vector3f> lidar_points_room;
             std::vector<GraphObjectBox> graph_object_boxes;
+            std::uint64_t               frame_ts_ms = 0;   // capture stamp of rgbd/depth — published so consumers can pin pose to capture time
         };
 
         std::optional<SceneFrame> process_scene_frame(FPSCounter& compute_fps);

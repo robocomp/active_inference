@@ -41,8 +41,10 @@ public:
                    std::function<void()> relayout);
 
     // Publish every enabled export for this cycle: masks (always), tracks/voxels (config-gated).
+    // frame_ts_ms = capture stamp of the rgbd/depth frame; published on the masks node so consumers can
+    // pin their pose lookups to capture time (0 = unknown → consumers fall back to latest pose).
     void publish(const RGBDData& rgbd, const Mat::RTMat& room_T_zed,
-                 const std::vector<SegDetection>& detections);
+                 const std::vector<SegDetection>& detections, std::uint64_t frame_ts_ms = 0);
 
     // Re-publish the (possibly just-cleared) voxel grid — for the "Clear Voxels" button.
     // No-op unless Voxel.publish_voxels is set.
@@ -58,7 +60,7 @@ private:
     bool ensure_node(const char* name, const char* color, bool& ready, bool relayout);
 
     void upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T_zed,
-                      const std::vector<SegDetection>& detections);
+                      const std::vector<SegDetection>& detections, std::uint64_t frame_ts_ms);
     void publish_tracks();
     void upload_voxels();
 

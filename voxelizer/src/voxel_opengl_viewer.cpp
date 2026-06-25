@@ -429,16 +429,24 @@ void VoxelOpenGLViewer::update_rfe_points(std::span<const QVector3D> residual_po
     request_update_throttled();
 }
 
-void VoxelOpenGLViewer::update_mask_points(std::span<const QVector3D> positions)
+void VoxelOpenGLViewer::update_mask_points(std::span<const QVector3D> positions,
+                                           std::span<const std::string> categories)
 {
     std::vector<Vertex> new_vertices;
     new_vertices.reserve(positions.size());
-    for (const QVector3D& p : positions)
+    for (std::size_t i = 0; i < positions.size(); ++i)
     {
+        const QVector3D& p = positions[i];
         const float fx = voxel_flip_x_ ? -1.f : 1.f;
         const float fy = voxel_flip_y_ ? -1.f : 1.f;
         const QVector3D mapped{fx * p.x(), p.z(), fy * p.y()};
-        new_vertices.push_back(Vertex{mapped.x(), mapped.y(), mapped.z(), 0.92f, 0.92f, 0.95f});  // mask: white
+        // Colour by class so mask points match their voxel/box colour (bottle magenta, table green);
+        // fall back to off-white when no category is supplied. Brightened so the points stay legible.
+        QColor c(235, 235, 242);
+        if (not categories.empty() and i < categories.size())
+            c = categories[i] == "bottle" ? QColor(255, 40, 40)   // bottle mask: red (contrasts the magenta cylinder)
+                                          : color_for_category(categories[i]).lighter(125);
+        new_vertices.push_back(Vertex{mapped.x(), mapped.y(), mapped.z(), c.redF(), c.greenF(), c.blueF()});
     }
     {
         std::scoped_lock lk(data_mutex_);
@@ -878,20 +886,9 @@ void VoxelOpenGLViewer::paintGL()
         glEnable(GL_DEPTH_TEST);
     }
 
-    if (has_mask && show_masks_)
-    {
-        glDisable(GL_DEPTH_TEST);
-        room_vao_.bind();
-        room_vbo_.bind();
-        room_vbo_.allocate(mask_draw_vertices.data(), static_cast<int>(mask_draw_vertices.size() * sizeof(Vertex)));
-        program_.setUniformValue("u_round_points", 1);
-        program_.setUniformValue("u_point_size", 6.0f);
-        glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(mask_draw_vertices.size()));
-        program_.setUniformValue("u_point_size", 4.5f);
-        room_vbo_.release();
-        room_vao_.release();
-        glEnable(GL_DEPTH_TEST);
-    }
+    // Mask points are drawn LATER (after the solid bottle cylinder + object meshes) so the
+    // depth-test-off overlay isn't painted over by opaque geometry sitting on top of it — e.g.
+    // from an above view the cylinder cap would otherwise hide the bottle's mask support points.
 
     // Draw room polygon outlines (floor and ceiling)
     std::vector<QVector3D> local_floor, local_ceiling;
@@ -1241,6 +1238,54 @@ void VoxelOpenGLViewer::paintGL()
                 return {fx * x, z, fy * y};
             };
 
+            // Bottle (cylinder) nodes are drawn SOLID (collected here, drawn after the wireframes)
+            // instead of as a box. Tessellated side + caps; a fixed room-frame light gives a little
+            // rounded shading so it reads as a cylinder rather than a flat silhouette.
+            std::vector<Vertex> bottle_tris;
+            const auto append_cylinder = [&](const QVector3D& ctr, float radius, float half_h,
+                                             const QColor& col)
+            {
+                constexpr int   N      = 28;
+                constexpr float TWO_PI = 6.28318530718f;
+                constexpr float lx = 0.3526f, ly = 0.2519f, lz = 0.9068f;   // normalised light dir
+                const float cr = col.redF(), cg = col.greenF(), cb = col.blueF();
+                const auto shade = [&](float nx, float ny, float nz)
+                {
+                    const float d = std::max(0.0f, nx * lx + ny * ly + nz * lz);
+                    return 0.45f + 0.55f * d;   // ambient + diffuse
+                };
+                const auto vtx = [&](float x, float y, float z, float gain)
+                {
+                    const QVector3D p = map_room_to_ogl(x, y, z);
+                    return Vertex{p.x(), p.y(), p.z(), cr * gain, cg * gain, cb * gain};
+                };
+                const float zb = ctr.z() - half_h, zt = ctr.z() + half_h;
+                const float gt = shade(0, 0, 1), gbm = shade(0, 0, -1);
+                for (int k = 0; k < N; ++k)
+                {
+                    const float a0 = TWO_PI * k / N, a1 = TWO_PI * (k + 1) / N;
+                    const float c0 = std::cos(a0), s0 = std::sin(a0);
+                    const float c1 = std::cos(a1), s1 = std::sin(a1);
+                    const float x0 = ctr.x() + radius * c0, y0 = ctr.y() + radius * s0;
+                    const float x1 = ctr.x() + radius * c1, y1 = ctr.y() + radius * s1;
+                    const float g0 = shade(c0, s0, 0), g1 = shade(c1, s1, 0);
+                    // Side wall (two triangles per segment).
+                    bottle_tris.push_back(vtx(x0, y0, zb, g0));
+                    bottle_tris.push_back(vtx(x1, y1, zb, g1));
+                    bottle_tris.push_back(vtx(x1, y1, zt, g1));
+                    bottle_tris.push_back(vtx(x0, y0, zb, g0));
+                    bottle_tris.push_back(vtx(x1, y1, zt, g1));
+                    bottle_tris.push_back(vtx(x0, y0, zt, g0));
+                    // Top + bottom caps (triangle fans).
+                    bottle_tris.push_back(vtx(ctr.x(), ctr.y(), zt, gt));
+                    bottle_tris.push_back(vtx(x0, y0, zt, gt));
+                    bottle_tris.push_back(vtx(x1, y1, zt, gt));
+                    bottle_tris.push_back(vtx(ctr.x(), ctr.y(), zb, gbm));
+                    bottle_tris.push_back(vtx(x1, y1, zb, gbm));
+                    bottle_tris.push_back(vtx(x0, y0, zb, gbm));
+                }
+            };
+
             constexpr int edges[12][2] = {
                 {0,1}, {1,2}, {2,3}, {3,0},
                 {4,5}, {5,6}, {6,7}, {7,4},
@@ -1265,6 +1310,13 @@ void VoxelOpenGLViewer::paintGL()
                 // Skip the green table BBs (per request) — shown via mesh/voxels/RFE points.
                 if (cat == "table" or cat == "model_table")
                     continue;
+                // Bottle: draw a SOLID cylinder (radius from the box footprint, full height = 2·hz)
+                // instead of the wireframe box. he = (radius, radius, height/2) for a cylinder node.
+                if (cat == "bottle")
+                {
+                    append_cylinder(ctr, 0.5f * (he.x() + he.y()), he.z(), color_for_category(cat));
+                    continue;
+                }
                 const QColor c = color_for_category(cat);
                 const float r = c.redF();
                 const float g = c.greenF();
@@ -1304,6 +1356,19 @@ void VoxelOpenGLViewer::paintGL()
                 room_vbo_.release();
                 room_vao_.release();
                 glEnable(GL_DEPTH_TEST);
+            }
+
+            // Solid bottle cylinders — depth-tested so they occlude properly.
+            if (!bottle_tris.empty())
+            {
+                glEnable(GL_DEPTH_TEST);
+                room_vao_.bind();
+                room_vbo_.bind();
+                room_vbo_.allocate(bottle_tris.data(), static_cast<int>(bottle_tris.size() * sizeof(Vertex)));
+                program_.setUniformValue("u_round_points", 0);
+                glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(bottle_tris.size()));
+                room_vbo_.release();
+                room_vao_.release();
             }
         }
     }
@@ -1346,6 +1411,23 @@ void VoxelOpenGLViewer::paintGL()
         program_.setUniformValue("u_round_points", 1);
         program_.setUniformValue("u_point_size", 4.0f);
         glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(candidate_draw_vertices.size()));
+        program_.setUniformValue("u_point_size", 4.5f);
+        room_vbo_.release();
+        room_vao_.release();
+        glEnable(GL_DEPTH_TEST);
+    }
+
+    // Mask support points — drawn LAST as a depth-test-off overlay so they stay visible on top of
+    // the solid bottle cylinder / object meshes from any view angle (notably from above).
+    if (has_mask && show_masks_)
+    {
+        glDisable(GL_DEPTH_TEST);
+        room_vao_.bind();
+        room_vbo_.bind();
+        room_vbo_.allocate(mask_draw_vertices.data(), static_cast<int>(mask_draw_vertices.size() * sizeof(Vertex)));
+        program_.setUniformValue("u_round_points", 1);
+        program_.setUniformValue("u_point_size", 6.0f);
+        glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(mask_draw_vertices.size()));
         program_.setUniformValue("u_point_size", 4.5f);
         room_vbo_.release();
         room_vao_.release();

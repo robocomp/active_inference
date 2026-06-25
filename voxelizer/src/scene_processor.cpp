@@ -1035,7 +1035,8 @@ void SceneProcessor::update_viewer_mask_points()
     // point ranges come from mask_support_offsets; the i-th label in mask_labels
     // ('|'-joined) owns range [offsets[i], offsets[i+1]).
     static const std::array<std::string_view, 2> kDrawnMaskLabels{"bottle", "table"};
-    std::vector<QVector3D> mask_points;
+    std::vector<QVector3D>   mask_points;
+    std::vector<std::string> mask_categories;   // parallel to mask_points → per-class colour in the viewer
     if (const auto masks_node = graph_->get_node("masks"); masks_node.has_value())
     {
         const auto& attrs = masks_node->attrs();
@@ -1060,11 +1061,14 @@ void SceneProcessor::update_viewer_mask_points()
                 const std::size_t begin = static_cast<std::size_t>(offsets[m]);
                 const std::size_t end   = static_cast<std::size_t>(offsets[m + 1]);
                 for (std::size_t i = begin; i < end and (i * 3 + 2) < flat.size(); ++i)
+                {
                     mask_points.emplace_back(flat[i * 3], flat[i * 3 + 1], flat[i * 3 + 2]);
+                    mask_categories.push_back(labels[m]);
+                }
             }
         }
     }
-    voxel_viewer_->update_mask_points(mask_points);
+    voxel_viewer_->update_mask_points(mask_points, mask_categories);
 }
 
 void SceneProcessor::update_viewer_robot_pose(const Mat::RTMat& room_T_robot)
