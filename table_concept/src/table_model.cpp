@@ -307,7 +307,7 @@ torch::Tensor fe_torch_impl(const TableModelParams& params,
     // the flat-interior degeneracy that otherwise lets the box drift/oversize at ~zero energy.
     if (params.lambda_extent > 0.0f && points_tensor.size(0) >= 8)
     {
-        const auto q = torch::tensor({0.02f, 0.98f}, points_tensor.options());
+        const auto q = torch::tensor({params.extent_pct_lo, params.extent_pct_hi}, points_tensor.options());
         const auto qx = torch::quantile(local_x, q);
         const auto qy = torch::quantile(local_y, q);
         const auto ex = (qx.index({1}) - qx.index({0})) * 0.5f;
@@ -416,6 +416,13 @@ std::array<float, 8> TableModel::observation_information(
     // so the linearisation is local but large enough to stay clear of float-cancellation noise.
     const std::array<float, 8> eps = {1e-3f, 1e-3f, 1e-3f, 1e-3f, 1e-3f, 1e-3f, 1e-3f, 1e-3f};
 
+    // (B) Clamp the finite-difference slope. The box SDF is min() over faces+legs, hence non-smooth:
+    // a point straddling a face-switch/corner makes (gp-gm) a discontinuity JUMP, so g=(gp-gm)/2eps
+    // blows up ~1000× and a single point would dominate the Fisher (→ K→1, stabiliser bypassed). For a
+    // well-behaved SDF point |∂SDF/∂θ| is O(1), so clamping the slope rejects the kink without
+    // distorting genuine curvature. 0 disables.
+    const float gmax = params_.fisher_grad_clamp;
+
     const auto base = state_.to_array();
     for (std::size_t i = 0; i < n; ++i)
     {
@@ -432,11 +439,71 @@ std::array<float, 8> TableModel::observation_information(
             minus[j] -= eps[j];
             const float gp = sdf_point_at(p, TableState::from_array(plus));
             const float gm = sdf_point_at(p, TableState::from_array(minus));
-            const float g  = (gp - gm) / (2.0f * eps[j]);   // ∂SDF/∂θ_j
+            float g  = (gp - gm) / (2.0f * eps[j]);   // ∂SDF/∂θ_j
+            if (gmax > 0.0f)
+                g = std::clamp(g, -gmax, gmax);
             info[j] += wi * inv_sigma2 * g * g;
         }
     }
     return info;
+}
+
+ExtentDiagnostics TableModel::extent_diagnostics(const std::vector<Eigen::Vector3f>& points) const
+{
+    ExtentDiagnostics diag;
+    diag.n_total = static_cast<int>(points.size());
+    if (points.empty())
+        return diag;
+
+    const float cos_t = std::cos(-state_.yaw);
+    const float sin_t = std::sin(-state_.yaw);
+    const float half_w = state_.w * 0.5f;
+    const float half_h = state_.h * 0.5f;
+    const float half_t = TOP_THICKNESS * 0.5f;
+    const float top_cz = state_.table_height - half_t;
+    const float leg_cz = state_.leg_length * 0.5f;
+    const float leg_hh = state_.leg_length * 0.5f;
+    const float inset  = state_.leg_inset;
+    const float leg_offsets[4][2] = {
+        { half_w - inset,  half_h - inset}, {-half_w + inset,  half_h - inset},
+        {-half_w + inset, -half_h + inset}, { half_w - inset, -half_h + inset}};
+
+    std::vector<float> lx, ly;
+    lx.reserve(points.size());
+    ly.reserve(points.size());
+    for (const auto& p : points)
+    {
+        const float px = p.x() - state_.cx, py = p.y() - state_.cy;
+        const float local_x = px * cos_t - py * sin_t;
+        const float local_y = px * sin_t + py * cos_t;
+        lx.push_back(local_x);
+        ly.push_back(local_y);
+
+        // Attribution: which face of the compound SDF min(top, legs) is nearest this point?
+        const float sdf_top = box_sdf(std::abs(local_x) - half_w, std::abs(local_y) - half_h,
+                                      std::abs(p.z() - top_cz) - half_t);
+        float sdf_leg = std::numeric_limits<float>::max();
+        for (const auto& off : leg_offsets)
+            sdf_leg = std::min(sdf_leg, cylinder_sdf(local_x - off[0], local_y - off[1],
+                                                     p.z() - leg_cz, LEG_RADIUS, leg_hh));
+        (sdf_top <= sdf_leg ? diag.n_top : diag.n_leg) += 1;
+    }
+
+    const std::array<std::pair<float, float>, 3> qs = {{{0.02f, 0.98f}, {0.05f, 0.95f}, {0.10f, 0.90f}}};
+    for (int k = 0; k < 3; ++k)
+    {
+        std::vector<float> cx = lx, cy = ly;   // percentile_inplace consumes its argument
+        const float xlo = percentile_inplace(cx, qs[k].first);
+        std::vector<float> cx2 = lx;
+        const float xhi = percentile_inplace(cx2, qs[k].second);
+        const float ylo = percentile_inplace(cy, qs[k].first);
+        std::vector<float> cy2 = ly;
+        const float yhi = percentile_inplace(cy2, qs[k].second);
+        diag.half_ex[k] = 0.5f * (xhi - xlo);
+        diag.half_ey[k] = 0.5f * (yhi - ylo);
+        if (k == 0) { diag.off_x = 0.5f * (xhi + xlo); diag.off_y = 0.5f * (yhi + ylo); }
+    }
+    return diag;
 }
 
 // ─── Free Energy ─────────────────────────────────────────────────────────────

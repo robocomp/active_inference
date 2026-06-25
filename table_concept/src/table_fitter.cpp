@@ -5,6 +5,7 @@
 #include "table_fitter.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <print>
 #include <unordered_map>
@@ -403,7 +404,8 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
     }
 
     const float free_energy = step_model_update(inst, observation.residual_pts,
-                                                observation.candidate_pts, residual_precision);
+                                                observation.candidate_pts, residual_precision,
+                                                observation.has_fresh_data);
 
     // Active-perception aids for the controller's lock-on search: where the model projects in the
     // image (centring target) + whether YOLO is currently firing here (dwell/lock signal).
@@ -510,6 +512,10 @@ void TableFitter::log_fisher_csv(const TableInstance& inst, bool fresh, float fr
         for (const auto* d : kDof) fisher_csv_ << ",raw_"   << d;   // un-normalised accumulated precision Σ⁻¹
         for (const auto* d : kDof) fisher_csv_ << ",std_"   << d;   // posterior std (mm for lengths, mrad for yaw); -1 = unobserved
         for (const auto* d : kDof) fisher_csv_ << ",gain_"  << d;   // per-DOF Kalman acceptance gain (the calibrated stiffness)
+        // Size-bias diagnostic: observed half-extent at 3 percentile pairs vs fitted half-w/h
+        // (= state_w/2, state_h/2), the 2-98 span's local centre offset, and the top/leg point split.
+        fisher_csv_ << ",ext_hw02,ext_hh02,ext_hw05,ext_hh05,ext_hw10,ext_hh10"
+                    << ",ext_offx,ext_offy,n_top,n_leg,n_pts";
         fisher_csv_ << '\n';
     }
 
@@ -528,6 +534,12 @@ void TableFitter::log_fisher_csv(const TableInstance& inst, bool fresh, float fr
         fisher_csv_ << ',' << (prec > 1e-6f ? 1000.0f / std::sqrt(prec) : -1.0f);
     }
     for (int j = 0; j < 8; ++j) fisher_csv_ << ',' << inst.last_kalman_gain[j];
+    const auto& ed = inst.last_extent_diag;
+    fisher_csv_ << ',' << ed.half_ex[0] << ',' << ed.half_ey[0]
+                << ',' << ed.half_ex[1] << ',' << ed.half_ey[1]
+                << ',' << ed.half_ex[2] << ',' << ed.half_ey[2]
+                << ',' << ed.off_x << ',' << ed.off_y
+                << ',' << ed.n_top << ',' << ed.n_leg << ',' << ed.n_total;
     fisher_csv_ << '\n';
     fisher_csv_.flush();   // flush each row so a plot can tail the file during a live run
 }
@@ -559,7 +571,8 @@ void TableFitter::step_queue_update(TableInstance& inst,
 float TableFitter::step_model_update(TableInstance& inst,
                                      const std::vector<Eigen::Vector3f>& residual_pts,
                                      const std::vector<Eigen::Vector3f>& current_pts,
-                                     float residual_precision)
+                                     float residual_precision,
+                                     bool fresh_observation)
 {
     const TableState previous_state = inst.model.state();
 
@@ -571,8 +584,24 @@ float TableFitter::step_model_update(TableInstance& inst,
         return inst.model.compute_free_energy({}, {});
     }
 
-    evolve_table_belief(inst, evidence);
-    const float free_energy = accept_table_belief(inst, previous_state, evidence);
+    float free_energy;
+    if (cfg_.freeze_belief_on_stale and not fresh_observation)
+    {
+        // (A) No new measurement → don't update the belief. Re-optimising the same frozen anchor set
+        // every cycle and re-accepting through a noisy per-frame Kalman gain is exactly what injects
+        // jitter into the accepted state and FE. The information-filter axiom: no observation, no
+        // update. Recompute FE at the unchanged state for reporting only (queue weights still age, so
+        // this drifts only as slowly as the anchor mass decays — not the per-cycle re-fit noise).
+        inst.last_fe_terms = inst.model.compute_free_energy_decomposition(
+            evidence.eval_pts, evidence.eval_weights,
+            static_cast<std::size_t>(evidence.historical_anchor_count));
+        free_energy = inst.last_fe_terms.total_fe;
+    }
+    else
+    {
+        evolve_table_belief(inst, evidence);
+        free_energy = accept_table_belief(inst, previous_state, evidence);
+    }
     refresh_table_memory(inst);
     inst.last_queue_metrics = inst.queue.metrics();
 
@@ -591,12 +620,33 @@ float TableFitter::step_model_update(TableInstance& inst,
     return free_energy;
 }
 
+std::vector<Eigen::Vector3f> TableFitter::gate_to_top_band(
+    const std::vector<Eigen::Vector3f>& pts, const TableModel& model) const
+{
+    if (!cfg_.top_band_gate_enabled)
+        return pts;
+    const float H    = model.state().table_height;
+    const float band = std::max(0.0f, cfg_.top_band_m);
+    std::vector<Eigen::Vector3f> out;
+    out.reserve(pts.size());
+    for (const auto& p : pts)
+        if (std::abs(p.z() - H) <= band)
+            out.push_back(p);
+    return out;
+}
+
 TableFitter::TableBeliefEvidence TableFitter::compose_belief_evidence(
     const TableInstance& inst,
-    const std::vector<Eigen::Vector3f>& residual_pts,
-    const std::vector<Eigen::Vector3f>& current_pts,
+    const std::vector<Eigen::Vector3f>& residual_pts_in,
+    const std::vector<Eigen::Vector3f>& current_pts_in,
     float residual_precision) const
 {
+    // Gate the live observation streams to the table-top band before they enter the fit/extent so
+    // off-surface points (floor/under-table/clutter) can't inflate w/h or corrupt the leg/height fit.
+    // The queue anchors are already SDF-filtered near the surface, so they're left untouched.
+    const std::vector<Eigen::Vector3f> residual_pts = gate_to_top_band(residual_pts_in, inst.model);
+    const std::vector<Eigen::Vector3f> current_pts  = gate_to_top_band(current_pts_in, inst.model);
+
     TableBeliefEvidence evidence;
     evidence.fit_pts = inst.queue.points();
     evidence.fit_weights = inst.queue.weights();
@@ -707,13 +757,23 @@ float TableFitter::accept_table_belief(TableInstance& inst,
     {
         const float q_len = cfg_.fisher_process_std_m   * cfg_.fisher_process_std_m;
         const float q_ang = cfg_.fisher_process_std_yaw * cfg_.fisher_process_std_yaw;
+        const float vh    = std::max(1e-3f, cfg_.fisher_views_half);
         for (int j = 0; j < 8; ++j)
         {
             const float q     = (j == 6) ? q_ang : q_len;
             const float Yprev = inst.fisher_info_raw[j];
             const float Ypred = 1.0f / (1.0f / std::max(Yprev, 1e-9f) + q);
             const float oi    = inst.last_obs_info[j];
-            inst.last_kalman_gain[j] = (oi > 0.0f) ? oi / (Ypred + oi) : 0.0f;
+            float k = (oi > 0.0f) ? oi / (Ypred + oi) : 0.0f;
+            // (C) Maturity stiffening: the per-frame Kalman gain alone lets a single high-info frame move
+            // a well-seen DOF — the Q-bleed caps the accumulated precision at ~one frame's worth, so one
+            // measurement rivals all of history. Scale the gain down by the accumulated observation info
+            // (fisher_info = normalised "equivalent views", read BEFORE this frame's update in
+            // run_inference), so a mature DOF barely moves regardless of one noisy frame while an
+            // unobserved DOF (info≈0 → factor≈1) stays plastic. Disabled → pure per-frame gain (A/B).
+            if (cfg_.fisher_maturity_stiffness)
+                k *= vh / (vh + inst.fisher_info[j]);
+            inst.last_kalman_gain[j] = k;
         }
     }
 
@@ -745,6 +805,9 @@ float TableFitter::accept_table_belief(TableInstance& inst,
     // Do NOT update prior_ to accepted_state — keep prior anchored to the previous frame's state so
     // the state-transition prior (lambda_state/pos/angle) acts as a true per-frame dampener.
 
+    // Footprint-extent / point-attribution diagnostic at the accepted state (for the w/h size bias).
+    inst.last_extent_diag = inst.model.extent_diagnostics(evidence.eval_pts);
+
     inst.last_fe_terms = inst.model.compute_free_energy_decomposition(
         evidence.eval_pts, evidence.eval_weights,
         static_cast<std::size_t>(evidence.historical_anchor_count));
@@ -772,11 +835,13 @@ void TableFitter::refresh_table_memory(TableInstance& inst)
 
 // ─── RGB-mask silhouette ──────────────────────────────────────────────────────
 
-std::optional<Eigen::Matrix4d> TableFitter::room_T_zed_matrix() const
+std::optional<Eigen::Matrix4d> TableFitter::room_T_zed_matrix(std::uint64_t pose_ts_ms) const
 {
     if (not inner_eigen_)
         return std::nullopt;
-    const auto rtb = inner_eigen_->get_transformation_matrix("room", "body", 0);
+    // Pin the moving room→body hop to the frame's capture stamp (Nearest); keep the rigid body→zed mount
+    // at latest (it carries only a bootstrap stamp — a pinned query would fail). ts=0 → current pose.
+    const auto rtb = inner_eigen_->get_transformation_matrix("room", "body", pose_ts_ms);
     const auto btz = inner_eigen_->get_transformation_matrix("body", "zed", 0);
     if (not (rtb.has_value() and btz.has_value()))
         return std::nullopt;
@@ -809,7 +874,10 @@ void TableFitter::feed_silhouette(TableInstance& inst)
         or slice->pixel_end > packet.mask_pixels.size())
         return;
 
-    const auto Mopt = room_T_zed_matrix();   // room_T_zed (camera→room)
+    // Back-project the contour through the pose AT THE MASK'S CAPTURE TIME, not the current pose — a
+    // moving base between capture and consumption would otherwise cast the rays from the wrong origin
+    // and bias the silhouette pull on w/h/yaw/pos. ts=0 (old producer) → falls back to the current pose.
+    const auto Mopt = room_T_zed_matrix(packet.timestamp_ms);   // room_T_zed (camera→room) at capture time
     if (not Mopt.has_value())
         return;
     const Eigen::Matrix4d& M = Mopt.value();
@@ -848,6 +916,18 @@ void TableFitter::feed_silhouette(TableInstance& inst)
     };
     for (const auto& [r, mm] : row_mm) { add(mm.first, static_cast<float>(r)); add(mm.second, static_cast<float>(r)); }
     for (const auto& [c, mm] : col_mm) { add(static_cast<float>(c), mm.first); add(static_cast<float>(c), mm.second); }
+
+    // Report how stale the consumed mask is: lag from its capture stamp to now (same wall-clock epoch as
+    // the producer's frame stamp). A large lag while the base is moving is exactly what the capture-time
+    // pose pinning above corrects — this quantifies how much it's buying. Throttled; only with a stamp.
+    if (packet.timestamp_ms > 0 and should_log_table(inst))
+    {
+        const auto now_ms = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+        const long long lag_ms = static_cast<long long>(now_ms) - static_cast<long long>(packet.timestamp_ms);
+        std::print("[{}] silhouette: mask capture→now lag={} ms (pose pinned to capture) rays={}\n",
+                   inst.node_name, lag_ms, dirs.size());
+    }
 
     if (not dirs.empty())
         inst.model.set_silhouette(C, std::move(dirs), slice->confidence);
@@ -1000,6 +1080,8 @@ TableModelParams TableFitter::make_model_params() const
     p.lambda_size        = cfg_.lambda_size;
     p.lambda_pos         = cfg_.lambda_pos;
     p.lambda_extent      = cfg_.lambda_extent;
+    p.extent_pct_lo      = cfg_.extent_pct_lo;
+    p.extent_pct_hi      = cfg_.extent_pct_hi;
     p.lambda_state       = cfg_.lambda_state;
     p.lambda_angle       = cfg_.lambda_angle;
     p.prior_size_std     = cfg_.prior_size_std;
@@ -1013,6 +1095,7 @@ TableModelParams TableFitter::make_model_params() const
     p.robust_gnc_start_scale = cfg_.robust_gnc_start_scale;
     p.mask_precision     = cfg_.mask_precision;
     p.sil_tangent_samples = cfg_.sil_tangent_samples;
+    p.fisher_grad_clamp  = cfg_.fisher_grad_clamp;
     return p;
 }
 

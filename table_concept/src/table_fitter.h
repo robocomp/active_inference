@@ -118,7 +118,8 @@ private:
     float step_model_update(TableInstance& inst,
                             const std::vector<Eigen::Vector3f>& residual_pts,
                             const std::vector<Eigen::Vector3f>& current_pts,
-                            float residual_precision);
+                            float residual_precision,
+                            bool fresh_observation);
     TableBeliefEvidence compose_belief_evidence(const TableInstance& inst,
                                                 const std::vector<Eigen::Vector3f>& residual_pts,
                                                 const std::vector<Eigen::Vector3f>& current_pts,
@@ -132,7 +133,10 @@ private:
     // RGB-mask silhouette: back-project the table mask contour to room-frame rays and hand them to
     // the model for its differentiable silhouette term. No-op if mask_precision<=0 or no camera.
     void feed_silhouette(TableInstance& inst);
-    std::optional<Eigen::Matrix4d> room_T_zed_matrix() const;
+    // room_T_zed (camera→room). pose_ts_ms pins the room→body hop to the mask's capture time (Nearest RT
+    // query) so a moving base doesn't back-project a stale contour through the current pose; the rigid
+    // body→zed mount is always queried latest. 0 → current pose (no timestamp available).
+    std::optional<Eigen::Matrix4d> room_T_zed_matrix(std::uint64_t pose_ts_ms = 0) const;
     // Project the current model through the camera extrinsic → normalised in-image ROI (centre
     // offset + fill), stored on the instance for the controller's centring/dwell lock-on search.
     void compute_projected_roi(TableInstance& inst);
@@ -143,6 +147,11 @@ private:
 
     TableModelParams  make_model_params() const;
     SampleQueueParams make_queue_params() const;
+
+    // Keep only points within ±cfg_.top_band_m of the model's estimated table-top height — drops the
+    // floor/under-table/clutter population before the fit/extent terms. Identity if the gate is off.
+    std::vector<Eigen::Vector3f> gate_to_top_band(const std::vector<Eigen::Vector3f>& pts,
+                                                  const TableModel& model) const;
 
     // Append one row of Fisher-filter evolution (state + per-DOF obs/accumulated info + posterior
     // std) to cfg_.fisher_csv_path. No-op if the path is empty. Lazily opens + writes the header.

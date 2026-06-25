@@ -232,7 +232,7 @@ void SpecificWorker::initialize()
     inner_eigen_ = G->get_inner_eigen_api();
     mask_ingestor_ = std::make_unique<rc::MaskIngestor>(G);
     scene_graph_ = std::make_unique<rc::TableSceneGraph>(
-        G, rt_api_.get(), [this] { trigger_graph_layout_twopi(); });
+        G, rt_api_.get(), cfg_, [this] { trigger_graph_layout_twopi(); });
 
     // Subscribe to graph signals
     connect(G.get(), &DSR::DSRGraph::update_node_signal,
@@ -261,7 +261,8 @@ void SpecificWorker::initialize()
     // provide some table evidence in the current scene.
 
     // Build rc::EpistemicPlanner with configured parameters
-    epistemic_planner_ = rc::EpistemicPlanner(cfg_.delta_min, cfg_.gain_threshold, cfg_.obs_distance);
+    epistemic_planner_ = rc::EpistemicPlanner(cfg_.delta_min, cfg_.gain_threshold, cfg_.obs_distance,
+                                              cfg_.epistemic_use_info_gain, cfg_.epistemic_min_info_gain);
 
     // Remove stale affordance nodes created by this agent only.
     // Keep foreign affordance nodes untouched.
@@ -451,17 +452,11 @@ void SpecificWorker::publish_table_intentions(rc::TableInstance& inst,
                                               const TableObservation& observation,
                                               float free_energy)
 {
-    if (inst.last_coverage_deficit > 0.f)
-    {
-        auto node_opt = G->get_node(node_id);
-        if (node_opt.has_value())
-            step_epistemic(inst, node_opt.value());
-    }
-    else if (inst.affordance.is_active())
-    {
-        // All faces covered — remove the epistemic action request
-        inst.affordance.remove();
-    }
+    // step_epistemic now owns the propose-vs-withdraw decision via the planner's ΔH (it withdraws
+    // when the expected information gain falls below threshold), so it runs unconditionally rather
+    // than being gated on the legacy coverage-deficit proxy.
+    if (auto node_opt = G->get_node(node_id); node_opt.has_value())
+        step_epistemic(inst, node_opt.value());
 
     if (observation.has_fresh_data)
     {
@@ -551,9 +546,44 @@ void SpecificWorker::step_convergence(rc::TableInstance& inst,
 
 void SpecificWorker::step_epistemic(rc::TableInstance& inst, DSR::Node& node)
 {
-    const auto prop = epistemic_planner_.compute(inst.model, inst.queue);
+    if (inst.epistemic_cooldown > 0)
+        --inst.epistemic_cooldown;
+
+    const auto prop = epistemic_planner_.compute(inst.model, inst.queue, inst.fisher_info_raw);
     if (not prop.valid)
+    {
+        // ΔH fell below the WITHDRAW threshold ⇒ nothing left to learn. Withdraw the affordance (even
+        // mid-execution) so the controller releases its claim and the grounded EFE selection hands off
+        // (belief→knowledge governor). Latch "satisfied" + start the cooldown so it can't immediately
+        // re-offer.
+        if (inst.affordance.is_active())
+        {
+            inst.affordance.remove();
+            std::print("[{}] epistemic ΔH below threshold → withdrew affordance (belief→knowledge)\n",
+                       inst.node_name);
+        }
+        inst.epistemic_satisfied = true;
+        inst.epistemic_cooldown  = cfg_.epistemic_cooldown_cycles;
+        inst.epistemic_pending   = false;
         return;
+    }
+
+    // Schmitt hysteresis: a satisfied table stays withdrawn until the cooldown elapses AND ΔH climbs
+    // back above the (higher) re-arm threshold — this is what breaks the withdraw/re-offer limit cycle
+    // (the table re-proposing the instant ΔH jitters back over the low withdraw threshold).
+    if (inst.epistemic_satisfied)
+    {
+        if (inst.epistemic_cooldown > 0 || prop.epistemic_gain < cfg_.epistemic_rearm_info_gain)
+        {
+            if (inst.affordance.is_active())
+                inst.affordance.remove();
+            inst.epistemic_pending = false;
+            return;
+        }
+        inst.epistemic_satisfied = false;   // genuinely uncertain again → re-arm
+        std::print("[{}] epistemic re-armed: ΔH={:.2f} > {:.2f} nats\n",
+                   inst.node_name, prop.epistemic_gain, cfg_.epistemic_rearm_info_gain);
+    }
 
     if (not prop.is_finite())
     {

@@ -44,16 +44,24 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.obs_distance             = getf("TableConcept.ObsDistance",            1.8f);
     out.delta_min                = getf("TableConcept.DeltaMin",               20.0f);
     out.gain_threshold           = getf("TableConcept.GainThreshold",          0.1f);
+    out.epistemic_use_info_gain  = getb("TableConcept.EpistemicInfoGain",      true);
+    out.epistemic_min_info_gain  = getf("TableConcept.EpistemicMinInfoGain",   0.3f);
+    out.epistemic_rearm_info_gain= getf("TableConcept.EpistemicRearmInfoGain", 5.0f);
+    out.epistemic_cooldown_cycles= geti("TableConcept.EpistemicCooldownCycles", 200);
     out.table_log_period_frames  = geti("TableConcept.TableLogPeriodFrames",   30);
     out.voxel_bank_max_points    = geti("TableConcept.VoxelBankMaxPoints",     4000);
     out.voxel_bank_quantization_m= getf("TableConcept.VoxelBankQuantizationM", 0.02f);
     out.voxel_select_radius_margin_m = getf("TableConcept.VoxelSelectRadiusMarginM", 0.50f);
     out.voxel_select_height_margin_m = getf("TableConcept.VoxelSelectHeightMarginM", 0.25f);
+    out.top_band_gate_enabled    = getb("TableConcept.TopBandGate",            false);
+    out.top_band_m               = getf("TableConcept.TopBandM",               0.08f);
 
     // TableModel
     out.sigma_obs          = getf("TableModel.SigmaObs",          0.05f);
     out.lambda_size        = getf("TableModel.LambdaSize",        0.15f);
     out.lambda_extent      = getf("TableModel.LambdaExtent",      2.0f);
+    out.extent_pct_lo      = getf("TableModel.ExtentPctLo",       0.05f);
+    out.extent_pct_hi      = getf("TableModel.ExtentPctHi",       0.95f);
     out.lambda_pos         = getf("TableModel.LambdaPos",         0.05f);
     out.lambda_state       = getf("TableModel.LambdaState",       0.02f);
     out.lambda_angle       = getf("TableModel.LambdaAngle",       0.01f);
@@ -111,7 +119,13 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.fisher_info_decay             = getf("WarmStart.FisherInfoDecay",          1.0f);
     out.fisher_process_std_m          = getf("WarmStart.FisherProcessStdM",        0.005f);
     out.fisher_process_std_yaw        = getf("WarmStart.FisherProcessStdYaw",      0.01f);
+    out.freeze_belief_on_stale        = getb("WarmStart.FreezeBeliefOnStale",      true);
+    out.fisher_grad_clamp             = getf("WarmStart.FisherGradClamp",          2.0f);
+    out.fisher_maturity_stiffness     = getb("WarmStart.FisherMaturityStiffness",  true);
+    out.fisher_views_half             = getf("WarmStart.FisherViewsHalf",          4.0f);
     out.fisher_csv_path               = gets("WarmStart.FisherCsvPath",            "");
+    out.rt_cov_upload                 = getb("WarmStart.RtCovUpload",              true);
+    out.rt_cov_scale                  = getf("WarmStart.RtCovScale",              1.0f);
     out.warm_lambda_pos_base          = getf("WarmStart.LambdaPosBase",           0.15f);
     out.warm_lambda_pos_gain          = getf("WarmStart.LambdaPosGain",           0.45f);
     out.warm_lambda_size_base         = getf("WarmStart.LambdaSizeBase",          0.02f);

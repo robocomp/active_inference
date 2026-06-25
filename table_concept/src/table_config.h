@@ -34,12 +34,27 @@ struct TableConfig
     float write_threshold   = 1e-3f;   // min ‖Δθ‖ before writing RT to DSR
     float obs_distance      = 1.8f;    // d_obs for epistemic planner
     float delta_min         = 20.0f;   // min face coverage count
-    float gain_threshold    = 0.1f;    // min ΔH for epistemic proposal
+    float gain_threshold    = 0.1f;    // min gain for the legacy coverage-deficit epistemic proxy
+    // Epistemic info-gain selection: score faces by the expected entropy reduction ΔH from the Fisher
+    // posterior (Σ) instead of the coverage-deficit proxy, and pick the most informative face.
+    bool  epistemic_use_info_gain = true;
+    float epistemic_min_info_gain = 0.3f;   // WITHDRAW threshold: ΔH (nats) below which the affordance is dropped
+    // Schmitt hysteresis (anti-oscillation): a satisfied table stays withdrawn for cooldown cycles AND
+    // until ΔH climbs back above the re-arm threshold (> withdraw), so it can't re-offer the instant ΔH
+    // crosses the low withdraw threshold again.
+    float epistemic_rearm_info_gain = 5.0f;   // ΔH (nats) above which a satisfied table re-arms
+    int   epistemic_cooldown_cycles = 200;    // min cycles withdrawn after satisfaction
     int   table_log_period_frames = 30;
     int   voxel_bank_max_points = 4000;
     float voxel_bank_quantization_m = 0.02f;
     float voxel_select_radius_margin_m = 0.50f;
     float voxel_select_height_margin_m = 0.25f;
+    // Top-band point gate: before the fit/extent terms, keep only points within ±top_band_m of the
+    // estimated table-top height, dropping the floor / under-table / clutter population that is
+    // attributed to legs and inflates the w/h footprint (and corrupts the leg/height fit). Off by
+    // default; the extent diagnostic (n_top/n_leg, observed span vs fitted) shows whether it helps.
+    bool  top_band_gate_enabled = false;
+    float top_band_m            = 0.08f;   // half-width of the top-surface membership band (m)
 
     // TableModel parameters (forwarded to TableModelParams)
     float sigma_obs         = 0.05f;
@@ -48,6 +63,8 @@ struct TableConfig
     float lambda_state      = 0.02f;
     float lambda_angle      = 0.01f;
     float lambda_extent     = 2.0f;   // footprint-extent term: fit top rectangle to point span
+    float extent_pct_lo     = 0.05f;  // lower percentile of the point span the extent term pins to
+    float extent_pct_hi     = 0.95f;  // upper percentile (tighter pair trims the depth-noise edge margin)
     float prior_size_std    = 0.30f;
     int   optimization_iters = 10;
     float optimization_lr   = 0.05f;
@@ -107,7 +124,32 @@ struct TableConfig
     // process-noise std in each DOF's native units; variance Q = std².
     float fisher_process_std_m         = 0.005f;  // length DOFs (cx,cy,w,h,H,leg,inset): 5 mm / fresh frame
     float fisher_process_std_yaw       = 0.01f;   // yaw: ~0.57° / fresh frame
+    // (A) Freeze-on-stale: the information-filter axiom — no measurement, no update. When no fresh mask
+    // arrives this cycle, do NOT gradient-step or re-accept the belief (which would re-optimise the same
+    // frozen anchor set and amplify noise into the accepted state/FE); just recompute FE at the unchanged
+    // state for reporting. Set false to restore the legacy every-cycle re-fit (for A/B).
+    bool  freeze_belief_on_stale       = true;
+    // (B) Fisher-gradient clamp: observation_information builds the per-DOF Fisher via a central finite
+    // difference of the NON-smooth min() box-SDF. A point sitting on a face-switch/corner makes the
+    // difference a discontinuity JUMP, not a derivative, spiking |∂SDF/∂θ| by ~1000× → a single point
+    // forces the Kalman gain K→1 and bypasses all accumulated stabilisation. For a well-behaved SDF
+    // |∂SDF/∂θ| is O(1); clamp the per-point slope to this bound before squaring. 0 = disabled (for A/B).
+    float fisher_grad_clamp            = 2.0f;
+    // (C) Maturity stiffening: scale the per-frame Kalman acceptance gain by vh/(vh + accumulated_views),
+    // so a well-observed DOF (many equivalent views) barely moves on any single frame — history dominates
+    // a lone noisy measurement — while an unseen DOF (views≈0 → factor≈1) stays fully plastic. The
+    // accumulated-views signal is the normalised Fisher accumulator (fisher_info[j]). false → pure
+    // per-frame Kalman gain (for A/B); requires KalmanGainStiffness to have any effect.
+    bool  fisher_maturity_stiffness    = true;
+    float fisher_views_half            = 4.0f;    // equivalent-views at which the maturity stiffener halves the gain (lower = hardens faster)
     std::string fisher_csv_path        = "";      // if non-empty, append per-cycle Fisher-filter evolution to this CSV (for plotting)
+    // Upload the table pose covariance onto the room→table RT edge (rt_covariance_att, 6×6 SE3),
+    // built from the Fisher filter's per-DOF posterior precision (var = rt_cov_scale / fisher_info_raw):
+    // x←cx, y←cy, z←H/2, yaw←ψ are data-driven; roll/pitch are unobservable (large). rt_cov_scale
+    // calibrates the raw curvature toward NEES≈1 (raw precision over-counts spatially-correlated
+    // points), like bottle_concept's cov_eff_scale. Written only when the geometry is (re)published.
+    bool  rt_cov_upload = true;
+    float rt_cov_scale  = 1.0f;
     float warm_lambda_pos_base         = 0.15f;
     float warm_lambda_pos_gain         = 0.45f;
     float warm_lambda_size_base        = 0.02f;

@@ -47,6 +47,7 @@ public:
     {
         bool valid = false;
         int frame_id = -1;
+        std::uint64_t timestamp_ms = 0;   // capture stamp of the source RGBD frame (0 = producer didn't publish one)
         std::vector<MaskSlice> slices;
         std::vector<Eigen::Vector3f> support_points;
         std::vector<Eigen::Vector2f> mask_pixels;   // raw YOLO foreground (col,row), depth-independent

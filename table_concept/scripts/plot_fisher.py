@@ -29,6 +29,8 @@ def main() -> int:
     ap.add_argument("--node", default=None, help="table node to plot (default: all nodes)")
     ap.add_argument("--info-half", type=float, default=20.0,
                     help="WarmStart.InfoHalf (draws the gain-halving knee on panel 2)")
+    ap.add_argument("--gt-w", type=float, default=1.5, help="ground-truth width (m) for panel 1")
+    ap.add_argument("--gt-h", type=float, default=1.4, help="ground-truth depth (m) for panel 1")
     ap.add_argument("--save", default=None, help="write the figure to this path instead of showing")
     args = ap.parse_args()
 
@@ -46,6 +48,22 @@ def main() -> int:
             continue
         fresh = d[d["fresh"] == 1]
 
+        # Size-bias diagnostic (printed if the extent columns are present): is the w/h over-estimate
+        # the model overshooting the data, or off-table margin points inflating the observed span?
+        if "ext_hw02" in d.columns and not fresh.empty:
+            late = fresh.tail(60)
+            fw, fh = late["state_w"] / 2, late["state_h"] / 2          # fitted half-extents
+            legfrac = late["n_leg"] / late["n_pts"].clip(lower=1)
+            print(f"\n[{node}] extent diagnostic (late {len(late)} fresh frames, half-extents in m):")
+            print(f"  fitted   half_w={fw.mean():.3f}  half_h={fh.mean():.3f}   (state_w={2*fw.mean():.3f} state_h={2*fh.mean():.3f})")
+            for tag, lo in (("2-98", "02"), ("5-95", "05"), ("10-90", "10")):
+                ex, ey = late[f"ext_hw{lo}"].mean(), late[f"ext_hh{lo}"].mean()
+                print(f"  observed {tag:>5} span: half_x={ex:.3f}  half_y={ey:.3f}   "
+                      f"(Δ vs fit: x={2*(fw.mean()-ex):+.3f} y={2*(fh.mean()-ey):+.3f})")
+            print(f"  2-98 span local centre offset: x={late['ext_offx'].mean():+.3f} y={late['ext_offy'].mean():+.3f}")
+            print(f"  point split: top={1-legfrac.mean():.1%}  leg={legfrac.mean():.1%}  "
+                  f"(n≈{int(late['n_pts'].mean())}/frame)")
+
         fig, ax = plt.subplots(2, 2, figsize=(14, 9), sharex=True)
         fig.suptitle(f"Fisher information filter — {node}", fontsize=13)
 
@@ -53,9 +71,11 @@ def main() -> int:
         a = ax[0, 0]
         a.plot(d["cycle"], d["state_w"], label="w", color="C0")
         a.plot(d["cycle"], d["state_h"], label="h", color="C1")
+        a.axhline(args.gt_w, color="C0", ls="--", lw=1, alpha=0.7, label=f"GT w={args.gt_w:g}")
+        a.axhline(args.gt_h, color="C1", ls="--", lw=1, alpha=0.7, label=f"GT h={args.gt_h:g}")
         a.set_ylabel("state (m)")
         a.set_title("1. Dimensions settling")
-        a.legend(loc="best"); a.grid(alpha=0.3)
+        a.legend(loc="best", fontsize=8); a.grid(alpha=0.3)
 
         # 2) The stiffness controller: per-DOF Kalman gain if present (calibrated), else the
         #    legacy normalised accumulator vs the InfoHalf knee.

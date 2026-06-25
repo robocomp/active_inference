@@ -18,8 +18,9 @@ namespace rc {
 
 TableSceneGraph::TableSceneGraph(std::shared_ptr<DSR::DSRGraph> graph,
                                  DSR::RT_API* rt_api,
+                                 const TableConfig& cfg,
                                  std::function<void()> relayout)
-    : G_(std::move(graph)), rt_api_(rt_api), relayout_(std::move(relayout))
+    : G_(std::move(graph)), rt_api_(rt_api), cfg_(cfg), relayout_(std::move(relayout))
 {}
 
 void TableSceneGraph::scaffold_missing_table_nodes(const std::vector<TablePrior>& priors,
@@ -136,15 +137,34 @@ void TableSceneGraph::step_write_model(TableInstance& inst, DSR::Node& node,
 {
     const auto& s = inst.model.state();
 
-    // Geometry attributes
-    G_->add_or_modify_attrib_local<width_m_att> (node, s.w);
-    G_->add_or_modify_attrib_local<depth_m_att> (node, s.h);
-    G_->add_or_modify_attrib_local<height_m_att>(node, s.table_height);
-    G_->add_or_modify_attrib_local<free_energy_att>(node, free_energy);
-    G_->add_or_modify_attrib_local<model_generation_att>(node, ++inst.model_generation);
+    // Publish gate: only (re)write the geometry + mesh when the fitted dims/pose moved beyond a few
+    // mm / mrad since the last publish. The voxelizer renders the MESH attribute (not the coarsely
+    // dead-banded RT pose), rebuilt here every cycle from the raw fit — so writing it from the
+    // sub-cm oscillating state each frame makes the viewer table JITTER even though room→table is
+    // static. Freezing the mesh once settled removes the jitter. Mirrors bottle_concept's pub gate.
+    constexpr float kPosEps = 0.003f;   // 3 mm
+    constexpr float kYawEps = 0.005f;   // ~0.3°
+    const bool geometry_changed =
+        std::abs(s.cx - inst.last_pub_cx) > kPosEps or
+        std::abs(s.cy - inst.last_pub_cy) > kPosEps or
+        std::abs(s.w  - inst.last_pub_w)  > kPosEps or
+        std::abs(s.h  - inst.last_pub_h)  > kPosEps or
+        std::abs(s.table_height - inst.last_pub_H) > kPosEps or
+        std::abs(static_cast<float>(std::remainder(s.yaw - inst.last_pub_yaw, 2.0 * M_PI))) > kYawEps;
 
-    // Mesh for the voxelizer 3D viewer
-    write_table_mesh(inst, node);
+    // Geometry attributes + mesh (gated to kill the viewer jitter once settled).
+    if (geometry_changed)
+    {
+        G_->add_or_modify_attrib_local<width_m_att> (node, s.w);
+        G_->add_or_modify_attrib_local<depth_m_att> (node, s.h);
+        G_->add_or_modify_attrib_local<height_m_att>(node, s.table_height);
+        G_->add_or_modify_attrib_local<model_generation_att>(node, ++inst.model_generation);
+        write_table_mesh(inst, node);   // mesh for the voxelizer 3D viewer
+        inst.last_pub_cx = s.cx; inst.last_pub_cy = s.cy;
+        inst.last_pub_w  = s.w;  inst.last_pub_h  = s.h;
+        inst.last_pub_H  = s.table_height; inst.last_pub_yaw = s.yaw;
+    }
+    G_->add_or_modify_attrib_local<free_energy_att>(node, free_energy);
 
     // Export the current historical RFE queue (remembered evidence) as XYZ triples.
     {
@@ -189,6 +209,51 @@ void TableSceneGraph::step_write_model(TableInstance& inst, DSR::Node& node,
     G_->update_node(node);
 
     write_rt_pose(room_id, inst);
+    // Upload the table pose covariance after the pose write (so a rare >5 cm RT recreate doesn't
+    // clobber it). `force` on a geometry republish; otherwise the write self-gates on a meaningful
+    // uncertainty change, so a stationary-but-tightening table stays current without edge churn.
+    write_rt_covariance(room_id, inst, geometry_changed);
+}
+
+void TableSceneGraph::write_rt_covariance(std::uint64_t room_id, TableInstance& inst, bool force)
+{
+    if (not cfg_.rt_cov_upload or room_id == 0)
+        return;
+
+    // Per-DOF accumulated precision from the Fisher filter: [cx,cy,w,h,H,leg,yaw,inset].
+    const auto& Y = inst.fisher_info_raw;
+    const float scale = std::max(1e-6f, cfg_.rt_cov_scale);
+    constexpr float big = 1e3f;   // unobservable / never-seen DOF → large variance
+    const auto var = [&](int j) -> float { return Y[j] > 1e-6f ? scale / Y[j] : big; };
+
+    const float vx = var(0), vy = var(1), vz = 0.25f * var(4), vyaw = var(6);   // data-driven DOFs
+
+    // Self-gate on the data-driven trace: write on a geometry republish (force) OR when the
+    // uncertainty moved >5 % since the last publish (covers a frozen pose whose belief keeps
+    // tightening / loosening). Avoids rewriting the edge every cycle once everything has settled.
+    const float trace = vx + vy + vz + vyaw;
+    const float prev  = inst.last_pub_cov_trace;
+    const bool cov_changed = not std::isfinite(prev) or prev <= 0.0f or
+                             std::abs(trace - prev) > 0.05f * prev;
+    if (not force and not cov_changed)
+        return;
+
+    auto edge = G_->get_edge(room_id, inst.node_id, "RT");
+    if (not edge.has_value())
+        return;
+
+    // 6×6 SE3 covariance, row-major [x,y,z,rx,ry,rz]; diagonal only (cross-terms unmodelled).
+    std::vector<float> cov(36, 0.0f);
+    cov[0 * 6 + 0] = vx;     // x   ← cx
+    cov[1 * 6 + 1] = vy;     // y   ← cy
+    cov[2 * 6 + 2] = vz;     // z   ← table_height (z = H/2 ⇒ var_z = var_H/4)
+    cov[3 * 6 + 3] = big;   // roll  (unobservable)
+    cov[4 * 6 + 4] = big;   // pitch (unobservable)
+    cov[5 * 6 + 5] = vyaw;   // yaw ← ψ
+
+    G_->add_or_modify_attrib_local<rt_covariance_att>(edge.value(), cov);
+    G_->insert_or_assign_edge(edge.value());
+    inst.last_pub_cov_trace = trace;
 }
 
 std::vector<float> TableSceneGraph::make_table_mesh(const TableState& s)

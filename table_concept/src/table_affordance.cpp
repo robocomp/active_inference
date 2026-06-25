@@ -4,6 +4,7 @@
 
 #include "table_affordance.h"
 #include <QtGlobal>
+#include <cmath>
 
 #include "../../common/affordance_protocol/affordance_protocol.h"
 
@@ -177,6 +178,16 @@ void TableAffordance::update_node(const EpistemicProposal& prop)
     if (active && pending)
     {
         state_ = State::executing;
+        // Refresh ONLY the epistemic value while the controller owns the claim, so the grounded EFE
+        // selection sees the belief decay during a long execution (ΔH→0 as evidence accumulates). Do
+        // NOT touch the target pose or active/pending flags. Dead-band the write to avoid per-cycle
+        // graph churn.
+        const float cur_gain = G_->get_attrib_by_name<epistemic_gain_att>(n).value_or(0.f);
+        if (std::abs(cur_gain - prop.epistemic_gain) > 0.1f)
+        {
+            G_->add_or_modify_attrib_local<epistemic_gain_att>(n, prop.epistemic_gain);
+            G_->update_node(n);
+        }
         refresh_edge();
         return;
     }

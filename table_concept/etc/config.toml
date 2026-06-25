@@ -57,15 +57,23 @@ RobustGncStartScale = 0.80  # GNC: wide initial robust scale, annealed to Robust
 RobustGncDecayCycles = 20   # GNC start scale ramps from RobustGncStartScale down to RobustLossScale
                             # over this many compute cycles, then anneals off so the converged pose
                             # stops being re-widened each frame and can settle. 0 = no lifetime decay.
+ExtentPctLo = 0.05          # lower percentile of the point span the footprint-extent term pins w/h to
+ExtentPctHi = 0.95          # upper percentile (tighter pair trims the depth-noise margin past the true edge)
 
 [TableConcept]
 ObsDistance = 1.8           # comfortable maximum stand-off from the target face for epistemic poses
 DeltaMin = 20.0             # minimum per-face coverage before stopping epistemic proposals
-GainThreshold = 0.1         # minimum gain proxy required to emit a proposal
+GainThreshold = 0.1         # minimum gain for the legacy coverage-deficit epistemic proxy
+EpistemicInfoGain = true    # score faces by expected entropy reduction ΔH from the Fisher Σ (vs coverage proxy)
+EpistemicMinInfoGain = 0.3  # WITHDRAW threshold: ΔH (nats) below which the epistemic affordance is dropped
+EpistemicRearmInfoGain = 5.0 # Schmitt re-arm: a satisfied table re-offers only once ΔH climbs back above this
+EpistemicCooldownCycles = 200 # min cycles a satisfied table stays withdrawn (anti-chatter)
 VoxelBankMaxPoints = 4000   # max number of table-owned voxels kept in memory
 VoxelBankQuantizationM = 0.02 # dedup grid (m) for voxel-bank hashing
 VoxelSelectRadiusMarginM = 0.50 # per-table XY ownership gate margin for mixed proto-tables
 VoxelSelectHeightMarginM = 0.25 # extra Z margin above table height when selecting owned voxels
+TopBandGate = true          # gate fit/extent points to ±TopBandM of the table-top height (drops floor/clutter that inflates w/h)
+TopBandM = 0.08             # half-width (m) of the top-surface membership band
 
 [WarmStart]
 PtsMin = 12.0            # point count where observability starts to become trustworthy
@@ -87,6 +95,8 @@ FisherInfoDecay = 0.95            # stiffener (acc): scalar fading memory; 0.95 
 FisherProcessStdM = 0.005        # calibrated-cov predict: process-noise std per fresh frame for length DOFs (m) → std floor
 FisherProcessStdYaw = 0.01       # calibrated-cov predict: process-noise std per fresh frame for yaw (rad)
 FisherCsvPath = "etc/fisher_filter_log.csv"   # per-cycle evolution log for plotting (empty = off)
+RtCovUpload = true                # upload the table pose covariance (rt_covariance_att, 6×6 SE3) onto the room→table RT edge, from the Fisher per-DOF precision
+RtCovScale = 1.0                  # var = RtCovScale / fisher_info_raw; calibrate toward NEES≈1 (raw curvature over-counts correlated points), like bottle CovEffScale
 
 [SampleQueue]
 RfeWeightGain = 0.25      # lower than 1.0 keeps historical RFE anchors influential

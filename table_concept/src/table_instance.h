@@ -58,11 +58,30 @@ struct TableInstance
     std::array<float, 8> fisher_info_peak{};   // per-DOF adaptive normaliser (best single-view info seen)
     std::array<float, 8> last_obs_info{};      // most recent frame's raw Fisher diagonal
     std::array<float, 8> last_kalman_gain{};   // per-DOF acceptance gain K=obs/(Y_pred+obs) (the calibrated stiffness)
+    ExtentDiagnostics    last_extent_diag{};   // footprint-extent vs fitted w/h + top/leg point split (size-bias diagnostic)
     bool epistemic_pending  = false;
+    // Schmitt-trigger hysteresis for the epistemic affordance (anti-oscillation): once the expected
+    // information gain ΔH falls below the withdraw threshold the table is "satisfied" and latched; it
+    // stays withdrawn until a cooldown elapses AND ΔH climbs back above the (higher) re-arm threshold,
+    // so it can't chatter across a single threshold as the belief jitters.
+    bool epistemic_satisfied = false;
+    int  epistemic_cooldown  = 0;   // cycles remaining before a satisfied table may re-arm
     float prev_free_energy  = std::numeric_limits<float>::max();
     // Dead-band tracking for write_rt_pose — suppress tiny oscillations
     float last_written_cx   = std::numeric_limits<float>::max();
     float last_written_cy   = std::numeric_limits<float>::max();
+    // Last GEOMETRY published to the graph (dims + mesh). Gates the per-cycle mesh/dim rewrite so a
+    // settled table stops jittering the voxelizer mesh (which renders the mesh attr, NOT the coarsely
+    // dead-banded RT pose). Mirrors bottle_concept's last_pub_* publish gate.
+    float last_pub_cx  = std::numeric_limits<float>::max();
+    float last_pub_cy  = std::numeric_limits<float>::max();
+    float last_pub_w   = std::numeric_limits<float>::max();
+    float last_pub_h   = std::numeric_limits<float>::max();
+    float last_pub_H   = std::numeric_limits<float>::max();
+    float last_pub_yaw = std::numeric_limits<float>::max();
+    // Trace of the last RT-edge covariance published, so a stationary-but-still-tightening table
+    // refreshes its edge covariance on a meaningful uncertainty change (not only on a pose move).
+    float last_pub_cov_trace = std::numeric_limits<float>::quiet_NaN();
     // Last coverage deficit (written by step_convergence, read by plot)
     float last_coverage_deficit = 0.f;
     // Higher-level confidence state driving warm-start precision from above

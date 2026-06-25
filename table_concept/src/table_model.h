@@ -51,6 +51,18 @@ struct TableState
     }
 };
 
+// Footprint-extent diagnostic: the half-extent of the observed point span in table-local frame at
+// a few percentile pairs (so we can see how much trimming changes it), the local centre offset of
+// that span, and how the points split between the top slab and the legs. Used to diagnose whether a
+// w/h over-estimate comes from off-table margin points inflating the span vs the model overshooting.
+struct ExtentDiagnostics
+{
+    float half_ex[3] = {0, 0, 0};   // half-extent in local X at [2-98, 5-95, 10-90] percentile
+    float half_ey[3] = {0, 0, 0};   // half-extent in local Y
+    float off_x = 0.0f, off_y = 0.0f;  // local-frame centre of the 2-98 span (0 = centred on the model)
+    int   n_top = 0, n_leg = 0, n_total = 0;  // point attribution (compound SDF: top slab vs nearest leg)
+};
+
 struct TableModelParams
 {
     // Observation noise (SDF likelihood width)
@@ -65,6 +77,11 @@ struct TableModelParams
     // point extent in table-local frame. Breaks the flat-interior translation/size degeneracy that
     // lets an oversized, off-centre box sit at ~zero data energy. 0 disables.
     float lambda_extent = 2.0f;
+    // Percentile pair defining the observed point span the extent term pins the footprint to. Tighter
+    // (e.g. 0.05/0.95) trims the depth-noise margin that overshoots the true edge; looser (0.02/0.98)
+    // is more inclusive under partial views. Symmetric pair in [0,1].
+    float extent_pct_lo = 0.05f;
+    float extent_pct_hi = 0.95f;
 
     // Prior geometry (used by KL term)
     float prior_w            = 1.0f;
@@ -98,6 +115,10 @@ struct TableModelParams
     // robust band so they still produce gradient during coarse alignment; the scale then
     // sharpens to the target so the final pose is precise. <= robust_loss_scale disables it.
     float robust_gnc_start_scale = 0.0f;
+    // Clamp on the per-point finite-difference slope |∂SDF/∂θ| inside observation_information, to
+    // suppress the spurious ~1000× Fisher spikes a point on a non-smooth min()-SDF kink would inject.
+    // For a well-behaved SDF point the slope is O(1). 0 disables the clamp.
+    float fisher_grad_clamp = 2.0f;
 };
 
 struct FreeEnergyDecomposition
@@ -148,6 +169,9 @@ public:
      */
     std::array<float, 8> observation_information(const std::vector<Eigen::Vector3f>& points,
                                                  const std::vector<float>& weights) const;
+
+    /** Footprint-extent + top/leg attribution diagnostic at the current state (see ExtentDiagnostics). */
+    ExtentDiagnostics extent_diagnostics(const std::vector<Eigen::Vector3f>& points) const;
 
     // ── Free Energy ──────────────────────────────────────────────────────────
 

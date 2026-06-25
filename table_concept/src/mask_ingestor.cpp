@@ -35,6 +35,7 @@ bool MaskIngestor::refresh()
     };
 
     const DSR::Attribute* frame_attr = find_attr("mask_frame_id");
+    const DSR::Attribute* ts_attr = find_attr("mask_timestamp_ms");   // optional (newer producers only)
     const DSR::Attribute* count_attr = find_attr("mask_count");
     const DSR::Attribute* labels_attr = find_attr("mask_labels");
     const DSR::Attribute* label_ids_attr = find_attr("mask_label_ids");
@@ -90,6 +91,7 @@ bool MaskIngestor::refresh()
     MasksPacket packet;
     packet.valid = true;
     packet.frame_id = frame_id;
+    packet.timestamp_ms = ts_attr ? ts_attr->uint64() : 0;   // 0 → consumer falls back to latest pose
     packet.support_points.reserve(support_count);
     for (std::size_t i = 0; i < support_count; ++i)
         packet.support_points.emplace_back(support_flat[i*3], support_flat[i*3+1], support_flat[i*3+2]);
