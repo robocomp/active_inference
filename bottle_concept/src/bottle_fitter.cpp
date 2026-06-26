@@ -33,12 +33,59 @@ void BottleFitter::process_bottle_node(const DSR::Node& node, std::uint64_t room
     auto& inst = instances_.at(node.id());
     ++inst.processed_cycles;
 
-    // Resolve the table the bottle stands on (from its current centre) BEFORE ingest/fit, so the
-    // surface filter (is_voxel_owned_by_bottle) and the post-fit cz anchor both have it. NaN ⇒ no
-    // table → bottle hangs from the room (no anchor / no surface filter).
+    // Decide the surface the bottle rests on (room vs a table) BEFORE ingest/fit, so the surface
+    // filter (is_voxel_owned_by_bottle) and the post-fit cz anchor both have it. MAP over {room,
+    // every table_N} using the OBSERVED base (low-percentile z of the owned voxel bank — NOT the
+    // anchored cz, which would be circular) + an oriented footprint + vertical-support test. A
+    // re-parent is committed only after support_commit_cycles of agreement (hysteresis).
     {
         const auto& s0 = inst.model.state();
-        inst.table_top_z = scene_graph_->find_table_top(s0.cx, s0.cy).value_or(std::numeric_limits<float>::quiet_NaN());
+        float base_z;
+        if (not inst.voxel_bank_pts.empty())
+        {
+            std::vector<float> zs;
+            zs.reserve(inst.voxel_bank_pts.size());
+            for (const auto& p : inst.voxel_bank_pts) zs.push_back(p.z());
+            const std::size_t k = zs.size() / 10;          // 10th percentile → robust base, rejects outliers
+            std::nth_element(zs.begin(), zs.begin() + k, zs.end());
+            base_z = zs[k];
+        }
+        else
+            base_z = s0.cz - 0.5f * s0.height;             // pre-evidence fallback: model base
+
+        const auto dec = scene_graph_->decide_support_surface(s0.cx, s0.cy, base_z, room_node_id);
+        if (inst.parent_id == 0)                            // uninitialised → adopt immediately
+        {
+            inst.parent_id = dec.parent_id;
+            inst.parent_name = dec.parent_name;
+        }
+        if (dec.parent_id == inst.parent_id)
+        {
+            inst.support_challenger_id = 0;
+            inst.support_challenger_count = 0;
+        }
+        else                                                // a different surface is winning → debounce
+        {
+            if (dec.parent_id == inst.support_challenger_id)
+                ++inst.support_challenger_count;
+            else
+            {
+                inst.support_challenger_id = dec.parent_id;
+                inst.support_challenger_count = 1;
+            }
+            if (inst.support_challenger_count >= cfg_.support_commit_cycles)
+            {
+                std::print("[{}] re-parent {} → {} (support won {} cycles)\n",
+                           inst.node_name, inst.parent_name, dec.parent_name, inst.support_challenger_count);
+                inst.parent_id = dec.parent_id;
+                inst.parent_name = dec.parent_name;
+                inst.support_reparent_pending = true;
+                inst.support_challenger_id = 0;
+                inst.support_challenger_count = 0;
+            }
+        }
+        // Anchor reflects the COMMITTED parent: table_top_of returns NaN for the room (no z anchor).
+        inst.table_top_z = scene_graph_->table_top_of(inst.parent_id);
     }
 
     const auto observation = observe_bottle_node(inst, node);

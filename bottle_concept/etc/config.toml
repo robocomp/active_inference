@@ -150,6 +150,16 @@ FisherInfoDecay = 1.0         # stiffener fading memory; <1 forgets old views, 1
 FisherProcessStdM = 0.005     # predict process-noise std per fresh frame (m) → posterior std floor (all 5 DOF are lengths)
 FisherCsvPath = "etc/bottle_fisher_log.csv"   # per-cycle Fisher evolution log for plotting (empty = off)
 
+[Support]
+# Which surface the bottle hangs from (room vs a table): MAP over {room, every table_N} by
+# vertical-support log-evidence — the centre must lie inside a table's oriented footprint AND the
+# observed base must sit at its top. Replaces the naive XY-only single-"table" gate.
+SigmaZ = 0.04            # base vertical-support std (m); keep ≥ the perceived table-top z-bias (~2.5 cm)
+FootprintMargin = 0.05   # m: slack on the table half-extents for the footprint gate
+LambdaXY = 50.0          # penalty (1/m²) for the centre lying outside the footprint
+DecisionMargin = 2.0     # log-evidence a table must beat the room/floor hypothesis by to win
+CommitCycles = 8         # consecutive cycles a challenger surface must win before re-parenting (anti-thrash)
+
 [SampleQueue]
 NumAngleBins = 16
 NumZBins = 6

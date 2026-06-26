@@ -46,6 +46,17 @@ struct BottleConfig
     float robust_loss_scale = 0.05f;
     float mask_precision    = 0.0f;   // RGB-mask silhouette likelihood weight (0 = off)
     float cov_eff_scale     = 1.0f;   // covariance calibration: N_eff = N·scale (NEES → ~3)
+    // ── Support-surface decision (room vs table parent) ───────────────────────────────────────────
+    // The bottle hangs from the surface it RESTS ON, chosen by MAP over {room, every table_N}: the
+    // centre must lie inside the table's oriented footprint AND the observed base must sit at its top
+    // (vertical support). Robust to the perceived table-top z-bias (σ_z ≥ that bias) and to flicker
+    // (commit a re-parent only after support_commit_cycles favouring the challenger). Replaces the
+    // naive XY-only single-"table" gate.
+    float support_sigma_z          = 0.04f;   // base vertical-support std (m); ≥ the table-top z-bias (~2.5 cm)
+    float support_footprint_margin = 0.05f;   // m: slack added to the table half-extents for the footprint gate
+    float support_lambda_xy        = 50.0f;   // penalty weight (1/m²) for the centre lying OUTSIDE the footprint
+    float support_decision_margin  = 2.0f;    // log-evidence a table must beat the room/floor by to win
+    int   support_commit_cycles    = 8;       // consecutive cycles a challenger must win before re-parenting
     // ── Fisher information filter (per-DOF stabiliser; currently diagnostic) ──────────────────────
     // Accumulate the real per-DOF SDF observation Fisher information across viewpoints instead of a
     // "times viewed" proxy. The info-filter predict step bleeds a fixed process-noise Q each fresh

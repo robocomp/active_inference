@@ -18,8 +18,10 @@ namespace rc {
 BottleSceneGraph::BottleSceneGraph(std::shared_ptr<DSR::DSRGraph> graph,
                                    DSR::RT_API* rt_api,
                                    DSR::InnerEigenAPI* inner_eigen,
-                                   BottleConfig& cfg)
-    : G_(std::move(graph)), rt_api_(rt_api), inner_eigen_(inner_eigen), cfg_(cfg)
+                                   BottleConfig& cfg,
+                                   std::function<void()> relayout)
+    : G_(std::move(graph)), rt_api_(rt_api), inner_eigen_(inner_eigen), cfg_(cfg),
+      relayout_(std::move(relayout))
 {}
 
 std::optional<DSR::Node> BottleSceneGraph::find_table_node(float bx, float by) const
@@ -55,6 +57,95 @@ std::optional<float> BottleSceneGraph::find_table_top(float bx, float by) const
     if (not org.has_value())
         return std::nullopt;
     return static_cast<float>(org->z()) + h;       // table top = base origin z + height
+}
+
+float BottleSceneGraph::table_top_of(std::uint64_t table_id) const
+{
+    constexpr float nan = std::numeric_limits<float>::quiet_NaN();
+    if (not inner_eigen_ or table_id == 0)
+        return nan;
+    const auto t = G_->get_node(table_id);
+    if (not t.has_value() or t->type() != "table")
+        return nan;
+    const float h = G_->get_attrib_by_name<height_m_att>(t.value()).value_or(0.0f);
+    if (h <= 0.0f)
+        return nan;
+    const auto org = inner_eigen_->transform("room", Mat::Vector3d(0.0, 0.0, 0.0), t->name(), 0);
+    if (not org.has_value())
+        return nan;
+    return static_cast<float>(org->z()) + h;
+}
+
+BottleSceneGraph::SupportDecision
+BottleSceneGraph::decide_support_surface(float cx, float cy, float base_z,
+                                         std::uint64_t room_node_id) const
+{
+    SupportDecision room_dec;                 // default: hang from the room (NaN top ⇒ no z anchor)
+    room_dec.parent_id = room_node_id;
+    if (const auto r = G_->get_node(room_node_id); r.has_value())
+        room_dec.parent_name = r->name();
+    if (not inner_eigen_)
+        return room_dec;
+
+    const float sz0      = std::max(0.005f, cfg_.support_sigma_z);
+    const float margin_m = cfg_.support_footprint_margin;
+    const float lambda   = cfg_.support_lambda_xy;
+
+    // Room/floor hypothesis: a bottle on the floor has base_z ≈ 0.
+    const float ll_room = -0.5f * (base_z / sz0) * (base_z / sz0);
+
+    float best_ll = -std::numeric_limits<float>::infinity();
+    SupportDecision best;
+    for (const auto& t : G_->get_nodes_by_type("table"))
+    {
+        const float w = G_->get_attrib_by_name<width_m_att> (t).value_or(0.0f);
+        const float d = G_->get_attrib_by_name<depth_m_att> (t).value_or(0.0f);
+        const float h = G_->get_attrib_by_name<height_m_att>(t).value_or(0.0f);
+        if (w <= 0.0f or d <= 0.0f or h <= 0.0f)
+            continue;
+
+        // Bottle base in this table's LOCAL frame → oriented footprint + vertical residual in one step.
+        const auto loc = inner_eigen_->transform(t.name(), Mat::Vector3d(cx, cy, base_z), "room", 0);
+        if (not loc.has_value())
+            continue;
+        const float lx = std::abs(static_cast<float>(loc->x()));
+        const float ly = std::abs(static_cast<float>(loc->y()));
+        const float hw = 0.5f * w, hd = 0.5f * d;
+        if (lx > hw + margin_m or ly > hd + margin_m)   // centre not over this table (+margin)
+            continue;
+
+        const float dxo = std::max(0.0f, lx - hw);
+        const float dyo = std::max(0.0f, ly - hd);
+        const float d_xy2 = dxo * dxo + dyo * dyo;
+        const float r_z = static_cast<float>(loc->z()) - h;   // base vs table top (local top = z=h)
+
+        // Inflate σ_z by the table's published top-z variance: a poorly-known table is a weak anchor.
+        float sz2 = sz0 * sz0;
+        if (const auto e = G_->get_edge(room_node_id, t.id(), "RT"); e.has_value())
+            if (const auto cov = G_->get_attrib_by_name<rt_covariance_att>(e.value()); cov.has_value())
+            {
+                const auto& v = cov->get();
+                if (v.size() >= 36) sz2 += std::max(0.0f, v[2 * 6 + 2]);   // z-variance block
+            }
+
+        const float ll = -0.5f * (r_z * r_z) / sz2 - lambda * d_xy2;
+        if (ll > best_ll)
+        {
+            best_ll = ll;
+            best.parent_id   = t.id();
+            best.parent_name = t.name();
+            best.top_z       = table_top_of(t.id());
+        }
+    }
+
+    // Pick the best table only if it beats the room/floor hypothesis by the decision margin.
+    if (std::isfinite(best_ll) and best_ll > ll_room + cfg_.support_decision_margin)
+    {
+        best.margin = best_ll - ll_room;
+        return best;
+    }
+    room_dec.margin = ll_room - best_ll;
+    return room_dec;
 }
 
 void BottleSceneGraph::scaffold_missing_bottle_nodes(const std::vector<BottlePrior>& priors,
@@ -123,8 +214,11 @@ void BottleSceneGraph::scaffold_missing_bottle_nodes(const std::vector<BottlePri
         // else from the room. insert_or_assign_edge_RT (below) sets the bottle's parent + level
         // (= anchor.level + 1) authoritatively from the RT edge, so we don't bookkeep them here.
         const float cz = matched_slice.centroid.z() > 1e-3f ? matched_slice.centroid.z() : p.room_z_m;
-        const auto table = find_table_node(matched_slice.centroid.x(), matched_slice.centroid.y());
-        DSR::Node parent_node = table.value_or(room_opt.value());
+        // Same MAP support decision as the per-cycle loop, so the INITIAL parent is robust too
+        // (multi-table + vertical support), not the naive XY-only single-"table" gate.
+        const auto dec = decide_support_surface(matched_slice.centroid.x(), matched_slice.centroid.y(),
+                                                cz - 0.5f * p.height_m, room_node_id);
+        DSR::Node parent_node = G_->get_node(dec.parent_id).value_or(room_opt.value());
         const int parent_level = G_->get_node_level(parent_node).value_or(-1);   // for the log line only
         {
             const float rpx = G_->get_attrib_by_name<pos_x_att>(room_opt.value()).value_or(200.f);
@@ -152,6 +246,10 @@ void BottleSceneGraph::scaffold_missing_bottle_nodes(const std::vector<BottlePri
         std::print("bottle_concept: created node '{}' id={} parent='{}' (lvl {}) from masks frame={} at room ({:.2f}, {:.2f}, {:.2f})\n",
                    p.node_name, id_opt.value(), parent_node.name(), parent_level + 1, masks.frame_id,
                    matched_slice.centroid.x(), matched_slice.centroid.y(), cz);
+
+        // A new bottle node joined the graph — re-run the twopi layout so it's placed coherently.
+        if (relayout_)
+            relayout_();
     }
 }
 
@@ -234,12 +332,29 @@ void BottleSceneGraph::write_rt_pose(BottleInstance& inst)
 
     const auto& s = inst.model.state();
 
-    // Dead-band: suppress RT updates below ~1 cm to avoid pos churn from jitter (room-frame state).
-    constexpr float kMinWriteDistSq = 0.01f * 0.01f;
-    const float dx = s.cx - inst.last_written_cx;
-    const float dy = s.cy - inst.last_written_cy;
-    if (dx*dx + dy*dy < kMinWriteDistSq)
-        return;
+    // A pending re-parent writes through the dead-band and first DETACHES the old RT parent edge, so
+    // the bottle keeps exactly one parent in the RT tree (insert_or_assign_edge_RT below sets the new
+    // parent + level authoritatively).
+    if (inst.support_reparent_pending)
+    {
+        if (const auto n = G_->get_node(inst.node_id); n.has_value())
+        {
+            const auto old_parent = G_->get_attrib_by_name<parent_att>(n.value()).value_or(0);
+            if (old_parent != 0 and old_parent != inst.parent_id)
+                G_->delete_edge(old_parent, inst.node_id, "RT");
+        }
+        inst.support_reparent_pending = false;
+        std::print("bottle_concept: [{}] RT re-parented under '{}'\n", inst.node_name, inst.parent_name);
+    }
+    else
+    {
+        // Dead-band: suppress RT updates below ~1 cm to avoid pos churn from jitter (room-frame state).
+        constexpr float kMinWriteDistSq = 0.01f * 0.01f;
+        const float dx = s.cx - inst.last_written_cx;
+        const float dy = s.cy - inst.last_written_cy;
+        if (dx*dx + dy*dy < kMinWriteDistSq)
+            return;
+    }
 
     auto parent_opt = G_->get_node(inst.parent_id);
     if (not parent_opt.has_value())

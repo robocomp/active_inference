@@ -30,6 +30,7 @@
 #include <QtCore>
 #include <variant>
 #include <unordered_map>
+#include <unordered_set>
 #include <fps/fps.h>
 
 #include "dsr/api/dsr_api.h"
@@ -79,11 +80,17 @@ protected:
 	std::unordered_map<std::string, std::shared_ptr<DSR::DSRViewer>> graph_viewers;
 	std::unordered_map<std::string, std::unique_ptr<QMainWindow>> windows;
 	std::shared_ptr<DSR::DSRViewer> setupViewer(std::shared_ptr<DSR::DSRGraph> graph, const std::string& prefix, QMainWindow* parent);
+	void trigger_graph_layout_twopi();
+	void restore_window_settings();
+	void save_window_settings() const;
 
 
 
 
 private:
+	static constexpr int kWindowStateVersion = 1;
+	static QString settings_group_name(const std::string& graph_name, int agent_id);
+	std::unordered_set<std::string> participant_layout_done_graphs;
 
 public slots:
 	virtual void initialize() = 0;

@@ -53,6 +53,11 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
     out.grad_clip          = getf("BottleModel.GradClip",          2.0f);
     out.mask_precision     = getf("BottleModel.MaskPrecision",     0.0f);
     out.cov_eff_scale      = getf("BottleModel.CovEffScale",       1.0f);
+    out.support_sigma_z          = getf("Support.SigmaZ",            0.04f);
+    out.support_footprint_margin = getf("Support.FootprintMargin",   0.05f);
+    out.support_lambda_xy        = getf("Support.LambdaXY",          50.0f);
+    out.support_decision_margin  = getf("Support.DecisionMargin",    2.0f);
+    out.support_commit_cycles    = geti("Support.CommitCycles",      8);
     out.fisher_filter_enabled = getb("BottleModel.FisherFilterEnabled", true);
     out.fisher_info_decay     = getf("BottleModel.FisherInfoDecay",     1.0f);
     out.fisher_process_std_m  = getf("BottleModel.FisherProcessStdM",   0.005f);

@@ -72,6 +72,11 @@ struct BottleInstance
     // always in the room frame; the RT edge (parent→bottle) is written in the parent frame.
     std::uint64_t parent_id = 0;
     std::string   parent_name = "room";
+    // Support-surface decision hysteresis: a challenger surface must win for support_commit_cycles
+    // consecutive cycles before we re-parent (anti-thrash at table edges / the floor↔table boundary).
+    std::uint64_t support_challenger_id    = 0;
+    int           support_challenger_count = 0;
+    bool          support_reparent_pending = false;   // tells write_rt_pose to swap the RT parent edge
 };
 
 }  // namespace rc

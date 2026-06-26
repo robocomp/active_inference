@@ -238,7 +238,8 @@ void SpecificWorker::initialize()
     rt_api_ = G->get_rt_api();
     inner_eigen_ = G->get_inner_eigen_api();
     mask_ingestor_ = std::make_unique<rc::MaskIngestor>(G);
-    scene_graph_ = std::make_unique<rc::BottleSceneGraph>(G, rt_api_.get(), inner_eigen_.get(), cfg_);
+    scene_graph_ = std::make_unique<rc::BottleSceneGraph>(G, rt_api_.get(), inner_eigen_.get(), cfg_,
+                                                          [this] { trigger_graph_layout_twopi(); });
 
     connect(G.get(), &DSR::DSRGraph::del_node_signal, this, &SpecificWorker::del_node_slot);
 
@@ -319,6 +320,8 @@ void SpecificWorker::del_node_slot(std::uint64_t id)
 {
     if (fitter_)
         fitter_->forget_node(id);
+    // A node left the graph — re-run the twopi layout so the view stays coherent.
+    trigger_graph_layout_twopi();
 }
 
 void SpecificWorker::emergency()

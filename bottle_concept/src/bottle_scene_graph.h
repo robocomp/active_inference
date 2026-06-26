@@ -17,8 +17,11 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -41,13 +44,31 @@ public:
     BottleSceneGraph(std::shared_ptr<DSR::DSRGraph> graph,
                      DSR::RT_API* rt_api,
                      DSR::InnerEigenAPI* inner_eigen,
-                     BottleConfig& cfg);
+                     BottleConfig& cfg,
+                     std::function<void()> relayout = {});
 
     // The "table" node when the bottle's (bx,by) is over its footprint — the RT parent the bottle
     // hangs from (re-parents room→bottle to table→bottle). std::nullopt ⇒ hang from the room.
     std::optional<DSR::Node> find_table_node(float bx, float by) const;
     // Table-top z (room frame) for the same gate. std::nullopt if no table under (bx,by).
     std::optional<float> find_table_top(float bx, float by) const;
+
+    // Which surface does the bottle rest on? MAP over {room, every table_N} by vertical-support
+    // log-evidence: the centre must lie inside a table's ORIENTED footprint AND the OBSERVED base
+    // (base_z, not the anchored cz) must sit at its top. σ_z is inflated by the table's published
+    // top-z variance, so a poorly-known table is a weak anchor. Returns the chosen RT parent + its
+    // top z in room frame (NaN ⇒ room/floor, no z anchor) and the winner's log-evidence margin.
+    struct SupportDecision
+    {
+        std::uint64_t parent_id   = 0;
+        std::string   parent_name = "room";
+        float         top_z       = std::numeric_limits<float>::quiet_NaN();
+        float         margin      = 0.0f;
+    };
+    SupportDecision decide_support_surface(float cx, float cy, float base_z,
+                                           std::uint64_t room_node_id) const;
+    // Table top z (room frame) of a specific table node id, or NaN if it's not a valid table.
+    float table_top_of(std::uint64_t table_id) const;
 
     // Create any "bottle_N" cylinder node named in priors that doesn't exist yet, matching each prior
     // to the nearest unused "bottle" mask slice and anchoring it to the table (or room) under it.
@@ -72,6 +93,7 @@ private:
     DSR::RT_API*        rt_api_      = nullptr;
     DSR::InnerEigenAPI* inner_eigen_ = nullptr;
     BottleConfig&        cfg_;
+    std::function<void()> relayout_;   // re-run the graph twopi layout after a node is created/removed
 };
 
 }  // namespace rc
