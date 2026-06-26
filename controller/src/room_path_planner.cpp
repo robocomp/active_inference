@@ -491,3 +491,57 @@ std::optional<RoomPathPlanner::PathPlan> RoomPathPlanner::plan_path(
     };
 }
 
+std::optional<Eigen::Vector2f> RoomPathPlanner::repair_target(
+    const Polygon &room_polygon,
+    const Polygon &inner_polygon,
+    const Polygons &obstacle_polygons,
+    const Eigen::Vector2f &target) const
+{
+    if (room_polygon.size() < 3)
+        return std::nullopt;
+
+    // Same free-space definition plan_path uses: inside the room (and the inner wall-clearance ring
+    // if present), and outside every obstacle inflated by half the robot width.
+    const float obs_clearance = std::max(0.01f, params.robot_width_m * 0.5f);
+    Polygons expanded_obs;
+    expanded_obs.reserve(obstacle_polygons.size());
+    for (const auto &obs : obstacle_polygons)
+        if (obs.size() >= 3)
+            expanded_obs.push_back(offset_polygon_outward(obs, obs_clearance));
+
+    const bool have_inner = inner_polygon.size() >= 3;
+    auto is_free = [&](const Eigen::Vector2f &p) -> bool
+    {
+        if (!point_in_polygon(room_polygon, p)) return false;
+        if (have_inner && !point_in_polygon(inner_polygon, p)) return false;
+        for (const auto &obs : expanded_obs)      if (point_in_polygon(obs, p)) return false;
+        for (const auto &obs : obstacle_polygons) if (point_in_polygon(obs, p)) return false;
+        return true;
+    };
+
+    if (is_free(target))
+        return target;   // already navigable — no change
+
+    // Ring search outward; the first radius yielding any free candidate is the (angularly quantised)
+    // nearest exit from the blocked region. Bounded so a hopeless target fails fast.
+    const float step  = std::max(0.10f, params.grid_resolution_m * 0.5f);
+    const float max_r  = 3.0f;
+    constexpr int kAng = 24;
+    for (float r = step; r <= max_r; r += step)
+    {
+        std::optional<Eigen::Vector2f> best;
+        float best_d2 = std::numeric_limits<float>::max();
+        for (int i = 0; i < kAng; ++i)
+        {
+            const float a = 2.0f * static_cast<float>(M_PI) * static_cast<float>(i) / kAng;
+            const Eigen::Vector2f cand = target + r * Eigen::Vector2f(std::cos(a), std::sin(a));
+            if (!is_free(cand)) continue;
+            const float d2 = (cand - target).squaredNorm();
+            if (d2 < best_d2) { best_d2 = d2; best = cand; }
+        }
+        if (best.has_value())
+            return best;
+    }
+    return std::nullopt;   // no free point within max_r → caller keeps original (planner then fails)
+}
+

@@ -34,6 +34,8 @@
 	#include <QtWidgets>
 #endif
 
+#include "timeseries_plot.h"
+
 
 class Custom_widget : public QWidget
 {
@@ -102,7 +104,21 @@ public:
         frame->setFrameShape(QFrame::StyledPanel);
         frame->setFrameShadow(QFrame::Sunken);
         frame->setMinimumSize(320, 320);
-        main_layout->addWidget(frame, 1);
+        main_layout->addWidget(frame, 3);
+
+        // Affordance EFE time-series panel, below the 2D view.
+        auto *efe_panel = new QFrame(this);
+        efe_panel->setFrameShape(QFrame::StyledPanel);
+        efe_panel->setFrameShadow(QFrame::Sunken);
+        auto *efe_layout = new QVBoxLayout(efe_panel);
+        efe_layout->setContentsMargins(4, 2, 4, 2);
+        efe_layout->setSpacing(2);
+        efe_layout->addWidget(new QLabel("Affordance EFE score (gain − λ·dist; higher = selected)", efe_panel));
+        affordance_efe_plot = new rc::TimeSeriesPlot(efe_panel);
+        affordance_efe_plot->setMinimumHeight(160);
+        affordance_efe_plot->set_visible_window(60.f);
+        efe_layout->addWidget(affordance_efe_plot, 1);
+        main_layout->addWidget(efe_panel, 1);
     }
 	~Custom_widget()
     {
@@ -123,6 +139,7 @@ public:
 
 public:
     QFrame *frame = nullptr;
+    rc::TimeSeriesPlot *affordance_efe_plot = nullptr;
     QPushButton *lidar_toggle_btn = nullptr;
     QPushButton *follow_toggle_btn = nullptr;
     QPushButton *mppi_paths_toggle_btn = nullptr;

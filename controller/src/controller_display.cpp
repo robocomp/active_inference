@@ -108,6 +108,36 @@ void ControllerDisplay::set_selected_affordance_text(const QString &text)
     snapshot_.selected_affordance_text_pending = true;
 }
 
+void ControllerDisplay::update_affordance_efe(const std::vector<AffordanceEfeSample> &samples)
+{
+    auto *plot = custom_widget_ ? custom_widget_->affordance_efe_plot : nullptr;
+    if (plot == nullptr)
+        return;
+
+    // Distinct, stable colours per affordance (assigned in first-seen order).
+    static const QColor kPalette[] = {QColor("Tomato"),     QColor("SteelBlue"), QColor("MediumSeaGreen"),
+                                      QColor("Goldenrod"),   QColor("MediumPurple"), QColor("Teal"),
+                                      QColor("OrangeRed"),   QColor("SlateGray")};
+    constexpr std::size_t kPaletteSize = sizeof(kPalette) / sizeof(kPalette[0]);
+
+    for (const auto &s : samples)
+    {
+        const std::string gain_key = s.name + " (gain)";
+        if (efe_series_known_.find(s.name) == efe_series_known_.end())
+        {
+            const QColor c = kPalette[efe_color_next_ % kPaletteSize];
+            ++efe_color_next_;
+            plot->add_series(s.name, c, 1.8f);              // bold  = selection score (gain − λ·dist)
+            plot->add_series(gain_key, c.darker(135), 1.0f); // darker/thin = raw gain (ΔH); gap = λ·dist
+                                                             // (darker, not lighter — light tints wash out on the white plot)
+            efe_series_known_.insert(s.name);
+            efe_series_known_.insert(gain_key);
+        }
+        plot->add_point(s.name, s.score);
+        plot->add_point(gain_key, s.gain);
+    }
+}
+
 void ControllerDisplay::clear_robot_trajectory()
 {
     std::lock_guard<std::mutex> lock(snapshot_mutex_);

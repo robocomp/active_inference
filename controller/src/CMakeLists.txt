@@ -16,6 +16,7 @@ LIST(APPEND SOURCES
   ${ACTIVE_INFERENCE_COMMON_DIR}/robust_metrics/robust_metrics.cpp
   ../src/room_path_planner.cpp
   ../src/trajectory_controller.cpp
+  ../src/timeseries_plot.cpp
   ../src/viewer_2d.cpp
   ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/media_transport.cpp
   ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/image_framePubSubTypes.cxx
@@ -43,6 +44,7 @@ LIST(APPEND HEADERS
   ${ACTIVE_INFERENCE_COMMON_DIR}/robust_metrics/robust_metrics.h
   ../src/custom_widget.h
   ../src/room_path_planner.h
+  ../src/timeseries_plot.h
   ../src/viewer_2d.h
 )
 

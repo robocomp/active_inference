@@ -23,6 +23,9 @@ public:
         const std::optional<std::uint64_t> &last_lidar_timestamp_ms) const;
     std::optional<ControllerPoseUncertainty> read_pose_uncertainty() const;
     std::optional<ControllerTargetInfo> read_target_in_room(std::uint64_t timestamp_ms) const;
+    // Room-frame XY of an arbitrary node (e.g. an affordance's parent object), via the RT tree. Used
+    // to re-aim a repaired affordance target's heading at the object it observes.
+    std::optional<Eigen::Vector2f> read_node_room_xy(std::uint64_t node_id, std::uint64_t timestamp_ms) const;
 
     static bool same_target_instance(const ControllerTargetInfo &lhs, const ControllerTargetInfo &rhs);
 

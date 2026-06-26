@@ -56,6 +56,16 @@ public:
                                       const Eigen::Vector2f &robot_pos,
                                       const Eigen::Vector2f &target_room_pos) const;
 
+    // If `target` is blocked (outside the navigable region or inside an inflated obstacle), return the
+    // nearest free point via a small outward ring search; returns `target` unchanged when it is already
+    // free, or nullopt if nothing free is found within the search radius. Uses the SAME free-space
+    // definition as plan_path, so a repaired target is guaranteed plannable. Lets the controller rescue
+    // an affordance viewpoint that fell inside an obstacle footprint (which would otherwise stall).
+    std::optional<Eigen::Vector2f> repair_target(const Polygon &room_polygon,
+                                                 const Polygon &inner_polygon,
+                                                 const Polygons &obstacle_polygons,
+                                                 const Eigen::Vector2f &target) const;
+
 private:
     static constexpr float k_epsilon = 1e-5f;
 

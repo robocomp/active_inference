@@ -6,6 +6,9 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <string>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include <QString>
@@ -46,6 +49,11 @@ public:
 
     void set_command_text(const QString &text);
     void set_selected_affordance_text(const QString &text);
+    // One sample per evaluated affordance for the EFE panel below the 2D view. Plots TWO lines per
+    // affordance: the selection score (gain − λ·dist, solid) and the raw gain (ΔH, lighter) — so the
+    // vertical gap between them is λ·dist. Thread-safe (the plot buffers under its own mutex).
+    struct AffordanceEfeSample { std::string name; float gain = 0.f; float score = 0.f; };
+    void update_affordance_efe(const std::vector<AffordanceEfeSample> &samples);
     void clear_robot_trajectory();
 
     // Presentation — MUST be called on the GUI thread only. Reads the latest
@@ -79,6 +87,8 @@ private:
     std::unique_ptr<Custom_widget> custom_widget_;
     std::unique_ptr<rc::Viewer2D> viewer_2d_;
     bool room_view_fitted_ = false;
+    std::unordered_set<std::string> efe_series_known_;   // plot series already registered
+    std::size_t efe_color_next_ = 0;                     // next palette colour for a new affordance
 
     mutable std::mutex snapshot_mutex_;
     DisplaySnapshot snapshot_;

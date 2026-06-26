@@ -750,17 +750,20 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
             || node.name() == "body");
     };
 
-    auto obstacle_nodes = graph_->get_nodes_by_type("object");
+    // Gather every graph node that represents a real shaped object the robot must avoid AND that can
+    // EXPLAIN/retire a controller-published temporary obstacle. Crucially this includes the concept
+    // object types (table_concept→"table", bottle_concept→"cylinder"), not only generic "object"/
+    // "obstacle". Previously a real table was missed (it is type "table") because the width/depth
+    // fallback only ran when NO obstacle node existed — but the controller's own published temp
+    // obstacles are type "obstacle", so the fallback never ran → temp obstacles over a table were
+    // never retired. Add new object types here.
+    static constexpr std::array<const char *, 4> kObjectTypes = {"object", "obstacle", "table", "cylinder"};
+    std::vector<DSR::Node> obstacle_nodes;
     std::unordered_set<std::uint64_t> obstacle_node_ids;
-    obstacle_node_ids.reserve(obstacle_nodes.size() + temporary_obstacles_.size());
-    for (const auto &node : obstacle_nodes)
-        obstacle_node_ids.insert(node.id());
-
-    for (const auto &node : graph_->get_nodes_by_type("obstacle"))
-    {
-        if (obstacle_node_ids.insert(node.id()).second)
-            obstacle_nodes.push_back(node);
-    }
+    for (const char *type : kObjectTypes)
+        for (const auto &node : graph_->get_nodes_by_type(type))
+            if (obstacle_node_ids.insert(node.id()).second)
+                obstacle_nodes.push_back(node);
 
     bool using_fallback_nodes = false;
     if (obstacle_nodes.empty())

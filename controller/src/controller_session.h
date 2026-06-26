@@ -38,6 +38,7 @@ public:
                                                               ControllerWorldModel &world_model,
                                                               ControllerObstacleTracker &obstacle_tracker,
                                                               rc::AffordanceManager &affordance_manager,
+                                                              RoomPathPlanner &planner,
                                                               rc::TrajectoryController &path_controller,
                                                               ControllerMotionCommander &motion_commander,
                                                               ControllerDisplay &display);
@@ -87,6 +88,10 @@ private:
     bool step_lockon(ControllerMotionCommander &motion_commander, const TimeSource &time_source);
     rc::LockOn::Reading read_servo_reading(std::uint64_t feedback_node_id) const;
     bool goal_met(std::uint64_t feedback_node_id) const;
+    // Contract observation-stillness gate: track the base speed (finite-difference of the room-frame
+    // robot pose → m/s, rad/s) and test it against the active contract's max_observe_vel/omega.
+    void update_base_speed(const ControllerRobotPose &pose, std::uint64_t timestamp_ms);
+    bool robot_still() const;
     void finalize_reached(rc::AffordanceManager &affordance_manager,
                           rc::TrajectoryController &path_controller,
                           ControllerMotionCommander &motion_commander,
@@ -97,6 +102,11 @@ private:
     rc::affordance::Contract active_contract_;     // resolved contract of the affordance in lock-on
     std::uint64_t feedback_node_id_ = 0;           // node carrying the contract's feedback attributes
     std::shared_ptr<DSR::DSRGraph> graph_;
+    // Base speed (room frame) for the contract stillness gate, plus the previous pose it differences.
+    float base_speed_lin_ = 0.0f;                  // m/s   (EMA-smoothed)
+    float base_speed_ang_ = 0.0f;                  // rad/s (EMA-smoothed)
+    std::optional<ControllerRobotPose> prev_robot_pose_;
+    std::uint64_t prev_robot_ts_ms_ = 0;
     ControllerPolygon room_polygon_;
     ControllerPolygon inner_polygon_;
     std::optional<ControllerPathPlan> current_plan_;

@@ -132,6 +132,29 @@ std::optional<ControllerRobotPose> ControllerWorldModel::read_robot_pose_in_room
     return pose;
 }
 
+std::optional<Eigen::Vector2f> ControllerWorldModel::read_node_room_xy(std::uint64_t node_id,
+                                                                      std::uint64_t timestamp_ms) const
+{
+    if (!graph_ || !inner_eigen_api_ || !graph_state_.ready() || !params_)
+        return std::nullopt;
+    const auto node = graph_->get_node(node_id);
+    if (!node.has_value())
+        return std::nullopt;
+
+    const auto time_query = params_->interpolate_rt ? DSR::RT_API::TimeQuery::Interpolated
+                                                    : DSR::RT_API::TimeQuery::Nearest;
+    auto room_T_node = inner_eigen_api_->get_transformation_matrix(graph_state_.room_name, node->name(),
+                                                                   timestamp_ms, "RT", time_query);
+    if (!room_T_node.has_value())
+        room_T_node = inner_eigen_api_->get_transformation_matrix(graph_state_.room_name, node->name(),
+                                                                  0, "RT", time_query);
+    if (!room_T_node.has_value())
+        return std::nullopt;
+
+    const auto &m = room_T_node->matrix();
+    return Eigen::Vector2f(static_cast<float>(m(0, 3)), static_cast<float>(m(1, 3)));
+}
+
 std::optional<ControllerPoseUncertainty> ControllerWorldModel::read_pose_uncertainty() const
 {
     if (!graph_ || !graph_state_.ready())

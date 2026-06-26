@@ -94,6 +94,7 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
                                                                              ControllerWorldModel &world_model,
                                                                              ControllerObstacleTracker &obstacle_tracker,
                                                                              rc::AffordanceManager &affordance_manager,
+                                                                             RoomPathPlanner &planner,
                                                                              rc::TrajectoryController &path_controller,
                                                                              ControllerMotionCommander &motion_commander,
                                                                              ControllerDisplay &display)
@@ -110,6 +111,8 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         stop(path_controller, motion_commander);
         return std::nullopt;
     }
+
+    update_base_speed(*robot_pose, timestamp_ms);   // base speed for the contract stillness gate
 
     ControllerPlanningStep step;
     step.robot_pose = *robot_pose;
@@ -156,6 +159,30 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
 
     target_wait_logged_ = false;
     step.target = *target;
+
+    // A producer's affordance viewpoint can land inside an obstacle footprint (its own object, or one
+    // that grew/moved), which the planner can't reach → stall. Move ONLY the navigation target to the
+    // nearest free point; the affordance's object/feedback (parent_node_id) is untouched, so the
+    // contract still services the same object. Everything downstream (plan, arrival, display) then uses
+    // the repaired target consistently.
+    if (const auto safe = planner.repair_target(room_polygon_, inner_polygon_,
+                                                obstacle_tracker.obstacle_polygons(), step.target.room_pos);
+        safe.has_value() && (*safe - step.target.room_pos).squaredNorm() > 1e-6f)
+    {
+        qInfo() << "[controller] affordance target" << step.target.node_name.c_str()
+                << "blocked → repaired to nearest free point ("
+                << (*safe).x() << "," << (*safe).y() << ")";
+        step.target.room_pos = *safe;
+
+        // Re-aim the heading at the object now that the standpoint moved (the producer's yaw faced the
+        // object from the original, now-discarded viewpoint).
+        if (step.target.parent_node_id != 0)
+            if (const auto obj = world_model.read_node_room_xy(step.target.parent_node_id, timestamp_ms);
+                obj.has_value())
+                step.target.yaw_rad = std::atan2(obj->y() - step.target.room_pos.y(),
+                                                 obj->x() - step.target.room_pos.x());
+    }
+
     current_target_room_ = step.target.room_pos;
     step.target_changed = !last_target_info_.has_value()
                        || !ControllerWorldModel::same_target_instance(*last_target_info_, step.target);
@@ -288,7 +315,13 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         {
             if (const auto aff_node = graph_->get_node(active_target_id_); aff_node.has_value())
             {
-                active_contract_ = rc::affordance::read_contract(aff_node.value());
+                // Resolve the contract from the PARENT object's type (stable across affordance-node
+                // renames on restart), not the affordance node name.
+                std::string parent_type;
+                if (last_target_info_->parent_node_id != 0)
+                    if (const auto pn = graph_->get_node(last_target_info_->parent_node_id); pn.has_value())
+                        parent_type = pn->type();
+                active_contract_ = rc::affordance::read_contract(aff_node.value(), parent_type);
                 feedback_node_id_ = active_contract_.feedback_node_id != 0
                                   ? active_contract_.feedback_node_id
                                   : last_target_info_->parent_node_id;   // default: the parent object
@@ -397,7 +430,33 @@ bool ControllerSession::goal_met(std::uint64_t feedback_node_id) const
     const auto node = graph_->get_node(feedback_node_id);
     if (!node.has_value())
         return false;
-    return rc::affordance::evaluate_goal(node.value(), active_contract_.goal);
+    // The look is "done" only when the contract clauses hold AND the base is quiet enough for a clean,
+    // motion-free observation (no blur / pose smear). max_observe_*=0 → stillness not required.
+    return rc::affordance::evaluate_goal(node.value(), active_contract_.goal) && robot_still();
+}
+
+void ControllerSession::update_base_speed(const ControllerRobotPose &pose, std::uint64_t timestamp_ms)
+{
+    if (prev_robot_pose_.has_value() && timestamp_ms > prev_robot_ts_ms_)
+    {
+        const float dt = static_cast<float>(timestamp_ms - prev_robot_ts_ms_) * 1e-3f;
+        if (dt > 1e-3f)
+        {
+            constexpr float kTwoPi = 6.28318530718f;
+            const float lin = (pose.pos - prev_robot_pose_->pos).norm() / dt;
+            const float ang = std::abs(std::remainder(pose.theta - prev_robot_pose_->theta, kTwoPi)) / dt;
+            // EMA so a single jittery pose sample doesn't spuriously trip (or release) the gate.
+            base_speed_lin_ = 0.5f * base_speed_lin_ + 0.5f * lin;
+            base_speed_ang_ = 0.5f * base_speed_ang_ + 0.5f * ang;
+        }
+    }
+    prev_robot_pose_  = pose;
+    prev_robot_ts_ms_ = timestamp_ms;
+}
+
+bool ControllerSession::robot_still() const
+{
+    return rc::affordance::stillness_ok(base_speed_lin_, base_speed_ang_, active_contract_);
 }
 
 bool ControllerSession::step_lockon(ControllerMotionCommander &motion_commander, const TimeSource &time_source)

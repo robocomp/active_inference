@@ -300,6 +300,15 @@ void SpecificWorker::compute()
 	};
 	update_selected_affordance_label();
 
+	// Feed the EFE time-series panel (below the 2D view): score (gain − λ·dist) + raw gain (ΔH) per
+	// affordance evaluated last cycle. The gap between the two lines is λ·dist.
+	{
+		std::vector<ControllerDisplay::AffordanceEfeSample> efe;
+		for (const auto &c : affordance_manager_.last_candidates())
+			efe.push_back({c.node_name, c.gain, c.efe_score});
+		display_.update_affordance_efe(efe);
+	}
+
 	log_first_compute_once();
 
 	if (!G)
@@ -390,6 +399,7 @@ std::optional<SpecificWorker::PlanningStep> SpecificWorker::build_planning_step(
 	                                  world_model_,
 	                                  obstacle_tracker_,
 	                                  affordance_manager_,
+	                                  planner_,
 	                                  path_controller_,
 	                                  motion_commander_,
 	                                  display_);
