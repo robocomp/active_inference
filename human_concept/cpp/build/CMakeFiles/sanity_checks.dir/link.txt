@@ -1,1 +1,0 @@
-/usr/bin/c++ -O3 -DNDEBUG CMakeFiles/sanity_checks.dir/test/sanity_checks.cpp.o -o sanity_checks  libhuman_core.a 

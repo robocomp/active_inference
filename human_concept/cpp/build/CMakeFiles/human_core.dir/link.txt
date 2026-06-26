@@ -1,2 +1,0 @@
-/usr/bin/ar qc libhuman_core.a CMakeFiles/human_core.dir/core/human_kinematic_model.cpp.o CMakeFiles/human_core.dir/core/vfe_inference.cpp.o
-/usr/bin/ranlib libhuman_core.a

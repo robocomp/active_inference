@@ -1,1 +1,0 @@
-/usr/bin/c++ -O3 -DNDEBUG CMakeFiles/parity_check.dir/test/parity_check.cpp.o -o parity_check  libhuman_core.a 
