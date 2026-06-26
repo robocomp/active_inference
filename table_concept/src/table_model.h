@@ -137,6 +137,7 @@ struct FreeEnergyDecomposition
 class TableModel
 {
 public:
+    using State = TableState;   // for the shared SampleQueue<Model> template
     using IterationObserver = std::function<void(int, const TableState&, const FreeEnergyDecomposition&)>;
 
     static constexpr float TOP_THICKNESS = 0.03f;

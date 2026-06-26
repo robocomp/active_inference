@@ -244,7 +244,7 @@ bool TableFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_id)
     }
 
     inst.model     = TableModel(init_state, mparams);
-    inst.queue     = SampleQueue(make_queue_params());
+    inst.queue     = SampleQueue<TableModel>(make_queue_params());
     inst.affordance.init(G_, node.id(), node.name());
 
     instances_.emplace(node.id(), std::move(inst));
@@ -266,7 +266,7 @@ TableFitter::TableObservation TableFitter::observe(TableInstance& inst, const DS
     const auto& masks_packet = mask_ingestor_->packet();
     if (masks_packet.valid && masks_packet.frame_id > inst.last_masks_frame_seen)
     {
-        const auto selected_mask = mask_ingestor_->select_for_table(inst);
+        const auto selected_mask = mask_ingestor_->select_nearest(Eigen::Vector3f(inst.model.state().cx, inst.model.state().cy, inst.model.state().table_height), "table");
         if (selected_mask.has_value())
         {
             const auto& slice = selected_mask.value();
@@ -303,7 +303,7 @@ TableFitter::TableObservation TableFitter::observe(TableInstance& inst, const DS
 
                 inst.last_masks_frame_seen = masks_packet.frame_id;
 
-                if (should_log_table(inst))
+                if (should_log(inst))
                     std::print("[{}] masks={} label='{}' conf={:.2f} support={} cand={} resid={} centroid=({:.2f},{:.2f},{:.2f})\n",
                                inst.node_name, masks_packet.frame_id, slice.label, slice.confidence,
                                end - begin, observation.candidate_pts.size(), observation.residual_pts.size(),
@@ -329,7 +329,7 @@ TableFitter::TableObservation TableFitter::observe(TableInstance& inst, const DS
     if (const auto v = G_->get_attrib_by_name<explanation_ratio_att>(node); v.has_value())
         observation.explanation_ratio = v.value();
 
-    if (should_log_table(inst))
+    if (should_log(inst))
         std::print("[{}] ↓ frame={} cands={} resid={} expl={:.2f}\n",
                    inst.node_name, last_frame,
                    observation.candidate_pts.size(), observation.residual_pts.size(),
@@ -337,7 +337,7 @@ TableFitter::TableObservation TableFitter::observe(TableInstance& inst, const DS
     return observation;
 }
 
-bool TableFitter::should_log_table(const TableInstance& inst) const
+bool TableFitter::should_log(const TableInstance& inst) const
 {
     const int period = std::max(1, cfg_.table_log_period_frames);
     return (inst.processed_cycles % period) == 0;
@@ -396,7 +396,7 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
         && inst.model.silhouette_ray_count() > 0
         && inst.model.silhouette_residual() > cfg_.sil_reopen_residual_m)
     {
-        if (should_log_table(inst))
+        if (should_log(inst))
             std::print("[{}] silhouette re-open: silres={:.3f} > {:.3f} → reopen fit\n",
                        inst.node_name, inst.model.silhouette_residual(), cfg_.sil_reopen_residual_m);
         inst.frames_converged = cfg_.K_stable / 2;
@@ -418,38 +418,12 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
     {
         if (cfg_.fisher_filter_enabled)
         {
-            // Fisher information filter: fold this viewpoint's calibrated per-DOF Fisher information
-            // into the accumulators. Each DOF's raw curvature is normalised by the best single-view
-            // info seen for that DOF, so a fresh face that finally constrains a dimension counts as
-            // ~1 "equivalent view" and redundant views add proportionally less — anisotropic, and on
-            // the same scale as the proven InfoHalf stiffener. fisher_info_raw keeps the un-normalised
-            // posterior precision for the calibrated Σ (posterior std below).
-            const float decay = std::clamp(cfg_.fisher_info_decay, 0.0f, 1.0f);
-            const float q_len = cfg_.fisher_process_std_m   * cfg_.fisher_process_std_m;
-            const float q_ang = cfg_.fisher_process_std_yaw * cfg_.fisher_process_std_yaw;
-            for (int j = 0; j < 8; ++j)
-            {
-                const float oi = inst.last_obs_info[j];
-
-                // (a) stiffness driver — normalised "equivalent views", scalar fading memory.
-                inst.fisher_info_peak[j] = std::max(inst.fisher_info_peak[j], oi);
-                const float incr = inst.fisher_info_peak[j] > 1e-6f
-                                 ? TableBeliefPolicy::clamp01(oi / inst.fisher_info_peak[j]) : 0.0f;
-                inst.fisher_info[j] = inst.fisher_info[j] * decay + incr;
-
-                // (b) calibrated covariance — proper information-filter predict + update.
-                //   predict (static state, F=I): inflate covariance by Q → Y_pred = (Y_prev⁻¹ + Q)⁻¹,
-                //                                 i.e. precision bleeds a fixed amount each fresh frame.
-                //   update:                       Y_post = Y_pred + obs_info (measurement adds precision).
-                // The per-frame Q-bleed balances the measurement gain at a finite steady precision, so
-                // the posterior std converges to a physical floor instead of collapsing toward zero.
-                const float q     = (j == 6) ? q_ang : q_len;
-                const float Yprev = inst.fisher_info_raw[j];
-                const float Ypred = 1.0f / (1.0f / std::max(Yprev, 1e-9f) + q);
-                inst.fisher_info_raw[j] = Ypred + oi;
-            }
-            inst.info_w = inst.fisher_info[2];   // DOF index 2 = w
-            inst.info_h = inst.fisher_info[3];   // DOF index 3 = h
+            // Fisher information filter: fold this viewpoint's (confidence-weighted) per-DOF observation
+            // info into the accumulators (predict Q-bleed + update + normalised "equivalent views"), via
+            // the shared stabiliser. The weighting + Kalman/CUSUM already ran in accept_table_belief.
+            stabilizer_.accumulate(inst.stab);
+            inst.info_w = inst.stab.fisher_info[2];   // DOF index 2 = w
+            inst.info_h = inst.stab.fisher_info[3];   // DOF index 3 = h
         }
         else
         {
@@ -466,16 +440,16 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
     // Data-only posterior std (mm) from the accumulated Fisher precision — shrinks as evidence
     // gathers; ∞ (shown as -1) until a DOF is first observed. Diagnostic for the EFE epistemic value.
     const auto post_std_mm = [&](int j) -> float {
-        return inst.fisher_info_raw[j] > 1e-6f ? 1000.0f / std::sqrt(inst.fisher_info_raw[j]) : -1.0f;
+        return BeliefStabilizer<8>::posterior_std_milli(inst.stab, j);
     };
-    if (should_log_table(inst))
+    if (should_log(inst))
         std::print("[{}] FE={:.4f}  cx={:.3f} cy={:.3f}  w={:.3f} h={:.3f} H={:.3f} L={:.3f} ψ={:.3f} inset={:.3f}  pts={} sil={} silres={:.4f} info=({:.1f},{:.1f}) σ(w,h)mm=({:.1f},{:.1f})\n",
                    inst.node_name, free_energy,
                    s.cx, s.cy, s.w, s.h, s.table_height, s.leg_length, s.yaw, s.leg_inset,
                    inst.queue.size() + static_cast<int>(observation.residual_pts.size()),
                    inst.model.silhouette_ray_count(), inst.model.silhouette_residual(),
                    inst.info_w, inst.info_h, post_std_mm(2), post_std_mm(3));
-    if (should_log_table(inst))
+    if (should_log(inst))
         std::print("[{}] roi: valid={} offset=({:.2f},{:.2f}) fill={:.2f} | detect alive={} conf={:.2f} since={}\n",
                    inst.node_name, inst.roi_valid, inst.roi_offset_x, inst.roi_offset_y, inst.roi_fill,
                    inst.detection_alive, inst.last_mask_confidence, inst.frames_since_detection);
@@ -505,7 +479,7 @@ void TableFitter::log_fisher_csv(const TableInstance& inst, bool fresh, float fr
             cfg_.fisher_csv_path.clear();   // disable further attempts
             return;
         }
-        fisher_csv_ << "cycle,node,fresh,fe,warm_conf,settle_maturity,frames_converged,pts,silres";
+        fisher_csv_ << "cycle,node,fresh,fe,warm_conf,settle_maturity,frames_converged,pts,silres,mask_conf,mask_w";
         for (const auto* d : kDof) fisher_csv_ << ",state_" << d;
         for (const auto* d : kDof) fisher_csv_ << ",obs_"   << d;   // this frame's raw Fisher diag
         for (const auto* d : kDof) fisher_csv_ << ",acc_"   << d;   // normalised accumulated info (drives stiffness)
@@ -516,30 +490,33 @@ void TableFitter::log_fisher_csv(const TableInstance& inst, bool fresh, float fr
         // (= state_w/2, state_h/2), the 2-98 span's local centre offset, and the top/leg point split.
         fisher_csv_ << ",ext_hw02,ext_hh02,ext_hw05,ext_hh05,ext_hw10,ext_hh10"
                     << ",ext_offx,ext_offy,n_top,n_leg,n_pts";
+        // (D) Counter-evidence gate: per-DOF accumulator S_j (signed excess-bands) and the gate decision
+        // (-1 rejected/locked, 0 coherent passthrough, +1 unlocked/snapped).
+        for (const auto* d : kDof) fisher_csv_ << ",ce_"  << d;
+        for (const auto* d : kDof) fisher_csv_ << ",ceg_" << d;
         fisher_csv_ << '\n';
     }
 
     const auto s = inst.model.state().to_array();
     fisher_csv_ << inst.processed_cycles << ',' << inst.node_name << ',' << (fresh ? 1 : 0) << ','
                 << free_energy << ',' << inst.warm_confidence << ',' << inst.settle_maturity << ','
-                << inst.frames_converged << ',' << point_count << ',' << silres;
+                << inst.frames_converged << ',' << point_count << ',' << silres << ','
+                << inst.last_mask_confidence << ',' << inst.stab.last_mask_conf_weight;
     for (int j = 0; j < 8; ++j) fisher_csv_ << ',' << s[j];
-    for (int j = 0; j < 8; ++j) fisher_csv_ << ',' << inst.last_obs_info[j];
-    for (int j = 0; j < 8; ++j) fisher_csv_ << ',' << inst.fisher_info[j];
-    for (int j = 0; j < 8; ++j) fisher_csv_ << ',' << inst.fisher_info_raw[j];
+    for (int j = 0; j < 8; ++j) fisher_csv_ << ',' << inst.stab.last_obs_info[j];
+    for (int j = 0; j < 8; ++j) fisher_csv_ << ',' << inst.stab.fisher_info[j];
+    for (int j = 0; j < 8; ++j) fisher_csv_ << ',' << inst.stab.fisher_info_raw[j];
     for (int j = 0; j < 8; ++j)
-    {
-        // 1/sqrt(precision) ×1000: mm for length DOFs, mrad for yaw (index 6); -1 if never observed.
-        const float prec = inst.fisher_info_raw[j];
-        fisher_csv_ << ',' << (prec > 1e-6f ? 1000.0f / std::sqrt(prec) : -1.0f);
-    }
-    for (int j = 0; j < 8; ++j) fisher_csv_ << ',' << inst.last_kalman_gain[j];
+        fisher_csv_ << ',' << BeliefStabilizer<8>::posterior_std_milli(inst.stab, j);
+    for (int j = 0; j < 8; ++j) fisher_csv_ << ',' << inst.stab.last_kalman_gain[j];
     const auto& ed = inst.last_extent_diag;
     fisher_csv_ << ',' << ed.half_ex[0] << ',' << ed.half_ey[0]
                 << ',' << ed.half_ex[1] << ',' << ed.half_ey[1]
                 << ',' << ed.half_ex[2] << ',' << ed.half_ey[2]
                 << ',' << ed.off_x << ',' << ed.off_y
                 << ',' << ed.n_top << ',' << ed.n_leg << ',' << ed.n_total;
+    for (int j = 0; j < 8; ++j) fisher_csv_ << ',' << inst.stab.counter_evidence[j];
+    for (int j = 0; j < 8; ++j) fisher_csv_ << ',' << inst.stab.last_ce_gate[j];
     fisher_csv_ << '\n';
     fisher_csv_.flush();   // flush each row so a plot can tail the file during a live run
 }
@@ -563,7 +540,7 @@ void TableFitter::step_queue_update(TableInstance& inst,
     // model adapts to the new evidence, then re-settles.
     if (admitted >= cfg_.warm_reopen_admit)
         inst.settle_maturity = 0;
-    if (should_log_table(inst))
+    if (should_log(inst))
         std::print("[{}] queue: admitted={} size={} obs_precision={:.2f}\n",
                    inst.node_name, admitted, inst.queue.size(), observation_precision);
 }
@@ -607,7 +584,7 @@ float TableFitter::step_model_update(TableInstance& inst,
 
     const auto& fe = inst.last_fe_terms;
     const auto& qm = inst.last_queue_metrics;
-    if (should_log_table(inst))
+    if (should_log(inst))
         std::print("[{}] objective: Lc={:.4f} Lh={:.4f} P={:.4f} FE={:.4f} | anchors={}/{} mass={:.2f} "
                    "rfe=({:.4f},{:.4f},{:.4f}) occ={:.2f} edge={:.2f} | acc={} rej[warm={},sdf={},cap={},bin={}] "
                    "evict[bin={},rfe={}] mean|sdf|={:.4f}\n",
@@ -722,6 +699,44 @@ void TableFitter::evolve_table_belief(TableInstance& inst, const TableBeliefEvid
     }
 }
 
+void TableFitter::refresh_stabilizer_params()
+{
+    // Table DOF order = [cx, cy, w, h, H, leg, yaw, inset]: yaw is the periodic DOF; cx,cy are position.
+    StabilizerLayout<8> layout;
+    layout.yaw_index = 6;
+    layout.is_position[0] = true;
+    layout.is_position[1] = true;
+    stabilizer_.set_layout(layout);
+
+    StabilizerParams p;
+    p.fisher_filter_enabled = cfg_.fisher_filter_enabled;
+    p.kalman_stiffness      = cfg_.fisher_kalman_stiffness;
+    p.maturity_stiffness    = cfg_.fisher_maturity_stiffness;
+    p.info_decay            = cfg_.fisher_info_decay;
+    p.info_quality_rescale  = cfg_.fisher_quality_rescale;
+    p.info_peak_decay        = cfg_.fisher_peak_decay;
+    p.info_peak_ratchet      = cfg_.fisher_peak_ratchet;
+    p.info_peak_ema          = cfg_.fisher_peak_ema;
+    p.views_half            = cfg_.fisher_views_half;
+    p.process_std_len       = cfg_.fisher_process_std_m;
+    p.process_std_ang       = cfg_.fisher_process_std_yaw;
+    p.mask_conf_weight      = cfg_.mask_conf_weight;
+    p.mask_conf_floor       = cfg_.mask_conf_floor;
+    p.mask_conf_ref         = cfg_.mask_conf_ref;
+    p.mask_conf_power       = cfg_.mask_conf_power;
+    p.ce_gate               = cfg_.counter_evidence_gate;
+    p.ce_band_len           = cfg_.counter_evidence_band_m;
+    p.ce_band_ang           = cfg_.counter_evidence_band_rad;
+    p.ce_base_pos           = cfg_.counter_evidence_base_pos;
+    p.ce_lambda_pos         = cfg_.counter_evidence_lambda_pos;
+    p.ce_base_size          = cfg_.counter_evidence_base_size;
+    p.ce_lambda_size        = cfg_.counter_evidence_lambda_size;
+    p.ce_decay              = cfg_.counter_evidence_decay;
+    p.ce_step_cap           = cfg_.counter_evidence_step_cap;
+    p.ce_unlock_deflate     = cfg_.counter_evidence_unlock_deflate;
+    stabilizer_.set_params(p);
+}
+
 float TableFitter::accept_table_belief(TableInstance& inst,
                                        const TableState& previous_state,
                                        const TableBeliefEvidence& evidence)
@@ -753,29 +768,14 @@ float TableFitter::accept_table_belief(TableInstance& inst,
     // previous posterior precision after the Q-bleed predict). Always computed (logged); only used as
     // the acceptance stiffness when fisher_kalman_stiffness is on. The filter STATE update (predict +
     // posterior) stays in run_inference's fresh-mask block — here we only READ the prior precision.
-    inst.last_obs_info = inst.model.observation_information(evidence.eval_pts, evidence.eval_weights);
-    {
-        const float q_len = cfg_.fisher_process_std_m   * cfg_.fisher_process_std_m;
-        const float q_ang = cfg_.fisher_process_std_yaw * cfg_.fisher_process_std_yaw;
-        const float vh    = std::max(1e-3f, cfg_.fisher_views_half);
-        for (int j = 0; j < 8; ++j)
-        {
-            const float q     = (j == 6) ? q_ang : q_len;
-            const float Yprev = inst.fisher_info_raw[j];
-            const float Ypred = 1.0f / (1.0f / std::max(Yprev, 1e-9f) + q);
-            const float oi    = inst.last_obs_info[j];
-            float k = (oi > 0.0f) ? oi / (Ypred + oi) : 0.0f;
-            // (C) Maturity stiffening: the per-frame Kalman gain alone lets a single high-info frame move
-            // a well-seen DOF — the Q-bleed caps the accumulated precision at ~one frame's worth, so one
-            // measurement rivals all of history. Scale the gain down by the accumulated observation info
-            // (fisher_info = normalised "equivalent views", read BEFORE this frame's update in
-            // run_inference), so a mature DOF barely moves regardless of one noisy frame while an
-            // unobserved DOF (info≈0 → factor≈1) stays plastic. Disabled → pure per-frame gain (A/B).
-            if (cfg_.fisher_maturity_stiffness)
-                k *= vh / (vh + inst.fisher_info[j]);
-            inst.last_kalman_gain[j] = k;
-        }
-    }
+    // Per-DOF belief stabiliser (shared rc::BeliefStabilizer): weight this viewpoint's observation
+    // Fisher info by the mask confidence, derive the maturity-stiffened Kalman acceptance gain from the
+    // Q-bleed filter, and run the CUSUM/SPRT gate (reject lone surprises, ease onto sustained coherent
+    // ones). The filter STATE accumulation (predict + posterior) stays in run_inference's fresh block.
+    refresh_stabilizer_params();
+    const auto obs_info = inst.model.observation_information(evidence.eval_pts, evidence.eval_weights);
+    stabilizer_.weight_observation(inst.stab, obs_info, inst.last_mask_confidence);
+    stabilizer_.compute_acceptance(inst.stab, raw_state.to_array(), previous_state.to_array());
 
     const auto coverage = inst.queue.face_coverage(inst.model);
 
@@ -793,11 +793,10 @@ float TableFitter::accept_table_belief(TableInstance& inst,
                                                       static_cast<float>(std::max(1, cfg_.warm_settle_cycles)));
     const float settle_gain = TableBeliefPolicy::lerp(1.0f, cfg_.warm_settle_floor, maturity);
 
-    const bool use_kalman = cfg_.fisher_filter_enabled && cfg_.fisher_kalman_stiffness;
     const TableState accepted_state = TableBeliefPolicy::apply_observability_warm_start(
         previous_state, raw_state, inst.model.params(), cfg_, inst.warm_confidence,
         coverage, evidence.trusted_point_count, settle_gain, inst.info_w, inst.info_h,
-        use_kalman ? &inst.last_kalman_gain : nullptr);
+        stabilizer_.kalman_active() ? &inst.stab.last_kalman_gain : nullptr);
     if (!finite_state(accepted_state))
         return revert();
 
@@ -815,9 +814,9 @@ float TableFitter::accept_table_belief(TableInstance& inst,
     if (!std::isfinite(free_energy))
         return revert();
 
-    if (should_log_table(inst))
-        std::print("[{}] warm-start: conf={:.2f} rho_x={:.2f} rho_y={:.2f} residual={} trusted_pts={} residual_precision={:.2f} raw(w={:.3f},h={:.3f},psi={:.3f}) accepted(w={:.3f},h={:.3f},psi={:.3f})\n",
-                   inst.node_name, inst.warm_confidence,
+    if (should_log(inst))
+        std::print("[{}] warm-start: conf={:.2f} mask_conf={:.2f} w={:.2f} rho_x={:.2f} rho_y={:.2f} residual={} trusted_pts={} residual_precision={:.2f} raw(w={:.3f},h={:.3f},psi={:.3f}) accepted(w={:.3f},h={:.3f},psi={:.3f})\n",
+                   inst.node_name, inst.warm_confidence, inst.last_mask_confidence, inst.stab.last_mask_conf_weight,
                    std::min(coverage[0], coverage[1]) / (std::max(coverage[0], coverage[1]) + 1e-3f),
                    std::min(coverage[2], coverage[3]) / (std::max(coverage[2], coverage[3]) + 1e-3f),
                    evidence.residual_count, evidence.trusted_point_count, evidence.residual_precision,
@@ -869,7 +868,7 @@ void TableFitter::feed_silhouette(TableInstance& inst)
     }
 
     const auto& packet = mask_ingestor_->packet();
-    const auto slice = mask_ingestor_->select_for_table(inst);
+    const auto slice = mask_ingestor_->select_nearest(Eigen::Vector3f(inst.model.state().cx, inst.model.state().cy, inst.model.state().table_height), "table");
     if (not slice.has_value() or slice->pixel_end <= slice->pixel_begin
         or slice->pixel_end > packet.mask_pixels.size())
         return;
@@ -920,7 +919,7 @@ void TableFitter::feed_silhouette(TableInstance& inst)
     // Report how stale the consumed mask is: lag from its capture stamp to now (same wall-clock epoch as
     // the producer's frame stamp). A large lag while the base is moving is exactly what the capture-time
     // pose pinning above corrects — this quantifies how much it's buying. Throttled; only with a stamp.
-    if (packet.timestamp_ms > 0 and should_log_table(inst))
+    if (packet.timestamp_ms > 0 and should_log(inst))
     {
         const auto now_ms = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count());
@@ -1048,7 +1047,7 @@ void TableFitter::ingest_observation_voxels(TableInstance& inst, const TableObse
     ingest(observation.candidate_pts);
     ingest(observation.residual_pts);
 
-    if (inserted > 0 && should_log_table(inst))
+    if (inserted > 0 && should_log(inst))
         std::print("[{}] voxel-bank: +{} total={} (cap={}) reject_foreign={}\n",
                    inst.node_name, inserted, inst.voxel_bank_pts.size(), max_points, rejected_foreign);
 }
@@ -1115,6 +1114,7 @@ SampleQueueParams TableFitter::make_queue_params() const
     p.min_anchor_weight            = cfg_.min_anchor_weight;
     p.edge_bonus_weight            = cfg_.edge_bonus_weight;
     p.edge_proximity_threshold     = cfg_.edge_proximity_threshold;
+    p.diversity_admission          = true;   // table: spatial-diversity admission (preserve pre-template behaviour)
     return p;
 }
 

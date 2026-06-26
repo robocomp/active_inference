@@ -27,15 +27,14 @@ LIST(APPEND SOURCES
   ../src/specificworker.cpp
   ../src/specificworker_presence.cpp
   ../src/table_config.cpp
-  ../src/mask_ingestor.cpp
+  ${ACTIVE_INFERENCE_COMMON_DIR}/mask_ingestor/mask_ingestor.cpp
+  ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/timeseries_plot.cpp
   ../src/table_scene_graph.cpp
   ../src/table_fitter.cpp
   ../src/table_model.cpp
-  ../src/sample_queue.cpp
   ../src/epistemic_planner.cpp
   ../src/prior_store.cpp
   ../src/table_affordance.cpp
-  ../src/timeseries_plot.cpp
   ${ACTIVE_INFERENCE_COMMON_DIR}/robust_metrics/robust_metrics.cpp
   ${ACTIVE_INFERENCE_COMMON_DIR}/robust_metrics/robust_metrics_torch.cpp
   ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_monitor/agent_presence_monitor.cpp
@@ -47,16 +46,17 @@ LIST(APPEND HEADERS
   ../src/specificworker.h
   ../src/table_config.h
   ../src/table_instance.h
-  ../src/mask_ingestor.h
+  ${ACTIVE_INFERENCE_COMMON_DIR}/mask_ingestor/mask_ingestor.h
   ../src/table_scene_graph.h
   ../src/table_fitter.h
   ../src/table_model.h
-  ../src/sample_queue.h
+  ${ACTIVE_INFERENCE_COMMON_DIR}/sample_queue/sample_queue.h
+  ../src/sample_queue_geometry.h
   ../src/epistemic_planner.h
   ../src/prior_store.h
   ../src/table_affordance.h
-  ../src/timeseries_plot.h
-  ../src/custom_widget.h
+  ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/timeseries_plot.h
+  ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/custom_widget.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/robust_metrics/robust_metrics.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/robust_metrics/robust_metrics_torch.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_monitor/agent_presence_monitor.h

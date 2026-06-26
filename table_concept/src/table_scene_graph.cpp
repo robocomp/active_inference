@@ -221,7 +221,7 @@ void TableSceneGraph::write_rt_covariance(std::uint64_t room_id, TableInstance& 
         return;
 
     // Per-DOF accumulated precision from the Fisher filter: [cx,cy,w,h,H,leg,yaw,inset].
-    const auto& Y = inst.fisher_info_raw;
+    const auto& Y = inst.stab.fisher_info_raw;
     const float scale = std::max(1e-6f, cfg_.rt_cov_scale);
     constexpr float big = 1e3f;   // unobservable / never-seen DOF → large variance
     const auto var = [&](int j) -> float { return Y[j] > 1e-6f ? scale / Y[j] : big; };

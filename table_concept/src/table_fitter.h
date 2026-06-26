@@ -33,9 +33,9 @@
 #include "table_config.h"        // rc::TableConfig
 #include "table_instance.h"      // rc::TableInstance, TableState
 #include "table_model.h"         // TableModel / TableModelParams / FreeEnergyDecomposition
-#include "sample_queue.h"        // SampleQueue / SampleQueueParams
+#include "../../common/sample_queue/sample_queue.h"        // SampleQueue / SampleQueueParams
 #include "prior_store.h"         // PriorStore / TablePrior
-#include "mask_ingestor.h"
+#include "../../common/mask_ingestor/mask_ingestor.h"
 #include "table_scene_graph.h"
 
 namespace rc {
@@ -69,7 +69,7 @@ public:
 
     std::unordered_map<std::uint64_t, TableInstance>& instances() { return instances_; }
     void forget_node(std::uint64_t id) { instances_.erase(id); }
-    bool should_log_table(const TableInstance& inst) const;
+    bool should_log(const TableInstance& inst) const;
 
 private:
     struct TableBeliefEvidence
@@ -169,6 +169,11 @@ private:
     std::unordered_map<std::uint64_t, TableInstance> instances_;
     std::uint64_t                  room_node_id_ = 0;   // latched per ensure_instance call
     std::ofstream                  fisher_csv_;         // per-cycle Fisher-filter evolution log (optional)
+
+    // Shared per-DOF belief stabiliser (Fisher filter + Kalman acceptance + CUSUM/SPRT). Holds the
+    // algorithm + params (refreshed from cfg_ each accept); per-table state lives in inst.stab.
+    BeliefStabilizer<8>            stabilizer_;
+    void refresh_stabilizer_params();   // map cfg_ → stabilizer_ params + the table DOF layout
 };
 
 }  // namespace rc

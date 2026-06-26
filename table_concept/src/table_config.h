@@ -116,6 +116,18 @@ struct TableConfig
     // gain (stiff) yet still snap to a genuinely high-information view; uniform across all 8 DOFs.
     bool  fisher_kalman_stiffness      = false;
     float fisher_info_decay            = 1.0f;    // stiffener (acc): scalar fading memory; <1 forgets, 1 = pure accumulation
+    // Quality-aware maturity: normalise the views accumulator by a (decaying) running quality bar so a
+    // CLOSE approach after far glimpses re-opens the fit (rescales the stale far-view "views" down)
+    // instead of staying locked at the misrepresented far fit. Off → every view counts ~1 (far hardens
+    // as fast as close — the over-stiffening that froze the fit).
+    bool  fisher_quality_rescale       = true;
+    float fisher_peak_decay            = 1.0f;    // quality-bar slow forgetting (1 = non-decaying)
+    // Only re-open the fit when a view beats the quality bar by ≥ this ratio (a GENUINE close approach,
+    // ~10–100×), and fold the new high in as an EMA — so ordinary per-frame obs flutter (which swings
+    // orders of magnitude) no longer re-ratchets the bar and keeps a DOF perpetually plastic (the width
+    // wander). Higher ratchet = stiffer / harder to re-open; lower EMA = the bar moves up more gently.
+    float fisher_peak_ratchet          = 2.5f;
+    float fisher_peak_ema              = 0.30f;
     // Calibrated-covariance branch (fisher_info_raw): the information-filter PREDICT step inflates
     // each DOF's covariance by process noise Q per fresh frame — Y_pred = (Y_prev⁻¹ + Q)⁻¹ — so the
     // posterior precision reaches a finite STEADY state (belief converges to a real uncertainty floor)
@@ -142,6 +154,42 @@ struct TableConfig
     // per-frame Kalman gain (for A/B); requires KalmanGainStiffness to have any effect.
     bool  fisher_maturity_stiffness    = true;
     float fisher_views_half            = 4.0f;    // equivalent-views at which the maturity stiffener halves the gain (lower = hardens faster)
+    // (D) Counter-evidence gate (CUSUM / sequential change-detector): asymmetric, ratcheting trust on
+    // top of the Kalman gain. Per DOF, the surprise of each fresh frame — innovation |raw−belief| in
+    // units of the deadband — accumulates a SIGNED counter-evidence S_j only while it stays one-sided;
+    // a lone glitch bumps S_j once and decays away (rejected, gain→0), while a CONTIGUOUS same-direction
+    // run of surprises grows S_j until it overcomes a barrier that scales with the filter's accumulated
+    // confidence (the better the prediction, the more coherent counter-evidence is needed to unlock it).
+    // On unlock the DOF snaps to the new evidence (gain→1), S_j resets, and its accumulated precision is
+    // deflated (the old estimate is conceded). Requires KalmanGainStiffness. false = disabled (A/B).
+    bool  counter_evidence_gate        = false;
+    float counter_evidence_band_m      = 0.02f;   // length-DOF surprise deadband (m): innovations within this are "coherent"
+    float counter_evidence_band_rad    = 0.05f;   // yaw surprise deadband (rad)
+    // Barrier = base + lambda·fisher_info[j], SPLIT into position (cx,cy) vs size/shape (w,h,H,leg,yaw,
+    // inset) groups so the table CENTRE can be locked harder than its extents (position drifts one-sided
+    // with robot localisation and was unlocking ~3× more often than w/h). Higher base/lambda → a longer,
+    // more confident coherent run is needed before that group re-adapts.
+    float counter_evidence_base_pos    = 6.0f;    // position barrier floor (excess-bands): centre is heavily locked
+    float counter_evidence_lambda_pos  = 1.0f;    // extra position barrier per accumulated equivalent-view
+    float counter_evidence_base_size   = 3.0f;    // size/shape barrier floor (excess-bands)
+    float counter_evidence_lambda_size = 0.5f;    // extra size/shape barrier per accumulated equivalent-view
+    float counter_evidence_decay       = 0.8f;    // per-coherent-frame pay-down of S_j (a coherent frame is evidence FOR the belief)
+    float counter_evidence_unlock_deflate = 0.3f; // on unlock, multiply that DOF's accumulated info by this (concede the old estimate)
+    float counter_evidence_step_cap    = 1.0f;    // cap the per-frame CUSUM increment (excess-bands) so ONE big glitch can't
+                                                  // jump the barrier — unlock then requires a RUN of coherent surprise (proper SPRT)
+    // ── YOLO mask-score weighting of the update ─────────────────────────────────────────────────
+    // The detector's confidence is the measurement's reliability: weight each fresh frame's observation
+    // Fisher information by w(conf) so a low-score mask contributes ~zero precision → its Kalman gain
+    // ≈ 0 and it barely moves the belief (and barely hardens it). w = clamp01((conf−floor)/(1−floor))^power:
+    // below `floor` the mask is effectively ignored; `power` sets how steeply trust ramps with score.
+    // w = clamp01((conf−floor)/(ref−floor))^power : 0 at/below `floor`, 1 at/above `ref`. Set `floor`
+    // just above the detector's NOISE score and `ref` at a CONFIDENT score — for a partially-viewed
+    // table YOLO scores stay low (~0.3–0.45), so floor/ref must sit in that band or every mask is
+    // nuked (w=0 → the Fisher accumulator dies → no maturity stiffening → unstable).
+    bool  mask_conf_weight = true;
+    float mask_conf_floor  = 0.2f;   // YOLO score at/below which the mask is ~ignored in the update
+    float mask_conf_ref    = 0.5f;   // YOLO score at/above which the mask is fully trusted (w=1)
+    float mask_conf_power  = 2.0f;   // steepness of the trust ramp between floor and ref
     std::string fisher_csv_path        = "";      // if non-empty, append per-cycle Fisher-filter evolution to this CSV (for plotting)
     // Upload the table pose covariance onto the room→table RT edge (rt_covariance_att, 6×6 SE3),
     // built from the Fisher filter's per-DOF posterior precision (var = rt_cov_scale / fisher_info_raw):

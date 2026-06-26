@@ -24,7 +24,7 @@
 
 #include "table_config.h"       // rc::TableConfig
 #include "table_instance.h"     // rc::TableInstance, TableState
-#include "mask_ingestor.h"      // MaskIngestor::MasksPacket
+#include "../../common/mask_ingestor/mask_ingestor.h"      // MaskIngestor::MasksPacket
 #include "prior_store.h"        // TablePrior
 #include "epistemic_planner.h"  // EpistemicProposal
 

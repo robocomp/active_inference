@@ -20,7 +20,7 @@
 #include <array>
 #include <cmath>
 
-#include "sample_queue.h"
+#include "sample_queue_geometry.h"   // common SampleQueue<Model> + table's geometry policy (face_coverage)
 #include "table_model.h"
 
 // ─── Proposal ────────────────────────────────────────────────────────────────
@@ -76,7 +76,7 @@ public:
      * Returns valid==false if the best gain is below the threshold.
      */
     EpistemicProposal compute(const TableModel&  model,
-                              const SampleQueue& queue,
+                              const SampleQueue<TableModel>& queue,
                               const std::array<float, 8>& posterior_info = {}) const;
 
 private:

@@ -1,5 +1,7 @@
 #include "specificworker.h"
 
+#include <print>
+
 void SpecificWorker::waiting_enter()
 {
     presence_coordinator_.waiting_enter();
@@ -30,11 +32,32 @@ void SpecificWorker::degraded_loop()
     presence_coordinator_.degraded_loop();
 }
 
+void SpecificWorker::remove_owned_table_nodes()
+{
+    if (not G)
+        return;
+
+    // Table instances are DSR `table` nodes named "table_*". Deleting the node also drops its
+    // room→table RT edge, so no separate edge cleanup is needed. Startup stale-sweep (mirrors bottle).
+    std::vector<std::uint64_t> to_delete;
+    for (const auto& node : G->get_nodes_by_type("table"))
+        if (node.name().starts_with("table"))
+            to_delete.push_back(node.id());
+
+    for (const auto id : to_delete)
+        if (G->delete_node(id))
+            std::print("table_concept: removed table node id={}\n", id);
+}
+
 void SpecificWorker::cleanup_owned_nodes()
 {
     if (owned_nodes_cleaned_)
         return;
     owned_nodes_cleaned_ = true;
+
+    // Sweep every affordance node parented to a table (robust to renames / orphans not tracked in
+    // instances_), while the table parents still exist for the parent-type lookup.
+    remove_stale_affordance_nodes();
 
     if (G and fitter_)
     {
@@ -74,6 +97,28 @@ void SpecificWorker::cleanup_owned_nodes()
     }
 
     presence_coordinator_.cleanup_owned_nodes();
+}
+
+// Remove every "affordance" node whose parent object is a table — i.e. this agent's affordances,
+// including stale ones left by a crashed previous run (whatever their possibly-renamed node name).
+// Keyed on the stable parent TYPE, not the affordance node name. Main-thread only (graph access).
+void SpecificWorker::remove_stale_affordance_nodes()
+{
+    if (not G)
+        return;
+    for (const auto& aff : G->get_nodes_by_type("affordance"))
+    {
+        const auto pid = G->get_attrib_by_name<parent_att>(aff);
+        if (not pid.has_value())
+            continue;
+        const auto parent = G->get_node(pid.value());
+        if (parent.has_value() and parent->type() == "table")
+        {
+            qInfo() << "[table_concept] removing affordance node"
+                    << QString::fromStdString(aff.name()) << "id" << aff.id() << "(parent table)";
+            G->delete_node(aff.id());
+        }
+    }
 }
 
 void SpecificWorker::on_optional_peer_lost(const std::string &name, std::uint32_t /*id*/)

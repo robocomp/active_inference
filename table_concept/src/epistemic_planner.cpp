@@ -86,7 +86,7 @@ EpistemicPlanner::EpistemicPlanner(float delta_min, float gain_threshold, float 
 {}
 
 EpistemicProposal EpistemicPlanner::compute(const TableModel&  model,
-                                             const SampleQueue& queue,
+                                             const SampleQueue<TableModel>& queue,
                                              const std::array<float, 8>& posterior_info) const
 {
     constexpr float kEffectiveHorizontalFovRad = 70.0f * std::numbers::pi_v<float> / 180.0f;

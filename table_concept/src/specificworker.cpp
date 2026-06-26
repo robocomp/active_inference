@@ -193,9 +193,13 @@ void SpecificWorker::initialize()
                 qInfo() << "[SM] -> Waiting (missing:" << m.trimmed() << ")";
             }
         },
-        .on_operating_enter = []()
+        .on_operating_enter = [this]()
         {
             qInfo("[SM] -> Operating: all required peers present");
+            // Stale-node sweep on (re)entering Operating: remove any leftover affordance nodes from a
+            // previous run (e.g. after a crash that skipped cleanup) so a fresh create doesn't collide
+            // and get a DSR-generated name. Keyed on the parent object type, not the node name.
+            remove_stale_affordance_nodes();
         },
         .on_operating_loop = [this]()
         {
@@ -242,6 +246,11 @@ void SpecificWorker::initialize()
     connect(G.get(), &DSR::DSRGraph::del_node_signal,
             this, &SpecificWorker::del_node_slot);
 
+    // Remove any "table*" nodes left behind by a previous (crashed) run so this agent always starts
+    // from a clean slate and never adopts a stale/drifted node (mirrors bottle's startup sweep;
+    // scaffold_missing_table_nodes re-creates them from priors).
+    remove_owned_table_nodes();
+
     // Resolve room node
     const auto rooms = G->get_nodes_by_type("room");
     if (not rooms.empty())
@@ -264,23 +273,13 @@ void SpecificWorker::initialize()
     epistemic_planner_ = rc::EpistemicPlanner(cfg_.delta_min, cfg_.gain_threshold, cfg_.obs_distance,
                                               cfg_.epistemic_use_info_gain, cfg_.epistemic_min_info_gain);
 
-    // Remove stale affordance nodes created by this agent only.
-    // Keep foreign affordance nodes untouched.
-    constexpr std::string_view own_affordance_prefix = "table_afford";
-    for (const auto& aff_node : G->get_nodes_by_type("affordance"))
-    {
-        if (not aff_node.name().starts_with(own_affordance_prefix))
-            continue;
-
-        std::print("table_concept: removing stale affordance node '{}' id={}\n",
-                   aff_node.name(), aff_node.id());
-        G->delete_node(aff_node.id());
-    }
+    // Stale affordance nodes are swept on entering Operating (presence hook) and on shutdown — see
+    // remove_stale_affordance_nodes(), keyed on the parent object type (robust to node-name renames).
 
     // ── Time-series widget ──────────────────────────────────────────────────
     if (not graph_viewers.empty())
     {
-        custom_widget_ = new Custom_widget();
+        custom_widget_ = new Custom_widget("Table Model — Free Energy, Coverage Deficit, Residuals & Dimensions (w,h)");
         // Dock into the main DSR graph window (tab alongside the graph/tree views). The TimeSeriesPlot
         // is a plain QWidget (no QOpenGLWidget backing store), so it doesn't hit the shared-backing-store
         // repaint crash that pushed the heavy Voxel3D GL view into its own window — docking it here is
@@ -310,6 +309,15 @@ void SpecificWorker::initialize()
         ts_state_plot_->set_visible_window(60.f);
         series_layout->addWidget(ts_state_plot_);
 
+        // (D) Counter-evidence accumulator S_w/S_h — only when the gate is enabled. Watch S charge on a
+        // surprise and decay back (glitch absorbed) vs climb to the barrier (a real change unlocks).
+        if (cfg_.counter_evidence_gate)
+        {
+            ts_ce_plot_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
+            ts_ce_plot_->set_visible_window(60.f);
+            series_layout->addWidget(ts_ce_plot_);
+        }
+
         // GenericWorker::initialize() may have already started compute(), so
         // some instances can exist before the plots are constructed.
         for (const auto& [_, inst] : fitter_->instances())
@@ -319,6 +327,11 @@ void SpecificWorker::initialize()
             ts_res_plot_->add_series(inst.node_name + "_res", QColor(170, 80, 255), 1.1f);
             ts_state_plot_->add_series(inst.node_name + "_w", QColor(255, 90, 90), 1.1f);
             ts_state_plot_->add_series(inst.node_name + "_h", QColor(90, 200, 90), 1.1f);
+            if (ts_ce_plot_)
+            {
+                ts_ce_plot_->add_series(inst.node_name + "_ceW", QColor(255, 90, 90), 1.1f);
+                ts_ce_plot_->add_series(inst.node_name + "_ceH", QColor(90, 200, 90), 1.1f);
+            }
         }
     }
 }
@@ -451,9 +464,18 @@ void SpecificWorker::publish_table_diagnostics(const rc::TableInstance& inst,
             ts_state_plot_->add_point (inst.node_name + "_w", s.w);
             ts_state_plot_->add_point (inst.node_name + "_h", s.h);
         }
+        if (ts_ce_plot_)
+        {
+            // (D) Counter-evidence accumulator for the size DOFs (index 2=w, 3=h). Held between fresh
+            // frames (only updated in accept on a measurement), so it reads as a charge/decay trace.
+            ts_ce_plot_->add_series(inst.node_name + "_ceW", QColor(255, 90, 90), 1.1f);
+            ts_ce_plot_->add_series(inst.node_name + "_ceH", QColor(90, 200, 90), 1.1f);
+            ts_ce_plot_->add_point (inst.node_name + "_ceW", inst.stab.counter_evidence[2]);
+            ts_ce_plot_->add_point (inst.node_name + "_ceH", inst.stab.counter_evidence[3]);
+        }
     }
 
-    if (fitter_->should_log_table(inst))
+    if (fitter_->should_log(inst))
         std::print("[{}] series: FE={:.4f} cov={:.1f} res={}\n",
                    inst.node_name,
                    free_energy,
@@ -528,7 +550,7 @@ void SpecificWorker::step_convergence(rc::TableInstance& inst,
     G->add_or_modify_attrib_local<model_uncertainty_att>(node, total_deficit);
 
     // ↑ Top-down: generative model prediction vs. coverage evidence
-    if (fitter_->should_log_table(inst))
+    if (fitter_->should_log(inst))
         std::print("[{}] coverage: +x={:.1f} -x={:.1f} +y={:.1f} -y={:.1f}  "
                    "stable={}/{} U={:.1f}\n",
                    inst.node_name,
@@ -582,7 +604,7 @@ void SpecificWorker::step_epistemic(rc::TableInstance& inst, DSR::Node& node)
             }
         }
 
-    auto prop = epistemic_planner_.compute(inst.model, inst.queue, inst.fisher_info_raw);
+    auto prop = epistemic_planner_.compute(inst.model, inst.queue, inst.stab.fisher_info_raw);
     if (not prop.valid or not prop.is_finite())
         return;   // degenerate (non-finite) fit — leave the existing affordance node as-is, retry next cycle
 

@@ -140,7 +140,7 @@ void TableAffordance::create_node(const EpistemicProposal& prop)
     // Declare the execution contract: how the controller should complete this affordance (Servo
     // lock-on bound to the table's projected-ROI / detection feedback attributes + completion
     // predicate). Uses the shared type-level default; producers can override per node here.
-    rc::affordance::write_contract(*G_, aff_node, rc::affordance::default_contract_for(aff_name));
+    rc::affordance::write_contract(*G_, aff_node, rc::affordance::default_contract_for("table"));
 
     const auto id_opt = G_->insert_node(aff_node);
     if (!id_opt.has_value())

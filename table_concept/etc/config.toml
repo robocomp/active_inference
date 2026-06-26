@@ -91,10 +91,45 @@ ConfidenceCoverageGain = 1.00     # how much coverage evidence raises confidence
 ConfidenceResidualGain = 0.25     # how much unexplained residuals raise confidence
 FisherFilterEnabled = true        # use the real per-DOF SDF Fisher information (vs the face-coverage view-info proxy)
 KalmanGainStiffness = true        # drive each DOF's acceptance gain from the Kalman gain K=obs/(Y_pred+obs) (vs the InfoHalf/coverage heuristic)
-FisherInfoDecay = 0.95            # stiffener (acc): scalar fading memory; 0.95 ≈ 20 fresh-frame window → steady stiffness
+FisherInfoDecay = 0.99            # stiffener (acc): fading memory ≈100-frame window. A table is RIGID — its shape is
+                                  # learned once and should stay known, so the accumulator must build up (→ strong maturity
+                                  # stiffening + a high CUSUM barrier) instead of forgetting it every ~20 frames (0.95).
+# Quality-aware maturity: a CLOSE approach after far glimpses re-opens the fit (rescales the stale
+# far-view "views" down) instead of staying locked at the misrepresented far fit. The fix for "first
+# seen far → bad fit → approaching can't re-fit". Off → every view counts ~1 (far hardens as fast as close).
+FisherQualityRescale = true
+FisherPeakDecay = 1.0             # quality-bar slow forgetting (1 = non-decaying)
+# Re-open only on a GENUINELY better view: a view must beat the quality bar by ≥ Ratchet× to ratchet it
+# (and rescale the accumulated views), folding the new high in as an EMA. Stops ordinary per-frame obs
+# flutter (orders of magnitude) from constantly re-opening a DOF → fixes the width wander. Higher = stiffer.
+FisherPeakRatchet = 2.5
+FisherPeakEma = 0.30
 FisherProcessStdM = 0.005        # calibrated-cov predict: process-noise std per fresh frame for length DOFs (m) → std floor
 FisherProcessStdYaw = 0.01       # calibrated-cov predict: process-noise std per fresh frame for yaw (rad)
 FisherCsvPath = "etc/fisher_filter_log.csv"   # per-cycle evolution log for plotting (empty = off)
+# Sequential change-detector (CUSUM/SPRT) on top of the Kalman gain: an isolated surprising mask is
+# rejected per-DOF (gain→0), and only a COHERENT same-direction run of surprise unlocks the DOF and
+# snaps it to the new evidence. This is what stops a lone noisy mask from nudging a settled fit.
+CounterEvidenceGate = true        # enable the SPRT/CUSUM gate (requires KalmanGainStiffness)
+CounterEvidenceBandM = 0.02       # length-DOF surprise deadband (m): innovations within this are "coherent"
+CounterEvidenceBandRad = 0.05     # yaw surprise deadband (rad)
+# Barrier = base + lambda·views, SPLIT position (cx,cy) vs size/shape so the table CENTRE locks harder
+# than its extents (position drifts one-sided with robot localisation → it was unlocking ~3× more than w/h).
+CounterEvidenceBasePos = 6.0      # position barrier floor (excess-bands) — centre heavily locked
+CounterEvidenceLambdaPos = 1.0    # extra position barrier per accumulated equivalent-view
+CounterEvidenceBaseSize = 3.0     # size/shape barrier floor (excess-bands)
+CounterEvidenceLambdaSize = 0.5   # extra size/shape barrier per accumulated equivalent-view
+CounterEvidenceDecay = 0.8        # per-coherent-frame pay-down of the accumulator (evidence FOR the belief)
+CounterEvidenceUnlockDeflate = 0.3  # on unlock, multiply that DOF's accumulated info by this (concede the old estimate)
+CounterEvidenceStepCap = 1.0      # cap per-frame CUSUM increment (excess-bands) → unlock needs a RUN, not one outlier
+# YOLO mask-score weighting: w = clamp01((score−floor)/(ref−floor))^power. IMPORTANT: a partially-viewed
+# table scores LOW (~0.3–0.45 here), so floor/ref must sit in that band — floor too high nukes every mask
+# (w=0 → the Fisher accumulator dies → no maturity stiffening → UNSTABLE, the bug just fixed). Tune to
+# your detector: floor just above the noise score, ref at a confident score. Set MaskConfWeight=false to disable.
+MaskConfWeight = true             # weight the observation Fisher info by w(mask_score)
+MaskConfFloor = 0.2               # score at/below which the mask is ~ignored
+MaskConfRef = 0.5                 # score at/above which the mask is fully trusted (w=1)
+MaskConfPower = 2.0               # steepness of the trust ramp between floor and ref
 RtCovUpload = true                # upload the table pose covariance (rt_covariance_att, 6×6 SE3) onto the room→table RT edge, from the Fisher per-DOF precision
 RtCovScale = 1.0                  # var = RtCovScale / fisher_info_raw; calibrate toward NEES≈1 (raw curvature over-counts correlated points), like bottle CovEffScale
 

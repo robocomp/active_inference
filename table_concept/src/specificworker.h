@@ -46,16 +46,16 @@
 #include "../../common/robust_metrics/robust_metrics.h"
 #include "table_config.h"      // rc::TableConfig + load_table_config
 #include "table_instance.h"    // rc::TableInstance
-#include "mask_ingestor.h"     // rc::MaskIngestor (perception)
+#include "../../common/mask_ingestor/mask_ingestor.h"     // rc::MaskIngestor (perception)
 #include "table_scene_graph.h" // rc::TableSceneGraph (DSR node/RT I/O)
 #include "table_fitter.h"      // rc::TableFitter (active-inference core)
 #include "epistemic_planner.h"
 #include "prior_store.h"
-#include "sample_queue.h"
+#include "../../common/sample_queue/sample_queue.h"
 #include "table_affordance.h"
 #include "table_model.h"
-#include "custom_widget.h"
-#include "timeseries_plot.h"
+#include "../../common/dashboard/custom_widget.h"
+#include "../../common/dashboard/timeseries_plot.h"
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 
 // ─── SpecificWorker ──────────────────────────────────────────────────────────
@@ -118,6 +118,8 @@ private:
     void degraded_enter();
     void degraded_loop();
     void cleanup_owned_nodes();
+    void remove_stale_affordance_nodes();   // sweep affordances parented to a table (start + exit)
+    void remove_owned_table_nodes();        // startup stale-sweep of "table*" nodes (mirrors bottle)
     void request_shutdown();
     // Crash-free exit (request_shutdown + DDS reset + _Exit), bypassing the Ice/static teardown abort.
     void terminal_shutdown();
@@ -143,6 +145,7 @@ private:
     rc::TimeSeriesPlot*  ts_cov_plot_   = nullptr;   // coverage deficit
     rc::TimeSeriesPlot*  ts_res_plot_   = nullptr;   // residual point count
     rc::TimeSeriesPlot*  ts_state_plot_ = nullptr;   // inferred dimensions w/h (stability check)
+    rc::TimeSeriesPlot*  ts_ce_plot_    = nullptr;   // (D) counter-evidence accumulator S_w/S_h (only when the gate is on)
 
     std::unique_ptr<DSR::RT_API>                        rt_api_;
     std::unique_ptr<DSR::InnerEigenAPI>                inner_eigen_;     // for room↔body↔zed extrinsic (silhouette)

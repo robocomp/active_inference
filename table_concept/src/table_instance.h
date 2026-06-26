@@ -17,8 +17,9 @@
 #include <Eigen/Dense>
 
 #include "table_model.h"        // TableModel / TableState / FreeEnergyDecomposition
-#include "sample_queue.h"       // SampleQueue / SampleQueueMetrics
+#include "sample_queue_geometry.h"   // common SampleQueue<Model> + table's geometry policy
 #include "table_affordance.h"   // TableAffordance
+#include "../../common/belief_stabilizer/belief_stabilizer.h"   // rc::StabilizerState
 
 namespace rc {
 
@@ -28,7 +29,7 @@ struct TableInstance
     std::string node_name;
 
     TableModel  model;
-    SampleQueue queue;
+    SampleQueue<TableModel> queue;
 
     int  last_frame_seen    = -1;     // last_sensing_frame_att value read
     int  matched_frames     = 0;      // frames with fresh sensing data
@@ -46,18 +47,12 @@ struct TableInstance
     // unobserved face stays plastic until first seen. info_w ← x-faces, info_h ← y-faces.
     float      info_w = 0.0f;
     float      info_h = 0.0f;
-    // ── Fisher information filter ─────────────────────────────────────────────────
-    // The principled replacement for info_w/info_h: a per-DOF information filter over
-    // [cx,cy,w,h,H,leg,yaw,inset]. Each fresh mask measures the observation Fisher information
-    // (curvature of the SDF data-likelihood); the filter accumulates it across viewpoints so a
-    // well-seen DOF hardens while an unobserved one stays plastic — the stabiliser for successive
-    // gatherings of evidence as the robot orbits the table. info_w/info_h are mirrors of the
-    // (normalised) accumulators for DOFs w/h, feeding the existing acceptance-gain stiffener.
-    std::array<float, 8> fisher_info{};        // normalised "equivalent views" accumulator (drives stiffness)
-    std::array<float, 8> fisher_info_raw{};    // raw accumulated Fisher precision Σ⁻¹ (for posterior std / EFE)
-    std::array<float, 8> fisher_info_peak{};   // per-DOF adaptive normaliser (best single-view info seen)
-    std::array<float, 8> last_obs_info{};      // most recent frame's raw Fisher diagonal
-    std::array<float, 8> last_kalman_gain{};   // per-DOF acceptance gain K=obs/(Y_pred+obs) (the calibrated stiffness)
+    // ── Per-DOF belief stabiliser state ──────────────────────────────────────────
+    // The Fisher-information filter + Kalman acceptance + CUSUM/SPRT gate, now the shared
+    // rc::BeliefStabilizer over the 8 DOFs [cx,cy,w,h,H,leg,yaw,inset]. The algorithm + params live in
+    // TableFitter's stabilizer; this is just the per-table state (accumulators, gains, gate). info_w/
+    // info_h are mirrors of stab.fisher_info[w/h], feeding the legacy acceptance-gain stiffener.
+    StabilizerState<8> stab;
     ExtentDiagnostics    last_extent_diag{};   // footprint-extent vs fitted w/h + top/leg point split (size-bias diagnostic)
     bool epistemic_pending  = false;
     // Schmitt-trigger hysteresis for the epistemic affordance (anti-oscillation): once the expected
