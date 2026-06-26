@@ -57,6 +57,13 @@ struct BottleConfig
     float support_lambda_xy        = 50.0f;   // penalty weight (1/m²) for the centre lying OUTSIDE the footprint
     float support_decision_margin  = 2.0f;    // log-evidence a table must beat the room/floor by to win
     int   support_commit_cycles    = 8;       // consecutive cycles a challenger must win before re-parenting
+    // ── Epistemic "hidden-face" affordance ────────────────────────────────────────────────────────
+    // The agent advertises a far-side viewpoint (opposite the camera) so the controller can observe the
+    // bottle's occluded back arc and resolve the depth-degenerate radius. ΔH = ½·log(1 + view_info/Y_r).
+    float epistemic_obs_distance   = 0.9f;    // stand-off (m) from the bottle at the far-side viewpoint
+    float epistemic_view_info      = 50.0f;   // Fisher precision a back-view is expected to add to the radius DOF (ΔH scale)
+    int   epistemic_cooldown_cycles = 200;    // post-completion hold: cycles the gain is suppressed so it isn't re-claimed
+    std::string epistemic_csv_path  = "";     // non-empty → append a per-cycle epistemic/affordance CSV (debug/monitor)
     // ── Fisher information filter (per-DOF stabiliser; currently diagnostic) ──────────────────────
     // Accumulate the real per-DOF SDF observation Fisher information across viewpoints instead of a
     // "times viewed" proxy. The info-filter predict step bleeds a fixed process-noise Q each fresh

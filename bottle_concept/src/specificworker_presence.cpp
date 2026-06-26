@@ -59,11 +59,37 @@ void SpecificWorker::cleanup_owned_nodes()
         return;
     owned_nodes_cleaned_ = true;
 
+    // Sweep affordance nodes parented to a bottle cylinder (robust to renames / orphans), while the
+    // cylinder parents still exist for the parent-type lookup, before the [Owns] nodes are deleted.
+    remove_stale_affordance_nodes();
+
     // Stops the presence monitor FIRST, then deletes the [Owns] nodes ("bottle*" + the
     // agent node) — so every bottle cylinder is torn down here, after monitoring is off
     // (no separate remove_owned_bottle_nodes(): that ran the deletes while the monitor was
     // still live, and is only needed for the startup stale-sweep in initialize()).
     presence_coordinator_.cleanup_owned_nodes();
+}
+
+// Remove every "affordance" node whose parent object is a bottle cylinder — i.e. this agent's
+// affordances, including stale ones left by a crashed previous run (whatever their renamed name).
+// Keyed on the stable parent TYPE, not the affordance node name. Main-thread only (graph access).
+void SpecificWorker::remove_stale_affordance_nodes()
+{
+    if (not G)
+        return;
+    for (const auto& aff : G->get_nodes_by_type("affordance"))
+    {
+        const auto pid = G->get_attrib_by_name<parent_att>(aff);
+        if (not pid.has_value())
+            continue;
+        const auto parent = G->get_node(pid.value());
+        if (parent.has_value() and parent->type() == "cylinder")
+        {
+            qInfo() << "[bottle_concept] removing affordance node"
+                    << QString::fromStdString(aff.name()) << "id" << aff.id() << "(parent cylinder)";
+            G->delete_node(aff.id());
+        }
+    }
 }
 
 // ─── Optional-peer notifications ───────────────────────────────────────────────

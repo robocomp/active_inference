@@ -195,9 +195,13 @@ void SpecificWorker::initialize()
                 qInfo() << "[SM] -> Waiting (missing:" << m.trimmed() << ")";
             }
         },
-        .on_operating_enter = []()
+        .on_operating_enter = [this]()
         {
             qInfo("[SM] -> Operating: all required peers present");
+            // Stale-node sweep on (re)entering Operating: remove leftover affordance nodes from a
+            // previous run so a fresh create doesn't collide and get a DSR-generated name. Keyed on
+            // the parent object type, not the node name.
+            remove_stale_affordance_nodes();
         },
         .on_operating_loop = [this]()
         {
@@ -262,10 +266,42 @@ void SpecificWorker::initialize()
         cfg_, webots2robocomp_proxy, inner_eigen_.get(),
         [this](float bx, float by) { return scene_graph_->find_table_top(bx, by); });
 
-    // Active-inference fit core. Owns the instance map; collaborates with the three layers above.
+    // Hidden-face next-best-view planner (epistemic affordance).
+    epistemic_planner_ = rc::EpistemicPlanner(cfg_.epistemic_obs_distance, cfg_.epistemic_view_info);
+
+    // Active-inference fit core (pure belief). Owns the instance map; READS via scene_graph_ but the
+    // worker (process_bottle_node) owns the write-back + eval — see the canonical concept-agent loop.
     fitter_ = std::make_unique<rc::BottleFitter>(
         G, inner_eigen_.get(), cfg_, priors_cache_,
-        mask_ingestor_.get(), scene_graph_.get(), evaluator_.get());
+        mask_ingestor_.get(), scene_graph_.get());
+
+    // ── Live "Bottle Inference" dashboard (docked in the DSR graph window) ─────────────────────────
+    // TimeSeriesPlot is a plain QWidget (no QOpenGL backing store), so docking it is safe. Mirrors
+    // table_concept's dashboard; fed each cycle in publish_bottle_diagnostics.
+    if (not graph_viewers.empty())
+    {
+        custom_widget_ = new Custom_widget("Bottle Model — Free Energy, Dimensions (r,h), Posterior σ & Epistemic ΔH");
+        graph_viewers.at("")->add_custom_widget_to_dock("Bottle Inference", custom_widget_);
+
+        auto* series_layout = new QVBoxLayout(custom_widget_->frame_series);
+        series_layout->setContentsMargins(0, 0, 0, 0);
+        custom_widget_->frame_series->setLayout(series_layout);
+
+        const auto add_plot = [&](rc::TimeSeriesPlot*& plot)
+        {
+            plot = new rc::TimeSeriesPlot(custom_widget_->frame_series);
+            plot->set_visible_window(60.f);
+            series_layout->addWidget(plot);
+        };
+        add_plot(ts_fe_plot_);
+        add_plot(ts_dim_plot_);
+        add_plot(ts_sigma_plot_);
+        add_plot(ts_ce_plot_);
+
+        // GenericWorker::initialize() may have started compute() already, so some instances can exist.
+        for (auto& [_, inst] : fitter_->instances())
+            publish_bottle_diagnostics(inst, inst.prev_free_energy);
+    }
 }
 
 namespace { constexpr int PLACE_SETTLE_CYCLES = 30; }   // ~settle time after a start-placement move
@@ -302,7 +338,7 @@ void SpecificWorker::compute()
     // Bottle instances are DSR `cylinder` nodes named "bottle_*".
     for (const auto& node : G->get_nodes_by_type("cylinder"))
         if (node.name().starts_with("bottle"))
-            fitter_->process_bottle_node(node, room_node_id_);
+            process_bottle_node(node);
 
     // Validation drivers (Webots) also teleport the bottle, so they are mutually exclusive with the
     // arm-side start placement — skip them when place_on_start owns the bottle pose.
@@ -316,12 +352,178 @@ void SpecificWorker::compute()
     }
 }
 
+// Canonical per-node orchestration (mirrors table_concept::process_table_node): the fitter runs the
+// pure belief (ensure_instance → observe → run_inference, no DSR writes); the worker owns the DSR
+// write-back (scene_graph_->step_write_model) and the eval log.
+void SpecificWorker::process_bottle_node(const DSR::Node& node)
+{
+    fitter_->ensure_instance(node, room_node_id_);
+    auto& inst = fitter_->instances().at(node.id());
+    ++inst.processed_cycles;
+
+    const auto observation = fitter_->observe(inst, node);
+    if (not observation.has_fresh_data and inst.matched_frames < 5)
+        return;
+
+    const float free_energy = fitter_->run_inference(inst, observation);
+
+    if (auto node_opt = G->get_node(node.id()); node_opt.has_value())
+        scene_graph_->step_write_model(inst, node_opt.value(), free_energy);
+
+    // Epistemic capability: publish/refresh the hidden-face affordance for the controller.
+    step_epistemic(inst);
+
+    // Live dashboard (after step_epistemic so last_epistemic_gain is current).
+    publish_bottle_diagnostics(inst, free_energy);
+
+    // Eval logs every compute cycle, independent of the graph-write change-gate inside step_write_model.
+    evaluator_->log_eval(inst, free_energy);
+
+    inst.prev_free_energy = free_energy;
+}
+
+// Feed the live dashboard. Series are registered lazily & idempotently here (instances can be created
+// via the graph-signal path before the plots exist). Sampled every cycle so a flat trace = a settled
+// belief between fresh masks.
+void SpecificWorker::publish_bottle_diagnostics(rc::BottleInstance& inst, float free_energy)
+{
+    if (not ts_fe_plot_)
+        return;   // no graph viewer / dashboard this run
+
+    const auto& s = inst.model.state();
+    // Posterior std (mm) from the Fisher precision; -1 (drawn as a floor) until a DOF is first observed.
+    const auto sigma_mm = [&](int j) -> float {
+        return rc::BeliefStabilizer<5>::posterior_std_milli(inst.stab, j);
+    };
+
+    ts_fe_plot_->add_series(inst.node_name + "_fe", QColor(255, 170, 0), 1.1f);
+    ts_fe_plot_->add_point (inst.node_name + "_fe", free_energy);
+
+    ts_dim_plot_->add_series(inst.node_name + "_r", QColor(255, 90, 90), 1.1f);
+    ts_dim_plot_->add_series(inst.node_name + "_h", QColor(90, 200, 90), 1.1f);
+    ts_dim_plot_->add_point (inst.node_name + "_r", s.radius);
+    ts_dim_plot_->add_point (inst.node_name + "_h", s.height);
+
+    ts_sigma_plot_->add_series(inst.node_name + "_sr", QColor(255, 90, 90), 1.1f);
+    ts_sigma_plot_->add_series(inst.node_name + "_sh", QColor(90, 200, 90), 1.1f);
+    ts_sigma_plot_->add_point (inst.node_name + "_sr", sigma_mm(3));   // radius (depth-degenerate)
+    ts_sigma_plot_->add_point (inst.node_name + "_sh", sigma_mm(4));   // height
+
+    // CUSUM/SPRT counter-evidence Sⱼ for the size DOFs (radius idx 3, height idx 4): signed run of
+    // surprise vs the committed belief. ≈0 = coherent/locked; spike-then-decay = rejected glitch;
+    // sustained ramp then reset = a real change re-opened the fit. (Diagnostic — see update_fisher_filter.)
+    ts_ce_plot_->add_series(inst.node_name + "_ceR", QColor(255, 90, 90), 1.1f);
+    ts_ce_plot_->add_series(inst.node_name + "_ceH", QColor(90, 200, 90), 1.1f);
+    ts_ce_plot_->add_point (inst.node_name + "_ceR", inst.stab.counter_evidence[3]);
+    ts_ce_plot_->add_point (inst.node_name + "_ceH", inst.stab.counter_evidence[4]);
+}
+
+// Publish/refresh the "go see the hidden face" affordance (mirrors table_concept::step_epistemic). The
+// node persists and re-offers every cycle; a low ΔH is published as-is so the controller's EFE
+// selection won't pick a well-seen bottle (belief→knowledge governor without deleting the node).
+void SpecificWorker::step_epistemic(rc::BottleInstance& inst)
+{
+    if (inst.epistemic_cooldown > 0)
+        --inst.epistemic_cooldown;
+
+    // Controller-completion hold: when the controller completes (active=false, pending=false), keep the
+    // node but suppress its gain for a cooldown so it isn't immediately re-claimed before the belief settles.
+    if (const auto aid = inst.affordance.node_id(); aid != 0)
+        if (auto an = G->get_node(aid); an.has_value())
+        {
+            const bool a = G->get_attrib_by_name<active_att>(an.value()).value_or(false);
+            const bool p = G->get_attrib_by_name<epistemic_pending_att>(an.value()).value_or(true);
+            if (not a and not p and inst.epistemic_cooldown == 0)
+            {
+                inst.epistemic_cooldown = cfg_.epistemic_cooldown_cycles;
+                std::print("[{}] controller completed affordance → hold {} cycles (node kept, gain suppressed)\n",
+                           inst.node_name, cfg_.epistemic_cooldown_cycles);
+            }
+        }
+
+    // ZED origin in the room frame — defines which arc of the bottle is hidden from the camera.
+    Eigen::Vector2f camera_xy(std::numeric_limits<float>::quiet_NaN(),
+                              std::numeric_limits<float>::quiet_NaN());
+    if (inner_eigen_)
+        if (const auto c = inner_eigen_->transform("room", Mat::Vector3d(0.0, 0.0, 0.0), "zed", 0);
+            c.has_value())
+            camera_xy = Eigen::Vector2f(static_cast<float>(c->x()), static_cast<float>(c->y()));
+
+    auto prop = epistemic_planner_.compute(inst.model, camera_xy, inst.stab.fisher_info_raw);
+    if (not prop.valid or not prop.is_finite())
+        return;   // no camera pose / degenerate ray this cycle → leave the existing affordance untouched
+
+    if (inst.epistemic_cooldown > 0)
+        prop.epistemic_gain = 0.0f;
+
+    inst.last_epistemic_gain = prop.epistemic_gain;   // expose to the dashboard
+
+    const auto affordance_node_before = inst.affordance.node_id();
+    inst.affordance.update(prop);
+    if (affordance_node_before == 0 and inst.affordance.node_id() != 0)
+        trigger_graph_layout_twopi();
+    inst.epistemic_pending = true;
+
+    log_epistemic_csv(inst, prop, camera_xy);   // gated CSV: ΔH + viewpoint + affordance state (fresh here)
+}
+
+// Optional gated CSV of the epistemic/affordance evolution (no-op unless Epistemic.CsvPath is set).
+// One row per cycle with a valid proposal: the published ΔH (post-cooldown suppression), the far-side
+// target, the camera + bottle positions that define the hidden side, and the affordance protocol state.
+void SpecificWorker::log_epistemic_csv(const rc::BottleInstance& inst,
+                                       const rc::EpistemicProposal& prop,
+                                       const Eigen::Vector2f& camera_xy)
+{
+    if (cfg_.epistemic_csv_path.empty())
+        return;
+
+    if (not epistemic_csv_.is_open())
+    {
+        epistemic_csv_.open(cfg_.epistemic_csv_path, std::ios::out | std::ios::trunc);
+        if (not epistemic_csv_.is_open())
+        {
+            std::print("bottle_concept: [epistemic] cannot open CSV '{}'\n", cfg_.epistemic_csv_path);
+            cfg_.epistemic_csv_path.clear();   // disable further attempts
+            return;
+        }
+        epistemic_csv_ << "cycle,node,gain,pending,cooldown,aff_state,aff_node,"
+                          "target_x,target_y,target_yaw,cam_x,cam_y,bottle_cx,bottle_cy,radius,sigma_r_mm\n";
+    }
+
+    const auto& s = inst.model.state();
+    const float sigma_r = rc::BeliefStabilizer<5>::posterior_std_milli(inst.stab, 3);   // radius (mm)
+    epistemic_csv_ << inst.processed_cycles << ',' << inst.node_name << ','
+                   << prop.epistemic_gain << ',' << (inst.epistemic_pending ? 1 : 0) << ','
+                   << inst.epistemic_cooldown << ','
+                   << rc::BottleAffordance::state_name(inst.affordance.state()) << ','
+                   << inst.affordance.node_id() << ','
+                   << prop.epistemic_target_x_m << ',' << prop.epistemic_target_y_m << ','
+                   << prop.epistemic_target_yaw_rad << ','
+                   << camera_xy.x() << ',' << camera_xy.y() << ','
+                   << s.cx << ',' << s.cy << ',' << s.radius << ',' << sigma_r << '\n';
+    epistemic_csv_.flush();   // flush each row so a plot can tail the file during a live run
+}
+
 void SpecificWorker::del_node_slot(std::uint64_t id)
 {
     if (fitter_)
+    {
+        // If the deleted node was an instance's affordance node (controller satisfied / external delete),
+        // reset its state machine so it re-creates on the next epistemic cycle.
+        for (auto& [_, inst] : fitter_->instances())
+            inst.affordance.on_node_deleted(id);
         fitter_->forget_node(id);
+    }
     // A node left the graph — re-run the twopi layout so the view stays coherent.
     trigger_graph_layout_twopi();
+}
+
+void SpecificWorker::modify_node_attrs_slot(std::uint64_t id, const std::vector<std::string>&)
+{
+    // Track controller-owned protocol transitions on each instance's affordance node (active/pending).
+    if (fitter_)
+        for (auto& [_, inst] : fitter_->instances())
+            inst.affordance.on_node_modified(id);
 }
 
 void SpecificWorker::emergency()

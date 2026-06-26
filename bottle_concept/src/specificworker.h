@@ -57,11 +57,14 @@
 #include "../../common/robust_metrics/robust_metrics.h"
 #include "prior_store.h"
 #include "bottle_instance.h"    // rc::BottleInstance
+#include "epistemic_planner.h"  // rc::EpistemicPlanner (hidden-face next-best-view)
 #include "bottle_config.h"       // rc::BottleConfig + rc::load_bottle_config
 #include "bottle_evaluator.h"   // rc::BottleEvaluator (validation harness)
-#include "mask_ingestor.h"  // rc::MaskIngestor (masks reading)
+#include "../../common/mask_ingestor/mask_ingestor.h"  // rc::MaskIngestor (masks reading)
 #include "bottle_scene_graph.h" // rc::BottleSceneGraph (DSR node/RT I/O)
 #include "bottle_fitter.h"      // rc::BottleFitter (active-inference fit core)
+#include "../../common/dashboard/custom_widget.h"      // Custom_widget (dockable dashboard host)
+#include "../../common/dashboard/timeseries_plot.h"    // rc::TimeSeriesPlot
 
 // ─── (rc::BottleInstance / rc::BottleConfig moved to bottle_instance.h / bottle_config.h) ─
 
@@ -83,7 +86,7 @@ public slots:
     int  startup_check();
 
     void modify_node_slot(std::uint64_t, const std::string& type){};
-    void modify_node_attrs_slot(std::uint64_t id, const std::vector<std::string>& att_names){};
+    void modify_node_attrs_slot(std::uint64_t id, const std::vector<std::string>& att_names);
     void modify_edge_slot(std::uint64_t from, std::uint64_t to, const std::string& type){};
     void modify_edge_attrs_slot(std::uint64_t from, std::uint64_t to,
                                 const std::string& type, const std::vector<std::string>& att_names){};
@@ -101,6 +104,7 @@ private:
     void degraded_enter();
     void degraded_loop();
     void cleanup_owned_nodes();
+    void remove_stale_affordance_nodes();   // sweep affordances parented to a cylinder (start + exit)
     void request_shutdown();
     // Terminal, crash-free exit: runs request_shutdown() then std::_Exit() to bypass the fragile
     // Ice communicator/static teardown that aborts (IceUtil::Mutex EINVAL). Single exit point for
@@ -114,6 +118,23 @@ private:
     // Delete every "bottle*" cylinder node this agent owns (startup sweep + teardown).
     void remove_owned_bottle_nodes();
 
+    // Per-node orchestration (canonical concept-agent loop): the fitter runs the pure belief
+    // (ensure_instance → observe → run_inference); the worker persists it via scene_graph_ and logs eval.
+    void process_bottle_node(const DSR::Node& node);
+
+    // Epistemic capability: publish/refresh the hidden-face affordance for this bottle. Keeps the node
+    // alive and re-offered; a low ΔH is published as-is so the controller's EFE selection won't pick it.
+    void step_epistemic(rc::BottleInstance& inst);
+
+    // Live "Bottle Inference" dashboard: feed FE / dimensions / posterior σ / epistemic ΔH each cycle.
+    void publish_bottle_diagnostics(rc::BottleInstance& inst, float free_energy);
+
+    // Optional gated CSV of the epistemic/affordance evolution (debug/monitor). No-op unless
+    // cfg_.epistemic_csv_path is set. Written from step_epistemic where ΔH + the viewpoint are fresh.
+    void log_epistemic_csv(const rc::BottleInstance& inst,
+                           const rc::EpistemicProposal& prop,
+                           const Eigen::Vector2f& camera_xy);
+
     // ── Members ──────────────────────────────────────────────────────────────
     bool startup_check_flag = false;
     bool owned_nodes_cleaned_ = false;
@@ -121,8 +142,18 @@ private:
     AgentPresenceCoordinator presence_coordinator_;
 
     rc::BottleConfig                                 cfg_;
+    rc::EpistemicPlanner                             epistemic_planner_;   // hidden-face next-best-view
     std::unique_ptr<rc::PriorStore>                 prior_store_;
     std::vector<rc::BottlePrior>                    priors_cache_;
+
+    // Live dashboard (docked in the DSR graph window). Null when no graph viewer is present.
+    Custom_widget*      custom_widget_ = nullptr;
+    rc::TimeSeriesPlot* ts_fe_plot_    = nullptr;   // free energy
+    rc::TimeSeriesPlot* ts_dim_plot_   = nullptr;   // radius, height (m)
+    rc::TimeSeriesPlot* ts_sigma_plot_ = nullptr;   // posterior σ(radius,height) (mm)
+    rc::TimeSeriesPlot* ts_ce_plot_    = nullptr;   // CUSUM/SPRT counter-evidence (radius, height)
+
+    std::ofstream epistemic_csv_;   // optional per-cycle epistemic/affordance log (Epistemic.CsvPath)
 
     std::unique_ptr<DSR::RT_API> rt_api_;
     std::unique_ptr<DSR::InnerEigenAPI> inner_eigen_;

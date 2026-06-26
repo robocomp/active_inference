@@ -33,7 +33,7 @@
 #include "bottle_config.h"
 #include "bottle_instance.h"
 #include "bottle_model.h"        // BottleState
-#include "mask_ingestor.h"   // MaskIngestor::MasksPacket
+#include "../../common/mask_ingestor/mask_ingestor.h"   // MaskIngestor::MasksPacket
 #include "prior_store.h"         // BottlePrior
 
 namespace rc {

@@ -261,6 +261,22 @@ void BottleSceneGraph::step_write_model(BottleInstance& inst, DSR::Node& node, f
     // stops the per-cycle rewrite of the node (incl. the large mesh + the ever-incrementing
     // model_generation) and the RT edge — sparing the DSR network and every agent's graph viewer.
     // FE jitter is deliberately NOT a trigger (it never fully settles), only pose/size do.
+    // Active-perception detection signal (read by the controller's servo-lock-on goal). Decoupled from
+    // the geometry dead-band so a settled bottle still refreshes "is YOLO firing here", but itself
+    // dead-banded (state flip or a >0.02 confidence move) so it doesn't rewrite the node every cycle.
+    constexpr int   kDetectionAliveMaxFrames = 40;
+    inst.detection_alive = inst.frames_since_detection < kDetectionAliveMaxFrames;
+    const bool detection_changed =
+        inst.detection_alive != inst.last_pub_detection_alive or
+        std::abs(inst.last_mask_confidence - inst.last_pub_detection_conf) > 0.02f;
+    if (detection_changed)
+    {
+        inst.last_pub_detection_alive = inst.detection_alive;
+        inst.last_pub_detection_conf  = inst.last_mask_confidence;
+        G_->runtime_checked_add_or_modify_attrib_local(node, "bottle_detection_alive", inst.detection_alive ? 1 : 0);
+        G_->runtime_checked_add_or_modify_attrib_local(node, "bottle_detection_confidence", inst.last_mask_confidence);
+    }
+
     constexpr float kPosEps  = 0.005f;   // 5 mm
     constexpr float kSizeEps = 0.002f;   // 2 mm
     const bool changed =
@@ -270,7 +286,12 @@ void BottleSceneGraph::step_write_model(BottleInstance& inst, DSR::Node& node, f
         std::abs(s.cy     - inst.last_pub_cy)     > kPosEps  or
         std::abs(s.cz     - inst.last_pub_cz)     > kPosEps;
     if (not changed)
+    {
+        // Geometry settled, but a detection-signal change still needs to reach the graph.
+        if (detection_changed)
+            G_->update_node(node);
         return;
+    }
 
     inst.last_pub_radius = s.radius;
     inst.last_pub_height = s.height;

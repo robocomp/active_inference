@@ -58,6 +58,10 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
     out.support_lambda_xy        = getf("Support.LambdaXY",          50.0f);
     out.support_decision_margin  = getf("Support.DecisionMargin",    2.0f);
     out.support_commit_cycles    = geti("Support.CommitCycles",      8);
+    out.epistemic_obs_distance    = getf("Epistemic.ObsDistance",     0.9f);
+    out.epistemic_view_info       = getf("Epistemic.ViewInfo",        50.0f);
+    out.epistemic_cooldown_cycles = geti("Epistemic.CooldownCycles",  200);
+    out.epistemic_csv_path        = gets("Epistemic.CsvPath",         "");
     out.fisher_filter_enabled = getb("BottleModel.FisherFilterEnabled", true);
     out.fisher_info_decay     = getf("BottleModel.FisherInfoDecay",     1.0f);
     out.fisher_process_std_m  = getf("BottleModel.FisherProcessStdM",   0.005f);

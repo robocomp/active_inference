@@ -19,113 +19,86 @@ BottleFitter::BottleFitter(std::shared_ptr<DSR::DSRGraph> graph,
                            BottleConfig& cfg,
                            const std::vector<BottlePrior>& priors,
                            MaskIngestor* perception,
-                           BottleSceneGraph* scene_graph,
-                           BottleEvaluator* evaluator)
+                           BottleSceneGraph* scene_graph)
     : G_(std::move(graph)), inner_eigen_(inner_eigen), cfg_(cfg), priors_(priors),
-      mask_ingestor_(perception), scene_graph_(scene_graph), evaluator_(evaluator)
+      mask_ingestor_(perception), scene_graph_(scene_graph)
 {}
 
-void BottleFitter::process_bottle_node(const DSR::Node& node, std::uint64_t room_node_id)
+void BottleFitter::update_support_surface(BottleInstance& inst)
 {
-    room_node_id_ = room_node_id;
-    ensure_instance(node);
-
-    auto& inst = instances_.at(node.id());
-    ++inst.processed_cycles;
-
     // Decide the surface the bottle rests on (room vs a table) BEFORE ingest/fit, so the surface
     // filter (is_voxel_owned_by_bottle) and the post-fit cz anchor both have it. MAP over {room,
     // every table_N} using the OBSERVED base (low-percentile z of the owned voxel bank — NOT the
     // anchored cz, which would be circular) + an oriented footprint + vertical-support test. A
     // re-parent is committed only after support_commit_cycles of agreement (hysteresis).
+    const auto& s0 = inst.model.state();
+    float base_z;
+    if (not inst.voxel_bank_pts.empty())
     {
-        const auto& s0 = inst.model.state();
-        float base_z;
-        if (not inst.voxel_bank_pts.empty())
-        {
-            std::vector<float> zs;
-            zs.reserve(inst.voxel_bank_pts.size());
-            for (const auto& p : inst.voxel_bank_pts) zs.push_back(p.z());
-            const std::size_t k = zs.size() / 10;          // 10th percentile → robust base, rejects outliers
-            std::nth_element(zs.begin(), zs.begin() + k, zs.end());
-            base_z = zs[k];
-        }
-        else
-            base_z = s0.cz - 0.5f * s0.height;             // pre-evidence fallback: model base
+        std::vector<float> zs;
+        zs.reserve(inst.voxel_bank_pts.size());
+        for (const auto& p : inst.voxel_bank_pts) zs.push_back(p.z());
+        const std::size_t k = zs.size() / 10;          // 10th percentile → robust base, rejects outliers
+        std::nth_element(zs.begin(), zs.begin() + k, zs.end());
+        base_z = zs[k];
+    }
+    else
+        base_z = s0.cz - 0.5f * s0.height;             // pre-evidence fallback: model base
 
-        const auto dec = scene_graph_->decide_support_surface(s0.cx, s0.cy, base_z, room_node_id);
-        if (inst.parent_id == 0)                            // uninitialised → adopt immediately
+    const auto dec = scene_graph_->decide_support_surface(s0.cx, s0.cy, base_z, room_node_id_);
+    if (inst.parent_id == 0)                            // uninitialised → adopt immediately
+    {
+        inst.parent_id = dec.parent_id;
+        inst.parent_name = dec.parent_name;
+    }
+    if (dec.parent_id == inst.parent_id)
+    {
+        inst.support_challenger_id = 0;
+        inst.support_challenger_count = 0;
+    }
+    else                                                // a different surface is winning → debounce
+    {
+        if (dec.parent_id == inst.support_challenger_id)
+            ++inst.support_challenger_count;
+        else
         {
+            inst.support_challenger_id = dec.parent_id;
+            inst.support_challenger_count = 1;
+        }
+        if (inst.support_challenger_count >= cfg_.support_commit_cycles)
+        {
+            std::print("[{}] re-parent {} → {} (support won {} cycles)\n",
+                       inst.node_name, inst.parent_name, dec.parent_name, inst.support_challenger_count);
             inst.parent_id = dec.parent_id;
             inst.parent_name = dec.parent_name;
-        }
-        if (dec.parent_id == inst.parent_id)
-        {
+            inst.support_reparent_pending = true;
             inst.support_challenger_id = 0;
             inst.support_challenger_count = 0;
         }
-        else                                                // a different surface is winning → debounce
-        {
-            if (dec.parent_id == inst.support_challenger_id)
-                ++inst.support_challenger_count;
-            else
-            {
-                inst.support_challenger_id = dec.parent_id;
-                inst.support_challenger_count = 1;
-            }
-            if (inst.support_challenger_count >= cfg_.support_commit_cycles)
-            {
-                std::print("[{}] re-parent {} → {} (support won {} cycles)\n",
-                           inst.node_name, inst.parent_name, dec.parent_name, inst.support_challenger_count);
-                inst.parent_id = dec.parent_id;
-                inst.parent_name = dec.parent_name;
-                inst.support_reparent_pending = true;
-                inst.support_challenger_id = 0;
-                inst.support_challenger_count = 0;
-            }
-        }
-        // Anchor reflects the COMMITTED parent: table_top_of returns NaN for the room (no z anchor).
-        inst.table_top_z = scene_graph_->table_top_of(inst.parent_id);
     }
-
-    const auto observation = observe_bottle_node(inst, node);
-
-    if (not observation.has_fresh_data and inst.matched_frames < 5)
-        return;
-
-    const float free_energy = run_bottle_inference(inst, observation);
-
-    // Hang the bottle from the table: standing on the surface fixes cz = table_top + height/2, so z
-    // is determined (not fitted) — removes the z DOF and the systematic z error the free fit carried.
-    if (std::isfinite(inst.table_top_z))
-    {
-        auto s = inst.model.state();
-        s.cz = inst.table_top_z + 0.5f * s.height;
-        inst.model.set_state(s);
-    }
-
-    if (auto node_opt = G_->get_node(node.id()); node_opt.has_value())
-        scene_graph_->step_write_model(inst, node_opt.value(), free_energy);
-
-    // Eval logs every compute cycle, independent of the graph-write change-gate above.
-    evaluator_->log_eval(inst, free_energy);
-
-    inst.prev_free_energy = free_energy;
+    // Anchor reflects the COMMITTED parent: table_top_of returns NaN for the room (no z anchor).
+    inst.table_top_z = scene_graph_->table_top_of(inst.parent_id);
 }
 
-BottleFitter::BottleObservation BottleFitter::observe_bottle_node(BottleInstance& inst,
-                                                                  const DSR::Node& node)
+BottleFitter::BottleObservation BottleFitter::observe(BottleInstance& inst,
+                                                      const DSR::Node& node)
 {
     BottleObservation observation;
+
+    // Detection aliveness ticks every cycle; a fresh selected bottle mask below resets it to 0.
+    ++inst.frames_since_detection;
 
     // Primary path: YOLO masks (room frame). Classify-don't-destroy SDF split —
     // inliers become queue anchors, the rest drive model expansion.
     if (mask_ingestor_->packet().valid and mask_ingestor_->packet().frame_id > inst.last_masks_frame_seen)
     {
-        const auto selected_mask = mask_ingestor_->select_for_bottle(inst);
+        const auto selected_mask = mask_ingestor_->select_nearest(Eigen::Vector3f(inst.model.state().cx, inst.model.state().cy, inst.model.state().cz), "bottle");
         if (selected_mask.has_value())
         {
             const auto& slice = selected_mask.value();
+            // YOLO produced a bottle mask this frame → detection is alive; record its confidence.
+            inst.frames_since_detection = 0;
+            inst.last_mask_confidence   = slice.confidence;
             const std::size_t begin = std::min(slice.support_begin, mask_ingestor_->packet().support_points.size());
             const std::size_t end   = std::min(slice.support_end,   mask_ingestor_->packet().support_points.size());
 
@@ -174,8 +147,10 @@ BottleFitter::BottleObservation BottleFitter::observe_bottle_node(BottleInstance
     return observation;
 }
 
-float BottleFitter::run_bottle_inference(BottleInstance& inst, const BottleObservation& observation)
+float BottleFitter::run_inference(BottleInstance& inst, const BottleObservation& observation)
 {
+    update_support_surface(inst);   // resting-surface decision + table-top z anchor (before ingest/fit)
+
     inst.queue.begin_cycle();
 
     if (observation.has_fresh_data)
@@ -265,7 +240,7 @@ float BottleFitter::run_bottle_inference(BottleInstance& inst, const BottleObser
     // Data-only posterior std (mm) from the accumulated Fisher precision — shrinks as evidence
     // gathers; -1 until a DOF is first observed. Diagnostic for the EFE epistemic value / P_bottle.
     const auto post_std_mm = [&](int j) -> float {
-        return inst.fisher_info_raw[j] > 1e-6f ? 1000.0f / std::sqrt(inst.fisher_info_raw[j]) : -1.0f;
+        return BeliefStabilizer<5>::posterior_std_milli(inst.stab, j);
     };
     if (should_log(inst))
         std::print("[{}] FE={:.4f}  c=({:.3f},{:.3f},{:.3f}) r={:.3f} h={:.3f}  pts={} σ(r,h)mm=({:.1f},{:.1f})\n",
@@ -273,6 +248,16 @@ float BottleFitter::run_bottle_inference(BottleInstance& inst, const BottleObser
                    point_count, post_std_mm(3), post_std_mm(4));
 
     log_fisher_csv(inst, observation.has_fresh_data, free_energy, point_count);
+
+    // Hang the bottle from the table: standing on the surface fixes cz = table_top + height/2, so z is
+    // determined (not fitted) — removes the z DOF and the systematic z error the free fit carried. The
+    // returned FE is the pre-anchor value (as before); the anchored state is what the worker writes back.
+    if (std::isfinite(inst.table_top_z))
+    {
+        auto s_anchor = inst.model.state();
+        s_anchor.cz = inst.table_top_z + 0.5f * s_anchor.height;
+        inst.model.set_state(s_anchor);
+    }
 
     return free_energy;
 }
@@ -308,7 +293,7 @@ void BottleFitter::feed_silhouette(BottleInstance& inst)
         if (not camera_api_) return;
     }
 
-    const auto slice = mask_ingestor_->select_for_bottle(inst);
+    const auto slice = mask_ingestor_->select_nearest(Eigen::Vector3f(inst.model.state().cx, inst.model.state().cy, inst.model.state().cz), "bottle");
     if (not slice.has_value() or slice->pixel_end <= slice->pixel_begin
         or slice->pixel_end > mask_ingestor_->packet().mask_pixels.size())
         return;
@@ -436,40 +421,42 @@ float BottleFitter::step_model_update(BottleInstance& inst,
 
     // Measure this frame's per-DOF observation Fisher information at the accepted state on the same
     // evidence used for the fit — the calibrated, anisotropic "how well is each DOF seen". Stored
-    // raw; run_bottle_inference folds it into the cross-frame filter on fresh-mask frames only.
+    // raw; run_inference folds it into the cross-frame filter on fresh-mask frames only.
     if (cfg_.fisher_filter_enabled)
-        inst.last_obs_info = inst.model.observation_information(fit_pts, fit_weights);
+        inst.stab.last_obs_info = inst.model.observation_information(fit_pts, fit_weights);
 
     return free_energy;
 }
 
 void BottleFitter::update_fisher_filter(BottleInstance& inst)
 {
-    // Fold the latest fresh frame's per-DOF Fisher diagonal (inst.last_obs_info, measured in
-    // step_model_update) into the cross-frame accumulators. Two parallel views, mirroring TableModel:
-    //   (a) stiffener  — normalised "equivalent views" with a scalar fading memory (decay): a fresh
-    //                    view that finally constrains a DOF counts ~1 view, redundant views add less.
-    //   (b) precision  — information-filter predict (Y_pred = (Y_prev⁻¹ + Q)⁻¹) + update (Y_post =
-    //                    Y_pred + obs). The per-frame Q-bleed balances the measurement gain at a
-    //                    finite steady precision, so the posterior std converges to a physical floor
-    //                    instead of collapsing toward zero.
-    const float decay = std::clamp(cfg_.fisher_info_decay, 0.0f, 1.0f);
-    const float q     = cfg_.fisher_process_std_m * cfg_.fisher_process_std_m;   // all 5 DOF are lengths
-    for (int j = 0; j < 5; ++j)
-    {
-        const float oi = inst.last_obs_info[j];
+    // Fold this frame's per-DOF Fisher diagonal (inst.stab.last_obs_info) into the cross-frame
+    // accumulators via the shared stabiliser: normalised "equivalent views" + information-filter
+    // predict (Q-bleed) + update. 5 DOF, all lengths (no yaw). Diagnostic for bottle today.
+    StabilizerParams p;
+    p.info_decay      = cfg_.fisher_info_decay;
+    p.process_std_len = cfg_.fisher_process_std_m;
+    p.mask_conf_weight = false;   // bottle does not weight by score yet
+    p.kalman_stiffness = false;   // gains computed but NOT applied to the fit (diagnostic only)
+    // Run the CUSUM/SPRT gate DIAGNOSTICALLY so the dashboard's counter-evidence panel is live. Bands
+    // sized to the bottle's cm scale; the resulting stab.counter_evidence tracks the fit's surprise.
+    p.ce_gate         = true;
+    p.ce_band_len     = 0.005f;   // 5 mm: radius/height innovations within this are "coherent"
+    StabilizerLayout<5> layout;   // yaw_index = -1 (no periodic DOF); cx,cy are position
+    layout.is_position[0] = true;
+    layout.is_position[1] = true;
+    stabilizer_.set_layout(layout);
+    stabilizer_.set_params(p);
 
-        // (a) normalised equivalent-views accumulator.
-        inst.fisher_info_peak[j] = std::max(inst.fisher_info_peak[j], oi);
-        const float incr = inst.fisher_info_peak[j] > 1e-6f
-                         ? std::clamp(oi / inst.fisher_info_peak[j], 0.0f, 1.0f) : 0.0f;
-        inst.fisher_info[j] = inst.fisher_info[j] * decay + incr;
+    // Diagnostic CUSUM: innovation = this fresh fit vs the previous fresh fit. Populates
+    // stab.counter_evidence / last_ce_gate (gains ignored — bottle keeps its convergence gate).
+    const auto cur = inst.model.state().to_array();
+    if (inst.has_prev_diag)
+        stabilizer_.compute_acceptance(inst.stab, cur, inst.prev_diag_state);
+    inst.prev_diag_state = cur;
+    inst.has_prev_diag   = true;
 
-        // (b) calibrated precision — predict (Q-bleed) then update.
-        const float Yprev = inst.fisher_info_raw[j];
-        const float Ypred = 1.0f / (1.0f / std::max(Yprev, 1e-9f) + q);
-        inst.fisher_info_raw[j] = Ypred + oi;
-    }
+    stabilizer_.accumulate(inst.stab);
 }
 
 void BottleFitter::log_fisher_csv(const BottleInstance& inst, bool fresh, float free_energy, int point_count)
@@ -494,6 +481,9 @@ void BottleFitter::log_fisher_csv(const BottleInstance& inst, bool fresh, float 
         for (const auto* d : kDof) fisher_csv_ << ",acc_"   << d;   // normalised accumulated info (stiffener)
         for (const auto* d : kDof) fisher_csv_ << ",raw_"   << d;   // un-normalised accumulated precision Σ⁻¹
         for (const auto* d : kDof) fisher_csv_ << ",std_"   << d;   // posterior std (mm); -1 = unobserved
+        for (const auto* d : kDof) fisher_csv_ << ",gain_"  << d;   // per-DOF Kalman gain (diagnostic; not applied)
+        for (const auto* d : kDof) fisher_csv_ << ",ce_"    << d;   // CUSUM counter-evidence Sⱼ (diagnostic)
+        for (const auto* d : kDof) fisher_csv_ << ",ceg_"   << d;   // gate: -1 reject / 0 passthrough / +1 unlock
         fisher_csv_ << '\n';
     }
 
@@ -501,14 +491,14 @@ void BottleFitter::log_fisher_csv(const BottleInstance& inst, bool fresh, float 
     fisher_csv_ << inst.processed_cycles << ',' << inst.node_name << ',' << (fresh ? 1 : 0) << ','
                 << free_energy << ',' << inst.frames_converged << ',' << point_count;
     for (int j = 0; j < 5; ++j) fisher_csv_ << ',' << s[j];
-    for (int j = 0; j < 5; ++j) fisher_csv_ << ',' << inst.last_obs_info[j];
-    for (int j = 0; j < 5; ++j) fisher_csv_ << ',' << inst.fisher_info[j];
-    for (int j = 0; j < 5; ++j) fisher_csv_ << ',' << inst.fisher_info_raw[j];
+    for (int j = 0; j < 5; ++j) fisher_csv_ << ',' << inst.stab.last_obs_info[j];
+    for (int j = 0; j < 5; ++j) fisher_csv_ << ',' << inst.stab.fisher_info[j];
+    for (int j = 0; j < 5; ++j) fisher_csv_ << ',' << inst.stab.fisher_info_raw[j];
     for (int j = 0; j < 5; ++j)
-    {
-        const float prec = inst.fisher_info_raw[j];
-        fisher_csv_ << ',' << (prec > 1e-6f ? 1000.0f / std::sqrt(prec) : -1.0f);
-    }
+        fisher_csv_ << ',' << BeliefStabilizer<5>::posterior_std_milli(inst.stab, j);
+    for (int j = 0; j < 5; ++j) fisher_csv_ << ',' << inst.stab.last_kalman_gain[j];
+    for (int j = 0; j < 5; ++j) fisher_csv_ << ',' << inst.stab.counter_evidence[j];
+    for (int j = 0; j < 5; ++j) fisher_csv_ << ',' << inst.stab.last_ce_gate[j];
     fisher_csv_ << '\n';
     fisher_csv_.flush();   // flush each row so a plot can tail the file during a live run
 }
@@ -588,10 +578,11 @@ std::uint64_t BottleFitter::voxel_key(const Eigen::Vector3f& point, float quanti
     return h;
 }
 
-void BottleFitter::ensure_instance(const DSR::Node& node)
+bool BottleFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_node_id)
 {
+    room_node_id_ = room_node_id;   // latch every cycle (the support decision + parent default read it)
     if (instances_.count(node.id()))
-        return;
+        return false;
 
     BottleState init_state;
     init_state.radius = cfg_.prior_radius;
@@ -646,14 +637,17 @@ void BottleFitter::ensure_instance(const DSR::Node& node)
     inst.node_id   = node.id();
     inst.node_name = node.name();
     inst.model     = BottleModel(init_state, mparams);
-    inst.queue     = SampleQueue(make_queue_params());
+    inst.queue     = SampleQueue<BottleModel>(make_queue_params());
     // RT-tree parent (table when hung from it, else room) — write_rt_pose writes in the parent frame.
     inst.parent_id = G_->get_attrib_by_name<parent_att>(node).value_or(room_node_id_);
     if (const auto pn = G_->get_node(inst.parent_id); pn.has_value())
         inst.parent_name = pn.value().name();
 
+    inst.affordance.init(G_, node.id(), node.name());   // epistemic hidden-face affordance for this bottle
+
     instances_.emplace(node.id(), std::move(inst));
     std::print("bottle_concept: created instance for node '{}' id={}\n", node.name(), node.id());
+    return true;
 }
 
 bool BottleFitter::should_log(const BottleInstance& inst) const
@@ -703,6 +697,7 @@ SampleQueueParams BottleFitter::make_queue_params() const
     p.edge_bonus_weight            = cfg_.edge_bonus_weight;
     p.edge_proximity_threshold     = cfg_.edge_proximity_threshold;
     p.z_bin_size                   = cfg_.z_bin_size;
+    p.diversity_admission          = false;  // bottle: smallest-|SDF| admission (preserve pre-template behaviour)
     return p;
 }
 

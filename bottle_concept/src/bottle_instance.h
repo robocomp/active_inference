@@ -18,7 +18,9 @@
 #include <Eigen/Dense>
 
 #include "bottle_model.h"
-#include "sample_queue.h"
+#include "sample_queue_geometry.h"   // common SampleQueue<Model> + bottle's geometry policy
+#include "bottle_affordance.h"
+#include "../../common/belief_stabilizer/belief_stabilizer.h"   // rc::StabilizerState
 
 namespace rc {
 
@@ -28,7 +30,15 @@ struct BottleInstance
     std::string node_name;
 
     BottleModel model;
-    SampleQueue queue;
+    SampleQueue<BottleModel> queue;
+
+    // Epistemic "go see the hidden face" affordance: a DSR node advertising the far-side viewpoint
+    // (EpistemicPlanner) for the mission controller. The node persists and refreshes; its ΔH gain
+    // governs selection (low nats → the controller won't pick it).
+    BottleAffordance affordance;
+    bool epistemic_pending  = false;
+    int  epistemic_cooldown = 0;   // post-completion hold (cycles) during which the gain is suppressed
+    float last_epistemic_gain = 0.0f;   // most recent published ΔH (nats) — for the dashboard
 
     int  matched_frames        = 0;     // frames with fresh sensing data
     bool reseed_requested      = false; // move-experiment: force a fresh cold-start at the next pose
@@ -36,6 +46,16 @@ struct BottleInstance
     int  last_masks_frame_seen = -1;    // last masks packet frame consumed
     int  processed_cycles      = 0;     // per-bottle compute cycles for log throttling
     int  model_generation      = 0;
+    // ── YOLO detection aliveness (active-perception feedback for the affordance contract) ──────────
+    // The producer publishes bottle_detection_alive/_confidence on the bottle node so the controller's
+    // servo lock-on completes on "YOLO is firing on this bottle". frames_since_detection ticks every
+    // observe() cycle and resets to 0 when a fresh bottle mask is selected; detection_alive is the
+    // thresholded form. last_pub_* dead-band the publish so a settled bottle stops rewriting the node.
+    int   frames_since_detection   = 100000;   // cycles since the last fresh bottle mask (0 = just seen)
+    float last_mask_confidence     = 0.0f;     // YOLO confidence of the last selected bottle mask
+    bool  detection_alive          = false;    // frames_since_detection < threshold
+    bool  last_pub_detection_alive = false;    // dead-band trace for the published flag
+    float last_pub_detection_conf  = -1.0f;    // dead-band trace for the published confidence
     float prev_free_energy     = std::numeric_limits<float>::max();
     // Dead-band tracking for write_rt_pose — suppress tiny oscillations
     float last_written_cx = std::numeric_limits<float>::max();
@@ -57,10 +77,15 @@ struct BottleInstance
     // stabiliser for successive gatherings of evidence as the robot orbits the table. The Q-bleed
     // predict keeps the precision at a finite steady state (the fix for P_bottle overconfidence).
     // Phase 1–2: folded + logged only — not yet driving acceptance or the published covariance.
-    std::array<float, 5> fisher_info{};        // normalised "equivalent views" accumulator (fading memory)
-    std::array<float, 5> fisher_info_raw{};    // raw accumulated precision Σ⁻¹ (Q-bleed → finite steady state)
-    std::array<float, 5> fisher_info_peak{};   // per-DOF adaptive normaliser (best single-view info seen)
-    std::array<float, 5> last_obs_info{};      // most recent fresh frame's raw Fisher diagonal
+    // Shared rc::BeliefStabilizer state over the 5 DOFs [cx,cy,cz,radius,height]. Currently only the
+    // Fisher accumulators are exercised (diagnostic); the Kalman/CUSUM fields stay zero until bottle's
+    // acceptance is wired to compute_acceptance (a future behaviour change).
+    StabilizerState<5> stab;
+    // Previous fresh-frame state, so the stabiliser's CUSUM can be run DIAGNOSTICALLY (innovation =
+    // this fit vs last) to populate stab.counter_evidence for the dashboard — without applying the
+    // gate to the fit (bottle still uses its convergence gate, not the Kalman/CUSUM acceptance).
+    std::array<float, 5> prev_diag_state{};
+    bool has_prev_diag = false;
     // Bottle-owned voxel memory bank (room frame), independent of per-frame uploads.
     std::vector<Eigen::Vector3f>      voxel_bank_pts;
     std::unordered_set<std::uint64_t> voxel_bank_keys;

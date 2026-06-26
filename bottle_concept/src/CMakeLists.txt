@@ -43,11 +43,13 @@ LIST(APPEND SOURCES
   ../src/specificworker_presence.cpp
   ../src/bottle_config.cpp
   ../src/bottle_evaluator.cpp
-  ../src/mask_ingestor.cpp
+  ${ACTIVE_INFERENCE_COMMON_DIR}/mask_ingestor/mask_ingestor.cpp
+  ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/timeseries_plot.cpp
   ../src/bottle_scene_graph.cpp
   ../src/bottle_fitter.cpp
+  ../src/epistemic_planner.cpp
+  ../src/bottle_affordance.cpp
   ../src/bottle_model.cpp
-  ../src/sample_queue.cpp
   ../src/prior_store.cpp
   ${ACTIVE_INFERENCE_COMMON_DIR}/robust_metrics/robust_metrics.cpp
   ${ACTIVE_INFERENCE_COMMON_DIR}/robust_metrics/robust_metrics_torch.cpp
@@ -61,11 +63,16 @@ LIST(APPEND HEADERS
   ../src/bottle_config.h
   ../src/bottle_instance.h
   ../src/bottle_evaluator.h
-  ../src/mask_ingestor.h
+  ${ACTIVE_INFERENCE_COMMON_DIR}/mask_ingestor/mask_ingestor.h
   ../src/bottle_scene_graph.h
   ../src/bottle_fitter.h
+  ../src/epistemic_planner.h
+  ../src/bottle_affordance.h
+  ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/timeseries_plot.h
+  ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/custom_widget.h
   ../src/bottle_model.h
-  ../src/sample_queue.h
+  ${ACTIVE_INFERENCE_COMMON_DIR}/sample_queue/sample_queue.h
+  ../src/sample_queue_geometry.h
   ../src/prior_store.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/robust_metrics/robust_metrics.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/robust_metrics/robust_metrics_torch.h

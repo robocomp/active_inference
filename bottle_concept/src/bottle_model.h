@@ -126,6 +126,7 @@ struct FreeEnergyDecomposition
 class BottleModel
 {
     public:
+        using State = BottleState;   // for the shared SampleQueue<Model> template
         using IterationObserver = std::function<void(int, const BottleState&, const FreeEnergyDecomposition&)>;
 
         // Minimum physical extents (clamped after every step)

@@ -5,14 +5,15 @@
  * runs the free-energy fit for each "bottle_*" cylinder node every cycle:
  *   - instance lifecycle (ensure_instance + the BottleModel/SampleQueue factories),
  *   - observation: split the selected mask's support points into queue anchors vs
- *     residuals against the current SDF (observe_bottle_node),
+ *     residuals against the current SDF (observe),
  *   - inference: voxel-bank ingest + cold-start seed (with camera-ward de-projection)
  *     + queue update + RGB silhouette likelihood + the gradient/free-energy step,
  *   - the bottle-owned voxel memory (ownership gate + FNV voxel keys).
  *
- * Collaborates with MaskIngestor (masks), BottleSceneGraph (table lookups, model
- * write-back, robot covariance) and BottleEvaluator (per-cycle eval logging). Plain
- * class (no Q_OBJECT) constructed by SpecificWorker after the other collaborators.
+ * Pure belief engine (mirrors TableFitter): exposes ensure_instance → observe → run_inference and
+ * does NOT write DSR. READS via MaskIngestor (masks) and BottleSceneGraph (table lookups / support
+ * surface / robot covariance). The worker (SpecificWorker::process_bottle_node) owns the write-back
+ * (scene_graph_->step_write_model) and the eval log. Plain class (no Q_OBJECT).
  */
 
 #pragma once
@@ -33,11 +34,10 @@
 #include "bottle_config.h"
 #include "bottle_instance.h"
 #include "bottle_model.h"        // BottleModel / BottleState / BottleModelParams
-#include "sample_queue.h"        // SampleQueue / SampleQueueParams
+#include "../../common/sample_queue/sample_queue.h"        // SampleQueue / SampleQueueParams
 #include "prior_store.h"         // BottlePrior
-#include "mask_ingestor.h"
+#include "../../common/mask_ingestor/mask_ingestor.h"
 #include "bottle_scene_graph.h"
-#include "bottle_evaluator.h"
 
 namespace rc {
 
@@ -49,18 +49,9 @@ public:
                  BottleConfig& cfg,
                  const std::vector<BottlePrior>& priors,
                  MaskIngestor* perception,
-                 BottleSceneGraph* scene_graph,
-                 BottleEvaluator* evaluator);
+                 BottleSceneGraph* scene_graph);
 
-    // Run one fit cycle for a bottle node: ensure its instance, observe, infer, anchor to the
-    // table, write the model back (via scene_graph) and log the eval row (via evaluator).
-    void process_bottle_node(const DSR::Node& node, std::uint64_t room_node_id);
-
-    // The live instance map (the validation sweep mutates it; del_node prunes it).
-    std::unordered_map<std::uint64_t, BottleInstance>& instances() { return instances_; }
-    void forget_node(std::uint64_t id) { instances_.erase(id); }
-
-private:
+    // Per-cycle fresh observation: the selected mask's support split into queue anchors vs residuals.
     struct BottleObservation
     {
         bool has_fresh_data = false;
@@ -69,11 +60,26 @@ private:
         std::vector<Eigen::Vector3f> residual_pts;
     };
 
-    void ensure_instance(const DSR::Node& node);
+    // Pure belief API (no DSR write-back: the worker orchestrates persist + eval). Mirrors TableFitter:
+    //   ensure_instance → observe → run_inference; run_inference also does the support-surface decision
+    //   and the table-top z anchor (object-specific belief steps), reading — never writing — via the
+    //   scene_graph. Returns the free energy. The worker then calls scene_graph_->step_write_model and
+    //   the evaluator.
+    // Create the instance for a "bottle_*" node if absent. Returns true the first time it is created
+    // (so the worker can do one-time setup); latches room_node_id every call.
+    bool ensure_instance(const DSR::Node& node, std::uint64_t room_node_id);
+    BottleObservation observe(BottleInstance& inst, const DSR::Node& node);
+    float run_inference(BottleInstance& inst, const BottleObservation& observation);
     bool should_log(const BottleInstance& inst) const;
 
-    BottleObservation observe_bottle_node(BottleInstance& inst, const DSR::Node& node);
-    float run_bottle_inference(BottleInstance& inst, const BottleObservation& observation);
+    // The live instance map (the validation sweep mutates it; del_node prunes it).
+    std::unordered_map<std::uint64_t, BottleInstance>& instances() { return instances_; }
+    void forget_node(std::uint64_t id) { instances_.erase(id); }
+
+private:
+    // Object-specific belief pre-step: decide the resting surface (room vs a table) + set the table-top
+    // z anchor (hysteretic re-parent). Reads via scene_graph_; called at the head of run_inference.
+    void update_support_surface(BottleInstance& inst);
     void step_queue_update(BottleInstance& inst,
                            const std::vector<Eigen::Vector3f>& candidate_pts,
                            float observation_precision);
@@ -87,7 +93,7 @@ private:
     static std::uint64_t voxel_key(const Eigen::Vector3f& point, float quantization_m);
 
     // Fisher information filter (diagnostic): fold this fresh frame's per-DOF observation Fisher
-    // information (inst.last_obs_info, measured in step_model_update) into the instance accumulators
+    // information (inst.stab.last_obs_info, measured in step_model_update) into the instance accumulators
     // — normalised "equivalent views" stiffener + the Q-bleed precision filter (finite steady state).
     void update_fisher_filter(BottleInstance& inst);
     // Append one row of Fisher-filter evolution (state + per-DOF obs/accumulated info + posterior std
@@ -108,13 +114,16 @@ private:
     BottleConfig&                    cfg_;
     const std::vector<BottlePrior>& priors_;
     MaskIngestor*               mask_ingestor_  = nullptr;
-    BottleSceneGraph*               scene_graph_ = nullptr;
-    BottleEvaluator*                evaluator_   = nullptr;
+    BottleSceneGraph*               scene_graph_ = nullptr;   // READS only (support surface, table-top, robot cov)
 
     std::unique_ptr<DSR::CameraAPI> camera_api_;   // ZED intrinsics, lazily bound to the "zed" node
     std::unordered_map<std::uint64_t, BottleInstance> instances_;
     std::uint64_t                   room_node_id_ = 0;   // refreshed each process_bottle_node call
     std::ofstream                   fisher_csv_;         // per-cycle Fisher-filter evolution log (optional)
+
+    // Shared per-DOF belief stabiliser (5 DOF [cx,cy,cz,radius,height], no yaw). Currently only its
+    // Fisher accumulation is used (diagnostic); per-bottle state lives in inst.stab.
+    BeliefStabilizer<5>             stabilizer_;
 };
 
 }  // namespace rc
