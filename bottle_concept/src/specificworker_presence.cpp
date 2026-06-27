@@ -79,14 +79,23 @@ void SpecificWorker::remove_stale_affordance_nodes()
         return;
     for (const auto& aff : G->get_nodes_by_type("affordance"))
     {
-        const auto pid = G->get_attrib_by_name<parent_att>(aff);
-        if (not pid.has_value())
-            continue;
-        const auto parent = G->get_node(pid.value());
-        if (parent.has_value() and parent->type() == "cylinder")
+        // Ours if EITHER (a) the name matches our deterministic "aff_<bottle_*>" scheme — orphan-safe,
+        // catches affordances whose parent cylinder was already deleted (tracker DEATH / crashed run) —
+        // OR (b) it still hangs from a live cylinder (backstop for a DSR collision-renamed node).
+        bool ours = aff.name().starts_with("aff_bottle");
+        const char* why = "name";
+        if (not ours)
+            if (const auto pid = G->get_attrib_by_name<parent_att>(aff); pid.has_value())
+                if (const auto parent = G->get_node(pid.value());
+                    parent.has_value() and parent->type() == "cylinder")
+                {
+                    ours = true;
+                    why = "parent cylinder";
+                }
+        if (ours)
         {
             qInfo() << "[bottle_concept] removing affordance node"
-                    << QString::fromStdString(aff.name()) << "id" << aff.id() << "(parent cylinder)";
+                    << QString::fromStdString(aff.name()) << "id" << aff.id() << "(" << why << ")";
             G->delete_node(aff.id());
         }
     }

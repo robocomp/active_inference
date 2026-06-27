@@ -51,6 +51,9 @@ struct BottleInstance
     // servo lock-on completes on "YOLO is firing on this bottle". frames_since_detection ticks every
     // observe() cycle and resets to 0 when a fresh bottle mask is selected; detection_alive is the
     // thresholded form. last_pub_* dead-band the publish so a settled bottle stops rewriting the node.
+    // Mask slice assigned to THIS instance by the InstanceTracker this cycle (-1 = none → observe()
+    // falls back to greedy nearest). Set by the worker's tracker step; read in observe().
+    int   assigned_mask_idx        = -1;
     int   frames_since_detection   = 100000;   // cycles since the last fresh bottle mask (0 = just seen)
     float last_mask_confidence     = 0.0f;     // YOLO confidence of the last selected bottle mask
     bool  detection_alive          = false;    // frames_since_detection < threshold

@@ -104,6 +104,11 @@ void SpecificWorker::request_shutdown()
     if (shutting_down_.exchange(true))
         return;
 
+    // Persist window geometry + dock layout (splitter positions) while the QMainWindow is still intact.
+    // terminal_shutdown() → _Exit() bypasses Qt's aboutToQuit save hook, so we must save here explicitly
+    // (mirrors table_concept).
+    save_window_settings();
+
     // Sever graph callbacks BEFORE any teardown. On Ctrl+C a del_node delta can be
     // delivered from a DSR/DDS internal thread and invoke del_node_slot (instances_.erase)
     // on this already-destructing object — the exit segfault. Dropping inner_eigen_ here
@@ -198,10 +203,15 @@ void SpecificWorker::initialize()
         .on_operating_enter = [this]()
         {
             qInfo("[SM] -> Operating: all required peers present");
-            // Stale-node sweep on (re)entering Operating: remove leftover affordance nodes from a
-            // previous run so a fresh create doesn't collide and get a DSR-generated name. Keyed on
-            // the parent object type, not the node name.
-            remove_stale_affordance_nodes();
+            // One-time startup sweep: remove leftover affordance nodes from a PREVIOUS run so a fresh
+            // create doesn't collide and get a DSR-generated name. Guarded — on a RE-entry to Operating
+            // (after a transient required-peer flap → Degraded → recover) the affordances in the graph
+            // are THIS run's live ones, and wiping them every bounce makes them flicker.
+            if (not startup_affordance_sweep_done_)
+            {
+                startup_affordance_sweep_done_ = true;
+                remove_stale_affordance_nodes();
+            }
         },
         .on_operating_loop = [this]()
         {
@@ -333,7 +343,10 @@ void SpecificWorker::compute()
     }
 
     mask_ingestor_->refresh();
-    scene_graph_->scaffold_missing_bottle_nodes(priors_cache_, mask_ingestor_->packet(), room_node_id_);
+    if (cfg_.tracker_enabled)
+        run_instance_tracker();   // data-driven birth/associate/death
+    else
+        scene_graph_->scaffold_missing_bottle_nodes(priors_cache_, mask_ingestor_->packet(), room_node_id_);
 
     // Bottle instances are DSR `cylinder` nodes named "bottle_*".
     for (const auto& node : G->get_nodes_by_type("cylinder"))
@@ -355,6 +368,88 @@ void SpecificWorker::compute()
 // Canonical per-node orchestration (mirrors table_concept::process_table_node): the fitter runs the
 // pure belief (ensure_instance → observe → run_inference, no DSR writes); the worker owns the DSR
 // write-back (scene_graph_->step_write_model) and the eval log.
+void SpecificWorker::run_instance_tracker()
+{
+    rc::TrackerParams tp;
+    tp.gate_mahalanobis = cfg_.tracker_gate_mahalanobis;
+    tp.gate_fallback_m  = cfg_.tracker_gate_fallback_m;
+    tp.birth_frames     = cfg_.tracker_birth_frames;
+    tp.death_frames     = cfg_.tracker_death_frames;
+    tp.birth_min_sep_m  = cfg_.tracker_birth_min_sep_m;
+    tracker_.set_params(tp);
+
+    // Tracks ← live instances: centre from the fit, XY cov from the stabiliser posterior precision.
+    std::vector<rc::TrackView> tracks;
+    tracks.reserve(fitter_->instances().size());
+    for (auto& [id, inst] : fitter_->instances())
+    {
+        rc::TrackView t;
+        t.id = id;
+        const auto& s = inst.model.state();
+        t.xy = {s.cx, s.cy};
+        const float rx = inst.stab.fisher_info_raw[0], ry = inst.stab.fisher_info_raw[1];
+        if (rx > 1e-6f and ry > 1e-6f)
+        {
+            t.cov = Eigen::Matrix2f::Zero();
+            t.cov(0, 0) = 1.0f / rx;
+            t.cov(1, 1) = 1.0f / ry;
+            t.has_cov = true;
+        }
+        tracks.push_back(t);
+        inst.assigned_mask_idx = -1;   // cleared; re-set below only if associated this cycle
+    }
+
+    // Detections ← this frame's "bottle" mask slices (carry the slice index for the assignment).
+    std::vector<rc::DetectionView> dets;
+    const auto& pkt = mask_ingestor_->packet();
+    if (pkt.valid)
+        for (int i = 0; i < static_cast<int>(pkt.slices.size()); ++i)
+            if (pkt.slices[i].label == "bottle")
+                dets.push_back({Eigen::Vector2f(pkt.slices[i].centroid.x(), pkt.slices[i].centroid.y()), i});
+
+    const auto res = tracker_.update(tracks, dets);
+
+    // Diagnostic: how many bottle detections vs instances, and what the tracker decided. Throttled,
+    // but always logged on a birth/death. Reveals "only 1 slice" (upstream) vs "2 slices, no birth".
+    static int dbg = 0;
+    const int n_assigned = static_cast<int>(std::count_if(res.assignment.begin(), res.assignment.end(),
+                                                          [](int a){ return a >= 0; }));
+    if (++dbg % 30 == 0 or not res.births.empty() or not res.deaths.empty())
+    {
+        std::print("[tracker] instances={} bottle_dets={} assigned={} unassigned={} births={} deaths={}\n",
+                   tracks.size(), dets.size(), n_assigned,
+                   static_cast<int>(dets.size()) - n_assigned, res.births.size(), res.deaths.size());
+        for (const auto& d : dets)
+            std::print("[tracker]   det slice={} xy=({:.2f},{:.2f})\n", d.slice_index, d.xy.x(), d.xy.y());
+    }
+
+    // DEATH: retire unsupported instances (never one that was matched this cycle).
+    for (const std::uint64_t id : res.deaths)
+    {
+        std::print("bottle_concept: [tracker] DEATH id={} (unsupported {} frames)\n", id, cfg_.tracker_death_frames);
+        // Delete this bottle's affordance node FIRST, while the instance (and its id) still exists.
+        // forget_node() only erases the C++ instance; deleting the cylinder below would otherwise
+        // orphan aff_<bottle> (parent gone), and the close-time sweep keys on a live cylinder parent.
+        if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
+            it->second.affordance.remove();
+        fitter_->forget_node(id);
+        G->delete_node(id);
+    }
+
+    // ASSOCIATE: route each matched detection's mask slice to its instance (read in observe()).
+    for (int d = 0; d < static_cast<int>(dets.size()); ++d)
+        if (res.assignment[d] >= 0)
+        {
+            const std::uint64_t id = tracks[res.assignment[d]].id;
+            if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
+                it->second.assigned_mask_idx = dets[d].slice_index;
+        }
+
+    // BIRTH: spawn an instance from each promoted (persistently-unexplained) detection.
+    for (const int d : res.births)
+        scene_graph_->create_instance_from_detection(pkt.slices[dets[d].slice_index].centroid, room_node_id_);
+}
+
 void SpecificWorker::process_bottle_node(const DSR::Node& node)
 {
     fitter_->ensure_instance(node, room_node_id_);

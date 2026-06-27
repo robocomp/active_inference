@@ -57,6 +57,17 @@ struct BottleConfig
     float support_lambda_xy        = 50.0f;   // penalty weight (1/m²) for the centre lying OUTSIDE the footprint
     float support_decision_margin  = 2.0f;    // log-evidence a table must beat the room/floor by to win
     int   support_commit_cycles    = 8;       // consecutive cycles a challenger must win before re-parenting
+    // ── Multi-instance birth/associate/death tracker (shared rc::InstanceTracker) ──────────────────
+    // OFF → legacy prior-scaffold + greedy nearest-mask. ON → data-driven: masks are associated to
+    // instances by a covariance-gated global 1-to-1, a persistently-unexplained mask spawns a new
+    // bottle, and an unsupported instance is retired. Pure-tracker mode (priors give only the default
+    // birth size); enable when the scene has an unknown / changing number of bottles.
+    bool  tracker_enabled          = false;
+    float tracker_gate_mahalanobis = 9.0f;    // χ²₂ gate (~3σ) for a mask↔instance match (when cov known)
+    float tracker_gate_fallback_m  = 0.30f;   // metric XY gate (m) when an instance has no usable cov yet
+    int   tracker_birth_frames     = 6;       // frames a mask must stay unexplained before spawning a bottle
+    int   tracker_death_frames     = 90;      // frames an instance may go unsupported before retirement
+    float tracker_birth_min_sep_m  = 0.20f;   // a birth must be ≥ this from every existing bottle (anti-dup)
     // ── Epistemic "hidden-face" affordance ────────────────────────────────────────────────────────
     // The agent advertises a far-side viewpoint (opposite the camera) so the controller can observe the
     // bottle's occluded back arc and resolve the depth-degenerate radius. ΔH = ½·log(1 + view_info/Y_r).
@@ -74,6 +85,11 @@ struct BottleConfig
     bool        fisher_filter_enabled = true;   // compute + accumulate (and log); false = zero cost
     float       fisher_info_decay     = 1.0f;   // stiffener accumulator fading memory; <1 forgets, 1 = pure accumulation
     float       fisher_process_std_m  = 0.005f; // predict process-noise std per fresh frame (m); all 5 DOF are lengths
+    // Apply the stabiliser's maturity-stiffened Kalman gain + CUSUM gate to the ACCEPTED fit (vs the raw
+    // per-frame gradient fit). true → a well-seen DOF (esp. the depth-degenerate radius) barely moves per
+    // frame so the perceived pose stops jerking, while a sustained coherent move still unlocks via the
+    // CUSUM gate. false → legacy raw-fit behaviour, stabiliser diagnostic-only (for A/B).
+    bool        stabilizer_acceptance = true;
     std::string fisher_csv_path       = "";     // non-empty → append per-cycle Fisher evolution CSV (for plotting)
     // Cold-start seed de-projection: the visible (front-arc-only) point centroid sits ~one radius
     // toward the camera from the true cylinder axis, so snapping the seed to it biases the model

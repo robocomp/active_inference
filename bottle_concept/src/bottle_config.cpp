@@ -58,6 +58,12 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
     out.support_lambda_xy        = getf("Support.LambdaXY",          50.0f);
     out.support_decision_margin  = getf("Support.DecisionMargin",    2.0f);
     out.support_commit_cycles    = geti("Support.CommitCycles",      8);
+    out.tracker_enabled          = getb("Tracker.Enabled",            false);
+    out.tracker_gate_mahalanobis = getf("Tracker.GateMahalanobis",    9.0f);
+    out.tracker_gate_fallback_m  = getf("Tracker.GateFallbackM",      0.30f);
+    out.tracker_birth_frames     = geti("Tracker.BirthFrames",        6);
+    out.tracker_death_frames     = geti("Tracker.DeathFrames",        90);
+    out.tracker_birth_min_sep_m  = getf("Tracker.BirthMinSepM",       0.20f);
     out.epistemic_obs_distance    = getf("Epistemic.ObsDistance",     0.9f);
     out.epistemic_view_info       = getf("Epistemic.ViewInfo",        50.0f);
     out.epistemic_cooldown_cycles = geti("Epistemic.CooldownCycles",  200);
@@ -65,6 +71,7 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
     out.fisher_filter_enabled = getb("BottleModel.FisherFilterEnabled", true);
     out.fisher_info_decay     = getf("BottleModel.FisherInfoDecay",     1.0f);
     out.fisher_process_std_m  = getf("BottleModel.FisherProcessStdM",   0.005f);
+    out.stabilizer_acceptance = getb("BottleModel.StabilizerAcceptance", true);
     out.fisher_csv_path       = gets("BottleModel.FisherCsvPath",       "");
     out.seed_deproject_frac = getf("BottleModel.SeedDeprojectFrac", 1.0f);
     out.lambda_freespace   = getf("BottleModel.LambdaFreeSpace",   0.0f);
@@ -131,7 +138,8 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
     if (out.move_experiment or out.static_pose_test)
         out.eval_enabled = true;              // the experiment is pointless without logging
 
-    std::print("bottle_concept: configuration loaded.\n");
+    std::print("bottle_concept: configuration loaded. tracker_enabled={} (Tracker.Enabled)\n",
+               out.tracker_enabled);
     return out;
 }
 

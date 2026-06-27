@@ -96,6 +96,8 @@ private:
     // information (inst.stab.last_obs_info, measured in step_model_update) into the instance accumulators
     // — normalised "equivalent views" stiffener + the Q-bleed precision filter (finite steady state).
     void update_fisher_filter(BottleInstance& inst);
+    // Push cfg → the shared stabiliser (layout + params). Called before compute_acceptance/accumulate.
+    void refresh_stabilizer_params();
     // Append one row of Fisher-filter evolution (state + per-DOF obs/accumulated info + posterior std
     // mm) to cfg_.fisher_csv_path. No-op if the path is empty. Lazily opens + writes the header.
     void log_fisher_csv(const BottleInstance& inst, bool fresh, float free_energy, int point_count);

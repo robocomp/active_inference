@@ -63,6 +63,7 @@
 #include "../../common/mask_ingestor/mask_ingestor.h"  // rc::MaskIngestor (masks reading)
 #include "bottle_scene_graph.h" // rc::BottleSceneGraph (DSR node/RT I/O)
 #include "bottle_fitter.h"      // rc::BottleFitter (active-inference fit core)
+#include "../../common/instance_tracker/instance_tracker.h"   // rc::InstanceTracker (birth/associate/death)
 #include "../../common/dashboard/custom_widget.h"      // Custom_widget (dockable dashboard host)
 #include "../../common/dashboard/timeseries_plot.h"    // rc::TimeSeriesPlot
 
@@ -138,6 +139,10 @@ private:
     // ── Members ──────────────────────────────────────────────────────────────
     bool startup_check_flag = false;
     bool owned_nodes_cleaned_ = false;
+    bool startup_affordance_sweep_done_ = false;   // the stale-affordance sweep is a one-time startup
+                                                   // cleanup; re-running it on every Operating re-entry
+                                                   // (after a transient Degraded flap) would wipe THIS
+                                                   // run's live affordances → graph flicker.
     std::atomic<bool> shutting_down_{false};
     AgentPresenceCoordinator presence_coordinator_;
 
@@ -165,6 +170,11 @@ private:
     std::unique_ptr<rc::BottleSceneGraph> scene_graph_;  // DSR node/RT I/O (table, scaffold, write-back)
     std::unique_ptr<rc::BottleEvaluator>  evaluator_;    // Webots-GT / sweep / eval CSV (no-op unless flagged)
     std::unique_ptr<rc::BottleFitter>     fitter_;       // active-inference fit core (owns the instance map)
+
+    // Multi-instance birth/associate/death (shared, when cfg_.tracker_enabled). Associates masks to
+    // instances (gated 1-to-1), spawns new bottles from unexplained masks, retires unsupported ones.
+    rc::InstanceTracker tracker_;
+    void run_instance_tracker();   // called from compute() in place of scaffold when tracker_enabled
 
     int place_settle_ = 0;   // cycles waited after a start-placement move, before fitting (gate-lock guard)
 

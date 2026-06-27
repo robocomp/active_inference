@@ -76,6 +76,11 @@ public:
                                        const MaskIngestor::MasksPacket& masks,
                                        std::uint64_t room_node_id);
 
+    // BIRTH (InstanceTracker): create a fresh auto-named "bottle_<N>" node at a detection centroid with
+    // the default prior size, parented by the support decision. Returns the new node id (0 on failure).
+    std::uint64_t create_instance_from_detection(const Eigen::Vector3f& centroid_room,
+                                                 std::uint64_t room_node_id);
+
     // Publish the instance's fitted model to its DSR node (geometry attrs + FE + mesh + RFE queue) and
     // RT edge — only when pose/size moved past the dead-band (FE jitter alone never triggers a rewrite).
     void step_write_model(BottleInstance& inst, DSR::Node& node, float free_energy);

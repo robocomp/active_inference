@@ -1,7 +1,8 @@
 
 [Proxies]
 # Proxies for required interfaces
-Webots2Robocomp = "webots2robocomp:tcp -h localhost -p 15010"
+#Webots2Robocomp = "webots2robocomp:tcp -h localhost -p 15010"
+Webots2Robocomp = "webots2robocomp:tcp -h localhost -p 10006"
 
 # --- Common Agent Data ---
 [Agent]
@@ -159,6 +160,18 @@ FootprintMargin = 0.05   # m: slack on the table half-extents for the footprint 
 LambdaXY = 50.0          # penalty (1/m²) for the centre lying outside the footprint
 DecisionMargin = 2.0     # log-evidence a table must beat the room/floor hypothesis by to win
 CommitCycles = 8         # consecutive cycles a challenger surface must win before re-parenting (anti-thrash)
+
+[Tracker]
+# Multi-instance birth/associate/death (shared rc::InstanceTracker). OFF → legacy prior-scaffold +
+# greedy nearest-mask. ON → masks are associated to instances by a covariance-gated global 1-to-1, an
+# unexplained mask spawns a new bottle, an unsupported instance is retired. Enable for scenes with an
+# unknown/changing number of bottles (priors then only seed the default birth size).
+Enabled = true
+GateMahalanobis = 9.0     # χ²₂ gate (~3σ) for a mask↔instance match when the instance has a cov
+GateFallbackM = 0.30     # metric XY gate (m) before an instance has a usable covariance
+BirthFrames = 6          # frames a mask must stay unexplained before spawning a bottle
+DeathFrames = 90         # frames an instance may go unsupported before retirement
+BirthMinSepM = 0.20      # a birth must be ≥ this (m) from every existing bottle (anti-duplicate)
 
 [SampleQueue]
 NumAngleBins = 16

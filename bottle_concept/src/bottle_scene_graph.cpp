@@ -253,6 +253,54 @@ void BottleSceneGraph::scaffold_missing_bottle_nodes(const std::vector<BottlePri
     }
 }
 
+std::uint64_t BottleSceneGraph::create_instance_from_detection(const Eigen::Vector3f& centroid_room,
+                                                               std::uint64_t room_node_id)
+{
+    auto room_opt = G_->get_node(room_node_id);
+    if (not room_opt.has_value() or not inner_eigen_)
+        return 0;
+
+    // Auto-name: one past the highest existing "bottle_<N>".
+    int max_n = 0;
+    for (const auto& n : G_->get_nodes_by_type("cylinder"))
+        if (n.name().rfind("bottle_", 0) == 0)
+            try { max_n = std::max(max_n, std::stoi(n.name().substr(7))); } catch (...) {}
+    const std::string name = "bottle_" + std::to_string(max_n + 1);
+
+    DSR::Node bottle_node = DSR::Node::create<cylinder_node_type>(name);
+    G_->add_or_modify_attrib_local<width_m_att> (bottle_node, 2.0f * cfg_.prior_radius);
+    G_->add_or_modify_attrib_local<depth_m_att> (bottle_node, 2.0f * cfg_.prior_radius);
+    G_->add_or_modify_attrib_local<height_m_att>(bottle_node, cfg_.prior_height);
+
+    const float cz = centroid_room.z() > 1e-3f ? centroid_room.z() : cfg_.prior_height * 0.5f;
+    const auto dec = decide_support_surface(centroid_room.x(), centroid_room.y(),
+                                            cz - 0.5f * cfg_.prior_height, room_node_id);
+    DSR::Node parent_node = G_->get_node(dec.parent_id).value_or(room_opt.value());
+    {
+        const float rpx = G_->get_attrib_by_name<pos_x_att>(room_opt.value()).value_or(200.f);
+        const float rpy = G_->get_attrib_by_name<pos_y_att>(room_opt.value()).value_or(200.f);
+        G_->add_or_modify_attrib_local<pos_x_att>(bottle_node, rpx + 180.f);
+        G_->add_or_modify_attrib_local<pos_y_att>(bottle_node, rpy +  80.f);
+    }
+
+    const auto id_opt = G_->insert_node(bottle_node);
+    if (not id_opt.has_value())
+        return 0;
+
+    Mat::Vector3d c_parent(centroid_room.x(), centroid_room.y(), cz);
+    if (const auto cp = inner_eigen_->transform(parent_node.name(), c_parent, "room", 0); cp.has_value())
+        c_parent = cp.value();
+    rt_api_->insert_or_assign_edge_RT(parent_node, id_opt.value(),
+                                      {static_cast<float>(c_parent.x()), static_cast<float>(c_parent.y()),
+                                       static_cast<float>(c_parent.z())}, {0.0f, 0.0f, 0.0f});
+
+    std::print("bottle_concept: [tracker] BIRTH '{}' id={} parent='{}' at room ({:.2f},{:.2f},{:.2f})\n",
+               name, id_opt.value(), parent_node.name(), centroid_room.x(), centroid_room.y(), cz);
+    if (relayout_)
+        relayout_();
+    return id_opt.value();
+}
+
 void BottleSceneGraph::step_write_model(BottleInstance& inst, DSR::Node& node, float free_energy)
 {
     const auto& s = inst.model.state();

@@ -92,7 +92,15 @@ BottleFitter::BottleObservation BottleFitter::observe(BottleInstance& inst,
     // inliers become queue anchors, the rest drive model expansion.
     if (mask_ingestor_->packet().valid and mask_ingestor_->packet().frame_id > inst.last_masks_frame_seen)
     {
-        const auto selected_mask = mask_ingestor_->select_nearest(Eigen::Vector3f(inst.model.state().cx, inst.model.state().cy, inst.model.state().cz), "bottle");
+        // Mask for this instance: the tracker's gated assignment when present (multi-instance safe),
+        // else the legacy greedy nearest-to-our-centre.
+        std::optional<MaskIngestor::MaskSlice> selected_mask;
+        if (const auto& sl = mask_ingestor_->packet().slices;
+            inst.assigned_mask_idx >= 0 and inst.assigned_mask_idx < static_cast<int>(sl.size()))
+            selected_mask = sl[inst.assigned_mask_idx];
+        else
+            selected_mask = mask_ingestor_->select_nearest(
+                Eigen::Vector3f(inst.model.state().cx, inst.model.state().cy, inst.model.state().cz), "bottle");
         if (selected_mask.has_value())
         {
             const auto& slice = selected_mask.value();
@@ -419,27 +427,46 @@ float BottleFitter::step_model_update(BottleInstance& inst,
     inst.last_fe_terms = inst.model.compute_free_energy_decomposition(fit_pts, fit_weights, historical_anchor_count);
     inst.last_queue_metrics = inst.queue.metrics();
 
-    // Measure this frame's per-DOF observation Fisher information at the accepted state on the same
+    // Measure this frame's per-DOF observation Fisher information at the fitted state on the same
     // evidence used for the fit — the calibrated, anisotropic "how well is each DOF seen". Stored
     // raw; run_inference folds it into the cross-frame filter on fresh-mask frames only.
     if (cfg_.fisher_filter_enabled)
         inst.stab.last_obs_info = inst.model.observation_information(fit_pts, fit_weights);
 
+    // Apply the stabiliser to the ACCEPTED fit: the maturity-stiffened per-DOF Kalman gain + CUSUM gate
+    // lerp the raw gradient fit back toward the committed belief, so a well-seen DOF (esp. the
+    // depth-degenerate radius) barely moves per frame and the perceived pose stops jerking — while a
+    // sustained coherent move still unlocks via the gate. Uses the prior accumulated precision (the
+    // accumulate() that folds THIS frame runs afterwards, in update_fisher_filter). Off → raw fit.
+    if (cfg_.fisher_filter_enabled and cfg_.stabilizer_acceptance and finite)
+    {
+        refresh_stabilizer_params();
+        stabilizer_.weight_observation(inst.stab, inst.stab.last_obs_info, inst.last_mask_confidence);
+        const auto raw  = inst.model.state().to_array();
+        const auto prev = previous_state.to_array();
+        stabilizer_.compute_acceptance(inst.stab, raw, prev);
+
+        std::array<float, 5> accepted;
+        for (int j = 0; j < 5; ++j)
+            accepted[j] = prev[j] + inst.stab.last_kalman_gain[j] * (raw[j] - prev[j]);
+        inst.model.set_state(BottleState::from_array(accepted));
+
+        free_energy = inst.model.compute_free_energy(fit_pts, fit_weights);
+        inst.last_fe_terms = inst.model.compute_free_energy_decomposition(fit_pts, fit_weights, historical_anchor_count);
+    }
+
     return free_energy;
 }
 
-void BottleFitter::update_fisher_filter(BottleInstance& inst)
+void BottleFitter::refresh_stabilizer_params()
 {
-    // Fold this frame's per-DOF Fisher diagonal (inst.stab.last_obs_info) into the cross-frame
-    // accumulators via the shared stabiliser: normalised "equivalent views" + information-filter
-    // predict (Q-bleed) + update. 5 DOF, all lengths (no yaw). Diagnostic for bottle today.
     StabilizerParams p;
     p.info_decay      = cfg_.fisher_info_decay;
     p.process_std_len = cfg_.fisher_process_std_m;
     p.mask_conf_weight = false;   // bottle does not weight by score yet
-    p.kalman_stiffness = false;   // gains computed but NOT applied to the fit (diagnostic only)
-    // Run the CUSUM/SPRT gate DIAGNOSTICALLY so the dashboard's counter-evidence panel is live. Bands
-    // sized to the bottle's cm scale; the resulting stab.counter_evidence tracks the fit's surprise.
+    p.kalman_stiffness = cfg_.stabilizer_acceptance;   // drive the accepted fit from the Kalman gain
+    // CUSUM/SPRT gate: bands sized to the bottle's cm scale. Applied to the fit when stabilizer_acceptance
+    // is on; otherwise it runs diagnostically (dashboard counter-evidence panel stays live).
     p.ce_gate         = true;
     p.ce_band_len     = 0.005f;   // 5 mm: radius/height innovations within this are "coherent"
     StabilizerLayout<5> layout;   // yaw_index = -1 (no periodic DOF); cx,cy are position
@@ -447,14 +474,26 @@ void BottleFitter::update_fisher_filter(BottleInstance& inst)
     layout.is_position[1] = true;
     stabilizer_.set_layout(layout);
     stabilizer_.set_params(p);
+}
 
-    // Diagnostic CUSUM: innovation = this fresh fit vs the previous fresh fit. Populates
-    // stab.counter_evidence / last_ce_gate (gains ignored — bottle keeps its convergence gate).
-    const auto cur = inst.model.state().to_array();
-    if (inst.has_prev_diag)
-        stabilizer_.compute_acceptance(inst.stab, cur, inst.prev_diag_state);
-    inst.prev_diag_state = cur;
-    inst.has_prev_diag   = true;
+void BottleFitter::update_fisher_filter(BottleInstance& inst)
+{
+    // Fold this frame's per-DOF Fisher diagonal (inst.stab.last_obs_info) into the cross-frame
+    // accumulators via the shared stabiliser: normalised "equivalent views" + information-filter
+    // predict (Q-bleed) + update. 5 DOF, all lengths (no yaw).
+    refresh_stabilizer_params();
+
+    // When the stabiliser is NOT applied to the fit, run the CUSUM diagnostically (innovation = this
+    // fresh fit vs the previous one) so the dashboard's counter-evidence panel stays live. When it IS
+    // applied, compute_acceptance already ran in step_model_update (innovation vs the committed belief).
+    if (not cfg_.stabilizer_acceptance)
+    {
+        const auto cur = inst.model.state().to_array();
+        if (inst.has_prev_diag)
+            stabilizer_.compute_acceptance(inst.stab, cur, inst.prev_diag_state);
+        inst.prev_diag_state = cur;
+        inst.has_prev_diag   = true;
+    }
 
     stabilizer_.accumulate(inst.stab);
 }
