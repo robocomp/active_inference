@@ -46,7 +46,7 @@ void VoxelProcessor::clear_state(rc::VoxelOpenGLViewer* voxel_viewer)
     voxel_viewer->update_track_boxes(empty_points, empty_points, empty_categories);
     // Also wipe the transient point clouds so "Clear Voxels" empties the view (these are
     // re-fed each frame from live data, so they return on the next compute cycle).
-    voxel_viewer->update_rfe_points(empty_points, empty_points, empty_points);
+    voxel_viewer->update_rfe_points(empty_points, empty_points);
     voxel_viewer->update_mask_points(empty_points);
 }
 

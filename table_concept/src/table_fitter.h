@@ -69,6 +69,11 @@ public:
 
     std::unordered_map<std::uint64_t, TableInstance>& instances() { return instances_; }
     void forget_node(std::uint64_t id) { instances_.erase(id); }
+    // Room-frame XY a NEWLY born instance's model should start at (from the tracker's detection). The
+    // room→table RT edge written at birth is NOT reliably queryable in the same cycle, so ensure_instance
+    // would read the 0,0 default and the warm-start would freeze the model there forever (the tracker then
+    // never associates and re-births endlessly). Consumed once by ensure_instance on first creation.
+    void note_birth(std::uint64_t id, const Eigen::Vector2f& xy) { birth_seeds_[id] = xy; }
     bool should_log(const TableInstance& inst) const;
 
 private:
@@ -167,6 +172,7 @@ private:
     std::unique_ptr<DSR::CameraAPI> camera_api_;   // ZED intrinsics, lazily bound to the "zed" node
 
     std::unordered_map<std::uint64_t, TableInstance> instances_;
+    std::unordered_map<std::uint64_t, Eigen::Vector2f> birth_seeds_;   // tracker-provided birth XY (see note_birth)
     std::uint64_t                  room_node_id_ = 0;   // latched per ensure_instance call
     std::ofstream                  fisher_csv_;         // per-cycle Fisher-filter evolution log (optional)
 

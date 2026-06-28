@@ -31,8 +31,7 @@ public:
 
     void update_lidar_points(std::span<const QVector3D> positions);
     void update_rfe_points(std::span<const QVector3D> residual_positions,
-                           std::span<const QVector3D> fallback_positions = {},
-                           std::span<const QVector3D> candidate_positions = {});
+                           std::span<const QVector3D> fallback_positions = {});
     // YOLO mask support points (room frame), drawn as a distinct point cloud. Optional per-point
     // categories colour them by class (color_for_category, matching the voxel/box palette); empty
     // → fall back to off-white.
@@ -43,7 +42,8 @@ public:
     void set_show_voxels(bool show);
     void set_show_residual(bool show);
     void set_show_rfe(bool show);
-    void set_show_candidate(bool show);
+    // Fitted-model layer: the table mesh, the solid bottle cylinder and the graph object boxes.
+    void set_show_models(bool show);
 
     void update_room_polygon(std::span<const float> polygon_x,
                              std::span<const float> polygon_y);
@@ -66,8 +66,15 @@ public:
                             std::span<const float> yaws,
                             std::span<const std::string> categories = {});
 
-    // Flat triangle-list meshes in room frame [x0,y0,z0, x1,y1,z1, ...].
-    void update_object_meshes(std::span<const std::vector<float>> meshes);
+    // Flat triangle-list meshes in room frame [x0,y0,z0, x1,y1,z1, ...]. Optional per-mesh categories
+    // colour them by class (table = amber model colour, others via color_for_category).
+    void update_object_meshes(std::span<const std::vector<float>> meshes,
+                              std::span<const std::string> categories = {});
+
+    // Human skeletons: one flat BODY_18 array per person [x0,y0,z0, ... x17,y17,z17] (54 floats),
+    // room frame. NaN joints are skipped. Drawn as bones (BODY18 edges) + joint points.
+    void update_skeletons(std::span<const std::vector<float>> skeletons);
+    void set_show_skeletons(bool show);
 
     // Robot pose in room frame (x, y in meters; theta in radians).
     void set_robot_pose(float x, float y, float theta);
@@ -104,7 +111,6 @@ private:
     std::vector<Vertex> lidar_vertices_;
     std::vector<Vertex> residual_vertices_;
     std::vector<Vertex> rfe_vertices_;
-    std::vector<Vertex> candidate_vertices_;
     std::vector<Vertex> mask_vertices_;
     std::mutex data_mutex_;
 
@@ -132,7 +138,8 @@ private:
     bool show_masks_ = false;
     bool show_residual_ = true;
     bool show_rfe_ = true;
-    bool show_candidate_ = true;
+    bool show_models_ = true;
+    bool show_skeletons_ = true;
     std::vector<QVector3D> robot_mesh_local_;
     std::mutex robot_mesh_mutex_;
 
@@ -146,7 +153,10 @@ private:
     std::mutex track_boxes_mutex_;
     std::mutex graph_boxes_mutex_;
     std::vector<std::vector<float>> object_meshes_;
+    std::vector<std::string>        object_mesh_categories_;   // parallel to object_meshes_
     std::mutex object_meshes_mutex_;
+    std::vector<std::vector<float>> skeletons_;                // BODY_18 flat (54 floats) per person, room frame
+    std::mutex skeletons_mutex_;
     void rebuild_polygon_locked_();
 
     bool gl_ready_ = false;

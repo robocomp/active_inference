@@ -120,21 +120,16 @@ void ControllerDisplay::update_affordance_efe(const std::vector<AffordanceEfeSam
                                       QColor("OrangeRed"),   QColor("SlateGray")};
     constexpr std::size_t kPaletteSize = sizeof(kPalette) / sizeof(kPalette[0]);
 
+    // One line per affordance: the selection score (gain − λ·dist) — the value used to choose.
     for (const auto &s : samples)
     {
-        const std::string gain_key = s.name + " (gain)";
         if (efe_series_known_.find(s.name) == efe_series_known_.end())
         {
-            const QColor c = kPalette[efe_color_next_ % kPaletteSize];
+            plot->add_series(s.name, kPalette[efe_color_next_ % kPaletteSize], 1.8f);
             ++efe_color_next_;
-            plot->add_series(s.name, c, 1.8f);              // bold  = selection score (gain − λ·dist)
-            plot->add_series(gain_key, c.darker(135), 1.0f); // darker/thin = raw gain (ΔH); gap = λ·dist
-                                                             // (darker, not lighter — light tints wash out on the white plot)
             efe_series_known_.insert(s.name);
-            efe_series_known_.insert(gain_key);
         }
         plot->add_point(s.name, s.score);
-        plot->add_point(gain_key, s.gain);
     }
 }
 

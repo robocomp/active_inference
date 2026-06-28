@@ -66,16 +66,28 @@ TableState TableFitter::TableBeliefPolicy::apply_observability_warm_start(
     // K_j = obs_info_j / (Y_pred_j + obs_info_j) supplied by the information filter. Bypasses the
     // coverage/confidence/InfoHalf/freeze heuristic entirely — a well-observed DOF (large Y_pred)
     // gets a small gain so it barely moves, while a high-information view (large obs) still moves it.
+    // Size RATCHET (asymmetric acceptance). A table is rigid: a far/occluded view shows a SMALLER visible
+    // extent, but that is NOT evidence the table IS smaller — only seeing MORE can confirm a bigger table;
+    // a partial view cannot confirm a smaller one. So a size DOF grows at its full Kalman gain but SHRINKS
+    // at gain·size_shrink_gain (heavily damped) — a transient far view can't collapse the box (the "shrank
+    // to a third across the room" failure), while a sustained, genuine shrink can still slowly correct an
+    // over-grow. Position/yaw are unaffected (they move freely).
+    const float shrink = std::clamp(cfg.size_shrink_gain, 0.0f, 1.0f);
+    const auto ratchet = [&](float prev, float rawv, float k)
+    {
+        return lerp(prev, rawv, rawv < prev ? k * shrink : k);
+    };
+
     if (kalman_gain)
     {
         const auto& K = *kalman_gain;
         TableState accepted = raw;
         accepted.cx           = lerp(previous.cx,           raw.cx,           K[0]);
         accepted.cy           = lerp(previous.cy,           raw.cy,           K[1]);
-        accepted.w            = lerp(previous.w,            raw.w,            K[2]);
-        accepted.h            = lerp(previous.h,            raw.h,            K[3]);
-        accepted.table_height = lerp(previous.table_height, raw.table_height, K[4]);
-        accepted.leg_length   = lerp(previous.leg_length,   raw.leg_length,   K[5]);
+        accepted.w            = ratchet(previous.w,            raw.w,            K[2]);
+        accepted.h            = ratchet(previous.h,            raw.h,            K[3]);
+        accepted.table_height = ratchet(previous.table_height, raw.table_height, K[4]);
+        accepted.leg_length   = ratchet(previous.leg_length,   raw.leg_length,   K[5]);
         accepted.yaw          = angle_lerp(previous.yaw,    raw.yaw,          K[6]);
         accepted.leg_inset    = lerp(previous.leg_inset,    raw.leg_inset,    K[7]);
         return accepted;
@@ -124,10 +136,10 @@ TableState TableFitter::TableBeliefPolicy::apply_observability_warm_start(
     TableState accepted = raw;
     accepted.cx = lerp(previous.cx, raw.cx, lambda_pos);
     accepted.cy = lerp(previous.cy, raw.cy, lambda_pos);
-    accepted.w = freeze_x ? previous.w : lerp(previous.w, raw.w, lambda_size_x);
-    accepted.h = freeze_y ? previous.h : lerp(previous.h, raw.h, lambda_size_y);
-    accepted.table_height = lerp(previous.table_height, raw.table_height, lambda_vertical);
-    accepted.leg_length = lerp(previous.leg_length, raw.leg_length, lambda_vertical);
+    accepted.w = freeze_x ? previous.w : ratchet(previous.w, raw.w, lambda_size_x);
+    accepted.h = freeze_y ? previous.h : ratchet(previous.h, raw.h, lambda_size_y);
+    accepted.table_height = ratchet(previous.table_height, raw.table_height, lambda_vertical);
+    accepted.leg_length = ratchet(previous.leg_length, raw.leg_length, lambda_vertical);
     accepted.yaw = angle_lerp(previous.yaw, raw.yaw, lambda_yaw);
     // leg_inset was previously accepted raw (unsmoothed) → it swung every frame. Damp it like the
     // other size DOFs so it settles with maturity.
@@ -203,6 +215,20 @@ bool TableFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_id)
         }
     }
 
+    // Tracker birth seed: authoritative for a freshly-born instance. The room→table RT edge written at
+    // birth is not reliably queryable this same cycle (it reads as 0,0), and the warm-start would then
+    // freeze the model at the origin forever → the tracker never associates and re-births endlessly.
+    if (auto it = birth_seeds_.find(node.id()); it != birth_seeds_.end())
+    {
+        init_state.cx = it->second.x();
+        init_state.cy = it->second.y();
+        std::print("[{}] birth-seed applied → cx={:.2f} cy={:.2f}\n", node.name(), init_state.cx, init_state.cy);
+        birth_seeds_.erase(it);
+    }
+    else
+        std::print("[{}] NO birth-seed (id={}) → init cx={:.2f} cy={:.2f}\n",
+                   node.name(), node.id(), init_state.cx, init_state.cy);
+
     init_state.leg_length = std::max(0.05f, init_state.table_height - TableModel::TOP_THICKNESS);
 
     // Sanitize: a NaN/Inf from a corrupted RT edge would poison the SDF and lock the
@@ -241,6 +267,12 @@ bool TableFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_id)
                                      [&](const TablePrior& prior){ return prior.node_name == node.name(); });
         if (it != priors_.end())
             mparams.prior_size_std = std::max(mparams.prior_size_std, it->sigma_size);
+        else if (cfg_.tracker_enabled)
+            // Born-from-detection (no prior entry): the Birth* dims are not just the seed but a real
+            // size prior at this precision, so the size is pinned near standard furniture under weak
+            // early views instead of being reshaped freely by the first partial mask. See "go with the
+            // prior": same mean as the seed, but now with a confidence behind it.
+            mparams.prior_size_std = cfg_.tracker_birth_size_std;
     }
 
     inst.model     = TableModel(init_state, mparams);
@@ -266,7 +298,14 @@ TableFitter::TableObservation TableFitter::observe(TableInstance& inst, const DS
     const auto& masks_packet = mask_ingestor_->packet();
     if (masks_packet.valid && masks_packet.frame_id > inst.last_masks_frame_seen)
     {
-        const auto selected_mask = mask_ingestor_->select_nearest(Eigen::Vector3f(inst.model.state().cx, inst.model.state().cy, inst.model.state().table_height), "table");
+        // Mask for this instance: the tracker's gated assignment when present (multi-instance safe),
+        // else the legacy greedy nearest-to-our-centre.
+        std::optional<MaskIngestor::MaskSlice> selected_mask;
+        if (const auto& sl = masks_packet.slices;
+            inst.assigned_mask_idx >= 0 and inst.assigned_mask_idx < static_cast<int>(sl.size()))
+            selected_mask = sl[inst.assigned_mask_idx];
+        else
+            selected_mask = mask_ingestor_->select_nearest(Eigen::Vector3f(inst.model.state().cx, inst.model.state().cy, inst.model.state().table_height), "table");
         if (selected_mask.has_value())
         {
             const auto& slice = selected_mask.value();
@@ -763,6 +802,24 @@ float TableFitter::accept_table_belief(TableInstance& inst,
     if (!finite_state(raw_state))
         return revert();
 
+    // (A2) FE-spike guard: a fresh-but-contaminated frame (clutter / partial-or-wrong mask) produces a
+    // raw-fit FE far above this instance's running level. Don't let it move the belief — revert (keeps the
+    // state, recomputes FE for reporting) BEFORE the stabiliser, so the gate can't unlock onto garbage.
+    // The information-filter axiom for "fresh but untrustworthy". Baseline updated below on accepted frames.
+    if (cfg_.freeze_belief_on_bad_fit and std::isfinite(inst.fe_baseline) and inst.fe_baseline > 1e-3f)
+    {
+        const float raw_fe = inst.model.compute_free_energy_decomposition(
+            evidence.eval_pts, evidence.eval_weights,
+            static_cast<std::size_t>(evidence.historical_anchor_count)).total_fe;
+        if (std::isfinite(raw_fe) and raw_fe > cfg_.bad_fit_fe_ratio * inst.fe_baseline)
+        {
+            if (should_log(inst))
+                std::print("[{}] bad-fit frame rejected: raw_fe={:.2f} > {:.1f}× baseline {:.2f}\n",
+                           inst.node_name, raw_fe, cfg_.bad_fit_fe_ratio, inst.fe_baseline);
+            return revert();
+        }
+    }
+
     // Measure this viewpoint's observation Fisher information (per DOF) at the raw fit, and derive
     // the per-DOF Kalman gain K_j = obs_j / (Y_pred_j + obs_j) from the calibrated filter (Y_pred =
     // previous posterior precision after the Q-bleed predict). Always computed (logged); only used as
@@ -813,6 +870,12 @@ float TableFitter::accept_table_belief(TableInstance& inst,
     const float free_energy = inst.last_fe_terms.total_fe;
     if (!std::isfinite(free_energy))
         return revert();
+
+    // Update the FE-spike baseline on ACCEPTED frames only (good evidence), so a contaminated frame that
+    // was reverted above never raises the bar that detects the next one.
+    inst.fe_baseline = std::isfinite(inst.fe_baseline)
+        ? (1.0f - cfg_.fe_baseline_ema) * inst.fe_baseline + cfg_.fe_baseline_ema * free_energy
+        : free_energy;
 
     if (should_log(inst))
         std::print("[{}] warm-start: conf={:.2f} mask_conf={:.2f} w={:.2f} rho_x={:.2f} rho_y={:.2f} residual={} trusted_pts={} residual_precision={:.2f} raw(w={:.3f},h={:.3f},psi={:.3f}) accepted(w={:.3f},h={:.3f},psi={:.3f})\n",

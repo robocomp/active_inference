@@ -8,10 +8,13 @@
 #include "unified_voxel_grid.h"
 #include "voxel_processor.h"
 #include "yolo_processor.h"   // SegDetection
+#include "yolo_human.h"       // rc::human_pose::PoseDetection, BODY18_FROM_COCO
 
 #include "graph_publisher.h"
 
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <limits>
 #include <print>
 #include <sstream>
@@ -287,6 +290,166 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
         qInfo() << "[Masks] Uploaded" << mask_count << "masks and" << total_support_points << "support points to DSR (frame=" << sensing_frame << ")";
 }
 
+void GraphPublisher::publish_skeletons(const RGBDData& rgbd,
+                                       const std::vector<rc::human_pose::PoseDetection>& poses,
+                                       std::uint64_t frame_ts_ms)
+{
+    if (ensure_node("skeleton", "MediumAquamarine", skeleton_ready_, /*relayout=*/true))
+        upload_skeletons(rgbd, poses, frame_ts_ms);
+}
+
+// Deproject YOLO-pose keypoints to BODY_18 3D in the CAMERA (zed) frame and publish on the
+// 'skeleton' node. Layout is fixed-stride (18 joints/body) so consumers slice by body index —
+// no offsets array. Missing/low-confidence joints are written as NaN with conf 0. Coordinates are
+// in metres, camera frame (x right, y forward/depth, z up) — the SAME convention upload_masks uses
+// before its room transform, just stopped one step earlier. Re-parenting into room/robot frame is
+// the consumer's job (human_concept owns the person node + its RT edge).
+void GraphPublisher::upload_skeletons(const RGBDData& rgbd,
+                                      const std::vector<rc::human_pose::PoseDetection>& poses,
+                                      std::uint64_t frame_ts_ms)
+{
+    namespace hp = rc::human_pose;
+
+    const std::uint64_t sensing_frame = ++skeleton_publish_seq_;
+    if (sensing_frame == last_skeleton_uploaded_frame_)
+        return;
+    last_skeleton_uploaded_frame_ = sensing_frame;
+
+    auto node_opt = G_->get_node("skeleton");
+    if (!node_opt.has_value())
+        return;
+    auto& node = node_opt.value();
+
+    const float fx = rgbd.focal_x;
+    const float fy = rgbd.focal_y;
+    const float cx = static_cast<float>(rgbd.width) * 0.5f;
+    const float cy = static_cast<float>(rgbd.height) * 0.5f;
+    const float NaN = std::numeric_limits<float>::quiet_NaN();
+    const float kp_conf_min = params_.SKELETON_KP_CONF_MIN;
+    const int   patch = std::max(0, params_.SKELETON_DEPTH_PATCH);
+
+    // Median depth over a (2*patch+1) window around (col,row); 0 if no valid sample. A single-pixel
+    // depth on a thin limb is often missing/noisy, so a small patch stabilises the joint range.
+    auto sample_depth = [&](int col, int row) -> float
+    {
+        std::vector<float> vals;
+        vals.reserve(static_cast<std::size_t>((2 * patch + 1) * (2 * patch + 1)));
+        for (int r = row - patch; r <= row + patch; ++r)
+            for (int c = col - patch; c <= col + patch; ++c)
+            {
+                if (r < 0 || c < 0 || r >= rgbd.height || c >= rgbd.width)
+                    continue;
+                const std::size_t idx = static_cast<std::size_t>(r) * rgbd.width + static_cast<std::size_t>(c);
+                if (idx >= rgbd.depth.size())
+                    continue;
+                const float d = rgbd.depth[idx];
+                if (std::isfinite(d) && d > 0.0f)
+                    vals.push_back(d);
+            }
+        if (vals.empty())
+            return 0.0f;
+        std::nth_element(vals.begin(), vals.begin() + vals.size() / 2, vals.end());
+        return vals[vals.size() / 2];
+    };
+
+    // Deproject one COCO keypoint to camera-frame metres; conf gates validity. Returns false if no
+    // usable depth or below the confidence floor (caller writes NaN/0).
+    auto deproject_coco = [&](const hp::PoseKp& kp, Eigen::Vector3f& out) -> bool
+    {
+        if (kp.conf < kp_conf_min)
+            return false;
+        const int col = static_cast<int>(std::lround(kp.x));
+        const int row = static_cast<int>(std::lround(kp.y));
+        if (col < 0 || row < 0 || col >= rgbd.width || row >= rgbd.height)
+            return false;
+        const float depth = sample_depth(col, row);
+        if (depth <= 0.0f)
+            return false;
+        out = Eigen::Vector3f((static_cast<float>(col) - cx) * depth / fx,
+                              depth,
+                              (cy - static_cast<float>(row)) * depth / fy);
+        return true;
+    };
+
+    std::vector<float> ids;
+    std::vector<float> kp_xyz;    // count * 18 * 3, camera frame metres (NaN = missing)
+    std::vector<float> kp_conf;   // count * 18, [0,1]
+    ids.reserve(poses.size());
+    kp_xyz.reserve(poses.size() * hp::NUM_BODY18 * 3);
+    kp_conf.reserve(poses.size() * hp::NUM_BODY18);
+
+    int written = 0;
+    for (std::size_t p = 0; p < poses.size(); ++p)
+    {
+        const auto& pose = poses[p];
+
+        // Deproject the 17 COCO joints first; BODY_18 then reorders + synthesizes the neck in 3D.
+        std::array<Eigen::Vector3f, hp::NUM_COCO_KP> coco_xyz;
+        std::array<bool,  hp::NUM_COCO_KP> coco_ok{};
+        for (int k = 0; k < hp::NUM_COCO_KP; ++k)
+            coco_ok[static_cast<std::size_t>(k)] = deproject_coco(pose.kp[static_cast<std::size_t>(k)],
+                                                                  coco_xyz[static_cast<std::size_t>(k)]);
+
+        ids.push_back(pose.track_id >= 0 ? static_cast<float>(pose.track_id) : static_cast<float>(p));
+
+        for (int b = 0; b < hp::NUM_BODY18; ++b)
+        {
+            const int src = hp::BODY18_FROM_COCO[static_cast<std::size_t>(b)];
+            if (src < 0)  // neck = 3D midpoint of shoulders (valid only if both shoulders are)
+            {
+                const int ls = hp::COCO_L_SHOULDER, rs = hp::COCO_R_SHOULDER;
+                if (coco_ok[ls] && coco_ok[rs])
+                {
+                    const Eigen::Vector3f neck = 0.5f * (coco_xyz[ls] + coco_xyz[rs]);
+                    kp_xyz.insert(kp_xyz.end(), {neck.x(), neck.y(), neck.z()});
+                    kp_conf.push_back(std::min(pose.kp[ls].conf, pose.kp[rs].conf));
+                }
+                else
+                {
+                    kp_xyz.insert(kp_xyz.end(), {NaN, NaN, NaN});
+                    kp_conf.push_back(0.0f);
+                }
+                continue;
+            }
+            if (coco_ok[static_cast<std::size_t>(src)])
+            {
+                const Eigen::Vector3f& v = coco_xyz[static_cast<std::size_t>(src)];
+                kp_xyz.insert(kp_xyz.end(), {v.x(), v.y(), v.z()});
+                kp_conf.push_back(pose.kp[static_cast<std::size_t>(src)].conf);
+            }
+            else
+            {
+                kp_xyz.insert(kp_xyz.end(), {NaN, NaN, NaN});
+                kp_conf.push_back(0.0f);
+            }
+        }
+        ++written;
+    }
+
+    G_->runtime_checked_add_or_modify_attrib_local(node, "skeleton_frame_id", static_cast<int>(sensing_frame));
+    G_->runtime_checked_add_or_modify_attrib_local(node, "skeleton_timestamp_ms", frame_ts_ms);
+    G_->runtime_checked_add_or_modify_attrib_local(node, "skeleton_count", written);
+    G_->runtime_checked_add_or_modify_attrib_local(node, "skeleton_ids", ids);
+    G_->runtime_checked_add_or_modify_attrib_local(node, "skeleton_kp_xyz", kp_xyz);
+    G_->runtime_checked_add_or_modify_attrib_local(node, "skeleton_kp_conf", kp_conf);
+    G_->update_node(std::move(node));
+
+    // Detection signal: log when the people count changes (so you SEE 0→1 when someone steps in),
+    // and always under verbose. valid_joints = keypoints that got a real depth (the rest are NaN).
+    const long valid_joints = std::count_if(kp_conf.begin(), kp_conf.end(), [](float c){ return c > 0.0f; });
+    // Log on a count change (0↔N transitions), plus a periodic heartbeat (~every 30 frames ≈ 3s @10Hz)
+    // while anyone is present so the stream stays visible in steady state. std::cout (not qInfo) so it
+    // shows on the same channel as the detector banners — RoboComp typically filters Qt info messages.
+    const bool changed   = (written != last_logged_skeleton_count_);
+    const bool heartbeat = (written > 0 and sensing_frame % 30 == 0);
+    if (changed or heartbeat or params_.VERBOSE_DEBUG)
+    {
+        std::println("[Skeleton] {} people, {} of {} joints with depth (camera frame, frame={})",
+                     written, valid_joints, written * 18, sensing_frame);
+        last_logged_skeleton_count_ = written;
+    }
+}
+
 // Feed-forward, class-agnostic publisher. Exports ALL current voxel tracks (every category) into the
 // 'tracks' node, room frame, as a struct-of-arrays keyed by persistent track id. Concept agents read
 // these and do their own instance assignment. Uses runtime/dynamic attributes (like 'masks').
@@ -395,7 +558,8 @@ void GraphPublisher::cleanup_semantic_grid_nodes()
         qInfo() << "[GraphPublisher] Removing stale '" << node.name().c_str() << "' node (id=" << node.id() << ") from DSR graph";
         G_->delete_node(node.id());
     }
-    masks_ready_  = false;
-    tracks_ready_ = false;
-    voxels_ready_ = false;
+    masks_ready_    = false;
+    tracks_ready_   = false;
+    voxels_ready_   = false;
+    skeleton_ready_ = false;
 }

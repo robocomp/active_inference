@@ -38,6 +38,9 @@ struct InferenceConfig
     // shoulder by more than arm_cross_margin (m). Allows folded arms, rejects YOLO L/R swaps. 0 = off.
     float w_cross         = 0.0f;   // off in pure core (agent sets it); margin allows folding
     float arm_cross_margin = 0.05f;
+    // Neutral-pose prior: weak L2 pull of the arm angle DOFs toward rest (arms down), pinning the
+    // under-observed null-space so it doesn't drift at constant FE. 0 = off (pure core default).
+    float w_neutral       = 0.0f;
 
     // Kinematic-plausibility limits (soft one-sided hinge penalties beyond the bound, dt-aware;
     // applied to the per-frame change in theta). A weight of 0 disables that term. Angle DOFs use

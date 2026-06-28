@@ -46,6 +46,18 @@ struct BottleConfig
     float robust_loss_scale = 0.05f;
     float mask_precision    = 0.0f;   // RGB-mask silhouette likelihood weight (0 = off)
     float cov_eff_scale     = 1.0f;   // covariance calibration: N_eff = N·scale (NEES → ~3)
+    // ── YOLO detection-score → observation precision ───────────────────────────────────────────────
+    // The detector's per-mask confidence is a per-observation RELIABILITY (a noisy mask is noisy
+    // evidence). It is an INDEPENDENT, averages-down factor → it belongs at the front of the fit, not
+    // as a post-hoc scale on the final Σ. The same monotone map w = clamp01((conf−floor)/(ref−floor))^p
+    // weights (a) the Laplace fit covariance (via the queue capture-cov + residual fit weights) and
+    // (b) the Fisher stabiliser's per-DOF observation info. floor keeps a low-but-real detection
+    // contributing rather than zeroing it; the score is detection confidence, not localisation
+    // confidence, so it can WIDEN the belief but the geometry (SDF Hessian) still sets Σ's shape.
+    bool  mask_conf_weight  = true;   // false → score ignored (legacy A/B); w≡1
+    float mask_conf_floor   = 0.2f;   // conf ≤ floor → minimal weight
+    float mask_conf_ref     = 0.5f;   // conf ≥ ref   → full weight (w=1)
+    float mask_conf_power    = 2.0f;  // shaping exponent on the normalised score
     // ── Support-surface decision (room vs table parent) ───────────────────────────────────────────
     // The bottle hangs from the surface it RESTS ON, chosen by MAP over {room, every table_N}: the
     // centre must lie inside the table's oriented footprint AND the observed base must sit at its top
@@ -68,6 +80,9 @@ struct BottleConfig
     int   tracker_birth_frames     = 6;       // frames a mask must stay unexplained before spawning a bottle
     int   tracker_death_frames     = 90;      // frames an instance may go unsupported before retirement
     float tracker_birth_min_sep_m  = 0.20f;   // a birth must be ≥ this from every existing bottle (anti-dup)
+    float tracker_detection_noise_m = 0.05f;  // R in the association innovation cov S=P+R²I (≥ centroid-vs-fit offset)
+    float tracker_merge_overlap    = 0.30f;   // merge two instances whose footprints (circles) overlap ≥ this
+                                              // fraction of the SMALLER one, keeping the more-observed. 0 disables.
     // ── Epistemic "hidden-face" affordance ────────────────────────────────────────────────────────
     // The agent advertises a far-side viewpoint (opposite the camera) so the controller can observe the
     // bottle's occluded back arc and resolve the depth-degenerate radius. ΔH = ½·log(1 + view_info/Y_r).

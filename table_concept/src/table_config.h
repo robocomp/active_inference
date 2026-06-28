@@ -23,15 +23,12 @@ struct TableConfig
     std::string priors_path = "etc/object_priors.toml";
 
     // Agent convergence
-    float fe_eps            = 1e-3f;   // |ΔFE| threshold for convergence (legacy)
     float state_eps         = 0.04f;   // Σ|Δstate| threshold between cycles for convergence (m+rad)
     int   K_stable          = 30;
     int   max_direct_fit_points = 400; // strided live points fed straight into the gradient each frame (0=off)
     int   detection_alive_max_frames = 40; // cycles without a fresh table mask before detection_alive=false
     int   M_diverge         = 20;
-    float staleness_frames  = 90.0f;
     float explanation_ratio_thresh = 0.3f;
-    float write_threshold   = 1e-3f;   // min ‖Δθ‖ before writing RT to DSR
     float obs_distance      = 1.8f;    // d_obs for epistemic planner
     float delta_min         = 20.0f;   // min face coverage count
     float gain_threshold    = 0.1f;    // min gain for the legacy coverage-deficit epistemic proxy
@@ -39,10 +36,6 @@ struct TableConfig
     // posterior (Σ) instead of the coverage-deficit proxy, and pick the most informative face.
     bool  epistemic_use_info_gain = true;
     float epistemic_min_info_gain = 0.3f;   // WITHDRAW threshold: ΔH (nats) below which the affordance is dropped
-    // Schmitt hysteresis (anti-oscillation): a satisfied table stays withdrawn for cooldown cycles AND
-    // until ΔH climbs back above the re-arm threshold (> withdraw), so it can't re-offer the instant ΔH
-    // crosses the low withdraw threshold again.
-    float epistemic_rearm_info_gain = 5.0f;   // ΔH (nats) above which a satisfied table re-arms
     int   epistemic_cooldown_cycles = 200;    // min cycles withdrawn after satisfaction
     int   table_log_period_frames = 30;
     int   voxel_bank_max_points = 4000;
@@ -114,8 +107,8 @@ struct TableConfig
     // information filter as λ_j = obs_info_j / (Y_pred_j + obs_info_j) — the per-DOF Kalman gain —
     // instead of the coverage/confidence/InfoHalf heuristic stack. Well-observed DOFs get a small
     // gain (stiff) yet still snap to a genuinely high-information view; uniform across all 8 DOFs.
-    bool  fisher_kalman_stiffness      = false;
-    float fisher_info_decay            = 1.0f;    // stiffener (acc): scalar fading memory; <1 forgets, 1 = pure accumulation
+    bool  fisher_kalman_stiffness      = true;
+    float fisher_info_decay            = 0.95f;   // stiffener (acc): scalar fading memory; <1 forgets, 1 = pure accumulation
     // Quality-aware maturity: normalise the views accumulator by a (decaying) running quality bar so a
     // CLOSE approach after far glimpses re-opens the fit (rescales the stale far-view "views" down)
     // instead of staying locked at the misrepresented far fit. Off → every view counts ~1 (far hardens
@@ -141,6 +134,18 @@ struct TableConfig
     // frozen anchor set and amplify noise into the accepted state/FE); just recompute FE at the unchanged
     // state for reporting. Set false to restore the legacy every-cycle re-fit (for A/B).
     bool  freeze_belief_on_stale       = true;
+    // (A2) Freeze-on-bad-fit: a FRESH frame whose raw-fit free energy is ≫ the instance's running FE
+    // level is a contaminated observation (clutter / partial-or-wrong mask → points the model cannot
+    // explain; extent blows up, FE spikes ~20× vs ~1). Updating the belief on it injects the size wander.
+    // Same axiom as freeze-on-stale, for "fresh-but-untrustworthy": skip the acceptance, keep the belief,
+    // recompute FE for reporting. The baseline is an EMA over ACCEPTED frames only (bad frames don't bias it).
+    bool  freeze_belief_on_bad_fit     = true;
+    float bad_fit_fe_ratio             = 4.0f;    // reject a fresh frame if raw_fe > ratio · fe_baseline
+    float fe_baseline_ema              = 0.10f;   // EMA weight for the accepted-FE running baseline
+    // Size RATCHET: a size DOF (w,h,H,leg) grows at its full acceptance gain but SHRINKS at gain·this — a
+    // table is rigid, so a far/occluded partial view (small visible extent) must NOT collapse it ("shrank
+    // to a third across the room"). Small = strong ratchet; 1.0 = symmetric (off). Growth is unaffected.
+    float size_shrink_gain             = 0.05f;
     // (B) Fisher-gradient clamp: observation_information builds the per-DOF Fisher via a central finite
     // difference of the NON-smooth min() box-SDF. A point sitting on a face-switch/corner makes the
     // difference a discontinuity JUMP, not a derivative, spiking |∂SDF/∂θ| by ~1000× → a single point
@@ -162,7 +167,7 @@ struct TableConfig
     // confidence (the better the prediction, the more coherent counter-evidence is needed to unlock it).
     // On unlock the DOF snaps to the new evidence (gain→1), S_j resets, and its accumulated precision is
     // deflated (the old estimate is conceded). Requires KalmanGainStiffness. false = disabled (A/B).
-    bool  counter_evidence_gate        = false;
+    bool  counter_evidence_gate        = true;
     float counter_evidence_band_m      = 0.02f;   // length-DOF surprise deadband (m): innovations within this are "coherent"
     float counter_evidence_band_rad    = 0.05f;   // yaw surprise deadband (rad)
     // Barrier = base + lambda·fisher_info[j], SPLIT into position (cx,cy) vs size/shape (w,h,H,leg,yaw,
@@ -207,6 +212,39 @@ struct TableConfig
     float warm_confidence_decay         = 0.70f;
     float warm_confidence_coverage_gain = 0.35f;
     float warm_confidence_residual_gain = 0.65f;
+
+    // ── Multi-instance birth/associate/death (shared rc::InstanceTracker) ─────────────────────────
+    // OFF → legacy prior-scaffold + greedy nearest-mask. ON → "table" masks are associated to instances
+    // by a covariance-gated global 1-to-1; an unexplained mask spawns a new table; an instance unobserved
+    // for tracker_death_frames is retired. Tables are large static furniture: keep birth_min_sep large
+    // (no two table centres that close) and death_frames LARGE so a long occlusion doesn't drop a table.
+    bool  tracker_enabled          = false;
+    float tracker_gate_mahalanobis = 9.0f;    // χ²₂ gate (~3σ) for a mask↔instance match once it has a cov
+    float tracker_gate_fallback_m  = 0.50f;   // metric XY gate (m) before an instance has a usable covariance
+    // Detection-noise std R (m) added to the fit cov in the Mahalanobis gate (S = P + R²I). For a table
+    // the YOLO mask CENTROID sits well off the fitted geometric CENTRE under a partial view (~0.2–0.5 m),
+    // so R must cover that offset or the overconfident fit (σ ~mm) rejects its own real detection. Large
+    // for tables; the 4 m table separation keeps neighbours from cross-matching even at this R.
+    float tracker_detection_noise_m = 0.35f;
+    int   tracker_birth_frames     = 8;       // frames a mask must stay unexplained before spawning a table
+    int   tracker_death_frames     = 300;     // frames an instance may go unobserved before retirement (large)
+    bool  tracker_death_enabled    = false;   // OFF: a table is rigid, persistent furniture — never retired by
+                                              // a miss timer (a long occlusion is not absence). Removal is by
+                                              // the MERGE operator only (two tables can't share space).
+    float tracker_birth_min_sep_m  = 0.60f;   // a birth must be ≥ this (m) from every existing table
+    // Physical exclusion: collapse two instances whose oriented footprints overlap by ≥ this fraction of
+    // the SMALLER footprint (two tables cannot share space). 0 disables the merge.
+    float tracker_merge_overlap    = 0.30f;
+    // Default geometry for a table BORN from a mask (no prior to seed it); the fit refines from here.
+    float tracker_birth_width_m    = 1.0f;
+    float tracker_birth_depth_m    = 0.6f;
+    float tracker_birth_height_m   = 0.75f;
+    // Prior PRECISION (size std, m) for a born table: the Birth* dims are applied not just as the optimizer
+    // seed but as the size-KL prior mean with THIS σ — so the size is pinned near standard furniture
+    // dimensions under weak/partial early views and only yields to genuine evidence (smaller = stiffer).
+    // Without it a born table falls back to the loose generic prior_size_std and the first far/partial
+    // mask can reshape it freely. Applied in ensure_instance when no matching prior entry exists.
+    float tracker_birth_size_std   = 0.15f;
 };
 
 // Fill a TableConfig from a RoboComp ConfigLoader (all keys optional, defaults above).

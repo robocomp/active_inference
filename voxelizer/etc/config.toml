@@ -73,6 +73,17 @@ tray_mask_polygon = [
     1280, 720,  0, 720
 ]
 
+[HumanPose]
+# Second YOLO-pose model on the same RGB frame → BODY_18 3D skeletons on the 'skeleton' DSR node
+# (camera frame, metres) consumed by human_concept. Default OFF — set enabled=true once the ONNX
+# model exists. Export with: yolo export model=yolo26m-pose.pt format=onnx  (gives yolo26m-pose.onnx).
+enabled = true
+model_path = "yolo26m-pose.onnx"
+conf_thresh = 0.30          # person-detection confidence floor
+kp_conf_min = 0.30          # per-joint floor; below this a keypoint is dropped (NaN)
+depth_patch = 2             # half-window (px) for the median-depth sample at each joint
+use_trt = true             # pose model is cheap; CUDA EP is fine and avoids the TRT version lock
+
 [Voxel]
 # Optional DSR exports beyond 'masks' (the live product consumed by the concept agents).
 # Both default OFF: 'voxels' has no consumer and 'tracks' is read only by the (deferred)

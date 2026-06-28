@@ -312,11 +312,26 @@ void VoxelOpenGLViewer::update_voxels(std::span<const QVector3D> positions,
     request_update_throttled();
 }
 
-void VoxelOpenGLViewer::update_object_meshes(std::span<const std::vector<float>> meshes)
+void VoxelOpenGLViewer::update_object_meshes(std::span<const std::vector<float>> meshes,
+                                             std::span<const std::string> categories)
 {
     std::scoped_lock lk(object_meshes_mutex_);
     object_meshes_.assign(meshes.begin(), meshes.end());
+    object_mesh_categories_.assign(categories.begin(), categories.end());
     request_update_throttled();
+}
+
+void VoxelOpenGLViewer::update_skeletons(std::span<const std::vector<float>> skeletons)
+{
+    std::scoped_lock lk(skeletons_mutex_);
+    skeletons_.assign(skeletons.begin(), skeletons.end());
+    request_update_throttled();
+}
+
+void VoxelOpenGLViewer::set_show_skeletons(bool show)
+{
+    show_skeletons_ = show;
+    update();
 }
 
 void VoxelOpenGLViewer::update_graph_boxes(std::span<const QVector3D> centers,
@@ -351,12 +366,6 @@ void VoxelOpenGLViewer::set_show_rfe(bool show)
     request_update_throttled();
 }
 
-void VoxelOpenGLViewer::set_show_candidate(bool show)
-{
-    show_candidate_ = show;
-    request_update_throttled();
-}
-
 void VoxelOpenGLViewer::set_show_voxels(bool show)
 {
     show_voxels_ = show;
@@ -366,6 +375,12 @@ void VoxelOpenGLViewer::set_show_voxels(bool show)
 void VoxelOpenGLViewer::set_show_masks(bool show)
 {
     show_masks_ = show;
+    request_update_throttled();
+}
+
+void VoxelOpenGLViewer::set_show_models(bool show)
+{
+    show_models_ = show;
     request_update_throttled();
 }
 
@@ -390,16 +405,13 @@ void VoxelOpenGLViewer::update_lidar_points(std::span<const QVector3D> positions
 }
 
 void VoxelOpenGLViewer::update_rfe_points(std::span<const QVector3D> residual_positions,
-                                          std::span<const QVector3D> fallback_positions,
-                                          std::span<const QVector3D> candidate_positions)
+                                          std::span<const QVector3D> fallback_positions)
 {
     // Each cloud goes to its own buffer so it can be toggled independently.
     std::vector<Vertex> residual_vertices;
     std::vector<Vertex> rfe_vertices;
-    std::vector<Vertex> candidate_vertices;
     residual_vertices.reserve(residual_positions.size());
     rfe_vertices.reserve(fallback_positions.size());
-    candidate_vertices.reserve(candidate_positions.size());
 
     auto append_points = [this](std::vector<Vertex>& target,
                                 std::span<const QVector3D> positions,
@@ -418,13 +430,11 @@ void VoxelOpenGLViewer::update_rfe_points(std::span<const QVector3D> residual_po
 
     append_points(residual_vertices, residual_positions, 0.15f, 0.20f, 0.80f);  // residual: dark blue
     append_points(rfe_vertices, fallback_positions, 0.95f, 0.20f, 0.85f);       // rfe: magenta
-    append_points(candidate_vertices, candidate_positions, 0.20f, 0.85f, 1.00f); // candidate: cyan
 
     {
         std::scoped_lock lk(data_mutex_);
         residual_vertices_ = std::move(residual_vertices);
         rfe_vertices_ = std::move(rfe_vertices);
-        candidate_vertices_ = std::move(candidate_vertices);
     }
     request_update_throttled();
 }
@@ -611,6 +621,7 @@ void VoxelOpenGLViewer::initializeGL()
         in vec3 v_col;
         out vec4 out_col;
         uniform int u_round_points;
+        uniform float u_alpha;
         void main()
         {
             if (u_round_points != 0)
@@ -618,7 +629,7 @@ void VoxelOpenGLViewer::initializeGL()
                 vec2 uv = gl_PointCoord * 2.0 - 1.0;
                 if (dot(uv, uv) > 1.0) discard;
             }
-            out_col = vec4(v_col, 1.0);
+            out_col = vec4(v_col, u_alpha);
         }
     )";
 
@@ -641,6 +652,7 @@ void VoxelOpenGLViewer::initializeGL()
         #version 120
         varying vec3 v_col;
         uniform int u_round_points;
+        uniform float u_alpha;
         void main()
         {
             if (u_round_points != 0)
@@ -648,7 +660,7 @@ void VoxelOpenGLViewer::initializeGL()
                 vec2 uv = gl_PointCoord * 2.0 - 1.0;
                 if (dot(uv, uv) > 1.0) discard;
             }
-            gl_FragColor = vec4(v_col, 1.0);
+            gl_FragColor = vec4(v_col, u_alpha);
         }
     )";
 
@@ -735,6 +747,10 @@ void VoxelOpenGLViewer::resizeGL(int w, int h)
 
 void VoxelOpenGLViewer::paintGL()
 {
+    // [perf-probe] wall-clock cost of one paintGL, printed avg/max/count every ~3 s. paintGL runs on
+    // the GUI thread, the SAME thread as compute(); compare this against [Compute] to see the split.
+    const auto probe_t0 = std::chrono::steady_clock::now();
+
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     if (!gl_ready_)
         return;
@@ -764,13 +780,11 @@ void VoxelOpenGLViewer::paintGL()
     std::size_t n_lidar_vertices = 0;
     std::size_t n_residual_vertices = 0;
     std::size_t n_rfe_vertices = 0;
-    std::size_t n_candidate_vertices = 0;
     std::size_t n_mask_vertices = 0;
     std::vector<Vertex> draw_vertices;
     std::vector<Vertex> lidar_draw_vertices;
     std::vector<Vertex> residual_draw_vertices;
     std::vector<Vertex> rfe_draw_vertices;
-    std::vector<Vertex> candidate_draw_vertices;
     std::vector<Vertex> mask_draw_vertices;
     {
         std::scoped_lock lk(data_mutex_);
@@ -778,20 +792,17 @@ void VoxelOpenGLViewer::paintGL()
         n_lidar_vertices = lidar_vertices_.size();
         n_residual_vertices = residual_vertices_.size();
         n_rfe_vertices = rfe_vertices_.size();
-        n_candidate_vertices = candidate_vertices_.size();
         n_mask_vertices = mask_vertices_.size();
         draw_vertices = cpu_vertices_;
         lidar_draw_vertices = lidar_vertices_;
         residual_draw_vertices = residual_vertices_;
         rfe_draw_vertices = rfe_vertices_;
-        candidate_draw_vertices = candidate_vertices_;
         mask_draw_vertices = mask_vertices_;
     }
     const bool has_voxels = n_vertices > 0;
     const bool has_lidar = n_lidar_vertices > 0;
     const bool has_residual = n_residual_vertices > 0;
     const bool has_rfe = n_rfe_vertices > 0;
-    const bool has_candidate = n_candidate_vertices > 0;
     const bool has_mask = n_mask_vertices > 0;
 
     const bool draw_voxels = show_voxels_;
@@ -814,6 +825,7 @@ void VoxelOpenGLViewer::paintGL()
     program_.bind();
     program_.setUniformValue("u_mvp", mvp);
     program_.setUniformValue("u_point_size", 4.5f);
+    program_.setUniformValue("u_alpha", 1.0f);   // opaque by default; only the walls lower it
     program_.setUniformValue("u_round_points", 1);
 
     vao_.bind();
@@ -1046,6 +1058,45 @@ void VoxelOpenGLViewer::paintGL()
         glEnable(GL_DEPTH_TEST);
     }
 
+    // Semi-transparent wall panels (floor↔ceiling quads) for a more solid, room-like impression.
+    // A subtle per-wall directional shade (XZ normal vs a fixed light) keeps adjacent walls distinct.
+    if (local_floor.size() == local_ceiling.size() and local_floor.size() >= 2)
+    {
+        const std::size_t n = local_floor.size();
+        std::vector<Vertex> wall_tris;
+        wall_tris.reserve(n * 6);
+        constexpr float lx = 0.6f, lz = 0.8f;                 // fixed horizontal light dir (XZ)
+        const QColor base(202, 204, 212);                     // soft cool gray
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            const auto& f0 = local_floor[i];
+            const auto& f1 = local_floor[(i + 1) % n];
+            const auto& c0 = local_ceiling[i];
+            const auto& c1 = local_ceiling[(i + 1) % n];
+            float nx = -(f1.z() - f0.z()), nz = (f1.x() - f0.x());   // XZ normal ⟂ the wall edge
+            if (const float l = std::sqrt(nx * nx + nz * nz); l > 1e-6f) { nx /= l; nz /= l; }
+            const float g = 0.55f + 0.45f * std::abs(nx * lx + nz * lz);
+            const float r = base.redF() * g, gg = base.greenF() * g, b = base.blueF() * g;
+            const auto V = [&](const QVector3D& p){ return Vertex{p.x(), p.y(), p.z(), r, gg, b}; };
+            wall_tris.push_back(V(f0)); wall_tris.push_back(V(f1)); wall_tris.push_back(V(c1));
+            wall_tris.push_back(V(f0)); wall_tris.push_back(V(c1)); wall_tris.push_back(V(c0));
+        }
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glDepthMask(GL_FALSE);   // transparent: test against depth but don't write it
+        room_vao_.bind();
+        room_vbo_.bind();
+        room_vbo_.allocate(wall_tris.data(), static_cast<int>(wall_tris.size() * sizeof(Vertex)));
+        program_.setUniformValue("u_round_points", 0);
+        program_.setUniformValue("u_alpha", 0.22f);
+        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(wall_tris.size()));
+        program_.setUniformValue("u_alpha", 1.0f);
+        glDepthMask(GL_TRUE);
+        glDisable(GL_BLEND);
+        room_vbo_.release();
+        room_vao_.release();
+    }
+
     // Draw robot pose marker: dot + forward arrow on the floor (y=0).
     bool have_pose = false;
     float rx = 0.f, ry_room = 0.f, rtheta = 0.f;
@@ -1213,7 +1264,8 @@ void VoxelOpenGLViewer::paintGL()
         }
     }
 
-    // Draw DSR graph object bounding boxes (wireframe), oriented by their room yaw.
+    // Draw DSR graph object bounding boxes (wireframe) + the solid bottle cylinder, oriented by yaw.
+    if (show_models_)
     {
         std::vector<QVector3D> local_centers, local_half;
         std::vector<float> local_yaws;
@@ -1373,18 +1425,27 @@ void VoxelOpenGLViewer::paintGL()
         }
     }
 
-    // ── Object meshes (flat triangle list, room frame) ────────────────────────
+    // ── Object meshes (flat triangle list, room frame) — the table model ──────
+    if (show_models_)
     {
         std::vector<std::vector<float>> local_meshes;
-        { std::scoped_lock lk(object_meshes_mutex_); local_meshes = object_meshes_; }
+        std::vector<std::string>        local_mesh_cats;
+        { std::scoped_lock lk(object_meshes_mutex_); local_meshes = object_meshes_; local_mesh_cats = object_mesh_categories_; }
 
         const float fx = voxel_flip_x_ ? -1.f : 1.f;
         const float fy = voxel_flip_y_ ? -1.f : 1.f;
-        constexpr float mc_r = 1.f, mc_g = 200.f / 255.f, mc_b = 100.f / 255.f;
+        const QColor amber(255, 200, 100);   // established table-model colour (kept)
 
-        for (const auto& mesh : local_meshes)
+        for (std::size_t mi = 0; mi < local_meshes.size(); ++mi)
         {
+            const auto& mesh = local_meshes[mi];
             if (mesh.size() < 9 || mesh.size() % 9 != 0) continue;
+
+            // Per-class mesh colour: the table keeps its amber model colour; everything else (chair, …)
+            // uses its class colour so the chair model matches its mask/voxels (electric blue).
+            const std::string cat = mi < local_mesh_cats.size() ? local_mesh_cats[mi] : std::string{};
+            const QColor mc = (cat.empty() || cat == "table") ? amber : color_for_category(cat);
+            const float mc_r = mc.redF(), mc_g = mc.greenF(), mc_b = mc.blueF();
 
             std::vector<Vertex> mv;
             mv.reserve(mesh.size() / 3);
@@ -1402,19 +1463,120 @@ void VoxelOpenGLViewer::paintGL()
         }
     }
 
-    if (has_candidate && show_candidate_)
+    // Human skeletons (BODY_18, room frame): cyan bones + red joint points, drawn depth-test-off so
+    // they stay visible over the voxels/meshes. Fed from the DSR 'person' nodes' mesh_vertices.
+    if (show_skeletons_)
     {
-        glDisable(GL_DEPTH_TEST);
-        room_vao_.bind();
-        room_vbo_.bind();
-        room_vbo_.allocate(candidate_draw_vertices.data(), static_cast<int>(candidate_draw_vertices.size() * sizeof(Vertex)));
-        program_.setUniformValue("u_round_points", 1);
-        program_.setUniformValue("u_point_size", 4.0f);
-        glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(candidate_draw_vertices.size()));
-        program_.setUniformValue("u_point_size", 4.5f);
-        room_vbo_.release();
-        room_vao_.release();
-        glEnable(GL_DEPTH_TEST);
+        std::vector<std::vector<float>> local_skels;
+        { std::scoped_lock lk(skeletons_mutex_); local_skels = skeletons_; }
+
+        if (!local_skels.empty())
+        {
+            const float fxs = voxel_flip_x_ ? -1.f : 1.f;
+            const float fys = voxel_flip_y_ ? -1.f : 1.f;
+            const auto to_ogl = [&](const float* p) -> QVector3D { return {fxs * p[0], p[2], fys * p[1]}; };
+            // BODY_18 edges (ZED/OpenPose) — indices match human_concept's body18.h.
+            static constexpr int EDGES[17][2] = {
+                {1,0}, {0,14}, {14,16}, {0,15}, {15,17},
+                {1,2}, {2,3}, {3,4}, {1,5}, {5,6}, {6,7},
+                {2,8}, {8,9}, {9,10}, {5,11}, {11,12}, {12,13}
+            };
+            constexpr int K = 18;
+            // Per-BODY_18 joint colour by body region, so joint types are distinguishable:
+            // head=yellow, neck=white, shoulders=green, elbows=orange, wrists=red, hips=magenta,
+            // knees=blue, ankles=purple. (Bones stay cyan — no joint uses cyan.)
+            static constexpr float JOINT_RGB[K][3] = {
+                {1.00f, 0.85f, 0.10f},  // 0  nose        head
+                {1.00f, 1.00f, 1.00f},  // 1  neck        white
+                {0.20f, 0.90f, 0.20f},  // 2  r_shoulder  green
+                {1.00f, 0.55f, 0.00f},  // 3  r_elbow     orange
+                {1.00f, 0.15f, 0.15f},  // 4  r_wrist     red
+                {0.20f, 0.90f, 0.20f},  // 5  l_shoulder  green
+                {1.00f, 0.55f, 0.00f},  // 6  l_elbow     orange
+                {1.00f, 0.15f, 0.15f},  // 7  l_wrist     red
+                {0.90f, 0.20f, 0.90f},  // 8  r_hip       magenta
+                {0.30f, 0.50f, 1.00f},  // 9  r_knee      blue
+                {0.60f, 0.20f, 0.90f},  // 10 r_ankle     purple
+                {0.90f, 0.20f, 0.90f},  // 11 l_hip       magenta
+                {0.30f, 0.50f, 1.00f},  // 12 l_knee      blue
+                {0.60f, 0.20f, 0.90f},  // 13 l_ankle     purple
+                {1.00f, 0.85f, 0.10f},  // 14 r_eye       head
+                {1.00f, 0.85f, 0.10f},  // 15 l_eye       head
+                {1.00f, 0.85f, 0.10f},  // 16 r_ear       head
+                {1.00f, 0.85f, 0.10f},  // 17 l_ear       head
+            };
+            // Bones drawn as 3D tubes (GL_TRIANGLES), NOT GL_LINES — glLineWidth is clamped to 1px on
+            // core-profile drivers, so thickness must be real geometry.
+            constexpr float BONE_R = 0.020f;   // tube radius (m)
+            std::vector<Vertex> bone_tris;
+            std::vector<Vertex> joint_pts;
+            const auto append_bone = [&](const QVector3D& a, const QVector3D& b)
+            {
+                const QVector3D axis = b - a;
+                const float len = axis.length();
+                if (len < 1e-5f) return;
+                const QVector3D n = axis / len;
+                const QVector3D ref = (std::abs(n.y()) < 0.9f) ? QVector3D(0,1,0) : QVector3D(1,0,0);
+                const QVector3D u = QVector3D::crossProduct(n, ref).normalized() * BONE_R;
+                const QVector3D v = QVector3D::crossProduct(n, u).normalized() * BONE_R;
+                constexpr int NS = 6;
+                constexpr float TWO_PI = 6.28318530718f;
+                const auto vtx = [](const QVector3D& p){ return Vertex{p.x(), p.y(), p.z(), 0.10f, 0.95f, 0.95f}; };
+                for (int k = 0; k < NS; ++k)
+                {
+                    const float a0 = TWO_PI * k / NS, a1 = TWO_PI * (k + 1) / NS;
+                    const QVector3D r0 = std::cos(a0) * u + std::sin(a0) * v;
+                    const QVector3D r1 = std::cos(a1) * u + std::sin(a1) * v;
+                    bone_tris.push_back(vtx(a + r0)); bone_tris.push_back(vtx(a + r1)); bone_tris.push_back(vtx(b + r1));
+                    bone_tris.push_back(vtx(a + r0)); bone_tris.push_back(vtx(b + r1)); bone_tris.push_back(vtx(b + r0));
+                }
+            };
+            for (const auto& s : local_skels)
+            {
+                if (static_cast<int>(s.size()) < K * 3)
+                    continue;
+                const auto valid = [&](int j) {
+                    return std::isfinite(s[j*3]) and std::isfinite(s[j*3+1]) and std::isfinite(s[j*3+2]);
+                };
+                for (const auto& e : EDGES)
+                    if (valid(e[0]) and valid(e[1]))
+                        append_bone(to_ogl(&s[e[0]*3]), to_ogl(&s[e[1]*3]));
+                for (int j = 0; j < K; ++j)
+                    if (valid(j))
+                    {
+                        const QVector3D p = to_ogl(&s[j*3]);
+                        joint_pts.push_back(Vertex{p.x(), p.y(), p.z(),
+                                                   JOINT_RGB[j][0], JOINT_RGB[j][1], JOINT_RGB[j][2]});
+                    }
+            }
+
+            if (not bone_tris.empty())
+            {
+                glDisable(GL_DEPTH_TEST);
+                room_vao_.bind();
+                room_vbo_.bind();
+                room_vbo_.allocate(bone_tris.data(), static_cast<int>(bone_tris.size() * sizeof(Vertex)));
+                program_.setUniformValue("u_round_points", 0);
+                glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(bone_tris.size()));
+                room_vbo_.release();
+                room_vao_.release();
+                glEnable(GL_DEPTH_TEST);
+            }
+            if (not joint_pts.empty())
+            {
+                glDisable(GL_DEPTH_TEST);
+                room_vao_.bind();
+                room_vbo_.bind();
+                room_vbo_.allocate(joint_pts.data(), static_cast<int>(joint_pts.size() * sizeof(Vertex)));
+                program_.setUniformValue("u_round_points", 1);
+                program_.setUniformValue("u_point_size", 6.5f);
+                glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(joint_pts.size()));
+                program_.setUniformValue("u_point_size", 4.5f);
+                room_vbo_.release();
+                room_vao_.release();
+                glEnable(GL_DEPTH_TEST);
+            }
+        }
     }
 
     // Mask support points — drawn LAST as a depth-test-off overlay so they stay visible on top of
@@ -1449,6 +1611,27 @@ void VoxelOpenGLViewer::paintGL()
                          .arg(static_cast<qulonglong>(n_lidar_vertices))
                          .arg(static_cast<qulonglong>(n_vertices))
                          .arg(fps_text));
+
+    // [perf-probe] append paintGL cost per frame to a CSV. t_ms is a shared steady-clock stamp so this
+    // aligns with viewer_perf_frames/compute/yolo on one timeline. File truncated once per launch.
+    {
+        const auto t1 = std::chrono::steady_clock::now();
+        const double ms = std::chrono::duration<double, std::milli>(t1 - probe_t0).count();
+        static std::ofstream csv = []
+        {
+            std::ofstream f("etc/viewer_perf_paint.csv", std::ios::trunc);
+            f << "t_ms,paint_ms,voxels,lidar\n";
+            return f;
+        }();
+        if (csv)
+        {
+            const long t_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  t1.time_since_epoch()).count();
+            csv << t_ms << ',' << ms << ',' << static_cast<qulonglong>(n_vertices) << ','
+                << static_cast<qulonglong>(n_lidar_vertices) << '\n';
+            csv.flush();
+        }
+    }
 }
 
 void VoxelOpenGLViewer::mousePressEvent(QMouseEvent* event)
@@ -1564,7 +1747,7 @@ void VoxelOpenGLViewer::keyPressEvent(QKeyEvent* event)
 
 QColor VoxelOpenGLViewer::color_for_category(const std::string& category)
 {
-    if (category == "chair") return QColor(0, 170, 255);   // cyan-blue
+    if (category == "chair") return QColor(30, 90, 255);   // electric blue (distinct from the yellowish table)
     if (category == "table") return QColor(0, 200, 60);    // green
     if (category == "model_table") return QColor(80, 220, 120); // green for graph/model tables
     if (category == "bottle") return QColor(255, 0, 200);  // hot magenta — bottle cylinder boxes

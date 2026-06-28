@@ -44,6 +44,12 @@ public:
                                       const MaskIngestor::MasksPacket& masks,
                                       std::uint64_t room_node_id);
 
+    // Birth a brand-new "table_N" node from an unexplained mask detection (tracker path). Auto-names one
+    // past the highest existing table_N, seeds default geometry from the Tracker.Birth* config, anchors
+    // it to the room at the detected room-frame centroid. Returns the new node id (0 on failure).
+    std::uint64_t create_instance_from_detection(const Eigen::Vector3f& centroid_room,
+                                                 std::uint64_t room_node_id);
+
     // Publish the instance's fitted model to its DSR node (geometry + FE + mesh + RFE/voxel-bank) and
     // the room→table RT edge. persist_* resolves the node by id first; both no-op if the node is gone.
     bool persist_table_belief(TableInstance& inst, std::uint64_t node_id, std::uint64_t room_id, float free_energy);

@@ -17,9 +17,11 @@
  *    along with RoboComp.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "specificworker.h"
+#include <fstream>   // [perf-probe] CSV timing logs (remove with the probes)
 #include "scene_processor.h"
 #include "voxel_processor.h"
 #include "yolo_processor.h"
+#include "yolo_human.h"
 #include "graph_publisher.h"
 #ifdef emit
 #undef emit
@@ -129,6 +131,30 @@ void SpecificWorker::initialize()
     yolo_config.verbose_debug       = verbose_debug_;
     yolo_processor->configure(yolo_config);
 
+    // --- Human pose (optional second model → BODY_18 skeletons on the 'skeleton' node) ---
+    if (params.HUMAN_POSE_ENABLED)
+    {
+        try
+        {
+            yolo_human_processor = std::make_unique<rc::human_pose::YoloHumanProcessor>();
+            rc::human_pose::YoloHumanProcessor::Config pose_config;
+            pose_config.model_path    = params.HUMAN_POSE_MODEL_PATH;
+            pose_config.conf_thresh   = params.HUMAN_POSE_CONF_THRESH;
+            pose_config.iou_thresh    = params.HUMAN_POSE_IOU_THRESH;
+            pose_config.input_size    = params.HUMAN_POSE_INPUT_SIZE;
+            pose_config.use_gpu       = params.HUMAN_POSE_USE_GPU;
+            pose_config.use_trt       = params.HUMAN_POSE_USE_TRT;
+            pose_config.verbose_debug = verbose_debug_;
+            yolo_human_processor->configure(pose_config);
+        }
+        catch (const std::exception& e)
+        {
+            qWarning() << "[HumanPose] disabled — failed to load model" << params.HUMAN_POSE_MODEL_PATH.c_str()
+                       << ":" << e.what();
+            yolo_human_processor.reset();
+        }
+    }
+
     // --- Lidar secondary attributor (silent no-op when lidar3D data is absent) ---
     lidar_track_attributor = std::make_unique<LidarTrackAttributor>();
 
@@ -170,6 +196,16 @@ void SpecificWorker::initialize()
 
     graph_publisher_->cleanup_semantic_grid_nodes();
 
+    // Decoupled render timer: only worth running when the 3D viewer exists. ~33 ms (≈30 Hz) matches
+    // the viewer's repaint throttle, giving fluid robot motion without re-running perception faster.
+    // Created stopped; started in Operating (so graph reads happen only after the join completes).
+    if (voxel_viewer_gl)
+    {
+        render_timer_ = std::make_unique<QTimer>(this);
+        render_timer_->setInterval(33);
+        QObject::connect(render_timer_.get(), &QTimer::timeout, this, &SpecificWorker::on_render_tick);
+    }
+
     presence_coordinator_.configure(configLoader, G, static_cast<std::uint32_t>(agent_id));
     presence_coordinator_.set_transition_hooks({
         .request_presence_ready = [this]() { Q_EMIT presenceReady(); },
@@ -202,19 +238,45 @@ void SpecificWorker::initialize()
                 qInfo() << "  missing:" << m;
             }
         },
-        .on_operating_enter = []()
+        .on_operating_enter = [this]()
         {
             qInfo() << "[SM] -> Operating: all required constraints satisfied";
+            if (render_timer_)
+                render_timer_->start();   // start fluid viewer refresh only once the graph is joined
         },
         .on_operating_loop = [this]()
         {
+            // [perf-probe] wall-clock cost of compute() per cycle, appended to a CSV for offline
+            // analysis. compute() shares the GUI thread with the viewer's paintGL; the paint cost
+            // lands in viewer_perf_paint.csv. t_ms is a shared steady-clock stamp so the two files
+            // align on one timeline. File is truncated once per process launch.
+            const auto probe_t0 = std::chrono::steady_clock::now();
             compute();
+            {
+                const auto t1 = std::chrono::steady_clock::now();
+                const double ms = std::chrono::duration<double, std::milli>(t1 - probe_t0).count();
+                static std::ofstream csv = []
+                {
+                    std::ofstream f("etc/viewer_perf_compute.csv", std::ios::trunc);
+                    f << "t_ms,compute_ms\n";
+                    return f;
+                }();
+                if (csv)
+                {
+                    const long t_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          t1.time_since_epoch()).count();
+                    csv << t_ms << ',' << ms << '\n';
+                    csv.flush();
+                }
+            }
             if (auto it = graph_viewers.find(""); it != graph_viewers.end() && it->second)
                 it->second->set_external_fps(states.at("Operating")->getActualFps());
         },
-        .on_degraded_enter = []()
+        .on_degraded_enter = [this]()
         {
             qInfo() << "[SM] -> Degraded: a required peer or node is no longer available";
+            if (render_timer_)
+                render_timer_->stop();   // no graph access outside Operating
         },
     });
     presence_coordinator_.start();
@@ -225,19 +287,53 @@ void SpecificWorker::initialize()
     restore_window_settings();
 }
 
+// Decoupled viewer refresh (GUI thread, Operating only). Reads the LATEST robot pose from the graph
+// and pushes it to the 3D viewer, independent of the perception/camera pipeline, so robot motion is
+// fluid. set_robot_pose() triggers the viewer's own throttled repaint — no explicit update() here.
+void SpecificWorker::on_render_tick()
+{
+    if (shutting_down_ || !scene_processor)
+        return;
+    scene_processor->refresh_viewer_robot_pose_latest();
+}
+
 void SpecificWorker::compute()
 {
     if (!scene_processor or !voxel_processor)
         return;
 
+    const auto scene_t0 = std::chrono::steady_clock::now();
     const auto frame = process_scene_frame(fps_counter_);
+    // [perf-probe] per-cycle frame-pipeline log. produced=1 when a SceneFrame was built (this is the
+    // rate the viewer overlays refresh). rgbd_ts_ms is the camera frame stamp (stale-repeats when no
+    // new media frame) → counting DISTINCT values per second gives the true camera source rate, which
+    // bounds how fast the viewer content can change. scene_ms = cost of transforms + lidar fetch.
+    {
+        const auto t1 = std::chrono::steady_clock::now();
+        const double scene_ms = std::chrono::duration<double, std::milli>(t1 - scene_t0).count();
+        static std::ofstream csv = []
+        {
+            std::ofstream f("etc/viewer_perf_frames.csv", std::ios::trunc);
+            f << "t_ms,scene_ms,produced,rgbd_ts_ms\n";
+            return f;
+        }();
+        if (csv)
+        {
+            const long t_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  t1.time_since_epoch()).count();
+            csv << t_ms << ',' << scene_ms << ',' << (frame.has_value() ? 1 : 0) << ','
+                << scene_processor->get_frame_timestamp_ms() << '\n';
+            csv.flush();
+        }
+    }
 
     // Budget regulation is a heartbeat: run it every cycle (self-throttled),
     // even when no RGBD frame arrived, so the cap/gauge keep working while the
     // robot explores away from the table. FPS comes from the shared counter,
     // which scene_processor also ticks on the not-ready path.
     qInfo() << fps_counter_.get_frequency();
-    regulate_voxel_budget(fps_counter_.get_frequency());
+    if (compute_voxels_)
+        regulate_voxel_budget(fps_counter_.get_frequency());
 
     // No RGBD frame this cycle (sensor not ready / gated transforms). The budget heartbeat
     // above already ran; everything below dereferences `frame`, so we MUST stop here.
@@ -249,39 +345,74 @@ void SpecificWorker::compute()
         return;
     }
 
+    const auto yolo_t0 = std::chrono::steady_clock::now();
     const auto detections = yolo_processor
         ? yolo_processor->detect_segmentation(frame->rgbd.rgb)
         : std::vector<SegDetection>{};
-  
-    voxel_processor->process_rgbd_frame(frame->rgbd, detections,
-                                         frame->room_T_robot, frame->room_T_zed,
-                                         frame->graph_object_boxes, voxel_viewer_gl.get());
-
-    if (include_lidar3d_in_voxels_ && lidar_track_attributor && !frame->lidar_points_room.empty())
+    // [perf-probe] YOLO segmentation cost per produced frame (the dominant per-cycle work while
+    // compute_voxels_ is OFF). Appended to its own CSV; align with the others on t_ms.
     {
-        std::vector<LidarTrackAttributor::TrackCandidate> track_candidates;
-        const auto& current_tracks = voxel_processor->last_track_candidates();
-        track_candidates.reserve(current_tracks.size());
-        for (const auto& track : current_tracks)
+        const auto t1 = std::chrono::steady_clock::now();
+        const double yolo_ms = std::chrono::duration<double, std::milli>(t1 - yolo_t0).count();
+        static std::ofstream csv = []
         {
-            track_candidates.push_back(LidarTrackAttributor::TrackCandidate{
-                .track_id = track.track_id,
-                .category = track.category,
-                .min = track.min,
-                .max = track.max,
-                .centroid = track.centroid
-            });
+            std::ofstream f("etc/viewer_perf_yolo.csv", std::ios::trunc);
+            f << "t_ms,yolo_ms,n_det\n";
+            return f;
+        }();
+        if (csv)
+        {
+            const long t_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  t1.time_since_epoch()).count();
+            csv << t_ms << ',' << yolo_ms << ',' << detections.size() << '\n';
+            csv.flush();
         }
-    
-        auto attributed = lidar_track_attributor->attribute_points(frame->lidar_points_room, track_candidates);
-        voxel_processor->fuse_lidar_support_points(attributed);
     }
 
-    if (yolo_viewer_) 
-    {    
-        const cv::Mat viewer_rgb = yolo_processor
+    // Human-pose detection: run ONCE here so the same poses feed both the viewer overlay and the
+    // 'skeleton' DSR publish below.
+    const auto poses = (yolo_human_processor and yolo_human_processor->ready())
+        ? yolo_human_processor->detect_poses(frame->rgbd.rgb)
+        : std::vector<rc::human_pose::PoseDetection>{};
+
+    // Voxel computation gated OFF for now — we only run the masks pipeline (YOLO detections →
+    // graph_publisher publishes the "masks" support points, consumed by table/bottle_concept). The
+    // voxel grid build + lidar→voxel fusion are skipped. Flip compute_voxels_ to re-enable.
+    if (compute_voxels_)
+    {
+        voxel_processor->process_rgbd_frame(frame->rgbd, detections,
+                                             frame->room_T_robot, frame->room_T_zed,
+                                             frame->graph_object_boxes, voxel_viewer_gl.get());
+
+        if (include_lidar3d_in_voxels_ && lidar_track_attributor && !frame->lidar_points_room.empty())
+        {
+            std::vector<LidarTrackAttributor::TrackCandidate> track_candidates;
+            const auto& current_tracks = voxel_processor->last_track_candidates();
+            track_candidates.reserve(current_tracks.size());
+            for (const auto& track : current_tracks)
+            {
+                track_candidates.push_back(LidarTrackAttributor::TrackCandidate{
+                    .track_id = track.track_id,
+                    .category = track.category,
+                    .min = track.min,
+                    .max = track.max,
+                    .centroid = track.centroid
+                });
+            }
+
+            auto attributed = lidar_track_attributor->attribute_points(frame->lidar_points_room, track_candidates);
+            voxel_processor->fuse_lidar_support_points(attributed);
+        }
+    }
+
+    if (yolo_viewer_)
+    {
+        cv::Mat viewer_rgb = yolo_processor
             ? yolo_processor->apply_tray_mask(frame->rgbd.rgb)
             : frame->rgbd.rgb;
+        // Draw the detected skeletons (green bones, red joints, orange bbox) under the seg overlay.
+        if (yolo_human_processor and not poses.empty())
+            viewer_rgb = yolo_human_processor->compose_pose_canvas(viewer_rgb, poses);
         yolo_viewer_->update_frame(viewer_rgb, detections);
         // Size the RGB window to the image once (only when no saved geometry was restored).
         if (yolo_window_needs_image_size_ and yolo_window_ != nullptr and not viewer_rgb.empty())
@@ -292,6 +423,10 @@ void SpecificWorker::compute()
     }
 
     graph_publisher_->publish(frame->rgbd, frame->room_T_zed, detections, frame->frame_ts_ms);
+
+    // Human-pose branch: BODY_18 skeletons (camera frame) on the 'skeleton' node for human_concept.
+    if (yolo_human_processor and yolo_human_processor->ready())
+        graph_publisher_->publish_skeletons(frame->rgbd, poses, frame->frame_ts_ms);
 
     fps_counter_.print("[Compute]", 3000);
 }
@@ -401,6 +536,7 @@ std::optional<SpecificWorker::SceneFrame> SpecificWorker::process_scene_frame(FP
     scene_processor->update_viewer_lidar_points(room_name, robot_name, room_T_robot.value());
     scene_processor->update_viewer_graph_object_boxes(graph_object_boxes);
     scene_processor->update_viewer_object_meshes();
+    scene_processor->update_viewer_person_skeletons();
     scene_processor->update_viewer_table_rfe_points();
     scene_processor->update_viewer_mask_points();
     scene_processor->update_room_polygon_periodic();

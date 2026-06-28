@@ -53,6 +53,10 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
     out.grad_clip          = getf("BottleModel.GradClip",          2.0f);
     out.mask_precision     = getf("BottleModel.MaskPrecision",     0.0f);
     out.cov_eff_scale      = getf("BottleModel.CovEffScale",       1.0f);
+    out.mask_conf_weight   = getb("BottleModel.MaskConfWeight",    true);
+    out.mask_conf_floor    = getf("BottleModel.MaskConfFloor",     0.2f);
+    out.mask_conf_ref      = getf("BottleModel.MaskConfRef",       0.5f);
+    out.mask_conf_power    = getf("BottleModel.MaskConfPower",     2.0f);
     out.support_sigma_z          = getf("Support.SigmaZ",            0.04f);
     out.support_footprint_margin = getf("Support.FootprintMargin",   0.05f);
     out.support_lambda_xy        = getf("Support.LambdaXY",          50.0f);
@@ -64,6 +68,8 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
     out.tracker_birth_frames     = geti("Tracker.BirthFrames",        6);
     out.tracker_death_frames     = geti("Tracker.DeathFrames",        90);
     out.tracker_birth_min_sep_m  = getf("Tracker.BirthMinSepM",       0.20f);
+    out.tracker_detection_noise_m = getf("Tracker.DetectionNoiseM",   0.05f);
+    out.tracker_merge_overlap    = getf("Tracker.MergeOverlap",       0.30f);
     out.epistemic_obs_distance    = getf("Epistemic.ObsDistance",     0.9f);
     out.epistemic_view_info       = getf("Epistemic.ViewInfo",        50.0f);
     out.epistemic_cooldown_cycles = geti("Epistemic.CooldownCycles",  200);

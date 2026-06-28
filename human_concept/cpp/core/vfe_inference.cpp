@@ -349,6 +349,21 @@ InferenceResult AInfLaplacePoseEstimator::infer(
                 if (std::abs(u) > d_acc(k)) H(k, k) += 2.f * cfg_.w_acc;
             }
 
+        // Neutral-pose prior: a weak quadratic pull toward rest (0). Applied to the arm angle DOFs
+        // (shoulders 0..5, elbows 6,7) AND lb_roll (10, body twist). These are the under-observed /
+        // degenerate directions — the likelihood is flat there, so the estimate would otherwise drift
+        // along the null space at constant FE (lb_roll is only constrained by the hips, so it swings
+        // wildly → unnatural body twist). The pull pins them without biasing well-observed DOFs (their
+        // large likelihood curvature dominates this small term). NOT applied to lb_x/lb_z (8,9) — that
+        // would drag the person's position. Proper quadratic, so add the Hessian for a well-scaled step.
+        if (cfg_.w_neutral > 0.f)
+            for (int k = 0; k < 11; ++k)
+            {
+                if (k == 8 or k == 9) continue;           // skip lower-body translation (position)
+                g(k)    += cfg_.w_neutral * 2.f * x(k);   // d/dθ of (θ - 0)^2
+                H(k, k) += cfg_.w_neutral * 2.f;
+            }
+
         const Vec11 delta = H.ldlt().solve(g);
 
         mu_     = x - delta;

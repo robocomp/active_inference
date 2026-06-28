@@ -121,6 +121,49 @@ void TableSceneGraph::scaffold_missing_table_nodes(const std::vector<TablePrior>
     }
 }
 
+std::uint64_t TableSceneGraph::create_instance_from_detection(const Eigen::Vector3f& centroid_room,
+                                                              std::uint64_t room_node_id)
+{
+    auto room_opt = G_->get_node(room_node_id);
+    if (not room_opt.has_value())
+        return 0;
+
+    // Auto-name: one past the highest existing "table_<N>".
+    int max_n = 0;
+    for (const auto& n : G_->get_nodes_by_type("table"))
+        if (n.name().rfind("table_", 0) == 0)
+            try { max_n = std::max(max_n, std::stoi(n.name().substr(6))); } catch (...) {}
+    const std::string name = "table_" + std::to_string(max_n + 1);
+
+    DSR::Node table_node = DSR::Node::create<table_node_type>(name);
+    G_->add_or_modify_attrib_local<width_m_att> (table_node, cfg_.tracker_birth_width_m);
+    G_->add_or_modify_attrib_local<depth_m_att> (table_node, cfg_.tracker_birth_depth_m);
+    G_->add_or_modify_attrib_local<height_m_att>(table_node, cfg_.tracker_birth_height_m);
+    G_->add_or_modify_attrib_local<level_att>   (table_node, 3);
+    G_->add_or_modify_attrib_local<parent_att>  (table_node, room_node_id);
+    {
+        const float rpx = G_->get_attrib_by_name<pos_x_att>(room_opt.value()).value_or(200.f);
+        const float rpy = G_->get_attrib_by_name<pos_y_att>(room_opt.value()).value_or(200.f);
+        G_->add_or_modify_attrib_local<pos_x_att>(table_node, rpx + 150.f);
+        G_->add_or_modify_attrib_local<pos_y_att>(table_node, rpy +  50.f);
+    }
+
+    const auto id_opt = G_->insert_node(table_node);
+    if (not id_opt.has_value())
+        return 0;
+
+    const float z = cfg_.tracker_birth_height_m * 0.5f;
+    rt_api_->insert_or_assign_edge_RT(room_opt.value(), id_opt.value(),
+                                      {centroid_room.x(), centroid_room.y(), z}, {0.0f, 0.0f, 0.0f});
+
+    if (relayout_)
+        relayout_();
+
+    std::print("table_concept: [tracker] BIRTH '{}' id={} at room ({:.2f},{:.2f})\n",
+               name, id_opt.value(), centroid_room.x(), centroid_room.y());
+    return id_opt.value();
+}
+
 bool TableSceneGraph::persist_table_belief(TableInstance& inst, std::uint64_t node_id,
                                            std::uint64_t room_id, float free_energy)
 {

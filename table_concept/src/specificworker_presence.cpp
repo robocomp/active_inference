@@ -108,14 +108,23 @@ void SpecificWorker::remove_stale_affordance_nodes()
         return;
     for (const auto& aff : G->get_nodes_by_type("affordance"))
     {
-        const auto pid = G->get_attrib_by_name<parent_att>(aff);
-        if (not pid.has_value())
-            continue;
-        const auto parent = G->get_node(pid.value());
-        if (parent.has_value() and parent->type() == "table")
+        // Ours if EITHER (a) the name matches our deterministic "aff_table*" scheme — orphan-safe,
+        // catches affordances whose parent table node was already deleted (retirement / crashed run) —
+        // OR (b) it still hangs from a live table (backstop for a DSR collision-renamed node).
+        bool ours = aff.name().starts_with("aff_table");
+        const char* why = "name";
+        if (not ours)
+            if (const auto pid = G->get_attrib_by_name<parent_att>(aff); pid.has_value())
+                if (const auto parent = G->get_node(pid.value());
+                    parent.has_value() and parent->type() == "table")
+                {
+                    ours = true;
+                    why = "parent table";
+                }
+        if (ours)
         {
             qInfo() << "[table_concept] removing affordance node"
-                    << QString::fromStdString(aff.name()) << "id" << aff.id() << "(parent table)";
+                    << QString::fromStdString(aff.name()) << "id" << aff.id() << "(" << why << ")";
             G->delete_node(aff.id());
         }
     }

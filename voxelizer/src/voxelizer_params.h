@@ -58,6 +58,20 @@ struct VoxelizerParams
     float       MASK_OUTLIER_RADIUS_M            = 0.03f;
     int         MASK_OUTLIER_MIN_NEIGHBORS       = 4;
 
+    // Human-pose branch (yolo_human): a second YOLO-pose model on the same RGB frame, published as
+    // BODY_18 3D skeletons (camera frame) on the 'skeleton' node for human_concept. Default OFF.
+    bool        HUMAN_POSE_ENABLED      = false;            // HumanPose.enabled
+    std::string HUMAN_POSE_MODEL_PATH   = "yolo26m-pose.onnx";
+    float       HUMAN_POSE_CONF_THRESH  = 0.30f;            // person-detection confidence floor
+    float       HUMAN_POSE_IOU_THRESH   = 0.45f;
+    int         HUMAN_POSE_INPUT_SIZE   = 640;
+    bool        HUMAN_POSE_USE_GPU      = true;
+    bool        HUMAN_POSE_USE_TRT      = false;
+    // Per-joint confidence floor below which a keypoint is dropped (NaN) from the skeleton node.
+    float       SKELETON_KP_CONF_MIN    = 0.30f;
+    // Half-window (px) for the median-depth patch sampled at each keypoint (0 = single pixel).
+    int         SKELETON_DEPTH_PATCH    = 2;
+
     // Media plane (zero-copy DDS) for RGBD pixels carried OUT of the graph.
     int         MEDIA_DOMAIN_ID   = 0;
     std::string MEDIA_RGB_TOPIC   = "rc/zed/rgb";

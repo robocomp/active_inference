@@ -465,6 +465,31 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
 
     const auto affordances = graph->get_nodes_by_type("affordance");
 
+    // Snapshot every evaluated affordance (gain + EFE score + eligibility) for the controller's EFE
+    // plot — done up front so it is populated regardless of which selection branch returns below.
+    last_candidates_.clear();
+    for (const auto &node : affordances)
+    {
+        const auto target = read_target(graph, node);
+        if (!target.has_value())
+            continue;
+        const auto active = graph->get_attrib_by_name<active_att>(node).value_or(false);
+        const auto pending = graph->get_attrib_by_name<epistemic_pending_att>(node).value_or(true);
+        const auto state = decode_protocol_state(active, pending);
+        last_candidates_.push_back({target->node_name, target->parent_node_type,
+                                    target->epistemic_gain, neg_efe(*target),
+                                    state == ProtocolState::Offered || state == ProtocolState::Executing,
+                                    std::string(protocol_state_name(state))});
+    }
+
+    // One compact line listing EVERY affordance with its protocol state — shows WHY the eligible set
+    // flips (e.g. the incumbent went Completed and dropped out), which gain/score alone can't reveal.
+    std::ostringstream all_cands;
+    for (const auto &c : last_candidates_)
+        all_cands << " '" << c.node_name << "'(" << c.state << ") gain=" << c.gain
+                  << " score=" << c.efe_score << " |";
+    const std::string candidates_str = all_cands.str();
+
     if (current_affordance_id_ != 0)
     {
         for (const auto &node : affordances)
@@ -480,7 +505,7 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
                 if (const auto key = make_affordance_key(*target); key != selected_target_debug_report_)
                 {
                     selected_target_debug_report_ = key;
-                    std::print("{}\n", make_affordance_debug_report(*target));
+                    std::print("{}  [candidates:{} ]\n", make_affordance_debug_report(*target), candidates_str);
                     std::fflush(stdout);
                 }
                 log_observation(target->node_id,
@@ -525,7 +550,7 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
         if (const auto key = make_affordance_key(*resumed_target); key != selected_target_debug_report_)
         {
             selected_target_debug_report_ = key;
-            std::print("{}\n", make_affordance_debug_report(*resumed_target));
+            std::print("{}  [candidates:{} ]\n", make_affordance_debug_report(*resumed_target), candidates_str);
             std::fflush(stdout);
         }
         reset_observation();
@@ -543,7 +568,6 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
     }
 
     std::optional<Target> best_target;
-    std::ostringstream options;   // all eligible candidates with gain + EFE score, for the log
     for (const auto &node : affordances)
     {
         const auto target = read_target(graph, node);
@@ -554,10 +578,6 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
         const auto pending = graph->get_attrib_by_name<epistemic_pending_att>(node).value_or(true);
         if (decode_protocol_state(active, pending) != ProtocolState::Offered)
             continue;
-
-        const float nav_dist = robot_pos ? (target->room_pos - *robot_pos).norm() : 0.f;
-        options << " '" << target->node_name << "' gain=" << target->epistemic_gain
-                << " d=" << nav_dist << " score=" << neg_efe(*target) << " |";
 
         if (!best_target.has_value() || better(*target, *best_target))
             best_target = target;
@@ -596,7 +616,7 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
         if (const auto key = make_affordance_key(*best_target); key != selected_target_debug_report_)
         {
             selected_target_debug_report_ = key;
-            std::print("{}  [candidates:{} ]\n", make_affordance_debug_report(*best_target), options.str());
+            std::print("{}  [candidates:{} ]\n", make_affordance_debug_report(*best_target), candidates_str);
             std::fflush(stdout);
         }
         reset_observation();

@@ -44,6 +44,17 @@ VoxelizerParams load_voxelizer_params(const ConfigLoader& configLoader)
     rc::ConfigLoaderUtils::load_optional(configLoader, "Media.lidar_topic", params.MEDIA_LIDAR_TOPIC);
     rc::ConfigLoaderUtils::load_optional(configLoader, "Media.lidar_use_media", params.LIDAR_USE_MEDIA);
 
+    // Human-pose branch (default OFF — see header).
+    rc::ConfigLoaderUtils::load_optional(configLoader, "HumanPose.enabled", params.HUMAN_POSE_ENABLED);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "HumanPose.model_path", params.HUMAN_POSE_MODEL_PATH);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "HumanPose.conf_thresh", params.HUMAN_POSE_CONF_THRESH);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "HumanPose.iou_thresh", params.HUMAN_POSE_IOU_THRESH);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "HumanPose.input_size", params.HUMAN_POSE_INPUT_SIZE);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "HumanPose.use_gpu", params.HUMAN_POSE_USE_GPU);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "HumanPose.use_trt", params.HUMAN_POSE_USE_TRT);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "HumanPose.kp_conf_min", params.SKELETON_KP_CONF_MIN);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "HumanPose.depth_patch", params.SKELETON_DEPTH_PATCH);
+
     // Optional DSR exports (default OFF — see header).
     rc::ConfigLoaderUtils::load_optional(configLoader, "Voxel.publish_tracks", params.PUBLISH_TRACKS);
     rc::ConfigLoaderUtils::load_optional(configLoader, "Voxel.publish_voxels", params.PUBLISH_VOXELS);

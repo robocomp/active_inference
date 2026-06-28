@@ -37,6 +37,9 @@ struct TableInstance
     int  frames_rising      = 0;      // consecutive frames with F increasing
     int  last_masks_frame_seen = -1;  // last masks packet frame consumed
     int  processed_cycles   = 0;      // per-table compute cycles for log throttling
+    // Tracker's gated mask assignment for THIS frame (index into the masks packet slices), or -1 to fall
+    // back to greedy nearest-mask. Set each cycle by run_instance_tracker(); read in TableFitter::observe.
+    int  assigned_mask_idx  = -1;
     bool model_stable       = false;
     int  model_generation   = 0;
     TableState prev_conv_state{};      // accepted state at the previous cycle (for state-delta convergence)
@@ -62,6 +65,9 @@ struct TableInstance
     bool epistemic_satisfied = false;
     int  epistemic_cooldown  = 0;   // cycles remaining before a satisfied table may re-arm
     float prev_free_energy  = std::numeric_limits<float>::max();
+    // Running FE level on ACCEPTED (good) fresh frames (EMA); the FE-spike guard rejects a fresh frame
+    // whose raw-fit FE is ≫ this (contaminated point set the model can't explain). NaN until first accept.
+    float fe_baseline       = std::numeric_limits<float>::quiet_NaN();
     // Dead-band tracking for write_rt_pose — suppress tiny oscillations
     float last_written_cx   = std::numeric_limits<float>::max();
     float last_written_cy   = std::numeric_limits<float>::max();

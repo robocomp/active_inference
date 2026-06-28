@@ -175,6 +175,9 @@ private:
     // instances (gated 1-to-1), spawns new bottles from unexplained masks, retires unsupported ones.
     rc::InstanceTracker tracker_;
     void run_instance_tracker();   // called from compute() in place of scaffold when tracker_enabled
+    // Collapse two instances fitted to the SAME physical bottle (circle footprints overlap beyond
+    // Tracker.MergeOverlap), keeping the more-observed one. Runs before associate/birth each cycle.
+    void merge_overlapping_instances();
 
     int place_settle_ = 0;   // cycles waited after a start-placement move, before fitting (gate-lock guard)
 

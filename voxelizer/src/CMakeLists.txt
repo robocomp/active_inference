@@ -20,6 +20,8 @@ LIST(APPEND SOURCES
   ../src/lidar_track_attributor.cpp
   ../src/voxel_processor.cpp
   ../src/yolo_processor.cpp
+  ../src/yolo_human.cpp
+  ../src/onnx_providers.cpp
   ../src/unified_voxel_grid.cpp
 )
 

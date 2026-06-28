@@ -124,6 +124,10 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.fisher_process_std_m          = getf("WarmStart.FisherProcessStdM",        0.005f);
     out.fisher_process_std_yaw        = getf("WarmStart.FisherProcessStdYaw",      0.01f);
     out.freeze_belief_on_stale        = getb("WarmStart.FreezeBeliefOnStale",      true);
+    out.freeze_belief_on_bad_fit      = getb("WarmStart.FreezeBeliefOnBadFit",     true);
+    out.bad_fit_fe_ratio              = getf("WarmStart.BadFitFeRatio",            4.0f);
+    out.fe_baseline_ema               = getf("WarmStart.FeBaselineEma",            0.10f);
+    out.size_shrink_gain              = getf("WarmStart.SizeShrinkGain",           0.05f);
     out.fisher_grad_clamp             = getf("WarmStart.FisherGradClamp",          2.0f);
     out.fisher_maturity_stiffness     = getb("WarmStart.FisherMaturityStiffness",  true);
     out.fisher_views_half             = getf("WarmStart.FisherViewsHalf",          4.0f);
@@ -154,7 +158,22 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.warm_confidence_coverage_gain = getf("WarmStart.ConfidenceCoverageGain",  0.35f);
     out.warm_confidence_residual_gain = getf("WarmStart.ConfidenceResidualGain",  0.65f);
 
-    std::print("table_concept: configuration loaded.\n");
+    out.tracker_enabled          = getb("Tracker.Enabled",          false);
+    out.tracker_gate_mahalanobis = getf("Tracker.GateMahalanobis",  9.0f);
+    out.tracker_gate_fallback_m  = getf("Tracker.GateFallbackM",    0.50f);
+    out.tracker_detection_noise_m = getf("Tracker.DetectionNoiseM", 0.35f);
+    out.tracker_birth_frames     = geti("Tracker.BirthFrames",      8);
+    out.tracker_death_frames     = geti("Tracker.DeathFrames",      300);
+    out.tracker_death_enabled    = getb("Tracker.DeathEnabled",     false);
+    out.tracker_birth_min_sep_m  = getf("Tracker.BirthMinSepM",     0.60f);
+    out.tracker_merge_overlap    = getf("Tracker.MergeOverlap",     0.30f);
+    out.tracker_birth_width_m    = getf("Tracker.BirthWidthM",      1.0f);
+    out.tracker_birth_depth_m    = getf("Tracker.BirthDepthM",      0.6f);
+    out.tracker_birth_height_m   = getf("Tracker.BirthHeightM",     0.75f);
+    out.tracker_birth_size_std   = getf("Tracker.BirthSizeStd",     0.15f);
+
+    std::print("table_concept: configuration loaded. tracker_enabled={} (Tracker.Enabled)\n",
+               out.tracker_enabled);
     return out;
 }
 

@@ -47,6 +47,7 @@
 #include "table_config.h"      // rc::TableConfig + load_table_config
 #include "table_instance.h"    // rc::TableInstance
 #include "../../common/mask_ingestor/mask_ingestor.h"     // rc::MaskIngestor (perception)
+#include "../../common/instance_tracker/instance_tracker.h"   // rc::InstanceTracker (birth/associate/death)
 #include "table_scene_graph.h" // rc::TableSceneGraph (DSR node/RT I/O)
 #include "table_fitter.h"      // rc::TableFitter (active-inference core)
 #include "epistemic_planner.h"
@@ -110,6 +111,14 @@ private:
                             float free_energy, float explanation_ratio);
     void trigger_graph_layout_twopi();   // injected into TableSceneGraph as the relayout callback
 
+    // Multi-instance birth/associate/death (shared, when cfg_.tracker_enabled). Associates "table" masks
+    // to instances, spawns a table from an unexplained mask, retires a long-unobserved one.
+    rc::InstanceTracker tracker_;
+    void run_instance_tracker();   // called from compute() in place of scaffold when tracker_enabled
+    // Physical-exclusion invariant: two tables cannot share space. Collapse any pair of instances whose
+    // oriented footprints overlap beyond Tracker.MergeOverlap, keeping the more-observed one.
+    void merge_overlapping_instances();
+
     // ── Presence protocol ────────────────────────────────────────────────────
     void waiting_enter();
     void waiting_loop();
@@ -131,6 +140,8 @@ private:
     // ── Members ──────────────────────────────────────────────────────────────
     bool startup_check_flag = false;
     bool owned_nodes_cleaned_ = false;
+    bool startup_affordance_sweep_done_ = false;   // one-time startup stale-affordance sweep; re-running
+                                                   // on every Operating re-entry would wipe live affordances.
     std::atomic<bool> shutting_down_{false};
     AgentPresenceCoordinator presence_coordinator_;
 

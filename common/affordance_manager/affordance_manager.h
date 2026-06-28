@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace DSR
 {
@@ -36,6 +37,18 @@ public:
         float shape_depth_m = 0.f;
         bool has_shape = false;
     };
+
+    // One evaluated affordance per select_target() call (for the controller's EFE plot/log).
+    struct Candidate
+    {
+        std::string node_name;
+        std::string parent_type;
+        float gain = 0.f;        // epistemic value ΔH (nats)
+        float efe_score = 0.f;   // selection objective gain − λ·dist (+hysteresis); higher = selected
+        bool  eligible = false;  // Offered or Executing (i.e. actually competing)
+        std::string state;       // protocol state: Offered / Executing / Completed / … (diagnostic)
+    };
+    const std::vector<Candidate> &last_candidates() const { return last_candidates_; }
 
     explicit AffordanceManager(std::string managed_node_name = {});
 
@@ -120,6 +133,7 @@ private:
     float select_lambda_cost_ = 0.2f;
     float select_switch_margin_ = 0.5f;
     std::uint64_t last_selected_id_ = 0;   // for commitment hysteresis across cycles
+    std::vector<Candidate> last_candidates_;   // all affordances evaluated in the last select_target()
     State state_ = State::Idle;
     std::optional<bool> last_observed_active_;
     std::optional<bool> last_observed_pending_;

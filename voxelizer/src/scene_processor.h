@@ -84,6 +84,10 @@ public:
     void update_room_polygon_periodic();
     void overlay_room_polygon_on_canvas(cv::Mat& canvas, std::uint64_t frame_ts_ms) const;
     void update_viewer_robot_pose(const Mat::RTMat& room_T_robot);
+    // Reads the LATEST robot pose (RT ts=0) and pushes it to the viewer, decoupled from the
+    // per-frame camera timestamp. Cheap; called from the render timer so the robot redraws at the
+    // render cadence instead of the perception-frame rate. No-op until room/robot/inner-eigen exist.
+    void refresh_viewer_robot_pose_latest();
     void update_viewer_lidar_points(const std::string& room_name,
                                     const std::string& robot_name,
                                     const Mat::RTMat& room_T_robot_fallback);
@@ -91,6 +95,9 @@ public:
                                                        std::uint64_t timestamp_ms) const;
     void update_viewer_graph_object_boxes(std::span<const GraphObjectBox> graph_boxes);
     void update_viewer_object_meshes();
+    // Read human_concept's 'person' nodes (mesh_vertices_att = fitted BODY_18, room frame) and feed
+    // them to the GL viewer as 3D skeletons.
+    void update_viewer_person_skeletons();
     void update_viewer_table_rfe_points();
     // Feed the YOLO mask support points (room frame) from the "masks" node to the 3D viewer.
     void update_viewer_mask_points();

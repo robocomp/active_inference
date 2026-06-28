@@ -225,15 +225,21 @@ float BottleFitter::run_inference(BottleInstance& inst, const BottleObservation&
         else
             ++inst.matched_frames;
 
-        step_queue_update(inst, inst.voxel_bank_pts, std::clamp(observation.explanation_ratio, 0.0f, 1.0f));
+        // Combined per-observation precision = geometric self-consistency (explanation_ratio) ×
+        // detection confidence (YOLO score). Both must be high for the frame to count fully; a
+        // low-score mask widens the resulting Laplace covariance instead of hardening the belief.
+        step_queue_update(inst, inst.voxel_bank_pts,
+                          std::clamp(observation.explanation_ratio, 0.0f, 1.0f)
+                              * mask_confidence_weight(inst.last_mask_confidence));
     }
 
     const float explanation_confidence = std::clamp(observation.explanation_ratio, 0.0f, 1.0f);
+    const float conf_w = mask_confidence_weight(inst.last_mask_confidence);
     float residual_precision = 0.0f;
     if (observation.has_fresh_data and observation.candidate_pts.empty() and not observation.residual_pts.empty())
-        residual_precision = 0.10f;   // only residuals: keep a floor so the model can expand
+        residual_precision = 0.10f * conf_w;   // only residuals: keep a floor so the model can expand
     else
-        residual_precision = std::clamp(1.0f - explanation_confidence, 0.0f, 1.0f);
+        residual_precision = std::clamp(1.0f - explanation_confidence, 0.0f, 1.0f) * conf_w;
 
     feed_silhouette(inst);   // attach the RGB-mask edge rays before the model + covariance update
     const float free_energy = step_model_update(inst, observation.residual_pts, residual_precision);
@@ -348,6 +354,18 @@ void BottleFitter::feed_silhouette(BottleInstance& inst)
                                   std::move(dirs), slice->confidence);
 }
 
+float BottleFitter::mask_confidence_weight(float confidence) const
+{
+    if (not cfg_.mask_conf_weight)
+        return 1.0f;
+    // w = clamp01((conf−floor)/(ref−floor))^power — identical to BeliefStabilizer::weight_observation
+    // so the Laplace fit covariance and the Fisher stabiliser down-weight a low-score mask the same way.
+    const float floor = std::clamp(cfg_.mask_conf_floor, 0.0f, 0.99f);
+    const float ref   = std::max(floor + 1e-3f, cfg_.mask_conf_ref);
+    return std::pow(std::clamp((confidence - floor) / (ref - floor), 0.0f, 1.0f),
+                    std::max(0.1f, cfg_.mask_conf_power));
+}
+
 void BottleFitter::step_queue_update(BottleInstance& inst,
                                      const std::vector<Eigen::Vector3f>& candidate_pts,
                                      float observation_precision)
@@ -418,12 +436,6 @@ float BottleFitter::step_model_update(BottleInstance& inst,
         free_energy = inst.model.compute_free_energy(fit_pts, fit_weights);
     }
 
-    // Convergence bookkeeping.
-    if (std::abs(free_energy - inst.prev_free_energy) < cfg_.fe_eps)
-        inst.frames_converged = std::min(inst.frames_converged + 1, cfg_.K_stable);
-    else
-        inst.frames_converged = 0;
-
     inst.last_fe_terms = inst.model.compute_free_energy_decomposition(fit_pts, fit_weights, historical_anchor_count);
     inst.last_queue_metrics = inst.queue.metrics();
 
@@ -455,6 +467,16 @@ float BottleFitter::step_model_update(BottleInstance& inst,
         inst.last_fe_terms = inst.model.compute_free_energy_decomposition(fit_pts, fit_weights, historical_anchor_count);
     }
 
+    // Convergence bookkeeping — AFTER the stabiliser, on the COMMITTED free energy. prev_free_energy
+    // holds last frame's post-stabiliser FE, so this compares committed-vs-committed. Doing it on the
+    // pre-stabiliser raw gradient optimum (before this block) pinned frames_converged at 0 forever: the
+    // stabiliser holds the committed state away from the per-frame raw optimum, so raw(t) and
+    // committed(t−1) never agreed within fe_eps even when the committed belief was perfectly stable.
+    if (std::abs(free_energy - inst.prev_free_energy) < cfg_.fe_eps)
+        inst.frames_converged = std::min(inst.frames_converged + 1, cfg_.K_stable);
+    else
+        inst.frames_converged = 0;
+
     return free_energy;
 }
 
@@ -463,7 +485,10 @@ void BottleFitter::refresh_stabilizer_params()
     StabilizerParams p;
     p.info_decay      = cfg_.fisher_info_decay;
     p.process_std_len = cfg_.fisher_process_std_m;
-    p.mask_conf_weight = false;   // bottle does not weight by score yet
+    p.mask_conf_weight = cfg_.mask_conf_weight;   // YOLO score → per-DOF obs-info weight (see BottleConfig)
+    p.mask_conf_floor  = cfg_.mask_conf_floor;
+    p.mask_conf_ref    = cfg_.mask_conf_ref;
+    p.mask_conf_power  = cfg_.mask_conf_power;
     p.kalman_stiffness = cfg_.stabilizer_acceptance;   // drive the accepted fit from the Kalman gain
     // CUSUM/SPRT gate: bands sized to the bottle's cm scale. Applied to the fit when stabilizer_acceptance
     // is on; otherwise it runs diagnostically (dashboard counter-evidence panel stays live).
@@ -514,7 +539,7 @@ void BottleFitter::log_fisher_csv(const BottleInstance& inst, bool fresh, float 
             cfg_.fisher_csv_path.clear();   // disable further attempts
             return;
         }
-        fisher_csv_ << "cycle,node,fresh,fe,frames_converged,pts";
+        fisher_csv_ << "cycle,node,fresh,fe,frames_converged,pts,conf,conf_w";   // YOLO score + applied weight w
         for (const auto* d : kDof) fisher_csv_ << ",state_" << d;
         for (const auto* d : kDof) fisher_csv_ << ",obs_"   << d;   // this frame's raw Fisher diag
         for (const auto* d : kDof) fisher_csv_ << ",acc_"   << d;   // normalised accumulated info (stiffener)
@@ -528,7 +553,8 @@ void BottleFitter::log_fisher_csv(const BottleInstance& inst, bool fresh, float 
 
     const auto s = inst.model.state().to_array();
     fisher_csv_ << inst.processed_cycles << ',' << inst.node_name << ',' << (fresh ? 1 : 0) << ','
-                << free_energy << ',' << inst.frames_converged << ',' << point_count;
+                << free_energy << ',' << inst.frames_converged << ',' << point_count << ','
+                << inst.last_mask_confidence << ',' << inst.stab.last_mask_conf_weight;
     for (int j = 0; j < 5; ++j) fisher_csv_ << ',' << s[j];
     for (int j = 0; j < 5; ++j) fisher_csv_ << ',' << inst.stab.last_obs_info[j];
     for (int j = 0; j < 5; ++j) fisher_csv_ << ',' << inst.stab.fisher_info[j];
@@ -641,6 +667,15 @@ bool BottleFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_nod
             init_state.cy = static_cast<float>(p->y());
             init_state.cz = static_cast<float>(p->z());
         }
+    }
+
+    // Tracker birth seed: authoritative XY for a freshly-born instance, independent of the same-cycle RT
+    // composition (which can read as 0,0 right after birth). Consumed once.
+    if (auto it = birth_seeds_.find(node.id()); it != birth_seeds_.end())
+    {
+        init_state.cx = it->second.x();
+        init_state.cy = it->second.y();
+        birth_seeds_.erase(it);
     }
 
     // No checkpoints: the model ALWAYS cold-starts at the fresh masks-detected pose (init_state, set

@@ -294,9 +294,17 @@ void SpecificWorker::compute()
 	auto update_selected_affordance_label = [this]()
 	{
 		const auto current_affordance_name = affordance_manager_.current_name();
-		display_.set_selected_affordance_text(current_affordance_name.empty()
-		    ? QStringLiteral("none")
-		    : QString::fromStdString(current_affordance_name));
+		// Track the previous DISTINCT non-empty selection so the label shows the last flip.
+		if (!current_affordance_name.empty() && current_affordance_name != last_selected_affordance_)
+		{
+			prev_selected_affordance_ = last_selected_affordance_;
+			last_selected_affordance_ = current_affordance_name;
+		}
+		const QString cur  = current_affordance_name.empty() ? QStringLiteral("none")
+		                                                     : QString::fromStdString(current_affordance_name);
+		const QString prev = prev_selected_affordance_.empty() ? QStringLiteral("—")
+		                                                       : QString::fromStdString(prev_selected_affordance_);
+		display_.set_selected_affordance_text(cur + QStringLiteral("   (prev: ") + prev + QStringLiteral(")"));
 	};
 	update_selected_affordance_label();
 

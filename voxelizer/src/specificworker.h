@@ -48,6 +48,7 @@ class YoloProcessor;
 class SceneProcessor;
 class GraphPublisher;
 struct SegDetection;
+namespace rc::human_pose { class YoloHumanProcessor; }
 
 namespace rc { class VoxelOpenGLViewer; }
 namespace rc { class YoloViewer; }
@@ -116,10 +117,14 @@ class SpecificWorker : public GenericWorker
         bool verbose_debug_      = false;
         std::atomic<bool> shutting_down_{false};
         bool include_lidar3d_in_voxels_ = true;
+        // Master gate for the voxel-grid pipeline (build + lidar fusion + budget regulation). OFF for
+        // now — only the masks pipeline runs. Flip to true to restore the full voxelizer.
+        bool compute_voxels_ = false;
 
         std::shared_ptr<DSR::InnerEigenAPI> inner_eigen_api;
 
         std::unique_ptr<YoloProcessor>     yolo_processor;
+        std::unique_ptr<rc::human_pose::YoloHumanProcessor> yolo_human_processor;
         std::unique_ptr<LidarTrackAttributor> lidar_track_attributor;
         std::unique_ptr<UnifiedVoxelGrid>  voxel_grid;
         std::unique_ptr<VoxelProcessor>    voxel_processor;
@@ -127,6 +132,12 @@ class SpecificWorker : public GenericWorker
         std::unique_ptr<GraphPublisher>    graph_publisher_;   // all DSR semantic_grid exports
         std::unique_ptr<rc::VoxelOpenGLViewer> voxel_viewer_gl;
         std::unique_ptr<rc::YoloViewer>        yolo_viewer_;
+
+        // Decoupled viewer-refresh timer (GUI thread). Pushes the LATEST robot pose to the 3D viewer
+        // at a fluid cadence, independent of the ~7-10 Hz perception/camera pipeline, so robot motion
+        // is smooth. Started in Operating, stopped in Degraded (graph access stays within Operating).
+        std::unique_ptr<QTimer> render_timer_;
+        void on_render_tick();
 
         // Own-window holders returned by add_custom_widget_in_own_window. Borrowed (parented to the
         // DSR main window); we only read/persist their geometry, we do not own them.

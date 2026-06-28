@@ -30,6 +30,7 @@
 class VoxelProcessor;
 class UnifiedVoxelGrid;
 struct SegDetection;
+namespace rc::human_pose { struct PoseDetection; }
 
 class GraphPublisher
 {
@@ -46,6 +47,14 @@ public:
     void publish(const RGBDData& rgbd, const Mat::RTMat& room_T_zed,
                  const std::vector<SegDetection>& detections, std::uint64_t frame_ts_ms = 0);
 
+    // Publish human skeletons on the dedicated 'skeleton' node. Keypoints are BODY_18, deprojected
+    // to the CAMERA (zed) frame — NOT room frame — so a consumer interacting with a person can
+    // servo robot-relative (re-parent under the robot in the RT tree) without paying localization
+    // noise. frame_ts_ms pins the camera-pose lookup at capture time. No-op unless poses present.
+    void publish_skeletons(const RGBDData& rgbd,
+                           const std::vector<rc::human_pose::PoseDetection>& poses,
+                           std::uint64_t frame_ts_ms = 0);
+
     // Re-publish the (possibly just-cleared) voxel grid — for the "Clear Voxels" button.
     // No-op unless Voxel.publish_voxels is set.
     void refresh_voxels_node();
@@ -61,6 +70,9 @@ private:
 
     void upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T_zed,
                       const std::vector<SegDetection>& detections, std::uint64_t frame_ts_ms);
+    void upload_skeletons(const RGBDData& rgbd,
+                          const std::vector<rc::human_pose::PoseDetection>& poses,
+                          std::uint64_t frame_ts_ms);
     void publish_tracks();
     void upload_voxels();
 
@@ -70,9 +82,13 @@ private:
     UnifiedVoxelGrid*              voxel_grid_      = nullptr;
     std::function<void()>          relayout_;
 
-    bool          masks_ready_  = false;
-    bool          tracks_ready_ = false;
-    bool          voxels_ready_ = false;
-    std::uint64_t last_masks_uploaded_frame_ = 0;
-    std::uint64_t masks_publish_seq_         = 0;
+    bool          masks_ready_    = false;
+    bool          tracks_ready_   = false;
+    bool          voxels_ready_   = false;
+    bool          skeleton_ready_ = false;
+    std::uint64_t last_masks_uploaded_frame_    = 0;
+    std::uint64_t masks_publish_seq_            = 0;
+    std::uint64_t last_skeleton_uploaded_frame_ = 0;
+    std::uint64_t skeleton_publish_seq_         = 0;
+    int           last_logged_skeleton_count_   = -1;   // log only on a count change (0↔N↔M)
 };

@@ -78,26 +78,17 @@ void SpecificWorker::setup_custom_viewers()
         lidar_btn->setCheckable(true);
         lidar_btn->setCursor(Qt::PointingHandCursor);
 
-        auto* lidar_voxels_btn = new QPushButton("Fuse Lidar3D: ON", voxel_panel);
-        lidar_voxels_btn->setCheckable(true);
-        lidar_voxels_btn->setChecked(include_lidar3d_in_voxels_);
-        lidar_voxels_btn->setCursor(Qt::PointingHandCursor);
-
-        auto* voxels_btn = new QPushButton("Voxels: ON", voxel_panel);
-        voxels_btn->setCheckable(true);
-        voxels_btn->setChecked(true);
-        voxels_btn->setCursor(Qt::PointingHandCursor);
+        // Fitted models (table mesh + bottle cylinder + graph boxes) — default ON.
+        auto* models_btn = new QPushButton("Models: ON", voxel_panel);
+        models_btn->setCheckable(true);
+        models_btn->setChecked(true);
+        models_btn->setCursor(Qt::PointingHandCursor);
 
         auto* masks_btn = new QPushButton("Masks: OFF", voxel_panel);
         masks_btn->setCheckable(true);
         masks_btn->setCursor(Qt::PointingHandCursor);
 
         // table_concept point clouds — independently toggled (default ON).
-        auto* candidate_btn = new QPushButton("Candidate: ON", voxel_panel);
-        candidate_btn->setCheckable(true);
-        candidate_btn->setChecked(true);
-        candidate_btn->setCursor(Qt::PointingHandCursor);
-
         auto* rfe_btn = new QPushButton("RFE: ON", voxel_panel);
         rfe_btn->setCheckable(true);
         rfe_btn->setChecked(true);
@@ -122,16 +113,14 @@ void SpecificWorker::setup_custom_viewers()
                 "QPushButton:checked { background-color: %1; color: #101010; }").arg(hex));
         };
         accent(lidar_btn,     "#8C9EC7");  // lidar: slate blue-gray
+        accent(models_btn,    "#FFC864");  // models: table-mesh amber
         accent(masks_btn,     "#EBEBF2");  // mask: white
-        accent(candidate_btn, "#33D9FF");  // candidate: cyan
         accent(rfe_btn,       "#F233D9");  // rfe: magenta
         accent(residual_btn,  "#2633CC");  // residual: dark blue
 
         controls_layout->addWidget(lidar_btn);
-        controls_layout->addWidget(lidar_voxels_btn);
-        controls_layout->addWidget(voxels_btn);
+        controls_layout->addWidget(models_btn);
         controls_layout->addWidget(masks_btn);
-        controls_layout->addWidget(candidate_btn);
         controls_layout->addWidget(rfe_btn);
         controls_layout->addWidget(residual_btn);
         controls_layout->addWidget(clear_voxels_btn);
@@ -150,26 +139,11 @@ void SpecificWorker::setup_custom_viewers()
             lidar_btn->setText(checked ? "Lidar: ON" : "Lidar: OFF");
         });
 
-        connect(lidar_voxels_btn, &QPushButton::toggled, this, [this, lidar_voxels_btn](bool checked)
-        {
-            include_lidar3d_in_voxels_ = checked;
-            lidar_voxels_btn->setText(checked ? "Fuse Lidar3D: ON" : "Fuse Lidar3D: OFF");
-            // Toggling only gates FUTURE lidar fusion; voxels already fused into the grid would
-            // linger and keep being drawn. Purge the grid so the displayed voxel set immediately
-            // reflects the new setting (it repopulates from the next RGBD/lidar frames).
-            if (voxel_processor && voxel_viewer_gl)
-            {
-                voxel_processor->clear_state(voxel_viewer_gl.get());
-                if (graph_publisher_)
-                    graph_publisher_->refresh_voxels_node();
-            }
-        });
-
-        connect(voxels_btn, &QPushButton::toggled, this, [this, voxels_btn](bool checked)
+        connect(models_btn, &QPushButton::toggled, this, [this, models_btn](bool checked)
         {
             if (voxel_viewer_gl)
-                voxel_viewer_gl->set_show_voxels(checked);
-            voxels_btn->setText(checked ? "Voxels: ON" : "Voxels: OFF");
+                voxel_viewer_gl->set_show_models(checked);
+            models_btn->setText(checked ? "Models: ON" : "Models: OFF");
         });
 
         connect(masks_btn, &QPushButton::toggled, this, [this, masks_btn](bool checked)
@@ -177,13 +151,6 @@ void SpecificWorker::setup_custom_viewers()
             if (voxel_viewer_gl)
                 voxel_viewer_gl->set_show_masks(checked);
             masks_btn->setText(checked ? "Masks: ON" : "Masks: OFF");
-        });
-
-        connect(candidate_btn, &QPushButton::toggled, this, [this, candidate_btn](bool checked)
-        {
-            if (voxel_viewer_gl)
-                voxel_viewer_gl->set_show_candidate(checked);
-            candidate_btn->setText(checked ? "Candidate: ON" : "Candidate: OFF");
         });
 
         connect(rfe_btn, &QPushButton::toggled, this, [this, rfe_btn](bool checked)

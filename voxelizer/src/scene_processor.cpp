@@ -946,13 +946,34 @@ void SceneProcessor::update_viewer_object_meshes()
     if (voxel_viewer_ == nullptr || graph_ == nullptr)
         return;
 
-    // Tables are drawn as the dead-banded oriented box reconstructed from the table node's
-    // width/depth/height + the room→table RT edge (see build_graph_object_box → "model_table"),
-    // which is coherent with the shared belief and only moves when the written pose clears the
-    // dead-band. The per-cycle mesh_vertices_att baked the full pose (cx,cy,yaw) with no dead-band
-    // and jittered, so it is no longer rendered — feed an empty set to clear any prior mesh.
-    const std::vector<std::vector<float>> none;
-    voxel_viewer_->update_object_meshes(none);
+    // Tables and chairs are drawn as the solid mesh (mesh_vertices_att) published by
+    // table_concept / chair_concept. The mesh is gated at the source (published only when the fit
+    // moves past a few mm/mrad), so it is stable. (The graph BOX is intentionally NOT drawn for
+    // these types — see the box pass — so the mesh is their only visual.)
+    std::vector<std::vector<float>> meshes;
+    std::vector<std::string>        categories;   // parallel to meshes → per-class mesh colour in the viewer
+    for (const char* type : {"table", "chair"})
+        for (const auto& node : graph_->get_nodes_by_type(type))
+            if (const auto opt = graph_->get_attrib_by_name<mesh_vertices_att>(node); opt.has_value())
+            {
+                meshes.emplace_back(opt.value().get());
+                categories.emplace_back(type);
+            }
+    voxel_viewer_->update_object_meshes(meshes, categories);
+}
+
+void SceneProcessor::update_viewer_person_skeletons()
+{
+    if (voxel_viewer_ == nullptr || graph_ == nullptr)
+        return;
+
+    // human_concept writes the fitted BODY_18 skeleton (room frame, 18×3 flat) into mesh_vertices_att
+    // of each 'person' node. Draw it directly — same room frame as the voxels/object meshes.
+    std::vector<std::vector<float>> skeletons;
+    for (const auto& node : graph_->get_nodes_by_type("person"))
+        if (const auto opt = graph_->get_attrib_by_name<mesh_vertices_att>(node); opt.has_value())
+            skeletons.emplace_back(opt.value().get());
+    voxel_viewer_->update_skeletons(skeletons);
 }
 
 void SceneProcessor::update_viewer_table_rfe_points()
@@ -963,14 +984,11 @@ void SceneProcessor::update_viewer_table_rfe_points()
     static int debug_frame_counter = 0;
     std::vector<QVector3D> residual_points;
     std::vector<QVector3D> rfe_points;
-    std::vector<QVector3D> candidate_points;
     std::size_t tables_seen = 0;
     std::size_t tables_with_residual = 0;
     std::size_t tables_with_rfe = 0;
-    std::size_t tables_with_candidates = 0;
     std::size_t residual_point_count = 0;
     std::size_t rfe_point_count = 0;
-    std::size_t candidate_point_count = 0;
 
     for (const auto& node : graph_->get_nodes_by_type("table"))
     {
@@ -1004,22 +1022,9 @@ void SceneProcessor::update_viewer_table_rfe_points()
             }
         }
 
-        if (auto candidate_opt = graph_->get_attrib_by_name<candidate_pts_att>(node); candidate_opt.has_value())
-        {
-            ++tables_with_candidates;
-            const auto& flat = candidate_opt.value().get();
-            const std::size_t n = flat.size() / 3;
-            candidate_point_count += n;
-            candidate_points.reserve(candidate_points.size() + n);
-            for (std::size_t i = 0; i < n; ++i)
-            {
-                const std::size_t idx = i * 3;
-                candidate_points.emplace_back(flat[idx], flat[idx + 1], flat[idx + 2]);
-            }
-        }
     }
 
-    voxel_viewer_->update_rfe_points(residual_points, rfe_points, candidate_points);
+    voxel_viewer_->update_rfe_points(residual_points, rfe_points);
 }
 
 void SceneProcessor::update_viewer_mask_points()
@@ -1028,12 +1033,11 @@ void SceneProcessor::update_viewer_mask_points()
         return;
 
     // The masks node carries the YOLO support points (flat xyz, room frame) as a runtime
-    // attribute. Draw the slices that downstream fitters actually consume — "bottle"
-    // (bottle_concept) and "table" (table_concept) — so the Masks toggle shows exactly the
-    // support points reaching those agents; other detections are clutter here. Per-mask
-    // point ranges come from mask_support_offsets; the i-th label in mask_labels
-    // ('|'-joined) owns range [offsets[i], offsets[i+1]).
-    static const std::array<std::string_view, 2> kDrawnMaskLabels{"bottle", "table"};
+    // attribute. Draw the object slices — "bottle" (bottle_concept), "table" (table_concept) and
+    // "chair" — so the Masks toggle shows them; other detections are clutter here. Each is coloured
+    // by color_for_category (table green, bottle red, chair cyan). Per-mask point ranges come from
+    // mask_support_offsets; the i-th label in mask_labels ('|'-joined) owns range [offsets[i], offsets[i+1]).
+    static const std::array<std::string_view, 3> kDrawnMaskLabels{"bottle", "table", "chair"};
     std::vector<QVector3D>   mask_points;
     std::vector<std::string> mask_categories;   // parallel to mask_points → per-class colour in the viewer
     if (const auto masks_node = graph_->get_node("masks"); masks_node.has_value())
@@ -1078,6 +1082,20 @@ void SceneProcessor::update_viewer_robot_pose(const Mat::RTMat& room_T_robot)
     const Eigen::Matrix3d R = room_T_robot.rotation();
     const float theta = static_cast<float>(std::atan2(R(1, 0), R(0, 0)));
     voxel_viewer_->set_robot_pose(static_cast<float>(t.x()), static_cast<float>(t.y()), theta);
+}
+
+void SceneProcessor::refresh_viewer_robot_pose_latest()
+{
+    if (inner_eigen_api_ == nullptr || voxel_viewer_ == nullptr)
+        return;
+    const auto [room_name, robot_name] = get_room_robot_names_for_compute();
+    if (room_name.empty() || robot_name.empty())
+        return;
+    // ts=0 → latest RT (not pinned to the camera frame stamp), so the robot tracks live odometry
+    // at the render-timer rate rather than stepping at the ~7-10 Hz perception cadence.
+    if (auto room_T_robot = inner_eigen_api_->get_transformation_matrix(room_name, robot_name, 0);
+        room_T_robot.has_value())
+        update_viewer_robot_pose(room_T_robot.value());
 }
 
 void SceneProcessor::update_viewer_lidar_points(const std::string& room_name,

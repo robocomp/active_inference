@@ -136,6 +136,8 @@ private:
 	ControllerDisplay display_;
 	ControllerSession session_;
 	rc::AffordanceManager affordance_manager_;
+	std::string last_selected_affordance_;   // most recent distinct selection (for the "prev" label)
+	std::string prev_selected_affordance_;   // the one selected before it
 	bool path_following_active_ = false;
 	bool stop_sent_when_paused_ = false;
 	bool compute_debug_logged_ = false;

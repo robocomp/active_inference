@@ -33,7 +33,9 @@ stale_grace_ms = 120000
 agent_info_period_ms = 1000
 
 [Owns]
-nodes = ["table_concept 7"]
+# "table*" matches every table this agent births/scaffolds (table_1, table_2, …) so none survive a
+# restart as a stale node (mirrors bottle_concept owning "bottle*").
+nodes = ["table_concept 7", "table*"]
 
 [Period]
 Compute = 100
@@ -91,9 +93,10 @@ ConfidenceCoverageGain = 1.00     # how much coverage evidence raises confidence
 ConfidenceResidualGain = 0.25     # how much unexplained residuals raise confidence
 FisherFilterEnabled = true        # use the real per-DOF SDF Fisher information (vs the face-coverage view-info proxy)
 KalmanGainStiffness = true        # drive each DOF's acceptance gain from the Kalman gain K=obs/(Y_pred+obs) (vs the InfoHalf/coverage heuristic)
-FisherInfoDecay = 0.99            # stiffener (acc): fading memory ≈100-frame window. A table is RIGID — its shape is
-                                  # learned once and should stay known, so the accumulator must build up (→ strong maturity
-                                  # stiffening + a high CUSUM barrier) instead of forgetting it every ~20 frames (0.95).
+FisherInfoDecay = 0.95            # A/B (2026-06-27): was 0.99. Lowered to a ~20-frame window — the 0.99 ceiling
+                                  # over-accumulated (raw info ~14k) and locked the fit at w≈1.13 while the point
+                                  # extent says ~1.35 (the "static + large residuals" symptom). Restore 0.99 once
+                                  # the fit converges, with a CUSUM barrier that actually yields to real evidence.
 # Quality-aware maturity: a CLOSE approach after far glimpses re-opens the fit (rescales the stale
 # far-view "views" down) instead of staying locked at the misrepresented far fit. The fix for "first
 # seen far → bad fit → approaching can't re-fit". Off → every view counts ~1 (far hardens as fast as close).
@@ -107,21 +110,38 @@ FisherPeakEma = 0.30
 FisherProcessStdM = 0.005        # calibrated-cov predict: process-noise std per fresh frame for length DOFs (m) → std floor
 FisherProcessStdYaw = 0.01       # calibrated-cov predict: process-noise std per fresh frame for yaw (rad)
 FisherCsvPath = "etc/fisher_filter_log.csv"   # per-cycle evolution log for plotting (empty = off)
+# FE-spike guard (2026-06-27): drop a FRESH frame whose raw-fit FE is ≫ the instance's running FE level —
+# a contaminated point set (clutter / partial-or-wrong mask, extent blows up, FE ~20× vs ~1) the model
+# can't explain. Skips the acceptance (keeps the belief) so the gate can't unlock onto garbage → kills the
+# residual size wander at the source. Baseline is an EMA over ACCEPTED frames only.
+FreezeBeliefOnBadFit = true
+BadFitFeRatio = 4.0              # reject a fresh frame if raw_fe > this × baseline (lower = stricter)
+FeBaselineEma = 0.10            # EMA weight for the accepted-FE running baseline
+# Size RATCHET (2026-06-27): a table is rigid — a size DOF grows at full gain but SHRINKS at gain×this.
+# A far/occluded partial view shows a small visible extent but is NOT evidence the table is smaller, so it
+# must not collapse the box ("shrank to a third across the room"). Small=strong ratchet; 1.0=symmetric(off).
+SizeShrinkGain = 0.05
 # Sequential change-detector (CUSUM/SPRT) on top of the Kalman gain: an isolated surprising mask is
 # rejected per-DOF (gain→0), and only a COHERENT same-direction run of surprise unlocks the DOF and
 # snaps it to the new evidence. This is what stops a lone noisy mask from nudging a settled fit.
-CounterEvidenceGate = true        # enable the SPRT/CUSUM gate (requires KalmanGainStiffness)
+CounterEvidenceGate = true        # A/B confirmed (2026-06-27) the gate was the lock (ceg_w=-1 in 62% of frames
+                                  # froze the fit under-sized). RE-ENABLED but RETUNED below (lower BaseSize,
+                                  # higher StepCap) so a real sustained size change unlocks in a few frames while
+                                  # a one-frame extent spike (noise) is still rejected — the gate-off run wandered.
 CounterEvidenceBandM = 0.02       # length-DOF surprise deadband (m): innovations within this are "coherent"
 CounterEvidenceBandRad = 0.05     # yaw surprise deadband (rad)
 # Barrier = base + lambda·views, SPLIT position (cx,cy) vs size/shape so the table CENTRE locks harder
 # than its extents (position drifts one-sided with robot localisation → it was unlocking ~3× more than w/h).
 CounterEvidenceBasePos = 6.0      # position barrier floor (excess-bands) — centre heavily locked
 CounterEvidenceLambdaPos = 1.0    # extra position barrier per accumulated equivalent-view
-CounterEvidenceBaseSize = 3.0     # size/shape barrier floor (excess-bands)
-CounterEvidenceLambdaSize = 0.5   # extra size/shape barrier per accumulated equivalent-view
+CounterEvidenceBaseSize = 1.5     # A/B retune (2026-06-27): was 3.0. Lower barrier so a REAL sustained size
+                                  # change unlocks in a few frames (the 0.99/3.0 combo froze the fit 20 cm under).
+CounterEvidenceLambdaSize = 0.2   # A/B retune: was 0.5. Per-view barrier growth softened so a well-observed DOF
+                                  # still re-adapts to genuine evidence instead of hard-locking.
 CounterEvidenceDecay = 0.8        # per-coherent-frame pay-down of the accumulator (evidence FOR the belief)
 CounterEvidenceUnlockDeflate = 0.3  # on unlock, multiply that DOF's accumulated info by this (concede the old estimate)
-CounterEvidenceStepCap = 1.0      # cap per-frame CUSUM increment (excess-bands) → unlock needs a RUN, not one outlier
+CounterEvidenceStepCap = 3.0      # A/B retune (2026-06-27): was 1.0. A sustained 3-4 frame run now clears the
+                                  # (lowered) barrier, but ONE outlier frame still can't — kills the gate-off wander.
 # YOLO mask-score weighting: w = clamp01((score−floor)/(ref−floor))^power. IMPORTANT: a partially-viewed
 # table scores LOW (~0.3–0.45 here), so floor/ref must sit in that band — floor too high nukes every mask
 # (w=0 → the Fisher accumulator dies → no maturity stiffening → UNSTABLE, the bug just fixed). Tune to
@@ -134,8 +154,41 @@ RtCovUpload = true                # upload the table pose covariance (rt_covaria
 RtCovScale = 1.0                  # var = RtCovScale / fisher_info_raw; calibrate toward NEES≈1 (raw curvature over-counts correlated points), like bottle CovEffScale
 
 [SampleQueue]
+# RFE anchors are binned over a yaw-aware xy-GRID of the table footprint (2026-06-27, was angle/z — a
+# cylinder leftover that lumped centre+edge points and never pinned w/h). NumAngleBins=x divisions,
+# NumZBins=y divisions; raise for finer footprint sampling. Capacity = NumAngleBins·NumZBins·MaxPerBin.
+NumAngleBins = 24         # x-grid divisions of the footprint
+NumZBins = 16             # y-grid divisions (raised from 10 → ~symmetric cell size with x)
+MaxPerBin = 2             # anchors kept per xy-cell
+MaxNewPointsPerFrame = 40 # anchors admitted per frame — fill the grid fast (was 30)
 RfeWeightGain = 0.25      # lower than 1.0 keeps historical RFE anchors influential
 MinAnchorWeight = 0.12    # floor for anchor weight in optimization/coverage
+
+[Tracker]
+# Multi-instance birth/associate/death (shared rc::InstanceTracker). OFF → legacy prior-scaffold +
+# greedy nearest-mask. ON → "table" masks are associated to instances by a covariance-gated global
+# 1-to-1, an unexplained mask spawns a new table, an instance unobserved for DeathFrames is retired.
+# Tables are large STATIC furniture: BirthMinSepM wide (no two table centres that close) and
+# DeathFrames LARGE so a temporarily-occluded table is not dropped.
+Enabled = true           # set true for scenes with an unknown/changing number of tables
+GateMahalanobis = 9.0     # χ²₂ gate (~3σ) for a mask↔instance match once it has a cov
+GateFallbackM = 0.50      # metric XY gate (m) before an instance has a usable covariance
+DetectionNoiseM = 0.35    # det-noise std R added to fit cov in the gate (S=P+R²I): covers the mask-centroid
+                          # vs fitted-centre offset of a partially-viewed table (~0.2–0.5 m), else the
+                          # overconfident fit rejects its own detection. Tables are far apart → safe.
+BirthFrames = 8           # frames a mask must stay unexplained before spawning a table
+DeathFrames = 300         # (only if DeathEnabled) frames unobserved before retirement (~30 s @ 100 ms)
+DeathEnabled = false      # OFF: a table is rigid persistent furniture — a long occlusion is not absence.
+                          # Removal is by the MERGE operator ONLY (two tables can't share space).
+BirthMinSepM = 0.60       # a birth must be ≥ this (m) from every existing table (anti-duplicate)
+MergeOverlap = 0.30       # physical exclusion: collapse two instances whose oriented footprints overlap by
+                          # ≥ this fraction of the smaller footprint (two tables cannot share space). 0=off.
+BirthWidthM = 1.0         # default geometry for a table BORN from a mask (the fit refines from here)
+BirthDepthM = 0.6
+BirthHeightM = 0.75
+BirthSizeStd = 0.15       # prior PRECISION (size std, m) behind the Birth* dims: pins the size near
+                          # standard furniture under weak early views (smaller = stiffer). Without it a
+                          # born table uses the loose generic prior and the first partial mask reshapes it.
 
 [Ice]
 Warn.Connections = "0"

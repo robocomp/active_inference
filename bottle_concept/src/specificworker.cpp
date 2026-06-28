@@ -368,14 +368,81 @@ void SpecificWorker::compute()
 // Canonical per-node orchestration (mirrors table_concept::process_table_node): the fitter runs the
 // pure belief (ensure_instance → observe → run_inference, no DSR writes); the worker owns the DSR
 // write-back (scene_graph_->step_write_model) and the eval log.
+namespace {
+// Two bottles cannot share physical space. Footprint = the circle (cx,cy,radius) in the room plane;
+// overlap area as a fraction of the SMALLER circle (1.0 = one circle fully inside the other) lets the
+// merge operator collapse two instances fitted to the same bottle.
+float circle_overlap_ratio(const rc::BottleState& A, const rc::BottleState& B)
+{
+    const float ra = std::max(A.radius, 1e-4f), rb = std::max(B.radius, 1e-4f);
+    const float d  = std::hypot(A.cx - B.cx, A.cy - B.cy);
+    if (d >= ra + rb)           return 0.0f;          // disjoint
+    if (d <= std::abs(ra - rb)) return 1.0f;          // smaller fully inside the larger
+    const float d1 = (d * d + ra * ra - rb * rb) / (2.0f * d);   // a-centre → radical line
+    const float d2 = d - d1;
+    const float seg_a = ra * ra * std::acos(std::clamp(d1 / ra, -1.0f, 1.0f))
+                        - d1 * std::sqrt(std::max(0.0f, ra * ra - d1 * d1));
+    const float seg_b = rb * rb * std::acos(std::clamp(d2 / rb, -1.0f, 1.0f))
+                        - d2 * std::sqrt(std::max(0.0f, rb * rb - d2 * d2));
+    const float amin  = std::numbers::pi_v<float> * std::min(ra, rb) * std::min(ra, rb);
+    return amin > 1e-9f ? std::clamp((seg_a + seg_b) / amin, 0.0f, 1.0f) : 0.0f;
+}
+}  // namespace
+
+// Collapse instances whose circle footprints overlap (same physical bottle fitted twice): keep the one
+// with more integrated fresh evidence, retire the other (affordance + node). Runs before tracking so a
+// duplicate is gone before it is fed a mask. Mirrors table_concept::merge_overlapping_instances.
+void SpecificWorker::merge_overlapping_instances()
+{
+    if (cfg_.tracker_merge_overlap <= 0.0f)
+        return;
+    auto& insts = fitter_->instances();
+    if (insts.size() < 2)
+        return;
+
+    std::vector<std::uint64_t> ids;
+    ids.reserve(insts.size());
+    for (auto& [id, _] : insts) ids.push_back(id);
+
+    std::unordered_set<std::uint64_t> removed;
+    for (std::size_t i = 0; i < ids.size(); ++i)
+    {
+        if (removed.count(ids[i])) continue;
+        for (std::size_t j = i + 1; j < ids.size(); ++j)
+        {
+            if (removed.count(ids[j])) continue;
+            const auto ia = insts.find(ids[i]), ib = insts.find(ids[j]);
+            if (ia == insts.end() or ib == insts.end()) continue;
+
+            const float ratio = circle_overlap_ratio(ia->second.model.state(), ib->second.model.state());
+            if (ratio < cfg_.tracker_merge_overlap) continue;
+
+            const bool keep_i = ia->second.matched_frames >= ib->second.matched_frames;
+            const std::uint64_t keep = keep_i ? ids[i] : ids[j];
+            const std::uint64_t drop = keep_i ? ids[j] : ids[i];
+            std::print("bottle_concept: [tracker] MERGE id={} into id={} (circle overlap {:.2f})\n",
+                       drop, keep, ratio);
+            if (auto it = insts.find(drop); it != insts.end())
+                it->second.affordance.remove();
+            fitter_->forget_node(drop);
+            G->delete_node(drop);
+            removed.insert(drop);
+            if (drop == ids[i]) break;   // this i is gone; advance to the next i
+        }
+    }
+}
+
 void SpecificWorker::run_instance_tracker()
 {
+    merge_overlapping_instances();   // enforce physical exclusion before associating/birthing this cycle
+
     rc::TrackerParams tp;
     tp.gate_mahalanobis = cfg_.tracker_gate_mahalanobis;
     tp.gate_fallback_m  = cfg_.tracker_gate_fallback_m;
     tp.birth_frames     = cfg_.tracker_birth_frames;
     tp.death_frames     = cfg_.tracker_death_frames;
     tp.birth_min_sep_m  = cfg_.tracker_birth_min_sep_m;
+    tp.detection_noise_m = cfg_.tracker_detection_noise_m;
     tracker_.set_params(tp);
 
     // Tracks ← live instances: centre from the fit, XY cov from the stabiliser posterior precision.
@@ -445,9 +512,15 @@ void SpecificWorker::run_instance_tracker()
                 it->second.assigned_mask_idx = dets[d].slice_index;
         }
 
-    // BIRTH: spawn an instance from each promoted (persistently-unexplained) detection.
+    // BIRTH: spawn an instance from each promoted (persistently-unexplained) detection, seeding the
+    // fitter with the detection XY so the model starts AT the bottle (not the same-cycle RT-read default).
     for (const int d : res.births)
-        scene_graph_->create_instance_from_detection(pkt.slices[dets[d].slice_index].centroid, room_node_id_);
+    {
+        const Eigen::Vector3f& c = pkt.slices[dets[d].slice_index].centroid;
+        const auto new_id = scene_graph_->create_instance_from_detection(c, room_node_id_);
+        if (new_id != 0)
+            fitter_->note_birth(new_id, Eigen::Vector2f(c.x(), c.y()));
+    }
 }
 
 void SpecificWorker::process_bottle_node(const DSR::Node& node)

@@ -75,6 +75,11 @@ public:
     // The live instance map (the validation sweep mutates it; del_node prunes it).
     std::unordered_map<std::uint64_t, BottleInstance>& instances() { return instances_; }
     void forget_node(std::uint64_t id) { instances_.erase(id); }
+    // Room-frame XY a NEWLY born instance's model should start at (from the tracker's detection). The
+    // room→bottle RT written at birth is not reliably composable by inner_eigen in the same cycle, so
+    // the model could cold-start at 0,0; the fit normally drags it to the points, but seeding it removes
+    // that dependency (and the matching tracker re-birth risk). Consumed once by ensure_instance.
+    void note_birth(std::uint64_t id, const Eigen::Vector2f& xy) { birth_seeds_[id] = xy; }
 
 private:
     // Object-specific belief pre-step: decide the resting surface (room vs a table) + set the table-top
@@ -86,6 +91,10 @@ private:
     float step_model_update(BottleInstance& inst,
                             const std::vector<Eigen::Vector3f>& residual_pts,
                             float residual_precision);
+    // YOLO detection score → per-observation precision weight w∈[0,1] (the same monotone map the
+    // belief stabiliser applies to obs info; kept here so the Laplace fit covariance is weighted by
+    // the score too). Returns 1.0 when cfg_.mask_conf_weight is off, so legacy behaviour is exact.
+    float mask_confidence_weight(float confidence) const;
 
     // Voxel bank (bottle-owned historical memory).
     void ingest_observation_voxels(BottleInstance& inst, const BottleObservation& observation);
@@ -120,6 +129,7 @@ private:
 
     std::unique_ptr<DSR::CameraAPI> camera_api_;   // ZED intrinsics, lazily bound to the "zed" node
     std::unordered_map<std::uint64_t, BottleInstance> instances_;
+    std::unordered_map<std::uint64_t, Eigen::Vector2f> birth_seeds_;   // tracker-provided birth XY (see note_birth)
     std::uint64_t                   room_node_id_ = 0;   // refreshed each process_bottle_node call
     std::ofstream                   fisher_csv_;         // per-cycle Fisher-filter evolution log (optional)
 

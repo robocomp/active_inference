@@ -41,11 +41,82 @@
 #include <iostream>  // std::cout/cerr flush
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <sstream>
+#include <unordered_set>
+#include <vector>
 
 // DSR attribute name tags — generated from dsr_attr_name.h
 #include <dsr/api/dsr_api.h>
+
+namespace {
+
+// Two tables cannot share physical space. The footprint is the oriented rectangle (cx,cy,w,h,yaw) in the
+// room plane; these helpers compute the area of overlap between two footprints so the merge operator can
+// collapse duplicate instances. Corners are returned CCW (local order (-,-),(+,-),(+,+),(-,+)).
+std::array<Eigen::Vector2f, 4> footprint_corners(const rc::TableState& s)
+{
+    const float c = std::cos(s.yaw), sn = std::sin(s.yaw);
+    const Eigen::Vector2f ex(c, sn), ey(-sn, c), ctr(s.cx, s.cy);
+    const float hw = 0.5f * s.w, hh = 0.5f * s.h;
+    return { ctr - hw * ex - hh * ey, ctr + hw * ex - hh * ey,
+             ctr + hw * ex + hh * ey, ctr - hw * ex + hh * ey };
+}
+
+float poly_area(const std::vector<Eigen::Vector2f>& p)
+{
+    if (p.size() < 3) return 0.0f;
+    float a = 0.0f;
+    for (std::size_t i = 0, n = p.size(); i < n; ++i)
+    {
+        const auto& u = p[i]; const auto& v = p[(i + 1) % n];
+        a += u.x() * v.y() - v.x() * u.y();
+    }
+    return 0.5f * std::abs(a);
+}
+
+// Sutherland–Hodgman: clip the subject polygon against the convex CCW clip rectangle.
+std::vector<Eigen::Vector2f> clip_poly(std::vector<Eigen::Vector2f> subj,
+                                       const std::array<Eigen::Vector2f, 4>& clip)
+{
+    for (int e = 0; e < 4 and not subj.empty(); ++e)
+    {
+        const Eigen::Vector2f a = clip[e], b = clip[(e + 1) % 4], d1 = b - a;
+        const auto inside = [&](const Eigen::Vector2f& p)
+        { return d1.x() * (p.y() - a.y()) - d1.y() * (p.x() - a.x()) >= 0.0f; };
+        std::vector<Eigen::Vector2f> out;
+        for (std::size_t i = 0, n = subj.size(); i < n; ++i)
+        {
+            const Eigen::Vector2f cur = subj[i], prv = subj[(i + n - 1) % n];
+            const bool ci = inside(cur), pi = inside(prv);
+            const auto isect = [&]() -> Eigen::Vector2f
+            {
+                const Eigen::Vector2f d2 = cur - prv;
+                const float den = d2.x() * d1.y() - d2.y() * d1.x();
+                const float t = std::abs(den) < 1e-12f ? 0.0f
+                    : ((a.x() - prv.x()) * d1.y() - (a.y() - prv.y()) * d1.x()) / den;
+                return prv + t * d2;
+            };
+            if (ci) { if (not pi) out.push_back(isect()); out.push_back(cur); }
+            else if (pi) out.push_back(isect());
+        }
+        subj.swap(out);
+    }
+    return subj;
+}
+
+// Overlap area as a fraction of the SMALLER footprint (1.0 = one table fully inside the other).
+float footprint_overlap_ratio(const rc::TableState& a, const rc::TableState& b)
+{
+    const auto ca = footprint_corners(a), cb = footprint_corners(b);
+    const auto inter = clip_poly(std::vector<Eigen::Vector2f>(ca.begin(), ca.end()), cb);
+    const float ai = poly_area(inter);
+    const float amin = std::min(poly_area({ca.begin(), ca.end()}), poly_area({cb.begin(), cb.end()}));
+    return amin > 1e-6f ? ai / amin : 0.0f;
+}
+
+}  // namespace
 
 
 // ─── Constructor / Destructor ─────────────────────────────────────────────────
@@ -196,10 +267,15 @@ void SpecificWorker::initialize()
         .on_operating_enter = [this]()
         {
             qInfo("[SM] -> Operating: all required peers present");
-            // Stale-node sweep on (re)entering Operating: remove any leftover affordance nodes from a
-            // previous run (e.g. after a crash that skipped cleanup) so a fresh create doesn't collide
-            // and get a DSR-generated name. Keyed on the parent object type, not the node name.
-            remove_stale_affordance_nodes();
+            // One-time startup sweep: remove leftover affordance nodes from a PREVIOUS run (e.g. a crash
+            // that skipped cleanup) so a fresh create doesn't collide and get a DSR-generated name.
+            // Guarded — on a RE-entry to Operating (transient required-peer flap → Degraded → recover)
+            // the affordances in the graph are THIS run's live ones; wiping them every bounce flickers.
+            if (not startup_affordance_sweep_done_)
+            {
+                startup_affordance_sweep_done_ = true;
+                remove_stale_affordance_nodes();
+            }
         },
         .on_operating_loop = [this]()
         {
@@ -352,11 +428,155 @@ void SpecificWorker::compute()
     }
 
     mask_ingestor_->refresh();
-    scene_graph_->scaffold_missing_table_nodes(priors_cache_, mask_ingestor_->packet(), room_node_id_);
+    if (cfg_.tracker_enabled)
+        run_instance_tracker();   // data-driven birth/associate/death
+    else
+        scene_graph_->scaffold_missing_table_nodes(priors_cache_, mask_ingestor_->packet(), room_node_id_);
 
     const auto table_nodes = G->get_nodes_by_type("table");
     for (const auto& node : table_nodes)
         process_table_node(node);
+}
+
+// Data-driven multi-instance lifecycle (mirrors bottle_concept::run_instance_tracker). Tables are large
+// static furniture, so death_frames is large and birth_min_sep wide. Replaces the prior-scaffold +
+// greedy nearest-mask when cfg_.tracker_enabled.
+// Collapse instances whose footprints overlap (same physical table fitted twice): keep the one with more
+// integrated fresh evidence, retire the other (affordance + node). Runs before tracking so a duplicate is
+// gone before it is fed a mask. v1 keeps-best; precision-weighted DOF pooling is a later refinement.
+void SpecificWorker::merge_overlapping_instances()
+{
+    if (cfg_.tracker_merge_overlap <= 0.0f)
+        return;
+    auto& insts = fitter_->instances();
+    if (insts.size() < 2)
+        return;
+
+    std::vector<std::uint64_t> ids;
+    ids.reserve(insts.size());
+    for (auto& [id, _] : insts) ids.push_back(id);
+
+    std::unordered_set<std::uint64_t> removed;
+    for (std::size_t i = 0; i < ids.size(); ++i)
+    {
+        if (removed.count(ids[i])) continue;
+        for (std::size_t j = i + 1; j < ids.size(); ++j)
+        {
+            if (removed.count(ids[j])) continue;
+            const auto ia = insts.find(ids[i]), ib = insts.find(ids[j]);
+            if (ia == insts.end() or ib == insts.end()) continue;
+
+            const float ratio = footprint_overlap_ratio(ia->second.model.state(), ib->second.model.state());
+            if (ratio < cfg_.tracker_merge_overlap) continue;
+
+            // Keep the more-observed instance (more integrated fresh frames); retire the other.
+            const bool keep_i = ia->second.matched_frames >= ib->second.matched_frames;
+            const std::uint64_t keep = keep_i ? ids[i] : ids[j];
+            const std::uint64_t drop = keep_i ? ids[j] : ids[i];
+            std::print("table_concept: [tracker] MERGE id={} into id={} (footprint overlap {:.2f})\n",
+                       drop, keep, ratio);
+            if (auto it = insts.find(drop); it != insts.end())
+                it->second.affordance.remove();
+            fitter_->forget_node(drop);
+            G->delete_node(drop);
+            removed.insert(drop);
+            if (drop == ids[i]) break;   // this i is gone; advance to the next i
+        }
+    }
+}
+
+void SpecificWorker::run_instance_tracker()
+{
+    merge_overlapping_instances();   // enforce physical exclusion before associating/birthing this cycle
+
+    rc::TrackerParams tp;
+    tp.gate_mahalanobis = cfg_.tracker_gate_mahalanobis;
+    tp.gate_fallback_m  = cfg_.tracker_gate_fallback_m;
+    tp.detection_noise_m = cfg_.tracker_detection_noise_m;
+    tp.birth_frames     = cfg_.tracker_birth_frames;
+    tp.death_frames     = cfg_.tracker_death_frames;
+    tp.birth_min_sep_m  = cfg_.tracker_birth_min_sep_m;
+    tracker_.set_params(tp);
+
+    // Tracks ← live instances: centre from the fit, XY cov from the stabiliser posterior precision
+    // (fisher_info_raw[0]=cx, [1]=cy in the 8-DOF [cx,cy,w,h,H,leg,yaw,inset] layout).
+    std::vector<rc::TrackView> tracks;
+    tracks.reserve(fitter_->instances().size());
+    for (auto& [id, inst] : fitter_->instances())
+    {
+        rc::TrackView t;
+        t.id = id;
+        const auto& s = inst.model.state();
+        t.xy = {s.cx, s.cy};
+        const float rx = inst.stab.fisher_info_raw[0], ry = inst.stab.fisher_info_raw[1];
+        if (rx > 1e-6f and ry > 1e-6f)
+        {
+            t.cov = Eigen::Matrix2f::Zero();
+            t.cov(0, 0) = 1.0f / rx;
+            t.cov(1, 1) = 1.0f / ry;
+            t.has_cov = true;
+        }
+        tracks.push_back(t);
+        inst.assigned_mask_idx = -1;   // cleared; re-set below only if associated this cycle
+    }
+
+    // Detections ← this frame's "table" mask slices (carry the slice index for the assignment).
+    std::vector<rc::DetectionView> dets;
+    const auto& pkt = mask_ingestor_->packet();
+    if (pkt.valid)
+        for (int i = 0; i < static_cast<int>(pkt.slices.size()); ++i)
+            if (pkt.slices[i].label == "table" and pkt.slices[i].support_end > pkt.slices[i].support_begin)
+                dets.push_back({Eigen::Vector2f(pkt.slices[i].centroid.x(), pkt.slices[i].centroid.y()), i});
+
+    const auto res = tracker_.update(tracks, dets);
+
+    // Diagnostic (throttled, plus on any birth/death): reveals "1 slice" (upstream) vs "N slices, no birth".
+    static int dbg = 0;
+    const int n_assigned = static_cast<int>(std::count_if(res.assignment.begin(), res.assignment.end(),
+                                                          [](int a){ return a >= 0; }));
+    if (++dbg % 30 == 0 or not res.births.empty() or not res.deaths.empty())
+    {
+        std::print("[tracker] instances={} table_dets={} assigned={} unassigned={} births={} deaths={}\n",
+                   tracks.size(), dets.size(), n_assigned,
+                   static_cast<int>(dets.size()) - n_assigned, res.births.size(), res.deaths.size());
+        for (const auto& t : tracks)
+            std::print("[tracker]   track id={} xy=({:.2f},{:.2f}) has_cov={}\n",
+                       t.id, t.xy.x(), t.xy.y(), t.has_cov);
+        for (const auto& d : dets)
+            std::print("[tracker]   det slice={} xy=({:.2f},{:.2f})\n", d.slice_index, d.xy.x(), d.xy.y());
+    }
+
+    // DEATH: OFF by default — a table is rigid, persistent furniture, so a long occlusion (no mask for
+    // many frames) is NOT absence and must not retire it. The ONLY way a table is removed is the MERGE
+    // operator (two tables can't share space). Enable Tracker.DeathEnabled to restore miss-timer retirement.
+    if (cfg_.tracker_death_enabled)
+        for (const std::uint64_t id : res.deaths)
+        {
+            std::print("table_concept: [tracker] DEATH id={} (unobserved {} frames)\n", id, cfg_.tracker_death_frames);
+            if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
+                it->second.affordance.remove();
+            fitter_->forget_node(id);
+            G->delete_node(id);
+        }
+
+    // ASSOCIATE: route each matched detection's mask slice to its instance (read in observe()).
+    for (int d = 0; d < static_cast<int>(dets.size()); ++d)
+        if (res.assignment[d] >= 0)
+        {
+            const std::uint64_t id = tracks[res.assignment[d]].id;
+            if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
+                it->second.assigned_mask_idx = dets[d].slice_index;
+        }
+
+    // BIRTH: spawn an instance from each promoted (persistently-unexplained) detection, seeding the
+    // fitter with the detection XY so the model starts AT the table (not the 0,0 RT-read default).
+    for (const int d : res.births)
+    {
+        const Eigen::Vector3f& c = pkt.slices[dets[d].slice_index].centroid;
+        const auto new_id = scene_graph_->create_instance_from_detection(c, room_node_id_);
+        if (new_id != 0)
+            fitter_->note_birth(new_id, Eigen::Vector2f(c.x(), c.y()));
+    }
 }
 
 ///////////////////////////////////////////////////////////////
@@ -672,16 +892,15 @@ void SpecificWorker::trigger_graph_layout_twopi()
 }
 // ─── DSR signal slots ────────────────────────────────────────────────────────
 
-void SpecificWorker::modify_node_slot(std::uint64_t id, const std::string& type)
+void SpecificWorker::modify_node_slot(std::uint64_t /*id*/, const std::string& /*type*/)
 {
-    if (type != "table")
-        return;
-
-    const auto node_opt = G->get_node(id);
-    if (not node_opt.has_value())
-        return;
-
-    fitter_->ensure_instance(node_opt.value(), room_node_id_);
+    // Deliberately does NOT create instances. insert_node() emits update_node_signal SYNCHRONOUSLY on the
+    // main thread (same-thread Auto → Direct), so creating the instance here runs INSIDE the tracker's
+    // create_instance_from_detection → before its note_birth() seed is stored → the model is born at the
+    // 0,0 RT-read default and frozen there (the tracker then never associates and re-births forever).
+    // Instance creation is owned by the compute() loop (process_table_node → ensure_instance), which runs
+    // AFTER note_birth() each cycle, so the birth seed is in place. The loop also covers externally-created
+    // table nodes (every cycle), so nothing is lost by not creating here.
 }
 
 void SpecificWorker::modify_node_attrs_slot(std::uint64_t id,
