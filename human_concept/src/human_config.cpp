@@ -54,6 +54,7 @@ HumanConfig load_human_config(const ConfigLoader& cfg)
     out.sigma_dyn = getf("HumanModel.SigmaDyn", 0.25f);
     out.sigma_min = getf("HumanModel.SigmaMin", 0.02f);
     out.sigma_max = getf("HumanModel.SigmaMax", 0.15f);
+    out.min_kp_conf = getf("HumanModel.MinKpConf", 15.0f);
     out.w_limits  = getf("HumanModel.WLimits", 5.0f);
     out.w_sym     = getf("HumanModel.WSym", 1.0f);
     out.gn_steps  = geti("HumanModel.GnSteps", 2);
@@ -73,6 +74,9 @@ HumanConfig load_human_config(const ConfigLoader& cfg)
     out.alpha_max = getf("HumanModel.AlphaMax", 80.0f);
     out.vlin_max  = getf("HumanModel.VLinMax", 3.0f);
     out.alin_max  = getf("HumanModel.ALinMax", 30.0f);
+    out.pose_smooth = getf("HumanModel.PoseSmooth", 0.2f);
+    out.calibrate_bones = getb("HumanModel.CalibrateBones", true);
+    out.calib_smooth    = getf("HumanModel.CalibSmooth", 0.05f);
     out.fit_csv_path = gets("HumanModel.FitCsvPath", "");
 
     out.death_frames       = geti("HumanConcept.DeathFrames", 60);

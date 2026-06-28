@@ -8,6 +8,7 @@
 
 #include <Eigen/Dense>
 #include <array>
+#include <optional>
 
 #include "body18.h"
 
@@ -87,16 +88,27 @@ class HumanKinematicModel
 {
 public:
     explicit HumanKinematicModel(const SegmentLengths &lengths) : L_(lengths) {}
+    HumanKinematicModel() : L_(lengths_from_standard(standard_template())) {}   // default = standard template
 
     // 11-DOF angles -> 18x3 canonical keypoints.
     KpArray forward(const Angles &angles) const;
     KpArray forward(const Vec11 &x) const { return forward(Angles::from_vector(x)); }
 
     const SegmentLengths &lengths() const { return L_; }
+    void set_lengths(const SegmentLengths &l) { L_ = l; }   // for per-person online calibration
 
 private:
     SegmentLengths L_;
 };
+
+// Online per-person bone-length calibration: EMA the scalar segment lengths in `L` toward the limb
+// distances measured from observed keypoints `kp` (room frame), weight `alpha` on the new measurement.
+// A segment is only updated when BOTH its endpoints are finite AND (if `conf` is given) above
+// `min_conf` [0,100] — so a low-confidence keypoint doesn't corrupt the calibrated lengths. Face
+// offsets are left untouched. Sanity-bounds each measurement to [5cm, 1.2m].
+void calibrate_lengths(SegmentLengths &L, const KpArray &kp,
+                       const std::optional<std::array<float, NUM_KP>> &conf,
+                       float min_conf, float alpha);
 
 // ---------------- joint limits ----------------
 // Per-group [min, max] in radians (positions for lb_x/lb_z are in meters).

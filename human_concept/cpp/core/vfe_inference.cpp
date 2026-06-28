@@ -152,6 +152,15 @@ KpArray AInfLaplacePoseEstimator::predict_aligned_kp(const Vec11 &x, const KpArr
     return predict_aligned(x, live, cfg_.anchors).pred;
 }
 
+bool AInfLaplacePoseEstimator::kabsch_align(const Vec11 &x, const KpArray &live,
+                                            Eigen::Matrix3f &R, Eigen::Vector3f &t) const
+{
+    const Aligned a = predict_aligned(x, live, cfg_.anchors);
+    R = a.R;
+    t = a.t;
+    return R.allFinite() and t.allFinite();
+}
+
 AInfLaplacePoseEstimator::Aligned
 AInfLaplacePoseEstimator::predict_aligned(const Vec11 &x, const KpArray &live,
                                           const std::vector<int> &anchors) const
@@ -203,17 +212,24 @@ InferenceResult AInfLaplacePoseEstimator::infer(
     // Real seconds since the previous fit drives the speed/accel thresholds; fall back to cfg_.dt.
     const float dt = (dt_override > 0.f) ? dt_override : cfg_.dt;
 
+    // A joint is usable if its row is finite AND (when confidence is provided) above the hard floor —
+    // so a garbage keypoint is dropped from the fit, not merely down-weighted.
+    const auto usable = [&](int i) {
+        return row_finite(live, i)
+            and (not conf.has_value() or cfg_.min_kp_conf <= 0.f or (*conf)[i] >= cfg_.min_kp_conf);
+    };
+
     // Valid joints.
     std::vector<int> valid_idx;
     valid_idx.reserve(NUM_KP);
     for (int i = 0; i < NUM_KP; ++i)
-        if (row_finite(live, i)) valid_idx.push_back(i);
+        if (usable(i)) valid_idx.push_back(i);
     const int valid_count = static_cast<int>(valid_idx.size());
 
-    // Choose anchors that are valid; fall back to all-valid; else bail.
+    // Choose anchors that are usable; fall back to all-valid; else bail.
     std::vector<int> anchors;
     for (int i : cfg_.anchors)
-        if (i >= 0 && i < NUM_KP && row_finite(live, i)) anchors.push_back(i);
+        if (i >= 0 && i < NUM_KP && usable(i)) anchors.push_back(i);
     if (static_cast<int>(anchors.size()) < 3)
         anchors = valid_idx;
 

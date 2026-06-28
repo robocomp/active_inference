@@ -27,9 +27,12 @@ struct InferenceConfig
     // Dynamics prior noise (how fast angles may change frame-to-frame).
     float sigma_dyn = 0.25f;
 
-    // Precision mapping from confidence.
+    // Precision mapping from confidence: high conf → sigma_min (tight), low → sigma_max (loose).
     float sigma_min = 0.02f;
     float sigma_max = 0.15f;
+    // Hard per-joint confidence floor [0,100]: a keypoint below this is dropped from the fit entirely
+    // (not just down-weighted), so garbage YOLO detections can't pull the pose. 0 = no floor.
+    float min_kp_conf = 0.0f;
 
     // Prior weights.
     float w_limits = 5.0f;
@@ -108,6 +111,11 @@ public:
     // giving room-frame keypoints. Used by the output controller to render a SMOOTHED command pose
     // without re-running the fit. Does not touch the belief state.
     KpArray predict_aligned_kp(const Vec11 &x, const KpArray &live) const;
+
+    // Kabsch alignment (R,t) of forward(x) onto `live` using the configured anchors. Exposed so the
+    // caller can temporally SMOOTH the global pose (the per-frame Kabsch to noisy keypoints jitters
+    // the facing) and rebuild the published pose as R·forward(x) + t. Returns false if degenerate.
+    bool kabsch_align(const Vec11 &x, const KpArray &live, Eigen::Matrix3f &R, Eigen::Vector3f &t) const;
 
 private:
     struct Aligned

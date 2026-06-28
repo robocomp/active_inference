@@ -28,6 +28,12 @@ struct HumanInstance
     std::string   node_name;
     int           track_id = 0;     // SkeletonSource body id this node tracks
 
+    // Per-person kinematic model (own bone lengths, calibrated online from observed limb distances —
+    // see human::calibrate_lengths). The estimator references THIS model, so the fit uses this person's
+    // proportions. Declared BEFORE the estimator so it outlives it; unordered_map keeps its address stable.
+    human::HumanKinematicModel model;
+    bool calib_init = false;
+
     // The active-inference belief: one stateful estimator per tracked person (mu carries across frames).
     std::unique_ptr<human::AInfLaplacePoseEstimator> estimator;
     human::InferenceResult last_result;   // most recent infer() output (pose, mu, uncertainty) = TARGET
@@ -41,6 +47,12 @@ struct HumanInstance
     human::KpArray cmd_kp = human::KpArray::Zero();
     bool has_cmd = false;
     float track_err = 0.f;   // mean |target - cmd| over the angle DOFs (tracking lag, for the CSV)
+
+    // Smoothed GLOBAL pose (the per-frame Kabsch R,t to noisy keypoints jitters the facing). The
+    // published pose is R_sm · forward(theta_cmd) + t_sm. R EMA'd via quaternion slerp, t via lerp.
+    Eigen::Matrix3f R_sm = Eigen::Matrix3f::Identity();
+    Eigen::Vector3f t_sm = Eigen::Vector3f::Zero();
+    bool pose_init = false;
 
     // Epistemic "reduce-occlusion" affordance for the controller (next-best-view to see hidden joints).
     HumanAffordance affordance;

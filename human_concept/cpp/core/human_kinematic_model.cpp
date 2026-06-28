@@ -188,4 +188,34 @@ JointLimits default_joint_limits_radians()
     return lim;
 }
 
+void calibrate_lengths(SegmentLengths &L, const KpArray &kp,
+                       const std::optional<std::array<float, NUM_KP>> &conf,
+                       float min_conf, float alpha)
+{
+    // A joint usable for length measurement: finite AND (if confidence given) above the floor — so a
+    // shaky keypoint doesn't pull the calibrated bone length toward a wrong value.
+    const auto fin  = [&](int j){
+        return std::isfinite(kp(j,0)) and std::isfinite(kp(j,1)) and std::isfinite(kp(j,2))
+           and (not conf.has_value() or min_conf <= 0.f or (*conf)[j] >= min_conf);
+    };
+    const auto dist = [&](int a, int b){ return (kp.row(a) - kp.row(b)).norm(); };
+    const auto ema  = [&](float &v, float meas){ if (meas > 0.05f and meas < 1.2f) v = (1.f - alpha) * v + alpha * meas; };
+
+    if (fin(KP::R_SHOULDER) and fin(KP::R_ELBOW)) ema(L.upper_arm, dist(KP::R_SHOULDER, KP::R_ELBOW));
+    if (fin(KP::L_SHOULDER) and fin(KP::L_ELBOW)) ema(L.upper_arm, dist(KP::L_SHOULDER, KP::L_ELBOW));
+    if (fin(KP::R_ELBOW)    and fin(KP::R_WRIST)) ema(L.lower_arm, dist(KP::R_ELBOW, KP::R_WRIST));
+    if (fin(KP::L_ELBOW)    and fin(KP::L_WRIST)) ema(L.lower_arm, dist(KP::L_ELBOW, KP::L_WRIST));
+    if (fin(KP::R_HIP)      and fin(KP::R_KNEE))  ema(L.thigh,     dist(KP::R_HIP, KP::R_KNEE));
+    if (fin(KP::L_HIP)      and fin(KP::L_KNEE))  ema(L.thigh,     dist(KP::L_HIP, KP::L_KNEE));
+    if (fin(KP::R_KNEE)     and fin(KP::R_ANKLE)) ema(L.calf,      dist(KP::R_KNEE, KP::R_ANKLE));
+    if (fin(KP::L_KNEE)     and fin(KP::L_ANKLE)) ema(L.calf,      dist(KP::L_KNEE, KP::L_ANKLE));
+    if (fin(KP::R_SHOULDER) and fin(KP::L_SHOULDER)) ema(L.shoulder_offset_x, 0.5f * dist(KP::R_SHOULDER, KP::L_SHOULDER));
+    if (fin(KP::R_HIP)      and fin(KP::L_HIP))      ema(L.hip_offset_x,      0.5f * dist(KP::R_HIP, KP::L_HIP));
+    if (fin(KP::NECK) and fin(KP::R_HIP) and fin(KP::L_HIP))
+    {
+        const Eigen::RowVector3f pelvis = 0.5f * (kp.row(KP::R_HIP) + kp.row(KP::L_HIP));
+        ema(L.torso, (kp.row(KP::NECK) - pelvis).norm());
+    }
+}
+
 }  // namespace rc::human

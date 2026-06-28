@@ -31,6 +31,7 @@ struct HumanConfig
     float sigma_dyn  = 0.25f;
     float sigma_min  = 0.02f;
     float sigma_max  = 0.15f;
+    float min_kp_conf = 15.0f;   // [0,100] hard floor: drop keypoints below this from fit + calibration
     float w_limits   = 5.0f;
     float w_sym      = 1.0f;
     int   gn_steps   = 2;
@@ -52,6 +53,9 @@ struct HumanConfig
     float w_acc      = 0.0f;    // in-fit acceleration penalty (OFF)
     float omega_max  = 3.0f;    // rad/s  (angle DOFs) — natural limb speed
     float alpha_max  = 12.0f;   // rad/s² (angle DOFs) — gentle ease-in/out
+    float pose_smooth = 0.2f;   // global-pose EMA weight on the new Kabsch R,t (lower = steadier facing)
+    bool  calibrate_bones = true;   // online per-person bone-length calibration (matches proportions → lower FE)
+    float calib_smooth    = 0.05f;  // EMA weight on each new measured segment length (lower = steadier)
     float vlin_max   = 3.0f;    // m/s    (lb_x, lb_z)
     float alin_max   = 30.0f;   // m/s²   (lb_x, lb_z)
     std::string fit_csv_path = "";   // non-empty → per-cycle fit-diagnostics CSV (gate)

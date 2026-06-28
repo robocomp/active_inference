@@ -9,6 +9,8 @@
 #include <cstdlib>
 #include <print>
 
+#include <Eigen/Geometry>
+
 #include "human_controller.h"
 
 namespace rc {
@@ -47,6 +49,7 @@ human::InferenceConfig HumanFitter::make_infer_config() const
     c.sigma_dyn = cfg_.sigma_dyn;
     c.sigma_min = cfg_.sigma_min;
     c.sigma_max = cfg_.sigma_max;
+    c.min_kp_conf = cfg_.min_kp_conf;
     c.w_limits  = cfg_.w_limits;
     c.w_sym     = cfg_.w_sym;
     c.w_cross         = cfg_.w_cross;
@@ -80,12 +83,15 @@ bool HumanFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_node
         inst.track_id = track_id_from_name(node.name());
     inst.parent_id   = room_node_id;
     inst.parent_name = "room";
-    inst.estimator   = std::make_unique<human::AInfLaplacePoseEstimator>(model_, make_infer_config());
     inst.affordance.init(G_, node.id(), node.name());
 
-    instances_.emplace(node.id(), std::move(inst));
+    // Estimator references the PER-INSTANCE model (own, online-calibrated bone lengths). Build it AFTER
+    // the instance is in the map so it binds the in-map model address (stable under unordered_map).
+    const auto it = instances_.emplace(node.id(), std::move(inst)).first;
+    HumanInstance& m = it->second;
+    m.estimator = std::make_unique<human::AInfLaplacePoseEstimator>(m.model, make_infer_config());
     std::print("human_concept: instance for '{}' id={} track={}\n",
-               node.name(), node.id(), instances_.at(node.id()).track_id);
+               node.name(), node.id(), m.track_id);
     return true;
 }
 
@@ -134,6 +140,18 @@ float HumanFitter::run_inference(HumanInstance& inst, const HumanObservation& ob
             dt = std::clamp(std::chrono::duration<float>(now - *inst.last_fit_time).count(), 0.01f, 0.5f);
         inst.last_fit_time = now;
 
+        // Online bone-length calibration: EMA this person's segment lengths toward the limb distances
+        // measured from the observed keypoints, so the model matches their proportions and FE drops.
+        // First valid frame seeds directly (alpha=1) so we don't crawl up from the generic template.
+        if (cfg_.calibrate_bones)
+        {
+            human::SegmentLengths L = inst.model.lengths();
+            human::calibrate_lengths(L, obs.kp, obs.conf, cfg_.min_kp_conf,
+                                     inst.calib_init ? cfg_.calib_smooth : 1.0f);
+            inst.model.set_lengths(L);
+            inst.calib_init = true;
+        }
+
         inst.last_result = inst.estimator->infer(obs.kp, obs.conf, dt);
         inst.has_result  = true;
         ++inst.matched_frames;
@@ -155,11 +173,30 @@ float HumanFitter::run_inference(HumanInstance& inst, const HumanObservation& ob
             }
             const human::RateLimits lim{cfg_.omega_max, cfg_.alpha_max, cfg_.vlin_max, cfg_.alin_max};
             const auto [vsat, asat] = human::track_angles(inst.theta_cmd, inst.theta_vel, target, dt, lim);
-            if (const human::KpArray cand = inst.estimator->predict_aligned_kp(inst.theta_cmd, obs.kp);
-                cand.allFinite())
+
+            // Global pose smoothing: the per-frame Kabsch (forward(theta_cmd) → live) jitters in yaw
+            // because the torso anchors barely constrain facing. EMA the rotation (quaternion slerp)
+            // and translation, then rebuild the published pose as R_sm·forward(theta_cmd) + t_sm — so
+            // the WHOLE model's orientation is steady, not just the arrow.
+            Eigen::Matrix3f R; Eigen::Vector3f t;
+            if (inst.estimator->kabsch_align(inst.theta_cmd, obs.kp, R, t))
             {
-                inst.cmd_kp  = cand;
-                inst.has_cmd = true;
+                if (not inst.pose_init)
+                {
+                    inst.R_sm = R; inst.t_sm = t; inst.pose_init = true;
+                }
+                else
+                {
+                    Eigen::Quaternionf q_prev(inst.R_sm), q_new(R);
+                    if (q_prev.dot(q_new) < 0.f) q_new.coeffs() = -q_new.coeffs();   // shortest arc
+                    inst.R_sm = q_prev.slerp(cfg_.pose_smooth, q_new).normalized().toRotationMatrix();
+                    inst.t_sm = (1.f - cfg_.pose_smooth) * inst.t_sm + cfg_.pose_smooth * t;
+                }
+                const human::KpArray local = inst.model.forward(inst.theta_cmd);
+                human::KpArray cand;
+                for (int i = 0; i < human::NUM_KP; ++i)
+                    cand.row(i) = (inst.R_sm * local.row(i).transpose() + inst.t_sm).transpose();
+                if (cand.allFinite()) { inst.cmd_kp = cand; inst.has_cmd = true; }
             }
             inst.track_err = (target - inst.theta_cmd).cwiseAbs().mean();
             inst.last_result.vel_clamped = vsat;   // repurposed: controller speed-saturated DOFs
