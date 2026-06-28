@@ -101,16 +101,6 @@ class SpecificWorker : public GenericWorker
         };
 
         std::optional<SceneFrame> process_scene_frame(FPSCounter& compute_fps);
-
-        // Consolidated, ALWAYS-ON diagnostic heartbeat (std::cout, throttled ~2s). Prints on every
-        // compute() cycle — frame produced or dropped — so a "120% CPU, empty viewer" state is
-        // attributable at a glance: SM loop rate, drop gate, media-plane freshness, YOLO cost, and
-        // what is actually fed to the 3D viewer. produced=false ⇒ n_det/yolo_ms/box/lidar are stale.
-        void print_compute_heartbeat(bool produced, int n_det, double yolo_ms,
-                                     std::size_t n_boxes, std::size_t n_lidar_pts,
-                                     int n_poses, double pose_ms);
-        std::string last_drop_gate_{"-"};   // updated by process_scene_frame's gate logger
-
         void setup_custom_viewers();         // Voxel3D GL + YOLO windows (specificworker_viewers.cpp)
         void trigger_graph_layout_twopi();   // injected into GraphPublisher as the relayout callback
 
