@@ -360,9 +360,12 @@ void SpecificWorker::compute()
     // In PreserveBootstrapRoom mode the room is a static prior: do NOT create/reparent the
     // room or write robot->room (that would clobber the fixed low-cov bootstrap edge). The
     // localizer still runs for the viewer; it just doesn't touch the graph.
+    // Publish near the lidar rate (~60 ms) so the RT timestamped history is dense enough for
+    // consumers to bracket a recent lidar-stamped query (e.g. the controller's overlay) instead of
+    // clamping to a stale block. Steady RT updates on one edge — not join/leave churn — so low risk.
     if (!params.PRESERVE_BOOTSTRAP_ROOM
         && have_loc && loc_res->timestamp_ms > 0 && loc_res->timestamp_ms != last_dsr_published_ts_ms_
-        && (last_dsr_publish_try_ms_ == 0 || now_ms - last_dsr_publish_try_ms_ >= 200))
+        && (last_dsr_publish_try_ms_ == 0 || now_ms - last_dsr_publish_try_ms_ >= 60))
     {
         section_timer.restart();
         last_dsr_publish_try_ms_ = now_ms;

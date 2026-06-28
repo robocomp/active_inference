@@ -55,6 +55,11 @@ struct TableConfig
     float extent_pct_lo     = 0.05f;  // lower percentile of the point span the extent term pins to
     float extent_pct_hi     = 0.95f;  // upper percentile (tighter pair trims the depth-noise edge margin)
     float prior_size_std    = 0.30f;
+    // Model-evidence ρ inlier width (m): a fresh mask point counts as "explained" within ~this distance of
+    // the box surface; ρ = mean exp(−½(SDF/σ_ρ)²) over the mask drives the evidence-scaled precision (a box
+    // too small → mask far outside → low ρ → belief loosens → grows). Wider than sigma_obs so a clean fit
+    // reads ρ≈1 (precision persists) while a clearly under-/mis-sized box reads low.
+    float evidence_sigma_m  = 0.12f;
     int   optimization_iters = 10;
     float optimization_lr   = 0.05f;
     float grad_clip         = 2.0f;

@@ -53,6 +53,10 @@ struct BottleInstance
     int           last_motion_frame  = -1; // mask frame id of the last CV update (fresh-frame guard)
     Eigen::Vector3f last_obs_centroid = Eigen::Vector3f::Zero();  // fresh-frame mask centroid = CV measurement
                                            // (FOLLOWS the bottle; the queue-anchored SDF fit lags)
+    // Part B diagnostics (published RT-edge covariance, room frame, m²) — set in write_rt_pose, logged in
+    // the fisher CSV: the chain/localization term J·Σ_chain·Jᵀ and the TOTAL published xx,yy (fit+chain).
+    float dbg_chain_cov_xx = -1.0f, dbg_chain_cov_yy = -1.0f;
+    float dbg_rtcov_xx     = -1.0f, dbg_rtcov_yy     = -1.0f;
     // Grasp-mode seam (Part B step 2, not yet wired): when the controller grasps the bottle its motion
     // becomes a KNOWN control input (the arm). The handshake will set this + switch the transition to
     // known-input / re-parent-under-gripper. Left false for the free-movable CV mode.

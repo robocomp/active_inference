@@ -462,6 +462,8 @@ void BottleSceneGraph::write_rt_pose(BottleInstance& inst)
         // on the robot pose). Compute it by transforming the centre (expressed in the measurement frame)
         // back to the fit frame with ZERO input cov: InnerGaussianAPI then returns exactly J·Σ_chain·Jᵀ
         // (Σ_chain accumulated from each RT edge's rt_covariance), pinned to the mask capture stamp.
+        inst.dbg_chain_cov_xx = 0.0f;
+        inst.dbg_chain_cov_yy = 0.0f;
         if (chain_cov_enabled_ and gaussian_ and inner_eigen_)
         {
             const std::uint64_t ts = inst.last_mask_timestamp_ms;
@@ -476,12 +478,16 @@ void BottleSceneGraph::write_rt_pose(BottleInstance& inst)
                     g_fit.has_value())
                 {
                     const auto& C = g_fit.value().covariance;
+                    inst.dbg_chain_cov_xx = static_cast<float>(C(0, 0));   // localization term (diag), room frame
+                    inst.dbg_chain_cov_yy = static_cast<float>(C(1, 1));
                     for (int r = 0; r < 3; ++r)
                         for (int c = 0; c < 3; ++c)
                             cov(r, c) += static_cast<float>(C(r, c));
                 }
             }
         }
+        inst.dbg_rtcov_xx = cov(0, 0);   // TOTAL published xx,yy = fit (Laplace) + chain
+        inst.dbg_rtcov_yy = cov(1, 1);
 
         std::vector<float> cov_flat(36, 0.0f);
         for (int r = 0; r < 3; ++r)

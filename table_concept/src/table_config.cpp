@@ -58,6 +58,7 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.lambda_state       = getf("TableModel.LambdaState",       0.02f);
     out.lambda_angle       = getf("TableModel.LambdaAngle",       0.01f);
     out.prior_size_std     = getf("TableModel.PriorSizeStd",      0.30f);
+    out.evidence_sigma_m   = getf("TableModel.EvidenceSigmaM",    0.12f);
     out.optimization_iters = geti("TableModel.OptimizationIters", 10);
     out.optimization_lr    = getf("TableModel.OptimizationLr",    0.05f);
     out.grad_clip          = getf("TableModel.GradClip",          2.0f);

@@ -607,6 +607,7 @@ void BottleFitter::log_fisher_csv(const BottleInstance& inst, bool fresh, float 
         for (const auto* d : kDof) fisher_csv_ << ",ce_"    << d;   // CUSUM counter-evidence Sⱼ (diagnostic)
         for (const auto* d : kDof) fisher_csv_ << ",ceg_"   << d;   // gate: -1 reject / 0 passthrough / +1 unlock
         fisher_csv_ << ",vx,vy,motion_var";   // CV motion filter: velocity (m/s) + cx position variance
+        fisher_csv_ << ",chain_xx,chain_yy,rtcov_xx,rtcov_yy";   // Part B: localization/chain cov + total published RT cov (m²)
         fisher_csv_ << '\n';
     }
 
@@ -626,6 +627,8 @@ void BottleFitter::log_fisher_csv(const BottleInstance& inst, bool fresh, float 
     fisher_csv_ << ',' << (inst.motion.initialized() ? inst.motion.velocity(0) : 0.0)
                 << ',' << (inst.motion.initialized() ? inst.motion.velocity(1) : 0.0)
                 << ',' << (inst.motion.initialized() ? inst.motion.pos_var(0)  : 0.0);
+    fisher_csv_ << ',' << inst.dbg_chain_cov_xx << ',' << inst.dbg_chain_cov_yy
+                << ',' << inst.dbg_rtcov_xx     << ',' << inst.dbg_rtcov_yy;
     fisher_csv_ << '\n';
     fisher_csv_.flush();   // flush each row so a plot can tail the file during a live run
 }

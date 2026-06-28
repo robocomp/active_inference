@@ -357,11 +357,24 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
 
     feed_silhouette(inst);   // set the RGB-mask contour rays before the gradient step
 
-    // (No convergence-freeze / re-open machinery: the optimiser runs every FRESH frame and the belief
-    // stabiliser — Kalman gain + maturity + CUSUM + size ratchet + yaw lock — provides the stability that
-    // a freeze used to. So the FE responds CONTINUOUSLY to evidence: the extent term grows w/h to the
-    // observed point span (mask beyond the fit), while the stabiliser damps per-frame noise. No thresholds
-    // decide when to "re-open".)
+    // Model evidence ρ = mean inlier responsibility of the FRESH mask under the CURRENT belief: how well
+    // the box explains what we just saw. exp(−½(SDF/σ_ρ)²) per point → ρ∈(0,1]. A box that is too small
+    // leaves the mask points far outside → low ρ → the stabiliser's predict loosens the size precision so
+    // the belief yields and the extent term grows it. This (with the always-on optimiser) is what makes the
+    // fit respond to a mask beyond its span — replacing the freeze/re-open/CUSUM machinery. Computed over
+    // the fresh observation, NOT the near-surface-by-construction queue anchors.
+    if (observation.has_fresh_data)
+    {
+        const float inv2s2 = 0.5f / std::max(1e-6f, cfg_.evidence_sigma_m * cfg_.evidence_sigma_m);
+        double sum = 0.0; std::size_t n = 0;
+        const auto accum = [&](const std::vector<Eigen::Vector3f>& pts)
+        { for (const auto& p : pts) { const float d = inst.model.sdf_point(p); sum += std::exp(-d * d * inv2s2); ++n; } };
+        accum(observation.candidate_pts);
+        accum(observation.residual_pts);
+        inst.stab.model_evidence = n > 0 ? static_cast<float>(sum / static_cast<double>(n)) : 1.0f;
+    }
+    else
+        inst.stab.model_evidence = 1.0f;   // no fresh data → don't loosen (freeze-on-stale governs updates)
 
     const float free_energy = step_model_update(inst, observation.residual_pts,
                                                 observation.candidate_pts, residual_precision,
@@ -670,7 +683,8 @@ void TableFitter::refresh_stabilizer_params()
     p.mask_conf_floor       = cfg_.mask_conf_floor;
     p.mask_conf_ref         = cfg_.mask_conf_ref;
     p.mask_conf_power       = cfg_.mask_conf_power;
-    p.ce_gate               = true;
+    p.ce_gate               = false;   // CUSUM retired: evidence-scaled precision (model_evidence ρ) is the
+                                       // falsifiability mechanism now — a wrong belief loosens and yields.
     p.ce_band_len           = cfg_.counter_evidence_band_m;
     p.ce_band_ang           = cfg_.counter_evidence_band_rad;
     p.ce_base_pos           = cfg_.counter_evidence_base_pos;

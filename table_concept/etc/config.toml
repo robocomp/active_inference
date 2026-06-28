@@ -47,8 +47,12 @@ Verbose = false
 [TableModel]
 LambdaSize = 0.05         # weaker KL pull on w/h/height so evidence can expand the table model
 PriorSizeStd = 0.60       # broader 1-sigma size prior (m); higher means weaker size prior
-RobustLoss = "tukey_biweight"   # one of: quadratic, huber, geman_mcclure, welsch, tukey_biweight
+RobustLoss = "geman_mcclure"   # SOFT redescending (never zeroes a far point's gradient/Fisher, unlike
+                            # tukey/welsch) so a dense, consistent far edge is NOT discarded — robustness
+                            # rejects sparse outliers, not structure. The mixture-equivalent likelihood.
 RobustLossScale = 0.10      # SDF residual scale in meters where robust losses start to saturate
+EvidenceSigmaM = 0.12       # inlier width for model-evidence ρ (mean exp(−½(SDF/σ_ρ)²) over the mask):
+                            # a box too small → mask far outside → low ρ → belief precision loosens → grows
 MaskPrecision = 0.30        # RGB-mask silhouette term weight: back-projects the 2D table contour and
                             # pulls the model onto it (constrains occluded faces + yaw). 0 disables.
 MaskSilhouetteSamples = 8   # >0 = height-agnostic occluding-contour (samples/ray vs box+legs SDF);

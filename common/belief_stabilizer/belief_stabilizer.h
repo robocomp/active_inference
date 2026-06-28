@@ -103,6 +103,12 @@ struct StabilizerState
     std::array<float, N> counter_evidence{};     // signed CUSUM of one-sided surprise vs the committed belief
     std::array<float, N> last_ce_gate{};         // gate decision: −1 reject/locked, 0 passthrough, +1 unlock
     float last_mask_conf_weight = 1.0f;          // w(YOLO score) applied this frame (1 = full trust)
+    // Model evidence ρ ∈ (0,1] for THIS frame (mean inlier responsibility): how well the current belief
+    // explains the fresh observation. The predict step discounts the carried precision by ρ, so a
+    // persistently UN-explained observation (the model is wrong) loosens the belief and lets it yield to
+    // the data — the falsifiability that makes a CUSUM/freeze/re-open unnecessary. 1 = perfectly explained
+    // (precision fully persists). Set by the agent each fresh frame before compute_acceptance/accumulate.
+    float model_evidence = 1.0f;
 };
 
 template <int N>
@@ -146,9 +152,12 @@ public:
     void compute_acceptance(StabilizerState<N>& s, const Vec& raw, const Vec& prev) const
     {
         const float vh = std::max(1e-3f, params_.views_half);
+        const float rho = std::clamp(s.model_evidence, 1e-3f, 1.0f);
         for (int j = 0; j < N; ++j)
         {
-            const float Yprev = s.fisher_info_raw[j];
+            // Evidence-scaled predict: a poorly-explained belief (low ρ) is discounted so its Kalman gain
+            // rises and it yields to the data — the model is falsifiable, no gate needed.
+            const float Yprev = s.fisher_info_raw[j] * rho;
             const float Ypred = 1.0f / (1.0f / std::max(Yprev, 1e-9f) + process_q(j));
             const float oi    = s.last_obs_info[j];
             float k = (oi > 0.0f) ? oi / (Ypred + oi) : 0.0f;
@@ -206,6 +215,7 @@ public:
     {
         const float decay      = std::clamp(params_.info_decay, 0.0f, 1.0f);
         const float peak_decay = std::clamp(params_.info_peak_decay, 0.5f, 1.0f);
+        const float rho        = std::clamp(s.model_evidence, 1e-3f, 1.0f);   // evidence-scaled forgetting
         for (int j = 0; j < N; ++j)
         {
             const float oi = s.last_obs_info[j];
@@ -234,9 +244,9 @@ public:
             s.fisher_info_peak[j] = bar;
 
             const float incr = bar > 1e-6f ? std::clamp(oi / bar, 0.0f, 1.0f) : 0.0f;
-            s.fisher_info[j] = s.fisher_info[j] * decay + incr;
+            s.fisher_info[j] = s.fisher_info[j] * decay * rho + incr;   // bad fit (low ρ) → forget faster
 
-            const float Yprev = s.fisher_info_raw[j];
+            const float Yprev = s.fisher_info_raw[j] * rho;             // evidence-scaled carried precision
             const float Ypred = 1.0f / (1.0f / std::max(Yprev, 1e-9f) + process_q(j));
             s.fisher_info_raw[j] = Ypred + oi;
         }

@@ -167,50 +167,35 @@ void RoomSceneGraph::dsr_update_pose(const rc::RoomConcept::UpdateResult& res)
         for (int c = 0; c < 3; ++c)
             cov_flat[r * 6 + c] = cov_se2(r, c);
 
-    // ── All attributes written in one shot via normal API ───────────────────
-    auto edge_rt = G_->get_edge(parent_id, child_id, "RT");
-    if (!edge_rt.has_value())
+    // ── Timestamped RT write ────────────────────────────────────────────────
+    // Write via the RT_API covariance+timestamp overload so the edge keeps a proper TIMESTAMPED
+    // HISTORY ring buffer (rt_timestamps / rt_head_index). The previous code overwrote a single
+    // untimestamped block, so consumers' InterpolatedRT could never interpolate to a requested
+    // time — it always returned the latest pose (RTdelta=0), freezing the controller's lidar
+    // overlay between the ~5 Hz pose publishes. res.timestamp_ms is the pose's validity time (the
+    // localization stamp). The old per-edge velocity attrs are dropped — nothing reads them and the
+    // transform never used them (DSR interpolates between blocks, it does not extrapolate velocity).
+    try
     {
-        try
-        {
-            rt_api_->insert_or_assign_edge_RT(parent_opt.value(), child_id,
-                                              {x, y, 0.f},
-                                              {0.f, 0.f, theta});
-        }
-        catch (const std::exception &error)
-        {
-            qWarning() << "dsr_update_pose: insert_or_assign_edge_RT failed:"
-                       << error.what();
-            log_cached_ids("insert_or_assign_edge_RT failed", child_id);
-            if (room_node_created_ && child_id == dsr_room_id_)
-            {
-                room_node_created_ = false;
-                dsr_room_id_ = 0;
-                affordance_manager_.reset();
-                stable_frames_ = 0;
-            }
-            return;
-        }
-        edge_rt = G_->get_edge(parent_id, child_id, "RT");
-        if (!edge_rt.has_value())
-        {
-            qWarning() << "dsr_update_pose: failed to create RT edge"
-                       << "parent_id=" << parent_id
-                       << "child_id=" << child_id;
-            return;
-        }
+        rt_api_->insert_or_assign_edge_RT(parent_opt.value(), child_id,
+                                          std::vector<float>{x, y, 0.f},
+                                          std::vector<float>{0.f, 0.f, theta},
+                                          cov_flat,
+                                          static_cast<std::uint64_t>(res.timestamp_ms));
     }
-
-    G_->add_or_modify_attrib_local<rt_translation_att>(
-        edge_rt.value(), std::vector<float>{x, y, 0.f});
-    G_->add_or_modify_attrib_local<rt_rotation_euler_xyz_att>(
-        edge_rt.value(), std::vector<float>{0.f, 0.f, theta});
-    G_->add_or_modify_attrib_local<rt_covariance_att>(edge_rt.value(), cov_flat);
-    G_->add_or_modify_attrib_local<rt_translation_velocity_att>(
-        edge_rt.value(), std::vector<float>{last_adv_, last_side_, 0.f});
-    G_->add_or_modify_attrib_local<rt_rotation_euler_xyz_velocity_att>(
-        edge_rt.value(), std::vector<float>{0.f, 0.f, last_rot_});
-    G_->insert_or_assign_edge(edge_rt.value());
+    catch (const std::exception &error)
+    {
+        qWarning() << "dsr_update_pose: insert_or_assign_edge_RT failed:" << error.what();
+        log_cached_ids("insert_or_assign_edge_RT failed", child_id);
+        if (room_node_created_ && child_id == dsr_room_id_)
+        {
+            room_node_created_ = false;
+            dsr_room_id_ = 0;
+            affordance_manager_.reset();
+            stable_frames_ = 0;
+        }
+        return;
+    }
 }
 
 ///////////////////////////////////////////////////////////////////////////////
