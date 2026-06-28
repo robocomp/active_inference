@@ -95,6 +95,7 @@ void SceneProcessor::drain_media_plane() const
                 media_rgb_.stamp    = f.stamp_ms();
                 media_rgb_.frame_id = f.frame_id();
                 media_rgb_.valid    = true;
+                last_rgb_recv_      = std::chrono::steady_clock::now();
             }
         });
     }
@@ -131,6 +132,7 @@ void SceneProcessor::drain_media_plane() const
             media_depth_.stamp    = f.stamp_ms();
             media_depth_.frame_id = f.frame_id();
             media_depth_.valid    = true;
+            last_depth_recv_      = std::chrono::steady_clock::now();
         });
     }
 
@@ -143,6 +145,29 @@ void SceneProcessor::drain_media_plane() const
         rx_rgb = rx_depth = 0;
         last_rx_report = now_rx;
     }
+}
+
+SceneProcessor::MediaDiag SceneProcessor::get_media_diag() const
+{
+    const auto now = std::chrono::steady_clock::now();
+    const auto age = [&](std::chrono::steady_clock::time_point t) -> long
+    {
+        if (t.time_since_epoch().count() == 0)
+            return -1;
+        return std::chrono::duration_cast<std::chrono::milliseconds>(now - t).count();
+    };
+    MediaDiag d;
+    d.rgb_valid    = media_rgb_.valid;
+    d.depth_valid  = media_depth_.valid;
+    d.lidar_valid  = media_lidar_valid_;
+    d.rgb_w        = media_rgb_.width;
+    d.rgb_h        = media_rgb_.height;
+    d.depth_w      = media_depth_.width;
+    d.depth_h      = media_depth_.height;
+    d.rgb_age_ms   = age(last_rgb_recv_);
+    d.depth_age_ms = age(last_depth_recv_);
+    d.lidar_age_ms = age(last_lidar_recv_);
+    return d;
 }
 
 bool SceneProcessor::init_lidar_media_plane(std::uint32_t domain_id, const std::string& topic, bool use_media)
@@ -213,6 +238,7 @@ std::optional<SceneProcessor::LidarData> SceneProcessor::get_lidar3D()
         ld.timestamp_ms = f.stamp_ms();
         media_lidar_ = std::move(ld);
         media_lidar_valid_ = true;
+        last_lidar_recv_ = std::chrono::steady_clock::now();
     });
     fresh += static_cast<std::uint64_t>(std::max(0, got));
 

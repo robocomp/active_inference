@@ -78,6 +78,21 @@ public:
     std::optional<LidarData> get_lidar3D();
     std::optional<RGBDData> get_rgbd_frame_from_dsr() const;
 
+    // Lightweight media-plane health snapshot for the consolidated compute() heartbeat.
+    // age_*_ms = wall-clock since the last NEW frame was delivered (-1 if never).
+    struct MediaDiag
+    {
+        bool rgb_valid = false;
+        bool depth_valid = false;
+        bool lidar_valid = false;
+        int  rgb_w = 0, rgb_h = 0;
+        int  depth_w = 0, depth_h = 0;
+        long rgb_age_ms = -1;
+        long depth_age_ms = -1;
+        long lidar_age_ms = -1;
+    };
+    MediaDiag get_media_diag() const;
+
     void check_input_stream_startup_status();
     void log_room_robot_pose_periodic(const Mat::RTMat& room_T_robot) const;
     void mark_room_rt_ready();
@@ -175,4 +190,9 @@ private:
     };
     mutable MediaRgbCache   media_rgb_;
     mutable MediaDepthCache media_depth_;
+
+    // Wall-clock stamps of the last NEW media-plane delivery (for freshness diagnostics).
+    mutable std::chrono::steady_clock::time_point last_rgb_recv_{};
+    mutable std::chrono::steady_clock::time_point last_depth_recv_{};
+    mutable std::chrono::steady_clock::time_point last_lidar_recv_{};
 };

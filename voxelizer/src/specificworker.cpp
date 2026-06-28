@@ -37,6 +37,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iostream>
 #include <limits>
 #include <print>
 #include <sstream>
@@ -331,7 +332,6 @@ void SpecificWorker::compute()
     // even when no RGBD frame arrived, so the cap/gauge keep working while the
     // robot explores away from the table. FPS comes from the shared counter,
     // which scene_processor also ticks on the not-ready path.
-    qInfo() << fps_counter_.get_frequency();
     if (compute_voxels_)
         regulate_voxel_budget(fps_counter_.get_frequency());
 
@@ -341,7 +341,11 @@ void SpecificWorker::compute()
     // cv::Mat::release() and heap corruption that later crashed paintAndFlush.
     if (!frame.has_value())
     {
-        qWarning() << __FUNCTION__ << "frame has no value";
+        // Always-on heartbeat on the DROP path too — this is the branch that explains a
+        // "busy but empty" voxelizer (which gate is rejecting, is media stale, etc.).
+        print_compute_heartbeat(/*produced=*/false, /*n_det=*/-1, /*yolo_ms=*/0.0,
+                                /*n_boxes=*/0, /*n_lidar_pts=*/0,
+                                /*n_poses=*/-1, /*pose_ms=*/0.0);
         return;
     }
 
@@ -349,11 +353,12 @@ void SpecificWorker::compute()
     const auto detections = yolo_processor
         ? yolo_processor->detect_segmentation(frame->rgbd.rgb)
         : std::vector<SegDetection>{};
+    const double yolo_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - yolo_t0).count();
     // [perf-probe] YOLO segmentation cost per produced frame (the dominant per-cycle work while
     // compute_voxels_ is OFF). Appended to its own CSV; align with the others on t_ms.
     {
         const auto t1 = std::chrono::steady_clock::now();
-        const double yolo_ms = std::chrono::duration<double, std::milli>(t1 - yolo_t0).count();
         static std::ofstream csv = []
         {
             std::ofstream f("etc/viewer_perf_yolo.csv", std::ios::trunc);
@@ -370,10 +375,16 @@ void SpecificWorker::compute()
     }
 
     // Human-pose detection: run ONCE here so the same poses feed both the viewer overlay and the
-    // 'skeleton' DSR publish below.
+    // 'skeleton' DSR publish below. Timed so the [VOX-DIAG] heartbeat reports the pose model's
+    // per-frame cost alongside the seg model's (mirrors yolo=Ndet/Xms for [YoloPoseDetector]).
+    const auto pose_t0 = std::chrono::steady_clock::now();
     const auto poses = (yolo_human_processor and yolo_human_processor->ready())
         ? yolo_human_processor->detect_poses(frame->rgbd.rgb)
         : std::vector<rc::human_pose::PoseDetection>{};
+    const bool pose_ran = (yolo_human_processor and yolo_human_processor->ready());
+    const double pose_ms = pose_ran
+        ? std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - pose_t0).count()
+        : 0.0;
 
     // Voxel computation gated OFF for now — we only run the masks pipeline (YOLO detections →
     // graph_publisher publishes the "masks" support points, consumed by table/bottle_concept). The
@@ -428,7 +439,58 @@ void SpecificWorker::compute()
     if (yolo_human_processor and yolo_human_processor->ready())
         graph_publisher_->publish_skeletons(frame->rgbd, poses, frame->frame_ts_ms);
 
+    print_compute_heartbeat(/*produced=*/true, static_cast<int>(detections.size()), yolo_ms,
+                            frame->graph_object_boxes.size(), frame->lidar_points_room.size(),
+                            pose_ran ? static_cast<int>(poses.size()) : -1, pose_ms);
+
     fps_counter_.print("[Compute]", 3000);
+}
+
+// One consolidated diagnostic line, throttled to ~2 s, on std::cout (qInfo is swallowed unless
+// Component.Debug.Verbose). Prints whether or not a frame was produced, so a "120% CPU but empty
+// viewer" state is diagnosable from a single line:
+//   - loop  = the GRAFCET Operating-step's measured call rate (Hz). If it pins near 1000/period_ms
+//             while a frame is produced, compute() is the CPU hog (likely YOLO on a CPU fallback).
+//   - frame = PRODUCED / DROPPED@<gate>  (which input gate is rejecting, if any)
+//   - media = rgb/depth/lidar validity + age since the last NEW delivery (stale ⇒ producer stalled)
+//   - yolo  = seg detections and inference cost on the produced frame ([YoloSegDetector])
+//   - pose  = human-pose detections and inference cost ([YoloPoseDetector]); "off" when disabled
+//   - fed   = boxes + lidar points actually pushed to the 3D viewer this cycle (0/0 ⇒ nothing to draw)
+void SpecificWorker::print_compute_heartbeat(bool produced, int n_det, double yolo_ms,
+                                             std::size_t n_boxes, std::size_t n_lidar_pts,
+                                             int n_poses, double pose_ms)
+{
+    static auto last = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last < std::chrono::seconds(2))
+        return;
+    last = now;
+
+    const float loop_hz = states.count("Operating") ? states.at("Operating")->getActualFps() : 0.f;
+    const auto md = scene_processor ? scene_processor->get_media_diag() : SceneProcessor::MediaDiag{};
+    const std::size_t live_voxels = voxel_grid ? static_cast<std::size_t>(voxel_grid->size()) : 0;
+
+    const auto src = [](bool valid, long age_ms) -> std::string
+    {
+        if (!valid) return "MISSING";
+        if (age_ms < 0) return "valid";
+        return std::to_string(age_ms) + "ms";
+    };
+
+    std::cout << "[VOX-DIAG] loop=" << loop_hz << "Hz"
+              << " frame=" << (produced ? std::string("PRODUCED")
+                                        : "DROPPED@" + last_drop_gate_)
+              << " | media rgb=" << src(md.rgb_valid, md.rgb_age_ms)
+              << "(" << md.rgb_w << "x" << md.rgb_h << ")"
+              << " depth=" << src(md.depth_valid, md.depth_age_ms)
+              << " lidar=" << src(md.lidar_valid, md.lidar_age_ms)
+              << " | yolo=" << (produced ? std::to_string(n_det) + "det/" + std::to_string(static_cast<int>(yolo_ms)) + "ms"
+                                         : std::string("-"))
+              << " pose=" << (n_poses < 0 ? std::string(produced ? "off" : "-")
+                                          : std::to_string(n_poses) + "p/" + std::to_string(static_cast<int>(pose_ms)) + "ms")
+              << " | fed boxes=" << n_boxes << " lidarpts=" << n_lidar_pts
+              << " | voxels(" << (compute_voxels_ ? "on" : "off") << ")=" << live_voxels
+              << std::endl;
 }
 
 // Homeostatic FPS regulation: once per control period, read the measured compute
@@ -474,6 +536,7 @@ std::optional<SpecificWorker::SceneFrame> SpecificWorker::process_scene_frame(FP
     static auto last_gate_report = std::chrono::steady_clock::now();
     const auto gate_log = [&](const char* gate)
     {
+        last_drop_gate_ = gate;   // surfaced by the consolidated compute() heartbeat
         const auto now = std::chrono::steady_clock::now();
         if (now - last_gate_report >= std::chrono::seconds(2))
         {
@@ -541,6 +604,7 @@ std::optional<SpecificWorker::SceneFrame> SpecificWorker::process_scene_frame(FP
     scene_processor->update_viewer_mask_points();
     scene_processor->update_room_polygon_periodic();
 
+    last_drop_gate_ = "-";   // a frame made it through every gate this cycle
     return SceneFrame{rgbd_opt.value(),
                       room_T_robot.value(),
                       room_T_zed.value(),
