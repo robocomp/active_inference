@@ -757,7 +757,7 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
     // fallback only ran when NO obstacle node existed — but the controller's own published temp
     // obstacles are type "obstacle", so the fallback never ran → temp obstacles over a table were
     // never retired. Add new object types here.
-    static constexpr std::array<const char *, 4> kObjectTypes = {"object", "obstacle", "table", "cylinder"};
+    static constexpr std::array<const char *, 5> kObjectTypes = {"object", "obstacle", "table", "cylinder", "chair"};
     std::vector<DSR::Node> obstacle_nodes;
     std::unordered_set<std::uint64_t> obstacle_node_ids;
     for (const char *type : kObjectTypes)
