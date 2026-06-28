@@ -39,10 +39,17 @@ void YoloProcessor::configure(const Config& config)
 
 std::vector<SegDetection> YoloProcessor::detect_segmentation(const cv::Mat& rgb_frame)
 {
-    if (!detector_.has_value() || rgb_frame.empty() || rgb_frame.cols <= 0 || rgb_frame.rows <= 0)
+    if (rgb_frame.empty())
+        return {};
+    return detect_segmentation_on(apply_tray_mask(rgb_frame));
+}
+
+std::vector<SegDetection> YoloProcessor::detect_segmentation_on(const cv::Mat& masked_rgb_frame)
+{
+    if (!detector_.has_value() || masked_rgb_frame.empty()
+        || masked_rgb_frame.cols <= 0 || masked_rgb_frame.rows <= 0)
         return {};
 
-    const cv::Mat masked_rgb_frame = apply_tray_mask(rgb_frame);
     auto detections = detector_->detect(masked_rgb_frame, true);
     postprocess_yolo_detections(detections);
     return detections;

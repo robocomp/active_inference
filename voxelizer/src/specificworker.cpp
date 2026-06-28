@@ -113,6 +113,11 @@ void SpecificWorker::initialize()
     params = load_voxelizer_params(configLoader);
     verbose_debug_ = params.VERBOSE_DEBUG;
 
+    // Cap OpenCV's implicit thread pool. The per-cycle preprocessing (resize/split/convertTo of the
+    // YOLO frames) otherwise fans out across ALL cores in short bursts, inflating the process's
+    // core-count for negligible latency gain on a 640² tensor. 2 threads is plenty here.
+    cv::setNumThreads(2);
+
     // --- YOLO ---
     yolo_processor = std::make_unique<YoloProcessor>();
     YoloProcessor::Config yolo_config;
@@ -246,29 +251,7 @@ void SpecificWorker::initialize()
         },
         .on_operating_loop = [this]()
         {
-            // [perf-probe] wall-clock cost of compute() per cycle, appended to a CSV for offline
-            // analysis. compute() shares the GUI thread with the viewer's paintGL; the paint cost
-            // lands in viewer_perf_paint.csv. t_ms is a shared steady-clock stamp so the two files
-            // align on one timeline. File is truncated once per process launch.
-            const auto probe_t0 = std::chrono::steady_clock::now();
             compute();
-            {
-                const auto t1 = std::chrono::steady_clock::now();
-                const double ms = std::chrono::duration<double, std::milli>(t1 - probe_t0).count();
-                static std::ofstream csv = []
-                {
-                    std::ofstream f("etc/viewer_perf_compute.csv", std::ios::trunc);
-                    f << "t_ms,compute_ms\n";
-                    return f;
-                }();
-                if (csv)
-                {
-                    const long t_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                          t1.time_since_epoch()).count();
-                    csv << t_ms << ',' << ms << '\n';
-                    csv.flush();
-                }
-            }
             if (auto it = graph_viewers.find(""); it != graph_viewers.end() && it->second)
                 it->second->set_external_fps(states.at("Operating")->getActualFps());
         },
@@ -302,76 +285,33 @@ void SpecificWorker::compute()
     if (!scene_processor or !voxel_processor)
         return;
 
-    const auto scene_t0 = std::chrono::steady_clock::now();
     const auto frame = process_scene_frame(fps_counter_);
-    // [perf-probe] per-cycle frame-pipeline log. produced=1 when a SceneFrame was built (this is the
-    // rate the viewer overlays refresh). rgbd_ts_ms is the camera frame stamp (stale-repeats when no
-    // new media frame) → counting DISTINCT values per second gives the true camera source rate, which
-    // bounds how fast the viewer content can change. scene_ms = cost of transforms + lidar fetch.
-    {
-        const auto t1 = std::chrono::steady_clock::now();
-        const double scene_ms = std::chrono::duration<double, std::milli>(t1 - scene_t0).count();
-        static std::ofstream csv = []
-        {
-            std::ofstream f("etc/viewer_perf_frames.csv", std::ios::trunc);
-            f << "t_ms,scene_ms,produced,rgbd_ts_ms\n";
-            return f;
-        }();
-        if (csv)
-        {
-            const long t_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                  t1.time_since_epoch()).count();
-            csv << t_ms << ',' << scene_ms << ',' << (frame.has_value() ? 1 : 0) << ','
-                << scene_processor->get_frame_timestamp_ms() << '\n';
-            csv.flush();
-        }
-    }
 
-    // Budget regulation is a heartbeat: run it every cycle (self-throttled),
-    // even when no RGBD frame arrived, so the cap/gauge keep working while the
-    // robot explores away from the table. FPS comes from the shared counter,
-    // which scene_processor also ticks on the not-ready path.
-    qInfo() << fps_counter_.get_frequency();
+    // Budget regulation is a heartbeat: run it every cycle (self-throttled), even when no RGBD frame
+    // arrived, so the cap/gauge keep working while the robot explores away from the table.
     if (compute_voxels_)
         regulate_voxel_budget(fps_counter_.get_frequency());
 
-    // No RGBD frame this cycle (sensor not ready / gated transforms). The budget heartbeat
-    // above already ran; everything below dereferences `frame`, so we MUST stop here.
-    // Falling through accessed frame->rgbd on an empty optional → garbage cv::Mat → SEGV in
-    // cv::Mat::release() and heap corruption that later crashed paintAndFlush.
+    // No RGBD frame this cycle (sensor not ready / gated transforms). Everything below dereferences
+    // `frame`, so we MUST stop here — a fall-through hit frame->rgbd on an empty optional → SEGV.
     if (!frame.has_value())
-    {
-        qWarning() << __FUNCTION__ << "frame has no value";
         return;
-    }
 
-    const auto yolo_t0 = std::chrono::steady_clock::now();
+    // Tray-mask the frame ONCE and reuse it for both detection and the viewer overlay (one full-frame
+    // clone/cycle instead of two). update_frame() clones internally and only reads, so sharing is safe.
+    const cv::Mat masked_rgb = yolo_processor
+        ? yolo_processor->apply_tray_mask(frame->rgbd.rgb)
+        : frame->rgbd.rgb;
     const auto detections = yolo_processor
-        ? yolo_processor->detect_segmentation(frame->rgbd.rgb)
+        ? yolo_processor->detect_segmentation_on(masked_rgb)
         : std::vector<SegDetection>{};
-    // [perf-probe] YOLO segmentation cost per produced frame (the dominant per-cycle work while
-    // compute_voxels_ is OFF). Appended to its own CSV; align with the others on t_ms.
-    {
-        const auto t1 = std::chrono::steady_clock::now();
-        const double yolo_ms = std::chrono::duration<double, std::milli>(t1 - yolo_t0).count();
-        static std::ofstream csv = []
-        {
-            std::ofstream f("etc/viewer_perf_yolo.csv", std::ios::trunc);
-            f << "t_ms,yolo_ms,n_det\n";
-            return f;
-        }();
-        if (csv)
-        {
-            const long t_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                  t1.time_since_epoch()).count();
-            csv << t_ms << ',' << yolo_ms << ',' << detections.size() << '\n';
-            csv.flush();
-        }
-    }
 
-    // Human-pose detection: run ONCE here so the same poses feed both the viewer overlay and the
-    // 'skeleton' DSR publish below.
-    const auto poses = (yolo_human_processor and yolo_human_processor->ready())
+    // Human-pose: decimated (run every kPoseDecimation-th cycle only — people don't move at 10 Hz).
+    // Feeds both the viewer overlay and the 'skeleton' publish below; on skipped cycles `poses` is
+    // empty and neither runs.
+    const bool run_pose = yolo_human_processor and yolo_human_processor->ready()
+                          and (pose_frame_counter_++ % kPoseDecimation == 0);
+    const auto poses = run_pose
         ? yolo_human_processor->detect_poses(frame->rgbd.rgb)
         : std::vector<rc::human_pose::PoseDetection>{};
 
@@ -407,9 +347,7 @@ void SpecificWorker::compute()
 
     if (yolo_viewer_)
     {
-        cv::Mat viewer_rgb = yolo_processor
-            ? yolo_processor->apply_tray_mask(frame->rgbd.rgb)
-            : frame->rgbd.rgb;
+        cv::Mat viewer_rgb = masked_rgb;   // already tray-masked above — no extra clone
         // Draw the detected skeletons (green bones, red joints, orange bbox) under the seg overlay.
         if (yolo_human_processor and not poses.empty())
             viewer_rgb = yolo_human_processor->compose_pose_canvas(viewer_rgb, poses);
@@ -425,7 +363,8 @@ void SpecificWorker::compute()
     graph_publisher_->publish(frame->rgbd, frame->room_T_zed, detections, frame->frame_ts_ms);
 
     // Human-pose branch: BODY_18 skeletons (camera frame) on the 'skeleton' node for human_concept.
-    if (yolo_human_processor and yolo_human_processor->ready())
+    // Only on cycles we actually ran the pose model (decimated above).
+    if (run_pose)
         graph_publisher_->publish_skeletons(frame->rgbd, poses, frame->frame_ts_ms);
 
     fps_counter_.print("[Compute]", 3000);

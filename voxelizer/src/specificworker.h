@@ -117,6 +117,10 @@ class SpecificWorker : public GenericWorker
         bool verbose_debug_      = false;
         std::atomic<bool> shutting_down_{false};
         bool include_lidar3d_in_voxels_ = true;
+        // Human-pose model decimation: run yolo-pose every Nth compute cycle only (people don't move at
+        // 10 Hz; the model finds 0 people ~always). N=3 ≈ 3 Hz — roughly halves total YOLO CPU.
+        static constexpr int kPoseDecimation = 3;
+        int pose_frame_counter_ = 0;
         // Master gate for the voxel-grid pipeline (build + lidar fusion + budget regulation). OFF for
         // now — only the masks pipeline runs. Flip to true to restore the full voxelizer.
         bool compute_voxels_ = false;
