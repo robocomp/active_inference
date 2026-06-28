@@ -1,0 +1,165 @@
+
+# --- Common Agent Data ---
+[Agent]
+id = 20 # unique across the shared graph: room=5 robot=6 table=7 controller=8 voxelizer=9 bottle=10 kinova=11 self_calib=12
+name = "chair_concept"
+
+# --- Single Instance Configuration ---
+# Use this if you only have one graph.
+configFile = ""
+domain = 0
+tree = false
+graph = false 
+2d = false
+3d = false
+
+# --- Multiple Instance Template ---
+# If you define multiple instances, the single instance config above will be ignored.
+# [Agent.instance_name]
+# configFile = ""
+# domain = 1
+# tree = true
+# graph = true
+# 2d = true
+# 3d = true
+
+[Presence]
+required_agent_names = ["robot_concept", "room_concept"]
+config_dir = "etc"
+monitor_period_ms = 500
+heartbeat_timeout_ms = 3000
+rejoin_grace_ms = 1500
+stale_grace_ms = 120000
+agent_info_period_ms = 1000
+
+[Owns]
+nodes = ["chair_concept 20"]
+
+[Period]
+Compute = 100
+Emergency = 500
+
+[Component.Debug]
+Verbose = false
+
+[ChairModel]
+LambdaSize = 0.05         # weaker KL pull on w/h/height so evidence can expand the chair model
+PriorSizeStd = 0.60       # broader 1-sigma size prior (m); higher means weaker size prior
+RobustLoss = "tukey_biweight"   # one of: quadratic, huber, geman_mcclure, welsch, tukey_biweight
+RobustLossScale = 0.10      # SDF residual scale in meters where robust losses start to saturate
+MaskPrecision = 0.30        # RGB-mask silhouette term weight: back-projects the 2D chair contour and
+                            # pulls the model onto it (constrains occluded faces + yaw). 0 disables.
+MaskSilhouetteSamples = 8   # >0 = height-agnostic occluding-contour (samples/ray vs box+legs SDF);
+                            # 0 = legacy chair-top-plane intersection (top rectangle only).
+RobustGncStartScale = 0.80  # GNC: wide initial robust scale, annealed to RobustLossScale across the
+                            # optimizer iters so a half-offset chair still produces gradient during
+                            # coarse alignment. Set <= RobustLossScale to disable annealing.
+RobustGncDecayCycles = 20   # GNC start scale ramps from RobustGncStartScale down to RobustLossScale
+                            # over this many compute cycles, then anneals off so the converged pose
+                            # stops being re-widened each frame and can settle. 0 = no lifetime decay.
+ExtentPctLo = 0.05          # lower percentile of the point span the footprint-extent term pins w/h to
+ExtentPctHi = 0.95          # upper percentile (tighter pair trims the depth-noise margin past the true edge)
+
+[ChairConcept]
+ObsDistance = 1.8           # comfortable maximum stand-off from the target face for epistemic poses
+DeltaMin = 20.0             # minimum per-face coverage before stopping epistemic proposals
+GainThreshold = 0.1         # minimum gain for the legacy coverage-deficit epistemic proxy
+EpistemicInfoGain = true    # score faces by expected entropy reduction ΔH from the Fisher Σ (vs coverage proxy)
+EpistemicMinInfoGain = 0.3  # WITHDRAW threshold: ΔH (nats) below which the epistemic affordance is dropped
+EpistemicRearmInfoGain = 5.0 # Schmitt re-arm: a satisfied chair re-offers only once ΔH climbs back above this
+EpistemicCooldownCycles = 200 # min cycles a satisfied chair stays withdrawn (anti-chatter)
+VoxelBankMaxPoints = 4000   # max number of chair-owned voxels kept in memory
+VoxelBankQuantizationM = 0.02 # dedup grid (m) for voxel-bank hashing
+VoxelSelectRadiusMarginM = 0.50 # per-chair XY ownership gate margin for mixed proto-chairs
+VoxelSelectHeightMarginM = 0.25 # extra Z margin above chair height when selecting owned voxels
+TopBandGate = true          # gate fit/extent points to ±TopBandM of the chair-top height (drops floor/clutter that inflates w/h)
+TopBandM = 0.08             # half-width (m) of the top-surface membership band
+
+[WarmStart]
+PtsMin = 12.0            # point count where observability starts to become trustworthy
+PtsMax = 30.0            # point count where the point-count confidence saturates
+CoverageMinSide = 2.0    # minimum bilateral face coverage before size/yaw can adapt freely
+RhoFreeze = 0.25         # observability-ratio threshold below which one-sided dimensions are frozen
+LambdaPosBase = 0.15     # baseline gain for cx/cy acceptance even under weak evidence
+LambdaPosGain = 0.45     # extra positional gain added as observability improves
+LambdaSizeBase = 0.05    # baseline gain for shape/height acceptance under poor coverage
+LambdaSizeGain = 0.35    # extra shape gain added when bilateral coverage improves
+LambdaYawBase = 0.01     # baseline yaw gain when orientation evidence is weak
+LambdaYawGain = 0.12     # extra yaw gain added when both x/y face coverage are balanced
+ConfidenceDecay = 0.55            # how quickly the higher-level confidence state forgets old evidence
+ConfidenceCoverageGain = 1.00     # how much coverage evidence raises confidence
+ConfidenceResidualGain = 0.25     # how much unexplained residuals raise confidence
+FisherFilterEnabled = true        # use the real per-DOF SDF Fisher information (vs the face-coverage view-info proxy)
+KalmanGainStiffness = true        # drive each DOF's acceptance gain from the Kalman gain K=obs/(Y_pred+obs) (vs the InfoHalf/coverage heuristic)
+FisherInfoDecay = 0.99            # stiffener (acc): fading memory ≈100-frame window. A chair is RIGID — its shape is
+                                  # learned once and should stay known, so the accumulator must build up (→ strong maturity
+                                  # stiffening + a high CUSUM barrier) instead of forgetting it every ~20 frames (0.95).
+# Quality-aware maturity: a CLOSE approach after far glimpses re-opens the fit (rescales the stale
+# far-view "views" down) instead of staying locked at the misrepresented far fit. The fix for "first
+# seen far → bad fit → approaching can't re-fit". Off → every view counts ~1 (far hardens as fast as close).
+FisherQualityRescale = true
+FisherPeakDecay = 1.0             # quality-bar slow forgetting (1 = non-decaying)
+# Re-open only on a GENUINELY better view: a view must beat the quality bar by ≥ Ratchet× to ratchet it
+# (and rescale the accumulated views), folding the new high in as an EMA. Stops ordinary per-frame obs
+# flutter (orders of magnitude) from constantly re-opening a DOF → fixes the width wander. Higher = stiffer.
+FisherPeakRatchet = 2.5
+FisherPeakEma = 0.30
+FisherProcessStdM = 0.005        # calibrated-cov predict: process-noise std per fresh frame for length DOFs (m) → std floor
+FisherProcessStdYaw = 0.01       # calibrated-cov predict: process-noise std per fresh frame for yaw (rad)
+FisherCsvPath = "etc/fisher_filter_log.csv"   # per-cycle evolution log for plotting (empty = off)
+# Sequential change-detector (CUSUM/SPRT) on top of the Kalman gain: an isolated surprising mask is
+# rejected per-DOF (gain→0), and only a COHERENT same-direction run of surprise unlocks the DOF and
+# snaps it to the new evidence. This is what stops a lone noisy mask from nudging a settled fit.
+CounterEvidenceGate = true        # enable the SPRT/CUSUM gate (requires KalmanGainStiffness)
+CounterEvidenceBandM = 0.02       # length-DOF surprise deadband (m): innovations within this are "coherent"
+CounterEvidenceBandRad = 0.05     # yaw surprise deadband (rad)
+# Barrier = base + lambda·views, SPLIT position (cx,cy) vs size/shape so the chair CENTRE locks harder
+# than its extents (position drifts one-sided with robot localisation → it was unlocking ~3× more than w/h).
+CounterEvidenceBasePos = 6.0      # position barrier floor (excess-bands) — centre heavily locked
+CounterEvidenceLambdaPos = 1.0    # extra position barrier per accumulated equivalent-view
+CounterEvidenceBaseSize = 3.0     # size/shape barrier floor (excess-bands)
+CounterEvidenceLambdaSize = 0.5   # extra size/shape barrier per accumulated equivalent-view
+CounterEvidenceDecay = 0.8        # per-coherent-frame pay-down of the accumulator (evidence FOR the belief)
+CounterEvidenceUnlockDeflate = 0.3  # on unlock, multiply that DOF's accumulated info by this (concede the old estimate)
+CounterEvidenceStepCap = 1.0      # cap per-frame CUSUM increment (excess-bands) → unlock needs a RUN, not one outlier
+# YOLO mask-score weighting: w = clamp01((score−floor)/(ref−floor))^power. IMPORTANT: a partially-viewed
+# chair scores LOW (~0.3–0.45 here), so floor/ref must sit in that band — floor too high nukes every mask
+# (w=0 → the Fisher accumulator dies → no maturity stiffening → UNSTABLE, the bug just fixed). Tune to
+# your detector: floor just above the noise score, ref at a confident score. Set MaskConfWeight=false to disable.
+MaskConfWeight = true             # weight the observation Fisher info by w(mask_score)
+MaskConfFloor = 0.2               # score at/below which the mask is ~ignored
+MaskConfRef = 0.5                 # score at/above which the mask is fully trusted (w=1)
+MaskConfPower = 2.0               # steepness of the trust ramp between floor and ref
+RtCovUpload = true                # upload the chair pose covariance (rt_covariance_att, 6×6 SE3) onto the room→chair RT edge, from the Fisher per-DOF precision
+RtCovScale = 1.0                  # var = RtCovScale / fisher_info_raw; calibrate toward NEES≈1 (raw curvature over-counts correlated points), like bottle CovEffScale
+
+[SampleQueue]
+RfeWeightGain = 0.25      # lower than 1.0 keeps historical RFE anchors influential
+MinAnchorWeight = 0.12    # floor for anchor weight in optimization/coverage
+
+[Tracker]
+# Multi-instance birth/associate/death (shared rc::InstanceTracker). OFF → legacy prior-scaffold +
+# greedy nearest-mask. ON → masks are associated to instances by a covariance-gated 1-to-1, an
+# unexplained mask spawns a new chair, and the MERGE operator collapses two instances on the same chair.
+Enabled = true 
+GateMahalanobis = 9.0     # χ²₂ gate (~3σ) for a mask↔instance match once it has a cov
+GateFallbackM = 0.40     # metric XY gate (m) before an instance has a usable covariance
+DetectionNoiseM = 0.20   # R in the association innovation cov S=P+R²I (≥ centroid-vs-fit offset)
+BirthFrames = 8          # frames a mask must stay unexplained before spawning a chair
+DeathFrames = 300        # frames an instance may go unobserved before retirement
+DeathEnabled = false     # OFF: a chair is persistent furniture — removed only by MERGE
+BirthMinSepM = 0.40      # a birth must be ≥ this (m) from every existing chair (anti-duplicate)
+MergeOverlap = 0.30      # collapse two instances whose seat footprints overlap ≥ this fraction of the
+                         # smaller (same chair fitted twice), keeping the more-observed. 0 disables.
+BirthSeatW = 0.45        # seed seat width/depth + seat/back heights for a freshly born chair node
+BirthSeatD = 0.45
+BirthSeatH = 0.45
+BirthBackH = 0.45
+NllCost = false          # association cost = ½(m²+ln|S|) NLL (compete by likelihood, not raw distance)
+                         # vs raw squared-Mahalanobis. Gate is m² either way. Matters under clutter.
+
+[Ice]
+Warn.Connections = "0"
+Trace.Network = "0"
+Trace.Protocol = "0"
+MessageSizeMax = "20004800"
