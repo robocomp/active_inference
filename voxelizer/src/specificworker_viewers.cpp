@@ -30,7 +30,7 @@ constexpr auto kWinSettingsOrg   = "RoboComp";
 constexpr auto kWinSettingsApp   = "robot_concept";
 constexpr auto kWinSettingsGroup = "VoxelOpenGLViewer";
 
-bool restore_external_window_geometry(QMainWindow* win, const QString& key)
+bool restore_external_window_geometry(QWidget* win, const QString& key)
 {
     if (win == nullptr)
         return false;
@@ -55,16 +55,14 @@ void SpecificWorker::save_external_window_geometry() const
 
 void SpecificWorker::setup_custom_viewers()
 {
-    if (graph_viewers.empty())
-        return;
+    // NOTE: these are shown as standalone top-level windows, independent of the DSR graph viewer.
+    // The DSR node-link graph view is disabled (Agent.graph=false) because it crashes in
+    // paintAndFlush under participant churn (e.g. bottle_concept joining). All consumers are null-guarded.
 
     // The voxel viewer is a QOpenGLWidget; disabling it (Voxel.show_voxel_viewer=false) is the robust
-    // production setting (graph stays available for debugging). All viewer consumers are null-guarded.
+    // production setting. All viewer consumers are null-guarded.
     if (params.SHOW_VOXEL_VIEWER)
     {
-        const std::string viewer_key = graph_viewers.contains("")
-            ? std::string("") : graph_viewers.begin()->first;
-
         auto* voxel_panel = new QWidget(nullptr);
         auto* panel_layout = new QVBoxLayout(voxel_panel);
         panel_layout->setContentsMargins(6, 6, 6, 6);
@@ -176,27 +174,26 @@ void SpecificWorker::setup_custom_viewers()
                 graph_publisher_->refresh_voxels_node();
         });
 
-        // Own top-level window, NOT docked into the DSR graph-viewer window. add_custom_widget_in_own_window
-        // reparents voxel_panel into the holder, so voxel_panel->window() is that holder.
-        graph_viewers.at(viewer_key)->add_custom_widget_in_own_window("Voxel3D", voxel_panel);
-        voxel3d_window_ = qobject_cast<QMainWindow*>(voxel_panel->window());
+        // Standalone top-level window (voxel_panel was created parentless → it IS a top-level window).
+        voxel_panel->setWindowTitle("Voxel3D");
+        voxel3d_window_ = voxel_panel;
         // Restore the last geometry; otherwise open at ~half the default window size.
-        if (voxel3d_window_ != nullptr and not restore_external_window_geometry(voxel3d_window_, "Voxel3DWindow"))
+        if (not restore_external_window_geometry(voxel3d_window_, "Voxel3DWindow"))
             voxel3d_window_->resize(450, 360);
-        qInfo() << __FUNCTION__ << "Voxel3D GL viewer attached in its own window";
+        voxel3d_window_->show();
+        qInfo() << __FUNCTION__ << "Voxel3D GL viewer shown in its own window";
     }
 
     // YOLO viewer (raster QLabel) — independently gated.
     if (params.SHOW_YOLO_VIEWER)
     {
-        const std::string viewer_key = graph_viewers.contains("")
-            ? std::string("") : graph_viewers.begin()->first;
         yolo_viewer_ = std::make_unique<rc::YoloViewer>(nullptr);
-        graph_viewers.at(viewer_key)->add_custom_widget_in_own_window("YOLO", yolo_viewer_.get());
-        yolo_window_ = qobject_cast<QMainWindow*>(yolo_viewer_->window());
+        yolo_viewer_->setWindowTitle("YOLO");
+        yolo_window_ = yolo_viewer_.get();   // the widget itself is the top-level window
         // Restore the last geometry; otherwise size the RGB window to the camera image on first frame.
-        if (yolo_window_ != nullptr and not restore_external_window_geometry(yolo_window_, "YOLOWindow"))
+        if (not restore_external_window_geometry(yolo_window_, "YOLOWindow"))
             yolo_window_needs_image_size_ = true;
-        qInfo() << __FUNCTION__ << "YOLO viewer attached in its own window";
+        yolo_window_->show();
+        qInfo() << __FUNCTION__ << "YOLO viewer shown in its own window";
     }
 }

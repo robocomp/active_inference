@@ -121,6 +121,11 @@ class SpecificWorker : public GenericWorker
         // 10 Hz; the model finds 0 people ~always). N=3 ≈ 3 Hz — roughly halves total YOLO CPU.
         static constexpr int kPoseDecimation = 3;
         int pose_frame_counter_ = 0;
+
+        // Camera stamp of the last RGB frame we actually processed. The media cache repeats the last
+        // frame when nothing new arrived, so we dedup on this to make the RGB pipeline (YOLO + viewer +
+        // mask publish) follow the camera's REAL delivery rate instead of the fixed compute period.
+        std::uint64_t last_rgb_ts_ = 0;
         // Master gate for the voxel-grid pipeline (build + lidar fusion + budget regulation). OFF for
         // now — only the masks pipeline runs. Flip to true to restore the full voxelizer.
         bool compute_voxels_ = false;
@@ -143,10 +148,12 @@ class SpecificWorker : public GenericWorker
         std::unique_ptr<QTimer> render_timer_;
         void on_render_tick();
 
-        // Own-window holders returned by add_custom_widget_in_own_window. Borrowed (parented to the
-        // DSR main window); we only read/persist their geometry, we do not own them.
-        QMainWindow* voxel3d_window_ = nullptr;
-        QMainWindow* yolo_window_ = nullptr;
+        // Standalone top-level viewer windows (NOT hosted by the DSR graph viewer — that node-link
+        // widget crashes in paintAndFlush under participant churn, so the graph view is disabled).
+        // These are the custom widgets shown directly as their own windows; we only read/persist their
+        // geometry. Lifetime: shown for the process lifetime (released at exit).
+        QWidget* voxel3d_window_ = nullptr;
+        QWidget* yolo_window_ = nullptr;
         bool yolo_window_needs_image_size_ = false;  // size the RGB window to the image on first frame
         void save_external_window_geometry() const;
 

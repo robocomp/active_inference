@@ -201,13 +201,13 @@ void SpecificWorker::initialize()
 
     graph_publisher_->cleanup_semantic_grid_nodes();
 
-    // Decoupled render timer: only worth running when the 3D viewer exists. ~33 ms (≈30 Hz) matches
-    // the viewer's repaint throttle, giving fluid robot motion without re-running perception faster.
+    // Decoupled render timer: only worth running when the 3D viewer exists. 50 ms (20 Hz) matches the
+    // viewer's repaint throttle, giving a stable 20 Hz refresh without re-running perception faster.
     // Created stopped; started in Operating (so graph reads happen only after the join completes).
     if (voxel_viewer_gl)
     {
         render_timer_ = std::make_unique<QTimer>(this);
-        render_timer_->setInterval(33);
+        render_timer_->setInterval(50);
         QObject::connect(render_timer_.get(), &QTimer::timeout, this, &SpecificWorker::on_render_tick);
     }
 
@@ -297,6 +297,14 @@ void SpecificWorker::compute()
     if (!frame.has_value())
         return;
 
+    // Follow the RGB stream's REAL rate: the media cache repeats the last frame when nothing new
+    // arrived this cycle. Skip the RGB-derived work (YOLO, pose, viewer, mask publish) on stale
+    // repeats so the displayed FPS and published masks track the camera's actual delivery rate. The
+    // lidar/robot-pose viewer updates already ran in process_scene_frame and keep the compute cadence.
+    if (frame->frame_ts_ms == last_rgb_ts_)
+        return;
+    last_rgb_ts_ = frame->frame_ts_ms;
+
     // Tray-mask the frame ONCE and reuse it for both detection and the viewer overlay (one full-frame
     // clone/cycle instead of two). update_frame() clones internally and only reads, so sharing is safe.
     const cv::Mat masked_rgb = yolo_processor
@@ -306,14 +314,17 @@ void SpecificWorker::compute()
         ? yolo_processor->detect_segmentation_on(masked_rgb)
         : std::vector<SegDetection>{};
 
-    // Human-pose: decimated (run every kPoseDecimation-th cycle only — people don't move at 10 Hz).
-    // Feeds both the viewer overlay and the 'skeleton' publish below; on skipped cycles `poses` is
-    // empty and neither runs.
+    // Human-pose: the MODEL runs decimated (every kPoseDecimation-th cycle — people don't move at
+    // 20 Hz), but the viewer redraws the LAST cached detection every frame so the skeleton overlay
+    // doesn't flicker between detections.
     const bool run_pose = yolo_human_processor and yolo_human_processor->ready()
                           and (pose_frame_counter_++ % kPoseDecimation == 0);
-    const auto poses = run_pose
-        ? yolo_human_processor->detect_poses(frame->rgbd.rgb)
-        : std::vector<rc::human_pose::PoseDetection>{};
+    if (run_pose)
+        yolo_human_processor->detect_poses(frame->rgbd.rgb);   // refresh the cache (~6-7 Hz)
+    static const std::vector<rc::human_pose::PoseDetection> kNoPoses;
+    const auto& poses = (yolo_human_processor and yolo_human_processor->ready())
+        ? yolo_human_processor->last_poses()
+        : kNoPoses;
 
     // Voxel computation gated OFF for now — we only run the masks pipeline (YOLO detections →
     // graph_publisher publishes the "masks" support points, consumed by table/bottle_concept). The

@@ -167,8 +167,12 @@ private:
     bool repaint_scheduled_ = false;
     std::chrono::steady_clock::time_point last_update_request_{};
     std::chrono::steady_clock::time_point last_voxel_update_time_{};
-    static constexpr std::chrono::milliseconds kMinUpdateIntervalMs{33};
+    static constexpr std::chrono::milliseconds kMinUpdateIntervalMs{50};  // cap repaints at 20 Hz
     float voxel_input_fps_ = 0.0f;
+    // Real render rate: EMA of paintGL inter-call intervals (the actual repaint cadence of the 3D
+    // view). Shown in the HUD instead of the voxel-update FPS (which is ~dead while voxels are off).
+    std::chrono::steady_clock::time_point last_paint_time_{};
+    float render_fps_ = 0.0f;
 
     float yaw_ = 0.0f;
     float pitch_ = +0.52f;

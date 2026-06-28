@@ -147,7 +147,13 @@ public:
     [[nodiscard]] bool ready() const noexcept { return detector_.has_value(); }
 
     // Returns detected people with COCO-17 keypoints (image px). Empty if not configured.
+    // Also caches the result (see last_poses) so callers running the model on a decimated schedule
+    // can redraw the most recent detection every frame without flicker.
     [[nodiscard]] std::vector<PoseDetection> detect_poses(const cv::Mat& rgb_frame);
+
+    // The most recent detect_poses() result. Lets a decimated caller keep drawing the last skeleton
+    // on cycles where the model didn't run.
+    [[nodiscard]] const std::vector<PoseDetection>& last_poses() const noexcept { return last_poses_; }
 
     // Overlay skeletons on a copy of rgb_frame (BGR) for the viewer.
     [[nodiscard]] cv::Mat compose_pose_canvas(const cv::Mat& rgb_frame,
@@ -156,6 +162,7 @@ public:
 private:
     Config config_;
     std::optional<YoloPoseDetector> detector_;
+    std::vector<PoseDetection> last_poses_;   // cache of the latest detect_poses() result
 };
 
 }  // namespace rc::human_pose

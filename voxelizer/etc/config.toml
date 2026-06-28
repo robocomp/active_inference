@@ -9,7 +9,8 @@ name = "voxelizer"
 configFile = ""
 domain = 0
 tree = false
-graph = true
+graph = false   # DSR node-link viewer crashes in paintAndFlush under participant churn (e.g. bottle_concept
+                # joining). Voxel3D + YOLO run as standalone windows, so no DSR view is needed here.
 2d = false
 3d = false
 
@@ -34,7 +35,7 @@ lidar_topic = "rc/lidar3d/points"
 lidar_use_media = true   # false ⇒ DSR graph 'lidar3D' node only
 
 [Period]
-Compute = 100
+Compute = 50
 Emergency = 500
 
 [Presence]

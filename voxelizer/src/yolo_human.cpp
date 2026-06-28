@@ -284,7 +284,8 @@ std::vector<PoseDetection> YoloHumanProcessor::detect_poses(const cv::Mat& rgb_f
 {
     if (!detector_.has_value() || rgb_frame.empty())
         return {};
-    return detector_->detect(rgb_frame, /*is_rgb=*/false);
+    last_poses_ = detector_->detect(rgb_frame, /*is_rgb=*/false);   // cache for decimated redraw
+    return last_poses_;
 }
 
 cv::Mat YoloHumanProcessor::compose_pose_canvas(const cv::Mat& rgb_frame,

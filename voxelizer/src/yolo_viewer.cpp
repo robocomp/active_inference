@@ -80,6 +80,16 @@ QPixmap YoloViewer::render_frame(const cv::Mat& rgb,
                     cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(255, 255, 255), 1, cv::LINE_AA);
     }
 
+    // ── FPS overlay (top-left, green on a dark chip for legibility) ───────────
+    const std::string fps_text = cv::format("%.1f FPS", fps_ema_);
+    int fps_baseline = 0;
+    const cv::Size fts = cv::getTextSize(fps_text, cv::FONT_HERSHEY_SIMPLEX, 0.7, 2, &fps_baseline);
+    cv::rectangle(canvas, cv::Point(6, 6),
+                  cv::Point(6 + fts.width + 10, 6 + fts.height + 12),
+                  cv::Scalar(0, 0, 0), cv::FILLED);
+    cv::putText(canvas, fps_text, cv::Point(11, 6 + fts.height + 4),
+                cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 255, 0), 2, cv::LINE_AA);  // RGB → green
+
     // ── Convert RGB cv::Mat → QImage (no copy) → QPixmap ─────────────────────
     const QImage qimg(canvas.data, canvas.cols, canvas.rows,
                       static_cast<int>(canvas.step),
@@ -92,6 +102,20 @@ void YoloViewer::update_frame(const cv::Mat& rgb,
 {
     if (rgb.empty())
         return;
+
+    // Update the display-rate EMA from the inter-call interval (drawn by render_frame).
+    const auto now = std::chrono::steady_clock::now();
+    if (last_frame_time_.time_since_epoch().count() != 0)
+    {
+        const double dt_ms = std::chrono::duration<double, std::milli>(now - last_frame_time_).count();
+        if (dt_ms > 0.0)
+        {
+            const float inst = static_cast<float>(1000.0 / dt_ms);
+            fps_ema_ = (fps_ema_ > 0.f) ? (0.9f * fps_ema_ + 0.1f * inst) : inst;
+        }
+    }
+    last_frame_time_ = now;
+
     last_pixmap_ = render_frame(rgb, detections);
     setPixmap(last_pixmap_.scaled(size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
 }

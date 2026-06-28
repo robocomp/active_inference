@@ -791,6 +791,18 @@ void VoxelOpenGLViewer::paintGL()
     // the GUI thread, the SAME thread as compute(); compare this against [Compute] to see the split.
     const auto probe_t0 = std::chrono::steady_clock::now();
 
+    // Real render FPS: EMA over the interval between successive paintGL calls.
+    if (last_paint_time_.time_since_epoch().count() != 0)
+    {
+        const double dt_ms = std::chrono::duration<double, std::milli>(probe_t0 - last_paint_time_).count();
+        if (dt_ms > 0.0)
+        {
+            const float inst = static_cast<float>(1000.0 / dt_ms);
+            render_fps_ = (render_fps_ > 0.0f) ? (0.9f * render_fps_ + 0.1f * inst) : inst;
+        }
+    }
+    last_paint_time_ = probe_t0;
+
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     if (!gl_ready_)
         return;
@@ -1688,12 +1700,12 @@ void VoxelOpenGLViewer::paintGL()
     QPainter painter(this);
     painter.setRenderHint(QPainter::TextAntialiasing, true);
     painter.setPen(QColor(255, 255, 255));
-    const QString fps_text = (voxel_input_fps_ > 0.0f)
-                                 ? QString::number(voxel_input_fps_, 'f', 1)
+    const QString fps_text = (render_fps_ > 0.0f)
+                                 ? QString::number(render_fps_, 'f', 1)
                                  : QStringLiteral("--");
     painter.drawText(QRect(10, 10, width() - 20, 24),
                      Qt::AlignLeft | Qt::AlignTop,
-                     QString("LiDAR points: %1   Voxels: %2   Voxel update FPS: %3")
+                     QString("LiDAR points: %1   Voxels: %2   Render FPS: %3")
                          .arg(static_cast<qulonglong>(n_lidar_vertices))
                          .arg(static_cast<qulonglong>(n_vertices))
                          .arg(fps_text));

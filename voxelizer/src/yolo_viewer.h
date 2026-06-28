@@ -4,6 +4,7 @@
 #include <QPixmap>
 #include <opencv2/core.hpp>
 
+#include <chrono>
 #include <vector>
 
 struct SegDetection;
@@ -28,6 +29,11 @@ private:
     static cv::Vec3b class_color(int class_id);
 
     QPixmap last_pixmap_;
+
+    // Display-rate (update_frame call rate) shown as an on-image FPS overlay. EMA over inter-call
+    // intervals; 0 until the second frame.
+    std::chrono::steady_clock::time_point last_frame_time_{};
+    float fps_ema_ = 0.f;
 };
 
 } // namespace rc
