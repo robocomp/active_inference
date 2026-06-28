@@ -70,6 +70,17 @@ void TimeSeriesPlot::add_series(const std::string& name, QColor colour,
     }
 }
 
+void TimeSeriesPlot::remove_series(const std::string& name)
+{
+    std::lock_guard lk(mu_);
+    if (auto it = series_.find(name); it != series_.end())
+    {
+        if (!it->second.avg_companion.empty())
+            series_.erase(it->second.avg_companion);
+        series_.erase(it);
+    }
+}
+
 void TimeSeriesPlot::add_point(const std::string& name, float value)
 {
     std::lock_guard lk(mu_);

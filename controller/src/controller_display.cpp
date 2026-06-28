@@ -122,6 +122,23 @@ void ControllerDisplay::update_affordance_efe(const std::vector<AffordanceEfeSam
                                       QColor("OrangeRed"),   QColor("SlateGray")};
     constexpr std::size_t kPaletteSize = sizeof(kPalette) / sizeof(kPalette[0]);
 
+    // Drop series whose affordance is no longer among the candidates (object removed from the graph),
+    // so the plot tracks the live scene instead of accumulating stale lines.
+    std::unordered_set<std::string> current;
+    current.reserve(samples.size());
+    for (const auto &s : samples)
+        current.insert(s.name);
+    for (auto it = efe_series_known_.begin(); it != efe_series_known_.end();)
+    {
+        if (current.find(*it) == current.end())
+        {
+            plot->remove_series(*it);
+            it = efe_series_known_.erase(it);
+        }
+        else
+            ++it;
+    }
+
     // One line per affordance: the selection score (gain − λ·dist) — the value used to choose.
     for (const auto &s : samples)
     {

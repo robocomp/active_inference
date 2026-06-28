@@ -41,6 +41,9 @@ public:
      *  If a running-average companion exists it is updated automatically. */
     void add_point(const std::string& name, float value);
 
+    /** Drop a series (and its running-average companion). No-op if absent. */
+    void remove_series(const std::string& name);
+
     /** How many seconds of history to display (default 30). */
     void set_visible_window(float seconds);
 
