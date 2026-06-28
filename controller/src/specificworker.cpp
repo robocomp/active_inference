@@ -446,8 +446,8 @@ void SpecificWorker::load_params()
 	load_optional_cast<double>("Controller.RotGain", params.rot_gain);
 	load_optional("Transforms.interpolate_rt", params.interpolate_rt);
 	load_optional("Transforms.overlay_extrapolate_to_now", params.overlay_extrapolate_to_now);
+	load_optional("Transforms.overlay_draw_one_frame_old", params.overlay_draw_one_frame_old);
 	load_optional_cast<double>("Transforms.overlay_extrapolation_max_dt_s", params.overlay_extrapolation_max_dt_s);
-	load_optional_cast<double>("Transforms.overlay_latency_comp_s", params.overlay_latency_comp_s);
 	load_optional("Transforms.overlay_csv_path", params.overlay_csv_path);
 	load_optional("Viewer2D.MaxLidarDrawPoints", params.max_lidar_draw_points);
 	load_optional("Lidar.Name", params.lidar_name);

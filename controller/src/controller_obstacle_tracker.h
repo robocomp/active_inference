@@ -105,6 +105,13 @@ class ControllerObstacleTracker
             ControllerObstacleKind kind = ControllerObstacleKind::Obstacle;
         };
 
+        // Raw scan held back one frame for the "draw one frame old" overlay path.
+        struct PendingLidarScan
+        {
+            std::vector<float> xs, ys, zs;
+            std::uint64_t ts = 0;
+        };
+
         std::vector<Eigen::Vector2f> read_temporary_obstacle_points(std::uint64_t timestamp_ms,
                                                                     const ControllerRobotPose &robot_pose,
                                                                     const Eigen::Vector2f &region_center_room,
@@ -186,7 +193,9 @@ class ControllerObstacleTracker
         std::vector<TemporaryObstacleInstance> temporary_obstacles_;
         std::uint64_t next_temporary_obstacle_id_ = 1;
         std::uint64_t last_scan_ms_ = 0;   // throttle for scan_for_unmodelled_obstacles
-        mutable std::optional<std::uint64_t> last_lidar_timestamp_ms_;
+        mutable std::optional<std::uint64_t> last_lidar_timestamp_ms_;   // stamp of the scan actually buffered
+        std::optional<std::uint64_t> newest_raw_lidar_ts_;               // newest RAW stamp (dedup + period)
+        std::optional<PendingLidarScan> pending_lidar_scan_;             // held-back frame (draw-one-frame-old)
         mutable std::uint64_t lidar_period_ms_ = 100;
         mutable std::string obstacle_debug_report_;
         mutable std::string graph_object_debug_report_;

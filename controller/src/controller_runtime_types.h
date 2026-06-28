@@ -47,13 +47,16 @@ struct ControllerParams
     // stays anchored at scan time.
     bool overlay_extrapolate_to_now = true;
     float overlay_extrapolation_max_dt_s = 0.4f;   // clamp the extrapolation horizon
-    // Extra fixed latency added to the extrapolation horizon, on top of the measured pose-value age.
-    // Compensates a constant localization pipeline delay (the pose, even when fresh, is L old). Tune
-    // live until the cloud sits on the walls.
-    float overlay_latency_comp_s = 0.0f;
+    // Draw the cloud (and read the pose) one lidar frame OLD — query the RT at the PREVIOUS scan's
+    // stamp, which room_concept has had a full frame to publish, so InterpolatedRT brackets it
+    // exactly instead of clamping at the leading edge. Exact registration, no extrapolation, at the
+    // cost of ~one lidar period (~60 ms) of overlay age. Takes precedence over the extrapolation
+    // (which would push the exact past pose back toward now and defeat the point).
+    bool overlay_draw_one_frame_old = true;
     // When non-empty, append per-cycle overlay-lag diagnostics to this CSV (for plotting the lag /
-    // velocity / RT-staleness evolution). Empty = disabled.
-    std::string overlay_csv_path;
+    // velocity / RT-staleness evolution). Empty = disabled. Relative → lands in the launch CWD; the
+    // resolved absolute path is printed once on first write so it's findable.
+    std::string overlay_csv_path = "overlay_lag_eval.csv";
     int max_lidar_draw_points = 600;
     std::string lidar_name = "lidar3D";
     // Zero-copy media plane (LiDAR). When lidar_use_media is true, the LiDAR point

@@ -116,7 +116,6 @@ private:
     std::optional<std::uint64_t> overlay_lidar_ts_ms_;  // last lidar stamp (overlay extrapolation base time)
     std::optional<ControllerRobotPose> overlay_icon_pose_;   // dead-reckoned robot pose for the icon
     std::optional<Eigen::Affine2f> overlay_correction_;      // room(now)←room(scan) for the cloud
-    std::uint64_t overlay_diag_last_ms_ = 0;       // throttle for the std::cout overlay summary
     std::ofstream overlay_csv_;                    // per-cycle overlay-lag diagnostics
     bool overlay_csv_open_ = false;
     std::uint64_t overlay_csv_last_ms_ = 0;        // throttle for CSV rows

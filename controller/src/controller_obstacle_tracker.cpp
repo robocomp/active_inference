@@ -1414,16 +1414,16 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
     if (!params_ || !inner_eigen_api_ || !graph_state_ || !graph_state_->ready())
         return false;
 
-    // Dedup by source timestamp: when the laser node is polled (DSR fallback), the same
-    // scan would otherwise be reprocessed every cycle (and read as "fresh", defeating the
-    // stall watchdog). A 0 timestamp can't be deduped, so it always passes.
-    if (timestamp_ms != 0 && last_lidar_timestamp_ms_.has_value()
-        && timestamp_ms <= last_lidar_timestamp_ms_.value())
+    // Dedup + period tracking against the newest RAW source stamp: when the laser node is polled
+    // (DSR fallback), the same scan would otherwise be reprocessed every cycle. A 0 stamp can't be
+    // deduped, so it always passes.
+    if (timestamp_ms != 0 && newest_raw_lidar_ts_.has_value()
+        && timestamp_ms <= newest_raw_lidar_ts_.value())
         return false;
 
-    if (timestamp_ms > 0 && last_lidar_timestamp_ms_.has_value() && timestamp_ms > last_lidar_timestamp_ms_.value())
+    if (timestamp_ms > 0 && newest_raw_lidar_ts_.has_value() && timestamp_ms > newest_raw_lidar_ts_.value())
     {
-        const std::uint64_t diff_ms = timestamp_ms - last_lidar_timestamp_ms_.value();
+        const std::uint64_t diff_ms = timestamp_ms - newest_raw_lidar_ts_.value();
         if (diff_ms >= 20 && diff_ms <= 500)
         {
             const double blended_period_ms = 0.7 * static_cast<double>(lidar_period_ms_)
@@ -1431,24 +1431,51 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
             lidar_period_ms_ = static_cast<std::uint64_t>(std::clamp(blended_period_ms, 20.0, 500.0));
         }
     }
-    last_lidar_timestamp_ms_ = timestamp_ms;
+    newest_raw_lidar_ts_ = timestamp_ms;
+
+    // "Draw one frame old": transform+buffer the PREVIOUS scan, whose room←robot pose room_concept
+    // has now had a full frame to publish → InterpolatedRT brackets it exactly instead of clamping
+    // at the leading edge. The newest scan is held until the next call. Everything keys off the
+    // BUFFERED stamp (last_lidar_timestamp_ms_), so cloud + pose stay consistent — exact, ~1 frame old.
+    std::vector<float> proc_xs, proc_ys, proc_zs;
+    std::uint64_t proc_ts = timestamp_ms;
+    if (params_->overlay_draw_one_frame_old)
+    {
+        if (!pending_lidar_scan_.has_value())
+        {
+            pending_lidar_scan_ = PendingLidarScan{std::move(xs), std::move(ys), std::move(zs), timestamp_ms};
+            return true;   // first frame: nothing to buffer yet
+        }
+        proc_xs = std::move(pending_lidar_scan_->xs);
+        proc_ys = std::move(pending_lidar_scan_->ys);
+        proc_zs = std::move(pending_lidar_scan_->zs);
+        proc_ts = pending_lidar_scan_->ts;
+        pending_lidar_scan_ = PendingLidarScan{std::move(xs), std::move(ys), std::move(zs), timestamp_ms};
+    }
+    else
+    {
+        proc_xs = std::move(xs);
+        proc_ys = std::move(ys);
+        proc_zs = std::move(zs);
+    }
+    last_lidar_timestamp_ms_ = proc_ts;
 
     const auto interp = params_->interpolate_rt ? DSR::RT_API::TimeQuery::Interpolated
                                                 : DSR::RT_API::TimeQuery::Nearest;
     const auto room_from_lidar = inner_eigen_api_->get_transformation_matrix(graph_state_->room_name,
                                                                              lidar_node_name,
-                                                                             timestamp_ms,
+                                                                             proc_ts,
                                                                              "RT",
                                                                              interp);
     const auto robot_from_lidar = inner_eigen_api_->get_transformation_matrix(graph_state_->robot_name,
                                                                                lidar_node_name,
-                                                                               timestamp_ms,
+                                                                               proc_ts,
                                                                                "RT",
                                                                                interp);
     if (!room_from_lidar.has_value() || !robot_from_lidar.has_value())
         return false;
 
-    const std::size_t raw_count = std::min({xs.size(), ys.size(), zs.size()});
+    const std::size_t raw_count = std::min({proc_xs.size(), proc_ys.size(), proc_zs.size()});
     if (raw_count == 0)
         return false;
 
@@ -1457,10 +1484,10 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
     const bool robot_from_lidar_is_identity = robot_from_lidar_matrix.isApprox(Eigen::Matrix4d::Identity(), 1e-5);
     lidar_room_buffer_.put<0>(
         rc::RawLidarPointVectors{
-            .xs = std::move(xs),
-            .ys = std::move(ys),
-            .zs = std::move(zs)},
-        timestamp_ms,
+            .xs = std::move(proc_xs),
+            .ys = std::move(proc_ys),
+            .zs = std::move(proc_zs)},
+        proc_ts,
         [room_from_lidar_matrix, robot_from_lidar_matrix, robot_from_lidar_is_identity, raw_count](rc::RawLidarPointVectors &&raw_points, rc::LidarPointVectors &room_points)
         {
             auto &[room_xs, room_ys, room_zs] = room_points;

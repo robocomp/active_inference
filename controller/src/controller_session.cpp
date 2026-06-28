@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <filesystem>
 #include <iostream>
 #include <print>
 #include <sstream>
@@ -514,21 +515,28 @@ void ControllerSession::update_overlay_extrapolation(const ControllerWorldModel 
 {
     overlay_icon_pose_.reset();
     overlay_correction_.reset();
-    if (!params_ || !params_->overlay_extrapolate_to_now)
+    if (!params_)
         return;
     if (!overlay_lidar_ts_ms_.has_value() || timestamp_ms <= *overlay_lidar_ts_ms_)
         return;
 
     const std::uint64_t gap_ms = timestamp_ms - *overlay_lidar_ts_ms_;   // lidar staleness (informational)
     // The room←robot value updates coarser than the lidar, so the cloud's anchor pose is as old as
-    // the time since that value last changed — extrapolate by THAT, not just the lidar gap. Plus a
-    // tunable fixed-latency term for any residual localization pipeline delay.
+    // the time since that value last changed — extrapolate by THAT, not just the lidar gap.
     const std::uint64_t pose_age_ms = timestamp_ms >= last_pose_change_ms_ ? timestamp_ms - last_pose_change_ms_ : 0;
-    const float raw_dt = static_cast<float>(pose_age_ms) * 1e-3f + std::max(0.f, params_->overlay_latency_comp_s);
+    const float raw_dt = static_cast<float>(pose_age_ms) * 1e-3f;
     const float dt = std::min(raw_dt, std::max(0.f, params_->overlay_extrapolation_max_dt_s));
     const auto now_pose = extrapolate_room_pose(robot_pose, room_vel_, dt);
-    overlay_icon_pose_ = now_pose;
-    overlay_correction_ = now_pose.as_transform() * robot_pose.as_transform().inverse();
+
+    // Apply the correction to the drawn cloud + icon only when extrapolating to "now". When the
+    // cloud is drawn one frame old it is already exactly registered (the pose is bracketed, not
+    // clamped), so the correction is left identity — pushing it forward would undo the exactness.
+    // The diagnostics below run regardless, so the CSV still logs a baseline for A/B.
+    if (params_->overlay_extrapolate_to_now && !params_->overlay_draw_one_frame_old)
+    {
+        overlay_icon_pose_ = now_pose;
+        overlay_correction_ = now_pose.as_transform() * robot_pose.as_transform().inverse();
+    }
 
     const Eigen::Vector2f disp = now_pose.pos - robot_pose.pos;
     const float dtheta = now_pose.theta - robot_pose.theta;
@@ -540,6 +548,23 @@ void ControllerSession::update_overlay_extrapolation(const ControllerWorldModel 
         pose_now_rt.has_value())
         rt_delta = (pose_now_rt->pos - robot_pose.pos).norm();
 
+    // Commanded (robot_ref_*) vs measured (robot_current_*) base velocity, read from the shared graph,
+    // so the joystick/actuation sign can be checked against the robot's actual rotation. cmd_* is the
+    // reference written by whoever commands (controller / joystick path); cur_* is the measured motion
+    // (robot_concept writes it from the FullPose estimator). Same-sign rotation ⇒ consistent.
+    float cmd_adv = 0.f, cmd_rot = 0.f, cur_adv = 0.f, cur_rot = 0.f;
+    if (graph_)
+    {
+        if (const auto rid = world_model.graph_state().robot_id; rid != 0)
+            if (auto robot_node = graph_->get_node(rid); robot_node.has_value())
+            {
+                cmd_adv = graph_->get_attrib_by_name<robot_ref_adv_speed_att>(*robot_node).value_or(0.f);
+                cmd_rot = graph_->get_attrib_by_name<robot_ref_rot_speed_att>(*robot_node).value_or(0.f);
+                cur_adv = graph_->get_attrib_by_name<robot_current_advance_speed_att>(*robot_node).value_or(0.f);
+                cur_rot = graph_->get_attrib_by_name<robot_current_angular_speed_att>(*robot_node).value_or(0.f);
+            }
+    }
+
     // CSV (lazy-open + header, truncated each run), throttled to ~10 Hz.
     if (!params_->overlay_csv_path.empty() && timestamp_ms - overlay_csv_last_ms_ >= 100)
     {
@@ -548,27 +573,24 @@ void ControllerSession::update_overlay_extrapolation(const ControllerWorldModel 
         {
             overlay_csv_.open(params_->overlay_csv_path, std::ios::out | std::ios::trunc);
             if (overlay_csv_.is_open())
-                overlay_csv_ << "t_ms,lidar_ts,gap_ms,pose_age_ms,vx,vy,omega,extrap_dt_s,disp_m,dtheta_rad,RTdelta_m\n";
+                overlay_csv_ << "t_ms,lidar_ts,gap_ms,pose_age_ms,vx,vy,omega,extrap_dt_s,disp_m,dtheta_rad,RTdelta_m,"
+                                "cmd_adv,cmd_rot,cur_adv,cur_rot\n";
+            // Announce the resolved absolute path (it's a relative path → lands in the process CWD,
+            // which is easy to miss), or the failure — so this is never silently a no-op again.
+            std::error_code ec;
+            const auto abs_path = std::filesystem::absolute(params_->overlay_csv_path, ec).string();
+            std::cout << "[OverlayExtrap] CSV " << (overlay_csv_.is_open() ? "writing to " : "FAILED to open ")
+                      << abs_path << std::endl;
             overlay_csv_open_ = true;
         }
         if (overlay_csv_.is_open())
         {
             overlay_csv_ << timestamp_ms << ',' << *overlay_lidar_ts_ms_ << ',' << gap_ms << ',' << pose_age_ms << ','
                          << room_vel_.vx << ',' << room_vel_.vy << ',' << room_vel_.omega << ','
-                         << dt << ',' << disp.norm() << ',' << dtheta << ',' << rt_delta << '\n';
+                         << dt << ',' << disp.norm() << ',' << dtheta << ',' << rt_delta << ','
+                         << cmd_adv << ',' << cmd_rot << ',' << cur_adv << ',' << cur_rot << '\n';
             overlay_csv_.flush();
         }
-    }
-
-    // Throttled std::cout summary (qInfo is swallowed by the no-op message handler unless Verbose).
-    if (timestamp_ms - overlay_diag_last_ms_ >= 1000)
-    {
-        overlay_diag_last_ms_ = timestamp_ms;
-        std::cout << "[OverlayExtrap] now=" << timestamp_ms << " gap_ms=" << gap_ms
-                  << " pose_age_ms=" << pose_age_ms << " dt_s=" << dt
-                  << " vel(room)=(" << room_vel_.vx << ',' << room_vel_.vy << ',' << room_vel_.omega << ')'
-                  << " |disp|=" << disp.norm() << "m dtheta=" << dtheta << "rad RTdelta=" << rt_delta << "m"
-                  << std::endl;
     }
 }
 
