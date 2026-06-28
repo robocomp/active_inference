@@ -120,6 +120,9 @@ Transforms.interpolate_rt = true
 # so the overlay tracks the robot instead of trailing it by the lidar/pose latency.
 Transforms.overlay_extrapolate_to_now = true
 Transforms.overlay_extrapolation_max_dt_s = 0.4
+# Extra fixed latency (s) added on top of the measured pose-value age. Tune up if the cloud still
+# trails (the room<-robot feed is delayed beyond its own update period), down if it overshoots.
+Transforms.overlay_latency_comp_s = 0.0
 # Append per-cycle overlay-lag diagnostics to this CSV (empty = off). Columns:
 # t_ms,lidar_ts,gap_ms,vx,vy,omega,extrap_dt_s,disp_m,dtheta_rad,RTdelta_m
 Transforms.overlay_csv_path = "overlay_lag_eval.csv"

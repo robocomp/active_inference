@@ -457,27 +457,55 @@ bool ControllerSession::goal_met(std::uint64_t feedback_node_id) const
 
 void ControllerSession::update_base_speed(const ControllerRobotPose &pose, std::uint64_t timestamp_ms)
 {
-    if (prev_robot_pose_.has_value() && timestamp_ms > prev_robot_ts_ms_)
+    constexpr float kTwoPi = 6.28318530718f;
+    constexpr float kPosEps = 1e-3f;            // 1 mm — below this the pose value is "unchanged"
+    constexpr float kThetaEps = 1e-3f;          // ~0.06°
+    constexpr std::uint64_t kStaleMs = 400;     // no change for this long ⇒ treat the robot as stopped
+
+    if (!prev_robot_pose_.has_value())
     {
+        prev_robot_pose_  = pose;
+        prev_robot_ts_ms_ = timestamp_ms;
+        last_pose_change_ms_ = timestamp_ms;
+        return;
+    }
+
+    const Eigen::Vector2f dpos = pose.pos - prev_robot_pose_->pos;
+    const float dtheta = std::remainder(pose.theta - prev_robot_pose_->theta, kTwoPi);
+    const bool changed = dpos.norm() > kPosEps || std::abs(dtheta) > kThetaEps;
+
+    if (changed && timestamp_ms > prev_robot_ts_ms_)
+    {
+        // Velocity over the actual pose-CHANGE interval. The room←robot feed updates coarser than the
+        // control loop, so per-cycle differencing would alternate real steps with zeros (bursty); we
+        // only difference when the value moves, over the real elapsed time.
         const float dt = static_cast<float>(timestamp_ms - prev_robot_ts_ms_) * 1e-3f;
         if (dt > 1e-3f)
         {
-            constexpr float kTwoPi = 6.28318530718f;
-            const Eigen::Vector2f dpos = (pose.pos - prev_robot_pose_->pos) / dt;   // room-frame m/s
-            const float dtheta = std::remainder(pose.theta - prev_robot_pose_->theta, kTwoPi) / dt;
-            const float lin = dpos.norm();
-            const float ang = std::abs(dtheta);
-            // EMA so a single jittery pose sample doesn't spuriously trip (or release) the gate.
-            base_speed_lin_ = 0.5f * base_speed_lin_ + 0.5f * lin;
-            base_speed_ang_ = 0.5f * base_speed_ang_ + 0.5f * ang;
-            // Directional room-frame velocity (signed), for overlay dead-reckoning.
-            room_vel_.vx    = 0.5f * room_vel_.vx + 0.5f * dpos.x();
-            room_vel_.vy    = 0.5f * room_vel_.vy + 0.5f * dpos.y();
-            room_vel_.omega = 0.5f * room_vel_.omega + 0.5f * dtheta;
+            const Eigen::Vector2f v = dpos / dt;   // room-frame m/s
+            const float w = dtheta / dt;
+            // EMA so a single jittery sample doesn't spuriously trip the stillness gate / overlay.
+            base_speed_lin_ = 0.5f * base_speed_lin_ + 0.5f * v.norm();
+            base_speed_ang_ = 0.5f * base_speed_ang_ + 0.5f * std::abs(w);
+            room_vel_.vx    = 0.5f * room_vel_.vx + 0.5f * v.x();
+            room_vel_.vy    = 0.5f * room_vel_.vy + 0.5f * v.y();
+            room_vel_.omega = 0.5f * room_vel_.omega + 0.5f * w;
         }
+        prev_robot_pose_  = pose;
+        prev_robot_ts_ms_ = timestamp_ms;
+        last_pose_change_ms_ = timestamp_ms;
     }
-    prev_robot_pose_  = pose;
-    prev_robot_ts_ms_ = timestamp_ms;
+    else if (timestamp_ms - last_pose_change_ms_ > kStaleMs)
+    {
+        // Pose value hasn't moved for a while ⇒ robot stopped: zero the velocity so the overlay
+        // settles (and the pose-age clock restarts here, so a fresh pose isn't seen as ancient).
+        base_speed_lin_ = 0.f;
+        base_speed_ang_ = 0.f;
+        room_vel_ = ControllerRoomVelocity{};
+        prev_robot_pose_  = pose;
+        prev_robot_ts_ms_ = timestamp_ms;
+        last_pose_change_ms_ = timestamp_ms;
+    }
 }
 
 void ControllerSession::update_overlay_extrapolation(const ControllerWorldModel &world_model,
@@ -491,8 +519,12 @@ void ControllerSession::update_overlay_extrapolation(const ControllerWorldModel 
     if (!overlay_lidar_ts_ms_.has_value() || timestamp_ms <= *overlay_lidar_ts_ms_)
         return;
 
-    const std::uint64_t gap_ms = timestamp_ms - *overlay_lidar_ts_ms_;
-    const float raw_dt = static_cast<float>(gap_ms) * 1e-3f;
+    const std::uint64_t gap_ms = timestamp_ms - *overlay_lidar_ts_ms_;   // lidar staleness (informational)
+    // The room←robot value updates coarser than the lidar, so the cloud's anchor pose is as old as
+    // the time since that value last changed — extrapolate by THAT, not just the lidar gap. Plus a
+    // tunable fixed-latency term for any residual localization pipeline delay.
+    const std::uint64_t pose_age_ms = timestamp_ms >= last_pose_change_ms_ ? timestamp_ms - last_pose_change_ms_ : 0;
+    const float raw_dt = static_cast<float>(pose_age_ms) * 1e-3f + std::max(0.f, params_->overlay_latency_comp_s);
     const float dt = std::min(raw_dt, std::max(0.f, params_->overlay_extrapolation_max_dt_s));
     const auto now_pose = extrapolate_room_pose(robot_pose, room_vel_, dt);
     overlay_icon_pose_ = now_pose;
@@ -516,12 +548,12 @@ void ControllerSession::update_overlay_extrapolation(const ControllerWorldModel 
         {
             overlay_csv_.open(params_->overlay_csv_path, std::ios::out | std::ios::trunc);
             if (overlay_csv_.is_open())
-                overlay_csv_ << "t_ms,lidar_ts,gap_ms,vx,vy,omega,extrap_dt_s,disp_m,dtheta_rad,RTdelta_m\n";
+                overlay_csv_ << "t_ms,lidar_ts,gap_ms,pose_age_ms,vx,vy,omega,extrap_dt_s,disp_m,dtheta_rad,RTdelta_m\n";
             overlay_csv_open_ = true;
         }
         if (overlay_csv_.is_open())
         {
-            overlay_csv_ << timestamp_ms << ',' << *overlay_lidar_ts_ms_ << ',' << gap_ms << ','
+            overlay_csv_ << timestamp_ms << ',' << *overlay_lidar_ts_ms_ << ',' << gap_ms << ',' << pose_age_ms << ','
                          << room_vel_.vx << ',' << room_vel_.vy << ',' << room_vel_.omega << ','
                          << dt << ',' << disp.norm() << ',' << dtheta << ',' << rt_delta << '\n';
             overlay_csv_.flush();
@@ -532,8 +564,8 @@ void ControllerSession::update_overlay_extrapolation(const ControllerWorldModel 
     if (timestamp_ms - overlay_diag_last_ms_ >= 1000)
     {
         overlay_diag_last_ms_ = timestamp_ms;
-        std::cout << "[OverlayExtrap] now=" << timestamp_ms << " lidar_ts=" << *overlay_lidar_ts_ms_
-                  << " gap_ms=" << gap_ms << " dt_s=" << dt
+        std::cout << "[OverlayExtrap] now=" << timestamp_ms << " gap_ms=" << gap_ms
+                  << " pose_age_ms=" << pose_age_ms << " dt_s=" << dt
                   << " vel(room)=(" << room_vel_.vx << ',' << room_vel_.vy << ',' << room_vel_.omega << ')'
                   << " |disp|=" << disp.norm() << "m dtheta=" << dtheta << "rad RTdelta=" << rt_delta << "m"
                   << std::endl;

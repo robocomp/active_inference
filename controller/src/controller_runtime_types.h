@@ -47,6 +47,10 @@ struct ControllerParams
     // stays anchored at scan time.
     bool overlay_extrapolate_to_now = true;
     float overlay_extrapolation_max_dt_s = 0.4f;   // clamp the extrapolation horizon
+    // Extra fixed latency added to the extrapolation horizon, on top of the measured pose-value age.
+    // Compensates a constant localization pipeline delay (the pose, even when fresh, is L old). Tune
+    // live until the cloud sits on the walls.
+    float overlay_latency_comp_s = 0.0f;
     // When non-empty, append per-cycle overlay-lag diagnostics to this CSV (for plotting the lag /
     // velocity / RT-staleness evolution). Empty = disabled.
     std::string overlay_csv_path;

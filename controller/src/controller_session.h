@@ -120,8 +120,9 @@ private:
     std::ofstream overlay_csv_;                    // per-cycle overlay-lag diagnostics
     bool overlay_csv_open_ = false;
     std::uint64_t overlay_csv_last_ms_ = 0;        // throttle for CSV rows
-    std::optional<ControllerRobotPose> prev_robot_pose_;
-    std::uint64_t prev_robot_ts_ms_ = 0;
+    std::optional<ControllerRobotPose> prev_robot_pose_;   // last pose at which the value actually changed
+    std::uint64_t prev_robot_ts_ms_ = 0;                   // timestamp of that change (velocity dt base)
+    std::uint64_t last_pose_change_ms_ = 0;                // = prev_robot_ts_ms_; pose-value age reference
     ControllerPolygon room_polygon_;
     ControllerPolygon inner_polygon_;
     std::optional<ControllerPathPlan> current_plan_;
