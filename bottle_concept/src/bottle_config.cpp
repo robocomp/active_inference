@@ -76,10 +76,14 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
     out.masks_target_frame     = gets("Masks.TargetFrame",    "room");
     out.rt_cov_add_chain       = getb("Masks.RtCovAddChain",  true);
     out.dynamics_model = gets("Dynamics.Model",        "constant_velocity");
-    out.cv_accel_std   = getf("Dynamics.CvAccelStd",   0.5f);
-    out.cv_meas_std    = getf("Dynamics.CvMeasStd",    0.01f);
-    out.cv_init_vel_std = getf("Dynamics.CvInitVelStd", 0.5f);
+    out.cv_accel_std   = getf("Dynamics.CvAccelStd",   0.08f);
+    out.cv_meas_std    = getf("Dynamics.CvMeasStd",    0.04f);
+    out.cv_init_vel_std = getf("Dynamics.CvInitVelStd", 0.3f);
     out.cv_dt_default_s = getf("Dynamics.CvDtDefaultS", 0.1f);
+    out.cv_gate        = getf("Dynamics.CvGate",        6.0f);
+    out.cv_max_speed   = getf("Dynamics.CvMaxSpeed",    0.4f);
+    out.cv_lost_frames = geti("Dynamics.CvLostFrames",  5);
+    out.cv_max_pos_std = getf("Dynamics.CvMaxPosStd",   0.05f);
     out.epistemic_obs_distance    = getf("Epistemic.ObsDistance",     0.9f);
     out.epistemic_view_info       = getf("Epistemic.ViewInfo",        50.0f);
     out.epistemic_cooldown_cycles = geti("Epistemic.CooldownCycles",  200);

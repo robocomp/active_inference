@@ -167,10 +167,20 @@ MaskConfPower  = 2.0
 # (the maturity-locked position gain froze the fit; the moved detection then spawned a new instance).
 # cz stays table-anchored; radius/height keep hardening. Set Model="static" for the legacy behaviour.
 Model = "constant_velocity"
-CvAccelStd = 0.5      # process: acceleration std (m/s²) — how fast the velocity can change
-CvMeasStd = 0.01      # per-frame position measurement std (m) fed as the KF measurement noise R
-CvInitVelStd = 0.5    # 1-σ on the initial unknown velocity (m/s)
+# A RESTING bottle (hanging from table/room) is effectively STATIC — only a GRASP injects real (known)
+# motion (step 2). So the resting regime is heavily damped: small accel process noise (velocity barely
+# builds) + realistic measurement noise (don't chase centroid wobble) → smooth, table-like. The S=P+R
+# tracker gate (DetectionNoiseM) still associates a genuinely moved bottle, so this won't re-spawn.
+CvAccelStd = 0.08     # process: acceleration std (m/s²) — tiny: a resting bottle barely accelerates
+CvMeasStd = 0.04      # per-frame position measurement std (m) — matches the real centroid/transform noise
+CvInitVelStd = 0.3    # 1-σ on the initial unknown velocity (m/s)
 CvDtDefaultS = 0.1    # fallback Δt (s) when capture stamps are missing/equal (≈ Period.Compute)
+CvGate = 6.0          # χ²₂ outlier gate: reject a measurement whose innovation² (vs S=P+R) exceeds this
+                      # — stops a jumpy partial-mask centroid (hand occlusion at the FoV edge) flinging the track
+CvMaxSpeed = 0.4      # velocity clamp (m/s): a resting bottle barely moves; kills fling spikes
+CvLostFrames = 5      # after a detection gap > this×CvDtDefaultS, zero the velocity (HOLD last pose, don't coast)
+CvMaxPosStd = 0.05    # cap on per-axis position σ during predict (m): keeps the gate tight across dropouts so a
+                      # far / other-bottle measurement can't be accepted — fixes two close bottles swapping/jumping
 
 [Support]
 # Which surface the bottle hangs from (room vs a table): MAP over {room, every table_N} by

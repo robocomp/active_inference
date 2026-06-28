@@ -482,6 +482,7 @@ void SpecificWorker::run_instance_tracker()
             t.cov(1, 1) = 1.0f / ry;
             t.has_cov = true;
         }
+        t.expected_visible = inst.expected_visible;   // negative-info death gate: persist out-of-FoV
         tracks.push_back(t);
         inst.assigned_mask_idx = -1;   // cleared; re-set below only if associated this cycle
     }

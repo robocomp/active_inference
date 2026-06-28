@@ -113,8 +113,11 @@ private:
 
     // Feed the fitted model the RGB-mask edge rays as a silhouette likelihood.
     void feed_silhouette(BottleInstance& inst);
+    // Set inst.expected_visible: true iff the bottle centre projects inside the camera frustum now. Drives
+    // the tracker's negative-information DEATH gate (persist out-of-FoV; retire only if in-view & absent).
+    void update_expected_visible(BottleInstance& inst);
     // room_T_zed (camera→room) as a plain 4×4, composed room→body→zed at ts=0 (alignment-safe).
-    std::optional<Eigen::Matrix4d> room_T_zed_matrix() const;
+    std::optional<Eigen::Matrix4d> room_T_zed_matrix(std::uint64_t timestamp_ms = 0) const;
 
     // Factory helpers (config → model/queue params).
     BottleModelParams make_model_params() const;

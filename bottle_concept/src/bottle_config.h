@@ -97,10 +97,18 @@ struct BottleConfig
     // "static" → position hardens like furniture (legacy). "constant_velocity" → cx,cy TRACK via a CV
     // Kalman filter (a bottle is movable), fixing the frozen-fit-spawns-a-new-instance bug.
     std::string dynamics_model = "constant_velocity";
-    float       cv_accel_std    = 0.5f;    // process: acceleration std (m/s²) — how fast velocity can change
-    float       cv_meas_std     = 0.01f;   // per-frame position measurement std (m) fed as the KF R
-    float       cv_init_vel_std = 0.5f;    // 1-σ on the initial unknown velocity (m/s)
+    // Resting bottle = effectively STATIC (only a grasp injects real motion): tiny accel process noise +
+    // realistic measurement noise → heavily damped, table-like. The S=P+R tracker gate still associates
+    // a genuinely moved bottle, so the damping does not re-introduce spawning.
+    float       cv_accel_std    = 0.08f;   // process: acceleration std (m/s²) — tiny (barely accelerates)
+    float       cv_meas_std     = 0.04f;   // per-frame position measurement std (m) — real centroid noise
+    float       cv_init_vel_std = 0.3f;    // 1-σ on the initial unknown velocity (m/s)
     float       cv_dt_default_s = 0.1f;    // fallback Δt when capture stamps are missing/equal (≈ Period.Compute)
+    float       cv_gate         = 6.0f;    // χ²₂ outlier gate: reject a measurement whose innovation² (vs S=P+R) exceeds this
+    float       cv_max_speed    = 0.4f;    // velocity clamp (m/s) — a resting bottle barely moves; kills fling spikes
+    int         cv_lost_frames  = 5;       // after this many frames with no detection, zero the velocity (stop coasting)
+    float       cv_max_pos_std  = 0.05f;   // cap on the per-axis position σ during predict (m) → gate stays tight across
+                                           // dropouts so a far/other-bottle measurement can't be accepted (anti-swap/jump)
     // ── Epistemic "hidden-face" affordance ────────────────────────────────────────────────────────
     // The agent advertises a far-side viewpoint (opposite the camera) so the controller can observe the
     // bottle's occluded back arc and resolve the depth-degenerate radius. ΔH = ½·log(1 + view_info/Y_r).

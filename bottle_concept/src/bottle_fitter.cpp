@@ -204,7 +204,7 @@ float BottleFitter::run_inference(BottleInstance& inst, const BottleObservation&
             // sided cloud, so this seed/prior decides depth). Push the seed away from the camera by
             // frac·radius in the horizontal plane (axis is vertical → bias is purely radial in XY).
             float deproj = 0.0f;
-            if (const auto Mopt = room_T_zed_matrix();
+            if (const auto Mopt = room_T_zed_matrix(inst.last_mask_timestamp_ms);
                 Mopt.has_value() and cfg_.seed_deproject_frac > 0.0f and s.radius > 0.0f)
             {
                 const Eigen::Vector2f cam_xy(static_cast<float>((*Mopt)(0, 3)),
@@ -273,6 +273,8 @@ float BottleFitter::run_inference(BottleInstance& inst, const BottleObservation&
                    inst.node_name, free_energy, s.cx, s.cy, s.cz, s.radius, s.height,
                    point_count, post_std_mm(3), post_std_mm(4));
 
+    update_expected_visible(inst);   // negative-information death gate (persist out-of-FoV)
+
     log_fisher_csv(inst, observation.has_fresh_data, free_energy, point_count);
 
     // Hang the bottle from the table: standing on the surface fixes cz = table_top + height/2, so z is
@@ -288,12 +290,15 @@ float BottleFitter::run_inference(BottleInstance& inst, const BottleObservation&
     return free_energy;
 }
 
-std::optional<Eigen::Matrix4d> BottleFitter::room_T_zed_matrix() const
+std::optional<Eigen::Matrix4d> BottleFitter::room_T_zed_matrix(std::uint64_t timestamp_ms) const
 {
     if (not inner_eigen_)
         return std::nullopt;
-    const auto rtb = inner_eigen_->get_transformation_matrix("room", "body", 0);
-    const auto btz = inner_eigen_->get_transformation_matrix("body", "zed", 0);
+    // Pin to the frame's capture stamp (0 = latest): with the robot rotating, the LATEST camera pose
+    // differs from the one at capture, so a latest-pose de-projection swings the measurement (~±12 cm)
+    // and makes a STATIC bottle drift + split. Using the capture pose keeps it stable.
+    const auto rtb = inner_eigen_->get_transformation_matrix("room", "body", timestamp_ms);
+    const auto btz = inner_eigen_->get_transformation_matrix("body", "zed", timestamp_ms);
     if (not (rtb.has_value() and btz.has_value()))
         return std::nullopt;
     const auto to_mat4 = [](const Mat::RTMat& T)
@@ -376,6 +381,33 @@ float BottleFitter::mask_confidence_weight(float confidence) const
     const float ref   = std::max(floor + 1e-3f, cfg_.mask_conf_ref);
     return std::pow(std::clamp((confidence - floor) / (ref - floor), 0.0f, 1.0f),
                     std::max(0.1f, cfg_.mask_conf_power));
+}
+
+void BottleFitter::update_expected_visible(BottleInstance& inst)
+{
+    inst.expected_visible = false;   // permanence default: only retire if CONFIRMED in-frame & undetected
+    if (not inner_eigen_)
+        return;
+    if (not camera_api_)
+    {
+        const auto zed = G_->get_node("zed");
+        if (not zed.has_value()) return;
+        camera_api_ = G_->get_camera_api(zed.value());
+        if (not camera_api_) return;
+    }
+    const auto& s = inst.model.state();
+    const auto p = inner_eigen_->transform("zed", Mat::Vector3d(s.cx, s.cy, s.cz), "room", 0);
+    if (not p.has_value())
+        return;
+    const double depth = p->y();   // camera frame: x=right, y=forward(depth), z=up (see feed_silhouette)
+    if (depth <= 0.05)
+        return;                    // behind/at the camera → not in the frustum
+    const float fx = camera_api_->get_focal_x(), fy = camera_api_->get_focal_y();
+    const float W  = static_cast<float>(camera_api_->get_width());
+    const float H  = static_cast<float>(camera_api_->get_height());
+    const double col = p->x() * fx / depth + 0.5 * W;
+    const double row = 0.5 * H - p->z() * fy / depth;
+    inst.expected_visible = (col >= 0.0 and col <= W and row >= 0.0 and row <= H);
 }
 
 void BottleFitter::step_queue_update(BottleInstance& inst,
@@ -487,7 +519,7 @@ float BottleFitter::step_model_update(BottleInstance& inst,
             if (inst.last_obs_centroid.squaredNorm() > 0.0f)
             {
                 zc = {inst.last_obs_centroid.x(), inst.last_obs_centroid.y()};
-                if (const auto Mopt = room_T_zed_matrix();
+                if (const auto Mopt = room_T_zed_matrix(inst.last_mask_timestamp_ms);
                     Mopt.has_value() and cfg_.seed_deproject_frac > 0.0f and inst.model.state().radius > 0.0f)
                 {
                     const Eigen::Vector2f cam_xy(static_cast<float>((*Mopt)(0, 3)), static_cast<float>((*Mopt)(1, 3)));
@@ -501,17 +533,26 @@ float BottleFitter::step_model_update(BottleInstance& inst,
             const std::vector<double> mvv = {mv, mv};
             if (not inst.motion.initialized())
             {
-                inst.motion.configure(cfg_.cv_accel_std, cfg_.cv_init_vel_std);
+                inst.motion.configure(cfg_.cv_accel_std, cfg_.cv_init_vel_std, cfg_.cv_max_pos_std);
                 inst.motion.init(z, mvv);
             }
             else if (inst.last_masks_frame_seen != inst.last_motion_frame)   // a NEW frame's measurement
             {
-                double dt = (inst.last_mask_timestamp_ms > inst.last_motion_ts_ms and inst.last_motion_ts_ms > 0)
-                            ? static_cast<double>(inst.last_mask_timestamp_ms - inst.last_motion_ts_ms) / 1000.0
-                            : static_cast<double>(cfg_.cv_dt_default_s);
-                dt = std::clamp(dt, 0.01, 0.5);
+                const double gap = (inst.last_mask_timestamp_ms > inst.last_motion_ts_ms and inst.last_motion_ts_ms > 0)
+                                   ? static_cast<double>(inst.last_mask_timestamp_ms - inst.last_motion_ts_ms) / 1000.0
+                                   : static_cast<double>(cfg_.cv_dt_default_s);
+                // Re-acquired after a long gap (it had left the FoV) → stop coasting on the stale velocity
+                // so we HOLD the last good position instead of flinging to a spurious spot.
+                if (gap > cfg_.cv_lost_frames * cfg_.cv_dt_default_s)
+                    inst.motion.reset_velocity();
+                const double dt = std::clamp(gap, 0.01, 0.5);
                 inst.motion.predict(dt);
-                inst.motion.correct(z, mvv);
+                // Outlier → STOP coasting (zero velocity) so a rejected run HOLDS instead of flying off
+                // to the edge on a stale velocity (the static-bottle-robot-rotating failure).
+                if (inst.motion.correct_gated(z, mvv, cfg_.cv_gate))
+                    inst.motion.clamp_velocity(cfg_.cv_max_speed);
+                else
+                    inst.motion.reset_velocity();
             }
             inst.last_motion_ts_ms = inst.last_mask_timestamp_ms;
             inst.last_motion_frame = inst.last_masks_frame_seen;

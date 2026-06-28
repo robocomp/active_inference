@@ -61,6 +61,11 @@ struct BottleInstance
     // becomes a KNOWN control input (the arm). The handshake will set this + switch the transition to
     // known-input / re-parent-under-gripper. Left false for the free-movable CV mode.
     bool          grasped = false;
+    // Negative-information persistence: true only when the bottle centre projects INSIDE the camera
+    // frustum this cycle. The tracker accrues a death "miss" only when expected_visible — so out-of-FoV
+    // the bottle PERSISTS, and it is retired only if it should be seen yet isn't (removed). Default
+    // false = don't kill until we confirm it is in view.
+    bool          expected_visible = false;
     int  frames_converged      = 0;     // consecutive frames with |ΔFE| < fe_eps
     int  last_masks_frame_seen = -1;    // last masks packet frame consumed
     int  processed_cycles      = 0;     // per-bottle compute cycles for log throttling
