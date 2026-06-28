@@ -68,6 +68,10 @@ struct TableInstance
     // Running FE level on ACCEPTED (good) fresh frames (EMA); the FE-spike guard rejects a fresh frame
     // whose raw-fit FE is ≫ this (contaminated point set the model can't explain). NaN until first accept.
     float fe_baseline       = std::numeric_limits<float>::quiet_NaN();
+    // Temporal EMA of the model evidence ρ: the belief loosens only on SUSTAINED low evidence (a real
+    // reshape), not a transient burst of noisy masks. A brief dip barely moves it; a persistent mismatch
+    // pulls it down and the belief yields. The sustained-vs-transient discriminator (no threshold).
+    float evidence_ema      = 1.0f;
     // Dead-band tracking for write_rt_pose — suppress tiny oscillations
     float last_written_cx   = std::numeric_limits<float>::max();
     float last_written_cy   = std::numeric_limits<float>::max();

@@ -41,6 +41,19 @@ struct SampleQueueGeometry<TableModel>
         const float lx = px * cos_t - py * sin_t;
         const float ly = px * sin_t + py * cos_t;
 
+        // FACE-aware split (mirrors the compound SDF's top-vs-leg attribution): a point clearly below the
+        // top slab belongs to a LEG, not the top. Give the four legs DEDICATED bins (by corner quadrant) so
+        // they are kept as RFE instead of being out-voted by the dense top population at the same footprint
+        // cell — the "no RFE on the legs" symptom. (The map-backed queue lets bin_index exceed nx·ny.)
+        const float top_underside = s.table_height - TableModel::TOP_THICKNESS;
+        if (p.z() < top_underside - 0.05f)
+        {
+            const int quadrant = (lx >= 0.0f ? 1 : 0) + (ly >= 0.0f ? 2 : 0);   // 0..3, one per corner leg
+            const int zlayer   = (p.z() < 0.5f * top_underside) ? 0 : 1;        // lower/upper half of the leg
+            return nx * ny + quadrant * 2 + zlayer;                             // 8 dedicated leg bins
+        }
+
+        // TOP: yaw-aware xy-grid over the footprint (distributes anchors to the w/h-defining edges).
         const float u = (lx + kHalfExtent) / (2.0f * kHalfExtent);   // → [0,1] across the grid
         const float v = (ly + kHalfExtent) / (2.0f * kHalfExtent);
         const int xb = std::clamp(static_cast<int>(u * nx), 0, nx - 1);

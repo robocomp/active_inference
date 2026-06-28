@@ -65,13 +65,8 @@ TableState TableFitter::TableBeliefPolicy::apply_observability_warm_start(
         return lerp(prev, rawv, rawv < prev ? k * shrink : k);
     };
 
-    // Yaw observability gate: orientation is only meaningful for a clearly RECTANGULAR footprint. Scale
-    // the yaw gain by the aspect ratio so a near-SQUARE table (yaw geometrically unobservable) freezes its
-    // yaw instead of chasing noise. |w−h|/max(w,h) → 0 for a square, ≥ aspect_ref for a clear rectangle.
-    const float aspect = std::abs(previous.w - previous.h) /
-                         std::max({previous.w, previous.h, 1e-3f});
-    const float yaw_obs = clamp01(aspect / std::max(1e-3f, cfg.yaw_obs_aspect_ref));
-
+    // (No explicit yaw aspect gate: for a near-square footprint the SDF's yaw sensitivity is small, so the
+    // yaw observation Fisher info — hence the Kalman gain K[6] — is already low. Precision handles it.)
     const auto& K = kalman_gain;
     TableState accepted = raw;
     accepted.cx           = lerp(previous.cx,           raw.cx,           K[0]);
@@ -80,7 +75,7 @@ TableState TableFitter::TableBeliefPolicy::apply_observability_warm_start(
     accepted.h            = ratchet(previous.h,            raw.h,            K[3]);
     accepted.table_height = ratchet(previous.table_height, raw.table_height, K[4]);
     accepted.leg_length   = ratchet(previous.leg_length,   raw.leg_length,   K[5]);
-    accepted.yaw          = angle_lerp(previous.yaw,    raw.yaw,          K[6] * yaw_obs);
+    accepted.yaw          = angle_lerp(previous.yaw,    raw.yaw,          K[6]);
     accepted.leg_inset    = lerp(previous.leg_inset,    raw.leg_inset,    K[7]);
     return accepted;
 }
@@ -371,7 +366,24 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
         { for (const auto& p : pts) { const float d = inst.model.sdf_point(p); sum += std::exp(-d * d * inv2s2); ++n; } };
         accum(observation.candidate_pts);
         accum(observation.residual_pts);
-        inst.stab.model_evidence = n > 0 ? static_cast<float>(sum / static_cast<double>(n)) : 1.0f;
+        const float rho_raw = n > 0 ? static_cast<float>(sum / static_cast<double>(n)) : 1.0f;
+
+        // Gate the loosening by the observation's RELIABILITY (YOLO-confidence weight): only a TRUSTED view
+        // may falsify the belief. A far / low-confidence mask whose points miss the box is a bad OBSERVATION,
+        // not evidence the (static) table moved — so it must NOT loosen position/yaw (the instability seen on
+        // mask_w≈0.2–0.3 views). ρ_eff = 1 − w(conf)·(1−ρ_raw): w→0 ⇒ ρ_eff→1 (precision persists, stays put);
+        // w→1 with a genuinely contradicting view ⇒ ρ_eff→ρ_raw (loosens, yields).
+        const float c0 = std::clamp(cfg_.mask_conf_floor, 0.0f, 0.99f);
+        const float cr = std::max(c0 + 1e-3f, cfg_.mask_conf_ref);
+        const float w  = std::pow(TableBeliefPolicy::clamp01((inst.last_mask_confidence - c0) / (cr - c0)),
+                                  std::max(0.1f, cfg_.mask_conf_power));
+        const float rho_frame = 1.0f - w * (1.0f - rho_raw);
+
+        // Temporal integration: loosen only on SUSTAINED low evidence, not a transient noisy burst. EMA
+        // over ~1/(1−α) fresh frames; a brief dip barely moves it, a persistent mismatch pulls it down.
+        const float a = std::clamp(cfg_.evidence_ema_alpha, 0.0f, 0.999f);
+        inst.evidence_ema = a * inst.evidence_ema + (1.0f - a) * rho_frame;
+        inst.stab.model_evidence = inst.evidence_ema;
     }
     else
         inst.stab.model_evidence = 1.0f;   // no fresh data → don't loosen (freeze-on-stale governs updates)
@@ -664,9 +676,10 @@ void TableFitter::refresh_stabilizer_params()
     layout.is_position[1] = true;
     stabilizer_.set_layout(layout);
 
-    // Stage-1: the Fisher filter + Kalman stiffness + maturity stiffening + quality rescale + CUSUM gate
-    // + mask-conf weighting are the agent's belief model, not options — hardwired on (their A/B-off
-    // branches were removed). Only the numeric tunings remain configurable.
+    // The belief model: Fisher filter + Kalman stiffness + maturity + quality rescale + mask-conf
+    // weighting, all hardwired on. Stability/plasticity is precision (the evidence-scaled Kalman gain),
+    // NOT the CUSUM gate — that is retired (ce_gate=false), subsumed by model_evidence ρ. Only numeric
+    // tunings remain configurable.
     StabilizerParams p;
     p.fisher_filter_enabled = true;
     p.kalman_stiffness      = true;
@@ -679,23 +692,12 @@ void TableFitter::refresh_stabilizer_params()
     p.views_half            = cfg_.fisher_views_half;
     p.process_std_len       = cfg_.fisher_process_std_m;
     p.process_std_ang       = cfg_.fisher_process_std_yaw;
+    p.process_std_pos       = cfg_.process_std_pos_m;   // static-centre lock (cx,cy): small Q vs the size DOFs
     p.mask_conf_weight      = true;
     p.mask_conf_floor       = cfg_.mask_conf_floor;
     p.mask_conf_ref         = cfg_.mask_conf_ref;
     p.mask_conf_power       = cfg_.mask_conf_power;
-    p.ce_gate               = false;   // CUSUM retired: evidence-scaled precision (model_evidence ρ) is the
-                                       // falsifiability mechanism now — a wrong belief loosens and yields.
-    p.ce_band_len           = cfg_.counter_evidence_band_m;
-    p.ce_band_ang           = cfg_.counter_evidence_band_rad;
-    p.ce_base_pos           = cfg_.counter_evidence_base_pos;
-    p.ce_lambda_pos         = cfg_.counter_evidence_lambda_pos;
-    p.ce_base_size          = cfg_.counter_evidence_base_size;
-    p.ce_lambda_size        = cfg_.counter_evidence_lambda_size;
-    p.ce_base_yaw           = cfg_.counter_evidence_base_yaw;
-    p.ce_lambda_yaw         = cfg_.counter_evidence_lambda_yaw;
-    p.ce_decay              = cfg_.counter_evidence_decay;
-    p.ce_step_cap           = cfg_.counter_evidence_step_cap;
-    p.ce_unlock_deflate     = cfg_.counter_evidence_unlock_deflate;
+    p.ce_gate               = false;   // CUSUM retired — see above (ρ is the falsifiability mechanism)
     stabilizer_.set_params(p);
 }
 

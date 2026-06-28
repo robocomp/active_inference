@@ -42,7 +42,7 @@ struct TableConfig
     // estimated table-top height, dropping the floor / under-table / clutter population that is
     // attributed to legs and inflates the w/h footprint (and corrupts the leg/height fit). Off by
     // default; the extent diagnostic (n_top/n_leg, observed span vs fitted) shows whether it helps.
-    bool  top_band_gate_enabled = true;
+    bool  top_band_gate_enabled = false;
     float top_band_m            = 0.08f;   // half-width of the top-surface membership band (m)
 
     // TableModel parameters (forwarded to TableModelParams)
@@ -52,14 +52,23 @@ struct TableConfig
     float lambda_state      = 0.02f;
     float lambda_angle      = 0.01f;
     float lambda_extent     = 2.0f;   // footprint-extent term: fit top rectangle to point span
-    float extent_pct_lo     = 0.05f;  // lower percentile of the point span the extent term pins to
-    float extent_pct_hi     = 0.95f;  // upper percentile (tighter pair trims the depth-noise edge margin)
+    float extent_pct_lo     = 0.02f;  // footprint-extent percentiles: full observed span (was 0.05/0.95,
+    float extent_pct_hi     = 0.98f;  // which trimmed the true edges → under-sizing)
     float prior_size_std    = 0.30f;
     // Model-evidence ρ inlier width (m): a fresh mask point counts as "explained" within ~this distance of
     // the box surface; ρ = mean exp(−½(SDF/σ_ρ)²) over the mask drives the evidence-scaled precision (a box
     // too small → mask far outside → low ρ → belief loosens → grows). Wider than sigma_obs so a clean fit
     // reads ρ≈1 (precision persists) while a clearly under-/mis-sized box reads low.
     float evidence_sigma_m  = 0.12f;
+    // Temporal smoothing of the model evidence ρ: ρ_eff = α·ρ_eff + (1−α)·ρ_frame. Higher α = more frames
+    // of CONSISTENT mismatch needed before the belief loosens → a transient burst of noisy masks is ridden
+    // through, a sustained real change is followed. ~1/(1−α) frame time-constant (0.9 ≈ 10 frames).
+    float evidence_ema_alpha = 0.9f;
+    // Process noise std (m) for the POSITION DOFs (cx,cy), separate from the size DOFs. A STATIC table's
+    // centre barely moves between frames (only localisation jitter), so this is small → position precision
+    // accumulates → its Kalman gain falls → the centre LOCKS and stops chasing each noisy frame's centroid.
+    // Size DOFs keep the larger fisher_process_std_m (they are still being refined as more is seen).
+    float process_std_pos_m = 0.001f;
     int   optimization_iters = 10;
     float optimization_lr   = 0.05f;
     float grad_clip         = 2.0f;
@@ -70,9 +79,6 @@ struct TableConfig
     float robust_gnc_start_scale = 0.80f;   // GNC: wide initial robust scale annealed to robust_loss_scale
     float mask_precision = 0.30f;           // RGB-mask silhouette term weight (0 disables)
     int   sil_tangent_samples = 8;          // >0 = height-agnostic occluding-contour (samples/ray); 0 = top-plane only
-    // Extent re-open: if the observed point span (5–95 pct) exceeds the model footprint by more than this,
-    // the table is bigger than the current (frozen) fit — the "mask extends beyond the RFE" symptom. Re-open
-    // so the extent term grows w/h to the points. Self-limiting: closes the gap, then re-settles.
     int   robust_gnc_decay_cycles = 20;     // GNC start scale ramps to target over this many cycles, then off
 
     // SampleQueue parameters (forwarded to SampleQueueParams)
@@ -126,7 +132,7 @@ struct TableConfig
     // Size RATCHET: a size DOF (w,h,H,leg) grows at its full acceptance gain but SHRINKS at gain·this — a
     // table is rigid, so a far/occluded partial view (small visible extent) must NOT collapse it ("shrank
     // to a third across the room"). Small = strong ratchet; 1.0 = symmetric (off). Growth is unaffected.
-    float size_shrink_gain             = 0.05f;
+    float size_shrink_gain             = 0.0f;
     // (B) Fisher-gradient clamp: observation_information builds the per-DOF Fisher via a central finite
     // difference of the NON-smooth min() box-SDF. A point sitting on a face-switch/corner makes the
     // difference a discontinuity JUMP, not a derivative, spiking |∂SDF/∂θ| by ~1000× → a single point
@@ -144,29 +150,17 @@ struct TableConfig
     // bumps S_j once and decays away (rejected, gain→0), while a CONTIGUOUS same-direction run grows S_j
     // until it overcomes a barrier scaling with the filter's accumulated confidence. On unlock the DOF
     // snaps to the new evidence (gain→1), S_j resets, and its accumulated precision is deflated.
-    float counter_evidence_band_m      = 0.02f;   // length-DOF surprise deadband (m): innovations within this are "coherent"
-    float counter_evidence_band_rad    = 0.05f;   // yaw surprise deadband (rad)
     // Barrier = base + lambda·fisher_info[j], SPLIT into position (cx,cy) vs size/shape (w,h,H,leg,yaw,
     // inset) groups so the table CENTRE can be locked harder than its extents (position drifts one-sided
     // with robot localisation and was unlocking ~3× more often than w/h). Higher base/lambda → a longer,
     // more confident coherent run is needed before that group re-adapts.
-    float counter_evidence_base_pos    = 6.0f;    // position barrier floor (excess-bands): centre is heavily locked
-    float counter_evidence_lambda_pos  = 1.0f;    // extra position barrier per accumulated equivalent-view
-    float counter_evidence_base_size   = 1.5f;    // size/shape barrier floor (excess-bands)
-    float counter_evidence_lambda_size = 0.2f;    // extra size/shape barrier per accumulated equivalent-view
     // Yaw is decoupled from the size group with a HIGH barrier: a static rectangle's orientation, once
     // observed, is its most rigid property and the easiest to confuse from a partial/ambiguous view —
     // it was unlocking (ceg_yaw=1) every few minutes and rotating the table. Make it hard to unlock.
-    float counter_evidence_base_yaw    = 12.0f;   // yaw barrier floor (excess-bands) — yaw is heavily locked
-    float counter_evidence_lambda_yaw  = 1.0f;    // extra yaw barrier per accumulated equivalent-view
     // Yaw observability gate: yaw is only meaningful for a clearly RECTANGULAR footprint. Scale the yaw
     // acceptance gain by clamp01(|w−h|/max(w,h) / aspect_ref) so a near-SQUARE table (yaw geometrically
     // unobservable) freezes its yaw at the seed instead of chasing noise. 1.0 ≈ fully observable above
     // a (aspect_ref) fractional w/h difference.
-    float yaw_obs_aspect_ref           = 0.12f;
-    float counter_evidence_decay       = 0.8f;    // per-coherent-frame pay-down of S_j (a coherent frame is evidence FOR the belief)
-    float counter_evidence_unlock_deflate = 0.3f; // on unlock, multiply that DOF's accumulated info by this (concede the old estimate)
-    float counter_evidence_step_cap    = 3.0f;    // cap the per-frame CUSUM increment (excess-bands) so ONE big glitch can't
                                                   // jump the barrier — unlock then requires a RUN of coherent surprise (proper SPRT)
     // ── YOLO mask-score weighting of the update ─────────────────────────────────────────────────
     // The detector's confidence is the measurement's reliability: weight each fresh frame's observation
@@ -211,7 +205,7 @@ struct TableConfig
     float tracker_birth_min_sep_m  = 0.60f;   // a birth must be ≥ this (m) from every existing table
     // Physical exclusion: collapse two instances whose oriented footprints overlap by ≥ this fraction of
     // the SMALLER footprint (two tables cannot share space). 0 disables the merge.
-    float tracker_merge_overlap    = 0.30f;
+    float tracker_merge_overlap    = 0.05f;
     // Default geometry for a table BORN from a mask (no prior to seed it); the fit refines from here.
     float tracker_birth_width_m    = 1.0f;
     float tracker_birth_depth_m    = 0.6f;

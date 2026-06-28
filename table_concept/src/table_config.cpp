@@ -45,20 +45,22 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.voxel_bank_quantization_m= getf("TableConcept.VoxelBankQuantizationM", 0.02f);
     out.voxel_select_radius_margin_m = getf("TableConcept.VoxelSelectRadiusMarginM", 0.50f);
     out.voxel_select_height_margin_m = getf("TableConcept.VoxelSelectHeightMarginM", 0.25f);
-    out.top_band_gate_enabled    = getb("TableConcept.TopBandGate",            true);
+    out.top_band_gate_enabled    = getb("TableConcept.TopBandGate",            false);
     out.top_band_m               = getf("TableConcept.TopBandM",               0.08f);
 
     // TableModel
     out.sigma_obs          = getf("TableModel.SigmaObs",          0.05f);
     out.lambda_size        = getf("TableModel.LambdaSize",        0.15f);
     out.lambda_extent      = getf("TableModel.LambdaExtent",      2.0f);
-    out.extent_pct_lo      = getf("TableModel.ExtentPctLo",       0.05f);
-    out.extent_pct_hi      = getf("TableModel.ExtentPctHi",       0.95f);
+    out.extent_pct_lo      = getf("TableModel.ExtentPctLo",       0.02f);
+    out.extent_pct_hi      = getf("TableModel.ExtentPctHi",       0.98f);
     out.lambda_pos         = getf("TableModel.LambdaPos",         0.05f);
     out.lambda_state       = getf("TableModel.LambdaState",       0.02f);
     out.lambda_angle       = getf("TableModel.LambdaAngle",       0.01f);
     out.prior_size_std     = getf("TableModel.PriorSizeStd",      0.30f);
     out.evidence_sigma_m   = getf("TableModel.EvidenceSigmaM",    0.12f);
+    out.evidence_ema_alpha = getf("TableModel.EvidenceEmaAlpha",  0.9f);
+    out.process_std_pos_m  = getf("WarmStart.ProcessStdPosM",     0.001f);
     out.optimization_iters = geti("TableModel.OptimizationIters", 10);
     out.optimization_lr    = getf("TableModel.OptimizationLr",    0.05f);
     out.grad_clip          = getf("TableModel.GradClip",          2.0f);
@@ -107,21 +109,9 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.fisher_process_std_yaw        = getf("WarmStart.FisherProcessStdYaw",      0.01f);
     out.bad_fit_fe_ratio              = getf("WarmStart.BadFitFeRatio",            4.0f);
     out.fe_baseline_ema               = getf("WarmStart.FeBaselineEma",            0.10f);
-    out.size_shrink_gain              = getf("WarmStart.SizeShrinkGain",           0.05f);
+    out.size_shrink_gain              = getf("WarmStart.SizeShrinkGain",           0.0f);
     out.fisher_grad_clamp             = getf("WarmStart.FisherGradClamp",          2.0f);
     out.fisher_views_half             = getf("WarmStart.FisherViewsHalf",          4.0f);
-    out.counter_evidence_band_m       = getf("WarmStart.CounterEvidenceBandM",     0.02f);
-    out.counter_evidence_band_rad     = getf("WarmStart.CounterEvidenceBandRad",   0.05f);
-    out.counter_evidence_base_pos     = getf("WarmStart.CounterEvidenceBasePos",    6.0f);
-    out.counter_evidence_lambda_pos   = getf("WarmStart.CounterEvidenceLambdaPos",  1.0f);
-    out.counter_evidence_base_size    = getf("WarmStart.CounterEvidenceBaseSize",   1.5f);
-    out.counter_evidence_lambda_size  = getf("WarmStart.CounterEvidenceLambdaSize", 0.2f);
-    out.counter_evidence_base_yaw     = getf("WarmStart.CounterEvidenceBaseYaw",   12.0f);
-    out.counter_evidence_lambda_yaw   = getf("WarmStart.CounterEvidenceLambdaYaw",  1.0f);
-    out.yaw_obs_aspect_ref            = getf("WarmStart.YawObsAspectRef",           0.12f);
-    out.counter_evidence_decay        = getf("WarmStart.CounterEvidenceDecay",     0.8f);
-    out.counter_evidence_unlock_deflate = getf("WarmStart.CounterEvidenceUnlockDeflate", 0.3f);
-    out.counter_evidence_step_cap     = getf("WarmStart.CounterEvidenceStepCap",  3.0f);
     out.mask_conf_floor               = getf("WarmStart.MaskConfFloor",           0.2f);
     out.mask_conf_ref                 = getf("WarmStart.MaskConfRef",             0.5f);
     out.mask_conf_power               = getf("WarmStart.MaskConfPower",           2.0f);
@@ -138,7 +128,7 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.tracker_death_frames     = geti("Tracker.DeathFrames",      300);
     out.tracker_death_enabled    = getb("Tracker.DeathEnabled",     false);
     out.tracker_birth_min_sep_m  = getf("Tracker.BirthMinSepM",     0.60f);
-    out.tracker_merge_overlap    = getf("Tracker.MergeOverlap",     0.30f);
+    out.tracker_merge_overlap    = getf("Tracker.MergeOverlap",     0.05f);
     out.tracker_birth_width_m    = getf("Tracker.BirthWidthM",      1.0f);
     out.tracker_birth_depth_m    = getf("Tracker.BirthDepthM",      0.6f);
     out.tracker_birth_height_m   = getf("Tracker.BirthHeightM",     0.75f);

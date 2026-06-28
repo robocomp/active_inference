@@ -53,6 +53,8 @@ RobustLoss = "geman_mcclure"   # SOFT redescending (never zeroes a far point's g
 RobustLossScale = 0.10      # SDF residual scale in meters where robust losses start to saturate
 EvidenceSigmaM = 0.12       # inlier width for model-evidence ρ (mean exp(−½(SDF/σ_ρ)²) over the mask):
                             # a box too small → mask far outside → low ρ → belief precision loosens → grows
+EvidenceEmaAlpha = 0.9      # temporal smoothing of ρ: loosen only on SUSTAINED low evidence (~10 frames),
+                            # so a transient burst of noisy masks is ridden through, a real change followed
 MaskPrecision = 0.30        # RGB-mask silhouette term weight: back-projects the 2D table contour and
                             # pulls the model onto it (constrains occluded faces + yaw). 0 disables.
 MaskSilhouetteSamples = 8   # >0 = height-agnostic occluding-contour (samples/ray vs box+legs SDF);
@@ -63,8 +65,9 @@ RobustGncStartScale = 0.80  # GNC: wide initial robust scale, annealed to Robust
 RobustGncDecayCycles = 20   # GNC start scale ramps from RobustGncStartScale down to RobustLossScale
                             # over this many compute cycles, then anneals off so the converged pose
                             # stops being re-widened each frame and can settle. 0 = no lifetime decay.
-ExtentPctLo = 0.05          # lower percentile of the point span the footprint-extent term pins w/h to
-ExtentPctHi = 0.95          # upper percentile (tighter pair trims the depth-noise margin past the true edge)
+ExtentPctLo = 0.02          # lower percentile of the point span the footprint-extent term pins w/h to
+ExtentPctHi = 0.98          # upper percentile (0.05/0.95 trimmed the TRUE edges → under-sized; widened so
+                            # the extent targets the full observed span, robust still to a few outliers)
 ReopenExtentMarginM = 0.08  # re-open a converged fit when the observed span exceeds the model by > this
                             # (the mask-beyond-RFE / FE-stuck case — point residuals had no re-open path)
 
@@ -76,7 +79,11 @@ VoxelBankMaxPoints = 4000   # max number of table-owned voxels kept in memory
 VoxelBankQuantizationM = 0.02 # dedup grid (m) for voxel-bank hashing
 VoxelSelectRadiusMarginM = 0.50 # per-table XY ownership gate margin for mixed proto-tables
 VoxelSelectHeightMarginM = 0.25 # extra Z margin above table height when selecting owned voxels
-TopBandGate = true          # gate fit/extent points to ±TopBandM of the table-top height (drops floor/clutter that inflates w/h)
+TopBandGate = false         # OFF: a hard ±TopBandM pre-filter discards ALL leg points (below the top) before
+                            # the fit → the compound model's legs never get their evidence (the "residuals in
+                            # the legs are ignored" symptom). The compound SDF attributes under-table/leg points
+                            # correctly and the robust loss + ρ reject sparse floor clutter, so no band cutoff
+                            # is needed. (No hard evidence-gate — robustness handles outliers, not a threshold.)
 TopBandM = 0.08             # half-width (m) of the top-surface membership band
 
 [WarmStart]
@@ -100,6 +107,9 @@ FisherPeakRatchet = 2.5
 FisherPeakEma = 0.30
 FisherProcessStdM = 0.005        # calibrated-cov predict: process-noise std per fresh frame for length DOFs (m) → std floor
 FisherProcessStdYaw = 0.01       # calibrated-cov predict: process-noise std per fresh frame for yaw (rad)
+ProcessStdPosM = 0.001           # process noise for cx,cy ONLY (static table centre): small ⇒ position
+                                 # precision accumulates ⇒ its gain → 0 ⇒ the centre LOCKS, stops chasing
+                                 # each noisy frame's centroid. Size DOFs keep the larger FisherProcessStdM.
 FisherCsvPath = "etc/fisher_filter_log.csv"   # per-cycle evolution log for plotting (empty = off)
 # FE-spike guard (2026-06-27): drop a FRESH frame whose raw-fit FE is ≫ the instance's running FE level —
 # a contaminated point set (clutter / partial-or-wrong mask, extent blows up, FE ~20× vs ~1) the model
@@ -107,32 +117,16 @@ FisherCsvPath = "etc/fisher_filter_log.csv"   # per-cycle evolution log for plot
 # residual size wander at the source. Baseline is an EMA over ACCEPTED frames only.
 BadFitFeRatio = 4.0              # reject a fresh frame if raw_fe > this × baseline (lower = stricter)
 FeBaselineEma = 0.10            # EMA weight for the accepted-FE running baseline
-# Size RATCHET (2026-06-27): a table is rigid — a size DOF grows at full gain but SHRINKS at gain×this.
-# A far/occluded partial view shows a small visible extent but is NOT evidence the table is smaller, so it
-# must not collapse the box ("shrank to a third across the room"). Small=strong ratchet; 1.0=symmetric(off).
-SizeShrinkGain = 0.05
-# Sequential change-detector (CUSUM/SPRT) on top of the Kalman gain (always on): an isolated surprising
-# mask is rejected per-DOF (gain→0), and only a COHERENT same-direction run of surprise unlocks the DOF
-# and snaps it to the new evidence — stops a lone noisy mask from nudging a settled fit. Tunings below.
-CounterEvidenceBandM = 0.02       # length-DOF surprise deadband (m): innovations within this are "coherent"
-CounterEvidenceBandRad = 0.05     # yaw surprise deadband (rad)
-# Barrier = base + lambda·views, SPLIT position (cx,cy) vs size/shape so the table CENTRE locks harder
-# than its extents (position drifts one-sided with robot localisation → it was unlocking ~3× more than w/h).
-CounterEvidenceBasePos = 6.0      # position barrier floor (excess-bands) — centre heavily locked
-CounterEvidenceLambdaPos = 1.0    # extra position barrier per accumulated equivalent-view
-CounterEvidenceBaseSize = 1.5     # A/B retune (2026-06-27): was 3.0. Lower barrier so a REAL sustained size
-                                  # change unlocks in a few frames (the 0.99/3.0 combo froze the fit 20 cm under).
-CounterEvidenceLambdaSize = 0.2   # A/B retune: was 0.5. Per-view barrier growth softened so a well-observed DOF
-                                  # still re-adapts to genuine evidence instead of hard-locking.
-# Yaw decoupled with its OWN high barrier (2026-06-28): a static rectangle's orientation is its most rigid
-# property; it was unlocking (ceg_yaw=1) and rotating the table after minutes. Hard to unlock now.
-CounterEvidenceBaseYaw = 12.0     # yaw barrier floor (excess-bands) — heavily locked vs the size group's 1.5
-CounterEvidenceLambdaYaw = 1.0    # extra yaw barrier per accumulated equivalent-view
-YawObsAspectRef = 0.12            # yaw gain scales with |w−h|/max(w,h)/this → a near-square table freezes yaw
-CounterEvidenceDecay = 0.8        # per-coherent-frame pay-down of the accumulator (evidence FOR the belief)
-CounterEvidenceUnlockDeflate = 0.3  # on unlock, multiply that DOF's accumulated info by this (concede the old estimate)
-CounterEvidenceStepCap = 3.0      # A/B retune (2026-06-27): was 1.0. A sustained 3-4 frame run now clears the
-                                  # (lowered) barrier, but ONE outlier frame still can't — kills the gate-off wander.
+# Size RATCHET: a static rigid table's size is monotone evidence — seeing more only confirms it's BIGGER;
+# a partial/occluded view showing a smaller visible span is NOT evidence it shrank. So size GROWS at full
+# gain but is (near) grow-ONLY, accumulating the maximum observed extent across views and holding it. This
+# fixes both the under-sizing (it no longer relaxes back to the current partial span) and the "moves
+# instead of reshapes" (a box already covering the table needn't translate onto the visible part). 0 = pure
+# grow-only; small >0 lets a gross over-grow correct very slowly. (Principled occlusion-aware shrink =
+# free-space carving, still the documented next step.)
+SizeShrinkGain = 0.0
+# (The CUSUM/SPRT change-detector and the yaw barrier/aspect gate were removed 2026-06-28: falsifiability
+# is now the evidence-scaled precision ρ, and near-square yaw is handled by its naturally-low Fisher info.)
 # YOLO mask-score weighting: w = clamp01((score−floor)/(ref−floor))^power. IMPORTANT: a partially-viewed
 # table scores LOW (~0.3–0.45 here), so floor/ref must sit in that band — floor too high nukes every mask
 # (w=0 → the Fisher accumulator dies → no maturity stiffening → UNSTABLE, the bug just fixed). Tune to
@@ -168,7 +162,7 @@ DeathFrames = 300         # (only if DeathEnabled) frames unobserved before reti
 DeathEnabled = false      # OFF: a table is rigid persistent furniture — a long occlusion is not absence.
                           # Removal is by the MERGE operator ONLY (two tables can't share space).
 BirthMinSepM = 0.60       # a birth must be ≥ this (m) from every existing table (anti-duplicate)
-MergeOverlap = 0.30       # physical exclusion: collapse two instances whose oriented footprints overlap by
+MergeOverlap = 0.05       # physical exclusion: collapse two instances whose oriented footprints overlap by
                           # ≥ this fraction of the smaller footprint (two tables cannot share space). 0=off.
 BirthWidthM = 1.0         # default geometry for a table BORN from a mask (the fit refines from here)
 BirthDepthM = 0.6
