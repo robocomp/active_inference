@@ -25,6 +25,7 @@ struct ControllerObstacleVisual
 {
     ControllerPolygon polygon;
     ControllerObstacleKind kind = ControllerObstacleKind::Obstacle;
+    std::string label;   // short tag drawn on the footprint: t_1/c_1/b_1 (objects), o_1/o_2 (obstacles)
 };
 
 using ControllerObstacleVisuals = std::vector<ControllerObstacleVisual>;
@@ -40,6 +41,15 @@ struct ControllerParams
     float pos_gain = 1.2f;
     float rot_gain = 1.5f;
     bool interpolate_rt = true;
+    // Dead-reckon the DISPLAYED lidar cloud + robot icon forward from the last lidar
+    // timestamp to "now" using the measured base velocity, so the overlay tracks the robot
+    // instead of trailing it by the lidar/pose latency. Display-only — the obstacle buffer
+    // stays anchored at scan time.
+    bool overlay_extrapolate_to_now = true;
+    float overlay_extrapolation_max_dt_s = 0.4f;   // clamp the extrapolation horizon
+    // When non-empty, append per-cycle overlay-lag diagnostics to this CSV (for plotting the lag /
+    // velocity / RT-staleness evolution). Empty = disabled.
+    std::string overlay_csv_path;
     int max_lidar_draw_points = 600;
     std::string lidar_name = "lidar3D";
     // Zero-copy media plane (LiDAR). When lidar_use_media is true, the LiDAR point
@@ -143,6 +153,26 @@ struct ControllerRobotPose
         return tf;
     }
 };
+
+// Robot base velocity expressed in the ROOM frame (so extrapolation is a plain Euler step,
+// no body-frame rotation needed). Measured by differencing consecutive room poses.
+struct ControllerRoomVelocity
+{
+    float vx = 0.f;     // m/s
+    float vy = 0.f;     // m/s
+    float omega = 0.f;  // rad/s
+};
+
+// Constant-velocity dead-reckoning of a room pose over dt seconds.
+inline ControllerRobotPose extrapolate_room_pose(const ControllerRobotPose &pose,
+                                                 const ControllerRoomVelocity &vel,
+                                                 float dt_s)
+{
+    ControllerRobotPose out;
+    out.pos = pose.pos + Eigen::Vector2f(vel.vx, vel.vy) * dt_s;
+    out.theta = pose.theta + vel.omega * dt_s;
+    return out;
+}
 
 struct ControllerPlanningStep
 {

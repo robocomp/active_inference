@@ -75,7 +75,8 @@ void ControllerDisplay::update(const std::optional<ControllerRobotPose> &robot_p
                                const ControllerPolygon &last_mppi_average_trajectory,
                                int last_best_mppi_trajectory_idx,
                                int last_display_wp_index,
-                               int max_lidar_draw_points)
+                               int max_lidar_draw_points,
+                               const std::optional<Eigen::Affine2f> &lidar_correction)
 {
     // Staging only — copy into the snapshot, no Qt access. Safe from any thread.
     std::lock_guard<std::mutex> lock(snapshot_mutex_);
@@ -91,6 +92,7 @@ void ControllerDisplay::update(const std::optional<ControllerRobotPose> &robot_p
     snapshot_.last_best_mppi_trajectory_idx = last_best_mppi_trajectory_idx;
     snapshot_.last_display_wp_index = last_display_wp_index;
     snapshot_.max_lidar_draw_points = max_lidar_draw_points;
+    snapshot_.lidar_correction = lidar_correction;
     snapshot_.valid = true;
 }
 
@@ -171,6 +173,7 @@ void ControllerDisplay::present()
         display_path = snap.current_plan->room_path;
 
     viewer_2d_->draw_room_polygon(snap.room_polygon);
+    viewer_2d_->set_lidar_draw_correction(snap.lidar_correction.value_or(Eigen::Affine2f::Identity()));
     viewer_2d_->draw_lidar_points_from_buffer(snap.max_lidar_draw_points);
     viewer_2d_->draw_path({
         .path = std::move(display_path),

@@ -45,7 +45,8 @@ public:
                 const ControllerPolygon &last_mppi_average_trajectory,
                 int last_best_mppi_trajectory_idx,
                 int last_display_wp_index,
-                int max_lidar_draw_points);
+                int max_lidar_draw_points,
+                const std::optional<Eigen::Affine2f> &lidar_correction = std::nullopt);
 
     void set_command_text(const QString &text);
     void set_selected_affordance_text(const QString &text);
@@ -75,6 +76,7 @@ private:
         int last_best_mppi_trajectory_idx = -1;
         int last_display_wp_index = 0;
         int max_lidar_draw_points = 0;
+        std::optional<Eigen::Affine2f> lidar_correction;   // room(now)←room(scan) overlay dead-reckoning
         bool valid = false;
 
         QString command_text;

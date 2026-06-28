@@ -9,6 +9,7 @@
 #include <numeric>
 #include <print>
 #include <sstream>
+#include <unordered_map>
 #include <unordered_set>
 
 std::array<Eigen::Vector2f, ControllerObstacleTracker::kRememberedEdgeCount>
@@ -105,6 +106,16 @@ Eigen::Vector2f ControllerObstacleTracker::estimate_initial_obstacle_center(cons
 std::string ControllerObstacleTracker::published_obstacle_name(std::uint64_t obstacle_id)
 {
     return "obs" + std::to_string(obstacle_id);
+}
+
+std::string ControllerObstacleTracker::object_label_prefix(const std::string &object_type)
+{
+    if (object_type == "table") return "t";
+    if (object_type == "chair") return "c";
+    if (object_type == "cylinder" || object_type == "bottle") return "b";
+    if (!object_type.empty())
+        return std::string(1, static_cast<char>(std::tolower(object_type.front())));
+    return "x";
 }
 
 float ControllerObstacleTracker::distance_visibility_scale(const ControllerParams *params,
@@ -724,6 +735,8 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
     ControllerPolygons obstacles;
     known_graph_obstacles_.clear();
     display_obstacle_polygons_.clear();
+    object_label_counts_.clear();   // per-type object tags (t_1/c_1/b_1) restart each rebuild
+    obstacle_label_count_ = 0;      // shared o_N counter spans graph "obstacle" nodes + temporaries
     std::ostringstream report;
     std::ostringstream object_report;
     if (!graph_ || !inner_eigen_api_ || !graph_state_ || graph_state_->room_name.empty())
@@ -949,9 +962,21 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
         report << " center=(" << state.center.x() << "," << state.center.y() << ") yaw=" << state.yaw_rad;
         if (!polygon.empty())
             report << " first_vertex=(" << polygon.front().x() << "," << polygon.front().y() << ")";
-        const ControllerObstacleKind kind = node.type() == "object"
-            ? ControllerObstacleKind::Object
-            : ControllerObstacleKind::Obstacle;
+        // Anything a concept agent modelled (object/table/cylinder/chair) is an "object"; only
+        // an explicit graph "obstacle" node counts as an unmodelled obstacle here.
+        const ControllerObstacleKind kind = node.type() == "obstacle"
+            ? ControllerObstacleKind::Obstacle
+            : ControllerObstacleKind::Object;
+        std::string visual_label;
+        if (kind == ControllerObstacleKind::Object)
+        {
+            const std::string prefix = object_label_prefix(node.type());
+            visual_label = prefix + "_" + std::to_string(++object_label_counts_[prefix]);
+        }
+        else
+        {
+            visual_label = "o_" + std::to_string(++obstacle_label_count_);
+        }
         if (kind == ControllerObstacleKind::Object)
         {
             object_report << " | object='" << node.name() << "' id=" << node.id()
@@ -964,7 +989,8 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
                                                              .state = state,
                                                              .kind = kind});
         display_obstacle_polygons_.push_back(ControllerObstacleVisual{.polygon = polygon,
-                                                                      .kind = kind});
+                                                                      .kind = kind,
+                                                                      .label = visual_label});
         obstacles.push_back(std::move(polygon));
     }
 
@@ -1019,7 +1045,8 @@ void ControllerObstacleTracker::update_active_obstacle_polygons(std::uint64_t ti
         const auto polygon = instance.model.polygon();
         obstacle_polygons_.push_back(polygon);
         display_obstacle_polygons_.push_back(ControllerObstacleVisual{.polygon = polygon,
-                                                                      .kind = ControllerObstacleKind::Temporary});
+                                                                      .kind = ControllerObstacleKind::Temporary,
+                                                                      .label = "o_" + std::to_string(++obstacle_label_count_)});
     }
     // Per-cycle "Current obstacles debug" print removed (wobbling geometry → reprinted every frame).
     sync_temporary_obstacles_to_dsr(timestamp_ms);
@@ -1138,18 +1165,30 @@ bool ControllerObstacleTracker::create_temporary_lidar_obstacle(std::uint64_t ti
     if (!observation.has_value())
         return false;
 
-    if (const auto matched_index = match_temporary_obstacle(*observation); matched_index.has_value())
+    ingest_obstacle_observation(*observation, timestamp_ms);
+
+    update_active_obstacle_polygons(timestamp_ms, path_controller);
+    return true;
+}
+
+// Match-or-create a temporary obstacle from an observation and bump its Bayesian existence filter.
+// Extracted so the reactive blockage path and the proactive scan share one code path.
+void ControllerObstacleTracker::ingest_obstacle_observation(const ControllerObstacleObservation &observation,
+                                                            std::uint64_t timestamp_ms)
+{
+    if (!params_)
+        return;
+
+    if (const auto matched_index = match_temporary_obstacle(observation); matched_index.has_value())
     {
         auto &instance = temporary_obstacles_[matched_index.value()];
-        const auto augmented_observation = augment_with_remembered_points(*observation, instance);
+        const auto augmented_observation = augment_with_remembered_points(observation, instance);
         instance.free_energy = instance.model.update(augmented_observation, size_hardening_evidence(instance));
-        update_remembered_points(instance, *observation);
+        update_remembered_points(instance, observation);
         int support_points = 0;
-        for (const auto &point : observation->points)
-        {
+        for (const auto &point : observation.points)
             if (std::abs(obstacle_sdf(instance.model.state(), point)) < kRemovalSupportDistanceThreshold)
                 ++support_points;
-        }
         const float positive_delta = params_->temporary_obstacle_existence_observation_bias
                        + params_->temporary_obstacle_existence_support_gain * static_cast<float>(support_points)
                        + params_->temporary_obstacle_existence_remembered_gain * static_cast<float>(instance.remembered_points.size());
@@ -1162,23 +1201,188 @@ bool ControllerObstacleTracker::create_temporary_lidar_obstacle(std::uint64_t ti
     }
     else
     {
-        ControllerObstacleState initial_state{.center = estimate_initial_obstacle_center(*observation),
-                                              .yaw_rad = observation->yaw_rad,
-                                              .width_m = observation->width_m,
-                                              .depth_m = observation->depth_m};
+        ControllerObstacleState initial_state{.center = estimate_initial_obstacle_center(observation),
+                                              .yaw_rad = observation.yaw_rad,
+                                              .width_m = observation.width_m,
+                                              .depth_m = observation.depth_m};
         TemporaryObstacleInstance instance;
         instance.id = next_temporary_obstacle_id_++;
         instance.model = ControllerObstacleModel(initial_state, make_model_params());
-        instance.free_energy = instance.model.update(*observation, 0.f);
-        update_remembered_points(instance, *observation);
+        instance.free_energy = instance.model.update(observation, 0.f);
+        update_remembered_points(instance, observation);
         instance.existence_log_odds = params_->temporary_obstacle_existence_init_log_odds;
         instance.last_seen_ms = timestamp_ms;
         instance.expires_at_ms = 0;
         temporary_obstacles_.push_back(std::move(instance));
     }
+}
+
+namespace
+{
+bool point_in_polygon_2d(const std::vector<Eigen::Vector2f> &poly, const Eigen::Vector2f &p)
+{
+    bool inside = false;
+    const std::size_t n = poly.size();
+    for (std::size_t i = 0, j = n - 1; i < n; j = i++)
+        if (((poly[i].y() > p.y()) != (poly[j].y() > p.y())) &&
+            (p.x() < (poly[j].x() - poly[i].x()) * (p.y() - poly[i].y()) /
+                         (poly[j].y() - poly[i].y() + 1e-12f) + poly[i].x()))
+            inside = !inside;
+    return inside;
+}
+
+float distance_to_polygon_edges(const std::vector<Eigen::Vector2f> &poly, const Eigen::Vector2f &p)
+{
+    float best = std::numeric_limits<float>::max();
+    const std::size_t n = poly.size();
+    for (std::size_t i = 0, j = n - 1; i < n; j = i++)
+    {
+        const Eigen::Vector2f a = poly[j], b = poly[i];
+        const Eigen::Vector2f ab = b - a;
+        const float t = std::clamp((p - a).dot(ab) / std::max(ab.squaredNorm(), 1e-9f), 0.0f, 1.0f);
+        best = std::min(best, (p - (a + t * ab)).norm());
+    }
+    return best;
+}
+}  // namespace
+
+std::vector<Eigen::Vector2f> ControllerObstacleTracker::read_room_polygon_room_frame() const
+{
+    std::vector<Eigen::Vector2f> poly;
+    if (!graph_ || !graph_state_ || graph_state_->room_id == 0)
+        return poly;
+    const auto room = graph_->get_node(graph_state_->room_id);
+    if (!room.has_value())
+        return poly;
+    const auto px = graph_->get_attrib_by_name<delimiting_polygon_x_att>(room.value());
+    const auto py = graph_->get_attrib_by_name<delimiting_polygon_y_att>(room.value());
+    if (!px.has_value() || !py.has_value())
+        return poly;
+    const auto &xs = px->get();
+    const auto &ys = py->get();
+    const std::size_t n = std::min(xs.size(), ys.size());
+    poly.reserve(n);
+    for (std::size_t i = 0; i < n; ++i)
+        poly.emplace_back(xs[i], ys[i]);
+    return poly;
+}
+
+void ControllerObstacleTracker::scan_for_unmodelled_obstacles(std::uint64_t timestamp_ms,
+                                                              const ControllerRobotPose &robot_pose,
+                                                              rc::TrajectoryController &path_controller)
+{
+    if (!params_)
+        return;
+
+    // Throttle: the full-scene cluster pass is heavier than the per-instance refresh, so run it at a
+    // few Hz, not every control cycle.
+    constexpr std::uint64_t kScanPeriodMs = 700;
+    if (last_scan_ms_ != 0 && timestamp_ms >= last_scan_ms_ && timestamp_ms - last_scan_ms_ < kScanPeriodMs)
+        return;
+    last_scan_ms_ = timestamp_ms;
+
+    // Cold start: ensure the known-object set is populated before filtering (otherwise a real table
+    // would be re-detected as an obstacle); in steady state it is refreshed every cycle elsewhere.
+    if (known_graph_obstacles_.empty())
+        (void)read_obstacle_polygons(timestamp_ms);
+    prune_expired_temporary_obstacles(timestamp_ms);
+
+    const auto points_room = read_recent_lidar_points_in_room(timestamp_ms, 2);
+    if (points_room.empty())
+        return;
+
+    // Tunables (local for now; promote to ControllerParams if they need field tuning).
+    constexpr float kZMin = 0.10f;          // ignore floor returns
+    constexpr float kZMax = 1.50f;          // ignore high ceiling/overhead returns
+    constexpr float kWallMarginM = 0.30f;   // drop returns near/beyond the room boundary (walls)
+    constexpr float kRobotRadiusM = 0.40f;  // drop the robot's own returns
+    constexpr float kCellM = 0.20f;         // grid-cluster cell size
+    constexpr std::size_t kMaxObstacles = 24;
+    const float explain_margin = std::max(0.08f, 0.5f * std::max(0.0f, params_->temporary_obstacle_padding_m));
+    const int   min_cluster_pts = std::max(4, params_->temporary_obstacle_min_points);
+
+    const auto room_poly = read_room_polygon_room_frame();
+    const bool have_room = room_poly.size() >= 3;
+
+    // ── Keep only LiDAR returns that NOTHING explains: not floor/ceiling, not the robot, inside the
+    //    room and clear of the walls, and not inside any modelled object (table/chair/cylinder/…). ──
+    std::vector<Eigen::Vector2f> unexplained;
+    unexplained.reserve(points_room.size());
+    for (const auto &p : points_room)
+    {
+        if (p.z() < kZMin || p.z() > kZMax)
+            continue;
+        const Eigen::Vector2f q(p.x(), p.y());
+        if ((q - robot_pose.pos).norm() < kRobotRadiusM)
+            continue;
+        if (have_room && (!point_in_polygon_2d(room_poly, q) || distance_to_polygon_edges(room_poly, q) < kWallMarginM))
+            continue;
+        bool explained = false;
+        for (const auto &known : known_graph_obstacles_)
+            if (point_explained_by_obstacle(known.state, q, explain_margin)) { explained = true; break; }
+        if (explained)
+            continue;
+        unexplained.push_back(q);
+    }
+    if (static_cast<int>(unexplained.size()) < min_cluster_pts)
+        return;
+
+    // ── Grid clustering: bin to cells, connect 8-neighbour occupied cells, gather per cluster. ──
+    auto pack = [](std::int32_t ix, std::int32_t iy) -> std::int64_t
+    { return (static_cast<std::int64_t>(ix) << 32) | static_cast<std::int64_t>(static_cast<std::uint32_t>(iy)); };
+    auto cell_of = [&](const Eigen::Vector2f &q) -> std::int64_t
+    { return pack(static_cast<std::int32_t>(std::floor(q.x() / kCellM)), static_cast<std::int32_t>(std::floor(q.y() / kCellM))); };
+
+    std::unordered_map<std::int64_t, std::vector<std::size_t>> cells;
+    for (std::size_t i = 0; i < unexplained.size(); ++i)
+        cells[cell_of(unexplained[i])].push_back(i);
+
+    std::unordered_set<std::int64_t> visited;
+    std::vector<std::vector<Eigen::Vector2f>> clusters;
+    for (const auto &[key, idxs] : cells)
+    {
+        (void)idxs;
+        if (visited.count(key))
+            continue;
+        std::vector<std::int64_t> stack{key};
+        visited.insert(key);
+        std::vector<Eigen::Vector2f> cluster;
+        while (!stack.empty())
+        {
+            const std::int64_t k = stack.back();
+            stack.pop_back();
+            const std::int32_t ix = static_cast<std::int32_t>(k >> 32);
+            const std::int32_t iy = static_cast<std::int32_t>(static_cast<std::uint32_t>(k & 0xffffffffLL));
+            for (const std::size_t pi : cells[k])
+                cluster.push_back(unexplained[pi]);
+            for (int dx = -1; dx <= 1; ++dx)
+                for (int dy = -1; dy <= 1; ++dy)
+                {
+                    if (dx == 0 && dy == 0) continue;
+                    const std::int64_t nk = pack(ix + dx, iy + dy);
+                    if (cells.count(nk) && !visited.count(nk)) { visited.insert(nk); stack.push_back(nk); }
+                }
+        }
+        if (static_cast<int>(cluster.size()) >= min_cluster_pts)
+            clusters.push_back(std::move(cluster));
+    }
+
+    // ── Each cluster → an obstacle (match-or-create), capped. ──
+    for (auto &cluster : clusters)
+    {
+        const auto observation = ControllerObstacleModel::make_observation(
+            cluster, robot_pose.pos,
+            std::max(0.0f, params_->temporary_obstacle_padding_m),
+            std::max(0.0f, params_->temporary_obstacle_occlusion_depth_m));
+        if (!observation.has_value())
+            continue;
+        const bool matched = match_temporary_obstacle(*observation).has_value();
+        if (!matched && temporary_obstacles_.size() >= kMaxObstacles)
+            continue;   // cap NEW obstacles; existing ones still refresh
+        ingest_obstacle_observation(*observation, timestamp_ms);
+    }
 
     update_active_obstacle_polygons(timestamp_ms, path_controller);
-    return true;
 }
 
 ControllerPolygon ControllerObstacleTracker::make_obstacle_polygon(const Eigen::Vector2f &center,

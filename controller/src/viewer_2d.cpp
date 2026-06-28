@@ -29,11 +29,11 @@ ObstaclePalette obstacle_palette(ControllerObstacleKind kind)
     switch (kind)
     {
         case ControllerObstacleKind::Object:
-        // Objects (e.g., table) are rendered in blue tones.
-        return {QColor(25, 99, 170),
-            QColor(76, 164, 232, 120),
-            QColor(56, 189, 248, 230),
-            QColor(12, 74, 140, 240)};
+        // Model objects interpreted by a concept agent (table/cylinder/chair/object) — green.
+        return {QColor(34, 139, 58),
+            QColor(74, 200, 110, 130),
+            QColor(110, 231, 140, 230),
+            QColor(20, 101, 42, 240)};
         case ControllerObstacleKind::Temporary:
         // The controller's OWN temporary lidar obstacles (unexplained returns) — orange.
         return {QColor(194, 103, 25),
@@ -41,11 +41,11 @@ ObstaclePalette obstacle_palette(ControllerObstacleKind kind)
             QColor(251, 146, 60, 230),
             QColor(154, 52, 18, 240)};
         case ControllerObstacleKind::Obstacle:
-        // Graph "obstacle" nodes — red, distinct from temporary (orange) and objects (blue).
-        return {QColor(170, 40, 40),
-            QColor(230, 76, 76, 130),
-            QColor(248, 80, 80, 230),
-            QColor(120, 20, 20, 240)};
+        // Graph "obstacle" nodes — also unmodelled, rendered orange like the temporary ones.
+        return {QColor(194, 103, 25),
+            QColor(245, 158, 11, 150),
+            QColor(251, 146, 60, 230),
+            QColor(154, 52, 18, 240)};
         default:
         return {QColor(194, 103, 25),
             QColor(245, 158, 11, 150),
@@ -363,19 +363,31 @@ void Viewer2D::draw_lidar_points_from_buffer(int max_points)
     pen.setCosmetic(true);
     QBrush brush(QColor("ForestGreen"));
 
+    // Dead-reckoning correction: re-anchor the (robot-attached) cloud from the scan-time pose to
+    // "now". Identity when overlay extrapolation is off, so this is a no-op in that case.
+    const bool correct = !lidar_draw_correction_.isApprox(Eigen::Affine2f::Identity());
+
     std::size_t draw_index = 0;
     for (std::size_t point_index = 0; point_index < count && draw_index < draw_count; point_index += stride)
     {
+        float px = xs[point_index];
+        float py = ys[point_index];
+        if (correct)
+        {
+            const Eigen::Vector2f c = lidar_draw_correction_ * Eigen::Vector2f(px, py);
+            px = c.x();
+            py = c.y();
+        }
         if (draw_index < lidar_items_.size())
         {
-            lidar_items_[draw_index]->setPos(xs[point_index], ys[point_index]);
+            lidar_items_[draw_index]->setPos(px, py);
             lidar_items_[draw_index]->setVisible(true);
         }
         else
         {
             auto *item = agv_->scene.addEllipse(ellipse_rect, pen, brush);
             item->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
-            item->setPos(xs[point_index], ys[point_index]);
+            item->setPos(px, py);
             item->setZValue(5);
             lidar_items_.push_back(item);
         }
@@ -521,6 +533,19 @@ void Viewer2D::draw_path(const PathDrawData &data)
             dot->setPos(center);
             dot->setZValue(19);
             path_draw_items_.push_back(dot);
+
+            if (!obstacle_visual.label.empty())
+            {
+                QFont label_font;
+                label_font.setPointSizeF(8.0);
+                label_font.setBold(true);
+                auto *label = agv_->scene.addSimpleText(QString::fromStdString(obstacle_visual.label), label_font);
+                label->setBrush(QBrush(palette.pen));
+                label->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+                label->setPos(center.x() + 0.06, center.y() - 0.06);
+                label->setZValue(20);
+                path_draw_items_.push_back(label);
+            }
         }
     }
 

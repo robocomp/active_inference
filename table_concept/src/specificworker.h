@@ -51,7 +51,6 @@
 #include "table_scene_graph.h" // rc::TableSceneGraph (DSR node/RT I/O)
 #include "table_fitter.h"      // rc::TableFitter (active-inference core)
 #include "epistemic_planner.h"
-#include "prior_store.h"
 #include "../../common/sample_queue/sample_queue.h"
 #include "table_affordance.h"
 #include "table_model.h"
@@ -111,10 +110,10 @@ private:
                             float free_energy, float explanation_ratio);
     void trigger_graph_layout_twopi();   // injected into TableSceneGraph as the relayout callback
 
-    // Multi-instance birth/associate/death (shared, when cfg_.tracker_enabled). Associates "table" masks
-    // to instances, spawns a table from an unexplained mask, retires a long-unobserved one.
+    // Multi-instance birth/associate/merge (shared rc::InstanceTracker; the only instance-lifecycle path).
+    // Associates "table" masks to instances, spawns a table from an unexplained mask, merges overlaps.
     rc::InstanceTracker tracker_;
-    void run_instance_tracker();   // called from compute() in place of scaffold when tracker_enabled
+    void run_instance_tracker();   // called every cycle from compute()
     // Physical-exclusion invariant: two tables cannot share space. Collapse any pair of instances whose
     // oriented footprints overlap beyond Tracker.MergeOverlap, keeping the more-observed one.
     void merge_overlapping_instances();
@@ -146,8 +145,6 @@ private:
     AgentPresenceCoordinator presence_coordinator_;
 
     rc::TableConfig                                         cfg_;
-    std::unique_ptr<rc::PriorStore>                         prior_store_;
-    std::vector<rc::TablePrior>                             priors_cache_;
     rc::EpistemicPlanner                                    epistemic_planner_;
     std::unique_ptr<rc::TableFitter>                    fitter_;   // active-inference fit core (owns instances)
 
@@ -163,9 +160,6 @@ private:
     std::unique_ptr<rc::MaskIngestor>                   mask_ingestor_;   // perception (masks-only)
     std::unique_ptr<rc::TableSceneGraph>               scene_graph_;     // DSR node/RT I/O
     uint64_t                                            room_node_id_ = 0;
-
-    // Paths resolved from ConfigLoader
-    std::string priors_path_;
 
 signals:
     void presenceReady();

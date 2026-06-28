@@ -20,7 +20,6 @@ namespace rc {
 struct TableConfig
 {
     // Paths
-    std::string priors_path = "etc/object_priors.toml";
 
     // Agent convergence
     float state_eps         = 0.04f;   // Σ|Δstate| threshold between cycles for convergence (m+rad)
@@ -31,11 +30,8 @@ struct TableConfig
     float explanation_ratio_thresh = 0.3f;
     float obs_distance      = 1.8f;    // d_obs for epistemic planner
     float delta_min         = 20.0f;   // min face coverage count
-    float gain_threshold    = 0.1f;    // min gain for the legacy coverage-deficit epistemic proxy
     // Epistemic info-gain selection: score faces by the expected entropy reduction ΔH from the Fisher
     // posterior (Σ) instead of the coverage-deficit proxy, and pick the most informative face.
-    bool  epistemic_use_info_gain = true;
-    float epistemic_min_info_gain = 0.3f;   // WITHDRAW threshold: ΔH (nats) below which the affordance is dropped
     int   epistemic_cooldown_cycles = 200;    // min cycles withdrawn after satisfaction
     int   table_log_period_frames = 30;
     int   voxel_bank_max_points = 4000;
@@ -46,7 +42,7 @@ struct TableConfig
     // estimated table-top height, dropping the floor / under-table / clutter population that is
     // attributed to legs and inflates the w/h footprint (and corrupts the leg/height fit). Off by
     // default; the extent diagnostic (n_top/n_leg, observed span vs fitted) shows whether it helps.
-    bool  top_band_gate_enabled = false;
+    bool  top_band_gate_enabled = true;
     float top_band_m            = 0.08f;   // half-width of the top-surface membership band (m)
 
     // TableModel parameters (forwarded to TableModelParams)
@@ -69,7 +65,9 @@ struct TableConfig
     float robust_gnc_start_scale = 0.80f;   // GNC: wide initial robust scale annealed to robust_loss_scale
     float mask_precision = 0.30f;           // RGB-mask silhouette term weight (0 disables)
     int   sil_tangent_samples = 8;          // >0 = height-agnostic occluding-contour (samples/ray); 0 = top-plane only
-    float sil_reopen_residual_m = 0.15f;    // a fresh mask with silhouette residual above this re-opens a converged fit
+    // Extent re-open: if the observed point span (5–95 pct) exceeds the model footprint by more than this,
+    // the table is bigger than the current (frozen) fit — the "mask extends beyond the RFE" symptom. Re-open
+    // so the extent term grows w/h to the points. Self-limiting: closes the gap, then re-settles.
     int   robust_gnc_decay_cycles = 20;     // GNC start scale ramps to target over this many cycles, then off
 
     // SampleQueue parameters (forwarded to SampleQueueParams)
@@ -90,30 +88,14 @@ struct TableConfig
     // Observability-aware warm-start acceptance
     float warm_pts_min                 = 12.0f;
     float warm_pts_max                 = 30.0f;
-    float warm_coverage_min_side       = 2.0f;
-    float warm_rho_freeze              = 0.25f;
-    float warm_size_pts_release        = 0.60f;   // rho_pts above which w/h trust points & ignore the side-coverage freeze
-    int   warm_settle_cycles           = 40;      // cycles for acceptance gain to decay full→floor after a new-evidence burst
-    int   warm_reopen_admit            = 8;       // net new queue anchors in a cycle that count as a fresh viewpoint (reset maturity)
-    float warm_settle_floor            = 0.05f;   // acceptance-gain multiplier once mature (lower = stiffer lock; recovers on new evidence)
-    float warm_info_half               = 20.0f;   // accumulated per-face view-info at which the w/h gain halves (lower = hardens faster)
-    // Fisher information filter: replaces the face-coverage view-info PROXY with the real per-DOF
-    // observation Fisher information (curvature of the SDF data-likelihood). Each fresh mask
-    // contributes calibrated, anisotropic evidence per DOF; the accumulated info stiffens the
-    // acceptance gain so a well-observed extent hardens (belief→knowledge) while an unseen face
-    // stays plastic — the stabiliser for successive viewpoints as the robot orbits the table.
-    bool  fisher_filter_enabled        = true;
-    // Kalman-gain stiffness: drive each DOF's acceptance lerp gain directly from the calibrated
-    // information filter as λ_j = obs_info_j / (Y_pred_j + obs_info_j) — the per-DOF Kalman gain —
-    // instead of the coverage/confidence/InfoHalf heuristic stack. Well-observed DOFs get a small
-    // gain (stiff) yet still snap to a genuinely high-information view; uniform across all 8 DOFs.
-    bool  fisher_kalman_stiffness      = true;
+    // Belief stabiliser (always on; the A/B toggles were removed in Stage 1): per-DOF SDF-likelihood
+    // Fisher information, accumulated across viewpoints, drives the acceptance lerp through the Kalman
+    // gain λ_j = obs_j/(Y_pred_j + obs_j) — a well-observed DOF hardens (belief→knowledge) while an
+    // unseen face stays plastic. The keys below are its numeric tunings.
     float fisher_info_decay            = 0.95f;   // stiffener (acc): scalar fading memory; <1 forgets, 1 = pure accumulation
-    // Quality-aware maturity: normalise the views accumulator by a (decaying) running quality bar so a
-    // CLOSE approach after far glimpses re-opens the fit (rescales the stale far-view "views" down)
-    // instead of staying locked at the misrepresented far fit. Off → every view counts ~1 (far hardens
-    // as fast as close — the over-stiffening that froze the fit).
-    bool  fisher_quality_rescale       = true;
+    // Quality-aware maturity (always on): normalise the views accumulator by a (decaying) running quality
+    // bar so a CLOSE approach after far glimpses re-opens the fit (rescales the stale far-view "views"
+    // down) instead of staying locked at the misrepresented far fit.
     float fisher_peak_decay            = 1.0f;    // quality-bar slow forgetting (1 = non-decaying)
     // Only re-open the fit when a view beats the quality bar by ≥ this ratio (a GENUINE close approach,
     // ~10–100×), and fold the new high in as an EMA — so ordinary per-frame obs flutter (which swings
@@ -129,17 +111,11 @@ struct TableConfig
     // process-noise std in each DOF's native units; variance Q = std².
     float fisher_process_std_m         = 0.005f;  // length DOFs (cx,cy,w,h,H,leg,inset): 5 mm / fresh frame
     float fisher_process_std_yaw       = 0.01f;   // yaw: ~0.57° / fresh frame
-    // (A) Freeze-on-stale: the information-filter axiom — no measurement, no update. When no fresh mask
-    // arrives this cycle, do NOT gradient-step or re-accept the belief (which would re-optimise the same
-    // frozen anchor set and amplify noise into the accepted state/FE); just recompute FE at the unchanged
-    // state for reporting. Set false to restore the legacy every-cycle re-fit (for A/B).
-    bool  freeze_belief_on_stale       = true;
-    // (A2) Freeze-on-bad-fit: a FRESH frame whose raw-fit free energy is ≫ the instance's running FE
-    // level is a contaminated observation (clutter / partial-or-wrong mask → points the model cannot
-    // explain; extent blows up, FE spikes ~20× vs ~1). Updating the belief on it injects the size wander.
-    // Same axiom as freeze-on-stale, for "fresh-but-untrustworthy": skip the acceptance, keep the belief,
-    // recompute FE for reporting. The baseline is an EMA over ACCEPTED frames only (bad frames don't bias it).
-    bool  freeze_belief_on_bad_fit     = true;
+    // Freeze-on-bad-fit (always on): a FRESH frame whose raw-fit free energy is ≫ the instance's running
+    // FE level is a contaminated observation (clutter / partial-or-wrong mask → points the model cannot
+    // explain; extent blows up, FE spikes ~20× vs ~1). Skip the acceptance, keep the belief, recompute FE
+    // for reporting. The baseline is an EMA over ACCEPTED frames only (bad frames don't bias it). This and
+    // freeze-on-stale (no fresh mask → no update) are the information-filter axiom: untrustworthy → ignore.
     float bad_fit_fe_ratio             = 4.0f;    // reject a fresh frame if raw_fe > ratio · fe_baseline
     float fe_baseline_ema              = 0.10f;   // EMA weight for the accepted-FE running baseline
     // Size RATCHET: a size DOF (w,h,H,leg) grows at its full acceptance gain but SHRINKS at gain·this — a
@@ -152,22 +128,17 @@ struct TableConfig
     // forces the Kalman gain K→1 and bypasses all accumulated stabilisation. For a well-behaved SDF
     // |∂SDF/∂θ| is O(1); clamp the per-point slope to this bound before squaring. 0 = disabled (for A/B).
     float fisher_grad_clamp            = 2.0f;
-    // (C) Maturity stiffening: scale the per-frame Kalman acceptance gain by vh/(vh + accumulated_views),
-    // so a well-observed DOF (many equivalent views) barely moves on any single frame — history dominates
-    // a lone noisy measurement — while an unseen DOF (views≈0 → factor≈1) stays fully plastic. The
-    // accumulated-views signal is the normalised Fisher accumulator (fisher_info[j]). false → pure
-    // per-frame Kalman gain (for A/B); requires KalmanGainStiffness to have any effect.
-    bool  fisher_maturity_stiffness    = true;
+    // Maturity stiffening (always on): scale the per-frame Kalman acceptance gain by vh/(vh + views), so a
+    // well-observed DOF (many equivalent views) barely moves on any single frame — history dominates a lone
+    // noisy measurement — while an unseen DOF (views≈0 → factor≈1) stays fully plastic. The views signal is
+    // the normalised Fisher accumulator (fisher_info[j]).
     float fisher_views_half            = 4.0f;    // equivalent-views at which the maturity stiffener halves the gain (lower = hardens faster)
-    // (D) Counter-evidence gate (CUSUM / sequential change-detector): asymmetric, ratcheting trust on
-    // top of the Kalman gain. Per DOF, the surprise of each fresh frame — innovation |raw−belief| in
-    // units of the deadband — accumulates a SIGNED counter-evidence S_j only while it stays one-sided;
-    // a lone glitch bumps S_j once and decays away (rejected, gain→0), while a CONTIGUOUS same-direction
-    // run of surprises grows S_j until it overcomes a barrier that scales with the filter's accumulated
-    // confidence (the better the prediction, the more coherent counter-evidence is needed to unlock it).
-    // On unlock the DOF snaps to the new evidence (gain→1), S_j resets, and its accumulated precision is
-    // deflated (the old estimate is conceded). Requires KalmanGainStiffness. false = disabled (A/B).
-    bool  counter_evidence_gate        = true;
+    // Counter-evidence gate (CUSUM / sequential change-detector; always on): asymmetric, ratcheting
+    // trust on top of the Kalman gain. Per DOF, the surprise of each fresh frame — innovation |raw−belief|
+    // in deadband units — accumulates a SIGNED counter-evidence S_j only while one-sided; a lone glitch
+    // bumps S_j once and decays away (rejected, gain→0), while a CONTIGUOUS same-direction run grows S_j
+    // until it overcomes a barrier scaling with the filter's accumulated confidence. On unlock the DOF
+    // snaps to the new evidence (gain→1), S_j resets, and its accumulated precision is deflated.
     float counter_evidence_band_m      = 0.02f;   // length-DOF surprise deadband (m): innovations within this are "coherent"
     float counter_evidence_band_rad    = 0.05f;   // yaw surprise deadband (rad)
     // Barrier = base + lambda·fisher_info[j], SPLIT into position (cx,cy) vs size/shape (w,h,H,leg,yaw,
@@ -176,11 +147,21 @@ struct TableConfig
     // more confident coherent run is needed before that group re-adapts.
     float counter_evidence_base_pos    = 6.0f;    // position barrier floor (excess-bands): centre is heavily locked
     float counter_evidence_lambda_pos  = 1.0f;    // extra position barrier per accumulated equivalent-view
-    float counter_evidence_base_size   = 3.0f;    // size/shape barrier floor (excess-bands)
-    float counter_evidence_lambda_size = 0.5f;    // extra size/shape barrier per accumulated equivalent-view
+    float counter_evidence_base_size   = 1.5f;    // size/shape barrier floor (excess-bands)
+    float counter_evidence_lambda_size = 0.2f;    // extra size/shape barrier per accumulated equivalent-view
+    // Yaw is decoupled from the size group with a HIGH barrier: a static rectangle's orientation, once
+    // observed, is its most rigid property and the easiest to confuse from a partial/ambiguous view —
+    // it was unlocking (ceg_yaw=1) every few minutes and rotating the table. Make it hard to unlock.
+    float counter_evidence_base_yaw    = 12.0f;   // yaw barrier floor (excess-bands) — yaw is heavily locked
+    float counter_evidence_lambda_yaw  = 1.0f;    // extra yaw barrier per accumulated equivalent-view
+    // Yaw observability gate: yaw is only meaningful for a clearly RECTANGULAR footprint. Scale the yaw
+    // acceptance gain by clamp01(|w−h|/max(w,h) / aspect_ref) so a near-SQUARE table (yaw geometrically
+    // unobservable) freezes its yaw at the seed instead of chasing noise. 1.0 ≈ fully observable above
+    // a (aspect_ref) fractional w/h difference.
+    float yaw_obs_aspect_ref           = 0.12f;
     float counter_evidence_decay       = 0.8f;    // per-coherent-frame pay-down of S_j (a coherent frame is evidence FOR the belief)
     float counter_evidence_unlock_deflate = 0.3f; // on unlock, multiply that DOF's accumulated info by this (concede the old estimate)
-    float counter_evidence_step_cap    = 1.0f;    // cap the per-frame CUSUM increment (excess-bands) so ONE big glitch can't
+    float counter_evidence_step_cap    = 3.0f;    // cap the per-frame CUSUM increment (excess-bands) so ONE big glitch can't
                                                   // jump the barrier — unlock then requires a RUN of coherent surprise (proper SPRT)
     // ── YOLO mask-score weighting of the update ─────────────────────────────────────────────────
     // The detector's confidence is the measurement's reliability: weight each fresh frame's observation
@@ -191,7 +172,6 @@ struct TableConfig
     // just above the detector's NOISE score and `ref` at a CONFIDENT score — for a partially-viewed
     // table YOLO scores stay low (~0.3–0.45), so floor/ref must sit in that band or every mask is
     // nuked (w=0 → the Fisher accumulator dies → no maturity stiffening → unstable).
-    bool  mask_conf_weight = true;
     float mask_conf_floor  = 0.2f;   // YOLO score at/below which the mask is ~ignored in the update
     float mask_conf_ref    = 0.5f;   // YOLO score at/above which the mask is fully trusted (w=1)
     float mask_conf_power  = 2.0f;   // steepness of the trust ramp between floor and ref
@@ -201,14 +181,7 @@ struct TableConfig
     // x←cx, y←cy, z←H/2, yaw←ψ are data-driven; roll/pitch are unobservable (large). rt_cov_scale
     // calibrates the raw curvature toward NEES≈1 (raw precision over-counts spatially-correlated
     // points), like bottle_concept's cov_eff_scale. Written only when the geometry is (re)published.
-    bool  rt_cov_upload = true;
     float rt_cov_scale  = 1.0f;
-    float warm_lambda_pos_base         = 0.15f;
-    float warm_lambda_pos_gain         = 0.45f;
-    float warm_lambda_size_base        = 0.02f;
-    float warm_lambda_size_gain        = 0.18f;
-    float warm_lambda_yaw_base         = 0.01f;
-    float warm_lambda_yaw_gain         = 0.12f;
     float warm_confidence_decay         = 0.70f;
     float warm_confidence_coverage_gain = 0.35f;
     float warm_confidence_residual_gain = 0.65f;
@@ -218,7 +191,6 @@ struct TableConfig
     // by a covariance-gated global 1-to-1; an unexplained mask spawns a new table; an instance unobserved
     // for tracker_death_frames is retired. Tables are large static furniture: keep birth_min_sep large
     // (no two table centres that close) and death_frames LARGE so a long occlusion doesn't drop a table.
-    bool  tracker_enabled          = false;
     float tracker_gate_mahalanobis = 9.0f;    // χ²₂ gate (~3σ) for a mask↔instance match once it has a cov
     float tracker_gate_fallback_m  = 0.50f;   // metric XY gate (m) before an instance has a usable covariance
     // Detection-noise std R (m) added to the fit cov in the Mahalanobis gate (S = P + R²I). For a table
@@ -245,6 +217,7 @@ struct TableConfig
     // Without it a born table falls back to the loose generic prior_size_std and the first far/partial
     // mask can reshape it freely. Applied in ensure_instance when no matching prior entry exists.
     float tracker_birth_size_std   = 0.15f;
+    bool  tracker_nll_cost         = false;   // association cost = ½(m²+ln|S|) NLL (vs raw m²); see InstanceTracker
 };
 
 // Fill a TableConfig from a RoboComp ConfigLoader (all keys optional, defaults above).

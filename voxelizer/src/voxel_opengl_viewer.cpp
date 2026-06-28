@@ -325,6 +325,46 @@ void VoxelOpenGLViewer::update_skeletons(std::span<const std::vector<float>> ske
 {
     std::scoped_lock lk(skeletons_mutex_);
     skeletons_.assign(skeletons.begin(), skeletons.end());
+
+    // Facing is under-constrained (per-frame Kabsch to noisy keypoints), so the raw torso normal
+    // jitters → the arrow oscillates. EMA-smooth it per person (matched by chest proximity across
+    // updates), aligning each new sample to the tracked direction first so transient 180° flips are
+    // rejected (a real turn rotates gradually and still tracks). Computed at the DATA rate here.
+    constexpr float ALPHA = 0.12f;     // EMA weight on the new sample (lower = smoother)
+    constexpr float MATCH2 = 0.4f * 0.4f;
+    skeleton_facing_.assign(skeletons_.size(), QVector3D(0, 0, 0));
+    std::vector<FacingTrack> next(skeletons_.size());
+    for (std::size_t i = 0; i < skeletons_.size(); ++i)
+    {
+        const auto& s = skeletons_[i];
+        if (s.size() < 18 * 3) continue;
+        const auto fin = [&](int j){ return std::isfinite(s[j*3]) and std::isfinite(s[j*3+1]) and std::isfinite(s[j*3+2]); };
+        if (not (fin(1) and fin(2) and fin(5) and fin(8) and fin(11))) continue;
+        const auto P = [&](int j){ return QVector3D(s[j*3], s[j*3+1], s[j*3+2]); };
+        const QVector3D neck = P(1), pelvis = (P(8) + P(11)) * 0.5f, chest = (neck + pelvis) * 0.5f;
+        QVector3D fwd = QVector3D::crossProduct(neck - pelvis, P(5) - P(2));
+        if (fwd.lengthSquared() < 1e-10f) continue;
+        fwd.normalize();
+        if (fin(0) and QVector3D::dotProduct(fwd, P(0) - neck) < 0.f) fwd = -fwd;   // toward the face
+
+        int best = -1; float bestd = MATCH2;
+        for (std::size_t t = 0; t < facing_tracks_.size(); ++t)
+        {
+            const float d = (facing_tracks_[t].chest - chest).lengthSquared();
+            if (facing_tracks_[t].facing.lengthSquared() > 1e-6f and d < bestd) { bestd = d; best = static_cast<int>(t); }
+        }
+        QVector3D sm = fwd;
+        if (best >= 0)
+        {
+            QVector3D prev = facing_tracks_[best].facing;
+            if (QVector3D::dotProduct(prev, fwd) < 0.f) fwd = -fwd;                 // reject transient flip
+            sm = (prev * (1.f - ALPHA) + fwd * ALPHA).normalized();
+        }
+        skeleton_facing_[i] = sm;
+        next[i] = {chest, sm};
+    }
+    facing_tracks_.swap(next);
+
     request_update_throttled();
 }
 
@@ -1468,7 +1508,8 @@ void VoxelOpenGLViewer::paintGL()
     if (show_skeletons_)
     {
         std::vector<std::vector<float>> local_skels;
-        { std::scoped_lock lk(skeletons_mutex_); local_skels = skeletons_; }
+        std::vector<QVector3D> local_facing;
+        { std::scoped_lock lk(skeletons_mutex_); local_skels = skeletons_; local_facing = skeleton_facing_; }
 
         if (!local_skels.empty())
         {
@@ -1510,29 +1551,56 @@ void VoxelOpenGLViewer::paintGL()
             constexpr float BONE_R = 0.020f;   // tube radius (m)
             std::vector<Vertex> bone_tris;
             std::vector<Vertex> joint_pts;
-            const auto append_bone = [&](const QVector3D& a, const QVector3D& b)
+            const auto append_tube = [](std::vector<Vertex>& out, const QVector3D& a, const QVector3D& b,
+                                        float radius, float cr, float cg, float cb)
             {
                 const QVector3D axis = b - a;
                 const float len = axis.length();
                 if (len < 1e-5f) return;
                 const QVector3D n = axis / len;
                 const QVector3D ref = (std::abs(n.y()) < 0.9f) ? QVector3D(0,1,0) : QVector3D(1,0,0);
-                const QVector3D u = QVector3D::crossProduct(n, ref).normalized() * BONE_R;
-                const QVector3D v = QVector3D::crossProduct(n, u).normalized() * BONE_R;
+                const QVector3D u = QVector3D::crossProduct(n, ref).normalized() * radius;
+                const QVector3D v = QVector3D::crossProduct(n, u).normalized() * radius;
                 constexpr int NS = 6;
                 constexpr float TWO_PI = 6.28318530718f;
-                const auto vtx = [](const QVector3D& p){ return Vertex{p.x(), p.y(), p.z(), 0.10f, 0.95f, 0.95f}; };
+                const auto vtx = [&](const QVector3D& p){ return Vertex{p.x(), p.y(), p.z(), cr, cg, cb}; };
                 for (int k = 0; k < NS; ++k)
                 {
                     const float a0 = TWO_PI * k / NS, a1 = TWO_PI * (k + 1) / NS;
                     const QVector3D r0 = std::cos(a0) * u + std::sin(a0) * v;
                     const QVector3D r1 = std::cos(a1) * u + std::sin(a1) * v;
-                    bone_tris.push_back(vtx(a + r0)); bone_tris.push_back(vtx(a + r1)); bone_tris.push_back(vtx(b + r1));
-                    bone_tris.push_back(vtx(a + r0)); bone_tris.push_back(vtx(b + r1)); bone_tris.push_back(vtx(b + r0));
+                    out.push_back(vtx(a + r0)); out.push_back(vtx(a + r1)); out.push_back(vtx(b + r1));
+                    out.push_back(vtx(a + r0)); out.push_back(vtx(b + r1)); out.push_back(vtx(b + r0));
                 }
             };
-            for (const auto& s : local_skels)
+            // Solid cone (apex + base ring fan), for the facing-arrow head.
+            const auto append_cone = [](std::vector<Vertex>& out, const QVector3D& apex, const QVector3D& base,
+                                        float radius, float cr, float cg, float cb)
             {
+                const QVector3D axis = apex - base;
+                const float len = axis.length();
+                if (len < 1e-5f) return;
+                const QVector3D n = axis / len;
+                const QVector3D ref = (std::abs(n.y()) < 0.9f) ? QVector3D(0,1,0) : QVector3D(1,0,0);
+                const QVector3D u = QVector3D::crossProduct(n, ref).normalized() * radius;
+                const QVector3D v = QVector3D::crossProduct(n, u).normalized() * radius;
+                constexpr int NS = 8;
+                constexpr float TWO_PI = 6.28318530718f;
+                const auto vtx = [&](const QVector3D& p){ return Vertex{p.x(), p.y(), p.z(), cr, cg, cb}; };
+                for (int k = 0; k < NS; ++k)
+                {
+                    const float a0 = TWO_PI * k / NS, a1 = TWO_PI * (k + 1) / NS;
+                    const QVector3D r0 = std::cos(a0) * u + std::sin(a0) * v;
+                    const QVector3D r1 = std::cos(a1) * u + std::sin(a1) * v;
+                    out.push_back(vtx(apex)); out.push_back(vtx(base + r0)); out.push_back(vtx(base + r1));
+                    out.push_back(vtx(base)); out.push_back(vtx(base + r1)); out.push_back(vtx(base + r0));
+                }
+            };
+            const auto append_bone = [&](const QVector3D& a, const QVector3D& b)
+            { append_tube(bone_tris, a, b, BONE_R, 0.10f, 0.95f, 0.95f); };
+            for (std::size_t si = 0; si < local_skels.size(); ++si)
+            {
+                const auto& s = local_skels[si];
                 if (static_cast<int>(s.size()) < K * 3)
                     continue;
                 const auto valid = [&](int j) {
@@ -1548,6 +1616,24 @@ void VoxelOpenGLViewer::paintGL()
                         joint_pts.push_back(Vertex{p.x(), p.y(), p.z(),
                                                    JOINT_RGB[j][0], JOINT_RGB[j][1], JOINT_RGB[j][2]});
                     }
+
+                // Facing arrow — front/back cue. Direction is the EMA-smoothed torso normal computed in
+                // update_skeletons (raw per-frame facing jitters); drawn out the chest as a white shaft
+                // + RED cone at the front.
+                if (valid(1) and valid(8) and valid(11)
+                    and si < local_facing.size() and local_facing[si].lengthSquared() > 1e-6f)
+                {
+                    const auto P = [&](int j){ return QVector3D(s[j*3], s[j*3+1], s[j*3+2]); };   // room frame
+                    const QVector3D chest = (P(1) + (P(8) + P(11)) * 0.5f) * 0.5f;
+                    const QVector3D fwd = local_facing[si];                       // smoothed, room frame
+                    constexpr float L = 0.35f, HEAD = 0.12f;
+                    const auto toO = [&](const QVector3D& p){ return QVector3D(fxs * p.x(), p.z(), fys * p.y()); };
+                    const QVector3D base     = toO(chest);
+                    const QVector3D headBase = toO(chest + fwd * (L - HEAD));
+                    const QVector3D tip      = toO(chest + fwd * L);
+                    append_tube(bone_tris, base, headBase, 0.012f, 1.0f, 1.0f, 1.0f);   // white shaft
+                    append_cone(bone_tris, tip, headBase, 0.045f, 1.0f, 0.15f, 0.15f);  // red front tip
+                }
             }
 
             if (not bone_tris.empty())

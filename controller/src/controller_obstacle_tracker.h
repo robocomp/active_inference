@@ -7,6 +7,7 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "controller_obstacle_model.h"
@@ -46,6 +47,13 @@ class ControllerObstacleTracker
                                             const Eigen::Vector2f &blockage_center_room,
                                             float blockage_radius_m,
                                             rc::TrajectoryController &path_controller);
+        // Proactive "everything unmodelled is an obstacle" sweep (throttled internally): cluster the
+        // recent LiDAR returns that no concept-agent object explains and aren't the floor/walls/robot,
+        // and create/refresh one temporary obstacle per cluster. The existing existence-filter / prune
+        // / retire-when-modelled machinery then manages their lifecycle (multi-instance).
+        void scan_for_unmodelled_obstacles(std::uint64_t timestamp_ms,
+                                           const ControllerRobotPose &robot_pose,
+                                           rc::TrajectoryController &path_controller);
 
     private:
         static constexpr int kRememberedEdgeCount = 4;
@@ -119,6 +127,8 @@ class ControllerObstacleTracker
                                                         float depth_m);
         static Eigen::Vector2f estimate_initial_obstacle_center(const ControllerObstacleObservation &observation);
         static std::string published_obstacle_name(std::uint64_t obstacle_id);
+        // Single-letter viewer tag prefix per modelled object type: table→t, chair→c, cylinder/bottle→b.
+        static std::string object_label_prefix(const std::string &object_type);
         static float distance_visibility_scale(const ControllerParams *params,
                                             const ControllerRobotPose &robot_pose,
                                             const ControllerObstacleState &state);
@@ -148,6 +158,11 @@ class ControllerObstacleTracker
         void prune_expired_temporary_obstacles(std::uint64_t timestamp_ms);
         void retire_temporary_obstacles_explained_by_graph();
         std::optional<std::size_t> match_temporary_obstacle(const ControllerObstacleObservation &observation) const;
+        // Match-or-create a temporary obstacle from an observation + bump its existence filter. Shared
+        // by the reactive blockage path and the proactive scan.
+        void ingest_obstacle_observation(const ControllerObstacleObservation &observation, std::uint64_t timestamp_ms);
+        // Room delimiting polygon in room frame (for the proactive scan's wall/outside filtering).
+        std::vector<Eigen::Vector2f> read_room_polygon_room_frame() const;
 
         ControllerPolygons read_obstacle_polygons(std::uint64_t timestamp_ms);
         std::vector<Eigen::Vector3f> read_recent_lidar_points_in_room(std::uint64_t timestamp_ms, int max_scans);
@@ -166,8 +181,11 @@ class ControllerObstacleTracker
         std::vector<GraphObstacleRecord> known_graph_obstacles_;
         ControllerPolygons obstacle_polygons_;
         ControllerObstacleVisuals display_obstacle_polygons_;
+        std::unordered_map<std::string, int> object_label_counts_;   // per-type object tag counter (t/c/b)
+        int obstacle_label_count_ = 0;                               // shared o_N counter (graph + temp)
         std::vector<TemporaryObstacleInstance> temporary_obstacles_;
         std::uint64_t next_temporary_obstacle_id_ = 1;
+        std::uint64_t last_scan_ms_ = 0;   // throttle for scan_for_unmodelled_obstacles
         mutable std::optional<std::uint64_t> last_lidar_timestamp_ms_;
         mutable std::uint64_t lidar_period_ms_ = 100;
         mutable std::string obstacle_debug_report_;

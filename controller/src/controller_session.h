@@ -2,6 +2,7 @@
 
 #include <QPointF>
 
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -91,6 +92,11 @@ private:
     // Contract observation-stillness gate: track the base speed (finite-difference of the room-frame
     // robot pose → m/s, rad/s) and test it against the active contract's max_observe_vel/omega.
     void update_base_speed(const ControllerRobotPose &pose, std::uint64_t timestamp_ms);
+    // Dead-reckon the displayed cloud + icon from the last lidar stamp to "now" (stores the icon pose
+    // and the cloud correction), and append a lag-diagnostics row to the overlay CSV.
+    void update_overlay_extrapolation(const ControllerWorldModel &world_model,
+                                      const ControllerRobotPose &robot_pose,
+                                      std::uint64_t timestamp_ms);
     bool robot_still() const;
     void finalize_reached(rc::AffordanceManager &affordance_manager,
                           rc::TrajectoryController &path_controller,
@@ -105,6 +111,15 @@ private:
     // Base speed (room frame) for the contract stillness gate, plus the previous pose it differences.
     float base_speed_lin_ = 0.0f;                  // m/s   (EMA-smoothed)
     float base_speed_ang_ = 0.0f;                  // rad/s (EMA-smoothed)
+    ControllerRoomVelocity room_vel_;              // room-frame base velocity (EMA), for overlay dead-reckoning
+    std::uint64_t overlay_now_ms_ = 0;             // current compute time (overlay extrapolation target)
+    std::optional<std::uint64_t> overlay_lidar_ts_ms_;  // last lidar stamp (overlay extrapolation base time)
+    std::optional<ControllerRobotPose> overlay_icon_pose_;   // dead-reckoned robot pose for the icon
+    std::optional<Eigen::Affine2f> overlay_correction_;      // room(now)←room(scan) for the cloud
+    std::uint64_t overlay_diag_last_ms_ = 0;       // throttle for the std::cout overlay summary
+    std::ofstream overlay_csv_;                    // per-cycle overlay-lag diagnostics
+    bool overlay_csv_open_ = false;
+    std::uint64_t overlay_csv_last_ms_ = 0;        // throttle for CSV rows
     std::optional<ControllerRobotPose> prev_robot_pose_;
     std::uint64_t prev_robot_ts_ms_ = 0;
     ControllerPolygon room_polygon_;

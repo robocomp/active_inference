@@ -33,7 +33,6 @@ LIST(APPEND SOURCES
   ../src/table_fitter.cpp
   ../src/table_model.cpp
   ../src/epistemic_planner.cpp
-  ../src/prior_store.cpp
   ../src/table_affordance.cpp
   ${ACTIVE_INFERENCE_COMMON_DIR}/robust_metrics/robust_metrics.cpp
   ${ACTIVE_INFERENCE_COMMON_DIR}/robust_metrics/robust_metrics_torch.cpp
@@ -53,7 +52,6 @@ LIST(APPEND HEADERS
   ${ACTIVE_INFERENCE_COMMON_DIR}/sample_queue/sample_queue.h
   ../src/sample_queue_geometry.h
   ../src/epistemic_planner.h
-  ../src/prior_store.h
   ../src/table_affordance.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/timeseries_plot.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/custom_widget.h

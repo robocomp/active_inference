@@ -70,6 +70,16 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
     out.tracker_birth_min_sep_m  = getf("Tracker.BirthMinSepM",       0.20f);
     out.tracker_detection_noise_m = getf("Tracker.DetectionNoiseM",   0.05f);
     out.tracker_merge_overlap    = getf("Tracker.MergeOverlap",       0.30f);
+    out.tracker_nll_cost         = getb("Tracker.NllCost",            false);
+    out.masks_use_camera_frame = getb("Masks.UseCameraFrame", true);
+    out.masks_source_frame     = gets("Masks.SourceFrame",    "zed");
+    out.masks_target_frame     = gets("Masks.TargetFrame",    "room");
+    out.rt_cov_add_chain       = getb("Masks.RtCovAddChain",  true);
+    out.dynamics_model = gets("Dynamics.Model",        "constant_velocity");
+    out.cv_accel_std   = getf("Dynamics.CvAccelStd",   0.5f);
+    out.cv_meas_std    = getf("Dynamics.CvMeasStd",    0.01f);
+    out.cv_init_vel_std = getf("Dynamics.CvInitVelStd", 0.5f);
+    out.cv_dt_default_s = getf("Dynamics.CvDtDefaultS", 0.1f);
     out.epistemic_obs_distance    = getf("Epistemic.ObsDistance",     0.9f);
     out.epistemic_view_info       = getf("Epistemic.ViewInfo",        50.0f);
     out.epistemic_cooldown_cycles = geti("Epistemic.CooldownCycles",  200);

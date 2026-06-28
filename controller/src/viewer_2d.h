@@ -55,6 +55,7 @@ class Viewer2D : public QObject
     void set_lidar_buffer(LidarPointBuffer *buffer);
     void set_lidar_visible(bool visible);
     void set_mppi_paths_visible(bool visible);
+    void set_lidar_draw_correction(const Eigen::Affine2f &correction) { lidar_draw_correction_ = correction; }
     void draw_lidar_points_from_buffer(int max_points);
     void draw_path(const PathDrawData &data);
     void clear_path_items();
@@ -70,6 +71,7 @@ private:
     QGraphicsPolygonItem *polygon_item_ = nullptr;
     QGraphicsPolygonItem *inner_polygon_item_ = nullptr;
     LidarPointBuffer *lidar_buffer_ = nullptr;
+    Eigen::Affine2f lidar_draw_correction_ = Eigen::Affine2f::Identity();   // overlay dead-reckoning (room→room)
     bool lidar_visible_ = true;
     bool mppi_paths_visible_ = false;
     std::vector<QGraphicsEllipseItem *> lidar_items_;

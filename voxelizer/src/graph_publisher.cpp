@@ -117,6 +117,7 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
         G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_confidences", std::vector<float>{});
         G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_support_offsets", std::vector<float>{0.0f});
         G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_support_points", std::vector<float>{});
+        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_support_points_cam", std::vector<float>{});
         G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_centroids_xyz", std::vector<float>{});
         G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_bbox_min_xyz", std::vector<float>{});
         G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_bbox_max_xyz", std::vector<float>{});
@@ -138,6 +139,11 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
     std::vector<float> confidences;
     std::vector<float> support_offsets;
     std::vector<float> support_points;
+    // Dual-publish: the SAME support points in CAMERA (zed) frame (raw deprojected, no room transform),
+    // 1-to-1 with support_points/support_offsets. Lets a consumer transform through the probabilistic
+    // chain (zed→…→target) itself — pinned to the capture stamp + carrying localization covariance —
+    // instead of inheriting the room transform baked here. Room-frame array kept for legacy consumers.
+    std::vector<float> support_points_cam;
     std::vector<float> centroids_xyz;
     std::vector<float> bbox_min_xyz;
     std::vector<float> bbox_max_xyz;
@@ -170,7 +176,9 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
         // masked pixel that deprojects is kept (radius outlier removal below still trims the
         // sparse silhouette-edge tail).
         std::vector<Eigen::Vector3f> gated;
+        std::vector<Eigen::Vector3f> gated_cam;   // same points in camera (zed) frame, parallel to gated
         gated.reserve(static_cast<std::size_t>(det.bbox.area() / std::max<int>(1, static_cast<int>(mask_stride * mask_stride))));
+        gated_cam.reserve(gated.capacity());
         std::vector<float> det_pixels;   // raw 2D foreground (col,row), depth-independent
 
         for (int row = min_y; row < max_y; row += static_cast<int>(mask_stride))
@@ -194,10 +202,12 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
                 const float px = (static_cast<float>(col) - cx) * depth / fx;
                 const float py = depth;
                 const float pz = (cy - static_cast<float>(row)) * depth / fy;
-                Eigen::Vector3f point_room = room_rotation * Eigen::Vector3f(px, py, pz) + room_translation;
+                const Eigen::Vector3f point_cam(px, py, pz);
+                Eigen::Vector3f point_room = room_rotation * point_cam + room_translation;
                 point_room.z() += z_lift_m;
 
                 gated.push_back(point_room);
+                gated_cam.push_back(point_cam);
             }
         }
 
@@ -207,11 +217,13 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
         // Radius outlier removal: keep points that have enough neighbours nearby. The dense
         // object body survives; the sparse silhouette-edge tail is trimmed.
         std::vector<Eigen::Vector3f> mask_points_room;
+        std::vector<Eigen::Vector3f> mask_points_cam;   // parallel to mask_points_room (same survivors)
         if (params_.MASK_OUTLIER_MIN_NEIGHBORS > 0 and params_.MASK_OUTLIER_RADIUS_M > 0.0f
             and gated.size() > static_cast<std::size_t>(params_.MASK_OUTLIER_MIN_NEIGHBORS))
         {
             const float r2 = params_.MASK_OUTLIER_RADIUS_M * params_.MASK_OUTLIER_RADIUS_M;
             mask_points_room.reserve(gated.size());
+            mask_points_cam.reserve(gated.size());
             for (std::size_t i = 0; i < gated.size(); ++i)
             {
                 int neighbours = 0;
@@ -219,11 +231,17 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
                     if (i != j and (gated[i] - gated[j]).squaredNorm() <= r2)
                         ++neighbours;
                 if (neighbours >= params_.MASK_OUTLIER_MIN_NEIGHBORS)
+                {
                     mask_points_room.push_back(gated[i]);
+                    mask_points_cam.push_back(gated_cam[i]);
+                }
             }
         }
         else
+        {
             mask_points_room = std::move(gated);
+            mask_points_cam = std::move(gated_cam);
+        }
 
         if (mask_points_room.empty())
             continue;
@@ -266,6 +284,12 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
             support_points.push_back(point.y());
             support_points.push_back(point.z());
         }
+        for (const auto& point : mask_points_cam)
+        {
+            support_points_cam.push_back(point.x());
+            support_points_cam.push_back(point.y());
+            support_points_cam.push_back(point.z());
+        }
 
         total_support_points += mask_points_room.size();
     }
@@ -279,6 +303,7 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
     G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_confidences", confidences);
     G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_support_offsets", support_offsets);
     G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_support_points", support_points);
+    G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_support_points_cam", support_points_cam);
     G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_centroids_xyz", centroids_xyz);
     G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_bbox_min_xyz", bbox_min_xyz);
     G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_bbox_max_xyz", bbox_max_xyz);

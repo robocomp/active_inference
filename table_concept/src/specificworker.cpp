@@ -334,20 +334,15 @@ void SpecificWorker::initialize()
     else
         qWarning() << "table_concept: no room node found at startup";
 
-    // Setup prior store
-    prior_store_ = std::make_unique<rc::PriorStore>(priors_path_);
-    priors_cache_ = prior_store_->load_priors();
-
     // Active-inference fit core. Owns the instance map; collaborates with the ingestor + scene graph.
     fitter_ = std::make_unique<rc::TableFitter>(
-        G, inner_eigen_.get(), cfg_, priors_cache_, mask_ingestor_.get(), scene_graph_.get());
+        G, inner_eigen_.get(), cfg_, mask_ingestor_.get(), scene_graph_.get());
 
     // Missing table nodes are scaffolded lazily from priors only after masks
     // provide some table evidence in the current scene.
 
-    // Build rc::EpistemicPlanner with configured parameters
-    epistemic_planner_ = rc::EpistemicPlanner(cfg_.delta_min, cfg_.gain_threshold, cfg_.obs_distance,
-                                              cfg_.epistemic_use_info_gain, cfg_.epistemic_min_info_gain);
+    // Build rc::EpistemicPlanner (info-gain scoring only; stand-off distance is the sole parameter).
+    epistemic_planner_ = rc::EpistemicPlanner(cfg_.obs_distance);
 
     // Stale affordance nodes are swept on entering Operating (presence hook) and on shutdown — see
     // remove_stale_affordance_nodes(), keyed on the parent object type (robust to node-name renames).
@@ -385,9 +380,8 @@ void SpecificWorker::initialize()
         ts_state_plot_->set_visible_window(60.f);
         series_layout->addWidget(ts_state_plot_);
 
-        // (D) Counter-evidence accumulator S_w/S_h — only when the gate is enabled. Watch S charge on a
+        // (D) Counter-evidence accumulator S_w/S_h (the CUSUM gate is always on). Watch S charge on a
         // surprise and decay back (glitch absorbed) vs climb to the barrier (a real change unlocks).
-        if (cfg_.counter_evidence_gate)
         {
             ts_ce_plot_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
             ts_ce_plot_->set_visible_window(60.f);
@@ -428,10 +422,7 @@ void SpecificWorker::compute()
     }
 
     mask_ingestor_->refresh();
-    if (cfg_.tracker_enabled)
-        run_instance_tracker();   // data-driven birth/associate/death
-    else
-        scene_graph_->scaffold_missing_table_nodes(priors_cache_, mask_ingestor_->packet(), room_node_id_);
+    run_instance_tracker();   // data-driven birth / associate / merge (the only instance-lifecycle path)
 
     const auto table_nodes = G->get_nodes_by_type("table");
     for (const auto& node : table_nodes)
@@ -439,8 +430,8 @@ void SpecificWorker::compute()
 }
 
 // Data-driven multi-instance lifecycle (mirrors bottle_concept::run_instance_tracker). Tables are large
-// static furniture, so death_frames is large and birth_min_sep wide. Replaces the prior-scaffold +
-// greedy nearest-mask when cfg_.tracker_enabled.
+// static furniture, so birth_min_sep is wide, death is off, and overlaps merge. The only path that
+// creates/associates table instances (the prior-scaffold + greedy nearest-mask were removed in Stage 2).
 // Collapse instances whose footprints overlap (same physical table fitted twice): keep the one with more
 // integrated fresh evidence, retire the other (affordance + node). Runs before tracking so a duplicate is
 // gone before it is fed a mask. v1 keeps-best; precision-weighted DOF pooling is a later refinement.
@@ -496,6 +487,7 @@ void SpecificWorker::run_instance_tracker()
     tp.birth_frames     = cfg_.tracker_birth_frames;
     tp.death_frames     = cfg_.tracker_death_frames;
     tp.birth_min_sep_m  = cfg_.tracker_birth_min_sep_m;
+    tp.nll_cost         = cfg_.tracker_nll_cost;
     tracker_.set_params(tp);
 
     // Tracks ← live instances: centre from the fit, XY cov from the stabiliser posterior precision
@@ -727,7 +719,6 @@ void SpecificWorker::publish_table_intentions(rc::TableInstance& inst,
 void SpecificWorker::load_config(const ConfigLoader& cfg)
 {
     cfg_ = rc::load_table_config(cfg);
-    priors_path_ = cfg_.priors_path;           // mirrored into the existing members for now
 }
 
 

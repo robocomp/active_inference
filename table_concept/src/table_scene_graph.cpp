@@ -23,104 +23,6 @@ TableSceneGraph::TableSceneGraph(std::shared_ptr<DSR::DSRGraph> graph,
     : G_(std::move(graph)), rt_api_(rt_api), cfg_(cfg), relayout_(std::move(relayout))
 {}
 
-void TableSceneGraph::scaffold_missing_table_nodes(const std::vector<TablePrior>& priors,
-                                                   const MaskIngestor::MasksPacket& masks,
-                                                   std::uint64_t room_node_id)
-{
-    if (!masks.valid || priors.empty())
-        return;
-
-    std::vector<bool> mask_used(masks.slices.size(), false);
-
-    for (const auto& p : priors)
-    {
-        if (G_->get_node(p.node_name).has_value())
-            continue;
-
-        int best_mask_idx = -1;
-        int fallback_mask_idx = -1;
-        float best_dist_xy = std::numeric_limits<float>::max();
-        const float prior_half_diag = 0.5f * std::sqrt(p.width_m * p.width_m + p.depth_m * p.depth_m);
-        const float max_match_dist_xy = std::max(1.0f, 3.0f * p.sigma_pose + prior_half_diag);
-        for (std::size_t i = 0; i < masks.slices.size(); ++i)
-        {
-            if (mask_used[i])
-                continue;
-
-            const auto& slice = masks.slices[i];
-            if (slice.label != "table")
-                continue;
-            if (slice.support_end <= slice.support_begin)
-                continue;
-
-            if (fallback_mask_idx < 0)
-                fallback_mask_idx = static_cast<int>(i);
-
-            const float dx = slice.centroid.x() - p.room_x_m;
-            const float dy = slice.centroid.y() - p.room_y_m;
-            const float dist_xy = std::hypot(dx, dy);
-            if (dist_xy <= max_match_dist_xy && dist_xy < best_dist_xy)
-            {
-                best_dist_xy = dist_xy;
-                best_mask_idx = static_cast<int>(i);
-            }
-        }
-
-        if (best_mask_idx < 0)
-            best_mask_idx = fallback_mask_idx;
-
-        if (best_mask_idx < 0)
-        {
-            std::print("table_concept: no usable table mask for '{}' yet\n", p.node_name);
-            continue;
-        }
-
-        const auto& matched_slice = masks.slices[static_cast<std::size_t>(best_mask_idx)];
-        mask_used[static_cast<std::size_t>(best_mask_idx)] = true;
-
-        auto room_opt = G_->get_node(room_node_id);
-        if (not room_opt.has_value())
-        {
-            qWarning() << "table_concept: room node missing, cannot scaffold" << p.node_name.c_str();
-            continue;
-        }
-
-        DSR::Node table_node = DSR::Node::create<table_node_type>(p.node_name);
-        G_->add_or_modify_attrib_local<width_m_att> (table_node, p.width_m);
-        G_->add_or_modify_attrib_local<depth_m_att> (table_node, p.depth_m);
-        G_->add_or_modify_attrib_local<height_m_att>(table_node, p.height_m);
-        G_->add_or_modify_attrib_local<level_att>   (table_node, 3);
-        G_->add_or_modify_attrib_local<parent_att>  (table_node, room_node_id);
-        // Canvas position: derive from room node + fixed offset so the viewer doesn't randomize
-        // pos_x/pos_y on every render tick.
-        {
-            const float rpx = G_->get_attrib_by_name<pos_x_att>(room_opt.value()).value_or(200.f);
-            const float rpy = G_->get_attrib_by_name<pos_y_att>(room_opt.value()).value_or(200.f);
-            G_->add_or_modify_attrib_local<pos_x_att>(table_node, rpx + 150.f);
-            G_->add_or_modify_attrib_local<pos_y_att>(table_node, rpy +  50.f);
-        }
-
-        const auto id_opt = G_->insert_node(table_node);
-        if (not id_opt.has_value())
-        {
-            qWarning() << "table_concept: failed to insert node" << p.node_name.c_str();
-            continue;
-        }
-
-        const float z = p.height_m * 0.5f;
-        rt_api_->insert_or_assign_edge_RT(room_opt.value(), id_opt.value(),
-                                          {matched_slice.centroid.x(), matched_slice.centroid.y(), z},
-                                          {0.0f, 0.0f, p.yaw_rad});
-
-        if (relayout_)
-            relayout_();
-
-        std::print("table_concept: created node '{}' id={} from masks frame={} at ({:.2f}, {:.2f})\n",
-                   p.node_name, id_opt.value(), masks.frame_id,
-                   matched_slice.centroid.x(), matched_slice.centroid.y());
-    }
-}
-
 std::uint64_t TableSceneGraph::create_instance_from_detection(const Eigen::Vector3f& centroid_room,
                                                               std::uint64_t room_node_id)
 {
@@ -260,7 +162,7 @@ void TableSceneGraph::step_write_model(TableInstance& inst, DSR::Node& node,
 
 void TableSceneGraph::write_rt_covariance(std::uint64_t room_id, TableInstance& inst, bool force)
 {
-    if (not cfg_.rt_cov_upload or room_id == 0)
+    if (room_id == 0)
         return;
 
     // Per-DOF accumulated precision from the Fisher filter: [cx,cy,w,h,H,leg,yaw,inset].

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <iostream>
 #include <print>
 #include <sstream>
 
@@ -113,6 +114,9 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     }
 
     update_base_speed(*robot_pose, timestamp_ms);   // base speed for the contract stillness gate
+    overlay_now_ms_ = timestamp_ms;                 // overlay dead-reckoning target + base time
+    overlay_lidar_ts_ms_ = obstacle_tracker.last_lidar_timestamp_ms();
+    update_overlay_extrapolation(world_model, *robot_pose, timestamp_ms);
 
     ControllerPlanningStep step;
     step.robot_pose = *robot_pose;
@@ -238,7 +242,19 @@ void ControllerSession::update_display(const std::optional<ControllerRobotPose> 
                                        const ControllerPolygons &obstacle_rfe_points,
                                        int max_lidar_draw_points) const
 {
-    display.update(robot_pose,
+    // Dead-reckoning of the DISPLAYED cloud + icon to "now" is computed once per cycle in
+    // update_overlay_extrapolation (stored in overlay_icon_pose_ / overlay_correction_); here we
+    // just apply it. The lidar buffer (obstacle detection) stays anchored at scan time.
+    auto icon_pose = robot_pose;
+    std::optional<Eigen::Affine2f> lidar_correction;
+    if (robot_pose.has_value())
+    {
+        if (overlay_icon_pose_.has_value())
+            icon_pose = overlay_icon_pose_;
+        lidar_correction = overlay_correction_;
+    }
+
+    display.update(icon_pose,
                    room_polygon_,
                    inner_polygon_,
                    current_plan_,
@@ -249,7 +265,8 @@ void ControllerSession::update_display(const std::optional<ControllerRobotPose> 
                    last_mppi_average_trajectory_,
                    last_best_mppi_trajectory_idx_,
                    last_display_wp_index_,
-                   max_lidar_draw_points);
+                   max_lidar_draw_points,
+                   lidar_correction);
 }
 
 void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
@@ -261,6 +278,9 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                                      const TimeSource &time_source)
 {
     obstacle_tracker.refresh_temporary_lidar_obstacle(time_source(), robot_pose, path_controller);
+    // Proactive: model anything the concept agents don't (throttled internally). Complements the
+    // reactive blockage-driven creation below; both feed the same multi-instance tracker.
+    obstacle_tracker.scan_for_unmodelled_obstacles(time_source(), robot_pose, path_controller);
 
     if (!current_plan_.has_value())
     {
@@ -443,15 +463,81 @@ void ControllerSession::update_base_speed(const ControllerRobotPose &pose, std::
         if (dt > 1e-3f)
         {
             constexpr float kTwoPi = 6.28318530718f;
-            const float lin = (pose.pos - prev_robot_pose_->pos).norm() / dt;
-            const float ang = std::abs(std::remainder(pose.theta - prev_robot_pose_->theta, kTwoPi)) / dt;
+            const Eigen::Vector2f dpos = (pose.pos - prev_robot_pose_->pos) / dt;   // room-frame m/s
+            const float dtheta = std::remainder(pose.theta - prev_robot_pose_->theta, kTwoPi) / dt;
+            const float lin = dpos.norm();
+            const float ang = std::abs(dtheta);
             // EMA so a single jittery pose sample doesn't spuriously trip (or release) the gate.
             base_speed_lin_ = 0.5f * base_speed_lin_ + 0.5f * lin;
             base_speed_ang_ = 0.5f * base_speed_ang_ + 0.5f * ang;
+            // Directional room-frame velocity (signed), for overlay dead-reckoning.
+            room_vel_.vx    = 0.5f * room_vel_.vx + 0.5f * dpos.x();
+            room_vel_.vy    = 0.5f * room_vel_.vy + 0.5f * dpos.y();
+            room_vel_.omega = 0.5f * room_vel_.omega + 0.5f * dtheta;
         }
     }
     prev_robot_pose_  = pose;
     prev_robot_ts_ms_ = timestamp_ms;
+}
+
+void ControllerSession::update_overlay_extrapolation(const ControllerWorldModel &world_model,
+                                                     const ControllerRobotPose &robot_pose,
+                                                     std::uint64_t timestamp_ms)
+{
+    overlay_icon_pose_.reset();
+    overlay_correction_.reset();
+    if (!params_ || !params_->overlay_extrapolate_to_now)
+        return;
+    if (!overlay_lidar_ts_ms_.has_value() || timestamp_ms <= *overlay_lidar_ts_ms_)
+        return;
+
+    const std::uint64_t gap_ms = timestamp_ms - *overlay_lidar_ts_ms_;
+    const float raw_dt = static_cast<float>(gap_ms) * 1e-3f;
+    const float dt = std::min(raw_dt, std::max(0.f, params_->overlay_extrapolation_max_dt_s));
+    const auto now_pose = extrapolate_room_pose(robot_pose, room_vel_, dt);
+    overlay_icon_pose_ = now_pose;
+    overlay_correction_ = now_pose.as_transform() * robot_pose.as_transform().inverse();
+
+    const Eigen::Vector2f disp = now_pose.pos - robot_pose.pos;
+    const float dtheta = now_pose.theta - robot_pose.theta;
+
+    // RT-staleness probe: the room←robot pose the tree returns at "now" vs at the lidar stamp. If
+    // RTdelta≈0 while the robot moves, the upstream pose feed is stale/clamped — the real lag source.
+    float rt_delta = -1.f;
+    if (const auto pose_now_rt = world_model.read_robot_pose_in_room(timestamp_ms, std::nullopt);
+        pose_now_rt.has_value())
+        rt_delta = (pose_now_rt->pos - robot_pose.pos).norm();
+
+    // CSV (lazy-open + header, truncated each run), throttled to ~10 Hz.
+    if (!params_->overlay_csv_path.empty() && timestamp_ms - overlay_csv_last_ms_ >= 100)
+    {
+        overlay_csv_last_ms_ = timestamp_ms;
+        if (!overlay_csv_open_)
+        {
+            overlay_csv_.open(params_->overlay_csv_path, std::ios::out | std::ios::trunc);
+            if (overlay_csv_.is_open())
+                overlay_csv_ << "t_ms,lidar_ts,gap_ms,vx,vy,omega,extrap_dt_s,disp_m,dtheta_rad,RTdelta_m\n";
+            overlay_csv_open_ = true;
+        }
+        if (overlay_csv_.is_open())
+        {
+            overlay_csv_ << timestamp_ms << ',' << *overlay_lidar_ts_ms_ << ',' << gap_ms << ','
+                         << room_vel_.vx << ',' << room_vel_.vy << ',' << room_vel_.omega << ','
+                         << dt << ',' << disp.norm() << ',' << dtheta << ',' << rt_delta << '\n';
+            overlay_csv_.flush();
+        }
+    }
+
+    // Throttled std::cout summary (qInfo is swallowed by the no-op message handler unless Verbose).
+    if (timestamp_ms - overlay_diag_last_ms_ >= 1000)
+    {
+        overlay_diag_last_ms_ = timestamp_ms;
+        std::cout << "[OverlayExtrap] now=" << timestamp_ms << " lidar_ts=" << *overlay_lidar_ts_ms_
+                  << " gap_ms=" << gap_ms << " dt_s=" << dt
+                  << " vel(room)=(" << room_vel_.vx << ',' << room_vel_.vy << ',' << room_vel_.omega << ')'
+                  << " |disp|=" << disp.norm() << "m dtheta=" << dtheta << "rad RTdelta=" << rt_delta << "m"
+                  << std::endl;
+    }
 }
 
 bool ControllerSession::robot_still() const

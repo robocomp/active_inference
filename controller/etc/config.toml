@@ -116,6 +116,13 @@ LockOnMaxAttempts = 30
 
 Target.EdgeType = "target"
 Transforms.interpolate_rt = true
+# Dead-reckon the DISPLAYED lidar cloud + robot icon forward to "now" using base velocity,
+# so the overlay tracks the robot instead of trailing it by the lidar/pose latency.
+Transforms.overlay_extrapolate_to_now = true
+Transforms.overlay_extrapolation_max_dt_s = 0.4
+# Append per-cycle overlay-lag diagnostics to this CSV (empty = off). Columns:
+# t_ms,lidar_ts,gap_ms,vx,vy,omega,extrap_dt_s,disp_m,dtheta_rad,RTdelta_m
+Transforms.overlay_csv_path = "overlay_lag_eval.csv"
 
 # NOTE: the zero-copy media plane (LiDAR) needs NO config here. The DDS domain +
 # topic are read from the media descriptor JSON attribute the producer

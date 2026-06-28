@@ -41,6 +41,9 @@ struct InferenceConfig
     // Neutral-pose prior: weak L2 pull of the arm angle DOFs toward rest (arms down), pinning the
     // under-observed null-space so it doesn't drift at constant FE. 0 = off (pure core default).
     float w_neutral       = 0.0f;
+    // Innovation gate: reject a fit whose per-frame angle jump exceeds this (rad) on any DOF (glitch /
+    // transient bad transform) and hold the previous belief. 0 = off (pure core default).
+    float max_innovation  = 0.0f;
 
     // Kinematic-plausibility limits (soft one-sided hinge penalties beyond the bound, dt-aware;
     // applied to the per-frame change in theta). A weight of 0 disables that term. Angle DOFs use
@@ -81,6 +84,7 @@ struct InferenceResult
     float dt = 0.f;
     int   vel_clamped = 0;
     int   acc_clamped = 0;
+    bool  rejected = false;   // this frame's fit was an innovation-gate outlier → previous belief held
 };
 
 class AInfLaplacePoseEstimator

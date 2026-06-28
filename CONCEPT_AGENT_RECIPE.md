@@ -86,7 +86,12 @@ shared (do NOT copy, #include + add to CMake):
     `Tracker.MergeOverlap` (frac of the smaller), keeping the more-observed (`matched_frames`) and
     `delete_node`+`forget_node`+`affordance.remove()` on the other. The overlap metric is
     GEOMETRY-SPECIFIC: oriented-rectangle (Sutherland–Hodgman clip) for table/chair seat footprints;
-    circle-lens for bottle radii. Without it two tracks can lock onto one object and never reconcile.)
+    circle-lens for bottle radii. Without it two tracks can lock onto one object and never reconcile.
+    Matching is greedy-lowest-cost (exact 1-to-1 at these tiny instance counts; no Hungarian). Cost is
+    raw squared-Mahalanobis `m²` by default, or — with `Tracker.NllCost` — the Gaussian NLL
+    `½(m²+ln|S|)` so tracks with DIFFERENT cov sizes compete by likelihood, not raw distance (a tight
+    mature track out-bids a wide newborn for a contested detection). The GATE stays `m²≤gate_mahalanobis`
+    either way; NLL only changes outcomes under contention (same-class clutter). Off by default.)
   common/mask_ingestor/mask_ingestor.{h,cpp}          (call select_nearest(centroid, "<obj>"))
   common/sample_queue/sample_queue.h                  (header-only; SampleQueue<<Obj>Model>)
     → author sample_queue_geometry.h: specialise SampleQueueGeometry<<Obj>Model> with the 4 geometry

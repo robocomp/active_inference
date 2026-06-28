@@ -21,6 +21,7 @@
 #include "sample_queue_geometry.h"   // common SampleQueue<Model> + bottle's geometry policy
 #include "bottle_affordance.h"
 #include "../../common/belief_stabilizer/belief_stabilizer.h"   // rc::StabilizerState
+#include "../../common/motion_filter/cv_filter.h"               // rc::CVFilter (movable-object tracking)
 
 namespace rc {
 
@@ -42,6 +43,20 @@ struct BottleInstance
 
     int  matched_frames        = 0;     // frames with fresh sensing data
     bool reseed_requested      = false; // move-experiment: force a fresh cold-start at the next pose
+
+    // ── Motion model (movable object) ──────────────────────────────────────────────────────────────
+    // A bottle is MOVABLE: its position TRACKS via a constant-velocity filter on (cx,cy) instead of
+    // hardening (cz is table-anchored; radius/height harden via the stabiliser). Replaces the
+    // maturity-locked position gain that froze the fit and made a moved bottle spawn a new instance.
+    CVFilter      motion;                  // CV KF on cx,cy (2 axes); empty until first fit
+    std::uint64_t last_motion_ts_ms = 0;   // capture stamp of the last CV update (for dt)
+    int           last_motion_frame  = -1; // mask frame id of the last CV update (fresh-frame guard)
+    Eigen::Vector3f last_obs_centroid = Eigen::Vector3f::Zero();  // fresh-frame mask centroid = CV measurement
+                                           // (FOLLOWS the bottle; the queue-anchored SDF fit lags)
+    // Grasp-mode seam (Part B step 2, not yet wired): when the controller grasps the bottle its motion
+    // becomes a KNOWN control input (the arm). The handshake will set this + switch the transition to
+    // known-input / re-parent-under-gripper. Left false for the free-movable CV mode.
+    bool          grasped = false;
     int  frames_converged      = 0;     // consecutive frames with |ΔFE| < fe_eps
     int  last_masks_frame_seen = -1;    // last masks packet frame consumed
     int  processed_cycles      = 0;     // per-bottle compute cycles for log throttling
@@ -56,6 +71,7 @@ struct BottleInstance
     int   assigned_mask_idx        = -1;
     int   frames_since_detection   = 100000;   // cycles since the last fresh bottle mask (0 = just seen)
     float last_mask_confidence     = 0.0f;     // YOLO confidence of the last selected bottle mask
+    std::uint64_t last_mask_timestamp_ms = 0;  // capture stamp of the last consumed mask frame (chain-cov pinning)
     bool  detection_alive          = false;    // frames_since_detection < threshold
     bool  last_pub_detection_alive = false;    // dead-band trace for the published flag
     float last_pub_detection_conf  = -1.0f;    // dead-band trace for the published confidence

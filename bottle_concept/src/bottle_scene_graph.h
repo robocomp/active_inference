@@ -29,6 +29,7 @@
 #include <dsr/api/dsr_api.h>
 #include <dsr/api/dsr_rt_api.h>
 #include <dsr/api/dsr_inner_eigen_api.h>
+#include <dsr/api/dsr_inner_gaussian_api.h>   // Part B: chain covariance propagation
 
 #include "bottle_config.h"
 #include "bottle_instance.h"
@@ -87,6 +88,10 @@ public:
     // Write the room-frame fit on the room/table→bottle RT edge (parent-frame transformed) + P_bottle.
     void write_rt_pose(BottleInstance& inst);
 
+    // Part B: enable adding the localization/chain covariance J·Σ_chain·Jᵀ (source frame → fit frame,
+    // capture-stamp pinned) to the published RT-edge cov, via InnerGaussianAPI. Off until set.
+    void set_chain_cov_source(DSR::InnerGaussianAPI* gaussian, std::string source_frame, bool enabled);
+
     // The robot's XY localisation covariance off the room→robot RT edge (0.01·I fallback).
     Eigen::Matrix2f read_robot_covariance(std::uint64_t room_node_id) const;
 
@@ -97,6 +102,9 @@ private:
     std::shared_ptr<DSR::DSRGraph> G_;
     DSR::RT_API*        rt_api_      = nullptr;
     DSR::InnerEigenAPI* inner_eigen_ = nullptr;
+    DSR::InnerGaussianAPI* gaussian_ = nullptr;   // Part B: chain covariance (set via set_chain_cov_source)
+    std::string         chain_src_frame_;          // measurement frame the chain cov is computed from
+    bool                chain_cov_enabled_ = false;
     BottleConfig&        cfg_;
     std::function<void()> relayout_;   // re-run the graph twopi layout after a node is created/removed
 };

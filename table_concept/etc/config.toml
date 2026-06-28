@@ -61,14 +61,12 @@ RobustGncDecayCycles = 20   # GNC start scale ramps from RobustGncStartScale dow
                             # stops being re-widened each frame and can settle. 0 = no lifetime decay.
 ExtentPctLo = 0.05          # lower percentile of the point span the footprint-extent term pins w/h to
 ExtentPctHi = 0.95          # upper percentile (tighter pair trims the depth-noise margin past the true edge)
+ReopenExtentMarginM = 0.08  # re-open a converged fit when the observed span exceeds the model by > this
+                            # (the mask-beyond-RFE / FE-stuck case — point residuals had no re-open path)
 
 [TableConcept]
 ObsDistance = 1.8           # comfortable maximum stand-off from the target face for epistemic poses
 DeltaMin = 20.0             # minimum per-face coverage before stopping epistemic proposals
-GainThreshold = 0.1         # minimum gain for the legacy coverage-deficit epistemic proxy
-EpistemicInfoGain = true    # score faces by expected entropy reduction ΔH from the Fisher Σ (vs coverage proxy)
-EpistemicMinInfoGain = 0.3  # WITHDRAW threshold: ΔH (nats) below which the epistemic affordance is dropped
-EpistemicRearmInfoGain = 5.0 # Schmitt re-arm: a satisfied table re-offers only once ΔH climbs back above this
 EpistemicCooldownCycles = 200 # min cycles a satisfied table stays withdrawn (anti-chatter)
 VoxelBankMaxPoints = 4000   # max number of table-owned voxels kept in memory
 VoxelBankQuantizationM = 0.02 # dedup grid (m) for voxel-bank hashing
@@ -80,27 +78,16 @@ TopBandM = 0.08             # half-width (m) of the top-surface membership band
 [WarmStart]
 PtsMin = 12.0            # point count where observability starts to become trustworthy
 PtsMax = 30.0            # point count where the point-count confidence saturates
-CoverageMinSide = 2.0    # minimum bilateral face coverage before size/yaw can adapt freely
-RhoFreeze = 0.25         # observability-ratio threshold below which one-sided dimensions are frozen
-LambdaPosBase = 0.15     # baseline gain for cx/cy acceptance even under weak evidence
-LambdaPosGain = 0.45     # extra positional gain added as observability improves
-LambdaSizeBase = 0.05    # baseline gain for shape/height acceptance under poor coverage
-LambdaSizeGain = 0.35    # extra shape gain added when bilateral coverage improves
-LambdaYawBase = 0.01     # baseline yaw gain when orientation evidence is weak
-LambdaYawGain = 0.12     # extra yaw gain added when both x/y face coverage are balanced
 ConfidenceDecay = 0.55            # how quickly the higher-level confidence state forgets old evidence
 ConfidenceCoverageGain = 1.00     # how much coverage evidence raises confidence
 ConfidenceResidualGain = 0.25     # how much unexplained residuals raise confidence
-FisherFilterEnabled = true        # use the real per-DOF SDF Fisher information (vs the face-coverage view-info proxy)
-KalmanGainStiffness = true        # drive each DOF's acceptance gain from the Kalman gain K=obs/(Y_pred+obs) (vs the InfoHalf/coverage heuristic)
 FisherInfoDecay = 0.95            # A/B (2026-06-27): was 0.99. Lowered to a ~20-frame window — the 0.99 ceiling
                                   # over-accumulated (raw info ~14k) and locked the fit at w≈1.13 while the point
                                   # extent says ~1.35 (the "static + large residuals" symptom). Restore 0.99 once
                                   # the fit converges, with a CUSUM barrier that actually yields to real evidence.
-# Quality-aware maturity: a CLOSE approach after far glimpses re-opens the fit (rescales the stale
-# far-view "views" down) instead of staying locked at the misrepresented far fit. The fix for "first
-# seen far → bad fit → approaching can't re-fit". Off → every view counts ~1 (far hardens as fast as close).
-FisherQualityRescale = true
+# Quality-aware maturity (always on): a CLOSE approach after far glimpses re-opens the fit (rescales the
+# stale far-view "views" down) instead of staying locked at the misrepresented far fit — the fix for
+# "first seen far → bad fit → approaching can't re-fit".
 FisherPeakDecay = 1.0             # quality-bar slow forgetting (1 = non-decaying)
 # Re-open only on a GENUINELY better view: a view must beat the quality bar by ≥ Ratchet× to ratchet it
 # (and rescale the accumulated views), folding the new high in as an EMA. Stops ordinary per-frame obs
@@ -114,20 +101,15 @@ FisherCsvPath = "etc/fisher_filter_log.csv"   # per-cycle evolution log for plot
 # a contaminated point set (clutter / partial-or-wrong mask, extent blows up, FE ~20× vs ~1) the model
 # can't explain. Skips the acceptance (keeps the belief) so the gate can't unlock onto garbage → kills the
 # residual size wander at the source. Baseline is an EMA over ACCEPTED frames only.
-FreezeBeliefOnBadFit = true
 BadFitFeRatio = 4.0              # reject a fresh frame if raw_fe > this × baseline (lower = stricter)
 FeBaselineEma = 0.10            # EMA weight for the accepted-FE running baseline
 # Size RATCHET (2026-06-27): a table is rigid — a size DOF grows at full gain but SHRINKS at gain×this.
 # A far/occluded partial view shows a small visible extent but is NOT evidence the table is smaller, so it
 # must not collapse the box ("shrank to a third across the room"). Small=strong ratchet; 1.0=symmetric(off).
 SizeShrinkGain = 0.05
-# Sequential change-detector (CUSUM/SPRT) on top of the Kalman gain: an isolated surprising mask is
-# rejected per-DOF (gain→0), and only a COHERENT same-direction run of surprise unlocks the DOF and
-# snaps it to the new evidence. This is what stops a lone noisy mask from nudging a settled fit.
-CounterEvidenceGate = true        # A/B confirmed (2026-06-27) the gate was the lock (ceg_w=-1 in 62% of frames
-                                  # froze the fit under-sized). RE-ENABLED but RETUNED below (lower BaseSize,
-                                  # higher StepCap) so a real sustained size change unlocks in a few frames while
-                                  # a one-frame extent spike (noise) is still rejected — the gate-off run wandered.
+# Sequential change-detector (CUSUM/SPRT) on top of the Kalman gain (always on): an isolated surprising
+# mask is rejected per-DOF (gain→0), and only a COHERENT same-direction run of surprise unlocks the DOF
+# and snaps it to the new evidence — stops a lone noisy mask from nudging a settled fit. Tunings below.
 CounterEvidenceBandM = 0.02       # length-DOF surprise deadband (m): innovations within this are "coherent"
 CounterEvidenceBandRad = 0.05     # yaw surprise deadband (rad)
 # Barrier = base + lambda·views, SPLIT position (cx,cy) vs size/shape so the table CENTRE locks harder
@@ -138,6 +120,11 @@ CounterEvidenceBaseSize = 1.5     # A/B retune (2026-06-27): was 3.0. Lower barr
                                   # change unlocks in a few frames (the 0.99/3.0 combo froze the fit 20 cm under).
 CounterEvidenceLambdaSize = 0.2   # A/B retune: was 0.5. Per-view barrier growth softened so a well-observed DOF
                                   # still re-adapts to genuine evidence instead of hard-locking.
+# Yaw decoupled with its OWN high barrier (2026-06-28): a static rectangle's orientation is its most rigid
+# property; it was unlocking (ceg_yaw=1) and rotating the table after minutes. Hard to unlock now.
+CounterEvidenceBaseYaw = 12.0     # yaw barrier floor (excess-bands) — heavily locked vs the size group's 1.5
+CounterEvidenceLambdaYaw = 1.0    # extra yaw barrier per accumulated equivalent-view
+YawObsAspectRef = 0.12            # yaw gain scales with |w−h|/max(w,h)/this → a near-square table freezes yaw
 CounterEvidenceDecay = 0.8        # per-coherent-frame pay-down of the accumulator (evidence FOR the belief)
 CounterEvidenceUnlockDeflate = 0.3  # on unlock, multiply that DOF's accumulated info by this (concede the old estimate)
 CounterEvidenceStepCap = 3.0      # A/B retune (2026-06-27): was 1.0. A sustained 3-4 frame run now clears the
@@ -145,12 +132,10 @@ CounterEvidenceStepCap = 3.0      # A/B retune (2026-06-27): was 1.0. A sustaine
 # YOLO mask-score weighting: w = clamp01((score−floor)/(ref−floor))^power. IMPORTANT: a partially-viewed
 # table scores LOW (~0.3–0.45 here), so floor/ref must sit in that band — floor too high nukes every mask
 # (w=0 → the Fisher accumulator dies → no maturity stiffening → UNSTABLE, the bug just fixed). Tune to
-# your detector: floor just above the noise score, ref at a confident score. Set MaskConfWeight=false to disable.
-MaskConfWeight = true             # weight the observation Fisher info by w(mask_score)
+# your detector: floor just above the noise score, ref at a confident score (mask-conf weighting is always on).
 MaskConfFloor = 0.2               # score at/below which the mask is ~ignored
 MaskConfRef = 0.5                 # score at/above which the mask is fully trusted (w=1)
 MaskConfPower = 2.0               # steepness of the trust ramp between floor and ref
-RtCovUpload = true                # upload the table pose covariance (rt_covariance_att, 6×6 SE3) onto the room→table RT edge, from the Fisher per-DOF precision
 RtCovScale = 1.0                  # var = RtCovScale / fisher_info_raw; calibrate toward NEES≈1 (raw curvature over-counts correlated points), like bottle CovEffScale
 
 [SampleQueue]
@@ -165,12 +150,10 @@ RfeWeightGain = 0.25      # lower than 1.0 keeps historical RFE anchors influent
 MinAnchorWeight = 0.12    # floor for anchor weight in optimization/coverage
 
 [Tracker]
-# Multi-instance birth/associate/death (shared rc::InstanceTracker). OFF → legacy prior-scaffold +
-# greedy nearest-mask. ON → "table" masks are associated to instances by a covariance-gated global
-# 1-to-1, an unexplained mask spawns a new table, an instance unobserved for DeathFrames is retired.
-# Tables are large STATIC furniture: BirthMinSepM wide (no two table centres that close) and
-# DeathFrames LARGE so a temporarily-occluded table is not dropped.
-Enabled = true           # set true for scenes with an unknown/changing number of tables
+# Multi-instance birth/associate/merge (shared rc::InstanceTracker; the only instance-lifecycle path —
+# prior-scaffold + greedy nearest-mask were removed in Stage 2). "table" masks are associated to instances
+# by a covariance-gated global 1-to-1; an unexplained mask spawns a new table; overlapping tables merge
+# (two can't share space); death is OFF (a long occlusion is not absence — DeathEnabled to restore it).
 GateMahalanobis = 9.0     # χ²₂ gate (~3σ) for a mask↔instance match once it has a cov
 GateFallbackM = 0.50      # metric XY gate (m) before an instance has a usable covariance
 DetectionNoiseM = 0.35    # det-noise std R added to fit cov in the gate (S=P+R²I): covers the mask-centroid
@@ -189,6 +172,8 @@ BirthHeightM = 0.75
 BirthSizeStd = 0.15       # prior PRECISION (size std, m) behind the Birth* dims: pins the size near
                           # standard furniture under weak early views (smaller = stiffer). Without it a
                           # born table uses the loose generic prior and the first partial mask reshapes it.
+NllCost = false           # association cost = ½(m²+ln|S|) NLL (compete by likelihood, not raw distance)
+                          # vs raw squared-Mahalanobis. Gate is m² either way. Matters under clutter.
 
 [Ice]
 Warn.Connections = "0"

@@ -34,7 +34,6 @@
 #include "table_instance.h"      // rc::TableInstance, TableState
 #include "table_model.h"         // TableModel / TableModelParams / FreeEnergyDecomposition
 #include "../../common/sample_queue/sample_queue.h"        // SampleQueue / SampleQueueParams
-#include "prior_store.h"         // PriorStore / TablePrior
 #include "../../common/mask_ingestor/mask_ingestor.h"
 #include "table_scene_graph.h"
 
@@ -54,7 +53,6 @@ public:
     TableFitter(std::shared_ptr<DSR::DSRGraph> graph,
                 DSR::InnerEigenAPI* inner_eigen,
                 TableConfig& cfg,
-                const std::vector<TablePrior>& priors,
                 MaskIngestor* mask_ingestor,
                 TableSceneGraph* scene_graph);
 
@@ -98,17 +96,12 @@ private:
         static float lerp(float start, float end, float gain);
         static float wrap_angle(float angle);
         static float angle_lerp(float start, float end, float gain);
+        // Kalman-gain-driven acceptance lerp + size ratchet (the only stabilisation path; the old
+        // coverage/InfoHalf heuristic was removed in the Stage-1 simplification).
         static TableState apply_observability_warm_start(const TableState& previous,
                                                          const TableState& raw,
-                                                         const TableModelParams& params,
                                                          const TableConfig& cfg,
-                                                         float confidence,
-                                                         const std::array<float, 6>& coverage,
-                                                         int point_count,
-                                                         float settle_gain = 1.0f,
-                                                         float info_w = 0.0f,
-                                                         float info_h = 0.0f,
-                                                         const std::array<float, 8>* kalman_gain = nullptr);
+                                                         const std::array<float, 8>& kalman_gain);
         static float update_warm_confidence(float previous_confidence,
                                             const TableConfig& cfg,
                                             const std::array<float, 6>& coverage,
@@ -166,7 +159,6 @@ private:
     std::shared_ptr<DSR::DSRGraph> G_;
     DSR::InnerEigenAPI*            inner_eigen_ = nullptr;
     TableConfig&                   cfg_;
-    const std::vector<TablePrior>& priors_;
     MaskIngestor*                  mask_ingestor_ = nullptr;
     TableSceneGraph*               scene_graph_   = nullptr;
     std::unique_ptr<DSR::CameraAPI> camera_api_;   // ZED intrinsics, lazily bound to the "zed" node

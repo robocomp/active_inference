@@ -24,6 +24,13 @@ BottleSceneGraph::BottleSceneGraph(std::shared_ptr<DSR::DSRGraph> graph,
       relayout_(std::move(relayout))
 {}
 
+void BottleSceneGraph::set_chain_cov_source(DSR::InnerGaussianAPI* gaussian, std::string source_frame, bool enabled)
+{
+    gaussian_          = gaussian;
+    chain_src_frame_   = std::move(source_frame);
+    chain_cov_enabled_ = enabled and (gaussian_ != nullptr) and not chain_src_frame_.empty();
+}
+
 std::optional<DSR::Node> BottleSceneGraph::find_table_node(float bx, float by) const
 {
     if (not inner_eigen_)
@@ -448,7 +455,34 @@ void BottleSceneGraph::write_rt_pose(BottleInstance& inst)
     if (auto edge = G_->get_edge(inst.parent_id, inst.node_id, "RT"); edge.has_value())
     {
         const auto fit_pts = inst.queue.points();
-        const Eigen::Matrix3f cov = inst.model.pose_covariance(fit_pts, inst.queue.weights());
+        Eigen::Matrix3f cov = inst.model.pose_covariance(fit_pts, inst.queue.weights());
+
+        // Part B: add the localization/chain covariance J·Σ_chain·Jᵀ — the uncertainty the bottle's
+        // room-frame position inherits from the robot localisation chain (the Laplace cov is conditional
+        // on the robot pose). Compute it by transforming the centre (expressed in the measurement frame)
+        // back to the fit frame with ZERO input cov: InnerGaussianAPI then returns exactly J·Σ_chain·Jᵀ
+        // (Σ_chain accumulated from each RT edge's rt_covariance), pinned to the mask capture stamp.
+        if (chain_cov_enabled_ and gaussian_ and inner_eigen_)
+        {
+            const std::uint64_t ts = inst.last_mask_timestamp_ms;
+            const Mat::Vector3d centre_fit(s.cx, s.cy, s.cz);
+            if (const auto c_src = inner_eigen_->transform(chain_src_frame_, centre_fit, cfg_.masks_target_frame, ts);
+                c_src.has_value())
+            {
+                DSR::GaussianPoint3D gp;
+                gp.mean = c_src.value();
+                gp.covariance = DSR::Cov3d::Zero();
+                if (const auto g_fit = gaussian_->transform_point(cfg_.masks_target_frame, gp, chain_src_frame_, ts);
+                    g_fit.has_value())
+                {
+                    const auto& C = g_fit.value().covariance;
+                    for (int r = 0; r < 3; ++r)
+                        for (int c = 0; c < 3; ++c)
+                            cov(r, c) += static_cast<float>(C(r, c));
+                }
+            }
+        }
+
         std::vector<float> cov_flat(36, 0.0f);
         for (int r = 0; r < 3; ++r)
             for (int c = 0; c < 3; ++c)

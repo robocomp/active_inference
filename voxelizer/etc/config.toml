@@ -58,7 +58,8 @@ Verbose = false
 # TensorRT EP (FP16) for YOLO. Requires the TRT 10.9 stack the linked ONNX Runtime is built against
 # (see README "TensorRT version lock"). Set false to run on the CUDA EP only — version-independent,
 # same masks, no TRT speedup — if the TRT libs can't be reconciled (e.g. after an apt upgrade).
-use_trt =true 
+use_trt =true
+model_path = "yolo26l-seg.onnx" 
 accepted_labels = ["table", "chair", "monitor", "tv", "bottle"]
 mask_tray = true
 tray_mask_ref_width  = 1280
@@ -78,7 +79,7 @@ tray_mask_polygon = [
 # (camera frame, metres) consumed by human_concept. Default OFF — set enabled=true once the ONNX
 # model exists. Export with: yolo export model=yolo26m-pose.pt format=onnx  (gives yolo26m-pose.onnx).
 enabled = true
-model_path = "yolo26m-pose.onnx"
+model_path = "yolo26l-pose.onnx"
 conf_thresh = 0.30          # person-detection confidence floor
 kp_conf_min = 0.30          # per-joint floor; below this a keypoint is dropped (NaN)
 depth_patch = 2             # half-window (px) for the median-depth sample at each joint

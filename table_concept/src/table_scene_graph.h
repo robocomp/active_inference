@@ -25,7 +25,6 @@
 #include "table_config.h"       // rc::TableConfig
 #include "table_instance.h"     // rc::TableInstance, TableState
 #include "../../common/mask_ingestor/mask_ingestor.h"      // MaskIngestor::MasksPacket
-#include "prior_store.h"        // TablePrior
 #include "epistemic_planner.h"  // EpistemicProposal
 
 namespace rc {
@@ -37,12 +36,6 @@ public:
                     DSR::RT_API* rt_api,
                     const TableConfig& cfg,
                     std::function<void()> relayout);
-
-    // Create any "table_N" node named in priors that doesn't exist yet, matching each prior to the
-    // nearest unused "table" mask slice and anchoring it to the room.
-    void scaffold_missing_table_nodes(const std::vector<TablePrior>& priors,
-                                      const MaskIngestor::MasksPacket& masks,
-                                      std::uint64_t room_node_id);
 
     // Birth a brand-new "table_N" node from an unexplained mask detection (tracker path). Auto-names one
     // past the highest existing table_N, seeds default geometry from the Tracker.Birth* config, anchors

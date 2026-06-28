@@ -29,31 +29,23 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     };
 
     // Paths
-    out.priors_path = gets("TableConcept.PriorsPath", "etc/object_priors.toml");
 
     // Agent convergence
-    out.fe_eps                   = getf("TableConcept.FEps",                   1e-3f);
     out.state_eps                = getf("TableConcept.StateEps",               0.04f);
     out.K_stable                 = geti("TableConcept.KStable",                30);
     out.max_direct_fit_points    = geti("TableConcept.MaxDirectFitPoints",     400);
     out.detection_alive_max_frames = geti("TableConcept.DetectionAliveMaxFrames", 40);
     out.M_diverge                = geti("TableConcept.MDiverge",               20);
-    out.staleness_frames         = getf("TableConcept.StalenessFrames",        90.0f);
     out.explanation_ratio_thresh = getf("TableConcept.ExplanationRatioThresh", 0.3f);
-    out.write_threshold          = getf("TableConcept.WriteThreshold",         1e-3f);
     out.obs_distance             = getf("TableConcept.ObsDistance",            1.8f);
     out.delta_min                = getf("TableConcept.DeltaMin",               20.0f);
-    out.gain_threshold           = getf("TableConcept.GainThreshold",          0.1f);
-    out.epistemic_use_info_gain  = getb("TableConcept.EpistemicInfoGain",      true);
-    out.epistemic_min_info_gain  = getf("TableConcept.EpistemicMinInfoGain",   0.3f);
-    out.epistemic_rearm_info_gain= getf("TableConcept.EpistemicRearmInfoGain", 5.0f);
     out.epistemic_cooldown_cycles= geti("TableConcept.EpistemicCooldownCycles", 200);
     out.table_log_period_frames  = geti("TableConcept.TableLogPeriodFrames",   30);
     out.voxel_bank_max_points    = geti("TableConcept.VoxelBankMaxPoints",     4000);
     out.voxel_bank_quantization_m= getf("TableConcept.VoxelBankQuantizationM", 0.02f);
     out.voxel_select_radius_margin_m = getf("TableConcept.VoxelSelectRadiusMarginM", 0.50f);
     out.voxel_select_height_margin_m = getf("TableConcept.VoxelSelectHeightMarginM", 0.25f);
-    out.top_band_gate_enabled    = getb("TableConcept.TopBandGate",            false);
+    out.top_band_gate_enabled    = getb("TableConcept.TopBandGate",            true);
     out.top_band_m               = getf("TableConcept.TopBandM",               0.08f);
 
     // TableModel
@@ -86,7 +78,6 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.robust_gnc_start_scale = getf("TableModel.RobustGncStartScale", 0.80f);
     out.mask_precision     = getf("TableModel.MaskPrecision",     0.30f);
     out.sil_tangent_samples = geti("TableModel.MaskSilhouetteSamples", 8);
-    out.sil_reopen_residual_m = getf("TableModel.SilReopenResidualM", 0.15f);
     out.robust_gnc_decay_cycles = geti("TableModel.RobustGncDecayCycles", 20);
 
     // SampleQueue
@@ -107,58 +98,38 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     // WarmStart
     out.warm_pts_min                  = getf("WarmStart.PtsMin",                  12.0f);
     out.warm_pts_max                  = getf("WarmStart.PtsMax",                  30.0f);
-    out.warm_coverage_min_side        = getf("WarmStart.CoverageMinSide",         2.0f);
-    out.warm_rho_freeze               = getf("WarmStart.RhoFreeze",               0.25f);
-    out.warm_size_pts_release         = getf("WarmStart.SizePtsRelease",          0.60f);
-    out.warm_settle_cycles            = geti("WarmStart.SettleCycles",            40);
-    out.warm_reopen_admit             = geti("WarmStart.ReopenAdmit",             8);
-    out.warm_settle_floor             = getf("WarmStart.SettleFloor",             0.05f);
-    out.warm_info_half                = getf("WarmStart.InfoHalf",                20.0f);
-    out.fisher_filter_enabled         = getb("WarmStart.FisherFilterEnabled",     true);
-    out.fisher_kalman_stiffness       = getb("WarmStart.KalmanGainStiffness",     false);
-    out.fisher_info_decay             = getf("WarmStart.FisherInfoDecay",          1.0f);
-    out.fisher_quality_rescale        = getb("WarmStart.FisherQualityRescale",     true);
+    out.fisher_info_decay             = getf("WarmStart.FisherInfoDecay",          0.95f);
     out.fisher_peak_decay             = getf("WarmStart.FisherPeakDecay",          1.0f);
     out.fisher_peak_ratchet           = getf("WarmStart.FisherPeakRatchet",        2.5f);
     out.fisher_peak_ema               = getf("WarmStart.FisherPeakEma",            0.30f);
     out.fisher_process_std_m          = getf("WarmStart.FisherProcessStdM",        0.005f);
     out.fisher_process_std_yaw        = getf("WarmStart.FisherProcessStdYaw",      0.01f);
-    out.freeze_belief_on_stale        = getb("WarmStart.FreezeBeliefOnStale",      true);
-    out.freeze_belief_on_bad_fit      = getb("WarmStart.FreezeBeliefOnBadFit",     true);
     out.bad_fit_fe_ratio              = getf("WarmStart.BadFitFeRatio",            4.0f);
     out.fe_baseline_ema               = getf("WarmStart.FeBaselineEma",            0.10f);
     out.size_shrink_gain              = getf("WarmStart.SizeShrinkGain",           0.05f);
     out.fisher_grad_clamp             = getf("WarmStart.FisherGradClamp",          2.0f);
-    out.fisher_maturity_stiffness     = getb("WarmStart.FisherMaturityStiffness",  true);
     out.fisher_views_half             = getf("WarmStart.FisherViewsHalf",          4.0f);
-    out.counter_evidence_gate         = getb("WarmStart.CounterEvidenceGate",      false);
     out.counter_evidence_band_m       = getf("WarmStart.CounterEvidenceBandM",     0.02f);
     out.counter_evidence_band_rad     = getf("WarmStart.CounterEvidenceBandRad",   0.05f);
     out.counter_evidence_base_pos     = getf("WarmStart.CounterEvidenceBasePos",    6.0f);
     out.counter_evidence_lambda_pos   = getf("WarmStart.CounterEvidenceLambdaPos",  1.0f);
-    out.counter_evidence_base_size    = getf("WarmStart.CounterEvidenceBaseSize",   3.0f);
-    out.counter_evidence_lambda_size  = getf("WarmStart.CounterEvidenceLambdaSize", 0.5f);
+    out.counter_evidence_base_size    = getf("WarmStart.CounterEvidenceBaseSize",   1.5f);
+    out.counter_evidence_lambda_size  = getf("WarmStart.CounterEvidenceLambdaSize", 0.2f);
+    out.counter_evidence_base_yaw     = getf("WarmStart.CounterEvidenceBaseYaw",   12.0f);
+    out.counter_evidence_lambda_yaw   = getf("WarmStart.CounterEvidenceLambdaYaw",  1.0f);
+    out.yaw_obs_aspect_ref            = getf("WarmStart.YawObsAspectRef",           0.12f);
     out.counter_evidence_decay        = getf("WarmStart.CounterEvidenceDecay",     0.8f);
     out.counter_evidence_unlock_deflate = getf("WarmStart.CounterEvidenceUnlockDeflate", 0.3f);
-    out.counter_evidence_step_cap     = getf("WarmStart.CounterEvidenceStepCap",  1.0f);
-    out.mask_conf_weight              = getb("WarmStart.MaskConfWeight",          true);
+    out.counter_evidence_step_cap     = getf("WarmStart.CounterEvidenceStepCap",  3.0f);
     out.mask_conf_floor               = getf("WarmStart.MaskConfFloor",           0.2f);
     out.mask_conf_ref                 = getf("WarmStart.MaskConfRef",             0.5f);
     out.mask_conf_power               = getf("WarmStart.MaskConfPower",           2.0f);
     out.fisher_csv_path               = gets("WarmStart.FisherCsvPath",            "");
-    out.rt_cov_upload                 = getb("WarmStart.RtCovUpload",              true);
     out.rt_cov_scale                  = getf("WarmStart.RtCovScale",              1.0f);
-    out.warm_lambda_pos_base          = getf("WarmStart.LambdaPosBase",           0.15f);
-    out.warm_lambda_pos_gain          = getf("WarmStart.LambdaPosGain",           0.45f);
-    out.warm_lambda_size_base         = getf("WarmStart.LambdaSizeBase",          0.02f);
-    out.warm_lambda_size_gain         = getf("WarmStart.LambdaSizeGain",          0.18f);
-    out.warm_lambda_yaw_base          = getf("WarmStart.LambdaYawBase",           0.01f);
-    out.warm_lambda_yaw_gain          = getf("WarmStart.LambdaYawGain",           0.12f);
     out.warm_confidence_decay         = getf("WarmStart.ConfidenceDecay",         0.70f);
     out.warm_confidence_coverage_gain = getf("WarmStart.ConfidenceCoverageGain",  0.35f);
     out.warm_confidence_residual_gain = getf("WarmStart.ConfidenceResidualGain",  0.65f);
 
-    out.tracker_enabled          = getb("Tracker.Enabled",          false);
     out.tracker_gate_mahalanobis = getf("Tracker.GateMahalanobis",  9.0f);
     out.tracker_gate_fallback_m  = getf("Tracker.GateFallbackM",    0.50f);
     out.tracker_detection_noise_m = getf("Tracker.DetectionNoiseM", 0.35f);
@@ -171,9 +142,9 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.tracker_birth_depth_m    = getf("Tracker.BirthDepthM",      0.6f);
     out.tracker_birth_height_m   = getf("Tracker.BirthHeightM",     0.75f);
     out.tracker_birth_size_std   = getf("Tracker.BirthSizeStd",     0.15f);
+    out.tracker_nll_cost         = getb("Tracker.NllCost",          false);
 
-    std::print("table_concept: configuration loaded. tracker_enabled={} (Tracker.Enabled)\n",
-               out.tracker_enabled);
+    std::print("table_concept: configuration loaded.\n");
     return out;
 }
 

@@ -156,6 +156,9 @@ private:
     std::vector<std::string>        object_mesh_categories_;   // parallel to object_meshes_
     std::mutex object_meshes_mutex_;
     std::vector<std::vector<float>> skeletons_;                // BODY_18 flat (54 floats) per person, room frame
+    std::vector<QVector3D> skeleton_facing_;                   // EMA-smoothed facing (room frame), parallel to skeletons_
+    struct FacingTrack { QVector3D chest, facing; };
+    std::vector<FacingTrack> facing_tracks_;                   // persistent across updates for the facing EMA
     std::mutex skeletons_mutex_;
     void rebuild_polygon_locked_();
 

@@ -52,6 +52,7 @@
 
 #include <dsr/api/dsr_rt_api.h>
 #include <dsr/api/dsr_inner_eigen_api.h>
+#include <dsr/api/dsr_inner_gaussian_api.h>   // Part B: chain covariance propagation
 
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 #include "../../common/robust_metrics/robust_metrics.h"
@@ -162,6 +163,7 @@ private:
 
     std::unique_ptr<DSR::RT_API> rt_api_;
     std::unique_ptr<DSR::InnerEigenAPI> inner_eigen_;
+    std::unique_ptr<DSR::InnerGaussianAPI> gaussian_api_;   // Part B: source→target chain covariance
     uint64_t                     room_node_id_ = 0;
 
     // Collaborators (constructed in initialize(), after G + the DSR APIs are ready). Declared in

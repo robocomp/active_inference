@@ -251,9 +251,18 @@ void SpecificWorker::initialize()
 
     rt_api_ = G->get_rt_api();
     inner_eigen_ = G->get_inner_eigen_api();
+    gaussian_api_ = std::make_unique<DSR::InnerGaussianAPI>(G.get());
     mask_ingestor_ = std::make_unique<rc::MaskIngestor>(G);
     scene_graph_ = std::make_unique<rc::BottleSceneGraph>(G, rt_api_.get(), inner_eigen_.get(), cfg_,
                                                           [this] { trigger_graph_layout_twopi(); });
+
+    // Part B: consume camera-frame masks + transform through the probabilistic chain. MaskIngestor
+    // re-frames the support points (src→fit frame, capture-stamp pinned); the scene-graph adds the
+    // localization/chain covariance to the published RT edge via InnerGaussianAPI.
+    if (cfg_.masks_use_camera_frame)
+        mask_ingestor_->enable_frame_transform(inner_eigen_.get(), cfg_.masks_source_frame, cfg_.masks_target_frame);
+    scene_graph_->set_chain_cov_source(gaussian_api_.get(), cfg_.masks_source_frame,
+                                       cfg_.rt_cov_add_chain and cfg_.masks_use_camera_frame);
 
     connect(G.get(), &DSR::DSRGraph::del_node_signal, this, &SpecificWorker::del_node_slot);
 
@@ -443,6 +452,7 @@ void SpecificWorker::run_instance_tracker()
     tp.death_frames     = cfg_.tracker_death_frames;
     tp.birth_min_sep_m  = cfg_.tracker_birth_min_sep_m;
     tp.detection_noise_m = cfg_.tracker_detection_noise_m;
+    tp.nll_cost         = cfg_.tracker_nll_cost;
     tracker_.set_params(tp);
 
     // Tracks ← live instances: centre from the fit, XY cov from the stabiliser posterior precision.
@@ -454,8 +464,18 @@ void SpecificWorker::run_instance_tracker()
         t.id = id;
         const auto& s = inst.model.state();
         t.xy = {s.cx, s.cy};
-        const float rx = inst.stab.fisher_info_raw[0], ry = inst.stab.fisher_info_raw[1];
-        if (rx > 1e-6f and ry > 1e-6f)
+        if (cfg_.dynamics_model == "constant_velocity" and inst.motion.initialized())
+        {
+            // Movable: gate on the CV position covariance — it INFLATES during motion (predict adds
+            // process noise), so the gate widens exactly when the bottle moves → the moved detection
+            // still associates (no spurious birth) and tightens back when it settles.
+            t.cov = Eigen::Matrix2f::Zero();
+            t.cov(0, 0) = static_cast<float>(inst.motion.pos_var(0));
+            t.cov(1, 1) = static_cast<float>(inst.motion.pos_var(1));
+            t.has_cov = true;
+        }
+        else if (const float rx = inst.stab.fisher_info_raw[0], ry = inst.stab.fisher_info_raw[1];
+                 rx > 1e-6f and ry > 1e-6f)
         {
             t.cov = Eigen::Matrix2f::Zero();
             t.cov(0, 0) = 1.0f / rx;

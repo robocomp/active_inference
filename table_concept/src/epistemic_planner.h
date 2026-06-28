@@ -54,11 +54,7 @@ public:
      * @param gain_threshold Minimum ΔH to emit a proposal.
     * @param d_obs          Comfortable maximum stand-off from the target face (m).
      */
-    explicit EpistemicPlanner(float delta_min      = 20.0f,
-                              float gain_threshold  = 0.1f,
-                              float d_obs           = 1.8f,
-                              bool  use_info_gain   = true,
-                              float min_info_gain   = 0.3f);
+    explicit EpistemicPlanner(float d_obs = 1.8f);
 
     /**
      * Score the four vertical faces and return a viewpoint proposal for the most
@@ -69,22 +65,16 @@ public:
      * where I_pred_j(f) is the per-DOF Fisher information that observing face f would
      * provide (predicted by evaluating the SDF-likelihood Fisher on synthetic face
      * samples) and Y_j is the current accumulated posterior precision (posterior_info,
-     * = TableInstance::fisher_info_raw). ΔH→0 as a face becomes well-observed, so a
-     * sub-threshold best gain means "nothing left to learn" (belief→knowledge governor).
-     * Otherwise it falls back to the legacy face_area·deficit/σ² coverage proxy.
-     *
-     * Returns valid==false if the best gain is below the threshold.
+     * = TableInstance::fisher_info_raw). ΔH→0 as a face becomes well-observed, so a low best gain
+     * means "nothing left to learn" (belief→knowledge governor) — it is NOT withdrawn here; the
+     * controller's EFE selection simply won't pick a low-nat target.
      */
     EpistemicProposal compute(const TableModel&  model,
                               const SampleQueue<TableModel>& queue,
                               const std::array<float, 8>& posterior_info = {}) const;
 
 private:
-    float delta_min_;
-    float gain_threshold_;
     float d_obs_;
-    bool  use_info_gain_;
-    float min_info_gain_;
 };
 
 }  // namespace rc

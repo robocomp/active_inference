@@ -79,10 +79,8 @@ float expected_info_gain(const std::array<float, 8>& I_pred, const std::array<fl
 
 }  // namespace
 
-EpistemicPlanner::EpistemicPlanner(float delta_min, float gain_threshold, float d_obs,
-                                   bool use_info_gain, float min_info_gain)
-    : delta_min_(delta_min), gain_threshold_(gain_threshold), d_obs_(d_obs),
-      use_info_gain_(use_info_gain), min_info_gain_(min_info_gain)
+EpistemicPlanner::EpistemicPlanner(float d_obs)
+    : d_obs_(d_obs)
 {}
 
 EpistemicProposal EpistemicPlanner::compute(const TableModel&  model,
@@ -130,29 +128,16 @@ EpistemicProposal EpistemicPlanner::compute(const TableModel&  model,
     }};
 
     // Score each face and keep the most informative one. The score is either the expected entropy
-    // reduction ΔH from the Fisher posterior (information-seeking), or the legacy coverage-deficit
-    // proxy. P(detect|v) would scale ΔH here — kept at 1.0 for now (hook for a camera-projection
-    // detectability model; see [[affordance-contract-efe-selection]]).
-    const float sigma2_proxy = model.params().sigma_obs * model.params().sigma_obs;
+    // reduction ΔH from the Fisher posterior (information-seeking). P(detect|v) would scale ΔH here —
+    // kept at 1.0 for now (hook for a camera-projection detectability model; see
+    // [[affordance-contract-efe-selection]]).
     int   best_idx   = 0;
     float best_gain  = -std::numeric_limits<float>::max();
     for (int i = 0; i < 4; ++i)
     {
-        float gain;
-        if (use_info_gain_)
-        {
-            const auto I_pred = model.observation_information(sample_face_surface(s, i), {});
-            const float p_detect = 1.0f;
-            gain = p_detect * expected_info_gain(I_pred, posterior_info);
-        }
-        else
-        {
-            const float face_area = 2.0f * faces[i].half_span * s.table_height;
-            const float deficit   = 1.0f - std::min(1.0f, faces[i].cov / delta_min_);
-            if (!std::isfinite(sigma2_proxy) || sigma2_proxy <= std::numeric_limits<float>::epsilon())
-                return {};
-            gain = face_area * deficit / sigma2_proxy;
-        }
+        const auto I_pred = model.observation_information(sample_face_surface(s, i), {});
+        const float p_detect = 1.0f;
+        const float gain = p_detect * expected_info_gain(I_pred, posterior_info);
         if (gain > best_gain)
         {
             best_gain = gain;
@@ -163,11 +148,8 @@ EpistemicProposal EpistemicPlanner::compute(const TableModel&  model,
     // Reject only a degenerate (non-finite) score. A LOW but finite ΔH is NOT withdrawn here: the
     // planner keeps returning the best-face proposal carrying its true gain so the affordance node
     // persists and refreshes, and the controller's EFE selection simply doesn't pick a low-nat target
-    // (the belief→knowledge governor, expressed as a small gain rather than a deleted node). The legacy
-    // coverage-deficit proxy keeps its hard cutoff — it has no calibrated gain for the controller to weigh.
+    // (the belief→knowledge governor, expressed as a small gain rather than a deleted node).
     if (!std::isfinite(best_gain))
-        return {};
-    if (not use_info_gain_ && best_gain < gain_threshold_)
         return {};
 
     const auto& f = faces[best_idx];

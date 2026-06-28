@@ -83,6 +83,24 @@ struct BottleConfig
     float tracker_detection_noise_m = 0.05f;  // R in the association innovation cov S=P+R²I (≥ centroid-vs-fit offset)
     float tracker_merge_overlap    = 0.30f;   // merge two instances whose footprints (circles) overlap ≥ this
                                               // fraction of the SMALLER one, keeping the more-observed. 0 disables.
+    bool  tracker_nll_cost         = false;   // association cost = ½(m²+ln|S|) NLL (vs raw m²); see InstanceTracker
+    // ── Part B: masks in camera frame + chain covariance ───────────────────────────────────────────
+    // The voxelizer dual-publishes support points in CAMERA frame (mask_support_points_cam). When
+    // enabled, MaskIngestor transforms them to the fit frame via inner_eigen pinned to the capture
+    // stamp, and the published RT-edge covariance gains the localization term J·Σ_chain·Jᵀ from
+    // InnerGaussianAPI (the chain source→target uncertainty). false → legacy room-frame masks.
+    bool        masks_use_camera_frame = true;
+    std::string masks_source_frame     = "zed";    // producer frame of mask_support_points_cam
+    std::string masks_target_frame     = "room";   // bottle's fit frame
+    bool        rt_cov_add_chain       = true;      // add J·Σ_chain·Jᵀ localization cov to the published RT cov
+    // ── Motion model (movable object) ──────────────────────────────────────────────────────────────
+    // "static" → position hardens like furniture (legacy). "constant_velocity" → cx,cy TRACK via a CV
+    // Kalman filter (a bottle is movable), fixing the frozen-fit-spawns-a-new-instance bug.
+    std::string dynamics_model = "constant_velocity";
+    float       cv_accel_std    = 0.5f;    // process: acceleration std (m/s²) — how fast velocity can change
+    float       cv_meas_std     = 0.01f;   // per-frame position measurement std (m) fed as the KF R
+    float       cv_init_vel_std = 0.5f;    // 1-σ on the initial unknown velocity (m/s)
+    float       cv_dt_default_s = 0.1f;    // fallback Δt when capture stamps are missing/equal (≈ Period.Compute)
     // ── Epistemic "hidden-face" affordance ────────────────────────────────────────────────────────
     // The agent advertises a far-side viewpoint (opposite the camera) so the controller can observe the
     // bottle's occluded back arc and resolve the depth-degenerate radius. ΔH = ½·log(1 + view_info/Y_r).

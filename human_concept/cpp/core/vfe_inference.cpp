@@ -370,6 +370,30 @@ InferenceResult AInfLaplacePoseEstimator::infer(
         Lambda_ = H;
     }
 
+    // Hard joint-limit projection: the soft limits prior can be overrun by a bad observation (robot
+    // motion / YOLO glitch drives a shoulder to -257° etc.), so clamp every DOF to its physical range.
+    {
+        Vec11 lo, hi;
+        lo.segment<3>(0) = lim_.sh_min; lo.segment<3>(3) = lim_.sh_min;
+        hi.segment<3>(0) = lim_.sh_max; hi.segment<3>(3) = lim_.sh_max;
+        lo(6) = lim_.el_min; lo(7) = lim_.el_min; hi(6) = lim_.el_max; hi(7) = lim_.el_max;
+        lo(8) = lim_.lb_x_min; lo(9) = lim_.lb_z_min; lo(10) = lim_.lb_roll_min;
+        hi(8) = lim_.lb_x_max; hi(9) = lim_.lb_z_max; hi(10) = lim_.lb_roll_max;
+        mu_ = mu_.cwiseMax(lo).cwiseMin(hi);
+    }
+
+    // Innovation reject: a per-frame jump larger than max_innovation (rad) on any DOF is a glitch — a
+    // static person can't move that fast, and during robot motion a transient bad room transform makes
+    // the fit lurch. Hold the previous belief (mu_prior) rather than chase it; outputs below recompute
+    // from the held mu_, so the controller target doesn't move and FE reflects the good fit.
+    bool rejected = false;
+    if (frames_seen_ > 0 and cfg_.max_innovation > 0.f
+        and (mu_ - mu_prior).cwiseAbs().maxCoeff() > cfg_.max_innovation)
+    {
+        mu_ = mu_prior;
+        rejected = true;
+    }
+
     // Limit diagnostics for the gated CSV: how many DOFs the converged fit left at/over the bounds.
     int vel_clamped = 0, acc_clamped = 0;
     if (apply_vel)
@@ -420,6 +444,7 @@ InferenceResult AInfLaplacePoseEstimator::infer(
     res.dt = dt;
     res.vel_clamped = vel_clamped;
     res.acc_clamped = acc_clamped;
+    res.rejected = rejected;
 
     // Per-keypoint positional posterior std (mm). Propagate cov through the FK Jacobian J=∂kp/∂x at
     // mu (forward differences). trace(J·cov·Jᵀ) is rotation-invariant, so the model-frame Jacobian

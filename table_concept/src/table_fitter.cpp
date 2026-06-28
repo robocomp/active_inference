@@ -16,10 +16,9 @@ namespace rc {
 TableFitter::TableFitter(std::shared_ptr<DSR::DSRGraph> graph,
                          DSR::InnerEigenAPI* inner_eigen,
                          TableConfig& cfg,
-                         const std::vector<TablePrior>& priors,
                          MaskIngestor* mask_ingestor,
                          TableSceneGraph* scene_graph)
-    : G_(std::move(graph)), inner_eigen_(inner_eigen), cfg_(cfg), priors_(priors),
+    : G_(std::move(graph)), inner_eigen_(inner_eigen), cfg_(cfg),
       mask_ingestor_(mask_ingestor), scene_graph_(scene_graph)
 {}
 
@@ -50,101 +49,39 @@ float TableFitter::TableBeliefPolicy::angle_lerp(float start, float end, float g
 TableState TableFitter::TableBeliefPolicy::apply_observability_warm_start(
     const TableState& previous,
     const TableState& raw,
-    const TableModelParams& /*params*/,
     const TableConfig& cfg,
-    float confidence,
-    const std::array<float, 6>& coverage,
-    int point_count,
-    float settle_gain,
-    float info_w,
-    float info_h,
-    const std::array<float, 8>* kalman_gain)
+    const std::array<float, 8>& kalman_gain)
 {
-    constexpr float kCoverageEps = 1e-3f;
-
-    // Calibrated stiffness: drive every DOF's acceptance lerp directly from the per-DOF Kalman gain
-    // K_j = obs_info_j / (Y_pred_j + obs_info_j) supplied by the information filter. Bypasses the
-    // coverage/confidence/InfoHalf/freeze heuristic entirely — a well-observed DOF (large Y_pred)
-    // gets a small gain so it barely moves, while a high-information view (large obs) still moves it.
-    // Size RATCHET (asymmetric acceptance). A table is rigid: a far/occluded view shows a SMALLER visible
-    // extent, but that is NOT evidence the table IS smaller — only seeing MORE can confirm a bigger table;
-    // a partial view cannot confirm a smaller one. So a size DOF grows at its full Kalman gain but SHRINKS
-    // at gain·size_shrink_gain (heavily damped) — a transient far view can't collapse the box (the "shrank
-    // to a third across the room" failure), while a sustained, genuine shrink can still slowly correct an
-    // over-grow. Position/yaw are unaffected (they move freely).
+    // Calibrated stiffness: every DOF's acceptance lerp is driven directly by the per-DOF Kalman gain
+    // K_j = obs_info_j / (Y_pred_j + obs_info_j) from the information filter — a well-observed DOF
+    // (large Y_pred) barely moves, while a genuinely high-information view (large obs) still moves it.
+    // Size RATCHET: a table is rigid — a size DOF grows at its full gain but SHRINKS at gain·size_shrink_gain
+    // (heavily damped), so a far/occluded partial view can't collapse the box ("shrank to a third across
+    // the room") while a sustained genuine shrink can still slowly correct an over-grow. Position/yaw move
+    // freely.
     const float shrink = std::clamp(cfg.size_shrink_gain, 0.0f, 1.0f);
     const auto ratchet = [&](float prev, float rawv, float k)
     {
         return lerp(prev, rawv, rawv < prev ? k * shrink : k);
     };
 
-    if (kalman_gain)
-    {
-        const auto& K = *kalman_gain;
-        TableState accepted = raw;
-        accepted.cx           = lerp(previous.cx,           raw.cx,           K[0]);
-        accepted.cy           = lerp(previous.cy,           raw.cy,           K[1]);
-        accepted.w            = ratchet(previous.w,            raw.w,            K[2]);
-        accepted.h            = ratchet(previous.h,            raw.h,            K[3]);
-        accepted.table_height = ratchet(previous.table_height, raw.table_height, K[4]);
-        accepted.leg_length   = ratchet(previous.leg_length,   raw.leg_length,   K[5]);
-        accepted.yaw          = angle_lerp(previous.yaw,    raw.yaw,          K[6]);
-        accepted.leg_inset    = lerp(previous.leg_inset,    raw.leg_inset,    K[7]);
-        return accepted;
-    }
+    // Yaw observability gate: orientation is only meaningful for a clearly RECTANGULAR footprint. Scale
+    // the yaw gain by the aspect ratio so a near-SQUARE table (yaw geometrically unobservable) freezes its
+    // yaw instead of chasing noise. |w−h|/max(w,h) → 0 for a square, ≥ aspect_ref for a clear rectangle.
+    const float aspect = std::abs(previous.w - previous.h) /
+                         std::max({previous.w, previous.h, 1e-3f});
+    const float yaw_obs = clamp01(aspect / std::max(1e-3f, cfg.yaw_obs_aspect_ref));
 
-    const float cov_px = coverage[0];
-    const float cov_nx = coverage[1];
-    const float cov_py = coverage[2];
-    const float cov_ny = coverage[3];
-
-    const float rho_x = std::min(cov_px, cov_nx) / (std::max(cov_px, cov_nx) + kCoverageEps);
-    const float rho_y = std::min(cov_py, cov_ny) / (std::max(cov_py, cov_ny) + kCoverageEps);
-    const float pts_span = std::max(1e-3f, cfg.warm_pts_max - cfg.warm_pts_min);
-    const float rho_pts = clamp01((static_cast<float>(point_count) - cfg.warm_pts_min) / pts_span);
-
-    // A full top-face view (high rho_pts) constrains w/h directly from the silhouette extent, even
-    // with no bilateral vertical-side coverage. Without this, an oversized box reads rho_x/rho_y≈0
-    // (rim points sit far inside the too-wide side planes) → freeze → it can never shrink: a
-    // deadlock. When point evidence is strong, trust size from points and release the freeze.
-    const bool strong_evidence = rho_pts >= cfg.warm_size_pts_release;
-    const float rho_pos = rho_pts * std::max(rho_x, rho_y);
-    const float rho_size_x = strong_evidence ? std::max(rho_pts * rho_x, rho_pts) : rho_pts * rho_x;
-    const float rho_size_y = strong_evidence ? std::max(rho_pts * rho_y, rho_pts) : rho_pts * rho_y;
-    const float rho_vertical = rho_pts;
-    const float yaw_support = clamp01(0.25f * std::max(rho_x, rho_y) + 0.75f * std::sqrt(rho_x * rho_y));
-
-    // Evidence-hardening: a well-observed extent (high accumulated per-face info) STIFFENS — its
-    // acceptance gain shrinks toward 0, so re-encountered masks barely move it (belief→knowledge).
-    // An unobserved face has info≈0 → stiffness≈1 → it stays plastic until first seen.
-    const float ih = std::max(1e-3f, cfg.warm_info_half);
-    const float stiff_w = ih / (ih + info_w);
-    const float stiff_h = ih / (ih + info_h);
-
-    const float lambda_pos = settle_gain * lerp(cfg.warm_lambda_pos_base + cfg.warm_lambda_pos_gain * rho_pos, 0.95f, confidence);
-    const float lambda_size_x = settle_gain * stiff_w * lerp(cfg.warm_lambda_size_base + cfg.warm_lambda_size_gain * rho_size_x, 0.95f, confidence);
-    const float lambda_size_y = settle_gain * stiff_h * lerp(cfg.warm_lambda_size_base + cfg.warm_lambda_size_gain * rho_size_y, 0.95f, confidence);
-    const float lambda_vertical = settle_gain * lerp(cfg.warm_lambda_size_base + cfg.warm_lambda_size_gain * rho_vertical, 0.90f, confidence);
-    const float lambda_yaw = settle_gain * lerp(cfg.warm_lambda_yaw_base + cfg.warm_lambda_yaw_gain * (rho_pts * yaw_support), 0.70f, confidence);
-
-    const float effective_side_min = cfg.warm_coverage_min_side * (1.0f - 0.6f * confidence);
-    const float effective_rho_freeze = cfg.warm_rho_freeze * (1.0f - 0.7f * confidence);
-
-    const bool freeze_x = !strong_evidence && (std::min(cov_px, cov_nx) < effective_side_min || rho_x < effective_rho_freeze);
-    const bool freeze_y = !strong_evidence && (std::min(cov_py, cov_ny) < effective_side_min || rho_y < effective_rho_freeze);
-
+    const auto& K = kalman_gain;
     TableState accepted = raw;
-    accepted.cx = lerp(previous.cx, raw.cx, lambda_pos);
-    accepted.cy = lerp(previous.cy, raw.cy, lambda_pos);
-    accepted.w = freeze_x ? previous.w : ratchet(previous.w, raw.w, lambda_size_x);
-    accepted.h = freeze_y ? previous.h : ratchet(previous.h, raw.h, lambda_size_y);
-    accepted.table_height = ratchet(previous.table_height, raw.table_height, lambda_vertical);
-    accepted.leg_length = ratchet(previous.leg_length, raw.leg_length, lambda_vertical);
-    accepted.yaw = angle_lerp(previous.yaw, raw.yaw, lambda_yaw);
-    // leg_inset was previously accepted raw (unsmoothed) → it swung every frame. Damp it like the
-    // other size DOFs so it settles with maturity.
-    accepted.leg_inset = lerp(previous.leg_inset, raw.leg_inset, 0.5f * (lambda_size_x + lambda_size_y));
-
+    accepted.cx           = lerp(previous.cx,           raw.cx,           K[0]);
+    accepted.cy           = lerp(previous.cy,           raw.cy,           K[1]);
+    accepted.w            = ratchet(previous.w,            raw.w,            K[2]);
+    accepted.h            = ratchet(previous.h,            raw.h,            K[3]);
+    accepted.table_height = ratchet(previous.table_height, raw.table_height, K[4]);
+    accepted.leg_length   = ratchet(previous.leg_length,   raw.leg_length,   K[5]);
+    accepted.yaw          = angle_lerp(previous.yaw,    raw.yaw,          K[6] * yaw_obs);
+    accepted.leg_inset    = lerp(previous.leg_inset,    raw.leg_inset,    K[7]);
     return accepted;
 }
 
@@ -262,18 +199,10 @@ bool TableFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_id)
     mparams.prior_w            = init_state.w;
     mparams.prior_h            = init_state.h;
     mparams.prior_table_height = init_state.table_height;
-    {
-        const auto it = std::find_if(priors_.begin(), priors_.end(),
-                                     [&](const TablePrior& prior){ return prior.node_name == node.name(); });
-        if (it != priors_.end())
-            mparams.prior_size_std = std::max(mparams.prior_size_std, it->sigma_size);
-        else if (cfg_.tracker_enabled)
-            // Born-from-detection (no prior entry): the Birth* dims are not just the seed but a real
-            // size prior at this precision, so the size is pinned near standard furniture under weak
-            // early views instead of being reshaped freely by the first partial mask. See "go with the
-            // prior": same mean as the seed, but now with a confidence behind it.
-            mparams.prior_size_std = cfg_.tracker_birth_size_std;
-    }
+    // Born-from-detection: the Birth* dims (seed) double as the size prior MEAN, at this precision, so the
+    // size is pinned near standard furniture under weak early views instead of being reshaped freely by
+    // the first partial mask ("go with the prior": same mean as the seed, with a confidence behind it).
+    mparams.prior_size_std = cfg_.tracker_birth_size_std;
 
     inst.model     = TableModel(init_state, mparams);
     inst.queue     = SampleQueue<TableModel>(make_queue_params());
@@ -298,14 +227,15 @@ TableFitter::TableObservation TableFitter::observe(TableInstance& inst, const DS
     const auto& masks_packet = mask_ingestor_->packet();
     if (masks_packet.valid && masks_packet.frame_id > inst.last_masks_frame_seen)
     {
-        // Mask for this instance: the tracker's gated assignment when present (multi-instance safe),
-        // else the legacy greedy nearest-to-our-centre.
+        // Mask for this instance = the tracker's gated assignment ONLY. A frame where the tracker did not
+        // associate a detection to this instance carries no trustworthy mask for it (feeding the nearest
+        // blob would cross-contaminate instances and update on unconfirmed evidence), so we skip — the
+        // belief just freezes that cycle (information-filter axiom). assigned_mask_idx is set each cycle by
+        // run_instance_tracker; -1 means "no association this frame".
         std::optional<MaskIngestor::MaskSlice> selected_mask;
         if (const auto& sl = masks_packet.slices;
             inst.assigned_mask_idx >= 0 and inst.assigned_mask_idx < static_cast<int>(sl.size()))
             selected_mask = sl[inst.assigned_mask_idx];
-        else
-            selected_mask = mask_ingestor_->select_nearest(Eigen::Vector3f(inst.model.state().cx, inst.model.state().cy, inst.model.state().table_height), "table");
         if (selected_mask.has_value())
         {
             const auto& slice = selected_mask.value();
@@ -427,20 +357,11 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
 
     feed_silhouette(inst);   // set the RGB-mask contour rays before the gradient step
 
-    // A fresh mask whose contour disagrees with the (possibly frozen) model — high silhouette
-    // residual — is NEW evidence: re-open the converged fit and re-energise the acceptance gain so
-    // the silhouette term can actually pull w/h/pose onto the mask (e.g. expand an undersized box),
-    // instead of merely reporting the mismatch. Mirrors the queue-admission re-open.
-    if (inst.frames_converged >= cfg_.K_stable
-        && inst.model.silhouette_ray_count() > 0
-        && inst.model.silhouette_residual() > cfg_.sil_reopen_residual_m)
-    {
-        if (should_log(inst))
-            std::print("[{}] silhouette re-open: silres={:.3f} > {:.3f} → reopen fit\n",
-                       inst.node_name, inst.model.silhouette_residual(), cfg_.sil_reopen_residual_m);
-        inst.frames_converged = cfg_.K_stable / 2;
-        inst.settle_maturity = 0;
-    }
+    // (No convergence-freeze / re-open machinery: the optimiser runs every FRESH frame and the belief
+    // stabiliser — Kalman gain + maturity + CUSUM + size ratchet + yaw lock — provides the stability that
+    // a freeze used to. So the FE responds CONTINUOUSLY to evidence: the extent term grows w/h to the
+    // observed point span (mask beyond the fit), while the stabiliser damps per-frame noise. No thresholds
+    // decide when to "re-open".)
 
     const float free_energy = step_model_update(inst, observation.residual_pts,
                                                 observation.candidate_pts, residual_precision,
@@ -455,23 +376,13 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
     // hardens the belief by views, not wall-clock.
     if (observation.has_fresh_data)
     {
-        if (cfg_.fisher_filter_enabled)
-        {
-            // Fisher information filter: fold this viewpoint's (confidence-weighted) per-DOF observation
-            // info into the accumulators (predict Q-bleed + update + normalised "equivalent views"), via
-            // the shared stabiliser. The weighting + Kalman/CUSUM already ran in accept_table_belief.
-            stabilizer_.accumulate(inst.stab);
-            inst.info_w = inst.stab.fisher_info[2];   // DOF index 2 = w
-            inst.info_h = inst.stab.fisher_info[3];   // DOF index 3 = h
-        }
-        else
-        {
-            // Legacy face-coverage PROXY (kept for A/B): info_w ← x-faces, info_h ← y-faces.
-            const auto cov = inst.queue.face_coverage(inst.model);
-            const float dm = std::max(1.0f, cfg_.delta_min);
-            inst.info_w += TableBeliefPolicy::clamp01(std::max(cov[0], cov[1]) / dm);
-            inst.info_h += TableBeliefPolicy::clamp01(std::max(cov[2], cov[3]) / dm);
-        }
+        // Fisher information filter: fold this viewpoint's (confidence-weighted) per-DOF observation
+        // info into the accumulators (predict Q-bleed + update + normalised "equivalent views"), via the
+        // shared stabiliser. The weighting + Kalman/CUSUM already ran in accept_table_belief. info_w/info_h
+        // mirror the w/h accumulators for the diagnostic log line below.
+        stabilizer_.accumulate(inst.stab);
+        inst.info_w = inst.stab.fisher_info[2];   // DOF index 2 = w
+        inst.info_h = inst.stab.fisher_info[3];   // DOF index 3 = h
         inst.last_residual_pts = observation.residual_pts;   // hold for the voxelizer residual layer
     }
 
@@ -572,13 +483,6 @@ void TableFitter::step_queue_update(TableInstance& inst,
     const int q_before = inst.queue.size();
     inst.queue.insert(candidate_pts, sdf_vals, robot_cov, inst.model, inst.matched_frames);
     const int admitted = inst.queue.size() - q_before;
-    if (admitted > 0 && inst.frames_converged >= cfg_.K_stable)
-        inst.frames_converged = cfg_.K_stable / 2;
-    // A burst of NET new anchors = a genuinely new viewpoint (new faces fill empty bins). Static
-    // churn nets ~0 (admit≈evict), so this ignores noise. Re-energise the acceptance gain so the
-    // model adapts to the new evidence, then re-settles.
-    if (admitted >= cfg_.warm_reopen_admit)
-        inst.settle_maturity = 0;
     if (should_log(inst))
         std::print("[{}] queue: admitted={} size={} obs_precision={:.2f}\n",
                    inst.node_name, admitted, inst.queue.size(), observation_precision);
@@ -601,13 +505,12 @@ float TableFitter::step_model_update(TableInstance& inst,
     }
 
     float free_energy;
-    if (cfg_.freeze_belief_on_stale and not fresh_observation)
+    if (not fresh_observation)
     {
-        // (A) No new measurement → don't update the belief. Re-optimising the same frozen anchor set
-        // every cycle and re-accepting through a noisy per-frame Kalman gain is exactly what injects
-        // jitter into the accepted state and FE. The information-filter axiom: no observation, no
-        // update. Recompute FE at the unchanged state for reporting only (queue weights still age, so
-        // this drifts only as slowly as the anchor mass decays — not the per-cycle re-fit noise).
+        // Information-filter axiom: no new measurement → no belief update. Re-optimising the same frozen
+        // anchor set every cycle and re-accepting through a noisy per-frame Kalman gain injects jitter into
+        // the accepted state and FE. Recompute FE at the unchanged state for reporting only (queue weights
+        // still age, so this drifts only as slowly as the anchor mass decays).
         inst.last_fe_terms = inst.model.compute_free_energy_decomposition(
             evidence.eval_pts, evidence.eval_weights,
             static_cast<std::size_t>(evidence.historical_anchor_count));
@@ -706,9 +609,10 @@ TableFitter::TableBeliefEvidence TableFitter::compose_belief_evidence(
 
 void TableFitter::evolve_table_belief(TableInstance& inst, const TableBeliefEvidence& evidence)
 {
-    // Freeze gradient descent once converged to prevent oscillation; step_queue_update unlocks it
-    // automatically when new points arrive.
-    if (inst.frames_converged < cfg_.K_stable && evidence.can_optimize())
+    // Optimise on every fresh frame (no convergence freeze): the belief stabiliser controls how much the
+    // accepted state actually moves, so the raw fit can always respond to evidence (e.g. grow to a mask
+    // that extends past the current span) while the accepted belief stays stable on a settled table.
+    if (evidence.can_optimize())
     {
         auto observer = [&](int /*iter*/, const TableState& state, const FreeEnergyDecomposition& /*terms*/)
         {
@@ -747,29 +651,34 @@ void TableFitter::refresh_stabilizer_params()
     layout.is_position[1] = true;
     stabilizer_.set_layout(layout);
 
+    // Stage-1: the Fisher filter + Kalman stiffness + maturity stiffening + quality rescale + CUSUM gate
+    // + mask-conf weighting are the agent's belief model, not options — hardwired on (their A/B-off
+    // branches were removed). Only the numeric tunings remain configurable.
     StabilizerParams p;
-    p.fisher_filter_enabled = cfg_.fisher_filter_enabled;
-    p.kalman_stiffness      = cfg_.fisher_kalman_stiffness;
-    p.maturity_stiffness    = cfg_.fisher_maturity_stiffness;
+    p.fisher_filter_enabled = true;
+    p.kalman_stiffness      = true;
+    p.maturity_stiffness    = true;
     p.info_decay            = cfg_.fisher_info_decay;
-    p.info_quality_rescale  = cfg_.fisher_quality_rescale;
+    p.info_quality_rescale  = true;
     p.info_peak_decay        = cfg_.fisher_peak_decay;
     p.info_peak_ratchet      = cfg_.fisher_peak_ratchet;
     p.info_peak_ema          = cfg_.fisher_peak_ema;
     p.views_half            = cfg_.fisher_views_half;
     p.process_std_len       = cfg_.fisher_process_std_m;
     p.process_std_ang       = cfg_.fisher_process_std_yaw;
-    p.mask_conf_weight      = cfg_.mask_conf_weight;
+    p.mask_conf_weight      = true;
     p.mask_conf_floor       = cfg_.mask_conf_floor;
     p.mask_conf_ref         = cfg_.mask_conf_ref;
     p.mask_conf_power       = cfg_.mask_conf_power;
-    p.ce_gate               = cfg_.counter_evidence_gate;
+    p.ce_gate               = true;
     p.ce_band_len           = cfg_.counter_evidence_band_m;
     p.ce_band_ang           = cfg_.counter_evidence_band_rad;
     p.ce_base_pos           = cfg_.counter_evidence_base_pos;
     p.ce_lambda_pos         = cfg_.counter_evidence_lambda_pos;
     p.ce_base_size          = cfg_.counter_evidence_base_size;
     p.ce_lambda_size        = cfg_.counter_evidence_lambda_size;
+    p.ce_base_yaw           = cfg_.counter_evidence_base_yaw;
+    p.ce_lambda_yaw         = cfg_.counter_evidence_lambda_yaw;
     p.ce_decay              = cfg_.counter_evidence_decay;
     p.ce_step_cap           = cfg_.counter_evidence_step_cap;
     p.ce_unlock_deflate     = cfg_.counter_evidence_unlock_deflate;
@@ -806,7 +715,7 @@ float TableFitter::accept_table_belief(TableInstance& inst,
     // raw-fit FE far above this instance's running level. Don't let it move the belief — revert (keeps the
     // state, recomputes FE for reporting) BEFORE the stabiliser, so the gate can't unlock onto garbage.
     // The information-filter axiom for "fresh but untrustworthy". Baseline updated below on accepted frames.
-    if (cfg_.freeze_belief_on_bad_fit and std::isfinite(inst.fe_baseline) and inst.fe_baseline > 1e-3f)
+    if (std::isfinite(inst.fe_baseline) and inst.fe_baseline > 1e-3f)
     {
         const float raw_fe = inst.model.compute_free_energy_decomposition(
             evidence.eval_pts, evidence.eval_weights,
@@ -840,22 +749,23 @@ float TableFitter::accept_table_belief(TableInstance& inst,
         inst.warm_confidence, cfg_, coverage,
         evidence.trusted_point_count, evidence.residual_count, evidence.residual_precision);
 
-    // Acceptance-gain damping driven by settle_maturity: a counter that climbs each cycle and is
-    // reset ONLY by a genuine new-evidence burst (net new queue anchors ⇒ a fresh viewpoint), in
-    // step_queue_update. High gain while immature (startup or just after the controller moves the
-    // robot) → adapts fast; decays to a low floor once mature → smooth lock. It deliberately does
-    // NOT react to frames_converged / per-frame state jitter, which would spike the gain on noise
-    // and make the fit jerky.
-    const float maturity = TableBeliefPolicy::clamp01(static_cast<float>(inst.settle_maturity) /
-                                                      static_cast<float>(std::max(1, cfg_.warm_settle_cycles)));
-    const float settle_gain = TableBeliefPolicy::lerp(1.0f, cfg_.warm_settle_floor, maturity);
-
-    const TableState accepted_state = TableBeliefPolicy::apply_observability_warm_start(
-        previous_state, raw_state, inst.model.params(), cfg_, inst.warm_confidence,
-        coverage, evidence.trusted_point_count, settle_gain, inst.info_w, inst.info_h,
-        stabilizer_.kalman_active() ? &inst.stab.last_kalman_gain : nullptr);
+    TableState accepted_state = TableBeliefPolicy::apply_observability_warm_start(
+        previous_state, raw_state, cfg_, inst.stab.last_kalman_gain);
     if (!finite_state(accepted_state))
         return revert();
+
+    // Canonicalise the footprint to w ≥ h (fold yaw into a π/2 wedge). A box has a 90° symmetry —
+    // (w,h,ψ) ≡ (h,w,ψ+π/2) — so without a convention a yaw flip silently swaps w↔h, and with the size
+    // RATCHET (grow-only) each flip ratchets BOTH dims up → the table inflates toward square → yaw gets
+    // ever more ambiguous → more flips (the runaway). Enforcing w≥h makes the representation unique so a
+    // flip maps back to the SAME (w,h,ψ); the w/h Fisher accumulators are swapped too so precision follows
+    // its dimension. Converges in ≤1 swap then holds (the optimiser won't recross w=h once canonical).
+    if (accepted_state.w < accepted_state.h)
+    {
+        std::swap(accepted_state.w, accepted_state.h);
+        accepted_state.yaw = TableBeliefPolicy::wrap_angle(accepted_state.yaw + 0.5f * M_PIf);
+        BeliefStabilizer<8>::swap_dofs(inst.stab, 2, 3);   // DOF 2 = w, 3 = h
+    }
 
     inst.model.set_state(accepted_state);
     // Do NOT update prior_ to accepted_state — keep prior anchored to the previous frame's state so

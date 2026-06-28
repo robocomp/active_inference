@@ -107,6 +107,7 @@ BottleFitter::BottleObservation BottleFitter::observe(BottleInstance& inst,
             // YOLO produced a bottle mask this frame → detection is alive; record its confidence.
             inst.frames_since_detection = 0;
             inst.last_mask_confidence   = slice.confidence;
+            inst.last_mask_timestamp_ms = mask_ingestor_->packet().timestamp_ms;   // chain-cov pinning (Part B)
             const std::size_t begin = std::min(slice.support_begin, mask_ingestor_->packet().support_points.size());
             const std::size_t end   = std::min(slice.support_end,   mask_ingestor_->packet().support_points.size());
 
@@ -123,6 +124,17 @@ BottleFitter::BottleObservation BottleFitter::observe(BottleInstance& inst,
                     candidate_pts.push_back(p);
                 else
                     residual_pts.push_back(p);
+            }
+
+            // Fresh-frame observation centroid (room frame) — the CV motion filter's position
+            // measurement. It FOLLOWS the bottle (it's this frame's points), unlike the raw SDF fit
+            // which the historical queue drags toward the old location. De-projection applied at use.
+            if (not candidate_pts.empty() or not residual_pts.empty())
+            {
+                Eigen::Vector3f sum = Eigen::Vector3f::Zero();
+                for (const auto& p : candidate_pts) sum += p;
+                for (const auto& p : residual_pts)  sum += p;
+                inst.last_obs_centroid = sum / static_cast<float>(candidate_pts.size() + residual_pts.size());
             }
 
             observation.has_fresh_data = true;
@@ -461,6 +473,52 @@ float BottleFitter::step_model_update(BottleInstance& inst,
         std::array<float, 5> accepted;
         for (int j = 0; j < 5; ++j)
             accepted[j] = prev[j] + inst.stab.last_kalman_gain[j] * (raw[j] - prev[j]);
+
+        // Movable object: cx,cy TRACK via the CV filter using the raw per-frame fit as the measurement
+        // (the maturity-locked gain above froze them, so a moved bottle spawned a new instance). cz
+        // stays table-anchored downstream; radius/height keep the stabiliser's hardening. The CV
+        // covariance inflates during motion → the InstanceTracker gate widens and still associates.
+        if (cfg_.dynamics_model == "constant_velocity")
+        {
+            // Measurement = the fresh-frame observation centroid (FOLLOWS the bottle), de-projected onto
+            // the cylinder axis (the visible front-arc centroid sits ~1 radius camera-ward — same
+            // correction as the cold-start seed). Falls back to the raw fit before the first observation.
+            Eigen::Vector2f zc(raw[0], raw[1]);
+            if (inst.last_obs_centroid.squaredNorm() > 0.0f)
+            {
+                zc = {inst.last_obs_centroid.x(), inst.last_obs_centroid.y()};
+                if (const auto Mopt = room_T_zed_matrix();
+                    Mopt.has_value() and cfg_.seed_deproject_frac > 0.0f and inst.model.state().radius > 0.0f)
+                {
+                    const Eigen::Vector2f cam_xy(static_cast<float>((*Mopt)(0, 3)), static_cast<float>((*Mopt)(1, 3)));
+                    const Eigen::Vector2f ray = zc - cam_xy;
+                    if (ray.norm() > 1e-4f)
+                        zc += (cfg_.seed_deproject_frac * inst.model.state().radius) * ray.normalized();
+                }
+            }
+            const double mv = static_cast<double>(cfg_.cv_meas_std) * cfg_.cv_meas_std;
+            const std::vector<double> z   = {zc.x(), zc.y()};
+            const std::vector<double> mvv = {mv, mv};
+            if (not inst.motion.initialized())
+            {
+                inst.motion.configure(cfg_.cv_accel_std, cfg_.cv_init_vel_std);
+                inst.motion.init(z, mvv);
+            }
+            else if (inst.last_masks_frame_seen != inst.last_motion_frame)   // a NEW frame's measurement
+            {
+                double dt = (inst.last_mask_timestamp_ms > inst.last_motion_ts_ms and inst.last_motion_ts_ms > 0)
+                            ? static_cast<double>(inst.last_mask_timestamp_ms - inst.last_motion_ts_ms) / 1000.0
+                            : static_cast<double>(cfg_.cv_dt_default_s);
+                dt = std::clamp(dt, 0.01, 0.5);
+                inst.motion.predict(dt);
+                inst.motion.correct(z, mvv);
+            }
+            inst.last_motion_ts_ms = inst.last_mask_timestamp_ms;
+            inst.last_motion_frame = inst.last_masks_frame_seen;
+            accepted[0] = static_cast<float>(inst.motion.position(0));
+            accepted[1] = static_cast<float>(inst.motion.position(1));
+        }
+
         inst.model.set_state(BottleState::from_array(accepted));
 
         free_energy = inst.model.compute_free_energy(fit_pts, fit_weights);
@@ -548,6 +606,7 @@ void BottleFitter::log_fisher_csv(const BottleInstance& inst, bool fresh, float 
         for (const auto* d : kDof) fisher_csv_ << ",gain_"  << d;   // per-DOF Kalman gain (diagnostic; not applied)
         for (const auto* d : kDof) fisher_csv_ << ",ce_"    << d;   // CUSUM counter-evidence Sⱼ (diagnostic)
         for (const auto* d : kDof) fisher_csv_ << ",ceg_"   << d;   // gate: -1 reject / 0 passthrough / +1 unlock
+        fisher_csv_ << ",vx,vy,motion_var";   // CV motion filter: velocity (m/s) + cx position variance
         fisher_csv_ << '\n';
     }
 
@@ -564,6 +623,9 @@ void BottleFitter::log_fisher_csv(const BottleInstance& inst, bool fresh, float 
     for (int j = 0; j < 5; ++j) fisher_csv_ << ',' << inst.stab.last_kalman_gain[j];
     for (int j = 0; j < 5; ++j) fisher_csv_ << ',' << inst.stab.counter_evidence[j];
     for (int j = 0; j < 5; ++j) fisher_csv_ << ',' << inst.stab.last_ce_gate[j];
+    fisher_csv_ << ',' << (inst.motion.initialized() ? inst.motion.velocity(0) : 0.0)
+                << ',' << (inst.motion.initialized() ? inst.motion.velocity(1) : 0.0)
+                << ',' << (inst.motion.initialized() ? inst.motion.pos_var(0)  : 0.0);
     fisher_csv_ << '\n';
     fisher_csv_.flush();   // flush each row so a plot can tail the file during a live run
 }

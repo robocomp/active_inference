@@ -161,6 +161,17 @@ MaskConfFloor  = 0.2
 MaskConfRef    = 0.5
 MaskConfPower  = 2.0
 
+[Dynamics]
+# A bottle is MOVABLE: its position (cx,cy) TRACKS via a constant-velocity Kalman filter instead of
+# hardening like furniture. Fixes "move the bottle → a 2nd instance is born instead of tracking it"
+# (the maturity-locked position gain froze the fit; the moved detection then spawned a new instance).
+# cz stays table-anchored; radius/height keep hardening. Set Model="static" for the legacy behaviour.
+Model = "constant_velocity"
+CvAccelStd = 0.5      # process: acceleration std (m/s²) — how fast the velocity can change
+CvMeasStd = 0.01      # per-frame position measurement std (m) fed as the KF measurement noise R
+CvInitVelStd = 0.5    # 1-σ on the initial unknown velocity (m/s)
+CvDtDefaultS = 0.1    # fallback Δt (s) when capture stamps are missing/equal (≈ Period.Compute)
+
 [Support]
 # Which surface the bottle hangs from (room vs a table): MAP over {room, every table_N} by
 # vertical-support log-evidence — the centre must lie inside a table's oriented footprint AND the
@@ -186,6 +197,8 @@ DetectionNoiseM = 0.05   # R in the association innovation cov S=P+R²I — fixe
                          # overconfident σ~mm fit cov otherwise rejects the ~6cm-offset mask centroid). ≥ that offset.
 MergeOverlap = 0.30      # collapse two instances whose circle footprints overlap ≥ this fraction of the
                          # smaller (same bottle fitted twice), keeping the more-observed. 0 disables.
+NllCost = false          # association cost = ½(m²+ln|S|) NLL (tracks compete by likelihood, not raw
+                         # distance) vs raw squared-Mahalanobis. Gate is m² either way. Matters under clutter.
 
 [SampleQueue]
 NumAngleBins = 16
