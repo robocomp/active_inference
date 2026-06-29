@@ -17,6 +17,7 @@
 #include <Eigen/Dense>
 
 #include "table_model.h"        // TableModel / TableState / FreeEnergyDecomposition
+#include "table_belief.h"       // AI2 full-covariance belief (TABLE_FIT_AI2.md)
 #include "sample_queue_geometry.h"   // common SampleQueue<Model> + table's geometry policy
 #include "table_affordance.h"   // TableAffordance
 #include "../../common/belief_stabilizer/belief_stabilizer.h"   // rc::StabilizerState
@@ -31,11 +32,25 @@ struct TableInstance
     TableModel  model;
     SampleQueue<TableModel> queue;
 
+    // ── AI2 belief (TABLE_FIT_AI2.md), used when cfg.use_ai2 ──────────────────────
+    // Full-covariance recursive filter over θ=[cx,cy,H,w,h,yaw]; replaces the legacy fit + Fisher/Kalman
+    // path. Lazily initialised from the model state on the first AI2 cycle.
+    TableBelief ai2_belief;
+    bool        ai2_initialized = false;
+    // This frame's ego-motion capture-corruption (from the selected mask slice), consumed by the AI2
+    // update as the observation precision R / bias gate (see MASK_MOTION_CORRUPTION.md).
+    float last_motion_var      = 0.0f;
+    float last_motion_bias     = 0.0f;
+    float last_trunc_frac      = 0.0f;
+    float last_centroid_radius = 0.0f;
+
     int  last_frame_seen    = -1;     // last_sensing_frame_att value read
     int  matched_frames     = 0;      // frames with fresh sensing data
     int  frames_converged    = 0;     // consecutive frames with |ΔFE| < fe_eps
     int  frames_rising      = 0;      // consecutive frames with F increasing
     int  last_masks_frame_seen = -1;  // last masks packet frame consumed
+    std::uint64_t last_mask_timestamp_ms = 0;  // capture stamp of the last consumed mask (chain-cov pinning)
+    float chain_cov_xx = 0.0f, chain_cov_yy = 0.0f;  // Part B localization/chain cov (m²), added to the RT cov
     int  processed_cycles   = 0;      // per-table compute cycles for log throttling
     // Tracker's gated mask assignment for THIS frame (index into the masks packet slices), or -1 to fall
     // back to greedy nearest-mask. Set each cycle by run_instance_tracker(); read in TableFitter::observe.
@@ -50,6 +65,13 @@ struct TableInstance
     // unobserved face stays plastic until first seen. info_w ← x-faces, info_h ← y-faces.
     float      info_w = 0.0f;
     float      info_h = 0.0f;
+    // Viewpoint-novelty gate: room-frame camera position at the last viewpoint whose observation info was
+    // accumulated. A fresh frame whose camera is within view_novelty_scale_m of this is a REDUNDANT view —
+    // its Fisher info is attenuated to the floor so a static robot can't tighten the belief past what its
+    // single vantage actually supports. Updated whenever a frame registers as novel.
+    Eigen::Vector3f last_view_pos = Eigen::Vector3f::Zero();
+    bool            has_view_pos  = false;
+    float           last_view_novelty = 1.0f;   // diagnostic: the w_view applied last fresh frame
     // ── Per-DOF belief stabiliser state ──────────────────────────────────────────
     // The Fisher-information filter + Kalman acceptance + CUSUM/SPRT gate, now the shared
     // rc::BeliefStabilizer over the 8 DOFs [cx,cy,w,h,H,leg,yaw,inset]. The algorithm + params live in

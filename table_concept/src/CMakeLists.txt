@@ -32,6 +32,7 @@ LIST(APPEND SOURCES
   ../src/table_scene_graph.cpp
   ../src/table_fitter.cpp
   ../src/table_model.cpp
+  ../src/table_belief.cpp
   ../src/epistemic_planner.cpp
   ../src/table_affordance.cpp
   ${ACTIVE_INFERENCE_COMMON_DIR}/robust_metrics/robust_metrics.cpp

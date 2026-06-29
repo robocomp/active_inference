@@ -20,7 +20,44 @@ TableFitter::TableFitter(std::shared_ptr<DSR::DSRGraph> graph,
                          TableSceneGraph* scene_graph)
     : G_(std::move(graph)), inner_eigen_(inner_eigen), cfg_(cfg),
       mask_ingestor_(mask_ingestor), scene_graph_(scene_graph)
-{}
+{
+    // Cap torch intra-op parallelism: the per-box FE fit is tiny (a few k points), so torch spreading it
+    // across every core is pure overhead + contention — it grabbed ~20 cores for a single table. A small
+    // pool is faster here and frees the machine. (Set TableModel.TorchThreads; default 2.)
+    set_torch_threads(cfg_.torch_threads);
+}
+
+void TableFitter::set_chain_cov_source(DSR::InnerGaussianAPI* gaussian, std::string source_frame, bool enabled)
+{
+    gaussian_          = gaussian;
+    chain_src_frame_   = std::move(source_frame);
+    chain_cov_enabled_ = enabled and (gaussian_ != nullptr) and not chain_src_frame_.empty();
+}
+
+void TableFitter::compute_chain_cov(TableInstance& inst)
+{
+    inst.chain_cov_xx = 0.0f;
+    inst.chain_cov_yy = 0.0f;
+    if (not chain_cov_enabled_ or not gaussian_ or not inner_eigen_)
+        return;
+    // Localization/chain term J·Σ_chain·Jᵀ at the table centre: transform it to the measurement frame,
+    // then back to room with ZERO input cov — InnerGaussianAPI returns exactly the chain contribution
+    // (Σ_chain from each RT edge's rt_covariance), pinned to the mask capture stamp. The table is fit in
+    // room but its position is still conditional on the robot pose (camera→robot→room), so this applies.
+    const auto& s = inst.model.state();
+    const Mat::Vector3d centre(s.cx, s.cy, 0.0);   // table node origin = base on the floor (z=0)
+    const auto c_src = inner_eigen_->transform(chain_src_frame_, centre, "room", inst.last_mask_timestamp_ms);
+    if (not c_src.has_value())
+        return;
+    DSR::GaussianPoint3D gp;
+    gp.mean = c_src.value();
+    gp.covariance = DSR::Cov3d::Zero();
+    const auto g = gaussian_->transform_point("room", gp, chain_src_frame_, inst.last_mask_timestamp_ms);
+    if (not g.has_value())
+        return;
+    inst.chain_cov_xx = static_cast<float>(g->covariance(0, 0));
+    inst.chain_cov_yy = static_cast<float>(g->covariance(1, 1));
+}
 
 // ─── TableBeliefPolicy ───────────────────────────────────────────────────────
 
@@ -49,32 +86,23 @@ float TableFitter::TableBeliefPolicy::angle_lerp(float start, float end, float g
 TableState TableFitter::TableBeliefPolicy::apply_observability_warm_start(
     const TableState& previous,
     const TableState& raw,
-    const TableConfig& cfg,
     const std::array<float, 8>& kalman_gain)
 {
-    // Calibrated stiffness: every DOF's acceptance lerp is driven directly by the per-DOF Kalman gain
-    // K_j = obs_info_j / (Y_pred_j + obs_info_j) from the information filter — a well-observed DOF
-    // (large Y_pred) barely moves, while a genuinely high-information view (large obs) still moves it.
-    // Size RATCHET: a table is rigid — a size DOF grows at its full gain but SHRINKS at gain·size_shrink_gain
-    // (heavily damped), so a far/occluded partial view can't collapse the box ("shrank to a third across
-    // the room") while a sustained genuine shrink can still slowly correct an over-grow. Position/yaw move
-    // freely.
-    const float shrink = std::clamp(cfg.size_shrink_gain, 0.0f, 1.0f);
-    const auto ratchet = [&](float prev, float rawv, float k)
-    {
-        return lerp(prev, rawv, rawv < prev ? k * shrink : k);
-    };
-
-    // (No explicit yaw aspect gate: for a near-square footprint the SDF's yaw sensitivity is small, so the
-    // yaw observation Fisher info — hence the Kalman gain K[6] — is already low. Precision handles it.)
+    // SYMMETRIC precision-weighted acceptance for EVERY DOF (the asymmetric size ratchet is retired). Each
+    // DOF's lerp is driven by its Kalman gain K_j = obs_j/(Y_pred_j + obs_j) from the information filter —
+    // a well-observed DOF (large Y_pred) barely moves; a high-information view still moves it. Size needs no
+    // grow-only hack: the extent term works over the ACCUMULATED RFE queue (which holds the full observed
+    // span, so a partial current view can't shrink it), and the gain (mature size → small) + the ρ-EMA
+    // (transient bursts) damp it. So the box relaxes an over-grow toward the consistent span AND resists a
+    // partial-view collapse — symmetrically, with no high-side noise accumulation.
     const auto& K = kalman_gain;
     TableState accepted = raw;
     accepted.cx           = lerp(previous.cx,           raw.cx,           K[0]);
     accepted.cy           = lerp(previous.cy,           raw.cy,           K[1]);
-    accepted.w            = ratchet(previous.w,            raw.w,            K[2]);
-    accepted.h            = ratchet(previous.h,            raw.h,            K[3]);
-    accepted.table_height = ratchet(previous.table_height, raw.table_height, K[4]);
-    accepted.leg_length   = ratchet(previous.leg_length,   raw.leg_length,   K[5]);
+    accepted.w            = lerp(previous.w,            raw.w,            K[2]);
+    accepted.h            = lerp(previous.h,            raw.h,            K[3]);
+    accepted.table_height = lerp(previous.table_height, raw.table_height, K[4]);
+    accepted.leg_length   = lerp(previous.leg_length,   raw.leg_length,   K[5]);
     accepted.yaw          = angle_lerp(previous.yaw,    raw.yaw,          K[6]);
     accepted.leg_inset    = lerp(previous.leg_inset,    raw.leg_inset,    K[7]);
     return accepted;
@@ -180,7 +208,7 @@ bool TableFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_id)
         fix(init_state.w, 1.0f, "w");
         fix(init_state.h, 0.6f, "h");
         fix(init_state.table_height, 0.75f, "table_height");
-        fix(init_state.leg_inset, 0.045f, "leg_inset");
+        fix(init_state.leg_inset, TableModel::LEG_RADIUS, "leg_inset");  // FROZEN at outer edge
         init_state.leg_length = std::max(0.05f, init_state.table_height - TableModel::TOP_THICKNESS);
     }
 
@@ -237,6 +265,13 @@ TableFitter::TableObservation TableFitter::observe(TableInstance& inst, const DS
             // YOLO fired for this table on a fresh frame → detection is alive.
             inst.frames_since_detection = 0;
             inst.last_mask_confidence = slice.confidence;
+            inst.last_mask_timestamp_ms = masks_packet.timestamp_ms;   // chain-cov pinning (Part B)
+            // Ego-motion capture-corruption for this mask (AI2 obs precision / bias gate; 0 if producer
+            // predates the feature). See MASK_MOTION_CORRUPTION.md.
+            inst.last_motion_var      = slice.motion_var;
+            inst.last_motion_bias     = slice.motion_bias;
+            inst.last_trunc_frac      = slice.trunc_frac;
+            inst.last_centroid_radius = slice.centroid_radius;
             const std::size_t begin = std::min(slice.support_begin, masks_packet.support_points.size());
             const std::size_t end = std::min(slice.support_end, masks_packet.support_points.size());
 
@@ -309,8 +344,107 @@ bool TableFitter::should_log(const TableInstance& inst) const
 
 // ─── Inference ───────────────────────────────────────────────────────────────
 
+float TableFitter::run_inference_ai2(TableInstance& inst, const TableObservation& observation)
+{
+    const int npts = static_cast<int>(observation.candidate_pts.size() + observation.residual_pts.size());
+
+    // Lazy init: warm-start the belief from the model state, but on the FIRST frame snap the centre/height
+    // to the observed cloud — a box far from the points would see them all as clutter (zero gradient) and
+    // never converge (the AI2 analogue of the legacy cold-start snap).
+    if (not inst.ai2_initialized)
+    {
+        const auto& m = inst.model.state();
+        TableBeliefState s0{m.cx, m.cy, m.table_height, m.w, m.h, m.yaw};
+        if (npts > 0)
+        {
+            Eigen::Vector3f sum = Eigen::Vector3f::Zero();
+            std::vector<float> zs; zs.reserve(npts);
+            const auto scan = [&](const std::vector<Eigen::Vector3f>& v)
+            { for (const auto& p : v) { sum += p; zs.push_back(p.z()); } };
+            scan(observation.candidate_pts); scan(observation.residual_pts);
+            s0.cx = sum.x() / npts; s0.cy = sum.y() / npts;
+            const std::size_t k = static_cast<std::size_t>(0.95f * (zs.size() - 1));
+            std::nth_element(zs.begin(), zs.begin() + k, zs.end());
+            s0.H = zs[k];   // observed top face
+        }
+        TableBeliefParams p;
+        p.sigma_base_m    = cfg_.ai2_sigma_base_m;
+        p.clutter_frac    = cfg_.ai2_clutter_frac;
+        p.clutter_scale_m = cfg_.ai2_clutter_scale_m;
+        p.prior_size_std  = cfg_.ai2_prior_size_std;
+        p.process_std_m   = cfg_.ai2_process_std_m;
+        p.process_std_yaw = cfg_.ai2_process_std_yaw;
+        p.gn_iters        = cfg_.ai2_gn_iters;
+        p.top_thickness   = TableModel::TOP_THICKNESS;
+        p.leg_radius      = TableModel::LEG_RADIUS;
+        inst.ai2_belief = TableBelief(s0, p);
+        inst.ai2_initialized = true;
+    }
+
+    if (observation.has_fresh_data)
+        ingest_observation_voxels(inst, observation);   // keep the viewer's voxel bank fed
+
+    // Freeze-on-stale: no fresh mask ⇒ don't touch the belief (information-filter axiom).
+    if (not observation.has_fresh_data)
+    {
+        compute_projected_roi(inst);
+        return 0.0f;
+    }
+
+    // Observation precision R = σ_base² + mask_motion_var (the ego-motion downweight; symmetric/random
+    // error). One scalar per mask in v1 — the per-DOF split is a later step.
+    const float R = cfg_.ai2_sigma_base_m * cfg_.ai2_sigma_base_m + std::max(0.0f, inst.last_motion_var);
+
+    // Bias gate: a known timing offset shifts the whole mask systematically (a bias, not noise). Above
+    // tolerance, skip the geometric update (predict only) — but keep the instance (association ran
+    // upstream). Table is cm-scale ⇒ a looser gate than bottle.
+    const bool gated = inst.last_motion_bias > cfg_.ai2_motion_bias_gate_m;
+
+    float energy = 0.0f;
+    if (gated)
+        inst.ai2_belief.predict();   // Σ inflates, mean unchanged
+    else
+    {
+        TableFrame frame;
+        frame.points.reserve(static_cast<std::size_t>(npts));
+        frame.points.insert(frame.points.end(), observation.candidate_pts.begin(), observation.candidate_pts.end());
+        frame.points.insert(frame.points.end(), observation.residual_pts.begin(), observation.residual_pts.end());
+        frame.R.assign(frame.points.size(), R);
+        energy = inst.ai2_belief.update(frame);
+    }
+
+    // Write the belief back into the legacy TableState so all downstream publish/viewer/RT code is
+    // unchanged. Legs are derived: leg_length = H − TOP_THICKNESS, inset frozen at the outer edge.
+    const auto& bs = inst.ai2_belief.state();
+    TableState ms = inst.model.state();
+    ms.cx = bs.cx; ms.cy = bs.cy; ms.table_height = bs.H; ms.w = bs.w; ms.h = bs.h; ms.yaw = bs.yaw;
+    ms.leg_length = std::max(0.05f, bs.H - TableModel::TOP_THICKNESS);
+    ms.leg_inset  = TableModel::LEG_RADIUS;
+    inst.model.set_state(ms);
+
+    ++inst.matched_frames;
+    inst.detection_alive = inst.frames_since_detection < cfg_.detection_alive_max_frames;
+
+    compute_projected_roi(inst);
+    compute_chain_cov(inst);
+
+    if (should_log(inst))
+        std::print("[{}] AI2 npts={} R={:.4f} bias={:.3f}{} | cx={:.3f} cy={:.3f} H={:.3f} w={:.3f} h={:.3f} ψ={:.3f} | σ(w,h,H)mm=({:.0f},{:.0f},{:.0f})\n",
+                   inst.node_name, npts, R, inst.last_motion_bias, gated ? " GATED" : "",
+                   bs.cx, bs.cy, bs.H, bs.w, bs.h, bs.yaw,
+                   1000.f * std::sqrt(std::max(0.f, inst.ai2_belief.covariance()(3, 3))),
+                   1000.f * std::sqrt(std::max(0.f, inst.ai2_belief.covariance()(4, 4))),
+                   1000.f * std::sqrt(std::max(0.f, inst.ai2_belief.covariance()(2, 2))));
+
+    log_ai2_csv(inst, npts, R, gated, energy);
+    return energy;
+}
+
 float TableFitter::run_inference(TableInstance& inst, const TableObservation& observation)
 {
+    if (cfg_.use_ai2)
+        return run_inference_ai2(inst, observation);
+
     inst.queue.begin_cycle();
 
     ++inst.settle_maturity;   // climbs each cycle; step_queue_update resets it on a new-evidence burst
@@ -395,6 +529,7 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
     // Active-perception aids for the controller's lock-on search: where the model projects in the
     // image (centring target) + whether YOLO is currently firing here (dwell/lock signal).
     compute_projected_roi(inst);
+    compute_chain_cov(inst);   // Part B: localization/chain cov added to the published RT cov
     inst.detection_alive = inst.frames_since_detection < cfg_.detection_alive_max_frames;
 
     // Per-DOF observation info ("times viewed") accumulates only on frames with a FRESH mask, so it
@@ -436,6 +571,28 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
     return free_energy;
 }
 
+void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool gated, float energy)
+{
+    if (cfg_.ai2_csv_path.empty())
+        return;
+    if (not ai2_csv_.is_open())
+    {
+        ai2_csv_.open(cfg_.ai2_csv_path, std::ios::out | std::ios::trunc);
+        if (not ai2_csv_.is_open()) { cfg_.ai2_csv_path.clear(); return; }
+        ai2_csv_ << "cycle,node,npts,gated,energy,R,motion_var,motion_bias,trunc_frac,"
+                 << "cx,cy,H,w,h,yaw,std_cx,std_cy,std_H,std_w,std_h,std_yaw\n";
+    }
+    const auto& s = inst.ai2_belief.state();
+    const auto& S = inst.ai2_belief.covariance();
+    const auto sd = [&](int i) { return std::sqrt(std::max(0.0f, S(i, i))); };   // posterior std (m / rad)
+    ai2_csv_ << inst.processed_cycles << ',' << inst.node_name << ',' << npts << ',' << (gated ? 1 : 0) << ','
+             << energy << ',' << R << ',' << inst.last_motion_var << ',' << inst.last_motion_bias << ','
+             << inst.last_trunc_frac << ','
+             << s.cx << ',' << s.cy << ',' << s.H << ',' << s.w << ',' << s.h << ',' << s.yaw << ','
+             << sd(0) << ',' << sd(1) << ',' << sd(2) << ',' << sd(3) << ',' << sd(4) << ',' << sd(5) << '\n';
+    ai2_csv_.flush();
+}
+
 void TableFitter::log_fisher_csv(const TableInstance& inst, bool fresh, float free_energy,
                                  int point_count, float silres)
 {
@@ -469,6 +626,7 @@ void TableFitter::log_fisher_csv(const TableInstance& inst, bool fresh, float fr
         // (-1 rejected/locked, 0 coherent passthrough, +1 unlocked/snapped).
         for (const auto* d : kDof) fisher_csv_ << ",ce_"  << d;
         for (const auto* d : kDof) fisher_csv_ << ",ceg_" << d;
+        fisher_csv_ << ",w_view";   // viewpoint-novelty weight applied to this frame's obs info
         fisher_csv_ << '\n';
     }
 
@@ -492,6 +650,7 @@ void TableFitter::log_fisher_csv(const TableInstance& inst, bool fresh, float fr
                 << ',' << ed.n_top << ',' << ed.n_leg << ',' << ed.n_total;
     for (int j = 0; j < 8; ++j) fisher_csv_ << ',' << inst.stab.counter_evidence[j];
     for (int j = 0; j < 8; ++j) fisher_csv_ << ',' << inst.stab.last_ce_gate[j];
+    fisher_csv_ << ',' << inst.last_view_novelty;
     fisher_csv_ << '\n';
     fisher_csv_.flush();   // flush each row so a plot can tail the file during a live run
 }
@@ -755,7 +914,36 @@ float TableFitter::accept_table_belief(TableInstance& inst,
     // Q-bleed filter, and run the CUSUM/SPRT gate (reject lone surprises, ease onto sustained coherent
     // ones). The filter STATE accumulation (predict + posterior) stays in run_inference's fresh block.
     refresh_stabilizer_params();
-    const auto obs_info = inst.model.observation_information(evidence.eval_pts, evidence.eval_weights);
+    auto obs_info = inst.model.observation_information(evidence.eval_pts, evidence.eval_weights);
+    // Viewpoint-novelty gate: a static robot re-observes the SAME partial view every frame, so folding
+    // each frame's Fisher info in as independent evidence makes the belief overconfident about geometry it
+    // never saw (the occluded far depth h collapses to mm-precision). Attenuate the info by how far the
+    // camera has moved since the last accumulated vantage — a redundant same-pose frame contributes only
+    // the floor (sensor-noise averaging), so with the predict Q-bleed the steady-state precision reflects
+    // viewpoint DIVERSITY, not dwell time. Under-observed DOFs stay honestly loose until the robot orbits.
+    if (cfg_.view_novelty_gate)
+    {
+        float w_view = 1.0f;
+        if (const auto M = room_T_zed_matrix(inst.last_mask_timestamp_ms); M.has_value())
+        {
+            const Eigen::Vector3f cam(static_cast<float>((*M)(0, 3)),
+                                      static_cast<float>((*M)(1, 3)),
+                                      static_cast<float>((*M)(2, 3)));
+            const float scale = std::max(1e-3f, cfg_.view_novelty_scale_m);
+            const float floor = std::clamp(cfg_.view_novelty_floor, 0.0f, 1.0f);
+            const float delta = inst.has_view_pos ? (cam - inst.last_view_pos).norm()
+                                                  : std::numeric_limits<float>::max();
+            w_view = floor + (1.0f - floor) * std::clamp(delta / scale, 0.0f, 1.0f);
+            if (not inst.has_view_pos or delta >= scale)   // genuinely new vantage → register it
+            {
+                inst.last_view_pos = cam;
+                inst.has_view_pos  = true;
+            }
+        }
+        inst.last_view_novelty = w_view;
+        for (auto& v : obs_info)
+            v *= w_view;
+    }
     stabilizer_.weight_observation(inst.stab, obs_info, inst.last_mask_confidence);
     stabilizer_.compute_acceptance(inst.stab, raw_state.to_array(), previous_state.to_array());
 
@@ -766,7 +954,7 @@ float TableFitter::accept_table_belief(TableInstance& inst,
         evidence.trusted_point_count, evidence.residual_count, evidence.residual_precision);
 
     TableState accepted_state = TableBeliefPolicy::apply_observability_warm_start(
-        previous_state, raw_state, cfg_, inst.stab.last_kalman_gain);
+        previous_state, raw_state, inst.stab.last_kalman_gain);
     if (!finite_state(accepted_state))
         return revert();
 

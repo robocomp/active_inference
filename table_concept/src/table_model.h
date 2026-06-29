@@ -28,6 +28,12 @@
 
 
 namespace rc {
+
+// Cap torch's intra-op thread pool for the FE fit. Defined in table_model.cpp (which includes torch
+// cleanly); declared here free of torch types so table_fitter.cpp can call it without including
+// <torch/torch.h> — that include collides with the Qt `emit` macro / libtorch ivalue_inl.h there.
+void set_torch_threads(int n);
+
 struct TableState
 {
     float cx           = 0.0f;   // Room-frame X of table centre
@@ -37,7 +43,7 @@ struct TableState
     float table_height = 0.75f;  // Height of table surface from floor
     float leg_length   = 0.72f;  // Length of legs from floor to underside of top
     float yaw          = 0.0f;   // Rotation around Z axis (room frame)
-    float leg_inset    = 0.045f; // Distance from each top edge to the leg centre (top overhang)
+    float leg_inset    = 0.025f; // FROZEN at LEG_RADIUS: legs at outer edge (rim flush w/ table edge)
 
     // Serialise/deserialise as 8-vector
     std::array<float, 8> to_array() const
@@ -256,9 +262,22 @@ private:
     // SDF evaluated for a given explicit state
     float sdf_point_at(const Eigen::Vector3f& p, const TableState& s) const;
 
+    // Height at which the top/leg attribution splits: points above ⇒ top slab, below ⇒ legs.
+    // Anchored to the OBSERVED top face (top_ref_z_, a high percentile of the cloud's z) when set,
+    // minus the slab thickness + one obs-sigma, so points anywhere in the slab band count as top.
+    // Falls back to the belief table_height when no reference has been set. Anchoring to the data —
+    // not the belief height — avoids the circularity where a too-high H mis-labels every top point
+    // as a leg, starves H of evidence, and freezes the error.
+    float top_split_z(const TableState& s) const;
+    // Set top_ref_z_ to a high percentile of the cloud's z (the observed top face). NaN-safe.
+    void update_top_reference(const std::vector<Eigen::Vector3f>& pts) const;
+
     TableState        state_;
     TableState        prior_;
     TableModelParams  params_;
+
+    // Observed top-face height (room z), refreshed each frame from the point cloud; NaN ⇒ use belief.
+    mutable float     top_ref_z_ = std::numeric_limits<float>::quiet_NaN();
 
     // RGB-mask silhouette evidence (room frame), set per-frame; empty ⇒ term inactive.
     Eigen::Vector3f              sil_cam_ = Eigen::Vector3f::Zero();

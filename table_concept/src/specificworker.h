@@ -157,6 +157,7 @@ private:
 
     std::unique_ptr<DSR::RT_API>                        rt_api_;
     std::unique_ptr<DSR::InnerEigenAPI>                inner_eigen_;     // for room↔body↔zed extrinsic (silhouette)
+    std::unique_ptr<DSR::InnerGaussianAPI>            gaussian_api_;    // Part B: chain covariance propagation
     std::unique_ptr<rc::MaskIngestor>                   mask_ingestor_;   // perception (masks-only)
     std::unique_ptr<rc::TableSceneGraph>               scene_graph_;     // DSR node/RT I/O
     uint64_t                                            room_node_id_ = 0;

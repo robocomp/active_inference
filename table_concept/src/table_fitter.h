@@ -28,6 +28,7 @@
 #include <Eigen/Dense>
 #include <dsr/api/dsr_api.h>
 #include <dsr/api/dsr_inner_eigen_api.h>
+#include <dsr/api/dsr_inner_gaussian_api.h>   // Part B: chain covariance propagation
 #include <dsr/api/dsr_camera_api.h>
 
 #include "table_config.h"        // rc::TableConfig
@@ -64,9 +65,16 @@ public:
     TableObservation observe(TableInstance& inst, const DSR::Node& node);
     // One free-energy fit cycle (voxel-bank ingest + cold-start + queue + belief). Returns the FE.
     float run_inference(TableInstance& inst, const TableObservation& observation);
+    // AI2 path (TABLE_FIT_AI2.md): one recursive full-covariance belief update on this frame's mask
+    // points, with the mask-motion channel as the observation precision R / bias gate. Selected by
+    // cfg_.use_ai2; writes the result into inst.model so all downstream publish/viewer code is unchanged.
+    float run_inference_ai2(TableInstance& inst, const TableObservation& observation);
 
     std::unordered_map<std::uint64_t, TableInstance>& instances() { return instances_; }
     void forget_node(std::uint64_t id) { instances_.erase(id); }
+    // Part B (chain covariance): enable adding the localization/chain term J·Σ_chain·Jᵀ (measurement
+    // frame → room, capture-stamp pinned) to each instance, read by the scene-graph's RT-cov write.
+    void set_chain_cov_source(DSR::InnerGaussianAPI* gaussian, std::string source_frame, bool enabled);
     // Room-frame XY a NEWLY born instance's model should start at (from the tracker's detection). The
     // room→table RT edge written at birth is NOT reliably queryable in the same cycle, so ensure_instance
     // would read the 0,0 default and the warm-start would freeze the model there forever (the tracker then
@@ -96,11 +104,10 @@ private:
         static float lerp(float start, float end, float gain);
         static float wrap_angle(float angle);
         static float angle_lerp(float start, float end, float gain);
-        // Kalman-gain-driven acceptance lerp + size ratchet (the only stabilisation path; the old
-        // coverage/InfoHalf heuristic was removed in the Stage-1 simplification).
+        // Symmetric per-DOF Kalman-gain-driven acceptance lerp (the only stabilisation path; the coverage/
+        // InfoHalf heuristic and the size ratchet were both removed — precision + extent + ρ-EMA suffice).
         static TableState apply_observability_warm_start(const TableState& previous,
                                                          const TableState& raw,
-                                                         const TableConfig& cfg,
                                                          const std::array<float, 8>& kalman_gain);
         static float update_warm_confidence(float previous_confidence,
                                             const TableConfig& cfg,
@@ -135,6 +142,10 @@ private:
     // query) so a moving base doesn't back-project a stale contour through the current pose; the rigid
     // body→zed mount is always queried latest. 0 → current pose (no timestamp available).
     std::optional<Eigen::Matrix4d> room_T_zed_matrix(std::uint64_t pose_ts_ms = 0) const;
+    // Compute the localization/chain covariance term (J·Σ_chain·Jᵀ) at the table centre by transforming
+    // it from the measurement frame back to room with ZERO input cov; stored on the instance for the
+    // RT-cov write. No-op unless set_chain_cov_source enabled it.
+    void compute_chain_cov(TableInstance& inst);
     // Project the current model through the camera extrinsic → normalised in-image ROI (centre
     // offset + fill), stored on the instance for the controller's centring/dwell lock-on search.
     void compute_projected_roi(TableInstance& inst);
@@ -155,9 +166,14 @@ private:
     // std) to cfg_.fisher_csv_path. No-op if the path is empty. Lazily opens + writes the header.
     void log_fisher_csv(const TableInstance& inst, bool fresh, float free_energy,
                         int point_count, float silres);
+    // Append one AI2 belief row (state + Σ diag std + mask R/bias/trunc + gate flag) to cfg_.ai2_csv_path.
+    void log_ai2_csv(const TableInstance& inst, int point_count, float R, bool gated, float energy);
 
     std::shared_ptr<DSR::DSRGraph> G_;
     DSR::InnerEigenAPI*            inner_eigen_ = nullptr;
+    DSR::InnerGaussianAPI*         gaussian_    = nullptr;   // Part B: chain covariance (set_chain_cov_source)
+    std::string                    chain_src_frame_;          // measurement frame the chain cov is computed from
+    bool                           chain_cov_enabled_ = false;
     TableConfig&                   cfg_;
     MaskIngestor*                  mask_ingestor_ = nullptr;
     TableSceneGraph*               scene_graph_   = nullptr;
@@ -167,6 +183,7 @@ private:
     std::unordered_map<std::uint64_t, Eigen::Vector2f> birth_seeds_;   // tracker-provided birth XY (see note_birth)
     std::uint64_t                  room_node_id_ = 0;   // latched per ensure_instance call
     std::ofstream                  fisher_csv_;         // per-cycle Fisher-filter evolution log (optional)
+    std::ofstream                  ai2_csv_;            // per-cycle AI2 belief log (optional)
 
     // Shared per-DOF belief stabiliser (Fisher filter + Kalman acceptance + CUSUM/SPRT). Holds the
     // algorithm + params (refreshed from cfg_ each accept); per-table state lives in inst.stab.

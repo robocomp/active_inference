@@ -200,11 +200,9 @@ void apply_constraints_to_tensor(torch::Tensor& arr)
     arr.index_put_({4}, torch::clamp_min(arr.index({4}), 0.05f + TableModel::TOP_THICKNESS));
     const auto max_leg = arr.index({4}) - TableModel::TOP_THICKNESS;
     arr.index_put_({5}, torch::clamp(arr.index({5}), 0.05f, max_leg.item<float>()));
-    // leg_inset ∈ [LEG_RADIUS, min(half_w, half_h) − LEG_RADIUS]: leg stays under the top and
-    // inside the footprint.
-    const float half_min = 0.5f * std::min(arr.index({2}).item<float>(), arr.index({3}).item<float>());
-    const float max_inset = std::max(TableModel::LEG_RADIUS, half_min - TableModel::LEG_RADIUS);
-    arr.index_put_({7}, torch::clamp(arr.index({7}), TableModel::LEG_RADIUS, max_inset));
+    // leg_inset FROZEN at the outer edge — pin it each iteration so the optimiser's gradient on
+    // index 7 is discarded (legs stay flush with the top edge; see apply_constraints()).
+    arr.index_put_({7}, TableModel::LEG_RADIUS);
 }
 
 torch::Tensor fe_torch_impl(const TableModelParams& params,
@@ -212,7 +210,8 @@ torch::Tensor fe_torch_impl(const TableModelParams& params,
                              const torch::Tensor& state_tensor,
                              const torch::Tensor& points_tensor,
                              const torch::Tensor& weights_tensor,
-                             float robust_scale)
+                             float robust_scale,
+                             float top_split_z)
 {
     const auto cx = state_tensor.index({0});
     const auto cy = state_tensor.index({1});
@@ -268,7 +267,15 @@ torch::Tensor fe_torch_impl(const TableModelParams& params,
             sdf_leg_min = torch::minimum(sdf_leg_min, leg);
     }
 
-    const auto sdf = torch::minimum(sdf_top, sdf_leg_min);
+    // Height-based top/leg attribution (replaces nearest-primitive min(top,legs)). A point above the
+    // split height is a TOP observation even when it lies horizontally near a corner leg — under the
+    // old min() an undersized box let the corner leg cylinders "absorb" the top-edge points (≈2/3 of
+    // all points) and PIN the size, so the box sat ~15% under the mask and never grew. The split is a
+    // CONSTANT (anchored to the observed top face, see top_split_z) so the gate is a fixed per-point
+    // classification — no gradient through the discrete choice — which also removes the min()-SDF kink
+    // the Fisher clamp was fighting.
+    const auto top_mask = (local_z >= top_split_z).to(points_tensor.dtype());
+    const auto sdf = top_mask * sdf_top + (1.0f - top_mask) * sdf_leg_min;
 
     const float inv_sigma2 = 1.0f / (params.sigma_obs * params.sigma_obs);
     const auto point_loss = robust_loss_value(sdf, params.robust_loss, robust_scale);
@@ -323,6 +330,35 @@ torch::Tensor fe_torch_impl(const TableModelParams& params,
 }
 
 } // anonymous namespace
+
+void set_torch_threads(int n)
+{
+    torch::set_num_threads(std::max(1, n));
+}
+
+// ─── Top/leg attribution split ─────────────────────────────────────────────────
+
+void TableModel::update_top_reference(const std::vector<Eigen::Vector3f>& pts) const
+{
+    if (pts.size() < 4)
+        return;   // too few points to estimate a top face — keep the previous reference
+    std::vector<float> z;
+    z.reserve(pts.size());
+    for (const auto& p : pts)
+        z.push_back(p.z());
+    // 95th percentile of z = robust observed top face (rejects a few high outliers/noise).
+    const std::size_t k = static_cast<std::size_t>(0.95f * (z.size() - 1));
+    std::nth_element(z.begin(), z.begin() + k, z.end());
+    top_ref_z_ = z[k];
+}
+
+float TableModel::top_split_z(const TableState& s) const
+{
+    // Top face: the observed cloud top when available, else the belief surface height. A point is a
+    // top-slab observation if it sits no more than (slab thickness + one obs-sigma) below that face.
+    const float top_face = std::isfinite(top_ref_z_) ? top_ref_z_ : s.table_height;
+    return top_face - (TOP_THICKNESS + params_.sigma_obs);
+}
 
 // ─── TableModel ──────────────────────────────────────────────────────────────
 
@@ -384,7 +420,8 @@ float TableModel::sdf_point_at(const Eigen::Vector3f& p, const TableState& s) co
         sdf_leg_min = std::min(sdf_leg_min, cylinder_sdf(dlx, dly, dlz, LEG_RADIUS, leg_half_h));
     }
 
-    return std::min(sdf_top, sdf_leg_min);
+    // Height-based attribution — scalar mirror of fe_torch_impl (split anchored to the observed top).
+    return (local_z >= top_split_z(s)) ? sdf_top : sdf_leg_min;
 }
 
 float TableModel::sdf_point(const Eigen::Vector3f& p) const
@@ -409,6 +446,8 @@ std::array<float, 8> TableModel::observation_information(
     const std::size_t n = points.size();
     if (n == 0)
         return info;
+
+    update_top_reference(points);   // same top/leg split as the data term sees
 
     const float inv_sigma2 = 1.0f / (params_.sigma_obs * params_.sigma_obs);
 
@@ -455,18 +494,11 @@ ExtentDiagnostics TableModel::extent_diagnostics(const std::vector<Eigen::Vector
     if (points.empty())
         return diag;
 
+    update_top_reference(points);
+    const float z_split = top_split_z(state_);
+
     const float cos_t = std::cos(-state_.yaw);
     const float sin_t = std::sin(-state_.yaw);
-    const float half_w = state_.w * 0.5f;
-    const float half_h = state_.h * 0.5f;
-    const float half_t = TOP_THICKNESS * 0.5f;
-    const float top_cz = state_.table_height - half_t;
-    const float leg_cz = state_.leg_length * 0.5f;
-    const float leg_hh = state_.leg_length * 0.5f;
-    const float inset  = state_.leg_inset;
-    const float leg_offsets[4][2] = {
-        { half_w - inset,  half_h - inset}, {-half_w + inset,  half_h - inset},
-        {-half_w + inset, -half_h + inset}, { half_w - inset, -half_h + inset}};
 
     std::vector<float> lx, ly;
     lx.reserve(points.size());
@@ -479,14 +511,9 @@ ExtentDiagnostics TableModel::extent_diagnostics(const std::vector<Eigen::Vector
         lx.push_back(local_x);
         ly.push_back(local_y);
 
-        // Attribution: which face of the compound SDF min(top, legs) is nearest this point?
-        const float sdf_top = box_sdf(std::abs(local_x) - half_w, std::abs(local_y) - half_h,
-                                      std::abs(p.z() - top_cz) - half_t);
-        float sdf_leg = std::numeric_limits<float>::max();
-        for (const auto& off : leg_offsets)
-            sdf_leg = std::min(sdf_leg, cylinder_sdf(local_x - off[0], local_y - off[1],
-                                                     p.z() - leg_cz, LEG_RADIUS, leg_hh));
-        (sdf_top <= sdf_leg ? diag.n_top : diag.n_leg) += 1;
+        // Attribution by HEIGHT (matches fe_torch_impl / sdf_point_at): above the split ⇒ a top
+        // observation, below ⇒ a leg observation. (Was nearest-primitive min(top,legs).)
+        (p.z() >= z_split ? diag.n_top : diag.n_leg) += 1;
     }
 
     const std::array<std::pair<float, float>, 3> qs = {{{0.02f, 0.98f}, {0.05f, 0.95f}, {0.10f, 0.90f}}};
@@ -672,6 +699,9 @@ float TableModel::gradient_step(const std::vector<Eigen::Vector3f>& points,
     if (points.empty())
         return prior_energy(state_);
 
+    update_top_reference(points);                 // anchor the top/leg split to this frame's cloud
+    const float top_split = top_split_z(state_);  // constant over the inner iterations
+
     const auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
 
     auto points_tensor = torch::empty({static_cast<long>(points.size()), 3}, options);
@@ -813,7 +843,7 @@ float TableModel::gradient_step(const std::vector<Eigen::Vector3f>& points,
         for (int iter = 0; iter < params_.optimization_iters; ++iter)
         {
             optimizer.zero_grad();
-            auto loss = fe_torch_impl(params_, prior_, theta, points_tensor, weights_tensor, scale_for_iter(iter))
+            auto loss = fe_torch_impl(params_, prior_, theta, points_tensor, weights_tensor, scale_for_iter(iter), top_split)
                       + silhouette_loss(theta, scale_for_iter(iter));
             const float loss_value = loss.item<float>();
             if (!std::isfinite(loss_value))
@@ -877,7 +907,7 @@ float TableModel::gradient_step(const std::vector<Eigen::Vector3f>& points,
     // Report the final FE at the SHARP target scale (matches fe_terms_at / acceptance), not the
     // annealed scale, so convergence/acceptance see the true objective.
     const float final_fe = (fe_torch_impl(params_, prior_, theta.detach(), points_tensor, weights_tensor,
-                                          params_.robust_loss_scale)
+                                          params_.robust_loss_scale, top_split)
                             + silhouette_loss(theta.detach(), params_.robust_loss_scale)).item<float>();
     if (!std::isfinite(final_fe))
     {
@@ -898,9 +928,11 @@ void TableModel::apply_constraints()
     state_.table_height = std::max(state_.table_height, 0.05f + TOP_THICKNESS);
     const float max_leg = state_.table_height - TOP_THICKNESS;
     state_.leg_length   = std::clamp(state_.leg_length, 0.05f, max_leg);
-    const float half_min  = 0.5f * std::min(state_.w, state_.h);
-    const float max_inset = std::max(LEG_RADIUS, half_min - LEG_RADIUS);
-    state_.leg_inset    = std::clamp(state_.leg_inset, LEG_RADIUS, max_inset);
+    // leg_inset is FROZEN (not estimated): legs sit at the OUTER edge of the top, their outer rim
+    // flush with the table edge (centre at half_w − LEG_RADIUS). Estimating it let the legs migrate
+    // inward and fight the top edges; pinning it removes a degenerate DOF and keeps the corner-leg
+    // points tied to the true footprint.
+    state_.leg_inset    = LEG_RADIUS;
 }
 
 // ─── Bounding box ────────────────────────────────────────────────────────────

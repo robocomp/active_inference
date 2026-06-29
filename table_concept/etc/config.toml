@@ -71,6 +71,18 @@ ExtentPctHi = 0.98          # upper percentile (0.05/0.95 trimmed the TRUE edges
 ReopenExtentMarginM = 0.08  # re-open a converged fit when the observed span exceeds the model by > this
                             # (the mask-beyond-RFE / FE-stuck case — point residuals had no re-open path)
 
+# ── AI2 belief (TABLE_FIT_AI2.md): full-covariance recursive filter; legs derived, soft mixture ──
+UseAI2 = true               # select the AI2 TableBelief instead of the legacy fit/belief path
+AI2CsvPath = "etc/ai2_log.csv"  # per-cycle AI2 log (state + Σ diag + mask R/bias); empty disables
+AI2SigmaBaseM = 0.03        # base on-surface obs noise std (m); R = σ² + mask_motion_var per frame
+AI2ClutterFrac = 0.10       # ε: prior weight of the uniform clutter mixture component
+AI2ClutterScaleM = 0.12     # a point further than ~this from EVERY surface is explained by clutter
+AI2PriorSizeStd = 0.30      # broad size prior std (m) on w,h,H
+AI2ProcessStdM = 0.005      # predict process-noise std, length DOFs (m/frame) — rigid+static ⇒ small
+AI2ProcessStdYaw = 0.01     # predict process-noise std, yaw (rad/frame)
+AI2MotionBiasGateM = 0.05   # drop the geometric update when mask_motion_bias exceeds this (m) — table cm-scale
+AI2GnIters = 4              # Gauss-Newton iterations per frame
+
 [TableConcept]
 ObsDistance = 1.8           # comfortable maximum stand-off from the target face for epistemic poses
 DeltaMin = 20.0             # minimum per-face coverage before stopping epistemic proposals
@@ -117,14 +129,10 @@ FisherCsvPath = "etc/fisher_filter_log.csv"   # per-cycle evolution log for plot
 # residual size wander at the source. Baseline is an EMA over ACCEPTED frames only.
 BadFitFeRatio = 4.0              # reject a fresh frame if raw_fe > this × baseline (lower = stricter)
 FeBaselineEma = 0.10            # EMA weight for the accepted-FE running baseline
-# Size RATCHET: a static rigid table's size is monotone evidence — seeing more only confirms it's BIGGER;
-# a partial/occluded view showing a smaller visible span is NOT evidence it shrank. So size GROWS at full
-# gain but is (near) grow-ONLY, accumulating the maximum observed extent across views and holding it. This
-# fixes both the under-sizing (it no longer relaxes back to the current partial span) and the "moves
-# instead of reshapes" (a box already covering the table needn't translate onto the visible part). 0 = pure
-# grow-only; small >0 lets a gross over-grow correct very slowly. (Principled occlusion-aware shrink =
-# free-space carving, still the documented next step.)
-SizeShrinkGain = 0.0
+# (The size ratchet was retired 2026-06-28: size is now a SYMMETRIC precision-weighted update. The extent
+# term works over the accumulated RFE queue — which holds the full observed span, so a partial view can't
+# shrink it — and the Kalman gain + ρ-EMA damp bursts. So the box relaxes a noise-driven over-grow toward
+# the consistent span AND resists partial-view collapse, with no grow-only knob accumulating high-side noise.)
 # (The CUSUM/SPRT change-detector and the yaw barrier/aspect gate were removed 2026-06-28: falsifiability
 # is now the evidence-scaled precision ρ, and near-square yaw is handled by its naturally-low Fisher info.)
 # YOLO mask-score weighting: w = clamp01((score−floor)/(ref−floor))^power. IMPORTANT: a partially-viewed

@@ -338,6 +338,10 @@ void SpecificWorker::initialize()
     fitter_ = std::make_unique<rc::TableFitter>(
         G, inner_eigen_.get(), cfg_, mask_ingestor_.get(), scene_graph_.get());
 
+    // Part B: localization/chain covariance on the published RT edge (mirrors bottle_concept).
+    gaussian_api_ = std::make_unique<DSR::InnerGaussianAPI>(G.get());
+    fitter_->set_chain_cov_source(gaussian_api_.get(), "zed", cfg_.rt_cov_add_chain);
+
     // Missing table nodes are scaffolded lazily from priors only after masks
     // provide some table evidence in the current scene.
 

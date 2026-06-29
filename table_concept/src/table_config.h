@@ -69,6 +69,18 @@ struct TableConfig
     // accumulates → its Kalman gain falls → the centre LOCKS and stops chasing each noisy frame's centroid.
     // Size DOFs keep the larger fisher_process_std_m (they are still being refined as more is seen).
     float process_std_pos_m = 0.001f;
+    int   torch_threads     = 2;       // cap torch intra-op threads for the FE fit (tiny problem; all-core
+                                       // parallelism was pure overhead — grabbed ~20 cores for one table)
+    // ── AI2 belief (TABLE_FIT_AI2.md) — full-covariance recursive filter, behind UseAI2 (default off) ──
+    bool  use_ai2              = false;  // select the AI2 TableBelief instead of the legacy fit/belief path
+    float ai2_sigma_base_m     = 0.03f;  // base on-surface obs noise std (m); R = σ² (+ motion_var + …)
+    float ai2_clutter_frac     = 0.10f;  // ε: prior weight of the uniform clutter mixture component
+    float ai2_clutter_scale_m  = 0.12f;  // a point further than ~this from every surface is likely clutter
+    float ai2_prior_size_std   = 0.30f;  // broad size prior std (m) on w,h,H
+    float ai2_process_std_m    = 0.005f; // predict process-noise std, length DOFs (m/frame)
+    float ai2_process_std_yaw  = 0.01f;  // predict process-noise std, yaw (rad/frame)
+    float ai2_motion_bias_gate_m = 0.05f;// drop the geometric update when mask_motion_bias exceeds this (m)
+    int   ai2_gn_iters         = 4;      // Gauss-Newton iterations per frame
     int   optimization_iters = 10;
     float optimization_lr   = 0.05f;
     float grad_clip         = 2.0f;
@@ -122,6 +134,17 @@ struct TableConfig
     // process-noise std in each DOF's native units; variance Q = std².
     float fisher_process_std_m         = 0.005f;  // length DOFs (cx,cy,w,h,H,leg,inset): 5 mm / fresh frame
     float fisher_process_std_yaw       = 0.01f;   // yaw: ~0.57° / fresh frame
+    // Viewpoint-novelty gate on the Fisher ACCUMULATION. A static robot re-observes the SAME partial view
+    // every frame; folding each frame's information in as if independent makes the belief CONFIDENT about
+    // geometry it has never seen (e.g. the occluded far depth h → std collapses to mm while the true error
+    // is ~½ m). Scale this frame's observation info by w_view = floor + (1−floor)·clamp(‖cam−last_view‖/
+    // scale, 0, 1): a fresh viewpoint (camera moved ≥ scale in room frame) contributes fully; a redundant
+    // same-pose frame contributes only the floor (a trickle for sensor-noise averaging). With the predict
+    // Q-bleed this caps the steady-state precision so under-observed DOFs stay HONESTLY loose until the
+    // robot earns the evidence by orbiting — which is the uncertainty signal the epistemic planner needs.
+    float view_novelty_scale_m         = 0.15f;   // camera move (m) at which a view counts as fully novel
+    float view_novelty_floor           = 0.05f;   // min info weight for a redundant (unmoved) re-observation
+    bool  view_novelty_gate            = true;    // enable the viewpoint-novelty attenuation of obs info
     // Freeze-on-bad-fit (always on): a FRESH frame whose raw-fit free energy is ≫ the instance's running
     // FE level is a contaminated observation (clutter / partial-or-wrong mask → points the model cannot
     // explain; extent blows up, FE spikes ~20× vs ~1). Skip the acceptance, keep the belief, recompute FE
@@ -132,7 +155,6 @@ struct TableConfig
     // Size RATCHET: a size DOF (w,h,H,leg) grows at its full acceptance gain but SHRINKS at gain·this — a
     // table is rigid, so a far/occluded partial view (small visible extent) must NOT collapse it ("shrank
     // to a third across the room"). Small = strong ratchet; 1.0 = symmetric (off). Growth is unaffected.
-    float size_shrink_gain             = 0.0f;
     // (B) Fisher-gradient clamp: observation_information builds the per-DOF Fisher via a central finite
     // difference of the NON-smooth min() box-SDF. A point sitting on a face-switch/corner makes the
     // difference a discontinuity JUMP, not a derivative, spiking |∂SDF/∂θ| by ~1000× → a single point
@@ -175,12 +197,14 @@ struct TableConfig
     float mask_conf_ref    = 0.5f;   // YOLO score at/above which the mask is fully trusted (w=1)
     float mask_conf_power  = 2.0f;   // steepness of the trust ramp between floor and ref
     std::string fisher_csv_path        = "";      // if non-empty, append per-cycle Fisher-filter evolution to this CSV (for plotting)
+    std::string ai2_csv_path           = "";      // if non-empty, append per-cycle AI2 belief (state + Σ diag + mask R) to this CSV
     // Upload the table pose covariance onto the room→table RT edge (rt_covariance_att, 6×6 SE3),
     // built from the Fisher filter's per-DOF posterior precision (var = rt_cov_scale / fisher_info_raw):
     // x←cx, y←cy, z←H/2, yaw←ψ are data-driven; roll/pitch are unobservable (large). rt_cov_scale
     // calibrates the raw curvature toward NEES≈1 (raw precision over-counts spatially-correlated
     // points), like bottle_concept's cov_eff_scale. Written only when the geometry is (re)published.
     float rt_cov_scale  = 1.0f;
+    bool  rt_cov_add_chain = true;   // Part B: add the localization/chain cov J·Σ_chain·Jᵀ to the published RT cov
     float warm_confidence_decay         = 0.70f;
     float warm_confidence_coverage_gain = 0.35f;
     float warm_confidence_residual_gain = 0.65f;
