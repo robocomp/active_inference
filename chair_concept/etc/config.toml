@@ -148,9 +148,22 @@ DetectionNoiseM = 0.20   # R in the association innovation cov S=P+R²I (≥ cen
 BirthFrames = 8          # frames a mask must stay unexplained before spawning a chair
 DeathFrames = 300        # frames an instance may go unobserved before retirement
 DeathEnabled = false     # OFF: a chair is persistent furniture — removed only by MERGE
-BirthMinSepM = 0.40      # a birth must be ≥ this (m) from every existing chair (anti-duplicate)
-MergeOverlap = 0.30      # collapse two instances whose seat footprints overlap ≥ this fraction of the
-                         # smaller (same chair fitted twice), keeping the more-observed. 0 disables.
+BirthMinSepM = 0.70      # a birth must be ≥ this (m) from every existing chair (anti-duplicate). Chairs are
+                         # ~0.45m wide and the fit centroid wanders with yaw/cov while converging, so the same
+                         # physical chair presents detection centroids that drift ~0.5m off its instance xy —
+                         # a 0.40 gate let a same-chair duplicate spawn. Real chairs are ≥1m apart → 0.70 is safe.
+MergeOverlap = 0.20      # collapse two instances whose seat footprints overlap ≥ this fraction of the
+                         # smaller (same chair fitted twice), keeping the more-observed. 0 disables. Lowered
+                         # 0.30→0.20 so a drifting duplicate collapses sooner (it overlaps the real chair only
+                         # intermittently while its cov is loose).
+# Stillbirth prune — a phantom born from association churn (it stole a detection the real chair then re-won)
+# starves once the real instance reclaims its mask. Prune a YOUNG instance (still inside its probation
+# window) that the tracker leaves unassigned for a sustained streak. A real chair locks on and matches
+# essentially every cycle → its streak never reaches Patience → it survives probation and becomes permanent
+# furniture (immune, matching DeathEnabled=false). Set PruneEnabled=false to disable.
+PruneEnabled = true
+PruneMaturityCycles = 90 # probation window: an instance older than this is permanent furniture, never pruned
+PrunePatience = 30       # consecutive tracker-unassigned cycles within probation → prune as stillborn
 BirthSeatW = 0.45        # seed seat width/depth + seat/back heights for a freshly born chair node
 BirthSeatD = 0.45
 BirthSeatH = 0.45

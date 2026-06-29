@@ -36,7 +36,10 @@ struct ChairInstance
     int  frames_converged    = 0;     // consecutive frames with |ΔFE| < fe_eps
     int  frames_rising      = 0;      // consecutive frames with F increasing
     int  last_masks_frame_seen = -1;  // last masks packet frame consumed
+    std::uint64_t last_mask_timestamp_ms = 0;  // capture stamp of the last consumed mask (chain-cov pinning)
+    float chain_cov_xx = 0.0f, chain_cov_yy = 0.0f;  // Part B localization/chain cov (m²), added to the RT cov
     int  assigned_mask_idx  = -1;     // tracker's gated mask-slice assignment (-1 = use greedy nearest)
+    int  unassigned_streak  = 0;      // consecutive tracker cycles with no mask assignment (stillbirth prune)
     int  processed_cycles   = 0;      // per-chair compute cycles for log throttling
     bool model_stable       = false;
     int  model_generation   = 0;

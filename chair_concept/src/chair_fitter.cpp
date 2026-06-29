@@ -23,6 +23,37 @@ ChairFitter::ChairFitter(std::shared_ptr<DSR::DSRGraph> graph,
       mask_ingestor_(mask_ingestor), scene_graph_(scene_graph)
 {}
 
+void ChairFitter::set_chain_cov_source(DSR::InnerGaussianAPI* gaussian, std::string source_frame, bool enabled)
+{
+    gaussian_          = gaussian;
+    chain_src_frame_   = std::move(source_frame);
+    chain_cov_enabled_ = enabled and (gaussian_ != nullptr) and not chain_src_frame_.empty();
+}
+
+void ChairFitter::compute_chain_cov(ChairInstance& inst)
+{
+    inst.chain_cov_xx = 0.0f;
+    inst.chain_cov_yy = 0.0f;
+    if (not chain_cov_enabled_ or not gaussian_ or not inner_eigen_)
+        return;
+    // Localization/chain term J·Σ_chain·Jᵀ at the chair centre: transform it to the measurement frame,
+    // then back to room with ZERO input cov — InnerGaussianAPI returns exactly the chain contribution,
+    // pinned to the mask capture stamp.
+    const auto& s = inst.model.state();
+    const Mat::Vector3d centre(s.cx, s.cy, s.cz);
+    const auto c_src = inner_eigen_->transform(chain_src_frame_, centre, "room", inst.last_mask_timestamp_ms);
+    if (not c_src.has_value())
+        return;
+    DSR::GaussianPoint3D gp;
+    gp.mean = c_src.value();
+    gp.covariance = DSR::Cov3d::Zero();
+    const auto g = gaussian_->transform_point("room", gp, chain_src_frame_, inst.last_mask_timestamp_ms);
+    if (not g.has_value())
+        return;
+    inst.chain_cov_xx = static_cast<float>(g->covariance(0, 0));
+    inst.chain_cov_yy = static_cast<float>(g->covariance(1, 1));
+}
+
 // ─── ChairBeliefPolicy ───────────────────────────────────────────────────────
 
 float ChairFitter::ChairBeliefPolicy::clamp01(float value)
@@ -237,6 +268,7 @@ ChairFitter::ChairObservation ChairFitter::observe(ChairInstance& inst, const DS
             // YOLO fired for this chair on a fresh frame → detection is alive.
             inst.frames_since_detection = 0;
             inst.last_mask_confidence = slice.confidence;
+            inst.last_mask_timestamp_ms = masks_packet.timestamp_ms;   // chain-cov pinning (Part B)
             const std::size_t begin = std::min(slice.support_begin, masks_packet.support_points.size());
             const std::size_t end = std::min(slice.support_end, masks_packet.support_points.size());
 
@@ -446,6 +478,7 @@ float ChairFitter::run_inference(ChairInstance& inst, const ChairObservation& ob
     // Active-perception aids for the controller's lock-on search: where the model projects in the
     // image (centring target) + whether YOLO is currently firing here (dwell/lock signal).
     compute_projected_roi(inst);
+    compute_chain_cov(inst);   // Part B: localization/chain cov added to the published RT cov
     inst.detection_alive = inst.frames_since_detection < cfg_.detection_alive_max_frames;
 
     // Per-DOF observation info ("times viewed") accumulates only on frames with a FRESH mask, so it

@@ -28,6 +28,7 @@
 #include <Eigen/Dense>
 #include <dsr/api/dsr_api.h>
 #include <dsr/api/dsr_inner_eigen_api.h>
+#include <dsr/api/dsr_inner_gaussian_api.h>   // Part B: chain covariance propagation
 #include <dsr/api/dsr_camera_api.h>
 
 #include "chair_config.h"        // rc::ChairConfig
@@ -70,6 +71,9 @@ public:
     std::unordered_map<std::uint64_t, ChairInstance>& instances() { return instances_; }
     void forget_node(std::uint64_t id) { instances_.erase(id); }
     bool should_log(const ChairInstance& inst) const;
+    // Part B (chain covariance): enable adding the localization/chain term J·Σ_chain·Jᵀ (measurement
+    // frame → room, capture-stamp pinned) per instance, read by the scene-graph's RT-cov write.
+    void set_chain_cov_source(DSR::InnerGaussianAPI* gaussian, std::string source_frame, bool enabled);
     // Room-frame XY a NEWLY born instance's model should cold-start at (from the tracker's detection).
     // The room→chair RT written at birth is not reliably composable the same cycle, so without this the
     // model would start at 0,0; consumed once by ensure_instance.
@@ -144,6 +148,9 @@ private:
     // Project the current model through the camera extrinsic → normalised in-image ROI (centre
     // offset + fill), stored on the instance for the controller's centring/dwell lock-on search.
     void compute_projected_roi(ChairInstance& inst);
+    // Part B: localization/chain cov J·Σ_chain·Jᵀ at the chair centre (measurement frame → room, zero
+    // input cov), stored on the instance for the RT-cov write. No-op unless set_chain_cov_source enabled.
+    void compute_chain_cov(ChairInstance& inst);
 
     void ingest_observation_voxels(ChairInstance& inst, const ChairObservation& observation);
     bool is_voxel_owned_by_chair(const ChairInstance& inst, const Eigen::Vector3f& point) const;
@@ -164,6 +171,9 @@ private:
 
     std::shared_ptr<DSR::DSRGraph> G_;
     DSR::InnerEigenAPI*            inner_eigen_ = nullptr;
+    DSR::InnerGaussianAPI*         gaussian_    = nullptr;   // Part B: chain covariance (set_chain_cov_source)
+    std::string                    chain_src_frame_;
+    bool                           chain_cov_enabled_ = false;
     ChairConfig&                   cfg_;
     const std::vector<ChairPrior>& priors_;
     MaskIngestor*                  mask_ingestor_ = nullptr;

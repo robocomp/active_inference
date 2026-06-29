@@ -338,6 +338,10 @@ void SpecificWorker::initialize()
     fitter_ = std::make_unique<rc::ChairFitter>(
         G, inner_eigen_.get(), cfg_, priors_cache_, mask_ingestor_.get(), scene_graph_.get());
 
+    // Part B: localization/chain covariance on the published RT edge (mirrors bottle/table).
+    gaussian_api_ = std::make_unique<DSR::InnerGaussianAPI>(G.get());
+    fitter_->set_chain_cov_source(gaussian_api_.get(), "zed", cfg_.rt_cov_add_chain);
+
     // Missing chair nodes are scaffolded lazily from priors only after masks
     // provide some chair evidence in the current scene.
 
@@ -565,6 +569,37 @@ void SpecificWorker::run_instance_tracker()
             if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
                 it->second.assigned_mask_idx = dets[d].slice_index;
         }
+
+    // STILLBIRTH PRUNE: a phantom born from association churn (it stole a detection the real chair then
+    // re-won) starves once the real instance reclaims its mask. A young instance (still inside its probation
+    // window) that the tracker leaves unassigned for a sustained streak is such a phantom. A real chair
+    // locks on and matches essentially every cycle → its streak resets and never reaches patience → it
+    // survives probation and becomes permanent furniture (immune, like DeathEnabled=false). The streak is
+    // updated for ALL instances here so a mature chair's history stays correct even though it can't be pruned.
+    if (cfg_.tracker_prune_enabled)
+    {
+        std::vector<std::uint64_t> stillborn;
+        for (auto& [id, inst] : fitter_->instances())
+        {
+            if (inst.assigned_mask_idx >= 0) { inst.unassigned_streak = 0; continue; }
+            ++inst.unassigned_streak;
+            const bool young = inst.processed_cycles < cfg_.tracker_prune_maturity_cycles;
+            if (young and inst.unassigned_streak >= cfg_.tracker_prune_patience)
+                stillborn.push_back(id);
+        }
+        for (const std::uint64_t id : stillborn)
+        {
+            const auto it = fitter_->instances().find(id);
+            std::print("chair_concept: [tracker] PRUNE stillborn id={} (unassigned {} cycles, age {} < maturity {})\n",
+                       id, it != fitter_->instances().end() ? it->second.unassigned_streak : 0,
+                       it != fitter_->instances().end() ? it->second.processed_cycles : 0,
+                       cfg_.tracker_prune_maturity_cycles);
+            if (it != fitter_->instances().end())
+                it->second.affordance.remove();
+            fitter_->forget_node(id);
+            G->delete_node(id);
+        }
+    }
 
     // BIRTH: spawn an instance from each promoted (persistently-unexplained) detection, seeding the
     // fitter with the detection XY so the model starts AT the chair (not the 0,0 RT-read default).

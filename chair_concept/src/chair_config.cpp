@@ -149,6 +149,7 @@ ChairConfig load_chair_config(const ConfigLoader& cfg)
     out.fisher_csv_path               = gets("WarmStart.FisherCsvPath",            "");
     out.rt_cov_upload                 = getb("WarmStart.RtCovUpload",              true);
     out.rt_cov_scale                  = getf("WarmStart.RtCovScale",              1.0f);
+    out.rt_cov_add_chain              = getb("WarmStart.RtCovAddChain",          true);
     out.warm_lambda_pos_base          = getf("WarmStart.LambdaPosBase",           0.15f);
     out.warm_lambda_pos_gain          = getf("WarmStart.LambdaPosGain",           0.45f);
     out.warm_lambda_size_base         = getf("WarmStart.LambdaSizeBase",          0.02f);
@@ -166,8 +167,11 @@ ChairConfig load_chair_config(const ConfigLoader& cfg)
     out.tracker_birth_frames     = geti("Tracker.BirthFrames",      8);
     out.tracker_death_frames     = geti("Tracker.DeathFrames",      300);
     out.tracker_death_enabled    = getb("Tracker.DeathEnabled",     false);
-    out.tracker_birth_min_sep_m  = getf("Tracker.BirthMinSepM",     0.40f);
-    out.tracker_merge_overlap    = getf("Tracker.MergeOverlap",     0.30f);
+    out.tracker_birth_min_sep_m  = getf("Tracker.BirthMinSepM",     0.70f);
+    out.tracker_merge_overlap    = getf("Tracker.MergeOverlap",     0.20f);
+    out.tracker_prune_enabled         = getb("Tracker.PruneEnabled",        true);
+    out.tracker_prune_maturity_cycles = geti("Tracker.PruneMaturityCycles", 90);
+    out.tracker_prune_patience        = geti("Tracker.PrunePatience",       30);
     out.tracker_birth_seat_w     = getf("Tracker.BirthSeatW",       0.45f);
     out.tracker_birth_seat_d     = getf("Tracker.BirthSeatD",       0.45f);
     out.tracker_birth_seat_h     = getf("Tracker.BirthSeatH",       0.45f);

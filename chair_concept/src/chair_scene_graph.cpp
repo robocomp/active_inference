@@ -270,7 +270,12 @@ void ChairSceneGraph::write_rt_covariance(std::uint64_t room_id, ChairInstance& 
     constexpr float big = 1e3f;   // unobservable / never-seen DOF → large variance
     const auto var = [&](int j) -> float { return Y[j] > 1e-6f ? scale / Y[j] : big; };
 
-    const float vx = var(0), vy = var(1), vz = var(2), vyaw = var(3);   // data-driven DOFs
+    float vx = var(0), vy = var(1);
+    const float vz = var(2), vyaw = var(3);   // data-driven DOFs
+    // Part B: add the localization/chain covariance J·Σ_chain·Jᵀ (computed in the fitter) — the chair's
+    // room-frame position is conditional on the robot pose, so its published uncertainty must include it.
+    vx += inst.chain_cov_xx;
+    vy += inst.chain_cov_yy;
 
     // Self-gate on the data-driven trace: write on a geometry republish (force) OR when the
     // uncertainty moved >5 % since the last publish (covers a frozen pose whose belief keeps

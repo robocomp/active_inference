@@ -198,6 +198,7 @@ struct ChairConfig
     // points), like bottle_concept's cov_eff_scale. Written only when the geometry is (re)published.
     bool  rt_cov_upload = true;
     float rt_cov_scale  = 1.0f;
+    bool  rt_cov_add_chain = true;   // Part B: add the localization/chain cov J·Σ_chain·Jᵀ to the published RT cov
     float warm_lambda_pos_base         = 0.15f;
     float warm_lambda_pos_gain         = 0.45f;
     float warm_lambda_size_base        = 0.02f;
@@ -219,9 +220,12 @@ struct ChairConfig
     int   tracker_birth_frames     = 8;       // frames a mask must stay unexplained before spawning a chair
     int   tracker_death_frames     = 300;     // frames an instance may go unobserved before retirement
     bool  tracker_death_enabled    = false;   // OFF: a chair is persistent furniture — removed only by MERGE
-    float tracker_birth_min_sep_m  = 0.40f;   // a birth must be ≥ this (m) from every existing chair (anti-dup)
-    float tracker_merge_overlap    = 0.30f;   // merge two instances whose seat footprints overlap ≥ this
+    float tracker_birth_min_sep_m  = 0.70f;   // a birth must be ≥ this (m) from every existing chair (anti-dup)
+    float tracker_merge_overlap    = 0.20f;   // merge two instances whose seat footprints overlap ≥ this
                                               // fraction of the smaller, keeping the more-observed. 0 disables.
+    bool  tracker_prune_enabled        = true; // stillbirth prune of phantom duplicates born from churn
+    int   tracker_prune_maturity_cycles = 90;  // probation window; older instances are permanent furniture
+    int   tracker_prune_patience       = 30;   // consecutive tracker-unassigned cycles in probation → prune
     float tracker_birth_seat_w     = 0.45f;   // seed seat width/depth/heights for a freshly born chair node
     float tracker_birth_seat_d     = 0.45f;
     float tracker_birth_seat_h     = 0.45f;
