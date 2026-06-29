@@ -856,13 +856,14 @@ private:
                                                torch::Device device = torch::kCPU)
     {
         const auto N = static_cast<long>(points.size());
-        auto tensor = torch::empty({N, 3},
-            torch::TensorOptions().dtype(torch::kFloat32).device(device));
+        // Build on CPU first: data_ptr() of a CUDA tensor is a DEVICE pointer, and a host std::memcpy
+        // into it SIGSEGVs (the UseCuda=true crash). Fill host-side, then move to the target device.
+        auto tensor = torch::empty({N, 3}, torch::TensorOptions().dtype(torch::kFloat32));
         auto ptr = tensor.data_ptr<float>();
         // Eigen::Vector3f is 3 contiguous floats — bulk-copy each point
         for (long i = 0; i < N; ++i)
             std::memcpy(ptr + i * 3, points[i].data(), 3 * sizeof(float));
-        return tensor;
+        return device.is_cpu() ? tensor : tensor.to(device);
     }
 
     // Returns median absolute SDF error for UI display (robust to outliers)
