@@ -30,11 +30,19 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.DifferentialTest", room_concept.params.differential_test_enabled);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.SdfCurrentSlotOnly", room_concept.params.sdf_current_slot_only);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.PreserveBootstrapRoom", p.PRESERVE_BOOTSTRAP_ROOM);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.RobotVelCovAdv", p.ROBOT_VEL_COV_ADV);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.RobotVelCovSide", p.ROBOT_VEL_COV_SIDE);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.RobotVelCovRot", p.ROBOT_VEL_COV_ROT);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "PredictPublish.enabled", p.PREDICT_PUBLISH_ENABLED);
-    rc::ConfigLoaderUtils::load_optional<int>(cl, "PredictPublish.period_ms", p.PREDICT_PUBLISH_PERIOD_MS);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "PredictPublish.max_coast_s", p.PREDICT_PUBLISH_MAX_COAST_S);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "PredictPublish.process_noise_xy", p.PREDICT_PROCESS_NOISE_XY);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "PredictPublish.process_noise_theta", p.PREDICT_PROCESS_NOISE_THETA);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "PredictPublish.blend_gain", p.PREDICT_BLEND_GAIN);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "PredictPublish.max_dt_s", p.PREDICT_MAX_DT_S);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "PredictPublish.max_blend_step_m", p.PREDICT_MAX_BLEND_STEP_M);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "PredictPublish.max_blend_step_rad", p.PREDICT_MAX_BLEND_STEP_RAD);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "PredictPublish.snap_thresh_m", p.PREDICT_SNAP_THRESH_M);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "PredictPublish.snap_thresh_rad", p.PREDICT_SNAP_THRESH_RAD);
     rc::ConfigLoaderUtils::load_optional_apply<std::string>(cl, "RoomConcept.OptimizerType", [&](const std::string& optimizer_type)
     {
         p.OptimizerType = optimizer_type;
@@ -71,6 +79,16 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.EigenvalueClampBoundaryMax", room_concept.params.eigenvalue_clamp_boundary_max);
 
     rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomConcept.RecoveryCooldownFrames", room_concept.params.recovery_cooldown_frames);
+
+    // 180° symmetry-flip robustness (leaky evidence + confidence-scaled threshold).
+    rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomConcept.SymmetryCheckInterval", room_concept.params.symmetry_check_interval);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.SymmetryFlipMinImprovement", room_concept.params.symmetry_flip_min_improvement);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.SymmetryEvidenceLeak", room_concept.params.symmetry_evidence_leak);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.SymmetryFlipEvidenceThresh", room_concept.params.symmetry_flip_evidence_thresh);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.SymmetryConfidenceGain", room_concept.params.symmetry_confidence_gain);
+    rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomConcept.SymmetryConfidenceCap", room_concept.params.symmetry_confidence_cap);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.SymmetryGoodFitMse", room_concept.params.symmetry_good_fit_mse);
+    rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomConcept.SymmetryConfidenceDecay", room_concept.params.symmetry_confidence_decay);
 
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.VelocityAdaptiveWeights", room_concept.params.velocity_adaptive_weights);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.LinearVelocityThreshold", room_concept.params.linear_velocity_threshold);

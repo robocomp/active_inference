@@ -61,22 +61,41 @@ struct RoomConfig
     // instead of deleting+recreating it, and do NOT write room pose / robot->room.
     bool  PRESERVE_BOOTSTRAP_ROOM = false;
 
-    // High-rate predict-publish: between ~5 Hz lidar corrections, dead-reckon the robot pose from
-    // odometry and publish PREDICTED robot↔room RT blocks (with a GROWING covariance) so consumers
-    // pinning to a recent capture stamp interpolate instead of clamping to a stale pose. Collapses the
-    // ~130 ms localization lag the voxelizer measured. Process-noise rates grow the cov while coasting.
-    // DEFAULT OFF (confirmed by pose_trace analysis 2026-06-29): the 60 Hz dead-reckoned pose injects
-    // single-step jumps of ~277 mm / 13.5° per 16 ms → impossible 17 m/s / 843°/s velocity spikes that
-    // break MPPI's velocity estimate (slow motion) and jerk the viewer. Cause = per-correction catch-up
-    // (clock reset to the past lidar stamp → next tick integrates the whole lag-gap in one step) + snap.
-    // The CORRECTED stream is smooth (innovation≈0) and ~50-100 ms fresh at the now-faster optimizer
-    // (~10-19 Hz) — strictly better for consumers. Re-enable ONLY with a smooth incremental predictor
-    // (small-dt integration, blended corrections, monotonic now-stamped blocks).
-    bool  PREDICT_PUBLISH_ENABLED      = false;   // PredictPublish.enabled
-    int   PREDICT_PUBLISH_PERIOD_MS    = 16;      // target predicted-block spacing (~60 Hz)
-    float PREDICT_PUBLISH_MAX_COAST_S  = 1.0f;    // stop predicting if no correction for this long
-    float PREDICT_PROCESS_NOISE_XY     = 0.04f;   // (m/√s)² → variance growth m²/s on x,y
+    // ODOMETRY-DRIVEN COMPLEMENTARY-FILTER PUBLISH (v2). The robot↔room RT edge is published from the
+    // ODOMETRY callback (event-driven, at the odometry rate, e.g. 20-30 Hz) — decoupled from the bursty
+    // ~15 Hz lidar/compute path. Each odometry sample integrates a SMALL dt step (no catch-up jump) and
+    // publishes a monotonic now-stamped block with a GROWING covariance. Lidar corrections are BLENDED
+    // into the filter (complementary, gain below) and NOT written to RT directly (no past-stamped block
+    // interleaving). This is the smooth replacement for the v1 QTimer predict-publish (which injected
+    // 17 m/s spikes via per-correction catch-up + hard snap + block interleaving — see git history).
+    // Robot BODY-FRAME velocity (adv=fwd, side=lat, rot=yaw-rate) is published on the robot↔room RT
+    // edge (rt_translation_velocity / rt_rotation_euler_xyz_velocity) so the controller reads velocity
+    // DIRECTLY instead of differentiating the pose (which would turn lidar-correction jumps into spikes).
+    // A diagonal velocity covariance (variances below) goes on rt_se2_covariance_velocity.
+    float ROBOT_VEL_COV_ADV            = 0.0025f; // (0.05 m/s)²
+    float ROBOT_VEL_COV_SIDE           = 0.0025f; // (0.05 m/s)²
+    float ROBOT_VEL_COV_ROT            = 0.01f;   // (0.1 rad/s)²
+
+    bool  PREDICT_PUBLISH_ENABLED      = true;    // PredictPublish.enabled (drives RT from odometry)
+    float PREDICT_PUBLISH_MAX_COAST_S  = 1.0f;    // stop publishing if no lidar correction for this long
+    float PREDICT_PROCESS_NOISE_XY     = 0.04f;   // (m/√s)² → variance growth m²/s on x,y while coasting
     float PREDICT_PROCESS_NOISE_THETA  = 0.05f;   // (rad/√s)² → variance growth rad²/s on theta
+    float PREDICT_MAX_DT_S             = 0.1f;    // clamp per-sample integration dt (a missed/late odom
+                                                  // sample must not dead-reckon a big jump); also caps
+                                                  // the lidar-lag used to extrapolate the correction
+    // Correction is NOT applied as a position jump (that injects velocity spikes the MPPI differentiates
+    // into garbage — measured post-blend 3.46 m/s vs pure-odom 0.84). Instead each lidar correction sets
+    // a residual that is BLED IN smoothly over the 30 Hz odometry ticks, slew-limited, so it's a small
+    // continuous velocity contribution. Per tick: step = min(blend_gain·residual, max_blend_step).
+    float PREDICT_BLEND_GAIN           = 0.2f;    // fraction of the residual applied per odometry tick
+    float PREDICT_MAX_BLEND_STEP_M     = 0.01f;   // max position bleed per tick (→ ≤0.3 m/s @30Hz)
+    float PREDICT_MAX_BLEND_STEP_RAD   = 0.03f;   // max heading bleed per tick
+    // Outlier-aware: a residual bigger than these is a relocalization/jump (the gentle slew would take
+    // ~30 s to catch up → the pose strands metres from truth). SNAP to it immediately instead — bounds
+    // divergence to this threshold; the rare spike on a real relocalization is legitimate. Small
+    // residuals (normal drift) are still slewed smoothly.
+    float PREDICT_SNAP_THRESH_M        = 0.30f;
+    float PREDICT_SNAP_THRESH_RAD      = 0.40f;
 
     float room_height = 2.4f;  // m, room DSR node attribute
 

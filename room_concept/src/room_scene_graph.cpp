@@ -34,7 +34,8 @@ void RoomSceneGraph::on_controller_lost()
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv, float side, float rot)
+void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv, float side, float rot,
+                           bool write_rt)
 {
     last_adv_  = adv;
     last_side_ = side;
@@ -52,12 +53,13 @@ void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv,
         stable_frames_ = stable ? stable_frames_ + 1 : 0;
         if (stable_frames_ >= params_->STABLE_FRAMES_REQUIRED)
             dsr_create_room_and_reparent(res);
-        else
+        else if (write_rt)
             dsr_update_pose(res);   // world->robot RT while waiting for stable room creation
     }
     else
     {
-        dsr_update_pose(res);       // robot->room RT once room node exists
+        if (write_rt)
+            dsr_update_pose(res);   // robot->room RT (skipped when the odometry publisher owns it)
         dsr_update_affordance(res); // publish epistemic target affordance
     }
 }
@@ -192,8 +194,8 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose,
     // untimestamped block, so consumers' InterpolatedRT could never interpolate to a requested
     // time — it always returned the latest pose (RTdelta=0), freezing the controller's lidar
     // overlay between the ~5 Hz pose publishes. res.timestamp_ms is the pose's validity time (the
-    // localization stamp). The old per-edge velocity attrs are dropped — nothing reads them and the
-    // transform never used them (DSR interpolates between blocks, it does not extrapolate velocity).
+    // localization stamp). DSR interpolates pose between blocks; it does NOT extrapolate the velocity
+    // attrs (written below) — those are for consumers to read directly.
     try
     {
         rt_api_->insert_or_assign_edge_RT(parent_opt.value(), child_id,
@@ -214,6 +216,29 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose,
             stable_frames_ = 0;
         }
         return;
+    }
+
+    // Publish the robot's BODY-FRAME twist + covariance on the SAME RT edge, so the controller reads
+    // velocity DIRECTLY (no pose differentiation → no correction-induced velocity spikes). Convention:
+    // rt_translation_velocity = [adv(fwd,+x), side(lat,+y), 0], rt_rotation_euler_xyz_velocity = [0,0,rot].
+    // last_adv_/side_/rot_ are the measured odometry (set in update()). Covariance = diagonal (config).
+    // Re-fetch the edge FRESH from the graph (NOT from the stale parent_opt node captured before the RT
+    // write) — otherwise we'd write back the old pose ring buffer and freeze the position.
+    if (auto edge = G_->get_edge(parent_opt.value().id(), child_id, "RT"); edge.has_value())
+    {
+        G_->add_or_modify_attrib_local<rt_translation_velocity_att>(
+            edge.value(), std::vector<float>{last_adv_, last_side_, 0.f});
+        G_->add_or_modify_attrib_local<rt_rotation_euler_xyz_velocity_att>(
+            edge.value(), std::vector<float>{0.f, 0.f, last_rot_});
+        std::vector<float> vel_cov(36, 0.f);   // 6×6 row-major; SE2 diag at [0],[7],[14] (matches pose cov)
+        if (params_)
+        {
+            vel_cov[0]  = params_->ROBOT_VEL_COV_ADV;
+            vel_cov[7]  = params_->ROBOT_VEL_COV_SIDE;
+            vel_cov[14] = params_->ROBOT_VEL_COV_ROT;
+        }
+        G_->add_or_modify_attrib_local<rt_se2_covariance_velocity_att>(edge.value(), vel_cov);
+        G_->insert_or_assign_edge(edge.value());
     }
 }
 

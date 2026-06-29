@@ -619,6 +619,14 @@ namespace rc
                 opt_update_us_sum_.fetch_add(static_cast<std::uint64_t>(update_ms * 1000.0f),
                                              std::memory_order_relaxed);
 
+                // Track-establishment confidence for the symmetry-flip threshold: grow on a good fit,
+                // DECAY (not reset) on a bad one so a momentary tight-turn degradation doesn't collapse
+                // the inertia that protects a long-correct orientation.
+                if (res.sdf_mse < params.symmetry_good_fit_mse)
+                    good_fit_streak_ = std::min(good_fit_streak_ + 1, params.symmetry_confidence_cap);
+                else
+                    good_fit_streak_ = std::max(0, good_fit_streak_ - params.symmetry_confidence_decay);
+
                 // Lean per-update timing CSV (loc-thread only): distribution + CUDA warmup curve.
                 if (params.optimizer_timing_csv)
                 {
@@ -845,13 +853,28 @@ namespace rc
                     for (const auto& c : cands)
                         if (c.loss < best->loss) best = &c;
 
-                    if (best->loss < loss_cur - params.symmetry_flip_min_improvement)
+                    // Per-check advantage of the best symmetric candidate over the current pose, net of
+                    // the base margin. Positive ⇒ the flip looks better THIS check.
+                    const float advantage = (loss_cur - best->loss) - params.symmetry_flip_min_improvement;
+                    // Leaky accumulation: sustained advantage builds; a momentary tight-turn blip decays
+                    // (leak<1), and a check where the current pose is better actively drains it.
+                    symmetry_flip_evidence_ = std::max(0.f,
+                        params.symmetry_evidence_leak * symmetry_flip_evidence_ + advantage);
+                    // Threshold grows with how long the current orientation has been established → a
+                    // long-correct track demands far more sustained evidence to flip than a fresh one.
+                    const float thresh = params.symmetry_flip_evidence_thresh
+                        * (1.f + params.symmetry_confidence_gain
+                                 * static_cast<float>(std::min(good_fit_streak_, params.symmetry_confidence_cap)));
+                    if (symmetry_flip_evidence_ > thresh)
                     {
-                        qWarning() << "[SymmetryCheck]" << best->name << "wins by"
-                                   << (loss_cur - best->loss) << "-> applying";
+                        qWarning() << "[SymmetryCheck]" << best->name << "flip — evidence"
+                                   << symmetry_flip_evidence_ << "> thresh" << thresh
+                                   << "(streak" << good_fit_streak_ << ")";
                         set_robot_pose(best->x, best->y, best->theta);
                         recovery_.reset();
                         window_mgr_.clear();
+                        symmetry_flip_evidence_ = 0.f;
+                        good_fit_streak_ = 0;   // fresh orientation — re-establish confidence from scratch
                     }
                 }
             }

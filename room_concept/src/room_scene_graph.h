@@ -53,7 +53,10 @@ public:
 
     // Stabilize → create room / reparent, then publish pose + affordance each frame.
     // adv/side/rot are the latest robot-frame velocities for the RT velocity attrs.
-    void update(const rc::RoomConcept::UpdateResult& res, float adv, float side, float rot);
+    // write_rt=false ⇒ do room creation/affordance but DON'T write the robot↔room RT edge (the
+    // odometry-driven complementary-filter publisher owns it; avoids past-stamped block interleaving).
+    void update(const rc::RoomConcept::UpdateResult& res, float adv, float side, float rot,
+                bool write_rt = true);
 
     // Tick the affordance manager (execution monitoring); call periodically.
     void monitor_affordance();

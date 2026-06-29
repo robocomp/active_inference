@@ -140,16 +140,6 @@ class SpecificWorker : public GenericWorker
         std::unique_ptr<rc::RoomSceneGraph> scene_graph_;
         std::int64_t last_dsr_published_ts_ms_ = 0;
 
-        // ── Predict-publish: high-rate dead-reckoned RT blocks between lidar corrections ──────────
-        // Anchored to each correction, advanced by odometry every compute tick, published with a
-        // growing covariance + a real-time validity stamp so consumers interpolate to capture time
-        // instead of clamping to the ~5 Hz corrected pose. Stamps assume QDateTime epoch == the lidar
-        // /camera sensor epoch (verified by the voxelizer rt_lag dropping after this change).
-        Eigen::Affine2f pred_pose_ = Eigen::Affine2f::Identity();
-        Eigen::Matrix3f pred_cov_  = Eigen::Matrix3f::Identity();
-        bool         pred_valid_              = false;
-        std::int64_t pred_last_step_ms_       = 0;   // validity time of pred_pose_ (sensor epoch ms)
-        std::int64_t pred_anchor_ms_          = 0;   // last correction's validity time (coast limit)
 
         // Pose trace CSV (etc/pose_trace.csv): logs CORRECTED (20 Hz, compute) and PREDICTED (60 Hz,
         // tick) poses with timestamps so the intermediate dead-reckoned poses can be compared against
@@ -160,16 +150,16 @@ class SpecificWorker : public GenericWorker
         void log_pose_trace(int type, std::int64_t valid_ts_ms,
                             const Eigen::Affine2f& pose, float innov_norm);
 
+        // Per-tick compute-timing CSV (etc/compute_timing.csv): exposes WHERE compute() stalls (viewer
+        // vs dsr vs loc_fetch) so we can see why the corrected publish drops below the optimizer rate.
+        std::ofstream compute_csv_;
+        bool          compute_csv_open_attempted_ = false;
+
         // RT publish-rate monitor (shown in the window title at ~1 Hz so it can be watched visually).
         int          rt_corr_count_           = 0;   // corrected blocks this window
         int          rt_pred_count_           = 0;   // predicted blocks this window
         std::int64_t rt_rate_window_start_ms_ = 0;
         void update_rt_rate_readout(std::int64_t now_ms, bool on_gui_thread);
-
-        // Own ~60 Hz predict-publish timer (decoupled from the 20 Hz compute/viewer). Parented to this,
-        // so timeout() fires on this->thread() — the same thread compute() runs on (race-free pred_*).
-        QTimer* predict_timer_ = nullptr;
-        void predict_publish_tick();
 
         std::atomic<bool> shutting_down_{false};
 

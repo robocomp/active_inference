@@ -208,8 +208,23 @@ public:
         // Every N optimizer-frames test whether rotating the robot by 180° gives
         // lower SDF FE than the current pose.  Disabled once the room is stable.
         // Set to 0 to disable.
-        int   symmetry_check_interval       = 30;    // optimizer-frames between checks
-        float symmetry_flip_min_improvement = 0.005f; // flip must beat current sdf_mse by this much
+        int   symmetry_check_interval       = 5;     // optimizer-frames between checks (small → can
+                                                     // integrate evidence across a momentary turn)
+        float symmetry_flip_min_improvement = 0.005f; // BASE per-check loss advantage to count as evidence
+        // Leaky evidence accumulation + confidence-scaled threshold so a long-correct track requires
+        // SUSTAINED contrary evidence to flip (not a momentary tight-turn degeneracy). Each check adds
+        // (loss_cur - best_loss - min_improvement) to flip_evidence with a leak; flip when it exceeds
+        // threshold = base × (1 + confidence_gain × min(good_fit_streak, cap)). good_fit_streak counts
+        // consecutive frames whose SDF is below symmetry_good_fit_mse (the track is "established").
+        float symmetry_evidence_leak        = 0.6f;   // per-check retention (<1 → momentary blips decay)
+        float symmetry_flip_evidence_thresh = 0.02f;  // base evidence to cross before flipping
+        float symmetry_confidence_gain      = 0.05f;  // threshold growth per established frame
+        int   symmetry_confidence_cap       = 200;    // streak cap (~10-20 s) so threshold can't run away
+        float symmetry_good_fit_mse         = 0.02f;  // SDF below this ⇒ a "good fit" frame (streak++)
+        // Streak DECAYS (not resets) on a bad frame so a momentary tight-turn degradation only dents the
+        // established confidence; only sustained bad fit (truly lost) erodes it. cap/decay ≈ bad frames
+        // to fully lose confidence (200/8 ≈ 25 frames ≈ ~1.3 s @19 Hz).
+        int   symmetry_confidence_decay     = 8;
 
         // ===== Grid Search / Orientation Search =====
         float grid_search_wall_margin = 0.3f;        // meters from room walls
@@ -685,6 +700,8 @@ private:
    RerunLogger        rerun_logger_;
    int                rerun_frame_counter_ = 0;
    int                symmetry_check_counter_ = 0;
+   float              symmetry_flip_evidence_ = 0.f;  // leaky accumulator of contrary-orientation evidence
+   int                good_fit_streak_        = 0;    // consecutive good-SDF frames (track establishment)
    std::atomic<bool>  relocalization_enabled_{true};
    bool               rerun_room_polygon_sent_ = false;
    std::vector<float> last_adam_losses_;    // per-iteration losses from last Adam/LBFGS run

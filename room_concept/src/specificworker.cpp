@@ -297,13 +297,6 @@ void SpecificWorker::initialize()
         connect(v, &rc::Viewer2D::robot_rotate, this, [this](QPointF p){ viewer_->on_robot_rotated(p); });
     }
 
-    // ── High-rate predict-publish timer ───────────────────────────────────
-    // Own QTimer (parented to this → fires on this->thread()) so predicted RT blocks are emitted at
-    // ~60 Hz independent of the 20 Hz compute/viewer cadence. No-op until compute()'s CORRECT branch
-    // anchors the first pose; gated inside the tick by PredictPublish.enabled / PreserveBootstrapRoom.
-    predict_timer_ = new QTimer(this);
-    connect(predict_timer_, &QTimer::timeout, this, &SpecificWorker::predict_publish_tick);
-    predict_timer_->start(std::max(1, params.PREDICT_PUBLISH_PERIOD_MS));
 
     restore_window_settings();
 }
@@ -350,40 +343,6 @@ void SpecificWorker::update_rt_rate_readout(std::int64_t now_ms, bool on_gui_thr
     rt_rate_window_start_ms_ = now_ms;
 }
 
-// High-rate predicted-pose publisher (own QTimer, ~PREDICT_PUBLISH_PERIOD_MS). Dead-reckons the
-// anchored corrected pose forward to NOW from the latest body velocity, grows the covariance, and
-// writes a predicted robot↔room block stamped at NOW so a recent capture interpolates instead of
-// clamping. Fires on this->thread() — the SAME thread compute() runs on — so the pred_* anchor set by
-// compute()'s CORRECT branch is read race-free. Decoupled from compute so the publish rate is
-// independent of the (heavier) viewer/compute cadence. No-op until a correction has anchored it.
-void SpecificWorker::predict_publish_tick()
-{
-    if (shutting_down_ || params.PRESERVE_BOOTSTRAP_ROOM || !params.PREDICT_PUBLISH_ENABLED)
-        return;
-    if (!pred_valid_ || !scene_graph_)
-        return;
-
-    const std::int64_t now_ms = QDateTime::currentMSecsSinceEpoch();
-    // Stop coasting if no correction for too long — the dead-reckoned pose (and its cov) would be
-    // meaningless; let the buffer go stale so consumers gate rather than trust a drifting prediction.
-    if (now_ms - pred_anchor_ms_ > static_cast<std::int64_t>(params.PREDICT_PUBLISH_MAX_COAST_S * 1000.f))
-        return;
-
-    const float dt = static_cast<float>(now_ms - pred_last_step_ms_) * 0.001f;
-    if (dt <= 0.f)
-        return;
-
-    pred_pose_ = room_concept_.predict_pose_forward(
-        pred_pose_, last_robot_adv_speed_, last_robot_side_speed_, last_robot_rot_speed_, dt);
-    pred_cov_(0, 0) += params.PREDICT_PROCESS_NOISE_XY    * dt;
-    pred_cov_(1, 1) += params.PREDICT_PROCESS_NOISE_XY    * dt;
-    pred_cov_(2, 2) += params.PREDICT_PROCESS_NOISE_THETA * dt;
-    pred_last_step_ms_ = now_ms;
-    scene_graph_->dsr_publish_predicted_pose(pred_pose_, pred_cov_, static_cast<std::uint64_t>(now_ms));
-    ++rt_pred_count_;
-    log_pose_trace(/*type=predicted*/1, now_ms, pred_pose_, -1.0f);
-}
-
 // Append one pose-trace row. type 0=corrected (optimizer, ~20 Hz), 1=predicted (dead-reckon, ~60 Hz).
 // valid_ts_ms = the pose's validity stamp; wall_ms = QDateTime now. Lets us overlay the intermediate
 // predicted poses on the corrected ones and see the dead-reckoning wander / correction snaps.
@@ -419,6 +378,7 @@ void SpecificWorker::compute()
     qint64 t_dsr_ms = 0;
     qint64 t_ui_ms = 0;
     qint64 t_health_ms = 0;
+    bool   did_publish = false;   // a corrected RT block was published this tick (for compute_timing.csv)
 
     if (last_affordance_monitor_ms_ == 0 || now_ms - last_affordance_monitor_ms_ >= 200)
     {
@@ -482,23 +442,17 @@ void SpecificWorker::compute()
         if (fresh_correction
             && (last_dsr_publish_try_ms_ == 0 || now_ms - last_dsr_publish_try_ms_ >= 15))
         {
-            // CORRECT: publish the optimized pose (full update — room creation/affordance/cov) and
-            // re-anchor the dead-reckoning to it (the corrected pose is valid at its lidar stamp).
+            // Publish the optimizer output DIRECTLY (corrected pose → robot↔room RT). No prediction,
+            // no filtering — the lidar-corrected pose tracks truth and is smooth; rate = optimizer rate.
             last_dsr_publish_try_ms_ = now_ms;
             scene_graph_->update(*loc_res, last_robot_adv_speed_, last_robot_side_speed_, last_robot_rot_speed_);
             last_dsr_published_ts_ms_ = loc_res->timestamp_ms;
 
-            pred_pose_          = loc_res->robot_pose;
-            pred_cov_           = loc_res->covariance;
-            pred_last_step_ms_  = loc_res->timestamp_ms;   // first predict integrates the lag gap
-            pred_anchor_ms_     = loc_res->timestamp_ms;
-            pred_valid_         = true;
             ++rt_corr_count_;
             log_pose_trace(/*type=corrected*/0, loc_res->timestamp_ms,
                            loc_res->robot_pose, loc_res->innovation_norm);
+            did_publish = true;
         }
-        // PREDICT runs on its own ~60 Hz QTimer (predict_publish_tick), decoupled from this 20 Hz
-        // compute loop / viewer cost — both fire on this->thread(), so pred_* access is race-free.
         t_dsr_ms = section_timer.elapsed();
     }
 
@@ -517,6 +471,24 @@ void SpecificWorker::compute()
     const auto total_ms = compute_timer.elapsed();
     const auto elapsed_since_init_ms = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now() - init_time).count();
+
+    // Per-tick compute-timing CSV — shows whether compute() holds the period (≈50 ms) or stalls, and
+    // which section is responsible, explaining publish-rate loss vs the optimizer's production rate.
+    if (not compute_csv_open_attempted_)
+    {
+        compute_csv_open_attempted_ = true;
+        compute_csv_.open("etc/compute_timing.csv", std::ios::out | std::ios::trunc);
+        if (compute_csv_.is_open())
+            compute_csv_ << "wall_ms,total_ms,affordance_ms,loc_fetch_ms,viewer_ms,dsr_ms,ui_ms,did_publish,gui_thread\n";
+    }
+    if (compute_csv_.is_open())
+    {
+        compute_csv_ << now_ms << ',' << total_ms << ',' << t_affordance_ms << ',' << t_loc_fetch_ms
+                     << ',' << t_viewer_ms << ',' << t_dsr_ms << ',' << t_ui_ms << ','
+                     << (did_publish ? 1 : 0) << ',' << (on_gui_thread ? 1 : 0) << '\n';
+        compute_csv_.flush();
+    }
+
     if (last_compute_timing_log_ms_ == 0 || now_ms - last_compute_timing_log_ms_ >= 3000 || total_ms > 50)
     {
         last_compute_timing_log_ms_ = now_ms;
