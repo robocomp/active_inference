@@ -86,12 +86,24 @@ std::array<float, 6> TableBelief::responsibilities(const Eigen::Vector3f& p, con
     const float eps    = std::clamp(params_.clutter_frac, 0.0f, 0.99f);
     const float pi_surf = (1.0f - eps) / 5.0f;
     const float inv2R  = 0.5f / std::max(1e-9f, R);
+
+    // Height-based attribution. The leg cylinders' lateral surface exists only over z∈[0, H−top_thickness];
+    // the top slab only over z∈[H−top_thickness, H]. The two meet at the join plane, so a tabletop point near
+    // a corner (z≈H, laterally close to an inset corner leg) is otherwise mis-attributed to that leg, and GN
+    // shrinks w,h to slide the legs under it → systematic under-size. Gate each component's mixing weight by a
+    // smooth vertical compatibility about the join plane (band = slab half-thickness — physical, not tuned).
+    // EM holds responsibilities fixed within a GN iteration, so this needs no Jacobian change.
+    const float z_join = s.H - params_.top_thickness;       // leg top == slab bottom
+    const float band   = std::max(0.5f * params_.top_thickness, 1e-3f);
+    const float leg_z  = 1.0f / (1.0f + std::exp((p.z() - z_join) / band));  // →1 below join, →0 above (tabletop)
+    const float top_z  = 1.0f - leg_z;                                       // →1 above join (tabletop), →0 below
+
     std::array<float, 6> u{};
-    u[0] = pi_surf * std::exp(-sdf_top(p, s) * sdf_top(p, s) * inv2R);
+    u[0] = pi_surf * top_z * std::exp(-sdf_top(p, s) * sdf_top(p, s) * inv2R);
     for (int k = 0; k < 4; ++k)
     {
         const float d = sdf_leg(p, s, k);
-        u[1 + k] = pi_surf * std::exp(-d * d * inv2R);
+        u[1 + k] = pi_surf * leg_z * std::exp(-d * d * inv2R);
     }
     // Clutter = uniform; modelled as a Gaussian floor at clutter_scale so a point further than that from
     // EVERY surface is explained by clutter rather than dragging the model.
@@ -173,13 +185,27 @@ float TableBelief::update(const TableFrame& frame)
     const Eigen::Matrix<float, 6, 6> P0 = Sigma_.inverse();   // transition-prior precision (Σ_pred⁻¹)
     Eigen::Matrix<float, 6, 1> theta = state_.vec();
 
-    Eigen::Matrix<float, 6, 6> A;
-    Eigen::Matrix<float, 6, 1> b;
-    const auto accumulate = [&](const Eigen::Matrix<float, 6, 1>& th)
+    // Inverse of the per-frame common-mode covariance Σ_c (diagonal): position (cx,cy) = config floor +
+    // pose-chain variance; size (H,w,h) and yaw = config measurement stds. Marginalising this shared
+    // error makes the frame's information SATURATE at Σ_c regardless of point count (so N correlated
+    // points cannot collapse σ). Σ_c⁻¹ is used via Woodbury so no Σ_c or data-info inverse is needed.
+    const float p2 = params_.common_mode_pos_std  * params_.common_mode_pos_std;
+    const float s2 = params_.common_mode_size_std * params_.common_mode_size_std;
+    const float y2 = params_.common_mode_yaw_std  * params_.common_mode_yaw_std;
+    Eigen::Matrix<float, 6, 1> sc_inv;
+    sc_inv << 1.0f / std::max(1e-9f, p2 + frame.chain_cov_xx),
+              1.0f / std::max(1e-9f, p2 + frame.chain_cov_yy),
+              1.0f / s2, 1.0f / s2, 1.0f / s2, 1.0f / y2;
+    const Eigen::Matrix<float, 6, 6> Sc_inv = sc_inv.asDiagonal();
+
+    // Accumulate the DATA-ONLY information Id and gradient bd (no prior) at th.
+    Eigen::Matrix<float, 6, 6> Id;
+    Eigen::Matrix<float, 6, 1> bd;
+    const auto accumulate_data = [&](const Eigen::Matrix<float, 6, 1>& th)
     {
         const TableBeliefState s = TableBeliefState::from_vec(th);
-        A = P0;
-        b = P0 * (prior_mean_ - th);
+        Id.setZero();
+        bd.setZero();
         for (std::size_t i = 0; i < frame.points.size(); ++i)
         {
             const float R = R_of(i);
@@ -190,15 +216,32 @@ float TableBelief::update(const TableFrame& frame)
                 if (w < 1e-6f) continue;
                 const float d = sdf_prim(frame.points[i], s, prim);
                 const Eigen::Matrix<float, 6, 1> J = sdf_jacobian(frame.points[i], s, prim);
-                A.noalias() += w * (J * J.transpose());
-                b.noalias() += -w * J * d;
+                Id.noalias() += w * (J * J.transpose());
+                bd.noalias() += -w * J * d;
             }
         }
     };
 
+    // Saturate the data evidence by the common-mode (exact marginalisation, Woodbury):
+    //   I_eff = Id − Id (Id + Σc⁻¹)⁻¹ Id ,   b_eff = bd − Id (Id + Σc⁻¹)⁻¹ bd
+    // I_eff → Σc⁻¹ as Id → ∞, so a frame contributes at most Σc⁻¹ information.
+    Eigen::Matrix<float, 6, 6> Ieff;
+    Eigen::Matrix<float, 6, 1> beff;
+    const auto saturate = [&]()
+    {
+        const Eigen::Matrix<float, 6, 6> IdMinv = Id * (Id + Sc_inv).inverse();
+        Ieff = Id - IdMinv * Id;
+        beff = bd - IdMinv * bd;
+    };
+
+    // MEAN (MAP): use the FULL data information so the point estimate converges fast/accurately.
+    // The common-mode saturation is applied ONLY to the posterior covariance below (calibration) —
+    // it must not slow the point estimate.
     for (int it = 0; it < params_.gn_iters; ++it)
     {
-        accumulate(theta);
+        accumulate_data(theta);
+        const Eigen::Matrix<float, 6, 6> A = P0 + Id;
+        const Eigen::Matrix<float, 6, 1> b = P0 * (prior_mean_ - theta) + bd;
         const Eigen::Matrix<float, 6, 1> dtheta = A.ldlt().solve(b);
         if (!dtheta.allFinite()) break;
         theta += dtheta;
@@ -218,8 +261,9 @@ float TableBelief::update(const TableFrame& frame)
     }
     state_ = s;
 
-    accumulate(state_.vec());                 // information at the converged state
-    Sigma_ = A.inverse();                      // posterior covariance
+    accumulate_data(state_.vec());            // data information at the converged state
+    saturate();                                // cap it by the common-mode (calibrated posterior)
+    Sigma_ = (P0 + Ieff).inverse();            // posterior covariance
 
     // Mean per-point data energy (diagnostic, ~negative-log-likelihood proxy).
     double energy = 0.0;

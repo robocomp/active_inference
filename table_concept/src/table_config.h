@@ -79,7 +79,13 @@ struct TableConfig
     float ai2_prior_size_std   = 0.30f;  // broad size prior std (m) on w,h,H
     float ai2_process_std_m    = 0.005f; // predict process-noise std, length DOFs (m/frame)
     float ai2_process_std_yaw  = 0.01f;  // predict process-noise std, yaw (rad/frame)
-    float ai2_motion_bias_gate_m = 0.05f;// drop the geometric update when mask_motion_bias exceeds this (m)
+    // Per-frame COMMON-MODE error (shared by all points of a mask → doesn't average out). The frame's
+    // information saturates here, so N≈10⁴ correlated points can't collapse σ → calibrated posterior.
+    float ai2_common_mode_pos_std  = 0.03f; // shared position error (m); pose-chain cov adds to it
+    float ai2_common_mode_size_std = 0.02f; // shared size error w,h,H (m)
+    float ai2_common_mode_yaw_std  = 0.03f; // shared yaw error (rad)
+    float ai2_trunc_gate_frac  = 0.10f;  // skip the geometric update (predict only) when this fraction of
+                                         // the mask silhouette is on the image border (truncated → biased)
     int   ai2_gn_iters         = 4;      // Gauss-Newton iterations per frame
     int   optimization_iters = 10;
     float optimization_lr   = 0.05f;

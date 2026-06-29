@@ -37,10 +37,11 @@ struct TableInstance
     // path. Lazily initialised from the model state on the first AI2 cycle.
     TableBelief ai2_belief;
     bool        ai2_initialized = false;
-    // This frame's ego-motion capture-corruption (from the selected mask slice), consumed by the AI2
-    // update as the observation precision R / bias gate (see MASK_MOTION_CORRUPTION.md).
+    // This frame's ego-motion capture-corruption (from the selected mask slice): motion_var inflates the
+    // AI2 observation precision R (downweight), trunc_frac gates the update (truncated→biased mask).
+    // dotd is the motion-corruption speed, kept for diagnostics (see MASK_MOTION_CORRUPTION.md).
     float last_motion_var      = 0.0f;
-    float last_motion_bias     = 0.0f;
+    float last_motion_dotd     = 0.0f;
     float last_trunc_frac      = 0.0f;
     float last_centroid_radius = 0.0f;
 

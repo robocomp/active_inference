@@ -80,7 +80,7 @@ AI2ClutterScaleM = 0.12     # a point further than ~this from EVERY surface is e
 AI2PriorSizeStd = 0.30      # broad size prior std (m) on w,h,H
 AI2ProcessStdM = 0.005      # predict process-noise std, length DOFs (m/frame) — rigid+static ⇒ small
 AI2ProcessStdYaw = 0.01     # predict process-noise std, yaw (rad/frame)
-AI2MotionBiasGateM = 0.05   # drop the geometric update when mask_motion_bias exceeds this (m) — table cm-scale
+AI2TruncGateFrac = 0.10     # skip the geometric update when >this fraction of the mask silhouette is on the image border (truncated → biased)
 AI2GnIters = 4              # Gauss-Newton iterations per frame
 
 [TableConcept]

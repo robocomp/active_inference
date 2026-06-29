@@ -72,7 +72,10 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.ai2_prior_size_std   = getf("TableModel.AI2PriorSizeStd",     0.30f);
     out.ai2_process_std_m    = getf("TableModel.AI2ProcessStdM",      0.005f);
     out.ai2_process_std_yaw  = getf("TableModel.AI2ProcessStdYaw",    0.01f);
-    out.ai2_motion_bias_gate_m = getf("TableModel.AI2MotionBiasGateM", 0.05f);
+    out.ai2_common_mode_pos_std  = getf("TableModel.AI2CommonModePosStd",  0.03f);
+    out.ai2_common_mode_size_std = getf("TableModel.AI2CommonModeSizeStd", 0.02f);
+    out.ai2_common_mode_yaw_std  = getf("TableModel.AI2CommonModeYawStd",  0.03f);
+    out.ai2_trunc_gate_frac    = getf("TableModel.AI2TruncGateFrac",   0.10f);
     out.ai2_gn_iters         = geti("TableModel.AI2GnIters",          4);
     out.optimization_iters = geti("TableModel.OptimizationIters", 10);
     out.optimization_lr    = getf("TableModel.OptimizationLr",    0.05f);

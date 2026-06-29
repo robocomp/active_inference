@@ -269,7 +269,7 @@ TableFitter::TableObservation TableFitter::observe(TableInstance& inst, const DS
             // Ego-motion capture-corruption for this mask (AI2 obs precision / bias gate; 0 if producer
             // predates the feature). See MASK_MOTION_CORRUPTION.md.
             inst.last_motion_var      = slice.motion_var;
-            inst.last_motion_bias     = slice.motion_bias;
+            inst.last_motion_dotd     = slice.motion_dotd;
             inst.last_trunc_frac      = slice.trunc_frac;
             inst.last_centroid_radius = slice.centroid_radius;
             const std::size_t begin = std::min(slice.support_begin, masks_packet.support_points.size());
@@ -374,6 +374,9 @@ float TableFitter::run_inference_ai2(TableInstance& inst, const TableObservation
         p.prior_size_std  = cfg_.ai2_prior_size_std;
         p.process_std_m   = cfg_.ai2_process_std_m;
         p.process_std_yaw = cfg_.ai2_process_std_yaw;
+        p.common_mode_pos_std  = cfg_.ai2_common_mode_pos_std;
+        p.common_mode_size_std = cfg_.ai2_common_mode_size_std;
+        p.common_mode_yaw_std  = cfg_.ai2_common_mode_yaw_std;
         p.gn_iters        = cfg_.ai2_gn_iters;
         p.top_thickness   = TableModel::TOP_THICKNESS;
         p.leg_radius      = TableModel::LEG_RADIUS;
@@ -395,10 +398,16 @@ float TableFitter::run_inference_ai2(TableInstance& inst, const TableObservation
     // error). One scalar per mask in v1 — the per-DOF split is a later step.
     const float R = cfg_.ai2_sigma_base_m * cfg_.ai2_sigma_base_m + std::max(0.0f, inst.last_motion_var);
 
-    // Bias gate: a known timing offset shifts the whole mask systematically (a bias, not noise). Above
-    // tolerance, skip the geometric update (predict only) — but keep the instance (association ran
-    // upstream). Table is cm-scale ⇒ a looser gate than bottle.
-    const bool gated = inst.last_motion_bias > cfg_.ai2_motion_bias_gate_m;
+    // Truncation gate: a mask clipped by the image border has a chopped silhouette → it biases the fit
+    // (shrinks/displaces the model). Above tolerance, skip the geometric update (predict only) — but
+    // keep the instance (association ran upstream). The ego-motion lag bias is handled upstream by the
+    // voxelizer pose extrapolation, so no separate motion/bias gate is needed here.
+    const bool gated = inst.last_trunc_frac > cfg_.ai2_trunc_gate_frac;
+
+    // Pose-chain covariance at the table centre (cx,cy) — the per-frame SHARED localization error. Fed
+    // into the belief as part of the common-mode so the frame's information saturates (calibrated σ).
+    // Computed once here (before the update) and reused for the published RT cov below.
+    compute_chain_cov(inst);
 
     float energy = 0.0f;
     if (gated)
@@ -410,6 +419,8 @@ float TableFitter::run_inference_ai2(TableInstance& inst, const TableObservation
         frame.points.insert(frame.points.end(), observation.candidate_pts.begin(), observation.candidate_pts.end());
         frame.points.insert(frame.points.end(), observation.residual_pts.begin(), observation.residual_pts.end());
         frame.R.assign(frame.points.size(), R);
+        frame.chain_cov_xx = inst.chain_cov_xx;
+        frame.chain_cov_yy = inst.chain_cov_yy;
         energy = inst.ai2_belief.update(frame);
     }
 
@@ -426,11 +437,11 @@ float TableFitter::run_inference_ai2(TableInstance& inst, const TableObservation
     inst.detection_alive = inst.frames_since_detection < cfg_.detection_alive_max_frames;
 
     compute_projected_roi(inst);
-    compute_chain_cov(inst);
+    // (chain cov already computed above, before the belief update)
 
     if (should_log(inst))
-        std::print("[{}] AI2 npts={} R={:.4f} bias={:.3f}{} | cx={:.3f} cy={:.3f} H={:.3f} w={:.3f} h={:.3f} ψ={:.3f} | σ(w,h,H)mm=({:.0f},{:.0f},{:.0f})\n",
-                   inst.node_name, npts, R, inst.last_motion_bias, gated ? " GATED" : "",
+        std::print("[{}] AI2 npts={} R={:.4f} dotd={:.2f} trunc={:.2f}{} | cx={:.3f} cy={:.3f} H={:.3f} w={:.3f} h={:.3f} ψ={:.3f} | σ(w,h,H)mm=({:.0f},{:.0f},{:.0f})\n",
+                   inst.node_name, npts, R, inst.last_motion_dotd, inst.last_trunc_frac, gated ? " GATED" : "",
                    bs.cx, bs.cy, bs.H, bs.w, bs.h, bs.yaw,
                    1000.f * std::sqrt(std::max(0.f, inst.ai2_belief.covariance()(3, 3))),
                    1000.f * std::sqrt(std::max(0.f, inst.ai2_belief.covariance()(4, 4))),
@@ -579,14 +590,14 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
     {
         ai2_csv_.open(cfg_.ai2_csv_path, std::ios::out | std::ios::trunc);
         if (not ai2_csv_.is_open()) { cfg_.ai2_csv_path.clear(); return; }
-        ai2_csv_ << "cycle,node,npts,gated,energy,R,motion_var,motion_bias,trunc_frac,"
+        ai2_csv_ << "cycle,node,npts,gated,energy,R,motion_var,motion_dotd,trunc_frac,"
                  << "cx,cy,H,w,h,yaw,std_cx,std_cy,std_H,std_w,std_h,std_yaw\n";
     }
     const auto& s = inst.ai2_belief.state();
     const auto& S = inst.ai2_belief.covariance();
     const auto sd = [&](int i) { return std::sqrt(std::max(0.0f, S(i, i))); };   // posterior std (m / rad)
     ai2_csv_ << inst.processed_cycles << ',' << inst.node_name << ',' << npts << ',' << (gated ? 1 : 0) << ','
-             << energy << ',' << R << ',' << inst.last_motion_var << ',' << inst.last_motion_bias << ','
+             << energy << ',' << R << ',' << inst.last_motion_var << ',' << inst.last_motion_dotd << ','
              << inst.last_trunc_frac << ','
              << s.cx << ',' << s.cy << ',' << s.H << ',' << s.w << ',' << s.h << ',' << s.yaw << ','
              << sd(0) << ',' << sd(1) << ',' << sd(2) << ',' << sd(3) << ',' << sd(4) << ',' << sd(5) << '\n';

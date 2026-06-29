@@ -46,6 +46,14 @@ struct TableBeliefParams
     float process_std_m   = 0.005f;
     float process_std_yaw = 0.01f;
 
+    // Per-frame COMMON-MODE error: the error SHARED by all points of one mask (localization + mask
+    // boundary + deprojection), which does NOT average out over points. The frame's information
+    // SATURATES at this covariance (marginalised, Woodbury), so N≈10⁴ correlated points can no longer
+    // collapse σ — the posterior stays calibrated. These are measurement-model stds, not a σ floor.
+    float common_mode_pos_std  = 0.03f;  // shared position error (m); chain_cov (pose) adds to it
+    float common_mode_size_std = 0.02f;  // shared size error w,h,H (m)
+    float common_mode_yaw_std  = 0.03f;  // shared yaw error (rad)
+
     // Optimiser
     int   gn_iters = 4;            // Gauss-Newton iterations per frame
     float fd_eps   = 1e-3f;        // finite-difference step for SDF Jacobians (m / rad)
@@ -57,6 +65,8 @@ struct TableFrame
 {
     std::vector<Eigen::Vector3f> points;
     std::vector<float>           R;        // per-point measurement variance (m²); empty ⇒ σ_base² for all
+    float chain_cov_xx = 0.0f;             // extra shared position variance (m²) from the pose chain (cx)
+    float chain_cov_yy = 0.0f;             // ...                                                      (cy)
 };
 
 class TableBelief
