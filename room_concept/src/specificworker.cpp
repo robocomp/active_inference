@@ -381,6 +381,30 @@ void SpecificWorker::predict_publish_tick()
     pred_last_step_ms_ = now_ms;
     scene_graph_->dsr_publish_predicted_pose(pred_pose_, pred_cov_, static_cast<std::uint64_t>(now_ms));
     ++rt_pred_count_;
+    log_pose_trace(/*type=predicted*/1, now_ms, pred_pose_, -1.0f);
+}
+
+// Append one pose-trace row. type 0=corrected (optimizer, ~20 Hz), 1=predicted (dead-reckon, ~60 Hz).
+// valid_ts_ms = the pose's validity stamp; wall_ms = QDateTime now. Lets us overlay the intermediate
+// predicted poses on the corrected ones and see the dead-reckoning wander / correction snaps.
+void SpecificWorker::log_pose_trace(int type, std::int64_t valid_ts_ms,
+                                    const Eigen::Affine2f& pose, float innov_norm)
+{
+    if (not pose_trace_open_attempted_)
+    {
+        pose_trace_open_attempted_ = true;
+        pose_trace_.open("etc/pose_trace.csv", std::ios::out | std::ios::trunc);
+        if (pose_trace_.is_open())
+            pose_trace_ << "wall_ms,type,valid_ts_ms,x,y,theta,innov_norm\n";
+    }
+    if (not pose_trace_.is_open())
+        return;
+    const float x = pose.translation().x();
+    const float y = pose.translation().y();
+    const float th = std::atan2(pose.linear()(1, 0), pose.linear()(0, 0));
+    pose_trace_ << QDateTime::currentMSecsSinceEpoch() << ',' << type << ',' << valid_ts_ms << ','
+                << x << ',' << y << ',' << th << ',' << innov_norm << '\n';
+    pose_trace_.flush();
 }
 
 void SpecificWorker::compute()
@@ -466,6 +490,8 @@ void SpecificWorker::compute()
             pred_anchor_ms_     = loc_res->timestamp_ms;
             pred_valid_         = true;
             ++rt_corr_count_;
+            log_pose_trace(/*type=corrected*/0, loc_res->timestamp_ms,
+                           loc_res->robot_pose, loc_res->innovation_norm);
         }
         // PREDICT runs on its own ~60 Hz QTimer (predict_publish_tick), decoupled from this 20 Hz
         // compute loop / viewer cost — both fire on this->thread(), so pred_* access is race-free.

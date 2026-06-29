@@ -151,6 +151,15 @@ class SpecificWorker : public GenericWorker
         std::int64_t pred_last_step_ms_       = 0;   // validity time of pred_pose_ (sensor epoch ms)
         std::int64_t pred_anchor_ms_          = 0;   // last correction's validity time (coast limit)
 
+        // Pose trace CSV (etc/pose_trace.csv): logs CORRECTED (20 Hz, compute) and PREDICTED (60 Hz,
+        // tick) poses with timestamps so the intermediate dead-reckoned poses can be compared against
+        // the optimizer corrections (diagnose the noise predict-publish injects). Both writers run on
+        // this->thread() → single ofstream, no lock. type: 0=corrected, 1=predicted.
+        std::ofstream pose_trace_;
+        bool          pose_trace_open_attempted_ = false;
+        void log_pose_trace(int type, std::int64_t valid_ts_ms,
+                            const Eigen::Affine2f& pose, float innov_norm);
+
         // RT publish-rate monitor (shown in the window title at ~1 Hz so it can be watched visually).
         int          rt_corr_count_           = 0;   // corrected blocks this window
         int          rt_pred_count_           = 0;   // predicted blocks this window

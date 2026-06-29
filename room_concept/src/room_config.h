@@ -65,7 +65,14 @@ struct RoomConfig
     // odometry and publish PREDICTED robot↔room RT blocks (with a GROWING covariance) so consumers
     // pinning to a recent capture stamp interpolate instead of clamping to a stale pose. Collapses the
     // ~130 ms localization lag the voxelizer measured. Process-noise rates grow the cov while coasting.
-    bool  PREDICT_PUBLISH_ENABLED      = true;    // PredictPublish.enabled
+    // DEFAULT OFF (confirmed by pose_trace analysis 2026-06-29): the 60 Hz dead-reckoned pose injects
+    // single-step jumps of ~277 mm / 13.5° per 16 ms → impossible 17 m/s / 843°/s velocity spikes that
+    // break MPPI's velocity estimate (slow motion) and jerk the viewer. Cause = per-correction catch-up
+    // (clock reset to the past lidar stamp → next tick integrates the whole lag-gap in one step) + snap.
+    // The CORRECTED stream is smooth (innovation≈0) and ~50-100 ms fresh at the now-faster optimizer
+    // (~10-19 Hz) — strictly better for consumers. Re-enable ONLY with a smooth incremental predictor
+    // (small-dt integration, blended corrections, monotonic now-stamped blocks).
+    bool  PREDICT_PUBLISH_ENABLED      = false;   // PredictPublish.enabled
     int   PREDICT_PUBLISH_PERIOD_MS    = 16;      // target predicted-block spacing (~60 Hz)
     float PREDICT_PUBLISH_MAX_COAST_S  = 1.0f;    // stop predicting if no correction for this long
     float PREDICT_PROCESS_NOISE_XY     = 0.04f;   // (m/√s)² → variance growth m²/s on x,y
