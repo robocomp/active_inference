@@ -612,6 +612,34 @@ namespace rc
                 update_ms = std::chrono::duration<float, std::milli>(
                     std::chrono::high_resolution_clock::now() - t_update_start_).count();
 
+                // Optimizer-timing telemetry for the UI readout (early-exit ⇔ iterations_used <= 0).
+                opt_total_count_.fetch_add(1, std::memory_order_relaxed);
+                if (res.iterations_used <= 0)
+                    opt_earlyexit_count_.fetch_add(1, std::memory_order_relaxed);
+                opt_update_us_sum_.fetch_add(static_cast<std::uint64_t>(update_ms * 1000.0f),
+                                             std::memory_order_relaxed);
+
+                // Lean per-update timing CSV (loc-thread only): distribution + CUDA warmup curve.
+                if (params.optimizer_timing_csv)
+                {
+                    if (!opt_csv_open_attempted_)
+                    {
+                        opt_csv_open_attempted_ = true;
+                        opt_csv_.open("etc/optimizer_timing.csv", std::ios::out | std::ios::trunc);
+                        if (opt_csv_.is_open())
+                            opt_csv_ << "# device=" << (get_device().is_cuda() ? "CUDA" : "CPU") << "\n"
+                                     << "ts_ms,update_ms,iters,early_exit,window_size,t_adam_ms,t_cov_ms,sdf_mse,cov_tt\n";
+                    }
+                    if (opt_csv_.is_open())
+                    {
+                        opt_csv_ << res.timestamp_ms << ',' << update_ms << ',' << res.iterations_used
+                                 << ',' << (res.iterations_used <= 0 ? 1 : 0) << ',' << window_mgr_.size()
+                                 << ',' << last_t_adam_ms_ << ',' << last_t_cov_ms_ << ',' << res.sdf_mse
+                                 << ',' << res.covariance(2, 2) << '\n';
+                        opt_csv_.flush();
+                    }
+                }
+
             if (params.rerun_enabled)
             {
                 RerunFrame rf;
@@ -2804,6 +2832,36 @@ namespace rc
         cov(2, 2) = rotation_std * rotation_std;
 
         return cov;
+    }
+
+    RoomConcept::OptTiming RoomConcept::take_optimizer_timing()
+    {
+        const auto n  = opt_total_count_.exchange(0, std::memory_order_relaxed);
+        const auto ee = opt_earlyexit_count_.exchange(0, std::memory_order_relaxed);
+        const auto us = opt_update_us_sum_.exchange(0, std::memory_order_relaxed);
+        OptTiming t;
+        t.count         = n;
+        t.early_exits   = ee;
+        t.avg_update_ms = (n > 0) ? (static_cast<double>(us) / 1000.0 / n) : 0.0;
+        return t;
+    }
+
+    Eigen::Affine2f RoomConcept::predict_pose_forward(const Eigen::Affine2f& pose,
+                                                      float adv, float side, float rot, float dt) const
+    {
+        if (dt <= 0.f)
+            return pose;
+        const float theta = std::atan2(pose.linear()(1, 0), pose.linear()(0, 0));
+        const float dx_local = adv * dt;
+        const float dy_local = side * dt;
+        const float dtheta = rot * dt;                  // velocity is CCW+; use directly
+        const float theta_mid = theta + 0.5f * dtheta;  // midpoint integration (reduces bias)
+        Eigen::Affine2f out = Eigen::Affine2f::Identity();
+        out.translation() = pose.translation()
+            + Eigen::Vector2f(dx_local * std::cos(theta_mid) - dy_local * std::sin(theta_mid),
+                              dx_local * std::sin(theta_mid) + dy_local * std::cos(theta_mid));
+        out.linear() = Eigen::Rotation2Df(theta + dtheta).toRotationMatrix();
+        return out;
     }
 
      Eigen::Vector3f RoomConcept::integrate_velocity_over_window(

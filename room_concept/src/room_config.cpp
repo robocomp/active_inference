@@ -30,6 +30,11 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.DifferentialTest", room_concept.params.differential_test_enabled);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.SdfCurrentSlotOnly", room_concept.params.sdf_current_slot_only);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.PreserveBootstrapRoom", p.PRESERVE_BOOTSTRAP_ROOM);
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "PredictPublish.enabled", p.PREDICT_PUBLISH_ENABLED);
+    rc::ConfigLoaderUtils::load_optional<int>(cl, "PredictPublish.period_ms", p.PREDICT_PUBLISH_PERIOD_MS);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "PredictPublish.max_coast_s", p.PREDICT_PUBLISH_MAX_COAST_S);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "PredictPublish.process_noise_xy", p.PREDICT_PROCESS_NOISE_XY);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "PredictPublish.process_noise_theta", p.PREDICT_PROCESS_NOISE_THETA);
     rc::ConfigLoaderUtils::load_optional_apply<std::string>(cl, "RoomConcept.OptimizerType", [&](const std::string& optimizer_type)
     {
         p.OptimizerType = optimizer_type;
@@ -100,6 +105,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.IncidenceAngleMinWeight", room_concept.params.incidence_angle_min_weight);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.UseCuda", room_concept.params.use_cuda);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.DebugLog", room_concept.params.debug_log_enabled);
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.OptimizerTimingCsv", room_concept.params.optimizer_timing_csv);
 
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.RerunEnabled", room_concept.params.rerun_enabled);
     rc::ConfigLoaderUtils::load_optional<std::string>(cl, "RoomConcept.RerunHost", room_concept.params.rerun_host);

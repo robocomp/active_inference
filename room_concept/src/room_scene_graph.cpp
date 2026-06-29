@@ -65,6 +65,25 @@ void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv,
 ///////////////////////////////////////////////////////////////////////////////
 void RoomSceneGraph::dsr_update_pose(const rc::RoomConcept::UpdateResult& res)
 {
+    write_robot_room_rt(res.robot_pose, res.covariance, static_cast<std::uint64_t>(res.timestamp_ms));
+}
+
+// High-rate predicted pose (dead-reckoned between lidar corrections): same RT edge, same frame/cov
+// conversion as a corrected pose — only the source and the (grown) covariance + validity stamp differ.
+void RoomSceneGraph::dsr_publish_predicted_pose(const Eigen::Affine2f& robot_pose,
+                                                const Eigen::Matrix3f& covariance,
+                                                std::uint64_t timestamp_ms)
+{
+    write_robot_room_rt(robot_pose, covariance, timestamp_ms);
+}
+
+// Shared writer for the robot↔room RT edge. `robot_pose`/`covariance` are the room←robot estimate
+// (room frame); when the room is a child of the robot we invert to robot→room (pose AND cov Jacobian)
+// before the timestamped ring-buffer write. Called by both the corrected and predicted paths.
+void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose,
+                                         const Eigen::Matrix3f& covariance,
+                                         std::uint64_t timestamp_ms)
+{
     if (!G_ || !rt_api_) return;
 
     const auto describe_node = [this](uint64_t id) -> QString
@@ -111,8 +130,8 @@ void RoomSceneGraph::dsr_update_pose(const rc::RoomConcept::UpdateResult& res)
         stable_frames_ = 0;
     }
 
-    const Eigen::Matrix2f R = res.robot_pose.linear();
-    const Eigen::Vector2f t = res.robot_pose.translation();
+    const Eigen::Matrix2f R = robot_pose.linear();
+    const Eigen::Vector2f t = robot_pose.translation();
     const float theta_room_to_robot = std::atan2(R(1, 0), R(0, 0));
 
     // Convert room->robot estimate into robot->room when the room is a child of the robot.
@@ -148,8 +167,8 @@ void RoomSceneGraph::dsr_update_pose(const rc::RoomConcept::UpdateResult& res)
 
     // ── Covariance (SE2 3×3 packed into 6×6 flat row-major) ───────────────
     Eigen::Matrix3f cov_se2 = Eigen::Matrix3f::Identity();
-    if (res.covariance.rows() >= 3 && res.covariance.cols() >= 3)
-        cov_se2 = res.covariance.topLeftCorner<3, 3>();
+    if (covariance.rows() >= 3 && covariance.cols() >= 3)
+        cov_se2 = covariance.topLeftCorner<3, 3>();
 
     if (room_node_created_)
     {
@@ -181,7 +200,7 @@ void RoomSceneGraph::dsr_update_pose(const rc::RoomConcept::UpdateResult& res)
                                           std::vector<float>{x, y, 0.f},
                                           std::vector<float>{0.f, 0.f, theta},
                                           cov_flat,
-                                          static_cast<std::uint64_t>(res.timestamp_ms));
+                                          timestamp_ms);
     }
     catch (const std::exception &error)
     {

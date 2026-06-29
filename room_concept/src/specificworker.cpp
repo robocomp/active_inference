@@ -297,10 +297,92 @@ void SpecificWorker::initialize()
         connect(v, &rc::Viewer2D::robot_rotate, this, [this](QPointF p){ viewer_->on_robot_rotated(p); });
     }
 
+    // ── High-rate predict-publish timer ───────────────────────────────────
+    // Own QTimer (parented to this → fires on this->thread()) so predicted RT blocks are emitted at
+    // ~60 Hz independent of the 20 Hz compute/viewer cadence. No-op until compute()'s CORRECT branch
+    // anchors the first pose; gated inside the tick by PredictPublish.enabled / PreserveBootstrapRoom.
+    predict_timer_ = new QTimer(this);
+    connect(predict_timer_, &QTimer::timeout, this, &SpecificWorker::predict_publish_tick);
+    predict_timer_->start(std::max(1, params.PREDICT_PUBLISH_PERIOD_MS));
+
     restore_window_settings();
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+// Compute the RT publish rate over a ~1 s window and show it in the custom widget (corrected +
+// predicted blocks/s). Counters accumulate every compute tick; the readout refreshes once per second.
+// The widget write is done only on the GUI thread (Qt requirement); counters still reset so the rate
+// stays a true 1 s average.
+void SpecificWorker::update_rt_rate_readout(std::int64_t now_ms, bool on_gui_thread)
+{
+    if (rt_rate_window_start_ms_ == 0)
+    {
+        rt_rate_window_start_ms_ = now_ms;
+        return;
+    }
+    const std::int64_t elapsed = now_ms - rt_rate_window_start_ms_;
+    if (elapsed < 1000)
+        return;
+
+    const float dt_s    = static_cast<float>(elapsed) * 0.001f;
+    const float corr_hz = static_cast<float>(rt_corr_count_) / dt_s;
+    const float pred_hz = static_cast<float>(rt_pred_count_) / dt_s;
+
+    // Optimizer timing (loc thread): processing rate, mean cost/update, and early-exit fraction —
+    // diagnoses whether localization is compute-bound (low Hz, high ms) and CUDA/window effects.
+    const auto opt = room_concept_.take_optimizer_timing();
+    const float opt_hz = static_cast<float>(opt.count) / dt_s;
+    const float ee_pct = (opt.count > 0)
+        ? 100.0f * static_cast<float>(opt.early_exits) / static_cast<float>(opt.count) : 0.0f;
+
+    if (on_gui_thread && viewer_)
+        viewer_->set_rt_rate_text(
+            QString("RT %1 Hz (corr %2 + pred %3) | opt %4 Hz  %5 ms/upd  ee %6%")
+                .arg(corr_hz + pred_hz, 0, 'f', 1)
+                .arg(corr_hz, 0, 'f', 1)
+                .arg(pred_hz, 0, 'f', 1)
+                .arg(opt_hz, 0, 'f', 1)
+                .arg(opt.avg_update_ms, 0, 'f', 1)
+                .arg(ee_pct, 0, 'f', 0));
+
+    rt_corr_count_ = 0;
+    rt_pred_count_ = 0;
+    rt_rate_window_start_ms_ = now_ms;
+}
+
+// High-rate predicted-pose publisher (own QTimer, ~PREDICT_PUBLISH_PERIOD_MS). Dead-reckons the
+// anchored corrected pose forward to NOW from the latest body velocity, grows the covariance, and
+// writes a predicted robot↔room block stamped at NOW so a recent capture interpolates instead of
+// clamping. Fires on this->thread() — the SAME thread compute() runs on — so the pred_* anchor set by
+// compute()'s CORRECT branch is read race-free. Decoupled from compute so the publish rate is
+// independent of the (heavier) viewer/compute cadence. No-op until a correction has anchored it.
+void SpecificWorker::predict_publish_tick()
+{
+    if (shutting_down_ || params.PRESERVE_BOOTSTRAP_ROOM || !params.PREDICT_PUBLISH_ENABLED)
+        return;
+    if (!pred_valid_ || !scene_graph_)
+        return;
+
+    const std::int64_t now_ms = QDateTime::currentMSecsSinceEpoch();
+    // Stop coasting if no correction for too long — the dead-reckoned pose (and its cov) would be
+    // meaningless; let the buffer go stale so consumers gate rather than trust a drifting prediction.
+    if (now_ms - pred_anchor_ms_ > static_cast<std::int64_t>(params.PREDICT_PUBLISH_MAX_COAST_S * 1000.f))
+        return;
+
+    const float dt = static_cast<float>(now_ms - pred_last_step_ms_) * 0.001f;
+    if (dt <= 0.f)
+        return;
+
+    pred_pose_ = room_concept_.predict_pose_forward(
+        pred_pose_, last_robot_adv_speed_, last_robot_side_speed_, last_robot_rot_speed_, dt);
+    pred_cov_(0, 0) += params.PREDICT_PROCESS_NOISE_XY    * dt;
+    pred_cov_(1, 1) += params.PREDICT_PROCESS_NOISE_XY    * dt;
+    pred_cov_(2, 2) += params.PREDICT_PROCESS_NOISE_THETA * dt;
+    pred_last_step_ms_ = now_ms;
+    scene_graph_->dsr_publish_predicted_pose(pred_pose_, pred_cov_, static_cast<std::uint64_t>(now_ms));
+    ++rt_pred_count_;
+}
+
 void SpecificWorker::compute()
 {
     const auto now_ms = QDateTime::currentMSecsSinceEpoch();
@@ -363,16 +445,35 @@ void SpecificWorker::compute()
     // Publish near the lidar rate (~60 ms) so the RT timestamped history is dense enough for
     // consumers to bracket a recent lidar-stamped query (e.g. the controller's overlay) instead of
     // clamping to a stale block. Steady RT updates on one edge — not join/leave churn — so low risk.
-    if (!params.PRESERVE_BOOTSTRAP_ROOM
-        && have_loc && loc_res->timestamp_ms > 0 && loc_res->timestamp_ms != last_dsr_published_ts_ms_
-        && (last_dsr_publish_try_ms_ == 0 || now_ms - last_dsr_publish_try_ms_ >= 60))
+    if (!params.PRESERVE_BOOTSTRAP_ROOM && have_loc)
     {
         section_timer.restart();
-        last_dsr_publish_try_ms_ = now_ms;
-        scene_graph_->update(*loc_res, last_robot_adv_speed_, last_robot_side_speed_, last_robot_rot_speed_);
-        last_dsr_published_ts_ms_ = loc_res->timestamp_ms;
+        const bool fresh_correction = loc_res->timestamp_ms > 0
+                                      && loc_res->timestamp_ms != last_dsr_published_ts_ms_;
+
+        if (fresh_correction
+            && (last_dsr_publish_try_ms_ == 0 || now_ms - last_dsr_publish_try_ms_ >= 60))
+        {
+            // CORRECT: publish the optimized pose (full update — room creation/affordance/cov) and
+            // re-anchor the dead-reckoning to it (the corrected pose is valid at its lidar stamp).
+            last_dsr_publish_try_ms_ = now_ms;
+            scene_graph_->update(*loc_res, last_robot_adv_speed_, last_robot_side_speed_, last_robot_rot_speed_);
+            last_dsr_published_ts_ms_ = loc_res->timestamp_ms;
+
+            pred_pose_          = loc_res->robot_pose;
+            pred_cov_           = loc_res->covariance;
+            pred_last_step_ms_  = loc_res->timestamp_ms;   // first predict integrates the lag gap
+            pred_anchor_ms_     = loc_res->timestamp_ms;
+            pred_valid_         = true;
+            ++rt_corr_count_;
+        }
+        // PREDICT runs on its own ~60 Hz QTimer (predict_publish_tick), decoupled from this 20 Hz
+        // compute loop / viewer cost — both fire on this->thread(), so pred_* access is race-free.
         t_dsr_ms = section_timer.elapsed();
     }
+
+    // Visual RT-rate monitor: refresh the custom-widget readout once per second (low freq, cheap).
+    update_rt_rate_readout(now_ms, on_gui_thread);
 
     if (on_gui_thread)
     {

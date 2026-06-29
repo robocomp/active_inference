@@ -215,7 +215,7 @@ FarPointsExponent    = 2.0   # α — exponente de la distancia.
                               #   Mayor α → gradiente dominado por puntos en paredes lejanas,
                               #   mejor precisión angular pero más sensible a puntos espurios.
 FarPointsMinWeight   = 0.1   # Floor de peso (evita anular puntos muy cercanos).
-UseCuda              = false   # Fallback automático a CPU si falla
+UseCuda              = true    # GPU (RTX 5070 Ti); auto-fallback a CPU si falla
 DebugLog             = false  # CSV → tmp/sdf_localizer/log.csv
 
 # ── Rerun (desactivado para timing limpio) ────────────────────────────────────

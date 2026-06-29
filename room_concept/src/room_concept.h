@@ -124,6 +124,7 @@ public:
         // GPU/CPU selection
         // Note: For small tensors (~200 points), CPU is faster due to GPU transfer overhead
         bool use_cuda = false;
+        bool optimizer_timing_csv = true;   // lean per-update timing CSV (etc/optimizer_timing.csv)
 
         // ===== Prediction-based Early Exit =====
         // If predicted pose already has low SDF error, skip optimization entirely
@@ -422,6 +423,23 @@ public:
     /// Thread-safe: get the latest UpdateResult (nullopt if not yet available).
     std::optional<UpdateResult> get_last_result() const;
 
+    /// Dead-reckon a room←robot pose forward by a constant body velocity (adv=forward, side=lateral,
+    /// rot=CCW, robot frame) over dt seconds, using the same midpoint-SE2 convention as
+    /// integrate_velocity_over_window. Pure/const — used for high-rate predict-publish between lidar
+    /// corrections. Returns the input pose unchanged if dt <= 0.
+    Eigen::Affine2f predict_pose_forward(const Eigen::Affine2f& pose,
+                                         float adv, float side, float rot, float dt) const;
+
+    /// Optimizer-timing telemetry accumulated on the localization thread since the last call.
+    struct OptTiming
+    {
+        std::uint32_t count       = 0;   // updates that ran (new lidar frames processed)
+        std::uint32_t early_exits = 0;   // of those, how many skipped Adam/LBFGS (prediction good)
+        double        avg_update_ms = 0.0;
+    };
+    /// Thread-safe: read AND RESET the optimizer-timing accumulators (call ~1 Hz from the UI).
+    OptTiming take_optimizer_timing();
+
     /// Thread-safe convenience: returns [half_w, half_h, x, y, theta] or zeros.
     Eigen::Matrix<float,5,1> get_loc_state() const;
 
@@ -660,6 +678,10 @@ private:
 
    // ===== Debug Logging (localization thread only — no mutex needed) =====
    std::ofstream      debug_log_;
+   // Lean per-update optimizer-timing CSV (loc-thread only; no lock). Captures the cost distribution
+   // and CUDA warmup curve. Opened lazily on the first update; gated by params.optimizer_timing_csv.
+   std::ofstream      opt_csv_;
+   bool               opt_csv_open_attempted_ = false;
    RerunLogger        rerun_logger_;
    int                rerun_frame_counter_ = 0;
    int                symmetry_check_counter_ = 0;
@@ -675,6 +697,10 @@ private:
    float              last_t_adam_ms_      = 0.f;
    float              last_t_cov_ms_       = 0.f;
    float              last_t_breakdown_ms_ = 0.f;
+   // Optimizer-timing telemetry (written on loc_thread_, drained by the worker via take_optimizer_timing).
+   std::atomic<std::uint32_t> opt_total_count_{0};
+   std::atomic<std::uint32_t> opt_earlyexit_count_{0};
+   std::atomic<std::uint64_t> opt_update_us_sum_{0};
    OdometryPrior      last_measured_prior_; // saved by apply_dual_prior_fusion for logging
     OdometryPrior      last_selected_prior_;
     MotionPriorSource  last_motion_prior_source_ = MotionPriorSource::None;

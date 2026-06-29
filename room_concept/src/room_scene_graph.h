@@ -64,11 +64,20 @@ public:
     // Controller peer lost: drop a stale execution claim so the room stays selectable.
     void on_controller_lost();
 
+    // High-rate predicted pose between lidar corrections (dead-reckoned room←robot estimate + grown
+    // cov + forward validity stamp). Writes ONLY the robot↔room RT edge — no room creation/affordance.
+    void dsr_publish_predicted_pose(const Eigen::Affine2f& robot_pose,
+                                    const Eigen::Matrix3f& covariance,
+                                    std::uint64_t timestamp_ms);
+
     [[nodiscard]] bool  room_node_created() const noexcept { return room_node_created_; }
     [[nodiscard]] std::uint64_t robot_id() const noexcept { return dsr_robot_id_; }
 
 private:
     void dsr_update_pose(const rc::RoomConcept::UpdateResult& res);
+    void write_robot_room_rt(const Eigen::Affine2f& robot_pose,
+                             const Eigen::Matrix3f& covariance,
+                             std::uint64_t timestamp_ms);
     void dsr_create_room_and_reparent(const rc::RoomConcept::UpdateResult& res);
     void dsr_update_affordance(const rc::RoomConcept::UpdateResult& res);
     void update_planner_obstacle_footprints();

@@ -74,6 +74,9 @@ public:
     // Free-energy / covariance time-series update.
     void update_ui(const std::optional<rc::RoomConcept::UpdateResult>& loc_res);
 
+    // Set the RT publish-rate readout shown in the custom widget (call ~1 Hz from the GUI thread).
+    void set_rt_rate_text(const QString& text);
+
     // Button actions.
     void show_camera();
     void toggle_lidar_points(bool checked);
@@ -92,6 +95,7 @@ private:
     rc::EpistemicController* epistemic_    = nullptr;
 
     QPointer<Custom_widget>      custom_widget_;
+    QPointer<QLabel>             rt_rate_label_;   // RT publish-rate readout in the controls row
     QPointer<rc::Viewer2D>       viewer_2d_;
     QPointer<rc::TimeSeriesPlot> ts_plot_fe_;
     std::unique_ptr<rc::CameraVisualizer> camera_viz_;

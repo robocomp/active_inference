@@ -61,6 +61,16 @@ struct RoomConfig
     // instead of deleting+recreating it, and do NOT write room pose / robot->room.
     bool  PRESERVE_BOOTSTRAP_ROOM = false;
 
+    // High-rate predict-publish: between ~5 Hz lidar corrections, dead-reckon the robot pose from
+    // odometry and publish PREDICTED robot↔room RT blocks (with a GROWING covariance) so consumers
+    // pinning to a recent capture stamp interpolate instead of clamping to a stale pose. Collapses the
+    // ~130 ms localization lag the voxelizer measured. Process-noise rates grow the cov while coasting.
+    bool  PREDICT_PUBLISH_ENABLED      = true;    // PredictPublish.enabled
+    int   PREDICT_PUBLISH_PERIOD_MS    = 16;      // target predicted-block spacing (~60 Hz)
+    float PREDICT_PUBLISH_MAX_COAST_S  = 1.0f;    // stop predicting if no correction for this long
+    float PREDICT_PROCESS_NOISE_XY     = 0.04f;   // (m/√s)² → variance growth m²/s on x,y
+    float PREDICT_PROCESS_NOISE_THETA  = 0.05f;   // (rad/√s)² → variance growth rad²/s on theta
+
     float room_height = 2.4f;  // m, room DSR node attribute
 
     // Debug bootstrap table hanging from the room node

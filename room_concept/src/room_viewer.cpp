@@ -37,6 +37,12 @@ RoomViewer::RoomViewer(DSR::DSRViewer* default_viewer,
     viewer_2d_->show();
     viewer_2d_->add_robot(params_->ROBOT_WIDTH, params_->ROBOT_LENGTH, 0.f, 0.f, QColor("blue"));
 
+    // RT publish-rate readout in the controls row (updated ~1 Hz from the worker's compute loop).
+    rt_rate_label_ = new QLabel(QStringLiteral("RT: --"), custom_widget_);
+    rt_rate_label_->setStyleSheet("QLabel { font-weight: bold; }");
+    if (custom_widget_->controlsLayout != nullptr)
+        custom_widget_->controlsLayout->addWidget(rt_rate_label_);
+
     // Self-driven 1 Hz object/obstacle BB overlay (GUI-thread timer; thread-safe, decoupled
     // from the compute loop). Objects render blue, obstacles red.
     viewer_2d_->start_semantic_bbox_overlay(graph, 1000);
@@ -151,6 +157,12 @@ void RoomViewer::update_epistemic_overlay()
         viewer_2d_->draw_selected_grid_cell(std::nullopt, planner.cell_size());
         viewer_2d_->update_target_marker(0.f, 0.f, false);
     }
+}
+
+void RoomViewer::set_rt_rate_text(const QString& text)
+{
+    if (rt_rate_label_)
+        rt_rate_label_->setText(text);
 }
 
 void RoomViewer::update_ui(const std::optional<rc::RoomConcept::UpdateResult>& loc_res)
