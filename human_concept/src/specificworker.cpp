@@ -143,7 +143,13 @@ void SpecificWorker::initialize()
             qInfo("[SM] -> Operating: all required peers present");
             remove_stale_affordance_nodes();
         },
-        .on_operating_loop = [this]() { compute(); },
+        .on_operating_loop = [this]()
+        {
+            compute();
+            // Feed the compute-loop FPS to the DSR main-window status bar (lower bar), like the other agents.
+            if (auto it = graph_viewers.find(""); it != graph_viewers.end() and it->second)
+                it->second->set_external_fps(states.at("Operating")->getActualFps());
+        },
         .on_degraded_enter = [this]()
         {
             if (shutting_down_) return;
