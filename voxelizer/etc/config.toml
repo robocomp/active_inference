@@ -65,13 +65,16 @@ accepted_labels = ["table", "chair", "monitor", "tv", "bottle"]
 mask_tray = true
 tray_mask_ref_width  = 1280
 tray_mask_ref_height = 720
-# Crescent polygon bounding the robot tray (flat x,y pairs, referenced to 1280×720).
-# Traces the outer arc from the left image-bottom intersection clockwise to the right,
-# then closes along the image bottom edge.  Adjust if the camera mount changes.
+# Flat-topped polygon bounding the robot tray (flat x,y pairs, referenced to 1280×720).
+# The real tray rim is nearly flat across the centre with rounded shoulders, NOT a
+# semicircle — the old crescent dipped below the flat rim at the centre-sides, leaving
+# tray pixels exposed → YOLO artifacts. This traces a flat plateau (y≈600 across the
+# central ±220 px) then rounds the shoulders down to the image bottom, then closes
+# along the bottom edge.  Adjust if the camera mount changes.
 tray_mask_polygon = [
-    195, 720,  230, 694,  286, 664,  353, 640,  428, 621,
-    510, 608,  596, 601,  640, 600,  684, 601,  770, 608,
-    852, 621,  927, 640,  994, 664, 1050, 694, 1086, 720,
+    195, 720,  242, 700,  298, 672,  358, 638,  420, 608,
+    480, 602,  560, 600,  640, 599,  720, 600,  800, 602,
+    860, 608,  922, 638,  982, 672, 1038, 700, 1086, 720,
     1280, 720,  0, 720
 ]
 
