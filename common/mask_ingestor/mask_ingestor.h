@@ -9,10 +9,22 @@
  *
  * Owns the parsed MasksPacket (and the last-seen frame guard); consumers read it read-only via
  * packet(). Plain class (no Q_OBJECT) constructed by SpecificWorker once G is ready.
+ *
+ * FRAME CONTRACT (this class IS the single agreement point with the voxelizer producer):
+ *   The producer dual-publishes mask support points, 1-to-1:
+ *     - "mask_support_points"      → ROOM frame  (default path here)
+ *     - "mask_support_points_cam"  → ZED/camera frame
+ *   Frame is chosen PER CONSUMER, here, not at the producer:
+ *     - default            → read room-frame points as-is  (table_concept, chair_concept)
+ *     - enable_frame_transform(...) → read the _cam points, transform src→target via inner_eigen
+ *       pinned to the capture stamp, and RECOMPUTE per-slice centroids/bboxes in the target frame
+ *       (bottle_concept). No *_cam centroid/bbox attribute exists or is needed for this reason.
+ *   Both producer arrays must keep existing; switching everyone to one frame is NOT a producer change.
  */
 
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -42,6 +54,13 @@ public:
         std::size_t support_end = 0;
         std::size_t pixel_begin = 0;   // raw 2D mask pixel range (into MasksPacket::mask_pixels)
         std::size_t pixel_end = 0;
+        // Ego-motion capture-corruption channel (see ../MASK_MOTION_CORRUPTION.md). Per-mask, written by
+        // the voxelizer producer; 0 when the producer predates the feature (backward-compatible).
+        float motion_var      = 0.0f;  // variance to ADD to R (m²): exposure blur + timing jitter, ×peripheral
+        float motion_bias     = 0.0f;  // systematic displacement from a known timing offset (m) → GATE if large
+        float motion_dotd     = 0.0f;  // metric position-corruption speed Z·‖ṡ‖ (m/s), diagnostic
+        float trunc_frac      = 0.0f;  // fraction of silhouette pixels on the image border → unobserved face
+        float centroid_radius = 0.0f;  // normalised centroid radius from the principal point (periphery)
     };
 
     struct MasksPacket
@@ -52,6 +71,9 @@ public:
         std::vector<MaskSlice> slices;
         std::vector<Eigen::Vector3f> support_points;
         std::vector<Eigen::Vector2f> mask_pixels;   // raw YOLO foreground (col,row), depth-independent
+        // Per-frame ego-motion (optical frame), written by the producer; empty/0 if absent.
+        std::array<float, 6> cam_twist{};   // [vx,vy,vz,wx,wy,wz]
+        float                frame_dt_s = 0.0f;
     };
 
     explicit MaskIngestor(std::shared_ptr<DSR::DSRGraph> graph);

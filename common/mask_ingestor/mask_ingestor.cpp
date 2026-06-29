@@ -56,6 +56,14 @@ bool MaskIngestor::refresh()
     const DSR::Attribute* bbox_max_attr = find_attr("mask_bbox_max_xyz");
     const DSR::Attribute* pixels_attr = find_attr("mask_pixels_xy");
     const DSR::Attribute* pixel_offsets_attr = find_attr("mask_pixel_offsets");
+    // Ego-motion capture-corruption channel (optional; newer producers only) — see MASK_MOTION_CORRUPTION.md
+    const DSR::Attribute* motion_var_attr      = find_attr("mask_motion_var");
+    const DSR::Attribute* motion_bias_attr     = find_attr("mask_motion_bias");
+    const DSR::Attribute* motion_dotd_attr     = find_attr("mask_motion_dotd");
+    const DSR::Attribute* trunc_frac_attr      = find_attr("mask_trunc_frac");
+    const DSR::Attribute* centroid_radius_attr = find_attr("mask_centroid_radius");
+    const DSR::Attribute* cam_twist_attr       = find_attr("mask_cam_twist");
+    const DSR::Attribute* frame_dt_attr        = find_attr("mask_frame_dt_s");
 
     if (frame_attr == nullptr || count_attr == nullptr || labels_attr == nullptr ||
         label_ids_attr == nullptr || confs_attr == nullptr || offsets_attr == nullptr ||
@@ -82,6 +90,11 @@ bool MaskIngestor::refresh()
     static const std::vector<float> empty_flat;
     const auto& pixels_flat  = pixels_attr        ? pixels_attr->float_vec()        : empty_flat;
     const auto& pixel_offsets = pixel_offsets_attr ? pixel_offsets_attr->float_vec() : empty_flat;
+    const auto& motion_var_v      = motion_var_attr      ? motion_var_attr->float_vec()      : empty_flat;
+    const auto& motion_bias_v     = motion_bias_attr     ? motion_bias_attr->float_vec()     : empty_flat;
+    const auto& motion_dotd_v     = motion_dotd_attr     ? motion_dotd_attr->float_vec()     : empty_flat;
+    const auto& trunc_frac_v      = trunc_frac_attr      ? trunc_frac_attr->float_vec()      : empty_flat;
+    const auto& centroid_radius_v = centroid_radius_attr ? centroid_radius_attr->float_vec() : empty_flat;
 
     // Part B: with frame-transform enabled, source the camera-frame support array and transform it to
     // the target frame below; otherwise use the legacy room-frame array as-is.
@@ -108,6 +121,9 @@ bool MaskIngestor::refresh()
     packet.valid = true;
     packet.frame_id = frame_id;
     packet.timestamp_ms = ts_attr ? ts_attr->uint64() : 0;   // 0 → consumer falls back to latest pose
+    if (cam_twist_attr and cam_twist_attr->float_vec().size() >= 6)
+        for (int k = 0; k < 6; ++k) packet.cam_twist[k] = cam_twist_attr->float_vec()[k];
+    packet.frame_dt_s = frame_dt_attr ? frame_dt_attr->fl() : 0.0f;
 
     // src→tgt transform (Part B): one matrix for the whole frame, pinned to the capture stamp. Built
     // element-wise to dodge the Eigen-alignment ABI trap. Identity fallback if the chain isn't ready
@@ -159,6 +175,13 @@ bool MaskIngestor::refresh()
             slice.class_id = label_ids[static_cast<std::size_t>(i)];
         if (static_cast<std::size_t>(i) < confidences.size())
             slice.confidence = confidences[static_cast<std::size_t>(i)];
+        const auto fetch1 = [&](const std::vector<float>& v) -> float
+        { return static_cast<std::size_t>(i) < v.size() ? v[static_cast<std::size_t>(i)] : 0.0f; };
+        slice.motion_var      = fetch1(motion_var_v);
+        slice.motion_bias     = fetch1(motion_bias_v);
+        slice.motion_dotd     = fetch1(motion_dotd_v);
+        slice.trunc_frac      = fetch1(trunc_frac_v);
+        slice.centroid_radius = fetch1(centroid_radius_v);
         slice.support_begin = clamped_begin;
         slice.support_end = clamped_end;
         {

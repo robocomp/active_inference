@@ -68,6 +68,11 @@ struct TrackView
     Eigen::Vector2f xy  = Eigen::Vector2f::Zero();   // current/predicted centre (room frame)
     Eigen::Matrix2f cov = Eigen::Matrix2f::Identity();
     bool            has_cov = false;                 // false → use the metric fallback gate
+    // Negative-information gate for DEATH: only accrue an unsupported "miss" when the object SHOULD be
+    // visible (inside the camera frustum, not behind it) yet wasn't detected — that is real evidence it
+    // was removed. Out-of-FoV absence is NOT evidence: with expected_visible=false the miss timer is
+    // HELD, so the instance persists. Default true = legacy (every unsupported frame counts).
+    bool            expected_visible = true;
 };
 
 // One incoming detection (the agent's mask slice). slice_index maps the assignment back to the packet.
@@ -141,12 +146,15 @@ public:
             trk_used[p.trk] = true;
         }
 
-        // ── 3. DEATH: a track that got no detection this cycle accrues misses; retire past death_frames
+        // ── 3. DEATH: a track unsupported WHILE it should be visible accrues misses; retire past
+        //        death_frames. If it is NOT expected_visible (out of the camera frustum), the miss
+        //        timer is HELD — out-of-FoV absence is not evidence of removal, so it persists.
         std::unordered_map<std::uint64_t, int> next_miss;
         for (int t = 0; t < static_cast<int>(tracks.size()); ++t)
         {
             const std::uint64_t id = tracks[t].id;
             if (trk_used[t]) { next_miss[id] = 0; continue; }
+            if (not tracks[t].expected_visible) { next_miss[id] = miss_count_[id]; continue; }   // hold
             const int miss = miss_count_[id] + 1;
             if (miss >= params_.death_frames) out.deaths.push_back(id);
             else                              next_miss[id] = miss;

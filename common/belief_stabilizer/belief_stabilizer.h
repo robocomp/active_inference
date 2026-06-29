@@ -58,6 +58,9 @@ struct StabilizerParams
     float info_peak_ema         = 0.30f;  // EMA weight folding a new high obs into the bar (0 = frozen bar, 1 = raw max)
     float process_std_len       = 0.005f; // info-filter predict process-noise std per fresh frame, length DOFs (m)
     float process_std_ang       = 0.01f;  // …for the periodic (yaw) DOF (rad)
+    float process_std_pos       = -1.0f;  // …for the POSITION DOFs (is_position); <0 ⇒ use process_std_len.
+                                          // A static object's centre barely moves frame-to-frame, so a small
+                                          // value lets position precision accumulate → its gain → 0 (locks).
 
     // Confidence (YOLO score) weighting: w = clamp01((conf−floor)/(ref−floor))^power, applied to obs info.
     bool  mask_conf_weight = true;
@@ -278,7 +281,13 @@ public:
 private:
     float process_q(int j) const
     {
-        const float std = (j == layout_.yaw_index) ? params_.process_std_ang : params_.process_std_len;
+        float std;
+        if (j == layout_.yaw_index)
+            std = params_.process_std_ang;
+        else if (j >= 0 and j < N and layout_.is_position[j] and params_.process_std_pos >= 0.0f)
+            std = params_.process_std_pos;   // static-centre: small Q ⇒ precision accumulates ⇒ position locks
+        else
+            std = params_.process_std_len;
         return std * std;
     }
 

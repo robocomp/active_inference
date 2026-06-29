@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <vector>
 #include <Eigen/Dense>
 
@@ -25,11 +26,14 @@ class CVFilter
 {
 public:
     // accel_std: how fast velocity can change (m/s² std) → process noise. init_vel_std: 1-σ on the
-    // initial (unknown) velocity (m/s).
-    void configure(double accel_std, double init_vel_std)
+    // initial (unknown) velocity (m/s). max_pos_std: cap on the per-axis position σ during predict — keeps
+    // the association/innovation gate from loosening without bound across a long dropout (which would let
+    // a far/other-object measurement get accepted and the track jump). 0 = no cap.
+    void configure(double accel_std, double init_vel_std, double max_pos_std = 0.0)
     {
         accel_var_    = accel_std * accel_std;
         init_vel_var_ = init_vel_std * init_vel_std;
+        max_pos_var_  = max_pos_std * max_pos_std;
     }
 
     bool   initialized() const { return init_; }
@@ -68,7 +72,51 @@ public:
             P_[a](0, 1) = p01 + dt * p11 + q12;
             P_[a](1, 0) = p10 + dt * p11 + q12;
             P_[a](1, 1) = p11 + q22;
+            if (max_pos_var_ > 0.0 and P_[a](0, 0) > max_pos_var_)
+                P_[a](0, 0) = max_pos_var_;   // bound the gate from loosening across a dropout
         }
+    }
+
+    // Gated correct: reject the measurement as an OUTLIER if its squared Mahalanobis innovation
+    // (summed over axes, vs S = P + R) exceeds `gate` (χ² with `size()` DOF). Returns true if accepted
+    // (and corrected), false if rejected (belief left at the prediction). Stops a jumpy partial-mask
+    // centroid from flinging the track. gate <= 0 disables the test.
+    bool correct_gated(const std::vector<double>& z, const std::vector<double>& meas_var, double gate)
+    {
+        if (not init_)
+        {
+            init(z, meas_var);
+            return true;
+        }
+        if (gate > 0.0)
+        {
+            double m2 = 0.0;
+            for (std::size_t a = 0; a < pos_.size(); ++a)
+            {
+                const double S = P_[a](0, 0) + meas_var[a];
+                if (S > 0.0)
+                {
+                    const double y = z[a] - pos_[a];
+                    m2 += y * y / S;
+                }
+            }
+            if (m2 > gate)
+                return false;   // outlier — keep the prediction, do not correct
+        }
+        correct(z, meas_var);
+        return true;
+    }
+
+    void clamp_velocity(double vmax)
+    {
+        for (auto& v : vel_)
+            v = std::clamp(v, -vmax, vmax);
+    }
+
+    void reset_velocity()   // stop coasting (e.g. when the detection is lost)
+    {
+        for (auto& v : vel_)
+            v = 0.0;
     }
 
     // Standard 1-D KF update per axis, H = [1, 0].
@@ -101,6 +149,7 @@ private:
     std::vector<Eigen::Matrix2d> P_;
     double accel_var_    = 0.25;   // (0.5 m/s²)²
     double init_vel_var_ = 1.0;    // (1 m/s)²
+    double max_pos_var_  = 0.0;    // cap on per-axis position variance during predict (0 = none)
     bool   init_ = false;
 };
 
