@@ -131,6 +131,14 @@ public:
     /// visible. For a rotate-in-place recovery, pass robot_pos().
     float live_epistemic_gain(const Eigen::Vector2f& viewpoint) const;
 
+    /// TOTAL epistemic gain advertised on afford_room = pose-FIM ΔH (nats, self-extinguishing
+    /// once localized) + w_map · expected occupancy-entropy reduction (NON-saturating: stays
+    /// positive until the room interior is COVERED, not just localized). Mirrors the selection
+    /// currency in evaluate_targets so the published gain matches how targets are ranked. With
+    /// w_map=0 this reduces exactly to live_epistemic_gain (legacy behaviour). Use this as the
+    /// published gain so exploration does not stall the moment the pose covariance tightens.
+    float live_total_epistemic_gain(const Eigen::Vector2f& viewpoint) const;
+
     /// Called every plan cycle.  Returns the current navigation target,
     /// handling dwell and arrival logic internally.  Returns std::nullopt
     /// only when no valid target can be found.

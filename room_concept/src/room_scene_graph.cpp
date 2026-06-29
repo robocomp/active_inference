@@ -351,11 +351,14 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
     // same currency as afford_table's ΔH so the controller can compare them as one EFE term.
     //
     // Recompute LIVE against the current pose precision (do not reuse the value frozen at target
-    // selection): as the robot drives in and localization tightens, Y_prior grows ⇒ ΔH decays
-    // toward 0, falling through the consumer's withdrawal threshold and releasing the claim. The
-    // recompute at target_opt->position also gives the rotate-in-place recovery a real gain (its
-    // position is robot_pos), which the frozen eigenvector_score left at 0.
-    const float gain = planner.live_epistemic_gain(target_opt->position);
+    // selection): as the robot drives in and localization tightens, Y_prior grows ⇒ the pose-FIM
+    // part decays toward 0. We publish the TOTAL gain (pose-FIM ΔH + w_map·occupancy-entropy ΔH):
+    // the occupancy term is NON-saturating, so once the pose is localized the advertised gain stays
+    // positive until the room interior is actually COVERED — otherwise it would fall through the
+    // consumer's withdrawal threshold the instant localization tightens and the robot would stop
+    // exploring after a single affordance. With w_map=0 this is exactly the legacy FIM-only gain.
+    // The recompute at target_opt->position also gives the rotate-in-place recovery a real gain.
+    const float gain = planner.live_total_epistemic_gain(target_opt->position);
 
     // Heading: face toward room centre so the robot maximises wall/corner visibility
     const float cx  = (planner.room_min().x() + planner.room_max().x()) * 0.5f;

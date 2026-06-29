@@ -225,6 +225,17 @@ float EpistemicPlanner::live_epistemic_gain(const Eigen::Vector2f& viewpoint) co
     return score_fim_gain(viewpoint, current_prior_precision());
 }
 
+float EpistemicPlanner::live_total_epistemic_gain(const Eigen::Vector2f& viewpoint) const
+{
+    const float fim_gain = live_epistemic_gain(viewpoint);
+    // Non-saturating exploration term: expected occupancy-entropy resolved by a scan from this
+    // vantage. Same combination as evaluate_targets (t.score), so the advertised gain tracks the
+    // ranking. 0 once the cell is covered → the total still decays to 0 when the room is DONE.
+    const float map_gain = (params.w_map > 0.f && occ_.configured())
+                           ? occ_.expected_info_gain(viewpoint) : 0.f;
+    return fim_gain + params.w_map * map_gain;
+}
+
 // ===========================================================================
 // evaluate_targets — FIM-based D-optimality scoring + cell score cache
 // ===========================================================================
