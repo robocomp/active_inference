@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <fstream>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -43,7 +44,9 @@ public:
     void configure(DSR::InnerEigenAPI* inner_eigen_api,
                    rc::VoxelOpenGLViewer* voxel_viewer,
                    bool transforms_interpolate_rt,
-                   bool verbose_debug);
+                   bool verbose_debug,
+                   bool mask_pose_extrapolate,
+                   float mask_pose_extrap_max_dt_s);
 
     // Media plane (zero-copy DDS): RGBD pixels arrive here instead of via the DSR
     // graph. Camera intrinsics (focal) are still read from the static 'zed' node.
@@ -134,11 +137,26 @@ private:
     rc::VoxelOpenGLViewer* voxel_viewer_ = nullptr;
     bool transforms_interpolate_rt_ = true;
     bool verbose_debug_ = false;
+    bool mask_pose_extrapolate_ = true;       // extrapolate robot pose to capture stamp via RT-edge velocity
+    float mask_pose_extrap_max_dt_s_ = 0.2f;  // clamp the extrapolation horizon
+    // Diagnostic CSV (etc/pose_extrap_log.csv): raw vs extrapolated pose + dt/velocity/displacement, so
+    // the extrapolation magnitude (= the mask lag-bias being cancelled) can be analysed. Opened lazily.
+    std::ofstream pose_extrap_csv_;
+    bool          pose_extrap_csv_open_attempted_ = false;
     bool room_ready_logged_ = false;
     bool room_wait_logged_ = false;
     bool room_rt_ready_logged_ = false;
     bool room_rt_wait_logged_ = false;
     int polygon_check_count_ = 0;
+
+    // Viewer-only EMA on the displayed robot pose. The RT edge now carries room_concept's 60 Hz
+    // dead-reckoned predict-publish; reading its leading edge (ts=0) at the render-tick rate shows the
+    // raw prediction noise + correction snaps → jitter. A short time-constant low-pass smooths the
+    // DISPLAY without touching the mask pipeline (which queries its own capture-time pose).
+    bool  robot_disp_sm_init_ = false;
+    float robot_disp_sm_x_ = 0.f, robot_disp_sm_y_ = 0.f, robot_disp_sm_theta_ = 0.f;
+    std::chrono::steady_clock::time_point robot_disp_sm_last_ = std::chrono::steady_clock::now();
+
     std::chrono::steady_clock::time_point input_stream_watchdog_start_ = std::chrono::steady_clock::now();
     mutable std::mutex node_names_mutex_;
     std::string room_node_name_;

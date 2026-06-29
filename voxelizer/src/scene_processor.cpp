@@ -237,12 +237,16 @@ std::optional<SceneProcessor::LidarData> SceneProcessor::get_lidar3D()
 void SceneProcessor::configure(DSR::InnerEigenAPI* inner_eigen_api,
                                rc::VoxelOpenGLViewer* voxel_viewer,
                                bool transforms_interpolate_rt,
-                               bool verbose_debug)
+                               bool verbose_debug,
+                               bool mask_pose_extrapolate,
+                               float mask_pose_extrap_max_dt_s)
 {
     inner_eigen_api_ = inner_eigen_api;
     voxel_viewer_ = voxel_viewer;
     transforms_interpolate_rt_ = transforms_interpolate_rt;
     verbose_debug_ = verbose_debug;
+    mask_pose_extrapolate_ = mask_pose_extrapolate;
+    mask_pose_extrap_max_dt_s_ = mask_pose_extrap_max_dt_s;
 }
 
 std::pair<std::string, std::string> SceneProcessor::get_room_robot_names_for_compute()
@@ -348,6 +352,70 @@ std::optional<Mat::RTMat> SceneProcessor::get_room_robot_transform(FPSCounter& c
         if (verbose_debug_)
             compute_fps.print("[Compute]", 2000);
         return std::nullopt;
+    }
+
+    // DSR's InterpolatedRT clamps the pose to the newest RT block, which lags the camera capture stamp
+    // by ~100 ms — so masks would deproject against a stale robot pose. Extrapolate the pose FORWARD to
+    // the capture stamp using the body-frame velocity room_concept writes on the robot→room RT edge
+    // (rt_translation_velocity=[adv,side,0], rt_rotation_euler_xyz_velocity=[0,0,rot]). Consumer-side,
+    // no producer rate change — the same efference-copy trick the controller uses for its overlay.
+    if (mask_pose_extrapolate_ && graph_ && graph_->get_rt_api())
+    {
+        const auto robot_node = graph_->get_node(robot_name);
+        const auto room_node  = graph_->get_node(room_name);
+        if (robot_node.has_value() && room_node.has_value())
+        {
+            if (auto edge = graph_->get_rt_api()->get_edge_RT(robot_node.value(), room_node.value().id());
+                edge.has_value())
+            {
+                const auto ts = graph_->get_attrib_by_name<rt_timestamps_att>(edge.value());
+                const auto tv = graph_->get_attrib_by_name<rt_translation_velocity_att>(edge.value());
+                const auto rv = graph_->get_attrib_by_name<rt_rotation_euler_xyz_velocity_att>(edge.value());
+                if (ts.has_value() && tv.has_value() && tv->get().size() >= 2
+                    && rv.has_value() && rv->get().size() >= 3)
+                {
+                    std::uint64_t newest = 0;
+                    for (const auto t : ts->get())
+                        newest = std::max(newest, t);
+                    if (newest > 0 && timestamp_ms > newest)
+                    {
+                        float dt = static_cast<float>(timestamp_ms - newest) * 1e-3f;
+                        dt = std::min(dt, mask_pose_extrap_max_dt_s_);
+                        const double adv = tv->get()[0], side = tv->get()[1], rot = rv->get()[2];
+                        auto& T = room_T_robot.value();
+                        const Eigen::Matrix3d R = T.linear();
+                        const double th  = std::atan2(R(1, 0), R(0, 0));
+                        const double raw_x = T.translation().x(), raw_y = T.translation().y();
+                        const double dth = rot * dt;
+                        const double thm = th + 0.5 * dth;   // midpoint integration
+                        const double dx = (adv * std::cos(thm) - side * std::sin(thm)) * dt;
+                        const double dy = (adv * std::sin(thm) + side * std::cos(thm)) * dt;
+                        T.translation().x() += dx;
+                        T.translation().y() += dy;
+                        T.linear() = (Eigen::AngleAxisd(dth, Eigen::Vector3d::UnitZ()).toRotationMatrix() * R);
+
+                        // Log raw vs extrapolated pose + dt/velocity/displacement for analysis.
+                        if (!pose_extrap_csv_open_attempted_)
+                        {
+                            pose_extrap_csv_open_attempted_ = true;
+                            pose_extrap_csv_.open("etc/pose_extrap_log.csv", std::ios::out | std::ios::trunc);
+                            if (pose_extrap_csv_.is_open())
+                                pose_extrap_csv_ << "frame_ts_ms,newest_block_ms,dt_s,adv,side,rot,"
+                                                    "raw_x,raw_y,raw_th,ext_x,ext_y,ext_th,disp_m,dtheta_rad\n";
+                        }
+                        if (pose_extrap_csv_.is_open())
+                        {
+                            pose_extrap_csv_ << timestamp_ms << ',' << newest << ',' << dt << ','
+                                             << adv << ',' << side << ',' << rot << ','
+                                             << raw_x << ',' << raw_y << ',' << th << ','
+                                             << (raw_x + dx) << ',' << (raw_y + dy) << ',' << (th + dth) << ','
+                                             << std::hypot(dx, dy) << ',' << dth << '\n';
+                            pose_extrap_csv_.flush();
+                        }
+                    }
+                }
+            }
+        }
     }
 
     return room_T_robot;
@@ -1080,8 +1148,37 @@ void SceneProcessor::update_viewer_robot_pose(const Mat::RTMat& room_T_robot)
         return;
     const auto& t = room_T_robot.translation();
     const Eigen::Matrix3d R = room_T_robot.rotation();
-    const float theta = static_cast<float>(std::atan2(R(1, 0), R(0, 0)));
-    voxel_viewer_->set_robot_pose(static_cast<float>(t.x()), static_cast<float>(t.y()), theta);
+    const float tx = static_cast<float>(t.x());
+    const float ty = static_cast<float>(t.y());
+    const float ttheta = static_cast<float>(std::atan2(R(1, 0), R(0, 0)));
+
+    // Time-constant EMA (rate-independent: works whether fed at the 60 Hz render tick or 16 Hz frame
+    // path). tau ≈ correction interval so prediction noise / correction snaps are averaged out while
+    // real motion still tracks with only ~tau of display lag. tau <= 0 would disable smoothing.
+    constexpr float kTauS = 0.12f;
+    if (not robot_disp_sm_init_)
+    {
+        robot_disp_sm_x_ = tx;
+        robot_disp_sm_y_ = ty;
+        robot_disp_sm_theta_ = ttheta;
+        robot_disp_sm_last_ = std::chrono::steady_clock::now();
+        robot_disp_sm_init_ = true;
+    }
+    else
+    {
+        const auto now = std::chrono::steady_clock::now();
+        const float dt = std::chrono::duration<float>(now - robot_disp_sm_last_).count();
+        robot_disp_sm_last_ = now;
+        const float alpha = (kTauS > 0.f and dt > 0.f) ? (1.f - std::exp(-dt / kTauS)) : 1.f;
+        robot_disp_sm_x_ += alpha * (tx - robot_disp_sm_x_);
+        robot_disp_sm_y_ += alpha * (ty - robot_disp_sm_y_);
+        // Wrap the angle delta into (-π, π] before blending so it smooths across the ±π seam.
+        float dth = ttheta - robot_disp_sm_theta_;
+        while (dth >  static_cast<float>(M_PI)) dth -= 2.f * static_cast<float>(M_PI);
+        while (dth < -static_cast<float>(M_PI)) dth += 2.f * static_cast<float>(M_PI);
+        robot_disp_sm_theta_ += alpha * dth;
+    }
+    voxel_viewer_->set_robot_pose(robot_disp_sm_x_, robot_disp_sm_y_, robot_disp_sm_theta_);
 }
 
 void SceneProcessor::refresh_viewer_robot_pose_latest()

@@ -73,6 +73,13 @@ struct VoxelizerParams
     // static, spikes on pan). Default ON during bring-up; turn off in production. MaskMotion.csv_log
     bool        MASK_MOTION_CSV_LOG        = true;
 
+    // Extrapolate the robot pose to the camera CAPTURE stamp using the body-frame velocity on the
+    // robot→room RT edge. DSR's InterpolatedRT clamps to the newest block (poses lag the camera by
+    // ~100 ms), so masks deproject against a stale pose; this fills that residual lag at the consumer
+    // (efference-copy applied to perception) — no producer rate change. MaskMotion.pose_extrapolate
+    bool        MASK_POSE_EXTRAPOLATE      = true;
+    float       MASK_POSE_EXTRAP_MAX_DT_S  = 0.2f;   // clamp the extrapolation horizon (s)
+
     // Human-pose branch (yolo_human): a second YOLO-pose model on the same RGB frame, published as
     // BODY_18 3D skeletons (camera frame) on the 'skeleton' node for human_concept. Default OFF.
     bool        HUMAN_POSE_ENABLED      = false;            // HumanPose.enabled

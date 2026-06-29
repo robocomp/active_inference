@@ -188,7 +188,8 @@ void SpecificWorker::initialize()
     inner_eigen_api = G->get_inner_eigen_api();
     scene_processor = std::make_unique<SceneProcessor>(G);
     scene_processor->configure(inner_eigen_api.get(), voxel_viewer_gl.get(),
-                               params.TRANSFORMS_INTERPOLATE_RT, verbose_debug_);
+                               params.TRANSFORMS_INTERPOLATE_RT, verbose_debug_,
+                               params.MASK_POSE_EXTRAPOLATE, params.MASK_POSE_EXTRAP_MAX_DT_S);
     scene_processor->init_media_plane(static_cast<std::uint32_t>(params.MEDIA_DOMAIN_ID),
                                       params.MEDIA_RGB_TOPIC, params.MEDIA_DEPTH_TOPIC);
     scene_processor->init_lidar_media_plane(static_cast<std::uint32_t>(params.MEDIA_DOMAIN_ID),
