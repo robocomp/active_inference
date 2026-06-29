@@ -276,6 +276,17 @@ void SpecificWorker::initialize()
 
 	QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
 	                 this, &SpecificWorker::request_shutdown, Qt::UniqueConnection);
+
+	// One-shot radial (twopi) relayout once the bootstrap graph has been ingested
+	// by the viewer, so the DSR tree is well organized in the UI at startup.
+	// Delayed on the main-thread event loop so it runs after the initial node/edge
+	// update signals have been processed (graph access stays on the main thread).
+	QTimer::singleShot(1500, this, [this]()
+	{
+		if (shutting_down_.load())
+			return;
+		trigger_graph_layout_twopi();
+	});
 }
 
 void SpecificWorker::compute()
@@ -742,6 +753,37 @@ void SpecificWorker::FullPoseEstimationPub_newFullPose(RoboCompFullPoseEstimatio
 	if (shutting_down_.load())
 		return;
 
+	// --- measured ingress rate of this Ice slot (real wall-clock freq) ---
+	// Ice may dispatch this callback from a thread pool, so guard the stats.
+	{
+		static std::mutex rate_mtx;
+		static std::chrono::steady_clock::time_point last_log{};
+		static std::chrono::steady_clock::time_point last_call{};
+		static double freq_hz = 0.0;   // EMA of instantaneous rate
+		static unsigned long calls = 0;
+		const auto now = std::chrono::steady_clock::now();
+		std::lock_guard lk(rate_mtx);
+		if (last_call.time_since_epoch().count() != 0)
+		{
+			const double dt = std::chrono::duration<double>(now - last_call).count();
+			if (dt > 1e-6)
+			{
+				const double inst = 1.0 / dt;
+				freq_hz = (freq_hz == 0.0) ? inst : 0.9 * freq_hz + 0.1 * inst;
+			}
+		}
+		last_call = now;
+		++calls;
+		if (last_log.time_since_epoch().count() == 0)
+			last_log = now;
+		else if (now - last_log >= std::chrono::seconds(5))
+		{
+			std::cout << "[FullPoseEstimationPub_newFullPose] ingress " << freq_hz
+			          << " Hz (EMA), " << calls << " calls total" << std::endl;
+			last_log = now;
+		}
+	}
+
 	// we do not add any noise here. It is up to the users.
 	if (auto pose_node = G->get_node(robot_name); pose_node.has_value())
 	{
@@ -749,7 +791,9 @@ void SpecificWorker::FullPoseEstimationPub_newFullPose(RoboCompFullPoseEstimatio
 		G->add_or_modify_attrib_local<robot_current_side_speed_att>(pose_node.value(), pose.side);
 		G->add_or_modify_attrib_local<robot_current_angular_speed_att>(pose_node.value(), pose.rot);
 		G->add_or_modify_attrib_local<robot_current_speed_timestamp_att>(pose_node.value(), static_cast<unsigned long>(pose.timestamp));
-		G->update_node(pose_node.value());
+		// pose_node is not read after this; move it so update_node forwards
+		// the rvalue into the engine (no deep blob copy under the graph mutex).
+		G->update_node(std::move(pose_node.value()));
 	}
 	else if (!shutting_down_.load())
 		qWarning() << "FullPose node not found in DSR graph";
