@@ -475,8 +475,12 @@ void SpecificWorker::compute()
         const bool fresh_correction = loc_res->timestamp_ms > 0
                                       && loc_res->timestamp_ms != last_dsr_published_ts_ms_;
 
+        // Publish EVERY fresh correction (fresh_correction already gates to the optimizer's new-frame
+        // rate). The throttle is only a small anti-burst floor (15 ms ≪ compute period) — the previous
+        // 60 ms throttle interacted with the 50 ms compute period to drop every other correction,
+        // quantizing the corrected stream to 10 Hz even though the optimizer runs ~19 Hz.
         if (fresh_correction
-            && (last_dsr_publish_try_ms_ == 0 || now_ms - last_dsr_publish_try_ms_ >= 60))
+            && (last_dsr_publish_try_ms_ == 0 || now_ms - last_dsr_publish_try_ms_ >= 15))
         {
             // CORRECT: publish the optimized pose (full update — room creation/affordance/cov) and
             // re-anchor the dead-reckoning to it (the corrected pose is valid at its lidar stamp).
