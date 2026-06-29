@@ -36,6 +36,9 @@ struct VoxelizerParams
         {852, 621}, {927, 640}, {994, 664}, {1050, 694}, {1086, 720},
         {1280, 720}, {0, 720}
     };
+    // Drop a detection whose ROI intersects the tray when the overlap covers ≥ this fraction of the
+    // bbox. 0 ⇒ drop on ANY intersection (Yolo.tray_drop_fraction).
+    float       YOLO_TRAY_DROP_FRACTION = 0.0f;
     float       TRACK_ASSOCIATION_MAX_DISTANCE_M = 0.7f;
     int         TRACK_MAX_MISSED_FRAMES          = 10;
     std::size_t VOXEL_VIEWER_MAX_RENDERED_VOXELS = 30'000;
@@ -57,6 +60,18 @@ struct VoxelizerParams
     // leaves behind, while the dense object body survives. <= 0 disables.
     float       MASK_OUTLIER_RADIUS_M            = 0.03f;
     int         MASK_OUTLIER_MIN_NEIGHBORS       = 4;
+
+    // Ego-motion mask-corruption annotation (saccadic-suppression / VOR producer side). When ON, the
+    // 'masks' node carries per-mask (dot_d, bias, variance, truncation, centroid radius) plus the
+    // capture-time camera twist, so a consumer can downweight/gate masks taken while the camera moves.
+    // Pure annotation — consumers that ignore the attrs are unaffected. See common/motion_corruption.
+    bool        MASK_MOTION_ENABLED        = true;    // MaskMotion.enabled
+    float       MASK_MOTION_EXPOSURE_S     = 0.005f;  // MaskMotion.exposure_s  (T_exp, blur window)
+    float       MASK_MOTION_TIMING_JITTER_S = 0.010f; // MaskMotion.timing_jitter_s (σ_t, zero-mean)
+    float       MASK_MOTION_TIMING_OFFSET_S = 0.0f;   // MaskMotion.timing_offset_s (δt, known lag → bias)
+    // Diagnostic: append per-mask motion-corruption rows to etc/mask_motion_log.csv (verify dot_d≈0 when
+    // static, spikes on pan). Default ON during bring-up; turn off in production. MaskMotion.csv_log
+    bool        MASK_MOTION_CSV_LOG        = true;
 
     // Human-pose branch (yolo_human): a second YOLO-pose model on the same RGB frame, published as
     // BODY_18 3D skeletons (camera frame) on the 'skeleton' node for human_concept. Default OFF.

@@ -12,6 +12,8 @@
 
 #include "graph_publisher.h"
 
+#include "../../common/motion_corruption/motion_corruption.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -93,6 +95,27 @@ bool GraphPublisher::ensure_node(const char* name, const char* color, bool& read
     return true;
 }
 
+// FRAME CONTRACT — the 'masks' node is a SHARED contract read by every concept agent through ONE
+// component, common/mask_ingestor. Mask support points are DUAL-PUBLISHED, 1-to-1:
+//   * mask_support_points      → ROOM frame  (consumed by table_concept, chair_concept — default path)
+//   * mask_support_points_cam  → ZED/camera frame (consumed by bottle_concept via MaskIngestor's
+//                                enable_frame_transform: zed→target, capture-stamp pinned + chain cov)
+// Centroids/bboxes are published ROOM-frame only; the ingestor RECOMPUTES them in the target frame
+// when a consumer opts into the camera path, so no *_cam centroid/bbox is needed.
+// DO NOT drop either array: removing _cam breaks bottle_concept; removing the room arrays breaks
+// table/chair. Frame choice is per-consumer at the ingestor, never a producer-side switch.
+//
+// EGO-MOTION CORRUPTION ANNOTATION (MaskMotion.enabled, default on; common/motion_corruption):
+// while the camera moves, a mask is corrupted in a way the consumer can't reconstruct without the
+// capture-time twist/exposure/timing. The producer attaches the DECOMPOSITION; the consumer decides
+// gate-vs-downweight (per-concept b_max), per-DOF split, and folds the variance into its innovation cov.
+//   per-mask (1-to-1 with mask_label_ids):
+//     mask_motion_dotd     — metric position-corruption speed Z·‖ṡ‖ (m/s), diagnostic
+//     mask_motion_bias     — systematic displacement from a KNOWN timing offset (m) — GATE on this
+//     mask_motion_var      — variance to ADD to R (m²): exposure blur + timing jitter, ×peripheral
+//     mask_trunc_frac      — fraction of silhouette pixels on the image border (truncation → bias)
+//     mask_centroid_radius — normalized centroid radius from the principal point (periphery penalty)
+//   per-frame (global): mask_cam_twist [vx,vy,vz,wx,wy,wz] (OPTICAL frame) + mask_frame_dt_s.
 void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T_zed,
                                   const std::vector<SegDetection>& detections, std::uint64_t frame_ts_ms)
 {
@@ -123,6 +146,18 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
         G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_bbox_max_xyz", std::vector<float>{});
         G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_pixels_xy", std::vector<float>{});
         G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_pixel_offsets", std::vector<float>{0.0f});
+        if (params_.MASK_MOTION_ENABLED)
+        {
+            G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_motion_dotd", std::vector<float>{});
+            G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_motion_bias", std::vector<float>{});
+            G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_motion_var", std::vector<float>{});
+            G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_trunc_frac", std::vector<float>{});
+            G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_centroid_radius", std::vector<float>{});
+            G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_cam_twist", std::vector<float>{0,0,0,0,0,0});
+            G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_frame_dt_s", 0.0f);
+            G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_rt_lag_s", -1.0f);
+            G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_rt_gap_s", -1.0f);
+        }
         G_->update_node(std::move(masks_node));
         return;
     }
@@ -134,6 +169,76 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
     const float fy = rgbd.focal_y;
     const float cx = static_cast<float>(rgbd.width) * 0.5f;
     const float cy = static_cast<float>(rgbd.height) * 0.5f;
+
+    // Ego-motion camera twist (optical frame) for the per-mask corruption annotation. Finite-difference
+    // the zed pose against the previous published frame, pinned to capture stamps; zero on the first
+    // frame or when no stamp is available (corruption then evaluates to 0 → masks pass through unweighted).
+    rc::motion::Twist cam_twist_optical;
+    float frame_dt_s = 0.0f;
+    if (params_.MASK_MOTION_ENABLED and have_last_zed_ and frame_ts_ms > 0 and last_zed_ts_ms_ > 0
+        and frame_ts_ms > last_zed_ts_ms_)
+    {
+        frame_dt_s = static_cast<float>(frame_ts_ms - last_zed_ts_ms_) * 1e-3f;
+        const auto tw = rc::motion::body_twist_from_poses(last_zed_R_, last_zed_t_,
+                                                          room_rotation, room_translation, frame_dt_s);
+        cam_twist_optical = rc::motion::vcam_to_optical(tw);
+    }
+    const rc::motion::CorruptionParams corruption_params{
+        .exposure_s      = params_.MASK_MOTION_EXPOSURE_S,
+        .timing_jitter_s = params_.MASK_MOTION_TIMING_JITTER_S,
+        .timing_offset_s = params_.MASK_MOTION_TIMING_OFFSET_S};
+
+    // Lazily open the diagnostic CSV (once). |v|,|w| are the frame twist magnitudes; per-mask columns
+    // let you confirm dot_d≈0 when static and that it spikes under panning (rotation dominates).
+    if (params_.MASK_MOTION_ENABLED and params_.MASK_MOTION_CSV_LOG and not motion_csv_open_attempted_)
+    {
+        motion_csv_open_attempted_ = true;
+        motion_csv_.open("etc/mask_motion_log.csv", std::ios::out | std::ios::trunc);
+        if (motion_csv_.is_open())
+            motion_csv_ << "frame,ts_ms,dt_s,rt_lag_s,rt_gap_s,v_norm,w_norm,label,Z,xn,yn,radius,trunc,dotd,bias,var\n";
+    }
+    const float v_norm = cam_twist_optical.v.norm();
+    const float w_norm = cam_twist_optical.w.norm();
+
+    // Localization timing lag: capture stamp minus the NEWEST room→robot RT block stamp. This is the δt
+    // the no-extrapolation clamp leaves when the robot-pose stream lags the camera — i.e. the residual
+    // that drives the corruption BIAS. Measuring it here sizes MaskMotion.timing_offset_s and quantifies
+    // the effect of raising room_concept's RT publish rate. -1 = couldn't read (edge/attr/stamp missing).
+    float rt_lag_s = -1.0f;
+    float rt_gap_s = -1.0f;   // spacing between the two newest RT blocks in this replica (block density)
+    if (params_.MASK_MOTION_ENABLED and frame_ts_ms > 0)
+    {
+        const auto room_nodes  = G_->get_nodes_by_type("room");
+        const auto robot_nodes = G_->get_nodes_by_type("robot");
+        if (not room_nodes.empty() and not robot_nodes.empty())
+        {
+            // The dynamic localization RT edge is robot→room (robot-rooted bootstrap; room_concept
+            // dsr_update_pose writes parent=robot, child=room). Try that first, then the reverse.
+            auto edge = G_->get_rt_api()->get_edge_RT(robot_nodes.front(), room_nodes.front().id());
+            if (not edge.has_value())
+                edge = G_->get_rt_api()->get_edge_RT(room_nodes.front(), robot_nodes.front().id());
+            if (edge.has_value())
+            {
+                if (auto ts = G_->get_attrib_by_name<rt_timestamps_att>(edge.value()); ts.has_value())
+                {
+                    // Two newest stamps in the consumer's ring: newest → rt_lag; (newest - second) →
+                    // rt_gap, the consumer-side block spacing. rt_gap ~16ms = the 60Hz blocks actually
+                    // reach this replica (dense ring → good interpolation); ~200ms = only ~5Hz arrive.
+                    std::uint64_t newest = 0, second = 0;
+                    for (const auto t : ts->get())   // ring buffer; 0 = empty slot
+                    {
+                        if (t > newest) { second = newest; newest = t; }
+                        else if (t > second and t < newest) { second = t; }
+                    }
+                    if (newest > 0)
+                        rt_lag_s = static_cast<float>(static_cast<std::int64_t>(frame_ts_ms)
+                                                      - static_cast<std::int64_t>(newest)) * 1e-3f;
+                    if (newest > 0 and second > 0)
+                        rt_gap_s = static_cast<float>(newest - second) * 1e-3f;
+                }
+            }
+        }
+    }
 
     std::vector<float> label_ids;
     std::vector<float> confidences;
@@ -152,6 +257,12 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
     // delimited by mask_pixel_offsets exactly like support_points/support_offsets.
     std::vector<float> mask_pixels_xy;
     std::vector<float> mask_pixel_offsets;
+    // Per-mask ego-motion corruption decomposition (1-to-1 with label_ids). See common/motion_corruption.
+    std::vector<float> motion_dotd;       // metric position-corruption speed (m/s)
+    std::vector<float> motion_bias;       // systematic timing-offset displacement (m) — consumer gates on this
+    std::vector<float> motion_var;        // variance to ADD to R (m²) — blur + jitter, ×peripheral
+    std::vector<float> trunc_frac;        // fraction of silhouette pixels on the image border (truncation)
+    std::vector<float> centroid_radius;   // normalized centroid radius from principal point (periphery)
     std::ostringstream labels_joined;
     std::size_t total_support_points = 0;
     support_offsets.push_back(0.0f);
@@ -291,6 +402,46 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
             support_points_cam.push_back(point.z());
         }
 
+        if (params_.MASK_MOTION_ENABLED)
+        {
+            // Pixel centroid + truncation from the raw 2D foreground (det_pixels = col,row, depth-free).
+            float sum_col = 0.0f, sum_row = 0.0f;
+            int on_border = 0;
+            const std::size_t n_px = det_pixels.size() / 2;
+            for (std::size_t i = 0; i + 1 < det_pixels.size(); i += 2)
+            {
+                const float c = det_pixels[i], r = det_pixels[i + 1];
+                sum_col += c;
+                sum_row += r;
+                if (c <= 0.0f or r <= 0.0f
+                    or c >= static_cast<float>(rgbd.width - 1) or r >= static_cast<float>(rgbd.height - 1))
+                    ++on_border;
+            }
+            const float tau = (n_px > 0) ? static_cast<float>(on_border) / static_cast<float>(n_px) : 0.0f;
+            // Mean optical-axis depth from the camera-frame survivors (.y() is depth in the zed frame).
+            float sum_depth = 0.0f;
+            for (const auto& p : mask_points_cam)
+                sum_depth += p.y();
+            const float Z = mask_points_cam.empty() ? 0.0f : sum_depth / static_cast<float>(mask_points_cam.size());
+            const float col_c = (n_px > 0) ? sum_col / static_cast<float>(n_px) : cx;
+            const float row_c = (n_px > 0) ? sum_row / static_cast<float>(n_px) : cy;
+            const float xn = (col_c - cx) / fx;
+            const float yn = (row_c - cy) / fy;
+            const auto corr = rc::motion::mask_corruption(cam_twist_optical, xn, yn, Z, corruption_params);
+            motion_dotd.push_back(corr.dot_d);
+            motion_bias.push_back(corr.bias_m);
+            motion_var.push_back(corr.var_m);
+            trunc_frac.push_back(tau);
+            const float radius = std::sqrt(xn * xn + yn * yn);
+            centroid_radius.push_back(radius);
+
+            if (motion_csv_.is_open())
+                motion_csv_ << sensing_frame << ',' << frame_ts_ms << ',' << frame_dt_s << ','
+                            << rt_lag_s << ',' << rt_gap_s << ',' << v_norm << ',' << w_norm << ','
+                            << det.label << ',' << Z << ',' << xn << ',' << yn << ',' << radius << ','
+                            << tau << ',' << corr.dot_d << ',' << corr.bias_m << ',' << corr.var_m << '\n';
+        }
+
         total_support_points += mask_points_room.size();
     }
 
@@ -309,7 +460,33 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
     G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_bbox_max_xyz", bbox_max_xyz);
     G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_pixels_xy", mask_pixels_xy);
     G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_pixel_offsets", mask_pixel_offsets);
+    if (params_.MASK_MOTION_ENABLED)
+    {
+        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_motion_dotd", motion_dotd);
+        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_motion_bias", motion_bias);
+        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_motion_var", motion_var);
+        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_trunc_frac", trunc_frac);
+        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_centroid_radius", centroid_radius);
+        const std::vector<float> twist_flat{
+            cam_twist_optical.v.x(), cam_twist_optical.v.y(), cam_twist_optical.v.z(),
+            cam_twist_optical.w.x(), cam_twist_optical.w.y(), cam_twist_optical.w.z()};
+        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_cam_twist", twist_flat);
+        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_frame_dt_s", frame_dt_s);
+        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_rt_lag_s", rt_lag_s);
+        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_rt_gap_s", rt_gap_s);
+    }
     G_->update_node(std::move(masks_node));
+
+    // Remember this zed pose for the next frame's twist finite-difference (only with a valid capture stamp).
+    if (params_.MASK_MOTION_ENABLED and frame_ts_ms > 0)
+    {
+        last_zed_R_     = room_rotation;
+        last_zed_t_     = room_translation;
+        last_zed_ts_ms_ = frame_ts_ms;
+        have_last_zed_  = true;
+    }
+    if (motion_csv_.is_open())
+        motion_csv_.flush();
 
     if (params_.VERBOSE_DEBUG)
         qInfo() << "[Masks] Uploaded" << mask_count << "masks and" << total_support_points << "support points to DSR (frame=" << sensing_frame << ")";

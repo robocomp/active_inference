@@ -121,6 +121,10 @@ public:
         int tray_mask_ref_width = 1280;
         int tray_mask_ref_height = 720;
         std::vector<cv::Point> tray_mask_polygon_px;
+        // Drop a whole detection when its rectangular ROI (bbox) intersects the tray region and the
+        // overlap covers at least this fraction of the bbox area. 0 ⇒ drop on ANY intersection
+        // (strongest — the tray is circular but ROIs are rectangular, so any touch is suspect).
+        float tray_drop_fraction = 0.0f;
         std::vector<std::string> accepted_labels;
         bool verbose_debug = false;
     };
@@ -145,4 +149,9 @@ private:
 
     Config config_;
     std::optional<YoloSegDetector> detector_;
+
+    // Cached rasterized tray polygon (image-sized 8UC1, 255 inside the tray). Rebuilt only when the
+    // image size changes. Used by postprocess to erase tray-region pixels from every detection mask.
+    mutable cv::Mat  tray_mask_cache_;
+    mutable cv::Size tray_mask_cache_size_{0, 0};
 };

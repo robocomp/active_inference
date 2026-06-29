@@ -17,6 +17,7 @@
 #pragma once
 
 #include <cstdint>
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -81,6 +82,17 @@ private:
     VoxelProcessor*                voxel_processor_ = nullptr;
     UnifiedVoxelGrid*              voxel_grid_      = nullptr;
     std::function<void()>          relayout_;
+
+    // Previous zed pose + capture stamp, kept to finite-difference the camera twist for the per-mask
+    // ego-motion corruption annotation (common/motion_corruption). Updated each masks upload.
+    Eigen::Matrix3f last_zed_R_    = Eigen::Matrix3f::Identity();
+    Eigen::Vector3f last_zed_t_    = Eigen::Vector3f::Zero();
+    std::uint64_t   last_zed_ts_ms_ = 0;
+    bool            have_last_zed_  = false;
+
+    // Diagnostic CSV for the ego-motion corruption (MaskMotion.csv_log). Opened lazily on first write.
+    std::ofstream   motion_csv_;
+    bool            motion_csv_open_attempted_ = false;
 
     bool          masks_ready_    = false;
     bool          tracks_ready_   = false;

@@ -345,7 +345,16 @@ void VoxelOpenGLViewer::update_skeletons(std::span<const std::vector<float>> ske
         QVector3D fwd = QVector3D::crossProduct(neck - pelvis, P(5) - P(2));
         if (fwd.lengthSquared() < 1e-10f) continue;
         fwd.normalize();
-        if (fin(0) and QVector3D::dotProduct(fwd, P(0) - neck) < 0.f) fwd = -fwd;   // toward the face
+        // Front/back sign: the EYES sit forward of the EARS (the nose offset has NO depth in the
+        // template, so a nose-vs-neck test is ≈0 → its sign is noise → the arrow flips). eyes 14/15,
+        // ears 16/17. Fall back to the (weak) nose test only if the face keypoints are missing.
+        if (fin(14) and fin(15) and fin(16) and fin(17))
+        {
+            const QVector3D eye_mid = (P(14) + P(15)) * 0.5f;
+            const QVector3D ear_mid = (P(16) + P(17)) * 0.5f;
+            if (QVector3D::dotProduct(fwd, eye_mid - ear_mid) < 0.f) fwd = -fwd;
+        }
+        else if (fin(0) and QVector3D::dotProduct(fwd, P(0) - neck) < 0.f) fwd = -fwd;
 
         int best = -1; float bestd = MATCH2;
         for (std::size_t t = 0; t < facing_tracks_.size(); ++t)
@@ -791,17 +800,21 @@ void VoxelOpenGLViewer::paintGL()
     // the GUI thread, the SAME thread as compute(); compare this against [Compute] to see the split.
     const auto probe_t0 = std::chrono::steady_clock::now();
 
-    // Real render FPS: EMA over the interval between successive paintGL calls.
-    if (last_paint_time_.time_since_epoch().count() != 0)
+    // Real render FPS: count paints over a ~1 s window (stable; instantaneous intervals are jittery
+    // because Qt event-coalesces update() requests from the render timer + data updates + expose events).
+    ++render_frame_count_;
+    if (fps_window_start_.time_since_epoch().count() == 0)
+        fps_window_start_ = probe_t0;
+    else
     {
-        const double dt_ms = std::chrono::duration<double, std::milli>(probe_t0 - last_paint_time_).count();
-        if (dt_ms > 0.0)
+        const double win_ms = std::chrono::duration<double, std::milli>(probe_t0 - fps_window_start_).count();
+        if (win_ms >= 1000.0)
         {
-            const float inst = static_cast<float>(1000.0 / dt_ms);
-            render_fps_ = (render_fps_ > 0.0f) ? (0.9f * render_fps_ + 0.1f * inst) : inst;
+            render_fps_ = static_cast<float>(render_frame_count_ * 1000.0 / win_ms);
+            render_frame_count_ = 0;
+            fps_window_start_ = probe_t0;
         }
     }
-    last_paint_time_ = probe_t0;
 
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     if (!gl_ready_)

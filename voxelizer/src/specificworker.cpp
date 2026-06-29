@@ -132,6 +132,7 @@ void SpecificWorker::initialize()
     yolo_config.tray_mask_ref_width = params.YOLO_TRAY_MASK_REF_WIDTH;
     yolo_config.tray_mask_ref_height= params.YOLO_TRAY_MASK_REF_HEIGHT;
     yolo_config.tray_mask_polygon_px= params.YOLO_TRAY_MASK_POLYGON_PX;
+    yolo_config.tray_drop_fraction  = params.YOLO_TRAY_DROP_FRACTION;
     yolo_config.accepted_labels     = params.YOLO_ACCEPTED_LABELS;
     yolo_config.verbose_debug       = verbose_debug_;
     yolo_processor->configure(yolo_config);

@@ -28,6 +28,7 @@ VoxelizerParams load_voxelizer_params(const ConfigLoader& configLoader)
                     params.YOLO_TRAY_MASK_POLYGON_PX.emplace_back(flat[i], flat[i + 1]);
             }
         });
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Yolo.tray_drop_fraction", params.YOLO_TRAY_DROP_FRACTION);
     rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Yolo.track_association_max_distance_m", params.TRACK_ASSOCIATION_MAX_DISTANCE_M);
     rc::ConfigLoaderUtils::load_optional(configLoader, "Yolo.track_max_missed_frames", params.TRACK_MAX_MISSED_FRAMES);
     rc::ConfigLoaderUtils::load_optional<std::size_t, int>(configLoader, "Voxel.viewer_max_rendered_voxels", params.VOXEL_VIEWER_MAX_RENDERED_VOXELS);
@@ -43,6 +44,13 @@ VoxelizerParams load_voxelizer_params(const ConfigLoader& configLoader)
     rc::ConfigLoaderUtils::load_optional(configLoader, "Media.depth_topic", params.MEDIA_DEPTH_TOPIC);
     rc::ConfigLoaderUtils::load_optional(configLoader, "Media.lidar_topic", params.MEDIA_LIDAR_TOPIC);
     rc::ConfigLoaderUtils::load_optional(configLoader, "Media.lidar_use_media", params.LIDAR_USE_MEDIA);
+
+    // Ego-motion mask-corruption annotation (default ON — pure producer-side metadata).
+    rc::ConfigLoaderUtils::load_optional(configLoader, "MaskMotion.enabled", params.MASK_MOTION_ENABLED);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "MaskMotion.exposure_s", params.MASK_MOTION_EXPOSURE_S);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "MaskMotion.timing_jitter_s", params.MASK_MOTION_TIMING_JITTER_S);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "MaskMotion.timing_offset_s", params.MASK_MOTION_TIMING_OFFSET_S);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "MaskMotion.csv_log", params.MASK_MOTION_CSV_LOG);
 
     // Human-pose branch (default OFF — see header).
     rc::ConfigLoaderUtils::load_optional(configLoader, "HumanPose.enabled", params.HUMAN_POSE_ENABLED);

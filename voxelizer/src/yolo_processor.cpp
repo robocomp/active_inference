@@ -134,6 +134,53 @@ void YoloProcessor::postprocess_yolo_detections(std::vector<SegDetection>& detec
         cv::erode(detection.mask, eroded, cv::Mat(), cv::Point(-1, -1), kernel);
         detection.mask = eroded;
     }
+
+    // Tray phantom removal (generative reasoning): the robot's visible tray, if segmented, reads as a
+    // "table". So a detection labelled "table" whose ROI overlaps the tray zone IS that phantom — drop
+    // it. Other labels (e.g. a bottle the robot holds in the tray) are real objects and are kept. The
+    // bbox is rectangular and the tray crescent is curved, so we test the actual tray pixels inside the
+    // ROI (not rect-vs-rect). tray_drop_fraction = min ROI/tray overlap to drop (0 ⇒ any intersection).
+    // The tray raster is cached (image size is fixed).
+    if (config_.mask_tray)
+    {
+        cv::Size img;
+        for (const auto& d : detections)
+            if (!d.mask.empty()) { img = d.mask.size(); break; }
+
+        if (img.width > 0 && img.height > 0 && tray_mask_cache_size_ != img)
+        {
+            const auto tray_poly = get_tray_mask_polygon(img);
+            tray_mask_cache_ = cv::Mat();
+            if (tray_poly.size() >= 3)
+            {
+                tray_mask_cache_ = cv::Mat::zeros(img, CV_8UC1);
+                cv::fillPoly(tray_mask_cache_, std::vector<std::vector<cv::Point>>{tray_poly}, cv::Scalar(255));
+            }
+            tray_mask_cache_size_ = img;
+        }
+
+        if (!tray_mask_cache_.empty())
+        {
+            const cv::Rect img_rect(0, 0, tray_mask_cache_.cols, tray_mask_cache_.rows);
+            const double drop_frac = std::clamp(config_.tray_drop_fraction, 0.0f, 1.0f);
+            std::erase_if(detections, [&](const SegDetection& d) -> bool
+            {
+                if (d.label != "table")
+                    return false;   // only the phantom the tray itself would produce
+
+                const cv::Rect roi = d.bbox & img_rect;
+                if (roi.width <= 0 || roi.height <= 0)
+                    return false;
+
+                const double inter = cv::countNonZero(tray_mask_cache_(roi));
+                if (inter <= 0.0)
+                    return false;   // table ROI does not touch the tray → real table, keep
+
+                const double bbox_frac = inter / (static_cast<double>(roi.width) * roi.height);
+                return bbox_frac >= drop_frac;   // tray phantom → drop bbox + label + mask
+            });
+        }
+    }
 }
 
 cv::Mat YoloProcessor::compose_detection_canvas(const cv::Mat& rgb_frame,

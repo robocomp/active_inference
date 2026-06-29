@@ -169,9 +169,12 @@ private:
     std::chrono::steady_clock::time_point last_voxel_update_time_{};
     static constexpr std::chrono::milliseconds kMinUpdateIntervalMs{50};  // cap repaints at 20 Hz
     float voxel_input_fps_ = 0.0f;
-    // Real render rate: EMA of paintGL inter-call intervals (the actual repaint cadence of the 3D
-    // view). Shown in the HUD instead of the voxel-update FPS (which is ~dead while voxels are off).
-    std::chrono::steady_clock::time_point last_paint_time_{};
+    // Real render rate: paints counted over a ~1 s window (the actual repaint cadence of the 3D view).
+    // A windowed count, NOT an instantaneous inter-call EMA — paints are event-coalesced by Qt, so
+    // per-frame intervals are jittery and would swing the number; counting over a window is stable.
+    // Shown in the HUD instead of the voxel-update FPS (which is ~dead while voxels are off).
+    std::chrono::steady_clock::time_point fps_window_start_{};
+    int   render_frame_count_ = 0;
     float render_fps_ = 0.0f;
 
     float yaw_ = 0.0f;
