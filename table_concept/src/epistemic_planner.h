@@ -22,6 +22,7 @@
 
 #include "sample_queue_geometry.h"   // common SampleQueue<Model> + table's geometry policy (face_coverage)
 #include "table_model.h"
+#include "table_belief.h"            // AI2 belief: Σ + predicted_information for the Σ-based NBV
 
 // ─── Proposal ────────────────────────────────────────────────────────────────
 
@@ -72,6 +73,16 @@ public:
     EpistemicProposal compute(const TableModel&  model,
                               const SampleQueue<TableModel>& queue,
                               const std::array<float, 8>& posterior_info = {}) const;
+
+    /**
+     * AI2-native next-best-view (no sample queue, no Fisher diagonal). Scores each vertical face by the
+     * D-optimal expected entropy reduction on the belief's FULL covariance Σ:
+     *   gain(i) = ½·ln det( I₆ + Σ · ΔI(i) ),   ΔI(i) = Σₚ (1/Rᵢ) Jₚ Jₚᵀ  (belief.predicted_information)
+     * with Rᵢ = sigma_base² + (lat_rate·standoffᵢ)² — range-aware so far faces yield less information.
+     * Targets the dominant uncertainty eigen-direction of Σ (an unobserved extent / yaw). Placement
+     * (stand-off + heading) and the persist-low-gain policy are identical to the legacy compute().
+     */
+    EpistemicProposal compute(const TableBelief& belief, float lat_rate, float sigma_base) const;
 
 private:
     float d_obs_;

@@ -17,6 +17,8 @@
 #include <vector>
 #include <Eigen/Dense>
 
+#include "../../common/ai_belief/recursive_laplace.h"   // shared predict/MAP/Woodbury engine
+
 namespace rc
 {
 
@@ -71,11 +73,20 @@ struct TableFrame
                                            // distant, vague mask cannot rotate a converged table
 };
 
+// The table generative model wired onto the shared rc::ai recursive-Laplace engine. The Bayesian math
+// (predict / GN-MAP / Woodbury) lives in common/ai_belief/recursive_laplace.h; this class supplies only
+// the table-specific MODEL hooks the engine calls (SDF, responsibilities, Jacobian, constraints, the
+// canonical w≥h fold, and the Q/F/prior/common-mode diagonals). N = 6, static (transition = I).
 class TableBelief
 {
 public:
+    static constexpr int N = 6;
+    using State = TableBeliefState;
+    using Frame = TableFrame;
+
     TableBelief() = default;
-    TableBelief(const TableBeliefState& s, const TableBeliefParams& p) : state_(s), params_(p) { init_prior_cov(); }
+    TableBelief(const TableBeliefState& s, const TableBeliefParams& p) : state_(s), params_(p)
+    { Sigma_.setZero(); Sigma_.diagonal() = prior_cov_diag(); }
 
     const TableBeliefState&            state()      const { return state_; }
     const Eigen::Matrix<float, 6, 6>&  covariance() const { return Sigma_; }
@@ -83,45 +94,43 @@ public:
     void set_state(const TableBeliefState& s) { state_ = s; }
     void set_params(const TableBeliefParams& p) { params_ = p; }
 
-    // ── Generative model ──────────────────────────────────────────────────────
-    // Signed distance to the top slab and to leg k (k=0..3) for a room-frame point at the given state.
+    // ── Inference (delegated to the shared engine) ────────────────────────────
+    float update(const TableFrame& frame) { return ai::update<N>(*this, state_, Sigma_, prior_mean_, frame); }
+    void  predict()                       { ai::predict<N>(*this, Sigma_, state_, prior_mean_); }
+    Eigen::Matrix<float, 6, 6> predicted_information(const std::vector<Eigen::Vector3f>& pts, float R) const
+    { return ai::predicted_information<N>(*this, state_, pts, R); }
+
+    // ── Generative-model hooks (called by the engine; also used as the SDF API) ─
     float sdf_top(const Eigen::Vector3f& p, const TableBeliefState& s) const;
     float sdf_leg(const Eigen::Vector3f& p, const TableBeliefState& s, int k) const;
-    // Min over all 5 surface primitives (diagnostic / clutter test).
-    float sdf_compound(const Eigen::Vector3f& p, const TableBeliefState& s) const;
-
-    // Soft responsibilities for a point: [top, leg0..3, clutter] (sum = 1), given measurement variance R.
+    float sdf_compound(const Eigen::Vector3f& p, const TableBeliefState& s) const;   // min over 5 prims (diag)
+    float sdf_prim(const Eigen::Vector3f& p, const TableBeliefState& s, int prim) const;
+    Eigen::Matrix<float, 6, 1> sdf_jacobian(const Eigen::Vector3f& p, const TableBeliefState& s, int prim) const;
+    // Soft responsibilities: [top, leg0..3, clutter] (sum = 1) at measurement variance R.
     std::array<float, 6> responsibilities(const Eigen::Vector3f& p, const TableBeliefState& s, float R) const;
+    void  apply_constraints(TableBeliefState& s) const;
+    void  canonicalize(TableBeliefState& s) const;   // once after the GN loop: canonical w≥h fold
 
-    // ── Inference ───────────────────────────────────────────────────────────────
-    // Predict (inflate Σ by process noise), then run gn_iters Gauss-Newton EM updates on the frame.
-    // Returns the mean per-point free energy (negative log-likelihood proxy) after the last step.
-    float update(const TableFrame& frame);
-    // The predict step alone (used when a frame is bias-gated): Σ ← Σ + Q.
-    void predict();
+    int   gn_iters() const { return params_.gn_iters; }
+    int   n_prims()  const { return 5; }             // top slab + 4 legs (clutter is the +1 mixture comp)
+    float sigma2()   const { return params_.sigma_base_m * params_.sigma_base_m; }
+    Eigen::Matrix<float, 6, 6> transition() const { return Eigen::Matrix<float, 6, 6>::Identity(); }  // static
+    Eigen::Matrix<float, 6, 1> process_noise_diag() const;
+    Eigen::Matrix<float, 6, 1> prior_cov_diag() const;
+    Eigen::Matrix<float, 6, 1> common_mode_inv_diag(const TableFrame& frame) const;
 
     // ── Verification ──────────────────────────────────────────────────────────
-    // Synthetic self-test: build a known table, sample top+legs+clutter, fit from a perturbed init, and
-    // assert (a) Jacobians match finite differences, (b) params recovered, (c) clutter gets low
-    // responsibility, (d) Σ is finite & SPD. Prints a report. Returns true on PASS.
     static bool self_test();
 
 private:
-    void  init_prior_cov();
     float leg_half_height(const TableBeliefState& s) const
     { return 0.5f * std::max(0.0f, s.H - params_.top_thickness); }
-    // local-frame leg-centre XY for corner k (signs), at the outer-edge inset = leg_radius.
     Eigen::Vector2f leg_center_local(const TableBeliefState& s, int k) const;
-    // ∂SDF_prim/∂θ via central finite differences (prim: 0=top, 1..4=leg k-1).
-    Eigen::Matrix<float, 6, 1> sdf_jacobian(const Eigen::Vector3f& p, const TableBeliefState& s, int prim) const;
-    float sdf_prim(const Eigen::Vector3f& p, const TableBeliefState& s, int prim) const;
-    void  apply_constraints(TableBeliefState& s) const;
 
     TableBeliefState           state_;
     TableBeliefParams          params_;
     Eigen::Matrix<float, 6, 6> Sigma_ = Eigen::Matrix<float, 6, 6>::Identity();  // posterior covariance
-    bool                       have_prior_ = false;
-    Eigen::Matrix<float, 6, 1> prior_mean_;     // transition prior mean (previous posterior mean)
+    Eigen::Matrix<float, 6, 1> prior_mean_ = Eigen::Matrix<float, 6, 1>::Zero();  // transition prior mean
 };
 
 }  // namespace rc

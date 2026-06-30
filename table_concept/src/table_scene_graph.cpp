@@ -165,16 +165,33 @@ void TableSceneGraph::write_rt_covariance(std::uint64_t room_id, TableInstance& 
     if (room_id == 0)
         return;
 
-    // Per-DOF accumulated precision from the Fisher filter: [cx,cy,w,h,H,leg,yaw,inset].
-    const auto& Y = inst.stab.fisher_info_raw;
     const float scale = std::max(1e-6f, cfg_.rt_cov_scale);
     constexpr float big = 1e3f;   // unobservable / never-seen DOF → large variance
-    const auto var = [&](int j) -> float { return Y[j] > 1e-6f ? scale / Y[j] : big; };
 
-    float vx = var(0), vy = var(1);
-    const float vz = 0.25f * var(4), vyaw = var(6);   // data-driven DOFs
-    // Part B: add the localization/chain covariance J·Σ_chain·Jᵀ (computed in the fitter) — the table's
-    // room-frame position is conditional on the robot pose, so its published uncertainty must include it.
+    float vx, vy, vz, vyaw;
+    if (cfg_.use_ai2 and inst.ai2_initialized)
+    {
+        // AI2 path: the belief carries a full 6×6 Σ over [cx,cy,H,w,h,yaw] — publish it directly.
+        // (The legacy Fisher accumulator inst.stab.fisher_info_raw is never populated under AI2, so the
+        // old branch published big=1e3 garbage on every DOF.) Σ already folds the per-frame common-mode
+        // floor (incl. chain), but across-frame accumulation can tighten cx,cy below it, so we still ADD
+        // the localization/chain term below — conservative, and the safe direction for the controller's
+        // uncertainty governor.
+        const auto& S = inst.ai2_belief.covariance();
+        vx   = scale * S(0, 0);          // cx
+        vy   = scale * S(1, 1);          // cy
+        vz   = scale * 0.25f * S(2, 2);  // z = H/2 ⇒ var_z = var_H/4
+        vyaw = scale * S(5, 5);          // yaw
+    }
+    else
+    {
+        // Legacy path: per-DOF accumulated precision from the Fisher filter [cx,cy,w,h,H,leg,yaw,inset].
+        const auto& Y = inst.stab.fisher_info_raw;
+        const auto var = [&](int j) -> float { return Y[j] > 1e-6f ? scale / Y[j] : big; };
+        vx = var(0); vy = var(1); vz = 0.25f * var(4); vyaw = var(6);
+    }
+    // Localization/chain covariance J·Σ_chain·Jᵀ (computed in the fitter) — the table's room-frame
+    // position is conditional on the robot pose, so its published uncertainty must include it.
     vx += inst.chain_cov_xx;
     vy += inst.chain_cov_yy;
 
@@ -204,6 +221,16 @@ void TableSceneGraph::write_rt_covariance(std::uint64_t room_id, TableInstance& 
     G_->add_or_modify_attrib_local<rt_covariance_att>(edge.value(), cov);
     G_->insert_or_assign_edge(edge.value());
     inst.last_pub_cov_trace = trace;
+
+    // Verification readout: the controller-visible pose uncertainty published on the RT edge. Under AI2
+    // this should be ~cm (Σ-mapped), NOT the 1e3 sentinel the legacy fisher_info_raw produced. Naturally
+    // throttled — the cov write self-gates above (>5 % trace change or a geometry republish).
+    std::print("[{}] RT-cov σ x={:.1f}cm y={:.1f}cm z={:.1f}cm yaw={:.2f}° (src={})\n",
+               inst.node_name,
+               100.0f * std::sqrt(std::max(0.0f, vx)), 100.0f * std::sqrt(std::max(0.0f, vy)),
+               100.0f * std::sqrt(std::max(0.0f, vz)),
+               57.2958f * std::sqrt(std::max(0.0f, vyaw)),
+               (cfg_.use_ai2 and inst.ai2_initialized) ? "Σ" : "fisher");
 }
 
 std::vector<float> TableSceneGraph::make_table_mesh(const TableState& s)

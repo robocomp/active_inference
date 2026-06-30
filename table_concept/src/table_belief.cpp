@@ -144,141 +144,46 @@ void TableBelief::apply_constraints(TableBeliefState& s) const
     s.yaw = std::remainder(s.yaw, 2.0f * static_cast<float>(M_PI));   // wrap to (−π, π]
 }
 
-// ─── Prior covariance ───────────────────────────────────────────────────────────
+// ─── Engine hooks: prior cov, process noise (F = I, static), common-mode, canonical fold ────────────
 
-void TableBelief::init_prior_cov()
+Eigen::Matrix<float, 6, 1> TableBelief::prior_cov_diag() const
 {
-    Sigma_.setZero();
-    const float ss = params_.prior_size_std * params_.prior_size_std;
-    Sigma_(0, 0) = 0.30f * 0.30f;   // cx
-    Sigma_(1, 1) = 0.30f * 0.30f;   // cy
-    Sigma_(2, 2) = ss;              // H
-    Sigma_(3, 3) = ss;              // w
-    Sigma_(4, 4) = ss;              // h
-    Sigma_(5, 5) = 0.60f * 0.60f;   // yaw
+    const float ss = params_.prior_size_std * params_.prior_size_std;   // H, w, h
+    return (Eigen::Matrix<float, 6, 1>() << 0.30f * 0.30f, 0.30f * 0.30f, ss, ss, ss, 0.60f * 0.60f).finished();
 }
 
-void TableBelief::predict()
+Eigen::Matrix<float, 6, 1> TableBelief::process_noise_diag() const
 {
-    if (Sigma_.isZero()) init_prior_cov();
-    const float qm = params_.process_std_m * params_.process_std_m;
+    const float qm = params_.process_std_m * params_.process_std_m;     // rigid + static ⇒ small
     const float qy = params_.process_std_yaw * params_.process_std_yaw;
-    Eigen::Matrix<float, 6, 1> q;
-    q << qm, qm, qm, qm, qm, qy;   // rigid + static ⇒ small process noise; length DOFs share qm, yaw qy
-    Sigma_ += q.asDiagonal();
-    prior_mean_ = state_.vec();
-    have_prior_ = true;
+    return (Eigen::Matrix<float, 6, 1>() << qm, qm, qm, qm, qm, qy).finished();
 }
 
-// ─── Recursive update (predict + EM Gauss-Newton) ──────────────────────────────
-
-float TableBelief::update(const TableFrame& frame)
+// Inverse of the per-frame common-mode covariance Σ_c (diagonal): position (cx,cy) = config floor + pose-
+// chain + range variance; size (H,w,h) = config std; yaw = config std + range. Marginalising this SHARED
+// error (via Woodbury in the engine) makes the frame's information SATURATE at Σ_c regardless of point
+// count — N correlated points cannot collapse σ.
+Eigen::Matrix<float, 6, 1> TableBelief::common_mode_inv_diag(const TableFrame& frame) const
 {
-    predict();
-    if (frame.points.empty())
-        return 0.0f;
-
-    const float sigma2 = params_.sigma_base_m * params_.sigma_base_m;
-    const auto  R_of   = [&](std::size_t i) -> float
-    { return (i < frame.R.size() and frame.R[i] > 0.0f) ? frame.R[i] : sigma2; };
-
-    const Eigen::Matrix<float, 6, 6> P0 = Sigma_.inverse();   // transition-prior precision (Σ_pred⁻¹)
-    Eigen::Matrix<float, 6, 1> theta = state_.vec();
-
-    // Inverse of the per-frame common-mode covariance Σ_c (diagonal): position (cx,cy) = config floor +
-    // pose-chain variance; size (H,w,h) and yaw = config measurement stds. Marginalising this shared
-    // error makes the frame's information SATURATE at Σ_c regardless of point count (so N correlated
-    // points cannot collapse σ). Σ_c⁻¹ is used via Woodbury so no Σ_c or data-info inverse is needed.
     const float p2 = params_.common_mode_pos_std  * params_.common_mode_pos_std;
     const float s2 = params_.common_mode_size_std * params_.common_mode_size_std;
     const float y2 = params_.common_mode_yaw_std  * params_.common_mode_yaw_std;
-    Eigen::Matrix<float, 6, 1> sc_inv;
-    sc_inv << 1.0f / std::max(1e-9f, p2 + frame.chain_cov_xx),
-              1.0f / std::max(1e-9f, p2 + frame.chain_cov_yy),
-              1.0f / s2, 1.0f / s2, 1.0f / s2,
-              1.0f / std::max(1e-9f, y2 + frame.chain_cov_yaw);   // yaw cap grows with view range
-    const Eigen::Matrix<float, 6, 6> Sc_inv = sc_inv.asDiagonal();
+    return (Eigen::Matrix<float, 6, 1>() <<
+            1.0f / std::max(1e-9f, p2 + frame.chain_cov_xx),
+            1.0f / std::max(1e-9f, p2 + frame.chain_cov_yy),
+            1.0f / s2, 1.0f / s2, 1.0f / s2,
+            1.0f / std::max(1e-9f, y2 + frame.chain_cov_yaw)).finished();   // yaw cap grows with view range
+}
 
-    // Accumulate the DATA-ONLY information Id and gradient bd (no prior) at th.
-    Eigen::Matrix<float, 6, 6> Id;
-    Eigen::Matrix<float, 6, 1> bd;
-    const auto accumulate_data = [&](const Eigen::Matrix<float, 6, 1>& th)
-    {
-        const TableBeliefState s = TableBeliefState::from_vec(th);
-        Id.setZero();
-        bd.setZero();
-        for (std::size_t i = 0; i < frame.points.size(); ++i)
-        {
-            const float R = R_of(i);
-            const auto  r = responsibilities(frame.points[i], s, R);
-            for (int prim = 0; prim < 5; ++prim)
-            {
-                const float w = r[prim] / R;
-                if (w < 1e-6f) continue;
-                const float d = sdf_prim(frame.points[i], s, prim);
-                const Eigen::Matrix<float, 6, 1> J = sdf_jacobian(frame.points[i], s, prim);
-                Id.noalias() += w * (J * J.transpose());
-                bd.noalias() += -w * J * d;
-            }
-        }
-    };
-
-    // Saturate the data evidence by the common-mode (exact marginalisation, Woodbury):
-    //   I_eff = Id − Id (Id + Σc⁻¹)⁻¹ Id ,   b_eff = bd − Id (Id + Σc⁻¹)⁻¹ bd
-    // I_eff → Σc⁻¹ as Id → ∞, so a frame contributes at most Σc⁻¹ information.
-    Eigen::Matrix<float, 6, 6> Ieff;
-    Eigen::Matrix<float, 6, 1> beff;
-    const auto saturate = [&]()
-    {
-        const Eigen::Matrix<float, 6, 6> IdMinv = Id * (Id + Sc_inv).inverse();
-        Ieff = Id - IdMinv * Id;
-        beff = bd - IdMinv * bd;
-    };
-
-    // MEAN (MAP): use the FULL data information so the point estimate converges fast/accurately.
-    // The common-mode saturation is applied ONLY to the posterior covariance below (calibration) —
-    // it must not slow the point estimate.
-    for (int it = 0; it < params_.gn_iters; ++it)
-    {
-        accumulate_data(theta);
-        const Eigen::Matrix<float, 6, 6> A = P0 + Id;
-        const Eigen::Matrix<float, 6, 1> b = P0 * (prior_mean_ - theta) + bd;
-        const Eigen::Matrix<float, 6, 1> dtheta = A.ldlt().solve(b);
-        if (!dtheta.allFinite()) break;
-        theta += dtheta;
-        TableBeliefState s = TableBeliefState::from_vec(theta);
-        apply_constraints(s);
-        theta = s.vec();
-    }
-
-    TableBeliefState s = TableBeliefState::from_vec(theta);
-    apply_constraints(s);
-    // Canonical w ≥ h: fold the box's π/2 symmetry into the representation (swap w↔h, yaw += π/2, and the
-    // matching covariance rows/cols) instead of letting a yaw flip silently swap the extents.
+// Canonical w ≥ h: fold the box's π/2 symmetry into the representation (swap w↔h, yaw += π/2) instead of
+// letting a yaw flip silently swap the extents. Run once, after the GN loop (engine calls canonicalize()).
+void TableBelief::canonicalize(TableBeliefState& s) const
+{
     if (s.w < s.h)
     {
         std::swap(s.w, s.h);
         s.yaw = std::remainder(s.yaw + 0.5f * static_cast<float>(M_PI), 2.0f * static_cast<float>(M_PI));
     }
-    state_ = s;
-
-    accumulate_data(state_.vec());            // data information at the converged state
-    saturate();                                // cap it by the common-mode (calibrated posterior)
-    Sigma_ = (P0 + Ieff).inverse();            // posterior covariance
-
-    // Mean per-point data energy (diagnostic, ~negative-log-likelihood proxy).
-    double energy = 0.0;
-    for (std::size_t i = 0; i < frame.points.size(); ++i)
-    {
-        const float R = R_of(i);
-        const auto  r = responsibilities(frame.points[i], state_, R);
-        for (int prim = 0; prim < 5; ++prim)
-        {
-            const float d = sdf_prim(frame.points[i], state_, prim);
-            energy += 0.5 * r[prim] * d * d / R;
-        }
-    }
-    return static_cast<float>(energy / static_cast<double>(frame.points.size()));
 }
 
 // ─── Self-test ───────────────────────────────────────────────────────────────────
@@ -383,6 +288,40 @@ bool TableBelief::self_test()
         std::printf("  Σ diag (std, m/rad): cx=%.3f cy=%.3f H=%.3f w=%.3f h=%.3f yaw=%.3f\n",
                     std::sqrt(S(0,0)), std::sqrt(S(1,1)), std::sqrt(S(2,2)),
                     std::sqrt(S(3,3)), std::sqrt(S(4,4)), std::sqrt(S(5,5)));
+    }
+
+    // (f) NBV: the D-optimal gain ½·ln det(I+Σ·ΔI) picks the face perpendicular to the most-uncertain
+    // extent — observe the +x face when w is uncertain, the +y face when h is uncertain.
+    {
+        const auto& bs = belief.state();
+        const float cc = std::cos(bs.yaw), ssn = std::sin(bs.yaw);
+        // sample the slab side band (z∈[H−t, H]) of the +x (axis 0) or +y (axis 1) face → clean w/h signal
+        auto face_pts = [&](int axis) {
+            std::vector<Eigen::Vector3f> fp;
+            for (int m = 0; m < 10; ++m)
+            {
+                const float t = -1.0f + 2.0f * m / 9.0f;
+                const float lx = (axis == 0) ? 0.5f * bs.w : t * 0.5f * bs.w;
+                const float ly = (axis == 0) ? t * 0.5f * bs.h : 0.5f * bs.h;
+                for (int k = 0; k < 4; ++k)
+                {
+                    const float z = bs.H - P.top_thickness * (1.0f - static_cast<float>(k) / 3.0f);
+                    fp.push_back({bs.cx + cc * lx - ssn * ly, bs.cy + ssn * lx + cc * ly, z});
+                }
+            }
+            return fp;
+        };
+        const float Rn = P.sigma_base_m * P.sigma_base_m;
+        const auto dIx = belief.predicted_information(face_pts(0), Rn);
+        const auto dIy = belief.predicted_information(face_pts(1), Rn);
+        const auto gain = [](const Eigen::Matrix<float, 6, 6>& S, const Eigen::Matrix<float, 6, 6>& dI)
+        { return 0.5f * std::log(std::max(1e-9f, (Eigen::Matrix<float, 6, 6>::Identity() + S * dI).determinant())); };
+        Eigen::Matrix<float, 6, 6> Sw = Eigen::Matrix<float, 6, 6>::Identity() * 1e-4f; Sw(3, 3) = 0.25f;  // w uncertain
+        Eigen::Matrix<float, 6, 6> Sh = Eigen::Matrix<float, 6, 6>::Identity() * 1e-4f; Sh(4, 4) = 0.25f;  // h uncertain
+        std::printf("  NBV gains: w-unc(+x=%.3f +y=%.3f)  h-unc(+x=%.3f +y=%.3f)\n",
+                    gain(Sw, dIx), gain(Sw, dIy), gain(Sh, dIx), gain(Sh, dIy));
+        check(gain(Sw, dIx) > gain(Sw, dIy), "NBV: w uncertain → +x face should win");
+        check(gain(Sh, dIy) > gain(Sh, dIx), "NBV: h uncertain → +y face should win");
     }
 
     std::printf("TableBelief::self_test %s\n", ok ? "PASS" : "FAIL");

@@ -504,8 +504,18 @@ void SpecificWorker::run_instance_tracker()
         t.id = id;
         const auto& s = inst.model.state();
         t.xy = {s.cx, s.cy};
-        const float rx = inst.stab.fisher_info_raw[0], ry = inst.stab.fisher_info_raw[1];
-        if (rx > 1e-6f and ry > 1e-6f)
+        if (cfg_.use_ai2 and inst.ai2_initialized)
+        {
+            // AI2: gate on the belief's position covariance (+ localization chain) so association uses the
+            // Mahalanobis innovation S = P + R²I, not the Euclidean fallback (matters for multi-instance).
+            const auto& S = inst.ai2_belief.covariance();   // Σ over [cx,cy,H,w,h,yaw]
+            t.cov = Eigen::Matrix2f::Zero();
+            t.cov(0, 0) = S(0, 0) + inst.chain_cov_xx;
+            t.cov(1, 1) = S(1, 1) + inst.chain_cov_yy;
+            t.has_cov = true;
+        }
+        else if (const float rx = inst.stab.fisher_info_raw[0], ry = inst.stab.fisher_info_raw[1];
+                 rx > 1e-6f and ry > 1e-6f)
         {
             t.cov = Eigen::Matrix2f::Zero();
             t.cov(0, 0) = 1.0f / rx;
@@ -819,7 +829,17 @@ void SpecificWorker::step_epistemic(rc::TableInstance& inst, DSR::Node& node)
             }
         }
 
-    auto prop = epistemic_planner_.compute(inst.model, inst.queue, inst.stab.fisher_info_raw);
+    // AI2: Σ-based D-optimal NBV from the belief (the legacy queue/Fisher inputs are empty under AI2).
+    // Skip until the belief has seen its first frame (else Σ is the broad prior and the proposal is moot).
+    rc::EpistemicProposal prop;
+    if (cfg_.use_ai2)
+    {
+        if (not inst.ai2_initialized)
+            return;
+        prop = epistemic_planner_.compute(inst.ai2_belief, cfg_.ai2_range_noise_lat_per_m, cfg_.ai2_sigma_base_m);
+    }
+    else
+        prop = epistemic_planner_.compute(inst.model, inst.queue, inst.stab.fisher_info_raw);
     if (not prop.valid or not prop.is_finite())
         return;   // degenerate (non-finite) fit — leave the existing affordance node as-is, retry next cycle
 

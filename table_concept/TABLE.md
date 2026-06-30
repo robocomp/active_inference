@@ -326,7 +326,7 @@ belief→knowledge governor expressed as a small gain, not a deleted node).
 information. (Call site `specificworker.cpp:822`.) This is the *one* remaining legacy dependency
 besides the now-fixed RT-cov.
 
-### Target — AI2-native Σ-based D-optimal NBV (planned; `../AI2_MIGRATION_PLAN.md` Phase 4 step 2)
+### AI2-native Σ-based D-optimal NBV (✅ implemented, built green + unit-tested; pending live validation)
 
 Replace the diagonal proxy with **expected entropy reduction on the belief's full Σ**. The four
 vertical faces stay the candidate look-targets; the geometry (face centres, normals, stand-off,

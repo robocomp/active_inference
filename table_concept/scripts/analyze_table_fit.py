@@ -121,6 +121,32 @@ def analyze(node, rows):
         seg("MOVING", mov)
         seg("STILL",  sta)
 
+    # RANGE vs YAW STABILITY — does a far view rotate the table? Yaw is folded mod π (a rectangle's
+    # orientation is 180°-symmetric, and the canonical w≥h fold flips the REPRESENTED yaw by π/2 when
+    # w≈h), so drift = circular std of (2·yaw)/2 — immune to the ±π / π-2 symmetry jumps. Two checks:
+    # (a) the belief's CLAIMED σyaw should GROW with range (the range→yaw common-mode cap), and
+    # (b) the ACTUAL folded-yaw drift should stay LOW and flat across range (a far view confirms
+    # existence, it must not rotate the table). A small |w−h| ⇒ near-square ⇒ yaw physically degenerate,
+    # so high drift there is expected, not a regression — read the |w−h| column alongside.
+    if has("range") and has("yaw"):
+        def circ_std_modpi_deg(ys):
+            if len(ys) < 2: return 0.0
+            cs = mean([math.cos(2*y) for y in ys]); sn = mean([math.sin(2*y) for y in ys])
+            Rr = math.hypot(cs, sn)
+            return 90.0 if Rr <= 1e-9 else math.degrees(math.sqrt(max(0.0, -2*math.log(Rr))) / 2)
+        buckets = [(0.0, 2.0, "<2m"), (2.0, 4.0, "2-4m"), (4.0, 6.0, "4-6m"), (6.0, 1e9, ">6m")]
+        print("\nRANGE vs YAW STABILITY (yaw folded mod π; drift = circular std):")
+        print("  want: claimed σyaw GROWS with range (yaw cap) + actual drift LOW & flat (no far-view rotation)")
+        print("  bucket    n   actual-drift  claimed-σyaw   |w−h|(squareness)")
+        for lo, hi, lab in buckets:
+            b = [r for r in rows if lo <= F(r, "range") < hi]
+            if not b: continue
+            drift = circ_std_modpi_deg([F(r, "yaw") for r in b])
+            sy = math.degrees(mean([F(r, "std_yaw") for r in b]))
+            wh = 100 * mean([abs(F(r, "w") - F(r, "h")) for r in b])
+            print(f"  {lab:6s} {len(b):4d}   {drift:7.1f}°    {sy:8.1f}°    {wh:5.1f}cm"
+                  + ("  ← near-square: yaw degenerate" if wh < 8.0 else ""))
+
 for nd in nodes:
     analyze(nd, by_node[nd])
 
