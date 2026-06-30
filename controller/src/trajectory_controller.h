@@ -320,6 +320,11 @@ public:
     const std::vector<Eigen::Vector2f>& get_path() const { return path_room_; }
     std::optional<Eigen::Vector2f> current_waypoint_room() const;
 
+    /// Signed-distance-to-obstacle (m) at a point given in the ROBOT frame, sampled from
+    /// the ESDF built during the most recent compute(). Used by recovery to probe side /
+    /// rear clearance. Returns the unknown-distance sentinel if no ESDF exists yet.
+    float clearance_at(float rx, float ry) const { return query_esdf(rx, ry); }
+
     Params params;
 
 private:

@@ -516,6 +516,21 @@ void SpecificWorker::load_params()
 	load_optional_cast<double>("Controller.LockOnStepMs",       params.lockon_step_ms);
 	load_optional("Controller.LockOnMaxAttempts",              params.lockon_max_attempts);
 
+	// Physical-stuck detection + reverse-and-turn escape (see ControllerParams).
+	load_optional("Controller.StuckRecoveryEnabled",            params.stuck_recovery_enabled);
+	load_optional_cast<double>("Controller.StuckCmdLinEps",     params.stuck_cmd_lin_eps);
+	load_optional_cast<double>("Controller.StuckCmdRotEps",     params.stuck_cmd_rot_eps);
+	load_optional_cast<double>("Controller.StuckMeasLinEps",    params.stuck_meas_lin_eps);
+	load_optional_cast<double>("Controller.StuckMeasRotEps",    params.stuck_meas_rot_eps);
+	load_optional_cast<double>("Controller.StuckConfirmMs",     params.stuck_confirm_ms);
+	load_optional_cast<double>("Controller.EscapeAdvSpeedMps",  params.escape_adv_speed_mps);
+	load_optional_cast<double>("Controller.EscapeRotSpeedRps",  params.escape_rot_speed_rps);
+	load_optional_cast<double>("Controller.EscapeDistanceM",    params.escape_distance_m);
+	load_optional_cast<double>("Controller.EscapeMaxMs",        params.escape_max_ms);
+	load_optional_cast<double>("Controller.EscapeSideProbeM",   params.escape_side_probe_m);
+	load_optional_cast<double>("Controller.EscapeRearProbeM",   params.escape_rear_probe_m);
+	load_optional_cast<double>("Controller.EscapeRearMinM",     params.escape_rear_min_m);
+
 	world_model_.set_params(&params);
 	obstacle_tracker_.set_params(&params);
 	motion_commander_.set_params(&params);

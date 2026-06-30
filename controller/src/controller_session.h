@@ -103,6 +103,24 @@ private:
                           ControllerMotionCommander &motion_commander,
                           ControllerDisplay &display);
 
+    // ── Physical-stuck recovery ──────────────────────────────────────────────────────
+    // Detector: are we commanding a real velocity but not actually moving? Accumulates
+    // the no-progress window and returns true once it exceeds stuck_confirm_ms.
+    bool detect_stuck(float adv_mps, float side_mps, float rot_rps, std::uint64_t now_ms);
+    // Begin an escape: choose turn direction from side clearance, drop a temp obstacle at
+    // the stuck spot, reset the plan, and record the start pose/time.
+    void begin_escape(const ControllerRobotPose &robot_pose,
+                      ControllerObstacleTracker &obstacle_tracker,
+                      rc::TrajectoryController &path_controller,
+                      std::uint64_t now_ms);
+    // Step the active escape (owns the base). Reverses with a slight turn (or rotates in
+    // place if the rear is blocked) until distance/time bound is met, then stops + clears.
+    void step_escape(const ControllerRobotPose &robot_pose,
+                     rc::TrajectoryController &path_controller,
+                     ControllerMotionCommander &motion_commander,
+                     std::uint64_t now_ms);
+    void reset_stuck_state();
+
     const ControllerParams *params_ = nullptr;
     rc::LockOn lockon_;
     rc::affordance::Contract active_contract_;     // resolved contract of the affordance in lock-on
@@ -137,4 +155,12 @@ private:
     std::uint64_t active_target_id_ = 0;
     bool room_wait_logged_ = false;
     bool target_wait_logged_ = false;
+
+    // Physical-stuck recovery state.
+    std::uint64_t stuck_since_ms_ = 0;          // start of the current no-progress window (0 = not stuck)
+    bool          escape_active_ = false;       // an escape maneuver currently owns the base
+    std::uint64_t escape_start_ms_ = 0;         // escape start time (for the time bound)
+    Eigen::Vector2f escape_start_pos_ = Eigen::Vector2f::Zero();  // pose at escape start (distance bound)
+    float         escape_turn_sign_ = 1.0f;     // +1 / −1: rotation direction during escape
+    int           escape_count_ = 0;            // consecutive escapes (alternating fallback for turn dir)
 };

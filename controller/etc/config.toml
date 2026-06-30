@@ -114,6 +114,25 @@ LockOnSettleMs = 400.0       # dwell before each measurement (kills motion blur 
 LockOnStepMs = 400.0         # duration of one sweep step
 LockOnMaxAttempts = 30
 
+# Physical-stuck detection + reverse-and-turn escape. Fires when the base is COMMANDED to
+# move but is NOT actually making progress (wedged below the lidar plane, scraping a frame,
+# wheel slip, oscillating) — distinct from the MPPI's geometric path_blocked. Escape =
+# reverse with a slight turn toward the side with more clearance, drop a temp obstacle at the
+# stuck spot, then replan. Set StuckRecoveryEnabled=false to disable.
+StuckRecoveryEnabled = true
+StuckCmdLinEps = 0.05    # m/s — commanded linear above this = "trying to move"
+StuckCmdRotEps = 0.15    # rad/s — commanded rotation above this counts too
+StuckMeasLinEps = 0.02   # m/s — measured base speed below this = "not moving"
+StuckMeasRotEps = 0.08   # rad/s
+StuckConfirmMs = 1500    # sustained no-progress (ms) before escape fires
+EscapeAdvSpeedMps = 0.15 # reverse speed (issued negative)
+EscapeRotSpeedRps = 0.35 # slight turn rate during escape
+EscapeDistanceM = 0.30   # back up at most this far …
+EscapeMaxMs = 1500       # … or this long, whichever first
+EscapeSideProbeM = 0.50  # lateral ESDF probe for turn-direction choice
+EscapeRearProbeM = 0.45  # rear ESDF probe distance
+EscapeRearMinM = 0.30    # rear clearance below this → rotate-in-place, no reverse
+
 Target.EdgeType = "target"
 Transforms.interpolate_rt = true
 # Dead-reckon the DISPLAYED lidar cloud + robot icon forward to "now" using base velocity,

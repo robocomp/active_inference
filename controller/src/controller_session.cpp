@@ -283,6 +283,15 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     // reactive blockage-driven creation below; both feed the same multi-instance tracker.
     obstacle_tracker.scan_for_unmodelled_obstacles(time_source(), robot_pose, path_controller);
 
+    // An escape maneuver (physical-stuck recovery) owns the base until it finishes backing
+    // out — bypass the planner/follower entirely, just like the lock-on micro-search below.
+    // It survives the current_plan_ reset done in begin_escape(), so it's gated FIRST.
+    if (escape_active_)
+    {
+        step_escape(robot_pose, path_controller, motion_commander, time_source());
+        return;
+    }
+
     if (!current_plan_.has_value())
     {
         display.clear_robot_trajectory();
@@ -406,6 +415,16 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     {
         path_controller.stop();
         motion_commander.stop_robot();
+        return;
+    }
+
+    // Physical-stuck check: we are about to issue a real command. If the base has been
+    // commanded to move yet hasn't actually moved (measured room-frame speed ~0) for long
+    // enough, the path looks clear to MPPI but the robot is wedged — trigger an escape.
+    if (detect_stuck(adv_mps, side_mps, rot_rps, time_source()))
+    {
+        begin_escape(robot_pose, obstacle_tracker, path_controller, time_source());
+        step_escape(robot_pose, path_controller, motion_commander, time_source());
         return;
     }
 
@@ -623,6 +642,7 @@ void ControllerSession::finalize_reached(rc::AffordanceManager &affordance_manag
     if (graph_)
         affordance_manager.mark_reached(graph_);
     lockon_.reset();
+    reset_stuck_state();
     feedback_node_id_ = 0;
     clear_tracking_state();
     display.clear_robot_trajectory();
@@ -685,10 +705,110 @@ void ControllerSession::clear_manual_target(rc::AffordanceManager &affordance_ma
         wake_callback();
 }
 
+// ─── Physical-stuck recovery ──────────────────────────────────────────────────────────
+
+void ControllerSession::reset_stuck_state()
+{
+    stuck_since_ms_ = 0;
+    escape_active_ = false;
+}
+
+bool ControllerSession::detect_stuck(float adv_mps, float side_mps, float rot_rps, std::uint64_t now_ms)
+{
+    if (!params_ || !params_->stuck_recovery_enabled)
+    {
+        stuck_since_ms_ = 0;
+        return false;
+    }
+    // Commanded to move? (post-uncertainty-limit command we are about to send)
+    const bool commanded = std::abs(adv_mps)  > params_->stuck_cmd_lin_eps
+                        || std::abs(side_mps) > params_->stuck_cmd_lin_eps
+                        || std::abs(rot_rps)  > params_->stuck_cmd_rot_eps;
+    // Actually moving? (measured room-frame base speed, EMA, refreshed in build_planning_step)
+    const bool moving = base_speed_lin_ > params_->stuck_meas_lin_eps
+                     || base_speed_ang_ > params_->stuck_meas_rot_eps;
+
+    if (commanded && !moving)
+    {
+        if (stuck_since_ms_ == 0)
+            stuck_since_ms_ = now_ms;   // start the no-progress clock
+        else if (now_ms - stuck_since_ms_ > static_cast<std::uint64_t>(params_->stuck_confirm_ms))
+            return true;                // sustained → stuck
+    }
+    else
+        stuck_since_ms_ = 0;            // progress (or not trying) → reset
+    return false;
+}
+
+void ControllerSession::begin_escape(const ControllerRobotPose &robot_pose,
+                                     ControllerObstacleTracker &obstacle_tracker,
+                                     rc::TrajectoryController &path_controller,
+                                     std::uint64_t now_ms)
+{
+    // Choose the turn direction toward whichever side has more ESDF clearance (robot frame:
+    // +y left, −y right). If the two sides are within an epsilon, alternate across
+    // consecutive escapes so repeated attempts don't keep re-wedging the same way.
+    const float probe = params_ ? params_->escape_side_probe_m : 0.5f;
+    const float cl = path_controller.clearance_at(0.f, +probe);   // left clearance
+    const float cr = path_controller.clearance_at(0.f, -probe);   // right clearance
+    if (std::abs(cl - cr) > 0.05f)
+        escape_turn_sign_ = (cl > cr) ? +1.f : -1.f;
+    else
+        escape_turn_sign_ = (escape_count_ % 2 == 0) ? +1.f : -1.f;
+
+    // Mark the stuck spot just ahead of the robot so the replanner routes around whatever we
+    // wedged on (it may be invisible to the lidar). Reuses the same temp-obstacle mechanism
+    // as the geometric path_blocked recovery; it ages out via the existing existence filter.
+    const Eigen::Vector2f fwd(std::cos(robot_pose.theta), std::sin(robot_pose.theta));
+    const Eigen::Vector2f stuck_center = robot_pose.pos + 0.4f * fwd;
+    obstacle_tracker.create_temporary_lidar_obstacle(now_ms, robot_pose, stuck_center, 0.25f, path_controller);
+
+    escape_active_   = true;
+    escape_start_ms_ = now_ms;
+    escape_start_pos_ = robot_pose.pos;
+    ++escape_count_;
+    stuck_since_ms_ = 0;
+
+    clear_tracking_state();
+    current_plan_.reset();
+    path_controller.stop();
+
+    qInfo() << "[recovery] STUCK -> escape | reverse + turn"
+            << (escape_turn_sign_ > 0 ? "LEFT" : "RIGHT")
+            << "| clearance L" << cl << "R" << cr << "| attempt" << escape_count_;
+}
+
+void ControllerSession::step_escape(const ControllerRobotPose &robot_pose,
+                                    rc::TrajectoryController &path_controller,
+                                    ControllerMotionCommander &motion_commander,
+                                    std::uint64_t now_ms)
+{
+    const float backed = (robot_pose.pos - escape_start_pos_).norm();
+    const float max_ms = params_ ? params_->escape_max_ms : 1500.f;
+    const float max_dist = params_ ? params_->escape_distance_m : 0.30f;
+    if (now_ms - escape_start_ms_ > static_cast<std::uint64_t>(max_ms) || backed > max_dist)
+    {
+        escape_active_ = false;
+        motion_commander.stop_robot();   // plan already reset in begin_escape → next cycle replans
+        qInfo() << "[recovery] escape done | backed" << backed << "m";
+        return;
+    }
+
+    // Rear-clearance guard: don't reverse into a wall. If the space behind is tight, escape
+    // by rotating in place only (adv = 0).
+    const float rear_probe = params_ ? params_->escape_rear_probe_m : 0.45f;
+    const float rear_min   = params_ ? params_->escape_rear_min_m   : 0.30f;
+    const float rear = path_controller.clearance_at(-rear_probe, 0.f);
+    const float adv = (rear < rear_min) ? 0.f : -(params_ ? params_->escape_adv_speed_mps : 0.15f);
+    const float rot = escape_turn_sign_ * (params_ ? params_->escape_rot_speed_rps : 0.35f);
+    motion_commander.send_speed_command(adv, 0.f, rot);
+}
+
 void ControllerSession::stop(rc::TrajectoryController &path_controller,
                              ControllerMotionCommander &motion_commander)
 {
     path_controller.stop();
+    reset_stuck_state();
     clear_tracking_state();
     motion_commander.stop_robot();
 }

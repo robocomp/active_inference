@@ -120,6 +120,27 @@ struct ControllerParams
     float lockon_settle_ms       = 400.0f;
     float lockon_step_ms         = 400.0f;
     int   lockon_max_attempts    = 30;
+
+    // Physical-stuck detection + reverse-and-turn escape. Distinct from the MPPI's
+    // geometric path_blocked (which predicts the planned path runs through obstacles):
+    // this fires when the base is COMMANDED to move but is NOT actually making progress
+    // (wedged below the lidar plane, scraping a frame, wheel slip, oscillating in place).
+    // Commanded vs measured (room-frame EMA base speed) over a window → escape maneuver:
+    // reverse with a slight turn toward the side with more ESDF clearance, drop a temp
+    // obstacle at the stuck spot, then replan. On by default.
+    bool  stuck_recovery_enabled = true;
+    float stuck_cmd_lin_eps      = 0.05f;   // m/s — commanded linear above this = "trying to move"
+    float stuck_cmd_rot_eps      = 0.15f;   // rad/s — commanded rotation above this counts too
+    float stuck_meas_lin_eps     = 0.02f;   // m/s — measured below this = "not moving"
+    float stuck_meas_rot_eps     = 0.08f;   // rad/s
+    float stuck_confirm_ms       = 1500.0f; // sustained no-progress before escape fires
+    float escape_adv_speed_mps   = 0.15f;   // reverse speed (issued negative)
+    float escape_rot_speed_rps   = 0.35f;   // slight turn rate during escape
+    float escape_distance_m      = 0.30f;   // back up at most this far …
+    float escape_max_ms          = 1500.0f; // … or this long, whichever comes first
+    float escape_side_probe_m    = 0.50f;   // lateral ESDF probe for turn-direction choice
+    float escape_rear_probe_m    = 0.45f;   // rear ESDF probe distance
+    float escape_rear_min_m      = 0.30f;   // rear clearance below this → rotate-in-place, no reverse
 };
 
 struct ControllerGraphState
