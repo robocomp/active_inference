@@ -75,6 +75,8 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.ai2_common_mode_pos_std  = getf("TableModel.AI2CommonModePosStd",  0.03f);
     out.ai2_common_mode_size_std = getf("TableModel.AI2CommonModeSizeStd", 0.02f);
     out.ai2_common_mode_yaw_std  = getf("TableModel.AI2CommonModeYawStd",  0.03f);
+    out.ai2_range_noise_lat_per_m = getf("TableModel.AI2RangeNoiseLatPerM", 0.02f);
+    out.ai2_range_noise_yaw_per_m = getf("TableModel.AI2RangeNoiseYawPerM", 0.03f);
     out.ai2_trunc_gate_frac    = getf("TableModel.AI2TruncGateFrac",   0.10f);
     out.ai2_gn_iters         = geti("TableModel.AI2GnIters",          4);
     out.optimization_iters = geti("TableModel.OptimizationIters", 10);

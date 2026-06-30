@@ -195,7 +195,8 @@ float TableBelief::update(const TableFrame& frame)
     Eigen::Matrix<float, 6, 1> sc_inv;
     sc_inv << 1.0f / std::max(1e-9f, p2 + frame.chain_cov_xx),
               1.0f / std::max(1e-9f, p2 + frame.chain_cov_yy),
-              1.0f / s2, 1.0f / s2, 1.0f / s2, 1.0f / y2;
+              1.0f / s2, 1.0f / s2, 1.0f / s2,
+              1.0f / std::max(1e-9f, y2 + frame.chain_cov_yaw);   // yaw cap grows with view range
     const Eigen::Matrix<float, 6, 6> Sc_inv = sc_inv.asDiagonal();
 
     // Accumulate the DATA-ONLY information Id and gradient bd (no prior) at th.

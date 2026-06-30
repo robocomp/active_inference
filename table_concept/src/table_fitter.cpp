@@ -272,6 +272,7 @@ TableFitter::TableObservation TableFitter::observe(TableInstance& inst, const DS
             inst.last_motion_dotd     = slice.motion_dotd;
             inst.last_trunc_frac      = slice.trunc_frac;
             inst.last_centroid_radius = slice.centroid_radius;
+            inst.last_range           = slice.range;
             const std::size_t begin = std::min(slice.support_begin, masks_packet.support_points.size());
             const std::size_t end = std::min(slice.support_end, masks_packet.support_points.size());
 
@@ -394,9 +395,22 @@ float TableFitter::run_inference_ai2(TableInstance& inst, const TableObservation
         return 0.0f;
     }
 
-    // Observation precision R = σ_base² + mask_motion_var (the ego-motion downweight; symmetric/random
-    // error). One scalar per mask in v1 — the per-DOF split is a later step.
-    const float R = cfg_.ai2_sigma_base_m * cfg_.ai2_sigma_base_m + std::max(0.0f, inst.last_motion_var);
+    // Static range weighting (motion-free). Even at zero camera motion, deprojection noise grows with
+    // distance AND a far mask subtends a tiny angle, so pose — orientation most of all — becomes
+    // unobservable: a 7 m view should confirm existence but never rotate a converged table. The
+    // motion×distance term is already in last_motion_var (the voxelizer interaction matrix carries 1/Z),
+    // but that vanishes when still; this is the missing static part. Pure continuous covariance growth (no
+    // gate): the per-frame information CAP (common-mode) rises with range, so the frame's yaw gain against a
+    // converged prior shrinks smoothly toward zero. mask_range = mean camera→mask depth Z, from the producer.
+    const float range         = std::max(0.0f, inst.last_range);
+    const float lat_std       = cfg_.ai2_range_noise_lat_per_m * range;   // m   (lateral deprojection)
+    const float yaw_std       = cfg_.ai2_range_noise_yaw_per_m * range;   // rad (orientation lever-arm ∝ 1/range)
+    const float range_lat_var = lat_std * lat_std;
+    const float range_yaw_var = yaw_std * yaw_std;
+
+    // Observation precision R = σ_base² + ego-motion var + static range var (per-point random part).
+    const float R = cfg_.ai2_sigma_base_m * cfg_.ai2_sigma_base_m
+                  + std::max(0.0f, inst.last_motion_var) + range_lat_var;
 
     // Truncation gate: a mask clipped by the image border has a chopped silhouette → it biases the fit
     // (shrinks/displaces the model). Above tolerance, skip the geometric update (predict only) — but
@@ -419,8 +433,9 @@ float TableFitter::run_inference_ai2(TableInstance& inst, const TableObservation
         frame.points.insert(frame.points.end(), observation.candidate_pts.begin(), observation.candidate_pts.end());
         frame.points.insert(frame.points.end(), observation.residual_pts.begin(), observation.residual_pts.end());
         frame.R.assign(frame.points.size(), R);
-        frame.chain_cov_xx = inst.chain_cov_xx;
-        frame.chain_cov_yy = inst.chain_cov_yy;
+        frame.chain_cov_xx  = inst.chain_cov_xx + range_lat_var;   // range adds to the SHARED position error (cap)
+        frame.chain_cov_yy  = inst.chain_cov_yy + range_lat_var;
+        frame.chain_cov_yaw = range_yaw_var;                       // the binding term: far view can't rotate
         energy = inst.ai2_belief.update(frame);
     }
 
@@ -590,7 +605,7 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
     {
         ai2_csv_.open(cfg_.ai2_csv_path, std::ios::out | std::ios::trunc);
         if (not ai2_csv_.is_open()) { cfg_.ai2_csv_path.clear(); return; }
-        ai2_csv_ << "cycle,node,npts,gated,energy,R,motion_var,motion_dotd,trunc_frac,"
+        ai2_csv_ << "cycle,node,npts,gated,energy,R,motion_var,motion_dotd,trunc_frac,range,"
                  << "cx,cy,H,w,h,yaw,std_cx,std_cy,std_H,std_w,std_h,std_yaw\n";
     }
     const auto& s = inst.ai2_belief.state();
@@ -598,7 +613,7 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
     const auto sd = [&](int i) { return std::sqrt(std::max(0.0f, S(i, i))); };   // posterior std (m / rad)
     ai2_csv_ << inst.processed_cycles << ',' << inst.node_name << ',' << npts << ',' << (gated ? 1 : 0) << ','
              << energy << ',' << R << ',' << inst.last_motion_var << ',' << inst.last_motion_dotd << ','
-             << inst.last_trunc_frac << ','
+             << inst.last_trunc_frac << ',' << inst.last_range << ','
              << s.cx << ',' << s.cy << ',' << s.H << ',' << s.w << ',' << s.h << ',' << s.yaw << ','
              << sd(0) << ',' << sd(1) << ',' << sd(2) << ',' << sd(3) << ',' << sd(4) << ',' << sd(5) << '\n';
     ai2_csv_.flush();

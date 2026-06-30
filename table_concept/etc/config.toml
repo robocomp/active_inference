@@ -81,6 +81,10 @@ AI2PriorSizeStd = 0.30      # broad size prior std (m) on w,h,H
 AI2ProcessStdM = 0.005      # predict process-noise std, length DOFs (m/frame) — rigid+static ⇒ small
 AI2ProcessStdYaw = 0.01     # predict process-noise std, yaw (rad/frame)
 AI2TruncGateFrac = 0.10     # skip the geometric update when >this fraction of the mask silhouette is on the image border (truncated → biased)
+# Static range weighting (motion-free): common-mode error grows with view distance so a far, vague mask
+# can confirm existence but NOT resolve pose/orientation (can't rotate a converged table). Continuous, no gate.
+AI2RangeNoiseLatPerM = 0.02 # lateral deprojection std growth (m per m of range) → feeds R + position common-mode
+AI2RangeNoiseYawPerM = 0.03 # yaw common-mode std growth (rad per m of range) → the binding term vs far-view rotation
 AI2GnIters = 4              # Gauss-Newton iterations per frame
 
 [TableConcept]

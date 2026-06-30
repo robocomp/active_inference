@@ -44,6 +44,7 @@ struct TableInstance
     float last_motion_dotd     = 0.0f;
     float last_trunc_frac      = 0.0f;
     float last_centroid_radius = 0.0f;
+    float last_range           = 0.0f;   // mean camera→mask depth Z (m), this frame — static range weighting
 
     int  last_frame_seen    = -1;     // last_sensing_frame_att value read
     int  matched_frames     = 0;      // frames with fresh sensing data

@@ -92,9 +92,11 @@ def analyze(node, rows):
     # gate activity + load
     g = col("gated"); mv = col("motion_var"); tf = col("trunc_frac"); npts = col("npts")
     dd = col("motion_dotd") if has("motion_dotd") else []
+    rng = col("range") if has("range") else []
     print(f"\nGATES/LOAD: gated={100*sum(g)/n:.0f}%  npts med={pct(npts,.5):.0f}  "
           f"motion_var p90={pct(mv,.9):.4f}  trunc_frac p90={pct(tf,.9):.2f}"
-          + (f"  dotd p90={pct(dd,.9):.2f}" if dd else ""))
+          + (f"  dotd p90={pct(dd,.9):.2f}" if dd else "")
+          + (f"  range med={pct(rng,.5):.1f}m p90={pct(rng,.9):.1f}m" if rng else ""))
     en = col("energy")
     print(f"energy: med={pct(en,.5):.3f} p90={pct(en,.9):.3f}  (fit residual; want low+stable)")
 

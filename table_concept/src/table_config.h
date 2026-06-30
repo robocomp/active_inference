@@ -84,6 +84,12 @@ struct TableConfig
     float ai2_common_mode_pos_std  = 0.03f; // shared position error (m); pose-chain cov adds to it
     float ai2_common_mode_size_std = 0.02f; // shared size error w,h,H (m)
     float ai2_common_mode_yaw_std  = 0.03f; // shared yaw error (rad)
+    // STATIC range weighting (motion-free): the common-mode error grows with view distance, so a far, vague
+    // mask cannot resolve pose — orientation least of all (a far view confirms existence, can't rotate the
+    // table). Continuous, no gate. lat feeds R + position common-mode (m per m of range); yaw feeds the yaw
+    // common-mode (rad per m), the binding term. Set 0 to disable. Range Z comes from the voxelizer (mask_range).
+    float ai2_range_noise_lat_per_m = 0.02f; // lateral deprojection std growth (m per m of range)
+    float ai2_range_noise_yaw_per_m = 0.03f; // yaw common-mode std growth (rad per m of range)
     float ai2_trunc_gate_frac  = 0.10f;  // skip the geometric update (predict only) when this fraction of
                                          // the mask silhouette is on the image border (truncated → biased)
     int   ai2_gn_iters         = 4;      // Gauss-Newton iterations per frame

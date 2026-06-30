@@ -67,6 +67,8 @@ struct TableFrame
     std::vector<float>           R;        // per-point measurement variance (m²); empty ⇒ σ_base² for all
     float chain_cov_xx = 0.0f;             // extra shared position variance (m²) from the pose chain (cx)
     float chain_cov_yy = 0.0f;             // ...                                                      (cy)
+    float chain_cov_yaw = 0.0f;            // extra shared yaw variance (rad²) — grows with view range so a
+                                           // distant, vague mask cannot rotate a converged table
 };
 
 class TableBelief
