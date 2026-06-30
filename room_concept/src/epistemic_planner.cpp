@@ -228,12 +228,19 @@ float EpistemicPlanner::live_epistemic_gain(const Eigen::Vector2f& viewpoint) co
 float EpistemicPlanner::live_total_epistemic_gain(const Eigen::Vector2f& viewpoint) const
 {
     const float fim_gain = live_epistemic_gain(viewpoint);
-    // Non-saturating exploration term: expected occupancy-entropy resolved by a scan from this
-    // vantage. Same combination as evaluate_targets (t.score), so the advertised gain tracks the
-    // ranking. 0 once the cell is covered → the total still decays to 0 when the room is DONE.
+    // Occupancy term: expected occupancy-entropy resolved by a scan from this vantage. Same
+    // combination as evaluate_targets (t.score), so the advertised gain tracks the ranking. Goes
+    // to 0 once the cell's visibility is covered (fast in a convex room → it saturates).
     const float map_gain = (params.w_map > 0.f && occ_.configured())
                            ? occ_.expected_info_gain(viewpoint) : 0.f;
-    return fim_gain + params.w_map * map_gain;
+    // Non-saturating IoR patrol drive: staleness recovers over ior_decay_time, so the published gain
+    // stays positive on long-unvisited cells even after both info terms saturate → the controller
+    // keeps executing and the robot keeps moving instead of freezing after a few completions.
+    const float stale = (params.w_ior_drive > 0.f && visit_grid_.initialized)
+                        ? visit_grid_.staleness(viewpoint, params.ior_decay_time,
+                                                std::chrono::steady_clock::now())
+                        : 0.f;
+    return fim_gain + params.w_map * map_gain + params.w_ior_drive * stale;
 }
 
 // ===========================================================================
@@ -325,8 +332,13 @@ std::vector<EpistemicPlanner::Target> EpistemicPlanner::evaluate_targets() const
         const float map_gain = (params.w_map > 0.f && occ_.configured())
                                ? occ_.expected_info_gain(pos) : 0.f;
 
-        // 1e-6 floor: when both terms vanish, tie-break by FIM gain.
-        t.score = (fim_gain * ior_suppressor + params.w_map * map_gain) * bonus + 1e-6f;
+        // Score = (saturating info terms) + (non-saturating IoR patrol drive), all × distance bonus.
+        // The IoR drive is ADDITIVE (route_staleness ∈ [0,1] recovers over time), so when both info
+        // terms vanish (localized + room seen) the planner still ranks the stalest reachable cell
+        // highest instead of going flat — this is what keeps it moving after a few completions.
+        // 1e-6 floor: tie-break when everything vanishes.
+        t.score = (fim_gain * ior_suppressor + params.w_map * map_gain
+                   + params.w_ior_drive * route_staleness) * bonus + 1e-6f;
         t.eigenvector_score = fim_gain;
         targets.push_back(t);
     }

@@ -49,6 +49,15 @@ public:
         float w_path_interest = 0.3f;        // weight: bonus for paths that traverse unvisited cells
                                              //   path_interest = mean staleness of intermediate path cells ∈ [0,1]
                                              //   higher → prefer routes through unexplored territory
+        // ADDITIVE IoR patrol drive (nats). w_ior (above) is a MULTIPLICATIVE suppressor on fim_gain,
+        // so it vanishes once fim_gain→0 (localized) and map_gain→0 (room seen) — both info terms
+        // saturate in a static convex room and the robot stops after a few affordances. This term is
+        // ADDITIVE and NON-saturating: route_staleness recovers over ior_decay_time, so it keeps both
+        // the selection score AND the published gain positive on long-unvisited cells → the robot
+        // perpetually patrols the stalest reachable cell. It sits BELOW the info terms in magnitude so
+        // genuine info-gathering still takes priority; it only dominates once info is exhausted.
+        // 0 ⇒ off (robot rests once the room is fully known). Units: nats per unit staleness ∈ [0,1].
+        float w_ior_drive     = 0.5f;
 
         // ---- FIM scoring ----
         float fim_corner_sigma  = 0.04f;     // isotropic corner detection noise σ (m)

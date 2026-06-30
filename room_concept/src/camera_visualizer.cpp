@@ -3,13 +3,19 @@
 #include <dsr/api/dsr_api.h>
 #include <dsr/api/dsr_camera_api.h>
 #include <dsr/api/dsr_inner_eigen_api.h>
+#include <dsr/api/dsr_rt_api.h>
 #include <dsr/core/types/type_checking/dsr_attr_name.h>
 
 #include "../../common/media_transport/media_transport.h"
 
+#include <QBrush>
+#include <QColor>
 #include <QPainter>
+#include <QPolygonF>
 #include <QVBoxLayout>
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -56,6 +62,20 @@ Mat::Vector3d transform_room_point(const RoomToCameraBasis& basis, const Mat::Ve
          + point_room.x() * basis.axis_x
          + point_room.y() * basis.axis_y
          + point_room.z() * basis.axis_z;
+}
+
+// Max forward-prediction horizon for the pose dead-reckoning (s). Caps extrapolation if the
+// RT feed stalls or a stamp is bogus, so the overlay can never run away from the image.
+constexpr double kMaxPredictHorizonS = 0.25;
+
+// Overlay colour per object category (mirrors the voxelizer's 3D-viewer palette intent:
+// tables warm/orange, bottles cyan, generic objects green).
+QColor color_for_category(const std::string& category)
+{
+    if (category == "model_table" || category == "table")        return QColor(255, 165, 0);    // orange
+    if (category == "bottle" || category == "cylinder")          return QColor(0, 220, 220);    // cyan
+    if (category == "object")                                    return QColor(60, 220, 90);    // green
+    return QColor(255, 230, 0);                                                                 // yellow fallback
 }
 
 }  // namespace
@@ -404,6 +424,184 @@ std::vector<Eigen::Vector3f> CameraVisualizer::get_room_corners_3d() const
     return corners_3d;
 }
 
+std::vector<CameraVisualizer::ObjectBox> CameraVisualizer::get_dsr_object_boxes(std::uint64_t rt_timestamp) const
+{
+    std::vector<ObjectBox> boxes;
+    if (!graph_ || !inner_eigen_api_)
+        return boxes;
+
+    // Same node families the voxelizer draws in its 3D viewer: generic objects, tables and the
+    // bottle_concept cylinders. Each carries width/depth/height + a room←node RT edge.
+    const auto build_for = [&](const std::string& node_type)
+    {
+        for (const auto& node : graph_->get_nodes_by_type(node_type))
+        {
+            const auto width_opt  = graph_->get_attrib_by_name<width_m_att>(node);
+            const auto depth_opt  = graph_->get_attrib_by_name<depth_m_att>(node);
+            const auto height_opt = graph_->get_attrib_by_name<height_m_att>(node);
+            if (!width_opt.has_value() || !depth_opt.has_value() || !height_opt.has_value())
+                continue;
+
+            const float width = width_opt.value(), depth = depth_opt.value(), height = height_opt.value();
+            if (width <= 0.f || depth <= 0.f || height <= 0.f)
+                continue;
+
+            const auto room_T_object = inner_eigen_api_->get_transformation_matrix(
+                room_frame_name_, node.name(), rt_timestamp, "RT", DSR::RT_API::TimeQuery::Nearest);
+            if (!room_T_object.has_value())
+                continue;
+
+            const float hw = width * 0.5f, hd = depth * 0.5f, hh = height * 0.5f;
+
+            // Floor-standing furniture (tables) anchors its node origin at the base → box extends
+            // upward [0, h]; free objects are center-anchored → [-h/2, h/2]. Matches the voxelizer.
+            const bool stands_on_floor = (node.type() == "table") || (node.name().rfind("table", 0) == 0);
+            const float z_lo = stands_on_floor ? 0.f     : -hh;
+            const float z_hi = stands_on_floor ? height  :  hh;
+
+            const std::array<Eigen::Vector3d, 8> local = {
+                Eigen::Vector3d{-hw, -hd, z_lo}, Eigen::Vector3d{ hw, -hd, z_lo},
+                Eigen::Vector3d{ hw,  hd, z_lo}, Eigen::Vector3d{-hw,  hd, z_lo},
+                Eigen::Vector3d{-hw, -hd, z_hi}, Eigen::Vector3d{ hw, -hd, z_hi},
+                Eigen::Vector3d{ hw,  hd, z_hi}, Eigen::Vector3d{-hw,  hd, z_hi}
+            };
+
+            ObjectBox box;
+            box.node_name = node.name();
+            box.category  = node.name();
+            if (const auto it = node.attrs().find("semantic_class");
+                it != node.attrs().end() && it->second.selected() == 0)
+                box.category = it->second.str();
+            if (node.type() == "table")    box.category = "model_table";
+            if (node.type() == "cylinder") box.category = "bottle";
+
+            for (std::size_t i = 0; i < local.size(); ++i)
+            {
+                const Eigen::Vector3d c = room_T_object->linear() * local[i] + room_T_object->translation();
+                box.corners[i] = Eigen::Vector3f(static_cast<float>(c.x()),
+                                                 static_cast<float>(c.y()),
+                                                 static_cast<float>(c.z()));
+            }
+            boxes.push_back(std::move(box));
+        }
+    };
+
+    build_for("object");
+    build_for("table");
+    build_for("cylinder");
+    return boxes;
+}
+
+std::vector<CameraVisualizer::WallQuad> CameraVisualizer::get_dsr_wall_quads(std::uint64_t rt_timestamp) const
+{
+    std::vector<WallQuad> quads;
+    if (!graph_ || !inner_eigen_api_)
+        return quads;
+
+    for (const auto& node : graph_->get_nodes_by_type("wall"))
+    {
+        const auto width_opt  = graph_->get_attrib_by_name<width_m_att>(node);   // length along local X
+        const auto height_opt = graph_->get_attrib_by_name<height_m_att>(node);  // room height along local Z
+        if (!width_opt.has_value() || !height_opt.has_value())
+            continue;
+        const float L = width_opt.value(), H = height_opt.value();
+        if (L <= 0.f || H <= 0.f)
+            continue;
+
+        const auto room_T_wall = inner_eigen_api_->get_transformation_matrix(
+            room_frame_name_, node.name(), rt_timestamp, "RT", DSR::RT_API::TimeQuery::Nearest);
+        if (!room_T_wall.has_value())
+            continue;
+
+        const float hw = L * 0.5f, hh = H * 0.5f;
+        // Wall plane is local Y=0; X spans the length, Z the height, centred on the RT origin.
+        const std::array<Eigen::Vector3d, 4> local = {
+            Eigen::Vector3d{-hw, 0.0, -hh},   // bottom-left
+            Eigen::Vector3d{ hw, 0.0, -hh},   // bottom-right
+            Eigen::Vector3d{ hw, 0.0,  hh},   // top-right
+            Eigen::Vector3d{-hw, 0.0,  hh}    // top-left
+        };
+
+        WallQuad q;
+        q.node_name = node.name();
+        for (std::size_t i = 0; i < local.size(); ++i)
+        {
+            const Eigen::Vector3d c = room_T_wall->linear() * local[i] + room_T_wall->translation();
+            q.corners[i] = Eigen::Vector3f(static_cast<float>(c.x()),
+                                           static_cast<float>(c.y()),
+                                           static_cast<float>(c.z()));
+        }
+        quads.push_back(std::move(q));
+    }
+    return quads;
+}
+
+std::optional<Eigen::Affine3d> CameraVisualizer::predicted_camera_from_room(std::uint64_t frame_ts) const
+{
+    if (!graph_ || !inner_eigen_api_)
+        return std::nullopt;
+
+    const auto room_node = graph_->get_node(room_frame_name_);
+    if (!room_node.has_value())
+        return std::nullopt;
+
+    const auto robot_nodes = graph_->get_nodes_by_type("robot");
+    if (robot_nodes.empty())
+        return std::nullopt;
+    const auto& robot_node = robot_nodes.front();
+    const std::string robot_name = robot_node.name();
+
+    // room←robot at the frame time (DSR clamps/interpolates), and the static robot←zed mount.
+    const auto room_T_robot = inner_eigen_api_->get_transformation_matrix(
+        room_frame_name_, robot_name, frame_ts, "RT", DSR::RT_API::TimeQuery::Interpolated);
+    const auto robot_T_zed = inner_eigen_api_->get_transformation_matrix(
+        robot_name, camera_node_name_, 0, "RT", DSR::RT_API::TimeQuery::Nearest);
+    if (!room_T_robot.has_value() || !robot_T_zed.has_value())
+        return std::nullopt;
+
+    Eigen::Affine3d room_T_robot_pred = room_T_robot.value();
+
+    // Dead-reckon room←robot forward by (frame_ts − leading_edge_stamp) using the body twist
+    // written on the room→robot RT edge (rt_translation_velocity=[adv,side,0] m/s, body frame;
+    // rt_rotation_euler_xyz_velocity=[0,0,rot] rad/s). SE2 increment: t += R·v·dt, θ += rot·dt.
+    if (const auto rt_edge = graph_->get_edge(room_node->id(), robot_node.id(), "RT"); rt_edge.has_value())
+    {
+        const auto vel_t  = graph_->get_attrib_by_name<rt_translation_velocity_att>(rt_edge.value());
+        const auto vel_r  = graph_->get_attrib_by_name<rt_rotation_euler_xyz_velocity_att>(rt_edge.value());
+        const auto stamps = graph_->get_attrib_by_name<rt_timestamps_att>(rt_edge.value());
+
+        if (vel_t.has_value() && vel_r.has_value() && stamps.has_value()
+            && vel_t->get().size() >= 2 && vel_r->get().size() >= 3 && !stamps->get().empty())
+        {
+            std::uint64_t t_leading = 0;
+            for (const auto s : stamps->get())
+                t_leading = std::max(t_leading, s);
+
+            // Only forward-predict: if the frame predates the leading edge the pose was already
+            // bracketed/interpolated exactly, so dt=0. Clamp to the safety horizon.
+            double dt = (frame_ts > t_leading) ? (static_cast<double>(frame_ts - t_leading) * 1e-3) : 0.0;
+            dt = std::clamp(dt, 0.0, kMaxPredictHorizonS);
+
+            if (dt > 1e-4)
+            {
+                const float adv  = vel_t->get()[0];
+                const float side = vel_t->get()[1];
+                const float rot  = vel_r->get()[2];
+
+                const Eigen::Matrix3d R_old = room_T_robot->linear();
+                const Eigen::Vector3d t_old = room_T_robot->translation();
+                room_T_robot_pred.linear() =
+                    Eigen::AngleAxisd(rot * dt, Eigen::Vector3d::UnitZ()).toRotationMatrix() * R_old;
+                room_T_robot_pred.translation() =
+                    t_old + R_old * Eigen::Vector3d(adv, side, 0.0) * dt;
+            }
+        }
+    }
+
+    const Eigen::Affine3d room_T_zed_pred = room_T_robot_pred * robot_T_zed.value();
+    return room_T_zed_pred.inverse();   // camera_T_room: maps room points → camera frame
+}
+
 std::vector<Eigen::Vector2f> CameraVisualizer::project_points_to_image(
     const std::vector<Eigen::Vector3f>& world_points, std::uint64_t rt_timestamp) const
 {
@@ -474,8 +672,25 @@ void CameraVisualizer::draw_projections(QImage& image, std::uint64_t rt_timestam
     if (!inner_eigen_api_ || !camera_api_ || num_corners < 2)
         return;
 
+    // Prefer the latency-compensated camera pose (dead-reckoned to the frame's capture time) so the
+    // overlay does not trail the image during motion. Fall back to the plain time-indexed lookup.
     RoomToCameraBasis basis;
-    if (!compute_room_to_camera_basis(inner_eigen_api_.get(), camera_node_name_, room_frame_name_, rt_timestamp, basis))
+    bool basis_ok = false;
+    if (overlay_predict_pose_)
+    {
+        if (const auto cam_T_room = predicted_camera_from_room(rt_timestamp); cam_T_room.has_value())
+        {
+            const Eigen::Affine3d& M = cam_T_room.value();
+            basis.origin = M.translation();
+            basis.axis_x = M.linear().col(0);
+            basis.axis_y = M.linear().col(1);
+            basis.axis_z = M.linear().col(2);
+            basis_ok = true;
+        }
+    }
+    if (!basis_ok)
+        basis_ok = compute_room_to_camera_basis(inner_eigen_api_.get(), camera_node_name_, room_frame_name_, rt_timestamp, basis);
+    if (!basis_ok)
         return;
 
     // 1) Transform all room floor/top corners from room frame -> camera frame.
@@ -623,6 +838,104 @@ void CameraVisualizer::draw_projections(QImage& image, std::uint64_t rt_timestam
             painter.drawEllipse(QPointF(top_a.x(), top_a.y()), 4, 4);
         if (top_ok && finite(top_b))
             painter.drawEllipse(QPointF(top_b.x(), top_b.y()), 4, 4);
+    }
+
+    // 3.5) Translucent mesh + name label on each DSR wall. Each wall is a vertical quad; clip it
+    // against the camera near plane (Sutherland-Hodgman, keep camera-y >= near) so walls partly
+    // behind the camera still fill correctly, then project + fill translucent and label by name.
+    {
+        constexpr double near_y = 1e-4;
+        const QColor wall_fill(120, 90, 200, 60);    // translucent purple mesh
+        const QColor wall_edge(150, 120, 230, 170);
+        for (const auto& wall : get_dsr_wall_quads(rt_timestamp))
+        {
+            std::vector<Mat::Vector3d> cam;
+            cam.reserve(wall.corners.size());
+            for (const auto& c : wall.corners)
+                cam.push_back(transform_room_point(basis, Mat::Vector3d(c.x(), c.y(), c.z())));
+
+            std::vector<Mat::Vector3d> clipped;
+            for (std::size_t i = 0; i < cam.size(); ++i)
+            {
+                const Mat::Vector3d& curr = cam[i];
+                const Mat::Vector3d& next = cam[(i + 1) % cam.size()];
+                const bool in_curr = curr.y() >= near_y;
+                const bool in_next = next.y() >= near_y;
+                if (in_curr)
+                    clipped.push_back(curr);
+                if (in_curr != in_next)
+                {
+                    const double t = (near_y - curr.y()) / (next.y() - curr.y());
+                    clipped.push_back(curr + t * (next - curr));
+                }
+            }
+            if (clipped.size() < 3)
+                continue;
+
+            QPolygonF poly;
+            bool poly_ok = true;
+            for (const auto& p : clipped)
+            {
+                const Eigen::Vector2d uv = camera_api_->project(p);
+                if (!std::isfinite(uv.x()) || !std::isfinite(uv.y())) { poly_ok = false; break; }
+                poly << QPointF(uv.x(), uv.y());
+            }
+            if (!poly_ok || poly.size() < 3)
+                continue;
+
+            painter.setPen(QPen(wall_edge, 1.5));
+            painter.setBrush(QBrush(wall_fill));
+            painter.drawPolygon(poly);
+
+            // Name label at the projected polygon centroid (same style intent as object labels).
+            QPointF centroid(0.0, 0.0);
+            for (const auto& pt : poly)
+                centroid += pt;
+            centroid /= static_cast<double>(poly.size());
+            painter.setBrush(Qt::NoBrush);
+            painter.setPen(QPen(QColor(235, 220, 255)));
+            painter.drawText(centroid, QString::fromStdString(wall.node_name));
+        }
+        painter.setBrush(Qt::NoBrush);
+    }
+
+    // 4) Project every modelled DSR object (object/table/cylinder) as an oriented 3D box.
+    // 12 edges per box: bottom face (0-1-2-3), top face (4-5-6-7), 4 verticals (i ↔ i+4).
+    // Each edge is room→camera transformed, near-plane clipped and projected like the room edges.
+    painter.setBrush(Qt::NoBrush);
+    static constexpr int box_edges[12][2] = {
+        {0, 1}, {1, 2}, {2, 3}, {3, 0},   // bottom
+        {4, 5}, {5, 6}, {6, 7}, {7, 4},   // top
+        {0, 4}, {1, 5}, {2, 6}, {3, 7}    // verticals
+    };
+    for (const auto& box : get_dsr_object_boxes(rt_timestamp))
+    {
+        const QPen box_pen(color_for_category(box.category), 2.5);
+        for (const auto& e : box_edges)
+        {
+            const auto& ca = box.corners[e[0]];
+            const auto& cb = box.corners[e[1]];
+            const auto a_cam = transform_room_point(basis, Mat::Vector3d(ca.x(), ca.y(), ca.z()));
+            const auto b_cam = transform_room_point(basis, Mat::Vector3d(cb.x(), cb.y(), cb.z()));
+            Eigen::Vector2f a;
+            Eigen::Vector2f b;
+            if (project_clipped_segment(a_cam, b_cam, a, b))
+                draw_segment(a, b, box_pen);
+        }
+
+        // Label the box at its projected top-front corner (corner 4), if visible.
+        const auto& c0 = box.corners[4];
+        const auto c0_cam = transform_room_point(basis, Mat::Vector3d(c0.x(), c0.y(), c0.z()));
+        if (c0_cam.y() > 1e-4)
+        {
+            const Eigen::Vector2d uv = camera_api_->project(c0_cam);
+            if (std::isfinite(uv.x()) && std::isfinite(uv.y()))
+            {
+                painter.setPen(QPen(color_for_category(box.category)));
+                painter.drawText(QPointF(uv.x() + 3, uv.y() - 3),
+                                 QString::fromStdString(box.node_name));
+            }
+        }
     }
 
     painter.end();

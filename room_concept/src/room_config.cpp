@@ -179,6 +179,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.IorCellSize", ep.ior_cell_size);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.IorDecayTime", ep.ior_decay_time);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.WIor", ep.w_ior);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.WIorDrive", ep.w_ior_drive);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.WPathInterest", ep.w_path_interest);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.FimCornerSigma", ep.fim_corner_sigma);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.FimMaxRange", ep.fim_max_range);

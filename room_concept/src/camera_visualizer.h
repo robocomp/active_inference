@@ -8,9 +8,11 @@
 #include <QShowEvent>
 #include <QTimer>
 #include <QElapsedTimer>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <Eigen/Dense>
+#include <optional>
 #include <vector>
 #include <memory>
 #include <string>
@@ -126,6 +128,39 @@ class CameraVisualizer : public QDialog
         std::vector<Eigen::Vector3f> get_room_corners_3d() const;
         std::vector<Eigen::Vector2f> project_points_to_image(const std::vector<Eigen::Vector3f>& world_points,
                                                             std::uint64_t rt_timestamp) const;
+
+        // Oriented 3D box of a DSR object/table/cylinder node, with its 8 corners already
+        // transformed to the ROOM frame (same 8-corner convention as the voxelizer's
+        // GraphObjectBox: 0-3 = bottom face CCW, 4-7 = top face CCW). Drawn on top of the
+        // room-layout overlay so every modelled object is projected onto the live image.
+        struct ObjectBox
+        {
+            std::array<Eigen::Vector3f, 8> corners;  // room frame, metres
+            std::string category;                    // drives the overlay colour
+            std::string node_name;
+        };
+        // Read every object/table/cylinder node from the DSR and build its oriented room-frame
+        // box from width/depth/height + the room←node RT transform at rt_timestamp.
+        std::vector<ObjectBox> get_dsr_object_boxes(std::uint64_t rt_timestamp) const;
+
+        // Planar quad of a DSR wall node, 4 corners in the ROOM frame (CCW). A wall is a vertical
+        // rectangle: width_m along its local X, height_m along local Z, centred on its RT origin.
+        struct WallQuad
+        {
+            std::array<Eigen::Vector3f, 4> corners;  // room frame, metres (bottom-left, bottom-right, top-right, top-left)
+            std::string node_name;
+        };
+        std::vector<WallQuad> get_dsr_wall_quads(std::uint64_t rt_timestamp) const;
+
+        // Forward-predict the camera←room transform (maps room points → camera frame) to the RGB
+        // frame's capture time using the robot body twist on the room→robot RT edge. The localizer
+        // pose trails the camera stream and DSR clamps at the leading edge (never extrapolates), so
+        // a plain RT lookup returns a stale pose and the overlay lags the image during motion. This
+        // dead-reckons the latest pose forward by (frame_ts − leading_edge_stamp). Returns nullopt
+        // when inputs are missing → caller falls back to the plain RT lookup.
+        std::optional<Eigen::Affine3d> predicted_camera_from_room(std::uint64_t frame_ts) const;
+        bool overlay_predict_pose_ = true;   // toggle the dead-reckoning latency compensation
+
         void draw_projections(QImage& image, std::uint64_t rt_timestamp);
         void draw_status_overlay(QImage& image) const;
         void reset_timing_window();

@@ -288,8 +288,17 @@ AngularDominanceRatio = 50.0 # σ²_θ / max(σ²_x, σ²_y) threshold to trigge
 WExploration       = 0.5    # weight: distance bonus (explore farther)
 IorCellSize        = 0.5    # inhibition-of-return grid resolution (m)
 IorDecayTime       = 120.0  # seconds until visited cell is fully stale
-WIor               = 1.0    # weight: staleness bonus (lowered: the WMap occupancy term below now
-                            # drives exploration principledly, so IoR no longer needs to dominate)
+WIor               = 1.0    # MULTIPLICATIVE staleness suppressor exponent on fim_gain (score *=
+                            # staleness^WIor). NOTE: this vanishes once fim_gain→0, so it cannot keep
+                            # the robot moving after localization — that job is WIorDrive below.
+WIorDrive          = 0.5    # ADDITIVE, non-saturating IoR patrol drive (nats per unit staleness).
+                            # Both info terms (pose-FIM, occupancy) saturate in a static convex room,
+                            # so without this the robot stops after a few affordances. Staleness
+                            # recovers over IorDecayTime → the robot perpetually revisits the stalest
+                            # reachable cell. Kept below the info-term magnitudes so real info-gathering
+                            # wins first; it only dominates once info is exhausted. 0 ⇒ robot rests
+                            # when the room is fully known. TUNE: raise if it still stalls; lower if it
+                            # patrols too eagerly before finishing localization/coverage.
 # Non-saturating occupancy-entropy exploration term. CRITICAL: with WMap=0 the only epistemic drive
 # is the pose-FIM ΔH, which self-extinguishes once the robot is localized — so it publishes ONE
 # affordance, localizes, then advertises gain≈0 forever and the controller stops executing (robot
