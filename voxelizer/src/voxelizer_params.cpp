@@ -65,6 +65,14 @@ VoxelizerParams load_voxelizer_params(const ConfigLoader& configLoader)
     rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "HumanPose.kp_conf_min", params.SKELETON_KP_CONF_MIN);
     rc::ConfigLoaderUtils::load_optional(configLoader, "HumanPose.depth_patch", params.SKELETON_DEPTH_PATCH);
 
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Semantic.enabled", params.SEMANTIC_SEG_ENABLED);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Semantic.model_path", params.SEMANTIC_SEG_MODEL_PATH);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Semantic.conf_thresh", params.SEMANTIC_SEG_CONF_THRESH);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Semantic.input_size", params.SEMANTIC_SEG_INPUT_SIZE);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Semantic.use_gpu", params.SEMANTIC_SEG_USE_GPU);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Semantic.use_trt", params.SEMANTIC_SEG_USE_TRT);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Semantic.decimation", params.SEMANTIC_SEG_DECIMATION);
+
     // Optional DSR exports (default OFF — see header).
     rc::ConfigLoaderUtils::load_optional(configLoader, "Voxel.publish_tracks", params.PUBLISH_TRACKS);
     rc::ConfigLoaderUtils::load_optional(configLoader, "Voxel.publish_voxels", params.PUBLISH_VOXELS);

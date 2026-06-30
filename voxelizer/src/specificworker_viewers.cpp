@@ -20,6 +20,7 @@
 #include "voxel_processor.h"
 #include "voxel_opengl_viewer.h"
 #include "yolo_viewer.h"
+#include "yolo_semantic.h"
 #include "graph_publisher.h"
 
 namespace
@@ -188,8 +189,50 @@ void SpecificWorker::setup_custom_viewers()
     if (params.SHOW_YOLO_VIEWER)
     {
         yolo_viewer_ = std::make_unique<rc::YoloViewer>(nullptr);
-        yolo_viewer_->setWindowTitle("YOLO");
-        yolo_window_ = yolo_viewer_.get();   // the widget itself is the top-level window
+
+        if (yolo_semantic_processor)
+        {
+            // Wrap the raster label in a panel so we can host a control row above it: a toggle for
+            // the dense semantic-segmentation overlay (only shown when the *-sem model is loaded).
+            auto* yolo_panel = new QWidget(nullptr);
+            auto* yolo_layout = new QVBoxLayout(yolo_panel);
+            yolo_layout->setContentsMargins(6, 6, 6, 6);
+            yolo_layout->setSpacing(6);
+
+            auto* controls = new QHBoxLayout();
+            controls->setContentsMargins(0, 0, 0, 0);
+            controls->setSpacing(8);
+
+            auto* sem_btn = new QPushButton(semantic_overlay_enabled_ ? "Semantic: ON" : "Semantic: OFF", yolo_panel);
+            sem_btn->setCheckable(true);
+            sem_btn->setChecked(semantic_overlay_enabled_);
+            sem_btn->setCursor(Qt::PointingHandCursor);
+            sem_btn->setStyleSheet(QString(
+                "QPushButton { border: 2px solid %1; border-radius: 4px; padding: 3px 8px; }"
+                "QPushButton:checked { background-color: %1; color: #101010; }").arg("#64C8FF"));
+            connect(sem_btn, &QPushButton::toggled, this, [this, sem_btn](bool checked)
+            {
+                semantic_overlay_enabled_ = checked;
+                sem_btn->setText(checked ? "Semantic: ON" : "Semantic: OFF");
+            });
+            controls->addWidget(sem_btn);
+            controls->addStretch(1);
+
+            // Feed the class-id → name table so the viewer can show the label under the cursor.
+            yolo_viewer_->set_class_names(yolo_semantic_processor->class_names());
+
+            yolo_layout->addLayout(controls);
+            yolo_layout->addWidget(yolo_viewer_.get(), 1);   // reparents the label into the panel
+
+            yolo_panel->setWindowTitle("YOLO");
+            yolo_window_ = yolo_panel;   // the panel is the top-level window
+        }
+        else
+        {
+            yolo_viewer_->setWindowTitle("YOLO");
+            yolo_window_ = yolo_viewer_.get();   // no controls → the label itself is the window
+        }
+
         // Restore the last geometry; otherwise size the RGB window to the camera image on first frame.
         if (not restore_external_window_geometry(yolo_window_, "YOLOWindow"))
             yolo_window_needs_image_size_ = true;

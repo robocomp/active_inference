@@ -153,6 +153,7 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
             G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_motion_var", std::vector<float>{});
             G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_trunc_frac", std::vector<float>{});
             G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_centroid_radius", std::vector<float>{});
+            G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_range", std::vector<float>{});
             G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_cam_twist", std::vector<float>{0,0,0,0,0,0});
             G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_frame_dt_s", 0.0f);
             G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_rt_lag_s", -1.0f);
@@ -263,6 +264,7 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
     std::vector<float> motion_var;        // variance to ADD to R (m²) — blur + jitter, ×peripheral
     std::vector<float> trunc_frac;        // fraction of silhouette pixels on the image border (truncation)
     std::vector<float> centroid_radius;   // normalized centroid radius from principal point (periphery)
+    std::vector<float> mask_range;         // mean camera→mask depth Z (m): static range — consumer scales R + pose common-mode (a far view can't resolve orientation)
     std::ostringstream labels_joined;
     std::size_t total_support_points = 0;
     support_offsets.push_back(0.0f);
@@ -434,6 +436,7 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
             trunc_frac.push_back(tau);
             const float radius = std::sqrt(xn * xn + yn * yn);
             centroid_radius.push_back(radius);
+            mask_range.push_back(Z);   // static range: distance carries info loss even at zero motion
 
             if (motion_csv_.is_open())
                 motion_csv_ << sensing_frame << ',' << frame_ts_ms << ',' << frame_dt_s << ','
@@ -467,6 +470,7 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
         G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_motion_var", motion_var);
         G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_trunc_frac", trunc_frac);
         G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_centroid_radius", centroid_radius);
+        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_range", mask_range);
         const std::vector<float> twist_flat{
             cam_twist_optical.v.x(), cam_twist_optical.v.y(), cam_twist_optical.v.z(),
             cam_twist_optical.w.x(), cam_twist_optical.w.y(), cam_twist_optical.w.z()};

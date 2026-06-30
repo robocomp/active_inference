@@ -134,10 +134,9 @@ public:
     void configure(const Config& config);
 
     std::vector<SegDetection> detect_segmentation(const cv::Mat& rgb_frame);
-    // Same as detect_segmentation but on an ALREADY tray-masked frame — lets the caller mask once and
-    // reuse the result for both detection and the viewer overlay (avoids a 2nd full-frame clone/cycle).
-    std::vector<SegDetection> detect_segmentation_on(const cv::Mat& masked_rgb_frame);
-    cv::Mat apply_tray_mask(const cv::Mat& rgb_frame) const;
+    // Runs detection on the given frame and applies postprocess (label normalization, accepted-label
+    // filtering, tray-region suppression). detect_segmentation forwards the clean frame here.
+    std::vector<SegDetection> detect_segmentation_on(const cv::Mat& rgb_frame);
     cv::Mat compose_detection_canvas(const cv::Mat& rgb_frame,
                                      const std::vector<SegDetection>& detections) const;
 

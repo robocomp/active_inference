@@ -22,6 +22,7 @@
 #include "voxel_processor.h"
 #include "yolo_processor.h"
 #include "yolo_human.h"
+#include "yolo_semantic.h"
 #include "graph_publisher.h"
 #ifdef emit
 #undef emit
@@ -158,6 +159,29 @@ void SpecificWorker::initialize()
             qWarning() << "[HumanPose] disabled — failed to load model" << params.HUMAN_POSE_MODEL_PATH.c_str()
                        << ":" << e.what();
             yolo_human_processor.reset();
+        }
+    }
+
+    // --- Semantic segmentation (optional dense ADE20K-150 per-pixel class map → viewer overlay) ---
+    if (params.SEMANTIC_SEG_ENABLED)
+    {
+        try
+        {
+            yolo_semantic_processor = std::make_unique<rc::semantic::YoloSemanticProcessor>();
+            rc::semantic::YoloSemanticProcessor::Config sem_config;
+            sem_config.model_path    = params.SEMANTIC_SEG_MODEL_PATH;
+            sem_config.conf_thresh   = params.SEMANTIC_SEG_CONF_THRESH;
+            sem_config.input_size    = params.SEMANTIC_SEG_INPUT_SIZE;
+            sem_config.use_gpu       = params.SEMANTIC_SEG_USE_GPU;
+            sem_config.use_trt       = params.SEMANTIC_SEG_USE_TRT;
+            sem_config.verbose_debug = verbose_debug_;
+            yolo_semantic_processor->configure(sem_config);
+        }
+        catch (const std::exception& e)
+        {
+            qWarning() << "[Semantic] disabled — failed to load model" << params.SEMANTIC_SEG_MODEL_PATH.c_str()
+                       << ":" << e.what();
+            yolo_semantic_processor.reset();
         }
     }
 
@@ -307,13 +331,11 @@ void SpecificWorker::compute()
         return;
     last_rgb_ts_ = frame->frame_ts_ms;
 
-    // Tray-mask the frame ONCE and reuse it for both detection and the viewer overlay (one full-frame
-    // clone/cycle instead of two). update_frame() clones internally and only reads, so sharing is safe.
-    const cv::Mat masked_rgb = yolo_processor
-        ? yolo_processor->apply_tray_mask(frame->rgbd.rgb)
-        : frame->rgbd.rgb;
+    // YOLO runs on the CLEAN frame (no tray black-out). The tray would be segmented as a phantom
+    // object, but rather than corrupting the image we let it be detected and drop any detection that
+    // overlaps the tray region in postprocess (see YoloProcessor::postprocess_yolo_detections).
     const auto detections = yolo_processor
-        ? yolo_processor->detect_segmentation_on(masked_rgb)
+        ? yolo_processor->detect_segmentation(frame->rgbd.rgb)
         : std::vector<SegDetection>{};
 
     // Human-pose: the MODEL runs decimated (every kPoseDecimation-th cycle — people don't move at
@@ -327,6 +349,16 @@ void SpecificWorker::compute()
     const auto& poses = (yolo_human_processor and yolo_human_processor->ready())
         ? yolo_human_processor->last_poses()
         : kNoPoses;
+
+    // Semantic segmentation: dense ADE20K-150 per-pixel class map. Heavy, so run decimated (the last
+    // map is reused for the overlay on skipped cycles). Feeds the viewer overlay only, and the whole
+    // pass is gated by the YOLO-window "Semantic" toggle so deactivating it also stops the model work.
+    if (yolo_semantic_processor and yolo_semantic_processor->ready() and semantic_overlay_enabled_)
+    {
+        const int decim = std::max(1, params.SEMANTIC_SEG_DECIMATION);
+        if (semantic_frame_counter_++ % decim == 0)
+            yolo_semantic_processor->segment(frame->rgbd.rgb);   // refresh the cached label map
+    }
 
     // Voxel computation gated OFF for now — we only run the masks pipeline (YOLO detections →
     // graph_publisher publishes the "masks" support points, consumed by table/bottle_concept). The
@@ -360,11 +392,18 @@ void SpecificWorker::compute()
 
     if (yolo_viewer_)
     {
-        cv::Mat viewer_rgb = masked_rgb;   // already tray-masked above — no extra clone
+        cv::Mat viewer_rgb = frame->rgbd.rgb;   // clean frame (no tray black-out); update_frame clones
+        // Dense semantic class-map underlay (blended) first, then skeletons + seg masks on top.
+        if (yolo_semantic_processor and semantic_overlay_enabled_
+            and not yolo_semantic_processor->last_map().labels.empty())
+            viewer_rgb = yolo_semantic_processor->compose_semantic_canvas(viewer_rgb, yolo_semantic_processor->last_map());
         // Draw the detected skeletons (green bones, red joints, orange bbox) under the seg overlay.
         if (yolo_human_processor and not poses.empty())
             viewer_rgb = yolo_human_processor->compose_pose_canvas(viewer_rgb, poses);
         yolo_viewer_->update_frame(viewer_rgb, detections);
+        // Feed the dense label map for the hover readout (cleared internally when not active).
+        if (yolo_semantic_processor)
+            yolo_viewer_->update_semantic(yolo_semantic_processor->last_map().labels, semantic_overlay_enabled_);
         // Size the RGB window to the image once (only when no saved geometry was restored).
         if (yolo_window_needs_image_size_ and yolo_window_ != nullptr and not viewer_rgb.empty())
         {

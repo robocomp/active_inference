@@ -49,6 +49,7 @@ class SceneProcessor;
 class GraphPublisher;
 struct SegDetection;
 namespace rc::human_pose { class YoloHumanProcessor; }
+namespace rc::semantic { class YoloSemanticProcessor; }
 
 namespace rc { class VoxelOpenGLViewer; }
 namespace rc { class YoloViewer; }
@@ -121,6 +122,8 @@ class SpecificWorker : public GenericWorker
         // 10 Hz; the model finds 0 people ~always). N=3 ≈ 3 Hz — roughly halves total YOLO CPU.
         static constexpr int kPoseDecimation = 3;
         int pose_frame_counter_ = 0;
+        // Semantic-seg decimation counter (period read from params.SEMANTIC_SEG_DECIMATION).
+        int semantic_frame_counter_ = 0;
 
         // Camera stamp of the last RGB frame we actually processed. The media cache repeats the last
         // frame when nothing new arrived, so we dedup on this to make the RGB pipeline (YOLO + viewer +
@@ -134,6 +137,7 @@ class SpecificWorker : public GenericWorker
 
         std::unique_ptr<YoloProcessor>     yolo_processor;
         std::unique_ptr<rc::human_pose::YoloHumanProcessor> yolo_human_processor;
+        std::unique_ptr<rc::semantic::YoloSemanticProcessor> yolo_semantic_processor;
         std::unique_ptr<LidarTrackAttributor> lidar_track_attributor;
         std::unique_ptr<UnifiedVoxelGrid>  voxel_grid;
         std::unique_ptr<VoxelProcessor>    voxel_processor;
@@ -155,6 +159,7 @@ class SpecificWorker : public GenericWorker
         QWidget* voxel3d_window_ = nullptr;
         QWidget* yolo_window_ = nullptr;
         bool yolo_window_needs_image_size_ = false;  // size the RGB window to the image on first frame
+        bool semantic_overlay_enabled_ = true;       // YOLO-window toggle: run + draw the semantic overlay
         void save_external_window_geometry() const;
 
     signals:

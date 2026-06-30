@@ -61,6 +61,8 @@ public:
         float motion_dotd     = 0.0f;  // metric position-corruption speed Z·‖ṡ‖ (m/s), diagnostic
         float trunc_frac      = 0.0f;  // fraction of silhouette pixels on the image border → unobserved face
         float centroid_radius = 0.0f;  // normalised centroid radius from the principal point (periphery)
+        float range           = 0.0f;  // mean camera→mask depth Z (m): STATIC range — consumer grows R + pose
+                                       // common-mode with it so a distant view can't resolve pose/orientation
     };
 
     struct MasksPacket

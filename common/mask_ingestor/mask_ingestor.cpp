@@ -62,6 +62,7 @@ bool MaskIngestor::refresh()
     const DSR::Attribute* motion_dotd_attr     = find_attr("mask_motion_dotd");
     const DSR::Attribute* trunc_frac_attr      = find_attr("mask_trunc_frac");
     const DSR::Attribute* centroid_radius_attr = find_attr("mask_centroid_radius");
+    const DSR::Attribute* range_attr           = find_attr("mask_range");
     const DSR::Attribute* cam_twist_attr       = find_attr("mask_cam_twist");
     const DSR::Attribute* frame_dt_attr        = find_attr("mask_frame_dt_s");
 
@@ -95,6 +96,7 @@ bool MaskIngestor::refresh()
     const auto& motion_dotd_v     = motion_dotd_attr     ? motion_dotd_attr->float_vec()     : empty_flat;
     const auto& trunc_frac_v      = trunc_frac_attr      ? trunc_frac_attr->float_vec()      : empty_flat;
     const auto& centroid_radius_v = centroid_radius_attr ? centroid_radius_attr->float_vec() : empty_flat;
+    const auto& range_v           = range_attr           ? range_attr->float_vec()           : empty_flat;
 
     // Part B: with frame-transform enabled, source the camera-frame support array and transform it to
     // the target frame below; otherwise use the legacy room-frame array as-is.
@@ -182,6 +184,7 @@ bool MaskIngestor::refresh()
         slice.motion_dotd     = fetch1(motion_dotd_v);
         slice.trunc_frac      = fetch1(trunc_frac_v);
         slice.centroid_radius = fetch1(centroid_radius_v);
+        slice.range           = fetch1(range_v);
         slice.support_begin = clamped_begin;
         slice.support_end = clamped_end;
         {

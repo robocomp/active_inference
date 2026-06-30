@@ -60,21 +60,22 @@ Verbose = false
 # (see README "TensorRT version lock"). Set false to run on the CUDA EP only — version-independent,
 # same masks, no TRT speedup — if the TRT libs can't be reconciled (e.g. after an apt upgrade).
 use_trt =true
-model_path = "yolo26l-seg.onnx" 
+model_path = "yolo26x-seg.onnx" 
 accepted_labels = ["table", "chair", "monitor", "tv", "bottle"]
 mask_tray = true
 tray_mask_ref_width  = 1280
 tray_mask_ref_height = 720
 # Flat-topped polygon bounding the robot tray (flat x,y pairs, referenced to 1280×720).
 # The real tray rim is nearly flat across the centre with rounded shoulders, NOT a
-# semicircle — the old crescent dipped below the flat rim at the centre-sides, leaving
-# tray pixels exposed → YOLO artifacts. This traces a flat plateau (y≈600 across the
-# central ±220 px) then rounds the shoulders down to the image bottom, then closes
-# along the bottom edge.  Adjust if the camera mount changes.
+# semicircle. This traces a flat plateau (y≈657 across the central ±220 px) then rounds
+# the shoulders down to the image bottom, then closes along the bottom edge.  The tray
+# is shallow, so the vertical extent is ~63 px at centre.  NOTE: this polygon no longer
+# blacks out the RGB pixels — YOLO runs on the clean frame and any detection overlapping
+# this region is dropped in postprocess (mask_tray gate).  Adjust if the mount changes.
 tray_mask_polygon = [
-    195, 720,  242, 700,  298, 672,  358, 638,  420, 608,
-    480, 602,  560, 600,  640, 599,  720, 600,  800, 602,
-    860, 608,  922, 638,  982, 672, 1038, 700, 1086, 720,
+    195, 720,  242, 710,  298, 695,  358, 677,  420, 662,
+    480, 659,  560, 658,  640, 657,  720, 658,  800, 659,
+    860, 662,  922, 677,  982, 695, 1038, 710, 1086, 720,
     1280, 720,  0, 720
 ]
 
@@ -88,6 +89,18 @@ conf_thresh = 0.30          # person-detection confidence floor
 kp_conf_min = 0.30          # per-joint floor; below this a keypoint is dropped (NaN)
 depth_patch = 2             # half-window (px) for the median-depth sample at each joint
 use_trt = true             # pose model is cheap; CUDA EP is fine and avoids the TRT version lock
+
+[Semantic]
+# YOLO26 semantic-segmentation model (ADE20K-150) on the same RGB frame → a DENSE per-pixel class
+# map (vs the sparse per-instance seg masks). Currently a viewer overlay only (no DSR publish).
+# Default OFF — set enabled=true once the ONNX model exists. Export with:
+#   yolo export model=yolo26l-sem-ade20k.pt format=onnx   (gives yolo26l-sem-ade20k.onnx).
+enabled = true
+model_path = "yolo26l-sem-ade20k.onnx"
+conf_thresh = 0.25          # per-pixel argmax-softmax floor; below it the pixel is "ignore" (255)
+input_size = 640
+use_trt = false             # dense model; CUDA EP avoids the TRT version lock
+decimation = 2              # run the model every Nth cycle; reuse the last map on skipped cycles
 
 [Voxel]
 # Optional DSR exports beyond 'masks' (the live product consumed by the concept agents).

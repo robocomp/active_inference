@@ -41,16 +41,17 @@ std::vector<SegDetection> YoloProcessor::detect_segmentation(const cv::Mat& rgb_
 {
     if (rgb_frame.empty())
         return {};
-    return detect_segmentation_on(apply_tray_mask(rgb_frame));
+    // No tray black-out: run on the clean frame; tray-region detections are dropped in postprocess.
+    return detect_segmentation_on(rgb_frame);
 }
 
-std::vector<SegDetection> YoloProcessor::detect_segmentation_on(const cv::Mat& masked_rgb_frame)
+std::vector<SegDetection> YoloProcessor::detect_segmentation_on(const cv::Mat& rgb_frame)
 {
-    if (!detector_.has_value() || masked_rgb_frame.empty()
-        || masked_rgb_frame.cols <= 0 || masked_rgb_frame.rows <= 0)
+    if (!detector_.has_value() || rgb_frame.empty()
+        || rgb_frame.cols <= 0 || rgb_frame.rows <= 0)
         return {};
 
-    auto detections = detector_->detect(masked_rgb_frame, true);
+    auto detections = detector_->detect(rgb_frame, true);
     postprocess_yolo_detections(detections);
     return detections;
 }
@@ -75,21 +76,6 @@ std::vector<cv::Point> YoloProcessor::get_tray_mask_polygon(const cv::Size& imag
     }
 
     return polygon;
-}
-
-cv::Mat YoloProcessor::apply_tray_mask(const cv::Mat& rgb_frame) const
-{
-    if (rgb_frame.empty())
-        return {};
-
-    const auto polygon = get_tray_mask_polygon(rgb_frame.size());
-    if (polygon.size() < 3)
-        return rgb_frame.clone();
-
-    cv::Mat masked = rgb_frame.clone();
-    const std::vector<std::vector<cv::Point>> polygons{polygon};
-    cv::fillPoly(masked, polygons, cv::Scalar(0, 0, 0));
-    return masked;
 }
 
 std::string YoloProcessor::normalize_yolo_label(const std::string& label) const
@@ -135,12 +121,12 @@ void YoloProcessor::postprocess_yolo_detections(std::vector<SegDetection>& detec
         detection.mask = eroded;
     }
 
-    // Tray phantom removal (generative reasoning): the robot's visible tray, if segmented, reads as a
-    // "table". So a detection labelled "table" whose ROI overlaps the tray zone IS that phantom — drop
-    // it. Other labels (e.g. a bottle the robot holds in the tray) are real objects and are kept. The
-    // bbox is rectangular and the tray crescent is curved, so we test the actual tray pixels inside the
-    // ROI (not rect-vs-rect). tray_drop_fraction = min ROI/tray overlap to drop (0 ⇒ any intersection).
-    // The tray raster is cached (image size is fixed).
+    // Tray phantom removal: the robot's visible tray, if segmented, reads as a "table". So a detection
+    // labelled "table" whose ROI overlaps the tray zone IS that phantom — drop it. We no longer black
+    // out the pixels (YOLO runs on the clean frame); we just reject the table phantom here. Other labels
+    // (e.g. a bottle the robot holds in the tray) are kept. The bbox is rectangular and the tray is
+    // curved, so we test the actual tray pixels inside the ROI (not rect-vs-rect). tray_drop_fraction =
+    // min ROI/tray overlap to drop (0 ⇒ any intersection). The tray raster is cached (size is fixed).
     if (config_.mask_tray)
     {
         cv::Size img;

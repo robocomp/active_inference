@@ -32,6 +32,7 @@ LIST(APPEND SOURCES
   ../src/chair_scene_graph.cpp
   ../src/chair_fitter.cpp
   ../src/chair_model.cpp
+  ../src/chair_belief.cpp
   ../src/epistemic_planner.cpp
   ../src/prior_store.cpp
   ../src/chair_affordance.cpp

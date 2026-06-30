@@ -94,6 +94,18 @@ struct VoxelizerParams
     // Half-window (px) for the median-depth patch sampled at each keypoint (0 = single pixel).
     int         SKELETON_DEPTH_PATCH    = 2;
 
+    // Semantic-segmentation branch (yolo_semantic): a YOLO26 *-sem model on the same RGB frame
+    // producing a DENSE per-pixel ADE20K-150 class map (vs the sparse per-instance seg masks).
+    // Currently a viewer overlay only — no DSR publish. Default OFF.
+    bool        SEMANTIC_SEG_ENABLED    = false;                    // Semantic.enabled
+    std::string SEMANTIC_SEG_MODEL_PATH = "yolo26l-sem-ade20k.onnx";
+    float       SEMANTIC_SEG_CONF_THRESH= 0.25f;                    // per-pixel argmax-softmax floor
+    int         SEMANTIC_SEG_INPUT_SIZE = 640;
+    bool        SEMANTIC_SEG_USE_GPU    = true;
+    bool        SEMANTIC_SEG_USE_TRT    = false;
+    // Run the (heavy dense) model every Nth cycle; the last map is reused on skipped cycles.
+    int         SEMANTIC_SEG_DECIMATION = 1;
+
     // Media plane (zero-copy DDS) for RGBD pixels carried OUT of the graph.
     int         MEDIA_DOMAIN_ID   = 0;
     std::string MEDIA_RGB_TOPIC   = "rc/zed/rgb";

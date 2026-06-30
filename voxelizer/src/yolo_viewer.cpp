@@ -4,6 +4,10 @@
 #include <opencv2/imgproc.hpp>
 #include <QImage>
 #include <QResizeEvent>
+#include <QMouseEvent>
+#include <QToolTip>
+
+#include <algorithm>
 
 namespace rc
 {
@@ -27,6 +31,7 @@ YoloViewer::YoloViewer(QWidget* parent)
     setMinimumSize(320, 240);
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     setText("Waiting for YOLO frame…");
+    setMouseTracking(true);   // fire mouseMoveEvent without a pressed button (for the hover readout)
 }
 
 // ─── Rendering ───────────────────────────────────────────────────────────────
@@ -125,6 +130,54 @@ void YoloViewer::resizeEvent(QResizeEvent* event)
     QLabel::resizeEvent(event);
     if (!last_pixmap_.isNull())
         setPixmap(last_pixmap_.scaled(size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+}
+
+void YoloViewer::update_semantic(const cv::Mat& labels, bool active)
+{
+    semantic_active_ = active;
+    // Keep our own copy: the source map is recomputed in place each (decimated) cycle.
+    if (active and not labels.empty())
+        semantic_labels_ = labels.clone();
+    else
+        semantic_labels_.release();
+}
+
+void YoloViewer::mouseMoveEvent(QMouseEvent* event)
+{
+    QLabel::mouseMoveEvent(event);
+
+    if (!semantic_active_ or semantic_labels_.empty() or last_pixmap_.isNull())
+    {
+        QToolTip::hideText();
+        return;
+    }
+
+    // The pixmap is shown scaled-to-fit (KeepAspectRatio) and centred (AlignCenter), so undo that
+    // letterbox transform to recover the image pixel under the cursor.
+    const QSize shown = last_pixmap_.size().scaled(size(), Qt::KeepAspectRatio);
+    const int off_x = (width()  - shown.width())  / 2;
+    const int off_y = (height() - shown.height()) / 2;
+
+    const QPoint p = event->position().toPoint();
+    const double rx = static_cast<double>(p.x() - off_x) / shown.width();
+    const double ry = static_cast<double>(p.y() - off_y) / shown.height();
+    if (rx < 0.0 or rx >= 1.0 or ry < 0.0 or ry >= 1.0)   // cursor in the letterbox margin
+    {
+        QToolTip::hideText();
+        return;
+    }
+
+    const int ix = std::clamp(static_cast<int>(rx * semantic_labels_.cols), 0, semantic_labels_.cols - 1);
+    const int iy = std::clamp(static_cast<int>(ry * semantic_labels_.rows), 0, semantic_labels_.rows - 1);
+    const int id = semantic_labels_.at<unsigned char>(iy, ix);
+
+    QString text;
+    if (id >= 0 and id < static_cast<int>(class_names_.size()))
+        text = QString::fromStdString(class_names_[static_cast<std::size_t>(id)]);
+    else
+        text = QStringLiteral("(unlabelled)");   // IGNORE_LABEL (255) / below confidence
+
+    QToolTip::showText(event->globalPosition().toPoint(), text, this);
 }
 
 } // namespace rc
