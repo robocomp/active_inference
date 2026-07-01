@@ -17,6 +17,7 @@
 #include <Eigen/Dense>
 
 #include "chair_model.h"        // ChairModel / ChairState / FreeEnergyDecomposition
+#include "chair_belief.h"       // rc::ChairBelief (AI2 recursive-Laplace belief)
 #include "sample_queue_geometry.h"   // common SampleQueue<Model> + chair's geometry policy
 #include "chair_affordance.h"   // ChairAffordance
 #include "../../common/belief_stabilizer/belief_stabilizer.h"   // rc::StabilizerState
@@ -37,7 +38,15 @@ struct ChairInstance
     int  frames_rising      = 0;      // consecutive frames with F increasing
     int  last_masks_frame_seen = -1;  // last masks packet frame consumed
     std::uint64_t last_mask_timestamp_ms = 0;  // capture stamp of the last consumed mask (chain-cov pinning)
-    float chain_cov_xx = 0.0f, chain_cov_yy = 0.0f;  // Part B localization/chain cov (m²), added to the RT cov
+    float chain_cov_xx = 0.0f, chain_cov_yy = 0.0f, chain_cov_yaw = 0.0f;  // localization/chain cov (m²,rad²)
+
+    // ── AI2 belief (UseAI2): the recursive-Laplace belief on the shared engine ────
+    ChairBelief ai2_belief;
+    bool  ai2_initialized = false;
+    float last_motion_var  = 0.0f;   // ego-motion downweight (added to R)
+    float last_motion_dotd = 0.0f;   // motion-corruption speed (diagnostic)
+    float last_trunc_frac  = 0.0f;   // silhouette truncation (predict-only gate)
+    float last_range       = 0.0f;   // mean camera→mask depth Z (m): static range weighting
     int  assigned_mask_idx  = -1;     // tracker's gated mask-slice assignment (-1 = use greedy nearest)
     int  unassigned_streak  = 0;      // consecutive tracker cycles with no mask assignment (stillbirth prune)
     int  processed_cycles   = 0;      // per-chair compute cycles for log throttling

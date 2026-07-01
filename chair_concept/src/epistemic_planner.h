@@ -22,6 +22,7 @@
 
 #include "sample_queue_geometry.h"   // common SampleQueue<Model> + chair's geometry policy (face_coverage)
 #include "chair_model.h"
+#include "chair_belief.h"            // AI2 belief: Σ + predicted_information for the Σ-based NBV
 
 // ─── Proposal ────────────────────────────────────────────────────────────────
 
@@ -78,6 +79,14 @@ public:
     EpistemicProposal compute(const ChairModel&  model,
                               const SampleQueue<ChairModel>& queue,
                               const std::array<float, 8>& posterior_info = {}) const;
+
+    /**
+     * AI2-native next-best-view: scores each vertical seat-face by the D-optimal expected entropy
+     * reduction on the belief's full Σ — gain(i) = ½·ln det(I₈ + Σ·ΔI(i)), ΔI(i) = Σₚ (1/Rᵢ) Jₚ Jₚᵀ
+     * (ChairBelief::predicted_information), Rᵢ = σ_base² + (lat_rate·standoffᵢ)². No sample queue / Fisher
+     * diagonal. Targets the dominant uncertainty eigen-direction (an unobserved extent / seat depth / yaw).
+     */
+    EpistemicProposal compute(const ChairBelief& belief, float lat_rate, float sigma_base) const;
 
 private:
     float delta_min_;

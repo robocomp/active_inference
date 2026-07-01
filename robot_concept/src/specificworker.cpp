@@ -90,6 +90,7 @@ void SpecificWorker::request_shutdown()
 	stop_imu_thread = true;
 	stop_lidar_thread = true;
 	stop_rgbd_thread = true;
+	stop_ricoh_thread = true;
 
 	if (imu_thread.joinable())
 		imu_thread.join();
@@ -97,6 +98,8 @@ void SpecificWorker::request_shutdown()
 		lidar_thread.join();
 	if (rgbd_thread.joinable())
 		rgbd_thread.join();
+	if (ricoh_thread.joinable())
+		ricoh_thread.join();
 
 	// Tear down DDS endpoints after producer threads are fully stopped.
 	media_.shutdown();
@@ -121,8 +124,13 @@ void SpecificWorker::initialize()
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.domain_id", params.MEDIA_DOMAIN_ID);
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.rgb_topic", params.MEDIA_RGB_TOPIC);
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.depth_topic", params.MEDIA_DEPTH_TOPIC);
+	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.ricoh_topic", params.MEDIA_RICOH_TOPIC);
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.lidar_topic", params.MEDIA_LIDAR_TOPIC);
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.imu_topic", params.MEDIA_IMU_TOPIC);
+	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.enable_zed",   params.ENABLE_ZED);
+	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.enable_ricoh", params.ENABLE_RICOH);
+	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.enable_lidar", params.ENABLE_LIDAR);
+	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.enable_imu",   params.ENABLE_IMU);
 
 	qInfo() << "[DSR Upload Rates] rgb=" << params.DSR_RGB_FPS
 	        << "depth=" << params.DSR_DEPTH_FPS
@@ -193,11 +201,21 @@ void SpecificWorker::initialize()
 		SensorMediaPublisher::Config mcfg;
 		mcfg.domain_id     = static_cast<std::uint32_t>(params.MEDIA_DOMAIN_ID);
 		mcfg.history_depth = 8;
-		mcfg.image_streams = {{"rgb",   params.MEDIA_RGB_TOPIC,   rc::media::STREAM_ZED_RGB},
-		                      {"depth", params.MEDIA_DEPTH_TOPIC, rc::media::STREAM_ZED_DEPTH}};
-		mcfg.lidar_stream  = {{"lidar", params.MEDIA_LIDAR_TOPIC, rc::media::STREAM_LIDAR}};
-		mcfg.imu_stream    = {{"imu",   params.MEDIA_IMU_TOPIC,   rc::media::STREAM_IMU}};
+		// Each stream is registered only when its [Media].enable_* gate is on.
+		if (params.ENABLE_ZED)
+			mcfg.image_streams = {{"rgb",   params.MEDIA_RGB_TOPIC,   rc::media::STREAM_ZED_RGB},
+			                      {"depth", params.MEDIA_DEPTH_TOPIC, rc::media::STREAM_ZED_DEPTH}};
+		// The RGBD_360 panorama rides its OWN wide Image360Frame plane (5.5 MB buffer),
+		// kept separate from the ZED ImageFrame so its small buffer is not enlarged.
+		if (params.ENABLE_RICOH)
+			mcfg.image360_stream = {{"rgb360", params.MEDIA_RICOH_TOPIC, rc::media::STREAM_RICOH_RGB}};
+		if (params.ENABLE_LIDAR)
+			mcfg.lidar_stream  = {{"lidar", params.MEDIA_LIDAR_TOPIC, rc::media::STREAM_LIDAR}};
+		if (params.ENABLE_IMU)
+			mcfg.imu_stream    = {{"imu",   params.MEDIA_IMU_TOPIC,   rc::media::STREAM_IMU}};
 		media_.init(mcfg);
+		qInfo() << "[Media] stream gates — zed:" << params.ENABLE_ZED << "ricoh:" << params.ENABLE_RICOH
+		        << "lidar:" << params.ENABLE_LIDAR << "imu:" << params.ENABLE_IMU;
 	}
 
 	// Advertise the plane PER SENSOR NODE so ANY agent can discover and subscribe
@@ -206,13 +224,16 @@ void SpecificWorker::initialize()
 	// stream(s): rgb+depth on "zed", lidar on "lidar3D", imu on "imu". Only these
 	// small JSON strings live in the graph; the heavy frames stay out-of-band on the
 	// zero-copy plane. (Registering a new stream = one more (node, keys) line here.)
-	struct { const char* node; std::vector<std::string> keys; } media_ads[] = {
-		{"zed",     {"rgb", "depth"}},
-		{"lidar3D", {"lidar"}},
-		{"imu",     {"imu"}},
+	struct { const char* node; std::vector<std::string> keys; bool enabled; } media_ads[] = {
+		{"zed",     {"rgb", "depth"}, params.ENABLE_ZED},
+		{"ricoh",   {"rgb360"},       params.ENABLE_RICOH},
+		{"lidar3D", {"lidar"},        params.ENABLE_LIDAR},
+		{"imu",     {"imu"},          params.ENABLE_IMU},
 	};
 	for (const auto& ad : media_ads)
 	{
+		if (not ad.enabled)
+			continue;                                    // gated OFF: no publisher, no descriptor
 		if (media_.advertise(*G, ad.node, ad.keys))
 			qInfo() << "[Media] descriptor advertised on" << ad.node << ":"
 			        << QString::fromStdString(media_.descriptor_json(ad.keys));
@@ -220,10 +241,13 @@ void SpecificWorker::initialize()
 			qWarning() << "[Media]" << ad.node << "node not found at init — media descriptor NOT advertised";
 	}
 
-	lidar_thread = std::thread(&SpecificWorker::read_lidar_thread,  this);
-	rgbd_thread  = std::thread(&SpecificWorker::read_rgbd_thread,   this);
-	imu_thread   = std::thread(&SpecificWorker::read_imu_thread,    this);
-	qInfo() << __FUNCTION__ << "Started lidar, RGBD and IMU reader threads";
+	// Start only the reader threads whose stream is enabled — a gated-off sensor
+	// spins up no Ice proxy traffic at all.
+	if (params.ENABLE_LIDAR) lidar_thread = std::thread(&SpecificWorker::read_lidar_thread, this);
+	if (params.ENABLE_ZED)   rgbd_thread  = std::thread(&SpecificWorker::read_rgbd_thread,  this);
+	if (params.ENABLE_IMU)   imu_thread   = std::thread(&SpecificWorker::read_imu_thread,   this);
+	if (params.ENABLE_RICOH) ricoh_thread = std::thread(&SpecificWorker::read_ricoh_thread, this);
+	qInfo() << __FUNCTION__ << "Started reader threads (enabled sensors only)";
 
 	presence_coordinator_.configure(configLoader, G, static_cast<std::uint32_t>(agent_id));
 	presence_coordinator_.set_transition_hooks({
@@ -298,7 +322,7 @@ void SpecificWorker::compute()
 	compute_fps.print("Compute (void)", 5000);
 
 	static auto   last      = std::chrono::steady_clock::now();
-	static std::uint64_t last_rgbd = 0, last_lidar = 0, last_imu = 0;
+	static std::uint64_t last_rgbd = 0, last_lidar = 0, last_imu = 0, last_ricoh = 0;
 	const auto    now = std::chrono::steady_clock::now();
 	const double  dt  = std::chrono::duration<double>(now - last).count();
 	if (dt >= 1.0 / 3.0)   // sample at ~3 Hz, but only PRINT when the rates change (no repeated blocks)
@@ -306,22 +330,25 @@ void SpecificWorker::compute()
 		const std::uint64_t r = rgbd_frames_.load(std::memory_order_relaxed);
 		const std::uint64_t l = lidar_frames_.load(std::memory_order_relaxed);
 		const std::uint64_t i = imu_frames_.load(std::memory_order_relaxed);
+		const std::uint64_t c = ricoh_frames_.load(std::memory_order_relaxed);
 		const double f_rgbd  = static_cast<double>(r - last_rgbd)  / dt;
 		const double f_lidar = static_cast<double>(l - last_lidar) / dt;
 		const double f_imu   = static_cast<double>(i - last_imu)   / dt;
+		const double f_ricoh = static_cast<double>(c - last_ricoh) / dt;
 		// Print only when a rate moves by >= this many Hz, so steady-state jitter doesn't tick every sample.
 		constexpr double kHzPrintDelta = 1.0;
-		static double p_rgbd = -1e9, p_lidar = -1e9, p_imu = -1e9;
+		static double p_rgbd = -1e9, p_lidar = -1e9, p_imu = -1e9, p_ricoh = -1e9;
 		if (std::abs(f_rgbd - p_rgbd) >= kHzPrintDelta
 			or std::abs(f_lidar - p_lidar) >= kHzPrintDelta
-			or std::abs(f_imu - p_imu) >= kHzPrintDelta)
+			or std::abs(f_imu - p_imu) >= kHzPrintDelta
+			or std::abs(f_ricoh - p_ricoh) >= kHzPrintDelta)
 		{
 			qInfo().noquote() << QString::asprintf(
-				"[RGBDThread] %5.1f Hz | [LidarThread] %5.1f Hz | [IMUThread] %5.1f Hz",
-				f_rgbd, f_lidar, f_imu);
-			p_rgbd = f_rgbd; p_lidar = f_lidar; p_imu = f_imu;
+				"[RGBDThread] %5.1f Hz | [LidarThread] %5.1f Hz | [IMUThread] %5.1f Hz | [Ricoh360Thread] %5.1f Hz",
+				f_rgbd, f_lidar, f_imu, f_ricoh);
+			p_rgbd = f_rgbd; p_lidar = f_lidar; p_imu = f_imu; p_ricoh = f_ricoh;
 		}
-		last = now; last_rgbd = r; last_lidar = l; last_imu = i;
+		last = now; last_rgbd = r; last_lidar = l; last_imu = i; last_ricoh = c;
 	}
 }
 
@@ -652,6 +679,130 @@ void SpecificWorker::read_rgbd_thread()
 		catch (const Ice::Exception& e)
 		{
 			qWarning() << "[read_rgbd] Ice exception:" << e.what();
+		}
+	}
+}
+
+void SpecificWorker::read_ricoh_thread()
+{
+	if (camera360rgbd_proxy == nullptr)
+	{
+		qWarning() << "[read_ricoh] no Camera360RGBD proxy configured — ricoh media stream disabled";
+		return;
+	}
+	// Bridge Ice → media plane: pull the RGBD_360 panorama (RGBD_360 stitches the
+	// two cylindrical halves + reprojects the LiDAR into a sparse depth plane) and
+	// republish the RGB image on the zero-copy DDS plane. Depth is deferred (the
+	// co-registered cloud is already on the lidar3D plane); only RGB flows here.
+	bool empty_logged = false;
+	// Start fast so the loop oversamples the source; the EMA converges the poll
+	// period up to ~1× the source period (see read_rgbd_thread for the rationale).
+	auto wait_period = std::chrono::milliseconds(5);
+	std::uint64_t last_stamp_ms = 0;        // self-sync: dedup by source stamp
+	double src_period_ms = -1.0;            // self-sync: source period from stamp deltas
+	// RGBD_360 throws an Ice::UnknownException (marshalled OpenCV assertion) from
+	// getROI while it has no fused frame yet (its own camera/lidar upstream not
+	// matched). That is a peer-not-ready condition, not our bug: back off and log
+	// only the first failure + a periodic heartbeat instead of flooding at 10 Hz.
+	std::uint64_t getroi_fail = 0;
+	constexpr std::uint64_t GETROI_LOG_EVERY = 50;   // ~ every 50 backoff cycles
+	constexpr auto to_epoch_ms = [](long long t) -> std::uint64_t
+	{
+		return t > 1'000'000'000'000'000LL
+		           ? static_cast<std::uint64_t>(t / 1'000'000)   // ns -> ms
+		           : static_cast<std::uint64_t>(t);              // already ms
+	};
+	while (!stop_ricoh_thread && !shutting_down_.load())
+	{
+		const auto loop_start = std::chrono::steady_clock::now();
+		try
+		{
+			RoboCompCamera360RGBD::TRGBD frame;
+			try
+			{
+				// Full panorama: getROI(-1,…) returns the whole stitched image.
+				frame = camera360rgbd_proxy->getROI(-1, -1, -1, -1, -1, -1);
+			}
+			catch (const Ice::Exception& e)
+			{
+				if (getroi_fail++ % GETROI_LOG_EVERY == 0)
+					qWarning() << "[read_ricoh] getROI unavailable (RGBD_360 not producing a fused"
+					           << "frame yet?) — backing off. err:" << e.what();
+				std::this_thread::sleep_for(std::chrono::milliseconds(500));   // peer-not-ready backoff
+				continue;
+			}
+			if (getroi_fail != 0)
+			{
+				qInfo() << "[read_ricoh] getROI recovered after" << getroi_fail << "failed attempts";
+				getroi_fail = 0;
+			}
+
+			const bool empty_rgb = frame.width <= 0 || frame.height <= 0 || frame.rgb.empty();
+			if (empty_rgb)
+			{
+				if (!empty_logged)
+				{
+					std::print("[read_ricoh] Empty 360 stream received. Waiting for RGBD_360 data...\n");
+					empty_logged = true;
+				}
+				std::this_thread::sleep_for(std::chrono::milliseconds(100));
+				continue;
+			}
+			else if (empty_logged)
+			{
+				std::print("[read_ricoh] 360 stream recovered.\n");
+				empty_logged = false;
+			}
+
+			// Self-synchronize with the source: advance only on a genuinely new frame
+			// (dedup by capture stamp) and pace at ~2× the source period, derived from
+			// SOURCE stamp deltas (not wall clock — that death-spirals the rate).
+			{
+				const std::uint64_t stamp_ms = to_epoch_ms(frame.alivetime);
+				if (stamp_ms != 0 && stamp_ms == last_stamp_ms)
+				{
+					std::this_thread::sleep_for(wait_period);
+					continue;
+				}
+				if (stamp_ms != 0)
+				{
+					if (last_stamp_ms != 0)
+					{
+						const double src_dt = static_cast<double>(stamp_ms - last_stamp_ms);
+						if (src_dt > 0.5 && src_dt < 2000.0)
+						{
+							src_period_ms = (src_period_ms < 0.0) ? src_dt : 0.8 * src_period_ms + 0.2 * src_dt;
+							wait_period = std::chrono::milliseconds(std::max<long>(1, static_cast<long>(0.5 * src_period_ms + 0.5)));
+						}
+					}
+					last_stamp_ms = stamp_ms;
+				}
+			}
+
+			// Publish the RGB panorama on the wide Image360Frame plane. Channel order
+			// follows the RGBD_360 output (webots-derived); tagged BGR8 to match the
+			// zed convention — a consumer flips if it needs RGB.
+			if (media_.image360_ready())
+			{
+				media_.publish_image360({
+					.stamp_ms = to_epoch_ms(frame.alivetime),
+					.width    = static_cast<std::uint32_t>(frame.width),
+					.height   = static_cast<std::uint32_t>(frame.height),
+					.step     = static_cast<std::uint32_t>(frame.width) * 3u,
+					.format   = rc::media::IMG360_FORMAT_BGR8,
+					.data     = reinterpret_cast<const std::uint8_t*>(frame.rgb.data()),
+					.nbytes   = frame.rgb.size()});
+			}
+			media_.maybe_report_stats(SensorMediaPublisher::StatsGroup::Image360, std::chrono::seconds(5));
+
+			ricoh_frames_.fetch_add(1, std::memory_order_relaxed);
+			const auto loop_elapsed = std::chrono::steady_clock::now() - loop_start;
+			if (loop_elapsed < wait_period)
+				std::this_thread::sleep_for(wait_period - loop_elapsed);
+		}
+		catch (const Ice::Exception& e)
+		{
+			qWarning() << "[read_ricoh] Ice exception:" << e.what();
 		}
 	}
 }

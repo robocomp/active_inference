@@ -865,7 +865,52 @@ namespace rc
                     const float thresh = params.symmetry_flip_evidence_thresh
                         * (1.f + params.symmetry_confidence_gain
                                  * static_cast<float>(std::min(good_fit_streak_, params.symmetry_confidence_cap)));
-                    if (symmetry_flip_evidence_ > thresh)
+                    const bool flip_triggered = symmetry_flip_evidence_ > thresh;
+
+                    // Trial CSV: one row per check (not just on a flip) so a flip event can be
+                    // traced back through the evidence/threshold trajectory that led to it.
+                    // Independent of debug_log_enabled — cheap, gated by symmetry_debug_csv.
+                    if (params.symmetry_debug_csv)
+                    {
+                        if (!symmetry_csv_open_attempted_)
+                        {
+                            symmetry_csv_open_attempted_ = true;
+                            ::mkdir("tmp", 0755);
+                            ::mkdir("tmp/sdf_localizer", 0755);
+                            const auto now = std::chrono::system_clock::now();
+                            const std::time_t tt = std::chrono::system_clock::to_time_t(now);
+                            std::tm tm_local{};
+                            localtime_r(&tt, &tm_local);
+                            char ts_buf[32];
+                            std::strftime(ts_buf, sizeof(ts_buf), "%Y-%m-%d_%H-%M-%S", &tm_local);
+                            const std::string path = std::string("tmp/sdf_localizer/symmetry_check_") + ts_buf + ".csv";
+                            symmetry_csv_.open(path, std::ios::out | std::ios::trunc);
+                            if (symmetry_csv_.is_open())
+                                symmetry_csv_ << "ts_ms,cx,cy,cth,loss_cur,best_name,best_loss,"
+                                                 "loss_rot180,loss_refl_y,loss_refl_x,loss_rot180_y,"
+                                                 "advantage,evidence,thresh,good_fit_streak,flip_triggered\n";
+                            else
+                                qWarning() << "Symmetry debug CSV could not be opened:" << QString::fromStdString(path);
+                        }
+                        if (symmetry_csv_.is_open())
+                        {
+                            symmetry_csv_ << res.timestamp_ms
+                                          << ',' << cx << ',' << cy << ',' << cth
+                                          << ',' << loss_cur
+                                          << ',' << best->name << ',' << best->loss
+                                          << ',' << cands[0].loss << ',' << cands[1].loss
+                                          << ',' << cands[2].loss << ',' << cands[3].loss
+                                          << ',' << advantage
+                                          << ',' << symmetry_flip_evidence_
+                                          << ',' << thresh
+                                          << ',' << good_fit_streak_
+                                          << ',' << (int)flip_triggered
+                                          << '\n';
+                            symmetry_csv_.flush();
+                        }
+                    }
+
+                    if (flip_triggered)
                     {
                         qWarning() << "[SymmetryCheck]" << best->name << "flip — evidence"
                                    << symmetry_flip_evidence_ << "> thresh" << thresh

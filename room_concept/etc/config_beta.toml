@@ -97,6 +97,22 @@ MinTrackingSteps       = 5     # Warm-up tras reset: 5 frames (default 20).
                                 # en cuanto la ventana está llena.
 RotationSdfCoupling    = 0.5   # Extra tolerancia SDF por rotación (m/rad)
 
+# ── 180° symmetry-flip guard (harden against spurious flips) ───────────────────
+# The optimizer periodically tests whether rotating the robot 180° fits the room
+# better. Evidence accumulates leakily and must cross a confidence-scaled threshold
+# before the pose is actually flipped. Raising the base threshold makes a flip
+# require MORE sustained contrary evidence → harder to flip on a momentary
+# tight-turn degeneracy. (Header default 0.02; doubled here.)
+SymmetryFlipEvidenceThresh = 0.04
+# Companion knobs (header defaults shown) — raise the first two / lower the leak to
+# harden further:
+#   SymmetryFlipMinImprovement = 0.005  # per-check loss advantage to count as evidence
+#   SymmetryEvidenceLeak       = 0.6    # per-check retention (<1 → blips decay; lower = harder)
+#   SymmetryConfidenceGain     = 0.05   # extra threshold per established frame
+# One row per symmetry check (loss/evidence/threshold/streak + which candidate would win),
+# written to tmp/sdf_localizer/symmetry_check_<ts>.csv — use this to catch a flip in the act.
+SymmetryDebugCsv = true
+
 # ── Selección de optimizador ──────────────────────────────────────────────────
 # "ADAM"  — Adam adaptativo (default probado, robusto lejos del mínimo)
 # "LBFGS" — L-BFGS con line search Wolfe (convergencia más rápida, ~8-12 evals)

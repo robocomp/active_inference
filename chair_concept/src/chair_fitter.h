@@ -67,6 +67,8 @@ public:
     ChairObservation observe(ChairInstance& inst, const DSR::Node& node);
     // One free-energy fit cycle (voxel-bank ingest + cold-start + queue + belief). Returns the FE.
     float run_inference(ChairInstance& inst, const ChairObservation& observation);
+    // AI2 path (UseAI2): the shared recursive-Laplace belief (mirrors table run_inference_ai2).
+    float run_inference_ai2(ChairInstance& inst, const ChairObservation& observation);
 
     std::unordered_map<std::uint64_t, ChairInstance>& instances() { return instances_; }
     void forget_node(std::uint64_t id) { instances_.erase(id); }
@@ -168,6 +170,8 @@ private:
     // std) to cfg_.fisher_csv_path. No-op if the path is empty. Lazily opens + writes the header.
     void log_fisher_csv(const ChairInstance& inst, bool fresh, float free_energy,
                         int point_count, float silres);
+    // AI2 per-cycle log (state + Σ diag + range/motion). No-op if cfg_.ai2_csv_path is empty.
+    void log_ai2_csv(const ChairInstance& inst, int npts, float R, bool gated, float energy);
 
     std::shared_ptr<DSR::DSRGraph> G_;
     DSR::InnerEigenAPI*            inner_eigen_ = nullptr;
@@ -184,6 +188,7 @@ private:
     std::unordered_map<std::uint64_t, Eigen::Vector2f> birth_seeds_;   // tracker-provided birth XY (note_birth)
     std::uint64_t                  room_node_id_ = 0;   // latched per ensure_instance call
     std::ofstream                  fisher_csv_;         // per-cycle Fisher-filter evolution log (optional)
+    std::ofstream                  ai2_csv_;            // per-cycle AI2 belief log (optional)
 
     // Shared per-DOF belief stabiliser (Fisher filter + Kalman acceptance + CUSUM/SPRT). Holds the
     // algorithm + params (refreshed from cfg_ each accept); per-chair state lives in inst.stab.

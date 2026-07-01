@@ -89,6 +89,7 @@ conf_thresh = 0.30          # person-detection confidence floor
 kp_conf_min = 0.30          # per-joint floor; below this a keypoint is dropped (NaN)
 depth_patch = 2             # half-window (px) for the median-depth sample at each joint
 use_trt = true             # pose model is cheap; CUDA EP is fine and avoids the TRT version lock
+hold_ms = 500               # keep last good skeleton this long after a detection miss (anti-flicker on the YOLO viewer)
 
 [Semantic]
 # YOLO26 semantic-segmentation model (ADE20K-150) on the same RGB frame → a DENSE per-pixel class

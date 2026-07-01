@@ -62,6 +62,7 @@ VoxelizerParams load_voxelizer_params(const ConfigLoader& configLoader)
     rc::ConfigLoaderUtils::load_optional(configLoader, "HumanPose.input_size", params.HUMAN_POSE_INPUT_SIZE);
     rc::ConfigLoaderUtils::load_optional(configLoader, "HumanPose.use_gpu", params.HUMAN_POSE_USE_GPU);
     rc::ConfigLoaderUtils::load_optional(configLoader, "HumanPose.use_trt", params.HUMAN_POSE_USE_TRT);
+    rc::ConfigLoaderUtils::load_optional<std::uint64_t, int>(configLoader, "HumanPose.hold_ms", params.HUMAN_POSE_HOLD_MS);
     rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "HumanPose.kp_conf_min", params.SKELETON_KP_CONF_MIN);
     rc::ConfigLoaderUtils::load_optional(configLoader, "HumanPose.depth_patch", params.SKELETON_DEPTH_PATCH);
 

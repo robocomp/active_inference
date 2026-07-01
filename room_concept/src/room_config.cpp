@@ -89,6 +89,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomConcept.SymmetryConfidenceCap", room_concept.params.symmetry_confidence_cap);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.SymmetryGoodFitMse", room_concept.params.symmetry_good_fit_mse);
     rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomConcept.SymmetryConfidenceDecay", room_concept.params.symmetry_confidence_decay);
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.SymmetryDebugCsv", room_concept.params.symmetry_debug_csv);
 
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.VelocityAdaptiveWeights", room_concept.params.velocity_adaptive_weights);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.LinearVelocityThreshold", room_concept.params.linear_velocity_threshold);

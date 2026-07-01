@@ -18,6 +18,7 @@
 #include <cmath>
 #include <limits>
 #include <numbers>
+#include <print>
 #include <vector>
 
 // ─── EpistemicPlanner ────────────────────────────────────────────────────────
@@ -63,6 +64,36 @@ std::vector<Eigen::Vector3f> sample_face_surface(const ChairState& s, int face_i
     return pts;
 }
 
+// AI2 belief-state face sampler (same geometry, off the 8-DOF ChairBeliefState).
+std::vector<Eigen::Vector3f> sample_face_surface(const ChairBeliefState& s, int face_idx)
+{
+    constexpr int kTangent = 10, kVert = 6;
+    const float hw = s.seat_w * 0.5f, hh = s.seat_d * 0.5f;
+    const float cyaw = std::cos(s.yaw), syaw = std::sin(s.yaw);
+    std::vector<Eigen::Vector3f> pts; pts.reserve(kTangent * kVert);
+    for (int m = 0; m < kTangent; ++m)
+    {
+        const float t = (kTangent > 1) ? (-1.0f + 2.0f * m / (kTangent - 1)) : 0.0f;
+        float lx = 0.0f, ly = 0.0f;
+        switch (face_idx)
+        {
+            case 0: lx =  hw;     ly =  t * hh; break;
+            case 1: lx = -hw;     ly =  t * hh; break;
+            case 2: lx =  t * hw; ly =  hh;     break;
+            default: lx = t * hw; ly = -hh;     break;
+        }
+        const float rx = s.cx + cyaw * lx - syaw * ly;
+        const float ry = s.cy + syaw * lx + cyaw * ly;
+        const float top = s.seat_h + s.back_h;
+        for (int k = 0; k < kVert; ++k)
+        {
+            const float z = s.cz + top * ((kVert > 1) ? static_cast<float>(k) / (kVert - 1) : 1.0f);
+            pts.emplace_back(rx, ry, z);
+        }
+    }
+    return pts;
+}
+
 // Expected entropy reduction ΔH = Σ_j ½·log(1 + I_pred_j / Y_j), nats. Y_j is floored at a prior
 // precision so a never-observed DOF gives a large-but-finite gain rather than ∞.
 float expected_info_gain(const std::array<float, 8>& I_pred, const std::array<float, 8>& Y)
@@ -91,8 +122,8 @@ EpistemicProposal EpistemicPlanner::compute(const ChairModel&  model,
                                              const std::array<float, 8>& posterior_info) const
 {
     constexpr float kEffectiveHorizontalFovRad = 70.0f * std::numbers::pi_v<float> / 180.0f;
-    constexpr float kMinimumStandOffM = 0.90f;
-    constexpr float kStandOffSafetyMarginM = 0.25f;
+    constexpr float kMinimumStandOffM = 1.15f;         // YOLO won't fire too close → keep a viewing gap
+    constexpr float kStandOffSafetyMarginM = 0.45f;    // extra stand-off beyond the FoV-fit distance
 
     const auto coverage = queue.face_coverage(model);
     const auto& s       = model.state();
@@ -193,6 +224,74 @@ EpistemicProposal EpistemicPlanner::compute(const ChairModel&  model,
     if (!proposal.is_finite())
         return {};
 
+    return proposal;
+}
+
+// ── AI2-native Σ-based D-optimal next-best-view ──────────────────────────────────────────────
+EpistemicProposal EpistemicPlanner::compute(const ChairBelief& belief, float lat_rate, float sigma_base) const
+{
+    constexpr float kEffectiveHorizontalFovRad = 70.0f * std::numbers::pi_v<float> / 180.0f;
+    constexpr float kMinimumStandOffM = 1.15f;         // YOLO won't fire too close → keep a viewing gap
+    constexpr float kStandOffSafetyMarginM = 0.45f;    // extra stand-off beyond the FoV-fit distance
+
+    const Eigen::Matrix<float, 8, 8>& S = belief.covariance();   // Σ over [cx,cy,cz,yaw,seat_w,d,h,back_h]
+    const ChairBeliefState& s = belief.state();
+
+    const float cy = std::cos(s.yaw), sy = std::sin(s.yaw);
+    const float hw = s.seat_w * 0.5f, hh = s.seat_d * 0.5f;
+    struct Face { Eigen::Vector2f normal, centre; float half_span; };
+    const std::array<Face, 4> faces = {{
+        { { cy,  sy}, {s.cx + cy * hw, s.cy + sy * hw}, hh },   // +x
+        { {-cy, -sy}, {s.cx - cy * hw, s.cy - sy * hw}, hh },   // -x
+        { {-sy,  cy}, {s.cx - sy * hh, s.cy + cy * hh}, hw },   // +y
+        { { sy, -cy}, {s.cx + sy * hh, s.cy - cy * hh}, hw },   // -y
+    }};
+    const float max_stand_off = std::max(kMinimumStandOffM, d_obs_);
+    const auto standoff_for = [&](float half_span)
+    { return std::clamp(half_span / std::tan(kEffectiveHorizontalFovRad * 0.5f) + kStandOffSafetyMarginM,
+                        kMinimumStandOffM, max_stand_off); };
+
+    const Eigen::Matrix<float, 8, 8> I8 = Eigen::Matrix<float, 8, 8>::Identity();
+    int   best_idx = 0;
+    float best_gain = -std::numeric_limits<float>::max();
+    float best_standoff = kMinimumStandOffM;
+    std::array<float, 4> face_gain{};
+    for (int i = 0; i < 4; ++i)
+    {
+        const float standoff = standoff_for(faces[i].half_span);
+        const float Ri = sigma_base * sigma_base + (lat_rate * standoff) * (lat_rate * standoff);
+        const auto  dI = belief.predicted_information(sample_face_surface(s, i), Ri);
+        const float gain = 0.5f * std::log(std::max(1e-9f, (I8 + S * dI).determinant()));
+        face_gain[i] = gain;
+        if (gain > best_gain) { best_gain = gain; best_idx = i; best_standoff = standoff; }
+    }
+    if (!std::isfinite(best_gain))
+        return {};
+
+    static int dbg = 0;
+    if (++dbg % 30 == 0)
+    {
+        static const float ref[8] = {0.10f, 0.10f, 0.10f, 0.10f, 0.10f, 0.10f, 0.10f, 0.10f};  // m…; yaw rad
+        static const char* dof[8] = {"cx", "cy", "cz", "yaw", "seat_w", "seat_d", "seat_h", "back_h"};
+        static const char* fn[4]  = {"+x", "-x", "+y", "-y"};
+        int dom = 0; float best = -1.0f;
+        for (int j = 0; j < 8; ++j)
+        {
+            const float n = std::sqrt(std::max(0.0f, S(j, j))) / ref[j];
+            if (n > best) { best = n; dom = j; }
+        }
+        std::print("[epistemic-NBV] face={} gain={:.3f} | Σ dom-unc={} σ={:.3f}{} | gains +x={:.2f} -x={:.2f} +y={:.2f} -y={:.2f}\n",
+                   fn[best_idx], best_gain, dof[dom], std::sqrt(std::max(0.0f, S(dom, dom))), (dom == 3 ? "rad" : "m"),
+                   face_gain[0], face_gain[1], face_gain[2], face_gain[3]);
+    }
+
+    const auto& f = faces[best_idx];
+    const float vx = f.centre.x() + f.normal.x() * best_standoff;
+    const float vy = f.centre.y() + f.normal.y() * best_standoff;
+    const float yaw_to_face = std::atan2(s.cy - vy, s.cx - vx);
+    EpistemicProposal proposal{vx, vy, yaw_to_face, best_gain, true};
+    if (!proposal.is_finite())
+        return {};
     return proposal;
 }
 

@@ -17,6 +17,8 @@ add_executable(media_bench
   media_transport.cpp
   ${GEN_DIR}/image_framePubSubTypes.cxx
   ${GEN_DIR}/image_frameTypeObjectSupport.cxx
+  ${GEN_DIR}/image360_framePubSubTypes.cxx
+  ${GEN_DIR}/image360_frameTypeObjectSupport.cxx
   ${GEN_DIR}/lidar_framePubSubTypes.cxx
   ${GEN_DIR}/lidar_frameTypeObjectSupport.cxx
   ${GEN_DIR}/imu_framePubSubTypes.cxx

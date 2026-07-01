@@ -12,6 +12,8 @@ LIST(APPEND SOURCES
   ../../common/media_transport/media_transport.cpp
   ../../common/media_transport/generated/idl/image_framePubSubTypes.cxx
   ../../common/media_transport/generated/idl/image_frameTypeObjectSupport.cxx
+  ../../common/media_transport/generated/idl/image360_framePubSubTypes.cxx
+  ../../common/media_transport/generated/idl/image360_frameTypeObjectSupport.cxx
   ../../common/media_transport/generated/idl/lidar_framePubSubTypes.cxx
   ../../common/media_transport/generated/idl/lidar_frameTypeObjectSupport.cxx
   ../../common/media_transport/generated/idl/imu_framePubSubTypes.cxx

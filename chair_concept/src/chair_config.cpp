@@ -56,6 +56,23 @@ ChairConfig load_chair_config(const ConfigLoader& cfg)
     out.top_band_gate_enabled    = getb("ChairConcept.TopBandGate",            false);
     out.top_band_m               = getf("ChairConcept.TopBandM",               0.08f);
 
+    // ChairModel — AI2 belief (mirror table)
+    out.use_ai2                  = getb("ChairModel.UseAI2",                  false);
+    out.ai2_sigma_base_m         = getf("ChairModel.AI2SigmaBaseM",           0.03f);
+    out.ai2_clutter_frac         = getf("ChairModel.AI2ClutterFrac",          0.10f);
+    out.ai2_clutter_scale_m      = getf("ChairModel.AI2ClutterScaleM",        0.12f);
+    out.ai2_prior_size_std       = getf("ChairModel.AI2PriorSizeStd",         0.15f);
+    out.ai2_process_std_m        = getf("ChairModel.AI2ProcessStdM",          0.005f);
+    out.ai2_process_std_yaw      = getf("ChairModel.AI2ProcessStdYaw",        0.01f);
+    out.ai2_common_mode_pos_std  = getf("ChairModel.AI2CommonModePosStd",     0.03f);
+    out.ai2_common_mode_size_std = getf("ChairModel.AI2CommonModeSizeStd",    0.02f);
+    out.ai2_common_mode_yaw_std  = getf("ChairModel.AI2CommonModeYawStd",     0.03f);
+    out.ai2_range_noise_lat_per_m = getf("ChairModel.AI2RangeNoiseLatPerM",   0.02f);
+    out.ai2_range_noise_yaw_per_m = getf("ChairModel.AI2RangeNoiseYawPerM",   0.03f);
+    out.ai2_trunc_gate_frac      = getf("ChairModel.AI2TruncGateFrac",        0.10f);
+    out.ai2_gn_iters             = geti("ChairModel.AI2GnIters",              4);
+    out.ai2_csv_path             = gets("ChairModel.AI2CsvPath",              "");
+
     // ChairModel
     out.sigma_obs          = getf("ChairModel.SigmaObs",          0.05f);
     // A chair is a RIGID, standardised object (Webots WoodenChair ≈ 0.45×0.45). Hold the size

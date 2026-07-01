@@ -43,6 +43,15 @@ Emergency = 500
 Verbose = false
 
 [ChairModel]
+# ── AI2 recursive-Laplace belief (mirrors table_concept). Set UseAI2=false for the legacy path. ──
+UseAI2 = true
+AI2CsvPath = "etc/ai2_log.csv"   # per-cycle AI2 log (state + Σ diag + range/motion); empty disables
+AI2SigmaBaseM = 0.03
+AI2RangeNoiseLatPerM = 0.02      # static range → R + position common-mode (m per m)
+AI2RangeNoiseYawPerM = 0.03      # static range → yaw common-mode (rad per m) — anti far-view rotation
+AI2CommonModePosStd = 0.03
+AI2CommonModeSizeStd = 0.02
+AI2CommonModeYawStd = 0.03
 LambdaSize = 0.05         # weaker KL pull on w/h/height so evidence can expand the chair model
 PriorSizeStd = 0.60       # broader 1-sigma size prior (m); higher means weaker size prior
 RobustLoss = "tukey_biweight"   # one of: quadratic, huber, geman_mcclure, welsch, tukey_biweight

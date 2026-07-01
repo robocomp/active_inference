@@ -18,6 +18,7 @@
 #include <opencv2/opencv.hpp>
 
 #include <array>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -139,6 +140,9 @@ public:
         bool  use_gpu = true;
         bool  use_trt = false;
         bool  verbose_debug = false;
+        // Keep drawing the last good skeleton for up to this long after a detection, so a single
+        // decimated frame that momentarily misses the person doesn't blank the overlay (anti-flicker).
+        std::uint64_t hold_ms = 500;
     };
 
     YoloHumanProcessor() = default;
@@ -148,8 +152,10 @@ public:
 
     // Returns detected people with COCO-17 keypoints (image px). Empty if not configured.
     // Also caches the result (see last_poses) so callers running the model on a decimated schedule
-    // can redraw the most recent detection every frame without flicker.
-    [[nodiscard]] std::vector<PoseDetection> detect_poses(const cv::Mat& rgb_frame);
+    // can redraw the most recent detection every frame without flicker. `now_ms` is the capture stamp
+    // of rgb_frame: a fresh non-empty detection refreshes the cache + stamp; an empty result keeps the
+    // cached skeleton until `Config::hold_ms` has elapsed since the last good detection, then clears.
+    [[nodiscard]] std::vector<PoseDetection> detect_poses(const cv::Mat& rgb_frame, std::uint64_t now_ms);
 
     // The most recent detect_poses() result. Lets a decimated caller keep drawing the last skeleton
     // on cycles where the model didn't run.
@@ -162,7 +168,8 @@ public:
 private:
     Config config_;
     std::optional<YoloPoseDetector> detector_;
-    std::vector<PoseDetection> last_poses_;   // cache of the latest detect_poses() result
+    std::vector<PoseDetection> last_poses_;   // cache of the latest non-empty detect_poses() result
+    std::uint64_t last_poses_ts_ = 0;         // capture stamp of the cached poses (for the hold window)
 };
 
 }  // namespace rc::human_pose

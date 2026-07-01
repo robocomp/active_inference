@@ -225,6 +225,10 @@ public:
         // established confidence; only sustained bad fit (truly lost) erodes it. cap/decay ≈ bad frames
         // to fully lose confidence (200/8 ≈ 25 frames ≈ ~1.3 s @19 Hz).
         int   symmetry_confidence_decay     = 8;
+        // Trial CSV: one row per symmetry check (not just when a flip fires), so a flip event
+        // can be traced back to the evidence/threshold trajectory that led to it. Independent
+        // of debug_log_enabled — cheap (1 row / symmetry_check_interval frames).
+        bool  symmetry_debug_csv            = true;
 
         // ===== Grid Search / Orientation Search =====
         float grid_search_wall_margin = 0.3f;        // meters from room walls
@@ -697,6 +701,9 @@ private:
    // and CUDA warmup curve. Opened lazily on the first update; gated by params.optimizer_timing_csv.
    std::ofstream      opt_csv_;
    bool               opt_csv_open_attempted_ = false;
+   // Per-symmetry-check trial CSV (loc-thread only; no lock). Gated by params.symmetry_debug_csv.
+   std::ofstream      symmetry_csv_;
+   bool               symmetry_csv_open_attempted_ = false;
    RerunLogger        rerun_logger_;
    int                rerun_frame_counter_ = 0;
    int                symmetry_check_counter_ = 0;

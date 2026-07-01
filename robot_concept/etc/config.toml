@@ -3,8 +3,9 @@
 TopicManager = "IceStorm/TopicManager:default -p 9999"
 
 # Proxies for required interfaces
-CameraRGBDSimple = "camerargbdsimple:tcp -h localhost -p 12001"
-IMU = "imu:tcp -h localhost -p 10007"
+CameraRGBDSimple = "camerargbdsimple:tcp -h localhost -p 12001" # ZED
+Camera360RGBD = "camera360rgbd:tcp -h localhost -p 12003" # ricoh+lidar
+IMU = "imu:tcp -h localhost -p 10007" 
 Lidar3D = "lidar3d:tcp -h localhost -p 11995"
 
 [Endpoints]
@@ -89,11 +90,18 @@ dsr_depth_fps = -1
 # never perturb the cortex/DSR discovery + graph-resync path. Must MATCH across
 # robot_concept (producer), voxelizer and room_concept (consumers).
 [Media]
-domain_id   = 7
-rgb_topic   = "rc/zed/rgb"
-depth_topic = "rc/zed/depth"
-lidar_topic = "rc/lidar3d/points"
-imu_topic   = "rc/imu/data"
+domain_id    = 7
+rgb_topic    = "rc/zed/rgb"
+depth_topic  = "rc/zed/depth"
+ricoh_topic  = "rc/ricoh/rgb"
+lidar_topic  = "rc/lidar3d/points"
+imu_topic    = "rc/imu/data"
+# Per-sensor stream gates. When false: no media publisher is created, no descriptor
+# is advertised, and the sensor's Ice reader thread is not started (no proxy traffic).
+enable_zed   = true    # ZED RGB + depth
+enable_ricoh = true    # RGBD_360 360 panorama
+enable_lidar = true    # 3D LiDAR cloud
+enable_imu   = true    # IMU
 
 [Lidar]
 # Legacy DSR-graph lidar upload. <0 DISABLES it (default): lidar is published on the zero-copy

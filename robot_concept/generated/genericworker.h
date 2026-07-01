@@ -37,13 +37,14 @@
 #include "dsr/gui/dsr_gui.h"
 #include <memory>
 
+#include <Camera360RGBD.h>
 #include <CameraRGBDSimple.h>
 #include <FullPoseEstimation.h>
 #include <FullPoseEstimationPub.h>
 #include <IMU.h>
 #include <Lidar3D.h>
 
-using TuplePrx = std::tuple<RoboCompCameraRGBDSimple::CameraRGBDSimplePrxPtr,RoboCompIMU::IMUPrxPtr,RoboCompLidar3D::Lidar3DPrxPtr>;
+using TuplePrx = std::tuple<RoboCompCameraRGBDSimple::CameraRGBDSimplePrxPtr,RoboCompIMU::IMUPrxPtr,RoboCompLidar3D::Lidar3DPrxPtr,RoboCompCamera360RGBD::Camera360RGBDPrxPtr>;
 
 
 class GenericWorker : public QObject
@@ -65,6 +66,7 @@ public:
 	RoboCompCameraRGBDSimple::CameraRGBDSimplePrxPtr camerargbdsimple_proxy;
 	RoboCompIMU::IMUPrxPtr imu_proxy;
 	RoboCompLidar3D::Lidar3DPrxPtr lidar3d_proxy;
+	RoboCompCamera360RGBD::Camera360RGBDPrxPtr camera360rgbd_proxy;
 
 	virtual void FullPoseEstimationPub_newFullPose (RoboCompFullPoseEstimation::FullPoseEuler pose) = 0;
 

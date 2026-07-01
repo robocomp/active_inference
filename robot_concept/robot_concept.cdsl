@@ -1,5 +1,6 @@
 import "Lidar3D.idsl";
 import "CameraRGBDSimple.idsl";
+import "Camera360RGBD.idsl";
 import "IMU.idsl";
 import "FullPoseEstimationPub.idsl";
 
@@ -7,7 +8,7 @@ Component robot_concept
 {
     Communications
     {
-        requires Lidar3D, CameraRGBDSimple, IMU;
+        requires Lidar3D, CameraRGBDSimple, Camera360RGBD, IMU;
         subscribesTo FullPoseEstimationPub;
     };
     language Cpp11;

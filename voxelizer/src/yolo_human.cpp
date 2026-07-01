@@ -280,11 +280,23 @@ void YoloHumanProcessor::configure(const Config& config)
         std::println("[YoloHuman] pose detector ready: {}", config_.model_path);
 }
 
-std::vector<PoseDetection> YoloHumanProcessor::detect_poses(const cv::Mat& rgb_frame)
+std::vector<PoseDetection> YoloHumanProcessor::detect_poses(const cv::Mat& rgb_frame, std::uint64_t now_ms)
 {
     if (!detector_.has_value() || rgb_frame.empty())
-        return {};
-    last_poses_ = detector_->detect(rgb_frame, /*is_rgb=*/false);   // cache for decimated redraw
+        return last_poses_;   // a bad/absent frame must not clobber the cache
+    auto fresh = detector_->detect(rgb_frame, /*is_rgb=*/false);
+    if (!fresh.empty())
+    {
+        // A real detection refreshes the cache and restarts the hold window.
+        last_poses_ = std::move(fresh);
+        last_poses_ts_ = now_ms;
+    }
+    else if (now_ms - last_poses_ts_ > config_.hold_ms)
+    {
+        // No person for longer than the hold window → they're genuinely gone; clear the overlay.
+        last_poses_.clear();
+    }
+    // else: a transient miss inside the hold window → keep drawing the last good skeleton (anti-flicker).
     return last_poses_;
 }
 

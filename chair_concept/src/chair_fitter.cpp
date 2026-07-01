@@ -269,6 +269,10 @@ ChairFitter::ChairObservation ChairFitter::observe(ChairInstance& inst, const DS
             inst.frames_since_detection = 0;
             inst.last_mask_confidence = slice.confidence;
             inst.last_mask_timestamp_ms = masks_packet.timestamp_ms;   // chain-cov pinning (Part B)
+            inst.last_motion_var  = slice.motion_var;     // AI2 ego-motion / range / truncation channels
+            inst.last_motion_dotd = slice.motion_dotd;
+            inst.last_trunc_frac  = slice.trunc_frac;
+            inst.last_range       = slice.range;
             const std::size_t begin = std::min(slice.support_begin, masks_packet.support_points.size());
             const std::size_t end = std::min(slice.support_end, masks_packet.support_points.size());
 
@@ -343,6 +347,9 @@ bool ChairFitter::should_log(const ChairInstance& inst) const
 
 float ChairFitter::run_inference(ChairInstance& inst, const ChairObservation& observation)
 {
+    if (cfg_.use_ai2)
+        return run_inference_ai2(inst, observation);
+
     inst.queue.begin_cycle();
 
     ++inst.settle_maturity;   // climbs each cycle; step_queue_update resets it on a new-evidence burst
@@ -528,6 +535,150 @@ float ChairFitter::run_inference(ChairInstance& inst, const ChairObservation& ob
                    inst.model.silhouette_residual());
 
     return free_energy;
+}
+
+// ─── AI2 inference (shared recursive-Laplace belief; mirrors table run_inference_ai2) ───────────
+float ChairFitter::run_inference_ai2(ChairInstance& inst, const ChairObservation& observation)
+{
+    const int npts = static_cast<int>(observation.candidate_pts.size() + observation.residual_pts.size());
+
+    // Lazy belief init from the model state; on the FIRST frame snap cx,cy→centroid and cz/seat_h→z-pctiles
+    // (the belief is a LOCAL filter — the tracker birth provides the coarse yaw + size seed).
+    if (not inst.ai2_initialized)
+    {
+        const auto& m = inst.model.state();
+        ChairBeliefState s0{m.cx, m.cy, m.cz, m.yaw, m.seat_w, m.seat_d, m.seat_h, m.back_h};
+        if (npts > 0)
+        {
+            Eigen::Vector3f sum = Eigen::Vector3f::Zero();
+            std::vector<float> zs; zs.reserve(static_cast<std::size_t>(npts));
+            const auto scan = [&](const std::vector<Eigen::Vector3f>& v)
+            { for (const auto& p : v) { sum += p; zs.push_back(p.z()); } };
+            scan(observation.candidate_pts); scan(observation.residual_pts);
+            s0.cx = sum.x() / npts; s0.cy = sum.y() / npts;
+            std::sort(zs.begin(), zs.end());
+            const float zlo  = zs[static_cast<std::size_t>(0.05f * (zs.size() - 1))];   // floor (leg bottoms)
+            const float zmid = zs[static_cast<std::size_t>(0.55f * (zs.size() - 1))];   // ~seat-top band
+            s0.cz = zlo;
+            s0.seat_h = std::clamp(zmid - zlo, 0.20f, 0.80f);
+
+            // Coarse yaw from the backrest offset: the backrest sits on the −local_y seat edge, so the
+            // vector from the seat centroid to the upper (backrest) points runs along −local_y ⇒
+            // yaw = atan2(dx, −dy). Seeds the (weakly-observed, near-square-seat) yaw near the answer so
+            // the belief doesn't dwell at the wrong seed for hundreds of frames before the backrest wins.
+            Eigen::Vector2f seat_c = Eigen::Vector2f::Zero(), back_c = Eigen::Vector2f::Zero();
+            int n_seat = 0, n_back = 0;
+            const float back_z = zmid + 0.10f, seat_lo = zmid - 0.10f;
+            const auto split = [&](const std::vector<Eigen::Vector3f>& v)
+            {
+                for (const auto& p : v)
+                {
+                    if (p.z() > back_z)       { back_c += p.head<2>(); ++n_back; }
+                    else if (p.z() > seat_lo) { seat_c += p.head<2>(); ++n_seat; }
+                }
+            };
+            split(observation.candidate_pts); split(observation.residual_pts);
+            if (n_back > 20 and n_seat > 20)
+            {
+                seat_c /= static_cast<float>(n_seat); back_c /= static_cast<float>(n_back);
+                const Eigen::Vector2f d = back_c - seat_c;
+                if (d.norm() > 0.05f)   // enough backrest offset to be a meaningful heading
+                    s0.yaw = std::atan2(d.x(), -d.y());
+            }
+        }
+        ChairBeliefParams p;
+        p.sigma_base_m         = cfg_.ai2_sigma_base_m;
+        p.clutter_frac         = cfg_.ai2_clutter_frac;
+        p.clutter_scale_m      = cfg_.ai2_clutter_scale_m;
+        p.prior_size_std       = cfg_.ai2_prior_size_std;
+        p.process_std_m        = cfg_.ai2_process_std_m;
+        p.process_std_yaw      = cfg_.ai2_process_std_yaw;
+        p.common_mode_pos_std  = cfg_.ai2_common_mode_pos_std;
+        p.common_mode_size_std = cfg_.ai2_common_mode_size_std;
+        p.common_mode_yaw_std  = cfg_.ai2_common_mode_yaw_std;
+        p.gn_iters             = cfg_.ai2_gn_iters;
+        inst.ai2_belief = ChairBelief(s0, p);
+        inst.ai2_initialized = true;
+    }
+
+    if (observation.has_fresh_data)
+        ingest_observation_voxels(inst, observation);
+
+    if (not observation.has_fresh_data)   // freeze-on-stale
+    {
+        compute_projected_roi(inst);
+        return 0.0f;
+    }
+
+    // Static range weighting + ego-motion downweight (mirror table): a far view widens the common-mode
+    // (binding yaw cap) so it can't rotate the chair; continuous, no gate.
+    const float range         = std::max(0.0f, inst.last_range);
+    const float range_lat_var = (cfg_.ai2_range_noise_lat_per_m * range) * (cfg_.ai2_range_noise_lat_per_m * range);
+    const float range_yaw_var = (cfg_.ai2_range_noise_yaw_per_m * range) * (cfg_.ai2_range_noise_yaw_per_m * range);
+    const float R = cfg_.ai2_sigma_base_m * cfg_.ai2_sigma_base_m + std::max(0.0f, inst.last_motion_var) + range_lat_var;
+
+    const bool gated = inst.last_trunc_frac > cfg_.ai2_trunc_gate_frac;
+    compute_chain_cov(inst);
+
+    float energy = 0.0f;
+    if (gated)
+        inst.ai2_belief.predict();
+    else
+    {
+        ChairFrame frame;
+        frame.points.reserve(static_cast<std::size_t>(npts));
+        frame.points.insert(frame.points.end(), observation.candidate_pts.begin(), observation.candidate_pts.end());
+        frame.points.insert(frame.points.end(), observation.residual_pts.begin(), observation.residual_pts.end());
+        frame.R.assign(frame.points.size(), R);
+        frame.chain_cov_xx  = inst.chain_cov_xx + range_lat_var;
+        frame.chain_cov_yy  = inst.chain_cov_yy + range_lat_var;
+        frame.chain_cov_yaw = range_yaw_var;
+        // Anchor the part-attribution to the observed seat top (prevents the tall-legs seat_h runaway).
+        inst.ai2_belief.set_seat_ref(ChairBelief::estimate_seat_top(frame.points, inst.ai2_belief.state().cz));
+        energy = inst.ai2_belief.update(frame);
+    }
+
+    // Write belief → legacy ChairState so downstream publish/viewer/RT code is unchanged.
+    const auto& bs = inst.ai2_belief.state();
+    ChairState ms = inst.model.state();
+    ms.cx = bs.cx; ms.cy = bs.cy; ms.cz = bs.cz; ms.yaw = bs.yaw;
+    ms.seat_w = bs.seat_w; ms.seat_d = bs.seat_d; ms.seat_h = bs.seat_h; ms.back_h = bs.back_h;
+    inst.model.set_state(ms);
+
+    ++inst.matched_frames;
+    inst.detection_alive = inst.frames_since_detection < cfg_.detection_alive_max_frames;
+    compute_projected_roi(inst);
+
+    if (should_log(inst))
+        std::print("[{}] AI2 npts={} R={:.4f} range={:.2f} trunc={:.2f}{} | cx={:.2f} cy={:.2f} cz={:.2f} ψ={:.2f} | sw={:.2f} sd={:.2f} sh={:.2f} bh={:.2f}\n",
+                   inst.node_name, npts, R, range, inst.last_trunc_frac, gated ? " GATED" : "",
+                   bs.cx, bs.cy, bs.cz, bs.yaw, bs.seat_w, bs.seat_d, bs.seat_h, bs.back_h);
+
+    log_ai2_csv(inst, npts, R, gated, energy);
+    return energy;
+}
+
+void ChairFitter::log_ai2_csv(const ChairInstance& inst, int npts, float R, bool gated, float energy)
+{
+    if (cfg_.ai2_csv_path.empty())
+        return;
+    if (not ai2_csv_.is_open())
+    {
+        ai2_csv_.open(cfg_.ai2_csv_path, std::ios::out | std::ios::trunc);
+        if (not ai2_csv_.is_open()) { cfg_.ai2_csv_path.clear(); return; }
+        ai2_csv_ << "cycle,node,npts,gated,energy,R,motion_var,trunc_frac,range,"
+                 << "cx,cy,cz,yaw,seat_w,seat_d,seat_h,back_h,"
+                 << "std_cx,std_cy,std_cz,std_yaw,std_sw,std_sd,std_sh,std_bh\n";
+    }
+    const auto& s = inst.ai2_belief.state();
+    const auto& S = inst.ai2_belief.covariance();
+    const auto sd = [&](int i) { return std::sqrt(std::max(0.0f, S(i, i))); };
+    ai2_csv_ << inst.processed_cycles << ',' << inst.node_name << ',' << npts << ',' << (gated ? 1 : 0) << ','
+             << energy << ',' << R << ',' << inst.last_motion_var << ',' << inst.last_trunc_frac << ',' << inst.last_range << ','
+             << s.cx << ',' << s.cy << ',' << s.cz << ',' << s.yaw << ','
+             << s.seat_w << ',' << s.seat_d << ',' << s.seat_h << ',' << s.back_h << ','
+             << sd(0) << ',' << sd(1) << ',' << sd(2) << ',' << sd(3) << ',' << sd(4) << ',' << sd(5) << ',' << sd(6) << ',' << sd(7) << '\n';
+    ai2_csv_.flush();
 }
 
 void ChairFitter::log_fisher_csv(const ChairInstance& inst, bool fresh, float free_energy,

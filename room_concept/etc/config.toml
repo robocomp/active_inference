@@ -108,6 +108,9 @@ SymmetryFlipEvidenceThresh = 0.04
 #   SymmetryFlipMinImprovement = 0.005  # per-check loss advantage to count as evidence
 #   SymmetryEvidenceLeak       = 0.6    # per-check retention (<1 → blips decay; lower = harder)
 #   SymmetryConfidenceGain     = 0.05   # extra threshold per established frame
+# One row per symmetry check (loss/evidence/threshold/streak + which candidate would win),
+# written to tmp/sdf_localizer/symmetry_check_<ts>.csv — use this to catch a flip in the act.
+SymmetryDebugCsv = true
 
 # ── Selección de optimizador ──────────────────────────────────────────────────
 # "ADAM"  — Adam adaptativo (default probado, robusto lejos del mínimo)

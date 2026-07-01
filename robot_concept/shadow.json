@@ -424,6 +424,29 @@
                             }
                         },
                         "src": "250"
+                    },
+                    {
+                        "dst": "240",
+                        "label": "RT",
+                        "linkAttribute": {
+                            "rt_rotation_euler_xyz": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    0,
+                                    0
+                                ]
+                            },
+                            "rt_translation": {
+                                "type": 3,
+                                "value": [
+                                    0,
+                                    -0.17,
+                                    1.275
+                                ]
+                            }
+                        },
+                        "src": "250"
                     }
                 ],
                 "name": "body",
@@ -457,6 +480,28 @@
                 ],
                 "name": "mind",
                 "type": "mind"
+            },
+            "240": {
+                "attribute": {
+                    "cam_rgb_width":     { "type": 1, "value": 1920 },
+                    "cam_rgb_height":    { "type": 1, "value": 960 },
+                    "cam_rgb_depth":     { "type": 1, "value": 3 },
+                    "cam_depth_width":   { "type": 1, "value": 1920 },
+                    "cam_depth_height":  { "type": 1, "value": 960 },
+                    "cam_depth_channels":{ "type": 1, "value": 3 },
+                    "cam_depthFactor":   { "type": 2, "value": 1.0 },
+                    "cam_fov":           { "type": 2, "value": 6.28 },
+                    "cam_projection":    { "type": 0, "value": "cylindrical" },
+                    "color":  { "type": 0, "value": "DarkCyan" },
+                    "level":  { "type": 1, "value": 3 },
+                    "parent": { "type": 7, "value": "250" },
+                    "pos_x":  { "type": 2, "value": 60.0 },
+                    "pos_y":  { "type": 2, "value": 250.0 }
+                },
+                "id": "240",
+                "links": [],
+                "name": "ricoh",
+                "type": "rgbd"
             }
         }
     }

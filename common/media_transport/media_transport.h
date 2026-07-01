@@ -20,6 +20,7 @@
 #include <string>
 
 #include "generated/idl/image_framePubSubTypes.hpp"
+#include "generated/idl/image360_framePubSubTypes.hpp"
 #include "generated/idl/lidar_framePubSubTypes.hpp"
 #include "generated/idl/imu_framePubSubTypes.hpp"
 
@@ -77,9 +78,10 @@ inline constexpr const char* MEDIA_DESCRIPTOR_ATTR = "media_descriptor";
 // Type-compatibility tags for the zero-copy bounded-plain frame types. Zero-copy
 // maps the SHM segment byte-for-byte, so a subscriber MUST refuse a stream whose
 // tag differs. BUMP THE RELEVANT TAG whenever the matching .idl changes.
-inline constexpr const char* IMAGE_FRAME_TYPE_TAG = "ImageFrame.v2";
-inline constexpr const char* LIDAR_FRAME_TYPE_TAG = "LidarFrame.v1";
-inline constexpr const char* IMU_FRAME_TYPE_TAG   = "ImuFrame.v1";
+inline constexpr const char* IMAGE_FRAME_TYPE_TAG    = "ImageFrame.v2";
+inline constexpr const char* IMAGE360_FRAME_TYPE_TAG = "Image360Frame.v1";
+inline constexpr const char* LIDAR_FRAME_TYPE_TAG    = "LidarFrame.v1";
+inline constexpr const char* IMU_FRAME_TYPE_TAG      = "ImuFrame.v1";
 
 struct MediaDescriptor
 {
@@ -133,7 +135,7 @@ namespace detail
 // participant/QoS/loan logic lives here once; the typed wrappers only add the
 // FrameKind selector (which PubSubType to register) and the loan/publish casts.
 // Not thread-safe: drive from a single producer thread.
-enum class FrameKind { Image, Lidar, Imu };
+enum class FrameKind { Image, Image360, Lidar, Imu };
 
 class WriterCore
 {
@@ -179,6 +181,23 @@ public:
     void        discard(ImageFrame* s) { core_.discard_raw(s); }
     // Fallback copy path (serializes/copies) when the source buffer is owned.
     bool        publish_copy(const ImageFrame& frame) { return core_.publish_copy_raw(&frame); }
+    [[nodiscard]] bool data_sharing_active() const { return core_.data_sharing_active(); }
+private:
+    detail::WriterCore core_;
+};
+
+// Publisher for the wide 360 panorama (Image360Frame, ~5.5 MB inline buffer).
+// Separate from MediaPublisher so the ZED ImageFrame buffer stays small.
+class Image360Publisher
+{
+public:
+    Image360Publisher() = default;
+    bool init(const PublisherConfig& cfg) { return core_.init(cfg, detail::FrameKind::Image360); }
+    void close() { core_.close(); }
+    Image360Frame* loan() { return static_cast<Image360Frame*>(core_.loan_raw()); }
+    bool           publish(Image360Frame* s) { return core_.publish_raw(s); }
+    void           discard(Image360Frame* s) { core_.discard_raw(s); }
+    bool           publish_copy(const Image360Frame& frame) { return core_.publish_copy_raw(&frame); }
     [[nodiscard]] bool data_sharing_active() const { return core_.data_sharing_active(); }
 private:
     detail::WriterCore core_;
@@ -234,6 +253,38 @@ public:
     // Block until at least one frame is available or the timeout elapses, then
     // drain. Returns the number of frames delivered.
     int wait_and_poll(const FrameCallback& cb, int timeout_ms);
+
+    [[nodiscard]] bool data_sharing_active() const { return data_sharing_active_; }
+
+private:
+    eprosima::fastdds::dds::DomainParticipant* participant_ = nullptr;
+    eprosima::fastdds::dds::Subscriber*        subscriber_  = nullptr;
+    eprosima::fastdds::dds::Topic*             topic_       = nullptr;
+    eprosima::fastdds::dds::DataReader*        reader_      = nullptr;
+    std::uint32_t participant_domain_id_ = 0;
+    bool participant_shm_only_ = true;
+    bool has_participant_ = false;
+    bool data_sharing_active_ = false;
+};
+
+// One reader per 360 topic. The callback receives a const Image360Frame& valid
+// only for the duration of the call (a loaned view into the SHM segment). Mirror
+// of MediaSubscriber for the Image360Frame type.
+class Image360Subscriber
+{
+public:
+    using FrameCallback = std::function<void(const Image360Frame& frame, std::int64_t recv_ns)>;
+
+    Image360Subscriber() = default;
+    ~Image360Subscriber();
+    Image360Subscriber(const Image360Subscriber&) = delete;
+    Image360Subscriber& operator=(const Image360Subscriber&) = delete;
+
+    bool init(const SubscriberConfig& cfg);
+    void close();
+
+    int poll(const FrameCallback& cb);                          // non-blocking drain
+    int wait_and_poll(const FrameCallback& cb, int timeout_ms); // block-then-drain
 
     [[nodiscard]] bool data_sharing_active() const { return data_sharing_active_; }
 

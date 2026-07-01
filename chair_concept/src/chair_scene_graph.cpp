@@ -264,16 +264,26 @@ void ChairSceneGraph::write_rt_covariance(std::uint64_t room_id, ChairInstance& 
     if (not cfg_.rt_cov_upload or room_id == 0)
         return;
 
-    // Per-DOF accumulated precision from the Fisher filter: [cx,cy,cz,yaw,seat_w,seat_d,seat_h,back_h].
-    const auto& Y = inst.stab.fisher_info_raw;
     const float scale = std::max(1e-6f, cfg_.rt_cov_scale);
     constexpr float big = 1e3f;   // unobservable / never-seen DOF → large variance
-    const auto var = [&](int j) -> float { return Y[j] > 1e-6f ? scale / Y[j] : big; };
 
-    float vx = var(0), vy = var(1);
-    const float vz = var(2), vyaw = var(3);   // data-driven DOFs
-    // Part B: add the localization/chain covariance J·Σ_chain·Jᵀ (computed in the fitter) — the chair's
-    // room-frame position is conditional on the robot pose, so its published uncertainty must include it.
+    float vx, vy, vz, vyaw;
+    if (cfg_.use_ai2 and inst.ai2_initialized)
+    {
+        // AI2: publish the belief's full Σ over [cx,cy,cz,yaw,...] (the legacy fisher_info_raw is empty
+        // under AI2 → it produced big=1e3 garbage on every DOF).
+        const auto& S = inst.ai2_belief.covariance();
+        vx = scale * S(0, 0); vy = scale * S(1, 1); vz = scale * S(2, 2); vyaw = scale * S(3, 3);
+    }
+    else
+    {
+        // Legacy per-DOF Fisher precision [cx,cy,cz,yaw,seat_w,seat_d,seat_h,back_h].
+        const auto& Y = inst.stab.fisher_info_raw;
+        const auto var = [&](int j) -> float { return Y[j] > 1e-6f ? scale / Y[j] : big; };
+        vx = var(0); vy = var(1); vz = var(2); vyaw = var(3);
+    }
+    // Localization/chain covariance J·Σ_chain·Jᵀ — the chair's room-frame position is conditional on the
+    // robot pose, so its published uncertainty must include it.
     vx += inst.chain_cov_xx;
     vy += inst.chain_cov_yy;
 

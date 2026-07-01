@@ -88,9 +88,16 @@ private:
 		int DSR_LIDAR_FPS = -1;
 
 		// Media plane (zero-copy DDS) for raw sensor streams carried OUT of the graph.
+		// Per-sensor gates: when false, the stream's media publisher is not created,
+		// its descriptor is not advertised, and its Ice reader thread is not started.
+		bool        ENABLE_ZED    = true;   // ZED RGB + depth  (rc/zed/rgb, rc/zed/depth)
+		bool        ENABLE_RICOH  = true;   // RGBD_360 panorama (rc/ricoh/rgb)
+		bool        ENABLE_LIDAR  = true;   // 3D LiDAR cloud    (rc/lidar3d/points)
+		bool        ENABLE_IMU    = true;   // IMU sample        (rc/imu/data)
 		int         MEDIA_DOMAIN_ID   = 0;
 		std::string MEDIA_RGB_TOPIC   = "rc/zed/rgb";
 		std::string MEDIA_DEPTH_TOPIC = "rc/zed/depth";
+		std::string MEDIA_RICOH_TOPIC = "rc/ricoh/rgb";
 		std::string MEDIA_LIDAR_TOPIC = "rc/lidar3d/points";
 		std::string MEDIA_IMU_TOPIC   = "rc/imu/data";
 	};
@@ -114,11 +121,19 @@ private:
 	std::atomic<std::uint64_t> rgbd_frames_{0};
 	std::atomic<std::uint64_t> lidar_frames_{0};
 	std::atomic<std::uint64_t> imu_frames_{0};
+	std::atomic<std::uint64_t> ricoh_frames_{0};
 
 	// RGBD camera reader thread
 	void read_rgbd_thread();
 	std::thread rgbd_thread;
 	std::atomic<bool> stop_rgbd_thread{false};
+
+	// Ricoh 360 camera reader thread: pulls the RGBD_360 panorama over Ice
+	// (Camera360RGBD) and republishes the RGB image on the media plane. Bridges
+	// Ice → DDS so the hardware-facing RGBD_360 stays DDS-free.
+	void read_ricoh_thread();
+	std::thread ricoh_thread;
+	std::atomic<bool> stop_ricoh_thread{false};
 
 	// Media plane (zero-copy DDS); RGBD pixels leave the DSR graph here.
 	SensorMediaPublisher media_;

@@ -106,9 +106,26 @@ bool SensorMediaPublisher::init(const Config& cfg)
                      + "=" + QString::fromStdString(cfg.imu_stream->topic);
     }
 
+    if (cfg.image360_stream)
+    {
+        image360_.emplace();
+        image360_->key       = cfg.image360_stream->key;
+        image360_->topic     = cfg.image360_stream->topic;
+        image360_->stream_id = cfg.image360_stream->stream_id;
+        if (not image360_->pub.init(stream_config(cfg.domain_id, cfg.history_depth, cfg.image360_stream->topic)))
+        {
+            qWarning() << "[Media] image360 publisher init FAILED topic="
+                       << QString::fromStdString(cfg.image360_stream->topic);
+            image360_.reset();                       // ⇒ image360_ready()==false, publish no-ops
+        }
+        else
+            summary += " " + QString::fromStdString(cfg.image360_stream->key)
+                     + "=" + QString::fromStdString(cfg.image360_stream->topic);
+    }
+
     ready_ = images_ok;
     const auto now = std::chrono::steady_clock::now();
-    image_report_at_ = lidar_report_at_ = imu_report_at_ = now;
+    image_report_at_ = image360_report_at_ = lidar_report_at_ = imu_report_at_ = now;
 
     if (ready_)
         qInfo() << "[Media] publishers ready domain=" << domain_id_
@@ -168,6 +185,23 @@ rc::media::MediaDescriptor SensorMediaPublisher::make_descriptor(
         desc.streams[imu_->key]      = imu_->topic;
         desc.stream_types[imu_->key] = "ImuFrame";
     }
+    if (image360_ and wanted(image360_->key))
+    {
+        desc.streams[image360_->key]      = image360_->topic;
+        desc.stream_types[image360_->key] = "Image360Frame";
+        // When THIS descriptor carries only the 360 panorama (per-node advertise
+        // on the ricoh node), stamp the top-level tag/type as Image360Frame so a
+        // consumer's zero-copy schema guard matches. Mixed bundles keep the
+        // ImageFrame default and rely on per-stream stream_types.
+        const bool only360 = images_.empty() ||
+            std::none_of(images_.begin(), images_.end(),
+                         [&](const auto& kv){ return wanted(kv.first); });
+        if (only360)
+        {
+            desc.type_name = "Image360Frame";
+            desc.type_tag  = rc::media::IMAGE360_FRAME_TYPE_TAG;
+        }
+    }
     return desc;
 }
 
@@ -185,6 +219,40 @@ bool SensorMediaPublisher::publish_image(const std::string& key, const ImageFram
         return false;
     auto& st = it->second;
     if (view.data == nullptr or view.nbytes == 0 or view.nbytes > rc::media::MAX_IMAGE_BYTES)
+        return false;
+
+    auto* s = st.pub.loan();
+    if (s == nullptr)
+    {
+        ++st.stats.loan_fail;
+        return false;
+    }
+    s->stream_id(st.stream_id);
+    s->frame_id(st.frame_id++);
+    s->stamp_ms(view.stamp_ms);
+    s->width(view.width);
+    s->height(view.height);
+    s->step(view.step);
+    s->format(view.format);
+    s->size(static_cast<std::uint32_t>(view.nbytes));
+    std::memcpy(s->data().data(), view.data, view.nbytes);
+
+    if (st.pub.publish(s))
+    {
+        ++st.stats.ok;
+        st.stats.bytes += view.nbytes;
+        return true;
+    }
+    ++st.stats.publish_fail;
+    return false;
+}
+
+bool SensorMediaPublisher::publish_image360(const ImageFrameView& view)
+{
+    if (not image360_)
+        return false;
+    auto& st = *image360_;
+    if (view.data == nullptr or view.nbytes == 0 or view.nbytes > rc::media::MAX_IMAGE360_BYTES)
         return false;
 
     auto* s = st.pub.loan();
@@ -307,6 +375,10 @@ void SensorMediaPublisher::maybe_report_stats(StatsGroup group, std::chrono::sec
                 for (auto& [key, st] : images_)
                     report_one(key, st.stats);
             break;
+        case StatsGroup::Image360:
+            if (image360_ and due(image360_report_at_))
+                report_one(image360_->key, image360_->stats);
+            break;
         case StatsGroup::Lidar:
             if (lidar_ and due(lidar_report_at_))
                 report_one(lidar_->key, lidar_->stats);
@@ -322,6 +394,7 @@ void SensorMediaPublisher::shutdown()
 {
     ready_ = false;
     images_.clear();   // ~MediaPublisher tears down each DDS endpoint
+    image360_.reset();
     lidar_.reset();
     imu_.reset();
 }

@@ -61,6 +61,7 @@ public:
         std::uint32_t            domain_id     = 0;
         int                      history_depth = 8;
         std::vector<StreamSpec>  image_streams;   // rgb, depth, …
+        std::optional<StreamSpec> image360_stream;// nullopt ⇒ ricoh panorama not published (wide Image360Frame)
         std::optional<StreamSpec> lidar_stream;   // nullopt ⇒ lidar not published
         std::optional<StreamSpec> imu_stream;     // nullopt ⇒ imu not published
     };
@@ -103,6 +104,7 @@ public:
     bool init(const Config& cfg);
 
     [[nodiscard]] bool ready() const noexcept { return ready_; }          // images up
+    [[nodiscard]] bool image360_ready() const noexcept { return image360_.has_value(); }
     [[nodiscard]] bool lidar_ready() const noexcept { return lidar_.has_value(); }
     [[nodiscard]] bool imu_ready() const noexcept { return imu_.has_value(); }
     [[nodiscard]] bool data_sharing_active() const noexcept;
@@ -123,13 +125,16 @@ public:
     // ready, key/stream unknown, empty/oversize payload, loan unavailable, publish
     // failure — folded into the per-stream stats.
     bool publish_image(const std::string& key, const ImageFrameView& view);
+    // Publish the wide 360 panorama on the Image360Frame plane (buffer bound
+    // MAX_IMAGE360_BYTES, not MAX_IMAGE_BYTES). No-op if no image360 stream configured.
+    bool publish_image360(const ImageFrameView& view);
     bool publish_lidar(const LidarFrameView& view);
     bool publish_imu(const ImuFrameView& view);
 
     // Which producer thread's streams to report. Each group is touched by exactly
     // one thread (images=RGBD, lidar=lidar, imu=imu), so per-group reporting stays
     // lock-free and race-free — never report a group from another thread.
-    enum class StatsGroup { Image, Lidar, Imu };
+    enum class StatsGroup { Image, Image360, Lidar, Imu };
 
     // Emit a [Media] stats line for one group's streams at most once per `interval`;
     // self-throttles. Call from that group's own producer thread.
@@ -163,6 +168,7 @@ private:
     void report_one(const std::string& key, Stats& s);
 
     std::map<std::string, Stream<rc::media::MediaPublisher>> images_;
+    std::optional<Stream<rc::media::Image360Publisher>>      image360_;
     std::optional<Stream<rc::media::LidarPublisher>>         lidar_;
     std::optional<Stream<rc::media::ImuPublisher>>           imu_;
 
@@ -173,6 +179,7 @@ private:
     bool          ready_              = false;   // image streams up
     // One report clock per group; each touched only by its own producer thread.
     std::chrono::steady_clock::time_point image_report_at_{};
+    std::chrono::steady_clock::time_point image360_report_at_{};
     std::chrono::steady_clock::time_point lidar_report_at_{};
     std::chrono::steady_clock::time_point imu_report_at_{};
 };

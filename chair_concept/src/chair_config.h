@@ -56,6 +56,23 @@ struct ChairConfig
     bool  top_band_gate_enabled = false;
     float top_band_m            = 0.08f;   // half-width of the top-surface membership band (m)
 
+    // ── AI2 belief (UseAI2): mirrors table_concept [TableModel].AI2* ──────────────
+    bool  use_ai2                = false;
+    float ai2_sigma_base_m       = 0.03f;
+    float ai2_clutter_frac       = 0.10f;
+    float ai2_clutter_scale_m    = 0.12f;
+    float ai2_prior_size_std     = 0.15f;
+    float ai2_process_std_m      = 0.005f;
+    float ai2_process_std_yaw    = 0.01f;
+    float ai2_common_mode_pos_std  = 0.03f;
+    float ai2_common_mode_size_std = 0.02f;
+    float ai2_common_mode_yaw_std  = 0.03f;
+    float ai2_range_noise_lat_per_m = 0.02f;   // static range → R + position common-mode (m per m)
+    float ai2_range_noise_yaw_per_m = 0.03f;   // static range → yaw common-mode (rad per m)
+    float ai2_trunc_gate_frac    = 0.10f;
+    int   ai2_gn_iters           = 4;
+    std::string ai2_csv_path     = "";
+
     // ChairModel parameters (forwarded to ChairModelParams)
     float sigma_obs         = 0.05f;
     float lambda_size       = 0.15f;

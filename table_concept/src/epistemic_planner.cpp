@@ -118,8 +118,8 @@ EpistemicProposal EpistemicPlanner::compute(const TableModel&  model,
                                              const std::array<float, 8>& posterior_info) const
 {
     constexpr float kEffectiveHorizontalFovRad = 70.0f * std::numbers::pi_v<float> / 180.0f;
-    constexpr float kMinimumStandOffM = 0.90f;
-    constexpr float kStandOffSafetyMarginM = 0.25f;
+    constexpr float kMinimumStandOffM = 1.15f;         // YOLO won't fire too close → keep a viewing gap
+    constexpr float kStandOffSafetyMarginM = 0.45f;    // extra stand-off beyond the FoV-fit distance
 
     const auto coverage = queue.face_coverage(model);
     const auto& s       = model.state();
@@ -211,8 +211,8 @@ EpistemicProposal EpistemicPlanner::compute(const TableModel&  model,
 EpistemicProposal EpistemicPlanner::compute(const TableBelief& belief, float lat_rate, float sigma_base) const
 {
     constexpr float kEffectiveHorizontalFovRad = 70.0f * std::numbers::pi_v<float> / 180.0f;
-    constexpr float kMinimumStandOffM = 0.90f;
-    constexpr float kStandOffSafetyMarginM = 0.25f;
+    constexpr float kMinimumStandOffM = 1.15f;         // YOLO won't fire too close → keep a viewing gap
+    constexpr float kStandOffSafetyMarginM = 0.45f;    // extra stand-off beyond the FoV-fit distance
 
     const Eigen::Matrix<float, 6, 6>& S = belief.covariance();   // full Σ over [cx,cy,H,w,h,yaw]
     const TableBeliefState& s = belief.state();

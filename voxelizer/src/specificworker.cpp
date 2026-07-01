@@ -151,6 +151,7 @@ void SpecificWorker::initialize()
             pose_config.input_size    = params.HUMAN_POSE_INPUT_SIZE;
             pose_config.use_gpu       = params.HUMAN_POSE_USE_GPU;
             pose_config.use_trt       = params.HUMAN_POSE_USE_TRT;
+            pose_config.hold_ms       = params.HUMAN_POSE_HOLD_MS;
             pose_config.verbose_debug = verbose_debug_;
             yolo_human_processor->configure(pose_config);
         }
@@ -344,7 +345,7 @@ void SpecificWorker::compute()
     const bool run_pose = yolo_human_processor and yolo_human_processor->ready()
                           and (pose_frame_counter_++ % kPoseDecimation == 0);
     if (run_pose)
-        yolo_human_processor->detect_poses(frame->rgbd.rgb);   // refresh the cache (~6-7 Hz)
+        yolo_human_processor->detect_poses(frame->rgbd.rgb, frame->frame_ts_ms);   // refresh the cache (~6-7 Hz)
     static const std::vector<rc::human_pose::PoseDetection> kNoPoses;
     const auto& poses = (yolo_human_processor and yolo_human_processor->ready())
         ? yolo_human_processor->last_poses()

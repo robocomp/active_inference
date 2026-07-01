@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -89,6 +90,8 @@ struct VoxelizerParams
     int         HUMAN_POSE_INPUT_SIZE   = 640;
     bool        HUMAN_POSE_USE_GPU      = true;
     bool        HUMAN_POSE_USE_TRT      = false;
+    // Keep the last good skeleton on the viewer for up to this long after a detection miss (anti-flicker).
+    std::uint64_t HUMAN_POSE_HOLD_MS    = 500;              // HumanPose.hold_ms
     // Per-joint confidence floor below which a keypoint is dropped (NaN) from the skeleton node.
     float       SKELETON_KP_CONF_MIN    = 0.30f;
     // Half-window (px) for the median-depth patch sampled at each keypoint (0 = single pixel).
