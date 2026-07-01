@@ -1292,8 +1292,8 @@ void ControllerObstacleTracker::scan_for_unmodelled_obstacles(std::uint64_t time
         return;
 
     // Tunables (local for now; promote to ControllerParams if they need field tuning).
-    constexpr float kZMin = 0.10f;          // ignore floor returns
-    constexpr float kZMax = 1.50f;          // ignore high ceiling/overhead returns
+    const float kZMin = params_->unmodelled_scan_min_z_m;   // ignore floor returns
+    const float kZMax = params_->unmodelled_scan_max_z_m;   // ignore high ceiling/overhead returns
     constexpr float kWallMarginM = 0.30f;   // drop returns near/beyond the room boundary (walls)
     constexpr float kRobotRadiusM = 0.40f;  // drop the robot's own returns
     constexpr float kCellM = 0.20f;         // grid-cluster cell size
@@ -1481,14 +1481,21 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
 
     const auto room_from_lidar_matrix = room_from_lidar->matrix();
     const auto robot_from_lidar_matrix = robot_from_lidar->matrix();
+    // NOTE: the RoboComp Lidar3D source already returns points in the robot/base frame (floor ≈ z=0),
+    // so the robot→lidar RT edge is deliberately identity; robot_z below is therefore height above the
+    // floor. If someone ever moves the lidar node to its true mount height in shadow.json this shortcut
+    // double-counts — keep the edge identity for this data convention.
     const bool robot_from_lidar_is_identity = robot_from_lidar_matrix.isApprox(Eigen::Matrix4d::Identity(), 1e-5);
+
+    const float min_h = params_->temporary_obstacle_min_height_m;
+    const float max_h = params_->temporary_obstacle_max_height_m;
     lidar_room_buffer_.put<0>(
         rc::RawLidarPointVectors{
             .xs = std::move(proc_xs),
             .ys = std::move(proc_ys),
             .zs = std::move(proc_zs)},
         proc_ts,
-        [room_from_lidar_matrix, robot_from_lidar_matrix, robot_from_lidar_is_identity, raw_count](rc::RawLidarPointVectors &&raw_points, rc::LidarPointVectors &room_points)
+        [room_from_lidar_matrix, robot_from_lidar_matrix, robot_from_lidar_is_identity, raw_count, min_h, max_h](rc::RawLidarPointVectors &&raw_points, rc::LidarPointVectors &room_points)
         {
             auto &[room_xs, room_ys, room_zs] = room_points;
             const auto &xs_in = raw_points.xs;
@@ -1530,7 +1537,7 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
                 const float robot_z = robot_from_lidar_is_identity
                     ? z
                     : static_cast<float>(r20 * x + r21 * y + r22 * z + r23);
-                if (robot_z < kTemporaryObstacleMinHeightAboveFloorM || robot_z > kTemporaryObstacleMaxHeightAboveFloorM)
+                if (robot_z < min_h || robot_z > max_h)
                     continue;
 
                 const float room_x = static_cast<float>(m00 * x + m01 * y + m02 * z + m03);

@@ -24,6 +24,7 @@ namespace rc
 }
 
 namespace rc::media { class MediaSubscriber; }
+namespace rc::media { class Image360Subscriber; }
 namespace rc::media { class LidarSubscriber; }
 
 class SceneProcessor
@@ -58,6 +59,19 @@ public:
     // false (or init fails) the DSR graph 'lidar3D' node remains the source. Points share the sensor
     // frame of the graph laser_* attrs, so the downstream room_T_robot transform is unchanged.
     bool init_lidar_media_plane(std::uint32_t domain_id, const std::string& topic, bool use_media);
+
+    // RGBD_360 panorama over the wide Image360Frame plane (display-only for the
+    // Ricoh popup). Discovered from the "ricoh" node descriptor; falls back to the
+    // configured domain/topic. Independent of the ZED rgb/depth pipeline.
+    bool init_ricoh_media_plane(std::uint32_t domain_id, const std::string& topic);
+    // Drain the ricoh subscriber; decodes into the latest-frame cache ONLY when
+    // ricoh is wanted (window visible), so a hidden popup costs just a poll-discard.
+    void poll_ricoh();
+    void set_ricoh_wanted(bool on) { ricoh_wanted_.store(on, std::memory_order_relaxed); }
+    // Latest decoded panorama (BGR, CV_8UC3); empty until a frame arrives.
+    const cv::Mat& ricoh_bgr() const { return media_ricoh_.bgr; }
+    // Latest ricoh source stamp (ms); recorded on every poll (even when not decoding) for rate telemetry.
+    std::uint64_t ricoh_last_stamp_ms() const { return ricoh_last_stamp_ms_; }
 
     std::pair<std::string, std::string> get_room_robot_names_for_compute();
     bool ensure_room_and_robot_ready(FPSCounter& compute_fps,
@@ -193,4 +207,10 @@ private:
     };
     mutable MediaRgbCache   media_rgb_;
     mutable MediaDepthCache media_depth_;
+
+    // RGBD_360 panorama (display-only). Reuses the RGB cache shape.
+    std::unique_ptr<rc::media::Image360Subscriber> media_ricoh_sub_;
+    MediaRgbCache      media_ricoh_;
+    std::atomic<bool>  ricoh_wanted_{false};   // set by the popup's show/hide toggle
+    std::uint64_t      ricoh_last_stamp_ms_ = 0;   // last polled ricoh source stamp (rate telemetry)
 };

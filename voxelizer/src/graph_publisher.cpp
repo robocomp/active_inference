@@ -1,12 +1,10 @@
 /*
- * graph_publisher.cpp — DSR semantic_grid exports (masks / tracks / voxels).
+ * graph_publisher.cpp — DSR semantic_grid exports (masks).
  */
 
 // These pull in oneTBB (tbb/profiling.h). Include them BEFORE any header that activates Qt's `emit`
 // keyword macro (dsr_api.h via graph_publisher.h, and <QtGlobal>), otherwise the empty `emit` macro
 // mangles TBB's profiling.h and it fails to compile.
-#include "unified_voxel_grid.h"
-#include "voxel_processor.h"
 #include "yolo_processor.h"   // SegDetection
 #include "yolo_human.h"       // rc::human_pose::PoseDetection, BODY18_FROM_COCO
 
@@ -20,17 +18,15 @@
 #include <limits>
 #include <print>
 #include <sstream>
+#include <unordered_map>
 #include <utility>
 
 #include <QtGlobal>
 
 GraphPublisher::GraphPublisher(std::shared_ptr<DSR::DSRGraph> graph,
                                const VoxelizerParams& params,
-                               VoxelProcessor* voxel_processor,
-                               UnifiedVoxelGrid* voxel_grid,
                                std::function<void()> relayout)
-    : G_(std::move(graph)), params_(params), voxel_processor_(voxel_processor),
-      voxel_grid_(voxel_grid), relayout_(std::move(relayout))
+    : G_(std::move(graph)), params_(params), relayout_(std::move(relayout))
 {}
 
 void GraphPublisher::publish(const RGBDData& rgbd, const Mat::RTMat& room_T_zed,
@@ -38,20 +34,6 @@ void GraphPublisher::publish(const RGBDData& rgbd, const Mat::RTMat& room_T_zed,
 {
     if (ensure_node("masks", "Plum", masks_ready_, /*relayout=*/true))
         upload_masks(rgbd, room_T_zed, detections, frame_ts_ms);
-
-    // tracks deliberately does NOT relayout: a full twopi reshuffle racing another agent's node
-    // insert/remove can paint a freed QGraphicsItem → SIGSEGV in the viewer. Cosmetic only.
-    if (params_.PUBLISH_TRACKS and ensure_node("tracks", "SteelBlue", tracks_ready_, /*relayout=*/false))
-        publish_tracks();
-
-    if (params_.PUBLISH_VOXELS and ensure_node("voxels", "Khaki", voxels_ready_, /*relayout=*/true))
-        upload_voxels();
-}
-
-void GraphPublisher::refresh_voxels_node()
-{
-    if (params_.PUBLISH_VOXELS and ensure_node("voxels", "Khaki", voxels_ready_, /*relayout=*/true))
-        upload_voxels();
 }
 
 bool GraphPublisher::ensure_node(const char* name, const char* color, bool& ready, bool relayout)
@@ -328,22 +310,65 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
             continue;
 
         // Radius outlier removal: keep points that have enough neighbours nearby. The dense
-        // object body survives; the sparse silhouette-edge tail is trimmed.
+        // object body survives; the sparse silhouette-edge tail is trimmed. Bucketed into a
+        // uniform spatial hash grid (cell = MASK_OUTLIER_RADIUS_M) instead of all-pairs distance
+        // checks: an isolated silhouette-edge point — exactly the case this filter is meant to
+        // discard — used to scan the ENTIRE point set before concluding it has too few
+        // neighbours (worst-case O(n²) on the very points it removes); the grid only visits the
+        // 3x3x3 neighbouring cells, so cost tracks local density instead of total point count.
         std::vector<Eigen::Vector3f> mask_points_room;
         std::vector<Eigen::Vector3f> mask_points_cam;   // parallel to mask_points_room (same survivors)
         if (params_.MASK_OUTLIER_MIN_NEIGHBORS > 0 and params_.MASK_OUTLIER_RADIUS_M > 0.0f
             and gated.size() > static_cast<std::size_t>(params_.MASK_OUTLIER_MIN_NEIGHBORS))
         {
-            const float r2 = params_.MASK_OUTLIER_RADIUS_M * params_.MASK_OUTLIER_RADIUS_M;
+            const float radius = params_.MASK_OUTLIER_RADIUS_M;
+            const float r2 = radius * radius;
+            const int min_neighbours = params_.MASK_OUTLIER_MIN_NEIGHBORS;
+
+            const auto cell_of = [radius](const Eigen::Vector3f& p) -> std::array<int, 3>
+            {
+                return {static_cast<int>(std::floor(p.x() / radius)),
+                        static_cast<int>(std::floor(p.y() / radius)),
+                        static_cast<int>(std::floor(p.z() / radius))};
+            };
+            struct CellHash
+            {
+                std::size_t operator()(const std::array<int, 3>& k) const noexcept
+                {
+                    std::size_t h = static_cast<std::size_t>(k[0]);
+                    h = h * 1000003u ^ static_cast<std::size_t>(k[1]);
+                    h = h * 1000003u ^ static_cast<std::size_t>(k[2]);
+                    return h;
+                }
+            };
+
+            std::unordered_map<std::array<int, 3>, std::vector<std::size_t>, CellHash> grid;
+            grid.reserve(gated.size());
+            for (std::size_t i = 0; i < gated.size(); ++i)
+                grid[cell_of(gated[i])].push_back(i);
+
             mask_points_room.reserve(gated.size());
             mask_points_cam.reserve(gated.size());
             for (std::size_t i = 0; i < gated.size(); ++i)
             {
+                const auto base = cell_of(gated[i]);
                 int neighbours = 0;
-                for (std::size_t j = 0; j < gated.size() and neighbours < params_.MASK_OUTLIER_MIN_NEIGHBORS; ++j)
-                    if (i != j and (gated[i] - gated[j]).squaredNorm() <= r2)
-                        ++neighbours;
-                if (neighbours >= params_.MASK_OUTLIER_MIN_NEIGHBORS)
+                for (int dx = -1; dx <= 1 and neighbours < min_neighbours; ++dx)
+                    for (int dy = -1; dy <= 1 and neighbours < min_neighbours; ++dy)
+                        for (int dz = -1; dz <= 1 and neighbours < min_neighbours; ++dz)
+                        {
+                            const auto it = grid.find({base[0] + dx, base[1] + dy, base[2] + dz});
+                            if (it == grid.end())
+                                continue;
+                            for (const std::size_t j : it->second)
+                            {
+                                if (j == i or (gated[i] - gated[j]).squaredNorm() > r2)
+                                    continue;
+                                if (++neighbours >= min_neighbours)
+                                    break;
+                            }
+                        }
+                if (neighbours >= min_neighbours)
                 {
                     mask_points_room.push_back(gated[i]);
                     mask_points_cam.push_back(gated_cam[i]);
@@ -656,107 +681,6 @@ void GraphPublisher::upload_skeletons(const RGBDData& rgbd,
     }
 }
 
-// Feed-forward, class-agnostic publisher. Exports ALL current voxel tracks (every category) into the
-// 'tracks' node, room frame, as a struct-of-arrays keyed by persistent track id. Concept agents read
-// these and do their own instance assignment. Uses runtime/dynamic attributes (like 'masks').
-void GraphPublisher::publish_tracks()
-{
-    auto node_opt = G_->get_node("tracks");
-    if (!node_opt.has_value())
-        return;
-    auto& node = node_opt.value();
-
-    const auto& tracks        = voxel_processor_->last_track_candidates();
-    const int   sensing_frame = voxel_processor_->last_frame_id();
-    constexpr int kMaxPtsPerTrack = 400;
-
-    std::vector<float> ids, label_ids, confidences, last_seen, voxel_counts;
-    std::vector<float> centroids_xyz, bbox_min_xyz, bbox_max_xyz;
-    std::vector<float> support_offsets{0.0f};   // prefix offsets, in POINTS
-    std::vector<float> support_points;
-    std::ostringstream labels_joined;
-    int published = 0;
-
-    for (const auto& t : tracks)
-    {
-        const auto pts = voxel_processor_->get_flat_pts_for_track(t.track_id, kMaxPtsPerTrack);
-        if (pts.empty())
-            continue;
-
-        if (!labels_joined.str().empty())
-            labels_joined << '|';
-        labels_joined << t.category;
-
-        ids.push_back(static_cast<float>(t.track_id));
-        label_ids.push_back(0.0f);                 // class id slot (category string carries the label)
-        confidences.push_back(1.0f);               // label-vote confidence (placeholder)
-        last_seen.push_back(static_cast<float>(t.last_seen_frame));
-        voxel_counts.push_back(static_cast<float>(t.voxel_count));
-
-        centroids_xyz.insert(centroids_xyz.end(), {t.centroid.x(), t.centroid.y(), t.centroid.z()});
-        bbox_min_xyz.insert(bbox_min_xyz.end(),   {t.min.x(), t.min.y(), t.min.z()});
-        bbox_max_xyz.insert(bbox_max_xyz.end(),   {t.max.x(), t.max.y(), t.max.z()});
-
-        support_points.insert(support_points.end(), pts.begin(), pts.end());
-        support_offsets.push_back(static_cast<float>(support_points.size() / 3));
-        ++published;
-    }
-
-    G_->runtime_checked_add_or_modify_attrib_local(node, "track_frame_id",      sensing_frame);
-    G_->runtime_checked_add_or_modify_attrib_local(node, "track_count",         published);
-    G_->runtime_checked_add_or_modify_attrib_local(node, "track_ids",           ids);
-    G_->runtime_checked_add_or_modify_attrib_local(node, "track_labels",        labels_joined.str());
-    G_->runtime_checked_add_or_modify_attrib_local(node, "track_label_ids",     label_ids);
-    G_->runtime_checked_add_or_modify_attrib_local(node, "track_confidences",   confidences);
-    G_->runtime_checked_add_or_modify_attrib_local(node, "track_last_seen",     last_seen);
-    G_->runtime_checked_add_or_modify_attrib_local(node, "track_voxel_counts",  voxel_counts);
-    G_->runtime_checked_add_or_modify_attrib_local(node, "track_centroids_xyz", centroids_xyz);
-    G_->runtime_checked_add_or_modify_attrib_local(node, "track_bbox_min_xyz",  bbox_min_xyz);
-    G_->runtime_checked_add_or_modify_attrib_local(node, "track_bbox_max_xyz",  bbox_max_xyz);
-    G_->runtime_checked_add_or_modify_attrib_local(node, "track_support_offsets", support_offsets);
-    G_->runtime_checked_add_or_modify_attrib_local(node, "track_support_points",  support_points);
-    G_->update_node(std::move(node));
-
-    if (sensing_frame % 30 == 0)
-        std::println("[Tracks] frame={} published={} support_pts={}",
-                     sensing_frame, published, support_points.size() / 3);
-}
-
-void GraphPublisher::upload_voxels()
-{
-    const int sensing_frame = voxel_processor_->last_frame_id();
-    if (sensing_frame % 30 != 0)
-        return;
-
-    auto voxels_node_opt = G_->get_node("voxels");
-    if (!voxels_node_opt.has_value())
-        return;
-    auto& voxels_node = voxels_node_opt.value();
-
-    const auto exported = voxel_grid_->export_semantic_voxels();
-
-    // Stride-5 encoding per voxel: [x, y, z, prob, track_id]. Receivers must interpret with stride 5.
-    const std::size_t n = exported.points.size();
-    std::vector<float> flat_pts;
-    flat_pts.reserve(n * 5);
-    for (std::size_t i = 0; i < n; ++i)
-    {
-        const auto& pt = exported.points[i];
-        flat_pts.push_back(pt.x());
-        flat_pts.push_back(pt.y());
-        flat_pts.push_back(pt.z());
-        flat_pts.push_back(i < exported.probs.size()    ? exported.probs[i]                    : 0.0f);
-        flat_pts.push_back(i < exported.track_ids.size() ? static_cast<float>(exported.track_ids[i]) : -1.0f);
-    }
-
-    G_->add_or_modify_attrib_local<candidate_pts_att>(voxels_node, flat_pts);
-    G_->add_or_modify_attrib_local<last_sensing_frame_att>(voxels_node, sensing_frame);
-    G_->update_node(std::move(voxels_node));   // last use: move the voxel-grid blob into the engine (no deep copy under _mutex)
-
-    if (params_.VERBOSE_DEBUG)
-        qInfo() << "[Voxels] Uploaded" << n << "voxels (stride-5) to DSR (frame=" << sensing_frame << ")";
-}
-
 void GraphPublisher::cleanup_semantic_grid_nodes()
 {
     for (const auto& node : G_->get_nodes_by_type("semantic_grid"))
@@ -765,7 +689,5 @@ void GraphPublisher::cleanup_semantic_grid_nodes()
         G_->delete_node(node.id());
     }
     masks_ready_    = false;
-    tracks_ready_   = false;
-    voxels_ready_   = false;
     skeleton_ready_ = false;
 }

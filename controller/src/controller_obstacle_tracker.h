@@ -68,8 +68,8 @@ class ControllerObstacleTracker
         static constexpr float kRemovalPenetrationMargin = 0.05f;
         static constexpr float kRemovalCrossAxisMargin = 0.08f;
         static constexpr float kPublishedObstacleHeightM = 0.8f;
-        static constexpr float kTemporaryObstacleMinHeightAboveFloorM = 0.20f;
-        static constexpr float kTemporaryObstacleMaxHeightAboveFloorM = 1.8f;
+        // LiDAR height band moved to ControllerParams (temporary_obstacle_min/max_height_m) so the
+        // floor-reject cutoff can be tuned from config without a rebuild.
 
         struct RememberedPoint
         {

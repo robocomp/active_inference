@@ -393,4 +393,29 @@ make_image_subscriber_from_graph(Graph& graph, const std::string& node_name,
     return sub;
 }
 
+template <class Graph>
+[[nodiscard]] std::unique_ptr<Image360Subscriber>
+make_image360_subscriber_from_graph(Graph& graph, const std::string& node_name,
+                                    const std::string& stream_key)
+{
+    auto desc = descriptor_from_graph(graph, node_name);
+    auto cfg  = desc.has_value() ? desc->subscriber_config(stream_key) : std::nullopt;
+    if (not cfg.has_value())
+    {
+        std::print(stderr, "[media] no '{}' stream descriptor on node '{}' — image360 subscriber not created\n",
+                   stream_key, node_name);
+        return nullptr;
+    }
+    auto sub = std::make_unique<Image360Subscriber>();
+    if (not sub->init(*cfg))
+    {
+        std::print(stderr, "[media] image360 subscriber init FAILED (node '{}' topic '{}')\n",
+                   node_name, cfg->topic_name);
+        return nullptr;
+    }
+    std::print("[media] image360 subscriber up from '{}' descriptor ('{}'): domain={} topic='{}'\n",
+               node_name, stream_key, cfg->domain_id, cfg->topic_name);
+    return sub;
+}
+
 }  // namespace rc::media

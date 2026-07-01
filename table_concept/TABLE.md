@@ -394,9 +394,20 @@ visible (centre projects inside the `zed` frustum) yet isn't detected; out-of-Fo
 
 For tables, `DeathEnabled = false` (`Tracker.DeathEnabled`): a table is rigid persistent furniture, a
 long occlusion is not absence. So `res.deaths` is ignored (`specificworker.cpp:548–551`) and tables
-are never retired by timeout. **Removal-on-genuine-absence is therefore not yet wired for tables** —
-to complete it: set `DeathEnabled = true`, ensure `update_expected_visible` projects each centre into
-the `zed` frustum each cycle, and on a death `delete_node` + `forget_node` + `affordance.remove()`.
+are never retired by timeout. To enable removal-on-genuine-absence: set `DeathEnabled = true`, feed
+`TrackView.expected_visible` per cycle, and on a death `delete_node` + `forget_node` + `affordance.remove()`.
+
+**The negative-information gate is the whole removal contract** — get it right or an instance flickers
+(created, then deleted within seconds). *Any* removal timer must advance ONLY when the instance
+**should** be seen — its model projects into the camera FoV (`inst.roi_valid` / `TrackView.
+expected_visible`) yet no mask associated. Out-of-FoV (robot looked away) the timer is **held**, so a
+piece of furniture glimpsed once and left behind persists; a true phantom sits at a detected location →
+projects in-frame → its timer still advances and it is removed. This applies to death **and** to
+`chair_concept`'s stillbirth prune (`tracker_prune_enabled` — the chair worker's `unassigned_streak`),
+which without the gate deleted a real chair the robot turned away from within `prune_patience` cycles
+(the "chair appears and disappears in seconds" flicker, fixed 2026-07-01 by gating the prune increment
+on `roi_valid` + setting `TrackView.expected_visible = roi_valid`). Table has no prune (merge-only
+removal), so it never flickers; the same gate is the template if a table prune/death is ever added.
 
 ### 4.3 Open issue — fragmentation vs merge
 

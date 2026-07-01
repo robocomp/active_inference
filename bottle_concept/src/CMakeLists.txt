@@ -46,6 +46,7 @@ LIST(APPEND SOURCES
   ${ACTIVE_INFERENCE_COMMON_DIR}/mask_ingestor/mask_ingestor.cpp
   ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/timeseries_plot.cpp
   ../src/bottle_scene_graph.cpp
+  ../src/bottle_belief.cpp
   ../src/bottle_fitter.cpp
   ../src/epistemic_planner.cpp
   ../src/bottle_affordance.cpp
@@ -65,6 +66,7 @@ LIST(APPEND HEADERS
   ../src/bottle_evaluator.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/mask_ingestor/mask_ingestor.h
   ../src/bottle_scene_graph.h
+  ../src/bottle_belief.h
   ../src/bottle_fitter.h
   ../src/epistemic_planner.h
   ../src/bottle_affordance.h

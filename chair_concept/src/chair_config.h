@@ -71,6 +71,7 @@ struct ChairConfig
     float ai2_range_noise_yaw_per_m = 0.03f;   // static range → yaw common-mode (rad per m)
     float ai2_trunc_gate_frac    = 0.10f;
     int   ai2_gn_iters           = 4;
+    float ai2_extent_std         = 0.05f;   // extent-observation noise (m) for the coverage/extent likelihood
     std::string ai2_csv_path     = "";
 
     // ChairModel parameters (forwarded to ChairModelParams)

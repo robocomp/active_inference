@@ -57,6 +57,14 @@ struct ControllerParams
     // velocity / RT-staleness evolution). Empty = disabled. Relative → lands in the launch CWD; the
     // resolved absolute path is printed once on first write so it's findable.
     std::string overlay_csv_path = "overlay_lag_eval.csv";
+    // Near-obstacle "black box": when the robot comes within proximity_log_distance_m of a tracked
+    // obstacle (or the trajectory ESDF drops that low), append a CSV row capturing what the controller
+    // saw that cycle (min_esdf, safety-guard/blockage flags, commanded velocity, geometric nearest
+    // obstacle). Lets a later collision be explained — e.g. nearest_obst_m small but min_esdf large ⇒
+    // the ESDF never saw the obstacle (self-occlusion). Off by default.
+    bool proximity_log_enabled = false;
+    std::string proximity_csv_path = "proximity_obstacles.csv";
+    float proximity_log_distance_m = 0.6f;
     int max_lidar_draw_points = 600;
     std::string lidar_name = "lidar3D";
     // Zero-copy media plane (LiDAR). When lidar_use_media is true, the LiDAR point
@@ -100,6 +108,16 @@ struct ControllerParams
     float temporary_obstacle_existence_remembered_gain = 0.02f;
     float temporary_obstacle_existence_weak_miss_penalty = 0.05f;
     float temporary_obstacle_existence_absence_penalty = 0.75f;
+    // LiDAR height band (metres, robot frame ≈ height above floor since robot_from_lidar is identity
+    // and the source cloud is already floor-referenced). The min is a floor-plane reject cutoff: the
+    // lowest lidar beam grazes the floor into a dense ring at ~0.11–0.18 m (confirmed with an EMPTY
+    // Webots room), so it MUST sit above that ring — 0.20 is the known-good value. Lower it only if the
+    // [LidarZ] histogram shows the floor ring is lower AND you need to catch sub-0.20 m obstacles.
+    float temporary_obstacle_min_height_m = 0.20f;
+    float temporary_obstacle_max_height_m = 1.8f;
+    // Same idea for the proactive unmodelled-obstacle scan (room frame, z = height above floor).
+    float unmodelled_scan_min_z_m = 0.10f;
+    float unmodelled_scan_max_z_m = 1.50f;
     float goal_clearance_relax_dist_m = 0.6f;
     float goal_obstacle_margin_m = 0.08f;
     float goal_clearance_min_ratio = 0.85f;

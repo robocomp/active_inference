@@ -519,6 +519,10 @@ void SpecificWorker::run_instance_tracker()
         t.id = id;
         const auto& s = inst.model.state();
         t.xy = {s.cx, s.cy};
+        // Negative-information for the tracker's death path (if DeathEnabled): a miss counts only when the
+        // chair projects into the camera FoV. Out-of-view → HOLD (matches the prune gate above). roi_valid
+        // is a cycle stale (set in run_inference) but that's fine for a frustum test.
+        t.expected_visible = inst.roi_valid;
         if (cfg_.use_ai2 and inst.ai2_initialized)
         {
             // AI2: gate association on the belief's position cov (+ chain) → Mahalanobis S = P + R²I.
@@ -591,6 +595,12 @@ void SpecificWorker::run_instance_tracker()
         for (auto& [id, inst] : fitter_->instances())
         {
             if (inst.assigned_mask_idx >= 0) { inst.unassigned_streak = 0; continue; }
+            // Negative-information: an unassigned cycle is evidence of a PHANTOM only when the chair SHOULD
+            // be seen — its model projects into the camera FoV (roi_valid) yet no mask associated. When the
+            // chair is out of view (robot looked away) the streak is HELD, so a real chair glimpsed once and
+            // left behind persists as furniture instead of being pruned within seconds (the flicker). A true
+            // phantom sits at a detected location → projects in-frame → still accrues the streak and is pruned.
+            if (not inst.roi_valid) continue;
             ++inst.unassigned_streak;
             const bool young = inst.processed_cycles < cfg_.tracker_prune_maturity_cycles;
             if (young and inst.unassigned_streak >= cfg_.tracker_prune_patience)

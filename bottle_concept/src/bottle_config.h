@@ -58,6 +58,23 @@ struct BottleConfig
     float mask_conf_floor   = 0.2f;   // conf ≤ floor → minimal weight
     float mask_conf_ref     = 0.5f;   // conf ≥ ref   → full weight (w=1)
     float mask_conf_power    = 2.0f;  // shaping exponent on the normalised score
+    // ── AI2 belief (mirrors table_concept [TableModel].AI2*/chair [ChairModel].AI2*) ────────────────
+    // Full-covariance recursive-Laplace belief over [cx,cy,cz,radius,height] on the shared engine
+    // (bottle_belief.h). Behind UseAI2 (default OFF); the legacy BottleModel gradient path is the default.
+    // Static (no yaw, single cylinder primitive); the movable-object CV tracking stays in the legacy path.
+    bool  use_ai2                  = false;  // select the AI2 BottleBelief instead of the legacy fit path
+    float ai2_sigma_base_m         = 0.02f;  // base on-surface obs noise std (m); R = σ² (+ motion_var)
+    float ai2_clutter_frac         = 0.10f;  // ε: prior weight of the uniform clutter mixture component
+    float ai2_clutter_scale_m      = 0.08f;  // a point further than ~this from the surface is likely clutter
+    float ai2_prior_pos_std        = 0.30f;  // broad position prior std (m) on cx,cy,cz
+    float ai2_prior_size_std       = 0.03f;  // broad size prior std (m) on radius,height
+    float ai2_process_std_m        = 0.005f; // predict process-noise std, all 5 length DOFs (m/frame)
+    // Per-frame COMMON-MODE error (shared by all points of a mask → doesn't average out). The frame's
+    // information saturates here, so N correlated points can't collapse σ → calibrated posterior.
+    float ai2_common_mode_pos_std  = 0.02f;  // shared position error (m); pose-chain cov adds to it
+    float ai2_common_mode_size_std = 0.01f;  // shared size error radius,height (m)
+    int   ai2_gn_iters             = 4;      // Gauss-Newton iterations per frame
+    std::string ai2_csv_path       = "";     // non-empty → append a per-cycle AI2 belief CSV (state + Σ diag)
     // ── Support-surface decision (room vs table parent) ───────────────────────────────────────────
     // The bottle hangs from the surface it RESTS ON, chosen by MAP over {room, every table_N}: the
     // centre must lie inside the table's oriented footprint AND the observed base must sit at its top

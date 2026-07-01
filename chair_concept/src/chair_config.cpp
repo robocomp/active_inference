@@ -71,6 +71,7 @@ ChairConfig load_chair_config(const ConfigLoader& cfg)
     out.ai2_range_noise_yaw_per_m = getf("ChairModel.AI2RangeNoiseYawPerM",   0.03f);
     out.ai2_trunc_gate_frac      = getf("ChairModel.AI2TruncGateFrac",        0.10f);
     out.ai2_gn_iters             = geti("ChairModel.AI2GnIters",              4);
+    out.ai2_extent_std           = getf("ChairModel.AI2ExtentStd",            0.05f);
     out.ai2_csv_path             = gets("ChairModel.AI2CsvPath",              "");
 
     // ChairModel

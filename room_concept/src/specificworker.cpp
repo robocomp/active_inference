@@ -146,9 +146,11 @@ void SpecificWorker::initialize()
     const std::string pose_path = pose_file_path();
     room_concept_.set_seed_pose_file(pose_path);
 
-    auto default_viewer = find_graph_viewer("");
-    if (!default_viewer)
-        throw std::runtime_error("SpecificWorker requires a default DSR viewer. Enable at least one Agent viewer flag for the default graph.");
+    // The DSR graph viewer is OPTIONAL now: the layout GUI lives in its own top-level window
+    // (see RoomViewer), so the agent runs with Agent.graph=false (no DSRViewer created). When a
+    // viewer flag IS enabled we still use it for the graph relayout; every access is null-guarded.
+    if (!find_graph_viewer(""))
+        qInfo() << "[room] No DSR viewer (Agent.graph=false); layout window runs standalone.";
 
     // Load room polygon for visualizations (viewer outline + camera-projection overlay).
     std::vector<Eigen::Vector2f> room_polygon_for_viz;
@@ -158,7 +160,7 @@ void SpecificWorker::initialize()
 
     // GUI / visualization (2-D viewer, FE plot, camera-projection window + RGB media plane).
     viewer_ = std::make_unique<rc::RoomViewer>(
-        default_viewer.get(), G, params, room_polygon_for_viz,
+        G, params, room_polygon_for_viz,
         room_initialized_from_svg_polygon_, room_concept_, epistemic_controller_);
 
     if (auto* w = viewer_->widget())

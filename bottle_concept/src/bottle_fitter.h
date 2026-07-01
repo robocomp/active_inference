@@ -70,6 +70,9 @@ public:
     bool ensure_instance(const DSR::Node& node, std::uint64_t room_node_id);
     BottleObservation observe(BottleInstance& inst, const DSR::Node& node);
     float run_inference(BottleInstance& inst, const BottleObservation& observation);
+    // AI2 path (cfg.use_ai2): one recursive full-covariance belief update on this frame's mask points
+    // (mirrors table run_inference_ai2). Writes the result into inst.model so downstream code is unchanged.
+    float run_inference_ai2(BottleInstance& inst, const BottleObservation& observation);
     bool should_log(const BottleInstance& inst) const;
 
     // The live instance map (the validation sweep mutates it; del_node prunes it).
@@ -110,6 +113,8 @@ private:
     // Append one row of Fisher-filter evolution (state + per-DOF obs/accumulated info + posterior std
     // mm) to cfg_.fisher_csv_path. No-op if the path is empty. Lazily opens + writes the header.
     void log_fisher_csv(const BottleInstance& inst, bool fresh, float free_energy, int point_count);
+    // Append one AI2 belief row (state + Σ diag std) to cfg_.ai2_csv_path. No-op if the path is empty.
+    void log_ai2_csv(const BottleInstance& inst, int point_count, float R, float energy);
 
     // Feed the fitted model the RGB-mask edge rays as a silhouette likelihood.
     void feed_silhouette(BottleInstance& inst);
@@ -135,6 +140,7 @@ private:
     std::unordered_map<std::uint64_t, Eigen::Vector2f> birth_seeds_;   // tracker-provided birth XY (see note_birth)
     std::uint64_t                   room_node_id_ = 0;   // refreshed each process_bottle_node call
     std::ofstream                   fisher_csv_;         // per-cycle Fisher-filter evolution log (optional)
+    std::ofstream                   ai2_csv_;            // per-cycle AI2 belief log (optional)
 
     // Shared per-DOF belief stabiliser (5 DOF [cx,cy,cz,radius,height], no yaw). Currently only its
     // Fisher accumulation is used (diagnostic); per-bottle state lives in inst.stab.

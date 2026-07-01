@@ -52,6 +52,11 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
 
     cfg_ = rc::load_bottle_config(configLoader);
 
+    // AI2 belief self-test (isolated Eigen unit test) — runs once at startup when UseAI2 is on, so a
+    // broken generative model / engine wiring is caught before the live loop (mirrors table/chair).
+    if (cfg_.use_ai2)
+        rc::BottleBelief::self_test();
+
 #ifdef HIBERNATION_ENABLED
     hibernationChecker.start(500);
 #endif
@@ -464,7 +469,14 @@ void SpecificWorker::run_instance_tracker()
         t.id = id;
         const auto& s = inst.model.state();
         t.xy = {s.cx, s.cy};
-        if (cfg_.dynamics_model == "constant_velocity" and inst.motion.initialized())
+        if (cfg_.use_ai2 and inst.ai2_initialized)
+        {
+            // AI2: gate on the belief's position covariance Σ[cx,cy] (Mahalanobis innovation S = P + R²I),
+            // mirroring table_concept's AI2 tracker gate.
+            t.cov = inst.ai2_belief.covariance().block<2, 2>(0, 0);
+            t.has_cov = true;
+        }
+        else if (cfg_.dynamics_model == "constant_velocity" and inst.motion.initialized())
         {
             // Movable: gate on the CV position covariance — it INFLATES during motion (predict adds
             // process noise), so the gate widens exactly when the bottle moves → the moved detection
@@ -638,7 +650,9 @@ void SpecificWorker::step_epistemic(rc::BottleInstance& inst)
             c.has_value())
             camera_xy = Eigen::Vector2f(static_cast<float>(c->x()), static_cast<float>(c->y()));
 
-    auto prop = epistemic_planner_.compute(inst.model, camera_xy, inst.stab.fisher_info_raw);
+    auto prop = (cfg_.use_ai2 and inst.ai2_initialized)
+                    ? epistemic_planner_.compute(inst.ai2_belief, camera_xy, cfg_.ai2_sigma_base_m)
+                    : epistemic_planner_.compute(inst.model, camera_xy, inst.stab.fisher_info_raw);
     if (not prop.valid or not prop.is_finite())
         return;   // no camera pose / degenerate ray this cycle → leave the existing affordance untouched
 

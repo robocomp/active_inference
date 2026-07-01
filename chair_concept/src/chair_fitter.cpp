@@ -633,9 +633,22 @@ float ChairFitter::run_inference_ai2(ChairInstance& inst, const ChairObservation
         frame.chain_cov_xx  = inst.chain_cov_xx + range_lat_var;
         frame.chain_cov_yy  = inst.chain_cov_yy + range_lat_var;
         frame.chain_cov_yaw = range_yaw_var;
-        // Anchor the part-attribution to the observed seat top (prevents the tall-legs seat_h runaway).
-        inst.ai2_belief.set_seat_ref(ChairBelief::estimate_seat_top(frame.points, inst.ai2_belief.state().cz));
         energy = inst.ai2_belief.update(frame);
+        // Coverage/extent likelihood: pull the footprint + total height onto the observed point extent —
+        // kills the tall-legs runaway and the seat collapse (uses raw points, no attribution).
+        inst.ai2_belief.refine_extent(frame.points, cfg_.ai2_extent_std);
+
+        // 180° yaw-flip: a chair's only front/back asymmetry is the backrest, so the fit can lock 180° off
+        // when the backrest was weakly seen at seed time, and no gradient step makes the π jump once yaw is
+        // confidently converged. resolve_orientation() runs a SEQUENTIAL test (EMA of the yaw+π energy
+        // advantage) — it corrects a sustained-wrong orientation but ignores single partial-view frames.
+        if (inst.ai2_belief.resolve_orientation(frame.points, R) and should_log(inst))
+            std::print("[{}] AI2 yaw 180° FLIP corrected (sustained backrest evidence)\n", inst.node_name);
+
+        // Clutter diagnostic: how much of the assigned mask the model can't explain (off-model points —
+        // e.g. the table bleeding into a chair mask, which drags the centroid). High + a position jump ⇒
+        // contamination the clutter component didn't fully reject.
+        inst.last_clutter_frac = inst.ai2_belief.clutter_fraction(frame.points, R);
     }
 
     // Write belief → legacy ChairState so downstream publish/viewer/RT code is unchanged.
@@ -650,8 +663,8 @@ float ChairFitter::run_inference_ai2(ChairInstance& inst, const ChairObservation
     compute_projected_roi(inst);
 
     if (should_log(inst))
-        std::print("[{}] AI2 npts={} R={:.4f} range={:.2f} trunc={:.2f}{} | cx={:.2f} cy={:.2f} cz={:.2f} ψ={:.2f} | sw={:.2f} sd={:.2f} sh={:.2f} bh={:.2f}\n",
-                   inst.node_name, npts, R, range, inst.last_trunc_frac, gated ? " GATED" : "",
+        std::print("[{}] AI2 npts={} clutter={:.0f}% R={:.4f} range={:.2f} trunc={:.2f}{} | cx={:.2f} cy={:.2f} cz={:.2f} ψ={:.2f} | sw={:.2f} sd={:.2f} sh={:.2f} bh={:.2f}\n",
+                   inst.node_name, npts, 100.0f * inst.last_clutter_frac, R, range, inst.last_trunc_frac, gated ? " GATED" : "",
                    bs.cx, bs.cy, bs.cz, bs.yaw, bs.seat_w, bs.seat_d, bs.seat_h, bs.back_h);
 
     log_ai2_csv(inst, npts, R, gated, energy);
@@ -666,7 +679,7 @@ void ChairFitter::log_ai2_csv(const ChairInstance& inst, int npts, float R, bool
     {
         ai2_csv_.open(cfg_.ai2_csv_path, std::ios::out | std::ios::trunc);
         if (not ai2_csv_.is_open()) { cfg_.ai2_csv_path.clear(); return; }
-        ai2_csv_ << "cycle,node,npts,gated,energy,R,motion_var,trunc_frac,range,"
+        ai2_csv_ << "cycle,node,npts,gated,energy,R,motion_var,trunc_frac,range,clutter_frac,"
                  << "cx,cy,cz,yaw,seat_w,seat_d,seat_h,back_h,"
                  << "std_cx,std_cy,std_cz,std_yaw,std_sw,std_sd,std_sh,std_bh\n";
     }
@@ -674,7 +687,7 @@ void ChairFitter::log_ai2_csv(const ChairInstance& inst, int npts, float R, bool
     const auto& S = inst.ai2_belief.covariance();
     const auto sd = [&](int i) { return std::sqrt(std::max(0.0f, S(i, i))); };
     ai2_csv_ << inst.processed_cycles << ',' << inst.node_name << ',' << npts << ',' << (gated ? 1 : 0) << ','
-             << energy << ',' << R << ',' << inst.last_motion_var << ',' << inst.last_trunc_frac << ',' << inst.last_range << ','
+             << energy << ',' << R << ',' << inst.last_motion_var << ',' << inst.last_trunc_frac << ',' << inst.last_range << ',' << inst.last_clutter_frac << ','
              << s.cx << ',' << s.cy << ',' << s.cz << ',' << s.yaw << ','
              << s.seat_w << ',' << s.seat_d << ',' << s.seat_h << ',' << s.back_h << ','
              << sd(0) << ',' << sd(1) << ',' << sd(2) << ',' << sd(3) << ',' << sd(4) << ',' << sd(5) << ',' << sd(6) << ',' << sd(7) << '\n';

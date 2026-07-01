@@ -46,10 +46,10 @@ class RoomViewer
 {
 public:
     // Constructor injection (out-of-line — unique_ptr<CameraVisualizer> incomplete in
-    // callers). Builds the docked widgets + camera-projection window and brings up the
-    // RGB media plane. Fully constructed == ready.
-    RoomViewer(DSR::DSRViewer*          default_viewer,
-                       std::shared_ptr<DSR::DSRGraph> graph,
+    // callers). Builds the layout widget in its OWN top-level window (independent of the
+    // DSR graph viewer, so the agent runs with Agent.graph=false) + the camera-projection
+    // window, and brings up the RGB media plane. Fully constructed == ready.
+    RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
                        rc::RoomConfig&     params,
                        const std::vector<Eigen::Vector2f>& room_polygon,
                        bool                     has_room_polygon,
@@ -88,6 +88,10 @@ public:
 
 private:
     void update_epistemic_overlay();
+
+    // Persist the independent layout window's position/size across runs (QSettings).
+    void restore_window_geometry();
+    void save_window_geometry() const;
 
     rc::RoomConfig*     params_       = nullptr;   // shared config
     bool                     has_room_polygon_ = false;

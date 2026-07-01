@@ -47,6 +47,7 @@ struct ChairInstance
     float last_motion_dotd = 0.0f;   // motion-corruption speed (diagnostic)
     float last_trunc_frac  = 0.0f;   // silhouette truncation (predict-only gate)
     float last_range       = 0.0f;   // mean camera→mask depth Z (m): static range weighting
+    float last_clutter_frac = 0.0f;  // mean clutter responsibility (fraction of the mask the model can't explain)
     int  assigned_mask_idx  = -1;     // tracker's gated mask-slice assignment (-1 = use greedy nearest)
     int  unassigned_streak  = 0;      // consecutive tracker cycles with no mask assignment (stillbirth prune)
     int  processed_cycles   = 0;      // per-chair compute cycles for log throttling

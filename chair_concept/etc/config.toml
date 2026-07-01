@@ -52,6 +52,7 @@ AI2RangeNoiseYawPerM = 0.03      # static range → yaw common-mode (rad per m) 
 AI2CommonModePosStd = 0.03
 AI2CommonModeSizeStd = 0.02
 AI2CommonModeYawStd = 0.03
+AI2ExtentStd = 0.05       # extent-observation noise (m): coverage likelihood pulling footprint+height onto the point span
 LambdaSize = 0.05         # weaker KL pull on w/h/height so evidence can expand the chair model
 PriorSizeStd = 0.60       # broader 1-sigma size prior (m); higher means weaker size prior
 RobustLoss = "tukey_biweight"   # one of: quadratic, huber, geman_mcclure, welsch, tukey_biweight

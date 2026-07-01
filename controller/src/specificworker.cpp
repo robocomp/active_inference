@@ -491,6 +491,10 @@ void SpecificWorker::load_params()
 	load_optional_cast<double>("Controller.TemporaryObstacleExistenceRememberedGain", params.temporary_obstacle_existence_remembered_gain);
 	load_optional_cast<double>("Controller.TemporaryObstacleExistenceWeakMissPenalty", params.temporary_obstacle_existence_weak_miss_penalty);
 	load_optional_cast<double>("Controller.TemporaryObstacleExistenceAbsencePenalty", params.temporary_obstacle_existence_absence_penalty);
+	load_optional_cast<double>("Controller.TemporaryObstacleMinHeight", params.temporary_obstacle_min_height_m);
+	load_optional_cast<double>("Controller.TemporaryObstacleMaxHeight", params.temporary_obstacle_max_height_m);
+	load_optional_cast<double>("Controller.UnmodelledScanMinZ", params.unmodelled_scan_min_z_m);
+	load_optional_cast<double>("Controller.UnmodelledScanMaxZ", params.unmodelled_scan_max_z_m);
 	load_optional_cast<double>("Controller.GoalClearanceRelaxDist", params.goal_clearance_relax_dist_m);
 	load_optional_cast<double>("Controller.GoalObstacleMargin", params.goal_obstacle_margin_m);
 	load_optional_cast<double>("Controller.GoalClearanceMinRatio", params.goal_clearance_min_ratio);
@@ -530,6 +534,9 @@ void SpecificWorker::load_params()
 	load_optional_cast<double>("Controller.EscapeSideProbeM",   params.escape_side_probe_m);
 	load_optional_cast<double>("Controller.EscapeRearProbeM",   params.escape_rear_probe_m);
 	load_optional_cast<double>("Controller.EscapeRearMinM",     params.escape_rear_min_m);
+	load_optional("Controller.ProximityLogEnabled",             params.proximity_log_enabled);
+	load_optional("Controller.ProximityCsvPath",                params.proximity_csv_path);
+	load_optional_cast<double>("Controller.ProximityLogDistance", params.proximity_log_distance_m);
 
 	world_model_.set_params(&params);
 	obstacle_tracker_.set_params(&params);

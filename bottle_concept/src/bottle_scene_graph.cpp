@@ -455,7 +455,11 @@ void BottleSceneGraph::write_rt_pose(BottleInstance& inst)
     if (auto edge = G_->get_edge(inst.parent_id, inst.node_id, "RT"); edge.has_value())
     {
         const auto fit_pts = inst.queue.points();
-        Eigen::Matrix3f cov = inst.model.pose_covariance(fit_pts, inst.queue.weights());
+        // AI2: publish the belief's position covariance Σ[cx,cy,cz] (calibrated, common-mode-saturated);
+        // legacy: the model's Laplace pose_covariance. Both are the room-frame P_bottle on the RT edge.
+        Eigen::Matrix3f cov = (cfg_.use_ai2 and inst.ai2_initialized)
+                                  ? Eigen::Matrix3f(inst.ai2_belief.covariance().block<3, 3>(0, 0))
+                                  : inst.model.pose_covariance(fit_pts, inst.queue.weights());
 
         // Part B: add the localization/chain covariance J·Σ_chain·Jᵀ — the uncertainty the bottle's
         // room-frame position inherits from the robot localisation chain (the Laplace cov is conditional

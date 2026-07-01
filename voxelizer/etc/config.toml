@@ -31,11 +31,12 @@ graph = false   # DSR node-link viewer crashes in paintAndFlush under participan
 domain_id   = 7
 rgb_topic   = "rc/zed/rgb"
 depth_topic = "rc/zed/depth"
+ricoh_topic = "rc/ricoh/rgb"   # RGBD_360 panorama (Image360Frame plane)
 lidar_topic = "rc/lidar3d/points"
 lidar_use_media = true   # false ⇒ DSR graph 'lidar3D' node only
 
 [Period]
-Compute = 50
+Compute = 25   # 40 Hz ceiling; cycle is ~13 ms (L seg + pose), so headroom to keep up with the ~24 Hz RGB feed
 Emergency = 500
 
 [Presence]
@@ -60,7 +61,7 @@ Verbose = false
 # (see README "TensorRT version lock"). Set false to run on the CUDA EP only — version-independent,
 # same masks, no TRT speedup — if the TRT libs can't be reconciled (e.g. after an apt upgrade).
 use_trt =true
-model_path = "yolo26x-seg.onnx" 
+model_path = "yolo26l-seg.onnx"    # L (was yolo26x-seg): lighter seg to lift compute toward the 24 Hz RGB feed
 accepted_labels = ["table", "chair", "monitor", "tv", "bottle"]
 mask_tray = true
 tray_mask_ref_width  = 1280
@@ -90,13 +91,14 @@ kp_conf_min = 0.30          # per-joint floor; below this a keypoint is dropped 
 depth_patch = 2             # half-window (px) for the median-depth sample at each joint
 use_trt = true             # pose model is cheap; CUDA EP is fine and avoids the TRT version lock
 hold_ms = 500               # keep last good skeleton this long after a detection miss (anti-flicker on the YOLO viewer)
+decimation = 1              # run pose every Nth cycle; 1 = every frame (no skeleton stutter). Raise if GPU-bound
 
 [Semantic]
 # YOLO26 semantic-segmentation model (ADE20K-150) on the same RGB frame → a DENSE per-pixel class
 # map (vs the sparse per-instance seg masks). Currently a viewer overlay only (no DSR publish).
 # Default OFF — set enabled=true once the ONNX model exists. Export with:
 #   yolo export model=yolo26l-sem-ade20k.pt format=onnx   (gives yolo26l-sem-ade20k.onnx).
-enabled = true
+enabled = false   # gated OFF: don't load/run the dense semantic model (frees GPU + compute)
 model_path = "yolo26l-sem-ade20k.onnx"
 conf_thresh = 0.25          # per-pixel argmax-softmax floor; below it the pixel is "ignore" (255)
 input_size = 640
@@ -104,14 +106,25 @@ use_trt = false             # dense model; CUDA EP avoids the TRT version lock
 decimation = 2              # run the model every Nth cycle; reuse the last map on skipped cycles
 
 [Voxel]
-# Optional DSR exports beyond 'masks' (the live product consumed by the concept agents).
-# Both default OFF: 'voxels' has no consumer and 'tracks' is read only by the (deferred)
-# table_concept — publishing them every cycle is wasted graph churn. Flip on if revived.
-publish_tracks = false
-publish_voxels = false
 # Custom drawing windows (own top-level windows). Set false for headless/production.
 show_voxel_viewer = true
 show_yolo_viewer  = true
+show_ricoh_viewer = true   # creates the Ricoh360 button+popup (popup hidden until toggled)
+perf_log = true   # per-frame compute/yolo/pose timing -> etc/viewer_perf.csv
+
+# Homeostatic perception-rate regulator: holds compute() near target_hz by adapting pose
+# decimation (AIMD + hysteresis). Actuator = pose only (YOLO-seg is the core product). Reacts to
+# compute cost + input-feed rate: if the feed itself is below target it holds (decimation can't help).
+[RateRegulator]
+target_hz      = 20    # desired compute rate; below this (minus deadband) the regulator raises pose decimation
+pose_decim_max = 4     # never skip pose more than this; floor = HumanPose.decimation
+
+# Publish-hold watchdog: if the RGB producer stalls (feed goes stale while the peer is still
+# alive — presence can't see this), stop publishing perception rather than emit stale masks.
+# Debounced with hysteresis to avoid flapping on brief blips.
+[StreamWatchdog]
+hold_enter_s = 1.5    # RGB stale this long → HOLD publishing
+recover_s    = 1.0    # sustained freshness required before resuming
 
 [Ice]
 Warn.Connections = "0"

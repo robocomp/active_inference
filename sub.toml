@@ -28,11 +28,11 @@ cwd = "~/robocomp/components/robocomp-robolab/components/hardware/laser/lidar3DF
 cmd = "bin/lidar3DFilter etc/config_shadow_webots"
 ice_name = "Lidar3DFilter:tcp -h localhost -p 11995"
 
-[[components]]
-name = "rgbd360"
-cwd = "~/robocomp/components/robocomp-shadow/insect/RGBD_360"
-cmd = "bin/RGBD_360 etc/config_wb"
-ice_name = "RGBD360:tcp -h localhost -p 10100"
+#[[components]]
+#name = "rgbd360"
+#cwd = "~/robocomp/components/robocomp-shadow/insect/RGBD_360"
+#cmd = "bin/RGBD_360 etc/config_wb"
+#ice_name = "RGBD360:tcp -h localhost -p 10100"
 
 #[[components]]
 #name = "vision_segmentation"

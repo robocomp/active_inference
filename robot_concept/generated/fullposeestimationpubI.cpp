@@ -21,13 +21,7 @@
 FullPoseEstimationPubI::FullPoseEstimationPubI(GenericWorker *_worker, const size_t id): worker(_worker), id(id)
 {
 	newFullPoseHandlers = {
-		[this](auto &a)
-		{
-			auto *specific = qobject_cast<SpecificWorker *>(worker.data());
-			if (specific == nullptr || specific->is_shutting_down())
-				return;
-			specific->FullPoseEstimationPub_newFullPose(a);
-		}
+		[this](auto &a) {if (worker != nullptr) worker->FullPoseEstimationPub_newFullPose(a); else throw std::runtime_error("Worker is null");}
 	};
 
 }
@@ -38,12 +32,11 @@ FullPoseEstimationPubI::~FullPoseEstimationPubI()
 
 void FullPoseEstimationPubI::newFullPose(RoboCompFullPoseEstimation::FullPoseEuler pose, const Ice::Current&)
 {
-	auto *specific = qobject_cast<SpecificWorker *>(worker.data());
-	if (specific == nullptr || specific->is_shutting_down())
-		return;
+    if (!worker)
+        throw std::runtime_error("Worker is null");
         
     #ifdef HIBERNATION_ENABLED
-		specific->hibernationTick();
+		worker->hibernationTick();
 	#endif
     
 	newFullPoseHandlers.at(id)(pose);

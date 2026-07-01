@@ -57,7 +57,6 @@ LIST(APPEND SOURCES
   ../src/room_model.cpp
   ../src/pointcloud_center_estimator.cpp
   ../src/epistemic_controller.cpp
-  ../src/occupancy_belief.cpp
   ../src/room_scene_graph.cpp
   ../src/lidar_ingestor.cpp
   ../src/room_viewer.cpp
@@ -97,7 +96,6 @@ LIST(APPEND HEADERS
   ../src/room_config.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/affordance_manager/affordance_manager.h
   ../src/epistemic_planner.h
-  ../src/occupancy_belief.h
   ../src/corner_visibility.h
   ../src/timeseries_plot.h
   ../src/corner_detector.h

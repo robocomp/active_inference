@@ -19,13 +19,10 @@ LIST(APPEND SOURCES
   ../../common/media_transport/generated/idl/imu_framePubSubTypes.cxx
   ../../common/media_transport/generated/idl/imu_frameTypeObjectSupport.cxx
   ../src/scene_processor.cpp
-  ../src/lidar_track_attributor.cpp
-  ../src/voxel_processor.cpp
   ../src/yolo_processor.cpp
   ../src/yolo_human.cpp
   ../src/yolo_semantic.cpp
   ../src/onnx_providers.cpp
-  ../src/unified_voxel_grid.cpp
 )
 
 # Headers set
@@ -34,10 +31,7 @@ LIST(APPEND HEADERS
   ../src/voxelizer_params.h
   ../src/graph_publisher.h
   ../src/scene_processor.h
-  ../src/lidar_track_attributor.h
-  ../src/voxel_processor.h
   ../src/yolo_processor.h
-  ../src/unified_voxel_grid.h
   ../src/graph_object_box.h
   ../../common/agent_presence_monitor/agent_presence_monitor.h
   ../../common/agent_presence_coordinator/agent_presence_coordinator.h
@@ -57,6 +51,8 @@ endif()
 
 LIST(APPEND SOURCES ../src/yolo_viewer.cpp)
 LIST(APPEND HEADERS ../src/yolo_viewer.h)
+LIST(APPEND SOURCES ../src/image_popup_viewer.cpp)
+LIST(APPEND HEADERS ../src/image_popup_viewer.h)
 
 # TBB is required by std::execution::par_unseq (libstdc++ on Linux)
 find_package(TBB REQUIRED)

@@ -81,6 +81,20 @@ PoseThetaStdGrowthPerRps = 1.0
 AdvRotationCouplingExponent = 0.5
 TemporaryObstacleHistoryScans = 5
 TemporaryObstacleOcclusionDepth = 0.35
+# Min lidar points for a cluster to be admitted as a temporary obstacle (both the total-unexplained
+# early-bail and the per-cluster gate). 12 was too high — a thin chair at range sits right on it, so
+# obstacle creation was intermittent/late and it drove through on a miss (proximity CSV: n_obst stayed
+# 0 through the approach, obstacle only appeared at 0.73 m). 6 makes small objects cluster reliably and
+# earlier; the tracker's existence log-odds filter prunes transient false positives.
+TemporaryObstacleMinPoints = 6
+# LiDAR height band (m, ≈ height above floor). Min is a floor-plane reject cutoff: the lowest beam
+# grazes the floor into a dense ring at ~0.11-0.18 m, so this MUST stay above it (0.20 known-good).
+# Going lower (e.g. 0.10) floods the controller with phantom floor obstacles. See the [LidarZ] histogram.
+TemporaryObstacleMinHeight = 0.20
+TemporaryObstacleMaxHeight = 1.8
+# Same band for the proactive unmodelled-obstacle scan (room frame).
+UnmodelledScanMinZ = 0.10
+UnmodelledScanMaxZ = 1.50
 TemporaryObstacleRobustLoss = "huber"
 TemporaryObstacleRobustLossScale = 0.08
 TemporaryObstacleExistenceInitLogOdds = 1.6
@@ -132,6 +146,13 @@ EscapeMaxMs = 1500       # … or this long, whichever first
 EscapeSideProbeM = 0.50  # lateral ESDF probe for turn-direction choice
 EscapeRearProbeM = 0.45  # rear ESDF probe distance
 EscapeRearMinM = 0.30    # rear clearance below this → rotate-in-place, no reverse
+
+# Near-obstacle "black box": append a CSV row whenever the robot is within ProximityLogDistance of a
+# tracked obstacle OR the trajectory ESDF drops that low. Lets a collision be explained afterwards
+# (nearest_obst_m small but min_esdf large ⇒ the controller never saw it — e.g. self-occlusion).
+ProximityLogEnabled = true
+ProximityCsvPath = "proximity_obstacles.csv"
+ProximityLogDistance = 0.8   # m; gate distance for logging a row (raw lidar / tracked obstacle / ESDF)
 
 Target.EdgeType = "target"
 Transforms.interpolate_rt = true

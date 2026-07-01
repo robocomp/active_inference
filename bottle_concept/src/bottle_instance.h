@@ -18,6 +18,7 @@
 #include <Eigen/Dense>
 
 #include "bottle_model.h"
+#include "bottle_belief.h"           // rc::BottleBelief (AI2 recursive-Laplace belief, used when cfg.use_ai2)
 #include "sample_queue_geometry.h"   // common SampleQueue<Model> + bottle's geometry policy
 #include "bottle_affordance.h"
 #include "../../common/belief_stabilizer/belief_stabilizer.h"   // rc::StabilizerState
@@ -32,6 +33,13 @@ struct BottleInstance
 
     BottleModel model;
     SampleQueue<BottleModel> queue;
+
+    // ── AI2 belief (used when cfg.use_ai2), mirrors table_concept/chair_concept ────────────────────
+    // The recursive-Laplace full-covariance belief on the shared engine. Lazily initialised from the
+    // model state on the first AI2 cycle; run_inference_ai2 writes its posterior back into `model` so all
+    // downstream publish/viewer/RT code is unchanged. Its Σ drives the AI2 tracker gate + NBV + P_bottle.
+    BottleBelief ai2_belief;
+    bool         ai2_initialized = false;
 
     // Epistemic "go see the hidden face" affordance: a DSR node advertising the far-side viewpoint
     // (EpistemicPlanner) for the mission controller. The node persists and refreshes; its ΔH gain

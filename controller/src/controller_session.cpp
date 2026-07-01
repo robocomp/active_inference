@@ -2,9 +2,11 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <print>
 #include <sstream>
 
@@ -319,6 +321,94 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     last_mppi_average_trajectory_ = control_output.average_trajectory_room;
     last_best_mppi_trajectory_idx_ = control_output.best_trajectory_idx;
     last_display_wp_index_ = std::max(0, control_output.current_wp_index);
+
+    // ── Near-obstacle black box. Fires BEFORE any branch below, so it captures the cycle whether the
+    //    controller reacts (blocked/stalled) or keeps driving. It gates on the RAW lidar cloud (the
+    //    thing that's "perfectly visible"), NOT on the tracked obstacles/ESDF — those are exactly what
+    //    fails, so gating on them would miss the episode. The smoking gun for a missed reaction is a
+    //    small nearest_lidar_m (something IS there) paired with a large nearest_obst_m (never tracked)
+    //    and/or a large min_esdf (ESDF never saw it). cmd_* are the pre-limit MPPI velocities (rot sign
+    //    is flipped before sending). Off unless enabled. ──
+    if (params_ && params_->proximity_log_enabled)
+    {
+        const Eigen::Vector2f rp = robot_pose.pos;
+        const float gate = params_->proximity_log_distance_m;
+
+        // (a) Nearest RAW lidar return (room frame, same band-filtered buffer the viewer draws). Ignore
+        //     hits closer than kSelfR to skip the robot's own body returns — these extend to ~0.35 m
+        //     (observed: the column pinned at 0.15/0.33), so 0.40 clears them and reveals the real
+        //     approaching object in the 0.40–0.80 m window (contact is inside the footprint anyway).
+        constexpr float kSelfR = 0.40f;
+        float nearest_lidar = std::numeric_limits<float>::infinity();
+        if (auto *lb = obstacle_tracker.lidar_buffer())
+        {
+            const auto [cloud_opt] = lb->read_last();
+            if (cloud_opt.has_value())
+            {
+                const auto &[lxs, lys, lzs] = cloud_opt.value();
+                const std::size_t nn = std::min(lxs.size(), lys.size());
+                for (std::size_t i = 0; i < nn; ++i)
+                {
+                    const float d = std::hypot(lxs[i] - rp.x(), lys[i] - rp.y());
+                    if (d >= kSelfR) nearest_lidar = std::min(nearest_lidar, d);
+                }
+            }
+        }
+        const float nearest_lidar_out = std::isfinite(nearest_lidar) ? nearest_lidar : -1.f;
+
+        // (b) Nearest TRACKED obstacle polygon edge (what the controller actually reasons about).
+        float nearest = std::numeric_limits<float>::infinity();
+        const auto &polys = obstacle_tracker.obstacle_polygons();
+        for (const auto &poly : polys)
+        {
+            const std::size_t n = poly.size();
+            for (std::size_t i = 0; i < n; ++i)   // min point-to-edge distance robot→polygon
+            {
+                const Eigen::Vector2f &a = poly[i];
+                const Eigen::Vector2f &b = poly[(i + 1) % n];
+                const Eigen::Vector2f ab = b - a;
+                const float len2 = ab.squaredNorm();
+                const float t = len2 > 1e-9f ? std::clamp((rp - a).dot(ab) / len2, 0.f, 1.f) : 0.f;
+                nearest = std::min(nearest, (rp - (a + t * ab)).norm());
+            }
+        }
+        const float nearest_out = std::isfinite(nearest) ? nearest : -1.f;
+
+        // Gate on the RAW cloud first (fires even when nothing is tracked), plus the two model layers.
+        const bool near = (nearest_lidar_out >= 0.f && nearest_lidar_out <= gate)
+                       || (nearest_out >= 0.f && nearest_out <= gate)
+                       || (control_output.min_esdf <= gate);
+        const std::uint64_t t_ms = time_source();
+        if (near && t_ms - proximity_csv_last_ms_ >= 100)
+        {
+            proximity_csv_last_ms_ = t_ms;
+            if (!proximity_csv_open_)
+            {
+                proximity_csv_.open(params_->proximity_csv_path, std::ios::out | std::ios::trunc);
+                if (proximity_csv_.is_open())
+                    proximity_csv_ << "t_ms,rx,ry,rtheta,vx,vy,omega,cmd_adv,cmd_side,cmd_rot,min_esdf,"
+                                      "nearest_lidar_m,nearest_obst_m,n_obst,safety_guard,blockage_ahead,"
+                                      "path_blocked,blk_x,blk_y,blk_r,dist_to_goal\n";
+                proximity_csv_open_ = true;
+            }
+            if (proximity_csv_.is_open())
+            {
+                proximity_csv_ << t_ms << ',' << rp.x() << ',' << rp.y() << ',' << robot_pose.theta << ','
+                               << room_vel_.vx << ',' << room_vel_.vy << ',' << room_vel_.omega << ','
+                               << control_output.adv << ',' << control_output.side << ',' << control_output.rot << ','
+                               << control_output.min_esdf << ',' << nearest_lidar_out << ',' << nearest_out << ','
+                               << polys.size() << ','
+                               << (control_output.safety_guard_triggered ? 1 : 0) << ','
+                               << (control_output.blockage_detected_ahead ? 1 : 0) << ','
+                               << (control_output.path_blocked ? 1 : 0) << ','
+                               << control_output.blockage_center_room.x() << ','
+                               << control_output.blockage_center_room.y() << ','
+                               << control_output.blockage_radius << ',' << control_output.dist_to_goal << '\n';
+                proximity_csv_.flush();
+            }
+        }
+    }
+
     if (control_output.path_blocked)
     {
         clear_tracking_state();

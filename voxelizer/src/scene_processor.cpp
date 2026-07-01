@@ -41,14 +41,15 @@ bool SceneProcessor::init_media_plane(std::uint32_t domain_id,
     rc::media::SubscriberConfig depth_cfg = rgb_cfg;
     depth_cfg.topic_name = depth_topic;
 
-    // Prefer the producer's media descriptor on the "zed" node (its authored domain/topic, on the
-    // dedicated media domain isolated from Agent.domain) — the same discovery the other agents use;
-    // fall back to the configured domain/topic if the descriptor isn't advertised yet.
+    // Prefer the producer's media descriptor on the "zed" node — take the FULL config
+    // (domain, topic, history_depth, shared_memory_only, data_sharing) so this consumer
+    // tracks the producer's QoS automatically; fall back to the configured domain/topic
+    // (with defaults) if the descriptor isn't advertised yet.
     if (graph_)
         if (auto desc = rc::media::descriptor_from_graph(*graph_, "zed"); desc.has_value())
         {
-            if (auto c = desc->subscriber_config("rgb");   c.has_value()) { rgb_cfg.domain_id = c->domain_id;   rgb_cfg.topic_name = c->topic_name; }
-            if (auto c = desc->subscriber_config("depth"); c.has_value()) { depth_cfg.domain_id = c->domain_id; depth_cfg.topic_name = c->topic_name; }
+            if (auto c = desc->subscriber_config("rgb");   c.has_value()) rgb_cfg   = *c;
+            if (auto c = desc->subscriber_config("depth"); c.has_value()) depth_cfg = *c;
         }
 
     const bool rgb_ok   = media_rgb_sub_->init(rgb_cfg);
@@ -145,6 +146,62 @@ void SceneProcessor::drain_media_plane() const
     }
 }
 
+bool SceneProcessor::init_ricoh_media_plane(std::uint32_t domain_id, const std::string& topic)
+{
+    // Prefer the producer's descriptor on the "ricoh" node (its authored media
+    // domain/topic + Image360Frame type); fall back to the configured domain/topic.
+    if (graph_)
+        media_ricoh_sub_ = rc::media::make_image360_subscriber_from_graph(*graph_, "ricoh", "rgb360");
+
+    if (!media_ricoh_sub_)
+    {
+        rc::media::SubscriberConfig cfg;
+        cfg.domain_id     = domain_id;
+        cfg.topic_name    = topic;
+        cfg.history_depth = 8;
+        media_ricoh_sub_ = std::make_unique<rc::media::Image360Subscriber>();
+        if (!media_ricoh_sub_->init(cfg))
+        {
+            std::print(stderr, "[voxelizer] ricoh media subscriber init FAILED (domain={}, '{}')\n",
+                       domain_id, topic);
+            media_ricoh_sub_.reset();
+            return false;
+        }
+        std::print("[voxelizer] ricoh media plane ready (fallback) domain={} '{}'\n", domain_id, topic);
+    }
+    return true;
+}
+
+void SceneProcessor::poll_ricoh()
+{
+    if (!media_ricoh_sub_)
+        return;
+    const bool wanted = ricoh_wanted_.load(std::memory_order_relaxed);
+    media_ricoh_sub_->poll([this, wanted](const rc::media::Image360Frame& f, std::int64_t)
+    {
+        ricoh_last_stamp_ms_ = f.stamp_ms();   // always recorded (cheap) — feeds the RGB360 rate HUD
+        if (!wanted)                       // window hidden: drain + discard, no decode/clone cost
+            return;
+        const int w = static_cast<int>(f.width());
+        const int h = static_cast<int>(f.height());
+        if (w <= 0 || h <= 0)
+            return;
+        const std::size_t npix = static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
+        if (f.size() < npix * 3)
+            return;
+        cv::Mat view(h, w, CV_8UC3, const_cast<std::uint8_t*>(f.data().data()));
+        if (f.format() == rc::media::IMG360_FORMAT_RGB8)
+            cv::cvtColor(view, media_ricoh_.bgr, cv::COLOR_RGB2BGR);
+        else                               // IMG360_FORMAT_BGR8 (producer default) or unspecified
+            media_ricoh_.bgr = view.clone();
+        media_ricoh_.width    = w;
+        media_ricoh_.height   = h;
+        media_ricoh_.stamp    = f.stamp_ms();
+        media_ricoh_.frame_id = f.frame_id();
+        media_ricoh_.valid    = true;
+    });
+}
+
 bool SceneProcessor::init_lidar_media_plane(std::uint32_t domain_id, const std::string& topic, bool use_media)
 {
     lidar_use_media_ = use_media;
@@ -158,15 +215,14 @@ bool SceneProcessor::init_lidar_media_plane(std::uint32_t domain_id, const std::
     cfg.domain_id     = domain_id;
     cfg.topic_name    = topic;
     cfg.history_depth = 4;
-    // Prefer the producer's media descriptor on the "lidar3D" node (its authored domain/topic) — the
-    // same discovery the other agents use; fall back to the configured domain/topic if not advertised.
+    // Prefer the producer's media descriptor on the "lidar3D" node — take the FULL config
+    // (domain, topic, history_depth, shared_memory_only, data_sharing) so this consumer
+    // tracks the producer's QoS automatically; fall back to the configured domain/topic if
+    // not advertised.
     if (graph_)
         if (auto desc = rc::media::descriptor_from_graph(*graph_, "lidar3D"); desc.has_value())
             if (auto c = desc->subscriber_config("lidar"); c.has_value())
-            {
-                cfg.domain_id  = c->domain_id;
-                cfg.topic_name = c->topic_name;
-            }
+                cfg = *c;
 
     lidar_sub_ = std::make_unique<rc::media::LidarSubscriber>();
     if (!lidar_sub_->init(cfg))

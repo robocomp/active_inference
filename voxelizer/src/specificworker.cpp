@@ -19,7 +19,6 @@
 #include "specificworker.h"
 #include <fstream>   // [perf-probe] CSV timing logs (remove with the probes)
 #include "scene_processor.h"
-#include "voxel_processor.h"
 #include "yolo_processor.h"
 #include "yolo_human.h"
 #include "yolo_semantic.h"
@@ -27,9 +26,9 @@
 #ifdef emit
 #undef emit
 #endif
-#include "unified_voxel_grid.h"
 #include "voxel_opengl_viewer.h"
 #include "yolo_viewer.h"
+#include "image_popup_viewer.h"
 #include <dsr/gui/viewers/graph_viewer/graph_viewer.h>
 #include <QHBoxLayout>
 #include <QPushButton>
@@ -186,28 +185,9 @@ void SpecificWorker::initialize()
         }
     }
 
-    // --- Lidar secondary attributor (silent no-op when lidar3D data is absent) ---
-    lidar_track_attributor = std::make_unique<LidarTrackAttributor>();
-
     // Custom drawing windows (Voxel3D GL + YOLO raster), each in its own top-level window — see
     // specificworker_viewers.cpp. Both config-gated (Voxel.show_voxel_viewer / show_yolo_viewer).
     setup_custom_viewers();
-
-    // --- Voxel grid + processor ---
-    UnifiedGridConfig voxel_grid_config;
-    voxel_grid_config.max_display_voxels = static_cast<int>(params.VOXEL_VIEWER_MAX_RENDERED_VOXELS);
-    voxel_grid = std::make_unique<UnifiedVoxelGrid>(voxel_grid_config);
-    voxel_processor = std::make_unique<VoxelProcessor>(*voxel_grid);
-    VoxelProcessor::Config voxel_processor_config;
-    voxel_processor_config.voxel_decimation_factor         = params.VOXEL_DECIMATION_FACTOR;
-    voxel_processor_config.viewer_max_rendered_voxels      = params.VOXEL_VIEWER_MAX_RENDERED_VOXELS;
-    voxel_processor_config.track_association_max_distance_m= params.TRACK_ASSOCIATION_MAX_DISTANCE_M;
-    voxel_processor_config.track_max_missed_frames         = params.TRACK_MAX_MISSED_FRAMES;
-    voxel_processor_config.viewer_voxel_fps                = params.VOXEL_VIEWER_FPS;
-    voxel_processor_config.z_lift_m                        = params.VOXEL_Z_LIFT_M;
-    voxel_processor_config.mask_surface_band_m             = params.MASK_SURFACE_BAND_M;
-    voxel_processor_config.verbose_debug                   = verbose_debug_;
-    voxel_processor->configure(voxel_processor_config);
 
     // --- Scene processor (DSR-only: no proxies) ---
     inner_eigen_api = G->get_inner_eigen_api();
@@ -219,12 +199,25 @@ void SpecificWorker::initialize()
                                       params.MEDIA_RGB_TOPIC, params.MEDIA_DEPTH_TOPIC);
     scene_processor->init_lidar_media_plane(static_cast<std::uint32_t>(params.MEDIA_DOMAIN_ID),
                                             params.MEDIA_LIDAR_TOPIC, params.LIDAR_USE_MEDIA);
+    if (params.SHOW_RICOH_VIEWER)
+        scene_processor->init_ricoh_media_plane(static_cast<std::uint32_t>(params.MEDIA_DOMAIN_ID),
+                                                params.MEDIA_RICOH_TOPIC);
 
-    // All DSR semantic_grid exports (masks always; tracks/voxels config-gated). Relayout is injected
-    // so the publisher stays decoupled from the GUI (graph_viewers).
+    // Perception-rate regulator: floor = the user-configured pose decimation, ceiling =
+    // RateRegulator.pose_decim_max; target = TARGET_HZ. Holds compute() near target by
+    // raising pose decimation only when compute-bound AND the input feed can supply it.
+    {
+        rc::RateRegulatorConfig rc_cfg;
+        rc_cfg.target_hz      = params.TARGET_HZ;
+        rc_cfg.pose_decim_min = std::max(1, params.HUMAN_POSE_DECIMATION);
+        rc_cfg.pose_decim_max = std::max(rc_cfg.pose_decim_min, params.POSE_DECIM_MAX);
+        rate_reg_.configure(rc_cfg);
+    }
+
+    // All DSR semantic_grid exports (masks). Relayout is injected so the publisher stays
+    // decoupled from the GUI (graph_viewers).
     graph_publisher_ = std::make_unique<GraphPublisher>(
-        G, params, voxel_processor.get(), voxel_grid.get(),
-        [this]() { trigger_graph_layout_twopi(); });
+        G, params, [this]() { trigger_graph_layout_twopi(); });
 
     graph_publisher_->cleanup_semantic_grid_nodes();
 
@@ -304,20 +297,113 @@ void SpecificWorker::on_render_tick()
 {
     if (shutting_down_ || !scene_processor)
         return;
+
+    // [perf] this timer shares the Qt main thread with compute() (both are plain QTimers on the
+    // same event loop) — a slow render tick delays the next compute() tick just as much as a slow
+    // compute() delays the next render tick. Logged separately from viewer_perf.csv (different timer).
+    const auto perf_t0 = std::chrono::steady_clock::now();
+    auto perf_ms = [](auto a, auto b){ return std::chrono::duration<double, std::milli>(b - a).count(); };
+
     scene_processor->refresh_viewer_robot_pose_latest();
+
+    // Ricoh 360 popup: poll the panorama plane and refresh the window when visible.
+    // Decoupled from the perception pipeline, so it updates even when the ZED stream
+    // is idle. poll_ricoh() only decodes while the window is toggled on.
+    double ricoh_ms = 0.0;
+    {
+        // Always drain the ricoh plane (cheap; poll_ricoh decodes only when the popup is visible) so
+        // its stream rate is known for the HUD even with the popup closed; push the image only if shown.
+        const auto perf_ricoh0 = std::chrono::steady_clock::now();
+        scene_processor->poll_ricoh();
+        if (const std::uint64_t rs = scene_processor->ricoh_last_stamp_ms(); rs > 0)
+            stream_mon_.tick("rgb360", rs);
+        if (ricoh_viewer_ and ricoh_window_ and ricoh_window_->isVisible())
+        {
+            const cv::Mat& pano = scene_processor->ricoh_bgr();
+            if (not pano.empty())
+                ricoh_viewer_->update_image(pano);
+        }
+        ricoh_ms = perf_ms(perf_ricoh0, std::chrono::steady_clock::now());
+    }
+
+    // Feed the input-stream rates to the 3D viewer HUD (Render / RGB / RGB360).
+    if (voxel_viewer_gl)
+        voxel_viewer_gl->set_stream_fps(static_cast<float>(stream_mon_.rate_hz("rgb")),
+                                        static_cast<float>(stream_mon_.rate_hz("rgb360")));
+
+    // Input-stream health: report rates every 5 s and flag stalls. Runs here (GUI tick,
+    // independent of the perception frame path) so a FULLY stalled RGB stream — which
+    // makes compute() early-return before it could log — is still detected.
+    if (auto rep = stream_mon_.maybe_report(5.0, 1.5); rep.has_value())
+    {
+        if (rep->any_stall)
+            qWarning().noquote() << "[streams]" << QString::fromStdString(rep->summary)
+                                 << "— producer stall? (see presence/emergency)";
+        else
+            qInfo().noquote() << "[streams]" << QString::fromStdString(rep->summary);
+    }
+
+    // Publish-hold watchdog (debounced, hysteresis). Enter hold when RGB has been stale for
+    // HOLD_ENTER_S; resume only after RGB stays fresh for HOLD_RECOVER_S — so the first frame
+    // after a stall doesn't immediately un-hold (anti-flap). Reacts to producer-side stalls that
+    // presence can't see (the peer is alive, only its data-plane stopped).
+    if (const double rgb_idle = stream_mon_.idle_s("rgb"); rgb_idle >= 0.0)
+    {
+        using namespace std::chrono;
+        const bool stale = rgb_idle > params.HOLD_ENTER_S;
+        const auto now = steady_clock::now();
+        if (not perception_hold_)
+        {
+            if (stale)
+            {
+                perception_hold_ = true;
+                rgb_fresh_since_ = {};
+                qWarning().noquote() << QString::asprintf(
+                    "[hold] RGB stale %.1fs — perception publish HELD (not emitting stale masks/skeletons)", rgb_idle);
+            }
+        }
+        else if (not stale)   // candidate recovery: require sustained freshness
+        {
+            if (rgb_fresh_since_.time_since_epoch().count() == 0) rgb_fresh_since_ = now;
+            else if (duration<double>(now - rgb_fresh_since_).count() >= params.HOLD_RECOVER_S)
+            {
+                perception_hold_ = false;
+                qInfo().noquote() << "[hold] RGB recovered — resuming perception publish";
+            }
+        }
+        else                  // relapsed while recovering → reset the recovery timer
+            rgb_fresh_since_ = {};
+    }
+
+    // [perf] one row per render tick (~20 Hz nominal) → etc/viewer_perf_render.csv. Lets a spike in
+    // viewer_perf.csv's compute_ms be cross-checked against a concurrent render-tick stall (same
+    // Qt thread) — e.g. Ricoh decode/repaint — instead of only blaming scene/yolo/pose.
+    if (params.PERF_LOG)
+    {
+        const double render_tick_ms = perf_ms(perf_t0, std::chrono::steady_clock::now());
+        static const auto perf_log_start = std::chrono::steady_clock::now();
+        static std::ofstream perf_csv("etc/viewer_perf_render.csv", std::ios::trunc);
+        static const bool perf_hdr = [](std::ofstream& f)
+            { f << "t_ms,render_tick_ms,ricoh_ms\n"; return true; }(perf_csv);
+        (void)perf_hdr;
+        const long long t_ms = static_cast<long long>(perf_ms(perf_log_start, std::chrono::steady_clock::now()));
+        perf_csv << t_ms << ',' << render_tick_ms << ',' << ricoh_ms << '\n';
+        perf_csv.flush();
+    }
 }
 
 void SpecificWorker::compute()
 {
-    if (!scene_processor or !voxel_processor)
+    if (!scene_processor)
         return;
 
-    const auto frame = process_scene_frame(fps_counter_);
+    // [perf] per-frame timing → etc/viewer_perf.csv when Voxel.perf_log=true.
+    const auto perf_t0 = std::chrono::steady_clock::now();
+    auto perf_ms = [](auto a, auto b){ return std::chrono::duration<double, std::milli>(b - a).count(); };
 
-    // Budget regulation is a heartbeat: run it every cycle (self-throttled), even when no RGBD frame
-    // arrived, so the cap/gauge keep working while the robot explores away from the table.
-    if (compute_voxels_)
-        regulate_voxel_budget(fps_counter_.get_frequency());
+    const auto perf_scene0 = std::chrono::steady_clock::now();
+    const auto frame = process_scene_frame(fps_counter_);
+    const double scene_ms = perf_ms(perf_scene0, std::chrono::steady_clock::now());
 
     // No RGBD frame this cycle (sensor not ready / gated transforms). Everything below dereferences
     // `frame`, so we MUST stop here — a fall-through hit frame->rgbd on an empty optional → SEGV.
@@ -331,21 +417,27 @@ void SpecificWorker::compute()
     if (frame->frame_ts_ms == last_rgb_ts_)
         return;
     last_rgb_ts_ = frame->frame_ts_ms;
+    stream_mon_.tick("rgb", frame->frame_ts_ms);   // input-rate telemetry / stall detection
 
     // YOLO runs on the CLEAN frame (no tray black-out). The tray would be segmented as a phantom
     // object, but rather than corrupting the image we let it be detected and drop any detection that
     // overlaps the tray region in postprocess (see YoloProcessor::postprocess_yolo_detections).
+    const auto perf_yolo0 = std::chrono::steady_clock::now();
     const auto detections = yolo_processor
         ? yolo_processor->detect_segmentation(frame->rgbd.rgb)
         : std::vector<SegDetection>{};
+    const double yolo_ms = perf_ms(perf_yolo0, std::chrono::steady_clock::now());
 
-    // Human-pose: the MODEL runs decimated (every kPoseDecimation-th cycle — people don't move at
-    // 20 Hz), but the viewer redraws the LAST cached detection every frame so the skeleton overlay
-    // doesn't flicker between detections.
+    // Human-pose: the MODEL runs every HumanPose.decimation-th cycle. Default 1 (every frame) keeps the
+    // skeleton glued to the moving person; on skipped cycles (decimation>1) the viewer redraws the LAST
+    // cached detection, and detect_poses holds it across brief misses so the overlay never flickers.
+    const int pose_decim = std::max(1, rate_reg_.pose_decimation());   // regulator-adapted (≥ HumanPose.decimation)
     const bool run_pose = yolo_human_processor and yolo_human_processor->ready()
-                          and (pose_frame_counter_++ % kPoseDecimation == 0);
+                          and (pose_frame_counter_++ % pose_decim == 0);
+    const auto perf_pose0 = std::chrono::steady_clock::now();
     if (run_pose)
         yolo_human_processor->detect_poses(frame->rgbd.rgb, frame->frame_ts_ms);   // refresh the cache (~6-7 Hz)
+    const double pose_ms = run_pose ? perf_ms(perf_pose0, std::chrono::steady_clock::now()) : 0.0;
     static const std::vector<rc::human_pose::PoseDetection> kNoPoses;
     const auto& poses = (yolo_human_processor and yolo_human_processor->ready())
         ? yolo_human_processor->last_poses()
@@ -361,37 +453,7 @@ void SpecificWorker::compute()
             yolo_semantic_processor->segment(frame->rgbd.rgb);   // refresh the cached label map
     }
 
-    // Voxel computation gated OFF for now — we only run the masks pipeline (YOLO detections →
-    // graph_publisher publishes the "masks" support points, consumed by table/bottle_concept). The
-    // voxel grid build + lidar→voxel fusion are skipped. Flip compute_voxels_ to re-enable.
-    if (compute_voxels_)
-    {
-        voxel_processor->process_rgbd_frame(frame->rgbd, detections,
-                                             frame->room_T_robot, frame->room_T_zed,
-                                             frame->graph_object_boxes, voxel_viewer_gl.get());
-
-        if (include_lidar3d_in_voxels_ && lidar_track_attributor && !frame->lidar_points_room.empty())
-        {
-            std::vector<LidarTrackAttributor::TrackCandidate> track_candidates;
-            const auto& current_tracks = voxel_processor->last_track_candidates();
-            track_candidates.reserve(current_tracks.size());
-            for (const auto& track : current_tracks)
-            {
-                track_candidates.push_back(LidarTrackAttributor::TrackCandidate{
-                    .track_id = track.track_id,
-                    .category = track.category,
-                    .min = track.min,
-                    .max = track.max,
-                    .centroid = track.centroid
-                });
-            }
-
-            auto attributed = lidar_track_attributor->attribute_points(frame->lidar_points_room, track_candidates);
-            voxel_processor->fuse_lidar_support_points(attributed);
-        }
-    }
-
-    if (yolo_viewer_)
+    if (yolo_viewer_ and yolo_window_ and yolo_window_->isVisible())
     {
         cv::Mat viewer_rgb = frame->rgbd.rgb;   // clean frame (no tray black-out); update_frame clones
         // Dense semantic class-map underlay (blended) first, then skeletons + seg masks on top.
@@ -413,47 +475,75 @@ void SpecificWorker::compute()
         }
     }
 
-    graph_publisher_->publish(frame->rgbd, frame->room_T_zed, detections, frame->frame_ts_ms);
-
-    // Human-pose branch: BODY_18 skeletons (camera frame) on the 'skeleton' node for human_concept.
-    // Only on cycles we actually ran the pose model (decimated above).
-    if (run_pose)
-        graph_publisher_->publish_skeletons(frame->rgbd, poses, frame->frame_ts_ms);
-
-    fps_counter_.print("[Compute]", 3000);
-}
-
-// Homeostatic FPS regulation: once per control period, read the measured compute
-// FPS and let the AIMD regulator resize the voxel-grid population cap so the
-// frame-rate holds its target band. Self-throttled — safe to call every cycle.
-void SpecificWorker::regulate_voxel_budget(float fps)
-{
-    if (!voxel_grid)
-        return;
-
-    // Self-throttle to one control tick per period (regardless of compute rate).
-    constexpr auto kControlPeriod = std::chrono::seconds(2);
-    const auto now = std::chrono::steady_clock::now();
-    if (last_budget_tick_.time_since_epoch().count() != 0 &&
-        now - last_budget_tick_ < kControlPeriod)
-        return;
-    last_budget_tick_ = now;
-
-    const int live = voxel_grid->size();
-
-    if (!std::isfinite(fps) || fps <= 0.0f)   // FPS not measured yet (first ~3 s) → hold, but show life
+    // Publish only when the input is fresh. On a producer stall the watchdog holds publishing so we
+    // never push stale-but-confident masks/skeletons that downstream would fuse as current. (On a
+    // full stall compute() already early-returns on the dedup above; the gate also covers the
+    // recovery window, where a first fresh frame arrives before freshness is confirmed sustained.)
+    double publish_ms = 0.0;
+    double skel_ms = 0.0;
+    if (not perception_hold_)
     {
-        std::println("[VoxelBudget] warming up (no fps yet)  cap={} live={}",
-                     voxel_grid->max_voxels(), live);
-        return;
+        const auto perf_pub0 = std::chrono::steady_clock::now();
+        graph_publisher_->publish(frame->rgbd, frame->room_T_zed, detections, frame->frame_ts_ms);
+        publish_ms = perf_ms(perf_pub0, std::chrono::steady_clock::now());
+
+        // Human-pose branch: BODY_18 skeletons (camera frame) on the 'skeleton' node for human_concept.
+        // Only on cycles we actually ran the pose model (decimated above).
+        if (run_pose)
+        {
+            const auto perf_skel0 = std::chrono::steady_clock::now();
+            graph_publisher_->publish_skeletons(frame->rgbd, poses, frame->frame_ts_ms);
+            skel_ms = perf_ms(perf_skel0, std::chrono::steady_clock::now());
+        }
     }
 
-    const int new_cap = voxel_budget_.update(fps);
-    voxel_grid->set_max_voxels(new_cap);
+    const double compute_ms = perf_ms(perf_t0, std::chrono::steady_clock::now());
 
-    std::println("[VoxelBudget] fps={:.1f} target={:.1f} cap={} live={} [{}..{}]",
-                 fps, voxel_budget_.target_fps, new_cap, live,
-                 voxel_budget_.floor, voxel_budget_.ceiling);
+    // Homeostatic regulator: feed it this cycle's cost + frame stamp; it adapts pose decimation
+    // and exposes processed/feed Hz. Log on decimation changes, and warn (throttled) only when
+    // WE are the limiter (compute-bound) — if the feed itself is slow, decimation can't help.
+    rate_reg_.update(compute_ms, frame->frame_ts_ms);
+    if (rate_reg_.changed())
+        qInfo().noquote() << QString::asprintf(
+            "[rate] pose decimation → %d | compute %.1f Hz, feed %.1f Hz, cycle %.1fms (yolo %.1f, pose %.1f)",
+            rate_reg_.pose_decimation(), rate_reg_.processed_hz(), rate_reg_.feed_hz(),
+            rate_reg_.compute_ms(), yolo_ms, pose_ms);
+    else if (rate_reg_.below_target())
+    {
+        using namespace std::chrono;
+        static steady_clock::time_point last_warn_tp{};
+        const auto now_tp = steady_clock::now();
+        if (duration_cast<seconds>(now_tp - last_warn_tp).count() >= 5)
+        {
+            last_warn_tp = now_tp;
+            if (rate_reg_.feed_limited())
+                qInfo().noquote() << QString::asprintf(
+                    "[rate] %.1f Hz < target %.0f Hz but INPUT feed is only %.1f Hz — feed-limited, not compute; holding",
+                    rate_reg_.processed_hz(), static_cast<double>(params.TARGET_HZ), rate_reg_.feed_hz());
+            else if (rate_reg_.at_pose_cap())
+                qWarning().noquote() << QString::asprintf(
+                    "[rate] %.1f Hz < target %.0f Hz, pose decim at cap (%d), cycle %.1fms (yolo %.1f) "
+                    "— drop to a lighter seg model / lower input res", rate_reg_.processed_hz(),
+                    static_cast<double>(params.TARGET_HZ), rate_reg_.pose_decimation(), rate_reg_.compute_ms(), yolo_ms);
+        }
+    }
+
+    // [perf] one row per real (fresh-frame) cycle: total + the model-inference breakdown.
+    if (params.PERF_LOG)
+    {
+        static const auto perf_log_start = std::chrono::steady_clock::now();
+        static std::ofstream perf_csv("etc/viewer_perf.csv", std::ios::trunc);
+        static const bool perf_hdr = [](std::ofstream& f)
+            { f << "t_ms,compute_ms,scene_ms,yolo_ms,pose_ms,publish_ms,skel_ms,n_det,rgbd_ts_ms\n"; return true; }(perf_csv);
+        (void)perf_hdr;
+        const long long t_ms = static_cast<long long>(perf_ms(perf_log_start, std::chrono::steady_clock::now()));
+        perf_csv << t_ms << ',' << compute_ms << ',' << scene_ms << ',' << yolo_ms << ',' << pose_ms
+                 << ',' << publish_ms << ',' << skel_ms
+                 << ',' << detections.size() << ',' << frame->frame_ts_ms << '\n';
+        perf_csv.flush();
+    }
+
+    fps_counter_.print("[Compute]", 3000);
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -496,6 +586,8 @@ std::optional<SpecificWorker::SceneFrame> SpecificWorker::process_scene_frame(FP
     std::vector<Eigen::Vector3f> lidar_points_room;
     if (auto lidar_data = scene_processor->get_lidar3D(); lidar_data.has_value())
     {
+        if (lidar_data->timestamp_ms > 0)
+            stream_mon_.tick("lidar", lidar_data->timestamp_ms);   // input-rate telemetry / stall detection
         Mat::RTMat room_T_robot_lidar = room_T_robot.value();
         if (inner_eigen_api != nullptr && lidar_data->timestamp_ms > 0)
         {
@@ -537,7 +629,6 @@ std::optional<SpecificWorker::SceneFrame> SpecificWorker::process_scene_frame(FP
                       room_T_robot.value(),
                       room_T_zed.value(),
                       std::move(lidar_points_room),
-                      graph_object_boxes,
                       frame_ts_ms};
 }
 

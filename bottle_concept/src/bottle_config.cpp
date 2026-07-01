@@ -57,6 +57,18 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
     out.mask_conf_floor    = getf("BottleModel.MaskConfFloor",     0.2f);
     out.mask_conf_ref      = getf("BottleModel.MaskConfRef",       0.5f);
     out.mask_conf_power    = getf("BottleModel.MaskConfPower",     2.0f);
+
+    out.use_ai2                  = getb("BottleModel.UseAI2",                  false);
+    out.ai2_sigma_base_m         = getf("BottleModel.AI2SigmaBaseM",          0.02f);
+    out.ai2_clutter_frac         = getf("BottleModel.AI2ClutterFrac",         0.10f);
+    out.ai2_clutter_scale_m      = getf("BottleModel.AI2ClutterScaleM",       0.08f);
+    out.ai2_prior_pos_std        = getf("BottleModel.AI2PriorPosStd",         0.30f);
+    out.ai2_prior_size_std       = getf("BottleModel.AI2PriorSizeStd",        0.03f);
+    out.ai2_process_std_m        = getf("BottleModel.AI2ProcessStdM",         0.005f);
+    out.ai2_common_mode_pos_std  = getf("BottleModel.AI2CommonModePosStd",    0.02f);
+    out.ai2_common_mode_size_std = getf("BottleModel.AI2CommonModeSizeStd",   0.01f);
+    out.ai2_gn_iters             = geti("BottleModel.AI2GnIters",             4);
+    out.ai2_csv_path             = gets("BottleModel.AI2CsvPath",             "");
     out.support_sigma_z          = getf("Support.SigmaZ",            0.04f);
     out.support_footprint_margin = getf("Support.FootprintMargin",   0.05f);
     out.support_lambda_xy        = getf("Support.LambdaXY",          50.0f);

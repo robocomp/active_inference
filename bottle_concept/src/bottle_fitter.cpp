@@ -169,6 +169,9 @@ BottleFitter::BottleObservation BottleFitter::observe(BottleInstance& inst,
 
 float BottleFitter::run_inference(BottleInstance& inst, const BottleObservation& observation)
 {
+    if (cfg_.use_ai2)
+        return run_inference_ai2(inst, observation);
+
     update_support_surface(inst);   // resting-surface decision + table-top z anchor (before ingest/fit)
 
     inst.queue.begin_cycle();
@@ -288,6 +291,138 @@ float BottleFitter::run_inference(BottleInstance& inst, const BottleObservation&
     }
 
     return free_energy;
+}
+
+// AI2 path (cfg.use_ai2): one recursive full-covariance belief update per fresh frame, on the shared
+// recursive-Laplace engine (bottle_belief.h). Mirrors TableFitter::run_inference_ai2. Static belief; the
+// movable-object CV tracking (legacy step_model_update) is not used here — AI2 is default-off, so the
+// shipped movable behaviour is unchanged. Writes the posterior back into inst.model so all downstream
+// publish/viewer/RT code (which reads inst.model.state()) is untouched.
+float BottleFitter::run_inference_ai2(BottleInstance& inst, const BottleObservation& observation)
+{
+    update_support_surface(inst);   // resting-surface decision + table-top z anchor (reads scene_graph_)
+
+    const int npts = static_cast<int>(observation.candidate_pts.size() + observation.residual_pts.size());
+
+    // Lazy init: warm-start the belief from the model state, but on the FIRST frame snap the centre to the
+    // observed cloud — a cylinder far from the points would see them all as clutter (zero gradient) and
+    // never converge (the AI2 analogue of the legacy cold-start snap).
+    if (not inst.ai2_initialized)
+    {
+        const auto& m = inst.model.state();
+        BottleBeliefState s0{m.cx, m.cy, m.cz, m.radius, m.height};
+        if (npts > 0)
+        {
+            Eigen::Vector3f sum = Eigen::Vector3f::Zero();
+            const auto scan = [&](const std::vector<Eigen::Vector3f>& v) { for (const auto& p : v) sum += p; };
+            scan(observation.candidate_pts); scan(observation.residual_pts);
+            const Eigen::Vector3f cen = sum / static_cast<float>(npts);
+            s0.cx = cen.x(); s0.cy = cen.y(); s0.cz = cen.z();
+        }
+        BottleBeliefParams p;
+        p.sigma_base_m         = cfg_.ai2_sigma_base_m;
+        p.clutter_frac         = cfg_.ai2_clutter_frac;
+        p.clutter_scale_m      = cfg_.ai2_clutter_scale_m;
+        p.prior_pos_std        = cfg_.ai2_prior_pos_std;
+        p.prior_size_std       = cfg_.ai2_prior_size_std;
+        p.process_std_m        = cfg_.ai2_process_std_m;
+        p.common_mode_pos_std  = cfg_.ai2_common_mode_pos_std;
+        p.common_mode_size_std = cfg_.ai2_common_mode_size_std;
+        p.gn_iters             = cfg_.ai2_gn_iters;
+        p.min_radius           = BottleModel::MIN_RADIUS;
+        p.min_height           = BottleModel::MIN_HEIGHT;
+        inst.ai2_belief = BottleBelief(s0, p);
+        inst.ai2_initialized = true;
+    }
+
+    if (observation.has_fresh_data)
+        ingest_observation_voxels(inst, observation);   // keep the viewer's voxel bank fed
+
+    // Freeze-on-stale: no fresh mask ⇒ don't touch the belief (information-filter axiom).
+    if (not observation.has_fresh_data)
+        return inst.prev_free_energy;
+
+    // Observation precision R = σ_base² + object/ego-motion var (per-point random part). The motion var
+    // comes from the CV filter's position variance when it is live (a moving/just-moved bottle is noisier).
+    const float motion_var = inst.motion.initialized() ? static_cast<float>(inst.motion.pos_var(0)) : 0.0f;
+    const float R = cfg_.ai2_sigma_base_m * cfg_.ai2_sigma_base_m + std::max(0.0f, motion_var);
+
+    BottleFrame frame;
+    frame.points.reserve(static_cast<std::size_t>(npts));
+    frame.points.insert(frame.points.end(), observation.candidate_pts.begin(), observation.candidate_pts.end());
+    frame.points.insert(frame.points.end(), observation.residual_pts.begin(), observation.residual_pts.end());
+    frame.R.assign(frame.points.size(), R);
+    // Pose-chain (localization) shared error at the bottle centre, computed in write_rt_pose the previous
+    // cycle (slowly varying) — fed into the common-mode so the frame's information saturates (calibrated σ).
+    frame.chain_cov_xx = std::max(0.0f, inst.dbg_chain_cov_xx);
+    frame.chain_cov_yy = std::max(0.0f, inst.dbg_chain_cov_yy);
+
+    const float energy = inst.ai2_belief.update(frame);
+
+    // Write the belief back into the legacy BottleState so all downstream publish/viewer/RT code is
+    // unchanged. Hang the bottle from the table when a support surface is known (cz = table_top + h/2),
+    // matching the legacy path's z-anchor.
+    const auto& bs = inst.ai2_belief.state();
+    BottleState ms = inst.model.state();
+    ms.cx = bs.cx; ms.cy = bs.cy; ms.cz = bs.cz; ms.radius = bs.radius; ms.height = bs.height;
+    if (std::isfinite(inst.table_top_z))
+        ms.cz = inst.table_top_z + 0.5f * ms.height;
+    inst.model.set_state(ms);
+
+    ++inst.matched_frames;
+    inst.frames_since_detection = 0;
+    inst.detection_alive = true;
+
+    // Convergence bookkeeping on the committed free energy (mirrors the legacy path's gate).
+    if (std::abs(energy - inst.prev_free_energy) < cfg_.fe_eps)
+        inst.frames_converged = std::min(inst.frames_converged + 1, cfg_.K_stable);
+    else
+        inst.frames_converged = 0;
+
+    update_expected_visible(inst);   // negative-information death gate (persist out-of-FoV)
+
+    if (should_log(inst))
+        std::print("[{}] AI2 npts={} R={:.4f} | c=({:.3f},{:.3f},{:.3f}) r={:.3f} h={:.3f} | σ(r,h)mm=({:.1f},{:.1f})\n",
+                   inst.node_name, npts, R, bs.cx, bs.cy, bs.cz, bs.radius, bs.height,
+                   1000.f * std::sqrt(std::max(0.f, inst.ai2_belief.covariance()(3, 3))),
+                   1000.f * std::sqrt(std::max(0.f, inst.ai2_belief.covariance()(4, 4))));
+
+    log_ai2_csv(inst, npts, R, energy);
+    return energy;
+}
+
+void BottleFitter::log_ai2_csv(const BottleInstance& inst, int point_count, float R, float energy)
+{
+    if (cfg_.ai2_csv_path.empty())
+        return;
+
+    static const std::array<const char*, 5> kDof = {"cx", "cy", "cz", "r", "h"};
+
+    if (not ai2_csv_.is_open())
+    {
+        ai2_csv_.open(cfg_.ai2_csv_path, std::ios::out | std::ios::trunc);
+        if (not ai2_csv_.is_open())
+        {
+            std::print("bottle_concept: [ai2] cannot open CSV '{}'\n", cfg_.ai2_csv_path);
+            cfg_.ai2_csv_path.clear();   // disable further attempts
+            return;
+        }
+        ai2_csv_ << "cycle,node,pts,R,energy,frames_converged";
+        for (const auto* d : kDof) ai2_csv_ << ",state_" << d;
+        for (const auto* d : kDof) ai2_csv_ << ",std_"   << d;   // posterior std (m) = sqrt(Σ_jj)
+        ai2_csv_ << ",chain_xx,chain_yy";
+        ai2_csv_ << '\n';
+    }
+
+    const auto s = inst.ai2_belief.state().vec();
+    const auto& S = inst.ai2_belief.covariance();
+    ai2_csv_ << inst.processed_cycles << ',' << inst.node_name << ',' << point_count << ','
+             << R << ',' << energy << ',' << inst.frames_converged;
+    for (int j = 0; j < 5; ++j) ai2_csv_ << ',' << s[j];
+    for (int j = 0; j < 5; ++j) ai2_csv_ << ',' << std::sqrt(std::max(0.0f, S(j, j)));
+    ai2_csv_ << ',' << std::max(0.0f, inst.dbg_chain_cov_xx) << ',' << std::max(0.0f, inst.dbg_chain_cov_yy);
+    ai2_csv_ << '\n';
+    ai2_csv_.flush();
 }
 
 std::optional<Eigen::Matrix4d> BottleFitter::room_T_zed_matrix(std::uint64_t timestamp_ms) const

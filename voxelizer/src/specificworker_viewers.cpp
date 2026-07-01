@@ -17,9 +17,10 @@
 #include <QSettings>
 #include <QByteArray>
 
-#include "voxel_processor.h"
 #include "voxel_opengl_viewer.h"
 #include "yolo_viewer.h"
+#include "image_popup_viewer.h"
+#include "scene_processor.h"
 #include "yolo_semantic.h"
 #include "graph_publisher.h"
 
@@ -51,6 +52,8 @@ void SpecificWorker::save_external_window_geometry() const
         settings.setValue("Voxel3DWindow_geometry", voxel3d_window_->saveGeometry());
     if (yolo_window_ != nullptr)
         settings.setValue("YOLOWindow_geometry", yolo_window_->saveGeometry());
+    if (ricoh_window_ != nullptr)
+        settings.setValue("Ricoh360Window_geometry", ricoh_window_->saveGeometry());
     settings.endGroup();
 }
 
@@ -59,6 +62,20 @@ void SpecificWorker::setup_custom_viewers()
     // NOTE: these are shown as standalone top-level windows, independent of the DSR graph viewer.
     // The DSR node-link graph view is disabled (Agent.graph=false) because it crashes in
     // paintAndFlush under participant churn (e.g. bottle_concept joining). All consumers are null-guarded.
+
+    // Ricoh 360 panorama popup: a raster window, created HIDDEN and toggled by a
+    // button in the Voxel3D top bar (below). Kept a plain top-level label window
+    // like the no-controls YOLO case; frames are pushed from on_render_tick.
+    if (params.SHOW_RICOH_VIEWER)
+    {
+        ricoh_viewer_ = std::make_unique<rc::ImagePopupViewer>(nullptr);
+        ricoh_viewer_->setWindowTitle("Ricoh 360");
+        ricoh_window_ = ricoh_viewer_.get();
+        if (not restore_external_window_geometry(ricoh_window_, "Ricoh360Window"))
+            ricoh_window_->resize(960, 480);   // half the 1920x960 panorama
+        // Intentionally NOT shown here — hidden until the top-bar button turns it on.
+        qInfo() << __FUNCTION__ << "Ricoh 360 viewer created (hidden; toggle from the Voxel3D top bar)";
+    }
 
     // The voxel viewer is a QOpenGLWidget; disabling it (Voxel.show_voxel_viewer=false) is the robust
     // production setting. All viewer consumers are null-guarded.
@@ -98,8 +115,24 @@ void SpecificWorker::setup_custom_viewers()
         residual_btn->setChecked(true);
         residual_btn->setCursor(Qt::PointingHandCursor);
 
-        auto* clear_voxels_btn = new QPushButton("Clear Voxels", voxel_panel);
-        clear_voxels_btn->setCursor(Qt::PointingHandCursor);
+        // YOLO popup toggle — created here; the window itself is built (hidden) in the
+        // SHOW_YOLO_VIEWER block below, so the lambda resolves yolo_window_ at click time.
+        QPushButton* yolo_btn = nullptr;
+        if (params.SHOW_YOLO_VIEWER)
+        {
+            yolo_btn = new QPushButton("YOLO: OFF", voxel_panel);
+            yolo_btn->setCheckable(true);
+            yolo_btn->setCursor(Qt::PointingHandCursor);
+        }
+
+        // Ricoh 360 popup toggle — only when the popup window was created.
+        QPushButton* ricoh_btn = nullptr;
+        if (params.SHOW_RICOH_VIEWER and ricoh_window_ != nullptr)
+        {
+            ricoh_btn = new QPushButton("Ricoh360: OFF", voxel_panel);
+            ricoh_btn->setCheckable(true);
+            ricoh_btn->setCursor(Qt::PointingHandCursor);
+        }
 
         // Tint each point toggle with the colour of the points it shows in the viewer:
         // a coloured outline always (so the association is visible) filled when ON.
@@ -116,13 +149,16 @@ void SpecificWorker::setup_custom_viewers()
         accent(masks_btn,     "#EBEBF2");  // mask: white
         accent(rfe_btn,       "#F233D9");  // rfe: magenta
         accent(residual_btn,  "#2633CC");  // residual: dark blue
+        if (yolo_btn)  accent(yolo_btn,  "#64C8FF");  // yolo: light blue
+        if (ricoh_btn) accent(ricoh_btn, "#00D4BB");  // ricoh: teal
 
         controls_layout->addWidget(lidar_btn);
         controls_layout->addWidget(models_btn);
         controls_layout->addWidget(masks_btn);
         controls_layout->addWidget(rfe_btn);
         controls_layout->addWidget(residual_btn);
-        controls_layout->addWidget(clear_voxels_btn);
+        if (yolo_btn)  controls_layout->addWidget(yolo_btn);
+        if (ricoh_btn) controls_layout->addWidget(ricoh_btn);
         controls_layout->addStretch(1);
 
         voxel_viewer_gl = std::make_unique<rc::VoxelOpenGLViewer>(nullptr);
@@ -166,14 +202,24 @@ void SpecificWorker::setup_custom_viewers()
             residual_btn->setText(checked ? "Residual: ON" : "Residual: OFF");
         });
 
-        connect(clear_voxels_btn, &QPushButton::clicked, this, [this]
-        {
-            if (!voxel_processor || !voxel_viewer_gl)
-                return;
-            voxel_processor->clear_state(voxel_viewer_gl.get());
-            if (graph_publisher_)
-                graph_publisher_->refresh_voxels_node();
-        });
+        if (yolo_btn)
+            connect(yolo_btn, &QPushButton::toggled, this, [this, yolo_btn](bool checked)
+            {
+                if (yolo_window_)
+                    yolo_window_->setVisible(checked);
+                yolo_btn->setText(checked ? "YOLO: ON" : "YOLO: OFF");
+            });
+
+        if (ricoh_btn)
+            connect(ricoh_btn, &QPushButton::toggled, this, [this, ricoh_btn](bool checked)
+            {
+                if (ricoh_window_)
+                    ricoh_window_->setVisible(checked);
+                // Gate decoding: a hidden popup only poll-discards (no clone cost).
+                if (scene_processor)
+                    scene_processor->set_ricoh_wanted(checked);
+                ricoh_btn->setText(checked ? "Ricoh360: ON" : "Ricoh360: OFF");
+            });
 
         // Standalone top-level window (voxel_panel was created parentless → it IS a top-level window).
         voxel_panel->setWindowTitle("Voxel3D");
@@ -236,7 +282,7 @@ void SpecificWorker::setup_custom_viewers()
         // Restore the last geometry; otherwise size the RGB window to the camera image on first frame.
         if (not restore_external_window_geometry(yolo_window_, "YOLOWindow"))
             yolo_window_needs_image_size_ = true;
-        yolo_window_->show();
-        qInfo() << __FUNCTION__ << "YOLO viewer shown in its own window";
+        // Start HIDDEN — shown only when the "YOLO" button in the Voxel3D top bar is toggled on.
+        qInfo() << __FUNCTION__ << "YOLO viewer created (hidden; toggle from the Voxel3D top bar)";
     }
 }

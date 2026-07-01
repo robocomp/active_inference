@@ -24,6 +24,7 @@
 #include <Eigen/Dense>
 
 #include "bottle_model.h"
+#include "bottle_belief.h"            // AI2 belief: Σ + predicted_information for the Σ-based NBV
 
 namespace rc {
 
@@ -63,6 +64,16 @@ public:
     EpistemicProposal compute(const BottleModel& model,
                               const Eigen::Vector2f& camera_xy,
                               const std::array<float, 5>& posterior_info) const;
+
+    /**
+     * AI2-native next-best-view (cfg.use_ai2). Same hidden-face viewpoint geometry, but the gain is the
+     * D-optimal expected entropy reduction on the belief's FULL covariance Σ (mirrors table/chair):
+     *   ΔH = ½·log det( I₅ + Σ · ΔI ),   ΔI = Σₚ (1/R) Jₚ Jₚᵀ  (BottleBelief::predicted_information)
+     * over synthetic hidden-arc points, R = σ_base². ΔH→0 as the belief tightens (belief→knowledge).
+     */
+    EpistemicProposal compute(const BottleBelief& belief,
+                              const Eigen::Vector2f& camera_xy,
+                              float sigma_base) const;
 
 private:
     float d_obs_;

@@ -182,7 +182,6 @@ void VoxelOpenGLViewer::load_view_state()
     target_.setX(settings.value("target_x", target_.x()).toFloat());
     target_.setY(settings.value("target_y", target_.y()).toFloat());
     target_.setZ(settings.value("target_z", target_.z()).toFloat());
-    first_cloud_received_ = true;
     room_target_initialized_ = true;
     camera_user_moved_ = true;
     settings.endGroup();
@@ -230,86 +229,9 @@ VoxelOpenGLViewer::~VoxelOpenGLViewer()
 {
     save_view_state();
     makeCurrent();
-    if (vbo_.isCreated())
-        vbo_.destroy();
     if (room_vbo_.isCreated())
         room_vbo_.destroy();
     doneCurrent();
-}
-
-void VoxelOpenGLViewer::update_voxels(std::span<const QVector3D> positions,
-                                      std::span<const std::string> categories,
-                                      std::span<const float> confidences)
-{
-    const auto now = std::chrono::steady_clock::now();
-    if (last_voxel_update_time_ != std::chrono::steady_clock::time_point{})
-    {
-        const auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_voxel_update_time_).count();
-        if (dt_ms > 0)
-        {
-            const float inst_fps = 1000.0f / static_cast<float>(dt_ms);
-            voxel_input_fps_ = (voxel_input_fps_ > 0.0f) ? (0.85f * voxel_input_fps_ + 0.15f * inst_fps) : inst_fps;
-        }
-    }
-    last_voxel_update_time_ = now;
-
-    std::vector<Vertex> new_vertices;
-    new_vertices.reserve(positions.size());
-
-    for (std::size_t i = 0; i < positions.size(); ++i)
-    {
-        const QVector3D p = positions[i];
-        // RoboComp room frame -> OpenGL: X=X, Z(height)->Y, Y(depth)->Z.
-        const float fx = voxel_flip_x_ ? -1.f : 1.f;
-        const float fy = voxel_flip_y_ ? -1.f : 1.f;
-        const QVector3D mapped{fx * p.x(), p.z(), fy * p.y()};
-
-        QColor c = QColor(140, 145, 155);
-        if (!categories.empty() && i < categories.size())
-            c = color_for_category(categories[i]);
-
-        float gain = 1.0f;
-        if (!confidences.empty() && i < confidences.size())
-            gain = 0.55f + 0.45f * std::clamp(confidences[i], 0.0f, 1.0f);
-
-        new_vertices.push_back(Vertex{
-            mapped.x(), mapped.y(), mapped.z(),
-            c.redF() * gain, c.greenF() * gain, c.blueF() * gain
-        });
-    }
-
-    if (!new_vertices.empty())
-    {
-        QVector3D bb_min(new_vertices.front().px, new_vertices.front().py, new_vertices.front().pz);
-        QVector3D bb_max = bb_min;
-        for (const auto& v : new_vertices)
-        {
-            bb_min.setX(std::min(bb_min.x(), v.px));
-            bb_min.setY(std::min(bb_min.y(), v.py));
-            bb_min.setZ(std::min(bb_min.z(), v.pz));
-            bb_max.setX(std::max(bb_max.x(), v.px));
-            bb_max.setY(std::max(bb_max.y(), v.py));
-            bb_max.setZ(std::max(bb_max.z(), v.pz));
-        }
-        const float radius = 0.5f * (bb_max - bb_min).length();
-        if (!first_cloud_received_)
-        {
-            // Only set target/distance once from the very first cloud, so the
-            // camera stays stable as the robot moves and voxels accumulate.
-            // If a room polygon is already loaded its centroid will override
-            // this in rebuild_polygon_locked_().
-            target_ = 0.5f * (bb_min + bb_max);
-            distance_ = std::clamp(3.6f * std::max(0.25f, radius), 3.0f, 80.0f);
-            first_cloud_received_ = true;
-        }
-    }
-
-    {
-        std::scoped_lock lk(data_mutex_);
-        cpu_vertices_ = std::move(new_vertices);
-        upload_pending_ = true;
-    }
-    request_update_throttled();
 }
 
 void VoxelOpenGLViewer::update_object_meshes(std::span<const std::vector<float>> meshes,
@@ -412,12 +334,6 @@ void VoxelOpenGLViewer::set_show_residual(bool show)
 void VoxelOpenGLViewer::set_show_rfe(bool show)
 {
     show_rfe_ = show;
-    request_update_throttled();
-}
-
-void VoxelOpenGLViewer::set_show_voxels(bool show)
-{
-    show_voxels_ = show;
     request_update_throttled();
 }
 
@@ -531,19 +447,6 @@ void VoxelOpenGLViewer::update_room_polygon_dual(std::span<const float> polygon_
         raw_polygon_y_.assign(polygon_y.begin(), polygon_y.end());
         raw_polygon_height_ = height;
         rebuild_polygon_locked_();
-    }
-    request_update_throttled();
-}
-
-void VoxelOpenGLViewer::update_track_boxes(std::span<const QVector3D> mins,
-                                           std::span<const QVector3D> maxs,
-                                           std::span<const std::string> categories)
-{
-    {
-        std::scoped_lock lk(track_boxes_mutex_);
-        track_box_mins_.assign(mins.begin(), mins.end());
-        track_box_maxs_.assign(maxs.begin(), maxs.end());
-        track_box_categories_.assign(categories.begin(), categories.end());
     }
     request_update_throttled();
 }
@@ -757,21 +660,6 @@ void VoxelOpenGLViewer::initializeGL()
         return;
     }
 
-    vao_.create();
-    vao_.bind();
-
-    vbo_.create();
-    vbo_.bind();
-    vbo_.setUsagePattern(QOpenGLBuffer::DynamicDraw);
-    program_.bind();
-    program_.enableAttributeArray(0);
-    program_.enableAttributeArray(1);
-    program_.setAttributeBuffer(0, GL_FLOAT, offsetof(Vertex, px), 3, sizeof(Vertex));
-    program_.setAttributeBuffer(1, GL_FLOAT, offsetof(Vertex, r), 3, sizeof(Vertex));
-    program_.release();
-    vbo_.release();
-    vao_.release();
-
     room_vao_.create();
     room_vao_.bind();
     room_vbo_.create();
@@ -820,57 +708,29 @@ void VoxelOpenGLViewer::paintGL()
     if (!gl_ready_)
         return;
 
-    std::vector<Vertex> local_vertices;
-    bool upload_now = false;
-    {
-        std::scoped_lock lk(data_mutex_);
-        if (upload_pending_)
-        {
-            local_vertices = cpu_vertices_;
-            upload_pending_ = false;
-            upload_now = true;
-        }
-    }
-
-    if (upload_now)
-    {
-        vao_.bind();
-        vbo_.bind();
-        vbo_.allocate(local_vertices.data(), static_cast<int>(local_vertices.size() * sizeof(Vertex)));
-        vbo_.release();
-        vao_.release();
-    }
-
-    std::size_t n_vertices = 0;
     std::size_t n_lidar_vertices = 0;
     std::size_t n_residual_vertices = 0;
     std::size_t n_rfe_vertices = 0;
     std::size_t n_mask_vertices = 0;
-    std::vector<Vertex> draw_vertices;
     std::vector<Vertex> lidar_draw_vertices;
     std::vector<Vertex> residual_draw_vertices;
     std::vector<Vertex> rfe_draw_vertices;
     std::vector<Vertex> mask_draw_vertices;
     {
         std::scoped_lock lk(data_mutex_);
-        n_vertices = cpu_vertices_.size();
         n_lidar_vertices = lidar_vertices_.size();
         n_residual_vertices = residual_vertices_.size();
         n_rfe_vertices = rfe_vertices_.size();
         n_mask_vertices = mask_vertices_.size();
-        draw_vertices = cpu_vertices_;
         lidar_draw_vertices = lidar_vertices_;
         residual_draw_vertices = residual_vertices_;
         rfe_draw_vertices = rfe_vertices_;
         mask_draw_vertices = mask_vertices_;
     }
-    const bool has_voxels = n_vertices > 0;
     const bool has_lidar = n_lidar_vertices > 0;
     const bool has_residual = n_residual_vertices > 0;
     const bool has_rfe = n_rfe_vertices > 0;
     const bool has_mask = n_mask_vertices > 0;
-
-    const bool draw_voxels = show_voxels_;
 
     const float cp = std::cos(pitch_);
     const QVector3D eye(
@@ -892,31 +752,6 @@ void VoxelOpenGLViewer::paintGL()
     program_.setUniformValue("u_point_size", 4.5f);
     program_.setUniformValue("u_alpha", 1.0f);   // opaque by default; only the walls lower it
     program_.setUniformValue("u_round_points", 1);
-
-    vao_.bind();
-
-    if (draw_voxels && has_voxels)
-        glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(n_vertices));
-
-    // Compatibility fallback: if shader path silently fails on some drivers,
-    // draw a second pass using fixed-function calls when available. Must honour
-    // the voxel toggle too, else voxels reappear when hidden on compat contexts.
-    if (draw_voxels && has_voxels && context() && context()->format().profile() != QSurfaceFormat::CoreProfile)
-    {
-        glUseProgram(0);
-        glMatrixMode(GL_PROJECTION);
-        glLoadMatrixf(proj.constData());
-        glMatrixMode(GL_MODELVIEW);
-        glLoadMatrixf(view.constData());
-        glPointSize(4.5f);
-        glBegin(GL_POINTS);
-        for (const auto& v : draw_vertices)
-        {
-            glColor3f(v.r, v.g, v.b);
-            glVertex3f(v.px, v.py, v.pz);
-        }
-        glEnd();
-    }
 
     if (show_lidar_ && has_lidar)
     {
@@ -990,19 +825,6 @@ void VoxelOpenGLViewer::paintGL()
                 max_x = std::max(max_x, p.x());
                 min_z = std::min(min_z, p.z());
                 max_z = std::max(max_z, p.z());
-            }
-            have_bounds = true;
-        }
-        else if (!draw_vertices.empty())
-        {
-            min_x = max_x = draw_vertices.front().px;
-            min_z = max_z = draw_vertices.front().pz;
-            for (const auto& v : draw_vertices)
-            {
-                min_x = std::min(min_x, v.px);
-                max_x = std::max(max_x, v.px);
-                min_z = std::min(min_z, v.pz);
-                max_z = std::max(max_z, v.pz);
             }
             have_bounds = true;
         }
@@ -1246,86 +1068,6 @@ void VoxelOpenGLViewer::paintGL()
             room_vbo_.release();
             room_vao_.release();
             glEnable(GL_DEPTH_TEST);
-        }
-    }
-
-    // Draw tracked object bounding boxes (wireframe).
-    {
-        std::vector<QVector3D> local_mins, local_maxs;
-        std::vector<std::string> local_cats;
-        {
-            std::scoped_lock lk(track_boxes_mutex_);
-            local_mins = track_box_mins_;
-            local_maxs = track_box_maxs_;
-            local_cats = track_box_categories_;
-        }
-
-        if (!local_mins.empty() && local_mins.size() == local_maxs.size())
-        {
-            std::vector<Vertex> box_lines;
-            box_lines.reserve(local_mins.size() * 24);
-
-            const auto map_room_to_ogl = [&](float x, float y, float z) -> QVector3D
-            {
-                const float fx = voxel_flip_x_ ? -1.f : 1.f;
-                const float fy = voxel_flip_y_ ? -1.f : 1.f;
-                return {fx * x, z, fy * y};
-            };
-
-            constexpr int edges[12][2] = {
-                {0,1}, {1,2}, {2,3}, {3,0},
-                {4,5}, {5,6}, {6,7}, {7,4},
-                {0,4}, {1,5}, {2,6}, {3,7}
-            };
-
-            for (std::size_t i = 0; i < local_mins.size(); ++i)
-            {
-                const auto& mn = local_mins[i];
-                const auto& mx = local_maxs[i];
-                std::string cat;
-                if (i < local_cats.size()) cat = local_cats[i];
-                // Skip the green table BBs (per request) — the table is shown via its
-                // mesh + voxels + RFE points, so its bounding boxes are just clutter.
-                if (cat == "table" or cat == "model_table")
-                    continue;
-                const QColor c = color_for_category(cat);
-                const float r = c.redF();
-                const float g = c.greenF();
-                const float b = c.blueF();
-
-                QVector3D corners[8] = {
-                    map_room_to_ogl(mn.x(), mn.y(), mn.z()),
-                    map_room_to_ogl(mx.x(), mn.y(), mn.z()),
-                    map_room_to_ogl(mx.x(), mx.y(), mn.z()),
-                    map_room_to_ogl(mn.x(), mx.y(), mn.z()),
-                    map_room_to_ogl(mn.x(), mn.y(), mx.z()),
-                    map_room_to_ogl(mx.x(), mn.y(), mx.z()),
-                    map_room_to_ogl(mx.x(), mx.y(), mx.z()),
-                    map_room_to_ogl(mn.x(), mx.y(), mx.z())
-                };
-
-                for (const auto& e : edges)
-                {
-                    const auto& a = corners[e[0]];
-                    const auto& d = corners[e[1]];
-                    box_lines.push_back(Vertex{a.x(), a.y(), a.z(), r, g, b});
-                    box_lines.push_back(Vertex{d.x(), d.y(), d.z(), r, g, b});
-                }
-            }
-
-            if (!box_lines.empty())
-            {
-                glDisable(GL_DEPTH_TEST);
-                room_vao_.bind();
-                room_vbo_.bind();
-                room_vbo_.allocate(box_lines.data(), static_cast<int>(box_lines.size() * sizeof(Vertex)));
-                program_.setUniformValue("u_round_points", 0);
-                glLineWidth(2.0f);
-                glDrawArrays(GL_LINES, 0, static_cast<GLsizei>(box_lines.size()));
-                room_vbo_.release();
-                room_vao_.release();
-                glEnable(GL_DEPTH_TEST);
-            }
         }
     }
 
@@ -1707,21 +1449,18 @@ void VoxelOpenGLViewer::paintGL()
         glEnable(GL_DEPTH_TEST);
     }
 
-    vao_.release();
     program_.release();
 
     QPainter painter(this);
     painter.setRenderHint(QPainter::TextAntialiasing, true);
     painter.setPen(QColor(255, 255, 255));
-    const QString fps_text = (render_fps_ > 0.0f)
-                                 ? QString::number(render_fps_, 'f', 1)
-                                 : QStringLiteral("--");
+    auto hz = [](float v) { return v >= 0.0f ? QString::number(v, 'f', 1) : QStringLiteral("--"); };
     painter.drawText(QRect(10, 10, width() - 20, 24),
                      Qt::AlignLeft | Qt::AlignTop,
-                     QString("LiDAR points: %1   Voxels: %2   Render FPS: %3")
-                         .arg(static_cast<qulonglong>(n_lidar_vertices))
-                         .arg(static_cast<qulonglong>(n_vertices))
-                         .arg(fps_text));
+                     QString("Render: %1 FPS   RGB: %2 Hz   RGB360: %3 Hz")
+                         .arg(render_fps_ > 0.0f ? QString::number(render_fps_, 'f', 1) : QStringLiteral("--"))
+                         .arg(hz(rgb_fps_))
+                         .arg(hz(rgb360_fps_)));
 
     // [perf-probe] append paintGL cost per frame to a CSV. t_ms is a shared steady-clock stamp so this
     // aligns with viewer_perf_frames/compute/yolo on one timeline. File truncated once per launch.
@@ -1731,14 +1470,14 @@ void VoxelOpenGLViewer::paintGL()
         static std::ofstream csv = []
         {
             std::ofstream f("etc/viewer_perf_paint.csv", std::ios::trunc);
-            f << "t_ms,paint_ms,voxels,lidar\n";
+            f << "t_ms,paint_ms,lidar\n";
             return f;
         }();
         if (csv)
         {
             const long t_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                   t1.time_since_epoch()).count();
-            csv << t_ms << ',' << ms << ',' << static_cast<qulonglong>(n_vertices) << ','
+            csv << t_ms << ',' << ms << ','
                 << static_cast<qulonglong>(n_lidar_vertices) << '\n';
             csv.flush();
         }
@@ -1843,13 +1582,6 @@ void VoxelOpenGLViewer::keyPressEvent(QKeyEvent* event)
     if (event->key() == Qt::Key_B)
     {
         voxel_flip_y_ = !voxel_flip_y_;
-        event->accept();
-        return;
-    }
-    if (event->key() == Qt::Key_H)
-    {
-        show_voxels_ = !show_voxels_;
-        update();
         event->accept();
         return;
     }

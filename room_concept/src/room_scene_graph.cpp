@@ -317,12 +317,14 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
     {
         planner.clear_target();
         planner.mark_and_refresh();   // keep path trail live in viewer
+        planner.refresh_belief();     // just finished exploring → belief fresh (restart forget clock)
         return;
     }
 
     if (affordance_manager_.is_executing(G_))
     {
         planner.mark_and_refresh();   // stamp path + refresh IoR overlay during navigation
+        planner.refresh_belief();     // actively exploring → hold belief fresh; forgetting only when idle
         return;
     }
 
@@ -331,14 +333,6 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
 
     // Ask the planner for the current best target (handles dwell / arrival internally)
     const auto target_opt = planner.update_target();
-
-    // Route-2 readout: total unresolved interior occupancy entropy (the NON-saturating
-    // epistemic budget). Unlike the pose covariance, this only falls as the room gets
-    // COVERED — watch it decay as the robot explores. Throttled to ~every 3 s.
-    if (static int tick = 0; (tick++ % 15) == 0)
-        qInfo().noquote() << QString::asprintf("[Epistemic] map_entropy=%.1f bits  w_map=%.2f%s",
-                          planner.map_entropy(), planner.params.w_map,
-                          planner.params.w_map > 0.f ? "" : " (map term OFF — set EpistemicController.WMap>0)");
 
     if (!target_opt.has_value()) return;
 
@@ -352,11 +346,10 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
     //
     // Recompute LIVE against the current pose precision (do not reuse the value frozen at target
     // selection): as the robot drives in and localization tightens, Y_prior grows ⇒ the pose-FIM
-    // part decays toward 0. We publish the TOTAL gain (pose-FIM ΔH + w_map·occupancy-entropy ΔH):
-    // the occupancy term is NON-saturating, so once the pose is localized the advertised gain stays
-    // positive until the room interior is actually COVERED — otherwise it would fall through the
-    // consumer's withdrawal threshold the instant localization tightens and the robot would stop
-    // exploring after a single affordance. With w_map=0 this is exactly the legacy FIM-only gain.
+    // part decays toward 0. We publish the TOTAL gain (pose-FIM ΔH + IoR patrol-staleness drive):
+    // the IoR term is NON-saturating, so once the pose is localized the advertised gain stays
+    // positive on long-unvisited cells instead of falling through the consumer's withdrawal
+    // threshold and stopping exploration after a single affordance.
     // The recompute at target_opt->position also gives the rotate-in-place recovery a real gain.
     const float gain = planner.live_total_epistemic_gain(target_opt->position);
 

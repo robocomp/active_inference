@@ -40,10 +40,6 @@ struct VoxelizerParams
     // Drop a detection whose ROI intersects the tray when the overlap covers ≥ this fraction of the
     // bbox. 0 ⇒ drop on ANY intersection (Yolo.tray_drop_fraction).
     float       YOLO_TRAY_DROP_FRACTION = 0.0f;
-    float       TRACK_ASSOCIATION_MAX_DISTANCE_M = 0.7f;
-    int         TRACK_MAX_MISSED_FRAMES          = 10;
-    std::size_t VOXEL_VIEWER_MAX_RENDERED_VOXELS = 30'000;
-    int         VOXEL_VIEWER_FPS                 = 10;
     std::size_t VOXEL_DECIMATION_FACTOR          = 2;
     float       VOXEL_Z_LIFT_M                   = 0.0f;
     bool        TRANSFORMS_INTERPOLATE_RT        = true;
@@ -52,10 +48,6 @@ struct VoxelizerParams
     // pixels that see THROUGH the object to the background and deproject into a line.
     // <= 0 disables the gate.
     float       MASK_DEPTH_GATE_BAND_M           = 0.20f;
-    // Voxel-grid surface band (m): voxel_processor keeps masked points whose range is within
-    // this distance of the detection's MEDIAN range. (The mask-support-point export in
-    // graph_publisher applies no depth/range gate — it keeps every masked pixel.)
-    float       MASK_SURFACE_BAND_M              = 0.35f;
     // Per-mask radius outlier removal: drop points with fewer than MIN_NEIGHBORS
     // others within RADIUS_M. Trims the sparse silhouette-edge "tail" the depth gate
     // leaves behind, while the dense object body survives. <= 0 disables.
@@ -92,6 +84,10 @@ struct VoxelizerParams
     bool        HUMAN_POSE_USE_TRT      = false;
     // Keep the last good skeleton on the viewer for up to this long after a detection miss (anti-flicker).
     std::uint64_t HUMAN_POSE_HOLD_MS    = 500;              // HumanPose.hold_ms
+    // Run the pose model every Nth compute cycle. 1 = every frame (skeleton stays glued to the moving
+    // person, no freeze-then-snap stutter). Raise to trade skeleton smoothness for GPU if the box is
+    // inference-bound; the hold above still bridges any resulting gaps.
+    int         HUMAN_POSE_DECIMATION   = 1;               // HumanPose.decimation
     // Per-joint confidence floor below which a keypoint is dropped (NaN) from the skeleton node.
     float       SKELETON_KP_CONF_MIN    = 0.30f;
     // Half-window (px) for the median-depth patch sampled at each keypoint (0 = single pixel).
@@ -117,16 +113,20 @@ struct VoxelizerParams
     // graph 'lidar3D' node only.
     std::string MEDIA_LIDAR_TOPIC = "rc/lidar3d/points";
     bool        LIDAR_USE_MEDIA   = true;
-
-    // Optional DSR exports beyond 'masks' (the live product). Both default OFF: 'voxels' has no
-    // consumer and 'tracks' is read only by the (deferred) table_concept — publishing them every
-    // cycle is wasted graph churn. Flip on if a consumer is revived. ('masks' is always published.)
-    bool        PUBLISH_TRACKS = false;   // Voxel.publish_tracks
-    bool        PUBLISH_VOXELS = false;   // Voxel.publish_voxels
+    // RGBD_360 panorama (Image360Frame plane), display-only in the Ricoh popup.
+    std::string MEDIA_RICOH_TOPIC = "rc/ricoh/rgb";
 
     // Custom drawing windows (attach to the DSR GUI if available). Both default ON.
     bool        SHOW_VOXEL_VIEWER = true; // Voxel.show_voxel_viewer
     bool        SHOW_YOLO_VIEWER  = true; // Voxel.show_yolo_viewer
+    bool        SHOW_RICOH_VIEWER = true; // Voxel.show_ricoh_viewer — creates the button+popup (hidden until toggled)
+    bool        PERF_LOG          = false; // Voxel.perf_log — per-frame compute/yolo/pose timing → etc/viewer_perf.csv
+    float       TARGET_HZ         = 20.0f;  // target compute rate for the perception-rate regulator (+ warn floor)
+    int         POSE_DECIM_MAX    = 4;       // RateRegulator.pose_decim_max — regulator won't skip pose more than this
+    // Input-stream publish-hold watchdog: if the RGB feed goes stale (producer stall), stop publishing
+    // perception (better nothing than stale masks). Debounced with hysteresis.
+    float       HOLD_ENTER_S      = 1.5f;    // StreamWatchdog.hold_enter_s — RGB stale this long → enter hold
+    float       HOLD_RECOVER_S    = 1.0f;    // StreamWatchdog.recover_s — sustained freshness before resuming
 
     bool        VERBOSE_DEBUG = false;
 };

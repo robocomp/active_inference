@@ -79,6 +79,7 @@
 
 #include <fullposeestimationpubI.h>
 
+#include <Camera360RGB.h>
 #include <Camera360RGBD.h>
 #include <CameraRGBDSimple.h>
 #include <FullPoseEstimation.h>
@@ -237,21 +238,24 @@ int robot_concept::run(int argc, char* argv[])
 	std::shared_ptr<IceStorm::TopicPrx> fullposeestimationpub_topic;
 	Ice::ObjectPrxPtr fullposeestimationpub;
 
+	RoboCompCamera360RGB::Camera360RGBPrxPtr camera360rgb_proxy;
+	RoboCompCamera360RGBD::Camera360RGBDPrxPtr camera360rgbd_proxy;
 	RoboCompCameraRGBDSimple::CameraRGBDSimplePrxPtr camerargbdsimple_proxy;
 	RoboCompIMU::IMUPrxPtr imu_proxy;
 	RoboCompLidar3D::Lidar3DPrxPtr lidar3d_proxy;
-	RoboCompCamera360RGBD::Camera360RGBDPrxPtr camera360rgbd_proxy;
 
 
 	//Require code
+	require<RoboCompCamera360RGB::Camera360RGBPrx, RoboCompCamera360RGB::Camera360RGBPrxPtr>(communicator(),
+	                    configLoader.get<std::string>("Proxies.Camera360RGB"), "Camera360RGBProxy", camera360rgb_proxy);
+	require<RoboCompCamera360RGBD::Camera360RGBDPrx, RoboCompCamera360RGBD::Camera360RGBDPrxPtr>(communicator(),
+	                    configLoader.get<std::string>("Proxies.Camera360RGBD"), "Camera360RGBDProxy", camera360rgbd_proxy);
 	require<RoboCompCameraRGBDSimple::CameraRGBDSimplePrx, RoboCompCameraRGBDSimple::CameraRGBDSimplePrxPtr>(communicator(),
 	                    configLoader.get<std::string>("Proxies.CameraRGBDSimple"), "CameraRGBDSimpleProxy", camerargbdsimple_proxy);
 	require<RoboCompIMU::IMUPrx, RoboCompIMU::IMUPrxPtr>(communicator(),
 	                    configLoader.get<std::string>("Proxies.IMU"), "IMUProxy", imu_proxy);
 	require<RoboCompLidar3D::Lidar3DPrx, RoboCompLidar3D::Lidar3DPrxPtr>(communicator(),
 	                    configLoader.get<std::string>("Proxies.Lidar3D"), "Lidar3DProxy", lidar3d_proxy);
-	require<RoboCompCamera360RGBD::Camera360RGBDPrx, RoboCompCamera360RGBD::Camera360RGBDPrxPtr>(communicator(),
-	                    configLoader.get<std::string>("Proxies.Camera360RGBD"), "Camera360RGBDProxy", camera360rgbd_proxy);
 
 	//Topic Manager code
 
@@ -272,7 +276,7 @@ int robot_concept::run(int argc, char* argv[])
 		return EXIT_FAILURE;
 	}
 
-	tprx = std::make_tuple(camerargbdsimple_proxy,imu_proxy,lidar3d_proxy,camera360rgbd_proxy);
+	tprx = std::make_tuple(camera360rgb_proxy,camera360rgbd_proxy,camerargbdsimple_proxy,imu_proxy,lidar3d_proxy);
 	SpecificWorker *worker = new SpecificWorker(this->configLoader, tprx, startup_check_flag);
 	QObject::connect(worker, SIGNAL(kill()), &a, SLOT(quit()));
 
@@ -299,11 +303,9 @@ int robot_concept::run(int argc, char* argv[])
 
 		try
 		{
-			if (fullposeestimationpub_topic)
-			{
-				std::cout << "Unsubscribing topic: fullposeestimationpub " <<std::endl;
-				fullposeestimationpub_topic->unsubscribe(fullposeestimationpub);
-			}
+			std::cout << "Unsubscribing topic: fullposeestimationpub " <<std::endl;
+			fullposeestimationpub_topic->unsubscribe(fullposeestimationpub);
+
 		}
 		catch(const Ice::Exception& ex)
 		{

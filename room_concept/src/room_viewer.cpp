@@ -8,7 +8,9 @@
 #include <algorithm>
 #include <cmath>
 
+#include <QByteArray>
 #include <QColor>
+#include <QSettings>
 #include <QVBoxLayout>
 #include <QtCore/qdebug.h>
 
@@ -19,10 +21,40 @@
 namespace rc
 {
 
-RoomViewer::~RoomViewer() = default;
+namespace
+{
+constexpr auto kWinSettingsOrg = "RoboComp";
+constexpr auto kWinSettingsApp = "room_concept";
+constexpr auto kWinSettingsKey = "RoomLayoutWindow_geometry";
+}  // namespace
 
-RoomViewer::RoomViewer(DSR::DSRViewer* default_viewer,
-                                       std::shared_ptr<DSR::DSRGraph> graph,
+RoomViewer::~RoomViewer()
+{
+    save_window_geometry();
+}
+
+void RoomViewer::restore_window_geometry()
+{
+    if (!custom_widget_)
+        return;
+    QSettings settings(kWinSettingsOrg, kWinSettingsApp);
+    const QByteArray geom = settings.value(kWinSettingsKey).toByteArray();
+    if (!geom.isEmpty())
+        custom_widget_->restoreGeometry(geom);
+    else
+        custom_widget_->resize(820, 430);
+}
+
+void RoomViewer::save_window_geometry() const
+{
+    if (!custom_widget_)
+        return;
+    QSettings settings(kWinSettingsOrg, kWinSettingsApp);
+    settings.setValue(kWinSettingsKey, custom_widget_->saveGeometry());
+    settings.sync();
+}
+
+RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
                                        rc::RoomConfig& params,
                                        const std::vector<Eigen::Vector2f>& room_polygon,
                                        bool has_room_polygon,
@@ -31,8 +63,13 @@ RoomViewer::RoomViewer(DSR::DSRViewer* default_viewer,
     : params_(&params), has_room_polygon_(has_room_polygon),
       room_concept_(&room_concept), epistemic_(&epistemic)
 {
+    // Own top-level window (parent == nullptr), NOT docked into the DSR graph viewer. This
+    // decouples the layout GUI from Agent.graph, so the agent runs with graph=false (no
+    // DSRViewer created at all). Mirrors voxelizer's independent custom drawing windows.
     custom_widget_ = new Custom_widget();
-    default_viewer->add_custom_widget_to_dock("layout", custom_widget_);
+    custom_widget_->setWindowTitle(QStringLiteral("room_concept — layout"));
+    restore_window_geometry();
+    custom_widget_->show();
     viewer_2d_ = new rc::Viewer2D(custom_widget_->frame, params_->GRID_MAX_DIM, true);
     viewer_2d_->show();
     viewer_2d_->add_robot(params_->ROBOT_WIDTH, params_->ROBOT_LENGTH, 0.f, 0.f, QColor("blue"));

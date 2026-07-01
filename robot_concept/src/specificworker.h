@@ -117,7 +117,7 @@ private:
 	std::atomic<bool> stop_imu_thread{false};
 
 	// Per-thread frame counters (relaxed); compute() turns deltas into a 3 Hz
-	// [RGBDThread]/[LidarThread]/[IMUThread] Hz readout without needing Verbose.
+	// [ZEDThread]/[LidarThread]/[IMUThread] Hz readout without needing Verbose.
 	std::atomic<std::uint64_t> rgbd_frames_{0};
 	std::atomic<std::uint64_t> lidar_frames_{0};
 	std::atomic<std::uint64_t> imu_frames_{0};
@@ -147,6 +147,7 @@ private:
 	void request_shutdown();
 
 	void cleanup_owned_nodes();
+	void trigger_graph_layout_twopi();   // one-shot twopi relayout of the DSR graph viewer at startup
 	void on_optional_peer_lost(const std::string &name, std::uint32_t id);
 	void on_optional_peer_ready(const std::string &name, std::uint32_t id);
 	std::atomic<bool> shutting_down_{false};

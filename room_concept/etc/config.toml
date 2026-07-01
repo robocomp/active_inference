@@ -27,8 +27,8 @@ name = "room_concept"
 configFile = ""
 domain = 0
 tree = false
-graph = true
-2d = false 
+graph = false   # DSR graph viewer optional: the layout GUI is its own top-level window (RoomViewer)
+2d = false
 3d = false
 
 # --- Multiple Instance Template ---
@@ -295,25 +295,22 @@ WIor               = 1.0    # MULTIPLICATIVE staleness suppressor exponent on fi
                             # staleness^WIor). NOTE: this vanishes once fim_gain→0, so it cannot keep
                             # the robot moving after localization — that job is WIorDrive below.
 WIorDrive          = 0.5    # ADDITIVE, non-saturating IoR patrol drive (nats per unit staleness).
-                            # Both info terms (pose-FIM, occupancy) saturate in a static convex room,
-                            # so without this the robot stops after a few affordances. Staleness
-                            # recovers over IorDecayTime → the robot perpetually revisits the stalest
-                            # reachable cell. Kept below the info-term magnitudes so real info-gathering
-                            # wins first; it only dominates once info is exhausted. 0 ⇒ robot rests
-                            # when the room is fully known. TUNE: raise if it still stalls; lower if it
+                            # The pose-FIM term saturates in a static convex room, so without this
+                            # the robot stops after a few affordances. Staleness recovers over
+                            # IorDecayTime → the robot perpetually revisits the stalest reachable
+                            # cell. Kept below the info-term magnitude so real info-gathering wins
+                            # first; it only dominates once info is exhausted. 0 ⇒ robot rests when
+                            # the room is fully known. TUNE: raise if it still stalls; lower if it
                             # patrols too eagerly before finishing localization/coverage.
-# Non-saturating occupancy-entropy exploration term. CRITICAL: with WMap=0 the only epistemic drive
-# is the pose-FIM ΔH, which self-extinguishes once the robot is localized — so it publishes ONE
-# affordance, localizes, then advertises gain≈0 forever and the controller stops executing (robot
-# sits still). WMap>0 folds the expected occupancy-entropy reduction (bits, summed over cells visible
-# from the vantage; ~50-300 early) into BOTH target selection and the published gain, so exploration
-# persists until the room interior is COVERED, not merely localized. WMap≈0.01 bridges bits→nats so
-# the term sits in the same ~0.5-2 range as the pose-FIM/table ΔH. TUNE live: too low → still stalls
-# after localization; too high → drives pure coverage and ignores pose refinement.
-WMap               = 0.01   # weight of expected occupancy-entropy reduction (set >0 to keep exploring)
 WPathInterest      = 0.7    # blend weight: 0=target staleness only, 1=path staleness only (multiplicative IoR)
 ArrivalDistance    = 0.15   # target reached threshold (m)
 DwellTime          = 2.0    # seconds to pause after reaching target
+# Belief forgetting: the pose-FIM epistemic gain self-extinguishes once localized (afford_room goes
+# silent "after a while"). >0 makes the epistemic pose-prior precision decay toward its floor over this
+# many seconds WHILE IDLE, so the gain recovers and the robot periodically re-verifies the room
+# (breathe-in/out with period ≈ this value). Resets while actively exploring. 0 = off. Scoring-only —
+# never touches the localizer covariance.
+BeliefForgetTime   = 90.0   # seconds; 0 disables
 
 # ---- Acceleration ramp (SpecificWorker) ---- MOVE THIS TO ROBOT
 MaxLinAccel        = 1.2    # m/s² max translational acceleration

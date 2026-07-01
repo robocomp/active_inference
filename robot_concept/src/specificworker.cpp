@@ -21,6 +21,9 @@
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 #include "../../common/media_transport/media_transport.h"
 
+#include <dsr/gui/viewers/graph_viewer/graph_viewer.h>
+#include <QTimer>
+
 #include <ConfigLoader/ConfigLoader.h>
 
 #include <chrono>
@@ -344,7 +347,7 @@ void SpecificWorker::compute()
 			or std::abs(f_ricoh - p_ricoh) >= kHzPrintDelta)
 		{
 			qInfo().noquote() << QString::asprintf(
-				"[RGBDThread] %5.1f Hz | [LidarThread] %5.1f Hz | [IMUThread] %5.1f Hz | [Ricoh360Thread] %5.1f Hz",
+				"[ZEDThread] %5.1f Hz | [LidarThread] %5.1f Hz | [IMUThread] %5.1f Hz | [Ricoh360Thread] %5.1f Hz",
 				f_rgbd, f_lidar, f_imu, f_ricoh);
 			p_rgbd = f_rgbd; p_lidar = f_lidar; p_imu = f_imu; p_ricoh = f_ricoh;
 		}
@@ -683,27 +686,48 @@ void SpecificWorker::read_rgbd_thread()
 	}
 }
 
+void SpecificWorker::trigger_graph_layout_twopi()
+{
+	// Re-run the DSR graph viewer's automatic layout with the "twopi" (radial tree) engine so the
+	// node/edge graph is legible at startup. No-op when the graph view is disabled (Agent.graph=false)
+	// or not yet created. Main-thread only (graph/GUI access).
+	const auto it = graph_viewers.find("");
+	if (it == graph_viewers.end() || !it->second)
+		return;
+
+	QWidget* graph_widget = it->second->get_widget(DSR::DSRViewer::view::graph);
+	auto* graph_viewer = qobject_cast<DSR::GraphViewer*>(graph_widget);
+	if (!graph_viewer)
+		return;
+
+	// Run now and once more queued, so the layout also happens after any pending node/edge
+	// update signals have been processed by the viewer.
+	graph_viewer->compute_layout("twopi");
+	QMetaObject::invokeMethod(graph_viewer,
+	                          [graph_viewer]() { graph_viewer->compute_layout("twopi"); },
+	                          Qt::QueuedConnection);
+}
+
 void SpecificWorker::read_ricoh_thread()
 {
-	if (camera360rgbd_proxy == nullptr)
+	if (camera360rgb_proxy == nullptr)
 	{
-		qWarning() << "[read_ricoh] no Camera360RGBD proxy configured — ricoh media stream disabled";
+		qWarning() << "[read_ricoh] no Camera360RGB proxy configured — ricoh media stream disabled";
 		return;
 	}
-	// Bridge Ice → media plane: pull the RGBD_360 panorama (RGBD_360 stitches the
-	// two cylindrical halves + reprojects the LiDAR into a sparse depth plane) and
-	// republish the RGB image on the zero-copy DDS plane. Depth is deferred (the
-	// co-registered cloud is already on the lidar3D plane); only RGB flows here.
+	// Bridge Ice → media plane: pull the RAW stitched 360 panorama straight from the
+	// Camera360RGB source (the webots-shadow bridge) and republish it on the zero-copy
+	// DDS plane (rc/ricoh/rgb). This bypasses RGBD_360's lidar-fusion hop, which caps the
+	// rate at ~12 Hz; the raw panorama runs at the bridge's full rate. RGB only (no depth).
 	bool empty_logged = false;
 	// Start fast so the loop oversamples the source; the EMA converges the poll
 	// period up to ~1× the source period (see read_rgbd_thread for the rationale).
 	auto wait_period = std::chrono::milliseconds(5);
 	std::uint64_t last_stamp_ms = 0;        // self-sync: dedup by source stamp
 	double src_period_ms = -1.0;            // self-sync: source period from stamp deltas
-	// RGBD_360 throws an Ice::UnknownException (marshalled OpenCV assertion) from
-	// getROI while it has no fused frame yet (its own camera/lidar upstream not
-	// matched). That is a peer-not-ready condition, not our bug: back off and log
-	// only the first failure + a periodic heartbeat instead of flooding at 10 Hz.
+	// getROI can throw / return empty while the Camera360RGB source is not yet up. Treat
+	// that as peer-not-ready: back off and log only the first failure + a periodic
+	// heartbeat instead of flooding at 10 Hz.
 	std::uint64_t getroi_fail = 0;
 	constexpr std::uint64_t GETROI_LOG_EVERY = 50;   // ~ every 50 backoff cycles
 	constexpr auto to_epoch_ms = [](long long t) -> std::uint64_t
@@ -717,17 +741,17 @@ void SpecificWorker::read_ricoh_thread()
 		const auto loop_start = std::chrono::steady_clock::now();
 		try
 		{
-			RoboCompCamera360RGBD::TRGBD frame;
+			RoboCompCamera360RGB::TImage frame;
 			try
 			{
 				// Full panorama: getROI(-1,…) returns the whole stitched image.
-				frame = camera360rgbd_proxy->getROI(-1, -1, -1, -1, -1, -1);
+				frame = camera360rgb_proxy->getROI(-1, -1, -1, -1, -1, -1);
 			}
 			catch (const Ice::Exception& e)
 			{
 				if (getroi_fail++ % GETROI_LOG_EVERY == 0)
-					qWarning() << "[read_ricoh] getROI unavailable (RGBD_360 not producing a fused"
-					           << "frame yet?) — backing off. err:" << e.what();
+					qWarning() << "[read_ricoh] Camera360RGB getROI unavailable (source not up"
+					           << "yet?) — backing off. err:" << e.what();
 				std::this_thread::sleep_for(std::chrono::milliseconds(500));   // peer-not-ready backoff
 				continue;
 			}
@@ -737,12 +761,12 @@ void SpecificWorker::read_ricoh_thread()
 				getroi_fail = 0;
 			}
 
-			const bool empty_rgb = frame.width <= 0 || frame.height <= 0 || frame.rgb.empty();
+			const bool empty_rgb = frame.width <= 0 || frame.height <= 0 || frame.image.empty();
 			if (empty_rgb)
 			{
 				if (!empty_logged)
 				{
-					std::print("[read_ricoh] Empty 360 stream received. Waiting for RGBD_360 data...\n");
+					std::print("[read_ricoh] Empty 360 stream received. Waiting for Camera360RGB data...\n");
 					empty_logged = true;
 				}
 				std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -758,7 +782,7 @@ void SpecificWorker::read_ricoh_thread()
 			// (dedup by capture stamp) and pace at ~2× the source period, derived from
 			// SOURCE stamp deltas (not wall clock — that death-spirals the rate).
 			{
-				const std::uint64_t stamp_ms = to_epoch_ms(frame.alivetime);
+				const std::uint64_t stamp_ms = to_epoch_ms(frame.timestamp);
 				if (stamp_ms != 0 && stamp_ms == last_stamp_ms)
 				{
 					std::this_thread::sleep_for(wait_period);
@@ -785,13 +809,13 @@ void SpecificWorker::read_ricoh_thread()
 			if (media_.image360_ready())
 			{
 				media_.publish_image360({
-					.stamp_ms = to_epoch_ms(frame.alivetime),
+					.stamp_ms = to_epoch_ms(frame.timestamp),
 					.width    = static_cast<std::uint32_t>(frame.width),
 					.height   = static_cast<std::uint32_t>(frame.height),
 					.step     = static_cast<std::uint32_t>(frame.width) * 3u,
 					.format   = rc::media::IMG360_FORMAT_BGR8,
-					.data     = reinterpret_cast<const std::uint8_t*>(frame.rgb.data()),
-					.nbytes   = frame.rgb.size()});
+					.data     = reinterpret_cast<const std::uint8_t*>(frame.image.data()),
+					.nbytes   = frame.image.size()});
 			}
 			media_.maybe_report_stats(SensorMediaPublisher::StatsGroup::Image360, std::chrono::seconds(5));
 

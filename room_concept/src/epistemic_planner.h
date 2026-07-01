@@ -6,7 +6,6 @@
 #include <random>
 #include <Eigen/Dense>
 #include "corner_visibility.h"
-#include "occupancy_belief.h"
 
 namespace rc
 {
@@ -79,21 +78,19 @@ public:
         bool  fim_wall_incidence_weight = true;   // down-weight grazing hits (|n·ray|)
         float fim_wall_incidence_min    = 0.2f;   // floor for the incidence weight
 
-        // ---- Map occupancy-entropy epistemics (the NON-saturating exploration term) ----
-        // Pose info (FIM) self-extinguishes once localized (fixed map). This scores the
-        // expected reduction of the room's *interior* occupancy entropy — a term that
-        // → 0 only when the room is COVERED, not when the pose is known. It is the
-        // principled replacement for the IoR heuristic. w_map=0 ⇒ off (legacy behaviour);
-        // raise w_map (and lower w_ior) to drive exploration by information gain.
-        float w_map            = 0.0f;   // weight of expected occupancy-entropy reduction (bits)
-        float map_cell_size    = 0.5f;   // occupancy grid resolution (m)
-        float map_sensor_range = 8.0f;   // visibility range for coverage (m)
-        int   map_rays         = 64;     // simulated 360° scan density
-        float map_free_logodds = 0.9f;   // |Δ log-odds| toward "known" per cell observation
-
         // ---- Target lifecycle ----
         float arrival_distance = 0.15f;      // target reached threshold (m)
         float dwell_time       = 2.0f;       // seconds to stop after reaching a target
+
+        // ---- Belief forgetting (re-activate exploration) ----
+        // The pose-FIM ΔH self-extinguishes once the robot localizes against the static room prior
+        // (robot_cov_ shrinks and stays tight), so afford_room goes silent "after a while". With
+        // belief_forget_time > 0, the pose-prior precision used for epistemic SCORING decays toward its
+        // floor over this timescale WHENEVER the robot is not actively exploring — a random-walk
+        // covariance inflation on the epistemic prior only (never the localizer's covariance). The gain
+        // then recovers and the robot periodically re-verifies the room. refresh_belief() resets the
+        // clock while exploring, giving a breathe-in/out cycle of period ≈ belief_forget_time. 0 = off.
+        float belief_forget_time = 0.0f;     // seconds; 0 disables (current self-extinguishing behaviour)
     };
 
     /// Scored candidate target in room frame
@@ -141,11 +138,11 @@ public:
     float live_epistemic_gain(const Eigen::Vector2f& viewpoint) const;
 
     /// TOTAL epistemic gain advertised on afford_room = pose-FIM ΔH (nats, self-extinguishing
-    /// once localized) + w_map · expected occupancy-entropy reduction (NON-saturating: stays
-    /// positive until the room interior is COVERED, not just localized). Mirrors the selection
-    /// currency in evaluate_targets so the published gain matches how targets are ranked. With
-    /// w_map=0 this reduces exactly to live_epistemic_gain (legacy behaviour). Use this as the
-    /// published gain so exploration does not stall the moment the pose covariance tightens.
+    /// once localized) + w_ior_drive · IoR patrol-staleness drive (NON-saturating: stays positive
+    /// on long-unvisited cells even after the pose-FIM term saturates). Mirrors the selection
+    /// currency in evaluate_targets so the published gain matches how targets are ranked. Use
+    /// this as the published gain so exploration does not stall the moment the pose covariance
+    /// tightens.
     float live_total_epistemic_gain(const Eigen::Vector2f& viewpoint) const;
 
     /// Called every plan cycle.  Returns the current navigation target,
@@ -155,6 +152,12 @@ public:
 
     void clear_target() { current_target_.reset(); }
     const std::optional<Target>& current_target() const { return current_target_; }
+
+    /// Mark the room-knowledge belief as FRESH — call while the robot is actively exploring or
+    /// executing an epistemic affordance. Resets the belief-forgetting clock so the epistemic prior
+    /// only decays (and exploration only re-activates) during genuine idle time. No-op unless
+    /// Params::belief_forget_time > 0.
+    void refresh_belief() { last_belief_refresh_ = std::chrono::steady_clock::now(); }
 
     /// Lightweight per-cycle update: stamps the current robot position in the
     /// visit grid and refreshes the IoR overlay. Call this when the full
@@ -178,11 +181,6 @@ public:
     const std::vector<IorCell>& ior_cells() const { return ior_cells_; }
     float cell_size() const { return params.ior_cell_size; }
 
-    // ---- Occupancy-entropy belief (route-2 epistemics) ----
-    const OccupancyBelief& occupancy() const { return occ_; }
-    std::vector<OccupancyBelief::EntropyCell> map_entropy_field() const { return occ_.entropy_field(); }
-    float map_entropy() const { return occ_.total_entropy(); }   // total unresolved bits
-
     // ---- Accessors needed by Level 2 ----
     Eigen::Vector2f robot_pos() const { return robot_pose_.translation(); }
     float robot_theta() const { return std::atan2(robot_pose_.linear()(1,0), robot_pose_.linear()(0,0)); }
@@ -205,9 +203,6 @@ private:
     /// large-but-finite ΔH, no ∞/NaN). Shared by evaluate_targets and live_epistemic_gain.
     Eigen::Matrix3f current_prior_precision() const;
     void refresh_ior_overlay();   // lightweight per-cycle rebuild of ior_cells_
-    void maybe_configure_occupancy();   // (re)build occ_ grid once room bounds are known
-
-    OccupancyBelief occ_;   // non-saturating epistemic state (room interior occupancy/visibility)
 
     // ---- State ----
     Eigen::Vector2f room_min_{0, 0};
@@ -222,6 +217,11 @@ private:
     Eigen::Matrix3f robot_cov_ = Eigen::Matrix3f::Identity();
     bool robot_state_set_ = false;
     float robot_footprint_radius_ = 0.f;
+
+    // Belief-forgetting clock: time of the last "belief is fresh" mark (active exploration). The
+    // epistemic prior precision decays as (now - this) grows; refresh_belief() resets it. Initialised
+    // to construction time so no spurious forgetting accrues before the first exploration.
+    std::chrono::steady_clock::time_point last_belief_refresh_ = std::chrono::steady_clock::now();
 
     // Object/obstacle exclusion zones (updated each cycle from DSR graph)
     std::vector<ObstacleFootprint> obstacle_footprints_;
