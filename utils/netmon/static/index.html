@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>RoboComp — Mapa de interconexión</title>
+  <script src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
+  <style>
+    html, body { margin: 0; height: 100%; background: #14161a; color: #e6e6e6;
+                 font-family: ui-monospace, "Cascadia Code", monospace; }
+    #bar { padding: 8px 14px; background: #1c1f26; border-bottom: 1px solid #2c313c;
+           display: flex; gap: 14px; align-items: center; font-size: 13px; }
+    #bar b { color: #7fd1ff; }
+    #main { display: flex; height: calc(100% - 41px); }
+    #graph { flex: 1; min-width: 0; }
+    #panel { width: 340px; overflow: auto; border-left: 1px solid #2c313c; background: #171a20; }
+    #panel.hidden { display: none; }
+    .pill { padding: 2px 8px; border-radius: 10px; font-size: 12px; }
+    .warn { background: #4a2b00; color: #ffcf8f; }
+    .ok   { background: #16351c; color: #8fe6a3; }
+    .dot  { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; }
+    .btn  { background: #262b34; color: #cfd6e0; border: 1px solid #39414d; border-radius: 6px;
+            padding: 3px 10px; font: inherit; font-size: 12px; cursor: pointer; }
+    .btn:hover { background: #313947; border-color: #4a5568; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #23272f; white-space: nowrap; }
+    th { position: sticky; top: 0; background: #1c1f26; color: #8a94a2; font-weight: normal; }
+    td.num { text-align: right; }
+    .lay { padding: 1px 6px; border-radius: 8px; font-size: 11px; }
+    .lay.sensorimotor { background: #14303a; color: #7fd1ff; }
+    .lay.cognitive    { background: #2b1d3d; color: #c79bea; }
+    .st { font-weight: bold; }
+  </style>
+</head>
+<body>
+  <div id="bar">
+    <span><b>🧠 RoboComp</b> interconexión</span>
+    <span><span class="dot" style="background:#3fb950"></span>alive
+          <span class="dot" style="background:#d6b528;margin-left:8px"></span>up (ICE ✗)
+          <span class="dot" style="background:#f85149;margin-left:8px"></span>parado
+          <span class="dot" style="background:#b072e0;margin-left:8px"></span>broker
+          <span class="dot" style="background:#2ec5d3;margin-left:8px"></span>DSR</span>
+    <span style="color:#8a94a2">— RPC · <span style="color:#b072e0">- - pub/sub</span> · <span style="color:#2ec5d3">DSR</span></span>
+    <span id="bw" class="pill">bw…</span>
+    <button id="layoutBtn" class="btn" style="margin-left:auto">Vista: Orgánico por nivel</button>
+    <button id="fitBtn" class="btn">Reorganizar</button>
+    <button id="tableBtn" class="btn">Tabla</button>
+    <span style="color:#6b7280" id="ts"></span>
+  </div>
+  <div id="main">
+    <div id="graph"></div>
+    <div id="panel">
+      <table>
+        <thead><tr><th>Componente</th><th>Capa</th><th>Estado</th><th class="num">CPU</th><th class="num">Mem</th></tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>
