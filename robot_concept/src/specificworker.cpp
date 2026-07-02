@@ -515,7 +515,7 @@ void SpecificWorker::read_rgbd_thread()
 {
 	bool empty_rgbd_logged = false;
 	// Start fast so the loop oversamples the camera and the EMA below measures the TRUE frame period
-	// (starting slow would lock it to its own rate); it then converges up to ~1× the camera period.
+	// (starting slow would lock it to its own rate); it then converges up to ~1.1× the camera rate.
 	auto wait_period = std::chrono::milliseconds(5);
 	const bool rgb_upload_enabled = params.DSR_RGB_FPS >= 0;
 	const bool depth_upload_enabled = params.DSR_DEPTH_FPS >= 0;
@@ -566,9 +566,12 @@ void SpecificWorker::read_rgbd_thread()
 			}
 
 			// Self-synchronize with the source: advance only on a genuinely new frame (dedup by the RGB
-			// capture stamp) and poll at ~2× the source period — derived from the SOURCE stamp deltas,
-			// not our own loop timing (wall-clock between ingests is circular and death-spirals the rate
-			// down). getAll() returns a full image even for a duplicate, so this also stops re-publishing.
+			// capture stamp) and poll at just above the source rate (~1.1×) — derived from the SOURCE stamp
+			// deltas, not our own loop timing (wall-clock between ingests is circular and death-spirals the
+			// rate down). getAll() ships a full image even for a DUPLICATE, so every extra poll is a full
+			// wasted RGBD transfer over Ice; keep the poll factor just above 1× to not miss frames while
+			// minimizing double-pulls. The dedup below only stops RE-PUBLISHING — the Ice payload already
+			// crossed the wire — so the poll factor, not the dedup, is what bounds zed->robot_concept flow.
 			{
 				const long long rgb_t = frame.image.alivetime;
 				const std::uint64_t stamp_ms = rgb_t > 1'000'000'000'000'000LL
@@ -586,7 +589,9 @@ void SpecificWorker::read_rgbd_thread()
 						if (src_dt > 0.5 && src_dt < 2000.0)
 						{
 							rgbd_src_period_ms = (rgbd_src_period_ms < 0.0) ? src_dt : 0.8 * rgbd_src_period_ms + 0.2 * src_dt;
-							wait_period = std::chrono::milliseconds(std::max<long>(1, static_cast<long>(0.5 * rgbd_src_period_ms + 0.5)));
+							// Poll at ~1.1× the source rate (wait 0.9× the source period): fast enough to
+							// never miss a frame, but avoids the ~2× full-image over-pull that 0.5× caused.
+							wait_period = std::chrono::milliseconds(std::max<long>(1, static_cast<long>(0.9 * rgbd_src_period_ms + 0.5)));
 						}
 					}
 					last_rgbd_stamp_ms = stamp_ms;
