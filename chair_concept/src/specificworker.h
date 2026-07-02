@@ -44,15 +44,12 @@
 #include <Eigen/Dense>
 #include <unordered_set>
 
-#include "../../common/robust_metrics/robust_metrics.h"
 #include "chair_config.h"      // rc::ChairConfig + load_chair_config
 #include "chair_instance.h"    // rc::ChairInstance
 #include "../../common/mask_ingestor/mask_ingestor.h"     // rc::MaskIngestor (perception)
 #include "chair_scene_graph.h" // rc::ChairSceneGraph (DSR node/RT I/O)
 #include "chair_fitter.h"      // rc::ChairFitter (active-inference core)
 #include "epistemic_planner.h"
-#include "prior_store.h"
-#include "../../common/sample_queue/sample_queue.h"
 #include "chair_affordance.h"
 #include "chair_model.h"
 #include "../../common/dashboard/custom_widget.h"
@@ -94,7 +91,7 @@ private:
     // ── Orchestration + post-fit steps ────────────────────────────────────────
     void load_config(const ConfigLoader& cfg);
     void process_chair_node(const DSR::Node& node);
-    void run_instance_tracker();          // data-driven birth/associate/death when cfg_.tracker_enabled
+    void run_instance_tracker();          // data-driven birth/associate/death (the only instance-lifecycle path)
     void merge_overlapping_instances();   // collapse two instances on the same chair (seat-footprint overlap)
     void publish_chair_cycle(rc::ChairInstance& inst,
                              const DSR::Node& node,
@@ -110,8 +107,6 @@ private:
                                   float free_energy);
     void step_convergence(rc::ChairInstance& inst, DSR::Node& node, float free_energy);
     void step_epistemic(rc::ChairInstance& inst, DSR::Node& node);
-    void step_refresh_check(rc::ChairInstance& inst, DSR::Node& node,
-                            float free_energy, float explanation_ratio);
     void trigger_graph_layout_twopi();   // injected into ChairSceneGraph as the relayout callback
 
     // ── Presence protocol ────────────────────────────────────────────────────
@@ -139,17 +134,19 @@ private:
     AgentPresenceCoordinator presence_coordinator_;
 
     rc::ChairConfig                                         cfg_;
-    std::unique_ptr<rc::PriorStore>                         prior_store_;
-    std::vector<rc::ChairPrior>                             priors_cache_;
     rc::EpistemicPlanner                                    epistemic_planner_;
     std::unique_ptr<rc::ChairFitter>                    fitter_;   // active-inference fit core (owns instances)
 
+    // Live belief dashboard — its OWN top-level window (extracted from the DSR graph dock so it shows
+    // independently of Agent.graph; mirrors room_concept/kinova_controller). Geometry persisted via QSettings.
     Custom_widget*       custom_widget_ = nullptr;
     rc::TimeSeriesPlot*  ts_plot_       = nullptr;   // FE
-    rc::TimeSeriesPlot*  ts_cov_plot_   = nullptr;   // coverage deficit
+    rc::TimeSeriesPlot*  ts_cov_plot_   = nullptr;   // belief uncertainty U(Σ) = Σ pos+size posterior std (m)
     rc::TimeSeriesPlot*  ts_res_plot_   = nullptr;   // residual point count
     rc::TimeSeriesPlot*  ts_state_plot_ = nullptr;   // inferred dimensions w/h (stability check)
-    rc::TimeSeriesPlot*  ts_ce_plot_    = nullptr;   // (D) counter-evidence accumulator S_w/S_h (only when the gate is on)
+    rc::TimeSeriesPlot*  ts_ce_plot_    = nullptr;   // belief size posterior std σ_w/σ_h (mm)
+    void restore_dashboard_geometry();
+    void save_dashboard_geometry() const;
 
     std::unique_ptr<DSR::RT_API>                        rt_api_;
     std::unique_ptr<DSR::InnerEigenAPI>                inner_eigen_;     // for room↔body↔zed extrinsic (silhouette)
@@ -159,9 +156,6 @@ private:
     rc::InstanceTracker                                tracker_;         // multi-instance (Tracker.Enabled)
     uint64_t                                            room_node_id_ = 0;
     FPSCounter                                          fps_counter_;     // overall compute()-cycle rate
-
-    // Paths resolved from ConfigLoader
-    std::string priors_path_;
 
 signals:
     void presenceReady();

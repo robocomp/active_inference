@@ -29,6 +29,7 @@
 #include "voxel_opengl_viewer.h"
 #include "yolo_viewer.h"
 #include "image_popup_viewer.h"
+#include "ricoh_yolo_worker.h"
 #include <dsr/gui/viewers/graph_viewer/graph_viewer.h>
 #include <QHBoxLayout>
 #include <QPushButton>
@@ -100,6 +101,7 @@ void SpecificWorker::request_shutdown()
 
     save_window_settings();
     save_external_window_geometry();
+    ricoh_yolo_worker_.reset();   // stop+join BEFORE scene_processor is destroyed (holds a raw ptr to it)
     scene_processor.reset();
     cleanup_owned_nodes();
 }
@@ -199,9 +201,39 @@ void SpecificWorker::initialize()
                                       params.MEDIA_RGB_TOPIC, params.MEDIA_DEPTH_TOPIC);
     scene_processor->init_lidar_media_plane(static_cast<std::uint32_t>(params.MEDIA_DOMAIN_ID),
                                             params.MEDIA_LIDAR_TOPIC, params.LIDAR_USE_MEDIA);
-    if (params.SHOW_RICOH_VIEWER)
+    // Media subscriber is needed for EITHER the popup or peripheral detection — independent of whether
+    // the popup window is ever shown, so 360-YOLO can run without anyone watching.
+    if (params.SHOW_RICOH_VIEWER or params.RICOH_YOLO_ENABLED)
         scene_processor->init_ricoh_media_plane(static_cast<std::uint32_t>(params.MEDIA_DOMAIN_ID),
                                                 params.MEDIA_RICOH_TOPIC);
+
+    // Ricoh 360 peripheral YOLO: own thread, own model/session — decoupled from compute()'s budget
+    // (see ricoh_yolo_worker.h). Started here (after the media plane is up); stopped explicitly in
+    // request_shutdown() before scene_processor is destroyed.
+    if (params.RICOH_YOLO_ENABLED)
+    {
+        ricoh_yolo_worker_ = std::make_unique<rc::RicohYoloWorker>();
+        rc::RicohYoloWorker::Config ricoh_worker_cfg;
+        ricoh_worker_cfg.yolo_config.model_path        = params.YOLO_MODEL_PATH;
+        ricoh_worker_cfg.yolo_config.conf_thresh       = params.YOLO_CONF_THRESH;
+        ricoh_worker_cfg.yolo_config.iou_thresh        = params.YOLO_IOU_THRESH;
+        ricoh_worker_cfg.yolo_config.input_size        = params.YOLO_INPUT_SIZE;
+        ricoh_worker_cfg.yolo_config.use_gpu           = params.YOLO_USE_GPU;
+        ricoh_worker_cfg.yolo_config.use_trt           = params.YOLO_USE_TRT;
+        ricoh_worker_cfg.yolo_config.mask_erode_kernel = params.YOLO_MASK_ERODE_KERNEL;
+        ricoh_worker_cfg.yolo_config.accepted_labels   = params.YOLO_ACCEPTED_LABELS;
+        ricoh_worker_cfg.yolo_config.verbose_debug     = verbose_debug_;
+        ricoh_worker_cfg.detect_config.n_strips        = params.RICOH_YOLO_N_STRIPS;
+        ricoh_worker_cfg.detect_config.overlap_px      = params.RICOH_YOLO_STRIP_OVERLAP_PX;
+        ricoh_worker_cfg.detect_config.merge_iou       = params.RICOH_YOLO_MERGE_IOU;
+        ricoh_worker_cfg.target_period_ms              = params.RICOH_YOLO_THREAD_PERIOD_MS;
+        ricoh_worker_cfg.perf_log                      = params.PERF_LOG;
+        if (!ricoh_yolo_worker_->start(scene_processor.get(), ricoh_worker_cfg))
+        {
+            std::println("[Ricoh] 360-YOLO worker failed to start (media plane not ready?) — disabling");
+            ricoh_yolo_worker_.reset();
+        }
+    }
 
     // Perception-rate regulator: floor = the user-configured pose decimation, ceiling =
     // RateRegulator.pose_decim_max; target = TARGET_HZ. Holds compute() near target by
@@ -306,23 +338,48 @@ void SpecificWorker::on_render_tick()
 
     scene_processor->refresh_viewer_robot_pose_latest();
 
-    // Ricoh 360 popup: poll the panorama plane and refresh the window when visible.
-    // Decoupled from the perception pipeline, so it updates even when the ZED stream
-    // is idle. poll_ricoh() only decodes while the window is toggled on.
+    // Ricoh 360 popup: refresh the window when visible. When the 360-YOLO worker is running it OWNS
+    // polling (its own thread, see ricoh_yolo_worker.h) — just read its thread-safe snapshot here, no
+    // decode on this thread. Otherwise (Ricoh.yolo_enabled=false) poll directly, same as always.
     double ricoh_ms = 0.0;
     {
-        // Always drain the ricoh plane (cheap; poll_ricoh decodes only when the popup is visible) so
-        // its stream rate is known for the HUD even with the popup closed; push the image only if shown.
         const auto perf_ricoh0 = std::chrono::steady_clock::now();
-        scene_processor->poll_ricoh();
+        const bool popup_visible = ricoh_viewer_ and ricoh_window_ and ricoh_window_->isVisible();
+
+        if (ricoh_yolo_worker_)
+        {
+            if (popup_visible)
+            {
+                const cv::Mat pano = ricoh_yolo_worker_->latest_bgr();
+                if (not pano.empty())
+                {
+                    const auto dets = ricoh_yolo_worker_->latest_detections();
+                    if (!dets.empty() and yolo_processor)
+                    {
+                        cv::Mat pano_rgb;
+                        cv::cvtColor(pano, pano_rgb, cv::COLOR_BGR2RGB);
+                        ricoh_viewer_->update_image(yolo_processor->compose_detection_canvas(pano_rgb, dets));
+                    }
+                    else
+                        ricoh_viewer_->update_image(pano);
+                }
+            }
+        }
+        else
+        {
+            // Always drain the ricoh plane (cheap; poll_ricoh decodes only when the popup is visible)
+            // so its stream rate is known for the HUD even with the popup closed.
+            scene_processor->poll_ricoh();
+            if (popup_visible)
+            {
+                const cv::Mat pano = scene_processor->ricoh_bgr_copy();
+                if (not pano.empty())
+                    ricoh_viewer_->update_image(pano);
+            }
+        }
+
         if (const std::uint64_t rs = scene_processor->ricoh_last_stamp_ms(); rs > 0)
             stream_mon_.tick("rgb360", rs);
-        if (ricoh_viewer_ and ricoh_window_ and ricoh_window_->isVisible())
-        {
-            const cv::Mat& pano = scene_processor->ricoh_bgr();
-            if (not pano.empty())
-                ricoh_viewer_->update_image(pano);
-        }
         ricoh_ms = perf_ms(perf_ricoh0, std::chrono::steady_clock::now());
     }
 
@@ -452,6 +509,10 @@ void SpecificWorker::compute()
         if (semantic_frame_counter_++ % decim == 0)
             yolo_semantic_processor->segment(frame->rgbd.rgb);   // refresh the cached label map
     }
+
+    // Ricoh 360 peripheral detection now runs on its own thread (rc::RicohYoloWorker, started in
+    // initialize()) — nothing to do here. It's paced to its own target period, fully decoupled from
+    // this cycle's budget; see etc/viewer_perf_ricoh_yolo.csv for its own timing.
 
     if (yolo_viewer_ and yolo_window_ and yolo_window_->isVisible())
     {

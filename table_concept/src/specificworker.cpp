@@ -39,6 +39,8 @@
 #include <thread>    // brief DDS flush before _Exit
 #include <chrono>
 #include <iostream>  // std::cout/cerr flush
+#include <QSettings>   // persist the standalone dashboard window geometry
+#include <QByteArray>
 
 #include <algorithm>
 #include <array>
@@ -51,6 +53,18 @@
 #include <dsr/api/dsr_api.h>
 
 namespace {
+
+// Scalar model-uncertainty readout for model_uncertainty_att / the dashboard: the sum of the belief's
+// per-DOF posterior stds over position (cx,cy) + size (w,h), in metres, from the AI2 covariance Σ over
+// [cx,cy,H,w,h,yaw]. Shrinks as the robot gathers viewpoints. 0 before the belief is seeded.
+float belief_uncertainty(const rc::TableInstance& inst)
+{
+    if (not inst.ai2_initialized)
+        return 0.0f;
+    const auto& S = inst.ai2_belief.covariance();
+    const auto sd = [&](int i) { return std::sqrt(std::max(0.0f, S(i, i))); };
+    return sd(0) + sd(1) + sd(3) + sd(4);
+}
 
 // Two tables cannot share physical space. The footprint is the oriented rectangle (cx,cy,w,h,yaw) in the
 // room plane; these helpers compute the area of overlap between two footprints so the merge operator can
@@ -183,6 +197,7 @@ void SpecificWorker::request_shutdown()
         return;
 
     save_window_settings();
+    save_dashboard_geometry();   // the standalone dashboard is not in `windows`, so save it explicitly
 
     cleanup_owned_nodes();
 
@@ -211,6 +226,30 @@ void SpecificWorker::terminal_shutdown()
     std::cerr.flush();
     std::this_thread::sleep_for(std::chrono::milliseconds(300));   // let the del-deltas reach peers
     std::_Exit(EXIT_SUCCESS);
+}
+
+// Persist/restore the standalone dashboard window's geometry. The generated save_window_settings()
+// only covers the QMainWindow(s) in `windows`; our extracted top-level widget is separate, so we
+// carry its own QSettings entry (mirrors room_concept's RoomViewer).
+void SpecificWorker::restore_dashboard_geometry()
+{
+    if (not custom_widget_)
+        return;
+    QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("table_concept"));
+    const QByteArray geom = settings.value(QStringLiteral("DashboardWindow_geometry")).toByteArray();
+    if (not geom.isEmpty())
+        custom_widget_->restoreGeometry(geom);
+    else
+        custom_widget_->resize(560, 620);
+}
+
+void SpecificWorker::save_dashboard_geometry() const
+{
+    if (not custom_widget_)
+        return;
+    QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("table_concept"));
+    settings.setValue(QStringLiteral("DashboardWindow_geometry"), custom_widget_->saveGeometry());
+    settings.sync();
 }
 
 // ─── Initialisation ──────────────────────────────────────────────────────────
@@ -351,15 +390,17 @@ void SpecificWorker::initialize()
     // Stale affordance nodes are swept on entering Operating (presence hook) and on shutdown — see
     // remove_stale_affordance_nodes(), keyed on the parent object type (robust to node-name renames).
 
-    // ── Time-series widget ──────────────────────────────────────────────────
-    if (not graph_viewers.empty())
+    // ── Time-series dashboard — its OWN top-level window ──────────────────────
+    // Extracted from the DSR graph dock (add_custom_widget_to_dock) into a standalone window, so the
+    // dashboard shows even with Agent.graph=false (no DSRViewer created). Mirrors room_concept and
+    // kinova_controller. The TimeSeriesPlot is a plain QWidget (no QOpenGL backing store), safe as a
+    // top-level. NOT WA_DeleteOnClose: closing must only HIDE it, or the ts_*_plot_ pointers the
+    // compute() feed uses would dangle. A QApplication always exists (generated/main.cpp).
     {
         custom_widget_ = new Custom_widget("Table Model — Free Energy, Coverage Deficit, Residuals & Dimensions (w,h)");
-        // Dock into the main DSR graph window (tab alongside the graph/tree views). The TimeSeriesPlot
-        // is a plain QWidget (no QOpenGLWidget backing store), so it doesn't hit the shared-backing-store
-        // repaint crash that pushed the heavy Voxel3D GL view into its own window — docking it here is
-        // safe and keeps the dashboard together with the graph it annotates.
-        graph_viewers.at("")->add_custom_widget_to_dock("Table Inference", custom_widget_);
+        custom_widget_->setWindowTitle(QStringLiteral("table_concept — belief dashboard"));
+        restore_dashboard_geometry();
+        custom_widget_->show();
 
         // Create plot inside frame_series
         auto* series_layout = new QVBoxLayout(custom_widget_->frame_series);
@@ -494,8 +535,7 @@ void SpecificWorker::run_instance_tracker()
     tp.nll_cost         = cfg_.tracker_nll_cost;
     tracker_.set_params(tp);
 
-    // Tracks ← live instances: centre from the fit, XY cov from the stabiliser posterior precision
-    // (fisher_info_raw[0]=cx, [1]=cy in the 8-DOF [cx,cy,w,h,H,leg,yaw,inset] layout).
+    // Tracks ← live instances: centre from the fit, XY cov from the belief's position covariance Σ.
     std::vector<rc::TrackView> tracks;
     tracks.reserve(fitter_->instances().size());
     for (auto& [id, inst] : fitter_->instances())
@@ -504,22 +544,14 @@ void SpecificWorker::run_instance_tracker()
         t.id = id;
         const auto& s = inst.model.state();
         t.xy = {s.cx, s.cy};
-        if (cfg_.use_ai2 and inst.ai2_initialized)
+        if (inst.ai2_initialized)
         {
-            // AI2: gate on the belief's position covariance (+ localization chain) so association uses the
+            // Gate on the belief's position covariance (+ localization chain) so association uses the
             // Mahalanobis innovation S = P + R²I, not the Euclidean fallback (matters for multi-instance).
             const auto& S = inst.ai2_belief.covariance();   // Σ over [cx,cy,H,w,h,yaw]
             t.cov = Eigen::Matrix2f::Zero();
             t.cov(0, 0) = S(0, 0) + inst.chain_cov_xx;
             t.cov(1, 1) = S(1, 1) + inst.chain_cov_yy;
-            t.has_cov = true;
-        }
-        else if (const float rx = inst.stab.fisher_info_raw[0], ry = inst.stab.fisher_info_raw[1];
-                 rx > 1e-6f and ry > 1e-6f)
-        {
-            t.cov = Eigen::Matrix2f::Zero();
-            t.cov(0, 0) = 1.0f / rx;
-            t.cov(1, 1) = 1.0f / ry;
             t.has_cov = true;
         }
         tracks.push_back(t);
@@ -626,7 +658,6 @@ void SpecificWorker::process_table_node(const DSR::Node& node)
 
     const float free_energy = fitter_->run_inference(inst, observation);
     publish_table_cycle(inst, node, observation, free_energy);
-    inst.prev_free_energy = free_energy;
 }
 
 
@@ -669,7 +700,7 @@ void SpecificWorker::publish_table_diagnostics(const rc::TableInstance& inst,
         if (ts_cov_plot_)
         {
             ts_cov_plot_->add_series(inst.node_name + "_cov", QColor(0, 190, 255), 1.1f);
-            ts_cov_plot_->add_point (inst.node_name + "_cov", inst.last_coverage_deficit);
+            ts_cov_plot_->add_point (inst.node_name + "_cov", belief_uncertainty(inst));
         }
         if (ts_res_plot_)
         {
@@ -690,22 +721,22 @@ void SpecificWorker::publish_table_diagnostics(const rc::TableInstance& inst,
             ts_state_plot_->add_point (inst.node_name + "_w", s.w);
             ts_state_plot_->add_point (inst.node_name + "_h", s.h);
         }
-        if (ts_ce_plot_)
+        if (ts_ce_plot_ and inst.ai2_initialized)
         {
-            // (D) Counter-evidence accumulator for the size DOFs (index 2=w, 3=h). Held between fresh
-            // frames (only updated in accept on a measurement), so it reads as a charge/decay trace.
-            ts_ce_plot_->add_series(inst.node_name + "_ceW", QColor(255, 90, 90), 1.1f);
-            ts_ce_plot_->add_series(inst.node_name + "_ceH", QColor(90, 200, 90), 1.1f);
-            ts_ce_plot_->add_point (inst.node_name + "_ceW", inst.stab.counter_evidence[2]);
-            ts_ce_plot_->add_point (inst.node_name + "_ceH", inst.stab.counter_evidence[3]);
+            // Belief posterior std for the size DOFs (Σ index 3=w, 4=h), in mm — the size-uncertainty trace.
+            const auto& S = inst.ai2_belief.covariance();
+            ts_ce_plot_->add_series(inst.node_name + "_sW", QColor(255, 90, 90), 1.1f);
+            ts_ce_plot_->add_series(inst.node_name + "_sH", QColor(90, 200, 90), 1.1f);
+            ts_ce_plot_->add_point (inst.node_name + "_sW", 1000.f * std::sqrt(std::max(0.f, S(3, 3))));
+            ts_ce_plot_->add_point (inst.node_name + "_sH", 1000.f * std::sqrt(std::max(0.f, S(4, 4))));
         }
     }
 
     if (fitter_->should_log(inst))
-        std::print("[{}] series: FE={:.4f} cov={:.1f} res={}\n",
+        std::print("[{}] series: FE={:.4f} U(Σ)={:.3f} res={}\n",
                    inst.node_name,
                    free_energy,
-                   inst.last_coverage_deficit,
+                   belief_uncertainty(inst),
                    observation.residual_pts.size());
 }
 
@@ -719,13 +750,6 @@ void SpecificWorker::publish_table_intentions(rc::TableInstance& inst,
     // than being gated on the legacy coverage-deficit proxy.
     if (auto node_opt = G->get_node(node_id); node_opt.has_value())
         step_epistemic(inst, node_opt.value());
-
-    if (observation.has_fresh_data)
-    {
-        auto node_opt = G->get_node(node_id);
-        if (node_opt.has_value())
-            step_refresh_check(inst, node_opt.value(), free_energy, observation.explanation_ratio);
-    }
 }
 
 // ─── Initialisation helpers ──────────────────────────────────────────────────
@@ -764,24 +788,15 @@ void SpecificWorker::step_convergence(rc::TableInstance& inst,
         inst.model_stable     = false;
     }
 
-    // Check all four vertical faces are covered (for affordance/uncertainty reporting only)
-    const auto coverage = inst.queue.face_coverage(inst.model);
+    // Model uncertainty for model_uncertainty_att: sum of the belief's per-DOF posterior stds over
+    // position + size (m), from the AI2 covariance Σ over [cx,cy,H,w,h,yaw]. Shrinks as the robot
+    // gathers viewpoints — the AI2-native replacement for the old queue face-coverage deficit.
+    const float model_uncertainty = belief_uncertainty(inst);
+    G->add_or_modify_attrib_local<model_uncertainty_att>(node, model_uncertainty);
 
-    // Compute per-face coverage deficit for model_uncertainty_att
-    float total_deficit = 0.0f;
-    for (int i = 0; i < 4; ++i)
-        total_deficit += std::max(0.0f, cfg_.delta_min - coverage[i]);
-    inst.last_coverage_deficit = total_deficit;   // expose to plot
-    G->add_or_modify_attrib_local<model_uncertainty_att>(node, total_deficit);
-
-    // ↑ Top-down: generative model prediction vs. coverage evidence
     if (fitter_->should_log(inst))
-        std::print("[{}] coverage: +x={:.1f} -x={:.1f} +y={:.1f} -y={:.1f}  "
-                   "stable={}/{} U={:.1f}\n",
-                   inst.node_name,
-                   coverage[0], coverage[1], coverage[2], coverage[3],
-                   inst.frames_converged, cfg_.K_stable,
-                   total_deficit);
+        std::print("[{}] convergence: Δstate={:.4f} stable={}/{} U(Σ)={:.3f}m\n",
+                   inst.node_name, state_delta, inst.frames_converged, cfg_.K_stable, model_uncertainty);
 
     if (inst.frames_converged >= cfg_.K_stable)
     {
@@ -829,17 +844,12 @@ void SpecificWorker::step_epistemic(rc::TableInstance& inst, DSR::Node& node)
             }
         }
 
-    // AI2: Σ-based D-optimal NBV from the belief (the legacy queue/Fisher inputs are empty under AI2).
-    // Skip until the belief has seen its first frame (else Σ is the broad prior and the proposal is moot).
-    rc::EpistemicProposal prop;
-    if (cfg_.use_ai2)
-    {
-        if (not inst.ai2_initialized)
-            return;
-        prop = epistemic_planner_.compute(inst.ai2_belief, cfg_.ai2_range_noise_lat_per_m, cfg_.ai2_sigma_base_m);
-    }
-    else
-        prop = epistemic_planner_.compute(inst.model, inst.queue, inst.stab.fisher_info_raw);
+    // Σ-based D-optimal NBV from the belief. Skip until the belief has seen its first frame (else Σ is
+    // the broad prior and the proposal is moot).
+    if (not inst.ai2_initialized)
+        return;
+    rc::EpistemicProposal prop =
+        epistemic_planner_.compute(inst.ai2_belief, cfg_.ai2_range_noise_lat_per_m, cfg_.ai2_sigma_base_m);
     if (not prop.valid or not prop.is_finite())
         return;   // degenerate (non-finite) fit — leave the existing affordance node as-is, retry next cycle
 
@@ -860,28 +870,6 @@ void SpecificWorker::step_epistemic(rc::TableInstance& inst, DSR::Node& node)
     if (affordance_node_before == 0 and inst.affordance.node_id() != 0)
         trigger_graph_layout_twopi();
     inst.epistemic_pending = true;
-}
-
-void SpecificWorker::step_refresh_check(rc::TableInstance& inst,
-                                         DSR::Node& node,
-                                         float free_energy,
-                                         float explanation_ratio)
-{
-    if (free_energy > inst.prev_free_energy)
-        ++inst.frames_rising;
-    else
-        inst.frames_rising = 0;
-
-    if (inst.frames_rising >= cfg_.M_diverge and explanation_ratio < cfg_.explanation_ratio_thresh)
-    {
-        G->add_or_modify_attrib_local<request_full_sample_att>(node, true);
-        G->update_node(node);
-        inst.frames_rising   = 0;
-        inst.queue.clear();
-        inst.matched_frames  = 0;
-        std::print("table_concept: divergence detected for '{}' — requesting full resample\n",
-                   inst.node_name);
-    }
 }
 
 // ─── DSR helpers ─────────────────────────────────────────────────────────────

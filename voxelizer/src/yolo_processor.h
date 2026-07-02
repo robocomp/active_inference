@@ -20,6 +20,16 @@ struct SegDetection
     cv::Mat mask;
 };
 
+// 360-panorama detection config (YoloProcessor::detect_segmentation_360). Free-standing, not nested
+// in YoloProcessor: a default *argument* referencing a nested class's own default *member*
+// initializers can't be evaluated before the enclosing class is complete (GCC rejects it outright).
+struct Detection360Config
+{
+    int   n_strips   = 3;
+    int   overlap_px = 80;    // circular-padded margin so a seam-straddling object survives whole
+    float merge_iou  = 0.5f;  // cross-strip box IoU above which two strips' boxes are the same object
+};
+
 class YoloSegDetector
 {
 public:
@@ -137,6 +147,13 @@ public:
     // Runs detection on the given frame and applies postprocess (label normalization, accepted-label
     // filtering, tray-region suppression). detect_segmentation forwards the clean frame here.
     std::vector<SegDetection> detect_segmentation_on(const cv::Mat& rgb_frame);
+    // 360-panorama detection: splits a wide equirectangular/cylindrical frame into n_strips vertical
+    // strips (mitigates the aspect-ratio distortion of squashing e.g. 1920x960 straight to 640x640),
+    // runs the SAME model/session on each, and merges duplicate detections across strip seams. Output
+    // boxes are in FULL-PANORAMA pixel coordinates (column canonicalized into [0, panorama width)).
+    // No tray-phantom suppression (that's calibrated to the zed camera's mount, not applicable here).
+    std::vector<SegDetection> detect_segmentation_360(const cv::Mat& panorama_rgb,
+                                                       const Detection360Config& cfg = Detection360Config{});
     cv::Mat compose_detection_canvas(const cv::Mat& rgb_frame,
                                      const std::vector<SegDetection>& detections) const;
 
@@ -144,7 +161,12 @@ private:
     std::vector<cv::Point> get_tray_mask_polygon(const cv::Size& image_size) const;
     std::string normalize_yolo_label(const std::string& label) const;
     bool is_accepted_yolo_label(const std::string& label) const;
+    // Label-normalize + accepted-label filter + target-mask erode. Shared by the zed path (which then
+    // ALSO applies tray-phantom suppression) and the ricoh strip path (which does not — different
+    // camera mount, the tray polygon calibration doesn't apply).
+    void normalize_filter_and_erode(std::vector<SegDetection>& detections) const;
     void postprocess_yolo_detections(std::vector<SegDetection>& detections) const;
+    [[nodiscard]] std::vector<SegDetection> detect_on_strip(const cv::Mat& rgb_strip) const;
 
     Config config_;
     std::optional<YoloSegDetector> detector_;

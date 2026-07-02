@@ -57,6 +57,28 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     // topics are read from the producer's media descriptor on the graph, not config.
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "Media.lidar_use_media", p.LIDAR_USE_MEDIA);
 
+    // Camera-overlay object projection: comma-separated DSR node types (e.g. "object,table,cylinder,chair").
+    rc::ConfigLoaderUtils::load_optional_apply<std::string>(cl, "Overlay.ObjectTypes", [&](const std::string& csv)
+    {
+        std::vector<std::string> types;
+        std::size_t start = 0;
+        while (start <= csv.size())
+        {
+            const std::size_t comma = csv.find(',', start);
+            const std::size_t end = (comma == std::string::npos) ? csv.size() : comma;
+            std::string tok = csv.substr(start, end - start);
+            const auto l = tok.find_first_not_of(" \t");
+            const auto r = tok.find_last_not_of(" \t");
+            if (l != std::string::npos)
+                types.push_back(tok.substr(l, r - l + 1));
+            if (comma == std::string::npos)
+                break;
+            start = comma + 1;
+        }
+        if (not types.empty())
+            p.OVERLAY_OBJECT_TYPES = std::move(types);
+    });
+
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.SigmaSdf", room_concept.params.sigma_sdf);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.PredictionTrustFactor", room_concept.params.prediction_trust_factor);
     rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomConcept.MinTrackingSteps", room_concept.params.min_tracking_steps);

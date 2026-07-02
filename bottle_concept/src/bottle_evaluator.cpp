@@ -272,11 +272,10 @@ void BottleEvaluator::log_eval(const BottleInstance& inst, float free_energy)
 
     const auto& s = inst.model.state();
 
-    // 3×3 Laplace position covariance (same P_bottle written on the RT edge).
-    const auto fit_pts = inst.queue.points();
-    if (fit_pts.empty())
+    // 3×3 position covariance (same P_bottle written on the RT edge) — the AI2 belief's Σ[cx,cy,cz].
+    if (not inst.ai2_initialized)
         return;
-    const Eigen::Matrix3f cov = inst.model.pose_covariance(fit_pts, inst.queue.weights());
+    const Eigen::Matrix3f cov = inst.ai2_belief.covariance().block<3, 3>(0, 0);
 
     const Eigen::Vector3f e(s.cx - cfg_.gt_cx, s.cy - cfg_.gt_cy, s.cz - cfg_.gt_cz);
 

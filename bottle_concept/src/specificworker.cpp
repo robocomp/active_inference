@@ -37,6 +37,8 @@
 
 #include <QCoreApplication>
 #include <QTimer>
+#include <QSettings>   // persist the standalone dashboard window geometry
+#include <QByteArray>
 
 #include <dsr/api/dsr_api.h>
 
@@ -52,10 +54,9 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
 
     cfg_ = rc::load_bottle_config(configLoader);
 
-    // AI2 belief self-test (isolated Eigen unit test) — runs once at startup when UseAI2 is on, so a
-    // broken generative model / engine wiring is caught before the live loop (mirrors table/chair).
-    if (cfg_.use_ai2)
-        rc::BottleBelief::self_test();
+    // AI2 belief self-test (isolated Eigen unit test) — runs once at startup so a broken generative
+    // model / engine wiring (incl. the silhouette radius factor) is caught before the live loop.
+    rc::BottleBelief::self_test();
 
 #ifdef HIBERNATION_ENABLED
     hibernationChecker.start(500);
@@ -113,6 +114,7 @@ void SpecificWorker::request_shutdown()
     // terminal_shutdown() → _Exit() bypasses Qt's aboutToQuit save hook, so we must save here explicitly
     // (mirrors table_concept).
     save_window_settings();
+    save_dashboard_geometry();   // the standalone dashboard is not in `windows`, so save it explicitly
 
     // Sever graph callbacks BEFORE any teardown. On Ctrl+C a del_node delta can be
     // delivered from a DSR/DDS internal thread and invoke del_node_slot (instances_.erase)
@@ -158,6 +160,30 @@ void SpecificWorker::terminal_shutdown()
     //    EINVAL) — bottle is the only agent with an active OUTGOING Ice client proxy, so the only one
     //    that hits it. State is persisted, graph presence cleanly removed; the OS reclaims the rest.
     std::_Exit(EXIT_SUCCESS);
+}
+
+// Persist/restore the standalone dashboard window's geometry. The generated save_window_settings()
+// only covers the QMainWindow(s) in `windows`; our extracted top-level widget is separate, so we
+// carry its own QSettings entry (mirrors room_concept's RoomViewer).
+void SpecificWorker::restore_dashboard_geometry()
+{
+    if (not custom_widget_)
+        return;
+    QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("bottle_concept"));
+    const QByteArray geom = settings.value(QStringLiteral("DashboardWindow_geometry")).toByteArray();
+    if (not geom.isEmpty())
+        custom_widget_->restoreGeometry(geom);
+    else
+        custom_widget_->resize(560, 560);
+}
+
+void SpecificWorker::save_dashboard_geometry() const
+{
+    if (not custom_widget_)
+        return;
+    QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("bottle_concept"));
+    settings.setValue(QStringLiteral("DashboardWindow_geometry"), custom_widget_->saveGeometry());
+    settings.sync();
 }
 
 void SpecificWorker::initialize()
@@ -299,13 +325,17 @@ void SpecificWorker::initialize()
         G, inner_eigen_.get(), cfg_, priors_cache_,
         mask_ingestor_.get(), scene_graph_.get());
 
-    // ── Live "Bottle Inference" dashboard (docked in the DSR graph window) ─────────────────────────
-    // TimeSeriesPlot is a plain QWidget (no QOpenGL backing store), so docking it is safe. Mirrors
-    // table_concept's dashboard; fed each cycle in publish_bottle_diagnostics.
-    if (not graph_viewers.empty())
+    // ── Live "Bottle Inference" dashboard — its OWN top-level window ───────────────────────────────
+    // Extracted from the DSR graph dock (add_custom_widget_to_dock) into a standalone window so it shows
+    // even with Agent.graph=false. Mirrors room_concept/kinova_controller and table_concept. TimeSeriesPlot
+    // is a plain QWidget (no QOpenGL backing store), safe as a top-level. NOT WA_DeleteOnClose: closing
+    // must only HIDE it, or the ts_*_plot_ pointers publish_bottle_diagnostics uses would dangle. A
+    // QApplication always exists (generated/main.cpp). Fed each cycle in publish_bottle_diagnostics.
     {
         custom_widget_ = new Custom_widget("Bottle Model — Free Energy, Dimensions (r,h), Posterior σ & Epistemic ΔH");
-        graph_viewers.at("")->add_custom_widget_to_dock("Bottle Inference", custom_widget_);
+        custom_widget_->setWindowTitle(QStringLiteral("bottle_concept — belief dashboard"));
+        restore_dashboard_geometry();
+        custom_widget_->show();
 
         auto* series_layout = new QVBoxLayout(custom_widget_->frame_series);
         series_layout->setContentsMargins(0, 0, 0, 0);
@@ -460,7 +490,9 @@ void SpecificWorker::run_instance_tracker()
     tp.nll_cost         = cfg_.tracker_nll_cost;
     tracker_.set_params(tp);
 
-    // Tracks ← live instances: centre from the fit, XY cov from the stabiliser posterior precision.
+    // Tracks ← live instances: centre from the fit, XY cov from the AI2 belief's position Σ. The gate is
+    // the Mahalanobis innovation S = P + R²I; the belief Σ inflates on stale (look-away) predicts, so the
+    // gate widens across a dropout and the re-acquired detection associates instead of spawning a rebirth.
     std::vector<rc::TrackView> tracks;
     tracks.reserve(fitter_->instances().size());
     for (auto& [id, inst] : fitter_->instances())
@@ -469,29 +501,9 @@ void SpecificWorker::run_instance_tracker()
         t.id = id;
         const auto& s = inst.model.state();
         t.xy = {s.cx, s.cy};
-        if (cfg_.use_ai2 and inst.ai2_initialized)
+        if (inst.ai2_initialized)
         {
-            // AI2: gate on the belief's position covariance Σ[cx,cy] (Mahalanobis innovation S = P + R²I),
-            // mirroring table_concept's AI2 tracker gate.
             t.cov = inst.ai2_belief.covariance().block<2, 2>(0, 0);
-            t.has_cov = true;
-        }
-        else if (cfg_.dynamics_model == "constant_velocity" and inst.motion.initialized())
-        {
-            // Movable: gate on the CV position covariance — it INFLATES during motion (predict adds
-            // process noise), so the gate widens exactly when the bottle moves → the moved detection
-            // still associates (no spurious birth) and tightens back when it settles.
-            t.cov = Eigen::Matrix2f::Zero();
-            t.cov(0, 0) = static_cast<float>(inst.motion.pos_var(0));
-            t.cov(1, 1) = static_cast<float>(inst.motion.pos_var(1));
-            t.has_cov = true;
-        }
-        else if (const float rx = inst.stab.fisher_info_raw[0], ry = inst.stab.fisher_info_raw[1];
-                 rx > 1e-6f and ry > 1e-6f)
-        {
-            t.cov = Eigen::Matrix2f::Zero();
-            t.cov(0, 0) = 1.0f / rx;
-            t.cov(1, 1) = 1.0f / ry;
             t.has_cov = true;
         }
         t.expected_visible = inst.expected_visible;   // negative-info death gate: persist out-of-FoV
@@ -594,7 +606,7 @@ void SpecificWorker::publish_bottle_diagnostics(rc::BottleInstance& inst, float 
     const auto& s = inst.model.state();
     // Posterior std (mm) from the Fisher precision; -1 (drawn as a floor) until a DOF is first observed.
     const auto sigma_mm = [&](int j) -> float {
-        return rc::BeliefStabilizer<5>::posterior_std_milli(inst.stab, j);
+        return inst.ai2_initialized ? 1000.0f * std::sqrt(std::max(0.0f, inst.ai2_belief.covariance()(j, j))) : -1.0f;
     };
 
     ts_fe_plot_->add_series(inst.node_name + "_fe", QColor(255, 170, 0), 1.1f);
@@ -610,13 +622,11 @@ void SpecificWorker::publish_bottle_diagnostics(rc::BottleInstance& inst, float 
     ts_sigma_plot_->add_point (inst.node_name + "_sr", sigma_mm(3));   // radius (depth-degenerate)
     ts_sigma_plot_->add_point (inst.node_name + "_sh", sigma_mm(4));   // height
 
-    // CUSUM/SPRT counter-evidence Sⱼ for the size DOFs (radius idx 3, height idx 4): signed run of
-    // surprise vs the committed belief. ≈0 = coherent/locked; spike-then-decay = rejected glitch;
-    // sustained ramp then reset = a real change re-opened the fit. (Diagnostic — see update_fisher_filter.)
-    ts_ce_plot_->add_series(inst.node_name + "_ceR", QColor(255, 90, 90), 1.1f);
-    ts_ce_plot_->add_series(inst.node_name + "_ceH", QColor(90, 200, 90), 1.1f);
-    ts_ce_plot_->add_point (inst.node_name + "_ceR", inst.stab.counter_evidence[3]);
-    ts_ce_plot_->add_point (inst.node_name + "_ceH", inst.stab.counter_evidence[4]);
+    // Position uncertainty Σ[cx,cy] std (mm) — the calibrated posterior the tracker gate and controller use.
+    ts_ce_plot_->add_series(inst.node_name + "_scx", QColor(255, 90, 90), 1.1f);
+    ts_ce_plot_->add_series(inst.node_name + "_scy", QColor(90, 200, 90), 1.1f);
+    ts_ce_plot_->add_point (inst.node_name + "_scx", sigma_mm(0));
+    ts_ce_plot_->add_point (inst.node_name + "_scy", sigma_mm(1));
 }
 
 // Publish/refresh the "go see the hidden face" affordance (mirrors table_concept::step_epistemic). The
@@ -650,9 +660,9 @@ void SpecificWorker::step_epistemic(rc::BottleInstance& inst)
             c.has_value())
             camera_xy = Eigen::Vector2f(static_cast<float>(c->x()), static_cast<float>(c->y()));
 
-    auto prop = (cfg_.use_ai2 and inst.ai2_initialized)
-                    ? epistemic_planner_.compute(inst.ai2_belief, camera_xy, cfg_.ai2_sigma_base_m)
-                    : epistemic_planner_.compute(inst.model, camera_xy, inst.stab.fisher_info_raw);
+    if (not inst.ai2_initialized)
+        return;   // belief not yet seeded (no fresh frame) → no NBV this cycle
+    auto prop = epistemic_planner_.compute(inst.ai2_belief, camera_xy, cfg_.ai2_sigma_base_m);
     if (not prop.valid or not prop.is_finite())
         return;   // no camera pose / degenerate ray this cycle → leave the existing affordance untouched
 
@@ -694,7 +704,8 @@ void SpecificWorker::log_epistemic_csv(const rc::BottleInstance& inst,
     }
 
     const auto& s = inst.model.state();
-    const float sigma_r = rc::BeliefStabilizer<5>::posterior_std_milli(inst.stab, 3);   // radius (mm)
+    const float sigma_r = inst.ai2_initialized
+                              ? 1000.0f * std::sqrt(std::max(0.0f, inst.ai2_belief.covariance()(3, 3))) : -1.0f;   // radius (mm)
     epistemic_csv_ << inst.processed_cycles << ',' << inst.node_name << ','
                    << prop.epistemic_gain << ',' << (inst.epistemic_pending ? 1 : 0) << ','
                    << inst.epistemic_cooldown << ','

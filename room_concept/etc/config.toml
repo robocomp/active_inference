@@ -316,6 +316,11 @@ BeliefForgetTime   = 90.0   # seconds; 0 disables
 MaxLinAccel        = 1.2    # m/s² max translational acceleration
 MaxRotAccel        = 2.0    # rad/s² max angular acceleration
 
+[Overlay]
+# DSR node types projected as oriented boxes on the camera RGB overlay (walls are always drawn).
+# Comma-separated; add/remove types here to control what appears. Default covers all concept agents.
+ObjectTypes = "object,table,cylinder,chair"
+
 [Component.Debug]
 Verbose = false
 

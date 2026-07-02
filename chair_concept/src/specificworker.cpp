@@ -34,11 +34,14 @@
 #include "specificworker.h"
 
 #include <QTimer>
+#include <QSettings>   // persist the standalone dashboard window geometry
+#include <QByteArray>
 #include <filesystem>
 #include <print>
 #include <cstdlib>   // std::_Exit — crash-free terminal shutdown
 #include <thread>    // brief DDS flush before _Exit
 #include <chrono>
+#include <fstream>   // per-cycle detection-slice diagnostic CSV
 #include <iostream>  // std::cout/cerr flush
 
 #include <algorithm>
@@ -52,6 +55,18 @@
 #include <dsr/api/dsr_api.h>
 
 namespace {
+
+// Scalar model-uncertainty readout for model_uncertainty_att / the dashboard: the sum of the belief's
+// per-DOF posterior stds over position (cx,cy) + size (seat_w,seat_d), in metres, from the AI2
+// covariance Σ over [cx,cy,cz,yaw,seat_w,seat_d,seat_h,back_h]. Shrinks as the robot gathers viewpoints.
+float belief_uncertainty(const rc::ChairInstance& inst)
+{
+    if (not inst.ai2_initialized)
+        return 0.0f;
+    const auto& S = inst.ai2_belief.covariance();
+    const auto sd = [&](int i) { return std::sqrt(std::max(0.0f, S(i, i))); };
+    return sd(0) + sd(1) + sd(4) + sd(5);
+}
 
 // Two chairs cannot share physical space. Footprint = the oriented seat rectangle (cx,cy,seat_w,seat_d,yaw)
 // in the room plane; these helpers compute the overlap area so the merge operator can collapse duplicate
@@ -184,6 +199,7 @@ void SpecificWorker::request_shutdown()
         return;
 
     save_window_settings();
+    save_dashboard_geometry();   // the standalone dashboard is not in `windows`, so save it explicitly
 
     cleanup_owned_nodes();
 
@@ -212,6 +228,30 @@ void SpecificWorker::terminal_shutdown()
     std::cerr.flush();
     std::this_thread::sleep_for(std::chrono::milliseconds(300));   // let the del-deltas reach peers
     std::_Exit(EXIT_SUCCESS);
+}
+
+// Persist/restore the standalone dashboard window's geometry. The generated save_window_settings()
+// only covers the QMainWindow(s) in `windows`; our extracted top-level widget is separate, so we
+// carry its own QSettings entry (mirrors room_concept's RoomViewer).
+void SpecificWorker::restore_dashboard_geometry()
+{
+    if (not custom_widget_)
+        return;
+    QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("chair_concept"));
+    const QByteArray geom = settings.value(QStringLiteral("DashboardWindow_geometry")).toByteArray();
+    if (not geom.isEmpty())
+        custom_widget_->restoreGeometry(geom);
+    else
+        custom_widget_->resize(560, 620);
+}
+
+void SpecificWorker::save_dashboard_geometry() const
+{
+    if (not custom_widget_)
+        return;
+    QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("chair_concept"));
+    settings.setValue(QStringLiteral("DashboardWindow_geometry"), custom_widget_->saveGeometry());
+    settings.sync();
 }
 
 // ─── Initialisation ──────────────────────────────────────────────────────────
@@ -330,37 +370,32 @@ void SpecificWorker::initialize()
     else
         qWarning() << "chair_concept: no room node found at startup";
 
-    // Setup prior store
-    prior_store_ = std::make_unique<rc::PriorStore>(priors_path_);
-    priors_cache_ = prior_store_->load_priors();
-
     // Active-inference fit core. Owns the instance map; collaborates with the ingestor + scene graph.
     fitter_ = std::make_unique<rc::ChairFitter>(
-        G, inner_eigen_.get(), cfg_, priors_cache_, mask_ingestor_.get(), scene_graph_.get());
+        G, inner_eigen_.get(), cfg_, mask_ingestor_.get(), scene_graph_.get());
 
     // Part B: localization/chain covariance on the published RT edge (mirrors bottle/table).
     gaussian_api_ = std::make_unique<DSR::InnerGaussianAPI>(G.get());
     fitter_->set_chain_cov_source(gaussian_api_.get(), "zed", cfg_.rt_cov_add_chain);
 
-    // Missing chair nodes are scaffolded lazily from priors only after masks
-    // provide some chair evidence in the current scene.
-
-    // Build rc::EpistemicPlanner with configured parameters
-    epistemic_planner_ = rc::EpistemicPlanner(cfg_.delta_min, cfg_.gain_threshold, cfg_.obs_distance,
-                                              cfg_.epistemic_use_info_gain, cfg_.epistemic_min_info_gain);
+    // Build rc::EpistemicPlanner (Σ-based D-optimal NBV) with the configured stand-off.
+    epistemic_planner_ = rc::EpistemicPlanner(cfg_.obs_distance);
+    epistemic_planner_.set_min_standoff(cfg_.min_standoff_m);   // push viewpoints further out (YOLO needs a gap)
 
     // Stale affordance nodes are swept on entering Operating (presence hook) and on shutdown — see
     // remove_stale_affordance_nodes(), keyed on the parent object type (robust to node-name renames).
 
-    // ── Time-series widget ──────────────────────────────────────────────────
-    if (not graph_viewers.empty())
+    // ── Time-series dashboard — its OWN top-level window ──────────────────────
+    // Extracted from the DSR graph dock (add_custom_widget_to_dock) into a standalone window so it shows
+    // even with Agent.graph=false (this agent runs graph=false → no DSRViewer). Mirrors room_concept,
+    // kinova_controller, table_concept and bottle_concept. TimeSeriesPlot is a plain QWidget (no QOpenGL
+    // backing store), safe as a top-level. NOT WA_DeleteOnClose: closing must only HIDE it, or the
+    // ts_*_plot_ pointers the compute() feed uses would dangle. A QApplication always exists (generated/main.cpp).
     {
         custom_widget_ = new Custom_widget("Chair Model — Free Energy, Coverage Deficit, Residuals & Dimensions (w,h)");
-        // Dock into the main DSR graph window (tab alongside the graph/tree views). The TimeSeriesPlot
-        // is a plain QWidget (no QOpenGLWidget backing store), so it doesn't hit the shared-backing-store
-        // repaint crash that pushed the heavy Voxel3D GL view into its own window — docking it here is
-        // safe and keeps the dashboard together with the graph it annotates.
-        graph_viewers.at("")->add_custom_widget_to_dock("Chair Inference", custom_widget_);
+        custom_widget_->setWindowTitle(QStringLiteral("chair_concept — belief dashboard"));
+        restore_dashboard_geometry();
+        custom_widget_->show();
 
         // Create plot inside frame_series
         auto* series_layout = new QVBoxLayout(custom_widget_->frame_series);
@@ -385,14 +420,10 @@ void SpecificWorker::initialize()
         ts_state_plot_->set_visible_window(60.f);
         series_layout->addWidget(ts_state_plot_);
 
-        // (D) Counter-evidence accumulator S_w/S_h — only when the gate is enabled. Watch S charge on a
-        // surprise and decay back (glitch absorbed) vs climb to the barrier (a real change unlocks).
-        if (cfg_.counter_evidence_gate)
-        {
-            ts_ce_plot_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
-            ts_ce_plot_->set_visible_window(60.f);
-            series_layout->addWidget(ts_ce_plot_);
-        }
+        // Belief size posterior std σ_w/σ_h (mm) — watch the size uncertainty shrink as views accumulate.
+        ts_ce_plot_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
+        ts_ce_plot_->set_visible_window(60.f);
+        series_layout->addWidget(ts_ce_plot_);
 
         // GenericWorker::initialize() may have already started compute(), so
         // some instances can exist before the plots are constructed.
@@ -405,17 +436,10 @@ void SpecificWorker::initialize()
             ts_state_plot_->add_series(inst.node_name + "_h", QColor(90, 200, 90), 1.1f);
             if (ts_ce_plot_)
             {
-                ts_ce_plot_->add_series(inst.node_name + "_ceW", QColor(255, 90, 90), 1.1f);
-                ts_ce_plot_->add_series(inst.node_name + "_ceH", QColor(90, 200, 90), 1.1f);
+                ts_ce_plot_->add_series(inst.node_name + "_sW", QColor(255, 90, 90), 1.1f);
+                ts_ce_plot_->add_series(inst.node_name + "_sH", QColor(90, 200, 90), 1.1f);
             }
         }
-
-        // GenericWorker::initialize() scheduled restore_window_settings() BEFORE this custom dock was
-        // added, and add_custom_widget_to_dock() force-tabifies/raises it into a default slot. Re-restore
-        // the saved layout now that the dock exists — deferred so it runs after the dock is fully realised
-        // (and after the base's restore) — so the user's saved relative position of the "Chair Inference"
-        // dock actually sticks. The dock carries an objectName, so QMainWindow::restoreState keys on it.
-        QTimer::singleShot(0, this, [this]() { restore_window_settings(); });
     }
 }
 
@@ -435,10 +459,7 @@ void SpecificWorker::compute()
     }
 
     mask_ingestor_->refresh();
-    if (cfg_.tracker_enabled)
-        run_instance_tracker();   // data-driven birth/associate/death + merge
-    else
-        scene_graph_->scaffold_missing_chair_nodes(priors_cache_, mask_ingestor_->packet(), room_node_id_);
+    run_instance_tracker();   // data-driven birth/associate/death + merge (the only instance-lifecycle path)
 
     const auto chair_nodes = G->get_nodes_by_type("chair");
     for (const auto& node : chair_nodes)
@@ -493,8 +514,7 @@ void SpecificWorker::merge_overlapping_instances()
 }
 
 // Data-driven multi-instance lifecycle (mirrors table_concept). Chairs are persistent furniture, so
-// death is OFF by default (removed only by MERGE); birth_min_sep is wide. Replaces the prior-scaffold +
-// greedy nearest-mask when cfg_.tracker_enabled.
+// death is OFF by default (removed only by MERGE); birth_min_sep is wide. The only instance-lifecycle path.
 void SpecificWorker::run_instance_tracker()
 {
     merge_overlapping_instances();   // enforce physical exclusion before associating/birthing this cycle
@@ -509,8 +529,7 @@ void SpecificWorker::run_instance_tracker()
     tp.nll_cost         = cfg_.tracker_nll_cost;
     tracker_.set_params(tp);
 
-    // Tracks ← live instances: centre from the fit, XY cov from the stabiliser posterior precision
-    // (fisher_info_raw[0]=cx, [1]=cy in the 8-DOF [cx,cy,cz,yaw,seat_w,seat_d,seat_h,back_h] layout).
+    // Tracks ← live instances: centre from the fit, XY cov from the belief's position covariance Σ.
     std::vector<rc::TrackView> tracks;
     tracks.reserve(fitter_->instances().size());
     for (auto& [id, inst] : fitter_->instances())
@@ -523,21 +542,13 @@ void SpecificWorker::run_instance_tracker()
         // chair projects into the camera FoV. Out-of-view → HOLD (matches the prune gate above). roi_valid
         // is a cycle stale (set in run_inference) but that's fine for a frustum test.
         t.expected_visible = inst.roi_valid;
-        if (cfg_.use_ai2 and inst.ai2_initialized)
+        if (inst.ai2_initialized)
         {
-            // AI2: gate association on the belief's position cov (+ chain) → Mahalanobis S = P + R²I.
+            // Gate association on the belief's position cov (+ chain) → Mahalanobis S = P + R²I.
             const auto& S = inst.ai2_belief.covariance();
             t.cov = Eigen::Matrix2f::Zero();
             t.cov(0, 0) = S(0, 0) + inst.chain_cov_xx;
             t.cov(1, 1) = S(1, 1) + inst.chain_cov_yy;
-            t.has_cov = true;
-        }
-        else if (const float rx = inst.stab.fisher_info_raw[0], ry = inst.stab.fisher_info_raw[1];
-                 rx > 1e-6f and ry > 1e-6f)
-        {
-            t.cov = Eigen::Matrix2f::Zero();
-            t.cov(0, 0) = 1.0f / rx;
-            t.cov(1, 1) = 1.0f / ry;
             t.has_cov = true;
         }
         tracks.push_back(t);
@@ -551,6 +562,35 @@ void SpecificWorker::run_instance_tracker()
         for (int i = 0; i < static_cast<int>(pkt.slices.size()); ++i)
             if (pkt.slices[i].label == "chair" and pkt.slices[i].support_end > pkt.slices[i].support_begin)
                 dets.push_back({Eigen::Vector2f(pkt.slices[i].centroid.x(), pkt.slices[i].centroid.y()), i});
+
+    // DIAGNOSTIC (merged-vs-single mask): one CSV row per "chair" slice per cycle — count, size, centroid,
+    // range. If a cluttered scene collapses to ONE big slice (npts ≫ a clean single chair) the extra chairs
+    // never get born because no separate detection ever arrives — the failure is upstream, not in birth. File
+    // truncated once per process launch.
+    {
+        static std::ofstream dcsv = []
+        {
+            std::ofstream f("etc/chair_dets_log.csv", std::ios::trunc);
+            f << "cycle,n_chair_slices,slice_idx,npts,conf,cx,cy,range,trunc_frac,motion_var\n";
+            return f;
+        }();
+        static int dcyc = 0;
+        ++dcyc;
+        if (dcsv)
+        {
+            if (dets.empty())
+                dcsv << dcyc << ",0,-1,0,0,0,0,0,0,0\n";
+            for (const auto& d : dets)
+            {
+                const auto& sl = pkt.slices[d.slice_index];
+                const std::size_t n = (sl.support_end > sl.support_begin) ? (sl.support_end - sl.support_begin) : 0;
+                dcsv << dcyc << ',' << dets.size() << ',' << d.slice_index << ',' << n << ',' << sl.confidence
+                     << ',' << sl.centroid.x() << ',' << sl.centroid.y() << ',' << sl.range << ','
+                     << sl.trunc_frac << ',' << sl.motion_var << '\n';
+            }
+            dcsv.flush();
+        }
+    }
 
     const auto res = tracker_.update(tracks, dets);
 
@@ -574,14 +614,42 @@ void SpecificWorker::run_instance_tracker()
             G->delete_node(id);
         }
 
-    // ASSOCIATE: route each matched detection's mask slice to its instance (read in observe()).
-    for (int d = 0; d < static_cast<int>(dets.size()); ++d)
-        if (res.assignment[d] >= 0)
+    // ASSOCIATE: route each detection's mask slice to its instance (read in observe()).
+    {
+        // §3.1 (Fable, PERCEPTION_ASSOCIATION_PLAN.md): associate by MODEL EVIDENCE, not centroid. The
+        // teleport was: a merged mask's centroid lands MIDWAY between two chairs → falls in the wrong
+        // track's Mahalanobis gate → greedy flip. Instead score each (initialised instance × chair slice)
+        // by the instance's belief NLL on the slice's POINTS — a merged mask fits NO single-chair model, and
+        // each instance keeps the slice that best matches ITS geometry. Greedy lowest-nll, 1-to-1, no gate.
+        // ★The evidence is `association_nll` = the mixture NLL, NOT `mean_energy`: mean_energy weights the SDF
+        // by responsibility, so a FAR slice (all points → clutter) scored ~0 = a PERFECT match → a distant
+        // instance mis-claimed the 3rd chair's slice and SUPPRESSED its birth (chair "never seen"). The
+        // mixture NLL counts the clutter cost, so a far/clutter'd slice scores HIGH → unclaimed → it births.
+        struct EvPair { float e; std::uint64_t id; int slice; };
+        std::vector<EvPair> pairs;
+        const float R = cfg_.ai2_sigma_base_m * cfg_.ai2_sigma_base_m;
+        for (auto& [id, inst] : fitter_->instances())
         {
-            const std::uint64_t id = tracks[res.assignment[d]].id;
-            if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
-                it->second.assigned_mask_idx = dets[d].slice_index;
+            if (not inst.ai2_initialized) continue;
+            for (const auto& d : dets)
+            {
+                const auto& sl = pkt.slices[d.slice_index];
+                const std::size_t b = std::min<std::size_t>(sl.support_begin, pkt.support_points.size());
+                const std::size_t e = std::min<std::size_t>(sl.support_end,   pkt.support_points.size());
+                if (e <= b) continue;
+                const std::vector<Eigen::Vector3f> pts(pkt.support_points.begin() + b, pkt.support_points.begin() + e);
+                pairs.push_back({inst.ai2_belief.association_nll(pts, R), id, d.slice_index});
+            }
         }
+        std::sort(pairs.begin(), pairs.end(), [](const EvPair& a, const EvPair& b) { return a.e < b.e; });
+        std::unordered_set<std::uint64_t> used_inst; std::unordered_set<int> used_slice;
+        for (const auto& p : pairs)
+        {
+            if (used_inst.count(p.id) or used_slice.count(p.slice)) continue;
+            fitter_->instances().at(p.id).assigned_mask_idx = p.slice;
+            used_inst.insert(p.id); used_slice.insert(p.slice);
+        }
+    }
 
     // STILLBIRTH PRUNE: a phantom born from association churn (it stole a detection the real chair then
     // re-won) starves once the real instance reclaims its mask. A young instance (still inside its probation
@@ -624,7 +692,33 @@ void SpecificWorker::run_instance_tracker()
     // fitter with the detection XY so the model starts AT the chair (not the 0,0 RT-read default).
     for (const int d : res.births)
     {
-        const Eigen::Vector3f& c = pkt.slices[dets[d].slice_index].centroid;
+        const int slice = dets[d].slice_index;
+        // §3.1: under AI2 the assignment is by belief evidence, not the tracker's centroid — so a slice an
+        // existing instance already claimed by mean_energy must NOT also spawn a phantom (the tracker's
+        // centroid birth and the evidence assignment can disagree). Full birth-validity (P(v=clean) — don't
+        // birth from a merged/contaminated mask at all) is §2, still to come.
+        const Eigen::Vector3f& c = pkt.slices[slice].centroid;
+        {
+            std::uint64_t claimer = 0;
+            for (auto& [id, inst] : fitter_->instances())
+                if (inst.assigned_mask_idx == slice) { claimer = id; break; }
+            if (claimer != 0)
+            {
+                // DIAGNOSTIC (missing-chair): a persistently-detected cluster that never instantiates is
+                // usually a birth SUPPRESSED here — a distant instance's belief mis-claimed this slice by
+                // mean_energy, stealing it from birth (and likely teleporting toward it). Surface which
+                // instance claimed it and how far it sits, so the failure is visible, not silent.
+                float dist = -1.0f;
+                if (auto it = fitter_->instances().find(claimer); it != fitter_->instances().end())
+                {
+                    const auto& st = it->second.model.state();
+                    dist = std::hypot(st.cx - c.x(), st.cy - c.y());
+                }
+                std::print("chair_concept: [tracker] BIRTH SUPPRESSED slice={} at ({:.2f},{:.2f}) — claimed by "
+                           "id={} ({:.2f} m away)\n", slice, c.x(), c.y(), claimer, dist);
+                continue;
+            }
+        }
         const auto new_id = scene_graph_->create_instance_from_detection(c, room_node_id_);
         if (new_id != 0)
             fitter_->note_birth(new_id, Eigen::Vector2f(c.x(), c.y()));
@@ -672,7 +766,6 @@ void SpecificWorker::process_chair_node(const DSR::Node& node)
 
     const float free_energy = fitter_->run_inference(inst, observation);
     publish_chair_cycle(inst, node, observation, free_energy);
-    inst.prev_free_energy = free_energy;
 }
 
 
@@ -715,7 +808,7 @@ void SpecificWorker::publish_chair_diagnostics(const rc::ChairInstance& inst,
         if (ts_cov_plot_)
         {
             ts_cov_plot_->add_series(inst.node_name + "_cov", QColor(0, 190, 255), 1.1f);
-            ts_cov_plot_->add_point (inst.node_name + "_cov", inst.last_coverage_deficit);
+            ts_cov_plot_->add_point (inst.node_name + "_cov", belief_uncertainty(inst));
         }
         if (ts_res_plot_)
         {
@@ -736,22 +829,22 @@ void SpecificWorker::publish_chair_diagnostics(const rc::ChairInstance& inst,
             ts_state_plot_->add_point (inst.node_name + "_w", s.seat_w);
             ts_state_plot_->add_point (inst.node_name + "_h", s.seat_d);
         }
-        if (ts_ce_plot_)
+        if (ts_ce_plot_ and inst.ai2_initialized)
         {
-            // (D) Counter-evidence accumulator for the size DOFs (index 4=seat_w, 5=seat_d). Held between
-            // fresh frames (only updated in accept on a measurement), so it reads as a charge/decay trace.
-            ts_ce_plot_->add_series(inst.node_name + "_ceW", QColor(255, 90, 90), 1.1f);
-            ts_ce_plot_->add_series(inst.node_name + "_ceH", QColor(90, 200, 90), 1.1f);
-            ts_ce_plot_->add_point (inst.node_name + "_ceW", inst.stab.counter_evidence[4]);
-            ts_ce_plot_->add_point (inst.node_name + "_ceH", inst.stab.counter_evidence[5]);
+            // Belief posterior std for the size DOFs (Σ index 4=seat_w, 5=seat_d), in mm — the size trace.
+            const auto& S = inst.ai2_belief.covariance();
+            ts_ce_plot_->add_series(inst.node_name + "_sW", QColor(255, 90, 90), 1.1f);
+            ts_ce_plot_->add_series(inst.node_name + "_sH", QColor(90, 200, 90), 1.1f);
+            ts_ce_plot_->add_point (inst.node_name + "_sW", 1000.f * std::sqrt(std::max(0.f, S(4, 4))));
+            ts_ce_plot_->add_point (inst.node_name + "_sH", 1000.f * std::sqrt(std::max(0.f, S(5, 5))));
         }
     }
 
     if (fitter_->should_log(inst))
-        std::print("[{}] series: FE={:.4f} cov={:.1f} res={}\n",
+        std::print("[{}] series: FE={:.4f} U(Σ)={:.3f} res={}\n",
                    inst.node_name,
                    free_energy,
-                   inst.last_coverage_deficit,
+                   belief_uncertainty(inst),
                    observation.residual_pts.size());
 }
 
@@ -765,13 +858,6 @@ void SpecificWorker::publish_chair_intentions(rc::ChairInstance& inst,
     // than being gated on the legacy coverage-deficit proxy.
     if (auto node_opt = G->get_node(node_id); node_opt.has_value())
         step_epistemic(inst, node_opt.value());
-
-    if (observation.has_fresh_data)
-    {
-        auto node_opt = G->get_node(node_id);
-        if (node_opt.has_value())
-            step_refresh_check(inst, node_opt.value(), free_energy, observation.explanation_ratio);
-    }
 }
 
 // ─── Initialisation helpers ──────────────────────────────────────────────────
@@ -779,7 +865,6 @@ void SpecificWorker::publish_chair_intentions(rc::ChairInstance& inst,
 void SpecificWorker::load_config(const ConfigLoader& cfg)
 {
     cfg_ = rc::load_chair_config(cfg);
-    priors_path_ = cfg_.priors_path;           // mirrored into the existing members for now
 }
 
 
@@ -811,24 +896,15 @@ void SpecificWorker::step_convergence(rc::ChairInstance& inst,
         inst.model_stable     = false;
     }
 
-    // Check all four vertical faces are covered (for affordance/uncertainty reporting only)
-    const auto coverage = inst.queue.face_coverage(inst.model);
+    // Model uncertainty for model_uncertainty_att: sum of the belief's per-DOF posterior stds over
+    // position + size (m), from the AI2 covariance Σ. Shrinks as the robot gathers viewpoints — the
+    // AI2-native replacement for the old queue face-coverage deficit.
+    const float model_uncertainty = belief_uncertainty(inst);
+    G->add_or_modify_attrib_local<model_uncertainty_att>(node, model_uncertainty);
 
-    // Compute per-face coverage deficit for model_uncertainty_att
-    float total_deficit = 0.0f;
-    for (int i = 0; i < 4; ++i)
-        total_deficit += std::max(0.0f, cfg_.delta_min - coverage[i]);
-    inst.last_coverage_deficit = total_deficit;   // expose to plot
-    G->add_or_modify_attrib_local<model_uncertainty_att>(node, total_deficit);
-
-    // ↑ Top-down: generative model prediction vs. coverage evidence
     if (fitter_->should_log(inst))
-        std::print("[{}] coverage: +x={:.1f} -x={:.1f} +y={:.1f} -y={:.1f}  "
-                   "stable={}/{} U={:.1f}\n",
-                   inst.node_name,
-                   coverage[0], coverage[1], coverage[2], coverage[3],
-                   inst.frames_converged, cfg_.K_stable,
-                   total_deficit);
+        std::print("[{}] convergence: Δstate={:.4f} stable={}/{} U(Σ)={:.3f}m\n",
+                   inst.node_name, state_delta, inst.frames_converged, cfg_.K_stable, model_uncertainty);
 
     if (inst.frames_converged >= cfg_.K_stable)
     {
@@ -876,17 +952,12 @@ void SpecificWorker::step_epistemic(rc::ChairInstance& inst, DSR::Node& node)
             }
         }
 
-    // AI2: Σ-based NBV from the belief (the legacy queue/Fisher inputs are empty under AI2). Skip until
-    // the belief has seen its first frame (else Σ is the broad prior and the proposal is moot).
-    rc::EpistemicProposal prop;
-    if (cfg_.use_ai2)
-    {
-        if (not inst.ai2_initialized)
-            return;
-        prop = epistemic_planner_.compute(inst.ai2_belief, cfg_.ai2_range_noise_lat_per_m, cfg_.ai2_sigma_base_m);
-    }
-    else
-        prop = epistemic_planner_.compute(inst.model, inst.queue, inst.stab.fisher_info_raw);
+    // Σ-based D-optimal NBV from the belief. Skip until the belief has seen its first frame (else Σ is
+    // the broad prior and the proposal is moot).
+    if (not inst.ai2_initialized)
+        return;
+    rc::EpistemicProposal prop =
+        epistemic_planner_.compute(inst.ai2_belief, cfg_.ai2_range_noise_lat_per_m, cfg_.ai2_sigma_base_m);
     if (not prop.valid or not prop.is_finite())
         return;   // degenerate (non-finite) fit — leave the existing affordance node as-is, retry next cycle
 
@@ -907,28 +978,6 @@ void SpecificWorker::step_epistemic(rc::ChairInstance& inst, DSR::Node& node)
     if (affordance_node_before == 0 and inst.affordance.node_id() != 0)
         trigger_graph_layout_twopi();
     inst.epistemic_pending = true;
-}
-
-void SpecificWorker::step_refresh_check(rc::ChairInstance& inst,
-                                         DSR::Node& node,
-                                         float free_energy,
-                                         float explanation_ratio)
-{
-    if (free_energy > inst.prev_free_energy)
-        ++inst.frames_rising;
-    else
-        inst.frames_rising = 0;
-
-    if (inst.frames_rising >= cfg_.M_diverge and explanation_ratio < cfg_.explanation_ratio_thresh)
-    {
-        G->add_or_modify_attrib_local<request_full_sample_att>(node, true);
-        G->update_node(node);
-        inst.frames_rising   = 0;
-        inst.queue.clear();
-        inst.matched_frames  = 0;
-        std::print("chair_concept: divergence detected for '{}' — requesting full resample\n",
-                   inst.node_name);
-    }
 }
 
 // ─── DSR helpers ─────────────────────────────────────────────────────────────

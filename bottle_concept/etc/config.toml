@@ -146,7 +146,7 @@ RobustLossScale = 0.04         # welsch c: points >~3-4cm from the cylinder surf
 # [cx,cy,cz,radius,height] on the shared engine (bottle_belief.h). Default OFF: the legacy gradient path
 # above stays the default. Static, single-cylinder; the movable-object CV tracking remains in the legacy
 # path. UseAI2=true also switches the tracker gate, the NBV, and the published P_bottle to the belief Σ.
-UseAI2 = false
+UseAI2 = true
 AI2SigmaBaseM = 0.02          # base on-surface obs noise std (m); R = σ² (+ motion_var)
 AI2ClutterFrac = 0.10         # ε: uniform clutter mixture weight
 AI2ClutterScaleM = 0.08       # a point further than ~this from the surface is likely clutter
@@ -156,7 +156,7 @@ AI2ProcessStdM = 0.005        # predict process-noise std, all 5 length DOFs (m/
 AI2CommonModePosStd = 0.02    # per-frame SHARED position error (m); pose-chain cov adds → Σ saturates (calibrated)
 AI2CommonModeSizeStd = 0.01   # per-frame SHARED size error radius,height (m)
 AI2GnIters = 4                # Gauss-Newton iterations per frame
-AI2CsvPath = ""               # non-empty → per-cycle AI2 belief CSV (state + Σ diag); empty = off
+AI2CsvPath = "etc/bottle_ai2_log.csv"   # per-cycle AI2 belief CSV (state + Σ diag); empty = off
 # Fisher information filter (per-DOF stabiliser; currently DIAGNOSTIC — logged, not yet driving the fit).
 # Real per-DOF SDF observation Fisher info accumulated across viewpoints (incl. radius/height, which the
 # position-only Laplace Hessian ignores). The Q-bleed predict gives a finite STEADY-STATE precision — the

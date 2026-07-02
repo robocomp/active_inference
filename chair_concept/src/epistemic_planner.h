@@ -3,14 +3,12 @@
  *
  * Computes epistemic action proposals for the chair-concept agent.
  *
- * For the lowest-coverage vertical face of the chair, computes:
+ * For the highest-uncertainty vertical face of the chair, computes:
  *   v* = face_centre + outward_normal × d_view  (projected to floor z)
- *   heading = atan2(face_centre.y - v.y,
- *                   face_centre.x - v.x)        (facing the face centre)
+ *   heading = atan2(chair_centre.y - v.y,
+ *                   chair_centre.x - v.x)        (facing the chair centre)
  * where d_view is chosen to keep the selected face inside a conservative
- * horizontal camera field-of-view while staying close enough to orbit the
- * chair instead of drifting far away from it.
- *   ΔH ∝ face_area / σ²                         (practical gain proxy)
+ * horizontal camera field-of-view while staying close enough to orbit the chair.
  *
  * Reference: TABLE_CONCEPT.md §8.
  */
@@ -20,8 +18,6 @@
 #include <array>
 #include <cmath>
 
-#include "sample_queue_geometry.h"   // common SampleQueue<Model> + chair's geometry policy (face_coverage)
-#include "chair_model.h"
 #include "chair_belief.h"            // AI2 belief: Σ + predicted_information for the Σ-based NBV
 
 // ─── Proposal ────────────────────────────────────────────────────────────────
@@ -50,50 +46,25 @@ struct EpistemicProposal
 class EpistemicPlanner
 {
 public:
-    /**
-     * @param delta_min      Minimum coverage count per face before declaring full.
-     * @param gain_threshold Minimum ΔH to emit a proposal.
-    * @param d_obs          Comfortable maximum stand-off from the target face (m).
-     */
-    explicit EpistemicPlanner(float delta_min      = 20.0f,
-                              float gain_threshold  = 0.1f,
-                              float d_obs           = 1.8f,
-                              bool  use_info_gain   = true,
-                              float min_info_gain   = 0.3f);
-
-    /**
-     * Score the four vertical faces and return a viewpoint proposal for the most
-     * informative one.
-     *
-     * When use_info_gain is set, each face's gain is the expected entropy reduction
-     *   ΔH(f) = Σ_j ½·log(1 + I_pred_j(f) / Y_j)
-     * where I_pred_j(f) is the per-DOF Fisher information that observing face f would
-     * provide (predicted by evaluating the SDF-likelihood Fisher on synthetic face
-     * samples) and Y_j is the current accumulated posterior precision (posterior_info,
-     * = ChairInstance::fisher_info_raw). ΔH→0 as a face becomes well-observed, so a
-     * sub-threshold best gain means "nothing left to learn" (belief→knowledge governor).
-     * Otherwise it falls back to the legacy face_area·deficit/σ² coverage proxy.
-     *
-     * Returns valid==false if the best gain is below the threshold.
-     */
-    EpistemicProposal compute(const ChairModel&  model,
-                              const SampleQueue<ChairModel>& queue,
-                              const std::array<float, 8>& posterior_info = {}) const;
+    /** @param d_obs  Comfortable maximum stand-off from the target face (m). */
+    explicit EpistemicPlanner(float d_obs = 1.8f);
 
     /**
      * AI2-native next-best-view: scores each vertical seat-face by the D-optimal expected entropy
      * reduction on the belief's full Σ — gain(i) = ½·ln det(I₈ + Σ·ΔI(i)), ΔI(i) = Σₚ (1/Rᵢ) Jₚ Jₚᵀ
-     * (ChairBelief::predicted_information), Rᵢ = σ_base² + (lat_rate·standoffᵢ)². No sample queue / Fisher
-     * diagonal. Targets the dominant uncertainty eigen-direction (an unobserved extent / seat depth / yaw).
+     * (ChairBelief::predicted_information), Rᵢ = σ_base² + (lat_rate·standoffᵢ)². Targets the dominant
+     * uncertainty eigen-direction (an unobserved extent / seat depth / yaw).
      */
     EpistemicProposal compute(const ChairBelief& belief, float lat_rate, float sigma_base) const;
 
+    // Minimum stand-off (m) from the target: for a small object like a chair the FoV-fit distance is tiny,
+    // so the viewpoint always sits at this floor. Set it further out than the FoV needs — YOLO misses a
+    // chair that fills/overflows the frame from too close. Config ChairConcept.MinStandOffM.
+    void set_min_standoff(float m) { min_standoff_ = m; }
+
 private:
-    float delta_min_;
-    float gain_threshold_;
     float d_obs_;
-    bool  use_info_gain_;
-    float min_info_gain_;
+    float min_standoff_ = 1.8f;   // chair viewing distance floor (m)
 };
 
 }  // namespace rc

@@ -29,41 +29,24 @@ struct BottleConfig
     float voxel_select_radius_margin_m = 0.10f;
     float voxel_select_height_margin_m = 0.10f;
 
-    // BottleModel parameters (forwarded to BottleModelParams)
-    float sigma_obs         = 0.02f;
-    float lambda_size       = 0.5f;
-    float lambda_pos        = 0.05f;
-    float lambda_state      = 0.02f;
+    // BottleModel prior geometry (forwarded to BottleModelParams — the model is the SDF + state carrier).
     float prior_radius      = 0.035f;
     float prior_height      = 0.20f;
     float prior_size_std    = 0.03f;
-    int   optimization_iters = 15;
-    float optimization_lr   = 0.005f;   // cm-scale object: 10× smaller than the table's
-    float grad_clip         = 2.0f;
-    std::string optimizer_type = "adam";
-    float sgd_momentum      = 0.9f;
-    RobustLossType robust_loss = RobustLossType::Quadratic;
-    float robust_loss_scale = 0.05f;
-    float mask_precision    = 0.0f;   // RGB-mask silhouette likelihood weight (0 = off)
-    float cov_eff_scale     = 1.0f;   // covariance calibration: N_eff = N·scale (NEES → ~3)
-    // ── YOLO detection-score → observation precision ───────────────────────────────────────────────
-    // The detector's per-mask confidence is a per-observation RELIABILITY (a noisy mask is noisy
-    // evidence). It is an INDEPENDENT, averages-down factor → it belongs at the front of the fit, not
-    // as a post-hoc scale on the final Σ. The same monotone map w = clamp01((conf−floor)/(ref−floor))^p
-    // weights (a) the Laplace fit covariance (via the queue capture-cov + residual fit weights) and
-    // (b) the Fisher stabiliser's per-DOF observation info. floor keeps a low-but-real detection
-    // contributing rather than zeroing it; the score is detection confidence, not localisation
-    // confidence, so it can WIDEN the belief but the geometry (SDF Hessian) still sets Σ's shape.
-    bool  mask_conf_weight  = true;   // false → score ignored (legacy A/B); w≡1
+    float mask_precision    = 0.0f;   // occluding-contour silhouette weight (per-ray precision; 0 = off)
+    // ── YOLO detection-score → silhouette reliability weight ────────────────────────────────────────
+    // The detector's per-mask confidence is a per-observation RELIABILITY (a noisy mask is noisy evidence):
+    // w = clamp01((conf−floor)/(ref−floor))^power scales the silhouette precision so a weak mask can't
+    // over-tighten radius. floor keeps a low-but-real detection contributing rather than zeroing it.
+    bool  mask_conf_weight  = true;   // false → score ignored; w≡1
     float mask_conf_floor   = 0.2f;   // conf ≤ floor → minimal weight
     float mask_conf_ref     = 0.5f;   // conf ≥ ref   → full weight (w=1)
     float mask_conf_power    = 2.0f;  // shaping exponent on the normalised score
-    // ── AI2 belief (mirrors table_concept [TableModel].AI2*/chair [ChairModel].AI2*) ────────────────
+    // ── AI2 belief (the fit; mirrors table_concept [TableModel].AI2*/chair [ChairModel].AI2*) ────────
     // Full-covariance recursive-Laplace belief over [cx,cy,cz,radius,height] on the shared engine
-    // (bottle_belief.h). Behind UseAI2 (default OFF); the legacy BottleModel gradient path is the default.
-    // Static (no yaw, single cylinder primitive); the movable-object CV tracking stays in the legacy path.
-    bool  use_ai2                  = false;  // select the AI2 BottleBelief instead of the legacy fit path
-    float ai2_sigma_base_m         = 0.02f;  // base on-surface obs noise std (m); R = σ² (+ motion_var)
+    // (bottle_belief.h) — the ONLY fit path. Static (no yaw, single cylinder primitive); a moved bottle is
+    // re-acquired via the tracker gate widening on stale predicts.
+    float ai2_sigma_base_m         = 0.02f;  // base on-surface obs noise std (m); R = σ²
     float ai2_clutter_frac         = 0.10f;  // ε: prior weight of the uniform clutter mixture component
     float ai2_clutter_scale_m      = 0.08f;  // a point further than ~this from the surface is likely clutter
     float ai2_prior_pos_std        = 0.30f;  // broad position prior std (m) on cx,cy,cz
@@ -110,22 +93,6 @@ struct BottleConfig
     std::string masks_source_frame     = "zed";    // producer frame of mask_support_points_cam
     std::string masks_target_frame     = "room";   // bottle's fit frame
     bool        rt_cov_add_chain       = true;      // add J·Σ_chain·Jᵀ localization cov to the published RT cov
-    // ── Motion model (movable object) ──────────────────────────────────────────────────────────────
-    // "static" → position hardens like furniture (legacy). "constant_velocity" → cx,cy TRACK via a CV
-    // Kalman filter (a bottle is movable), fixing the frozen-fit-spawns-a-new-instance bug.
-    std::string dynamics_model = "constant_velocity";
-    // Resting bottle = effectively STATIC (only a grasp injects real motion): tiny accel process noise +
-    // realistic measurement noise → heavily damped, table-like. The S=P+R tracker gate still associates
-    // a genuinely moved bottle, so the damping does not re-introduce spawning.
-    float       cv_accel_std    = 0.08f;   // process: acceleration std (m/s²) — tiny (barely accelerates)
-    float       cv_meas_std     = 0.04f;   // per-frame position measurement std (m) — real centroid noise
-    float       cv_init_vel_std = 0.3f;    // 1-σ on the initial unknown velocity (m/s)
-    float       cv_dt_default_s = 0.1f;    // fallback Δt when capture stamps are missing/equal (≈ Period.Compute)
-    float       cv_gate         = 6.0f;    // χ²₂ outlier gate: reject a measurement whose innovation² (vs S=P+R) exceeds this
-    float       cv_max_speed    = 0.4f;    // velocity clamp (m/s) — a resting bottle barely moves; kills fling spikes
-    int         cv_lost_frames  = 5;       // after this many frames with no detection, zero the velocity (stop coasting)
-    float       cv_max_pos_std  = 0.05f;   // cap on the per-axis position σ during predict (m) → gate stays tight across
-                                           // dropouts so a far/other-bottle measurement can't be accepted (anti-swap/jump)
     // ── Epistemic "hidden-face" affordance ────────────────────────────────────────────────────────
     // The agent advertises a far-side viewpoint (opposite the camera) so the controller can observe the
     // bottle's occluded back arc and resolve the depth-degenerate radius. ΔH = ½·log(1 + view_info/Y_r).
@@ -133,47 +100,9 @@ struct BottleConfig
     float epistemic_view_info      = 50.0f;   // Fisher precision a back-view is expected to add to the radius DOF (ΔH scale)
     int   epistemic_cooldown_cycles = 200;    // post-completion hold: cycles the gain is suppressed so it isn't re-claimed
     std::string epistemic_csv_path  = "";     // non-empty → append a per-cycle epistemic/affordance CSV (debug/monitor)
-    // ── Fisher information filter (per-DOF stabiliser; currently diagnostic) ──────────────────────
-    // Accumulate the real per-DOF SDF observation Fisher information across viewpoints instead of a
-    // "times viewed" proxy. The info-filter predict step bleeds a fixed process-noise Q each fresh
-    // frame so the posterior precision reaches a finite STEADY state (a physical uncertainty floor)
-    // rather than collapsing toward zero — the principled fix for the documented P_bottle
-    // overconfidence. Phase 1–2: computed + logged only (no behaviour change); feeding it into
-    // P_bottle / the acceptance gain is a later, controller-facing step.
-    bool        fisher_filter_enabled = true;   // compute + accumulate (and log); false = zero cost
-    float       fisher_info_decay     = 1.0f;   // stiffener accumulator fading memory; <1 forgets, 1 = pure accumulation
-    float       fisher_process_std_m  = 0.005f; // predict process-noise std per fresh frame (m); all 5 DOF are lengths
-    // Apply the stabiliser's maturity-stiffened Kalman gain + CUSUM gate to the ACCEPTED fit (vs the raw
-    // per-frame gradient fit). true → a well-seen DOF (esp. the depth-degenerate radius) barely moves per
-    // frame so the perceived pose stops jerking, while a sustained coherent move still unlocks via the
-    // CUSUM gate. false → legacy raw-fit behaviour, stabiliser diagnostic-only (for A/B).
-    bool        stabilizer_acceptance = true;
-    std::string fisher_csv_path       = "";     // non-empty → append per-cycle Fisher evolution CSV (for plotting)
-    // Cold-start seed de-projection: the visible (front-arc-only) point centroid sits ~one radius
-    // toward the camera from the true cylinder axis, so snapping the seed to it biases the model
-    // camera-ward (perceived "closer than real"; the observed points fall behind its bbox). Push the
-    // seed AWAY from the camera by frac·radius in the horizontal plane to recover the axis. 0 = off.
-    float seed_deproject_frac = 1.0f;
-    // Free-space / visibility FE term (BottleModelParams): penalise the model occupying the space
-    // between the camera and the observed points. The source cure for the camera-ward depth bias.
-    float lambda_freespace = 0.0f;     // 0 = off
-    float freespace_margin = 0.01f;    // m: carve-sample offset in front of each point
 
-    // SampleQueue parameters (forwarded to SampleQueueParams)
-    int   num_angle_bins               = 16;
-    int   num_z_bins                   = 6;
-    int   max_per_bin                  = 2;
+    // Near-surface band (m): observe() splits a mask point into candidate (|SDF|<this) vs residual.
     float sdf_threshold_for_storage    = 0.03f;
-    int   min_frames_before_historical = 10;
-    int   historical_warmup_frames     = 5;
-    int   max_new_points_per_frame     = 20;
-    float rfe_alpha                    = 0.98f;
-    float rfe_max_threshold            = 2.0f;
-    float rfe_weight_gain              = 0.25f;
-    float min_anchor_weight            = 0.12f;
-    float edge_bonus_weight            = 0.3f;
-    float edge_proximity_threshold     = 0.01f;
-    float z_bin_size                   = 0.04f;
 
     // Covariance write
     float yaw_variance = 9.87f;   // ≈π² — yaw is unobservable for a symmetric cylinder

@@ -18,11 +18,8 @@
 #include <Eigen/Dense>
 
 #include "bottle_model.h"
-#include "bottle_belief.h"           // rc::BottleBelief (AI2 recursive-Laplace belief, used when cfg.use_ai2)
-#include "sample_queue_geometry.h"   // common SampleQueue<Model> + bottle's geometry policy
+#include "bottle_belief.h"           // rc::BottleBelief (AI2 recursive-Laplace belief — the fit)
 #include "bottle_affordance.h"
-#include "../../common/belief_stabilizer/belief_stabilizer.h"   // rc::StabilizerState
-#include "../../common/motion_filter/cv_filter.h"               // rc::CVFilter (movable-object tracking)
 
 namespace rc {
 
@@ -31,13 +28,11 @@ struct BottleInstance
     uint64_t    node_id = 0;
     std::string node_name;
 
-    BottleModel model;
-    SampleQueue<BottleModel> queue;
-
-    // ── AI2 belief (used when cfg.use_ai2), mirrors table_concept/chair_concept ────────────────────
-    // The recursive-Laplace full-covariance belief on the shared engine. Lazily initialised from the
-    // model state on the first AI2 cycle; run_inference_ai2 writes its posterior back into `model` so all
-    // downstream publish/viewer/RT code is unchanged. Its Σ drives the AI2 tracker gate + NBV + P_bottle.
+    // The fit: the recursive-Laplace full-covariance belief on the shared engine (mirrors table/chair).
+    // Lazily initialised from the model state on the first fresh frame; run_inference writes its posterior
+    // back into `model` (the state carrier) so all downstream publish/viewer/RT code is unchanged. Its Σ
+    // drives the tracker gate + NBV + published P_bottle.
+    BottleModel  model;
     BottleBelief ai2_belief;
     bool         ai2_initialized = false;
 
@@ -52,23 +47,10 @@ struct BottleInstance
     int  matched_frames        = 0;     // frames with fresh sensing data
     bool reseed_requested      = false; // move-experiment: force a fresh cold-start at the next pose
 
-    // ── Motion model (movable object) ──────────────────────────────────────────────────────────────
-    // A bottle is MOVABLE: its position TRACKS via a constant-velocity filter on (cx,cy) instead of
-    // hardening (cz is table-anchored; radius/height harden via the stabiliser). Replaces the
-    // maturity-locked position gain that froze the fit and made a moved bottle spawn a new instance.
-    CVFilter      motion;                  // CV KF on cx,cy (2 axes); empty until first fit
-    std::uint64_t last_motion_ts_ms = 0;   // capture stamp of the last CV update (for dt)
-    int           last_motion_frame  = -1; // mask frame id of the last CV update (fresh-frame guard)
-    Eigen::Vector3f last_obs_centroid = Eigen::Vector3f::Zero();  // fresh-frame mask centroid = CV measurement
-                                           // (FOLLOWS the bottle; the queue-anchored SDF fit lags)
-    // Part B diagnostics (published RT-edge covariance, room frame, m²) — set in write_rt_pose, logged in
-    // the fisher CSV: the chain/localization term J·Σ_chain·Jᵀ and the TOTAL published xx,yy (fit+chain).
+    // Part B diagnostics (published RT-edge covariance, room frame, m²) — set in write_rt_pose: the
+    // chain/localization term J·Σ_chain·Jᵀ and the TOTAL published xx,yy (fit+chain).
     float dbg_chain_cov_xx = -1.0f, dbg_chain_cov_yy = -1.0f;
     float dbg_rtcov_xx     = -1.0f, dbg_rtcov_yy     = -1.0f;
-    // Grasp-mode seam (Part B step 2, not yet wired): when the controller grasps the bottle its motion
-    // becomes a KNOWN control input (the arm). The handshake will set this + switch the transition to
-    // known-input / re-parent-under-gripper. Left false for the free-movable CV mode.
-    bool          grasped = false;
     // Negative-information persistence: true only when the bottle centre projects INSIDE the camera
     // frustum this cycle. The tracker accrues a death "miss" only when expected_visible — so out-of-FoV
     // the bottle PERSISTS, and it is retired only if it should be seen yet isn't (removed). Default
@@ -103,25 +85,6 @@ struct BottleInstance
     float last_pub_cx     = std::numeric_limits<float>::max();
     float last_pub_cy     = std::numeric_limits<float>::max();
     float last_pub_cz     = std::numeric_limits<float>::max();
-    SampleQueueMetrics      last_queue_metrics;
-    FreeEnergyDecomposition last_fe_terms;
-    // ── Fisher information filter (per-DOF; currently DIAGNOSTIC) ──────────────────────────────────
-    // The principled replacement for a "times viewed" proxy: a per-DOF information filter over
-    // [cx,cy,cz,radius,height] (matches BottleState::to_array()). Each fresh mask measures the
-    // observation Fisher information (curvature of the SDF data-likelihood); the filter accumulates
-    // it across viewpoints so a well-seen DOF hardens while an unobserved one stays plastic — the
-    // stabiliser for successive gatherings of evidence as the robot orbits the table. The Q-bleed
-    // predict keeps the precision at a finite steady state (the fix for P_bottle overconfidence).
-    // Phase 1–2: folded + logged only — not yet driving acceptance or the published covariance.
-    // Shared rc::BeliefStabilizer state over the 5 DOFs [cx,cy,cz,radius,height]. Currently only the
-    // Fisher accumulators are exercised (diagnostic); the Kalman/CUSUM fields stay zero until bottle's
-    // acceptance is wired to compute_acceptance (a future behaviour change).
-    StabilizerState<5> stab;
-    // Previous fresh-frame state, so the stabiliser's CUSUM can be run DIAGNOSTICALLY (innovation =
-    // this fit vs last) to populate stab.counter_evidence for the dashboard — without applying the
-    // gate to the fit (bottle still uses its convergence gate, not the Kalman/CUSUM acceptance).
-    std::array<float, 5> prev_diag_state{};
-    bool has_prev_diag = false;
     // Bottle-owned voxel memory bank (room frame), independent of per-frame uploads.
     std::vector<Eigen::Vector3f>      voxel_bank_pts;
     std::unordered_set<std::uint64_t> voxel_bank_keys;

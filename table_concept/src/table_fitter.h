@@ -2,11 +2,11 @@
  * table_fitter.h
  *
  * The active-inference core of table_concept (mirrors bottle_concept/bottle_fitter.h). Owns the
- * per-table instance map and runs the free-energy fit for each "table_*" node:
- *   - instance lifecycle (ensure_instance + the TableModel/SampleQueue factories),
- *   - observation: split the selected mask's support points into queue anchors vs residuals,
- *   - inference: voxel-bank ingest + cold-start snap + queue update + the belief evolve/accept
- *     step (warm-start observability policy) + RFE memory refresh,
+ * per-table instance map and runs the AI2 full-covariance belief update for each "table_*" node:
+ *   - instance lifecycle (ensure_instance + the TableModel factory),
+ *   - observation: split the selected mask's support points into on-surface vs off-surface sets,
+ *   - inference: voxel-bank ingest + one recursive belief update (TableBelief) with the mask-motion
+ *     channel as the observation precision R / bias gate, written back into inst.model,
  *   - the table-owned voxel memory (ownership gate + FNV voxel keys).
  *
  * Collaborates with MaskIngestor (masks) and TableSceneGraph (robot covariance). SpecificWorker
@@ -16,14 +16,13 @@
 
 #pragma once
 
-#include <array>
 #include <cstdint>
 #include <fstream>
 #include <memory>
+#include <optional>
+#include <string>
 #include <unordered_map>
 #include <vector>
-
-#include <optional>
 
 #include <Eigen/Dense>
 #include <dsr/api/dsr_api.h>
@@ -33,8 +32,7 @@
 
 #include "table_config.h"        // rc::TableConfig
 #include "table_instance.h"      // rc::TableInstance, TableState
-#include "table_model.h"         // TableModel / TableModelParams / FreeEnergyDecomposition
-#include "../../common/sample_queue/sample_queue.h"        // SampleQueue / SampleQueueParams
+#include "table_model.h"         // TableModel / TableModelParams
 #include "../../common/mask_ingestor/mask_ingestor.h"
 #include "table_scene_graph.h"
 
@@ -63,12 +61,10 @@ public:
 
     // Read the "masks" node → candidate/residual split against the current SDF.
     TableObservation observe(TableInstance& inst, const DSR::Node& node);
-    // One free-energy fit cycle (voxel-bank ingest + cold-start + queue + belief). Returns the FE.
+    // One recursive full-covariance belief update (TableBelief) on this frame's mask points, with the
+    // mask-motion channel as the observation precision R / bias gate. Writes the result into inst.model
+    // so all downstream publish/viewer code is unchanged. Returns the update free energy.
     float run_inference(TableInstance& inst, const TableObservation& observation);
-    // AI2 path (TABLE_FIT_AI2.md): one recursive full-covariance belief update on this frame's mask
-    // points, with the mask-motion channel as the observation precision R / bias gate. Selected by
-    // cfg_.use_ai2; writes the result into inst.model so all downstream publish/viewer code is unchanged.
-    float run_inference_ai2(TableInstance& inst, const TableObservation& observation);
 
     std::unordered_map<std::uint64_t, TableInstance>& instances() { return instances_; }
     void forget_node(std::uint64_t id) { instances_.erase(id); }
@@ -77,75 +73,18 @@ public:
     void set_chain_cov_source(DSR::InnerGaussianAPI* gaussian, std::string source_frame, bool enabled);
     // Room-frame XY a NEWLY born instance's model should start at (from the tracker's detection). The
     // room→table RT edge written at birth is NOT reliably queryable in the same cycle, so ensure_instance
-    // would read the 0,0 default and the warm-start would freeze the model there forever (the tracker then
-    // never associates and re-births endlessly). Consumed once by ensure_instance on first creation.
+    // would read the 0,0 default and the model would freeze there. Consumed once by ensure_instance.
     void note_birth(std::uint64_t id, const Eigen::Vector2f& xy) { birth_seeds_[id] = xy; }
     bool should_log(const TableInstance& inst) const;
 
 private:
-    struct TableBeliefEvidence
-    {
-        std::vector<Eigen::Vector3f> fit_pts;
-        std::vector<float> fit_weights;
-        std::vector<Eigen::Vector3f> eval_pts;
-        std::vector<float> eval_weights;
-        int residual_count = 0;
-        int trusted_point_count = 0;
-        int historical_anchor_count = 0;
-        float residual_precision = 0.0f;
-
-        [[nodiscard]] bool has_evaluation() const { return not eval_pts.empty(); }
-        [[nodiscard]] bool can_optimize() const { return not fit_pts.empty(); }
-    };
-
-    struct TableBeliefPolicy
-    {
-        static float clamp01(float value);
-        static float lerp(float start, float end, float gain);
-        static float wrap_angle(float angle);
-        static float angle_lerp(float start, float end, float gain);
-        // Symmetric per-DOF Kalman-gain-driven acceptance lerp (the only stabilisation path; the coverage/
-        // InfoHalf heuristic and the size ratchet were both removed — precision + extent + ρ-EMA suffice).
-        static TableState apply_observability_warm_start(const TableState& previous,
-                                                         const TableState& raw,
-                                                         const std::array<float, 8>& kalman_gain);
-        static float update_warm_confidence(float previous_confidence,
-                                            const TableConfig& cfg,
-                                            const std::array<float, 6>& coverage,
-                                            int point_count,
-                                            int residual_count,
-                                            float residual_precision);
-    };
-
-    void step_queue_update(TableInstance& inst,
-                           const std::vector<Eigen::Vector3f>& candidate_pts,
-                           float observation_precision);
-    float step_model_update(TableInstance& inst,
-                            const std::vector<Eigen::Vector3f>& residual_pts,
-                            const std::vector<Eigen::Vector3f>& current_pts,
-                            float residual_precision,
-                            bool fresh_observation);
-    TableBeliefEvidence compose_belief_evidence(const TableInstance& inst,
-                                                const std::vector<Eigen::Vector3f>& residual_pts,
-                                                const std::vector<Eigen::Vector3f>& current_pts,
-                                                float residual_precision) const;
-    void evolve_table_belief(TableInstance& inst, const TableBeliefEvidence& evidence);
-    float accept_table_belief(TableInstance& inst,
-                              const TableState& previous_state,
-                              const TableBeliefEvidence& evidence);
-    void refresh_table_memory(TableInstance& inst);
-
-    // RGB-mask silhouette: back-project the table mask contour to room-frame rays and hand them to
-    // the model for its differentiable silhouette term. No-op if mask_precision<=0 or no camera.
-    void feed_silhouette(TableInstance& inst);
-    // room_T_zed (camera→room). pose_ts_ms pins the room→body hop to the mask's capture time (Nearest RT
-    // query) so a moving base doesn't back-project a stale contour through the current pose; the rigid
-    // body→zed mount is always queried latest. 0 → current pose (no timestamp available).
-    std::optional<Eigen::Matrix4d> room_T_zed_matrix(std::uint64_t pose_ts_ms = 0) const;
     // Compute the localization/chain covariance term (J·Σ_chain·Jᵀ) at the table centre by transforming
     // it from the measurement frame back to room with ZERO input cov; stored on the instance for the
     // RT-cov write. No-op unless set_chain_cov_source enabled it.
     void compute_chain_cov(TableInstance& inst);
+    // room_T_zed (camera→room). pose_ts_ms pins the room→body hop to the mask's capture time (Nearest RT
+    // query); the rigid body→zed mount is always queried latest. 0 → current pose.
+    std::optional<Eigen::Matrix4d> room_T_zed_matrix(std::uint64_t pose_ts_ms = 0) const;
     // Project the current model through the camera extrinsic → normalised in-image ROI (centre
     // offset + fill), stored on the instance for the controller's centring/dwell lock-on search.
     void compute_projected_roi(TableInstance& inst);
@@ -155,17 +94,7 @@ private:
     static std::uint64_t voxel_key(const Eigen::Vector3f& point, float quantization_m);
 
     TableModelParams  make_model_params() const;
-    SampleQueueParams make_queue_params() const;
 
-    // Keep only points within ±cfg_.top_band_m of the model's estimated table-top height — drops the
-    // floor/under-table/clutter population before the fit/extent terms. Identity if the gate is off.
-    std::vector<Eigen::Vector3f> gate_to_top_band(const std::vector<Eigen::Vector3f>& pts,
-                                                  const TableModel& model) const;
-
-    // Append one row of Fisher-filter evolution (state + per-DOF obs/accumulated info + posterior
-    // std) to cfg_.fisher_csv_path. No-op if the path is empty. Lazily opens + writes the header.
-    void log_fisher_csv(const TableInstance& inst, bool fresh, float free_energy,
-                        int point_count, float silres);
     // Append one AI2 belief row (state + Σ diag std + mask R/bias/trunc + gate flag) to cfg_.ai2_csv_path.
     void log_ai2_csv(const TableInstance& inst, int point_count, float R, bool gated, float energy);
 
@@ -182,13 +111,7 @@ private:
     std::unordered_map<std::uint64_t, TableInstance> instances_;
     std::unordered_map<std::uint64_t, Eigen::Vector2f> birth_seeds_;   // tracker-provided birth XY (see note_birth)
     std::uint64_t                  room_node_id_ = 0;   // latched per ensure_instance call
-    std::ofstream                  fisher_csv_;         // per-cycle Fisher-filter evolution log (optional)
     std::ofstream                  ai2_csv_;            // per-cycle AI2 belief log (optional)
-
-    // Shared per-DOF belief stabiliser (Fisher filter + Kalman acceptance + CUSUM/SPRT). Holds the
-    // algorithm + params (refreshed from cfg_ each accept); per-table state lives in inst.stab.
-    BeliefStabilizer<8>            stabilizer_;
-    void refresh_stabilizer_params();   // map cfg_ → stabilizer_ params + the table DOF layout
 };
 
 }  // namespace rc

@@ -22,6 +22,7 @@ LIST(APPEND SOURCES
   ../src/yolo_processor.cpp
   ../src/yolo_human.cpp
   ../src/yolo_semantic.cpp
+  ../src/ricoh_yolo_worker.cpp
   ../src/onnx_providers.cpp
 )
 
@@ -32,6 +33,7 @@ LIST(APPEND HEADERS
   ../src/graph_publisher.h
   ../src/scene_processor.h
   ../src/yolo_processor.h
+  ../src/ricoh_yolo_worker.h
   ../src/graph_object_box.h
   ../../common/agent_presence_monitor/agent_presence_monitor.h
   ../../common/agent_presence_coordinator/agent_presence_coordinator.h

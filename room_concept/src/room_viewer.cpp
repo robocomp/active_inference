@@ -102,7 +102,7 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
         viewer_2d_->draw_room_polygon(room_polygon, false);
 
     // Camera-projection window: overlays the room layout on the live RGB image.
-    camera_viz_ = std::make_unique<rc::CameraVisualizer>(graph, room_polygon, nullptr);
+    camera_viz_ = std::make_unique<rc::CameraVisualizer>(graph, room_polygon, params_->OVERLAY_OBJECT_TYPES, nullptr);
 
     // Bring up the RGB media plane. The subscriber is created lazily by the camera
     // visualizer once the "zed" node + media descriptor exist, reading the DDS

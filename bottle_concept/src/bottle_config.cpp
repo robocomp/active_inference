@@ -9,8 +9,6 @@
 
 #include <genericworker.h>   // ConfigLoader
 
-#include "../../common/robust_metrics/robust_metrics.h"   // robust_loss_type_from_string
-
 namespace rc {
 
 BottleConfig load_bottle_config(const ConfigLoader& cfg)
@@ -41,24 +39,15 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
     out.voxel_select_radius_margin_m = getf("BottleConcept.VoxelSelectRadiusMarginM",  0.10f);
     out.voxel_select_height_margin_m = getf("BottleConcept.VoxelSelectHeightMarginM",  0.10f);
 
-    out.sigma_obs          = getf("BottleModel.SigmaObs",          0.02f);
-    out.lambda_size        = getf("BottleModel.LambdaSize",        0.5f);
-    out.lambda_pos         = getf("BottleModel.LambdaPos",         0.05f);
-    out.lambda_state       = getf("BottleModel.LambdaState",       0.02f);
     out.prior_radius       = getf("BottleModel.PriorRadius",       0.035f);
     out.prior_height       = getf("BottleModel.PriorHeight",       0.20f);
     out.prior_size_std     = getf("BottleModel.PriorSizeStd",      0.03f);
-    out.optimization_iters = geti("BottleModel.OptimizationIters", 15);
-    out.optimization_lr    = getf("BottleModel.OptimizationLr",    0.005f);
-    out.grad_clip          = getf("BottleModel.GradClip",          2.0f);
     out.mask_precision     = getf("BottleModel.MaskPrecision",     0.0f);
-    out.cov_eff_scale      = getf("BottleModel.CovEffScale",       1.0f);
     out.mask_conf_weight   = getb("BottleModel.MaskConfWeight",    true);
     out.mask_conf_floor    = getf("BottleModel.MaskConfFloor",     0.2f);
     out.mask_conf_ref      = getf("BottleModel.MaskConfRef",       0.5f);
     out.mask_conf_power    = getf("BottleModel.MaskConfPower",     2.0f);
 
-    out.use_ai2                  = getb("BottleModel.UseAI2",                  false);
     out.ai2_sigma_base_m         = getf("BottleModel.AI2SigmaBaseM",          0.02f);
     out.ai2_clutter_frac         = getf("BottleModel.AI2ClutterFrac",         0.10f);
     out.ai2_clutter_scale_m      = getf("BottleModel.AI2ClutterScaleM",       0.08f);
@@ -87,50 +76,12 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
     out.masks_source_frame     = gets("Masks.SourceFrame",    "zed");
     out.masks_target_frame     = gets("Masks.TargetFrame",    "room");
     out.rt_cov_add_chain       = getb("Masks.RtCovAddChain",  true);
-    out.dynamics_model = gets("Dynamics.Model",        "constant_velocity");
-    out.cv_accel_std   = getf("Dynamics.CvAccelStd",   0.08f);
-    out.cv_meas_std    = getf("Dynamics.CvMeasStd",    0.04f);
-    out.cv_init_vel_std = getf("Dynamics.CvInitVelStd", 0.3f);
-    out.cv_dt_default_s = getf("Dynamics.CvDtDefaultS", 0.1f);
-    out.cv_gate        = getf("Dynamics.CvGate",        6.0f);
-    out.cv_max_speed   = getf("Dynamics.CvMaxSpeed",    0.4f);
-    out.cv_lost_frames = geti("Dynamics.CvLostFrames",  5);
-    out.cv_max_pos_std = getf("Dynamics.CvMaxPosStd",   0.05f);
     out.epistemic_obs_distance    = getf("Epistemic.ObsDistance",     0.9f);
     out.epistemic_view_info       = getf("Epistemic.ViewInfo",        50.0f);
     out.epistemic_cooldown_cycles = geti("Epistemic.CooldownCycles",  200);
     out.epistemic_csv_path        = gets("Epistemic.CsvPath",         "");
-    out.fisher_filter_enabled = getb("BottleModel.FisherFilterEnabled", true);
-    out.fisher_info_decay     = getf("BottleModel.FisherInfoDecay",     1.0f);
-    out.fisher_process_std_m  = getf("BottleModel.FisherProcessStdM",   0.005f);
-    out.stabilizer_acceptance = getb("BottleModel.StabilizerAcceptance", true);
-    out.fisher_csv_path       = gets("BottleModel.FisherCsvPath",       "");
-    out.seed_deproject_frac = getf("BottleModel.SeedDeprojectFrac", 1.0f);
-    out.lambda_freespace   = getf("BottleModel.LambdaFreeSpace",   0.0f);
-    out.freespace_margin   = getf("BottleModel.FreeSpaceMargin",   0.01f);
-    out.optimizer_type     = gets("BottleModel.OptimizerType",     "adam");
-    out.sgd_momentum       = getf("BottleModel.SgdMomentum",       0.9f);
-    {
-        const auto loss_name = gets("BottleModel.RobustLoss", "quadratic");
-        const auto loss_type = robust_loss_type_from_string(loss_name);
-        out.robust_loss = loss_type.value_or(RobustLossType::Quadratic);
-    }
-    out.robust_loss_scale  = getf("BottleModel.RobustLossScale",  0.05f);
 
-    out.num_angle_bins               = geti("SampleQueue.NumAngleBins",              16);
-    out.num_z_bins                   = geti("SampleQueue.NumZBins",                  6);
-    out.max_per_bin                  = geti("SampleQueue.MaxPerBin",                 2);
     out.sdf_threshold_for_storage    = getf("SampleQueue.SdfThresholdForStorage",    0.03f);
-    out.min_frames_before_historical = geti("SampleQueue.MinFramesBeforeHistorical", 10);
-    out.historical_warmup_frames     = geti("SampleQueue.HistoricalWarmupFrames",    5);
-    out.max_new_points_per_frame     = geti("SampleQueue.MaxNewPointsPerFrame",      20);
-    out.rfe_alpha                    = getf("SampleQueue.RfeAlpha",                  0.98f);
-    out.rfe_max_threshold            = getf("SampleQueue.RfeMaxThreshold",           2.0f);
-    out.rfe_weight_gain              = getf("SampleQueue.RfeWeightGain",             0.25f);
-    out.min_anchor_weight            = getf("SampleQueue.MinAnchorWeight",           0.12f);
-    out.edge_bonus_weight            = getf("SampleQueue.EdgeBonusWeight",           0.3f);
-    out.edge_proximity_threshold     = getf("SampleQueue.EdgeProximityThreshold",    0.01f);
-    out.z_bin_size                   = getf("SampleQueue.ZBinSize",                  0.04f);
 
     out.yaw_variance = getf("BottleConcept.YawVariance", 9.87f);
 

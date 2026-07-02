@@ -9,7 +9,7 @@ name = "chair_concept"
 configFile = ""
 domain = 0
 tree = false
-graph = false 
+graph = false
 2d = false
 3d = false
 
@@ -43,134 +43,62 @@ Emergency = 500
 Verbose = false
 
 [ChairModel]
-# ── AI2 recursive-Laplace belief (mirrors table_concept). Set UseAI2=false for the legacy path. ──
-UseAI2 = true
+# ── AI2 recursive-Laplace belief (mirrors table_concept). ──
+SigmaObs = 0.05                  # compound-SDF band for the candidate/residual split in observe()
+SdfThresholdForStorage = 0.08    # on-surface membership for the candidate/residual split
 AI2CsvPath = "etc/ai2_log.csv"   # per-cycle AI2 log (state + Σ diag + range/motion); empty disables
 AI2SigmaBaseM = 0.03
-AI2RangeNoiseLatPerM = 0.02      # static range → R + position common-mode (m per m)
-AI2RangeNoiseYawPerM = 0.03      # static range → yaw common-mode (rad per m) — anti far-view rotation
+AI2ClutterFrac = 0.10
+AI2ClutterScaleM = 0.12
+AI2ClutterStructureGain = 1.0    # density-aware clutter: shrink the clutter prior for seat-coplanar points (closes the escape valve → seat_d recovers with honest Σ). 0 = flat clutter
+AI2PriorSizeStd = 0.15
+AI2ProcessStdM = 0.005
+AI2ProcessStdYaw = 0.01
+AI2ProcessStdSize = 0.0005       # process noise for RIGID size DOFs (≪ pose; furniture shape doesn't drift)
+AI2FloorZ = 0.0                  # room-frame floor plane; cz is PINNED here (shared, view-independent)
+AI2FloorStd = 0.03               # floor-height uncertainty (m) → common-mode z
+AI2SeatAnchorStd = 0.04          # seat-layer height-anchor obs noise (m); 0 disables. Pins seat_h to the dense seat layer (gauge fix)
+AI2SeatAnchorBand = 0.12         # seat-layer mean-shift bandwidth (m) — vertical scale separating seat from contamination
+AI2SeatExtentStd = 0.02          # seat-layer FOOTPRINT (seat_w/seat_d) span-anchor obs noise (m); 0 disables. Fixes seat_d collapse
 AI2CommonModePosStd = 0.03
 AI2CommonModeSizeStd = 0.02
 AI2CommonModeYawStd = 0.03
-AI2ExtentStd = 0.05       # extent-observation noise (m): coverage likelihood pulling footprint+height onto the point span
-LambdaSize = 0.05         # weaker KL pull on w/h/height so evidence can expand the chair model
-PriorSizeStd = 0.60       # broader 1-sigma size prior (m); higher means weaker size prior
-RobustLoss = "tukey_biweight"   # one of: quadratic, huber, geman_mcclure, welsch, tukey_biweight
-RobustLossScale = 0.10      # SDF residual scale in meters where robust losses start to saturate
-MaskPrecision = 0.30        # RGB-mask silhouette term weight: back-projects the 2D chair contour and
-                            # pulls the model onto it (constrains occluded faces + yaw). 0 disables.
-MaskSilhouetteSamples = 8   # >0 = height-agnostic occluding-contour (samples/ray vs box+legs SDF);
-                            # 0 = legacy chair-top-plane intersection (top rectangle only).
-RobustGncStartScale = 0.80  # GNC: wide initial robust scale, annealed to RobustLossScale across the
-                            # optimizer iters so a half-offset chair still produces gradient during
-                            # coarse alignment. Set <= RobustLossScale to disable annealing.
-RobustGncDecayCycles = 20   # GNC start scale ramps from RobustGncStartScale down to RobustLossScale
-                            # over this many compute cycles, then anneals off so the converged pose
-                            # stops being re-widened each frame and can settle. 0 = no lifetime decay.
-ExtentPctLo = 0.05          # lower percentile of the point span the footprint-extent term pins w/h to
-ExtentPctHi = 0.95          # upper percentile (tighter pair trims the depth-noise margin past the true edge)
+AI2RangeNoiseLatPerM = 0.02      # static range → R + position common-mode (m per m)
+AI2RangeNoiseYawPerM = 0.03      # static range → yaw common-mode (rad per m) — anti far-view rotation
+AI2TruncGateFrac = 0.10          # skip the geometric update (predict only) when this fraction of the mask is on the image border
+AI2GnIters = 4                   # Gauss-Newton iterations per frame
+AI2ExtentStd = 0.05              # extent-observation noise (m) for the coverage/extent likelihood
 
 [ChairConcept]
+StateEps = 0.04             # Σ|Δstate| threshold between cycles for convergence (m+rad)
+KStable = 30                # consecutive stable frames before model_stable
+DetectionAliveMaxFrames = 40 # cycles without a fresh chair mask before detection_alive=false
 ObsDistance = 1.8           # comfortable maximum stand-off from the target face for epistemic poses
-DeltaMin = 20.0             # minimum per-face coverage before stopping epistemic proposals
-GainThreshold = 0.1         # minimum gain for the legacy coverage-deficit epistemic proxy
-EpistemicInfoGain = true    # score faces by expected entropy reduction ΔH from the Fisher Σ (vs coverage proxy)
-EpistemicMinInfoGain = 0.3  # WITHDRAW threshold: ΔH (nats) below which the epistemic affordance is dropped
-EpistemicRearmInfoGain = 5.0 # Schmitt re-arm: a satisfied chair re-offers only once ΔH climbs back above this
+MinStandOffM = 2.0          # min stand-off floor for epistemic viewpoints (YOLO misses chairs seen too close)
 EpistemicCooldownCycles = 200 # min cycles a satisfied chair stays withdrawn (anti-chatter)
+ChairLogPeriodFrames = 30   # per-chair log throttle
 VoxelBankMaxPoints = 4000   # max number of chair-owned voxels kept in memory
 VoxelBankQuantizationM = 0.02 # dedup grid (m) for voxel-bank hashing
 VoxelSelectRadiusMarginM = 0.50 # per-chair XY ownership gate margin for mixed proto-chairs
 VoxelSelectHeightMarginM = 0.25 # extra Z margin above chair height when selecting owned voxels
-TopBandGate = true          # gate fit/extent points to ±TopBandM of the chair-top height (drops floor/clutter that inflates w/h)
-TopBandM = 0.08             # half-width (m) of the top-surface membership band
-
-[WarmStart]
-PtsMin = 12.0            # point count where observability starts to become trustworthy
-PtsMax = 30.0            # point count where the point-count confidence saturates
-CoverageMinSide = 2.0    # minimum bilateral face coverage before size/yaw can adapt freely
-RhoFreeze = 0.25         # observability-ratio threshold below which one-sided dimensions are frozen
-LambdaPosBase = 0.15     # baseline gain for cx/cy acceptance even under weak evidence
-LambdaPosGain = 0.45     # extra positional gain added as observability improves
-LambdaSizeBase = 0.05    # baseline gain for shape/height acceptance under poor coverage
-LambdaSizeGain = 0.35    # extra shape gain added when bilateral coverage improves
-LambdaYawBase = 0.01     # baseline yaw gain when orientation evidence is weak
-LambdaYawGain = 0.12     # extra yaw gain added when both x/y face coverage are balanced
-ConfidenceDecay = 0.55            # how quickly the higher-level confidence state forgets old evidence
-ConfidenceCoverageGain = 1.00     # how much coverage evidence raises confidence
-ConfidenceResidualGain = 0.25     # how much unexplained residuals raise confidence
-FisherFilterEnabled = true        # use the real per-DOF SDF Fisher information (vs the face-coverage view-info proxy)
-KalmanGainStiffness = true        # drive each DOF's acceptance gain from the Kalman gain K=obs/(Y_pred+obs) (vs the InfoHalf/coverage heuristic)
-FisherInfoDecay = 0.99            # stiffener (acc): fading memory ≈100-frame window. A chair is RIGID — its shape is
-                                  # learned once and should stay known, so the accumulator must build up (→ strong maturity
-                                  # stiffening + a high CUSUM barrier) instead of forgetting it every ~20 frames (0.95).
-# Quality-aware maturity: a CLOSE approach after far glimpses re-opens the fit (rescales the stale
-# far-view "views" down) instead of staying locked at the misrepresented far fit. The fix for "first
-# seen far → bad fit → approaching can't re-fit". Off → every view counts ~1 (far hardens as fast as close).
-FisherQualityRescale = true
-FisherPeakDecay = 1.0             # quality-bar slow forgetting (1 = non-decaying)
-# Re-open only on a GENUINELY better view: a view must beat the quality bar by ≥ Ratchet× to ratchet it
-# (and rescale the accumulated views), folding the new high in as an EMA. Stops ordinary per-frame obs
-# flutter (orders of magnitude) from constantly re-opening a DOF → fixes the width wander. Higher = stiffer.
-FisherPeakRatchet = 2.5
-FisherPeakEma = 0.30
-FisherProcessStdM = 0.005        # calibrated-cov predict: process-noise std per fresh frame for length DOFs (m) → std floor
-FisherProcessStdYaw = 0.01       # calibrated-cov predict: process-noise std per fresh frame for yaw (rad)
-FisherCsvPath = "etc/fisher_filter_log.csv"   # per-cycle evolution log for plotting (empty = off)
-# Sequential change-detector (CUSUM/SPRT) on top of the Kalman gain: an isolated surprising mask is
-# rejected per-DOF (gain→0), and only a COHERENT same-direction run of surprise unlocks the DOF and
-# snaps it to the new evidence. This is what stops a lone noisy mask from nudging a settled fit.
-CounterEvidenceGate = true        # enable the SPRT/CUSUM gate (requires KalmanGainStiffness)
-CounterEvidenceBandM = 0.02       # length-DOF surprise deadband (m): innovations within this are "coherent"
-CounterEvidenceBandRad = 0.05     # yaw surprise deadband (rad)
-# Barrier = base + lambda·views, SPLIT position (cx,cy) vs size/shape so the chair CENTRE locks harder
-# than its extents (position drifts one-sided with robot localisation → it was unlocking ~3× more than w/h).
-CounterEvidenceBasePos = 6.0      # position barrier floor (excess-bands) — centre heavily locked
-CounterEvidenceLambdaPos = 1.0    # extra position barrier per accumulated equivalent-view
-CounterEvidenceBaseSize = 3.0     # size/shape barrier floor (excess-bands)
-CounterEvidenceLambdaSize = 0.5   # extra size/shape barrier per accumulated equivalent-view
-CounterEvidenceDecay = 0.8        # per-coherent-frame pay-down of the accumulator (evidence FOR the belief)
-CounterEvidenceUnlockDeflate = 0.3  # on unlock, multiply that DOF's accumulated info by this (concede the old estimate)
-CounterEvidenceStepCap = 1.0      # cap per-frame CUSUM increment (excess-bands) → unlock needs a RUN, not one outlier
-# YOLO mask-score weighting: w = clamp01((score−floor)/(ref−floor))^power. IMPORTANT: a partially-viewed
-# chair scores LOW (~0.3–0.45 here), so floor/ref must sit in that band — floor too high nukes every mask
-# (w=0 → the Fisher accumulator dies → no maturity stiffening → UNSTABLE, the bug just fixed). Tune to
-# your detector: floor just above the noise score, ref at a confident score. Set MaskConfWeight=false to disable.
-MaskConfWeight = true             # weight the observation Fisher info by w(mask_score)
-MaskConfFloor = 0.2               # score at/below which the mask is ~ignored
-MaskConfRef = 0.5                 # score at/above which the mask is fully trusted (w=1)
-MaskConfPower = 2.0               # steepness of the trust ramp between floor and ref
-RtCovUpload = true                # upload the chair pose covariance (rt_covariance_att, 6×6 SE3) onto the room→chair RT edge, from the Fisher per-DOF precision
-RtCovScale = 1.0                  # var = RtCovScale / fisher_info_raw; calibrate toward NEES≈1 (raw curvature over-counts correlated points), like bottle CovEffScale
-
-[SampleQueue]
-RfeWeightGain = 0.25      # lower than 1.0 keeps historical RFE anchors influential
-MinAnchorWeight = 0.12    # floor for anchor weight in optimization/coverage
+RtCovUpload = true          # upload the chair pose covariance (rt_covariance_att, 6×6 SE3) onto the room→chair RT edge from the belief Σ
+RtCovScale = 1.0            # var = RtCovScale · Σ_ii; calibrate toward NEES≈1
+RtCovAddChain = true        # Part B: add the localization/chain cov J·Σ_chain·Jᵀ to the published RT cov
 
 [Tracker]
-# Multi-instance birth/associate/death (shared rc::InstanceTracker). OFF → legacy prior-scaffold +
-# greedy nearest-mask. ON → masks are associated to instances by a covariance-gated 1-to-1, an
-# unexplained mask spawns a new chair, and the MERGE operator collapses two instances on the same chair.
-Enabled = true 
+# Multi-instance birth/associate/death (shared rc::InstanceTracker) — the only instance-lifecycle path.
+# Masks are associated to instances by a covariance-gated 1-to-1, an unexplained mask spawns a new chair,
+# and the MERGE operator collapses two instances on the same chair.
 GateMahalanobis = 9.0     # χ²₂ gate (~3σ) for a mask↔instance match once it has a cov
 GateFallbackM = 0.40     # metric XY gate (m) before an instance has a usable covariance
 DetectionNoiseM = 0.20   # R in the association innovation cov S=P+R²I (≥ centroid-vs-fit offset)
 BirthFrames = 8          # frames a mask must stay unexplained before spawning a chair
 DeathFrames = 300        # frames an instance may go unobserved before retirement
 DeathEnabled = false     # OFF: a chair is persistent furniture — removed only by MERGE
-BirthMinSepM = 0.70      # a birth must be ≥ this (m) from every existing chair (anti-duplicate). Chairs are
-                         # ~0.45m wide and the fit centroid wanders with yaw/cov while converging, so the same
-                         # physical chair presents detection centroids that drift ~0.5m off its instance xy —
-                         # a 0.40 gate let a same-chair duplicate spawn. Real chairs are ≥1m apart → 0.70 is safe.
-MergeOverlap = 0.20      # collapse two instances whose seat footprints overlap ≥ this fraction of the
-                         # smaller (same chair fitted twice), keeping the more-observed. 0 disables. Lowered
-                         # 0.30→0.20 so a drifting duplicate collapses sooner (it overlaps the real chair only
-                         # intermittently while its cov is loose).
-# Stillbirth prune — a phantom born from association churn (it stole a detection the real chair then re-won)
-# starves once the real instance reclaims its mask. Prune a YOUNG instance (still inside its probation
-# window) that the tracker leaves unassigned for a sustained streak. A real chair locks on and matches
-# essentially every cycle → its streak never reaches Patience → it survives probation and becomes permanent
-# furniture (immune, matching DeathEnabled=false). Set PruneEnabled=false to disable.
+BirthMinSepM = 0.70      # a birth must be ≥ this (m) from every existing chair (anti-duplicate)
+MergeOverlap = 0.20      # collapse two instances whose seat footprints overlap ≥ this fraction of the smaller, keeping the more-observed. 0 disables.
+# Stillbirth prune — a phantom born from association churn starves once the real instance reclaims its
+# mask. Prune a YOUNG instance (still inside its probation window) left unassigned for a sustained streak.
 PruneEnabled = true
 PruneMaturityCycles = 90 # probation window: an instance older than this is permanent furniture, never pruned
 PrunePatience = 30       # consecutive tracker-unassigned cycles within probation → prune as stillborn
@@ -179,7 +107,6 @@ BirthSeatD = 0.45
 BirthSeatH = 0.45
 BirthBackH = 0.45
 NllCost = false          # association cost = ½(m²+ln|S|) NLL (compete by likelihood, not raw distance)
-                         # vs raw squared-Mahalanobis. Gate is m² either way. Matters under clutter.
 
 [Ice]
 Warn.Connections = "0"

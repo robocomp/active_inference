@@ -98,6 +98,7 @@ void SpecificWorker::request_shutdown()
 	if (shutting_down_.exchange(true))
 		return;
 
+	display_.save_window_geometry();   // persist the standalone planner window (GUI thread)
 	cleanup_owned_nodes();
 	stop_robot();
 }
@@ -228,20 +229,12 @@ void SpecificWorker::initialize()
 	connect(G.get(), &DSR::DSRGraph::update_edge_signal, this,
 	        &SpecificWorker::modify_edge_slot, Qt::QueuedConnection);
 
-	/***
-	Custom Widget
-	In addition to the predefined viewers, Graph Viewer allows you to add various widgets designed by the developer.
-	The add_custom_widget_to_dock method is used. This widget can be defined like any other Qt widget,
-	either with a QtDesigner or directly from scratch in a class of its own.
-	The add_custom_widget_to_dock method receives a name for the widget and a reference to the class instance.
-	***/
-	//If you have more than one graph, you need to connect to the specific graph with the name
-	//graph_viewers.at("")->add_custom_widget_to_dock("CustomWidget", &custom_widget);
+	// The planner GUI (ControllerDisplay) is its OWN top-level window, NOT docked into the DSR graph
+	// viewer — so the agent runs with Agent.graph=false (no DSRViewer created). See ControllerDisplay.
 	// User-input callbacks fire on the GUI thread but mutate session_/path_controller_
 	// state owned by the control thread. Marshal them through the command queue so
 	// they execute on the control thread, avoiding data races with compute().
-	display_.initialize(graph_viewers,
-	                  obstacle_tracker_.lidar_buffer(),
+	display_.initialize(obstacle_tracker_.lidar_buffer(),
 	                  [this](const QPointF &point) { enqueue_command([this, point]() { set_manual_target(point); }); },
 	                  [this]() { enqueue_command([this]() { clear_manual_target(); }); },
 	                  [this](bool checked)

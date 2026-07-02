@@ -28,44 +28,23 @@ TableConfig load_table_config(const ConfigLoader& cfg)
         return cfg.exists(k) ? cfg.get<bool>(k) : def;
     };
 
-    // Paths
-
     // Agent convergence
     out.state_eps                = getf("TableConcept.StateEps",               0.04f);
     out.K_stable                 = geti("TableConcept.KStable",                30);
-    out.max_direct_fit_points    = geti("TableConcept.MaxDirectFitPoints",     400);
     out.detection_alive_max_frames = geti("TableConcept.DetectionAliveMaxFrames", 40);
-    out.M_diverge                = geti("TableConcept.MDiverge",               20);
-    out.explanation_ratio_thresh = getf("TableConcept.ExplanationRatioThresh", 0.3f);
     out.obs_distance             = getf("TableConcept.ObsDistance",            1.8f);
-    out.delta_min                = getf("TableConcept.DeltaMin",               20.0f);
     out.epistemic_cooldown_cycles= geti("TableConcept.EpistemicCooldownCycles", 200);
     out.table_log_period_frames  = geti("TableConcept.TableLogPeriodFrames",   30);
     out.voxel_bank_max_points    = geti("TableConcept.VoxelBankMaxPoints",     4000);
     out.voxel_bank_quantization_m= getf("TableConcept.VoxelBankQuantizationM", 0.02f);
     out.voxel_select_radius_margin_m = getf("TableConcept.VoxelSelectRadiusMarginM", 0.50f);
     out.voxel_select_height_margin_m = getf("TableConcept.VoxelSelectHeightMarginM", 0.25f);
-    out.top_band_gate_enabled    = getb("TableConcept.TopBandGate",            false);
-    out.top_band_m               = getf("TableConcept.TopBandM",               0.08f);
 
-    // TableModel
+    // TableModel geometry / mask split
     out.sigma_obs          = getf("TableModel.SigmaObs",          0.05f);
-    out.lambda_size        = getf("TableModel.LambdaSize",        0.15f);
-    out.lambda_extent      = getf("TableModel.LambdaExtent",      2.0f);
-    out.extent_pct_lo      = getf("TableModel.ExtentPctLo",       0.02f);
-    out.extent_pct_hi      = getf("TableModel.ExtentPctHi",       0.98f);
-    out.lambda_pos         = getf("TableModel.LambdaPos",         0.05f);
-    out.lambda_state       = getf("TableModel.LambdaState",       0.02f);
-    out.lambda_angle       = getf("TableModel.LambdaAngle",       0.01f);
-    out.prior_size_std     = getf("TableModel.PriorSizeStd",      0.30f);
-    out.evidence_sigma_m   = getf("TableModel.EvidenceSigmaM",    0.12f);
-    out.evidence_ema_alpha = getf("TableModel.EvidenceEmaAlpha",  0.9f);
-    out.process_std_pos_m  = getf("WarmStart.ProcessStdPosM",     0.001f);
-    out.view_novelty_scale_m = getf("TableModel.ViewNoveltyScaleM", 0.15f);
-    out.view_novelty_floor   = getf("TableModel.ViewNoveltyFloor",  0.05f);
-    out.view_novelty_gate    = getb("TableModel.ViewNoveltyGate",   true);
-    out.torch_threads      = geti("TableModel.TorchThreads",     2);
-    out.use_ai2              = getb("TableModel.UseAI2",              false);
+    out.sdf_threshold_for_storage = getf("TableModel.SdfThresholdForStorage", 0.08f);
+
+    // ── AI2 belief ────────────────────────────────────────────────────────────
     out.ai2_sigma_base_m     = getf("TableModel.AI2SigmaBaseM",       0.03f);
     out.ai2_clutter_frac     = getf("TableModel.AI2ClutterFrac",      0.10f);
     out.ai2_clutter_scale_m  = getf("TableModel.AI2ClutterScaleM",    0.12f);
@@ -79,66 +58,10 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.ai2_range_noise_yaw_per_m = getf("TableModel.AI2RangeNoiseYawPerM", 0.03f);
     out.ai2_trunc_gate_frac    = getf("TableModel.AI2TruncGateFrac",   0.10f);
     out.ai2_gn_iters         = geti("TableModel.AI2GnIters",          4);
-    out.optimization_iters = geti("TableModel.OptimizationIters", 10);
-    out.optimization_lr    = getf("TableModel.OptimizationLr",    0.05f);
-    out.grad_clip          = getf("TableModel.GradClip",          2.0f);
-    out.optimizer_type     = gets("TableModel.OptimizerType",     "adam");
-    out.sgd_momentum       = getf("TableModel.SgdMomentum",       0.9f);
-    {
-        const auto loss_name = gets("TableModel.RobustLoss", "quadratic");
-        const auto loss_type = robust_loss_type_from_string(loss_name);
-        if (loss_type.has_value())
-            out.robust_loss = loss_type.value();
-        else
-        {
-            std::print("table_concept: unknown robust loss '{}' - using quadratic\n", loss_name);
-            out.robust_loss = RobustLossType::Quadratic;
-        }
-    }
-    out.robust_loss_scale  = getf("TableModel.RobustLossScale",  0.10f);
-    out.robust_gnc_start_scale = getf("TableModel.RobustGncStartScale", 0.80f);
-    out.mask_precision     = getf("TableModel.MaskPrecision",     0.30f);
-    out.sil_tangent_samples = geti("TableModel.MaskSilhouetteSamples", 8);
-    out.robust_gnc_decay_cycles = geti("TableModel.RobustGncDecayCycles", 20);
+    out.ai2_csv_path         = gets("TableModel.AI2CsvPath",          "");
 
-    // SampleQueue
-    out.num_angle_bins               = geti("SampleQueue.NumAngleBins",              24);
-    out.num_z_bins                   = geti("SampleQueue.NumZBins",                  10);
-    out.max_per_bin                  = geti("SampleQueue.MaxPerBin",                 2);
-    out.sdf_threshold_for_storage    = getf("SampleQueue.SdfThresholdForStorage",    0.30f);
-    out.min_frames_before_historical = geti("SampleQueue.MinFramesBeforeHistorical", 10);
-    out.historical_warmup_frames     = geti("SampleQueue.HistoricalWarmupFrames",    5);
-    out.max_new_points_per_frame     = geti("SampleQueue.MaxNewPointsPerFrame",      30);
-    out.rfe_alpha                    = getf("SampleQueue.RfeAlpha",                  0.98f);
-    out.rfe_max_threshold            = getf("SampleQueue.RfeMaxThreshold",           2.0f);
-    out.rfe_weight_gain              = getf("SampleQueue.RfeWeightGain",             0.25f);
-    out.min_anchor_weight            = getf("SampleQueue.MinAnchorWeight",           0.12f);
-    out.edge_bonus_weight            = getf("SampleQueue.EdgeBonusWeight",           0.3f);
-    out.edge_proximity_threshold     = getf("SampleQueue.EdgeProximityThreshold",    0.05f);
-
-    // WarmStart
-    out.warm_pts_min                  = getf("WarmStart.PtsMin",                  12.0f);
-    out.warm_pts_max                  = getf("WarmStart.PtsMax",                  30.0f);
-    out.fisher_info_decay             = getf("WarmStart.FisherInfoDecay",          0.95f);
-    out.fisher_peak_decay             = getf("WarmStart.FisherPeakDecay",          1.0f);
-    out.fisher_peak_ratchet           = getf("WarmStart.FisherPeakRatchet",        2.5f);
-    out.fisher_peak_ema               = getf("WarmStart.FisherPeakEma",            0.30f);
-    out.fisher_process_std_m          = getf("WarmStart.FisherProcessStdM",        0.005f);
-    out.fisher_process_std_yaw        = getf("WarmStart.FisherProcessStdYaw",      0.01f);
-    out.bad_fit_fe_ratio              = getf("WarmStart.BadFitFeRatio",            4.0f);
-    out.fe_baseline_ema               = getf("WarmStart.FeBaselineEma",            0.10f);
-    out.fisher_grad_clamp             = getf("WarmStart.FisherGradClamp",          2.0f);
-    out.fisher_views_half             = getf("WarmStart.FisherViewsHalf",          4.0f);
-    out.mask_conf_floor               = getf("WarmStart.MaskConfFloor",           0.2f);
-    out.mask_conf_ref                 = getf("WarmStart.MaskConfRef",             0.5f);
-    out.mask_conf_power               = getf("WarmStart.MaskConfPower",           2.0f);
-    out.fisher_csv_path               = gets("WarmStart.FisherCsvPath",            "");
-    out.ai2_csv_path                  = gets("TableModel.AI2CsvPath",              "");
-    out.rt_cov_scale                  = getf("WarmStart.RtCovScale",              1.0f);
-    out.rt_cov_add_chain              = getb("WarmStart.RtCovAddChain",          true);
-    out.warm_confidence_decay         = getf("WarmStart.ConfidenceDecay",         0.70f);
-    out.warm_confidence_coverage_gain = getf("WarmStart.ConfidenceCoverageGain",  0.35f);
-    out.warm_confidence_residual_gain = getf("WarmStart.ConfidenceResidualGain",  0.65f);
+    out.rt_cov_scale                  = getf("TableConcept.RtCovScale",           1.0f);
+    out.rt_cov_add_chain              = getb("TableConcept.RtCovAddChain",       true);
 
     out.tracker_gate_mahalanobis = getf("Tracker.GateMahalanobis",  9.0f);
     out.tracker_gate_fallback_m  = getf("Tracker.GateFallbackM",    0.50f);

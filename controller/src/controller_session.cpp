@@ -387,8 +387,8 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                 proximity_csv_.open(params_->proximity_csv_path, std::ios::out | std::ios::trunc);
                 if (proximity_csv_.is_open())
                     proximity_csv_ << "t_ms,rx,ry,rtheta,vx,vy,omega,cmd_adv,cmd_side,cmd_rot,min_esdf,"
-                                      "nearest_lidar_m,nearest_obst_m,n_obst,safety_guard,blockage_ahead,"
-                                      "path_blocked,blk_x,blk_y,blk_r,dist_to_goal\n";
+                                      "n_esdf_pts,nearest_esdf_pt_m,nearest_lidar_m,nearest_obst_m,n_obst,"
+                                      "safety_guard,blockage_ahead,path_blocked,blk_x,blk_y,blk_r,dist_to_goal\n";
                 proximity_csv_open_ = true;
             }
             if (proximity_csv_.is_open())
@@ -396,8 +396,9 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                 proximity_csv_ << t_ms << ',' << rp.x() << ',' << rp.y() << ',' << robot_pose.theta << ','
                                << room_vel_.vx << ',' << room_vel_.vy << ',' << room_vel_.omega << ','
                                << control_output.adv << ',' << control_output.side << ',' << control_output.rot << ','
-                               << control_output.min_esdf << ',' << nearest_lidar_out << ',' << nearest_out << ','
-                               << polys.size() << ','
+                               << control_output.min_esdf << ','
+                               << control_output.n_esdf_points << ',' << control_output.nearest_esdf_point_m << ','
+                               << nearest_lidar_out << ',' << nearest_out << ',' << polys.size() << ','
                                << (control_output.safety_guard_triggered ? 1 : 0) << ','
                                << (control_output.blockage_detected_ahead ? 1 : 0) << ','
                                << (control_output.path_blocked ? 1 : 0) << ','

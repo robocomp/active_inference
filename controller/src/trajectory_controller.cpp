@@ -474,6 +474,16 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
 
     const auto lidar_points = read_lidar_points_robot(robot_pose);
 
+    // ESDF-input diagnostics: count the raw points that survived the self-filter and the nearest one.
+    // If something is in the cloud yet nearest_esdf_point_m stays large, it was dropped before the ESDF.
+    out.n_esdf_points = static_cast<int>(lidar_points.size());
+    {
+        float nearest = std::numeric_limits<float>::infinity();
+        for (const auto &p : lidar_points)
+            nearest = std::min(nearest, std::hypot(p.x(), p.y()));
+        out.nearest_esdf_point_m = std::isfinite(nearest) ? nearest : -1.f;
+    }
+
     const auto t_mppi_start = std::chrono::steady_clock::now();
 
     const int T = adaptive_T_;

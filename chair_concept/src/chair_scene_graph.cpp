@@ -23,104 +23,6 @@ ChairSceneGraph::ChairSceneGraph(std::shared_ptr<DSR::DSRGraph> graph,
     : G_(std::move(graph)), rt_api_(rt_api), cfg_(cfg), relayout_(std::move(relayout))
 {}
 
-void ChairSceneGraph::scaffold_missing_chair_nodes(const std::vector<ChairPrior>& priors,
-                                                   const MaskIngestor::MasksPacket& masks,
-                                                   std::uint64_t room_node_id)
-{
-    if (!masks.valid || priors.empty())
-        return;
-
-    std::vector<bool> mask_used(masks.slices.size(), false);
-
-    for (const auto& p : priors)
-    {
-        if (G_->get_node(p.node_name).has_value())
-            continue;
-
-        int best_mask_idx = -1;
-        int fallback_mask_idx = -1;
-        float best_dist_xy = std::numeric_limits<float>::max();
-        const float prior_half_diag = 0.5f * std::sqrt(p.seat_w * p.seat_w + p.seat_d * p.seat_d);
-        const float max_match_dist_xy = std::max(1.0f, 3.0f * p.sigma_pose + prior_half_diag);
-        for (std::size_t i = 0; i < masks.slices.size(); ++i)
-        {
-            if (mask_used[i])
-                continue;
-
-            const auto& slice = masks.slices[i];
-            if (slice.label != "chair")
-                continue;
-            if (slice.support_end <= slice.support_begin)
-                continue;
-
-            if (fallback_mask_idx < 0)
-                fallback_mask_idx = static_cast<int>(i);
-
-            const float dx = slice.centroid.x() - p.room_x_m;
-            const float dy = slice.centroid.y() - p.room_y_m;
-            const float dist_xy = std::hypot(dx, dy);
-            if (dist_xy <= max_match_dist_xy && dist_xy < best_dist_xy)
-            {
-                best_dist_xy = dist_xy;
-                best_mask_idx = static_cast<int>(i);
-            }
-        }
-
-        if (best_mask_idx < 0)
-            best_mask_idx = fallback_mask_idx;
-
-        if (best_mask_idx < 0)
-        {
-            std::print("chair_concept: no usable chair mask for '{}' yet\n", p.node_name);
-            continue;
-        }
-
-        const auto& matched_slice = masks.slices[static_cast<std::size_t>(best_mask_idx)];
-        mask_used[static_cast<std::size_t>(best_mask_idx)] = true;
-
-        auto room_opt = G_->get_node(room_node_id);
-        if (not room_opt.has_value())
-        {
-            qWarning() << "chair_concept: room node missing, cannot scaffold" << p.node_name.c_str();
-            continue;
-        }
-
-        DSR::Node chair_node = DSR::Node::create<chair_node_type>(p.node_name);
-        G_->add_or_modify_attrib_local<width_m_att> (chair_node, p.seat_w);
-        G_->add_or_modify_attrib_local<depth_m_att> (chair_node, p.seat_d);
-        G_->add_or_modify_attrib_local<height_m_att>(chair_node, p.seat_h + p.back_h);
-        G_->add_or_modify_attrib_local<level_att>   (chair_node, 3);
-        G_->add_or_modify_attrib_local<parent_att>  (chair_node, room_node_id);
-        // Canvas position: derive from room node + fixed offset so the viewer doesn't randomize
-        // pos_x/pos_y on every render tick.
-        {
-            const float rpx = G_->get_attrib_by_name<pos_x_att>(room_opt.value()).value_or(200.f);
-            const float rpy = G_->get_attrib_by_name<pos_y_att>(room_opt.value()).value_or(200.f);
-            G_->add_or_modify_attrib_local<pos_x_att>(chair_node, rpx + 150.f);
-            G_->add_or_modify_attrib_local<pos_y_att>(chair_node, rpy +  50.f);
-        }
-
-        const auto id_opt = G_->insert_node(chair_node);
-        if (not id_opt.has_value())
-        {
-            qWarning() << "chair_concept: failed to insert node" << p.node_name.c_str();
-            continue;
-        }
-
-        const float z = 0.0f;   // chair node origin = base on the floor (see write_rt_pose)
-        rt_api_->insert_or_assign_edge_RT(room_opt.value(), id_opt.value(),
-                                          {matched_slice.centroid.x(), matched_slice.centroid.y(), z},
-                                          {0.0f, 0.0f, p.yaw_rad});
-
-        if (relayout_)
-            relayout_();
-
-        std::print("chair_concept: created node '{}' id={} from masks frame={} at ({:.2f}, {:.2f})\n",
-                   p.node_name, id_opt.value(), masks.frame_id,
-                   matched_slice.centroid.x(), matched_slice.centroid.y());
-    }
-}
-
 std::uint64_t ChairSceneGraph::create_instance_from_detection(const Eigen::Vector3f& centroid_room,
                                                               std::uint64_t room_node_id)
 {
@@ -210,15 +112,6 @@ void ChairSceneGraph::step_write_model(ChairInstance& inst, DSR::Node& node,
     }
     G_->add_or_modify_attrib_local<free_energy_att>(node, free_energy);
 
-    // Export the current historical RFE queue (remembered evidence) as XYZ triples.
-    {
-        const auto qpts = inst.queue.points();
-        std::vector<float> qflat;
-        qflat.reserve(qpts.size() * 3);
-        for (const auto& p : qpts) { qflat.push_back(p.x()); qflat.push_back(p.y()); qflat.push_back(p.z()); }
-        G_->runtime_checked_add_or_modify_attrib_local(node, "rfe_pts", qflat);
-    }
-
     // Export full chair-owned voxel memory (room frame) as XYZ triples.
     {
         std::vector<float> bank_flat;
@@ -267,21 +160,15 @@ void ChairSceneGraph::write_rt_covariance(std::uint64_t room_id, ChairInstance& 
     const float scale = std::max(1e-6f, cfg_.rt_cov_scale);
     constexpr float big = 1e3f;   // unobservable / never-seen DOF → large variance
 
-    float vx, vy, vz, vyaw;
-    if (cfg_.use_ai2 and inst.ai2_initialized)
-    {
-        // AI2: publish the belief's full Σ over [cx,cy,cz,yaw,...] (the legacy fisher_info_raw is empty
-        // under AI2 → it produced big=1e3 garbage on every DOF).
-        const auto& S = inst.ai2_belief.covariance();
-        vx = scale * S(0, 0); vy = scale * S(1, 1); vz = scale * S(2, 2); vyaw = scale * S(3, 3);
-    }
-    else
-    {
-        // Legacy per-DOF Fisher precision [cx,cy,cz,yaw,seat_w,seat_d,seat_h,back_h].
-        const auto& Y = inst.stab.fisher_info_raw;
-        const auto var = [&](int j) -> float { return Y[j] > 1e-6f ? scale / Y[j] : big; };
-        vx = var(0); vy = var(1); vz = var(2); vyaw = var(3);
-    }
+    if (not inst.ai2_initialized)
+        return;   // belief not seeded yet — nothing calibrated to publish
+
+    // The belief carries a full 8×8 Σ over [cx,cy,cz,yaw,seat_w,seat_d,seat_h,back_h] — publish it directly.
+    const auto& S = inst.ai2_belief.covariance();
+    float vx   = scale * S(0, 0);   // cx
+    float vy   = scale * S(1, 1);   // cy
+    float vz   = scale * S(2, 2);   // cz (floor height)
+    float vyaw = scale * S(3, 3);   // yaw
     // Localization/chain covariance J·Σ_chain·Jᵀ — the chair's room-frame position is conditional on the
     // robot pose, so its published uncertainty must include it.
     vx += inst.chain_cov_xx;
@@ -383,31 +270,6 @@ void ChairSceneGraph::write_chair_mesh(ChairInstance& inst, DSR::Node& node)
 {
     const std::vector<float> verts = make_chair_mesh(inst.model.state());
     G_->add_or_modify_attrib_local<mesh_vertices_att>(node, verts);
-}
-
-Eigen::Matrix2f ChairSceneGraph::read_robot_covariance(std::uint64_t room_id) const
-{
-    const auto robots = G_->get_nodes_by_type("robot");
-    if (not robots.empty() and room_id != 0)
-    {
-        const auto edge = G_->get_edge(room_id, robots.front().id(), "RT");
-        if (edge.has_value())
-        {
-            const auto cov_opt = G_->get_attrib_by_name<rt_se2_covariance_att>(edge.value());
-            if (cov_opt.has_value())
-            {
-                const auto& c = cov_opt.value().get();
-                // rt_se2_covariance is a 9-vector (3×3 row-major for [x,y,θ]); take the XY block.
-                if (c.size() >= 4)
-                {
-                    Eigen::Matrix2f m;
-                    m << c[0], c[1], c[3], c[4];
-                    return m;
-                }
-            }
-        }
-    }
-    return Eigen::Matrix2f::Identity() * 0.01f;   // fallback: small identity (high confidence)
 }
 
 void ChairSceneGraph::write_rt_pose(std::uint64_t room_id, ChairInstance& inst)

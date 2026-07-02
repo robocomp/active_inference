@@ -17,6 +17,7 @@
 // SpecificWorker::initialize().
 
 #include <string>
+#include <vector>
 
 #include <QRectF>
 
@@ -114,6 +115,11 @@ struct RoomConfig
     // uses the producer's dedicated domain. Subscribers are created lazily once those
     // nodes + descriptors exist.
     bool        LIDAR_USE_MEDIA   = true;   // false ⇒ DSR graph laser_* only
+
+    // Camera-overlay object projection: DSR node TYPES whose oriented boxes are projected on
+    // the live RGB image (alongside the always-drawn walls). Config Overlay.ObjectTypes is a
+    // comma-separated list (e.g. "object,table,cylinder,chair"); order is irrelevant.
+    std::vector<std::string> OVERLAY_OBJECT_TYPES = {"object", "table", "cylinder", "chair"};
 };
 
 // Load the agent params + RoomConcept params + EpistemicController/planner params,

@@ -51,6 +51,7 @@ namespace rc::semantic { class YoloSemanticProcessor; }
 namespace rc { class VoxelOpenGLViewer; }
 namespace rc { class YoloViewer; }
 namespace rc { class ImagePopupViewer; }
+namespace rc { class RicohYoloWorker; }
 
 class SpecificWorker : public GenericWorker
 {
@@ -144,6 +145,10 @@ class SpecificWorker : public GenericWorker
         std::unique_ptr<rc::VoxelOpenGLViewer> voxel_viewer_gl;
         std::unique_ptr<rc::YoloViewer>        yolo_viewer_;
         std::unique_ptr<rc::ImagePopupViewer>  ricoh_viewer_;   // RGBD_360 panorama popup
+        // Ricoh 360 peripheral YOLO, on its own thread (own model/session) — see ricoh_yolo_worker.h.
+        // Started in initialize() only when params.RICOH_YOLO_ENABLED; stopped explicitly in
+        // request_shutdown() BEFORE scene_processor is torn down (the worker holds a raw ptr to it).
+        std::unique_ptr<rc::RicohYoloWorker>   ricoh_yolo_worker_;
 
         // Decoupled viewer-refresh timer (GUI thread). Pushes the LATEST robot pose to the 3D viewer
         // at a fluid cadence, independent of the ~7-10 Hz perception/camera pipeline, so robot motion

@@ -25,7 +25,6 @@
 #include "chair_config.h"       // rc::ChairConfig
 #include "chair_instance.h"     // rc::ChairInstance, ChairState
 #include "../../common/mask_ingestor/mask_ingestor.h"      // MaskIngestor::MasksPacket
-#include "prior_store.h"        // ChairPrior
 #include "epistemic_planner.h"  // EpistemicProposal
 
 namespace rc {
@@ -37,12 +36,6 @@ public:
                     DSR::RT_API* rt_api,
                     const ChairConfig& cfg,
                     std::function<void()> relayout);
-
-    // Create any "chair_N" node named in priors that doesn't exist yet, matching each prior to the
-    // nearest unused "chair" mask slice and anchoring it to the room.
-    void scaffold_missing_chair_nodes(const std::vector<ChairPrior>& priors,
-                                      const MaskIngestor::MasksPacket& masks,
-                                      std::uint64_t room_node_id);
 
     // Data-driven birth: create a fresh "chair_N" node at the detection centroid (room frame), seeded
     // with the Tracker.Birth* default geometry. Returns the new node id (0 on failure). Used by the
@@ -56,14 +49,11 @@ public:
     void step_write_model(ChairInstance& inst, DSR::Node& node, std::uint64_t room_id, float free_energy);
     void write_rt_pose(std::uint64_t room_id, ChairInstance& inst);
 
-    // Attach the chair pose covariance (rt_covariance_att, 6×6 SE3) on the room→chair RT edge, built
-    // from the Fisher filter's per-DOF posterior precision. Writes when `force` (a geometry republish)
+    // Attach the chair pose covariance (rt_covariance_att, 6×6 SE3) on the room→chair RT edge, mapped
+    // from the belief's full Σ. Writes when `force` (a geometry republish)
     // OR the covariance trace changed meaningfully since last write — so a stationary-but-tightening
     // chair stays current without per-cycle edge churn. No-op if disabled / the edge is absent.
     void write_rt_covariance(std::uint64_t room_id, ChairInstance& inst, bool force);
-
-    // Robot XY localisation covariance off the room→robot RT edge (0.01·I fallback).
-    Eigen::Matrix2f read_robot_covariance(std::uint64_t room_id) const;
 
     // Write the epistemic next-best-view proposal onto a chair node.
     void write_epistemic_proposal(DSR::Node& node, const EpistemicProposal& prop);

@@ -71,6 +71,7 @@ float update(Model& m, typename Model::State& state, Eigen::Matrix<float, N, N>&
     const MatN P0 = Sigma.inverse();
     VecN theta = state.vec();
     const VecN Sc_inv = m.common_mode_inv_diag(frame);
+    const MatN Scinv  = Sc_inv.asDiagonal();
     const int  P = m.n_prims();
 
     MatN Id; VecN bd;
@@ -92,12 +93,28 @@ float update(Model& m, typename Model::State& state, Eigen::Matrix<float, N, N>&
                 bd.noalias() += -w * J * d;
             }
         }
+        // Optional model-provided extra factors (e.g. bottle's occluding-contour silhouette, which pins the
+        // depth-degenerate radius a symmetric cylinder's SDF cannot). Folded into the SAME GN normal
+        // equations so they inform the mean AND the posterior Σ. Detected via C++23 requires, so a model
+        // WITHOUT the hook (table/chair) is completely unaffected — no signature, no call.
+        if constexpr (requires { m.accumulate_extra(s, frame, Id, bd); })
+            m.accumulate_extra(s, frame, Id, bd);
     };
 
     for (int it = 0; it < m.gn_iters(); ++it)
     {
         accumulate(theta);
-        const VecN dtheta = (P0 + Id).ldlt().solve(P0 * (prior_mean - theta) + bd);
+        // Schur-consistent within-frame common-mode marginalisation: apply the SAME saturation operator
+        // (I − Id(Id+Σc⁻¹)⁻¹) to BOTH the curvature (→ Ieff) and the gradient (→ beff), so the GN MEAN sees
+        // the same saturated information as the posterior Σ. The earlier code paired the capped Ieff-implied
+        // step with the FULL gradient bd — a per-frame ML refit that let per-frame SHARED bias (viewpoint
+        // mask under-segmentation, exactly what Σc models) move the mean at full gain → the position wander.
+        // b = Id·δθ_Newton ⇒ beff = Ieff·δθ_Newton, so when the prior is weak this is still the full Newton
+        // step (recovery preserved); damping only engages once the prior is competitively strong.
+        const MatN IdMinv = Id * (Id + Scinv).inverse();
+        const MatN Ieff   = Id - IdMinv * Id;
+        const VecN beff   = bd - IdMinv * bd;
+        const VecN dtheta = (P0 + Ieff).ldlt().solve(P0 * (prior_mean - theta) + beff);
         if (!dtheta.allFinite()) break;
         theta += dtheta;
         State s = State::from_vec(theta);
@@ -106,11 +123,10 @@ float update(Model& m, typename Model::State& state, Eigen::Matrix<float, N, N>&
     }
     State s = State::from_vec(theta);
     m.apply_constraints(s);
-    m.canonicalize(s);          // once: model's representation fold (e.g. w≥h ⇒ swap + yaw+=π/2)
+    m.canonicalize(s);          // once: model's representation fold (e.g. continuity fold over the symmetry)
     state = s;
 
     accumulate(state.vec());    // data information at the converged state
-    const MatN Scinv  = Sc_inv.asDiagonal();
     const MatN IdMinv = Id * (Id + Scinv).inverse();
     const MatN Ieff   = Id - IdMinv * Id;
     Sigma = (P0 + Ieff).inverse();
@@ -130,7 +146,13 @@ float update(Model& m, typename Model::State& state, Eigen::Matrix<float, N, N>&
 }
 
 // Predicted Fisher information (N×N) that observing `pts` would add at variance R: I = Σₚ (1/R) J Jᵀ,
-// J = ∂sdf/∂θ of the nearest primitive at p. Used by the epistemic Σ-based next-best-view scorer.
+// J = ∂sdf/∂θ of the nearest primitive at p. Used by the epistemic Σ-based next-best-view scorer. NOTE:
+// deliberately NOT common-mode-saturated — the NBV needs the RELATIVE, per-DOF-anisotropic information to
+// rank faces ("which view resolves which DOF"), and the Woodbury cap saturates the high-info directions
+// toward Σc isotropically, which INVERTS the face ranking (verified via the self_test NBV check). The
+// "don't be overconfident about a single dense view" concern is instead handled where it belongs: the
+// planner scores gain against the REPORTED covariance (Σ with the yaw mode-entropy folded in), so an
+// unresolved DOF dominates Σ and the NBV attacks it regardless of the raw predicted magnitude.
 template <int N, class Model>
 Eigen::Matrix<float, N, N> predicted_information(const Model& m, const typename Model::State& state,
                                                  const std::vector<Eigen::Vector3f>& pts, float R)

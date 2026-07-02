@@ -12,7 +12,7 @@ name = "controller"
 configFile = ""
 domain = 0
 tree = false
-graph = true
+graph = false   # DSR graph viewer optional: the planner GUI is its own top-level window (ControllerDisplay)
 2d = false
 3d = false
 

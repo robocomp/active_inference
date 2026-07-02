@@ -52,8 +52,6 @@ LIST(APPEND SOURCES
   ../src/bottle_affordance.cpp
   ../src/bottle_model.cpp
   ../src/prior_store.cpp
-  ${ACTIVE_INFERENCE_COMMON_DIR}/robust_metrics/robust_metrics.cpp
-  ${ACTIVE_INFERENCE_COMMON_DIR}/robust_metrics/robust_metrics_torch.cpp
   ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_monitor/agent_presence_monitor.cpp
   ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_coordinator/agent_presence_coordinator.cpp
 )
@@ -73,11 +71,7 @@ LIST(APPEND HEADERS
   ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/timeseries_plot.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/custom_widget.h
   ../src/bottle_model.h
-  ${ACTIVE_INFERENCE_COMMON_DIR}/sample_queue/sample_queue.h
-  ../src/sample_queue_geometry.h
   ../src/prior_store.h
-  ${ACTIVE_INFERENCE_COMMON_DIR}/robust_metrics/robust_metrics.h
-  ${ACTIVE_INFERENCE_COMMON_DIR}/robust_metrics/robust_metrics_torch.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_monitor/agent_presence_monitor.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_coordinator/agent_presence_coordinator.h
 )

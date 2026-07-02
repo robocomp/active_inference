@@ -56,6 +56,137 @@ std::vector<SegDetection> YoloProcessor::detect_segmentation_on(const cv::Mat& r
     return detections;
 }
 
+std::vector<SegDetection> YoloProcessor::detect_on_strip(const cv::Mat& rgb_strip) const
+{
+    if (!detector_.has_value() || rgb_strip.empty())
+        return {};
+
+    auto detections = detector_->detect(rgb_strip, true);
+    normalize_filter_and_erode(detections);   // no tray-phantom drop — zed-only calibration
+    return detections;
+}
+
+namespace
+{
+// Circular-pad columns on both sides by wrapping from the opposite edge, so a strip extracted from
+// the padded image already contains its seam neighbourhood contiguously — no modular arithmetic
+// needed anywhere else in the 360 pipeline (including the panorama's own 0/width wraparound seam,
+// which this handles the same way as the two internal strip cuts).
+cv::Mat circular_pad_columns(const cv::Mat& img, int pad)
+{
+    if (pad <= 0 || img.cols <= 0)
+        return img;
+    const int p = std::min(pad, img.cols);
+    const cv::Mat left  = img(cv::Rect(img.cols - p, 0, p, img.rows));
+    const cv::Mat right = img(cv::Rect(0, 0, p, img.rows));
+    cv::Mat padded;
+    cv::hconcat(std::vector<cv::Mat>{left, img, right}, padded);
+    return padded;
+}
+
+float rect_iou(const cv::Rect& a, const cv::Rect& b)
+{
+    const cv::Rect inter = a & b;
+    if (inter.width <= 0 || inter.height <= 0)
+        return 0.0f;
+    const float inter_area = static_cast<float>(inter.area());
+    const float union_area = static_cast<float>(a.area() + b.area()) - inter_area;
+    return union_area > 0.0f ? inter_area / union_area : 0.0f;
+}
+
+// The linear "extended" global coordinate space (see detect_segmentation_360) correctly places every
+// strip EXCEPT the one wraparound pair: the last strip's tail (global >= width, wrapped-around true
+// columns near 0) and the first strip's head (global < strip_w, true columns near 0) represent the
+// SAME physical columns but sit ~width apart numerically — a plain rect_iou would miss that overlap.
+// Try the box shifted by ±width too and take the best match; a real duplicate only ever needs one of
+// the three alignments, and a full-width shift never spuriously matches an unrelated pair (object
+// boxes are always far smaller than the panorama width).
+float rect_iou_with_wrap(const cv::Rect& a, const cv::Rect& b, int width)
+{
+    float best = rect_iou(a, b);
+    cv::Rect shifted = b;
+    shifted.x = b.x + width;
+    best = std::max(best, rect_iou(a, shifted));
+    shifted.x = b.x - width;
+    best = std::max(best, rect_iou(a, shifted));
+    return best;
+}
+} // namespace
+
+std::vector<SegDetection> YoloProcessor::detect_segmentation_360(const cv::Mat& panorama_rgb,
+                                                                  const Detection360Config& cfg)
+{
+    if (!detector_.has_value() || panorama_rgb.empty() || cfg.n_strips <= 0)
+        return {};
+
+    const int width = panorama_rgb.cols;
+    const int strip_w = width / cfg.n_strips;
+    if (strip_w <= 0)
+        return {};
+    const int overlap = std::clamp(cfg.overlap_px, 0, strip_w / 2);
+
+    // padded[0] corresponds to true column (width - overlap); padded[overlap] corresponds to true
+    // column 0. So a strip's global offset (true/global column that its own local column 0 maps to)
+    // is `s*strip_w - overlap` — a plain linear integer, negative for the first strip and running past
+    // `width` for the last, with no special-casing needed for the panorama's wraparound seam.
+    const cv::Mat padded = circular_pad_columns(panorama_rgb, overlap);
+    const int strip_px = strip_w + 2 * overlap;
+
+    struct GlobalDet { SegDetection det; cv::Rect global_bbox; };
+    std::vector<GlobalDet> all;
+
+    for (int s = 0; s < cfg.n_strips; ++s)
+    {
+        const int local_x0 = s * strip_w;
+        if (local_x0 + strip_px > padded.cols)
+            continue;   // width not exactly divisible by n_strips — last sliver dropped, not sliced short
+
+        const cv::Mat strip = padded(cv::Rect(local_x0, 0, strip_px, padded.rows));
+        const int global_offset = s * strip_w - overlap;
+
+        for (auto& d : detect_on_strip(strip))
+        {
+            cv::Rect gbox = d.bbox;
+            gbox.x += global_offset;
+            all.push_back(GlobalDet{std::move(d), gbox});
+        }
+    }
+
+    // Cross-strip merge: an object can appear whole in at most two ADJACENT strips (the ones sharing
+    // the overlap region it sits in), so a same-label, high-IoU box from a different strip is the same
+    // physical object, not a coincidence — greedy keep-highest-confidence, same idea as normal NMS but
+    // across strips instead of across raw proposals within one image.
+    std::sort(all.begin(), all.end(), [](const GlobalDet& a, const GlobalDet& b)
+              { return a.det.confidence > b.det.confidence; });
+
+    std::vector<SegDetection> merged;
+    for (auto& g : all)
+    {
+        const bool duplicate = std::any_of(merged.begin(), merged.end(), [&](const SegDetection& kept)
+        {
+            return kept.label == g.det.label
+                && rect_iou_with_wrap(kept.bbox, g.global_bbox, width) >= cfg.merge_iou;
+        });
+        if (duplicate)
+            continue;
+
+        SegDetection out = std::move(g.det);
+        out.bbox = g.global_bbox;   // extended coords for now (may be <0 or >=width); canonicalized below
+        out.mask = cv::Mat();       // strip-local mask no longer matches this bbox — not needed downstream
+        merged.push_back(std::move(out));
+    }
+
+    for (auto& d : merged)
+    {
+        int x = d.bbox.x % width;
+        if (x < 0)
+            x += width;
+        d.bbox.x = x;
+    }
+
+    return merged;
+}
+
 std::vector<cv::Point> YoloProcessor::get_tray_mask_polygon(const cv::Size& image_size) const
 {
     if (!config_.mask_tray || config_.tray_mask_polygon_px.size() < 3
@@ -99,7 +230,7 @@ bool YoloProcessor::is_accepted_yolo_label(const std::string& label) const
         != config_.accepted_labels.end();
 }
 
-void YoloProcessor::postprocess_yolo_detections(std::vector<SegDetection>& detections) const
+void YoloProcessor::normalize_filter_and_erode(std::vector<SegDetection>& detections) const
 {
     for (auto& detection : detections)
         detection.label = normalize_yolo_label(detection.label);
@@ -120,6 +251,11 @@ void YoloProcessor::postprocess_yolo_detections(std::vector<SegDetection>& detec
         cv::erode(detection.mask, eroded, cv::Mat(), cv::Point(-1, -1), kernel);
         detection.mask = eroded;
     }
+}
+
+void YoloProcessor::postprocess_yolo_detections(std::vector<SegDetection>& detections) const
+{
+    normalize_filter_and_erode(detections);
 
     // Tray phantom removal: the robot's visible tray, if segmented, reads as a "table". So a detection
     // labelled "table" whose ROI overlaps the tray zone IS that phantom — drop it. We no longer black

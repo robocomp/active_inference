@@ -64,14 +64,20 @@ public:
     // Ricoh popup). Discovered from the "ricoh" node descriptor; falls back to the
     // configured domain/topic. Independent of the ZED rgb/depth pipeline.
     bool init_ricoh_media_plane(std::uint32_t domain_id, const std::string& topic);
-    // Drain the ricoh subscriber; decodes into the latest-frame cache ONLY when
-    // ricoh is wanted (window visible), so a hidden popup costs just a poll-discard.
-    void poll_ricoh();
+    bool ricoh_available() const { return media_ricoh_sub_ != nullptr; }
+    // Drain the ricoh subscriber; decodes into the latest-frame cache when ricoh is wanted (window
+    // visible) OR force=true (a one-off decode requested by e.g. rc::RicohYoloWorker's own thread), so
+    // a hidden-and-unforced poll costs just a poll-discard. May be called from the ricoh worker thread
+    // AND the main thread (on_render_tick, when the worker isn't running) — the cache is mutex-guarded.
+    void poll_ricoh(bool force = false);
     void set_ricoh_wanted(bool on) { ricoh_wanted_.store(on, std::memory_order_relaxed); }
-    // Latest decoded panorama (BGR, CV_8UC3); empty until a frame arrives.
-    const cv::Mat& ricoh_bgr() const { return media_ricoh_.bgr; }
+    // Thread-safe snapshot of the latest decoded panorama (BGR, CV_8UC3); empty until a frame arrives.
+    // A cv::Mat copy is a cheap shallow (refcounted) copy, not a pixel copy — safe to call from any
+    // thread while poll_ricoh() concurrently overwrites the cache on another.
+    cv::Mat ricoh_bgr_copy() const;
     // Latest ricoh source stamp (ms); recorded on every poll (even when not decoding) for rate telemetry.
-    std::uint64_t ricoh_last_stamp_ms() const { return ricoh_last_stamp_ms_; }
+    // Atomic — safe to read from any thread regardless of who last called poll_ricoh().
+    std::uint64_t ricoh_last_stamp_ms() const { return ricoh_last_stamp_ms_.load(std::memory_order_relaxed); }
 
     std::pair<std::string, std::string> get_room_robot_names_for_compute();
     bool ensure_room_and_robot_ready(FPSCounter& compute_fps,
@@ -208,9 +214,11 @@ private:
     mutable MediaRgbCache   media_rgb_;
     mutable MediaDepthCache media_depth_;
 
-    // RGBD_360 panorama (display-only). Reuses the RGB cache shape.
+    // RGBD_360 panorama. May be polled from the ricoh worker thread (rc::RicohYoloWorker) AND the
+    // main thread (on_render_tick, when no worker is running) — media_ricoh_ is mutex-guarded.
     std::unique_ptr<rc::media::Image360Subscriber> media_ricoh_sub_;
+    mutable std::mutex media_ricoh_mutex_;
     MediaRgbCache      media_ricoh_;
     std::atomic<bool>  ricoh_wanted_{false};   // set by the popup's show/hide toggle
-    std::uint64_t      ricoh_last_stamp_ms_ = 0;   // last polled ricoh source stamp (rate telemetry)
+    std::atomic<std::uint64_t> ricoh_last_stamp_ms_{0};   // last polled ricoh source stamp (rate telemetry)
 };

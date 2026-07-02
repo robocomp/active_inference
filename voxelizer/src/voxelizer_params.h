@@ -116,6 +116,17 @@ struct VoxelizerParams
     // RGBD_360 panorama (Image360Frame plane), display-only in the Ricoh popup.
     std::string MEDIA_RICOH_TOPIC = "rc/ricoh/rgb";
 
+    // Ricoh 360 peripheral detection: OWN YOLO model/session (rc::RicohYoloWorker), run over the
+    // panorama split into RICOH_YOLO_N_STRIPS vertical strips (see YoloProcessor::detect_segmentation_360)
+    // on a DEDICATED thread — decoupled from compute()'s budget, paced to RICOH_YOLO_THREAD_PERIOD_MS
+    // (~20 Hz default) rather than traded against the main perception rate via decimation. A coarse,
+    // no-depth "glance" signal — NOT wired to DSR yet (see RICOH_360_PERIPHERAL_DETECTION.md). Default OFF.
+    bool        RICOH_YOLO_ENABLED         = false;   // Ricoh.yolo_enabled
+    int         RICOH_YOLO_THREAD_PERIOD_MS= 50;      // Ricoh.yolo_thread_period_ms — target worker-thread cycle (~20 Hz)
+    int         RICOH_YOLO_N_STRIPS        = 3;       // Ricoh.yolo_n_strips
+    int         RICOH_YOLO_STRIP_OVERLAP_PX= 80;      // Ricoh.yolo_strip_overlap_px
+    float       RICOH_YOLO_MERGE_IOU       = 0.5f;    // Ricoh.yolo_merge_iou — cross-strip dedup threshold
+
     // Custom drawing windows (attach to the DSR GUI if available). Both default ON.
     bool        SHOW_VOXEL_VIEWER = true; // Voxel.show_voxel_viewer
     bool        SHOW_YOLO_VIEWER  = true; // Voxel.show_yolo_viewer

@@ -175,15 +175,106 @@ Eigen::Matrix<float, 6, 1> TableBelief::common_mode_inv_diag(const TableFrame& f
             1.0f / std::max(1e-9f, y2 + frame.chain_cov_yaw)).finished();   // yaw cap grows with view range
 }
 
-// Canonical w ≥ h: fold the box's π/2 symmetry into the representation (swap w↔h, yaw += π/2) instead of
-// letting a yaw flip silently swap the extents. Run once, after the GN loop (engine calls canonicalize()).
+// CONTINUITY fold (TABLE_FIT_AI2.md §5, replaces the w≥h sign fold). The box SDF is invariant under the
+// exact symmetry group {e, r_π, swap∘r_{π/2}, swap∘r_{−π/2}} — four representations of the SAME table.
+// The old fold chose by sign(w−h), a NOISE process when w≈h, which converted extent jitter into 90° yaw
+// SNAPS. Instead pick the representative CLOSEST (prior Mahalanobis under Σ_pred) to the predicted mean, i.e.
+// the MAP over the covering sheets: the chart follows continuity, never the sign of a near-tie. Since the GN
+// result stays near the prediction, the identity representative wins in the common case (no fold on noise).
+// The genuine cross-class flip (near-square ambiguity) is owned by resolve_orientation(), not here.
 void TableBelief::canonicalize(TableBeliefState& s) const
 {
-    if (s.w < s.h)
+    constexpr float kHalfPi = 0.5f * static_cast<float>(M_PI);
+    const auto wrap = [](float a) { return std::remainder(a, 2.0f * static_cast<float>(M_PI)); };
+
+    // The four exact-symmetry representatives of s (cx,cy,H unchanged; only w,h,yaw transform).
+    const std::array<TableBeliefState, 4> reps = {{
+        { s.cx, s.cy, s.H, s.w, s.h, wrap(s.yaw)            },   // e
+        { s.cx, s.cy, s.H, s.h, s.w, wrap(s.yaw + kHalfPi)  },   // swap ∘ r_{+π/2}
+        { s.cx, s.cy, s.H, s.w, s.h, wrap(s.yaw + 2*kHalfPi)},   // r_π
+        { s.cx, s.cy, s.H, s.h, s.w, wrap(s.yaw - kHalfPi)  },   // swap ∘ r_{−π/2}
+    }};
+
+    const Eigen::Matrix<float, 6, 6> Pinv = Sigma_.inverse();   // Σ_pred⁻¹ (Σ_ still holds the predicted cov here)
+    const auto mahalanobis = [&](const TableBeliefState& r) -> float
     {
-        std::swap(s.w, s.h);
-        s.yaw = std::remainder(s.yaw + 0.5f * static_cast<float>(M_PI), 2.0f * static_cast<float>(M_PI));
+        Eigen::Matrix<float, 6, 1> d = r.vec() - prior_mean_;
+        d(5) = wrap(r.yaw - prior_mean_(5));   // yaw difference must wrap
+        return d.dot(Pinv * d);
+    };
+
+    int best = 0; float best_m = mahalanobis(reps[0]);
+    for (int i = 1; i < 4; ++i)
+        if (const float m = mahalanobis(reps[i]); m < best_m) { best_m = m; best = i; }
+    s = reps[best];
+}
+
+// Mean per-point data energy (NLL proxy) at an arbitrary state — mirrors the engine's energy readout.
+float TableBelief::mean_energy(const std::vector<Eigen::Vector3f>& pts, const TableBeliefState& s, float R) const
+{
+    if (pts.empty()) return 0.0f;
+    const int P = n_prims();
+    double e = 0.0;
+    for (const auto& p : pts)
+    {
+        const auto r = responsibilities(p, s, R);
+        for (int prim = 0; prim < P; ++prim)
+        {
+            const float d = sdf_prim(p, s, prim);
+            e += 0.5 * r[prim] * d * d / R;
+        }
     }
+    return static_cast<float>(e / static_cast<double>(pts.size()));
+}
+
+// Sequential Bayesian comparison of the two orientation modes: current [(w,h,ψ)] vs the w↔h swap [(h,w,ψ)]
+// (≡ a 90° rotation, the near-square ambiguity). Each frame adds the log-evidence FOR the current mode
+// ∝ (E_swap − E_now): >0 when current fits better, ≈0 when the footprint is near-square (the two fit alike),
+// <0 when the swap fits better. Accumulation gives the belief MEMORY — one partial/biased frame can't flip
+// it (what stops the per-frame snapping) — and the adopted mode is the one with the LOWER accumulated
+// energy. Boundary = zero accumulated evidence (the MAP over the mode); NO tuned threshold. Mirrors chair's
+// resolve_orientation (180°) with the table's 90° / w↔h symmetry.
+bool TableBelief::resolve_orientation(const std::vector<Eigen::Vector3f>& pts, float R)
+{
+    if (pts.empty()) return false;
+    TableBeliefState swap = state_;
+    std::swap(swap.w, swap.h);   // same yaw; (h,w,ψ) is the competing class (≡ (w,h,ψ+π/2))
+    const float e_now  = mean_energy(pts, state_, R);
+    const float e_swap = mean_energy(pts, swap,   R);
+
+    flip_evidence_ += (e_swap - e_now);
+    if (flip_evidence_ < 0.0f)   // the swapped mode has accumulated the lower free energy
+    {
+        std::swap(state_.w, state_.h);
+        // Carry Σ into the new labelling: swap the w,h rows AND columns (DOF indices 3,4).
+        Sigma_.row(3).swap(Sigma_.row(4));
+        Sigma_.col(3).swap(Sigma_.col(4));
+        flip_evidence_ = -flip_evidence_;   // relabel: the accumulated evidence now backs the new current mode
+        return true;
+    }
+    return false;
+}
+
+// p of the ALTERNATIVE (swapped) mode from the accumulated log-evidence: σ(−flip_evidence_).
+float TableBelief::mode_posterior() const
+{
+    return 1.0f / (1.0f + std::exp(flip_evidence_));
+}
+
+// REPORTED yaw variance: the within-mode Σ(5,5) plus the discrete-mode entropy p(1−p)(π/2)². Near-square →
+// p≈½ → adds ~(π/2)²/4 (σ≈45°, honest); once evidence resolves the mode → p→0 → collapses to Σ(5,5).
+float TableBelief::yaw_marginal_var() const
+{
+    const float p = mode_posterior();
+    constexpr float kHalfPi = 0.5f * static_cast<float>(M_PI);
+    return Sigma_(5, 5) + p * (1.0f - p) * kHalfPi * kHalfPi;
+}
+
+Eigen::Matrix<float, 6, 6> TableBelief::covariance_reported() const
+{
+    Eigen::Matrix<float, 6, 6> S = Sigma_;
+    S(5, 5) = yaw_marginal_var();
+    return S;
 }
 
 // ─── Self-test ───────────────────────────────────────────────────────────────────
@@ -253,11 +344,14 @@ bool TableBelief::self_test()
         check((Jc - Jf).norm() < 1e-2f, "SDF Jacobian (coarse vs fine FD) disagree");
     }
 
-    // (c) Fit recovery from a perturbed init
+    // (c) Fit recovery from a perturbed init. The engine's Schur-consistent mean step (b_eff) applies the
+    // proper Bayesian gain rather than the old per-frame ML refit, so cold-start convergence is slower but
+    // unbiased (verified: |err| → mm by ~30 frames, exact by ~60); the aggressive 8-frame recovery the old
+    // full-gradient step gave is gone (that was what chased per-frame shared bias into the position wander).
     TableBelief belief(TableBeliefState{0.0f, 0.0f, 0.75f, 1.0f, 0.6f, 0.0f}, P);
     TableFrame frame; frame.points = all;
     float e = 0.0f;
-    for (int it = 0; it < 8; ++it) e = belief.update(frame);
+    for (int it = 0; it < 40; ++it) e = belief.update(frame);
     const auto& s = belief.state();
     std::printf("  recovered: cx=%.3f cy=%.3f H=%.3f w=%.3f h=%.3f yaw=%.3f  (energy=%.4f)\n",
                 s.cx, s.cy, s.H, s.w, s.h, s.yaw, e);

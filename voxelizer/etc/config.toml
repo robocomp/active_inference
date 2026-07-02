@@ -126,6 +126,18 @@ pose_decim_max = 4     # never skip pose more than this; floor = HumanPose.decim
 hold_enter_s = 1.5    # RGB stale this long → HOLD publishing
 recover_s    = 1.0    # sustained freshness required before resuming
 
+# Ricoh 360 peripheral detection (see RICOH_360_PERIPHERAL_DETECTION.md — no-depth "glance" evidence,
+# not yet wired to DSR). Runs on its OWN thread with its OWN YOLO model/session (rc::RicohYoloWorker) —
+# decoupled from compute()'s budget entirely, paced to yolo_thread_period_ms instead of traded against
+# the main perception rate via decimation. Split into 3 vertical strips to avoid the aspect-ratio
+# distortion of squashing 1920x960 straight to 640x640.
+[Ricoh]
+yolo_enabled          = true
+yolo_thread_period_ms = 50    # target worker-thread cycle (~20 Hz); 3-strip inference is the floor (~20ms)
+yolo_n_strips         = 3
+yolo_strip_overlap_px = 80    # circular-pad margin so a seam-straddling object survives whole
+yolo_merge_iou        = 0.5   # cross-strip box IoU above which two strips' boxes are the same object
+
 [Ice]
 Warn.Connections = "0"
 Trace.Network = "0"

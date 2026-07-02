@@ -34,7 +34,6 @@
 #include "bottle_config.h"
 #include "bottle_instance.h"
 #include "bottle_model.h"        // BottleModel / BottleState / BottleModelParams
-#include "../../common/sample_queue/sample_queue.h"        // SampleQueue / SampleQueueParams
 #include "prior_store.h"         // BottlePrior
 #include "../../common/mask_ingestor/mask_ingestor.h"
 #include "bottle_scene_graph.h"
@@ -69,10 +68,9 @@ public:
     // (so the worker can do one-time setup); latches room_node_id every call.
     bool ensure_instance(const DSR::Node& node, std::uint64_t room_node_id);
     BottleObservation observe(BottleInstance& inst, const DSR::Node& node);
+    // The fit: one recursive full-covariance AI2 belief update (bottle_belief.h) on this frame's mask
+    // points + silhouette. Writes the result into inst.model so downstream publish/RT code is unchanged.
     float run_inference(BottleInstance& inst, const BottleObservation& observation);
-    // AI2 path (cfg.use_ai2): one recursive full-covariance belief update on this frame's mask points
-    // (mirrors table run_inference_ai2). Writes the result into inst.model so downstream code is unchanged.
-    float run_inference_ai2(BottleInstance& inst, const BottleObservation& observation);
     bool should_log(const BottleInstance& inst) const;
 
     // The live instance map (the validation sweep mutates it; del_node prunes it).
@@ -88,15 +86,8 @@ private:
     // Object-specific belief pre-step: decide the resting surface (room vs a table) + set the table-top
     // z anchor (hysteretic re-parent). Reads via scene_graph_; called at the head of run_inference.
     void update_support_surface(BottleInstance& inst);
-    void step_queue_update(BottleInstance& inst,
-                           const std::vector<Eigen::Vector3f>& candidate_pts,
-                           float observation_precision);
-    float step_model_update(BottleInstance& inst,
-                            const std::vector<Eigen::Vector3f>& residual_pts,
-                            float residual_precision);
-    // YOLO detection score → per-observation precision weight w∈[0,1] (the same monotone map the
-    // belief stabiliser applies to obs info; kept here so the Laplace fit covariance is weighted by
-    // the score too). Returns 1.0 when cfg_.mask_conf_weight is off, so legacy behaviour is exact.
+    // YOLO detection score → per-observation reliability weight w∈[0,1] (monotone map). Scales the
+    // silhouette precision so a weak mask can't over-tighten radius. 1.0 when cfg_.mask_conf_weight is off.
     float mask_confidence_weight(float confidence) const;
 
     // Voxel bank (bottle-owned historical memory).
@@ -104,15 +95,6 @@ private:
     bool is_voxel_owned_by_bottle(const BottleInstance& inst, const Eigen::Vector3f& point) const;
     static std::uint64_t voxel_key(const Eigen::Vector3f& point, float quantization_m);
 
-    // Fisher information filter (diagnostic): fold this fresh frame's per-DOF observation Fisher
-    // information (inst.stab.last_obs_info, measured in step_model_update) into the instance accumulators
-    // — normalised "equivalent views" stiffener + the Q-bleed precision filter (finite steady state).
-    void update_fisher_filter(BottleInstance& inst);
-    // Push cfg → the shared stabiliser (layout + params). Called before compute_acceptance/accumulate.
-    void refresh_stabilizer_params();
-    // Append one row of Fisher-filter evolution (state + per-DOF obs/accumulated info + posterior std
-    // mm) to cfg_.fisher_csv_path. No-op if the path is empty. Lazily opens + writes the header.
-    void log_fisher_csv(const BottleInstance& inst, bool fresh, float free_energy, int point_count);
     // Append one AI2 belief row (state + Σ diag std) to cfg_.ai2_csv_path. No-op if the path is empty.
     void log_ai2_csv(const BottleInstance& inst, int point_count, float R, float energy);
 
@@ -124,9 +106,8 @@ private:
     // room_T_zed (camera→room) as a plain 4×4, composed room→body→zed at ts=0 (alignment-safe).
     std::optional<Eigen::Matrix4d> room_T_zed_matrix(std::uint64_t timestamp_ms = 0) const;
 
-    // Factory helpers (config → model/queue params).
+    // Factory helper (config → model geometry/prior params; the model carries the SDF + state).
     BottleModelParams make_model_params() const;
-    SampleQueueParams make_queue_params() const;
 
     std::shared_ptr<DSR::DSRGraph>  G_;
     DSR::InnerEigenAPI*             inner_eigen_ = nullptr;
@@ -139,12 +120,7 @@ private:
     std::unordered_map<std::uint64_t, BottleInstance> instances_;
     std::unordered_map<std::uint64_t, Eigen::Vector2f> birth_seeds_;   // tracker-provided birth XY (see note_birth)
     std::uint64_t                   room_node_id_ = 0;   // refreshed each process_bottle_node call
-    std::ofstream                   fisher_csv_;         // per-cycle Fisher-filter evolution log (optional)
     std::ofstream                   ai2_csv_;            // per-cycle AI2 belief log (optional)
-
-    // Shared per-DOF belief stabiliser (5 DOF [cx,cy,cz,radius,height], no yaw). Currently only its
-    // Fisher accumulation is used (diagnostic); per-bottle state lives in inst.stab.
-    BeliefStabilizer<5>             stabilizer_;
 };
 
 }  // namespace rc

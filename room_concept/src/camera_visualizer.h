@@ -38,7 +38,9 @@ class CameraVisualizer : public QDialog
     Q_OBJECT
 
     public:
-        explicit CameraVisualizer(std::shared_ptr<DSRGraph> graph, const std::vector<Eigen::Vector2f>& room_polygon, QWidget* parent = nullptr);
+        explicit CameraVisualizer(std::shared_ptr<DSRGraph> graph, const std::vector<Eigen::Vector2f>& room_polygon,
+                                  std::vector<std::string> overlay_object_types = {"object", "table", "cylinder", "chair"},
+                                  QWidget* parent = nullptr);
         ~CameraVisualizer();  // defined in .cpp for unique_ptr<MediaSubscriber> of incomplete type
 
         // Start the always-on media-plane drain timer. The RGB subscriber itself is
@@ -55,6 +57,7 @@ class CameraVisualizer : public QDialog
     private:
         std::shared_ptr<DSRGraph> graph_;
         std::vector<Eigen::Vector2f> room_polygon_;
+        std::vector<std::string> overlay_object_types_;  // DSR node types projected as boxes (config Overlay.ObjectTypes)
         QLabel* image_label_;
 
         // Cached camera data
@@ -139,8 +142,9 @@ class CameraVisualizer : public QDialog
             std::string category;                    // drives the overlay colour
             std::string node_name;
         };
-        // Read every object/table/cylinder node from the DSR and build its oriented room-frame
-        // box from width/depth/height + the room←node RT transform at rt_timestamp.
+        // Read every DSR node whose type is in overlay_object_types_ (config Overlay.ObjectTypes:
+        // object/table/cylinder/chair/…) and build its oriented room-frame box from
+        // width/depth/height + the room←node RT transform at rt_timestamp.
         std::vector<ObjectBox> get_dsr_object_boxes(std::uint64_t rt_timestamp) const;
 
         // Planar quad of a DSR wall node, 4 corners in the ROOM frame (CCW). A wall is a vertical

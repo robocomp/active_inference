@@ -1,18 +1,49 @@
 #include "controller_display.h"
 
+#include <QByteArray>
 #include <QPushButton>
+#include <QSettings>
 
-void ControllerDisplay::initialize(std::unordered_map<std::string, std::shared_ptr<DSR::DSRViewer>> &graph_viewers,
-                                   rc::LidarPointBuffer *lidar_buffer,
+namespace
+{
+constexpr auto kWinSettingsOrg = "RoboComp";
+constexpr auto kWinSettingsApp = "controller";
+constexpr auto kWinSettingsKey = "ControllerPlannerWindow_geometry";
+}  // namespace
+
+void ControllerDisplay::restore_window_geometry()
+{
+    if (!custom_widget_)
+        return;
+    QSettings settings(kWinSettingsOrg, kWinSettingsApp);
+    const QByteArray geom = settings.value(kWinSettingsKey).toByteArray();
+    if (!geom.isEmpty())
+        custom_widget_->restoreGeometry(geom);
+    else
+        custom_widget_->resize(820, 600);
+}
+
+void ControllerDisplay::save_window_geometry() const
+{
+    if (!custom_widget_)
+        return;
+    QSettings settings(kWinSettingsOrg, kWinSettingsApp);
+    settings.setValue(kWinSettingsKey, custom_widget_->saveGeometry());
+    settings.sync();
+}
+
+void ControllerDisplay::initialize(rc::LidarPointBuffer *lidar_buffer,
                                    ManualTargetCallback on_manual_target,
                                    ClearTargetCallback on_clear_target,
                                    FollowToggleCallback on_follow_toggle)
 {
+    // Own top-level window (parent == nullptr), NOT docked into the DSR graph viewer. This decouples
+    // the planner GUI from Agent.graph, so the agent runs with graph=false (no DSRViewer). Mirrors
+    // room_concept's RoomViewer.
     custom_widget_ = std::make_unique<Custom_widget>();
-    if (graph_viewers.contains(""))
-        graph_viewers.at("")->add_custom_widget_to_dock("controller", custom_widget_.get());
-    else if (!graph_viewers.empty())
-        graph_viewers.begin()->second->add_custom_widget_to_dock("controller", custom_widget_.get());
+    custom_widget_->setWindowTitle(QStringLiteral("controller — planner"));
+    restore_window_geometry();
+    custom_widget_->show();
 
     viewer_2d_ = std::make_unique<rc::Viewer2D>(custom_widget_->frame, QRectF(-5.0, -5.0, 10.0, 10.0), true);
     viewer_2d_->add_robot(0.5f, 0.6f, 0.f, 0.f, QColor("Tomato"));

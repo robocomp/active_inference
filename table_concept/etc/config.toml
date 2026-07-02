@@ -9,7 +9,7 @@ name = "table_concept"
 configFile = ""
 domain = 0
 tree = false
-graph = true
+graph = false 
 2d = false
 3d = false
 
@@ -44,35 +44,12 @@ Emergency = 500
 [Component.Debug]
 Verbose = false
 
-[TableModel]
-LambdaSize = 0.05         # weaker KL pull on w/h/height so evidence can expand the table model
-PriorSizeStd = 0.60       # broader 1-sigma size prior (m); higher means weaker size prior
-RobustLoss = "geman_mcclure"   # SOFT redescending (never zeroes a far point's gradient/Fisher, unlike
-                            # tukey/welsch) so a dense, consistent far edge is NOT discarded — robustness
-                            # rejects sparse outliers, not structure. The mixture-equivalent likelihood.
-RobustLossScale = 0.10      # SDF residual scale in meters where robust losses start to saturate
-EvidenceSigmaM = 0.12       # inlier width for model-evidence ρ (mean exp(−½(SDF/σ_ρ)²) over the mask):
-                            # a box too small → mask far outside → low ρ → belief precision loosens → grows
-EvidenceEmaAlpha = 0.9      # temporal smoothing of ρ: loosen only on SUSTAINED low evidence (~10 frames),
-                            # so a transient burst of noisy masks is ridden through, a real change followed
-MaskPrecision = 0.30        # RGB-mask silhouette term weight: back-projects the 2D table contour and
-                            # pulls the model onto it (constrains occluded faces + yaw). 0 disables.
-MaskSilhouetteSamples = 8   # >0 = height-agnostic occluding-contour (samples/ray vs box+legs SDF);
-                            # 0 = legacy table-top-plane intersection (top rectangle only).
-RobustGncStartScale = 0.80  # GNC: wide initial robust scale, annealed to RobustLossScale across the
-                            # optimizer iters so a half-offset table still produces gradient during
-                            # coarse alignment. Set <= RobustLossScale to disable annealing.
-RobustGncDecayCycles = 20   # GNC start scale ramps from RobustGncStartScale down to RobustLossScale
-                            # over this many compute cycles, then anneals off so the converged pose
-                            # stops being re-widened each frame and can settle. 0 = no lifetime decay.
-ExtentPctLo = 0.02          # lower percentile of the point span the footprint-extent term pins w/h to
-ExtentPctHi = 0.98          # upper percentile (0.05/0.95 trimmed the TRUE edges → under-sized; widened so
-                            # the extent targets the full observed span, robust still to a few outliers)
-ReopenExtentMarginM = 0.08  # re-open a converged fit when the observed span exceeds the model by > this
-                            # (the mask-beyond-RFE / FE-stuck case — point residuals had no re-open path)
-
 # ── AI2 belief (TABLE_FIT_AI2.md): full-covariance recursive filter; legs derived, soft mixture ──
-UseAI2 = true               # select the AI2 TableBelief instead of the legacy fit/belief path
+# This is the ONLY fit path (the legacy SDF-gradient/Fisher/queue/silhouette fit has been removed).
+[TableModel]
+SigmaObs = 0.05             # top/leg SDF split band (m): a point within TOP_THICKNESS+SigmaObs below the top
+                            # face is attributed to the slab (candidate) vs a leg — used for the mask split.
+SdfThresholdForStorage = 0.08  # |SDF| below which a mask support point is on-surface (candidate) vs residual
 AI2CsvPath = "etc/ai2_log.csv"  # per-cycle AI2 log (state + Σ diag + mask R/bias); empty disables
 AI2SigmaBaseM = 0.03        # base on-surface obs noise std (m); R = σ² + mask_motion_var per frame
 AI2ClutterFrac = 0.10       # ε: prior weight of the uniform clutter mixture component
@@ -89,75 +66,13 @@ AI2GnIters = 4              # Gauss-Newton iterations per frame
 
 [TableConcept]
 ObsDistance = 1.8           # comfortable maximum stand-off from the target face for epistemic poses
-DeltaMin = 20.0             # minimum per-face coverage before stopping epistemic proposals
 EpistemicCooldownCycles = 200 # min cycles a satisfied table stays withdrawn (anti-chatter)
 VoxelBankMaxPoints = 4000   # max number of table-owned voxels kept in memory
 VoxelBankQuantizationM = 0.02 # dedup grid (m) for voxel-bank hashing
 VoxelSelectRadiusMarginM = 0.50 # per-table XY ownership gate margin for mixed proto-tables
 VoxelSelectHeightMarginM = 0.25 # extra Z margin above table height when selecting owned voxels
-TopBandGate = false         # OFF: a hard ±TopBandM pre-filter discards ALL leg points (below the top) before
-                            # the fit → the compound model's legs never get their evidence (the "residuals in
-                            # the legs are ignored" symptom). The compound SDF attributes under-table/leg points
-                            # correctly and the robust loss + ρ reject sparse floor clutter, so no band cutoff
-                            # is needed. (No hard evidence-gate — robustness handles outliers, not a threshold.)
-TopBandM = 0.08             # half-width (m) of the top-surface membership band
-
-[WarmStart]
-PtsMin = 12.0            # point count where observability starts to become trustworthy
-PtsMax = 30.0            # point count where the point-count confidence saturates
-ConfidenceDecay = 0.55            # how quickly the higher-level confidence state forgets old evidence
-ConfidenceCoverageGain = 1.00     # how much coverage evidence raises confidence
-ConfidenceResidualGain = 0.25     # how much unexplained residuals raise confidence
-FisherInfoDecay = 0.95            # A/B (2026-06-27): was 0.99. Lowered to a ~20-frame window — the 0.99 ceiling
-                                  # over-accumulated (raw info ~14k) and locked the fit at w≈1.13 while the point
-                                  # extent says ~1.35 (the "static + large residuals" symptom). Restore 0.99 once
-                                  # the fit converges, with a CUSUM barrier that actually yields to real evidence.
-# Quality-aware maturity (always on): a CLOSE approach after far glimpses re-opens the fit (rescales the
-# stale far-view "views" down) instead of staying locked at the misrepresented far fit — the fix for
-# "first seen far → bad fit → approaching can't re-fit".
-FisherPeakDecay = 1.0             # quality-bar slow forgetting (1 = non-decaying)
-# Re-open only on a GENUINELY better view: a view must beat the quality bar by ≥ Ratchet× to ratchet it
-# (and rescale the accumulated views), folding the new high in as an EMA. Stops ordinary per-frame obs
-# flutter (orders of magnitude) from constantly re-opening a DOF → fixes the width wander. Higher = stiffer.
-FisherPeakRatchet = 2.5
-FisherPeakEma = 0.30
-FisherProcessStdM = 0.005        # calibrated-cov predict: process-noise std per fresh frame for length DOFs (m) → std floor
-FisherProcessStdYaw = 0.01       # calibrated-cov predict: process-noise std per fresh frame for yaw (rad)
-ProcessStdPosM = 0.001           # process noise for cx,cy ONLY (static table centre): small ⇒ position
-                                 # precision accumulates ⇒ its gain → 0 ⇒ the centre LOCKS, stops chasing
-                                 # each noisy frame's centroid. Size DOFs keep the larger FisherProcessStdM.
-FisherCsvPath = "etc/fisher_filter_log.csv"   # per-cycle evolution log for plotting (empty = off)
-# FE-spike guard (2026-06-27): drop a FRESH frame whose raw-fit FE is ≫ the instance's running FE level —
-# a contaminated point set (clutter / partial-or-wrong mask, extent blows up, FE ~20× vs ~1) the model
-# can't explain. Skips the acceptance (keeps the belief) so the gate can't unlock onto garbage → kills the
-# residual size wander at the source. Baseline is an EMA over ACCEPTED frames only.
-BadFitFeRatio = 4.0              # reject a fresh frame if raw_fe > this × baseline (lower = stricter)
-FeBaselineEma = 0.10            # EMA weight for the accepted-FE running baseline
-# (The size ratchet was retired 2026-06-28: size is now a SYMMETRIC precision-weighted update. The extent
-# term works over the accumulated RFE queue — which holds the full observed span, so a partial view can't
-# shrink it — and the Kalman gain + ρ-EMA damp bursts. So the box relaxes a noise-driven over-grow toward
-# the consistent span AND resists partial-view collapse, with no grow-only knob accumulating high-side noise.)
-# (The CUSUM/SPRT change-detector and the yaw barrier/aspect gate were removed 2026-06-28: falsifiability
-# is now the evidence-scaled precision ρ, and near-square yaw is handled by its naturally-low Fisher info.)
-# YOLO mask-score weighting: w = clamp01((score−floor)/(ref−floor))^power. IMPORTANT: a partially-viewed
-# table scores LOW (~0.3–0.45 here), so floor/ref must sit in that band — floor too high nukes every mask
-# (w=0 → the Fisher accumulator dies → no maturity stiffening → UNSTABLE, the bug just fixed). Tune to
-# your detector: floor just above the noise score, ref at a confident score (mask-conf weighting is always on).
-MaskConfFloor = 0.2               # score at/below which the mask is ~ignored
-MaskConfRef = 0.5                 # score at/above which the mask is fully trusted (w=1)
-MaskConfPower = 2.0               # steepness of the trust ramp between floor and ref
-RtCovScale = 1.0                  # var = RtCovScale / fisher_info_raw; calibrate toward NEES≈1 (raw curvature over-counts correlated points), like bottle CovEffScale
-
-[SampleQueue]
-# RFE anchors are binned over a yaw-aware xy-GRID of the table footprint (2026-06-27, was angle/z — a
-# cylinder leftover that lumped centre+edge points and never pinned w/h). NumAngleBins=x divisions,
-# NumZBins=y divisions; raise for finer footprint sampling. Capacity = NumAngleBins·NumZBins·MaxPerBin.
-NumAngleBins = 24         # x-grid divisions of the footprint
-NumZBins = 16             # y-grid divisions (raised from 10 → ~symmetric cell size with x)
-MaxPerBin = 2             # anchors kept per xy-cell
-MaxNewPointsPerFrame = 40 # anchors admitted per frame — fill the grid fast (was 30)
-RfeWeightGain = 0.25      # lower than 1.0 keeps historical RFE anchors influential
-MinAnchorWeight = 0.12    # floor for anchor weight in optimization/coverage
+RtCovScale = 1.0            # scales the belief Σ → published room→table RT covariance (calibrate toward NEES≈1)
+RtCovAddChain = true        # Part B: add the localization/chain cov J·Σ_chain·Jᵀ to the published RT cov
 
 [Tracker]
 # Multi-instance birth/associate/merge (shared rc::InstanceTracker; the only instance-lifecycle path —

@@ -55,7 +55,6 @@
 #include <dsr/api/dsr_inner_gaussian_api.h>   // Part B: chain covariance propagation
 
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
-#include "../../common/robust_metrics/robust_metrics.h"
 #include "prior_store.h"
 #include "bottle_instance.h"    // rc::BottleInstance
 #include "epistemic_planner.h"  // rc::EpistemicPlanner (hidden-face next-best-view)
@@ -152,12 +151,15 @@ private:
     std::unique_ptr<rc::PriorStore>                 prior_store_;
     std::vector<rc::BottlePrior>                    priors_cache_;
 
-    // Live dashboard (docked in the DSR graph window). Null when no graph viewer is present.
+    // Live belief dashboard — its OWN top-level window (extracted from the DSR graph dock so it shows
+    // independently of Agent.graph; mirrors room_concept/kinova_controller). Geometry persisted via QSettings.
     Custom_widget*      custom_widget_ = nullptr;
     rc::TimeSeriesPlot* ts_fe_plot_    = nullptr;   // free energy
     rc::TimeSeriesPlot* ts_dim_plot_   = nullptr;   // radius, height (m)
     rc::TimeSeriesPlot* ts_sigma_plot_ = nullptr;   // posterior σ(radius,height) (mm)
     rc::TimeSeriesPlot* ts_ce_plot_    = nullptr;   // CUSUM/SPRT counter-evidence (radius, height)
+    void restore_dashboard_geometry();
+    void save_dashboard_geometry() const;
 
     std::ofstream epistemic_csv_;   // optional per-cycle epistemic/affordance log (Epistemic.CsvPath)
 

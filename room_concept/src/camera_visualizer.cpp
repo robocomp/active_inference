@@ -74,6 +74,7 @@ QColor color_for_category(const std::string& category)
 {
     if (category == "model_table" || category == "table")        return QColor(255, 165, 0);    // orange
     if (category == "bottle" || category == "cylinder")          return QColor(0, 220, 220);    // cyan
+    if (category == "chair")                                     return QColor(200, 120, 255);  // violet
     if (category == "object")                                    return QColor(60, 220, 90);    // green
     return QColor(255, 230, 0);                                                                 // yellow fallback
 }
@@ -107,8 +108,10 @@ static std::vector<Eigen::Vector2f> read_room_polygon_from_dsr(const std::shared
     return polygon;
 }
 
-CameraVisualizer::CameraVisualizer(std::shared_ptr<DSRGraph> graph, const std::vector<Eigen::Vector2f>& room_polygon, QWidget* parent)
-    : QDialog(parent), graph_(graph), room_polygon_(room_polygon)
+CameraVisualizer::CameraVisualizer(std::shared_ptr<DSRGraph> graph, const std::vector<Eigen::Vector2f>& room_polygon,
+                                   std::vector<std::string> overlay_object_types, QWidget* parent)
+    : QDialog(parent), graph_(graph), room_polygon_(room_polygon),
+      overlay_object_types_(std::move(overlay_object_types))
 {
     setWindowTitle("Camera Visualization - Room Layout Projection");
     setGeometry(100, 100, 800, 600);
@@ -453,9 +456,10 @@ std::vector<CameraVisualizer::ObjectBox> CameraVisualizer::get_dsr_object_boxes(
 
             const float hw = width * 0.5f, hd = depth * 0.5f, hh = height * 0.5f;
 
-            // Floor-standing furniture (tables) anchors its node origin at the base → box extends
-            // upward [0, h]; free objects are center-anchored → [-h/2, h/2]. Matches the voxelizer.
-            const bool stands_on_floor = (node.type() == "table") || (node.name().rfind("table", 0) == 0);
+            // Floor-standing furniture (tables, chairs) anchors its node origin at the base → box
+            // extends upward [0, h]; free objects are center-anchored → [-h/2, h/2]. Matches the voxelizer.
+            const bool stands_on_floor = (node.type() == "table") || (node.type() == "chair")
+                                         || (node.name().rfind("table", 0) == 0);
             const float z_lo = stands_on_floor ? 0.f     : -hh;
             const float z_hi = stands_on_floor ? height  :  hh;
 
@@ -474,6 +478,7 @@ std::vector<CameraVisualizer::ObjectBox> CameraVisualizer::get_dsr_object_boxes(
                 box.category = it->second.str();
             if (node.type() == "table")    box.category = "model_table";
             if (node.type() == "cylinder") box.category = "bottle";
+            if (node.type() == "chair")    box.category = "chair";
 
             for (std::size_t i = 0; i < local.size(); ++i)
             {
@@ -486,9 +491,10 @@ std::vector<CameraVisualizer::ObjectBox> CameraVisualizer::get_dsr_object_boxes(
         }
     };
 
-    build_for("object");
-    build_for("table");
-    build_for("cylinder");
+    // Config-driven: project every DSR node type in Overlay.ObjectTypes (default
+    // object/table/cylinder/chair). Walls are handled separately (get_dsr_wall_quads).
+    for (const auto& node_type : overlay_object_types_)
+        build_for(node_type);
     return boxes;
 }
 

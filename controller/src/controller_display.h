@@ -24,11 +24,15 @@ public:
     using ClearTargetCallback = std::function<void()>;
     using FollowToggleCallback = std::function<void(bool)>;
 
-    void initialize(std::unordered_map<std::string, std::shared_ptr<DSR::DSRViewer>> &graph_viewers,
-                    rc::LidarPointBuffer *lidar_buffer,
+    // Creates the planner GUI as its OWN top-level window (not docked into the DSR graph viewer),
+    // so the agent runs with Agent.graph=false. Mirrors room_concept's RoomViewer.
+    void initialize(rc::LidarPointBuffer *lidar_buffer,
                     ManualTargetCallback on_manual_target,
                     ClearTargetCallback on_clear_target,
                     FollowToggleCallback on_follow_toggle);
+
+    // Persist the standalone window's geometry (call on shutdown, GUI thread).
+    void save_window_geometry() const;
 
     Custom_widget *widget() const { return custom_widget_.get(); }
 
@@ -85,6 +89,8 @@ private:
         bool selected_affordance_text_pending = false;
         bool clear_trajectory_pending = false;
     };
+
+    void restore_window_geometry();
 
     std::unique_ptr<Custom_widget> custom_widget_;
     std::unique_ptr<rc::Viewer2D> viewer_2d_;

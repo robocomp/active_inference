@@ -361,9 +361,9 @@ void BottleSceneGraph::step_write_model(BottleInstance& inst, DSR::Node& node, f
     G_->add_or_modify_attrib_local<model_generation_att>(node, ++inst.model_generation);
     G_->add_or_modify_attrib_local<mesh_vertices_att>(node, make_cylinder_mesh(s));
 
-    // Export the historical RFE queue (remembered evidence) as XYZ triples.
+    // Export the bottle-owned voxel memory bank (remembered evidence) as XYZ triples.
     {
-        const auto qpts = inst.queue.points();
+        const auto& qpts = inst.voxel_bank_pts;
         std::vector<float> qflat;
         qflat.reserve(qpts.size() * 3);
         for (const auto& p : qpts) { qflat.push_back(p.x()); qflat.push_back(p.y()); qflat.push_back(p.z()); }
@@ -454,12 +454,11 @@ void BottleSceneGraph::write_rt_pose(BottleInstance& inst)
     // this to set its closed→open-loop look-up rate.
     if (auto edge = G_->get_edge(inst.parent_id, inst.node_id, "RT"); edge.has_value())
     {
-        const auto fit_pts = inst.queue.points();
-        // AI2: publish the belief's position covariance Σ[cx,cy,cz] (calibrated, common-mode-saturated);
-        // legacy: the model's Laplace pose_covariance. Both are the room-frame P_bottle on the RT edge.
-        Eigen::Matrix3f cov = (cfg_.use_ai2 and inst.ai2_initialized)
+        // P_bottle = the belief's position covariance Σ[cx,cy,cz] (calibrated, common-mode-saturated),
+        // room frame, written on the RT edge (the controller reads it for its look-up rate).
+        Eigen::Matrix3f cov = inst.ai2_initialized
                                   ? Eigen::Matrix3f(inst.ai2_belief.covariance().block<3, 3>(0, 0))
-                                  : inst.model.pose_covariance(fit_pts, inst.queue.weights());
+                                  : Eigen::Matrix3f(Eigen::Matrix3f::Identity() * 0.01f);
 
         // Part B: add the localization/chain covariance J·Σ_chain·Jᵀ — the uncertainty the bottle's
         // room-frame position inherits from the robot localisation chain (the Laplace cov is conditional

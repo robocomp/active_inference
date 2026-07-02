@@ -56,20 +56,11 @@ public:
     explicit EpistemicPlanner(float d_obs = 0.9f, float view_info = 50.0f);
 
     /**
-     * Compute the hidden-face viewpoint. @p camera_xy is the ZED origin in the room frame
-     * (horizontal). @p posterior_info is BottleInstance::fisher_info_raw (DOF order
-     * [cx,cy,cz,radius,height]); the radius precision (index 3) drives ΔH.
-     * Returns valid==false only if the camera→bottle ray is degenerate (can't tell which side is hidden).
-     */
-    EpistemicProposal compute(const BottleModel& model,
-                              const Eigen::Vector2f& camera_xy,
-                              const std::array<float, 5>& posterior_info) const;
-
-    /**
-     * AI2-native next-best-view (cfg.use_ai2). Same hidden-face viewpoint geometry, but the gain is the
-     * D-optimal expected entropy reduction on the belief's FULL covariance Σ (mirrors table/chair):
+     * Hidden-face next-best-view. @p camera_xy is the ZED origin in the room frame (horizontal). The gain
+     * is the D-optimal expected entropy reduction on the belief's FULL covariance Σ (mirrors table/chair):
      *   ΔH = ½·log det( I₅ + Σ · ΔI ),   ΔI = Σₚ (1/R) Jₚ Jₚᵀ  (BottleBelief::predicted_information)
      * over synthetic hidden-arc points, R = σ_base². ΔH→0 as the belief tightens (belief→knowledge).
+     * Returns valid==false only if the camera→bottle ray is degenerate (can't tell which side is hidden).
      */
     EpistemicProposal compute(const BottleBelief& belief,
                               const Eigen::Vector2f& camera_xy,

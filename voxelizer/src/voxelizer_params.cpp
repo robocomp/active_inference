@@ -41,6 +41,13 @@ VoxelizerParams load_voxelizer_params(const ConfigLoader& configLoader)
     rc::ConfigLoaderUtils::load_optional(configLoader, "Media.lidar_use_media", params.LIDAR_USE_MEDIA);
     rc::ConfigLoaderUtils::load_optional(configLoader, "Media.ricoh_topic", params.MEDIA_RICOH_TOPIC);
 
+    // Ricoh 360 peripheral detection (default OFF — see header).
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Ricoh.yolo_enabled", params.RICOH_YOLO_ENABLED);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Ricoh.yolo_thread_period_ms", params.RICOH_YOLO_THREAD_PERIOD_MS);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Ricoh.yolo_n_strips", params.RICOH_YOLO_N_STRIPS);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Ricoh.yolo_strip_overlap_px", params.RICOH_YOLO_STRIP_OVERLAP_PX);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Ricoh.yolo_merge_iou", params.RICOH_YOLO_MERGE_IOU);
+
     // Ego-motion mask-corruption annotation (default ON — pure producer-side metadata).
     rc::ConfigLoaderUtils::load_optional(configLoader, "MaskMotion.enabled", params.MASK_MOTION_ENABLED);
     rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "MaskMotion.exposure_s", params.MASK_MOTION_EXPOSURE_S);

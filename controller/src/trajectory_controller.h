@@ -271,6 +271,12 @@ public:
         float dist_to_goal = 0.f;
         float min_esdf = 0.f;
 
+        // ESDF-input diagnostics: how many RAW lidar points actually reached build_esdf this cycle
+        // (after the self-filter) and the nearest of them to the robot center (robot frame). Lets a
+        // consumer tell whether an obstacle that IS in the cloud got dropped before the ESDF.
+        int   n_esdf_points = 0;
+        float nearest_esdf_point_m = -1.f;   // -1 when no points survived the self-filter
+
         // ESS diagnostics for UI
         float ess = 0.f;          // current ESS value
         int   ess_K = 1;          // current K (to compute ratio)

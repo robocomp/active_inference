@@ -172,14 +172,14 @@ bool SceneProcessor::init_ricoh_media_plane(std::uint32_t domain_id, const std::
     return true;
 }
 
-void SceneProcessor::poll_ricoh()
+void SceneProcessor::poll_ricoh(bool force)
 {
     if (!media_ricoh_sub_)
         return;
-    const bool wanted = ricoh_wanted_.load(std::memory_order_relaxed);
+    const bool wanted = force || ricoh_wanted_.load(std::memory_order_relaxed);
     media_ricoh_sub_->poll([this, wanted](const rc::media::Image360Frame& f, std::int64_t)
     {
-        ricoh_last_stamp_ms_ = f.stamp_ms();   // always recorded (cheap) — feeds the RGB360 rate HUD
+        ricoh_last_stamp_ms_.store(f.stamp_ms(), std::memory_order_relaxed);   // cheap — feeds the RGB360 rate HUD
         if (!wanted)                       // window hidden: drain + discard, no decode/clone cost
             return;
         const int w = static_cast<int>(f.width());
@@ -190,6 +190,7 @@ void SceneProcessor::poll_ricoh()
         if (f.size() < npix * 3)
             return;
         cv::Mat view(h, w, CV_8UC3, const_cast<std::uint8_t*>(f.data().data()));
+        std::scoped_lock lk(media_ricoh_mutex_);   // may race a concurrent ricoh_bgr_copy() from another thread
         if (f.format() == rc::media::IMG360_FORMAT_RGB8)
             cv::cvtColor(view, media_ricoh_.bgr, cv::COLOR_RGB2BGR);
         else                               // IMG360_FORMAT_BGR8 (producer default) or unspecified
@@ -200,6 +201,12 @@ void SceneProcessor::poll_ricoh()
         media_ricoh_.frame_id = f.frame_id();
         media_ricoh_.valid    = true;
     });
+}
+
+cv::Mat SceneProcessor::ricoh_bgr_copy() const
+{
+    std::scoped_lock lk(media_ricoh_mutex_);
+    return media_ricoh_.bgr;   // shallow (refcounted) copy — cheap, safe to use after the lock is released
 }
 
 bool SceneProcessor::init_lidar_media_plane(std::uint32_t domain_id, const std::string& topic, bool use_media)

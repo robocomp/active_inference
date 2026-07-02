@@ -94,6 +94,25 @@ public:
     void set_state(const TableBeliefState& s) { state_ = s; }
     void set_params(const TableBeliefParams& p) { params_ = p; }
 
+    // ── Discrete orientation mode (near-square yaw disambiguation, TABLE_FIT_AI2.md) ──────────────
+    // The 6×6 Σ carries only the WITHIN-mode yaw width (~1°). For a near-square footprint the two
+    // classes [(w,h,ψ)] and [(h,w,ψ)] (a w↔h swap ≡ a 90° rotation) have near-equal data energy, an
+    // ambiguity a unimodal Gaussian cannot hold — so the per-frame MAP used to SNAP 90° between them.
+    // resolve_orientation() is a sequential Bayesian comparison of the two modes; mode_posterior() is
+    // p of the ALTERNATIVE (swapped) mode; the REPORTED yaw variance inflates Σ(5,5) by p(1−p)(π/2)²
+    // so a still-ambiguous table reports an honest ~45° until an orbit resolves it.
+    float mode_posterior()  const;                          // p(alternative mode) = σ(−flip_evidence_)
+    float yaw_marginal_var() const;                         // Σ(5,5) + p(1−p)(π/2)²  (rad²)
+    Eigen::Matrix<float, 6, 6> covariance_reported() const; // Σ with the yaw marginal folded into (5,5)
+    float flip_evidence()   const { return flip_evidence_; }
+    // Mean per-point data energy (NLL proxy) at an ARBITRARY state — for the mode-comparison hypothesis test.
+    float mean_energy(const std::vector<Eigen::Vector3f>& pts, const TableBeliefState& s, float R) const;
+    // One sequential-comparison step over the discrete mode {current, w↔h-swapped}: accumulate the
+    // per-frame log-evidence (E_swap − E_now) and adopt the lower-accumulated-energy mode (boundary at zero
+    // accumulated evidence = the MAP over the mode; NO tuned threshold). On a flip, swaps w↔h in the state
+    // AND rows/cols 3↔4 of Σ. Returns true iff it flipped this call. Call once per fresh frame after update().
+    bool  resolve_orientation(const std::vector<Eigen::Vector3f>& pts, float R);
+
     // ── Inference (delegated to the shared engine) ────────────────────────────
     float update(const TableFrame& frame) { return ai::update<N>(*this, state_, Sigma_, prior_mean_, frame); }
     void  predict()                       { ai::predict<N>(*this, Sigma_, state_, prior_mean_); }
@@ -131,6 +150,7 @@ private:
     TableBeliefParams          params_;
     Eigen::Matrix<float, 6, 6> Sigma_ = Eigen::Matrix<float, 6, 6>::Identity();  // posterior covariance
     Eigen::Matrix<float, 6, 1> prior_mean_ = Eigen::Matrix<float, 6, 1>::Zero();  // transition prior mean
+    float                      flip_evidence_ = 0.0f;  // accumulated log-evidence FOR the current mode vs the w↔h swap
 };
 
 }  // namespace rc

@@ -43,7 +43,6 @@
 #include <Eigen/Dense>
 #include <unordered_set>
 
-#include "../../common/robust_metrics/robust_metrics.h"
 #include "table_config.h"      // rc::TableConfig + load_table_config
 #include "table_instance.h"    // rc::TableInstance
 #include "../../common/mask_ingestor/mask_ingestor.h"     // rc::MaskIngestor (perception)
@@ -51,7 +50,6 @@
 #include "table_scene_graph.h" // rc::TableSceneGraph (DSR node/RT I/O)
 #include "table_fitter.h"      // rc::TableFitter (active-inference core)
 #include "epistemic_planner.h"
-#include "../../common/sample_queue/sample_queue.h"
 #include "table_affordance.h"
 #include "table_model.h"
 #include "../../common/dashboard/custom_widget.h"
@@ -106,8 +104,6 @@ private:
                                   float free_energy);
     void step_convergence(rc::TableInstance& inst, DSR::Node& node, float free_energy);
     void step_epistemic(rc::TableInstance& inst, DSR::Node& node);
-    void step_refresh_check(rc::TableInstance& inst, DSR::Node& node,
-                            float free_energy, float explanation_ratio);
     void trigger_graph_layout_twopi();   // injected into TableSceneGraph as the relayout callback
 
     // Multi-instance birth/associate/merge (shared rc::InstanceTracker; the only instance-lifecycle path).
@@ -148,12 +144,16 @@ private:
     rc::EpistemicPlanner                                    epistemic_planner_;
     std::unique_ptr<rc::TableFitter>                    fitter_;   // active-inference fit core (owns instances)
 
+    // Live belief dashboard — its OWN top-level window (extracted from the DSR graph dock so it shows
+    // independently of Agent.graph; mirrors room_concept/kinova_controller). Geometry persisted via QSettings.
     Custom_widget*       custom_widget_ = nullptr;
     rc::TimeSeriesPlot*  ts_plot_       = nullptr;   // FE
-    rc::TimeSeriesPlot*  ts_cov_plot_   = nullptr;   // coverage deficit
+    rc::TimeSeriesPlot*  ts_cov_plot_   = nullptr;   // belief uncertainty U(Σ) = Σ pos+size posterior std (m)
     rc::TimeSeriesPlot*  ts_res_plot_   = nullptr;   // residual point count
     rc::TimeSeriesPlot*  ts_state_plot_ = nullptr;   // inferred dimensions w/h (stability check)
-    rc::TimeSeriesPlot*  ts_ce_plot_    = nullptr;   // (D) counter-evidence accumulator S_w/S_h (only when the gate is on)
+    rc::TimeSeriesPlot*  ts_ce_plot_    = nullptr;   // belief size posterior std σ_w/σ_h (mm)
+    void restore_dashboard_geometry();
+    void save_dashboard_geometry() const;
 
     std::unique_ptr<DSR::RT_API>                        rt_api_;
     std::unique_ptr<DSR::InnerEigenAPI>                inner_eigen_;     // for room↔body↔zed extrinsic (silhouette)

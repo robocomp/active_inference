@@ -27,7 +27,7 @@ name = "room_concept"
 configFile = ""
 domain = 0
 tree = false
-graph = true
+graph = false 
 2d = false
 3d = false
 
