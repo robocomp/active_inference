@@ -14,10 +14,10 @@ Desde la raíz del proyecto (`~/robocomp/components/active_inference`):
 
 ```bash
 # Solo capa sensorimotor (arranca Webots) — hospeda la web en http://127.0.0.1:8080
-python3 subcognitive_v2.py sub.toml
+python3 subcognitive.py sub.toml
 
 # Añadir la capa cognitiva (agentes + esfera DSR) — en otra terminal, cualquier orden
-python3 cognitive_v2.py cognitive.toml
+python3 cognitive.py cognitive.toml
 ```
 
 Abre **http://127.0.0.1:8080**. Para en cada terminal con `Ctrl+C` (termina sus procesos,
@@ -32,7 +32,7 @@ libera el lock del monitor y borra su registro).
 | `--no-bw` | Desactivar la captura de ancho de banda |
 | `--no-webots` | No autoarrancar Webots (solo `subcognitive_v2`) |
 
-### Ancho de banda por arista (opcional)
+### Ancho de banda por edge (opcional)
 
 Los `KB/s` solo aparecen si el intérprete tiene permiso de captura. **Una vez**:
 
@@ -86,9 +86,21 @@ Layout **jerárquico de abajo arriba**:
   - **DSR** (cian, sin flecha): agente ↔ grafo compartido (lectura/escritura).
 - **Tooltip** de cada nodo: qué implementa / requiere / publica / suscribe, y CPU/mem/estado.
 - Puedes **arrastrar** nodos para recolocar.
-- Botón **Vista** (barra superior): alterna layout **Jerárquica** (capas bridge→…→DSR) ↔
-  **Orgánica** (force-directed, separa mejor los hubs). **Reorganizar** re-acomoda el actual.
-  La física se congela tras estabilizar, así que el mapa no se mueve con los refrescos de estado.
+- Botón **Vista** (barra superior): cicla **Orgánico por nivel** (por defecto: force-directed
+  con cada nodo anclado a su banda de nivel) → **Jerárquico** → **Orgánico libre**.
+  **Reorganizar** re-acomoda; **Tabla** muestra/oculta el panel lateral. La física se congela
+  tras estabilizar, así que el mapa no se mueve con los refrescos de estado.
+
+### Control de procesos (panel Tabla)
+
+Cada fila de la tabla trae acciones sobre el componente:
+
+- **↻ relanzar** · **⏹ parar** · **📄 logs**.
+- Parar/relanzar se ejecutan de forma segura: el monitor **no** mata procesos ajenos; deja un
+  comando en `/tmp/robocomp_netmon/commands/` que **reclama y ejecuta el launcher dueño** del
+  proceso (el que lo lanzó). Solo se aceptan `stop`/`restart` sobre componentes conocidos.
+- **📄 logs** abre un panel inferior con el `tail` de `~/.local/logs/<name>.{err,out}`
+  (conmutable stdout/stderr), refrescado cada 1.5 s y con auto-scroll al final.
 
 ---
 

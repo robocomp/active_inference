@@ -244,7 +244,8 @@ function renderTable(stNodes) {
     const col = (STATUS_COLOR[n.status] || STATUS_COLOR.unknown).border;
     const lay = n.layer || "";
     const short = lay === "sensorimotor" ? "SM" : lay === "cognitive" ? "COG" : lay;
-    return `<tr><td>${n.name}</td>`
+    const sel = n.name === selected ? " selrow" : "";
+    return `<tr class="${sel}" data-name="${n.name}"><td>${n.name}</td>`
       + `<td><span class="lay ${lay}">${short}</span></td>`
       + `<td class="st" style="color:${col}">${n.status}</td>`
       + `<td class="num">${n.cpu}%</td>`
@@ -252,13 +253,110 @@ function renderTable(stNodes) {
   }).join("");
 }
 
+// --- selection + process control + log viewer ---
+let selected = null, logName = null, logStream = "err";
+
+function selectComponent(name) {
+  if (!expectedProc.has(name)) { clearSelection(); return; }   // only controllable nodes
+  selected = name;
+  document.getElementById("selname").textContent = name;
+  document.getElementById("sel").classList.remove("hidden");
+  document.querySelectorAll("#tbody tr").forEach(tr =>
+    tr.classList.toggle("selrow", tr.dataset.name === name));
+  if (network) network.selectNodes([name]);
+  openLogs(name);                                              // jump to its terminal
+}
+
+function clearSelection() {
+  selected = null;
+  document.getElementById("sel").classList.add("hidden");
+  document.querySelectorAll("#tbody tr.selrow").forEach(tr => tr.classList.remove("selrow"));
+  if (network) network.unselectAll();
+}
+
+async function sendAction(action, name) {
+  try {
+    const r = await (await fetch("/api/action", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action, name }),
+    })).json();
+    if (!r.ok) alert("Error: " + (r.error || "acción rechazada"));
+  } catch { alert("No se pudo enviar la acción"); }
+}
+
+function openLogs(name) {
+  logName = name;
+  document.getElementById("logtitle").textContent = "logs · " + name;
+  document.getElementById("logs").classList.remove("hidden");
+  refreshLogs();
+}
+
+async function refreshLogs() {
+  if (!logName || document.getElementById("logs").classList.contains("hidden")) return;
+  document.getElementById("logstream").textContent = logStream === "err" ? "stderr" : "stdout";
+  try {
+    const r = await (await fetch(`/api/logs?name=${encodeURIComponent(logName)}&stream=${logStream}&lines=400`)).json();
+    const pre = document.getElementById("logtext");
+    const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 30;
+    pre.textContent = r.text || "(sin log)";
+    if (atBottom) pre.scrollTop = pre.scrollHeight;   // follow tail unless user scrolled up
+  } catch { /* ignore */ }
+}
+
 async function init() {
   await loadTopology();
   document.getElementById("layoutBtn").addEventListener("click", cycleLayout);
   document.getElementById("fitBtn").addEventListener("click",
     () => { applyLayout(layoutMode); network.fit(); });
-  document.getElementById("tableBtn").addEventListener("click",
-    () => document.getElementById("panel").classList.toggle("hidden"));
+  document.getElementById("tableBtn").addEventListener("click", () => {
+    const hidden = document.getElementById("panel").classList.toggle("hidden");
+    document.getElementById("resizer").classList.toggle("hidden", hidden);
+    if (network) setTimeout(() => network.redraw(), 0);
+  });
+
+  // draggable divider to resize the side panel
+  const resizer = document.getElementById("resizer"), panel = document.getElementById("panel");
+  let resizing = false;
+  resizer.addEventListener("mousedown", (e) => {
+    resizing = true; resizer.classList.add("drag");
+    document.body.style.userSelect = "none"; e.preventDefault();
+  });
+  window.addEventListener("mousemove", (e) => {
+    if (!resizing) return;
+    const w = Math.max(260, Math.min(window.innerWidth - e.clientX, window.innerWidth - 320));
+    panel.style.width = w + "px";
+    if (network) network.redraw();
+  });
+  window.addEventListener("mouseup", () => {
+    if (!resizing) return;
+    resizing = false; resizer.classList.remove("drag");
+    document.body.style.userSelect = "";
+    if (network) network.redraw();
+  });
+
+  // select a component from the table row or from a graph node
+  document.getElementById("tbody").addEventListener("click", (e) => {
+    const tr = e.target.closest("tr[data-name]");
+    if (tr) selectComponent(tr.dataset.name);
+  });
+  network.on("click", (params) => {
+    if (params.nodes && params.nodes.length) selectComponent(params.nodes[0]);
+    else clearSelection();
+  });
+
+  // contextual actions in the top bar (act on the selected component)
+  document.getElementById("selStart").addEventListener("click", () => selected && sendAction("start", selected));
+  document.getElementById("selRestart").addEventListener("click", () => selected && sendAction("restart", selected));
+  document.getElementById("selStop").addEventListener("click",
+    () => { if (selected && confirm(`¿Parar ${selected}?`)) sendAction("stop", selected); });
+  document.getElementById("selTerm").addEventListener("click", () => selected && openLogs(selected));
+
+  document.getElementById("logOut").addEventListener("click", () => { logStream = "out"; refreshLogs(); });
+  document.getElementById("logErr").addEventListener("click", () => { logStream = "err"; refreshLogs(); });
+  document.getElementById("logClose").addEventListener("click",
+    () => { document.getElementById("logs").classList.add("hidden"); logName = null; });
+  setInterval(refreshLogs, 1500);
+
   poll();
   setInterval(poll, 1000);
 }
@@ -276,6 +374,7 @@ async function poll() {
   }
 
   renderTable(st.nodes);
+  if (selected && !cur.has(selected)) clearSelection();
 
   st.nodes.forEach(n => {
     const info = nodeInfo[n.name];
