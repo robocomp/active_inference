@@ -545,7 +545,35 @@ void SpecificWorker::compute()
     if (not perception_hold_)
     {
         const auto perf_pub0 = std::chrono::steady_clock::now();
-        graph_publisher_->publish(frame->rgbd, frame->room_T_zed, detections, frame->frame_ts_ms);
+
+        // RGB-360 (ricoh) peripheral detections → shared "masks" node as NO-DEPTH bearing slices (Part B,
+        // RICOH_360_PERIPHERAL_DETECTION.md). The RicohYoloWorker (own thread) already produced panorama-
+        // pixel SegDetections; convert each to a room-frame bearing here, where we hold the robot pose.
+        std::vector<BearingDetection> bearing_dets;
+        if (params.RICOH_PUBLISH_MASKS and ricoh_yolo_worker_)
+        {
+            const int pano_w = ricoh_yolo_worker_->latest_bgr().cols;
+            if (pano_w > 0)
+            {
+                // Robot heading in the room from the zed pose (forward axis = +y in the deproject convention).
+                const Eigen::Vector3d fwd = frame->room_T_zed.linear() * Eigen::Vector3d(0, 1, 0);
+                const float robot_yaw = std::atan2(static_cast<float>(fwd.y()), static_cast<float>(fwd.x()));
+                for (const auto& d : ricoh_yolo_worker_->latest_detections())
+                {
+                    const float col_c = static_cast<float>(d.bbox.x) + 0.5f * static_cast<float>(d.bbox.width);
+                    // Panorama column → bearing relative to the panorama CENTRE (centre column ⇒ straight
+                    // ahead). PROVISIONAL sign/zero convention — verify live vs the ricoh descriptor
+                    // projection model (see Part A step 8) before any consumer relies on this bearing.
+                    const float az_pano = 2.0f * static_cast<float>(M_PI) * (col_c / static_cast<float>(pano_w))
+                                          - static_cast<float>(M_PI);
+                    float az = robot_yaw + params.RICOH_AZIMUTH_OFFSET_RAD + az_pano;
+                    az = std::atan2(std::sin(az), std::cos(az));   // wrap to (-π, π]
+                    bearing_dets.push_back({d.label, static_cast<float>(d.class_id), d.confidence, az});
+                }
+            }
+        }
+
+        graph_publisher_->publish(frame->rgbd, frame->room_T_zed, detections, frame->frame_ts_ms, bearing_dets);
         publish_ms = perf_ms(perf_pub0, std::chrono::steady_clock::now());
 
         // Human-pose branch: BODY_18 skeletons (camera frame) on the 'skeleton' node for human_concept.

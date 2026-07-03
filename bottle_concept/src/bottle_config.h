@@ -18,10 +18,9 @@ namespace rc {
 
 struct BottleConfig
 {
-    std::string priors_path = "etc/object_priors.toml";
-
     float fe_eps           = 1e-3f;
     int   K_stable         = 30;
+    int   diverged_retire_frames = 20;   // retire an instance after this many consecutive no-data (E==0) fits; 0 = off
     float write_threshold  = 1e-3f;
     int   log_period_frames = 30;
     int   voxel_bank_max_points     = 4000;
@@ -34,6 +33,13 @@ struct BottleConfig
     float prior_height      = 0.20f;
     float prior_size_std    = 0.03f;
     float mask_precision    = 0.0f;   // occluding-contour silhouette weight (per-ray precision; 0 = off)
+    // ── YOLO-INDEPENDENT LiDAR first-hit range factor (see common/ai_belief/lidar_ray_factor.h) ──────
+    // A second evidence channel: LiDAR returns falling on the bottle pin cx,cy IN METRIC DEPTH + radius
+    // along the viewing ray — the direction the monocular mask SDF is blind to (see bottle-sdf-depth-bias).
+    float lidar_precision      = 0.0f;   // per-ray range precision (1/m², ≈1/σ_range²); 0 = OFF
+    float lidar_robust_c_m     = 0.05f;  // Cauchy scale (m): returns this far off the surface fade out
+    float lidar_select_margin_m = 0.06f; // pre-select returns within radius+margin (horiz) and h/2+margin (vert)
+    std::string lidar_frame_node = "lidar3D"; // DSR node whose frame the raw sweep is in (room←this transform)
     // ── YOLO detection-score → silhouette reliability weight ────────────────────────────────────────
     // The detector's per-mask confidence is a per-observation RELIABILITY (a noisy mask is noisy evidence):
     // w = clamp01((conf−floor)/(ref−floor))^power scales the silhouette precision so a weak mask can't
@@ -70,11 +76,9 @@ struct BottleConfig
     float support_decision_margin  = 2.0f;    // log-evidence a table must beat the room/floor by to win
     int   support_commit_cycles    = 8;       // consecutive cycles a challenger must win before re-parenting
     // ── Multi-instance birth/associate/death tracker (shared rc::InstanceTracker) ──────────────────
-    // OFF → legacy prior-scaffold + greedy nearest-mask. ON → data-driven: masks are associated to
-    // instances by a covariance-gated global 1-to-1, a persistently-unexplained mask spawns a new
-    // bottle, and an unsupported instance is retired. Pure-tracker mode (priors give only the default
-    // birth size); enable when the scene has an unknown / changing number of bottles.
-    bool  tracker_enabled          = false;
+    // The only instance-lifecycle path (mirrors table/chair): masks are associated to instances by a
+    // covariance-gated global 1-to-1, a persistently-unexplained mask spawns a new bottle, and an
+    // unsupported instance is retired.
     float tracker_gate_mahalanobis = 9.0f;    // χ²₂ gate (~3σ) for a mask↔instance match (when cov known)
     float tracker_gate_fallback_m  = 0.30f;   // metric XY gate (m) when an instance has no usable cov yet
     int   tracker_birth_frames     = 6;       // frames a mask must stay unexplained before spawning a bottle
@@ -84,6 +88,13 @@ struct BottleConfig
     float tracker_merge_overlap    = 0.30f;   // merge two instances whose footprints (circles) overlap ≥ this
                                               // fraction of the SMALLER one, keeping the more-observed. 0 disables.
     bool  tracker_nll_cost         = false;   // association cost = ½(m²+ln|S|) NLL (vs raw m²); see InstanceTracker
+    // ── RGB-360 bearing confirmation (Part C confirm; RICOH_360_PERIPHERAL_DETECTION.md) ────────────
+    // A ricoh no-depth bearing slice that lines up (in azimuth from the robot) with a live bottle is
+    // evidence it is STILL THERE even when the zed missed it → HOLD its death-miss this cycle (peripheral
+    // "glance"). No fit, no birth. Default OFF: the published bearing/azimuth convention is still
+    // PROVISIONAL (see Part A step 8) — enable + watch the [bearing] log to verify it before relying on it.
+    bool  bearing_confirm_enabled  = false;   // Bearing.ConfirmEnabled
+    float bearing_confirm_gate_rad = 0.17f;   // Bearing.ConfirmGateRad — 1-D angular gate (~10°)
     // ── Part B: masks in camera frame + chain covariance ───────────────────────────────────────────
     // The voxelizer dual-publishes support points in CAMERA frame (mask_support_points_cam). When
     // enabled, MaskIngestor transforms them to the fit frame via inner_eigen pinned to the capture

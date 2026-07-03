@@ -20,7 +20,7 @@
 /**
  * SpecificWorker — bottle_concept agent: RoboComp lifecycle + presence protocol +
  * orchestration only. compute() wires the collaborators into the per-cycle pipeline:
- *   mask_ingestor_ (read masks) → scene_graph_ (scaffold bottle nodes) →
+ *   mask_ingestor_ (read masks) → tracker_ (birth/associate/death of bottle nodes) →
  *   fitter_ (per-bottle free-energy fit + write-back) → evaluator_ (validation drivers).
  */
 
@@ -39,6 +39,8 @@
 #include <QTimer>
 #include <QSettings>   // persist the standalone dashboard window geometry
 #include <QByteArray>
+
+#include "../../common/bearing_confirm/bearing_confirm.h"   // Part C: RGB-360 bearing → live-instance confirm
 
 #include <dsr/api/dsr_api.h>
 
@@ -122,6 +124,9 @@ void SpecificWorker::request_shutdown()
     // (while G is still fully alive) also unsubscribes its internal graph signals cleanly.
     if (G)
         disconnect(G.get(), nullptr, this, nullptr);
+    // Drop the LiDAR media subscriber BEFORE tearing down the graph/inner_eigen it reads (it holds a raw
+    // inner_eigen_ pointer + a DDS reader) — mirrors room_concept's teardown ordering.
+    lidar_ingestor_.reset();
     inner_eigen_.reset();
 
     cleanup_owned_nodes();
@@ -298,7 +303,7 @@ void SpecificWorker::initialize()
     connect(G.get(), &DSR::DSRGraph::del_node_signal, this, &SpecificWorker::del_node_slot);
 
     // Remove any "bottle*" cylinder nodes left behind by a previous (crashed) run
-    // so this agent always starts from a clean slate and never double-scaffolds.
+    // so this agent always starts from a clean slate.
     remove_owned_bottle_nodes();
 
     const auto rooms = G->get_nodes_by_type("room");
@@ -306,9 +311,6 @@ void SpecificWorker::initialize()
         room_node_id_ = rooms.front().id();
     else
         qWarning() << "bottle_concept: no room node found at startup";
-
-    prior_store_  = std::make_unique<rc::PriorStore>(cfg_.priors_path);
-    priors_cache_ = prior_store_->load_priors();
 
     // Validation harness (no-op unless an Eval.*/Scene.* flag is set). Table-top lookup injected as a
     // callback so the evaluator stays decoupled from the scene-graph layer.
@@ -322,8 +324,13 @@ void SpecificWorker::initialize()
     // Active-inference fit core (pure belief). Owns the instance map; READS via scene_graph_ but the
     // worker (process_bottle_node) owns the write-back + eval — see the canonical concept-agent loop.
     fitter_ = std::make_unique<rc::BottleFitter>(
-        G, inner_eigen_.get(), cfg_, priors_cache_,
+        G, inner_eigen_.get(), cfg_,
         mask_ingestor_.get(), scene_graph_.get());
+
+    // YOLO-independent LiDAR range channel: lidar3D media-plane consumer that stages each cycle's sweep in the
+    // room frame for the fitter. Dormant (no DDS participant) unless BottleModel.LidarPrecision > 0. Subscriber
+    // is brought up lazily on the main thread from compute()::pump(), never here (graph may still be joining).
+    lidar_ingestor_ = std::make_unique<rc::BottleLidarIngestor>(G, inner_eigen_.get(), cfg_);
 
     // ── Live "Bottle Inference" dashboard — its OWN top-level window ───────────────────────────────
     // Extracted from the DSR graph dock (add_custom_widget_to_dock) into a standalone window so it shows
@@ -373,8 +380,8 @@ void SpecificWorker::compute()
     }
 
     // One-shot: place the bottle on its arm-side spot BEFORE any fit, then let the scene settle so
-    // the voxelizer captures it there before scaffold_missing_bottle_nodes() creates the node — a
-    // node created from a pre-move camera frame would lock the XY ownership gate at the old pose.
+    // the voxelizer captures it there before the tracker births the node — a node created from a
+    // pre-move camera frame would lock the XY ownership gate at the old pose.
     if (cfg_.place_on_start and not evaluator_->place_done())
     {
         evaluator_->place_bottle_on_start();
@@ -387,10 +394,14 @@ void SpecificWorker::compute()
     }
 
     mask_ingestor_->refresh();
-    if (cfg_.tracker_enabled)
-        run_instance_tracker();   // data-driven birth/associate/death
-    else
-        scene_graph_->scaffold_missing_bottle_nodes(priors_cache_, mask_ingestor_->packet(), room_node_id_);
+
+    // Stage this cycle's LiDAR sweep (room frame) for the fitter's range factor. clear-then-set so the factor
+    // only contributes on cycles with a genuinely fresh sweep (never re-uses a stale one). No-op when off.
+    fitter_->clear_lidar_sweep();
+    if (lidar_ingestor_ and lidar_ingestor_->pump())
+        fitter_->set_lidar_sweep(lidar_ingestor_->sweep_room(), lidar_ingestor_->origin_room());
+
+    run_instance_tracker();   // data-driven birth/associate/death (the only instance-lifecycle path)
 
     // Bottle instances are DSR `cylinder` nodes named "bottle_*".
     for (const auto& node : G->get_nodes_by_type("cylinder"))
@@ -476,9 +487,32 @@ void SpecificWorker::merge_overlapping_instances()
     }
 }
 
+void SpecificWorker::retire_diverged_instances()
+{
+    if (cfg_.diverged_retire_frames <= 0)
+        return;
+    auto& insts = fitter_->instances();
+    std::vector<std::uint64_t> doomed;
+    for (auto& [id, inst] : insts)
+        if (inst.frames_diverged >= cfg_.diverged_retire_frames)
+            doomed.push_back(id);
+    for (const std::uint64_t id : doomed)
+    {
+        std::print("bottle_concept: [tracker] RETIRE-DIVERGED id={} (energy==0 for {} frames)\n",
+                   id, cfg_.diverged_retire_frames);
+        // Affordance FIRST (while the instance/id still exists), then the C++ instance, then the DSR node —
+        // same ordering as a tracker DEATH so aff_<bottle> is never orphaned.
+        if (auto it = insts.find(id); it != insts.end())
+            it->second.affordance.remove();
+        fitter_->forget_node(id);
+        G->delete_node(id);
+    }
+}
+
 void SpecificWorker::run_instance_tracker()
 {
     merge_overlapping_instances();   // enforce physical exclusion before associating/birthing this cycle
+    retire_diverged_instances();     // drop diverged models before they are re-associated/re-fed a mask
 
     rc::TrackerParams tp;
     tp.gate_mahalanobis = cfg_.tracker_gate_mahalanobis;
@@ -516,8 +550,35 @@ void SpecificWorker::run_instance_tracker()
     const auto& pkt = mask_ingestor_->packet();
     if (pkt.valid)
         for (int i = 0; i < static_cast<int>(pkt.slices.size()); ++i)
-            if (pkt.slices[i].label == "bottle")
+            if (pkt.slices[i].label == "bottle" and pkt.slices[i].has_depth)   // skip ricoh bearing-only slices (Part B)
                 dets.push_back({Eigen::Vector2f(pkt.slices[i].centroid.x(), pkt.slices[i].centroid.y()), i});
+
+    // Part C (confirm): a ricoh no-depth "bottle" bearing that lines up (in azimuth from the robot) with a
+    // live instance is evidence it is STILL THERE even when the zed missed it → HOLD its death-miss this
+    // cycle (set expected_visible=false, exactly like being out of the zed frustum). No fit, no birth.
+    if (cfg_.bearing_confirm_enabled and pkt.valid and not tracks.empty())
+    {
+        std::vector<rc::BearingDetectionView> bearings;
+        for (int i = 0; i < static_cast<int>(pkt.slices.size()); ++i)
+            if (pkt.slices[i].label == "bottle" and not pkt.slices[i].has_depth)
+                bearings.push_back({pkt.slices[i].azimuth_room_rad, i});
+
+        if (not bearings.empty())
+        {
+            // Robot room-frame XY (≈ the zed origin in room, matching how the bearing was produced).
+            Eigen::Vector2f robot_xy(0.f, 0.f);
+            if (const auto p = inner_eigen_->transform("room", Eigen::Vector3d::Zero(), "zed"); p.has_value())
+                robot_xy = {static_cast<float>(p->x()), static_cast<float>(p->y())};
+
+            for (const auto& c : rc::confirm_tracks_by_bearing(tracks, bearings, robot_xy,
+                                                               cfg_.bearing_confirm_gate_rad))
+            {
+                tracks[c.track_index].expected_visible = false;   // hold the death-miss (peripheral glance)
+                std::print("[bearing] confirm bottle id={} slice={} innov={:.1f}deg (holds death-miss)\n",
+                           c.track_id, c.slice_index, c.innovation_rad * 180.0f / std::numbers::pi_v<float>);
+            }
+        }
+    }
 
     const auto res = tracker_.update(tracks, dets);
 

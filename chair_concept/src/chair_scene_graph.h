@@ -2,9 +2,9 @@
  * chair_scene_graph.h
  *
  * DSR node/RT I/O layer for chair_concept (mirrors bottle_concept/bottle_scene_graph.h):
- * scaffolds missing "chair_N" nodes from priors matched to masks, writes the fitted model
- * back (geometry attrs + mesh + RFE/voxel-bank export + room→chair RT edge), reads the
- * robot localisation covariance, and writes the epistemic action proposal.
+ * births "chair_N" nodes from tracker detections, writes the fitted model back (geometry
+ * attrs + mesh + RFE/voxel-bank export + room→chair RT edge), reads the robot localisation
+ * covariance, and writes the epistemic action proposal.
  *
  * Plain class (no Q_OBJECT) constructed by SpecificWorker once G + the DSR APIs are ready.
  * The graph relayout is injected as a callback to stay decoupled from the GUI (graph_viewers).
@@ -39,7 +39,7 @@ public:
 
     // Data-driven birth: create a fresh "chair_N" node at the detection centroid (room frame), seeded
     // with the Tracker.Birth* default geometry. Returns the new node id (0 on failure). Used by the
-    // worker's instance tracker in place of the prior-scaffold when Tracker.Enabled.
+    // worker's instance tracker — the only instance-lifecycle path.
     std::uint64_t create_instance_from_detection(const Eigen::Vector3f& centroid_room,
                                                  std::uint64_t room_node_id);
 

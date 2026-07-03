@@ -137,6 +137,8 @@ yolo_thread_period_ms = 50    # target worker-thread cycle (~20 Hz); 3-strip inf
 yolo_n_strips         = 3
 yolo_strip_overlap_px = 80    # circular-pad margin so a seam-straddling object survives whole
 yolo_merge_iou        = 0.5   # cross-strip box IoU above which two strips' boxes are the same object
+publish_masks         = true  # emit ricoh detections into the shared "masks" node as no-depth bearing slices (Part B)
+azimuth_offset_rad    = 0.0   # mounting-yaw + 0-column offset for the panorama-column→room-bearing map (PROVISIONAL — verify live)
 
 [Ice]
 Warn.Connections = "0"

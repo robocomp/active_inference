@@ -42,6 +42,7 @@
 #include <thread>    // brief DDS flush before _Exit
 #include <chrono>
 #include <fstream>   // per-cycle detection-slice diagnostic CSV
+#include <format>
 #include <iostream>  // std::cout/cerr flush
 
 #include <algorithm>
@@ -57,15 +58,15 @@
 namespace {
 
 // Scalar model-uncertainty readout for model_uncertainty_att / the dashboard: the sum of the belief's
-// per-DOF posterior stds over position (cx,cy) + size (seat_w,seat_d), in metres, from the AI2
-// covariance Σ over [cx,cy,cz,yaw,seat_w,seat_d,seat_h,back_h]. Shrinks as the robot gathers viewpoints.
+// per-DOF posterior stds of the POSE, from the AI2 covariance Σ over [cx,cy,yaw] (pose-only belief; size
+// is a fixed template). Shrinks as the robot gathers viewpoints (mostly yaw, via the backrest).
 float belief_uncertainty(const rc::ChairInstance& inst)
 {
     if (not inst.ai2_initialized)
         return 0.0f;
     const auto& S = inst.ai2_belief.covariance();
     const auto sd = [&](int i) { return std::sqrt(std::max(0.0f, S(i, i))); };
-    return sd(0) + sd(1) + sd(4) + sd(5);
+    return sd(0) + sd(1) + sd(2);
 }
 
 // Two chairs cannot share physical space. Footprint = the oriented seat rectangle (cx,cy,seat_w,seat_d,yaw)
@@ -130,6 +131,17 @@ float footprint_overlap_ratio(const rc::ChairState& a, const rc::ChairState& b)
     const float ai = poly_area(inter);
     const float amin = std::min(poly_area({ca.begin(), ca.end()}), poly_area({cb.begin(), cb.end()}));
     return amin > 1e-6f ? ai / amin : 0.0f;
+}
+
+// Tracker lifecycle event log (etc/chair_events.csv) — makes birth/merge/prune/suppress visible so the
+// "create then remove" churn can be diagnosed from a file, not stdout. seq gives ordering.
+void log_tracker_event(const char* ev, std::uint64_t id, float x, float y, const std::string& note)
+{
+    static std::ofstream f = [] { std::ofstream o("etc/chair_events.csv", std::ios::trunc);
+                                   o << "seq,event,id,x,y,note\n"; return o; }();
+    static int seq = 0;
+    f << seq++ << ',' << ev << ',' << id << ',' << x << ',' << y << ',' << note << '\n';
+    f.flush();
 }
 
 }  // namespace
@@ -359,8 +371,8 @@ void SpecificWorker::initialize()
             this, &SpecificWorker::del_node_slot);
 
     // Remove any "chair*" nodes left behind by a previous (crashed) run so this agent always starts
-    // from a clean slate and never adopts a stale/drifted node (mirrors bottle's startup sweep;
-    // scaffold_missing_chair_nodes re-creates them from priors).
+    // from a clean slate and never adopts a stale/drifted node (the instance tracker re-births them
+    // data-driven from masks).
     remove_owned_chair_nodes();
 
     // Resolve room node
@@ -503,6 +515,8 @@ void SpecificWorker::merge_overlapping_instances()
             const std::uint64_t drop = keep_i ? ids[j] : ids[i];
             std::print("chair_concept: [tracker] MERGE id={} into id={} (footprint overlap {:.2f})\n",
                        drop, keep, ratio);
+            log_tracker_event("MERGE", drop, ia->second.model.state().cx, ia->second.model.state().cy,
+                              std::format("into {} overlap {:.2f}", keep, ratio));
             if (auto it = insts.find(drop); it != insts.end())
                 it->second.affordance.remove();
             fitter_->forget_node(drop);
@@ -628,11 +642,25 @@ void SpecificWorker::run_instance_tracker()
         struct EvPair { float e; std::uint64_t id; int slice; };
         std::vector<EvPair> pairs;
         const float R = cfg_.ai2_sigma_base_m * cfg_.ai2_sigma_base_m;
+        const float rn2 = cfg_.tracker_detection_noise_m * cfg_.tracker_detection_noise_m;
         for (auto& [id, inst] : fitter_->instances())
         {
             if (not inst.ai2_initialized) continue;
+            const auto& bs = inst.ai2_belief.state();
+            const auto& BS = inst.ai2_belief.covariance();
+            const float sxx = BS(0, 0) + inst.chain_cov_xx + rn2;   // innovation cov diag S = P + R²I
+            const float syy = BS(1, 1) + inst.chain_cov_yy + rn2;
             for (const auto& d : dets)
             {
+                // POSITION GATE (mirrors the tracker's S=P+R²I Mahalanobis): an instance may claim a slice
+                // ONLY if the slice centroid is within its gate. Without it the evidence greedy assigns EVERY
+                // instance some slice, so an instance whose own chair is occluded this frame claims a FAR
+                // chair's slice (high nll, but the least-bad available) → suppresses THAT chair's birth AND
+                // teleports the instance (the "3rd chair never seen" + wrong-pose bug). Gate by position,
+                // rank by shape-evidence = the correct combination.
+                const float ex = d.xy.x() - bs.cx, ey = d.xy.y() - bs.cy;
+                const float m2 = ex * ex / std::max(1e-9f, sxx) + ey * ey / std::max(1e-9f, syy);
+                if (m2 > cfg_.tracker_gate_mahalanobis) continue;   // outside the gate → not claimable
                 const auto& sl = pkt.slices[d.slice_index];
                 const std::size_t b = std::min<std::size_t>(sl.support_begin, pkt.support_points.size());
                 const std::size_t e = std::min<std::size_t>(sl.support_end,   pkt.support_points.size());
@@ -648,6 +676,27 @@ void SpecificWorker::run_instance_tracker()
             if (used_inst.count(p.id) or used_slice.count(p.slice)) continue;
             fitter_->instances().at(p.id).assigned_mask_idx = p.slice;
             used_inst.insert(p.id); used_slice.insert(p.slice);
+        }
+
+        // Pass 2 — INITIALISATION: a freshly-born instance has no belief yet (Pass 1 skips it), so it has no
+        // way to earn its first mask. Assign it the nearest UNUSED slice within the metric fallback gate of
+        // its BIRTH position, so it initialises AT the chair it was born from — NOT the nearest chair (that
+        // was the teleport: a far-born instance grabbed a near chair's mask when its own was occluded, then
+        // merged, so the far chair never persisted). If no slice sits at its birth spot this frame it stays
+        // unassigned (frozen) — no teleport.
+        const float fb2 = cfg_.tracker_gate_fallback_m * cfg_.tracker_gate_fallback_m;
+        for (auto& [id, inst] : fitter_->instances())
+        {
+            if (inst.ai2_initialized or used_inst.count(id)) continue;
+            const auto& ms = inst.model.state();
+            int best = -1; float best_r2 = fb2;
+            for (const auto& d : dets)
+            {
+                if (used_slice.count(d.slice_index)) continue;
+                const float ex = d.xy.x() - ms.cx, ey = d.xy.y() - ms.cy, r2 = ex * ex + ey * ey;
+                if (r2 < best_r2) { best_r2 = r2; best = d.slice_index; }
+            }
+            if (best >= 0) { inst.assigned_mask_idx = best; used_slice.insert(best); used_inst.insert(id); }
         }
     }
 
@@ -681,6 +730,9 @@ void SpecificWorker::run_instance_tracker()
                        id, it != fitter_->instances().end() ? it->second.unassigned_streak : 0,
                        it != fitter_->instances().end() ? it->second.processed_cycles : 0,
                        cfg_.tracker_prune_maturity_cycles);
+            if (it != fitter_->instances().end())
+                log_tracker_event("PRUNE", id, it->second.model.state().cx, it->second.model.state().cy,
+                                  std::format("unassigned {} age {}", it->second.unassigned_streak, it->second.processed_cycles));
             if (it != fitter_->instances().end())
                 it->second.affordance.remove();
             fitter_->forget_node(id);
@@ -716,12 +768,16 @@ void SpecificWorker::run_instance_tracker()
                 }
                 std::print("chair_concept: [tracker] BIRTH SUPPRESSED slice={} at ({:.2f},{:.2f}) — claimed by "
                            "id={} ({:.2f} m away)\n", slice, c.x(), c.y(), claimer, dist);
+                log_tracker_event("SUPPRESS", claimer, c.x(), c.y(), std::format("claimer {:.2f}m", dist));
                 continue;
             }
         }
         const auto new_id = scene_graph_->create_instance_from_detection(c, room_node_id_);
         if (new_id != 0)
+        {
             fitter_->note_birth(new_id, Eigen::Vector2f(c.x(), c.y()));
+            log_tracker_event("BIRTH", new_id, c.x(), c.y(), "");
+        }
     }
 }
 
@@ -831,12 +887,12 @@ void SpecificWorker::publish_chair_diagnostics(const rc::ChairInstance& inst,
         }
         if (ts_ce_plot_ and inst.ai2_initialized)
         {
-            // Belief posterior std for the size DOFs (Σ index 4=seat_w, 5=seat_d), in mm — the size trace.
+            // Pose posterior std (pose-only belief): position (Σ 0=cx, mm) and yaw (Σ 2, mrad).
             const auto& S = inst.ai2_belief.covariance();
-            ts_ce_plot_->add_series(inst.node_name + "_sW", QColor(255, 90, 90), 1.1f);
-            ts_ce_plot_->add_series(inst.node_name + "_sH", QColor(90, 200, 90), 1.1f);
-            ts_ce_plot_->add_point (inst.node_name + "_sW", 1000.f * std::sqrt(std::max(0.f, S(4, 4))));
-            ts_ce_plot_->add_point (inst.node_name + "_sH", 1000.f * std::sqrt(std::max(0.f, S(5, 5))));
+            ts_ce_plot_->add_series(inst.node_name + "_pos", QColor(255, 90, 90), 1.1f);
+            ts_ce_plot_->add_series(inst.node_name + "_yaw", QColor(90, 200, 90), 1.1f);
+            ts_ce_plot_->add_point (inst.node_name + "_pos", 1000.f * std::sqrt(std::max(0.f, S(0, 0))));
+            ts_ce_plot_->add_point (inst.node_name + "_yaw", 1000.f * std::sqrt(std::max(0.f, S(2, 2))));
         }
     }
 

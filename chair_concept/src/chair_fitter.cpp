@@ -146,14 +146,15 @@ ChairFitter::ChairObservation ChairFitter::observe(ChairInstance& inst, const DS
     const auto& masks_packet = mask_ingestor_->packet();
     if (masks_packet.valid && masks_packet.frame_id > inst.last_masks_frame_seen)
     {
-        // Mask for this instance: the tracker's gated assignment when present (multi-instance safe),
-        // else the greedy nearest-to-our-centre.
+        // Mask for this instance = ONLY the §3.1 gated assignment. No greedy-nearest fallback: when this
+        // instance has no association this frame (its chair occluded / another instance won the slice), it
+        // must FREEZE, not grab the nearest chair's mask — that fallback teleported a far-born instance onto
+        // a near chair when its own chair was momentarily undetected (→ merge, so the far chair never
+        // persisted). Freeze-on-no-association is the information-filter axiom; mirrors table_concept.
         std::optional<MaskIngestor::MaskSlice> selected_mask;
         if (const auto& sl = masks_packet.slices;
             inst.assigned_mask_idx >= 0 and inst.assigned_mask_idx < static_cast<int>(sl.size()))
             selected_mask = sl[inst.assigned_mask_idx];
-        else
-            selected_mask = mask_ingestor_->select_nearest(Eigen::Vector3f(inst.model.state().cx, inst.model.state().cy, inst.model.state().seat_h), "chair");
         if (selected_mask.has_value())
         {
             const auto& slice = selected_mask.value();
@@ -245,7 +246,7 @@ float ChairFitter::run_inference(ChairInstance& inst, const ChairObservation& ob
     if (not inst.ai2_initialized)
     {
         const auto& m = inst.model.state();
-        ChairBeliefState s0{m.cx, m.cy, m.cz, m.yaw, m.seat_w, m.seat_d, m.seat_h, m.back_h};
+        ChairBeliefState s0{m.cx, m.cy, m.yaw};   // pose-only belief (size is the fixed template)
         if (npts > 0)
         {
             Eigen::Vector3f sum = Eigen::Vector3f::Zero();
@@ -255,9 +256,7 @@ float ChairFitter::run_inference(ChairInstance& inst, const ChairObservation& ob
             scan(observation.candidate_pts); scan(observation.residual_pts);
             s0.cx = sum.x() / npts; s0.cy = sum.y() / npts;
             std::sort(zs.begin(), zs.end());
-            const float zmid = zs[static_cast<std::size_t>(0.55f * (zs.size() - 1))];   // ~seat-top band
-            s0.cz = cfg_.ai2_floor_z;                                        // PIN to the shared room floor
-            s0.seat_h = std::clamp(zmid - cfg_.ai2_floor_z, 0.20f, 0.80f);   // seat top above the floor
+            const float zmid = zs[static_cast<std::size_t>(0.55f * (zs.size() - 1))];   // ~seat-top band (yaw split)
 
             // Coarse yaw from the backrest offset: the backrest sits on the −local_y seat edge, so the
             // vector from the seat centroid to the upper (backrest) points runs along −local_y ⇒
@@ -284,21 +283,18 @@ float ChairFitter::run_inference(ChairInstance& inst, const ChairObservation& ob
             }
         }
         ChairBeliefParams p;
+        p.tpl_seat_w = cfg_.tracker_birth_seat_w;   // fixed standard-chair template (pose-only belief)
+        p.tpl_seat_d = cfg_.tracker_birth_seat_d;
+        p.tpl_seat_h = cfg_.tracker_birth_seat_h;
+        p.tpl_back_h = cfg_.tracker_birth_back_h;
         p.sigma_base_m         = cfg_.ai2_sigma_base_m;
         p.clutter_frac         = cfg_.ai2_clutter_frac;
         p.clutter_scale_m      = cfg_.ai2_clutter_scale_m;
-        p.clutter_structure_gain = cfg_.ai2_clutter_structure_gain;
-        p.prior_size_std       = cfg_.ai2_prior_size_std;
         p.process_std_m        = cfg_.ai2_process_std_m;
         p.process_std_yaw      = cfg_.ai2_process_std_yaw;
-        p.process_std_size     = cfg_.ai2_process_std_size;
         p.floor_z              = cfg_.ai2_floor_z;
         p.floor_std            = cfg_.ai2_floor_std;
-        p.seat_anchor_std      = cfg_.ai2_seat_anchor_std;
-        p.seat_anchor_band     = cfg_.ai2_seat_anchor_band;
-        p.seat_extent_std      = cfg_.ai2_seat_extent_std;
         p.common_mode_pos_std  = cfg_.ai2_common_mode_pos_std;
-        p.common_mode_size_std = cfg_.ai2_common_mode_size_std;
         p.common_mode_yaw_std  = cfg_.ai2_common_mode_yaw_std;
         p.gn_iters             = cfg_.ai2_gn_iters;
         inst.ai2_belief = ChairBelief(s0, p);
@@ -358,8 +354,10 @@ float ChairFitter::run_inference(ChairInstance& inst, const ChairObservation& ob
     // Write belief → legacy ChairState so downstream publish/viewer/RT code is unchanged.
     const auto& bs = inst.ai2_belief.state();
     ChairState ms = inst.model.state();
-    ms.cx = bs.cx; ms.cy = bs.cy; ms.cz = bs.cz; ms.yaw = bs.yaw;
-    ms.seat_w = bs.seat_w; ms.seat_d = bs.seat_d; ms.seat_h = bs.seat_h; ms.back_h = bs.back_h;
+    ms.cx = bs.cx; ms.cy = bs.cy; ms.yaw = bs.yaw;
+    ms.cz = inst.ai2_belief.cz();                     // pinned floor
+    ms.seat_w = inst.ai2_belief.seat_w(); ms.seat_d = inst.ai2_belief.seat_d();   // fixed template dims
+    ms.seat_h = inst.ai2_belief.seat_h(); ms.back_h = inst.ai2_belief.back_h();
     inst.model.set_state(ms);
 
     ++inst.matched_frames;
@@ -367,9 +365,9 @@ float ChairFitter::run_inference(ChairInstance& inst, const ChairObservation& ob
     compute_projected_roi(inst);
 
     if (should_log(inst))
-        std::print("[{}] AI2 npts={} clutter={:.0f}% R={:.4f} range={:.2f} trunc={:.2f}{} | cx={:.2f} cy={:.2f} cz={:.2f} ψ={:.2f} | sw={:.2f} sd={:.2f} sh={:.2f} bh={:.2f}\n",
+        std::print("[{}] AI2 npts={} clutter={:.0f}% R={:.4f} range={:.2f} trunc={:.2f}{} | cx={:.2f} cy={:.2f} ψ={:.2f} (template sw={:.2f} sh={:.2f})\n",
                    inst.node_name, npts, 100.0f * inst.last_clutter_frac, R, range, inst.last_trunc_frac, gated ? " GATED" : "",
-                   bs.cx, bs.cy, bs.cz, bs.yaw, bs.seat_w, bs.seat_d, bs.seat_h, bs.back_h);
+                   bs.cx, bs.cy, bs.yaw, inst.ai2_belief.seat_w(), inst.ai2_belief.seat_h());
 
     log_ai2_csv(inst, npts, R, gated, energy);
     return energy;
@@ -384,17 +382,16 @@ void ChairFitter::log_ai2_csv(const ChairInstance& inst, int npts, float R, bool
         ai2_csv_.open(cfg_.ai2_csv_path, std::ios::out | std::ios::trunc);
         if (not ai2_csv_.is_open()) { cfg_.ai2_csv_path.clear(); return; }
         ai2_csv_ << "cycle,node,npts,gated,energy,R,motion_var,trunc_frac,range,clutter_frac,"
-                 << "cx,cy,cz,yaw,seat_w,seat_d,seat_h,back_h,"
-                 << "std_cx,std_cy,std_cz,std_yaw,std_sw,std_sd,std_sh,std_bh\n";
+                 << "cx,cy,yaw,seat_w,seat_d,seat_h,back_h,std_cx,std_cy,std_yaw\n";
     }
     const auto& s = inst.ai2_belief.state();
     const auto& S = inst.ai2_belief.covariance();
     const auto sd = [&](int i) { return std::sqrt(std::max(0.0f, S(i, i))); };
     ai2_csv_ << inst.processed_cycles << ',' << inst.node_name << ',' << npts << ',' << (gated ? 1 : 0) << ','
              << energy << ',' << R << ',' << inst.last_motion_var << ',' << inst.last_trunc_frac << ',' << inst.last_range << ',' << inst.last_clutter_frac << ','
-             << s.cx << ',' << s.cy << ',' << s.cz << ',' << s.yaw << ','
-             << s.seat_w << ',' << s.seat_d << ',' << s.seat_h << ',' << s.back_h << ','
-             << sd(0) << ',' << sd(1) << ',' << sd(2) << ',' << sd(3) << ',' << sd(4) << ',' << sd(5) << ',' << sd(6) << ',' << sd(7) << '\n';
+             << s.cx << ',' << s.cy << ',' << s.yaw << ','
+             << inst.ai2_belief.seat_w() << ',' << inst.ai2_belief.seat_d() << ',' << inst.ai2_belief.seat_h() << ',' << inst.ai2_belief.back_h() << ','
+             << sd(0) << ',' << sd(1) << ',' << sd(2) << '\n';
     ai2_csv_.flush();
 }
 

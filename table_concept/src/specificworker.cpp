@@ -362,8 +362,8 @@ void SpecificWorker::initialize()
             this, &SpecificWorker::del_node_slot);
 
     // Remove any "table*" nodes left behind by a previous (crashed) run so this agent always starts
-    // from a clean slate and never adopts a stale/drifted node (mirrors bottle's startup sweep;
-    // scaffold_missing_table_nodes re-creates them from priors).
+    // from a clean slate and never adopts a stale/drifted node (the instance tracker re-births them
+    // data-driven from masks).
     remove_owned_table_nodes();
 
     // Resolve room node
@@ -380,9 +380,6 @@ void SpecificWorker::initialize()
     // Part B: localization/chain covariance on the published RT edge (mirrors bottle_concept).
     gaussian_api_ = std::make_unique<DSR::InnerGaussianAPI>(G.get());
     fitter_->set_chain_cov_source(gaussian_api_.get(), "zed", cfg_.rt_cov_add_chain);
-
-    // Missing table nodes are scaffolded lazily from priors only after masks
-    // provide some table evidence in the current scene.
 
     // Build rc::EpistemicPlanner (info-gain scoring only; stand-off distance is the sole parameter).
     epistemic_planner_ = rc::EpistemicPlanner(cfg_.obs_distance);

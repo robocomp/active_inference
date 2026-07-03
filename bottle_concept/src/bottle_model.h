@@ -12,15 +12,11 @@
  *
  * Cylinder SDF (axis = +Z): d_radial = ‖(x,y)−(cx,cy)‖ − radius,
  *                           d_vertical = |z−cz| − height/2.
- * Free Energy  = Σᵢ wᵢ · ρ(SDF(θ,yᵢ)) / σ²  +  KL(q‖p)
- * Gradient computed with PyTorch autograd and optimised with Adam/SGD,
- * mirroring TableModel so the perception loop is identical bar the geometry.
  *
- * pose_covariance() returns the 3×3 position covariance from the Laplace
- * (curvature) approximation of F at the optimum: many well-spread observations
- * ⇒ tight covariance; few/no points ⇒ only the prior curvature survives ⇒ the
- * covariance grows. This is the P_bottle the controller consumes off the RT edge
- * to decide how slowly/often to look.
+ * This class is now only the state holder (BottleState) + the compound cylinder SDF + the
+ * occluding-contour silhouette store. All inference lives in BottleBelief (bottle_belief.h) on the
+ * shared recursive-Laplace engine; the fitted posterior is written back into this state for the
+ * downstream publish/viewer/RT code, which is unchanged.
  */
 
 #pragma once

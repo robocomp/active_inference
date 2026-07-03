@@ -126,6 +126,12 @@ struct VoxelizerParams
     int         RICOH_YOLO_N_STRIPS        = 3;       // Ricoh.yolo_n_strips
     int         RICOH_YOLO_STRIP_OVERLAP_PX= 80;      // Ricoh.yolo_strip_overlap_px
     float       RICOH_YOLO_MERGE_IOU       = 0.5f;    // Ricoh.yolo_merge_iou — cross-strip dedup threshold
+    // Publish the ricoh 360 detections into the shared "masks" node as NO-DEPTH bearing slices (Part B,
+    // RICOH_360_PERIPHERAL_DETECTION.md). azimuth_offset trims the panorama-column→room-bearing mapping for
+    // the ricoh's mounting yaw + the panorama's 0-column convention — PROVISIONAL, verify live vs the
+    // descriptor projection model before any consumer relies on the bearing (Part C is not built yet).
+    bool        RICOH_PUBLISH_MASKS        = true;    // Ricoh.publish_masks
+    float       RICOH_AZIMUTH_OFFSET_RAD   = 0.0f;    // Ricoh.azimuth_offset_rad
 
     // Custom drawing windows (attach to the DSR GUI if available). Both default ON.
     bool        SHOW_VOXEL_VIEWER = true; // Voxel.show_voxel_viewer

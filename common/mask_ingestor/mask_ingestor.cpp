@@ -63,6 +63,9 @@ bool MaskIngestor::refresh()
     const DSR::Attribute* trunc_frac_attr      = find_attr("mask_trunc_frac");
     const DSR::Attribute* centroid_radius_attr = find_attr("mask_centroid_radius");
     const DSR::Attribute* range_attr           = find_attr("mask_range");
+    // RGB-360 bearing-only channel (optional; newer producers only) — see RICOH_360_PERIPHERAL_DETECTION.md
+    const DSR::Attribute* has_depth_attr       = find_attr("mask_has_depth");
+    const DSR::Attribute* azimuth_attr         = find_attr("mask_azimuth");
     const DSR::Attribute* cam_twist_attr       = find_attr("mask_cam_twist");
     const DSR::Attribute* frame_dt_attr        = find_attr("mask_frame_dt_s");
 
@@ -97,6 +100,8 @@ bool MaskIngestor::refresh()
     const auto& trunc_frac_v      = trunc_frac_attr      ? trunc_frac_attr->float_vec()      : empty_flat;
     const auto& centroid_radius_v = centroid_radius_attr ? centroid_radius_attr->float_vec() : empty_flat;
     const auto& range_v           = range_attr           ? range_attr->float_vec()           : empty_flat;
+    const auto& has_depth_v       = has_depth_attr       ? has_depth_attr->float_vec()       : empty_flat;
+    const auto& azimuth_v         = azimuth_attr         ? azimuth_attr->float_vec()         : empty_flat;
 
     // Part B: with frame-transform enabled, source the camera-frame support array and transform it to
     // the target frame below; otherwise use the legacy room-frame array as-is.
@@ -185,6 +190,10 @@ bool MaskIngestor::refresh()
         slice.trunc_frac      = fetch1(trunc_frac_v);
         slice.centroid_radius = fetch1(centroid_radius_v);
         slice.range           = fetch1(range_v);
+        // Bearing-only (ricoh) channel: default has_depth=true when the producer predates the field.
+        slice.has_depth        = (static_cast<std::size_t>(i) < has_depth_v.size())
+                                 ? (has_depth_v[static_cast<std::size_t>(i)] != 0.0f) : true;
+        slice.azimuth_room_rad = fetch1(azimuth_v);
         slice.support_begin = clamped_begin;
         slice.support_end = clamped_end;
         {
@@ -234,6 +243,8 @@ MaskIngestor::select_nearest(const Eigen::Vector3f& query_centroid, std::string_
     for (const auto& slice : masks_packet_.slices)
     {
         if (slice.label != label)
+            continue;
+        if (not slice.has_depth)   // bearing-only (ricoh) slices have no 3D centroid to match against
             continue;
 
         const float dist = (slice.centroid - query_centroid).norm();

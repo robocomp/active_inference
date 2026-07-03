@@ -1,42 +1,5 @@
 set(ACTIVE_INFERENCE_COMMON_DIR "${CMAKE_CURRENT_LIST_DIR}/../../common")
 
-cmake_policy(SET CMP0074 NEW)
-
-# Keep generated CMake changes from pushing an unsupported host dialect into
-# libtorch/CUDA configure checks (CUDA-13.2 nvcc otherwise demands "CUDA26").
-if(NOT DEFINED CMAKE_CXX_STANDARD OR CMAKE_CXX_STANDARD GREATER 23)
-  set(CMAKE_CXX_STANDARD 23)
-endif()
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-set(CUDAToolkit_ROOT "/usr/local/cuda-13.2")
-find_package(CUDAToolkit REQUIRED)
-set(CMAKE_CUDA_STANDARD 17)
-set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-set(CMAKE_CUDA_EXTENSIONS OFF)
-
-# Find PyTorch (same resolution strategy used in table_concept / room_concept)
-if(NOT Torch_DIR)
-  if(EXISTS "/home/robocomp/software/libtorch/share/cmake/Torch/TorchConfig.cmake")
-    set(Torch_DIR "/home/robocomp/software/libtorch/share/cmake/Torch")
-  else()
-    find_package(Python3 COMPONENTS Interpreter QUIET)
-    if(Python3_Interpreter_FOUND)
-      execute_process(
-        COMMAND ${Python3_EXECUTABLE} -c "import torch; print(torch.utils.cmake_prefix_path, end='')"
-        OUTPUT_VARIABLE TORCH_CMAKE_PREFIX
-        RESULT_VARIABLE TORCH_CMAKE_PREFIX_RESULT
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET)
-      if(TORCH_CMAKE_PREFIX_RESULT EQUAL 0 AND EXISTS "${TORCH_CMAKE_PREFIX}/Torch/TorchConfig.cmake")
-        set(Torch_DIR "${TORCH_CMAKE_PREFIX}/Torch")
-      endif()
-    endif()
-  endif()
-endif()
-
-find_package(Torch REQUIRED)
-
 # Sources set
 LIST(APPEND SOURCES
   ../src/specificworker.cpp
@@ -48,10 +11,21 @@ LIST(APPEND SOURCES
   ../src/bottle_scene_graph.cpp
   ../src/bottle_belief.cpp
   ../src/bottle_fitter.cpp
+  ../src/bottle_lidar_ingestor.cpp
+  # Zero-copy media plane (lidar3D consumer for the YOLO-independent range factor). Mirrors room_concept:
+  # media_transport.cpp is type-agnostic but references all IDL frame types, so link every PubSubTypes pair.
+  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/media_transport.cpp
+  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/image_framePubSubTypes.cxx
+  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/image_frameTypeObjectSupport.cxx
+  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/image360_framePubSubTypes.cxx
+  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/image360_frameTypeObjectSupport.cxx
+  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/lidar_framePubSubTypes.cxx
+  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/lidar_frameTypeObjectSupport.cxx
+  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/imu_framePubSubTypes.cxx
+  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/imu_frameTypeObjectSupport.cxx
   ../src/epistemic_planner.cpp
   ../src/bottle_affordance.cpp
   ../src/bottle_model.cpp
-  ../src/prior_store.cpp
   ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_monitor/agent_presence_monitor.cpp
   ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_coordinator/agent_presence_coordinator.cpp
 )
@@ -71,20 +45,18 @@ LIST(APPEND HEADERS
   ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/timeseries_plot.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/custom_widget.h
   ../src/bottle_model.h
-  ../src/prior_store.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_monitor/agent_presence_monitor.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_coordinator/agent_presence_coordinator.h
 )
 
-
-LIST(APPEND LIBS ${LIBS} "${TORCH_LIBRARIES}")
-
 # libdsr_core defines symbols that libdsr_{api,gui} only reference (UND). The
 # framework links them under -Wl,--as-needed with core *ahead* of its consumers,
-# so the linker drops core whenever no TU references it directly. table_concept
-# survives only because its DSR-heavy TUs pull core in; force-keep all libs so a
-# light-DSR build (or the current stub) links too.
+# so the linker drops core whenever no TU references it directly. Force-keep all
+# libs so a light-DSR build links too.
 add_link_options(-Wl,--no-as-needed)
+
+# Media plane (zero-copy DDS) headers — used by bottle_lidar_ingestor.
+include_directories(${ACTIVE_INFERENCE_COMMON_DIR}/media_transport)
 
 # no-char8_t to avoid a problem with ICE Connection lib.
 # CRITICAL — match the prebuilt libdsr's Eigen ABI: use DEFAULT alignment (alignof(Transform)=16).

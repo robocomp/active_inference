@@ -17,10 +17,9 @@ namespace rc {
 BottleFitter::BottleFitter(std::shared_ptr<DSR::DSRGraph> graph,
                            DSR::InnerEigenAPI* inner_eigen,
                            BottleConfig& cfg,
-                           const std::vector<BottlePrior>& priors,
                            MaskIngestor* perception,
                            BottleSceneGraph* scene_graph)
-    : G_(std::move(graph)), inner_eigen_(inner_eigen), cfg_(cfg), priors_(priors),
+    : G_(std::move(graph)), inner_eigen_(inner_eigen), cfg_(cfg),
       mask_ingestor_(perception), scene_graph_(scene_graph)
 {}
 
@@ -241,6 +240,10 @@ float BottleFitter::run_inference(BottleInstance& inst, const BottleObservation&
         frame.sil_precision = cfg_.mask_precision * mask_confidence_weight(inst.model.silhouette_conf());
     }
 
+    // YOLO-INDEPENDENT LiDAR range channel: sensor-fusion evidence that pins metric depth + radius along the
+    // viewing ray (the direction the mask is blind to). Selects this cycle's sweep returns near the instance.
+    feed_lidar(inst, frame);
+
     const float energy = inst.ai2_belief.update(frame);
 
     // Write the belief back into the legacy BottleState so all downstream publish/viewer/RT code is
@@ -257,19 +260,31 @@ float BottleFitter::run_inference(BottleInstance& inst, const BottleObservation&
     inst.frames_since_detection = 0;
     inst.detection_alive = true;
 
-    // Convergence bookkeeping on the committed free energy (mirrors the legacy path's gate).
-    if (std::abs(energy - inst.prev_free_energy) < cfg_.fe_eps)
+    // Convergence bookkeeping on the committed free energy (mirrors the legacy path's gate). GUARD: energy is
+    // the mean cylinder-responsibility-weighted squared residual, so energy == 0 means EVERY point fell to the
+    // clutter component — the model explains NONE of its data (drifted/inflated off the cloud, a diverged fit,
+    // not a physical energy). A stuck-at-0 energy has a ~0 frame-to-frame delta and would otherwise be MISread
+    // as "converged" while the state diverges (observed live: radius ran 0.06→0.93 m with frames_converged
+    // marching to K_stable). Require a VALID, data-explaining fit (finite AND > 0) before counting stability;
+    // a non-explaining frame resets the counter. Not a magic threshold — energy == 0 is the all-clutter
+    // degeneracy sentinel (a genuine fit never reaches exactly 0; the healthy floor observed is ~0.03).
+    const bool explained = std::isfinite(energy) and energy > 0.0f;
+    if (explained and std::abs(energy - inst.prev_free_energy) < cfg_.fe_eps)
         inst.frames_converged = std::min(inst.frames_converged + 1, cfg_.K_stable);
     else
         inst.frames_converged = 0;
+    // Divergence persistence: a fit that explains none of its data (energy == 0) is diverged. Accrue; the
+    // worker retires the instance past cfg_.diverged_retire_frames so it can't keep writing a garbage model.
+    inst.frames_diverged = explained ? 0 : inst.frames_diverged + 1;
 
     update_expected_visible(inst);   // negative-information death gate (persist out-of-FoV)
 
     if (should_log(inst))
-        std::print("[{}] AI2 npts={} R={:.4f} | c=({:.3f},{:.3f},{:.3f}) r={:.3f} h={:.3f} | σ(r,h)mm=({:.1f},{:.1f})\n",
+        std::print("[{}] AI2 npts={} R={:.4f} | c=({:.3f},{:.3f},{:.3f}) r={:.3f} h={:.3f} | σ(r,h)mm=({:.1f},{:.1f}) | lidar rays={} resid={:.3f}m | E={:.4f} div={}\n",
                    inst.node_name, npts, R, bs.cx, bs.cy, bs.cz, bs.radius, bs.height,
                    1000.f * std::sqrt(std::max(0.f, inst.ai2_belief.covariance()(3, 3))),
-                   1000.f * std::sqrt(std::max(0.f, inst.ai2_belief.covariance()(4, 4))));
+                   1000.f * std::sqrt(std::max(0.f, inst.ai2_belief.covariance()(4, 4))),
+                   inst.dbg_lidar_rays, inst.dbg_lidar_resid_m, energy, inst.frames_diverged);
 
     log_ai2_csv(inst, npts, R, energy);
     return energy;
@@ -294,7 +309,7 @@ void BottleFitter::log_ai2_csv(const BottleInstance& inst, int point_count, floa
         ai2_csv_ << "cycle,node,pts,R,energy,frames_converged,sil_rays";   // sil_rays = silhouette edge rays folded
         for (const auto* d : kDof) ai2_csv_ << ",state_" << d;
         for (const auto* d : kDof) ai2_csv_ << ",std_"   << d;   // posterior std (m) = sqrt(Σ_jj)
-        ai2_csv_ << ",chain_xx,chain_yy";
+        ai2_csv_ << ",chain_xx,chain_yy,lidar_rays,lidar_resid_m,frames_diverged";
         ai2_csv_ << '\n';
     }
 
@@ -306,6 +321,7 @@ void BottleFitter::log_ai2_csv(const BottleInstance& inst, int point_count, floa
     for (int j = 0; j < 5; ++j) ai2_csv_ << ',' << s[j];
     for (int j = 0; j < 5; ++j) ai2_csv_ << ',' << std::sqrt(std::max(0.0f, S(j, j)));
     ai2_csv_ << ',' << std::max(0.0f, inst.dbg_chain_cov_xx) << ',' << std::max(0.0f, inst.dbg_chain_cov_yy);
+    ai2_csv_ << ',' << inst.dbg_lidar_rays << ',' << inst.dbg_lidar_resid_m << ',' << inst.frames_diverged;
     ai2_csv_ << '\n';
     ai2_csv_.flush();
 }
@@ -329,6 +345,57 @@ std::optional<Eigen::Matrix4d> BottleFitter::room_T_zed_matrix(std::uint64_t tim
         return m;
     };
     return to_mat4(rtb.value()) * to_mat4(btz.value());
+}
+
+// Pre-select the sweep returns that plausibly lie on THIS bottle — within (radius + margin) horizontally of
+// the current centre estimate and within (h/2 + margin) vertically — then stage them onto the frame's LiDAR
+// channel. Pre-selection just bounds the work and keeps a distant object's returns out; final membership is
+// the factor's own geometric test (a ray must actually cross the model's SDF), not a distance gate here.
+void BottleFitter::feed_lidar(BottleInstance& inst, BottleFrame& frame) const
+{
+    inst.dbg_lidar_rays = 0;
+    inst.dbg_lidar_resid_m = -1.0f;
+    if (cfg_.lidar_precision <= 0.0f or not lidar_have_sweep_ or lidar_sweep_room_.empty()
+        or frame.points.empty())
+        return;
+
+    // ANCHOR the selection on THIS CYCLE'S FRESH mask-cloud centroid, NOT the model estimate. A model-anchored
+    // box FOLLOWS a diverging fit into empty space → 0 rays exactly when LiDAR is most needed (observed live
+    // 2026-07-03: centre ran to −91 m, rays→0, no brake). Anchored on the observation, LiDAR keeps selecting
+    // the returns at the object's REAL location and can pull a runaway back. Box size is the PHYSICAL bottle
+    // footprint (prior radius/height + margin), not the fitted radius, so a blown-up radius can't explode the
+    // region either. (Echoes the CV-filter lesson: gate on the fresh obs, not the dragged fit.)
+    Eigen::Vector3f c = Eigen::Vector3f::Zero();
+    for (const auto& p : frame.points) c += p;
+    c /= static_cast<float>(frame.points.size());
+
+    const auto& s = inst.ai2_belief.state();
+    const float rxy = cfg_.prior_radius + cfg_.lidar_select_margin_m;          // fixed footprint, NOT fitted r
+    const float hz  = 0.5f * cfg_.prior_height + cfg_.lidar_select_margin_m;
+    const float rxy2 = rxy * rxy;
+
+    frame.lidar.endpoints.clear();
+    frame.lidar.endpoints.reserve(64);
+    double resid_sum = 0.0;
+    for (const auto& p : lidar_sweep_room_)
+    {
+        const float dx = p.x() - c.x(), dy = p.y() - c.y();
+        if (dx * dx + dy * dy > rxy2) continue;
+        if (std::abs(p.z() - c.z()) > hz) continue;
+        frame.lidar.endpoints.push_back(p);
+        resid_sum += std::abs(inst.ai2_belief.sdf_cylinder(p, s));   // |dist to CURRENT model surface| (diag)
+    }
+    // Frame-sanity diagnostic (drives the smoke-test): #returns landing on this bottle + how far they sit
+    // from the current surface. Few rays / large residual ⇒ wrong LidarFrameNode (mount double-applied).
+    inst.dbg_lidar_rays = static_cast<int>(frame.lidar.endpoints.size());
+    if (inst.dbg_lidar_rays > 0)
+        inst.dbg_lidar_resid_m = static_cast<float>(resid_sum / inst.dbg_lidar_rays);
+    if (frame.lidar.endpoints.empty())
+        return;
+
+    frame.lidar.origin     = lidar_origin_room_;
+    frame.lidar.precision  = cfg_.lidar_precision;
+    frame.lidar.robust_c_m = cfg_.lidar_robust_c_m;
 }
 
 void BottleFitter::feed_silhouette(BottleInstance& inst)
@@ -395,8 +462,8 @@ float BottleFitter::mask_confidence_weight(float confidence) const
 {
     if (not cfg_.mask_conf_weight)
         return 1.0f;
-    // w = clamp01((conf−floor)/(ref−floor))^power — identical to BeliefStabilizer::weight_observation
-    // so the Laplace fit covariance and the Fisher stabiliser down-weight a low-score mask the same way.
+    // w = clamp01((conf−floor)/(ref−floor))^power — a weak mask scales down the silhouette precision so it
+    // can't over-tighten the depth-degenerate radius. The score WIDENS Σ but the SDF geometry sets its SHAPE.
     const float floor = std::clamp(cfg_.mask_conf_floor, 0.0f, 0.99f);
     const float ref   = std::max(floor + 1e-3f, cfg_.mask_conf_ref);
     return std::pow(std::clamp((confidence - floor) / (ref - floor), 0.0f, 1.0f),
@@ -562,12 +629,6 @@ bool BottleFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_nod
     // prior must govern that direction; keep it pinned to config.
     mparams.prior_radius = cfg_.prior_radius;
     mparams.prior_height = cfg_.prior_height;
-    {
-        const auto it = std::find_if(priors_.begin(), priors_.end(),
-                                     [&](const BottlePrior& pr){ return pr.node_name == node.name(); });
-        if (it != priors_.end())
-            mparams.prior_size_std = std::max(mparams.prior_size_std, it->sigma_size);
-    }
 
     BottleInstance inst;
     inst.node_id   = node.id();

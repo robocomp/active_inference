@@ -111,6 +111,28 @@ float rect_iou_with_wrap(const cv::Rect& a, const cv::Rect& b, int width)
     best = std::max(best, rect_iou(a, shifted));
     return best;
 }
+
+// Lift a strip-local segmentation mask (full panorama height, strip_px wide) back into full-panorama
+// column coordinates, so a kept 360 detection carries a mask aligned with its global bbox (which the
+// popup's compose_detection_canvas can then draw). The strip occupies global columns
+// [global_offset, global_offset + strip_px) modulo `width`; since strip_px < width it wraps the 0/width
+// seam at most once, so a single contiguous copy plus (optionally) one wrapped tail suffices.
+cv::Mat lift_strip_mask_to_panorama(const cv::Mat& strip_mask, int global_offset, int width)
+{
+    if (strip_mask.empty() || width <= 0)
+        return {};
+    cv::Mat pano = cv::Mat::zeros(strip_mask.rows, width, strip_mask.type());
+    const int sp = std::min(strip_mask.cols, width);
+    int start = global_offset % width;
+    if (start < 0) start += width;
+    const int head = std::min(sp, width - start);       // columns that fit before the seam
+    strip_mask(cv::Rect(0, 0, head, strip_mask.rows))
+        .copyTo(pano(cv::Rect(start, 0, head, strip_mask.rows)));
+    if (const int tail = sp - head; tail > 0)           // remainder wraps to column 0
+        strip_mask(cv::Rect(head, 0, tail, strip_mask.rows))
+            .copyTo(pano(cv::Rect(0, 0, tail, strip_mask.rows)));
+    return pano;
+}
 } // namespace
 
 std::vector<SegDetection> YoloProcessor::detect_segmentation_360(const cv::Mat& panorama_rgb,
@@ -132,7 +154,7 @@ std::vector<SegDetection> YoloProcessor::detect_segmentation_360(const cv::Mat& 
     const cv::Mat padded = circular_pad_columns(panorama_rgb, overlap);
     const int strip_px = strip_w + 2 * overlap;
 
-    struct GlobalDet { SegDetection det; cv::Rect global_bbox; };
+    struct GlobalDet { SegDetection det; cv::Rect global_bbox; int global_offset; };
     std::vector<GlobalDet> all;
 
     for (int s = 0; s < cfg.n_strips; ++s)
@@ -148,7 +170,7 @@ std::vector<SegDetection> YoloProcessor::detect_segmentation_360(const cv::Mat& 
         {
             cv::Rect gbox = d.bbox;
             gbox.x += global_offset;
-            all.push_back(GlobalDet{std::move(d), gbox});
+            all.push_back(GlobalDet{std::move(d), gbox, global_offset});
         }
     }
 
@@ -171,8 +193,11 @@ std::vector<SegDetection> YoloProcessor::detect_segmentation_360(const cv::Mat& 
             continue;
 
         SegDetection out = std::move(g.det);
+        // Lift the strip-local mask into panorama columns so it aligns with the global bbox (the popup's
+        // compose_detection_canvas draws it as a silhouette). The bbox is canonicalized to [0,width) below;
+        // the mask spans the whole panorama width already, so it needs no further wrap fix-up.
+        out.mask = lift_strip_mask_to_panorama(out.mask, g.global_offset, width);
         out.bbox = g.global_bbox;   // extended coords for now (may be <0 or >=width); canonicalized below
-        out.mask = cv::Mat();       // strip-local mask no longer matches this bbox — not needed downstream
         merged.push_back(std::move(out));
     }
 

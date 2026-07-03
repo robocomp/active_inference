@@ -27,6 +27,17 @@
 struct SegDetection;
 namespace rc::human_pose { struct PoseDetection; }
 
+// A bearing-only detection from the RGB-360 (ricoh) panorama — no depth, so no 3D points. Published into
+// the SAME "masks" node as a no-depth slice (has_depth=false), tagged with a room-frame bearing instead of
+// a 3D centroid. See RICOH_360_PERIPHERAL_DETECTION.md Part B.
+struct BearingDetection
+{
+    std::string label;
+    float       class_id = -1.0f;
+    float       confidence = 0.0f;
+    float       azimuth_room_rad = 0.0f;   // room-frame bearing to the detection
+};
+
 class GraphPublisher
 {
 public:
@@ -38,7 +49,8 @@ public:
     // the masks node so consumers can pin their pose lookups to capture time (0 = unknown → consumers
     // fall back to latest pose).
     void publish(const RGBDData& rgbd, const Mat::RTMat& room_T_zed,
-                 const std::vector<SegDetection>& detections, std::uint64_t frame_ts_ms = 0);
+                 const std::vector<SegDetection>& detections, std::uint64_t frame_ts_ms = 0,
+                 const std::vector<BearingDetection>& bearing_detections = {});
 
     // Publish human skeletons on the dedicated 'skeleton' node. Keypoints are BODY_18, deprojected
     // to the CAMERA (zed) frame — NOT room frame — so a consumer interacting with a person can
@@ -58,7 +70,8 @@ private:
     bool ensure_node(const char* name, const char* color, bool& ready, bool relayout);
 
     void upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T_zed,
-                      const std::vector<SegDetection>& detections, std::uint64_t frame_ts_ms);
+                      const std::vector<SegDetection>& detections, std::uint64_t frame_ts_ms,
+                      const std::vector<BearingDetection>& bearing_detections);
     void upload_skeletons(const RGBDData& rgbd,
                           const std::vector<rc::human_pose::PoseDetection>& poses,
                           std::uint64_t frame_ts_ms);

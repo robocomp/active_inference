@@ -150,7 +150,10 @@ inline std::string_view to_string(CompareOp o)
 }
 inline CompareOp op_from(std::string_view s)
 {
-    if (s == "le") return CompareOp::LE; if (s == "eq") return CompareOp::EQ; if (s == "ne") return CompareOp::NE; return CompareOp::GE;
+    if (s == "le") return CompareOp::LE;
+    if (s == "eq") return CompareOp::EQ;
+    if (s == "ne") return CompareOp::NE;
+    return CompareOp::GE;
 }
 inline std::string_view to_string(OnFail f)     { return f == OnFail::Abandon ? "abandon" : "consume"; }
 inline OnFail           onfail_from(std::string_view s) { return s == "abandon" ? OnFail::Abandon : OnFail::Consume; }

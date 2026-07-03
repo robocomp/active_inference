@@ -30,10 +30,11 @@ GraphPublisher::GraphPublisher(std::shared_ptr<DSR::DSRGraph> graph,
 {}
 
 void GraphPublisher::publish(const RGBDData& rgbd, const Mat::RTMat& room_T_zed,
-                             const std::vector<SegDetection>& detections, std::uint64_t frame_ts_ms)
+                             const std::vector<SegDetection>& detections, std::uint64_t frame_ts_ms,
+                             const std::vector<BearingDetection>& bearing_detections)
 {
     if (ensure_node("masks", "Plum", masks_ready_, /*relayout=*/true))
-        upload_masks(rgbd, room_T_zed, detections, frame_ts_ms);
+        upload_masks(rgbd, room_T_zed, detections, frame_ts_ms, bearing_detections);
 }
 
 bool GraphPublisher::ensure_node(const char* name, const char* color, bool& ready, bool relayout)
@@ -99,7 +100,8 @@ bool GraphPublisher::ensure_node(const char* name, const char* color, bool& read
 //     mask_centroid_radius — normalized centroid radius from the principal point (periphery penalty)
 //   per-frame (global): mask_cam_twist [vx,vy,vz,wx,wy,wz] (OPTICAL frame) + mask_frame_dt_s.
 void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T_zed,
-                                  const std::vector<SegDetection>& detections, std::uint64_t frame_ts_ms)
+                                  const std::vector<SegDetection>& detections, std::uint64_t frame_ts_ms,
+                                  const std::vector<BearingDetection>& bearing_detections)
 {
     // Keep masks stream progressing even when voxel grid processing is paused.
     const std::uint64_t sensing_frame = ++masks_publish_seq_;
@@ -247,6 +249,8 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
     std::vector<float> trunc_frac;        // fraction of silhouette pixels on the image border (truncation)
     std::vector<float> centroid_radius;   // normalized centroid radius from principal point (periphery)
     std::vector<float> mask_range;         // mean camera→mask depth Z (m): static range — consumer scales R + pose common-mode (a far view can't resolve orientation)
+    std::vector<float> has_depth_flags;    // 1.0 = zed (3D) slice; 0.0 = ricoh RGB-360 bearing-only slice (Part B)
+    std::vector<float> azimuths;           // room-frame bearing (rad); meaningful only for has_depth==0 slices
     std::ostringstream labels_joined;
     std::size_t total_support_points = 0;
     support_offsets.push_back(0.0f);
@@ -400,6 +404,8 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
 
         label_ids.push_back(static_cast<float>(det.class_id));
         confidences.push_back(det.confidence);
+        has_depth_flags.push_back(1.0f);   // zed slice: carries 3D support points
+        azimuths.push_back(0.0f);
         support_offsets.push_back(static_cast<float>(support_offsets.back() + static_cast<float>(mask_points_room.size())));
         mask_pixels_xy.insert(mask_pixels_xy.end(), det_pixels.begin(), det_pixels.end());
         mask_pixel_offsets.push_back(static_cast<float>(mask_pixel_offsets.back() + static_cast<float>(det_pixels.size() / 2)));
@@ -473,6 +479,34 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
         total_support_points += mask_points_room.size();
     }
 
+    // Append the RGB-360 (ricoh) bearing-only detections as NO-DEPTH slices in the SAME node (Part B, see
+    // RICOH_360_PERIPHERAL_DETECTION.md). They carry a room-frame bearing instead of 3D points:
+    // support_begin==support_end (no points), no raw pixels, NaN centroid/bbox. Consumers skip !has_depth
+    // slices until the bearing confirm/birth path (Part C) exists — inert-but-available today.
+    // (Only emitted alongside a valid zed depth frame; the empty-depth early-return above drops them for
+    //  that rare/transient frame, which is fine for peripheral evidence.)
+    for (const auto& b : bearing_detections)
+    {
+        if (!labels_joined.str().empty())
+            labels_joined << '|';
+        labels_joined << b.label;
+        label_ids.push_back(b.class_id);
+        confidences.push_back(b.confidence);
+        has_depth_flags.push_back(0.0f);
+        azimuths.push_back(b.azimuth_room_rad);
+        support_offsets.push_back(support_offsets.back());          // no 3D points → begin == end
+        mask_pixel_offsets.push_back(mask_pixel_offsets.back());    // no raw silhouette pixels
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        centroids_xyz.insert(centroids_xyz.end(), {nan, nan, nan});
+        bbox_min_xyz.insert(bbox_min_xyz.end(),   {nan, nan, nan});
+        bbox_max_xyz.insert(bbox_max_xyz.end(),   {nan, nan, nan});
+        if (params_.MASK_MOTION_ENABLED)
+        {
+            motion_dotd.push_back(0.0f);  motion_bias.push_back(0.0f);      motion_var.push_back(0.0f);
+            trunc_frac.push_back(0.0f);   centroid_radius.push_back(0.0f);  mask_range.push_back(0.0f);
+        }
+    }
+
     const int mask_count = static_cast<int>(label_ids.size());
     G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_frame_id", static_cast<int>(sensing_frame));
     G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_timestamp_ms", frame_ts_ms);
@@ -488,6 +522,8 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
     G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_bbox_max_xyz", bbox_max_xyz);
     G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_pixels_xy", mask_pixels_xy);
     G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_pixel_offsets", mask_pixel_offsets);
+    G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_has_depth", has_depth_flags);
+    G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_azimuth", azimuths);
     if (params_.MASK_MOTION_ENABLED)
     {
         G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_motion_dotd", motion_dotd);

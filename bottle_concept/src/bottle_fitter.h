@@ -34,7 +34,6 @@
 #include "bottle_config.h"
 #include "bottle_instance.h"
 #include "bottle_model.h"        // BottleModel / BottleState / BottleModelParams
-#include "prior_store.h"         // BottlePrior
 #include "../../common/mask_ingestor/mask_ingestor.h"
 #include "bottle_scene_graph.h"
 
@@ -46,7 +45,6 @@ public:
     BottleFitter(std::shared_ptr<DSR::DSRGraph> graph,
                  DSR::InnerEigenAPI* inner_eigen,
                  BottleConfig& cfg,
-                 const std::vector<BottlePrior>& priors,
                  MaskIngestor* perception,
                  BottleSceneGraph* scene_graph);
 
@@ -68,6 +66,12 @@ public:
     // (so the worker can do one-time setup); latches room_node_id every call.
     bool ensure_instance(const DSR::Node& node, std::uint64_t room_node_id);
     BottleObservation observe(BottleInstance& inst, const DSR::Node& node);
+
+    // Stage the latest LiDAR sweep (ROOM frame) + the sensor origin (ROOM frame) for this cycle. Pumped once
+    // per compute() by specificworker from the lidar3D media plane; feed_lidar() then selects per-instance.
+    void set_lidar_sweep(std::vector<Eigen::Vector3f> pts_room, const Eigen::Vector3f& origin_room)
+    { lidar_sweep_room_ = std::move(pts_room); lidar_origin_room_ = origin_room; lidar_have_sweep_ = true; }
+    void clear_lidar_sweep() { lidar_sweep_room_.clear(); lidar_have_sweep_ = false; }
     // The fit: one recursive full-covariance AI2 belief update (bottle_belief.h) on this frame's mask
     // points + silhouette. Writes the result into inst.model so downstream publish/RT code is unchanged.
     float run_inference(BottleInstance& inst, const BottleObservation& observation);
@@ -100,6 +104,9 @@ private:
 
     // Feed the fitted model the RGB-mask edge rays as a silhouette likelihood.
     void feed_silhouette(BottleInstance& inst);
+    // Select the LiDAR returns of the current sweep that fall near this instance and stage them onto the
+    // frame's YOLO-independent range channel (no-op unless a sweep was set and cfg_.lidar_precision > 0).
+    void feed_lidar(BottleInstance& inst, BottleFrame& frame) const;
     // Set inst.expected_visible: true iff the bottle centre projects inside the camera frustum now. Drives
     // the tracker's negative-information DEATH gate (persist out-of-FoV; retire only if in-view & absent).
     void update_expected_visible(BottleInstance& inst);
@@ -112,7 +119,6 @@ private:
     std::shared_ptr<DSR::DSRGraph>  G_;
     DSR::InnerEigenAPI*             inner_eigen_ = nullptr;
     BottleConfig&                    cfg_;
-    const std::vector<BottlePrior>& priors_;
     MaskIngestor*               mask_ingestor_  = nullptr;
     BottleSceneGraph*               scene_graph_ = nullptr;   // READS only (support surface, table-top, robot cov)
 
@@ -121,6 +127,11 @@ private:
     std::unordered_map<std::uint64_t, Eigen::Vector2f> birth_seeds_;   // tracker-provided birth XY (see note_birth)
     std::uint64_t                   room_node_id_ = 0;   // refreshed each process_bottle_node call
     std::ofstream                   ai2_csv_;            // per-cycle AI2 belief log (optional)
+
+    // Latest LiDAR sweep for this cycle (ROOM frame) + sensor origin (ROOM frame); staged by set_lidar_sweep.
+    std::vector<Eigen::Vector3f>    lidar_sweep_room_;
+    Eigen::Vector3f                 lidar_origin_room_ = Eigen::Vector3f::Zero();
+    bool                            lidar_have_sweep_  = false;
 };
 
 }  // namespace rc

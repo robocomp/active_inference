@@ -55,7 +55,6 @@
 #include <dsr/api/dsr_inner_gaussian_api.h>   // Part B: chain covariance propagation
 
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
-#include "prior_store.h"
 #include "bottle_instance.h"    // rc::BottleInstance
 #include "epistemic_planner.h"  // rc::EpistemicPlanner (hidden-face next-best-view)
 #include "bottle_config.h"       // rc::BottleConfig + rc::load_bottle_config
@@ -63,6 +62,7 @@
 #include "../../common/mask_ingestor/mask_ingestor.h"  // rc::MaskIngestor (masks reading)
 #include "bottle_scene_graph.h" // rc::BottleSceneGraph (DSR node/RT I/O)
 #include "bottle_fitter.h"      // rc::BottleFitter (active-inference fit core)
+#include "bottle_lidar_ingestor.h"  // rc::BottleLidarIngestor (lidar3D media plane → room-frame sweep)
 #include "../../common/instance_tracker/instance_tracker.h"   // rc::InstanceTracker (birth/associate/death)
 #include "../../common/dashboard/custom_widget.h"      // Custom_widget (dockable dashboard host)
 #include "../../common/dashboard/timeseries_plot.h"    // rc::TimeSeriesPlot
@@ -148,8 +148,6 @@ private:
 
     rc::BottleConfig                                 cfg_;
     rc::EpistemicPlanner                             epistemic_planner_;   // hidden-face next-best-view
-    std::unique_ptr<rc::PriorStore>                 prior_store_;
-    std::vector<rc::BottlePrior>                    priors_cache_;
 
     // Live belief dashboard — its OWN top-level window (extracted from the DSR graph dock so it shows
     // independently of Agent.graph; mirrors room_concept/kinova_controller). Geometry persisted via QSettings.
@@ -171,17 +169,23 @@ private:
     // Collaborators (constructed in initialize(), after G + the DSR APIs are ready). Declared in
     // dependency order — the fitter holds raw pointers to the three above it, so it is destroyed first.
     std::unique_ptr<rc::MaskIngestor> mask_ingestor_;   // masks reading (owns the parsed MasksPacket)
-    std::unique_ptr<rc::BottleSceneGraph> scene_graph_;  // DSR node/RT I/O (table, scaffold, write-back)
+    std::unique_ptr<rc::BottleSceneGraph> scene_graph_;  // DSR node/RT I/O (table lookup, birth, write-back)
     std::unique_ptr<rc::BottleEvaluator>  evaluator_;    // Webots-GT / sweep / eval CSV (no-op unless flagged)
     std::unique_ptr<rc::BottleFitter>     fitter_;       // active-inference fit core (owns the instance map)
+    std::unique_ptr<rc::BottleLidarIngestor> lidar_ingestor_;  // lidar3D media plane → room-frame sweep (feeds fitter)
 
-    // Multi-instance birth/associate/death (shared, when cfg_.tracker_enabled). Associates masks to
-    // instances (gated 1-to-1), spawns new bottles from unexplained masks, retires unsupported ones.
+    // Multi-instance birth/associate/death (shared rc::InstanceTracker) — the only instance-lifecycle
+    // path. Associates masks to instances (gated 1-to-1), spawns new bottles from unexplained masks,
+    // retires unsupported ones.
     rc::InstanceTracker tracker_;
-    void run_instance_tracker();   // called from compute() in place of scaffold when tracker_enabled
+    void run_instance_tracker();   // called each cycle from compute()
     // Collapse two instances fitted to the SAME physical bottle (circle footprints overlap beyond
     // Tracker.MergeOverlap), keeping the more-observed one. Runs before associate/birth each cycle.
     void merge_overlapping_instances();
+    // Retire an instance whose fit has explained no data (belief energy == 0) for cfg_.diverged_retire_frames
+    // consecutive frames — a diverged/degenerate model (radius/centre runaway) that must not keep writing a
+    // garbage node. Same deletion sequence as a tracker DEATH. No-op when the bound is 0.
+    void retire_diverged_instances();
 
     int place_settle_ = 0;   // cycles waited after a start-placement move, before fitting (gate-lock guard)
 

@@ -51,6 +51,14 @@ struct BottleInstance
     // chain/localization term J·Σ_chain·Jᵀ and the TOTAL published xx,yy (fit+chain).
     float dbg_chain_cov_xx = -1.0f, dbg_chain_cov_yy = -1.0f;
     float dbg_rtcov_xx     = -1.0f, dbg_rtcov_yy     = -1.0f;
+    // LiDAR range-channel diagnostics (set in feed_lidar): returns SELECTED for this instance this frame and
+    // their mean |SDF| to the current model surface. A healthy frame = tens of rays at a few-cm residual; a
+    // wrong LidarFrameNode (mount double-applied) shows ~0 rays or a large systematic residual.
+    int   dbg_lidar_rays    = 0;
+    float dbg_lidar_resid_m = -1.0f;   // -1 = no LiDAR this frame
+    // Divergence persistence: consecutive frames whose fit explained NONE of its data (belief energy == 0,
+    // i.e. every point fell to the clutter component — a drifted/inflated model). Retired past a config bound.
+    int   frames_diverged   = 0;
     // Negative-information persistence: true only when the bottle centre projects INSIDE the camera
     // frustum this cycle. The tracker accrues a death "miss" only when expected_visible — so out-of-FoV
     // the bottle PERSISTS, and it is retired only if it should be seen yet isn't (removed). Default

@@ -28,10 +28,9 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
         return cfg.exists(k) ? cfg.get<bool>(k) : def;
     };
 
-    out.priors_path = gets("BottleConcept.PriorsPath", "etc/object_priors.toml");
-
     out.fe_eps            = getf("BottleConcept.FEps",            1e-3f);
     out.K_stable          = geti("BottleConcept.KStable",         30);
+    out.diverged_retire_frames = geti("BottleConcept.DivergedRetireFrames", 20);
     out.write_threshold   = getf("BottleConcept.WriteThreshold",  1e-3f);
     out.log_period_frames = geti("BottleConcept.LogPeriodFrames", 30);
     out.voxel_bank_max_points        = geti("BottleConcept.VoxelBankMaxPoints",        4000);
@@ -47,6 +46,10 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
     out.mask_conf_floor    = getf("BottleModel.MaskConfFloor",     0.2f);
     out.mask_conf_ref      = getf("BottleModel.MaskConfRef",       0.5f);
     out.mask_conf_power    = getf("BottleModel.MaskConfPower",     2.0f);
+    out.lidar_precision      = getf("BottleModel.LidarPrecision",      0.0f);
+    out.lidar_robust_c_m     = getf("BottleModel.LidarRobustCM",       0.05f);
+    out.lidar_select_margin_m = getf("BottleModel.LidarSelectMarginM", 0.06f);
+    out.lidar_frame_node      = gets("BottleModel.LidarFrameNode",     "lidar3D");
 
     out.ai2_sigma_base_m         = getf("BottleModel.AI2SigmaBaseM",          0.02f);
     out.ai2_clutter_frac         = getf("BottleModel.AI2ClutterFrac",         0.10f);
@@ -63,7 +66,6 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
     out.support_lambda_xy        = getf("Support.LambdaXY",          50.0f);
     out.support_decision_margin  = getf("Support.DecisionMargin",    2.0f);
     out.support_commit_cycles    = geti("Support.CommitCycles",      8);
-    out.tracker_enabled          = getb("Tracker.Enabled",            false);
     out.tracker_gate_mahalanobis = getf("Tracker.GateMahalanobis",    9.0f);
     out.tracker_gate_fallback_m  = getf("Tracker.GateFallbackM",      0.30f);
     out.tracker_birth_frames     = geti("Tracker.BirthFrames",        6);
@@ -72,6 +74,8 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
     out.tracker_detection_noise_m = getf("Tracker.DetectionNoiseM",   0.05f);
     out.tracker_merge_overlap    = getf("Tracker.MergeOverlap",       0.30f);
     out.tracker_nll_cost         = getb("Tracker.NllCost",            false);
+    out.bearing_confirm_enabled  = getb("Bearing.ConfirmEnabled",     false);
+    out.bearing_confirm_gate_rad = getf("Bearing.ConfirmGateRad",     0.17f);
     out.masks_use_camera_frame = getb("Masks.UseCameraFrame", true);
     out.masks_source_frame     = gets("Masks.SourceFrame",    "zed");
     out.masks_target_frame     = gets("Masks.TargetFrame",    "room");
@@ -81,7 +85,7 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
     out.epistemic_cooldown_cycles = geti("Epistemic.CooldownCycles",  200);
     out.epistemic_csv_path        = gets("Epistemic.CsvPath",         "");
 
-    out.sdf_threshold_for_storage    = getf("SampleQueue.SdfThresholdForStorage",    0.03f);
+    out.sdf_threshold_for_storage    = getf("BottleModel.SdfThresholdForStorage",    0.03f);
 
     out.yaw_variance = getf("BottleConcept.YawVariance", 9.87f);
 
@@ -121,8 +125,7 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
     if (out.move_experiment or out.static_pose_test)
         out.eval_enabled = true;              // the experiment is pointless without logging
 
-    std::print("bottle_concept: configuration loaded. tracker_enabled={} (Tracker.Enabled)\n",
-               out.tracker_enabled);
+    std::print("bottle_concept: configuration loaded.\n");
     return out;
 }
 

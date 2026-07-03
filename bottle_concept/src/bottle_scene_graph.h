@@ -4,13 +4,13 @@
  * DSR node/RT I/O layer for bottle_concept. Owns everything that reads or writes
  * the distributed graph for the bottle's geometry and pose:
  *   - table lookups (find_table_node / find_table_top) used to anchor the bottle,
- *   - scaffolding missing "bottle_N" cylinder nodes from priors matched to masks,
+ *   - birthing "bottle_N" cylinder nodes from tracker detections (create_instance_from_detection),
  *   - writing the fitted model back (geometry attrs + mesh + room→bottle RT edge
  *     with its Laplace covariance),
  *   - reading the robot's localisation covariance off the room→robot RT edge.
  *
  * Plain class (no Q_OBJECT) constructed by SpecificWorker once G + the DSR APIs
- * are ready. Runtime-varying inputs (priors, masks, the room node id) are passed
+ * are ready. Runtime-varying inputs (masks, the room node id) are passed
  * per-call rather than cached, so the collaborator never holds stale state.
  */
 
@@ -35,7 +35,6 @@
 #include "bottle_instance.h"
 #include "bottle_model.h"        // BottleState
 #include "../../common/mask_ingestor/mask_ingestor.h"   // MaskIngestor::MasksPacket
-#include "prior_store.h"         // BottlePrior
 
 namespace rc {
 
@@ -70,12 +69,6 @@ public:
                                            std::uint64_t room_node_id) const;
     // Table top z (room frame) of a specific table node id, or NaN if it's not a valid table.
     float table_top_of(std::uint64_t table_id) const;
-
-    // Create any "bottle_N" cylinder node named in priors that doesn't exist yet, matching each prior
-    // to the nearest unused "bottle" mask slice and anchoring it to the table (or room) under it.
-    void scaffold_missing_bottle_nodes(const std::vector<BottlePrior>& priors,
-                                       const MaskIngestor::MasksPacket& masks,
-                                       std::uint64_t room_node_id);
 
     // BIRTH (InstanceTracker): create a fresh auto-named "bottle_<N>" node at a detection centroid with
     // the default prior size, parented by the support decision. Returns the new node id (0 on failure).

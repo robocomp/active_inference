@@ -63,6 +63,12 @@ public:
         float centroid_radius = 0.0f;  // normalised centroid radius from the principal point (periphery)
         float range           = 0.0f;  // mean camera→mask depth Z (m): STATIC range — consumer grows R + pose
                                        // common-mode with it so a distant view can't resolve pose/orientation
+        // RGB-360 (ricoh) peripheral evidence (Part B, RICOH_360_PERIPHERAL_DETECTION.md). A no-depth slice
+        // carries NO 3D points (support_begin==support_end, centroid/bbox are NaN) — only a room-frame
+        // BEARING. Consumers MUST skip !has_depth slices until a bearing confirm/birth path exists (Part C).
+        // Defaults match the zed contract, so a producer that predates the field reads back has_depth=true.
+        bool  has_depth        = true;   // false ⇒ ricoh bearing-only slice
+        float azimuth_room_rad = 0.0f;   // room-frame bearing; meaningful only when has_depth==false
     };
 
     struct MasksPacket

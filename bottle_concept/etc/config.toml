@@ -14,7 +14,7 @@ name = "bottle_concept"
 configFile = ""
 domain = 0
 tree =false
-graph = true   # headless perception agent: the shared DSR node-link viewer crashes in paintAndFlush under participant churn (QRegion::~QRegion). Same fix as voxelizer.
+graph = false   # headless perception agent: the shared DSR node-link viewer crashes in paintAndFlush under participant churn (QRegion::~QRegion). Same fix as voxelizer.
 2d = false
 3d = false
 
@@ -114,8 +114,8 @@ PlaceBottleWorldY  = -0.575   # m, Webots world (+Y right). reach 0.648 m from a
 
 # ── bottle_concept agent ──────────────────────────────────────────────────────
 [BottleConcept]
-PriorsPath = "etc/object_priors.toml"
 KStable = 30
+DivergedRetireFrames = 20          # retire an instance after N consecutive no-data (belief energy==0) fits; 0=off
 LogPeriodFrames = 30
 VoxelBankMaxPoints = 4000
 VoxelBankQuantizationM = 0.01      # dedup grid (m) for the voxel-bank hash
@@ -124,30 +124,15 @@ VoxelSelectHeightMarginM = 0.10    # extra Z margin above/below the cylinder spa
 YawVariance = 9.87                 # ≈π² — yaw is unobservable for a symmetric cylinder
 
 [BottleModel]
-SigmaObs = 0.02            # SDF likelihood width (m); tight — a bottle is small
-LambdaSize = 0.5          # KL toward prior dimensions (radius, height)
-LambdaPos = 0.5          # KL toward prior centre
-LambdaState = 0.02        # size transition
+# Full-covariance recursive-Laplace belief over [cx,cy,cz,radius,height] on the shared engine
+# (bottle_belief.h) — the ONLY fit path, mirroring table/chair. Static single cylinder; a moved bottle is
+# re-acquired via the tracker gate widening on stale predicts.
 PriorRadius = 0.031       # cyberbotics BeerBottle (Heineken) body radius — naturally 62mm (no mesh distortion), well-detected by YOLO. height ~0.20 body.
 PriorHeight = 0.20
 PriorSizeStd = 0.03
-OptimizationIters = 15
-OptimizationLr = 0.005
-GradClip = 2.0
-OptimizerType = "adam"
-MaskPrecision = 500.0    # RGB-mask silhouette likelihood weight (0=off). cf. depth inv_sigma2=1/0.02²=2500. Constrains (cx,cy,radius) — the front-arc-degenerate direction.
-CovEffScale = 0.036    # covariance calibration: N_eff = N*scale → NEES≈3 (depth points are spatially correlated, N over-counts)
-SeedDeprojectFrac = 2.0   # cold-start: push the visible-centroid seed away from the camera by frac·radius to recover the cylinder axis (front-arc centroid sits ~1 radius camera-ward → model parks forward, points fall behind its bbox). 0=off.
-LambdaFreeSpace = 100.0   # free-space/visibility FE term: penalise the model occupying space between camera and observed points (carve sample in front of each point must be OUTSIDE the cylinder). Breaks the symmetric-SDF depth degeneracy → removes the camera-ward bias for ANY position, no drift-back. 0=off. 2.0 was ~250× too weak vs mask(500)/likelihood(2500) — the fit kept ey≈6cm; cranked to 100 to actually bite (watch eval ey shrink; back off if unstable).
-FreeSpaceMargin = 0.01    # m: how far in front of each point the carve sample sits (small ⇒ tight depth pin).
-RobustLoss = "welsch"        # redescending (soft): far-from-surface points ~0 weight; beats Tukey (hard cutoff over-rejects, depth drifts at bad-mask poses)
-RobustLossScale = 0.04         # welsch c: points >~3-4cm from the cylinder surface are strongly down-weighted
-# ── AI2 belief (mirrors table/chair [.]UseAI2) — full-covariance recursive-Laplace belief over
-# [cx,cy,cz,radius,height] on the shared engine (bottle_belief.h). Default OFF: the legacy gradient path
-# above stays the default. Static, single-cylinder; the movable-object CV tracking remains in the legacy
-# path. UseAI2=true also switches the tracker gate, the NBV, and the published P_bottle to the belief Σ.
-UseAI2 = true
-AI2SigmaBaseM = 0.02          # base on-surface obs noise std (m); R = σ² (+ motion_var)
+SdfThresholdForStorage = 0.03   # admit points within 3 cm of the surface into the voxel bank
+MaskPrecision = 500.0     # RGB-mask occluding-contour silhouette likelihood weight (0=off); pins the depth-degenerate radius the symmetric-cylinder SDF cannot.
+AI2SigmaBaseM = 0.02          # base on-surface obs noise std (m); R = σ²
 AI2ClutterFrac = 0.10         # ε: uniform clutter mixture weight
 AI2ClutterScaleM = 0.08       # a point further than ~this from the surface is likely clutter
 AI2PriorPosStd = 0.30         # broad position prior std (m) on cx,cy,cz
@@ -157,45 +142,29 @@ AI2CommonModePosStd = 0.02    # per-frame SHARED position error (m); pose-chain 
 AI2CommonModeSizeStd = 0.01   # per-frame SHARED size error radius,height (m)
 AI2GnIters = 4                # Gauss-Newton iterations per frame
 AI2CsvPath = "etc/bottle_ai2_log.csv"   # per-cycle AI2 belief CSV (state + Σ diag); empty = off
-# Fisher information filter (per-DOF stabiliser; currently DIAGNOSTIC — logged, not yet driving the fit).
-# Real per-DOF SDF observation Fisher info accumulated across viewpoints (incl. radius/height, which the
-# position-only Laplace Hessian ignores). The Q-bleed predict gives a finite STEADY-STATE precision — the
-# principled fix for the P_bottle overconfidence. Set FisherCsvPath to tail the per-cycle evolution.
-FisherFilterEnabled = true    # compute + accumulate + log; false = zero cost
-FisherInfoDecay = 1.0         # stiffener fading memory; <1 forgets old views, 1 = pure accumulation
-FisherProcessStdM = 0.005     # predict process-noise std per fresh frame (m) → posterior std floor (all 5 DOF are lengths)
-FisherCsvPath = "etc/bottle_fisher_log.csv"   # per-cycle Fisher evolution log for plotting (empty = off)
-# YOLO detection-score → observation precision: w = clamp01((conf−floor)/(ref−floor))^power weights BOTH
-# the Laplace fit cov (queue/residual fit weights) and the Fisher stabiliser obs-info. PRODUCTION:
-# Ref=0.5 → typical conf≈0.85 gives w≈1 (full trust); the score only bites for genuinely weak detections
-# (conf<0.5). VERIFIED 2026-06-27 via static A/B (Ref=0.95 to force a bite): σ widened 1.16–1.20× on the
-# well-observed DOFs cx,cy,radius vs the predicted 1/sqrt(w)=1.15. To re-run that test set Ref=0.95 and
-# A/B MaskConfWeight on vs off (see bottle_static_ab.sh); read conf,conf_w,std_* in bottle_fisher_log.csv.
+
+# ── YOLO-INDEPENDENT LiDAR first-hit range channel (common/ai_belief/lidar_ray_factor.h) ──────────────────
+# Second, sensor-INDEPENDENT evidence: lidar3D returns on the bottle pin cx,cy in METRIC DEPTH + radius along
+# the viewing ray (the direction the monocular mask/silhouette is blind to). Consumes the lidar3D media plane
+# (bottle_lidar_ingestor). STAGED ROLLOUT — OFF (0.0) by default; the media subscriber isn't created at all
+# while off. Step 1: set LidarPrecision=500 (low → can only nudge) and confirm on the console
+# "[BottleLidar] media subscriber up", NO crash, and the AI2 log/print shows lidar_rays>0 at a few-cm
+# lidar_resid_m (frame is right). Step 2: raise to 2500 (≈1/σ² = depth-point scale) → depth stable, the
+# radius/centre runaway arrested.
+LidarPrecision = 2500.0       # load-bearing (= depth-point weight, 1/σ²@2cm). 0=OFF
+LidarRobustCM = 0.05          # Cauchy scale (m): returns this far off the surface fade out (continuous, no gate)
+LidarSelectMarginM = 0.06     # pre-select returns within radius+margin (horiz) and h/2+margin (vert)
+LidarFrameNode = "lidar3D"    # DSR node whose frame the raw sweep is in (room←this transform). If lidar_resid_m
+                              # is large/systematic, the producer already returns robot-frame pts → set to the body node.
+
+# YOLO detection-score → observation precision: w = clamp01((conf−floor)/(ref−floor))^power scales the
+# silhouette precision so a weak mask can't over-tighten radius. PRODUCTION: Ref=0.5 → typical conf≈0.85
+# gives w≈1 (full trust); the score only bites for genuinely weak detections (conf<0.5). VERIFIED
+# 2026-06-27 via static A/B (Ref=0.95 to force a bite): σ widened 1.16–1.20× on cx,cy,radius vs 1/sqrt(w)=1.15.
 MaskConfWeight = true
 MaskConfFloor  = 0.2
 MaskConfRef    = 0.5
 MaskConfPower  = 2.0
-
-[Dynamics]
-# A bottle is MOVABLE: its position (cx,cy) TRACKS via a constant-velocity Kalman filter instead of
-# hardening like furniture. Fixes "move the bottle → a 2nd instance is born instead of tracking it"
-# (the maturity-locked position gain froze the fit; the moved detection then spawned a new instance).
-# cz stays table-anchored; radius/height keep hardening. Set Model="static" for the legacy behaviour.
-Model = "constant_velocity"
-# A RESTING bottle (hanging from table/room) is effectively STATIC — only a GRASP injects real (known)
-# motion (step 2). So the resting regime is heavily damped: small accel process noise (velocity barely
-# builds) + realistic measurement noise (don't chase centroid wobble) → smooth, table-like. The S=P+R
-# tracker gate (DetectionNoiseM) still associates a genuinely moved bottle, so this won't re-spawn.
-CvAccelStd = 0.08     # process: acceleration std (m/s²) — tiny: a resting bottle barely accelerates
-CvMeasStd = 0.04      # per-frame position measurement std (m) — matches the real centroid/transform noise
-CvInitVelStd = 0.3    # 1-σ on the initial unknown velocity (m/s)
-CvDtDefaultS = 0.1    # fallback Δt (s) when capture stamps are missing/equal (≈ Period.Compute)
-CvGate = 6.0          # χ²₂ outlier gate: reject a measurement whose innovation² (vs S=P+R) exceeds this
-                      # — stops a jumpy partial-mask centroid (hand occlusion at the FoV edge) flinging the track
-CvMaxSpeed = 0.4      # velocity clamp (m/s): a resting bottle barely moves; kills fling spikes
-CvLostFrames = 5      # after a detection gap > this×CvDtDefaultS, zero the velocity (HOLD last pose, don't coast)
-CvMaxPosStd = 0.05    # cap on per-axis position σ during predict (m): keeps the gate tight across dropouts so a
-                      # far / other-bottle measurement can't be accepted — fixes two close bottles swapping/jumping
 
 [Support]
 # Which surface the bottle hangs from (room vs a table): MAP over {room, every table_N} by
@@ -208,16 +177,14 @@ DecisionMargin = 2.0     # log-evidence a table must beat the room/floor hypothe
 CommitCycles = 8         # consecutive cycles a challenger surface must win before re-parenting (anti-thrash)
 
 [Tracker]
-# Multi-instance birth/associate/death (shared rc::InstanceTracker). OFF → legacy prior-scaffold +
-# greedy nearest-mask. ON → masks are associated to instances by a covariance-gated global 1-to-1, an
-# unexplained mask spawns a new bottle, an unsupported instance is retired. Enable for scenes with an
-# unknown/changing number of bottles (priors then only seed the default birth size).
-Enabled = true
+# Multi-instance birth/associate/death (shared rc::InstanceTracker) — the only instance-lifecycle path
+# (mirrors table/chair): masks are associated to instances by a covariance-gated global 1-to-1, an
+# unexplained mask spawns a new bottle, an unsupported instance is retired.
 GateMahalanobis = 9.0     # χ²₂ gate (~3σ) for a mask↔instance match when the instance has a cov
 GateFallbackM = 0.30     # metric XY gate (m) before an instance has a usable covariance
 BirthFrames = 6          # frames a mask must stay unexplained before spawning a bottle
 DeathFrames = 90         # frames an instance may go unsupported before retirement
-BirthMinSepM = 0.20      # a birth must be ≥ this (m) from every existing bottle (anti-duplicate)
+BirthMinSepM = 0.10      # a birth must be ≥ this (m) from every existing bottle (anti-duplicate)
 DetectionNoiseM = 0.05   # R in the association innovation cov S=P+R²I — fixes the assigned=0 churn (the
                          # overconfident σ~mm fit cov otherwise rejects the ~6cm-offset mask centroid). ≥ that offset.
 MergeOverlap = 0.30      # collapse two instances whose circle footprints overlap ≥ this fraction of the
@@ -225,16 +192,12 @@ MergeOverlap = 0.30      # collapse two instances whose circle footprints overla
 NllCost = false          # association cost = ½(m²+ln|S|) NLL (tracks compete by likelihood, not raw
                          # distance) vs raw squared-Mahalanobis. Gate is m² either way. Matters under clutter.
 
-[SampleQueue]
-NumAngleBins = 16
-NumZBins = 6
-MaxPerBin = 2
-SdfThresholdForStorage = 0.03      # admit points within 3 cm of the surface
-MinFramesBeforeHistorical = 10
-HistoricalWarmupFrames = 5
-MaxNewPointsPerFrame = 20
-ZBinSize = 0.04
-RfeWeightGain = 0.25
-MinAnchorWeight = 0.12
-EdgeBonusWeight = 0.3
-EdgeProximityThreshold = 0.01
+# ── RGB-360 bearing confirmation (Part C confirm; see RICOH_360_PERIPHERAL_DETECTION.md) ────────────
+# A ricoh no-depth "bottle" bearing that lines up (in azimuth from the robot) with a live instance HOLDS
+# its death-miss this cycle — peripheral "glance" evidence it wasn't removed. No fit, no birth.
+# ⚠ Default OFF: the published azimuth convention is PROVISIONAL (Part A step 8). Enable and watch the
+# [bearing] log lines to verify the bearing hits the right instance BEFORE relying on it.
+[Bearing]
+ConfirmEnabled = false   # true → 360 bearings hold a matched bottle's death-miss
+ConfirmGateRad = 0.17    # 1-D angular gate (rad, ~10°) for a bearing↔instance azimuth match
+

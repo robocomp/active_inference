@@ -47,6 +47,8 @@ VoxelizerParams load_voxelizer_params(const ConfigLoader& configLoader)
     rc::ConfigLoaderUtils::load_optional(configLoader, "Ricoh.yolo_n_strips", params.RICOH_YOLO_N_STRIPS);
     rc::ConfigLoaderUtils::load_optional(configLoader, "Ricoh.yolo_strip_overlap_px", params.RICOH_YOLO_STRIP_OVERLAP_PX);
     rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Ricoh.yolo_merge_iou", params.RICOH_YOLO_MERGE_IOU);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Ricoh.publish_masks", params.RICOH_PUBLISH_MASKS);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Ricoh.azimuth_offset_rad", params.RICOH_AZIMUTH_OFFSET_RAD);
 
     // Ego-motion mask-corruption annotation (default ON — pure producer-side metadata).
     rc::ConfigLoaderUtils::load_optional(configLoader, "MaskMotion.enabled", params.MASK_MOTION_ENABLED);

@@ -163,12 +163,13 @@ void ChairSceneGraph::write_rt_covariance(std::uint64_t room_id, ChairInstance& 
     if (not inst.ai2_initialized)
         return;   // belief not seeded yet — nothing calibrated to publish
 
-    // The belief carries a full 8×8 Σ over [cx,cy,cz,yaw,seat_w,seat_d,seat_h,back_h] — publish it directly.
+    // The belief carries a 3×3 Σ over [cx,cy,yaw] (pose-only; size is a fixed template). z is pinned to the
+    // floor → its uncertainty is the floor-height std (not a DOF).
     const auto& S = inst.ai2_belief.covariance();
     float vx   = scale * S(0, 0);   // cx
     float vy   = scale * S(1, 1);   // cy
-    float vz   = scale * S(2, 2);   // cz (floor height)
-    float vyaw = scale * S(3, 3);   // yaw
+    float vz   = inst.ai2_belief.params().floor_std * inst.ai2_belief.params().floor_std;   // cz pinned
+    float vyaw = scale * S(2, 2);   // yaw
     // Localization/chain covariance J·Σ_chain·Jᵀ — the chair's room-frame position is conditional on the
     // robot pose, so its published uncertainty must include it.
     vx += inst.chain_cov_xx;
