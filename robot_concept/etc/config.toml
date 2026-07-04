@@ -105,6 +105,11 @@ enable_zed   = true    # ZED RGB + depth
 enable_ricoh = true    # RGBD_360 360 panorama
 enable_lidar = true    # 3D LiDAR cloud
 enable_imu   = true    # IMU
+# RGB source selector: how robot_concept obtains/relays the ZED plane.
+#   auto (default): negotiate — bridge via Ice RPC until zed_camera is seen on DDS, then follow it up/down.
+#   ice           : always bridge via the CameraRGBDSimple Ice proxy; never defer to an external DDS producer.
+#   dds           : never bridge; always treat zed_camera as the external DDS producer and only monitor (alive+FPS).
+zed_source   = "auto"
 
 [Lidar]
 # Legacy DSR-graph lidar upload. <0 DISABLES it (default): lidar is published on the zero-copy

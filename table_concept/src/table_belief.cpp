@@ -175,6 +175,17 @@ Eigen::Matrix<float, 6, 1> TableBelief::common_mode_inv_diag(const TableFrame& f
             1.0f / std::max(1e-9f, y2 + frame.chain_cov_yaw)).finished();   // yaw cap grows with view range
 }
 
+// Extra evidence hook (engine calls it inside the GN loop): the YOLO-independent LiDAR first-hit range factor.
+// It sphere-traces THIS belief's own SDF (n_prims=5, sdf_prim/sdf_jacobian), so the SAME shared call the bottle
+// uses drops in unchanged at N=6. A no-op when f.lidar.precision==0. Because all returns of one sweep share the
+// sensor-pose error they are correlated, but they inform the SAME (Id,bd) the depth points do, so the engine's
+// common-mode Woodbury saturation de-correlates them too — no separate handling needed here.
+void TableBelief::accumulate_extra(const TableBeliefState& s, const TableFrame& f,
+                                   Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const
+{
+    rc::ai::accumulate_lidar_rays<6>(*this, s, f.lidar, Id, bd);
+}
+
 // CONTINUITY fold (TABLE_FIT_AI2.md §5, replaces the w≥h sign fold). The box SDF is invariant under the
 // exact symmetry group {e, r_π, swap∘r_{π/2}, swap∘r_{−π/2}} — four representations of the SAME table.
 // The old fold chose by sign(w−h), a NOISE process when w≈h, which converted extent jitter into 90° yaw
@@ -416,6 +427,45 @@ bool TableBelief::self_test()
                     gain(Sw, dIx), gain(Sw, dIy), gain(Sh, dIx), gain(Sh, dIy));
         check(gain(Sw, dIx) > gain(Sw, dIy), "NBV: w uncertain → +x face should win");
         check(gain(Sh, dIy) > gain(Sh, dIx), "NBV: h uncertain → +y face should win");
+    }
+
+    // (h) LiDAR first-hit range factor corrects the MASK-EROSION extent UNDER-SIZE — the reason this channel
+    //     was ported to the table. A YOLO mask whose boundary sits INSIDE the true rim yields a top cloud that
+    //     is uniformly shrunk, so a mask-only fit under-sizes the extent. LiDAR returns on the TRUE front rim
+    //     pin it in metric range (residual measured ALONG the ray), pushing the face back out. The camera is
+    //     on the −y side, so the y-extent h is the corrected DOF. Verify: with LiDAR, h recovers toward truth
+    //     and clearly beats mask-only. Exercises the N=6 accumulate_lidar_rays path (accumulate_extra hook).
+    {
+        const float Rb    = P.sigma_base_m * P.sigma_base_m;
+        const float erode = 0.90f;   // mask boundary ~5% inside the true rim each side (silhouette erosion)
+        std::vector<Eigen::Vector3f> eroded_top;
+        for (int i = 0; i < 1200; ++i)
+        {
+            const float lx = U(rng) * 0.5f * gt.w * erode, ly = U(rng) * 0.5f * gt.h * erode;
+            eroded_top.push_back(to_world(lx, ly, gt.H + noise(rng)));
+        }
+        // Sensor on the −y side; LiDAR returns on the TRUE front rim (slab front vertical face at ly=−h/2).
+        const Eigen::Vector3f o3 = to_world(0.0f, -0.5f * gt.h - 1.0f, gt.H - 0.2f);
+        std::vector<Eigen::Vector3f> rays;
+        for (int i = 0; i < 60; ++i)
+        {
+            const float lx = U(rng) * 0.5f * gt.w;                          // across the TRUE front-face width
+            const float z  = gt.H - U01(rng) * P.top_thickness;            // within the slab band (guaranteed hit)
+            rays.push_back(to_world(lx, -0.5f * gt.h + noise(rng), z + noise(rng)));   // TRUE front face
+        }
+        const TableBeliefState init{gt.cx, gt.cy, gt.H, gt.w, gt.h, gt.yaw};   // start AT truth ⇒ only erosion pulls
+        auto fit = [&](bool with_lidar) {
+            TableBelief b(init, P);
+            TableFrame fr; fr.points = eroded_top; fr.R.assign(eroded_top.size(), Rb);
+            if (with_lidar) { fr.lidar.origin = o3; fr.lidar.endpoints = rays; fr.lidar.precision = 2500.0f; }
+            for (int it = 0; it < 12; ++it) b.update(fr);
+            return b.state().h;
+        };
+        const float h_no  = fit(false);
+        const float h_lid = fit(true);
+        std::printf("  mask-erosion extent(h): mask-only=%.3f  with-lidar=%.3f  (truth=%.3f)\n", h_no, h_lid, gt.h);
+        check(h_no < gt.h - 0.02f, "mask-only should UNDER-size h (erosion)");
+        check(std::abs(h_lid - gt.h) < 0.6f * std::abs(h_no - gt.h), "lidar should clearly beat mask-only extent");
     }
 
     std::printf("TableBelief::self_test %s\n", ok ? "PASS" : "FAIL");

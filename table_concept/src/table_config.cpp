@@ -77,6 +77,13 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.tracker_birth_size_std   = getf("Tracker.BirthSizeStd",     0.15f);
     out.tracker_nll_cost         = getb("Tracker.NllCost",          false);
 
+    // YOLO-independent LiDAR first-hit range factor (common/ai_belief/lidar_ray_factor.h). OFF by default.
+    out.lidar_precision      = getf("TableModel.LidarPrecision",      0.0f);
+    out.lidar_robust_c_m     = getf("TableModel.LidarRobustCM",       0.05f);
+    out.lidar_select_margin_m = getf("TableModel.LidarSelectMarginM", 0.10f);
+    out.lidar_frame_node      = gets("TableModel.LidarFrameNode",     "lidar3D");
+    out.lidar_coverage_n0     = getf("TableModel.LidarCoverageN0",     60.0f);
+
     std::print("table_concept: configuration loaded.\n");
     return out;
 }

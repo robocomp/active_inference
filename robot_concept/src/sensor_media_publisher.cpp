@@ -54,10 +54,15 @@ bool SensorMediaPublisher::init(const Config& cfg)
     data_sharing_       = defaults.data_sharing;
 
     QString summary;
-    bool images_ok = not cfg.image_streams.empty();
+    // "ready" = every stream we were ASKED to create came up, and at least one was.
+    // (An empty image_streams — e.g. zed disabled — is NOT a failure as long as some
+    // other requested stream, lidar/imu/rgb360, initialized.)
+    bool all_ok     = true;
+    bool any_stream = false;
 
     for (const auto& spec : cfg.image_streams)
     {
+        any_stream = true;
         auto [it, inserted] = images_.try_emplace(spec.key);
         auto& st     = it->second;
         st.key       = spec.key;
@@ -65,7 +70,7 @@ bool SensorMediaPublisher::init(const Config& cfg)
         st.stream_id = spec.stream_id;
         if (not st.pub.init(stream_config(cfg.domain_id, cfg.history_depth, spec.topic)))
         {
-            images_ok = false;
+            all_ok = false;
             qWarning() << "[Media] image publisher init FAILED" << QString::fromStdString(spec.key)
                        << "topic=" << QString::fromStdString(spec.topic);
         }
@@ -74,12 +79,14 @@ bool SensorMediaPublisher::init(const Config& cfg)
 
     if (cfg.lidar_stream)
     {
+        any_stream = true;
         lidar_.emplace();
         lidar_->key       = cfg.lidar_stream->key;
         lidar_->topic     = cfg.lidar_stream->topic;
         lidar_->stream_id = cfg.lidar_stream->stream_id;
         if (not lidar_->pub.init(stream_config(cfg.domain_id, cfg.history_depth, cfg.lidar_stream->topic)))
         {
+            all_ok = false;
             qWarning() << "[Media] lidar publisher init FAILED topic="
                        << QString::fromStdString(cfg.lidar_stream->topic);
             lidar_.reset();                          // ⇒ lidar_ready()==false, publish no-ops
@@ -91,12 +98,14 @@ bool SensorMediaPublisher::init(const Config& cfg)
 
     if (cfg.imu_stream)
     {
+        any_stream = true;
         imu_.emplace();
         imu_->key       = cfg.imu_stream->key;
         imu_->topic     = cfg.imu_stream->topic;
         imu_->stream_id = cfg.imu_stream->stream_id;
         if (not imu_->pub.init(stream_config(cfg.domain_id, cfg.history_depth, cfg.imu_stream->topic)))
         {
+            all_ok = false;
             qWarning() << "[Media] imu publisher init FAILED topic="
                        << QString::fromStdString(cfg.imu_stream->topic);
             imu_.reset();
@@ -108,12 +117,14 @@ bool SensorMediaPublisher::init(const Config& cfg)
 
     if (cfg.image360_stream)
     {
+        any_stream = true;
         image360_.emplace();
         image360_->key       = cfg.image360_stream->key;
         image360_->topic     = cfg.image360_stream->topic;
         image360_->stream_id = cfg.image360_stream->stream_id;
         if (not image360_->pub.init(stream_config(cfg.domain_id, cfg.history_depth, cfg.image360_stream->topic)))
         {
+            all_ok = false;
             qWarning() << "[Media] image360 publisher init FAILED topic="
                        << QString::fromStdString(cfg.image360_stream->topic);
             image360_.reset();                       // ⇒ image360_ready()==false, publish no-ops
@@ -123,7 +134,7 @@ bool SensorMediaPublisher::init(const Config& cfg)
                      + "=" + QString::fromStdString(cfg.image360_stream->topic);
     }
 
-    ready_ = images_ok;
+    ready_ = all_ok and any_stream;
     const auto now = std::chrono::steady_clock::now();
     image_report_at_ = image360_report_at_ = lidar_report_at_ = imu_report_at_ = now;
 
@@ -131,9 +142,10 @@ bool SensorMediaPublisher::init(const Config& cfg)
         qInfo() << "[Media] publishers ready domain=" << domain_id_
                 << "streams:" << summary
                 << "data_sharing=" << data_sharing_active();
+    else if (not any_stream)
+        qWarning() << "[Media] no media streams configured — all sensor gates off; nothing published on the media plane";
     else
-        qWarning() << "[Media] image publisher init INCOMPLETE (streams:" << summary
-                   << ") - RGBD will only flow through the DSR graph";
+        qWarning() << "[Media] one or more media publishers FAILED to init (streams up:" << summary << ")";
     return ready_;
 }
 

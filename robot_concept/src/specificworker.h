@@ -91,7 +91,17 @@ private:
 		// Per-sensor gates: when false, the stream's media publisher is not created,
 		// its descriptor is not advertised, and its Ice reader thread is not started.
 		bool        ENABLE_ZED    = true;   // ZED RGB + depth  (rc/zed/rgb, rc/zed/depth)
+		// RGB source selector (Media.zed_source): how robot_concept obtains/relays the ZED plane.
+		//   "auto" (default): negotiate — bridge via Ice RPC until zed_camera is seen on DDS, then follow it.
+		//   "ice" : always bridge via the CameraRGBDSimple Ice proxy (never defer to an external DDS producer).
+		//   "dds" : never bridge; always treat zed_camera as the external DDS producer and only monitor.
+		std::string ZED_SOURCE    = "auto";
 		bool        ENABLE_RICOH  = true;   // RGBD_360 panorama (rc/ricoh/rgb)
+		// 360 source selector (Media.ricoh_source): mirror of ZED_SOURCE for the Ricoh plane.
+		//   "auto" (default): negotiate — bridge via Ice RPC until ricoh_omni_dds is seen on DDS, then follow it.
+		//   "ice" : always bridge via the Camera360RGB Ice proxy (never defer to an external DDS producer).
+		//   "dds" : never bridge; always treat ricoh_omni_dds as the external DDS producer and only monitor.
+		std::string RICOH_SOURCE  = "auto";
 		bool        ENABLE_LIDAR  = true;   // 3D LiDAR cloud    (rc/lidar3d/points)
 		bool        ENABLE_IMU    = true;   // IMU sample        (rc/imu/data)
 		int         MEDIA_DOMAIN_ID   = 0;
@@ -138,6 +148,13 @@ private:
 	void read_ricoh_thread();
 	std::thread ricoh_thread;
 	std::atomic<bool> stop_ricoh_thread{false};
+	// Media-source negotiation for the 360 plane (mirror of bridge_zed_): false once
+	// ricoh_omni_dds is detected publishing the Image360Frame plane over DDS — robot_concept
+	// then relays its descriptor onto the "ricoh" node and stops bridging. True = we bridge.
+	// The second MediaPlaneDDS proxy (addressed at ricoh_omni_dds, port 10099) is generated
+	// from the CDSL's duplicate `requires MediaPlaneDDS` as mediaplanedds1_proxy — see
+	// negotiate_ricoh_media_source() where it is aliased in one place.
+	std::atomic<bool> bridge_ricoh_{true};
 
 	// Media plane (zero-copy DDS); RGBD pixels leave the DSR graph here.
 	SensorMediaPublisher media_;
@@ -147,8 +164,13 @@ private:
 	// node and flip bridge_zed_ off; if not/unreachable, resume bridging + re-advertise
 	// our own descriptor. Keeps a single producer without hardcoded coordination.
 	void negotiate_zed_media_source();
-	void relay_media_descriptor(const std::string& descriptor_json);
-	std::string last_relayed_descriptor_;   // empty = advertising our own descriptor
+	// Mirror of negotiate_zed_media_source for the 360 plane: ask ricoh_omni_dds (via
+	// mediaplanedds360_proxy) whether it is publishing; relay its descriptor onto "ricoh"
+	// and flip bridge_ricoh_ off if so, else resume bridging + re-advertise our own.
+	void negotiate_ricoh_media_source();
+	void relay_media_descriptor(const std::string& node_name, const std::string& descriptor_json);
+	std::string last_relayed_descriptor_;         // zed:   empty = advertising our own descriptor
+	std::string last_relayed_ricoh_descriptor_;   // ricoh: empty = advertising our own descriptor
 
 	void waiting_enter();
 	void waiting_loop();

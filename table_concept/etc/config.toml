@@ -64,6 +64,20 @@ AI2RangeNoiseLatPerM = 0.02 # lateral deprojection std growth (m per m of range)
 AI2RangeNoiseYawPerM = 0.03 # yaw common-mode std growth (rad per m of range) → the binding term vs far-view rotation
 AI2GnIters = 4              # Gauss-Newton iterations per frame
 
+# ── YOLO-INDEPENDENT LiDAR first-hit range channel (common/ai_belief/lidar_ray_factor.h) ──────────────────
+# Second, sensor-INDEPENDENT evidence: lidar3D returns on the table's LEGS + RIM pin the extent/centre in
+# METRIC range along the viewing ray. Its error mechanism is uncorrelated with the YOLO segmentation, so it
+# attacks the mask-erosion extent UNDER-SIZE (~6cm) the mask cannot self-correct. Consumes the lidar3D media
+# plane (TableLidarIngestor). STAGED ROLLOUT — OFF (0.0) by default; the media subscriber isn't created at all
+# while off. Step 1: set LidarPrecision=500 (low → can only nudge) and confirm on the console
+# "[TableLidar] media subscriber up", NO crash, and lidar_rays>0 at a few-cm resid (frame/extrinsic is right).
+# Step 2: raise to 2500 (≈1/σ²@2cm = depth-point scale) → w/h under-size should shrink and extent σ tighten.
+LidarPrecision = 0.0          # per-ray range precision (1/m², ≈1/σ²@2cm=2500 when load-bearing). 0=OFF
+LidarRobustCM = 0.05          # Cauchy scale (m): returns this far off the surface fade out (continuous, no gate)
+LidarSelectMarginM = 0.10     # pre-select returns within (birth half-diagonal + margin) horiz, floor..birth_H vert
+LidarFrameNode = "lidar3D"    # DSR node whose frame the raw sweep is in (room←this transform)
+LidarCoverageN0 = 60.0        # LiDAR ray count for full weight; fewer → proportionally down-weighted (sparse-safe)
+
 [TableConcept]
 ObsDistance = 1.8           # comfortable maximum stand-off from the target face for epistemic poses
 EpistemicCooldownCycles = 200 # min cycles a satisfied table stays withdrawn (anti-chatter)

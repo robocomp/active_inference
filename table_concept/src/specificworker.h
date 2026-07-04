@@ -46,6 +46,7 @@
 #include "table_config.h"      // rc::TableConfig + load_table_config
 #include "table_instance.h"    // rc::TableInstance
 #include "../../common/mask_ingestor/mask_ingestor.h"     // rc::MaskIngestor (perception)
+#include "table_lidar_ingestor.h"                          // rc::TableLidarIngestor (YOLO-independent LiDAR)
 #include "../../common/instance_tracker/instance_tracker.h"   // rc::InstanceTracker (birth/associate/death)
 #include "table_scene_graph.h" // rc::TableSceneGraph (DSR node/RT I/O)
 #include "table_fitter.h"      // rc::TableFitter (active-inference core)
@@ -159,6 +160,7 @@ private:
     std::unique_ptr<DSR::InnerEigenAPI>                inner_eigen_;     // for room↔body↔zed extrinsic (silhouette)
     std::unique_ptr<DSR::InnerGaussianAPI>            gaussian_api_;    // Part B: chain covariance propagation
     std::unique_ptr<rc::MaskIngestor>                   mask_ingestor_;   // perception (masks-only)
+    std::unique_ptr<rc::TableLidarIngestor>             lidar_ingestor_;  // YOLO-independent LiDAR range channel
     std::unique_ptr<rc::TableSceneGraph>               scene_graph_;     // DSR node/RT I/O
     uint64_t                                            room_node_id_ = 0;
 

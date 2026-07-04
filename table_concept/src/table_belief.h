@@ -18,6 +18,7 @@
 #include <Eigen/Dense>
 
 #include "../../common/ai_belief/recursive_laplace.h"   // shared predict/MAP/Woodbury engine
+#include "../../common/ai_belief/lidar_ray_factor.h"     // shared YOLO-independent LiDAR first-hit factor
 
 namespace rc
 {
@@ -71,6 +72,10 @@ struct TableFrame
     float chain_cov_yy = 0.0f;             // ...                                                      (cy)
     float chain_cov_yaw = 0.0f;            // extra shared yaw variance (rad²) — grows with view range so a
                                            // distant, vague mask cannot rotate a converged table
+
+    // YOLO-INDEPENDENT LiDAR channel: range returns that fall on the table (room frame, sensor origin +
+    // endpoints). Sphere-traced against THIS belief's own SDF by the shared factor. precision==0 ⇒ skipped.
+    rc::ai::LidarRays lidar;
 };
 
 // The table generative model wired onto the shared rc::ai recursive-Laplace engine. The Bayesian math
@@ -137,6 +142,10 @@ public:
     Eigen::Matrix<float, 6, 1> process_noise_diag() const;
     Eigen::Matrix<float, 6, 1> prior_cov_diag() const;
     Eigen::Matrix<float, 6, 1> common_mode_inv_diag(const TableFrame& frame) const;
+    // Extra evidence folded into the GN normal equations (engine calls it if present): the YOLO-independent
+    // LiDAR first-hit range factor. Sphere-traces this belief's own SDF, so the shared call is used unchanged.
+    void accumulate_extra(const TableBeliefState& s, const TableFrame& f,
+                          Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const;
 
     // ── Verification ──────────────────────────────────────────────────────────
     static bool self_test();

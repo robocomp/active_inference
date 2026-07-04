@@ -77,6 +77,13 @@ public:
     void note_birth(std::uint64_t id, const Eigen::Vector2f& xy) { birth_seeds_[id] = xy; }
     bool should_log(const TableInstance& inst) const;
 
+    // YOLO-independent LiDAR range channel: stage this cycle's sweep (room frame) + sensor origin for the
+    // range factor. clear_lidar_sweep() each cycle first so a stale sweep never leaks into a frame with no
+    // fresh LiDAR. Set/cleared from the compute() main thread by SpecificWorker (fed by TableLidarIngestor).
+    void set_lidar_sweep(const std::vector<Eigen::Vector3f>& sweep_room, const Eigen::Vector3f& origin_room)
+    { lidar_sweep_room_ = sweep_room; lidar_origin_room_ = origin_room; lidar_have_sweep_ = true; }
+    void clear_lidar_sweep() { lidar_have_sweep_ = false; }
+
 private:
     // Compute the localization/chain covariance term (J·Σ_chain·Jᵀ) at the table centre by transforming
     // it from the measurement frame back to room with ZERO input cov; stored on the instance for the
@@ -92,6 +99,13 @@ private:
     void ingest_observation_voxels(TableInstance& inst, const TableObservation& observation);
     bool is_voxel_owned_by_table(const TableInstance& inst, const Eigen::Vector3f& point) const;
     static std::uint64_t voxel_key(const Eigen::Vector3f& point, float quantization_m);
+
+    // Select this cycle's LiDAR returns that land on THIS table and stage them on the frame's range channel.
+    // Box is ANCHORED on the fresh mask-cloud centroid (never the fitted state — a diverging fit would drag
+    // the box into empty space and starve LiDAR exactly when it is most needed) and SIZED from the BIRTH
+    // footprint (not the fitted w/h, so a blown-up extent can't explode the region), deliberately spanning
+    // legs + rim. Final on/off membership is the factor's own geometric sphere-trace test, not this box.
+    void feed_lidar(TableInstance& inst, TableFrame& frame) const;
 
     TableModelParams  make_model_params() const;
 
@@ -112,6 +126,12 @@ private:
     std::unordered_map<std::uint64_t, Eigen::Vector2f> birth_seeds_;   // tracker-provided birth XY (see note_birth)
     std::uint64_t                  room_node_id_ = 0;   // latched per ensure_instance call
     std::ofstream                  ai2_csv_;            // per-cycle AI2 belief log (optional)
+
+    // Staged LiDAR sweep for the range factor (room frame). Refreshed each compute() cycle; have flag false
+    // ⇒ no fresh sweep this cycle ⇒ feed_lidar is a no-op (never reuses a stale sweep).
+    std::vector<Eigen::Vector3f>   lidar_sweep_room_;
+    Eigen::Vector3f                lidar_origin_room_ = Eigen::Vector3f::Zero();
+    bool                           lidar_have_sweep_  = false;
 };
 
 }  // namespace rc

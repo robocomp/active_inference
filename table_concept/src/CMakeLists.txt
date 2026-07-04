@@ -8,6 +8,18 @@ LIST(APPEND SOURCES
   ${ACTIVE_INFERENCE_COMMON_DIR}/mask_ingestor/mask_ingestor.cpp
   ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/timeseries_plot.cpp
   ../src/table_scene_graph.cpp
+  ../src/table_lidar_ingestor.cpp
+  # Zero-copy media plane (lidar3D consumer for the YOLO-independent range factor). Mirrors bottle_concept:
+  # media_transport.cpp is type-agnostic but references all IDL frame types, so link every PubSubTypes pair.
+  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/media_transport.cpp
+  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/image_framePubSubTypes.cxx
+  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/image_frameTypeObjectSupport.cxx
+  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/image360_framePubSubTypes.cxx
+  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/image360_frameTypeObjectSupport.cxx
+  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/lidar_framePubSubTypes.cxx
+  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/lidar_frameTypeObjectSupport.cxx
+  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/imu_framePubSubTypes.cxx
+  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/imu_frameTypeObjectSupport.cxx
   ../src/table_fitter.cpp
   ../src/table_model.cpp
   ../src/table_belief.cpp
@@ -40,4 +52,7 @@ LIST(APPEND HEADERS
 # away from libdsr's default alignment (144) → get_transformation_matrix overruns the caller's stack
 # slot → 0x17ff… SIGBUS in whatever agent shares the graph. Match libdsr's default. (See crash notes.)
 add_definitions(-O3 -fmax-errors=1 -fno-char8_t)
+
+# Media-plane headers (media_transport.h + generated IDL) — the lidar3D consumer factory.
+include_directories(${ACTIVE_INFERENCE_COMMON_DIR}/media_transport)
 

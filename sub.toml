@@ -6,8 +6,8 @@ ice_name = "Webots2Robocomp:tcp -h localhost -p 10006"
 
 [[components]]
 name = "camera360"
-cwd = "~/robocomp/components/robocomp-robolab/components/hardware/camera/ricoh_omni"
-cmd = "bin/RicohOmni etc/config_wb"
+cwd = "~/robocomp/components/robocomp-robolab/components/hardware/camera/ricoh_omni_dds"
+cmd = "bin/ricoh_omni_dds etc/config_webots.toml"
 ice_name = "Camera360RGB:tcp -h localhost -p 10097"
 
 [[components]]

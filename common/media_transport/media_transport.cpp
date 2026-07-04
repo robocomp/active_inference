@@ -21,6 +21,7 @@
 #include <fastdds/dds/subscriber/Subscriber.hpp>
 #include <fastdds/dds/subscriber/qos/DataReaderQos.hpp>
 #include <fastdds/dds/topic/Topic.hpp>
+#include <fastdds/dds/topic/TopicDescription.hpp>
 #include <fastdds/dds/topic/TypeSupport.hpp>
 #include <fastdds/dds/core/LoanableSequence.hpp>
 #include <fastdds/dds/core/Time_t.hpp>
@@ -130,6 +131,27 @@ void release_participant(std::uint32_t domain_id, bool requested_shm_only, efd::
 
     efd::DomainParticipantFactory::get_instance()->delete_participant(it->second.participant);
     participant_pool.erase(it);
+}
+
+// Resolve the Topic a reader must bind to on a shared participant. acquire_participant()
+// hands every writer AND reader in this process the SAME cached DomainParticipant per
+// (domain, shm). So when a process both PUBLISHES and SUBSCRIBES the same topic — e.g.
+// robot_concept keeps its ZED media publisher up while the negotiator flips to monitor
+// zed_camera's external DDS feed — the publisher already created a Topic of that name,
+// and the reader's create_topic() would fail with "Topic ... already exists". Reuse the
+// existing topic instead of failing. *owned_out is set only when WE create it, so the
+// caller's close() deletes exactly the topics it owns (never a topic another endpoint owns).
+efd::TopicDescription* resolve_reader_topic(efd::DomainParticipant* participant,
+                                            const std::string& topic_name,
+                                            const std::string& type_name,
+                                            efd::Topic** owned_out)
+{
+    *owned_out = nullptr;
+    if (efd::TopicDescription* existing = participant->lookup_topicdescription(topic_name))
+        return existing;                                    // reuse; not owned by us
+    efd::Topic* created = participant->create_topic(topic_name, type_name, efd::TOPIC_QOS_DEFAULT);
+    *owned_out = created;                                   // may be null on failure
+    return created;
 }
 }  // namespace
 
@@ -312,9 +334,9 @@ bool MediaSubscriber::init(const SubscriberConfig& cfg)
         return false;
     }
 
-    topic_ = participant_->create_topic(cfg.topic_name, type.get_type_name(),
-                                        efd::TOPIC_QOS_DEFAULT);
-    if (!topic_)
+    efd::TopicDescription* rtopic =
+        resolve_reader_topic(participant_, cfg.topic_name, type.get_type_name(), &topic_);
+    if (!rtopic)
     {
         close();
         return false;
@@ -340,7 +362,7 @@ bool MediaSubscriber::init(const SubscriberConfig& cfg)
     else
         rqos.data_sharing().off();
 
-    reader_ = subscriber_->create_datareader(topic_, rqos);
+    reader_ = subscriber_->create_datareader(rtopic, rqos);
     if (!reader_)
     {
         close();
@@ -441,9 +463,9 @@ bool Image360Subscriber::init(const SubscriberConfig& cfg)
         return false;
     }
 
-    topic_ = participant_->create_topic(cfg.topic_name, type.get_type_name(),
-                                        efd::TOPIC_QOS_DEFAULT);
-    if (!topic_)
+    efd::TopicDescription* rtopic =
+        resolve_reader_topic(participant_, cfg.topic_name, type.get_type_name(), &topic_);
+    if (!rtopic)
     {
         close();
         return false;
@@ -467,7 +489,7 @@ bool Image360Subscriber::init(const SubscriberConfig& cfg)
     else
         rqos.data_sharing().off();
 
-    reader_ = subscriber_->create_datareader(topic_, rqos);
+    reader_ = subscriber_->create_datareader(rtopic, rqos);
     if (!reader_)
     {
         close();
@@ -564,8 +586,9 @@ bool LidarSubscriber::init(const SubscriberConfig& cfg)
     subscriber_ = participant_->create_subscriber(efd::SUBSCRIBER_QOS_DEFAULT);
     if (!subscriber_) { close(); return false; }
 
-    topic_ = participant_->create_topic(cfg.topic_name, type.get_type_name(), efd::TOPIC_QOS_DEFAULT);
-    if (!topic_) { close(); return false; }
+    efd::TopicDescription* rtopic =
+        resolve_reader_topic(participant_, cfg.topic_name, type.get_type_name(), &topic_);
+    if (!rtopic) { close(); return false; }
 
     efd::DataReaderQos rqos = efd::DATAREADER_QOS_DEFAULT;
     rqos.reliability().kind = std::getenv("MEDIA_BEST_EFFORT")
@@ -583,7 +606,7 @@ bool LidarSubscriber::init(const SubscriberConfig& cfg)
     else
         rqos.data_sharing().off();
 
-    reader_ = subscriber_->create_datareader(topic_, rqos);
+    reader_ = subscriber_->create_datareader(rtopic, rqos);
     if (!reader_) { close(); return false; }
 
     data_sharing_active_ = reader_->get_qos().data_sharing().kind() != efd::OFF;

@@ -46,6 +46,12 @@ struct TableInstance
     float last_centroid_radius = 0.0f;
     float last_range           = 0.0f;   // mean camera→mask depth Z (m), this frame — static range weighting
 
+    // LiDAR range-channel diagnostics (this frame): #returns fed to the factor, #returns in a generous box,
+    // and their mean |dist| to the current model surface. Few rays / large resid ⇒ wrong LidarFrameNode.
+    int   dbg_lidar_rays       = 0;
+    int   dbg_lidar_raw        = 0;
+    float dbg_lidar_resid_m    = -1.0f;
+
     int  last_frame_seen    = -1;     // last_sensing_frame_att value read
     int  matched_frames     = 0;      // frames with fresh sensing data
     int  frames_converged   = 0;      // consecutive frames with |Δstate| < state_eps

@@ -201,6 +201,10 @@ void SpecificWorker::request_shutdown()
 
     cleanup_owned_nodes();
 
+    // Drop the LiDAR media subscriber BEFORE tearing down the graph/inner_eigen it reads (it holds a raw
+    // pointer to both). Mirrors bottle_concept.
+    lidar_ingestor_.reset();
+
     // Drop the InnerEigenAPI now (the fitter only holds a raw pointer and is null-guarded): letting it
     // destruct later with the rest of the object can fault inside DSR. Mirrors bottle_concept.
     inner_eigen_.reset();
@@ -381,6 +385,11 @@ void SpecificWorker::initialize()
     gaussian_api_ = std::make_unique<DSR::InnerGaussianAPI>(G.get());
     fitter_->set_chain_cov_source(gaussian_api_.get(), "zed", cfg_.rt_cov_add_chain);
 
+    // YOLO-independent LiDAR range channel: lidar3D media-plane consumer that stages each cycle's sweep in the
+    // room frame for the fitter's range factor. Dormant (no DDS participant) unless TableModel.LidarPrecision
+    // > 0. Subscriber is brought up lazily on the compute/main thread once the lidar3D node + descriptor exist.
+    lidar_ingestor_ = std::make_unique<rc::TableLidarIngestor>(G, inner_eigen_.get(), cfg_);
+
     // Build rc::EpistemicPlanner (info-gain scoring only; stand-off distance is the sole parameter).
     epistemic_planner_ = rc::EpistemicPlanner(cfg_.obs_distance);
 
@@ -465,6 +474,12 @@ void SpecificWorker::compute()
 
     mask_ingestor_->refresh();
     run_instance_tracker();   // data-driven birth / associate / merge (the only instance-lifecycle path)
+
+    // Stage this cycle's LiDAR sweep (room frame) for the fitter's range factor. clear-then-set so the factor
+    // never consumes a stale sweep; pump() is main-thread (reads the graph) + dormant while the feature is off.
+    fitter_->clear_lidar_sweep();
+    if (lidar_ingestor_ and lidar_ingestor_->pump())
+        fitter_->set_lidar_sweep(lidar_ingestor_->sweep_room(), lidar_ingestor_->origin_room());
 
     const auto table_nodes = G->get_nodes_by_type("table");
     for (const auto& node : table_nodes)

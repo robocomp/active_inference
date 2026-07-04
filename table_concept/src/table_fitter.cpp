@@ -342,6 +342,10 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
         frame.chain_cov_xx  = inst.chain_cov_xx + range_lat_var;   // range adds to the SHARED position error (cap)
         frame.chain_cov_yy  = inst.chain_cov_yy + range_lat_var;
         frame.chain_cov_yaw = range_yaw_var;                       // the binding term: far view can't rotate
+        // YOLO-independent LiDAR range channel: stage returns landing on the legs/rim. No-op if precision==0
+        // or no fresh sweep. The shared factor (accumulate_lidar_rays<6> in TableBelief::accumulate_extra)
+        // sphere-traces this belief's own SDF, so the same call the bottle uses drops in unchanged.
+        feed_lidar(inst, frame);
         energy = inst.ai2_belief.update(frame);
         // Near-square yaw disambiguation: sequential Bayesian comparison of the two orientation modes
         // (current vs the w↔h swap ≡ 90° rotation). Owns the GENUINE mode flip so the per-frame MAP no
@@ -403,6 +407,71 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
              << std::sqrt(std::max(0.0f, inst.ai2_belief.yaw_marginal_var())) << ','
              << sd(5) << ',' << inst.ai2_belief.flip_evidence() << ',' << inst.ai2_belief.mode_posterior() << '\n';
     ai2_csv_.flush();
+}
+
+// ─── YOLO-independent LiDAR first-hit range channel ────────────────────────────
+// Select this cycle's returns landing on THIS table and stage them on frame.lidar. The box is anchored on
+// the FRESH mask-cloud centroid (XY) — not the fitted state, which a diverging fit would drag into empty
+// space, starving LiDAR exactly when it is most needed — and sized from the BIRTH footprint (not the fitted
+// w/h, so a blown-up extent can't explode the region). The vertical band is floor-referenced [−m, birth_H+m]
+// so it deliberately spans the LEGS and the tabletop RIM: those are the unbiased, segmentation-independent
+// surfaces that attack the mask-erosion under-size. Final membership is the factor's own sphere-trace hit
+// test (a ray must actually cross the model SDF), so this box is only a work bound + neighbour reject.
+void TableFitter::feed_lidar(TableInstance& inst, TableFrame& frame) const
+{
+    inst.dbg_lidar_rays = 0;
+    inst.dbg_lidar_raw  = 0;
+    inst.dbg_lidar_resid_m = -1.0f;
+    if (cfg_.lidar_precision <= 0.0f or not lidar_have_sweep_ or lidar_sweep_room_.empty()
+        or frame.points.empty())
+        return;
+
+    // Anchor XY on this cycle's fresh mask-cloud centroid.
+    Eigen::Vector3f c = Eigen::Vector3f::Zero();
+    for (const auto& p : frame.points) c += p;
+    c /= static_cast<float>(frame.points.size());
+
+    const auto& s = inst.ai2_belief.state();
+    // Fixed footprint from the BIRTH dims (never the fitted w/h). Circumscribed horizontal radius so the box
+    // is rotation-agnostic (yaw need not be resolved to select). Vertical band is floor-referenced.
+    const float m    = cfg_.lidar_select_margin_m;
+    const float rxy  = 0.5f * std::sqrt(cfg_.tracker_birth_width_m * cfg_.tracker_birth_width_m
+                                      + cfg_.tracker_birth_depth_m * cfg_.tracker_birth_depth_m) + m;
+    const float rxy2 = rxy * rxy;
+    const float z_lo = -m;                                   // floor (room z≈0), minus a little slack
+    const float z_hi = cfg_.tracker_birth_height_m + m;      // tabletop, plus margin
+    // Generous diagnostic box (1.5× horizontal) — "is a return anywhere near this table?" — kept below the
+    // birth min-separation so it can't grab a neighbouring table's returns.
+    const float rraw2 = (1.5f * rxy) * (1.5f * rxy);
+    int raw = 0;
+
+    frame.lidar.endpoints.clear();
+    frame.lidar.endpoints.reserve(256);
+    double resid_sum = 0.0;
+    for (const auto& p : lidar_sweep_room_)
+    {
+        const float dx = p.x() - c.x(), dy = p.y() - c.y();
+        const float dh2 = dx * dx + dy * dy;
+        if (dh2 <= rraw2 and p.z() >= z_lo and p.z() <= z_hi) ++raw;   // generous "near?" count
+        if (dh2 > rxy2) continue;
+        if (p.z() < z_lo or p.z() > z_hi) continue;
+        frame.lidar.endpoints.push_back(p);
+        resid_sum += std::abs(inst.ai2_belief.sdf_compound(p, s));     // |dist to CURRENT model surface|
+    }
+    inst.dbg_lidar_raw  = raw;
+    inst.dbg_lidar_rays = static_cast<int>(frame.lidar.endpoints.size());
+    if (inst.dbg_lidar_rays > 0)
+        inst.dbg_lidar_resid_m = static_cast<float>(resid_sum / inst.dbg_lidar_rays);
+    if (frame.lidar.endpoints.empty())
+        return;
+
+    // Precision = base, DOWN-WEIGHTED by sparse coverage (a handful of noisy returns must not swing extent).
+    // No range fade: a LiDAR hit is a real metric surface point at any range — sparsity is the only decay.
+    const float coverage = std::min(1.0f, static_cast<float>(inst.dbg_lidar_rays)
+                                        / std::max(1.0f, cfg_.lidar_coverage_n0));
+    frame.lidar.origin     = lidar_origin_room_;
+    frame.lidar.precision  = cfg_.lidar_precision * coverage;
+    frame.lidar.robust_c_m = cfg_.lidar_robust_c_m;
 }
 
 // ─── Camera extrinsic (room_T_zed) ─────────────────────────────────────────────

@@ -58,6 +58,17 @@ struct TableConfig
     int   ai2_gn_iters         = 4;      // Gauss-Newton iterations per frame
     std::string ai2_csv_path   = "";     // if non-empty, append per-cycle AI2 belief (state + Σ diag + mask R) to this CSV
 
+    // ── YOLO-INDEPENDENT LiDAR first-hit range factor (see common/ai_belief/lidar_ray_factor.h) ──────
+    // Second, sensor-independent evidence channel: lidar3D returns landing on the table (legs + rim) pin the
+    // extent and centre in METRIC range, ALONG the viewing ray — an error mechanism uncorrelated with the
+    // YOLO segmentation, so it attacks the mask-erosion under-size the mask cannot self-correct. Consumes
+    // the lidar3D media plane via TableLidarIngestor; dormant (no DDS participant) while precision == 0.
+    float lidar_precision      = 0.0f;   // per-ray range precision (1/m², ≈1/σ_range²); 0 = OFF
+    float lidar_robust_c_m     = 0.05f;  // Cauchy scale (m): returns this far off the surface fade out
+    float lidar_select_margin_m = 0.10f; // pre-select returns within (birth half-extent + margin), all z up to top
+    std::string lidar_frame_node = "lidar3D"; // DSR node whose frame the raw sweep is in (room←this transform)
+    float lidar_coverage_n0     = 60.0f; // LiDAR ray count for FULL weight; fewer → proportionally down-weighted
+
     // Upload the table pose covariance onto the room→table RT edge (rt_covariance_att, 6×6 SE3),
     // mapped from the belief's full Σ over [cx,cy,H,w,h,yaw]: x←cx, y←cy, z←H/2, yaw←ψ; roll/pitch are
     // unobservable (large). rt_cov_scale calibrates the raw variance toward NEES≈1.
