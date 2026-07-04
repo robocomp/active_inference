@@ -188,6 +188,7 @@ float BottleFitter::run_inference(BottleInstance& inst, const BottleObservation&
         p.prior_pos_std        = cfg_.ai2_prior_pos_std;
         p.prior_size_std       = cfg_.ai2_prior_size_std;
         p.process_std_m        = cfg_.ai2_process_std_m;
+        p.process_std_size_m   = cfg_.ai2_process_std_size_m;
         p.common_mode_pos_std  = cfg_.ai2_common_mode_pos_std;
         p.common_mode_size_std = cfg_.ai2_common_mode_size_std;
         p.gn_iters             = cfg_.ai2_gn_iters;
@@ -215,13 +216,18 @@ float BottleFitter::run_inference(BottleInstance& inst, const BottleObservation&
 
     // Observation precision R = σ_base² (per-point random part); the shared-mask/localization error is
     // carried separately by the common-mode (Woodbury) saturation, not folded into per-point R.
-    const float R = cfg_.ai2_sigma_base_m * cfg_.ai2_sigma_base_m;
+    // Range-scaled precision (perceive precisely when close, leave untouched when far): R grows with the
+    // camera→object sensing distance beyond `RangeNearM`, so distant frames carry ~no info and the belief
+    // holds. range_scale >= 1; == 1 within grasp range or when disabled.
+    const float range_scale = range_precision_scale(inst);
+    const float R = cfg_.ai2_sigma_base_m * cfg_.ai2_sigma_base_m * range_scale;
 
     BottleFrame frame;
     frame.points.reserve(static_cast<std::size_t>(npts));
     frame.points.insert(frame.points.end(), observation.candidate_pts.begin(), observation.candidate_pts.end());
     frame.points.insert(frame.points.end(), observation.residual_pts.begin(), observation.residual_pts.end());
     frame.R.assign(frame.points.size(), R);
+    frame.precision_scale = range_scale;   // inflate the common-mode with range — the BINDING cap on the mean
     // Pose-chain (localization) shared error at the bottle centre, computed in write_rt_pose the previous
     // cycle (slowly varying) — fed into the common-mode so the frame's information saturates (calibrated σ).
     frame.chain_cov_xx = std::max(0.0f, inst.dbg_chain_cov_xx);
@@ -237,14 +243,39 @@ float BottleFitter::run_inference(BottleInstance& inst, const BottleObservation&
     {
         frame.sil_cam_xy    = inst.model.silhouette_cam_xy();
         frame.sil_dirs      = inst.model.silhouette_dirs();
-        frame.sil_precision = cfg_.mask_precision * mask_confidence_weight(inst.model.silhouette_conf());
+        // Silhouette also fades with range (its radius-pinning must not over-tighten from a distant view).
+        frame.sil_precision = cfg_.mask_precision * mask_confidence_weight(inst.model.silhouette_conf()) / range_scale;
     }
 
     // YOLO-INDEPENDENT LiDAR range channel: sensor-fusion evidence that pins metric depth + radius along the
-    // viewing ray (the direction the mask is blind to). Selects this cycle's sweep returns near the instance.
-    feed_lidar(inst, frame);
+    // viewing ray (the direction the mask is blind to). Selects this cycle's sweep returns near the instance,
+    // down-weighted by sparse coverage + the range fade.
+    feed_lidar(inst, frame, range_scale);
 
-    const float energy = inst.ai2_belief.update(frame);
+    // Physical step-bound (fix 2a). A corrupted mask cloud (e.g. mask points deprojected to garbage during
+    // fast robot motion) can produce ONE wild GN step that teleports the centre tens of metres; once that
+    // happens LiDAR's restoring returns fall outside its robust kernel (huge residual → ~0 weight) and the fit
+    // can't recover → runaway. A static-scene bottle cannot physically move MaxStepM in one frame, so a frame
+    // whose net centre move exceeds it is an OUTLIER FRAME: reject its update (restore state+Σ), widen the
+    // position Σ like a look-away, and mark it no-data so persistent corruption still retires via frames_diverged.
+    const BottleBeliefState pre_state = inst.ai2_belief.state();
+    const BottleBelief      pre_belief = inst.ai2_belief;   // full snapshot (state + Σ)
+
+    float energy = inst.ai2_belief.update(frame);
+
+    if (cfg_.max_step_m > 0.0f)
+    {
+        const auto& ns = inst.ai2_belief.state();
+        const float dx = ns.cx - pre_state.cx, dy = ns.cy - pre_state.cy, dz = ns.cz - pre_state.cz;
+        if (std::sqrt(dx * dx + dy * dy + dz * dz) > cfg_.max_step_m)
+        {
+            std::print("[{}] AI2 step-bound REJECT: centre moved {:.2f}m (>{:.2f}) — outlier frame dropped\n",
+                       inst.node_name, std::sqrt(dx * dx + dy * dy + dz * dz), cfg_.max_step_m);
+            inst.ai2_belief = pre_belief;         // reject the corrupted update (restore state + Σ)
+            inst.ai2_belief.predict_stale();      // widen position Σ so the next good frame re-associates
+            energy = 0.0f;                        // explained nothing → drives frames_diverged (retirement)
+        }
+    }
 
     // Write the belief back into the legacy BottleState so all downstream publish/viewer/RT code is
     // unchanged. Hang the bottle from the table when a support surface is known (cz = table_top + h/2),
@@ -280,11 +311,11 @@ float BottleFitter::run_inference(BottleInstance& inst, const BottleObservation&
     update_expected_visible(inst);   // negative-information death gate (persist out-of-FoV)
 
     if (should_log(inst))
-        std::print("[{}] AI2 npts={} R={:.4f} | c=({:.3f},{:.3f},{:.3f}) r={:.3f} h={:.3f} | σ(r,h)mm=({:.1f},{:.1f}) | lidar rays={} resid={:.3f}m | E={:.4f} div={}\n",
+        std::print("[{}] AI2 npts={} R={:.4f} | c=({:.3f},{:.3f},{:.3f}) r={:.3f} h={:.3f} | σ(r,h)mm=({:.1f},{:.1f}) | lidar {}/{} raw resid={:.3f}m | E={:.4f} div={} rscale={:.1f}\n",
                    inst.node_name, npts, R, bs.cx, bs.cy, bs.cz, bs.radius, bs.height,
                    1000.f * std::sqrt(std::max(0.f, inst.ai2_belief.covariance()(3, 3))),
                    1000.f * std::sqrt(std::max(0.f, inst.ai2_belief.covariance()(4, 4))),
-                   inst.dbg_lidar_rays, inst.dbg_lidar_resid_m, energy, inst.frames_diverged);
+                   inst.dbg_lidar_rays, inst.dbg_lidar_raw, inst.dbg_lidar_resid_m, energy, inst.frames_diverged, range_scale);
 
     log_ai2_csv(inst, npts, R, energy);
     return energy;
@@ -309,7 +340,7 @@ void BottleFitter::log_ai2_csv(const BottleInstance& inst, int point_count, floa
         ai2_csv_ << "cycle,node,pts,R,energy,frames_converged,sil_rays";   // sil_rays = silhouette edge rays folded
         for (const auto* d : kDof) ai2_csv_ << ",state_" << d;
         for (const auto* d : kDof) ai2_csv_ << ",std_"   << d;   // posterior std (m) = sqrt(Σ_jj)
-        ai2_csv_ << ",chain_xx,chain_yy,lidar_rays,lidar_resid_m,frames_diverged";
+        ai2_csv_ << ",chain_xx,chain_yy,lidar_rays,lidar_raw,lidar_resid_m,frames_diverged";
         ai2_csv_ << '\n';
     }
 
@@ -321,7 +352,7 @@ void BottleFitter::log_ai2_csv(const BottleInstance& inst, int point_count, floa
     for (int j = 0; j < 5; ++j) ai2_csv_ << ',' << s[j];
     for (int j = 0; j < 5; ++j) ai2_csv_ << ',' << std::sqrt(std::max(0.0f, S(j, j)));
     ai2_csv_ << ',' << std::max(0.0f, inst.dbg_chain_cov_xx) << ',' << std::max(0.0f, inst.dbg_chain_cov_yy);
-    ai2_csv_ << ',' << inst.dbg_lidar_rays << ',' << inst.dbg_lidar_resid_m << ',' << inst.frames_diverged;
+    ai2_csv_ << ',' << inst.dbg_lidar_rays << ',' << inst.dbg_lidar_raw << ',' << inst.dbg_lidar_resid_m << ',' << inst.frames_diverged;
     ai2_csv_ << '\n';
     ai2_csv_.flush();
 }
@@ -351,9 +382,23 @@ std::optional<Eigen::Matrix4d> BottleFitter::room_T_zed_matrix(std::uint64_t tim
 // the current centre estimate and within (h/2 + margin) vertically — then stage them onto the frame's LiDAR
 // channel. Pre-selection just bounds the work and keeps a distant object's returns out; final membership is
 // the factor's own geometric test (a ray must actually cross the model's SDF), not a distance gate here.
-void BottleFitter::feed_lidar(BottleInstance& inst, BottleFrame& frame) const
+float BottleFitter::range_precision_scale(const BottleInstance& inst) const
+{
+    if (cfg_.range_near_m <= 0.0f)
+        return 1.0f;
+    const auto T = room_T_zed_matrix();   // room<-zed; translation col = camera origin in room
+    if (not T.has_value())
+        return 1.0f;
+    const auto& s = inst.ai2_belief.state();
+    const double dx = (*T)(0, 3) - s.cx, dy = (*T)(1, 3) - s.cy, dz = (*T)(2, 3) - s.cz;
+    const float range = static_cast<float>(std::sqrt(dx * dx + dy * dy + dz * dz));
+    return std::pow(std::max(1.0f, range / cfg_.range_near_m), cfg_.range_precision_power);
+}
+
+void BottleFitter::feed_lidar(BottleInstance& inst, BottleFrame& frame, float range_scale) const
 {
     inst.dbg_lidar_rays = 0;
+    inst.dbg_lidar_raw  = 0;
     inst.dbg_lidar_resid_m = -1.0f;
     if (cfg_.lidar_precision <= 0.0f or not lidar_have_sweep_ or lidar_sweep_room_.empty()
         or frame.points.empty())
@@ -373,6 +418,11 @@ void BottleFitter::feed_lidar(BottleInstance& inst, BottleFrame& frame) const
     const float rxy = cfg_.prior_radius + cfg_.lidar_select_margin_m;          // fixed footprint, NOT fitted r
     const float hz  = 0.5f * cfg_.prior_height + cfg_.lidar_select_margin_m;
     const float rxy2 = rxy * rxy;
+    // Generous diagnostic box (1.6× horizontal, 2× vertical): counts returns NEAR the bottle that the tight
+    // box may miss. Kept below the inter-bottle spacing so it can't grab a neighbour's returns.
+    const float rraw2 = (1.6f * rxy) * (1.6f * rxy);
+    const float hraw  = 2.0f * hz;
+    int raw = 0;
 
     frame.lidar.endpoints.clear();
     frame.lidar.endpoints.reserve(64);
@@ -380,11 +430,14 @@ void BottleFitter::feed_lidar(BottleInstance& inst, BottleFrame& frame) const
     for (const auto& p : lidar_sweep_room_)
     {
         const float dx = p.x() - c.x(), dy = p.y() - c.y();
-        if (dx * dx + dy * dy > rxy2) continue;
+        const float dh2 = dx * dx + dy * dy;
+        if (dh2 <= rraw2 and std::abs(p.z() - c.z()) <= hraw) ++raw;   // generous — "is a return anywhere near?"
+        if (dh2 > rxy2) continue;
         if (std::abs(p.z() - c.z()) > hz) continue;
         frame.lidar.endpoints.push_back(p);
         resid_sum += std::abs(inst.ai2_belief.sdf_cylinder(p, s));   // |dist to CURRENT model surface| (diag)
     }
+    inst.dbg_lidar_raw = raw;
     // Frame-sanity diagnostic (drives the smoke-test): #returns landing on this bottle + how far they sit
     // from the current surface. Few rays / large residual ⇒ wrong LidarFrameNode (mount double-applied).
     inst.dbg_lidar_rays = static_cast<int>(frame.lidar.endpoints.size());
@@ -393,8 +446,11 @@ void BottleFitter::feed_lidar(BottleInstance& inst, BottleFrame& frame) const
     if (frame.lidar.endpoints.empty())
         return;
 
+    // Precision = base, DOWN-WEIGHTED by sparse coverage (few noisy returns must not swing radius; bottle_2
+    // finding) and by the range fade (far → low precision → object left untouched). rays/N0 capped at 1.
+    const float coverage = std::min(1.0f, static_cast<float>(inst.dbg_lidar_rays) / std::max(1.0f, cfg_.lidar_coverage_n0));
     frame.lidar.origin     = lidar_origin_room_;
-    frame.lidar.precision  = cfg_.lidar_precision;
+    frame.lidar.precision  = cfg_.lidar_precision * coverage / std::max(1.0f, range_scale);
     frame.lidar.robust_c_m = cfg_.lidar_robust_c_m;
 }
 

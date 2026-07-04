@@ -4,12 +4,13 @@ import "Camera360RGBD.idsl";
 import "Camera360RGB.idsl";
 import "IMU.idsl";
 import "FullPoseEstimationPub.idsl";
+import "MediaPlaneDDS.idsl";
 
 Component robot_concept
 {
     Communications
     {
-        requires Lidar3D, CameraRGBDSimple, Camera360RGBD, IMU, Camera360RGB;
+        requires Lidar3D, CameraRGBDSimple, Camera360RGBD, IMU, Camera360RGB, MediaPlaneDDS;
         subscribesTo FullPoseEstimationPub;
     };
     language Cpp11;

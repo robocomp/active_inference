@@ -244,6 +244,11 @@ void SpecificWorker::initialize()
 			qWarning() << "[Media]" << ad.node << "node not found at init — media descriptor NOT advertised";
 	}
 
+	// One-shot negotiation before starting the bridge thread: if zed_camera is already
+	// publishing the ZED plane on DDS, adopt its descriptor now and start with bridging
+	// OFF (compute() then re-checks at low rate to follow zed_camera up/down).
+	negotiate_zed_media_source();
+
 	// Start only the reader threads whose stream is enabled — a gated-off sensor
 	// spins up no Ice proxy traffic at all.
 	if (params.ENABLE_LIDAR) lidar_thread = std::thread(&SpecificWorker::read_lidar_thread, this);
@@ -352,6 +357,15 @@ void SpecificWorker::compute()
 			p_rgbd = f_rgbd; p_lidar = f_lidar; p_imu = f_imu; p_ricoh = f_ricoh;
 		}
 		last = now; last_rgbd = r; last_lidar = l; last_imu = i; last_ricoh = c;
+	}
+
+	// Low-rate media-source negotiation (~every 3 s): is zed_camera publishing the ZED
+	// plane on DDS? Relay its descriptor + stop bridging if so; fall back if not.
+	static auto last_neg = std::chrono::steady_clock::now();
+	if (std::chrono::duration<double>(now - last_neg).count() >= 3.0)
+	{
+		negotiate_zed_media_source();
+		last_neg = now;
 	}
 }
 
@@ -529,8 +543,42 @@ void SpecificWorker::read_rgbd_thread()
 	auto last_depth_upload = std::chrono::steady_clock::time_point{};
 	std::uint64_t last_rgbd_stamp_ms = 0;   // self-sync: dedup by source stamp
 	double rgbd_src_period_ms = -1.0;       // self-sync: source period from stamp deltas (NOT wall clock)
+	// External-publisher monitor (only used while zed_camera owns the plane).
+	std::unique_ptr<rc::media::MediaSubscriber> ext_rgb_sub;
+	std::uint64_t ext_frames = 0;
+	auto ext_report_at = std::chrono::steady_clock::now();
 	while (!stop_rgbd_thread && !shutting_down_.load())
 	{
+		if (not bridge_zed_.load(std::memory_order_relaxed))
+		{
+			// zed_camera is the external DDS producer (descriptor relayed into DSR by
+			// negotiate_zed_media_source). Don't pull/publish; SUBSCRIBE to its rgb
+			// stream just to report "external publish" + the observed frame rate.
+			if (not ext_rgb_sub)
+			{
+				ext_rgb_sub = rc::media::make_image_subscriber_from_graph(*G, "zed", "rgb");
+				ext_frames = 0;
+				ext_report_at = std::chrono::steady_clock::now();
+			}
+			if (ext_rgb_sub)
+			{
+				ext_frames += static_cast<std::uint64_t>(
+					ext_rgb_sub->wait_and_poll([](const rc::media::ImageFrame&, std::int64_t){}, 200));
+				const auto now = std::chrono::steady_clock::now();
+				const double dt = std::chrono::duration<double>(now - ext_report_at).count();
+				if (dt >= 5.0)
+				{
+					std::print("[Media] external DDS publisher (zed_camera) — rgb {:.1f} Hz\n",
+					           static_cast<double>(ext_frames) / dt);
+					ext_frames = 0;
+					ext_report_at = now;
+				}
+			}
+			else
+				std::this_thread::sleep_for(std::chrono::milliseconds(200));   // descriptor not ready yet
+			continue;
+		}
+		if (ext_rgb_sub) ext_rgb_sub.reset();   // we are producing again -> stop monitoring
 		const auto loop_start = std::chrono::steady_clock::now();
 		try
 		{
@@ -689,6 +737,54 @@ void SpecificWorker::read_rgbd_thread()
 			qWarning() << "[read_rgbd] Ice exception:" << e.what();
 		}
 	}
+}
+
+void SpecificWorker::negotiate_zed_media_source()
+{
+	if (not params.ENABLE_ZED)
+		return;   // ZED path disabled entirely — nothing to negotiate
+
+	std::string descriptor;
+	if (mediaplanedds_proxy)
+	{
+		try { descriptor = mediaplanedds_proxy->getMediaDescriptor(); }
+		catch (const Ice::Exception&) { descriptor.clear(); }   // peer down → bridge ourselves
+	}
+
+	if (not descriptor.empty())
+	{
+		// zed_camera IS the DDS producer: relay its descriptor into DSR, stop bridging.
+		if (bridge_zed_.exchange(false))
+			qInfo() << "[MediaNeg] zed_camera publishing ZED on DDS — relaying its descriptor; robot_concept stops bridging";
+		if (descriptor != last_relayed_descriptor_)
+		{
+			relay_media_descriptor(descriptor);
+			last_relayed_descriptor_ = descriptor;
+		}
+	}
+	else
+	{
+		// zed_camera absent/not publishing: robot_concept is the producer (bridge as before).
+		if (not bridge_zed_.exchange(true))
+			qInfo() << "[MediaNeg] zed_camera not publishing — robot_concept resumes bridging ZED";
+		if (not last_relayed_descriptor_.empty())
+		{
+			media_.advertise(*G, "zed", {"rgb", "depth"});   // re-advertise our own plane
+			last_relayed_descriptor_.clear();
+		}
+	}
+}
+
+void SpecificWorker::relay_media_descriptor(const std::string& descriptor_json)
+{
+	auto node = G->get_node("zed");
+	if (not node.has_value())
+	{
+		qWarning() << "[MediaNeg] 'zed' node not found — cannot relay media descriptor";
+		return;
+	}
+	G->runtime_checked_add_or_modify_attrib_local(node.value(), rc::media::MEDIA_DESCRIPTOR_ATTR, descriptor_json);
+	G->update_node(node.value());
 }
 
 void SpecificWorker::trigger_graph_layout_twopi()

@@ -131,7 +131,10 @@ struct VoxelizerParams
     // the ricoh's mounting yaw + the panorama's 0-column convention — PROVISIONAL, verify live vs the
     // descriptor projection model before any consumer relies on the bearing (Part C is not built yet).
     bool        RICOH_PUBLISH_MASKS        = true;    // Ricoh.publish_masks
-    float       RICOH_AZIMUTH_OFFSET_RAD   = 0.0f;    // Ricoh.azimuth_offset_rad
+    float       RICOH_AZIMUTH_OFFSET_RAD   = 0.0f;    // Ricoh.azimuth_offset_rad — additive zero correction
+    float       RICOH_AZIMUTH_SIGN         = 1.0f;    // Ricoh.azimuth_sign — +1/−1: flip if the panorama is mirrored
+    bool        RICOH_LOG_BEARINGS         = false;   // Ricoh.log_bearings — print each 360 detection's
+                                                      // label + computed bearings (azimuth calibration)
 
     // Custom drawing windows (attach to the DSR GUI if available). Both default ON.
     bool        SHOW_VOXEL_VIEWER = true; // Voxel.show_voxel_viewer

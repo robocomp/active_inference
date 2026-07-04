@@ -55,6 +55,9 @@ struct BottleInstance
     // their mean |SDF| to the current model surface. A healthy frame = tens of rays at a few-cm residual; a
     // wrong LidarFrameNode (mount double-applied) shows ~0 rays or a large systematic residual.
     int   dbg_lidar_rays    = 0;
+    int   dbg_lidar_raw     = 0;       // returns in a GENEROUS box (before the tight select) — raw≈selected ⇒
+                                       // returns physically absent (occlusion/scan geometry, a VIEWPOINT problem);
+                                       // raw≫selected ⇒ they're there but the tight box misses them (offset/calib).
     float dbg_lidar_resid_m = -1.0f;   // -1 = no LiDAR this frame
     // Divergence persistence: consecutive frames whose fit explained NONE of its data (belief energy == 0,
     // i.e. every point fell to the clutter component — a drifted/inflated model). Retired past a config bound.

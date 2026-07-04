@@ -42,8 +42,8 @@ ice_name = "Lidar3DFilter:tcp -h localhost -p 11995"
 
 [[components]]
 name = "zed"
-cwd = "~/robocomp/components/robocomp-shadow/insect/zed_component"
-cmd = "bin/zed_component etc/configShadowWebot.toml"
+cwd = "~/robocomp/components/robocomp-robolab/components/hardware/camera/zed_camera"
+cmd = "bin/zed_camera etc/configShadowWebot.toml"
 ice_name = "Zed:tcp -h localhost -p 12001"
 
 

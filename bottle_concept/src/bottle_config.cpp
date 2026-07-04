@@ -31,6 +31,7 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
     out.fe_eps            = getf("BottleConcept.FEps",            1e-3f);
     out.K_stable          = geti("BottleConcept.KStable",         30);
     out.diverged_retire_frames = geti("BottleConcept.DivergedRetireFrames", 20);
+    out.max_step_m        = getf("BottleConcept.MaxStepM",        0.5f);
     out.write_threshold   = getf("BottleConcept.WriteThreshold",  1e-3f);
     out.log_period_frames = geti("BottleConcept.LogPeriodFrames", 30);
     out.voxel_bank_max_points        = geti("BottleConcept.VoxelBankMaxPoints",        4000);
@@ -50,6 +51,9 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
     out.lidar_robust_c_m     = getf("BottleModel.LidarRobustCM",       0.05f);
     out.lidar_select_margin_m = getf("BottleModel.LidarSelectMarginM", 0.06f);
     out.lidar_frame_node      = gets("BottleModel.LidarFrameNode",     "lidar3D");
+    out.range_near_m          = getf("BottleModel.RangeNearM",          0.6f);
+    out.range_precision_power = getf("BottleModel.RangePrecisionPower", 2.0f);
+    out.lidar_coverage_n0     = getf("BottleModel.LidarCoverageN0",     25.0f);
 
     out.ai2_sigma_base_m         = getf("BottleModel.AI2SigmaBaseM",          0.02f);
     out.ai2_clutter_frac         = getf("BottleModel.AI2ClutterFrac",         0.10f);
@@ -57,6 +61,7 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
     out.ai2_prior_pos_std        = getf("BottleModel.AI2PriorPosStd",         0.30f);
     out.ai2_prior_size_std       = getf("BottleModel.AI2PriorSizeStd",        0.03f);
     out.ai2_process_std_m        = getf("BottleModel.AI2ProcessStdM",         0.005f);
+    out.ai2_process_std_size_m   = getf("BottleModel.AI2ProcessStdSizeM",     0.001f);
     out.ai2_common_mode_pos_std  = getf("BottleModel.AI2CommonModePosStd",    0.02f);
     out.ai2_common_mode_size_std = getf("BottleModel.AI2CommonModeSizeStd",   0.01f);
     out.ai2_gn_iters             = geti("BottleModel.AI2GnIters",             4);

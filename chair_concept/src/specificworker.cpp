@@ -362,17 +362,12 @@ void SpecificWorker::initialize()
     scene_graph_ = std::make_unique<rc::ChairSceneGraph>(
         G, rt_api_.get(), cfg_, [this] { trigger_graph_layout_twopi(); });
 
-    // Subscribe to graph signals
-    connect(G.get(), &DSR::DSRGraph::update_node_signal,
-            this, &SpecificWorker::modify_node_slot);
-    connect(G.get(), &DSR::DSRGraph::update_node_attr_signal,
-            this, &SpecificWorker::modify_node_attrs_slot);
-    connect(G.get(), &DSR::DSRGraph::del_node_signal,
-            this, &SpecificWorker::del_node_slot);
-
     // Remove any "chair*" nodes left behind by a previous (crashed) run so this agent always starts
     // from a clean slate and never adopts a stale/drifted node (the instance tracker re-births them
-    // data-driven from masks).
+    // data-driven from masks). Runs BEFORE the graph signals are connected: delete_node() fires
+    // del_node_signal synchronously, and del_node_slot dereferences fitter_ — which does not exist yet.
+    // Connecting after this sweep (and after fitter_ is built) both avoids that null-deref SIGSEGV and
+    // skips a pointless self-notification for our own cleanup deletions.
     remove_owned_chair_nodes();
 
     // Resolve room node
@@ -385,6 +380,15 @@ void SpecificWorker::initialize()
     // Active-inference fit core. Owns the instance map; collaborates with the ingestor + scene graph.
     fitter_ = std::make_unique<rc::ChairFitter>(
         G, inner_eigen_.get(), cfg_, mask_ingestor_.get(), scene_graph_.get());
+
+    // Subscribe to graph signals ONLY now that fitter_ (which every slot dereferences) exists, and after
+    // the startup stale-sweep above. Cross-thread Auto resolves to Queued (never add DirectConnection).
+    connect(G.get(), &DSR::DSRGraph::update_node_signal,
+            this, &SpecificWorker::modify_node_slot);
+    connect(G.get(), &DSR::DSRGraph::update_node_attr_signal,
+            this, &SpecificWorker::modify_node_attrs_slot);
+    connect(G.get(), &DSR::DSRGraph::del_node_signal,
+            this, &SpecificWorker::del_node_slot);
 
     // Part B: localization/chain covariance on the published RT edge (mirrors bottle/table).
     gaussian_api_ = std::make_unique<DSR::InnerGaussianAPI>(G.get());
@@ -776,6 +780,20 @@ void SpecificWorker::run_instance_tracker()
         if (new_id != 0)
         {
             fitter_->note_birth(new_id, Eigen::Vector2f(c.x(), c.y()));
+            // Materialise the ChairInstance NOW, at birth — do not wait for the freshly inserted DSR node
+            // to surface in get_nodes_by_type (it is not reliably visible the same cycle). Birth was
+            // decoupled across three async steps (create node → ensure_instance when the node appears →
+            // belief init when a mask associates), so a born instance was never registered as a track:
+            // the tracker kept seeing its detection unexplained and RE-BIRTHED it every cycle (the
+            // 403-birth / 401-merge churn, duplicates collapsing at 0,0). Creating the instance here
+            // registers it as a track immediately and hands it its birth slice so observe()/run_inference
+            // initialise the belief AT the detection centroid this cycle — birth, track, and init are now atomic.
+            if (const auto nopt = G->get_node(new_id); nopt.has_value())
+            {
+                fitter_->ensure_instance(nopt.value(), room_node_id_);
+                if (auto it = fitter_->instances().find(new_id); it != fitter_->instances().end())
+                    it->second.assigned_mask_idx = slice;
+            }
             log_tracker_event("BIRTH", new_id, c.x(), c.y(), "");
         }
     }
@@ -959,8 +977,12 @@ void SpecificWorker::step_convergence(rc::ChairInstance& inst,
     G->add_or_modify_attrib_local<model_uncertainty_att>(node, model_uncertainty);
 
     if (fitter_->should_log(inst))
-        std::print("[{}] convergence: Δstate={:.4f} stable={}/{} U(Σ)={:.3f}m\n",
-                   inst.node_name, state_delta, inst.frames_converged, cfg_.K_stable, model_uncertainty);
+    {
+        const auto& cs = inst.model.state();
+        std::print("[{}] convergence: pos=({:.2f},{:.2f}) yaw={:.2f} Δstate={:.4f} stable={}/{} U(Σ)={:.3f}m\n",
+                   inst.node_name, cs.cx, cs.cy, cs.yaw, state_delta, inst.frames_converged, cfg_.K_stable,
+                   model_uncertainty);
+    }
 
     if (inst.frames_converged >= cfg_.K_stable)
     {

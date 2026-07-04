@@ -45,8 +45,8 @@ SET (SOURCES
 
 #ROBOCOMP
 ROBOCOMP_INITIALIZE( $ENV{ROBOCOMP}/ )
-ROBOCOMP_IDSL_TO_ICE(IMU FullPoseEstimation Lidar3D Camera360RGB CameraRGBDSimple Camera360RGBD FullPoseEstimationPub)
-ROBOCOMP_ICE_TO_SRC(IMU FullPoseEstimation Lidar3D Camera360RGB CameraRGBDSimple Camera360RGBD FullPoseEstimationPub)
+ROBOCOMP_IDSL_TO_ICE(Camera360RGBD IMU Lidar3D MediaPlaneDDS FullPoseEstimation Camera360RGB CameraRGBDSimple FullPoseEstimationPub)
+ROBOCOMP_ICE_TO_SRC(Camera360RGBD IMU Lidar3D MediaPlaneDDS FullPoseEstimation Camera360RGB CameraRGBDSimple FullPoseEstimationPub)
 SET (EXECUTABLE_OUTPUT_PATH ${RC_COMPONENT_DEVEL_PATH}/bin)
 
 # Specify construction and link process

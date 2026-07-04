@@ -106,7 +106,10 @@ private:
     void feed_silhouette(BottleInstance& inst);
     // Select the LiDAR returns of the current sweep that fall near this instance and stage them onto the
     // frame's YOLO-independent range channel (no-op unless a sweep was set and cfg_.lidar_precision > 0).
-    void feed_lidar(BottleInstance& inst, BottleFrame& frame) const;
+    void feed_lidar(BottleInstance& inst, BottleFrame& frame, float range_scale) const;
+    // Camera→object sensing distance (m) → precision-fade factor R_mult = max(1, range/near)^power (>=1). 1.0
+    // within `near` (grasp range, full precision); grows beyond so far/receding objects are left ~untouched.
+    float range_precision_scale(const BottleInstance& inst) const;
     // Set inst.expected_visible: true iff the bottle centre projects inside the camera frustum now. Drives
     // the tracker's negative-information DEATH gate (persist out-of-FoV; retire only if in-view & absent).
     void update_expected_visible(BottleInstance& inst);

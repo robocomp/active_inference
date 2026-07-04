@@ -21,6 +21,7 @@ struct BottleConfig
     float fe_eps           = 1e-3f;
     int   K_stable         = 30;
     int   diverged_retire_frames = 20;   // retire an instance after this many consecutive no-data (E==0) fits; 0 = off
+    float max_step_m       = 0.5f;   // reject a frame whose net centre move exceeds this (m); a bottle can't teleport — a corrupted cloud can. 0 = off
     float write_threshold  = 1e-3f;
     int   log_period_frames = 30;
     int   voxel_bank_max_points     = 4000;
@@ -40,6 +41,15 @@ struct BottleConfig
     float lidar_robust_c_m     = 0.05f;  // Cauchy scale (m): returns this far off the surface fade out
     float lidar_select_margin_m = 0.06f; // pre-select returns within radius+margin (horiz) and h/2+margin (vert)
     std::string lidar_frame_node = "lidar3D"; // DSR node whose frame the raw sweep is in (room←this transform)
+    // ── Range-scaled precision: perceive with precision when CLOSE (manipulation), leave UNTOUCHED when far ──
+    // Observation precision fades continuously with the camera→object sensing distance (NOT a range gate): R
+    // grows as (range/near)^power beyond `near`, so a distant/receding object's frames carry ~no information
+    // and the belief holds its last good estimate; inside `near` (grasp range) it gets full precision and
+    // sharpens. Mirrors the table-concept range-covariance philosophy. Also down-weight sparse LiDAR (few noisy
+    // returns shouldn't swing radius). 0 near = disable range weighting.
+    float range_near_m          = 0.6f;   // full precision within this sensing distance (m); ~manipulation reach
+    float range_precision_power = 2.0f;   // how fast precision fades beyond `near`: R *= (range/near)^power
+    float lidar_coverage_n0     = 25.0f;  // LiDAR ray count for FULL weight; fewer → proportionally down-weighted
     // ── YOLO detection-score → silhouette reliability weight ────────────────────────────────────────
     // The detector's per-mask confidence is a per-observation RELIABILITY (a noisy mask is noisy evidence):
     // w = clamp01((conf−floor)/(ref−floor))^power scales the silhouette precision so a weak mask can't
@@ -57,7 +67,8 @@ struct BottleConfig
     float ai2_clutter_scale_m      = 0.08f;  // a point further than ~this from the surface is likely clutter
     float ai2_prior_pos_std        = 0.30f;  // broad position prior std (m) on cx,cy,cz
     float ai2_prior_size_std       = 0.03f;  // broad size prior std (m) on radius,height
-    float ai2_process_std_m        = 0.005f; // predict process-noise std, all 5 length DOFs (m/frame)
+    float ai2_process_std_m        = 0.005f; // predict process-noise std, POSITION (cx,cy,cz) (m/frame)
+    float ai2_process_std_size_m   = 0.001f; // predict process-noise std, SIZE (radius,height) — tiny: rigid size sticks
     // Per-frame COMMON-MODE error (shared by all points of a mask → doesn't average out). The frame's
     // information saturates here, so N correlated points can't collapse σ → calibrated posterior.
     float ai2_common_mode_pos_std  = 0.02f;  // shared position error (m); pose-chain cov adds to it

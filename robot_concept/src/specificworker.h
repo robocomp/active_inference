@@ -127,6 +127,10 @@ private:
 	void read_rgbd_thread();
 	std::thread rgbd_thread;
 	std::atomic<bool> stop_rgbd_thread{false};
+	// Media-source negotiation: false once zed_camera is detected publishing the ZED
+	// RGB+depth plane over DDS — robot_concept then relays its descriptor into DSR and
+	// stops bridging (no pull, no publish) to avoid a double producer. True = we bridge.
+	std::atomic<bool> bridge_zed_{true};
 
 	// Ricoh 360 camera reader thread: pulls the RGBD_360 panorama over Ice
 	// (Camera360RGBD) and republishes the RGB image on the media plane. Bridges
@@ -137,6 +141,14 @@ private:
 
 	// Media plane (zero-copy DDS); RGBD pixels leave the DSR graph here.
 	SensorMediaPublisher media_;
+
+	// Low-rate check (from compute()): ask zed_camera (MediaPlaneDDS) whether it is
+	// publishing the ZED plane on DDS. If so, relay its descriptor onto the "zed" DSR
+	// node and flip bridge_zed_ off; if not/unreachable, resume bridging + re-advertise
+	// our own descriptor. Keeps a single producer without hardcoded coordination.
+	void negotiate_zed_media_source();
+	void relay_media_descriptor(const std::string& descriptor_json);
+	std::string last_relayed_descriptor_;   // empty = advertising our own descriptor
 
 	void waiting_enter();
 	void waiting_loop();

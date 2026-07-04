@@ -86,6 +86,7 @@
 #include <FullPoseEstimationPub.h>
 #include <IMU.h>
 #include <Lidar3D.h>
+#include <MediaPlaneDDS.h>
 
 #define USE_QTGUI
 
@@ -243,6 +244,7 @@ int robot_concept::run(int argc, char* argv[])
 	RoboCompCameraRGBDSimple::CameraRGBDSimplePrxPtr camerargbdsimple_proxy;
 	RoboCompIMU::IMUPrxPtr imu_proxy;
 	RoboCompLidar3D::Lidar3DPrxPtr lidar3d_proxy;
+	RoboCompMediaPlaneDDS::MediaPlaneDDSPrxPtr mediaplanedds_proxy;
 
 
 	//Require code
@@ -256,6 +258,8 @@ int robot_concept::run(int argc, char* argv[])
 	                    configLoader.get<std::string>("Proxies.IMU"), "IMUProxy", imu_proxy);
 	require<RoboCompLidar3D::Lidar3DPrx, RoboCompLidar3D::Lidar3DPrxPtr>(communicator(),
 	                    configLoader.get<std::string>("Proxies.Lidar3D"), "Lidar3DProxy", lidar3d_proxy);
+	require<RoboCompMediaPlaneDDS::MediaPlaneDDSPrx, RoboCompMediaPlaneDDS::MediaPlaneDDSPrxPtr>(communicator(),
+	                    configLoader.get<std::string>("Proxies.MediaPlaneDDS"), "MediaPlaneDDSProxy", mediaplanedds_proxy);
 
 	//Topic Manager code
 
@@ -276,7 +280,7 @@ int robot_concept::run(int argc, char* argv[])
 		return EXIT_FAILURE;
 	}
 
-	tprx = std::make_tuple(camera360rgb_proxy,camera360rgbd_proxy,camerargbdsimple_proxy,imu_proxy,lidar3d_proxy);
+	tprx = std::make_tuple(camera360rgb_proxy,camera360rgbd_proxy,camerargbdsimple_proxy,imu_proxy,lidar3d_proxy,mediaplanedds_proxy);
 	SpecificWorker *worker = new SpecificWorker(this->configLoader, tprx, startup_check_flag);
 	QObject::connect(worker, SIGNAL(kill()), &a, SLOT(quit()));
 

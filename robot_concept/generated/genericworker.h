@@ -43,10 +43,11 @@
 #include <FullPoseEstimationPub.h>
 #include <IMU.h>
 #include <Lidar3D.h>
+#include <MediaPlaneDDS.h>
 
 #define BASIC_PERIOD 100
 
-using TuplePrx = std::tuple<RoboCompCamera360RGB::Camera360RGBPrxPtr,RoboCompCamera360RGBD::Camera360RGBDPrxPtr,RoboCompCameraRGBDSimple::CameraRGBDSimplePrxPtr,RoboCompIMU::IMUPrxPtr,RoboCompLidar3D::Lidar3DPrxPtr>;
+using TuplePrx = std::tuple<RoboCompCamera360RGB::Camera360RGBPrxPtr,RoboCompCamera360RGBD::Camera360RGBDPrxPtr,RoboCompCameraRGBDSimple::CameraRGBDSimplePrxPtr,RoboCompIMU::IMUPrxPtr,RoboCompLidar3D::Lidar3DPrxPtr,RoboCompMediaPlaneDDS::MediaPlaneDDSPrxPtr>;
 
 
 class GenericWorker : public QObject
@@ -70,6 +71,7 @@ public:
 	RoboCompCameraRGBDSimple::CameraRGBDSimplePrxPtr camerargbdsimple_proxy;
 	RoboCompIMU::IMUPrxPtr imu_proxy;
 	RoboCompLidar3D::Lidar3DPrxPtr lidar3d_proxy;
+	RoboCompMediaPlaneDDS::MediaPlaneDDSPrxPtr mediaplanedds_proxy;
 
 	virtual void FullPoseEstimationPub_newFullPose (RoboCompFullPoseEstimation::FullPoseEuler pose) = 0;
 

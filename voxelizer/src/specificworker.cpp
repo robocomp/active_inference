@@ -566,9 +566,25 @@ void SpecificWorker::compute()
                     // projection model (see Part A step 8) before any consumer relies on this bearing.
                     const float az_pano = 2.0f * static_cast<float>(M_PI) * (col_c / static_cast<float>(pano_w))
                                           - static_cast<float>(M_PI);
-                    float az = robot_yaw + params.RICOH_AZIMUTH_OFFSET_RAD + az_pano;
-                    az = std::atan2(std::sin(az), std::cos(az));   // wrap to (-π, π]
+                    // Robot-RELATIVE bearing (0 = straight ahead) after the sign/zero calibration knobs, then
+                    // the absolute room bearing by adding the base heading. Both wrapped to (-π, π].
+                    const float az_rel = std::atan2(std::sin(params.RICOH_AZIMUTH_OFFSET_RAD + params.RICOH_AZIMUTH_SIGN * az_pano),
+                                                    std::cos(params.RICOH_AZIMUTH_OFFSET_RAD + params.RICOH_AZIMUTH_SIGN * az_pano));
+                    const float az = std::atan2(std::sin(robot_yaw + az_rel), std::cos(robot_yaw + az_rel));
                     bearing_dets.push_back({d.label, static_cast<float>(d.class_id), d.confidence, az});
+
+                    // Azimuth calibration (Ricoh.log_bearings). Place a recognised object at a KNOWN direction
+                    // relative to the robot and read `rel`: front=0, left=+90, right=−90, behind=±180.
+                    //   • rel has a constant error at front (≠0)  → set Ricoh.azimuth_offset_rad to cancel it.
+                    //   • rel moves the WRONG way as the object crosses the panorama → set Ricoh.azimuth_sign=-1.
+                    // Then `room` (= rel + robot heading) should equal the object's true ABSOLUTE room bearing.
+                    if (params.RICOH_LOG_BEARINGS)
+                    {
+                        constexpr float deg = 180.0f / static_cast<float>(M_PI);
+                        std::print("[ricoh-bearing] {:8} conf={:.2f} col={:.0f}%  rel={:+.0f} (robot-relative)  room={:+.0f} (absolute)  [robot_yaw={:+.0f}] deg\n",
+                                   d.label, d.confidence, 100.0f * col_c / static_cast<float>(pano_w),
+                                   az_rel * deg, az * deg, robot_yaw * deg);
+                    }
                 }
             }
         }

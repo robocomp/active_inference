@@ -281,9 +281,14 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                                      const TimeSource &time_source)
 {
     obstacle_tracker.refresh_temporary_lidar_obstacle(time_source(), robot_pose, path_controller);
-    // Proactive: model anything the concept agents don't (throttled internally). Complements the
-    // reactive blockage-driven creation below; both feed the same multi-instance tracker.
-    obstacle_tracker.scan_for_unmodelled_obstacles(time_source(), robot_pose, path_controller);
+    // Proactive scene-level "model anything the concept agents don't" is now owned by the dedicated
+    // `residual_concept` agent (the residual/null concept: LiDAR residual-filter → 3D DBSCAN → box belief
+    // → "obstacle" nodes). Its obstacles arrive via the graph and are consumed by read_obstacle_polygons
+    // exactly like the reactive ones, so the planner still avoids them. HYBRID phase: the controller keeps
+    // only the fast in-loop REACTIVE blockage reflex below (create_temporary_lidar_obstacle) for
+    // collision safety with zero DDS latency; the proactive full-scene scan is DISABLED here. Re-enable
+    // by uncommenting the call if residual_concept is not running.
+    // obstacle_tracker.scan_for_unmodelled_obstacles(time_source(), robot_pose, path_controller);
 
     // An escape maneuver (physical-stuck recovery) owns the base until it finishes backing
     // out — bypass the planner/follower entirely, just like the lock-on micro-search below.
