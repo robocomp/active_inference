@@ -307,9 +307,12 @@ int robot_concept::run(int argc, char* argv[])
 
 		try
 		{
-			std::cout << "Unsubscribing topic: fullposeestimationpub " <<std::endl;
-			fullposeestimationpub_topic->unsubscribe(fullposeestimationpub);
-
+			if(fullposeestimationpub_topic)
+			{
+				// Unsubscribe from topic
+				std::cout << "Unsubscribing topic: fullposeestimationpub " <<std::endl;
+				fullposeestimationpub_topic->unsubscribe(fullposeestimationpub);
+			}
 		}
 		catch(const Ice::Exception& ex)
 		{
