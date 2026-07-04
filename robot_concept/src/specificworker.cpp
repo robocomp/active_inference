@@ -381,27 +381,37 @@ void SpecificWorker::compute()
 		// transition is visible even when the two source rates happen to match.
 		const char* zed_src = not params.ENABLE_ZED ? "off"
 		                    : bridge_zed_.load(std::memory_order_relaxed) ? "local" : "ext-DDS";
+		// Ricoh source label: same semantics as zed_src — "off" when the 360 path is gated
+		// out, "local" while robot_concept bridges Ice→media itself, "ext-DDS" once negotiation
+		// hands the plane to ricoh_omni_dds (bridge_ricoh_ off).
+		const char* ricoh_src = not params.ENABLE_RICOH ? "off"
+		                      : bridge_ricoh_.load(std::memory_order_relaxed) ? "local" : "ext-DDS";
 		static const char* p_zed_src = nullptr;
+		static const char* p_ricoh_src = nullptr;
 		if (std::abs(f_rgbd - p_rgbd) >= kHzPrintDelta
 			or std::abs(f_lidar - p_lidar) >= kHzPrintDelta
 			or std::abs(f_imu - p_imu) >= kHzPrintDelta
 			or std::abs(f_ricoh - p_ricoh) >= kHzPrintDelta
-			or zed_src != p_zed_src)
+			or zed_src != p_zed_src
+			or ricoh_src != p_ricoh_src)
 		{
 			qInfo().noquote() << QString::asprintf(
-				"[ZEDThread:%s] %5.1f Hz | [LidarThread] %5.1f Hz | [IMUThread] %5.1f Hz | [Ricoh360Thread] %5.1f Hz",
-				zed_src, f_rgbd, f_lidar, f_imu, f_ricoh);
-			p_rgbd = f_rgbd; p_lidar = f_lidar; p_imu = f_imu; p_ricoh = f_ricoh; p_zed_src = zed_src;
+				"[ZEDThread:%s] %5.1f Hz | [LidarThread] %5.1f Hz | [IMUThread] %5.1f Hz | [Ricoh360Thread:%s] %5.1f Hz",
+				zed_src, f_rgbd, f_lidar, f_imu, ricoh_src, f_ricoh);
+			p_rgbd = f_rgbd; p_lidar = f_lidar; p_imu = f_imu; p_ricoh = f_ricoh;
+			p_zed_src = zed_src; p_ricoh_src = ricoh_src;
 		}
 		last = now; last_rgbd = r; last_lidar = l; last_imu = i; last_ricoh = c;
 	}
 
-	// Low-rate media-source negotiation (~every 3 s): is zed_camera publishing the ZED
-	// plane on DDS? Relay its descriptor + stop bridging if so; fall back if not.
+	// Low-rate media-source negotiation (~every 3 s): are zed_camera / ricoh_omni_dds
+	// publishing their planes on DDS? Relay each descriptor + stop bridging if so; fall
+	// back to bridging if not. Both run on the same timer, each gated by its own selector.
 	static auto last_neg = std::chrono::steady_clock::now();
 	if (std::chrono::duration<double>(now - last_neg).count() >= 3.0)
 	{
 		negotiate_zed_media_source();
+		negotiate_ricoh_media_source();
 		last_neg = now;
 	}
 }
@@ -855,12 +865,9 @@ void SpecificWorker::negotiate_ricoh_media_source()
 	// Mirror of negotiate_zed_media_source for the 360 plane. The ONLY binding to the
 	// generated duplicate proxy is this alias — if robocompdsl names the pair differently
 	// (e.g. mediaplanedds0_proxy/mediaplanedds1_proxy), change just this one line.
-	// TODO(ricoh-neg): the second `requires MediaPlaneDDS` is not yet in robot_concept.cdsl,
-	// so robocompdsl generates only mediaplanedds_proxy. Until the CDSL gains a 2nd requires
-	// (addressed at ricoh_omni_dds) and is regenerated, there is no ricoh MediaPlaneDDS proxy:
-	// hold it null so this (currently uncalled) negotiator compiles and safely no-ops into the
-	// bridge path (descriptor stays empty → robot_concept keeps bridging the 360 plane).
-	const RoboCompMediaPlaneDDS::MediaPlaneDDSPrxPtr ricoh_dds_proxy = nullptr;
+	// The second `requires MediaPlaneDDS` in robot_concept.cdsl generates mediaplanedds1_proxy,
+	// bound to Proxies.MediaPlaneDDS1 (ricoh_omni_dds, port 10099).
+	const auto& ricoh_dds_proxy = mediaplanedds1_proxy;
 
 	if (not params.ENABLE_RICOH)
 		return;   // 360 path disabled entirely — nothing to negotiate
@@ -990,8 +997,50 @@ void SpecificWorker::read_ricoh_thread()
 		           ? static_cast<std::uint64_t>(t / 1'000'000)   // ns -> ms
 		           : static_cast<std::uint64_t>(t);              // already ms
 	};
+	// External-publisher monitor (only used while ricoh_omni_dds owns the 360 plane).
+	std::unique_ptr<rc::media::Image360Subscriber> ext_ricoh_sub;
+	std::uint64_t ext_ricoh_frames = 0;
+	auto ext_ricoh_report_at = std::chrono::steady_clock::now();
 	while (!stop_ricoh_thread && !shutting_down_.load())
 	{
+		if (not bridge_ricoh_.load(std::memory_order_relaxed))
+		{
+			// ricoh_omni_dds is the external DDS producer (descriptor relayed into DSR by
+			// negotiate_ricoh_media_source). Don't pull/publish; SUBSCRIBE to its 360 stream
+			// just to report "external publish" + the observed frame rate. Mirror of the ZED
+			// monitor branch in read_rgbd_thread.
+			if (not ext_ricoh_sub)
+			{
+				ext_ricoh_sub = rc::media::make_image360_subscriber_from_graph(*G, "ricoh", "rgb360");
+				ext_ricoh_frames = 0;
+				ext_ricoh_report_at = std::chrono::steady_clock::now();
+			}
+			if (ext_ricoh_sub)
+			{
+				const int n = ext_ricoh_sub->wait_and_poll([](const rc::media::Image360Frame&, std::int64_t){}, 200);
+				ext_ricoh_frames += static_cast<std::uint64_t>(n);
+				// Feed the compute() [Ricoh360Thread] heartbeat with the external rate: while
+				// bypassing, the producer path never runs, so ricoh_frames_ only counts these
+				// DDS frames — the heartbeat then reads ricoh_omni_dds's live topic, not 0.0 Hz.
+				ricoh_frames_.fetch_add(static_cast<std::uint64_t>(n), std::memory_order_relaxed);
+				const auto now = std::chrono::steady_clock::now();
+				const double dt = std::chrono::duration<double>(now - ext_ricoh_report_at).count();
+				if (dt >= 5.0)
+				{
+					const double hz = static_cast<double>(ext_ricoh_frames) / dt;
+					if (ext_ricoh_frames > 0)
+						std::print("[Media] ricoh_omni_dds external DDS publisher ALIVE — 360 {:.1f} Hz on domain 7\n", hz);
+					else
+						std::print("[Media] ricoh_omni_dds external DDS publisher SILENT — no 360 frames on domain 7 in {:.0f}s\n", dt);
+					ext_ricoh_frames = 0;
+					ext_ricoh_report_at = now;
+				}
+			}
+			else
+				std::this_thread::sleep_for(std::chrono::milliseconds(200));   // descriptor not ready yet
+			continue;
+		}
+		if (ext_ricoh_sub) ext_ricoh_sub.reset();   // we are producing again -> stop monitoring
 		const auto loop_start = std::chrono::steady_clock::now();
 		try
 		{

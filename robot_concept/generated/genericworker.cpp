@@ -42,6 +42,7 @@ GenericWorker::GenericWorker(const ConfigLoader& configLoader, TuplePrx tprx) : 
 	imu_proxy = std::get<3>(tprx);
 	lidar3d_proxy = std::get<4>(tprx);
 	mediaplanedds_proxy = std::get<5>(tprx);
+	mediaplanedds1_proxy = std::get<6>(tprx);
 
 	states["Initialize"] = std::make_unique<GRAFCETStep>("Initialize", BASIC_PERIOD, nullptr, std::bind(&GenericWorker::initialize, this));
 	states["Compute"] = std::make_unique<GRAFCETStep>("Compute", configLoader.get<int>("Period.Compute"), std::bind(&GenericWorker::compute, this));

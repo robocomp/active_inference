@@ -245,6 +245,7 @@ int robot_concept::run(int argc, char* argv[])
 	RoboCompIMU::IMUPrxPtr imu_proxy;
 	RoboCompLidar3D::Lidar3DPrxPtr lidar3d_proxy;
 	RoboCompMediaPlaneDDS::MediaPlaneDDSPrxPtr mediaplanedds_proxy;
+	RoboCompMediaPlaneDDS::MediaPlaneDDSPrxPtr mediaplanedds_proxy1;
 
 
 	//Require code
@@ -260,6 +261,8 @@ int robot_concept::run(int argc, char* argv[])
 	                    configLoader.get<std::string>("Proxies.Lidar3D"), "Lidar3DProxy", lidar3d_proxy);
 	require<RoboCompMediaPlaneDDS::MediaPlaneDDSPrx, RoboCompMediaPlaneDDS::MediaPlaneDDSPrxPtr>(communicator(),
 	                    configLoader.get<std::string>("Proxies.MediaPlaneDDS"), "MediaPlaneDDSProxy", mediaplanedds_proxy);
+	require<RoboCompMediaPlaneDDS::MediaPlaneDDSPrx, RoboCompMediaPlaneDDS::MediaPlaneDDSPrxPtr>(communicator(),
+	                    configLoader.get<std::string>("Proxies.MediaPlaneDDS1"), "MediaPlaneDDSProxy1", mediaplanedds_proxy1);
 
 	//Topic Manager code
 
@@ -280,7 +283,7 @@ int robot_concept::run(int argc, char* argv[])
 		return EXIT_FAILURE;
 	}
 
-	tprx = std::make_tuple(camera360rgb_proxy,camera360rgbd_proxy,camerargbdsimple_proxy,imu_proxy,lidar3d_proxy,mediaplanedds_proxy);
+	tprx = std::make_tuple(camera360rgb_proxy,camera360rgbd_proxy,camerargbdsimple_proxy,imu_proxy,lidar3d_proxy,mediaplanedds_proxy,mediaplanedds_proxy1);
 	SpecificWorker *worker = new SpecificWorker(this->configLoader, tprx, startup_check_flag);
 	QObject::connect(worker, SIGNAL(kill()), &a, SLOT(quit()));
 
@@ -307,12 +310,9 @@ int robot_concept::run(int argc, char* argv[])
 
 		try
 		{
-			if(fullposeestimationpub_topic)
-			{
-				// Unsubscribe from topic
-				std::cout << "Unsubscribing topic: fullposeestimationpub " <<std::endl;
-				fullposeestimationpub_topic->unsubscribe(fullposeestimationpub);
-			}
+			std::cout << "Unsubscribing topic: fullposeestimationpub " <<std::endl;
+			fullposeestimationpub_topic->unsubscribe(fullposeestimationpub);
+
 		}
 		catch(const Ice::Exception& ex)
 		{

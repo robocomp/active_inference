@@ -9,7 +9,7 @@ IMU = "imu:tcp -h localhost -p 10007"
 Lidar3D = "lidar3d:tcp -h localhost -p 11995"
 Camera360RGB = "camera360rgb:tcp -h localhost -p 10097" # Ricoh
 MediaPlaneDDS = "mediaplanedds:tcp -h localhost -p 12002" # zed_camera: query its DDS media descriptor
-
+MediaPlaneDDS1 = "mediaplanedds:tcp -h localhost -p 10099" # ricoh_omni_dds: query its DDS media descriptor
 
 [Endpoints]
 # Endpoints for subscriptions interfaces
@@ -110,6 +110,11 @@ enable_imu   = true    # IMU
 #   ice           : always bridge via the CameraRGBDSimple Ice proxy; never defer to an external DDS producer.
 #   dds           : never bridge; always treat zed_camera as the external DDS producer and only monitor (alive+FPS).
 zed_source   = "auto"
+# 360 source selector: mirror of zed_source for the Ricoh plane (queries Proxies.MediaPlaneDDS1 = ricoh_omni_dds).
+#   auto (default): bridge via Ice RPC until ricoh_omni_dds is seen on DDS, then relay its descriptor + stop bridging.
+#   ice           : always bridge via the Camera360RGB Ice proxy; never defer to an external DDS producer.
+#   dds           : never bridge; always treat ricoh_omni_dds as the external DDS producer and only monitor.
+ricoh_source = "auto"
 
 [Lidar]
 # Legacy DSR-graph lidar upload. <0 DISABLES it (default): lidar is published on the zero-copy
