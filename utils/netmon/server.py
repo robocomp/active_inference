@@ -10,14 +10,16 @@ import os
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
 import psutil
 
 from .bandwidth import connection_edges
-from .registry import merged_components
+from .registry import merged_components, push_command
 from .topology import build_full_topology
 
 _STATIC = os.path.join(os.path.dirname(__file__), "static")
+_LOGS_DIR = os.path.expanduser("~/.local/logs")
 _TOPO_TTL = 2.0
 
 
@@ -82,6 +84,28 @@ class MonitorServer:
             "bw_error": self.bw.error if self.bw else "captura deshabilitada",
         }
 
+    def _known_names(self):
+        return {c["name"] for c in merged_components()}
+
+    def action(self, action, name):
+        if action not in ("stop", "start", "restart") or name not in self._known_names():
+            return {"ok": False, "error": "acción o componente inválido"}
+        push_command(action, name)
+        return {"ok": True, "action": action, "name": name}
+
+    def logs(self, name, stream, lines):
+        if name not in self._known_names() or stream not in ("out", "err"):
+            return {"ok": False, "error": "componente/stream inválido", "text": ""}
+        path = os.path.join(_LOGS_DIR, f"{os.path.basename(name)}.{stream}")
+        if not os.path.exists(path):
+            return {"ok": True, "name": name, "stream": stream, "text": "(sin log)"}
+        try:
+            with open(path, "r", errors="replace") as f:
+                text = "".join(f.readlines()[-lines:])
+        except OSError as e:
+            return {"ok": False, "error": str(e), "text": ""}
+        return {"ok": True, "name": name, "stream": stream, "text": text}
+
     def _handler(self):
         server = self
 
@@ -115,8 +139,28 @@ class MonitorServer:
                     self._send(200, json.dumps(server.topology()), "application/json")
                 elif route == "/api/state":
                     self._send(200, json.dumps(server.state()), "application/json")
+                elif route == "/api/logs":
+                    q = parse_qs(urlparse(self.path).query)
+                    name = (q.get("name") or [""])[0]
+                    stream = (q.get("stream") or ["err"])[0]
+                    lines = int((q.get("lines") or ["200"])[0])
+                    self._send(200, json.dumps(server.logs(name, stream, lines)), "application/json")
                 else:
                     self._send(404, "not found", "text/plain")
+
+            def do_POST(self):
+                route = self.path.split("?", 1)[0]
+                if route != "/api/action":
+                    self._send(404, "not found", "text/plain")
+                    return
+                try:
+                    n = int(self.headers.get("Content-Length", 0))
+                    body = json.loads(self.rfile.read(n) or b"{}")
+                except (ValueError, TypeError):
+                    self._send(400, json.dumps({"ok": False, "error": "json inválido"}), "application/json")
+                    return
+                res = server.action(body.get("action"), body.get("name"))
+                self._send(200 if res.get("ok") else 400, json.dumps(res), "application/json")
 
         return Handler
 

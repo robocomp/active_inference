@@ -7,6 +7,7 @@ just keep updating. If the monitor holder dies, the next launcher takes over.
 """
 
 import os
+import signal
 import subprocess
 import threading
 import time
@@ -20,7 +21,7 @@ from rich.live import Live
 from rich.table import Table
 
 from .bandwidth import BandwidthMonitor
-from .registry import MonitorLock, RegistryWriter
+from .registry import MonitorLock, RegistryWriter, claim_commands
 from .server import MonitorServer
 from .topology import agent_domain, parse_endpoint
 
@@ -119,6 +120,33 @@ def _remove_existing(components, console):
     time.sleep(1)
 
 
+def _kill_tree(proc, timeout=5):
+    """Kill a shell-launched process AND its children (the real binary), SIGKILL stragglers.
+
+    shell=True means proc.pid is /bin/sh; terminating only that orphans the real process,
+    so we terminate the whole tree.
+    """
+    if proc is None:
+        return
+    try:
+        parent = psutil.Process(proc.pid)
+    except psutil.NoSuchProcess:
+        return
+    procs = parent.children(recursive=True)
+    procs.append(parent)
+    for p in procs:
+        try:
+            p.terminate()
+        except psutil.NoSuchProcess:
+            pass
+    _, alive = psutil.wait_procs(procs, timeout=timeout)
+    for p in alive:
+        try:
+            p.kill()
+        except psutil.NoSuchProcess:
+            pass
+
+
 def _status(info):
     if info.get("is_webots"):
         try:
@@ -191,38 +219,72 @@ def run_launcher(toml_path, launcher, layer, start_webots=False,
             else:
                 console.print(f"[yellow]⚠ Bandwidth off: {bw.error}[/yellow]")
         server = MonitorServer(bw, port=web_port)
-        url = server.start()
+        try:
+            url = server.start()
+        except OSError as e:
+            console.print(f"[yellow]⚠ Puerto :{web_port} ocupado ({e}); otro proceso sirve la web. "
+                          f"Sigo actualizando el registro.[/yellow]")
+            if bw:
+                bw.stop()
+            mlock.release()
+            return False
         console.print(f"[bold green]🌐 Monitor at {url}  (this launcher is serving)[/bold green]")
         srv["server"], srv["bw"] = server, bw
+        return True
+
+    def run_command(cmd):
+        name, action = cmd.get("name"), cmd.get("action")
+        info = processes.get(name)
+        if not info or info.get("is_webots"):
+            return
+        p = info["process"]
+        running = p is not None and p.poll() is None
+        console.print(f"[yellow]{action} '{name}' (from web)[/yellow]")
+        if action in ("stop", "restart") and running:
+            _kill_tree(p)
+            running = False
+        if action in ("start", "restart") and not running:
+            c = info["comp"]
+            proc, ps = _launch(c["cmd"], _expand(c.get("cwd")), name)
+            ps.cpu_percent(interval=None)
+            info.update({"process": proc, "psutil_proc": ps,
+                         "start_time": time.time(), "status": "unknown"})
 
     def collector():
+        next_serve_try = 0.0
         while True:
-            reg = []
-            for name, info in processes.items():
-                try:
-                    p = info["psutil_proc"]
-                    if p.is_running():
-                        info["mem_last"] = p.memory_info().rss / (1024 ** 2)
-                        info["cpu_last"] = p.cpu_percent(interval=0.0)
-                    else:
+            try:
+                for cmd in claim_commands(set(processes.keys())):
+                    run_command(cmd)
+                reg = []
+                for name, info in processes.items():
+                    try:
+                        p = info["psutil_proc"]
+                        if p.is_running():
+                            info["mem_last"] = p.memory_info().rss / (1024 ** 2)
+                            info["cpu_last"] = p.cpu_percent(interval=0.0)
+                        else:
+                            info["mem_last"] = info["cpu_last"] = 0
+                    except Exception:
                         info["mem_last"] = info["cpu_last"] = 0
-                except Exception:
-                    info["mem_last"] = info["cpu_last"] = 0
-                info["status"] = _status(info)
-                if info.get("in_registry"):
-                    c = info["comp"]
-                    reg.append({"name": name, "status": info["status"],
-                                "cpu": info.get("cpu_last", 0.0), "mem": info.get("mem_last", 0.0),
-                                "pid": info["psutil_proc"].pid, "ice_name": c.get("ice_name"),
-                                "cwd": c.get("cwd"), "cmd": c.get("cmd"),
-                                "layer": layer, "domain": c.get("_domain")})
-            writer.update(reg)
-            if web:
-                if not mlock.owned:
-                    if mlock.try_acquire(web_port):
-                        take_monitor_role()
-                else:
-                    mlock.refresh(web_port)
+                    info["status"] = _status(info)
+                    if info.get("in_registry"):
+                        c = info["comp"]
+                        reg.append({"name": name, "status": info["status"],
+                                    "cpu": info.get("cpu_last", 0.0), "mem": info.get("mem_last", 0.0),
+                                    "pid": info["psutil_proc"].pid, "ice_name": c.get("ice_name"),
+                                    "cwd": c.get("cwd"), "cmd": c.get("cmd"),
+                                    "layer": layer, "domain": c.get("_domain")})
+                writer.update(reg)
+                if web:
+                    if not mlock.owned:
+                        if time.time() >= next_serve_try and mlock.try_acquire(web_port):
+                            if take_monitor_role() is False:
+                                next_serve_try = time.time() + 10
+                    else:
+                        mlock.refresh(web_port)
+            except Exception as e:
+                console.print(f"[red]collector: {e}[/red]")
             time.sleep(1)
 
     threading.Thread(target=collector, daemon=True).start()
@@ -252,6 +314,7 @@ def run_launcher(toml_path, launcher, layer, start_webots=False,
                 live.update(build_table())
     except KeyboardInterrupt:
         console.print("\n[yellow]Exiting. Terminating all processes...[/yellow]")
+        signal.signal(signal.SIGINT, signal.SIG_IGN)  # ignore further Ctrl+C during cleanup
         if srv["bw"]:
             srv["bw"].stop()
         if srv["server"]:
@@ -260,7 +323,4 @@ def run_launcher(toml_path, launcher, layer, start_webots=False,
         writer.remove()
         for info in processes.values():
             if info["process"]:
-                info["process"].terminate()
-        for info in processes.values():
-            if info["process"]:
-                info["process"].wait()
+                _kill_tree(info["process"])

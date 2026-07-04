@@ -10,17 +10,20 @@ import json
 import os
 import tempfile
 import time
+import uuid
 
 import psutil
 
 REG_DIR = "/tmp/robocomp_netmon"
 AGENTS_DIR = os.path.join(REG_DIR, "agents")
+COMMANDS_DIR = os.path.join(REG_DIR, "commands")
 LOCK_PATH = os.path.join(REG_DIR, "monitor.lock")
 STALE_AFTER = 5.0  # a registry/lock older than this is considered dead
 
 
 def _ensure_dirs():
     os.makedirs(AGENTS_DIR, exist_ok=True)
+    os.makedirs(COMMANDS_DIR, exist_ok=True)
 
 
 def _atomic_write(path, data):
@@ -88,6 +91,42 @@ def merged_components(stale_after=STALE_AFTER):
             c.setdefault("launcher", d.get("launcher"))
             comps.append(c)
     return comps
+
+
+# ---- command mailbox: the web monitor pushes, the owning launcher claims & executes ----
+
+def push_command(action, name):
+    _ensure_dirs()
+    path = os.path.join(COMMANDS_DIR, f"{uuid.uuid4().hex}.json")
+    _atomic_write(path, {"action": action, "name": name, "ts": time.time()})
+
+
+def claim_commands(names, stale_after=30.0):
+    """Return (and remove) pending commands targeting any of `names` (this launcher's)."""
+    out = []
+    if not os.path.isdir(COMMANDS_DIR):
+        return out
+    now = time.time()
+    for fn in os.listdir(COMMANDS_DIR):
+        p = os.path.join(COMMANDS_DIR, fn)
+        try:
+            with open(p) as f:
+                c = json.load(f)
+        except (OSError, ValueError):
+            try: os.unlink(p)
+            except OSError: pass
+            continue
+        if now - c.get("ts", 0) > stale_after:          # drop orphan commands
+            try: os.unlink(p)
+            except OSError: pass
+            continue
+        if c.get("name") in names:
+            try:
+                os.unlink(p)                             # claim it (atomic)
+            except OSError:
+                continue                                 # someone else took it
+            out.append(c)
+    return out
 
 
 class MonitorLock:

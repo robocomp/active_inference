@@ -4,6 +4,9 @@ All components talk over localhost, so every proxy connection crosses `lo`.
 We sniff `lo`, count bytes per (portA, portB) pair filtered to the known server
 ports, and psutil.net_connections maps each pair back to (client, server) components.
 
+On loopback every packet is delivered to AF_PACKET twice (once PACKET_OUTGOING,
+once PACKET_HOST), so we drop the OUTGOING copy to avoid counting each byte 2x.
+
 Note: counts include TCP/IP headers (raw frame length), so figures are wire bytes,
 a small over-estimate of ICE payload. Requires cap_net_raw (setcap) or root.
 """
@@ -16,6 +19,8 @@ import time
 ETH_P_ALL = 3
 _ETHERTYPE_IPV4 = 0x0800
 _PROTO_TCP = 6
+_PACKET_OUTGOING = 4  # sll_pkttype: on lo every packet is seen twice (HOST + OUTGOING); drop one
+_RCVBUF = 16 * 1024 * 1024  # big capture buffer so bursts don't overflow the ring and drop packets
 
 
 class BandwidthMonitor:
@@ -41,6 +46,10 @@ class BandwidthMonitor:
             s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_ALL))
             s.bind((self.iface, 0))
             s.settimeout(0.5)
+            try:  # FORCE bypasses rmem_max (needs cap_net_admin); fall back to the capped setsockopt
+                s.setsockopt(socket.SOL_SOCKET, getattr(socket, "SO_RCVBUFFORCE", 33), _RCVBUF)
+            except OSError:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, _RCVBUF)
         except PermissionError:
             self.error = "sin permisos de captura (setcap cap_net_raw+ep en python3, o sudo)"
             return
@@ -64,11 +73,13 @@ class BandwidthMonitor:
     def _loop(self):
         while self._running:
             try:
-                frame = self._sock.recv(65535)
+                frame, addr = self._sock.recvfrom(65535)
             except socket.timeout:
                 continue
             except OSError:
                 break
+            if addr[2] == _PACKET_OUTGOING:  # avoid loopback double-counting
+                continue
             n = len(frame)
             if n < 38:  # 14 eth + 20 ip + 4 tcp ports
                 continue

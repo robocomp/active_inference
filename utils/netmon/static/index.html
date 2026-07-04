@@ -12,8 +12,10 @@
     #bar b { color: #7fd1ff; }
     #main { display: flex; height: calc(100% - 41px); }
     #graph { flex: 1; min-width: 0; }
-    #panel { width: 340px; overflow: auto; border-left: 1px solid #2c313c; background: #171a20; }
-    #panel.hidden { display: none; }
+    #resizer { width: 6px; cursor: col-resize; background: #2c313c; flex: 0 0 auto; }
+    #resizer:hover, #resizer.drag { background: #4a5568; }
+    #panel { width: 420px; flex: 0 0 auto; overflow: auto; background: #171a20; }
+    #panel.hidden, #resizer.hidden { display: none; }
     .pill { padding: 2px 8px; border-radius: 10px; font-size: 12px; }
     .warn { background: #4a2b00; color: #ffcf8f; }
     .ok   { background: #16351c; color: #8fe6a3; }
@@ -29,6 +31,21 @@
     .lay.sensorimotor { background: #14303a; color: #7fd1ff; }
     .lay.cognitive    { background: #2b1d3d; color: #c79bea; }
     .st { font-weight: bold; }
+    tbody tr { cursor: pointer; }
+    tbody tr.selrow { background: #223047; }
+    tbody tr:hover { background: #1e232c; }
+    #sel { display: flex; gap: 6px; align-items: center; padding: 2px 8px; border-radius: 6px;
+           background: #202634; border: 1px solid #313947; }
+    #sel.hidden { display: none; }
+    #sel b { color: #7fd1ff; }
+    #sel .btn { padding: 2px 8px; }
+    #logs { position: fixed; left: 0; right: 0; bottom: 0; height: 40%; background: #0d0f13;
+            border-top: 1px solid #2c313c; display: flex; flex-direction: column; z-index: 20; }
+    #logs.hidden { display: none; }
+    #logshead { display: flex; gap: 8px; align-items: center; padding: 6px 12px;
+                background: #1c1f26; border-bottom: 1px solid #2c313c; font-size: 12px; }
+    #logtext { flex: 1; margin: 0; padding: 8px 12px; overflow: auto; font-size: 12px;
+               color: #cbd3de; white-space: pre-wrap; word-break: break-word; }
   </style>
 </head>
 <body>
@@ -41,6 +58,13 @@
           <span class="dot" style="background:#2ec5d3;margin-left:8px"></span>DSR</span>
     <span style="color:#8a94a2">— RPC · <span style="color:#b072e0">- - pub/sub</span> · <span style="color:#2ec5d3">DSR</span></span>
     <span id="bw" class="pill">bw…</span>
+    <span id="sel" class="hidden">
+      <b id="selname"></b>
+      <button class="btn" id="selStart" title="arrancar si está parado">▶ launch</button>
+      <button class="btn" id="selRestart" title="reiniciar">🔄 relaunch</button>
+      <button class="btn" id="selStop" title="parar">🛑 stop</button>
+      <button class="btn" id="selTerm" title="ver logs">📜 terminal</button>
+    </span>
     <button id="layoutBtn" class="btn" style="margin-left:auto">Vista: Orgánico por nivel</button>
     <button id="fitBtn" class="btn">Reorganizar</button>
     <button id="tableBtn" class="btn">Tabla</button>
@@ -48,12 +72,23 @@
   </div>
   <div id="main">
     <div id="graph"></div>
+    <div id="resizer" title="arrastra para redimensionar"></div>
     <div id="panel">
       <table>
         <thead><tr><th>Componente</th><th>Capa</th><th>Estado</th><th class="num">CPU</th><th class="num">Mem</th></tr></thead>
         <tbody id="tbody"></tbody>
       </table>
     </div>
+  </div>
+  <div id="logs" class="hidden">
+    <div id="logshead">
+      <b id="logtitle">logs</b>
+      <button class="btn" id="logOut">stdout</button>
+      <button class="btn" id="logErr">stderr</button>
+      <span id="logstream" style="color:#8a94a2"></span>
+      <button class="btn" id="logClose" style="margin-left:auto">✕ cerrar</button>
+    </div>
+    <pre id="logtext"></pre>
   </div>
   <script src="/app.js"></script>
 </body>
