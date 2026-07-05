@@ -53,6 +53,7 @@ struct TableInstance
     float dbg_lidar_resid_m    = -1.0f;
     float dbg_lidar_meanz_m    = -1.0f;   // mean z of selected returns (room frame) — vs H detects a z-offset
     float dbg_lidar_topz_m     = -1.0f;   // mean z of the HIGHEST 20% of selected returns ≈ observed tabletop z
+    float dbg_lidar_floorz_m   = -1.0f;   // mean z of the LOWEST 20% ≈ floor; should read ~0 if z-calib OK
     float dbg_lidar_cov_ang    = -1.0f;   // angular-coverage weight (1−R)^p ∈[0,1]; low ⇒ one-sided sweep
 
     // Divergence safety net (mirrors bottle): consecutive frames whose centre GN step was rejected as an

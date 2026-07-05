@@ -396,14 +396,14 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
     // (chain cov already computed above, before the belief update)
 
     if (should_log(inst))
-        std::print("[{}] AI2 npts={} R={:.4f} dotd={:.2f} trunc={:.2f}{} | cx={:.3f} cy={:.3f} H={:.3f} w={:.3f} h={:.3f} ψ={:.3f} | σ(w,h,H)mm=({:.0f},{:.0f},{:.0f}) | lidar {}/{} resid={:.3f}m topz={:.3f}(H={:.3f}) covA={:.2f} div={}\n",
+        std::print("[{}] AI2 npts={} R={:.4f} dotd={:.2f} trunc={:.2f}{} | cx={:.3f} cy={:.3f} H={:.3f} w={:.3f} h={:.3f} ψ={:.3f} | σ(w,h,H)mm=({:.0f},{:.0f},{:.0f}) | lidar {}/{} resid={:.3f}m topz={:.3f}(H={:.3f}) floorz={:.3f} covA={:.2f} div={}\n",
                    inst.node_name, npts, R, inst.last_motion_dotd, inst.last_trunc_frac, gated ? " GATED" : "",
                    bs.cx, bs.cy, bs.H, bs.w, bs.h, bs.yaw,
                    1000.f * std::sqrt(std::max(0.f, inst.ai2_belief.covariance()(3, 3))),
                    1000.f * std::sqrt(std::max(0.f, inst.ai2_belief.covariance()(4, 4))),
                    1000.f * std::sqrt(std::max(0.f, inst.ai2_belief.covariance()(2, 2))),
                    inst.dbg_lidar_rays, inst.dbg_lidar_raw, inst.dbg_lidar_resid_m,
-                   inst.dbg_lidar_topz_m, bs.H, inst.dbg_lidar_cov_ang, inst.frames_diverged);
+                   inst.dbg_lidar_topz_m, bs.H, inst.dbg_lidar_floorz_m, inst.dbg_lidar_cov_ang, inst.frames_diverged);
 
     log_ai2_csv(inst, npts, R, gated, energy);
     return energy;
@@ -503,10 +503,12 @@ void TableFitter::feed_lidar(TableInstance& inst, TableFrame& frame) const
         double zsum = 0.0;
         for (const auto& p : frame.lidar.endpoints) { zs.push_back(p.z()); zsum += p.z(); }
         std::sort(zs.begin(), zs.end());
-        const std::size_t k = std::max<std::size_t>(1, zs.size() / 5);   // top 20%
+        const std::size_t k = std::max<std::size_t>(1, zs.size() / 5);   // top/bottom 20%
         double topsum = 0.0; for (std::size_t i = zs.size() - k; i < zs.size(); ++i) topsum += zs[i];
+        double botsum = 0.0; for (std::size_t i = 0; i < k; ++i) botsum += zs[i];   // lowest returns ≈ floor
         inst.dbg_lidar_meanz_m = static_cast<float>(zsum / zs.size());
         inst.dbg_lidar_topz_m  = static_cast<float>(topsum / k);
+        inst.dbg_lidar_floorz_m = static_cast<float>(botsum / k);   // should read ~0 if room z=0=floor + calib OK
     }
 
     // Precision = base, down-weighted by TWO informativeness factors (both continuous, no gate):
