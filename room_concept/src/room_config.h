@@ -35,7 +35,12 @@ struct RoomConfig
     float ROBOT_HEIGHT = 1.6f;     // m, obstacle cloud ceiling
 
     // Lidar
-    std::string LIDAR_NAME            = "lidar3D";
+    std::string LIDAR_NAME            = "lidar3D";   // legacy fused plane (already robot-frame, bridged)
+    // Per-device high LiDAR plane (lidar3d_dds): points arrive in the DEVICE frame (metres) and
+    // must be transformed device->robot via the DSR RT tree. Preferred over LIDAR_NAME when live.
+    std::string LIDAR_HELIOS_NAME     = "helios";
+    // Destination frame for the device->robot transform (the mount RT edge parent, e.g. body->helios).
+    std::string LIDAR_ROBOT_FRAME     = "body";
     float MAX_LIDAR_HIGH_RANGE        = 100.f;  // m
     int   LIDAR_LOW_DECIMATION_FACTOR = 1;
     float LIDAR_HIGH_MIN_HEIGHT       = 1.5f;   // m

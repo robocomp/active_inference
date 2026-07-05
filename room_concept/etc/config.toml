@@ -82,6 +82,14 @@ nodes    = ["room_concept 5"]  # our own agent presence node (cleaned on shutdow
 # writes on the "zed"/"lidar3D" nodes, so the consumer always uses the producer's
 # dedicated media domain (isolated from Agent.domain = 0). Subscribers are created
 # lazily, only once those nodes + descriptors exist.
+#
+# LiDAR source: LidarIngestor prefers the per-device high plane published by lidar3d_dds
+# on the "helios" node (points in the DEVICE frame, metres), transforming them to the robot
+# base via the DSR RT tree (body->helios). It falls back to the fused "lidar3D" plane (already
+# robot-frame) when helios is not live. Override the node/destination-frame names if needed:
+# [Media]
+# lidar_helios_name = "helios"
+# lidar_robot_frame = "body"
 
 [RoomConcept]
 RoomLayoutSvg          = "room_4x4.svg"  # room polygon (room_contour) loaded at start; was hardcoded beta_layout.svg

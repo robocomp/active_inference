@@ -56,6 +56,8 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     // Media plane (RGB for the camera window + LiDAR for LidarIngestor). DDS domain +
     // topics are read from the producer's media descriptor on the graph, not config.
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "Media.lidar_use_media", p.LIDAR_USE_MEDIA);
+    rc::ConfigLoaderUtils::load_optional<std::string>(cl, "Media.lidar_helios_name", p.LIDAR_HELIOS_NAME);
+    rc::ConfigLoaderUtils::load_optional<std::string>(cl, "Media.lidar_robot_frame", p.LIDAR_ROBOT_FRAME);
 
     // Camera-overlay object projection: comma-separated DSR node types (e.g. "object,table,cylinder,chair").
     rc::ConfigLoaderUtils::load_optional_apply<std::string>(cl, "Overlay.ObjectTypes", [&](const std::string& csv)
