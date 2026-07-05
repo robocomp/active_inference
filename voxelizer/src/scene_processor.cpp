@@ -4,6 +4,7 @@
 #include "voxel_opengl_viewer.h"
 
 #include "../../common/media_transport/media_transport.h"
+#include "../../common/media_transport/lidar_plane_reader.h"
 
 #include <dsr/api/dsr_camera_api.h>
 
@@ -209,7 +210,7 @@ cv::Mat SceneProcessor::ricoh_bgr_copy() const
     return media_ricoh_.bgr;   // shallow (refcounted) copy — cheap, safe to use after the lock is released
 }
 
-bool SceneProcessor::init_lidar_media_plane(std::uint32_t domain_id, const std::string& topic, bool use_media)
+bool SceneProcessor::init_lidar_media_plane(std::uint32_t /*domain_id*/, const std::string& /*topic*/, bool use_media)
 {
     lidar_use_media_ = use_media;
     if (!use_media)
@@ -218,66 +219,50 @@ bool SceneProcessor::init_lidar_media_plane(std::uint32_t domain_id, const std::
         return false;
     }
 
-    rc::media::SubscriberConfig cfg;
-    cfg.domain_id     = domain_id;
-    cfg.topic_name    = topic;
-    cfg.history_depth = 4;
-    // Prefer the producer's media descriptor on the "lidar3D" node — take the FULL config
-    // (domain, topic, history_depth, shared_memory_only, data_sharing) so this consumer
-    // tracks the producer's QoS automatically; fall back to the configured domain/topic if
-    // not advertised.
-    if (graph_)
-        if (auto desc = rc::media::descriptor_from_graph(*graph_, "lidar3D"); desc.has_value())
-            if (auto c = desc->subscriber_config("lidar"); c.has_value())
-                cfg = *c;
-
-    lidar_sub_ = std::make_unique<rc::media::LidarSubscriber>();
-    if (!lidar_sub_->init(cfg))
-    {
-        std::print(stderr, "[voxelizer] lidar media subscriber init FAILED — no LiDAR source\n");
-        lidar_sub_.reset();
-        lidar_use_media_ = false;
-        return false;
-    }
-    std::print("[voxelizer] lidar media plane ready domain={} topic='{}' data_sharing={}\n",
-               cfg.domain_id, cfg.topic_name, lidar_sub_->data_sharing_active());
+    // Shared multi-plane reader (the same one every agent uses): prefers the two per-device planes
+    // helios+bpearl (DEVICE frame), transformed to the robot frame + merged; falls back to the fused
+    // "lidar3D" plane. Domain/topic come from each plane's media descriptor (no config). Subscribers
+    // come up lazily inside get_lidar3D()->poll() — nothing touches DDS here. inner_eigen_api_ (set in
+    // configure(), called before this) backs the device->robot RT transform.
+    lidar_reader_ = std::make_unique<rc::media::LidarPlaneReader>(
+        graph_, inner_eigen_api_, std::vector<std::string>{"helios", "bpearl"}, "lidar3D", "lidar");
+    std::print("[voxelizer] lidar media plane ready (shared reader: helios+bpearl → robot, lidar3D fallback)\n");
     return true;
 }
 
 std::optional<SceneProcessor::LidarData> SceneProcessor::get_lidar3D()
 {
-    if (!lidar_use_media_ || !lidar_sub_)
+    if (!lidar_use_media_ || !lidar_reader_)
         return std::nullopt;
 
-    // Diagnostic (every 5 s): fresh = LidarFrames drained this window; served = cycles that returned a
-    // scan. fresh==0 while served>0 ⇒ serving a STALE scan (producer stopped publishing).
+    // Diagnostic (every 5 s): fresh = merged sweeps this window; served = cycles that returned a scan.
+    // fresh==0 while served>0 ⇒ serving a STALE scan (producer stopped publishing).
     static std::uint64_t fresh = 0, served = 0;
     static auto last_report = std::chrono::steady_clock::now();
 
-    // Drain the media plane (non-blocking) and keep the latest scan.
-    const int got = lidar_sub_->poll([this](const rc::media::LidarFrame& f, std::int64_t)
-    {
-        const std::uint32_t stride = f.stride() ? f.stride() : 3u;
-        const auto& pts = f.points();
-        const std::uint32_t count = f.count();
-        LidarData ld;
-        ld.xs.reserve(count);
-        ld.ys.reserve(count);
-        ld.zs.reserve(count);
-        for (std::uint32_t i = 0; i < count; ++i)
+    // Merge helios+bpearl (or fused lidar3D) into the ROBOT frame; callers apply the dynamic
+    // room<-robot pose at the scan stamp (interpolate=false here — only static mount edges crossed).
+    std::string robot_name;
+    { std::scoped_lock lk(node_names_mutex_); robot_name = robot_node_name_; }
+    if (!robot_name.empty())
+        if (auto sweep = lidar_reader_->poll(robot_name, /*interpolate=*/false);
+            sweep.has_value() && !sweep->points.empty())
         {
-            const std::size_t base = static_cast<std::size_t>(i) * stride;
-            if (base + 2 >= pts.size())
-                break;
-            ld.xs.push_back(pts[base]);
-            ld.ys.push_back(pts[base + 1]);
-            ld.zs.push_back(pts[base + 2]);
+            LidarData ld;
+            ld.xs.reserve(sweep->points.size());
+            ld.ys.reserve(sweep->points.size());
+            ld.zs.reserve(sweep->points.size());
+            for (const auto& p : sweep->points)
+            {
+                ld.xs.push_back(p.x());
+                ld.ys.push_back(p.y());
+                ld.zs.push_back(p.z());
+            }
+            ld.timestamp_ms = static_cast<std::uint64_t>(sweep->stamp_ms);
+            media_lidar_ = std::move(ld);
+            media_lidar_valid_ = true;
+            ++fresh;
         }
-        ld.timestamp_ms = f.stamp_ms();
-        media_lidar_ = std::move(ld);
-        media_lidar_valid_ = true;
-    });
-    fresh += static_cast<std::uint64_t>(std::max(0, got));
 
     std::optional<LidarData> out;
     if (media_lidar_valid_ && !media_lidar_.xs.empty())

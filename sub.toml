@@ -12,21 +12,21 @@ ice_name = "Camera360RGB:tcp -h localhost -p 10097"
 
 [[components]]
 name = "helios"
-cwd = "~/robocomp/components/robocomp-robolab/components/hardware/laser/lidar3D"
-cmd = "bin/Lidar3D etc/config_helios_webots"
+cwd = "~/robocomp/components/robocomp-robolab/components/hardware/laser/lidar3d_dds"
+cmd = "bin/lidar3d_dds etc/config_helios_webots.toml"
 ice_name = "Lidar3D:tcp -h localhost -p 10098"
 
 [[components]]
 name = "pearl"
-cwd = "~/robocomp/components/robocomp-robolab/components/hardware/laser/lidar3D"
-cmd = "bin/Lidar3D etc/config_pearl_webots"
+cwd = "~/robocomp/components/robocomp-robolab/components/hardware/laser/lidar3d_dds"
+cmd = "bin/lidar3d_dds etc/config_bpearl_webots.toml"
 ice_name = "Lidar3D:tcp -h localhost -p 11990"
 
-[[components]]
-name = "filter"
-cwd = "~/robocomp/components/robocomp-robolab/components/hardware/laser/lidar3DFilter"
-cmd = "bin/lidar3DFilter etc/config_shadow_webots"
-ice_name = "Lidar3DFilter:tcp -h localhost -p 11995"
+#[[components]]
+#name = "filter"
+#cwd = "~/robocomp/components/robocomp-robolab/components/hardware/laser/lidar3DFilter"
+#cmd = "bin/lidar3DFilter etc/config_shadow_webots"
+#ice_name = "Lidar3DFilter:tcp -h localhost -p 11995"
 
 #[[components]]
 #name = "rgbd360"

@@ -83,6 +83,8 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.lidar_select_margin_m = getf("TableModel.LidarSelectMarginM", 0.10f);
     out.lidar_frame_node      = gets("TableModel.LidarFrameNode",     "lidar3D");
     out.lidar_coverage_n0     = getf("TableModel.LidarCoverageN0",     60.0f);
+    out.lidar_coverage_ang_power = getf("TableModel.LidarCoverageAngPower", 1.0f);
+    out.max_step_m            = getf("TableModel.MaxStepM",            1.0f);
 
     std::print("table_concept: configuration loaded.\n");
     return out;

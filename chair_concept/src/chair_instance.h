@@ -37,6 +37,11 @@ struct ChairInstance
     // so downstream publish/viewer code is unchanged.
     ChairBelief ai2_belief;
     bool  ai2_initialized = false;
+    // RGB-360 bearing-only hypothesis (Part C-birth): born from a peripheral 360 bearing with a broad
+    // along-ray Σ and NO depth yet. Authors an Orient affordance (rotate to look) instead of the normal
+    // one; cleared the first time a real depth mask is observed (the glance paid off → normal instance).
+    bool  is_bearing_hypothesis = false;
+    float hypothesis_azimuth    = 0.0f;   // room-frame bearing to look toward (the Orient affordance's target yaw)
     float last_motion_var  = 0.0f;   // ego-motion downweight (added to R)
     float last_motion_dotd = 0.0f;   // motion-corruption speed (diagnostic)
     float last_trunc_frac  = 0.0f;   // silhouette truncation (predict-only gate)

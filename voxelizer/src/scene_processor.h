@@ -25,7 +25,7 @@ namespace rc
 
 namespace rc::media { class MediaSubscriber; }
 namespace rc::media { class Image360Subscriber; }
-namespace rc::media { class LidarSubscriber; }
+namespace rc::media { class LidarPlaneReader; }
 
 class SceneProcessor
 {
@@ -187,9 +187,11 @@ private:
     std::unique_ptr<rc::media::MediaSubscriber> media_rgb_sub_;
     std::unique_ptr<rc::media::MediaSubscriber> media_depth_sub_;
 
-    // LiDAR media-plane source (preferred over the DSR graph when up). Latest scan cached in
-    // sensor frame, refreshed by draining the subscriber inside get_lidar3D().
-    std::unique_ptr<rc::media::LidarSubscriber> lidar_sub_;
+    // LiDAR media-plane source (shared reader — same one every agent uses). Prefers the two per-device
+    // planes helios+bpearl (DEVICE frame), transformed to the ROBOT frame and merged; falls back to the
+    // fused "lidar3D" plane. Latest merged scan cached (robot frame); callers apply the dynamic
+    // room<-robot pose. Refreshed by draining inside get_lidar3D().
+    std::unique_ptr<rc::media::LidarPlaneReader> lidar_reader_;
     bool      lidar_use_media_ = false;
     LidarData media_lidar_;
     bool      media_lidar_valid_ = false;

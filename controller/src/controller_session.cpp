@@ -280,7 +280,8 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                                      rc::AffordanceManager &affordance_manager,
                                      const TimeSource &time_source)
 {
-    obstacle_tracker.refresh_temporary_lidar_obstacle(time_source(), robot_pose, path_controller);
+    if (!params_ || params_->obstacle_creation_enabled)
+        obstacle_tracker.refresh_temporary_lidar_obstacle(time_source(), robot_pose, path_controller);
     // Proactive scene-level "model anything the concept agents don't" is now owned by the dedicated
     // `residual_concept` agent (the residual/null concept: LiDAR residual-filter → 3D DBSCAN → box belief
     // → "obstacle" nodes). Its obstacles arrive via the graph and are consumed by read_obstacle_polygons
@@ -315,6 +316,32 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         if (step_lockon(motion_commander, time_source))
             finalize_reached(affordance_manager, path_controller, motion_commander, display);
         return;
+    }
+
+    // Orient affordance (Policy::Orient): rotate IN PLACE toward the target bearing — no navigation. Owns
+    // the base like the lock-on above; only for a from-affordance target whose contract is Orient (a
+    // bearing-only hypothesis, Part D). Read the contract each cycle so it activates as soon as selected.
+    if (params_ && params_->lockon_enabled && graph_ && last_target_info_.has_value()
+        && last_target_info_->from_affordance && active_target_id_ != 0)
+    {
+        if (const auto aff = graph_->get_node(active_target_id_); aff.has_value())
+        {
+            std::string parent_type;
+            if (last_target_info_->parent_node_id != 0)
+                if (const auto pn = graph_->get_node(last_target_info_->parent_node_id); pn.has_value())
+                    parent_type = pn->type();
+            const auto contract = rc::affordance::read_contract(aff.value(), parent_type);
+            if (contract.policy == rc::affordance::Policy::Orient)
+            {
+                active_contract_  = contract;
+                feedback_node_id_ = contract.feedback_node_id != 0 ? contract.feedback_node_id
+                                                                   : last_target_info_->parent_node_id;
+                path_controller.stop();
+                if (step_orient(robot_pose, motion_commander, time_source, last_target_info_->yaw_rad))
+                    finalize_reached(affordance_manager, path_controller, motion_commander, display);
+                return;
+            }
+        }
     }
 
     const auto &boundary_polygon = inner_polygon_.empty() ? room_polygon_ : inner_polygon_;
@@ -418,11 +445,12 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     if (control_output.path_blocked)
     {
         clear_tracking_state();
-        obstacle_tracker.create_temporary_lidar_obstacle(time_source(),
-                                                         robot_pose,
-                                                         control_output.blockage_center_room,
-                                                         control_output.blockage_radius,
-                                                         path_controller);
+        if (!params_ || params_->obstacle_creation_enabled)
+            obstacle_tracker.create_temporary_lidar_obstacle(time_source(),
+                                                             robot_pose,
+                                                             control_output.blockage_center_room,
+                                                             control_output.blockage_radius,
+                                                             path_controller);
         current_plan_.reset();
         path_controller.stop();
         motion_commander.stop_robot();
@@ -493,7 +521,8 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         && std::abs(rot_rps) < 1e-3f;
     if (stalled_by_obstacle)
     {
-        if (obstacle_tracker.create_temporary_lidar_obstacle(time_source(),
+        if ((!params_ || params_->obstacle_creation_enabled) &&
+            obstacle_tracker.create_temporary_lidar_obstacle(time_source(),
                                                              robot_pose,
                                                              control_output.blockage_center_room,
                                                              control_output.blockage_radius,
@@ -730,6 +759,43 @@ bool ControllerSession::step_lockon(ControllerMotionCommander &motion_commander,
     return lockon_.done();
 }
 
+bool ControllerSession::step_orient(const ControllerRobotPose &robot_pose,
+                                    ControllerMotionCommander &motion_commander,
+                                    const TimeSource &time_source, float target_yaw)
+{
+    const std::uint64_t now = time_source();
+    if (!orient_start_ms_)
+        orient_start_ms_ = now;
+
+    // Completion: the contract's goal predicate (e.g. chair_detection_alive) held stable_n measurements =
+    // the glance paid off; or the contract timed out = give up. Consume the affordance either way.
+    if (goal_met(feedback_node_id_)) ++orient_stable_; else orient_stable_ = 0;
+    const bool looked    = orient_stable_ >= std::max(1, active_contract_.stable_n);
+    const bool timed_out = static_cast<double>(now - *orient_start_ms_) > active_contract_.timeout_ms;
+    if (looked || timed_out)
+    {
+        motion_commander.stop_robot();
+        qInfo() << "[affordance] orient" << (looked ? "LOOKED (detection)" : "GIVE_UP (timeout)")
+                << "| node" << active_target_id_;
+        orient_start_ms_.reset();
+        orient_stable_ = 0;
+        return true;
+    }
+
+    // Rotate the base toward the target bearing (capped). Once nearly aligned, HOLD STILL so the look is
+    // motion-free (the Orient contract's .still asks for a quiet capture) and wait for the detection.
+    const float yaw_err = std::atan2(std::sin(target_yaw - robot_pose.theta),
+                                     std::cos(target_yaw - robot_pose.theta));
+    const float k   = params_ ? params_->lockon_k_yaw       : 0.8f;
+    const float cap = params_ ? params_->lockon_max_yaw_rps : 0.12f;
+    float rot = std::clamp(k * yaw_err, -cap, cap);
+    if (std::abs(yaw_err) < 0.05f)
+        rot = 0.0f;
+    if (rot != 0.0f) motion_commander.send_speed_command(0.0f, 0.0f, rot);
+    else             motion_commander.stop_robot();
+    return false;
+}
+
 void ControllerSession::finalize_reached(rc::AffordanceManager &affordance_manager,
                                          rc::TrajectoryController &path_controller,
                                          ControllerMotionCommander &motion_commander,
@@ -738,6 +804,8 @@ void ControllerSession::finalize_reached(rc::AffordanceManager &affordance_manag
     if (graph_)
         affordance_manager.mark_reached(graph_);
     lockon_.reset();
+    orient_start_ms_.reset();
+    orient_stable_ = 0;
     reset_stuck_state();
     feedback_node_id_ = 0;
     clear_tracking_state();

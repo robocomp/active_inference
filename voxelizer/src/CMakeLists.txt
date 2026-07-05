@@ -10,6 +10,7 @@ LIST(APPEND SOURCES
   ../../common/agent_presence_monitor/agent_presence_monitor.cpp
   ../../common/agent_presence_coordinator/agent_presence_coordinator.cpp
   ../../common/media_transport/media_transport.cpp
+  ../../common/media_transport/lidar_plane_reader.cpp
   ../../common/media_transport/generated/idl/image_framePubSubTypes.cxx
   ../../common/media_transport/generated/idl/image_frameTypeObjectSupport.cxx
   ../../common/media_transport/generated/idl/image360_framePubSubTypes.cxx

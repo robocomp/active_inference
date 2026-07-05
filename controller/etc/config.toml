@@ -90,6 +90,11 @@ TemporaryObstacleMinPoints = 6
 # LiDAR height band (m, ≈ height above floor). Min is a floor-plane reject cutoff: the lowest beam
 # grazes the floor into a dense ring at ~0.11-0.18 m, so this MUST stay above it (0.20 known-good).
 # Going lower (e.g. 0.10) floods the controller with phantom floor obstacles. See the [LidarZ] histogram.
+# Controller-side LiDAR obstacle CREATION. false ⇒ the dedicated `residual_concept` agent is the SOLE
+# obstacle source: the controller only CONSUMES graph "obstacle" nodes (residual_* + any others) via
+# read_obstacle_polygons and no longer creates its own temp obstacles from LiDAR blockages. The
+# physical-STUCK recovery (wedged on something invisible to the LiDAR) is separate and stays active.
+ObstacleCreationEnabled = false
 TemporaryObstacleMinHeight = 0.20
 TemporaryObstacleMaxHeight = 1.8
 # Same band for the proactive unmodelled-obstacle scan (room frame).

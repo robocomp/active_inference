@@ -561,30 +561,15 @@ void SpecificWorker::compute()
                 for (const auto& d : ricoh_yolo_worker_->latest_detections())
                 {
                     const float col_c = static_cast<float>(d.bbox.x) + 0.5f * static_cast<float>(d.bbox.width);
-                    // Panorama column → bearing relative to the panorama CENTRE (centre column ⇒ straight
-                    // ahead). PROVISIONAL sign/zero convention — verify live vs the ricoh descriptor
-                    // projection model (see Part A step 8) before any consumer relies on this bearing.
+                    // Panorama column → bearing relative to the panorama CENTRE (centre column ⇒ straight ahead),
+                    // then apply the calibrated sign/zero knobs (mirror + mounting offset), then add the base
+                    // heading for the absolute room bearing. Wrapped to (-π, π]. Convention calibrated 2026-07-04.
                     const float az_pano = 2.0f * static_cast<float>(M_PI) * (col_c / static_cast<float>(pano_w))
                                           - static_cast<float>(M_PI);
-                    // Robot-RELATIVE bearing (0 = straight ahead) after the sign/zero calibration knobs, then
-                    // the absolute room bearing by adding the base heading. Both wrapped to (-π, π].
                     const float az_rel = std::atan2(std::sin(params.RICOH_AZIMUTH_OFFSET_RAD + params.RICOH_AZIMUTH_SIGN * az_pano),
                                                     std::cos(params.RICOH_AZIMUTH_OFFSET_RAD + params.RICOH_AZIMUTH_SIGN * az_pano));
                     const float az = std::atan2(std::sin(robot_yaw + az_rel), std::cos(robot_yaw + az_rel));
                     bearing_dets.push_back({d.label, static_cast<float>(d.class_id), d.confidence, az});
-
-                    // Azimuth calibration (Ricoh.log_bearings). Place a recognised object at a KNOWN direction
-                    // relative to the robot and read `rel`: front=0, left=+90, right=−90, behind=±180.
-                    //   • rel has a constant error at front (≠0)  → set Ricoh.azimuth_offset_rad to cancel it.
-                    //   • rel moves the WRONG way as the object crosses the panorama → set Ricoh.azimuth_sign=-1.
-                    // Then `room` (= rel + robot heading) should equal the object's true ABSOLUTE room bearing.
-                    if (params.RICOH_LOG_BEARINGS)
-                    {
-                        constexpr float deg = 180.0f / static_cast<float>(M_PI);
-                        std::print("[ricoh-bearing] {:8} conf={:.2f} col={:.0f}%  rel={:+.0f} (robot-relative)  room={:+.0f} (absolute)  [robot_yaw={:+.0f}] deg\n",
-                                   d.label, d.confidence, 100.0f * col_c / static_cast<float>(pano_w),
-                                   az_rel * deg, az * deg, robot_yaw * deg);
-                    }
                 }
             }
         }

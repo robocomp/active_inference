@@ -36,16 +36,48 @@ namespace rc::ai
 
 // Predict: inflate Σ by the transition + process noise; record the transition-prior mean. θ is unchanged
 // for a static model (F = I); a movable model's F carries the constant-velocity coupling.
+//
+// q_scale re-weights the per-step process noise Q. Default 1.0 = one nominal step (the historic
+// behaviour; update() below relies on this default so all existing call sites are unchanged). Q is
+// authored per-frame, so q_scale is how many nominal frames' worth of Q to inject — the mechanism
+// inflate_for_age() uses to integrate Q over real elapsed time when measurements are late or absent.
 template <int N, class Model>
 void predict(Model& m, Eigen::Matrix<float, N, N>& Sigma,
-             const typename Model::State& state, Eigen::Matrix<float, N, 1>& prior_mean)
+             const typename Model::State& state, Eigen::Matrix<float, N, 1>& prior_mean,
+             float q_scale = 1.0f)
 {
     if (Sigma.isZero())
         Sigma.diagonal() = m.prior_cov_diag();
     const Eigen::Matrix<float, N, N> F = m.transition();
     Sigma = F * Sigma * F.transpose();
-    Sigma.diagonal() += m.process_noise_diag();
+    Sigma.diagonal() += std::max(0.0f, q_scale) * m.process_noise_diag();
     prior_mean = state.vec();
+}
+
+// Age the belief with NO measurement — the "stale sensor" term. Consumers call this every control
+// tick on their OWN clock (which keeps running when the sensor is dead), EVEN WHEN NO FRESH FRAME
+// ARRIVED, passing the wall-clock seconds since the belief was last touched and the stream's nominal
+// inter-frame period. It runs only the predict half of the filter — F·Σ·Fᵀ then +Q·(dt/dt_nominal) —
+// holding the mean while the posterior covariance grows monotonically with the age of the evidence.
+//
+// This is the generative-model form of a dead stream: NO gate, NO emergency flag. A silent sensor is
+// just evidence getting old, so Σ → ∞ at a rate set by Q; downstream consumers that read Σ (e.g. the
+// controller's target-in-frame covariance) then back off continuously, in proportion to staleness,
+// instead of tripping a discrete watchdog. When the stream recovers, the next update() tightens Σ again.
+//
+// Exact for a static model (F = I: table/chair). For a constant-velocity F the covariance growth is
+// right but the mean is propagated by a single nominal F rather than F(dt); over long gaps a movable
+// model should carry the CV extrapolation in its own transition() — noted, not needed for the static
+// concepts this prototype targets first.
+template <int N, class Model>
+void inflate_for_age(Model& m, Eigen::Matrix<float, N, N>& Sigma,
+                     const typename Model::State& state, Eigen::Matrix<float, N, 1>& prior_mean,
+                     float dt_seconds, float dt_nominal_seconds)
+{
+    const float q_scale = dt_nominal_seconds > 1e-6f
+                              ? dt_seconds / dt_nominal_seconds     // frames-worth of Q over real time
+                              : 1.0f;                               // no nominal rate known → one step
+    predict<N>(m, Sigma, state, prior_mean, q_scale);
 }
 
 // One recursive update on a fresh frame. MEAN: Gauss-Newton MAP using the FULL data information (fast,

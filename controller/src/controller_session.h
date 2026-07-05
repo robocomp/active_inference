@@ -89,6 +89,13 @@ private:
     bool step_lockon(ControllerMotionCommander &motion_commander, const TimeSource &time_source);
     rc::LockOn::Reading read_servo_reading(std::uint64_t feedback_node_id) const;
     bool goal_met(std::uint64_t feedback_node_id) const;
+    // Contract-driven Orient (Policy::Orient): rotate IN PLACE toward `target_yaw` (no navigation) until the
+    // contract's completion predicate fires (a depth detection arrives) or the contract times out. Returns
+    // true once finished (LOOKED or GIVE_UP); drives the base rotation directly. Owns the base while active.
+    bool step_orient(const ControllerRobotPose &robot_pose, ControllerMotionCommander &motion_commander,
+                     const TimeSource &time_source, float target_yaw);
+    std::optional<std::uint64_t> orient_start_ms_;   // rotate-to-look start stamp (for the contract timeout)
+    int                          orient_stable_ = 0;  // consecutive goal-met measurements (→ stable_n = looked)
     // Contract observation-stillness gate: track the base speed (finite-difference of the room-frame
     // robot pose → m/s, rad/s) and test it against the active contract's max_observe_vel/omega.
     void update_base_speed(const ControllerRobotPose &pose, std::uint64_t timestamp_ms);

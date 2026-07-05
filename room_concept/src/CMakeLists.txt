@@ -68,6 +68,7 @@ LIST(APPEND SOURCES
   ../src/rerun_logger.cpp
   ../src/camera_visualizer.cpp
   ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/media_transport.cpp
+  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/lidar_plane_reader.cpp
   ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/image_framePubSubTypes.cxx
   ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/image_frameTypeObjectSupport.cxx
   ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/image360_framePubSubTypes.cxx

@@ -67,6 +67,12 @@ struct ControllerParams
     float proximity_log_distance_m = 0.6f;
     int max_lidar_draw_points = 600;
     std::string lidar_name = "lidar3D";
+    // Per-device high/low LiDAR planes (lidar3d_dds): points arrive in the DEVICE frame (metres) and
+    // are transformed to the robot frame via each sensor's static mount RT edge (robot<-helios /
+    // robot<-bpearl), then MERGED into one scan per cycle. Preferred over the fused lidar_name plane;
+    // the controller falls back to lidar_name (already robot-frame) only while neither is live.
+    std::string lidar_helios_name = "helios";
+    std::string lidar_bpearl_name = "bpearl";
     // Zero-copy media plane (LiDAR). When lidar_use_media is true, the LiDAR point
     // cloud is drained from the DDS media plane instead of the DSR laser_* attrs.
     // The DDS domain + topic are NOT configured here: they are read from the media
@@ -78,6 +84,12 @@ struct ControllerParams
     // the controller enters a local emergency hold (stops the robot, waits for the
     // stream to recover) instead of planning on stale perception.
     int lidar_stall_timeout_ms = 2000;
+    // Controller-side LiDAR obstacle CREATION (reactive blockage/stall temp obstacles + refresh). Set false
+    // to make the dedicated `residual_concept` agent the SOLE obstacle source: the controller then only
+    // CONSUMES graph "obstacle" nodes (read_obstacle_polygons) and no longer creates its own from LiDAR.
+    // The physical-STUCK recovery (wedged on something invisible to the LiDAR) is a separate reflex and is
+    // NOT gated by this flag.
+    bool obstacle_creation_enabled = true;
     std::string target_edge_type = "target";
     float pose_xy_std_slow_m = 0.03f;
     float pose_xy_std_stop_m = 0.12f;

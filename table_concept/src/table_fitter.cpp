@@ -346,7 +346,31 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
         // or no fresh sweep. The shared factor (accumulate_lidar_rays<6> in TableBelief::accumulate_extra)
         // sphere-traces this belief's own SDF, so the same call the bottle uses drops in unchanged.
         feed_lidar(inst, frame);
+
+        // Divergence safety net (mirrors bottle): snapshot state+Σ, run the update, and if the centre teleports
+        // beyond a physical bound in one frame (corrupted mask cloud / one-sided LiDAR runaway → the cx=−200m
+        // event) REJECT it — restore the snapshot, widen Σ via a predict so the next good frame re-associates,
+        // and accrue frames_diverged. A non-finite state is treated the same. 0 disables. NOT a magic gate: a
+        // static table cannot physically move max_step_m in one frame, so such a step is definitionally spurious.
+        const TableBelief pre_belief = inst.ai2_belief;   // value copy (state + Σ + prior + flip_evidence)
+        const auto&       ps         = pre_belief.state();
         energy = inst.ai2_belief.update(frame);
+        const auto& ns = inst.ai2_belief.state();
+        const float step = std::sqrt((ns.cx - ps.cx) * (ns.cx - ps.cx) + (ns.cy - ps.cy) * (ns.cy - ps.cy)
+                                   + (ns.H  - ps.H)  * (ns.H  - ps.H));
+        const bool bad = not (std::isfinite(ns.cx) and std::isfinite(ns.cy) and std::isfinite(ns.H)
+                              and std::isfinite(ns.w) and std::isfinite(ns.h) and std::isfinite(ns.yaw));
+        if (cfg_.max_step_m > 0.0f and (bad or step > cfg_.max_step_m))
+        {
+            std::print("[{}] AI2 step-bound REJECT: centre moved {:.2f}m (>{:.2f}){} — outlier frame dropped\n",
+                       inst.node_name, step, cfg_.max_step_m, bad ? " [non-finite]" : "");
+            inst.ai2_belief = pre_belief;     // reject the corrupted update (restore state + Σ)
+            inst.ai2_belief.predict();        // widen Σ so the next good frame re-associates
+            energy = 0.0f;
+            ++inst.frames_diverged;
+        }
+        else
+            inst.frames_diverged = 0;
         // Near-square yaw disambiguation: sequential Bayesian comparison of the two orientation modes
         // (current vs the w↔h swap ≡ 90° rotation). Owns the GENUINE mode flip so the per-frame MAP no
         // longer SNAPS 90° on extent noise; the reported yaw uncertainty (yaw_marginal_var) stays honest
@@ -372,12 +396,14 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
     // (chain cov already computed above, before the belief update)
 
     if (should_log(inst))
-        std::print("[{}] AI2 npts={} R={:.4f} dotd={:.2f} trunc={:.2f}{} | cx={:.3f} cy={:.3f} H={:.3f} w={:.3f} h={:.3f} ψ={:.3f} | σ(w,h,H)mm=({:.0f},{:.0f},{:.0f})\n",
+        std::print("[{}] AI2 npts={} R={:.4f} dotd={:.2f} trunc={:.2f}{} | cx={:.3f} cy={:.3f} H={:.3f} w={:.3f} h={:.3f} ψ={:.3f} | σ(w,h,H)mm=({:.0f},{:.0f},{:.0f}) | lidar {}/{} resid={:.3f}m topz={:.3f}(H={:.3f}) covA={:.2f} div={}\n",
                    inst.node_name, npts, R, inst.last_motion_dotd, inst.last_trunc_frac, gated ? " GATED" : "",
                    bs.cx, bs.cy, bs.H, bs.w, bs.h, bs.yaw,
                    1000.f * std::sqrt(std::max(0.f, inst.ai2_belief.covariance()(3, 3))),
                    1000.f * std::sqrt(std::max(0.f, inst.ai2_belief.covariance()(4, 4))),
-                   1000.f * std::sqrt(std::max(0.f, inst.ai2_belief.covariance()(2, 2))));
+                   1000.f * std::sqrt(std::max(0.f, inst.ai2_belief.covariance()(2, 2))),
+                   inst.dbg_lidar_rays, inst.dbg_lidar_raw, inst.dbg_lidar_resid_m,
+                   inst.dbg_lidar_topz_m, bs.H, inst.dbg_lidar_cov_ang, inst.frames_diverged);
 
     log_ai2_csv(inst, npts, R, gated, energy);
     return energy;
@@ -393,7 +419,7 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
         if (not ai2_csv_.is_open()) { cfg_.ai2_csv_path.clear(); return; }
         ai2_csv_ << "cycle,node,npts,gated,energy,R,motion_var,motion_dotd,trunc_frac,range,"
                  << "cx,cy,H,w,h,yaw,std_cx,std_cy,std_H,std_w,std_h,std_yaw,"
-                 << "std_yaw_within,flip_ev,p_alt\n";
+                 << "std_yaw_within,flip_ev,p_alt,lidar_rays,lidar_raw,lidar_resid_m,lidar_meanz,lidar_topz,lidar_cov_ang\n";
     }
     const auto& s = inst.ai2_belief.state();
     const auto& S = inst.ai2_belief.covariance();
@@ -405,7 +431,9 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
              << s.cx << ',' << s.cy << ',' << s.H << ',' << s.w << ',' << s.h << ',' << s.yaw << ','
              << sd(0) << ',' << sd(1) << ',' << sd(2) << ',' << sd(3) << ',' << sd(4) << ','
              << std::sqrt(std::max(0.0f, inst.ai2_belief.yaw_marginal_var())) << ','
-             << sd(5) << ',' << inst.ai2_belief.flip_evidence() << ',' << inst.ai2_belief.mode_posterior() << '\n';
+             << sd(5) << ',' << inst.ai2_belief.flip_evidence() << ',' << inst.ai2_belief.mode_posterior() << ','
+             << inst.dbg_lidar_rays << ',' << inst.dbg_lidar_raw << ',' << inst.dbg_lidar_resid_m << ','
+             << inst.dbg_lidar_meanz_m << ',' << inst.dbg_lidar_topz_m << ',' << inst.dbg_lidar_cov_ang << '\n';
     ai2_csv_.flush();
 }
 
@@ -448,6 +476,7 @@ void TableFitter::feed_lidar(TableInstance& inst, TableFrame& frame) const
     frame.lidar.endpoints.clear();
     frame.lidar.endpoints.reserve(256);
     double resid_sum = 0.0;
+    double bear_c = 0.0, bear_s = 0.0;    // Σcos φ, Σsin φ of return bearings about the centre (angular coverage)
     for (const auto& p : lidar_sweep_room_)
     {
         const float dx = p.x() - c.x(), dy = p.y() - c.y();
@@ -457,6 +486,8 @@ void TableFitter::feed_lidar(TableInstance& inst, TableFrame& frame) const
         if (p.z() < z_lo or p.z() > z_hi) continue;
         frame.lidar.endpoints.push_back(p);
         resid_sum += std::abs(inst.ai2_belief.sdf_compound(p, s));     // |dist to CURRENT model surface|
+        const float phi = std::atan2(dy, dx);                          // bearing about the centre (room XY)
+        bear_c += std::cos(phi); bear_s += std::sin(phi);
     }
     inst.dbg_lidar_raw  = raw;
     inst.dbg_lidar_rays = static_cast<int>(frame.lidar.endpoints.size());
@@ -465,12 +496,35 @@ void TableFitter::feed_lidar(TableInstance& inst, TableFrame& frame) const
     if (frame.lidar.endpoints.empty())
         return;
 
-    // Precision = base, DOWN-WEIGHTED by sparse coverage (a handful of noisy returns must not swing extent).
-    // No range fade: a LiDAR hit is a real metric surface point at any range — sparsity is the only decay.
+    // z-calibration probe: mean z of ALL selected returns + mean z of the highest 20% (≈ the observed tabletop
+    // surface). Compare dbg_lidar_topz_m to the fitted H — a persistent gap ⇒ a lidar3D→room z-offset, not fit.
+    {
+        std::vector<float> zs; zs.reserve(frame.lidar.endpoints.size());
+        double zsum = 0.0;
+        for (const auto& p : frame.lidar.endpoints) { zs.push_back(p.z()); zsum += p.z(); }
+        std::sort(zs.begin(), zs.end());
+        const std::size_t k = std::max<std::size_t>(1, zs.size() / 5);   // top 20%
+        double topsum = 0.0; for (std::size_t i = zs.size() - k; i < zs.size(); ++i) topsum += zs[i];
+        inst.dbg_lidar_meanz_m = static_cast<float>(zsum / zs.size());
+        inst.dbg_lidar_topz_m  = static_cast<float>(topsum / k);
+    }
+
+    // Precision = base, down-weighted by TWO informativeness factors (both continuous, no gate):
+    //  (1) sparse RAY-COUNT coverage — a handful of noisy returns must not swing extent.
+    //  (2) ANGULAR coverage — the circular variance (1−R) of the return bearings about the centre. R is the
+    //      mean-resultant length: R→1 when all returns share one bearing (a ONE-SIDED sweep, blind to the far
+    //      face and to which axis is which → near-zero orientation/extent info on a near-square table), R→0
+    //      when returns wrap the object. Multiplying by (1−R)^p makes a one-sided frame contribute almost
+    //      nothing to the ambiguous DOFs — killing the w↔h mode THRASH seen from far, degenerate viewpoints —
+    //      while the RECURSIVE belief still accumulates coverage across an orbit (each frame is one-sided, but
+    //      from DIFFERENT bearings that add up in Σ). Principled: precision ∝ the frame's actual angular info.
     const float coverage = std::min(1.0f, static_cast<float>(inst.dbg_lidar_rays)
                                         / std::max(1.0f, cfg_.lidar_coverage_n0));
+    const float R        = static_cast<float>(std::hypot(bear_c, bear_s) / inst.dbg_lidar_rays);  // ∈[0,1]
+    const float cov_ang  = std::pow(std::max(0.0f, 1.0f - R), cfg_.lidar_coverage_ang_power);
+    inst.dbg_lidar_cov_ang = cov_ang;
     frame.lidar.origin     = lidar_origin_room_;
-    frame.lidar.precision  = cfg_.lidar_precision * coverage;
+    frame.lidar.precision  = cfg_.lidar_precision * coverage * cov_ang;
     frame.lidar.robust_c_m = cfg_.lidar_robust_c_m;
 }
 

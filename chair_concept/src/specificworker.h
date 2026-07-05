@@ -56,6 +56,7 @@
 #include "../../common/dashboard/timeseries_plot.h"
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 #include "../../common/instance_tracker/instance_tracker.h"   // rc::InstanceTracker (birth/associate/death)
+#include "../../common/bearing_confirm/bearing_confirm.h"      // rc::confirm_tracks_by_bearing + BearingHypothesisStager (Part C)
 
 // ─── SpecificWorker ──────────────────────────────────────────────────────────
 
@@ -154,6 +155,7 @@ private:
     std::unique_ptr<rc::MaskIngestor>                   mask_ingestor_;   // perception (masks-only)
     std::unique_ptr<rc::ChairSceneGraph>               scene_graph_;     // DSR node/RT I/O
     rc::InstanceTracker                                tracker_;         // multi-instance (Tracker.Enabled)
+    rc::BearingHypothesisStager                        bearing_stager_;  // Part C-birth: stages unmatched 360 bearings
     uint64_t                                            room_node_id_ = 0;
     FPSCounter                                          fps_counter_;     // overall compute()-cycle rate
 

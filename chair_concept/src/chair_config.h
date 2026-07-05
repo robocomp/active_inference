@@ -87,6 +87,21 @@ struct ChairConfig
     float tracker_birth_seat_h     = 0.45f;
     float tracker_birth_back_h     = 0.45f;
     bool  tracker_nll_cost         = false;   // association cost = ½(m²+ln|S|) NLL (vs raw m²); see InstanceTracker
+    // ── RGB-360 bearing-only hypothesis birth (Part C-birth; RICOH_360_PERIPHERAL_DETECTION.md) ──────
+    // A peripheral 360 "chair" bearing (a no-depth mask slice, azimuth calibrated 2026-07-04) that matches
+    // no live chair and PERSISTS births a BROAD-Σ hypothesis: the mean is placed at a nominal range on the
+    // ray, but Σ is huge ALONG the ray (range unknown) and tight ACROSS it (bearing known). The hypothesis
+    // authors an Orient affordance (rotate to look); a depth mask then collapses Σ, or it dies unobserved.
+    // Default OFF — the whole glance→orient loop is opt-in.
+    bool  bearing_birth_enabled    = false;   // Bearing.BirthEnabled
+    float bearing_confirm_gate_rad = 0.17f;   // Bearing.ConfirmGateRad — bearing within this of a live chair's azimuth = "explained"
+    int   bearing_birth_frames     = 8;       // Bearing.BirthFrames — unmatched-bearing streak before promotion
+    float bearing_match_rad        = 0.17f;   // Bearing.MatchRad — candidate↔bearing azimuth match tolerance
+    int   bearing_max_miss         = 4;       // Bearing.MaxMiss — streak gap tolerance (intermittent 360 detection)
+    float bearing_nominal_range_m  = 2.0f;    // Bearing.NominalRangeM — where the mean starts on the ray (Σ carries the real uncertainty)
+    float bearing_along_std_m      = 3.0f;    // Bearing.AlongStdM — Σ std ALONG the ray (unknown range)
+    float bearing_across_std_m     = 0.30f;   // Bearing.AcrossStdM — Σ std ACROSS the ray (bearing known)
+    float bearing_yaw_std_rad      = 3.14f;   // Bearing.YawStdRad — orientation fully unknown at birth
 };
 
 // Fill a ChairConfig from a RoboComp ConfigLoader (all keys optional, defaults above).

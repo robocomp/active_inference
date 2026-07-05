@@ -33,6 +33,25 @@
 #include <iostream>
 #include <print>
 
+namespace
+{
+// Read + normalize + validate a media source selector ("auto" | "ice" | "dds").
+// Unknown values warn once and fall back to "auto".
+std::string read_media_source(const ConfigLoader& cfg, const char* key)
+{
+	std::string s = "auto";
+	rc::ConfigLoaderUtils::load_optional(cfg, key, s);
+	std::ranges::transform(s, s.begin(), ::tolower);
+	if (s != "auto" and s != "ice" and s != "dds")
+	{
+		qWarning() << "[Media] unknown" << key << "="
+		           << QString::fromStdString(s) << "— falling back to 'auto'";
+		s = "auto";
+	}
+	return s;
+}
+}  // namespace
+
 SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, bool startup_check) : GenericWorker(configLoader, tprx)
 {
 	this->startup_check_flag = startup_check;
@@ -136,44 +155,18 @@ void SpecificWorker::initialize()
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.enable_ricoh", params.ENABLE_RICOH);
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.enable_lidar", params.ENABLE_LIDAR);
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.enable_imu",   params.ENABLE_IMU);
-	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.zed_source",   params.ZED_SOURCE);
-	// Normalize + validate the RGB source selector ("auto" | "ice" | "dds").
-	std::ranges::transform(params.ZED_SOURCE, params.ZED_SOURCE.begin(), ::tolower);
-	if (params.ZED_SOURCE != "auto" and params.ZED_SOURCE != "ice" and params.ZED_SOURCE != "dds")
-	{
-		qWarning() << "[Media] unknown Media.zed_source" << QString::fromStdString(params.ZED_SOURCE)
-		           << "— falling back to 'auto'";
-		params.ZED_SOURCE = "auto";
-	}
+	// Per-sensor source selector ("auto" | "ice" | "dds"), normalized+validated by read_media_source().
 	// Forced modes seed the runtime gate up front: "dds" starts already bypassing (monitor-only),
-	// "ice"/"auto" start bridging. negotiate_zed_media_source() then honours or re-checks it.
-	bridge_zed_.store(params.ZED_SOURCE != "dds", std::memory_order_relaxed);
-	qInfo() << "[Media] zed_source =" << QString::fromStdString(params.ZED_SOURCE)
-	        << "(auto=negotiate, ice=always bridge, dds=always monitor external)";
-
-	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.ricoh_source", params.RICOH_SOURCE);
-	// Normalize + validate the 360 source selector ("auto" | "ice" | "dds").
-	std::ranges::transform(params.RICOH_SOURCE, params.RICOH_SOURCE.begin(), ::tolower);
-	if (params.RICOH_SOURCE != "auto" and params.RICOH_SOURCE != "ice" and params.RICOH_SOURCE != "dds")
-	{
-		qWarning() << "[Media] unknown Media.ricoh_source" << QString::fromStdString(params.RICOH_SOURCE)
-		           << "— falling back to 'auto'";
-		params.RICOH_SOURCE = "auto";
-	}
+	// "ice"/"auto" start bridging. negotiate() then honours or re-checks it each tick.
+	params.ZED_SOURCE   = read_media_source(configLoader, "Media.zed_source");
+	params.RICOH_SOURCE = read_media_source(configLoader, "Media.ricoh_source");
+	params.LIDAR_SOURCE = read_media_source(configLoader, "Media.lidar_source");
+	bridge_zed_.store(  params.ZED_SOURCE   != "dds", std::memory_order_relaxed);
 	bridge_ricoh_.store(params.RICOH_SOURCE != "dds", std::memory_order_relaxed);
-	qInfo() << "[Media] ricoh_source =" << QString::fromStdString(params.RICOH_SOURCE)
-	        << "(auto=negotiate, ice=always bridge, dds=always monitor external)";
-
-	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.lidar_source", params.LIDAR_SOURCE);
-	std::ranges::transform(params.LIDAR_SOURCE, params.LIDAR_SOURCE.begin(), ::tolower);
-	if (params.LIDAR_SOURCE != "auto" and params.LIDAR_SOURCE != "ice" and params.LIDAR_SOURCE != "dds")
-	{
-		qWarning() << "[Media] unknown Media.lidar_source" << QString::fromStdString(params.LIDAR_SOURCE)
-		           << "— falling back to 'auto'";
-		params.LIDAR_SOURCE = "auto";
-	}
 	bridge_lidar_.store(params.LIDAR_SOURCE != "dds", std::memory_order_relaxed);
-	qInfo() << "[Media] lidar_source =" << QString::fromStdString(params.LIDAR_SOURCE)
+	qInfo() << "[Media] sources: zed =" << QString::fromStdString(params.ZED_SOURCE)
+	        << "| ricoh =" << QString::fromStdString(params.RICOH_SOURCE)
+	        << "| lidar =" << QString::fromStdString(params.LIDAR_SOURCE)
 	        << "(auto=negotiate, ice=always bridge, dds=always monitor external)";
 
 	qInfo() << "[DSR Upload Rates] rgb=" << params.DSR_RGB_FPS
@@ -285,10 +278,14 @@ void SpecificWorker::initialize()
 			qWarning() << "[Media]" << ad.node << "node not found at init — media descriptor NOT advertised";
 	}
 
-	// One-shot negotiation before starting the bridge thread: if zed_camera is already
-	// publishing the ZED plane on DDS, adopt its descriptor now and start with bridging
-	// OFF (compute() then re-checks at low rate to follow zed_camera up/down).
-	negotiate_zed_media_source();
+	// Build the media-negotiation table now that the generated proxies are wired.
+	build_media_groups();
+
+	// One-shot negotiation before starting the bridge threads: if a producer is already
+	// publishing its plane on DDS, adopt its descriptor now and start with bridging OFF
+	// (compute() then re-checks at low rate to follow producers up/down).
+	for (auto& g : media_groups_)
+		negotiate(g);
 
 	// Start only the reader threads whose stream is enabled — a gated-off sensor
 	// spins up no Ice proxy traffic at all.
@@ -438,9 +435,8 @@ void SpecificWorker::compute()
 	static auto last_neg = std::chrono::steady_clock::now();
 	if (std::chrono::duration<double>(now - last_neg).count() >= 3.0)
 	{
-		negotiate_zed_media_source();
-		negotiate_ricoh_media_source();
-		negotiate_lidar_media_source();
+		for (auto& g : media_groups_)
+			negotiate(g);
 		last_neg = now;
 	}
 }
@@ -624,6 +620,46 @@ void SpecificWorker::read_lidar_thread()
 	}
 }
 
+template <class Frame, class Sub>
+void SpecificWorker::monitor_external_image_plane(std::unique_ptr<Sub>& sub,
+                                                  const std::type_identity_t<std::function<std::unique_ptr<Sub>()>>& make_sub,
+                                                  std::atomic<std::uint64_t>& frame_counter,
+                                                  std::uint64_t& mon_frames,
+                                                  std::chrono::steady_clock::time_point& report_at,
+                                                  const char* producer, const char* stream_label)
+{
+	if (not sub)
+	{
+		sub = make_sub();          // descriptor relayed onto its DSR node -> bind the subscriber
+		mon_frames = 0;
+		report_at = std::chrono::steady_clock::now();
+	}
+	if (not sub)
+	{
+		std::this_thread::sleep_for(std::chrono::milliseconds(200));   // descriptor not ready yet
+		return;
+	}
+	const int n = sub->wait_and_poll([](const Frame&, std::int64_t){}, 200);
+	mon_frames += static_cast<std::uint64_t>(n);
+	// Feed the compute() heartbeat with the external rate: while bypassing, the producer path
+	// never runs, so this counter only ever counts DDS frames — the heartbeat reads the live
+	// topic instead of a misleading 0.0 Hz.
+	frame_counter.fetch_add(static_cast<std::uint64_t>(n), std::memory_order_relaxed);
+	const auto now = std::chrono::steady_clock::now();
+	const double dt = std::chrono::duration<double>(now - report_at).count();
+	if (dt >= 5.0)
+	{
+		if (mon_frames > 0)
+			std::print("[Media] {} external DDS publisher ALIVE — {} {:.1f} Hz on domain 7\n",
+			           producer, stream_label, static_cast<double>(mon_frames) / dt);
+		else
+			std::print("[Media] {} external DDS publisher SILENT — no {} frames on domain 7 in {:.0f}s\n",
+			           producer, stream_label, dt);
+		mon_frames = 0;
+		report_at = now;
+	}
+}
+
 void SpecificWorker::read_rgbd_thread()
 {
 	bool empty_rgbd_logged = false;
@@ -651,37 +687,11 @@ void SpecificWorker::read_rgbd_thread()
 		if (not bridge_zed_.load(std::memory_order_relaxed))
 		{
 			// zed_camera is the external DDS producer (descriptor relayed into DSR by
-			// negotiate_zed_media_source). Don't pull/publish; SUBSCRIBE to its rgb
-			// stream just to report "external publish" + the observed frame rate.
-			if (not ext_rgb_sub)
-			{
-				ext_rgb_sub = rc::media::make_image_subscriber_from_graph(*G, "zed", "rgb");
-				ext_frames = 0;
-				ext_report_at = std::chrono::steady_clock::now();
-			}
-			if (ext_rgb_sub)
-			{
-				const int n = ext_rgb_sub->wait_and_poll([](const rc::media::ImageFrame&, std::int64_t){}, 200);
-				ext_frames += static_cast<std::uint64_t>(n);
-				// Feed the compute() [ZEDThread] heartbeat with the external rate: while bypassing,
-				// the producer path never runs, so rgbd_frames_ only ever counts these DDS frames —
-				// the heartbeat then reads zed_camera's live topic instead of a misleading 0.0 Hz.
-				rgbd_frames_.fetch_add(static_cast<std::uint64_t>(n), std::memory_order_relaxed);
-				const auto now = std::chrono::steady_clock::now();
-				const double dt = std::chrono::duration<double>(now - ext_report_at).count();
-				if (dt >= 5.0)
-				{
-					const double hz = static_cast<double>(ext_frames) / dt;
-					if (ext_frames > 0)
-						std::print("[Media] zed_camera external DDS publisher ALIVE — rgb {:.1f} Hz on domain 7\n", hz);
-					else
-						std::print("[Media] zed_camera external DDS publisher SILENT — no rgb frames on domain 7 in {:.0f}s\n", dt);
-					ext_frames = 0;
-					ext_report_at = now;
-				}
-			}
-			else
-				std::this_thread::sleep_for(std::chrono::milliseconds(200));   // descriptor not ready yet
+			// negotiate()). Don't pull/publish; SUBSCRIBE to its rgb stream just to report
+			// "external publish" + the observed frame rate (fed to the [ZEDThread] heartbeat).
+			monitor_external_image_plane<rc::media::ImageFrame>(
+				ext_rgb_sub, [this]{ return rc::media::make_image_subscriber_from_graph(*G, "zed", "rgb"); },
+				rgbd_frames_, ext_frames, ext_report_at, "zed_camera", "rgb");
 			continue;
 		}
 		if (ext_rgb_sub) ext_rgb_sub.reset();   // we are producing again -> stop monitoring
@@ -845,206 +855,98 @@ void SpecificWorker::read_rgbd_thread()
 	}
 }
 
-void SpecificWorker::negotiate_zed_media_source()
+void SpecificWorker::build_media_groups()
 {
-	if (not params.ENABLE_ZED)
-		return;   // ZED path disabled entirely — nothing to negotiate
-
-	// Forced "ice": never defer to an external DDS producer — stay bridging via Ice RPC.
-	if (params.ZED_SOURCE == "ice")
-	{
-		bridge_zed_.store(true, std::memory_order_relaxed);
-		return;
-	}
-
-	std::string descriptor;
-	if (mediaplanedds_proxy)
-	{
-		try { descriptor = mediaplanedds_proxy->getMediaDescriptor(); }
-		catch (const Ice::Exception&) { descriptor.clear(); }   // peer down → bridge ourselves
-	}
-
-	// Forced "dds": always treat zed_camera as the producer (never bridge). Still relay its
-	// descriptor whenever reachable so the monitor's subscriber can bind to the 'zed' plane;
-	// warn once (not every tick) if it's unreachable but we've bound to a prior descriptor.
-	if (params.ZED_SOURCE == "dds")
-	{
-		bridge_zed_.store(false, std::memory_order_relaxed);
-		static bool zed_dds_absent_warned = false;
-		if (not descriptor.empty())
-		{
-			if (descriptor != last_relayed_descriptor_)
-			{
-				relay_media_descriptor("zed", descriptor);
-				last_relayed_descriptor_ = descriptor;
-			}
-			zed_dds_absent_warned = false;
-		}
-		else if (not last_relayed_descriptor_.empty() and not zed_dds_absent_warned)
-		{
-			qWarning() << "[MediaNeg] zed_source=dds but zed_camera descriptor unavailable — monitoring last-known 'zed' plane";
-			zed_dds_absent_warned = true;
-		}
-		return;
-	}
-
-	if (not descriptor.empty())
-	{
-		// zed_camera IS the DDS producer: relay its descriptor into DSR, stop bridging.
-		if (bridge_zed_.exchange(false))
-			qInfo() << "[MediaNeg] zed_camera publishing ZED on DDS — relaying its descriptor; robot_concept stops bridging";
-		if (descriptor != last_relayed_descriptor_)
-		{
-			relay_media_descriptor("zed", descriptor);
-			last_relayed_descriptor_ = descriptor;
-		}
-	}
-	else
-	{
-		// zed_camera absent/not publishing: robot_concept is the producer (bridge as before).
-		if (not bridge_zed_.exchange(true))
-			qInfo() << "[MediaNeg] zed_camera not publishing — robot_concept resumes bridging ZED";
-		if (not last_relayed_descriptor_.empty())
-		{
-			media_.advertise(*G, "zed", {"rgb", "depth"});   // re-advertise our own plane
-			last_relayed_descriptor_.clear();
-		}
-	}
-}
-
-void SpecificWorker::negotiate_ricoh_media_source()
-{
-	// Mirror of negotiate_zed_media_source for the 360 plane. The ONLY binding to the
-	// generated duplicate proxy is this alias — if robocompdsl names the pair differently
-	// (e.g. mediaplanedds0_proxy/mediaplanedds1_proxy), change just this one line.
-	// The second `requires MediaPlaneDDS` in robot_concept.cdsl generates mediaplanedds1_proxy,
-	// bound to Proxies.MediaPlaneDDS1 (ricoh_omni_dds, port 10099).
-	const auto& ricoh_dds_proxy = mediaplanedds1_proxy;
-
-	if (not params.ENABLE_RICOH)
-		return;   // 360 path disabled entirely — nothing to negotiate
-
-	// Forced "ice": never defer to an external DDS producer — stay bridging via Ice RPC.
-	if (params.RICOH_SOURCE == "ice")
-	{
-		bridge_ricoh_.store(true, std::memory_order_relaxed);
-		return;
-	}
-
-	std::string descriptor;
-	if (ricoh_dds_proxy)
-	{
-		try { descriptor = ricoh_dds_proxy->getMediaDescriptor(); }
-		catch (const Ice::Exception&) { descriptor.clear(); }   // peer down → bridge ourselves
-	}
-
-	// Forced "dds": always treat ricoh_omni_dds as the producer (never bridge). Still relay its
-	// descriptor whenever reachable so the monitor's subscriber can bind to the 'ricoh' plane;
-	// warn once (not every tick) if it's unreachable but we've bound to a prior descriptor.
-	if (params.RICOH_SOURCE == "dds")
-	{
-		bridge_ricoh_.store(false, std::memory_order_relaxed);
-		static bool ricoh_dds_absent_warned = false;
-		if (not descriptor.empty())
-		{
-			if (descriptor != last_relayed_ricoh_descriptor_)
-			{
-				relay_media_descriptor("ricoh", descriptor);
-				last_relayed_ricoh_descriptor_ = descriptor;
-			}
-			ricoh_dds_absent_warned = false;
-		}
-		else if (not last_relayed_ricoh_descriptor_.empty() and not ricoh_dds_absent_warned)
-		{
-			qWarning() << "[MediaNeg] ricoh_source=dds but ricoh_omni_dds descriptor unavailable — monitoring last-known 'ricoh' plane";
-			ricoh_dds_absent_warned = true;
-		}
-		return;
-	}
-
-	if (not descriptor.empty())
-	{
-		// ricoh_omni_dds IS the DDS producer: relay its descriptor into DSR, stop bridging.
-		if (bridge_ricoh_.exchange(false))
-			qInfo() << "[MediaNeg] ricoh_omni_dds publishing 360 on DDS — relaying its descriptor; robot_concept stops bridging";
-		if (descriptor != last_relayed_ricoh_descriptor_)
-		{
-			relay_media_descriptor("ricoh", descriptor);
-			last_relayed_ricoh_descriptor_ = descriptor;
-		}
-	}
-	else
-	{
-		// ricoh_omni_dds absent/not publishing: robot_concept is the producer (bridge as before).
-		if (not bridge_ricoh_.exchange(true))
-			qInfo() << "[MediaNeg] ricoh_omni_dds not publishing — robot_concept resumes bridging 360";
-		if (not last_relayed_ricoh_descriptor_.empty())
-		{
-			media_.advertise(*G, "ricoh", {"rgb360"});   // re-advertise our own plane
-			last_relayed_ricoh_descriptor_.clear();
-		}
-	}
-}
-
-void SpecificWorker::negotiate_lidar_media_source()
-{
-	// The two extra `requires MediaPlaneDDS` in the CDSL generate mediaplanedds2_proxy
-	// (Proxies.MediaPlaneDDS2 = lidar3d_dds helios, port 11890) and mediaplanedds3_proxy
-	// (Proxies.MediaPlaneDDS3 = lidar3d_dds bpearl, port 11889). If robocompdsl names them
-	// differently, change just these two aliases.
-	const auto& helios_dds_proxy = mediaplanedds2_proxy;
-	const auto& bpearl_dds_proxy = mediaplanedds3_proxy;
-
-	if (not params.ENABLE_LIDAR)
-		return;   // LiDAR path disabled entirely — nothing to negotiate
-
-	// Forced "ice": never defer to the DDS producers — keep bridging via the Lidar3D proxy.
-	if (params.LIDAR_SOURCE == "ice")
-	{
-		bridge_lidar_.store(true, std::memory_order_relaxed);
-		return;
-	}
-
-	// Query each physical lidar's producer and relay its descriptor onto its own DSR node.
-	const auto query = [](const auto& prx) -> std::string
-	{
-		std::string d;
-		if (prx) { try { d = prx->getMediaDescriptor(); } catch (const Ice::Exception&) { d.clear(); } }
-		return d;
+	// One entry per sensor plane group. The proxy pointers bind to the generated members:
+	//   mediaplanedds_proxy   Proxies.MediaPlaneDDS   zed_camera      port 12002
+	//   mediaplanedds1_proxy  Proxies.MediaPlaneDDS1  ricoh_omni_dds  port 10099
+	//   mediaplanedds2_proxy  Proxies.MediaPlaneDDS2  lidar3d_dds helios  port 11890
+	//   mediaplanedds3_proxy  Proxies.MediaPlaneDDS3  lidar3d_dds bpearl  port 11889
+	// The lidar group holds BOTH physical lidars under a single shared bridge_lidar_: it only
+	// stops bridging once BOTH relay a descriptor (see negotiate()). advertise_node/-streams is
+	// what robot_concept re-advertises as its own plane while it is the producer (bridging).
+	media_groups_ = {
+		{ .tag = "ZED",
+		  .planes = { { .node = "zed", .proxy = &mediaplanedds_proxy } },
+		  .bridge = &bridge_zed_, .source = &params.ZED_SOURCE, .enabled = &params.ENABLE_ZED,
+		  .advertise_node = "zed", .advertise_streams = {"rgb", "depth"} },
+		{ .tag = "360",
+		  .planes = { { .node = "ricoh", .proxy = &mediaplanedds1_proxy } },
+		  .bridge = &bridge_ricoh_, .source = &params.RICOH_SOURCE, .enabled = &params.ENABLE_RICOH,
+		  .advertise_node = "ricoh", .advertise_streams = {"rgb360"} },
+		{ .tag = "LiDAR",
+		  .planes = { { .node = "helios", .proxy = &mediaplanedds2_proxy },
+		              { .node = "bpearl", .proxy = &mediaplanedds3_proxy } },
+		  .bridge = &bridge_lidar_, .source = &params.LIDAR_SOURCE, .enabled = &params.ENABLE_LIDAR,
+		  .advertise_node = "lidar3D", .advertise_streams = {"lidar"} },
 	};
-	const std::string helios = query(helios_dds_proxy);
-	const std::string bpearl = query(bpearl_dds_proxy);
+}
 
-	if (not helios.empty() and helios != last_relayed_helios_descriptor_)
-	{ relay_media_descriptor("helios", helios); last_relayed_helios_descriptor_ = helios; }
-	if (not bpearl.empty() and bpearl != last_relayed_bpearl_descriptor_)
-	{ relay_media_descriptor("bpearl", bpearl); last_relayed_bpearl_descriptor_ = bpearl; }
-
-	// Forced "dds": always treat the lidar3d_dds pair as the producers (never bridge).
-	if (params.LIDAR_SOURCE == "dds")
+std::string SpecificWorker::query_descriptor(const RoboCompMediaPlaneDDS::MediaPlaneDDSPrxPtr& proxy)
+{
+	std::string d;
+	if (proxy)
 	{
-		bridge_lidar_.store(false, std::memory_order_relaxed);
+		try { d = proxy->getMediaDescriptor(); }
+		catch (const Ice::Exception&) { d.clear(); }   // peer down → treated as absent
+	}
+	return d;
+}
+
+void SpecificWorker::negotiate(MediaGroup& g)
+{
+	if (not *g.enabled)
+		return;   // whole path disabled — nothing to negotiate
+
+	// Forced "ice": never defer to an external DDS producer — stay bridging via Ice RPC.
+	if (*g.source == "ice")
+	{
+		g.bridge->store(true, std::memory_order_relaxed);
 		return;
 	}
 
-	// auto: hand the plane to the DDS producers once BOTH are up; resume bridging if either drops.
-	const bool external_up = (not helios.empty()) and (not bpearl.empty());
-	if (external_up)
+	// Query every plane's producer and relay each live descriptor onto its DSR node.
+	// all_up gates the group's bridge: a single-plane group needs its one producer up; the
+	// lidar group needs BOTH (helios+bpearl) up before it will stop bridging.
+	bool all_up = true;
+	for (auto& p : g.planes)
 	{
-		if (bridge_lidar_.exchange(false))
-			qInfo() << "[MediaNeg] both lidar3d_dds (helios+bpearl) publishing on DDS — relaying descriptors; robot_concept stops bridging LiDAR";
+		const std::string desc = query_descriptor(*p.proxy);
+		if (desc.empty()) { all_up = false; continue; }   // peer absent -> keep/resume bridging
+		if (desc != p.last_relayed)
+		{
+			relay_media_descriptor(p.node, desc);
+			p.last_relayed = desc;
+		}
+	}
+
+	// Forced "dds": always treat the external producer(s) as authoritative (never bridge).
+	// Relays above still ran so the monitor's subscriber can bind to the plane.
+	if (*g.source == "dds")
+	{
+		g.bridge->store(false, std::memory_order_relaxed);
+		return;
+	}
+
+	// auto: hand the plane(s) to DDS once every producer is up; resume bridging if any drops.
+	if (all_up)
+	{
+		if (g.bridge->exchange(false))
+			qInfo().noquote() << QString::asprintf(
+				"[MediaNeg] %s: all producers publishing on DDS — relaying descriptors; robot_concept stops bridging",
+				g.tag.c_str());
 	}
 	else
 	{
-		if (not bridge_lidar_.exchange(true))
-			qInfo() << "[MediaNeg] a lidar3d_dds producer is absent — robot_concept resumes bridging LiDAR";
-		// coverage dropped: re-advertise our own single-plane descriptor and forget the relays.
-		if (not last_relayed_helios_descriptor_.empty() or not last_relayed_bpearl_descriptor_.empty())
-		{
-			media_.advertise(*G, "lidar3D", {"lidar"});
-			last_relayed_helios_descriptor_.clear();
-			last_relayed_bpearl_descriptor_.clear();
-		}
+		if (not g.bridge->exchange(true))
+			qInfo().noquote() << QString::asprintf(
+				"[MediaNeg] %s: a producer is absent — robot_concept resumes bridging", g.tag.c_str());
+		// coverage dropped: re-advertise our own plane and forget the relays.
+		bool had_relay = false;
+		for (auto& p : g.planes)
+			if (not p.last_relayed.empty()) { p.last_relayed.clear(); had_relay = true; }
+		if (had_relay)
+			media_.advertise(*G, g.advertise_node, g.advertise_streams);
 	}
 }
 
@@ -1120,38 +1022,11 @@ void SpecificWorker::read_ricoh_thread()
 		if (not bridge_ricoh_.load(std::memory_order_relaxed))
 		{
 			// ricoh_omni_dds is the external DDS producer (descriptor relayed into DSR by
-			// negotiate_ricoh_media_source). Don't pull/publish; SUBSCRIBE to its 360 stream
-			// just to report "external publish" + the observed frame rate. Mirror of the ZED
-			// monitor branch in read_rgbd_thread.
-			if (not ext_ricoh_sub)
-			{
-				ext_ricoh_sub = rc::media::make_image360_subscriber_from_graph(*G, "ricoh", "rgb360");
-				ext_ricoh_frames = 0;
-				ext_ricoh_report_at = std::chrono::steady_clock::now();
-			}
-			if (ext_ricoh_sub)
-			{
-				const int n = ext_ricoh_sub->wait_and_poll([](const rc::media::Image360Frame&, std::int64_t){}, 200);
-				ext_ricoh_frames += static_cast<std::uint64_t>(n);
-				// Feed the compute() [Ricoh360Thread] heartbeat with the external rate: while
-				// bypassing, the producer path never runs, so ricoh_frames_ only counts these
-				// DDS frames — the heartbeat then reads ricoh_omni_dds's live topic, not 0.0 Hz.
-				ricoh_frames_.fetch_add(static_cast<std::uint64_t>(n), std::memory_order_relaxed);
-				const auto now = std::chrono::steady_clock::now();
-				const double dt = std::chrono::duration<double>(now - ext_ricoh_report_at).count();
-				if (dt >= 5.0)
-				{
-					const double hz = static_cast<double>(ext_ricoh_frames) / dt;
-					if (ext_ricoh_frames > 0)
-						std::print("[Media] ricoh_omni_dds external DDS publisher ALIVE — 360 {:.1f} Hz on domain 7\n", hz);
-					else
-						std::print("[Media] ricoh_omni_dds external DDS publisher SILENT — no 360 frames on domain 7 in {:.0f}s\n", dt);
-					ext_ricoh_frames = 0;
-					ext_ricoh_report_at = now;
-				}
-			}
-			else
-				std::this_thread::sleep_for(std::chrono::milliseconds(200));   // descriptor not ready yet
+			// negotiate()). Don't pull/publish; SUBSCRIBE to its 360 stream just to report
+			// "external publish" + the observed frame rate. Mirror of the ZED monitor branch.
+			monitor_external_image_plane<rc::media::Image360Frame>(
+				ext_ricoh_sub, [this]{ return rc::media::make_image360_subscriber_from_graph(*G, "ricoh", "rgb360"); },
+				ricoh_frames_, ext_ricoh_frames, ext_ricoh_report_at, "ricoh_omni_dds", "360");
 			continue;
 		}
 		if (ext_ricoh_sub) ext_ricoh_sub.reset();   // we are producing again -> stop monitoring

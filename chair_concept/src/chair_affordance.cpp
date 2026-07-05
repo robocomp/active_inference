@@ -21,7 +21,7 @@ void ChairAffordance::init(std::shared_ptr<DSR::DSRGraph> G,
     chair_node_name_ = std::move(chair_node_name);
 }
 
-void ChairAffordance::update(const EpistemicProposal& prop)
+void ChairAffordance::update(const EpistemicProposal& prop, bool orient_mode)
 {
     if (!G_) return;
     if (!prop.valid || !prop.is_finite())
@@ -31,6 +31,7 @@ void ChairAffordance::update(const EpistemicProposal& prop)
                        << chair_node_name_.c_str();
         return;
     }
+    orient_mode_ = orient_mode;
 
     if (!node_created_)
         create_node(prop);
@@ -137,10 +138,9 @@ void ChairAffordance::create_node(const EpistemicProposal& prop)
     G_->add_or_modify_attrib_local<epistemic_gain_att>          (aff_node, prop.epistemic_gain);
     G_->add_or_modify_attrib_local<epistemic_pending_att>       (aff_node, true);
 
-    // Declare the execution contract: how the controller should complete this affordance (Servo
-    // lock-on bound to the chair's projected-ROI / detection feedback attributes + completion
-    // predicate). Uses the shared type-level default; producers can override per node here.
-    rc::affordance::write_contract(*G_, aff_node, rc::affordance::default_contract_for("chair"));
+    // Declare the execution contract: Orient (rotate-to-look) for a bearing hypothesis, else the normal
+    // Servo lock-on. Both complete on the chair's detection feedback attributes.
+    write_policy_contract(aff_node);
 
     const auto id_opt = G_->insert_node(aff_node);
     if (!id_opt.has_value())
@@ -203,10 +203,31 @@ void ChairAffordance::update_node(const EpistemicProposal& prop)
         G_->add_or_modify_attrib_local<epistemic_pending_att>   (n, true);
     }
 
+    // Hypothesis→normal (or vice-versa): swap the Orient↔Servo contract when the mode changed.
+    if (orient_mode_ != contract_is_orient_)
+        write_policy_contract(n);
+
     state_ = State::pending;
     G_->update_node(n);
 
     refresh_edge();
+}
+
+void ChairAffordance::write_policy_contract(DSR::Node& node)
+{
+    using namespace rc::affordance;
+    if (orient_mode_)
+        // Orient: rotate in place toward the affordance's target yaw (the bearing), optionally fine-centre
+        // on the chair's ROI once it enters the zed view, and complete when a real depth detection fires.
+        write_contract(*G_, node, Contract::orient()
+            .center("chair_roi_offset")
+            .valid ("chair_roi_valid")
+            .until ("chair_detection_alive",      CompareOp::GE, 0.5f)
+            .and_  ("chair_detection_confidence", CompareOp::GE, 0.20f)
+            .still(0.0f, 0.15f).stable(2).timeout_s(8).on_fail(OnFail::Consume));
+    else
+        write_contract(*G_, node, default_contract_for("chair"));
+    contract_is_orient_ = orient_mode_;
 }
 
 void ChairAffordance::refresh_edge()

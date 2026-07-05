@@ -53,8 +53,9 @@ public:
     // ── Compute-cycle interface ───────────────────────────────────────────────
 
     /// Create (first call) or refresh (subsequent calls) the affordance node.
-    /// No-op if not initialised.
-    void update(const EpistemicProposal& prop);
+    /// No-op if not initialised. `orient_mode` = author an Orient contract (rotate-to-look) instead of the
+    /// normal Servo one — used for a bearing-only hypothesis (Part C-birth); switched back when depth arrives.
+    void update(const EpistemicProposal& prop, bool orient_mode = false);
 
     /// Delete the affordance node (model became stable or instance reset).
     void remove();
@@ -85,9 +86,12 @@ private:
     uint64_t affordance_node_id_ = 0;
     bool     node_created_       = false;
     State    state_              = State::idle;
+    bool     orient_mode_        = false;   // author an Orient (rotate-to-look) contract vs the normal Servo
+    bool     contract_is_orient_ = false;   // which contract is currently written (to re-write only on change)
 
     void create_node(const EpistemicProposal& prop);
     void update_node(const EpistemicProposal& prop);
+    void write_policy_contract(DSR::Node& node);   // Orient vs default, per orient_mode_
     void refresh_edge();
     void reset();
 };

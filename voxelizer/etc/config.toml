@@ -116,7 +116,7 @@ perf_log = true   # per-frame compute/yolo/pose timing -> etc/viewer_perf.csv
 # decimation (AIMD + hysteresis). Actuator = pose only (YOLO-seg is the core product). Reacts to
 # compute cost + input-feed rate: if the feed itself is below target it holds (decimation can't help).
 [RateRegulator]
-target_hz      = 20    # desired compute rate; below this (minus deadband) the regulator raises pose decimation
+target_hz      = 20.0  # desired compute rate; below this (minus deadband) the regulator raises pose decimation
 pose_decim_max = 4     # never skip pose more than this; floor = HumanPose.decimation
 
 # Publish-hold watchdog: if the RGB producer stalls (feed goes stale while the peer is still
@@ -135,12 +135,14 @@ recover_s    = 1.0    # sustained freshness required before resuming
 yolo_enabled          = true
 yolo_thread_period_ms = 50    # target worker-thread cycle (~20 Hz); 3-strip inference is the floor (~20ms)
 yolo_n_strips         = 3
-yolo_strip_overlap_px = 80    # circular-pad margin so a seam-straddling object survives whole
+yolo_strip_overlap_px = 200   # circular-pad margin so a seam-straddling object survives whole. 80→200 so a
+                              # chair on the wraparound seam (directly behind the robot) stays whole in one
+                              # strip. Clamped to strip_w/2=320; each strip → 1040px (1.6× squash, was 1.25×).
 yolo_merge_iou        = 0.5   # cross-strip box IoU above which two strips' boxes are the same object
 publish_masks         = true  # emit ricoh detections into the shared "masks" node as no-depth bearing slices (Part B)
 azimuth_offset_rad    = 0.0   # additive zero correction for the panorama-column→bearing map (PROVISIONAL — calibrate live)
-azimuth_sign          = 1.0   # +1 / -1: flip if the panorama is mirrored (rel moves the wrong way)
-log_bearings          = false # true → print each 360 detection's label + robot-relative & absolute bearing (calibration)
+azimuth_sign          = -1.0  # panorama is mirrored (verified 2026-07-04 via chair front/left/right/back placement):
+                              # left→+90, right→−90 with sign=-1, offset=0. Matches room-frame atan2(obj−robot).
 
 [Ice]
 Warn.Connections = "0"

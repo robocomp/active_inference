@@ -77,7 +77,15 @@ public:
     // model would start at 0,0; consumed once by ensure_instance.
     void note_birth(std::uint64_t id, const Eigen::Vector2f& xy) { birth_seeds_[id] = xy; }
 
+    // Part C-birth: initialise `inst` as a bearing-only hypothesis — belief mean placed at `nominal_range`
+    // along the ray from `robot_xy` at `azimuth`, with a broad along-ray / tight across-ray Σ (see
+    // ChairBelief::seed_bearing). Sets ai2_initialized + is_bearing_hypothesis and writes the mean into the
+    // model so the scene-graph/viewer show the hypothesis on the ray. No depth mask needed.
+    void seed_bearing_hypothesis(ChairInstance& inst, const Eigen::Vector2f& robot_xy, float azimuth,
+                                 float nominal_range, float along_std, float across_std, float yaw_std);
+
 private:
+    ChairBeliefParams make_belief_params() const;   // config → belief params (shared by init + hypothesis seed)
     // room_T_zed (camera→room). pose_ts_ms pins the room→body hop to the mask's capture time (Nearest RT
     // query); the rigid body→zed mount is always queried latest. 0 → current pose.
     std::optional<Eigen::Matrix4d> room_T_zed_matrix(std::uint64_t pose_ts_ms = 0) const;

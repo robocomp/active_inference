@@ -68,6 +68,15 @@ struct TableConfig
     float lidar_select_margin_m = 0.10f; // pre-select returns within (birth half-extent + margin), all z up to top
     std::string lidar_frame_node = "lidar3D"; // DSR node whose frame the raw sweep is in (room←this transform)
     float lidar_coverage_n0     = 60.0f; // LiDAR ray count for FULL weight; fewer → proportionally down-weighted
+    // Angular-coverage weighting: precision ×= (1−R)^p, R = mean-resultant length of return bearings about the
+    // centre. p=0 disables (flat), p=1 = pure circular variance. Down-weights ONE-SIDED sweeps (which over-
+    // commit the near-square w↔h mode from a single view); the recursive belief still accumulates over an orbit.
+    float lidar_coverage_ang_power = 1.0f;
+
+    // Divergence safety net (mirrors bottle_concept). A static table cannot physically move this far in one
+    // frame, so a GN step whose centre jump exceeds it is an OUTLIER frame (corrupted mask cloud / one-sided
+    // LiDAR runaway) → reject the update, restore state+Σ, widen Σ. 0 disables. Prevents the cx=−200m runaway.
+    float max_step_m            = 1.0f;
 
     // Upload the table pose covariance onto the room→table RT edge (rt_covariance_att, 6×6 SE3),
     // mapped from the belief's full Σ over [cx,cy,H,w,h,yaw]: x←cx, y←cy, z←H/2, yaw←ψ; roll/pitch are

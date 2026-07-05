@@ -22,6 +22,44 @@ ChairFitter::ChairFitter(std::shared_ptr<DSR::DSRGraph> graph,
       mask_ingestor_(mask_ingestor), scene_graph_(scene_graph)
 {}
 
+ChairBeliefParams ChairFitter::make_belief_params() const
+{
+    ChairBeliefParams p;
+    p.tpl_seat_w = cfg_.tracker_birth_seat_w;   // fixed standard-chair template (pose-only belief)
+    p.tpl_seat_d = cfg_.tracker_birth_seat_d;
+    p.tpl_seat_h = cfg_.tracker_birth_seat_h;
+    p.tpl_back_h = cfg_.tracker_birth_back_h;
+    p.sigma_base_m         = cfg_.ai2_sigma_base_m;
+    p.clutter_frac         = cfg_.ai2_clutter_frac;
+    p.clutter_scale_m      = cfg_.ai2_clutter_scale_m;
+    p.process_std_m        = cfg_.ai2_process_std_m;
+    p.process_std_yaw      = cfg_.ai2_process_std_yaw;
+    p.floor_z              = cfg_.ai2_floor_z;
+    p.floor_std            = cfg_.ai2_floor_std;
+    p.common_mode_pos_std  = cfg_.ai2_common_mode_pos_std;
+    p.common_mode_yaw_std  = cfg_.ai2_common_mode_yaw_std;
+    p.gn_iters             = cfg_.ai2_gn_iters;
+    return p;
+}
+
+void ChairFitter::seed_bearing_hypothesis(ChairInstance& inst, const Eigen::Vector2f& robot_xy, float azimuth,
+                                          float nominal_range, float along_std, float across_std, float yaw_std)
+{
+    ChairBeliefState s0;
+    s0.cx  = robot_xy.x() + nominal_range * std::cos(azimuth);
+    s0.cy  = robot_xy.y() + nominal_range * std::sin(azimuth);
+    s0.yaw = 0.0f;                                    // unknown; the broad yaw_std below owns that
+    inst.ai2_belief = ChairBelief(s0, make_belief_params());
+    inst.ai2_belief.seed_bearing(robot_xy, azimuth, along_std, across_std, yaw_std);
+    inst.ai2_initialized       = true;
+    inst.is_bearing_hypothesis = true;
+    inst.hypothesis_azimuth    = azimuth;   // Orient affordance target yaw = the bearing to look toward
+    // Write the mean into the model so the scene-graph publish / viewer show the hypothesis on the ray.
+    ChairState ms = inst.model.state();
+    ms.cx = s0.cx; ms.cy = s0.cy; ms.yaw = s0.yaw;
+    inst.model.set_state(ms);
+}
+
 void ChairFitter::set_chain_cov_source(DSR::InnerGaussianAPI* gaussian, std::string source_frame, bool enabled)
 {
     gaussian_          = gaussian;
@@ -282,27 +320,18 @@ float ChairFitter::run_inference(ChairInstance& inst, const ChairObservation& ob
                     s0.yaw = std::atan2(d.x(), -d.y());
             }
         }
-        ChairBeliefParams p;
-        p.tpl_seat_w = cfg_.tracker_birth_seat_w;   // fixed standard-chair template (pose-only belief)
-        p.tpl_seat_d = cfg_.tracker_birth_seat_d;
-        p.tpl_seat_h = cfg_.tracker_birth_seat_h;
-        p.tpl_back_h = cfg_.tracker_birth_back_h;
-        p.sigma_base_m         = cfg_.ai2_sigma_base_m;
-        p.clutter_frac         = cfg_.ai2_clutter_frac;
-        p.clutter_scale_m      = cfg_.ai2_clutter_scale_m;
-        p.process_std_m        = cfg_.ai2_process_std_m;
-        p.process_std_yaw      = cfg_.ai2_process_std_yaw;
-        p.floor_z              = cfg_.ai2_floor_z;
-        p.floor_std            = cfg_.ai2_floor_std;
-        p.common_mode_pos_std  = cfg_.ai2_common_mode_pos_std;
-        p.common_mode_yaw_std  = cfg_.ai2_common_mode_yaw_std;
-        p.gn_iters             = cfg_.ai2_gn_iters;
-        inst.ai2_belief = ChairBelief(s0, p);
+        inst.ai2_belief = ChairBelief(s0, make_belief_params());
         inst.ai2_initialized = true;
     }
 
     if (observation.has_fresh_data)
+    {
         ingest_observation_voxels(inst, observation);
+        // The glance paid off: a real depth mask arrived → this is no longer a bearing-only hypothesis. The
+        // belief update below collapses the broad along-ray Σ to the observed position; the affordance
+        // switches from Orient to the normal one next cycle.
+        inst.is_bearing_hypothesis = false;
+    }
 
     if (not observation.has_fresh_data)   // freeze-on-stale
     {

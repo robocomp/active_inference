@@ -168,23 +168,48 @@ private:
 	// Media plane (zero-copy DDS); RGBD pixels leave the DSR graph here.
 	SensorMediaPublisher media_;
 
-	// Low-rate check (from compute()): ask zed_camera (MediaPlaneDDS) whether it is
-	// publishing the ZED plane on DDS. If so, relay its descriptor onto the "zed" DSR
-	// node and flip bridge_zed_ off; if not/unreachable, resume bridging + re-advertise
-	// our own descriptor. Keeps a single producer without hardcoded coordination.
-	void negotiate_zed_media_source();
-	// Mirror of negotiate_zed_media_source for the 360 plane: ask ricoh_omni_dds (via
-	// mediaplanedds360_proxy) whether it is publishing; relay its descriptor onto "ricoh"
-	// and flip bridge_ricoh_ off if so, else resume bridging + re-advertise our own.
-	void negotiate_ricoh_media_source();
-	// Two lidar3d_dds producers (helios, bpearl) via mediaplanedds2_proxy/mediaplanedds3_proxy:
-	// relay each descriptor onto its 'helios'/'bpearl' node and stop bridging once both are up.
-	void negotiate_lidar_media_source();
+	// ── Media-source negotiation (table-driven) ──────────────────────────────────
+	// One MediaGroup per sensor plane group; negotiate() runs the same auto/ice/dds
+	// state machine for each: query the producer(s) over MediaPlaneDDS, relay the live
+	// descriptor(s) onto the DSR node(s), and drive the group's bridge flag. When a
+	// producer is absent (auto) it resumes bridging + re-advertises our own descriptor.
+	// The lidar group holds TWO planes (helios+bpearl) that share one bridge_lidar_ and
+	// only stop bridging once BOTH are up. Adding a sensor = one table entry (see
+	// build_media_groups()).
+	struct MediaPlane
+	{
+		std::string node;                                                  // DSR node to relay onto
+		const RoboCompMediaPlaneDDS::MediaPlaneDDSPrxPtr* proxy = nullptr;  // -> generated proxy member
+		std::string last_relayed;                                          // empty = advertising our own
+	};
+	struct MediaGroup
+	{
+		std::string tag;                                                   // log tag ("ZED","360","LiDAR")
+		std::vector<MediaPlane> planes;                                    // 1, or 2 for the lidar pair
+		std::atomic<bool>* bridge = nullptr;                               // shared across the group's planes
+		const std::string* source = nullptr;                              // *_SOURCE selector (auto|ice|dds)
+		const bool* enabled = nullptr;                                     // ENABLE_* gate
+		std::string advertise_node;                                        // node re-advertised when bridging
+		std::vector<std::string> advertise_streams;                        // streams re-advertised when bridging
+	};
+	std::vector<MediaGroup> media_groups_;
+	void build_media_groups();                                             // populate media_groups_ (in initialize)
+	void negotiate(MediaGroup& group);                                     // one tick of the state machine
+	std::string query_descriptor(const RoboCompMediaPlaneDDS::MediaPlaneDDSPrxPtr& proxy);  // safe getMediaDescriptor
 	void relay_media_descriptor(const std::string& node_name, const std::string& descriptor_json);
-	std::string last_relayed_descriptor_;          // zed:   empty = advertising our own descriptor
-	std::string last_relayed_ricoh_descriptor_;    // ricoh: empty = advertising our own descriptor
-	std::string last_relayed_helios_descriptor_;   // lidar helios: empty = advertising our own
-	std::string last_relayed_bpearl_descriptor_;   // lidar bpearl: empty = advertising our own
+
+	// Monitor branch shared by read_rgbd_thread + read_ricoh_thread: while an external DDS
+	// producer owns a single image plane (bridge off), subscribe to it, feed the compute()
+	// heartbeat counter, and print a 5 s ALIVE/SILENT report. `sub` is created on demand via
+	// make_sub and reset by the caller when it resumes producing. Defined in the .cpp (both
+	// instantiations live there). Frame is explicit; Sub is deduced from `sub`.
+	template <class Frame, class Sub>
+	void monitor_external_image_plane(std::unique_ptr<Sub>& sub,
+	                                  const std::type_identity_t<std::function<std::unique_ptr<Sub>()>>& make_sub,
+	                                  std::atomic<std::uint64_t>& frame_counter,
+	                                  std::uint64_t& mon_frames,
+	                                  std::chrono::steady_clock::time_point& report_at,
+	                                  const char* producer, const char* stream_label);
 
 	void waiting_enter();
 	void waiting_loop();

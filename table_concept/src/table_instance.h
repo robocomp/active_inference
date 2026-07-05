@@ -51,6 +51,13 @@ struct TableInstance
     int   dbg_lidar_rays       = 0;
     int   dbg_lidar_raw        = 0;
     float dbg_lidar_resid_m    = -1.0f;
+    float dbg_lidar_meanz_m    = -1.0f;   // mean z of selected returns (room frame) — vs H detects a z-offset
+    float dbg_lidar_topz_m     = -1.0f;   // mean z of the HIGHEST 20% of selected returns ≈ observed tabletop z
+    float dbg_lidar_cov_ang    = -1.0f;   // angular-coverage weight (1−R)^p ∈[0,1]; low ⇒ one-sided sweep
+
+    // Divergence safety net (mirrors bottle): consecutive frames whose centre GN step was rejected as an
+    // outlier (exceeded cfg.max_step_m). Non-zero ⇒ the fit tried to run away and was held.
+    int   frames_diverged      = 0;
 
     int  last_frame_seen    = -1;     // last_sensing_frame_att value read
     int  matched_frames     = 0;      // frames with fresh sensing data

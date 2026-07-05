@@ -43,7 +43,10 @@
 namespace rc::affordance
 {
 
-enum class Policy    { Reach, Servo };
+// Reach  = navigate to the pose, then consume. Servo = navigate to the pose, then run the lock-on
+// micro-search to satisfy the completion predicate. Orient = do NOT navigate; rotate in place toward the
+// affordance's target yaw, then satisfy the predicate (a peripheral "glance" / saccade — no (x,y) target).
+enum class Policy    { Reach, Servo, Orient };
 enum class CompareOp { GE, LE, EQ, NE };
 enum class OnFail    { Consume, Abandon };   // Consume = give up & mark done; Abandon = release for retry
 
@@ -62,6 +65,7 @@ struct Contract
     // they produce this same struct, so the wire format and executor are unaffected.
     static ContractBuilder reach();
     static ContractBuilder servo();
+    static ContractBuilder orient();
 
     Policy policy = Policy::Reach;
 
@@ -100,8 +104,9 @@ struct Contract
 class ContractBuilder
 {
 public:
-    static ContractBuilder reach() { ContractBuilder b; b.c_.policy = Policy::Reach; return b; }
-    static ContractBuilder servo() { ContractBuilder b; b.c_.policy = Policy::Servo; return b; }
+    static ContractBuilder reach()  { ContractBuilder b; b.c_.policy = Policy::Reach;  return b; }
+    static ContractBuilder servo()  { ContractBuilder b; b.c_.policy = Policy::Servo;  return b; }
+    static ContractBuilder orient() { ContractBuilder b; b.c_.policy = Policy::Orient; return b; }
 
     // Servo feedback bindings (ignored under Reach).
     ContractBuilder& center (std::string a)            { c_.err_vec_attr = std::move(a); return *this; }
@@ -127,8 +132,8 @@ public:
     // reach — not per cycle.
     Contract build() const
     {
-        if (c_.policy == Policy::Servo && c_.goal.empty())
-            std::fprintf(stderr, "[affordance] WARNING: servo contract has no completion clause "
+        if ((c_.policy == Policy::Servo || c_.policy == Policy::Orient) && c_.goal.empty())
+            std::fprintf(stderr, "[affordance] WARNING: servo/orient contract has no completion clause "
                                  "(.until/.and_) — it can never complete\n");
         return c_;
     }
@@ -138,12 +143,21 @@ private:
     Contract c_;
 };
 
-inline ContractBuilder Contract::reach() { return ContractBuilder::reach(); }
-inline ContractBuilder Contract::servo() { return ContractBuilder::servo(); }
+inline ContractBuilder Contract::reach()  { return ContractBuilder::reach(); }
+inline ContractBuilder Contract::servo()  { return ContractBuilder::servo(); }
+inline ContractBuilder Contract::orient() { return ContractBuilder::orient(); }
 
 // ─── enum ⇄ string ────────────────────────────────────────────────────────────
-inline std::string_view to_string(Policy p)    { return p == Policy::Servo ? "servo" : "reach"; }
-inline Policy           policy_from(std::string_view s) { return s == "servo" ? Policy::Servo : Policy::Reach; }
+inline std::string_view to_string(Policy p)
+{
+    switch (p) { case Policy::Servo: return "servo"; case Policy::Orient: return "orient"; default: return "reach"; }
+}
+inline Policy policy_from(std::string_view s)
+{
+    if (s == "servo")  return Policy::Servo;
+    if (s == "orient") return Policy::Orient;
+    return Policy::Reach;
+}
 inline std::string_view to_string(CompareOp o)
 {
     switch (o) { case CompareOp::LE: return "le"; case CompareOp::EQ: return "eq"; case CompareOp::NE: return "ne"; default: return "ge"; }

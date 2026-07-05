@@ -56,7 +56,7 @@
 #include <memory>
 
 class FPSCounter;
-namespace rc::media { class LidarSubscriber; }  // zero-copy media-plane LiDAR consumer (keeps fastdds out of MOC)
+namespace rc::media { class LidarPlaneReader; }  // shared zero-copy media-plane LiDAR consumer (keeps fastdds out of MOC)
 
 /**
  * \brief Class SpecificWorker implements the core functionality of the component.
@@ -207,15 +207,14 @@ private:
 		static constexpr int kRequiredLossGraceMs = 3000;
 
 		// ─── Zero-copy media-plane LiDAR source ───────────────────────────────
-		// When params.lidar_use_media is set, the LiDAR point cloud is drained from
-		// the DDS media plane instead of the DSR laser_* graph attributes. The
-		// subscriber is created ONCE in initialize() (main thread, before the control
-		// thread starts): it verifies the producer's lidar node + media descriptor
-		// exist and reads the DDS domain/topic straight from that JSON (no config). If
-		// absent, it falls back to the DSR laser_* path. poll drains the newest frame
-		// (control thread) into the tracker.
-		std::unique_ptr<rc::media::LidarSubscriber> lidar_media_sub_;
-		std::uint64_t last_media_lidar_ts_ = 0;   // dedup by source stamp
+		// Shared multi-plane reader (the same one every agent uses). It prefers the two
+		// per-device planes — "helios" (high) + "bpearl" (low), published in the DEVICE
+		// frame — transforms each to the robot frame via the DSR RT tree and MERGES them
+		// into one scan; it falls back to the fused "lidar3D" plane while robot_concept is
+		// bridging. Subscribers come up lazily inside poll() (throttled), so this is safe
+		// from the Operating control thread. The merged robot-frame scan is fed once per
+		// cycle to the obstacle tracker (which then applies the dynamic room<-robot pose).
+		std::unique_ptr<rc::media::LidarPlaneReader> lidar_reader_;
 		void init_lidar_media();
 		bool poll_lidar_media();
 

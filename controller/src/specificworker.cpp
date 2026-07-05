@@ -19,7 +19,7 @@
 #include "specificworker.h"
 
 #include "../../common/robust_metrics/robust_metrics.h"
-#include "../../common/media_transport/media_transport.h"
+#include "../../common/media_transport/lidar_plane_reader.h"
 
 #include "custom_widget.h"
 #include <fps/fps.h>
@@ -444,6 +444,8 @@ void SpecificWorker::load_params()
 	load_optional("Transforms.overlay_csv_path", params.overlay_csv_path);
 	load_optional("Viewer2D.MaxLidarDrawPoints", params.max_lidar_draw_points);
 	load_optional("Lidar.Name", params.lidar_name);
+	load_optional("Lidar.HeliosName", params.lidar_helios_name);
+	load_optional("Lidar.BpearlName", params.lidar_bpearl_name);
 	load_optional("Lidar.StallTimeoutMs", params.lidar_stall_timeout_ms);
 	load_optional("Target.EdgeType", params.target_edge_type);
 	load_optional_cast<double>("Controller.PoseXYStdSlow", params.pose_xy_std_slow_m);
@@ -500,6 +502,9 @@ void SpecificWorker::load_params()
 	planner_.params.connection_radius_m = params.connection_radius_m;
 	planner_.params.path_sample_spacing_m = std::max(0.1f, params.grid_resolution_m * 1.5f);
 	planner_.params.waypoint_tolerance_m = params.waypoint_tolerance_m;
+
+	// Controller-side LiDAR obstacle creation (false ⇒ residual_concept is the sole obstacle source).
+	load_optional("Controller.ObstacleCreationEnabled", params.obstacle_creation_enabled);
 
 	// Affordance servo ("lock-on") executor — HOW only; WHAT/WHEN is per-affordance (contract).
 	load_optional("Controller.LockOnEnabled", params.lockon_enabled);
@@ -640,11 +645,9 @@ void SpecificWorker::control_loop()
 		}
 
 		// 2) Lidar decode off the GUI thread. LiDAR comes ONLY from the zero-copy media
-		//    plane (robot_concept no longer publishes the laser_* node to DSR), so there
-		//    is no DSR fallback. handle_lidar_points dedups by timestamp.
-		bool fresh_lidar = false;
-		if (lidar_media_sub_)
-			fresh_lidar = poll_lidar_media();
+		//    plane (robot_concept no longer publishes the laser_* node to DSR). The shared
+		//    reader brings up its subscribers lazily and dedups by timestamp.
+		bool fresh_lidar = poll_lidar_media();
 		if (fresh_lidar)
 		{
 			last_lidar_rx_ = std::chrono::steady_clock::now();
@@ -686,52 +689,44 @@ void SpecificWorker::control_loop()
 
 void SpecificWorker::init_lidar_media()
 {
-	// One-shot, on the main thread, before the control thread starts. Uses the shared
-	// descriptor-driven factory (rc::media::make_lidar_subscriber_from_graph) so every
-	// agent's subscriber init is identical: it verifies the sensor node + descriptor
-	// exist and reads the DDS domain/topic from that JSON (no config).
-	if (!params.lidar_use_media || lidar_media_sub_ || !G)
+	// Build the shared multi-plane reader on the main thread (graph already loaded). Its
+	// subscribers come up lazily inside poll() from the Operating control thread (throttled,
+	// descriptor-driven) — the sanctioned pattern; nothing touches DDS here. Prefers the two
+	// per-device planes (helios + bpearl, DEVICE frame) and falls back to the fused lidar3D
+	// plane; inner_eigen_api_ backs the device->robot RT transform + merge.
+	if (!params.lidar_use_media || lidar_reader_ || !G)
 		return;
-	lidar_media_sub_ = rc::media::make_lidar_subscriber_from_graph(*G, params.lidar_name, "lidar");
-	if (!lidar_media_sub_)
-		qWarning() << "[Lidar] media-plane LiDAR not available at init (is robot_concept up first?)"
-		           << "— no LiDAR source; the stream watchdog will hold the robot until it appears";
+	lidar_reader_ = std::make_unique<rc::media::LidarPlaneReader>(
+		G, inner_eigen_api_.get(),
+		std::vector<std::string>{params.lidar_helios_name, params.lidar_bpearl_name},
+		params.lidar_name, "lidar");
 }
 
 bool SpecificWorker::poll_lidar_media()
 {
-	if (!lidar_media_sub_)
+	if (!lidar_reader_)
 		return false;
 
-	bool ingested = false;
-	// Drain all pending frames (non-blocking); dedup by source stamp so only fresh
-	// scans reach the tracker. The RT transforms still come from the DSR graph.
-	lidar_media_sub_->poll([this, &ingested](const rc::media::LidarFrame &f, std::int64_t)
-	{
-		const auto ts = static_cast<std::uint64_t>(f.stamp_ms());
-		if (ts != 0 && ts <= last_media_lidar_ts_)
-			return;
-		last_media_lidar_ts_ = ts;
+	// One shared call: newest helios + bpearl sweeps merged into the ROBOT frame (static mounts),
+	// or the fused lidar3D sweep while bridging. interpolate=false — device->robot only crosses the
+	// static mount edges; the dynamic room<-robot leg is applied downstream by the tracker at the
+	// scan stamp. graph_state().robot_name is the frame the tracker treats as identity.
+	const std::string &robot_name = world_model_.graph_state().robot_name;
+	if (robot_name.empty())
+		return false;
 
-		const std::uint32_t stride = f.stride() ? f.stride() : 3u;
-		const std::uint32_t count  = f.count();
-		const auto &pts = f.points();
-		std::vector<float> xs, ys, zs;
-		xs.reserve(count); ys.reserve(count); zs.reserve(count);
-		for (std::uint32_t i = 0; i < count; ++i)
-		{
-			const std::size_t base = static_cast<std::size_t>(i) * stride;
-			if (base + 2 >= pts.size())
-				break;
-			xs.push_back(pts[base]);
-			ys.push_back(pts[base + 1]);
-			zs.push_back(pts[base + 2]);
-		}
-		if (obstacle_tracker_.handle_lidar_points(params.lidar_name,
-		                                          std::move(xs), std::move(ys), std::move(zs), ts))
-			ingested = true;
-	});
-	return ingested;
+	const auto sweep = lidar_reader_->poll(robot_name, /*interpolate=*/false);
+	if (!sweep.has_value() || sweep->points.empty())
+		return false;
+
+	std::vector<float> xs, ys, zs;
+	xs.reserve(sweep->points.size()); ys.reserve(sweep->points.size()); zs.reserve(sweep->points.size());
+	for (const auto &p : sweep->points) { xs.push_back(p.x()); ys.push_back(p.y()); zs.push_back(p.z()); }
+
+	// Feed as a single robot-frame scan: the tracker sees robot<-robot = identity for the height
+	// filter and applies the dynamic room<-robot pose at the merged stamp. Dedup is by that stamp.
+	return obstacle_tracker_.handle_lidar_points(robot_name, std::move(xs), std::move(ys), std::move(zs),
+	                                             static_cast<std::uint64_t>(sweep->stamp_ms));
 }
 
 void SpecificWorker::stop_control_thread()

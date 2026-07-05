@@ -89,6 +89,15 @@ ChairConfig load_chair_config(const ConfigLoader& cfg)
     out.tracker_birth_seat_h     = getf("Tracker.BirthSeatH",       0.45f);
     out.tracker_birth_back_h     = getf("Tracker.BirthBackH",       0.45f);
     out.tracker_nll_cost         = getb("Tracker.NllCost",          false);
+    out.bearing_birth_enabled    = getb("Bearing.BirthEnabled",     false);
+    out.bearing_confirm_gate_rad = getf("Bearing.ConfirmGateRad",   0.17f);
+    out.bearing_birth_frames     = geti("Bearing.BirthFrames",      8);
+    out.bearing_match_rad        = getf("Bearing.MatchRad",         0.17f);
+    out.bearing_max_miss         = geti("Bearing.MaxMiss",          4);
+    out.bearing_nominal_range_m  = getf("Bearing.NominalRangeM",    2.0f);
+    out.bearing_along_std_m      = getf("Bearing.AlongStdM",        3.0f);
+    out.bearing_across_std_m     = getf("Bearing.AcrossStdM",       0.30f);
+    out.bearing_yaw_std_rad      = getf("Bearing.YawStdRad",        3.14f);
 
     std::print("chair_concept: configuration loaded.\n");
     return out;

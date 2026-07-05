@@ -15,6 +15,7 @@ LIST(APPEND SOURCES
   # Zero-copy media plane (lidar3D consumer for the YOLO-independent range factor). Mirrors room_concept:
   # media_transport.cpp is type-agnostic but references all IDL frame types, so link every PubSubTypes pair.
   ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/media_transport.cpp
+  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/lidar_plane_reader.cpp
   ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/image_framePubSubTypes.cxx
   ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/image_frameTypeObjectSupport.cxx
   ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/image360_framePubSubTypes.cxx
