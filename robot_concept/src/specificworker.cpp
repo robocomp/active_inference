@@ -30,6 +30,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstring>
+#include <iterator>
 #include <iostream>
 #include <print>
 
@@ -281,11 +282,10 @@ void SpecificWorker::initialize()
 	// Build the media-negotiation table now that the generated proxies are wired.
 	build_media_groups();
 
-	// One-shot negotiation before starting the bridge threads: if a producer is already
-	// publishing its plane on DDS, adopt its descriptor now and start with bridging OFF
-	// (compute() then re-checks at low rate to follow producers up/down).
-	for (auto& g : media_groups_)
-		negotiate(g);
+	// One bounded negotiation round before starting the bridge threads: if a producer is
+	// already publishing its plane on DDS, adopt its descriptor now and start with bridging
+	// OFF (compute() then re-checks — non-blocking — at low rate to follow producers up/down).
+	prime_media_groups();
 
 	// Start only the reader threads whose stream is enabled — a gated-off sensor
 	// spins up no Ice proxy traffic at all.
@@ -387,43 +387,42 @@ void SpecificWorker::compute()
 		const double f_helios = static_cast<double>(hl - last_helios) / dt;
 		const double f_bpearl = static_cast<double>(bp - last_bpearl) / dt;
 		(void)f_lidar;
-		// Print only when a rate moves by >= this many Hz, so steady-state jitter doesn't tick every sample.
-		constexpr double kHzPrintDelta = 1.0;
-		static double p_rgbd = -1e9, p_imu = -1e9, p_ricoh = -1e9;
-		// ZED source label: "off" when the whole ZED path is gated out (no reader thread),
-		// "local" while robot_concept bridges Ice→media itself, "ext-DDS" once negotiation
-		// hands the plane to zed_camera (bridge_zed_ off). Reprint on a source flip so the
-		// transition is visible even when the two source rates happen to match.
-		const char* zed_src = not params.ENABLE_ZED ? "off"
-		                    : bridge_zed_.load(std::memory_order_relaxed) ? "local" : "ext-DDS";
-		// Ricoh source label: same semantics as zed_src — "off" when the 360 path is gated
-		// out, "local" while robot_concept bridges Ice→media itself, "ext-DDS" once negotiation
-		// hands the plane to ricoh_omni_dds (bridge_ricoh_ off).
-		const char* ricoh_src = not params.ENABLE_RICOH ? "off"
-		                      : bridge_ricoh_.load(std::memory_order_relaxed) ? "local" : "ext-DDS";
-		// LiDAR source label (shared by helios+bpearl): "off" | "local" (bridging) | "ext-DDS".
-		const char* lidar_src = not params.ENABLE_LIDAR ? "off"
-		                      : bridge_lidar_.load(std::memory_order_relaxed) ? "local" : "ext-DDS";
-		// IMU has no external DDS producer: always robot_concept-local (or off).
-		const char* imu_src = not params.ENABLE_IMU ? "off" : "local";
-		static const char* p_zed_src = nullptr;
-		static const char* p_ricoh_src = nullptr;
-		static double p_helios = -1e9, p_bpearl = -1e9;
-		static const char* p_lidar_src = nullptr;
-		if (std::abs(f_rgbd - p_rgbd) >= kHzPrintDelta
-			or std::abs(f_helios - p_helios) >= kHzPrintDelta
-			or std::abs(f_bpearl - p_bpearl) >= kHzPrintDelta
-			or std::abs(f_imu - p_imu) >= kHzPrintDelta
-			or std::abs(f_ricoh - p_ricoh) >= kHzPrintDelta
-			or zed_src != p_zed_src
-			or lidar_src != p_lidar_src
-			or ricoh_src != p_ricoh_src)
+		// Per-thread heartbeat, one table row each. src label: "off" when the whole path is
+		// gated out (no reader thread), "local" while robot_concept bridges Ice→media itself,
+		// "ext-DDS" once negotiation hands the plane to the external producer (bridge off). IMU
+		// has no external producer (nullptr bridge) → always "local"/"off". Adding a sensor is
+		// one row here. Print only when a rate moves >= kHzPrintDelta or a src label flips, so
+		// steady-state jitter doesn't reprint every sample.
+		const auto src_label = [](bool enabled, const std::atomic<bool>* bridge) -> const char*
 		{
-			qInfo().noquote() << QString::asprintf(
-				"[ZEDThread:%s] %5.1f Hz | [HeliosThread:%s] %5.1f Hz | [BpearlThread:%s] %5.1f Hz | [IMUThread:%s] %5.1f Hz | [Ricoh360Thread:%s] %5.1f Hz",
-				zed_src, f_rgbd, lidar_src, f_helios, lidar_src, f_bpearl, imu_src, f_imu, ricoh_src, f_ricoh);
-			p_rgbd = f_rgbd; p_helios = f_helios; p_bpearl = f_bpearl; p_imu = f_imu; p_ricoh = f_ricoh;
-			p_zed_src = zed_src; p_lidar_src = lidar_src; p_ricoh_src = ricoh_src;
+			if (not enabled)         return "off";
+			if (bridge == nullptr)   return "local";   // no external producer (IMU)
+			return bridge->load(std::memory_order_relaxed) ? "local" : "ext-DDS";
+		};
+		struct FpsField { const char* label; double hz; const char* src; };
+		const FpsField fields[] = {
+			{ "ZEDThread",      f_rgbd,   src_label(params.ENABLE_ZED,   &bridge_zed_)   },
+			{ "HeliosThread",   f_helios, src_label(params.ENABLE_LIDAR, &bridge_lidar_) },
+			{ "BpearlThread",   f_bpearl, src_label(params.ENABLE_LIDAR, &bridge_lidar_) },
+			{ "IMUThread",      f_imu,    src_label(params.ENABLE_IMU,   nullptr)        },
+			{ "Ricoh360Thread", f_ricoh,  src_label(params.ENABLE_RICOH, &bridge_ricoh_) },
+		};
+		constexpr int NFIELDS = static_cast<int>(std::size(fields));
+		constexpr double kHzPrintDelta = 1.0;
+		static double      prev_hz[NFIELDS]  = { -1e9, -1e9, -1e9, -1e9, -1e9 };
+		static const char* prev_src[NFIELDS] = { nullptr, nullptr, nullptr, nullptr, nullptr };
+		bool changed = false;
+		for (int k = 0; k < NFIELDS; ++k)
+			if (std::abs(fields[k].hz - prev_hz[k]) >= kHzPrintDelta or fields[k].src != prev_src[k])
+				changed = true;
+		if (changed)
+		{
+			QString line;
+			for (int k = 0; k < NFIELDS; ++k)
+				line += QString::asprintf("%s[%s:%s] %5.1f Hz",
+				                          k ? " | " : "", fields[k].label, fields[k].src, fields[k].hz);
+			qInfo().noquote() << line;
+			for (int k = 0; k < NFIELDS; ++k) { prev_hz[k] = fields[k].hz; prev_src[k] = fields[k].src; }
 		}
 		last = now; last_rgbd = r; last_lidar = l; last_imu = i; last_ricoh = c;
 		last_helios = hl; last_bpearl = bp;
@@ -865,32 +864,54 @@ void SpecificWorker::build_media_groups()
 	// The lidar group holds BOTH physical lidars under a single shared bridge_lidar_: it only
 	// stops bridging once BOTH relay a descriptor (see negotiate()). advertise_node/-streams is
 	// what robot_concept re-advertises as its own plane while it is the producer (bridging).
-	media_groups_ = {
-		{ .tag = "ZED",
-		  .planes = { { .node = "zed", .proxy = &mediaplanedds_proxy } },
-		  .bridge = &bridge_zed_, .source = &params.ZED_SOURCE, .enabled = &params.ENABLE_ZED,
-		  .advertise_node = "zed", .advertise_streams = {"rgb", "depth"} },
-		{ .tag = "360",
-		  .planes = { { .node = "ricoh", .proxy = &mediaplanedds1_proxy } },
-		  .bridge = &bridge_ricoh_, .source = &params.RICOH_SOURCE, .enabled = &params.ENABLE_RICOH,
-		  .advertise_node = "ricoh", .advertise_streams = {"rgb360"} },
-		{ .tag = "LiDAR",
-		  .planes = { { .node = "helios", .proxy = &mediaplanedds2_proxy },
-		              { .node = "bpearl", .proxy = &mediaplanedds3_proxy } },
-		  .bridge = &bridge_lidar_, .source = &params.LIDAR_SOURCE, .enabled = &params.ENABLE_LIDAR,
-		  .advertise_node = "lidar3D", .advertise_streams = {"lidar"} },
+	// Built imperatively (not a braced initializer_list): MediaPlane holds a std::future and is
+	// therefore move-only, which an initializer_list can't hold.
+	const auto add_plane = [](MediaGroup& g, std::string node,
+	                          const RoboCompMediaPlaneDDS::MediaPlaneDDSPrxPtr* prx)
+	{
+		auto& p = g.planes.emplace_back();
+		p.node = std::move(node);
+		p.proxy = prx;
 	};
+
+	media_groups_.clear();
+	media_groups_.reserve(3);
+
+	auto& zed = media_groups_.emplace_back();
+	zed.tag = "ZED"; zed.bridge = &bridge_zed_; zed.source = &params.ZED_SOURCE;
+	zed.enabled = &params.ENABLE_ZED; zed.advertise_node = "zed"; zed.advertise_streams = {"rgb", "depth"};
+	add_plane(zed, "zed", &mediaplanedds_proxy);
+
+	auto& ricoh = media_groups_.emplace_back();
+	ricoh.tag = "360"; ricoh.bridge = &bridge_ricoh_; ricoh.source = &params.RICOH_SOURCE;
+	ricoh.enabled = &params.ENABLE_RICOH; ricoh.advertise_node = "ricoh"; ricoh.advertise_streams = {"rgb360"};
+	add_plane(ricoh, "ricoh", &mediaplanedds1_proxy);
+
+	auto& lidar = media_groups_.emplace_back();
+	lidar.tag = "LiDAR"; lidar.bridge = &bridge_lidar_; lidar.source = &params.LIDAR_SOURCE;
+	lidar.enabled = &params.ENABLE_LIDAR; lidar.advertise_node = "lidar3D"; lidar.advertise_streams = {"lidar"};
+	add_plane(lidar, "helios", &mediaplanedds2_proxy);
+	add_plane(lidar, "bpearl", &mediaplanedds3_proxy);
 }
 
-std::string SpecificWorker::query_descriptor(const RoboCompMediaPlaneDDS::MediaPlaneDDSPrxPtr& proxy)
+void SpecificWorker::prime_media_groups()
 {
-	std::string d;
-	if (proxy)
-	{
-		try { d = proxy->getMediaDescriptor(); }
-		catch (const Ice::Exception&) { d.clear(); }   // peer down → treated as absent
-	}
-	return d;
+	// One bounded round at startup so adoption is near-immediate instead of waiting for the
+	// first ~3 s compute() tick: fire every plane's async query concurrently, wait a short
+	// bounded time for the in-flight results (down peers fail fast on localhost), then run a
+	// normal negotiate() pass to harvest + decide. Bounded blocking here only, once.
+	for (auto& g : media_groups_)
+		if (*g.enabled and *g.source != "ice")
+			for (auto& p : g.planes)
+				if (p.proxy and *p.proxy)
+					try { p.pending = (*p.proxy)->getMediaDescriptorAsync(); }
+					catch (const Ice::Exception&) { p.present = false; }
+	for (auto& g : media_groups_)
+		for (auto& p : g.planes)
+			if (p.pending.valid())
+				p.pending.wait_for(std::chrono::milliseconds(300));   // concurrent -> total ~= max, not sum
+	for (auto& g : media_groups_)
+		negotiate(g);
 }
 
 void SpecificWorker::negotiate(MediaGroup& g)
@@ -905,19 +926,32 @@ void SpecificWorker::negotiate(MediaGroup& g)
 		return;
 	}
 
-	// Query every plane's producer and relay each live descriptor onto its DSR node.
-	// all_up gates the group's bridge: a single-plane group needs its one producer up; the
-	// lidar group needs BOTH (helios+bpearl) up before it will stop bridging.
+	// Non-blocking per plane: harvest a completed async query (if ready), relay its descriptor,
+	// then relaunch. p.present carries the last completed result across ticks so the compute()
+	// thread never blocks on getMediaDescriptor(). all_up gates the group's bridge: a single-plane
+	// group needs its one producer up; the lidar group needs BOTH (helios+bpearl) up.
 	bool all_up = true;
 	for (auto& p : g.planes)
 	{
-		const std::string desc = query_descriptor(*p.proxy);
-		if (desc.empty()) { all_up = false; continue; }   // peer absent -> keep/resume bridging
-		if (desc != p.last_relayed)
+		if (p.pending.valid() and p.pending.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
 		{
-			relay_media_descriptor(p.node, desc);
-			p.last_relayed = desc;
+			std::string desc;
+			try { desc = p.pending.get(); }
+			catch (const Ice::Exception&) { desc.clear(); }   // peer down/hung -> absent
+			p.present = not desc.empty();
+			if (p.present and desc != p.last_relayed)
+			{
+				relay_media_descriptor(p.node, desc);
+				p.last_relayed = desc;
+			}
 		}
+		if (not p.pending.valid() and p.proxy and *p.proxy)
+		{
+			try { p.pending = (*p.proxy)->getMediaDescriptorAsync(); }
+			catch (const Ice::Exception&) { p.present = false; }   // couldn't even dispatch
+		}
+		if (not p.present)
+			all_up = false;   // peer absent -> keep/resume bridging
 	}
 
 	// Forced "dds": always treat the external producer(s) as authoritative (never bridge).

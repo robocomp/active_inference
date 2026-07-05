@@ -26,6 +26,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -181,6 +182,8 @@ private:
 		std::string node;                                                  // DSR node to relay onto
 		const RoboCompMediaPlaneDDS::MediaPlaneDDSPrxPtr* proxy = nullptr;  // -> generated proxy member
 		std::string last_relayed;                                          // empty = advertising our own
+		std::future<std::string> pending;                                  // in-flight async getMediaDescriptor
+		bool present = false;                                              // last completed query had a descriptor
 	};
 	struct MediaGroup
 	{
@@ -194,8 +197,8 @@ private:
 	};
 	std::vector<MediaGroup> media_groups_;
 	void build_media_groups();                                             // populate media_groups_ (in initialize)
-	void negotiate(MediaGroup& group);                                     // one tick of the state machine
-	std::string query_descriptor(const RoboCompMediaPlaneDDS::MediaPlaneDDSPrxPtr& proxy);  // safe getMediaDescriptor
+	void prime_media_groups();                                             // one bounded round so startup adoption is near-immediate
+	void negotiate(MediaGroup& group);                                     // one non-blocking tick (async poll-then-relaunch)
 	void relay_media_descriptor(const std::string& node_name, const std::string& descriptor_json);
 
 	// Monitor branch shared by read_rgbd_thread + read_ricoh_thread: while an external DDS
