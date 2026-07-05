@@ -164,6 +164,18 @@ void SpecificWorker::initialize()
 	qInfo() << "[Media] ricoh_source =" << QString::fromStdString(params.RICOH_SOURCE)
 	        << "(auto=negotiate, ice=always bridge, dds=always monitor external)";
 
+	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.lidar_source", params.LIDAR_SOURCE);
+	std::ranges::transform(params.LIDAR_SOURCE, params.LIDAR_SOURCE.begin(), ::tolower);
+	if (params.LIDAR_SOURCE != "auto" and params.LIDAR_SOURCE != "ice" and params.LIDAR_SOURCE != "dds")
+	{
+		qWarning() << "[Media] unknown Media.lidar_source" << QString::fromStdString(params.LIDAR_SOURCE)
+		           << "— falling back to 'auto'";
+		params.LIDAR_SOURCE = "auto";
+	}
+	bridge_lidar_.store(params.LIDAR_SOURCE != "dds", std::memory_order_relaxed);
+	qInfo() << "[Media] lidar_source =" << QString::fromStdString(params.LIDAR_SOURCE)
+	        << "(auto=negotiate, ice=always bridge, dds=always monitor external)";
+
 	qInfo() << "[DSR Upload Rates] rgb=" << params.DSR_RGB_FPS
 	        << "depth=" << params.DSR_DEPTH_FPS
 	        << "lidar=" << params.DSR_LIDAR_FPS
@@ -360,6 +372,7 @@ void SpecificWorker::compute()
 
 	static auto   last      = std::chrono::steady_clock::now();
 	static std::uint64_t last_rgbd = 0, last_lidar = 0, last_imu = 0, last_ricoh = 0;
+	static std::uint64_t last_helios = 0, last_bpearl = 0;
 	const auto    now = std::chrono::steady_clock::now();
 	const double  dt  = std::chrono::duration<double>(now - last).count();
 	if (dt >= 1.0 / 3.0)   // sample at ~3 Hz, but only PRINT when the rates change (no repeated blocks)
@@ -368,13 +381,18 @@ void SpecificWorker::compute()
 		const std::uint64_t l = lidar_frames_.load(std::memory_order_relaxed);
 		const std::uint64_t i = imu_frames_.load(std::memory_order_relaxed);
 		const std::uint64_t c = ricoh_frames_.load(std::memory_order_relaxed);
-		const double f_rgbd  = static_cast<double>(r - last_rgbd)  / dt;
-		const double f_lidar = static_cast<double>(l - last_lidar) / dt;
-		const double f_imu   = static_cast<double>(i - last_imu)   / dt;
-		const double f_ricoh = static_cast<double>(c - last_ricoh) / dt;
+		const std::uint64_t hl = helios_frames_.load(std::memory_order_relaxed);
+		const std::uint64_t bp = bpearl_frames_.load(std::memory_order_relaxed);
+		const double f_rgbd   = static_cast<double>(r - last_rgbd)  / dt;
+		const double f_lidar  = static_cast<double>(l - last_lidar) / dt;
+		const double f_imu    = static_cast<double>(i - last_imu)   / dt;
+		const double f_ricoh  = static_cast<double>(c - last_ricoh) / dt;
+		const double f_helios = static_cast<double>(hl - last_helios) / dt;
+		const double f_bpearl = static_cast<double>(bp - last_bpearl) / dt;
+		(void)f_lidar;
 		// Print only when a rate moves by >= this many Hz, so steady-state jitter doesn't tick every sample.
 		constexpr double kHzPrintDelta = 1.0;
-		static double p_rgbd = -1e9, p_lidar = -1e9, p_imu = -1e9, p_ricoh = -1e9;
+		static double p_rgbd = -1e9, p_imu = -1e9, p_ricoh = -1e9;
 		// ZED source label: "off" when the whole ZED path is gated out (no reader thread),
 		// "local" while robot_concept bridges Ice→media itself, "ext-DDS" once negotiation
 		// hands the plane to zed_camera (bridge_zed_ off). Reprint on a source flip so the
@@ -386,22 +404,32 @@ void SpecificWorker::compute()
 		// hands the plane to ricoh_omni_dds (bridge_ricoh_ off).
 		const char* ricoh_src = not params.ENABLE_RICOH ? "off"
 		                      : bridge_ricoh_.load(std::memory_order_relaxed) ? "local" : "ext-DDS";
+		// LiDAR source label (shared by helios+bpearl): "off" | "local" (bridging) | "ext-DDS".
+		const char* lidar_src = not params.ENABLE_LIDAR ? "off"
+		                      : bridge_lidar_.load(std::memory_order_relaxed) ? "local" : "ext-DDS";
+		// IMU has no external DDS producer: always robot_concept-local (or off).
+		const char* imu_src = not params.ENABLE_IMU ? "off" : "local";
 		static const char* p_zed_src = nullptr;
 		static const char* p_ricoh_src = nullptr;
+		static double p_helios = -1e9, p_bpearl = -1e9;
+		static const char* p_lidar_src = nullptr;
 		if (std::abs(f_rgbd - p_rgbd) >= kHzPrintDelta
-			or std::abs(f_lidar - p_lidar) >= kHzPrintDelta
+			or std::abs(f_helios - p_helios) >= kHzPrintDelta
+			or std::abs(f_bpearl - p_bpearl) >= kHzPrintDelta
 			or std::abs(f_imu - p_imu) >= kHzPrintDelta
 			or std::abs(f_ricoh - p_ricoh) >= kHzPrintDelta
 			or zed_src != p_zed_src
+			or lidar_src != p_lidar_src
 			or ricoh_src != p_ricoh_src)
 		{
 			qInfo().noquote() << QString::asprintf(
-				"[ZEDThread:%s] %5.1f Hz | [LidarThread] %5.1f Hz | [IMUThread] %5.1f Hz | [Ricoh360Thread:%s] %5.1f Hz",
-				zed_src, f_rgbd, f_lidar, f_imu, ricoh_src, f_ricoh);
-			p_rgbd = f_rgbd; p_lidar = f_lidar; p_imu = f_imu; p_ricoh = f_ricoh;
-			p_zed_src = zed_src; p_ricoh_src = ricoh_src;
+				"[ZEDThread:%s] %5.1f Hz | [HeliosThread:%s] %5.1f Hz | [BpearlThread:%s] %5.1f Hz | [IMUThread:%s] %5.1f Hz | [Ricoh360Thread:%s] %5.1f Hz",
+				zed_src, f_rgbd, lidar_src, f_helios, lidar_src, f_bpearl, imu_src, f_imu, ricoh_src, f_ricoh);
+			p_rgbd = f_rgbd; p_helios = f_helios; p_bpearl = f_bpearl; p_imu = f_imu; p_ricoh = f_ricoh;
+			p_zed_src = zed_src; p_lidar_src = lidar_src; p_ricoh_src = ricoh_src;
 		}
 		last = now; last_rgbd = r; last_lidar = l; last_imu = i; last_ricoh = c;
+		last_helios = hl; last_bpearl = bp;
 	}
 
 	// Low-rate media-source negotiation (~every 3 s): are zed_camera / ricoh_omni_dds
@@ -412,6 +440,7 @@ void SpecificWorker::compute()
 	{
 		negotiate_zed_media_source();
 		negotiate_ricoh_media_source();
+		negotiate_lidar_media_source();
 		last_neg = now;
 	}
 }
@@ -462,8 +491,31 @@ void SpecificWorker::read_lidar_thread()
 		? std::chrono::milliseconds(1000 / params.DSR_LIDAR_FPS)
 		: std::chrono::milliseconds(0);
 	auto last_lidar_upload = std::chrono::steady_clock::time_point{};
+	// DDS monitors for the two external lidar planes (created on demand once their
+	// descriptors are relayed onto the helios/bpearl nodes); reset when we bridge again.
+	std::unique_ptr<rc::media::LidarSubscriber> helios_sub, bpearl_sub;
 	while (!stop_lidar_thread && !shutting_down_.load())
 	{
+		if (not bridge_lidar_.load(std::memory_order_relaxed))
+		{
+			// lidar3d_dds owns the planes. Don't bridge — SUBSCRIBE to helios+bpearl only to
+			// report their FPS ([HeliosThread]/[BpearlThread] in compute()).
+			if (not helios_sub) helios_sub = rc::media::make_lidar_subscriber_from_graph(*G, "helios", "lidar");
+			if (not bpearl_sub) bpearl_sub = rc::media::make_lidar_subscriber_from_graph(*G, "bpearl", "lidar");
+			if (helios_sub)   // wait_and_poll paces the loop (blocks up to 100 ms)
+				helios_frames_.fetch_add(
+					helios_sub->wait_and_poll([](const rc::media::LidarFrame&, std::int64_t){}, 100),
+					std::memory_order_relaxed);
+			if (bpearl_sub)
+				bpearl_frames_.fetch_add(
+					bpearl_sub->poll([](const rc::media::LidarFrame&, std::int64_t){}),
+					std::memory_order_relaxed);
+			if (not helios_sub and not bpearl_sub)
+				std::this_thread::sleep_for(std::chrono::milliseconds(200));   // descriptors not ready yet
+			continue;
+		}
+		if (helios_sub) helios_sub.reset();   // producing/bridging again -> stop monitoring
+		if (bpearl_sub) bpearl_sub.reset();
 		RoboCompLidar3D::TData data;
 		try
 		{
@@ -930,6 +982,68 @@ void SpecificWorker::negotiate_ricoh_media_source()
 		{
 			media_.advertise(*G, "ricoh", {"rgb360"});   // re-advertise our own plane
 			last_relayed_ricoh_descriptor_.clear();
+		}
+	}
+}
+
+void SpecificWorker::negotiate_lidar_media_source()
+{
+	// The two extra `requires MediaPlaneDDS` in the CDSL generate mediaplanedds2_proxy
+	// (Proxies.MediaPlaneDDS2 = lidar3d_dds helios, port 11890) and mediaplanedds3_proxy
+	// (Proxies.MediaPlaneDDS3 = lidar3d_dds bpearl, port 11889). If robocompdsl names them
+	// differently, change just these two aliases.
+	const auto& helios_dds_proxy = mediaplanedds2_proxy;
+	const auto& bpearl_dds_proxy = mediaplanedds3_proxy;
+
+	if (not params.ENABLE_LIDAR)
+		return;   // LiDAR path disabled entirely — nothing to negotiate
+
+	// Forced "ice": never defer to the DDS producers — keep bridging via the Lidar3D proxy.
+	if (params.LIDAR_SOURCE == "ice")
+	{
+		bridge_lidar_.store(true, std::memory_order_relaxed);
+		return;
+	}
+
+	// Query each physical lidar's producer and relay its descriptor onto its own DSR node.
+	const auto query = [](const auto& prx) -> std::string
+	{
+		std::string d;
+		if (prx) { try { d = prx->getMediaDescriptor(); } catch (const Ice::Exception&) { d.clear(); } }
+		return d;
+	};
+	const std::string helios = query(helios_dds_proxy);
+	const std::string bpearl = query(bpearl_dds_proxy);
+
+	if (not helios.empty() and helios != last_relayed_helios_descriptor_)
+	{ relay_media_descriptor("helios", helios); last_relayed_helios_descriptor_ = helios; }
+	if (not bpearl.empty() and bpearl != last_relayed_bpearl_descriptor_)
+	{ relay_media_descriptor("bpearl", bpearl); last_relayed_bpearl_descriptor_ = bpearl; }
+
+	// Forced "dds": always treat the lidar3d_dds pair as the producers (never bridge).
+	if (params.LIDAR_SOURCE == "dds")
+	{
+		bridge_lidar_.store(false, std::memory_order_relaxed);
+		return;
+	}
+
+	// auto: hand the plane to the DDS producers once BOTH are up; resume bridging if either drops.
+	const bool external_up = (not helios.empty()) and (not bpearl.empty());
+	if (external_up)
+	{
+		if (bridge_lidar_.exchange(false))
+			qInfo() << "[MediaNeg] both lidar3d_dds (helios+bpearl) publishing on DDS — relaying descriptors; robot_concept stops bridging LiDAR";
+	}
+	else
+	{
+		if (not bridge_lidar_.exchange(true))
+			qInfo() << "[MediaNeg] a lidar3d_dds producer is absent — robot_concept resumes bridging LiDAR";
+		// coverage dropped: re-advertise our own single-plane descriptor and forget the relays.
+		if (not last_relayed_helios_descriptor_.empty() or not last_relayed_bpearl_descriptor_.empty())
+		{
+			media_.advertise(*G, "lidar3D", {"lidar"});
+			last_relayed_helios_descriptor_.clear();
+			last_relayed_bpearl_descriptor_.clear();
 		}
 	}
 }

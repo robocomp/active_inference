@@ -103,6 +103,9 @@ private:
 		//   "dds" : never bridge; always treat ricoh_omni_dds as the external DDS producer and only monitor.
 		std::string RICOH_SOURCE  = "auto";
 		bool        ENABLE_LIDAR  = true;   // 3D LiDAR cloud    (rc/lidar3d/points)
+		// LiDAR source selector (Media.lidar_source): mirror of the above for the two lidar3d_dds
+		// producers (helios + bpearl). "auto" negotiate, "ice" always bridge, "dds" never bridge.
+		std::string LIDAR_SOURCE  = "auto";
 		bool        ENABLE_IMU    = true;   // IMU sample        (rc/imu/data)
 		int         MEDIA_DOMAIN_ID   = 0;
 		std::string MEDIA_RGB_TOPIC   = "rc/zed/rgb";
@@ -132,6 +135,9 @@ private:
 	std::atomic<std::uint64_t> lidar_frames_{0};
 	std::atomic<std::uint64_t> imu_frames_{0};
 	std::atomic<std::uint64_t> ricoh_frames_{0};
+	// Per-lidar counters (fed by the read_lidar_thread DDS monitor when bridging is off).
+	std::atomic<std::uint64_t> helios_frames_{0};
+	std::atomic<std::uint64_t> bpearl_frames_{0};
 
 	// RGBD camera reader thread
 	void read_rgbd_thread();
@@ -155,6 +161,9 @@ private:
 	// from the CDSL's duplicate `requires MediaPlaneDDS` as mediaplanedds1_proxy — see
 	// negotiate_ricoh_media_source() where it is aliased in one place.
 	std::atomic<bool> bridge_ricoh_{true};
+	// false once BOTH lidar3d_dds (helios+bpearl) are detected on DDS — robot_concept relays
+	// their descriptors to the 'helios'/'bpearl' nodes and stops bridging LiDAR. True = we bridge.
+	std::atomic<bool> bridge_lidar_{true};
 
 	// Media plane (zero-copy DDS); RGBD pixels leave the DSR graph here.
 	SensorMediaPublisher media_;
@@ -168,9 +177,14 @@ private:
 	// mediaplanedds360_proxy) whether it is publishing; relay its descriptor onto "ricoh"
 	// and flip bridge_ricoh_ off if so, else resume bridging + re-advertise our own.
 	void negotiate_ricoh_media_source();
+	// Two lidar3d_dds producers (helios, bpearl) via mediaplanedds2_proxy/mediaplanedds3_proxy:
+	// relay each descriptor onto its 'helios'/'bpearl' node and stop bridging once both are up.
+	void negotiate_lidar_media_source();
 	void relay_media_descriptor(const std::string& node_name, const std::string& descriptor_json);
-	std::string last_relayed_descriptor_;         // zed:   empty = advertising our own descriptor
-	std::string last_relayed_ricoh_descriptor_;   // ricoh: empty = advertising our own descriptor
+	std::string last_relayed_descriptor_;          // zed:   empty = advertising our own descriptor
+	std::string last_relayed_ricoh_descriptor_;    // ricoh: empty = advertising our own descriptor
+	std::string last_relayed_helios_descriptor_;   // lidar helios: empty = advertising our own
+	std::string last_relayed_bpearl_descriptor_;   // lidar bpearl: empty = advertising our own
 
 	void waiting_enter();
 	void waiting_loop();

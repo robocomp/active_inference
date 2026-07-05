@@ -246,6 +246,8 @@ int robot_concept::run(int argc, char* argv[])
 	RoboCompLidar3D::Lidar3DPrxPtr lidar3d_proxy;
 	RoboCompMediaPlaneDDS::MediaPlaneDDSPrxPtr mediaplanedds_proxy;
 	RoboCompMediaPlaneDDS::MediaPlaneDDSPrxPtr mediaplanedds_proxy1;
+	RoboCompMediaPlaneDDS::MediaPlaneDDSPrxPtr mediaplanedds_proxy2;
+	RoboCompMediaPlaneDDS::MediaPlaneDDSPrxPtr mediaplanedds_proxy3;
 
 
 	//Require code
@@ -263,6 +265,10 @@ int robot_concept::run(int argc, char* argv[])
 	                    configLoader.get<std::string>("Proxies.MediaPlaneDDS"), "MediaPlaneDDSProxy", mediaplanedds_proxy);
 	require<RoboCompMediaPlaneDDS::MediaPlaneDDSPrx, RoboCompMediaPlaneDDS::MediaPlaneDDSPrxPtr>(communicator(),
 	                    configLoader.get<std::string>("Proxies.MediaPlaneDDS1"), "MediaPlaneDDSProxy1", mediaplanedds_proxy1);
+	require<RoboCompMediaPlaneDDS::MediaPlaneDDSPrx, RoboCompMediaPlaneDDS::MediaPlaneDDSPrxPtr>(communicator(),
+	                    configLoader.get<std::string>("Proxies.MediaPlaneDDS2"), "MediaPlaneDDSProxy2", mediaplanedds_proxy2);
+	require<RoboCompMediaPlaneDDS::MediaPlaneDDSPrx, RoboCompMediaPlaneDDS::MediaPlaneDDSPrxPtr>(communicator(),
+	                    configLoader.get<std::string>("Proxies.MediaPlaneDDS3"), "MediaPlaneDDSProxy3", mediaplanedds_proxy3);
 
 	//Topic Manager code
 
@@ -283,7 +289,7 @@ int robot_concept::run(int argc, char* argv[])
 		return EXIT_FAILURE;
 	}
 
-	tprx = std::make_tuple(camera360rgb_proxy,camera360rgbd_proxy,camerargbdsimple_proxy,imu_proxy,lidar3d_proxy,mediaplanedds_proxy,mediaplanedds_proxy1);
+	tprx = std::make_tuple(camera360rgb_proxy,camera360rgbd_proxy,camerargbdsimple_proxy,imu_proxy,lidar3d_proxy,mediaplanedds_proxy,mediaplanedds_proxy1,mediaplanedds_proxy2,mediaplanedds_proxy3);
 	SpecificWorker *worker = new SpecificWorker(this->configLoader, tprx, startup_check_flag);
 	QObject::connect(worker, SIGNAL(kill()), &a, SLOT(quit()));
 
