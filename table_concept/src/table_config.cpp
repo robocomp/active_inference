@@ -51,6 +51,7 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.ai2_prior_size_std   = getf("TableModel.AI2PriorSizeStd",     0.30f);
     out.ai2_process_std_m    = getf("TableModel.AI2ProcessStdM",      0.005f);
     out.ai2_process_std_yaw  = getf("TableModel.AI2ProcessStdYaw",    0.01f);
+    out.ai2_age_nominal_dt_s = getf("TableModel.AI2AgeNominalDtS",    0.0f);
     out.ai2_common_mode_pos_std  = getf("TableModel.AI2CommonModePosStd",  0.03f);
     out.ai2_common_mode_size_std = getf("TableModel.AI2CommonModeSizeStd", 0.02f);
     out.ai2_common_mode_yaw_std  = getf("TableModel.AI2CommonModeYawStd",  0.03f);
@@ -85,6 +86,8 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.lidar_coverage_n0     = getf("TableModel.LidarCoverageN0",     60.0f);
     out.lidar_coverage_ang_power = getf("TableModel.LidarCoverageAngPower", 1.0f);
     out.max_step_m            = getf("TableModel.MaxStepM",            1.0f);
+    out.coverage_precision    = getf("TableModel.CoveragePrecision",  0.0f);
+    out.coverage_robust_c_m   = getf("TableModel.CoverageRobustCM",   0.15f);
 
     std::print("table_concept: configuration loaded.\n");
     return out;

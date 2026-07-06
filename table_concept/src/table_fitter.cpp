@@ -282,6 +282,8 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
         p.common_mode_size_std = cfg_.ai2_common_mode_size_std;
         p.common_mode_yaw_std  = cfg_.ai2_common_mode_yaw_std;
         p.gn_iters        = cfg_.ai2_gn_iters;
+        p.coverage_precision  = cfg_.coverage_precision;
+        p.coverage_robust_c_m = cfg_.coverage_robust_c_m;
         p.top_thickness   = TableModel::TOP_THICKNESS;
         p.leg_radius      = TableModel::LEG_RADIUS;
         inst.ai2_belief = TableBelief(s0, p);
@@ -294,12 +296,26 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
         inst.last_residual_pts = observation.residual_pts;   // model-unexplained points for the viewer layer
     }
 
-    // Freeze-on-stale: no fresh mask ⇒ don't touch the belief (information-filter axiom).
+    const auto now = std::chrono::steady_clock::now();
+
+    // Freeze-vs-age on stale: no fresh mask this cycle. Historically the belief just froze (Σ held —
+    // information-filter axiom), so a dead mask/ZED feed read downstream as a confident-but-stale table.
+    // With AI2AgeNominalDtS>0 we instead AGE it: run the predict-only step on the AGENT's clock so Σ grows
+    // by Q·(dt/dt_nominal) for as long as the stream is silent, and the propagated RT covariance reflects
+    // how old the evidence is. No gate, no emergency flag — the generative-model form of a stale sensor.
     if (not observation.has_fresh_data)
     {
+        if (cfg_.ai2_age_nominal_dt_s > 0.0f and inst.last_belief_touch.time_since_epoch().count() != 0)
+        {
+            const float dt = std::chrono::duration<float>(now - inst.last_belief_touch).count();
+            inst.ai2_belief.inflate_for_age(dt, cfg_.ai2_age_nominal_dt_s);
+        }
+        inst.last_belief_touch = now;
         compute_projected_roi(inst);
         return 0.0f;
     }
+    // Fresh path: update()/predict() below carry their own one-step Q, so just reset the age clock here.
+    inst.last_belief_touch = now;
 
     // Static range weighting (motion-free). Even at zero camera motion, deprojection noise grows with
     // distance AND a far mask subtends a tiny angle, so pose — orientation most of all — becomes
@@ -419,7 +435,7 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
         if (not ai2_csv_.is_open()) { cfg_.ai2_csv_path.clear(); return; }
         ai2_csv_ << "cycle,node,npts,gated,energy,R,motion_var,motion_dotd,trunc_frac,range,"
                  << "cx,cy,H,w,h,yaw,std_cx,std_cy,std_H,std_w,std_h,std_yaw,"
-                 << "std_yaw_within,flip_ev,p_alt,lidar_rays,lidar_raw,lidar_resid_m,lidar_meanz,lidar_topz,lidar_cov_ang\n";
+                 << "std_yaw_within,flip_ev,p_alt,lidar_rays,lidar_raw,lidar_resid_m,lidar_meanz,lidar_topz,lidar_floorz,lidar_cov_ang\n";
     }
     const auto& s = inst.ai2_belief.state();
     const auto& S = inst.ai2_belief.covariance();
@@ -433,7 +449,8 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
              << std::sqrt(std::max(0.0f, inst.ai2_belief.yaw_marginal_var())) << ','
              << sd(5) << ',' << inst.ai2_belief.flip_evidence() << ',' << inst.ai2_belief.mode_posterior() << ','
              << inst.dbg_lidar_rays << ',' << inst.dbg_lidar_raw << ',' << inst.dbg_lidar_resid_m << ','
-             << inst.dbg_lidar_meanz_m << ',' << inst.dbg_lidar_topz_m << ',' << inst.dbg_lidar_cov_ang << '\n';
+             << inst.dbg_lidar_meanz_m << ',' << inst.dbg_lidar_topz_m << ',' << inst.dbg_lidar_floorz_m << ','
+             << inst.dbg_lidar_cov_ang << '\n';
     ai2_csv_.flush();
 }
 

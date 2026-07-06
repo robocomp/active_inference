@@ -43,6 +43,15 @@ struct TableBeliefParams
     float clutter_frac  = 0.10f;   // ε: prior weight of the uniform clutter component
     float clutter_scale_m = 0.12f; // a point further than ~this from every surface is likely clutter
 
+    // Coverage / traction (EXISTENCE_BELIEF_PLAN.md, table_1.png): on-plane mask points the mixture ceded to
+    // the CLUTTER component still exert a robust, GROW-ONLY pull on the top slab, so a model UNDER-covering a
+    // large mask is pulled out to explain it instead of parking with the excess dumped to clutter for free (the
+    // escape-valve). Weight = coverage_precision·(top-plane compat)·(clutter resp)·Cauchy(outside dist).
+    // Self-bounded (sdf→0 when covered), on-plane-gated (off-plane contamination ignored), reclaims exactly the
+    // escaped points. 0 = OFF. The honest anti-contamination bound is the free-space carve; robust interim.
+    float coverage_precision  = 0.0f;
+    float coverage_robust_c_m = 0.15f;
+
     // Priors
     float prior_size_std = 0.30f;  // broad size prior std (m) on w,h,H — only breaks the empty-cloud degeneracy
     // Temporal transition (predict): rigid + static ⇒ small process noise per frame.
@@ -121,6 +130,10 @@ public:
     // ── Inference (delegated to the shared engine) ────────────────────────────
     float update(const TableFrame& frame) { return ai::update<N>(*this, state_, Sigma_, prior_mean_, frame); }
     void  predict()                       { ai::predict<N>(*this, Sigma_, state_, prior_mean_); }
+    // Age the belief with NO measurement: Σ ← FΣFᵀ + Q·(dt/dt_nominal), mean held. The fitter calls this when
+    // a table's mask stream is stale/dead so Σ grows on the agent's clock instead of freezing (see TABLE_FIT_AI2).
+    void  inflate_for_age(float dt_s, float dt_nominal_s)
+    { ai::inflate_for_age<N>(*this, Sigma_, state_, prior_mean_, dt_s, dt_nominal_s); }
     Eigen::Matrix<float, 6, 6> predicted_information(const std::vector<Eigen::Vector3f>& pts, float R) const
     { return ai::predicted_information<N>(*this, state_, pts, R); }
 

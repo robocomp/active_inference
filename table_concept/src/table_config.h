@@ -42,6 +42,11 @@ struct TableConfig
     float ai2_prior_size_std   = 0.30f;  // broad size prior std (m) on w,h,H
     float ai2_process_std_m    = 0.005f; // predict process-noise std, length DOFs (m/frame)
     float ai2_process_std_yaw  = 0.01f;  // predict process-noise std, yaw (rad/frame)
+    // Stale-belief aging (measurement-age → covariance). Nominal inter-frame period (s) of the mask stream,
+    // used to convert the per-frame process noise Q into a RATE so Σ keeps inflating on the AGENT's own clock
+    // while the sensor is silent (rc::ai::inflate_for_age). <=0 DISABLES it → the belief simply freezes on
+    // stale (historic information-filter behaviour). A dead ZED/mask feed then reads as a growing Σ downstream.
+    float ai2_age_nominal_dt_s = 0.0f;
     // Per-frame COMMON-MODE error (shared by all points of a mask → doesn't average out). The frame's
     // information saturates here, so N≈10⁴ correlated points can't collapse σ → calibrated posterior.
     float ai2_common_mode_pos_std  = 0.03f; // shared position error (m); pose-chain cov adds to it
@@ -77,6 +82,11 @@ struct TableConfig
     // frame, so a GN step whose centre jump exceeds it is an OUTLIER frame (corrupted mask cloud / one-sided
     // LiDAR runaway) → reject the update, restore state+Σ, widen Σ. 0 disables. Prevents the cx=−200m runaway.
     float max_step_m            = 1.0f;
+
+    // Coverage / traction (EXISTENCE_BELIEF_PLAN.md): grow-only pull from on-plane mask points the mixture
+    // ceded to clutter, so a model under-covering a large mask grows to explain it (fixes table_1.png). 0=OFF.
+    float coverage_precision   = 0.0f;
+    float coverage_robust_c_m  = 0.15f;
 
     // Upload the table pose covariance onto the room→table RT edge (rt_covariance_att, 6×6 SE3),
     // mapped from the belief's full Σ over [cx,cy,H,w,h,yaw]: x←cx, y←cy, z←H/2, yaw←ψ; roll/pitch are

@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -65,6 +66,9 @@ struct TableInstance
     int  frames_converged   = 0;      // consecutive frames with |Δstate| < state_eps
     int  last_masks_frame_seen = -1;  // last masks packet frame consumed
     std::uint64_t last_mask_timestamp_ms = 0;  // capture stamp of the last consumed mask (chain-cov pinning)
+    // Wall-clock (agent's own steady clock) of the last belief touch — measured on EVERY inference cycle, not
+    // just fresh ones — so a stale cycle can inflate Σ by the real elapsed time (measurement-age → covariance).
+    std::chrono::steady_clock::time_point last_belief_touch{};
     float chain_cov_xx = 0.0f, chain_cov_yy = 0.0f;  // Part B localization/chain cov (m²), added to the RT cov
     int  processed_cycles   = 0;      // per-table compute cycles for log throttling
     // Tracker's gated mask assignment for THIS frame (index into the masks packet slices), or -1.

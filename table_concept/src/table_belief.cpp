@@ -184,6 +184,39 @@ void TableBelief::accumulate_extra(const TableBeliefState& s, const TableFrame& 
                                    Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const
 {
     rc::ai::accumulate_lidar_rays<6>(*this, s, f.lidar, Id, bd);
+
+    // Coverage / traction (table_1.png): reclaim on-plane mask points the mixture ceded to CLUTTER as
+    // GROW-ONLY extent evidence. For each point OUTSIDE the top slab (sdf_top > 0) and near the tabletop plane,
+    // add the standard top-slab SDF pull weighted by (clutter responsibility)·Cauchy(outside dist), so a model
+    // that under-covers a large mask is pulled out to explain it. One-sided (never shrinks — that is the
+    // free-space carve's job); self-bounded (sdf→0 when covered); off-plane points (legs/floor/contamination)
+    // are gated out. 0 ⇒ OFF.
+    if (params_.coverage_precision > 0.0f and not f.points.empty())
+    {
+        const float eps     = std::clamp(params_.clutter_frac, 0.0f, 0.99f);
+        const float pi_surf = (1.0f - eps) / 5.0f;
+        const float ratio0  = (eps > 1e-6f) ? pi_surf / eps : 1e6f;         // surface-vs-clutter prior ratio
+        const float cs2     = params_.clutter_scale_m * params_.clutter_scale_m;
+        const float R       = std::max(1e-6f, params_.sigma_base_m * params_.sigma_base_m);
+        const float inv2R   = 0.5f / R;
+        const float cc2     = params_.coverage_robust_c_m * params_.coverage_robust_c_m;
+        const float z_join  = s.H - params_.top_thickness;
+        const float band    = std::max(0.5f * params_.top_thickness, 1e-3f);
+        for (const auto& p : f.points)
+        {
+            const float e = sdf_top(p, s);
+            if (e <= 0.0f) continue;                                        // inside/on the slab → normal term fits it
+            const float top_z = 1.0f - 1.0f / (1.0f + std::exp((p.z() - z_join) / band));  // →1 on the tabletop plane
+            if (top_z < 0.05f) continue;                                    // off-plane (legs/floor/contamination)
+            // clutter responsibility of this on-plane point (legs ≈0 on-plane): →1 beyond clutter_scale.
+            const float clut = 1.0f / (1.0f + ratio0 * std::exp((cs2 - e * e) * inv2R));
+            const float w = params_.coverage_precision * top_z * clut / (1.0f + e * e / cc2);
+            if (w < 1e-9f) continue;
+            const Eigen::Matrix<float, 6, 1> J = sdf_jacobian(p, s, 0);     // top slab (prim 0)
+            Id.noalias() += w * (J * J.transpose());
+            bd.noalias() += -w * J * e;
+        }
+    }
 }
 
 // CONTINUITY fold (TABLE_FIT_AI2.md §5, replaces the w≥h sign fold). The box SDF is invariant under the
@@ -466,6 +499,42 @@ bool TableBelief::self_test()
         std::printf("  mask-erosion extent(h): mask-only=%.3f  with-lidar=%.3f  (truth=%.3f)\n", h_no, h_lid, gt.h);
         check(h_no < gt.h - 0.02f, "mask-only should UNDER-size h (erosion)");
         check(std::abs(h_lid - gt.h) < 0.6f * std::abs(h_no - gt.h), "lidar should clearly beat mask-only extent");
+    }
+
+    // (i) Coverage / traction (table_1.png): an UNDER-covering model whose mask extends well beyond it must be
+    //     PULLED OUT to cover the on-plane points (the clutter-escape fix), grow-only and self-bounded, while
+    //     OFF-plane contamination is ignored.
+    {
+        const float Rb = P.sigma_base_m * P.sigma_base_m;
+        // Full-extent tabletop cloud (points out to the TRUE rim), + off-plane contamination far to the side.
+        std::vector<Eigen::Vector3f> plane;
+        for (int i = 0; i < 1500; ++i)
+        {
+            const float lx = U(rng) * 0.5f * gt.w, ly = U(rng) * 0.5f * gt.h;
+            plane.push_back(to_world(lx, ly, gt.H + noise(rng)));
+        }
+        std::vector<Eigen::Vector3f> contam = plane;               // same cloud + off-plane blob 0.6 m out in +x
+        for (int i = 0; i < 300; ++i)
+            contam.push_back(to_world(0.5f * gt.w + 0.6f + U(rng) * 0.1f, U(rng) * 0.3f, 0.30f + noise(rng)));
+        // OFFSET + under-covering start (the table_1.png geometry): the model sits to one side and small, so the
+        // far side of the mask is well beyond clutter_scale → escapes to clutter → the normal fit STALLS in a few
+        // frames. Coverage reclaims those points and pulls the model out AND over. Budget-limited (3 frames).
+        const TableBeliefState init{gt.cx + 0.30f, gt.cy, gt.H, 0.55f * gt.w, 0.55f * gt.h, gt.yaw};
+        auto fit = [&](float cov, const std::vector<Eigen::Vector3f>& pts) {
+            TableBeliefParams pp = P; pp.coverage_precision = cov;
+            TableBelief b(init, pp);
+            TableFrame fr; fr.points = pts; fr.R.assign(pts.size(), Rb);
+            for (int it = 0; it < 3; ++it) b.update(fr);
+            return b.state();
+        };
+        const auto s_no  = fit(0.0f, plane);
+        const auto s_cov = fit(500.0f, plane);
+        const auto s_con = fit(500.0f, contam);      // off-plane blob must NOT extra-grow the slab
+        std::printf("  coverage 3-frame w: no=%.3f cov=%.3f contam=%.3f (truth %.3f); |cx-gt| no=%.3f cov=%.3f\n",
+                    s_no.w, s_cov.w, s_con.w, gt.w, std::abs(s_no.cx - gt.cx), std::abs(s_cov.cx - gt.cx));
+        check(s_cov.w > s_no.w + 0.05f,        "coverage should grow w toward the mask extent faster (budget-limited)");
+        check(std::abs(s_cov.cx - gt.cx) < std::abs(s_no.cx - gt.cx), "coverage should recenter toward the unexplained side");
+        check(std::abs(s_con.w - s_cov.w) < 0.06f, "off-plane contamination must NOT extra-grow the slab (on-plane gate)");
     }
 
     std::printf("TableBelief::self_test %s\n", ok ? "PASS" : "FAIL");

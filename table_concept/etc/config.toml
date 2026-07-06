@@ -57,6 +57,7 @@ AI2ClutterScaleM = 0.12     # a point further than ~this from EVERY surface is e
 AI2PriorSizeStd = 0.30      # broad size prior std (m) on w,h,H
 AI2ProcessStdM = 0.005      # predict process-noise std, length DOFs (m/frame) — rigid+static ⇒ small
 AI2ProcessStdYaw = 0.01     # predict process-noise std, yaw (rad/frame)
+AI2AgeNominalDtS = 0.0      # stale-belief aging: mask stream nominal period (s). >0 ⇒ Σ inflates by Q·(dt/this) while the feed is silent (measurement-age→covariance); 0 = freeze on stale (historic). Try 0.1 (10 Hz masks) to enable.
 AI2TruncGateFrac = 0.10     # skip the geometric update when >this fraction of the mask silhouette is on the image border (truncated → biased)
 # Static range weighting (motion-free): common-mode error grows with view distance so a far, vague mask
 # can confirm existence but NOT resolve pose/orientation (can't rotate a converged table). Continuous, no gate.
@@ -72,7 +73,7 @@ AI2GnIters = 4              # Gauss-Newton iterations per frame
 # while off. Step 1: set LidarPrecision=500 (low → can only nudge) and confirm on the console
 # "[TableLidar] media subscriber up", NO crash, and lidar_rays>0 at a few-cm resid (frame/extrinsic is right).
 # Step 2: raise to 2500 (≈1/σ²@2cm = depth-point scale) → w/h under-size should shrink and extent σ tighten.
-LidarPrecision = 500.0          # per-ray range precision (1/m², ≈1/σ²@2cm=2500 when load-bearing). 0=OFF
+LidarPrecision = 2500.0          # per-ray range precision (1/m², ≈1/σ²@2cm=2500 when load-bearing). 0=OFF
 LidarRobustCM = 0.05          # Cauchy scale (m): returns this far off the surface fade out (continuous, no gate)
 LidarSelectMarginM = 0.10     # pre-select returns within (birth half-diagonal + margin) horiz, floor..birth_H vert
 LidarFrameNode = "lidar3D"    # DSR node whose frame the raw sweep is in (room←this transform)
@@ -81,6 +82,13 @@ LidarCoverageAngPower = 1.0    # ANGULAR-coverage weight precision×=(1−R)^p (
                                # down-weights ONE-SIDED sweeps that over-commit the near-square w↔h mode from a
                                # single view. 0=off (flat), 1=pure circular variance. Belief still accrues over orbit.
 MaxStepM = 1.0                 # divergence guard: reject a GN centre step > this (m) in one frame (static table)
+# Coverage / traction (EXISTENCE_BELIEF_PLAN.md): on-plane mask points the mixture ceded to CLUTTER exert a
+# GROW-ONLY pull on the top slab, so a model under-covering a large mask grows to explain it (fixes table_1.png:
+# green mask far outside the box, no traction). Self-bounded + on-plane-gated. STAGED — OFF (0.0) by default;
+# try 500 (≈ mask-point scale) and watch w/h grow to the mask extent without over-growing. Anti-contamination
+# bound = free-space carve (not yet wired) → keep modest until then.
+CoveragePrecision = 500.0        # grow-only coverage pull strength (per point, ~1/σ²@mask). 0=OFF
+CoverageRobustCM = 0.15        # Cauchy scale (m): on-plane points this far outside fade out (stray-point guard)
 
 [TableConcept]
 ObsDistance = 1.8           # comfortable maximum stand-off from the target face for epistemic poses
