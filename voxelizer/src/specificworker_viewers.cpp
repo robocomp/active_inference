@@ -69,10 +69,41 @@ void SpecificWorker::setup_custom_viewers()
     if (params.SHOW_RICOH_VIEWER)
     {
         ricoh_viewer_ = std::make_unique<rc::ImagePopupViewer>(nullptr);
-        ricoh_viewer_->setWindowTitle("Ricoh 360");
-        ricoh_window_ = ricoh_viewer_.get();
+
+        // Wrap the raster label in a panel with a control row so the panorama gets its own "Models"
+        // toggle (equirectangular projection of the DSR scene), mirroring the ZED popup.
+        auto* ricoh_panel = new QWidget(nullptr);
+        auto* ricoh_layout = new QVBoxLayout(ricoh_panel);
+        ricoh_layout->setContentsMargins(6, 6, 6, 6);
+        ricoh_layout->setSpacing(6);
+
+        auto* controls = new QHBoxLayout();
+        controls->setContentsMargins(0, 0, 0, 0);
+        controls->setSpacing(8);
+
+        auto* models_btn = new QPushButton(ricoh_model_overlay_enabled_ ? "Models: ON" : "Models: OFF", ricoh_panel);
+        models_btn->setCheckable(true);
+        models_btn->setChecked(ricoh_model_overlay_enabled_);
+        models_btn->setCursor(Qt::PointingHandCursor);
+        models_btn->setStyleSheet(QString(
+            "QPushButton { border: 2px solid %1; border-radius: 4px; padding: 3px 8px; }"
+            "QPushButton:checked { background-color: %1; color: #101010; }").arg("#FFC864"));
+        connect(models_btn, &QPushButton::toggled, this, [this, models_btn](bool checked)
+        {
+            ricoh_model_overlay_enabled_ = checked;
+            if (not checked) ricoh_scene_.valid = false;   // stop drawing a stale scene until refreshed
+            models_btn->setText(checked ? "Models: ON" : "Models: OFF");
+        });
+        controls->addWidget(models_btn);
+        controls->addStretch(1);
+
+        ricoh_layout->addLayout(controls);
+        ricoh_layout->addWidget(ricoh_viewer_.get(), 1);   // reparents the label into the panel
+
+        ricoh_panel->setWindowTitle("Ricoh 360");
+        ricoh_window_ = ricoh_panel;
         if (not restore_external_window_geometry(ricoh_window_, "Ricoh360Window"))
-            ricoh_window_->resize(960, 480);   // half the 1920x960 panorama
+            ricoh_window_->resize(960, 500);   // half the 1920x960 panorama + control row
         // Intentionally NOT shown here — hidden until the top-bar button turns it on.
         qInfo() << __FUNCTION__ << "Ricoh 360 viewer created (hidden; toggle from the Voxel3D top bar)";
     }
@@ -104,23 +135,19 @@ void SpecificWorker::setup_custom_viewers()
         masks_btn->setCheckable(true);
         masks_btn->setCursor(Qt::PointingHandCursor);
 
-        // table_concept point clouds — independently toggled (default ON).
-        auto* rfe_btn = new QPushButton("RFE: ON", voxel_panel);
-        rfe_btn->setCheckable(true);
-        rfe_btn->setChecked(true);
-        rfe_btn->setCursor(Qt::PointingHandCursor);
-
-        auto* residual_btn = new QPushButton("Residual: ON", voxel_panel);
+        // table_concept residual debug cloud — toggle, default OFF.
+        auto* residual_btn = new QPushButton("Residual: OFF", voxel_panel);
         residual_btn->setCheckable(true);
-        residual_btn->setChecked(true);
+        residual_btn->setChecked(false);
         residual_btn->setCursor(Qt::PointingHandCursor);
 
-        // YOLO popup toggle — created here; the window itself is built (hidden) in the
-        // SHOW_YOLO_VIEWER block below, so the lambda resolves yolo_window_ at click time.
+        // ZED popup toggle — opens the ZED RGB window (YOLO seg overlay lives inside it). Created here;
+        // the window itself is built (hidden) in the SHOW_YOLO_VIEWER block below, so the lambda
+        // resolves yolo_window_ at click time.
         QPushButton* yolo_btn = nullptr;
         if (params.SHOW_YOLO_VIEWER)
         {
-            yolo_btn = new QPushButton("YOLO: OFF", voxel_panel);
+            yolo_btn = new QPushButton("ZED: OFF", voxel_panel);
             yolo_btn->setCheckable(true);
             yolo_btn->setCursor(Qt::PointingHandCursor);
         }
@@ -147,7 +174,6 @@ void SpecificWorker::setup_custom_viewers()
         accent(lidar_btn,     "#8C9EC7");  // lidar: slate blue-gray
         accent(models_btn,    "#FFC864");  // models: table-mesh amber
         accent(masks_btn,     "#EBEBF2");  // mask: white
-        accent(rfe_btn,       "#F233D9");  // rfe: magenta
         accent(residual_btn,  "#2633CC");  // residual: dark blue
         if (yolo_btn)  accent(yolo_btn,  "#64C8FF");  // yolo: light blue
         if (ricoh_btn) accent(ricoh_btn, "#00D4BB");  // ricoh: teal
@@ -155,7 +181,6 @@ void SpecificWorker::setup_custom_viewers()
         controls_layout->addWidget(lidar_btn);
         controls_layout->addWidget(models_btn);
         controls_layout->addWidget(masks_btn);
-        controls_layout->addWidget(rfe_btn);
         controls_layout->addWidget(residual_btn);
         if (yolo_btn)  controls_layout->addWidget(yolo_btn);
         if (ricoh_btn) controls_layout->addWidget(ricoh_btn);
@@ -188,13 +213,6 @@ void SpecificWorker::setup_custom_viewers()
             masks_btn->setText(checked ? "Masks: ON" : "Masks: OFF");
         });
 
-        connect(rfe_btn, &QPushButton::toggled, this, [this, rfe_btn](bool checked)
-        {
-            if (voxel_viewer_gl)
-                voxel_viewer_gl->set_show_rfe(checked);
-            rfe_btn->setText(checked ? "RFE: ON" : "RFE: OFF");
-        });
-
         connect(residual_btn, &QPushButton::toggled, this, [this, residual_btn](bool checked)
         {
             if (voxel_viewer_gl)
@@ -207,7 +225,7 @@ void SpecificWorker::setup_custom_viewers()
             {
                 if (yolo_window_)
                     yolo_window_->setVisible(checked);
-                yolo_btn->setText(checked ? "YOLO: ON" : "YOLO: OFF");
+                yolo_btn->setText(checked ? "ZED: ON" : "ZED: OFF");
             });
 
         if (ricoh_btn)
@@ -236,48 +254,77 @@ void SpecificWorker::setup_custom_viewers()
     {
         yolo_viewer_ = std::make_unique<rc::YoloViewer>(nullptr);
 
+        // Wrap the raster label in a panel so we can host a control row above it. The row always
+        // carries the YOLO-silhouette and model-projection toggles; the dense semantic-seg toggle is
+        // added only when the *-sem model is loaded (it drives that extra model).
+        auto* yolo_panel = new QWidget(nullptr);
+        auto* yolo_layout = new QVBoxLayout(yolo_panel);
+        yolo_layout->setContentsMargins(6, 6, 6, 6);
+        yolo_layout->setSpacing(6);
+
+        auto* controls = new QHBoxLayout();
+        controls->setContentsMargins(0, 0, 0, 0);
+        controls->setSpacing(8);
+
+        const auto accent = [](QPushButton* b, const char* hex)
+        {
+            b->setStyleSheet(QString(
+                "QPushButton { border: 2px solid %1; border-radius: 4px; padding: 3px 8px; }"
+                "QPushButton:checked { background-color: %1; color: #101010; }").arg(hex));
+        };
+
+        // YOLO seg-detection overlay toggle — starts pushed (masks/bboxes drawn by default).
+        auto* yolo_overlay_btn = new QPushButton(yolo_overlay_enabled_ ? "YOLO: ON" : "YOLO: OFF", yolo_panel);
+        yolo_overlay_btn->setCheckable(true);
+        yolo_overlay_btn->setChecked(yolo_overlay_enabled_);
+        yolo_overlay_btn->setCursor(Qt::PointingHandCursor);
+        accent(yolo_overlay_btn, "#64C8FF");
+        connect(yolo_overlay_btn, &QPushButton::toggled, this, [this, yolo_overlay_btn](bool checked)
+        {
+            yolo_overlay_enabled_ = checked;
+            yolo_overlay_btn->setText(checked ? "YOLO: ON" : "YOLO: OFF");
+        });
+
+        // Model-instance projection overlay toggle — starts OFF (projects the graph model BBs on demand).
+        auto* models_overlay_btn = new QPushButton(model_overlay_enabled_ ? "Models: ON" : "Models: OFF", yolo_panel);
+        models_overlay_btn->setCheckable(true);
+        models_overlay_btn->setChecked(model_overlay_enabled_);
+        models_overlay_btn->setCursor(Qt::PointingHandCursor);
+        accent(models_overlay_btn, "#FFC864");
+        connect(models_overlay_btn, &QPushButton::toggled, this, [this, models_overlay_btn](bool checked)
+        {
+            model_overlay_enabled_ = checked;
+            models_overlay_btn->setText(checked ? "Models: ON" : "Models: OFF");
+        });
+
+        controls->addWidget(yolo_overlay_btn);
+        controls->addWidget(models_overlay_btn);
+
+        // Semantic overlay: only meaningful when the dense-seg model is loaded.
         if (yolo_semantic_processor)
         {
-            // Wrap the raster label in a panel so we can host a control row above it: a toggle for
-            // the dense semantic-segmentation overlay (only shown when the *-sem model is loaded).
-            auto* yolo_panel = new QWidget(nullptr);
-            auto* yolo_layout = new QVBoxLayout(yolo_panel);
-            yolo_layout->setContentsMargins(6, 6, 6, 6);
-            yolo_layout->setSpacing(6);
-
-            auto* controls = new QHBoxLayout();
-            controls->setContentsMargins(0, 0, 0, 0);
-            controls->setSpacing(8);
-
             auto* sem_btn = new QPushButton(semantic_overlay_enabled_ ? "Semantic: ON" : "Semantic: OFF", yolo_panel);
             sem_btn->setCheckable(true);
             sem_btn->setChecked(semantic_overlay_enabled_);
             sem_btn->setCursor(Qt::PointingHandCursor);
-            sem_btn->setStyleSheet(QString(
-                "QPushButton { border: 2px solid %1; border-radius: 4px; padding: 3px 8px; }"
-                "QPushButton:checked { background-color: %1; color: #101010; }").arg("#64C8FF"));
+            accent(sem_btn, "#64C8FF");
             connect(sem_btn, &QPushButton::toggled, this, [this, sem_btn](bool checked)
             {
                 semantic_overlay_enabled_ = checked;
                 sem_btn->setText(checked ? "Semantic: ON" : "Semantic: OFF");
             });
             controls->addWidget(sem_btn);
-            controls->addStretch(1);
 
             // Feed the class-id → name table so the viewer can show the label under the cursor.
             yolo_viewer_->set_class_names(yolo_semantic_processor->class_names());
-
-            yolo_layout->addLayout(controls);
-            yolo_layout->addWidget(yolo_viewer_.get(), 1);   // reparents the label into the panel
-
-            yolo_panel->setWindowTitle("YOLO");
-            yolo_window_ = yolo_panel;   // the panel is the top-level window
         }
-        else
-        {
-            yolo_viewer_->setWindowTitle("YOLO");
-            yolo_window_ = yolo_viewer_.get();   // no controls → the label itself is the window
-        }
+        controls->addStretch(1);
+
+        yolo_layout->addLayout(controls);
+        yolo_layout->addWidget(yolo_viewer_.get(), 1);   // reparents the label into the panel
+
+        yolo_panel->setWindowTitle("YOLO");
+        yolo_window_ = yolo_panel;   // the panel is the top-level window
 
         // Restore the last geometry; otherwise size the RGB window to the camera image on first frame.
         if (not restore_external_window_geometry(yolo_window_, "YOLOWindow"))

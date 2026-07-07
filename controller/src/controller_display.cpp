@@ -141,6 +141,12 @@ void ControllerDisplay::set_selected_affordance_text(const QString &text)
     snapshot_.selected_affordance_text_pending = true;
 }
 
+void ControllerDisplay::set_stuck_active(bool active)
+{
+    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+    snapshot_.stuck_active = active;
+}
+
 void ControllerDisplay::update_affordance_efe(const std::vector<AffordanceEfeSample> &samples)
 {
     auto *plot = custom_widget_ ? custom_widget_->affordance_efe_plot : nullptr;
@@ -212,6 +218,8 @@ void ControllerDisplay::present()
 
     if (snap.selected_affordance_text_pending)
         custom_widget_->set_selected_affordance_text(snap.selected_affordance_text);
+
+    custom_widget_->set_stuck_active(snap.stuck_active);   // widget dedups same-state calls
 
     if (!snap.valid || !viewer_2d_)
         return;

@@ -98,6 +98,15 @@ public:
         mppi_paths_toggle_btn->setChecked(false);
         toolbar_layout->addWidget(mppi_paths_toggle_btn);
         toolbar_layout->addStretch();
+
+        // Stuck-recovery indicator, pinned to the right of the toolbar. Hidden while the robot
+        // drives normally; lights up orange while an escape maneuver is reversing/turning the
+        // base out of a wedge (see ControllerSession stuck recovery).
+        stuck_status_label_ = new QLabel(QString(), toolbar);
+        stuck_status_label_->setAlignment(Qt::AlignCenter);
+        stuck_status_label_->setVisible(false);
+        toolbar_layout->addWidget(stuck_status_label_);
+
         main_layout->addWidget(toolbar);
 
         frame = new QFrame(this);
@@ -115,7 +124,7 @@ public:
         efe_layout->setSpacing(2);
         efe_layout->addWidget(new QLabel("Affordance EFE score (gain − λ·dist; higher = selected)", efe_panel));
         affordance_efe_plot = new rc::TimeSeriesPlot(efe_panel);
-        affordance_efe_plot->setMinimumHeight(160);
+        affordance_efe_plot->setMinimumHeight(80);
         affordance_efe_plot->set_visible_window(60.f);
         efe_layout->addWidget(affordance_efe_plot, 1);
         main_layout->addWidget(efe_panel, 1);
@@ -137,6 +146,25 @@ public:
             selected_affordance_value_->setText(text);
     }
 
+    // Toggle the stuck-recovery indicator. Orange + visible while the robot is escaping a wedge;
+    // hidden otherwise. Dedups so repeated same-state calls (one per cycle) don't churn Qt.
+    void set_stuck_active(bool active)
+    {
+        if (stuck_status_label_ == nullptr or active == stuck_active_shown_)
+            return;
+        stuck_active_shown_ = active;
+        if (active)
+        {
+            stuck_status_label_->setText(QStringLiteral(" ⚠ STUCK — escaping "));
+            stuck_status_label_->setStyleSheet(
+                "QLabel { background-color: #e67e22; color: white; font-weight: bold;"
+                " border-radius: 4px; padding: 2px 8px; }");
+            stuck_status_label_->setVisible(true);
+        }
+        else
+            stuck_status_label_->setVisible(false);
+    }
+
 public:
     QFrame *frame = nullptr;
     rc::TimeSeriesPlot *affordance_efe_plot = nullptr;
@@ -147,5 +175,7 @@ public:
 private:
     QLabel *cmd_vel_value_ = nullptr;
     QLabel *selected_affordance_value_ = nullptr;
+    QLabel *stuck_status_label_ = nullptr;
+    bool stuck_active_shown_ = false;
 };
 #endif

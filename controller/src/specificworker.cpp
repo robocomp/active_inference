@@ -413,7 +413,8 @@ bool SpecificWorker::ensure_current_plan(const PlanningStep &step)
 	                                  obstacle_tracker_,
 	                                  path_controller_,
 	                                  motion_commander_,
-	                                  display_);
+	                                  display_,
+	                                  [this]() { return current_time_ms(); });
 }
 
 /////////////////////////////////////////////////////////////////

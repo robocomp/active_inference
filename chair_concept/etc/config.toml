@@ -55,6 +55,7 @@ AI2PriorSizeStd = 0.15
 AI2ProcessStdM = 0.005
 AI2ProcessStdYaw = 0.01
 AI2ProcessStdSize = 0.0005       # process noise for RIGID size DOFs (≪ pose; furniture shape doesn't drift)
+AI2AgeNominalDtS = 0.0           # stale-belief aging: mask nominal period (s). >0 ⇒ Σ inflates by Q·(dt/this) while unseen (measurement-age→covariance); 0 = freeze on stale. Try 0.1.
 AI2FloorZ = 0.0                  # room-frame floor plane; cz is PINNED here (shared, view-independent)
 AI2FloorStd = 0.03               # floor-height uncertainty (m) → common-mode z
 AI2SeatAnchorStd = 0.04          # seat-layer height-anchor obs noise (m); 0 disables. Pins seat_h to the dense seat layer (gauge fix)

@@ -109,6 +109,14 @@ class SpecificWorker : public GenericWorker
         std::int64_t      last_compute_timing_log_ms_ = 0;
         std::string pose_file_path() const;
 
+        // Publish the latest corrected pose (robot↔room RT) to the DSR graph if it is fresh. Called
+        // both from compute() and — the instant the localizer produces a result — from a
+        // Qt::QueuedConnection posted by room_concept_'s on_result_ready callback. Both run on the MAIN
+        // thread (the queued hop marshals the localizer-thread trigger), so the publish bookkeeping is
+        // race-free and the timestamp dedup makes whichever path fires second a no-op. Returns true iff
+        // it actually published this call.
+        bool maybe_publish_corrected_pose();
+
         // ── Localizer ──────────────────────────────────────────────────────────
         rc::RoomConcept room_concept_;
         bool room_initialized_from_svg_polygon_ = false;

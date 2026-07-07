@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <print>
@@ -207,12 +208,20 @@ float BottleFitter::run_inference(BottleInstance& inst, const BottleObservation&
     // re-acquired detection (at a shifted apparent position) associates instead of spawning a rebirth,
     // WITHOUT loosening the learned radius/height. Σ is bounded in practice: the negative-information death
     // gate retires the instance long before it grows unusable.
+    const auto now = std::chrono::steady_clock::now();
     if (not observation.has_fresh_data)
     {
-        inst.ai2_belief.predict_stale();
+        // Age the position Σ. Default q_scale=1 (historic one-Q-per-unseen-cycle); with AI2AgeNominalDtS>0
+        // scale by real elapsed time so Σ_pos reflects how long the bottle has been unseen on the agent clock.
+        float q_scale = 1.0f;
+        if (cfg_.ai2_age_nominal_dt_s > 0.0f and inst.last_belief_touch.time_since_epoch().count() != 0)
+            q_scale = std::chrono::duration<float>(now - inst.last_belief_touch).count() / cfg_.ai2_age_nominal_dt_s;
+        inst.ai2_belief.predict_stale(q_scale);
+        inst.last_belief_touch = now;
         update_expected_visible(inst);
         return inst.prev_free_energy;
     }
+    inst.last_belief_touch = now;   // fresh path: update() below carries its own Q; reset the age clock
 
     // Observation precision R = σ_base² (per-point random part); the shared-mask/localization error is
     // carried separately by the common-mode (Woodbury) saturation, not folded into per-point R.

@@ -69,6 +69,10 @@ struct BottleConfig
     float ai2_prior_size_std       = 0.03f;  // broad size prior std (m) on radius,height
     float ai2_process_std_m        = 0.005f; // predict process-noise std, POSITION (cx,cy,cz) (m/frame)
     float ai2_process_std_size_m   = 0.001f; // predict process-noise std, SIZE (radius,height) — tiny: rigid size sticks
+    // Stale-belief aging (measurement-age → covariance). Nominal mask-stream period (s): with >0, an unseen
+    // bottle's POSITION Σ inflates by Q·(dt/this) on the agent's clock (predict_stale) so a dead feed reads as
+    // growing position uncertainty downstream. <=0 keeps the historic one-Q-per-unseen-cycle behaviour.
+    float ai2_age_nominal_dt_s     = 0.0f;
     // Per-frame COMMON-MODE error (shared by all points of a mask → doesn't average out). The frame's
     // information saturates here, so N correlated points can't collapse σ → calibrated posterior.
     float ai2_common_mode_pos_std  = 0.02f;  // shared position error (m); pose-chain cov adds to it

@@ -29,6 +29,7 @@
 #include <unordered_set>
 #include <QDir>
 #include <QDateTime>
+#include <QMetaObject>
 #include <QFileInfo>
 #include <QThread>
 #include <QVBoxLayout>
@@ -194,6 +195,16 @@ void SpecificWorker::initialize()
     // connect(G.get(), &DSR::DSRGraph::del_edge_signal,         this, &SpecificWorker::del_edge_slot);
     // connect(G.get(), &DSR::DSRGraph::del_node_signal,         this, &SpecificWorker::del_node_slot);
 
+    // Publish corrections the INSTANT the localizer produces them, not on the next compute() tick.
+    // The callback runs on the LOCALIZER thread, so it only marshals the actual graph write to the
+    // MAIN thread via a Qt::QueuedConnection (maybe_publish_corrected_pose touches the DSR graph and
+    // must stay on the main thread). Removes ~one compute-period of lidar→RT-publish latency; the
+    // timestamp dedup keeps it idempotent with compute()'s own publish call.
+    room_concept_.set_on_result_ready([this]()
+    {
+        QMetaObject::invokeMethod(this, [this]() { maybe_publish_corrected_pose(); }, Qt::QueuedConnection);
+    });
+
     // LiDAR is pumped synchronously from compute() (no ingest thread); just start the localizer.
     room_concept_.start();
 
@@ -245,6 +256,10 @@ void SpecificWorker::initialize()
                 qWarning() << "[SM] Operating enter: RoomConcept thread was not running, starting it";
                 room_concept_.start();
             }
+            // Start the dedicated LiDAR ingest thread ONLY now (post graph-join): it reads the DSR graph
+            // (subscriber discovery + inner_eigen transform), which is unsafe during the join. Idempotent.
+            if (lidar_ingestor_)
+                lidar_ingestor_->start();
         },
         .on_operating_loop = [this]()
         {
@@ -368,6 +383,40 @@ void SpecificWorker::log_pose_trace(int type, std::int64_t valid_ts_ms,
     pose_trace_.flush();
 }
 
+bool SpecificWorker::maybe_publish_corrected_pose()
+{
+    // Main-thread only (compute() directly, or the localizer's on_result_ready callback marshalled here
+    // via QueuedConnection). In PreserveBootstrapRoom mode the room is a static prior — the localizer
+    // still runs for the viewer, but we never touch the graph.
+    if (shutting_down_.load() || params.PRESERVE_BOOTSTRAP_ROOM)
+        return false;
+
+    const auto loc_res = room_concept_.get_last_result();
+    if (!loc_res.has_value() || !loc_res->ok)
+        return false;
+
+    // Dedup by the lidar stamp so the compute() path and the immediate-publish path are idempotent
+    // (whichever fires first for a given frame wins; the other no-ops). The throttle is a small
+    // anti-burst floor only — publishing runs at the optimizer/lidar rate, not the compute rate.
+    const auto now_ms = QDateTime::currentMSecsSinceEpoch();
+    const bool fresh_correction = loc_res->timestamp_ms > 0
+                                  && loc_res->timestamp_ms != last_dsr_published_ts_ms_;
+    if (!fresh_correction
+        || (last_dsr_publish_try_ms_ != 0 && now_ms - last_dsr_publish_try_ms_ < 15))
+        return false;
+
+    // Publish the optimizer output DIRECTLY (corrected pose → robot↔room RT). No prediction, no
+    // filtering — the lidar-corrected pose tracks truth and is smooth; rate = optimizer rate.
+    last_dsr_publish_try_ms_ = now_ms;
+    scene_graph_->update(*loc_res, last_robot_adv_speed_, last_robot_side_speed_, last_robot_rot_speed_);
+    last_dsr_published_ts_ms_ = loc_res->timestamp_ms;
+
+    ++rt_corr_count_;
+    log_pose_trace(/*type=corrected*/0, loc_res->timestamp_ms,
+                   loc_res->robot_pose, loc_res->innovation_norm);
+    return true;
+}
+
 void SpecificWorker::compute()
 {
     const auto now_ms = QDateTime::currentMSecsSinceEpoch();
@@ -391,8 +440,9 @@ void SpecificWorker::compute()
         last_affordance_monitor_ms_ = now_ms;
     }
 
-    // Drain the LiDAR media plane and wake the localizer (replaces the old ingest thread).
-    lidar_ingestor_->pump();
+    // LiDAR is drained by lidar_ingestor_'s dedicated ingest thread (started at Operating-enter), which
+    // pumps a fresh scan to the localizer with ~0-2 ms latency instead of this ~16 ms tick. compute()
+    // only reads the resulting buffer/result below.
 
     QElapsedTimer section_timer;
     section_timer.start();
@@ -431,30 +481,13 @@ void SpecificWorker::compute()
     // Publish near the lidar rate (~60 ms) so the RT timestamped history is dense enough for
     // consumers to bracket a recent lidar-stamped query (e.g. the controller's overlay) instead of
     // clamping to a stale block. Steady RT updates on one edge — not join/leave churn — so low risk.
-    if (!params.PRESERVE_BOOTSTRAP_ROOM && have_loc)
     {
         section_timer.restart();
-        const bool fresh_correction = loc_res->timestamp_ms > 0
-                                      && loc_res->timestamp_ms != last_dsr_published_ts_ms_;
-
-        // Publish EVERY fresh correction (fresh_correction already gates to the optimizer's new-frame
-        // rate). The throttle is only a small anti-burst floor (15 ms ≪ compute period) — the previous
-        // 60 ms throttle interacted with the 50 ms compute period to drop every other correction,
-        // quantizing the corrected stream to 10 Hz even though the optimizer runs ~19 Hz.
-        if (fresh_correction
-            && (last_dsr_publish_try_ms_ == 0 || now_ms - last_dsr_publish_try_ms_ >= 15))
-        {
-            // Publish the optimizer output DIRECTLY (corrected pose → robot↔room RT). No prediction,
-            // no filtering — the lidar-corrected pose tracks truth and is smooth; rate = optimizer rate.
-            last_dsr_publish_try_ms_ = now_ms;
-            scene_graph_->update(*loc_res, last_robot_adv_speed_, last_robot_side_speed_, last_robot_rot_speed_);
-            last_dsr_published_ts_ms_ = loc_res->timestamp_ms;
-
-            ++rt_corr_count_;
-            log_pose_trace(/*type=corrected*/0, loc_res->timestamp_ms,
-                           loc_res->robot_pose, loc_res->innovation_norm);
-            did_publish = true;
-        }
+        // Publish the fresh correction now (idempotent by timestamp). The localizer also triggers this
+        // the instant it finishes, via a QueuedConnection, so whichever fires first wins and this call
+        // usually no-ops — but it stays here so a compute() tick still publishes if the immediate hop
+        // was ever missed.
+        did_publish = maybe_publish_corrected_pose();
         t_dsr_ms = section_timer.elapsed();
     }
 

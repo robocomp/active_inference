@@ -347,16 +347,63 @@ void SpecificWorker::initialize()
 	QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
 	                 this, &SpecificWorker::request_shutdown, Qt::UniqueConnection);
 
-	// One-shot radial (twopi) relayout once the bootstrap graph has been ingested
-	// by the viewer, so the DSR tree is well organized in the UI at startup.
-	// Delayed on the main-thread event loop so it runs after the initial node/edge
-	// update signals have been processed (graph access stays on the main thread).
+	// Debounced relayout timer: a burst of node arrivals (e.g. residual_concept spawning several obstacles,
+	// or a peer joining) collapses into ONE twopi instead of one-per-node. Single-shot, restarted on each
+	// structural change; fires on the main thread.
+	relayout_timer_ = new QTimer(this);
+	relayout_timer_->setSingleShot(true);
+	QObject::connect(relayout_timer_, &QTimer::timeout, this, [this]()
+	{
+		if (not shutting_down_.load())
+			trigger_graph_layout_twopi();
+	});
+
+	// Seed the known-node set with the graph as loaded, then relayout the DSR viewer whenever a NODE is
+	// added or removed — so late arrivals (the residual_concept agent node id=14, its residual_* obstacles,
+	// any joining peer) re-tidy the tree, not just the startup snapshot. QUEUED, never DirectConnection:
+	// these signals fire on the FastDDS reader threads and the slot must run on the main thread (CLAUDE.md).
+	for (const auto& n : G->get_nodes())
+		known_node_ids_.insert(n.id());
+	QObject::connect(G.get(), &DSR::DSRGraph::update_node_signal, this, &SpecificWorker::modify_node_slot,
+	                 Qt::QueuedConnection);
+	QObject::connect(G.get(), &DSR::DSRGraph::del_node_signal, this, &SpecificWorker::del_node_slot,
+	                 Qt::QueuedConnection);
+
+	// One-shot radial (twopi) relayout once the bootstrap graph has been ingested by the viewer, so the DSR
+	// tree is well organized in the UI at startup. Delayed on the main-thread event loop so it runs after the
+	// initial node/edge update signals have been processed (graph access stays on the main thread).
 	QTimer::singleShot(1500, this, [this]()
 	{
 		if (shutting_down_.load())
 			return;
 		trigger_graph_layout_twopi();
 	});
+}
+
+// A node was inserted OR an attribute was updated (update_node_signal covers both). Relayout only when the id
+// is genuinely NEW — attribute churn (residual writes its box + Σ every cycle) must NOT trigger a relayout.
+void SpecificWorker::modify_node_slot(std::uint64_t id, const std::string& /*type*/)
+{
+	if (shutting_down_.load())
+		return;
+	if (known_node_ids_.insert(id).second)   // .second == true ⇒ this id was not present ⇒ a NEW node
+		schedule_graph_relayout();
+}
+
+// A node was removed → drop it from the set and re-tidy.
+void SpecificWorker::del_node_slot(std::uint64_t id)
+{
+	if (shutting_down_.load())
+		return;
+	if (known_node_ids_.erase(id) > 0)
+		schedule_graph_relayout();
+}
+
+// Coalesce a burst of structural changes into a single relayout: (re)start the single-shot debounce timer.
+void SpecificWorker::schedule_graph_relayout()
+{
+	if (relayout_timer_)
+		relayout_timer_->start(400);
 }
 
 void SpecificWorker::compute()

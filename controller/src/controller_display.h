@@ -54,6 +54,8 @@ public:
 
     void set_command_text(const QString &text);
     void set_selected_affordance_text(const QString &text);
+    // Stage the stuck-recovery indicator state (thread-safe; applied on the GUI thread in present()).
+    void set_stuck_active(bool active);
     // One sample per evaluated affordance for the EFE panel below the 2D view. Plots TWO lines per
     // affordance: the selection score (gain − λ·dist, solid) and the raw gain (ΔH, lighter) — so the
     // vertical gap between them is λ·dist. Thread-safe (the plot buffers under its own mutex).
@@ -88,6 +90,7 @@ private:
         QString selected_affordance_text;
         bool selected_affordance_text_pending = false;
         bool clear_trajectory_pending = false;
+        bool stuck_active = false;   // stuck-recovery indicator (pushed every cycle; widget dedups)
     };
 
     void restore_window_geometry();

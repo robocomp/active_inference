@@ -111,6 +111,9 @@ private:
     // Associates "table" masks to instances, spawns a table from an unexplained mask, merges overlaps.
     rc::InstanceTracker tracker_;
     void run_instance_tracker();   // called every cycle from compute()
+    // Evidence-based removal: carve this cycle's LiDAR sweep against each footprint → occupancy log-odds →
+    // remove the demonstrably-empty tables. Gated by TableModel.ExistenceRemovalEnabled.
+    void update_existence_and_remove();
     // Physical-exclusion invariant: two tables cannot share space. Collapse any pair of instances whose
     // oriented footprints overlap beyond Tracker.MergeOverlap, keeping the more-observed one.
     void merge_overlapping_instances();

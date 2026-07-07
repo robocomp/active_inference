@@ -139,6 +139,7 @@ AI2ClutterScaleM = 0.08       # a point further than ~this from the surface is l
 AI2PriorPosStd = 0.30         # broad position prior std (m) on cx,cy,cz
 AI2PriorSizeStd = 0.03        # broad size prior std (m) on radius,height
 AI2ProcessStdM = 0.005        # predict process-noise std, all 5 length DOFs (m/frame)
+AI2AgeNominalDtS = 0.0        # stale-belief aging: mask nominal period (s). >0 ⇒ unseen bottle's POSITION Σ grows by Q·(dt/this) on the agent clock (measurement-age→covariance); 0 = historic 1-Q-per-unseen-cycle. Try 0.1.
 AI2CommonModePosStd = 0.02    # per-frame SHARED position error (m); pose-chain cov adds → Σ saturates (calibrated)
 AI2CommonModeSizeStd = 0.01   # per-frame SHARED size error radius,height (m)
 AI2GnIters = 4                # Gauss-Newton iterations per frame

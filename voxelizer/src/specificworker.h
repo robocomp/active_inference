@@ -38,6 +38,8 @@
 #include "voxelizer_params.h"
 #include "perception_rate_regulator.h"
 #include "stream_rate_monitor.h"
+#include "model_projection_overlay.h"   // rc::ModelProjectionOverlay + GraphObjectBox (SceneFrame value member)
+#include "ricoh_projection_overlay.h"   // rc::RicohProjectionOverlay (360 panorama counterpart)
 
 #include <chrono>
 
@@ -96,6 +98,12 @@ class SpecificWorker : public GenericWorker
             Mat::RTMat                  room_T_robot;
             Mat::RTMat                  room_T_zed;
             std::vector<Eigen::Vector3f> lidar_points_room;
+            std::vector<GraphObjectBox>  graph_object_boxes;   // model instances (room frame) — reused for the ZED-image projection overlay
+            std::string                 room_name;         // live room node name (frame the boxes/polygon live in)
+            std::vector<float>          room_poly_x;       // room floor polygon (room frame, m) — gathered here so the overlay never re-reads the graph
+            std::vector<float>          room_poly_y;
+            float                       room_height = 0.f;
+            Eigen::Vector3d             ricoh_optical_center{0, 0, 0};   // room frame; from body→ricoh RT (graph) or config fallback
             std::uint64_t               frame_ts_ms = 0;   // capture stamp of rgbd/depth — published so consumers can pin pose to capture time
         };
 
@@ -165,6 +173,29 @@ class SpecificWorker : public GenericWorker
         QWidget* ricoh_window_ = nullptr;            // Ricoh 360 popup (hidden until the top-bar button toggles it)
         bool yolo_window_needs_image_size_ = false;  // size the RGB window to the image on first frame
         bool semantic_overlay_enabled_ = false;      // YOLO-window toggle: run + draw the semantic overlay (starts OFF)
+        bool yolo_overlay_enabled_ = true;           // ZED-window "YOLO" toggle: draw the seg detections (starts ON)
+        bool model_overlay_enabled_ = false;         // ZED-window "Models" toggle: project graph model-instance BBs (starts OFF)
+        std::unique_ptr<rc::ModelProjectionOverlay> model_overlay_;   // projects DSR model boxes onto the ZED image
+
+        // Ricoh-360 counterpart of the ZED Models overlay (equirectangular projection, wireframe).
+        bool ricoh_model_overlay_enabled_ = false;   // Ricoh-window "Models" toggle (starts OFF)
+        std::unique_ptr<rc::RicohProjectionOverlay> ricoh_model_overlay_;
+        // The ricoh popup renders in on_render_tick (not compute), so cache the last scene the overlay
+        // needs. Both run on the Qt main thread → no lock. Updated at the end of each compute() frame.
+        struct RicohSceneCache
+        {
+            std::vector<GraphObjectBox> boxes;
+            Eigen::Vector3d             ricoh_optical_center{0, 0, 0};
+            Mat::RTMat                  room_T_zed;
+            std::vector<float>          poly_x, poly_y;
+            float                       room_height = 0.f;
+            bool                        valid = false;
+        };
+        RicohSceneCache ricoh_scene_;
+        // Static robot→ricoh mount (from the body→ricoh RT edge), resolved once via inner_eigen then
+        // reused; room_T_ricoh = room_T_robot · robot_T_ricoh gives the optical centre without a
+        // per-frame tree walk. Empty until the ricoh node exists (config with no ricoh → config fallback).
+        std::optional<Mat::RTMat> robot_T_ricoh_;
         void save_external_window_geometry() const;
 
     signals:

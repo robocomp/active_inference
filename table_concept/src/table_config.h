@@ -88,6 +88,16 @@ struct TableConfig
     float coverage_precision   = 0.0f;
     float coverage_robust_c_m  = 0.15f;
 
+    // Existence / removal (common/existence_belief.h): each cycle carve the LiDAR sweep against the table
+    // footprint → occupancy/free-space log-odds; remove when P(occupied) < removal_prob. Evidence-based, not a
+    // miss counter. OFF by default (a mis-removal deletes furniture); enable to replace merge-only removal.
+    bool  existence_removal_enabled = false;
+    float existence_removal_prob    = 0.12f;  // decision boundary: remove when L < log(p/(1−p))
+    float existence_logodds_max     = 4.0f;   // clamp |L| so evidence stays finite AND recoverable
+    float existence_detection_prob  = 0.85f;  // P(beam through OCCUPIED footprint returns from it)
+    float existence_clutter_prob    = 0.05f;  // P(beam through EMPTY footprint returns anyway) — spurious rate
+    float existence_sensor_sigma_m  = 0.03f;  // LiDAR range σ (m) for the soft occ/free surface split
+
     // Upload the table pose covariance onto the room→table RT edge (rt_covariance_att, 6×6 SE3),
     // mapped from the belief's full Σ over [cx,cy,H,w,h,yaw]: x←cx, y←cy, z←H/2, yaw←ψ; roll/pitch are
     // unobservable (large). rt_cov_scale calibrates the raw variance toward NEES≈1.

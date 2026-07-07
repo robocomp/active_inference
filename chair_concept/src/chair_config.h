@@ -44,6 +44,10 @@ struct ChairConfig
     float ai2_process_std_m      = 0.005f;
     float ai2_process_std_yaw    = 0.01f;
     float ai2_process_std_size   = 0.0005f;  // rigid size DOFs ≪ pose (Tier-1: kills the vertical random walk)
+    // Stale-belief aging (measurement-age → covariance). Nominal mask-stream period (s): with >0, when a chair
+    // is unseen Σ inflates by Q·(dt/this) on the agent's own clock (rc::ai::inflate_for_age) so a dead feed reads
+    // downstream as growing uncertainty. <=0 DISABLES it → freeze-on-stale (historic). Mirrors table_concept.
+    float ai2_age_nominal_dt_s   = 0.0f;
     float ai2_floor_z            = 0.0f;     // room-frame floor; cz pinned here (Tier-1: removes cz gauge freedom)
     float ai2_floor_std          = 0.03f;    // floor-height uncertainty (m) → common-mode z
     float ai2_seat_anchor_std    = 0.04f;    // seat-layer height anchor obs noise (m); 0 → off. Fixes seat_h gauge runaway

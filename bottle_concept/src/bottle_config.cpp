@@ -62,6 +62,7 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
     out.ai2_prior_size_std       = getf("BottleModel.AI2PriorSizeStd",        0.03f);
     out.ai2_process_std_m        = getf("BottleModel.AI2ProcessStdM",         0.005f);
     out.ai2_process_std_size_m   = getf("BottleModel.AI2ProcessStdSizeM",     0.001f);
+    out.ai2_age_nominal_dt_s     = getf("BottleModel.AI2AgeNominalDtS",       0.0f);
     out.ai2_common_mode_pos_std  = getf("BottleModel.AI2CommonModePosStd",    0.02f);
     out.ai2_common_mode_size_std = getf("BottleModel.AI2CommonModeSizeStd",   0.01f);
     out.ai2_gn_iters             = geti("BottleModel.AI2GnIters",             4);

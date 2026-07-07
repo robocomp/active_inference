@@ -331,11 +331,6 @@ void VoxelOpenGLViewer::set_show_residual(bool show)
     request_update_throttled();
 }
 
-void VoxelOpenGLViewer::set_show_rfe(bool show)
-{
-    show_rfe_ = show;
-    request_update_throttled();
-}
 
 void VoxelOpenGLViewer::set_show_masks(bool show)
 {
@@ -349,17 +344,25 @@ void VoxelOpenGLViewer::set_show_models(bool show)
     request_update_throttled();
 }
 
-void VoxelOpenGLViewer::update_lidar_points(std::span<const QVector3D> positions)
+void VoxelOpenGLViewer::update_lidar_points(std::span<const QVector3D> positions,
+                                            std::span<const std::uint8_t> plane_id)
 {
     std::vector<Vertex> new_vertices;
     new_vertices.reserve(positions.size());
 
-    for (const QVector3D& p : positions)
+    for (std::size_t i = 0; i < positions.size(); ++i)
     {
+        const QVector3D& p = positions[i];
         const float fx = voxel_flip_x_ ? -1.f : 1.f;
         const float fy = voxel_flip_y_ ? -1.f : 1.f;
         const QVector3D mapped{fx * p.x(), p.z(), fy * p.y()};
-        new_vertices.push_back(Vertex{mapped.x(), mapped.y(), mapped.z(), 0.55f, 0.62f, 0.78f});  // lidar: slate blue-gray
+        // Colour by source plane so the floor rings' origin is visible at a glance:
+        //   helios (0) = slate blue-gray,  bpearl (1) = orange.
+        const bool bpearl = (i < plane_id.size()) and (plane_id[i] == 1);
+        const float r = bpearl ? 0.95f : 0.55f;
+        const float g = bpearl ? 0.55f : 0.62f;
+        const float b = bpearl ? 0.15f : 0.78f;
+        new_vertices.push_back(Vertex{mapped.x(), mapped.y(), mapped.z(), r, g, b});
     }
 
     {
@@ -369,37 +372,20 @@ void VoxelOpenGLViewer::update_lidar_points(std::span<const QVector3D> positions
     request_update_throttled();
 }
 
-void VoxelOpenGLViewer::update_rfe_points(std::span<const QVector3D> residual_positions,
-                                          std::span<const QVector3D> fallback_positions)
+void VoxelOpenGLViewer::update_residual_points(std::span<const QVector3D> residual_positions)
 {
-    // Each cloud goes to its own buffer so it can be toggled independently.
     std::vector<Vertex> residual_vertices;
-    std::vector<Vertex> rfe_vertices;
     residual_vertices.reserve(residual_positions.size());
-    rfe_vertices.reserve(fallback_positions.size());
-
-    auto append_points = [this](std::vector<Vertex>& target,
-                                std::span<const QVector3D> positions,
-                                float r,
-                                float g,
-                                float b)
+    for (const QVector3D& p : residual_positions)
     {
-        for (const QVector3D& p : positions)
-        {
-            const float fx = voxel_flip_x_ ? -1.f : 1.f;
-            const float fy = voxel_flip_y_ ? -1.f : 1.f;
-            const QVector3D mapped{fx * p.x(), p.z(), fy * p.y()};
-            target.push_back(Vertex{mapped.x(), mapped.y(), mapped.z(), r, g, b});
-        }
-    };
-
-    append_points(residual_vertices, residual_positions, 0.15f, 0.20f, 0.80f);  // residual: dark blue
-    append_points(rfe_vertices, fallback_positions, 0.95f, 0.20f, 0.85f);       // rfe: magenta
-
+        const float fx = voxel_flip_x_ ? -1.f : 1.f;
+        const float fy = voxel_flip_y_ ? -1.f : 1.f;
+        const QVector3D mapped{fx * p.x(), p.z(), fy * p.y()};
+        residual_vertices.push_back(Vertex{mapped.x(), mapped.y(), mapped.z(), 0.15f, 0.20f, 0.80f});  // residual: dark blue
+    }
     {
         std::scoped_lock lk(data_mutex_);
         residual_vertices_ = std::move(residual_vertices);
-        rfe_vertices_ = std::move(rfe_vertices);
     }
     request_update_throttled();
 }
@@ -710,26 +696,21 @@ void VoxelOpenGLViewer::paintGL()
 
     std::size_t n_lidar_vertices = 0;
     std::size_t n_residual_vertices = 0;
-    std::size_t n_rfe_vertices = 0;
     std::size_t n_mask_vertices = 0;
     std::vector<Vertex> lidar_draw_vertices;
     std::vector<Vertex> residual_draw_vertices;
-    std::vector<Vertex> rfe_draw_vertices;
     std::vector<Vertex> mask_draw_vertices;
     {
         std::scoped_lock lk(data_mutex_);
         n_lidar_vertices = lidar_vertices_.size();
         n_residual_vertices = residual_vertices_.size();
-        n_rfe_vertices = rfe_vertices_.size();
         n_mask_vertices = mask_vertices_.size();
         lidar_draw_vertices = lidar_vertices_;
         residual_draw_vertices = residual_vertices_;
-        rfe_draw_vertices = rfe_vertices_;
         mask_draw_vertices = mask_vertices_;
     }
     const bool has_lidar = n_lidar_vertices > 0;
     const bool has_residual = n_residual_vertices > 0;
-    const bool has_rfe = n_rfe_vertices > 0;
     const bool has_mask = n_mask_vertices > 0;
 
     const float cp = std::cos(pitch_);
@@ -777,21 +758,6 @@ void VoxelOpenGLViewer::paintGL()
         program_.setUniformValue("u_round_points", 1);
         program_.setUniformValue("u_point_size", 6.0f);
         glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(residual_draw_vertices.size()));
-        program_.setUniformValue("u_point_size", 4.5f);
-        room_vbo_.release();
-        room_vao_.release();
-        glEnable(GL_DEPTH_TEST);
-    }
-
-    if (has_rfe && show_rfe_)
-    {
-        glDisable(GL_DEPTH_TEST);
-        room_vao_.bind();
-        room_vbo_.bind();
-        room_vbo_.allocate(rfe_draw_vertices.data(), static_cast<int>(rfe_draw_vertices.size() * sizeof(Vertex)));
-        program_.setUniformValue("u_round_points", 1);
-        program_.setUniformValue("u_point_size", 6.0f);
-        glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(rfe_draw_vertices.size()));
         program_.setUniformValue("u_point_size", 4.5f);
         room_vbo_.release();
         room_vao_.release();
@@ -1595,6 +1561,7 @@ QColor VoxelOpenGLViewer::color_for_category(const std::string& category)
     if (category == "model_table") return QColor(80, 220, 120); // green for graph/model tables
     if (category == "bottle") return QColor(255, 0, 200);  // hot magenta — bottle cylinder boxes
     if (category == "monitor") return QColor(186, 85, 211); // orchid-violet
+    if (category == "obstacle") return QColor(255, 45, 45); // red — residual_concept obstacle boxes (obstacle=red)
 
     static const std::array<QColor, 20> palette = {
         QColor(220, 20, 60), QColor(0, 90, 181), QColor(34, 139, 34), QColor(255, 140, 0),

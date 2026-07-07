@@ -160,35 +160,62 @@ std::optional<LidarSweep> LidarPlaneReader::poll(const std::string& target_frame
 
     ensure_subscribers();
 
-    LidarSweep sweep;
-    bool any = false;
-    std::vector<Eigen::Vector3f> raw;   // reused per plane (device frame)
-
-    auto ingest = [&](Plane& p)
+    // 1) Refresh each live plane's CACHE from its newest frame (dedup by source stamp). A plane with no
+    //    fresh frame this poll keeps its previous cache — it is NOT dropped from the merge.
+    std::vector<Eigen::Vector3f> raw;
+    bool any_fresh = false;
+    auto refresh = [&](Plane& p)
     {
         if (not p.sub)
             return;
         raw.clear();
         const std::int64_t ts = drain_newest(*p.sub, p.last_ts, raw);
         if (ts <= p.last_ts or raw.empty())
-            return;
-        Eigen::Vector3f origin;
-        if (not append_transformed(p.node, target_frame, ts, interpolate, raw, sweep.points, origin))
-            return;   // RT edge not ready yet — skip this plane's sweep, keep p.last_ts so we retry
-        p.last_ts     = ts;
-        sweep.origin  = origin;
-        sweep.stamp_ms = std::max(sweep.stamp_ms, ts);
-        any = true;
+            return;   // no new frame → keep the existing cache
+        p.last_ts   = ts;
+        p.cache_ts  = ts;
+        p.raw_cache = std::move(raw);
+        any_fresh   = true;
     };
 
     bool any_preferred_live = false;
     for (auto& p : preferred_planes_)
     {
         if (p.sub) any_preferred_live = true;
-        ingest(p);
+        refresh(p);
     }
     if (not any_preferred_live)
-        ingest(fallback_plane_);
+        refresh(fallback_plane_);
+
+    // Nothing new this cycle → let the consumer keep its last sweep (no redundant reprocessing, no blink).
+    if (not any_fresh)
+        return std::nullopt;
+
+    // 2) Build the sweep from EVERY plane's LATEST cache — not only the planes fresh this poll — so an
+    //    out-of-phase plane (helios vs bpearl) never drops out and the merged cloud stays whole. Each plane
+    //    is transformed at ITS OWN capture stamp (correct per-plane registration on a moving robot).
+    LidarSweep sweep;
+    bool any = false;
+    auto merge_plane = [&](const Plane& p, std::uint8_t pid)   // NOT 'emit' — that is a Qt macro
+    {
+        if (p.raw_cache.empty())
+            return;
+        Eigen::Vector3f origin;
+        if (not append_transformed(p.node, target_frame, p.cache_ts, interpolate, p.raw_cache, sweep.points, origin))
+            return;   // RT edge not ready yet — skip this plane this poll
+        sweep.plane_id.resize(sweep.points.size(), pid);   // tag the points just appended with their plane
+        sweep.origin   = origin;
+        sweep.stamp_ms = std::max(sweep.stamp_ms, p.cache_ts);
+        any = true;
+    };
+
+    if (any_preferred_live)
+    {
+        std::uint8_t pid = 0;
+        for (const auto& p : preferred_planes_) merge_plane(p, pid++);
+    }
+    else
+        merge_plane(fallback_plane_, 0);
 
     if (not any or sweep.points.empty())
         return std::nullopt;

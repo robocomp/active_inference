@@ -258,6 +258,7 @@ std::optional<SceneProcessor::LidarData> SceneProcessor::get_lidar3D()
                 ld.ys.push_back(p.y());
                 ld.zs.push_back(p.z());
             }
+            ld.plane_id = sweep->plane_id;   // per-point source plane (helios=0, bpearl=1) for viewer colouring
             ld.timestamp_ms = static_cast<std::uint64_t>(sweep->stamp_ms);
             media_lidar_ = std::move(ld);
             media_lidar_valid_ = true;
@@ -810,6 +811,9 @@ std::optional<GraphObjectBox> SceneProcessor::build_graph_object_box(const DSR::
     // node.type() == "table" covers all table_1, table_2, … nodes.
     if (node.type() == "table")
         category = "model_table";
+    // residual_concept obstacles (type "obstacle", named residual_*) → their own category/colour.
+    if (node.type() == "obstacle")
+        category = "obstacle";
 
     // bottle_concept publishes bottles as `cylinder` nodes (bottle_1, …); tag them so
     // the viewer paints their bounding box in a colour distinct from the table.
@@ -844,7 +848,8 @@ std::vector<GraphObjectBox> SceneProcessor::get_graph_object_boxes(const std::st
     const auto object_nodes   = graph_->get_nodes_by_type("object");
     const auto table_nodes    = graph_->get_nodes_by_type("table");
     const auto cylinder_nodes = graph_->get_nodes_by_type("cylinder");   // bottle_concept bottles
-    graph_boxes.reserve(object_nodes.size() + table_nodes.size() + cylinder_nodes.size());
+    const auto obstacle_nodes = graph_->get_nodes_by_type("obstacle");   // residual_concept obstacles
+    graph_boxes.reserve(object_nodes.size() + table_nodes.size() + cylinder_nodes.size() + obstacle_nodes.size());
     auto add_boxes = [&](const auto& nodes)
     {
         for (const auto& node : nodes)
@@ -857,7 +862,20 @@ std::vector<GraphObjectBox> SceneProcessor::get_graph_object_boxes(const std::st
     add_boxes(object_nodes);
     add_boxes(table_nodes);
     add_boxes(cylinder_nodes);
+    add_boxes(obstacle_nodes);
     return graph_boxes;
+}
+
+bool SceneProcessor::get_room_layout(std::vector<float>& polygon_x, std::vector<float>& polygon_y,
+                                     float& room_height) const
+{
+    auto room_data = get_room_polygon_from_graph();
+    if (!room_data.has_value())
+        return false;
+    polygon_x = std::move(room_data->polygon_x);
+    polygon_y = std::move(room_data->polygon_y);
+    room_height = room_data->room_height;
+    return true;
 }
 
 void SceneProcessor::overlay_room_polygon_on_canvas(cv::Mat& canvas, std::uint64_t frame_ts_ms) const
@@ -1097,25 +1115,13 @@ void SceneProcessor::update_viewer_table_rfe_points()
     if (voxel_viewer_ == nullptr || graph_ == nullptr)
         return;
 
-    static int debug_frame_counter = 0;
     std::vector<QVector3D> residual_points;
-    std::vector<QVector3D> rfe_points;
-    std::size_t tables_seen = 0;
-    std::size_t tables_with_residual = 0;
-    std::size_t tables_with_rfe = 0;
-    std::size_t residual_point_count = 0;
-    std::size_t rfe_point_count = 0;
-
     for (const auto& node : graph_->get_nodes_by_type("table"))
     {
-        ++tables_seen;
-
         if (auto residual_opt = graph_->get_attrib_by_name<residual_pts_att>(node); residual_opt.has_value())
         {
-            ++tables_with_residual;
             const auto& flat = residual_opt.value().get();
             const std::size_t n = flat.size() / 3;
-            residual_point_count += n;
             residual_points.reserve(residual_points.size() + n);
             for (std::size_t i = 0; i < n; ++i)
             {
@@ -1123,24 +1129,9 @@ void SceneProcessor::update_viewer_table_rfe_points()
                 residual_points.emplace_back(flat[idx], flat[idx + 1], flat[idx + 2]);
             }
         }
-
-        if (auto rfe_opt = graph_->get_attrib_by_name<rfe_pts_att>(node); rfe_opt.has_value())
-        {
-            ++tables_with_rfe;
-            const auto& flat = rfe_opt.value().get();
-            const std::size_t n = flat.size() / 3;
-            rfe_point_count += n;
-            rfe_points.reserve(rfe_points.size() + n);
-            for (std::size_t i = 0; i < n; ++i)
-            {
-                const std::size_t idx = i * 3;
-                rfe_points.emplace_back(flat[idx], flat[idx + 1], flat[idx + 2]);
-            }
-        }
-
     }
 
-    voxel_viewer_->update_rfe_points(residual_points, rfe_points);
+    voxel_viewer_->update_residual_points(residual_points);
 }
 
 void SceneProcessor::update_viewer_mask_points()
@@ -1243,54 +1234,21 @@ void SceneProcessor::refresh_viewer_robot_pose_latest()
         update_viewer_robot_pose(room_T_robot.value());
 }
 
-void SceneProcessor::update_viewer_lidar_points(const std::string& room_name,
-                                                const std::string& robot_name,
-                                                const Mat::RTMat& room_T_robot_fallback)
+void SceneProcessor::update_viewer_lidar_points(std::span<const Eigen::Vector3f> lidar_points_room,
+                                                std::span<const std::uint8_t> plane_id)
 {
     if (voxel_viewer_ == nullptr)
         return;
-
-    const auto lidar_data = get_lidar3D();
-    if (!lidar_data.has_value() || lidar_data->xs.empty())
-    {
-        voxel_viewer_->update_lidar_points({});
+    // Empty ⇒ no fresh sweep drained this cycle: keep the last cloud (never blank it → no flicker). The
+    // caller (compute) already drained get_lidar3D() ONCE and posed the cloud into the room frame at the
+    // scan stamp; re-draining/re-interpolating here desynced the viewer and shimmered the cloud.
+    if (lidar_points_room.empty())
         return;
-    }
 
-    const auto& xs = lidar_data->xs;
-    const auto& ys = lidar_data->ys;
-    const auto& zs = lidar_data->zs;
-    const std::uint64_t lidar_timestamp_ms = lidar_data->timestamp_ms;
+    std::vector<QVector3D> pts;
+    pts.reserve(lidar_points_room.size());
+    for (const auto& p : lidar_points_room)
+        pts.emplace_back(p.x(), p.y(), p.z());
 
-    Mat::RTMat room_T_robot = room_T_robot_fallback;
-    if (inner_eigen_api_ != nullptr && lidar_timestamp_ms > 0)
-    {
-        const auto time_query = transforms_interpolate_rt_
-            ? DSR::RT_API::TimeQuery::Interpolated
-            : DSR::RT_API::TimeQuery::Nearest;
-        if (auto interpolated = inner_eigen_api_->get_transformation_matrix(
-                room_name,
-                robot_name,
-                lidar_timestamp_ms,
-                "RT",
-                time_query); interpolated.has_value())
-        {
-            room_T_robot = interpolated.value();
-        }
-    }
-
-    std::vector<QVector3D> lidar_points_room;
-    lidar_points_room.reserve(xs.size());
-    for (std::size_t i = 0; i < xs.size(); ++i)
-    {
-        const Eigen::Vector3d point_robot(static_cast<double>(xs[i]),
-                                          static_cast<double>(ys[i]),
-                                          static_cast<double>(zs[i]));
-        const Eigen::Vector3d point_room = room_T_robot.linear() * point_robot + room_T_robot.translation();
-        lidar_points_room.emplace_back(static_cast<float>(point_room.x()),
-                                       static_cast<float>(point_room.y()),
-                                       static_cast<float>(point_room.z()));
-    }
-
-    voxel_viewer_->update_lidar_points(lidar_points_room);
+    voxel_viewer_->update_lidar_points(pts, plane_id);
 }

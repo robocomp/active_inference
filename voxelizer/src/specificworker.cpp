@@ -19,6 +19,7 @@
 #include "specificworker.h"
 #include <fstream>   // [perf-probe] CSV timing logs (remove with the probes)
 #include "scene_processor.h"
+#include "../../common/media_transport/rt_extrapolate.h"
 #include "yolo_processor.h"
 #include "yolo_human.h"
 #include "yolo_semantic.h"
@@ -201,6 +202,12 @@ void SpecificWorker::initialize()
                                       params.MEDIA_RGB_TOPIC, params.MEDIA_DEPTH_TOPIC);
     scene_processor->init_lidar_media_plane(static_cast<std::uint32_t>(params.MEDIA_DOMAIN_ID),
                                             params.MEDIA_LIDAR_TOPIC, params.LIDAR_USE_MEDIA);
+    // ZED-image model-instance projection overlay (gated by the "Models" toggle in the ZED popup).
+    // Does NO live graph traversal at draw time (caches the zed CameraAPI once); all geometry is fed
+    // from the frame's already-gathered room←zed transform + room polygon.
+    model_overlay_ = std::make_unique<rc::ModelProjectionOverlay>(G);
+    // Ricoh-360 counterpart (equirectangular wireframe projection; pure math, no graph access).
+    ricoh_model_overlay_ = std::make_unique<rc::RicohProjectionOverlay>();
     // Media subscriber is needed for EITHER the popup or peripheral detection — independent of whether
     // the popup window is ever shown, so 360-YOLO can run without anyone watching.
     if (params.SHOW_RICOH_VIEWER or params.RICOH_YOLO_ENABLED)
@@ -350,9 +357,20 @@ void SpecificWorker::on_render_tick()
         {
             if (popup_visible)
             {
-                const cv::Mat pano = ricoh_yolo_worker_->latest_bgr();
+                cv::Mat pano = ricoh_yolo_worker_->latest_bgr();
                 if (not pano.empty())
                 {
+                    // Project the DSR scene (model boxes + room floor/ceiling/walls) onto the panorama
+                    // when the Ricoh "Models" toggle is on. Draw on a clone (BGR) so we never mutate
+                    // the worker's cached frame; the popup viewer converts BGR→RGB on display.
+                    if (ricoh_model_overlay_enabled_ and ricoh_model_overlay_ and ricoh_scene_.valid)
+                    {
+                        pano = pano.clone();
+                        ricoh_model_overlay_->draw(pano, ricoh_scene_.boxes,
+                                                   ricoh_scene_.ricoh_optical_center, ricoh_scene_.room_T_zed,
+                                                   ricoh_scene_.poly_x, ricoh_scene_.poly_y, ricoh_scene_.room_height,
+                                                   params.RICOH_AZIMUTH_SIGN, params.RICOH_AZIMUTH_OFFSET_RAD);
+                    }
                     const auto dets = ricoh_yolo_worker_->latest_detections();
                     if (!dets.empty() and yolo_processor)
                     {
@@ -467,6 +485,19 @@ void SpecificWorker::compute()
     if (!frame.has_value())
         return;
 
+    // Cache the scene the Ricoh-360 overlay needs (it renders in on_render_tick, a different timer).
+    // Only when its toggle is on, to avoid per-frame copies otherwise. Same thread → no lock.
+    if (ricoh_model_overlay_enabled_)
+    {
+        ricoh_scene_.boxes                = frame->graph_object_boxes;
+        ricoh_scene_.ricoh_optical_center = frame->ricoh_optical_center;
+        ricoh_scene_.room_T_zed           = frame->room_T_zed;
+        ricoh_scene_.poly_x               = frame->room_poly_x;
+        ricoh_scene_.poly_y               = frame->room_poly_y;
+        ricoh_scene_.room_height          = frame->room_height;
+        ricoh_scene_.valid                = true;
+    }
+
     // Follow the RGB stream's REAL rate: the media cache repeats the last frame when nothing new
     // arrived this cycle. Skip the RGB-derived work (YOLO, pose, viewer, mask publish) on stale
     // repeats so the displayed FPS and published masks track the camera's actual delivery rate. The
@@ -524,7 +555,19 @@ void SpecificWorker::compute()
         // Draw the detected skeletons (green bones, red joints, orange bbox) under the seg overlay.
         if (yolo_human_processor and not poses.empty())
             viewer_rgb = yolo_human_processor->compose_pose_canvas(viewer_rgb, poses);
-        yolo_viewer_->update_frame(viewer_rgb, detections);
+        // Project every graph model instance (table/bottle/chair/obstacle BBs) onto the image when the
+        // ZED-window "Models" toggle is on. Independent, self-contained overlay (model_projection_overlay).
+        if (model_overlay_enabled_ and model_overlay_)
+        {
+            if (viewer_rgb.data == frame->rgbd.rgb.data)
+                viewer_rgb = viewer_rgb.clone();   // don't scribble on the shared source frame
+            model_overlay_->draw(viewer_rgb, frame->graph_object_boxes, frame->room_T_zed,
+                                 frame->room_poly_x, frame->room_poly_y, frame->room_height);
+        }
+        // The "YOLO" toggle in the ZED window gates only the seg-detection overlay (masks/bboxes);
+        // the semantic underlay, skeletons and model projections above are independent.
+        static const std::vector<SegDetection> kNoDetections;
+        yolo_viewer_->update_frame(viewer_rgb, yolo_overlay_enabled_ ? detections : kNoDetections);
         // Feed the dense label map for the hover readout (cleared internally when not active).
         if (yolo_semantic_processor)
             yolo_viewer_->update_semantic(yolo_semantic_processor->last_map().labels, semantic_overlay_enabled_);
@@ -674,10 +717,48 @@ std::optional<SpecificWorker::SceneFrame> SpecificWorker::process_scene_frame(FP
     const auto graph_object_boxes = scene_processor->get_graph_object_boxes(room_name, frame_ts_ms);
 
     std::vector<Eigen::Vector3f> lidar_points_room;
+    std::vector<std::uint8_t>    lidar_plane_id;   // per-point source plane (helios=0, bpearl=1) for colouring
     if (auto lidar_data = scene_processor->get_lidar3D(); lidar_data.has_value())
     {
         if (lidar_data->timestamp_ms > 0)
             stream_mon_.tick("lidar", lidar_data->timestamp_ms);   // input-rate telemetry / stall detection
+
+        // [RT-clamp telemetry] Is the scan stamp AHEAD of the newest room<-robot RT block? Then
+        // InterpolatedRT clamps at the leading edge (DSR does not extrapolate velocity) and the cloud
+        // lags/steps until the next RT arrives — the shimmer source when room's RT rate < LiDAR rate.
+        // Logs how often the scan outruns the RT and by how much, every 5 s.
+        if (G && G->get_rt_api() && lidar_data->timestamp_ms > 0)
+        {
+            static std::uint64_t n_total = 0, n_clamp = 0, lag_sum = 0, lag_max = 0;
+            static auto last_rep = std::chrono::steady_clock::now();
+            const auto robot_n = G->get_node(robot_name);
+            const auto room_n  = G->get_node(room_name);
+            if (robot_n.has_value() && room_n.has_value())
+                if (auto e = G->get_rt_api()->get_edge_RT(robot_n.value(), room_n->id()); e.has_value())
+                    if (auto ts = G->get_attrib_by_name<rt_timestamps_att>(e.value()); ts.has_value())
+                    {
+                        std::uint64_t newest = 0;
+                        for (const auto t : ts->get()) newest = std::max<std::uint64_t>(newest, static_cast<std::uint64_t>(t));
+                        ++n_total;
+                        if (newest > 0 && lidar_data->timestamp_ms > newest)
+                        {
+                            const std::uint64_t lag = lidar_data->timestamp_ms - newest;
+                            ++n_clamp; lag_sum += lag; lag_max = std::max(lag_max, lag);
+                        }
+                    }
+            const auto now = std::chrono::steady_clock::now();
+            if (now - last_rep >= std::chrono::seconds(5))
+            {
+                if (n_total > 0)
+                    std::println("[RT-clamp] {}/{} scans AHEAD of newest RT ({:.0f}%) — lag mean={}ms max={}ms "
+                                 "(RT lagging LiDAR ⇒ interpolation clamps ⇒ cloud shimmer)",
+                                 n_clamp, n_total, 100.0 * static_cast<double>(n_clamp) / static_cast<double>(n_total),
+                                 n_clamp ? lag_sum / n_clamp : 0, lag_max);
+                n_total = n_clamp = lag_sum = lag_max = 0;
+                last_rep = now;
+            }
+        }
+
         Mat::RTMat room_T_robot_lidar = room_T_robot.value();
         if (inner_eigen_api != nullptr && lidar_data->timestamp_ms > 0)
         {
@@ -695,19 +776,39 @@ std::optional<SpecificWorker::SceneFrame> SpecificWorker::process_scene_frame(FP
             }
         }
 
+        // Efference-copy: extrapolate room<-robot FORWARD to the scan stamp over the RT-clamp gap using the
+        // RT-edge velocities. NO-OP when the robot is STATIC (velocities≈0 ⇒ zero correction) — the ~90 ms
+        // clamp only shifts the cloud when MOVING (displacement = velocity·lag, worst under rotation).
+        rc::media::extrapolate_room_T_robot(G, room_name, robot_name, lidar_data->timestamp_ms,
+                                            0.25f, room_T_robot_lidar, room_T_robot_lidar);
+
+        // Ceiling crop: drop LiDAR returns at/above the room ceiling. Room-frame z is height above
+        // the floor, so the ceiling is z == room_height (a float attribute the room agent writes on
+        // the "room" node). Fall back to +inf (no crop) when the node/attr isn't present yet, so a
+        // late-arriving room never silently blanks the cloud.
+        float ceiling_z = std::numeric_limits<float>::infinity();
+        if (const auto room_n = G->get_node(room_name); room_n.has_value())
+            if (const auto h = G->get_attrib_by_name<room_height_att>(room_n.value()); h.has_value())
+                ceiling_z = h.value();
+
         const std::size_t count = std::min({lidar_data->xs.size(), lidar_data->ys.size(), lidar_data->zs.size()});
+        const std::size_t plane_count = std::min(count, lidar_data->plane_id.size());
         lidar_points_room.reserve(count);
+        lidar_plane_id.reserve(plane_count);
         const Eigen::Matrix3f room_rotation = room_T_robot_lidar.linear().cast<float>();
         const Eigen::Vector3f room_translation = room_T_robot_lidar.translation().cast<float>();
         for (std::size_t i = 0; i < count; ++i)
         {
             const Eigen::Vector3f point_robot(lidar_data->xs[i], lidar_data->ys[i], lidar_data->zs[i]);
-            lidar_points_room.emplace_back(room_rotation * point_robot + room_translation);
+            const Eigen::Vector3f point_room = room_rotation * point_robot + room_translation;
+            if (point_room.z() >= ceiling_z) continue;   // above the ceiling → drop
+            lidar_points_room.emplace_back(point_room);
+            if (i < plane_count) lidar_plane_id.push_back(lidar_data->plane_id[i]);
         }
     }
 
     scene_processor->update_viewer_robot_pose(room_T_robot.value());
-    scene_processor->update_viewer_lidar_points(room_name, robot_name, room_T_robot.value());
+    scene_processor->update_viewer_lidar_points(lidar_points_room, lidar_plane_id);   // reuse drained+posed sweep + plane tags
     scene_processor->update_viewer_graph_object_boxes(graph_object_boxes);
     scene_processor->update_viewer_object_meshes();
     scene_processor->update_viewer_person_skeletons();
@@ -715,10 +816,34 @@ std::optional<SpecificWorker::SceneFrame> SpecificWorker::process_scene_frame(FP
     scene_processor->update_viewer_mask_points();
     scene_processor->update_room_polygon_periodic();
 
+    // Gather the room floor polygon + ceiling height HERE (main thread) so the projection overlay
+    // never traverses the graph itself — its per-frame reads raced DDS-thread residual inserts.
+    std::vector<float> room_poly_x, room_poly_y;
+    float room_height = 0.f;
+    scene_processor->get_room_layout(room_poly_x, room_poly_y, room_height);
+
+    // Ricoh optical centre in the room frame — single source of truth is the body→ricoh RT edge.
+    // Resolve the static robot→ricoh mount ONCE, then compose room_T_ricoh = room_T_robot·robot_T_ricoh
+    // (pure math, no per-frame tree walk). Fall back to robot xy + configured height if the ricoh node
+    // isn't in the graph (e.g. a config that loads a shadow model without it).
+    if (not robot_T_ricoh_ and inner_eigen_api != nullptr)
+        robot_T_ricoh_ = inner_eigen_api->get_transformation_matrix(robot_name, "ricoh", 0);
+    Eigen::Vector3d ricoh_optical_center =
+        robot_T_ricoh_.has_value()
+            ? Eigen::Vector3d(room_T_robot.value() * robot_T_ricoh_->translation())
+            : Eigen::Vector3d(room_T_robot.value().translation().x(), room_T_robot.value().translation().y(),
+                              static_cast<double>(params.RICOH_MOUNT_HEIGHT_M));
+
     return SceneFrame{rgbd_opt.value(),
                       room_T_robot.value(),
                       room_T_zed.value(),
                       std::move(lidar_points_room),
+                      graph_object_boxes,
+                      room_name,
+                      std::move(room_poly_x),
+                      std::move(room_poly_y),
+                      room_height,
+                      ricoh_optical_center,
                       frame_ts_ms};
 }
 

@@ -442,6 +442,13 @@ public:
     /// Thread-safe: get the latest UpdateResult (nullopt if not yet available).
     std::optional<UpdateResult> get_last_result() const;
 
+    /// Register a callback fired from the LOCALIZER THREAD the instant a fresh (ok) result is stored,
+    /// so the owner can publish it to the DSR graph WITHOUT waiting for the next compute() tick. The
+    /// callback must be cheap and thread-safe (SpecificWorker marshals to the main thread via a
+    /// Qt::QueuedConnection); it must NOT touch the DSR graph directly. Removes ~one compute-period of
+    /// lidar→RT-publish latency.
+    void set_on_result_ready(std::function<void()> cb) { on_result_ready_ = std::move(cb); }
+
     /// Dead-reckon a room←robot pose forward by a constant body velocity (adv=forward, side=lateral,
     /// rot=CCW, robot frame) over dt seconds, using the same midpoint-SE2 convention as
     /// integrate_velocity_over_window. Pure/const — used for high-rate predict-publish between lidar
@@ -584,6 +591,7 @@ private:
 
    mutable std::mutex result_mutex_;
    std::optional<UpdateResult> last_result_;
+   std::function<void()> on_result_ready_;   // fired (localizer thread) after a fresh ok result is stored
 
    std::mutex cmd_mutex_;
    std::vector<Command> pending_commands_;

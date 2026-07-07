@@ -203,8 +203,23 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
                                             ControllerObstacleTracker &obstacle_tracker,
                                             rc::TrajectoryController &path_controller,
                                             ControllerMotionCommander &motion_commander,
-                                            ControllerDisplay &display)
+                                            ControllerDisplay &display,
+                                            const TimeSource &time_source)
 {
+    // An escape maneuver (physical-stuck recovery) owns the base and must run even when NO plan
+    // exists — e.g. the robot is boxed in and plan_path keeps failing. Step it here, before any
+    // (re)planning, so the reverse-out completes. begin_escape reset current_plan_, so once the
+    // escape finishes the next plan_path routes around the temp obstacle dropped at the wedge spot.
+    if (escape_active_)
+    {
+        display.set_stuck_active(true);   // this path returns before compute()'s update_custom_widget
+        step_escape(step.robot_pose, path_controller, motion_commander, time_source());
+        return false;
+    }
+
+    if (step.target_changed)
+        reset_stuck_state();   // a fresh target = fresh navigation; don't inherit a stale stuck clock
+
     if (step.target_changed || !current_plan_.has_value())
     {
         current_plan_ = planner.plan_path(room_polygon_,
@@ -222,7 +237,19 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
                        obstacle_tracker.display_obstacle_polygons(),
                        obstacle_tracker.temporary_obstacle_rfe_points(),
                        params_ ? params_->max_lidar_draw_points : 0);
-        stop(path_controller, motion_commander);
+        // No route to the target — the robot is boxed in. Treat sustained no-path exactly like a
+        // physical stall: accumulate the no-progress clock and, once confirmed, reverse+turn out
+        // and drop a temp obstacle so the next plan_path finds a way around. Hold the base
+        // meanwhile WITHOUT stop()'s reset_stuck_state() (that would zero the clock every cycle,
+        // so the escape would never fire and the robot would idle in front of the obstacle).
+        if (detect_stuck(/*pursuing=*/true, time_source()))
+        {
+            begin_escape(step.robot_pose, obstacle_tracker, path_controller, time_source());
+            step_escape(step.robot_pose, path_controller, motion_commander, time_source());
+            return false;
+        }
+        path_controller.stop();
+        motion_commander.stop_robot();
         return false;
     }
 
@@ -270,6 +297,10 @@ void ControllerSession::update_display(const std::optional<ControllerRobotPose> 
                    last_display_wp_index_,
                    max_lidar_draw_points,
                    lidar_correction);
+
+    // Light the toolbar stuck indicator while an escape maneuver owns the base (robot is
+    // reversing/turning out of a wedge). Pushed every cycle; the widget dedups same-state calls.
+    display.set_stuck_active(escape_active_);
 }
 
 void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
@@ -420,7 +451,8 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                 if (proximity_csv_.is_open())
                     proximity_csv_ << "t_ms,rx,ry,rtheta,vx,vy,omega,cmd_adv,cmd_side,cmd_rot,min_esdf,"
                                       "n_esdf_pts,nearest_esdf_pt_m,nearest_lidar_m,nearest_obst_m,n_obst,"
-                                      "safety_guard,blockage_ahead,path_blocked,blk_x,blk_y,blk_r,dist_to_goal\n";
+                                      "safety_guard,blockage_ahead,path_blocked,blk_x,blk_y,blk_r,dist_to_goal,"
+                                      "stuck_ms\n";
                 proximity_csv_open_ = true;
             }
             if (proximity_csv_.is_open())
@@ -436,7 +468,11 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                                << (control_output.path_blocked ? 1 : 0) << ','
                                << control_output.blockage_center_room.x() << ','
                                << control_output.blockage_center_room.y() << ','
-                               << control_output.blockage_radius << ',' << control_output.dist_to_goal << '\n';
+                               << control_output.blockage_radius << ',' << control_output.dist_to_goal << ','
+                               // No-progress clock (ms): 0 = fresh/moving, climbs toward stuck_confirm_ms.
+                               // The escape fires when this crosses the threshold — the last row before the
+                               // "[recovery] STUCK -> escape" line is the smoking gun (cmd_* ~0, this ~confirm_ms).
+                               << (stuck_since_ms_ != 0 ? t_ms - stuck_since_ms_ : 0) << '\n';
                 proximity_csv_.flush();
             }
         }
@@ -536,20 +572,28 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         }
     }
 
+    // Physical-stuck / no-progress check. We are PURSUING an active, unreached target here
+    // (goal_reached, no-plan, lock-on, orient and path_blocked all returned earlier). This runs
+    // BEFORE the ~0-command idle return below on purpose: whether MPPI still commands a velocity
+    // or has collapsed to ~0 because the robot is boxed in (too close, or a residual/moved
+    // obstacle sits on every rollout), a base that isn't moving is making no progress. Sustained
+    // no-progress → escape: reverse+turn out AND drop a temp obstacle at the wedge spot so the
+    // next plan_path routes around it (get-me-out + replan). Previously the idle return fired
+    // first and this was unreachable, so the robot idled in front of the obstacle forever.
+    if (detect_stuck(/*pursuing=*/true, time_source()))
+    {
+        begin_escape(robot_pose, obstacle_tracker, path_controller, time_source());
+        step_escape(robot_pose, path_controller, motion_commander, time_source());
+        return;
+    }
+
+    // MPPI produced no usable motion this cycle but we are not yet confirmed-stuck: hold the base.
+    // The no-progress clock above keeps accumulating across cycles (we did NOT reset it) until
+    // detect_stuck trips or the robot starts moving again.
     if (std::abs(adv_mps) < 5e-4f && std::abs(side_mps) < 5e-4f && std::abs(rot_rps) < 1e-3f)
     {
         path_controller.stop();
         motion_commander.stop_robot();
-        return;
-    }
-
-    // Physical-stuck check: we are about to issue a real command. If the base has been
-    // commanded to move yet hasn't actually moved (measured room-frame speed ~0) for long
-    // enough, the path looks clear to MPPI but the robot is wedged — trigger an escape.
-    if (detect_stuck(adv_mps, side_mps, rot_rps, time_source()))
-    {
-        begin_escape(robot_pose, obstacle_tracker, path_controller, time_source());
-        step_escape(robot_pose, path_controller, motion_commander, time_source());
         return;
     }
 
@@ -877,22 +921,23 @@ void ControllerSession::reset_stuck_state()
     escape_active_ = false;
 }
 
-bool ControllerSession::detect_stuck(float adv_mps, float side_mps, float rot_rps, std::uint64_t now_ms)
+bool ControllerSession::detect_stuck(bool pursuing, std::uint64_t now_ms)
 {
     if (!params_ || !params_->stuck_recovery_enabled)
     {
         stuck_since_ms_ = 0;
         return false;
     }
-    // Commanded to move? (post-uncertainty-limit command we are about to send)
-    const bool commanded = std::abs(adv_mps)  > params_->stuck_cmd_lin_eps
-                        || std::abs(side_mps) > params_->stuck_cmd_lin_eps
-                        || std::abs(rot_rps)  > params_->stuck_cmd_rot_eps;
     // Actually moving? (measured room-frame base speed, EMA, refreshed in build_planning_step)
     const bool moving = base_speed_lin_ > params_->stuck_meas_lin_eps
                      || base_speed_ang_ > params_->stuck_meas_rot_eps;
 
-    if (commanded && !moving)
+    // `pursuing` means the caller has an active, unreached target and a valid intent to advance
+    // (goal_reached / no-plan / lock-on / orient / path_blocked all returned before this point).
+    // We deliberately do NOT gate on a non-zero command any more: MPPI collapsing to ~0 while
+    // boxed in is exactly the stuck we must catch — it used to reset the clock and idle forever.
+    // The legacy commanded-but-not-moving (wheel-slip) case is a strict subset of pursuing.
+    if (pursuing && !moving)
     {
         if (stuck_since_ms_ == 0)
             stuck_since_ms_ = now_ms;   // start the no-progress clock
@@ -900,7 +945,7 @@ bool ControllerSession::detect_stuck(float adv_mps, float side_mps, float rot_rp
             return true;                // sustained → stuck
     }
     else
-        stuck_since_ms_ = 0;            // progress (or not trying) → reset
+        stuck_since_ms_ = 0;            // making progress (moving) or not pursuing → reset
     return false;
 }
 

@@ -20,6 +20,7 @@
 #include "table_model.h"        // TableModel / TableState
 #include "table_belief.h"       // AI2 full-covariance belief (TABLE_FIT_AI2.md)
 #include "table_affordance.h"   // TableAffordance
+#include "../../common/existence_belief/existence_belief.h"   // per-instance existence log-odds (removal)
 
 namespace rc {
 
@@ -113,6 +114,10 @@ struct TableInstance
     int   frames_since_detection = 100000;   // cycles since last fresh table mask (0 = just detected)
     float last_mask_confidence   = 0.0f;      // YOLO confidence of the last table detection
     bool  detection_alive        = false;     // frames_since_detection < threshold
+
+    // Existence log-odds (removal): free-space carve of the LiDAR sweep vs this table's footprint accrues
+    // negative evidence when the volume is demonstrably empty; removed when P(occupied) crosses the boundary.
+    rc::exist::ExistenceBelief existence;
 
     // Predicted in-image table ROI from projecting the current model through the camera extrinsic.
     // Normalised so the controller is resolution-agnostic: drive offset→0 (centre the table in the

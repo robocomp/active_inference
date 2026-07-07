@@ -20,6 +20,8 @@ LIST(APPEND SOURCES
   ../../common/media_transport/generated/idl/imu_framePubSubTypes.cxx
   ../../common/media_transport/generated/idl/imu_frameTypeObjectSupport.cxx
   ../src/scene_processor.cpp
+  ../src/model_projection_overlay.cpp
+  ../src/ricoh_projection_overlay.cpp
   ../src/yolo_processor.cpp
   ../src/yolo_human.cpp
   ../src/yolo_semantic.cpp
@@ -36,6 +38,8 @@ LIST(APPEND HEADERS
   ../src/yolo_processor.h
   ../src/ricoh_yolo_worker.h
   ../src/graph_object_box.h
+  ../src/model_projection_overlay.h
+  ../src/ricoh_projection_overlay.h
   ../../common/agent_presence_monitor/agent_presence_monitor.h
   ../../common/agent_presence_coordinator/agent_presence_coordinator.h
   ../../common/media_transport/media_transport.h

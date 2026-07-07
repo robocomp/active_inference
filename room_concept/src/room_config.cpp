@@ -58,6 +58,12 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "Media.lidar_use_media", p.LIDAR_USE_MEDIA);
     rc::ConfigLoaderUtils::load_optional<std::string>(cl, "Media.lidar_helios_name", p.LIDAR_HELIOS_NAME);
     rc::ConfigLoaderUtils::load_optional<std::string>(cl, "Media.lidar_robot_frame", p.LIDAR_ROBOT_FRAME);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "Media.lidar_high_min_height", p.LIDAR_HIGH_MIN_HEIGHT);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "Media.lidar_high_max_height", p.LIDAR_HIGH_MAX_HEIGHT);
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "Media.lidar_startup_geometry_check", p.LIDAR_STARTUP_GEOMETRY_CHECK);
+    rc::ConfigLoaderUtils::load_optional<int>(cl, "Media.lidar_startup_check_sweeps", p.LIDAR_STARTUP_CHECK_SWEEPS);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "Media.lidar_floor_tolerance", p.LIDAR_FLOOR_TOLERANCE);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "Media.lidar_ceiling_margin", p.LIDAR_CEILING_MARGIN);
 
     // Camera-overlay object projection: comma-separated DSR node types (e.g. "object,table,cylinder,chair").
     rc::ConfigLoaderUtils::load_optional_apply<std::string>(cl, "Overlay.ObjectTypes", [&](const std::string& csv)
@@ -172,6 +178,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     // ── EpistemicController params ─────────────────────────────────────────
     auto& ec = epistemic.params;
     auto& ep = epistemic.epistemic_planner().params;
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "EpistemicController.PublishAffordance", p.PUBLISH_AFFORDANCE);
     rc::ConfigLoaderUtils::load_optional<int>(cl, "EpistemicController.NumArcCurvatures", ec.num_arc_curvatures);
     rc::ConfigLoaderUtils::load_optional<int>(cl, "EpistemicController.HorizonSteps", ec.horizon_steps);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.Dt", ec.dt);

@@ -478,12 +478,71 @@ void SpecificWorker::compute()
     // Stage this cycle's LiDAR sweep (room frame) for the fitter's range factor. clear-then-set so the factor
     // never consumes a stale sweep; pump() is main-thread (reads the graph) + dormant while the feature is off.
     fitter_->clear_lidar_sweep();
+    bool fresh_sweep = false;
     if (lidar_ingestor_ and lidar_ingestor_->pump())
+    {
         fitter_->set_lidar_sweep(lidar_ingestor_->sweep_room(), lidar_ingestor_->origin_room());
+        fresh_sweep = true;
+    }
 
     const auto table_nodes = G->get_nodes_by_type("table");
     for (const auto& node : table_nodes)
         process_table_node(node);
+
+    // Evidence-based removal: carve this cycle's sweep against each fitted footprint → occupancy log-odds →
+    // remove the demonstrably-empty ones. After the fits so footprints are current. OFF unless enabled.
+    if (cfg_.existence_removal_enabled and fresh_sweep)
+        update_existence_and_remove();
+}
+
+// Carve the LiDAR sweep against every table footprint and integrate the per-instance existence log-odds, then
+// remove the tables whose volume is demonstrably empty (P(occupied) < ExistenceRemovalProb). The shared
+// occupancy carve (common/existence_belief.h) supplies occ/free evidence with common-mode saturation + the
+// n_reached HOLD gate; the hollow guard suppresses interior free-evidence while a table is actively observed.
+void SpecificWorker::update_existence_and_remove()
+{
+    if (not lidar_ingestor_) return;
+    const auto& sweep = lidar_ingestor_->sweep_room();
+    if (sweep.empty()) return;
+    const Eigen::Vector3f origin = lidar_ingestor_->origin_room();
+
+    rc::exist::SensorModel sm;
+    sm.sensor_sigma_m = cfg_.existence_sensor_sigma_m;
+    sm.detection_prob = cfg_.existence_detection_prob;
+    sm.clutter_prob   = cfg_.existence_clutter_prob;
+
+    std::vector<std::uint64_t> doomed;
+    for (auto& [id, inst] : fitter_->instances())
+    {
+        if (not inst.ai2_initialized) continue;
+        inst.existence.set_max(cfg_.existence_logodds_max);
+        const auto& bs = inst.ai2_belief.state();
+        const auto& S  = inst.ai2_belief.covariance();
+        const float surf_sigma = std::sqrt(std::max(0.0f, 0.5f * (S(0, 0) + S(1, 1))));   // footprint position σ
+        // Carve only the TOP-SLAB z-band, not the full [0,H]: the slab spans the whole footprint at that height,
+        // so a beam there either hits the rim/top (occupancy) or passes through (gone) — no hollow ambiguity from
+        // beams travelling BETWEEN the legs under the tabletop (which the full-height box would miscount as free).
+        rc::exist::Evidence ev = rc::exist::carve_box(origin, sweep, bs.cx, bs.cy, bs.yaw, bs.w, bs.h,
+                                                      bs.H - rc::TableModel::TOP_THICKNESS, bs.H, surf_sigma, sm);
+        if (ev.n_reached == 0) continue;                                             // not probed this cycle → HOLD
+        const bool observed = inst.frames_since_detection == 0;                      // fresh mask ⇒ hollow guard
+        ev.log_odds_delta = rc::exist::hollow_guarded_delta(ev, observed, sm);
+        inst.existence.integrate(ev);
+        if (fitter_->should_log(inst))
+            std::print("[{}] [existence] L={:.2f} p={:.2f} occ={:.1f} free={:.1f} n={} {}\n",
+                       inst.node_name, inst.existence.logodds(), inst.existence.p_exists(),
+                       ev.e_occ, ev.e_free, ev.n_reached, observed ? "obs" : "-");
+        if (inst.existence.should_remove(cfg_.existence_removal_prob))
+            doomed.push_back(id);
+    }
+    for (const std::uint64_t id : doomed)
+    {
+        std::print("table_concept: [existence] removing table id={} — free-space evidence (empty volume)\n", id);
+        if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
+            it->second.affordance.remove();
+        fitter_->forget_node(id);
+        G->delete_node(id);
+    }
 }
 
 // Data-driven multi-instance lifecycle (mirrors bottle_concept::run_instance_tracker). Tables are large

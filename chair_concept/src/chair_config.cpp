@@ -54,6 +54,7 @@ ChairConfig load_chair_config(const ConfigLoader& cfg)
     out.ai2_process_std_m        = getf("ChairModel.AI2ProcessStdM",          0.005f);
     out.ai2_process_std_yaw      = getf("ChairModel.AI2ProcessStdYaw",        0.01f);
     out.ai2_process_std_size     = getf("ChairModel.AI2ProcessStdSize",       0.0005f);
+    out.ai2_age_nominal_dt_s     = getf("ChairModel.AI2AgeNominalDtS",        0.0f);
     out.ai2_floor_z              = getf("ChairModel.AI2FloorZ",               0.0f);
     out.ai2_floor_std            = getf("ChairModel.AI2FloorStd",             0.03f);
     out.ai2_seat_anchor_std      = getf("ChairModel.AI2SeatAnchorStd",        0.04f);

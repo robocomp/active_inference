@@ -52,6 +52,8 @@ class LidarSubscriber;
 struct LidarSweep
 {
     std::vector<Eigen::Vector3f> points;                             // merged returns, target frame
+    std::vector<std::uint8_t>    plane_id;                           // per-point source-plane index (0-based
+                                                                     //   over emitted planes: helios=0, bpearl=1)
     Eigen::Vector3f              origin   = Eigen::Vector3f::Zero();  // sensor centre, target frame
     std::int64_t                 stamp_ms = 0;                       // max source stamp of the merged planes
     // NOTE: `origin` is the sensor centre and is only meaningful when the reader consumes a SINGLE
@@ -108,6 +110,11 @@ private:
         std::string                      node;
         std::unique_ptr<LidarSubscriber> sub;
         std::int64_t                     last_ts = 0;
+        // Latest device-frame sweep of THIS plane, kept so a plane that didn't publish a fresh frame this
+        // poll still contributes its last points to the merge — otherwise out-of-phase planes (helios vs
+        // bpearl) drop in and out and the merged cloud BLINKS. Re-transformed per poll at cache_ts.
+        std::vector<Eigen::Vector3f>     raw_cache;
+        std::int64_t                     cache_ts = 0;
     };
     std::vector<Plane> preferred_planes_;   // one entry per preferred node (sub filled lazily)
     Plane              fallback_plane_;      // fused fallback (sub filled lazily, dropped once preferred live)

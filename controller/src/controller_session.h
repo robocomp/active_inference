@@ -49,7 +49,8 @@ public:
                              ControllerObstacleTracker &obstacle_tracker,
                              rc::TrajectoryController &path_controller,
                              ControllerMotionCommander &motion_commander,
-                             ControllerDisplay &display);
+                             ControllerDisplay &display,
+                             const TimeSource &time_source);
 
     void update_display(const std::optional<ControllerRobotPose> &robot_pose,
                         ControllerDisplay &display,
@@ -111,9 +112,13 @@ private:
                           ControllerDisplay &display);
 
     // ── Physical-stuck recovery ──────────────────────────────────────────────────────
-    // Detector: are we commanding a real velocity but not actually moving? Accumulates
-    // the no-progress window and returns true once it exceeds stuck_confirm_ms.
-    bool detect_stuck(float adv_mps, float side_mps, float rot_rps, std::uint64_t now_ms);
+    // Detector: while PURSUING a live, unreached target (caller asserts `pursuing`), is the
+    // base failing to actually move? Covers BOTH a real velocity command that produces no
+    // motion (physical wedge/wheel-slip) AND MPPI collapsing to ~0 because the robot is boxed
+    // in (too close, or a residual/moved obstacle on every rollout) — in either case we make
+    // no progress. Accumulates the no-progress window and returns true once it exceeds
+    // stuck_confirm_ms.
+    bool detect_stuck(bool pursuing, std::uint64_t now_ms);
     // Begin an escape: choose turn direction from side clearance, drop a temp obstacle at
     // the stuck spot, reset the plan, and record the start pose/time.
     void begin_escape(const ControllerRobotPose &robot_pose,

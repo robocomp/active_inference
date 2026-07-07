@@ -29,9 +29,12 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
+
+#include <QTimer>
 
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 #include "sensor_media_publisher.h"
@@ -56,12 +59,15 @@ public slots:
 	void restore();
 	int  startup_check();
 
-	void modify_node_slot(std::uint64_t, const std::string&){}
+	// Graph-viewer housekeeping: relayout (twopi) when the graph gains/loses a NODE. update_node_signal also
+	// fires on every attribute write, so we relayout only when a genuinely NEW id appears (tracked below) —
+	// and DEBOUNCED (a burst of node arrivals / the per-cycle attr churn collapse into one relayout).
+	void modify_node_slot(std::uint64_t id, const std::string& type);
 	void modify_node_attrs_slot(std::uint64_t, const std::vector<std::string>&){}
 	void modify_edge_slot(std::uint64_t, std::uint64_t, const std::string&){}
 	void modify_edge_attrs_slot(std::uint64_t, std::uint64_t, const std::string&, const std::vector<std::string>&){}
 	void del_edge_slot(std::uint64_t, std::uint64_t, const std::string&){}
-	void del_node_slot(std::uint64_t){}
+	void del_node_slot(std::uint64_t id);
 
 private:
 	bool startup_check_flag;
@@ -223,10 +229,16 @@ private:
 	void request_shutdown();
 
 	void cleanup_owned_nodes();
-	void trigger_graph_layout_twopi();   // one-shot twopi relayout of the DSR graph viewer at startup
+	void trigger_graph_layout_twopi();   // twopi relayout of the DSR graph viewer (startup + on node add/remove)
+	void schedule_graph_relayout();      // debounced request → one twopi after a burst of structural changes
 	void on_optional_peer_lost(const std::string &name, std::uint32_t id);
 	void on_optional_peer_ready(const std::string &name, std::uint32_t id);
 	std::atomic<bool> shutting_down_{false};
+
+	// DSR graph-structure tracking for the viewer relayout (main-thread only). update_node_signal fires on
+	// creation AND every attribute update, so we relayout only when `id` is not yet in `known_node_ids_`.
+	std::set<std::uint64_t> known_node_ids_;
+	QTimer* relayout_timer_ = nullptr;   // single-shot debounce; restarted on each structural change
 
 signals:
 	void presenceReady();

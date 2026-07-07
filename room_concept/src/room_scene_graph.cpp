@@ -60,7 +60,8 @@ void RoomSceneGraph::update(const rc::RoomConcept::UpdateResult& res, float adv,
     {
         if (write_rt)
             dsr_update_pose(res);   // robot->room RT (skipped when the odometry publisher owns it)
-        dsr_update_affordance(res); // publish epistemic target affordance
+        if (params_->PUBLISH_AFFORDANCE)
+            dsr_update_affordance(res); // publish epistemic target affordance (off ⇒ room never competes)
     }
 }
 

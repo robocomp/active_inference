@@ -9,6 +9,7 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -82,6 +83,9 @@ struct BottleInstance
     int   frames_since_detection   = 100000;   // cycles since the last fresh bottle mask (0 = just seen)
     float last_mask_confidence     = 0.0f;     // YOLO confidence of the last selected bottle mask
     std::uint64_t last_mask_timestamp_ms = 0;  // capture stamp of the last consumed mask frame (chain-cov pinning)
+    // Agent-clock stamp of the last belief touch (set EVERY inference cycle) so a stale cycle inflates the
+    // position Σ by the real elapsed time (measurement-age → covariance) rather than a fixed per-frame step.
+    std::chrono::steady_clock::time_point last_belief_touch{};
     bool  detection_alive          = false;    // frames_since_detection < threshold
     bool  last_pub_detection_alive = false;    // dead-band trace for the published flag
     float last_pub_detection_conf  = -1.0f;    // dead-band trace for the published confidence

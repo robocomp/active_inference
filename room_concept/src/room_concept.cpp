@@ -777,6 +777,13 @@ namespace rc
                 if (res.ok && !loc_initialized_.load())
                     loc_initialized_ = true;
 
+                // Wake the owner to publish this fresh correction to the DSR graph IMMEDIATELY rather
+                // than waiting for the next compute() tick (the callback marshals the graph write to the
+                // main thread via a Qt::QueuedConnection). Fired OUTSIDE result_mutex_ so we never hold
+                // the lock across the hop. Removes ~one compute-period of lidar→RT latency.
+                if (res.ok && on_result_ready_)
+                    on_result_ready_();
+
                 // ===== 8. RECOVERY DETECTION =====
             // Only while relocalization is enabled (i.e. before room is stable).
             if (relocalization_enabled_.load())

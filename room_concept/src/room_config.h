@@ -44,8 +44,15 @@ struct RoomConfig
     float MAX_LIDAR_HIGH_RANGE        = 100.f;  // m
     int   LIDAR_LOW_DECIMATION_FACTOR = 1;
     float LIDAR_HIGH_MIN_HEIGHT       = 1.5f;   // m
-    float LIDAR_HIGH_MAX_HEIGHT       = 2.0f;   // m
+    float LIDAR_HIGH_MAX_HEIGHT       = 2.0f;   // m — upper bound of the high band (excludes the ceiling)
     float LIDAR_HIGH_FLOOR_HEIGHT     = 0.15f;  // m
+    // Startup geometry self-check: from the first few sweeps, detect the floor plane (warn if it
+    // disagrees with the robot mount geometry -> a mis-set LiDAR mount height) and the ceiling plane
+    // (cap the high band at ceiling - margin so only upper-wall points feed the localizer).
+    bool  LIDAR_STARTUP_GEOMETRY_CHECK = true;
+    int   LIDAR_STARTUP_CHECK_SWEEPS   = 15;    // sweeps to accumulate before running the check
+    float LIDAR_FLOOR_TOLERANCE        = 0.06f; // m — warn if the measured floor is off by more
+    float LIDAR_CEILING_MARGIN         = 0.15f; // m — keep wall points this far below the ceiling
 
     // View
     QRectF GRID_MAX_DIM{-5, -5, 10, 10};
@@ -82,6 +89,10 @@ struct RoomConfig
     float ROBOT_VEL_COV_SIDE           = 0.0025f; // (0.05 m/s)²
     float ROBOT_VEL_COV_ROT            = 0.01f;   // (0.1 rad/s)²
 
+    bool  PUBLISH_AFFORDANCE           = true;    // EpistemicController.PublishAffordance — publish the room
+                                                  // exploration affordance. false ⇒ room never offers an
+                                                  // affordance (so it can't out-compete object affordances in
+                                                  // the controller's EFE selection — e.g. the 360-glance test).
     bool  PREDICT_PUBLISH_ENABLED      = true;    // PredictPublish.enabled (drives RT from odometry)
     float PREDICT_PUBLISH_MAX_COAST_S  = 1.0f;    // stop publishing if no lidar correction for this long
     float PREDICT_PROCESS_NOISE_XY     = 0.04f;   // (m/√s)² → variance growth m²/s on x,y while coasting

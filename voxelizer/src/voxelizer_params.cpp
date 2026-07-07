@@ -50,6 +50,7 @@ VoxelizerParams load_voxelizer_params(const ConfigLoader& configLoader)
     rc::ConfigLoaderUtils::load_optional(configLoader, "Ricoh.publish_masks", params.RICOH_PUBLISH_MASKS);
     rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Ricoh.azimuth_offset_rad", params.RICOH_AZIMUTH_OFFSET_RAD);
     rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Ricoh.azimuth_sign", params.RICOH_AZIMUTH_SIGN);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Ricoh.mount_height_m", params.RICOH_MOUNT_HEIGHT_M);
 
     // Ego-motion mask-corruption annotation (default ON — pure producer-side metadata).
     rc::ConfigLoaderUtils::load_optional(configLoader, "MaskMotion.enabled", params.MASK_MOTION_ENABLED);

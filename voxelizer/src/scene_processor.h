@@ -36,6 +36,7 @@ public:
         std::vector<float> xs;
         std::vector<float> ys;
         std::vector<float> zs;
+        std::vector<std::uint8_t> plane_id;   // per-point source plane (helios=0, bpearl=1) for viewer colouring
         std::uint64_t timestamp_ms = 0;
     };
 
@@ -111,11 +112,18 @@ public:
     // per-frame camera timestamp. Cheap; called from the render timer so the robot redraws at the
     // render cadence instead of the perception-frame rate. No-op until room/robot/inner-eigen exist.
     void refresh_viewer_robot_pose_latest();
-    void update_viewer_lidar_points(const std::string& room_name,
-                                    const std::string& robot_name,
-                                    const Mat::RTMat& room_T_robot_fallback);
+    // Push an ALREADY room-transformed LiDAR cloud to the viewer — the SAME sweep compute() drained and
+    // posed. Avoids a second get_lidar3D() drain + independent re-interpolation (which desynced the viewer
+    // from what was processed and re-projected the cloud under a slightly different room<-robot pose each
+    // cycle → shimmer). Empty ⇒ keep the last cloud (never blank it).
+    void update_viewer_lidar_points(std::span<const Eigen::Vector3f> lidar_points_room,
+                                    std::span<const std::uint8_t> plane_id = {});
     std::vector<GraphObjectBox> get_graph_object_boxes(const std::string& room_name,
                                                        std::uint64_t timestamp_ms) const;
+    // Room floor polygon (room frame, metres) + ceiling height, gathered on the MAIN thread so the
+    // ZED projection overlay never re-reads the graph itself (its per-frame inner_eigen tree-walks
+    // raced DDS-thread node inserts during residual churn → heap corruption). false if no room yet.
+    bool get_room_layout(std::vector<float>& polygon_x, std::vector<float>& polygon_y, float& room_height) const;
     void update_viewer_graph_object_boxes(std::span<const GraphObjectBox> graph_boxes);
     void update_viewer_object_meshes();
     // Read human_concept's 'person' nodes (mesh_vertices_att = fitted BODY_18, room frame) and feed

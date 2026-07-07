@@ -25,9 +25,9 @@ public:
     explicit VoxelOpenGLViewer(QWidget* parent = nullptr);
     ~VoxelOpenGLViewer() override;
 
-    void update_lidar_points(std::span<const QVector3D> positions);
-    void update_rfe_points(std::span<const QVector3D> residual_positions,
-                           std::span<const QVector3D> fallback_positions = {});
+    void update_lidar_points(std::span<const QVector3D> positions,
+                             std::span<const std::uint8_t> plane_id = {});
+    void update_residual_points(std::span<const QVector3D> residual_positions);
     // YOLO mask support points (room frame), drawn as a distinct point cloud. Optional per-point
     // categories colour them by class (color_for_category, matching the voxel/box palette); empty
     // → fall back to off-white.
@@ -36,7 +36,6 @@ public:
     void set_show_lidar(bool show);
     void set_show_masks(bool show);
     void set_show_residual(bool show);
-    void set_show_rfe(bool show);
     // Fitted-model layer: the table mesh, the solid bottle cylinder and the graph object boxes.
     void set_show_models(bool show);
 
@@ -100,7 +99,6 @@ private:
 
     std::vector<Vertex> lidar_vertices_;
     std::vector<Vertex> residual_vertices_;
-    std::vector<Vertex> rfe_vertices_;
     std::vector<Vertex> mask_vertices_;
     std::mutex data_mutex_;
 
@@ -122,8 +120,7 @@ private:
     bool voxel_flip_y_ = false;
     bool show_lidar_ = false;
     bool show_masks_ = false;
-    bool show_residual_ = true;
-    bool show_rfe_ = true;
+    bool show_residual_ = false;   // table_concept residual debug cloud — OFF by default
     bool show_models_ = true;
     bool show_skeletons_ = true;
     std::vector<QVector3D> robot_mesh_local_;

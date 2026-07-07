@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -53,6 +54,9 @@ struct ChairInstance
     int  frames_converged   = 0;      // consecutive frames with |Δstate| < state_eps
     int  last_masks_frame_seen = -1;  // last masks packet frame consumed
     std::uint64_t last_mask_timestamp_ms = 0;  // capture stamp of the last consumed mask (chain-cov pinning)
+    // Agent-clock stamp of the last belief touch (set EVERY inference cycle) so a stale cycle inflates Σ by
+    // the real elapsed time (measurement-age → covariance); mirrors table_concept.
+    std::chrono::steady_clock::time_point last_belief_touch{};
     float chain_cov_xx = 0.0f, chain_cov_yy = 0.0f, chain_cov_yaw = 0.0f;  // localization/chain cov (m²,rad²)
     int  assigned_mask_idx  = -1;     // tracker's gated mask-slice assignment (-1 = use greedy nearest)
     int  unassigned_streak  = 0;      // consecutive tracker cycles with no mask assignment (stillbirth prune)

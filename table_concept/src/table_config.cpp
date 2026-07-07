@@ -89,6 +89,13 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.coverage_precision    = getf("TableModel.CoveragePrecision",  0.0f);
     out.coverage_robust_c_m   = getf("TableModel.CoverageRobustCM",   0.15f);
 
+    out.existence_removal_enabled = getb("TableModel.ExistenceRemovalEnabled", false);
+    out.existence_removal_prob    = getf("TableModel.ExistenceRemovalProb",    0.12f);
+    out.existence_logodds_max     = getf("TableModel.ExistenceLogoddsMax",     4.0f);
+    out.existence_detection_prob  = getf("TableModel.ExistenceDetectionProb",  0.85f);
+    out.existence_clutter_prob    = getf("TableModel.ExistenceClutterProb",    0.05f);
+    out.existence_sensor_sigma_m  = getf("TableModel.ExistenceSensorSigmaM",   0.03f);
+
     std::print("table_concept: configuration loaded.\n");
     return out;
 }

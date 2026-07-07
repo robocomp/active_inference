@@ -333,11 +333,21 @@ float ChairFitter::run_inference(ChairInstance& inst, const ChairObservation& ob
         inst.is_bearing_hypothesis = false;
     }
 
-    if (not observation.has_fresh_data)   // freeze-on-stale
+    const auto now = std::chrono::steady_clock::now();
+
+    if (not observation.has_fresh_data)   // stale: age (Σ grows on the agent clock) unless AI2AgeNominalDtS<=0 (freeze)
     {
+        if (cfg_.ai2_age_nominal_dt_s > 0.0f and inst.last_belief_touch.time_since_epoch().count() != 0)
+        {
+            const float dt = std::chrono::duration<float>(now - inst.last_belief_touch).count();
+            inst.ai2_belief.inflate_for_age(dt, cfg_.ai2_age_nominal_dt_s);
+        }
+        inst.last_belief_touch = now;
         compute_projected_roi(inst);
         return 0.0f;
     }
+    // Fresh path: update()/predict() below carry their own one-step Q, so just reset the age clock here.
+    inst.last_belief_touch = now;
 
     // Static range weighting + ego-motion downweight (mirror table): a far view widens the common-mode
     // (binding yaw cap) so it can't rotate the chair; continuous, no gate.

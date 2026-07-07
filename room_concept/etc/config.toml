@@ -14,7 +14,13 @@ JoystickAdapterTopic = "tcp -p 0"
 JoystickAdapterPrefix = ""
 
 [Period]
-Compute = 50
+# compute() is <1 ms and the localizer optimizer is <1 ms, so the pose pipeline is period-bound,
+# not compute-bound. At 50 ms the lidar-stamp→RT-publish lag was ~90-110 ms = TWO ~50 ms quantizations
+# (a fresh scan waits up to one tick to be pumped+localized; the result waits up to one more tick to be
+# fetched+published). The lidar source is ~20 Hz (50 ms); oversampling at 16 ms (~60 Hz) collapses both
+# waits to <16 ms each → lag ~30-40 ms. Publish stays gated to fresh corrections (≈lidar rate), so no
+# extra graph churn. Negligible CPU (compute duty ~6%).
+Compute = 16
 Emergency = 500
 
 # --- Common Agent Data ---
@@ -252,6 +258,9 @@ RerunMaxQueue     = 30
 
 # ── Epistemic Controller ───────────────────────────────────────────────────────
 [EpistemicController]
+PublishAffordance  = true   # publish the room exploration affordance. Set false so the room never offers an
+                            # affordance and can't out-compete object affordances in the controller's EFE
+                            # selection (e.g. the 360-glance chair experiment).
 # ---- Arc trajectory generation ----
 NumArcCurvatures   = 9      # discrete curvatures sampled (odd ⇒ includes κ=0)
 
