@@ -103,7 +103,8 @@ class SpecificWorker : public GenericWorker
             std::vector<float>          room_poly_x;       // room floor polygon (room frame, m) — gathered here so the overlay never re-reads the graph
             std::vector<float>          room_poly_y;
             float                       room_height = 0.f;
-            Eigen::Vector3d             ricoh_optical_center{0, 0, 0};   // room frame; from body→ricoh RT (graph) or config fallback
+            Mat::RTMat                  room_T_ricoh = Mat::RTMat::Identity();   // ricoh pose in room (room_T_robot·robot_T_ricoh)
+            bool                        ricoh_valid = false;                     // true when the ricoh node/RT resolved
             std::uint64_t               frame_ts_ms = 0;   // capture stamp of rgbd/depth — published so consumers can pin pose to capture time
         };
 
@@ -185,8 +186,7 @@ class SpecificWorker : public GenericWorker
         struct RicohSceneCache
         {
             std::vector<GraphObjectBox> boxes;
-            Eigen::Vector3d             ricoh_optical_center{0, 0, 0};
-            Mat::RTMat                  room_T_zed;
+            Mat::RTMat                  room_T_ricoh = Mat::RTMat::Identity();
             std::vector<float>          poly_x, poly_y;
             float                       room_height = 0.f;
             bool                        valid = false;
@@ -196,6 +196,9 @@ class SpecificWorker : public GenericWorker
         // reused; room_T_ricoh = room_T_robot · robot_T_ricoh gives the optical centre without a
         // per-frame tree walk. Empty until the ricoh node exists (config with no ricoh → config fallback).
         std::optional<Mat::RTMat> robot_T_ricoh_;
+        // Ricoh CameraAPI for the detection→bearing UNPROJECT (ray_from_pixel); created once. Separate
+        // from the overlay's cache because the bearing publisher runs regardless of the Models toggle.
+        std::unique_ptr<DSR::CameraAPI> ricoh_camera_api_;
         void save_external_window_geometry() const;
 
     signals:

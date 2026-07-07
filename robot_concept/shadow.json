@@ -553,6 +553,14 @@
       "type": 2,
       "value": 6.28
      },
+     "cam_equirect_azimuth_sign": {
+      "type": 2,
+      "value": -1.0
+     },
+     "cam_equirect_azimuth_offset": {
+      "type": 2,
+      "value": 0.0
+     },
      "cam_projection": {
       "type": 0,
       "value": "cylindrical"

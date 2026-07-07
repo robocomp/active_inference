@@ -131,13 +131,10 @@ struct VoxelizerParams
     // the ricoh's mounting yaw + the panorama's 0-column convention — PROVISIONAL, verify live vs the
     // descriptor projection model before any consumer relies on the bearing (Part C is not built yet).
     bool        RICOH_PUBLISH_MASKS        = true;    // Ricoh.publish_masks
-    float       RICOH_AZIMUTH_OFFSET_RAD   = 0.0f;    // Ricoh.azimuth_offset_rad — additive zero correction
-    float       RICOH_AZIMUTH_SIGN         = -1.0f;   // Ricoh.azimuth_sign — +1/−1: −1 (panorama is mirrored, calibrated 2026-07-04)
-    // Ricoh mount height above the room floor (m), used by the 360 model-projection overlay for the
-    // ELEVATION (row) axis. Mirrors the body→ricoh rt_translation z in shadow.json (Shadow.proto
-    // camera_360 z=1.275); kept as a config knob so it can be tuned live without editing the graph.
-    // Azimuth is calibrated separately (sign/offset); this does not affect it.
-    float       RICOH_MOUNT_HEIGHT_M       = 1.275f;  // Ricoh.mount_height_m — matches body→ricoh rt_translation z in shadow.json (Shadow.proto camera_360 z=1.275)
+    // NOTE: the panorama azimuth calibration (mirror sign + seam zero) now lives in the GRAPH as the
+    // ricoh node's cam_equirect_azimuth_sign / cam_equirect_azimuth_offset intrinsics, applied by the
+    // shared CameraAPI equirectangular model. Both the 360 projection overlay AND the detection→bearing
+    // publisher go through CameraAPI (project / ray_from_pixel), so there are no RICOH_AZIMUTH_* config knobs.
 
     // Custom drawing windows (attach to the DSR GUI if available). Both default ON.
     bool        SHOW_VOXEL_VIEWER = true; // Voxel.show_voxel_viewer

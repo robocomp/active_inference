@@ -31,6 +31,7 @@
 #include "yolo_viewer.h"
 #include "image_popup_viewer.h"
 #include "ricoh_yolo_worker.h"
+#include <dsr/api/dsr_camera_api.h>   // ricoh unproject for the detection→bearing publisher (one truth)
 #include <dsr/gui/viewers/graph_viewer/graph_viewer.h>
 #include <QHBoxLayout>
 #include <QPushButton>
@@ -206,8 +207,9 @@ void SpecificWorker::initialize()
     // Does NO live graph traversal at draw time (caches the zed CameraAPI once); all geometry is fed
     // from the frame's already-gathered room←zed transform + room polygon.
     model_overlay_ = std::make_unique<rc::ModelProjectionOverlay>(G);
-    // Ricoh-360 counterpart (equirectangular wireframe projection; pure math, no graph access).
-    ricoh_model_overlay_ = std::make_unique<rc::RicohProjectionOverlay>();
+    // Ricoh-360 counterpart (equirectangular wireframe projection via the shared CameraAPI; caches the
+    // ricoh CameraAPI once, then pure math per frame).
+    ricoh_model_overlay_ = std::make_unique<rc::RicohProjectionOverlay>(G);
     // Media subscriber is needed for EITHER the popup or peripheral detection — independent of whether
     // the popup window is ever shown, so 360-YOLO can run without anyone watching.
     if (params.SHOW_RICOH_VIEWER or params.RICOH_YOLO_ENABLED)
@@ -366,10 +368,8 @@ void SpecificWorker::on_render_tick()
                     if (ricoh_model_overlay_enabled_ and ricoh_model_overlay_ and ricoh_scene_.valid)
                     {
                         pano = pano.clone();
-                        ricoh_model_overlay_->draw(pano, ricoh_scene_.boxes,
-                                                   ricoh_scene_.ricoh_optical_center, ricoh_scene_.room_T_zed,
-                                                   ricoh_scene_.poly_x, ricoh_scene_.poly_y, ricoh_scene_.room_height,
-                                                   params.RICOH_AZIMUTH_SIGN, params.RICOH_AZIMUTH_OFFSET_RAD);
+                        ricoh_model_overlay_->draw(pano, ricoh_scene_.boxes, ricoh_scene_.room_T_ricoh,
+                                                   ricoh_scene_.poly_x, ricoh_scene_.poly_y, ricoh_scene_.room_height);
                     }
                     const auto dets = ricoh_yolo_worker_->latest_detections();
                     if (!dets.empty() and yolo_processor)
@@ -489,13 +489,12 @@ void SpecificWorker::compute()
     // Only when its toggle is on, to avoid per-frame copies otherwise. Same thread → no lock.
     if (ricoh_model_overlay_enabled_)
     {
-        ricoh_scene_.boxes                = frame->graph_object_boxes;
-        ricoh_scene_.ricoh_optical_center = frame->ricoh_optical_center;
-        ricoh_scene_.room_T_zed           = frame->room_T_zed;
-        ricoh_scene_.poly_x               = frame->room_poly_x;
-        ricoh_scene_.poly_y               = frame->room_poly_y;
-        ricoh_scene_.room_height          = frame->room_height;
-        ricoh_scene_.valid                = true;
+        ricoh_scene_.boxes        = frame->graph_object_boxes;
+        ricoh_scene_.room_T_ricoh = frame->room_T_ricoh;
+        ricoh_scene_.poly_x       = frame->room_poly_x;
+        ricoh_scene_.poly_y       = frame->room_poly_y;
+        ricoh_scene_.room_height  = frame->room_height;
+        ricoh_scene_.valid        = frame->ricoh_valid;   // only draw once the ricoh pose is known
     }
 
     // Follow the RGB stream's REAL rate: the media cache repeats the last frame when nothing new
@@ -593,25 +592,25 @@ void SpecificWorker::compute()
         // RICOH_360_PERIPHERAL_DETECTION.md). The RicohYoloWorker (own thread) already produced panorama-
         // pixel SegDetections; convert each to a room-frame bearing here, where we hold the robot pose.
         std::vector<BearingDetection> bearing_dets;
-        if (params.RICOH_PUBLISH_MASKS and ricoh_yolo_worker_)
+        if (params.RICOH_PUBLISH_MASKS and ricoh_yolo_worker_ and frame->ricoh_valid)
         {
-            const int pano_w = ricoh_yolo_worker_->latest_bgr().cols;
-            if (pano_w > 0)
+            const cv::Mat pano = ricoh_yolo_worker_->latest_bgr();
+            // Lazily create + cache the ricoh CameraAPI (equirectangular; reads the panorama azimuth
+            // convention from the ricoh node's cam_equirect_* graph intrinsics — single source of truth).
+            if (not ricoh_camera_api_)
+                if (const auto rn = G->get_node("ricoh"); rn.has_value())
+                    ricoh_camera_api_ = G->get_camera_api(rn.value());
+            if (not pano.empty() and ricoh_camera_api_)
             {
-                // Robot heading in the room from the zed pose (forward axis = +y in the deproject convention).
-                const Eigen::Vector3d fwd = frame->room_T_zed.linear() * Eigen::Vector3d(0, 1, 0);
-                const float robot_yaw = std::atan2(static_cast<float>(fwd.y()), static_cast<float>(fwd.x()));
+                const double row_horizon = pano.rows * 0.5;   // horizon row → horizontal bearing
                 for (const auto& d : ricoh_yolo_worker_->latest_detections())
                 {
-                    const float col_c = static_cast<float>(d.bbox.x) + 0.5f * static_cast<float>(d.bbox.width);
-                    // Panorama column → bearing relative to the panorama CENTRE (centre column ⇒ straight ahead),
-                    // then apply the calibrated sign/zero knobs (mirror + mounting offset), then add the base
-                    // heading for the absolute room bearing. Wrapped to (-π, π]. Convention calibrated 2026-07-04.
-                    const float az_pano = 2.0f * static_cast<float>(M_PI) * (col_c / static_cast<float>(pano_w))
-                                          - static_cast<float>(M_PI);
-                    const float az_rel = std::atan2(std::sin(params.RICOH_AZIMUTH_OFFSET_RAD + params.RICOH_AZIMUTH_SIGN * az_pano),
-                                                    std::cos(params.RICOH_AZIMUTH_OFFSET_RAD + params.RICOH_AZIMUTH_SIGN * az_pano));
-                    const float az = std::atan2(std::sin(robot_yaw + az_rel), std::cos(robot_yaw + az_rel));
+                    const double col_c = static_cast<double>(d.bbox.x) + 0.5 * static_cast<double>(d.bbox.width);
+                    // Panorama column → ray in the ricoh frame (CameraAPI unproject) → room frame → bearing.
+                    // No manual sign/offset/robot-yaw: the extrinsic is room_T_ricoh, the intrinsic is in the node.
+                    const Eigen::Vector3d ray_room =
+                        frame->room_T_ricoh.linear() * ricoh_camera_api_->ray_from_pixel(col_c, row_horizon);
+                    const float az = std::atan2(static_cast<float>(ray_room.y()), static_cast<float>(ray_room.x()));
                     bearing_dets.push_back({d.label, static_cast<float>(d.class_id), d.confidence, az});
                 }
             }
@@ -822,17 +821,16 @@ std::optional<SpecificWorker::SceneFrame> SpecificWorker::process_scene_frame(FP
     float room_height = 0.f;
     scene_processor->get_room_layout(room_poly_x, room_poly_y, room_height);
 
-    // Ricoh optical centre in the room frame — single source of truth is the body→ricoh RT edge.
-    // Resolve the static robot→ricoh mount ONCE, then compose room_T_ricoh = room_T_robot·robot_T_ricoh
-    // (pure math, no per-frame tree walk). Fall back to robot xy + configured height if the ricoh node
-    // isn't in the graph (e.g. a config that loads a shadow model without it).
+    // Ricoh pose in the room frame — single source of truth is the graph (body→ricoh RT + the ricoh
+    // node's equirect intrinsics, applied by CameraAPI). Resolve the static robot→ricoh mount ONCE,
+    // then compose room_T_ricoh = room_T_robot·robot_T_ricoh (pure math, no per-frame tree walk).
+    // Left invalid (overlay no-ops) if the ricoh node isn't in the graph (e.g. a shadow model without it).
     if (not robot_T_ricoh_ and inner_eigen_api != nullptr)
         robot_T_ricoh_ = inner_eigen_api->get_transformation_matrix(robot_name, "ricoh", 0);
-    Eigen::Vector3d ricoh_optical_center =
-        robot_T_ricoh_.has_value()
-            ? Eigen::Vector3d(room_T_robot.value() * robot_T_ricoh_->translation())
-            : Eigen::Vector3d(room_T_robot.value().translation().x(), room_T_robot.value().translation().y(),
-                              static_cast<double>(params.RICOH_MOUNT_HEIGHT_M));
+    Mat::RTMat room_T_ricoh = Mat::RTMat::Identity();
+    const bool ricoh_valid = robot_T_ricoh_.has_value();
+    if (ricoh_valid)
+        room_T_ricoh = room_T_robot.value() * robot_T_ricoh_.value();
 
     return SceneFrame{rgbd_opt.value(),
                       room_T_robot.value(),
@@ -843,7 +841,8 @@ std::optional<SpecificWorker::SceneFrame> SpecificWorker::process_scene_frame(FP
                       std::move(room_poly_x),
                       std::move(room_poly_y),
                       room_height,
-                      ricoh_optical_center,
+                      room_T_ricoh,
+                      ricoh_valid,
                       frame_ts_ms};
 }
 

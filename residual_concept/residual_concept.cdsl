@@ -1,0 +1,12 @@
+import "Webots2Robocomp.idsl";
+
+Component residual_concept
+{
+    Communications
+    {
+        requires Webots2Robocomp;
+    };
+    language Cpp11;
+    options dsr;
+
+};

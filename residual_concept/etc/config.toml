@@ -1,0 +1,200 @@
+
+[Proxies]
+# Proxies for required interfaces (unused by residual_concept, kept so the generated genericworker links).
+Webots2Robocomp = "webots2robocomp:tcp -h localhost -p 10006"
+
+# --- Common Agent Data ---
+[Agent]
+id = 14  # MUST be unique across the shared graph: room=5 robot=6 table=7 controller=8 voxelizer=9 bottle=10 kinova=11 self_calib=12 human=13 chair=20. A collision = CRDT actor-id clash → SIGSEGV.
+name = "residual_concept"
+
+configFile = ""
+domain = 0
+tree = false
+graph = false   # headless perception agent (the shared DSR node-link viewer crashes under participant churn)
+2d = false
+3d = false
+
+[Period]
+Compute = 100
+Emergency = 500
+
+[Component.Debug]
+Verbose = false
+
+[Ice]
+Warn.Connections = "0"
+Trace.Network = "0"
+Trace.Protocol = "0"
+MessageSizeMax = "20004800"
+
+# ── Agent-presence protocol ───────────────────────────────────────────────────
+[Presence]
+required_agent_names = ["robot_concept", "room_concept"]   # robot_concept = lidar3D + robot node; room_concept = room node + floor/wall specialists. NO voxelizer (residual uses LiDAR, not YOLO masks).
+config_dir = "etc"
+monitor_period_ms = 500
+heartbeat_timeout_ms = 25000
+rejoin_grace_ms = 8000
+stale_grace_ms = 120000
+agent_info_period_ms = 1000
+
+# Owned graph nodes torn down on shutdown / peer-loss. "residual*" matches every obstacle this agent
+# scaffolds (residual_1, residual_2, …) so none survive a restart.
+[Owns]
+nodes = ["residual_concept 14", "residual*"]
+
+# ── residual_concept agent loop ───────────────────────────────────────────────
+[ResidualConcept]
+FEps = 0.005
+KStable = 20
+DivergedRetireFrames = 0      # OFF — removal is now the evidence-based occupancy carve (see [Carve]), not a
+                              # no-data-fit counter (failing to fit ≠ compelling evidence the obstacle is gone)
+LogPeriodFrames = 30
+WriteThresholdM = 0.03        # geometry dead-band: republish only past this centre/size change (m)
+# Conservative publish — LiDAR sees only NEAR faces, so the raw fit UNDER-sizes obstacles (far side occluded).
+# For safe navigation the published footprint must err LARGER: grow w/d by k·σ of the extent (occlusion
+# inflates that σ, so it grows exactly on the unobserved side — principled, not a fixed pad) + a per-side
+# robot-clearance margin. Internal fit/carve use the raw estimate; only the published box+hull are inflated.
+PublishExtentSigmaK = 2.0     # grow published w,d by k·σ (occlusion-aware; 0 = raw fit)
+PublishSafetyMarginM = 0.05   # + this clearance on EACH footprint side (robot clearance; ↑ for a wider berth)
+DissolveExplainedFrac = 0.60  # (with a specialist) fraction of interior explained → dissolve (fission accel)
+RtCovAddChain = true          # add J·Σ_chain·Jᵀ localization cov to the published RT cov
+UnobservableVar = 9.87        # ≈π² — roll/pitch unobservable for a footprint box
+DiagCsvPath = "etc/residual_diag.csv"   # per-cluster diagnostic CSV; empty = off
+
+# ── Belief (AI2 box-footprint fit; the ONLY fit path) ─────────────────────────
+[ResidualModel]
+AI2SigmaBaseM = 0.03
+AI2ClutterFrac = 0.15
+AI2ClutterScaleM = 0.12
+AI2PriorPosStd = 0.50
+AI2PriorYawStd = 1.57
+AI2PriorSizeStd = 0.50        # broad — a residual has NO shape prior
+# Process noise = how much the TRUE state drifts per frame. A physical obstacle is RIGID + STATIC, so — as in
+# table/chair/bottle — shape process noise is small and EVIDENCE ACCUMULATES: the posterior precision grows
+# with every frame, so the per-frame Kalman gain on w/d/yaw falls and the box only changes when NEW evidence
+# rivals the ACCUMULATED evidence (what stabilises the shape). The old values (pos .02/yaw .10/size .06) were
+# 10–120× the other concepts — they re-inflated Σ each frame so the box re-fit ~80% to the instantaneous
+# cluster OBB → shape jitter. Fission is NOT modelled here as drift: when a specialist carves the cluster the
+# POINTS vanish → sustained counter-evidence → the belief yields through the dissolve/tracker path, not a
+# standing covariance leak. Size kept a touch looser than chair's 0.0005 (a residual envelope refines as more
+# of an unknown object is seen), but tight enough that growth is deliberate, not per-frame chasing.
+AI2ProcessStdPosM = 0.01
+AI2ProcessStdYaw = 0.01
+AI2ProcessStdSizeM = 0.005
+AI2CommonModePosStd = 0.03
+AI2CommonModeYawStd = 0.20
+AI2CommonModeSizeStd = 0.03
+AI2GnIters = 5
+MinSize = 0.05
+MaxSize = 4.0
+# Per-point reliability covariates (AI2): R_i = σ² + (RangeNoiseCoeff·range)² + (EgoMotionLagS·rot_rate·range)².
+# Far and rotation-smeared returns get high R → the box widens Σ instead of chasing them (stops the far
+# fragments from wandering as the robot advances). range = horizontal distance from the sensor origin.
+RangeNoiseCoeff = 0.01        # extra std (m) per m of range
+EgoMotionLagS = 0.05          # effective registration lag (s): rotation smear = lag·rot_rate·range
+LidarFrameNode = "lidar3D"
+UseBpearl = true               # RE-ENABLED: the floor artefact was a lidar-height calibration issue (now fixed),
+                               # not bpearl. bpearl (low) sees table LEGS → leg-supported volume clusters stable
+                               # (vs helios-only flat-top rings that fragment).
+AI2CsvPath = "etc/residual_ai2.csv"   # per-cycle belief CSV (state + Σ diag + zed_pts); empty = off
+
+# ── Clusterer (LiDAR residual filter + 3D DBSCAN — the perception front-end) ───
+# Floor/ceiling/walls/robot are treated as SPECIALISTS (explainers), not thresholds: the residual is every
+# return the room+object models don't explain. The floor's tolerance GROWS with range (grazing physics).
+[Clusterer]
+FloorZ0 = 0.06                # floor band at the sensor (m)
+FloorSlope = 0.04             # REVERTED 0.10→0.04: the 0.10 band-aid was for the MIS-CALIBRATED floor (now fixed
+                              # upstream by lidar-height recalibration). At 0.10 the band reached 0.38 m @3m / 0.58 @5m
+                              # and was EATING the table LEGS at range → only the flat top survived → it fragmented.
+                              # 0.04 keeps a tight floor band so the legs survive and cluster with the top (leg-
+                              # supported volume = one stable box) — and low obstacles are preserved too.
+CeilZ = 1.80
+RobotRadiusM = 0.45
+WallMarginM = 0.35            # room delimiting-polygon wall model tolerance
+ExplainMarginM = 0.05         # object-surface claim tolerance (≈sensor noise; tight so on-table survives)
+DbscanEpsM = 0.30             # ↑ 0.20→0.30: a downward-LiDAR tabletop is painted as concentric rings spaced just
+                              # above 0.20 → it flickered into 1-5 arc slivers. 0.30 bridges the ring gaps into ONE
+                              # cluster. Lower toward 0.22 if genuinely-separate objects (chairs near the table) merge.
+DbscanMinPts = 4              # ↓ 6→4 — a small/distant object returns few points; let it form a core
+DbscanZScale = 0.35           # compress z so vertical layers of ONE object connect (anti-split); xy unchanged
+MinClusterPts = 6             # ↓ 14→6 — the 14 was an ANTI-CHURN gate (suppress flickering marginals). That job
+                              # is now done by the evidence-based lifecycle: a spurious small cluster gets carved
+                              # away by see-through evidence, a real small object sustains. So we can let small
+                              # boxes through here. Raise again only if genuine noise specks start birthing.
+# Navigation fragment-merge: two obstacles closer than the robot can pass between ARE one obstacle for
+# navigation, so any two clusters whose closest footprint points are within (RobotWidthM + MergeExcessM) are
+# unioned into ONE box+hull. This coalesces a LiDAR-shattered tabletop (concentric ring-arcs) into a single
+# coherent obstacle using LiDAR alone — so it holds every cycle even when the ZED FoV swings away. Merging a
+# chair pushed against the table is fine/desired (the robot won't fit between them). Set RobotWidthM=0 to off.
+# STOPGAP 2026-07-06: dropped 0.60→0.35. At robot-width (0.60) the merge transitively CHAINED a whole row of
+# distinct cubes into one giant convex box that over-blocked the free space around them. A near-horizontal
+# LiDAR grazes a cube in the same thin band as a tabletop, so shape/z can't tell "one shattered surface" from
+# "distinct objects a robot-width apart" — gap-merging can't cleanly separate them. 0.35 (just above DBSCAN
+# eps 0.30) bridges only tight single-surface fragmentation and leaves spaced objects individual. The proper
+# fix is PLANNER-side clearance: perception publishes tight individual boxes, the planner inflates each by the
+# robot radius (C-space), so narrow gaps auto-close without a merged box. Set RobotWidthM=0 to disable merge.
+RobotWidthM = 0.30            # fragmentation-bridge gap (NOT literal robot width; clearance → planner)
+MergeExcessM = 0.05           # extra bridge beyond the base gap
+MinVerticalExtentM = 0.10     # a flat cluster is only dropped if ALSO low (floor); an elevated flat sheet is kept
+MinTopZM = 0.30               # ...an elevated flat sheet with top ≥ this (a tabletop) is a REAL obstacle → KEPT
+
+# ── ZED dense-depth boost ─────────────────────────────────────────────────────
+# When a residual box falls in the ZED FoV, project it into the depth image, backproject the depth in that
+# pixel region, keep the points inside the box (reject background), and add them to the belief likelihood —
+# a much denser signal than LiDAR for forward objects (the ZED sees ~110° / ~5 m; LiDAR still covers 360°).
+[ZedBoost]
+Enabled = true
+FeedDetection = true    # feed dense ZED FoV into CLUSTERING (fixes the near-field-ahead LiDAR blind zone). Safe
+                        # now that infrastructure subtraction is range-noise robust (below): floor/ceiling/wall
+                        # removed with a band that grows as the ZED depth noise, so no sheet leaks/bridges.
+# Robust ZED infrastructure subtraction: a point is floor/ceiling/wall if within k·σ(range) of it, where the
+# ZED stereo depth noise σ(r)=Sigma0M + SigmaQuad·r² (physical, grows with range²). Absorbs a small ZED depth
+# calibration offset AND far-range blur so a dense floor/wall sheet can't survive and bridge objects into a blob.
+InfraSigma0M = 0.03     # depth-noise floor (m): near-range noise + calibration offset
+InfraSigmaQuad = 0.006  # depth-noise range² coeff (m per m²): σ = Sigma0M + SigmaQuad·range²
+InfraK = 3.0            # band width in σ (↑ for a wider, safer subtraction if floor/wall still leak)
+InfraWallMarginM = 0.10 # base wall tolerance, grown by k·σ (walls are a hard boundary → generous is safe)
+SigmaM = 0.02      # per-ZED-point obs noise std (m) → R (ZED close depth is crisp; ↑ to trust it less)
+Subsample = 3     # take every Nth pixel (dense depth → keep the point count bounded)
+XyMarginM = 0.10  # keep a backprojected point within this of the footprint edge
+ZMarginM = 0.10   # ...and within this of the box z-band
+MinDepthM = 0.30  # ZED near limit
+MaxDepthM = 5.0   # ZED depth degrades with range² — ignore beyond this
+MaxPoints = 1500  # cap per instance (bounds the GN fit)
+
+# ── Instance tracker (birth/associate/death) — TUNED FOR STABILITY (not bottle's crisp-mask values) ──
+# A residual's OBB centroid jitters as the robot sees different faces, and residuals are large & transient,
+# so: looser gate + higher detection noise (absorb the centroid jump so a re-observed obstacle ASSOCIATES
+# instead of spawning a duplicate), higher birth hysteresis (motion transients don't birth), larger
+# birth-separation (residuals are big → suppress near-duplicates), and a SHORT death (clear transients in
+# ~3 s instead of bottle's 9 s that piled up to 27 during motion).
+[Tracker]
+GateMahalanobis = 16.0        # ~4σ (looser than bottle's 9) — residual centroids are noisy
+GateFallbackM = 0.40
+BirthFrames = 8               # ↑ from 6 — a cluster must persist to birth (kills motion-transient births)
+DeathFrames = 30              # ↓ from 90 — transients clear in ~3 s; real obstacles are re-observed each pass
+BirthMinSepM = 0.40           # ↑ from 0.10 — residuals are large; suppress near-duplicate births
+DetectionNoiseM = 0.15        # ↑ from 0.05 — S=P+R²I absorbs the OBB-centroid viewpoint jump → re-associate
+MergeOverlap = 0.25           # collapse two boxes fitted to the same object (footprint overlap), keep more-observed
+NllCost = false
+DeathEnabled = false          # OFF — removal is the evidence-based occupancy carve ([Carve]), not a miss counter.
+                              # DeathFrames above is unused while DeathEnabled=false (kept for reference).
+ExpectedVisibleRangeM = 6.0   # (still used to hold out-of-range instances in other bookkeeping)
+
+# ── Occupancy-evidence removal (Bayesian ray-carving) — "compelling evidence it's not there anymore" ──────
+# Each cycle the LiDAR sweep is carved against every instance box along each beam (sensor origin → return).
+# A beam that reaches the box and STOPS INSIDE is occupancy evidence (still there → log-odds ↑); one that
+# passes clean THROUGH and returns from beyond is free-space evidence (gone → log-odds ↓); one that stops
+# SHORT is occluded (no evidence → HOLD); out of range / behind → no beams cross → HOLD. The surface test is
+# SOFT (Gaussian CDF over the belief Σ + sensor noise) — no hard margin. The per-cycle evidence is common-mode
+# saturated (one confident observation's worth) so N correlated beams can't delete in one frame. An obstacle
+# is removed only when the accumulated log-odds says the space is empty. Parameters are physical rates /
+# a risk tolerance, NOT tuning gates.
+[Carve]
+SensorSigmaM = 0.03           # LiDAR range noise σ (m) — surface-localisation blur along the beam
+DetectionProb = 0.85          # P(a beam through an OCCUPIED box returns from it) — sensor hit rate
+ClutterProb = 0.05            # P(a beam through an EMPTY box returns from inside anyway) — spurious rate
+RemovalProb = 0.12            # remove when P(occupied) < this (log-odds ≈ −2). RISK tolerance: smaller ⇒ more
+                              # compelling evidence required before deleting (fewer false removals, slower clear)
+OccupancyLogOddsMax = 4.0     # ± clamp on the accumulated log-odds (keeps evidence finite AND recoverable)
