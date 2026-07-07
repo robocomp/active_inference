@@ -96,12 +96,14 @@ CoverageRobustCM = 0.15        # Cauchy scale (m): on-plane points this far outs
 # saturated; HOLD when not looked at; free-evidence suppressed while the table is actively seen = hollow guard),
 # and the table is removed when P(occupied) < ExistenceRemovalProb. Evidence-based, NOT a miss counter. STAGED —
 # OFF by default (a mis-removal deletes furniture). Enable + watch the console "[existence] L=..." before trusting.
-ExistenceRemovalEnabled = false
+ExistenceRemovalEnabled =true 
 ExistenceRemovalProb = 0.12    # remove when L < log(p/(1−p)); lower = more conservative
 ExistenceLogoddsMax = 4.0      # clamp |L| so evidence stays finite AND recoverable
 ExistenceDetectionProb = 0.85  # P(beam through an OCCUPIED footprint returns from it) — sensor hit rate
 ExistenceClutterProb = 0.05    # P(beam through an EMPTY footprint returns anyway) — spurious rate
 ExistenceSensorSigmaM = 0.03   # LiDAR range σ (m) for the soft occupancy/free-space surface split
+ExistenceRemoveFrames = 15     # debounce: require the removal decision for this many CONSECUTIVE cycles before
+                               # deleting (a transient association/fit hiccup can't delete a real table)
 
 [TableConcept]
 ObsDistance = 1.8           # comfortable maximum stand-off from the target face for epistemic poses

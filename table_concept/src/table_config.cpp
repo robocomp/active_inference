@@ -95,6 +95,7 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.existence_detection_prob  = getf("TableModel.ExistenceDetectionProb",  0.85f);
     out.existence_clutter_prob    = getf("TableModel.ExistenceClutterProb",    0.05f);
     out.existence_sensor_sigma_m  = getf("TableModel.ExistenceSensorSigmaM",   0.03f);
+    out.existence_remove_frames   = geti("TableModel.ExistenceRemoveFrames",   15);
 
     std::print("table_concept: configuration loaded.\n");
     return out;

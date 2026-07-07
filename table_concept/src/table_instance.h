@@ -115,9 +115,11 @@ struct TableInstance
     float last_mask_confidence   = 0.0f;      // YOLO confidence of the last table detection
     bool  detection_alive        = false;     // frames_since_detection < threshold
 
-    // Existence log-odds (removal): free-space carve of the LiDAR sweep vs this table's footprint accrues
-    // negative evidence when the volume is demonstrably empty; removed when P(occupied) crosses the boundary.
+    // Existence log-odds (removal): LiDAR free-space carve + mask-absence accrue negative evidence when the
+    // table is demonstrably gone. Removed only when the removal decision holds for existence_remove_frames
+    // consecutive cycles (debounce) — deleting furniture warrants SUSTAINED evidence, not a transient hiccup.
     rc::exist::ExistenceBelief existence;
+    int existence_remove_streak = 0;
 
     // Predicted in-image table ROI from projecting the current model through the camera extrinsic.
     // Normalised so the controller is resolution-agnostic: drive offset→0 (centre the table in the

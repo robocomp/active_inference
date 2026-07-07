@@ -97,6 +97,8 @@ struct TableConfig
     float existence_detection_prob  = 0.85f;  // P(beam through OCCUPIED footprint returns from it)
     float existence_clutter_prob    = 0.05f;  // P(beam through EMPTY footprint returns anyway) — spurious rate
     float existence_sensor_sigma_m  = 0.03f;  // LiDAR range σ (m) for the soft occ/free surface split
+    int   existence_remove_frames   = 15;     // debounce: require the removal decision for this many consecutive
+                                              // cycles before deleting (transient association hiccups don't remove)
 
     // Upload the table pose covariance onto the room→table RT edge (rt_covariance_att, 6×6 SE3),
     // mapped from the belief's full Σ over [cx,cy,H,w,h,yaw]: x←cx, y←cy, z←H/2, yaw←ψ; roll/pitch are

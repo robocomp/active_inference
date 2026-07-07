@@ -519,20 +519,40 @@ void SpecificWorker::update_existence_and_remove()
         const auto& bs = inst.ai2_belief.state();
         const auto& S  = inst.ai2_belief.covariance();
         const float surf_sigma = std::sqrt(std::max(0.0f, 0.5f * (S(0, 0) + S(1, 1))));   // footprint position σ
-        // Carve only the TOP-SLAB z-band, not the full [0,H]: the slab spans the whole footprint at that height,
-        // so a beam there either hits the rim/top (occupancy) or passes through (gone) — no hollow ambiguity from
-        // beams travelling BETWEEN the legs under the tabletop (which the full-height box would miscount as free).
+        const bool observed = inst.frames_since_detection == 0;                      // fresh mask this cycle
+
+        // MASK channel (primary "gone" signal): if the model's silhouette projects INTO the camera FoV
+        // (roi_valid) it SHOULD be masked — masked ⇒ occupancy (holds L up against a LiDAR transient),
+        // NOT masked ⇒ predicted-but-absent (gone). Out of FoV ⇒ n_detectable=0 ⇒ HOLD.
+        if (inst.roi_valid)
+        {
+            constexpr int kMaskUnit = 20;   // detectable-footprint magnitude; tanh saturates the actual ΔL
+            const rc::exist::Evidence mev = rc::exist::mask_evidence(
+                observed ? kMaskUnit : 0, observed ? 0 : kMaskUnit, kMaskUnit, sm);
+            inst.existence.integrate(mev);
+        }
+
+        // LiDAR occupancy carve of the TOP-SLAB z-band [H−t, H] (the slab spans the full footprint there, so a
+        // beam hits rim/top = occupancy or passes through = gone — no hollow ambiguity from between-leg beams).
         rc::exist::Evidence ev = rc::exist::carve_box(origin, sweep, bs.cx, bs.cy, bs.yaw, bs.w, bs.h,
                                                       bs.H - rc::TableModel::TOP_THICKNESS, bs.H, surf_sigma, sm);
-        if (ev.n_reached == 0) continue;                                             // not probed this cycle → HOLD
-        const bool observed = inst.frames_since_detection == 0;                      // fresh mask ⇒ hollow guard
-        ev.log_odds_delta = rc::exist::hollow_guarded_delta(ev, observed, sm);
-        inst.existence.integrate(ev);
+        if (ev.n_reached > 0)                                                        // 0 ⇒ not probed ⇒ HOLD
+        {
+            ev.log_odds_delta = rc::exist::hollow_guarded_delta(ev, observed, sm);   // suppress interior free while observed
+            inst.existence.integrate(ev);
+        }
+
+        // Debounce: delete only when the removal decision holds for existence_remove_frames CONSECUTIVE cycles,
+        // so a transient association/fit hiccup (a few cycles of spurious free) can't delete a real table.
+        if (inst.existence.should_remove(cfg_.existence_removal_prob)) ++inst.existence_remove_streak;
+        else                                                          inst.existence_remove_streak = 0;
+
         if (fitter_->should_log(inst))
-            std::print("[{}] [existence] L={:.2f} p={:.2f} occ={:.1f} free={:.1f} n={} {}\n",
+            std::print("[{}] [existence] L={:.2f} p={:.2f} occ={:.1f} free={:.1f} n={} roi={} {} streak={}\n",
                        inst.node_name, inst.existence.logodds(), inst.existence.p_exists(),
-                       ev.e_occ, ev.e_free, ev.n_reached, observed ? "obs" : "-");
-        if (inst.existence.should_remove(cfg_.existence_removal_prob))
+                       ev.e_occ, ev.e_free, ev.n_reached, inst.roi_valid ? 1 : 0,
+                       observed ? "obs" : "-", inst.existence_remove_streak);
+        if (inst.existence_remove_streak >= cfg_.existence_remove_frames)
             doomed.push_back(id);
     }
     for (const std::uint64_t id : doomed)
