@@ -34,6 +34,7 @@
 #include "../../common/instance_tracker/instance_tracker.h"
 #include "residual_config.h"
 #include "residual_clusterer.h"
+#include "residual_occupancy_grid.h"   // PHASE-0 REBUILD: occupancy-grid safety layer
 #include "residual_scene_graph.h"
 #include "residual_fitter.h"
 #include "residual_lidar_ingestor.h"
@@ -82,6 +83,10 @@ private:
     void  build_support_surfaces();
     float support_z_for(float cx, float cy, float z_min) const;
 
+    // PHASE-1 REBUILD: publish the residual occupancy as a `grid` node under room (cell centres + cell size)
+    // for the voxelizer 3-D display. Throttled; the node is created once and its cell attribute is updated.
+    void  publish_grid_display(const rc::OccupancyGrid::CellExplained& explained);
+
     // ── Per-cycle orchestration ──
     void run_instance_tracker(const std::vector<rc::SpecialistSdf>& specialists);
     void merge_overlapping_instances();      // collapse two boxes fitted to the same object (footprint IoU)
@@ -119,6 +124,11 @@ private:
     std::unique_ptr<DSR::InnerEigenAPI>    inner_eigen_;
     std::unique_ptr<DSR::InnerGaussianAPI> gaussian_api_;
     std::uint64_t                          room_node_id_ = 0;
+
+    // PHASE-0 REBUILD: the occupancy-grid safety layer (runs live as a diagnostic first, then becomes the
+    // single source of obstacle truth once verified stable).
+    rc::OccupancyGrid grid_;
+    bool              grid_ready_ = false;
 
     // Collaborators (constructed in initialize()). Declared in dependency order.
     std::unique_ptr<rc::ResidualSceneGraph>    scene_graph_;

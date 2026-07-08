@@ -148,6 +148,12 @@ BirthSizeStd = 0.15       # prior PRECISION (size std, m) behind the Birth* dims
                           # born table uses the loose generic prior and the first partial mask reshapes it.
 NllCost = false           # association cost = ½(m²+ln|S|) NLL (compete by likelihood, not raw distance)
                           # vs raw squared-Mahalanobis. Gate is m² either way. Matters under clutter.
+# Ricoh-360 / LiDAR-depth mask BIRTH gate. A slice with depth_var>0 is a peripheral 360-RGB YOLO mask depth-
+# filled from reprojected LiDAR (dense ZED slices have depth_var==0). It always ASSOCIATES (fuses into a table
+# it gates to), but to SPAWN a table it must be confident AND well-ranged, else sparse peripheral blobs birth
+# phantoms all over. Birthable iff conf ≥ RicohBirthConf and depth_var ≤ RicohBirthMaxVar. ZED always births.
+RicohBirthConf = 0.60     # min YOLO confidence for a ricoh slice to birth a table
+RicohBirthMaxVar = 0.005  # max depth_var (m²) for a ricoh slice to birth (σ_range ≲ 7 cm)
 
 [Ice]
 Warn.Connections = "0"

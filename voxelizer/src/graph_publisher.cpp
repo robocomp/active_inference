@@ -130,6 +130,7 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
         G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_bbox_max_xyz", std::vector<float>{});
         G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_pixels_xy", std::vector<float>{});
         G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_pixel_offsets", std::vector<float>{0.0f});
+        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_depth_var", std::vector<float>{});
         if (params_.MASK_MOTION_ENABLED)
         {
             G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_motion_dotd", std::vector<float>{});
@@ -249,8 +250,10 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
     std::vector<float> trunc_frac;        // fraction of silhouette pixels on the image border (truncation)
     std::vector<float> centroid_radius;   // normalized centroid radius from principal point (periphery)
     std::vector<float> mask_range;         // mean camera→mask depth Z (m): static range — consumer scales R + pose common-mode (a far view can't resolve orientation)
-    std::vector<float> has_depth_flags;    // 1.0 = zed (3D) slice; 0.0 = ricoh RGB-360 bearing-only slice (Part B)
+    std::vector<float> has_depth_flags;    // 1.0 = 3D slice (zed, or ricoh with lidar depth); 0.0 = ricoh bearing-only
     std::vector<float> azimuths;           // room-frame bearing (rad); meaningful only for has_depth==0 slices
+    std::vector<float> depth_var;          // σ_range² (m²) to ADD to R along the mask ray (common/depth_projection).
+                                           // 0 for dense-depth zed masks; the scored range_var for lidar-depth ricoh masks.
     std::ostringstream labels_joined;
     std::size_t total_support_points = 0;
     support_offsets.push_back(0.0f);
@@ -406,6 +409,7 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
         confidences.push_back(det.confidence);
         has_depth_flags.push_back(1.0f);   // zed slice: carries 3D support points
         azimuths.push_back(0.0f);
+        depth_var.push_back(0.0f);          // zed dense depth ⇒ no extra range variance beyond R_base
         support_offsets.push_back(static_cast<float>(support_offsets.back() + static_cast<float>(mask_points_room.size())));
         mask_pixels_xy.insert(mask_pixels_xy.end(), det_pixels.begin(), det_pixels.end());
         mask_pixel_offsets.push_back(static_cast<float>(mask_pixel_offsets.back() + static_cast<float>(det_pixels.size() / 2)));
@@ -485,6 +489,13 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
     // slices until the bearing confirm/birth path (Part C) exists — inert-but-available today.
     // (Only emitted alongside a valid zed depth frame; the empty-depth early-return above drops them for
     //  that rare/transient frame, which is fine for peripheral evidence.)
+    // Zed→room inverse, to also express any lidar-depth ricoh support points in the ZED frame so they
+    // flow through the consumer's existing zed→target chain (no ingestor frame change / no camera tag).
+    const Eigen::Matrix3f zed_R = room_T_zed.linear().cast<float>();
+    const Eigen::Vector3f zed_t = room_T_zed.translation().cast<float>();
+    const Eigen::Matrix3f zed_R_inv = zed_R.transpose();               // room→zed rotation
+    const auto room_to_zed = [&](const Eigen::Vector3f& p_room) { return zed_R_inv * (p_room - zed_t); };
+
     for (const auto& b : bearing_detections)
     {
         if (!labels_joined.str().empty())
@@ -492,18 +503,52 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
         labels_joined << b.label;
         label_ids.push_back(b.class_id);
         confidences.push_back(b.confidence);
-        has_depth_flags.push_back(0.0f);
         azimuths.push_back(b.azimuth_room_rad);
-        support_offsets.push_back(support_offsets.back());          // no 3D points → begin == end
-        mask_pixel_offsets.push_back(mask_pixel_offsets.back());    // no raw silhouette pixels
-        const float nan = std::numeric_limits<float>::quiet_NaN();
-        centroids_xyz.insert(centroids_xyz.end(), {nan, nan, nan});
-        bbox_min_xyz.insert(bbox_min_xyz.end(),   {nan, nan, nan});
-        bbox_max_xyz.insert(bbox_max_xyz.end(),   {nan, nan, nan});
-        if (params_.MASK_MOTION_ENABLED)
+        mask_pixel_offsets.push_back(mask_pixel_offsets.back());    // no raw silhouette pixels either way
+
+        if (b.has_lidar_depth and not b.support_room.empty())
         {
-            motion_dotd.push_back(0.0f);  motion_bias.push_back(0.0f);      motion_var.push_back(0.0f);
-            trunc_frac.push_back(0.0f);   centroid_radius.push_back(0.0f);  mask_range.push_back(0.0f);
+            // FULL 3D slice from the reprojected lidar: room + zed support points (so both consumer
+            // paths work), real centroid/bbox, and range_var as the depth uncertainty to add to R.
+            has_depth_flags.push_back(1.0f);
+            depth_var.push_back(b.range_var);
+            support_offsets.push_back(static_cast<float>(support_offsets.back() + static_cast<float>(b.support_room.size())));
+            Eigen::Vector3f mn = Eigen::Vector3f::Constant(std::numeric_limits<float>::max());
+            Eigen::Vector3f mx = Eigen::Vector3f::Constant(std::numeric_limits<float>::lowest());
+            for (const auto& pr : b.support_room)
+            {
+                support_points.push_back(pr.x());     support_points.push_back(pr.y());     support_points.push_back(pr.z());
+                const Eigen::Vector3f pz = room_to_zed(pr);
+                support_points_cam.push_back(pz.x()); support_points_cam.push_back(pz.y()); support_points_cam.push_back(pz.z());
+                mn = mn.cwiseMin(pr); mx = mx.cwiseMax(pr);
+            }
+            centroids_xyz.insert(centroids_xyz.end(), {b.centroid_room.x(), b.centroid_room.y(), b.centroid_room.z()});
+            bbox_min_xyz.insert(bbox_min_xyz.end(),   {mn.x(), mn.y(), mn.z()});
+            bbox_max_xyz.insert(bbox_max_xyz.end(),   {mx.x(), mx.y(), mx.z()});
+            if (params_.MASK_MOTION_ENABLED)
+            {
+                // No zed-image interaction matrix for a ricoh mask ⇒ neutral motion terms; range_var
+                // (depth_var) carries the ricoh-specific uncertainty. mask_range = the depth centroid range.
+                motion_dotd.push_back(0.0f);  motion_bias.push_back(0.0f);  motion_var.push_back(0.0f);
+                trunc_frac.push_back(0.0f);   centroid_radius.push_back(0.0f);
+                mask_range.push_back(b.centroid_room.norm());
+            }
+        }
+        else
+        {
+            // Bearing-only slice (no lidar depth): unchanged Part-B behaviour.
+            has_depth_flags.push_back(0.0f);
+            depth_var.push_back(0.0f);
+            support_offsets.push_back(support_offsets.back());     // no 3D points → begin == end
+            const float nan = std::numeric_limits<float>::quiet_NaN();
+            centroids_xyz.insert(centroids_xyz.end(), {nan, nan, nan});
+            bbox_min_xyz.insert(bbox_min_xyz.end(),   {nan, nan, nan});
+            bbox_max_xyz.insert(bbox_max_xyz.end(),   {nan, nan, nan});
+            if (params_.MASK_MOTION_ENABLED)
+            {
+                motion_dotd.push_back(0.0f);  motion_bias.push_back(0.0f);      motion_var.push_back(0.0f);
+                trunc_frac.push_back(0.0f);   centroid_radius.push_back(0.0f);  mask_range.push_back(0.0f);
+            }
         }
     }
 
@@ -524,6 +569,7 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
     G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_pixel_offsets", mask_pixel_offsets);
     G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_has_depth", has_depth_flags);
     G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_azimuth", azimuths);
+    G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_depth_var", depth_var);
     if (params_.MASK_MOTION_ENABLED)
     {
         G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_motion_dotd", motion_dotd);

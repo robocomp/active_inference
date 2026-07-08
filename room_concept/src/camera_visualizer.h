@@ -9,10 +9,14 @@
 #include <QTimer>
 #include <QElapsedTimer>
 #include <array>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <Eigen/Dense>
+#include <mutex>
 #include <optional>
+#include <thread>
 #include <vector>
 #include <memory>
 #include <string>
@@ -43,9 +47,13 @@ class CameraVisualizer : public QDialog
                                   QWidget* parent = nullptr);
         ~CameraVisualizer();  // defined in .cpp for unique_ptr<MediaSubscriber> of incomplete type
 
-        // Start the always-on media-plane drain timer. The RGB subscriber itself is
-        // created lazily (shared descriptor-driven factory) once the "zed" node + media
-        // descriptor exist (domain/topic from that JSON — no config). Call once after construction.
+        // Start the dedicated media-plane ingest thread. The RGB subscriber itself is
+        // created lazily on that thread (shared descriptor-driven factory) once the "zed"
+        // node + media descriptor exist (domain/topic from that JSON — no config), and the
+        // thread then continuously drains DDS into a mutex-protected frame cache. Keeping the
+        // subscriber lifecycle + take() OFF the GUI thread both decouples camera latency from
+        // repaint and (with the media_transport entity mutex) makes concurrent bring-up
+        // alongside the LiDAR ingest thread safe. Call once after construction.
         void start_media_plane();
 
         void update_frame();  // Call this periodically to refresh the visualization
@@ -77,7 +85,11 @@ class CameraVisualizer : public QDialog
         std::string camera_node_name_ = "zed";
         std::string room_frame_name_ = "room";
 
-        // ── Media-plane RGB consumer ──────────────────────────────────────────
+        // ── Media-plane RGB consumer (dedicated ingest thread) ────────────────
+        // media_rgb_sub_ is owned EXCLUSIVELY by the ingest thread (created in
+        // try_discover_media_plane, polled in ingest_pump, destroyed after the thread joins).
+        // The GUI thread never touches the subscriber — it only reads the latest decoded frame
+        // from media_rgb_ under media_rgb_mtx_, gated by the subscriber_ready_ flag.
         std::unique_ptr<rc::media::MediaSubscriber> media_rgb_sub_;
         struct MediaRgbCache
         {
@@ -88,14 +100,24 @@ class CameraVisualizer : public QDialog
             std::uint64_t stamp = 0;
             bool valid = false;
         };
-        MediaRgbCache media_rgb_;
-        void drain_media_plane();
+        MediaRgbCache media_rgb_;                 // written by ingest thread, read by GUI — under media_rgb_mtx_
+        std::mutex media_rgb_mtx_;
+        std::vector<std::uint8_t> render_bytes_;  // GUI-thread scratch: a copy of the latest frame's bytes
+
+        // Ingest thread machinery (mirrors rc::LidarIngestor).
+        std::thread ingest_thread_;
+        std::atomic<bool> ingest_running_{false};
+        std::atomic<bool> subscriber_ready_{false};   // set once the RGB subscriber is live
+        std::mutex ingest_wake_mtx_;
+        std::condition_variable ingest_wake_cv_;
+        void ingest_loop();   // thread body: discover → drain → brief idle wait
+        bool ingest_pump();   // one discovery/drain step; true if a frame was taken
+        void stop_ingest();   // signal + join the ingest thread (idempotent)
+
         // Lazily create the RGB subscriber from the "zed" media descriptor (self-throttled).
+        // Runs on the ingest thread only.
         bool try_discover_media_plane();
         std::chrono::steady_clock::time_point last_media_discovery_attempt_{};
-        // Always-on drain so an idle (hidden) dialog never backs up the RELIABLE
-        // writer's shared-memory pool and stalls the whole media plane.
-        QTimer* media_drain_timer_ = nullptr;
 
         struct TimingStats
         {

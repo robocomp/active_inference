@@ -37,6 +37,7 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
     rc::ResidualBelief::self_test();
     rc::ResidualClusterer::self_test();
     rc::zed_boost_self_test();
+    rc::OccupancyGrid::self_test();   // PHASE-0 REBUILD: safety-layer grid (completeness / occluded / carve / z-aware)
 
 #ifdef HIBERNATION_ENABLED
     hibernationChecker.start(500);
@@ -353,6 +354,30 @@ void SpecificWorker::compute()
     const Eigen::Vector2f robot_xy = lidar_ingestor_->origin_room().head<2>();
     robot_xy_ = robot_xy;                                                // for the negative-info death gate
 
+    // ── PHASE-0 REBUILD: occupancy-grid safety layer, running LIVE as a diagnostic (publish still via the old
+    //    path until it's verified stable). Init once from the room polygon bounds; then integrate every sweep. ──
+    {
+        if (not grid_ready_)
+        {
+            const auto poly = read_room_polygon();
+            float xmn = -6, ymn = -6, xmx = 6, ymx = 6;
+            if (poly.size() >= 3)
+            {
+                xmn = ymn = 1e9f; xmx = ymx = -1e9f;
+                for (const auto& p : poly) { xmn = std::min(xmn, p.x()); xmx = std::max(xmx, p.x()); ymn = std::min(ymn, p.y()); ymx = std::max(ymx, p.y()); }
+                xmn -= 0.5f; ymn -= 0.5f; xmx += 0.5f; ymx += 0.5f;      // margin around the room
+            }
+            rc::OccGridParams gp;
+            gp.floor_z0 = cfg_.cluster.floor_z0; gp.floor_slope = cfg_.cluster.floor_slope; gp.ceil_z = cfg_.cluster.ceil_z;
+            grid_.reset(xmn, ymn, xmx, ymx, gp);
+            grid_ready_ = grid_.valid();
+            std::println("[grid] init bounds=({:.1f},{:.1f})..({:.1f},{:.1f}) cells={}x{}",
+                         xmn, ymn, xmx, ymx, grid_.width(), grid_.height());
+        }
+        if (grid_ready_)   // integrate now (needs no explainers); read-out + publish happen after explainers below
+            grid_.integrate_sweep(lidar_ingestor_->origin_room(), lidar_ingestor_->sweep_room());
+    }
+
     // Robot yaw rate (rad/s) from the room<-robot RT edge, for the ego-motion point-reliability term.
     float rot_rate = 0.0f;
     if (rt_api_)
@@ -366,6 +391,31 @@ void SpecificWorker::compute()
     const auto specialists = build_specialist_sdfs();                    // object SDFs (for the dissolve test)
     const auto explainers  = build_explainers(robot_xy, specialists);   // floor+ceiling+walls+robot+objects
     build_support_surfaces();                                            // tabletops → obstacle base anchoring
+
+    // ── PHASE-1 REBUILD: read the RESIDUAL out of the grid (occupied ∧ ¬explained) and publish it. A cell is
+    //    "explained" if any known-model explainer accounts for its representative point → walls + specialists
+    //    drop out (floor/ceiling already excluded by the nav band), leaving object-only components. Evidence is
+    //    never deleted, only masked at read-out — a specialist mis-fit cannot erase a real obstacle. Also
+    //    publishes the residual cells on a `grid` node under room for the voxelizer 3-D display. ──
+    if (grid_ready_)
+    {
+        const rc::OccupancyGrid::CellExplained cell_explained =
+            [&explainers](float x, float y, float zlo, float zhi) -> bool
+            {
+                const Eigen::Vector3f p(x, y, 0.5f * (zlo + zhi));
+                for (const auto& ex : explainers) if (ex(p)) return true;
+                return false;
+            };
+        const auto comps = grid_.occupied_components(2, cell_explained);
+        static int gc = 0;
+        if ((gc++ % 20) == 0)
+        {
+            std::size_t maxc = 0; for (const auto& c : comps) maxc = std::max<std::size_t>(maxc, c.n_cells);
+            std::println("[grid] residual components={} max_cells={} (walls/specialists subtracted at read-out)",
+                         comps.size(), maxc);
+        }
+        publish_grid_display(cell_explained);   // `grid` node under room: residual cell centres for the 3-D viewer
+    }
 
     // ZED dense-depth: pump the depth + cache the camera→room transform (at the depth stamp), then backproject
     // the WHOLE FoV into a dense room-frame cloud. It is fed into clustering ALONGSIDE the LiDAR sweep so
@@ -764,6 +814,41 @@ void SpecificWorker::run_instance_tracker(const std::vector<rc::SpecialistSdf>& 
             graph_dirty_ = true;                          // node created → relayout at end of cycle
         }
     }
+}
+
+void SpecificWorker::publish_grid_display(const rc::OccupancyGrid::CellExplained& explained)
+{
+    static int t = 0;
+    if ((t++ % 5) != 0) return;                         // ~2 Hz display update (attr-only; no node churn)
+    if (not G or room_node_id_ == 0 or not rt_api_) return;
+    auto room = G->get_node(room_node_id_);
+    if (not room.has_value()) return;
+
+    // Create the `grid` node once (owned; cleaned up on exit via the "grid" [Owns] entry).
+    auto gopt = G->get_node("grid");
+    if (not gopt.has_value())
+    {
+        DSR::Node gn = DSR::Node::create<grid_node_type>("grid");
+        const float rpx = G->get_attrib_by_name<pos_x_att>(room.value()).value_or(200.f);
+        const float rpy = G->get_attrib_by_name<pos_y_att>(room.value()).value_or(200.f);
+        G->add_or_modify_attrib_local<pos_x_att>(gn, rpx);
+        G->add_or_modify_attrib_local<pos_y_att>(gn, rpy + 100.f);
+        const auto idopt = G->insert_node(gn);
+        if (not idopt.has_value()) return;
+        rt_api_->insert_or_assign_edge_RT(room.value(), idopt.value(), {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f});
+        graph_dirty_ = true;
+        std::println("[grid] published 'grid' node id={} under room", idopt.value());
+        gopt = G->get_node(idopt.value());
+        if (not gopt.has_value()) return;
+    }
+
+    // Residual cell centres (occupied ∧ ¬explained), flat [x0,y0,x1,y1,…] room-frame, + the cell size, so the
+    // voxelizer can draw a square per cell. The z-band could follow later; a flat display height is enough now.
+    auto gn = gopt.value();
+    std::vector<float> cells = grid_.residual_cell_centres(explained);
+    G->runtime_checked_add_or_modify_attrib_local(gn, "grid_cells_xy", cells);
+    G->runtime_checked_add_or_modify_attrib_local(gn, "grid_cell_size", static_cast<float>(grid_.params().cell_size_m));
+    G->update_node(gn);
 }
 
 void SpecificWorker::process_residual_node(const DSR::Node& node)

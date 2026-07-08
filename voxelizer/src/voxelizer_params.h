@@ -131,6 +131,18 @@ struct VoxelizerParams
     // the ricoh's mounting yaw + the panorama's 0-column convention — PROVISIONAL, verify live vs the
     // descriptor projection model before any consumer relies on the bearing (Part C is not built yet).
     bool        RICOH_PUBLISH_MASKS        = true;    // Ricoh.publish_masks
+    // Ricoh.mask_depth — reproject the lidar into the panorama and publish the 360 masks as FULL 3D
+    // masks (has_depth=1, room+zed support points, mask_depth_var) instead of bearing-only. Default OFF:
+    // flip ON only once the concept agents read mask_depth_var into R (else sparse ricoh masks are
+    // over-trusted). See common/depth_projection.
+    bool        RICOH_MASK_DEPTH           = false;   // Ricoh.mask_depth
+    bool        RICOH_MASK_DEPTH_HELIOS_ONLY = true;  // Ricoh.mask_depth_helios_only — helios (co-located) only, exclude bpearl
+    // Ricoh.azimuth_tune_deg — LIVE azimuth fine-tune in DEGREES, applied as an extra yaw on room_T_ricoh
+    // on top of the graph's cam_equirect_* intrinsics. Affects BOTH the projection overlay and the
+    // detection→bearing path (one transform). Dial out the last few degrees of residual against the
+    // RGB360 Lidar overlay (e.g. 2 or -3), then bake the total into the ricoh node's
+    // cam_equirect_azimuth_offset in shadow.json and set this to 0. Restart voxelizer only to change it.
+    float       RICOH_AZIMUTH_TUNE_DEG     = 0.0f;    // Ricoh.azimuth_tune_deg (DEGREES, not radians)
     // NOTE: the panorama azimuth calibration (mirror sign + seam zero) now lives in the GRAPH as the
     // ricoh node's cam_equirect_azimuth_sign / cam_equirect_azimuth_offset intrinsics, applied by the
     // shared CameraAPI equirectangular model. Both the 360 projection overlay AND the detection→bearing

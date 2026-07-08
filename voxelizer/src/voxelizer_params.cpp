@@ -48,6 +48,9 @@ VoxelizerParams load_voxelizer_params(const ConfigLoader& configLoader)
     rc::ConfigLoaderUtils::load_optional(configLoader, "Ricoh.yolo_strip_overlap_px", params.RICOH_YOLO_STRIP_OVERLAP_PX);
     rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Ricoh.yolo_merge_iou", params.RICOH_YOLO_MERGE_IOU);
     rc::ConfigLoaderUtils::load_optional(configLoader, "Ricoh.publish_masks", params.RICOH_PUBLISH_MASKS);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Ricoh.mask_depth", params.RICOH_MASK_DEPTH);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Ricoh.mask_depth_helios_only", params.RICOH_MASK_DEPTH_HELIOS_ONLY);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Ricoh.azimuth_tune_deg", params.RICOH_AZIMUTH_TUNE_DEG);
     // Ricoh azimuth calibration is no longer a config knob — it lives in the graph (ricoh node's
     // cam_equirect_azimuth_sign/offset), applied by CameraAPI. See voxelizer_params.h.
 

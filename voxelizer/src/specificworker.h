@@ -98,6 +98,7 @@ class SpecificWorker : public GenericWorker
             Mat::RTMat                  room_T_robot;
             Mat::RTMat                  room_T_zed;
             std::vector<Eigen::Vector3f> lidar_points_room;
+            std::vector<std::uint8_t>    lidar_plane_id;    // per-point source plane (helios=0, bpearl=1) — for the ricoh depth-fill
             std::vector<GraphObjectBox>  graph_object_boxes;   // model instances (room frame) — reused for the ZED-image projection overlay
             std::string                 room_name;         // live room node name (frame the boxes/polygon live in)
             std::vector<float>          room_poly_x;       // room floor polygon (room frame, m) — gathered here so the overlay never re-reads the graph

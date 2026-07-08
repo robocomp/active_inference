@@ -47,6 +47,9 @@ struct TableInstance
     float last_trunc_frac      = 0.0f;
     float last_centroid_radius = 0.0f;
     float last_range           = 0.0f;   // mean camera→mask depth Z (m), this frame — static range weighting
+    // Depth-uncertainty of the mask (common/depth_projection): σ_range² (m²) added to R, sibling to
+    // last_motion_var. 0 for dense-depth zed masks; the scored range variance for lidar-depth ricoh masks.
+    float last_depth_var       = 0.0f;
 
     // LiDAR range-channel diagnostics (this frame): #returns fed to the factor, #returns in a generous box,
     // and their mean |dist| to the current model surface. Few rays / large resid ⇒ wrong LidarFrameNode.
@@ -72,9 +75,11 @@ struct TableInstance
     std::chrono::steady_clock::time_point last_belief_touch{};
     float chain_cov_xx = 0.0f, chain_cov_yy = 0.0f;  // Part B localization/chain cov (m²), added to the RT cov
     int  processed_cycles   = 0;      // per-table compute cycles for log throttling
-    // Tracker's gated mask assignment for THIS frame (index into the masks packet slices), or -1.
-    // Set each cycle by run_instance_tracker(); read in TableFitter::observe.
-    int  assigned_mask_idx  = -1;
+    // Tracker's gated mask assignments for THIS frame (indices into the masks packet slices). With
+    // multi-detection fusion a table can be seen by BOTH the ZED and the ricoh-360 masks in one cycle, so
+    // this is a LIST — process_table_node runs one belief update per slice (sequential = joint likelihood,
+    // each sensor keeping its own R + common-mode). Empty = no association this frame. Set by run_instance_tracker.
+    std::vector<int>  assigned_mask_idxs;
     bool model_stable       = false;
     int  model_generation   = 0;
     TableState prev_conv_state{};      // accepted state at the previous cycle (for state-delta convergence)

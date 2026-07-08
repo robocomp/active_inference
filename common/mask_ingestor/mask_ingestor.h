@@ -69,6 +69,11 @@ public:
         // Defaults match the zed contract, so a producer that predates the field reads back has_depth=true.
         bool  has_depth        = true;   // false ⇒ ricoh bearing-only slice
         float azimuth_room_rad = 0.0f;   // room-frame bearing; meaningful only when has_depth==false
+        // Depth-uncertainty channel (common/depth_projection). σ_range² (m²) to ADD to R along the mask
+        // ray, SAME currency as motion_var — sum them. 0 for dense-depth zed masks; the scored range
+        // variance for ricoh masks depth-filled from reprojected lidar (grows as hits get sparse/scattered,
+        // → the mask degrades back toward bearing-only). 0 when the producer predates the field.
+        float depth_var        = 0.0f;
     };
 
     struct MasksPacket

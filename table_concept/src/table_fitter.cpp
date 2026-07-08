@@ -143,80 +143,61 @@ bool TableFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_id)
 
 // ─── Observation ─────────────────────────────────────────────────────────────
 
+// Build an observation from ONE assigned mask slice. Latches that slice's R inputs on the instance and does
+// the classify-don't-destroy SDF split. The caller (process_table_node) invokes this once per assigned slice
+// and runs a belief update for each — sequential fusion that keeps every sensor's R and common-mode separate.
+TableFitter::TableObservation TableFitter::observe_slice(TableInstance& inst, int slice_index)
+{
+    TableObservation observation;
+    const auto& masks_packet = mask_ingestor_->packet();
+    if (not masks_packet.valid or slice_index < 0
+        or slice_index >= static_cast<int>(masks_packet.slices.size()))
+        return observation;
+
+    const auto& slice = masks_packet.slices[slice_index];
+    // A slice assigned to this table ⇒ detection is alive; latch its per-slice R inputs.
+    inst.frames_since_detection = 0;
+    inst.last_mask_confidence   = slice.confidence;
+    inst.last_mask_timestamp_ms = masks_packet.timestamp_ms;   // chain-cov pinning (Part B)
+    // Ego-motion capture-corruption + depth uncertainty for THIS mask (AI2 obs precision / bias gate; 0 if the
+    // producer predates the feature, or for a dense zed slice). See MASK_MOTION_CORRUPTION.md / depth_projection.
+    inst.last_motion_var      = slice.motion_var;
+    inst.last_motion_dotd     = slice.motion_dotd;
+    inst.last_trunc_frac      = slice.trunc_frac;
+    inst.last_centroid_radius = slice.centroid_radius;
+    inst.last_range           = slice.range;
+    inst.last_depth_var       = slice.depth_var;   // mask depth uncertainty → R (ricoh lidar-depth masks)
+    const std::size_t begin = std::min(slice.support_begin, masks_packet.support_points.size());
+    const std::size_t end   = std::min(slice.support_end,   masks_packet.support_points.size());
+
+    observation.candidate_pts.reserve(end > begin ? end - begin : 0);
+    observation.residual_pts.reserve(end > begin ? end - begin : 0);
+    for (std::size_t i = begin; i < end; ++i)
+    {
+        const auto& p = masks_packet.support_points[i];
+        const float sdf = inst.model.sdf_point(p);
+        if (std::abs(sdf) < cfg_.sdf_threshold_for_storage)
+            observation.candidate_pts.push_back(p);
+        else
+            observation.residual_pts.push_back(p);
+    }
+
+    const float total = static_cast<float>(observation.candidate_pts.size() + observation.residual_pts.size());
+    observation.has_fresh_data   = total > 0.0f;
+    observation.explanation_ratio = total > 0.0f
+        ? static_cast<float>(observation.candidate_pts.size()) / total : 0.0f;
+
+    if (should_log(inst))
+        std::print("[{}] masks={} slice={} label='{}' conf={:.2f} dvar={:.4f} support={} cand={} resid={} centroid=({:.2f},{:.2f},{:.2f})\n",
+                   inst.node_name, masks_packet.frame_id, slice_index, slice.label, slice.confidence, slice.depth_var,
+                   end - begin, observation.candidate_pts.size(), observation.residual_pts.size(),
+                   slice.centroid.x(), slice.centroid.y(), slice.centroid.z());
+    return observation;
+}
+
 TableFitter::TableObservation TableFitter::observe(TableInstance& inst, const DSR::Node& node)
 {
     TableObservation observation;
-
-    // Detection-aliveness ages every cycle; a fresh table mask below resets it to 0.
-    if (inst.frames_since_detection < 1000000) ++inst.frames_since_detection;
-
-    // Primary path: YOLO "masks" (room frame), masks-only. Classify-don't-destroy SDF split keeps
-    // inliers as queue anchors (candidates) and the rest as residuals that drive model expansion.
-    const auto& masks_packet = mask_ingestor_->packet();
-    if (masks_packet.valid && masks_packet.frame_id > inst.last_masks_frame_seen)
-    {
-        // Mask for this instance = the tracker's gated assignment ONLY. A frame where the tracker did not
-        // associate a detection to this instance carries no trustworthy mask for it (feeding the nearest
-        // blob would cross-contaminate instances and update on unconfirmed evidence), so we skip — the
-        // belief just freezes that cycle (information-filter axiom). assigned_mask_idx is set each cycle by
-        // run_instance_tracker; -1 means "no association this frame".
-        std::optional<MaskIngestor::MaskSlice> selected_mask;
-        if (const auto& sl = masks_packet.slices;
-            inst.assigned_mask_idx >= 0 and inst.assigned_mask_idx < static_cast<int>(sl.size()))
-            selected_mask = sl[inst.assigned_mask_idx];
-        if (selected_mask.has_value())
-        {
-            const auto& slice = selected_mask.value();
-            // YOLO fired for this table on a fresh frame → detection is alive.
-            inst.frames_since_detection = 0;
-            inst.last_mask_confidence = slice.confidence;
-            inst.last_mask_timestamp_ms = masks_packet.timestamp_ms;   // chain-cov pinning (Part B)
-            // Ego-motion capture-corruption for this mask (AI2 obs precision / bias gate; 0 if producer
-            // predates the feature). See MASK_MOTION_CORRUPTION.md.
-            inst.last_motion_var      = slice.motion_var;
-            inst.last_motion_dotd     = slice.motion_dotd;
-            inst.last_trunc_frac      = slice.trunc_frac;
-            inst.last_centroid_radius = slice.centroid_radius;
-            inst.last_range           = slice.range;
-            const std::size_t begin = std::min(slice.support_begin, masks_packet.support_points.size());
-            const std::size_t end = std::min(slice.support_end, masks_packet.support_points.size());
-
-            std::vector<Eigen::Vector3f> candidate_pts;
-            std::vector<Eigen::Vector3f> residual_pts;
-            candidate_pts.reserve(end > begin ? end - begin : 0);
-            residual_pts.reserve(end > begin ? end - begin : 0);
-
-            for (std::size_t i = begin; i < end; ++i)
-            {
-                const auto& p = masks_packet.support_points[i];
-                const float sdf = inst.model.sdf_point(p);
-                if (std::abs(sdf) < cfg_.sdf_threshold_for_storage)
-                    candidate_pts.push_back(p);
-                else
-                    residual_pts.push_back(p);
-            }
-
-            observation.has_fresh_data = true;
-            observation.candidate_pts = std::move(candidate_pts);
-            observation.residual_pts = std::move(residual_pts);
-
-            if (!observation.candidate_pts.empty() || !observation.residual_pts.empty())
-            {
-                const float total = static_cast<float>(observation.candidate_pts.size() + observation.residual_pts.size());
-                observation.explanation_ratio = total > 0.0f
-                    ? static_cast<float>(observation.candidate_pts.size()) / total : 0.0f;
-
-                inst.last_masks_frame_seen = masks_packet.frame_id;
-
-                if (should_log(inst))
-                    std::print("[{}] masks={} label='{}' conf={:.2f} support={} cand={} resid={} centroid=({:.2f},{:.2f},{:.2f})\n",
-                               inst.node_name, masks_packet.frame_id, slice.label, slice.confidence,
-                               end - begin, observation.candidate_pts.size(), observation.residual_pts.size(),
-                               slice.centroid.x(), slice.centroid.y(), slice.centroid.z());
-                return observation;
-            }
-        }
-    }
 
     // Fallback: candidate/residual point attributes written directly on the node.
     int last_frame = -1;
@@ -333,9 +314,11 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
     const float range_lat_var = lat_std * lat_std;
     const float range_yaw_var = yaw_std * yaw_std;
 
-    // Observation precision R = σ_base² + ego-motion var + static range var (per-point random part).
+    // Observation precision R = σ_base² + ego-motion var + mask depth var + static range var (per-point
+    // random part). depth_var (common/depth_projection) is 0 for dense zed masks and the reprojected-lidar
+    // range variance for ricoh masks — so a sparse-depth ricoh mask is smoothly down-weighted (→ bearing).
     const float R = cfg_.ai2_sigma_base_m * cfg_.ai2_sigma_base_m
-                  + std::max(0.0f, inst.last_motion_var) + range_lat_var;
+                  + std::max(0.0f, inst.last_motion_var) + std::max(0.0f, inst.last_depth_var) + range_lat_var;
 
     // Truncation gate: a mask clipped by the image border has a chopped silhouette → it biases the fit
     // (shrinks/displaces the model). Above tolerance, skip the geometric update (predict only) — but
@@ -443,7 +426,7 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
     {
         ai2_csv_.open(cfg_.ai2_csv_path, std::ios::out | std::ios::trunc);
         if (not ai2_csv_.is_open()) { cfg_.ai2_csv_path.clear(); return; }
-        ai2_csv_ << "cycle,node,npts,gated,energy,R,motion_var,motion_dotd,trunc_frac,range,"
+        ai2_csv_ << "cycle,node,npts,gated,energy,R,motion_var,depth_var,motion_dotd,trunc_frac,range,"
                  << "cx,cy,H,w,h,yaw,std_cx,std_cy,std_H,std_w,std_h,std_yaw,"
                  << "std_yaw_within,flip_ev,p_alt,lidar_rays,lidar_raw,lidar_resid_m,lidar_meanz,lidar_topz,lidar_floorz,lidar_cov_ang\n";
     }
@@ -452,7 +435,7 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
     const auto sd = [&](int i) { return std::sqrt(std::max(0.0f, S(i, i))); };   // posterior std (m / rad)
     // std_yaw is now the MARGINAL (mode-entropy-inflated) yaw std; std_yaw_within is the within-mode Σ(5,5).
     ai2_csv_ << inst.processed_cycles << ',' << inst.node_name << ',' << npts << ',' << (gated ? 1 : 0) << ','
-             << energy << ',' << R << ',' << inst.last_motion_var << ',' << inst.last_motion_dotd << ','
+             << energy << ',' << R << ',' << inst.last_motion_var << ',' << inst.last_depth_var << ',' << inst.last_motion_dotd << ','
              << inst.last_trunc_frac << ',' << inst.last_range << ','
              << s.cx << ',' << s.cy << ',' << s.H << ',' << s.w << ',' << s.h << ',' << s.yaw << ','
              << sd(0) << ',' << sd(1) << ',' << sd(2) << ',' << sd(3) << ',' << sd(4) << ','

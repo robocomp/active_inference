@@ -77,6 +77,8 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.tracker_birth_height_m   = getf("Tracker.BirthHeightM",     0.75f);
     out.tracker_birth_size_std   = getf("Tracker.BirthSizeStd",     0.15f);
     out.tracker_nll_cost         = getb("Tracker.NllCost",          false);
+    out.ricoh_birth_conf         = getf("Tracker.RicohBirthConf",   0.60f);
+    out.ricoh_birth_max_var      = getf("Tracker.RicohBirthMaxVar", 0.005f);
 
     // YOLO-independent LiDAR first-hit range factor (common/ai_belief/lidar_ray_factor.h). OFF by default.
     out.lidar_precision      = getf("TableModel.LidarPrecision",      0.0f);

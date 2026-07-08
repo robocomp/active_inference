@@ -59,7 +59,13 @@ public:
     // first time it is created (so the worker can register Qt series / canvas pos). Latches room_id.
     bool ensure_instance(const DSR::Node& node, std::uint64_t room_id);
 
-    // Read the "masks" node → candidate/residual split against the current SDF.
+    // Build an observation from ONE assigned mask slice (index into the current packet): candidate/residual
+    // split against the current SDF + this slice's R inputs (motion_var/depth_var/range) latched on the
+    // instance. Called once per slice in the same cycle for multi-sensor fusion (ZED + ricoh). Sets
+    // frames_since_detection=0 (a detection is alive). Does NOT gate on frame_id — the caller owns freshness.
+    TableObservation observe_slice(TableInstance& inst, int slice_index);
+    // Fallback path when the tracker assigned NO mask slice this cycle: candidate/residual point attributes
+    // written directly on the node (legacy), else a stale observation (has_fresh_data=false → age the belief).
     TableObservation observe(TableInstance& inst, const DSR::Node& node);
     // One recursive full-covariance belief update (TableBelief) on this frame's mask points, with the
     // mask-motion channel as the observation precision R / bias gate. Writes the result into inst.model

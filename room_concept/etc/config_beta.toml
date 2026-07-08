@@ -260,6 +260,8 @@ WEpistemic         = 0.1    # EFE weight: information gain
 WPragmatic         = 3.0    # EFE weight: goal proximity
 WHeading           = 2.0    # EFE weight: heading alignment
 WBoundary          = 10.0   # EFE weight: room boundary avoidance
+PublishAffordance  = true    # publish the room exploration affordance. Set false so the room never offers an
+                             # affordance and can't out-compete object affordances in the controller's EFE
 
 # ---- Approach speed ----
 KRot               = 3.5    # proportional gain for heading correction
@@ -297,6 +299,12 @@ IorCellSize        = 0.5    # inhibition-of-return grid resolution (m)
 IorDecayTime       = 120.0  # seconds until visited cell is fully stale
 WIor               = 2.0    # weight: staleness bonus
 WPathInterest      = 0.7    # blend weight: 0=target staleness only, 1=path staleness only (multiplicative IoR)
+# ---- Second-level IoR: perpetual patrol (keeps afford_room alive after pose-info saturates) ----
+PatrolEnabled      = true   # once info is exhausted, patrol the least-recently-visited reachable cell
+PatrolGainFloor    = 0.2    # nats floored onto afford_room's advertised gain in patrol mode so the
+                            # controller keeps executing it. Keep BELOW object-affordance ΔH so real
+                            # objects still win. 0 ⇒ off (robot rests once the room is fully known).
+InfoExhaustedGain  = 0.02   # max FIM gain (nats) below which pose-info is "exhausted" → enter patrol
 ArrivalDistance    = 0.15   # target reached threshold (m)
 DwellTime          = 2.0    # seconds to pause after reaching target
 

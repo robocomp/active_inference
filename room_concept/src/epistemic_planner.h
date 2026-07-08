@@ -58,6 +58,25 @@ public:
         // 0 ⇒ off (robot rests once the room is fully known). Units: nats per unit staleness ∈ [0,1].
         float w_ior_drive     = 0.5f;
 
+        // ---- Second-level Inhibition of Return: perpetual room patrol ----
+        // The first-level IoR terms above (w_ior suppressor + w_ior_drive additive drive) both use
+        // staleness() ∈ [0,1] CLAMPED at ior_decay_time. Once the whole room has gone unvisited for
+        // longer than ior_decay_time, every reachable cell saturates at staleness=1: the recency signal
+        // is lost, the selection argmax collapses onto the distance bonus, and the advertised gain flattens
+        // — so the robot rests after only a few affordances even though there is always a *stalest* area to
+        // revisit. This second level fixes both failure modes once pose-info is exhausted (max FIM gain <
+        // info_exhausted_gain):
+        //   (a) TARGET: re-rank candidates by RAW age (unclamped seconds since last visit), so the single
+        //       least-recently-visited reachable cell always wins and the robot patrols oldest-first.
+        //   (b) GAIN: floor afford_room's advertised gain at patrol_gain_floor nats so the consuming
+        //       controller keeps selecting/executing it instead of withdrawing when the pose-FIM term → 0.
+        // Keep patrol_gain_floor BELOW typical object-affordance ΔH so real objects still out-compete the
+        // patrol when present. This is a superset of w_ior_drive: leave w_ior_drive for the smooth blend
+        // while info is still trickling, and let this take over once info is truly exhausted.
+        bool  patrol_enabled       = true;   // second-level IoR patrol master switch
+        float patrol_gain_floor    = 0.0f;   // nats floored onto afford_room's gain in patrol mode (0 = off)
+        float info_exhausted_gain  = 0.02f;  // max FIM gain (nats) below which info is "exhausted" → patrol
+
         // ---- FIM scoring ----
         float fim_corner_sigma  = 0.04f;     // isotropic corner detection noise σ (m)
         float fim_max_range     = 10.0f;     // max range for corner/wall visibility (m)
@@ -336,6 +355,20 @@ private:
             if (tp == std::chrono::steady_clock::time_point{}) return 1.f;
             const float elapsed = std::chrono::duration<float>(now - tp).count();
             return std::min(1.f, elapsed / std::max(0.1f, decay_s));
+        }
+
+        // Raw seconds since this cell was last visited, UNCLAMPED (unlike staleness(), which saturates
+        // at 1 after decay_s). Never-visited cells return kNeverVisitedAge so they always rank as the
+        // "oldest". Used by the second-level IoR patrol to find a unique least-recently-visited reachable
+        // cell even after every cell has saturated staleness()=1.
+        static constexpr float kNeverVisitedAge = 1.0e6f;   // ~11.6 days; unvisited cells patrol first
+        float age_seconds(const Eigen::Vector2f& pos,
+                          std::chrono::steady_clock::time_point now) const
+        {
+            if (!initialized) return kNeverVisitedAge;
+            const auto& tp = cells[to_index(pos)].last_visit;
+            if (tp == std::chrono::steady_clock::time_point{}) return kNeverVisitedAge;
+            return std::chrono::duration<float>(now - tp).count();
         }
     };
     VisitGrid visit_grid_;

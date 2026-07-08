@@ -140,6 +140,13 @@ yolo_strip_overlap_px = 200   # circular-pad margin so a seam-straddling object 
                               # strip. Clamped to strip_w/2=320; each strip → 1040px (1.6× squash, was 1.25×).
 yolo_merge_iou        = 0.5   # cross-strip box IoU above which two strips' boxes are the same object
 publish_masks         = true  # emit ricoh detections into the shared "masks" node as no-depth bearing slices (Part B)
+mask_depth            = true  # reproject lidar into the panorama → publish 360 masks as FULL 3D (has_depth=1 +
+                              # mask_depth_var) instead of bearing-only. Flip ON only once agents read mask_depth_var into R.
+mask_depth_helios_only = true # use helios (co-located with the ricoh) only for the depth-fill; exclude bpearl
+azimuth_tune_deg      = 0.0   # tune in DEGREES: extra yaw on room_T_ricoh over the graph cam_equirect_offset.
+                              # Dial the last few degrees vs the Lidar overlay (restart voxelizer only), then bake the
+                              # total into the ricoh node's cam_equirect_azimuth_offset in shadow.json and reset to 0.
+                              # ~0.0175 rad per degree; +tune shifts the projected room one way, − the other.
 # Ricoh azimuth calibration (mirror sign + seam zero) now lives in the GRAPH as the ricoh node's
 # cam_equirect_azimuth_sign (-1) / cam_equirect_azimuth_offset (0) intrinsics, applied by CameraAPI.
 # Both the 360 projection overlay and the detection→bearing publisher go through CameraAPI — no knobs here.

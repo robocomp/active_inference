@@ -66,6 +66,7 @@ bool MaskIngestor::refresh()
     // RGB-360 bearing-only channel (optional; newer producers only) — see RICOH_360_PERIPHERAL_DETECTION.md
     const DSR::Attribute* has_depth_attr       = find_attr("mask_has_depth");
     const DSR::Attribute* azimuth_attr         = find_attr("mask_azimuth");
+    const DSR::Attribute* depth_var_attr       = find_attr("mask_depth_var");
     const DSR::Attribute* cam_twist_attr       = find_attr("mask_cam_twist");
     const DSR::Attribute* frame_dt_attr        = find_attr("mask_frame_dt_s");
 
@@ -102,6 +103,7 @@ bool MaskIngestor::refresh()
     const auto& range_v           = range_attr           ? range_attr->float_vec()           : empty_flat;
     const auto& has_depth_v       = has_depth_attr       ? has_depth_attr->float_vec()       : empty_flat;
     const auto& azimuth_v         = azimuth_attr         ? azimuth_attr->float_vec()         : empty_flat;
+    const auto& depth_var_v       = depth_var_attr       ? depth_var_attr->float_vec()       : empty_flat;
 
     // Part B: with frame-transform enabled, source the camera-frame support array and transform it to
     // the target frame below; otherwise use the legacy room-frame array as-is.
@@ -194,6 +196,7 @@ bool MaskIngestor::refresh()
         slice.has_depth        = (static_cast<std::size_t>(i) < has_depth_v.size())
                                  ? (has_depth_v[static_cast<std::size_t>(i)] != 0.0f) : true;
         slice.azimuth_room_rad = fetch1(azimuth_v);
+        slice.depth_var        = fetch1(depth_var_v);
         slice.support_begin = clamped_begin;
         slice.support_end = clamped_end;
         {

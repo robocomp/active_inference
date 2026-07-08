@@ -132,6 +132,8 @@ public:
     void update_viewer_table_rfe_points();
     // Feed the YOLO mask support points (room frame) from the "masks" node to the 3D viewer.
     void update_viewer_mask_points();
+    // Feed residual_concept's occupancy-grid cells (room frame) from the `grid` node to the 3D viewer.
+    void update_viewer_grid();
 
 private:
     struct RoomPolygonData

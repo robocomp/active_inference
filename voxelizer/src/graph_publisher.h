@@ -27,15 +27,23 @@
 struct SegDetection;
 namespace rc::human_pose { struct PoseDetection; }
 
-// A bearing-only detection from the RGB-360 (ricoh) panorama — no depth, so no 3D points. Published into
-// the SAME "masks" node as a no-depth slice (has_depth=false), tagged with a room-frame bearing instead of
-// a 3D centroid. See RICOH_360_PERIPHERAL_DETECTION.md Part B.
+// A detection from the RGB-360 (ricoh) panorama. Published into the SAME "masks" node. Two flavours:
+//   - bearing-only (has_lidar_depth=false): a no-depth slice (has_depth=0) tagged with a room-frame
+//     bearing instead of a 3D centroid (Part B legacy).
+//   - depth-carrying (has_lidar_depth=true): the lidar reprojected into the panorama gave this mask a
+//     3D range, so it's published as a FULL 3D slice (has_depth=1) with room-frame support points and a
+//     mask_depth_var (m²) the consumer adds to R — same currency as the interaction-matrix motion_var.
 struct BearingDetection
 {
     std::string label;
     float       class_id = -1.0f;
     float       confidence = 0.0f;
-    float       azimuth_room_rad = 0.0f;   // room-frame bearing to the detection
+    float       azimuth_room_rad = 0.0f;   // room-frame bearing to the detection (fallback channel)
+
+    bool                          has_lidar_depth = false;
+    float                         range_var = 0.0f;               // σ_range² (m²) → mask_depth_var
+    Eigen::Vector3f               centroid_room = Eigen::Vector3f::Zero();
+    std::vector<Eigen::Vector3f>  support_room;                   // lidar hits inside the mask (room frame)
 };
 
 class GraphPublisher

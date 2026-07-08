@@ -41,7 +41,7 @@ agent_info_period_ms = 1000
 # Owned graph nodes torn down on shutdown / peer-loss. "residual*" matches every obstacle this agent
 # scaffolds (residual_1, residual_2, …) so none survive a restart.
 [Owns]
-nodes = ["residual_concept 14", "residual*"]
+nodes = ["residual_concept 14", "residual*", "grid"]
 
 # ── residual_concept agent loop ───────────────────────────────────────────────
 [ResidualConcept]
@@ -151,9 +151,10 @@ MinTopZM = 0.30               # ...an elevated flat sheet with top ≥ this (a t
 # a much denser signal than LiDAR for forward objects (the ZED sees ~110° / ~5 m; LiDAR still covers 360°).
 [ZedBoost]
 Enabled = true
-FeedDetection = false   # TEMP OFF (regression triage 2026-07-07): a room-sized LiDAR mega-blob is swallowing the
-                        # cubes; isolating the ZED variable while we find whether the blob is DBSCAN or the merge.
-                        # infra-subtract worked (79 pts), so ZED isn't the blob — re-enable once the blob is fixed.
+FeedDetection = true    # RE-ENABLED 2026-07-08: the mega-blob was the MERGE (now off), not ZED (only 79 pts survive
+                        # infra-subtract). With merge off, dense ZED is the RIGHT way to coalesce a real surface
+                        # (fills the tabletop so it clusters as ONE table) without chaining distinct objects — and
+                        # it covers the near-field-ahead LiDAR blind zone. Watch [cluster] max_npts for any blob.
 # Robust ZED infrastructure subtraction: a point is floor/ceiling/wall if within k·σ(range) of it, where the
 # ZED stereo depth noise σ(r)=Sigma0M + SigmaQuad·r² (physical, grows with range²). Absorbs a small ZED depth
 # calibration offset AND far-range blur so a dense floor/wall sheet can't survive and bridge objects into a blob.

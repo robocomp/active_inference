@@ -213,6 +213,9 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.WIor", ep.w_ior);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.WIorDrive", ep.w_ior_drive);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.WPathInterest", ep.w_path_interest);
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "EpistemicController.PatrolEnabled", ep.patrol_enabled);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.PatrolGainFloor", ep.patrol_gain_floor);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.InfoExhaustedGain", ep.info_exhausted_gain);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.FimCornerSigma", ep.fim_corner_sigma);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.FimMaxRange", ep.fim_max_range);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.FimPriorPrecisionFloor", ep.fim_prior_precision_floor);

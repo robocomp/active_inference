@@ -10,6 +10,7 @@ LIST(APPEND SOURCES
   ../src/residual_fitter.cpp
   ../src/residual_lidar_ingestor.cpp
   ../src/residual_clusterer.cpp   # LiDAR residual filter → 3D DBSCAN → observations (replaces mask_ingestor)
+  ../src/residual_occupancy_grid.cpp   # PHASE-0 REBUILD: fixed room-frame log-odds occupancy grid (safety layer)
   ../src/residual_zed_boost.cpp     # dense ZED-depth boost: project box → backproject region → likelihood
   ../src/residual_zed_ingestor.cpp  # ZED depth media-plane consumer
   # Zero-copy media plane (lidar3D consumer for the YOLO-independent range factor). Mirrors room_concept:

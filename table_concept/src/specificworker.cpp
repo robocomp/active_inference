@@ -705,6 +705,7 @@ void SpecificWorker::run_instance_tracker()
     tp.death_frames     = cfg_.tracker_death_frames;
     tp.birth_min_sep_m  = cfg_.tracker_birth_min_sep_m;
     tp.nll_cost         = cfg_.tracker_nll_cost;
+    tp.multi_det_per_track = true;   // fuse ZED + ricoh-360 slices of the same table (one update per slice)
     tracker_.set_params(tp);
 
     // Tracks ← live instances: centre from the fit, XY cov from the belief's position covariance Σ.
@@ -727,16 +728,30 @@ void SpecificWorker::run_instance_tracker()
             t.has_cov = true;
         }
         tracks.push_back(t);
-        inst.assigned_mask_idx = -1;   // cleared; re-set below only if associated this cycle
+        inst.assigned_mask_idxs.clear();   // cleared; re-filled below with every slice associated this cycle
     }
 
-    // Detections ← this frame's "table" mask slices (carry the slice index for the assignment).
+    // Detections ← this frame's "table" mask slices (carry the slice index for the assignment). Built ONLY on
+    // a fresh mask frame; on a stale cycle dets stay empty so instances age instead of re-fitting old masks.
+    // Each det's BIRTHABLE flag encodes trust: a dense ZED slice (depth_var==0) may spawn a table; a ricoh-360
+    // / LiDAR-depth slice (depth_var>0) may only REFINE unless it is confident AND its depth is well-scored
+    // (conf ≥ RicohBirthConf and depth_var ≤ RicohBirthMaxVar) — otherwise a sparse peripheral blob would
+    // birth phantoms across the scene. All slices still ASSOCIATE regardless (that is the fusion).
     std::vector<rc::DetectionView> dets;
     const auto& pkt = mask_ingestor_->packet();
-    if (pkt.valid)
+    if (pkt.valid and not ev_g_.mask_stale)
         for (int i = 0; i < static_cast<int>(pkt.slices.size()); ++i)
-            if (pkt.slices[i].label == "table" and pkt.slices[i].support_end > pkt.slices[i].support_begin)
-                dets.push_back({Eigen::Vector2f(pkt.slices[i].centroid.x(), pkt.slices[i].centroid.y()), i});
+        {
+            const auto& sl = pkt.slices[i];
+            if (sl.label != "table" or sl.support_end <= sl.support_begin)
+                continue;
+            rc::DetectionView dv;
+            dv.xy = {sl.centroid.x(), sl.centroid.y()};
+            dv.slice_index = i;
+            dv.birthable = (sl.depth_var <= 0.0f)   // dense ZED
+                        or (sl.confidence >= cfg_.ricoh_birth_conf and sl.depth_var <= cfg_.ricoh_birth_max_var);
+            dets.push_back(dv);
+        }
 
     const auto res = tracker_.update(tracks, dets);
 
@@ -778,13 +793,14 @@ void SpecificWorker::run_instance_tracker()
             G->delete_node(id);
         }
 
-    // ASSOCIATE: route each matched detection's mask slice to its instance (read in observe()).
+    // ASSOCIATE: route every matched detection's mask slice to its instance (read in observe_slice()). With
+    // multi_det_per_track a track may collect SEVERAL slices (ZED + ricoh) → fused as sequential updates.
     for (int d = 0; d < static_cast<int>(dets.size()); ++d)
         if (res.assignment[d] >= 0)
         {
             const std::uint64_t id = tracks[res.assignment[d]].id;
             if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
-                it->second.assigned_mask_idx = dets[d].slice_index;
+                it->second.assigned_mask_idxs.push_back(dets[d].slice_index);
         }
 
     // BIRTH: spawn an instance from each promoted (persistently-unexplained) detection, seeding the
@@ -831,14 +847,38 @@ void SpecificWorker::process_table_node(const DSR::Node& node)
     }
 
     ++inst.processed_cycles;
-    const auto observation = fitter_->observe(inst, node);
+    // Detection-aliveness ages once per cycle; observe_slice() resets it to 0 when a slice is assigned.
+    if (inst.frames_since_detection < 1000000)
+        ++inst.frames_since_detection;
 
-    // Stale check: skip heavy update if data hasn't moved for too long
-    if (not observation.has_fresh_data and inst.matched_frames < 5)
-        return;
+    float free_energy = 0.0f;
+    TableObservation last_obs;
+    bool updated = false;
 
-    const float free_energy = fitter_->run_inference(inst, observation);
-    publish_table_cycle(inst, node, observation, free_energy);
+    // Multi-sensor fusion (Q2b): one belief update per assigned slice (e.g. ZED + ricoh-360). Sequential
+    // Bayesian updates = joint likelihood for the recursive filter, and each sensor keeps its OWN R and
+    // common-mode (they don't share a registration error) — which concatenating points into one frame could
+    // not express. The dense ZED slice and the sparse ricoh slice therefore both inform the SAME table.
+    for (const int idx : inst.assigned_mask_idxs)
+    {
+        auto obs = fitter_->observe_slice(inst, idx);
+        if (not obs.has_fresh_data)
+            continue;
+        free_energy = fitter_->run_inference(inst, obs);
+        last_obs = std::move(obs);
+        updated = true;
+    }
+
+    if (not updated)
+    {
+        // No mask associated this cycle: legacy node-attrib path, else a stale observation → age the belief.
+        last_obs = fitter_->observe(inst, node);
+        if (not last_obs.has_fresh_data and inst.matched_frames < 5)
+            return;
+        free_energy = fitter_->run_inference(inst, last_obs);
+    }
+
+    publish_table_cycle(inst, node, last_obs, free_energy);
 }
 
 

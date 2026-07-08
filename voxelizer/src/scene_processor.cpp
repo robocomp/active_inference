@@ -1134,6 +1134,30 @@ void SceneProcessor::update_viewer_table_rfe_points()
     voxel_viewer_->update_residual_points(residual_points);
 }
 
+void SceneProcessor::update_viewer_grid()
+{
+    if (voxel_viewer_ == nullptr || graph_ == nullptr)
+        return;
+    // residual_concept publishes a `grid` node under room: grid_cells_xy = flat [x0,y0,x1,y1,…] residual cell
+    // centres (room frame), grid_cell_size = the square edge. Read them and hand cell centres to the viewer.
+    std::vector<QVector3D> cells;
+    float cell_size = 0.05f;
+    if (const auto g = graph_->get_node("grid"); g.has_value())
+    {
+        if (const auto cs = graph_->get_attrib_by_name<grid_cell_size_att>(g.value()); cs.has_value())
+            cell_size = cs.value();
+        if (const auto xy = graph_->get_attrib_by_name<grid_cells_xy_att>(g.value()); xy.has_value())
+        {
+            const auto& flat = xy.value().get();
+            const std::size_t n = flat.size() / 2;
+            cells.reserve(n);
+            for (std::size_t i = 0; i < n; ++i)
+                cells.emplace_back(flat[2 * i], flat[2 * i + 1], 0.02f);   // z = small display height above the floor
+        }
+    }
+    voxel_viewer_->update_grid_cells(cells, cell_size);
+}
+
 void SceneProcessor::update_viewer_mask_points()
 {
     if (voxel_viewer_ == nullptr || graph_ == nullptr)

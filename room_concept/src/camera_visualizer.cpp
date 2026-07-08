@@ -147,25 +147,48 @@ CameraVisualizer::CameraVisualizer(std::shared_ptr<DSRGraph> graph, const std::v
     timing_window_timer_.start();
 }
 
-CameraVisualizer::~CameraVisualizer() = default;
+CameraVisualizer::~CameraVisualizer()
+{
+    stop_ingest();          // join the ingest thread BEFORE the subscriber it owns is destroyed
+    media_rgb_sub_.reset();
+}
 
 void CameraVisualizer::start_media_plane()
 {
-    // Start the always-on drain timer even before the subscriber exists. With a
-    // RELIABLE reader, samples that are never take()'d stay pinned in the producer's
-    // preallocated SHM pool; once it fills, the producer's loan_sample() fails and it
-    // silently stops publishing, freezing every other consumer (e.g. the voxelizer).
-    // A lightweight ~30 Hz drain keeps this reader's cache empty regardless of
-    // visibility; rendering is still gated by isVisible() in update_frame(). Until the
-    // subscriber is up the timer just retries lazy discovery (drain_media_plane).
-    if (media_drain_timer_ == nullptr)
+    // Spin up the always-on ingest thread. With a RELIABLE reader, samples that are never
+    // take()'d stay pinned in the producer's preallocated SHM pool; once it fills, the
+    // producer's loan_sample() fails and it silently stops publishing, freezing every other
+    // consumer (e.g. the voxelizer). The thread drains continuously regardless of dialog
+    // visibility (rendering is still gated by isVisible() in update_frame()). It also owns
+    // the lazy subscriber discovery, so DDS entity bring-up happens off the GUI thread —
+    // serialized against the LiDAR ingest thread by media_transport's entity mutex.
+    if (ingest_running_.exchange(true))
+        return;   // idempotent: already started
+    ingest_thread_ = std::thread(&CameraVisualizer::ingest_loop, this);
+}
+
+void CameraVisualizer::stop_ingest()
+{
+    if (!ingest_running_.exchange(false))
+        return;   // not running
+    ingest_wake_cv_.notify_all();
+    if (ingest_thread_.joinable())
+        ingest_thread_.join();
+}
+
+void CameraVisualizer::ingest_loop()
+{
+    // Tight drain loop on a dedicated thread (mirrors rc::LidarIngestor::ingest_loop): react
+    // to a fresh RGB frame with ~0-2 ms latency and keep the RELIABLE reader's SHM pool empty.
+    while (ingest_running_.load(std::memory_order_acquire))
     {
-        media_drain_timer_ = new QTimer(this);
-        media_drain_timer_->setTimerType(Qt::CoarseTimer);
-        connect(media_drain_timer_, &QTimer::timeout, this, &CameraVisualizer::drain_media_plane);
+        if (ingest_pump())
+            continue;   // drained a frame — try again immediately in case more are queued
+        // Idle (no subscriber yet, or no fresh frame): brief wait, woken instantly by stop_ingest().
+        std::unique_lock<std::mutex> lk(ingest_wake_mtx_);
+        ingest_wake_cv_.wait_for(lk, std::chrono::milliseconds(5),
+                                 [this] { return !ingest_running_.load(std::memory_order_acquire); });
     }
-    if (!media_drain_timer_->isActive())
-        media_drain_timer_->start(30);  // ~33 Hz, ahead of the 30 fps producer
 }
 
 bool CameraVisualizer::try_discover_media_plane()
@@ -173,7 +196,7 @@ bool CameraVisualizer::try_discover_media_plane()
     if (media_rgb_sub_ || !graph_)
         return false;
 
-    // Self-throttle discovery attempts (timer thread, ~33 Hz).
+    // Self-throttle discovery attempts (ingest thread, ~200 Hz idle poll).
     const auto now = std::chrono::steady_clock::now();
     if (now - last_media_discovery_attempt_ < std::chrono::seconds(1))
         return false;
@@ -182,18 +205,20 @@ bool CameraVisualizer::try_discover_media_plane()
     // Shared descriptor-driven factory (same init code as every other agent): verifies
     // the "zed" node + descriptor exist and reads the DDS domain/topic from the JSON.
     media_rgb_sub_ = rc::media::make_image_subscriber_from_graph(*graph_, camera_node_name_, "rgb");
+    if (media_rgb_sub_)
+        subscriber_ready_.store(true, std::memory_order_release);
     return media_rgb_sub_ != nullptr;
 }
 
-void CameraVisualizer::drain_media_plane()
+bool CameraVisualizer::ingest_pump()
 {
     if (!media_rgb_sub_)
     {
         try_discover_media_plane();   // lazy: brings the subscriber up once "zed" descriptor exists
-        return;
+        return false;
     }
 
-    media_rgb_sub_->poll([this](const rc::media::ImageFrame& f, std::int64_t)
+    const int delivered = media_rgb_sub_->poll([this](const rc::media::ImageFrame& f, std::int64_t)
     {
         const int w = static_cast<int>(f.width());
         const int h = static_cast<int>(f.height());
@@ -212,6 +237,8 @@ void CameraVisualizer::drain_media_plane()
         if (f.size() < expected)
             return;
 
+        // Publish the newest frame to the GUI thread under the cache lock.
+        std::lock_guard<std::mutex> lk(media_rgb_mtx_);
         media_rgb_.bytes.resize(expected);
         std::memcpy(media_rgb_.bytes.data(), f.data().data(), expected);
         media_rgb_.width  = w;
@@ -220,6 +247,7 @@ void CameraVisualizer::drain_media_plane()
         media_rgb_.stamp  = f.stamp_ms();
         media_rgb_.valid  = true;
     });
+    return delivered > 0;
 }
 
 void CameraVisualizer::showEvent(QShowEvent* event)
@@ -316,33 +344,41 @@ bool CameraVisualizer::fetch_rgb_from_dsr(QImage& rgb_image, std::uint64_t& fram
     if (!camera_data_.valid)
         fetch_camera_intrinsics();
 
-    // Pixels come from the zero-copy media plane (replaces camera_api_->get_rgb_image()).
-    if (!media_rgb_sub_)
+    // Pixels come from the zero-copy media plane (replaces camera_api_->get_rgb_image()). The
+    // ingest thread owns the subscriber and drains DDS; here we only snapshot the newest decoded
+    // frame it published. subscriber_ready_ becomes true once that subscriber is live.
+    if (!subscriber_ready_.load(std::memory_order_acquire))
     {
         image_label_->setText("Media plane RGB subscriber not initialized");
         return false;
     }
 
-    drain_media_plane();
-
-    if (!media_rgb_.valid)
+    // Copy the latest frame out under the cache lock, then release it before the (heavier)
+    // QImage deep-copy + overlay drawing so the ingest thread is never blocked on rendering.
+    int width = 0, height = 0;
+    std::uint32_t format = 0;
     {
-        image_label_->setText("Waiting for RGB frames on media plane...");
-        return false;
+        std::lock_guard<std::mutex> lk(media_rgb_mtx_);
+        if (!media_rgb_.valid)
+        {
+            image_label_->setText("Waiting for RGB frames on media plane...");
+            return false;
+        }
+        width          = media_rgb_.width;
+        height         = media_rgb_.height;
+        format         = media_rgb_.format;
+        frame_timestamp = media_rgb_.stamp;
+        render_bytes_  = media_rgb_.bytes;   // GUI-thread-private copy for the rest of this call
     }
 
-    const int width = media_rgb_.width;
-    const int height = media_rgb_.height;
     if (width <= 0 || height <= 0)
     {
         image_label_->setText("Invalid media-plane frame dimensions");
         return false;
     }
 
-    frame_timestamp = media_rgb_.stamp;
-
-    const uchar* data = reinterpret_cast<const uchar*>(media_rgb_.bytes.data());
-    switch (media_rgb_.format)
+    const uchar* data = reinterpret_cast<const uchar*>(render_bytes_.data());
+    switch (format)
     {
         case rc::media::FORMAT_BGR8:
         {
@@ -363,7 +399,7 @@ bool CameraVisualizer::fetch_rgb_from_dsr(QImage& rgb_image, std::uint64_t& fram
             return true;
         }
         default:
-            image_label_->setText(QString("Unsupported media RGB format: %1").arg(media_rgb_.format));
+            image_label_->setText(QString("Unsupported media RGB format: %1").arg(format));
             return false;
     }
 }

@@ -140,6 +140,14 @@ struct TableConfig
     // Prior PRECISION (size std, m) for a born table: the Birth* dims seed the belief size prior at THIS σ.
     float tracker_birth_size_std   = 0.15f;
     bool  tracker_nll_cost         = false;   // association cost = ½(m²+ln|S|) NLL (vs raw m²); see InstanceTracker
+
+    // Ricoh-360 / LiDAR-depth mask BIRTH gate (Q1a). A slice with depth_var>0 comes from the peripheral
+    // 360-RGB YOLO depth-filled by reprojected LiDAR (dense ZED slices have depth_var==0). It may always
+    // ASSOCIATE (refine a table), but to SPAWN one it must be confident AND well-ranged, else a sparse
+    // peripheral blob births phantoms all over the scene. A ricoh det is birthable iff conf ≥ RicohBirthConf
+    // and depth_var ≤ RicohBirthMaxVar (m²). ZED slices (depth_var==0) are always birthable.
+    float ricoh_birth_conf    = 0.60f;    // min YOLO confidence for a ricoh slice to birth a table
+    float ricoh_birth_max_var = 0.005f;   // max depth_var (m²) for a ricoh slice to birth (σ_range ≲ 7 cm)
 };
 
 // Fill a TableConfig from a RoboComp ConfigLoader (all keys optional, defaults above).

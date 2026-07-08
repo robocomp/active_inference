@@ -219,7 +219,15 @@ float EpistemicPlanner::live_total_epistemic_gain(const Eigen::Vector2f& viewpoi
                         ? visit_grid_.staleness(viewpoint, params.ior_decay_time,
                                                 std::chrono::steady_clock::now())
                         : 0.f;
-    return fim_gain + params.w_ior_drive * stale;
+    const float gain = fim_gain + params.w_ior_drive * stale;
+    // Second-level IoR gain floor: once pose-info saturates, the pose-FIM term → 0 and the clamped
+    // staleness drive collapses, so the advertised gain would fall through the consumer's selection bar
+    // and the robot would rest. Floor it at patrol_gain_floor so afford_room stays selectable and the
+    // robot perpetually patrols the stalest reachable cell (chosen by the age-ranked selection above).
+    // Kept below object-affordance ΔH so real objects still win. 0 ⇒ off (legacy resting behaviour).
+    if (params.patrol_enabled && params.patrol_gain_floor > 0.f)
+        return std::max(gain, params.patrol_gain_floor);
+    return gain;
 }
 
 // ===========================================================================
@@ -267,6 +275,9 @@ std::vector<EpistemicPlanner::Target> EpistemicPlanner::evaluate_targets() const
 
     std::vector<Target> targets;
     targets.reserve(candidates.size());
+    std::vector<float> ages;                 // raw seconds-since-visit per target, aligned pre-sort
+    ages.reserve(candidates.size());
+    float max_fim = 0.f;                      // best pose-info gain across candidates → patrol trigger
 
     for (const auto& pos : candidates)
     {
@@ -274,6 +285,7 @@ std::vector<EpistemicPlanner::Target> EpistemicPlanner::evaluate_targets() const
         t.position = pos;
         t.distance = (pos - robot_pos()).norm();
         const float fim_gain = score_fim_gain(pos, prior_precision);
+        max_fim = std::max(max_fim, fim_gain);
 
         // Update cell's running FIM average
         self.visit_grid_.update_fim(pos, fim_gain);
@@ -312,6 +324,26 @@ std::vector<EpistemicPlanner::Target> EpistemicPlanner::evaluate_targets() const
         t.score = (fim_gain * ior_suppressor + params.w_ior_drive * route_staleness) * bonus + 1e-6f;
         t.eigenvector_score = fim_gain;
         targets.push_back(t);
+        ages.push_back(visit_grid_.age_seconds(pos, now));
+    }
+
+    // ---- Second-level Inhibition of Return (patrol) ----------------------------------------------
+    // When pose-info is exhausted (best FIM gain below info_exhausted_gain) the first-level score above
+    // degenerates: staleness() has saturated at 1 room-wide, so fim_gain·ior_suppressor ≈ 0 and the
+    // w_ior_drive·route_staleness term is equal everywhere → the argmax collapses onto the distance
+    // bonus and the robot stops making progress around the room. Re-rank purely by RAW age so the single
+    // least-recently-visited reachable cell wins (distance only breaks ties), giving a systematic
+    // oldest-first patrol that never rests. Gated so genuine info-gathering always takes priority.
+    if (params.patrol_enabled && max_fim < params.info_exhausted_gain)
+    {
+        const float inv_decay = 1.f / std::max(1e-3f, params.ior_decay_time);
+        for (std::size_t i = 0; i < targets.size(); ++i)
+        {
+            // age/decay is UNCLAMPED, so an area untouched for many decay-times ranks strictly above a
+            // just-visited one; the mild distance bonus prefers the nearer of two equally-stale cells.
+            const float bonus = 1.f + params.w_exploration * targets[i].distance;
+            targets[i].score = ages[i] * inv_decay * bonus + 1e-6f;
+        }
     }
 
     std::sort(targets.begin(), targets.end(),

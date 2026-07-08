@@ -32,6 +32,7 @@
 #include "image_popup_viewer.h"
 #include "ricoh_yolo_worker.h"
 #include <dsr/api/dsr_camera_api.h>   // ricoh unproject for the detection→bearing publisher (one truth)
+#include "../../common/depth_projection/depth_projection.h"   // lidar→panorama reprojection + mask depth scoring
 #include <dsr/gui/viewers/graph_viewer/graph_viewer.h>
 #include <QHBoxLayout>
 #include <QPushButton>
@@ -609,6 +610,25 @@ void SpecificWorker::compute()
             if (not pano.empty() and ricoh_camera_api_)
             {
                 const double row_horizon = pano.rows * 0.5;   // horizon row → horizontal bearing
+
+                // Reproject the lidar into the panorama ONCE (helios-only by default: co-located with the
+                // ricoh ⇒ least occlusion parallax). Gated by Ricoh.mask_depth. Empty otherwise ⇒ masks
+                // stay bearing-only, unchanged.
+                std::vector<rc::depth::ProjectedPoint> lidar_pano;
+                if (params.RICOH_MASK_DEPTH and not frame->lidar_points_room.empty())
+                {
+                    std::vector<Eigen::Vector3f> cloud;
+                    cloud.reserve(frame->lidar_points_room.size());
+                    for (std::size_t i = 0; i < frame->lidar_points_room.size(); ++i)
+                    {
+                        if (params.RICOH_MASK_DEPTH_HELIOS_ONLY
+                            and i < frame->lidar_plane_id.size() and frame->lidar_plane_id[i] != 0)
+                            continue;   // skip bpearl (plane 1)
+                        cloud.push_back(frame->lidar_points_room[i]);
+                    }
+                    lidar_pano = rc::depth::reproject_cloud(cloud, *ricoh_camera_api_, frame->room_T_ricoh.inverse());
+                }
+
                 for (const auto& d : ricoh_yolo_worker_->latest_detections())
                 {
                     const double col_c = static_cast<double>(d.bbox.x) + 0.5 * static_cast<double>(d.bbox.width);
@@ -617,7 +637,32 @@ void SpecificWorker::compute()
                     const Eigen::Vector3d ray_room =
                         frame->room_T_ricoh.linear() * ricoh_camera_api_->ray_from_pixel(col_c, row_horizon);
                     const float az = std::atan2(static_cast<float>(ray_room.y()), static_cast<float>(ray_room.x()));
-                    bearing_dets.push_back({d.label, static_cast<float>(d.class_id), d.confidence, az});
+                    BearingDetection bd{d.label, static_cast<float>(d.class_id), d.confidence, az};
+
+                    // Depth-fill from the reprojected lidar points inside the detection's panorama bbox.
+                    if (not lidar_pano.empty())
+                    {
+                        std::vector<rc::depth::ProjectedPoint> hits;
+                        for (const auto& p : lidar_pano)
+                            if (p.u >= static_cast<float>(d.bbox.x) and p.u < static_cast<float>(d.bbox.x + d.bbox.width)
+                                and p.v >= static_cast<float>(d.bbox.y) and p.v < static_cast<float>(d.bbox.y + d.bbox.height))
+                                hits.push_back(p);
+                        if (const auto md = rc::depth::score_mask_depth(hits); md.has_depth)
+                        {
+                            bd.has_lidar_depth = true;
+                            bd.range_var = md.range_var;
+                            bd.support_room.reserve(hits.size());
+                            Eigen::Vector3f sum = Eigen::Vector3f::Zero();
+                            for (const auto& h : hits)   // ricoh-frame hit → room frame (round-trips to the source point)
+                            {
+                                const Eigen::Vector3f pr = (frame->room_T_ricoh * h.xyz_cam.cast<double>()).cast<float>();
+                                bd.support_room.push_back(pr);
+                                sum += pr;
+                            }
+                            bd.centroid_room = sum / static_cast<float>(hits.size());
+                        }
+                    }
+                    bearing_dets.push_back(std::move(bd));
                 }
             }
         }
@@ -819,6 +864,7 @@ std::optional<SpecificWorker::SceneFrame> SpecificWorker::process_scene_frame(FP
     scene_processor->update_viewer_person_skeletons();
     scene_processor->update_viewer_table_rfe_points();
     scene_processor->update_viewer_mask_points();
+    scene_processor->update_viewer_grid();   // residual_concept occupancy-grid display (`grid` node under room)
     scene_processor->update_room_polygon_periodic();
 
     // Gather the room floor polygon + ceiling height HERE (main thread) so the projection overlay
@@ -836,12 +882,20 @@ std::optional<SpecificWorker::SceneFrame> SpecificWorker::process_scene_frame(FP
     Mat::RTMat room_T_ricoh = Mat::RTMat::Identity();
     const bool ricoh_valid = robot_T_ricoh_.has_value();
     if (ricoh_valid)
+    {
         room_T_ricoh = room_T_robot.value() * robot_T_ricoh_.value();
+        // Live azimuth fine-tune (DEGREES): extra yaw about the ricoh's up axis, on top of the graph
+        // intrinsics. Post-multiply ⇒ rotates in the ricoh frame ⇒ shifts azimuth for BOTH overlay + bearing.
+        if (params.RICOH_AZIMUTH_TUNE_DEG != 0.0f)
+            room_T_ricoh.rotate(Eigen::AngleAxisd(params.RICOH_AZIMUTH_TUNE_DEG * M_PI / 180.0,
+                                                  Eigen::Vector3d::UnitZ()));
+    }
 
     return SceneFrame{rgbd_opt.value(),
                       room_T_robot.value(),
                       room_T_zed.value(),
                       std::move(lidar_points_room),
+                      std::move(lidar_plane_id),
                       graph_object_boxes,
                       room_name,
                       std::move(room_poly_x),

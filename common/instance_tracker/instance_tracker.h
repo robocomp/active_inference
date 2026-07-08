@@ -51,6 +51,12 @@ struct TrackerParams
                                       // every other pending candidate (anti-duplicate)
     float birth_match_m    = 0.20f;   // a pending candidate persists across frames if a fresh unassigned det
                                       // lands within this of it
+    // Multi-detection fusion: when true, ONE track may absorb SEVERAL detections in a cycle (each detection
+    // still goes to at most one track). Use it when the same object is seen by independent sensors in the same
+    // frame (e.g. a table in both the ZED and the ricoh-360 masks) and the agent wants to fuse ALL of them —
+    // it runs one belief update per assigned slice, so each sensor keeps its own R and common-mode error.
+    // false (default) = classic 1-to-1 (a track takes only its single best detection). bottle/chair unchanged.
+    bool  multi_det_per_track = false;
     // Assignment COST for cov-bearing pairs (the GATE is always squared Mahalanobis ≤ gate_mahalanobis).
     // false → cost = m² (raw squared Mahalanobis). true → cost = ½(m² + ln|S|), the Gaussian negative
     // log-likelihood (additive constant dropped, argmin-invariant). The ln|S| term makes tracks with
@@ -80,6 +86,11 @@ struct DetectionView
 {
     Eigen::Vector2f xy = Eigen::Vector2f::Zero();
     int             slice_index = -1;
+    // A detection may ASSOCIATE to (refine) an existing track regardless, but only a birthable one may
+    // SPAWN a new instance. The agent sets this false for evidence it judges too weak to create an object on
+    // its own this frame — e.g. a low-confidence or high-range-variance 360-RGB/LiDAR peripheral mask. Such a
+    // detection still refines a track it gates to; it just can't birth phantoms. Default true.
+    bool            birthable = true;
 };
 
 struct TrackerResult
@@ -140,7 +151,11 @@ public:
         std::vector<bool> det_used(dets.size(), false), trk_used(tracks.size(), false);
         for (const auto& p : pairs)
         {
-            if (det_used[p.det] or trk_used[p.trk]) continue;
+            // Each detection is used at most once. A track is used at most once too UNLESS multi-detection
+            // fusion is on, in which case a track may absorb several detections (trk_used then only records
+            // "this track was supported" for the death timer below, and never blocks a further match).
+            if (det_used[p.det]) continue;
+            if (trk_used[p.trk] and not params_.multi_det_per_track) continue;
             out.assignment[p.det] = p.trk;
             det_used[p.det] = true;
             trk_used[p.trk] = true;
@@ -172,6 +187,7 @@ public:
         for (int d = 0; d < static_cast<int>(dets.size()); ++d)
         {
             if (out.assignment[d] != -1) continue;            // explained by an existing instance
+            if (not dets[d].birthable) continue;              // low-trust evidence may refine, never spawn
             const Eigen::Vector2f& xy = dets[d].xy;
             if (not far_from_tracks(xy)) continue;            // sits on top of a track → not a new object
 
