@@ -88,6 +88,7 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.max_step_m            = getf("TableModel.MaxStepM",            1.0f);
     out.coverage_precision    = getf("TableModel.CoveragePrecision",  0.0f);
     out.coverage_robust_c_m   = getf("TableModel.CoverageRobustCM",   0.15f);
+    out.free_space_precision  = getf("TableModel.FreeSpacePrecision", 0.0f);
 
     out.existence_removal_enabled = getb("TableModel.ExistenceRemovalEnabled", false);
     out.existence_removal_prob    = getf("TableModel.ExistenceRemovalProb",    0.12f);

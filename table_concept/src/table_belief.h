@@ -52,6 +52,14 @@ struct TableBeliefParams
     float coverage_precision  = 0.0f;
     float coverage_robust_c_m = 0.15f;
 
+    // Free-space / VACATE (EXISTENCE_BELIEF_PLAN.md Step 4): the shrink-only counter-force that BOUNDS the
+    // grow-only coverage term. A LiDAR beam that passes THROUGH the top-slab z-band (endpoint beyond the far
+    // face) proves that crossing is empty, so its midpoint (inside the slab, sdf_top < 0) exerts a robust pull
+    // that retreats the boundary. Occupy-where-masked (coverage) + vacate-where-through (this) settle the
+    // extent where camera and LiDAR AGREE — coverage can no longer inflate onto clutter. 0 = OFF. Reads the
+    // frame's LiDAR endpoints/origin (same sweep the range factor uses); saturates via the engine common-mode.
+    float free_space_precision = 0.0f;
+
     // Priors
     float prior_size_std = 0.30f;  // broad size prior std (m) on w,h,H — only breaks the empty-cloud degeneracy
     // Temporal transition (predict): rigid + static ⇒ small process noise per frame.
@@ -160,6 +168,13 @@ public:
     void accumulate_extra(const TableBeliefState& s, const TableFrame& f,
                           Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const;
 
+    // ── Monitor instrumentation ───────────────────────────────────────────────
+    // Counts from the LAST accumulate_extra call (converged state): how many free-space beams actually
+    // exerted a VACATE pull and how many on-plane points were reclaimed by the COVERAGE term this frame.
+    // 0 when the respective precision is OFF. Read by the EvidenceMonitor after update().
+    int last_vacate_beams()  const { return dbg_vacate_beams_; }
+    int last_coverage_pts()  const { return dbg_coverage_pts_; }
+
     // ── Verification ──────────────────────────────────────────────────────────
     static bool self_test();
 
@@ -173,6 +188,8 @@ private:
     Eigen::Matrix<float, 6, 6> Sigma_ = Eigen::Matrix<float, 6, 6>::Identity();  // posterior covariance
     Eigen::Matrix<float, 6, 1> prior_mean_ = Eigen::Matrix<float, 6, 1>::Zero();  // transition prior mean
     float                      flip_evidence_ = 0.0f;  // accumulated log-evidence FOR the current mode vs the w↔h swap
+    mutable int                dbg_vacate_beams_ = 0;   // free-space beams that fired a vacate pull (last accumulate)
+    mutable int                dbg_coverage_pts_ = 0;   // on-plane points reclaimed by coverage (last accumulate)
 };
 
 }  // namespace rc

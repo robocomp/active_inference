@@ -70,6 +70,20 @@ struct ParticipantEntry
 std::mutex participant_pool_mtx;
 std::unordered_map<ParticipantKey, ParticipantEntry, ParticipantKeyHash> participant_pool;
 
+// Serializes the ENTIRE lifecycle (init/close) of every DDS entity in this process. acquire_participant()
+// hands the SAME cached DomainParticipant to every reader/writer on a given (domain, shm) — so two threads
+// (e.g. room_concept's main GUI thread bringing up the "zed" image reader while the LiDAR ingest thread
+// brings up the "helios" reader) end up calling register_type / create_subscriber / create_topic /
+// create_datareader on that ONE shared participant concurrently. Those mutate participant-level state
+// (type registry, topic list, and especially the PDP endpoint-discovery database) and are NOT safe to run
+// in parallel on the same participant — the race corrupts the heap (SIGSEGV/‘corrupted size vs. prev_size’
+// deep inside PDP::addReaderProxyData or later, wherever the next malloc touches the smashed chunk).
+// Creation/teardown is a rare, throttled discovery event, so serializing it costs nothing on the data path
+// (poll()/take() stay lock-free). Lock order is ALWAYS dds_entity_mtx → participant_pool_mtx (init/close
+// take this first, then call acquire/release_participant); participant_pool_mtx is never held while taking
+// this, so the nesting cannot deadlock. Recursive because every init() calls close() as its first step.
+std::recursive_mutex dds_entity_mtx;
+
 bool effective_shm_only(bool requested)
 {
     if (std::getenv("MEDIA_NO_SHM_ONLY"))
@@ -177,6 +191,7 @@ efd::TypeSupport make_type_support(detail::FrameKind kind)
 
 bool detail::WriterCore::init(const PublisherConfig& cfg, detail::FrameKind kind)
 {
+    std::lock_guard<std::recursive_mutex> entity_lock(dds_entity_mtx);
     close();
 
     participant_ = acquire_participant(cfg.domain_id, cfg.shared_memory_only);
@@ -284,6 +299,7 @@ bool detail::WriterCore::publish_copy_raw(const void* sample)
 
 void detail::WriterCore::close()
 {
+    std::lock_guard<std::recursive_mutex> entity_lock(dds_entity_mtx);
     if (publisher_ != nullptr && writer_ != nullptr)
         publisher_->delete_datawriter(writer_);
     writer_ = nullptr;
@@ -315,6 +331,7 @@ detail::WriterCore::~WriterCore()
 
 bool MediaSubscriber::init(const SubscriberConfig& cfg)
 {
+    std::lock_guard<std::recursive_mutex> entity_lock(dds_entity_mtx);
     close();
 
     participant_ = acquire_participant(cfg.domain_id, cfg.shared_memory_only);
@@ -416,6 +433,7 @@ MediaSubscriber::~MediaSubscriber()
 
 void MediaSubscriber::close()
 {
+    std::lock_guard<std::recursive_mutex> entity_lock(dds_entity_mtx);
     if (subscriber_ != nullptr && reader_ != nullptr)
         subscriber_->delete_datareader(reader_);
     reader_ = nullptr;
@@ -444,6 +462,7 @@ void MediaSubscriber::close()
 
 bool Image360Subscriber::init(const SubscriberConfig& cfg)
 {
+    std::lock_guard<std::recursive_mutex> entity_lock(dds_entity_mtx);
     close();
 
     participant_ = acquire_participant(cfg.domain_id, cfg.shared_memory_only);
@@ -543,6 +562,7 @@ Image360Subscriber::~Image360Subscriber()
 
 void Image360Subscriber::close()
 {
+    std::lock_guard<std::recursive_mutex> entity_lock(dds_entity_mtx);
     if (subscriber_ != nullptr && reader_ != nullptr)
         subscriber_->delete_datareader(reader_);
     reader_ = nullptr;
@@ -571,6 +591,7 @@ void Image360Subscriber::close()
 
 bool LidarSubscriber::init(const SubscriberConfig& cfg)
 {
+    std::lock_guard<std::recursive_mutex> entity_lock(dds_entity_mtx);
     close();
 
     participant_ = acquire_participant(cfg.domain_id, cfg.shared_memory_only);
@@ -654,6 +675,7 @@ LidarSubscriber::~LidarSubscriber()
 
 void LidarSubscriber::close()
 {
+    std::lock_guard<std::recursive_mutex> entity_lock(dds_entity_mtx);
     if (subscriber_ != nullptr && reader_ != nullptr)
         subscriber_->delete_datareader(reader_);
     reader_ = nullptr;

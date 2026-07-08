@@ -457,9 +457,16 @@ void SpecificWorker::compute()
     std::vector<Eigen::Vector3f> cloud = lidar_ingestor_->sweep_room();
     cloud.insert(cloud.end(), zed_scene.begin(), zed_scene.end());
     clusters_ = clusterer_.extract(cloud, explainers);
+    std::size_t max_pre = 0; for (const auto& c : clusters_) max_pre = std::max(max_pre, c.points.size());
     // Navigation fragment-merge: coalesce clusters closer than the bridge gap into ONE obstacle (a LiDAR-
     // shattered tabletop's ring-arcs). Clearance for "can't fit between" belongs to the planner (C-space).
     clusters_ = rc::ResidualClusterer::merge_close_clusters(std::move(clusters_), cfg_.cluster.merge_gap_m);
+    {   // BLOB DIAGNOSTIC: is a room-sized cluster forming, and does the MERGE create it (post≫pre) or DBSCAN?
+        std::size_t max_post = 0; for (const auto& c : clusters_) max_post = std::max(max_post, c.points.size());
+        static int mc = 0;
+        if ((mc++ % 20) == 0)
+            std::println("[cluster] n={} max_npts pre-merge={} post-merge={}", clusters_.size(), max_pre, max_post);
+    }
 
     // One-shot LiDAR-vs-room-model OFFSET measurement. The room polygon (inner wall surface) is TRUSTED
     // ground truth — the LiDAR should hit the walls ON it. If wall-height returns land systematically INSIDE

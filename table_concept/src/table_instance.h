@@ -121,6 +121,16 @@ struct TableInstance
     rc::exist::ExistenceBelief existence;
     int existence_remove_streak = 0;
 
+    // ── EvidenceMonitor per-cycle snapshots (persisted copies of otherwise-transient fit/existence values) ──
+    int   dbg_cand_pts  = 0;      // this frame's on-surface (candidate) support point count
+    int   dbg_resid_pts = 0;      // this frame's off-surface (residual/unexplained) support point count
+    float dbg_energy    = 0.0f;   // mean per-point data energy (NLL proxy) at the converged state
+    float dbg_R         = 0.0f;   // per-point measurement variance used this frame (m²)
+    bool  dbg_gated     = false;  // truncation-gated (predict-only, no geometric update) this frame
+    // Existence channel readouts from the last update_existence_and_remove (per-modality occ/free + counts).
+    float dbg_ex_lidar_occ = 0.0f, dbg_ex_lidar_free = 0.0f;  int dbg_ex_lidar_n   = 0;
+    float dbg_ex_sil_occ   = 0.0f, dbg_ex_sil_free   = 0.0f;  int dbg_ex_sil_ndet  = 0;
+
     // Predicted in-image table ROI from projecting the current model through the camera extrinsic.
     // Normalised so the controller is resolution-agnostic: drive offset→0 (centre the table in the
     // frame) and fill→target (stand-off sweet spot) to maximise YOLO's firing probability.

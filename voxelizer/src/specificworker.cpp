@@ -365,11 +365,16 @@ void SpecificWorker::on_render_tick()
                     // Project the DSR scene (model boxes + room floor/ceiling/walls) onto the panorama
                     // when the Ricoh "Models" toggle is on. Draw on a clone (BGR) so we never mutate
                     // the worker's cached frame; the popup viewer converts BGR→RGB on display.
-                    if (ricoh_model_overlay_enabled_ and ricoh_model_overlay_ and ricoh_scene_.valid)
+                    if ((ricoh_model_overlay_enabled_ or ricoh_lidar_overlay_enabled_)
+                        and ricoh_model_overlay_ and ricoh_scene_.valid)
                     {
                         pano = pano.clone();
-                        ricoh_model_overlay_->draw(pano, ricoh_scene_.boxes, ricoh_scene_.room_T_ricoh,
-                                                   ricoh_scene_.poly_x, ricoh_scene_.poly_y, ricoh_scene_.room_height);
+                        // Lidar reprojection first (background sparse depth), then the model wireframe on top.
+                        if (ricoh_lidar_overlay_enabled_)
+                            ricoh_model_overlay_->draw_lidar_points(pano, ricoh_scene_.lidar_room, ricoh_scene_.room_T_ricoh);
+                        if (ricoh_model_overlay_enabled_)
+                            ricoh_model_overlay_->draw(pano, ricoh_scene_.boxes, ricoh_scene_.room_T_ricoh,
+                                                       ricoh_scene_.poly_x, ricoh_scene_.poly_y, ricoh_scene_.room_height);
                     }
                     const auto dets = ricoh_yolo_worker_->latest_detections();
                     if (!dets.empty() and yolo_processor)
@@ -485,14 +490,15 @@ void SpecificWorker::compute()
     if (!frame.has_value())
         return;
 
-    // Cache the scene the Ricoh-360 overlay needs (it renders in on_render_tick, a different timer).
-    // Only when its toggle is on, to avoid per-frame copies otherwise. Same thread → no lock.
-    if (ricoh_model_overlay_enabled_)
+    // Cache the scene the Ricoh-360 overlays need (they render in on_render_tick, a different timer).
+    // Only when a toggle is on, to avoid per-frame copies otherwise. Same thread → no lock.
+    if (ricoh_model_overlay_enabled_ or ricoh_lidar_overlay_enabled_)
     {
         ricoh_scene_.boxes        = frame->graph_object_boxes;
         ricoh_scene_.room_T_ricoh = frame->room_T_ricoh;
         ricoh_scene_.poly_x       = frame->room_poly_x;
         ricoh_scene_.poly_y       = frame->room_poly_y;
+        ricoh_scene_.lidar_room   = ricoh_lidar_overlay_enabled_ ? frame->lidar_points_room : std::vector<Eigen::Vector3f>{};
         ricoh_scene_.room_height  = frame->room_height;
         ricoh_scene_.valid        = frame->ricoh_valid;   // only draw once the ricoh pose is known
     }

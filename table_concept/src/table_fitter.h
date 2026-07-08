@@ -84,6 +84,15 @@ public:
     { lidar_sweep_room_ = sweep_room; lidar_origin_room_ = origin_room; lidar_have_sweep_ = true; }
     void clear_lidar_sweep() { lidar_have_sweep_ = false; }
 
+    // PIXEL-LEVEL silhouette existence evidence (EXISTENCE_BELIEF_PLAN.md, mask channel). Projects the tabletop
+    // TOP face + the 4 LEG axes onto the image and, over the predicted-VISIBLE pixels, counts how many are lit by a "table" YOLO
+    // mask (e_occ ⇒ still there) vs by nothing at all (e_free ⇒ predicted-visible-but-ABSENT ⇒ evidence it is
+    // gone, EVEN WITH NO YOLO MASK this frame). Pixels covered by a NON-table mask are OCCLUDED (a nearer object
+    // hides the tabletop) and excluded from n_detectable → HOLD, never false absence. n_detectable==0 (out of
+    // FoV / fully occluded) ⇒ the caller HOLDs. Feeds rc::exist::mask_evidence. Called from update_existence.
+    struct SilhouetteExistence { float e_occ = 0.0f, e_free = 0.0f; int n_detectable = 0; };
+    SilhouetteExistence compute_silhouette_existence(const TableInstance& inst);
+
 private:
     // Compute the localization/chain covariance term (J·Σ_chain·Jᵀ) at the table centre by transforming
     // it from the measurement frame back to room with ZERO input cov; stored on the instance for the

@@ -173,6 +173,15 @@ struct ControllerParams
     float escape_side_probe_m    = 0.50f;   // lateral ESDF probe for turn-direction choice
     float escape_rear_probe_m    = 0.45f;   // rear ESDF probe distance
     float escape_rear_min_m      = 0.30f;   // rear clearance below this → rotate-in-place, no reverse
+    // On stuck, drop a LOCAL-ONLY virtual obstacle at the wedge spot: visible to the planner/MPPI
+    // (set_static_obstacles) but NEVER uploaded to DSR. Covers the case where MPPI wedges on
+    // something residual_concept never modelled (e.g. below the LiDAR plane) — the LiDAR-based
+    // temp obstacle would find no points and create nothing, so replanning alone can't help. The
+    // disc ages out on this TTL so it doesn't permanently pollute the map (a dynamic obstacle that
+    // moved on is forgotten); if the robot re-wedges, stuck recovery drops a fresh one.
+    float         stuck_virtual_obstacle_radius_m = 0.30f;   // half-extent of the virtual disc
+    float         stuck_virtual_obstacle_forward_m = 0.40f;  // placed this far ahead of the robot
+    std::uint64_t stuck_virtual_obstacle_ttl_ms   = 5000;    // lifetime before it ages out
 };
 
 struct ControllerGraphState

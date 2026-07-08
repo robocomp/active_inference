@@ -89,6 +89,14 @@ MaxStepM = 1.0                 # divergence guard: reject a GN centre step > thi
 # bound = free-space carve (not yet wired) → keep modest until then.
 CoveragePrecision = 500.0        # grow-only coverage pull strength (per point, ~1/σ²@mask). 0=OFF
 CoverageRobustCM = 0.15        # Cauchy scale (m): on-plane points this far outside fade out (stray-point guard)
+# Free-space / VACATE (EXISTENCE_BELIEF_PLAN.md Step 4): the SHRINK-only counter-force that BOUNDS CoveragePrecision.
+# A LiDAR beam that passes THROUGH the top-slab band and exits the far side proves that crossing is empty → pull the
+# extent back IN (occupy-where-masked + vacate-where-through settle the extent where camera & LiDAR agree, so coverage
+# can no longer inflate onto clutter). Uses the same sweep as LidarPrecision (auto-staged when either is > 0). Beams
+# that RETURN inside the slab (occupancy) are ignored, so a real tabletop is untouched. STAGED — OFF (0.0) by default;
+# try ~500 alongside CoveragePrecision and watch w/h stop over-growing on clutter/over-segmented masks.
+FreeSpacePrecision = 0.0         # shrink-only free-space pull strength (per through-beam, ~1/σ²). 0=OFF
+
 
 # ── Existence / removal (common/existence_belief.h) ───────────────────────────────────────────────────────
 # Each cycle the LiDAR sweep is carved against every table footprint: beams RETURNING inside → occupancy, beams

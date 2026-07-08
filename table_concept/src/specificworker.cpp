@@ -455,6 +455,13 @@ void SpecificWorker::initialize()
             }
         }
     }
+
+    // ── Evidence-consuming monitor — its OWN top-level window (per-instance snapshot + global counters) ──
+    // Same lifecycle discipline as the dashboard above: plain QWidget (no QOpenGL), built on the main thread,
+    // updated from compute() (which is the GUI thread here). Only HIDDEN on close, never deleted (compute()
+    // keeps a raw pointer). Shows even with Agent.graph=false.
+    evidence_monitor_ = new rc::EvidenceMonitor(QStringLiteral("table_concept — evidence monitor"));
+    evidence_monitor_->show();
 }
 
 // ─── Main compute loop ───────────────────────────────────────────────────────
@@ -472,7 +479,13 @@ void SpecificWorker::compute()
         room_node_id_ = rooms.front().id();
     }
 
-    mask_ingestor_->refresh();
+    const bool fresh_masks = mask_ingestor_->refresh();
+
+    // EvidenceMonitor per-cycle counters (cumulative *_cum fields persist across cycles). The producers below
+    // (tracker / merge / removal) add to these; the snapshot is pushed at the end of the cycle.
+    ev_g_.births = ev_g_.merges = ev_g_.removals = 0;
+    ev_g_.mask_stale = not fresh_masks;
+
     run_instance_tracker();   // data-driven birth / associate / merge (the only instance-lifecycle path)
 
     // Stage this cycle's LiDAR sweep (room frame) for the fitter's range factor. clear-then-set so the factor
@@ -493,6 +506,65 @@ void SpecificWorker::compute()
     // remove the demonstrably-empty ones. After the fits so footprints are current. OFF unless enabled.
     if (cfg_.existence_removal_enabled and fresh_sweep)
         update_existence_and_remove();
+
+    // ── Evidence monitor: global counters + throttled snapshot push ──
+    ev_g_.instances    = static_cast<int>(fitter_->instances().size());
+    ev_g_.sweep_points = (lidar_ingestor_ and fresh_sweep) ? static_cast<int>(lidar_ingestor_->sweep_room().size()) : 0;
+    const auto now = std::chrono::steady_clock::now();
+    if (last_compute_tp_.time_since_epoch().count() != 0)
+    {
+        const float dt = std::chrono::duration<float>(now - last_compute_tp_).count();
+        if (dt > 1e-4f)
+        {
+            const float hz = 1.0f / dt;
+            ev_g_.compute_hz = ev_g_.compute_hz > 0.0f ? 0.9f * ev_g_.compute_hz + 0.1f * hz : hz;
+        }
+    }
+    last_compute_tp_ = now;
+    refresh_evidence_monitor();
+}
+
+// Build the per-instance snapshot from live instance state and push it to the monitor at ~5 Hz (a full
+// QTableWidget rebuild every compute cycle would waste the GUI thread). All reads are main-thread.
+void SpecificWorker::refresh_evidence_monitor()
+{
+    if (not evidence_monitor_)
+        return;
+    const auto now = std::chrono::steady_clock::now();
+    if (last_monitor_tp_.time_since_epoch().count() != 0
+        and std::chrono::duration<float>(now - last_monitor_tp_).count() < 0.2f)
+        return;
+    last_monitor_tp_ = now;
+
+    std::vector<rc::EvidenceRow> rows;
+    rows.reserve(fitter_->instances().size());
+    for (const auto& [id, inst] : fitter_->instances())
+    {
+        rc::EvidenceRow x;
+        x.node       = inst.node_name;
+        x.conf       = inst.last_mask_confidence;
+        x.since_det  = inst.frames_since_detection;
+        x.cand       = inst.dbg_cand_pts;
+        x.resid      = inst.dbg_resid_pts;
+        x.gated      = inst.dbg_gated;
+        x.energy     = inst.dbg_energy;
+        x.R          = inst.dbg_R;
+        x.lidar_rays = inst.dbg_lidar_rays;
+        x.lidar_raw  = inst.dbg_lidar_raw;
+        x.lidar_resid= inst.dbg_lidar_resid_m;
+        x.cov_ang    = inst.dbg_lidar_cov_ang;
+        x.vacate     = inst.ai2_belief.last_vacate_beams();
+        x.coverage   = inst.ai2_belief.last_coverage_pts();
+        x.L          = inst.existence.logodds();
+        x.p          = inst.existence.p_exists();
+        x.ex_locc    = inst.dbg_ex_lidar_occ;  x.ex_lfree = inst.dbg_ex_lidar_free;  x.ex_ln    = inst.dbg_ex_lidar_n;
+        x.ex_socc    = inst.dbg_ex_sil_occ;    x.ex_sfree = inst.dbg_ex_sil_free;    x.ex_sndet = inst.dbg_ex_sil_ndet;
+        x.streak     = inst.existence_remove_streak;
+        const auto& s = inst.ai2_belief.state();
+        x.w = s.w; x.h = s.h; x.H = s.H;
+        rows.push_back(std::move(x));
+    }
+    evidence_monitor_->update_view(ev_g_, rows);
 }
 
 // Carve the LiDAR sweep against every table footprint and integrate the per-instance existence log-odds, then
@@ -521,14 +593,16 @@ void SpecificWorker::update_existence_and_remove()
         const float surf_sigma = std::sqrt(std::max(0.0f, 0.5f * (S(0, 0) + S(1, 1))));   // footprint position σ
         const bool observed = inst.frames_since_detection == 0;                      // fresh mask this cycle
 
-        // MASK channel (primary "gone" signal): if the model's silhouette projects INTO the camera FoV
-        // (roi_valid) it SHOULD be masked — masked ⇒ occupancy (holds L up against a LiDAR transient),
-        // NOT masked ⇒ predicted-but-absent (gone). Out of FoV ⇒ n_detectable=0 ⇒ HOLD.
-        if (inst.roi_valid)
+        // SILHOUETTE / MASK channel (pixel-level): project the tabletop silhouette and compare, per predicted-
+        // VISIBLE pixel, against the current YOLO foreground. Lit by a "table" mask ⇒ occupancy (holds L up);
+        // lit by NOTHING ⇒ predicted-but-absent (the KEY "gone" signal — present EVEN WITH NO YOLO MASK this
+        // frame); lit by a NON-table mask ⇒ occluded ⇒ HOLD (never false absence behind a nearer object).
+        // n_detectable==0 (out of FoV / fully occluded) ⇒ mask_evidence HOLDs. Replaces the old coarse
+        // roi_valid×observed proxy with a real silhouette↔mask pixel overlap.
+        const auto sil = fitter_->compute_silhouette_existence(inst);
+        if (sil.n_detectable > 0)
         {
-            constexpr int kMaskUnit = 20;   // detectable-footprint magnitude; tanh saturates the actual ΔL
-            const rc::exist::Evidence mev = rc::exist::mask_evidence(
-                observed ? kMaskUnit : 0, observed ? 0 : kMaskUnit, kMaskUnit, sm);
+            const rc::exist::Evidence mev = rc::exist::mask_evidence(sil.e_occ, sil.e_free, sil.n_detectable, sm);
             inst.existence.integrate(mev);
         }
 
@@ -542,19 +616,25 @@ void SpecificWorker::update_existence_and_remove()
             inst.existence.integrate(ev);
         }
 
+        // EvidenceMonitor snapshot of both existence channels this cycle.
+        inst.dbg_ex_lidar_occ = ev.e_occ;  inst.dbg_ex_lidar_free = ev.e_free;  inst.dbg_ex_lidar_n  = ev.n_reached;
+        inst.dbg_ex_sil_occ   = sil.e_occ; inst.dbg_ex_sil_free   = sil.e_free; inst.dbg_ex_sil_ndet = sil.n_detectable;
+
         // Debounce: delete only when the removal decision holds for existence_remove_frames CONSECUTIVE cycles,
         // so a transient association/fit hiccup (a few cycles of spurious free) can't delete a real table.
         if (inst.existence.should_remove(cfg_.existence_removal_prob)) ++inst.existence_remove_streak;
         else                                                          inst.existence_remove_streak = 0;
 
         if (fitter_->should_log(inst))
-            std::print("[{}] [existence] L={:.2f} p={:.2f} occ={:.1f} free={:.1f} n={} roi={} {} streak={}\n",
+            std::print("[{}] [existence] L={:.2f} p={:.2f} | lidar occ={:.1f} free={:.1f} n={} | sil occ={:.0f} free={:.0f} ndet={} | {} streak={}\n",
                        inst.node_name, inst.existence.logodds(), inst.existence.p_exists(),
-                       ev.e_occ, ev.e_free, ev.n_reached, inst.roi_valid ? 1 : 0,
+                       ev.e_occ, ev.e_free, ev.n_reached, sil.e_occ, sil.e_free, sil.n_detectable,
                        observed ? "obs" : "-", inst.existence_remove_streak);
         if (inst.existence_remove_streak >= cfg_.existence_remove_frames)
             doomed.push_back(id);
     }
+    ev_g_.removals     += static_cast<int>(doomed.size());   // EvidenceMonitor counters
+    ev_g_.removals_cum += static_cast<long>(doomed.size());
     for (const std::uint64_t id : doomed)
     {
         std::print("table_concept: [existence] removing table id={} — free-space evidence (empty volume)\n", id);
@@ -602,6 +682,7 @@ void SpecificWorker::merge_overlapping_instances()
             const std::uint64_t drop = keep_i ? ids[j] : ids[i];
             std::print("table_concept: [tracker] MERGE id={} into id={} (footprint overlap {:.2f})\n",
                        drop, keep, ratio);
+            ++ev_g_.merges; ++ev_g_.merges_cum;   // EvidenceMonitor counter
             if (auto it = insts.find(drop); it != insts.end())
                 it->second.affordance.remove();
             fitter_->forget_node(drop);
@@ -663,6 +744,15 @@ void SpecificWorker::run_instance_tracker()
     static int dbg = 0;
     const int n_assigned = static_cast<int>(std::count_if(res.assignment.begin(), res.assignment.end(),
                                                           [](int a){ return a >= 0; }));
+
+    // EvidenceMonitor mask/tracker counters (merges are added in merge_overlapping_instances above).
+    ev_g_.mask_frame_id = pkt.valid ? pkt.frame_id : -1;
+    ev_g_.total_slices  = pkt.valid ? static_cast<int>(pkt.slices.size()) : 0;
+    ev_g_.table_dets    = static_cast<int>(dets.size());
+    ev_g_.assigned      = n_assigned;
+    ev_g_.discarded     = static_cast<int>(dets.size()) - n_assigned;
+    ev_g_.births       += static_cast<int>(res.births.size());
+    ev_g_.births_cum   += static_cast<long>(res.births.size());
     if (++dbg % 30 == 0 or not res.births.empty() or not res.deaths.empty())
     {
         std::print("[tracker] instances={} table_dets={} assigned={} unassigned={} births={} deaths={}\n",

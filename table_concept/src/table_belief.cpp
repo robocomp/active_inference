@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <random>
 
 namespace rc
@@ -184,6 +185,8 @@ void TableBelief::accumulate_extra(const TableBeliefState& s, const TableFrame& 
                                    Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const
 {
     rc::ai::accumulate_lidar_rays<6>(*this, s, f.lidar, Id, bd);
+    dbg_coverage_pts_ = 0;   // monitor counters — reset per accumulate; the final (converged) call is what's read
+    dbg_vacate_beams_ = 0;
 
     // Coverage / traction (table_1.png): reclaim on-plane mask points the mixture ceded to CLUTTER as
     // GROW-ONLY extent evidence. For each point OUTSIDE the top slab (sdf_top > 0) and near the tabletop plane,
@@ -215,6 +218,90 @@ void TableBelief::accumulate_extra(const TableBeliefState& s, const TableFrame& 
             const Eigen::Matrix<float, 6, 1> J = sdf_jacobian(p, s, 0);     // top slab (prim 0)
             Id.noalias() += w * (J * J.transpose());
             bd.noalias() += -w * J * e;
+            ++dbg_coverage_pts_;
+        }
+    }
+
+    // Free-space / VACATE (EXISTENCE_BELIEF_PLAN.md Step 4): the shrink-only counter-force that BOUNDS the
+    // grow-only coverage term above. A LiDAR beam that traverses the top-slab volume and continues BEYOND it
+    // (endpoint past the far face) proves that crossing is empty; its midpoint lies INSIDE the footprint, so a
+    // GLS pull driving the FOOTPRINT SDF→0 there RETREATS the nearest face past the empty point = shrink.
+    // A beam that RETURNS inside the slab (occupancy) has its far face BEYOND the endpoint ⇒ p_through
+    // ≈ 0 ⇒ no vacate, so a real tabletop is untouched. z-gated to the SOLID top band [H−t, H] (beams passing
+    // under the tabletop between the legs are excluded) ⇒ no hollow ambiguity, so no hollow guard is needed.
+    // Correlated beams saturate through the engine's common-mode Woodbury, same as the range factor. Occupy-
+    // where-masked (coverage) + vacate-where-through (this) settle the extent where camera and LiDAR AGREE.
+    if (params_.free_space_precision > 0.0f and not f.lidar.endpoints.empty())
+    {
+        const float cyaw = std::cos(-s.yaw), syaw = std::sin(-s.yaw);
+        const float hw = 0.5f * s.w, hd = 0.5f * s.h;
+        const float lo[3] = {-hw, -hd, s.H - params_.top_thickness};   // local top-slab box (solid tabletop band)
+        const float hi[3] = { hw,  hd, s.H};
+        const float sigma_surf = std::sqrt(params_.sigma_base_m * params_.sigma_base_m
+                                         + params_.common_mode_pos_std * params_.common_mode_pos_std);
+        const auto  phi = [](float x) { return 0.5f * std::erfc(-x * 0.70710678f); };   // Φ(x)
+        const Eigen::Vector3f& O = f.lidar.origin;
+        const float oxr = O.x() - s.cx, oyr = O.y() - s.cy;
+        const Eigen::Vector3f Ol(oxr * cyaw - oyr * syaw, oxr * syaw + oyr * cyaw, O.z());   // sensor in local frame
+        for (const auto& ep : f.lidar.endpoints)
+        {
+            const float exr = ep.x() - s.cx, eyr = ep.y() - s.cy;
+            const Eigen::Vector3f El(exr * cyaw - eyr * syaw, exr * syaw + eyr * cyaw, ep.z());
+            const Eigen::Vector3f d = El - Ol;                            // local ray (t=1 at the endpoint)
+            const float len = d.norm();
+            if (len < 1e-4f) continue;
+
+            // Ray vs local top-slab box → normalised [t_near, t_far] (endpoint at t=1). Standard 3-axis slab.
+            float t_near = 0.0f, t_far = std::numeric_limits<float>::max();
+            bool miss = false;
+            for (int a = 0; a < 3 and not miss; ++a)
+            {
+                if (std::abs(d(a)) < 1e-6f) { if (Ol(a) < lo[a] or Ol(a) > hi[a]) miss = true; }
+                else
+                {
+                    float t1 = (lo[a] - Ol(a)) / d(a), t2 = (hi[a] - Ol(a)) / d(a);
+                    if (t1 > t2) std::swap(t1, t2);
+                    t_near = std::max(t_near, t1);
+                    t_far  = std::min(t_far,  t2);
+                }
+            }
+            if (miss or t_near > t_far or t_far < 0.0f or t_near >= 1.0f) continue;
+
+            // Passed-through soft weight: endpoint beyond the far face (else it returned inside ⇒ occupancy).
+            const float p_through = phi((1.0f - t_far) / (sigma_surf / len));
+            if (p_through < 1e-3f) continue;
+
+            const float t_mid = 0.5f * (t_near + t_far);                  // box-centre along the ray (empty)
+            const Eigen::Vector3f p_free = O + t_mid * (ep - O);          // WORLD empty point
+
+            // Residual = the LATERAL (2D footprint) SDF, NOT the full 3D sdf_top: for a point just under the
+            // tabletop the thin THICKNESS face dominates the 3D SDF (∂/∂w = ∂/∂h = 0), so a 3D residual cannot
+            // move the extent. The footprint SDF (signed distance to the w×h rectangle in the yaw frame, z
+            // ignored) restores the w/h/cx/cy gradient. e < 0 (empty point INSIDE the footprint) ⇒ driving e→0
+            // retreats the NEAREST face just past it = shrink-only. Central-difference Jacobian over the state.
+            const auto sdf_fp = [&](const TableBeliefState& st) -> float
+            {
+                const float cc = std::cos(-st.yaw), s2 = std::sin(-st.yaw);
+                const float lx = (p_free.x() - st.cx) * cc - (p_free.y() - st.cy) * s2;
+                const float ly = (p_free.x() - st.cx) * s2 + (p_free.y() - st.cy) * cc;
+                const float dx = std::abs(lx) - 0.5f * st.w, dy = std::abs(ly) - 0.5f * st.h;
+                const float ox = std::max(dx, 0.0f), oy = std::max(dy, 0.0f);
+                return std::sqrt(ox * ox + oy * oy) + std::min(std::max(dx, dy), 0.0f);   // 2D box SDF
+            };
+            const float e = sdf_fp(s);
+            if (e >= 0.0f) continue;                                      // must be inside the footprint to shrink
+            Eigen::Matrix<float, 6, 1> J;
+            const Eigen::Matrix<float, 6, 1> base = s.vec();
+            const float fde = params_.fd_eps;
+            for (int j = 0; j < 6; ++j)
+            {
+                Eigen::Matrix<float, 6, 1> vp = base, vm = base; vp(j) += fde; vm(j) -= fde;
+                J(j) = (sdf_fp(TableBeliefState::from_vec(vp)) - sdf_fp(TableBeliefState::from_vec(vm))) / (2.0f * fde);
+            }
+            const float w = params_.free_space_precision * p_through;
+            Id.noalias() += w * (J * J.transpose());
+            bd.noalias() += -w * J * e;
+            ++dbg_vacate_beams_;
         }
     }
 }
@@ -535,6 +622,52 @@ bool TableBelief::self_test()
         check(s_cov.w > s_no.w + 0.05f,        "coverage should grow w toward the mask extent faster (budget-limited)");
         check(std::abs(s_cov.cx - gt.cx) < std::abs(s_no.cx - gt.cx), "coverage should recenter toward the unexplained side");
         check(std::abs(s_con.w - s_cov.w) < 0.06f, "off-plane contamination must NOT extra-grow the slab (on-plane gate)");
+    }
+
+    // (j) Free-space / VACATE (EXISTENCE_BELIEF_PLAN.md Step 4): the shrink-only counter-force that BOUNDS
+    //     coverage. An OVER-SEGMENTED mask (YOLO bleeding past the true rim / a coverage runaway) holds the
+    //     slab too WIDE; LiDAR beams that pass THROUGH the phantom over-extension (no real tabletop there → they
+    //     exit the far face) pull the extent back IN. Beams that RETURN at a rim (occupancy) leave the model be.
+    {
+        const float Rb   = P.sigma_base_m * P.sigma_base_m;
+        const float over = 1.40f;   // model/mask over-extended to 1.4× the true half-width on BOTH x sides
+        std::vector<Eigen::Vector3f> mask;
+        for (int i = 0; i < 1400; ++i)   // dense TRUE tabletop
+        {
+            const float lx = U(rng) * 0.5f * gt.w, ly = U(rng) * 0.5f * gt.h;
+            mask.push_back(to_world(lx, ly, gt.H + noise(rng)));
+        }
+        for (int i = 0; i < 300; ++i)    // sparse PHANTOM over-segmentation strips beyond the true ±x rim
+        {
+            const float side = (i % 2 == 0) ? 1.0f : -1.0f;
+            const float lx = side * (0.5f * gt.w + U01(rng) * (over - 1.0f) * 0.5f * gt.w);
+            mask.push_back(to_world(lx, U(rng) * 0.5f * gt.h, gt.H + noise(rng)));
+        }
+        // One sensor FAR on the +y side (x≈0) so the near-parallel −y beams through the ±x phantom columns barely
+        // drift in x (they stay OUTSIDE the true rim, never over the real tabletop) and EXIT the far −y face.
+        const Eigen::Vector3f o_fs = to_world(0.0f, 50.0f, gt.H - 0.015f);
+        std::vector<Eigen::Vector3f> through;
+        for (int i = 0; i < 160; ++i)
+        {
+            const float side = (i % 2 == 0) ? 1.0f : -1.0f;
+            const float lx = side * (0.5f * gt.w + (0.15f + U01(rng) * 0.70f) * (over - 1.0f) * 0.5f * gt.w);
+            through.push_back(to_world(lx, -0.5f * gt.h - 1.0f, gt.H - 0.015f + noise(rng)));
+        }
+        const TableBeliefState init{gt.cx, gt.cy, gt.H, over * gt.w, gt.h, gt.yaw};   // start OVER-wide
+        auto fit = [&](float fs) {
+            TableBeliefParams pp = P; pp.free_space_precision = fs;
+            TableBelief b(init, pp);
+            TableFrame fr; fr.points = mask; fr.R.assign(mask.size(), Rb);
+            if (fs > 0.0f) { fr.lidar.origin = o_fs; fr.lidar.endpoints = through; }
+            for (int it = 0; it < 6; ++it) b.update(fr);
+            return b.state();
+        };
+        const auto s_no = fit(0.0f);
+        const auto s_fs = fit(800.0f);
+        std::printf("  free-space vacate w: no=%.3f fs=%.3f (over-mask=%.3f truth=%.3f) cx no=%.3f fs=%.3f\n",
+                    s_no.w, s_fs.w, over * gt.w, gt.w, s_no.cx, s_fs.cx);
+        check(s_fs.w < s_no.w - 0.03f,  "free-space should SHRINK the over-segmented slab (vacate)");
+        check(s_fs.w > gt.w - 0.10f,    "free-space must not collapse the slab below the true extent (occupancy holds)");
     }
 
     std::printf("TableBelief::self_test %s\n", ok ? "PASS" : "FAIL");

@@ -133,14 +133,15 @@ LockOnSettleMs = 400.0       # dwell before each measurement (kills motion blur 
 LockOnStepMs = 400.0         # duration of one sweep step
 LockOnMaxAttempts = 30
 
-# Physical-stuck detection + reverse-and-turn escape. Fires when the base is COMMANDED to
-# move but is NOT actually making progress (wedged below the lidar plane, scraping a frame,
-# wheel slip, oscillating) — distinct from the MPPI's geometric path_blocked. Escape =
-# reverse with a slight turn toward the side with more clearance, drop a temp obstacle at the
-# stuck spot, then replan. Set StuckRecoveryEnabled=false to disable.
+# Physical-stuck / no-progress detection + reverse-and-turn escape. Fires whenever the robot is
+# pursuing a live target but the base is NOT making progress — wedged while commanding motion,
+# OR MPPI collapsed to ~0 because the robot is boxed in, OR the planner can find no path at all
+# — distinct from the MPPI's geometric path_blocked. Escape = reverse with a slight turn toward
+# the side with more clearance, drop a LOCAL-ONLY virtual obstacle at the stuck spot (visible to
+# the planner/MPPI, never uploaded to DSR), then replan around it. StuckRecoveryEnabled=false disables.
 StuckRecoveryEnabled = true
-StuckCmdLinEps = 0.05    # m/s — commanded linear above this = "trying to move"
-StuckCmdRotEps = 0.15    # rad/s — commanded rotation above this counts too
+StuckCmdLinEps = 0.05    # m/s — LEGACY (no longer gates detection; kept for config back-compat)
+StuckCmdRotEps = 0.15    # rad/s — LEGACY (see above)
 StuckMeasLinEps = 0.02   # m/s — measured base speed below this = "not moving"
 StuckMeasRotEps = 0.08   # rad/s
 StuckConfirmMs = 1500    # sustained no-progress (ms) before escape fires
@@ -151,6 +152,10 @@ EscapeMaxMs = 1500       # … or this long, whichever first
 EscapeSideProbeM = 0.50  # lateral ESDF probe for turn-direction choice
 EscapeRearProbeM = 0.45  # rear ESDF probe distance
 EscapeRearMinM = 0.30    # rear clearance below this → rotate-in-place, no reverse
+# Virtual obstacle dropped at the wedge spot on stuck (local-only, planner-visible, NOT in DSR).
+StuckVirtualObstacleRadiusM = 0.30   # half-extent of the virtual disc
+StuckVirtualObstacleForwardM = 0.40  # placed this far ahead of the robot
+StuckVirtualObstacleTTLms = 5000     # lifetime before it ages out
 
 # Near-obstacle "black box": append a CSV row whenever the robot is within ProximityLogDistance of a
 # tracked obstacle OR the trajectory ESDF drops that low. Lets a collision be explained afterwards

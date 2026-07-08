@@ -134,9 +134,15 @@ MinClusterPts = 6             # ↓ 14→6 — the 14 was an ANTI-CHURN gate (su
 # eps 0.30) bridges only tight single-surface fragmentation and leaves spaced objects individual. The proper
 # fix is PLANNER-side clearance: perception publishes tight individual boxes, the planner inflates each by the
 # robot radius (C-space), so narrow gaps auto-close without a merged box. Set RobotWidthM=0 to disable merge.
-RobotWidthM = 0.30            # fragmentation-bridge gap (NOT literal robot width; clearance → planner)
-MergeExcessM = 0.05           # extra bridge beyond the base gap
-MinVerticalExtentM = 0.10     # a flat cluster is only dropped if ALSO low (floor); an elevated flat sheet is kept
+RobotWidthM = 0.0             # MERGE OFF (regression triage 2026-07-07): the merge was chaining distinct clusters
+                             # into a room-sized blob that swallowed the cubes. Distinct objects stay separate;
+                             # "can't-fit-between" clearance belongs to the planner (C-space). Re-enable only if a
+                             # single shattered surface (tabletop) genuinely needs coalescing, at a small gap.
+MergeExcessM = 0.0           # extra bridge beyond the base gap
+MinVerticalExtentM = 0.05     # ↓ 0.10→0.05: detect SHORTER floor obstacles. A cluster is dropped as floor only if
+                              # it has <5 cm vertical extent AND is low. Above the floor band a ~5 cm object now
+                              # survives. (Lower toward 0.03 for even shorter, but that approaches the LiDAR floor-
+                              # noise band → risk of floor-smear phantoms; the floor band below is the deeper limit.)
 MinTopZM = 0.30               # ...an elevated flat sheet with top ≥ this (a tabletop) is a REAL obstacle → KEPT
 
 # ── ZED dense-depth boost ─────────────────────────────────────────────────────
@@ -145,9 +151,9 @@ MinTopZM = 0.30               # ...an elevated flat sheet with top ≥ this (a t
 # a much denser signal than LiDAR for forward objects (the ZED sees ~110° / ~5 m; LiDAR still covers 360°).
 [ZedBoost]
 Enabled = true
-FeedDetection = true    # feed dense ZED FoV into CLUSTERING (fixes the near-field-ahead LiDAR blind zone). Safe
-                        # now that infrastructure subtraction is range-noise robust (below): floor/ceiling/wall
-                        # removed with a band that grows as the ZED depth noise, so no sheet leaks/bridges.
+FeedDetection = false   # TEMP OFF (regression triage 2026-07-07): a room-sized LiDAR mega-blob is swallowing the
+                        # cubes; isolating the ZED variable while we find whether the blob is DBSCAN or the merge.
+                        # infra-subtract worked (79 pts), so ZED isn't the blob — re-enable once the blob is fixed.
 # Robust ZED infrastructure subtraction: a point is floor/ceiling/wall if within k·σ(range) of it, where the
 # ZED stereo depth noise σ(r)=Sigma0M + SigmaQuad·r² (physical, grows with range²). Absorbs a small ZED depth
 # calibration offset AND far-range blur so a dense floor/wall sheet can't survive and bridge objects into a blob.

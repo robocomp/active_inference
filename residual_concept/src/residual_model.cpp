@@ -35,7 +35,10 @@ std::vector<Eigen::Vector2f> ResidualModel::box_polygon() const
     const float c = std::cos(state_.yaw), s = std::sin(state_.yaw);
     const float hw = 0.5f * state_.w, hd = 0.5f * state_.d;
     const Eigen::Vector2f ctr(state_.cx, state_.cy);
-    const auto corner = [&](float sx, float sy) {
+    // Explicit Vector2f return type: without it, `auto` deduces an Eigen EXPRESSION template that references
+    // the temporary Vector2f (which dies at return) → -Wdangling-pointer/-Wuninitialized. Forcing the concrete
+    // type evaluates the sum before returning.
+    const auto corner = [&](float sx, float sy) -> Eigen::Vector2f {
         const float lx = sx * hw, ly = sy * hd;
         return ctr + Eigen::Vector2f(c * lx - s * ly, s * lx + c * ly);
     };

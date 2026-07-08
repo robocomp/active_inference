@@ -44,6 +44,7 @@ LIST(APPEND HEADERS
   ../src/table_affordance.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/timeseries_plot.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/custom_widget.h
+  ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/evidence_monitor.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_monitor/agent_presence_monitor.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_coordinator/agent_presence_coordinator.h
 )

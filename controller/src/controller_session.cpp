@@ -966,11 +966,17 @@ void ControllerSession::begin_escape(const ControllerRobotPose &robot_pose,
         escape_turn_sign_ = (escape_count_ % 2 == 0) ? +1.f : -1.f;
 
     // Mark the stuck spot just ahead of the robot so the replanner routes around whatever we
-    // wedged on (it may be invisible to the lidar). Reuses the same temp-obstacle mechanism
-    // as the geometric path_blocked recovery; it ages out via the existing existence filter.
+    // wedged on. We drop a LOCAL-ONLY VIRTUAL obstacle (not the LiDAR-observed temp obstacle):
+    // the whole point of a stuck event is that the blocker is invisible to the pipeline — the
+    // LiDAR path would find no points and create nothing, so the planner would just reproduce the
+    // same blocked route. The virtual disc is geometric, always succeeds, is visible to the
+    // planner/MPPI, and is NOT uploaded to DSR. It ages out on its TTL so a since-moved obstacle
+    // is forgotten; if we re-wedge, another one is dropped.
+    const float fwd_off = params_ ? params_->stuck_virtual_obstacle_forward_m : 0.40f;
+    const float vrad    = params_ ? params_->stuck_virtual_obstacle_radius_m  : 0.30f;
     const Eigen::Vector2f fwd(std::cos(robot_pose.theta), std::sin(robot_pose.theta));
-    const Eigen::Vector2f stuck_center = robot_pose.pos + 0.4f * fwd;
-    obstacle_tracker.create_temporary_lidar_obstacle(now_ms, robot_pose, stuck_center, 0.25f, path_controller);
+    const Eigen::Vector2f stuck_center = robot_pose.pos + fwd_off * fwd;
+    obstacle_tracker.add_virtual_obstacle(now_ms, stuck_center, vrad);
 
     escape_active_   = true;
     escape_start_ms_ = now_ms;

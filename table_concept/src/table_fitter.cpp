@@ -7,8 +7,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <print>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace rc {
@@ -284,6 +286,7 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
         p.gn_iters        = cfg_.ai2_gn_iters;
         p.coverage_precision  = cfg_.coverage_precision;
         p.coverage_robust_c_m = cfg_.coverage_robust_c_m;
+        p.free_space_precision = cfg_.free_space_precision;
         p.top_thickness   = TableModel::TOP_THICKNESS;
         p.leg_radius      = TableModel::LEG_RADIUS;
         inst.ai2_belief = TableBelief(s0, p);
@@ -421,6 +424,13 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
                    inst.dbg_lidar_rays, inst.dbg_lidar_raw, inst.dbg_lidar_resid_m,
                    inst.dbg_lidar_topz_m, bs.H, inst.dbg_lidar_floorz_m, inst.dbg_lidar_cov_ang, inst.frames_diverged);
 
+    // EvidenceMonitor snapshot: persist this frame's fit evidence (else it dies with the local observation).
+    inst.dbg_cand_pts  = static_cast<int>(observation.candidate_pts.size());
+    inst.dbg_resid_pts = static_cast<int>(observation.residual_pts.size());
+    inst.dbg_energy    = energy;
+    inst.dbg_R         = R;
+    inst.dbg_gated     = gated;
+
     log_ai2_csv(inst, npts, R, gated, energy);
     return energy;
 }
@@ -467,8 +477,10 @@ void TableFitter::feed_lidar(TableInstance& inst, TableFrame& frame) const
     inst.dbg_lidar_rays = 0;
     inst.dbg_lidar_raw  = 0;
     inst.dbg_lidar_resid_m = -1.0f;
-    if (cfg_.lidar_precision <= 0.0f or not lidar_have_sweep_ or lidar_sweep_room_.empty()
-        or frame.points.empty())
+    // Stage the sweep for EITHER LiDAR consumer: the first-hit range factor (LidarPrecision) or the free-space
+    // VACATE term (FreeSpacePrecision, EXISTENCE_BELIEF_PLAN.md Step 4). Both read frame.lidar.endpoints/origin.
+    if ((cfg_.lidar_precision <= 0.0f and cfg_.free_space_precision <= 0.0f)
+        or not lidar_have_sweep_ or lidar_sweep_room_.empty() or frame.points.empty())
         return;
 
     // Anchor XY on this cycle's fresh mask-cloud centroid.
@@ -636,6 +648,98 @@ void TableFitter::compute_projected_roi(TableInstance& inst)
     inst.roi_offset_y = std::clamp(off_y, -3.0f, 3.0f);
     inst.roi_fill     = std::clamp(fill, 0.0f, 4.0f);
     inst.roi_valid    = sane;
+}
+
+// PIXEL-LEVEL silhouette existence evidence — see the header. Projects the tabletop top face onto the image
+// and, over the predicted-visible pixels, splits into: lit by a "table" mask (occupancy), lit by a non-table
+// mask (occlusion → HOLD), or lit by nothing (absence — the KEY signal when NO YOLO mask fires this frame).
+TableFitter::SilhouetteExistence TableFitter::compute_silhouette_existence(const TableInstance& inst)
+{
+    SilhouetteExistence out;
+    if (not inner_eigen_)
+        return out;
+    if (not camera_api_)
+    {
+        const auto zed = G_->get_node("zed");
+        if (not zed.has_value()) return out;
+        camera_api_ = G_->get_camera_api(zed.value());
+        if (not camera_api_) return out;
+    }
+    const auto Mopt = room_T_zed_matrix();   // room→zed pinned to current pose
+    if (not Mopt.has_value())
+        return out;
+    const Eigen::Matrix4d zed_T_room = Mopt.value().inverse();
+
+    const float fx = camera_api_->get_focal_x(), fy = camera_api_->get_focal_y();
+    const float W  = static_cast<float>(camera_api_->get_width());
+    const float Himg = static_cast<float>(camera_api_->get_height());
+    if (fx <= 0.f or fy <= 0.f or W <= 0.f or Himg <= 0.f)
+        return out;
+    const float cx_px = W * 0.5f, cy_px = Himg * 0.5f;
+
+    // Hashed pixel-cell coverage of the current YOLO foreground, split table (occupancy) vs other (occluder).
+    // A CELL-px cell absorbs mask-boundary jitter and makes membership O(1). Key packs the two cell indices.
+    const auto& pkt = mask_ingestor_->packet();
+    if (not pkt.valid or pkt.mask_pixels.empty())
+        return out;
+    constexpr float CELL = 6.0f;
+    const auto key = [&](float col, float row) -> std::int64_t
+    {
+        const std::int64_t cx = static_cast<std::int64_t>(std::floor(col / CELL));
+        const std::int64_t cy = static_cast<std::int64_t>(std::floor(row / CELL));
+        return (cx << 32) ^ (cy & 0xffffffffLL);
+    };
+    std::unordered_set<std::int64_t> table_cells, occluder_cells;
+    for (const auto& sl : pkt.slices)
+    {
+        const std::size_t b = std::min(sl.pixel_begin, pkt.mask_pixels.size());
+        const std::size_t e = std::min(sl.pixel_end,   pkt.mask_pixels.size());
+        auto& dst = (sl.label == "table") ? table_cells : occluder_cells;
+        for (std::size_t i = b; i < e; ++i)
+            dst.insert(key(pkt.mask_pixels[i].x(), pkt.mask_pixels[i].y()));
+    }
+
+    const auto& s = inst.ai2_belief.state();
+    const float c = std::cos(s.yaw), sn = std::sin(s.yaw), hw = 0.5f * s.w, hd = 0.5f * s.h;
+
+    // Classify ONE room-frame silhouette sample: project it, then vote occupancy / absence / occlusion. A
+    // sample lit by a "table" mask is occupancy; lit by nothing is ABSENCE (the "gone" signal that fires even
+    // with NO YOLO mask); lit by a non-table mask is OCCLUDED (a nearer object hides the point) ⇒ HOLD.
+    const auto classify = [&](float lx, float ly, float lz)
+    {
+        const Eigen::Vector4d Pr(s.cx + c * lx - sn * ly, s.cy + sn * lx + c * ly, lz, 1.0);
+        const Eigen::Vector4d Pc = zed_T_room * Pr;
+        const double X = Pc.x(), Y = Pc.y(), Z = Pc.z();
+        if (Y <= 0.20) return;                                         // behind / at the image plane
+        const float col = cx_px + static_cast<float>(X / Y) * fx;
+        const float row = cy_px - static_cast<float>(Z / Y) * fy;
+        if (col < 0.f or col >= W or row < 0.f or row >= Himg) return; // out of frame ⇒ not detectable
+        const std::int64_t k = key(col, row);
+        if (table_cells.contains(k))          { ++out.n_detectable; out.e_occ  += 1.0f; }  // still there
+        else if (occluder_cells.contains(k))  { /* nearer object hides it ⇒ HOLD (not detectable) */ }
+        else                                  { ++out.n_detectable; out.e_free += 1.0f; }  // predicted-but-absent
+    };
+
+    // (a) tabletop TOP face (z = H): regular grid over the footprint.
+    constexpr int NX = 24, NY = 24;
+    for (int ix = 0; ix < NX; ++ix)
+        for (int iy = 0; iy < NY; ++iy)
+            classify((-1.0f + 2.0f * (ix + 0.5f) / NX) * hw, (-1.0f + 2.0f * (iy + 0.5f) / NY) * hd, s.H);
+
+    // (b) the 4 LEGS (vertical axes at the inset corners, floor→join): valuable extra evidence, especially from
+    // edge-on/low views where the top face projects to a thin sliver — the legs project BELOW the tabletop and
+    // extend the detectable footprint (occupancy when masked, absence when the volume is empty).
+    const float leg_top = std::max(0.0f, s.H - rc::TableModel::TOP_THICKNESS);
+    const float inset    = rc::TableModel::LEG_RADIUS;
+    constexpr int NZ = 16;
+    for (const float sx : {-1.0f, 1.0f})
+        for (const float sy : {-1.0f, 1.0f})
+        {
+            const float lx = sx * std::max(0.0f, hw - inset), ly = sy * std::max(0.0f, hd - inset);
+            for (int iz = 0; iz < NZ; ++iz)
+                classify(lx, ly, leg_top * (iz + 0.5f) / NZ);
+        }
+    return out;
 }
 
 // ─── Voxel bank (table-owned historical memory) ──────────────────────────────

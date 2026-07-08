@@ -91,10 +91,28 @@ void SpecificWorker::setup_custom_viewers()
         connect(models_btn, &QPushButton::toggled, this, [this, models_btn](bool checked)
         {
             ricoh_model_overlay_enabled_ = checked;
-            if (not checked) ricoh_scene_.valid = false;   // stop drawing a stale scene until refreshed
+            if (not checked and not ricoh_lidar_overlay_enabled_) ricoh_scene_.valid = false;
             models_btn->setText(checked ? "Models: ON" : "Models: OFF");
         });
+
+        // Lidar reprojection overlay: lidar points projected into the panorama, coloured by range
+        // (sparse depth / calibration check). Starts OFF.
+        auto* lidar_btn = new QPushButton(ricoh_lidar_overlay_enabled_ ? "Lidar: ON" : "Lidar: OFF", ricoh_panel);
+        lidar_btn->setCheckable(true);
+        lidar_btn->setChecked(ricoh_lidar_overlay_enabled_);
+        lidar_btn->setCursor(Qt::PointingHandCursor);
+        lidar_btn->setStyleSheet(QString(
+            "QPushButton { border: 2px solid %1; border-radius: 4px; padding: 3px 8px; }"
+            "QPushButton:checked { background-color: %1; color: #101010; }").arg("#8C9EC7"));
+        connect(lidar_btn, &QPushButton::toggled, this, [this, lidar_btn](bool checked)
+        {
+            ricoh_lidar_overlay_enabled_ = checked;
+            if (not checked and not ricoh_model_overlay_enabled_) ricoh_scene_.valid = false;
+            lidar_btn->setText(checked ? "Lidar: ON" : "Lidar: OFF");
+        });
+
         controls->addWidget(models_btn);
+        controls->addWidget(lidar_btn);
         controls->addStretch(1);
 
         ricoh_layout->addLayout(controls);

@@ -180,6 +180,7 @@ class SpecificWorker : public GenericWorker
 
         // Ricoh-360 counterpart of the ZED Models overlay (equirectangular projection, wireframe).
         bool ricoh_model_overlay_enabled_ = false;   // Ricoh-window "Models" toggle (starts OFF)
+        bool ricoh_lidar_overlay_enabled_ = false;   // Ricoh-window "Lidar" toggle: reprojected sparse depth (starts OFF)
         std::unique_ptr<rc::RicohProjectionOverlay> ricoh_model_overlay_;
         // The ricoh popup renders in on_render_tick (not compute), so cache the last scene the overlay
         // needs. Both run on the Qt main thread → no lock. Updated at the end of each compute() frame.
@@ -188,6 +189,7 @@ class SpecificWorker : public GenericWorker
             std::vector<GraphObjectBox> boxes;
             Mat::RTMat                  room_T_ricoh = Mat::RTMat::Identity();
             std::vector<float>          poly_x, poly_y;
+            std::vector<Eigen::Vector3f> lidar_room;   // room-frame lidar sweep, for the reprojected-depth overlay
             float                       room_height = 0.f;
             bool                        valid = false;
         };

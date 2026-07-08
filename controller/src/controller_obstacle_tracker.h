@@ -47,6 +47,13 @@ class ControllerObstacleTracker
                                             const Eigen::Vector2f &blockage_center_room,
                                             float blockage_radius_m,
                                             rc::TrajectoryController &path_controller);
+        // Inject a purely GEOMETRIC, LOCAL-ONLY obstacle at `center` (room frame). Unlike the
+        // temporary LiDAR obstacles above, this needs no LiDAR support (it's built from geometry,
+        // not observed points) and is NEVER uploaded to DSR — it is appended to the planner/MPPI
+        // obstacle set each cycle and pruned on its TTL. Used by stuck recovery to force a detour
+        // around something residual_concept never modelled. Refreshes an existing disc that already
+        // covers the same spot instead of stacking duplicates.
+        void add_virtual_obstacle(std::uint64_t now_ms, const Eigen::Vector2f &center, float radius_m);
         // Proactive "everything unmodelled is an obstacle" sweep (throttled internally): cluster the
         // recent LiDAR returns that no concept-agent object explains and aren't the floor/walls/robot,
         // and create/refresh one temporary obstacle per cluster. The existing existence-filter / prune
@@ -192,6 +199,15 @@ class ControllerObstacleTracker
         int obstacle_label_count_ = 0;                               // shared o_N counter (graph + temp)
         std::vector<TemporaryObstacleInstance> temporary_obstacles_;
         std::uint64_t next_temporary_obstacle_id_ = 1;
+
+        // Local-only geometric obstacles (stuck recovery). Planner/MPPI-visible, never DSR-synced.
+        struct VirtualObstacle
+        {
+            Eigen::Vector2f center = Eigen::Vector2f::Zero();
+            float radius_m = 0.30f;
+            std::uint64_t expires_at_ms = 0;
+        };
+        std::vector<VirtualObstacle> virtual_obstacles_;
         std::uint64_t last_scan_ms_ = 0;   // throttle for scan_for_unmodelled_obstacles
         mutable std::optional<std::uint64_t> last_lidar_timestamp_ms_;   // stamp of the scan actually buffered
         std::optional<std::uint64_t> newest_raw_lidar_ts_;               // newest RAW stamp (dedup + period)

@@ -533,6 +533,11 @@ void SpecificWorker::load_params()
 	load_optional_cast<double>("Controller.EscapeSideProbeM",   params.escape_side_probe_m);
 	load_optional_cast<double>("Controller.EscapeRearProbeM",   params.escape_rear_probe_m);
 	load_optional_cast<double>("Controller.EscapeRearMinM",     params.escape_rear_min_m);
+	load_optional_cast<double>("Controller.StuckVirtualObstacleRadiusM",  params.stuck_virtual_obstacle_radius_m);
+	load_optional_cast<double>("Controller.StuckVirtualObstacleForwardM", params.stuck_virtual_obstacle_forward_m);
+	int stuck_virtual_obstacle_ttl_ms = static_cast<int>(params.stuck_virtual_obstacle_ttl_ms);
+	load_optional("Controller.StuckVirtualObstacleTTLms", stuck_virtual_obstacle_ttl_ms);
+	params.stuck_virtual_obstacle_ttl_ms = static_cast<std::uint64_t>(std::max(0, stuck_virtual_obstacle_ttl_ms));
 	load_optional("Controller.ProximityLogEnabled",             params.proximity_log_enabled);
 	load_optional("Controller.ProximityCsvPath",                params.proximity_csv_path);
 	load_optional_cast<double>("Controller.ProximityLogDistance", params.proximity_log_distance_m);

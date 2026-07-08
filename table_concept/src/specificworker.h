@@ -38,6 +38,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <chrono>
 
 #include <genericworker.h>
 #include <Eigen/Dense>
@@ -54,6 +55,7 @@
 #include "table_affordance.h"
 #include "table_model.h"
 #include "../../common/dashboard/custom_widget.h"
+#include "../../common/dashboard/evidence_monitor.h"
 #include "../../common/dashboard/timeseries_plot.h"
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 
@@ -158,6 +160,13 @@ private:
     rc::TimeSeriesPlot*  ts_ce_plot_    = nullptr;   // belief size posterior std σ_w/σ_h (mm)
     void restore_dashboard_geometry();
     void save_dashboard_geometry() const;
+
+    // Live "evidence consuming" monitor — its OWN top-level window (per-instance snapshot + global counters).
+    rc::EvidenceMonitor* evidence_monitor_ = nullptr;
+    rc::EvidenceGlobals  ev_g_{};                       // pipeline counters (per-cycle fields reset in compute)
+    void refresh_evidence_monitor();                    // throttled build+push of the snapshot (main thread)
+    std::chrono::steady_clock::time_point last_monitor_tp_{};   // ~5 Hz throttle
+    std::chrono::steady_clock::time_point last_compute_tp_{};   // compute-rate EMA
 
     std::unique_ptr<DSR::RT_API>                        rt_api_;
     std::unique_ptr<DSR::InnerEigenAPI>                inner_eigen_;     // for room↔body↔zed extrinsic (silhouette)

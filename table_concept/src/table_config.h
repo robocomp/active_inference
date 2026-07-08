@@ -88,6 +88,14 @@ struct TableConfig
     float coverage_precision   = 0.0f;
     float coverage_robust_c_m  = 0.15f;
 
+    // Free-space / VACATE (EXISTENCE_BELIEF_PLAN.md Step 4): the counter-force that BOUNDS coverage. A LiDAR
+    // beam that traverses the TOP-SLAB z-band and continues beyond (endpoint past the far face) demonstrates
+    // that slab region is EMPTY → a shrink-only pull retreats the tabletop boundary past the empty crossing.
+    // Coverage occupies where masked; free-space vacates where the beam passed through. Together they settle
+    // the extent where camera and LiDAR agree, so coverage can no longer run away onto clutter. 0=OFF. Needs
+    // the LiDAR sweep staged (auto-staged whenever this OR LidarPrecision > 0).
+    float free_space_precision = 0.0f;
+
     // Existence / removal (common/existence_belief.h): each cycle carve the LiDAR sweep against the table
     // footprint → occupancy/free-space log-odds; remove when P(occupied) < removal_prob. Evidence-based, not a
     // miss counter. OFF by default (a mis-removal deletes furniture); enable to replace merge-only removal.
