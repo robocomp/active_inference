@@ -406,7 +406,7 @@ void SpecificWorker::compute()
                 for (const auto& ex : explainers) if (ex(p)) return true;
                 return false;
             };
-        const auto comps = grid_.occupied_components(2, cell_explained);
+        const auto comps = grid_.occupied_components(2, cell_explained, grid_.params().inflate_radius_m);
         static int gc = 0;
         if ((gc++ % 20) == 0)
         {
@@ -414,236 +414,13 @@ void SpecificWorker::compute()
             std::println("[grid] residual components={} max_cells={} (walls/specialists subtracted at read-out)",
                          comps.size(), maxc);
         }
-        publish_grid_display(cell_explained);   // `grid` node under room: residual cell centres for the 3-D viewer
+        // `grid` node under room: residual cells + inflated border (display) + inflated component hulls
+        // (`grid_polygons`, encoded) which the controller reads and plans against alongside the known objects.
+        // Residual obstacle NODES are no longer uploaded.
+        publish_grid_display(cell_explained, comps);
     }
 
-    // ZED dense-depth: pump the depth + cache the camera→room transform (at the depth stamp), then backproject
-    // the WHOLE FoV into a dense room-frame cloud. It is fed into clustering ALONGSIDE the LiDAR sweep so
-    // forward objects (the ZED sees ~110°/5 m densely) get plenty of points → detected earlier and sized
-    // better than sparse LiDAR alone. Floor/walls/specialists are subtracted by the same explainers.
-    zed_ready_ = false;
-    std::vector<Eigen::Vector3f> zed_scene;
-    // A rigid transform is sane iff finite, its rotation columns are ~unit, and its translation is inside the
-    // room envelope. The RT interpolator can EXTRAPOLATE to garbage (non-orthonormal → ~1e31) on a stale/bad
-    // depth timestamp — that scatters the ZED cloud (and, projected, throws the viewer's boxes wildly off).
-    const auto sane_rt = [](const Eigen::Matrix4f& M)
-    {
-        if (not M.allFinite()) return false;
-        for (int c = 0; c < 3; ++c) { const float n = M.block<3, 1>(0, c).norm(); if (n < 0.5f or n > 2.0f) return false; }
-        return std::abs(M(0, 3)) < 50.0f and std::abs(M(1, 3)) < 50.0f and std::abs(M(2, 3)) < 10.0f;
-    };
-    if (zed_ingestor_)
-    {
-        zed_ingestor_->pump();
-        if (zed_ingestor_->has_depth() and inner_eigen_)
-        {
-            bool got = false;
-            // Try the depth stamp first (pose at capture time); fall back to latest (0) if it extrapolated to garbage.
-            for (const std::uint64_t stamp : {zed_ingestor_->stamp_ms(), std::uint64_t{0}})
-            {
-                const auto T = inner_eigen_->get_transformation_matrix("room", "zed", stamp);
-                if (not T.has_value()) continue;
-                Eigen::Matrix4f m;
-                { const auto& s = T.value().matrix(); for (int i = 0; i < 4; ++i) for (int j = 0; j < 4; ++j) m(i, j) = static_cast<float>(s(i, j)); }
-                if (sane_rt(m)) { room_T_cam_ = m; got = true; if (stamp != 0) break; else { static int fb = 0; if ((fb++ % 30) == 0) std::println("[ResidualZed] room_T_zed at depth-stamp was GARBAGE → using latest RT (timestamp extrapolation)"); } break; }
-            }
-            zed_ready_ = got;
-            if (not got) { static int w = 0; if ((w++ % 30) == 0) std::println("[ResidualZed] room_T_zed GARBAGE at BOTH depth-stamp and latest — ZED skipped (RT chain bad, not just the stamp)"); }
-            if (zed_ready_ and cfg_.zed_detection_enabled)
-            {
-                zed_scene = rc::backproject_fov(zed_ingestor_->depth(), zed_ingestor_->intrinsics(),
-                                                room_T_cam_, cfg_.zed_boost);
-                // ROBUST infrastructure subtraction on the dense ZED cloud BEFORE it joins detection: remove
-                // floor/ceiling/wall with a band that grows as the ZED's own depth noise (σ0 + q·range²), so a
-                // small calibration offset or far-range degradation can't leak a sheet that bridges objects.
-                const Eigen::Vector3f zed_origin = room_T_cam_.block<3, 1>(0, 3);   // ZED position in room
-                zed_scene = rc::ResidualClusterer::subtract_infrastructure(
-                    zed_scene, zed_origin, read_room_polygon(), cfg_.zed_infra);
-            }
-        }
-    }
-
-    // One-shot ZED explainer breakdown (runs even with the detection feed OFF): shows why the dense ZED cloud
-    // over-connects — how many ZED points each explainer removes vs keeps, plus the z-range and the MEAN z of
-    // kept LOW points. If floor ZED points survive with mean z ≈ 0.1–0.2, the ZED→room z is offset (floor
-    // lifted above the band) → that is the bridging cause. Read etc/residual_zed_filter_stats.csv off disk.
-    {
-        static bool zed_once = false;
-        if (zed_ready_ and not zed_once)
-        {
-            zed_once = true;
-            const auto zc = rc::backproject_fov(zed_ingestor_->depth(), zed_ingestor_->intrinsics(),
-                                                room_T_cam_, cfg_.zed_boost);
-            std::vector<int> cnt(explainers.size(), 0);
-            int kept = 0, low = 0, low_kept = 0; double low_kept_z = 0.0;
-            float zmn = 1e9f, zmx = -1e9f;
-            for (const auto& p : zc)
-            {
-                zmn = std::min(zmn, p.z()); zmx = std::max(zmx, p.z());
-                int hit = -1;
-                for (int i = 0; i < static_cast<int>(explainers.size()); ++i) if (explainers[i](p)) { hit = i; break; }
-                const bool is_low = p.z() < 0.30f;
-                if (is_low) ++low;
-                if (hit < 0) { ++kept; if (is_low) { ++low_kept; low_kept_z += p.z(); } } else ++cnt[hit];
-            }
-            int objs = 0; for (std::size_t i = 4; i < cnt.size(); ++i) objs += cnt[i];
-            std::ofstream f("etc/residual_zed_filter_stats.csv", std::ios::out | std::ios::trunc);
-            if (f.is_open())
-                f << "total,floor,ceiling,robot,wall,objects,kept,zmin,zmax,low_below0.30,low_kept,low_kept_meanz\n"
-                  << zc.size() << ',' << (cnt.size() > 0 ? cnt[0] : 0) << ',' << (cnt.size() > 1 ? cnt[1] : 0) << ','
-                  << (cnt.size() > 2 ? cnt[2] : 0) << ',' << (cnt.size() > 3 ? cnt[3] : 0) << ',' << objs << ','
-                  << kept << ',' << zmn << ',' << zmx << ',' << low << ',' << low_kept << ','
-                  << (low_kept ? low_kept_z / low_kept : 0.0) << '\n';
-        }
-    }
-
-    // Combined detection cloud = LiDAR sweep (360°, sparse) + dense ZED FoV points (forward, dense, already
-    // infrastructure-subtracted → only object residual survives, no floor/wall sheet to bridge).
-    if (cfg_.zed_detection_enabled)   // how many ZED points survived robust subtraction (should be ~object mass)
-    {
-        static int zc = 0;
-        if ((zc++ % 20) == 0) std::println("[ResidualZed] residual ZED points after infra-subtract = {}", zed_scene.size());
-    }
-    std::vector<Eigen::Vector3f> cloud = lidar_ingestor_->sweep_room();
-    cloud.insert(cloud.end(), zed_scene.begin(), zed_scene.end());
-    clusters_ = clusterer_.extract(cloud, explainers);
-    std::size_t max_pre = 0; for (const auto& c : clusters_) max_pre = std::max(max_pre, c.points.size());
-    // Navigation fragment-merge: coalesce clusters closer than the bridge gap into ONE obstacle (a LiDAR-
-    // shattered tabletop's ring-arcs). Clearance for "can't fit between" belongs to the planner (C-space).
-    clusters_ = rc::ResidualClusterer::merge_close_clusters(std::move(clusters_), cfg_.cluster.merge_gap_m);
-    {   // BLOB DIAGNOSTIC: is a room-sized cluster forming, and does the MERGE create it (post≫pre) or DBSCAN?
-        std::size_t max_post = 0; for (const auto& c : clusters_) max_post = std::max(max_post, c.points.size());
-        static int mc = 0;
-        if ((mc++ % 20) == 0)
-            std::println("[cluster] n={} max_npts pre-merge={} post-merge={}", clusters_.size(), max_pre, max_post);
-    }
-
-    // One-shot LiDAR-vs-room-model OFFSET measurement. The room polygon (inner wall surface) is TRUSTED
-    // ground truth — the LiDAR should hit the walls ON it. If wall-height returns land systematically INSIDE
-    // it (mean signed distance < 0), the raw LiDAR is PULLED IN toward the sensor by that amount — which is
-    // exactly the residual-box bias the user sees (floor/walls/table project fine because they're model-based;
-    // only residual uses raw LiDAR). A near-zero mean ⇒ LiDAR is faithful and the pull-in is elsewhere.
-    {
-        static bool wall_once = false;
-        if (not wall_once)
-        {
-            wall_once = true;
-            const auto poly = read_room_polygon();
-            if (poly.size() >= 3)
-            {
-                const auto& sw = lidar_ingestor_->sweep_room();
-                int n = 0, inside = 0; double sum_signed = 0.0;
-                for (const auto& p : sw)
-                {
-                    if (p.z() < 0.20f or p.z() > 1.60f) continue;                 // wall-height band (skip floor/ceiling)
-                    const Eigen::Vector2f xy = p.head<2>();
-                    const float d = rc::ResidualClusterer::dist_to_polygon_boundary(poly, xy);
-                    if (d > 0.40f) continue;                                      // only returns NEAR a wall
-                    const bool in = rc::ResidualClusterer::point_in_polygon(poly, xy);
-                    sum_signed += in ? -d : d; if (in) ++inside; ++n;             // inside = negative = pulled in
-                }
-                std::ofstream f("etc/residual_wall_offset.csv", std::ios::out | std::ios::trunc);
-                if (f.is_open())
-                    f << "n_near_wall,mean_signed_dist_inside_neg,inside,outside,robot_x,robot_y\n"
-                      << n << ',' << (n ? sum_signed / n : 0.0) << ',' << inside << ',' << (n - inside) << ','
-                      << robot_xy.x() << ',' << robot_xy.y() << '\n';
-            }
-        }
-    }
-
-    // Diagnostic CSV (read directly off disk — no terminal paste). One row per cluster with the sweep/
-    // specialists/room_poly counts (room_poly=0 ⇒ walls flood; specialists=0 ⇒ nothing subtracted) plus
-    // each cluster's footprint + z-band + point count, so wall/subtraction issues are diagnosable by file.
-    if (not cfg_.diag_csv_path.empty())
-    {
-        if (not diag_csv_.is_open())
-        {
-            diag_csv_.open(cfg_.diag_csv_path, std::ios::out | std::ios::trunc);
-            if (diag_csv_.is_open())
-                diag_csv_ << "cycle,ts,sweep,specialists,explainers,clusters,instances,idx,cx,cy,w,d,zmin,zmax,npts,ox,oy\n";
-        }
-        if (diag_csv_.is_open())
-        {
-            ++diag_cycle_;
-            const std::size_t sweep_n = lidar_ingestor_->sweep_room().size();
-            const std::size_t inst_n  = fitter_->instances().size();
-            const auto pre = [&](int idx) {
-                diag_csv_ << diag_cycle_ << ',' << current_ts_ << ',' << sweep_n << ',' << specialists.size()
-                          << ',' << explainers.size() << ',' << clusters_.size() << ',' << inst_n << ',' << idx << ',';
-            };
-            const float ox = robot_xy_.x(), oy = robot_xy_.y();   // sensor origin (room) — registration check
-            if (clusters_.empty()) { pre(-1); diag_csv_ << ",,,,,,," << ox << ',' << oy << '\n'; }
-            for (int i = 0; i < static_cast<int>(clusters_.size()); ++i)
-            {
-                const auto& c = clusters_[i];
-                pre(i);
-                diag_csv_ << c.centroid.x() << ',' << c.centroid.y() << ',' << c.w_seed << ',' << c.d_seed
-                          << ',' << c.z_min << ',' << c.z_max << ',' << c.points.size()
-                          << ',' << ox << ',' << oy << '\n';
-            }
-            diag_csv_.flush();
-        }
-    }
-
-    // One-time per-explainer breakdown (which model accounts for how many returns): floor / ceiling / robot /
-    // wall / objects / kept. All unified — no geometric-threshold masks. Read off disk, no terminal paste.
-    {
-        static bool once = false;
-        if (not once)
-        {
-            once = true;
-            const auto& sw = lidar_ingestor_->sweep_room();
-            std::vector<int> cnt(explainers.size(), 0);
-            int kept = 0;
-            for (const auto& p : sw)
-            {
-                int hit = -1;
-                for (int i = 0; i < static_cast<int>(explainers.size()); ++i)
-                    if (explainers[i](p)) { hit = i; break; }
-                if (hit < 0) ++kept; else ++cnt[hit];
-            }
-            const auto at = [&](std::size_t i) { return i < cnt.size() ? cnt[i] : 0; };
-            int objs = 0; for (std::size_t i = 4; i < cnt.size(); ++i) objs += cnt[i];
-            std::ofstream f("etc/residual_filter_stats.csv", std::ios::out | std::ios::trunc);
-            if (f.is_open())
-            {
-                f << "total,floor,ceiling,robot,wall,objects,kept,robot_x,robot_y\n";
-                f << sw.size() << ',' << at(0) << ',' << at(1) << ',' << at(2) << ',' << at(3) << ','
-                  << objs << ',' << kept << ',' << robot_xy.x() << ',' << robot_xy.y() << '\n';
-            }
-        }
-    }
-
-    cluster_centroids_.clear();
-    for (const auto& c : clusters_) cluster_centroids_.push_back(c.centroid);
-    fitter_->set_clusters(&clusters_);
-
-    // ZED pipeline diagnostic (throttled): pinpoints which gate blocks the ZED feed when it stays empty.
-    {
-        static int zc = 0;
-        if ((zc++ % 20) == 0)
-        {
-            const bool has_ing = static_cast<bool>(zed_ingestor_);
-            const bool has_dep = has_ing and zed_ingestor_->has_depth();
-            std::println("[ResidualZed] ingestor={} has_depth={} stamp={} zed_node={} tf_ok(zed_ready)={} "
-                         "instances={}",
-                         has_ing, has_dep, has_ing ? zed_ingestor_->stamp_ms() : 0,
-                         G->get_node("zed").has_value(), zed_ready_, fitter_->instances().size());
-        }
-    }
-
-    run_instance_tracker(specialists);
-
-    for (const auto& node : G->get_nodes_by_type("obstacle"))
-        if (node.name().rfind("residual_", 0) == 0)
-            process_residual_node(node);
-
-    remove_by_occupancy_evidence();   // compelling free-space evidence, not a miss counter
-    dissolve_explained_instances(specialists);
-
-    // Keep the DSR graph tidy: if any obstacle node was created or deleted this cycle, re-run the radial
-    // (twopi) layout ONCE — coalesced here rather than per-op so a multi-birth/death cycle triggers a single
-    // relayout instead of a burst. No-op when headless (no graph viewer).
+    // Keep the DSR graph tidy: relayout once if a node was created/deleted this cycle (no-op when headless).
     if (graph_dirty_)
     {
         trigger_graph_layout_twopi();
@@ -816,7 +593,9 @@ void SpecificWorker::run_instance_tracker(const std::vector<rc::SpecialistSdf>& 
     }
 }
 
-void SpecificWorker::publish_grid_display(const rc::OccupancyGrid::CellExplained& explained)
+
+void SpecificWorker::publish_grid_display(const rc::OccupancyGrid::CellExplained& explained,
+                                          const std::vector<rc::OccComponent>& comps)
 {
     static int t = 0;
     if ((t++ % 5) != 0) return;                         // ~2 Hz display update (attr-only; no node churn)
@@ -842,12 +621,33 @@ void SpecificWorker::publish_grid_display(const rc::OccupancyGrid::CellExplained
         if (not gopt.has_value()) return;
     }
 
-    // Residual cell centres (occupied ∧ ¬explained), flat [x0,y0,x1,y1,…] room-frame, + the cell size, so the
-    // voxelizer can draw a square per cell. The z-band could follow later; a flat display height is enough now.
+    // Residual cell centres (occupied ∧ ¬explained), published as the REGISTERED `residual_pts` attribute
+    // (flat x,y,z triples, room frame; z = a small display height). runtime_checked rejects unregistered
+    // names, so we reuse residual_pts (a vector<float>) rather than a bespoke grid attr. Voxelizer reads it
+    // off the `grid` node and draws a cell per point.
     auto gn = gopt.value();
-    std::vector<float> cells = grid_.residual_cell_centres(explained);
-    G->runtime_checked_add_or_modify_attrib_local(gn, "grid_cells_xy", cells);
-    G->runtime_checked_add_or_modify_attrib_local(gn, "grid_cell_size", static_cast<float>(grid_.params().cell_size_m));
+    const auto to_xyz = [](const std::vector<float>& xy) {
+        std::vector<float> xyz; xyz.reserve(xy.size() / 2 * 3);
+        for (std::size_t i = 0; i + 1 < xy.size(); i += 2) { xyz.push_back(xy[i]); xyz.push_back(xy[i + 1]); xyz.push_back(0.02f); }
+        return xyz;
+    };
+    // Two display layers (dedicated, type-checked grid attrs): grid_occupied_cells = raw OCCUPIED cells
+    // (colour A); grid_border_cells = the INFLATED half-robot-width clearance ring (colour B).
+    G->add_or_modify_attrib_local<grid_occupied_cells_att>(gn, to_xyz(grid_.residual_cell_centres(explained)));
+    G->add_or_modify_attrib_local<grid_border_cells_att>  (gn, to_xyz(grid_.inflated_border_centres(explained, grid_.params().inflate_radius_m)));
+    G->add_or_modify_attrib_local<grid_cell_size_att>     (gn, static_cast<float>(grid_.params().cell_size_m));
+
+    // Inflated component HULLS for the CONTROLLER's planner, encoded in grid_obstacle_hulls:
+    //   [ P, (V, x0,y0, …, x_{V-1},y_{V-1}) × P ]   — P polygons, each V vertices (room-frame footprint,
+    // already half-robot-width inflated). The controller decodes this and plans around each hull together
+    // with the known object boxes.
+    std::vector<float> poly; poly.push_back(static_cast<float>(comps.size()));
+    for (const auto& c : comps)
+    {
+        poly.push_back(static_cast<float>(c.hull.size()));
+        for (const auto& v : c.hull) { poly.push_back(v.x()); poly.push_back(v.y()); }
+    }
+    G->add_or_modify_attrib_local<grid_obstacle_hulls_att>(gn, std::move(poly));
     G->update_node(gn);
 }
 

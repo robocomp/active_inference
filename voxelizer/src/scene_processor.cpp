@@ -848,8 +848,9 @@ std::vector<GraphObjectBox> SceneProcessor::get_graph_object_boxes(const std::st
     const auto object_nodes   = graph_->get_nodes_by_type("object");
     const auto table_nodes    = graph_->get_nodes_by_type("table");
     const auto cylinder_nodes = graph_->get_nodes_by_type("cylinder");   // bottle_concept bottles
-    const auto obstacle_nodes = graph_->get_nodes_by_type("obstacle");   // residual_concept obstacles
-    graph_boxes.reserve(object_nodes.size() + table_nodes.size() + cylinder_nodes.size() + obstacle_nodes.size());
+    // residual_concept `obstacle` nodes are NO LONGER drawn as red boxes — the occupancy grid (amber cells,
+    // the `grid` node) is now the residual display. The obstacle nodes still exist for the controller.
+    graph_boxes.reserve(object_nodes.size() + table_nodes.size() + cylinder_nodes.size());
     auto add_boxes = [&](const auto& nodes)
     {
         for (const auto& node : nodes)
@@ -862,7 +863,6 @@ std::vector<GraphObjectBox> SceneProcessor::get_graph_object_boxes(const std::st
     add_boxes(object_nodes);
     add_boxes(table_nodes);
     add_boxes(cylinder_nodes);
-    add_boxes(obstacle_nodes);
     return graph_boxes;
 }
 
@@ -1140,22 +1140,21 @@ void SceneProcessor::update_viewer_grid()
         return;
     // residual_concept publishes a `grid` node under room: grid_cells_xy = flat [x0,y0,x1,y1,…] residual cell
     // centres (room frame), grid_cell_size = the square edge. Read them and hand cell centres to the viewer.
-    std::vector<QVector3D> cells;
-    float cell_size = 0.05f;
+    // residual_concept's `grid` node carries two layers of flat x,y,z triples: residual_pts = OCCUPIED cells
+    // (colour A), candidate_pts = the INFLATED half-robot-width clearance BORDER (colour B).
+    const auto read_pts = [](const auto& flat) {
+        std::vector<QVector3D> v; const std::size_t n = flat.size() / 3; v.reserve(n);
+        for (std::size_t i = 0; i < n; ++i) v.emplace_back(flat[3 * i], flat[3 * i + 1], flat[3 * i + 2]);
+        return v;
+    };
+    std::vector<QVector3D> cells, border;
     if (const auto g = graph_->get_node("grid"); g.has_value())
     {
-        if (const auto cs = graph_->get_attrib_by_name<grid_cell_size_att>(g.value()); cs.has_value())
-            cell_size = cs.value();
-        if (const auto xy = graph_->get_attrib_by_name<grid_cells_xy_att>(g.value()); xy.has_value())
-        {
-            const auto& flat = xy.value().get();
-            const std::size_t n = flat.size() / 2;
-            cells.reserve(n);
-            for (std::size_t i = 0; i < n; ++i)
-                cells.emplace_back(flat[2 * i], flat[2 * i + 1], 0.02f);   // z = small display height above the floor
-        }
+        if (const auto o = graph_->get_attrib_by_name<grid_occupied_cells_att>(g.value()); o.has_value()) cells  = read_pts(o.value().get());
+        if (const auto o = graph_->get_attrib_by_name<grid_border_cells_att>  (g.value()); o.has_value()) border = read_pts(o.value().get());
     }
-    voxel_viewer_->update_grid_cells(cells, cell_size);
+    voxel_viewer_->update_grid_cells(cells, 0.05f);
+    voxel_viewer_->update_grid_border(border);
 }
 
 void SceneProcessor::update_viewer_mask_points()

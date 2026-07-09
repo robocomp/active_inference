@@ -85,7 +85,8 @@ private:
 
     // PHASE-1 REBUILD: publish the residual occupancy as a `grid` node under room (cell centres + cell size)
     // for the voxelizer 3-D display. Throttled; the node is created once and its cell attribute is updated.
-    void  publish_grid_display(const rc::OccupancyGrid::CellExplained& explained);
+    void  publish_grid_display(const rc::OccupancyGrid::CellExplained& explained,
+                               const std::vector<rc::OccComponent>& comps);
 
     // ── Per-cycle orchestration ──
     void run_instance_tracker(const std::vector<rc::SpecialistSdf>& specialists);

@@ -159,6 +159,12 @@ void SpecificWorker::setup_custom_viewers()
         residual_btn->setChecked(false);
         residual_btn->setCursor(Qt::PointingHandCursor);
 
+        // Occupancy-grid display (residual_concept's rebuilt safety layer) — ON by default.
+        auto* grid_btn = new QPushButton("Grid: ON", voxel_panel);
+        grid_btn->setCheckable(true);
+        grid_btn->setChecked(true);
+        grid_btn->setCursor(Qt::PointingHandCursor);
+
         // ZED popup toggle — opens the ZED RGB window (YOLO seg overlay lives inside it). Created here;
         // the window itself is built (hidden) in the SHOW_YOLO_VIEWER block below, so the lambda
         // resolves yolo_window_ at click time.
@@ -193,6 +199,7 @@ void SpecificWorker::setup_custom_viewers()
         accent(models_btn,    "#FFC864");  // models: table-mesh amber
         accent(masks_btn,     "#EBEBF2");  // mask: white
         accent(residual_btn,  "#2633CC");  // residual: dark blue
+        accent(grid_btn,      "#CC8C0D");  // occupancy grid: amber
         if (yolo_btn)  accent(yolo_btn,  "#64C8FF");  // yolo: light blue
         if (ricoh_btn) accent(ricoh_btn, "#00D4BB");  // ricoh: teal
 
@@ -200,6 +207,7 @@ void SpecificWorker::setup_custom_viewers()
         controls_layout->addWidget(models_btn);
         controls_layout->addWidget(masks_btn);
         controls_layout->addWidget(residual_btn);
+        controls_layout->addWidget(grid_btn);
         if (yolo_btn)  controls_layout->addWidget(yolo_btn);
         if (ricoh_btn) controls_layout->addWidget(ricoh_btn);
         controls_layout->addStretch(1);
@@ -236,6 +244,13 @@ void SpecificWorker::setup_custom_viewers()
             if (voxel_viewer_gl)
                 voxel_viewer_gl->set_show_residual(checked);
             residual_btn->setText(checked ? "Residual: ON" : "Residual: OFF");
+        });
+
+        connect(grid_btn, &QPushButton::toggled, this, [this, grid_btn](bool checked)
+        {
+            if (voxel_viewer_gl)
+                voxel_viewer_gl->set_show_grid(checked);
+            grid_btn->setText(checked ? "Grid: ON" : "Grid: OFF");
         });
 
         if (yolo_btn)

@@ -1011,6 +1011,32 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
         temporary_obstacles_ = std::move(surviving_obstacles);
     }
 
+    // ── residual_concept OCCUPANCY GRID obstacles ──
+    // residual_concept no longer publishes `obstacle` nodes; it publishes a `grid` node under room whose
+    // `vec_float` attribute encodes the inflated occupancy component HULLS (already half-robot-width inflated):
+    //   [ P, (V, x0,y0, …, x_{V-1},y_{V-1}) × P ].
+    // Decode each hull and add it to the planner obstacles — so the robot plans around the residual/unmodelled
+    // world (from the grid) AND the known object boxes (read above), one unified obstacle list.
+    if (const auto g = graph_->get_node("grid"); g.has_value())
+    {
+        if (const auto opt = graph_->get_attrib_by_name<grid_obstacle_hulls_att>(g.value()); opt.has_value())
+        {
+            const auto &f = opt.value().get();
+            std::size_t i = 0;
+            const int P = (i < f.size()) ? static_cast<int>(f[i++]) : 0;
+            int added = 0;
+            for (int p = 0; p < P and i < f.size(); ++p)
+            {
+                const int V = static_cast<int>(f[i++]);
+                ControllerPolygon poly;
+                poly.reserve(static_cast<std::size_t>(std::max(0, V)));
+                for (int v = 0; v < V and i + 1 < f.size(); ++v) { poly.emplace_back(f[i], f[i + 1]); i += 2; }
+                if (poly.size() >= 3) { obstacles.push_back(std::move(poly)); ++added; }
+            }
+            report << " | grid_poly=" << added;
+        }
+    }
+
     report << " | drawn=" << obstacles.size();
     // Per-cycle obstacle/object debug prints removed (they embedded the table's wobbling size/center,
     // so the dedup reprinted every frame and clogged the console).

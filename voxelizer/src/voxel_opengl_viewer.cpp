@@ -390,6 +390,48 @@ void VoxelOpenGLViewer::update_residual_points(std::span<const QVector3D> residu
     request_update_throttled();
 }
 
+void VoxelOpenGLViewer::update_grid_cells(std::span<const QVector3D> cell_centres, float /*cell_size*/)
+{
+    std::vector<Vertex> grid_vertices;
+    grid_vertices.reserve(cell_centres.size());
+    for (const QVector3D& p : cell_centres)
+    {
+        const float fx = voxel_flip_x_ ? -1.f : 1.f;
+        const float fy = voxel_flip_y_ ? -1.f : 1.f;
+        const QVector3D mapped{fx * p.x(), p.z(), fy * p.y()};
+        grid_vertices.push_back(Vertex{mapped.x(), mapped.y(), mapped.z(), 1.00f, 0.55f, 0.05f});  // occupancy grid: amber
+    }
+    {
+        std::scoped_lock lk(data_mutex_);
+        grid_vertices_ = std::move(grid_vertices);
+    }
+    request_update_throttled();
+}
+
+void VoxelOpenGLViewer::update_grid_border(std::span<const QVector3D> border_centres)
+{
+    std::vector<Vertex> v;
+    v.reserve(border_centres.size());
+    for (const QVector3D& p : border_centres)
+    {
+        const float fx = voxel_flip_x_ ? -1.f : 1.f;
+        const float fy = voxel_flip_y_ ? -1.f : 1.f;
+        const QVector3D mapped{fx * p.x(), p.z(), fy * p.y()};
+        v.push_back(Vertex{mapped.x(), mapped.y(), mapped.z(), 0.10f, 0.75f, 0.85f});  // clearance border: cyan
+    }
+    {
+        std::scoped_lock lk(data_mutex_);
+        grid_border_vertices_ = std::move(v);
+    }
+    request_update_throttled();
+}
+
+void VoxelOpenGLViewer::set_show_grid(bool show)
+{
+    show_grid_ = show;
+    request_update_throttled();
+}
+
 void VoxelOpenGLViewer::update_mask_points(std::span<const QVector3D> positions,
                                            std::span<const std::string> categories)
 {
@@ -700,6 +742,8 @@ void VoxelOpenGLViewer::paintGL()
     std::vector<Vertex> lidar_draw_vertices;
     std::vector<Vertex> residual_draw_vertices;
     std::vector<Vertex> mask_draw_vertices;
+    std::vector<Vertex> grid_draw_vertices;
+    std::vector<Vertex> grid_border_draw_vertices;
     {
         std::scoped_lock lk(data_mutex_);
         n_lidar_vertices = lidar_vertices_.size();
@@ -708,10 +752,14 @@ void VoxelOpenGLViewer::paintGL()
         lidar_draw_vertices = lidar_vertices_;
         residual_draw_vertices = residual_vertices_;
         mask_draw_vertices = mask_vertices_;
+        grid_draw_vertices = grid_vertices_;
+        grid_border_draw_vertices = grid_border_vertices_;
     }
     const bool has_lidar = n_lidar_vertices > 0;
     const bool has_residual = n_residual_vertices > 0;
     const bool has_mask = n_mask_vertices > 0;
+    const bool has_grid = not grid_draw_vertices.empty();
+    const bool has_grid_border = not grid_border_draw_vertices.empty();
 
     const float cp = std::cos(pitch_);
     const QVector3D eye(
@@ -758,6 +806,39 @@ void VoxelOpenGLViewer::paintGL()
         program_.setUniformValue("u_round_points", 1);
         program_.setUniformValue("u_point_size", 6.0f);
         glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(residual_draw_vertices.size()));
+        program_.setUniformValue("u_point_size", 4.5f);
+        room_vbo_.release();
+        room_vao_.release();
+        glEnable(GL_DEPTH_TEST);
+    }
+
+    // residual_concept occupancy grid — inflated clearance BORDER first (cyan, under the obstacle), then the
+    // OCCUPIED cells (amber) on top, both square cell-like points. Same `Grid` toggle.
+    if (has_grid_border && show_grid_)
+    {
+        glDisable(GL_DEPTH_TEST);
+        room_vao_.bind();
+        room_vbo_.bind();
+        room_vbo_.allocate(grid_border_draw_vertices.data(), static_cast<int>(grid_border_draw_vertices.size() * sizeof(Vertex)));
+        program_.setUniformValue("u_round_points", 0);
+        program_.setUniformValue("u_point_size", 5.0f);
+        glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(grid_border_draw_vertices.size()));
+        program_.setUniformValue("u_round_points", 1);
+        program_.setUniformValue("u_point_size", 4.5f);
+        room_vbo_.release();
+        room_vao_.release();
+        glEnable(GL_DEPTH_TEST);
+    }
+    if (has_grid && show_grid_)
+    {
+        glDisable(GL_DEPTH_TEST);
+        room_vao_.bind();
+        room_vbo_.bind();
+        room_vbo_.allocate(grid_draw_vertices.data(), static_cast<int>(grid_draw_vertices.size() * sizeof(Vertex)));
+        program_.setUniformValue("u_round_points", 0);      // square points → cell-like
+        program_.setUniformValue("u_point_size", 5.0f);
+        glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(grid_draw_vertices.size()));
+        program_.setUniformValue("u_round_points", 1);
         program_.setUniformValue("u_point_size", 4.5f);
         room_vbo_.release();
         room_vao_.release();
