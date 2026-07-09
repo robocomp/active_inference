@@ -48,6 +48,10 @@ struct ResidualConfig
     // Feed the dense ZED FoV cloud into DETECTION (clustering). Safe once the dense floor/wall subtraction is
     // range-noise robust (zed_infra below) — otherwise dense depth bridges distinct objects into a mega-blob.
     bool          zed_detection_enabled = false;
+    // Feed the dense ZED FoV cloud into the OCCUPANCY GRID (as a second sensor after LiDAR). LiDAR rings only
+    // graze horizontal surfaces (tabletops) so they never fill; the ZED depth camera covers them densely, and
+    // the extra evidence per cell is what makes the costmap costmap-stable. Own ray origin (camera) → carve OK.
+    bool          grid_zed_enabled = true;
     // Robust infrastructure subtraction for the dense ZED cloud: floor/ceiling/wall removed with a band that
     // grows as the ZED's own depth noise (σ0 + q·range²), so a calibration offset / far-range blur can't leak.
     ResidualClusterer::DepthInfraParams zed_infra;

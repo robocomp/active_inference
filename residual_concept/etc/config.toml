@@ -155,6 +155,9 @@ FeedDetection = true    # RE-ENABLED 2026-07-08: the mega-blob was the MERGE (no
                         # infra-subtract). With merge off, dense ZED is the RIGHT way to coalesce a real surface
                         # (fills the tabletop so it clusters as ONE table) without chaining distinct objects — and
                         # it covers the near-field-ahead LiDAR blind zone. Watch [cluster] max_npts for any blob.
+FeedGrid = true         # feed the dense ZED FoV into the OCCUPANCY GRID as a 2nd sensor (own camera ray origin).
+                        # LiDAR rings only GRAZE horizontal surfaces so tabletops never fill; ZED covers them
+                        # densely → the tabletop shows AND the per-cell evidence makes the costmap stable. OFF to A/B.
 # Robust ZED infrastructure subtraction: a point is floor/ceiling/wall if within k·σ(range) of it, where the
 # ZED stereo depth noise σ(r)=Sigma0M + SigmaQuad·r² (physical, grows with range²). Absorbs a small ZED depth
 # calibration offset AND far-range blur so a dense floor/wall sheet can't survive and bridge objects into a blob.

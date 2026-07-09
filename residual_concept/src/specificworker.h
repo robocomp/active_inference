@@ -87,6 +87,13 @@ private:
     // for the voxelizer 3-D display. Throttled; the node is created once and its cell attribute is updated.
     void  publish_grid_display(const rc::OccupancyGrid::CellExplained& explained,
                                const std::vector<rc::OccComponent>& comps);
+    // Integrate the dense ZED depth FoV into the occupancy grid as a SECOND sensor (fills LiDAR-grazed
+    // tabletops, stabilises the costmap). Camera ray origin → z-aware carve stays correct. Gated by grid_zed_enabled.
+    void  integrate_zed_into_grid();
+    // DIAGNOSTIC: append per-sweep grid dynamics to etc/grid_diag.csv (hits/misses/latched/released + the
+    // "hit_then_cleared" smoking-gun for grazing beams erasing a horizontal surface they graze). Optionally
+    // probes a rectangular region [GridProbe*] (e.g. a tabletop) reporting occupied/hit cells inside it.
+    void  log_grid_diag();
 
     // ── Per-cycle orchestration ──
     void run_instance_tracker(const std::vector<rc::SpecialistSdf>& specialists);

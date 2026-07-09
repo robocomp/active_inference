@@ -97,6 +97,7 @@ ResidualConfig load_residual_config(const ConfigLoader& cfg)
     // ── ZED dense-depth boost ──
     out.zed_boost_enabled       = getb("ZedBoost.Enabled",       true);
     out.zed_detection_enabled   = getb("ZedBoost.FeedDetection", false);   // dense ZED → clustering
+    out.grid_zed_enabled        = getb("ZedBoost.FeedGrid",      true);    // dense ZED → occupancy grid
     // Robust ZED infrastructure subtraction (reuse the floor/ceiling heights; ZED depth-noise band σ0+q·r²).
     out.zed_infra.floor_z0      = out.cluster.floor_z0;
     out.zed_infra.ceil_z        = out.cluster.ceil_z;

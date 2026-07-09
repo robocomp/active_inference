@@ -14,6 +14,7 @@
 #include <chrono>
 #include <algorithm>
 #include <cmath>
+#include <fstream>
 #include <print>
 
 #include <QCoreApplication>
@@ -375,7 +376,12 @@ void SpecificWorker::compute()
                          xmn, ymn, xmx, ymx, grid_.width(), grid_.height());
         }
         if (grid_ready_)   // integrate now (needs no explainers); read-out + publish happen after explainers below
-            grid_.integrate_sweep(lidar_ingestor_->origin_room(), lidar_ingestor_->sweep_room());
+        {
+            grid_.integrate_sweep(lidar_ingestor_->origin_room(), lidar_ingestor_->sweep_room());  // accumulate LiDAR
+            integrate_zed_into_grid();   // accumulate dense ZED FoV as a second sensor (fills grazed tabletops)
+            grid_.commit_cycle();        // ONE log-odds update per cell (hit precedence) — the stability fix
+            log_grid_diag();
+        }
     }
 
     // Robot yaw rate (rad/s) from the room<-robot RT edge, for the ego-motion point-reliability term.
@@ -593,6 +599,53 @@ void SpecificWorker::run_instance_tracker(const std::vector<rc::SpecialistSdf>& 
     }
 }
 
+
+void SpecificWorker::integrate_zed_into_grid()
+{
+    // Second sensor for the occupancy grid: the dense ZED depth FoV. LiDAR rings only GRAZE horizontal surfaces
+    // (a tabletop) so they never fill it; the ZED covers it densely, and the extra evidence per cell is what
+    // makes the costmap stable. Integrated with the CAMERA as ray origin so the z-aware ray-carve stays correct.
+    if (not cfg_.grid_zed_enabled or not zed_ingestor_ or not inner_eigen_) return;
+    zed_ingestor_->pump();                                   // main-thread drain of the newest depth frame
+    if (not zed_ingestor_->has_depth()) return;
+
+    // room←zed at the sweep stamp (Nearest — the camera pose moves with the robot).
+    const auto rt = inner_eigen_->get_transformation_matrix("room", "zed", current_ts_, "RT",
+                                                            DSR::RT_API::TimeQuery::Nearest);
+    if (not rt.has_value()) return;
+    const Eigen::Matrix4f room_T_cam = rt->matrix().cast<float>();
+    if (not room_T_cam.allFinite()) return;
+
+    const auto pts = rc::backproject_fov(zed_ingestor_->depth(), zed_ingestor_->intrinsics(),
+                                         room_T_cam, cfg_.zed_boost);
+    if (pts.empty()) return;
+    const Eigen::Vector3f cam_origin = room_T_cam.col(3).head<3>();
+    grid_.integrate_sweep(cam_origin, pts, /*begin_cycle=*/false);   // accumulate into the LiDAR sweep's cycle
+}
+
+void SpecificWorker::log_grid_diag()
+{
+    if (not grid_ready_) return;
+    const auto& d = grid_.last_sweep_diag();
+    static long cyc = 0;
+    static std::ofstream f;
+    if (not f.is_open())
+    {
+        f.open("etc/grid_diag.csv", std::ios::out | std::ios::trunc);
+        f << "cycle,occupied,hits,misses,miss_blocked_zaware,latched,released,hit_then_cleared\n";
+    }
+    f << cyc << ',' << grid_.occupied_count() << ',' << d.hits << ',' << d.misses << ','
+      << d.miss_blocked_zaware << ',' << d.cells_latched << ',' << d.cells_released << ','
+      << d.hit_then_cleared << '\n';
+    if ((cyc % 20) == 0)
+    {
+        f.flush();
+        std::println("[grid-diag] occ={} hits={} miss={} zaware_block={} latch={} release={} hit_then_cleared={}",
+                     grid_.occupied_count(), d.hits, d.misses, d.miss_blocked_zaware,
+                     d.cells_latched, d.cells_released, d.hit_then_cleared);
+    }
+    ++cyc;
+}
 
 void SpecificWorker::publish_grid_display(const rc::OccupancyGrid::CellExplained& explained,
                                           const std::vector<rc::OccComponent>& comps)
