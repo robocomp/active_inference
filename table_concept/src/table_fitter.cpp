@@ -155,6 +155,13 @@ TableFitter::TableObservation TableFitter::observe_slice(TableInstance& inst, in
         return observation;
 
     const auto& slice = masks_packet.slices[slice_index];
+    // RICOH (depth_var>0) is BEARING-ONLY now: a peripheral 360 detection has a reliable DIRECTION but a biased
+    // centroid/extent (partial oblique view), so it must NEVER touch pose/extent/birth — it drove duplicate
+    // births + drift/inflation. It is handled entirely by the attention path (process_ricoh_bearings): an
+    // unassigned ricoh bearing raises attention so the robot seeks a good ZED view. Return empty here (never
+    // fitted). Defensive — run_instance_tracker also skips ricoh from assignment, so this normally isn't reached.
+    if (slice.depth_var > 0.0f)
+        return observation;   // has_fresh_data=false ⇒ no fit
     // A slice assigned to this table ⇒ detection is alive; latch its per-slice R inputs.
     inst.frames_since_detection = 0;
     inst.last_mask_confidence   = slice.confidence;
@@ -167,23 +174,6 @@ TableFitter::TableObservation TableFitter::observe_slice(TableInstance& inst, in
     inst.last_centroid_radius = slice.centroid_radius;
     inst.last_range           = slice.range;
     inst.last_depth_var       = slice.depth_var;   // mask depth uncertainty → R (ricoh lidar-depth masks)
-
-    // RICOH slice (depth_var>0): DON'T fit its reprojected-LiDAR support cloud (it sees through to background,
-    // which stretched/collapsed the extent). Instead contribute ONE weak position anchor — the slice centroid —
-    // and let the LiDAR range factor (sphere-traced, occlusion-robust) supply the geometry. feed_lidar anchors
-    // its return selection on this centroid; run_inference gives it a large R (ricoh_anchor_sigma_m).
-    if (slice.depth_var > 0.0f)
-    {
-        observation.candidate_pts = {slice.centroid};
-        observation.has_fresh_data = true;
-        observation.ricoh_range    = true;
-        observation.explanation_ratio = 1.0f;
-        if (should_log(inst))
-            std::print("[{}] masks={} slice={} RICOH-range anchor conf={:.2f} dvar={:.4f} centroid=({:.2f},{:.2f},{:.2f})\n",
-                       inst.node_name, masks_packet.frame_id, slice_index, slice.confidence, slice.depth_var,
-                       slice.centroid.x(), slice.centroid.y(), slice.centroid.z());
-        return observation;
-    }
 
     const std::size_t begin = std::min(slice.support_begin, masks_packet.support_points.size());
     const std::size_t end   = std::min(slice.support_end,   masks_packet.support_points.size());

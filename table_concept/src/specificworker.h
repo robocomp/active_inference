@@ -158,6 +158,15 @@ private:
     rc::TimeSeriesPlot*  ts_surprise_plot_ = nullptr;   // FE surprise (attention signal), own panel/scale
     std::unordered_set<std::string> ts_known_tables_;   // node_names with live timeseries series (for pruning)
     void prune_dead_series();   // drop timeseries series for tables removed from the graph (periodic, in compute)
+
+    // ── Ricoh 360 as PERIPHERAL ATTENTION (bearing-only) ──────────────────────────────────────────────────
+    // A ricoh detection has a reliable DIRECTION but a biased centroid/extent, so it never births/fits (that
+    // caused duplicates + drift). Instead an UNASSIGNED ricoh bearing (no known table lies along it) becomes an
+    // attention target: "seek a ZED view in this direction to birth/confirm the table" (peripheral→saccade→fovea).
+    struct RicohBearingTarget { float bearing_rad = 0.0f; float range_m = 0.0f; float confidence = 0.0f;
+                                Eigen::Vector2f xy = Eigen::Vector2f::Zero(); };
+    std::vector<RicohBearingTarget> ricoh_attention_targets_;   // unassigned ricoh bearings this cycle
+    void process_ricoh_bearings();   // associate ricoh detections to tables BY DIRECTION; collect the unassigned
     rc::TimeSeriesPlot*  ts_cov_plot_   = nullptr;   // belief uncertainty U(Σ) = Σ pos+size posterior std (m)
     rc::TimeSeriesPlot*  ts_res_plot_   = nullptr;   // residual point count
     rc::TimeSeriesPlot*  ts_state_plot_ = nullptr;   // inferred dimensions w/h (stability check)

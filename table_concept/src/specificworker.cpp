@@ -509,6 +509,10 @@ void SpecificWorker::compute()
     for (const auto& node : table_nodes)
         process_table_node(node);
 
+    // Ricoh 360 = peripheral attention: associate ricoh detections to tables BY DIRECTION (after the ZED fits,
+    // so table positions are current); an unassigned bearing becomes a "seek a ZED view here" attention target.
+    process_ricoh_bearings();
+
     // Evidence-based removal: each existence channel integrates on its OWN sensor cadence (silhouette/mask on a
     // fresh mask frame, LiDAR carve on a fresh sweep) — a camera-only cycle still accrues absence, a LiDAR-only
     // cycle still carves free space. After the fits so footprints are current. OFF unless enabled.
@@ -554,6 +558,82 @@ void SpecificWorker::prune_dead_series()
         it = ts_known_tables_.erase(it);
     }
     for (const auto& [id, inst] : fitter_->instances()) ts_known_tables_.insert(inst.node_name);
+}
+
+// Ricoh 360 as PERIPHERAL ATTENTION. A ricoh detection's DIRECTION (bearing from the robot) is reliable even
+// when its centroid/range is biased, so we use ONLY that: associate a ricoh bearing to an existing table if the
+// bearing falls within that table's angular extent (its circumscribed radius over its range — a physical size,
+// not a tuned gate). A ricoh bearing that NO table explains is UNASSIGNED → an attention target ("there is
+// something table-like in that direction that the ZED hasn't confirmed; seek a ZED view there"). Never births,
+// never fits — that is the ZED's job. This is step 1–3 of the peripheral→saccade→foveal design; the controller
+// consuming the target (turn the ZED to the bearing) is step 4.
+void SpecificWorker::process_ricoh_bearings()
+{
+    ricoh_attention_targets_.clear();
+    if (not cfg_.use_ricoh_slices or not inner_eigen_)   // flag now gates ONLY the attention path (ricoh never fits)
+        return;
+    const auto& pkt = mask_ingestor_->packet();
+    if (not pkt.valid)
+        return;
+    const auto rtb = inner_eigen_->get_transformation_matrix("room", "body", 0);   // robot pose in room
+    if (not rtb.has_value())
+        return;
+    const auto& Tm = rtb.value();
+    const float bx = static_cast<float>(Tm(0, 3)), by = static_cast<float>(Tm(1, 3));   // body XY in room
+    const auto wrap = [](float a) { return std::remainder(a, 2.0f * static_cast<float>(M_PI)); };
+
+    for (const auto& sl : pkt.slices)
+    {
+        if (sl.label != "table" or sl.depth_var <= 0.0f)          // ricoh (depth-carrying 360) detections only
+            continue;
+        if (sl.confidence < cfg_.ricoh_birth_conf)                // only reasonably confident peripheral blobs
+            continue;
+
+        // Robust position from the mask's 3D points: component-wise MEDIAN (resists the see-through/outlier tail
+        // that biases the centroid). Foreground-gated upstream, so the median sits near the tabletop surface.
+        // Falls back to the centroid if too few points. Used for the ATTENTION target's bearing + rough range
+        // ONLY — never the fit (a partial-view range is biased, so it decides WHERE TO LOOK / WHICH table, not
+        // where the table IS; the ZED measures that). Bearing is reliable; range is indicative.
+        float mx = sl.centroid.x(), my = sl.centroid.y();
+        const std::size_t b = std::min(sl.support_begin, pkt.support_points.size());
+        const std::size_t e = std::min(sl.support_end,   pkt.support_points.size());
+        if (e > b + 8)
+        {
+            std::vector<float> xs, ys; xs.reserve(e - b); ys.reserve(e - b);
+            for (std::size_t i = b; i < e; ++i) { xs.push_back(pkt.support_points[i].x()); ys.push_back(pkt.support_points[i].y()); }
+            const std::size_t k = xs.size() / 2;
+            std::nth_element(xs.begin(), xs.begin() + k, xs.end()); mx = xs[k];
+            std::nth_element(ys.begin(), ys.begin() + k, ys.end()); my = ys[k];
+        }
+        const float br  = std::atan2(my - by, mx - bx);                            // bearing to the robust point
+        const float rng = std::sqrt((mx - bx) * (mx - bx) + (my - by) * (my - by));// rough range (biased, indicative)
+
+        bool assigned = false;
+        for (const auto& [id, inst] : fitter_->instances())
+        {
+            const auto& s = inst.model.state();
+            const float dx = s.cx - bx, dy = s.cy - by;
+            const float dist = std::sqrt(dx * dx + dy * dy);
+            if (dist < 1e-3f) { assigned = true; break; }
+            const float tb   = std::atan2(dy, dx);                                  // bearing to the table
+            const float rad  = 0.5f * std::sqrt(s.w * s.w + s.h * s.h);             // circumscribed footprint radius
+            const float tol  = std::atan2(rad, dist) + 0.05f;                       // TIGHT: table angular half-size
+            const float band = rad + 1.0f;                                          // GENEROUS: ricoh range is rough
+            // Assign only if the detection matches this table in BOTH direction AND (rough) range — so a new,
+            // unconfirmed table hiding along the SAME bearing as a known one (different range) stays UNASSIGNED
+            // and still raises attention, instead of collapsing onto the known table (bearing-only would miss it).
+            if (std::abs(wrap(br - tb)) < tol and std::abs(rng - dist) < band) { assigned = true; break; }
+        }
+        if (not assigned)
+            ricoh_attention_targets_.push_back({br, rng, sl.confidence, {mx, my}});
+    }
+
+    ev_g_.ricoh_attention = static_cast<int>(ricoh_attention_targets_.size());
+    static int rb_dbg = 0;
+    if (not ricoh_attention_targets_.empty() and (rb_dbg++ % 10 == 0))
+        for (const auto& t : ricoh_attention_targets_)
+            std::print("[ricoh-attention] UNASSIGNED table bearing={:+.0f}° range≈{:.1f}m conf={:.2f} → seek ZED view\n",
+                       t.bearing_rad * 180.0f / static_cast<float>(M_PI), t.range_m, t.confidence);
 }
 
 // Build the per-instance snapshot from live instance state and push it to the monitor at ~5 Hz (a full
@@ -834,13 +914,12 @@ void SpecificWorker::run_instance_tracker()
             const auto& sl = pkt.slices[i];
             if (sl.label != "table" or sl.support_end <= sl.support_begin)
                 continue;
-            if (not cfg_.use_ricoh_slices and sl.depth_var > 0.0f)   // debug baseline: ZED-only masks (drop ricoh)
-                continue;
+            if (sl.depth_var > 0.0f)   // RICOH is BEARING-ONLY: never births/associates/fits — the tracker sees
+                continue;              // ZED masks only. Ricoh drives the attention path (process_ricoh_bearings).
             rc::DetectionView dv;
             dv.xy = {sl.centroid.x(), sl.centroid.y()};
             dv.slice_index = i;
-            dv.birthable = (sl.depth_var <= 0.0f)   // dense ZED
-                        or (sl.confidence >= cfg_.ricoh_birth_conf and sl.depth_var <= cfg_.ricoh_birth_max_var);
+            dv.birthable = true;       // ZED only reaches here → always birthable
             dets.push_back(dv);
         }
 
