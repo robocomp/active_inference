@@ -20,12 +20,10 @@
 /**
  * table_concept — Active Inference agent for table instance detection and maintenance.
  *
- * Owns the generative model (7-param state + compound SDF) for every table
- * node in the DSR graph.  Runs a free-energy minimisation loop, maintains a
- * binned historical sample queue, and emits epistemic action proposals to
- * mission-controller when table surfaces remain under-observed.
- *
- * See TABLE_CONCEPT.md for the full design specification.
+ * Tracks table instances from ZED YOLO masks (shared InstanceTracker: birth / associate / merge) and runs an
+ * AI2 recursive-Laplace full-covariance belief (TableBelief) over each table's pose + geometry, writing the
+ * fit back to the DSR graph. Emits epistemic action proposals to the mission-controller when a table remains
+ * under-observed. See TABLE_FIT_AI2.md for the belief/fit core.
  */
 
 #ifndef SPECIFICWORKER_H

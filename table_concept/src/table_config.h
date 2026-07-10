@@ -73,7 +73,6 @@ struct TableConfig
     float lidar_precision      = 0.0f;   // per-ray range precision (1/m², ≈1/σ_range²); 0 = OFF
     float lidar_robust_c_m     = 0.05f;  // Cauchy scale (m): returns this far off the surface fade out
     float lidar_select_margin_m = 0.10f; // pre-select returns within (birth half-extent + margin), all z up to top
-    std::string lidar_frame_node = "lidar3D"; // DSR node whose frame the raw sweep is in (room←this transform)
     float lidar_coverage_n0     = 60.0f; // LiDAR ray count for FULL weight; fewer → proportionally down-weighted
     // Angular-coverage weighting: precision ×= (1−R)^p, R = mean-resultant length of return bearings about the
     // centre. p=0 disables (flat), p=1 = pure circular variance. Down-weights ONE-SIDED sweeps (which over-
@@ -103,8 +102,6 @@ struct TableConfig
     // bigger/yawed mask unable to rotate/resize the box (tables_5.png). Also seeds (w,h,yaw) at birth. yaw pull
     // scales with extent anisotropy; capped by the range-driven common-mode. 0=OFF (baseline unchanged).
     float footprint_moment_precision = 0.0f;
-    // Orientation-mode hysteresis margin (nats): resolve_orientation must accumulate this much log-evidence
-    // before switching the w↔h mode, so a near-square table seen front-on can't snap 90°/180° on noise. 0=off.
     // Footprint-moment GENTLE range term (m per m of range): shared per-frame moment variance grows as
     // (this·range)². Much smaller than AI2RangeNoiseSizePerM because a global footprint fit is range-robust;
     // it makes the moment accumulate over frames (stable) rather than snap to each frame's footprint.
@@ -176,25 +173,20 @@ struct TableConfig
     float tracker_birth_width_m    = 1.0f;
     float tracker_birth_depth_m    = 0.6f;
     float tracker_birth_height_m   = 0.75f;
-    // Prior PRECISION (size std, m) for a born table: the Birth* dims seed the belief size prior at THIS σ.
-    float tracker_birth_size_std   = 0.15f;
     bool  tracker_nll_cost         = false;   // association cost = ½(m²+ln|S|) NLL (vs raw m²); see InstanceTracker
 
-    // Ricoh-360 / LiDAR-depth mask BIRTH gate (Q1a). A slice with depth_var>0 comes from the peripheral
-    // 360-RGB YOLO depth-filled by reprojected LiDAR (dense ZED slices have depth_var==0). It may always
-    // ASSOCIATE (refine a table), but to SPAWN one it must be confident AND well-ranged, else a sparse
-    // peripheral blob births phantoms all over the scene. A ricoh det is birthable iff conf ≥ RicohBirthConf
-    // and depth_var ≤ RicohBirthMaxVar (m²). ZED slices (depth_var==0) are always birthable.
-    float ricoh_birth_conf    = 0.60f;    // min YOLO confidence for a ricoh slice to birth a table
-    float ricoh_birth_max_var = 0.005f;   // max depth_var (m²) for a ricoh slice to birth (σ_range ≲ 7 cm)
+    // Ricoh-360 ATTENTION gate. A ricoh (depth_var>0) 360-RGB YOLO detection is bearing-only: it never births
+    // or fits, it only raises attention (process_ricoh_bearings) so the robot seeks a good ZED view. This is
+    // the min YOLO confidence for such a detection to be worth attending to.
+    float ricoh_attention_conf = 0.60f;   // min YOLO confidence for a ricoh detection to raise attention
     // Debug baseline switch: when false, ricoh (depth_var>0) slices are IGNORED entirely by the fit/tracker —
     // no association, no fusion, no birth. Used to reduce the multimodal fusion to a clean set of sources
     // (ZED masks + LiDAR range) and calibrate it before re-adding ricoh with a proper extent-information model.
     bool  use_ricoh_slices    = true;
-    // When a ricoh slice feeds the range factor, its centroid is a single WEAK position anchor: this is its
-    // measurement σ (m) → R, large so it barely constrains extent/depth (the LiDAR range rays do that). It just
-    // pins rough position and lets the GN run so feed_lidar can select the sweep returns near the table.
-    float ricoh_anchor_sigma_m = 0.50f;
+    // Ricoh attention association gates (process_ricoh_bearings): small margins on the physical angular size /
+    // range roughness when deciding whether an unassigned ricoh bearing already matches a known table.
+    float ricoh_attention_angle_margin_rad = 0.05f;  // extra angular tolerance on the table's angular half-size
+    float ricoh_attention_range_band_m     = 1.0f;   // extra range band (ricoh range is rough/indicative)
 };
 
 // Fill a TableConfig from a RoboComp ConfigLoader (all keys optional, defaults above).

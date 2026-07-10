@@ -119,14 +119,6 @@ struct TableFrame
                                            // measurement: ego-motion corruption + a gentle range term. Makes the
                                            // moment ACCUMULATE over frames (a moving/near-far view backs off)
                                            // instead of snapping the belief to each frame's noisy footprint.
-    float trunc_frac = 0.0f;               // fraction of the mask silhouette on the image border. >0 ⇒ TRIMMED:
-                                           // the footprint extent is a LOWER BOUND, so the moment factor may only
-                                           // GROW w/h, never shrink (a short table always shows a FULL mask →
-                                           // trunc≈0 → two-sided → it can shrink). Distinguishes the two cases.
-    bool  footprint_complete = true;       // the whole model projects INSIDE the image this view (roi_fully_in_view):
-                                           // the mask CAN capture the full table ⇒ moment extent is two-sided.
-                                           // False (big table overflowing the FoV at close range, which trunc_frac
-                                           // under-reports) ⇒ grow-only, so a partial view can't collapse the size.
     float chain_cov_size = 0.0f;           // extra shared SIZE variance (m²) on w,h,H — grows with view range so
                                            // a distant, vague mask cannot RESHAPE/inflate a converged table (the
                                            // per-frame info SATURATES lower with range → geometry freezes; only

@@ -76,18 +76,16 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.tracker_birth_width_m    = getf("Tracker.BirthWidthM",      1.0f);
     out.tracker_birth_depth_m    = getf("Tracker.BirthDepthM",      0.6f);
     out.tracker_birth_height_m   = getf("Tracker.BirthHeightM",     0.75f);
-    out.tracker_birth_size_std   = getf("Tracker.BirthSizeStd",     0.15f);
     out.tracker_nll_cost         = getb("Tracker.NllCost",          false);
-    out.ricoh_birth_conf         = getf("Tracker.RicohBirthConf",   0.60f);
-    out.ricoh_birth_max_var      = getf("Tracker.RicohBirthMaxVar", 0.005f);
+    out.ricoh_attention_conf     = getf("Tracker.RicohAttentionConf", 0.60f);
     out.use_ricoh_slices         = getb("Tracker.UseRicohSlices",   true);
-    out.ricoh_anchor_sigma_m     = getf("Tracker.RicohAnchorSigmaM", 0.50f);
+    out.ricoh_attention_angle_margin_rad = getf("Tracker.RicohAttentionAngleMargin", 0.05f);
+    out.ricoh_attention_range_band_m     = getf("Tracker.RicohAttentionRangeBandM",  1.0f);
 
     // YOLO-independent LiDAR first-hit range factor (common/ai_belief/lidar_ray_factor.h). OFF by default.
     out.lidar_precision      = getf("TableModel.LidarPrecision",      0.0f);
     out.lidar_robust_c_m     = getf("TableModel.LidarRobustCM",       0.05f);
     out.lidar_select_margin_m = getf("TableModel.LidarSelectMarginM", 0.10f);
-    out.lidar_frame_node      = gets("TableModel.LidarFrameNode",     "lidar3D");
     out.lidar_coverage_n0     = getf("TableModel.LidarCoverageN0",     60.0f);
     out.lidar_coverage_ang_power = getf("TableModel.LidarCoverageAngPower", 1.0f);
     out.max_step_m            = getf("TableModel.MaxStepM",            1.0f);

@@ -44,14 +44,11 @@ public:
     struct TableObservation
     {
         bool has_fresh_data = false;
-        float explanation_ratio = 1.0f;
         std::vector<Eigen::Vector3f> candidate_pts;
         std::vector<Eigen::Vector3f> residual_pts;
-        // Ricoh slices feed the LiDAR RANGE FACTOR, not raw points: their reprojected-LiDAR support cloud
-        // sees THROUGH to background (elongation/collapse), so instead the slice contributes only a single
-        // weak position anchor (its centroid, in candidate_pts) — enough to run the GN and anchor feed_lidar's
-        // return selection — and the sphere-traced range rays supply the robust geometry. See observe_slice.
-        bool ricoh_range = false;
+        // Ricoh slices are bearing-only and never fitted (see observe_slice / process_ricoh_bearings): a
+        // peripheral 360 detection has a reliable DIRECTION but a biased centroid/extent, so it only drives
+        // the attention path and never contributes candidate/residual points to a belief update.
     };
 
     TableFitter(std::shared_ptr<DSR::DSRGraph> graph,

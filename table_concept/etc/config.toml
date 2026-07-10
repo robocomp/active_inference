@@ -73,14 +73,11 @@ AI2GnIters = 4              # Gauss-Newton iterations per frame
 # Second, sensor-INDEPENDENT evidence: lidar3D returns on the table's LEGS + RIM pin the extent/centre in
 # METRIC range along the viewing ray. Its error mechanism is uncorrelated with the YOLO segmentation, so it
 # attacks the mask-erosion extent UNDER-SIZE (~6cm) the mask cannot self-correct. Consumes the lidar3D media
-# plane (TableLidarIngestor). STAGED ROLLOUT — OFF (0.0) by default; the media subscriber isn't created at all
-# while off. Step 1: set LidarPrecision=500 (low → can only nudge) and confirm on the console
-# "[TableLidar] media subscriber up", NO crash, and lidar_rays>0 at a few-cm resid (frame/extrinsic is right).
-# Step 2: raise to 2500 (≈1/σ²@2cm = depth-point scale) → w/h under-size should shrink and extent σ tighten.
+# plane (TableLidarIngestor); the media subscriber is created only while this is > 0.
+# ON at 2500 (load-bearing): ≈1/σ²@2cm = depth-point scale → w/h under-size shrinks and extent σ tightens.
 LidarPrecision = 2500.0          # per-ray range precision (1/m², ≈1/σ²@2cm=2500 when load-bearing). 0=OFF
 LidarRobustCM = 0.05          # Cauchy scale (m): returns this far off the surface fade out (continuous, no gate)
 LidarSelectMarginM = 0.10     # pre-select returns within (birth half-diagonal + margin) horiz, floor..birth_H vert
-LidarFrameNode = "lidar3D"    # DSR node whose frame the raw sweep is in (room←this transform)
 LidarCoverageN0 = 60.0        # LiDAR ray count for full weight; fewer → proportionally down-weighted (sparse-safe)
 LidarCoverageAngPower = 1.0    # ANGULAR-coverage weight precision×=(1−R)^p (R=mean-resultant of return bearings):
                                # down-weights ONE-SIDED sweeps that over-commit the near-square w↔h mode from a
@@ -98,8 +95,8 @@ CoverageRobustCM = 0.15        # Cauchy scale (m): on-plane points this far outs
 # A LiDAR beam that passes THROUGH the top-slab band and exits the far side proves that crossing is empty → pull the
 # extent back IN (occupy-where-masked + vacate-where-through settle the extent where camera & LiDAR agree, so coverage
 # can no longer inflate onto clutter). Uses the same sweep as LidarPrecision (auto-staged when either is > 0). Beams
-# that RETURN inside the slab (occupancy) are ignored, so a real tabletop is untouched. STAGED — OFF (0.0) by default;
-# try ~500 alongside CoveragePrecision and watch w/h stop over-growing on clutter/over-segmented masks.
+# that RETURN inside the slab (occupancy) are ignored, so a real tabletop is untouched. Runs SOLO at 500 here
+# (CoveragePrecision is off), bounding the extent from LiDAR through-beams alone.
 FreeSpacePrecision = 500.0         # shrink-only free-space pull strength (per through-beam, ~1/σ²). 0=OFF
 
 # Footprint SECOND-MOMENT factor (table_belief.h): measures (w,h,yaw) from the top-band cloud's 2D inertia
@@ -112,10 +109,6 @@ FreeSpacePrecision = 500.0         # shrink-only free-space pull strength (per t
 # table — no manual gate). NOT applied to cx,cy (partial-view centroid bias; the mixture handles position).
 FootprintMomentPrecision = 2000.0   # A/B: try ~2000 on the right table; 0=OFF (baseline births/fits unchanged)
 
-# Orientation-mode HYSTERESIS: front-on a near-square table, the footprint principal axis (and resolve_orientation's
-# w↔h evidence) is ~ambiguous → the box snaps 90°/180° on noise. Require this much accumulated log-evidence (nats)
-# to switch modes — a Bayes-factor sticky prior (e^M:1 odds), not a geometric gate. The moment also folds its yaw
-# mod-π to the current sheet and won't birth yaw from a near-square footprint. 2.0≈7:1. 0=historic flip-at-zero.
 # Orientation w↔h mode: pure sequential-Bayesian evidence on the TRUE free energy (−log mixture likelihood).
 # No hysteresis/leak/discriminability knobs — those were band-aids for a BROKEN energy readout (clutter silently
 # zeroed misfit → FE≈0 → the mode comparison was noise → periodic 90° flips). With a real FE the evidence is
@@ -202,25 +195,20 @@ MergeOverlap = 0.05       # physical exclusion: collapse two instances whose ori
 BirthWidthM = 1.0         # default geometry for a table BORN from a mask (the fit refines from here)
 BirthDepthM = 0.6
 BirthHeightM = 0.75
-BirthSizeStd = 0.15       # prior PRECISION (size std, m) behind the Birth* dims: pins the size near
-                          # standard furniture under weak early views (smaller = stiffer). Without it a
-                          # born table uses the loose generic prior and the first partial mask reshapes it.
 NllCost = false           # association cost = ½(m²+ln|S|) NLL (compete by likelihood, not raw distance)
                           # vs raw squared-Mahalanobis. Gate is m² either way. Matters under clutter.
-# Ricoh-360 / LiDAR-depth mask BIRTH gate. A slice with depth_var>0 is a peripheral 360-RGB YOLO mask depth-
-# filled from reprojected LiDAR (dense ZED slices have depth_var==0). It always ASSOCIATES (fuses into a table
-# it gates to), but to SPAWN a table it must be confident AND well-ranged, else sparse peripheral blobs birth
-# phantoms all over. Birthable iff conf ≥ RicohBirthConf and depth_var ≤ RicohBirthMaxVar. ZED always births.
-RicohBirthConf = 0.60     # min YOLO confidence for a ricoh slice to birth a table
-RicohBirthMaxVar = 0.005  # max depth_var (m²) for a ricoh slice to birth (σ_range ≲ 7 cm)
+# Ricoh-360 ATTENTION gate. A slice with depth_var>0 is a peripheral 360-RGB YOLO detection (dense ZED slices
+# have depth_var==0). It is bearing-only: it never births/associates/fits, it only raises attention
+# (process_ricoh_bearings) so the robot seeks a good ZED view.
+RicohAttentionConf = 0.60         # min YOLO confidence for a ricoh detection to raise attention
 
-# Ricoh (depth_var>0) slices: when true, a ricoh mask feeds the LiDAR RANGE FACTOR — it contributes only a weak
-# position anchor (its centroid) and the sphere-traced range rays supply the geometry, so its see-through
-# reprojected-LiDAR cloud never drives extent (no elongation/collapse). false ⇒ ignore ricoh entirely.
-# NOTE: ricoh depth is reliable only for FRONTAL views; lateral/back views smear the mask cloud (and its
-# centroid) in depth — a viewing-angle gate is the proper fix before re-enabling. ISOLATION TEST: ZED-only.
+# Ricoh (depth_var>0) slices: when true they are considered for the attention path; false ⇒ ignore ricoh
+# entirely. NOTE: ricoh depth is reliable only for FRONTAL views; lateral/back views smear the mask cloud.
 UseRicohSlices = true
-RicohAnchorSigmaM = 0.50  # ricoh centroid anchor σ (m) → R: large so it only pins rough position, not extent
+# Ricoh attention association gates: small margins on the physical angular size / range roughness when deciding
+# whether an unassigned ricoh bearing already matches a known table (process_ricoh_bearings).
+RicohAttentionAngleMargin = 0.05  # extra angular tolerance (rad) on the table's angular half-size
+RicohAttentionRangeBandM  = 1.0   # extra range band (m); ricoh range is rough/indicative
 
 [Ice]
 Warn.Connections = "0"

@@ -52,7 +52,7 @@ struct TableInstance
     float last_depth_var       = 0.0f;
 
     // LiDAR range-channel diagnostics (this frame): #returns fed to the factor, #returns in a generous box,
-    // and their mean |dist| to the current model surface. Few rays / large resid ⇒ wrong LidarFrameNode.
+    // and their mean |dist| to the current model surface. Few rays / large resid ⇒ wrong lidar→room frame.
     int   dbg_lidar_rays       = 0;
     int   dbg_lidar_raw        = 0;
     float dbg_lidar_resid_m    = -1.0f;
@@ -65,7 +65,6 @@ struct TableInstance
     // outlier (exceeded cfg.max_step_m). Non-zero ⇒ the fit tried to run away and was held.
     int   frames_diverged      = 0;
 
-    int  last_frame_seen    = -1;     // last_sensing_frame_att value read
     int  matched_frames     = 0;      // frames with fresh sensing data
     int  frames_converged   = 0;      // consecutive frames with |Δstate| < state_eps
     int  last_masks_frame_seen = -1;  // last masks packet frame consumed
@@ -127,11 +126,8 @@ struct TableInstance
     int existence_remove_streak = 0;
 
     // ── EvidenceMonitor per-cycle snapshots (persisted copies of otherwise-transient fit/existence values) ──
-    // Slices fused into this instance this cycle, split by source (ZED depth_var==0 vs ricoh depth_var>0).
-    // dbg_n_ricoh_slices ≥ 2 is the SIGNATURE of a 360 strip-SEAM split: a wide table straddling a strip
-    // boundary yields two partial ricoh detections that don't merge → both associate here (multi-det fusion).
+    // ZED mask slices fused into this instance this cycle (ricoh is bearing-only and never fused).
     int   dbg_n_zed_slices   = 0;
-    int   dbg_n_ricoh_slices = 0;
     int   dbg_cand_pts  = 0;      // this frame's on-surface (candidate) support point count
     int   dbg_resid_pts = 0;      // this frame's off-surface (residual/unexplained) support point count
     float dbg_energy    = 0.0f;   // mean per-point data energy (NLL proxy) at the converged state
@@ -158,12 +154,6 @@ struct TableInstance
     float roi_offset_x = 0.0f;   // [-1,1], 0 = horizontally centred in the image
     float roi_offset_y = 0.0f;   // [-1,1], 0 = vertically centred
     float roi_fill     = 0.0f;   // max(w/W, h/H): projected extent as a fraction of the image
-    // All 8 model corners project IN FRONT and inside the image with margin ⇒ the mask CAN capture the whole
-    // table this view, so a footprint-moment extent measurement is a trustworthy TWO-SIDED value (may shrink).
-    // False (close range / big table overflowing the FoV / partial view) ⇒ the mask only lower-bounds the extent
-    // → the moment is GROW-ONLY. A reliable, projection-derived completeness signal (the producer's trunc_frac
-    // under-reports at close range — the tables_5 close-range collapse). Set in compute_projected_roi().
-    bool  roi_fully_in_view = false;
 };
 
 }  // namespace rc

@@ -819,7 +819,6 @@ bool TableBelief::self_test()
             TableFrame fr; fr.points = top; fr.R.assign(top.size(), Rb);
             fr.chain_cov_yaw = cc_yaw; fr.chain_cov_size = cc_size;   // the range freeze the live fit fights
             fr.moment_extra_var = cc_size;   // realistic per-frame moment variance (range term) — must still recover
-            fr.footprint_complete = true;    // far view, whole table in frame ⇒ moment two-sided
             for (int it = 0; it < 40; ++it) b.update(fr);
             return b.state();
         };
@@ -836,10 +835,11 @@ bool TableBelief::self_test()
         check(dyaw_on < 0.4f * dyaw_off,       "moment factor should clearly beat the mixture-only baseline in yaw");
     }
 
-    // (l) Footprint moment is GROW-ONLY (a mask is only ever a LOWER BOUND on the extent — occlusion / side-view
-    //     foreshortening / FoV clip / under-segmentation all shorten it, nothing lengthens it). A PARTIAL view
-    //     (any keep<1, any trunc/in-view flags) must HOLD a converged table, never shrink it; a LARGER mask must
-    //     GROW it. Shrink is delegated to the occlusion-aware vacate channel, not the mask.
+    // (l) Footprint moment is UNCONDITIONALLY GROW-ONLY: a mask is only ever a LOWER BOUND on the extent (a
+    //     partial / trimmed / foreshortened / under-segmented view can only shorten the observed footprint,
+    //     never lengthen it), so the moment factor may only GROW w/h, never shrink — no completeness/trunc
+    //     signal is consulted. A PARTIAL view must HOLD a converged table; a LARGER mask must GROW it. Shrink
+    //     is delegated to the occlusion-aware vacate channel, not the mask.
     {
         rng.seed(4242);   // deterministic: this block's result must not depend on prior blocks' RNG consumption
         const float Rb = P.sigma_base_m * P.sigma_base_m;
@@ -852,20 +852,19 @@ bool TableBelief::self_test()
             return pts;
         };
         TableBeliefParams pm = P; pm.footprint_moment_precision = 2000.0f;
-        auto fit = [&](float ext_w, float keep, float trunc, bool complete) {
+        auto fit = [&](float ext_w, float keep) {
             TableBelief b(TableBeliefState{gt.cx, gt.cy, gt.H, gt.w, gt.h, gt.yaw}, pm);   // converged at truth
             for (int it = 0; it < 45; ++it)
             { auto pts = top(ext_w, gt.h, keep);
               TableFrame fr; fr.points = pts; fr.R.assign(pts.size(), Rb);
               fr.chain_cov_yaw = (0.03f * 3) * (0.03f * 3); fr.chain_cov_size = (0.08f * 3) * (0.08f * 3);
               fr.moment_extra_var = (0.03f * 3) * (0.03f * 3);
-              fr.trunc_frac = trunc; fr.footprint_complete = complete;
               b.update(fr); }
             return b.state().w;
         };
-        const float w_trim = fit(gt.w, 0.55f, 0.30f, false);  // border-trimmed partial view ⇒ must HOLD ~gt.w
-        const float w_part = fit(gt.w, 0.55f, 0.0f,  true);   // SIDE-VIEW partial (flags say "complete") ⇒ HOLD
-        const float w_grow = fit(2.0f, 1.0f,  0.0f,  true);   // a LARGER full mask ⇒ must GROW toward 2.0
+        const float w_trim = fit(gt.w, 0.55f);  // border-trimmed partial view ⇒ must HOLD ~gt.w
+        const float w_part = fit(gt.w, 0.55f);  // SIDE-VIEW partial view ⇒ HOLD
+        const float w_grow = fit(2.0f, 1.0f);   // a LARGER full mask ⇒ must GROW toward 2.0
         std::printf("  moment grow-only: trim-partial w=%.2f side-partial w=%.2f (gt=%.2f, must hold)  larger-mask w=%.2f (must grow >gt)\n",
                     w_trim, w_part, gt.w, w_grow);
         check(w_trim > gt.w - 0.12f,   "border-trimmed partial mask must NOT shrink a converged table");

@@ -192,8 +192,6 @@ TableFitter::TableObservation TableFitter::observe_slice(TableInstance& inst, in
 
     const float total = static_cast<float>(observation.candidate_pts.size() + observation.residual_pts.size());
     observation.has_fresh_data   = total > 0.0f;
-    observation.explanation_ratio = total > 0.0f
-        ? static_cast<float>(observation.candidate_pts.size()) / total : 0.0f;
 
     if (should_log(inst))
         std::print("[{}] masks={} slice={} label='{}' conf={:.2f} dvar={:.4f} support={} cand={} resid={} centroid=({:.2f},{:.2f},{:.2f})\n",
@@ -205,30 +203,11 @@ TableFitter::TableObservation TableFitter::observe_slice(TableInstance& inst, in
 
 TableFitter::TableObservation TableFitter::observe(TableInstance& inst, const DSR::Node& node)
 {
-    TableObservation observation;
-
-    // Fallback: candidate/residual point attributes written directly on the node.
-    int last_frame = -1;
-    if (const auto v = G_->get_attrib_by_name<last_sensing_frame_att>(node); v.has_value())
-        last_frame = v.value();
-
-    observation.has_fresh_data = (last_frame > inst.last_frame_seen);
-    if (not observation.has_fresh_data)
-        return observation;
-
-    inst.last_frame_seen = last_frame;
-    observation.candidate_pts = mask_ingestor_->read_pts_attrib(node, "candidate_pts_att");
-    observation.residual_pts  = mask_ingestor_->read_pts_attrib(node, "residual_pts_att");
-
-    if (const auto v = G_->get_attrib_by_name<explanation_ratio_att>(node); v.has_value())
-        observation.explanation_ratio = v.value();
-
-    if (should_log(inst))
-        std::print("[{}] ↓ frame={} cands={} resid={} expl={:.2f}\n",
-                   inst.node_name, last_frame,
-                   observation.candidate_pts.size(), observation.residual_pts.size(),
-                   observation.explanation_ratio);
-    return observation;
+    // No mask slice was assigned this cycle. There is no node-attrib sensing path (nothing writes
+    // candidate/residual points onto the node), so this is always a stale observation: has_fresh_data=false
+    // ⇒ run_inference ages the belief (predict-only) instead of fitting.
+    (void)inst; (void)node;
+    return TableObservation{};
 }
 
 bool TableFitter::should_log(const TableInstance& inst) const
@@ -353,10 +332,8 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
     const float range_yaw_var = yaw_std * yaw_std;
     const float range_size_var = size_std * size_std;
 
-    const float R = observation.ricoh_range
-                  ? cfg_.ricoh_anchor_sigma_m * cfg_.ricoh_anchor_sigma_m
-                  : cfg_.ai2_sigma_base_m * cfg_.ai2_sigma_base_m
-                    + std::max(0.0f, inst.last_motion_var) + std::max(0.0f, inst.last_depth_var) + range_lat_var;
+    const float R = cfg_.ai2_sigma_base_m * cfg_.ai2_sigma_base_m
+                  + std::max(0.0f, inst.last_motion_var) + std::max(0.0f, inst.last_depth_var) + range_lat_var;
 
     // Truncation gate: a mask clipped by the image border has a chopped silhouette → it biases the fit
     // (shrinks/displaces the model). Above tolerance, skip the geometric update (predict only) — but
@@ -383,8 +360,6 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
         frame.chain_cov_yy  = inst.chain_cov_yy + range_lat_var;
         frame.chain_cov_yaw = range_yaw_var;                       // the binding term: far view can't rotate
         frame.chain_cov_size = range_size_var;                     // ...nor RESHAPE/inflate — geometry freezes afar
-        frame.trunc_frac    = inst.last_trunc_frac;                // TRIMMED mask ⇒ moment extent is grow-only
-        frame.footprint_complete = inst.roi_fully_in_view;         // model fully in-frame ⇒ moment may shrink
         // Footprint-moment SHARED per-frame variance: ego-motion mask corruption + a GENTLE range term (a global
         // footprint fit is far more range-robust than a single boundary point, so a coefficient << the per-point
         // AI2RangeNoiseSizePerM). This makes the moment ACCUMULATE across frames and back off when the robot is
@@ -682,11 +657,6 @@ void TableFitter::compute_projected_roi(TableInstance& inst)
     const float hw = s.w * 0.5f, hh = s.h * 0.5f;
     float min_col = 1e9f, min_row = 1e9f, max_col = -1e9f, max_row = -1e9f;
     int in_front = 0;
-    // Completeness: are ALL 8 corners in front AND inside the image (with a margin)? If any corner is behind or
-    // off-frame, the mask cannot capture the whole table → the moment extent is a lower bound only (grow-only).
-    inst.roi_fully_in_view = false;
-    int corners_total = 0, corners_ok = 0;
-    const float margin_px = 0.02f * W;
     for (const int ix : {-1, 1})
         for (const int iy : {-1, 1})
             for (const float z : {0.0f, s.table_height})
@@ -695,17 +665,13 @@ void TableFitter::compute_projected_roi(TableInstance& inst)
                 const Eigen::Vector4d Pr(s.cx + c * lx - sn * ly, s.cy + sn * lx + c * ly, z, 1.0);
                 const Eigen::Vector4d Pc = zed_T_room * Pr;
                 const double X = Pc.x(), Y = Pc.y(), Z = Pc.z();
-                ++corners_total;
                 if (Y <= 0.20) continue;   // skip corners at/near the image plane: X/Y explodes there
                 ++in_front;
                 const float col = cx_px + static_cast<float>(X / Y) * fx;
                 const float row = cy_px - static_cast<float>(Z / Y) * fy;
                 min_col = std::min(min_col, col); max_col = std::max(max_col, col);
                 min_row = std::min(min_row, row); max_row = std::max(max_row, row);
-                if (col >= margin_px and col <= W - margin_px and row >= margin_px and row <= H - margin_px)
-                    ++corners_ok;
             }
-    inst.roi_fully_in_view = (corners_ok == corners_total);   // every corner in front AND inside the frame
 
     if (in_front < 4)   // need most of the box in front of the camera to trust the ROI
         return;

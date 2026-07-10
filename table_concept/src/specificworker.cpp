@@ -20,15 +20,11 @@
 /**
  * SpecificWorker — table_concept agent
  *
- * Implements the Active Inference loop described in TABLE_CONCEPT.md §11.2:
- *
- *  ① Read sensing attributes from DSR table nodes
- *  ② Update the historical sample queue with fresh near-surface candidates
- *  ③ Run gradient-descent steps on the 7-param generative model (SDF + FE)
- *  ④ Write updated model parameters back to DSR (RT edge + geometry attrs)
- *  ⑤ Check convergence and set model_stable_att
- *  ⑥ Compute epistemic action proposals (viewpoint → mission-controller)
- *  ⑦ Detect divergence and set request_full_sample_att
+ * Per compute() cycle: ingest the ZED YOLO "table" masks, associate them to table instances with the shared
+ * InstanceTracker (birth / associate / merge; ricoh 360 detections are bearing-only and only raise attention),
+ * run one AI2 recursive-Laplace belief update (TableBelief) per assigned slice, write the fitted pose+geometry
+ * back to DSR (RT edge + dims + mesh), and emit epistemic action proposals when a table stays under-observed.
+ * See TABLE_FIT_AI2.md for the belief/fit core.
  */
 
 #include "specificworker.h"
@@ -446,21 +442,8 @@ void SpecificWorker::initialize()
             series_layout->addWidget(ts_ce_plot_);
         }
 
-        // GenericWorker::initialize() may have already started compute(), so
-        // some instances can exist before the plots are constructed.
-        for (const auto& [_, inst] : fitter_->instances())
-        {
-            ts_plot_->add_series(inst.node_name + "_fe", QColor(255, 170, 0), 1.1f);
-            ts_cov_plot_->add_series(inst.node_name + "_cov", QColor(0, 190, 255), 1.1f);
-            ts_res_plot_->add_series(inst.node_name + "_res", QColor(170, 80, 255), 1.1f);
-            ts_state_plot_->add_series(inst.node_name + "_w", QColor(255, 90, 90), 1.1f);
-            ts_state_plot_->add_series(inst.node_name + "_h", QColor(90, 200, 90), 1.1f);
-            if (ts_ce_plot_)
-            {
-                ts_ce_plot_->add_series(inst.node_name + "_ceW", QColor(255, 90, 90), 1.1f);
-                ts_ce_plot_->add_series(inst.node_name + "_ceH", QColor(90, 200, 90), 1.1f);
-            }
-        }
+        // Per-instance series are registered idempotently by the diagnostics feed (publish_table_diagnostics)
+        // every cycle, so pre-existing instances need no separate registration here.
     }
 
     // ── Evidence-consuming monitor — its OWN top-level window (per-instance snapshot + global counters) ──
@@ -586,7 +569,7 @@ void SpecificWorker::process_ricoh_bearings()
     {
         if (sl.label != "table" or sl.depth_var <= 0.0f)          // ricoh (depth-carrying 360) detections only
             continue;
-        if (sl.confidence < cfg_.ricoh_birth_conf)                // only reasonably confident peripheral blobs
+        if (sl.confidence < cfg_.ricoh_attention_conf)            // only reasonably confident peripheral blobs
             continue;
 
         // Robust position from the mask's 3D points: component-wise MEDIAN (resists the see-through/outlier tail
@@ -617,8 +600,8 @@ void SpecificWorker::process_ricoh_bearings()
             if (dist < 1e-3f) { assigned = true; break; }
             const float tb   = std::atan2(dy, dx);                                  // bearing to the table
             const float rad  = 0.5f * std::sqrt(s.w * s.w + s.h * s.h);             // circumscribed footprint radius
-            const float tol  = std::atan2(rad, dist) + 0.05f;                       // TIGHT: table angular half-size
-            const float band = rad + 1.0f;                                          // GENEROUS: ricoh range is rough
+            const float tol  = std::atan2(rad, dist) + cfg_.ricoh_attention_angle_margin_rad;  // TIGHT: angular half-size
+            const float band = rad + cfg_.ricoh_attention_range_band_m;              // GENEROUS: ricoh range is rough
             // Assign only if the detection matches this table in BOTH direction AND (rough) range — so a new,
             // unconfirmed table hiding along the SAME bearing as a known one (different range) stays UNASSIGNED
             // and still raises attention, instead of collapsing onto the known table (bearing-only would miss it).
@@ -657,7 +640,7 @@ void SpecificWorker::refresh_evidence_monitor()
         x.conf       = inst.last_mask_confidence;
         x.since_det  = inst.frames_since_detection;
         x.n_zed      = inst.dbg_n_zed_slices;
-        x.n_ricoh    = inst.dbg_n_ricoh_slices;
+        x.n_ricoh    = 0;   // ricoh is bearing-only now (never fused); column kept for the monitor layout
         x.cand       = inst.dbg_cand_pts;
         x.resid      = inst.dbg_resid_pts;
         x.gated      = inst.dbg_gated;
@@ -871,7 +854,7 @@ void SpecificWorker::run_instance_tracker()
     tp.death_frames     = cfg_.tracker_death_frames;
     tp.birth_min_sep_m  = cfg_.tracker_birth_min_sep_m;
     tp.nll_cost         = cfg_.tracker_nll_cost;
-    tp.multi_det_per_track = true;   // fuse ZED + ricoh-360 slices of the same table (one update per slice)
+    tp.multi_det_per_track = true;   // fuse multiple ZED slices of one table (one belief update per slice)
     tracker_.set_params(tp);
 
     // Tracks ← live instances: centre from the fit, XY cov from the belief's position covariance Σ.
@@ -902,10 +885,8 @@ void SpecificWorker::run_instance_tracker()
     // mature over birth_frames consecutive cycles and so association stays live — gating this on mask freshness
     // wiped the candidates every stale cycle and NOTHING ever birthed. Re-fitting a stale mask is prevented
     // separately, in process_table_node (per-instance frame_id gate), NOT here.
-    // Each det's BIRTHABLE flag encodes trust: a dense ZED slice (depth_var==0) may spawn a table; a ricoh-360
-    // / LiDAR-depth slice (depth_var>0) may only REFINE unless it is confident AND its depth is well-scored
-    // (conf ≥ RicohBirthConf and depth_var ≤ RicohBirthMaxVar) — otherwise a sparse peripheral blob would
-    // birth phantoms across the scene. All slices still ASSOCIATE regardless (that is the fusion).
+    // Only ZED-depth slices (depth_var==0) reach the tracker; ricoh (depth_var>0) is bearing-only and drives
+    // the attention path (process_ricoh_bearings), never birth/associate/fit. Every ZED det is birthable.
     std::vector<rc::DetectionView> dets;
     const auto& pkt = mask_ingestor_->packet();
     if (pkt.valid)
@@ -964,7 +945,7 @@ void SpecificWorker::run_instance_tracker()
         }
 
     // ASSOCIATE: route every matched detection's mask slice to its instance (read in observe_slice()). With
-    // multi_det_per_track a track may collect SEVERAL slices (ZED + ricoh) → fused as sequential updates.
+    // multi_det_per_track a track may collect SEVERAL ZED slices → fused as sequential updates.
     for (int d = 0; d < static_cast<int>(dets.size()); ++d)
         if (res.assignment[d] >= 0)
         {
@@ -983,39 +964,10 @@ void SpecificWorker::run_instance_tracker()
             fitter_->note_birth(new_id, Eigen::Vector2f(c.x(), c.y()));
     }
 
-    // SEAM-SPLIT instrumentation: per instance, split the slices fused this cycle into ZED (depth_var==0) vs
-    // ricoh (depth_var>0). Two ricoh slices on one track ⇒ a 360 strip-seam split (a wide table straddling a
-    // strip boundary → two partial detections that didn't merge). Log their centroids + separation so it can
-    // be confirmed behind the robot, and count it globally (surfaced in the EvidenceMonitor header).
-    int seam_candidates = 0;
+    // Per-instance ZED-slice count for the EvidenceMonitor. Every assigned slice is a ZED detection now
+    // (ricoh is bearing-only and never reaches assigned_mask_idxs), so this is just the assignment count.
     for (auto& [id, inst] : fitter_->instances())
-    {
-        inst.dbg_n_zed_slices = inst.dbg_n_ricoh_slices = 0;
-        std::vector<Eigen::Vector3f> ricoh_centroids;
-        for (const int idx : inst.assigned_mask_idxs)
-            if (idx >= 0 and idx < static_cast<int>(pkt.slices.size()))
-            {
-                if (pkt.slices[idx].depth_var > 0.0f)
-                { ++inst.dbg_n_ricoh_slices; ricoh_centroids.push_back(pkt.slices[idx].centroid); }
-                else
-                    ++inst.dbg_n_zed_slices;
-            }
-        if (inst.dbg_n_ricoh_slices >= 2)
-        {
-            ++seam_candidates;
-            float max_sep = 0.0f;
-            for (std::size_t a = 0; a < ricoh_centroids.size(); ++a)
-                for (std::size_t b = a + 1; b < ricoh_centroids.size(); ++b)
-                    max_sep = std::max(max_sep, (ricoh_centroids[a] - ricoh_centroids[b]).norm());
-            std::print("[seam] {} fused {} ricoh slices (+{} zed) — SEAM-SPLIT candidate, max centroid sep {:.2f}m",
-                       inst.node_name, inst.dbg_n_ricoh_slices, inst.dbg_n_zed_slices, max_sep);
-            for (const auto& rc : ricoh_centroids)
-                std::print("  c=({:.2f},{:.2f},{:.2f})", rc.x(), rc.y(), rc.z());
-            std::print("\n");
-        }
-    }
-    ev_g_.seam_splits      = seam_candidates;
-    ev_g_.seam_splits_cum += seam_candidates;
+        inst.dbg_n_zed_slices = static_cast<int>(inst.assigned_mask_idxs.size());
 }
 
 ///////////////////////////////////////////////////////////////
@@ -1026,13 +978,7 @@ void SpecificWorker::process_table_node(const DSR::Node& node)
 
     if (created)
     {
-        // Register per-instance time-series (Qt dashboards stay in the worker).
-        if (ts_plot_)
-        {
-            ts_plot_->add_series(inst.node_name + "_fe",  QColor(255, 170,   0), 1.1f);
-            if (ts_cov_plot_) ts_cov_plot_->add_series(inst.node_name + "_cov", QColor(  0, 190, 255), 1.1f);
-            if (ts_res_plot_) ts_res_plot_->add_series(inst.node_name + "_res", QColor(170,  80, 255), 1.1f);
-        }
+        // (Per-instance time-series are registered idempotently by publish_table_diagnostics each cycle.)
         // Canvas position — viewer randomizes pos_x/pos_y if absent.
         if (not G->get_attrib_by_name<pos_x_att>(node).has_value())
         {
@@ -1059,10 +1005,9 @@ void SpecificWorker::process_table_node(const DSR::Node& node)
     TableObservation last_obs;
     bool updated = false;
 
-    // Multi-sensor fusion (Q2b): one belief update per assigned slice (e.g. ZED + ricoh-360). Sequential
-    // Bayesian updates = joint likelihood for the recursive filter, and each sensor keeps its OWN R and
-    // common-mode (they don't share a registration error) — which concatenating points into one frame could
-    // not express. The dense ZED slice and the sparse ricoh slice therefore both inform the SAME table.
+    // Multi-slice fusion: one belief update per assigned ZED slice of this table. Sequential Bayesian updates
+    // = joint likelihood for the recursive filter, and each slice keeps its OWN R and common-mode (they don't
+    // share a registration error) — which concatenating points into one frame could not express.
     // ONLY on a fresh mask FRAME for this instance: the tracker assigns every cycle (birth/association
     // continuity), but re-fitting the SAME packet each cycle would overcount evidence — gate on a new frame_id.
     const auto& pkt = mask_ingestor_->packet();
