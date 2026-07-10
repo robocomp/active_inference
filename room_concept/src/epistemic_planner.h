@@ -42,9 +42,11 @@ public:
         float w_ior           = 2.0f;        // exponent for IoR suppressor: score *= staleness^w_ior
                                              //   (0=no suppression, 1=linear, 2=quadratic, etc.)
                                              //   just-visited → staleness=0 → score=0 (hard inhibition)
-        float ior_path_radius = 1.0f;        // receptive-field radius for continuous path marking (m)
-                                             //   = 2 grid cells at default ior_cell_size=0.5m
-                                             //   cells within this radius are suppressed as the robot advances
+        float ior_path_radius = 1.0f;        // receptive-field radius for continuous path marking (m).
+                                             //   = 2 grid cells at default ior_cell_size=0.5m. Should stay
+                                             //   well below the room's half-extent so marking is LOCAL and
+                                             //   unvisited cells accumulate staleness/age (else IoR loses
+                                             //   steering contrast). Config: EpistemicController.IorPathRadius.
         float w_path_interest = 0.3f;        // weight: bonus for paths that traverse unvisited cells
                                              //   path_interest = mean staleness of intermediate path cells ∈ [0,1]
                                              //   higher → prefer routes through unexplored territory
@@ -157,11 +159,12 @@ public:
     float live_epistemic_gain(const Eigen::Vector2f& viewpoint) const;
 
     /// TOTAL epistemic gain advertised on afford_room = pose-FIM ΔH (nats, self-extinguishing
-    /// once localized) + w_ior_drive · IoR patrol-staleness drive (NON-saturating: stays positive
-    /// on long-unvisited cells even after the pose-FIM term saturates). Mirrors the selection
-    /// currency in evaluate_targets so the published gain matches how targets are ranked. Use
-    /// this as the published gain so exploration does not stall the moment the pose covariance
-    /// tightens.
+    /// once localized) + w_ior_drive · (neglect age / ior_decay_time) IoR patrol drive. The drive
+    /// uses the same UNCLAMPED age_seconds the patrol re-ranking in evaluate_targets uses, so the
+    /// published gain tracks how targets are actually chosen and grows without bound as the room is
+    /// neglected — it can never collapse below the consumer's selection bar the way a clamped
+    /// staleness ∈ [0,1] does (which flatlines past ior_decay_time and shrinks to ~0 in a small,
+    /// fully-swept room). This guarantees afford_room stays selectable so exploration never stalls.
     float live_total_epistemic_gain(const Eigen::Vector2f& viewpoint) const;
 
     /// Called every plan cycle.  Returns the current navigation target,
@@ -380,6 +383,10 @@ private:
 
     // RNG for weighted random selection
     mutable std::mt19937 rng_{std::random_device{}()};
+
+    // ---- Selection diagnostics (set in evaluate_targets, printed in select_target) ----
+    mutable float dbg_max_fim_ = 0.f;   // best pose-FIM gain across candidates this cycle (nats)
+    mutable bool  dbg_patrol_  = false; // true when the second-level age-ranked patrol was active
 };
 
 } // namespace rc

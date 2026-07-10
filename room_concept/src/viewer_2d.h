@@ -196,7 +196,7 @@ class Viewer2D : public QObject
         // Lidar point pools (reused each frame)
         std::vector<QGraphicsEllipseItem*> lidar_pool_high_;
         std::vector<QGraphicsEllipseItem*> lidar_pool_low_;
-        bool lidar_points_visible_ = true;
+        bool lidar_points_visible_ = false;   // LIDAR overlay starts OFF; toggled on via btn_lidar_points_viz
 
         // Path
         std::vector<QGraphicsItem*>         path_draw_items_;

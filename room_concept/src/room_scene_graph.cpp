@@ -6,6 +6,8 @@
 #include "room_scene_graph.h"
 
 #include <cmath>
+#include <cstdio>
+#include <print>
 #include <string>
 #include <vector>
 
@@ -326,6 +328,15 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
     {
         planner.mark_and_refresh();   // stamp path + refresh IoR overlay during navigation
         planner.refresh_belief();     // actively exploring → hold belief fresh; forgetting only when idle
+        // Throttled: a stuck claim (controller Executing but never completing) keeps the planner idle
+        // here forever — no reselect, no [planner] line. Reveals the OTHER "robot won't move on" path.
+        static int exec_hold_dbg = 0;
+        if (++exec_hold_dbg % 90 == 0)
+            std::print("[planner] afford_room EXECUTING (controller-claimed) — planner idle, holding "
+                       "target ({:.2f},{:.2f}); {} cycles\n",
+                       planner.current_target() ? planner.current_target()->position.x() : 0.f,
+                       planner.current_target() ? planner.current_target()->position.y() : 0.f,
+                       exec_hold_dbg);
         return;
     }
 
