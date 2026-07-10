@@ -417,6 +417,13 @@ void SpecificWorker::initialize()
         ts_plot_->set_visible_window(60.f);
         series_layout->addWidget(ts_plot_);
 
+        // FE SURPRISE (attention signal) on its own panel — it lives on a much smaller scale (~0–1) than the FE
+        // (~2–8), so it needs the full panel height to be readable. Spikes when a table moves, decays as the fit
+        // re-converges. See the belief/fitter plumbing (inst.fe_surprise).
+        ts_surprise_plot_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
+        ts_surprise_plot_->set_visible_window(60.f);
+        series_layout->addWidget(ts_surprise_plot_);
+
         ts_cov_plot_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
         ts_cov_plot_->set_visible_window(60.f);
         series_layout->addWidget(ts_cov_plot_);
@@ -502,10 +509,11 @@ void SpecificWorker::compute()
     for (const auto& node : table_nodes)
         process_table_node(node);
 
-    // Evidence-based removal: carve this cycle's sweep against each fitted footprint → occupancy log-odds →
-    // remove the demonstrably-empty ones. After the fits so footprints are current. OFF unless enabled.
-    if (cfg_.existence_removal_enabled and fresh_sweep)
-        update_existence_and_remove();
+    // Evidence-based removal: each existence channel integrates on its OWN sensor cadence (silhouette/mask on a
+    // fresh mask frame, LiDAR carve on a fresh sweep) — a camera-only cycle still accrues absence, a LiDAR-only
+    // cycle still carves free space. After the fits so footprints are current. OFF unless enabled.
+    if (cfg_.existence_removal_enabled)
+        update_existence_and_remove(fresh_masks, fresh_sweep);
 
     // ── Evidence monitor: global counters + throttled snapshot push ──
     ev_g_.instances    = static_cast<int>(fitter_->instances().size());
@@ -522,6 +530,30 @@ void SpecificWorker::compute()
     }
     last_compute_tp_ = now;
     refresh_evidence_monitor();
+    prune_dead_series();   // drop timeseries lines for tables that were removed from the graph
+}
+
+// Remove timeseries series for tables no longer present in the graph, so a removed table's lines don't persist
+// (and a table reborn under the same name gets fresh series via the idempotent add_series in the feed). Runs
+// every compute cycle; cheap (a set diff over the few live instances).
+void SpecificWorker::prune_dead_series()
+{
+    if (not ts_plot_) return;
+    std::unordered_set<std::string> live;
+    for (const auto& [id, inst] : fitter_->instances()) live.insert(inst.node_name);
+    for (auto it = ts_known_tables_.begin(); it != ts_known_tables_.end();)
+    {
+        if (live.contains(*it)) { ++it; continue; }
+        const std::string& n = *it;
+        ts_plot_->remove_series(n + "_fe");   ts_plot_->remove_series(n + "_base");
+        if (ts_surprise_plot_) ts_surprise_plot_->remove_series(n + "_surprise");
+        if (ts_cov_plot_)      ts_cov_plot_->remove_series(n + "_cov");
+        if (ts_res_plot_)      ts_res_plot_->remove_series(n + "_res");
+        if (ts_state_plot_)  { ts_state_plot_->remove_series(n + "_w");  ts_state_plot_->remove_series(n + "_h"); }
+        if (ts_ce_plot_)     { ts_ce_plot_->remove_series(n + "_sW");    ts_ce_plot_->remove_series(n + "_sH"); }
+        it = ts_known_tables_.erase(it);
+    }
+    for (const auto& [id, inst] : fitter_->instances()) ts_known_tables_.insert(inst.node_name);
 }
 
 // Build the per-instance snapshot from live instance state and push it to the monitor at ~5 Hz (a full
@@ -544,6 +576,8 @@ void SpecificWorker::refresh_evidence_monitor()
         x.node       = inst.node_name;
         x.conf       = inst.last_mask_confidence;
         x.since_det  = inst.frames_since_detection;
+        x.n_zed      = inst.dbg_n_zed_slices;
+        x.n_ricoh    = inst.dbg_n_ricoh_slices;
         x.cand       = inst.dbg_cand_pts;
         x.resid      = inst.dbg_resid_pts;
         x.gated      = inst.dbg_gated;
@@ -558,7 +592,9 @@ void SpecificWorker::refresh_evidence_monitor()
         x.L          = inst.existence.logodds();
         x.p          = inst.existence.p_exists();
         x.ex_locc    = inst.dbg_ex_lidar_occ;  x.ex_lfree = inst.dbg_ex_lidar_free;  x.ex_ln    = inst.dbg_ex_lidar_n;
+        x.ex_lfree_eff = inst.dbg_ex_lidar_free_eff;
         x.ex_socc    = inst.dbg_ex_sil_occ;    x.ex_sfree = inst.dbg_ex_sil_free;    x.ex_sndet = inst.dbg_ex_sil_ndet;
+        x.ex_sfree_eff = inst.dbg_ex_sil_free_eff;
         x.streak     = inst.existence_remove_streak;
         const auto& s = inst.ai2_belief.state();
         x.w = s.w; x.h = s.h; x.H = s.H;
@@ -571,17 +607,36 @@ void SpecificWorker::refresh_evidence_monitor()
 // remove the tables whose volume is demonstrably empty (P(occupied) < ExistenceRemovalProb). The shared
 // occupancy carve (common/existence_belief.h) supplies occ/free evidence with common-mode saturation + the
 // n_reached HOLD gate; the hollow guard suppresses interior free-evidence while a table is actively observed.
-void SpecificWorker::update_existence_and_remove()
+void SpecificWorker::update_existence_and_remove(bool fresh_masks, bool fresh_sweep)
 {
-    if (not lidar_ingestor_) return;
-    const auto& sweep = lidar_ingestor_->sweep_room();
-    if (sweep.empty()) return;
-    const Eigen::Vector3f origin = lidar_ingestor_->origin_room();
+    // Decoupled cadence: the SILHOUETTE/mask channel integrates on a fresh MASK frame (camera clock), the LiDAR
+    // free-space carve on a fresh SWEEP (LiDAR clock). Each accrues its evidence independently, so a camera-only
+    // cycle still votes absence and a LiDAR-only cycle still carves free space. The removal debounce advances
+    // only on an EVIDENCE cycle (when a channel actually integrated), so mixed sensor rates don't bias it.
+    const std::vector<Eigen::Vector3f>* sweep = nullptr;
+    Eigen::Vector3f origin = Eigen::Vector3f::Zero();
+    if (fresh_sweep and lidar_ingestor_)
+    {
+        const auto& s = lidar_ingestor_->sweep_room();
+        if (not s.empty()) { sweep = &s; origin = lidar_ingestor_->origin_room(); }
+    }
+    if (not fresh_masks and sweep == nullptr)   // no new evidence on either channel this cycle
+        return;
 
     rc::exist::SensorModel sm;
     sm.sensor_sigma_m = cfg_.existence_sensor_sigma_m;
     sm.detection_prob = cfg_.existence_detection_prob;
     sm.clutter_prob   = cfg_.existence_clutter_prob;
+
+    // Absence-confidence vs range: a miss at long range is weak evidence of removal (the sensor likely could
+    // not resolve the object). c = (range_ref/range)^power capped at 1 → 1 up close, →0 far. Scales the FREE
+    // (absence) half only; occupancy stays fully informative. power 0 disables (constant 1).
+    const auto absence_range_conf = [&](float range_m) -> float
+    {
+        const float rr = cfg_.existence_absence_range_ref_m;
+        if (rr <= 0.0f or cfg_.existence_absence_range_power <= 0.0f) return 1.0f;
+        return std::min(1.0f, std::pow(rr / std::max(range_m, 1e-3f), cfg_.existence_absence_range_power));
+    };
 
     std::vector<std::uint64_t> doomed;
     for (auto& [id, inst] : fitter_->instances())
@@ -592,44 +647,75 @@ void SpecificWorker::update_existence_and_remove()
         const auto& S  = inst.ai2_belief.covariance();
         const float surf_sigma = std::sqrt(std::max(0.0f, 0.5f * (S(0, 0) + S(1, 1))));   // footprint position σ
         const bool observed = inst.frames_since_detection == 0;                      // fresh mask this cycle
+        bool integrated = false;
 
-        // SILHOUETTE / MASK channel (pixel-level): project the tabletop silhouette and compare, per predicted-
-        // VISIBLE pixel, against the current YOLO foreground. Lit by a "table" mask ⇒ occupancy (holds L up);
-        // lit by NOTHING ⇒ predicted-but-absent (the KEY "gone" signal — present EVEN WITH NO YOLO MASK this
-        // frame); lit by a NON-table mask ⇒ occluded ⇒ HOLD (never false absence behind a nearer object).
-        // n_detectable==0 (out of FoV / fully occluded) ⇒ mask_evidence HOLDs. Replaces the old coarse
-        // roi_valid×observed proxy with a real silhouette↔mask pixel overlap.
-        const auto sil = fitter_->compute_silhouette_existence(inst);
-        if (sil.n_detectable > 0)
+        // SILHOUETTE / MASK channel (pixel-level) — CAMERA clock: project the tabletop silhouette and compare,
+        // per predicted-VISIBLE pixel, against the current YOLO foreground. Lit by a "table" mask ⇒ occupancy
+        // (holds L up); lit by NOTHING ⇒ predicted-but-absent (the "gone" signal, present EVEN WITH NO YOLO MASK);
+        // lit by a NON-table mask ⇒ occluded ⇒ HOLD (never false absence behind a nearer object). n_detectable==0
+        // (out of FoV / fully occluded) ⇒ mask_evidence HOLDs.
+        if (fresh_masks)
         {
-            const rc::exist::Evidence mev = rc::exist::mask_evidence(sil.e_occ, sil.e_free, sil.n_detectable, sm);
-            inst.existence.integrate(mev);
+            const auto sil = fitter_->compute_silhouette_existence(inst);
+            inst.dbg_ex_sil_occ = sil.e_occ; inst.dbg_ex_sil_free = sil.e_free; inst.dbg_ex_sil_ndet = sil.n_detectable;
+            if (sil.n_detectable > 0)
+            {
+                // Observed-guard (mirrors the LiDAR hollow guard): if the table was DETECTED by any sensor this
+                // frame it is not gone, so suppress silhouette ABSENCE — a ZED false-negative, or a table seen
+                // only by the ricoh whose silhouette the ZED-based check can't confirm, must never vote it away.
+                // Occupancy always counts. (The ricoh-projected silhouette, once the producer ships 360 mask
+                // pixels, will let absence be judged in the ricoh view directly instead of relying on this guard.)
+                float sfree = observed ? 0.0f : sil.e_free;
+                // Absence is evidence of removal only in proportion to how much of the table SHOULD have been
+                // seen from here: in_fov_frac = n_detectable / n_total folds the real camera FRUSTUM (out-of-FoV
+                // samples don't count) AND the occlusion HOLD together, and range_conf adds the angular-size /
+                // detectability drop. A ricoh-only table (barely in the ZED frustum) → in_fov_frac ≈ 0 → HOLD.
+                sfree *= absence_range_conf(sil.mean_range_m) * sil.in_fov_frac();
+                inst.dbg_ex_sil_free_eff = sfree;   // effective absence after range/occlusion + observed-guard
+                inst.existence.integrate(rc::exist::mask_evidence(sil.e_occ, sfree, sil.n_detectable, sm));
+                integrated = true;
+            }
         }
 
-        // LiDAR occupancy carve of the TOP-SLAB z-band [H−t, H] (the slab spans the full footprint there, so a
-        // beam hits rim/top = occupancy or passes through = gone — no hollow ambiguity from between-leg beams).
-        rc::exist::Evidence ev = rc::exist::carve_box(origin, sweep, bs.cx, bs.cy, bs.yaw, bs.w, bs.h,
-                                                      bs.H - rc::TableModel::TOP_THICKNESS, bs.H, surf_sigma, sm);
-        if (ev.n_reached > 0)                                                        // 0 ⇒ not probed ⇒ HOLD
+        // LiDAR occupancy carve of the TOP-SLAB z-band [H−t, H] — LiDAR clock (the slab spans the full footprint
+        // there, so a beam hits rim/top = occupancy or passes through = gone — no hollow ambiguity between legs).
+        if (sweep)
         {
-            ev.log_odds_delta = rc::exist::hollow_guarded_delta(ev, observed, sm);   // suppress interior free while observed
-            inst.existence.integrate(ev);
+            rc::exist::Evidence ev = rc::exist::carve_box(origin, *sweep, bs.cx, bs.cy, bs.yaw, bs.w, bs.h,
+                                                          bs.H - rc::TableModel::TOP_THICKNESS, bs.H, surf_sigma, sm);
+            inst.dbg_ex_lidar_occ = ev.e_occ; inst.dbg_ex_lidar_free = ev.e_free; inst.dbg_ex_lidar_n = ev.n_reached;
+            if (ev.n_reached > 0)                                                    // 0 ⇒ not probed ⇒ HOLD
+            {
+                // Degrade the free/absence half by LiDAR range: far away the beams are sparse and the thin
+                // top-slab subtends few of them, so a pass-through is weak evidence the tabletop is gone.
+                const float lidar_range = (origin - Eigen::Vector3f(bs.cx, bs.cy, bs.H)).norm();
+                ev.e_free *= absence_range_conf(lidar_range);
+                // OCCUPANCY-ONLY by default: a solid-slab model vs a thin real tabletop makes LiDAR "free"
+                // unreliable (beams under the top surface read as gone), so it must not drive removal — only
+                // the camera silhouette does. Suppress free unless it was observed (hollow guard) OR the
+                // ExistenceLidarAbsence override is on. Occupancy still counts, holding L up.
+                const bool suppress_free = observed or not cfg_.existence_lidar_absence;
+                inst.dbg_ex_lidar_free_eff = suppress_free ? 0.0f : ev.e_free;
+                ev.log_odds_delta = rc::exist::hollow_guarded_delta(ev, suppress_free, sm);
+                inst.existence.integrate(ev);
+                integrated = true;
+            }
         }
 
-        // EvidenceMonitor snapshot of both existence channels this cycle.
-        inst.dbg_ex_lidar_occ = ev.e_occ;  inst.dbg_ex_lidar_free = ev.e_free;  inst.dbg_ex_lidar_n  = ev.n_reached;
-        inst.dbg_ex_sil_occ   = sil.e_occ; inst.dbg_ex_sil_free   = sil.e_free; inst.dbg_ex_sil_ndet = sil.n_detectable;
+        // Debounce advances ONLY on an evidence cycle, so it counts sustained EVIDENCE agreement (not wall-clock
+        // cycles) regardless of the two sensors' rates. A transient hiccup still can't delete a real table.
+        if (integrated)
+        {
+            if (inst.existence.should_remove(cfg_.existence_removal_prob)) ++inst.existence_remove_streak;
+            else                                                          inst.existence_remove_streak = 0;
 
-        // Debounce: delete only when the removal decision holds for existence_remove_frames CONSECUTIVE cycles,
-        // so a transient association/fit hiccup (a few cycles of spurious free) can't delete a real table.
-        if (inst.existence.should_remove(cfg_.existence_removal_prob)) ++inst.existence_remove_streak;
-        else                                                          inst.existence_remove_streak = 0;
-
-        if (fitter_->should_log(inst))
-            std::print("[{}] [existence] L={:.2f} p={:.2f} | lidar occ={:.1f} free={:.1f} n={} | sil occ={:.0f} free={:.0f} ndet={} | {} streak={}\n",
-                       inst.node_name, inst.existence.logodds(), inst.existence.p_exists(),
-                       ev.e_occ, ev.e_free, ev.n_reached, sil.e_occ, sil.e_free, sil.n_detectable,
-                       observed ? "obs" : "-", inst.existence_remove_streak);
+            if (fitter_->should_log(inst))
+                std::print("[{}] [existence] L={:.2f} p={:.2f} | lidar occ={:.1f} free={:.1f} n={} | sil occ={:.0f} free={:.0f} ndet={} | {} streak={}\n",
+                           inst.node_name, inst.existence.logodds(), inst.existence.p_exists(),
+                           inst.dbg_ex_lidar_occ, inst.dbg_ex_lidar_free, inst.dbg_ex_lidar_n,
+                           inst.dbg_ex_sil_occ, inst.dbg_ex_sil_free, inst.dbg_ex_sil_ndet,
+                           observed ? "obs" : "-", inst.existence_remove_streak);
+        }
         if (inst.existence_remove_streak >= cfg_.existence_remove_frames)
             doomed.push_back(id);
     }
@@ -731,19 +817,24 @@ void SpecificWorker::run_instance_tracker()
         inst.assigned_mask_idxs.clear();   // cleared; re-filled below with every slice associated this cycle
     }
 
-    // Detections ← this frame's "table" mask slices (carry the slice index for the assignment). Built ONLY on
-    // a fresh mask frame; on a stale cycle dets stay empty so instances age instead of re-fitting old masks.
+    // Detections ← the current "table" mask slices (carry the slice index for the assignment). Built EVERY
+    // cycle from the packet (even a stale one): the tracker needs continuous detections so its birth CANDIDATES
+    // mature over birth_frames consecutive cycles and so association stays live — gating this on mask freshness
+    // wiped the candidates every stale cycle and NOTHING ever birthed. Re-fitting a stale mask is prevented
+    // separately, in process_table_node (per-instance frame_id gate), NOT here.
     // Each det's BIRTHABLE flag encodes trust: a dense ZED slice (depth_var==0) may spawn a table; a ricoh-360
     // / LiDAR-depth slice (depth_var>0) may only REFINE unless it is confident AND its depth is well-scored
     // (conf ≥ RicohBirthConf and depth_var ≤ RicohBirthMaxVar) — otherwise a sparse peripheral blob would
     // birth phantoms across the scene. All slices still ASSOCIATE regardless (that is the fusion).
     std::vector<rc::DetectionView> dets;
     const auto& pkt = mask_ingestor_->packet();
-    if (pkt.valid and not ev_g_.mask_stale)
+    if (pkt.valid)
         for (int i = 0; i < static_cast<int>(pkt.slices.size()); ++i)
         {
             const auto& sl = pkt.slices[i];
             if (sl.label != "table" or sl.support_end <= sl.support_begin)
+                continue;
+            if (not cfg_.use_ricoh_slices and sl.depth_var > 0.0f)   // debug baseline: ZED-only masks (drop ricoh)
                 continue;
             rc::DetectionView dv;
             dv.xy = {sl.centroid.x(), sl.centroid.y()};
@@ -812,6 +903,40 @@ void SpecificWorker::run_instance_tracker()
         if (new_id != 0)
             fitter_->note_birth(new_id, Eigen::Vector2f(c.x(), c.y()));
     }
+
+    // SEAM-SPLIT instrumentation: per instance, split the slices fused this cycle into ZED (depth_var==0) vs
+    // ricoh (depth_var>0). Two ricoh slices on one track ⇒ a 360 strip-seam split (a wide table straddling a
+    // strip boundary → two partial detections that didn't merge). Log their centroids + separation so it can
+    // be confirmed behind the robot, and count it globally (surfaced in the EvidenceMonitor header).
+    int seam_candidates = 0;
+    for (auto& [id, inst] : fitter_->instances())
+    {
+        inst.dbg_n_zed_slices = inst.dbg_n_ricoh_slices = 0;
+        std::vector<Eigen::Vector3f> ricoh_centroids;
+        for (const int idx : inst.assigned_mask_idxs)
+            if (idx >= 0 and idx < static_cast<int>(pkt.slices.size()))
+            {
+                if (pkt.slices[idx].depth_var > 0.0f)
+                { ++inst.dbg_n_ricoh_slices; ricoh_centroids.push_back(pkt.slices[idx].centroid); }
+                else
+                    ++inst.dbg_n_zed_slices;
+            }
+        if (inst.dbg_n_ricoh_slices >= 2)
+        {
+            ++seam_candidates;
+            float max_sep = 0.0f;
+            for (std::size_t a = 0; a < ricoh_centroids.size(); ++a)
+                for (std::size_t b = a + 1; b < ricoh_centroids.size(); ++b)
+                    max_sep = std::max(max_sep, (ricoh_centroids[a] - ricoh_centroids[b]).norm());
+            std::print("[seam] {} fused {} ricoh slices (+{} zed) — SEAM-SPLIT candidate, max centroid sep {:.2f}m",
+                       inst.node_name, inst.dbg_n_ricoh_slices, inst.dbg_n_zed_slices, max_sep);
+            for (const auto& rc : ricoh_centroids)
+                std::print("  c=({:.2f},{:.2f},{:.2f})", rc.x(), rc.y(), rc.z());
+            std::print("\n");
+        }
+    }
+    ev_g_.seam_splits      = seam_candidates;
+    ev_g_.seam_splits_cum += seam_candidates;
 }
 
 ///////////////////////////////////////////////////////////////
@@ -859,14 +984,21 @@ void SpecificWorker::process_table_node(const DSR::Node& node)
     // Bayesian updates = joint likelihood for the recursive filter, and each sensor keeps its OWN R and
     // common-mode (they don't share a registration error) — which concatenating points into one frame could
     // not express. The dense ZED slice and the sparse ricoh slice therefore both inform the SAME table.
-    for (const int idx : inst.assigned_mask_idxs)
+    // ONLY on a fresh mask FRAME for this instance: the tracker assigns every cycle (birth/association
+    // continuity), but re-fitting the SAME packet each cycle would overcount evidence — gate on a new frame_id.
+    const auto& pkt = mask_ingestor_->packet();
+    if (pkt.valid and pkt.frame_id > inst.last_masks_frame_seen)
     {
-        auto obs = fitter_->observe_slice(inst, idx);
-        if (not obs.has_fresh_data)
-            continue;
-        free_energy = fitter_->run_inference(inst, obs);
-        last_obs = std::move(obs);
-        updated = true;
+        for (const int idx : inst.assigned_mask_idxs)
+        {
+            auto obs = fitter_->observe_slice(inst, idx);
+            if (not obs.has_fresh_data)
+                continue;
+            free_energy = fitter_->run_inference(inst, obs);
+            last_obs = std::move(obs);
+            updated = true;
+        }
+        inst.last_masks_frame_seen = pkt.frame_id;
     }
 
     if (not updated)
@@ -918,6 +1050,18 @@ void SpecificWorker::publish_table_diagnostics(const rc::TableInstance& inst,
     {
         ts_plot_->add_series(inst.node_name + "_fe", QColor(255, 170, 0), 1.1f);
         ts_plot_->add_point (inst.node_name + "_fe", free_energy);
+        // FE BASELINE stays on the FE panel (same units): the FE line lifting ABOVE the gray baseline IS the
+        // surprise, shown here visually. The SURPRISE (smoothed gap) goes on its OWN panel (ts_surprise_plot_)
+        // because it lives on a much smaller scale — the active-perception attention signal.
+        ts_plot_->add_series(inst.node_name + "_base", QColor(140, 140, 140), 0.9f);
+        if (ts_surprise_plot_)
+            ts_surprise_plot_->add_series(inst.node_name + "_surprise", QColor(255, 60, 60), 1.3f);
+        if (inst.fe_baseline >= 0.0f)   // skip the uninitialised (-1) baseline before the first fit
+        {
+            ts_plot_->add_point(inst.node_name + "_base", inst.fe_baseline);
+            if (ts_surprise_plot_)
+                ts_surprise_plot_->add_point(inst.node_name + "_surprise", inst.fe_surprise);
+        }
         if (ts_cov_plot_)
         {
             ts_cov_plot_->add_series(inst.node_name + "_cov", QColor(0, 190, 255), 1.1f);
@@ -926,11 +1070,10 @@ void SpecificWorker::publish_table_diagnostics(const rc::TableInstance& inst,
         if (ts_res_plot_)
         {
             ts_res_plot_->add_series(inst.node_name + "_res", QColor(170, 80, 255), 1.1f);
-            // Residual points only exist on FRESH-mask frames; plotting 0 on every idle cycle made the
-            // series crash thousands→0 between masks. Only sample on fresh frames so the line holds
-            // the last real value between detections (a meaningful per-mask residual-count trend).
-            if (observation.has_fresh_data)
-                ts_res_plot_->add_point (inst.node_name + "_res", static_cast<float>(observation.residual_pts.size()));
+            // Plot inst.dbg_resid_pts (the SAME value the EvidenceMonitor counter shows), which HOLDS its last
+            // value between masks — so the line matches the counter and doesn't vanish. The old code sampled
+            // observation.residual_pts only on fresh frames, so on a non-fresh publish it added nothing → no line.
+            ts_res_plot_->add_point(inst.node_name + "_res", static_cast<float>(inst.dbg_resid_pts));
         }
         if (ts_state_plot_)
         {

@@ -167,6 +167,24 @@ TableFitter::TableObservation TableFitter::observe_slice(TableInstance& inst, in
     inst.last_centroid_radius = slice.centroid_radius;
     inst.last_range           = slice.range;
     inst.last_depth_var       = slice.depth_var;   // mask depth uncertainty → R (ricoh lidar-depth masks)
+
+    // RICOH slice (depth_var>0): DON'T fit its reprojected-LiDAR support cloud (it sees through to background,
+    // which stretched/collapsed the extent). Instead contribute ONE weak position anchor — the slice centroid —
+    // and let the LiDAR range factor (sphere-traced, occlusion-robust) supply the geometry. feed_lidar anchors
+    // its return selection on this centroid; run_inference gives it a large R (ricoh_anchor_sigma_m).
+    if (slice.depth_var > 0.0f)
+    {
+        observation.candidate_pts = {slice.centroid};
+        observation.has_fresh_data = true;
+        observation.ricoh_range    = true;
+        observation.explanation_ratio = 1.0f;
+        if (should_log(inst))
+            std::print("[{}] masks={} slice={} RICOH-range anchor conf={:.2f} dvar={:.4f} centroid=({:.2f},{:.2f},{:.2f})\n",
+                       inst.node_name, masks_packet.frame_id, slice_index, slice.confidence, slice.depth_var,
+                       slice.centroid.x(), slice.centroid.y(), slice.centroid.z());
+        return observation;
+    }
+
     const std::size_t begin = std::min(slice.support_begin, masks_packet.support_points.size());
     const std::size_t end   = std::min(slice.support_end,   masks_packet.support_points.size());
 
@@ -253,6 +271,34 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
             const std::size_t k = static_cast<std::size_t>(0.95f * (zs.size() - 1));
             std::nth_element(zs.begin(), zs.begin() + k, zs.end());
             s0.H = zs[k];   // observed top face
+
+            // Birth seed (w,h,yaw) from the footprint second-moment: start the box near the mask's real size and
+            // orientation so the per-point mixture + legs associate immediately, instead of a small axis-aligned
+            // box that sees the true rim/legs as clutter and never rotates. Same statistic as the per-frame factor;
+            // gated on footprint_moment_precision so the baseline (flag OFF) births exactly as before. Skip on a
+            // TRIMMED mask (extent is only a lower bound → would birth too small); wait for a full mask.
+            if (cfg_.footprint_moment_precision > 0.0f and inst.last_trunc_frac <= 1e-3f)
+            {
+                std::vector<Eigen::Vector3f> pts;
+                pts.reserve(static_cast<std::size_t>(npts));
+                pts.insert(pts.end(), observation.candidate_pts.begin(), observation.candidate_pts.end());
+                pts.insert(pts.end(), observation.residual_pts.begin(), observation.residual_pts.end());
+                const float z_hi = s0.H + 3.0f * cfg_.ai2_sigma_base_m;
+                const float z_lo = s0.H - TableModel::TOP_THICKNESS - 3.0f * cfg_.ai2_sigma_base_m;
+                if (const auto mom = TableBelief::footprint_moment(pts, z_lo, z_hi); mom.ok)
+                {
+                    s0.cx = mom.cx; s0.cy = mom.cy;   // top-plane centroid (sharper than the leg-biased full-cloud mean)
+                    s0.w = std::max(0.10f, mom.ext_major);
+                    s0.h = std::max(0.10f, mom.ext_minor);
+                    // Only commit the orientation when the footprint is clearly anisotropic. A near-square
+                    // footprint has an ill-defined principal axis (phi swings ±90° on noise), so birthing yaw
+                    // from a single frame would seed a random ±90°; leave yaw at its RT/default seed and let the
+                    // per-frame moment (aniso-weighted) + resolve_orientation settle it once evidence accrues.
+                    const float sum = mom.ext_major + mom.ext_minor;
+                    if (sum > 1e-4f and (mom.ext_major - mom.ext_minor) / sum > 0.10f)
+                        s0.yaw = mom.phi;
+                }
+            }
         }
         TableBeliefParams p;
         p.sigma_base_m    = cfg_.ai2_sigma_base_m;
@@ -268,6 +314,7 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
         p.coverage_precision  = cfg_.coverage_precision;
         p.coverage_robust_c_m = cfg_.coverage_robust_c_m;
         p.free_space_precision = cfg_.free_space_precision;
+        p.footprint_moment_precision = cfg_.footprint_moment_precision;
         p.top_thickness   = TableModel::TOP_THICKNESS;
         p.leg_radius      = TableModel::LEG_RADIUS;
         inst.ai2_belief = TableBelief(s0, p);
@@ -296,7 +343,7 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
         }
         inst.last_belief_touch = now;
         compute_projected_roi(inst);
-        return 0.0f;
+        return inst.dbg_energy;   // HOLD the last free energy — no new mask ≠ FE 0 (the fit is unchanged)
     }
     // Fresh path: update()/predict() below carry their own one-step Q, so just reset the age clock here.
     inst.last_belief_touch = now;
@@ -311,19 +358,20 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
     const float range         = std::max(0.0f, inst.last_range);
     const float lat_std       = cfg_.ai2_range_noise_lat_per_m * range;   // m   (lateral deprojection)
     const float yaw_std       = cfg_.ai2_range_noise_yaw_per_m * range;   // rad (orientation lever-arm ∝ 1/range)
+    const float size_std      = cfg_.ai2_range_noise_size_per_m * range;  // m   (extent unresolved at range)
     const float range_lat_var = lat_std * lat_std;
     const float range_yaw_var = yaw_std * yaw_std;
+    const float range_size_var = size_std * size_std;
 
-    // Observation precision R = σ_base² + ego-motion var + mask depth var + static range var (per-point
-    // random part). depth_var (common/depth_projection) is 0 for dense zed masks and the reprojected-lidar
-    // range variance for ricoh masks — so a sparse-depth ricoh mask is smoothly down-weighted (→ bearing).
-    const float R = cfg_.ai2_sigma_base_m * cfg_.ai2_sigma_base_m
-                  + std::max(0.0f, inst.last_motion_var) + std::max(0.0f, inst.last_depth_var) + range_lat_var;
+    const float R = observation.ricoh_range
+                  ? cfg_.ricoh_anchor_sigma_m * cfg_.ricoh_anchor_sigma_m
+                  : cfg_.ai2_sigma_base_m * cfg_.ai2_sigma_base_m
+                    + std::max(0.0f, inst.last_motion_var) + std::max(0.0f, inst.last_depth_var) + range_lat_var;
 
     // Truncation gate: a mask clipped by the image border has a chopped silhouette → it biases the fit
     // (shrinks/displaces the model). Above tolerance, skip the geometric update (predict only) — but
-    // keep the instance (association ran upstream). The ego-motion lag bias is handled upstream by the
-    // voxelizer pose extrapolation, so no separate motion/bias gate is needed here.
+    // keep the instance (association ran upstream). Ego-motion corruption is handled by CONTINUOUS covariance
+    // (moment_extra_var motion term + the mode evidence_weight), not a gate.
     const bool gated = inst.last_trunc_frac > cfg_.ai2_trunc_gate_frac;
 
     // Pose-chain covariance at the table centre (cx,cy) — the per-frame SHARED localization error. Fed
@@ -331,7 +379,7 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
     // Computed once here (before the update) and reused for the published RT cov below.
     compute_chain_cov(inst);
 
-    float energy = 0.0f;
+    float energy = inst.dbg_energy;   // default = HOLD last FE (a gated / rejected cycle took no measurement)
     if (gated)
         inst.ai2_belief.predict();   // Σ inflates, mean unchanged
     else
@@ -344,6 +392,22 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
         frame.chain_cov_xx  = inst.chain_cov_xx + range_lat_var;   // range adds to the SHARED position error (cap)
         frame.chain_cov_yy  = inst.chain_cov_yy + range_lat_var;
         frame.chain_cov_yaw = range_yaw_var;                       // the binding term: far view can't rotate
+        frame.chain_cov_size = range_size_var;                     // ...nor RESHAPE/inflate — geometry freezes afar
+        frame.trunc_frac    = inst.last_trunc_frac;                // TRIMMED mask ⇒ moment extent is grow-only
+        frame.footprint_complete = inst.roi_fully_in_view;         // model fully in-frame ⇒ moment may shrink
+        // Footprint-moment SHARED per-frame variance: ego-motion mask corruption + a GENTLE range term (a global
+        // footprint fit is far more range-robust than a single boundary point, so a coefficient << the per-point
+        // AI2RangeNoiseSizePerM). This makes the moment ACCUMULATE across frames and back off when the robot is
+        // moving, instead of snapping the belief to each frame's noisy/corrupted footprint (the live wander).
+        // The ego-motion term uses motion_dotd (camera→mask relative motion): a "going-away/rotation" frame yields
+        // a degraded/split mask, and this inflates the moment variance so it CANNOT reshape the established fit
+        // (the observed reshape/rotate came in exactly on those frames). motion_var (interaction-matrix) is often
+        // under-reported for split masks, so motion_dotd is the load-bearing signal here.
+        const float moment_range_std  = cfg_.footprint_moment_range_per_m * range;
+        const float moment_motion_std = cfg_.footprint_moment_motion_gain * std::abs(inst.last_motion_dotd);
+        frame.moment_extra_var = std::max(0.0f, inst.last_motion_var)
+                               + moment_range_std * moment_range_std
+                               + moment_motion_std * moment_motion_std;
         // YOLO-independent LiDAR range channel: stage returns landing on the legs/rim. No-op if precision==0
         // or no fresh sweep. The shared factor (accumulate_lidar_rays<6> in TableBelief::accumulate_extra)
         // sphere-traces this belief's own SDF, so the same call the bottle uses drops in unchanged.
@@ -358,26 +422,54 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
         const auto&       ps         = pre_belief.state();
         energy = inst.ai2_belief.update(frame);
         const auto& ns = inst.ai2_belief.state();
+        // Full-state jump: centre (cx,cy,H) AND EXTENT (w,h). A static table can't grow/shrink its extent by
+        // max_step_m in one frame any more than it can teleport — a close-range OVER-SEGMENTED mask (floor/wall
+        // points) + the grow-only coverage term used to inflate w→5 m in a couple of frames, unguarded because
+        // the old step omitted w,h. Now that blow-up is a definitionally-spurious frame → rejected.
         const float step = std::sqrt((ns.cx - ps.cx) * (ns.cx - ps.cx) + (ns.cy - ps.cy) * (ns.cy - ps.cy)
-                                   + (ns.H  - ps.H)  * (ns.H  - ps.H));
+                                   + (ns.H  - ps.H)  * (ns.H  - ps.H)
+                                   + (ns.w  - ps.w)  * (ns.w  - ps.w) + (ns.h - ps.h) * (ns.h - ps.h));
         const bool bad = not (std::isfinite(ns.cx) and std::isfinite(ns.cy) and std::isfinite(ns.H)
                               and std::isfinite(ns.w) and std::isfinite(ns.h) and std::isfinite(ns.yaw));
         if (cfg_.max_step_m > 0.0f and (bad or step > cfg_.max_step_m))
         {
-            std::print("[{}] AI2 step-bound REJECT: centre moved {:.2f}m (>{:.2f}){} — outlier frame dropped\n",
-                       inst.node_name, step, cfg_.max_step_m, bad ? " [non-finite]" : "");
+            std::print("[{}] AI2 step-bound REJECT: state moved {:.2f}m (>{:.2f}){} — outlier frame dropped (w={:.2f} h={:.2f})\n",
+                       inst.node_name, step, cfg_.max_step_m, bad ? " [non-finite]" : "", ns.w, ns.h);
             inst.ai2_belief = pre_belief;     // reject the corrupted update (restore state + Σ)
             inst.ai2_belief.predict();        // widen Σ so the next good frame re-associates
-            energy = 0.0f;
+            energy = inst.dbg_energy;         // HOLD last FE — a rejected outlier frame took no valid measurement
             ++inst.frames_diverged;
         }
         else
+        {
             inst.frames_diverged = 0;
+            // Log the TRUE free energy (mean −log mixture likelihood, clutter included) at the converged state —
+            // the engine's return zeroed misfit via clutter (read ≈0 even on a bad fit). This is a meaningful F.
+            energy = inst.ai2_belief.mean_energy(frame.points, inst.ai2_belief.state(), R);
+            // FE SURPRISE (attention trigger): baseline tracks DOWN fast (consolidate a better fit) / UP slow (a
+            // sustained rise = the table moved shows as surprise before the baseline accepts it); surprise = the
+            // smoothed positive gap FE−baseline. Updated only on a genuine measurement (this accepted branch).
+            if (inst.fe_baseline < 0.0f)
+                inst.fe_baseline = energy;
+            else
+            {
+                const float a = (energy < inst.fe_baseline) ? cfg_.fe_baseline_adapt_down
+                                                            : cfg_.fe_baseline_adapt_up;
+                inst.fe_baseline += a * (energy - inst.fe_baseline);
+            }
+            const float gap = std::max(0.0f, energy - inst.fe_baseline);
+            inst.fe_surprise += cfg_.fe_surprise_smooth * (gap - inst.fe_surprise);
+        }
         // Near-square yaw disambiguation: sequential Bayesian comparison of the two orientation modes
         // (current vs the w↔h swap ≡ 90° rotation). Owns the GENUINE mode flip so the per-frame MAP no
         // longer SNAPS 90° on extent noise; the reported yaw uncertainty (yaw_marginal_var) stays honest
         // until an orbit resolves it. See TABLE_FIT_AI2.md.
-        if (inst.ai2_belief.resolve_orientation(frame.points, R) and should_log(inst))
+        // Ego-motion reliability: a moving frame's mask must barely vote on the discrete w↔h mode (split/degraded
+        // masks during motion were flipping it). Continuous down-weight, not a gate. Static (dotd≈0) → weight 1.
+        const float mref = std::max(1e-3f, cfg_.orientation_motion_ref);
+        const float dotd = std::abs(inst.last_motion_dotd);
+        const float mode_evidence_weight = 1.0f / (1.0f + (dotd / mref) * (dotd / mref));
+        if (inst.ai2_belief.resolve_orientation(frame.points, R, mode_evidence_weight) and should_log(inst))
             std::print("[{}] orientation mode FLIP (w↔h) | flip_ev={:.3f} p_alt={:.2f}\n",
                        inst.node_name, inst.ai2_belief.flip_evidence(), inst.ai2_belief.mode_posterior());
     }
@@ -398,8 +490,10 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
     // (chain cov already computed above, before the belief update)
 
     if (should_log(inst))
-        std::print("[{}] AI2 npts={} R={:.4f} dotd={:.2f} trunc={:.2f}{} | cx={:.3f} cy={:.3f} H={:.3f} w={:.3f} h={:.3f} ψ={:.3f} | σ(w,h,H)mm=({:.0f},{:.0f},{:.0f}) | lidar {}/{} resid={:.3f}m topz={:.3f}(H={:.3f}) floorz={:.3f} covA={:.2f} div={}\n",
+        std::print("[{}] AI2 npts={} R={:.4f} dotd={:.2f} trunc={:.2f}{} mom={} | FE={:.2f} base={:.2f} surprise={:.2f} | cx={:.3f} cy={:.3f} H={:.3f} w={:.3f} h={:.3f} ψ={:.3f} | σ(w,h,H)mm=({:.0f},{:.0f},{:.0f}) | lidar {}/{} resid={:.3f}m topz={:.3f}(H={:.3f}) floorz={:.3f} covA={:.2f} div={}\n",
                    inst.node_name, npts, R, inst.last_motion_dotd, inst.last_trunc_frac, gated ? " GATED" : "",
+                   inst.ai2_belief.last_moment_pts(),
+                   energy, inst.fe_baseline, inst.fe_surprise,
                    bs.cx, bs.cy, bs.H, bs.w, bs.h, bs.yaw,
                    1000.f * std::sqrt(std::max(0.f, inst.ai2_belief.covariance()(3, 3))),
                    1000.f * std::sqrt(std::max(0.f, inst.ai2_belief.covariance()(4, 4))),
@@ -426,7 +520,7 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
     {
         ai2_csv_.open(cfg_.ai2_csv_path, std::ios::out | std::ios::trunc);
         if (not ai2_csv_.is_open()) { cfg_.ai2_csv_path.clear(); return; }
-        ai2_csv_ << "cycle,node,npts,gated,energy,R,motion_var,depth_var,motion_dotd,trunc_frac,range,"
+        ai2_csv_ << "cycle,node,npts,gated,energy,fe_baseline,fe_surprise,R,motion_var,depth_var,motion_dotd,trunc_frac,range,"
                  << "cx,cy,H,w,h,yaw,std_cx,std_cy,std_H,std_w,std_h,std_yaw,"
                  << "std_yaw_within,flip_ev,p_alt,lidar_rays,lidar_raw,lidar_resid_m,lidar_meanz,lidar_topz,lidar_floorz,lidar_cov_ang\n";
     }
@@ -435,7 +529,8 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
     const auto sd = [&](int i) { return std::sqrt(std::max(0.0f, S(i, i))); };   // posterior std (m / rad)
     // std_yaw is now the MARGINAL (mode-entropy-inflated) yaw std; std_yaw_within is the within-mode Σ(5,5).
     ai2_csv_ << inst.processed_cycles << ',' << inst.node_name << ',' << npts << ',' << (gated ? 1 : 0) << ','
-             << energy << ',' << R << ',' << inst.last_motion_var << ',' << inst.last_depth_var << ',' << inst.last_motion_dotd << ','
+             << energy << ',' << inst.fe_baseline << ',' << inst.fe_surprise << ','
+             << R << ',' << inst.last_motion_var << ',' << inst.last_depth_var << ',' << inst.last_motion_dotd << ','
              << inst.last_trunc_frac << ',' << inst.last_range << ','
              << s.cx << ',' << s.cy << ',' << s.H << ',' << s.w << ',' << s.h << ',' << s.yaw << ','
              << sd(0) << ',' << sd(1) << ',' << sd(2) << ',' << sd(3) << ',' << sd(4) << ','
@@ -597,6 +692,11 @@ void TableFitter::compute_projected_roi(TableInstance& inst)
     const float hw = s.w * 0.5f, hh = s.h * 0.5f;
     float min_col = 1e9f, min_row = 1e9f, max_col = -1e9f, max_row = -1e9f;
     int in_front = 0;
+    // Completeness: are ALL 8 corners in front AND inside the image (with a margin)? If any corner is behind or
+    // off-frame, the mask cannot capture the whole table → the moment extent is a lower bound only (grow-only).
+    inst.roi_fully_in_view = false;
+    int corners_total = 0, corners_ok = 0;
+    const float margin_px = 0.02f * W;
     for (const int ix : {-1, 1})
         for (const int iy : {-1, 1})
             for (const float z : {0.0f, s.table_height})
@@ -605,13 +705,17 @@ void TableFitter::compute_projected_roi(TableInstance& inst)
                 const Eigen::Vector4d Pr(s.cx + c * lx - sn * ly, s.cy + sn * lx + c * ly, z, 1.0);
                 const Eigen::Vector4d Pc = zed_T_room * Pr;
                 const double X = Pc.x(), Y = Pc.y(), Z = Pc.z();
+                ++corners_total;
                 if (Y <= 0.20) continue;   // skip corners at/near the image plane: X/Y explodes there
                 ++in_front;
                 const float col = cx_px + static_cast<float>(X / Y) * fx;
                 const float row = cy_px - static_cast<float>(Z / Y) * fy;
                 min_col = std::min(min_col, col); max_col = std::max(max_col, col);
                 min_row = std::min(min_row, row); max_row = std::max(max_row, row);
+                if (col >= margin_px and col <= W - margin_px and row >= margin_px and row <= H - margin_px)
+                    ++corners_ok;
             }
+    inst.roi_fully_in_view = (corners_ok == corners_total);   // every corner in front AND inside the frame
 
     if (in_front < 4)   // need most of the box in front of the camera to trust the ROI
         return;
@@ -656,9 +760,8 @@ TableFitter::SilhouetteExistence TableFitter::compute_silhouette_existence(const
     const float fx = camera_api_->get_focal_x(), fy = camera_api_->get_focal_y();
     const float W  = static_cast<float>(camera_api_->get_width());
     const float Himg = static_cast<float>(camera_api_->get_height());
-    if (fx <= 0.f or fy <= 0.f or W <= 0.f or Himg <= 0.f)
+    if (fx <= 0.f or fy <= 0.f or W <= 0.f or Himg <= 0.f)   // fx/fy: sanity only; projection uses CameraAPI
         return out;
-    const float cx_px = W * 0.5f, cy_px = Himg * 0.5f;
 
     // Hashed pixel-cell coverage of the current YOLO foreground, split table (occupancy) vs other (occluder).
     // A CELL-px cell absorbs mask-boundary jitter and makes membership O(1). Key packs the two cell indices.
@@ -688,19 +791,27 @@ TableFitter::SilhouetteExistence TableFitter::compute_silhouette_existence(const
     // Classify ONE room-frame silhouette sample: project it, then vote occupancy / absence / occlusion. A
     // sample lit by a "table" mask is occupancy; lit by nothing is ABSENCE (the "gone" signal that fires even
     // with NO YOLO mask); lit by a non-table mask is OCCLUDED (a nearer object hides the point) ⇒ HOLD.
+    double range_sum = 0.0;
     const auto classify = [&](float lx, float ly, float lz)
     {
+        ++out.n_total;                                                 // one silhouette sample of the WHOLE object
         const Eigen::Vector4d Pr(s.cx + c * lx - sn * ly, s.cy + sn * lx + c * ly, lz, 1.0);
         const Eigen::Vector4d Pc = zed_T_room * Pr;
         const double X = Pc.x(), Y = Pc.y(), Z = Pc.z();
-        if (Y <= 0.20) return;                                         // behind / at the image plane
-        const float col = cx_px + static_cast<float>(X / Y) * fx;
-        const float row = cy_px - static_cast<float>(Z / Y) * fy;
-        if (col < 0.f or col >= W or row < 0.f or row >= Himg) return; // out of frame ⇒ not detectable
+        if (Y <= 0.20) return;                                         // behind / at the image plane (near clip)
+        // Real camera FRUSTUM: project through the DSR CameraAPI (true intrinsics/principal point, and the
+        // node's projection model — pinhole for zed, equirectangular for a 360 sensor). A sample is "expected
+        // visible" only if it lands inside the actual image, so out-of-FoV samples are NOT counted detectable.
+        const Eigen::Vector2d uv = camera_api_->project(Eigen::Vector3d(Pc.x(), Pc.y(), Pc.z()));
+        const float col = static_cast<float>(uv.x()), row = static_cast<float>(uv.y());
+        if (col < 0.f or col >= W or row < 0.f or row >= Himg) return; // out of frustum ⇒ not detectable
         const std::int64_t k = key(col, row);
-        if (table_cells.contains(k))          { ++out.n_detectable; out.e_occ  += 1.0f; }  // still there
-        else if (occluder_cells.contains(k))  { /* nearer object hides it ⇒ HOLD (not detectable) */ }
-        else                                  { ++out.n_detectable; out.e_free += 1.0f; }  // predicted-but-absent
+        if (occluder_cells.contains(k) and not table_cells.contains(k))
+        { ++out.n_occluded; return; }                                 // nearer object hides it ⇒ HOLD
+        ++out.n_detectable;
+        range_sum += std::sqrt(X * X + Y * Y + Z * Z);                 // camera→sample distance (absence conf ∝ 1/range)
+        if (table_cells.contains(k)) out.e_occ  += 1.0f;              // still there
+        else                         out.e_free += 1.0f;              // predicted-but-absent
     };
 
     // (a) tabletop TOP face (z = H): regular grid over the footprint.
@@ -722,6 +833,8 @@ TableFitter::SilhouetteExistence TableFitter::compute_silhouette_existence(const
             for (int iz = 0; iz < NZ; ++iz)
                 classify(lx, ly, leg_top * (iz + 0.5f) / NZ);
         }
+    if (out.n_detectable > 0)
+        out.mean_range_m = static_cast<float>(range_sum / out.n_detectable);
     return out;
 }
 

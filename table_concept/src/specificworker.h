@@ -113,9 +113,10 @@ private:
     // Associates "table" masks to instances, spawns a table from an unexplained mask, merges overlaps.
     rc::InstanceTracker tracker_;
     void run_instance_tracker();   // called every cycle from compute()
-    // Evidence-based removal: carve this cycle's LiDAR sweep against each footprint → occupancy log-odds →
-    // remove the demonstrably-empty tables. Gated by TableModel.ExistenceRemovalEnabled.
-    void update_existence_and_remove();
+    // Evidence-based removal: integrate each existence channel on ITS OWN sensor clock — the silhouette/mask
+    // channel when masks are fresh, the LiDAR free-space carve when the sweep is fresh — then remove the
+    // demonstrably-empty tables. Gated by TableModel.ExistenceRemovalEnabled.
+    void update_existence_and_remove(bool fresh_masks, bool fresh_sweep);
     // Physical-exclusion invariant: two tables cannot share space. Collapse any pair of instances whose
     // oriented footprints overlap beyond Tracker.MergeOverlap, keeping the more-observed one.
     void merge_overlapping_instances();
@@ -153,7 +154,10 @@ private:
     // Live belief dashboard — its OWN top-level window (extracted from the DSR graph dock so it shows
     // independently of Agent.graph; mirrors room_concept/kinova_controller). Geometry persisted via QSettings.
     Custom_widget*       custom_widget_ = nullptr;
-    rc::TimeSeriesPlot*  ts_plot_       = nullptr;   // FE
+    rc::TimeSeriesPlot*  ts_plot_       = nullptr;   // FE (+ baseline)
+    rc::TimeSeriesPlot*  ts_surprise_plot_ = nullptr;   // FE surprise (attention signal), own panel/scale
+    std::unordered_set<std::string> ts_known_tables_;   // node_names with live timeseries series (for pruning)
+    void prune_dead_series();   // drop timeseries series for tables removed from the graph (periodic, in compute)
     rc::TimeSeriesPlot*  ts_cov_plot_   = nullptr;   // belief uncertainty U(Σ) = Σ pos+size posterior std (m)
     rc::TimeSeriesPlot*  ts_res_plot_   = nullptr;   // residual point count
     rc::TimeSeriesPlot*  ts_state_plot_ = nullptr;   // inferred dimensions w/h (stability check)

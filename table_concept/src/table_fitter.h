@@ -47,6 +47,11 @@ public:
         float explanation_ratio = 1.0f;
         std::vector<Eigen::Vector3f> candidate_pts;
         std::vector<Eigen::Vector3f> residual_pts;
+        // Ricoh slices feed the LiDAR RANGE FACTOR, not raw points: their reprojected-LiDAR support cloud
+        // sees THROUGH to background (elongation/collapse), so instead the slice contributes only a single
+        // weak position anchor (its centroid, in candidate_pts) — enough to run the GN and anchor feed_lidar's
+        // return selection — and the sphere-traced range rays supply the robust geometry. See observe_slice.
+        bool ricoh_range = false;
     };
 
     TableFitter(std::shared_ptr<DSR::DSRGraph> graph,
@@ -96,7 +101,17 @@ public:
     // gone, EVEN WITH NO YOLO MASK this frame). Pixels covered by a NON-table mask are OCCLUDED (a nearer object
     // hides the tabletop) and excluded from n_detectable → HOLD, never false absence. n_detectable==0 (out of
     // FoV / fully occluded) ⇒ the caller HOLDs. Feeds rc::exist::mask_evidence. Called from update_existence.
-    struct SilhouetteExistence { float e_occ = 0.0f, e_free = 0.0f; int n_detectable = 0; };
+    struct SilhouetteExistence
+    {
+        float e_occ = 0.0f, e_free = 0.0f;
+        int   n_total      = 0;    // silhouette samples attempted (top face + legs) — the "whole object"
+        int   n_detectable = 0;    // samples that land in the real camera FRUSTUM and are un-occluded (0 ⇒ HOLD)
+        int   n_occluded   = 0;    // in-frustum samples hidden by a nearer (non-table) mask
+        float mean_range_m = 0.0f; // mean camera→silhouette depth over the detectable samples (absence confidence ∝ 1/range)
+        // "Should be visible" fraction: n_detectable / n_total. Absence is only evidence of removal in
+        // proportion to how much of the object the sensor could actually have seen from here (real FoV).
+        float in_fov_frac() const { return n_total > 0 ? static_cast<float>(n_detectable) / n_total : 0.0f; }
+    };
     SilhouetteExistence compute_silhouette_existence(const TableInstance& inst);
 
 private:

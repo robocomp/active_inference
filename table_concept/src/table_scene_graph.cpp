@@ -157,7 +157,11 @@ void TableSceneGraph::write_rt_covariance(std::uint64_t room_id, TableInstance& 
         return;
 
     const float scale = std::max(1e-6f, cfg_.rt_cov_scale);
-    constexpr float big = 1e3f;   // unobservable / never-seen DOF → large variance
+    // A table rests FLAT on the floor: roll/pitch are pinned to ~0 by that physical prior — CONFIDENTLY known,
+    // not unknown. The old 1e3 ("unobservable → huge variance") was backwards: it told the controller the table
+    // might be tilted AND it dominated the published-covariance plot scale so the real sub-1 DOF read as ~0.
+    // Publish a small flat-table variance instead (≈1.3° std), consistent with the geometry.
+    constexpr float flat_rp_var = 5e-4f;   // roll/pitch: confidently flat on the floor (std ≈ 1.3°)
 
     if (not inst.ai2_initialized)
         return;   // belief not seeded yet — nothing calibrated to publish
@@ -198,8 +202,8 @@ void TableSceneGraph::write_rt_covariance(std::uint64_t room_id, TableInstance& 
     cov[0 * 6 + 0] = vx;     // x   ← cx
     cov[1 * 6 + 1] = vy;     // y   ← cy
     cov[2 * 6 + 2] = vz;     // z   ← table_height (z = H/2 ⇒ var_z = var_H/4)
-    cov[3 * 6 + 3] = big;   // roll  (unobservable)
-    cov[4 * 6 + 4] = big;   // pitch (unobservable)
+    cov[3 * 6 + 3] = flat_rp_var;   // roll  (pinned flat on the floor)
+    cov[4 * 6 + 4] = flat_rp_var;   // pitch (pinned flat on the floor)
     cov[5 * 6 + 5] = vyaw;   // yaw ← ψ
 
     G_->add_or_modify_attrib_local<rt_covariance_att>(edge.value(), cov);

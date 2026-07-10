@@ -82,7 +82,12 @@ float TableBelief::sdf_compound(const Eigen::Vector3f& p, const TableBeliefState
 
 // ─── Mixture responsibilities ───────────────────────────────────────────────────
 
-std::array<float, 6> TableBelief::responsibilities(const Eigen::Vector3f& p, const TableBeliefState& s, float R) const
+// UN-normalised mixture components u[0..5] (top, 4 legs, clutter) and their sum = the marginal likelihood
+// numerator p(point | model) ∝ Σ_k π_k N(d_k; 0, R). responsibilities() normalises this; the FREE ENERGY reads
+// −log(sum) — the clutter term (u[5]) makes a far/misfit point cost −log(clutter likelihood), a large real
+// penalty, so the energy actually reflects misfit (it is NOT silently zeroed by clutter attribution).
+float TableBelief::mixture_unnormalized(const Eigen::Vector3f& p, const TableBeliefState& s, float R,
+                                        std::array<float, 6>& u) const
 {
     const float eps    = std::clamp(params_.clutter_frac, 0.0f, 0.99f);
     const float pi_surf = (1.0f - eps) / 5.0f;
@@ -93,13 +98,11 @@ std::array<float, 6> TableBelief::responsibilities(const Eigen::Vector3f& p, con
     // a corner (z≈H, laterally close to an inset corner leg) is otherwise mis-attributed to that leg, and GN
     // shrinks w,h to slide the legs under it → systematic under-size. Gate each component's mixing weight by a
     // smooth vertical compatibility about the join plane (band = slab half-thickness — physical, not tuned).
-    // EM holds responsibilities fixed within a GN iteration, so this needs no Jacobian change.
     const float z_join = s.H - params_.top_thickness;       // leg top == slab bottom
     const float band   = std::max(0.5f * params_.top_thickness, 1e-3f);
     const float leg_z  = 1.0f / (1.0f + std::exp((p.z() - z_join) / band));  // →1 below join, →0 above (tabletop)
     const float top_z  = 1.0f - leg_z;                                       // →1 above join (tabletop), →0 below
 
-    std::array<float, 6> u{};
     u[0] = pi_surf * top_z * std::exp(-sdf_top(p, s) * sdf_top(p, s) * inv2R);
     for (int k = 0; k < 4; ++k)
     {
@@ -113,6 +116,14 @@ std::array<float, 6> TableBelief::responsibilities(const Eigen::Vector3f& p, con
 
     float sum = 0.0f;
     for (float v : u) sum += v;
+    return sum;
+}
+
+std::array<float, 6> TableBelief::responsibilities(const Eigen::Vector3f& p, const TableBeliefState& s, float R) const
+{
+    std::array<float, 6> u{};
+    const float sum = mixture_unnormalized(p, s, R, u);
+    // EM holds responsibilities fixed within a GN iteration, so this needs no Jacobian change.
     if (sum <= 0.0f) { u = {}; u[5] = 1.0f; return u; }
     for (float& v : u) v /= sum;
     return u;
@@ -169,11 +180,44 @@ Eigen::Matrix<float, 6, 1> TableBelief::common_mode_inv_diag(const TableFrame& f
     const float p2 = params_.common_mode_pos_std  * params_.common_mode_pos_std;
     const float s2 = params_.common_mode_size_std * params_.common_mode_size_std;
     const float y2 = params_.common_mode_yaw_std  * params_.common_mode_yaw_std;
+    const float cs = frame.chain_cov_size;   // range-driven SIZE variance: distant frame → less size authority
     return (Eigen::Matrix<float, 6, 1>() <<
             1.0f / std::max(1e-9f, p2 + frame.chain_cov_xx),
             1.0f / std::max(1e-9f, p2 + frame.chain_cov_yy),
-            1.0f / s2, 1.0f / s2, 1.0f / s2,
-            1.0f / std::max(1e-9f, y2 + frame.chain_cov_yaw)).finished();   // yaw cap grows with view range
+            1.0f / std::max(1e-9f, s2 + cs), 1.0f / std::max(1e-9f, s2 + cs), 1.0f / std::max(1e-9f, s2 + cs),
+            1.0f / std::max(1e-9f, y2 + frame.chain_cov_yaw)).finished();   // size + yaw caps grow with view range
+}
+
+// 2D footprint second-moment of the top-band points. Centroid + inertia tensor of the (x,y) projection, then
+// the closed-form 2×2 symmetric eigendecomposition: eigenvalues λ₁≥λ₂ give the equivalent uniform-rectangle
+// FULL extents √(12·λ), and the major eigenvector angle gives the principal-axis orientation. Model-free
+// (only the z-band selects the plane) — so a mask bigger/yawed than the current box is measured for what it is.
+FootprintMoment TableBelief::footprint_moment(const std::vector<Eigen::Vector3f>& pts, float z_lo, float z_hi)
+{
+    FootprintMoment m;
+    double sx = 0.0, sy = 0.0;
+    int n = 0;
+    for (const auto& p : pts)
+        if (p.z() >= z_lo and p.z() <= z_hi) { sx += p.x(); sy += p.y(); ++n; }
+    if (n < 16) return m;                                    // too few plane points for a stable moment
+    const double mx = sx / n, my = sy / n;
+    double cxx = 0.0, cyy = 0.0, cxy = 0.0;
+    for (const auto& p : pts)
+        if (p.z() >= z_lo and p.z() <= z_hi)
+        { const double dx = p.x() - mx, dy = p.y() - my; cxx += dx * dx; cyy += dy * dy; cxy += dx * dy; }
+    cxx /= n; cyy /= n; cxy /= n;
+    const double tr = cxx + cyy, det = cxx * cyy - cxy * cxy;
+    const double disc = std::sqrt(std::max(0.0, 0.25 * tr * tr - det));
+    const double l1 = 0.5 * tr + disc, l2 = std::max(0.0, 0.5 * tr - disc);
+    m.ok = true;
+    m.n = n;
+    m.cx = static_cast<float>(mx);
+    m.cy = static_cast<float>(my);
+    m.ext_major = static_cast<float>(std::sqrt(std::max(0.0, 12.0 * l1)));   // full extent of uniform rect
+    m.ext_minor = static_cast<float>(std::sqrt(std::max(0.0, 12.0 * l2)));
+    m.phi = 0.5f * std::atan2(2.0f * static_cast<float>(cxy),
+                              static_cast<float>(cxx - cyy));                 // major-axis angle ∈ (−π/2, π/2]
+    return m;
 }
 
 // Extra evidence hook (engine calls it inside the GN loop): the YOLO-independent LiDAR first-hit range factor.
@@ -187,6 +231,7 @@ void TableBelief::accumulate_extra(const TableBeliefState& s, const TableFrame& 
     rc::ai::accumulate_lidar_rays<6>(*this, s, f.lidar, Id, bd);
     dbg_coverage_pts_ = 0;   // monitor counters — reset per accumulate; the final (converged) call is what's read
     dbg_vacate_beams_ = 0;
+    dbg_moment_pts_   = 0;
 
     // Coverage / traction (table_1.png): reclaim on-plane mask points the mixture ceded to CLUTTER as
     // GROW-ONLY extent evidence. For each point OUTSIDE the top slab (sdf_top > 0) and near the tabletop plane,
@@ -306,6 +351,79 @@ void TableBelief::accumulate_extra(const TableBeliefState& s, const TableFrame& 
     }
 }
 
+// Footprint SECOND-MOMENT measurement (see TableBeliefParams::footprint_moment_precision). Fused as a SEPARATE
+// 3-DOF measurement of (w,h,yaw) with its OWN covariance — deliberately OUTSIDE the per-point common-mode
+// saturation. Rationale: the per-point range common-mode caps a single boundary point's authority (its
+// deprojected position error grows with range and is shared across the mask). But the moment is a GLOBAL fit
+// over thousands of points; its principal-axis angle and eigen-extents are direction/scale estimates in which
+// the shared radial error largely cancels, so they stay informative at range where the per-point channel is
+// frozen. This is exactly the DOF the per-point mixture cannot supply on a flat top (tables_5.png stuck yaw).
+// Standard information/Kalman update on the full 6×6 Σ. yaw variance ∝ 1/anisotropy² → a near-square footprint
+// carries no orientation info (K→0; resolve_orientation owns that flip). NOT applied to cx,cy (a partial view's
+// centroid is biased; the per-point channel already fixes position). No-op when precision==0.
+void TableBelief::apply_footprint_moment(const TableFrame& frame)
+{
+    dbg_moment_pts_ = 0;
+    if (params_.footprint_moment_precision <= 0.0f or frame.points.empty()) return;
+    const float z_hi = state_.H + 3.0f * params_.sigma_base_m;
+    const float z_lo = state_.H - params_.top_thickness - 3.0f * params_.sigma_base_m;   // tabletop band (excl. legs)
+    const FootprintMoment mom = footprint_moment(frame.points, z_lo, z_hi);
+    if (not mom.ok) return;
+    dbg_moment_pts_ = mom.n;
+
+    const auto near_pi = [](float a, float ref)                       // a mapped to nearest ref mod π (box π-sym)
+    { return ref + std::remainder(a - ref, static_cast<float>(M_PI)); };
+    // Two symmetry-consistent (major,minor)→(w,h) assignments; pick the one nearest the CURRENT (w,h) so the
+    // moment REINFORCES the present labelling and never itself triggers a 90° flip (resolve_orientation owns that).
+    const float yawA  = near_pi(mom.phi, state_.yaw);
+    const float yawB  = near_pi(mom.phi + 0.5f * static_cast<float>(M_PI), state_.yaw);
+    const auto  sq     = [](float x) { return x * x; };
+    const bool  A = sq(mom.ext_major - state_.w) + sq(mom.ext_minor - state_.h)
+                  <= sq(mom.ext_minor - state_.w) + sq(mom.ext_major - state_.h);
+    const float mw   = A ? mom.ext_major : mom.ext_minor;
+    const float mh   = A ? mom.ext_minor : mom.ext_major;
+    const float myaw = A ? yawA : yawB;
+
+    const float sum   = mom.ext_major + mom.ext_minor;
+    const float aniso = (sum > 1e-4f) ? (mom.ext_major - mom.ext_minor) / sum : 0.0f;
+    const float Pm    = params_.footprint_moment_precision;
+    // Per-frame measurement variance. 1/Pm is the STATIC noise FLOOR; frame.moment_extra_var adds the SHARED
+    // per-frame error (ego-motion corruption + a gentle range term the fitter authors). Without it a fixed 1/Pm
+    // is absurdly confident (≈2 cm @Pm=2000) and the belief SNAPS to each frame's noisy footprint (the live
+    // yaw/extent wander) instead of accumulating. A moving robot / far view inflates it → the moment backs off.
+    const float r_base = 1.0f / Pm + std::max(0.0f, frame.moment_extra_var);
+    float r_w   = r_base;                                             // measurement variance (m²)
+    float r_h   = r_base;
+    const float r_yaw = r_base / std::max(aniso * aniso, 1e-3f);      // rad²; near-square → huge → no yaw pull
+
+    // A mask is only ever a LOWER BOUND on the table extent. Occlusion, foreshortening (a side view of the
+    // tabletop, whose far edge is grazing/self-occluded), FoV clipping and YOLO under-segmentation can all make
+    // the observed footprint SHORTER than the table — but NOTHING makes it longer. So the moment may only GROW
+    // the extent, never SHRINK it: a partial view can no longer collapse a converged table (the side-view shrink).
+    // This needs no completeness signal (trunc/in-view missed the foreshortening case anyway). Legitimate shrink —
+    // a genuinely short table, or an over-grown model — is the job of the OCCLUSION-AWARE free-space / vacate
+    // channel (FreeSpacePrecision: a beam that passes THROUGH proves empty; a beam that returns short is just
+    // occluded and does not vacate), which is where "absence" belongs. The extent grows to the largest footprint
+    // seen across the orbit (the best view = the true extent) and holds. Over-grow is bounded by the step-guard.
+    constexpr float kDrop = 1e12f;       // effectively removes the row (K→0: no mean move, no Σ reduction)
+    if (mw < state_.w) r_w = kDrop;      // the moment would SHRINK w ⇒ untrustworthy (partial view) → drop
+    if (mh < state_.h) r_h = kDrop;
+
+    Eigen::Matrix<float, 3, 6> H = Eigen::Matrix<float, 3, 6>::Zero();
+    H(0, 3) = 1.0f; H(1, 4) = 1.0f; H(2, 5) = 1.0f;                   // measures w, h, yaw
+    const Eigen::Vector3f y(mw - state_.w, mh - state_.h,
+                            std::remainder(myaw - state_.yaw, 2.0f * static_cast<float>(M_PI)));
+    const Eigen::Matrix3f Rm = Eigen::Vector3f(r_w, r_h, r_yaw).asDiagonal();
+    const Eigen::Matrix3f S  = H * Sigma_ * H.transpose() + Rm;
+    const Eigen::Matrix<float, 6, 3> K = Sigma_ * H.transpose() * S.inverse();
+    Eigen::Matrix<float, 6, 1> xv = state_.vec() + K * y;
+    Sigma_ = (Eigen::Matrix<float, 6, 6>::Identity() - K * H) * Sigma_;
+    Sigma_ = 0.5f * (Sigma_ + Sigma_.transpose());                   // keep symmetric/SPD
+    TableBeliefState s = TableBeliefState::from_vec(xv);
+    apply_constraints(s);
+    state_ = s;
+}
+
 // CONTINUITY fold (TABLE_FIT_AI2.md §5, replaces the w≥h sign fold). The box SDF is invariant under the
 // exact symmetry group {e, r_π, swap∘r_{π/2}, swap∘r_{−π/2}} — four representations of the SAME table.
 // The old fold chose by sign(w−h), a NOISE process when w≈h, which converted extent jitter into 90° yaw
@@ -340,20 +458,21 @@ void TableBelief::canonicalize(TableBeliefState& s) const
     s = reps[best];
 }
 
-// Mean per-point data energy (NLL proxy) at an arbitrary state — mirrors the engine's energy readout.
+// TRUE free energy: mean per-point negative-log marginal likelihood of the mixture, −log Σ_k π_k N(d_k;0,R),
+// INCLUDING the clutter component. The old readout summed only the surface prims weighted by responsibility, so
+// a misfit point (routed to clutter, r_surface≈0) contributed ~0 and a badly-fit model read FE≈0 — blind to the
+// very errors that matter. Here a point far from every surface falls to the clutter floor u[5]=ε·exp(−cs²/2R),
+// so −log(sum) is large: the energy now rises with misfit, so mode comparison (e_swap−e_now) and any F readout
+// are meaningful. Constant (2πR)^{−3/2} normaliser dropped — it cancels in every comparison and in Δ over frames.
 float TableBelief::mean_energy(const std::vector<Eigen::Vector3f>& pts, const TableBeliefState& s, float R) const
 {
     if (pts.empty()) return 0.0f;
-    const int P = n_prims();
+    std::array<float, 6> u{};
     double e = 0.0;
     for (const auto& p : pts)
     {
-        const auto r = responsibilities(p, s, R);
-        for (int prim = 0; prim < P; ++prim)
-        {
-            const float d = sdf_prim(p, s, prim);
-            e += 0.5 * r[prim] * d * d / R;
-        }
+        const float sum = mixture_unnormalized(p, s, R, u);
+        e += -std::log(std::max(sum, 1e-12f));
     }
     return static_cast<float>(e / static_cast<double>(pts.size()));
 }
@@ -365,7 +484,7 @@ float TableBelief::mean_energy(const std::vector<Eigen::Vector3f>& pts, const Ta
 // it (what stops the per-frame snapping) — and the adopted mode is the one with the LOWER accumulated
 // energy. Boundary = zero accumulated evidence (the MAP over the mode); NO tuned threshold. Mirrors chair's
 // resolve_orientation (180°) with the table's 90° / w↔h symmetry.
-bool TableBelief::resolve_orientation(const std::vector<Eigen::Vector3f>& pts, float R)
+bool TableBelief::resolve_orientation(const std::vector<Eigen::Vector3f>& pts, float R, float evidence_weight)
 {
     if (pts.empty()) return false;
     TableBeliefState swap = state_;
@@ -373,8 +492,14 @@ bool TableBelief::resolve_orientation(const std::vector<Eigen::Vector3f>& pts, f
     const float e_now  = mean_energy(pts, state_, R);
     const float e_swap = mean_energy(pts, swap,   R);
 
-    flip_evidence_ += (e_swap - e_now);
-    if (flip_evidence_ < 0.0f)   // the swapped mode has accumulated the lower free energy
+    // Sequential Bayesian mode evidence on the TRUE free energy (e_swap−e_now is now a real, correctly-signed
+    // log-likelihood-ratio, not the noise the broken FE produced — so NO leak / discriminability / hysteresis
+    // band-aids are needed; a near-square footprint gives e_swap≈e_now → the accumulator rests near 0 at the
+    // honest ambiguity). evidence_weight ∈ [0,1] is the continuous ego-motion reliability (a smeared frame
+    // barely votes). Bounded so it stays a finite memory that a genuine aspect change can still overturn.
+    flip_evidence_ += std::clamp(evidence_weight, 0.0f, 1.0f) * (e_swap - e_now);
+    flip_evidence_ = std::clamp(flip_evidence_, -6.0f, 6.0f);
+    if (flip_evidence_ < 0.0f)   // the swapped mode has the lower accumulated free energy
     {
         std::swap(state_.w, state_.h);
         // Carry Σ into the new labelling: swap the w,h rows AND columns (DOF indices 3,4).
@@ -668,6 +793,84 @@ bool TableBelief::self_test()
                     s_no.w, s_fs.w, over * gt.w, gt.w, s_no.cx, s_fs.cx);
         check(s_fs.w < s_no.w - 0.03f,  "free-space should SHRINK the over-segmented slab (vacate)");
         check(s_fs.w > gt.w - 0.10f,    "free-space must not collapse the slab below the true extent (occupancy holds)");
+    }
+
+    // (k) Footprint second-moment factor (tables_5.png "stuck yaw"): the LIVE failure — a TOP-FACE-ONLY cloud
+    //     (no legs; ZED sees the tabletop, legs self-occluded) at RANGE (~3 m → the common-mode caps per-frame
+    //     size/yaw authority: "geometry freezes afar"), from a small axis-aligned birth, in a realistic dwell
+    //     (~15 frames). The per-point mixture is degenerate for yaw/extent on a flat top and the range cap
+    //     starves what little signal the rim gives → w and yaw barely move. The moment factor measures (w,h,yaw)
+    //     globally and saturates each DOF to its (range-limited) ceiling → recovers both, clearly beating baseline.
+    {
+        const float Rb = P.sigma_base_m * P.sigma_base_m;
+        std::vector<Eigen::Vector3f> top;                 // dense filled tabletop, NO legs, NO clutter
+        for (int i = 0; i < 2000; ++i)
+        {
+            const float lx = U(rng) * 0.5f * gt.w, ly = U(rng) * 0.5f * gt.h;
+            top.push_back(to_world(lx, ly, gt.H + noise(rng)));
+        }
+        const float rng_m   = 3.0f;                       // live view range
+        const float cc_yaw  = (0.03f * rng_m) * (0.03f * rng_m);   // AI2RangeNoiseYawPerM · range, squared
+        const float cc_size = (0.08f * rng_m) * (0.08f * rng_m);   // AI2RangeNoiseSizePerM · range, squared
+        const TableBeliefState init{gt.cx, gt.cy, gt.H, 0.60f, 0.40f, 0.0f};   // small, axis-aligned birth
+        auto fit = [&](float mom_prec) {
+            TableBeliefParams pp = P; pp.footprint_moment_precision = mom_prec;
+            TableBelief b(init, pp);
+            TableFrame fr; fr.points = top; fr.R.assign(top.size(), Rb);
+            fr.chain_cov_yaw = cc_yaw; fr.chain_cov_size = cc_size;   // the range freeze the live fit fights
+            fr.moment_extra_var = cc_size;   // realistic per-frame moment variance (range term) — must still recover
+            fr.footprint_complete = true;    // far view, whole table in frame ⇒ moment two-sided
+            for (int it = 0; it < 40; ++it) b.update(fr);
+            return b.state();
+        };
+        const auto s_off = fit(0.0f);
+        const auto s_on  = fit(2000.0f);
+        const float dyaw_off = std::abs(std::remainder(s_off.yaw - gt.yaw, static_cast<float>(M_PI)));
+        const float dyaw_on  = std::abs(std::remainder(s_on.yaw  - gt.yaw, static_cast<float>(M_PI)));
+        std::printf("  moment factor @3m: OFF(w=%.2f h=%.2f yaw=%.3f dyaw=%.3f)  ON(w=%.2f h=%.2f yaw=%.3f dyaw=%.3f)  (gt w=%.2f h=%.2f yaw=%.3f)\n",
+                    s_off.w, s_off.h, s_off.yaw, dyaw_off, s_on.w, s_on.h, s_on.yaw, dyaw_on, gt.w, gt.h, gt.yaw);
+        check(dyaw_off > 0.10f,                "top-only mixture at range SHOULD lag in yaw (baseline)");
+        check(dyaw_on  < 0.05f,                "moment factor should recover yaw from a top-only cloud at range");
+        check(std::abs(s_on.w - gt.w) < 0.20f, "moment factor should recover w");
+        check(std::abs(s_on.h - gt.h) < 0.20f, "moment factor should recover h");
+        check(dyaw_on < 0.4f * dyaw_off,       "moment factor should clearly beat the mixture-only baseline in yaw");
+    }
+
+    // (l) Footprint moment is GROW-ONLY (a mask is only ever a LOWER BOUND on the extent — occlusion / side-view
+    //     foreshortening / FoV clip / under-segmentation all shorten it, nothing lengthens it). A PARTIAL view
+    //     (any keep<1, any trunc/in-view flags) must HOLD a converged table, never shrink it; a LARGER mask must
+    //     GROW it. Shrink is delegated to the occlusion-aware vacate channel, not the mask.
+    {
+        rng.seed(4242);   // deterministic: this block's result must not depend on prior blocks' RNG consumption
+        const float Rb = P.sigma_base_m * P.sigma_base_m;
+        auto top = [&](float w, float h, float keep) {                // keep: clip |lx| ≤ 0.5·w·keep (border trim)
+            std::vector<Eigen::Vector3f> pts;
+            for (int i = 0; i < 2000; ++i)
+            { const float lx = U(rng) * 0.5f * w, ly = U(rng) * 0.5f * h;
+              if (std::abs(lx) > 0.5f * w * keep) continue;
+              pts.push_back(to_world(lx, ly, gt.H + noise(rng))); }
+            return pts;
+        };
+        TableBeliefParams pm = P; pm.footprint_moment_precision = 2000.0f;
+        auto fit = [&](float ext_w, float keep, float trunc, bool complete) {
+            TableBelief b(TableBeliefState{gt.cx, gt.cy, gt.H, gt.w, gt.h, gt.yaw}, pm);   // converged at truth
+            for (int it = 0; it < 45; ++it)
+            { auto pts = top(ext_w, gt.h, keep);
+              TableFrame fr; fr.points = pts; fr.R.assign(pts.size(), Rb);
+              fr.chain_cov_yaw = (0.03f * 3) * (0.03f * 3); fr.chain_cov_size = (0.08f * 3) * (0.08f * 3);
+              fr.moment_extra_var = (0.03f * 3) * (0.03f * 3);
+              fr.trunc_frac = trunc; fr.footprint_complete = complete;
+              b.update(fr); }
+            return b.state().w;
+        };
+        const float w_trim = fit(gt.w, 0.55f, 0.30f, false);  // border-trimmed partial view ⇒ must HOLD ~gt.w
+        const float w_part = fit(gt.w, 0.55f, 0.0f,  true);   // SIDE-VIEW partial (flags say "complete") ⇒ HOLD
+        const float w_grow = fit(2.0f, 1.0f,  0.0f,  true);   // a LARGER full mask ⇒ must GROW toward 2.0
+        std::printf("  moment grow-only: trim-partial w=%.2f side-partial w=%.2f (gt=%.2f, must hold)  larger-mask w=%.2f (must grow >gt)\n",
+                    w_trim, w_part, gt.w, w_grow);
+        check(w_trim > gt.w - 0.12f,   "border-trimmed partial mask must NOT shrink a converged table");
+        check(w_part > gt.w - 0.12f,   "SIDE-VIEW partial mask (in-view, trunc=0) must NOT shrink — the live failure");
+        check(w_grow > gt.w + 0.10f,   "a genuinely LARGER mask must still GROW the extent");
     }
 
     std::printf("TableBelief::self_test %s\n", ok ? "PASS" : "FAIL");

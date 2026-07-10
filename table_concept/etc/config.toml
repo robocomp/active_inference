@@ -63,6 +63,10 @@ AI2TruncGateFrac = 0.10     # skip the geometric update when >this fraction of t
 # can confirm existence but NOT resolve pose/orientation (can't rotate a converged table). Continuous, no gate.
 AI2RangeNoiseLatPerM = 0.02 # lateral deprojection std growth (m per m of range) → feeds R + position common-mode
 AI2RangeNoiseYawPerM = 0.03 # yaw common-mode std growth (rad per m of range) → the binding term vs far-view rotation
+AI2RangeNoiseSizePerM = 0.08 # SIZE (w,h,H) common-mode std growth (m per m of range): the per-frame size info
+                             # SATURATES lower with range, so a distant/vague mask can't reshape or INFLATE a
+                             # converged table (freezes geometry afar; also caps the coverage grow-term). Raise
+                             # to freeze harder at range; the sibling of the lat/yaw range terms. 0 = off.
 AI2GnIters = 4              # Gauss-Newton iterations per frame
 
 # ── YOLO-INDEPENDENT LiDAR first-hit range channel (common/ai_belief/lidar_ray_factor.h) ──────────────────
@@ -87,7 +91,7 @@ MaxStepM = 1.0                 # divergence guard: reject a GN centre step > thi
 # green mask far outside the box, no traction). Self-bounded + on-plane-gated. STAGED — OFF (0.0) by default;
 # try 500 (≈ mask-point scale) and watch w/h grow to the mask extent without over-growing. Anti-contamination
 # bound = free-space carve (not yet wired) → keep modest until then.
-CoveragePrecision = 500.0        # grow-only coverage pull strength (per point, ~1/σ²@mask). 0=OFF
+CoveragePrecision = 0.0          # DEBUG BASELINE: OFF (was 500). Re-add after the ZED+LiDAR pair is calibrated.
 CoverageRobustCM = 0.15        # Cauchy scale (m): on-plane points this far outside fade out (stray-point guard)
 # Free-space / VACATE (EXISTENCE_BELIEF_PLAN.md Step 4): the SHRINK-only counter-force that BOUNDS CoveragePrecision.
 # A LiDAR beam that passes THROUGH the top-slab band and exits the far side proves that crossing is empty → pull the
@@ -97,6 +101,43 @@ CoverageRobustCM = 0.15        # Cauchy scale (m): on-plane points this far outs
 # try ~500 alongside CoveragePrecision and watch w/h stop over-growing on clutter/over-segmented masks.
 FreeSpacePrecision = 0.0         # shrink-only free-space pull strength (per through-beam, ~1/σ²). 0=OFF
 
+# Footprint SECOND-MOMENT factor (table_belief.h): measures (w,h,yaw) from the top-band cloud's 2D inertia
+# tensor and folds it as a linear Gaussian factor into the GN update — the escape from the clutter-trap that
+# leaves a DENSE, bigger/yawed mask unable to rotate/resize the box (the tables_5.png "stuck yaw"). The
+# per-point SDF mixture can't do this: interior top points have ∂sdf/∂yaw≈∂sdf/∂w≈0, and the outboard rim/leg
+# points that carry the signal fall outside the box → routed to clutter. This global statistic uses them all.
+# Also seeds (w,h,yaw) at birth so the box starts near-right. yaw pull scales with extent anisotropy (a square
+# gives none); per-frame authority capped by the range-driven common-mode (far view can't rotate a converged
+# table — no manual gate). NOT applied to cx,cy (partial-view centroid bias; the mixture handles position).
+FootprintMomentPrecision = 2000.0   # A/B: try ~2000 on the right table; 0=OFF (baseline births/fits unchanged)
+# Orientation-mode HYSTERESIS: front-on a near-square table, the footprint principal axis (and resolve_orientation's
+# w↔h evidence) is ~ambiguous → the box snaps 90°/180° on noise. Require this much accumulated log-evidence (nats)
+# to switch modes — a Bayes-factor sticky prior (e^M:1 odds), not a geometric gate. The moment also folds its yaw
+# mod-π to the current sheet and won't birth yaw from a near-square footprint. 2.0≈7:1. 0=historic flip-at-zero.
+# Orientation w↔h mode: pure sequential-Bayesian evidence on the TRUE free energy (−log mixture likelihood).
+# No hysteresis/leak/discriminability knobs — those were band-aids for a BROKEN energy readout (clutter silently
+# zeroed misfit → FE≈0 → the mode comparison was noise → periodic 90° flips). With a real FE the evidence is
+# decisive and a near-square table rests at the honest ambiguity on its own.
+# Footprint-moment per-frame covariance: the moment's measurement variance is 1/FootprintMomentPrecision (a static
+# noise FLOOR) + ego-motion mask corruption (motion_var) + (FootprintMomentRangePerM·range)². The extra terms make
+# the moment ACCUMULATE over frames and back off while the robot is moving / far, instead of snapping the belief to
+# each frame's noisy footprint (the live yaw/extent wander). The range coeff is << AI2RangeNoiseSizePerM because a
+# GLOBAL footprint fit is far more range-robust than a single boundary point. Raise to trust the moment less per frame.
+FootprintMomentRangePerM = 0.03
+# FE ATTENTION / SURPRISE (active-perception trigger). fe_surprise = smoothed positive gap FE−baseline. The
+# baseline is the "well-fit" free-energy level: it tracks DOWN fast (consolidate a better fit) and UP SLOW so a
+# SUSTAINED mismatch — the table was moved — stays surprising long enough for the robot to attend and dwell until
+# the fit re-converges (FE→baseline → surprise→0). Watch fe_surprise in ai2_log.csv: move a table → spike → decay.
+FeBaselineAdaptDown = 0.05
+FeBaselineAdaptUp   = 0.005
+FeSurpriseSmooth    = 0.10
+# Ego-motion coupling (your observation: all misalignments arrive on going-away/rotation frames, where masks are
+# degraded/split). moment variance += (FootprintMomentMotionGain·motion_dotd)² so a moving frame CANNOT reshape the
+# established fit; the w↔h mode accumulator is halved at motion_dotd=OrientationMotionRef so a split mask can't flip
+# it. Both continuous (no gate); static frames (dotd≈0) are unaffected. Raise the gain to freeze harder while moving.
+FootprintMomentMotionGain = 0.30
+OrientationMotionRef = 0.50
+
 
 # ── Existence / removal (common/existence_belief.h) ───────────────────────────────────────────────────────
 # Each cycle the LiDAR sweep is carved against every table footprint: beams RETURNING inside → occupancy, beams
@@ -104,7 +145,7 @@ FreeSpacePrecision = 0.0         # shrink-only free-space pull strength (per thr
 # saturated; HOLD when not looked at; free-evidence suppressed while the table is actively seen = hollow guard),
 # and the table is removed when P(occupied) < ExistenceRemovalProb. Evidence-based, NOT a miss counter. STAGED —
 # OFF by default (a mis-removal deletes furniture). Enable + watch the console "[existence] L=..." before trusting.
-ExistenceRemovalEnabled =true 
+ExistenceRemovalEnabled = false   # DEBUG BASELINE: OFF while calibrating the fit (was true). Re-enable after.
 ExistenceRemovalProb = 0.12    # remove when L < log(p/(1−p)); lower = more conservative
 ExistenceLogoddsMax = 4.0      # clamp |L| so evidence stays finite AND recoverable
 ExistenceDetectionProb = 0.85  # P(beam through an OCCUPIED footprint returns from it) — sensor hit rate
@@ -112,6 +153,18 @@ ExistenceClutterProb = 0.05    # P(beam through an EMPTY footprint returns anywa
 ExistenceSensorSigmaM = 0.03   # LiDAR range σ (m) for the soft occupancy/free-space surface split
 ExistenceRemoveFrames = 15     # debounce: require the removal decision for this many CONSECUTIVE cycles before
                                # deleting (a transient association/fit hiccup can't delete a real table)
+# ABSENCE evidence degradation vs range + occlusion (no gate). "Predicted-visible but no mask/return there" is
+# weak removal evidence when the sensor likely couldn't resolve the table anyway — far away (tiny projection /
+# sparse beams) or largely occluded. The FREE half of both channels is scaled by (RangeRef/range)^Power (≤1) ×
+# visible_fraction; OCCUPANCY stays fully informative (a distant detection still confirms). Power=0 disables.
+ExistenceAbsenceRangeRefM = 2.5   # range (m) below which absence is trusted at full weight
+ExistenceAbsenceRangePower = 2.0  # decay exponent (2 ≈ angular area ∝ 1/range²)
+# LiDAR removal reliability: the model top slab is a SOLID band but a real tabletop is a THIN plate, so
+# horizontal beams passing UNDER the top surface exit the band and read as false "free" (unreliable absence).
+# Default false ⇒ the LiDAR carve contributes OCCUPANCY only (holds L up), never drives removal; removal is the
+# camera silhouette's job (predicted-visible-but-absent, which HOLDs when out of FoV → a table out of camera
+# view is never falsely removed). Set true only where the slab is a faithful solid model of the tabletop.
+ExistenceLidarAbsence = false
 
 [TableConcept]
 ObsDistance = 1.8           # comfortable maximum stand-off from the target face for epistemic poses
@@ -154,6 +207,13 @@ NllCost = false           # association cost = ½(m²+ln|S|) NLL (compete by lik
 # phantoms all over. Birthable iff conf ≥ RicohBirthConf and depth_var ≤ RicohBirthMaxVar. ZED always births.
 RicohBirthConf = 0.60     # min YOLO confidence for a ricoh slice to birth a table
 RicohBirthMaxVar = 0.005  # max depth_var (m²) for a ricoh slice to birth (σ_range ≲ 7 cm)
+# Ricoh (depth_var>0) slices: when true, a ricoh mask feeds the LiDAR RANGE FACTOR — it contributes only a weak
+# position anchor (its centroid) and the sphere-traced range rays supply the geometry, so its see-through
+# reprojected-LiDAR cloud never drives extent (no elongation/collapse). false ⇒ ignore ricoh entirely.
+# NOTE: ricoh depth is reliable only for FRONTAL views; lateral/back views smear the mask cloud (and its
+# centroid) in depth — a viewing-angle gate is the proper fix before re-enabling. ISOLATION TEST: ZED-only.
+UseRicohSlices = true
+RicohAnchorSigmaM = 0.50  # ricoh centroid anchor σ (m) → R: large so it only pins rough position, not extent
 
 [Ice]
 Warn.Connections = "0"

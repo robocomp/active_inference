@@ -127,14 +127,29 @@ struct TableInstance
     int existence_remove_streak = 0;
 
     // ── EvidenceMonitor per-cycle snapshots (persisted copies of otherwise-transient fit/existence values) ──
+    // Slices fused into this instance this cycle, split by source (ZED depth_var==0 vs ricoh depth_var>0).
+    // dbg_n_ricoh_slices ≥ 2 is the SIGNATURE of a 360 strip-SEAM split: a wide table straddling a strip
+    // boundary yields two partial ricoh detections that don't merge → both associate here (multi-det fusion).
+    int   dbg_n_zed_slices   = 0;
+    int   dbg_n_ricoh_slices = 0;
     int   dbg_cand_pts  = 0;      // this frame's on-surface (candidate) support point count
     int   dbg_resid_pts = 0;      // this frame's off-surface (residual/unexplained) support point count
     float dbg_energy    = 0.0f;   // mean per-point data energy (NLL proxy) at the converged state
     float dbg_R         = 0.0f;   // per-point measurement variance used this frame (m²)
+    // FE ATTENTION / SURPRISE (active-perception trigger). fe_baseline = the "well-fit" free-energy level this
+    // table settles to (slow EMA; tracks DOWN fast to consolidate a better fit, UP slow so a SUSTAINED rise — the
+    // world changed, e.g. the table was moved — shows as surprise before the baseline accepts it). fe_surprise =
+    // the smoothed positive gap (FE − baseline): ~0 when the belief matches the data, spikes when the table moves
+    // and decays as the robot re-observes and the fit re-converges. This is the signal that will raise the table's
+    // epistemic priority in the controller's EFE (attend + dwell until FE settles). See active-perception thread.
+    float fe_baseline   = -1.0f;  // <0 = uninitialised
+    float fe_surprise   = 0.0f;
     bool  dbg_gated     = false;  // truncation-gated (predict-only, no geometric update) this frame
     // Existence channel readouts from the last update_existence_and_remove (per-modality occ/free + counts).
-    float dbg_ex_lidar_occ = 0.0f, dbg_ex_lidar_free = 0.0f;  int dbg_ex_lidar_n   = 0;
-    float dbg_ex_sil_occ   = 0.0f, dbg_ex_sil_free   = 0.0f;  int dbg_ex_sil_ndet  = 0;
+    // *_free is the RAW sensor count; *_free_eff is what actually drove the log-odds after the range/occlusion
+    // absence-confidence scaling AND the observed-guard (so raw→eff shows how much the absence was degraded).
+    float dbg_ex_lidar_occ = 0.0f, dbg_ex_lidar_free = 0.0f, dbg_ex_lidar_free_eff = 0.0f;  int dbg_ex_lidar_n   = 0;
+    float dbg_ex_sil_occ   = 0.0f, dbg_ex_sil_free   = 0.0f, dbg_ex_sil_free_eff   = 0.0f;  int dbg_ex_sil_ndet  = 0;
 
     // Predicted in-image table ROI from projecting the current model through the camera extrinsic.
     // Normalised so the controller is resolution-agnostic: drive offset→0 (centre the table in the
@@ -143,6 +158,12 @@ struct TableInstance
     float roi_offset_x = 0.0f;   // [-1,1], 0 = horizontally centred in the image
     float roi_offset_y = 0.0f;   // [-1,1], 0 = vertically centred
     float roi_fill     = 0.0f;   // max(w/W, h/H): projected extent as a fraction of the image
+    // All 8 model corners project IN FRONT and inside the image with margin ⇒ the mask CAN capture the whole
+    // table this view, so a footprint-moment extent measurement is a trustworthy TWO-SIDED value (may shrink).
+    // False (close range / big table overflowing the FoV / partial view) ⇒ the mask only lower-bounds the extent
+    // → the moment is GROW-ONLY. A reliable, projection-derived completeness signal (the producer's trunc_frac
+    // under-reports at close range — the tables_5 close-range collapse). Set in compute_projected_roi().
+    bool  roi_fully_in_view = false;
 };
 
 }  // namespace rc

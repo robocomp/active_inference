@@ -58,6 +58,8 @@ struct TableConfig
     // common-mode (rad per m), the binding term. Set 0 to disable. Range Z comes from the voxelizer (mask_range).
     float ai2_range_noise_lat_per_m = 0.02f; // lateral deprojection std growth (m per m of range)
     float ai2_range_noise_yaw_per_m = 0.03f; // yaw common-mode std growth (rad per m of range)
+    float ai2_range_noise_size_per_m = 0.08f; // SIZE (w,h,H) common-mode std growth (m per m of range): a distant
+                                              // mask can't reshape/inflate a converged table (freezes geometry afar)
     float ai2_trunc_gate_frac  = 0.10f;  // skip the geometric update (predict only) when this fraction of
                                          // the mask silhouette is on the image border (truncated → biased)
     int   ai2_gn_iters         = 4;      // Gauss-Newton iterations per frame
@@ -96,6 +98,29 @@ struct TableConfig
     // the LiDAR sweep staged (auto-staged whenever this OR LidarPrecision > 0).
     float free_space_precision = 0.0f;
 
+    // Footprint SECOND-MOMENT factor (table_belief.h): measures (w,h,yaw) from the top-band cloud's 2D inertia
+    // tensor and folds it as a linear Gaussian factor — the escape from the clutter-trap that leaves a dense,
+    // bigger/yawed mask unable to rotate/resize the box (tables_5.png). Also seeds (w,h,yaw) at birth. yaw pull
+    // scales with extent anisotropy; capped by the range-driven common-mode. 0=OFF (baseline unchanged).
+    float footprint_moment_precision = 0.0f;
+    // Orientation-mode hysteresis margin (nats): resolve_orientation must accumulate this much log-evidence
+    // before switching the w↔h mode, so a near-square table seen front-on can't snap 90°/180° on noise. 0=off.
+    // Footprint-moment GENTLE range term (m per m of range): shared per-frame moment variance grows as
+    // (this·range)². Much smaller than AI2RangeNoiseSizePerM because a global footprint fit is range-robust;
+    // it makes the moment accumulate over frames (stable) rather than snap to each frame's footprint.
+    float footprint_moment_range_per_m = 0.03f;
+    // FE attention/surprise dynamics (active-perception trigger). Baseline EMA rates: DOWN fast (consolidate a
+    // better fit), UP slow (a sustained mismatch — the table moved — stays surprising long enough to attend);
+    // surprise = smoothed positive gap FE−baseline.
+    float fe_baseline_adapt_down = 0.05f;
+    float fe_baseline_adapt_up   = 0.005f;
+    float fe_surprise_smooth     = 0.10f;
+    // Ego-motion (motion_dotd) coupling: moment variance grows by (this·motion_dotd)² so a "going-away/rotation"
+    // frame (degraded/split mask) can't reshape the established fit; the mode accumulator is halved at
+    // motion_dotd = OrientationMotionRef. The observed reshapes/flips all arrived on motion frames.
+    float footprint_moment_motion_gain = 0.30f;
+    float orientation_motion_ref       = 0.50f;
+
     // Existence / removal (common/existence_belief.h): each cycle carve the LiDAR sweep against the table
     // footprint → occupancy/free-space log-odds; remove when P(occupied) < removal_prob. Evidence-based, not a
     // miss counter. OFF by default (a mis-removal deletes furniture); enable to replace merge-only removal.
@@ -107,6 +132,20 @@ struct TableConfig
     float existence_sensor_sigma_m  = 0.03f;  // LiDAR range σ (m) for the soft occ/free surface split
     int   existence_remove_frames   = 15;     // debounce: require the removal decision for this many consecutive
                                               // cycles before deleting (transient association hiccups don't remove)
+    // ABSENCE evidence degradation (no gate). "Predicted-visible but no mask/return there" is weak evidence of
+    // removal when the sensor likely could not resolve the object anyway — a distant view (small projection /
+    // sparse beams) or a largely-occluded one. So the FREE/absence half of BOTH channels is scaled by a
+    // confidence factor c = (range_ref/range)^power (capped at 1) × visible_fraction, degrading it continuously
+    // with range and occlusion while OCCUPANCY stays fully informative (a distant detection still confirms).
+    // This is P(detect|present) falling with range, the codebase's "range→precision, not a gate" pattern.
+    float existence_absence_range_ref_m = 2.5f;   // range (m) below which absence is trusted at full weight
+    float existence_absence_range_power = 2.0f;   // decay exponent (2 ≈ angular-area ∝ 1/range²); 0 disables
+    // LiDAR removal reliability: the model's top slab is a SOLID band, but a real tabletop is a THIN plate, so
+    // horizontal beams passing UNDER the top surface exit the band and read as false "free" — unreliable
+    // ABSENCE. So by default the LiDAR carve contributes OCCUPANCY only (holds L up / confirms presence) and
+    // NEVER drives removal; removal is the camera silhouette's job (predicted-visible-but-absent, which HOLDs
+    // when out of FoV). Set true to ALSO trust LiDAR free-space (only where the slab is a faithful solid model).
+    bool  existence_lidar_absence = false;
 
     // Upload the table pose covariance onto the room→table RT edge (rt_covariance_att, 6×6 SE3),
     // mapped from the belief's full Σ over [cx,cy,H,w,h,yaw]: x←cx, y←cy, z←H/2, yaw←ψ; roll/pitch are
@@ -148,6 +187,14 @@ struct TableConfig
     // and depth_var ≤ RicohBirthMaxVar (m²). ZED slices (depth_var==0) are always birthable.
     float ricoh_birth_conf    = 0.60f;    // min YOLO confidence for a ricoh slice to birth a table
     float ricoh_birth_max_var = 0.005f;   // max depth_var (m²) for a ricoh slice to birth (σ_range ≲ 7 cm)
+    // Debug baseline switch: when false, ricoh (depth_var>0) slices are IGNORED entirely by the fit/tracker —
+    // no association, no fusion, no birth. Used to reduce the multimodal fusion to a clean set of sources
+    // (ZED masks + LiDAR range) and calibrate it before re-adding ricoh with a proper extent-information model.
+    bool  use_ricoh_slices    = true;
+    // When a ricoh slice feeds the range factor, its centroid is a single WEAK position anchor: this is its
+    // measurement σ (m) → R, large so it barely constrains extent/depth (the LiDAR range rays do that). It just
+    // pins rough position and lets the GN run so feed_lidar can select the sweep returns near the table.
+    float ricoh_anchor_sigma_m = 0.50f;
 };
 
 // Fill a TableConfig from a RoboComp ConfigLoader (all keys optional, defaults above).

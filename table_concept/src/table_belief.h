@@ -23,6 +23,19 @@
 namespace rc
 {
 
+// 2D footprint second-moment measurement of a top-band point cloud: centroid, principal-axis angle (major
+// axis, wrapped to (−π/2, π/2]), and the FULL extents of the equivalent uniform rectangle (√(12·λ) of the
+// inertia-tensor eigenvalues). ok=false when too few points fell in the band. Model-independent (the only
+// model input is the z-band that selects the tabletop plane) — this is what breaks the clutter-escape trap.
+struct FootprintMoment
+{
+    bool  ok = false;
+    int   n = 0;
+    float cx = 0.0f, cy = 0.0f;   // 2D centroid (m)
+    float ext_major = 0.0f, ext_minor = 0.0f;   // full extents (m), major ≥ minor
+    float phi = 0.0f;             // major-axis angle (rad), atan2 in (−π/2, π/2]
+};
+
 struct TableBeliefState
 {
     float cx = 0.0f, cy = 0.0f, H = 0.75f, w = 1.0f, h = 0.6f, yaw = 0.0f;
@@ -60,6 +73,19 @@ struct TableBeliefParams
     // frame's LiDAR endpoints/origin (same sweep the range factor uses); saturates via the engine common-mode.
     float free_space_precision = 0.0f;
 
+    // Footprint SECOND-MOMENT factor (yaw/extent from the top surface's own 2D shape). The per-point SDF
+    // mixture cannot rotate/resize a table whose dense mask is bigger or yawed than the current box: interior
+    // top points have ∂sdf/∂yaw≈∂sdf/∂w≈0 (flat face), and the outboard rim/leg points that DO carry the signal
+    // fall outside the box → the mixture routes them to CLUTTER (zero gradient). The escape is a GLOBAL statistic:
+    // the top-band cloud's 2D centroid + inertia tensor is a sufficient statistic of the filled-rectangle model.
+    // Its principal-axis angle measures yaw, its eigen-extents (full = √(12·λ)) measure w,h — folded as a linear
+    // Gaussian factor on (w,h,yaw) into the SAME GN normal equations (so the engine's range-driven common-mode
+    // caps its per-frame authority — a far view still can't rotate a converged table; no manual gate). yaw
+    // precision scales with the extent ANISOTROPY (ext_major−ext_minor)/(sum): a near-square footprint carries no
+    // orientation info → 0 pull (resolve_orientation owns that flip). NOT applied to cx,cy (a partial view's
+    // centroid is biased; the mixture already fixes position). 0 = OFF. See the "stuck yaw" diagnosis (tables_5.png).
+    float footprint_moment_precision = 0.0f;
+
     // Priors
     float prior_size_std = 0.30f;  // broad size prior std (m) on w,h,H — only breaks the empty-cloud degeneracy
     // Temporal transition (predict): rigid + static ⇒ small process noise per frame.
@@ -89,6 +115,22 @@ struct TableFrame
     float chain_cov_yy = 0.0f;             // ...                                                      (cy)
     float chain_cov_yaw = 0.0f;            // extra shared yaw variance (rad²) — grows with view range so a
                                            // distant, vague mask cannot rotate a converged table
+    float moment_extra_var = 0.0f;         // SHARED per-frame variance (m²) added to the footprint-moment
+                                           // measurement: ego-motion corruption + a gentle range term. Makes the
+                                           // moment ACCUMULATE over frames (a moving/near-far view backs off)
+                                           // instead of snapping the belief to each frame's noisy footprint.
+    float trunc_frac = 0.0f;               // fraction of the mask silhouette on the image border. >0 ⇒ TRIMMED:
+                                           // the footprint extent is a LOWER BOUND, so the moment factor may only
+                                           // GROW w/h, never shrink (a short table always shows a FULL mask →
+                                           // trunc≈0 → two-sided → it can shrink). Distinguishes the two cases.
+    bool  footprint_complete = true;       // the whole model projects INSIDE the image this view (roi_fully_in_view):
+                                           // the mask CAN capture the full table ⇒ moment extent is two-sided.
+                                           // False (big table overflowing the FoV at close range, which trunc_frac
+                                           // under-reports) ⇒ grow-only, so a partial view can't collapse the size.
+    float chain_cov_size = 0.0f;           // extra shared SIZE variance (m²) on w,h,H — grows with view range so
+                                           // a distant, vague mask cannot RESHAPE/inflate a converged table (the
+                                           // per-frame info SATURATES lower with range → geometry freezes; only
+                                           // existence/occupancy survives afar). Caps the coverage grow-term too.
 
     // YOLO-INDEPENDENT LiDAR channel: range returns that fall on the table (room frame, sensor origin +
     // endpoints). Sphere-traced against THIS belief's own SDF by the shared factor. precision==0 ⇒ skipped.
@@ -133,10 +175,16 @@ public:
     // per-frame log-evidence (E_swap − E_now) and adopt the lower-accumulated-energy mode (boundary at zero
     // accumulated evidence = the MAP over the mode; NO tuned threshold). On a flip, swaps w↔h in the state
     // AND rows/cols 3↔4 of Σ. Returns true iff it flipped this call. Call once per fresh frame after update().
-    bool  resolve_orientation(const std::vector<Eigen::Vector3f>& pts, float R);
+    // evidence_weight ∈ [0,1] scales this frame's contribution to the mode accumulator — the fitter passes a low
+    // value while the robot is moving (ego-motion-corrupted / split masks must not vote on the discrete mode).
+    bool  resolve_orientation(const std::vector<Eigen::Vector3f>& pts, float R, float evidence_weight = 1.0f);
 
     // ── Inference (delegated to the shared engine) ────────────────────────────
-    float update(const TableFrame& frame) { return ai::update<N>(*this, state_, Sigma_, prior_mean_, frame); }
+    // Per-point recursive-Laplace update, then the footprint second-moment measurement fused as a separate
+    // channel with its own (range-robust) covariance — the DOF (yaw/extent) the flat-top per-point mixture
+    // structurally cannot supply (no-op unless footprint_moment_precision > 0).
+    float update(const TableFrame& frame)
+    { const float e = ai::update<N>(*this, state_, Sigma_, prior_mean_, frame); apply_footprint_moment(frame); return e; }
     void  predict()                       { ai::predict<N>(*this, Sigma_, state_, prior_mean_); }
     // Age the belief with NO measurement: Σ ← FΣFᵀ + Q·(dt/dt_nominal), mean held. The fitter calls this when
     // a table's mask stream is stale/dead so Σ grows on the agent's clock instead of freezing (see TABLE_FIT_AI2).
@@ -153,6 +201,10 @@ public:
     Eigen::Matrix<float, 6, 1> sdf_jacobian(const Eigen::Vector3f& p, const TableBeliefState& s, int prim) const;
     // Soft responsibilities: [top, leg0..3, clutter] (sum = 1) at measurement variance R.
     std::array<float, 6> responsibilities(const Eigen::Vector3f& p, const TableBeliefState& s, float R) const;
+    // Un-normalised mixture components + their sum (= marginal likelihood p(point|model)); shared by
+    // responsibilities() and the free-energy readout (mean_energy = mean −log sum). Public so the fitter can log F.
+    float mixture_unnormalized(const Eigen::Vector3f& p, const TableBeliefState& s, float R,
+                               std::array<float, 6>& u) const;
     void  apply_constraints(TableBeliefState& s) const;
     void  canonicalize(TableBeliefState& s) const;   // once after the GN loop: canonical w≥h fold
 
@@ -174,6 +226,13 @@ public:
     // 0 when the respective precision is OFF. Read by the EvidenceMonitor after update().
     int last_vacate_beams()  const { return dbg_vacate_beams_; }
     int last_coverage_pts()  const { return dbg_coverage_pts_; }
+    // Top-band point count the footprint-moment factor used last frame (0 when the factor is OFF or starved).
+    int last_moment_pts()    const { return dbg_moment_pts_; }
+
+    // 2D footprint second-moment of the points whose z falls in [z_lo, z_hi] (the tabletop band). Shared by
+    // the per-frame moment factor (accumulate_extra) and the birth seed (the fitter's lazy init) so both use
+    // identical math. Pure geometry, no state — the trap-breaking global statistic.
+    static FootprintMoment footprint_moment(const std::vector<Eigen::Vector3f>& pts, float z_lo, float z_hi);
 
     // ── Verification ──────────────────────────────────────────────────────────
     static bool self_test();
@@ -183,6 +242,10 @@ private:
     { return 0.5f * std::max(0.0f, s.H - params_.top_thickness); }
     Eigen::Vector2f leg_center_local(const TableBeliefState& s, int k) const;
 
+    // Footprint second-moment measurement fusion (called by update() after the per-point pass). Separate
+    // channel, own covariance, outside the per-point common-mode — see the .cpp for the range-robustness rationale.
+    void apply_footprint_moment(const TableFrame& frame);
+
     TableBeliefState           state_;
     TableBeliefParams          params_;
     Eigen::Matrix<float, 6, 6> Sigma_ = Eigen::Matrix<float, 6, 6>::Identity();  // posterior covariance
@@ -190,6 +253,7 @@ private:
     float                      flip_evidence_ = 0.0f;  // accumulated log-evidence FOR the current mode vs the w↔h swap
     mutable int                dbg_vacate_beams_ = 0;   // free-space beams that fired a vacate pull (last accumulate)
     mutable int                dbg_coverage_pts_ = 0;   // on-plane points reclaimed by coverage (last accumulate)
+    mutable int                dbg_moment_pts_ = 0;      // top-band points used by the footprint-moment factor
 };
 
 }  // namespace rc
