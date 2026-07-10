@@ -1148,13 +1148,42 @@ void SceneProcessor::update_viewer_grid()
         return v;
     };
     std::vector<QVector3D> cells, border;
+    std::vector<QVector3D> field_centres;
+    std::vector<float> field_prob, field_var;
     if (const auto g = graph_->get_node("grid"); g.has_value())
     {
         if (const auto o = graph_->get_attrib_by_name<grid_occupied_cells_att>(g.value()); o.has_value()) cells  = read_pts(o.value().get());
         if (const auto o = graph_->get_attrib_by_name<grid_border_cells_att>  (g.value()); o.has_value()) border = read_pts(o.value().get());
+        // Beta BELIEF FIELD: dense row-major P and Var + meta=[xmin,ymin,cell,w,h]. Reconstruct each cell's room
+        // centre from the meta and index — only cells with meaningful occupancy are drawn (filtered in the viewer).
+        const auto pa = graph_->get_attrib_by_name<grid_occupancy_prob_att>(g.value());
+        const auto va = graph_->get_attrib_by_name<grid_occupancy_var_att> (g.value());
+        const auto ma = graph_->get_attrib_by_name<grid_field_meta_att>     (g.value());
+        if (pa.has_value() and va.has_value() and ma.has_value())
+        {
+            const auto& P = pa.value().get(); const auto& V = va.value().get(); const auto& M = ma.value().get();
+            if (M.size() >= 5)
+            {
+                const float xmin = M[0], ymin = M[1], cell = M[2];
+                const int w = static_cast<int>(M[3]), h = static_cast<int>(M[4]);
+                if (static_cast<int>(P.size()) >= w * h and static_cast<int>(V.size()) >= w * h)
+                {
+                    field_centres.reserve(P.size()); field_prob.reserve(P.size()); field_var.reserve(P.size());
+                    for (int y = 0; y < h; ++y)
+                        for (int x = 0; x < w; ++x)
+                        {
+                            const int i = y * w + x;
+                            if (P[i] <= 0.5f) continue;                 // collapsed/free → skip (keeps payload small)
+                            field_centres.emplace_back(xmin + (x + 0.5f) * cell, ymin + (y + 0.5f) * cell, 0.03f);
+                            field_prob.push_back(P[i]); field_var.push_back(V[i]);
+                        }
+                }
+            }
+        }
     }
     voxel_viewer_->update_grid_cells(cells, 0.05f);
     voxel_viewer_->update_grid_border(border);
+    voxel_viewer_->update_grid_field(field_centres, field_prob, field_var);
 }
 
 void SceneProcessor::update_viewer_mask_points()
@@ -1170,16 +1199,20 @@ void SceneProcessor::update_viewer_mask_points()
     static const std::array<std::string_view, 3> kDrawnMaskLabels{"bottle", "table", "chair"};
     std::vector<QVector3D>   mask_points;
     std::vector<std::string> mask_categories;   // parallel to mask_points → per-class colour in the viewer
+    std::vector<float>       mask_sources;       // parallel to mask_points → sensor source (0=zed, 1=ricoh) → brightness
     if (const auto masks_node = graph_->get_node("masks"); masks_node.has_value())
     {
         const auto& attrs = masks_node->attrs();
         const auto pts_it     = attrs.find("mask_support_points");
         const auto off_it     = attrs.find("mask_support_offsets");
         const auto labels_it  = attrs.find("mask_labels");
+        const auto src_it     = attrs.find("mask_source");   // optional (older producers omit it → treated as zed/bright)
         if (pts_it != attrs.end() and off_it != attrs.end() and labels_it != attrs.end())
         {
             const auto& flat    = pts_it->second.float_vec();
             const auto& offsets = off_it->second.float_vec();
+            const std::vector<float> empty_src;
+            const auto& sources = (src_it != attrs.end()) ? src_it->second.float_vec() : empty_src;
 
             std::vector<std::string> labels;
             std::stringstream ls(labels_it->second.str());
@@ -1193,15 +1226,17 @@ void SceneProcessor::update_viewer_mask_points()
                     continue;
                 const std::size_t begin = static_cast<std::size_t>(offsets[m]);
                 const std::size_t end   = static_cast<std::size_t>(offsets[m + 1]);
+                const float src = (m < sources.size()) ? sources[m] : 0.0f;   // default zed (bright)
                 for (std::size_t i = begin; i < end and (i * 3 + 2) < flat.size(); ++i)
                 {
                     mask_points.emplace_back(flat[i * 3], flat[i * 3 + 1], flat[i * 3 + 2]);
                     mask_categories.push_back(labels[m]);
+                    mask_sources.push_back(src);
                 }
             }
         }
     }
-    voxel_viewer_->update_mask_points(mask_points, mask_categories);
+    voxel_viewer_->update_mask_points(mask_points, mask_categories, mask_sources);
 }
 
 void SceneProcessor::update_viewer_robot_pose(const Mat::RTMat& room_T_robot)

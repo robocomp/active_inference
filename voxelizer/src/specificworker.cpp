@@ -639,27 +639,56 @@ void SpecificWorker::compute()
                     const float az = std::atan2(static_cast<float>(ray_room.y()), static_cast<float>(ray_room.x()));
                     BearingDetection bd{d.label, static_cast<float>(d.class_id), d.confidence, az};
 
-                    // Depth-fill from the reprojected lidar points inside the detection's panorama bbox.
-                    if (not lidar_pano.empty())
+                    // Depth-fill from the reprojected lidar. TWO gates keep FLOOR out of the object's
+                    // support points (the lidar-ring arcs that used to spill onto the floor behind tables):
+                    //   (1) SILHOUETTE: select by the segmentation MASK, not the loose bbox — the bbox is a
+                    //       rectangle around the object whose surrounding floor rings the equirect/cylindrical
+                    //       reprojection drops straight in; the mask is tight on the object.
+                    //   (2) FOREGROUND: the object occludes the floor behind it, so anchor on the NEAREST
+                    //       silhouette surface (a low range percentile, robust to a few nearer stragglers) and
+                    //       keep only returns within RICOH_MASK_FG_BAND_M of it — the occluded floor-behind and
+                    //       under-object floor are farther along the ray → dropped. Physical object-depth prior,
+                    //       not a tuning cutoff (see [[no-threshold-patches]]).
+                    if (not lidar_pano.empty() and not d.mask.empty())
                     {
                         std::vector<rc::depth::ProjectedPoint> hits;
                         for (const auto& p : lidar_pano)
-                            if (p.u >= static_cast<float>(d.bbox.x) and p.u < static_cast<float>(d.bbox.x + d.bbox.width)
-                                and p.v >= static_cast<float>(d.bbox.y) and p.v < static_cast<float>(d.bbox.y + d.bbox.height))
-                                hits.push_back(p);
-                        if (const auto md = rc::depth::score_mask_depth(hits); md.has_depth)
                         {
-                            bd.has_lidar_depth = true;
-                            bd.range_var = md.range_var;
-                            bd.support_room.reserve(hits.size());
-                            Eigen::Vector3f sum = Eigen::Vector3f::Zero();
-                            for (const auto& h : hits)   // ricoh-frame hit → room frame (round-trips to the source point)
+                            const int ui = static_cast<int>(std::lround(p.u));
+                            const int vi = static_cast<int>(std::lround(p.v));
+                            if (ui < 0 or ui >= d.mask.cols or vi < 0 or vi >= d.mask.rows)
+                                continue;
+                            if (d.mask.at<std::uint8_t>(vi, ui) < 127)   // outside the object silhouette → skip
+                                continue;
+                            hits.push_back(p);
+                        }
+                        if (not hits.empty())
+                        {
+                            std::vector<float> rr;
+                            rr.reserve(hits.size());
+                            for (const auto& h : hits) rr.push_back(h.range);
+                            const std::size_t k = rr.size() / 10;                // ~10th-percentile = near surface
+                            std::nth_element(rr.begin(), rr.begin() + k, rr.end());
+                            const float r_near = rr[k];
+                            std::vector<rc::depth::ProjectedPoint> fg;
+                            fg.reserve(hits.size());
+                            for (const auto& h : hits)
+                                if (h.range - r_near <= params.RICOH_MASK_FG_BAND_M)   // drop the far (floor) tail
+                                    fg.push_back(h);
+                            if (const auto md = rc::depth::score_mask_depth(fg); md.has_depth)
                             {
-                                const Eigen::Vector3f pr = (frame->room_T_ricoh * h.xyz_cam.cast<double>()).cast<float>();
-                                bd.support_room.push_back(pr);
-                                sum += pr;
+                                bd.has_lidar_depth = true;
+                                bd.range_var = md.range_var;
+                                bd.support_room.reserve(fg.size());
+                                Eigen::Vector3f sum = Eigen::Vector3f::Zero();
+                                for (const auto& h : fg)   // ricoh-frame hit → room frame (round-trips to the source point)
+                                {
+                                    const Eigen::Vector3f pr = (frame->room_T_ricoh * h.xyz_cam.cast<double>()).cast<float>();
+                                    bd.support_room.push_back(pr);
+                                    sum += pr;
+                                }
+                                bd.centroid_room = sum / static_cast<float>(fg.size());
                             }
-                            bd.centroid_room = sum / static_cast<float>(hits.size());
                         }
                     }
                     bearing_dets.push_back(std::move(bd));

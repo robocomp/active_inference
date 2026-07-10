@@ -165,6 +165,12 @@ void SpecificWorker::setup_custom_viewers()
         grid_btn->setChecked(true);
         grid_btn->setCursor(Qt::PointingHandCursor);
 
+        // Beta belief-field heatmap (hue=P risk, brightness=confidence) — ON by default.
+        auto* field_btn = new QPushButton("Field: ON", voxel_panel);
+        field_btn->setCheckable(true);
+        field_btn->setChecked(true);
+        field_btn->setCursor(Qt::PointingHandCursor);
+
         // ZED popup toggle — opens the ZED RGB window (YOLO seg overlay lives inside it). Created here;
         // the window itself is built (hidden) in the SHOW_YOLO_VIEWER block below, so the lambda
         // resolves yolo_window_ at click time.
@@ -200,6 +206,7 @@ void SpecificWorker::setup_custom_viewers()
         accent(masks_btn,     "#EBEBF2");  // mask: white
         accent(residual_btn,  "#2633CC");  // residual: dark blue
         accent(grid_btn,      "#CC8C0D");  // occupancy grid: amber
+        accent(field_btn,     "#D64550");  // belief field: risk red
         if (yolo_btn)  accent(yolo_btn,  "#64C8FF");  // yolo: light blue
         if (ricoh_btn) accent(ricoh_btn, "#00D4BB");  // ricoh: teal
 
@@ -208,6 +215,7 @@ void SpecificWorker::setup_custom_viewers()
         controls_layout->addWidget(masks_btn);
         controls_layout->addWidget(residual_btn);
         controls_layout->addWidget(grid_btn);
+        controls_layout->addWidget(field_btn);
         if (yolo_btn)  controls_layout->addWidget(yolo_btn);
         if (ricoh_btn) controls_layout->addWidget(ricoh_btn);
         controls_layout->addStretch(1);
@@ -251,6 +259,13 @@ void SpecificWorker::setup_custom_viewers()
             if (voxel_viewer_gl)
                 voxel_viewer_gl->set_show_grid(checked);
             grid_btn->setText(checked ? "Grid: ON" : "Grid: OFF");
+        });
+
+        connect(field_btn, &QPushButton::toggled, this, [this, field_btn](bool checked)
+        {
+            if (voxel_viewer_gl)
+                voxel_viewer_gl->set_show_field(checked);
+            field_btn->setText(checked ? "Field: ON" : "Field: OFF");
         });
 
         if (yolo_btn)

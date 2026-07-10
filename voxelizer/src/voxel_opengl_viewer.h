@@ -30,9 +30,11 @@ public:
     void update_residual_points(std::span<const QVector3D> residual_positions);
     // YOLO mask support points (room frame), drawn as a distinct point cloud. Optional per-point
     // categories colour them by class (color_for_category, matching the voxel/box palette); empty
-    // → fall back to off-white.
+    // → fall back to off-white. Optional per-point sources (0=zed, 1=ricoh) keep the category HUE but
+    // dim + desaturate ricoh (360) points so the front RGB-D and peripheral evidence are told apart.
     void update_mask_points(std::span<const QVector3D> positions,
-                            std::span<const std::string> categories = {});
+                            std::span<const std::string> categories = {},
+                            std::span<const float> sources = {});
     void set_show_lidar(bool show);
     void set_show_masks(bool show);
     void set_show_residual(bool show);
@@ -41,6 +43,10 @@ public:
     // The inflated half-robot-width clearance border, drawn in a second colour.
     void update_grid_border(std::span<const QVector3D> border_centres);
     void set_show_grid(bool show);
+    // Beta-posterior BELIEF FIELD heatmap: per-cell centres + mean occupancy P (RISK, hue) + Var[P] (EPISTEMIC,
+    // brightness). Cells the source collapsed to P=0 (a modelled object owns them) are skipped.
+    void update_grid_field(std::span<const QVector3D> centres, std::span<const float> prob, std::span<const float> var);
+    void set_show_field(bool show);
     // Fitted-model layer: the table mesh, the solid bottle cylinder and the graph object boxes.
     void set_show_models(bool show);
 
@@ -106,6 +112,7 @@ private:
     std::vector<Vertex> residual_vertices_;
     std::vector<Vertex> grid_vertices_;        // residual_concept occupancy-grid cells (amber)
     std::vector<Vertex> grid_border_vertices_; // inflated clearance border (cyan)
+    std::vector<Vertex> grid_field_vertices_;  // Beta belief-field heatmap (hue=P, brightness=confidence)
     std::vector<Vertex> mask_vertices_;
     std::mutex data_mutex_;
 
@@ -129,6 +136,7 @@ private:
     bool show_masks_ = false;
     bool show_residual_ = false;   // table_concept residual debug cloud — OFF by default
     bool show_grid_ = true;        // residual_concept occupancy grid — ON by default (the new safety layer)
+    bool show_field_ = true;       // residual_concept Beta belief-field heatmap — ON by default
     bool show_models_ = true;
     bool show_skeletons_ = true;
     std::vector<QVector3D> robot_mesh_local_;

@@ -432,8 +432,47 @@ void VoxelOpenGLViewer::set_show_grid(bool show)
     request_update_throttled();
 }
 
+// Belief-field heatmap: one coloured point per cell of the residual grid's Beta posterior. HUE encodes the mean
+// occupancy P (collision RISK: green→red as 0.5→1), BRIGHTNESS encodes confidence 1−Var/Var_prior (the EPISTEMIC
+// term: vivid = well-observed, faded = uncertain). Cells the source collapsed to P=0 (a modelled object owns
+// them) or that lean free (P≤0.5) are skipped, so objects visibly collapse and free space stays uncluttered.
+void VoxelOpenGLViewer::update_grid_field(std::span<const QVector3D> centres, std::span<const float> prob,
+                                          std::span<const float> var)
+{
+    constexpr float var_prior = 0.125f;                 // Beta(0.5,0.5) prior variance = "unknown"
+    std::vector<Vertex> v;
+    v.reserve(centres.size());
+    const std::size_t n = std::min({centres.size(), prob.size(), var.size()});
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        const float p = prob[i];
+        if (p <= 0.5f) continue;                        // collapsed (P=0) or free-leaning → don't draw
+        const float t = std::clamp((p - 0.5f) * 2.0f, 0.f, 1.f);       // 0 at P=0.5 → 1 at P=1
+        const float conf = std::clamp(1.0f - var[i] / var_prior, 0.f, 1.f);
+        const float r = (0.40f + 0.60f * t) * conf;
+        const float g = (0.90f - 0.70f * t) * conf;
+        const float b = 0.10f * conf;
+        const float fx = voxel_flip_x_ ? -1.f : 1.f;
+        const float fy = voxel_flip_y_ ? -1.f : 1.f;
+        const QVector3D mapped{fx * centres[i].x(), centres[i].z(), fy * centres[i].y()};
+        v.push_back(Vertex{mapped.x(), mapped.y(), mapped.z(), r, g, b});
+    }
+    {
+        std::scoped_lock lk(data_mutex_);
+        grid_field_vertices_ = std::move(v);
+    }
+    request_update_throttled();
+}
+
+void VoxelOpenGLViewer::set_show_field(bool show)
+{
+    show_field_ = show;
+    request_update_throttled();
+}
+
 void VoxelOpenGLViewer::update_mask_points(std::span<const QVector3D> positions,
-                                           std::span<const std::string> categories)
+                                           std::span<const std::string> categories,
+                                           std::span<const float> sources)
 {
     std::vector<Vertex> new_vertices;
     new_vertices.reserve(positions.size());
@@ -449,6 +488,14 @@ void VoxelOpenGLViewer::update_mask_points(std::span<const QVector3D> positions,
         if (not categories.empty() and i < categories.size())
             c = categories[i] == "bottle" ? QColor(255, 40, 40)   // bottle mask: red (contrasts the magenta cylinder)
                                           : color_for_category(categories[i]).lighter(125);
+        // Source brightness channel: keep the category HUE but dim + desaturate ricoh (360) points so
+        // the front RGB-D (zed, bright) and peripheral 360 evidence read apart at a glance.
+        if (not sources.empty() and i < sources.size() and sources[i] > 0.5f)
+        {
+            float h, s, v, a;
+            c.getHsvF(&h, &s, &v, &a);
+            c.setHsvF(h, s * 0.55f, v * 0.50f, a);   // ricoh: same hue, muted + darker
+        }
         new_vertices.push_back(Vertex{mapped.x(), mapped.y(), mapped.z(), c.redF(), c.greenF(), c.blueF()});
     }
     {
@@ -744,6 +791,7 @@ void VoxelOpenGLViewer::paintGL()
     std::vector<Vertex> mask_draw_vertices;
     std::vector<Vertex> grid_draw_vertices;
     std::vector<Vertex> grid_border_draw_vertices;
+    std::vector<Vertex> grid_field_draw_vertices;
     {
         std::scoped_lock lk(data_mutex_);
         n_lidar_vertices = lidar_vertices_.size();
@@ -754,12 +802,14 @@ void VoxelOpenGLViewer::paintGL()
         mask_draw_vertices = mask_vertices_;
         grid_draw_vertices = grid_vertices_;
         grid_border_draw_vertices = grid_border_vertices_;
+        grid_field_draw_vertices = grid_field_vertices_;
     }
     const bool has_lidar = n_lidar_vertices > 0;
     const bool has_residual = n_residual_vertices > 0;
     const bool has_mask = n_mask_vertices > 0;
     const bool has_grid = not grid_draw_vertices.empty();
     const bool has_grid_border = not grid_border_draw_vertices.empty();
+    const bool has_field = not grid_field_draw_vertices.empty();
 
     const float cp = std::cos(pitch_);
     const QVector3D eye(
@@ -839,6 +889,22 @@ void VoxelOpenGLViewer::paintGL()
         program_.setUniformValue("u_point_size", 5.0f);
         glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(grid_draw_vertices.size()));
         program_.setUniformValue("u_round_points", 1);
+        program_.setUniformValue("u_point_size", 4.5f);
+        room_vbo_.release();
+        room_vao_.release();
+        glEnable(GL_DEPTH_TEST);
+    }
+    // Beta-posterior BELIEF FIELD heatmap (hue=P risk, brightness=confidence). Its own `Field` toggle so it can
+    // be compared against / overlaid on the hard amber occupied cells. Drawn slightly smaller so both read.
+    if (has_field && show_field_)
+    {
+        glDisable(GL_DEPTH_TEST);
+        room_vao_.bind();
+        room_vbo_.bind();
+        room_vbo_.allocate(grid_field_draw_vertices.data(), static_cast<int>(grid_field_draw_vertices.size() * sizeof(Vertex)));
+        program_.setUniformValue("u_round_points", 0);
+        program_.setUniformValue("u_point_size", 4.0f);
+        glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(grid_field_draw_vertices.size()));
         program_.setUniformValue("u_point_size", 4.5f);
         room_vbo_.release();
         room_vao_.release();

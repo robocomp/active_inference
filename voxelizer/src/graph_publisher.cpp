@@ -251,11 +251,15 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
     std::vector<float> centroid_radius;   // normalized centroid radius from principal point (periphery)
     std::vector<float> mask_range;         // mean camera→mask depth Z (m): static range — consumer scales R + pose common-mode (a far view can't resolve orientation)
     std::vector<float> has_depth_flags;    // 1.0 = 3D slice (zed, or ricoh with lidar depth); 0.0 = ricoh bearing-only
+    std::vector<float> mask_source;        // sensor SOURCE per mask: 0.0 = zed (front RGB-D), 1.0 = ricoh (360). Unlike
+                                           //   mask_has_depth this is unambiguous (a lidar-depth ricoh mask is still 1.0).
     std::vector<float> azimuths;           // room-frame bearing (rad); meaningful only for has_depth==0 slices
     std::vector<float> depth_var;          // σ_range² (m²) to ADD to R along the mask ray (common/depth_projection).
                                            // 0 for dense-depth zed masks; the scored range_var for lidar-depth ricoh masks.
     std::ostringstream labels_joined;
     std::size_t total_support_points = 0;
+    std::size_t fg_gate_dropped = 0, fg_gate_in = 0;   // foreground depth-gate telemetry (this frame)
+    int         fg_gate_masks   = 0;
     support_offsets.push_back(0.0f);
     mask_pixel_offsets.push_back(0.0f);
 
@@ -391,6 +395,41 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
         if (mask_points_room.empty())
             continue;
 
+        // FOREGROUND depth gate — kills the WALL-BEHIND points that bleed into the slice when the robot
+        // moves: the RGB mask and depth map skew, so silhouette-edge pixels sample the background depth and
+        // deproject onto the far wall. That's a COHERENT cluster the radius filter above can't remove. Anchor
+        // on the near surface (low percentile of camera-frame depth py; zed frame y = depth) and drop points
+        // more than MASK_DEPTH_GATE_BAND_M behind it — the object occludes the background, so those far
+        // returns can't be the object. Physical object-depth prior, not a tuning cutoff (no-threshold-patches).
+        if (params_.MASK_DEPTH_GATE_BAND_M > 0.0f and mask_points_cam.size() >= 8)
+        {
+            std::vector<float> depths;
+            depths.reserve(mask_points_cam.size());
+            for (const auto& pc : mask_points_cam) depths.push_back(pc.y());   // zed camera y = depth along axis
+            const std::size_t knear = depths.size() / 10;                       // ~10th-pct = near surface
+            std::nth_element(depths.begin(), depths.begin() + knear, depths.end());
+            const float d_max = depths[knear] + params_.MASK_DEPTH_GATE_BAND_M;
+            std::vector<Eigen::Vector3f> fg_room, fg_cam;
+            fg_room.reserve(mask_points_room.size());
+            fg_cam.reserve(mask_points_cam.size());
+            for (std::size_t i = 0; i < mask_points_room.size(); ++i)
+                if (mask_points_cam[i].y() <= d_max)
+                {
+                    fg_room.push_back(mask_points_room[i]);
+                    fg_cam.push_back(mask_points_cam[i]);
+                }
+            if (const std::size_t dropped = mask_points_room.size() - fg_room.size(); dropped > 0)
+            {
+                fg_gate_dropped += dropped;
+                fg_gate_in      += mask_points_room.size();
+                ++fg_gate_masks;
+            }
+            mask_points_room = std::move(fg_room);
+            mask_points_cam  = std::move(fg_cam);
+            if (mask_points_room.empty())
+                continue;
+        }
+
         Eigen::Vector3f min_pt = Eigen::Vector3f::Constant(std::numeric_limits<float>::max());
         Eigen::Vector3f max_pt = Eigen::Vector3f::Constant(std::numeric_limits<float>::lowest());
         Eigen::Vector3f sum_pt = Eigen::Vector3f::Zero();
@@ -408,6 +447,7 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
         label_ids.push_back(static_cast<float>(det.class_id));
         confidences.push_back(det.confidence);
         has_depth_flags.push_back(1.0f);   // zed slice: carries 3D support points
+        mask_source.push_back(0.0f);       // source = zed
         azimuths.push_back(0.0f);
         depth_var.push_back(0.0f);          // zed dense depth ⇒ no extra range variance beyond R_base
         support_offsets.push_back(static_cast<float>(support_offsets.back() + static_cast<float>(mask_points_room.size())));
@@ -483,6 +523,20 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
         total_support_points += mask_points_room.size();
     }
 
+    // Foreground-gate telemetry (throttled ≈1s): far wall-behind points removed this frame + masks affected.
+    // Only prints when the gate actually dropped something, so a clean scene stays quiet. Tune the band from
+    // these numbers: steady large drops on a static scene ⇒ band too tight (clipping the object).
+    {
+        static std::size_t fg_call_no = 0, fg_last_print = 0;
+        ++fg_call_no;
+        if (fg_gate_dropped > 0 and (fg_call_no - fg_last_print) >= 20)
+        {
+            fg_last_print = fg_call_no;
+            std::println("[mask-fg-gate] dropped {}/{} pts across {} zed mask(s) (band {:.2f}m, frame={})",
+                         fg_gate_dropped, fg_gate_in, fg_gate_masks, params_.MASK_DEPTH_GATE_BAND_M, sensing_frame);
+        }
+    }
+
     // Append the RGB-360 (ricoh) bearing-only detections as NO-DEPTH slices in the SAME node (Part B, see
     // RICOH_360_PERIPHERAL_DETECTION.md). They carry a room-frame bearing instead of 3D points:
     // support_begin==support_end (no points), no raw pixels, NaN centroid/bbox. Consumers skip !has_depth
@@ -503,6 +557,7 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
         labels_joined << b.label;
         label_ids.push_back(b.class_id);
         confidences.push_back(b.confidence);
+        mask_source.push_back(1.0f);       // source = ricoh (both bearing-only and lidar-depth ricoh slices)
         azimuths.push_back(b.azimuth_room_rad);
         mask_pixel_offsets.push_back(mask_pixel_offsets.back());    // no raw silhouette pixels either way
 
@@ -568,6 +623,7 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
     G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_pixels_xy", mask_pixels_xy);
     G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_pixel_offsets", mask_pixel_offsets);
     G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_has_depth", has_depth_flags);
+    G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_source", mask_source);
     G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_azimuth", azimuths);
     G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_depth_var", depth_var);
     if (params_.MASK_MOTION_ENABLED)

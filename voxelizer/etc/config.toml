@@ -111,6 +111,9 @@ show_voxel_viewer = true
 show_yolo_viewer  = true
 show_ricoh_viewer = true   # creates the Ricoh360 button+popup (popup hidden until toggled)
 perf_log = true   # per-frame compute/yolo/pose timing -> etc/viewer_perf.csv
+mask_depth_gate_band_m = 1.50  # ZED mask FOREGROUND gate: keep points within this depth band (m) of the mask's
+                               # near surface; farther points = wall-behind bleed (RGB↔depth skew while moving) → dropped.
+                               # Sized to the deepest object (table). Lower to cut closer walls; 0 disables.
 
 # Homeostatic perception-rate regulator: holds compute() near target_hz by adapting pose
 # decimation (AIMD + hysteresis). Actuator = pose only (YOLO-seg is the core product). Reacts to
@@ -143,6 +146,8 @@ publish_masks         = true  # emit ricoh detections into the shared "masks" no
 mask_depth            = true  # reproject lidar into the panorama → publish 360 masks as FULL 3D (has_depth=1 +
                               # mask_depth_var) instead of bearing-only. Flip ON only once agents read mask_depth_var into R.
 mask_depth_helios_only = true # use helios (co-located with the ricoh) only for the depth-fill; exclude bpearl
+mask_fg_band_m        = 0.60  # foreground depth band (m): keep lidar hits within this of the NEAREST silhouette
+                              # surface; farther returns are occluded floor-behind / under-object floor → dropped
 azimuth_tune_deg      = 0.0   # tune in DEGREES: extra yaw on room_T_ricoh over the graph cam_equirect_offset.
                               # Dial the last few degrees vs the Lidar overlay (restart voxelizer only), then bake the
                               # total into the ricoh node's cam_equirect_azimuth_offset in shadow.json and reset to 0.

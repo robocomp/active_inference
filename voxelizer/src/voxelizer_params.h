@@ -43,11 +43,14 @@ struct VoxelizerParams
     std::size_t VOXEL_DECIMATION_FACTOR          = 2;
     float       VOXEL_Z_LIFT_M                   = 0.0f;
     bool        TRANSFORMS_INTERPOLATE_RT        = true;
-    // Per-mask depth gate: reject mask pixels whose depth exceeds the mask's near
-    // surface by more than this band (m). Kills transparent-object depth dropout —
-    // pixels that see THROUGH the object to the background and deproject into a line.
-    // <= 0 disables the gate.
-    float       MASK_DEPTH_GATE_BAND_M           = 0.20f;
+    // Per-mask FOREGROUND depth gate (Voxel.mask_depth_gate_band_m): anchor on the mask's NEAR surface
+    // (low percentile of camera-frame depth) and drop points more than this band (m) behind it. The
+    // object occludes the background, so those far returns can't be the object — they are the WALL BEHIND
+    // that bleeds in when the robot moves (RGB mask ↔ depth skew: silhouette-edge pixels sample the
+    // background) or a transparent object's see-through dropout. Coherent, so the radius filter can't
+    // catch it. Sized to the deepest expected object (a table's along-ray extent), a physical prior, not
+    // a tuning cutoff (see no-threshold-patches). <= 0 disables. Applied in graph_publisher::upload_masks.
+    float       MASK_DEPTH_GATE_BAND_M           = 1.50f;
     // Per-mask radius outlier removal: drop points with fewer than MIN_NEIGHBORS
     // others within RADIUS_M. Trims the sparse silhouette-edge "tail" the depth gate
     // leaves behind, while the dense object body survives. <= 0 disables.
@@ -137,6 +140,12 @@ struct VoxelizerParams
     // over-trusted). See common/depth_projection.
     bool        RICOH_MASK_DEPTH           = false;   // Ricoh.mask_depth
     bool        RICOH_MASK_DEPTH_HELIOS_ONLY = true;  // Ricoh.mask_depth_helios_only — helios (co-located) only, exclude bpearl
+    // Ricoh.mask_fg_band_m — FOREGROUND depth band (m) for the 360 mask depth-fill. Lidar hits inside a
+    // detection's silhouette are anchored on the NEAREST surface (the object facing the ricoh, which
+    // occludes the floor behind it); returns farther than this band are the occluded floor / under-object
+    // floor and are dropped. It's a physical object-depth-extent prior (~a table's along-ray depth), not a
+    // tuning cutoff — flagged per [[no-threshold-patches]]. Larger = admits deeper objects (+ more floor).
+    float       RICOH_MASK_FG_BAND_M       = 0.60f;   // Ricoh.mask_fg_band_m
     // Ricoh.azimuth_tune_deg — LIVE azimuth fine-tune in DEGREES, applied as an extra yaw on room_T_ricoh
     // on top of the graph's cam_equirect_* intrinsics. Affects BOTH the projection overlay and the
     // detection→bearing path (one transform). Dial out the last few degrees of residual against the
