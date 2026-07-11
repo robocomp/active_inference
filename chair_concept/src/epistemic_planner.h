@@ -10,7 +10,7 @@
  * where d_view is chosen to keep the selected face inside a conservative
  * horizontal camera field-of-view while staying close enough to orbit the chair.
  *
- * Reference: TABLE_CONCEPT.md §8.
+ * Reference: ../table_concept/TABLE.md §10.
  */
 
 #pragma once

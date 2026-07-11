@@ -125,6 +125,22 @@ std::string_view TableAffordance::state_name(State s)
 
 // ─── Private helpers ─────────────────────────────────────────────────────────
 
+// Build the object-relative viewpoint constraint (the authoritative "where to look") from a proposal:
+// all four table faces in object frame + their adequacy-bounded gains + the stand-off band + framing +
+// Σ*. The controller resolves this into a collision-free reachable pose. Face order = [+x,-x,+y,-y].
+static rc::affordance::ViewpointConstraint make_viewpoint(const EpistemicProposal& prop)
+{
+    rc::affordance::ViewpointConstraint v;
+    v.object_relative = true;
+    v.faces        = {"+x", "-x", "+y", "-y"};
+    v.face_gains   = {prop.face_gains[0], prop.face_gains[1], prop.face_gains[2], prop.face_gains[3]};
+    v.standoff_min_m = prop.standoff_min_m;
+    v.standoff_max_m = prop.standoff_max_m;
+    v.framing_fill   = prop.framing_fill;
+    v.sigma_star.assign(prop.sigma_star.begin(), prop.sigma_star.end());
+    return v;
+}
+
 void TableAffordance::create_node(const EpistemicProposal& prop)
 {
     const std::string aff_name = "aff_" + table_node_name_;
@@ -145,6 +161,8 @@ void TableAffordance::create_node(const EpistemicProposal& prop)
     // lock-on bound to the table's projected-ROI / detection feedback attributes + completion
     // predicate). Uses the shared type-level default; producers can override per node here.
     rc::affordance::write_contract(*G_, aff_node, rc::affordance::default_contract_for("table"));
+    // Object-relative viewpoint constraint (the authoritative epistemic target the controller resolves).
+    rc::affordance::write_viewpoint(*G_, aff_node, make_viewpoint(prop));
 
     const auto id_opt = G_->insert_node(aff_node);
     if (!id_opt.has_value())
@@ -200,6 +218,9 @@ void TableAffordance::update_node(const EpistemicProposal& prop)
     G_->add_or_modify_attrib_local<epistemic_target_y_m_att>    (n, prop.epistemic_target_y_m);
     G_->add_or_modify_attrib_local<epistemic_target_yaw_rad_att>(n, prop.epistemic_target_yaw_rad);
     G_->add_or_modify_attrib_local<epistemic_gain_att>          (n, prop.epistemic_gain);
+    // Refresh the object-relative viewpoint constraint alongside the hint pose (offered/pending path only;
+    // like the pose, it is held stable while the controller owns an executing claim).
+    rc::affordance::write_viewpoint(*G_, n, make_viewpoint(prop));
 
     if (!pending || active)
     {

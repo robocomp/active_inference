@@ -35,7 +35,7 @@ struct TableConfig
     // On-surface membership for the candidate/residual split in TableFitter::observe.
     float sdf_threshold_for_storage = 0.08f;
 
-    // ── AI2 belief (TABLE_FIT_AI2.md) — full-covariance recursive filter ──────────────────────────
+    // ── AI2 belief (TABLE.md) — full-covariance recursive filter ──────────────────────────
     float ai2_sigma_base_m    = 0.03f;   // base on-surface obs noise std (m); R = σ² (+ motion_var + …)
     float ai2_clutter_frac    = 0.10f;   // ε: prior weight of the uniform clutter mixture component
     float ai2_clutter_scale_m = 0.12f;   // a point further than ~this from every surface is likely clutter

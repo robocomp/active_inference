@@ -45,6 +45,7 @@ bool ResidualLidarIngestor::pump()
         return false;
 
     sweep_room_  = std::move(sweep->points);
+    plane_id_    = std::move(sweep->plane_id);   // per-point device tag (helios=0, bpearl=1) for per-device filtering
     origin_room_ = sweep->origin;
     last_ts_     = sweep->stamp_ms;
     return true;

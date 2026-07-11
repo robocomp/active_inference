@@ -26,7 +26,7 @@
  * the fitted pose+geometry back to DSR (RT edge + dims + mesh + covariance), and emit epistemic action
  * proposals when a table stays under-observed. Also feeds the standalone belief dashboard + evidence monitor
  * windows. The fit core is rc::TableFitter, perception rc::MaskIngestor, DSR I/O rc::TableSceneGraph. See
- * TABLE_FIT_AI2.md for the belief/fit core.
+ * TABLE.md for the belief/fit core.
  */
 
 #include "specificworker.h"

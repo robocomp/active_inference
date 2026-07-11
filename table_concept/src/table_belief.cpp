@@ -1,5 +1,5 @@
 /*
- * table_belief.cpp  —  AI2 table belief implementation (see TABLE_FIT_AI2.md)
+ * table_belief.cpp  —  AI2 table belief implementation (see TABLE.md)
  *
  * The table-specific model hooks behind TableBelief: the compound SDF (top slab + 4 derived legs), the soft
  * mixture responsibilities + true (clutter-inclusive) free energy, the finite-difference Jacobian, the extra
@@ -386,6 +386,8 @@ void TableBelief::accumulate_extra(const TableBeliefState& s, const TableFrame& 
 void TableBelief::apply_footprint_moment(const TableFrame& frame)
 {
     dbg_moment_pts_ = 0;
+    dbg_moment_aniso_ = 0.0f; dbg_moment_r_yaw_ = 0.0f; dbg_moment_dyaw_ = 0.0f;   // DIAGNOSTIC: reset per cycle
+    dbg_moment_ext_major_ = 0.0f; dbg_moment_ext_minor_ = 0.0f;
     if (params_.footprint_moment_precision <= 0.0f or frame.points.empty()) return;
     const float z_hi = state_.H + 3.0f * params_.sigma_base_m;
     const float z_lo = state_.H - params_.top_thickness - 3.0f * params_.sigma_base_m;   // tabletop band (excl. legs)
@@ -417,6 +419,11 @@ void TableBelief::apply_footprint_moment(const TableFrame& frame)
     float r_w   = r_base;                                             // measurement variance (m²)
     float r_h   = r_base;
     const float r_yaw = r_base / std::max(aniso * aniso, 1e-3f);      // rad²; near-square → huge → no yaw pull
+    // DIAGNOSTIC (rogue-mask yaw attribution): record this frame's footprint anisotropy, the yaw variance the
+    // moment actually used, the yaw move it requested, and the observed extents. Read by the fitter's [yaw-jump].
+    dbg_moment_aniso_ = aniso; dbg_moment_r_yaw_ = r_yaw;
+    dbg_moment_dyaw_  = std::remainder(myaw - state_.yaw, 2.0f * static_cast<float>(M_PI));
+    dbg_moment_ext_major_ = mom.ext_major; dbg_moment_ext_minor_ = mom.ext_minor;
 
     // A mask is only ever a LOWER BOUND on the table extent. Occlusion, foreshortening (a side view of the
     // tabletop, whose far edge is grazing/self-occluded), FoV clipping and YOLO under-segmentation can all make
@@ -453,7 +460,7 @@ void TableBelief::apply_footprint_moment(const TableFrame& frame)
 // ─── Canonical symmetry fold ─────────────────────────────────────────────────────────────────────
 
 // Fold the state onto the box-symmetry representative CLOSEST to the predicted mean (CONTINUITY fold,
-// replaces the w≥h sign fold; TABLE_FIT_AI2.md §5).
+// replaces the w≥h sign fold; TABLE.md §5).
 //
 // The box SDF is invariant under the exact symmetry group {e, r_π, swap∘r_{π/2}, swap∘r_{−π/2}} — four
 // representations of the SAME table. The old fold chose by sign(w−h), a NOISE process when w≈h, which

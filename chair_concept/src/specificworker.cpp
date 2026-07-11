@@ -20,7 +20,7 @@
 /**
  * SpecificWorker — chair_concept agent
  *
- * Implements the Active Inference loop described in TABLE_CONCEPT.md §11.2:
+ * Implements the Active Inference loop described in ../CONCEPT_AGENT_RECIPE.md:
  *
  *  ① Read sensing attributes from DSR chair nodes
  *  ② Update the historical sample queue with fresh near-surface candidates

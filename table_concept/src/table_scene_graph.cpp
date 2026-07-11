@@ -192,7 +192,7 @@ void TableSceneGraph::write_rt_covariance(std::uint64_t room_id, TableInstance& 
     // MARGINAL yaw variance: within-mode Σ(5,5) + discrete-mode entropy p(1−p)(π/2)². A still-ambiguous
     // near-square table publishes an honest ~45° (not the overconfident ~1° within-mode width) so the
     // controller's uncertainty governor + epistemic planner know yaw is unresolved. Collapses as evidence
-    // resolves the mode. See TABLE_FIT_AI2.md.
+    // resolves the mode. See TABLE.md.
     float vyaw = scale * inst.ai2_belief.yaw_marginal_var();
     // Localization/chain covariance J·Σ_chain·Jᵀ (computed in the fitter) — the table's room-frame
     // position is conditional on the robot pose, so its published uncertainty must include it.

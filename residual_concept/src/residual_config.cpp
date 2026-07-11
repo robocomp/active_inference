@@ -62,6 +62,7 @@ ResidualConfig load_residual_config(const ConfigLoader& cfg)
     out.cluster.min_top_z_m           = getf("Clusterer.MinTopZM",           0.30f);
     out.cluster.robot_radius_m   = getf("Clusterer.RobotRadiusM",    0.40f);
     out.cluster.wall_margin_m    = getf("Clusterer.WallMarginM",     0.30f);
+    out.cluster.bpearl_floor_z0  = getf("Clusterer.BpearlFloorZ0",   0.12f);
     out.cluster.explain_margin_m = getf("Clusterer.ExplainMarginM",  0.04f);
     out.cluster.explain_sensor_sigma_m = getf("Clusterer.ExplainSensorSigmaM", 0.03f);
     out.cluster.explain_fit_margin_m   = getf("Clusterer.ExplainFitMarginM",   0.10f);  // under-fit slack (< clearance)

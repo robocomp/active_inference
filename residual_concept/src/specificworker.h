@@ -93,6 +93,9 @@ private:
     // Ego-motion evidence trust (0..1): 1 when still, <1 while the robot moves (pose jitter + blur). Scales the
     // whole sweep's grid evidence so the stable accumulated field dominates during motion (motion-stability).
     float compute_ego_reliability() const;
+    // LiDAR sweep with the LOW bpearl lidar's floor-grazing returns removed (device-specific floor band), so
+    // bpearl keeps its low-obstacle value without ringing the robot with phantom floor. Buffered in lidar_filtered_.
+    const std::vector<Eigen::Vector3f>& filtered_lidar_sweep();
     // DIAGNOSTIC: append per-sweep grid dynamics to etc/grid_diag.csv (hits/misses/latched/released + the
     // "hit_then_cleared" smoking-gun for grazing beams erasing a horizontal surface they graze). Optionally
     // probes a rectangular region [GridProbe*] (e.g. a tabletop) reporting occupied/hit cells inside it.
@@ -148,6 +151,7 @@ private:
     // publishes; re-initialised if the grid extent changes. Display/planner-facing only; not the safety latch.
     std::vector<float> pub_prob_ema_, pub_var_ema_;
     float ego_reliability_ = 1.0f;   // this cycle's ego-motion evidence trust (compute_ego_reliability())
+    std::vector<Eigen::Vector3f> lidar_filtered_;   // reusable buffer: sweep with bpearl floor grazing removed
 
     // PHASE-0 REBUILD: the occupancy-grid safety layer (runs live as a diagnostic first, then becomes the
     // single source of obstacle truth once verified stable).

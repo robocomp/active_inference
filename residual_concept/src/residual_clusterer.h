@@ -52,8 +52,13 @@ struct ResidualClusterParams
     // grows (beam pitch/noise × distance) + the ~3 cm floor-datum offset, so a flat cutoff can't separate a
     // far floor return (z≈0.22 @6 m) from a close low obstacle. Reject p if z < floor_z0 + floor_slope·range
     // (range = horizontal distance from the sensor). Mirrors the codebase's range-grows-covariance pattern.
-    float floor_z0         = 0.06f;   // floor band at the sensor
+    float floor_z0         = 0.06f;   // floor band at the sensor (tuned for the HIGH helios lidar)
     float floor_slope      = 0.04f;   // + this per metre of horizontal range (≈beam grazing at distance)
+    // The LOW bpearl lidar (~0.1 m) grazes the floor at shallow angles even near the robot, so its floor-height
+    // uncertainty is larger than helios's → its returns need a HIGHER floor band or they read as phantom floor
+    // obstacles ringing the robot. bpearl points below this band are dropped as floor; above it (real low
+    // obstacles helios misses) are kept. Cost: bpearl no longer flags obstacles shorter than this near the robot.
+    float bpearl_floor_z0  = 0.12f;   // floor band for bpearl (device-specific; > floor_z0)
     float ceil_z           = 1.80f;   // drop returns above this (ceiling / overhead)
     float robot_radius_m   = 0.40f;   // drop returns within this of the robot centre (self-returns)
     float wall_margin_m    = 0.30f;   // drop returns within this of the room delimiting polygon boundary

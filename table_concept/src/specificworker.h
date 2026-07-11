@@ -25,7 +25,7 @@
  * dims + mesh + covariance) and emit epistemic proposals when a table stays under-observed. Ricoh-360
  * detections are bearing-only PERIPHERAL ATTENTION (they never birth or fit). Also owns the two standalone
  * top-level windows (belief dashboard + evidence monitor). The fit core is rc::TableFitter, perception
- * rc::MaskIngestor, DSR I/O rc::TableSceneGraph. See TABLE_FIT_AI2.md for the belief/fit core.
+ * rc::MaskIngestor, DSR I/O rc::TableSceneGraph. See TABLE.md for the belief/fit core.
  */
 
 #ifndef SPECIFICWORKER_H

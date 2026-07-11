@@ -1,7 +1,7 @@
 /*
  * table_model.h  —  geometry / state container for a table instance.
  *
- * The recursive belief update lives in table_belief.* (the AI2 full-covariance filter, TABLE_FIT_AI2.md);
+ * The recursive belief update lives in table_belief.* (the AI2 full-covariance filter, TABLE.md);
  * this class is only the state holder + the compound SDF (box top + 4 corner legs = min(SDF_top, min_k
  * SDF_leg_k)), used to split a mask's support points into on-surface (candidate) vs off-surface (residual)
  * sets in TableFitter::observe and to render the mesh in TableSceneGraph. State θ = [cx, cy, w, h,

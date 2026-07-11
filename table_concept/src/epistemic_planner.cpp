@@ -88,7 +88,7 @@ EpistemicProposal EpistemicPlanner::compute(const TableBelief& belief, float lat
     { return std::clamp(half_span / std::tan(kEffectiveHorizontalFovRad * 0.5f) + kStandOffSafetyMarginM,
                         kMinimumStandOffM, max_stand_off); };
 
-    // ── Adequacy gap (active-perception step 1, TABLE_FIT_AI2.md) ─────────────────────────────────
+    // ── Adequacy gap (active-perception step 1, TABLE.md) ─────────────────────────────────
     // ★PLACEHOLDER target precision Σ* — the posterior covariance at which the table is "adequately
     // resolved" for its downstream consumer. It should be the physical manipulation tolerance (gripper
     // clearance / placement margin / approach-cone half-angle) pushed through ∂success/∂θ, and ultimately
@@ -161,6 +161,16 @@ EpistemicProposal EpistemicPlanner::compute(const TableBelief& belief, float lat
     const float yaw_to_face = std::atan2(s.cy - vy, s.cx - vx);
 
     EpistemicProposal proposal{vx, vy, yaw_to_face, best_gain, true};
+    // Object-relative viewpoint constraint (authoritative): publish ALL four faces with their adequacy-
+    // bounded gains + the sensor-model stand-off band + framing + Σ*, so the controller resolves a
+    // collision-free reachable face itself (a blocked argmax face falls back to the next reachable one).
+    // Face order matches the [+x,-x,+y,-y] sampling order above.
+    constexpr float kFramingFill = 0.45f;   // FoV framing sweet spot (matches the table servo contract's advance target)
+    proposal.face_gains    = face_gain;
+    proposal.standoff_min_m = kMinimumStandOffM;
+    proposal.standoff_max_m = max_stand_off;
+    proposal.framing_fill   = kFramingFill;
+    proposal.sigma_star     = kTargetStd;
     if (!proposal.is_finite())
         return {};
     return proposal;

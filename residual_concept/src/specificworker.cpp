@@ -397,7 +397,8 @@ void SpecificWorker::compute()
         if (grid_ready_)   // integrate now (needs no explainers); read-out + publish happen after explainers below
         {
             ego_reliability_ = compute_ego_reliability();   // <1 while moving → down-weight the whole sweep
-            grid_.integrate_sweep(lidar_ingestor_->origin_room(), lidar_ingestor_->sweep_room(),
+            const auto& lidar_sweep = filtered_lidar_sweep();   // bpearl floor grazing removed (per-device band)
+            grid_.integrate_sweep(lidar_ingestor_->origin_room(), lidar_sweep,
                                   /*begin_cycle=*/true, ego_reliability_);            // accumulate LiDAR
             integrate_zed_into_grid();   // accumulate dense ZED FoV as a second sensor (fills grazed tabletops)
             grid_.commit_cycle();        // ONE log-odds update per cell (hit precedence) — the stability fix
@@ -685,6 +686,33 @@ void SpecificWorker::integrate_zed_into_grid()
         std::println("[zed-grid] fov={} → {} after infra-subtract (floor/ceiling/wall removed)", before, pts.size());
     if (pts.empty()) return;
     grid_.integrate_sweep(cam_origin, pts, /*begin_cycle=*/false, ego_reliability_);   // same cycle, same ego trust
+}
+
+const std::vector<Eigen::Vector3f>& SpecificWorker::filtered_lidar_sweep()
+{
+    // Drop the LOW bpearl lidar's FLOOR-GRAZING returns (device-specific higher floor band) while keeping helios
+    // and bpearl's real (>band) low-obstacle returns — so bpearl still catches short obstacles helios misses,
+    // without ringing the robot with phantom floor cells. plane_id: helios=0, bpearl=1 (empty ⇒ fused → keep all).
+    const auto& pts = lidar_ingestor_->sweep_room();
+    const auto& pid = lidar_ingestor_->plane_id();
+    if (pid.size() != pts.size()) return pts;                    // no per-device tag (fused lidar3D) → pass through
+    const Eigen::Vector3f o = lidar_ingestor_->origin_room();
+    const float bz0 = cfg_.cluster.bpearl_floor_z0, slope = cfg_.cluster.floor_slope;
+    lidar_filtered_.clear(); lidar_filtered_.reserve(pts.size());
+    long dropped = 0;
+    for (std::size_t i = 0; i < pts.size(); ++i)
+    {
+        if (pid[i] == 1)                                         // bpearl → apply its higher floor band
+        {
+            const float range = std::hypot(pts[i].x() - o.x(), pts[i].y() - o.y());
+            if (pts[i].z() < bz0 + slope * range) { ++dropped; continue; }
+        }
+        lidar_filtered_.push_back(pts[i]);
+    }
+    static int bc = 0;
+    if ((bc++ % 40) == 0)
+        std::println("[bpearl-floor] dropped {} grazing floor pts (band z0={:.2f})", dropped, bz0);
+    return lidar_filtered_;
 }
 
 float SpecificWorker::compute_ego_reliability() const

@@ -45,6 +45,7 @@ public:
     bool pump();
 
     const std::vector<Eigen::Vector3f>& sweep_room()  const { return sweep_room_; }
+    const std::vector<std::uint8_t>&    plane_id()    const { return plane_id_; }   // per-point device: helios=0, bpearl=1
     const Eigen::Vector3f&              origin_room() const { return origin_room_; }
     std::uint64_t                       last_stamp_ms() const { return static_cast<std::uint64_t>(last_ts_); }
 
@@ -58,6 +59,7 @@ private:
     std::unique_ptr<rc::media::LidarPlaneReader> reader_;
 
     std::vector<Eigen::Vector3f> sweep_room_;                    // latest sweep, ROOM frame
+    std::vector<std::uint8_t>    plane_id_;                      // per-point source device (helios=0, bpearl=1)
     Eigen::Vector3f              origin_room_ = Eigen::Vector3f::Zero();  // sensor centre, ROOM frame
     std::int64_t                 last_ts_ = 0;                   // newest ingested source stamp (exposed)
 };

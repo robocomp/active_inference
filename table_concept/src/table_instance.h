@@ -18,7 +18,7 @@
 #include <Eigen/Dense>
 
 #include "table_model.h"        // TableModel / TableState
-#include "table_belief.h"       // AI2 full-covariance belief (TABLE_FIT_AI2.md)
+#include "table_belief.h"       // AI2 full-covariance belief (TABLE.md)
 #include "table_affordance.h"   // TableAffordance
 #include "../../common/existence_belief/existence_belief.h"   // per-instance existence log-odds (removal)
 
@@ -35,7 +35,7 @@ struct TableInstance
     // on-surface (candidate) vs off-surface (residual) sets.
     TableModel  model;
 
-    // ── AI2 belief (TABLE_FIT_AI2.md) ─────────────────────────────────────────────────────────────
+    // ── AI2 belief (TABLE.md) ─────────────────────────────────────────────────────────────
     // Full-covariance recursive filter over θ=[cx,cy,H,w,h,yaw]. Lazily initialised from the model state on
     // the first cycle; its result is written back into `model` so downstream publish/viewer code is unchanged.
     TableBelief ai2_belief;
@@ -146,6 +146,18 @@ struct TableInstance
     float fe_baseline = -1.0f;    // <0 = uninitialised
     float fe_surprise = 0.0f;
     bool  dbg_gated   = false;    // truncation-gated (predict-only, no geometric update) this frame
+
+    // ── Rogue-mask yaw diagnostics (instrumentation; NO effect on the fit) ─────────────────────────
+    // Captured per fresh cycle to CATCH the abrupt-rotation frames (robot turning / entering-leaving FoV /
+    // passing by, where an in-frame-but-partial mask snaps yaw). yaw at cycle entry + the per-channel yaw split,
+    // plus the two view-geometry covariates the truncation gate does NOT measure: obliquity (how grazing the
+    // tabletop view is → foreshortened footprint) and completeness (observed vs believed footprint area).
+    float dbg_yaw_pre       = 0.0f;   // belief yaw at cycle start, before the update (rad)
+    float dbg_obliquity_cos = 1.0f;   // |cos(incidence)| of camera→table ray vs tabletop normal +z (1=top-down, →0 grazing)
+    float dbg_completeness  = 1.0f;   // observed footprint area / believed w·h (<1 = partial/foreshortened mask)
+    float dbg_dyaw_points   = 0.0f;   // this cycle's yaw move attributed to the per-point GN channel (rad)
+    float dbg_dyaw_moment   = 0.0f;   // ...to the footprint-moment channel (rad)
+    float dbg_dyaw_flip     = 0.0f;   // ...to the resolve_orientation 90° flip (rad)
     // Existence channel readouts from the last update_existence_and_remove (per-modality occ/free + counts).
     // *_free is the RAW sensor count; *_free_eff is what actually drove the log-odds after the range/occlusion
     // absence-confidence scaling AND the observed-guard (so raw→eff shows how much the absence was degraded).

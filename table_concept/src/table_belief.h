@@ -1,5 +1,5 @@
 /*
- * table_belief.h  —  AI2 table belief (see TABLE_FIT_AI2.md)
+ * table_belief.h  —  AI2 table belief (see TABLE.md)
  *
  * A from-scratch, active-inference-faithful replacement for the accreted fit/belief path. ONE compound
  * generative model {top slab + 4 derived legs + clutter} with SOFT per-point responsibilities (a mixture,
@@ -159,7 +159,7 @@ public:
     void set_state(const TableBeliefState& s) { state_ = s; }
     void set_params(const TableBeliefParams& p) { params_ = p; }
 
-    // ── Discrete orientation mode (near-square yaw disambiguation, TABLE_FIT_AI2.md) ──────────────
+    // ── Discrete orientation mode (near-square yaw disambiguation, TABLE.md) ──────────────
     // The 6×6 Σ carries only the WITHIN-mode yaw width (~1°). For a near-square footprint the two
     // classes [(w,h,ψ)] and [(h,w,ψ)] (a w↔h swap ≡ a 90° rotation) have near-equal data energy, an
     // ambiguity a unimodal Gaussian cannot hold — so the per-frame MAP used to SNAP 90° between them.
@@ -185,10 +185,16 @@ public:
     // channel with its own (range-robust) covariance — the DOF (yaw/extent) the flat-top per-point mixture
     // structurally cannot supply (no-op unless footprint_moment_precision > 0).
     float update(const TableFrame& frame)
-    { const float e = ai::update<N>(*this, state_, Sigma_, prior_mean_, frame); apply_footprint_moment(frame); return e; }
+    {
+        const float e = ai::update<N>(*this, state_, Sigma_, prior_mean_, frame);
+        dbg_yaw_after_points_ = state_.yaw;   // DIAGNOSTIC: yaw after the per-point GN-MAP, before the moment channel
+        apply_footprint_moment(frame);
+        dbg_yaw_after_moment_ = state_.yaw;   // DIAGNOSTIC: yaw after the footprint-moment fusion
+        return e;
+    }
     void  predict()                       { ai::predict<N>(*this, Sigma_, state_, prior_mean_); }
     // Age the belief with NO measurement: Σ ← FΣFᵀ + Q·(dt/dt_nominal), mean held. The fitter calls this when
-    // a table's mask stream is stale/dead so Σ grows on the agent's clock instead of freezing (see TABLE_FIT_AI2).
+    // a table's mask stream is stale/dead so Σ grows on the agent's clock instead of freezing (see TABLE).
     void  inflate_for_age(float dt_s, float dt_nominal_s)
     { ai::inflate_for_age<N>(*this, Sigma_, state_, prior_mean_, dt_s, dt_nominal_s); }
     Eigen::Matrix<float, 6, 6> predicted_information(const std::vector<Eigen::Vector3f>& pts, float R) const
@@ -230,6 +236,17 @@ public:
     // Top-band point count the footprint-moment factor used last frame (0 when the factor is OFF or starved).
     int last_moment_pts()    const { return dbg_moment_pts_; }
 
+    // DIAGNOSTIC (rogue-mask yaw attribution): yaw immediately after the per-point pass and after the moment
+    // fusion, plus the moment channel's last anisotropy / applied yaw-variance / requested yaw move / observed
+    // footprint extents — so the fitter can attribute a per-cycle yaw jump to a specific channel. No fit effect.
+    float dbg_yaw_after_points() const { return dbg_yaw_after_points_; }
+    float dbg_yaw_after_moment() const { return dbg_yaw_after_moment_; }
+    float dbg_moment_aniso()     const { return dbg_moment_aniso_; }
+    float dbg_moment_r_yaw()     const { return dbg_moment_r_yaw_; }
+    float dbg_moment_dyaw()      const { return dbg_moment_dyaw_; }
+    float dbg_moment_ext_major() const { return dbg_moment_ext_major_; }
+    float dbg_moment_ext_minor() const { return dbg_moment_ext_minor_; }
+
     // 2D footprint second-moment of the points whose z falls in [z_lo, z_hi] (the tabletop band). Shared by
     // the per-frame moment factor (accumulate_extra) and the birth seed (the fitter's lazy init) so both use
     // identical math. Pure geometry, no state — the trap-breaking global statistic.
@@ -255,6 +272,15 @@ private:
     mutable int                dbg_vacate_beams_ = 0;   // free-space beams that fired a vacate pull (last accumulate)
     mutable int                dbg_coverage_pts_ = 0;   // on-plane points reclaimed by coverage (last accumulate)
     mutable int                dbg_moment_pts_ = 0;      // top-band points used by the footprint-moment factor
+    // DIAGNOSTIC only (rogue-mask yaw attribution) — written by update()/apply_footprint_moment(), never read
+    // by the fit. Let the fitter split a per-cycle yaw jump across the per-point / moment / flip channels.
+    float                      dbg_yaw_after_points_ = 0.0f;  // yaw after the per-point GN-MAP pass (rad)
+    float                      dbg_yaw_after_moment_ = 0.0f;  // yaw after the footprint-moment fusion (rad)
+    float                      dbg_moment_aniso_     = 0.0f;  // last footprint anisotropy (major−minor)/(major+minor)
+    float                      dbg_moment_r_yaw_     = 0.0f;  // last moment yaw measurement variance used (rad²)
+    float                      dbg_moment_dyaw_      = 0.0f;  // last moment requested yaw move myaw−yaw (rad)
+    float                      dbg_moment_ext_major_ = 0.0f;  // last observed footprint major extent (m)
+    float                      dbg_moment_ext_minor_ = 0.0f;  // last observed footprint minor extent (m)
 };
 
 }  // namespace rc

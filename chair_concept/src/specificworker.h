@@ -25,7 +25,7 @@
  * binned historical sample queue, and emits epistemic action proposals to
  * mission-controller when chair surfaces remain under-observed.
  *
- * See TABLE_CONCEPT.md for the full design specification.
+ * See ../CONCEPT_AGENT_RECIPE.md for the full design specification.
  */
 
 #ifndef SPECIFICWORKER_H

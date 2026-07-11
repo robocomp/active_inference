@@ -381,6 +381,22 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
     // Computed once here (before the update) and reused for the published RT cov below.
     compute_chain_cov(inst);
 
+    // ── Rogue-mask yaw instrumentation (NO effect on the fit) ──────────────────────────────────────
+    // Snapshot yaw at cycle entry and compute OBLIQUITY — the grazing-view covariate the truncation gate does
+    // not measure. A near-horizontal camera→tabletop ray foreshortens the top face, so its 2D footprint (hence
+    // yaw/extent) is biased even with a full in-frame mask. |cos(incidence)| = |ray·ẑ|/|ray|: 1 top-down, →0
+    // grazing. Completeness + the per-channel yaw split are filled after the update. See the [yaw-jump] log.
+    inst.dbg_yaw_pre = inst.ai2_belief.state().yaw;
+    inst.dbg_dyaw_points = 0.0f; inst.dbg_dyaw_moment = 0.0f; inst.dbg_dyaw_flip = 0.0f; inst.dbg_completeness = 1.0f;
+    if (const auto rTz = projection_->room_T_zed_matrix(inst.last_mask_timestamp_ms); rTz)
+    {
+        const Eigen::Vector3d cam = rTz->block<3, 1>(0, 3);   // camera origin in the room frame
+        const auto& s0b = inst.ai2_belief.state();
+        const Eigen::Vector3d ray(s0b.cx - cam.x(), s0b.cy - cam.y(), s0b.H - cam.z());   // camera→tabletop centre
+        const double rn = ray.norm();
+        inst.dbg_obliquity_cos = (rn > 1e-6) ? static_cast<float>(std::abs(ray.z()) / rn) : 1.0f;
+    }
+
     float energy = inst.dbg_energy;   // default = HOLD last FE (a gated / rejected cycle took no measurement)
     if (gated)
         inst.ai2_belief.predict();   // Σ inflates, mean unchanged
@@ -463,7 +479,7 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
         // Near-square yaw disambiguation: sequential Bayesian comparison of the two orientation modes
         // (current vs the w↔h swap ≡ 90° rotation). Owns the GENUINE mode flip so the per-frame MAP no
         // longer SNAPS 90° on extent noise; the reported yaw uncertainty (yaw_marginal_var) stays honest
-        // until an orbit resolves it. See TABLE_FIT_AI2.md.
+        // until an orbit resolves it. See TABLE.md.
         // Ego-motion reliability: a moving frame's mask must barely vote on the discrete w↔h mode (split/degraded
         // masks during motion were flipping it). Continuous down-weight, not a gate. Static (dotd≈0) → weight 1.
         const float mref = std::max(1e-3f, cfg_.orientation_motion_ref);
@@ -472,6 +488,35 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
         if (inst.ai2_belief.resolve_orientation(frame.points, R, mode_evidence_weight) and should_log(inst))
             std::print("[{}] orientation mode FLIP (w↔h) | flip_ev={:.3f} p_alt={:.2f}\n",
                        inst.node_name, inst.ai2_belief.flip_evidence(), inst.ai2_belief.mode_posterior());
+
+        // ── Rogue-mask yaw attribution (instrumentation) ──────────────────────────────────────────
+        // Split this cycle's yaw move across the three channels (per-point GN / footprint-moment / 90° flip)
+        // and, on a jump beyond kYawJumpLogRad (LOG-ONLY diagnostic trigger — NOT a control gate), dump the
+        // covariate vector so we can see WHICH frame geometry drove it: obliquity + completeness (the gate's
+        // blind spots) alongside anisotropy / motion / trunc / range. This is how we CATCH the rogue frames.
+        {
+            const auto  wrap    = [](float a) { return std::remainder(a, 2.0f * static_cast<float>(M_PI)); };
+            const auto& st      = inst.ai2_belief.state();
+            const float yaw_now = st.yaw;
+            const float y_pts   = inst.ai2_belief.dbg_yaw_after_points();
+            const float y_mom   = inst.ai2_belief.dbg_yaw_after_moment();
+            inst.dbg_dyaw_points = wrap(y_pts - inst.dbg_yaw_pre);
+            inst.dbg_dyaw_moment = wrap(y_mom - y_pts);
+            inst.dbg_dyaw_flip   = wrap(yaw_now - y_mom);
+            const float d_total  = wrap(yaw_now - inst.dbg_yaw_pre);
+            const float em = inst.ai2_belief.dbg_moment_ext_major(), en = inst.ai2_belief.dbg_moment_ext_minor();
+            inst.dbg_completeness = (st.w * st.h > 1e-4f and em > 0.0f) ? (em * en) / (st.w * st.h) : 1.0f;
+            constexpr float kYawJumpLogRad = 0.087f;   // ≈5°: diagnostic PRINT trigger only (no fit effect)
+            constexpr float kRad2Deg       = 57.29578f;
+            if (std::abs(d_total) > kYawJumpLogRad)
+                std::print("[yaw-jump] {} dpsi={:.1f}deg (pts={:.1f} mom={:.1f} flip={:.1f}) | oblq_cos={:.2f} compl={:.2f} "
+                           "aniso={:.2f} r_yaw={:.3f} | trunc={:.2f} mvar={:.4f} dotd={:.2f} range={:.2f} npts={}\n",
+                           inst.node_name, d_total * kRad2Deg, inst.dbg_dyaw_points * kRad2Deg,
+                           inst.dbg_dyaw_moment * kRad2Deg, inst.dbg_dyaw_flip * kRad2Deg,
+                           inst.dbg_obliquity_cos, inst.dbg_completeness,
+                           inst.ai2_belief.dbg_moment_aniso(), inst.ai2_belief.dbg_moment_r_yaw(),
+                           inst.last_trunc_frac, inst.last_motion_var, inst.last_motion_dotd, inst.last_range, npts);
+        }
     }
 
     // Write the belief back into the legacy TableState so all downstream publish/viewer/RT code is
@@ -523,7 +568,8 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
         if (not ai2_csv_.is_open()) { cfg_.ai2_csv_path.clear(); return; }
         ai2_csv_ << "cycle,node,npts,gated,energy,fe_baseline,fe_surprise,R,motion_var,depth_var,motion_dotd,trunc_frac,range,"
                  << "cx,cy,H,w,h,yaw,std_cx,std_cy,std_H,std_w,std_h,std_yaw,"
-                 << "std_yaw_within,flip_ev,p_alt,lidar_rays,lidar_raw,lidar_resid_m,lidar_meanz,lidar_topz,lidar_floorz,lidar_cov_ang\n";
+                 << "std_yaw_within,flip_ev,p_alt,lidar_rays,lidar_raw,lidar_resid_m,lidar_meanz,lidar_topz,lidar_floorz,lidar_cov_ang,"
+                 << "dyaw_points,dyaw_moment,dyaw_flip,obliquity_cos,completeness,moment_aniso,moment_r_yaw\n";   // rogue-mask diag
     }
     const auto& s = inst.ai2_belief.state();
     const auto& S = inst.ai2_belief.covariance();
@@ -539,7 +585,10 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
              << sd(5) << ',' << inst.ai2_belief.flip_evidence() << ',' << inst.ai2_belief.mode_posterior() << ','
              << inst.dbg_lidar_rays << ',' << inst.dbg_lidar_raw << ',' << inst.dbg_lidar_resid_m << ','
              << inst.dbg_lidar_meanz_m << ',' << inst.dbg_lidar_topz_m << ',' << inst.dbg_lidar_floorz_m << ','
-             << inst.dbg_lidar_cov_ang << '\n';
+             << inst.dbg_lidar_cov_ang << ','
+             << inst.dbg_dyaw_points << ',' << inst.dbg_dyaw_moment << ',' << inst.dbg_dyaw_flip << ','
+             << inst.dbg_obliquity_cos << ',' << inst.dbg_completeness << ','
+             << inst.ai2_belief.dbg_moment_aniso() << ',' << inst.ai2_belief.dbg_moment_r_yaw() << '\n';   // rogue-mask diag
     ai2_csv_.flush();
 }
 

@@ -90,6 +90,28 @@ struct Contract
     float max_observe_omega = 0.0f;   // rad/s
 };
 
+// ─── object-relative viewpoint constraint (the epistemic "where to look") ───────
+// A producer's NBV planner declares WHAT view it needs to shrink its own uncertainty, expressed in the
+// parent OBJECT's frame — NOT as a world pose, because the producer cannot see global occupancy or
+// reachability (the old model published an absolute (x,y,yaw) with a p_observable=1 stub). It offers a
+// RANKED set of candidate faces, each with its expected posterior-entropy reduction (nats), plus the
+// sensor-model stand-off band and framing target it needs, and its precision demand Σ* (per belief DOF,
+// the adequacy-gap target). The controller looks up the object footprint, generates viewpoints on the
+// requested faces across the stand-off band, tests them against the scene polygons + reachability, and
+// picks the best FEASIBLE face (argmax gain over reachable faces) — so a blocked argmax face falls back
+// to the next-best reachable one. object_relative=false ⇒ absent/legacy ⇒ the controller uses the
+// epistemic_target_* hint pose instead. Carried on the affordance node as aff_view_* attributes.
+struct ViewpointConstraint
+{
+    bool  object_relative = false;          // true ⇒ the fields below are authoritative (object frame)
+    std::vector<std::string> faces;         // candidate faces in object frame, e.g. "+x","-x","+y","-y"
+    std::vector<float>       face_gains;     // parallel to faces: expected ΔH (nats) from that face's view
+    float standoff_min_m = 0.0f;            // sensor-model stand-off band (framing sweet spot ← FoV geometry)
+    float standoff_max_m = 0.0f;
+    float framing_fill   = 0.0f;            // desired projected fill fraction (drive fill→this after arrival)
+    std::vector<float> sigma_star;          // per-DOF precision demand [·]; empty = unset (adequacy-gap target)
+};
+
 // ─── fluent authoring builder ─────────────────────────────────────────────────
 // Ergonomic alternative to filling Contract field-by-field. Produces the SAME Contract, so
 // write_contract/read_contract and the executor are untouched — authoring sugar only.
@@ -331,6 +353,42 @@ inline Contract read_contract(const DSR::Node& node, std::string_view parent_typ
     if (const auto it = attrs.find("aff_on_fail"); it != attrs.end())
         if (auto s = detail::attr_string(it->second)) c.on_fail = onfail_from(*s);
     return c;
+}
+
+// ─── viewpoint constraint ⇄ affordance node (aff_view_* attributes) ────────────
+// Producer stamps the object-relative viewpoint constraint; the controller reads it and resolves a
+// collision-free reachable pose. object_relative is wired as an int flag (0/1) so it rides the same
+// scalar-attr path as the rest. (Caller does G.update_node(node) afterwards, as usual.)
+inline void write_viewpoint(DSR::DSRGraph& G, DSR::Node& node, const ViewpointConstraint& v)
+{
+    G.runtime_checked_add_or_modify_attrib_local(node, "aff_view_object_relative", v.object_relative ? 1 : 0);
+    G.runtime_checked_add_or_modify_attrib_local(node, "aff_view_faces",        detail::join(v.faces, '|'));
+    G.runtime_checked_add_or_modify_attrib_local(node, "aff_view_face_gains",   v.face_gains);
+    G.runtime_checked_add_or_modify_attrib_local(node, "aff_view_standoff_min", v.standoff_min_m);
+    G.runtime_checked_add_or_modify_attrib_local(node, "aff_view_standoff_max", v.standoff_max_m);
+    G.runtime_checked_add_or_modify_attrib_local(node, "aff_view_framing_fill", v.framing_fill);
+    G.runtime_checked_add_or_modify_attrib_local(node, "aff_view_sigma_star",   v.sigma_star);
+}
+
+inline ViewpointConstraint read_viewpoint(const DSR::Node& node)
+{
+    ViewpointConstraint v;
+    const auto& attrs = node.attrs();
+    if (const auto it = attrs.find("aff_view_object_relative"); it != attrs.end())
+        if (auto s = detail::attr_scalar(it->second)) v.object_relative = (*s != 0.0f);
+    if (const auto it = attrs.find("aff_view_faces"); it != attrs.end())
+        if (auto s = detail::attr_string(it->second)) v.faces = detail::split(*s, '|');
+    if (const auto it = attrs.find("aff_view_face_gains"); it != attrs.end())
+        v.face_gains = it->second.float_vec();
+    if (const auto it = attrs.find("aff_view_standoff_min"); it != attrs.end())
+        if (auto s = detail::attr_scalar(it->second)) v.standoff_min_m = *s;
+    if (const auto it = attrs.find("aff_view_standoff_max"); it != attrs.end())
+        if (auto s = detail::attr_scalar(it->second)) v.standoff_max_m = *s;
+    if (const auto it = attrs.find("aff_view_framing_fill"); it != attrs.end())
+        if (auto s = detail::attr_scalar(it->second)) v.framing_fill = *s;
+    if (const auto it = attrs.find("aff_view_sigma_star"); it != attrs.end())
+        v.sigma_star = it->second.float_vec();
+    return v;
 }
 
 // ─── executor: stateless predicate evaluation ─────────────────────────────────

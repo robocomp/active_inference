@@ -94,16 +94,21 @@ MaxSize = 4.0
 RangeNoiseCoeff = 0.01        # extra std (m) per m of range
 EgoMotionLagS = 0.05          # effective registration lag (s): rotation smear = lag·rot_rate·range
 LidarFrameNode = "lidar3D"
-UseBpearl = true               # RE-ENABLED: the floor artefact was a lidar-height calibration issue (now fixed),
-                               # not bpearl. bpearl (low) sees table LEGS → leg-supported volume clusters stable
-                               # (vs helios-only flat-top rings that fragment).
+UseBpearl = true                # ON: bpearl (low) catches short obstacles the HIGH helios misses (safety). Its
+                               # floor-grazing artefact (phantom floor ring round the robot) is removed by a
+                               # device-specific higher floor band — see Clusterer.BpearlFloorZ0.
 AI2CsvPath = "etc/residual_ai2.csv"   # per-cycle belief CSV (state + Σ diag + zed_pts); empty = off
 
 # ── Clusterer (LiDAR residual filter + 3D DBSCAN — the perception front-end) ───
 # Floor/ceiling/walls/robot are treated as SPECIALISTS (explainers), not thresholds: the residual is every
 # return the room+object models don't explain. The floor's tolerance GROWS with range (grazing physics).
 [Clusterer]
-FloorZ0 = 0.06                # floor band at the sensor (m)
+FloorZ0 = 0.06                # floor band at the sensor (m) — tuned for the HIGH helios lidar
+# The LOW bpearl lidar (~0.1 m) grazes the floor at shallow angles even near the robot, so its floor-height
+# uncertainty is larger → without this it rings the robot with phantom floor obstacles. bpearl points below this
+# band (grown by FloorSlope·range) are dropped as floor; above it (real low obstacles helios misses) are kept.
+# Cost: bpearl no longer flags obstacles shorter than ~this near the robot. Watch the [bpearl-floor] log.
+BpearlFloorZ0 = 0.12          # device-specific floor band for bpearl only (> FloorZ0)
 FloorSlope = 0.04             # REVERTED 0.10→0.04: the 0.10 band-aid was for the MIS-CALIBRATED floor (now fixed
                               # upstream by lidar-height recalibration). At 0.10 the band reached 0.38 m @3m / 0.58 @5m
                               # and was EATING the table LEGS at range → only the flat top survived → it fragmented.
