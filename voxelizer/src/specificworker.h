@@ -54,6 +54,7 @@ namespace rc { class VoxelOpenGLViewer; }
 namespace rc { class YoloViewer; }
 namespace rc { class ImagePopupViewer; }
 namespace rc { class RicohYoloWorker; }
+namespace rc { class PerceptionWorker; }
 
 class SpecificWorker : public GenericWorker
 {
@@ -147,9 +148,8 @@ class SpecificWorker : public GenericWorker
 
         std::shared_ptr<DSR::InnerEigenAPI> inner_eigen_api;
 
-        std::unique_ptr<YoloProcessor>     yolo_processor;
-        std::unique_ptr<rc::human_pose::YoloHumanProcessor> yolo_human_processor;
-        std::unique_ptr<rc::semantic::YoloSemanticProcessor> yolo_semantic_processor;
+        std::unique_ptr<rc::PerceptionWorker> zed_worker_;   // ZED inference thread: [seg, pose] stages
+        std::unique_ptr<rc::semantic::YoloSemanticProcessor> yolo_semantic_processor;   // semantic stays on main (for now)
         std::unique_ptr<SceneProcessor>    scene_processor;
         std::unique_ptr<GraphPublisher>    graph_publisher_;   // all DSR semantic_grid exports
         std::unique_ptr<rc::VoxelOpenGLViewer> voxel_viewer_gl;

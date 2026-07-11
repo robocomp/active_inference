@@ -69,6 +69,11 @@ public:
     void latest_detections_and_bearings(std::vector<SegDetection>& dets,
                                         std::vector<BearingDetection>& bearings) const;
 
+    // Draw detections onto a canvas (passthrough to this worker's YoloProcessor). Lets the ricoh popup
+    // compose without the main thread keeping its own (now removed) YoloProcessor just for drawing.
+    cv::Mat compose_detection_canvas(const cv::Mat& rgb, const std::vector<SegDetection>& dets) const
+    { return yolo_.compose_detection_canvas(rgb, dets); }
+
 private:
     void run();
     // Convert panorama-pixel detections to room-frame bearings via the ricoh CameraAPI + room<-ricoh at

@@ -33,6 +33,9 @@
 #include "yolo_viewer.h"
 #include "image_popup_viewer.h"
 #include "ricoh_yolo_worker.h"
+#include "perception_worker.h"
+#include "seg_stage.h"
+#include "pose_stage.h"
 #include <dsr/gui/viewers/graph_viewer/graph_viewer.h>
 #include <QHBoxLayout>
 #include <QPushButton>
@@ -105,6 +108,7 @@ void SpecificWorker::request_shutdown()
     save_window_settings();
     save_external_window_geometry();
     ricoh_yolo_worker_.reset();   // stop+join BEFORE scene_processor is destroyed (holds a raw ptr to it)
+    zed_worker_.reset();          // stop+join the ZED perception worker (self-contained; order not critical)
     scene_processor.reset();
     cleanup_owned_nodes();
 }
@@ -123,8 +127,9 @@ void SpecificWorker::initialize()
     // core-count for negligible latency gain on a 640² tensor. 2 threads is plenty here.
     cv::setNumThreads(2);
 
-    // --- YOLO ---
-    yolo_processor = std::make_unique<YoloProcessor>();
+    // --- ZED perception worker: a set of Stages (seg, pose, …) on ONE thread, off the main compute/render
+    // tick. Main hands it a deep-copied frame each cycle and publishes the self-contained bundle it hands
+    // back (see compute()). Each Stage owns its own ONNX session. ---
     YoloProcessor::Config yolo_config;
     yolo_config.model_path          = params.YOLO_MODEL_PATH;
     yolo_config.conf_thresh         = params.YOLO_CONF_THRESH;
@@ -140,14 +145,15 @@ void SpecificWorker::initialize()
     yolo_config.tray_drop_fraction  = params.YOLO_TRAY_DROP_FRACTION;
     yolo_config.accepted_labels     = params.YOLO_ACCEPTED_LABELS;
     yolo_config.verbose_debug       = verbose_debug_;
-    yolo_processor->configure(yolo_config);
-
-    // --- Human pose (optional second model → BODY_18 skeletons on the 'skeleton' node) ---
-    if (params.HUMAN_POSE_ENABLED)
+    // Assemble the ZED worker's stage list: seg (always), then pose (optional). Each stage owns its ONNX
+    // session. Adding a stage here (e.g. semantic) is the only change needed to run another model on ZED.
     {
-        try
+        std::vector<std::unique_ptr<rc::Stage>> zed_stages;
+        zed_stages.push_back(std::make_unique<rc::SegStage>(yolo_config));
+
+        // --- Human pose (optional second model → BODY_18 skeletons on the 'skeleton' node) ---
+        if (params.HUMAN_POSE_ENABLED)
         {
-            yolo_human_processor = std::make_unique<rc::human_pose::YoloHumanProcessor>();
             rc::human_pose::YoloHumanProcessor::Config pose_config;
             pose_config.model_path    = params.HUMAN_POSE_MODEL_PATH;
             pose_config.conf_thresh   = params.HUMAN_POSE_CONF_THRESH;
@@ -157,13 +163,17 @@ void SpecificWorker::initialize()
             pose_config.use_trt       = params.HUMAN_POSE_USE_TRT;
             pose_config.hold_ms       = params.HUMAN_POSE_HOLD_MS;
             pose_config.verbose_debug = verbose_debug_;
-            yolo_human_processor->configure(pose_config);
+            zed_stages.push_back(std::make_unique<rc::PoseStage>(pose_config, params.HUMAN_POSE_DECIMATION));
         }
-        catch (const std::exception& e)
+
+        zed_worker_ = std::make_unique<rc::PerceptionWorker>();
+        rc::PerceptionWorker::Config wcfg;
+        wcfg.name     = "zed";
+        wcfg.perf_log = params.PERF_LOG;
+        if (!zed_worker_->start(std::move(zed_stages), wcfg))
         {
-            qWarning() << "[HumanPose] disabled — failed to load model" << params.HUMAN_POSE_MODEL_PATH.c_str()
-                       << ":" << e.what();
-            yolo_human_processor.reset();
+            std::println("[Zed] perception worker failed to start (model load?) — disabling");
+            zed_worker_.reset();
         }
     }
 
@@ -380,11 +390,11 @@ void SpecificWorker::on_render_tick()
                                                        ricoh_scene_.poly_x, ricoh_scene_.poly_y, ricoh_scene_.room_height);
                     }
                     const auto dets = ricoh_yolo_worker_->latest_detections();
-                    if (!dets.empty() and yolo_processor)
+                    if (!dets.empty())
                     {
                         cv::Mat pano_rgb;
                         cv::cvtColor(pano, pano_rgb, cv::COLOR_BGR2RGB);
-                        ricoh_viewer_->update_image(yolo_processor->compose_detection_canvas(pano_rgb, dets));
+                        ricoh_viewer_->update_image(ricoh_yolo_worker_->compose_detection_canvas(pano_rgb, dets));
                     }
                     else
                         ricoh_viewer_->update_image(pano);
@@ -515,29 +525,36 @@ void SpecificWorker::compute()
     last_rgb_ts_ = frame->frame_ts_ms;
     stream_mon_.tick("rgb", frame->frame_ts_ms);   // input-rate telemetry / stall detection
 
-    // YOLO runs on the CLEAN frame (no tray black-out). The tray would be segmented as a phantom
-    // object, but rather than corrupting the image we let it be detected and drop any detection that
-    // overlaps the tray region in postprocess (see YoloProcessor::postprocess_yolo_detections).
-    const auto perf_yolo0 = std::chrono::steady_clock::now();
-    const auto detections = yolo_processor
-        ? yolo_processor->detect_segmentation(frame->rgbd.rgb)
-        : std::vector<SegDetection>{};
-    const double yolo_ms = perf_ms(perf_yolo0, std::chrono::steady_clock::now());
-
-    // Human-pose: the MODEL runs every HumanPose.decimation-th cycle. Default 1 (every frame) keeps the
-    // skeleton glued to the moving person; on skipped cycles (decimation>1) the viewer redraws the LAST
-    // cached detection, and detect_poses holds it across brief misses so the overlay never flickers.
-    const int pose_decim = std::max(1, rate_reg_.pose_decimation());   // regulator-adapted (≥ HumanPose.decimation)
-    const bool run_pose = yolo_human_processor and yolo_human_processor->ready()
-                          and (pose_frame_counter_++ % pose_decim == 0);
-    const auto perf_pose0 = std::chrono::steady_clock::now();
-    if (run_pose)
-        yolo_human_processor->detect_poses(frame->rgbd.rgb, frame->frame_ts_ms);   // refresh the cache (~6-7 Hz)
-    const double pose_ms = run_pose ? perf_ms(perf_pose0, std::chrono::steady_clock::now()) : 0.0;
+    // YOLO seg runs on the ZED worker thread. Hand it a DEEP-COPIED frame (cv::Mat clone at the
+    // boundary) and consume the newest completed bundle. The bundle carries the exact frame it was
+    // computed on (rgbd + room_T_zed + stamp), so the masks publish self-consistently even though the
+    // worker is ~1 frame behind. `zed_res` is nullopt on cycles where the worker hasn't finished a new
+    // frame — then we publish ricoh-only and draw no seg overlay.
+    std::optional<rc::PerceptionResult> zed_res;
+    if (zed_worker_)
+    {
+        rc::PerceptionFrame pf;
+        pf.rgbd.rgb      = frame->rgbd.rgb.clone();   // deep copy at the thread boundary
+        pf.rgbd.depth    = frame->rgbd.depth;
+        pf.rgbd.width    = frame->rgbd.width;
+        pf.rgbd.height   = frame->rgbd.height;
+        pf.rgbd.focal_x  = frame->rgbd.focal_x;
+        pf.rgbd.focal_y  = frame->rgbd.focal_y;
+        pf.room_T_sensor = frame->room_T_zed;
+        pf.stamp         = frame->frame_ts_ms;
+        pf.is_360        = false;
+        zed_worker_->submit(std::move(pf));
+        zed_res = zed_worker_->take_result();
+    }
+    static const std::vector<SegDetection> kNoSegDetections;
     static const std::vector<rc::human_pose::PoseDetection> kNoPoses;
-    const auto& poses = (yolo_human_processor and yolo_human_processor->ready())
-        ? yolo_human_processor->last_poses()
-        : kNoPoses;
+    const std::vector<SegDetection>& detections =
+        (zed_res and zed_res->masks) ? *zed_res->masks : kNoSegDetections;
+    const std::vector<rc::human_pose::PoseDetection>& poses =
+        (zed_res and zed_res->poses) ? *zed_res->poses : kNoPoses;
+    const bool   poses_fresh = zed_res and zed_res->poses_fresh;   // pose model actually ran → gate skeleton publish
+    const double yolo_ms = 0.0;   // inference is off-thread now (per-stage timing in etc/viewer_perf_zed_worker.csv)
+    const double pose_ms = 0.0;
 
     // Semantic segmentation: dense ADE20K-150 per-pixel class map. Heavy, so run decimated (the last
     // map is reused for the overlay on skipped cycles). Feeds the viewer overlay only, and the whole
@@ -561,8 +578,10 @@ void SpecificWorker::compute()
             and not yolo_semantic_processor->last_map().labels.empty())
             viewer_rgb = yolo_semantic_processor->compose_semantic_canvas(viewer_rgb, yolo_semantic_processor->last_map());
         // Draw the detected skeletons (green bones, red joints, orange bbox) under the seg overlay.
-        if (yolo_human_processor and not poses.empty())
-            viewer_rgb = yolo_human_processor->compose_pose_canvas(viewer_rgb, poses);
+        // The pose model lives in the ZED worker's PoseStage now; reach it for the compose passthrough.
+        if (auto* ps = dynamic_cast<rc::PoseStage*>(zed_worker_ ? zed_worker_->stage("pose") : nullptr);
+            ps and ps->processor() and not poses.empty())
+            viewer_rgb = ps->processor()->compose_pose_canvas(viewer_rgb, poses);
         // Project every graph model instance (table/bottle/chair/obstacle BBs) onto the image when the
         // ZED-window "Models" toggle is on. Independent, self-contained overlay (model_projection_overlay).
         if (model_overlay_enabled_ and model_overlay_)
@@ -683,15 +702,24 @@ void SpecificWorker::compute()
             }
         }
 
-        graph_publisher_->publish(frame->rgbd, frame->room_T_zed, detections, frame->frame_ts_ms, bearing_dets);
+        // Masks: publish the WORKER's bundle (its own frame's rgbd/transform/stamp) so the seg masks are
+        // deprojected against their own depth. When the worker produced nothing new this cycle, still
+        // publish the ricoh bearings (no zed masks) against the current frame.
+        if (zed_res and zed_res->masks)
+            graph_publisher_->publish(zed_res->frame.rgbd, zed_res->frame.room_T_sensor, *zed_res->masks,
+                                      zed_res->frame.stamp, bearing_dets);
+        else
+            graph_publisher_->publish(frame->rgbd, frame->room_T_zed, kNoSegDetections,
+                                      frame->frame_ts_ms, bearing_dets);
         publish_ms = perf_ms(perf_pub0, std::chrono::steady_clock::now());
 
         // Human-pose branch: BODY_18 skeletons (camera frame) on the 'skeleton' node for human_concept.
-        // Only on cycles we actually ran the pose model (decimated above).
-        if (run_pose)
+        // Only on cycles the worker's PoseStage actually ran the model (fresh), and published against the
+        // bundle's own frame so the skeleton depth matches.
+        if (poses_fresh and zed_res)
         {
             const auto perf_skel0 = std::chrono::steady_clock::now();
-            graph_publisher_->publish_skeletons(frame->rgbd, poses, frame->frame_ts_ms);
+            graph_publisher_->publish_skeletons(zed_res->frame.rgbd, poses, zed_res->frame.stamp);
             skel_ms = perf_ms(perf_skel0, std::chrono::steady_clock::now());
         }
     }
