@@ -32,6 +32,7 @@ namespace efd = eprosima::fastdds::dds;
 FASTDDS_SEQUENCE(ImageFrameSeq, rc::media::ImageFrame);
 FASTDDS_SEQUENCE(Image360FrameSeq, rc::media::Image360Frame);
 FASTDDS_SEQUENCE(LidarFrameSeq, rc::media::LidarFrame);
+FASTDDS_SEQUENCE(ImuFrameSeq, rc::media::ImuFrame);
 
 namespace
 {
@@ -674,6 +675,118 @@ LidarSubscriber::~LidarSubscriber()
 }
 
 void LidarSubscriber::close()
+{
+    std::lock_guard<std::recursive_mutex> entity_lock(dds_entity_mtx);
+    if (subscriber_ != nullptr && reader_ != nullptr)
+        subscriber_->delete_datareader(reader_);
+    reader_ = nullptr;
+
+    if (participant_ != nullptr && topic_ != nullptr)
+        participant_->delete_topic(topic_);
+    topic_ = nullptr;
+
+    if (participant_ != nullptr && subscriber_ != nullptr)
+        participant_->delete_subscriber(subscriber_);
+    subscriber_ = nullptr;
+
+    if (has_participant_)
+    {
+        release_participant(participant_domain_id_, participant_shm_only_, participant_);
+        participant_ = nullptr;
+        has_participant_ = false;
+    }
+
+    data_sharing_active_ = false;
+}
+
+// ───────────────────────────── ImuSubscriber ───────────────────────────────
+// Mirror of LidarSubscriber for the ImuFrame type. Same participant pool + QoS.
+
+bool ImuSubscriber::init(const SubscriberConfig& cfg)
+{
+    std::lock_guard<std::recursive_mutex> entity_lock(dds_entity_mtx);
+    close();
+
+    participant_ = acquire_participant(cfg.domain_id, cfg.shared_memory_only);
+    if (!participant_)
+        return false;
+    participant_domain_id_ = cfg.domain_id;
+    participant_shm_only_ = cfg.shared_memory_only;
+    has_participant_ = true;
+
+    efd::TypeSupport type(new ImuFramePubSubType());
+    type.register_type(participant_);
+
+    subscriber_ = participant_->create_subscriber(efd::SUBSCRIBER_QOS_DEFAULT);
+    if (!subscriber_) { close(); return false; }
+
+    efd::TopicDescription* rtopic =
+        resolve_reader_topic(participant_, cfg.topic_name, type.get_type_name(), &topic_);
+    if (!rtopic) { close(); return false; }
+
+    efd::DataReaderQos rqos = efd::DATAREADER_QOS_DEFAULT;
+    rqos.reliability().kind = std::getenv("MEDIA_BEST_EFFORT")
+                                  ? efd::BEST_EFFORT_RELIABILITY_QOS
+                                  : efd::RELIABLE_RELIABILITY_QOS;
+    rqos.durability().kind  = efd::VOLATILE_DURABILITY_QOS;
+    rqos.history().kind     = efd::KEEP_LAST_HISTORY_QOS;
+    rqos.history().depth    = cfg.history_depth;
+    rqos.resource_limits().max_instances            = cfg.max_instances;
+    rqos.resource_limits().max_samples_per_instance = cfg.history_depth;
+    rqos.resource_limits().max_samples = cfg.max_instances * cfg.history_depth + 2;
+    rqos.endpoint().history_memory_policy = eprosima::fastdds::rtps::PREALLOCATED_MEMORY_MODE;
+    if (cfg.data_sharing and not std::getenv("MEDIA_NO_DATASHARING"))
+        rqos.data_sharing().automatic();
+    else
+        rqos.data_sharing().off();
+
+    reader_ = subscriber_->create_datareader(rtopic, rqos);
+    if (!reader_) { close(); return false; }
+
+    data_sharing_active_ = reader_->get_qos().data_sharing().kind() != efd::OFF;
+    return true;
+}
+
+int ImuSubscriber::poll(const FrameCallback& cb)
+{
+    if (!reader_)
+        return 0;
+
+    int delivered = 0;
+    ImuFrameSeq data;
+    efd::SampleInfoSeq infos;
+    while (reader_->take(data, infos) == efd::RETCODE_OK)
+    {
+        const std::int64_t recv = now_ns();
+        for (efd::LoanableCollection::size_type i = 0; i < infos.length(); ++i)
+        {
+            if (infos[i].valid_data)
+            {
+                cb(data[i], recv);
+                ++delivered;
+            }
+        }
+        reader_->return_loan(data, infos);
+    }
+    return delivered;
+}
+
+int ImuSubscriber::wait_and_poll(const FrameCallback& cb, int timeout_ms)
+{
+    if (!reader_)
+        return 0;
+    const efd::Duration_t timeout(timeout_ms / 1000,
+                                  static_cast<std::uint32_t>((timeout_ms % 1000) * 1000000));
+    reader_->wait_for_unread_message(timeout);
+    return poll(cb);
+}
+
+ImuSubscriber::~ImuSubscriber()
+{
+    close();
+}
+
+void ImuSubscriber::close()
 {
     std::lock_guard<std::recursive_mutex> entity_lock(dds_entity_mtx);
     if (subscriber_ != nullptr && reader_ != nullptr)

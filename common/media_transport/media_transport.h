@@ -332,6 +332,38 @@ private:
     bool data_sharing_active_ = false;
 };
 
+// One reader per IMU topic. The callback receives a const ImuFrame& valid only for the
+// duration of the call. Mirror of LidarSubscriber for the small ImuFrame type (acc/gyro/
+// mag/rpy scalars) so agents can consume the IMU media stream the same uniform way.
+class ImuSubscriber
+{
+public:
+    using FrameCallback = std::function<void(const ImuFrame& frame, std::int64_t recv_ns)>;
+
+    ImuSubscriber() = default;
+    ~ImuSubscriber();
+    ImuSubscriber(const ImuSubscriber&) = delete;
+    ImuSubscriber& operator=(const ImuSubscriber&) = delete;
+
+    bool init(const SubscriberConfig& cfg);
+    void close();
+
+    int poll(const FrameCallback& cb);                          // non-blocking drain
+    int wait_and_poll(const FrameCallback& cb, int timeout_ms); // block-then-drain
+
+    [[nodiscard]] bool data_sharing_active() const { return data_sharing_active_; }
+
+private:
+    eprosima::fastdds::dds::DomainParticipant* participant_ = nullptr;
+    eprosima::fastdds::dds::Subscriber*        subscriber_  = nullptr;
+    eprosima::fastdds::dds::Topic*             topic_       = nullptr;
+    eprosima::fastdds::dds::DataReader*        reader_      = nullptr;
+    std::uint32_t participant_domain_id_ = 0;
+    bool participant_shm_only_ = true;
+    bool has_participant_ = false;
+    bool data_sharing_active_ = false;
+};
+
 // ── Descriptor-driven subscriber factories ───────────────────────────────────
 // THE single, shared way every agent brings up a media-plane consumer, so the
 // initialization code is identical everywhere (easier maintenance). Each factory:
@@ -414,6 +446,31 @@ make_image360_subscriber_from_graph(Graph& graph, const std::string& node_name,
         return nullptr;
     }
     std::print("[media] image360 subscriber up from '{}' descriptor ('{}'): domain={} topic='{}'\n",
+               node_name, stream_key, cfg->domain_id, cfg->topic_name);
+    return sub;
+}
+
+template <class Graph>
+[[nodiscard]] std::unique_ptr<ImuSubscriber>
+make_imu_subscriber_from_graph(Graph& graph, const std::string& node_name,
+                               const std::string& stream_key = "imu")
+{
+    auto desc = descriptor_from_graph(graph, node_name);
+    auto cfg  = desc.has_value() ? desc->subscriber_config(stream_key) : std::nullopt;
+    if (not cfg.has_value())
+    {
+        std::print(stderr, "[media] no '{}' stream descriptor on node '{}' — IMU subscriber not created\n",
+                   stream_key, node_name);
+        return nullptr;
+    }
+    auto sub = std::make_unique<ImuSubscriber>();
+    if (not sub->init(*cfg))
+    {
+        std::print(stderr, "[media] IMU subscriber init FAILED (node '{}' topic '{}')\n",
+                   node_name, cfg->topic_name);
+        return nullptr;
+    }
+    std::print("[media] IMU subscriber up from '{}' descriptor ('{}'): domain={} topic='{}'\n",
                node_name, stream_key, cfg->domain_id, cfg->topic_name);
     return sub;
 }

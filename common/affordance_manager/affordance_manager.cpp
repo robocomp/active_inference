@@ -1,6 +1,7 @@
 #include "affordance_manager.h"
 
 #include <dsr/api/dsr_api.h>
+#include "../affordance_protocol/affordance_protocol.h"   // read_viewpoint (object-relative viewpoint debug read)
 
 #include <QDebug>
 
@@ -617,6 +618,18 @@ std::optional<AffordanceManager::Target> AffordanceManager::select_target(const 
         {
             selected_target_debug_report_ = key;
             std::print("{}  [candidates:{} ]\n", make_affordance_debug_report(*best_target), candidates_str);
+            // Consumer-side debug read (Part B / object-relative resolution not built yet): decode the
+            // viewpoint constraint the producer published on the claimed node, to confirm the aff_view_*
+            // wire format survives the DSR boundary. Pure diagnostic — no resolution logic here yet.
+            if (const auto vc = rc::affordance::read_viewpoint(node); vc.object_relative)
+            {
+                std::ostringstream gss; gss.setf(std::ios::fixed); gss.precision(2);
+                for (std::size_t i = 0; i < vc.face_gains.size(); ++i) { if (i) gss << ','; gss << vc.face_gains[i]; }
+                std::print("[affordance-viewpoint] '{}' object-relative: {} faces gains=[{}] standoff=[{:.2f},{:.2f}] "
+                           "fill={:.2f} σ*({})\n",
+                           best_target->node_name, vc.faces.size(), gss.str(),
+                           vc.standoff_min_m, vc.standoff_max_m, vc.framing_fill, vc.sigma_star.size());
+            }
             std::fflush(stdout);
         }
         reset_observation();
