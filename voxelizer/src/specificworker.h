@@ -53,7 +53,6 @@ namespace rc::semantic { class YoloSemanticProcessor; }
 namespace rc { class VoxelOpenGLViewer; }
 namespace rc { class YoloViewer; }
 namespace rc { class ImagePopupViewer; }
-namespace rc { class RicohYoloWorker; }
 namespace rc { class PerceptionWorker; }
 
 class SpecificWorker : public GenericWorker
@@ -93,11 +92,9 @@ class SpecificWorker : public GenericWorker
     private:
         VoxelizerParams params;   // loaded via load_voxelizer_params() in initialize()
 
-        struct SceneFrame
+        struct SceneFrame   // scene CONTEXT gathered on the main thread (RGBD/seg live in the ZED worker now)
         {
-            RGBDData                    rgbd;
             Mat::RTMat                  room_T_robot;
-            Mat::RTMat                  room_T_zed;
             std::vector<Eigen::Vector3f> lidar_points_room;
             std::vector<std::uint8_t>    lidar_plane_id;    // per-point source plane (helios=0, bpearl=1) — for the ricoh depth-fill
             std::vector<GraphObjectBox>  graph_object_boxes;   // model instances (room frame) — reused for the ZED-image projection overlay
@@ -148,8 +145,7 @@ class SpecificWorker : public GenericWorker
 
         std::shared_ptr<DSR::InnerEigenAPI> inner_eigen_api;
 
-        std::unique_ptr<rc::PerceptionWorker> zed_worker_;   // ZED inference thread: [seg, pose] stages
-        std::unique_ptr<rc::semantic::YoloSemanticProcessor> yolo_semantic_processor;   // semantic stays on main (for now)
+        std::unique_ptr<rc::PerceptionWorker> zed_worker_;   // ZED inference thread: [seg, pose, semantic] stages
         std::unique_ptr<SceneProcessor>    scene_processor;
         std::unique_ptr<GraphPublisher>    graph_publisher_;   // all DSR semantic_grid exports
         std::unique_ptr<rc::VoxelOpenGLViewer> voxel_viewer_gl;
@@ -158,7 +154,7 @@ class SpecificWorker : public GenericWorker
         // Ricoh 360 peripheral YOLO, on its own thread (own model/session) — see ricoh_yolo_worker.h.
         // Started in initialize() only when params.RICOH_YOLO_ENABLED; stopped explicitly in
         // request_shutdown() BEFORE scene_processor is torn down (the worker holds a raw ptr to it).
-        std::unique_ptr<rc::RicohYoloWorker>   ricoh_yolo_worker_;
+        std::unique_ptr<rc::PerceptionWorker>  ricoh_worker_;   // ricoh 360 pull worker: [seg360, bearing] stages
 
         // Decoupled viewer-refresh timer (GUI thread). Pushes the LATEST robot pose to the 3D viewer
         // at a fluid cadence, independent of the ~7-10 Hz perception/camera pipeline, so robot motion

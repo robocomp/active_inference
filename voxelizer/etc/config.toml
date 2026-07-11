@@ -99,7 +99,7 @@ decimation = 1              # run pose every Nth cycle; 1 = every frame (no skel
 # map (vs the sparse per-instance seg masks). Currently a viewer overlay only (no DSR publish).
 # Default OFF — set enabled=true once the ONNX model exists. Export with:
 #   yolo export model=yolo26l-sem-ade20k.pt format=onnx   (gives yolo26l-sem-ade20k.onnx).
-enabled = false   # gated OFF: don't load/run the dense semantic model (frees GPU + compute)
+enabled = true    # load the dense ADE20K semantic model → the "Semantic" toggle appears in the ZED window
 model_path = "yolo26l-sem-ade20k.onnx"
 conf_thresh = 0.25          # per-pixel argmax-softmax floor; below it the pixel is "ignore" (255)
 input_size = 640

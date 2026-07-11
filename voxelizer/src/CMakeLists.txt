@@ -29,9 +29,11 @@ LIST(APPEND SOURCES
   ../src/seg_stage.cpp
   ../src/pose_stage.cpp
   ../src/semantic_stage.cpp
+  ../src/bearing_stage.cpp
   ../src/yolo_human.cpp
   ../src/yolo_semantic.cpp
-  ../src/ricoh_yolo_worker.cpp
+  ../src/ricoh_source.cpp
+  ../src/zed_source.cpp
   ../src/perception_worker.cpp
   ../src/onnx_providers.cpp
 )
@@ -46,12 +48,14 @@ LIST(APPEND HEADERS
   ../src/zed_frame_aligner.h
   ../src/yolo_processor.h
   ../src/yolo_seg_detector.h
-  ../src/ricoh_yolo_worker.h
+  ../src/ricoh_source.h
+  ../src/zed_source.h
   ../src/perception_worker.h
   ../src/perception_stage.h
   ../src/seg_stage.h
   ../src/pose_stage.h
   ../src/semantic_stage.h
+  ../src/bearing_stage.h
   ../src/graph_object_box.h
   ../src/model_projection_overlay.h
   ../src/ricoh_projection_overlay.h

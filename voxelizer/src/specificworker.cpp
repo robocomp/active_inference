@@ -32,10 +32,13 @@
 #include "voxel_opengl_viewer.h"
 #include "yolo_viewer.h"
 #include "image_popup_viewer.h"
-#include "ricoh_yolo_worker.h"
 #include "perception_worker.h"
 #include "seg_stage.h"
 #include "pose_stage.h"
+#include "semantic_stage.h"
+#include "bearing_stage.h"
+#include "ricoh_source.h"
+#include "zed_source.h"
 #include <dsr/gui/viewers/graph_viewer/graph_viewer.h>
 #include <QHBoxLayout>
 #include <QPushButton>
@@ -107,7 +110,7 @@ void SpecificWorker::request_shutdown()
 
     save_window_settings();
     save_external_window_geometry();
-    ricoh_yolo_worker_.reset();   // stop+join BEFORE scene_processor is destroyed (holds a raw ptr to it)
+    ricoh_worker_.reset();        // stop+join BEFORE scene_processor is destroyed (RicohSource holds a raw ptr to it)
     zed_worker_.reset();          // stop+join the ZED perception worker (self-contained; order not critical)
     scene_processor.reset();
     cleanup_owned_nodes();
@@ -145,59 +148,40 @@ void SpecificWorker::initialize()
     yolo_config.tray_drop_fraction  = params.YOLO_TRAY_DROP_FRACTION;
     yolo_config.accepted_labels     = params.YOLO_ACCEPTED_LABELS;
     yolo_config.verbose_debug       = verbose_debug_;
-    // Assemble the ZED worker's stage list: seg (always), then pose (optional). Each stage owns its ONNX
-    // session. Adding a stage here (e.g. semantic) is the only change needed to run another model on ZED.
+    // Build the ZED worker's stage list (seg + optional pose/semantic; each loads its ONNX model here).
+    // The worker itself is STARTED later, after the media plane is up — its ZedSource pulls from it.
+    std::vector<std::unique_ptr<rc::Stage>> zed_stages;
+    zed_stages.push_back(std::make_unique<rc::SegStage>(yolo_config));
+
+    // --- Human pose (optional second model → BODY_18 skeletons on the 'skeleton' node) ---
+    if (params.HUMAN_POSE_ENABLED)
     {
-        std::vector<std::unique_ptr<rc::Stage>> zed_stages;
-        zed_stages.push_back(std::make_unique<rc::SegStage>(yolo_config));
-
-        // --- Human pose (optional second model → BODY_18 skeletons on the 'skeleton' node) ---
-        if (params.HUMAN_POSE_ENABLED)
-        {
-            rc::human_pose::YoloHumanProcessor::Config pose_config;
-            pose_config.model_path    = params.HUMAN_POSE_MODEL_PATH;
-            pose_config.conf_thresh   = params.HUMAN_POSE_CONF_THRESH;
-            pose_config.iou_thresh    = params.HUMAN_POSE_IOU_THRESH;
-            pose_config.input_size    = params.HUMAN_POSE_INPUT_SIZE;
-            pose_config.use_gpu       = params.HUMAN_POSE_USE_GPU;
-            pose_config.use_trt       = params.HUMAN_POSE_USE_TRT;
-            pose_config.hold_ms       = params.HUMAN_POSE_HOLD_MS;
-            pose_config.verbose_debug = verbose_debug_;
-            zed_stages.push_back(std::make_unique<rc::PoseStage>(pose_config, params.HUMAN_POSE_DECIMATION));
-        }
-
-        zed_worker_ = std::make_unique<rc::PerceptionWorker>();
-        rc::PerceptionWorker::Config wcfg;
-        wcfg.name     = "zed";
-        wcfg.perf_log = params.PERF_LOG;
-        if (!zed_worker_->start(std::move(zed_stages), wcfg))
-        {
-            std::println("[Zed] perception worker failed to start (model load?) — disabling");
-            zed_worker_.reset();
-        }
+        rc::human_pose::YoloHumanProcessor::Config pose_config;
+        pose_config.model_path    = params.HUMAN_POSE_MODEL_PATH;
+        pose_config.conf_thresh   = params.HUMAN_POSE_CONF_THRESH;
+        pose_config.iou_thresh    = params.HUMAN_POSE_IOU_THRESH;
+        pose_config.input_size    = params.HUMAN_POSE_INPUT_SIZE;
+        pose_config.use_gpu       = params.HUMAN_POSE_USE_GPU;
+        pose_config.use_trt       = params.HUMAN_POSE_USE_TRT;
+        pose_config.hold_ms       = params.HUMAN_POSE_HOLD_MS;
+        pose_config.verbose_debug = verbose_debug_;
+        zed_stages.push_back(std::make_unique<rc::PoseStage>(pose_config, params.HUMAN_POSE_DECIMATION));
     }
 
-    // --- Semantic segmentation (optional dense ADE20K-150 per-pixel class map → viewer overlay) ---
+    // --- Semantic segmentation (optional dense ADE20K-150 class map → viewer overlay). Starts DISABLED
+    // (gated by the ZED-window "Semantic" toggle) so the heavy model runs only when shown. ---
     if (params.SEMANTIC_SEG_ENABLED)
     {
-        try
-        {
-            yolo_semantic_processor = std::make_unique<rc::semantic::YoloSemanticProcessor>();
-            rc::semantic::YoloSemanticProcessor::Config sem_config;
-            sem_config.model_path    = params.SEMANTIC_SEG_MODEL_PATH;
-            sem_config.conf_thresh   = params.SEMANTIC_SEG_CONF_THRESH;
-            sem_config.input_size    = params.SEMANTIC_SEG_INPUT_SIZE;
-            sem_config.use_gpu       = params.SEMANTIC_SEG_USE_GPU;
-            sem_config.use_trt       = params.SEMANTIC_SEG_USE_TRT;
-            sem_config.verbose_debug = verbose_debug_;
-            yolo_semantic_processor->configure(sem_config);
-        }
-        catch (const std::exception& e)
-        {
-            qWarning() << "[Semantic] disabled — failed to load model" << params.SEMANTIC_SEG_MODEL_PATH.c_str()
-                       << ":" << e.what();
-            yolo_semantic_processor.reset();
-        }
+        rc::semantic::YoloSemanticProcessor::Config sem_config;
+        sem_config.model_path    = params.SEMANTIC_SEG_MODEL_PATH;
+        sem_config.conf_thresh   = params.SEMANTIC_SEG_CONF_THRESH;
+        sem_config.input_size    = params.SEMANTIC_SEG_INPUT_SIZE;
+        sem_config.use_gpu       = params.SEMANTIC_SEG_USE_GPU;
+        sem_config.use_trt       = params.SEMANTIC_SEG_USE_TRT;
+        sem_config.verbose_debug = verbose_debug_;
+        auto sem_stage = std::make_unique<rc::SemanticStage>(sem_config, params.SEMANTIC_SEG_DECIMATION);
+        sem_stage->set_enabled(semantic_overlay_enabled_);
+        zed_stages.push_back(std::move(sem_stage));
     }
 
     // Custom drawing windows (Voxel3D GL + YOLO raster), each in its own top-level window — see
@@ -214,6 +198,27 @@ void SpecificWorker::initialize()
                                       params.MEDIA_RGB_TOPIC, params.MEDIA_DEPTH_TOPIC);
     scene_processor->init_lidar_media_plane(static_cast<std::uint32_t>(params.MEDIA_DOMAIN_ID),
                                             params.MEDIA_LIDAR_TOPIC, params.LIDAR_USE_MEDIA);
+
+    // Start the ZED worker in PULL mode now that the media plane is up: its ZedSource drains the aligned
+    // RGBD + resolves room<-zed on the WORKER thread, so the whole RGBD path is off the main compute tick.
+    {
+        auto zed_src = std::make_shared<rc::ZedSource>(scene_processor.get(), G);
+        zed_worker_ = std::make_unique<rc::PerceptionWorker>();
+        rc::PerceptionWorker::Config wcfg;
+        wcfg.name             = "zed";
+        wcfg.perf_log         = params.PERF_LOG;
+        wcfg.target_period_ms = 15;   // pull a bit faster than the ~24Hz feed; ZedSource dedups when nothing new
+        if (!zed_worker_->start(std::move(zed_stages), wcfg, [zed_src]() { return (*zed_src)(); }))
+        {
+            std::println("[Zed] perception worker failed to start (model load?) — disabling");
+            zed_worker_.reset();
+        }
+        // Feed the semantic class-name table for the ZED-window hover readout, now that the stage exists.
+        if (yolo_viewer_)
+            if (auto* s = dynamic_cast<rc::SemanticStage*>(zed_worker_ ? zed_worker_->stage("semantic") : nullptr);
+                s and s->processor())
+                yolo_viewer_->set_class_names(s->processor()->class_names());
+    }
     // ZED-image model-instance projection overlay (gated by the "Models" toggle in the ZED popup).
     // Does NO live graph traversal at draw time (caches the zed CameraAPI once); all geometry is fed
     // from the frame's already-gathered room←zed transform + room polygon.
@@ -232,28 +237,41 @@ void SpecificWorker::initialize()
     // request_shutdown() before scene_processor is destroyed.
     if (params.RICOH_YOLO_ENABLED)
     {
-        ricoh_yolo_worker_ = std::make_unique<rc::RicohYoloWorker>();
-        rc::RicohYoloWorker::Config ricoh_worker_cfg;
-        ricoh_worker_cfg.yolo_config.model_path        = params.YOLO_MODEL_PATH;
-        ricoh_worker_cfg.yolo_config.conf_thresh       = params.YOLO_CONF_THRESH;
-        ricoh_worker_cfg.yolo_config.iou_thresh        = params.YOLO_IOU_THRESH;
-        ricoh_worker_cfg.yolo_config.input_size        = params.YOLO_INPUT_SIZE;
-        ricoh_worker_cfg.yolo_config.use_gpu           = params.YOLO_USE_GPU;
-        ricoh_worker_cfg.yolo_config.use_trt           = params.YOLO_USE_TRT;
-        ricoh_worker_cfg.yolo_config.mask_erode_kernel = params.YOLO_MASK_ERODE_KERNEL;
-        ricoh_worker_cfg.yolo_config.accepted_labels   = params.YOLO_ACCEPTED_LABELS;
-        ricoh_worker_cfg.yolo_config.verbose_debug     = verbose_debug_;
-        ricoh_worker_cfg.detect_config.n_strips        = params.RICOH_YOLO_N_STRIPS;
-        ricoh_worker_cfg.detect_config.overlap_px      = params.RICOH_YOLO_STRIP_OVERLAP_PX;
-        ricoh_worker_cfg.detect_config.merge_iou       = params.RICOH_YOLO_MERGE_IOU;
-        ricoh_worker_cfg.target_period_ms              = params.RICOH_YOLO_THREAD_PERIOD_MS;
-        ricoh_worker_cfg.perf_log                      = params.PERF_LOG;
-        ricoh_worker_cfg.publish_bearings              = params.RICOH_PUBLISH_MASKS;   // [step 1] bearings on the worker thread
-        ricoh_worker_cfg.azimuth_tune_deg              = params.RICOH_AZIMUTH_TUNE_DEG;
-        if (!ricoh_yolo_worker_->start(scene_processor.get(), ricoh_worker_cfg))
+        // Ricoh 360 = a PULL PerceptionWorker: its RicohSource polls the panorama plane + resolves
+        // room<-ricoh at the stamp; SegStage(is_360) runs the 3-strip model; BearingStage turns each mask
+        // into a room-frame bearing (all on the worker thread). LiDAR depth-fill stays main-side (compute()).
+        YoloProcessor::Config ricoh_yolo_cfg;
+        ricoh_yolo_cfg.model_path        = params.YOLO_MODEL_PATH;
+        ricoh_yolo_cfg.conf_thresh       = params.YOLO_CONF_THRESH;
+        ricoh_yolo_cfg.iou_thresh        = params.YOLO_IOU_THRESH;
+        ricoh_yolo_cfg.input_size        = params.YOLO_INPUT_SIZE;
+        ricoh_yolo_cfg.use_gpu           = params.YOLO_USE_GPU;
+        ricoh_yolo_cfg.use_trt           = params.YOLO_USE_TRT;
+        ricoh_yolo_cfg.mask_erode_kernel = params.YOLO_MASK_ERODE_KERNEL;
+        ricoh_yolo_cfg.accepted_labels   = params.YOLO_ACCEPTED_LABELS;
+        ricoh_yolo_cfg.verbose_debug     = verbose_debug_;
+
+        Detection360Config cfg360;
+        cfg360.n_strips   = params.RICOH_YOLO_N_STRIPS;
+        cfg360.overlap_px = params.RICOH_YOLO_STRIP_OVERLAP_PX;
+        cfg360.merge_iou  = params.RICOH_YOLO_MERGE_IOU;
+
+        std::vector<std::unique_ptr<rc::Stage>> ricoh_stages;
+        ricoh_stages.push_back(std::make_unique<rc::SegStage>(ricoh_yolo_cfg, cfg360));
+        if (params.RICOH_PUBLISH_MASKS)
+            ricoh_stages.push_back(std::make_unique<rc::BearingStage>(G));   // runs after seg (reads masks)
+
+        auto ricoh_src = std::make_shared<rc::RicohSource>(scene_processor.get(), G, params.RICOH_AZIMUTH_TUNE_DEG);
+
+        ricoh_worker_ = std::make_unique<rc::PerceptionWorker>();
+        rc::PerceptionWorker::Config rcfg;
+        rcfg.name             = "ricoh";
+        rcfg.perf_log         = params.PERF_LOG;
+        rcfg.target_period_ms = params.RICOH_YOLO_THREAD_PERIOD_MS;
+        if (!ricoh_worker_->start(std::move(ricoh_stages), rcfg, [ricoh_src]() { return (*ricoh_src)(); }))
         {
-            std::println("[Ricoh] 360-YOLO worker failed to start (media plane not ready?) — disabling");
-            ricoh_yolo_worker_.reset();
+            std::println("[Ricoh] perception worker failed to start (media plane not ready?) — disabling");
+            ricoh_worker_.reset();
         }
     }
 
@@ -368,33 +386,33 @@ void SpecificWorker::on_render_tick()
         const auto perf_ricoh0 = std::chrono::steady_clock::now();
         const bool popup_visible = ricoh_viewer_ and ricoh_window_ and ricoh_window_->isVisible();
 
-        if (ricoh_yolo_worker_)
+        if (ricoh_worker_)
         {
             if (popup_visible)
             {
-                cv::Mat pano = ricoh_yolo_worker_->latest_bgr();
-                if (not pano.empty())
+                auto rres = ricoh_worker_->latest_result();
+                if (rres and not rres->frame.rgbd.rgb.empty())
                 {
+                    cv::Mat pano = rres->frame.rgbd.rgb;   // BGR panorama the worker processed
                     // Project the DSR scene (model boxes + room floor/ceiling/walls) onto the panorama
                     // when the Ricoh "Models" toggle is on. Draw on a clone (BGR) so we never mutate
-                    // the worker's cached frame; the popup viewer converts BGR→RGB on display.
+                    // the worker's frame; the popup viewer converts BGR→RGB on display.
                     if ((ricoh_model_overlay_enabled_ or ricoh_lidar_overlay_enabled_)
                         and ricoh_model_overlay_ and ricoh_scene_.valid)
                     {
                         pano = pano.clone();
-                        // Lidar reprojection first (background sparse depth), then the model wireframe on top.
                         if (ricoh_lidar_overlay_enabled_)
                             ricoh_model_overlay_->draw_lidar_points(pano, ricoh_scene_.lidar_room, ricoh_scene_.room_T_ricoh);
                         if (ricoh_model_overlay_enabled_)
                             ricoh_model_overlay_->draw(pano, ricoh_scene_.boxes, ricoh_scene_.room_T_ricoh,
                                                        ricoh_scene_.poly_x, ricoh_scene_.poly_y, ricoh_scene_.room_height);
                     }
-                    const auto dets = ricoh_yolo_worker_->latest_detections();
-                    if (!dets.empty())
+                    if (rres->masks and not rres->masks->empty())
                     {
                         cv::Mat pano_rgb;
                         cv::cvtColor(pano, pano_rgb, cv::COLOR_BGR2RGB);
-                        ricoh_viewer_->update_image(ricoh_yolo_worker_->compose_detection_canvas(pano_rgb, dets));
+                        auto* seg = dynamic_cast<rc::SegStage*>(ricoh_worker_->stage("seg"));
+                        ricoh_viewer_->update_image(seg ? seg->compose(pano_rgb, *rres->masks) : pano_rgb);
                     }
                     else
                         ricoh_viewer_->update_image(pano);
@@ -516,67 +534,40 @@ void SpecificWorker::compute()
         ricoh_scene_.valid        = frame->ricoh_valid;   // only draw once the ricoh pose is known
     }
 
-    // Follow the RGB stream's REAL rate: the media cache repeats the last frame when nothing new
-    // arrived this cycle. Skip the RGB-derived work (YOLO, pose, viewer, mask publish) on stale
-    // repeats so the displayed FPS and published masks track the camera's actual delivery rate. The
-    // lidar/robot-pose viewer updates already ran in process_scene_frame and keep the compute cadence.
-    if (frame->frame_ts_ms == last_rgb_ts_)
-        return;
-    last_rgb_ts_ = frame->frame_ts_ms;
-    stream_mon_.tick("rgb", frame->frame_ts_ms);   // input-rate telemetry / stall detection
-
-    // YOLO seg runs on the ZED worker thread. Hand it a DEEP-COPIED frame (cv::Mat clone at the
-    // boundary) and consume the newest completed bundle. The bundle carries the exact frame it was
-    // computed on (rgbd + room_T_zed + stamp), so the masks publish self-consistently even though the
-    // worker is ~1 frame behind. `zed_res` is nullopt on cycles where the worker hasn't finished a new
-    // frame — then we publish ricoh-only and draw no seg overlay.
+    // ZED perception runs on its own PULL worker: ZedSource drains the aligned RGBD + resolves room<-zed
+    // ON THAT THREAD, so the whole RGBD path is off the main tick. Consume the newest completed bundle;
+    // nullopt = no new ZED frame this cycle — the scene/viewer/lidar already updated above, so return.
     std::optional<rc::PerceptionResult> zed_res;
     if (zed_worker_)
-    {
-        rc::PerceptionFrame pf;
-        pf.rgbd.rgb      = frame->rgbd.rgb.clone();   // deep copy at the thread boundary
-        pf.rgbd.depth    = frame->rgbd.depth;
-        pf.rgbd.width    = frame->rgbd.width;
-        pf.rgbd.height   = frame->rgbd.height;
-        pf.rgbd.focal_x  = frame->rgbd.focal_x;
-        pf.rgbd.focal_y  = frame->rgbd.focal_y;
-        pf.room_T_sensor = frame->room_T_zed;
-        pf.stamp         = frame->frame_ts_ms;
-        pf.is_360        = false;
-        zed_worker_->submit(std::move(pf));
         zed_res = zed_worker_->take_result();
+    if (!zed_res)
+    {
+        fps_counter_.print("[Compute]", 3000);
+        return;
     }
+    stream_mon_.tick("rgb", zed_res->frame.stamp);   // input-rate telemetry / stall detection
+
     static const std::vector<SegDetection> kNoSegDetections;
     static const std::vector<rc::human_pose::PoseDetection> kNoPoses;
-    const std::vector<SegDetection>& detections =
-        (zed_res and zed_res->masks) ? *zed_res->masks : kNoSegDetections;
-    const std::vector<rc::human_pose::PoseDetection>& poses =
-        (zed_res and zed_res->poses) ? *zed_res->poses : kNoPoses;
-    const bool   poses_fresh = zed_res and zed_res->poses_fresh;   // pose model actually ran → gate skeleton publish
+    const std::vector<SegDetection>& detections = zed_res->masks ? *zed_res->masks : kNoSegDetections;
+    const std::vector<rc::human_pose::PoseDetection>& poses = zed_res->poses ? *zed_res->poses : kNoPoses;
+    const bool   poses_fresh = zed_res->poses_fresh;   // pose model actually ran → gate skeleton publish
     const double yolo_ms = 0.0;   // inference is off-thread now (per-stage timing in etc/viewer_perf_zed_worker.csv)
     const double pose_ms = 0.0;
 
-    // Semantic segmentation: dense ADE20K-150 per-pixel class map. Heavy, so run decimated (the last
-    // map is reused for the overlay on skipped cycles). Feeds the viewer overlay only, and the whole
-    // pass is gated by the YOLO-window "Semantic" toggle so deactivating it also stops the model work.
-    if (yolo_semantic_processor and yolo_semantic_processor->ready() and semantic_overlay_enabled_)
-    {
-        const int decim = std::max(1, params.SEMANTIC_SEG_DECIMATION);
-        if (semantic_frame_counter_++ % decim == 0)
-            yolo_semantic_processor->segment(frame->rgbd.rgb);   // refresh the cached label map
-    }
-
-    // Ricoh 360 peripheral detection now runs on its own thread (rc::RicohYoloWorker, started in
-    // initialize()) — nothing to do here. It's paced to its own target period, fully decoupled from
-    // this cycle's budget; see etc/viewer_perf_ricoh_yolo.csv for its own timing.
+    // Semantic segmentation now runs as a SemanticStage in the ZED worker (decimated, gated by the
+    // "Semantic" toggle → the stage's enabled flag). The dense class map arrives in the bundle; reach the
+    // stage only for the viewer compose passthrough.
+    auto* sem_stage = dynamic_cast<rc::SemanticStage*>(zed_worker_ ? zed_worker_->stage("semantic") : nullptr);
+    const rc::semantic::SemanticMap* sem_map = (zed_res and zed_res->semantic) ? &*zed_res->semantic : nullptr;
 
     if (yolo_viewer_ and yolo_window_ and yolo_window_->isVisible())
     {
-        cv::Mat viewer_rgb = frame->rgbd.rgb;   // clean frame (no tray black-out); update_frame clones
+        cv::Mat viewer_rgb = zed_res->frame.rgbd.rgb;   // the worker's frame; update_frame clones
         // Dense semantic class-map underlay (blended) first, then skeletons + seg masks on top.
-        if (yolo_semantic_processor and semantic_overlay_enabled_
-            and not yolo_semantic_processor->last_map().labels.empty())
-            viewer_rgb = yolo_semantic_processor->compose_semantic_canvas(viewer_rgb, yolo_semantic_processor->last_map());
+        if (sem_stage and sem_stage->processor() and semantic_overlay_enabled_
+            and sem_map and not sem_map->labels.empty())
+            viewer_rgb = sem_stage->processor()->compose_semantic_canvas(viewer_rgb, *sem_map);
         // Draw the detected skeletons (green bones, red joints, orange bbox) under the seg overlay.
         // The pose model lives in the ZED worker's PoseStage now; reach it for the compose passthrough.
         if (auto* ps = dynamic_cast<rc::PoseStage*>(zed_worker_ ? zed_worker_->stage("pose") : nullptr);
@@ -586,9 +577,10 @@ void SpecificWorker::compute()
         // ZED-window "Models" toggle is on. Independent, self-contained overlay (model_projection_overlay).
         if (model_overlay_enabled_ and model_overlay_)
         {
-            if (viewer_rgb.data == frame->rgbd.rgb.data)
+            if (viewer_rgb.data == zed_res->frame.rgbd.rgb.data)
                 viewer_rgb = viewer_rgb.clone();   // don't scribble on the shared source frame
-            model_overlay_->draw(viewer_rgb, frame->graph_object_boxes, frame->room_T_zed,
+            // boxes/polygon from the main-thread scene gather; room<-zed from the worker's own frame.
+            model_overlay_->draw(viewer_rgb, frame->graph_object_boxes, zed_res->frame.room_T_sensor,
                                  frame->room_poly_x, frame->room_poly_y, frame->room_height);
         }
         // The "YOLO" toggle in the ZED window gates only the seg-detection overlay (masks/bboxes);
@@ -596,8 +588,8 @@ void SpecificWorker::compute()
         static const std::vector<SegDetection> kNoDetections;
         yolo_viewer_->update_frame(viewer_rgb, yolo_overlay_enabled_ ? detections : kNoDetections);
         // Feed the dense label map for the hover readout (cleared internally when not active).
-        if (yolo_semantic_processor)
-            yolo_viewer_->update_semantic(yolo_semantic_processor->last_map().labels, semantic_overlay_enabled_);
+        if (sem_map)
+            yolo_viewer_->update_semantic(sem_map->labels, semantic_overlay_enabled_);
         // Size the RGB window to the image once (only when no saved geometry was restored).
         if (yolo_window_needs_image_size_ and yolo_window_ != nullptr and not viewer_rgb.empty())
         {
@@ -622,10 +614,14 @@ void SpecificWorker::compute()
         // the LiDAR DEPTH-FILL runs HERE on the main thread, where the lidar cloud lives, augmenting those
         // bearings in place (has_depth=1 + support points + mask_depth_var). d.mask + bearing are a 1:1 snapshot.
         std::vector<BearingDetection> bearing_dets;
-        if (params.RICOH_PUBLISH_MASKS and ricoh_yolo_worker_)
+        if (params.RICOH_PUBLISH_MASKS and ricoh_worker_)
         {
             std::vector<SegDetection> ricoh_dets;
-            ricoh_yolo_worker_->latest_detections_and_bearings(ricoh_dets, bearing_dets);
+            if (auto rres = ricoh_worker_->latest_result(); rres and rres->masks and rres->bearings)
+            {
+                ricoh_dets   = std::move(*rres->masks);       // 1:1 with bearings (BearingStage order)
+                bearing_dets = std::move(*rres->bearings);
+            }
 
             if (params.RICOH_MASK_DEPTH and frame->ricoh_valid
                 and not bearing_dets.empty() and bearing_dets.size() == ricoh_dets.size()
@@ -703,14 +699,10 @@ void SpecificWorker::compute()
         }
 
         // Masks: publish the WORKER's bundle (its own frame's rgbd/transform/stamp) so the seg masks are
-        // deprojected against their own depth. When the worker produced nothing new this cycle, still
-        // publish the ricoh bearings (no zed masks) against the current frame.
-        if (zed_res and zed_res->masks)
-            graph_publisher_->publish(zed_res->frame.rgbd, zed_res->frame.room_T_sensor, *zed_res->masks,
-                                      zed_res->frame.stamp, bearing_dets);
-        else
-            graph_publisher_->publish(frame->rgbd, frame->room_T_zed, kNoSegDetections,
-                                      frame->frame_ts_ms, bearing_dets);
+        // deprojected against their own depth. Ricoh bearings ride along in the same node update.
+        graph_publisher_->publish(zed_res->frame.rgbd, zed_res->frame.room_T_sensor,
+                                  zed_res->masks ? *zed_res->masks : kNoSegDetections,
+                                  zed_res->frame.stamp, bearing_dets);
         publish_ms = perf_ms(perf_pub0, std::chrono::steady_clock::now());
 
         // Human-pose branch: BODY_18 skeletons (camera frame) on the 'skeleton' node for human_concept.
@@ -729,7 +721,7 @@ void SpecificWorker::compute()
     // Homeostatic regulator: feed it this cycle's cost + frame stamp; it adapts pose decimation
     // and exposes processed/feed Hz. Log on decimation changes, and warn (throttled) only when
     // WE are the limiter (compute-bound) — if the feed itself is slow, decimation can't help.
-    rate_reg_.update(compute_ms, frame->frame_ts_ms);
+    rate_reg_.update(compute_ms, zed_res->frame.stamp);
     if (rate_reg_.changed())
         qInfo().noquote() << QString::asprintf(
             "[rate] pose decimation → %d | compute %.1f Hz, feed %.1f Hz, cycle %.1fms (yolo %.1f, pose %.1f)",
@@ -766,7 +758,7 @@ void SpecificWorker::compute()
         const long long t_ms = static_cast<long long>(perf_ms(perf_log_start, std::chrono::steady_clock::now()));
         perf_csv << t_ms << ',' << compute_ms << ',' << scene_ms << ',' << yolo_ms << ',' << pose_ms
                  << ',' << publish_ms << ',' << skel_ms
-                 << ',' << detections.size() << ',' << frame->frame_ts_ms << '\n';
+                 << ',' << detections.size() << ',' << zed_res->frame.stamp << '\n';
         perf_csv.flush();
     }
 
@@ -793,10 +785,10 @@ std::optional<SpecificWorker::SceneFrame> SpecificWorker::process_scene_frame(FP
         }
     };
 
-    const auto rgbd_opt = scene_processor->get_rgbd_frame_from_dsr();
-    if (!rgbd_opt.has_value())
-        { gate_log("get_rgbd_frame"); return std::nullopt; }
-    const std::uint64_t frame_ts_ms = scene_processor->get_frame_timestamp_ms();
+    // RGBD is drained on the ZED worker thread now (ZedSource). This gather provides SCENE CONTEXT only
+    // (lidar + transforms + viewer + boxes + ricoh pose), at the LATEST pose — no RGBD gate/stamp, and it
+    // runs every cycle (decoupled from RGBD arrival).
+    const std::uint64_t frame_ts_ms = 0;   // latest (viewer/boxes don't need frame-precision here)
 
     if (!scene_processor->ensure_room_and_robot_ready(compute_fps, room_name, robot_name))
         { gate_log("ensure_room_and_robot_ready"); return std::nullopt; }
@@ -804,9 +796,6 @@ std::optional<SpecificWorker::SceneFrame> SpecificWorker::process_scene_frame(FP
     const auto room_T_robot = scene_processor->get_room_robot_transform(compute_fps, room_name, robot_name, frame_ts_ms);
     if (!room_T_robot.has_value())
         { gate_log("get_room_robot_transform"); return std::nullopt; }
-    const auto room_T_zed = scene_processor->get_room_zed_transform(compute_fps, robot_name, room_T_robot.value());
-    if (!room_T_zed.has_value())
-        { gate_log("get_room_zed_transform"); return std::nullopt; }
 
     scene_processor->mark_room_rt_ready();
     const auto graph_object_boxes = scene_processor->get_graph_object_boxes(room_name, frame_ts_ms);
@@ -937,9 +926,7 @@ std::optional<SpecificWorker::SceneFrame> SpecificWorker::process_scene_frame(FP
                                                   Eigen::Vector3d::UnitZ()));
     }
 
-    return SceneFrame{rgbd_opt.value(),
-                      room_T_robot.value(),
-                      room_T_zed.value(),
+    return SceneFrame{room_T_robot.value(),
                       std::move(lidar_points_room),
                       std::move(lidar_plane_id),
                       graph_object_boxes,

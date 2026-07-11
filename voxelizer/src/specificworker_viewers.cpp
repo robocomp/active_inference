@@ -8,6 +8,8 @@
  */
 
 #include "specificworker.h"
+#include "perception_worker.h"
+#include "semantic_stage.h"
 
 #include <QPushButton>
 #include <QVBoxLayout>
@@ -349,8 +351,10 @@ void SpecificWorker::setup_custom_viewers()
         controls->addWidget(yolo_overlay_btn);
         controls->addWidget(models_overlay_btn);
 
-        // Semantic overlay: only meaningful when the dense-seg model is loaded.
-        if (yolo_semantic_processor)
+        // Semantic overlay: shown when the model is configured. The SemanticStage lives in the ZED worker
+        // (created after this in initialize()), so the toggle reaches it lazily; the class-name table is
+        // fed once the worker exists (see initialize()).
+        if (params.SEMANTIC_SEG_ENABLED)
         {
             auto* sem_btn = new QPushButton(semantic_overlay_enabled_ ? "Semantic: ON" : "Semantic: OFF", yolo_panel);
             sem_btn->setCheckable(true);
@@ -360,19 +364,19 @@ void SpecificWorker::setup_custom_viewers()
             connect(sem_btn, &QPushButton::toggled, this, [this, sem_btn](bool checked)
             {
                 semantic_overlay_enabled_ = checked;
+                if (zed_worker_)
+                    if (auto* s = dynamic_cast<rc::SemanticStage*>(zed_worker_->stage("semantic")))
+                        s->set_enabled(checked);   // gate the (heavy) model — no work when the overlay is off
                 sem_btn->setText(checked ? "Semantic: ON" : "Semantic: OFF");
             });
             controls->addWidget(sem_btn);
-
-            // Feed the class-id → name table so the viewer can show the label under the cursor.
-            yolo_viewer_->set_class_names(yolo_semantic_processor->class_names());
         }
         controls->addStretch(1);
 
         yolo_layout->addLayout(controls);
         yolo_layout->addWidget(yolo_viewer_.get(), 1);   // reparents the label into the panel
 
-        yolo_panel->setWindowTitle("YOLO");
+        yolo_panel->setWindowTitle("ZED");
         yolo_window_ = yolo_panel;   // the panel is the top-level window
 
         // Restore the last geometry; otherwise size the RGB window to the camera image on first frame.
