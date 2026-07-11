@@ -433,9 +433,10 @@ for each face i:
   standoffᵢ = clamp( half_span/tan(FoV/2) + margin, min_standoff, d_obs )   (frame the face in ~70° FoV)
   Rᵢ        = σ_base² + (lat_rate·standoffᵢ)²                               (range-aware R, reuses §6)
   ΔI(i)     = Σₚ (1/Rᵢ)·Jₚ Jₚᵀ ,  pts = synthetic points on vertical face i, Jₚ = ∂sdf_top/∂θ
-  raw_gain  = ½·ln det( I₆ + Σ·ΔI(i) )                                       (D-optimal, nats)
-  gain(i)   = p_observable · max(0, min(raw_gain, adequacy_gap))
-pick argmax gain;  emit viewpoint v* = faceᵢ.centre + nᵢ·standoffᵢ , heading → centre , gain
+  face_gain(i) = max(0, ½·ln det( I₆ + Σ·ΔI(i) ))                            (RAW D-optimal, nats — the RANKING)
+best           = argmax_i face_gain(i)                                       (most-informative face, by RAW gain)
+epistemic_gain = p_observable · min( face_gain(best), adequacy_gap )         (SCALAR value — adequacy-BOUNDED)
+emit  ranked face_gain[·]  +  hint pose v* = face_best.centre + n·standoff, heading → centre  +  epistemic_gain
 ```
 
 D-optimal on the full Σ automatically targets the viewpoint that most shrinks the **dominant
@@ -450,11 +451,17 @@ adequacy_gap = Σⱼ max(0, ½·ln( Σⱼⱼ / Σ*ⱼⱼ ))
 ```
 
 Per-DOF clamp (not the full `½ ln detΣ/detΣ*`) on purpose — the consumer needs *each* of `w,h,yaw` within
-tolerance, so an over-resolved DOF must not mask an under-resolved one. The single-view gain is bounded
-at this gap: information beyond `Σ*` is worthless to the consumer, so an already-adequate table stops
-being attractive and the affordance goes quiet as gain→0 — a "done" set by the consumer's precision
-demand, not a tuned Σ bound. (`Σ*` is currently a placeholder `[0.02,0.02,0.02,0.02,0.02,0.05]`; it
-should be PUBLISHED by the consuming grasp/place affordance — see §10.2.)
+tolerance, so an over-resolved DOF must not mask an under-resolved one.
+
+**The bound lives on the SCALAR value, not on the per-face ranking.** Only `epistemic_gain` (the affordance's
+scalar worth) is clamped at the gap: information beyond `Σ*` is worthless to the consumer, so an
+already-adequate table stops being attractive and the affordance goes quiet as `epistemic_gain → 0` — a "done"
+set by the consumer's precision demand, not a tuned Σ bound. The **per-face** gains are published **raw
+(unbounded)**: because each face's single-view info typically *exceeds* the remaining gap, clamping every face
+at the gap makes all four tie (and pins `best` to the first face), erasing the ranking the controller needs to
+choose a feasible face. So `argmax` and the published `face_gain[·]` use the raw D-optimal gain; the adequacy
+bound applies only to the scalar. (`Σ*` is currently a placeholder `[0.02,0.02,0.02,0.02,0.02,0.05]`; it should
+be PUBLISHED by the consuming grasp/place affordance — see §10.2.)
 
 ### 10.2 The object-relative viewpoint affordance (producer↔controller contract)
 
@@ -466,8 +473,10 @@ producer (this agent) declares **what view it needs in the object frame**; the c
 default + per-node overrides).
 
 The declared view is, per candidate face:
-- a **ranked set of candidate faces**, each with its D-optimal gain `ΔH` in **nats** (the information
-  that face buys);
+- a **ranked set of candidate faces**, each with its **raw** D-optimal gain `ΔH` in **nats** (the ranking
+  the controller uses to pick a feasible face; opposite faces tie by the box's 2-fold face symmetry, so
+  feasibility breaks the ±). The affordance's *scalar* `epistemic_gain` is the winning face's gain
+  **adequacy-bounded** (§10.1) — ranking is raw, worth is bounded;
 - a **stand-off band** (min stand-off ≤ d ≤ FoV-fit distance) so the face frames in the camera;
 - a **framing-fill** target (`table_roi_fill` → advance) and **ROI-centring** error
   (`table_roi_offset` → base yaw/side), plus a **validity gate** (`table_roi_valid`);

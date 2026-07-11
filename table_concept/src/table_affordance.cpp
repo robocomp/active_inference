@@ -181,6 +181,34 @@ void TableAffordance::create_node(const EpistemicProposal& prop)
                aff_name, affordance_node_id_,
                prop.epistemic_target_x_m, prop.epistemic_target_y_m,
                prop.epistemic_target_yaw_rad, prop.epistemic_gain);
+
+    // Self-check (producer side): read the object-relative viewpoint constraint back off the node we just
+    // inserted and validate the round-trip + value sanity — faces↔gains parity (4 for a table), finite
+    // non-negative gains, Σ* of size 6, ordered stand-off band. Fires once per affordance birth; a MISMATCH
+    // means a serialization or value bug at the source (before it ever crosses the DSR boundary).
+    if (auto rb = G_->get_node(affordance_node_id_); rb.has_value())
+    {
+        const auto vc = rc::affordance::read_viewpoint(rb.value());
+        bool gains_ok = not vc.face_gains.empty();
+        for (const float g : vc.face_gains)
+            if (not (std::isfinite(g) and g >= 0.0f)) gains_ok = false;
+        const bool ok = vc.object_relative and vc.faces.size() == 4
+                    and vc.face_gains.size() == 4 and gains_ok
+                    and vc.sigma_star.size() == 6 and vc.standoff_min_m <= vc.standoff_max_m;
+        if (ok)
+            std::print("[affordance-selfcheck] '{}' viewpoint OK: gains(+x,-x,+y,-y)=[{:.2f},{:.2f},{:.2f},{:.2f}] "
+                       "standoff=[{:.2f},{:.2f}] fill={:.2f} σ*=[{:.2f},{:.2f},{:.2f},{:.2f},{:.2f},{:.2f}]\n",
+                       table_node_name_,
+                       vc.face_gains[0], vc.face_gains[1], vc.face_gains[2], vc.face_gains[3],
+                       vc.standoff_min_m, vc.standoff_max_m, vc.framing_fill,
+                       vc.sigma_star[0], vc.sigma_star[1], vc.sigma_star[2],
+                       vc.sigma_star[3], vc.sigma_star[4], vc.sigma_star[5]);
+        else
+            std::print("[affordance-selfcheck] '{}' viewpoint MISMATCH: object_relative={} faces={} gains={} "
+                       "σ*={} standoff=[{:.2f},{:.2f}]\n",
+                       table_node_name_, vc.object_relative, vc.faces.size(), vc.face_gains.size(),
+                       vc.sigma_star.size(), vc.standoff_min_m, vc.standoff_max_m);
+    }
 }
 
 void TableAffordance::update_node(const EpistemicProposal& prop)

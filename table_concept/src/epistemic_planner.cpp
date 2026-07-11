@@ -110,28 +110,32 @@ EpistemicProposal EpistemicPlanner::compute(const TableBelief& belief, float lat
     // Score each face by the D-optimal expected entropy reduction on Σ, with a range-aware R per face.
     const Eigen::Matrix<float, 6, 6> I6 = Eigen::Matrix<float, 6, 6>::Identity();
     int   best_idx      = 0;
-    float best_gain     = -std::numeric_limits<float>::max();
+    float best_raw      = -std::numeric_limits<float>::max();
     float best_standoff = kMinimumStandOffM;
-    std::array<float, 4> face_gain{};
+    // RAW per-face D-optimal gain (nats), UNBOUNDED — this is the RANKING the controller uses to choose a
+    // feasible face, so it must NOT be adequacy-clamped. Each face's single-view info typically EXCEEDS the
+    // remaining gap, so clamping every face at the gap made all four tie (the degenerate ranked-set that
+    // erased the controller's basis to prefer one face). The adequacy bound belongs on the SCALAR value below.
+    std::array<float, 4> face_raw{};
     for (int i = 0; i < 4; ++i)
     {
         const float standoff = standoff_for(faces[i].half_span);
         const float Ri = sigma_base * sigma_base + (lat_rate * standoff) * (lat_rate * standoff);
         const auto  dI = belief.predicted_information(sample_face_surface(s, i), Ri);
         const float det  = (I6 + S * dI).determinant();
-        const float raw_gain = 0.5f * std::log(std::max(1e-9f, det));   // single-view D-optimal info (nats)
-        // BOUND the single-view gain at the remaining adequacy gap: information beyond Σ* is worthless to
-        // the consumer, so an already-adequate / over-resolved table stops being attractive. P(observable |
-        // destination): the table is made detectable BY going to the proposed standoff (the chicken-and-egg
-        // — a distant unresolved table has ~0 P(detect) from HERE but ~1 from the destination). ★hook = 1.0
-        // (the standoff is a framed viewpoint by construction); wire a reachability/occlusion model later.
-        constexpr float p_observable = 1.0f;
-        const float gain = p_observable * std::max(0.0f, std::min(raw_gain, adequacy_gap));
-        face_gain[i] = gain;
-        if (gain > best_gain) { best_gain = gain; best_idx = i; best_standoff = standoff; }
+        const float raw_gain = std::max(0.0f, 0.5f * std::log(std::max(1e-9f, det)));   // single-view D-optimal info (nats)
+        face_raw[i] = raw_gain;
+        if (raw_gain > best_raw) { best_raw = raw_gain; best_idx = i; best_standoff = standoff; }
     }
-    if (!std::isfinite(best_gain))   // low-but-finite gain is NOT withdrawn (controller ranks it low)
+    if (!std::isfinite(best_raw))   // low-but-finite gain is NOT withdrawn (controller ranks it low)
         return {};
+
+    // SCALAR affordance value (epistemic_gain): the winning face's info BOUNDED by the adequacy gap to Σ*, so
+    // it → 0 as the belief reaches the consumer's precision — a threshold-free "done" AND the cross-affordance
+    // EFE currency. Information beyond Σ* is worthless to the consumer, so an adequate table stops attracting.
+    // p_observable hook = 1.0 (the standoff is a framed viewpoint by construction); wire reachability later.
+    constexpr float p_observable = 1.0f;
+    const float best_gain = p_observable * std::min(best_raw, adequacy_gap);
 
     // Verification readout (throttled): the chosen face should be perpendicular to Σ's dominant
     // uncertainty direction — e.g. dom-unc = h ⇒ a ±y face wins. Confirms the NBV attacks the worst DOF.
@@ -150,9 +154,9 @@ EpistemicProposal EpistemicPlanner::compute(const TableBelief& belief, float lat
             const float n = std::sqrt(std::max(0.0f, S(j, j))) / ref[j];
             if (n > best) { best = n; dom = j; }
         }
-        std::print("[epistemic-NBV] face={} gain={:.3f} adq_gap={:.3f} | Σ dom-unc={} σ={:.3f}{} | gains +x={:.2f} -x={:.2f} +y={:.2f} -y={:.2f}\n",
-                   fn[best_idx], best_gain, adequacy_gap, dof[dom], std::sqrt(std::max(0.0f, S(dom, dom))), (dom == 5 ? "rad" : "m"),
-                   face_gain[0], face_gain[1], face_gain[2], face_gain[3]);
+        std::print("[epistemic-NBV] face={} gain={:.3f}(raw {:.3f}) adq_gap={:.3f} | Σ dom-unc={} σ={:.3f}{} | raw +x={:.2f} -x={:.2f} +y={:.2f} -y={:.2f}\n",
+                   fn[best_idx], best_gain, best_raw, adequacy_gap, dof[dom], std::sqrt(std::max(0.0f, S(dom, dom))), (dom == 5 ? "rad" : "m"),
+                   face_raw[0], face_raw[1], face_raw[2], face_raw[3]);
     }
 
     const auto& f = faces[best_idx];
@@ -161,12 +165,13 @@ EpistemicProposal EpistemicPlanner::compute(const TableBelief& belief, float lat
     const float yaw_to_face = std::atan2(s.cy - vy, s.cx - vx);
 
     EpistemicProposal proposal{vx, vy, yaw_to_face, best_gain, true};
-    // Object-relative viewpoint constraint (authoritative): publish ALL four faces with their adequacy-
-    // bounded gains + the sensor-model stand-off band + framing + Σ*, so the controller resolves a
-    // collision-free reachable face itself (a blocked argmax face falls back to the next reachable one).
-    // Face order matches the [+x,-x,+y,-y] sampling order above.
+    // Object-relative viewpoint constraint (authoritative): publish ALL four faces with their RAW per-face
+    // gains (the ranking — NOT adequacy-clamped, else they tie) + the sensor-model stand-off band + framing
+    // + Σ*, so the controller picks the best FEASIBLE face itself (a blocked argmax face falls back to the
+    // next reachable one). The affordance's scalar epistemic_gain stays adequacy-bounded (cross-affordance
+    // selection + "done"). Face order matches the [+x,-x,+y,-y] sampling order above.
     constexpr float kFramingFill = 0.45f;   // FoV framing sweet spot (matches the table servo contract's advance target)
-    proposal.face_gains    = face_gain;
+    proposal.face_gains    = face_raw;
     proposal.standoff_min_m = kMinimumStandOffM;
     proposal.standoff_max_m = max_stand_off;
     proposal.framing_fill   = kFramingFill;
