@@ -21,6 +21,7 @@ LIST(APPEND SOURCES
   ../../common/media_transport/generated/idl/imu_frameTypeObjectSupport.cxx
   ../src/scene_processor.cpp
   ../src/media_plane_source.cpp
+  ../src/zed_frame_aligner.cpp
   ../src/model_projection_overlay.cpp
   ../src/ricoh_projection_overlay.cpp
   ../src/yolo_processor.cpp
@@ -38,6 +39,7 @@ LIST(APPEND HEADERS
   ../src/graph_publisher.h
   ../src/scene_processor.h
   ../src/media_plane_source.h
+  ../src/zed_frame_aligner.h
   ../src/yolo_processor.h
   ../src/yolo_seg_detector.h
   ../src/ricoh_yolo_worker.h
