@@ -1,5 +1,11 @@
 /*
  * table_scene_graph.cpp — DSR node/RT I/O for table_concept.
+ *
+ * Implements TableSceneGraph: births "table_N" nodes from tracker detections and, each cycle, writes the
+ * fitted model back to the graph — geometry attrs + mesh + residual/voxel-bank export + free energy, the
+ * room→table RT pose (dead-banded), and the 6×6 pose covariance mapped from the belief Σ (with a flat
+ * roll/pitch prior). Writes self-gate on a meaningful geometry/uncertainty change to avoid per-cycle edge
+ * churn. All graph access is on the main thread (SpecificWorker's compute path).
  */
 
 #include "table_scene_graph.h"
@@ -22,6 +28,8 @@ TableSceneGraph::TableSceneGraph(std::shared_ptr<DSR::DSRGraph> graph,
                                  std::function<void()> relayout)
     : G_(std::move(graph)), rt_api_(rt_api), cfg_(cfg), relayout_(std::move(relayout))
 {}
+
+// ─── Node birth ──────────────────────────────────────────────────────────────────────────────────
 
 std::uint64_t TableSceneGraph::create_instance_from_detection(const Eigen::Vector3f& centroid_room,
                                                               std::uint64_t room_node_id)
@@ -66,6 +74,9 @@ std::uint64_t TableSceneGraph::create_instance_from_detection(const Eigen::Vecto
     return id_opt.value();
 }
 
+// ─── Model publish (geometry · mesh · residual/voxel export · RT · covariance) ───────────────────
+
+// Resolve the table node by id and write the fitted model to it (false if the node is gone).
 bool TableSceneGraph::persist_table_belief(TableInstance& inst, std::uint64_t node_id,
                                            std::uint64_t room_id, float free_energy)
 {
@@ -77,6 +88,9 @@ bool TableSceneGraph::persist_table_belief(TableInstance& inst, std::uint64_t no
     return true;
 }
 
+// Write the full fitted model onto the node + RT edge: geometry attrs + mesh (gated on a real geometry move),
+// free energy, voxel-bank + residual point exports, the active-perception ROI/detection channel, then the RT
+// pose and pose covariance. The mesh gate freezes the voxelizer render once settled to stop viewer jitter.
 void TableSceneGraph::step_write_model(TableInstance& inst, DSR::Node& node,
                                        std::uint64_t room_id, float free_energy)
 {
@@ -151,6 +165,8 @@ void TableSceneGraph::step_write_model(TableInstance& inst, DSR::Node& node,
     write_rt_covariance(room_id, inst, geometry_changed);
 }
 
+// Map the belief's 6×6 Σ [cx,cy,H,w,h,yaw] onto the room→table RT edge covariance (+ chain term), with
+// roll/pitch pinned small by the flat-on-the-floor prior and yaw as the marginal (mode-entropy) variance.
 void TableSceneGraph::write_rt_covariance(std::uint64_t room_id, TableInstance& inst, bool force)
 {
     if (room_id == 0)
@@ -219,6 +235,8 @@ void TableSceneGraph::write_rt_covariance(std::uint64_t room_id, TableInstance& 
                57.2958f * std::sqrt(std::max(0.0f, vyaw)));
 }
 
+// ─── Mesh ────────────────────────────────────────────────────────────────────────────────────────
+
 std::vector<float> TableSceneGraph::make_table_mesh(const TableState& s)
 {
     // Flat triangle list (room frame): 1 top slab + 4 square legs = 5 boxes × 12 tri.
@@ -277,6 +295,9 @@ void TableSceneGraph::write_table_mesh(TableInstance& inst, DSR::Node& node)
     G_->add_or_modify_attrib_local<mesh_vertices_att>(node, verts);
 }
 
+// ─── RT pose ─────────────────────────────────────────────────────────────────────────────────────
+
+// Write the room→table RT edge (origin = base on the floor, z=0; yaw only), dead-banded below ~5 cm.
 void TableSceneGraph::write_rt_pose(std::uint64_t room_id, TableInstance& inst)
 {
     if (room_id == 0 or not rt_api_)
@@ -307,6 +328,8 @@ void TableSceneGraph::write_rt_pose(std::uint64_t room_id, TableInstance& inst)
     inst.last_written_cx = s.cx;
     inst.last_written_cy = s.cy;
 }
+
+// ─── Epistemic proposal ──────────────────────────────────────────────────────────────────────────
 
 void TableSceneGraph::write_epistemic_proposal(DSR::Node& node, const EpistemicProposal& prop)
 {

@@ -24,6 +24,8 @@
 #include "yolo_human.h"
 #include "yolo_semantic.h"
 #include "graph_publisher.h"
+#include <dsr/api/dsr_camera_api.h>   // ricoh CameraAPI for the main-thread lidar depth-fill (reproject_cloud)
+#include "../../common/depth_projection/depth_projection.h"   // lidar→panorama reprojection + mask depth scoring
 #ifdef emit
 #undef emit
 #endif
@@ -31,8 +33,6 @@
 #include "yolo_viewer.h"
 #include "image_popup_viewer.h"
 #include "ricoh_yolo_worker.h"
-#include <dsr/api/dsr_camera_api.h>   // ricoh unproject for the detection→bearing publisher (one truth)
-#include "../../common/depth_projection/depth_projection.h"   // lidar→panorama reprojection + mask depth scoring
 #include <dsr/gui/viewers/graph_viewer/graph_viewer.h>
 #include <QHBoxLayout>
 #include <QPushButton>
@@ -238,6 +238,8 @@ void SpecificWorker::initialize()
         ricoh_worker_cfg.detect_config.merge_iou       = params.RICOH_YOLO_MERGE_IOU;
         ricoh_worker_cfg.target_period_ms              = params.RICOH_YOLO_THREAD_PERIOD_MS;
         ricoh_worker_cfg.perf_log                      = params.PERF_LOG;
+        ricoh_worker_cfg.publish_bearings              = params.RICOH_PUBLISH_MASKS;   // [step 1] bearings on the worker thread
+        ricoh_worker_cfg.azimuth_tune_deg              = params.RICOH_AZIMUTH_TUNE_DEG;
         if (!ricoh_yolo_worker_->start(scene_processor.get(), ricoh_worker_cfg))
         {
             std::println("[Ricoh] 360-YOLO worker failed to start (media plane not ready?) — disabling");
@@ -595,28 +597,28 @@ void SpecificWorker::compute()
     {
         const auto perf_pub0 = std::chrono::steady_clock::now();
 
-        // RGB-360 (ricoh) peripheral detections → shared "masks" node as NO-DEPTH bearing slices (Part B,
-        // RICOH_360_PERIPHERAL_DETECTION.md). The RicohYoloWorker (own thread) already produced panorama-
-        // pixel SegDetections; convert each to a room-frame bearing here, where we hold the robot pose.
+        // RGB-360 (ricoh) peripheral detections → shared "masks" node (Part B, RICOH_360_PERIPHERAL_DETECTION.md).
+        // SPLIT across threads: the RicohYoloWorker resolves each detection's room-frame BEARING on its own
+        // thread (own InnerEigenAPI, room<-ricoh at the panorama stamp — ricoh_yolo_worker.cpp::compute_bearings);
+        // the LiDAR DEPTH-FILL runs HERE on the main thread, where the lidar cloud lives, augmenting those
+        // bearings in place (has_depth=1 + support points + mask_depth_var). d.mask + bearing are a 1:1 snapshot.
         std::vector<BearingDetection> bearing_dets;
-        if (params.RICOH_PUBLISH_MASKS and ricoh_yolo_worker_ and frame->ricoh_valid)
+        if (params.RICOH_PUBLISH_MASKS and ricoh_yolo_worker_)
         {
-            const cv::Mat pano = ricoh_yolo_worker_->latest_bgr();
-            // Lazily create + cache the ricoh CameraAPI (equirectangular; reads the panorama azimuth
-            // convention from the ricoh node's cam_equirect_* graph intrinsics — single source of truth).
-            if (not ricoh_camera_api_)
-                if (const auto rn = G->get_node("ricoh"); rn.has_value())
-                    ricoh_camera_api_ = G->get_camera_api(rn.value());
-            if (not pano.empty() and ricoh_camera_api_)
-            {
-                const double row_horizon = pano.rows * 0.5;   // horizon row → horizontal bearing
+            std::vector<SegDetection> ricoh_dets;
+            ricoh_yolo_worker_->latest_detections_and_bearings(ricoh_dets, bearing_dets);
 
-                // Reproject the lidar into the panorama ONCE (helios-only by default: co-located with the
-                // ricoh ⇒ least occlusion parallax). Gated by Ricoh.mask_depth. Empty otherwise ⇒ masks
-                // stay bearing-only, unchanged.
-                std::vector<rc::depth::ProjectedPoint> lidar_pano;
-                if (params.RICOH_MASK_DEPTH and not frame->lidar_points_room.empty())
+            if (params.RICOH_MASK_DEPTH and frame->ricoh_valid
+                and not bearing_dets.empty() and bearing_dets.size() == ricoh_dets.size()
+                and not frame->lidar_points_room.empty())
+            {
+                if (not ricoh_camera_api_)
+                    if (const auto rn = G->get_node("ricoh"); rn.has_value())
+                        ricoh_camera_api_ = G->get_camera_api(rn.value());
+                if (ricoh_camera_api_)
                 {
+                    // Reproject the lidar into the panorama ONCE (helios-only by default: co-located with the
+                    // ricoh ⇒ least occlusion parallax).
                     std::vector<Eigen::Vector3f> cloud;
                     cloud.reserve(frame->lidar_points_room.size());
                     for (std::size_t i = 0; i < frame->lidar_points_room.size(); ++i)
@@ -626,31 +628,18 @@ void SpecificWorker::compute()
                             continue;   // skip bpearl (plane 1)
                         cloud.push_back(frame->lidar_points_room[i]);
                     }
-                    lidar_pano = rc::depth::reproject_cloud(cloud, *ricoh_camera_api_, frame->room_T_ricoh.inverse());
-                }
+                    const auto lidar_pano =
+                        rc::depth::reproject_cloud(cloud, *ricoh_camera_api_, frame->room_T_ricoh.inverse());
 
-                for (const auto& d : ricoh_yolo_worker_->latest_detections())
-                {
-                    const double col_c = static_cast<double>(d.bbox.x) + 0.5 * static_cast<double>(d.bbox.width);
-                    // Panorama column → ray in the ricoh frame (CameraAPI unproject) → room frame → bearing.
-                    // No manual sign/offset/robot-yaw: the extrinsic is room_T_ricoh, the intrinsic is in the node.
-                    const Eigen::Vector3d ray_room =
-                        frame->room_T_ricoh.linear() * ricoh_camera_api_->ray_from_pixel(col_c, row_horizon);
-                    const float az = std::atan2(static_cast<float>(ray_room.y()), static_cast<float>(ray_room.x()));
-                    BearingDetection bd{d.label, static_cast<float>(d.class_id), d.confidence, az};
-
-                    // Depth-fill from the reprojected lidar. TWO gates keep FLOOR out of the object's
-                    // support points (the lidar-ring arcs that used to spill onto the floor behind tables):
-                    //   (1) SILHOUETTE: select by the segmentation MASK, not the loose bbox — the bbox is a
-                    //       rectangle around the object whose surrounding floor rings the equirect/cylindrical
-                    //       reprojection drops straight in; the mask is tight on the object.
-                    //   (2) FOREGROUND: the object occludes the floor behind it, so anchor on the NEAREST
-                    //       silhouette surface (a low range percentile, robust to a few nearer stragglers) and
-                    //       keep only returns within RICOH_MASK_FG_BAND_M of it — the occluded floor-behind and
-                    //       under-object floor are farther along the ray → dropped. Physical object-depth prior,
-                    //       not a tuning cutoff (see [[no-threshold-patches]]).
-                    if (not lidar_pano.empty() and not d.mask.empty())
+                    for (std::size_t di = 0; di < ricoh_dets.size() and not lidar_pano.empty(); ++di)
                     {
+                        const auto& d = ricoh_dets[di];
+                        if (d.mask.empty()) continue;
+                        // TWO gates keep FLOOR out of the object's support points:
+                        //   (1) SILHOUETTE: select by the segmentation MASK (tight on the object), not the bbox.
+                        //   (2) FOREGROUND: anchor on the NEAREST silhouette surface (low range percentile) and
+                        //       keep only returns within RICOH_MASK_FG_BAND_M — occluded floor-behind is farther
+                        //       along the ray → dropped. Physical object-depth prior (see [[no-threshold-patches]]).
                         std::vector<rc::depth::ProjectedPoint> hits;
                         for (const auto& p : lidar_pano)
                         {
@@ -662,36 +651,34 @@ void SpecificWorker::compute()
                                 continue;
                             hits.push_back(p);
                         }
-                        if (not hits.empty())
+                        if (hits.empty()) continue;
+                        std::vector<float> rr;
+                        rr.reserve(hits.size());
+                        for (const auto& h : hits) rr.push_back(h.range);
+                        const std::size_t k = rr.size() / 10;                // ~10th-percentile = near surface
+                        std::nth_element(rr.begin(), rr.begin() + k, rr.end());
+                        const float r_near = rr[k];
+                        std::vector<rc::depth::ProjectedPoint> fg;
+                        fg.reserve(hits.size());
+                        for (const auto& h : hits)
+                            if (h.range - r_near <= params.RICOH_MASK_FG_BAND_M)   // drop the far (floor) tail
+                                fg.push_back(h);
+                        if (const auto md = rc::depth::score_mask_depth(fg); md.has_depth)
                         {
-                            std::vector<float> rr;
-                            rr.reserve(hits.size());
-                            for (const auto& h : hits) rr.push_back(h.range);
-                            const std::size_t k = rr.size() / 10;                // ~10th-percentile = near surface
-                            std::nth_element(rr.begin(), rr.begin() + k, rr.end());
-                            const float r_near = rr[k];
-                            std::vector<rc::depth::ProjectedPoint> fg;
-                            fg.reserve(hits.size());
-                            for (const auto& h : hits)
-                                if (h.range - r_near <= params.RICOH_MASK_FG_BAND_M)   // drop the far (floor) tail
-                                    fg.push_back(h);
-                            if (const auto md = rc::depth::score_mask_depth(fg); md.has_depth)
+                            BearingDetection& bd = bearing_dets[di];   // augment the worker-computed bearing
+                            bd.has_lidar_depth = true;
+                            bd.range_var = md.range_var;
+                            bd.support_room.reserve(fg.size());
+                            Eigen::Vector3f sum = Eigen::Vector3f::Zero();
+                            for (const auto& h : fg)   // ricoh-frame hit → room frame
                             {
-                                bd.has_lidar_depth = true;
-                                bd.range_var = md.range_var;
-                                bd.support_room.reserve(fg.size());
-                                Eigen::Vector3f sum = Eigen::Vector3f::Zero();
-                                for (const auto& h : fg)   // ricoh-frame hit → room frame (round-trips to the source point)
-                                {
-                                    const Eigen::Vector3f pr = (frame->room_T_ricoh * h.xyz_cam.cast<double>()).cast<float>();
-                                    bd.support_room.push_back(pr);
-                                    sum += pr;
-                                }
-                                bd.centroid_room = sum / static_cast<float>(fg.size());
+                                const Eigen::Vector3f pr = (frame->room_T_ricoh * h.xyz_cam.cast<double>()).cast<float>();
+                                bd.support_room.push_back(pr);
+                                sum += pr;
                             }
+                            bd.centroid_room = sum / static_cast<float>(fg.size());
                         }
                     }
-                    bearing_dets.push_back(std::move(bd));
                 }
             }
         }
@@ -764,10 +751,12 @@ std::optional<SpecificWorker::SceneFrame> SpecificWorker::process_scene_frame(FP
     scene_processor->check_input_stream_startup_status();
     const auto [room_name, robot_name] = scene_processor->get_room_robot_names_for_compute();
 
-    // Diagnostic: throttled (every ~2s) report of which gate drops the frame.
+    // Diagnostic: throttled (every ~2s) report of which gate drops the frame. Verbose-only.
     static auto last_gate_report = std::chrono::steady_clock::now();
     const auto gate_log = [&](const char* gate)
     {
+        if (not verbose_debug_)
+            return;
         const auto now = std::chrono::steady_clock::now();
         if (now - last_gate_report >= std::chrono::seconds(2))
         {
@@ -791,7 +780,6 @@ std::optional<SpecificWorker::SceneFrame> SpecificWorker::process_scene_frame(FP
     if (!room_T_zed.has_value())
         { gate_log("get_room_zed_transform"); return std::nullopt; }
 
-    scene_processor->log_room_robot_pose_periodic(room_T_robot.value());
     scene_processor->mark_room_rt_ready();
     const auto graph_object_boxes = scene_processor->get_graph_object_boxes(room_name, frame_ts_ms);
 
@@ -805,8 +793,9 @@ std::optional<SpecificWorker::SceneFrame> SpecificWorker::process_scene_frame(FP
         // [RT-clamp telemetry] Is the scan stamp AHEAD of the newest room<-robot RT block? Then
         // InterpolatedRT clamps at the leading edge (DSR does not extrapolate velocity) and the cloud
         // lags/steps until the next RT arrives — the shimmer source when room's RT rate < LiDAR rate.
-        // Logs how often the scan outruns the RT and by how much, every 5 s.
-        if (G && G->get_rt_api() && lidar_data->timestamp_ms > 0)
+        // Logs how often the scan outruns the RT and by how much, every 5 s. Verbose-only — the
+        // per-cycle graph reads (get_node ×2 + get_edge_RT + attrib) are skipped entirely otherwise.
+        if (verbose_debug_ && G && G->get_rt_api() && lidar_data->timestamp_ms > 0)
         {
             static std::uint64_t n_total = 0, n_clamp = 0, lag_sum = 0, lag_max = 0;
             static auto last_rep = std::chrono::steady_clock::now();

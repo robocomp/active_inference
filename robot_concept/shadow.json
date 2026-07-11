@@ -563,7 +563,7 @@
      },
      "cam_projection": {
       "type": 0,
-      "value": "cylindrical"
+      "value": "equirectangular"
      },
      "color": {
       "type": 0,

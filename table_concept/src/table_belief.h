@@ -23,10 +23,12 @@
 namespace rc
 {
 
-// 2D footprint second-moment measurement of a top-band point cloud: centroid, principal-axis angle (major
-// axis, wrapped to (−π/2, π/2]), and the FULL extents of the equivalent uniform rectangle (√(12·λ) of the
-// inertia-tensor eigenvalues). ok=false when too few points fell in the band. Model-independent (the only
-// model input is the z-band that selects the tabletop plane) — this is what breaks the clutter-escape trap.
+// 2D footprint second-moment of a top-band point cloud (yaw + full extent from the tabletop's own shape).
+//
+// Fields: 2D centroid, principal-axis angle (major axis, wrapped to (−π/2, π/2]), and the FULL extents of the
+// equivalent uniform rectangle (√(12·λ) of the inertia-tensor eigenvalues). ok=false when too few points fell
+// in the band. Model-independent (the only model input is the z-band that selects the tabletop plane) — this
+// is the global statistic that breaks the clutter-escape trap.
 struct FootprintMoment
 {
     bool  ok = false;
@@ -36,6 +38,7 @@ struct FootprintMoment
     float phi = 0.0f;             // major-axis angle (rad), atan2 in (−π/2, π/2]
 };
 
+// Fitted table state θ = [cx, cy, H, w, h, yaw] (room frame; H = tabletop height, canonical w≥h).
 struct TableBeliefState
 {
     float cx = 0.0f, cy = 0.0f, H = 0.75f, w = 1.0f, h = 0.6f, yaw = 0.0f;
@@ -45,45 +48,51 @@ struct TableBeliefState
     { return {v(0), v(1), v(2), v(3), v(4), v(5)}; }
 };
 
+// Belief parameters: fixed geometry, the observation/mixture model, priors, and the transition +
+// common-mode covariances. All are measurement-model stds/precisions (never σ-floors or gates).
 struct TableBeliefParams
 {
-    // Geometry (fixed)
+    // Geometry (fixed, not fitted)
     float top_thickness = 0.03f;
     float leg_radius    = 0.025f;
 
     // Observation model
-    float sigma_base_m  = 0.03f;   // base on-surface noise std (m); R = σ² (+ motion_var + …) per point
-    float clutter_frac  = 0.10f;   // ε: prior weight of the uniform clutter component
-    float clutter_scale_m = 0.12f; // a point further than ~this from every surface is likely clutter
+    float sigma_base_m    = 0.03f;   // base on-surface noise std (m); R = σ² (+ motion_var + …) per point
+    float clutter_frac    = 0.10f;   // ε: prior weight of the uniform clutter component
+    float clutter_scale_m = 0.12f;   // a point further than ~this from every surface is likely clutter
 
-    // Coverage / traction (EXISTENCE_BELIEF_PLAN.md, table_1.png): on-plane mask points the mixture ceded to
-    // the CLUTTER component still exert a robust, GROW-ONLY pull on the top slab, so a model UNDER-covering a
-    // large mask is pulled out to explain it instead of parking with the excess dumped to clutter for free (the
-    // escape-valve). Weight = coverage_precision·(top-plane compat)·(clutter resp)·Cauchy(outside dist).
-    // Self-bounded (sdf→0 when covered), on-plane-gated (off-plane contamination ignored), reclaims exactly the
-    // escaped points. 0 = OFF. The honest anti-contamination bound is the free-space carve; robust interim.
+    // Coverage / traction factor: grow-only extent pull from clutter-ceded on-plane mask points. 0 = OFF.
+    //
+    // (EXISTENCE_BELIEF_PLAN.md, table_1.png.) On-plane mask points the mixture ceded to the CLUTTER component
+    // still exert a robust, GROW-ONLY pull on the top slab, so a model UNDER-covering a large mask is pulled
+    // out to explain it instead of parking with the excess dumped to clutter for free (the escape-valve).
+    // Weight = coverage_precision·(top-plane compat)·(clutter resp)·Cauchy(outside dist). Self-bounded
+    // (sdf→0 when covered), on-plane-gated (off-plane contamination ignored), reclaims exactly the escaped
+    // points. The honest anti-contamination bound is the free-space carve; this is the robust interim.
     float coverage_precision  = 0.0f;
     float coverage_robust_c_m = 0.15f;
 
-    // Free-space / VACATE (EXISTENCE_BELIEF_PLAN.md Step 4): the shrink-only counter-force that BOUNDS the
-    // grow-only coverage term. A LiDAR beam that passes THROUGH the top-slab z-band (endpoint beyond the far
-    // face) proves that crossing is empty, so its midpoint (inside the slab, sdf_top < 0) exerts a robust pull
-    // that retreats the boundary. Occupy-where-masked (coverage) + vacate-where-through (this) settle the
-    // extent where camera and LiDAR AGREE — coverage can no longer inflate onto clutter. 0 = OFF. Reads the
+    // Free-space / VACATE factor: shrink-only counter-force that BOUNDS the grow-only coverage term. 0 = OFF.
+    //
+    // (EXISTENCE_BELIEF_PLAN.md Step 4.) A LiDAR beam that passes THROUGH the top-slab z-band (endpoint beyond
+    // the far face) proves that crossing is empty, so its midpoint (inside the slab, sdf_top < 0) exerts a
+    // robust pull that retreats the boundary. Occupy-where-masked (coverage) + vacate-where-through (this)
+    // settle the extent where camera and LiDAR AGREE — coverage can no longer inflate onto clutter. Reads the
     // frame's LiDAR endpoints/origin (same sweep the range factor uses); saturates via the engine common-mode.
     float free_space_precision = 0.0f;
 
-    // Footprint SECOND-MOMENT factor (yaw/extent from the top surface's own 2D shape). The per-point SDF
-    // mixture cannot rotate/resize a table whose dense mask is bigger or yawed than the current box: interior
-    // top points have ∂sdf/∂yaw≈∂sdf/∂w≈0 (flat face), and the outboard rim/leg points that DO carry the signal
-    // fall outside the box → the mixture routes them to CLUTTER (zero gradient). The escape is a GLOBAL statistic:
-    // the top-band cloud's 2D centroid + inertia tensor is a sufficient statistic of the filled-rectangle model.
-    // Its principal-axis angle measures yaw, its eigen-extents (full = √(12·λ)) measure w,h — folded as a linear
-    // Gaussian factor on (w,h,yaw) into the SAME GN normal equations (so the engine's range-driven common-mode
-    // caps its per-frame authority — a far view still can't rotate a converged table; no manual gate). yaw
-    // precision scales with the extent ANISOTROPY (ext_major−ext_minor)/(sum): a near-square footprint carries no
-    // orientation info → 0 pull (resolve_orientation owns that flip). NOT applied to cx,cy (a partial view's
-    // centroid is biased; the mixture already fixes position). 0 = OFF. See the "stuck yaw" diagnosis (tables_5.png).
+    // Footprint SECOND-MOMENT factor: yaw/extent from the top surface's own 2D shape. 0 = OFF. (tables_5.png.)
+    //
+    // The per-point SDF mixture cannot rotate/resize a table whose dense mask is bigger or yawed than the
+    // current box: interior top points have ∂sdf/∂yaw≈∂sdf/∂w≈0 (flat face), and the outboard rim/leg points
+    // that DO carry the signal fall outside the box → the mixture routes them to CLUTTER (zero gradient). The
+    // escape is a GLOBAL statistic: the top-band cloud's 2D centroid + inertia tensor is a sufficient statistic
+    // of the filled-rectangle model. Its principal-axis angle measures yaw, its eigen-extents (full = √(12·λ))
+    // measure w,h — folded as a linear Gaussian factor on (w,h,yaw) into the SAME GN normal equations (so the
+    // engine's range-driven common-mode caps its per-frame authority — a far view still can't rotate a
+    // converged table; no manual gate). yaw precision scales with the extent ANISOTROPY (ext_major−ext_minor)/
+    // (sum): a near-square footprint carries no orientation info → 0 pull (resolve_orientation owns that flip).
+    // NOT applied to cx,cy (a partial view's centroid is biased; the mixture already fixes position).
     float footprint_moment_precision = 0.0f;
 
     // Priors

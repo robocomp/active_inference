@@ -1,5 +1,9 @@
 /*
- * table_affordance.cpp
+ * table_affordance.cpp  —  affordance-node lifecycle + controller-protocol state machine.
+ *
+ * Creates/refreshes/removes the per-table affordance DSR node, writes the epistemic target + the shared
+ * execution contract, and drives the idle→pending→executing→satisfied transitions off the controller-owned
+ * active_att / epistemic_pending_att flags observed on the node.
  */
 
 #include "table_affordance.h"

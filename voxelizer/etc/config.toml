@@ -50,7 +50,8 @@ stale_grace_ms       = 120000
 agent_info_period_ms = 1000
 
 [Owns]
-nodes    = ["voxels"]
+#nodes    = []   # voxelizer produces no owned graph node ("voxels" was vestigial — never created).
+                # Its real products (masks/skeleton, type semantic_grid) are cleaned by type on shutdown.
 
 
 [Component.Debug]
@@ -110,7 +111,8 @@ decimation = 2              # run the model every Nth cycle; reuse the last map 
 show_voxel_viewer = true
 show_yolo_viewer  = true
 show_ricoh_viewer = true   # creates the Ricoh360 button+popup (popup hidden until toggled)
-perf_log = true   # per-frame compute/yolo/pose timing -> etc/viewer_perf.csv
+perf_log = false   # per-frame compute/yolo/pose timing -> etc/viewer_perf.csv (diagnostic; flushes CSVs every
+                   # frame — leave OFF in production, flip true only to capture a timing trace)
 mask_depth_gate_band_m = 1.50  # ZED mask FOREGROUND gate: keep points within this depth band (m) of the mask's
                                # near surface; farther points = wall-behind bleed (RGB↔depth skew while moving) → dropped.
                                # Sized to the deepest object (table). Lower to cut closer walls; 0 disables.

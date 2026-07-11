@@ -1,5 +1,10 @@
 /*
- * common/mask_ingestor/mask_ingestor.cpp — shared YOLO "masks" DSR node reading.
+ * common/mask_ingestor/mask_ingestor.cpp  —  shared YOLO "masks" DSR node reader (implementation)
+ *
+ * SHARED across the concept agents: parses the voxelizer-written "masks" node into a MasksPacket (slices +
+ * support points + raw silhouette pixels + the per-mask corruption/range/bearing channels), optionally
+ * re-frames the support points src→target (pinned to the capture stamp, recomputing centroids/bboxes there),
+ * and serves the nearest slice of a requested label. Frame-agnostic; the caller chooses room vs camera frame.
  */
 
 #include "mask_ingestor.h"
@@ -12,10 +17,13 @@
 
 namespace rc {
 
+// ─── Construction / configuration ────────────────────────────────────────────────────────────────
+
 MaskIngestor::MaskIngestor(std::shared_ptr<DSR::DSRGraph> graph)
     : G_(std::move(graph))
 {}
 
+// Opt in (Part B) to reading camera-frame support points and transforming them src→target per capture stamp.
 void MaskIngestor::enable_frame_transform(DSR::InnerEigenAPI* inner_eigen,
                                           std::string source_frame, std::string target_frame)
 {
@@ -25,6 +33,9 @@ void MaskIngestor::enable_frame_transform(DSR::InnerEigenAPI* inner_eigen,
     transform_enabled_ = (inner_eigen_ != nullptr) and not src_frame_.empty() and not tgt_frame_.empty();
 }
 
+// ─── Ingest one masks frame ──────────────────────────────────────────────────────────────────────
+
+// Re-read the "masks" node; returns true only when a NEW frame (higher mask_frame_id) was ingested.
 bool MaskIngestor::refresh()
 {
     const auto masks_node_opt = G_->get_node("masks");
@@ -235,6 +246,9 @@ bool MaskIngestor::refresh()
     return true;
 }
 
+// ─── Queries ─────────────────────────────────────────────────────────────────────────────────────
+
+// Nearest depth-bearing slice of `label` to `query_centroid` (room frame); nullopt if none.
 std::optional<MaskIngestor::MaskSlice>
 MaskIngestor::select_nearest(const Eigen::Vector3f& query_centroid, std::string_view label) const
 {
@@ -261,6 +275,7 @@ MaskIngestor::select_nearest(const Eigen::Vector3f& query_centroid, std::string_
     return best;
 }
 
+// Read a flat float3 point attribute (candidate_pts_att / residual_pts_att) off a node into Vector3f's.
 std::vector<Eigen::Vector3f>
 MaskIngestor::read_pts_attrib(const DSR::Node& node, const std::string& att_name) const
 {

@@ -90,6 +90,9 @@ private:
     // Integrate the dense ZED depth FoV into the occupancy grid as a SECOND sensor (fills LiDAR-grazed
     // tabletops, stabilises the costmap). Camera ray origin → z-aware carve stays correct. Gated by grid_zed_enabled.
     void  integrate_zed_into_grid();
+    // Ego-motion evidence trust (0..1): 1 when still, <1 while the robot moves (pose jitter + blur). Scales the
+    // whole sweep's grid evidence so the stable accumulated field dominates during motion (motion-stability).
+    float compute_ego_reliability() const;
     // DIAGNOSTIC: append per-sweep grid dynamics to etc/grid_diag.csv (hits/misses/latched/released + the
     // "hit_then_cleared" smoking-gun for grazing beams erasing a horizontal surface they graze). Optionally
     // probes a rectangular region [GridProbe*] (e.g. a tabletop) reporting occupied/hit cells inside it.
@@ -132,6 +135,19 @@ private:
     std::unique_ptr<DSR::InnerEigenAPI>    inner_eigen_;
     std::unique_ptr<DSR::InnerGaussianAPI> gaussian_api_;
     std::uint64_t                          room_node_id_ = 0;
+
+    // Soft-collapse descriptor per modelled object (table/chair/cylinder): 2D footprint + top height + the σ's
+    // from the object's OWN published position covariance (⊕ sensor noise). A grid cell is explained by an
+    // object with probability Φ(−sdf2D/σ_xy)·Φ((z_top+noise−z_hi)/σ_z): a horizontal-surface hit (tabletop,
+    // z_hi≈z_top) collapses, while a return sitting ABOVE the surface (an on-table obstacle) does NOT. Filled
+    // each cycle by build_specialist_sdfs (mutable so it stays const).
+    struct SoftObject { float cx, cy, yaw, hx, hy, z_top, sigma_xy, sigma_z; };
+    mutable std::vector<SoftObject> soft_objects_;
+
+    // Temporally-smoothed PUBLISHED belief field (asymmetric EMA — see grid_field_ema_*). Persists across
+    // publishes; re-initialised if the grid extent changes. Display/planner-facing only; not the safety latch.
+    std::vector<float> pub_prob_ema_, pub_var_ema_;
+    float ego_reliability_ = 1.0f;   // this cycle's ego-motion evidence trust (compute_ego_reliability())
 
     // PHASE-0 REBUILD: the occupancy-grid safety layer (runs live as a diagnostic first, then becomes the
     // single source of obstacle truth once verified stable).

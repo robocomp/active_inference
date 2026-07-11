@@ -18,12 +18,14 @@
  */
 
 /**
- * table_concept — Active Inference agent for table instance detection and maintenance.
+ * specificworker.h — table_concept agent (orchestration + Qt/DSR glue).
  *
- * Tracks table instances from ZED YOLO masks (shared InstanceTracker: birth / associate / merge) and runs an
- * AI2 recursive-Laplace full-covariance belief (TableBelief) over each table's pose + geometry, writing the
- * fit back to the DSR graph. Emits epistemic action proposals to the mission-controller when a table remains
- * under-observed. See TABLE_FIT_AI2.md for the belief/fit core.
+ * Per compute() cycle: ingest ZED YOLO "table" masks → InstanceTracker (birth / associate / merge) →
+ * process_table_node (one AI2 TableBelief update per assigned slice) → publish the fit back to DSR (RT edge +
+ * dims + mesh + covariance) and emit epistemic proposals when a table stays under-observed. Ricoh-360
+ * detections are bearing-only PERIPHERAL ATTENTION (they never birth or fit). Also owns the two standalone
+ * top-level windows (belief dashboard + evidence monitor). The fit core is rc::TableFitter, perception
+ * rc::MaskIngestor, DSR I/O rc::TableSceneGraph. See TABLE_FIT_AI2.md for the belief/fit core.
  */
 
 #ifndef SPECIFICWORKER_H
@@ -57,7 +59,7 @@
 #include "../../common/dashboard/timeseries_plot.h"
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 
-// ─── SpecificWorker ──────────────────────────────────────────────────────────
+// ─── SpecificWorker ──────────────────────────────────────────────────────────────────────────────
 
 class SpecificWorker : public GenericWorker
 {
@@ -147,7 +149,7 @@ private:
 
     rc::TableConfig                                         cfg_;
     rc::EpistemicPlanner                                    epistemic_planner_;
-    std::unique_ptr<rc::TableFitter>                    fitter_;   // active-inference fit core (owns instances)
+    std::unique_ptr<rc::TableFitter>                        fitter_;    // active-inference fit core (owns instances)
 
     // Live belief dashboard — its OWN top-level window (extracted from the DSR graph dock so it shows
     // independently of Agent.graph; mirrors room_concept/kinova_controller). Geometry persisted via QSettings.
@@ -180,11 +182,11 @@ private:
     std::chrono::steady_clock::time_point last_compute_tp_{};   // compute-rate EMA
 
     std::unique_ptr<DSR::RT_API>                        rt_api_;
-    std::unique_ptr<DSR::InnerEigenAPI>                inner_eigen_;     // for room↔body↔zed extrinsic (silhouette)
-    std::unique_ptr<DSR::InnerGaussianAPI>            gaussian_api_;    // Part B: chain covariance propagation
-    std::unique_ptr<rc::MaskIngestor>                   mask_ingestor_;   // perception (masks-only)
-    std::unique_ptr<rc::TableLidarIngestor>             lidar_ingestor_;  // YOLO-independent LiDAR range channel
-    std::unique_ptr<rc::TableSceneGraph>               scene_graph_;     // DSR node/RT I/O
+    std::unique_ptr<DSR::InnerEigenAPI>                 inner_eigen_;      // for room↔body↔zed extrinsic (silhouette)
+    std::unique_ptr<DSR::InnerGaussianAPI>              gaussian_api_;     // Part B: chain covariance propagation
+    std::unique_ptr<rc::MaskIngestor>                   mask_ingestor_;    // perception (masks-only)
+    std::unique_ptr<rc::TableLidarIngestor>             lidar_ingestor_;   // YOLO-independent LiDAR range channel
+    std::unique_ptr<rc::TableSceneGraph>                scene_graph_;      // DSR node/RT I/O
     uint64_t                                            room_node_id_ = 0;
 
 signals:

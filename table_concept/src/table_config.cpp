@@ -1,5 +1,8 @@
 /*
- * table_config.cpp — fill TableConfig from a RoboComp ConfigLoader.
+ * table_config.cpp  —  fill TableConfig from a RoboComp ConfigLoader.
+ *
+ * Every key is optional: a missing TOML key keeps the default declared in table_config.h. The typed
+ * getf/geti/gets/getb helpers below just wrap ConfigLoader (which has no defaulted get overload).
  */
 
 #include "table_config.h"
@@ -28,7 +31,7 @@ TableConfig load_table_config(const ConfigLoader& cfg)
         return cfg.exists(k) ? cfg.get<bool>(k) : def;
     };
 
-    // Agent convergence
+    // ─── Agent convergence & cadence ───────────────────────────────────────────
     out.state_eps                = getf("TableConcept.StateEps",               0.04f);
     out.K_stable                 = geti("TableConcept.KStable",                30);
     out.detection_alive_max_frames = geti("TableConcept.DetectionAliveMaxFrames", 40);
@@ -40,11 +43,11 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.voxel_select_radius_margin_m = getf("TableConcept.VoxelSelectRadiusMarginM", 0.50f);
     out.voxel_select_height_margin_m = getf("TableConcept.VoxelSelectHeightMarginM", 0.25f);
 
-    // TableModel geometry / mask split
+    // ─── TableModel geometry / mask split ──────────────────────────────────────
     out.sigma_obs          = getf("TableModel.SigmaObs",          0.05f);
     out.sdf_threshold_for_storage = getf("TableModel.SdfThresholdForStorage", 0.08f);
 
-    // ── AI2 belief ────────────────────────────────────────────────────────────
+    // ─── AI2 belief ────────────────────────────────────────────────────────────
     out.ai2_sigma_base_m     = getf("TableModel.AI2SigmaBaseM",       0.03f);
     out.ai2_clutter_frac     = getf("TableModel.AI2ClutterFrac",      0.10f);
     out.ai2_clutter_scale_m  = getf("TableModel.AI2ClutterScaleM",    0.12f);
@@ -62,9 +65,11 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.ai2_gn_iters         = geti("TableModel.AI2GnIters",          4);
     out.ai2_csv_path         = gets("TableModel.AI2CsvPath",          "");
 
+    // ─── RT-edge covariance upload ─────────────────────────────────────────────
     out.rt_cov_scale                  = getf("TableConcept.RtCovScale",           1.0f);
     out.rt_cov_add_chain              = getb("TableConcept.RtCovAddChain",       true);
 
+    // ─── Multi-instance tracker + ricoh attention ──────────────────────────────
     out.tracker_gate_mahalanobis = getf("Tracker.GateMahalanobis",  9.0f);
     out.tracker_gate_fallback_m  = getf("Tracker.GateFallbackM",    0.50f);
     out.tracker_detection_noise_m = getf("Tracker.DetectionNoiseM", 0.35f);
@@ -82,6 +87,7 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.ricoh_attention_angle_margin_rad = getf("Tracker.RicohAttentionAngleMargin", 0.05f);
     out.ricoh_attention_range_band_m     = getf("Tracker.RicohAttentionRangeBandM",  1.0f);
 
+    // ─── LiDAR range factor · coverage · free-space · footprint moment · FE ────
     // YOLO-independent LiDAR first-hit range factor (common/ai_belief/lidar_ray_factor.h). OFF by default.
     out.lidar_precision      = getf("TableModel.LidarPrecision",      0.0f);
     out.lidar_robust_c_m     = getf("TableModel.LidarRobustCM",       0.05f);
@@ -100,6 +106,7 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.footprint_moment_motion_gain = getf("TableModel.FootprintMomentMotionGain", 0.30f);
     out.orientation_motion_ref       = getf("TableModel.OrientationMotionRef", 0.50f);
 
+    // ─── Existence / removal ───────────────────────────────────────────────────
     out.existence_removal_enabled = getb("TableModel.ExistenceRemovalEnabled", false);
     out.existence_removal_prob    = getf("TableModel.ExistenceRemovalProb",    0.12f);
     out.existence_logodds_max     = getf("TableModel.ExistenceLogoddsMax",     4.0f);

@@ -199,8 +199,8 @@ class SpecificWorker : public GenericWorker
         // reused; room_T_ricoh = room_T_robot · robot_T_ricoh gives the optical centre without a
         // per-frame tree walk. Empty until the ricoh node exists (config with no ricoh → config fallback).
         std::optional<Mat::RTMat> robot_T_ricoh_;
-        // Ricoh CameraAPI for the detection→bearing UNPROJECT (ray_from_pixel); created once. Separate
-        // from the overlay's cache because the bearing publisher runs regardless of the Models toggle.
+        // Ricoh detection→bearing UNPROJECT now runs on the RicohYoloWorker thread (compute_bearings).
+        // This CameraAPI is only for the MAIN-thread LiDAR depth-fill (reproject_cloud); cached once.
         std::unique_ptr<DSR::CameraAPI> ricoh_camera_api_;
         void save_external_window_geometry() const;
 

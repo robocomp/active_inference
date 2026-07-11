@@ -1,13 +1,11 @@
 /*
- * table_scene_graph.h
+ * table_scene_graph.h — DSR node/RT I/O layer for table_concept (mirrors bottle_concept/bottle_scene_graph.h).
  *
- * DSR node/RT I/O layer for table_concept (mirrors bottle_concept/bottle_scene_graph.h):
- * births "table_N" nodes from tracker detections, writes the fitted model back (geometry
- * attrs + mesh + RFE/voxel-bank export + room→table RT edge), reads the robot localisation
- * covariance, and writes the epistemic action proposal.
- *
- * Plain class (no Q_OBJECT) constructed by SpecificWorker once G + the DSR APIs are ready.
- * The graph relayout is injected as a callback to stay decoupled from the GUI (graph_viewers).
+ * Births "table_N" nodes from tracker detections and writes the fitted model back: geometry attrs + mesh +
+ * residual/voxel-bank export + free energy + the room→table RT pose, plus the 6×6 pose covariance (mapped from
+ * the belief Σ, with a flat roll/pitch prior) and the epistemic action proposal. Plain class (no Q_OBJECT),
+ * constructed by SpecificWorker once G + the DSR APIs are ready; the graph relayout is injected as a callback
+ * to stay decoupled from the GUI (graph_viewers).
  */
 
 #pragma once

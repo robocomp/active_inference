@@ -18,7 +18,8 @@ enum class ControllerObstacleKind
 {
     Object,
     Obstacle,
-    Temporary
+    Temporary,
+    GridOccupancy   // residual_concept occupancy-grid hulls: what the CONTROLLER treats as occupied space
 };
 
 struct ControllerObstacleVisual

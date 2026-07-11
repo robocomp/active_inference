@@ -1,10 +1,9 @@
 /*
- * table_affordance.h
+ * table_affordance.h  —  lifecycle of the "affordance" DSR node for one table.
  *
- * Manages the lifecycle of an "affordance" DSR node that hangs from a table
- * node via a "has_intention" edge.  The node advertises the robot pose that
- * maximises epistemic value for this table, and tracks the mission-controller's
- * progress through a simple state machine:
+ * Manages an affordance node that hangs from a table node via a "has_intention" edge. The node advertises
+ * the robot pose that maximises epistemic value for this table and tracks the mission-controller's progress
+ * through a simple state machine:
  *
  *   idle ──update()──► pending/offered ──controller sets active=true──► executing
  *                                                                             │
@@ -35,9 +34,9 @@
 
 #include "epistemic_planner.h"
 
-// ─────────────────────────────────────────────────────────────────────────────
-
 namespace rc {
+
+// Owns the affordance node's create/refresh/remove + the controller-protocol state machine for one table.
 class TableAffordance
 {
 public:

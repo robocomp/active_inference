@@ -197,19 +197,29 @@ std::vector<rc::SpecialistSdf> SpecificWorker::build_specialist_sdfs() const
     // the object base) so an object resting ON a table (above its slab) is NOT swallowed. NOTE: the RT-pose-
     // is-base assumption + solid-box (vs slab+legs) approximation is the first live-tuning point.
     std::vector<rc::SpecialistSdf> out;
+    soft_objects_.clear();
     if (not inner_eigen_)
         return out;
+    const float sensor_var = cfg_.cluster.explain_sensor_sigma_m * cfg_.cluster.explain_sensor_sigma_m;
     for (const char* type : {"table", "chair", "cylinder"})
         for (const auto& n : G->get_nodes_by_type(type))
         {
             const float w = G->get_attrib_by_name<width_m_att> (n).value_or(0.0f);
             const float d = G->get_attrib_by_name<depth_m_att> (n).value_or(0.0f);
             const float h = G->get_attrib_by_name<height_m_att>(n).value_or(0.0f);
+            static int sk = 0;
+            const bool log_skip = (sk++ % 200) == 0;
             if (w <= 0.0f or d <= 0.0f or h <= 0.0f)
+            {
+                if (log_skip) std::println("[collapse-skip] '{}' w={:.2f} d={:.2f} h={:.2f} (needs all >0)", n.name(), w, d, h);
                 continue;
+            }
             const auto T = inner_eigen_->get_transformation_matrix("room", n.name(), 0);
             if (not T.has_value())
+            {
+                if (log_skip) std::println("[collapse-skip] '{}' no room→object transform", n.name());
                 continue;
+            }
             Eigen::Matrix4d M;
             { const auto& s = T.value().matrix(); for (int i = 0; i < 4; ++i) for (int j = 0; j < 4; ++j) M(i, j) = s(i, j); }
             const Eigen::Vector3f centre(static_cast<float>(M(0, 3)), static_cast<float>(M(1, 3)),
@@ -218,6 +228,20 @@ std::vector<rc::SpecialistSdf> SpecificWorker::build_specialist_sdfs() const
             const float hx = 0.5f * w, hy = 0.5f * d, hz = 0.5f * h;
             out.push_back([centre, yaw, hx, hy, hz](const Eigen::Vector3f& p)
                           { return rc::ResidualClusterer::box_sdf_3d(p, centre, yaw, hx, hy, hz); });
+            // Soft-collapse descriptor: 2D footprint + top height + σ's from the object's OWN published position
+            // covariance (rt_covariance, which already folds in the localisation chain → range-aware) ⊕ sensor.
+            float var_xy = 0.0f, var_z = 0.0f;
+            if (const auto e = G->get_edge(room_node_id_, n.id(), "RT"); e.has_value())
+                if (const auto cov = G->get_attrib_by_name<rt_covariance_att>(e.value());
+                    cov.has_value() and cov->get().size() >= 15)
+                {
+                    var_xy = 0.5f * (cov->get()[0] + cov->get()[7]);   // ½(σ²x+σ²y)
+                    var_z  = cov->get()[14];                            // σ²z (6×6 diagonal index 2)
+                }
+            soft_objects_.push_back({centre.x(), centre.y(), yaw, hx, hy,
+                                     static_cast<float>(M(2, 3)) + h,          // z_top (box top face)
+                                     std::sqrt(std::max(0.0f, var_xy) + sensor_var),
+                                     std::sqrt(std::max(0.0f, var_z)  + sensor_var)});
         }
     return out;
 }
@@ -297,15 +321,10 @@ std::vector<rc::SpecialistExplainer> SpecificWorker::build_explainers(
                               or rc::ResidualClusterer::dist_to_polygon_boundary(poly, xy) < wm; });
     else
         ex.push_back([](const Eigen::Vector3f&) { return false; });   // no room polygon yet → no wall model
-    // 4+: MODELLED OBJECTS — table/chair/bottle box SDFs. A point is explained if it is INSIDE the object's
-    //     volume OR within `em` of its surface (signed sdf < em, NOT |sdf| < em). Claiming the interior — not
-    //     just a surface shell — keeps the filter CONSISTENT with the dissolve test (which uses signed sdf at
-    //     the centroid): otherwise a cluster sitting deep inside a modelled box leaks through the surface
-    //     filter, births, and is dissolved the same cycle → an endless birth↔dissolve loop. On-table survival
-    //     is unaffected: an object resting ABOVE the box has sdf > em (outside) and still survives.
-    const float em = C.explain_margin_m;
-    for (const auto& sdf : objects)
-        ex.push_back([sdf, em](const Eigen::Vector3f& p) { return sdf(p) < em; });
+    // NOTE: modelled OBJECTS are handled separately as a SOFT collapse (explained_probability, see compute()),
+    // not as hard boolean explainers — so their marginal uncertainty attenuates the residual continuously. This
+    // list is only the hard infrastructure (floor/ceiling/robot/walls), which are genuine 0/1 explanations.
+    (void) objects;
     return ex;
 }
 
@@ -377,7 +396,9 @@ void SpecificWorker::compute()
         }
         if (grid_ready_)   // integrate now (needs no explainers); read-out + publish happen after explainers below
         {
-            grid_.integrate_sweep(lidar_ingestor_->origin_room(), lidar_ingestor_->sweep_room());  // accumulate LiDAR
+            ego_reliability_ = compute_ego_reliability();   // <1 while moving → down-weight the whole sweep
+            grid_.integrate_sweep(lidar_ingestor_->origin_room(), lidar_ingestor_->sweep_room(),
+                                  /*begin_cycle=*/true, ego_reliability_);            // accumulate LiDAR
             integrate_zed_into_grid();   // accumulate dense ZED FoV as a second sensor (fills grazed tabletops)
             grid_.commit_cycle();        // ONE log-odds update per cell (hit precedence) — the stability fix
             log_grid_diag();
@@ -398,6 +419,21 @@ void SpecificWorker::compute()
     const auto explainers  = build_explainers(robot_xy, specialists);   // floor+ceiling+walls+robot+objects
     build_support_surfaces();                                            // tabletops → obstacle base anchoring
 
+    // Diagnostic: each object's SOFT-collapse σ (from its OWN published position covariance ⊕ sensor noise). A
+    // tiny σ on a distant object ⇒ overconfident upstream covariance (chain-cov off / room localiser too sure),
+    // which is why it wouldn't collapse — the honest signal, surfaced here rather than papered over by a floor.
+    static int cs = 0;
+    if ((cs++ % 40) == 0)
+    {
+        const int n_tab = static_cast<int>(G->get_nodes_by_type("table").size());
+        const int n_chr = static_cast<int>(G->get_nodes_by_type("chair").size());
+        const int n_cyl = static_cast<int>(G->get_nodes_by_type("cylinder").size());
+        std::string s;
+        for (const auto& o : soft_objects_) s += std::format("[σxy={:.3f} σz={:.3f} ztop={:.2f} hx={:.2f} hy={:.2f}] ", o.sigma_xy, o.sigma_z, o.z_top, o.hx, o.hy);
+        std::println("[collapse] nodes table={} chair={} cylinder={} → {} objects; {}",
+                     n_tab, n_chr, n_cyl, soft_objects_.size(), s.empty() ? "(none)" : s);
+    }
+
     // ── PHASE-1 REBUILD: read the RESIDUAL out of the grid (occupied ∧ ¬explained) and publish it. A cell is
     //    "explained" if any known-model explainer accounts for its representative point → walls + specialists
     //    drop out (floor/ceiling already excluded by the nav band), leaving object-only components. Evidence is
@@ -405,12 +441,29 @@ void SpecificWorker::compute()
     //    publishes the residual cells on a `grid` node under room for the voxelizer 3-D display. ──
     if (grid_ready_)
     {
+        // p_explained(cell) = max( hard infrastructure (0/1),  soft objects  Φ(−sdf2D/σ_xy) ). The object term
+        // marginalises the 2D FOOTPRINT over the object's own published covariance (range-aware via the
+        // localisation chain), plus the fit margin. NO z-gate: this is a FLOOR-navigation costmap — the robot
+        // must avoid the whole object footprint regardless of what sits on it, and a per-cm z-ceiling on the
+        // box top spuriously kept the entire tabletop whenever the fitted height was a few cm short.
+        const float fitm = cfg_.cluster.explain_fit_margin_m;       // under-fit slack (< planner clearance)
         const rc::OccupancyGrid::CellExplained cell_explained =
-            [&explainers](float x, float y, float zlo, float zhi) -> bool
+            [&explainers, this, fitm](float x, float y, float zlo, float zhi) -> float
             {
                 const Eigen::Vector3f p(x, y, 0.5f * (zlo + zhi));
-                for (const auto& ex : explainers) if (ex(p)) return true;
-                return false;
+                for (const auto& ex : explainers) if (ex(p)) return 1.0f;          // hard: floor/ceiling/robot/walls
+                float pe = 0.0f;
+                for (const auto& o : soft_objects_)
+                {
+                    // 2D oriented-box signed distance of (x,y) to the object footprint (negative inside); the
+                    // fit margin shifts the 0.5-crossing OUTWARD by `fitm` to absorb a known under-fit / legs.
+                    const float c = std::cos(o.yaw), s = std::sin(o.yaw), dx = x - o.cx, dy = y - o.cy;
+                    const float lx = c * dx + s * dy, ly = -s * dx + c * dy;
+                    const float qx = std::abs(lx) - o.hx, qy = std::abs(ly) - o.hy;
+                    const float sdf2d = std::hypot(std::max(qx, 0.0f), std::max(qy, 0.0f)) + std::min(std::max(qx, qy), 0.0f) - fitm;
+                    pe = std::max(pe, 0.5f * std::erfc(sdf2d / (std::max(1e-4f, o.sigma_xy) * 1.41421356f)));   // Φ(−sdf2D/σxy)
+                }
+                return pe;
             };
         const auto comps = grid_.occupied_components(2, cell_explained, grid_.params().inflate_radius_m);
         static int gc = 0;
@@ -616,11 +669,42 @@ void SpecificWorker::integrate_zed_into_grid()
     const Eigen::Matrix4f room_T_cam = rt->matrix().cast<float>();
     if (not room_T_cam.allFinite()) return;
 
-    const auto pts = rc::backproject_fov(zed_ingestor_->depth(), zed_ingestor_->intrinsics(),
-                                         room_T_cam, cfg_.zed_boost);
+    auto pts = rc::backproject_fov(zed_ingestor_->depth(), zed_ingestor_->intrinsics(),
+                                   room_T_cam, cfg_.zed_boost);
     if (pts.empty()) return;
     const Eigen::Vector3f cam_origin = room_T_cam.col(3).head<3>();
-    grid_.integrate_sweep(cam_origin, pts, /*begin_cycle=*/false);   // accumulate into the LiDAR sweep's cycle
+    // ROBUST infrastructure rejection BEFORE the grid: ZED stereo depth noise grows with range² (σ0+q·r²), so
+    // the grid's fixed nav-band lets noisy floor points read as obstacles → phantom floor obstacles everywhere.
+    // subtract_infrastructure removes floor/ceiling/walls with a k·σ(r) band (the same filter the old ZED
+    // detection path used); what remains is real ZED residual (tabletops, objects). LiDAR is precise and needs
+    // no such filter (its own nav-band suffices).
+    const std::size_t before = pts.size();
+    pts = rc::ResidualClusterer::subtract_infrastructure(pts, cam_origin, read_room_polygon(), cfg_.zed_infra);
+    static int zc = 0;
+    if ((zc++ % 40) == 0)
+        std::println("[zed-grid] fov={} → {} after infra-subtract (floor/ceiling/wall removed)", before, pts.size());
+    if (pts.empty()) return;
+    grid_.integrate_sweep(cam_origin, pts, /*begin_cycle=*/false, ego_reliability_);   // same cycle, same ego trust
+}
+
+float SpecificWorker::compute_ego_reliability() const
+{
+    // EGO-MOTION precision: the room<-robot RT edge carries the robot's body twist. Fast translation/rotation
+    // means more pose jitter + motion blur this sweep → trust it less: 1/(1 + |v|/vel0 + |ω|/omega0). Still → 1.
+    float v = 0.0f, w = 0.0f;
+    if (rt_api_)
+        if (const auto robots = G->get_nodes_by_type("robot"); not robots.empty())
+            if (auto e = rt_api_->get_edge_RT(robots.front(), room_node_id_); e.has_value())
+            {
+                if (auto tv = G->get_attrib_by_name<rt_translation_velocity_att>(e.value());
+                    tv.has_value() and tv->get().size() >= 2)
+                    v = std::hypot(tv->get()[0], tv->get()[1]);
+                if (auto rv = G->get_attrib_by_name<rt_rotation_euler_xyz_velocity_att>(e.value());
+                    rv.has_value() and rv->get().size() >= 3)
+                    w = std::abs(rv->get()[2]);
+            }
+    const float v0 = std::max(1e-3f, cfg_.motion_vel0_mps), w0 = std::max(1e-3f, cfg_.motion_omega0_rps);
+    return 1.0f / (1.0f + v / v0 + w / w0);
 }
 
 void SpecificWorker::log_grid_diag()
@@ -694,13 +778,47 @@ void SpecificWorker::publish_grid_display(const rc::OccupancyGrid::CellExplained
     //   [ P, (V, x0,y0, …, x_{V-1},y_{V-1}) × P ]   — P polygons, each V vertices (room-frame footprint,
     // already half-robot-width inflated). The controller decodes this and plans around each hull together
     // with the known object boxes.
-    std::vector<float> poly; poly.push_back(static_cast<float>(comps.size()));
+    // Prefer each component's CONCAVE outline loops (C/U/L concavities stay navigable for the planner);
+    // fall back to the convex hull only when the trace was degenerate (empty). Count total polygons first.
+    std::size_t n_poly = 0;
+    for (const auto& c : comps) n_poly += c.outline.empty() ? 1 : c.outline.size();
+    std::vector<float> poly; poly.push_back(static_cast<float>(n_poly));
+    const auto push_ring = [&](const std::vector<Eigen::Vector2f>& ring) {
+        poly.push_back(static_cast<float>(ring.size()));
+        for (const auto& v : ring) { poly.push_back(v.x()); poly.push_back(v.y()); }
+    };
     for (const auto& c : comps)
     {
-        poly.push_back(static_cast<float>(c.hull.size()));
-        for (const auto& v : c.hull) { poly.push_back(v.x()); poly.push_back(v.y()); }
+        if (c.outline.empty()) push_ring(c.hull);
+        else for (const auto& ring : c.outline) push_ring(ring);
     }
     G->add_or_modify_attrib_local<grid_obstacle_hulls_att>(gn, std::move(poly));
+
+    // ── BELIEF FIELD for the planner (plan over belief, not geometry): dense row-major P (collision RISK) and
+    //    Var[P] (EPISTEMIC), collapsed to zero wherever a modelled object explains the cell. grid_field_meta =
+    //    [xmin, ymin, cell, w, h] lets the consumer index the arrays without any other assumptions. ──
+    std::vector<float> field_prob, field_var;
+    grid_.occupancy_fields(field_prob, field_var, explained);
+    // ASYMMETRIC temporal low-pass on the published field: risk rises at ema_up (instant → never lag a new
+    // obstacle, safe), falls at ema_down (slow → a flickering edge cell holds its risk, stable). Occupancy latch
+    // is untouched. Re-seed on first publish / extent change.
+    if (pub_prob_ema_.size() != field_prob.size())
+    { pub_prob_ema_ = field_prob; pub_var_ema_ = field_var; }
+    else
+    {
+        const float au = cfg_.grid_field_ema_up, ad = cfg_.grid_field_ema_down;
+        for (std::size_t i = 0; i < field_prob.size(); ++i)
+        {
+            const float a = (field_prob[i] >= pub_prob_ema_[i]) ? au : ad;   // rise fast, fall slow
+            pub_prob_ema_[i] += a * (field_prob[i] - pub_prob_ema_[i]);
+            pub_var_ema_[i]  += ad * (field_var[i]  - pub_var_ema_[i]);       // variance: light symmetric smoothing
+        }
+    }
+    std::vector<float> meta{grid_.xmin(), grid_.ymin(), grid_.cell_size(),
+                            static_cast<float>(grid_.width()), static_cast<float>(grid_.height())};
+    G->add_or_modify_attrib_local<grid_occupancy_prob_att>(gn, pub_prob_ema_);
+    G->add_or_modify_attrib_local<grid_occupancy_var_att> (gn, pub_var_ema_);
+    G->add_or_modify_attrib_local<grid_field_meta_att>    (gn, std::move(meta));
     G->update_node(gn);
 }
 

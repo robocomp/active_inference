@@ -52,6 +52,17 @@ struct ResidualConfig
     // graze horizontal surfaces (tabletops) so they never fill; the ZED depth camera covers them densely, and
     // the extra evidence per cell is what makes the costmap costmap-stable. Own ray origin (camera) → carve OK.
     bool          grid_zed_enabled = true;
+    // Temporal low-pass on the PUBLISHED belief field only (P/Var): P_pub = α·P_new + (1−α)·P_prev, per cell.
+    // Damps frame-to-frame heatmap shimmer at obstacle edges WITHOUT touching the occupancy latch (instant
+    // completeness preserved — the safety occupied set is unaffected). ASYMMETRIC: risk RISES at full α (fast
+    // detection, safe) and only FALLS at α_down (slow, stable) so a flickering cell holds its risk. 1 = off.
+    float grid_field_ema_up   = 1.0f;    // blend toward a HIGHER risk (instant — never lag a new obstacle)
+    float grid_field_ema_down = 0.30f;   // blend toward a LOWER risk (slow — stabilises flicker; ↓ = stickier)
+    // EGO-MOTION precision: when the robot moves, pose jitter + motion blur make the whole sweep less trustworthy,
+    // so grid evidence is scaled by 1/(1 + |v|/vel0 + |ω|/omega0) → the stable accumulated field dominates during
+    // motion and sharpens when stopped. (Combined with the per-hit range weight — see OccGridParams.)
+    float motion_vel0_mps    = 0.5f;     // linear speed (m/s) at which sweep trust halves
+    float motion_omega0_rps  = 0.6f;     // yaw rate (rad/s) at which sweep trust halves
     // Robust infrastructure subtraction for the dense ZED cloud: floor/ceiling/wall removed with a band that
     // grows as the ZED's own depth noise (σ0 + q·range²), so a calibration offset / far-range blur can't leak.
     ResidualClusterer::DepthInfraParams zed_infra;

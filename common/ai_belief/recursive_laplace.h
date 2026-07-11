@@ -1,6 +1,9 @@
 /*
  * common/ai_belief/recursive_laplace.h  —  shared AI2 inference engine (header-only)
  *
+ * SHARED across every concept agent (table/chair/bottle/residual/…): the model-independent Bayesian core
+ * they all delegate to, so the math lives ONCE and can't diverge per-agent.
+ *
  * The model-independent core of the AI2 belief proven in table_concept (see table_concept/TABLE.md):
  * a recursive variational-Laplace Gaussian filter — predict (F·θ, Σ←FΣFᵀ+Q) → Gauss-Newton MAP on the
  * FULL data information → posterior Σ via exact within-frame common-mode (Woodbury) saturation. Each
@@ -33,6 +36,8 @@
 
 namespace rc::ai
 {
+
+// ─── Predict (transition + process noise · age the stale belief) ─────────────────────────────────
 
 // Predict: inflate Σ by the transition + process noise; record the transition-prior mean. θ is unchanged
 // for a static model (F = I); a movable model's F carries the constant-velocity coupling.
@@ -79,6 +84,8 @@ void inflate_for_age(Model& m, Eigen::Matrix<float, N, N>& Sigma,
                               : 1.0f;                               // no nominal rate known → one step
     predict<N>(m, Sigma, state, prior_mean, q_scale);
 }
+
+// ─── Update (GN-MAP mean · Woodbury common-mode saturation of Σ) ─────────────────────────────────
 
 // One recursive update on a fresh frame. MEAN: Gauss-Newton MAP using the FULL data information (fast,
 // unbiased). COVARIANCE: the per-frame common-mode saturation (Woodbury) — I_eff = Id − Id(Id+Σc⁻¹)⁻¹Id
@@ -176,6 +183,8 @@ float update(Model& m, typename Model::State& state, Eigen::Matrix<float, N, N>&
     }
     return static_cast<float>(energy / static_cast<double>(frame.points.size()));
 }
+
+// ─── Epistemic: predicted Fisher information (next-best-view scorer) ──────────────────────────────
 
 // Predicted Fisher information (N×N) that observing `pts` would add at variance R: I = Σₚ (1/R) J Jᵀ,
 // J = ∂sdf/∂θ of the nearest primitive at p. Used by the epistemic Σ-based next-best-view scorer. NOTE:

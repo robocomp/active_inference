@@ -361,11 +361,13 @@ bool SensorMediaPublisher::publish_imu(const ImuFrameView& view)
 
 void SensorMediaPublisher::report_one(const std::string& key, Stats& s)
 {
-    qInfo() << "[Media] stats" << QString::fromStdString(key)
-            << "ok=" << s.ok
-            << "MB=" << (static_cast<double>(s.bytes) / 1e6)
-            << "loan_fail=" << s.loan_fail
-            << "publish_fail=" << s.publish_fail;
+    // Routine "ok=" heartbeat dropped; warn only when publishing actually fails.
+    if (s.loan_fail > 0 or s.publish_fail > 0)
+        qWarning() << "[Media] stats" << QString::fromStdString(key)
+                   << "ok=" << s.ok
+                   << "MB=" << (static_cast<double>(s.bytes) / 1e6)
+                   << "loan_fail=" << s.loan_fail
+                   << "publish_fail=" << s.publish_fail;
     s.reset();
 }
 

@@ -1,17 +1,14 @@
 /*
- * table_fitter.h
+ * table_fitter.h — the active-inference fit core of table_concept (mirrors bottle_concept/bottle_fitter.h).
  *
- * The active-inference core of table_concept (mirrors bottle_concept/bottle_fitter.h). Owns the
- * per-table instance map and runs the AI2 full-covariance belief update for each "table_*" node:
- *   - instance lifecycle (ensure_instance + the TableModel factory),
- *   - observation: split the selected mask's support points into on-surface vs off-surface sets,
- *   - inference: voxel-bank ingest + one recursive belief update (TableBelief) with the mask-motion
- *     channel as the observation precision R / bias gate, written back into inst.model,
- *   - the table-owned voxel memory (ownership gate + FNV voxel keys).
- *
- * Collaborates with MaskIngestor (masks) and TableSceneGraph (robot covariance). SpecificWorker
- * keeps the orchestration (process_table_node), the DSR write-back call, and the post-fit epistemic
- * / affordance / Qt-diagnostics steps. Plain class (no Q_OBJECT).
+ * Owns the per-table instance map and runs the AI2 full-covariance belief update for each "table_*" node:
+ * instance lifecycle (ensure_instance + the TableModel factory), observation (split the selected mask's
+ * support points into on-surface vs off-surface sets), inference (voxel-bank ingest + one recursive TableBelief
+ * update with the mask-motion channel as the observation precision R / bias gate, written back into inst.model),
+ * and the table-owned voxel memory (ownership gate + FNV voxel keys). Collaborates with MaskIngestor (masks),
+ * TableSceneGraph (robot covariance), TableProjection (camera projection), and TableLidarRangeChannel;
+ * SpecificWorker keeps the orchestration (process_table_node), the DSR write-back, and the post-fit
+ * epistemic / affordance / Qt-diagnostics steps. Plain class (no Q_OBJECT).
  */
 
 #pragma once
@@ -33,6 +30,8 @@
 #include "table_config.h"        // rc::TableConfig
 #include "table_instance.h"      // rc::TableInstance, TableState
 #include "table_model.h"         // TableModel / TableModelParams
+#include "table_projection.h"    // rc::TableProjection, rc::SilhouetteExistence
+#include "table_lidar_range_channel.h"   // rc::TableLidarRangeChannel
 #include "../../common/mask_ingestor/mask_ingestor.h"
 #include "table_scene_graph.h"
 
@@ -89,50 +88,19 @@ public:
     // range factor. clear_lidar_sweep() each cycle first so a stale sweep never leaks into a frame with no
     // fresh LiDAR. Set/cleared from the compute() main thread by SpecificWorker (fed by TableLidarIngestor).
     void set_lidar_sweep(const std::vector<Eigen::Vector3f>& sweep_room, const Eigen::Vector3f& origin_room)
-    { lidar_sweep_room_ = sweep_room; lidar_origin_room_ = origin_room; lidar_have_sweep_ = true; }
-    void clear_lidar_sweep() { lidar_have_sweep_ = false; }
+    { lidar_channel_.set_sweep(sweep_room, origin_room); }
+    void clear_lidar_sweep() { lidar_channel_.clear(); }
 
-    // PIXEL-LEVEL silhouette existence evidence (EXISTENCE_BELIEF_PLAN.md, mask channel). Projects the tabletop
-    // TOP face + the 4 LEG axes onto the image and, over the predicted-VISIBLE pixels, counts how many are lit by a "table" YOLO
-    // mask (e_occ ⇒ still there) vs by nothing at all (e_free ⇒ predicted-visible-but-ABSENT ⇒ evidence it is
-    // gone, EVEN WITH NO YOLO MASK this frame). Pixels covered by a NON-table mask are OCCLUDED (a nearer object
-    // hides the tabletop) and excluded from n_detectable → HOLD, never false absence. n_detectable==0 (out of
-    // FoV / fully occluded) ⇒ the caller HOLDs. Feeds rc::exist::mask_evidence. Called from update_existence.
-    struct SilhouetteExistence
-    {
-        float e_occ = 0.0f, e_free = 0.0f;
-        int   n_total      = 0;    // silhouette samples attempted (top face + legs) — the "whole object"
-        int   n_detectable = 0;    // samples that land in the real camera FRUSTUM and are un-occluded (0 ⇒ HOLD)
-        int   n_occluded   = 0;    // in-frustum samples hidden by a nearer (non-table) mask
-        float mean_range_m = 0.0f; // mean camera→silhouette depth over the detectable samples (absence confidence ∝ 1/range)
-        // "Should be visible" fraction: n_detectable / n_total. Absence is only evidence of removal in
-        // proportion to how much of the object the sensor could actually have seen from here (real FoV).
-        float in_fov_frac() const { return n_total > 0 ? static_cast<float>(n_detectable) / n_total : 0.0f; }
-    };
-    SilhouetteExistence compute_silhouette_existence(const TableInstance& inst);
+    // PIXEL-LEVEL silhouette existence evidence (EXISTENCE_BELIEF_PLAN.md, mask channel). Delegates to
+    // TableProjection; see rc::SilhouetteExistence in table_projection.h. Called from update_existence.
+    SilhouetteExistence compute_silhouette_existence(const TableInstance& inst)
+    { return projection_->compute_silhouette_existence(inst); }
 
 private:
     // Compute the localization/chain covariance term (J·Σ_chain·Jᵀ) at the table centre by transforming
     // it from the measurement frame back to room with ZERO input cov; stored on the instance for the
     // RT-cov write. No-op unless set_chain_cov_source enabled it.
     void compute_chain_cov(TableInstance& inst);
-    // room_T_zed (camera→room). pose_ts_ms pins the room→body hop to the mask's capture time (Nearest RT
-    // query); the rigid body→zed mount is always queried latest. 0 → current pose.
-    std::optional<Eigen::Matrix4d> room_T_zed_matrix(std::uint64_t pose_ts_ms = 0) const;
-    // Project the current model through the camera extrinsic → normalised in-image ROI (centre
-    // offset + fill), stored on the instance for the controller's centring/dwell lock-on search.
-    void compute_projected_roi(TableInstance& inst);
-
-    void ingest_observation_voxels(TableInstance& inst, const TableObservation& observation);
-    bool is_voxel_owned_by_table(const TableInstance& inst, const Eigen::Vector3f& point) const;
-    static std::uint64_t voxel_key(const Eigen::Vector3f& point, float quantization_m);
-
-    // Select this cycle's LiDAR returns that land on THIS table and stage them on the frame's range channel.
-    // Box is ANCHORED on the fresh mask-cloud centroid (never the fitted state — a diverging fit would drag
-    // the box into empty space and starve LiDAR exactly when it is most needed) and SIZED from the BIRTH
-    // footprint (not the fitted w/h, so a blown-up extent can't explode the region), deliberately spanning
-    // legs + rim. Final on/off membership is the factor's own geometric sphere-trace test, not this box.
-    void feed_lidar(TableInstance& inst, TableFrame& frame) const;
 
     TableModelParams  make_model_params() const;
 
@@ -147,18 +115,15 @@ private:
     TableConfig&                   cfg_;
     MaskIngestor*                  mask_ingestor_ = nullptr;
     TableSceneGraph*               scene_graph_   = nullptr;
-    std::unique_ptr<DSR::CameraAPI> camera_api_;   // ZED intrinsics, lazily bound to the "zed" node
+    std::unique_ptr<TableProjection> projection_;   // camera-projection unit (owns the ZED CameraAPI)
 
     std::unordered_map<std::uint64_t, TableInstance> instances_;
     std::unordered_map<std::uint64_t, Eigen::Vector2f> birth_seeds_;   // tracker-provided birth XY (see note_birth)
     std::uint64_t                  room_node_id_ = 0;   // latched per ensure_instance call
     std::ofstream                  ai2_csv_;            // per-cycle AI2 belief log (optional)
 
-    // Staged LiDAR sweep for the range factor (room frame). Refreshed each compute() cycle; have flag false
-    // ⇒ no fresh sweep this cycle ⇒ feed_lidar is a no-op (never reuses a stale sweep).
-    std::vector<Eigen::Vector3f>   lidar_sweep_room_;
-    Eigen::Vector3f                lidar_origin_room_ = Eigen::Vector3f::Zero();
-    bool                           lidar_have_sweep_  = false;
+    // YOLO-independent LiDAR range channel: owns the staged per-cycle sweep + return selection (feed).
+    TableLidarRangeChannel         lidar_channel_{cfg_};
 };
 
 }  // namespace rc

@@ -77,6 +77,45 @@ Everything else is **shared** and unchanged by a new object: `instance_tracker`,
 merge operator, `<obj>_scene_graph` (RT-cov maps the belief Σ), affordance / epistemic (Σ-based NBV) /
 dashboard. So the §1 contract below holds; only the model hooks are authored.
 
+### Belief invariants (2026-07 refresh) — a copy MUST keep these
+
+- **Free energy is the true `−log` mixture MARGINAL likelihood** (the clutter component **included**), so F
+  rises with misfit. A surface-only / responsibility-weighted energy reads ≈0 on a bad fit and *silently*
+  breaks mode resolution and any reject-worse-fit logic. (This was THE root-cause bug fixed this session.)
+- **No thresholds/gates** unless strictly necessary and flagged — encode the effect as a covariance/precision
+  and let it fall out of inference (see `CLAUDE.md` modeling philosophy).
+- **A mask is a LOWER BOUND on extent** (occlusion / foreshortening only shorten it) → extent evidence is
+  **grow-only**; shrink is the occlusion-aware free-space (vacate) channel's job (through-beam = empty →
+  shrink; short-return = occluded → hold).
+- **Common-mode saturation**: the per-frame information caps at a shared-error covariance, so N correlated
+  points can't collapse σ.
+
+### Multi-sensor policy — one sensor births, peripheral sensors only cue attention
+
+The primary dense/foveal sensor (**ZED**) is the ONLY one that **births and fits**. A peripheral 360 sensor
+(**ricoh**) is used ONLY as a bearing+range **ATTENTION cue**: an unassigned detection (no known instance
+along its bearing + rough range) raises a "seek a foveal view here" target and **never** touches
+pose/extent/birth — its centroid/extent are biased by the oblique partial view. The robust range comes from
+the **MEDIAN of the mask's 3D points**; association is **tight-in-bearing, generous-in-range**.
+
+### Data flow (one `compute()` cycle)
+
+```
+masks (media plane) ──► MaskIngestor ──► InstanceTracker ──► assigned mask slices per <obj>
+                                                                     │
+lidar (media plane) ──► <Obj>LidarIngestor ──► <Obj>LidarRangeChannel.stage()
+                                                                     ▼
+   for each <obj> node:  Fitter.observe_slice() ──► Fitter.run_inference()  (once per assigned slice)
+                              (ZED points → belief update: per-point SDF mixture
+                               + footprint-moment factor + LiDAR range factor)
+                                                                     ▼
+                         Belief (recursive Laplace) ──► model ──► SceneGraph (RT + cov + geometry)
+                                                                     ▼
+                         EpistemicPlanner ──► affordance request (next-best-view)
+
+   ricoh 360 slices ──► process_ricoh_bearings()  [ATTENTION ONLY — never fits]
+```
+
 ---
 
 ## 0. Object spec (the prompt syntax)
@@ -142,6 +181,14 @@ capabilities:                     # opt-in; each is a copyable unit
 <obj>_config.{h,cpp}  <obj>_instance.h  <obj>_model.{h,cpp}  <obj>_belief.{h,cpp}  <obj>_fitter.{h,cpp}
 <obj>_scene_graph.{h,cpp}  specificworker.{h,cpp}  specificworker_presence.cpp
 +epistemic_planner.{h,cpp}  +<obj>_affordance.{h,cpp}  +<obj>_evaluator.{h,cpp}
+sensor/memory collaborators (extracted from the fitter this session — behavior-preserving, so the fitter
+stays a THIN orchestrator; each is opt-in per the object's sensing/memory needs):
++<obj>_projection.{h,cpp}     (camera projection: room_T_cam + in-image ROI (controller lock-on) +
+    pixel-silhouette existence evidence; owns the CameraAPI)                              — +projection
++<obj>_lidar_range_channel.{h,cpp}  (YOLO-independent LiDAR first-hit range factor: stages the sweep and
+    feeds range residuals to a frame)                                                     — +lidar
++<obj>_voxel_bank.h           (header-only free functions: <obj>-owned historical point memory —
+    ownership gate + FNV voxel keys)                                                      — +voxel_bank
 shared (do NOT copy, #include + add to CMake):
   common/ai_belief/recursive_laplace.h                (header-only; rc::ai predict/MAP/Woodbury engine —
     the belief delegates update/predict/predicted_information to it. This replaced belief_stabilizer,
@@ -181,7 +228,8 @@ last to carry those; they were removed when it moved to the shared engine.)
 ### Fitter — PURE belief (no DSR writes). Public API exactly:
 ```cpp
 bool                ensure_instance(const DSR::Node&, std::uint64_t room);   // true on first create; inits affordance
-<Obj>Observation    observe(<Obj>Instance&, const DSR::Node&);               // mask → candidate/residual split
+<Obj>Observation    observe_slice(<Obj>Instance&, int slice_index);         // ONE assigned mask slice → observation
+<Obj>Observation    observe(<Obj>Instance&, const DSR::Node&);               // stale fallback: whole-node mask → cand/residual split
 float               run_inference(<Obj>Instance&, const <Obj>Observation&);  // [support pre-step] → belief.update → [z-anchor] → FE
 std::unordered_map<std::uint64_t,<Obj>Instance>& instances();
 void                forget_node(std::uint64_t id);
@@ -189,9 +237,15 @@ bool                should_log(const <Obj>Instance&) const;                  // 
 void                note_birth(std::uint64_t id, const Eigen::Vector2f& xy); // tracker seeds the birth centroid
 void                set_chain_cov_source(DSR::InnerGaussianAPI*, std::string source_frame, bool enabled);  // Part B
 ```
-Fitter holds `<Obj>SceneGraph*` for **reads only**. Object-specific belief steps (support surface, z anchor)
-live INSIDE `run_inference`, never the worker. The fit is `inst.<obj>_belief.update(frame)`; the posterior
-is copied back into `inst.model` so downstream publish/RT is unchanged.
+**Multi-sensor fusion (the primary path).** A cycle now fuses *several* observations per instance. For each
+mask slice the tracker assigned to the instance, the worker calls `observe_slice(inst, slice_index)` to build
+an observation from that ONE slice and feeds it to a `run_inference`. Running the assigned slices one after
+another is a **sequential Bayesian update** — the joint likelihood factored across sensors — with each sensor
+keeping its own `R` (and its own within-frame common-mode marginalization). `observe(inst, node)` remains only
+as the stale single-slice fallback. Fitter holds `<Obj>SceneGraph*` for **reads only**. Object-specific belief
+steps (support surface, z anchor) live INSIDE `run_inference`, never the worker. The fit is
+`inst.<obj>_belief.update(frame)`; the posterior is copied back into `inst.model` so downstream publish/RT is
+unchanged.
 
 ### Worker — orchestration. `compute()`:
 ```cpp
@@ -258,6 +312,18 @@ FE → dimensions → **posterior σ(mm)** per DOF (from `sqrt(diag Σ)` — the
 is what the old counter-evidence/CUSUM panel became once the stabiliser was removed). The gated AI2 CSV
 (`<Obj>Model.AI2CsvPath`) logs per cycle: `cycle,node,pts,R,energy,frames_converged[,extra]` — the belief
 state + Σ diag. (`TimeSeriesPlot` strokes lines only — never set a brush before `drawPath`, or peaks fill.)
+
+### Comment & formatting conventions (two-tier) — *scannable at a glance, deep on demand*
+- **File header** (every `.h`/`.cpp`): one paragraph — what this unit is, its single responsibility, and its
+  collaborators. Reference-agent files also note their role in the pattern.
+- **Two-tier doc comments.** Every public type/method opens with **one crisp summary line** (what it does /
+  returns). Any non-obvious *why* follows below it, or is deferred to a design doc by name. Don't bury the
+  summary inside a dense paragraph.
+- **Section dividers**: `// ─── Title ─────────` inside a `.cpp` to group related methods.
+- **Style**: C++23; write `and`/`or`/`not` (not `&&`/`||`/`!`); ~110-column soft limit; align member
+  declarations. Prefer the shared `common/` factory/util over a hand-rolled copy.
+- **Flag every threshold.** If a magic cutoff is truly unavoidable, say so in the comment and name the
+  physical quantity it stands for.
 
 ---
 

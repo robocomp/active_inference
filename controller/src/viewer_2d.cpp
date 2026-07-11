@@ -46,6 +46,13 @@ ObstaclePalette obstacle_palette(ControllerObstacleKind kind)
             QColor(245, 158, 11, 150),
             QColor(251, 146, 60, 230),
             QColor(154, 52, 18, 240)};
+        case ControllerObstacleKind::GridOccupancy:
+        // residual_concept occupancy-grid hulls = what the controller plans around as OCCUPIED.
+        // Semi-transparent crimson FILL so occupied area is shaded and free space stays clear.
+        return {QColor(150, 20, 40, 220),
+            QColor(220, 40, 60, 70),
+            QColor(150, 20, 40, 120),
+            QColor(150, 20, 40, 120)};
         default:
         return {QColor(194, 103, 25),
             QColor(245, 158, 11, 150),
@@ -491,8 +498,11 @@ void Viewer2D::draw_path(const PathDrawData &data)
                 continue;
 
             const auto palette = obstacle_palette(obstacle_visual.kind);
-            QPen obstacle_pen(palette.pen, 0.085);
-            obstacle_pen.setCosmetic(false);
+            const bool is_grid_cell = obstacle_visual.kind == ControllerObstacleKind::GridOccupancy;
+            // Grid cells tile edge-to-edge — use a thin hairline pen so they read as one filled region
+            // (a 0.085 m border per 0.35 m cell would drown the fill). Real obstacles keep the bold edge.
+            QPen obstacle_pen(palette.pen, is_grid_cell ? 0.0 : 0.085);
+            obstacle_pen.setCosmetic(is_grid_cell);
             const QBrush obstacle_brush(palette.fill);
             const QBrush obstacle_center_brush(palette.center);
             const QBrush obstacle_edge_brush(palette.edge);
@@ -505,6 +515,11 @@ void Viewer2D::draw_path(const PathDrawData &data)
             auto *polygon = agv_->scene.addPolygon(qpoly, obstacle_pen, obstacle_brush);
             polygon->setZValue(18);
             path_draw_items_.push_back(polygon);
+
+            // Grid-occupancy hulls read as a filled region only — skip the dense contour dots + centre
+            // marker (they are the "small points" that made occupied/free space unreadable).
+            if (obstacle_visual.kind == ControllerObstacleKind::GridOccupancy)
+                continue;
 
             for (std::size_t index = 0; index < obstacle.size(); ++index)
             {

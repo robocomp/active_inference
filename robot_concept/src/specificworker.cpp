@@ -415,25 +415,35 @@ void SpecificWorker::compute()
 	compute_fps.print("Compute (void)", 5000);
 
 	static auto   last      = std::chrono::steady_clock::now();
-	static std::uint64_t last_rgbd = 0, last_lidar = 0, last_imu = 0, last_ricoh = 0;
+	static std::uint64_t last_rgbd = 0, last_imu = 0, last_ricoh = 0;
 	static std::uint64_t last_helios = 0, last_bpearl = 0;
 	const auto    now = std::chrono::steady_clock::now();
 	const double  dt  = std::chrono::duration<double>(now - last).count();
-	if (dt >= 1.0 / 3.0)   // sample at ~3 Hz, but only PRINT when the rates change (no repeated blocks)
+	// The raw estimate is (integer frame delta / dt): over a short window this quantises
+	// hard — at a ~0.4s window one missed/extra frame is ±2.5Hz, and the ext-DDS streams
+	// count in wait_and_poll() batches whose boundaries alias against the window, so the
+	// readout jitters even though the source rate is stable. Fix = a longer window (finer
+	// quantum: at 2s, ±1 frame is only ±0.5Hz) + a light EWMA to absorb the residual
+	// batch aliasing. This measures reception precisely; it is NOT DDS propagation noise.
+	constexpr double kRateWindowS = 2.0;
+	if (dt >= kRateWindowS)   // long window + EWMA below; only PRINT when the smoothed rate moves
 	{
 		const std::uint64_t r = rgbd_frames_.load(std::memory_order_relaxed);
-		const std::uint64_t l = lidar_frames_.load(std::memory_order_relaxed);
 		const std::uint64_t i = imu_frames_.load(std::memory_order_relaxed);
 		const std::uint64_t c = ricoh_frames_.load(std::memory_order_relaxed);
 		const std::uint64_t hl = helios_frames_.load(std::memory_order_relaxed);
 		const std::uint64_t bp = bpearl_frames_.load(std::memory_order_relaxed);
-		const double f_rgbd   = static_cast<double>(r - last_rgbd)  / dt;
-		const double f_lidar  = static_cast<double>(l - last_lidar) / dt;
-		const double f_imu    = static_cast<double>(i - last_imu)   / dt;
-		const double f_ricoh  = static_cast<double>(c - last_ricoh) / dt;
-		const double f_helios = static_cast<double>(hl - last_helios) / dt;
-		const double f_bpearl = static_cast<double>(bp - last_bpearl) / dt;
-		(void)f_lidar;
+		// Instantaneous window rate → EWMA. Seed on first sample; alpha 0.5 settles in a few
+		// windows after a real rate change while erasing per-window quantisation wobble.
+		constexpr double kAlpha = 0.5;
+		static double ema_rgbd = -1.0, ema_helios = -1.0, ema_bpearl = -1.0, ema_imu = -1.0, ema_ricoh = -1.0;
+		const auto ewma = [](double& s, double inst)
+		{ s = (s < 0.0) ? inst : kAlpha * inst + (1.0 - kAlpha) * s; return s; };
+		const double f_rgbd   = ewma(ema_rgbd,   static_cast<double>(r  - last_rgbd)   / dt);
+		const double f_imu    = ewma(ema_imu,    static_cast<double>(i  - last_imu)    / dt);
+		const double f_ricoh  = ewma(ema_ricoh,  static_cast<double>(c  - last_ricoh)  / dt);
+		const double f_helios = ewma(ema_helios, static_cast<double>(hl - last_helios) / dt);
+		const double f_bpearl = ewma(ema_bpearl, static_cast<double>(bp - last_bpearl) / dt);
 		// Per-thread heartbeat, one table row each. src label: "off" when the whole path is
 		// gated out (no reader thread), "local" while robot_concept bridges Ice→media itself,
 		// "ext-DDS" once negotiation hands the plane to the external producer (bridge off). IMU
@@ -471,7 +481,7 @@ void SpecificWorker::compute()
 			qInfo().noquote() << line;
 			for (int k = 0; k < NFIELDS; ++k) { prev_hz[k] = fields[k].hz; prev_src[k] = fields[k].src; }
 		}
-		last = now; last_rgbd = r; last_lidar = l; last_imu = i; last_ricoh = c;
+		last = now; last_rgbd = r; last_imu = i; last_ricoh = c;
 		last_helios = hl; last_bpearl = bp;
 	}
 
@@ -695,10 +705,9 @@ void SpecificWorker::monitor_external_image_plane(std::unique_ptr<Sub>& sub,
 	const double dt = std::chrono::duration<double>(now - report_at).count();
 	if (dt >= 5.0)
 	{
-		if (mon_frames > 0)
-			std::print("[Media] {} external DDS publisher ALIVE — {} {:.1f} Hz on domain 7\n",
-			           producer, stream_label, static_cast<double>(mon_frames) / dt);
-		else
+		// ALIVE rate meter dropped (redundant with the compute() heartbeat); keep only the
+		// exceptional SILENT stall warning per the stream-stall logging rule.
+		if (mon_frames == 0)
 			std::print("[Media] {} external DDS publisher SILENT — no {} frames on domain 7 in {:.0f}s\n",
 			           producer, stream_label, dt);
 		mon_frames = 0;
@@ -1300,37 +1309,6 @@ void SpecificWorker::FullPoseEstimationPub_newFullPose(RoboCompFullPoseEstimatio
 {
 	if (shutting_down_.load())
 		return;
-
-	// --- measured ingress rate of this Ice slot (real wall-clock freq) ---
-	// Ice may dispatch this callback from a thread pool, so guard the stats.
-	{
-		static std::mutex rate_mtx;
-		static std::chrono::steady_clock::time_point last_log{};
-		static std::chrono::steady_clock::time_point last_call{};
-		static double freq_hz = 0.0;   // EMA of instantaneous rate
-		static unsigned long calls = 0;
-		const auto now = std::chrono::steady_clock::now();
-		std::lock_guard lk(rate_mtx);
-		if (last_call.time_since_epoch().count() != 0)
-		{
-			const double dt = std::chrono::duration<double>(now - last_call).count();
-			if (dt > 1e-6)
-			{
-				const double inst = 1.0 / dt;
-				freq_hz = (freq_hz == 0.0) ? inst : 0.9 * freq_hz + 0.1 * inst;
-			}
-		}
-		last_call = now;
-		++calls;
-		if (last_log.time_since_epoch().count() == 0)
-			last_log = now;
-		else if (now - last_log >= std::chrono::seconds(5))
-		{
-			std::cout << "[FullPoseEstimationPub_newFullPose] ingress " << freq_hz
-			          << " Hz (EMA), " << calls << " calls total" << std::endl;
-			last_log = now;
-		}
-	}
 
 	// we do not add any noise here. It is up to the users.
 	if (auto pose_node = G->get_node(robot_name); pose_node.has_value())

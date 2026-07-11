@@ -1,3 +1,10 @@
+/*
+ * common/dashboard/timeseries_plot.cpp  —  shared scrolling time-series plot (implementation)
+ *
+ * SHARED dashboard widget across the concept agents: series bookkeeping (add/remove + running-average
+ * companions), thread-safe sampling, and the auto-scaling paint (axes, stroked polylines, legend).
+ */
+
 #include "timeseries_plot.h"
 #include <algorithm>
 #include <cmath>
@@ -7,8 +14,11 @@
 
 namespace rc {
 
+// ─── Legend labels / fixed value ranges (anonymous helpers) ──────────────────────────────────────
+
 namespace
 {
+// Short legend label from a series name (…_cov → "cov", …_fe → "FE", …_res → "res", else the raw name).
 QString legend_label_for_series(const std::string& name)
 {
     if (name == "cov_det_scaled" || (name.size() >= 4 && name.substr(name.size() - 4) == "_cov"))
@@ -20,18 +30,18 @@ QString legend_label_for_series(const std::string& name)
     return QString::fromStdString(name);
 }
 
-std::optional<std::pair<float, float>> fixed_value_range_for_series(const std::string& name)
+std::optional<std::pair<float, float>> fixed_value_range_for_series(const std::string& /*name*/)
 {
-    if (name.size() >= 3 && name.substr(name.size() - 3) == "_fe")
-        return std::make_pair(0.0f, 1.5f);
-    if (name.size() >= 4 && name.substr(name.size() - 4) == "_cov")
-        return std::make_pair(0.0f, 100.0f);
-    if (name.size() >= 4 && name.substr(name.size() - 4) == "_res")
-        return std::make_pair(0.0f, 20.0f);
+    // AUTOSCALE all panels. The old fixed ranges (FE 0–1.5, cov 0–100, res 0–20) were calibrated to stale scales:
+    // the corrected free energy now sits at ~2–8 (pegged off the top of 1.5) and the covariance is < 1 (flat at
+    // the bottom of 100). Auto-scaling to the visible data (with a centred fallback for flat series, below) shows
+    // the real dynamics — including the FE baseline + surprise now on the FE panel.
     return std::nullopt;
 }
 
 }
+
+// ─── Construction ────────────────────────────────────────────────────────────────────────────────
 
 TimeSeriesPlot::TimeSeriesPlot(QWidget* parent)
     : QWidget(parent)
@@ -45,6 +55,8 @@ TimeSeriesPlot::TimeSeriesPlot(QWidget* parent)
     clock_.start();
     startTimer(100);  // repaint at ~10 Hz
 }
+
+// ─── Series management ───────────────────────────────────────────────────────────────────────────
 
 void TimeSeriesPlot::add_series(const std::string& name, QColor colour,
                                 float line_width, int avg_window)
@@ -69,6 +81,19 @@ void TimeSeriesPlot::add_series(const std::string& name, QColor colour,
         a.line_width = line_width + 0.5f;
     }
 }
+
+void TimeSeriesPlot::remove_series(const std::string& name)
+{
+    std::lock_guard lk(mu_);
+    if (auto it = series_.find(name); it != series_.end())
+    {
+        if (!it->second.avg_companion.empty())
+            series_.erase(it->second.avg_companion);
+        series_.erase(it);
+    }
+}
+
+// ─── Sampling ────────────────────────────────────────────────────────────────────────────────────
 
 void TimeSeriesPlot::add_point(const std::string& name, float value)
 {
@@ -113,6 +138,8 @@ void TimeSeriesPlot::set_visible_window(float seconds)
 {
     window_sec_ = std::max(1.f, seconds);
 }
+
+// ─── Painting ────────────────────────────────────────────────────────────────────────────────────
 
 void TimeSeriesPlot::timerEvent(QTimerEvent*)
 {
@@ -165,7 +192,10 @@ void TimeSeriesPlot::paintEvent(QPaintEvent*)
                 v_max = std::max(v_max, pt.v);
             }
         }
-        if (v_min >= v_max) { v_min = 0.f; v_max = 1.f; }
+        if (v_min == std::numeric_limits<float>::max())      // no visible data
+        { v_min = 0.f; v_max = 1.f; }
+        else if (v_min >= v_max)                             // flat / single value → centre it with a margin
+        { const float c = v_min, m = std::max(0.5f, 0.1f * std::abs(c)); v_min = c - m; v_max = c + m; }
     }
 
     // Add 5% padding

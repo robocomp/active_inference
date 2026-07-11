@@ -1,14 +1,10 @@
 /*
- * epistemic_planner.cpp
+ * epistemic_planner.cpp  —  Σ-based D-optimal next-best-view over the table's vertical faces.
  *
- * Computes optimal viewpoint for the least-observed vertical table face.
- *
- * Only the four vertical faces (±X, ±Y in table frame) are considered because
- * a floor-navigating robot cannot observe the top face from above or the
- * bottom face at all.
- *
- * The gain proxy is:  ΔH = face_face_area / σ_obs²  (expected Fisher info)
- * scaled by the coverage deficit (1 − coverage / δ_min).
+ * Only the four vertical faces (±X, ±Y in table frame) are considered: a floor-navigating robot cannot
+ * observe the top face from above or the bottom face at all. Each face is scored by the expected entropy
+ * reduction ½·ln det(I₆ + Σ·ΔI) on the belief's full covariance, bounded by the adequacy gap to Σ*, and
+ * the winning face's framed viewpoint + heading is returned. See epistemic_planner.h for the formulas.
  */
 
 #include "epistemic_planner.h"
@@ -21,16 +17,13 @@
 #include <print>
 #include <vector>
 
-// ─── EpistemicPlanner ────────────────────────────────────────────────────────
-
+// ─── Face sampler ────────────────────────────────────────────────────────────
 
 namespace rc {
 
 namespace
 {
-
-
-// AI2 belief-state face sampler (same geometry as above, off the 6-DOF TableBeliefState [cx,cy,H,w,h,yaw]).
+// Samples surface points on one vertical face of the 6-DOF TableBeliefState [cx,cy,H,w,h,yaw], for ΔI.
 std::vector<Eigen::Vector3f> sample_face_surface(const TableBeliefState& s, int face_idx)
 {
     constexpr int kTangent = 10, kVert = 6;
@@ -62,11 +55,13 @@ std::vector<Eigen::Vector3f> sample_face_surface(const TableBeliefState& s, int 
 
 }  // namespace
 
+// ─── EpistemicPlanner ────────────────────────────────────────────────────────
+
 EpistemicPlanner::EpistemicPlanner(float d_obs)
     : d_obs_(d_obs)
 {}
 
-// ── AI2-native Σ-based D-optimal next-best-view ──────────────────────────────────────────────
+// AI2-native Σ-based D-optimal next-best-view: score the four faces, return the best framed viewpoint.
 EpistemicProposal EpistemicPlanner::compute(const TableBelief& belief, float lat_rate, float sigma_base) const
 {
     constexpr float kEffectiveHorizontalFovRad = 70.0f * std::numbers::pi_v<float> / 180.0f;

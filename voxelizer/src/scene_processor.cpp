@@ -23,264 +23,43 @@
 
 SceneProcessor::SceneProcessor(const std::shared_ptr<DSR::DSRGraph>& graph)
     : graph_(graph)
+    , media_(std::make_unique<MediaPlaneSource>(graph))
 {
 }
 
 SceneProcessor::~SceneProcessor() = default;
 
-bool SceneProcessor::init_media_plane(std::uint32_t domain_id,
-                                      const std::string& rgb_topic,
-                                      const std::string& depth_topic)
+bool SceneProcessor::init_media_plane(std::uint32_t domain_id, const std::string& rgb_topic, const std::string& depth_topic)
 {
-    media_rgb_sub_   = std::make_unique<rc::media::MediaSubscriber>();
-    media_depth_sub_ = std::make_unique<rc::media::MediaSubscriber>();
-
-    rc::media::SubscriberConfig rgb_cfg;
-    rgb_cfg.domain_id     = domain_id;
-    rgb_cfg.topic_name    = rgb_topic;
-    rgb_cfg.history_depth = 8;
-    rc::media::SubscriberConfig depth_cfg = rgb_cfg;
-    depth_cfg.topic_name = depth_topic;
-
-    // Prefer the producer's media descriptor on the "zed" node — take the FULL config
-    // (domain, topic, history_depth, shared_memory_only, data_sharing) so this consumer
-    // tracks the producer's QoS automatically; fall back to the configured domain/topic
-    // (with defaults) if the descriptor isn't advertised yet.
-    if (graph_)
-        if (auto desc = rc::media::descriptor_from_graph(*graph_, "zed"); desc.has_value())
-        {
-            if (auto c = desc->subscriber_config("rgb");   c.has_value()) rgb_cfg   = *c;
-            if (auto c = desc->subscriber_config("depth"); c.has_value()) depth_cfg = *c;
-        }
-
-    const bool rgb_ok   = media_rgb_sub_->init(rgb_cfg);
-    const bool depth_ok = media_depth_sub_->init(depth_cfg);
-    if (!rgb_ok || !depth_ok)
-    {
-        std::print(stderr, "[voxelizer] media plane subscriber init FAILED (rgb={}, depth={})\n", rgb_ok, depth_ok);
-        return false;
-    }
-    std::print("[voxelizer] media plane ready rgb domain={} '{}' | depth domain={} '{}' data_sharing={}\n",
-               rgb_cfg.domain_id, rgb_cfg.topic_name, depth_cfg.domain_id, depth_cfg.topic_name,
-               media_rgb_sub_->data_sharing_active() && media_depth_sub_->data_sharing_active());
-    return true;
-}
-
-void SceneProcessor::drain_media_plane() const
-{
-    // Diagnostic: positively confirm media-plane reception (mirrors robot_concept's
-    // producer-side "[Media] 5s stats"). Accumulate poll() delivery counts and print
-    // every 5 s on stdout, alongside [Tracks].
-    static std::uint64_t rx_rgb = 0, rx_depth = 0;
-    static auto last_rx_report = std::chrono::steady_clock::now();
-
-    if (media_rgb_sub_)
-    {
-        rx_rgb += media_rgb_sub_->poll([this](const rc::media::ImageFrame& f, std::int64_t)
-        {
-            const int w = static_cast<int>(f.width());
-            const int h = static_cast<int>(f.height());
-            if (w <= 0 || h <= 0)
-                return;
-            const std::size_t npix = static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
-            if (f.format() == rc::media::FORMAT_BGR8 || f.format() == rc::media::FORMAT_RGB8)
-            {
-                if (f.size() < npix * 3)
-                    return;
-                cv::Mat view(h, w, CV_8UC3, const_cast<std::uint8_t*>(f.data().data()));
-                if (f.format() == rc::media::FORMAT_RGB8)
-                    cv::cvtColor(view, media_rgb_.bgr, cv::COLOR_RGB2BGR);
-                else
-                    media_rgb_.bgr = view.clone();
-                media_rgb_.width    = w;
-                media_rgb_.height   = h;
-                media_rgb_.stamp    = f.stamp_ms();
-                media_rgb_.frame_id = f.frame_id();
-                media_rgb_.valid    = true;
-            }
-        });
-    }
-
-    if (media_depth_sub_)
-    {
-        rx_depth += media_depth_sub_->poll([this](const rc::media::ImageFrame& f, std::int64_t)
-        {
-            const int w = static_cast<int>(f.width());
-            const int h = static_cast<int>(f.height());
-            if (w <= 0 || h <= 0)
-                return;
-            const std::size_t npix = static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
-            if (f.format() == rc::media::FORMAT_DEPTH_F32)
-            {
-                if (f.size() < npix * sizeof(float))
-                    return;
-                const float* p = reinterpret_cast<const float*>(f.data().data());
-                media_depth_.depth.assign(p, p + npix);
-            }
-            else if (f.format() == rc::media::FORMAT_Z16)
-            {
-                if (f.size() < npix * sizeof(std::uint16_t))
-                    return;
-                const std::uint16_t* p = reinterpret_cast<const std::uint16_t*>(f.data().data());
-                media_depth_.depth.resize(npix);
-                for (std::size_t i = 0; i < npix; ++i)
-                    media_depth_.depth[i] = static_cast<float>(p[i]) * 0.001f;  // mm -> m fallback
-            }
-            else
-                return;
-            media_depth_.width    = w;
-            media_depth_.height   = h;
-            media_depth_.stamp    = f.stamp_ms();
-            media_depth_.frame_id = f.frame_id();
-            media_depth_.valid    = true;
-        });
-    }
-
-    const auto now_rx = std::chrono::steady_clock::now();
-    if (now_rx - last_rx_report >= std::chrono::seconds(5))
-    {
-        std::println("[MediaRx] 5s stats rgb={} depth={} rgb_valid={} depth_valid={} ({}x{} / {}x{})",
-                     rx_rgb, rx_depth, media_rgb_.valid, media_depth_.valid,
-                     media_rgb_.width, media_rgb_.height, media_depth_.width, media_depth_.height);
-        rx_rgb = rx_depth = 0;
-        last_rx_report = now_rx;
-    }
+    return media_->init_media_plane(domain_id, rgb_topic, depth_topic);
 }
 
 bool SceneProcessor::init_ricoh_media_plane(std::uint32_t domain_id, const std::string& topic)
 {
-    // Prefer the producer's descriptor on the "ricoh" node (its authored media
-    // domain/topic + Image360Frame type); fall back to the configured domain/topic.
-    if (graph_)
-        media_ricoh_sub_ = rc::media::make_image360_subscriber_from_graph(*graph_, "ricoh", "rgb360");
-
-    if (!media_ricoh_sub_)
-    {
-        rc::media::SubscriberConfig cfg;
-        cfg.domain_id     = domain_id;
-        cfg.topic_name    = topic;
-        cfg.history_depth = 8;
-        media_ricoh_sub_ = std::make_unique<rc::media::Image360Subscriber>();
-        if (!media_ricoh_sub_->init(cfg))
-        {
-            std::print(stderr, "[voxelizer] ricoh media subscriber init FAILED (domain={}, '{}')\n",
-                       domain_id, topic);
-            media_ricoh_sub_.reset();
-            return false;
-        }
-        std::print("[voxelizer] ricoh media plane ready (fallback) domain={} '{}'\n", domain_id, topic);
-    }
-    return true;
+    return media_->init_ricoh_media_plane(domain_id, topic);
 }
 
 void SceneProcessor::poll_ricoh(bool force)
 {
-    if (!media_ricoh_sub_)
-        return;
-    const bool wanted = force || ricoh_wanted_.load(std::memory_order_relaxed);
-    media_ricoh_sub_->poll([this, wanted](const rc::media::Image360Frame& f, std::int64_t)
-    {
-        ricoh_last_stamp_ms_.store(f.stamp_ms(), std::memory_order_relaxed);   // cheap — feeds the RGB360 rate HUD
-        if (!wanted)                       // window hidden: drain + discard, no decode/clone cost
-            return;
-        const int w = static_cast<int>(f.width());
-        const int h = static_cast<int>(f.height());
-        if (w <= 0 || h <= 0)
-            return;
-        const std::size_t npix = static_cast<std::size_t>(w) * static_cast<std::size_t>(h);
-        if (f.size() < npix * 3)
-            return;
-        cv::Mat view(h, w, CV_8UC3, const_cast<std::uint8_t*>(f.data().data()));
-        std::scoped_lock lk(media_ricoh_mutex_);   // may race a concurrent ricoh_bgr_copy() from another thread
-        if (f.format() == rc::media::IMG360_FORMAT_RGB8)
-            cv::cvtColor(view, media_ricoh_.bgr, cv::COLOR_RGB2BGR);
-        else                               // IMG360_FORMAT_BGR8 (producer default) or unspecified
-            media_ricoh_.bgr = view.clone();
-        media_ricoh_.width    = w;
-        media_ricoh_.height   = h;
-        media_ricoh_.stamp    = f.stamp_ms();
-        media_ricoh_.frame_id = f.frame_id();
-        media_ricoh_.valid    = true;
-    });
+    media_->poll_ricoh(force);
 }
 
 cv::Mat SceneProcessor::ricoh_bgr_copy() const
 {
-    std::scoped_lock lk(media_ricoh_mutex_);
-    return media_ricoh_.bgr;   // shallow (refcounted) copy — cheap, safe to use after the lock is released
+    return media_->ricoh_bgr_copy();
 }
 
-bool SceneProcessor::init_lidar_media_plane(std::uint32_t /*domain_id*/, const std::string& /*topic*/, bool use_media)
+bool SceneProcessor::init_lidar_media_plane(std::uint32_t domain_id, const std::string& topic, bool use_media)
 {
-    lidar_use_media_ = use_media;
-    if (!use_media)
-    {
-        std::print("[voxelizer] lidar media plane DISABLED (Voxel.lidar_use_media=false) — no LiDAR source\n");
-        return false;
-    }
-
-    // Shared multi-plane reader (the same one every agent uses): prefers the two per-device planes
-    // helios+bpearl (DEVICE frame), transformed to the robot frame + merged; falls back to the fused
-    // "lidar3D" plane. Domain/topic come from each plane's media descriptor (no config). Subscribers
-    // come up lazily inside get_lidar3D()->poll() — nothing touches DDS here. inner_eigen_api_ (set in
-    // configure(), called before this) backs the device->robot RT transform.
-    lidar_reader_ = std::make_unique<rc::media::LidarPlaneReader>(
-        graph_, inner_eigen_api_, std::vector<std::string>{"helios", "bpearl"}, "lidar3D", "lidar");
-    std::print("[voxelizer] lidar media plane ready (shared reader: helios+bpearl → robot, lidar3D fallback)\n");
-    return true;
+    // inner_eigen_api_ is set in configure() (called before this) and backs the device->robot RT.
+    return media_->init_lidar_media_plane(inner_eigen_api_, domain_id, topic, use_media);
 }
 
-std::optional<SceneProcessor::LidarData> SceneProcessor::get_lidar3D()
+std::optional<LidarData> SceneProcessor::get_lidar3D()
 {
-    if (!lidar_use_media_ || !lidar_reader_)
-        return std::nullopt;
-
-    // Diagnostic (every 5 s): fresh = merged sweeps this window; served = cycles that returned a scan.
-    // fresh==0 while served>0 ⇒ serving a STALE scan (producer stopped publishing).
-    static std::uint64_t fresh = 0, served = 0;
-    static auto last_report = std::chrono::steady_clock::now();
-
-    // Merge helios+bpearl (or fused lidar3D) into the ROBOT frame; callers apply the dynamic
-    // room<-robot pose at the scan stamp (interpolate=false here — only static mount edges crossed).
     std::string robot_name;
     { std::scoped_lock lk(node_names_mutex_); robot_name = robot_node_name_; }
-    if (!robot_name.empty())
-        if (auto sweep = lidar_reader_->poll(robot_name, /*interpolate=*/false);
-            sweep.has_value() && !sweep->points.empty())
-        {
-            LidarData ld;
-            ld.xs.reserve(sweep->points.size());
-            ld.ys.reserve(sweep->points.size());
-            ld.zs.reserve(sweep->points.size());
-            for (const auto& p : sweep->points)
-            {
-                ld.xs.push_back(p.x());
-                ld.ys.push_back(p.y());
-                ld.zs.push_back(p.z());
-            }
-            ld.plane_id = sweep->plane_id;   // per-point source plane (helios=0, bpearl=1) for viewer colouring
-            ld.timestamp_ms = static_cast<std::uint64_t>(sweep->stamp_ms);
-            media_lidar_ = std::move(ld);
-            media_lidar_valid_ = true;
-            ++fresh;
-        }
-
-    std::optional<LidarData> out;
-    if (media_lidar_valid_ && !media_lidar_.xs.empty())
-    {
-        out = media_lidar_;
-        ++served;
-    }
-
-    const auto now = std::chrono::steady_clock::now();
-    if (now - last_report >= std::chrono::seconds(5))
-    {
-        std::println("[LidarSrc] 5s media fresh={} served={} ({} pts)",
-                     fresh, served, out ? out->xs.size() : 0u);
-        fresh = served = 0;
-        last_report = now;
-    }
-    return out;
+    return media_->get_lidar3D(robot_name);
 }
 
 void SceneProcessor::configure(DSR::InnerEigenAPI* inner_eigen_api,
@@ -518,100 +297,12 @@ std::optional<Mat::RTMat> SceneProcessor::get_room_zed_transform(FPSCounter& com
 
 std::uint64_t SceneProcessor::get_frame_timestamp_ms() const
 {
-    if (media_rgb_.valid && media_rgb_.stamp != 0)
-        return media_rgb_.stamp;
-    else if (media_depth_.valid && media_depth_.stamp != 0)
-        return media_depth_.stamp;
-    else
-    {
-        return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count());
-    }
-}
-
-std::optional<cv::Mat> SceneProcessor::get_rgb_from_dsr() const
-{
-    if (!graph_)
-        return std::nullopt;
-    auto zed_node = graph_->get_node("zed");
-    if (!zed_node.has_value())
-        return std::nullopt;
-
-    auto data_opt    = graph_->get_attrib_by_name<cam_rgb_att>(zed_node.value());
-    auto width_opt   = graph_->get_attrib_by_name<cam_rgb_width_att>(zed_node.value());
-    auto height_opt  = graph_->get_attrib_by_name<cam_rgb_height_att>(zed_node.value());
-    auto depth_opt   = graph_->get_attrib_by_name<cam_rgb_depth_att>(zed_node.value());
-    if (!data_opt.has_value() || !width_opt.has_value() || !height_opt.has_value())
-        return std::nullopt;
-
-    const int w = width_opt.value();
-    const int h = height_opt.value();
-    const int ch = depth_opt.has_value() ? depth_opt.value() : 3;
-    const auto& bytes = data_opt.value().get();
-    if (w <= 0 || h <= 0 || static_cast<int>(bytes.size()) < w * h * ch)
-        return std::nullopt;
-
-    // Wrap in cv::Mat without copying, then clone so the node can be released.
-    return cv::Mat(h, w, ch == 4 ? CV_8UC4 : CV_8UC3,
-                   const_cast<void*>(static_cast<const void*>(bytes.data()))).clone();
+    return media_->get_frame_timestamp_ms();
 }
 
 std::optional<RGBDData> SceneProcessor::get_rgbd_frame_from_dsr() const
 {
-    // Pixels now arrive over the zero-copy media plane (not the DSR graph). Pull
-    // the latest RGB and depth frames; camera intrinsics (focal) remain in the
-    // static 'zed' node descriptor.
-    drain_media_plane();
-
-    if (!media_rgb_.valid || media_rgb_.bgr.empty())
-        return std::nullopt;
-    if (!media_depth_.valid || media_depth_.depth.empty())
-        return std::nullopt;
-
-    const int rgb_w = media_rgb_.width;
-    const int rgb_h = media_rgb_.height;
-    const int depth_w = media_depth_.width;
-    const int depth_h = media_depth_.height;
-    if (rgb_w <= 0 || rgb_h <= 0 || depth_w <= 0 || depth_h <= 0)
-        return std::nullopt;
-
-    // Voxel pipeline assumes one xyz point per RGB pixel.
-    if (depth_w != rgb_w || depth_h != rgb_h)
-    {
-        qWarning() << "RGB/depth resolution mismatch. RGB=" << rgb_w << "x" << rgb_h
-                   << " depth=" << depth_w << "x" << depth_h;
-        return std::nullopt;
-    }
-
-    const std::size_t depth_size = static_cast<std::size_t>(depth_w) * static_cast<std::size_t>(depth_h);
-    if (media_depth_.depth.size() < depth_size)
-        return std::nullopt;
-
-    // Camera intrinsics from the static 'zed' node (not per-frame).
-    float focal_x = 0.f;
-    float focal_y = 0.f;
-    if (graph_)
-    {
-        if (auto zed_node = graph_->get_node("zed"); zed_node.has_value())
-        {
-            if (auto fx = graph_->get_attrib_by_name<cam_depth_focalx_att>(zed_node.value()); fx.has_value())
-                focal_x = static_cast<float>(fx.value());
-            if (auto fy = graph_->get_attrib_by_name<cam_depth_focaly_att>(zed_node.value()); fy.has_value())
-                focal_y = static_cast<float>(fy.value());
-        }
-    }
-    if (focal_x <= 0.f || focal_y <= 0.f)
-        return std::nullopt;
-
-    RGBDData data;
-    data.rgb     = media_rgb_.bgr.clone();
-    data.width   = rgb_w;
-    data.height  = rgb_h;
-    data.focal_x = focal_x;
-    data.focal_y = focal_y;
-    data.depth.assign(media_depth_.depth.begin(),
-                      media_depth_.depth.begin() + static_cast<std::ptrdiff_t>(depth_size));
-    return data;
+    return media_->get_rgbd_frame_from_dsr();
 }
 
 void SceneProcessor::check_input_stream_startup_status()
@@ -623,19 +314,14 @@ void SceneProcessor::check_input_stream_startup_status()
 
     if (graph_)
     {
-        if (!media_rgb_.valid)
+        if (!media_->rgb_valid())
             std::print(stderr, "[voxelizer] No RGB frame on the media plane yet. Waiting for robot_concept producer...\n");
-        if (!media_depth_.valid)
+        if (!media_->depth_valid())
             std::print(stderr, "[voxelizer] No depth frame on the media plane yet. Waiting for robot_concept producer...\n");
 
         if (auto zed = graph_->get_node("zed"); !zed.has_value())
             std::print(stderr, "[voxelizer] DSR 'zed' node not found. Waiting...\n");
     }
-}
-
-void SceneProcessor::log_room_robot_pose_periodic(const Mat::RTMat& room_T_robot) const
-{
-    (void)room_T_robot;
 }
 
 void SceneProcessor::mark_room_rt_ready()
@@ -652,32 +338,6 @@ void SceneProcessor::update_room_polygon_periodic()
     ++polygon_check_count_;
     if (polygon_check_count_ % 50 == 0)
         update_room_polygon_in_viewers();
-}
-
-bool SceneProcessor::compute_room_to_camera_basis(const std::string& camera_node_name,
-                                                  const std::string& room_frame_name,
-                                                  std::uint64_t rt_timestamp,
-                                                  RoomToCameraBasis& basis) const
-{
-    if (inner_eigen_api_ == nullptr)
-        return false;
-
-    const auto time_query = transforms_interpolate_rt_
-        ? DSR::RT_API::TimeQuery::Interpolated
-        : DSR::RT_API::TimeQuery::Nearest;
-
-    const auto origin_opt = inner_eigen_api_->transform(camera_node_name, Mat::Vector3d(0.0, 0.0, 0.0), room_frame_name, rt_timestamp, "RT", time_query);
-    const auto x_opt = inner_eigen_api_->transform(camera_node_name, Mat::Vector3d(1.0, 0.0, 0.0), room_frame_name, rt_timestamp, "RT", time_query);
-    const auto y_opt = inner_eigen_api_->transform(camera_node_name, Mat::Vector3d(0.0, 1.0, 0.0), room_frame_name, rt_timestamp, "RT", time_query);
-    const auto z_opt = inner_eigen_api_->transform(camera_node_name, Mat::Vector3d(0.0, 0.0, 1.0), room_frame_name, rt_timestamp, "RT", time_query);
-    if (!origin_opt.has_value() || !x_opt.has_value() || !y_opt.has_value() || !z_opt.has_value())
-        return false;
-
-    basis.origin = origin_opt.value();
-    basis.axis_x = x_opt.value() - basis.origin;
-    basis.axis_y = y_opt.value() - basis.origin;
-    basis.axis_z = z_opt.value() - basis.origin;
-    return true;
 }
 
 std::optional<SceneProcessor::RoomPolygonData> SceneProcessor::get_room_polygon_from_graph() const
@@ -876,155 +536,6 @@ bool SceneProcessor::get_room_layout(std::vector<float>& polygon_x, std::vector<
     polygon_y = std::move(room_data->polygon_y);
     room_height = room_data->room_height;
     return true;
-}
-
-void SceneProcessor::overlay_room_polygon_on_canvas(cv::Mat& canvas, std::uint64_t frame_ts_ms) const
-{
-    if (canvas.empty() || !graph_ || inner_eigen_api_ == nullptr)
-        return;
-
-    auto room_data = get_room_polygon_from_graph();
-    if (!room_data.has_value())
-        return;
-
-    auto zed_node = graph_->get_node("zed");
-    if (!zed_node.has_value())
-        return;
-
-    auto camera_api = graph_->get_camera_api(zed_node.value());
-    if (!camera_api)
-        return;
-
-    const std::size_t n = std::min(room_data->polygon_x.size(), room_data->polygon_y.size());
-    if (n < 2)
-        return;
-
-    RoomToCameraBasis basis;
-    if (!compute_room_to_camera_basis("zed", room_data->room_name, frame_ts_ms, basis))
-        return;
-
-    Eigen::Matrix<double, 3, Eigen::Dynamic> room_points(3, static_cast<Eigen::Index>(n));
-    Eigen::Matrix<double, 3, Eigen::Dynamic> room_points_top(3, static_cast<Eigen::Index>(n));
-    for (std::size_t i = 0; i < n; ++i)
-    {
-        room_points(0, static_cast<Eigen::Index>(i)) = static_cast<double>(room_data->polygon_x[i]);
-        room_points(1, static_cast<Eigen::Index>(i)) = static_cast<double>(room_data->polygon_y[i]);
-        room_points(2, static_cast<Eigen::Index>(i)) = 0.0;
-        room_points_top(0, static_cast<Eigen::Index>(i)) = static_cast<double>(room_data->polygon_x[i]);
-        room_points_top(1, static_cast<Eigen::Index>(i)) = static_cast<double>(room_data->polygon_y[i]);
-        room_points_top(2, static_cast<Eigen::Index>(i)) = static_cast<double>(room_data->room_height);
-    }
-
-    Eigen::Matrix3d basis_matrix;
-    basis_matrix.col(0) = basis.axis_x;
-    basis_matrix.col(1) = basis.axis_y;
-    basis_matrix.col(2) = basis.axis_z;
-    const Eigen::Vector3d basis_origin = basis.origin;
-
-    Eigen::Matrix<double, 3, Eigen::Dynamic> zed_points =
-        (basis_matrix * room_points).colwise() + basis_origin;
-    Eigen::Matrix<double, 3, Eigen::Dynamic> zed_points_top =
-        (basis_matrix * room_points_top).colwise() + basis_origin;
-
-    auto project_clipped_segment = [&](Eigen::Vector3d a, Eigen::Vector3d b,
-                                       cv::Point& out_a, cv::Point& out_b) -> bool
-    {
-        constexpr double near_y = 1e-4;
-
-        if (a.y() <= near_y && b.y() <= near_y)
-            return false;
-
-        if (a.y() <= near_y)
-        {
-            const double t = (near_y - a.y()) / (b.y() - a.y());
-            a = a + t * (b - a);
-        }
-        else if (b.y() <= near_y)
-        {
-            const double t = (near_y - b.y()) / (a.y() - b.y());
-            b = b + t * (a - b);
-        }
-
-        const Eigen::Vector2d uv0 = camera_api->project(a);
-        const Eigen::Vector2d uv1 = camera_api->project(b);
-        if (!std::isfinite(uv0.x()) || !std::isfinite(uv0.y()) || !std::isfinite(uv1.x()) || !std::isfinite(uv1.y()))
-            return false;
-
-        out_a = cv::Point(static_cast<int>(std::lround(uv0.x())), static_cast<int>(std::lround(uv0.y())));
-        out_b = cv::Point(static_cast<int>(std::lround(uv1.x())), static_cast<int>(std::lround(uv1.y())));
-        return true;
-    };
-
-    std::vector<std::optional<cv::Point>> projected_floor(n);
-    std::vector<std::optional<cv::Point>> projected_top(n);
-    for (std::size_t i = 0; i < n; ++i)
-    {
-        const Eigen::Vector3d floor_point_zed = zed_points.col(static_cast<Eigen::Index>(i));
-        if (floor_point_zed.y() > 1e-6)
-        {
-            const Eigen::Vector2d uv = camera_api->project(floor_point_zed);
-            if (std::isfinite(uv.x()) && std::isfinite(uv.y()))
-                projected_floor[i] = cv::Point(static_cast<int>(std::lround(uv.x())), static_cast<int>(std::lround(uv.y())));
-        }
-
-        const Eigen::Vector3d top_point_zed = zed_points_top.col(static_cast<Eigen::Index>(i));
-        if (top_point_zed.y() > 1e-6)
-        {
-            const Eigen::Vector2d uv = camera_api->project(top_point_zed);
-            if (std::isfinite(uv.x()) && std::isfinite(uv.y()))
-                projected_top[i] = cv::Point(static_cast<int>(std::lround(uv.x())), static_cast<int>(std::lround(uv.y())));
-        }
-    }
-
-    const cv::Scalar floor_colour(255, 0, 255);
-    const cv::Scalar top_colour(0, 0, 255);
-    const cv::Scalar vertical_colour(0, 200, 255);
-    for (std::size_t i = 0; i < n; ++i)
-    {
-        const std::size_t j = (i + 1) % n;
-
-        cv::Point p0;
-        cv::Point p1;
-        if (project_clipped_segment(zed_points.col(static_cast<Eigen::Index>(i)),
-                                    zed_points.col(static_cast<Eigen::Index>(j)),
-                                    p0, p1))
-        {
-            if (cv::clipLine(canvas.size(), p0, p1))
-                cv::line(canvas, p0, p1, floor_colour, 2, cv::LINE_AA);
-        }
-
-        if (project_clipped_segment(zed_points_top.col(static_cast<Eigen::Index>(i)),
-                                    zed_points_top.col(static_cast<Eigen::Index>(j)),
-                                    p0, p1))
-        {
-            if (cv::clipLine(canvas.size(), p0, p1))
-                cv::line(canvas, p0, p1, top_colour, 2, cv::LINE_AA);
-        }
-
-        if (project_clipped_segment(zed_points.col(static_cast<Eigen::Index>(i)),
-                                    zed_points_top.col(static_cast<Eigen::Index>(i)),
-                                    p0, p1))
-        {
-            if (cv::clipLine(canvas.size(), p0, p1))
-                cv::line(canvas, p0, p1, vertical_colour, 2, cv::LINE_AA);
-        }
-    }
-
-    for (const auto& p : projected_floor)
-    {
-        if (!p.has_value())
-            continue;
-        if (p->x >= 0 && p->x < canvas.cols && p->y >= 0 && p->y < canvas.rows)
-            cv::circle(canvas, p.value(), 4, floor_colour, cv::FILLED, cv::LINE_AA);
-    }
-
-    for (const auto& p : projected_top)
-    {
-        if (!p.has_value())
-            continue;
-        if (p->x >= 0 && p->x < canvas.cols && p->y >= 0 && p->y < canvas.rows)
-            cv::circle(canvas, p.value(), 4, top_colour, cv::FILLED, cv::LINE_AA);
-    }
 }
 
 void SceneProcessor::update_room_polygon_in_viewers()

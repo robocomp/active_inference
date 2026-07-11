@@ -22,6 +22,8 @@ LIST(APPEND SOURCES
   ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/imu_framePubSubTypes.cxx
   ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/imu_frameTypeObjectSupport.cxx
   ../src/table_fitter.cpp
+  ../src/table_projection.cpp
+  ../src/table_lidar_range_channel.cpp
   ../src/table_model.cpp
   ../src/table_belief.cpp
   ../src/epistemic_planner.cpp
@@ -38,6 +40,8 @@ LIST(APPEND HEADERS
   ${ACTIVE_INFERENCE_COMMON_DIR}/mask_ingestor/mask_ingestor.h
   ../src/table_scene_graph.h
   ../src/table_fitter.h
+  ../src/table_projection.h
+  ../src/table_lidar_range_channel.h
   ../src/table_model.h
   ../src/table_belief.h
   ../src/epistemic_planner.h

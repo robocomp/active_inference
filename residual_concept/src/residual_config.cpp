@@ -63,6 +63,8 @@ ResidualConfig load_residual_config(const ConfigLoader& cfg)
     out.cluster.robot_radius_m   = getf("Clusterer.RobotRadiusM",    0.40f);
     out.cluster.wall_margin_m    = getf("Clusterer.WallMarginM",     0.30f);
     out.cluster.explain_margin_m = getf("Clusterer.ExplainMarginM",  0.04f);
+    out.cluster.explain_sensor_sigma_m = getf("Clusterer.ExplainSensorSigmaM", 0.03f);
+    out.cluster.explain_fit_margin_m   = getf("Clusterer.ExplainFitMarginM",   0.10f);  // under-fit slack (< clearance)
     out.cluster.dbscan_eps_m     = getf("Clusterer.DbscanEpsM",      0.20f);
     out.cluster.dbscan_min_pts   = geti("Clusterer.DbscanMinPts",    5);
     out.cluster.dbscan_z_scale   = getf("Clusterer.DbscanZScale",    0.35f);
@@ -98,6 +100,10 @@ ResidualConfig load_residual_config(const ConfigLoader& cfg)
     out.zed_boost_enabled       = getb("ZedBoost.Enabled",       true);
     out.zed_detection_enabled   = getb("ZedBoost.FeedDetection", false);   // dense ZED → clustering
     out.grid_zed_enabled        = getb("ZedBoost.FeedGrid",      true);    // dense ZED → occupancy grid
+    out.grid_field_ema_up       = getf("Grid.FieldEmaUp",        1.0f);    // published-field temporal low-pass (rise)
+    out.grid_field_ema_down     = getf("Grid.FieldEmaDown",      0.30f);   // ...and fall (slow = stable)
+    out.motion_vel0_mps         = getf("Grid.MotionVel0",        0.5f);    // linear speed (m/s) that halves sweep trust
+    out.motion_omega0_rps       = getf("Grid.MotionOmega0",      0.6f);    // yaw rate (rad/s) that halves sweep trust
     // Robust ZED infrastructure subtraction (reuse the floor/ceiling heights; ZED depth-noise band σ0+q·r²).
     out.zed_infra.floor_z0      = out.cluster.floor_z0;
     out.zed_infra.ceil_z        = out.cluster.ceil_z;

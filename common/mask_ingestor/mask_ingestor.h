@@ -42,6 +42,8 @@ namespace rc {
 class MaskIngestor
 {
 public:
+    // One detected instance: label + pose + [begin,end) ranges into the packet's shared point/pixel arrays,
+    // plus the per-mask corruption/range/bearing channels the consumers fold into R and the common-mode.
     struct MaskSlice
     {
         std::string label;
@@ -76,6 +78,7 @@ public:
         float depth_var        = 0.0f;
     };
 
+    // One ingested masks frame: every slice plus the shared support-point and raw-pixel arrays they index into.
     struct MasksPacket
     {
         bool valid = false;

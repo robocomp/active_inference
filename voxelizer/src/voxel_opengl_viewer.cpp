@@ -1,4 +1,5 @@
 #include "voxel_opengl_viewer.h"
+#include "obj_loader.h"
 
 #include <QCoreApplication>
 #include <QHash>
@@ -24,125 +25,6 @@ namespace
 {
 constexpr auto kViewerSettingsGroup = "VoxelOpenGLViewer";
 
-struct ObjMeshData
-{
-    std::vector<QVector3D> triangles;
-    QVector3D bb_min;
-    QVector3D bb_max;
-};
-
-std::optional<std::filesystem::path> resolve_robot_mesh_path(const std::string& mesh_path)
-{
-    if (mesh_path.empty())
-        return std::nullopt;
-
-    const std::filesystem::path input(mesh_path);
-    std::vector<std::filesystem::path> candidates;
-    if (input.is_absolute())
-        candidates.push_back(input);
-    else
-    {
-        candidates.push_back(std::filesystem::current_path() / input);
-        const auto app_dir = std::filesystem::path(QCoreApplication::applicationDirPath().toStdString());
-        candidates.push_back(app_dir.parent_path() / input);
-        candidates.push_back(input);
-    }
-
-    for (const auto& candidate : candidates)
-        if (!candidate.empty() && std::filesystem::exists(candidate))
-            return candidate;
-
-    return std::nullopt;
-}
-
-int parse_obj_index(const std::string& token, int vertex_count)
-{
-    const auto slash = token.find('/');
-    const std::string index_str = token.substr(0, slash);
-    if (index_str.empty())
-        return -1;
-
-    const int raw_index = std::stoi(index_str);
-    if (raw_index > 0)
-        return raw_index - 1;
-    if (raw_index < 0)
-        return vertex_count + raw_index;
-    return -1;
-}
-
-std::optional<ObjMeshData> load_obj_mesh_data(const std::filesystem::path& mesh_path)
-{
-    std::ifstream input(mesh_path);
-    if (!input.is_open())
-        return std::nullopt;
-
-    std::vector<QVector3D> vertices;
-    std::vector<QVector3D> triangles;
-    QVector3D bb_min;
-    QVector3D bb_max;
-    bool have_bounds = false;
-    std::string line;
-
-    while (std::getline(input, line))
-    {
-        if (line.size() < 2)
-            continue;
-
-        std::istringstream stream(line);
-        std::string tag;
-        stream >> tag;
-        if (tag == "v")
-        {
-            float x = 0.f, y = 0.f, z = 0.f;
-            if (!(stream >> x >> y >> z))
-                continue;
-
-            const QVector3D vertex(x, y, z);
-            vertices.push_back(vertex);
-            if (!have_bounds)
-            {
-                bb_min = vertex;
-                bb_max = vertex;
-                have_bounds = true;
-            }
-            else
-            {
-                bb_min.setX(std::min(bb_min.x(), vertex.x()));
-                bb_min.setY(std::min(bb_min.y(), vertex.y()));
-                bb_min.setZ(std::min(bb_min.z(), vertex.z()));
-                bb_max.setX(std::max(bb_max.x(), vertex.x()));
-                bb_max.setY(std::max(bb_max.y(), vertex.y()));
-                bb_max.setZ(std::max(bb_max.z(), vertex.z()));
-            }
-        }
-        else if (tag == "f")
-        {
-            std::vector<int> face_indices;
-            std::string token;
-            while (stream >> token)
-            {
-                const int index = parse_obj_index(token, static_cast<int>(vertices.size()));
-                if (index >= 0 && index < static_cast<int>(vertices.size()))
-                    face_indices.push_back(index);
-            }
-
-            if (face_indices.size() < 3)
-                continue;
-
-            for (std::size_t i = 1; i + 1 < face_indices.size(); ++i)
-            {
-                triangles.push_back(vertices[static_cast<std::size_t>(face_indices[0])]);
-                triangles.push_back(vertices[static_cast<std::size_t>(face_indices[i])]);
-                triangles.push_back(vertices[static_cast<std::size_t>(face_indices[i + 1])]);
-            }
-        }
-    }
-
-    if (triangles.empty() || !have_bounds)
-        return std::nullopt;
-
-    return ObjMeshData{std::move(triangles), bb_min, bb_max};
-}
 }
 
 VoxelOpenGLViewer::VoxelOpenGLViewer(QWidget* parent)
@@ -530,6 +412,13 @@ void VoxelOpenGLViewer::set_robot_pose(float x, float y, float theta)
 {
     {
         std::scoped_lock lk(robot_pose_mutex_);
+        // Skip the repaint when the pose the viewer would draw is unchanged. The render timer feeds this
+        // at 20 Hz off the latest odometry; a still robot yields identical values once the display EMA has
+        // settled, so re-rendering the whole scene each tick would be pure idle CPU. Other layers (lidar,
+        // masks, boxes…) request their own repaints via their setters, so this only suppresses the
+        // pose-driven idle repaint — not updates that actually changed something.
+        if (have_robot_pose_ and x == robot_x_ and y == robot_y_ and theta == robot_theta_)
+            return;
         robot_x_ = x;
         robot_y_ = y;
         robot_theta_ = theta;
@@ -540,14 +429,14 @@ void VoxelOpenGLViewer::set_robot_pose(float x, float y, float theta)
 
 bool VoxelOpenGLViewer::load_robot_mesh(const std::string& path)
 {
-    const auto resolved_path = resolve_robot_mesh_path(path);
+    const auto resolved_path = rc::obj::resolve_robot_mesh_path(path);
     if (!resolved_path.has_value())
     {
         qWarning() << "VoxelOpenGLViewer robot mesh not found:" << QString::fromStdString(path);
         return false;
     }
 
-    const auto mesh = load_obj_mesh_data(resolved_path.value());
+    const auto mesh = rc::obj::load_obj_mesh_data(resolved_path.value());
     if (!mesh.has_value())
     {
         qWarning() << "VoxelOpenGLViewer failed to load robot mesh:" << QString::fromStdString(resolved_path->string());
@@ -1577,6 +1466,8 @@ void VoxelOpenGLViewer::paintGL()
 
     // [perf-probe] append paintGL cost per frame to a CSV. t_ms is a shared steady-clock stamp so this
     // aligns with viewer_perf_frames/compute/yolo on one timeline. File truncated once per launch.
+    // Gated on perf_log_: a synchronous flush() every paint is itself measurable idle cost.
+    if (perf_log_)
     {
         const auto t1 = std::chrono::steady_clock::now();
         const double ms = std::chrono::duration<double, std::milli>(t1 - probe_t0).count();

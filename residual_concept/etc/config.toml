@@ -113,6 +113,18 @@ CeilZ = 1.80
 RobotRadiusM = 0.45
 WallMarginM = 0.35            # room delimiting-polygon wall model tolerance
 ExplainMarginM = 0.05         # object-surface claim tolerance (≈sensor noise; tight so on-table survives)
+# Object collapse is a SOFT marginalisation, not a margin: explained-probability = Φ(−sdf/σ_tot), where σ_tot is
+# the object's OWN published position covariance (rt_covariance, which already includes the localisation-chain
+# term → a distant object's uncertainty grows with range through the graph) convolved with the sensor noise
+# below. No k, no floors. Watch the [collapse] log for each object's live σ. If a distant table still isn't
+# clearing, the root cause is upstream (its published covariance is overconfident / chain-cov off), not here.
+ExplainSensorSigmaM = 0.03      # irreducible LiDAR range noise (m): the only constant, a named physical quantity
+# The soft collapse crosses 0.5 exactly at the object's model-box edge, so on its own it can't clear cells the
+# box doesn't reach — table legs / box corners leak and inflate into a clearance halo. This claims M metres PAST
+# each object box edge to absorb a known under-fit. SAFETY-NEUTRAL while M < the planner's object clearance
+# (≈ half robot width, inflate_radius_m=0.25): that zone is already no-go via the OBJECT, so masking the
+# redundant residual there is free. Keep < 0.25. Upstream cure = the fitter covering the true extent. 0 = model-exact.
+ExplainFitMarginM = 0.10
 DbscanEpsM = 0.30             # ↑ 0.20→0.30: a downward-LiDAR tabletop is painted as concentric rings spaced just
                               # above 0.20 → it flickered into 1-5 arc slivers. 0.30 bridges the ring gaps into ONE
                               # cluster. Lower toward 0.22 if genuinely-separate objects (chairs near the table) merge.
@@ -149,6 +161,20 @@ MinTopZM = 0.30               # ...an elevated flat sheet with top ≥ this (a t
 # When a residual box falls in the ZED FoV, project it into the depth image, backproject the depth in that
 # pixel region, keep the points inside the box (reject background), and add them to the belief likelihood —
 # a much denser signal than LiDAR for forward objects (the ZED sees ~110° / ~5 m; LiDAR still covers 360°).
+[Grid]
+# Temporal low-pass on the PUBLISHED belief field only (the heatmap + what the planner reads); the safety
+# occupancy latch is untouched (instant completeness preserved). ASYMMETRIC so risk is never lagged: a cell's
+# published risk RISES at FieldEmaUp (=1 → instant) and only FALLS at FieldEmaDown (slow → flicker holds risk,
+# stable). Lower FieldEmaDown = stickier/steadier field (but slower to clear a genuinely departed obstacle).
+FieldEmaUp   = 1.0    # blend toward higher risk (1 = instant; leave at 1 for safety)
+FieldEmaDown = 0.30   # blend toward lower risk per ~2 Hz publish (0.30 ≈ ~1 s settle; ↓ = steadier)
+# MOTION STABILITY. A far LiDAR hit is unreliable (angular footprint + localisation lever arm both grow with
+# range) and a moving robot's pose jitter makes far cells flicker. Evidence is scaled by ego-motion trust
+# 1/(1+|v|/MotionVel0+|ω|/MotionOmega0) AND a per-hit range weight r0²/(r0²+r²). Near/still hits keep full weight
+# (latch in one frame — completeness); far/while-moving hits accumulate over several frames (no phantom flicker).
+MotionVel0   = 0.5    # linear speed (m/s) at which sweep trust halves
+MotionOmega0 = 0.6    # yaw rate (rad/s) at which sweep trust halves
+
 [ZedBoost]
 Enabled = true
 FeedDetection = true    # RE-ENABLED 2026-07-08: the mega-blob was the MERGE (now off), not ZED (only 79 pts survive
@@ -156,6 +182,7 @@ FeedDetection = true    # RE-ENABLED 2026-07-08: the mega-blob was the MERGE (no
                         # (fills the tabletop so it clusters as ONE table) without chaining distinct objects — and
                         # it covers the near-field-ahead LiDAR blind zone. Watch [cluster] max_npts for any blob.
 FeedGrid = true         # feed the dense ZED FoV into the OCCUPANCY GRID as a 2nd sensor (own camera ray origin).
+# (Grid.FieldEma* live in the [Grid] section below — temporal low-pass on the PUBLISHED belief field.)
                         # LiDAR rings only GRAZE horizontal surfaces so tabletops never fill; ZED covers them
                         # densely → the tabletop shows AND the per-cell evidence makes the costmap stable. OFF to A/B.
 # Robust ZED infrastructure subtraction: a point is floor/ceiling/wall if within k·σ(range) of it, where the

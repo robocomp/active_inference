@@ -1,8 +1,16 @@
 /*
- * table_fitter.cpp — the active-inference fit core for table_concept.
+ * table_fitter.cpp — the active-inference fit core for table_concept (see table_fitter.h).
+ *
+ * Implements the per-"table_*" instance lifecycle and the AI2 full-covariance belief update: ensure_instance
+ * (birth-seed + RT/prior warm-start + NaN sanitize), observe_slice (mask-cloud → candidate/residual SDF split
+ * + per-slice R inputs), and run_inference (lazy footprint-moment birth, voxel-bank ingest, one TableBelief
+ * update with range/motion covariance, the step-bound divergence net, FE-surprise attention, orientation-mode
+ * resolution, and write-back into the legacy TableState). Collaborates with MaskIngestor, TableSceneGraph,
+ * TableProjection, TableLidarRangeChannel, and the header-only voxel bank; SpecificWorker owns orchestration.
  */
 
 #include "table_fitter.h"
+#include "table_voxel_bank.h"
 
 #include <algorithm>
 #include <chrono>
@@ -15,16 +23,20 @@
 
 namespace rc {
 
+// ─── Construction & chain covariance ──────────────────────────────────────────────────────────────
+
 TableFitter::TableFitter(std::shared_ptr<DSR::DSRGraph> graph,
                          DSR::InnerEigenAPI* inner_eigen,
                          TableConfig& cfg,
                          MaskIngestor* mask_ingestor,
                          TableSceneGraph* scene_graph)
-    : G_(std::move(graph)), inner_eigen_(inner_eigen), cfg_(cfg),
-      mask_ingestor_(mask_ingestor), scene_graph_(scene_graph)
+    : G_(graph), inner_eigen_(inner_eigen), cfg_(cfg),
+      mask_ingestor_(mask_ingestor), scene_graph_(scene_graph),
+      projection_(std::make_unique<TableProjection>(graph, inner_eigen, mask_ingestor))
 {
 }
 
+// Enable Part-B chain-covariance propagation from source_frame (no-op unless a gaussian API + frame are given).
 void TableFitter::set_chain_cov_source(DSR::InnerGaussianAPI* gaussian, std::string source_frame, bool enabled)
 {
     gaussian_          = gaussian;
@@ -32,6 +44,12 @@ void TableFitter::set_chain_cov_source(DSR::InnerGaussianAPI* gaussian, std::str
     chain_cov_enabled_ = enabled and (gaussian_ != nullptr) and not chain_src_frame_.empty();
 }
 
+// Compute the localization/chain covariance term (J·Σ_chain·Jᵀ) at the table centre; store it on the instance.
+//
+// Transform the centre to the measurement frame and back to room with ZERO input cov, so InnerGaussianAPI
+// returns exactly the chain contribution (Σ_chain from each RT edge's rt_covariance), pinned to the mask
+// capture stamp. The table is fit in room but its position stays conditional on the robot pose
+// (camera→robot→room), so this per-frame SHARED localization error feeds the belief common-mode.
 void TableFitter::compute_chain_cov(TableInstance& inst)
 {
     inst.chain_cov_xx = 0.0f;
@@ -57,8 +75,14 @@ void TableFitter::compute_chain_cov(TableInstance& inst)
     inst.chain_cov_yy = static_cast<float>(g->covariance(1, 1));
 }
 
-// ─── Instance lifecycle ──────────────────────────────────────────────────────
+// ─── Instance lifecycle ───────────────────────────────────────────────────────────────────────────
 
+// Create the instance for a "table_*" node if absent; return true only the first time it is created.
+//
+// Warm-starts from the node's size attribs and the room→table RT edge, then OVERRIDES with the tracker
+// birth seed when present (the RT edge written at birth is not reliably queryable this same cycle — it reads
+// 0,0 — which would freeze the model at the origin and cause endless re-births). Sanitizes any non-finite
+// field before it can poison the SDF and lock the optimizer.
 bool TableFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_id)
 {
     room_node_id_ = room_id;
@@ -141,11 +165,14 @@ bool TableFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_id)
     return true;
 }
 
-// ─── Observation ─────────────────────────────────────────────────────────────
+// ─── Observation ──────────────────────────────────────────────────────────────────────────────────
 
-// Build an observation from ONE assigned mask slice. Latches that slice's R inputs on the instance and does
-// the classify-don't-destroy SDF split. The caller (process_table_node) invokes this once per assigned slice
-// and runs a belief update for each — sequential fusion that keeps every sensor's R and common-mode separate.
+// Build an observation from ONE assigned mask slice: latch that slice's R inputs, then SDF-split its cloud.
+//
+// Classify-don't-destroy split into candidate (near the current surface) vs residual (off-surface) points.
+// The caller (process_table_node) invokes this once per assigned slice and runs a belief update for each —
+// sequential fusion that keeps every sensor's R and common-mode separate. RICOH slices (depth_var>0) are
+// BEARING-ONLY and return empty (never fitted); they drive only the attention path.
 TableFitter::TableObservation TableFitter::observe_slice(TableInstance& inst, int slice_index)
 {
     TableObservation observation;
@@ -201,6 +228,7 @@ TableFitter::TableObservation TableFitter::observe_slice(TableInstance& inst, in
     return observation;
 }
 
+// Fallback when the tracker assigned NO mask slice this cycle: always a stale observation (age the belief).
 TableFitter::TableObservation TableFitter::observe(TableInstance& inst, const DSR::Node& node)
 {
     // No mask slice was assigned this cycle. There is no node-attrib sensing path (nothing writes
@@ -210,14 +238,21 @@ TableFitter::TableObservation TableFitter::observe(TableInstance& inst, const DS
     return TableObservation{};
 }
 
+// True on the config-driven log period (one in table_log_period_frames cycles).
 bool TableFitter::should_log(const TableInstance& inst) const
 {
     const int period = std::max(1, cfg_.table_log_period_frames);
     return (inst.processed_cycles % period) == 0;
 }
 
-// ─── Inference ───────────────────────────────────────────────────────────────
+// ─── Inference ────────────────────────────────────────────────────────────────────────────────────
 
+// One recursive full-covariance belief update (or age-only step) for this instance; returns the free energy.
+//
+// Lazy first-frame init (snap centre/height to the cloud, footprint-moment birth of w/h/yaw), voxel-bank
+// ingest, then the range/motion covariance and the TableBelief update guarded by a step-bound divergence net,
+// FE-surprise attention baseline, and orientation-mode resolution. On a stale frame it ages the belief
+// (Σ grows on the agent's clock) instead of freezing. Result is written back into the legacy TableState.
 float TableFitter::run_inference(TableInstance& inst, const TableObservation& observation)
 {
     const int npts = static_cast<int>(observation.candidate_pts.size() + observation.residual_pts.size());
@@ -292,7 +327,7 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
 
     if (observation.has_fresh_data)
     {
-        ingest_observation_voxels(inst, observation);   // keep the viewer's voxel bank fed
+        rc::voxel_bank::ingest(inst, observation.candidate_pts, observation.residual_pts, cfg_);   // keep the viewer's voxel bank fed
         inst.last_residual_pts = observation.residual_pts;   // model-unexplained points for the viewer layer
     }
 
@@ -311,7 +346,7 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
             inst.ai2_belief.inflate_for_age(dt, cfg_.ai2_age_nominal_dt_s);
         }
         inst.last_belief_touch = now;
-        compute_projected_roi(inst);
+        projection_->compute_projected_roi(inst);
         return inst.dbg_energy;   // HOLD the last free energy — no new mask ≠ FE 0 (the fit is unchanged)
     }
     // Fresh path: update()/predict() below carry their own one-step Q, so just reset the age clock here.
@@ -376,7 +411,7 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
         // YOLO-independent LiDAR range channel: stage returns landing on the legs/rim. No-op if precision==0
         // or no fresh sweep. The shared factor (accumulate_lidar_rays<6> in TableBelief::accumulate_extra)
         // sphere-traces this belief's own SDF, so the same call the bottle uses drops in unchanged.
-        feed_lidar(inst, frame);
+        lidar_channel_.feed(inst, frame);
 
         // Divergence safety net (mirrors bottle): snapshot state+Σ, run the update, and if the centre teleports
         // beyond a physical bound in one frame (corrupted mask cloud / one-sided LiDAR runaway → the cx=−200m
@@ -451,7 +486,7 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
     ++inst.matched_frames;
     inst.detection_alive = inst.frames_since_detection < cfg_.detection_alive_max_frames;
 
-    compute_projected_roi(inst);
+    projection_->compute_projected_roi(inst);
     // (chain cov already computed above, before the belief update)
 
     if (should_log(inst))
@@ -477,6 +512,7 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
     return energy;
 }
 
+// Append one AI2 belief row (state + Σ-diag std + mask R/bias/trunc + mode evidence + LiDAR diag) to the CSV.
 void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool gated, float energy)
 {
     if (cfg_.ai2_csv_path.empty())
@@ -507,364 +543,9 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
     ai2_csv_.flush();
 }
 
-// ─── YOLO-independent LiDAR first-hit range channel ────────────────────────────
-// Select this cycle's returns landing on THIS table and stage them on frame.lidar. The box is anchored on
-// the FRESH mask-cloud centroid (XY) — not the fitted state, which a diverging fit would drag into empty
-// space, starving LiDAR exactly when it is most needed — and sized from the BIRTH footprint (not the fitted
-// w/h, so a blown-up extent can't explode the region). The vertical band is floor-referenced [−m, birth_H+m]
-// so it deliberately spans the LEGS and the tabletop RIM: those are the unbiased, segmentation-independent
-// surfaces that attack the mask-erosion under-size. Final membership is the factor's own sphere-trace hit
-// test (a ray must actually cross the model SDF), so this box is only a work bound + neighbour reject.
-void TableFitter::feed_lidar(TableInstance& inst, TableFrame& frame) const
-{
-    inst.dbg_lidar_rays = 0;
-    inst.dbg_lidar_raw  = 0;
-    inst.dbg_lidar_resid_m = -1.0f;
-    // Stage the sweep for EITHER LiDAR consumer: the first-hit range factor (LidarPrecision) or the free-space
-    // VACATE term (FreeSpacePrecision, EXISTENCE_BELIEF_PLAN.md Step 4). Both read frame.lidar.endpoints/origin.
-    if ((cfg_.lidar_precision <= 0.0f and cfg_.free_space_precision <= 0.0f)
-        or not lidar_have_sweep_ or lidar_sweep_room_.empty() or frame.points.empty())
-        return;
+// ─── Factory helpers ──────────────────────────────────────────────────────────────────────────────
 
-    // Anchor XY on this cycle's fresh mask-cloud centroid.
-    Eigen::Vector3f c = Eigen::Vector3f::Zero();
-    for (const auto& p : frame.points) c += p;
-    c /= static_cast<float>(frame.points.size());
-
-    const auto& s = inst.ai2_belief.state();
-    // Fixed footprint from the BIRTH dims (never the fitted w/h). Circumscribed horizontal radius so the box
-    // is rotation-agnostic (yaw need not be resolved to select). Vertical band is floor-referenced.
-    const float m    = cfg_.lidar_select_margin_m;
-    const float rxy  = 0.5f * std::sqrt(cfg_.tracker_birth_width_m * cfg_.tracker_birth_width_m
-                                      + cfg_.tracker_birth_depth_m * cfg_.tracker_birth_depth_m) + m;
-    const float rxy2 = rxy * rxy;
-    const float z_lo = -m;                                   // floor (room z≈0), minus a little slack
-    const float z_hi = cfg_.tracker_birth_height_m + m;      // tabletop, plus margin
-    // Generous diagnostic box (1.5× horizontal) — "is a return anywhere near this table?" — kept below the
-    // birth min-separation so it can't grab a neighbouring table's returns.
-    const float rraw2 = (1.5f * rxy) * (1.5f * rxy);
-    int raw = 0;
-
-    frame.lidar.endpoints.clear();
-    frame.lidar.endpoints.reserve(256);
-    double resid_sum = 0.0;
-    double bear_c = 0.0, bear_s = 0.0;    // Σcos φ, Σsin φ of return bearings about the centre (angular coverage)
-    for (const auto& p : lidar_sweep_room_)
-    {
-        const float dx = p.x() - c.x(), dy = p.y() - c.y();
-        const float dh2 = dx * dx + dy * dy;
-        if (dh2 <= rraw2 and p.z() >= z_lo and p.z() <= z_hi) ++raw;   // generous "near?" count
-        if (dh2 > rxy2) continue;
-        if (p.z() < z_lo or p.z() > z_hi) continue;
-        frame.lidar.endpoints.push_back(p);
-        resid_sum += std::abs(inst.ai2_belief.sdf_compound(p, s));     // |dist to CURRENT model surface|
-        const float phi = std::atan2(dy, dx);                          // bearing about the centre (room XY)
-        bear_c += std::cos(phi); bear_s += std::sin(phi);
-    }
-    inst.dbg_lidar_raw  = raw;
-    inst.dbg_lidar_rays = static_cast<int>(frame.lidar.endpoints.size());
-    if (inst.dbg_lidar_rays > 0)
-        inst.dbg_lidar_resid_m = static_cast<float>(resid_sum / inst.dbg_lidar_rays);
-    if (frame.lidar.endpoints.empty())
-        return;
-
-    // z-calibration probe: mean z of ALL selected returns + mean z of the highest 20% (≈ the observed tabletop
-    // surface). Compare dbg_lidar_topz_m to the fitted H — a persistent gap ⇒ a lidar3D→room z-offset, not fit.
-    {
-        std::vector<float> zs; zs.reserve(frame.lidar.endpoints.size());
-        double zsum = 0.0;
-        for (const auto& p : frame.lidar.endpoints) { zs.push_back(p.z()); zsum += p.z(); }
-        std::sort(zs.begin(), zs.end());
-        const std::size_t k = std::max<std::size_t>(1, zs.size() / 5);   // top/bottom 20%
-        double topsum = 0.0; for (std::size_t i = zs.size() - k; i < zs.size(); ++i) topsum += zs[i];
-        double botsum = 0.0; for (std::size_t i = 0; i < k; ++i) botsum += zs[i];   // lowest returns ≈ floor
-        inst.dbg_lidar_meanz_m = static_cast<float>(zsum / zs.size());
-        inst.dbg_lidar_topz_m  = static_cast<float>(topsum / k);
-        inst.dbg_lidar_floorz_m = static_cast<float>(botsum / k);   // should read ~0 if room z=0=floor + calib OK
-    }
-
-    // Precision = base, down-weighted by TWO informativeness factors (both continuous, no gate):
-    //  (1) sparse RAY-COUNT coverage — a handful of noisy returns must not swing extent.
-    //  (2) ANGULAR coverage — the circular variance (1−R) of the return bearings about the centre. R is the
-    //      mean-resultant length: R→1 when all returns share one bearing (a ONE-SIDED sweep, blind to the far
-    //      face and to which axis is which → near-zero orientation/extent info on a near-square table), R→0
-    //      when returns wrap the object. Multiplying by (1−R)^p makes a one-sided frame contribute almost
-    //      nothing to the ambiguous DOFs — killing the w↔h mode THRASH seen from far, degenerate viewpoints —
-    //      while the RECURSIVE belief still accumulates coverage across an orbit (each frame is one-sided, but
-    //      from DIFFERENT bearings that add up in Σ). Principled: precision ∝ the frame's actual angular info.
-    const float coverage = std::min(1.0f, static_cast<float>(inst.dbg_lidar_rays)
-                                        / std::max(1.0f, cfg_.lidar_coverage_n0));
-    const float R        = static_cast<float>(std::hypot(bear_c, bear_s) / inst.dbg_lidar_rays);  // ∈[0,1]
-    const float cov_ang  = std::pow(std::max(0.0f, 1.0f - R), cfg_.lidar_coverage_ang_power);
-    inst.dbg_lidar_cov_ang = cov_ang;
-    frame.lidar.origin     = lidar_origin_room_;
-    frame.lidar.precision  = cfg_.lidar_precision * coverage * cov_ang;
-    frame.lidar.robust_c_m = cfg_.lidar_robust_c_m;
-}
-
-// ─── Camera extrinsic (room_T_zed) ─────────────────────────────────────────────
-
-std::optional<Eigen::Matrix4d> TableFitter::room_T_zed_matrix(std::uint64_t pose_ts_ms) const
-{
-    if (not inner_eigen_)
-        return std::nullopt;
-    // Pin the moving room→body hop to the frame's capture stamp (Nearest); keep the rigid body→zed mount
-    // at latest (it carries only a bootstrap stamp — a pinned query would fail). ts=0 → current pose.
-    const auto rtb = inner_eigen_->get_transformation_matrix("room", "body", pose_ts_ms);
-    const auto btz = inner_eigen_->get_transformation_matrix("body", "zed", 0);
-    if (not (rtb.has_value() and btz.has_value()))
-        return std::nullopt;
-    const auto to_mat4 = [](const Mat::RTMat& T)
-    {
-        Eigen::Matrix4d m;
-        const auto& s = T.matrix();
-        for (int i = 0; i < 4; ++i) for (int j = 0; j < 4; ++j) m(i, j) = s(i, j);   // no aligned load
-        return m;
-    };
-    return to_mat4(rtb.value()) * to_mat4(btz.value());
-}
-
-void TableFitter::compute_projected_roi(TableInstance& inst)
-{
-    inst.roi_valid = false;
-    if (not inner_eigen_)
-        return;
-    if (not camera_api_)
-    {
-        const auto zed = G_->get_node("zed");
-        if (not zed.has_value()) return;
-        camera_api_ = G_->get_camera_api(zed.value());
-        if (not camera_api_) return;
-    }
-
-    const auto Mopt = room_T_zed_matrix();   // room_T_zed (camera→room)
-    if (not Mopt.has_value())
-        return;
-    const Eigen::Matrix4d zed_T_room = Mopt.value().inverse();   // room point → camera frame
-
-    const float fx = camera_api_->get_focal_x();
-    const float fy = camera_api_->get_focal_y();
-    const float W  = static_cast<float>(camera_api_->get_width());
-    const float H  = static_cast<float>(camera_api_->get_height());
-    if (fx <= 0.f || fy <= 0.f || W <= 0.f || H <= 0.f)
-        return;
-    const float cx_px = W * 0.5f, cy_px = H * 0.5f;
-
-    // Project the 8 box corners (top slab + footprint at floor) into the image. Camera convention
-    // matches the producer: X=right, Y=forward(depth), Z=up ⇒ col=cx+X/Y·fx, row=cy−Z/Y·fy.
-    const auto& s = inst.model.state();
-    const float c = std::cos(s.yaw), sn = std::sin(s.yaw);
-    const float hw = s.w * 0.5f, hh = s.h * 0.5f;
-    float min_col = 1e9f, min_row = 1e9f, max_col = -1e9f, max_row = -1e9f;
-    int in_front = 0;
-    for (const int ix : {-1, 1})
-        for (const int iy : {-1, 1})
-            for (const float z : {0.0f, s.table_height})
-            {
-                const float lx = static_cast<float>(ix) * hw, ly = static_cast<float>(iy) * hh;
-                const Eigen::Vector4d Pr(s.cx + c * lx - sn * ly, s.cy + sn * lx + c * ly, z, 1.0);
-                const Eigen::Vector4d Pc = zed_T_room * Pr;
-                const double X = Pc.x(), Y = Pc.y(), Z = Pc.z();
-                if (Y <= 0.20) continue;   // skip corners at/near the image plane: X/Y explodes there
-                ++in_front;
-                const float col = cx_px + static_cast<float>(X / Y) * fx;
-                const float row = cy_px - static_cast<float>(Z / Y) * fy;
-                min_col = std::min(min_col, col); max_col = std::max(max_col, col);
-                min_row = std::min(min_row, row); max_row = std::max(max_row, row);
-            }
-
-    if (in_front < 4)   // need most of the box in front of the camera to trust the ROI
-        return;
-
-    const float roi_cx = 0.5f * (min_col + max_col);
-    const float roi_cy = 0.5f * (min_row + max_row);
-    const float off_x = (roi_cx - cx_px) / (0.5f * W);   // [-1,1], 0 = centred
-    const float off_y = (roi_cy - cy_px) / (0.5f * H);
-    const float fill  = std::max((max_col - min_col) / W, (max_row - min_row) / H);
-    // Reject degenerate projections (robot too close / a corner grazing the image plane → the
-    // bbox explodes to absurd offsets). Beyond a sane bound the ROI is unusable for centring:
-    // mark invalid (the controller then keeps sweeping / treats framing as unknown) and clamp the
-    // stored values so consumers/logs never see garbage.
-    const bool sane = std::isfinite(off_x) && std::isfinite(off_y) && std::isfinite(fill)
-                      && std::abs(off_x) < 3.0f && std::abs(off_y) < 3.0f && fill < 4.0f;
-    inst.roi_offset_x = std::clamp(off_x, -3.0f, 3.0f);
-    inst.roi_offset_y = std::clamp(off_y, -3.0f, 3.0f);
-    inst.roi_fill     = std::clamp(fill, 0.0f, 4.0f);
-    inst.roi_valid    = sane;
-}
-
-// PIXEL-LEVEL silhouette existence evidence — see the header. Projects the tabletop top face onto the image
-// and, over the predicted-visible pixels, splits into: lit by a "table" mask (occupancy), lit by a non-table
-// mask (occlusion → HOLD), or lit by nothing (absence — the KEY signal when NO YOLO mask fires this frame).
-TableFitter::SilhouetteExistence TableFitter::compute_silhouette_existence(const TableInstance& inst)
-{
-    SilhouetteExistence out;
-    if (not inner_eigen_)
-        return out;
-    if (not camera_api_)
-    {
-        const auto zed = G_->get_node("zed");
-        if (not zed.has_value()) return out;
-        camera_api_ = G_->get_camera_api(zed.value());
-        if (not camera_api_) return out;
-    }
-    const auto Mopt = room_T_zed_matrix();   // room→zed pinned to current pose
-    if (not Mopt.has_value())
-        return out;
-    const Eigen::Matrix4d zed_T_room = Mopt.value().inverse();
-
-    const float fx = camera_api_->get_focal_x(), fy = camera_api_->get_focal_y();
-    const float W  = static_cast<float>(camera_api_->get_width());
-    const float Himg = static_cast<float>(camera_api_->get_height());
-    if (fx <= 0.f or fy <= 0.f or W <= 0.f or Himg <= 0.f)   // fx/fy: sanity only; projection uses CameraAPI
-        return out;
-
-    // Hashed pixel-cell coverage of the current YOLO foreground, split table (occupancy) vs other (occluder).
-    // A CELL-px cell absorbs mask-boundary jitter and makes membership O(1). Key packs the two cell indices.
-    const auto& pkt = mask_ingestor_->packet();
-    if (not pkt.valid or pkt.mask_pixels.empty())
-        return out;
-    constexpr float CELL = 6.0f;
-    const auto key = [&](float col, float row) -> std::int64_t
-    {
-        const std::int64_t cx = static_cast<std::int64_t>(std::floor(col / CELL));
-        const std::int64_t cy = static_cast<std::int64_t>(std::floor(row / CELL));
-        return (cx << 32) ^ (cy & 0xffffffffLL);
-    };
-    std::unordered_set<std::int64_t> table_cells, occluder_cells;
-    for (const auto& sl : pkt.slices)
-    {
-        const std::size_t b = std::min(sl.pixel_begin, pkt.mask_pixels.size());
-        const std::size_t e = std::min(sl.pixel_end,   pkt.mask_pixels.size());
-        auto& dst = (sl.label == "table") ? table_cells : occluder_cells;
-        for (std::size_t i = b; i < e; ++i)
-            dst.insert(key(pkt.mask_pixels[i].x(), pkt.mask_pixels[i].y()));
-    }
-
-    const auto& s = inst.ai2_belief.state();
-    const float c = std::cos(s.yaw), sn = std::sin(s.yaw), hw = 0.5f * s.w, hd = 0.5f * s.h;
-
-    // Classify ONE room-frame silhouette sample: project it, then vote occupancy / absence / occlusion. A
-    // sample lit by a "table" mask is occupancy; lit by nothing is ABSENCE (the "gone" signal that fires even
-    // with NO YOLO mask); lit by a non-table mask is OCCLUDED (a nearer object hides the point) ⇒ HOLD.
-    double range_sum = 0.0;
-    const auto classify = [&](float lx, float ly, float lz)
-    {
-        ++out.n_total;                                                 // one silhouette sample of the WHOLE object
-        const Eigen::Vector4d Pr(s.cx + c * lx - sn * ly, s.cy + sn * lx + c * ly, lz, 1.0);
-        const Eigen::Vector4d Pc = zed_T_room * Pr;
-        const double X = Pc.x(), Y = Pc.y(), Z = Pc.z();
-        if (Y <= 0.20) return;                                         // behind / at the image plane (near clip)
-        // Real camera FRUSTUM: project through the DSR CameraAPI (true intrinsics/principal point, and the
-        // node's projection model — pinhole for zed, equirectangular for a 360 sensor). A sample is "expected
-        // visible" only if it lands inside the actual image, so out-of-FoV samples are NOT counted detectable.
-        const Eigen::Vector2d uv = camera_api_->project(Eigen::Vector3d(Pc.x(), Pc.y(), Pc.z()));
-        const float col = static_cast<float>(uv.x()), row = static_cast<float>(uv.y());
-        if (col < 0.f or col >= W or row < 0.f or row >= Himg) return; // out of frustum ⇒ not detectable
-        const std::int64_t k = key(col, row);
-        if (occluder_cells.contains(k) and not table_cells.contains(k))
-        { ++out.n_occluded; return; }                                 // nearer object hides it ⇒ HOLD
-        ++out.n_detectable;
-        range_sum += std::sqrt(X * X + Y * Y + Z * Z);                 // camera→sample distance (absence conf ∝ 1/range)
-        if (table_cells.contains(k)) out.e_occ  += 1.0f;              // still there
-        else                         out.e_free += 1.0f;              // predicted-but-absent
-    };
-
-    // (a) tabletop TOP face (z = H): regular grid over the footprint.
-    constexpr int NX = 24, NY = 24;
-    for (int ix = 0; ix < NX; ++ix)
-        for (int iy = 0; iy < NY; ++iy)
-            classify((-1.0f + 2.0f * (ix + 0.5f) / NX) * hw, (-1.0f + 2.0f * (iy + 0.5f) / NY) * hd, s.H);
-
-    // (b) the 4 LEGS (vertical axes at the inset corners, floor→join): valuable extra evidence, especially from
-    // edge-on/low views where the top face projects to a thin sliver — the legs project BELOW the tabletop and
-    // extend the detectable footprint (occupancy when masked, absence when the volume is empty).
-    const float leg_top = std::max(0.0f, s.H - rc::TableModel::TOP_THICKNESS);
-    const float inset    = rc::TableModel::LEG_RADIUS;
-    constexpr int NZ = 16;
-    for (const float sx : {-1.0f, 1.0f})
-        for (const float sy : {-1.0f, 1.0f})
-        {
-            const float lx = sx * std::max(0.0f, hw - inset), ly = sy * std::max(0.0f, hd - inset);
-            for (int iz = 0; iz < NZ; ++iz)
-                classify(lx, ly, leg_top * (iz + 0.5f) / NZ);
-        }
-    if (out.n_detectable > 0)
-        out.mean_range_m = static_cast<float>(range_sum / out.n_detectable);
-    return out;
-}
-
-// ─── Voxel bank (table-owned historical memory) ──────────────────────────────
-
-std::uint64_t TableFitter::voxel_key(const Eigen::Vector3f& point, float quantization_m)
-{
-    const float q = std::max(1e-4f, quantization_m);
-    const int ix = static_cast<int>(std::floor(point.x() / q));
-    const int iy = static_cast<int>(std::floor(point.y() / q));
-    const int iz = static_cast<int>(std::floor(point.z() / q));
-
-    std::uint64_t h = 1469598103934665603ULL;  // FNV-1a offset basis
-    auto mix = [&](std::uint64_t v) { h ^= v; h *= 1099511628211ULL; };
-    mix(static_cast<std::uint64_t>(ix));
-    mix(static_cast<std::uint64_t>(iy));
-    mix(static_cast<std::uint64_t>(iz));
-    return h;
-}
-
-void TableFitter::ingest_observation_voxels(TableInstance& inst, const TableObservation& observation)
-{
-    std::size_t inserted = 0;
-    std::size_t rejected_foreign = 0;
-    const auto max_points = static_cast<std::size_t>(std::max(1, cfg_.voxel_bank_max_points));
-
-    auto ingest = [&](const std::vector<Eigen::Vector3f>& src)
-    {
-        for (const auto& p : src)
-        {
-            if (inst.voxel_bank_pts.size() >= max_points)
-                break;
-            if (not is_voxel_owned_by_table(inst, p))
-            {
-                ++rejected_foreign;
-                continue;
-            }
-            const auto key = voxel_key(p, cfg_.voxel_bank_quantization_m);
-            if (inst.voxel_bank_keys.insert(key).second)
-            {
-                inst.voxel_bank_pts.push_back(p);
-                ++inserted;
-            }
-        }
-    };
-
-    ingest(observation.candidate_pts);
-    ingest(observation.residual_pts);
-
-    if (inserted > 0 && should_log(inst))
-        std::print("[{}] voxel-bank: +{} total={} (cap={}) reject_foreign={}\n",
-                   inst.node_name, inserted, inst.voxel_bank_pts.size(), max_points, rejected_foreign);
-}
-
-bool TableFitter::is_voxel_owned_by_table(const TableInstance& inst, const Eigen::Vector3f& point) const
-{
-    const auto& s = inst.model.state();
-
-    // XY ownership gate: table-centered radius with a configurable margin.
-    const float half_diag = 0.5f * std::sqrt(s.w * s.w + s.h * s.h);
-    const float gate_radius = std::max(1.0f, half_diag + cfg_.voxel_select_radius_margin_m);
-    const float dx = point.x() - s.cx;
-    const float dy = point.y() - s.cy;
-    if (std::hypot(dx, dy) > gate_radius)
-        return false;
-
-    // Height gate to reject floor / distant clutter points in mixed scenes.
-    const float z_min = -0.05f;
-    const float z_max = s.table_height + cfg_.voxel_select_height_margin_m;
-    return point.z() >= z_min && point.z() <= z_max;
-}
-
-// ─── Factory helpers ─────────────────────────────────────────────────────────
-
+// Build the TableModel params from config (the SDF split band for candidate/residual classification).
 TableModelParams TableFitter::make_model_params() const
 {
     TableModelParams p;

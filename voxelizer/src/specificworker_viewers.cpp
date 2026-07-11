@@ -221,6 +221,7 @@ void SpecificWorker::setup_custom_viewers()
         controls_layout->addStretch(1);
 
         voxel_viewer_gl = std::make_unique<rc::VoxelOpenGLViewer>(nullptr);
+        voxel_viewer_gl->set_perf_log(params.PERF_LOG);   // per-paint CSV probe off unless perf logging on
         voxel_viewer_gl->load_robot_mesh("meshes/shadow.obj");
 
         panel_layout->addLayout(controls_layout);

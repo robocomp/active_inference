@@ -1,6 +1,18 @@
+/*
+ * specificworker_presence.cpp — presence protocol + owned-node cleanup for table_concept.
+ *
+ * The Waiting/Operating/Degraded state hooks are thin delegators to AgentPresenceCoordinator (the shared
+ * bottle_concept protocol: debounced degraded, unique [Agent] id). The rest sweeps this agent's own DSR
+ * nodes — "table_*" instances and their child "affordance" nodes — both as a one-time startup stale-sweep
+ * (recover from a crashed previous run) and on shutdown, so the graph never accumulates orphans. Main-thread
+ * only: all graph access here runs on the main thread. See CLAUDE.md (presence protocol / startup join).
+ */
+
 #include "specificworker.h"
 
 #include <print>
+
+// ─── Presence state delegators ───────────────────────────────────────────────────────────────────
 
 void SpecificWorker::waiting_enter()
 {
@@ -31,6 +43,8 @@ void SpecificWorker::degraded_loop()
 {
     presence_coordinator_.degraded_loop();
 }
+
+// ─── Owned-node cleanup (startup stale-sweep + shutdown) ─────────────────────────────────────────
 
 void SpecificWorker::remove_owned_table_nodes()
 {
@@ -129,6 +143,8 @@ void SpecificWorker::remove_stale_affordance_nodes()
         }
     }
 }
+
+// ─── Optional-peer hooks ─────────────────────────────────────────────────────────────────────────
 
 void SpecificWorker::on_optional_peer_lost(const std::string &name, std::uint32_t /*id*/)
 {

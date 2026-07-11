@@ -1,5 +1,11 @@
 /*
- * table_belief.cpp  —  AI2 table belief (see TABLE_FIT_AI2.md)
+ * table_belief.cpp  —  AI2 table belief implementation (see TABLE_FIT_AI2.md)
+ *
+ * The table-specific model hooks behind TableBelief: the compound SDF (top slab + 4 derived legs), the soft
+ * mixture responsibilities + true (clutter-inclusive) free energy, the finite-difference Jacobian, the extra
+ * GN factors (LiDAR range · coverage traction · free-space vacate), the footprint second-moment fusion, the
+ * canonical symmetry fold and orientation-mode resolution, and self_test(). All Bayesian bookkeeping
+ * (predict / GN-MAP / Woodbury) lives in common/ai_belief/recursive_laplace.h; this file only feeds it.
  */
 
 #include "table_belief.h"
@@ -13,7 +19,7 @@
 namespace rc
 {
 
-// ─── SDF primitives (scalar, room→local handled by caller) ──────────────────────
+// ─── SDF primitives (scalar, room→local handled by caller) ───────────────────────────────────────
 
 namespace
 {
@@ -80,7 +86,7 @@ float TableBelief::sdf_compound(const Eigen::Vector3f& p, const TableBeliefState
     return m;
 }
 
-// ─── Mixture responsibilities ───────────────────────────────────────────────────
+// ─── Mixture responsibilities ────────────────────────────────────────────────────────────────────
 
 // UN-normalised mixture components u[0..5] (top, 4 legs, clutter) and their sum = the marginal likelihood
 // numerator p(point | model) ∝ Σ_k π_k N(d_k; 0, R). responsibilities() normalises this; the FREE ENERGY reads
@@ -129,7 +135,7 @@ std::array<float, 6> TableBelief::responsibilities(const Eigen::Vector3f& p, con
     return u;
 }
 
-// ─── Jacobian (central finite difference) ──────────────────────────────────────
+// ─── Jacobian (central finite difference) ────────────────────────────────────────────────────────
 
 Eigen::Matrix<float, 6, 1> TableBelief::sdf_jacobian(const Eigen::Vector3f& p, const TableBeliefState& s, int prim) const
 {
@@ -146,8 +152,12 @@ Eigen::Matrix<float, 6, 1> TableBelief::sdf_jacobian(const Eigen::Vector3f& p, c
     return J;
 }
 
-// ─── Constraints / canonical form ───────────────────────────────────────────────
+// ─── Constraints / canonical form ────────────────────────────────────────────────────────────────
 
+// Per-GN-iteration bounds: floor each extent so the box can't invert or collapse, and wrap yaw.
+// THRESHOLDS (physical floors, not tuned gates): w,h ≥ 0.10 m and H ≥ top_thickness+0.05 m keep the SDF
+// well-posed (a degenerate zero/negative extent has no gradient and would trap the GN step). yaw wraps to
+// (−π, π] for continuity. These clamp geometry only; they never gate evidence.
 void TableBelief::apply_constraints(TableBeliefState& s) const
 {
     s.w = std::max(s.w, 0.10f);
@@ -156,7 +166,7 @@ void TableBelief::apply_constraints(TableBeliefState& s) const
     s.yaw = std::remainder(s.yaw, 2.0f * static_cast<float>(M_PI));   // wrap to (−π, π]
 }
 
-// ─── Engine hooks: prior cov, process noise (F = I, static), common-mode, canonical fold ────────────
+// ─── Engine hooks: prior cov · process noise (F = I, static) · common-mode ───────────────────────
 
 Eigen::Matrix<float, 6, 1> TableBelief::prior_cov_diag() const
 {
@@ -188,10 +198,14 @@ Eigen::Matrix<float, 6, 1> TableBelief::common_mode_inv_diag(const TableFrame& f
             1.0f / std::max(1e-9f, y2 + frame.chain_cov_yaw)).finished();   // size + yaw caps grow with view range
 }
 
-// 2D footprint second-moment of the top-band points. Centroid + inertia tensor of the (x,y) projection, then
-// the closed-form 2×2 symmetric eigendecomposition: eigenvalues λ₁≥λ₂ give the equivalent uniform-rectangle
-// FULL extents √(12·λ), and the major eigenvector angle gives the principal-axis orientation. Model-free
-// (only the z-band selects the plane) — so a mask bigger/yawed than the current box is measured for what it is.
+// ─── Footprint second-moment statistic ───────────────────────────────────────────────────────────
+
+// 2D footprint second-moment of the top-band points (the yaw/extent statistic used by the moment factor).
+//
+// Centroid + inertia tensor of the (x,y) projection, then the closed-form 2×2 symmetric eigendecomposition:
+// eigenvalues λ₁≥λ₂ give the equivalent uniform-rectangle FULL extents √(12·λ), and the major eigenvector
+// angle gives the principal-axis orientation. Model-free (only the z-band selects the plane) — so a mask
+// bigger/yawed than the current box is measured for what it is.
 FootprintMoment TableBelief::footprint_moment(const std::vector<Eigen::Vector3f>& pts, float z_lo, float z_hi)
 {
     FootprintMoment m;
@@ -220,11 +234,15 @@ FootprintMoment TableBelief::footprint_moment(const std::vector<Eigen::Vector3f>
     return m;
 }
 
-// Extra evidence hook (engine calls it inside the GN loop): the YOLO-independent LiDAR first-hit range factor.
-// It sphere-traces THIS belief's own SDF (n_prims=5, sdf_prim/sdf_jacobian), so the SAME shared call the bottle
-// uses drops in unchanged at N=6. A no-op when f.lidar.precision==0. Because all returns of one sweep share the
-// sensor-pose error they are correlated, but they inform the SAME (Id,bd) the depth points do, so the engine's
-// common-mode Woodbury saturation de-correlates them too — no separate handling needed here.
+// ─── Extra GN factors: LiDAR range · coverage traction · free-space vacate ───────────────────────
+
+// Extra per-frame evidence folded into the GN normal equations (engine calls it inside the loop): the
+// YOLO-independent LiDAR range factor, then the coverage and free-space terms. Accumulates into (Id, bd).
+//
+// LiDAR: sphere-traces THIS belief's own SDF (n_prims=5, sdf_prim/sdf_jacobian), so the SAME shared call the
+// bottle uses drops in unchanged at N=6. A no-op when f.lidar.precision==0. Because all returns of one sweep
+// share the sensor-pose error they are correlated, but they inform the SAME (Id,bd) the depth points do, so
+// the engine's common-mode Woodbury saturation de-correlates them too — no separate handling needed here.
 void TableBelief::accumulate_extra(const TableBeliefState& s, const TableFrame& f,
                                    Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const
 {
@@ -351,16 +369,20 @@ void TableBelief::accumulate_extra(const TableBeliefState& s, const TableFrame& 
     }
 }
 
-// Footprint SECOND-MOMENT measurement (see TableBeliefParams::footprint_moment_precision). Fused as a SEPARATE
-// 3-DOF measurement of (w,h,yaw) with its OWN covariance — deliberately OUTSIDE the per-point common-mode
-// saturation. Rationale: the per-point range common-mode caps a single boundary point's authority (its
-// deprojected position error grows with range and is shared across the mask). But the moment is a GLOBAL fit
-// over thousands of points; its principal-axis angle and eigen-extents are direction/scale estimates in which
-// the shared radial error largely cancels, so they stay informative at range where the per-point channel is
+// ─── Footprint-moment measurement fusion ─────────────────────────────────────────────────────────
+
+// Fuse the footprint second-moment as a SEPARATE 3-DOF (w,h,yaw) Kalman update with its OWN covariance,
+// deliberately OUTSIDE the per-point common-mode saturation. No-op when precision==0.
+// (See TableBeliefParams::footprint_moment_precision.)
+//
+// Rationale: the per-point range common-mode caps a single boundary point's authority (its deprojected
+// position error grows with range and is shared across the mask). But the moment is a GLOBAL fit over
+// thousands of points; its principal-axis angle and eigen-extents are direction/scale estimates in which the
+// shared radial error largely cancels, so they stay informative at range where the per-point channel is
 // frozen. This is exactly the DOF the per-point mixture cannot supply on a flat top (tables_5.png stuck yaw).
 // Standard information/Kalman update on the full 6×6 Σ. yaw variance ∝ 1/anisotropy² → a near-square footprint
-// carries no orientation info (K→0; resolve_orientation owns that flip). NOT applied to cx,cy (a partial view's
-// centroid is biased; the per-point channel already fixes position). No-op when precision==0.
+// carries no orientation info (K→0; resolve_orientation owns that flip). NOT applied to cx,cy (a partial
+// view's centroid is biased; the per-point channel already fixes position).
 void TableBelief::apply_footprint_moment(const TableFrame& frame)
 {
     dbg_moment_pts_ = 0;
@@ -405,9 +427,13 @@ void TableBelief::apply_footprint_moment(const TableFrame& frame)
     // channel (FreeSpacePrecision: a beam that passes THROUGH proves empty; a beam that returns short is just
     // occluded and does not vacate), which is where "absence" belongs. The extent grows to the largest footprint
     // seen across the orbit (the best view = the true extent) and holds. Over-grow is bounded by the step-guard.
-    constexpr float kDrop = 1e12f;       // effectively removes the row (K→0: no mean move, no Σ reduction)
-    if (mw < state_.w) r_w = kDrop;      // the moment would SHRINK w ⇒ untrustworthy (partial view) → drop
-    if (mh < state_.h) r_h = kDrop;
+    // THRESHOLD (the file's one hard switch): grow-only guard. kDrop is a huge measurement variance that
+    // effectively removes the w or h row (K→0: no mean move, no Σ reduction). It fires when the moment would
+    // SHRINK an extent, because a mask is only ever a LOWER BOUND (see the grow-only paragraph above) — a
+    // measured shrink is an untrustworthy partial view, so drop it. Legitimate shrink is the vacate channel's job.
+    constexpr float kDrop = 1e12f;
+    if (mw < state_.w) r_w = kDrop;      // moment would SHRINK w ⇒ partial view → drop the row
+    if (mh < state_.h) r_h = kDrop;      // moment would SHRINK h ⇒ partial view → drop the row
 
     Eigen::Matrix<float, 3, 6> H = Eigen::Matrix<float, 3, 6>::Zero();
     H(0, 3) = 1.0f; H(1, 4) = 1.0f; H(2, 5) = 1.0f;                   // measures w, h, yaw
@@ -424,13 +450,18 @@ void TableBelief::apply_footprint_moment(const TableFrame& frame)
     state_ = s;
 }
 
-// CONTINUITY fold (TABLE_FIT_AI2.md §5, replaces the w≥h sign fold). The box SDF is invariant under the
-// exact symmetry group {e, r_π, swap∘r_{π/2}, swap∘r_{−π/2}} — four representations of the SAME table.
-// The old fold chose by sign(w−h), a NOISE process when w≈h, which converted extent jitter into 90° yaw
-// SNAPS. Instead pick the representative CLOSEST (prior Mahalanobis under Σ_pred) to the predicted mean, i.e.
-// the MAP over the covering sheets: the chart follows continuity, never the sign of a near-tie. Since the GN
-// result stays near the prediction, the identity representative wins in the common case (no fold on noise).
-// The genuine cross-class flip (near-square ambiguity) is owned by resolve_orientation(), not here.
+// ─── Canonical symmetry fold ─────────────────────────────────────────────────────────────────────
+
+// Fold the state onto the box-symmetry representative CLOSEST to the predicted mean (CONTINUITY fold,
+// replaces the w≥h sign fold; TABLE_FIT_AI2.md §5).
+//
+// The box SDF is invariant under the exact symmetry group {e, r_π, swap∘r_{π/2}, swap∘r_{−π/2}} — four
+// representations of the SAME table. The old fold chose by sign(w−h), a NOISE process when w≈h, which
+// converted extent jitter into 90° yaw SNAPS. Instead pick the representative CLOSEST (prior Mahalanobis under
+// Σ_pred) to the predicted mean, i.e. the MAP over the covering sheets: the chart follows continuity, never
+// the sign of a near-tie. Since the GN result stays near the prediction, the identity representative wins in
+// the common case (no fold on noise). The genuine cross-class flip (near-square ambiguity) is owned by
+// resolve_orientation(), not here.
 void TableBelief::canonicalize(TableBeliefState& s) const
 {
     constexpr float kHalfPi = 0.5f * static_cast<float>(M_PI);
@@ -458,12 +489,16 @@ void TableBelief::canonicalize(TableBeliefState& s) const
     s = reps[best];
 }
 
+// ─── Free energy & orientation-mode resolution ───────────────────────────────────────────────────
+
 // TRUE free energy: mean per-point negative-log marginal likelihood of the mixture, −log Σ_k π_k N(d_k;0,R),
-// INCLUDING the clutter component. The old readout summed only the surface prims weighted by responsibility, so
-// a misfit point (routed to clutter, r_surface≈0) contributed ~0 and a badly-fit model read FE≈0 — blind to the
-// very errors that matter. Here a point far from every surface falls to the clutter floor u[5]=ε·exp(−cs²/2R),
-// so −log(sum) is large: the energy now rises with misfit, so mode comparison (e_swap−e_now) and any F readout
-// are meaningful. Constant (2πR)^{−3/2} normaliser dropped — it cancels in every comparison and in Δ over frames.
+// INCLUDING the clutter component (so F rises with misfit).
+//
+// The old readout summed only the surface prims weighted by responsibility, so a misfit point (routed to
+// clutter, r_surface≈0) contributed ~0 and a badly-fit model read FE≈0 — blind to the very errors that matter.
+// Here a point far from every surface falls to the clutter floor u[5]=ε·exp(−cs²/2R), so −log(sum) is large:
+// the energy now rises with misfit, so mode comparison (e_swap−e_now) and any F readout are meaningful. The
+// constant (2πR)^{−3/2} normaliser is dropped — it cancels in every comparison and in Δ over frames.
 float TableBelief::mean_energy(const std::vector<Eigen::Vector3f>& pts, const TableBeliefState& s, float R) const
 {
     if (pts.empty()) return 0.0f;
@@ -477,13 +512,14 @@ float TableBelief::mean_energy(const std::vector<Eigen::Vector3f>& pts, const Ta
     return static_cast<float>(e / static_cast<double>(pts.size()));
 }
 
-// Sequential Bayesian comparison of the two orientation modes: current [(w,h,ψ)] vs the w↔h swap [(h,w,ψ)]
-// (≡ a 90° rotation, the near-square ambiguity). Each frame adds the log-evidence FOR the current mode
-// ∝ (E_swap − E_now): >0 when current fits better, ≈0 when the footprint is near-square (the two fit alike),
-// <0 when the swap fits better. Accumulation gives the belief MEMORY — one partial/biased frame can't flip
-// it (what stops the per-frame snapping) — and the adopted mode is the one with the LOWER accumulated
-// energy. Boundary = zero accumulated evidence (the MAP over the mode); NO tuned threshold. Mirrors chair's
-// resolve_orientation (180°) with the table's 90° / w↔h symmetry.
+// One sequential-Bayesian step over the two orientation modes — current [(w,h,ψ)] vs the w↔h swap [(h,w,ψ)]
+// (≡ 90° rotation, the near-square ambiguity) — adopting whichever has the lower accumulated energy.
+//
+// Each frame adds the log-evidence FOR the current mode ∝ (E_swap − E_now): >0 when current fits better, ≈0
+// when the footprint is near-square (the two fit alike), <0 when the swap fits better. Accumulation gives the
+// belief MEMORY — one partial/biased frame can't flip it (what stops the per-frame snapping). Boundary = zero
+// accumulated evidence (the MAP over the mode); NO tuned threshold. Mirrors chair's resolve_orientation
+// (180°) with the table's 90° / w↔h symmetry.
 bool TableBelief::resolve_orientation(const std::vector<Eigen::Vector3f>& pts, float R, float evidence_weight)
 {
     if (pts.empty()) return false;
@@ -533,8 +569,9 @@ Eigen::Matrix<float, 6, 6> TableBelief::covariance_reported() const
     return S;
 }
 
-// ─── Self-test ───────────────────────────────────────────────────────────────────
+// ─── Self-test ───────────────────────────────────────────────────────────────────────────────────
 
+// Isolated Eigen unit test: recovers a synthetic table pose + exercises each factor. Prints PASS/FAIL.
 bool TableBelief::self_test()
 {
     std::mt19937 rng(12345);

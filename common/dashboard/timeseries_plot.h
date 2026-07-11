@@ -1,5 +1,12 @@
 #pragma once
 
+/*
+ * common/dashboard/timeseries_plot.h  —  shared scrolling time-series plot widget
+ *
+ * SHARED dashboard widget for every concept agent's diagnostics dock (FE / dimensions / posterior σ panels).
+ * Q_OBJECT QWidget; thread-safe add_point() (mutex), wall-clock X axis, auto-scaling Y, N named series.
+ */
+
 #include <QWidget>
 #include <QPainter>
 #include <QPainterPath>
@@ -12,18 +19,11 @@
 
 namespace rc {
 
-/**
- * Lightweight scrolling time-series plot.
- *
- * Usage:
- *   plot->add_series("sdf_mse", Qt::red);
- *   // in compute loop:
- *   plot->add_point("sdf_mse", value);
- *
- * The X axis is wall-clock seconds since the first point.
- * The Y axis auto-scales to fit visible data.
- * Multiple named series share the same axes.
- */
+// Lightweight scrolling time-series plot: X = wall-clock seconds since the first point, Y auto-scales to the
+// visible data, and any number of named series share the same axes.
+//
+//   plot->add_series("sdf_mse", Qt::red);
+//   plot->add_point("sdf_mse", value);        // in the compute loop
 class TimeSeriesPlot : public QWidget
 {
     Q_OBJECT
@@ -31,17 +31,19 @@ class TimeSeriesPlot : public QWidget
 public:
     explicit TimeSeriesPlot(QWidget* parent = nullptr);
 
-    /** Register a new series with the given display colour.
-     *  If avg_window > 0 a companion "<name>_avg" series is auto-created
-     *  with a lighter colour and the running average is updated on every add_point(). */
+    // Register a new series with the given display colour.
+    // If avg_window > 0 a companion "<name>_avg" series is auto-created with a lighter colour and its running
+    // average is updated on every add_point().
     void add_series(const std::string& name, QColor colour,
                     float line_width = 1.5f, int avg_window = 0);
 
-    /** Append a sample to the named series (call from any thread).
-     *  If a running-average companion exists it is updated automatically. */
+    // Append a sample to the named series (call from any thread); updates the running-average companion if any.
     void add_point(const std::string& name, float value);
 
-    /** How many seconds of history to display (default 30). */
+    // Drop a series (and its running-average companion). No-op if absent.
+    void remove_series(const std::string& name);
+
+    // How many seconds of history to display (default 30).
     void set_visible_window(float seconds);
 
 protected:

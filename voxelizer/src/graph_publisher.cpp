@@ -529,7 +529,7 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
     {
         static std::size_t fg_call_no = 0, fg_last_print = 0;
         ++fg_call_no;
-        if (fg_gate_dropped > 0 and (fg_call_no - fg_last_print) >= 20)
+        if (params_.VERBOSE_DEBUG and fg_gate_dropped > 0 and (fg_call_no - fg_last_print) >= 20)
         {
             fg_last_print = fg_call_no;
             std::println("[mask-fg-gate] dropped {}/{} pts across {} zed mask(s) (band {:.2f}m, frame={})",

@@ -67,6 +67,22 @@ struct ResidualClusterParams
     // ── evidential claiming (SDF-residual) ──
     float explain_margin_m = 0.04f;   // a point within this of a specialist SURFACE is claimed (≈sensor noise;
                                       //   tight so an on-table object is NOT swallowed by the tabletop slab)
+    // Object collapse is a SOFT marginalisation, NOT a margin: a return at signed distance sdf from an object
+    // box is explained with probability Φ(−sdf/σ_tot), where σ_tot is the object's OWN published room-frame
+    // position covariance (rt_covariance — which already folds in the localisation-chain term, so a distant
+    // object's uncertainty grows with range through the graph, no lever-arm math here) convolved with the
+    // irreducible LiDAR measurement noise below. No k, no floors — σ is entirely model/graph-derived; this is
+    // the only remaining constant and it is a NAMED physical quantity (sensor noise), not a tuning threshold.
+    float explain_sensor_sigma_m = 0.03f;   // irreducible LiDAR range noise: the explained boundary is fuzzy by ≥ this
+    // Collapse margin for a known object whose fitted box UNDER-COVERS its true extent (a masks-only table with
+    // frozen width/depth, legs/corners sticking past the tabletop box, etc.). The soft Φ(−sdf/σ) crosses 0.5
+    // exactly at the box edge, so on its own it can NEVER clear cells the model box doesn't reach → leg/corner
+    // cells leak and then inflate into a clearance halo. This offsets the collapse boundary OUTWARD by M metres.
+    // SAFETY-NEUTRAL while M < the planner's object clearance (≈ inflate_radius_m = robot radius): anything within
+    // that of a known object is already in the planner's no-go zone via the OBJECT, so masking the redundant
+    // residual there removes nothing safety-relevant. Keep M comfortably below inflate_radius_m. The principled
+    // cure is still upstream (the fitter covering the true extent); this absorbs the gap in the meantime.
+    float explain_fit_margin_m = 0.10f;     // claim M past each object box edge (0 = model-exact; < inflate_radius_m)
     // ── DBSCAN ──
     // eps admits LARGER ensembles: a downward (helios) LiDAR paints a big surface (tabletop) as concentric
     // rings with gaps, so a too-small eps shatters it into arcs. 0.20 connects the rings into one cluster.

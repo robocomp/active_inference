@@ -18,13 +18,15 @@
  */
 
 /**
- * SpecificWorker — table_concept agent
+ * specificworker.cpp — table_concept agent orchestration.
  *
  * Per compute() cycle: ingest the ZED YOLO "table" masks, associate them to table instances with the shared
  * InstanceTracker (birth / associate / merge; ricoh 360 detections are bearing-only and only raise attention),
- * run one AI2 recursive-Laplace belief update (TableBelief) per assigned slice, write the fitted pose+geometry
- * back to DSR (RT edge + dims + mesh), and emit epistemic action proposals when a table stays under-observed.
- * See TABLE_FIT_AI2.md for the belief/fit core.
+ * run one AI2 recursive-Laplace belief update (TableBelief) per assigned slice via process_table_node, write
+ * the fitted pose+geometry back to DSR (RT edge + dims + mesh + covariance), and emit epistemic action
+ * proposals when a table stays under-observed. Also feeds the standalone belief dashboard + evidence monitor
+ * windows. The fit core is rc::TableFitter, perception rc::MaskIngestor, DSR I/O rc::TableSceneGraph. See
+ * TABLE_FIT_AI2.md for the belief/fit core.
  */
 
 #include "specificworker.h"
@@ -47,6 +49,8 @@
 
 // DSR attribute name tags — generated from dsr_attr_name.h
 #include <dsr/api/dsr_api.h>
+
+// ─── Anonymous-namespace helpers (footprint overlap + uncertainty readout) ───────────────────────
 
 namespace {
 
@@ -129,7 +133,7 @@ float footprint_overlap_ratio(const rc::TableState& a, const rc::TableState& b)
 }  // namespace
 
 
-// ─── Constructor / Destructor ─────────────────────────────────────────────────
+// ─── Constructor / Destructor ────────────────────────────────────────────────────────────────────
 
 SpecificWorker::SpecificWorker(const ConfigLoader& configLoader,
                                TuplePrx tprx,
@@ -252,7 +256,7 @@ void SpecificWorker::save_dashboard_geometry() const
     settings.sync();
 }
 
-// ─── Initialisation ──────────────────────────────────────────────────────────
+// ─── Initialisation ──────────────────────────────────────────────────────────────────────────────
 
 void SpecificWorker::initialize()
 {
@@ -454,7 +458,7 @@ void SpecificWorker::initialize()
     evidence_monitor_->show();
 }
 
-// ─── Main compute loop ───────────────────────────────────────────────────────
+// ─── Main compute loop ───────────────────────────────────────────────────────────────────────────
 
 void SpecificWorker::compute()
 {
@@ -543,6 +547,8 @@ void SpecificWorker::prune_dead_series()
     for (const auto& [id, inst] : fitter_->instances()) ts_known_tables_.insert(inst.node_name);
 }
 
+// ─── Ricoh 360 peripheral attention (bearing-only) ───────────────────────────────────────────────
+
 // Ricoh 360 as PERIPHERAL ATTENTION. A ricoh detection's DIRECTION (bearing from the robot) is reliable even
 // when its centroid/range is biased, so we use ONLY that: associate a ricoh bearing to an existing table if the
 // bearing falls within that table's angular extent (its circumscribed radius over its range — a physical size,
@@ -619,6 +625,8 @@ void SpecificWorker::process_ricoh_bearings()
                        t.bearing_rad * 180.0f / static_cast<float>(M_PI), t.range_m, t.confidence);
 }
 
+// ─── Evidence monitor ────────────────────────────────────────────────────────────────────────────
+
 // Build the per-instance snapshot from live instance state and push it to the monitor at ~5 Hz (a full
 // QTableWidget rebuild every compute cycle would waste the GUI thread). All reads are main-thread.
 void SpecificWorker::refresh_evidence_monitor()
@@ -665,6 +673,8 @@ void SpecificWorker::refresh_evidence_monitor()
     }
     evidence_monitor_->update_view(ev_g_, rows);
 }
+
+// ─── Existence-based removal ─────────────────────────────────────────────────────────────────────
 
 // Carve the LiDAR sweep against every table footprint and integrate the per-instance existence log-odds, then
 // remove the tables whose volume is demonstrably empty (P(occupied) < ExistenceRemovalProb). The shared
@@ -794,6 +804,8 @@ void SpecificWorker::update_existence_and_remove(bool fresh_masks, bool fresh_sw
     }
 }
 
+// ─── Instance lifecycle: merge / tracker / birth ─────────────────────────────────────────────────
+
 // Data-driven multi-instance lifecycle (mirrors bottle_concept::run_instance_tracker). Tables are large
 // static furniture, so birth_min_sep is wide, death is off, and overlaps merge. The only path that
 // creates/associates table instances (the prior-scaffold + greedy nearest-mask were removed in Stage 2).
@@ -842,6 +854,9 @@ void SpecificWorker::merge_overlapping_instances()
     }
 }
 
+// One tracker cycle: merge overlaps, build tracks from live instances (Mahalanobis gate on belief Σ) and
+// detections from this frame's ZED "table" slices, then apply the result (death / associate / birth). Ricoh
+// slices are excluded here (bearing-only). This is the ONLY path that creates/associates table instances.
 void SpecificWorker::run_instance_tracker()
 {
     merge_overlapping_instances();   // enforce physical exclusion before associating/birthing this cycle
@@ -970,7 +985,11 @@ void SpecificWorker::run_instance_tracker()
         inst.dbg_n_zed_slices = static_cast<int>(inst.assigned_mask_idxs.size());
 }
 
-///////////////////////////////////////////////////////////////
+// ─── Per-node processing + publish ───────────────────────────────────────────────────────────────
+
+// Process one "table" DSR node this cycle: ensure its instance exists, then fuse each assigned ZED slice
+// (one belief update per slice, gated to a fresh mask frame) or age the belief when no mask arrived, and
+// hand the result to publish_table_cycle. run_instance_tracker has already associated this cycle's slices.
 void SpecificWorker::process_table_node(const DSR::Node& node)
 {
     const bool created = fitter_->ensure_instance(node, room_node_id_);
@@ -1038,6 +1057,8 @@ void SpecificWorker::process_table_node(const DSR::Node& node)
 }
 
 
+// Publish one fitted table: persist belief→DSR, assess convergence, then push diagnostics + intentions.
+// Each step short-circuits if its node lookup fails (the node may have been removed mid-cycle).
 void SpecificWorker::publish_table_cycle(rc::TableInstance& inst,
                                          const DSR::Node& node,
                                          const TableObservation& observation,
@@ -1052,6 +1073,7 @@ void SpecificWorker::publish_table_cycle(rc::TableInstance& inst,
     publish_table_intentions(inst, node_id, observation, free_energy);
 }
 
+// Run the convergence/stability step for one table; re-resolves the node by id (false if it is gone).
 bool SpecificWorker::assess_table_state(rc::TableInstance& inst, uint64_t node_id, float free_energy)
 {
     auto node_opt = G->get_node(node_id);
@@ -1062,6 +1084,8 @@ bool SpecificWorker::assess_table_state(rc::TableInstance& inst, uint64_t node_i
     return true;
 }
 
+// Feed this instance's time-series to the standalone dashboard: FE + baseline, FE-surprise, U(Σ) covariance,
+// residual count, inferred dims (w,h), and size posterior σ. Series are added idempotently every cycle.
 void SpecificWorker::publish_table_diagnostics(const rc::TableInstance& inst,
                                                const TableObservation& observation,
                                                float free_energy)
@@ -1140,7 +1164,7 @@ void SpecificWorker::publish_table_intentions(rc::TableInstance& inst,
         step_epistemic(inst, node_opt.value());
 }
 
-// ─── Initialisation helpers ──────────────────────────────────────────────────
+// ─── Initialisation helpers ──────────────────────────────────────────────────────────────────────
 
 void SpecificWorker::load_config(const ConfigLoader& cfg)
 {
@@ -1148,9 +1172,10 @@ void SpecificWorker::load_config(const ConfigLoader& cfg)
 }
 
 
-// ─── Per-cycle steps ─────────────────────────────────────────────────────────
+// ─── Per-cycle steps ─────────────────────────────────────────────────────────────────────────────
 
-
+// Convergence latch for one table: measure how far the accepted state moved this cycle and, once it holds
+// still for K_stable cycles, publish model_stable + the model_uncertainty_att readout (posterior std sum).
 void SpecificWorker::step_convergence(rc::TableInstance& inst,
                                        DSR::Node& node,
                                        float free_energy)
@@ -1208,6 +1233,8 @@ void SpecificWorker::step_convergence(rc::TableInstance& inst,
     }
 }
 
+// Publish/refresh the epistemic next-best-view affordance for one table from its belief Σ (D-optimal NBV),
+// with a post-completion cooldown that suppresses the published gain so a just-finished table isn't re-claimed.
 void SpecificWorker::step_epistemic(rc::TableInstance& inst, DSR::Node& node)
 {
     if (inst.epistemic_cooldown > 0)
@@ -1260,9 +1287,10 @@ void SpecificWorker::step_epistemic(rc::TableInstance& inst, DSR::Node& node)
     inst.epistemic_pending = true;
 }
 
-// ─── DSR helpers ─────────────────────────────────────────────────────────────
+// ─── DSR helpers ─────────────────────────────────────────────────────────────────────────────────
 
-
+// Re-run the graph viewer's twopi layout now and again once queued, so it also settles after the pending
+// node/edge update signals are processed. No-op when Agent.graph is off (no viewer widget).
 void SpecificWorker::trigger_graph_layout_twopi()
 {
     const auto it = graph_viewers.find("");
@@ -1281,7 +1309,7 @@ void SpecificWorker::trigger_graph_layout_twopi()
                               [graph_viewer]() { graph_viewer->compute_layout("twopi"); },
                               Qt::QueuedConnection);
 }
-// ─── DSR signal slots ────────────────────────────────────────────────────────
+// ─── DSR signal slots (QUEUED — never DirectConnection; see CLAUDE.md) ───────────────────────────
 
 void SpecificWorker::modify_node_slot(std::uint64_t /*id*/, const std::string& /*type*/)
 {
@@ -1336,7 +1364,7 @@ void SpecificWorker::del_node_slot(std::uint64_t id)
     }
 }
 
-// ─── Lifecycle stubs ─────────────────────────────────────────────────────────
+// ─── Lifecycle stubs ─────────────────────────────────────────────────────────────────────────────
 
 void SpecificWorker::emergency()
 {

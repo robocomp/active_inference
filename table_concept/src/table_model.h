@@ -1,16 +1,11 @@
 /*
- * table_model.h
+ * table_model.h  —  geometry / state container for a table instance.
  *
- * Geometry / state container for a table instance.
- *
- * The recursive belief update lives in table_belief.* (the AI2 full-covariance filter, see
- * TABLE_FIT_AI2.md). This class is now only the state holder + the compound SDF (box top + 4
- * corner legs), used to split a mask's support points into on-surface (candidate) vs off-surface
- * (residual) sets in TableFitter::observe and to render the mesh in TableSceneGraph.
- *
- * State vector θ = [cx, cy, w, h, table_height, leg_length, yaw, leg_inset]
- * Fixed geometry: TOP_THICKNESS = 0.03 m, LEG_RADIUS = 0.025 m
- * Compound SDF = min(SDF_top, min_k SDF_leg_k)
+ * The recursive belief update lives in table_belief.* (the AI2 full-covariance filter, TABLE_FIT_AI2.md);
+ * this class is only the state holder + the compound SDF (box top + 4 corner legs = min(SDF_top, min_k
+ * SDF_leg_k)), used to split a mask's support points into on-surface (candidate) vs off-surface (residual)
+ * sets in TableFitter::observe and to render the mesh in TableSceneGraph. State θ = [cx, cy, w, h,
+ * table_height, leg_length, yaw, leg_inset]; fixed geometry TOP_THICKNESS = 0.03 m, LEG_RADIUS = 0.025 m.
  */
 
 #pragma once
@@ -21,6 +16,7 @@
 
 namespace rc {
 
+// Accepted table pose + dimensions (room frame); the 8-DOF geometry the model renders and splits against.
 struct TableState
 {
     float cx           = 0.0f;   // Room-frame X of table centre
@@ -44,6 +40,7 @@ struct TableState
     }
 };
 
+// Fixed model parameters (not fitted): the top/leg attribution band.
 struct TableModelParams
 {
     // Top/leg split band: a point no more than (TOP_THICKNESS + sigma_obs) below the top face is
@@ -53,6 +50,7 @@ struct TableModelParams
 
 // ─── TableModel ──────────────────────────────────────────────────────────────
 
+// State holder + compound SDF (box top + 4 corner-leg cylinders) for one table instance.
 class TableModel
 {
 public:

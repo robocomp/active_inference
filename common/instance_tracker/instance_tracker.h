@@ -35,6 +35,7 @@
 
 namespace rc {
 
+// Tunables for the birth/associate/death policy (gates, costs, birth/death debounce). Physical, not tuned.
 struct TrackerParams
 {
     float gate_mahalanobis = 9.0f;    // χ²₂ gate (~3σ) for a det↔track match when the track has a cov
@@ -93,6 +94,7 @@ struct DetectionView
     bool            birthable = true;
 };
 
+// One cycle's decision: det→track assignment + which detections birth + which tracks die.
 struct TrackerResult
 {
     std::vector<int>           assignment;   // per detection: index into `tracks` (-1 = unassigned)
@@ -100,12 +102,14 @@ struct TrackerResult
     std::vector<std::uint64_t> deaths;       // track ids to retire
 };
 
+// Stateful multi-object tracker: carries the miss-counters and pending birth candidates across cycles.
 class InstanceTracker
 {
 public:
     void set_params(const TrackerParams& p) { params_ = p; }
     const TrackerParams& params() const { return params_; }
 
+    // Run one cycle: gate → greedy 1-to-1 associate → negative-information death → persisted-candidate birth.
     TrackerResult update(const std::vector<TrackView>& tracks,
                          const std::vector<DetectionView>& dets)
     {

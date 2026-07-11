@@ -1031,7 +1031,16 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
                 ControllerPolygon poly;
                 poly.reserve(static_cast<std::size_t>(std::max(0, V)));
                 for (int v = 0; v < V and i + 1 < f.size(); ++v) { poly.emplace_back(f[i], f[i + 1]); i += 2; }
-                if (poly.size() >= 3) { obstacles.push_back(std::move(poly)); ++added; }
+                if (poly.size() >= 3)
+                {
+                    // residual now publishes CONCAVE outlines here (not convex hulls), so these few
+                    // polygons are BOTH what the planner avoids AND a faithful, cheap occupied/free
+                    // display — no need for the hundreds-of-squares per-cell overlay (UI-heavy).
+                    display_obstacle_polygons_.push_back(ControllerObstacleVisual{
+                        .polygon = poly, .kind = ControllerObstacleKind::GridOccupancy, .label = {}});
+                    obstacles.push_back(std::move(poly));
+                    ++added;
+                }
             }
             report << " | grid_poly=" << added;
         }

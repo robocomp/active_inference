@@ -34,7 +34,7 @@
 	#include <QtWidgets>
 #endif
 
-#include "timeseries_plot.h"
+#include "../../common/dashboard/timeseries_plot.h"
 
 
 class Custom_widget : public QWidget

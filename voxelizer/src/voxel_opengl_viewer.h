@@ -78,6 +78,7 @@ public:
 
     // Input-stream delivery rates (Hz) shown in the HUD; <0 ⇒ "--". Pushed from the render tick.
     void set_stream_fps(float rgb_hz, float rgb360_hz) { rgb_fps_ = rgb_hz; rgb360_fps_ = rgb360_hz; }
+    void set_perf_log(bool on) { perf_log_ = on; }   // gate the per-paint CSV probe (off in production)
 
     // Robot pose in room frame (x, y in meters; theta in radians).
     void set_robot_pose(float x, float y, float theta);
@@ -171,6 +172,7 @@ private:
     std::chrono::steady_clock::time_point fps_window_start_{};
     int   render_frame_count_ = 0;
     float render_fps_ = 0.0f;
+    bool perf_log_ = false;   // when false, skip the per-paint CSV write+flush (see paintGL probe)
     float rgb_fps_    = -1.0f;   // input-stream rates for the HUD (<0 ⇒ unknown/"--")
     float rgb360_fps_ = -1.0f;
 

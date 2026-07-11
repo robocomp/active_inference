@@ -20,9 +20,11 @@ LIST(APPEND SOURCES
   ../../common/media_transport/generated/idl/imu_framePubSubTypes.cxx
   ../../common/media_transport/generated/idl/imu_frameTypeObjectSupport.cxx
   ../src/scene_processor.cpp
+  ../src/media_plane_source.cpp
   ../src/model_projection_overlay.cpp
   ../src/ricoh_projection_overlay.cpp
   ../src/yolo_processor.cpp
+  ../src/yolo_seg_detector.cpp
   ../src/yolo_human.cpp
   ../src/yolo_semantic.cpp
   ../src/ricoh_yolo_worker.cpp
@@ -35,7 +37,9 @@ LIST(APPEND HEADERS
   ../src/voxelizer_params.h
   ../src/graph_publisher.h
   ../src/scene_processor.h
+  ../src/media_plane_source.h
   ../src/yolo_processor.h
+  ../src/yolo_seg_detector.h
   ../src/ricoh_yolo_worker.h
   ../src/graph_object_box.h
   ../src/model_projection_overlay.h
@@ -49,8 +53,8 @@ LIST(APPEND HEADERS
 include_directories(${CMAKE_CURRENT_LIST_DIR}/../../common/media_transport)
 
 if(TARGET Qt6::OpenGL AND TARGET Qt6::OpenGLWidgets)
-  LIST(APPEND SOURCES ../src/voxel_opengl_viewer.cpp)
-  LIST(APPEND HEADERS ../src/voxel_opengl_viewer.h)
+  LIST(APPEND SOURCES ../src/voxel_opengl_viewer.cpp ../src/obj_loader.cpp)
+  LIST(APPEND HEADERS ../src/voxel_opengl_viewer.h ../src/obj_loader.h)
   LIST(APPEND LIBS Qt6::OpenGL Qt6::OpenGLWidgets)
 else()
   message(WARNING "Qt OpenGL targets not found; building without voxel_opengl_viewer")

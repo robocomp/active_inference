@@ -1,9 +1,8 @@
 /*
- * table_model.cpp
+ * table_model.cpp  —  compound SDF (box top + 4 corner cylinders) for a table instance, scalar (Eigen).
  *
- * Compound SDF (box top + 4 corner cylinders) for a table instance, scalar (Eigen) implementation.
- * The recursive belief update lives in table_belief.* (AI2); this file is only the geometry/state
- * container used for the mask candidate/residual split and the mesh.
+ * The recursive belief update lives in table_belief.* (AI2); this file is only the geometry/state container
+ * used for the mask candidate/residual split and the mesh. Height-based attribution splits top vs legs.
  */
 
 #include "table_model.h"

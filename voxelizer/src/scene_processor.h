@@ -17,31 +17,22 @@
 
 #include "graph_object_box.h"
 #include "rgbd_data.h"
+#include "media_plane_source.h"   // MediaPlaneSource + LidarData (DDS media ingest, owned by this class)
 
 namespace rc
 {
     class VoxelOpenGLViewer;
 }
 
-namespace rc::media { class MediaSubscriber; }
-namespace rc::media { class Image360Subscriber; }
-namespace rc::media { class LidarPlaneReader; }
-
 class SceneProcessor
 {
 public:
-    // Data bundles returned from DSR reads
-    struct LidarData
-    {
-        std::vector<float> xs;
-        std::vector<float> ys;
-        std::vector<float> zs;
-        std::vector<std::uint8_t> plane_id;   // per-point source plane (helios=0, bpearl=1) for viewer colouring
-        std::uint64_t timestamp_ms = 0;
-    };
-
     explicit SceneProcessor(const std::shared_ptr<DSR::DSRGraph>& graph);
     ~SceneProcessor();
+
+    // The shared DSR graph (its API is thread-safe — shared_mutex). Handed to worker threads that do
+    // their own graph reads (e.g. RicohYoloWorker resolving room<-ricoh on its own thread).
+    std::shared_ptr<DSR::DSRGraph> graph() const { return graph_; }
 
     void configure(DSR::InnerEigenAPI* inner_eigen_api,
                    rc::VoxelOpenGLViewer* voxel_viewer,
@@ -65,20 +56,20 @@ public:
     // Ricoh popup). Discovered from the "ricoh" node descriptor; falls back to the
     // configured domain/topic. Independent of the ZED rgb/depth pipeline.
     bool init_ricoh_media_plane(std::uint32_t domain_id, const std::string& topic);
-    bool ricoh_available() const { return media_ricoh_sub_ != nullptr; }
+    bool ricoh_available() const { return media_ and media_->ricoh_available(); }
     // Drain the ricoh subscriber; decodes into the latest-frame cache when ricoh is wanted (window
     // visible) OR force=true (a one-off decode requested by e.g. rc::RicohYoloWorker's own thread), so
     // a hidden-and-unforced poll costs just a poll-discard. May be called from the ricoh worker thread
     // AND the main thread (on_render_tick, when the worker isn't running) — the cache is mutex-guarded.
     void poll_ricoh(bool force = false);
-    void set_ricoh_wanted(bool on) { ricoh_wanted_.store(on, std::memory_order_relaxed); }
+    void set_ricoh_wanted(bool on) { if (media_) media_->set_ricoh_wanted(on); }
     // Thread-safe snapshot of the latest decoded panorama (BGR, CV_8UC3); empty until a frame arrives.
     // A cv::Mat copy is a cheap shallow (refcounted) copy, not a pixel copy — safe to call from any
     // thread while poll_ricoh() concurrently overwrites the cache on another.
     cv::Mat ricoh_bgr_copy() const;
     // Latest ricoh source stamp (ms); recorded on every poll (even when not decoding) for rate telemetry.
     // Atomic — safe to read from any thread regardless of who last called poll_ricoh().
-    std::uint64_t ricoh_last_stamp_ms() const { return ricoh_last_stamp_ms_.load(std::memory_order_relaxed); }
+    std::uint64_t ricoh_last_stamp_ms() const { return media_ ? media_->ricoh_last_stamp_ms() : 0; }
 
     std::pair<std::string, std::string> get_room_robot_names_for_compute();
     bool ensure_room_and_robot_ready(FPSCounter& compute_fps,
@@ -97,16 +88,13 @@ public:
                                                      const Mat::RTMat& room_T_robot);
     // DSR-native data accessors (no proxy needed)
     std::uint64_t get_frame_timestamp_ms() const;
-    std::optional<cv::Mat> get_rgb_from_dsr() const;
     // Latest LiDAR scan from the media plane (LidarFrame). std::nullopt if disabled or nothing received.
     std::optional<LidarData> get_lidar3D();
     std::optional<RGBDData> get_rgbd_frame_from_dsr() const;
 
     void check_input_stream_startup_status();
-    void log_room_robot_pose_periodic(const Mat::RTMat& room_T_robot) const;
     void mark_room_rt_ready();
     void update_room_polygon_periodic();
-    void overlay_room_polygon_on_canvas(cv::Mat& canvas, std::uint64_t frame_ts_ms) const;
     void update_viewer_robot_pose(const Mat::RTMat& room_T_robot);
     // Reads the LATEST robot pose (RT ts=0) and pushes it to the viewer, decoupled from the
     // per-frame camera timestamp. Cheap; called from the render timer so the robot redraws at the
@@ -144,18 +132,6 @@ private:
         float room_height = 2.4f;
     };
 
-    struct RoomToCameraBasis
-    {
-        Mat::Vector3d origin{0.0, 0.0, 0.0};
-        Mat::Vector3d axis_x{0.0, 0.0, 0.0};
-        Mat::Vector3d axis_y{0.0, 0.0, 0.0};
-        Mat::Vector3d axis_z{0.0, 0.0, 0.0};
-    };
-
-    bool compute_room_to_camera_basis(const std::string& camera_node_name,
-                                      const std::string& room_frame_name,
-                                      std::uint64_t rt_timestamp,
-                                      RoomToCameraBasis& basis) const;
     std::optional<RoomPolygonData> get_room_polygon_from_graph() const;
     std::optional<GraphObjectBox> build_graph_object_box(const DSR::Node& node,
                                                          const std::string& room_name,
@@ -192,45 +168,7 @@ private:
     std::string room_node_name_;
     std::string robot_node_name_;
 
-    // --- Media plane RGBD source (replaces cam_rgb/cam_depth DSR blobs) ---
-    void drain_media_plane() const;  // polls subscribers, refreshes the caches
-    std::unique_ptr<rc::media::MediaSubscriber> media_rgb_sub_;
-    std::unique_ptr<rc::media::MediaSubscriber> media_depth_sub_;
-
-    // LiDAR media-plane source (shared reader — same one every agent uses). Prefers the two per-device
-    // planes helios+bpearl (DEVICE frame), transformed to the ROBOT frame and merged; falls back to the
-    // fused "lidar3D" plane. Latest merged scan cached (robot frame); callers apply the dynamic
-    // room<-robot pose. Refreshed by draining inside get_lidar3D().
-    std::unique_ptr<rc::media::LidarPlaneReader> lidar_reader_;
-    bool      lidar_use_media_ = false;
-    LidarData media_lidar_;
-    bool      media_lidar_valid_ = false;
-    struct MediaRgbCache
-    {
-        bool          valid = false;
-        std::uint64_t frame_id = 0;
-        std::uint64_t stamp = 0;   // camera alivetime (ms), opaque timestamp
-        int           width = 0;
-        int           height = 0;
-        cv::Mat       bgr;         // CV_8UC3
-    };
-    struct MediaDepthCache
-    {
-        bool          valid = false;
-        std::uint64_t frame_id = 0;
-        std::uint64_t stamp = 0;
-        int           width = 0;
-        int           height = 0;
-        std::vector<float> depth;  // metric, row*width+col
-    };
-    mutable MediaRgbCache   media_rgb_;
-    mutable MediaDepthCache media_depth_;
-
-    // RGBD_360 panorama. May be polled from the ricoh worker thread (rc::RicohYoloWorker) AND the
-    // main thread (on_render_tick, when no worker is running) — media_ricoh_ is mutex-guarded.
-    std::unique_ptr<rc::media::Image360Subscriber> media_ricoh_sub_;
-    mutable std::mutex media_ricoh_mutex_;
-    MediaRgbCache      media_ricoh_;
-    std::atomic<bool>  ricoh_wanted_{false};   // set by the popup's show/hide toggle
-    std::atomic<std::uint64_t> ricoh_last_stamp_ms_{0};   // last polled ricoh source stamp (rate telemetry)
+    // Zero-copy DDS media ingest (ZED RGBD, shared LiDAR reader, Ricoh-360). Owns all subscriber/cache/
+    // thread state; the public media methods above forward to it. Constructed in the ctor.
+    std::unique_ptr<MediaPlaneSource> media_;
 };
