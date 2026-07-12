@@ -43,24 +43,35 @@ public:
                        const TableConfig& cfg);
     ~TableLidarIngestor();
 
-    // Poll the media plane; on a NEW sweep, transform it into the room frame and stage it. Returns true iff a
-    // fresh sweep was staged this call. Main-thread only (reads the DSR graph).
+    // Poll BOTH planes (helios primary, bpearl if LidarBpearlPrecision>0); on a NEW sweep, transform each into
+    // the room frame at its OWN capture stamp and stage it. Returns true iff a fresh sweep was staged for EITHER
+    // plane this call. Per-plane freshness via helios_fresh()/bpearl_fresh(). Main-thread only (reads the graph).
     bool pump();
 
     const std::vector<Eigen::Vector3f>& sweep_room()  const { return sweep_room_; }
     const Eigen::Vector3f&              origin_room() const { return origin_room_; }
+    bool                                helios_fresh() const { return helios_fresh_; }
+    // Low bpearl plane (separate per-device ray-set; own origin). Only pumped while LidarBpearlPrecision>0.
+    const std::vector<Eigen::Vector3f>& sweep_bpearl_room()  const { return sweep_bpearl_room_; }
+    const Eigen::Vector3f&              origin_bpearl_room() const { return origin_bpearl_room_; }
+    bool                                bpearl_fresh() const { return bpearl_fresh_; }
 
 private:
     std::shared_ptr<DSR::DSRGraph>               G_;
     DSR::InnerEigenAPI*                          inner_eigen_ = nullptr;
     const TableConfig*                           cfg_ = nullptr;
-    // Shared media-plane reader (the same one every agent uses): the high "helios" plane (DEVICE
-    // frame) transformed straight to the ROOM frame, with the fused "lidar3D" plane as fallback. A
-    // single plane keeps the first-hit ray factor's single-origin assumption (see lidar_ray_factor.h).
+    // Per-device media-plane readers: the high "helios" 360 plane and the low "bpearl" plane, each a SINGLE
+    // plane transformed straight to the ROOM frame — a single plane per reader keeps the first-hit ray factor's
+    // origin well-defined (see lidar_ray_factor.h). They are consumed as SEPARATE ray-sets, never merged.
     std::unique_ptr<rc::media::LidarPlaneReader> reader_;
+    std::unique_ptr<rc::media::LidarPlaneReader> reader_bpearl_;
 
-    std::vector<Eigen::Vector3f> sweep_room_;                    // latest sweep, ROOM frame
-    Eigen::Vector3f              origin_room_ = Eigen::Vector3f::Zero();  // sensor centre, ROOM frame
+    std::vector<Eigen::Vector3f> sweep_room_;                    // latest helios sweep, ROOM frame
+    Eigen::Vector3f              origin_room_ = Eigen::Vector3f::Zero();  // helios sensor centre, ROOM frame
+    bool                         helios_fresh_ = false;
+    std::vector<Eigen::Vector3f> sweep_bpearl_room_;             // latest bpearl sweep, ROOM frame
+    Eigen::Vector3f              origin_bpearl_room_ = Eigen::Vector3f::Zero();
+    bool                         bpearl_fresh_ = false;
 };
 
 }  // namespace rc

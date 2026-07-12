@@ -51,6 +51,7 @@
 #include "../../common/instance_tracker/instance_tracker.h"   // rc::InstanceTracker (birth/associate/death)
 #include "table_scene_graph.h" // rc::TableSceneGraph (DSR node/RT I/O)
 #include "table_fitter.h"      // rc::TableFitter (active-inference core)
+#include "table_existence.h"   // rc::TableExistence (evidence-based removal)
 #include "epistemic_planner.h"
 #include "table_affordance.h"
 #include "table_model.h"
@@ -113,10 +114,7 @@ private:
     // Associates "table" masks to instances, spawns a table from an unexplained mask, merges overlaps.
     rc::InstanceTracker tracker_;
     void run_instance_tracker();   // called every cycle from compute()
-    // Evidence-based removal: integrate each existence channel on ITS OWN sensor clock — the silhouette/mask
-    // channel when masks are fresh, the LiDAR free-space carve when the sweep is fresh — then remove the
-    // demonstrably-empty tables. Gated by TableModel.ExistenceRemovalEnabled.
-    void update_existence_and_remove(bool fresh_masks, bool fresh_sweep);
+    void retire_instance(std::uint64_t id);   // shared teardown: affordance + fitter forget + graph delete
     // Physical-exclusion invariant: two tables cannot share space. Collapse any pair of instances whose
     // oriented footprints overlap beyond Tracker.MergeOverlap, keeping the more-observed one.
     void merge_overlapping_instances();
@@ -150,6 +148,7 @@ private:
     rc::TableConfig                                         cfg_;
     rc::EpistemicPlanner                                    epistemic_planner_;
     std::unique_ptr<rc::TableFitter>                        fitter_;    // active-inference fit core (owns instances)
+    std::unique_ptr<rc::TableExistence>                    existence_; // evidence-based removal (existence log-odds)
 
     // Live belief dashboard — its OWN top-level window (extracted from the DSR graph dock so it shows
     // independently of Agent.graph; mirrors room_concept/kinova_controller). Geometry persisted via QSettings.
@@ -171,6 +170,7 @@ private:
     rc::TimeSeriesPlot*  ts_res_plot_   = nullptr;   // residual point count
     rc::TimeSeriesPlot*  ts_state_plot_ = nullptr;   // inferred dimensions w/h (stability check)
     rc::TimeSeriesPlot*  ts_ce_plot_    = nullptr;   // belief size posterior std σ_w/σ_h (mm)
+    void build_dashboard();          // create the dashboard + evidence-monitor windows (called from initialize)
     void restore_dashboard_geometry();
     void save_dashboard_geometry() const;
 

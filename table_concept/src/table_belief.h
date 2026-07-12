@@ -95,6 +95,20 @@ struct TableBeliefParams
     // NOT applied to cx,cy (a partial view's centroid is biased; the mixture already fixes position).
     float footprint_moment_precision = 0.0f;
 
+    // Completeness → moment measurement variance. The moment's yaw precision scales with the footprint's
+    // ANISOTROPY (r_yaw = r_base/aniso²), which conflates two cases: a genuinely elongated table (high aniso is
+    // REAL → trust yaw) and a fragmentary sliver of a square-ish table (high aniso is a SAMPLING ARTEFACT of a
+    // partial/foreshortened view → yaw is wrong). The discriminator is COMPLETENESS = observed footprint area /
+    // believed w·h: ≈1 when the whole top is seen, ≪1 for a partial view (robot going away / returning from a
+    // detour with the table half in FoV — the live "table rotates" failure, verified in ai2_log.csv where the
+    // snap came in at completeness≈0.01, aniso≈0.8, entirely on the moment channel). Inflate the moment variance
+    // as completeness falls: r_base += (gain·(1/completeness − 1))², clamped, so a fragmentary footprint can no
+    // longer rotate/reshape a converged table, while a full view (completeness≥1) is UNCHANGED. Continuous
+    // precision keyed on the view's information content — the same covariance form as the range/motion terms, no
+    // gate. 0 = OFF (baseline unchanged). Pairs with the fitter's obliquity→moment term.
+    float footprint_moment_completeness_gain = 0.0f;
+    float footprint_moment_min_completeness  = 0.02f;  // clamp floor so 1/completeness stays finite
+
     // Priors
     float prior_size_std = 0.30f;  // broad size prior std (m) on w,h,H — only breaks the empty-cloud degeneracy
     // Temporal transition (predict): rigid + static ⇒ small process noise per frame.
@@ -112,6 +126,11 @@ struct TableBeliefParams
     // Optimiser
     int   gn_iters = 4;            // Gauss-Newton iterations per frame
     float fd_eps   = 1e-3f;        // finite-difference step for SDF Jacobians (m / rad)
+
+    // Canonical fold: pick the reported box-symmetry representative by a FIXED-scale continuity metric instead
+    // of the Σ-weighted Mahalanobis, so a large predicted σ_yaw (edge-on view) can no longer let the reported
+    // yaw oscillate ±90/±180 between equivalent representatives. See canonicalize(). false ⇒ legacy Σ-weighted.
+    bool  orientation_continuity_fold = false;
 };
 
 // One fitted frame's evidence: room-frame points and per-point measurement variance R (m²). Pass an empty
@@ -136,6 +155,10 @@ struct TableFrame
     // YOLO-INDEPENDENT LiDAR channel: range returns that fall on the table (room frame, sensor origin +
     // endpoints). Sphere-traced against THIS belief's own SDF by the shared factor. precision==0 ⇒ skipped.
     rc::ai::LidarRays lidar;
+    // Additional per-device range ray-sets (e.g. the low "bpearl" LiDAR). Each keeps its OWN origin so the
+    // first-hit sphere-trace stays occlusion-aware per device — NOT merged (merging would lose the single origin
+    // the ray geometry needs). accumulate_extra runs the factor once per set into the SAME normal equations.
+    std::vector<rc::ai::LidarRays> lidar_extra;
 };
 
 // The table generative model wired onto the shared rc::ai recursive-Laplace engine. The Bayesian math

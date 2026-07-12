@@ -63,6 +63,7 @@ struct TableInstance
     float dbg_lidar_topz_m   = -1.0f;   // mean z of the HIGHEST 20% of selected returns ≈ observed tabletop z
     float dbg_lidar_floorz_m = -1.0f;   // mean z of the LOWEST 20% ≈ floor; should read ~0 if z-calib OK
     float dbg_lidar_cov_ang  = -1.0f;   // angular-coverage weight (1−R)^p ∈[0,1]; low ⇒ one-sided sweep
+    int   dbg_lidar_bpearl_rays = 0;    // low-bpearl returns staged into the extra ray-set this frame (0 = OFF/none)
 
     // ── Divergence safety net (mirrors bottle) ────────────────────────────────────────────────────
     // Consecutive frames whose centre GN step was rejected as an outlier (exceeded cfg.max_step_m). Non-zero
@@ -78,6 +79,10 @@ struct TableInstance
     // just fresh ones — so a stale cycle can inflate Σ by the real elapsed time (measurement-age → covariance).
     std::chrono::steady_clock::time_point last_belief_touch{};
     float chain_cov_xx = 0.0f, chain_cov_yy = 0.0f;  // Part B localization/chain cov (m²), added to the RT cov
+    // Per-frame ROBOT-frame observation z_o (x,y,yaw) for the room localizer's object-anchor factor.
+    // Computed by the fitter (gated), published by the scene-graph writer. See common/object_anchor.
+    Eigen::Vector3f obs_robot = Eigen::Vector3f::Zero();
+    bool obs_robot_valid = false;
     int  processed_cycles = 0;        // per-table compute cycles for log throttling
     // Tracker's gated mask assignments for THIS frame (indices into the masks packet slices). With
     // multi-detection fusion a table can be seen by BOTH the ZED and the ricoh-360 masks in one cycle, so
@@ -91,7 +96,6 @@ struct TableInstance
 
     // ── Epistemic affordance state (Schmitt-trigger hysteresis, anti-oscillation) ─────────────────
     bool epistemic_pending   = false;
-    bool epistemic_satisfied = false;
     int  epistemic_cooldown  = 0;   // cycles remaining before a satisfied table may re-arm
 
     // ── write_rt_pose dead-band (suppress tiny pose oscillations) ─────────────────────────────────

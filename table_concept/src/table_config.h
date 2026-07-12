@@ -72,6 +72,10 @@ struct TableConfig
     // YOLO segmentation, so it attacks the mask-erosion under-size the mask cannot self-correct. Consumes
     // the lidar3D media plane via TableLidarIngestor; dormant (no DDS participant) while precision == 0.
     float lidar_precision       = 0.0f;   // per-ray range precision (1/m², ≈1/σ_range²); 0 = OFF
+    // Low "bpearl" LiDAR as a SEPARATE per-device ray-set (own origin, occlusion-aware first-hit; sees the legs
+    // the high helios grazes over). Summed into the SAME GN as helios — NOT merged (merging loses the origin the
+    // ray geometry needs). Also feeds the existence leg-occupancy carve from its own origin. 0 = OFF (helios only).
+    float lidar_bpearl_precision = 0.0f;
     float lidar_robust_c_m      = 0.05f;  // Cauchy scale (m): returns this far off the surface fade out
     float lidar_select_margin_m = 0.10f;  // pre-select returns within (birth half-extent + margin), all z up to top
     float lidar_coverage_n0     = 60.0f;  // LiDAR ray count for FULL weight; fewer → proportionally down-weighted
@@ -123,6 +127,23 @@ struct TableConfig
     // motion_dotd = OrientationMotionRef. The observed reshapes/flips all arrived on motion frames.
     float footprint_moment_motion_gain = 0.30f;
     float orientation_motion_ref       = 0.50f;
+    // Grazing-view yaw stability (CSV rogue-rotation fix, both flag-gated OFF = baseline).
+    // continuity_fold: report the box-symmetry representative by a FIXED-scale continuity metric (kills the
+    //   ±90/±180 reported-yaw oscillation a large edge-on σ_yaw let through the Σ-weighted fold).
+    // obliquity_yaw_gain: cap the per-point yaw authority at grazing views — chain_cov_yaw += (gain·(1/|cosθ|−1))²
+    //   so an edge-on frame confirms the table but cannot rotate it. ~0.05 strongly damps; 0 = OFF.
+    bool  orientation_continuity_fold  = false;
+    float obliquity_yaw_gain           = 0.0f;
+    // obliquity_moment_gain: same view-angle backoff, but on the MOMENT channel — moment_extra_var +=
+    //   (gain·(1/|cosθ|−1))². obliquity_yaw_gain only protects the per-point GN; the CSV rogue rotations came in
+    //   on the MOMENT channel (dyaw_moment), which the per-point cap never sees. A grazing/foreshortened frame
+    //   biases the 2D inertia → back the whole moment off, not just its per-point yaw. 0 = OFF.
+    float obliquity_moment_gain        = 0.0f;
+    // footprint_moment_completeness_gain / _min_completeness: forwarded to TableBeliefParams — inflate the moment
+    //   measurement variance as the observed footprint area falls below the believed area (partial view). This is
+    //   the direct fix for the going-away / detour-return yaw snap (ai2_log.csv: completeness≈0.01). 0 = OFF.
+    float footprint_moment_completeness_gain = 0.0f;
+    float footprint_moment_min_completeness  = 0.02f;
 
     // ── Existence / removal (common/existence_belief.h) ───────────────────────────────────────────
     // Each cycle carve the LiDAR sweep against the table footprint → occupancy/free-space log-odds; remove
@@ -150,6 +171,10 @@ struct TableConfig
     // NEVER drives removal; removal is the camera silhouette's job (predicted-visible-but-absent, which HOLDs
     // when out of FoV). Set true to ALSO trust LiDAR free-space (only where the slab is a faithful solid model).
     bool  existence_lidar_absence = false;
+    // Leg OCCUPANCY: also carve the 4 leg volumes [0, H−t] for occupancy (never free — thin legs, and the hollow
+    // space between them must not vote absence). Robustifies confirmation when the thin top slab is at an awkward
+    // height for the LiDAR rings (tall legs are far likelier to be struck). Occupancy-only ⇒ cannot false-remove.
+    bool  existence_leg_occupancy = true;
 
     // ── RT-edge covariance upload ─────────────────────────────────────────────────────────────────
     // Upload the table pose covariance onto the room→table RT edge (rt_covariance_att, 6×6 SE3), mapped from
@@ -157,6 +182,11 @@ struct TableConfig
     // rt_cov_scale calibrates the raw variance toward NEES≈1.
     float rt_cov_scale     = 1.0f;
     bool  rt_cov_add_chain = true;   // Part B: add the localization/chain cov J·Σ_chain·Jᵀ to the published RT cov
+
+    // Object-anchor observation: publish this frame's ROBOT-frame fit (z_o) so room_concept can use the
+    // table as an SE(2) pose landmark. OFF by default (consumer side is also flag-gated + defaults OFF).
+    bool        publish_object_obs = false;      // TableConcept.PublishObjectObs
+    std::string object_obs_frame   = "body";     // TableConcept.ObjectObsFrame (localizer base node)
 
     // ── Multi-instance birth/associate/death (shared rc::InstanceTracker) ─────────────────────────
     // "table" masks are associated to instances by a covariance-gated global 1-to-1; an unexplained mask

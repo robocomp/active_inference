@@ -247,6 +247,8 @@ void TableBelief::accumulate_extra(const TableBeliefState& s, const TableFrame& 
                                    Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const
 {
     rc::ai::accumulate_lidar_rays<6>(*this, s, f.lidar, Id, bd);
+    for (const auto& lr : f.lidar_extra)   // extra per-device ray-sets (e.g. low bpearl) — each occlusion-aware, own origin
+        rc::ai::accumulate_lidar_rays<6>(*this, s, lr, Id, bd);
     dbg_coverage_pts_ = 0;   // monitor counters — reset per accumulate; the final (converged) call is what's read
     dbg_vacate_beams_ = 0;
     dbg_moment_pts_   = 0;
@@ -415,7 +417,22 @@ void TableBelief::apply_footprint_moment(const TableFrame& frame)
     // per-frame error (ego-motion corruption + a gentle range term the fitter authors). Without it a fixed 1/Pm
     // is absurdly confident (≈2 cm @Pm=2000) and the belief SNAPS to each frame's noisy footprint (the live
     // yaw/extent wander) instead of accumulating. A moving robot / far view inflates it → the moment backs off.
-    const float r_base = 1.0f / Pm + std::max(0.0f, frame.moment_extra_var);
+    // COMPLETENESS backoff: how much of the believed footprint this frame's moment actually spans. A partial /
+    // foreshortened view yields a fragmentary footprint whose 2D inertia is spuriously anisotropic — high aniso,
+    // hence a razor-sharp r_yaw below, but pointing the WRONG way. Grow the moment measurement variance as the
+    // observed area falls below the believed area so the sliver can no longer rotate/reshape a converged table.
+    // completeness≥1 (full view or a legitimately larger mask) ⇒ no inflation. See TableBeliefParams. 0 = OFF.
+    float compl_extra = 0.0f;
+    if (params_.footprint_moment_completeness_gain > 0.0f)
+    {
+        const float obs_area = mom.ext_major * mom.ext_minor;
+        const float bel_area = state_.w * state_.h;
+        const float completeness = (bel_area > 1e-4f and obs_area > 0.0f) ? obs_area / bel_area : 1.0f;
+        const float c  = std::clamp(completeness, params_.footprint_moment_min_completeness, 1.0f);
+        const float cs = params_.footprint_moment_completeness_gain * (1.0f / c - 1.0f);   // 0 at completeness≥1
+        compl_extra = cs * cs;
+    }
+    const float r_base = 1.0f / Pm + std::max(0.0f, frame.moment_extra_var) + compl_extra;
     float r_w   = r_base;                                             // measurement variance (m²)
     float r_h   = r_base;
     const float r_yaw = r_base / std::max(aniso * aniso, 1e-3f);      // rad²; near-square → huge → no yaw pull
@@ -481,6 +498,30 @@ void TableBelief::canonicalize(TableBeliefState& s) const
         { s.cx, s.cy, s.H, s.w, s.h, wrap(s.yaw + 2*kHalfPi)},   // r_π
         { s.cx, s.cy, s.H, s.h, s.w, wrap(s.yaw - kHalfPi)  },   // swap ∘ r_{−π/2}
     }};
+
+    // CONTINUITY fold with a FIXED yaw scale (flag-gated). The Σ-weighted fold below weights the yaw difference
+    // by Σ_pred⁻¹, which vanishes exactly when the view is edge-on (σ_yaw huge) — so a 90°/180° box-symmetry snap
+    // costs ≈nothing and the reported yaw oscillates ±90/±180 between equivalent representatives of the SAME box
+    // (the grazing-view flips seen in the CSV; dims constant for r_π, swapped for w↔h). A fixed yaw scale keeps
+    // continuity effective independent of σ_yaw: a genuine slow rotation stays cheap, a symmetry snap does not.
+    // resolve_orientation still owns the evidence-based cross-class flip; this only fixes which representative is
+    // REPORTED for continuity. (Set TableModel.OrientationContinuityFold=true to A/B against the Σ-weighted fold.)
+    if (params_.orientation_continuity_fold)
+    {
+        constexpr float kYawScale2 = 0.5f * 0.5f;   // rad²: a slow genuine rotation is cheap; a 90/180 snap is not
+        const float sz2 = std::max(1e-6f, params_.prior_size_std * params_.prior_size_std);
+        const auto cont = [&](const TableBeliefState& r) -> float
+        {
+            const float dy = wrap(r.yaw - prior_mean_(5));
+            const float dw = r.w - prior_mean_(3), dh = r.h - prior_mean_(4);
+            return dy * dy / kYawScale2 + (dw * dw + dh * dh) / sz2;
+        };
+        int best = 0; float best_c = cont(reps[0]);
+        for (int i = 1; i < 4; ++i)
+            if (const float c = cont(reps[i]); c < best_c) { best_c = c; best = i; }
+        s = reps[best];
+        return;
+    }
 
     const Eigen::Matrix<float, 6, 6> Pinv = Sigma_.inverse();   // Σ_pred⁻¹ (Σ_ still holds the predicted cov here)
     const auto mahalanobis = [&](const TableBeliefState& r) -> float
@@ -914,6 +955,50 @@ bool TableBelief::self_test()
         check(w_trim > gt.w - 0.12f,   "border-trimmed partial mask must NOT shrink a converged table");
         check(w_part > gt.w - 0.12f,   "SIDE-VIEW partial mask (in-view, trunc=0) must NOT shrink — the live failure");
         check(w_grow > gt.w + 0.10f,   "a genuinely LARGER mask must still GROW the extent");
+    }
+
+    // (m) COMPLETENESS backoff: a converged table hit by a FRAGMENTARY footprint (partial/foreshortened view)
+    //     whose sliver principal-axis is rotated OFF the believed yaw must NOT rotate the belief when the
+    //     completeness gain is ON, whereas with the gain OFF the moment snaps yaw toward the sliver (the live
+    //     "table rotates when going away / returning from a detour" failure — ai2_log.csv completeness≈0.01).
+    {
+        rng.seed(9090);
+        const float Rb = P.sigma_base_m * P.sigma_base_m;
+        // Thin sliver ~30° off the table's yaw: elongated along dir(gt.yaw+off), a few cm wide → high aniso,
+        // completeness ≈ (major·minor)/(w·h) ≪ 1. This is what a foreshortened partial view of the top looks like.
+        // The sliver is kept fully INSIDE the believed top rectangle so the per-point SDF mixture has ~zero yaw
+        // gradient (interior top points: ∂sdf/∂yaw≈0) — exactly the live regime where the per-point channel is
+        // inert (dyaw_points≈0) and ONLY the global moment statistic can rotate the box. Verified: with the moment
+        // OFF this sliver moves yaw by 0.000 rad; the whole snap below is the moment's doing.
+        const float off = 0.52f;                                   // ~30° offset from the converged yaw
+        const float dc = std::cos(gt.yaw + off), ds = std::sin(gt.yaw + off);
+        auto sliver = [&]() {
+            std::vector<Eigen::Vector3f> pts;
+            for (int i = 0; i < 1500; ++i)
+            { const float t = U(rng) * 0.30f * gt.w;               // major dir, kept inside the box
+              const float n = U(rng) * 0.03f;                      // ~3 cm minor → sliver, interior
+              pts.push_back({gt.cx + dc * t - ds * n, gt.cy + ds * t + dc * n, gt.H + noise(rng)}); }
+            return pts;
+        };
+        auto fit_yaw = [&](float compl_gain) {
+            TableBeliefParams pm = P; pm.footprint_moment_precision = 2000.0f;
+            pm.footprint_moment_completeness_gain = compl_gain;
+            TableBelief b(TableBeliefState{gt.cx, gt.cy, gt.H, gt.w, gt.h, gt.yaw}, pm);   // converged at truth
+            for (int it = 0; it < 30; ++it)
+            { auto pts = sliver();
+              TableFrame fr; fr.points = pts; fr.R.assign(pts.size(), Rb);
+              fr.chain_cov_yaw = (0.03f * 3) * (0.03f * 3); fr.chain_cov_size = (0.08f * 3) * (0.08f * 3);
+              fr.moment_extra_var = (0.03f * 3) * (0.03f * 3);
+              b.update(fr); }
+            return std::abs(std::remainder(b.state().yaw - gt.yaw, static_cast<float>(M_PI)));
+        };
+        const float dyaw_off = fit_yaw(0.0f);   // gain OFF ⇒ sliver snaps yaw toward its (wrong) principal axis
+        const float dyaw_on  = fit_yaw(0.5f);   // gain ON  ⇒ fragmentary footprint can no longer rotate the box
+        std::printf("  completeness backoff: dyaw OFF=%.3f rad  ON=%.3f rad (sliver ~%.2f rad off yaw)\n",
+                    dyaw_off, dyaw_on, off);
+        check(dyaw_off > 0.15f,            "sliver SHOULD snap yaw with completeness backoff OFF (baseline)");
+        check(dyaw_on  < 0.5f * dyaw_off,  "completeness backoff must hold yaw against a fragmentary footprint");
+        check(dyaw_on  < 0.10f,            "completeness backoff should keep yaw near the converged truth");
     }
 
     std::printf("TableBelief::self_test %s\n", ok ? "PASS" : "FAIL");

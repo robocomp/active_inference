@@ -76,6 +76,10 @@ AI2GnIters = 4              # Gauss-Newton iterations per frame
 # plane (TableLidarIngestor); the media subscriber is created only while this is > 0.
 # ON at 2500 (load-bearing): ≈1/σ²@2cm = depth-point scale → w/h under-size shrinks and extent σ tightens.
 LidarPrecision = 2500.0          # per-ray range precision (1/m², ≈1/σ²@2cm=2500 when load-bearing). 0=OFF
+# A/B: use the LOW 'bpearl' LiDAR as a SEPARATE per-device ray-set (own origin, occlusion-aware first-hit) — it sees
+# the LEGS / lower extent the high 'helios' grazes over. Summed into the SAME GN as helios (NOT merged: each keeps its
+# origin), and feeds the existence leg-occupancy carve from its own origin. Try ~2500 to match helios. 0=OFF (helios only).
+LidarBpearlPrecision = 0.0
 LidarRobustCM = 0.05          # Cauchy scale (m): returns this far off the surface fade out (continuous, no gate)
 LidarSelectMarginM = 0.10     # pre-select returns within (birth half-diagonal + margin) horiz, floor..birth_H vert
 LidarCoverageN0 = 60.0        # LiDAR ray count for full weight; fewer → proportionally down-weighted (sparse-safe)
@@ -135,6 +139,20 @@ FeSurpriseSmooth    = 0.10
 FootprintMomentMotionGain = 0.30
 OrientationMotionRef = 0.50
 
+# Grazing-view yaw stability (CSV rogue-rotation fix). The tabletop is viewed nearly edge-on (obliquity_cos≈0.09,
+# 100% of frames in the log), so yaw is weakly observable and the per-point GN snaps between the box's symmetric
+# orientations — reported as ±180° (r_π, dims constant) or ±90° (w↔h, dims swap). Both A/B, default OFF = baseline.
+OrientationContinuityFold = true   # fixed-scale continuity fold: stop the REPORTED yaw oscillating between equivalent representatives (a large edge-on σ_yaw defeated the Σ-weighted fold). false=legacy fold
+ObliquityYawGain = 0.05              # grazing-view yaw cap on the BELIEF: chain_cov_yaw += (gain·(1/|cosθ|−1))². ~0.05 makes σ_yaw≈30° at cos=0.09 → per-point GN holds yaw. 0=OFF
+
+# MOMENT-channel yaw stability (CSV rogue-rotation fix, part 2). The per-point caps above do NOT touch the footprint
+# MOMENT factor, but the live rogue rotations came in on the MOMENT channel (dyaw_moment) — a partial/foreshortened
+# view yields a fragmentary footprint whose 2D inertia is spuriously anisotropic, so r_yaw=r_base/aniso² becomes
+# razor-sharp and SNAPS yaw the wrong way (ai2_log.csv cyc1244: completeness≈0.01, aniso≈0.8, dyaw_moment≈-0.57).
+# Both terms inflate moment_extra_var as continuous covariance — no gate. self_test (m): dyaw 0.52→0.02 rad.
+FootprintMomentCompletenessGain = 0.5   # moment var += (gain·(1/completeness−1))², completeness=observed/believed footprint area → a partial-view sliver can no longer rotate a converged table. completeness≥1 (full/larger view) unchanged. 0=OFF
+ObliquityMomentGain = 0.05              # grazing-view cap on the MOMENT channel: moment var += (gain·(1/|cosθ|−1))². Mirrors ObliquityYawGain (which only guards per-point). 0=OFF
+
 
 # ── Existence / removal (common/existence_belief.h) ───────────────────────────────────────────────────────
 # Each cycle the LiDAR sweep is carved against every table footprint: beams RETURNING inside → occupancy, beams
@@ -142,7 +160,10 @@ OrientationMotionRef = 0.50
 # saturated; HOLD when not looked at; free-evidence suppressed while the table is actively seen = hollow guard),
 # and the table is removed when P(occupied) < ExistenceRemovalProb. Evidence-based, NOT a miss counter. STAGED —
 # OFF by default (a mis-removal deletes furniture). Enable + watch the console "[existence] L=..." before trusting.
-ExistenceRemovalEnabled = false   # DEBUG BASELINE: OFF while calibrating the fit (was true). Re-enable after.
+ExistenceRemovalEnabled = true    # ON (fit calibrated). Optimizer-orthogonal: writes only inst.existence log-odds, at
+                                  # most delete_node — never touches θ/Σ. Silhouette channel HOLDs on occlusion (non-table
+                                  # mask over the pixels) AND out-of-FoV (in_fov_frac≈0), so an unseen/occluded table is
+                                  # NEVER falsely removed — it removes only when the camera LOOKS and sees empty.
 ExistenceRemovalProb = 0.12    # remove when L < log(p/(1−p)); lower = more conservative
 ExistenceLogoddsMax = 4.0      # clamp |L| so evidence stays finite AND recoverable
 ExistenceDetectionProb = 0.85  # P(beam through an OCCUPIED footprint returns from it) — sensor hit rate
@@ -163,7 +184,14 @@ ExistenceAbsenceRangePower = 2.0  # decay exponent (2 ≈ angular area ∝ 1/ran
 # Default false ⇒ the LiDAR carve contributes OCCUPANCY only (holds L up), never drives removal; removal is the
 # camera silhouette's job (predicted-visible-but-absent, which HOLDs when out of FoV → a table out of camera
 # view is never falsely removed). Set true only where the slab is a faithful solid model of the tabletop.
-ExistenceLidarAbsence = false
+ExistenceLidarAbsence = true    # A/B 2026-07-11: LiDAR now drives REMOVAL too, not just confirmation. Audited safe:
+                                # carve_box drops occluded beams (return short of the footprint ⇒ t_near>1 ⇒ p_reached≈0 ⇒
+                                # skipped, never counted as free) and the z-band [H−3cm,H] rejects under-table beams (live:
+                                # real table read occ=40.8 vs free=0.2). Debounce(15) + range-degraded absence are backstops.
+# Leg OCCUPANCY: also carve the 4 leg volumes [0, H−t] for confirmation. Occupancy-ONLY (legs are thin → a miss isn't
+# absence; the hollow space between legs must never vote free) ⇒ CANNOT cause a false removal, only holds a real table
+# up. Robust when the thin top slab is at an awkward height for the horizontal LiDAR rings (tall legs get struck).
+ExistenceLegOccupancy = true
 
 [TableConcept]
 ObsDistance = 1.8           # comfortable maximum stand-off from the target face for epistemic poses
@@ -174,6 +202,8 @@ VoxelSelectRadiusMarginM = 0.50 # per-table XY ownership gate margin for mixed p
 VoxelSelectHeightMarginM = 0.25 # extra Z margin above table height when selecting owned voxels
 RtCovScale = 1.0            # scales the belief Σ → published room→table RT covariance (calibrate toward NEES≈1)
 RtCovAddChain = true        # Part B: add the localization/chain cov J·Σ_chain·Jᵀ to the published RT cov
+PublishObjectObs = true     # publish per-frame ROBOT-frame fit z_o (obj_obs_robot) → room's object-anchor factor
+ObjectObsFrame = "body"     # localizer base frame z_o is expressed in (== room's LIDAR_ROBOT_FRAME)
 
 [Tracker]
 # Multi-instance birth/associate/merge (shared rc::InstanceTracker; the only instance-lifecycle path —

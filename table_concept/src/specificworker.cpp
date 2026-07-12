@@ -30,8 +30,8 @@
  */
 
 #include "specificworker.h"
+#include "table_geometry.h"   // rc::geom pure footprint/uncertainty helpers
 
-#include <filesystem>
 #include <print>
 #include <cstdlib>   // std::_Exit — crash-free terminal shutdown
 #include <thread>    // brief DDS flush before _Exit
@@ -43,94 +43,11 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <sstream>
 #include <unordered_set>
 #include <vector>
 
 // DSR attribute name tags — generated from dsr_attr_name.h
 #include <dsr/api/dsr_api.h>
-
-// ─── Anonymous-namespace helpers (footprint overlap + uncertainty readout) ───────────────────────
-
-namespace {
-
-// Scalar model-uncertainty readout for model_uncertainty_att / the dashboard: the sum of the belief's
-// per-DOF posterior stds over position (cx,cy) + size (w,h), in metres, from the AI2 covariance Σ over
-// [cx,cy,H,w,h,yaw]. Shrinks as the robot gathers viewpoints. 0 before the belief is seeded.
-float belief_uncertainty(const rc::TableInstance& inst)
-{
-    if (not inst.ai2_initialized)
-        return 0.0f;
-    const auto& S = inst.ai2_belief.covariance();
-    const auto sd = [&](int i) { return std::sqrt(std::max(0.0f, S(i, i))); };
-    return sd(0) + sd(1) + sd(3) + sd(4);
-}
-
-// Two tables cannot share physical space. The footprint is the oriented rectangle (cx,cy,w,h,yaw) in the
-// room plane; these helpers compute the area of overlap between two footprints so the merge operator can
-// collapse duplicate instances. Corners are returned CCW (local order (-,-),(+,-),(+,+),(-,+)).
-std::array<Eigen::Vector2f, 4> footprint_corners(const rc::TableState& s)
-{
-    const float c = std::cos(s.yaw), sn = std::sin(s.yaw);
-    const Eigen::Vector2f ex(c, sn), ey(-sn, c), ctr(s.cx, s.cy);
-    const float hw = 0.5f * s.w, hh = 0.5f * s.h;
-    return { ctr - hw * ex - hh * ey, ctr + hw * ex - hh * ey,
-             ctr + hw * ex + hh * ey, ctr - hw * ex + hh * ey };
-}
-
-float poly_area(const std::vector<Eigen::Vector2f>& p)
-{
-    if (p.size() < 3) return 0.0f;
-    float a = 0.0f;
-    for (std::size_t i = 0, n = p.size(); i < n; ++i)
-    {
-        const auto& u = p[i]; const auto& v = p[(i + 1) % n];
-        a += u.x() * v.y() - v.x() * u.y();
-    }
-    return 0.5f * std::abs(a);
-}
-
-// Sutherland–Hodgman: clip the subject polygon against the convex CCW clip rectangle.
-std::vector<Eigen::Vector2f> clip_poly(std::vector<Eigen::Vector2f> subj,
-                                       const std::array<Eigen::Vector2f, 4>& clip)
-{
-    for (int e = 0; e < 4 and not subj.empty(); ++e)
-    {
-        const Eigen::Vector2f a = clip[e], b = clip[(e + 1) % 4], d1 = b - a;
-        const auto inside = [&](const Eigen::Vector2f& p)
-        { return d1.x() * (p.y() - a.y()) - d1.y() * (p.x() - a.x()) >= 0.0f; };
-        std::vector<Eigen::Vector2f> out;
-        for (std::size_t i = 0, n = subj.size(); i < n; ++i)
-        {
-            const Eigen::Vector2f cur = subj[i], prv = subj[(i + n - 1) % n];
-            const bool ci = inside(cur), pi = inside(prv);
-            const auto isect = [&]() -> Eigen::Vector2f
-            {
-                const Eigen::Vector2f d2 = cur - prv;
-                const float den = d2.x() * d1.y() - d2.y() * d1.x();
-                const float t = std::abs(den) < 1e-12f ? 0.0f
-                    : ((a.x() - prv.x()) * d1.y() - (a.y() - prv.y()) * d1.x()) / den;
-                return prv + t * d2;
-            };
-            if (ci) { if (not pi) out.push_back(isect()); out.push_back(cur); }
-            else if (pi) out.push_back(isect());
-        }
-        subj.swap(out);
-    }
-    return subj;
-}
-
-// Overlap area as a fraction of the SMALLER footprint (1.0 = one table fully inside the other).
-float footprint_overlap_ratio(const rc::TableState& a, const rc::TableState& b)
-{
-    const auto ca = footprint_corners(a), cb = footprint_corners(b);
-    const auto inter = clip_poly(std::vector<Eigen::Vector2f>(ca.begin(), ca.end()), cb);
-    const float ai = poly_area(inter);
-    const float amin = std::min(poly_area({ca.begin(), ca.end()}), poly_area({cb.begin(), cb.end()}));
-    return amin > 1e-6f ? ai / amin : 0.0f;
-}
-
-}  // namespace
 
 
 // ─── Constructor / Destructor ────────────────────────────────────────────────────────────────────
@@ -230,30 +147,6 @@ void SpecificWorker::terminal_shutdown()
     std::cerr.flush();
     std::this_thread::sleep_for(std::chrono::milliseconds(300));   // let the del-deltas reach peers
     std::_Exit(EXIT_SUCCESS);
-}
-
-// Persist/restore the standalone dashboard window's geometry. The generated save_window_settings()
-// only covers the QMainWindow(s) in `windows`; our extracted top-level widget is separate, so we
-// carry its own QSettings entry (mirrors room_concept's RoomViewer).
-void SpecificWorker::restore_dashboard_geometry()
-{
-    if (not custom_widget_)
-        return;
-    QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("table_concept"));
-    const QByteArray geom = settings.value(QStringLiteral("DashboardWindow_geometry")).toByteArray();
-    if (not geom.isEmpty())
-        custom_widget_->restoreGeometry(geom);
-    else
-        custom_widget_->resize(560, 620);
-}
-
-void SpecificWorker::save_dashboard_geometry() const
-{
-    if (not custom_widget_)
-        return;
-    QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("table_concept"));
-    settings.setValue(QStringLiteral("DashboardWindow_geometry"), custom_widget_->saveGeometry());
-    settings.sync();
 }
 
 // ─── Initialisation ──────────────────────────────────────────────────────────────────────────────
@@ -380,10 +273,13 @@ void SpecificWorker::initialize()
     // Active-inference fit core. Owns the instance map; collaborates with the ingestor + scene graph.
     fitter_ = std::make_unique<rc::TableFitter>(
         G, inner_eigen_.get(), cfg_, mask_ingestor_.get(), scene_graph_.get());
+    existence_ = std::make_unique<rc::TableExistence>(G, cfg_);   // evidence-based removal (existence log-odds)
 
     // Part B: localization/chain covariance on the published RT edge (mirrors bottle_concept).
     gaussian_api_ = std::make_unique<DSR::InnerGaussianAPI>(G.get());
     fitter_->set_chain_cov_source(gaussian_api_.get(), "zed", cfg_.rt_cov_add_chain);
+    // Object-anchor observation z_o for room_concept's landmark factor (expressed in the localizer base frame).
+    fitter_->set_object_observation(cfg_.publish_object_obs, cfg_.object_obs_frame);
 
     // YOLO-independent LiDAR range channel: lidar3D media-plane consumer that stages each cycle's sweep in the
     // room frame for the fitter's range factor. Dormant (no DDS participant) unless TableModel.LidarPrecision
@@ -396,66 +292,8 @@ void SpecificWorker::initialize()
     // Stale affordance nodes are swept on entering Operating (presence hook) and on shutdown — see
     // remove_stale_affordance_nodes(), keyed on the parent object type (robust to node-name renames).
 
-    // ── Time-series dashboard — its OWN top-level window ──────────────────────
-    // Extracted from the DSR graph dock (add_custom_widget_to_dock) into a standalone window, so the
-    // dashboard shows even with Agent.graph=false (no DSRViewer created). Mirrors room_concept and
-    // kinova_controller. The TimeSeriesPlot is a plain QWidget (no QOpenGL backing store), safe as a
-    // top-level. NOT WA_DeleteOnClose: closing must only HIDE it, or the ts_*_plot_ pointers the
-    // compute() feed uses would dangle. A QApplication always exists (generated/main.cpp).
-    {
-        custom_widget_ = new Custom_widget("Table Model — Free Energy, Coverage Deficit, Residuals & Dimensions (w,h)");
-        custom_widget_->setWindowTitle(QStringLiteral("table_concept — belief dashboard"));
-        restore_dashboard_geometry();
-        custom_widget_->show();
-
-        // Create plot inside frame_series
-        auto* series_layout = new QVBoxLayout(custom_widget_->frame_series);
-        series_layout->setContentsMargins(0, 0, 0, 0);
-        custom_widget_->frame_series->setLayout(series_layout);
-
-        ts_plot_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
-        ts_plot_->set_visible_window(60.f);
-        series_layout->addWidget(ts_plot_);
-
-        // FE SURPRISE (attention signal) on its own panel — it lives on a much smaller scale (~0–1) than the FE
-        // (~2–8), so it needs the full panel height to be readable. Spikes when a table moves, decays as the fit
-        // re-converges. See the belief/fitter plumbing (inst.fe_surprise).
-        ts_surprise_plot_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
-        ts_surprise_plot_->set_visible_window(60.f);
-        series_layout->addWidget(ts_surprise_plot_);
-
-        ts_cov_plot_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
-        ts_cov_plot_->set_visible_window(60.f);
-        series_layout->addWidget(ts_cov_plot_);
-
-        ts_res_plot_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
-        ts_res_plot_->set_visible_window(60.f);
-        series_layout->addWidget(ts_res_plot_);
-
-        // Inferred table dimensions (w, h) — the size DOFs the stabiliser targets. Watch these to
-        // confirm the belief has stopped jittering between fresh masks (flat = stable).
-        ts_state_plot_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
-        ts_state_plot_->set_visible_window(60.f);
-        series_layout->addWidget(ts_state_plot_);
-
-        // (D) Counter-evidence accumulator S_w/S_h (the CUSUM gate is always on). Watch S charge on a
-        // surprise and decay back (glitch absorbed) vs climb to the barrier (a real change unlocks).
-        {
-            ts_ce_plot_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
-            ts_ce_plot_->set_visible_window(60.f);
-            series_layout->addWidget(ts_ce_plot_);
-        }
-
-        // Per-instance series are registered idempotently by the diagnostics feed (publish_table_diagnostics)
-        // every cycle, so pre-existing instances need no separate registration here.
-    }
-
-    // ── Evidence-consuming monitor — its OWN top-level window (per-instance snapshot + global counters) ──
-    // Same lifecycle discipline as the dashboard above: plain QWidget (no QOpenGL), built on the main thread,
-    // updated from compute() (which is the GUI thread here). Only HIDDEN on close, never deleted (compute()
-    // keeps a raw pointer). Shows even with Agent.graph=false.
-    evidence_monitor_ = new rc::EvidenceMonitor(QStringLiteral("table_concept — evidence monitor"));
-    evidence_monitor_->show();
+    // Standalone Qt dashboard + evidence-monitor windows (belief plots + per-instance snapshot).
+    build_dashboard();
 }
 
 // ─── Main compute loop ───────────────────────────────────────────────────────────────────────────
@@ -486,10 +324,19 @@ void SpecificWorker::compute()
     // never consumes a stale sweep; pump() is main-thread (reads the graph) + dormant while the feature is off.
     fitter_->clear_lidar_sweep();
     bool fresh_sweep = false;
-    if (lidar_ingestor_ and lidar_ingestor_->pump())
+    if (lidar_ingestor_)
     {
-        fitter_->set_lidar_sweep(lidar_ingestor_->sweep_room(), lidar_ingestor_->origin_room());
-        fresh_sweep = true;
+        lidar_ingestor_->pump();   // pumps BOTH planes (helios primary; bpearl if LidarBpearlPrecision>0)
+        if (lidar_ingestor_->helios_fresh())
+        {
+            fitter_->set_lidar_sweep(lidar_ingestor_->sweep_room(), lidar_ingestor_->origin_room());
+            fresh_sweep = true;
+        }
+        if (lidar_ingestor_->bpearl_fresh())   // low LiDAR as a SEPARATE ray-set (own origin) — sees the legs
+        {
+            fitter_->set_lidar_sweep_bpearl(lidar_ingestor_->sweep_bpearl_room(), lidar_ingestor_->origin_bpearl_room());
+            fresh_sweep = true;
+        }
     }
 
     const auto table_nodes = G->get_nodes_by_type("table");
@@ -504,7 +351,7 @@ void SpecificWorker::compute()
     // fresh mask frame, LiDAR carve on a fresh sweep) — a camera-only cycle still accrues absence, a LiDAR-only
     // cycle still carves free space. After the fits so footprints are current. OFF unless enabled.
     if (cfg_.existence_removal_enabled)
-        update_existence_and_remove(fresh_masks, fresh_sweep);
+        existence_->update_and_remove(*fitter_, lidar_ingestor_.get(), fresh_masks, fresh_sweep, ev_g_);
 
     // ── Evidence monitor: global counters + throttled snapshot push ──
     ev_g_.instances    = static_cast<int>(fitter_->instances().size());
@@ -524,466 +371,6 @@ void SpecificWorker::compute()
     prune_dead_series();   // drop timeseries lines for tables that were removed from the graph
 }
 
-// Remove timeseries series for tables no longer present in the graph, so a removed table's lines don't persist
-// (and a table reborn under the same name gets fresh series via the idempotent add_series in the feed). Runs
-// every compute cycle; cheap (a set diff over the few live instances).
-void SpecificWorker::prune_dead_series()
-{
-    if (not ts_plot_) return;
-    std::unordered_set<std::string> live;
-    for (const auto& [id, inst] : fitter_->instances()) live.insert(inst.node_name);
-    for (auto it = ts_known_tables_.begin(); it != ts_known_tables_.end();)
-    {
-        if (live.contains(*it)) { ++it; continue; }
-        const std::string& n = *it;
-        ts_plot_->remove_series(n + "_fe");   ts_plot_->remove_series(n + "_base");
-        if (ts_surprise_plot_) ts_surprise_plot_->remove_series(n + "_surprise");
-        if (ts_cov_plot_)      ts_cov_plot_->remove_series(n + "_cov");
-        if (ts_res_plot_)      ts_res_plot_->remove_series(n + "_res");
-        if (ts_state_plot_)  { ts_state_plot_->remove_series(n + "_w");  ts_state_plot_->remove_series(n + "_h"); }
-        if (ts_ce_plot_)     { ts_ce_plot_->remove_series(n + "_sW");    ts_ce_plot_->remove_series(n + "_sH"); }
-        it = ts_known_tables_.erase(it);
-    }
-    for (const auto& [id, inst] : fitter_->instances()) ts_known_tables_.insert(inst.node_name);
-}
-
-// ─── Ricoh 360 peripheral attention (bearing-only) ───────────────────────────────────────────────
-
-// Ricoh 360 as PERIPHERAL ATTENTION. A ricoh detection's DIRECTION (bearing from the robot) is reliable even
-// when its centroid/range is biased, so we use ONLY that: associate a ricoh bearing to an existing table if the
-// bearing falls within that table's angular extent (its circumscribed radius over its range — a physical size,
-// not a tuned gate). A ricoh bearing that NO table explains is UNASSIGNED → an attention target ("there is
-// something table-like in that direction that the ZED hasn't confirmed; seek a ZED view there"). Never births,
-// never fits — that is the ZED's job. This is step 1–3 of the peripheral→saccade→foveal design; the controller
-// consuming the target (turn the ZED to the bearing) is step 4.
-void SpecificWorker::process_ricoh_bearings()
-{
-    ricoh_attention_targets_.clear();
-    if (not cfg_.use_ricoh_slices or not inner_eigen_)   // flag now gates ONLY the attention path (ricoh never fits)
-        return;
-    const auto& pkt = mask_ingestor_->packet();
-    if (not pkt.valid)
-        return;
-    const auto rtb = inner_eigen_->get_transformation_matrix("room", "body", 0);   // robot pose in room
-    if (not rtb.has_value())
-        return;
-    const auto& Tm = rtb.value();
-    const float bx = static_cast<float>(Tm(0, 3)), by = static_cast<float>(Tm(1, 3));   // body XY in room
-    const auto wrap = [](float a) { return std::remainder(a, 2.0f * static_cast<float>(M_PI)); };
-
-    for (const auto& sl : pkt.slices)
-    {
-        if (sl.label != "table" or sl.depth_var <= 0.0f)          // ricoh (depth-carrying 360) detections only
-            continue;
-        if (sl.confidence < cfg_.ricoh_attention_conf)            // only reasonably confident peripheral blobs
-            continue;
-
-        // Robust position from the mask's 3D points: component-wise MEDIAN (resists the see-through/outlier tail
-        // that biases the centroid). Foreground-gated upstream, so the median sits near the tabletop surface.
-        // Falls back to the centroid if too few points. Used for the ATTENTION target's bearing + rough range
-        // ONLY — never the fit (a partial-view range is biased, so it decides WHERE TO LOOK / WHICH table, not
-        // where the table IS; the ZED measures that). Bearing is reliable; range is indicative.
-        float mx = sl.centroid.x(), my = sl.centroid.y();
-        const std::size_t b = std::min(sl.support_begin, pkt.support_points.size());
-        const std::size_t e = std::min(sl.support_end,   pkt.support_points.size());
-        if (e > b + 8)
-        {
-            std::vector<float> xs, ys; xs.reserve(e - b); ys.reserve(e - b);
-            for (std::size_t i = b; i < e; ++i) { xs.push_back(pkt.support_points[i].x()); ys.push_back(pkt.support_points[i].y()); }
-            const std::size_t k = xs.size() / 2;
-            std::nth_element(xs.begin(), xs.begin() + k, xs.end()); mx = xs[k];
-            std::nth_element(ys.begin(), ys.begin() + k, ys.end()); my = ys[k];
-        }
-        const float br  = std::atan2(my - by, mx - bx);                            // bearing to the robust point
-        const float rng = std::sqrt((mx - bx) * (mx - bx) + (my - by) * (my - by));// rough range (biased, indicative)
-
-        bool assigned = false;
-        for (const auto& [id, inst] : fitter_->instances())
-        {
-            const auto& s = inst.model.state();
-            const float dx = s.cx - bx, dy = s.cy - by;
-            const float dist = std::sqrt(dx * dx + dy * dy);
-            if (dist < 1e-3f) { assigned = true; break; }
-            const float tb   = std::atan2(dy, dx);                                  // bearing to the table
-            const float rad  = 0.5f * std::sqrt(s.w * s.w + s.h * s.h);             // circumscribed footprint radius
-            const float tol  = std::atan2(rad, dist) + cfg_.ricoh_attention_angle_margin_rad;  // TIGHT: angular half-size
-            const float band = rad + cfg_.ricoh_attention_range_band_m;              // GENEROUS: ricoh range is rough
-            // Assign only if the detection matches this table in BOTH direction AND (rough) range — so a new,
-            // unconfirmed table hiding along the SAME bearing as a known one (different range) stays UNASSIGNED
-            // and still raises attention, instead of collapsing onto the known table (bearing-only would miss it).
-            if (std::abs(wrap(br - tb)) < tol and std::abs(rng - dist) < band) { assigned = true; break; }
-        }
-        if (not assigned)
-            ricoh_attention_targets_.push_back({br, rng, sl.confidence, {mx, my}});
-    }
-
-    ev_g_.ricoh_attention = static_cast<int>(ricoh_attention_targets_.size());
-    static int rb_dbg = 0;
-    if (not ricoh_attention_targets_.empty() and (rb_dbg++ % 10 == 0))
-        for (const auto& t : ricoh_attention_targets_)
-            std::print("[ricoh-attention] UNASSIGNED table bearing={:+.0f}° range≈{:.1f}m conf={:.2f} → seek ZED view\n",
-                       t.bearing_rad * 180.0f / static_cast<float>(M_PI), t.range_m, t.confidence);
-}
-
-// ─── Evidence monitor ────────────────────────────────────────────────────────────────────────────
-
-// Build the per-instance snapshot from live instance state and push it to the monitor at ~5 Hz (a full
-// QTableWidget rebuild every compute cycle would waste the GUI thread). All reads are main-thread.
-void SpecificWorker::refresh_evidence_monitor()
-{
-    if (not evidence_monitor_)
-        return;
-    const auto now = std::chrono::steady_clock::now();
-    if (last_monitor_tp_.time_since_epoch().count() != 0
-        and std::chrono::duration<float>(now - last_monitor_tp_).count() < 0.2f)
-        return;
-    last_monitor_tp_ = now;
-
-    std::vector<rc::EvidenceRow> rows;
-    rows.reserve(fitter_->instances().size());
-    for (const auto& [id, inst] : fitter_->instances())
-    {
-        rc::EvidenceRow x;
-        x.node       = inst.node_name;
-        x.conf       = inst.last_mask_confidence;
-        x.since_det  = inst.frames_since_detection;
-        x.n_zed      = inst.dbg_n_zed_slices;
-        x.n_ricoh    = 0;   // ricoh is bearing-only now (never fused); column kept for the monitor layout
-        x.cand       = inst.dbg_cand_pts;
-        x.resid      = inst.dbg_resid_pts;
-        x.gated      = inst.dbg_gated;
-        x.energy     = inst.dbg_energy;
-        x.R          = inst.dbg_R;
-        x.lidar_rays = inst.dbg_lidar_rays;
-        x.lidar_raw  = inst.dbg_lidar_raw;
-        x.lidar_resid= inst.dbg_lidar_resid_m;
-        x.cov_ang    = inst.dbg_lidar_cov_ang;
-        x.vacate     = inst.ai2_belief.last_vacate_beams();
-        x.coverage   = inst.ai2_belief.last_coverage_pts();
-        x.L          = inst.existence.logodds();
-        x.p          = inst.existence.p_exists();
-        x.ex_locc    = inst.dbg_ex_lidar_occ;  x.ex_lfree = inst.dbg_ex_lidar_free;  x.ex_ln    = inst.dbg_ex_lidar_n;
-        x.ex_lfree_eff = inst.dbg_ex_lidar_free_eff;
-        x.ex_socc    = inst.dbg_ex_sil_occ;    x.ex_sfree = inst.dbg_ex_sil_free;    x.ex_sndet = inst.dbg_ex_sil_ndet;
-        x.ex_sfree_eff = inst.dbg_ex_sil_free_eff;
-        x.streak     = inst.existence_remove_streak;
-        const auto& s = inst.ai2_belief.state();
-        x.w = s.w; x.h = s.h; x.H = s.H;
-        rows.push_back(std::move(x));
-    }
-    evidence_monitor_->update_view(ev_g_, rows);
-}
-
-// ─── Existence-based removal ─────────────────────────────────────────────────────────────────────
-
-// Carve the LiDAR sweep against every table footprint and integrate the per-instance existence log-odds, then
-// remove the tables whose volume is demonstrably empty (P(occupied) < ExistenceRemovalProb). The shared
-// occupancy carve (common/existence_belief.h) supplies occ/free evidence with common-mode saturation + the
-// n_reached HOLD gate; the hollow guard suppresses interior free-evidence while a table is actively observed.
-void SpecificWorker::update_existence_and_remove(bool fresh_masks, bool fresh_sweep)
-{
-    // Decoupled cadence: the SILHOUETTE/mask channel integrates on a fresh MASK frame (camera clock), the LiDAR
-    // free-space carve on a fresh SWEEP (LiDAR clock). Each accrues its evidence independently, so a camera-only
-    // cycle still votes absence and a LiDAR-only cycle still carves free space. The removal debounce advances
-    // only on an EVIDENCE cycle (when a channel actually integrated), so mixed sensor rates don't bias it.
-    const std::vector<Eigen::Vector3f>* sweep = nullptr;
-    Eigen::Vector3f origin = Eigen::Vector3f::Zero();
-    if (fresh_sweep and lidar_ingestor_)
-    {
-        const auto& s = lidar_ingestor_->sweep_room();
-        if (not s.empty()) { sweep = &s; origin = lidar_ingestor_->origin_room(); }
-    }
-    if (not fresh_masks and sweep == nullptr)   // no new evidence on either channel this cycle
-        return;
-
-    rc::exist::SensorModel sm;
-    sm.sensor_sigma_m = cfg_.existence_sensor_sigma_m;
-    sm.detection_prob = cfg_.existence_detection_prob;
-    sm.clutter_prob   = cfg_.existence_clutter_prob;
-
-    // Absence-confidence vs range: a miss at long range is weak evidence of removal (the sensor likely could
-    // not resolve the object). c = (range_ref/range)^power capped at 1 → 1 up close, →0 far. Scales the FREE
-    // (absence) half only; occupancy stays fully informative. power 0 disables (constant 1).
-    const auto absence_range_conf = [&](float range_m) -> float
-    {
-        const float rr = cfg_.existence_absence_range_ref_m;
-        if (rr <= 0.0f or cfg_.existence_absence_range_power <= 0.0f) return 1.0f;
-        return std::min(1.0f, std::pow(rr / std::max(range_m, 1e-3f), cfg_.existence_absence_range_power));
-    };
-
-    std::vector<std::uint64_t> doomed;
-    for (auto& [id, inst] : fitter_->instances())
-    {
-        if (not inst.ai2_initialized) continue;
-        inst.existence.set_max(cfg_.existence_logodds_max);
-        const auto& bs = inst.ai2_belief.state();
-        const auto& S  = inst.ai2_belief.covariance();
-        const float surf_sigma = std::sqrt(std::max(0.0f, 0.5f * (S(0, 0) + S(1, 1))));   // footprint position σ
-        const bool observed = inst.frames_since_detection == 0;                      // fresh mask this cycle
-        bool integrated = false;
-
-        // SILHOUETTE / MASK channel (pixel-level) — CAMERA clock: project the tabletop silhouette and compare,
-        // per predicted-VISIBLE pixel, against the current YOLO foreground. Lit by a "table" mask ⇒ occupancy
-        // (holds L up); lit by NOTHING ⇒ predicted-but-absent (the "gone" signal, present EVEN WITH NO YOLO MASK);
-        // lit by a NON-table mask ⇒ occluded ⇒ HOLD (never false absence behind a nearer object). n_detectable==0
-        // (out of FoV / fully occluded) ⇒ mask_evidence HOLDs.
-        if (fresh_masks)
-        {
-            const auto sil = fitter_->compute_silhouette_existence(inst);
-            inst.dbg_ex_sil_occ = sil.e_occ; inst.dbg_ex_sil_free = sil.e_free; inst.dbg_ex_sil_ndet = sil.n_detectable;
-            if (sil.n_detectable > 0)
-            {
-                // Observed-guard (mirrors the LiDAR hollow guard): if the table was DETECTED by any sensor this
-                // frame it is not gone, so suppress silhouette ABSENCE — a ZED false-negative, or a table seen
-                // only by the ricoh whose silhouette the ZED-based check can't confirm, must never vote it away.
-                // Occupancy always counts. (The ricoh-projected silhouette, once the producer ships 360 mask
-                // pixels, will let absence be judged in the ricoh view directly instead of relying on this guard.)
-                float sfree = observed ? 0.0f : sil.e_free;
-                // Absence is evidence of removal only in proportion to how much of the table SHOULD have been
-                // seen from here: in_fov_frac = n_detectable / n_total folds the real camera FRUSTUM (out-of-FoV
-                // samples don't count) AND the occlusion HOLD together, and range_conf adds the angular-size /
-                // detectability drop. A ricoh-only table (barely in the ZED frustum) → in_fov_frac ≈ 0 → HOLD.
-                sfree *= absence_range_conf(sil.mean_range_m) * sil.in_fov_frac();
-                inst.dbg_ex_sil_free_eff = sfree;   // effective absence after range/occlusion + observed-guard
-                inst.existence.integrate(rc::exist::mask_evidence(sil.e_occ, sfree, sil.n_detectable, sm));
-                integrated = true;
-            }
-        }
-
-        // LiDAR occupancy carve of the TOP-SLAB z-band [H−t, H] — LiDAR clock (the slab spans the full footprint
-        // there, so a beam hits rim/top = occupancy or passes through = gone — no hollow ambiguity between legs).
-        if (sweep)
-        {
-            rc::exist::Evidence ev = rc::exist::carve_box(origin, *sweep, bs.cx, bs.cy, bs.yaw, bs.w, bs.h,
-                                                          bs.H - rc::TableModel::TOP_THICKNESS, bs.H, surf_sigma, sm);
-            inst.dbg_ex_lidar_occ = ev.e_occ; inst.dbg_ex_lidar_free = ev.e_free; inst.dbg_ex_lidar_n = ev.n_reached;
-            if (ev.n_reached > 0)                                                    // 0 ⇒ not probed ⇒ HOLD
-            {
-                // Degrade the free/absence half by LiDAR range: far away the beams are sparse and the thin
-                // top-slab subtends few of them, so a pass-through is weak evidence the tabletop is gone.
-                const float lidar_range = (origin - Eigen::Vector3f(bs.cx, bs.cy, bs.H)).norm();
-                ev.e_free *= absence_range_conf(lidar_range);
-                // OCCUPANCY-ONLY by default: a solid-slab model vs a thin real tabletop makes LiDAR "free"
-                // unreliable (beams under the top surface read as gone), so it must not drive removal — only
-                // the camera silhouette does. Suppress free unless it was observed (hollow guard) OR the
-                // ExistenceLidarAbsence override is on. Occupancy still counts, holding L up.
-                const bool suppress_free = observed or not cfg_.existence_lidar_absence;
-                inst.dbg_ex_lidar_free_eff = suppress_free ? 0.0f : ev.e_free;
-                ev.log_odds_delta = rc::exist::hollow_guarded_delta(ev, suppress_free, sm);
-                inst.existence.integrate(ev);
-                integrated = true;
-            }
-        }
-
-        // Debounce advances ONLY on an evidence cycle, so it counts sustained EVIDENCE agreement (not wall-clock
-        // cycles) regardless of the two sensors' rates. A transient hiccup still can't delete a real table.
-        if (integrated)
-        {
-            if (inst.existence.should_remove(cfg_.existence_removal_prob)) ++inst.existence_remove_streak;
-            else                                                          inst.existence_remove_streak = 0;
-
-            if (fitter_->should_log(inst))
-                std::print("[{}] [existence] L={:.2f} p={:.2f} | lidar occ={:.1f} free={:.1f} n={} | sil occ={:.0f} free={:.0f} ndet={} | {} streak={}\n",
-                           inst.node_name, inst.existence.logodds(), inst.existence.p_exists(),
-                           inst.dbg_ex_lidar_occ, inst.dbg_ex_lidar_free, inst.dbg_ex_lidar_n,
-                           inst.dbg_ex_sil_occ, inst.dbg_ex_sil_free, inst.dbg_ex_sil_ndet,
-                           observed ? "obs" : "-", inst.existence_remove_streak);
-        }
-        if (inst.existence_remove_streak >= cfg_.existence_remove_frames)
-            doomed.push_back(id);
-    }
-    ev_g_.removals     += static_cast<int>(doomed.size());   // EvidenceMonitor counters
-    ev_g_.removals_cum += static_cast<long>(doomed.size());
-    for (const std::uint64_t id : doomed)
-    {
-        std::print("table_concept: [existence] removing table id={} — free-space evidence (empty volume)\n", id);
-        if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
-            it->second.affordance.remove();
-        fitter_->forget_node(id);
-        G->delete_node(id);
-    }
-}
-
-// ─── Instance lifecycle: merge / tracker / birth ─────────────────────────────────────────────────
-
-// Data-driven multi-instance lifecycle (mirrors bottle_concept::run_instance_tracker). Tables are large
-// static furniture, so birth_min_sep is wide, death is off, and overlaps merge. The only path that
-// creates/associates table instances (the prior-scaffold + greedy nearest-mask were removed in Stage 2).
-// Collapse instances whose footprints overlap (same physical table fitted twice): keep the one with more
-// integrated fresh evidence, retire the other (affordance + node). Runs before tracking so a duplicate is
-// gone before it is fed a mask. v1 keeps-best; precision-weighted DOF pooling is a later refinement.
-void SpecificWorker::merge_overlapping_instances()
-{
-    if (cfg_.tracker_merge_overlap <= 0.0f)
-        return;
-    auto& insts = fitter_->instances();
-    if (insts.size() < 2)
-        return;
-
-    std::vector<std::uint64_t> ids;
-    ids.reserve(insts.size());
-    for (auto& [id, _] : insts) ids.push_back(id);
-
-    std::unordered_set<std::uint64_t> removed;
-    for (std::size_t i = 0; i < ids.size(); ++i)
-    {
-        if (removed.count(ids[i])) continue;
-        for (std::size_t j = i + 1; j < ids.size(); ++j)
-        {
-            if (removed.count(ids[j])) continue;
-            const auto ia = insts.find(ids[i]), ib = insts.find(ids[j]);
-            if (ia == insts.end() or ib == insts.end()) continue;
-
-            const float ratio = footprint_overlap_ratio(ia->second.model.state(), ib->second.model.state());
-            if (ratio < cfg_.tracker_merge_overlap) continue;
-
-            // Keep the more-observed instance (more integrated fresh frames); retire the other.
-            const bool keep_i = ia->second.matched_frames >= ib->second.matched_frames;
-            const std::uint64_t keep = keep_i ? ids[i] : ids[j];
-            const std::uint64_t drop = keep_i ? ids[j] : ids[i];
-            std::print("table_concept: [tracker] MERGE id={} into id={} (footprint overlap {:.2f})\n",
-                       drop, keep, ratio);
-            ++ev_g_.merges; ++ev_g_.merges_cum;   // EvidenceMonitor counter
-            if (auto it = insts.find(drop); it != insts.end())
-                it->second.affordance.remove();
-            fitter_->forget_node(drop);
-            G->delete_node(drop);
-            removed.insert(drop);
-            if (drop == ids[i]) break;   // this i is gone; advance to the next i
-        }
-    }
-}
-
-// One tracker cycle: merge overlaps, build tracks from live instances (Mahalanobis gate on belief Σ) and
-// detections from this frame's ZED "table" slices, then apply the result (death / associate / birth). Ricoh
-// slices are excluded here (bearing-only). This is the ONLY path that creates/associates table instances.
-void SpecificWorker::run_instance_tracker()
-{
-    merge_overlapping_instances();   // enforce physical exclusion before associating/birthing this cycle
-
-    rc::TrackerParams tp;
-    tp.gate_mahalanobis = cfg_.tracker_gate_mahalanobis;
-    tp.gate_fallback_m  = cfg_.tracker_gate_fallback_m;
-    tp.detection_noise_m = cfg_.tracker_detection_noise_m;
-    tp.birth_frames     = cfg_.tracker_birth_frames;
-    tp.death_frames     = cfg_.tracker_death_frames;
-    tp.birth_min_sep_m  = cfg_.tracker_birth_min_sep_m;
-    tp.nll_cost         = cfg_.tracker_nll_cost;
-    tp.multi_det_per_track = true;   // fuse multiple ZED slices of one table (one belief update per slice)
-    tracker_.set_params(tp);
-
-    // Tracks ← live instances: centre from the fit, XY cov from the belief's position covariance Σ.
-    std::vector<rc::TrackView> tracks;
-    tracks.reserve(fitter_->instances().size());
-    for (auto& [id, inst] : fitter_->instances())
-    {
-        rc::TrackView t;
-        t.id = id;
-        const auto& s = inst.model.state();
-        t.xy = {s.cx, s.cy};
-        if (inst.ai2_initialized)
-        {
-            // Gate on the belief's position covariance (+ localization chain) so association uses the
-            // Mahalanobis innovation S = P + R²I, not the Euclidean fallback (matters for multi-instance).
-            const auto& S = inst.ai2_belief.covariance();   // Σ over [cx,cy,H,w,h,yaw]
-            t.cov = Eigen::Matrix2f::Zero();
-            t.cov(0, 0) = S(0, 0) + inst.chain_cov_xx;
-            t.cov(1, 1) = S(1, 1) + inst.chain_cov_yy;
-            t.has_cov = true;
-        }
-        tracks.push_back(t);
-        inst.assigned_mask_idxs.clear();   // cleared; re-filled below with every slice associated this cycle
-    }
-
-    // Detections ← the current "table" mask slices (carry the slice index for the assignment). Built EVERY
-    // cycle from the packet (even a stale one): the tracker needs continuous detections so its birth CANDIDATES
-    // mature over birth_frames consecutive cycles and so association stays live — gating this on mask freshness
-    // wiped the candidates every stale cycle and NOTHING ever birthed. Re-fitting a stale mask is prevented
-    // separately, in process_table_node (per-instance frame_id gate), NOT here.
-    // Only ZED-depth slices (depth_var==0) reach the tracker; ricoh (depth_var>0) is bearing-only and drives
-    // the attention path (process_ricoh_bearings), never birth/associate/fit. Every ZED det is birthable.
-    std::vector<rc::DetectionView> dets;
-    const auto& pkt = mask_ingestor_->packet();
-    if (pkt.valid)
-        for (int i = 0; i < static_cast<int>(pkt.slices.size()); ++i)
-        {
-            const auto& sl = pkt.slices[i];
-            if (sl.label != "table" or sl.support_end <= sl.support_begin)
-                continue;
-            if (sl.depth_var > 0.0f)   // RICOH is BEARING-ONLY: never births/associates/fits — the tracker sees
-                continue;              // ZED masks only. Ricoh drives the attention path (process_ricoh_bearings).
-            rc::DetectionView dv;
-            dv.xy = {sl.centroid.x(), sl.centroid.y()};
-            dv.slice_index = i;
-            dv.birthable = true;       // ZED only reaches here → always birthable
-            dets.push_back(dv);
-        }
-
-    const auto res = tracker_.update(tracks, dets);
-
-    // Diagnostic (throttled, plus on any birth/death): reveals "1 slice" (upstream) vs "N slices, no birth".
-    static int dbg = 0;
-    const int n_assigned = static_cast<int>(std::count_if(res.assignment.begin(), res.assignment.end(),
-                                                          [](int a){ return a >= 0; }));
-
-    // EvidenceMonitor mask/tracker counters (merges are added in merge_overlapping_instances above).
-    ev_g_.mask_frame_id = pkt.valid ? pkt.frame_id : -1;
-    ev_g_.total_slices  = pkt.valid ? static_cast<int>(pkt.slices.size()) : 0;
-    ev_g_.table_dets    = static_cast<int>(dets.size());
-    ev_g_.assigned      = n_assigned;
-    ev_g_.discarded     = static_cast<int>(dets.size()) - n_assigned;
-    ev_g_.births       += static_cast<int>(res.births.size());
-    ev_g_.births_cum   += static_cast<long>(res.births.size());
-    if (++dbg % 30 == 0 or not res.births.empty() or not res.deaths.empty())
-    {
-        std::print("[tracker] instances={} table_dets={} assigned={} unassigned={} births={} deaths={}\n",
-                   tracks.size(), dets.size(), n_assigned,
-                   static_cast<int>(dets.size()) - n_assigned, res.births.size(), res.deaths.size());
-        for (const auto& t : tracks)
-            std::print("[tracker]   track id={} xy=({:.2f},{:.2f}) has_cov={}\n",
-                       t.id, t.xy.x(), t.xy.y(), t.has_cov);
-        for (const auto& d : dets)
-            std::print("[tracker]   det slice={} xy=({:.2f},{:.2f})\n", d.slice_index, d.xy.x(), d.xy.y());
-    }
-
-    // DEATH: OFF by default — a table is rigid, persistent furniture, so a long occlusion (no mask for
-    // many frames) is NOT absence and must not retire it. The ONLY way a table is removed is the MERGE
-    // operator (two tables can't share space). Enable Tracker.DeathEnabled to restore miss-timer retirement.
-    if (cfg_.tracker_death_enabled)
-        for (const std::uint64_t id : res.deaths)
-        {
-            std::print("table_concept: [tracker] DEATH id={} (unobserved {} frames)\n", id, cfg_.tracker_death_frames);
-            if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
-                it->second.affordance.remove();
-            fitter_->forget_node(id);
-            G->delete_node(id);
-        }
-
-    // ASSOCIATE: route every matched detection's mask slice to its instance (read in observe_slice()). With
-    // multi_det_per_track a track may collect SEVERAL ZED slices → fused as sequential updates.
-    for (int d = 0; d < static_cast<int>(dets.size()); ++d)
-        if (res.assignment[d] >= 0)
-        {
-            const std::uint64_t id = tracks[res.assignment[d]].id;
-            if (auto it = fitter_->instances().find(id); it != fitter_->instances().end())
-                it->second.assigned_mask_idxs.push_back(dets[d].slice_index);
-        }
-
-    // BIRTH: spawn an instance from each promoted (persistently-unexplained) detection, seeding the
-    // fitter with the detection XY so the model starts AT the table (not the 0,0 RT-read default).
-    for (const int d : res.births)
-    {
-        const Eigen::Vector3f& c = pkt.slices[dets[d].slice_index].centroid;
-        const auto new_id = scene_graph_->create_instance_from_detection(c, room_node_id_);
-        if (new_id != 0)
-            fitter_->note_birth(new_id, Eigen::Vector2f(c.x(), c.y()));
-    }
-
-    // Per-instance ZED-slice count for the EvidenceMonitor. Every assigned slice is a ZED detection now
-    // (ricoh is bearing-only and never reaches assigned_mask_idxs), so this is just the assignment count.
-    for (auto& [id, inst] : fitter_->instances())
-        inst.dbg_n_zed_slices = static_cast<int>(inst.assigned_mask_idxs.size());
-}
 
 // ─── Per-node processing + publish ───────────────────────────────────────────────────────────────
 
@@ -1030,7 +417,16 @@ void SpecificWorker::process_table_node(const DSR::Node& node)
     // ONLY on a fresh mask FRAME for this instance: the tracker assigns every cycle (birth/association
     // continuity), but re-fitting the SAME packet each cycle would overcount evidence — gate on a new frame_id.
     const auto& pkt = mask_ingestor_->packet();
-    if (pkt.valid and pkt.frame_id > inst.last_masks_frame_seen)
+    // Freshness gate. mask_frame_id is a PUBLISH counter — it advances on every republish even when the source
+    // camera is FROZEN/paused, so gating on it alone re-integrates the SAME capture as independent evidence and
+    // the belief RATCHETS: w/h/yaw rotate + reshape with the robot AND scene stationary (ai2_log.csv symptom —
+    // npts pinned identical, flip_ev saturated, yaw walking ~90°). The producer also ships mask_timestamp_ms =
+    // the CAPTURE stamp of the source RGBD frame; require THAT to advance too. A stale capture stamp ⇒ no new
+    // sensor information ⇒ fall through to AGE the belief (predict-only, Σ grows), never re-integrate the same
+    // frame. timestamp_ms==0 (older producer with no capture stamp) ⇒ fall back to the frame_id gate alone.
+    const bool fresh_frame   = pkt.valid and pkt.frame_id > inst.last_masks_frame_seen;
+    const bool fresh_capture = pkt.timestamp_ms == 0 or pkt.timestamp_ms > inst.last_mask_timestamp_ms;
+    if (fresh_frame and fresh_capture)
     {
         for (const int idx : inst.assigned_mask_idxs)
         {
@@ -1113,7 +509,7 @@ void SpecificWorker::publish_table_diagnostics(const rc::TableInstance& inst,
         if (ts_cov_plot_)
         {
             ts_cov_plot_->add_series(inst.node_name + "_cov", QColor(0, 190, 255), 1.1f);
-            ts_cov_plot_->add_point (inst.node_name + "_cov", belief_uncertainty(inst));
+            ts_cov_plot_->add_point (inst.node_name + "_cov", rc::geom::belief_uncertainty(inst));
         }
         if (ts_res_plot_)
         {
@@ -1148,7 +544,7 @@ void SpecificWorker::publish_table_diagnostics(const rc::TableInstance& inst,
         std::print("[{}] series: FE={:.4f} U(Σ)={:.3f} res={}\n",
                    inst.node_name,
                    free_energy,
-                   belief_uncertainty(inst),
+                   rc::geom::belief_uncertainty(inst),
                    observation.residual_pts.size());
 }
 
@@ -1204,7 +600,7 @@ void SpecificWorker::step_convergence(rc::TableInstance& inst,
     // Model uncertainty for model_uncertainty_att: sum of the belief's per-DOF posterior stds over
     // position + size (m), from the AI2 covariance Σ over [cx,cy,H,w,h,yaw]. Shrinks as the robot
     // gathers viewpoints — the AI2-native replacement for the old queue face-coverage deficit.
-    const float model_uncertainty = belief_uncertainty(inst);
+    const float model_uncertainty = rc::geom::belief_uncertainty(inst);
     G->add_or_modify_attrib_local<model_uncertainty_att>(node, model_uncertainty);
 
     if (fitter_->should_log(inst))

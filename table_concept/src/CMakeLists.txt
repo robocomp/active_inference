@@ -4,11 +4,14 @@ set(ACTIVE_INFERENCE_COMMON_DIR "${CMAKE_CURRENT_LIST_DIR}/../../common")
 LIST(APPEND SOURCES
   ../src/specificworker.cpp
   ../src/specificworker_presence.cpp
+  ../src/specificworker_lifecycle.cpp
+  ../src/specificworker_dashboard.cpp
   ../src/table_config.cpp
   ${ACTIVE_INFERENCE_COMMON_DIR}/mask_ingestor/mask_ingestor.cpp
   ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/timeseries_plot.cpp
   ../src/table_scene_graph.cpp
   ../src/table_lidar_ingestor.cpp
+  ../src/table_existence.cpp
   # Zero-copy media plane (lidar3D consumer for the YOLO-independent range factor). Mirrors bottle_concept:
   # media_transport.cpp is type-agnostic but references all IDL frame types, so link every PubSubTypes pair.
   ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/media_transport.cpp

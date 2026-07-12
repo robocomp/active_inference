@@ -78,17 +78,30 @@ public:
     // Part B (chain covariance): enable adding the localization/chain term J·Σ_chain·Jᵀ (measurement
     // frame → room, capture-stamp pinned) to each instance, read by the scene-graph's RT-cov write.
     void set_chain_cov_source(DSR::InnerGaussianAPI* gaussian, std::string source_frame, bool enabled);
+    // Object-anchor observation: publish this frame's ROBOT-frame fit (z_o) so the room localizer can
+    // use the table as an SE(2) pose landmark. robot_frame = the localizer's base node ("body"). OFF unless enabled.
+    void set_object_observation(bool enabled, std::string robot_frame);
     // Room-frame XY a NEWLY born instance's model should start at (from the tracker's detection). The
     // room→table RT edge written at birth is NOT reliably queryable in the same cycle, so ensure_instance
     // would read the 0,0 default and the model would freeze there. Consumed once by ensure_instance.
     void note_birth(std::uint64_t id, const Eigen::Vector2f& xy) { birth_seeds_[id] = xy; }
     bool should_log(const TableInstance& inst) const;
 
+    // Emit a CSV row for an OUT-OF-VIEW instance whose EXISTENCE evidence integrated this cycle (LiDAR/silhouette
+    // carve) but which the fitter did NOT fit (no fresh mask) — so the existence log-odds trajectory that drives a
+    // removal is captured even across the silent out-of-FoV stretch where no fit row is written. Fit fields are the
+    // last converged values (held); the existence columns are FRESH (integrated just before this call). Called from
+    // TableExistence::update_and_remove for non-observed instances only, so it never double-logs a fit row.
+    void log_existence_cycle(const TableInstance& inst)
+    { log_ai2_csv(inst, 0, inst.dbg_R, /*gated=*/true, inst.dbg_energy); }
+
     // YOLO-independent LiDAR range channel: stage this cycle's sweep (room frame) + sensor origin for the
     // range factor. clear_lidar_sweep() each cycle first so a stale sweep never leaks into a frame with no
     // fresh LiDAR. Set/cleared from the compute() main thread by SpecificWorker (fed by TableLidarIngestor).
     void set_lidar_sweep(const std::vector<Eigen::Vector3f>& sweep_room, const Eigen::Vector3f& origin_room)
     { lidar_channel_.set_sweep(sweep_room, origin_room); }
+    void set_lidar_sweep_bpearl(const std::vector<Eigen::Vector3f>& sweep_room, const Eigen::Vector3f& origin_room)
+    { lidar_channel_.set_sweep_bpearl(sweep_room, origin_room); }
     void clear_lidar_sweep() { lidar_channel_.clear(); }
 
     // PIXEL-LEVEL silhouette existence evidence (EXISTENCE_BELIEF_PLAN.md, mask channel). Delegates to
@@ -112,6 +125,10 @@ private:
     DSR::InnerGaussianAPI*         gaussian_    = nullptr;   // Part B: chain covariance (set_chain_cov_source)
     std::string                    chain_src_frame_;          // measurement frame the chain cov is computed from
     bool                           chain_cov_enabled_ = false;
+    bool                           obs_enabled_ = false;       // publish z_o (object-anchor observation)?
+    std::string                    obs_robot_frame_ = "body";  // localizer base frame z_o is expressed in
+    std::string                    obs_cam_frame_ = "zed";     // camera frame the raw mask cloud lives in
+    void compute_object_observation(TableInstance& inst);      // fill inst.obs_robot (gated)
     TableConfig&                   cfg_;
     MaskIngestor*                  mask_ingestor_ = nullptr;
     TableSceneGraph*               scene_graph_   = nullptr;

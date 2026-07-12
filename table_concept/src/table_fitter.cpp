@@ -11,6 +11,7 @@
 
 #include "table_fitter.h"
 #include "table_voxel_bank.h"
+#include "../../common/object_anchor/object_anchor_contract.h"
 
 #include <algorithm>
 #include <chrono>
@@ -42,6 +43,60 @@ void TableFitter::set_chain_cov_source(DSR::InnerGaussianAPI* gaussian, std::str
     gaussian_          = gaussian;
     chain_src_frame_   = std::move(source_frame);
     chain_cov_enabled_ = enabled and (gaussian_ != nullptr) and not chain_src_frame_.empty();
+}
+
+void TableFitter::set_object_observation(bool enabled, std::string robot_frame)
+{
+    obs_robot_frame_ = std::move(robot_frame);
+    obs_enabled_     = enabled and (inner_eigen_ != nullptr) and not obs_robot_frame_.empty();
+}
+
+// Build the object-anchor observation z_o for room_concept's landmark factor.
+//
+// z_o MUST be independent of the robot pose the localizer is estimating, or the factor just
+// re-anchors to the last pose (the residual is ~0 at the current estimate). So we take the table's
+// RAW camera-frame mask centroid (this frame's ZED measurement, no localization in it) and carry it
+// to the robot base by the STATIC body←zed extrinsic (ts=0, a fixed calibrated mount). Position-only:
+// a single view's yaw is biased (the grazing/obliquity problem), so we publish [x,y] and let the
+// consumer treat it as a 2-DOF landmark. Gated OFF by default.
+void TableFitter::compute_object_observation(TableInstance& inst)
+{
+    inst.obs_robot_valid = false;
+    if (not obs_enabled_ or not inner_eigen_ or not mask_ingestor_)
+        return;
+    const auto& packet = mask_ingestor_->packet();
+    if (packet.support_points_cam.empty())
+        return;
+
+    // This frame's ZED slice assigned to this table (the pinhole camera cloud; skip ricoh depth_var>0).
+    const MaskIngestor::MaskSlice* zed_slice = nullptr;
+    for (const int idx : inst.assigned_mask_idxs)
+    {
+        if (idx < 0 or idx >= static_cast<int>(packet.slices.size())) continue;
+        const auto& sl = packet.slices[idx];
+        if (sl.depth_var > 0.0f) continue;                      // ricoh / lidar-depth mask, not the ZED frame
+        if (sl.support_end > sl.support_begin) { zed_slice = &sl; break; }
+    }
+    if (zed_slice == nullptr)
+        return;
+
+    // Centroid of the RAW camera-frame support points — the pose-INDEPENDENT sensor measurement.
+    const std::size_t b = std::min<std::size_t>(zed_slice->support_begin, packet.support_points_cam.size());
+    const std::size_t e = std::min<std::size_t>(zed_slice->support_end,   packet.support_points_cam.size());
+    if (e <= b)
+        return;
+    Eigen::Vector3d c_cam = Eigen::Vector3d::Zero();
+    for (std::size_t k = b; k < e; ++k)
+        c_cam += packet.support_points_cam[k].cast<double>();
+    c_cam /= static_cast<double>(e - b);
+
+    // STATIC camera→base extrinsic (ts=0, rigid mount) — carries NO localization pose ⇒ z_o ⟂ robot pose.
+    const auto m = inner_eigen_->get_transformation_matrix(obs_robot_frame_, obs_cam_frame_, 0);
+    if (not m.has_value())
+        return;
+    const Mat::Vector3d p = m.value() * c_cam;
+    inst.obs_robot       = {static_cast<float>(p.x()), static_cast<float>(p.y()), 0.0f};  // position-only
+    inst.obs_robot_valid = true;
 }
 
 // Compute the localization/chain covariance term (J·Σ_chain·Jᵀ) at the table centre; store it on the instance.
@@ -319,6 +374,9 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
         p.coverage_robust_c_m = cfg_.coverage_robust_c_m;
         p.free_space_precision = cfg_.free_space_precision;
         p.footprint_moment_precision = cfg_.footprint_moment_precision;
+        p.footprint_moment_completeness_gain = cfg_.footprint_moment_completeness_gain;
+        p.footprint_moment_min_completeness  = cfg_.footprint_moment_min_completeness;
+        p.orientation_continuity_fold = cfg_.orientation_continuity_fold;
         p.top_thickness   = TableModel::TOP_THICKNESS;
         p.leg_radius      = TableModel::LEG_RADIUS;
         inst.ai2_belief = TableBelief(s0, p);
@@ -409,7 +467,14 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
         frame.R.assign(frame.points.size(), R);
         frame.chain_cov_xx  = inst.chain_cov_xx + range_lat_var;   // range adds to the SHARED position error (cap)
         frame.chain_cov_yy  = inst.chain_cov_yy + range_lat_var;
-        frame.chain_cov_yaw = range_yaw_var;                       // the binding term: far view can't rotate
+        // Obliquity yaw cap: at an edge-on (grazing) view the tabletop cloud is ~1-D along the near edge, so yaw
+        // is barely observable and the per-point GN snaps between the box's symmetric orientations (r_π / w↔h —
+        // the CSV flips). Grow the SHARED yaw variance as the view grazes (|cos(incidence)|→0 ⇒ 1/cos→∞), so a
+        // grazing frame confirms the table but cannot rotate it — the same continuous-covariance form as the range
+        // term, keyed on view angle instead of distance. ObliquityYawGain=0 ⇒ OFF (baseline unchanged).
+        const float oblq_cos          = std::clamp(inst.dbg_obliquity_cos, 0.05f, 1.0f);
+        const float obliquity_yaw_std = cfg_.obliquity_yaw_gain * (1.0f / oblq_cos - 1.0f);   // 0 at top-down
+        frame.chain_cov_yaw  = range_yaw_var + obliquity_yaw_std * obliquity_yaw_std;   // range + grazing-view cap
         frame.chain_cov_size = range_size_var;                     // ...nor RESHAPE/inflate — geometry freezes afar
         // Footprint-moment SHARED per-frame variance: ego-motion mask corruption + a GENTLE range term (a global
         // footprint fit is far more range-robust than a single boundary point, so a coefficient << the per-point
@@ -421,9 +486,15 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
         // under-reported for split masks, so motion_dotd is the load-bearing signal here.
         const float moment_range_std  = cfg_.footprint_moment_range_per_m * range;
         const float moment_motion_std = cfg_.footprint_moment_motion_gain * std::abs(inst.last_motion_dotd);
+        // Obliquity → moment variance: a grazing/foreshortened view biases the 2D inertia tensor (the SAME cause
+        // that spoils the per-point yaw, but on the moment channel — where the CSV rogue rotations actually came
+        // in). Mirror the per-point obliquity cap onto moment_extra_var so an edge-on frame confirms the table but
+        // cannot rotate/reshape it via the moment. Reuses oblq_cos computed above for chain_cov_yaw. 0 = OFF.
+        const float moment_oblq_std   = cfg_.obliquity_moment_gain * (1.0f / oblq_cos - 1.0f);
         frame.moment_extra_var = std::max(0.0f, inst.last_motion_var)
                                + moment_range_std * moment_range_std
-                               + moment_motion_std * moment_motion_std;
+                               + moment_motion_std * moment_motion_std
+                               + moment_oblq_std * moment_oblq_std;
         // YOLO-independent LiDAR range channel: stage returns landing on the legs/rim. No-op if precision==0
         // or no fresh sweep. The shared factor (accumulate_lidar_rays<6> in TableBelief::accumulate_extra)
         // sphere-traces this belief's own SDF, so the same call the bottle uses drops in unchanged.
@@ -534,8 +605,11 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
     projection_->compute_projected_roi(inst);
     // (chain cov already computed above, before the belief update)
 
+    // Object-anchor observation z_o: settled fit expressed in the localizer's base frame (gated OFF).
+    compute_object_observation(inst);
+
     if (should_log(inst))
-        std::print("[{}] AI2 npts={} R={:.4f} dotd={:.2f} trunc={:.2f}{} mom={} | FE={:.2f} base={:.2f} surprise={:.2f} | cx={:.3f} cy={:.3f} H={:.3f} w={:.3f} h={:.3f} ψ={:.3f} | σ(w,h,H)mm=({:.0f},{:.0f},{:.0f}) | lidar {}/{} resid={:.3f}m topz={:.3f}(H={:.3f}) floorz={:.3f} covA={:.2f} div={}\n",
+        std::print("[{}] AI2 npts={} R={:.4f} dotd={:.2f} trunc={:.2f}{} mom={} | FE={:.2f} base={:.2f} surprise={:.2f} | cx={:.3f} cy={:.3f} H={:.3f} w={:.3f} h={:.3f} ψ={:.3f} | σ(w,h,H)mm=({:.0f},{:.0f},{:.0f}) | lidar {}/{} bp{} resid={:.3f}m topz={:.3f}(H={:.3f}) floorz={:.3f} covA={:.2f} div={}\n",
                    inst.node_name, npts, R, inst.last_motion_dotd, inst.last_trunc_frac, gated ? " GATED" : "",
                    inst.ai2_belief.last_moment_pts(),
                    energy, inst.fe_baseline, inst.fe_surprise,
@@ -543,7 +617,7 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
                    1000.f * std::sqrt(std::max(0.f, inst.ai2_belief.covariance()(3, 3))),
                    1000.f * std::sqrt(std::max(0.f, inst.ai2_belief.covariance()(4, 4))),
                    1000.f * std::sqrt(std::max(0.f, inst.ai2_belief.covariance()(2, 2))),
-                   inst.dbg_lidar_rays, inst.dbg_lidar_raw, inst.dbg_lidar_resid_m,
+                   inst.dbg_lidar_rays, inst.dbg_lidar_raw, inst.dbg_lidar_bpearl_rays, inst.dbg_lidar_resid_m,
                    inst.dbg_lidar_topz_m, bs.H, inst.dbg_lidar_floorz_m, inst.dbg_lidar_cov_ang, inst.frames_diverged);
 
     // EvidenceMonitor snapshot: persist this frame's fit evidence (else it dies with the local observation).
@@ -568,8 +642,9 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
         if (not ai2_csv_.is_open()) { cfg_.ai2_csv_path.clear(); return; }
         ai2_csv_ << "cycle,node,npts,gated,energy,fe_baseline,fe_surprise,R,motion_var,depth_var,motion_dotd,trunc_frac,range,"
                  << "cx,cy,H,w,h,yaw,std_cx,std_cy,std_H,std_w,std_h,std_yaw,"
-                 << "std_yaw_within,flip_ev,p_alt,lidar_rays,lidar_raw,lidar_resid_m,lidar_meanz,lidar_topz,lidar_floorz,lidar_cov_ang,"
-                 << "dyaw_points,dyaw_moment,dyaw_flip,obliquity_cos,completeness,moment_aniso,moment_r_yaw\n";   // rogue-mask diag
+                 << "std_yaw_within,flip_ev,p_alt,lidar_rays,lidar_raw,lidar_bpearl,lidar_resid_m,lidar_meanz,lidar_topz,lidar_floorz,lidar_cov_ang,"
+                 << "dyaw_points,dyaw_moment,dyaw_flip,obliquity_cos,completeness,moment_aniso,moment_r_yaw,"   // rogue-mask diag
+                 << "ex_L,ex_p,ex_locc,ex_lfree,ex_lfree_eff,ex_ln,ex_socc,ex_sfree,ex_sfree_eff,ex_sndet,ex_streak\n";   // existence-removal diag
     }
     const auto& s = inst.ai2_belief.state();
     const auto& S = inst.ai2_belief.covariance();
@@ -583,12 +658,16 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
              << sd(0) << ',' << sd(1) << ',' << sd(2) << ',' << sd(3) << ',' << sd(4) << ','
              << std::sqrt(std::max(0.0f, inst.ai2_belief.yaw_marginal_var())) << ','
              << sd(5) << ',' << inst.ai2_belief.flip_evidence() << ',' << inst.ai2_belief.mode_posterior() << ','
-             << inst.dbg_lidar_rays << ',' << inst.dbg_lidar_raw << ',' << inst.dbg_lidar_resid_m << ','
+             << inst.dbg_lidar_rays << ',' << inst.dbg_lidar_raw << ',' << inst.dbg_lidar_bpearl_rays << ',' << inst.dbg_lidar_resid_m << ','
              << inst.dbg_lidar_meanz_m << ',' << inst.dbg_lidar_topz_m << ',' << inst.dbg_lidar_floorz_m << ','
              << inst.dbg_lidar_cov_ang << ','
              << inst.dbg_dyaw_points << ',' << inst.dbg_dyaw_moment << ',' << inst.dbg_dyaw_flip << ','
              << inst.dbg_obliquity_cos << ',' << inst.dbg_completeness << ','
-             << inst.ai2_belief.dbg_moment_aniso() << ',' << inst.ai2_belief.dbg_moment_r_yaw() << '\n';   // rogue-mask diag
+             << inst.ai2_belief.dbg_moment_aniso() << ',' << inst.ai2_belief.dbg_moment_r_yaw() << ','   // rogue-mask diag
+             << inst.existence.logodds() << ',' << inst.existence.p_exists() << ','
+             << inst.dbg_ex_lidar_occ << ',' << inst.dbg_ex_lidar_free << ',' << inst.dbg_ex_lidar_free_eff << ',' << inst.dbg_ex_lidar_n << ','
+             << inst.dbg_ex_sil_occ << ',' << inst.dbg_ex_sil_free << ',' << inst.dbg_ex_sil_free_eff << ',' << inst.dbg_ex_sil_ndet << ','
+             << inst.existence_remove_streak << '\n';   // existence-removal diag
     ai2_csv_.flush();
 }
 

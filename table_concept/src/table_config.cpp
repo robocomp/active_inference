@@ -68,6 +68,8 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     // ─── RT-edge covariance upload ─────────────────────────────────────────────
     out.rt_cov_scale                  = getf("TableConcept.RtCovScale",           1.0f);
     out.rt_cov_add_chain              = getb("TableConcept.RtCovAddChain",       true);
+    out.publish_object_obs            = getb("TableConcept.PublishObjectObs",   false);
+    out.object_obs_frame              = gets("TableConcept.ObjectObsFrame",     "body");
 
     // ─── Multi-instance tracker + ricoh attention ──────────────────────────────
     out.tracker_gate_mahalanobis = getf("Tracker.GateMahalanobis",  9.0f);
@@ -90,6 +92,7 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     // ─── LiDAR range factor · coverage · free-space · footprint moment · FE ────
     // YOLO-independent LiDAR first-hit range factor (common/ai_belief/lidar_ray_factor.h). OFF by default.
     out.lidar_precision      = getf("TableModel.LidarPrecision",      0.0f);
+    out.lidar_bpearl_precision = getf("TableModel.LidarBpearlPrecision", 0.0f);
     out.lidar_robust_c_m     = getf("TableModel.LidarRobustCM",       0.05f);
     out.lidar_select_margin_m = getf("TableModel.LidarSelectMarginM", 0.10f);
     out.lidar_coverage_n0     = getf("TableModel.LidarCoverageN0",     60.0f);
@@ -105,6 +108,11 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.fe_surprise_smooth           = getf("TableModel.FeSurpriseSmooth",    0.10f);
     out.footprint_moment_motion_gain = getf("TableModel.FootprintMomentMotionGain", 0.30f);
     out.orientation_motion_ref       = getf("TableModel.OrientationMotionRef", 0.50f);
+    out.orientation_continuity_fold  = getb("TableModel.OrientationContinuityFold", false);
+    out.obliquity_yaw_gain           = getf("TableModel.ObliquityYawGain", 0.0f);
+    out.obliquity_moment_gain        = getf("TableModel.ObliquityMomentGain", 0.0f);
+    out.footprint_moment_completeness_gain = getf("TableModel.FootprintMomentCompletenessGain", 0.0f);
+    out.footprint_moment_min_completeness  = getf("TableModel.FootprintMomentMinCompleteness",  0.02f);
 
     // ─── Existence / removal ───────────────────────────────────────────────────
     out.existence_removal_enabled = getb("TableModel.ExistenceRemovalEnabled", false);
@@ -117,6 +125,7 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.existence_absence_range_ref_m = getf("TableModel.ExistenceAbsenceRangeRefM", 2.5f);
     out.existence_absence_range_power = getf("TableModel.ExistenceAbsenceRangePower", 2.0f);
     out.existence_lidar_absence       = getb("TableModel.ExistenceLidarAbsence", false);
+    out.existence_leg_occupancy       = getb("TableModel.ExistenceLegOccupancy", true);
 
     std::print("table_concept: configuration loaded.\n");
     return out;

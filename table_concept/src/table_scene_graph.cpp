@@ -19,6 +19,7 @@
 #include <QDebug>
 
 #include "table_model.h"   // rc::TableModel statics (TOP_THICKNESS, LEG_RADIUS)
+#include "../../common/object_anchor/object_anchor_contract.h"
 
 namespace rc {
 
@@ -155,6 +156,12 @@ void TableSceneGraph::step_write_model(TableInstance& inst, DSR::Node& node,
     G_->runtime_checked_add_or_modify_attrib_local(node, "table_detection_alive", inst.detection_alive ? 1 : 0);
     G_->runtime_checked_add_or_modify_attrib_local(node, "table_detection_confidence", inst.last_mask_confidence);
     G_->runtime_checked_add_or_modify_attrib_local(node, "table_frames_since_detection", inst.frames_since_detection);
+
+    // Object-anchor observation z_o (raw camera-frame centroid → static body extrinsic) for the room
+    // localizer's landmark factor. Position-only (single-view yaw is biased). Batched into this node
+    // write; only present when the fitter has it enabled (OFF by default).
+    if (inst.obs_robot_valid)
+        rc::object_anchor::write_observation(*G_, node, inst.obs_robot, /*has_orientation=*/false);
 
     G_->update_node(node);
 
