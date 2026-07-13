@@ -223,11 +223,11 @@ CornerDetector::DetectionResult CornerDetector::detect(
             continue;
 
         if (angle_deg < params_.min_corner_angle || angle_deg > params_.max_corner_angle)
-            continue;
+            { result.rej_angle++; continue; }
 
         const float isect_dist = (*intersection - predicted).norm();
         if (isect_dist > params_.max_match_distance)
-            continue;
+            { result.rej_dist++; continue; }
 
         const float raw_dot_in  = line_in->direction().dot(dir_in);
         const float raw_dot_out = line_out->direction().dot(dir_out);
@@ -235,14 +235,14 @@ CornerDetector::DetectionResult CornerDetector::detect(
             const float cos_thresh = std::cos(params_.max_orientation_dev
                                               * static_cast<float>(M_PI) / 180.f);
             if (std::abs(raw_dot_in) < cos_thresh || std::abs(raw_dot_out) < cos_thresh)
-                continue;
+                { result.rej_orient++; continue; }
         }
         const Eigen::Vector2f ori_in  = (raw_dot_in  >= 0.f ? 1.f : -1.f) * line_in->direction();
         const Eigen::Vector2f ori_out = (raw_dot_out >= 0.f ? 1.f : -1.f) * line_out->direction();
         {
             const float detected_cross = ori_in.x() * ori_out.y() - ori_in.y() * ori_out.x();
             if (mc.convexity_sign * detected_cross < 0.50f * std::abs(mc.convexity_sign))
-                continue;
+                { result.rej_convex++; continue; }
         }
 
         const float sigma = params_.ransac_threshold;
@@ -296,6 +296,8 @@ CornerDetector::DetectionResult CornerDetector::detect(
         result.matches.push_back(m);
     }
     result.corners_accepted = static_cast<int>(result.matches.size());
+    // Candidates that passed every quality gate but lost the 1-to-1 assignment.
+    result.rej_unassigned = C - result.corners_accepted;
 
     return result;
 }

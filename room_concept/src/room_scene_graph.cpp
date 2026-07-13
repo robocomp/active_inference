@@ -343,6 +343,9 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
     // Refresh obstacle exclusion zones from DSR graph before selecting the target.
     update_planner_obstacle_footprints();
 
+    // Refresh the localizer's object anchors (validated objects → SE(2) pose landmarks).
+    refresh_object_anchors();
+
     // Ask the planner for the current best target (handles dwell / arrival internally)
     const auto target_opt = planner.update_target();
 
@@ -420,6 +423,96 @@ void RoomSceneGraph::update_planner_obstacle_footprints()
     collect("table");   // tables (table_concept) are type "table", not "object" — avoid them too
 
     epistemic_->epistemic_planner().set_obstacle_footprints(std::move(footprints));
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// Gather validated modelled objects (tables, …) from the graph and hand them to the localizer
+// as SE(2) pose landmarks. MAIN THREAD (get_RT_pose_from_parent uses the ts==0 InnerEigen cache).
+void RoomSceneGraph::refresh_object_anchors()
+{
+    if (!G_ || !rt_api_ || !room_concept_ || !room_node_created_)
+        return;
+    if (!params_->OBJECT_ANCHOR_ENABLE)
+        return;
+
+    if (!inner_gaussian_)                       // lazily create on the main thread (Qt event loop present)
+        inner_gaussian_ = G_->get_inner_gaussian_api();
+
+    rc::ObjectAnchorSource::Config cfg;
+    cfg.enable         = params_->OBJECT_ANCHOR_ENABLE;
+    cfg.meas_sigma_xy  = params_->OBJECT_ANCHOR_MEAS_SIG_XY;
+    cfg.meas_sigma_yaw = params_->OBJECT_ANCHOR_MEAS_SIG_YAW;
+    cfg.validate_sigma = params_->OBJECT_ANCHOR_VALIDATE_SIGMA;
+
+    auto anchors = object_anchor_source_.gather(*G_, *inner_gaussian_, cfg);
+
+    // Diagnostic (~1/s): pinpoint where the chain breaks —
+    //   tables=0            → room doesn't see the table node
+    //   with_obs=0          → table_concept isn't publishing obj_obs_robot (producer side)
+    //   used<with_obs       → reader skipped (no RT pose / gaussian transform)
+    //   used>0 but loss=0   → factor/slot-copy issue on the localizer side
+    static std::uint64_t anchor_dbg_k = 0;
+    if ((anchor_dbg_k++ % 30) == 0)
+    {
+        int n_tables = 0, with_obs = 0;
+        for (const auto& n : G_->get_nodes_by_type("table"))
+        {
+            ++n_tables;
+            if (const auto o = G_->get_attrib_by_name<obj_obs_robot_att>(n);
+                o.has_value() and o->get().size() >= 2)
+                ++with_obs;
+        }
+        std::print("[room][anchors] table_nodes={} with_obj_obs_robot={} anchors_used={}\n",
+                   n_tables, with_obs, anchors.size());
+        if (not anchors.empty())
+        {
+            const auto& a = anchors.front();
+            // Λdiag≈0 ⇒ map cov Σ_o came back huge (factor muted). p_o vs z_o wildly apart ⇒ frame bug;
+            // near-equal (after the R(-θ) transform) ⇒ anchor satisfied (0 loss is then correct).
+            std::print("[room][anchors]   a0 type={} p_o=({:.2f},{:.2f},{:.2f}) z_o=({:.2f},{:.2f}) "
+                       "Λdiag=({:.2f},{:.2f}) has_yaw={}\n",
+                       a.type, a.pose_world.x(), a.pose_world.y(), a.pose_world.z(),
+                       a.obs_robot.x(), a.obs_robot.y(), a.information(0, 0), a.information(1, 1),
+                       a.has_orientation);
+        }
+        // Cross-check: the table's RAW room→table RT + its actual parent frame. If parent!='room' or the
+        // raw translation differs from p_o above, the map pose is being read in the wrong frame.
+        for (const auto& n : G_->get_nodes_by_type("table"))
+        {
+            std::string parent_name = "?";
+            if (const auto p = G_->get_attrib_by_name<parent_att>(n); p.has_value())
+                if (const auto pn = G_->get_node(p.value()); pn.has_value())
+                    parent_name = pn->name();
+            if (const auto rt = rt_api_->get_RT_pose_from_parent(n); rt.has_value())
+                std::print("[room][anchors]   RAW {} #{} parent='{}' t=({:.2f},{:.2f})\n",
+                           n.name(), n.id(), parent_name,
+                           rt->translation().x(), rt->translation().y());
+            break;   // first table only
+        }
+    }
+
+    // Cache the pinned landmark world positions (+ live "being measured" flag) for the viewer
+    // (robot→landmark sight lines). "Measured" = the producer's per-frame detection flag; for tables
+    // that is `table_detection_alive` (runtime-typed → read off the node's attrs map). Absent flag ⇒
+    // default to measured, so an object type that doesn't publish it still shows its sight line.
+    latest_pinned_landmarks_.clear();
+    latest_pinned_measured_.clear();
+    latest_pinned_landmarks_.reserve(anchors.size());
+    latest_pinned_measured_.reserve(anchors.size());
+    for (const auto& a : anchors)
+    {
+        latest_pinned_landmarks_.emplace_back(a.pose_world.x(), a.pose_world.y());
+        bool measured = true;
+        if (const auto n = G_->get_node(a.node_id); n.has_value())
+        {
+            const auto& attrs = n->attrs();
+            if (const auto it = attrs.find("table_detection_alive"); it != attrs.end())
+                measured = (it->second.dec() != 0);
+        }
+        latest_pinned_measured_.push_back(measured ? 1 : 0);
+    }
+
+    room_concept_->set_object_anchors(std::move(anchors));
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -573,6 +666,28 @@ void RoomSceneGraph::check_init_graph_is_valid()
     if (!robot_nodes.empty())
         dsr_robot_id_ = robot_nodes.front().id();
     else { qWarning() << "dsr_init_graph: no 'robot' type node found in graph"; return; }
+
+    // Optimise in the SAME frame we publish the robot↔room RT onto — the type-"robot" node itself.
+    // The RT edge is written parent=<robot node>→child=room, so the SDF must fit the lidar in THAT
+    // node's frame; otherwise the published pose is off by the fixed <robot>→base offset (e.g. Shadow→
+    // body ≈ 4.5 cm z here) — a z-only error today, but wrong to publish. Deriving the frame from the
+    // robot node (instead of a hardcoded "body") locks the optimisation frame to the write target so
+    // they can never drift. Empty LIDAR_ROBOT_FRAME = auto-derive; a non-empty config value overrides.
+    if (params_ != nullptr)
+    {
+        const std::string robot_name = robot_nodes.front().name();
+        if (params_->LIDAR_ROBOT_FRAME.empty())
+        {
+            params_->LIDAR_ROBOT_FRAME = robot_name;
+            qInfo() << "[room] optimisation/lidar frame derived from robot node ="
+                    << QString::fromStdString(robot_name)
+                    << "(robot↔room RT now published in this frame — no base offset)";
+        }
+        else if (params_->LIDAR_ROBOT_FRAME != robot_name)
+            qWarning() << "[room] LIDAR_ROBOT_FRAME =" << QString::fromStdString(params_->LIDAR_ROBOT_FRAME)
+                       << "differs from the robot node" << QString::fromStdString(robot_name)
+                       << "— the published robot↔room RT will carry that frame's offset. Set it empty to auto-derive.";
+    }
 
     load_robot_body_dimensions_from_graph();
 }

@@ -68,6 +68,7 @@ static std::string serialize_frame(const RerunFrame& f)
     j << "\"l_obs\":"      << jf(f.loss_obs)     << ',';
     j << "\"l_mot\":"      << jf(f.loss_motion)  << ',';
     j << "\"l_cor\":"      << jf(f.loss_corner)  << ',';
+    j << "\"l_obj\":"      << jf(f.loss_object)  << ',';
     j << "\"sdf_mse\":"    << jf(f.sdf_mse)      << ',';
     j << "\"innov_x\":"    << jf(f.innov_x)      << ',';
     j << "\"innov_y\":"    << jf(f.innov_y)      << ',';

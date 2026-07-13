@@ -689,6 +689,14 @@ void Viewer2D::draw_corners(const std::vector<rc::CornerDetector::CornerMatch>& 
         return item;
     });
 
+    // Lines connecting robot → detected corner (sight lines to the detected corners)
+    resize_pool(corner_robot_line_items_, n, [&]() {
+        QPen pen(QColor(0, 0, 139), 0.08);   // dark blue, thick
+        auto* item = agv_->scene.addLine(0, 0, 0, 0, pen);
+        item->setZValue(27);
+        return item;
+    });
+
     const Eigen::Matrix2f R = robot_pose.linear();
     const Eigen::Vector2f t = robot_pose.translation();
 
@@ -705,6 +713,54 @@ void Viewer2D::draw_corners(const std::vector<rc::CornerDetector::CornerMatch>& 
         corner_predicted_items_[i]->setPos(pred_world.x(), pred_world.y());
         corner_line_items_[i]->setLine(pred_world.x(), pred_world.y(),
                                         det_world.x(), det_world.y());
+        corner_robot_line_items_[i]->setLine(t.x(), t.y(),
+                                             det_world.x(), det_world.y());
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Landmark sight lines — robot → each pinned-object landmark (room frame)
+// ─────────────────────────────────────────────────────────────────────────────
+void Viewer2D::draw_landmark_lines(const std::vector<Eigen::Vector2f>& landmarks_world,
+                                   const std::vector<char>& measured,
+                                   const Eigen::Vector2f& robot_xy)
+{
+    const size_t n = landmarks_world.size();
+
+    auto resize_pool = [&](auto& pool, size_t count, auto make_item)
+    {
+        while (pool.size() < count)
+            pool.push_back(make_item());
+        for (size_t i = 0; i < pool.size(); ++i)
+            pool[i]->setVisible(i < count);
+    };
+
+    // Object "being measured" this frame? Missing/short flag ⇒ treat as measured (draw the line).
+    const auto is_measured = [&](size_t i) { return i >= measured.size() or measured[i] != 0; };
+
+    // Dark-blue thick line from robot to each pinned landmark
+    resize_pool(landmark_line_items_, n, [&]() {
+        QPen pen(QColor(0, 0, 139), 0.08);   // dark blue, thick
+        auto* item = agv_->scene.addLine(0, 0, 0, 0, pen);
+        item->setZValue(27);
+        return item;
+    });
+
+    // Dark-blue marker at each landmark position
+    resize_pool(landmark_marker_items_, n, [&]() {
+        constexpr float r = 0.20f;
+        auto* item = agv_->scene.addEllipse(-r, -r, 2*r, 2*r,
+            QPen(QColor(0, 0, 139), 0.03), QBrush(QColor(0, 0, 139, 180)));
+        item->setZValue(31);
+        return item;
+    });
+
+    for (size_t i = 0; i < n; ++i)
+    {
+        const auto& lw = landmarks_world[i];
+        landmark_line_items_[i]->setLine(robot_xy.x(), robot_xy.y(), lw.x(), lw.y());
+        landmark_line_items_[i]->setVisible(is_measured(i));   // sight line only while measured
+        landmark_marker_items_[i]->setPos(lw.x(), lw.y());     // marker always shown
     }
 }
 

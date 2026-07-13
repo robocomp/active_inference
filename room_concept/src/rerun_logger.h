@@ -45,6 +45,7 @@ struct RerunFrame
     float    loss_obs     = 0;
     float    loss_motion  = 0;
     float    loss_corner  = 0;
+    float    loss_object  = 0;
 
     // ---- localization quality ----
     float    sdf_mse      = 0;

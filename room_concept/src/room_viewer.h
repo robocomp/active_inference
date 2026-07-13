@@ -61,6 +61,11 @@ public:
     [[nodiscard]] Custom_widget* widget()  const { return custom_widget_; }
     [[nodiscard]] rc::Viewer2D*  viewer()  const { return viewer_2d_; }
 
+    // Persist the layout window geometry + splitter division to QSettings NOW. The destructor also
+    // does this, but SpecificWorker::request_shutdown() hard-exits via std::_Exit (skips all C++
+    // destructors), so it must be called explicitly from the shutdown path.
+    void persist_window_state() const { save_window_geometry(); }
+
     // Best pose to draw (localized → predicted → identity).
     [[nodiscard]] Eigen::Affine2f best_available_pose(
         const std::optional<rc::RoomConcept::UpdateResult>& loc_res, bool have_loc) const;
@@ -70,6 +75,12 @@ public:
                        const Eigen::Affine2f& pose_for_draw,
                        const std::vector<Eigen::Vector3f>& lidar_for_canvas,
                        const Eigen::Affine2f& loc_pose, bool use_loc);
+
+    // Draw robot→pinned-landmark sight lines (room-frame landmark positions). `measured` is 1:1 with
+    // landmarks_world; the sight line is drawn only for objects being actively measured this frame.
+    void draw_landmarks(const std::vector<Eigen::Vector2f>& landmarks_world,
+                        const std::vector<char>& measured,
+                        const Eigen::Affine2f& robot_pose);
 
     // Free-energy / covariance time-series update.
     void update_ui(const std::optional<rc::RoomConcept::UpdateResult>& loc_res);

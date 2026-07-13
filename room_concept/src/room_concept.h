@@ -51,6 +51,8 @@
 #include "room_model.h"
 #include "corner_detector.h"
 #include "rerun_logger.h"
+#include "object_anchor_types.h"
+#include "object_anchor_factor.h"
 
 namespace rc
 {
@@ -298,6 +300,15 @@ public:
         int   min_tracking_steps_for_corners = 5;      // Require this many tracking steps before adding corner factors
         int   corner_max_slots = 5;                    // Only apply corner factors to the newest N slots
         float corner_huber_delta = 0.3f;               // Huber saturation for corner residuals (meters)
+
+        // ===== Object anchors (validated modelled objects as SE(2) pose landmarks) =====
+        // As the room fills with confidently-localised objects (tables, …) their poses
+        // become interior factors that tighten the robot↔room link.  Precision-weighted by
+        // each object's own belief covariance — no threshold (see object_anchor_source.h).
+        ObjectAnchorFactor::Params object_anchor;      // .enable defaults false (OFF)
+        int   object_anchor_max_slots = 3;             // Only apply object factors to the newest N slots
+        float object_anchor_early_exit_sigma = 2.0f;   // prediction early-exit gate: whitened anchor-residual
+                                                       // σ-cutoff above which the optimizer is forced to run
 
         // Torch threading configuration
         int torch_num_threads = 5;          // Limit CPU threads to avoid overload
@@ -560,6 +571,9 @@ public:
             // the loss applies a scalar corner_obs_sigma uniformly in all directions.
         };
         std::vector<CornerObs> corner_obs;
+
+        // Object-anchor observations for this slot (validated modelled objects as SE(2) landmarks).
+        std::vector<ObjectAnchorObs> object_anchors;
     };
 
     struct BoundaryPrior
@@ -574,6 +588,14 @@ public:
                         const std::vector<rc::OdometryReading> &odometry_history);
 
     Params params;
+
+    /// Hand the latest validated object anchors (gathered on the MAIN thread from the DSR graph)
+    /// to the localizer.  Copied into the newest window slot at the next update().  Thread-safe.
+    void set_object_anchors(std::vector<ObjectAnchorObs> anchors)
+    {
+        std::scoped_lock lk(object_anchors_mutex_);
+        latest_object_anchors_ = std::move(anchors);
+    }
 
     // Process noise covariance (diagonal [x, y, theta])
     Eigen::Vector3f process_noise = {0.01f, 0.01f, 0.01f};
@@ -591,6 +613,10 @@ private:
 
    mutable std::mutex result_mutex_;
    std::optional<UpdateResult> last_result_;
+
+   // Latest object anchors from the graph (set on main thread, consumed by the localizer thread).
+   std::mutex object_anchors_mutex_;
+   std::vector<ObjectAnchorObs> latest_object_anchors_;
    std::function<void()> on_result_ready_;   // fired (localizer thread) after a fresh ok result is stored
 
    std::mutex cmd_mutex_;
@@ -614,6 +640,10 @@ private:
    // Smoothed pose to reduce jitter (legacy, used only when rfe_window_size == 1)
    Eigen::Vector3f smoothed_pose_ = Eigen::Vector3f::Zero();  // [x, y, theta]
    bool has_smoothed_pose_ = false;
+
+   // Flip instrumentation: last OPTIMIZED pose, to detect a ~180° yaw jump and dump why (see [FLIP] log).
+   float flip_prev_x_ = 0.f, flip_prev_y_ = 0.f, flip_prev_th_ = 0.f;
+   bool  flip_prev_valid_ = false;
 
    // ===== Recovery Manager =====
    struct RecoveryManager
@@ -676,6 +706,7 @@ private:
            float obs      = 0.f;
            float motion   = 0.f;
            float corner   = 0.f;
+           float object   = 0.f;
        };
        LossBreakdown compute_rfe_loss_breakdown(const Model& model, const Params& params,
                                                  torch::Device device) const;
@@ -712,6 +743,9 @@ private:
    // Per-symmetry-check trial CSV (loc-thread only; no lock). Gated by params.symmetry_debug_csv.
    std::ofstream      symmetry_csv_;
    bool               symmetry_csv_open_attempted_ = false;
+
+   std::ofstream      flip_csv_;   // one row per detected ~180° flip (tmp/sdf_localizer/flips_<ts>.csv)
+   bool               flip_csv_open_attempted_ = false;
    RerunLogger        rerun_logger_;
    int                rerun_frame_counter_ = 0;
    int                symmetry_check_counter_ = 0;

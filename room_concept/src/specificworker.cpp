@@ -90,6 +90,8 @@ void SpecificWorker::request_shutdown()
         return;
 
     save_window_settings();
+    if (viewer_)
+        viewer_->persist_window_state();   // _Exit below skips ~RoomViewer, so save its state now
     save_robot_pose_once();
 
     // Drop the lidar media subscriber BEFORE tearing down RoomConcept (pump() calls
@@ -471,6 +473,7 @@ void SpecificWorker::compute()
     {
         section_timer.restart();
         viewer_->update_viewer(loc_res, have_loc, pose_for_draw, lidar_for_canvas, loc_pose, use_loc);
+        viewer_->draw_landmarks(scene_graph_->pinned_landmarks(), scene_graph_->pinned_measured(), pose_for_draw);
         t_viewer_ms = section_timer.elapsed();
     }
 

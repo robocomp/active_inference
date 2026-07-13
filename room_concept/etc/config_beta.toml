@@ -104,6 +104,12 @@ RotationSdfCoupling    = 0.5   # Extra tolerancia SDF por rotación (m/rad)
 # require MORE sustained contrary evidence → harder to flip on a momentary
 # tight-turn degeneracy. (Header default 0.02; doubled here.)
 SymmetryFlipEvidenceThresh = 0.04
+# SDF mse below which a frame counts as a "good fit" and builds the flip-inertia streak (which grows
+# the flip threshold). Header default 0.02 was UNREACHABLE here — this room fits chronically at ~0.32 m
+# mean SDF (mse ≈ 0.10), so the streak stayed 0 and a minutes-stable pose had ZERO flip protection and
+# flipped on a transient 0.184 evidence spike. Raised to 0.12 (> chronic mse) so a STABLE pose builds
+# the streak → the threshold climbs toward ~0.44 → transient near-symmetric flips are rejected.
+SymmetryGoodFitMse = 0.12
 # Companion knobs (header defaults shown) — raise the first two / lower the leak to
 # harden further:
 #   SymmetryFlipMinImprovement = 0.005  # per-check loss advantage to count as evidence
@@ -236,7 +242,7 @@ UseCuda              = false   # CPU is FASTER here: windowed LBFGS (3-30 DOF, f
                                # launch/sync-overhead-bound on GPU — measured 2.4× slower early-exit,
                                # full-opt 82/397ms vs CPU 68/112ms. GPU path is crash-free now (host
                                # memcpy→device bug fixed) but not worth it. Flip true only to re-measure.
-DebugLog             = false  # CSV → tmp/sdf_localizer/log.csv
+DebugLog             = true   # CSV → tmp/sdf_localizer/log.csv (ON to observe loss_object live)
 
 # ── Rerun (desactivado para timing limpio) ────────────────────────────────────
 RerunEnabled      = false     # OFF: elimina ~3 ms/frame de overhead de red
@@ -245,6 +251,20 @@ RerunPort         = 9877
 RerunSdfEveryN    = 20
 RerunSdfResolution = 150
 RerunMaxQueue     = 30
+
+# ── Object anchors (validated modelled objects as SE(2) pose landmarks in the RFE loss) ──
+[ObjectAnchor]
+enable   = false   # A/B TEST: OFF to check whether the flips/delocalizations persist WITHOUT the anchor
+                   # (anchorSD=85 at good poses implicated a wrong pin as the destabilizer). Re-enable after.
+weight   = 1.0     # global scale (keep < walls: objects refine, never outvote geometry)
+huber    = 3.0     # robust cutoff in whitened σ units
+maxSlots = 3       # apply object factors to the newest N window slots
+measSigmaXY = 0.05 # reverted from 0.20: p_o is now confirmed CORRECT + off-center (~3 m), so the flip lever
+                   # (~6 m) dwarfs mask-centroid noise — trust it (Λ≈160) so it can actually veto the flip.
+earlyExitSigma = 2.0  # prediction early-exit gate: whitened anchor-residual σ above which the optimizer is
+                      # forced to run — low so a flip (huge residual) reliably triggers a correction.
+validateSigma  = 0.10 # map-pose σ (m) below which room PINS the table's world pose (fixed landmark) —
+                      # breaks the circularity so the anchor carries real information
 
 # ── Epistemic Controller ───────────────────────────────────────────────────────
 [EpistemicController]

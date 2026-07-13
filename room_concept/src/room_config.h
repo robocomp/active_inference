@@ -40,7 +40,9 @@ struct RoomConfig
     // must be transformed device->robot via the DSR RT tree. Preferred over LIDAR_NAME when live.
     std::string LIDAR_HELIOS_NAME     = "helios";
     // Destination frame for the device->robot transform (the mount RT edge parent, e.g. body->helios).
-    std::string LIDAR_ROBOT_FRAME     = "body";
+    std::string LIDAR_ROBOT_FRAME     = "";   // empty ⇒ auto-derived from the type-"robot" node at init
+                                              // (so the SDF optimises in the SAME frame the robot↔room RT
+                                              // is published onto). Set explicitly only to override.
     float MAX_LIDAR_HIGH_RANGE        = 100.f;  // m
     int   LIDAR_LOW_DECIMATION_FACTOR = 1;
     float LIDAR_HIGH_MIN_HEIGHT       = 1.5f;   // m
@@ -136,6 +138,19 @@ struct RoomConfig
     // the live RGB image (alongside the always-drawn walls). Config Overlay.ObjectTypes is a
     // comma-separated list (e.g. "object,table,cylinder,chair"); order is irrelevant.
     std::vector<std::string> OVERLAY_OBJECT_TYPES = {"object", "table", "cylinder", "chair"};
+
+    // ── Object anchors (validated modelled objects as SE(2) pose landmarks for localization) ──
+    // OFF by default. Precision-weighted by each object's own belief covariance (no threshold).
+    bool  OBJECT_ANCHOR_ENABLE      = false;  // ObjectAnchor.enable
+    float OBJECT_ANCHOR_WEIGHT      = 1.0f;   // ObjectAnchor.weight  (keep < walls)
+    float OBJECT_ANCHOR_HUBER       = 3.0f;   // ObjectAnchor.huber   (whitened σ units)
+    int   OBJECT_ANCHOR_MAX_SLOTS   = 3;      // ObjectAnchor.maxSlots
+    float OBJECT_ANCHOR_MEAS_SIG_XY = 0.05f;  // ObjectAnchor.measSigmaXY  (m)  fallback R_o
+    float OBJECT_ANCHOR_MEAS_SIG_YAW= 0.15f;  // ObjectAnchor.measSigmaYaw (rad) fallback R_o
+    float OBJECT_ANCHOR_EARLY_EXIT_SIGMA = 2.0f;  // ObjectAnchor.earlyExitSigma — whitened anchor-residual
+                                                  // σ-cutoff that forces the optimizer to run (drift catch)
+    float OBJECT_ANCHOR_VALIDATE_SIGMA  = 0.10f;  // ObjectAnchor.validateSigma — map-pose σ (m) below which
+                                                  // room PINS the table's world pose (breaks the circularity)
 };
 
 // Load the agent params + RoomConcept params + EpistemicController/planner params,

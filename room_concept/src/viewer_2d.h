@@ -130,9 +130,17 @@ class Viewer2D : public QObject
         void draw_all_trajectories(const std::vector<std::vector<Eigen::Vector3f>>& candidates,
                                    const std::vector<Eigen::Vector3f>& best);
 
-        /// Draw detected corners: green circles for accepted, yellow for predicted/in-FOV
+        /// Draw detected corners: green circles for accepted, yellow for predicted/in-FOV.
+        /// Also draws a line from the robot to each detected corner.
         void draw_corners(const std::vector<rc::CornerDetector::CornerMatch>& matches,
                           const Eigen::Affine2f& robot_pose);
+
+        /// Draw a line from the robot to each pinned-landmark object (room-frame positions). The
+        /// sight line is shown only when `measured[i]` is true (object actively detected this frame);
+        /// the landmark marker is always shown. `measured` may be shorter/empty → treated as measured.
+        void draw_landmark_lines(const std::vector<Eigen::Vector2f>& landmarks_world,
+                                 const std::vector<char>& measured,
+                                 const Eigen::Vector2f& robot_xy);
 
         /// Draw the epistemic score grid as semi-transparent coloured cells.
         /// cell_size is in world-frame meters.
@@ -211,6 +219,11 @@ class Viewer2D : public QObject
         std::vector<QGraphicsEllipseItem*> corner_detected_items_;
         std::vector<QGraphicsEllipseItem*> corner_predicted_items_;
         std::vector<QGraphicsLineItem*>    corner_line_items_;
+        std::vector<QGraphicsLineItem*>    corner_robot_line_items_;   // robot → detected corner
+
+        // Landmark markers (pinned objects): robot → landmark lines
+        std::vector<QGraphicsLineItem*>    landmark_line_items_;
+        std::vector<QGraphicsEllipseItem*> landmark_marker_items_;
 
         // Trajectory overlay
         std::vector<QGraphicsLineItem*>   traj_line_items_;

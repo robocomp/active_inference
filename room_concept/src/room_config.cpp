@@ -146,6 +146,22 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.MotionLearnQualityThreshold", room_concept.params.motion_learn_quality_threshold);
 
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.EnableCornerTracking", room_concept.params.enable_corner_tracking);
+
+    // Object anchors (validated modelled objects as SE(2) pose landmarks). Loaded into BOTH the
+    // shared config (read by RoomSceneGraph's graph-side gather) and the localizer params.
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "ObjectAnchor.enable", p.OBJECT_ANCHOR_ENABLE);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "ObjectAnchor.weight", p.OBJECT_ANCHOR_WEIGHT);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "ObjectAnchor.huber", p.OBJECT_ANCHOR_HUBER);
+    rc::ConfigLoaderUtils::load_optional<int>(cl, "ObjectAnchor.maxSlots", p.OBJECT_ANCHOR_MAX_SLOTS);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "ObjectAnchor.measSigmaXY", p.OBJECT_ANCHOR_MEAS_SIG_XY);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "ObjectAnchor.measSigmaYaw", p.OBJECT_ANCHOR_MEAS_SIG_YAW);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "ObjectAnchor.earlyExitSigma", p.OBJECT_ANCHOR_EARLY_EXIT_SIGMA);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "ObjectAnchor.validateSigma", p.OBJECT_ANCHOR_VALIDATE_SIGMA);
+    room_concept.params.object_anchor.enable      = p.OBJECT_ANCHOR_ENABLE;
+    room_concept.params.object_anchor.weight      = p.OBJECT_ANCHOR_WEIGHT;
+    room_concept.params.object_anchor.huber_delta = p.OBJECT_ANCHOR_HUBER;
+    room_concept.params.object_anchor_max_slots   = p.OBJECT_ANCHOR_MAX_SLOTS;
+    room_concept.params.object_anchor_early_exit_sigma = p.OBJECT_ANCHOR_EARLY_EXIT_SIGMA;
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.FarPointsWeight", room_concept.params.far_points_weight);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.FarPointsExponent", room_concept.params.far_points_exponent);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.FarPointsMinWeight", room_concept.params.far_points_min_weight);

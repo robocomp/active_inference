@@ -22,12 +22,16 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <vector>
+
+#include <Eigen/Dense>
 
 #include <genericworker.h>                 // DSR API + generated node/attr type tags
 
 #include "room_concept.h"                  // rc::RoomConcept (+ UpdateResult)
 #include "epistemic_controller.h"
 #include "room_config.h"             // rc::RoomConfig (shared config)
+#include "object_anchor_source.h"    // rc::ObjectAnchorSource (validated objects → SE(2) landmarks)
 #include "../../common/affordance_manager/affordance_manager.h"
 
 namespace rc
@@ -76,6 +80,17 @@ public:
     [[nodiscard]] bool  room_node_created() const noexcept { return room_node_created_; }
     [[nodiscard]] std::uint64_t robot_id() const noexcept { return dsr_robot_id_; }
 
+    // World-frame (room) positions of the pinned-object landmarks, refreshed each frame by
+    // refresh_object_anchors(). Consumed by the viewer to draw robot→landmark sight lines.
+    [[nodiscard]] const std::vector<Eigen::Vector2f>& pinned_landmarks() const noexcept
+    { return latest_pinned_landmarks_; }
+
+    // Per-landmark "currently being measured" flag (1:1 with pinned_landmarks()): true when the
+    // object's producer is actively detecting it this frame (e.g. table_detection_alive). The viewer
+    // draws the robot→landmark sight line only while measured.
+    [[nodiscard]] const std::vector<char>& pinned_measured() const noexcept
+    { return latest_pinned_measured_; }
+
 private:
     void dsr_update_pose(const rc::RoomConcept::UpdateResult& res);
     void write_robot_room_rt(const Eigen::Affine2f& robot_pose,
@@ -84,6 +99,9 @@ private:
     void dsr_create_room_and_reparent(const rc::RoomConcept::UpdateResult& res);
     void dsr_update_affordance(const rc::RoomConcept::UpdateResult& res);
     void update_planner_obstacle_footprints();
+    // Gather validated modelled objects from the graph (MAIN thread) and hand them to the
+    // localizer as SE(2) pose landmarks.  No-op unless params_->ObjectAnchorEnable.
+    void refresh_object_anchors();
     void load_robot_body_dimensions_from_graph();
     void dsr_create_wall_nodes();
 
@@ -95,6 +113,10 @@ private:
     std::function<void()>          trigger_layout_;
 
     rc::AffordanceManager affordance_manager_{"afford_room"};
+    rc::ObjectAnchorSource object_anchor_source_;
+    // Chain-propagated pose+covariance reader for object anchors. Created lazily on the MAIN
+    // thread (owns an RT_API whose ts==0 path uses the InnerEigen cache — see CLAUDE.md).
+    std::unique_ptr<DSR::InnerGaussianAPI> inner_gaussian_;
 
     std::uint64_t dsr_robot_id_ = 0;
     std::uint64_t dsr_body_id_  = 0;
@@ -102,6 +124,11 @@ private:
     std::uint64_t dsr_room_id_  = 0;
     bool          room_node_created_ = false;
     int           stable_frames_     = 0;
+
+    // World-frame positions of pinned-object landmarks (refreshed by refresh_object_anchors()).
+    std::vector<Eigen::Vector2f> latest_pinned_landmarks_;
+    // Parallel to latest_pinned_landmarks_: is that object being actively measured this frame?
+    std::vector<char>            latest_pinned_measured_;
 
     // Latest robot-frame velocities, refreshed per update() for the RT velocity attrs.
     float last_adv_  = 0.f;

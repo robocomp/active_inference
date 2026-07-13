@@ -67,7 +67,9 @@ void LidarIngestor::start()
     // Re-arm the one-shot startup geometry check for this Operating session (runs before the thread).
     geom_check_done_ = false;
     geom_sweeps_     = 0;
+    geom_bpearl_sweeps_ = 0;
     geom_hist_.assign(GEOM_NBINS, 0);
+    geom_hist_bpearl_.assign(GEOM_NBINS, 0);
     high_max_z_      = params_ ? params_->LIDAR_HIGH_MAX_HEIGHT : 2.0f;
     thread_ = std::thread(&LidarIngestor::ingest_loop, this);
 }
@@ -122,7 +124,36 @@ bool LidarIngestor::pump()
         // the high-band filter below strips). It warns on a floor/geometry mismatch and lowers
         // high_max_z_ to just under the detected ceiling.
         if (params_->LIDAR_STARTUP_GEOMETRY_CHECK and not geom_check_done_)
+        {
+            // Accumulate bpearl's own low-z histogram (the head-on floor datum) alongside helios. bpearl's
+            // reader comes up later than helios, so gate the trigger on its warm-up (fallback 3× so a
+            // missing bpearl can't stall). Source self-filter already removed the robot base/base-plate,
+            // so a small near-cut is enough; source floor cut is off, so the real floor is present.
+            if (not geom_bpearl_reader_ and G_)
+                geom_bpearl_reader_ = std::make_unique<rc::media::LidarPlaneReader>(
+                    G_, inner_eigen_.get(), std::vector<std::string>{"bpearl"}, params_->LIDAR_NAME, "lidar");
+            if (geom_bpearl_reader_)
+                if (const auto bp = geom_bpearl_reader_->poll(params_->LIDAR_ROBOT_FRAME, /*interpolate=*/false);
+                    bp.has_value() and not bp->points.empty())
+                {
+                    ++geom_bpearl_sweeps_;
+                    for (const auto& p : bp->points)
+                    {
+                        if (p.head<2>().norm() < 0.10f) continue;
+                        const int b = static_cast<int>(std::floor((p.z() - GEOM_Z_LO) / GEOM_BIN));
+                        if (b >= 0 and b < static_cast<int>(geom_hist_bpearl_.size())) ++geom_hist_bpearl_[b];
+                    }
+                }
             accumulate_geometry_sample(sweep->points);
+
+            const int need = std::max(1, params_->LIDAR_STARTUP_CHECK_SWEEPS);
+            if (geom_sweeps_ >= need and (geom_bpearl_sweeps_ >= need or geom_sweeps_ >= 3 * need))
+            {
+                run_startup_geometry_check();
+                geom_check_done_ = true;
+                std::vector<int>().swap(geom_hist_);
+            }
+        }
 
         const float min_h_m = params_->LIDAR_HIGH_MIN_HEIGHT;
         const float max_h_m = high_max_z_;                 // upper bound excludes the ceiling plane
@@ -168,62 +199,63 @@ void LidarIngestor::accumulate_geometry_sample(const std::vector<Eigen::Vector3f
         if (b >= 0 and b < static_cast<int>(geom_hist_.size()))
             ++geom_hist_[b];
     }
-    if (++geom_sweeps_ >= std::max(1, params_->LIDAR_STARTUP_CHECK_SWEEPS))
-    {
-        run_startup_geometry_check();
-        geom_check_done_ = true;
-        std::vector<int>().swap(geom_hist_);   // free the histogram
-    }
+    ++geom_sweeps_;   // trigger decision lives in pump() (it also gates on bpearl warm-up)
 }
 
 void LidarIngestor::run_startup_geometry_check()
 {
     // Mode (peak) of the accumulated z-histogram within a [lo,hi] window.
-    const auto peak_in = [this](float lo, float hi) -> std::pair<float, int>
+    const auto peak_in = [](const std::vector<int>& hist, float lo, float hi) -> std::pair<float, int>
     {
         int best_bin = -1, best_cnt = 0;
-        for (int b = 0; b < static_cast<int>(geom_hist_.size()); ++b)
+        for (int b = 0; b < static_cast<int>(hist.size()); ++b)
         {
             const float z = GEOM_Z_LO + (b + 0.5f) * GEOM_BIN;
             if (z < lo or z > hi) continue;
-            if (geom_hist_[b] > best_cnt) { best_cnt = geom_hist_[b]; best_bin = b; }
+            if (hist[b] > best_cnt) { best_cnt = hist[b]; best_bin = b; }
         }
         if (best_bin < 0) return {0.f, 0};
         return {GEOM_Z_LO + (best_bin + 0.5f) * GEOM_BIN, best_cnt};
     };
 
-    // RT geometry: body origin height above the floor (root<-body) and the current mount (body<-helios).
-    std::optional<double> base_z, mount_z;
+    // RT geometry: robot-frame origin height above the root/floor (root<-Shadow).
+    std::optional<double> base_z;
     if (inner_eigen_)
-    {
         if (auto t = inner_eigen_->get_translation_vector("root", params_->LIDAR_ROBOT_FRAME); t.has_value())
             base_z = t->z();
-        if (auto t = inner_eigen_->get_translation_vector(params_->LIDAR_ROBOT_FRAME, params_->LIDAR_HELIOS_NAME); t.has_value())
-            mount_z = t->z();
-    }
 
-    // (a) Floor plane (dominant low horizontal plane) lifted into the root frame -> must be ~0.
-    const auto [floor_z, floor_cnt] = peak_in(GEOM_Z_LO, 0.5f);
-    if (floor_cnt > 0 and base_z.has_value())
+    // (a) Floor-plane CALIBRATION from BPEARL (the downward dome — head-on, dense, near). helios is an
+    // upright 360 lidar whose floor is all grazing/at-range (reads several cm high) → reference only, NOT
+    // the datum. With the source floor cut removed, the real floor reaches us and must land at world z ≈ 0.
+    const auto [he_floor_z, he_cnt] = peak_in(geom_hist_,        GEOM_Z_LO, 0.5f);   // helios (grazing, ref)
+    const auto [bp_floor_z, bp_cnt] = peak_in(geom_hist_bpearl_, GEOM_Z_LO, 0.5f);   // bpearl (head-on, datum)
+    const int floor_cnt = he_cnt;   // used to scale the ceiling threshold below
+    if (base_z.has_value())
     {
-        const float floor_root = floor_z + static_cast<float>(*base_z);
-        if (std::abs(floor_root) > params_->LIDAR_FLOOR_TOLERANCE)
+        const float bp_root = bp_floor_z + static_cast<float>(*base_z);
+        const float he_root = he_floor_z + static_cast<float>(*base_z);
+        if (bp_cnt > 0)
         {
-            std::println("[FloorCheck] WARNING: '{}' floor plane sits at world z = {:.0f} mm (expected ~0) "
-                         "-> LiDAR mount height disagrees with robot geometry by {:.0f} mm",
-                         params_->LIDAR_HELIOS_NAME, floor_root * 1000.f, floor_root * 1000.f);
-            if (mount_z.has_value())
-                std::println("[FloorCheck]   current body<-'{}' mount z = {:.0f} mm -> suggested {:.0f} mm "
-                             "(correct the shadow.json RT translation)",
-                             params_->LIDAR_HELIOS_NAME, *mount_z * 1000.0, (*mount_z - floor_root) * 1000.0);
+            if (std::abs(bp_root) > params_->LIDAR_FLOOR_TOLERANCE)
+                std::println("[FloorCheck] WARNING: frame='{}' base_z={:.0f} mm | bpearl floor at world z = {:.0f} mm "
+                             "(expected ~0, {} pts, {} sweeps) -> floor datum off by {:.0f} mm — check root height / "
+                             "sensor mounts in shadow.json (helios ref {:.0f} mm is grazing, not the datum)",
+                             params_->LIDAR_ROBOT_FRAME, base_z.value_or(0.0) * 1000.0, bp_root * 1000.f,
+                             bp_cnt, geom_bpearl_sweeps_, bp_root * 1000.f, he_root * 1000.f);
+            else
+                std::println("[FloorCheck] OK: frame='{}' base_z={:.0f} mm | bpearl floor at world z = {:.0f} mm "
+                             "(within {:.0f} mm, {} pts) | helios ref {:.0f} mm (grazing, high by design)",
+                             params_->LIDAR_ROBOT_FRAME, base_z.value_or(0.0) * 1000.0, bp_root * 1000.f,
+                             params_->LIDAR_FLOOR_TOLERANCE * 1000.f, bp_cnt, he_root * 1000.f);
         }
         else
-            std::println("[FloorCheck] OK: '{}' floor at world z = {:.0f} mm (within {:.0f} mm tolerance)",
-                         params_->LIDAR_HELIOS_NAME, floor_root * 1000.f, params_->LIDAR_FLOOR_TOLERANCE * 1000.f);
+            std::println("[FloorCheck] bpearl floor unavailable ({} sweeps) — helios floor {:.0f} mm is GRAZING "
+                         "(upright lidar, floor >3 m out), not a reliable datum; skipping mount verdict.",
+                         geom_bpearl_sweeps_, he_root * 1000.f);
     }
     else
-        std::println("[FloorCheck] floor verification skipped (floor_pts={}, root<-body RT ready={})",
-                     floor_cnt, base_z.has_value());
+        std::println("[FloorCheck] floor verification skipped (helios_pts={}, bpearl_pts={}, root RT ready={})",
+                     he_cnt, bp_cnt, base_z.has_value());
 
     // (b) Ceiling plane -> cap the high band at (ceiling - margin) so only upper-wall points survive.
     // Search a window centred on the expected ceiling (room_height above the floor) to avoid picking a
@@ -236,9 +268,13 @@ void LidarIngestor::run_startup_geometry_check()
         chi = exp_ceil + 0.4f;
     }
     clo = std::max(clo, params_->LIDAR_HIGH_MIN_HEIGHT + 0.2f);
-    const auto [ceil_z, ceil_cnt] = peak_in(clo, chi);
+    const auto [ceil_z, ceil_cnt] = peak_in(geom_hist_, clo, chi);
     const float cfg_max = params_->LIDAR_HIGH_MAX_HEIGHT;
-    if (ceil_cnt > 0 and ceil_cnt >= std::max(200, floor_cnt / 5))
+    // Absolute threshold: the search window is already location-restricted to the expected ceiling, so a
+    // substantial peak there IS the ceiling. (The old `floor_cnt/5` broke once the source floor cut was
+    // removed — the un-filtered floor is now huge, making that ratio reject a real ceiling; floor_cnt is
+    // helios's grazing floor here anyway.)
+    if (ceil_cnt >= 400)
     {
         high_max_z_ = std::clamp(ceil_z - params_->LIDAR_CEILING_MARGIN,
                                  params_->LIDAR_HIGH_MIN_HEIGHT + 0.1f, GEOM_Z_HI);
@@ -249,9 +285,13 @@ void LidarIngestor::run_startup_geometry_check()
     else
     {
         high_max_z_ = cfg_max;
-        std::println("[FloorCheck] no clear ceiling (best high peak {} pts) -> high band max kept at {:.2f} m",
-                     ceil_cnt, cfg_max);
+        std::println("[FloorCheck] no clear ceiling (best high peak {} pts, floor_ref {}) -> high band max kept at {:.2f} m",
+                     ceil_cnt, floor_cnt, cfg_max);
     }
+
+    // Drop the one-shot bpearl probe reader + histogram (diagnostic; frees the extra subscriber).
+    geom_bpearl_reader_.reset();
+    std::vector<int>().swap(geom_hist_bpearl_);
 }
 
 }  // namespace rc

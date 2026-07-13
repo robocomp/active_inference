@@ -49,6 +49,13 @@ public:
         int corners_in_fov = 0;
         int corners_detected = 0;
         int corners_accepted = 0;
+        // Per-gate rejection counts (why detected corners did NOT become matches) — diagnostic for
+        // "corner acceptance too strict": see which gate is the bottleneck.
+        int rej_angle = 0;     // corner angle outside [min,max]_corner_angle
+        int rej_dist = 0;      // detected corner > max_match_distance from prediction
+        int rej_orient = 0;    // a wall direction deviates > max_orientation_dev from the model edge
+        int rej_convex = 0;    // convexity sign mismatch
+        int rej_unassigned = 0;// survived gates but lost the 1-to-1 Hungarian assignment
     };
 
     // ===== Interface =====

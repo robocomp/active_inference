@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <fstream>
 #include <limits>
+#include <print>
 #include <sstream>
 #include <sys/stat.h>
 #include <QDebug>
@@ -232,6 +233,7 @@ namespace rc
             << ",loss_obs"
             << ",loss_motion"
             << ",loss_corner"
+            << ",loss_object"
             << ",loss_init"
             << ",t_update_ms"
             << ",t_adam_ms"
@@ -671,6 +673,7 @@ namespace rc
                 rf.loss_obs = last_loss_breakdown_.obs;
                 rf.loss_motion = last_loss_breakdown_.motion;
                 rf.loss_corner = last_loss_breakdown_.corner;
+                rf.loss_object = last_loss_breakdown_.object;
 
                 rf.sdf_mse = res.sdf_mse;
                 rf.innov_norm = res.innovation_norm;
@@ -1695,6 +1698,15 @@ namespace rc
             res.corners_in_fov = det.corners_in_fov;
             res.corner_matches = det.matches;
 
+            // Acceptance-rate diagnostic (~1/s): where do detected corners die? If detected≫accepted and
+            // one rej_* dominates, THAT gate is the too-strict one.
+            static std::uint64_t corner_dbg_k = 0;
+            if ((corner_dbg_k++ % 20) == 0)
+                std::print("[corners] in_fov={} detected={} accepted={} | rej: angle={} dist={} orient={} "
+                           "convex={} unassigned={}\n",
+                           det.corners_in_fov, det.corners_detected, det.corners_accepted,
+                           det.rej_angle, det.rej_dist, det.rej_orient, det.rej_convex, det.rej_unassigned);
+
             // Store corner observations in the newest slot for the RFE loss
             auto& newest_slot = window_mgr_.newest();
             newest_slot.corner_obs.clear();
@@ -1709,6 +1721,14 @@ namespace rc
                 // current loss — compute_rfe_loss() uses scalar corner_obs_sigma uniformly.
                 newest_slot.corner_obs.push_back(obs);
             }
+        }
+
+        // Store validated object anchors (from the graph, set on the main thread) in the newest
+        // slot so the RFE loss can add them as SE(2) pose-landmark factors.
+        if (params.object_anchor.enable)
+        {
+            std::scoped_lock lk(object_anchors_mutex_);
+            window_mgr_.newest().object_anchors = latest_object_anchors_;
         }
 
         // ===== EARLY EXIT CHECK =====
@@ -1828,6 +1848,82 @@ namespace rc
                 auto ext = ext_cpu.accessor<float, 1>();
                 res.state << 2.f * ext[0], 2.f * ext[1], x, y, phi;
             }
+
+            // ── FLIP INSTRUMENTATION ──────────────────────────────────────────────────────────────
+            // Detect a ~180° yaw jump vs the last optimized pose and dump WHY the optimizer chose it:
+            //  • SDF at old vs new pose — Δ≈0 ⇒ the walls are INDIFFERENT (symmetric room), so the SDF
+            //    can't prevent the flip; new≪old ⇒ the flip genuinely fits the walls better (old was wrong).
+            //  • the FE terms at the settled pose — is corner/object DISAGREEING with the flip (high) but
+            //    outweighed, or also indifferent (low)?  That says whether anything can break the tie.
+            if (flip_prev_valid_)
+            {
+                const float dth = std::remainder(phi - flip_prev_th_, 2.0f * static_cast<float>(M_PI));
+                if (std::abs(dth) > 2.0f)   // ~115°+ between consecutive optimized poses = a flip
+                {
+                    torch::NoGradGuard ng;
+                    const auto opt = torch::TensorOptions().device(get_device());
+                    auto sdf_at = [&](float px, float py, float pth) {
+                        auto xy = torch::tensor({px, py}, opt);
+                        auto th = torch::tensor({pth}, opt);
+                        return torch::mean(torch::abs(model_->sdf_at_pose(points_tensor, xy, th))).item<float>();
+                    };
+                    const float sdf_old = sdf_at(flip_prev_x_, flip_prev_y_, flip_prev_th_);
+                    const float sdf_new = sdf_at(x, y, phi);
+                    // FRESH anchor whitened distance (σ) at old vs new pose: does the anchor SEE the flip?
+                    // huge new / small old ⇒ the anchor discriminates strongly (should have vetoed it);
+                    // both ~0 ⇒ the anchor isn't engaging (empty slot / wrong pin).
+                    float anc_old = 0.f, anc_new = 0.f;
+                    int   nanc = static_cast<int>(window_mgr_.newest().object_anchors.size());
+                    for (const auto& a : window_mgr_.newest().object_anchors)
+                    {
+                        auto whit = [&](float px, float py, float pth) {
+                            const float c = std::cos(pth), s = std::sin(pth);
+                            const float dx = a.pose_world.x() - px, dy = a.pose_world.y() - py;
+                            const float rx = a.obs_robot.x() - ( c * dx + s * dy);
+                            const float ry = a.obs_robot.y() - (-s * dx + c * dy);
+                            return std::sqrt(std::max(0.f,
+                                rx * (a.information(0,0)*rx + a.information(0,1)*ry)
+                              + ry * (a.information(1,0)*rx + a.information(1,1)*ry)));
+                        };
+                        anc_old = std::max(anc_old, whit(flip_prev_x_, flip_prev_y_, flip_prev_th_));
+                        anc_new = std::max(anc_new, whit(x, y, phi));
+                    }
+                    // FRESH FE breakdown at the settled (flipped) pose (not the stale 5-frame cache).
+                    const auto bd = window_mgr_.compute_rfe_loss_breakdown(*model_, params, get_device());
+                    std::print("[FLIP] dyaw={:+.0f}deg dxy=({:+.2f},{:+.2f}) | SDF old={:.3f} new={:.3f} | "
+                               "anchorSD old={:.1f} new={:.1f} (n={}) | FE obs={:.2f} corner={:.2f} object={:.2f} | iters={}\n",
+                               dth * 57.2958f, x - flip_prev_x_, y - flip_prev_y_, sdf_old, sdf_new,
+                               anc_old, anc_new, nanc, bd.obs, bd.corner, bd.object, res.iterations_used);
+
+                    // Also log one row per flip to a dedicated CSV (independent of DebugLog).
+                    if (!flip_csv_open_attempted_)
+                    {
+                        flip_csv_open_attempted_ = true;
+                        ::mkdir("tmp", 0755);
+                        ::mkdir("tmp/sdf_localizer", 0755);
+                        const std::time_t tt = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+                        std::tm tm_local{}; localtime_r(&tt, &tm_local);
+                        char ts_buf[32]; std::strftime(ts_buf, sizeof(ts_buf), "%Y-%m-%d_%H-%M-%S", &tm_local);
+                        flip_csv_.open(std::string("tmp/sdf_localizer/flips_") + ts_buf + ".csv",
+                                       std::ios::out | std::ios::trunc);
+                        if (flip_csv_.is_open())
+                            flip_csv_ << "ts_ms,dyaw_deg,dx,dy,new_x,new_y,new_th,sdf_old,sdf_new,"
+                                         "anchorSD_old,anchorSD_new,n_anchors,fe_obs,fe_corner,fe_object,iters\n";
+                    }
+                    if (flip_csv_.is_open())
+                    {
+                        flip_csv_ << res.timestamp_ms << ',' << dth * 57.2958f << ','
+                                  << (x - flip_prev_x_) << ',' << (y - flip_prev_y_) << ','
+                                  << x << ',' << y << ',' << phi << ','
+                                  << sdf_old << ',' << sdf_new << ','
+                                  << anc_old << ',' << anc_new << ',' << nanc << ','
+                                  << bd.obs << ',' << bd.corner << ',' << bd.object << ','
+                                  << res.iterations_used << '\n';
+                        flip_csv_.flush();
+                    }
+                }
+            }
+            flip_prev_x_ = x; flip_prev_y_ = y; flip_prev_th_ = phi; flip_prev_valid_ = true;
 
             Eigen::Affine2f pose = Eigen::Affine2f::Identity();
             pose.translation() = Eigen::Vector2f{x, y};
@@ -1973,6 +2069,7 @@ namespace rc
                 << ',' << last_loss_breakdown_.obs
                 << ',' << last_loss_breakdown_.motion
                 << ',' << last_loss_breakdown_.corner
+                << ',' << last_loss_breakdown_.object
                 << ',' << last_loss_init_
                 << ',' << std::chrono::duration<float, std::milli>(
                                std::chrono::high_resolution_clock::now() - t_update_start_).count()
@@ -2195,6 +2292,11 @@ namespace rc
         const float prediction_trust_threshold = params.sigma_sdf * params.prediction_trust_factor + rot_boost;
         if (mean_sdf_pred >= prediction_trust_threshold)
             return std::nullopt;
+
+        // NOTE: the object-anchor early-exit GATE was reverted (2026-07-12) to A/B whether it was the
+        // source of the localization instability. The anchor is now FACTOR-ONLY: it refines the pose
+        // inside SDF-triggered optimizations but no longer FORCES the optimizer to run on its own.
+        // (object_anchor_early_exit_sigma is left in the config but unused while this is out.)
 
         prediction_early_exits_++;
         last_t_adam_ms_ = 0.f;
@@ -3454,6 +3556,21 @@ namespace rc
         }
         } // enable_corner_tracking
 
+        // --- 5. Object-anchor factors (validated modelled objects as SE(2) pose landmarks) ---
+        if (params.object_anchor.enable)
+        {
+            const int obj_start = std::max(0, static_cast<int>(window.size()) - params.object_anchor_max_slots);
+            for (size_t si = obj_start; si < window.size(); si++)
+            {
+                const auto& slot = window[si];
+                if (slot.object_anchors.empty()) continue;
+                auto pose_xy    = slot.pose.index({torch::indexing::Slice(0, 2)});
+                auto pose_theta = slot.pose.index({torch::indexing::Slice(2, 3)});
+                total_loss = total_loss + ObjectAnchorFactor::loss(
+                    slot.object_anchors, pose_xy, pose_theta, params.object_anchor, device);
+            }
+        }
+
         return total_loss;
     }
 
@@ -3543,6 +3660,21 @@ namespace rc
                 }
             }
             bd.corner = cor_acc;
+        }
+
+        // 5. Object-anchor factors
+        if (params.object_anchor.enable) {
+            const int obj_start = std::max(0, static_cast<int>(window.size()) - params.object_anchor_max_slots);
+            float obj_acc = 0.f;
+            for (size_t si = obj_start; si < window.size(); si++) {
+                const auto& slot = window[si];
+                if (slot.object_anchors.empty()) continue;
+                auto pose_xy    = slot.pose.detach().index({torch::indexing::Slice(0, 2)});
+                auto pose_theta = slot.pose.detach().index({torch::indexing::Slice(2, 3)});
+                obj_acc += ObjectAnchorFactor::loss(
+                    slot.object_anchors, pose_xy, pose_theta, params.object_anchor, device).item<float>();
+            }
+            bd.object = obj_acc;
         }
 
         return bd;

@@ -103,7 +103,12 @@ private:
     // Startup geometry-check state (ingest thread only; re-armed by start()).
     bool  geom_check_done_ = false;
     int   geom_sweeps_     = 0;
-    std::vector<int> geom_hist_;   // z-histogram accumulated over the first sweeps
+    std::vector<int> geom_hist_;   // helios z-histogram (walls/ceiling; floor is grazing/high)
+    // bpearl (downward dome) is the HEAD-ON floor sensor — its own z-histogram is the floor calibration
+    // datum. Comes up later than helios → warm-up counter; separate reader dropped after the check.
+    int   geom_bpearl_sweeps_ = 0;
+    std::vector<int> geom_hist_bpearl_;
+    std::unique_ptr<rc::media::LidarPlaneReader> geom_bpearl_reader_;
 
     // Dedicated ingest thread (started at Operating-enter, joined in stop()/dtor).
     std::thread             thread_;

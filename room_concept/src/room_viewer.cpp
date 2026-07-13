@@ -26,6 +26,7 @@ namespace
 constexpr auto kWinSettingsOrg = "RoboComp";
 constexpr auto kWinSettingsApp = "room_concept";
 constexpr auto kWinSettingsKey = "RoomLayoutWindow_geometry";
+constexpr auto kSplitterStateKey = "RoomLayoutWindow_splitterState";
 }  // namespace
 
 RoomViewer::~RoomViewer()
@@ -51,6 +52,10 @@ void RoomViewer::save_window_geometry() const
         return;
     QSettings settings(kWinSettingsOrg, kWinSettingsApp);
     settings.setValue(kWinSettingsKey, custom_widget_->saveGeometry());
+    // Persist the splitter division separately — saveGeometry() only stores the window rect, not the
+    // splitter handle position, so remembering where the user dragged it needs saveState().
+    if (custom_widget_->splitter != nullptr)
+        settings.setValue(kSplitterStateKey, custom_widget_->splitter->saveState());
     settings.sync();
 }
 
@@ -97,6 +102,30 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
     ts_plot_fe_->add_series("free_energy", QColor(255, 170, 0), 1.8f, 0);
     ts_plot_fe_->add_series("cov_det_scaled", QColor(0, 190, 255), 1.6f, 0);
     custom_widget_->frame_series->layout()->addWidget(ts_plot_fe_);
+
+    // Thicken the layout lines — a wider splitter handle plus a 2px border on both frames. Then
+    // restore the user's last splitter drag if we have one; otherwise start 50/50 (equal stretch →
+    // equal proportions regardless of the actual pixel height). saveState()/restoreState() persists
+    // the handle position across sessions (saveGeometry() does not cover it).
+    if (custom_widget_->splitter != nullptr)
+    {
+        custom_widget_->splitter->setHandleWidth(6);
+        custom_widget_->splitter->setStretchFactor(0, 1);
+        custom_widget_->splitter->setStretchFactor(1, 1);
+        custom_widget_->splitter->setStyleSheet("QSplitter::handle { background-color: #5a5f64; }");
+        QSettings settings(kWinSettingsOrg, kWinSettingsApp);
+        const QByteArray split_state = settings.value(kSplitterStateKey).toByteArray();
+        if (!split_state.isEmpty())
+            custom_widget_->splitter->restoreState(split_state);
+        else
+            custom_widget_->splitter->setSizes({10000, 10000});   // first run → 50/50 default
+    }
+    for (auto* f : {custom_widget_->frame, custom_widget_->frame_series})
+        if (f != nullptr)
+        {
+            f->setFrameShape(QFrame::Box);
+            f->setLineWidth(2);
+        }
 
     if (has_room_polygon_ && room_polygon.size() >= 3)
         viewer_2d_->draw_room_polygon(room_polygon, false);
@@ -164,22 +193,9 @@ void RoomViewer::update_epistemic_overlay()
     if (!viewer_2d_ || !epistemic_)
         return;
 
-    // Epistemic score grid heatmap overlay (drawn behind lidar/robot by z-order).
+    // Score-grid / IoR-grid cell colouring of the room space is intentionally NOT drawn:
+    // the room space is now conveyed by robot→corner and robot→landmark sight lines instead.
     const auto& planner = epistemic_->epistemic_planner();
-    const auto& cell_scores = planner.cell_scores();
-    std::vector<std::pair<Eigen::Vector2f, float>> score_cells;
-    score_cells.reserve(cell_scores.size());
-    for (const auto& cell : cell_scores)
-        score_cells.emplace_back(cell.center, cell.score);
-    viewer_2d_->draw_score_grid(score_cells, planner.cell_size());
-
-    // IoR inhibition overlay: warm red fades out as visited cells recover
-    const auto& ior = planner.ior_cells();
-    std::vector<std::pair<Eigen::Vector2f, float>> ior_cells;
-    ior_cells.reserve(ior.size());
-    for (const auto& cell : ior)
-        ior_cells.emplace_back(cell.center, cell.freshness);
-    viewer_2d_->draw_ior_grid(ior_cells, planner.cell_size());
 
     const auto& current_target = planner.current_target();
     if (current_target.has_value() && !current_target->rotate_in_place)
@@ -194,6 +210,15 @@ void RoomViewer::update_epistemic_overlay()
         viewer_2d_->draw_selected_grid_cell(std::nullopt, planner.cell_size());
         viewer_2d_->update_target_marker(0.f, 0.f, false);
     }
+}
+
+void RoomViewer::draw_landmarks(const std::vector<Eigen::Vector2f>& landmarks_world,
+                                const std::vector<char>& measured,
+                                const Eigen::Affine2f& robot_pose)
+{
+    if (!viewer_2d_)
+        return;
+    viewer_2d_->draw_landmark_lines(landmarks_world, measured, robot_pose.translation());
 }
 
 void RoomViewer::set_rt_rate_text(const QString& text)

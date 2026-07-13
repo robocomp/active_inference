@@ -65,6 +65,8 @@ LIST(APPEND SOURCES
   ../src/epistemic_planner.cpp
   ../src/timeseries_plot.cpp
   ../src/corner_detector.cpp
+  ../src/object_anchor_factor.cpp
+  ../src/object_anchor_source.cpp
   ../src/rerun_logger.cpp
   ../src/camera_visualizer.cpp
   ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/media_transport.cpp
