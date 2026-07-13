@@ -1163,6 +1163,12 @@ void SpecificWorker::open_stream_viewer(std::uint64_t node_id, const std::string
 		// count*18*3 floats, ZED camera frame) → 3D OpenGL skeleton view read from G.
 		viewer = new rc::viewers::SkeletonNodeViewer(G, node_id, "skeleton — BODY_18 poses (graph)");
 	}
+	else if (node_name == "grid")
+	{
+		// residual_concept's Beta occupancy belief field (grid_occupancy_prob/var + meta) + occupied/
+		// border cell layers → 3D risk-column field, mirroring the voxelizer residual display.
+		viewer = new rc::viewers::GridNodeViewer(G, node_id, "grid — residual belief field (graph)");
+	}
 
 	if (viewer == nullptr)
 	{
