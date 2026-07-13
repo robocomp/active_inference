@@ -27,6 +27,22 @@ class ControllerObstacleTracker
         const ControllerPolygons &obstacle_polygons() const { return obstacle_polygons_; }
         const ControllerObstacleVisuals &display_obstacle_polygons() const { return display_obstacle_polygons_; }
         ControllerPolygons temporary_obstacle_rfe_points() const;
+
+        // Diagnostic breakdown of what the planner sees near a query point, split by SOURCE. Lets the
+        // proximity CSV tell a self-stuck (robot hugging its OWN generated geometry — a temp-LiDAR
+        // phantom or a virtual escape disc — with no real LiDAR support) apart from a genuine obstacle.
+        struct ObstacleProximityDiag
+        {
+            int   n_temp = 0;                    // live temp-LiDAR obstacles
+            int   n_virtual = 0;                 // live virtual escape discs
+            float near_temp_m = -1.f;            // nearest temp-LiDAR obstacle edge → query (-1 = none)
+            float near_virtual_m = -1.f;         // nearest virtual disc edge → query (-1 = none)
+            float near_temp_log_odds = 0.f;      // existence log-odds of that nearest temp obstacle (low ⇒ phantom)
+            int   near_temp_missed = 0;          // consecutive missed updates of that nearest temp obstacle
+            std::uint64_t near_temp_age_ms = 0;  // now − last_seen_ms of that nearest temp obstacle
+        };
+        ObstacleProximityDiag obstacle_proximity_diag(const Eigen::Vector2f &query_room,
+                                                      std::uint64_t now_ms) const;
         const std::optional<std::uint64_t> &last_lidar_timestamp_ms() const { return last_lidar_timestamp_ms_; }
         void clear_published_obstacles();
 

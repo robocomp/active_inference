@@ -268,6 +268,10 @@ public:
         float rot  = 0.f;
         bool  safety_guard_triggered = false;
         bool  goal_reached = false;
+        // Position reached; rotating IN PLACE to the target facing yaw (arrival maneuver, adv=side=0).
+        // goal_reached is still false until aligned. Consumers must NOT treat this as a wedge — it makes
+        // no waypoint progress by design.
+        bool  aligning = false;
         float dist_to_goal = 0.f;
         float min_esdf = 0.f;
 

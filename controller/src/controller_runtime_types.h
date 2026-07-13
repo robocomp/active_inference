@@ -152,21 +152,23 @@ struct ControllerParams
     float lockon_step_ms         = 400.0f;
     int   lockon_max_attempts    = 30;
 
-    // Physical-stuck / no-progress detection + reverse-and-turn escape. Distinct from the MPPI's
-    // geometric path_blocked (which predicts the planned path runs through obstacles): this fires
-    // whenever the robot is pursuing a live, unreached target but the base is NOT actually making
-    // progress — EITHER wedged while commanding motion (below the lidar plane, scraping a frame,
-    // wheel slip) OR MPPI collapsed to ~0 because the robot is boxed in (too close, or a
-    // residual/moved obstacle on every rollout) OR the planner cannot produce any path at all.
-    // Measured (room-frame EMA base speed) ~0 over a window → escape maneuver: reverse with a
-    // slight turn toward the side with more ESDF clearance, drop a temp obstacle at the stuck
-    // spot, then replan around it. On by default.
+    // Physical-stuck detection + reverse-and-turn escape. Distinct from the MPPI's geometric
+    // path_blocked (which predicts the planned path runs through obstacles): this fires whenever the
+    // robot is pursuing a live, unreached target but is NOT ADVANCING ALONG ITS COMMITTED PLAN —
+    // EITHER wedged while commanding motion (below the lidar plane, scraping a frame, wheel slip) OR
+    // MPPI collapsed to ~0 because the robot is boxed in OR the planner cannot produce any path at all.
+    // The signal is progress along the plan (the reached waypoint index), NOT straight-line goal
+    // distance — that wrong signal plateaus at the goal and grows on any detour, so it fired spurious
+    // escapes (a detouring/arriving robot read as "stuck"). Following the plan advances the index; a
+    // real wedge stalls it. When the index fails to advance for stuck_confirm_ms → escape maneuver:
+    // reverse with a slight turn toward the side with more ESDF clearance, drop a temp obstacle at the
+    // stuck spot, then replan around it. On by default.
     bool  stuck_recovery_enabled = true;
     float stuck_cmd_lin_eps      = 0.05f;   // m/s — LEGACY (no longer gates detect_stuck; kept for config back-compat)
     float stuck_cmd_rot_eps      = 0.15f;   // rad/s — LEGACY (see above)
-    float stuck_meas_lin_eps     = 0.02f;   // m/s — measured below this = "not moving"
-    float stuck_meas_rot_eps     = 0.08f;   // rad/s
-    float stuck_confirm_ms       = 1500.0f; // sustained no-progress before escape fires
+    float stuck_meas_lin_eps     = 0.02f;   // m/s — LEGACY (base-speed gate removed; kept for config back-compat)
+    float stuck_meas_rot_eps     = 0.08f;   // rad/s — LEGACY (see above)
+    float stuck_confirm_ms       = 1500.0f; // sustained no-advance-along-plan before escape fires
     float escape_adv_speed_mps   = 0.15f;   // reverse speed (issued negative)
     float escape_rot_speed_rps   = 0.35f;   // slight turn rate during escape
     float escape_distance_m      = 0.30f;   // back up at most this far …

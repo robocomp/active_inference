@@ -519,6 +519,7 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
                 return out;
             }
             aligning_ = true;
+            out.aligning = true;
             out.adv = 0.f;
             out.side = 0.f;
             // The session sends rot_rps = -out.rot; in the OmniRobot convention a

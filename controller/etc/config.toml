@@ -96,7 +96,9 @@ TemporaryObstacleMinPoints = 6
 # obstacle source: the controller only CONSUMES graph "obstacle" nodes (residual_* + any others) via
 # read_obstacle_polygons and no longer creates its own temp obstacles from LiDAR blockages. The
 # physical-STUCK recovery (wedged on something invisible to the LiDAR) is separate and stays active.
-ObstacleCreationEnabled = false
+# Set TRUE when residual_concept is NOT running, else the controller has no obstacle source at all and
+# creeps straight into blockers (the fast in-loop reactive reflex is gated by this flag too).
+ObstacleCreationEnabled = true
 TemporaryObstacleMinHeight = 0.20
 TemporaryObstacleMaxHeight = 1.8
 
@@ -136,18 +138,19 @@ LockOnSettleMs = 400.0       # dwell before each measurement (kills motion blur 
 LockOnStepMs = 400.0         # duration of one sweep step
 LockOnMaxAttempts = 30
 
-# Physical-stuck / no-progress detection + reverse-and-turn escape. Fires whenever the robot is
-# pursuing a live target but the base is NOT making progress — wedged while commanding motion,
-# OR MPPI collapsed to ~0 because the robot is boxed in, OR the planner can find no path at all
-# — distinct from the MPPI's geometric path_blocked. Escape = reverse with a slight turn toward
+# Physical-stuck detection + reverse-and-turn escape. Fires whenever the robot is pursuing a live
+# target but is NOT ADVANCING ALONG ITS COMMITTED PLAN — measured by the reached waypoint index, NOT
+# straight-line goal distance (that plateaus at the goal and grows on any detour, so it false-fired).
+# Following the plan advances the index; a real wedge stalls it; a hard box-in or no-path also stalls
+# it — distinct from the MPPI's geometric path_blocked. Escape = reverse with a slight turn toward
 # the side with more clearance, drop a LOCAL-ONLY virtual obstacle at the stuck spot (visible to
 # the planner/MPPI, never uploaded to DSR), then replan around it. StuckRecoveryEnabled=false disables.
 StuckRecoveryEnabled = true
 StuckCmdLinEps = 0.05    # m/s — LEGACY (no longer gates detection; kept for config back-compat)
 StuckCmdRotEps = 0.15    # rad/s — LEGACY (see above)
-StuckMeasLinEps = 0.02   # m/s — measured base speed below this = "not moving"
-StuckMeasRotEps = 0.08   # rad/s
-StuckConfirmMs = 1500    # sustained no-progress (ms) before escape fires
+StuckMeasLinEps = 0.02   # m/s — LEGACY (base-speed gate removed; detection now uses plan-waypoint progress)
+StuckMeasRotEps = 0.08   # rad/s — LEGACY (see above)
+StuckConfirmMs = 1500    # sustained no-advance-along-plan (ms) before escape fires
 EscapeAdvSpeedMps = 0.15 # reverse speed (issued negative)
 EscapeRotSpeedRps = 0.35 # slight turn rate during escape
 EscapeDistanceM = 0.30   # back up at most this far …

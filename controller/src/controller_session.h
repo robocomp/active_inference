@@ -4,6 +4,7 @@
 
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 
@@ -112,13 +113,16 @@ private:
                           ControllerDisplay &display);
 
     // ── Physical-stuck recovery ──────────────────────────────────────────────────────
-    // Detector: while PURSUING a live, unreached target (caller asserts `pursuing`), is the
-    // base failing to actually move? Covers BOTH a real velocity command that produces no
-    // motion (physical wedge/wheel-slip) AND MPPI collapsing to ~0 because the robot is boxed
-    // in (too close, or a residual/moved obstacle on every rollout) — in either case we make
-    // no progress. Accumulates the no-progress window and returns true once it exceeds
-    // stuck_confirm_ms.
-    bool detect_stuck(bool pursuing, std::uint64_t now_ms);
+    // Detector: while PURSUING a live, unreached target (caller asserts `pursuing`), is the robot
+    // failing to ADVANCE ALONG ITS COMMITTED PLAN? Progress is the waypoint index the robot has
+    // reached (`wp_index` of `wp_count` total), NOT the straight-line goal distance — straight-line
+    // distance is the wrong signal (it plateaus at the goal and grows on any legitimate detour, so it
+    // reads "no progress" when the robot is fine, which fired spurious escapes). Following the plan —
+    // even the long way around an obstacle — advances the index; a genuine wedge stalls it. Reaching
+    // the final waypoint is arrival (goal/alignment logic owns it, not this). Pass std::nullopt for
+    // wp_index when there is no route at all (boxed in — cannot advance). Accumulates the no-advance
+    // window and returns true once it exceeds stuck_confirm_ms. No spatial thresholds — one quantity.
+    bool detect_stuck(bool pursuing, std::optional<int> wp_index, int wp_count, std::uint64_t now_ms);
     // Begin an escape: choose turn direction from side clearance, drop a temp obstacle at
     // the stuck spot, reset the plan, and record the start pose/time.
     void begin_escape(const ControllerRobotPose &robot_pose,
@@ -172,7 +176,8 @@ private:
     bool target_wait_logged_ = false;
 
     // Physical-stuck recovery state.
-    std::uint64_t stuck_since_ms_ = 0;          // start of the current no-progress window (0 = not stuck)
+    std::uint64_t stuck_since_ms_ = 0;          // start of the current no-advance window (0 = not stuck)
+    int           best_wp_index_ = -1;          // furthest plan waypoint reached (progress along committed plan)
     bool          escape_active_ = false;       // an escape maneuver currently owns the base
     std::uint64_t escape_start_ms_ = 0;         // escape start time (for the time bound)
     Eigen::Vector2f escape_start_pos_ = Eigen::Vector2f::Zero();  // pose at escape start (distance bound)

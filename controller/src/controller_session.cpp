@@ -242,7 +242,7 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
         // and drop a temp obstacle so the next plan_path finds a way around. Hold the base
         // meanwhile WITHOUT stop()'s reset_stuck_state() (that would zero the clock every cycle,
         // so the escape would never fire and the robot would idle in front of the obstacle).
-        if (detect_stuck(/*pursuing=*/true, time_source()))
+        if (detect_stuck(/*pursuing=*/true, /*wp_index=*/std::nullopt, /*wp_count=*/0, time_source()))
         {
             begin_escape(step.robot_pose, obstacle_tracker, path_controller, time_source());
             step_escape(step.robot_pose, path_controller, motion_commander, time_source());
@@ -256,6 +256,7 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
     if (step.target_changed || !path_controller.is_active())
     {
         path_controller.set_path(current_plan_->room_path);
+        best_wp_index_ = -1;   // new committed plan ⇒ fresh progress baseline (wp_index restarts at 0)
         // Affordance targets carry a desired facing yaw (point AT the table); manual
         // mouse targets do not, so they keep the legacy stop-on-arrival behaviour.
         path_controller.set_goal_facing_yaw(step.target.from_affordance
@@ -452,11 +453,22 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                     proximity_csv_ << "t_ms,rx,ry,rtheta,vx,vy,omega,cmd_adv,cmd_side,cmd_rot,min_esdf,"
                                       "n_esdf_pts,nearest_esdf_pt_m,nearest_lidar_m,nearest_obst_m,n_obst,"
                                       "safety_guard,blockage_ahead,path_blocked,blk_x,blk_y,blk_r,dist_to_goal,"
-                                      "stuck_ms\n";
+                                      // Self-stuck diagnostics: split the nearest MODELLED obstacle by source
+                                      // (temp-LiDAR vs virtual escape disc), plus the temp obstacle's health.
+                                      // Signed distances (robot centre → edge): NEGATIVE ⇒ robot INSIDE it
+                                      // (self-collision trap). near_temp with LOW log_odds / HIGH missed / HIGH
+                                      // age + a large nearest_lidar_m = an unsupported phantom the robot is
+                                      // stuck on. escape_active=1 ⇒ a recovery maneuver owns the base.
+                                      "stuck_ms,escape_active,n_temp,n_virtual,near_temp_m,near_virtual_m,"
+                                      // wp_index/wp_count = progress along the committed plan (the stuck
+                                      // signal). aligning=1 ⇒ arrived, rotating in place to face the target
+                                      // (turn-around) — makes no waypoint progress BY DESIGN, must not escape.
+                                      "near_temp_logodds,near_temp_missed,near_temp_age_ms,wp_index,wp_count,aligning\n";
                 proximity_csv_open_ = true;
             }
             if (proximity_csv_.is_open())
             {
+                const auto od = obstacle_tracker.obstacle_proximity_diag(rp, t_ms);
                 proximity_csv_ << t_ms << ',' << rp.x() << ',' << rp.y() << ',' << robot_pose.theta << ','
                                << room_vel_.vx << ',' << room_vel_.vy << ',' << room_vel_.omega << ','
                                << control_output.adv << ',' << control_output.side << ',' << control_output.rot << ','
@@ -472,7 +484,14 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                                // No-progress clock (ms): 0 = fresh/moving, climbs toward stuck_confirm_ms.
                                // The escape fires when this crosses the threshold — the last row before the
                                // "[recovery] STUCK -> escape" line is the smoking gun (cmd_* ~0, this ~confirm_ms).
-                               << (stuck_since_ms_ != 0 ? t_ms - stuck_since_ms_ : 0) << '\n';
+                               << (stuck_since_ms_ != 0 ? t_ms - stuck_since_ms_ : 0) << ','
+                               << (escape_active_ ? 1 : 0) << ',' << od.n_temp << ',' << od.n_virtual << ','
+                               << od.near_temp_m << ',' << od.near_virtual_m << ','
+                               << od.near_temp_log_odds << ',' << od.near_temp_missed << ','
+                               << od.near_temp_age_ms << ','
+                               << control_output.current_wp_index << ','
+                               << (current_plan_.has_value() ? static_cast<int>(current_plan_->room_path.size()) : 0) << ','
+                               << (control_output.aligning ? 1 : 0) << '\n';
                 proximity_csv_.flush();
             }
         }
@@ -550,40 +569,52 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     float rot_rps = -control_output.rot;
     motion_commander.apply_uncertainty_speed_limit(adv_mps, side_mps, rot_rps);
 
-    const bool stalled_by_obstacle = control_output.blockage_detected_ahead
-        && control_output.safety_guard_triggered
-        && std::abs(adv_mps) < 5e-4f
-        && std::abs(side_mps) < 5e-4f
-        && std::abs(rot_rps) < 1e-3f;
-    if (stalled_by_obstacle)
+    // ARRIVAL ROTATION: position reached, the controller is rotating IN PLACE to the target facing yaw
+    // (adv=side=0, goal_reached still false). This is a controller-owned maneuver that makes NO waypoint
+    // progress by design — turning around at a target. It must bypass the stuck/escape logic entirely,
+    // else it reads as a wedge and drops a recovery disc right at the target. Just issue the rotation.
+    if (control_output.aligning)
     {
-        if ((!params_ || params_->obstacle_creation_enabled) &&
-            obstacle_tracker.create_temporary_lidar_obstacle(time_source(),
-                                                             robot_pose,
-                                                             control_output.blockage_center_room,
-                                                             control_output.blockage_radius,
-                                                             path_controller))
-        {
-            clear_tracking_state();
-            current_plan_.reset();
-            path_controller.stop();
-            motion_commander.stop_robot();
-            return;
-        }
+        reset_stuck_state();   // not stuck — clear any no-advance window carried over from the approach
+        motion_commander.send_speed_command(adv_mps, side_mps, rot_rps);
+        return;
     }
 
-    // Physical-stuck / no-progress check. We are PURSUING an active, unreached target here
-    // (goal_reached, no-plan, lock-on, orient and path_blocked all returned earlier). This runs
-    // BEFORE the ~0-command idle return below on purpose: whether MPPI still commands a velocity
-    // or has collapsed to ~0 because the robot is boxed in (too close, or a residual/moved
-    // obstacle sits on every rollout), a base that isn't moving is making no progress. Sustained
-    // no-progress → escape: reverse+turn out AND drop a temp obstacle at the wedge spot so the
-    // next plan_path routes around it (get-me-out + replan). Previously the idle return fired
-    // first and this was unreachable, so the robot idled in front of the obstacle forever.
-    if (detect_stuck(/*pursuing=*/true, time_source()))
+    // Physical-stuck / no-progress check FIRST. We are PURSUING an active, unreached target here
+    // (goal_reached, no-plan, lock-on, orient and path_blocked all returned earlier). It updates the
+    // no-progress clock every cycle and, once the goal distance has failed to improve for
+    // stuck_confirm_ms, escalates to an escape: reverse+turn out AND drop a virtual obstacle at the
+    // wedge spot so the next plan_path routes around it (get-me-out + replan). Placed BEFORE the
+    // reactive blockage reflex below so that a persistent wedge — one the reflex's create+replan can
+    // never route around — escalates to a real escape instead of looping the reflex forever.
+    const int wp_count = current_plan_.has_value() ? static_cast<int>(current_plan_->room_path.size()) : 0;
+    if (detect_stuck(/*pursuing=*/true, control_output.current_wp_index, wp_count, time_source()))
     {
         begin_escape(robot_pose, obstacle_tracker, path_controller, time_source());
         step_escape(robot_pose, path_controller, motion_commander, time_source());
+        return;
+    }
+
+    // Reactive blockage reflex: the planned path grazes a real obstacle ahead (blockage_detected_ahead)
+    // AND we are not making headway toward the goal (the no-progress clock, just updated above, is
+    // running). Model the blocker from the raw LiDAR in the blockage region and replan around it. This
+    // NO LONGER requires safety_guard_triggered or a near-zero commanded velocity: the robot creeping
+    // slowly into a blocker never trips those (it keeps commanding motion), yet is exactly the case we
+    // must react to. create_temporary_lidar_obstacle match-or-refreshes (deduped), so re-firing while
+    // the blockage persists is safe; once it exists and plan_path routes around it, blockage_detected_
+    // ahead clears. If it can't be routed around, the escape above eventually takes over.
+    if (control_output.blockage_detected_ahead && stuck_since_ms_ != 0
+        && (!params_ || params_->obstacle_creation_enabled)
+        && obstacle_tracker.create_temporary_lidar_obstacle(time_source(),
+                                                            robot_pose,
+                                                            control_output.blockage_center_room,
+                                                            control_output.blockage_radius,
+                                                            path_controller))
+    {
+        clear_tracking_state();
+        current_plan_.reset();
+        path_controller.stop();
+        motion_commander.stop_robot();
         return;
     }
 
@@ -918,35 +949,54 @@ void ControllerSession::clear_manual_target(rc::AffordanceManager &affordance_ma
 void ControllerSession::reset_stuck_state()
 {
     stuck_since_ms_ = 0;
+    best_wp_index_ = -1;
     escape_active_ = false;
 }
 
-bool ControllerSession::detect_stuck(bool pursuing, std::uint64_t now_ms)
+bool ControllerSession::detect_stuck(bool pursuing, std::optional<int> wp_index, int wp_count,
+                                     std::uint64_t now_ms)
 {
     if (!params_ || !params_->stuck_recovery_enabled)
     {
         stuck_since_ms_ = 0;
         return false;
     }
-    // Actually moving? (measured room-frame base speed, EMA, refreshed in build_planning_step)
-    const bool moving = base_speed_lin_ > params_->stuck_meas_lin_eps
-                     || base_speed_ang_ > params_->stuck_meas_rot_eps;
-
     // `pursuing` means the caller has an active, unreached target and a valid intent to advance
     // (goal_reached / no-plan / lock-on / orient / path_blocked all returned before this point).
-    // We deliberately do NOT gate on a non-zero command any more: MPPI collapsing to ~0 while
-    // boxed in is exactly the stuck we must catch — it used to reset the clock and idle forever.
-    // The legacy commanded-but-not-moving (wheel-slip) case is a strict subset of pursuing.
-    if (pursuing && !moving)
+    if (!pursuing)
     {
-        if (stuck_since_ms_ == 0)
-            stuck_since_ms_ = now_ms;   // start the no-progress clock
-        else if (now_ms - stuck_since_ms_ > static_cast<std::uint64_t>(params_->stuck_confirm_ms))
-            return true;                // sustained → stuck
+        stuck_since_ms_ = 0;
+        best_wp_index_ = -1;
+        return false;
     }
-    else
-        stuck_since_ms_ = 0;            // making progress (moving) or not pursuing → reset
-    return false;
+
+    // PLAN COMPLETE: the robot has reached the final waypoint — the residual gap to the exact goal is
+    // the arrival/alignment phase's job (goal_reached), never a wedge. Without this, a robot that has
+    // arrived but sits just outside goal tolerance would read as "not advancing" forever.
+    if (wp_index.has_value() and wp_count > 0 and *wp_index >= wp_count - 1)
+    {
+        stuck_since_ms_ = 0;
+        best_wp_index_ = *wp_index;
+        return false;
+    }
+
+    // PROGRESS = advancement along the committed plan. Following the plan (even a long detour) moves the
+    // waypoint index forward; a genuine wedge stalls it. A missing wp_index (no route at all) can never
+    // advance, so it accumulates straight to an escape. best_wp_index_ is the furthest waypoint reached
+    // on the CURRENT plan (reset when a new plan is committed, on a fresh target, and after each escape).
+    const bool advanced = wp_index.has_value() and *wp_index > best_wp_index_;
+    if (advanced)
+    {
+        best_wp_index_ = *wp_index;
+        stuck_since_ms_ = 0;
+        return false;
+    }
+    if (stuck_since_ms_ == 0)
+    {
+        stuck_since_ms_ = now_ms;   // start the no-advance clock
+        return false;
+    }
+    return now_ms - stuck_since_ms_ > static_cast<std::uint64_t>(params_->stuck_confirm_ms);
 }
 
 void ControllerSession::begin_escape(const ControllerRobotPose &robot_pose,
@@ -972,17 +1022,31 @@ void ControllerSession::begin_escape(const ControllerRobotPose &robot_pose,
     // same blocked route. The virtual disc is geometric, always succeeds, is visible to the
     // planner/MPPI, and is NOT uploaded to DSR. It ages out on its TTL so a since-moved obstacle
     // is forgotten; if we re-wedge, another one is dropped.
-    const float fwd_off = params_ ? params_->stuck_virtual_obstacle_forward_m : 0.40f;
-    const float vrad    = params_ ? params_->stuck_virtual_obstacle_radius_m  : 0.30f;
+    const float vrad        = params_ ? params_->stuck_virtual_obstacle_radius_m  : 0.30f;
+    const float fwd_off_cfg = params_ ? params_->stuck_virtual_obstacle_forward_m : 0.40f;
+    const float body_radius = params_ ? std::max(0.f, params_->clearance_m)       : 0.40f;
+    // Push the disc far enough ahead that its NEAR edge clears the robot footprint. Otherwise the marker
+    // overlaps the body (default 0.40 ahead − 0.30 radius = 0.10 m from centre, well inside clearance),
+    // the planner/MPPI reads the robot as "already colliding" with its own marker, no rollout escapes,
+    // and we re-stick on ourselves. Near edge = fwd_off − vrad ≥ body_radius (+ a small margin).
+    const float fwd_off = std::max(fwd_off_cfg, body_radius + vrad + 0.05f);
     const Eigen::Vector2f fwd(std::cos(robot_pose.theta), std::sin(robot_pose.theta));
     const Eigen::Vector2f stuck_center = robot_pose.pos + fwd_off * fwd;
     obstacle_tracker.add_virtual_obstacle(now_ms, stuck_center, vrad);
+    // [stuck-diag] escape geometry — the escape early-returns before the proximity CSV block, so these
+    // cycles aren't otherwise logged. near_edge = fwd_off − vrad must exceed the footprint (clearance_m),
+    // else the disc traps the robot on itself. Watch how far dist_to_goal is when this keeps firing.
+    qInfo().nospace() << "[stuck-diag] escape begin: disc_center=(" << stuck_center.x() << ',' << stuck_center.y()
+                      << ") r=" << vrad << " fwd_off=" << fwd_off << " near_edge_to_robot=" << (fwd_off - vrad)
+                      << " body_radius=" << body_radius << " turn=" << escape_turn_sign_
+                      << " cl=" << cl << " cr=" << cr << " escape_count=" << escape_count_;
 
     escape_active_   = true;
     escape_start_ms_ = now_ms;
     escape_start_pos_ = robot_pose.pos;
     ++escape_count_;
     stuck_since_ms_ = 0;
+    best_wp_index_ = -1;   // fresh progress baseline after backing out (a new plan will be committed)
 
     clear_tracking_state();
     current_plan_.reset();

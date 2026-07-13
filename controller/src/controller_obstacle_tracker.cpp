@@ -358,11 +358,17 @@ std::vector<Eigen::Vector2f> ControllerObstacleTracker::read_temporary_obstacle_
                                                                  0.14f);
     const float search_radius = std::max(region_radius_m + cluster_margin, cluster_margin + 0.1f);
     const float max_robot_distance = max_front_distance + search_radius + 0.25f;
+    // Returns inside the robot's own footprint are self/body/floor-ring hits, not obstacles — and any
+    // real contact is already inside the footprint anyway. Drop them so we never fit an obstacle glued
+    // to the body. clearance_m is the footprint radius used everywhere else in the controller.
+    const float body_radius = std::max(0.f, params_->clearance_m);
 
     for (const auto &point3d_room : fused_points_room)
     {
         const Eigen::Vector2f point_room(point3d_room.x(), point3d_room.y());
         if ((point_room - region_center_room).norm() > search_radius)
+            continue;
+        if ((point_room - robot_pose.pos).norm() < body_radius)
             continue;
 
         const Eigen::Vector2f point_robot = robot_from_room * point_room;
@@ -1236,6 +1242,18 @@ bool ControllerObstacleTracker::create_temporary_lidar_obstacle(std::uint64_t ti
     if (!observation.has_value())
         return false;
 
+    // Hard invariant: never create an obstacle whose footprint intersects the robot body. Such a box is
+    // either a self/floor phantom or something we are already in contact with; injected into the planner
+    // it just traps every MPPI rollout ("already in collision") and can't be routed around — backing out
+    // is the stuck-recovery escape's job, not a planner obstacle's. Require the fitted box surface to sit
+    // at least one footprint radius (clearance_m) from the robot centre.
+    const ControllerObstacleState candidate{.center = observation->centroid,
+                                            .yaw_rad = observation->yaw_rad,
+                                            .width_m = observation->width_m,
+                                            .depth_m = observation->depth_m};
+    if (obstacle_sdf(candidate, robot_pose.pos) < std::max(0.f, params_->clearance_m))
+        return false;
+
     ingest_obstacle_observation(*observation, timestamp_ms);
 
     update_active_obstacle_polygons(timestamp_ms, path_controller);
@@ -1316,6 +1334,42 @@ float distance_to_polygon_edges(const std::vector<Eigen::Vector2f> &poly, const 
     return best;
 }
 }  // namespace
+
+ControllerObstacleTracker::ObstacleProximityDiag
+ControllerObstacleTracker::obstacle_proximity_diag(const Eigen::Vector2f &query_room,
+                                                   std::uint64_t now_ms) const
+{
+    ObstacleProximityDiag diag;
+    diag.n_temp = static_cast<int>(temporary_obstacles_.size());
+    diag.n_virtual = static_cast<int>(virtual_obstacles_.size());
+
+    float best_temp = std::numeric_limits<float>::infinity();
+    for (const auto &instance : temporary_obstacles_)
+    {
+        const auto polygon = instance.model.polygon();
+        if (polygon.size() < 2)
+            continue;
+        float d = distance_to_polygon_edges(polygon, query_room);
+        if (point_in_polygon_2d(polygon, query_room))
+            d = -d;   // robot centre INSIDE the obstacle ⇒ hard self-collision trap (negative distance)
+        if (d < best_temp)
+        {
+            best_temp = d;
+            diag.near_temp_m = d;
+            diag.near_temp_log_odds = instance.existence_log_odds;
+            diag.near_temp_missed = instance.missed_updates;
+            diag.near_temp_age_ms = now_ms >= instance.last_seen_ms ? now_ms - instance.last_seen_ms : 0;
+        }
+    }
+
+    float best_virt = std::numeric_limits<float>::infinity();
+    for (const auto &vo : virtual_obstacles_)
+        best_virt = std::min(best_virt, (query_room - vo.center).norm() - vo.radius_m);  // <0 ⇒ inside disc
+    if (std::isfinite(best_virt))
+        diag.near_virtual_m = best_virt;
+
+    return diag;
+}
 
 std::vector<Eigen::Vector2f> ControllerObstacleTracker::read_room_polygon_room_frame() const
 {
