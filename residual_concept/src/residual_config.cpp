@@ -120,6 +120,28 @@ ResidualConfig load_residual_config(const ConfigLoader& cfg)
     out.zed_boost.max_depth_m   = getf("ZedBoost.MaxDepthM",     5.0f);
     out.zed_boost.max_points    = geti("ZedBoost.MaxPoints",     1500);
 
+    // ── RGB-semantic floor down-weighting (second, uncorrelated cue vs ZED floor phantoms) ──
+    out.semantic_floor.enabled          = getb("Semantic.DownweightFloor", false);   // master flag (OFF by default)
+    out.semantic_floor.floor_suppress   = getf("Semantic.FloorSuppress",   0.60f);
+    out.semantic_floor.height_scale_m   = getf("Semantic.HeightScaleM",    0.15f);
+    out.semantic_floor.fresh_half_life_s = getf("Semantic.FreshHalfLifeS", 0.50f);
+    out.semantic_floor.floor_z0         = out.cluster.floor_z0;   // share the geometric nav band
+    out.semantic_floor.floor_slope      = out.cluster.floor_slope;
+    // Optional override of the ADE20K walkable-ground class set (comma/space-separated ids). Empty ⇒ the built-in
+    // default (floor/road/grass/sidewalk/earth/rug/field/sand/path/runway/dirt-track/land). Lets the set be tuned
+    // to the deployed segmenter without a rebuild.
+    if (const std::string s = gets("Semantic.FloorClassIds", ""); not s.empty())
+    {
+        std::vector<std::uint8_t> ids; std::string tok;
+        for (const char c : s + ",")
+        {
+            if (c == ',' or c == ' ' or c == ';' or c == '\t')
+            { if (not tok.empty()) { ids.push_back(static_cast<std::uint8_t>(std::stoi(tok))); tok.clear(); } }
+            else tok.push_back(c);
+        }
+        if (not ids.empty()) out.semantic_floor.floor_class_ids = std::move(ids);
+    }
+
     // ── residual-specific ──
     out.dissolve_explained_frac = getf("ResidualConcept.DissolveExplainedFrac", 0.60f);
 

@@ -65,6 +65,11 @@ struct TableConfig
     float ai2_trunc_gate_frac = 0.10f;
     int   ai2_gn_iters        = 4;       // Gauss-Newton iterations per frame
     std::string ai2_csv_path  = "";      // if non-empty, append per-cycle belief (state + Σ diag + mask R) to CSV
+    // EXPERIMENTAL birth-surprise probe (read-only): read residual_concept's `grid` node as an unexplained-
+    // occupancy (surprise) field, cluster it, and LOG uncovered high-surprise regions next to the tracker's
+    // birth decision — to check whether surprise flags births cleanly before it drives the lifecycle. OFF = no
+    // read, no log, zero cost. See birth_surprise_probe.h. Writes etc/birth_surprise.csv when on.
+    bool birth_surprise_probe = false;
 
     // ── YOLO-INDEPENDENT LiDAR first-hit range factor (common/ai_belief/lidar_ray_factor.h) ───────
     // Second, sensor-independent evidence channel: lidar3D returns landing on the table (legs + rim) pin the
@@ -127,17 +132,13 @@ struct TableConfig
     // motion_dotd = OrientationMotionRef. The observed reshapes/flips all arrived on motion frames.
     float footprint_moment_motion_gain = 0.30f;
     float orientation_motion_ref       = 0.50f;
-    // Grazing-view yaw stability (CSV rogue-rotation fix, both flag-gated OFF = baseline).
-    // continuity_fold: report the box-symmetry representative by a FIXED-scale continuity metric (kills the
-    //   ±90/±180 reported-yaw oscillation a large edge-on σ_yaw let through the Σ-weighted fold).
-    // obliquity_yaw_gain: cap the per-point yaw authority at grazing views — chain_cov_yaw += (gain·(1/|cosθ|−1))²
-    //   so an edge-on frame confirms the table but cannot rotate it. ~0.05 strongly damps; 0 = OFF.
-    bool  orientation_continuity_fold  = false;
-    float obliquity_yaw_gain           = 0.0f;
+    // Grazing-view yaw stability (CSV rogue-rotation fix). The continuity fold (canonicalize, fixed yaw scale) and
+    // the per-point obliquity yaw cap (kObliquityYawGain in table_fitter.cpp) were validated live 2026-07-11 and
+    // are now always on — no flags. The MOMENT-channel backoff below is still A/B.
     // obliquity_moment_gain: same view-angle backoff, but on the MOMENT channel — moment_extra_var +=
-    //   (gain·(1/|cosθ|−1))². obliquity_yaw_gain only protects the per-point GN; the CSV rogue rotations came in
-    //   on the MOMENT channel (dyaw_moment), which the per-point cap never sees. A grazing/foreshortened frame
-    //   biases the 2D inertia → back the whole moment off, not just its per-point yaw. 0 = OFF.
+    //   (gain·(1/|cosθ|−1))². The per-point cap only protects the GN; the CSV rogue rotations came in on the
+    //   MOMENT channel (dyaw_moment), which the per-point cap never sees. A grazing/foreshortened frame biases the
+    //   2D inertia → back the whole moment off, not just its per-point yaw. 0 = OFF.
     float obliquity_moment_gain        = 0.0f;
     // footprint_moment_completeness_gain / _min_completeness: forwarded to TableBeliefParams — inflate the moment
     //   measurement variance as the observed footprint area falls below the believed area (partial view). This is
@@ -181,8 +182,6 @@ struct TableConfig
     // the belief's full Σ over [cx,cy,H,w,h,yaw]: x←cx, y←cy, z←H/2, yaw←ψ; roll/pitch are unobservable (large).
     // rt_cov_scale calibrates the raw variance toward NEES≈1.
     float rt_cov_scale     = 1.0f;
-    bool  rt_cov_add_chain = true;   // Part B: add the localization/chain cov J·Σ_chain·Jᵀ to the published RT cov
-
     // Object-anchor observation: publish this frame's ROBOT-frame fit (z_o) so room_concept can use the
     // table as an SE(2) pose landmark. OFF by default (consumer side is also flag-gated + defaults OFF).
     bool        publish_object_obs = false;      // TableConcept.PublishObjectObs
@@ -217,10 +216,6 @@ struct TableConfig
     // A ricoh (depth_var>0) 360-RGB YOLO detection is bearing-only: it never births or fits, it only raises
     // attention (process_ricoh_bearings) so the robot seeks a good ZED view.
     float ricoh_attention_conf = 0.60f;   // min YOLO confidence for a ricoh detection to raise attention
-    // Debug baseline switch: when false, ricoh (depth_var>0) slices are IGNORED entirely by the fit/tracker —
-    // no association, no fusion, no birth. Used to reduce the multimodal fusion to a clean set of sources
-    // (ZED masks + LiDAR range) and calibrate it before re-adding ricoh with a proper extent-information model.
-    bool  use_ricoh_slices = true;
     // Ricoh attention association gates (process_ricoh_bearings): small margins on the physical angular size /
     // range roughness when deciding whether an unassigned ricoh bearing already matches a known table.
     float ricoh_attention_angle_margin_rad = 0.05f;  // extra angular tolerance on the table's angular half-size

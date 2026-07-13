@@ -86,6 +86,10 @@ public:
         std::uint64_t timestamp_ms = 0;   // capture stamp of the source RGBD frame (0 = producer didn't publish one)
         std::vector<MaskSlice> slices;
         std::vector<Eigen::Vector3f> support_points;
+        // RAW camera/source-frame support points (from "mask_support_points_cam"), 1-to-1 with
+        // support_points' indexing. Empty if the producer didn't dual-publish it. Independent of
+        // the robot pose — used to build pose-independent observations (object-anchor z_o).
+        std::vector<Eigen::Vector3f> support_points_cam;
         std::vector<Eigen::Vector2f> mask_pixels;   // raw YOLO foreground (col,row), depth-independent
         // Per-frame ego-motion (optical frame), written by the producer; empty/0 if absent.
         std::array<float, 6> cam_twist{};   // [vx,vy,vz,wx,wy,wz]

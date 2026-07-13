@@ -14,6 +14,7 @@
 #include "residual_belief.h"      // rc::ResidualBeliefParams
 #include "residual_clusterer.h"   // rc::ResidualClusterParams
 #include "residual_zed_boost.h"   // rc::ZedBoostParams
+#include "residual_semantic.h"    // rc::SemanticFloorParams
 
 class ConfigLoader;   // RoboComp config façade (defined in genericworker.h)
 
@@ -66,6 +67,11 @@ struct ResidualConfig
     // Robust infrastructure subtraction for the dense ZED cloud: floor/ceiling/wall removed with a band that
     // grows as the ZED's own depth noise (σ0 + q·range²), so a calibration offset / far-range blur can't leak.
     ResidualClusterer::DepthInfraParams zed_infra;
+
+    // RGB-SEMANTIC floor down-weighting: a second, uncorrelated cue against ZED floor phantoms. The dense YOLO-sem
+    // label map (voxelizer `semantic` node under `zed`) is sampled per ZED grid-point; a floor-class label at a
+    // NEAR-floor return down-weights its occupancy HIT (height-gated + freshness-decayed, never discards). Flag OFF.
+    SemanticFloorParams semantic_floor;
 
     // ── instance tracker (shared rc::InstanceTracker) ──
     float tracker_gate_mahalanobis  = 9.0f;

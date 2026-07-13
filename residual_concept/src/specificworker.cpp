@@ -39,6 +39,7 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
     rc::ResidualClusterer::self_test();
     rc::zed_boost_self_test();
     rc::OccupancyGrid::self_test();   // PHASE-0 REBUILD: safety-layer grid (completeness / occluded / carve / z-aware)
+    rc::semantic_self_test();         // RGB-semantic floor down-weighting (height gate / freshness / class / safety)
 
 #ifdef HIBERNATION_ENABLED
     hibernationChecker.start(500);
@@ -685,7 +686,58 @@ void SpecificWorker::integrate_zed_into_grid()
     if ((zc++ % 40) == 0)
         std::println("[zed-grid] fov={} → {} after infra-subtract (floor/ceiling/wall removed)", before, pts.size());
     if (pts.empty()) return;
-    grid_.integrate_sweep(cam_origin, pts, /*begin_cycle=*/false, ego_reliability_);   // same cycle, same ego trust
+
+    // RGB-SEMANTIC floor down-weighting (a second, uncorrelated cue vs the ZED floor phantoms that survive the
+    // geometric infra-subtract above): sample the dense YOLO-sem label of each surviving ZED point (reproject it
+    // back into its own frame → exact pixel) and down-weight the HIT of a floor-class near-floor return. Height-
+    // gated + freshness-decayed + never-discard (see residual_semantic.h). No-op when Semantic.DownweightFloor=off.
+    std::vector<float> hit_scale;
+    const std::vector<float>* scale_ptr = nullptr;
+    if (cfg_.semantic_floor.enabled and refresh_semantic_map())
+    {
+        const Eigen::Matrix4f cam_T_room = room_T_cam.inverse();
+        const float age_s = current_ts_ > semantic_map_.stamp_ms
+                          ? static_cast<float>(current_ts_ - semantic_map_.stamp_ms) * 1e-3f : 0.0f;
+        hit_scale = rc::semantic_obstacle_weights(pts, cam_T_room, zed_ingestor_->intrinsics(),
+                                                  zed_ingestor_->depth().width, zed_ingestor_->depth().height,
+                                                  semantic_map_, cam_origin, age_s, cfg_.semantic_floor);
+        scale_ptr = &hit_scale;
+        static int sc = 0;
+        if ((sc++ % 40) == 0)
+        {
+            long dw = 0; float mn = 1.0f;
+            for (float w : hit_scale) if (w < 0.999f) { ++dw; mn = std::min(mn, w); }
+            std::println("[zed-sem] {}/{} floor pts down-weighted (min w={:.2f}, map age={:.2f}s)",
+                         dw, hit_scale.size(), mn, age_s);
+        }
+    }
+    grid_.integrate_sweep(cam_origin, pts, /*begin_cycle=*/false, ego_reliability_, scale_ptr);   // same cycle+ego
+}
+
+bool SpecificWorker::refresh_semantic_map()
+{
+    // Read the voxelizer's `semantic` node (dense YOLO-sem label map under `zed`). The blob is large and published
+    // at ~2 Hz, so re-copy it only when the frame_id advanced; otherwise reuse the cache. Main-thread graph read.
+    const auto node = G->get_node("semantic");
+    if (not node.has_value()) return semantic_map_.valid();   // node not up yet → keep whatever we had (or invalid)
+
+    const auto fid = G->get_attrib_by_name<semantic_frame_id_att>(node.value());
+    const int  frame_id = fid.has_value() ? fid.value() : -1;
+    if (frame_id == semantic_map_.frame_id and semantic_map_.valid())
+        return true;                                          // unchanged → keep the cached copy
+
+    const auto w  = G->get_attrib_by_name<semantic_width_att>(node.value());
+    const auto h  = G->get_attrib_by_name<semantic_height_att>(node.value());
+    const auto ts = G->get_attrib_by_name<semantic_timestamp_ms_att>(node.value());
+    const auto lb = G->get_attrib_by_name<semantic_labels_att>(node.value());
+    if (not (w.has_value() and h.has_value() and lb.has_value())) return semantic_map_.valid();
+
+    semantic_map_.width    = w.value();
+    semantic_map_.height   = h.value();
+    semantic_map_.stamp_ms = ts.has_value() ? ts.value() : 0;
+    semantic_map_.frame_id = frame_id;
+    semantic_map_.labels   = lb.value().get();                // copy the flattened class-id buffer (ref_wrapper → get)
+    return semantic_map_.valid();
 }
 
 const std::vector<Eigen::Vector3f>& SpecificWorker::filtered_lidar_sweep()

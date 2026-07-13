@@ -49,6 +49,6 @@ ice_name = "Zed:tcp -h localhost -p 12001"
 
 [[components]]
 name = "joy"
-cwd = "~/robocomp/components/robocomp-robolab/components/hardware/external_control/joystickpublish"
-cmd = "bin/JoystickPublish etc/config_shadow_webots"
-ice_name = "JoystickPublish:tcp -h localhost -p 11230"
+cwd = "~/robocomp/components/robocomp-robolab/components/hardware/external_control/python_xbox_controller"
+cmd = "bin/python_xbox_controller etc/config_shadow"
+ice_name = "python_xbox_controller:tcp -h localhost -p 11230"

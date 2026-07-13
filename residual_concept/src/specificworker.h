@@ -90,6 +90,10 @@ private:
     // Integrate the dense ZED depth FoV into the occupancy grid as a SECOND sensor (fills LiDAR-grazed
     // tabletops, stabilises the costmap). Camera ray origin → z-aware carve stays correct. Gated by grid_zed_enabled.
     void  integrate_zed_into_grid();
+    // Refresh semantic_map_ from the DSR `semantic` node (voxelizer's dense YOLO-sem label map under `zed`), but
+    // only re-copy the large blob when its frame_id changed. Returns true if a valid map is cached. Gated by the
+    // Semantic.DownweightFloor flag (no-op / false when off). Main-thread graph read.
+    bool  refresh_semantic_map();
     // Ego-motion evidence trust (0..1): 1 when still, <1 while the robot moves (pose jitter + blur). Scales the
     // whole sweep's grid evidence so the stable accumulated field dominates during motion (motion-stability).
     float compute_ego_reliability() const;
@@ -152,6 +156,10 @@ private:
     std::vector<float> pub_prob_ema_, pub_var_ema_;
     float ego_reliability_ = 1.0f;   // this cycle's ego-motion evidence trust (compute_ego_reliability())
     std::vector<Eigen::Vector3f> lidar_filtered_;   // reusable buffer: sweep with bpearl floor grazing removed
+
+    // Cached ZED semantic label map (refreshed from the `semantic` node only when its frame_id changes — the map
+    // is a large blob published at ~2 Hz). Feeds the RGB-semantic floor down-weighting of ZED grid hits.
+    rc::SemanticMap semantic_map_;
 
     // PHASE-0 REBUILD: the occupancy-grid safety layer (runs live as a diagnostic first, then becomes the
     // single source of obstacle truth once verified stable).

@@ -64,10 +64,10 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.ai2_trunc_gate_frac    = getf("TableModel.AI2TruncGateFrac",   0.10f);
     out.ai2_gn_iters         = geti("TableModel.AI2GnIters",          4);
     out.ai2_csv_path         = gets("TableModel.AI2CsvPath",          "");
+    out.birth_surprise_probe = getb("TableModel.BirthSurpriseProbe",  false);
 
     // ─── RT-edge covariance upload ─────────────────────────────────────────────
     out.rt_cov_scale                  = getf("TableConcept.RtCovScale",           1.0f);
-    out.rt_cov_add_chain              = getb("TableConcept.RtCovAddChain",       true);
     out.publish_object_obs            = getb("TableConcept.PublishObjectObs",   false);
     out.object_obs_frame              = gets("TableConcept.ObjectObsFrame",     "body");
 
@@ -85,7 +85,6 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.tracker_birth_height_m   = getf("Tracker.BirthHeightM",     0.75f);
     out.tracker_nll_cost         = getb("Tracker.NllCost",          false);
     out.ricoh_attention_conf     = getf("Tracker.RicohAttentionConf", 0.60f);
-    out.use_ricoh_slices         = getb("Tracker.UseRicohSlices",   true);
     out.ricoh_attention_angle_margin_rad = getf("Tracker.RicohAttentionAngleMargin", 0.05f);
     out.ricoh_attention_range_band_m     = getf("Tracker.RicohAttentionRangeBandM",  1.0f);
 
@@ -108,8 +107,6 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.fe_surprise_smooth           = getf("TableModel.FeSurpriseSmooth",    0.10f);
     out.footprint_moment_motion_gain = getf("TableModel.FootprintMomentMotionGain", 0.30f);
     out.orientation_motion_ref       = getf("TableModel.OrientationMotionRef", 0.50f);
-    out.orientation_continuity_fold  = getb("TableModel.OrientationContinuityFold", false);
-    out.obliquity_yaw_gain           = getf("TableModel.ObliquityYawGain", 0.0f);
     out.obliquity_moment_gain        = getf("TableModel.ObliquityMomentGain", 0.0f);
     out.footprint_moment_completeness_gain = getf("TableModel.FootprintMomentCompletenessGain", 0.0f);
     out.footprint_moment_min_completeness  = getf("TableModel.FootprintMomentMinCompleteness",  0.02f);

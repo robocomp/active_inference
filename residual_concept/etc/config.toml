@@ -205,6 +205,23 @@ MinDepthM = 0.30  # ZED near limit
 MaxDepthM = 5.0   # ZED depth degrades with range² — ignore beyond this
 MaxPoints = 1500  # cap per instance (bounds the GN fit)
 
+# ── RGB-SEMANTIC floor down-weighting (2nd, uncorrelated cue vs ZED floor phantoms) ──
+# The voxelizer's dense YOLO-sem label map (ADE20K-150) on the `semantic` node under `zed` is sampled per surviving
+# ZED grid-point (reproject → exact pixel). A FLOOR-class label at a NEAR-floor return down-weights its occupancy
+# HIT, so a phantom floor obstacle needs more evidence to latch. SAFE BY CONSTRUCTION: down-weight only (never
+# discard), HEIGHT-GATED (a clearly-elevated obstacle keeps full weight regardless of label), and FRESHNESS-decayed
+# (the 2 Hz map loses authority with age). Complements the geometric floor rejection (nav-band + infra-subtract).
+[Semantic]
+DownweightFloor = true   # master flag — ON (flipped 2026-07-12; ZED `semantic` node confirmed live).
+FloorSuppress   = 0.60   # max hit-weight reduction for a floor-class near-floor point (weight = 1 − this = 0.40)
+HeightScaleM    = 0.15   # a floor label's authority decays as exp(−(h/scale)²) over height h above the floor band
+FreshHalfLifeS  = 0.50   # suppression strength halves per this much map age (freshness-as-precision; 0 = no decay)
+# ADE20K-150 walkable-ground class ids (the ground/soil concept is split across several classes → list ALL synonyms
+# or the segmenter's choice among them leaks a floor phantom). Default set below; edit to match your model.
+# 3 floor · 6 road · 9 grass · 11 sidewalk · 13 earth/ground · 28 rug · 29 field · 46 sand · 52 path · 54 runway
+# · 91 dirt-track · 94 land/soil. Excluded on purpose: 53 stairs / 59 stairway / 121 step (hazards, not floor-flat).
+FloorClassIds   = "3,6,9,11,13,28,29,46,52,54,91,94"
+
 # ── Instance tracker (birth/associate/death) — TUNED FOR STABILITY (not bottle's crisp-mask values) ──
 # A residual's OBB centroid jitters as the robot sees different faces, and residuals are large & transient,
 # so: looser gate + higher detection noise (absorb the centroid jump so a re-observed obstacle ASSOCIATES

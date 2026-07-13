@@ -277,7 +277,7 @@ void SpecificWorker::initialize()
 
     // Part B: localization/chain covariance on the published RT edge (mirrors bottle_concept).
     gaussian_api_ = std::make_unique<DSR::InnerGaussianAPI>(G.get());
-    fitter_->set_chain_cov_source(gaussian_api_.get(), "zed", cfg_.rt_cov_add_chain);
+    fitter_->set_chain_cov_source(gaussian_api_.get(), "zed");
     // Object-anchor observation z_o for room_concept's landmark factor (expressed in the localizer base frame).
     fitter_->set_object_observation(cfg_.publish_object_obs, cfg_.object_obs_frame);
 
@@ -369,6 +369,111 @@ void SpecificWorker::compute()
     last_compute_tp_ = now;
     refresh_evidence_monitor();
     prune_dead_series();   // drop timeseries lines for tables that were removed from the graph
+    log_birth_surprise();  // EXPERIMENTAL read-only: residual grid → birth-surprise regions (cfg-gated, off by default)
+}
+
+// EXPERIMENTAL, read-only. Reinterpret residual_concept's `grid` node (under room) as an unexplained-occupancy
+// SURPRISE field and cluster its confidently-unexplained cells into candidate regions (birth_surprise_probe.h).
+// Log, per cycle, the regions NOT already covered by a believed table alongside the tracker's actual birth count,
+// so we can see whether surprise flags a real new table cleanly (and stays quiet on phantoms) BEFORE letting it
+// drive the lifecycle. Never writes the graph; never births. See [[table-birth-surprise-probe]].
+void SpecificWorker::log_birth_surprise()
+{
+    if (not cfg_.birth_surprise_probe or room_node_id_ == 0) return;
+    const auto gopt = G->get_node("grid");   // residual_concept publishes this under room (~2 Hz)
+    if (not gopt.has_value()) return;
+    const auto& gnode = gopt.value();
+    const auto pa = G->get_attrib_by_name<grid_occupancy_prob_att>(gnode);
+    const auto ma = G->get_attrib_by_name<grid_field_meta_att>(gnode);
+    if (not (pa.has_value() and ma.has_value())) return;
+    const auto& M = ma.value().get();
+    if (M.size() < 5) return;
+
+    rc::GridField gf;
+    gf.prob = pa.value().get();   // snapshot copy (small, ~2 Hz); read-only — never mutate the graph's field
+    if (const auto va = G->get_attrib_by_name<grid_occupancy_var_att>(gnode); va.has_value()) gf.var = va.value().get();
+    gf.xmin = M[0]; gf.ymin = M[1]; gf.cell = M[2];
+    gf.width = static_cast<int>(M[3]); gf.height = static_cast<int>(M[4]);
+
+    // Believed table footprints (room frame) — a region under one is already explained, NOT a birth.
+    std::vector<rc::FootprintBox> tables;
+    for (const auto& [id, inst] : fitter_->instances())
+        if (inst.ai2_initialized)
+        { const auto& s = inst.ai2_belief.state(); tables.push_back({s.cx, s.cy, s.w, s.h, s.yaw}); }
+
+    const auto cands = rc::BirthSurpriseProbe::scan(gf, tables);
+    const long cyc = ++birth_surprise_cycle_;   // advances only on cycles where the grid field was actually read
+    int n_birth = 0;                       // uncovered high-surprise regions = birth candidates
+    for (const auto& c : cands) if (not c.covered_by_table) ++n_birth;
+
+    // CSV: one row per region per cycle (covered flag distinguishes birth candidates from explained mass; the
+    // latter should be ~0 if residual_concept's concept-subtraction is working — a free sanity check).
+    if (not birth_surprise_csv_.is_open())
+    {
+        birth_surprise_csv_.open("etc/birth_surprise.csv", std::ios::out | std::ios::trunc);
+        if (birth_surprise_csv_.is_open())
+            birth_surprise_csv_ << "cycle,region,cx,cy,cells,mass,ext_x,ext_y,mean_p,mean_var,covered,"
+                                << "n_tables,tracker_births,instances\n";
+    }
+    if (birth_surprise_csv_.is_open())
+    {
+        int r = 0;
+        for (const auto& c : cands)
+            birth_surprise_csv_ << cyc << ',' << r++ << ',' << c.cx << ',' << c.cy << ',' << c.cells << ','
+                                << c.mass << ',' << c.ext_x << ',' << c.ext_y << ',' << c.mean_p << ',' << c.mean_var
+                                << ',' << (c.covered_by_table ? 1 : 0) << ',' << tables.size() << ','
+                                << ev_g_.births << ',' << fitter_->instances().size() << '\n';
+        birth_surprise_csv_.flush();
+    }
+
+    // ── FUSION readout: residual surprise MASS under each YOLO "table" detection (birth_fusion.csv). The measured
+    //    quantity: does a real detection land on high unexplained-occupancy (→ corroborated → birth fast/confident)
+    //    while a flicker/phantom detection lands on ~0? covered = the detection sits inside an already-believed
+    //    table footprint (associate, not birth). This is the signal that would let residual GATE/accelerate birth.
+    if (not birth_fusion_csv_.is_open())
+    {
+        birth_fusion_csv_.open("etc/birth_fusion.csv", std::ios::out | std::ios::trunc);
+        if (birth_fusion_csv_.is_open())
+            birth_fusion_csv_ << "cycle,det,det_x,det_y,mass_r05,mass_r03,near_dist,near_mass,covered,"
+                              << "n_tables,tracker_births,instances\n";
+    }
+    if (birth_fusion_csv_.is_open())
+    {
+        int di = 0;
+        for (const auto& d : last_table_dets_xy_)
+        {
+            const float m05 = rc::BirthSurpriseProbe::residual_mass_near(gf, d.x(), d.y(), 0.50f);
+            const float m03 = rc::BirthSurpriseProbe::residual_mass_near(gf, d.x(), d.y(), 0.30f);
+            float nd = 1e9f, nm = 0.f;                      // nearest region to this detection
+            for (const auto& c : cands)
+            { const float dd = std::hypot(c.cx - d.x(), c.cy - d.y()); if (dd < nd) { nd = dd; nm = c.mass; } }
+            bool covered = false;
+            for (const auto& t : tables)
+            { const float cc = std::cos(t.yaw), ss = std::sin(t.yaw), dx = d.x() - t.cx, dy = d.y() - t.cy;
+              if (std::abs(cc*dx + ss*dy) <= 0.5f*t.w + 0.30f and std::abs(-ss*dx + cc*dy) <= 0.5f*t.h + 0.30f)
+                  { covered = true; break; } }
+            birth_fusion_csv_ << cyc << ',' << di++ << ',' << d.x() << ',' << d.y() << ',' << m05 << ',' << m03 << ','
+                              << (nd > 1e8f ? -1.f : nd) << ',' << nm << ',' << (covered ? 1 : 0) << ','
+                              << tables.size() << ',' << ev_g_.births << ',' << fitter_->instances().size() << '\n';
+            if (ev_g_.births > 0 and not covered)          // a NEW table just born — print its corroboration
+                std::print("[birth-fusion] BIRTH det@({:.2f},{:.2f}) residual mass_r05={:.1f} mass_r03={:.1f} "
+                           "near_region_mass={:.1f} dist={:.2f}\n", d.x(), d.y(), m05, m03, nm, nd);
+        }
+        birth_fusion_csv_.flush();
+    }
+
+    // Console: throttled (every ~20 cycles) OR whenever the tracker actually births this cycle — so the surprise
+    // state at the birth instant is always printed for correlation.
+    if (n_birth > 0 and (ev_g_.births > 0 or (birth_surprise_log_ctr_++ % 20) == 0))
+    {
+        const rc::BirthCandidate* top = nullptr;   // strongest UNcovered region
+        for (const auto& c : cands) if (not c.covered_by_table) { top = &c; break; }   // cands sorted by mass
+        if (top)
+            std::print("[birth-surprise] uncovered={} tables={} tracker_births={} | top: ({:.2f},{:.2f}) "
+                       "mass={:.1f} cells={} ext={:.2f}x{:.2f} mean_p={:.2f} var={:.3f}\n",
+                       n_birth, tables.size(), ev_g_.births, top->cx, top->cy, top->mass, top->cells,
+                       top->ext_x, top->ext_y, top->mean_p, top->mean_var);
+    }
 }
 
 

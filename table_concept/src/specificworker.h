@@ -39,6 +39,7 @@
 #include <unordered_map>
 #include <vector>
 #include <chrono>
+#include <fstream>
 
 #include <genericworker.h>
 #include <Eigen/Dense>
@@ -52,6 +53,7 @@
 #include "table_scene_graph.h" // rc::TableSceneGraph (DSR node/RT I/O)
 #include "table_fitter.h"      // rc::TableFitter (active-inference core)
 #include "table_existence.h"   // rc::TableExistence (evidence-based removal)
+#include "birth_surprise_probe.h"   // rc::BirthSurpriseProbe (read-only: residual grid → birth surprise)
 #include "epistemic_planner.h"
 #include "table_affordance.h"
 #include "table_model.h"
@@ -178,6 +180,12 @@ private:
     rc::EvidenceMonitor* evidence_monitor_ = nullptr;
     rc::EvidenceGlobals  ev_g_{};                       // pipeline counters (per-cycle fields reset in compute)
     void refresh_evidence_monitor();                    // throttled build+push of the snapshot (main thread)
+    void log_birth_surprise();                          // EXPERIMENTAL read-only probe (cfg_.birth_surprise_probe)
+    std::ofstream        birth_surprise_csv_;           // etc/birth_surprise.csv (opened lazily when the probe is on)
+    std::ofstream        birth_fusion_csv_;             // etc/birth_fusion.csv (detection-conditioned residual mass)
+    int                  birth_surprise_log_ctr_ = 0;   // console-throttle counter
+    long                 birth_surprise_cycle_ = 0;     // probe cycle index (advances only when the grid was read)
+    std::vector<Eigen::Vector2f> last_table_dets_xy_;   // this cycle's ZED "table" detection centroids (room frame)
     std::chrono::steady_clock::time_point last_monitor_tp_{};   // ~5 Hz throttle
     std::chrono::steady_clock::time_point last_compute_tp_{};   // compute-rate EMA
 

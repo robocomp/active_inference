@@ -126,11 +126,6 @@ struct TableBeliefParams
     // Optimiser
     int   gn_iters = 4;            // Gauss-Newton iterations per frame
     float fd_eps   = 1e-3f;        // finite-difference step for SDF Jacobians (m / rad)
-
-    // Canonical fold: pick the reported box-symmetry representative by a FIXED-scale continuity metric instead
-    // of the Σ-weighted Mahalanobis, so a large predicted σ_yaw (edge-on view) can no longer let the reported
-    // yaw oscillate ±90/±180 between equivalent representatives. See canonicalize(). false ⇒ legacy Σ-weighted.
-    bool  orientation_continuity_fold = false;
 };
 
 // One fitted frame's evidence: room-frame points and per-point measurement variance R (m²). Pass an empty

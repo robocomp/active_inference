@@ -499,41 +499,23 @@ void TableBelief::canonicalize(TableBeliefState& s) const
         { s.cx, s.cy, s.H, s.h, s.w, wrap(s.yaw - kHalfPi)  },   // swap ∘ r_{−π/2}
     }};
 
-    // CONTINUITY fold with a FIXED yaw scale (flag-gated). The Σ-weighted fold below weights the yaw difference
-    // by Σ_pred⁻¹, which vanishes exactly when the view is edge-on (σ_yaw huge) — so a 90°/180° box-symmetry snap
-    // costs ≈nothing and the reported yaw oscillates ±90/±180 between equivalent representatives of the SAME box
-    // (the grazing-view flips seen in the CSV; dims constant for r_π, swapped for w↔h). A fixed yaw scale keeps
-    // continuity effective independent of σ_yaw: a genuine slow rotation stays cheap, a symmetry snap does not.
-    // resolve_orientation still owns the evidence-based cross-class flip; this only fixes which representative is
-    // REPORTED for continuity. (Set TableModel.OrientationContinuityFold=true to A/B against the Σ-weighted fold.)
-    if (params_.orientation_continuity_fold)
+    // CONTINUITY fold with a FIXED yaw scale. The Σ-weighted alternative weighted the yaw difference by Σ_pred⁻¹,
+    // which vanishes exactly when the view is edge-on (σ_yaw huge) — so a 90°/180° box-symmetry snap cost ≈nothing
+    // and the reported yaw oscillated ±90/±180 between equivalent representatives of the SAME box (the grazing-view
+    // flips seen in the CSV; dims constant for r_π, swapped for w↔h). A fixed yaw scale keeps continuity effective
+    // independent of σ_yaw: a genuine slow rotation stays cheap, a symmetry snap does not. resolve_orientation
+    // still owns the evidence-based cross-class flip; this only fixes which representative is REPORTED.
+    constexpr float kYawScale2 = 0.5f * 0.5f;   // rad²: a slow genuine rotation is cheap; a 90/180 snap is not
+    const float sz2 = std::max(1e-6f, params_.prior_size_std * params_.prior_size_std);
+    const auto cont = [&](const TableBeliefState& r) -> float
     {
-        constexpr float kYawScale2 = 0.5f * 0.5f;   // rad²: a slow genuine rotation is cheap; a 90/180 snap is not
-        const float sz2 = std::max(1e-6f, params_.prior_size_std * params_.prior_size_std);
-        const auto cont = [&](const TableBeliefState& r) -> float
-        {
-            const float dy = wrap(r.yaw - prior_mean_(5));
-            const float dw = r.w - prior_mean_(3), dh = r.h - prior_mean_(4);
-            return dy * dy / kYawScale2 + (dw * dw + dh * dh) / sz2;
-        };
-        int best = 0; float best_c = cont(reps[0]);
-        for (int i = 1; i < 4; ++i)
-            if (const float c = cont(reps[i]); c < best_c) { best_c = c; best = i; }
-        s = reps[best];
-        return;
-    }
-
-    const Eigen::Matrix<float, 6, 6> Pinv = Sigma_.inverse();   // Σ_pred⁻¹ (Σ_ still holds the predicted cov here)
-    const auto mahalanobis = [&](const TableBeliefState& r) -> float
-    {
-        Eigen::Matrix<float, 6, 1> d = r.vec() - prior_mean_;
-        d(5) = wrap(r.yaw - prior_mean_(5));   // yaw difference must wrap
-        return d.dot(Pinv * d);
+        const float dy = wrap(r.yaw - prior_mean_(5));
+        const float dw = r.w - prior_mean_(3), dh = r.h - prior_mean_(4);
+        return dy * dy / kYawScale2 + (dw * dw + dh * dh) / sz2;
     };
-
-    int best = 0; float best_m = mahalanobis(reps[0]);
+    int best = 0; float best_c = cont(reps[0]);
     for (int i = 1; i < 4; ++i)
-        if (const float m = mahalanobis(reps[i]); m < best_m) { best_m = m; best = i; }
+        if (const float c = cont(reps[i]); c < best_c) { best_c = c; best = i; }
     s = reps[best];
 }
 

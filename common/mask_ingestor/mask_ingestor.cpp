@@ -169,6 +169,17 @@ bool MaskIngestor::refresh()
             packet.support_points.emplace_back(source_flat[i*3], source_flat[i*3+1], source_flat[i*3+2]);
     }
 
+    // RAW camera-frame support points (untransformed), when the producer dual-published them — 1-to-1
+    // with support_points' indexing. Pose-independent; consumed by object-anchor z_o. Loaded regardless
+    // of use_cam (which only governs the room/target-frame support_points path above).
+    if (points_cam_attr != nullptr and points_cam_attr->float_vec().size() == source_flat.size() and not use_cam)
+    {
+        const auto& cam_flat = points_cam_attr->float_vec();
+        packet.support_points_cam.reserve(support_count);
+        for (std::size_t i = 0; i < support_count; ++i)
+            packet.support_points_cam.emplace_back(cam_flat[i*3], cam_flat[i*3+1], cam_flat[i*3+2]);
+    }
+
     packet.mask_pixels.reserve(pixel_count);
     for (std::size_t i = 0; i < pixel_count; ++i)
         packet.mask_pixels.emplace_back(pixels_flat[i*2], pixels_flat[i*2+1]);

@@ -77,7 +77,7 @@ public:
     void forget_node(std::uint64_t id) { instances_.erase(id); }
     // Part B (chain covariance): enable adding the localization/chain term J·Σ_chain·Jᵀ (measurement
     // frame → room, capture-stamp pinned) to each instance, read by the scene-graph's RT-cov write.
-    void set_chain_cov_source(DSR::InnerGaussianAPI* gaussian, std::string source_frame, bool enabled);
+    void set_chain_cov_source(DSR::InnerGaussianAPI* gaussian, std::string source_frame);
     // Object-anchor observation: publish this frame's ROBOT-frame fit (z_o) so the room localizer can
     // use the table as an SE(2) pose landmark. robot_frame = the localizer's base node ("body"). OFF unless enabled.
     void set_object_observation(bool enabled, std::string robot_frame);

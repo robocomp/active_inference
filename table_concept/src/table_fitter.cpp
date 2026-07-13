@@ -38,11 +38,11 @@ TableFitter::TableFitter(std::shared_ptr<DSR::DSRGraph> graph,
 }
 
 // Enable Part-B chain-covariance propagation from source_frame (no-op unless a gaussian API + frame are given).
-void TableFitter::set_chain_cov_source(DSR::InnerGaussianAPI* gaussian, std::string source_frame, bool enabled)
+void TableFitter::set_chain_cov_source(DSR::InnerGaussianAPI* gaussian, std::string source_frame)
 {
     gaussian_          = gaussian;
     chain_src_frame_   = std::move(source_frame);
-    chain_cov_enabled_ = enabled and (gaussian_ != nullptr) and not chain_src_frame_.empty();
+    chain_cov_enabled_ = (gaussian_ != nullptr) and not chain_src_frame_.empty();
 }
 
 void TableFitter::set_object_observation(bool enabled, std::string robot_frame)
@@ -376,7 +376,6 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
         p.footprint_moment_precision = cfg_.footprint_moment_precision;
         p.footprint_moment_completeness_gain = cfg_.footprint_moment_completeness_gain;
         p.footprint_moment_min_completeness  = cfg_.footprint_moment_min_completeness;
-        p.orientation_continuity_fold = cfg_.orientation_continuity_fold;
         p.top_thickness   = TableModel::TOP_THICKNESS;
         p.leg_radius      = TableModel::LEG_RADIUS;
         inst.ai2_belief = TableBelief(s0, p);
@@ -471,9 +470,11 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
         // is barely observable and the per-point GN snaps between the box's symmetric orientations (r_π / w↔h —
         // the CSV flips). Grow the SHARED yaw variance as the view grazes (|cos(incidence)|→0 ⇒ 1/cos→∞), so a
         // grazing frame confirms the table but cannot rotate it — the same continuous-covariance form as the range
-        // term, keyed on view angle instead of distance. ObliquityYawGain=0 ⇒ OFF (baseline unchanged).
+        // term, keyed on view angle instead of distance. Validated live 2026-07-11 → always on; kObliquityYawGain
+        // is a candidate for derivation from the deprojection Jacobian (replace the tuned coefficient with physics).
+        constexpr float kObliquityYawGain = 0.05f;   // ~30° σ_yaw at cos=0.09 → per-point GN holds yaw at grazing
         const float oblq_cos          = std::clamp(inst.dbg_obliquity_cos, 0.05f, 1.0f);
-        const float obliquity_yaw_std = cfg_.obliquity_yaw_gain * (1.0f / oblq_cos - 1.0f);   // 0 at top-down
+        const float obliquity_yaw_std = kObliquityYawGain * (1.0f / oblq_cos - 1.0f);   // 0 at top-down
         frame.chain_cov_yaw  = range_yaw_var + obliquity_yaw_std * obliquity_yaw_std;   // range + grazing-view cap
         frame.chain_cov_size = range_size_var;                     // ...nor RESHAPE/inflate — geometry freezes afar
         // Footprint-moment SHARED per-frame variance: ego-motion mask corruption + a GENTLE range term (a global
