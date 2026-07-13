@@ -189,6 +189,7 @@ class Viewer2D : public QObject
 
         // Room polygon outline
         QGraphicsPolygonItem* polygon_item_         = nullptr;
+        QGraphicsPolygonItem* polygon_fill_item_    = nullptr;   // warm floor fill (interior only)
         QGraphicsPolygonItem* polygon_item_backup_  = nullptr;
         QGraphicsLineItem* room_axis_x_item_        = nullptr;
         QGraphicsLineItem* room_axis_y_item_        = nullptr;

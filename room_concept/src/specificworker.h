@@ -164,8 +164,7 @@ class SpecificWorker : public GenericWorker
         bool          compute_csv_open_attempted_ = false;
 
         // RT publish-rate monitor (shown in the window title at ~1 Hz so it can be watched visually).
-        int          rt_corr_count_           = 0;   // corrected blocks this window
-        int          rt_pred_count_           = 0;   // predicted blocks this window
+        int          rt_corr_count_           = 0;   // corrected RT publishes this window
         std::int64_t rt_rate_window_start_ms_ = 0;
         void update_rt_rate_readout(std::int64_t now_ms, bool on_gui_thread);
 

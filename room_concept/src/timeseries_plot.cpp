@@ -96,6 +96,14 @@ void TimeSeriesPlot::set_visible_window(float seconds)
     window_sec_ = std::max(1.f, seconds);
 }
 
+void TimeSeriesPlot::set_y_range(float v_min, float v_max)
+{
+    std::lock_guard lk(mu_);
+    y_fixed_min_ = std::min(v_min, v_max);
+    y_fixed_max_ = std::max(v_min, v_max);
+    y_fixed_     = (y_fixed_max_ > y_fixed_min_);
+}
+
 void TimeSeriesPlot::timerEvent(QTimerEvent*)
 {
     update();  // schedule repaint
@@ -113,24 +121,32 @@ void TimeSeriesPlot::paintEvent(QPaintEvent*)
     const float t_min = t_now - window_sec_;
     const float t_max = t_now;
 
-    // Determine value range across all visible series
-    float v_min = std::numeric_limits<float>::max();
-    float v_max = std::numeric_limits<float>::lowest();
-    for (const auto& [_, s] : series_)
+    // Determine value range: fixed if pinned, else auto-scale across all visible series (+5% pad).
+    float v_min, v_max;
+    if (y_fixed_)
     {
-        for (const auto& pt : s.samples)
-        {
-            if (pt.t < t_min) continue;
-            v_min = std::min(v_min, pt.v);
-            v_max = std::max(v_max, pt.v);
-        }
+        v_min = y_fixed_min_;
+        v_max = y_fixed_max_;
     }
-    if (v_min >= v_max) { v_min = 0.f; v_max = 1.f; }
+    else
+    {
+        v_min = std::numeric_limits<float>::max();
+        v_max = std::numeric_limits<float>::lowest();
+        for (const auto& [_, s] : series_)
+        {
+            for (const auto& pt : s.samples)
+            {
+                if (pt.t < t_min) continue;
+                v_min = std::min(v_min, pt.v);
+                v_max = std::max(v_max, pt.v);
+            }
+        }
+        if (v_min >= v_max) { v_min = 0.f; v_max = 1.f; }
 
-    // Add 5% padding
-    const float pad = (v_max - v_min) * 0.05f;
-    v_min -= pad;
-    v_max += pad;
+        const float pad = (v_max - v_min) * 0.05f;
+        v_min -= pad;
+        v_max += pad;
+    }
 
     draw_axes(p, t_min, t_max, v_min, v_max);
 

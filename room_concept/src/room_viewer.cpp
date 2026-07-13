@@ -103,6 +103,16 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
     ts_plot_fe_->add_series("cov_det_scaled", QColor(0, 190, 255), 1.6f, 0);
     custom_widget_->frame_series->layout()->addWidget(ts_plot_fe_);
 
+    // Pipeline-rate plot (Hz over time), stacked under the FE plot: RT-publish rate (corrected pose)
+    // and optimizer rate. Separate plot from the FE one because the Y units differ (Hz vs free energy).
+    // No "predicted" series — predicted poses are no longer published (the optimizer output is the RT).
+    ts_plot_rates_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
+    ts_plot_rates_->set_visible_window(60.f);
+    ts_plot_rates_->set_y_range(0.f, 22.f);   // fixed Hz scale (optimizer tops out ~20 Hz)
+    ts_plot_rates_->add_series("RT publish Hz", QColor(46, 204, 113), 1.8f, 0);   // corrected-pose publishes
+    ts_plot_rates_->add_series("optimizer Hz",  QColor(230, 126, 34), 1.6f, 0);   // loc-thread solve rate
+    custom_widget_->frame_series->layout()->addWidget(ts_plot_rates_);
+
     // Thicken the layout lines — a wider splitter handle plus a 2px border on both frames. Then
     // restore the user's last splitter drag if we have one; otherwise start 50/50 (equal stretch →
     // equal proportions regardless of the actual pixel height). saveState()/restoreState() persists
@@ -219,6 +229,15 @@ void RoomViewer::draw_landmarks(const std::vector<Eigen::Vector2f>& landmarks_wo
     if (!viewer_2d_)
         return;
     viewer_2d_->draw_landmark_lines(landmarks_world, measured, robot_pose.translation());
+}
+
+void RoomViewer::add_rate_samples(float corr_hz, float opt_hz)
+{
+    if (ts_plot_rates_)
+    {
+        ts_plot_rates_->add_point("RT publish Hz", corr_hz);
+        ts_plot_rates_->add_point("optimizer Hz",  opt_hz);
+    }
 }
 
 void RoomViewer::set_rt_rate_text(const QString& text)

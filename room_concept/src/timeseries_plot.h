@@ -44,6 +44,9 @@ public:
     /** How many seconds of history to display (default 30). */
     void set_visible_window(float seconds);
 
+    /** Pin the Y axis to a fixed [v_min, v_max] range (disables auto-scaling). */
+    void set_y_range(float v_min, float v_max);
+
 protected:
     void paintEvent(QPaintEvent* event) override;
     void timerEvent(QTimerEvent* event) override;
@@ -69,6 +72,11 @@ private:
     std::unordered_map<std::string, Series> series_;
     QElapsedTimer clock_;
     float window_sec_ = 30.f;
+
+    // Fixed Y range (auto-scales when disabled).
+    bool  y_fixed_ = false;
+    float y_fixed_min_ = 0.f;
+    float y_fixed_max_ = 1.f;
 
     // Margins (pixels)
     static constexpr int kLeft = 55;

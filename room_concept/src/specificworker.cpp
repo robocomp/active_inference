@@ -337,8 +337,7 @@ void SpecificWorker::update_rt_rate_readout(std::int64_t now_ms, bool on_gui_thr
         return;
 
     const float dt_s    = static_cast<float>(elapsed) * 0.001f;
-    const float corr_hz = static_cast<float>(rt_corr_count_) / dt_s;
-    const float pred_hz = static_cast<float>(rt_pred_count_) / dt_s;
+    const float corr_hz = static_cast<float>(rt_corr_count_) / dt_s;   // RT publishes = corrected poses
 
     // Optimizer timing (loc thread): processing rate, mean cost/update, and early-exit fraction —
     // diagnoses whether localization is compute-bound (low Hz, high ms) and CUDA/window effects.
@@ -348,17 +347,17 @@ void SpecificWorker::update_rt_rate_readout(std::int64_t now_ms, bool on_gui_thr
         ? 100.0f * static_cast<float>(opt.early_exits) / static_cast<float>(opt.count) : 0.0f;
 
     if (on_gui_thread && viewer_)
+    {
+        // RT/opt rates → live plot (trend). The text readout keeps only the scalar optimizer-health
+        // numbers that aren't plotted (ms per update, early-exit %).
+        viewer_->add_rate_samples(corr_hz, opt_hz);
         viewer_->set_rt_rate_text(
-            QString("RT %1 Hz (corr %2 + pred %3) | opt %4 Hz  %5 ms/upd  ee %6%")
-                .arg(corr_hz + pred_hz, 0, 'f', 1)
-                .arg(corr_hz, 0, 'f', 1)
-                .arg(pred_hz, 0, 'f', 1)
-                .arg(opt_hz, 0, 'f', 1)
+            QString("%1 ms/upd · %2% early-exit")
                 .arg(opt.avg_update_ms, 0, 'f', 1)
                 .arg(ee_pct, 0, 'f', 0));
+    }
 
     rt_corr_count_ = 0;
-    rt_pred_count_ = 0;
     rt_rate_window_start_ms_ = now_ms;
 }
 

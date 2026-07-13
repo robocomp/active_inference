@@ -88,6 +88,10 @@ public:
     // Set the RT publish-rate readout shown in the custom widget (call ~1 Hz from the GUI thread).
     void set_rt_rate_text(const QString& text);
 
+    // Push one ~1 Hz sample of the RT-publish rate (corrected pose) and optimizer rate to the live
+    // rate plot in the lower frame. Predicted poses are no longer published, so there is no pred rate.
+    void add_rate_samples(float corr_hz, float opt_hz);
+
     // Button actions.
     void show_camera();
     void toggle_lidar_points(bool checked);
@@ -113,6 +117,7 @@ private:
     QPointer<QLabel>             rt_rate_label_;   // RT publish-rate readout in the controls row
     QPointer<rc::Viewer2D>       viewer_2d_;
     QPointer<rc::TimeSeriesPlot> ts_plot_fe_;
+    QPointer<rc::TimeSeriesPlot> ts_plot_rates_;   // RT-publish + optimizer rates (Hz) over time
     std::unique_ptr<rc::CameraVisualizer> camera_viz_;
     bool camera_media_plane_initialized_ = false;
 };

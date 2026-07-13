@@ -271,12 +271,26 @@ void Viewer2D::draw_room_polygon(const std::vector<Eigen::Vector2f>& verts, bool
         delete polygon_item_;
         polygon_item_ = nullptr;
     }
+    if (polygon_fill_item_ != nullptr)
+    {
+        agv_->scene.removeItem(polygon_fill_item_);
+        delete polygon_fill_item_;
+        polygon_fill_item_ = nullptr;
+    }
 
     QPolygonF poly;
     for (const auto& v : verts)
         poly << QPointF(v.x(), v.y());
     if (!is_capturing && verts.size() >= 3)
         poly << QPointF(verts.front().x(), verts.front().y());
+
+    // Warm, light orange/brown floor fill — covers ONLY the interior of the (closed) room polygon,
+    // drawn behind every overlay (negative z) so lidar/robot/objects stay on top.
+    if (!is_capturing && verts.size() >= 3)
+    {
+        polygon_fill_item_ = agv_->scene.addPolygon(poly, QPen(Qt::NoPen), QBrush(QColor(240, 219, 195)));
+        polygon_fill_item_->setZValue(-10);
+    }
 
     QPen pen(is_capturing ? Qt::yellow : Qt::magenta,
              is_capturing ? 0.08 : 0.15);
