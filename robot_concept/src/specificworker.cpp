@@ -22,7 +22,11 @@
 #include "../../common/media_transport/media_transport.h"
 
 #include <dsr/gui/viewers/graph_viewer/graph_viewer.h>
+#include "media_stream_viewers.h"
+#include "graph_attr_viewers.h"
 #include <QTimer>
+#include <QLabel>
+#include <QVBoxLayout>
 
 #include <ConfigLoader/ConfigLoader.h>
 
@@ -377,6 +381,7 @@ void SpecificWorker::initialize()
 		if (shutting_down_.load())
 			return;
 		trigger_graph_layout_twopi();
+		wire_view_data_signal();   // enable right-click "View data" → live FPS viewer on media-plane nodes
 	});
 }
 
@@ -465,21 +470,14 @@ void SpecificWorker::compute()
 			{ "Ricoh360Thread", f_ricoh,  src_label(params.ENABLE_RICOH, &bridge_ricoh_) },
 		};
 		constexpr int NFIELDS = static_cast<int>(std::size(fields));
-		constexpr double kHzPrintDelta = 1.0;
-		static double      prev_hz[NFIELDS]  = { -1e9, -1e9, -1e9, -1e9, -1e9 };
-		static const char* prev_src[NFIELDS] = { nullptr, nullptr, nullptr, nullptr, nullptr };
-		bool changed = false;
-		for (int k = 0; k < NFIELDS; ++k)
-			if (std::abs(fields[k].hz - prev_hz[k]) >= kHzPrintDelta or fields[k].src != prev_src[k])
-				changed = true;
-		if (changed)
+		// Print every rate window (~2 s) so the per-stream Hz table is always visible in the terminal,
+		// not only when a rate happens to move.
 		{
 			QString line;
 			for (int k = 0; k < NFIELDS; ++k)
 				line += QString::asprintf("%s[%s:%s] %5.1f Hz",
 				                          k ? " | " : "", fields[k].label, fields[k].src, fields[k].hz);
 			qInfo().noquote() << line;
-			for (int k = 0; k < NFIELDS; ++k) { prev_hz[k] = fields[k].hz; prev_src[k] = fields[k].src; }
 		}
 		last = now; last_rgbd = r; last_imu = i; last_ricoh = c;
 		last_helios = hl; last_bpearl = bp;
@@ -1073,6 +1071,114 @@ void SpecificWorker::trigger_graph_layout_twopi()
 	QMetaObject::invokeMethod(graph_viewer,
 	                          [graph_viewer]() { graph_viewer->compute_layout("twopi"); },
 	                          Qt::QueuedConnection);
+}
+
+void SpecificWorker::wire_view_data_signal()
+{
+	// Right-clicking a node whose raw stream lives on the media plane (no inline blob in the graph)
+	// makes dsr_gui emit GraphViewer::view_data_signal(id, type). robot_concept is the one agent with
+	// the graph up AND subscribed to every stream, so it answers with a live per-node FPS viewer.
+	// Main-thread only (graph/GUI access); no-op when the graph view is disabled (Agent.graph=false).
+	const auto it = graph_viewers.find("");
+	if (it == graph_viewers.end() || !it->second)
+		return;
+	auto* graph_viewer = qobject_cast<DSR::GraphViewer*>(it->second->get_widget(DSR::DSRViewer::view::graph));
+	if (!graph_viewer)
+		return;
+	// QueuedConnection + UniqueConnection: the source signal originates on the GUI thread, but keep the
+	// CLAUDE.md discipline uniform, and make a second call (re-init) idempotent rather than double-wire.
+	QObject::connect(graph_viewer, &DSR::GraphViewer::view_data_signal, this,
+	                 &SpecificWorker::open_stream_viewer,
+	                 static_cast<Qt::ConnectionType>(Qt::QueuedConnection | Qt::UniqueConnection));
+}
+
+void SpecificWorker::open_stream_viewer(std::uint64_t node_id, const std::string &type)
+{
+	// Map the clicked DSR node to its media-plane stream and open the matching viewer. Names are the
+	// media descriptor node names authored in initialize() (zed/ricoh/lidar3D/imu) plus the per-device
+	// lidar nodes (helios/bpearl). Each viewer builds its OWN subscriber via the shared factory here on
+	// the main thread (the required consumer pattern) and polls it itself.
+	std::string node_name;
+	if (auto n = G->get_node(node_id); n.has_value())
+		node_name = n->name();
+	qInfo() << "[view-data] request for node" << QString::fromStdString(node_name)
+	        << "id" << node_id << "type" << QString::fromStdString(type);
+
+	// One live viewer per node id: re-clicking raises the existing one instead of stacking windows.
+	if (auto existing = stream_viewers_.find(node_id); existing != stream_viewers_.end() and existing->second)
+	{
+		existing->second->show();
+		existing->second->raise();
+		existing->second->activateWindow();
+		return;
+	}
+
+	QWidget *viewer = nullptr;
+	if (node_name == "zed")
+	{
+		if (auto sub = rc::media::make_image_subscriber_from_graph(*G, "zed", "rgb"))
+			viewer = new rc::viewers::ImageStreamViewer(std::move(sub), "zed — RGB (media plane)");
+	}
+	else if (node_name == "ricoh")
+	{
+		if (auto sub = rc::media::make_image360_subscriber_from_graph(*G, "ricoh", "rgb360"))
+			viewer = new rc::viewers::Image360Viewer(std::move(sub), "ricoh — 360 panorama (media plane)");
+	}
+	else if (node_name == "lidar3D" or node_name == "helios" or node_name == "bpearl")
+	{
+		// lidar3D aggregates both rings; a per-device node shows just that ring.
+		std::unique_ptr<rc::media::LidarSubscriber> helios, bpearl;
+		if (node_name != "bpearl") helios = rc::media::make_lidar_subscriber_from_graph(*G, "helios", "lidar");
+		if (node_name != "helios") bpearl = rc::media::make_lidar_subscriber_from_graph(*G, "bpearl", "lidar");
+		if (helios or bpearl)
+			viewer = new rc::viewers::LidarStreamViewer(std::move(helios), std::move(bpearl),
+			                                            QString::fromStdString(node_name + " — points (media plane)"));
+	}
+	else if (node_name == "imu")
+	{
+		if (auto sub = rc::media::make_imu_subscriber_from_graph(*G, "imu", "imu"))
+			viewer = new rc::viewers::ImuStreamViewer(std::move(sub), "imu — data (media plane)");
+	}
+	else if (type == "room")
+	{
+		// Data lives in the graph node (delimiting_polygon_x/y), not the media plane → read from G.
+		viewer = new rc::viewers::RoomPolygonViewer(G, node_id, "room — delimiting polygon (graph)");
+	}
+	else if (type == "robot")
+	{
+		// 3D OpenGL view of the .obj mesh named in the node's `path` attribute.
+		viewer = new rc::viewers::RobotMeshViewer(G, node_id, "robot — mesh (path attr)");
+	}
+	else if (node_name == "semantic")
+	{
+		// Dense ADE20K-150 label map lives as attributes on the node (semantic_labels/width/height),
+		// published low-freq by the voxelizer → colourise + hover-readout from G, no media plane.
+		// NB: the voxelizer's semantic/skeleton/masks nodes all share type "semantic_grid", so these
+		// branch on node NAME, not type.
+		viewer = new rc::viewers::SemanticGridViewer(G, node_id, "semantic — ADE20K label map (graph)");
+	}
+	else if (node_name == "skeleton")
+	{
+		// BODY_18 human poses live as attributes on the node (skeleton_count + skeleton_kp_xyz,
+		// count*18*3 floats, ZED camera frame) → 3D OpenGL skeleton view read from G.
+		viewer = new rc::viewers::SkeletonNodeViewer(G, node_id, "skeleton — BODY_18 poses (graph)");
+	}
+
+	if (viewer == nullptr)
+	{
+		qInfo() << "[view-data] node" << QString::fromStdString(node_name)
+		        << "(type" << QString::fromStdString(type)
+		        << ") has no media-plane stream to view (producer not up yet, or unsupported type)";
+		return;
+	}
+
+	// Drop the map entry when the window is closed (WA_DeleteOnClose) so a later click re-creates it.
+	QObject::connect(viewer, &QObject::destroyed, this, [this, node_id](QObject *)
+	{
+		stream_viewers_.erase(node_id);
+	});
+	stream_viewers_[node_id] = viewer;
+	viewer->show();
 }
 
 void SpecificWorker::read_ricoh_thread()

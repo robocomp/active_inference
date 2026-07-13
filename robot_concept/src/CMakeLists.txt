@@ -13,6 +13,7 @@ LIST(APPEND SOURCES
   ../../common/media_transport/generated/idl/lidar_frameTypeObjectSupport.cxx
   ../../common/media_transport/generated/idl/imu_framePubSubTypes.cxx
   ../../common/media_transport/generated/idl/imu_frameTypeObjectSupport.cxx
+  ../../common/obj/obj_loader.cpp
   ../src/sensor_media_publisher.cpp
   ../src/specificworker.cpp
   ../src/specificworker_presence.cpp

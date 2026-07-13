@@ -152,50 +152,6 @@
     "name": "Shadow",
     "type": "robot"
    },
-   "210": {
-    "attribute": {
-     "color": {
-      "type": 0,
-      "value": "Orange"
-     },
-     "laser_X": {
-      "type": 3,
-      "value": []
-     },
-     "laser_Y": {
-      "type": 3,
-      "value": []
-     },
-     "laser_Z": {
-      "type": 3,
-      "value": []
-     },
-     "laser_timestamp": {
-      "type": 7,
-      "value": "1779219459141"
-     },
-     "level": {
-      "type": 1,
-      "value": 3
-     },
-     "parent": {
-      "type": 7,
-      "value": "250"
-     },
-     "pos_x": {
-      "type": 2,
-      "value": 289.095917
-     },
-     "pos_y": {
-      "type": 2,
-      "value": 171.117142
-     }
-    },
-    "id": "210",
-    "links": [],
-    "name": "lidar3D",
-    "type": "laser"
-   },
    "220": {
     "attribute": {
      "cam_depth": {

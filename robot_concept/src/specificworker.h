@@ -27,6 +27,7 @@
 #include <chrono>
 #include <cstdint>
 #include <future>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -35,6 +36,7 @@
 #include <vector>
 
 #include <QTimer>
+#include <QWidget>
 
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 #include "sensor_media_publisher.h"
@@ -231,6 +233,15 @@ private:
 	void cleanup_owned_nodes();
 	void trigger_graph_layout_twopi();   // twopi relayout of the DSR graph viewer (startup + on node add/remove)
 	void schedule_graph_relayout();      // debounced request → one twopi after a burst of structural changes
+
+	// "View data" on a media-plane sensor node (no inline blob in the graph) is forwarded by the
+	// dsr_gui GraphViewer as view_data_signal(id, type). robot_concept is the one agent with the graph
+	// up AND access to every stream, so it answers by opening a live media-plane viewer: an image
+	// window for zed/ricoh, a top-down point view for lidar3D/helios/bpearl. Each viewer owns its own
+	// media subscriber (built via the shared factory on the main thread) and polls it on a QTimer.
+	void wire_view_data_signal();                                          // connect once, main thread
+	void open_stream_viewer(std::uint64_t node_id, const std::string &type);
+	std::map<std::uint64_t, QWidget*> stream_viewers_;                     // one live viewer per node id
 	void on_optional_peer_lost(const std::string &name, std::uint32_t id);
 	void on_optional_peer_ready(const std::string &name, std::uint32_t id);
 	std::atomic<bool> shutting_down_{false};
