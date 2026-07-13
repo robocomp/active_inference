@@ -321,10 +321,20 @@ void VoxelOpenGLViewer::set_show_grid(bool show)
 void VoxelOpenGLViewer::update_grid_field(std::span<const QVector3D> centres, std::span<const float> prob,
                                           std::span<const float> var)
 {
-    constexpr float var_prior = 0.125f;                 // Beta(0.5,0.5) prior variance = "unknown"
-    std::vector<Vertex> v;
-    v.reserve(centres.size());
+    // Draw the Beta belief field as ELEVATED COLUMNS: one vertical bar per cell rising from the floor,
+    // its HEIGHT ∝ occupancy probability P (the "height of the cell"), hue also = P (green→red) and
+    // brightness = confidence (1 − Var/prior). The column is a floor→top line pair (GL_LINES) plus a
+    // top-cap point; the base is dimmed so each bar fades upward and reads as a 3D stalagmite.
+    constexpr float var_prior  = 0.125f;                // Beta(0.5,0.5) prior variance = "unknown"
+    constexpr float max_height = 0.60f;                 // room metres for a fully-occupied (P=1) cell
+    constexpr float base_z     = 0.02f;                 // lift the foot just off the floor plane
+    std::vector<Vertex> lines;                          // 2 verts per cell (bottom, top)
+    std::vector<Vertex> caps;                           // 1 vert per cell (top)
     const std::size_t n = std::min({centres.size(), prob.size(), var.size()});
+    lines.reserve(2 * n);
+    caps.reserve(n);
+    const float fx = voxel_flip_x_ ? -1.f : 1.f;
+    const float fy = voxel_flip_y_ ? -1.f : 1.f;
     for (std::size_t i = 0; i < n; ++i)
     {
         const float p = prob[i];
@@ -334,14 +344,17 @@ void VoxelOpenGLViewer::update_grid_field(std::span<const QVector3D> centres, st
         const float r = (0.40f + 0.60f * t) * conf;
         const float g = (0.90f - 0.70f * t) * conf;
         const float b = 0.10f * conf;
-        const float fx = voxel_flip_x_ ? -1.f : 1.f;
-        const float fy = voxel_flip_y_ ? -1.f : 1.f;
-        const QVector3D mapped{fx * centres[i].x(), centres[i].z(), fy * centres[i].y()};
-        v.push_back(Vertex{mapped.x(), mapped.y(), mapped.z(), r, g, b});
+        const float x   = fx * centres[i].x();
+        const float z   = fy * centres[i].y();
+        const float top = base_z + t * max_height;      // viewer up-axis is Y ( = room z )
+        lines.push_back(Vertex{x, base_z, z, 0.20f * r, 0.20f * g, 0.20f * b});   // dim foot
+        lines.push_back(Vertex{x, top,    z, r,         g,         b});           // bright top
+        caps.push_back(Vertex{x, top, z, r, g, b});
     }
     {
         std::scoped_lock lk(data_mutex_);
-        grid_field_vertices_ = std::move(v);
+        grid_field_vertices_     = std::move(lines);
+        grid_field_cap_vertices_ = std::move(caps);
     }
     request_update_throttled();
 }
@@ -681,6 +694,7 @@ void VoxelOpenGLViewer::paintGL()
     std::vector<Vertex> grid_draw_vertices;
     std::vector<Vertex> grid_border_draw_vertices;
     std::vector<Vertex> grid_field_draw_vertices;
+    std::vector<Vertex> grid_field_cap_draw_vertices;
     {
         std::scoped_lock lk(data_mutex_);
         n_lidar_vertices = lidar_vertices_.size();
@@ -692,6 +706,7 @@ void VoxelOpenGLViewer::paintGL()
         grid_draw_vertices = grid_vertices_;
         grid_border_draw_vertices = grid_border_vertices_;
         grid_field_draw_vertices = grid_field_vertices_;
+        grid_field_cap_draw_vertices = grid_field_cap_vertices_;
     }
     const bool has_lidar = n_lidar_vertices > 0;
     const bool has_residual = n_residual_vertices > 0;
@@ -787,17 +802,24 @@ void VoxelOpenGLViewer::paintGL()
     // be compared against / overlaid on the hard amber occupied cells. Drawn slightly smaller so both read.
     if (has_field && show_field_)
     {
-        glDisable(GL_DEPTH_TEST);
+        // ELEVATED COLUMNS: a vertical bar per cell (height ∝ P) + a round cap point on top. Depth test ON
+        // so nearer/taller bars correctly occlude those behind them (unlike the flat overlays above).
         room_vao_.bind();
         room_vbo_.bind();
-        room_vbo_.allocate(grid_field_draw_vertices.data(), static_cast<int>(grid_field_draw_vertices.size() * sizeof(Vertex)));
         program_.setUniformValue("u_round_points", 0);
-        program_.setUniformValue("u_point_size", 4.0f);
-        glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(grid_field_draw_vertices.size()));
-        program_.setUniformValue("u_point_size", 4.5f);
+        room_vbo_.allocate(grid_field_draw_vertices.data(), static_cast<int>(grid_field_draw_vertices.size() * sizeof(Vertex)));
+        glLineWidth(3.0f);
+        glDrawArrays(GL_LINES, 0, static_cast<GLsizei>(grid_field_draw_vertices.size()));
+        if (not grid_field_cap_draw_vertices.empty())
+        {
+            room_vbo_.allocate(grid_field_cap_draw_vertices.data(), static_cast<int>(grid_field_cap_draw_vertices.size() * sizeof(Vertex)));
+            program_.setUniformValue("u_round_points", 1);
+            program_.setUniformValue("u_point_size", 5.0f);
+            glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(grid_field_cap_draw_vertices.size()));
+            program_.setUniformValue("u_point_size", 4.5f);
+        }
         room_vbo_.release();
         room_vao_.release();
-        glEnable(GL_DEPTH_TEST);
     }
 
     // Mask points are drawn LATER (after the solid bottle cylinder + object meshes) so the

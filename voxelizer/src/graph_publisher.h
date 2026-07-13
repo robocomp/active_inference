@@ -68,6 +68,11 @@ public:
                            const std::vector<rc::human_pose::PoseDetection>& poses,
                            std::uint64_t frame_ts_ms = 0);
 
+    // Publish the dense semantic label map on a 'semantic' node under 'zed'. `labels` is CV_8UC1 class
+    // ids at the ZED IMAGE resolution (already unletterboxed), so a consumer reads
+    // label = semantic_labels[v*semantic_width + u] directly. Large blob → call LOW-FREQUENCY.
+    void publish_semantic(const cv::Mat& labels, std::uint64_t stamp);
+
     // Delete every "semantic_grid" node this agent left in the graph + reset ready flags.
     void cleanup_semantic_grid_nodes();
 
@@ -101,6 +106,8 @@ private:
 
     bool          masks_ready_    = false;
     bool          skeleton_ready_ = false;
+    bool          semantic_ready_ = false;
+    int           semantic_seq_   = 0;
     std::uint64_t last_masks_uploaded_frame_    = 0;
     std::uint64_t masks_publish_seq_            = 0;
     std::uint64_t last_skeleton_uploaded_frame_ = 0;

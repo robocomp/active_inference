@@ -84,6 +84,21 @@ VoxelizerParams load_voxelizer_params(const ConfigLoader& configLoader)
     rc::ConfigLoaderUtils::load_optional(configLoader, "Semantic.use_gpu", params.SEMANTIC_SEG_USE_GPU);
     rc::ConfigLoaderUtils::load_optional(configLoader, "Semantic.use_trt", params.SEMANTIC_SEG_USE_TRT);
     rc::ConfigLoaderUtils::load_optional(configLoader, "Semantic.decimation", params.SEMANTIC_SEG_DECIMATION);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Semantic.publish_node", params.SEMANTIC_PUBLISH_NODE);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Semantic.publish_min_interval_s", params.SEMANTIC_PUBLISH_MIN_INTERVAL_S);
+
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Sam2.enabled", params.SAM2_ENABLED);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Sam2.encoder_path", params.SAM2_ENCODER_PATH);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Sam2.decoder_path", params.SAM2_DECODER_PATH);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Sam2.use_gpu", params.SAM2_USE_GPU);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Sam2.encoder_use_trt", params.SAM2_ENCODER_USE_TRT);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Sam2.decoder_use_trt", params.SAM2_DECODER_USE_TRT);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Sam2.decimation", params.SAM2_DECIMATION);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Sam2.mask_prior", params.SAM2_MASK_PRIOR);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Sam2.mask_prior_logit", params.SAM2_MASK_PRIOR_LOGIT);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Sam2.metrics_log", params.SAM2_METRICS_LOG);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Sam2.publish_refined", params.SAM2_PUBLISH_REFINED);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "Sam2.refine_labels", params.SAM2_REFINE_LABELS);
 
     // Custom drawing windows (default ON).
     rc::ConfigLoaderUtils::load_optional(configLoader, "Voxel.show_voxel_viewer", params.SHOW_VOXEL_VIEWER);

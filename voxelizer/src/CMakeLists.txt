@@ -29,6 +29,8 @@ LIST(APPEND SOURCES
   ../src/seg_stage.cpp
   ../src/pose_stage.cpp
   ../src/semantic_stage.cpp
+  ../src/sam2_stage.cpp
+  ../src/sam2_processor.cpp
   ../src/bearing_stage.cpp
   ../src/yolo_human.cpp
   ../src/yolo_semantic.cpp
@@ -55,6 +57,8 @@ LIST(APPEND HEADERS
   ../src/seg_stage.h
   ../src/pose_stage.h
   ../src/semantic_stage.h
+  ../src/sam2_stage.h
+  ../src/sam2_processor.h
   ../src/bearing_stage.h
   ../src/graph_object_box.h
   ../src/model_projection_overlay.h

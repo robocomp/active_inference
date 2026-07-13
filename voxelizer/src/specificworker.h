@@ -122,6 +122,7 @@ class SpecificWorker : public GenericWorker
         int pose_frame_counter_ = 0;
         // Semantic-seg decimation counter (period read from params.SEMANTIC_SEG_DECIMATION).
         int semantic_frame_counter_ = 0;
+        std::chrono::steady_clock::time_point last_semantic_pub_{};   // rate cap for the semantic-node publish
 
         // Homeostatic perception-rate regulator: adapts pose decimation to hold compute() near
         // params.TARGET_HZ (voxel-free; fed compute cost + frame stamp). Actuator = pose only.
@@ -171,6 +172,7 @@ class SpecificWorker : public GenericWorker
         QWidget* ricoh_window_ = nullptr;            // Ricoh 360 popup (hidden until the top-bar button toggles it)
         bool yolo_window_needs_image_size_ = false;  // size the RGB window to the image on first frame
         bool semantic_overlay_enabled_ = false;      // YOLO-window toggle: run + draw the semantic overlay (starts OFF)
+        bool sam2_overlay_enabled_ = false;          // ZED-window "SAM2" toggle: run + draw SAM2-refined masks (starts OFF)
         bool yolo_overlay_enabled_ = true;           // ZED-window "YOLO" toggle: draw the seg detections (starts ON)
         bool model_overlay_enabled_ = false;         // ZED-window "Models" toggle: project graph model-instance BBs (starts OFF)
         std::unique_ptr<rc::ModelProjectionOverlay> model_overlay_;   // projects DSR model boxes onto the ZED image

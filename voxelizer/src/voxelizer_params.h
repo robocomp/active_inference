@@ -48,9 +48,15 @@ struct VoxelizerParams
     // object occludes the background, so those far returns can't be the object — they are the WALL BEHIND
     // that bleeds in when the robot moves (RGB mask ↔ depth skew: silhouette-edge pixels sample the
     // background) or a transparent object's see-through dropout. Coherent, so the radius filter can't
-    // catch it. Sized to the deepest expected object (a table's along-ray extent), a physical prior, not
-    // a tuning cutoff (see no-threshold-patches). <= 0 disables. Applied in graph_publisher::upload_masks.
-    float       MASK_DEPTH_GATE_BAND_M           = 1.50f;
+    // catch it. <= 0 disables. Applied in graph_publisher::upload_masks.
+    // ⚠ THIS IS A HARD THRESHOLD (a cliff) and it is TEMPORARY. It silently amputates any object deeper
+    // than the band (e.g. a 2 m table viewed along its length loses its far ~0.5 m → biased-short fit).
+    // Widened to 3.0 m so realistic objects survive while still catching gross wall-behind bleed; SAM2's
+    // tighter silhouette already removes most edge bleed at the source. REMOVE this gate entirely once the
+    // model-conditioned association (fitter accepts/rejects points by its own surface hypothesis) is tested
+    // and live — see [[table-concept-fit-ai-rewrite]] / the mask-bleed→precision plan. Do NOT re-tune the
+    // number; the fix is to delete it, not to grow it further.
+    float       MASK_DEPTH_GATE_BAND_M           = 3.0f;
     // Per-mask radius outlier removal: drop points with fewer than MIN_NEIGHBORS
     // others within RADIUS_M. Trims the sparse silhouette-edge "tail" the depth gate
     // leaves behind, while the dense object body survives. <= 0 disables.
@@ -107,6 +113,26 @@ struct VoxelizerParams
     bool        SEMANTIC_SEG_USE_TRT    = false;
     // Run the (heavy dense) model every Nth cycle; the last map is reused on skipped cycles.
     int         SEMANTIC_SEG_DECIMATION = 1;
+    bool        SEMANTIC_PUBLISH_NODE   = false;   // publish the dense label map to a 'semantic' DSR node under 'zed'
+    float       SEMANTIC_PUBLISH_MIN_INTERVAL_S = 0.5f;   // rate cap for the (large) semantic-node publish
+
+    // SAM2.1 mask REFINEMENT (sam2_stage): a two-model ONNX pipeline that sharpens the mask of an
+    // ALREADY-LOCATED YOLO object (bbox → box+centre prompt → tight SAM2 mask). Viewer overlay only for
+    // now (own PerceptionResult slot; the mask_ingestor route comes later). Default OFF; the heavy 1024²
+    // encoder only fires when the ZED-window "SAM2" toggle is on AND a target object is present.
+    bool        SAM2_ENABLED       = false;                             // Sam2.enabled
+    std::string SAM2_ENCODER_PATH  = "sam2.1_hiera_tiny.encoder.onnx";
+    std::string SAM2_DECODER_PATH  = "sam2.1_hiera_tiny.decoder.onnx";
+    bool        SAM2_USE_GPU       = true;
+    bool        SAM2_ENCODER_USE_TRT = false;   // fixed-shape encoder → TRT FP16 win (slow first build, cached)
+    bool        SAM2_DECODER_USE_TRT = false;   // dynamic-shape decoder → CUDA (TRT needs profiles); cheap anyway
+    int         SAM2_DECIMATION    = 1;                                 // run every Nth enabled frame
+    bool        SAM2_MASK_PRIOR    = true;    // feed the YOLO mask as the decoder mask_input prior
+    float       SAM2_MASK_PRIOR_LOGIT = 4.0f; // ±logit strength of that prior (high → SAM2 echoes YOLO; low → free to tighten)
+    bool        SAM2_METRICS_LOG   = false;   // write etc/sam2_refine_metrics.csv (YOLO vs SAM2 depth-bleed)
+    bool        SAM2_PUBLISH_REFINED = false; // route refined masks into the published 'masks' node (→ fitters);
+                                              // also keeps the SAM2 stage running regardless of the overlay toggle
+    std::vector<std::string> SAM2_REFINE_LABELS{"table", "chair", "monitor", "tv", "bottle"};   // empty → all classes
 
     // Media plane (zero-copy DDS) for RGBD pixels carried OUT of the graph.
     int         MEDIA_DOMAIN_ID   = 0;

@@ -113,7 +113,8 @@ private:
     std::vector<Vertex> residual_vertices_;
     std::vector<Vertex> grid_vertices_;        // residual_concept occupancy-grid cells (amber)
     std::vector<Vertex> grid_border_vertices_; // inflated clearance border (cyan)
-    std::vector<Vertex> grid_field_vertices_;  // Beta belief-field heatmap (hue=P, brightness=confidence)
+    std::vector<Vertex> grid_field_vertices_;  // Beta belief-field COLUMNS: line pairs (floor→top), height=P, hue=P, brightness=confidence
+    std::vector<Vertex> grid_field_cap_vertices_;  // top-of-column cap points (one per field cell)
     std::vector<Vertex> mask_vertices_;
     std::mutex data_mutex_;
 

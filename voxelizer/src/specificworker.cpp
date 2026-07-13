@@ -36,6 +36,7 @@
 #include "seg_stage.h"
 #include "pose_stage.h"
 #include "semantic_stage.h"
+#include "sam2_stage.h"
 #include "bearing_stage.h"
 #include "ricoh_source.h"
 #include "zed_source.h"
@@ -182,6 +183,27 @@ void SpecificWorker::initialize()
         auto sem_stage = std::make_unique<rc::SemanticStage>(sem_config, params.SEMANTIC_SEG_DECIMATION);
         sem_stage->set_enabled(semantic_overlay_enabled_);
         zed_stages.push_back(std::move(sem_stage));
+    }
+
+    // --- SAM2 mask refinement (optional). Runs AFTER SegStage so it can read its detections and sharpen
+    // the target-class masks. Starts DISABLED (gated by the ZED-window "SAM2" toggle) so the heavy 1024²
+    // encoder runs only when shown. Its refined masks land in PerceptionResult::refined_masks. ---
+    if (params.SAM2_ENABLED)
+    {
+        rc::sam2::Config sam2_config;
+        sam2_config.encoder_path = params.SAM2_ENCODER_PATH;
+        sam2_config.decoder_path = params.SAM2_DECODER_PATH;
+        sam2_config.use_gpu          = params.SAM2_USE_GPU;
+        sam2_config.encoder_use_trt  = params.SAM2_ENCODER_USE_TRT;
+        sam2_config.decoder_use_trt  = params.SAM2_DECODER_USE_TRT;
+        sam2_config.mask_prior       = params.SAM2_MASK_PRIOR;
+        sam2_config.mask_prior_logit = params.SAM2_MASK_PRIOR_LOGIT;
+        sam2_config.verbose          = verbose_debug_;
+        auto sam2_stage = std::make_unique<rc::Sam2Stage>(sam2_config, params.SAM2_REFINE_LABELS,
+                                                          params.SAM2_DECIMATION, params.SAM2_METRICS_LOG);
+        // Run when the overlay is on OR when routing refined masks to the fitters (publish_refined).
+        sam2_stage->set_enabled(sam2_overlay_enabled_ or params.SAM2_PUBLISH_REFINED);
+        zed_stages.push_back(std::move(sam2_stage));
     }
 
     // Custom drawing windows (Voxel3D GL + YOLO raster), each in its own top-level window — see
@@ -583,6 +605,12 @@ void SpecificWorker::compute()
             model_overlay_->draw(viewer_rgb, frame->graph_object_boxes, zed_res->frame.room_T_sensor,
                                  frame->room_poly_x, frame->room_poly_y, frame->room_height);
         }
+        // SAM2-refined masks (magenta) when the ZED-window "SAM2" toggle is on — for eyeballing SAM2
+        // vs the raw YOLO masks. compose_canvas returns a fresh Mat, so the shared frame is untouched.
+        if (sam2_overlay_enabled_ and zed_res->refined_masks and not zed_res->refined_masks->empty())
+            if (auto* s2 = dynamic_cast<rc::Sam2Stage*>(zed_worker_ ? zed_worker_->stage("sam2") : nullptr);
+                s2 and s2->refiner())
+                viewer_rgb = s2->refiner()->compose_canvas(viewer_rgb, *zed_res->refined_masks, /*is_bgr=*/true);
         // The "YOLO" toggle in the ZED window gates only the seg-detection overlay (masks/bboxes);
         // the semantic underlay, skeletons and model projections above are independent.
         static const std::vector<SegDetection> kNoDetections;
@@ -700,9 +728,23 @@ void SpecificWorker::compute()
 
         // Masks: publish the WORKER's bundle (its own frame's rgbd/transform/stamp) so the seg masks are
         // deprojected against their own depth. Ricoh bearings ride along in the same node update.
+        // When Sam2.publish_refined is on, swap each detection's YOLO mask for its SAM2-refined counterpart
+        // (matched by label+bbox) so the concept fitters get the tighter support-point clouds. Only on
+        // FRESH SAM2 cycles — a held-last refined mask against the current frame would be mildly stale.
+        const std::vector<SegDetection>* masks_src = zed_res->masks ? &*zed_res->masks : &kNoSegDetections;
+        std::vector<SegDetection> masks_refined;
+        if (params.SAM2_PUBLISH_REFINED and zed_res->masks and zed_res->refined_fresh
+            and zed_res->refined_masks and not zed_res->refined_masks->empty())
+        {
+            masks_refined = *zed_res->masks;
+            for (auto& d : masks_refined)
+                for (const auto& r : *zed_res->refined_masks)
+                    if (not r.mask.empty() and r.label == d.label and r.bbox == d.bbox)
+                    { d.mask = r.mask; break; }
+            masks_src = &masks_refined;
+        }
         graph_publisher_->publish(zed_res->frame.rgbd, zed_res->frame.room_T_sensor,
-                                  zed_res->masks ? *zed_res->masks : kNoSegDetections,
-                                  zed_res->frame.stamp, bearing_dets);
+                                  *masks_src, zed_res->frame.stamp, bearing_dets);
         publish_ms = perf_ms(perf_pub0, std::chrono::steady_clock::now());
 
         // Human-pose branch: BODY_18 skeletons (camera frame) on the 'skeleton' node for human_concept.
@@ -713,6 +755,20 @@ void SpecificWorker::compute()
             const auto perf_skel0 = std::chrono::steady_clock::now();
             graph_publisher_->publish_skeletons(zed_res->frame.rgbd, poses, zed_res->frame.stamp);
             skel_ms = perf_ms(perf_skel0, std::chrono::steady_clock::now());
+        }
+
+        // Dense semantic label map → 'semantic' node under 'zed'. LOW-FREQUENCY (large blob): rate-capped,
+        // and only on cycles the model actually ran (semantic_fresh). Gated by Semantic.publish_node.
+        if (params.SEMANTIC_PUBLISH_NODE and zed_res->semantic_fresh
+            and zed_res->semantic and not zed_res->semantic->labels.empty())
+        {
+            using namespace std::chrono;
+            const auto now = steady_clock::now();
+            if (duration<double>(now - last_semantic_pub_).count() >= params.SEMANTIC_PUBLISH_MIN_INTERVAL_S)
+            {
+                graph_publisher_->publish_semantic(zed_res->semantic->labels, zed_res->frame.stamp);
+                last_semantic_pub_ = now;
+            }
         }
     }
 

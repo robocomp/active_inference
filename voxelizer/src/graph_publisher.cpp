@@ -78,6 +78,36 @@ bool GraphPublisher::ensure_node(const char* name, const char* color, bool& read
     return true;
 }
 
+void GraphPublisher::publish_semantic(const cv::Mat& labels, std::uint64_t stamp)
+{
+    if (labels.empty() or labels.type() != CV_8UC1)
+        return;
+    if (!ensure_node("semantic", "Teal", semantic_ready_, /*relayout=*/true))
+        return;
+    auto node_opt = G_->get_node("semantic");
+    if (!node_opt.has_value())
+        return;
+    auto& node = node_opt.value();
+
+    // Flatten to a contiguous byte buffer (a cv::Mat row may be padded). labels is already at the ZED
+    // image resolution, so semantic_labels[v*width + u] is the class id of original-image pixel (u,v).
+    const int w = labels.cols, h = labels.rows;
+    std::vector<std::uint8_t> buf;
+    buf.reserve(static_cast<std::size_t>(w) * static_cast<std::size_t>(h));
+    for (int r = 0; r < h; ++r)
+    {
+        const std::uint8_t* p = labels.ptr<std::uint8_t>(r);
+        buf.insert(buf.end(), p, p + w);
+    }
+
+    G_->add_or_modify_attrib_local<semantic_labels_att>(node, buf);
+    G_->add_or_modify_attrib_local<semantic_width_att>(node, w);
+    G_->add_or_modify_attrib_local<semantic_height_att>(node, h);
+    G_->add_or_modify_attrib_local<semantic_timestamp_ms_att>(node, stamp);
+    G_->add_or_modify_attrib_local<semantic_frame_id_att>(node, ++semantic_seq_);
+    G_->update_node(std::move(node));
+}
+
 // FRAME CONTRACT — the 'masks' node is a SHARED contract read by every concept agent through ONE
 // component, common/mask_ingestor. Mask support points are DUAL-PUBLISHED, 1-to-1:
 //   * mask_support_points      → ROOM frame  (consumed by table_concept, chair_concept — default path)
@@ -400,7 +430,12 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
         // deproject onto the far wall. That's a COHERENT cluster the radius filter above can't remove. Anchor
         // on the near surface (low percentile of camera-frame depth py; zed frame y = depth) and drop points
         // more than MASK_DEPTH_GATE_BAND_M behind it — the object occludes the background, so those far
-        // returns can't be the object. Physical object-depth prior, not a tuning cutoff (no-threshold-patches).
+        // returns can't be the object.
+        // ⚠ TEMPORARY HARD THRESHOLD — a cliff that silently amputates any object deeper than the band (a 2 m
+        // table along its length loses its far edge). Band widened to 3.0 m as a stopgap. The real fix is
+        // model-conditioned association: let the concept fitter accept/reject points by its own surface
+        // hypothesis (SAM2 already tightens the edge upstream). REMOVE this whole block once that is tested
+        // live — do NOT keep growing the number.
         if (params_.MASK_DEPTH_GATE_BAND_M > 0.0f and mask_points_cam.size() >= 8)
         {
             std::vector<float> depths;

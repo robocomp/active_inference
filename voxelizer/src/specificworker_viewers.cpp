@@ -10,6 +10,7 @@
 #include "specificworker.h"
 #include "perception_worker.h"
 #include "semantic_stage.h"
+#include "sam2_stage.h"
 
 #include <QPushButton>
 #include <QVBoxLayout>
@@ -370,6 +371,27 @@ void SpecificWorker::setup_custom_viewers()
                 sem_btn->setText(checked ? "Semantic: ON" : "Semantic: OFF");
             });
             controls->addWidget(sem_btn);
+        }
+
+        // SAM2 mask-refinement overlay (magenta). Toggle gates the Sam2Stage's enabled flag → the heavy
+        // 1024² encoder only runs while shown. Stage lives in the ZED worker (created after this).
+        if (params.SAM2_ENABLED)
+        {
+            auto* sam2_btn = new QPushButton(sam2_overlay_enabled_ ? "SAM2: ON" : "SAM2: OFF", yolo_panel);
+            sam2_btn->setCheckable(true);
+            sam2_btn->setChecked(sam2_overlay_enabled_);
+            sam2_btn->setCursor(Qt::PointingHandCursor);
+            accent(sam2_btn, "#FF28DC");   // magenta — matches the overlay tint
+            connect(sam2_btn, &QPushButton::toggled, this, [this, sam2_btn](bool checked)
+            {
+                sam2_overlay_enabled_ = checked;
+                if (zed_worker_)
+                    if (auto* s = dynamic_cast<rc::Sam2Stage*>(zed_worker_->stage("sam2")))
+                        // Keep running if publish_refined needs it; otherwise gate the heavy encoder.
+                        s->set_enabled(checked or params.SAM2_PUBLISH_REFINED);
+                sam2_btn->setText(checked ? "SAM2: ON" : "SAM2: OFF");
+            });
+            controls->addWidget(sam2_btn);
         }
         controls->addStretch(1);
 

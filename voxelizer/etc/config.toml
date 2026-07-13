@@ -62,7 +62,7 @@ Verbose = false
 # (see README "TensorRT version lock"). Set false to run on the CUDA EP only — version-independent,
 # same masks, no TRT speedup — if the TRT libs can't be reconciled (e.g. after an apt upgrade).
 use_trt =true
-model_path = "yolo26x-seg.onnx"    # L (was yolo26x-seg): lighter seg to lift compute toward the 24 Hz RGB feed
+model_path = "models/yolo26/yolo26x-seg.onnx"    # L (was yolo26x-seg): lighter seg to lift compute toward the 24 Hz RGB feed
 accepted_labels = ["table", "chair", "monitor", "tv", "bottle"]
 mask_tray = true
 tray_mask_ref_width  = 1280
@@ -86,7 +86,7 @@ tray_mask_polygon = [
 # (camera frame, metres) consumed by human_concept. Default OFF — set enabled=true once the ONNX
 # model exists. Export with: yolo export model=yolo26m-pose.pt format=onnx  (gives yolo26m-pose.onnx).
 enabled = true
-model_path = "yolo26l-pose.onnx"
+model_path = "models/yolo26/yolo26l-pose.onnx"
 conf_thresh = 0.30          # person-detection confidence floor
 kp_conf_min = 0.30          # per-joint floor; below this a keypoint is dropped (NaN)
 depth_patch = 2             # half-window (px) for the median-depth sample at each joint
@@ -99,12 +99,36 @@ decimation = 1              # run pose every Nth cycle; 1 = every frame (no skel
 # map (vs the sparse per-instance seg masks). Currently a viewer overlay only (no DSR publish).
 # Default OFF — set enabled=true once the ONNX model exists. Export with:
 #   yolo export model=yolo26l-sem-ade20k.pt format=onnx   (gives yolo26l-sem-ade20k.onnx).
-enabled = true    # load the dense ADE20K semantic model → the "Semantic" toggle appears in the ZED window
-model_path = "yolo26l-sem-ade20k.onnx"
+enabled = false   # OFF (2026-07-12: not used currently) — no model load, no overlay toggle, no semantic-node
+                  # publish. Flip true to bring the dense ADE20K branch + "Semantic" ZED toggle back.
+model_path = "models/yolo26/yolo26l-sem-ade20k.onnx"
 conf_thresh = 0.25          # per-pixel argmax-softmax floor; below it the pixel is "ignore" (255)
 input_size = 640
-use_trt = false             # dense model; CUDA EP avoids the TRT version lock
+use_trt = true             # dense model; CUDA EP avoids the TRT version lock
 decimation = 2              # run the model every Nth cycle; reuse the last map on skipped cycles
+publish_node = true         # publish the dense label map to a 'semantic' DSR node under 'zed' (large blob → low-freq)
+publish_min_interval_s = 0.5  # min seconds between semantic-node publishes (rate cap; ~2 Hz). The map is big.
+
+[Sam2]
+# SAM2.1 mask REFINEMENT: sharpen the mask of an already-located YOLO object. Runs a two-model ONNX
+# pipeline (encoder once/frame, decoder per object) prompted by each detection's bbox. Viewer overlay
+# only for now (magenta) — toggle "SAM2" appears in the ZED window. Default OFF (heavy 1024² encoder).
+enabled = true
+encoder_path = "models/sam2/sam2.1_hiera_tiny.encoder.onnx"
+decoder_path = "models/sam2/sam2.1_hiera_tiny.decoder.onnx"
+use_gpu = true
+encoder_use_trt = true      # fixed-shape 1024² hiera → TRT FP16 speedup. FIRST launch builds the engine
+                            # (slow, minutes; cached in .trt_cache after) — subsequent launches are fast.
+decoder_use_trt = false     # dynamic-shape decoder (num_labels/points) → CUDA EP; cheap (~7ms) anyway
+decimation = 1              # run every enabled frame (needed for every-frame publish_refined substitution)
+mask_prior = true           # feed the YOLO mask as the decoder's mask_input prior → tighter boundaries
+mask_prior_logit = 4.0      # ±logit strength of that prior. High (8)=SAM2 echoes YOLO; low (2)=free to tighten.
+                            # A/B this + mask_prior=false against the metric CSV to see what refines most.
+metrics_log = true          # log etc/sam2_refine_metrics.csv: per-object depth-bleed YOLO vs SAM2 (the win)
+publish_refined = true      # route SAM2 masks into the published 'masks' node (→ concept fitters). When true,
+                            # SAM2 runs continuously (not just when the overlay toggle is on). Only fresh
+                            # (non-decimated) cycles substitute, so set decimation=1 for every-frame refinement.
+refine_labels = ["table", "chair", "monitor", "tv", "bottle"]   # which classes to refine ([] → all detections)
 
 [Voxel]
 # Custom drawing windows (own top-level windows). Set false for headless/production.
@@ -113,9 +137,13 @@ show_yolo_viewer  = true
 show_ricoh_viewer = true   # creates the Ricoh360 button+popup (popup hidden until toggled)
 perf_log = false   # per-frame compute/yolo/pose timing -> etc/viewer_perf.csv (diagnostic; flushes CSVs every
                    # frame — leave OFF in production, flip true only to capture a timing trace)
-mask_depth_gate_band_m = 1.50  # ZED mask FOREGROUND gate: keep points within this depth band (m) of the mask's
+mask_depth_gate_band_m = 3.0   # ZED mask FOREGROUND gate: keep points within this depth band (m) of the mask's
                                # near surface; farther points = wall-behind bleed (RGB↔depth skew while moving) → dropped.
-                               # Sized to the deepest object (table). Lower to cut closer walls; 0 disables.
+                               # ⚠ HARD THRESHOLD, TEMPORARY. At 1.5 it silently amputated the far half-metre of any
+                               # object deeper than 1.5 m (e.g. a 2 m table along its length). Widened to 3.0 so real
+                               # objects survive; SAM2's tighter masks already cut edge bleed at the source. TO BE
+                               # REMOVED once the model-conditioned association (fitter rejects bleed by its own
+                               # surface hypothesis) is tested live. Don't re-tune — the fix is to delete it. 0 disables.
 
 # Homeostatic perception-rate regulator: holds compute() near target_hz by adapting pose
 # decimation (AIMD + hysteresis). Actuator = pose only (YOLO-seg is the core product). Reacts to
