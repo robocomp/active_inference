@@ -12,6 +12,7 @@
 #include "table_fitter.h"
 #include "table_voxel_bank.h"
 #include "../../common/object_anchor/object_anchor_contract.h"
+#include "../../common/object_anchor/ray_anisotropic_cov.h"
 
 #include <algorithm>
 #include <chrono>
@@ -35,6 +36,7 @@ TableFitter::TableFitter(std::shared_ptr<DSR::DSRGraph> graph,
       mask_ingestor_(mask_ingestor), scene_graph_(scene_graph),
       projection_(std::make_unique<TableProjection>(graph, inner_eigen, mask_ingestor))
 {
+    TableBeliefState::use_quotient = cfg.quotient_chart;   // C2v symmetry-quotient optimisation chart (global mode)
 }
 
 // Enable Part-B chain-covariance propagation from source_frame (no-op unless a gaussian API + frame are given).
@@ -96,6 +98,24 @@ void TableFitter::compute_object_observation(TableInstance& inst)
         return;
     const Mat::Vector3d p = m.value() * c_cam;
     inst.obs_robot       = {static_cast<float>(p.x()), static_cast<float>(p.y()), 0.0f};  // position-only
+
+    // Anisotropic measurement covariance R_o (body frame): loose along the viewing ray (near-face/partial-
+    // view depth bias), tight ⊥. Ray origin = camera optical centre in body = the extrinsic translation.
+    // box_yaw in body = belief yaw (room) + yaw(body←room). See TABLE_TRIANGULATION.md.
+    {
+        const Mat::Vector3d cam_o = m.value() * Mat::Vector3d(0, 0, 0);
+        const Eigen::Vector2f cam_xy{static_cast<float>(cam_o.x()), static_cast<float>(cam_o.y())};
+        const Eigen::Vector2f cen_xy{inst.obs_robot.x(), inst.obs_robot.y()};
+        const auto bs = inst.ai2_belief.state();
+        float box_yaw_body = bs.yaw;
+        if (const auto br = inner_eigen_->get_transformation_matrix(obs_robot_frame_, "room", 0); br.has_value())
+            box_yaw_body = bs.yaw + static_cast<float>(std::atan2(br.value().linear()(1, 0),
+                                                                  br.value().linear()(0, 0)));
+        inst.obs_robot_cov = rc::object_anchor::ray_anisotropic_cov(
+            cen_xy, cam_xy, {0.5f * bs.w, 0.5f * bs.h}, box_yaw_body,
+            std::max(0.1f, inst.last_range), std::clamp(inst.dbg_obliquity_cos, 0.f, 1.f),
+            rc::object_anchor::RayCovParams{});
+    }
     inst.obs_robot_valid = true;
 }
 
@@ -364,6 +384,14 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
         p.clutter_frac    = cfg_.ai2_clutter_frac;
         p.clutter_scale_m = cfg_.ai2_clutter_scale_m;
         p.prior_size_std  = cfg_.ai2_prior_size_std;
+        p.anisotropic_r          = cfg_.anisotropic_r;   // Stage 1: per-point deprojection-noise R (sensor consts)
+        p.pixel_sigma_over_f     = cfg_.pixel_sigma_over_f;
+        p.depth_sigma0_m         = cfg_.depth_sigma0_m;
+        p.depth_sigma_range_coef = cfg_.depth_sigma_range_coef;
+        p.model_sigma_m          = cfg_.model_sigma_m;
+        p.footprint_residual     = cfg_.footprint_residual;   // a1′+a2′: 2-D footprint residual + shared depth-affine
+        p.depth_bias_std         = cfg_.depth_bias_std;
+        p.depth_scale_std        = cfg_.depth_scale_std;
         p.process_std_m   = cfg_.ai2_process_std_m;
         p.process_std_yaw = cfg_.ai2_process_std_yaw;
         p.common_mode_pos_std  = cfg_.ai2_common_mode_pos_std;
@@ -445,9 +473,12 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
     // grazing. Completeness + the per-channel yaw split are filled after the update. See the [yaw-jump] log.
     inst.dbg_yaw_pre = inst.ai2_belief.state().yaw;
     inst.dbg_dyaw_points = 0.0f; inst.dbg_dyaw_moment = 0.0f; inst.dbg_dyaw_flip = 0.0f; inst.dbg_completeness = 1.0f;
+    Eigen::Vector3f cam_origin_room = Eigen::Vector3f::Zero();   // for the anisotropic per-point R (Stage 1)
+    bool have_cam = false;
     if (const auto rTz = projection_->room_T_zed_matrix(inst.last_mask_timestamp_ms); rTz)
     {
         const Eigen::Vector3d cam = rTz->block<3, 1>(0, 3);   // camera origin in the room frame
+        cam_origin_room = cam.cast<float>(); have_cam = true;
         const auto& s0b = inst.ai2_belief.state();
         const Eigen::Vector3d ray(s0b.cx - cam.x(), s0b.cy - cam.y(), s0b.H - cam.z());   // camera→tabletop centre
         const double rn = ray.norm();
@@ -464,6 +495,9 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
         frame.points.insert(frame.points.end(), observation.candidate_pts.begin(), observation.candidate_pts.end());
         frame.points.insert(frame.points.end(), observation.residual_pts.begin(), observation.residual_pts.end());
         frame.R.assign(frame.points.size(), R);
+        // Ray geometry (needed by the footprint residual + tilt→yaw common-mode below and the anisotropic R later).
+        if ((cfg_.anisotropic_r or cfg_.footprint_residual) and have_cam)
+        { frame.cam_origin = cam_origin_room; frame.has_rays = true; }
         frame.chain_cov_xx  = inst.chain_cov_xx + range_lat_var;   // range adds to the SHARED position error (cap)
         frame.chain_cov_yy  = inst.chain_cov_yy + range_lat_var;
         // Obliquity yaw cap: at an edge-on (grazing) view the tabletop cloud is ~1-D along the near edge, so yaw
@@ -475,7 +509,11 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
         constexpr float kObliquityYawGain = 0.05f;   // ~30° σ_yaw at cos=0.09 → per-point GN holds yaw at grazing
         const float oblq_cos          = std::clamp(inst.dbg_obliquity_cos, 0.05f, 1.0f);
         const float obliquity_yaw_std = kObliquityYawGain * (1.0f / oblq_cos - 1.0f);   // 0 at top-down
-        frame.chain_cov_yaw  = range_yaw_var + obliquity_yaw_std * obliquity_yaw_std;   // range + grazing-view cap
+        // FootprintResidual on ⇒ chain_cov_yaw is the DERIVED tilt→yaw aliasing variance (replaces the tuned
+        // obliquity+range yaw gains — PRECISION_AS_INFORMATION.md a2′ Tier-1); else the legacy tuned form.
+        frame.chain_cov_yaw = cfg_.footprint_residual
+            ? range_yaw_var + inst.ai2_belief.tilt_yaw_common_mode(frame, cfg_.depth_tilt_std)
+            : range_yaw_var + obliquity_yaw_std * obliquity_yaw_std;   // range + grazing-view cap
         frame.chain_cov_size = range_size_var;                     // ...nor RESHAPE/inflate — geometry freezes afar
         // Footprint-moment SHARED per-frame variance: ego-motion mask corruption + a GENTLE range term (a global
         // footprint fit is far more range-robust than a single boundary point, so a coefficient << the per-point
@@ -500,6 +538,16 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
         // or no fresh sweep. The shared factor (accumulate_lidar_rays<6> in TableBelief::accumulate_extra)
         // sphere-traces this belief's own SDF, so the same call the bottle uses drops in unchanged.
         lidar_channel_.feed(inst, frame);
+
+        // Stage 1 (PRECISION_AS_INFORMATION.md): replace the scalar per-point R with the anisotropic deprojection
+        // noise projected on the SDF normal. Ego-motion variance is preserved as an isotropic floor (Stage 2 will
+        // subsume it into the nuisance Jacobian). No-op unless the flag is on and we know the camera origin — then
+        // a grazing view's yaw-carrying points get huge R → the per-point GN cannot rotate a converged table,
+        // WITHOUT the obliquity/range yaw gains above (which this is designed to make redundant).
+        if (cfg_.anisotropic_r and frame.has_rays)   // cam_origin/has_rays set above with the chain-cov block
+            inst.ai2_belief.fill_anisotropic_R(frame, std::max(0.0f, inst.last_motion_var));
+        // (the footprint residual runs inside ai2_belief.update via accumulate_footprint; its tilt→yaw common-mode
+        //  was folded into frame.chain_cov_yaw above so the engine Woodbury caps the total yaw information)
 
         // Divergence safety net (mirrors bottle): snapshot state+Σ, run the update, and if the centre teleports
         // beyond a physical bound in one frame (corrupted mask cloud / one-sided LiDAR runaway → the cx=−200m
@@ -557,7 +605,10 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
         const float mref = std::max(1e-3f, cfg_.orientation_motion_ref);
         const float dotd = std::abs(inst.last_motion_dotd);
         const float mode_evidence_weight = 1.0f / (1.0f + (dotd / mref) * (dotd / mref));
-        if (inst.ai2_belief.resolve_orientation(frame.points, R, mode_evidence_weight) and should_log(inst))
+        // The quotient chart makes the w↔h mode a continuous, single-valued coordinate — the discrete flip
+        // accumulator is unrepresentable and unnecessary (skipped). Legacy path keeps resolve_orientation.
+        if (not rc::TableBeliefState::use_quotient
+            and inst.ai2_belief.resolve_orientation(frame.points, R, mode_evidence_weight) and should_log(inst))
             std::print("[{}] orientation mode FLIP (w↔h) | flip_ev={:.3f} p_alt={:.2f}\n",
                        inst.node_name, inst.ai2_belief.flip_evidence(), inst.ai2_belief.mode_posterior());
 

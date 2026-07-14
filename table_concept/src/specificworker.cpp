@@ -318,6 +318,10 @@ void SpecificWorker::compute()
     ev_g_.births = ev_g_.merges = ev_g_.removals = 0;
     ev_g_.mask_stale = not fresh_masks;
 
+    // Snapshot the residual (surprise) field ONCE per cycle before the tracker, so fused birth (run_instance_
+    // tracker) and the logging probe (compute() tail) share one read. No-op unless a probe/fusion flag is on.
+    if (cfg_.birth_fusion or cfg_.birth_surprise_probe) read_residual_field();
+
     run_instance_tracker();   // data-driven birth / associate / merge (the only instance-lifecycle path)
 
     // Stage this cycle's LiDAR sweep (room frame) for the fitter's range factor. clear-then-set so the factor
@@ -377,23 +381,33 @@ void SpecificWorker::compute()
 // Log, per cycle, the regions NOT already covered by a believed table alongside the tracker's actual birth count,
 // so we can see whether surprise flags a real new table cleanly (and stays quiet on phantoms) BEFORE letting it
 // drive the lifecycle. Never writes the graph; never births. See [[table-birth-surprise-probe]].
-void SpecificWorker::log_birth_surprise()
+// Snapshot residual_concept's `grid` node (published under room ~2 Hz) into residual_field_ — the dense
+// P(occupied ∧ ¬explained) surprise field. Read-only; never mutates the graph. Called once at the compute() head
+// so BOTH the fused-birth path (run_instance_tracker) and the logging probe (log_birth_surprise) share one read.
+bool SpecificWorker::read_residual_field()
 {
-    if (not cfg_.birth_surprise_probe or room_node_id_ == 0) return;
-    const auto gopt = G->get_node("grid");   // residual_concept publishes this under room (~2 Hz)
-    if (not gopt.has_value()) return;
+    residual_field_ = rc::GridField{};   // reset (empty ⇒ invalid ⇒ consumers no-op)
+    if (room_node_id_ == 0) return false;
+    const auto gopt = G->get_node("residual");   // node renamed "grid"→"residual" (type stays "grid")
+    if (not gopt.has_value()) return false;
     const auto& gnode = gopt.value();
     const auto pa = G->get_attrib_by_name<grid_occupancy_prob_att>(gnode);
     const auto ma = G->get_attrib_by_name<grid_field_meta_att>(gnode);
-    if (not (pa.has_value() and ma.has_value())) return;
+    if (not (pa.has_value() and ma.has_value())) return false;
     const auto& M = ma.value().get();
-    if (M.size() < 5) return;
+    if (M.size() < 5) return false;
+    residual_field_.prob = pa.value().get();   // snapshot copy (small, ~2 Hz)
+    if (const auto va = G->get_attrib_by_name<grid_occupancy_var_att>(gnode); va.has_value())
+        residual_field_.var = va.value().get();
+    residual_field_.xmin = M[0]; residual_field_.ymin = M[1]; residual_field_.cell = M[2];
+    residual_field_.width = static_cast<int>(M[3]); residual_field_.height = static_cast<int>(M[4]);
+    return residual_field_.valid();
+}
 
-    rc::GridField gf;
-    gf.prob = pa.value().get();   // snapshot copy (small, ~2 Hz); read-only — never mutate the graph's field
-    if (const auto va = G->get_attrib_by_name<grid_occupancy_var_att>(gnode); va.has_value()) gf.var = va.value().get();
-    gf.xmin = M[0]; gf.ymin = M[1]; gf.cell = M[2];
-    gf.width = static_cast<int>(M[3]); gf.height = static_cast<int>(M[4]);
+void SpecificWorker::log_birth_surprise()
+{
+    if (not cfg_.birth_surprise_probe or not residual_field_.valid()) return;
+    const rc::GridField& gf = residual_field_;   // read at the compute() head by read_residual_field()
 
     // Believed table footprints (room frame) — a region under one is already explained, NOT a birth.
     std::vector<rc::FootprintBox> tables;

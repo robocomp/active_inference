@@ -161,7 +161,8 @@ void TableSceneGraph::step_write_model(TableInstance& inst, DSR::Node& node,
     // localizer's landmark factor. Position-only (single-view yaw is biased). Batched into this node
     // write; only present when the fitter has it enabled (OFF by default).
     if (inst.obs_robot_valid)
-        rc::object_anchor::write_observation(*G_, node, inst.obs_robot, /*has_orientation=*/false);
+        rc::object_anchor::write_observation_aniso(
+            *G_, node, inst.obs_robot.head<2>(), inst.obs_robot_cov);   // anisotropic R_o (ray-loose)
 
     G_->update_node(node);
 

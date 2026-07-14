@@ -109,8 +109,15 @@ float update(Model& m, typename Model::State& state, Eigen::Matrix<float, N, N>&
 
     const MatN P0 = Sigma.inverse();
     VecN theta = state.vec();
-    const VecN Sc_inv = m.common_mode_inv_diag(frame);
-    const MatN Scinv  = Sc_inv.asDiagonal();
+    // Common-mode marginalisation term Σc⁻¹. A model may optionally provide a FULL 6×6 (common_mode_inv) — needed
+    // when the optimisation chart makes a shared error a rank-1 OFF-DIAGONAL term (e.g. the table's quotient chart,
+    // where the yaw cap is a rotation in (a₁,a₂) a diagonal cannot represent). Detected via C++23 requires, so a
+    // model with only the diagonal hook (bottle/chair) is completely unaffected.
+    MatN Scinv;
+    if constexpr (requires { m.common_mode_inv(frame); })
+        Scinv = m.common_mode_inv(frame);
+    else
+        Scinv = m.common_mode_inv_diag(frame).asDiagonal();
     const int  P = m.n_prims();
 
     MatN Id; VecN bd;

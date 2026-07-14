@@ -82,6 +82,11 @@ struct TableInstance
     // Per-frame ROBOT-frame observation z_o (x,y,yaw) for the room localizer's object-anchor factor.
     // Computed by the fitter (gated), published by the scene-graph writer. See common/object_anchor.
     Eigen::Vector3f obs_robot = Eigen::Vector3f::Zero();
+    // Anisotropic 2×2 measurement covariance R_o (ROBOT/body frame) for this single-view centroid: tight
+    // ⊥-ray, loose along-ray so the near-face/partial-view bias falls in R_o's null-space and can't drag
+    // the robot pose. Built in compute_object_observation via ray_anisotropic_cov; published as
+    // obj_obs_robot_cov=[Rxx,Ryy,Rxy]. See TABLE_TRIANGULATION.md.
+    Eigen::Matrix2f obs_robot_cov = Eigen::Matrix2f::Identity();
     bool obs_robot_valid = false;
     int  processed_cycles = 0;        // per-table compute cycles for log throttling
     // Tracker's gated mask assignments for THIS frame (indices into the masks packet slices). With

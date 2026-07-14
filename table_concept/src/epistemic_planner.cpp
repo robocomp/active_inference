@@ -71,7 +71,7 @@ EpistemicProposal EpistemicPlanner::compute(const TableBelief& belief, float lat
     // REPORTED covariance: Σ with the yaw entry inflated by the discrete-mode entropy (p(1−p)(π/2)²), so a
     // near-square table whose orientation mode is unresolved shows a large yaw variance → the D-optimal NBV
     // scores a mode-discriminating (side/leg) view highly and drives the orbit that resolves it.
-    const Eigen::Matrix<float, 6, 6> S = belief.covariance_reported();   // full Σ over [cx,cy,H,w,h,yaw]
+    const Eigen::Matrix<float, 6, 6> S = belief.covariance_reported().topLeftCorner<6, 6>();   // [cx,cy,H,w,h,yaw] (drop the tilt-calibration DOF)
     const TableBeliefState& s = belief.state();
 
     const float cy = std::cos(s.yaw), sy = std::sin(s.yaw);
@@ -121,7 +121,7 @@ EpistemicProposal EpistemicPlanner::compute(const TableBelief& belief, float lat
     {
         const float standoff = standoff_for(faces[i].half_span);
         const float Ri = sigma_base * sigma_base + (lat_rate * standoff) * (lat_rate * standoff);
-        const auto  dI = belief.predicted_information(sample_face_surface(s, i), Ri);
+        const Eigen::Matrix<float, 6, 6> dI = belief.predicted_information(sample_face_surface(s, i), Ri).topLeftCorner<6, 6>();
         const float det  = (I6 + S * dI).determinant();
         const float raw_gain = std::max(0.0f, 0.5f * std::log(std::max(1e-9f, det)));   // single-view D-optimal info (nats)
         face_raw[i] = raw_gain;

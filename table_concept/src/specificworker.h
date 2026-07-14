@@ -180,7 +180,9 @@ private:
     rc::EvidenceMonitor* evidence_monitor_ = nullptr;
     rc::EvidenceGlobals  ev_g_{};                       // pipeline counters (per-cycle fields reset in compute)
     void refresh_evidence_monitor();                    // throttled build+push of the snapshot (main thread)
+    bool read_residual_field();                         // snapshot residual_concept's `grid` node → residual_field_
     void log_birth_surprise();                          // EXPERIMENTAL read-only probe (cfg_.birth_surprise_probe)
+    rc::GridField        residual_field_;               // this cycle's residual (surprise) field; read at compute head
     std::ofstream        birth_surprise_csv_;           // etc/birth_surprise.csv (opened lazily when the probe is on)
     std::ofstream        birth_fusion_csv_;             // etc/birth_fusion.csv (detection-conditioned residual mass)
     int                  birth_surprise_log_ctr_ = 0;   // console-throttle counter

@@ -53,6 +53,22 @@ SdfThresholdForStorage = 0.08  # |SDF| below which a mask support point is on-su
 AI2CsvPath = "etc/ai2_log.csv"  # per-cycle AI2 log (state + Σ diag + mask R/bias); empty disables
 BirthSurpriseProbe = true    # EXPERIMENTAL read-only: read residual_concept's `grid` node as a surprise (unexplained-occupancy) field, cluster it, log uncovered high-surprise regions vs the tracker's births → etc/birth_surprise.csv. true to test; no fit/graph effect
 AI2SigmaBaseM = 0.03        # base on-surface obs noise std (m); R = σ² + mask_motion_var per frame
+# Anisotropic per-point R (PRECISION_AS_INFORMATION.md Stage 1): per-point variance = deprojection noise
+# projected on the SDF normal → a grazing view carries ~0 yaw information by construction (replaces the
+# obliquity/range yaw gains). The 4 constants below are PHYSICAL ZED sensor noise, not tuning knobs.
+AnisotropicR = false        # true to enable; when on, obliquity/range yaw gains become redundant (Stage 1 A/B)
+PixelSigmaOverF = 0.0015    # σ_px/focal → transverse position std per metre of range
+DepthSigma0M = 0.006        # depth std floor (m)
+DepthSigmaRangeCoef = 0.004 # depth std growth (m per m² of range): σ_d = σ0 + coef·range²
+ModelSigmaM = 0.010         # residual model/surface std floor (m)
+# a1′+a2′ (PRECISION_AS_INFORMATION.md): weighted 2-D footprint residual + shared per-frame depth-affine nuisance.
+# THE grazing-yaw fix — models yaw where it lives (the footprint) and marginalizes the common depth bias/scale
+# that aliases into yaw at grazing. REPLACES the footprint-moment channel when on. depth_*_std = ZED depth priors.
+FootprintResidual = false   # true to enable (needs the ray geometry; supersedes the FootprintMoment* + obliquity yaw knobs)
+QuotientChart = false       # C2v symmetry-quotient chart [s,a1,a2] (Stage 3): kills 90°/180° yaw snaps + honest near-square σ_yaw; retires the fold/flip machinery. Pair with FootprintResidual
+DepthTiltStd = 0.020        # shared per-frame depth TILT prior std (m/rad) — the azimuth-odd mode that aliases into yaw
+DepthBiasStd = 0.015        # shared per-frame depth bias prior std (m)   — extent/pos nuisance (future)
+DepthScaleStd = 0.010       # shared per-frame depth scale prior std (fraction) — extent nuisance (future)
 AI2ClutterFrac = 0.10       # ε: prior weight of the uniform clutter mixture component
 AI2ClutterScaleM = 0.12     # a point further than ~this from EVERY surface is explained by clutter
 AI2PriorSizeStd = 0.30      # broad size prior std (m) on w,h,H
@@ -219,6 +235,13 @@ DetectionNoiseM = 0.35    # det-noise std R added to fit cov in the gate (S=P+R�
                           # vs fitted-centre offset of a partially-viewed table (~0.2–0.5 m), else the
                           # overconfident fit rejects its own detection. Tables are far apart → safe.
 BirthFrames = 8           # frames a mask must stay unexplained before spawning a table
+# FUSED BIRTH (EXPERIMENTAL): residual-grid surprise mass under a detection accelerates its birth. birth_evidence
+# = 1 + Gain·(m/(m+MassRef)) per frame toward BirthFrames; a corroborated detection (high unexplained-occupancy)
+# births in ~1-2 frames, a phantom (m≈0 → evidence 1) serves the full 8-frame debounce. Needs residual_concept.
+BirthFusion = true         # true to enable; needs BirthSurpriseProbe infra (reads the `grid` node)
+BirthFusionGain = 6.0      # max extra evidence/frame at full corroboration (0 ⇒ baseline birth timing)
+BirthFusionMassRef = 8.0   # residual mass at which corroboration is half-saturated
+BirthFusionRadiusM = 0.50  # window (m) for the residual-mass sample under the detection
 DeathFrames = 300         # (only if DeathEnabled) frames unobserved before retirement (~30 s @ 100 ms)
 DeathEnabled = false      # OFF: a table is rigid persistent furniture — a long occlusion is not absence.
                           # Removal is by the MERGE operator ONLY (two tables can't share space).

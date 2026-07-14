@@ -65,6 +65,24 @@ struct TableConfig
     float ai2_trunc_gate_frac = 0.10f;
     int   ai2_gn_iters        = 4;       // Gauss-Newton iterations per frame
     std::string ai2_csv_path  = "";      // if non-empty, append per-cycle belief (state + Σ diag + mask R) to CSV
+    // Anisotropic per-point R (PRECISION_AS_INFORMATION.md Stage 1). Replaces the scalar per-point variance with
+    // the deprojection noise projected on the SDF normal → a grazing view carries ~0 yaw information by
+    // construction (no obliquity/range yaw gains needed). The 4 constants are PHYSICAL (ZED sensor), not tuning.
+    bool  anisotropic_r          = false;
+    float pixel_sigma_over_f     = 0.0015f;  // σ_px/f → transverse std per m of range
+    float depth_sigma0_m         = 0.006f;   // depth std floor (m)
+    float depth_sigma_range_coef = 0.004f;   // depth std growth (m per m² of range)
+    float model_sigma_m          = 0.010f;   // residual model std floor (m)
+    // a1′+a2′: weighted 2-D footprint residual + shared depth-affine nuisance (replaces the moment channel; the
+    // real grazing-yaw fix). depth_bias/scale_std are the ZED depth-affine priors (physical). See belief params.
+    bool  footprint_residual     = false;
+    // C2v symmetry-quotient chart (PRECISION_AS_INFORMATION.md Stage 3): optimise the footprint in [s,a₁,a₂]
+    // so the 4 box representatives collapse to one point — no fold/flip/mode-accumulator, no 90°/180° yaw snaps,
+    // and σ_yaw diverges honestly near-square. Global (set once at startup). Pairs with footprint_residual.
+    bool  quotient_chart         = false;
+    float depth_tilt_std         = 0.020f;   // shared per-frame depth tilt prior std (m/rad) — the yaw nuisance
+    float depth_bias_std         = 0.015f;   // shared per-frame depth bias prior std (m)
+    float depth_scale_std        = 0.010f;   // shared per-frame depth scale prior std (fraction)
     // EXPERIMENTAL birth-surprise probe (read-only): read residual_concept's `grid` node as an unexplained-
     // occupancy (surprise) field, cluster it, and LOG uncovered high-surprise regions next to the tracker's
     // birth decision — to check whether surprise flags births cleanly before it drives the lifecycle. OFF = no
@@ -199,6 +217,16 @@ struct TableConfig
     // so R must cover that offset or the overconfident fit (σ ~mm) rejects its own real detection.
     float tracker_detection_noise_m = 0.35f;
     int   tracker_birth_frames      = 8;      // frames a mask must stay unexplained before spawning a table
+    // FUSED BIRTH (EXPERIMENTAL, off by default): let residual-grid SURPRISE MASS under a detection accelerate its
+    // birth. Per frame a detection contributes birth_evidence = 1 + gain·(m/(m+ref)) toward the birth_frames
+    // boundary, where m = residual mass within radius of the detection (birth_surprise_probe.h). A CORROBORATED
+    // detection (real object → high unexplained-occupancy) crosses in ~1-2 frames; an UN-corroborated / phantom
+    // detection (m≈0 → evidence 1.0) still serves the full birth_frames debounce → phantoms are NOT made easier,
+    // only real births faster. Birth = evidence-to-a-boundary (residual raises the prior), not a fixed counter.
+    bool  birth_fusion          = false;
+    float birth_fusion_gain     = 6.0f;   // max extra evidence/frame at full corroboration (0 ⇒ baseline)
+    float birth_fusion_mass_ref = 8.0f;   // residual mass at which corroboration is half-saturated (m/(m+ref))
+    float birth_fusion_radius_m = 0.50f;  // window (m) for the residual-mass sample under the detection
     int   tracker_death_frames      = 300;    // frames an instance may go unobserved before retirement (large)
     bool  tracker_death_enabled     = false;  // OFF: a table is rigid, persistent furniture — never retired by
                                               // a miss timer. Removal is by the MERGE operator only.

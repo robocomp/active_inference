@@ -92,6 +92,13 @@ struct DetectionView
     // its own this frame — e.g. a low-confidence or high-range-variance 360-RGB/LiDAR peripheral mask. Such a
     // detection still refines a track it gates to; it just can't birth phantoms. Default true.
     bool            birthable = true;
+    // Per-frame BIRTH EVIDENCE this detection contributes to its pending candidate's maturation. Default 1.0 ⇒
+    // the classic "birth_frames consecutive frames" behaviour (streak += 1 each frame). An agent that has an
+    // INDEPENDENT corroborating cue this frame (e.g. table_concept: residual-grid surprise mass under the
+    // detection — the geometry already agrees a real object is here) raises it >1 so a corroborated detection
+    // crosses the birth boundary in fewer frames, while an un-corroborated/phantom detection (evidence 1.0)
+    // still serves the full debounce. Birth becomes evidence-accumulation-to-a-boundary, not a fixed counter.
+    float           birth_evidence = 1.0f;
 };
 
 // One cycle's decision: det→track assignment + which detections birth + which tracks die.
@@ -206,7 +213,7 @@ public:
             Candidate cand;
             if (best >= 0) { cand = candidates_[best]; candidates_[best].claimed = true; }
             cand.xy     = xy;                                 // track the blob's latest position
-            cand.streak = (best >= 0 ? cand.streak : 0) + 1;
+            cand.streak = (best >= 0 ? cand.streak : 0.0f) + dets[d].birth_evidence;   // accumulate birth evidence
 
             // Don't let two fresh dets seed the same birth this frame.
             bool dup = false;
@@ -227,7 +234,7 @@ public:
     void reset() { miss_count_.clear(); candidates_.clear(); }
 
 private:
-    struct Candidate { Eigen::Vector2f xy = Eigen::Vector2f::Zero(); int streak = 0; bool claimed = false; };
+    struct Candidate { Eigen::Vector2f xy = Eigen::Vector2f::Zero(); float streak = 0.0f; bool claimed = false; };
 
     TrackerParams                          params_;
     std::unordered_map<std::uint64_t, int> miss_count_;   // track id → consecutive unsupported frames

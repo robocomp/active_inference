@@ -65,6 +65,16 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.ai2_gn_iters         = geti("TableModel.AI2GnIters",          4);
     out.ai2_csv_path         = gets("TableModel.AI2CsvPath",          "");
     out.birth_surprise_probe = getb("TableModel.BirthSurpriseProbe",  false);
+    out.anisotropic_r          = getb("TableModel.AnisotropicR",          false);
+    out.pixel_sigma_over_f     = getf("TableModel.PixelSigmaOverF",       0.0015f);
+    out.depth_sigma0_m         = getf("TableModel.DepthSigma0M",          0.006f);
+    out.depth_sigma_range_coef = getf("TableModel.DepthSigmaRangeCoef",   0.004f);
+    out.model_sigma_m          = getf("TableModel.ModelSigmaM",           0.010f);
+    out.footprint_residual     = getb("TableModel.FootprintResidual",     false);
+    out.quotient_chart         = getb("TableModel.QuotientChart",          false);
+    out.depth_tilt_std         = getf("TableModel.DepthTiltStd",          0.020f);
+    out.depth_bias_std         = getf("TableModel.DepthBiasStd",          0.015f);
+    out.depth_scale_std        = getf("TableModel.DepthScaleStd",         0.010f);
 
     // ─── RT-edge covariance upload ─────────────────────────────────────────────
     out.rt_cov_scale                  = getf("TableConcept.RtCovScale",           1.0f);
@@ -76,6 +86,10 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.tracker_gate_fallback_m  = getf("Tracker.GateFallbackM",    0.50f);
     out.tracker_detection_noise_m = getf("Tracker.DetectionNoiseM", 0.35f);
     out.tracker_birth_frames     = geti("Tracker.BirthFrames",      8);
+    out.birth_fusion             = getb("Tracker.BirthFusion",       false);
+    out.birth_fusion_gain        = getf("Tracker.BirthFusionGain",   6.0f);
+    out.birth_fusion_mass_ref    = getf("Tracker.BirthFusionMassRef",8.0f);
+    out.birth_fusion_radius_m    = getf("Tracker.BirthFusionRadiusM",0.50f);
     out.tracker_death_frames     = geti("Tracker.DeathFrames",      300);
     out.tracker_death_enabled    = getb("Tracker.DeathEnabled",     false);
     out.tracker_birth_min_sep_m  = getf("Tracker.BirthMinSepM",     0.60f);

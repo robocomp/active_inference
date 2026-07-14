@@ -39,13 +39,44 @@ struct FootprintMoment
 };
 
 // Fitted table state θ = [cx, cy, H, w, h, yaw] (room frame; H = tabletop height, canonical w≥h).
+// The FIELDS are always (w,h,yaw) — all SDF/publish/existence code reads them directly. The OPTIMIZATION vector
+// vec()/from_vec() optionally switches to the C2v SYMMETRY-QUOTIENT chart [cx,cy,H, s, a₁, a₂] (use_quotient), so
+// the GN optimises where the box likelihood actually lives: s=(w²+h²)/24, a=((w²−h²)/24)(cos2ψ,sin2ψ). All four
+// symmetry representatives {(w,h,ψ),(h,w,ψ+90°),(w,h,ψ+180°),(h,w,ψ+270°)} map to the SAME (s,a₁,a₂) point, so the
+// fold/flip/mode-accumulator bug class is UNREPRESENTABLE and yaw can't snap 90°/180°. See PRECISION_AS_INFORMATION.
 struct TableBeliefState
 {
     float cx = 0.0f, cy = 0.0f, H = 0.75f, w = 1.0f, h = 0.6f, yaw = 0.0f;
+    // t = slowly-varying DEPTH-TILT calibration state (PRECISION_AS_INFORMATION.md, N=7). A persistent depth tilt
+    // (a fixed camera-frame miscalibration) shears the footprint and aliases into yaw; per-frame capping it is
+    // fragile (bias↔variance sweet-spot). Instead it is CO-ESTIMATED here and SUBTRACTED, so yaw stays fully
+    // informed and unbiased. Its uncertainty folds into the reported yaw Σ automatically (marginalise over t).
+    float t = 0.0f;
 
-    Eigen::Matrix<float, 6, 1> vec() const { return (Eigen::Matrix<float, 6, 1>() << cx, cy, H, w, h, yaw).finished(); }
-    static TableBeliefState from_vec(const Eigen::Matrix<float, 6, 1>& v)
-    { return {v(0), v(1), v(2), v(3), v(4), v(5)}; }
+    inline static bool use_quotient = false;   // global chart mode (set once from config at startup)
+
+    Eigen::Matrix<float, 7, 1> vec() const
+    {
+        const float e6 = t;   // the tilt state rides in slot 6 unchanged by the chart
+        if (not use_quotient)
+            return (Eigen::Matrix<float, 7, 1>() << cx, cy, H, w, h, yaw, e6).finished();
+        const float s  = (w * w + h * h) / 24.0f;
+        const float m  = (w * w - h * h) / 24.0f;   // signed anisotropy (w<h ⇒ negative ≡ +90° in the angle)
+        return (Eigen::Matrix<float, 7, 1>() << cx, cy, H, s,
+                m * std::cos(2.0f * yaw), m * std::sin(2.0f * yaw), e6).finished();
+    }
+    static TableBeliefState from_vec(const Eigen::Matrix<float, 7, 1>& v)
+    {
+        if (not use_quotient)
+            return {v(0), v(1), v(2), v(3), v(4), v(5), v(6)};
+        const float s = v(3);
+        float r = std::sqrt(v(4) * v(4) + v(5) * v(5));   // = |w²−h²|/24
+        r = std::min(r, std::max(0.0f, s));               // keep h² ≥ 0 (r ≤ s)
+        const float yaw = 0.5f * std::atan2(v(5), v(4));  // canonical ψ ∈ (−π/2, π/2]
+        const float w = std::sqrt(std::max(1e-4f, 12.0f * (s + r)));
+        const float h = std::sqrt(std::max(1e-4f, 12.0f * (s - r)));
+        return {v(0), v(1), v(2), w, h, yaw, v(6)};       // canonical w ≥ h; tilt passes through
+    }
 };
 
 // Belief parameters: fixed geometry, the observation/mixture model, priors, and the transition +
@@ -58,6 +89,32 @@ struct TableBeliefParams
 
     // Observation model
     float sigma_base_m    = 0.03f;   // base on-surface noise std (m); R = σ² (+ motion_var + …) per point
+
+    // ── Anisotropic per-point measurement noise (PRECISION_AS_INFORMATION.md Stage 1) ──────────────────
+    // A deprojected mask point's position noise is NOT isotropic: pixel noise → transverse (⊥ ray) std =
+    // range·(σ_px/f); depth noise → along-ray std = σ_d(range) = depth_sigma0 + depth_sigma_range_coef·range².
+    // fill_anisotropic_R projects this 3×3 onto the SDF surface normal n: R_i = nᵀΣᵢn + σ_model². At a grazing
+    // view a yaw-carrying edge point (n ∥ the horizontal ray) gets ≈σ_d² → almost no yaw information, so an
+    // uninformative view CANNOT rotate the box — with NO obliquity/range yaw gains. These are PHYSICAL sensor
+    // constants (ZED datasheet), measurable, not tuned. anisotropic_r=false ⇒ baseline scalar-R path unchanged.
+    bool  anisotropic_r          = false;
+    float pixel_sigma_over_f     = 0.0015f;  // σ_px / focal_px → transverse std per metre of range
+    float depth_sigma0_m         = 0.006f;   // depth std floor (m)
+    float depth_sigma_range_coef = 0.004f;   // depth std growth (m per m² of range): σ_d = σ0 + coef·range²
+    float model_sigma_m          = 0.010f;   // residual model/surface std (m) added in quadrature (R floor)
+
+    // ── Weighted 2-D FOOTPRINT residual + shared depth-affine nuisance (PRECISION_AS_INFORMATION.md a1′+a2′) ──
+    // Route top-band points to the exact 2-D rectangle SDF with the IN-PLANE anisotropic covariance (Σ_2D above),
+    // and MARGINALIZE a shared per-frame depth-affine b=(bias, scale) via Schur. At a grazing view the ray-fan
+    // makes a common depth error alias into an in-plane SHEAR ≡ yaw, so marginalizing (bias,scale) removes exactly
+    // that aliased yaw information (large at grazing, ~0 top-down); per-point independent noise cannot — a shared
+    // nuisance is the only thing that fixes a mean BIAS. This factor REPLACES the footprint-moment channel (it is
+    // the moment done with correct per-point covariances → keeping both double-counts). depth_bias/scale_std are
+    // the ZED depth-affine priors (physical). footprint_residual=false ⇒ moment channel path unchanged.
+    bool  footprint_residual     = false;
+    float depth_tilt_std         = 0.020f;   // shared per-frame depth TILT prior std (m/rad) — the YAW nuisance
+    float depth_bias_std         = 0.015f;   // shared per-frame depth BIAS prior std (m)   — extent/pos nuisance (future)
+    float depth_scale_std        = 0.010f;   // shared per-frame depth SCALE prior std (frac) — extent nuisance (future)
     float clutter_frac    = 0.10f;   // ε: prior weight of the uniform clutter component
     float clutter_scale_m = 0.12f;   // a point further than ~this from every surface is likely clutter
 
@@ -134,6 +191,13 @@ struct TableFrame
 {
     std::vector<Eigen::Vector3f> points;
     std::vector<float>           R;        // per-point measurement variance (m²); empty ⇒ σ_base² for all
+    // Camera origin (room frame) of THIS frame's mask points, for the anisotropic deprojection-noise model
+    // (PRECISION_AS_INFORMATION.md Stage 1). Each point's ray is p−cam_origin; its position noise is anisotropic
+    // (transverse ∝ range·σ_px/f, along-ray ∝ σ_d(range)). fill_anisotropic_R projects that onto the SDF normal
+    // → a grazing-view edge point (normal ∥ the near-horizontal ray) gets ~σ_d² (huge) → ~0 yaw information,
+    // COMPUTED not tuned. has_rays=false ⇒ the scalar-R path (baseline) is used.
+    Eigen::Vector3f              cam_origin = Eigen::Vector3f::Zero();
+    bool                         has_rays   = false;
     float chain_cov_xx = 0.0f;             // extra shared position variance (m²) from the pose chain (cx)
     float chain_cov_yy = 0.0f;             // ...                                                      (cy)
     float chain_cov_yaw = 0.0f;            // extra shared yaw variance (rad²) — grows with view range so a
@@ -163,7 +227,7 @@ struct TableFrame
 class TableBelief
 {
 public:
-    static constexpr int N = 6;
+    static constexpr int N = 7;
     using State = TableBeliefState;
     using Frame = TableFrame;
 
@@ -172,7 +236,7 @@ public:
     { Sigma_.setZero(); Sigma_.diagonal() = prior_cov_diag(); }
 
     const TableBeliefState&            state()      const { return state_; }
-    const Eigen::Matrix<float, 6, 6>&  covariance() const { return Sigma_; }
+    const Eigen::Matrix<float, 7, 7>&  covariance() const { return Sigma_; }
     const TableBeliefParams&           params()     const { return params_; }
     void set_state(const TableBeliefState& s) { state_ = s; }
     void set_params(const TableBeliefParams& p) { params_ = p; }
@@ -186,7 +250,7 @@ public:
     // so a still-ambiguous table reports an honest ~45° until an orbit resolves it.
     float mode_posterior()  const;                          // p(alternative mode) = σ(−flip_evidence_)
     float yaw_marginal_var() const;                         // Σ(5,5) + p(1−p)(π/2)²  (rad²)
-    Eigen::Matrix<float, 6, 6> covariance_reported() const; // Σ with the yaw marginal folded into (5,5)
+    Eigen::Matrix<float, 7, 7> covariance_reported() const; // Σ with the yaw marginal folded into (5,5)
     float flip_evidence()   const { return flip_evidence_; }
     // Mean per-point data energy (NLL proxy) at an ARBITRARY state — for the mode-comparison hypothesis test.
     float mean_energy(const std::vector<Eigen::Vector3f>& pts, const TableBeliefState& s, float R) const;
@@ -204,9 +268,12 @@ public:
     // structurally cannot supply (no-op unless footprint_moment_precision > 0).
     float update(const TableFrame& frame)
     {
-        const float e = ai::update<N>(*this, state_, Sigma_, prior_mean_, frame);
+        const float e = ai::update<N>(*this, state_, Sigma_, prior_mean_, frame);   // (folds accumulate_footprint)
         dbg_yaw_after_points_ = state_.yaw;   // DIAGNOSTIC: yaw after the per-point GN-MAP, before the moment channel
-        apply_footprint_moment(frame);
+        // The weighted footprint residual (accumulate_footprint, inside the GN above) REPLACES the moment channel —
+        // it IS the moment done with correct per-point covariances, so running both would double-count the footprint.
+        if (not params_.footprint_residual)
+            apply_footprint_moment(frame);
         dbg_yaw_after_moment_ = state_.yaw;   // DIAGNOSTIC: yaw after the footprint-moment fusion
         return e;
     }
@@ -215,15 +282,21 @@ public:
     // a table's mask stream is stale/dead so Σ grows on the agent's clock instead of freezing (see TABLE).
     void  inflate_for_age(float dt_s, float dt_nominal_s)
     { ai::inflate_for_age<N>(*this, Sigma_, state_, prior_mean_, dt_s, dt_nominal_s); }
-    Eigen::Matrix<float, 6, 6> predicted_information(const std::vector<Eigen::Vector3f>& pts, float R) const
+    Eigen::Matrix<float, 7, 7> predicted_information(const std::vector<Eigen::Vector3f>& pts, float R) const
     { return ai::predicted_information<N>(*this, state_, pts, R); }
 
     // ── Generative-model hooks (called by the engine; also used as the SDF API) ─
     float sdf_top(const Eigen::Vector3f& p, const TableBeliefState& s) const;
     float sdf_leg(const Eigen::Vector3f& p, const TableBeliefState& s, int k) const;
     float sdf_compound(const Eigen::Vector3f& p, const TableBeliefState& s) const;   // min over 5 prims (diag)
+
+    // Fill frame.R[i] with the ANISOTROPIC per-point measurement variance R_i = nᵢᵀΣᵢnᵢ + σ_model² (+ extra_iso)
+    // at the current state, where nᵢ is the SDF surface normal (spatial gradient) and Σᵢ the deprojection noise
+    // pushforward from frame.cam_origin. No-op unless frame.has_rays. extra_iso adds an isotropic floor (e.g. the
+    // frame's ego-motion variance) preserved from the scalar path. See PRECISION_AS_INFORMATION.md Stage 1.
+    void fill_anisotropic_R(TableFrame& frame, float extra_iso = 0.0f) const;
     float sdf_prim(const Eigen::Vector3f& p, const TableBeliefState& s, int prim) const;
-    Eigen::Matrix<float, 6, 1> sdf_jacobian(const Eigen::Vector3f& p, const TableBeliefState& s, int prim) const;
+    Eigen::Matrix<float, 7, 1> sdf_jacobian(const Eigen::Vector3f& p, const TableBeliefState& s, int prim) const;
     // Soft responsibilities: [top, leg0..3, clutter] (sum = 1) at measurement variance R.
     std::array<float, 6> responsibilities(const Eigen::Vector3f& p, const TableBeliefState& s, float R) const;
     // Un-normalised mixture components + their sum (= marginal likelihood p(point|model)); shared by
@@ -236,14 +309,33 @@ public:
     int   gn_iters() const { return params_.gn_iters; }
     int   n_prims()  const { return 5; }             // top slab + 4 legs (clutter is the +1 mixture comp)
     float sigma2()   const { return params_.sigma_base_m * params_.sigma_base_m; }
-    Eigen::Matrix<float, 6, 6> transition() const { return Eigen::Matrix<float, 6, 6>::Identity(); }  // static
-    Eigen::Matrix<float, 6, 1> process_noise_diag() const;
-    Eigen::Matrix<float, 6, 1> prior_cov_diag() const;
-    Eigen::Matrix<float, 6, 1> common_mode_inv_diag(const TableFrame& frame) const;
+    Eigen::Matrix<float, 7, 7> transition() const { return Eigen::Matrix<float, 7, 7>::Identity(); }  // static
+    Eigen::Matrix<float, 7, 1> process_noise_diag() const;
+    Eigen::Matrix<float, 7, 1> prior_cov_diag() const;
+    Eigen::Matrix<float, 7, 1> common_mode_inv_diag(const TableFrame& frame) const;
+    // FULL 6×6 common-mode Σc⁻¹ (Tier 2). Under the quotient chart the yaw cap is a rank-1 ROTATIONAL term in
+    // (a₁,a₂) — a diagonal can't represent it (the a-vector would rotate freely under a persistent shear → 90°
+    // snap). Assembles the full Σc = blockdiag(pos, H, G·diag(size,size,yaw)·Gᵀ) and inverts. The engine calls
+    // this instead of common_mode_inv_diag when present. Non-quotient ⇒ returns the diagonal form unchanged.
+    Eigen::Matrix<float, 7, 7> common_mode_inv(const TableFrame& frame) const;
+    // Chart Jacobian G = ∂(s,a₁,a₂)/∂(w,h,yaw) at the current state — maps (w,h,yaw)-space covariances into the
+    // quotient optimisation space (and its inverse maps Σ back for reporting). Only used when use_quotient.
+    Eigen::Matrix3f chart_jac() const;
     // Extra evidence folded into the GN normal equations (engine calls it if present): the YOLO-independent
     // LiDAR first-hit range factor. Sphere-traces this belief's own SDF, so the shared call is used unchanged.
     void accumulate_extra(const TableBeliefState& s, const TableFrame& f,
-                          Eigen::Matrix<float, 6, 6>& Id, Eigen::Matrix<float, 6, 1>& bd) const;
+                          Eigen::Matrix<float, 7, 7>& Id, Eigen::Matrix<float, 7, 1>& bd) const;
+
+    // Weighted 2-D footprint residual + Schur-marginalized shared depth-affine nuisance (a1′+a2′). Folds the
+    // top-band points' correct-covariance lateral constraint into the GN normal equations; no-op unless
+    // params_.footprint_residual and frame.has_rays. Called from accumulate_extra. See PRECISION_AS_INFORMATION.md.
+    void accumulate_footprint(const TableBeliefState& s, const TableFrame& f,
+                              Eigen::Matrix<float, 7, 7>& Id, Eigen::Matrix<float, 7, 1>& bd) const;
+
+    // Shared depth-TILT → yaw common-mode variance (a2′ Tier-1): (∂ψ_MAP/∂t)²·σ_t², to ADD to frame.chain_cov_yaw
+    // so the engine's Woodbury caps the total yaw information consistently. The azimuth-odd tilt is the only
+    // depth mode that aliases into yaw. 0 unless footprint_residual + has_rays. See PRECISION_AS_INFORMATION.md.
+    float tilt_yaw_common_mode(const TableFrame& f, float sigma_tilt) const;
 
     // ── Monitor instrumentation ───────────────────────────────────────────────
     // Counts from the LAST accumulate_extra call (converged state): how many free-space beams actually
@@ -284,8 +376,8 @@ private:
 
     TableBeliefState           state_;
     TableBeliefParams          params_;
-    Eigen::Matrix<float, 6, 6> Sigma_ = Eigen::Matrix<float, 6, 6>::Identity();  // posterior covariance
-    Eigen::Matrix<float, 6, 1> prior_mean_ = Eigen::Matrix<float, 6, 1>::Zero();  // transition prior mean
+    Eigen::Matrix<float, 7, 7> Sigma_ = Eigen::Matrix<float, 7, 7>::Identity();  // posterior covariance
+    Eigen::Matrix<float, 7, 1> prior_mean_ = Eigen::Matrix<float, 7, 1>::Zero();  // transition prior mean
     float                      flip_evidence_ = 0.0f;  // accumulated log-evidence FOR the current mode vs the w↔h swap
     mutable int                dbg_vacate_beams_ = 0;   // free-space beams that fired a vacate pull (last accumulate)
     mutable int                dbg_coverage_pts_ = 0;   // on-plane points reclaimed by coverage (last accumulate)
