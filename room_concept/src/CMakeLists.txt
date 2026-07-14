@@ -16,6 +16,7 @@ find_package(CUDAToolkit REQUIRED)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_EXTENSIONS OFF)
+set(CMAKE_CUDA_COMPILER "/usr/local/cuda-13.2/bin/nvcc")
 
 # Allow an external Torch_DIR/CMAKE_PREFIX_PATH to win, then try common local installs.
 if(NOT Torch_DIR)
@@ -37,7 +38,19 @@ if(NOT Torch_DIR)
   endif()
 endif()
 
+set(CMAKE_CUDA_ARCHITECTURES "86" CACHE STRING "CUDA architectures")
 find_package(Torch REQUIRED)
+# Torch injects -D_GLIBCXX_USE_CXX11_ABI=0 via INTERFACE_COMPILE_OPTIONS on the imported `torch`
+# target (TorchConfig.cmake), not via CMAKE_CXX_FLAGS, so it propagates at link time no matter what
+# CMAKE_CXX_FLAGS says here. Strip it from the target itself: prebuilt libdsr_api/core/gui, Qt6, Ice
+# and FastDDS are all built with the default (CXX11) ABI.
+if(TARGET torch)
+  get_target_property(_torch_compile_opts torch INTERFACE_COMPILE_OPTIONS)
+  if(_torch_compile_opts)
+    list(REMOVE_ITEM _torch_compile_opts "-D_GLIBCXX_USE_CXX11_ABI=0")
+    set_property(TARGET torch PROPERTY INTERFACE_COMPILE_OPTIONS "${_torch_compile_opts}")
+  endif()
+endif()
 
 find_package(Eigen3 REQUIRED)
 find_package(Boost REQUIRED COMPONENTS system filesystem)

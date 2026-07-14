@@ -157,11 +157,22 @@ bool LidarIngestor::pump()
 
         const float min_h_m = params_->LIDAR_HIGH_MIN_HEIGHT;
         const float max_h_m = high_max_z_;                 // upper bound excludes the ceiling plane
+
+        // Compute z min/max of raw points for debug
+        float z_raw_min = 1e9f, z_raw_max = -1e9f;
+        for (const auto& p : sweep->points) {
+            if (p.z() < z_raw_min) z_raw_min = p.z();
+            if (p.z() > z_raw_max) z_raw_max = p.z();
+        }
+        std::println("[LidarSrc] z range: min={:.3f} max={:.3f}  high band=[{:.3f}, {:.3f}]  raw_pts={}  filtered_pts=",
+                     z_raw_min, z_raw_max, min_h_m, max_h_m, sweep->points.size());
+
         std::vector<Eigen::Vector3f> points_high;
         points_high.reserve(sweep->points.size());
         for (const auto& p : sweep->points)
             if (p.z() > min_h_m and p.z() < max_h_m)
                 points_high.emplace_back(p);
+        std::println("[LidarSrc] high band pts={}", points_high.size());
         ingest_scan(std::move(points_high), sweep->stamp_ms);
         ingested = true;
     }
