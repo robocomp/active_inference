@@ -1421,7 +1421,13 @@ namespace rc
         window_mgr_.clear();
         rerun_room_polygon_sent_ = false;
 
-        // Initialize corner detector with model polygon
+        // Initialize corner detector with model polygon + graded-covariance tuning from config.
+        {
+            auto& cp = corner_detector_.params();
+            cp.wall_band      = params.corner_wall_band;
+            cp.base_sigma     = params.corner_base_sigma;
+            cp.orient_tau_deg = params.corner_orient_tau_deg;
+        }
         corner_detector_.set_model_corners(polygon_vertices);
 
     }
@@ -1702,10 +1708,11 @@ namespace rc
             // one rej_* dominates, THAT gate is the too-strict one.
             static std::uint64_t corner_dbg_k = 0;
             if ((corner_dbg_k++ % 20) == 0)
-                std::print("[corners] in_fov={} detected={} accepted={} | rej: angle={} dist={} orient={} "
-                           "convex={} unassigned={}\n",
+                std::print("[corners] in_fov={} detected={} accepted={} | occluded={} fewpoints(FORMATION)={} "
+                           "dist={} soft_orient={} convex={} unassigned={}\n",
                            det.corners_in_fov, det.corners_detected, det.corners_accepted,
-                           det.rej_angle, det.rej_dist, det.rej_orient, det.rej_convex, det.rej_unassigned);
+                           det.rej_occluded, det.rej_fewpoints, det.rej_dist, det.soft_orient,
+                           det.rej_convex, det.rej_unassigned);
 
             // Store corner observations in the newest slot for the RFE loss
             auto& newest_slot = window_mgr_.newest();
@@ -1717,10 +1724,12 @@ namespace rc
                 WindowSlot::CornerObs obs;
                 obs.model_corner_world = init_polygon_vertices_[m.model_index];
                 obs.detected_robot = m.detected;
-                // Note: directional precision (m.covariance.inverse()) is not used in the
-                // current loss — compute_rfe_loss() uses scalar corner_obs_sigma uniformly.
+                obs.information = m.information;   // graded Λ_det (robot frame) — used anisotropically by the loss
                 newest_slot.corner_obs.push_back(obs);
             }
+            // Stack the pose-independent corner constants ONCE so the optimizer closure evaluates the
+            // corner factor as batched ops instead of O(corners) tiny per-iteration tensor allocations.
+            newest_slot.rebuild_corner_batch(get_device());
         }
 
         // Store validated object anchors (from the graph, set on the main thread) in the newest
@@ -2292,6 +2301,41 @@ namespace rc
         const float prediction_trust_threshold = params.sigma_sdf * params.prediction_trust_factor + rot_boost;
         if (mean_sdf_pred >= prediction_trust_threshold)
             return std::nullopt;
+
+        // ── Corner-consistency gate ─────────────────────────────────────────────────────────────
+        // The SDF gate above cannot see a 180° flip (a rot180 pose is SDF-ambiguous), so it would let a
+        // flipped-but-SDF-good prediction early-exit and never give the corners a chance to veto it. Here
+        // we validate the SAME predicted pose against the corner factor: if the worst corner's whitened
+        // residual m=√(rᵀΛ_det r) exceeds the tolerance, the prediction is inconsistent with the corners
+        // (the flip signature) → reject the early-exit so Adam runs and the corner factor pulls it back.
+        if (params.corner_early_exit_check)
+        {
+            const auto& slot = window_mgr_.newest();
+            if (!slot.corner_obs.empty())
+            {
+                auto pose_cpu0 = slot.pose.detach().to(torch::kCPU);
+                auto pa = pose_cpu0.accessor<float, 1>();
+                const float px = pa[0], py = pa[1], pth = pa[2];
+                const float ct = std::cos(pth), st = std::sin(pth);
+                int n_bad = 0;
+                for (const auto& obs : slot.corner_obs)
+                {
+                    const float dx = obs.model_corner_world.x() - px;
+                    const float dy = obs.model_corner_world.y() - py;
+                    // Predicted observation z_hat = R(-θ)·(c_world - t), residual = detected - z_hat.
+                    const float rx = obs.detected_robot.x() - ( ct * dx + st * dy);
+                    const float ry = obs.detected_robot.y() - (-st * dx + ct * dy);
+                    const Eigen::Vector2f r(rx, ry);
+                    const float maha_sq = params.corner_precision_gain * r.dot(obs.information * r);
+                    if (std::sqrt(std::max(0.f, maha_sq)) > params.corner_early_exit_sigma)
+                        ++n_bad;
+                }
+                // CONSENSUS: force Adam only when enough corners disagree — a lone outlier is outvoted by
+                // the corroborating majority, but a rot180 flip (ALL corners disagree) still trips it.
+                if (n_bad >= params.corner_early_exit_min_bad)
+                    return std::nullopt;
+            }
+        }
 
         // NOTE: the object-anchor early-exit GATE was reverted (2026-07-12) to A/B whether it was the
         // source of the localization instability. The anchor is now FACTOR-ONLY: it refines the pose
@@ -3516,43 +3560,39 @@ namespace rc
         // --- 4. Corner observation factors (newest slots only, Huber-saturated) ---
         if (params.enable_corner_tracking)
         {
-        const float corner_inv_var = 1.0f / (params.corner_obs_sigma * params.corner_obs_sigma);
-        const float corner_huber = params.corner_huber_delta;
+        const float corner_gain  = params.corner_precision_gain;
+        const float corner_huber = params.corner_huber_sigma;   // whitened (σ) units
         const int corner_start = std::max(0, static_cast<int>(window.size()) - params.corner_max_slots);
         for (size_t si = corner_start; si < window.size(); si++)
         {
             const auto& slot = window[si];
-            if (slot.corner_obs.empty()) continue;
+            if (!slot.corner_cw.defined() || slot.corner_cw.size(0) == 0) continue;
 
-            auto pose_xy    = slot.pose.index({torch::indexing::Slice(0, 2)});
+            auto pose_xy    = slot.pose.index({torch::indexing::Slice(0, 2)});  // [2]
             auto pose_theta = slot.pose.index({2});
             auto cos_th = torch::cos(pose_theta);
             auto sin_th = torch::sin(pose_theta);
 
-            for (const auto& obs : slot.corner_obs)
-            {
-                // Predicted observation: z_hat = R(-θ) · (c_world - t)
-                auto c_w = torch::tensor({obs.model_corner_world.x(), obs.model_corner_world.y()},
-                    torch::TensorOptions().dtype(torch::kFloat32).device(device));
-                auto dw = c_w - pose_xy;
-                auto pred_x = cos_th * dw.index({0}) + sin_th * dw.index({1});
-                auto pred_y = -sin_th * dw.index({0}) + cos_th * dw.index({1});
-                auto predicted = torch::stack({pred_x, pred_y});
+            // Batched predicted observations: z_hat_i = R(-θ) · (c_world_i - t), for all corners at once.
+            auto dw = slot.corner_cw - pose_xy;                    // [N,2]
+            auto dwx = dw.index({torch::indexing::Slice(), 0});   // [N]
+            auto dwy = dw.index({torch::indexing::Slice(), 1});   // [N]
+            auto pred_x = cos_th * dwx + sin_th * dwy;            // [N]
+            auto pred_y = -sin_th * dwx + cos_th * dwy;          // [N]
+            auto predicted = torch::stack({pred_x, pred_y}, 1);   // [N,2]
 
-                auto detected = torch::tensor({obs.detected_robot.x(), obs.detected_robot.y()},
-                    torch::TensorOptions().dtype(torch::kFloat32).device(device));
+            auto residual = slot.corner_detected - predicted;     // [N,2] robot frame
 
-                auto residual = detected - predicted;
-
-                // Huber-saturated Mahalanobis: use only per-corner precision (no double σ²)
-                auto r_sq = torch::dot(residual, residual);
-                auto r_norm = torch::sqrt(r_sq + 1e-8f);
-                auto huber_weight = torch::where(r_norm <= corner_huber,
-                    torch::ones_like(r_norm),
-                    corner_huber / r_norm);
-                auto corner_loss = 0.5f * corner_inv_var * huber_weight * r_sq;
-                total_loss = total_loss + corner_loss;
-            }
+            // Anisotropic graded precision Λ_det (robot frame): rᵀΛr downweights the residual
+            // component along ill-determined (shallow/marginal) directions automatically.
+            // Batched quadratic form: maha_i = r_iᵀ Λ_i r_i via bmm.
+            auto Lr = torch::bmm(slot.corner_information, residual.unsqueeze(2)).squeeze(2);  // [N,2]
+            auto maha_sq = corner_gain * (residual * Lr).sum(1);                              // [N]
+            // Huber saturation in whitened space (m = √(rᵀΛr) is in σ units).
+            auto m = torch::sqrt(maha_sq + 1e-8f);                                            // [N]
+            auto huber_weight = torch::where(m <= corner_huber,
+                torch::ones_like(m), corner_huber / m);                                      // [N]
+            total_loss = total_loss + (0.5f * huber_weight * maha_sq).sum();
         }
         } // enable_corner_tracking
 
@@ -3632,8 +3672,8 @@ namespace rc
 
         // 4. Corner factors
         if (params.enable_corner_tracking) {
-            const float corner_inv_var = 1.0f / (params.corner_obs_sigma * params.corner_obs_sigma);
-            const float corner_huber   = params.corner_huber_delta;
+            const float corner_gain  = params.corner_precision_gain;
+            const float corner_huber = params.corner_huber_sigma;
             const int corner_start = std::max(0, static_cast<int>(window.size()) - params.corner_max_slots);
             float cor_acc = 0.f;
             for (size_t si = corner_start; si < window.size(); si++) {
@@ -3653,10 +3693,14 @@ namespace rc
                     auto detected  = torch::tensor({obs.detected_robot.x(), obs.detected_robot.y()},
                         torch::TensorOptions().dtype(torch::kFloat32).device(device));
                     auto residual  = detected - predicted;
-                    auto r_sq  = torch::dot(residual, residual);
-                    auto r_norm = torch::sqrt(r_sq + 1e-8f);
-                    auto hw = torch::where(r_norm <= corner_huber, torch::ones_like(r_norm), corner_huber / r_norm);
-                    cor_acc += (0.5f * corner_inv_var * hw * r_sq).item<float>();
+                    auto Lambda = torch::tensor(
+                        {obs.information(0,0), obs.information(0,1), obs.information(1,0), obs.information(1,1)},
+                        torch::TensorOptions().dtype(torch::kFloat32).device(device)).reshape({2,2});
+                    auto maha_sq = corner_gain * torch::matmul(residual.unsqueeze(0),
+                                       torch::matmul(Lambda, residual.unsqueeze(1))).squeeze();
+                    auto m = torch::sqrt(maha_sq + 1e-8f);
+                    auto hw = torch::where(m <= corner_huber, torch::ones_like(m), corner_huber / m);
+                    cor_acc += (0.5f * hw * maha_sq).item<float>();
                 }
             }
             bd.corner = cor_acc;

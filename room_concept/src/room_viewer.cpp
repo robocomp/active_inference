@@ -250,13 +250,23 @@ void RoomViewer::update_ui(const std::optional<rc::RoomConcept::UpdateResult>& l
 {
     if (!loc_res.has_value() || !ts_plot_fe_)
         return;
-    ts_plot_fe_->add_point("free_energy", loc_res->final_loss);
+    const float fe = loc_res->final_loss;
+    ts_plot_fe_->add_point("free_energy", fe);
 
+    // Robust EMA of the STEADY-STATE FE level: clamp out flip/Adam spikes (which reach ~150+) so the
+    // reference tracks the ~0.05–0.2 working band, not the spikes. This anchors the covariance series
+    // into the FE's range — otherwise a spike auto-scales the shared Y-axis to ~150 and the covariance
+    // (a tiny normalized value) collapses onto the zero line.
+    const float fe_clamped = std::min(std::max(fe, 0.f), 1.0f);
+    fe_level_ema_ = 0.99f * fe_level_ema_ + 0.01f * fe_clamped;
+
+    // Localization confidence from the pose covariance determinant: small det (well-localized) → high.
+    // det ~ 1e-8..1e-10 well-localized, ~1e-4 uncertain → -log10(det) ~ 4..10.
     const float det_cov = std::max(1e-12f, std::abs(loc_res->covariance.determinant()));
-    float det_scaled = -std::log10(det_cov) / 10.f;  // map ~[1..1e-10] to [0..1]
-    if (det_scaled < 0.f) det_scaled = 0.f;
-    if (det_scaled > 1.f) det_scaled = 1.f;
-    ts_plot_fe_->add_point("cov_det_scaled", det_scaled);
+    float conf = std::clamp(-std::log10(det_cov) / 12.f, 0.f, 1.f);   // [0,1]
+    // Scale the [0,1] confidence into the current FE band (×3 headroom) so both lines share a range and
+    // the covariance is legible next to free_energy instead of pinned at zero.
+    ts_plot_fe_->add_point("cov_det_scaled", conf * fe_level_ema_ * 3.0f);
 }
 
 void RoomViewer::show_camera()

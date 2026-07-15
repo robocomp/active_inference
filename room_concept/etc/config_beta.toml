@@ -231,6 +231,34 @@ DifferentialTest     = false  # Sin overhead A/B: experimento limpio
 SdfCurrentSlotOnly   = true   # SDF obs solo en el slot actual; slots antiguos aportan
                               # solo via motion factors + corners. ~67% menos SDF evals.
 EnableCornerTracking = true  # Activa factores de esquinas en la perdida RFE
+# ── Graded-covariance corner factor (replaces hard rej_angle/rej_orient gates) ──
+# Corners now break the room's 180° (rot180) ambiguity via the ASYMMETRIC notch on the left wall.
+# Each detection carries a 2×2 information matrix Λ_det whose precision shrinks smoothly with wall-fit
+# scatter + orientation deviation, and goes rank-1 for a shallow (aperture-ambiguous) corner. The loss
+# uses it anisotropically → marginal corners contribute weakly, clean asymmetric corners strongly.
+# CornerWallBand: perpendicular gather band (m) around the PREDICTED wall line. MUST exceed the chronic
+#   model misfit (~0.32 m here) or the real wall points fall outside → NO detection forms (the actual
+#   reason corners fired in only 46/77559 frames). Was hardcoded 0.12; raised to 0.35.
+CornerWallBand       = 0.35
+CornerBaseSigma      = 0.04   # detection noise floor σ0 (m) per wall
+CornerOrientTauDeg   = 20.0   # smooth orientation-trust scale (deg): ori_scale = exp(−(dev/τ)²)
+CornerPrecisionGain  = 1.0    # global scale on corner precision vs the SDF term
+CornerHuberSigma     = 3.0    # Huber saturation in WHITENED (σ) units
+# Corner-consistency gate on the prediction early-exit. The SDF early-exit is BLIND to a 180° flip (a
+# rot180 pose fits the walls nearly as well), so without this a flip slips through while the corners —
+# the one signal that disagrees — are bypassed. When true, a predicted pose whose worst corner whitened
+# residual m=√(rᵀΛ_det r) exceeds CornerEarlyExitSigma is rejected → Adam runs → corners pull it back.
+# OFF by default (A/B): the ANCHOR early-exit gate destabilized before, but corners are re-detected each
+# frame + graded, so a bad detection can't force a bad correction. Flip true + watch flips/early-exit rate.
+CornerEarlyExitCheck = true
+CornerEarlyExitSigma = 4.0    # per-corner whitened-residual (σ) disagreement tolerance
+# CONSENSUS gate: a lone mismatched corner (a flaky notch detection / one misassociation) must NOT force
+# a full optimization when the other corners corroborate the prediction. Force Adam only when at least
+# this many corners disagree. A true rot180 flip trips ALL corners so it's still caught; a single outlier
+# is outvoted. (Was worst-case max → 1 bad corner pinned early-exit at 0%; see corners_1.png.)
+CornerEarlyExitMinBad = 2
+# Watch the new [corners] stdout line: fewpoints(FORMATION) should DROP sharply with the wider band;
+# accepted should rise. If fewpoints still dominates, raise CornerWallBand further.
 FarPointsWeight      = true   # Ponderación por distancia: puntos lejanos más peso
 FarPointsExponent    = 2.0   # α — exponente de la distancia.
                               #   α=1: lineal (original). α=2: cuadrático (recomendado).
@@ -259,12 +287,23 @@ enable   = false   # A/B TEST: OFF to check whether the flips/delocalizations pe
 weight   = 1.0     # global scale (keep < walls: objects refine, never outvote geometry)
 huber    = 3.0     # robust cutoff in whitened σ units
 maxSlots = 3       # apply object factors to the newest N window slots
-measSigmaXY = 0.05 # reverted from 0.20: p_o is now confirmed CORRECT + off-center (~3 m), so the flip lever
-                   # (~6 m) dwarfs mask-centroid noise — trust it (Λ≈160) so it can actually veto the flip.
+measSigmaXY = 0.30 # raised 0.05→0.30 to match MEASURED fresh-observation accuracy (07-13 table_landmark
+                   # CSV: even age==0 obs reconstruct ~0.32 m mean / 0.67 m p90 off the believed table pose —
+                   # a mask-centroid / partial-view bias). 0.05 was 6× overconfident → the anchor would
+                   # over-pull on a biased fresh reading. (Freshness handles STALENESS; this handles the
+                   # per-obs ACCURACY gap — independent. Revisit down once the centroid bias is fixed.)
 earlyExitSigma = 2.0  # prediction early-exit gate: whitened anchor-residual σ above which the optimizer is
                       # forced to run — low so a flip (huge residual) reliably triggers a correction.
 validateSigma  = 0.10 # map-pose σ (m) below which room PINS the table's world pose (fixed landmark) —
                       # breaks the circularity so the anchor carries real information
+# Freshness as precision: obj_obs_robot PERSISTS in the graph between actual sightings (the producer only
+# rewrites it when a mask is assigned; table_detection_alive stays true ~40 frames). A stale in-front obs
+# paired with the moved robot pose is a PHANTOM landmark (confirmed 07-13 via table_landmark CSV: 18% of
+# frames had the table geometrically BEHIND yet observed in front). Grow R_o with the producer's own age
+# counter (table_frames_since_detection): R_o ← R_o·(1+age/ageScale)² ⇒ a stale obs lands with Λ≈0 and
+# pulls nothing; a fresh (age 0) one keeps full weight. No threshold — smooth precision decay.
+freshnessEnable   = true
+freshnessAgeScale = 3.0  # frames of staleness at which σ roughly doubles (variance ×4)
 
 # ── Epistemic Controller ───────────────────────────────────────────────────────
 [EpistemicController]

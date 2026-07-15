@@ -56,33 +56,56 @@ namespace rc
             out.obs_robot       = {obs[0], obs[1], has_yaw ? obs[2] : 0.0f};
             out.has_orientation = has_yaw;
 
-            Eigen::Vector3f meas_var{cfg.meas_sigma_xy * cfg.meas_sigma_xy,
-                                     cfg.meas_sigma_xy * cfg.meas_sigma_xy,
-                                     cfg.meas_sigma_yaw * cfg.meas_sigma_yaw};
+            // Measurement noise R_o (robot frame). Position (2×2) may be ANISOTROPIC — the producer can
+            // publish a full symmetric 2×2 as obj_obs_robot_cov=[Rxx,Ryy,Rxy] (ray-loose, see
+            // ray_anisotropic_cov.h): disambiguated by size (position-only obs + cov size 3 ⇒ full 2×2).
+            Eigen::Matrix2f R_pos = cfg.meas_sigma_xy * cfg.meas_sigma_xy * Eigen::Matrix2f::Identity();
+            float meas_var_yaw = cfg.meas_sigma_yaw * cfg.meas_sigma_yaw;
             if (const auto cov_opt = G.get_attrib_by_name<obj_obs_robot_cov_att>(node);
                 cov_opt.has_value() and cov_opt->get().size() >= 2)
             {
                 const auto& c = cov_opt->get();
-                meas_var[0] = c[0];
-                meas_var[1] = c[1];
-                if (c.size() >= 3) meas_var[2] = c[2];
+                if (not has_yaw and c.size() >= 3)          // [Rxx, Ryy, Rxy] full anisotropic 2×2
+                    R_pos << c[0], c[2], c[2], c[1];
+                else                                         // diagonal [σx², σy²] (+ σyaw² if present)
+                {
+                    R_pos(0, 0) = c[0]; R_pos(1, 1) = c[1]; R_pos(0, 1) = R_pos(1, 0) = 0.f;
+                    if (has_yaw and c.size() >= 3) meas_var_yaw = c[2];
+                }
+            }
+
+            // ── Freshness as precision ──────────────────────────────────────────────────────────────
+            // obj_obs_robot is only rewritten when the producer actually sees the table; between sightings
+            // it PERSISTS (stale). Read the producer's own age counter (table_frames_since_detection) and
+            // inflate R_o by (1 + age/age_scale)² so a stale observation lands with Λ≈0 — it fades out
+            // smoothly instead of pulling the pose to a phantom "in front" reading. Fresh (age 0) ⇒ ×1.
+            if (cfg.freshness_enable)
+            {
+                int age = 0;
+                const auto& attrs = node.attrs();
+                if (const auto it = attrs.find("table_frames_since_detection"); it != attrs.end())
+                    age = std::max(0, it->second.dec());
+                const float scale = std::max(1e-3f, cfg.freshness_age_scale);
+                const float f2 = (1.0f + static_cast<float>(age) / scale);   // σ→ f·σ  ⇒  var → f²·var
+                R_pos *= f2 * f2;
+                meas_var_yaw *= f2 * f2;
             }
 
             // 3. Innovation S = Σ_o ⊕ R_o, then Λ = S^{-1}. Σ_o carries the map's cross-terms (from the
-            //    Gaussian chain); R_o is diagonal. Position-only ⇒ invert just the 2×2 block (proper
-            //    marginal), yaw row/col of Λ left zero so the yaw residual never enters the loss.
+            //    Gaussian chain); R_o's 2×2 position block may be anisotropic. Position-only ⇒ invert just
+            //    the 2×2 block (proper marginal), yaw row/col of Λ left zero so yaw never enters the loss.
             Eigen::Matrix3f info = Eigen::Matrix3f::Zero();
             if (has_yaw)
             {
                 Eigen::Matrix3f s = map_cov;
-                s.diagonal() += meas_var;
+                s.topLeftCorner<2, 2>() += R_pos;
+                s(2, 2) += meas_var_yaw;
                 s += 1e-8f * Eigen::Matrix3f::Identity();      // numerical floor, not a behavioural gate
                 info = s.inverse();
             }
             else
             {
-                Eigen::Matrix2f s2 = map_cov.topLeftCorner<2, 2>();
-                s2.diagonal() += meas_var.head<2>();
+                Eigen::Matrix2f s2 = map_cov.topLeftCorner<2, 2>() + R_pos;
                 s2 += 1e-8f * Eigen::Matrix2f::Identity();
                 info.topLeftCorner<2, 2>() = s2.inverse();
             }

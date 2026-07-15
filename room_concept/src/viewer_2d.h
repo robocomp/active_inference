@@ -221,6 +221,7 @@ class Viewer2D : public QObject
         std::vector<QGraphicsEllipseItem*> corner_predicted_items_;
         std::vector<QGraphicsLineItem*>    corner_line_items_;
         std::vector<QGraphicsLineItem*>    corner_robot_line_items_;   // robot → detected corner
+        std::vector<QGraphicsTextItem*>    corner_cov_text_items_;     // det(cov) label on each sight line
 
         // Landmark markers (pinned objects): robot → landmark lines
         std::vector<QGraphicsLineItem*>    landmark_line_items_;

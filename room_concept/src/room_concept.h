@@ -299,7 +299,27 @@ public:
         float corner_obs_sigma = 0.04f;                // Corner measurement noise (meters)
         int   min_tracking_steps_for_corners = 5;      // Require this many tracking steps before adding corner factors
         int   corner_max_slots = 5;                    // Only apply corner factors to the newest N slots
-        float corner_huber_delta = 0.3f;               // Huber saturation for corner residuals (meters)
+        float corner_huber_delta = 0.3f;               // (legacy, unused) old isotropic Huber in meters
+        // Graded anisotropic corner factor: loss = 0.5·gain·huber(m)·rᵀΛ_det r,  m = sqrt(gain·rᵀΛ_det r).
+        float corner_precision_gain = 1.0f;            // global scale on corner precision vs the SDF term
+        float corner_huber_sigma    = 3.0f;            // Huber saturation in WHITENED (σ) units, not meters
+        // CornerDetector geometry/grading (applied to corner_detector_.params() at model init).
+        float corner_wall_band      = 0.35f;           // perpendicular gather band (m) — MUST exceed model misfit
+        float corner_base_sigma     = 0.04f;           // detection noise floor σ0 (m) per wall
+        float corner_orient_tau_deg = 20.0f;           // smooth orientation-trust scale (deg)
+        // Corner-consistency gate on the prediction early-exit. Without it, the early-exit validates the
+        // predicted pose on SDF ALONE — and a rot180-flipped pose is SDF-ambiguous, so a flip slips through
+        // while the corners (which DO disagree) are bypassed. When on, a predicted pose whose worst corner
+        // whitened residual m=√(rᵀΛ_det r) exceeds corner_early_exit_sigma is rejected → Adam runs and the
+        // corner factor pulls it back. Flag-gated (A/B) — the anchor early-exit gate destabilized before,
+        // but corners are re-detected per-frame + graded, so a bad detection can't force a bad correction.
+        bool  corner_early_exit_check = false;         // OFF by default — flip on to A/B
+        float corner_early_exit_sigma = 4.0f;          // per-corner whitened-residual (σ) disagreement tolerance
+        // CONSENSUS, not worst-case: a lone mismatched corner (a flaky notch detection / one misassociation)
+        // must NOT force a full optimization when the others corroborate the prediction. Reject the
+        // early-exit only when at least this many corners disagree (m>σ). A true rot180 flip trips ALL
+        // corners, so consensus still catches it; a single outlier is outvoted.
+        int   corner_early_exit_min_bad = 2;           // # of disagreeing corners required to force Adam
 
         // ===== Object anchors (validated modelled objects as SE(2) pose landmarks) =====
         // As the room fills with confidently-localised objects (tables, …) their poses
@@ -567,10 +587,51 @@ public:
         struct CornerObs {
             Eigen::Vector2f model_corner_world;  // world-frame model corner
             Eigen::Vector2f detected_robot;      // detected position in robot frame
-            // Note: directional precision (Σ_c^{-1}) is not used in compute_rfe_loss();
-            // the loss applies a scalar corner_obs_sigma uniformly in all directions.
+            // Graded per-detection precision Λ_det (robot frame) from CornerDetector: the loss applies
+            // this anisotropically (rᵀΛ_det r), so shallow/marginal corners contribute weakly along
+            // ill-determined directions and clean asymmetric corners contribute strongly. Rank-1 for a
+            // near-parallel (aperture-ambiguous) corner. Replaces the old scalar corner_obs_sigma·I.
+            Eigen::Matrix2f information = Eigen::Matrix2f::Identity();
         };
         std::vector<CornerObs> corner_obs;
+
+        // Batched corner constants (built ONCE from corner_obs, reused every optimizer closure).
+        // The per-corner world corner / robot-frame detection / anisotropic precision Λ_det do NOT
+        // depend on the pose being optimized, so building them per-iteration (as tiny torch::tensor
+        // allocations) was pure dispatch overhead that scaled O(corners × closures). Stacked here they
+        // let compute_rfe_loss evaluate the whole corner factor as a handful of batched ops.
+        // Defined (non-empty) iff corner_obs is non-empty; rebuilt by rebuild_corner_batch().
+        torch::Tensor corner_cw;           // [N,2] world-frame model corners
+        torch::Tensor corner_detected;     // [N,2] detected positions in robot frame
+        torch::Tensor corner_information;  // [N,2,2] graded precision Λ_det (robot frame)
+
+        // Rebuild the batched corner tensors from corner_obs (call after populating corner_obs).
+        void rebuild_corner_batch(torch::Device device)
+        {
+            const int n = static_cast<int>(corner_obs.size());
+            if (n == 0)
+            {
+                corner_cw = corner_detected = corner_information = torch::Tensor{};
+                return;
+            }
+            auto cw   = torch::empty({n, 2}, torch::kFloat32);
+            auto det  = torch::empty({n, 2}, torch::kFloat32);
+            auto info = torch::empty({n, 2, 2}, torch::kFloat32);
+            auto acw = cw.accessor<float, 2>();
+            auto adet = det.accessor<float, 2>();
+            auto ainfo = info.accessor<float, 3>();
+            for (int i = 0; i < n; ++i)
+            {
+                const auto& o = corner_obs[i];
+                acw[i][0] = o.model_corner_world.x(); acw[i][1] = o.model_corner_world.y();
+                adet[i][0] = o.detected_robot.x();    adet[i][1] = o.detected_robot.y();
+                ainfo[i][0][0] = o.information(0,0);   ainfo[i][0][1] = o.information(0,1);
+                ainfo[i][1][0] = o.information(1,0);   ainfo[i][1][1] = o.information(1,1);
+            }
+            corner_cw = cw.to(device);
+            corner_detected = det.to(device);
+            corner_information = info.to(device);
+        }
 
         // Object-anchor observations for this slot (validated modelled objects as SE(2) landmarks).
         std::vector<ObjectAnchorObs> object_anchors;

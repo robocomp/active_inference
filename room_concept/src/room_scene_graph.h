@@ -20,6 +20,7 @@
 // threading state; SpecificWorker calls update() on fresh localization frames.
 
 #include <cstdint>
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -102,6 +103,10 @@ private:
     // Gather validated modelled objects from the graph (MAIN thread) and hand them to the
     // localizer as SE(2) pose landmarks.  No-op unless params_->ObjectAnchorEnable.
     void refresh_object_anchors();
+    // Observe-only: log each detected table's ROOM-frame pose + ROBOT-frame observation + the robot pose
+    // to stdout (throttled) and a CSV. Pure graph reads (no pin/anchor side effects); runs regardless of
+    // the anchor factor being enabled, so the table-landmark behaviour can be studied as the robot moves.
+    void log_table_landmarks();
     void load_robot_body_dimensions_from_graph();
     void dsr_create_wall_nodes();
 
@@ -134,6 +139,14 @@ private:
     float last_adv_  = 0.f;
     float last_side_ = 0.f;
     float last_rot_  = 0.f;
+
+    // Table-landmark tracking CSV (tmp/sdf_localizer/table_landmark_<ts>.csv): one row per detected table
+    // per refresh, logging its ROOM-frame coord (stable if localization is consistent) + ROBOT-frame
+    // observation + the robot pose, so the evolution of the detected table coords vs robot motion is
+    // analysable offline.
+    std::ofstream table_landmark_csv_;
+    bool          table_landmark_csv_open_attempted_ = false;
+    std::uint64_t table_landmark_log_k_ = 0;   // throttles the stdout line (CSV gets every frame)
 };
 
 }  // namespace rc

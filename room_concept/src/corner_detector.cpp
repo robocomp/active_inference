@@ -1,4 +1,5 @@
 #include "corner_detector.h"
+#include "corner_visibility.h"
 #include <cmath>
 
 namespace rc {
@@ -9,6 +10,7 @@ namespace rc {
 void CornerDetector::set_model_corners(const std::vector<Eigen::Vector2f>& polygon_vertices)
 {
     model_corners_.clear();
+    polygon_ = polygon_vertices;   // retained for the occlusion/visibility ray-cast in detect()
     const int N = static_cast<int>(polygon_vertices.size());
     if (N < 3) return;
 
@@ -166,6 +168,14 @@ CornerDetector::DetectionResult CornerDetector::detect(
         if (dw.squaredNorm() > max_range2)
             continue;
 
+        // Occlusion/visibility gate: skip a corner whose sight line from the robot is blocked by a
+        // non-adjacent wall (the notch step occludes its neighbour from most of the room). An occluded
+        // corner is UNREACHABLE — it must not be matched (→ spurious residual), must not enter the loss,
+        // and must not count toward the early-exit decision. This is the real cause of the lone red-circle
+        // corner that pinned early-exit at 0% (see corners_1.png): it was occluded, not mismatched.
+        if (!corner_visibility::is_corner_visible(t_world, mc.original_index, polygon_, max_range))
+            { result.rej_occluded++; continue; }
+
         const Eigen::Vector2f predicted = to_robot(dw);
         result.corners_in_fov++;
         fov_corners.push_back({&mc, predicted});
@@ -182,7 +192,9 @@ CornerDetector::DetectionResult CornerDetector::detect(
         group_out.reserve(128);
         const float in_limit  = mc.wall_in_length  + 0.2f;
         const float out_limit = mc.wall_out_length + 0.2f;
-        const float wall_band = std::max(0.12f, 2.f * params_.ransac_threshold);
+        // Perpendicular tolerance for gathering wall points around the PREDICTED wall line. Must exceed
+        // the chronic model misfit or true wall points fall outside the band and no detection forms.
+        const float wall_band = params_.wall_band;
 
         for (const auto& p : pts2d)
         {
@@ -208,7 +220,7 @@ CornerDetector::DetectionResult CornerDetector::detect(
 
         if (static_cast<int>(group_in.size())  < params_.min_points_per_line ||
             static_cast<int>(group_out.size()) < params_.min_points_per_line)
-            continue;
+            { result.rej_fewpoints++; continue; }   // FORMATION failure — see counter doc
 
         auto line_in  = fit_line_pca(group_in,  params_.min_points_per_line);
         auto line_out = fit_line_pca(group_out, params_.min_points_per_line);
@@ -220,23 +232,20 @@ CornerDetector::DetectionResult CornerDetector::detect(
         float angle_deg = 0.f;
         auto intersection = intersect(*line_in, *line_out, &angle_deg);
         if (!intersection)
-            continue;
+            continue;   // truly parallel (det≈0) → no intersection point exists at all
 
-        if (angle_deg < params_.min_corner_angle || angle_deg > params_.max_corner_angle)
-            { result.rej_angle++; continue; }
-
+        // ── Association cap (KEPT): a detection far from the prediction is a different physical
+        //    corner, not a graded-quality issue. Guards the 1-to-1 Hungarian assignment. ──
         const float isect_dist = (*intersection - predicted).norm();
         if (isect_dist > params_.max_match_distance)
             { result.rej_dist++; continue; }
 
+        // ── Convexity (KEPT as a hard gate — the rot180 disambiguator): |dir·model_dir| below is
+        //    blind to a 180° edge flip, so a rotated-by-π hypothesis passes the orientation test.
+        //    The SIGNED convexity of the corner (reflex vs convex — e.g. the notch) is the one
+        //    feature that distinguishes the true orientation from its 180° twin. ──
         const float raw_dot_in  = line_in->direction().dot(dir_in);
         const float raw_dot_out = line_out->direction().dot(dir_out);
-        {
-            const float cos_thresh = std::cos(params_.max_orientation_dev
-                                              * static_cast<float>(M_PI) / 180.f);
-            if (std::abs(raw_dot_in) < cos_thresh || std::abs(raw_dot_out) < cos_thresh)
-                { result.rej_orient++; continue; }
-        }
         const Eigen::Vector2f ori_in  = (raw_dot_in  >= 0.f ? 1.f : -1.f) * line_in->direction();
         const Eigen::Vector2f ori_out = (raw_dot_out >= 0.f ? 1.f : -1.f) * line_out->direction();
         {
@@ -245,17 +254,51 @@ CornerDetector::DetectionResult CornerDetector::detect(
                 { result.rej_convex++; continue; }
         }
 
-        const float sigma = params_.ransac_threshold;
+        // ── GRADED per-detection information matrix Λ_det (robot frame) ────────────────────────
+        // Each fitted wall line L contributes a rank-1 constraint (1/σ_L²)·n_L n_Lᵀ along its normal,
+        // scaled by a smooth orientation-trust weight. Summed:
+        //     Λ_det = Σ_L (ori_scale_L / σ_L²) n_L n_Lᵀ
+        //   • σ_L²      = base_sigma² + resid_var_L   — fit scatter inflates σ (clutter → distrust).
+        //   • ori_scale = exp(−(dev_L/τ)²)            — smooth wall-orientation trust (no hard cut).
+        // Near-parallel walls (shallow corner) → n_in ≈ ±n_out → Λ_det collapses to rank-1: the
+        // bisector direction is left UNCONSTRAINED (aperture ambiguity falls out of the geometry,
+        // replacing the old min/max angle gate). Perpendicular walls, clean fit → ~isotropic.
+        const float base_var = params_.base_sigma * params_.base_sigma;
+        const float tau = std::max(1e-3f, params_.orient_tau_deg * static_cast<float>(M_PI) / 180.f);
+        auto line_info = [&](const Line2D& L, float raw_dot) -> Eigen::Matrix2f {
+            const float cos_dev = std::min(1.0f, std::abs(raw_dot));
+            const float dev = std::acos(cos_dev);                 // 0 = aligned with model edge
+            const float ori_scale = std::exp(-(dev * dev) / (tau * tau));
+            const float sigma2 = base_var + L.resid_var;
+            return (ori_scale / sigma2) * (L.normal * L.normal.transpose());
+        };
+        const Eigen::Matrix2f Lambda = line_info(*line_in, raw_dot_in)
+                                     + line_info(*line_out, raw_dot_out);
+        {   // observability: heavily-downweighted (near-orthogonal to model) detections
+            const float dev_in  = std::acos(std::min(1.0f, std::abs(raw_dot_in)));
+            const float dev_out = std::acos(std::min(1.0f, std::abs(raw_dot_out)));
+            const float s = std::exp(-(std::max(dev_in, dev_out) * std::max(dev_in, dev_out)) / (tau * tau));
+            if (s < 0.05f) result.soft_orient++;
+        }
+
         CornerMatch cand;
         cand.detected    = *intersection;
         cand.predicted   = predicted;          // overwritten by Phase 2 winner
         cand.model_world = mc.position;        // overwritten by Phase 2 winner
         cand.model_index = mc.original_index;  // overwritten by Phase 2 winner
-        cand.distance    = (*intersection - predicted).norm();
+        cand.distance    = isect_dist;
         cand.angle_deg   = angle_deg;
-        cand.covariance  = sigma * sigma *
-            (line_in->normal * line_in->normal.transpose() +
-             line_out->normal * line_out->normal.transpose());
+        cand.information = Lambda;
+        // Legacy display covariance = pseudo-inverse of Λ_det (falls back to a large isotropic value
+        // along any unconstrained/rank-deficient direction). Not used by the loss.
+        {
+            Eigen::SelfAdjointEigenSolver<Eigen::Matrix2f> es(Lambda);
+            Eigen::Vector2f ev = es.eigenvalues();
+            Eigen::Matrix2f Vd = es.eigenvectors();
+            Eigen::Vector2f inv;
+            for (int i = 0; i < 2; ++i) inv(i) = ev(i) > 1e-6f ? 1.f / ev(i) : 1e6f;
+            cand.covariance = Vd * inv.asDiagonal() * Vd.transpose();
+        }
         candidates.push_back(cand);
     }
 
@@ -327,6 +370,10 @@ std::optional<CornerDetector::Line2D> CornerDetector::fit_line_pca(
     Line2D line;
     line.normal = eig.eigenvectors().col(0);  // smallest eigenvalue = line normal
     line.d = line.normal.dot(centroid);
+    // Smallest eigenvalue = Σ perpendicular² of the points about the fitted line.
+    // Per-point mean square scatter → a graded quality signal for σ_L (clean wall ≈ sensor noise).
+    line.npts = static_cast<int>(pts.size());
+    line.resid_var = std::max(0.f, eig.eigenvalues()(0)) / static_cast<float>(line.npts);
     return line;
 }
 

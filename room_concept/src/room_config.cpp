@@ -146,6 +146,15 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.MotionLearnQualityThreshold", room_concept.params.motion_learn_quality_threshold);
 
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.EnableCornerTracking", room_concept.params.enable_corner_tracking);
+    // Graded-covariance corner factor (replaces the old hard rej_angle/rej_orient gates).
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.CornerWallBand", room_concept.params.corner_wall_band);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.CornerBaseSigma", room_concept.params.corner_base_sigma);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.CornerOrientTauDeg", room_concept.params.corner_orient_tau_deg);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.CornerPrecisionGain", room_concept.params.corner_precision_gain);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.CornerHuberSigma", room_concept.params.corner_huber_sigma);
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.CornerEarlyExitCheck", room_concept.params.corner_early_exit_check);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.CornerEarlyExitSigma", room_concept.params.corner_early_exit_sigma);
+    rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomConcept.CornerEarlyExitMinBad", room_concept.params.corner_early_exit_min_bad);
 
     // Object anchors (validated modelled objects as SE(2) pose landmarks). Loaded into BOTH the
     // shared config (read by RoomSceneGraph's graph-side gather) and the localizer params.
@@ -157,6 +166,8 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "ObjectAnchor.measSigmaYaw", p.OBJECT_ANCHOR_MEAS_SIG_YAW);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "ObjectAnchor.earlyExitSigma", p.OBJECT_ANCHOR_EARLY_EXIT_SIGMA);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "ObjectAnchor.validateSigma", p.OBJECT_ANCHOR_VALIDATE_SIGMA);
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "ObjectAnchor.freshnessEnable", p.OBJECT_ANCHOR_FRESHNESS_ENABLE);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "ObjectAnchor.freshnessAgeScale", p.OBJECT_ANCHOR_FRESHNESS_AGE_SCALE);
     room_concept.params.object_anchor.enable      = p.OBJECT_ANCHOR_ENABLE;
     room_concept.params.object_anchor.weight      = p.OBJECT_ANCHOR_WEIGHT;
     room_concept.params.object_anchor.huber_delta = p.OBJECT_ANCHOR_HUBER;

@@ -151,6 +151,8 @@ struct RoomConfig
                                                   // σ-cutoff that forces the optimizer to run (drift catch)
     float OBJECT_ANCHOR_VALIDATE_SIGMA  = 0.10f;  // ObjectAnchor.validateSigma — map-pose σ (m) below which
                                                   // room PINS the table's world pose (breaks the circularity)
+    bool  OBJECT_ANCHOR_FRESHNESS_ENABLE    = true;  // ObjectAnchor.freshnessEnable — grow R_o with obs age
+    float OBJECT_ANCHOR_FRESHNESS_AGE_SCALE = 3.0f;  // ObjectAnchor.freshnessAgeScale — frames→σ doubles
 };
 
 // Load the agent params + RoomConcept params + EpistemicController/planner params,

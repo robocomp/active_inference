@@ -703,11 +703,20 @@ void Viewer2D::draw_corners(const std::vector<rc::CornerDetector::CornerMatch>& 
         return item;
     });
 
-    // Lines connecting robot → detected corner (sight lines to the detected corners)
+    // Lines connecting robot → detected corner (sight lines). Width + colour encode the detection
+    // covariance determinant (uncertainty); the pen is re-styled per corner below.
     resize_pool(corner_robot_line_items_, n, [&]() {
-        QPen pen(QColor(0, 0, 139), 0.08);   // dark blue, thick
-        auto* item = agv_->scene.addLine(0, 0, 0, 0, pen);
+        auto* item = agv_->scene.addLine(0, 0, 0, 0, QPen(QColor(0, 0, 139), 0.08));
         item->setZValue(27);
+        return item;
+    });
+
+    // Numeric det(cov) label at the midpoint of each sight line (screen-sized, transform-invariant).
+    resize_pool(corner_cov_text_items_, n, [&]() {
+        auto* item = agv_->scene.addText("");
+        item->setZValue(31);
+        item->setFlag(QGraphicsItem::ItemIgnoresTransformations, true);
+        QFont f = item->font(); f.setPointSizeF(7.0); item->setFont(f);
         return item;
     });
 
@@ -729,6 +738,31 @@ void Viewer2D::draw_corners(const std::vector<rc::CornerDetector::CornerMatch>& 
                                         det_world.x(), det_world.y());
         corner_robot_line_items_[i]->setLine(t.x(), t.y(),
                                              det_world.x(), det_world.y());
+
+        // ── Covariance-determinant encoding ────────────────────────────────────────────────────
+        // cov = Λ_det⁻¹. det(cov) = 1/det(Λ_det). A shallow (rank-1) corner has det(Λ)→0 ⇒ det(cov)→∞,
+        // so invert via the eigenvalues with a precision floor and cap the covariance eigenvalues.
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix2f> es(m.information);
+        Eigen::Vector2f lam = es.eigenvalues();                 // Λ_det eigenvalues (precision, 1/m²)
+        constexpr float kPrecFloor = 1e-3f;                     // → σ ≤ ~31 m for an unconstrained axis
+        const float cov0 = 1.f / std::max(lam(0), kPrecFloor);  // covariance eigenvalues (m²)
+        const float cov1 = 1.f / std::max(lam(1), kPrecFloor);
+        const float det_cov = cov0 * cov1;                      // m⁴  (= 1/det(Λ_det))
+        // Characteristic 1σ length = (det cov)^{1/4} = geometric-mean of the two σ axes (metres).
+        const float sigma_scale = std::pow(std::max(det_cov, 1e-12f), 0.25f);
+
+        // Line width grows with uncertainty (thin = confident, fat = uncertain), clamped to sane px-in-m.
+        const float width = std::clamp(0.03f + 0.9f * sigma_scale, 0.03f, 0.9f);
+        // Colour: green (confident, small σ) → red (uncertain, large σ) over ~[0.02, 0.6] m.
+        const float u = std::clamp((sigma_scale - 0.02f) / (0.60f - 0.02f), 0.f, 1.f);
+        const QColor col(static_cast<int>(255 * u), static_cast<int>(200 * (1.f - u)), 60, 220);
+        corner_robot_line_items_[i]->setPen(QPen(col, width));
+
+        // Numeric label: det(cov) in m⁴ at the line midpoint.
+        auto* txt = corner_cov_text_items_[i];
+        txt->setPlainText(QString("det(cov)=%1").arg(det_cov, 0, 'g', 3));
+        txt->setDefaultTextColor(col);
+        txt->setPos(0.5f * (t.x() + det_world.x()), 0.5f * (t.y() + det_world.y()));
     }
 }
 

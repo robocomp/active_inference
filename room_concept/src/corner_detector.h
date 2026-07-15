@@ -24,10 +24,24 @@ public:
         float search_radius       = 1.5f;   // meters around predicted corner to gather points
         int   min_points_per_line = 3;       // minimum points per wall group
         float ransac_threshold    = 0.06f;   // inlier band width for optional outlier rejection
-        float max_match_distance  = 1.5f;   // max distance between detected and predicted corner
-        float min_corner_angle    = 25.0f;   // degrees — reject nearly-parallel intersections
-        float max_corner_angle    = 155.0f;  // degrees — reject nearly-flat intersections
-        float max_orientation_dev = 20.0f;   // degrees — max deviation between PCA line and model edge direction
+        float max_match_distance  = 1.5f;   // max distance between detected and predicted corner (association cap)
+        float min_corner_angle    = 25.0f;   // degrees — kept for MODEL-corner selection only (set_model_corners)
+        float max_corner_angle    = 155.0f;  // degrees — kept for MODEL-corner selection only (set_model_corners)
+        float max_orientation_dev = 20.0f;   // degrees — LEGACY hard gate (unused now; kept for config back-compat)
+
+        // ── Graded-covariance detection (replaces the old hard rej_angle/rej_orient gates) ──
+        // A detection is no longer discarded when its geometry is marginal; instead it carries a
+        // per-detection 2×2 information matrix Λ_det (robot frame) whose precision shrinks smoothly
+        // with wall-fit scatter, orientation deviation, and intersection shallowness. The RFE loss
+        // consumes Λ_det anisotropically, so a marginal corner contributes weakly and a clean
+        // asymmetric corner (the notch) contributes strongly — no thresholds, covariance → SDF pose.
+        float wall_band     = 0.35f;   // meters — perpendicular tolerance gathering wall points around the
+                                       // PREDICTED wall line. Must exceed the chronic model misfit (~0.32 m
+                                       // here) or the true wall points fall outside the band and NO detection
+                                       // forms (the real reason corners almost never fired). Was hardcoded 0.12.
+        float base_sigma    = 0.04f;   // meters — corner detection noise floor σ0 (per-wall).
+        float orient_tau_deg = 20.0f;  // degrees — smooth orientation-trust scale: ori_scale = exp(−(dev/τ)²).
+                                       // dev=τ → 37% weight, 2τ → 2%. Replaces the 20° hard cut.
     };
 
     // ===== Output types =====
@@ -40,7 +54,10 @@ public:
         Eigen::Vector2f model_world;// model corner world position (for display)
         float  distance;            // ||detected - predicted||
         float  angle_deg;           // angle between the two fitted lines
-        Eigen::Matrix2f covariance; // 2×2 detection uncertainty (robot frame)
+        Eigen::Matrix2f covariance; // 2×2 detection uncertainty (robot frame) — legacy, display only
+        Eigen::Matrix2f information;// 2×2 graded precision Λ_det = Σ_L (ori_scale_L/σ_L²) n_L n_Lᵀ (robot frame).
+                                    // Rank-1 when the two walls are near-parallel (shallow corner → the
+                                    // bisector direction is left unconstrained). This is what the loss uses.
     };
 
     struct DetectionResult
@@ -49,13 +66,20 @@ public:
         int corners_in_fov = 0;
         int corners_detected = 0;
         int corners_accepted = 0;
-        // Per-gate rejection counts (why detected corners did NOT become matches) — diagnostic for
-        // "corner acceptance too strict": see which gate is the bottleneck.
-        int rej_angle = 0;     // corner angle outside [min,max]_corner_angle
-        int rej_dist = 0;      // detected corner > max_match_distance from prediction
-        int rej_orient = 0;    // a wall direction deviates > max_orientation_dev from the model edge
-        int rej_convex = 0;    // convexity sign mismatch
-        int rej_unassigned = 0;// survived gates but lost the 1-to-1 Hungarian assignment
+        // Diagnostic counts — where do in-FOV corners die? With graded covariance most of these are no
+        // longer hard rejections but "soft" events kept for observability.
+        int rej_occluded = 0;  // ★ model corner NOT visible from the robot (a wall/notch occludes the sight
+                               // line) → excluded BEFORE detection: an unreachable corner must not be matched,
+                               // must not enter the loss, and must not count toward the early-exit decision.
+        int rej_fewpoints = 0; // ★ FORMATION failure: gather grabbed < min_points_per_line on a wall → no
+                               // detection formed at all (fires BEFORE the gates). If this dominates, the
+                               // wall_band is too tight vs the model misfit — widen it. This is the counter
+                               // added to confirm the gather-band hypothesis.
+        int rej_dist = 0;      // detected corner > max_match_distance from prediction (association cap, kept)
+        int soft_orient = 0;   // orientation trust ori_scale < 0.05 (heavily downweighted, NOT discarded)
+        int rej_convex = 0;    // convexity sign mismatch — KEPT as a hard gate (topological disambiguator
+                               // for rot180: |dir·model_dir| is 180°-blind, only convexity breaks the tie)
+        int rej_unassigned = 0;// survived to candidate but lost the 1-to-1 Hungarian assignment
     };
 
     // ===== Interface =====
@@ -75,6 +99,10 @@ public:
 private:
     Params params_;
 
+    /// Full room polygon (world frame) — retained for the ray-cast occlusion/visibility test so an
+    /// occluded corner (behind a wall or the notch step) is excluded before detection.
+    std::vector<Eigen::Vector2f> polygon_;
+
     /// Model corner with its two adjacent wall directions.
     struct ModelCorner
     {
@@ -93,6 +121,10 @@ private:
     {
         Eigen::Vector2f normal;
         float d;
+        float resid_var = 0.f;   // λ_min / N — mean squared perpendicular scatter of the fitted points
+                                 // about the line (≈ sensor noise for a clean wall; large for a cluttered
+                                 // gather). Inflates σ_L so a poorly-fit wall is trusted less.
+        int   npts = 0;          // number of points the line was fit to
         Eigen::Vector2f direction() const { return Eigen::Vector2f(-normal.y(), normal.x()); }
     };
 

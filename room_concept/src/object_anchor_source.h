@@ -59,6 +59,15 @@ namespace rc
             // mid-flip/mid-delocalization is worse than no anchor — it fights the correct pose forever.
             // Existing pins are always honoured; this only gates fresh captures.
             bool  allow_pin = true;
+            // ── Freshness as precision ──────────────────────────────────────────────────────────────
+            // obj_obs_robot PERSISTS in the graph between actual sightings (the producer only rewrites it
+            // when a mask is assigned; `table_detection_alive` stays true for ~40 frames). A stale in-front
+            // observation paired with the moved robot pose is a PHANTOM landmark (confirmed 07-13). Instead
+            // of a hard freshness gate, grow the measurement covariance R_o with the observation's age
+            // (table_frames_since_detection): R_o ← R_o·(1 + age/age_scale)² ⇒ a stale obs lands with Λ≈0
+            // and pulls nothing; a fresh (age 0) one keeps full weight. No threshold — smooth decay.
+            bool  freshness_enable    = true;
+            float freshness_age_scale = 3.0f;   // frames of staleness at which σ roughly doubles
         };
 
         /// A Reader fills `out` from `node`; returns false to skip it (e.g. no measurement yet).

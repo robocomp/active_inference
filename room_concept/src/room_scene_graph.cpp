@@ -7,8 +7,11 @@
 
 #include <cmath>
 #include <cstdio>
+#include <ctime>
+#include <limits>
 #include <print>
 #include <string>
+#include <sys/stat.h>
 #include <vector>
 
 #include <QString>
@@ -426,12 +429,129 @@ void RoomSceneGraph::update_planner_obstacle_footprints()
 }
 
 ///////////////////////////////////////////////////////////////////////////////
+// Observe-only table-landmark logging (pure reads, no anchor/pin side effects). Tracks how the detected
+// table coordinates evolve as the robot moves: the ROOM-frame pose (from the room→table RT) should stay
+// STABLE if localization is consistent; the ROBOT-frame observation (obj_obs_robot, table_concept's raw
+// per-frame detection) naturally moves with the robot. Robot pose logged for correlation.
+void RoomSceneGraph::log_table_landmarks()
+{
+    // Robot pose in room frame (independent of the table) + localization timestamp.
+    float rx = 0.f, ry = 0.f, rth = 0.f; std::uint64_t ts_ms = 0;
+    if (const auto lr = room_concept_->get_last_result(); lr.has_value())
+    {
+        rx  = lr->robot_pose.translation().x();
+        ry  = lr->robot_pose.translation().y();
+        rth = std::atan2(lr->robot_pose.linear()(1, 0), lr->robot_pose.linear()(0, 0));
+        ts_ms = static_cast<std::uint64_t>(lr->timestamp_ms);
+    }
+
+    const bool throttle_log = (table_landmark_log_k_++ % 10) == 0;   // stdout ~2/s; CSV gets every frame
+
+    for (const auto& n : G_->get_nodes_by_type("table"))
+    {
+        // ROBOT-frame detection (raw): obj_obs_robot = [x, y]. Absent ⇒ table not detected this frame.
+        const auto obs = G_->get_attrib_by_name<obj_obs_robot_att>(n);
+        const bool has_obs = obs.has_value() and obs->get().size() >= 2;
+        const float ox = has_obs ? obs->get()[0] : std::numeric_limits<float>::quiet_NaN();
+        const float oy = has_obs ? obs->get()[1] : std::numeric_limits<float>::quiet_NaN();
+
+        // Anisotropic R_o published by the producer as obj_obs_robot_cov=[Rxx,Ryy,Rxy] (ray-loose): log its
+        // anisotropy (σ_along²/σ_perp², large ⇒ working) and whether its loose axis aligns with the viewing
+        // ray (|cos| between R_o's big eigenvector and obs_robot dir; ~1 ⇒ correct). See TABLE_TRIANGULATION.
+        float cov_ratio = std::numeric_limits<float>::quiet_NaN();
+        float ray_align = std::numeric_limits<float>::quiet_NaN();
+        if (const auto cov = G_->get_attrib_by_name<obj_obs_robot_cov_att>(n);
+            cov.has_value() and cov->get().size() >= 3 and has_obs)
+        {
+            const auto& c = cov->get();
+            Eigen::Matrix2f R; R << c[0], c[2], c[2], c[1];
+            Eigen::SelfAdjointEigenSolver<Eigen::Matrix2f> es(R);
+            const float lo = std::max(1e-9f, es.eigenvalues()(0)), hi = es.eigenvalues()(1);
+            cov_ratio = hi / lo;
+            const Eigen::Vector2f big = es.eigenvectors().col(1);
+            const float on = std::hypot(ox, oy);
+            if (on > 1e-6f)
+                ray_align = std::abs((big.x() * ox + big.y() * oy) / on);
+        }
+
+        // ROOM-frame table pose from the RT edge (parent should be 'room'; log parent to catch frame bugs).
+        float wx = std::numeric_limits<float>::quiet_NaN(), wy = wx, wyaw = wx;
+        std::string parent_name = "?";
+        if (const auto p = G_->get_attrib_by_name<parent_att>(n); p.has_value())
+            if (const auto pn = G_->get_node(p.value()); pn.has_value())
+                parent_name = pn->name();
+        if (const auto rt = rt_api_->get_RT_pose_from_parent(n); rt.has_value())
+        {
+            const Eigen::Vector3d t = rt->translation();
+            wx = static_cast<float>(t.x()); wy = static_cast<float>(t.y());
+            wyaw = static_cast<float>(std::atan2(rt->linear()(1, 0), rt->linear()(0, 0)));
+        }
+
+        bool alive = true;
+        int  age   = 0;   // table_frames_since_detection: 0 = fresh this cycle, grows while unseen
+        {
+            const auto& attrs = n.attrs();
+            if (const auto it = attrs.find("table_detection_alive"); it != attrs.end())
+                alive = (it->second.dec() != 0);
+            if (const auto it = attrs.find("table_frames_since_detection"); it != attrs.end())
+                age = std::max(0, it->second.dec());
+        }
+        // Freshness-as-precision weight actually applied to this obs by object_anchor_source:
+        //   R_o ← R_o·(1+age/scale)²  ⇒  relative precision (weight) = 1/(1+age/scale)². 1=fresh, →0 stale.
+        const float age_scale = std::max(1e-3f, params_->OBJECT_ANCHOR_FRESHNESS_AGE_SCALE);
+        const float f = 1.0f + static_cast<float>(age) / age_scale;
+        const float fresh_weight = 1.0f / (f * f);
+
+        // "Detected" = has a live robot-frame observation. Skip nodes with no measurement this frame.
+        if (not has_obs) continue;
+
+        if (throttle_log)
+            std::print("[table-landmark] #{} room=({:.3f},{:.3f},{:.2f}) obs_robot=({:.3f},{:.3f}) "
+                       "robot=({:.2f},{:.2f},{:.2f}) alive={} age={} fresh_w={:.3f} cov_ratio={:.1f} "
+                       "ray_align={:.2f} parent='{}'\n",
+                       n.id(), wx, wy, wyaw, ox, oy, rx, ry, rth, alive, age, fresh_weight,
+                       cov_ratio, ray_align, parent_name);
+
+        if (!table_landmark_csv_open_attempted_)
+        {
+            table_landmark_csv_open_attempted_ = true;
+            ::mkdir("tmp", 0755);
+            ::mkdir("tmp/sdf_localizer", 0755);
+            const std::time_t tt = std::time(nullptr);
+            std::tm tm_local{}; localtime_r(&tt, &tm_local);
+            char ts_buf[32]; std::strftime(ts_buf, sizeof(ts_buf), "%Y-%m-%d_%H-%M-%S", &tm_local);
+            table_landmark_csv_.open(std::string("tmp/sdf_localizer/table_landmark_") + ts_buf + ".csv",
+                                     std::ios::out | std::ios::trunc);
+            if (table_landmark_csv_.is_open())
+                table_landmark_csv_ << "ts_ms,node_id,room_x,room_y,room_yaw,obs_robot_x,obs_robot_y,"
+                                       "robot_x,robot_y,robot_th,alive,frames_since_detection,fresh_weight,"
+                                       "cov_ratio,ray_align,parent\n";
+        }
+        if (table_landmark_csv_.is_open())
+        {
+            table_landmark_csv_ << ts_ms << ',' << n.id() << ','
+                                << wx << ',' << wy << ',' << wyaw << ','
+                                << ox << ',' << oy << ','
+                                << rx << ',' << ry << ',' << rth << ','
+                                << (alive ? 1 : 0) << ',' << age << ',' << fresh_weight << ','
+                                << cov_ratio << ',' << ray_align << ',' << parent_name << '\n';
+            table_landmark_csv_.flush();
+        }
+    }
+}
+
 // Gather validated modelled objects (tables, …) from the graph and hand them to the localizer
 // as SE(2) pose landmarks. MAIN THREAD (get_RT_pose_from_parent uses the ts==0 InnerEigen cache).
 void RoomSceneGraph::refresh_object_anchors()
 {
     if (!G_ || !rt_api_ || !room_concept_ || !room_node_created_)
         return;
+
+    // Observe-only table-landmark logging: pure graph reads, ZERO anchor/pin side effects, runs even when
+    // the anchor FACTOR is disabled — so the detected table coordinates can be studied as the robot moves
+    // (register-then-pull) before deciding to let the landmark pull the pose.
+    log_table_landmarks();
+
     if (!params_->OBJECT_ANCHOR_ENABLE)
         return;
 
@@ -439,10 +559,12 @@ void RoomSceneGraph::refresh_object_anchors()
         inner_gaussian_ = G_->get_inner_gaussian_api();
 
     rc::ObjectAnchorSource::Config cfg;
-    cfg.enable         = params_->OBJECT_ANCHOR_ENABLE;
-    cfg.meas_sigma_xy  = params_->OBJECT_ANCHOR_MEAS_SIG_XY;
-    cfg.meas_sigma_yaw = params_->OBJECT_ANCHOR_MEAS_SIG_YAW;
-    cfg.validate_sigma = params_->OBJECT_ANCHOR_VALIDATE_SIGMA;
+    cfg.enable             = params_->OBJECT_ANCHOR_ENABLE;
+    cfg.meas_sigma_xy      = params_->OBJECT_ANCHOR_MEAS_SIG_XY;
+    cfg.meas_sigma_yaw     = params_->OBJECT_ANCHOR_MEAS_SIG_YAW;
+    cfg.validate_sigma     = params_->OBJECT_ANCHOR_VALIDATE_SIGMA;
+    cfg.freshness_enable   = params_->OBJECT_ANCHOR_FRESHNESS_ENABLE;
+    cfg.freshness_age_scale= params_->OBJECT_ANCHOR_FRESHNESS_AGE_SCALE;
 
     auto anchors = object_anchor_source_.gather(*G_, *inner_gaussian_, cfg);
 

@@ -506,7 +506,9 @@ void SpecificWorker::compute()
     t_health_ms = 0;
 
     const auto total_ms = compute_timer.elapsed();
-    const auto elapsed_since_init_ms = std::chrono::duration_cast<std::chrono::microseconds>(
+    // Sub-millisecond resolution total (compute() typically ~0.3 ms → the integer-ms section timers above
+    // all read 0). This is MICROSECONDS — printed as total_us so it's not mistaken for milliseconds.
+    const auto elapsed_since_init_us = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now() - init_time).count();
 
     // Per-tick compute-timing CSV — shows whether compute() holds the period (≈50 ms) or stalls, and
@@ -530,7 +532,7 @@ void SpecificWorker::compute()
     {
         last_compute_timing_log_ms_ = now_ms;
         qInfo() << "[Timing][compute]"
-                << "total_ms=" << elapsed_since_init_ms
+                << "total_us=" << elapsed_since_init_us   // MICROSECONDS (≈0.3 ms); sections below are integer ms
                 << "affordance_ms=" << t_affordance_ms
                 << "loc_fetch_ms=" << t_loc_fetch_ms
                 << "viewer_ms=" << t_viewer_ms
