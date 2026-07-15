@@ -80,4 +80,19 @@ namespace rc::object_anchor
             G.add_or_modify_attrib_local<obj_obs_robot_cov_att>(node, std::move(cov));
         }
     }
+
+    /// Position-only overload carrying a FULL ANISOTROPIC 2×2 R_o (robot frame). Writes obj_obs_robot
+    /// (=[x,y]) and obj_obs_robot_cov = [Rxx, Ryy, Rxy] (3 floats = symmetric 2×2). The consumer
+    /// disambiguates by size: obs size 2 + cov size 3 ⇒ anisotropic position landmark. Use this instead of
+    /// the diagonal form when the per-view centroid is ray-biased (see ray_anisotropic_cov.h /
+    /// TABLE_TRIANGULATION.md) — the off-diagonal is what puts the loose axis along the viewing ray.
+    inline void write_observation_aniso(DSR::DSRGraph& G, DSR::Node& node,
+                                        const Eigen::Vector2f& obs_robot,
+                                        const Eigen::Matrix2f& R_robot)
+    {
+        G.add_or_modify_attrib_local<obj_obs_robot_att>(
+            node, std::vector<float>{obs_robot.x(), obs_robot.y()});
+        G.add_or_modify_attrib_local<obj_obs_robot_cov_att>(
+            node, std::vector<float>{R_robot(0, 0), R_robot(1, 1), R_robot(0, 1)});
+    }
 } // namespace rc::object_anchor
