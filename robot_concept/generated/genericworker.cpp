@@ -102,10 +102,9 @@ GenericWorker::~GenericWorker()
 {
     for (auto& [name, graphPtr] : Graphs) {
         if (!graphPtr) continue;
-        auto grid_nodes = graphPtr->get_nodes_by_type("grid");
-        for (auto grid : grid_nodes) {
-            graphPtr->delete_node(grid);
-        }
+        // Node renamed "grid"→"residual" (type still "grid"): look up by NAME instead of type-search.
+        if (auto residual = graphPtr->get_node("residual"); residual.has_value())
+            graphPtr->delete_node(residual.value());
     }
 }
 void GenericWorker::killYourSelf()

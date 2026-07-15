@@ -15,12 +15,15 @@
 
 #include <QString>
 
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include <dsr/api/dsr_api.h>
+#include <dsr/api/dsr_inner_eigen_api.h>
+#include <dsr/api/dsr_eigen_defs.h>
 
 #include <QDebug>
 
@@ -281,37 +284,81 @@ private:
 		if(const auto o = g_->get_attrib_by_name<grid_border_cells_att>(n.value()); o.has_value())
 			border = read_pts(o->get());
 
-		// Reconstruct the belief field's cell centres from the dense arrays + meta (same as the
-		// voxelizer reader): only cells with meaningful occupancy (P>0.5) are forwarded.
-		std::vector<QVector3D> field_centres;
-		std::vector<float>     field_prob, field_var;
-		const auto pa = g_->get_attrib_by_name<grid_occupancy_prob_att>(n.value());
-		const auto va = g_->get_attrib_by_name<grid_occupancy_var_att>(n.value());
+		// Robot mesh (shadow.obj) posed into the room frame, so the scene reads with the robot in place.
+		const std::vector<QVector3D> robot = robot_room_triangles();
+
+		// The occupied cells now carry the REAL obstacle top height in z (producer publishes it); the
+		// viewer raises a surface to that height. grid_field_meta = [xmin, ymin, cell, w, h] only frames
+		// the coarse lattice — no dense field needed.
 		const auto ma = g_->get_attrib_by_name<grid_field_meta_att>(n.value());
-		if(pa.has_value() and va.has_value() and ma.has_value())
+		if(ma.has_value() and ma->get().size() >= 5)
 		{
-			const auto &P = pa->get(); const auto &V = va->get(); const auto &M = ma->get();
-			if(M.size() >= 5)
-			{
-				const float xmin = M[0], ymin = M[1], cell = M[2];
-				const int w = static_cast<int>(M[3]), h = static_cast<int>(M[4]);
-				if(static_cast<int>(P.size()) >= w * h and static_cast<int>(V.size()) >= w * h)
-					for(int y = 0; y < h; ++y)
-						for(int x = 0; x < w; ++x)
-						{
-							const int i = y * w + x;
-							if(P[i] <= 0.5f) continue;
-							field_centres.emplace_back(xmin + (x + 0.5f) * cell, ymin + (y + 0.5f) * cell, 0.03f);
-							field_prob.push_back(P[i]);
-							field_var.push_back(V[i]);
-						}
-			}
+			const auto &M = ma->get();
+			set_data(occupied, border, M[0], M[1], M[2],
+			         static_cast<int>(M[3]), static_cast<int>(M[4]), robot);
 		}
-		set_data(field_centres, field_prob, field_var, occupied, border);
+		else
+			set_data(occupied, border, 0.f, 0.f, 0.f, 0, 0, robot);   // no extent yet → cells + robot only
 	}
 
-	std::shared_ptr<DSR::DSRGraph> g_;
-	std::uint64_t id_;
+	// Load + recentre the robot mesh once (xy-centre, z-min → base on the floor), mirroring the
+	// voxelizer viewer. Empty on failure; retried never (the file is static).
+	void load_robot_mesh_once()
+	{
+		if(robot_loaded_)
+			return;
+		robot_loaded_ = true;
+		const auto p = rc::obj::resolve_robot_mesh_path("meshes/shadow.obj");
+		if(not p.has_value())
+		{
+			qWarning() << "[grid-view] robot mesh meshes/shadow.obj not found";
+			return;
+		}
+		const auto mesh = rc::obj::load_obj_mesh_data(p.value());
+		if(not mesh.has_value())
+			return;
+		const QVector3D ctr(0.5f * (mesh->bb_min.x() + mesh->bb_max.x()),
+		                    0.5f * (mesh->bb_min.y() + mesh->bb_max.y()),
+		                    mesh->bb_min.z());
+		robot_local_.reserve(mesh->triangles.size());
+		for(const auto &v : mesh->triangles)
+			robot_local_.emplace_back(v.x() - ctr.x(), v.y() - ctr.y(), v.z() - ctr.z());
+	}
+
+	// Robot mesh expressed in the ROOM frame via the room←robot SE(2) pose (x, y, yaw), same as the
+	// voxelizer draw. Empty if the mesh or the transform isn't available.
+	std::vector<QVector3D> robot_room_triangles()   // main thread
+	{
+		load_robot_mesh_once();
+		if(robot_local_.empty())
+			return {};
+		std::string room_name, robot_name;
+		if(const auto r = g_->get_nodes_by_type("room");  not r.empty()) room_name  = r.front().name();
+		if(const auto r = g_->get_nodes_by_type("robot"); not r.empty()) robot_name = r.front().name();
+		if(room_name.empty() or robot_name.empty())
+			return {};
+		if(not inner_)
+			inner_ = g_->get_inner_eigen_api();
+		const auto T = inner_->get_transformation_matrix(room_name, robot_name, 0);   // ts==0: main thread only
+		if(not T.has_value())
+			return {};
+		const auto &M = T.value();
+		const float x = static_cast<float>(M.translation().x());
+		const float y = static_cast<float>(M.translation().y());
+		const float yaw = static_cast<float>(std::atan2(M.linear()(1, 0), M.linear()(0, 0)));
+		const float c = std::cos(yaw), s = std::sin(yaw);
+		std::vector<QVector3D> out;
+		out.reserve(robot_local_.size());
+		for(const auto &l : robot_local_)
+			out.emplace_back(x + c * l.x() - s * l.y(), y + s * l.x() + c * l.y(), l.z() + 0.01f);
+		return out;
+	}
+
+	std::shared_ptr<DSR::DSRGraph>          g_;
+	std::uint64_t                           id_;
+	std::unique_ptr<DSR::InnerEigenAPI>     inner_;         // room←robot pose (created lazily, main thread)
+	std::vector<QVector3D>                  robot_local_;   // recentred mesh, robot frame
+	bool                                    robot_loaded_ = false;
 };
 
 }   // namespace rc::viewers

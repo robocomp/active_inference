@@ -253,6 +253,7 @@ bool SensorMediaPublisher::publish_image(const std::string& key, const ImageFram
     {
         ++st.stats.ok;
         st.stats.bytes += view.nbytes;
+        st.cum_bytes.fetch_add(view.nbytes, std::memory_order_relaxed);
         return true;
     }
     ++st.stats.publish_fail;
@@ -287,6 +288,7 @@ bool SensorMediaPublisher::publish_image360(const ImageFrameView& view)
     {
         ++st.stats.ok;
         st.stats.bytes += view.nbytes;
+        st.cum_bytes.fetch_add(view.nbytes, std::memory_order_relaxed);
         return true;
     }
     ++st.stats.publish_fail;
@@ -322,6 +324,7 @@ bool SensorMediaPublisher::publish_lidar(const LidarFrameView& view)
     {
         ++st.stats.ok;
         st.stats.bytes += nfloats * sizeof(float);
+        st.cum_bytes.fetch_add(nfloats * sizeof(float), std::memory_order_relaxed);
         return true;
     }
     ++st.stats.publish_fail;
@@ -353,6 +356,7 @@ bool SensorMediaPublisher::publish_imu(const ImuFrameView& view)
     {
         ++st.stats.ok;
         st.stats.bytes += sizeof(rc::media::ImuFrame);
+        st.cum_bytes.fetch_add(sizeof(rc::media::ImuFrame), std::memory_order_relaxed);
         return true;
     }
     ++st.stats.publish_fail;
@@ -369,6 +373,37 @@ void SensorMediaPublisher::report_one(const std::string& key, Stats& s)
                    << "loan_fail=" << s.loan_fail
                    << "publish_fail=" << s.publish_fail;
     s.reset();
+}
+
+double SensorMediaPublisher::current_bps(const std::vector<std::string>& keys)
+{
+    const auto now = std::chrono::steady_clock::now();
+    const bool all = keys.empty();
+    auto wanted = [&](const std::string& k)
+    { return all or std::find(keys.begin(), keys.end(), k) != keys.end(); };
+
+    // Sample one stream: (cum_bytes - prev) / dt. The first sample seeds prev and returns 0.
+    auto sample = [&](auto& st) -> double
+    {
+        const std::uint64_t cur = st.cum_bytes.load(std::memory_order_relaxed);
+        double bps = 0.0;
+        if (st.bps_prev_t.time_since_epoch().count() != 0)
+        {
+            const double dt = std::chrono::duration<double>(now - st.bps_prev_t).count();
+            if (dt > 0.0) bps = static_cast<double>(cur - st.bps_prev_bytes) / dt;
+        }
+        st.bps_prev_bytes = cur;
+        st.bps_prev_t     = now;
+        return bps;
+    };
+
+    double sum = 0.0;
+    for (auto& [key, st] : images_)
+        if (wanted(key)) sum += sample(st);
+    if (image360_ and wanted(image360_->key)) sum += sample(*image360_);
+    if (lidar_ and wanted(lidar_->key))       sum += sample(*lidar_);
+    if (imu_ and wanted(imu_->key))           sum += sample(*imu_);
+    return sum;
 }
 
 void SensorMediaPublisher::maybe_report_stats(StatsGroup group, std::chrono::seconds interval)

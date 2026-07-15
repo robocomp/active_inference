@@ -35,6 +35,7 @@
 // Not thread-safe per stream: each publish_*() for a given stream must come from a
 // single producer thread (RGBD thread for images, lidar thread, imu thread).
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <map>
@@ -119,7 +120,19 @@ public:
                    const std::vector<std::string>& keys = {},
                    const char* attr_name = rc::media::MEDIA_DESCRIPTOR_ATTR) const;
 
+    // Write the live media throughput (bytes/s, summed over the node's streams) onto the same sensor
+    // node as its descriptor, as the `media_bps` attribute. Call ~1 Hz from the graph/main thread.
+    // Returns false if the node is absent. Non-const: advances the per-stream sampling window.
+    template <class Graph>
+    bool advertise_stats(Graph& graph, const std::string& node_name,
+                         const std::vector<std::string>& keys = {});
+
     [[nodiscard]] std::string descriptor_json(const std::vector<std::string>& keys = {}) const;
+
+    // Sum of live bytes/s over the streams selected by `keys` (empty ⇒ all), from the LOCAL publish
+    // path (nonzero only while robot_concept produces/bridges the stream). Advances each selected
+    // stream's sampling window, so call once per node per period.
+    [[nodiscard]] double current_bps(const std::vector<std::string>& keys);
 
     // Loan → fill → publish for one stream. Returns false (frame dropped) on: not
     // ready, key/stream unknown, empty/oversize payload, loan unavailable, publish
@@ -161,6 +174,11 @@ private:
         PubT          pub;
         std::uint64_t frame_id = 0;
         Stats         stats;
+        // Monotonic byte counter for live throughput (never reset, unlike Stats::bytes). Written from
+        // the producer thread, sampled from the graph thread in advertise_stats() → atomic.
+        std::atomic<std::uint64_t> cum_bytes{0};
+        std::uint64_t             bps_prev_bytes = 0;                 // graph-thread-only bps state
+        std::chrono::steady_clock::time_point bps_prev_t{};
     };
 
     [[nodiscard]] rc::media::MediaDescriptor make_descriptor(
@@ -195,6 +213,19 @@ bool SensorMediaPublisher::advertise(Graph& graph, const std::string& node_name,
         return false;
     graph.runtime_checked_add_or_modify_attrib_local(node.value(), attr_name,
                                                       make_descriptor(keys).to_json());
+    graph.update_node(node.value());
+    return true;
+}
+
+template <class Graph>
+bool SensorMediaPublisher::advertise_stats(Graph& graph, const std::string& node_name,
+                                           const std::vector<std::string>& keys)
+{
+    auto node = graph.get_node(node_name);
+    if (not node.has_value())
+        return false;
+    graph.runtime_checked_add_or_modify_attrib_local(node.value(), "media_bps",
+                                                      static_cast<float>(current_bps(keys)));
     graph.update_node(node.value());
     return true;
 }

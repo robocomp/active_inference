@@ -148,6 +148,14 @@ private:
 	std::atomic<std::uint64_t> helios_frames_{0};
 	std::atomic<std::uint64_t> bpearl_frames_{0};
 
+	// External-DDS RECEIVED bytes per stream, summed in the monitor/poll callbacks (nonzero only while
+	// an external producer owns the plane and robot_concept is monitoring it). Combined with the LOCAL
+	// publish rate to report media_bps on the sensor node regardless of who produces the stream.
+	std::atomic<std::uint64_t> zed_bytes_{0};
+	std::atomic<std::uint64_t> ricoh_bytes_{0};
+	std::atomic<std::uint64_t> helios_bytes_{0};
+	std::atomic<std::uint64_t> bpearl_bytes_{0};
+
 	// RGBD camera reader thread
 	void read_rgbd_thread();
 	std::thread rgbd_thread;
@@ -204,6 +212,10 @@ private:
 		std::vector<std::string> advertise_streams;                        // streams re-advertised when bridging
 	};
 	std::vector<MediaGroup> media_groups_;
+	// DSR node -> its MediaPlaneDDS ICE port (parsed from the proxy). Written onto each media node as
+	// the `media_ice_port` attribute so the mind view can merge a SHM producer (zed) with its ICE
+	// descriptor endpoint (mediaplanedds:12002) into one box.
+	std::map<std::string, int> media_ice_ports_;
 	void build_media_groups();                                             // populate media_groups_ (in initialize)
 	void prime_media_groups();                                             // one bounded round so startup adoption is near-immediate
 	void negotiate(MediaGroup& group);                                     // one non-blocking tick (async poll-then-relaunch)
@@ -218,6 +230,7 @@ private:
 	void monitor_external_image_plane(std::unique_ptr<Sub>& sub,
 	                                  const std::type_identity_t<std::function<std::unique_ptr<Sub>()>>& make_sub,
 	                                  std::atomic<std::uint64_t>& frame_counter,
+	                                  std::atomic<std::uint64_t>& byte_counter,
 	                                  std::uint64_t& mon_frames,
 	                                  std::chrono::steady_clock::time_point& report_at,
 	                                  const char* producer, const char* stream_label);

@@ -481,6 +481,61 @@ void SpecificWorker::compute()
 		}
 		last = now; last_rgbd = r; last_imu = i; last_ricoh = c;
 		last_helios = hl; last_bpearl = bp;
+
+			// Publish live media-plane throughput onto each sensor's descriptor node (main thread, so
+			// the graph write is safe). The frames travel over zero-copy DDS SHM and never hit the wire,
+			// so this self-reported media_bps is the only way the mind network view can show real
+			// per-stream media bandwidth.
+			//
+			// media_bps = LOCAL publish rate (SensorMediaPublisher, while robot_concept bridges) +
+			// EXTERNAL received rate (bytes summed by the DDS monitor, while a hardware producer owns
+			// the plane). Only one side is active per stream at a time, so the sum is the true rate
+			// either way. External-only nodes (helios/bpearl) carry no local publisher (keys empty).
+			const struct { const char* node; std::vector<std::string> keys;
+			               std::atomic<std::uint64_t>* ext; bool enabled; } media_nodes[] = {
+				{"zed",     {"rgb", "depth"}, &zed_bytes_,    params.ENABLE_ZED},
+				{"ricoh",   {"rgb360"},       &ricoh_bytes_,  params.ENABLE_RICOH},
+				{"helios",  {},               &helios_bytes_, params.ENABLE_LIDAR},
+				{"bpearl",  {},               &bpearl_bytes_, params.ENABLE_LIDAR},
+				{"lidar3D", {"lidar"},        nullptr,        params.ENABLE_LIDAR},
+				{"imu",     {"imu"},          nullptr,        params.ENABLE_IMU},
+			};
+			static std::map<std::string, std::uint64_t> last_ext_bytes;
+			for (const auto& mn : media_nodes)
+			{
+				if (not mn.enabled)
+					continue;
+				double bps = mn.keys.empty() ? 0.0 : media_.current_bps(mn.keys);
+				if (mn.ext != nullptr)
+				{
+					const std::uint64_t cur = mn.ext->load(std::memory_order_relaxed);
+					auto [it, inserted] = last_ext_bytes.try_emplace(mn.node, cur);   // seed → no first-tick spike
+					if (not inserted)
+					{
+						bps += static_cast<double>(cur - it->second) / dt;
+						it->second = cur;
+					}
+				}
+				if (auto n = G->get_node(mn.node); n.has_value())
+				{
+					G->runtime_checked_add_or_modify_attrib_local(n.value(), "media_bps", static_cast<float>(bps));
+					G->update_node(n.value());
+				}
+			}
+
+			// Publish the node→ICE-port map (constant; written only when missing/changed to avoid CRDT
+			// churn) so the mind view can merge each SHM producer with its mediaplanedds endpoint.
+			for (const auto& [pnode, pport] : media_ice_ports_)
+				if (auto n = G->get_node(pnode); n.has_value())
+				{
+					const std::string val = std::to_string(pport);
+					const auto it = n->attrs().find("media_ice_port");
+					if (it == n->attrs().end() or it->second.str() != val)
+					{
+						G->runtime_checked_add_or_modify_attrib_local(n.value(), "media_ice_port", val);
+						G->update_node(n.value());
+					}
+				}
 	}
 
 	// Low-rate media-source negotiation (~every 3 s): are zed_camera / ricoh_omni_dds
@@ -552,13 +607,19 @@ void SpecificWorker::read_lidar_thread()
 			// report their FPS ([HeliosThread]/[BpearlThread] in compute()).
 			if (not helios_sub) helios_sub = rc::media::make_lidar_subscriber_from_graph(*G, "helios", "lidar");
 			if (not bpearl_sub) bpearl_sub = rc::media::make_lidar_subscriber_from_graph(*G, "bpearl", "lidar");
+			// Sum received bytes (count × stride × 4) so compute() can report each lidar's real SHM
+			// throughput as media_bps, not only its frame rate.
 			if (helios_sub)   // wait_and_poll paces the loop (blocks up to 100 ms)
 				helios_frames_.fetch_add(
-					helios_sub->wait_and_poll([](const rc::media::LidarFrame&, std::int64_t){}, 100),
+					helios_sub->wait_and_poll([this](const rc::media::LidarFrame& f, std::int64_t)
+						{ helios_bytes_.fetch_add(static_cast<std::uint64_t>(f.count()) * f.stride() * sizeof(float),
+						                          std::memory_order_relaxed); }, 100),
 					std::memory_order_relaxed);
 			if (bpearl_sub)
 				bpearl_frames_.fetch_add(
-					bpearl_sub->poll([](const rc::media::LidarFrame&, std::int64_t){}),
+					bpearl_sub->poll([this](const rc::media::LidarFrame& f, std::int64_t)
+						{ bpearl_bytes_.fetch_add(static_cast<std::uint64_t>(f.count()) * f.stride() * sizeof(float),
+						                          std::memory_order_relaxed); }),
 					std::memory_order_relaxed);
 			if (not helios_sub and not bpearl_sub)
 				std::this_thread::sleep_for(std::chrono::milliseconds(200));   // descriptors not ready yet
@@ -678,6 +739,7 @@ template <class Frame, class Sub>
 void SpecificWorker::monitor_external_image_plane(std::unique_ptr<Sub>& sub,
                                                   const std::type_identity_t<std::function<std::unique_ptr<Sub>()>>& make_sub,
                                                   std::atomic<std::uint64_t>& frame_counter,
+                                                  std::atomic<std::uint64_t>& byte_counter,
                                                   std::uint64_t& mon_frames,
                                                   std::chrono::steady_clock::time_point& report_at,
                                                   const char* producer, const char* stream_label)
@@ -693,7 +755,10 @@ void SpecificWorker::monitor_external_image_plane(std::unique_ptr<Sub>& sub,
 		std::this_thread::sleep_for(std::chrono::milliseconds(200));   // descriptor not ready yet
 		return;
 	}
-	const int n = sub->wait_and_poll([](const Frame&, std::int64_t){}, 200);
+	// Accumulate the received payload bytes (size() = valid image bytes) so compute() can report the
+	// external stream's real SHM throughput as media_bps, not just its frame rate.
+	const int n = sub->wait_and_poll([&byte_counter](const Frame& f, std::int64_t)
+		{ byte_counter.fetch_add(static_cast<std::uint64_t>(f.size()), std::memory_order_relaxed); }, 200);
 	mon_frames += static_cast<std::uint64_t>(n);
 	// Feed the compute() heartbeat with the external rate: while bypassing, the producer path
 	// never runs, so this counter only ever counts DDS frames — the heartbeat reads the live
@@ -744,7 +809,7 @@ void SpecificWorker::read_rgbd_thread()
 			// "external publish" + the observed frame rate (fed to the [ZEDThread] heartbeat).
 			monitor_external_image_plane<rc::media::ImageFrame>(
 				ext_rgb_sub, [this]{ return rc::media::make_image_subscriber_from_graph(*G, "zed", "rgb"); },
-				rgbd_frames_, ext_frames, ext_report_at, "zed_camera", "rgb");
+				rgbd_frames_, zed_bytes_, ext_frames, ext_report_at, "zed_camera", "rgb");
 			continue;
 		}
 		if (ext_rgb_sub) ext_rgb_sub.reset();   // we are producing again -> stop monitoring
@@ -946,6 +1011,18 @@ void SpecificWorker::build_media_groups()
 	lidar.enabled = &params.ENABLE_LIDAR; lidar.advertise_node = "lidar3D"; lidar.advertise_streams = {"lidar"};
 	add_plane(lidar, "helios", &mediaplanedds2_proxy);
 	add_plane(lidar, "bpearl", &mediaplanedds3_proxy);
+
+	// Resolve each plane's MediaPlaneDDS ICE port from its proxy string ("… -p 12002 …") so the mind
+	// view can fuse the SHM producer node with its mediaplanedds:<port> endpoint. Parsed once here.
+	media_ice_ports_.clear();
+	for (auto& g : media_groups_)
+		for (auto& p : g.planes)
+			if (p.proxy and *p.proxy)
+			{
+				const std::string s = (*p.proxy)->ice_toString();
+				if (const auto pos = s.find("-p "); pos != std::string::npos)
+					try { media_ice_ports_[p.node] = std::stoi(s.substr(pos + 3)); } catch (...) {}
+			}
 }
 
 void SpecificWorker::prime_media_groups()
@@ -1163,11 +1240,11 @@ void SpecificWorker::open_stream_viewer(std::uint64_t node_id, const std::string
 		// count*18*3 floats, ZED camera frame) → 3D OpenGL skeleton view read from G.
 		viewer = new rc::viewers::SkeletonNodeViewer(G, node_id, "skeleton — BODY_18 poses (graph)");
 	}
-	else if (node_name == "grid")
+	else if (node_name == "residual")   // node renamed "grid"→"residual" (type stays "grid")
 	{
 		// residual_concept's Beta occupancy belief field (grid_occupancy_prob/var + meta) + occupied/
 		// border cell layers → 3D risk-column field, mirroring the voxelizer residual display.
-		viewer = new rc::viewers::GridNodeViewer(G, node_id, "grid — residual belief field (graph)");
+		viewer = new rc::viewers::GridNodeViewer(G, node_id, "residual — belief field (graph)");
 	}
 
 	if (viewer == nullptr)
@@ -1228,7 +1305,7 @@ void SpecificWorker::read_ricoh_thread()
 			// "external publish" + the observed frame rate. Mirror of the ZED monitor branch.
 			monitor_external_image_plane<rc::media::Image360Frame>(
 				ext_ricoh_sub, [this]{ return rc::media::make_image360_subscriber_from_graph(*G, "ricoh", "rgb360"); },
-				ricoh_frames_, ext_ricoh_frames, ext_ricoh_report_at, "ricoh_omni_dds", "360");
+				ricoh_frames_, ricoh_bytes_, ext_ricoh_frames, ext_ricoh_report_at, "ricoh_omni_dds", "360");
 			continue;
 		}
 		if (ext_ricoh_sub) ext_ricoh_sub.reset();   // we are producing again -> stop monitoring
