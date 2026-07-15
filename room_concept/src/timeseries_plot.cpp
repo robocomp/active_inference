@@ -9,10 +9,6 @@ namespace
 {
 QString legend_label_for_series(const std::string& name)
 {
-    if (name == "cov_det_scaled")
-        return "cov";
-    if (name == "free_energy")
-        return "fr";
     return QString::fromStdString(name);
 }
 }

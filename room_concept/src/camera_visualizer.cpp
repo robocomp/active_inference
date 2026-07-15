@@ -153,6 +153,12 @@ CameraVisualizer::~CameraVisualizer()
     media_rgb_sub_.reset();
 }
 
+void CameraVisualizer::set_corner_matches(std::vector<rc::CornerDetector::CornerMatch> matches)
+{
+    std::lock_guard<std::mutex> lk(corner_matches_mtx_);
+    corner_matches_ = std::move(matches);
+}
+
 void CameraVisualizer::start_media_plane()
 {
     // Spin up the always-on ingest thread. With a RELIABLE reader, samples that are never
@@ -880,6 +886,49 @@ void CameraVisualizer::draw_projections(QImage& image, std::uint64_t rt_timestam
             painter.drawEllipse(QPointF(top_a.x(), top_a.y()), 4, 4);
         if (top_ok && finite(top_b))
             painter.drawEllipse(QPointF(top_b.x(), top_b.y()), 4, 4);
+    }
+
+    // 3.4) Matched-corner uncertainty overlay. Markers are anchored at the CEILING point of each corner.
+    // Radius = the projected 1σ positional uncertainty (from Σ_corner = Λ_det⁻¹), so shallow/aperture-
+    // ambiguous corners read as big fuzzy blobs and clean corners as tight dots.
+    {
+        std::vector<rc::CornerDetector::CornerMatch> matches;
+        {
+            std::lock_guard<std::mutex> lk(corner_matches_mtx_);
+            matches = corner_matches_;
+        }
+        constexpr double near_y = 1e-4;
+        const float fx = camera_data_.K(0, 0);             // focal length (px) for the metres→px radius
+        painter.setPen(Qt::NoPen);
+        for (const auto& m : matches)
+        {
+            const auto cam = transform_room_point(basis, Mat::Vector3d(m.model_world.x(), m.model_world.y(), ceil_z));
+            if (cam.y() <= near_y)                          // behind / on the camera plane
+                continue;
+            const Eigen::Vector2d uv = camera_api_->project(cam);
+            if (!std::isfinite(uv.x()) || !std::isfinite(uv.y()))
+                continue;
+
+            // Σ_corner = Λ_det⁻¹ via the eigenvalues with a precision floor (rank-1 shallow corner → σ capped),
+            // mirroring the 2D viewer. Characteristic 1σ length = (det Σ)^{1/4} = geometric mean of the σ axes.
+            Eigen::SelfAdjointEigenSolver<Eigen::Matrix2f> es(m.information);
+            const Eigen::Vector2f lam = es.eigenvalues();
+            constexpr float kPrecFloor = 1e-3f;
+            const float cov0 = 1.f / std::max(lam(0), kPrecFloor);
+            const float cov1 = 1.f / std::max(lam(1), kPrecFloor);
+            const float det_cov = cov0 * cov1;             // m⁴ (= 1/det Λ_det)
+            const float sigma_m = std::pow(std::max(det_cov, 1e-12f), 0.25f);   // metres
+
+            // Project the metric σ to pixels at the corner's depth; clamp so it stays visible but bounded.
+            // The radius carries the uncertainty (bigger blob = shallower corner), so the fill is a uniform
+            // orange tone — brightening slightly with uncertainty — rather than a hue ramp.
+            const float radius_px = std::clamp(fx * sigma_m / static_cast<float>(cam.y()), 5.f, 140.f);
+            const float u = std::clamp((sigma_m - 0.02f) / (0.60f - 0.02f), 0.f, 1.f);
+            const QColor fill(255, static_cast<int>(120 + 40 * u), 0, 130);   // orange, ~50% opacity
+            painter.setBrush(fill);
+            painter.drawEllipse(QPointF(uv.x(), uv.y()), radius_px, radius_px);
+        }
+        painter.setBrush(Qt::NoBrush);
     }
 
     // 3.5) Translucent mesh + name label on each DSR wall. Each wall is a vertical quad; clip it

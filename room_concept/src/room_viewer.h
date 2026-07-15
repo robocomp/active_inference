@@ -118,9 +118,7 @@ private:
     QPointer<rc::Viewer2D>       viewer_2d_;
     QPointer<rc::TimeSeriesPlot> ts_plot_fe_;
     QPointer<rc::TimeSeriesPlot> ts_plot_rates_;   // RT-publish + optimizer rates (Hz) over time
-    float fe_level_ema_ = 0.1f;                     // robust EMA of the steady-state FE level (spikes
-                                                    // clamped out) — anchors the covariance series into
-                                                    // the FE's working band so it's visible, not a zero line
+    QPointer<rc::TimeSeriesPlot> ts_plot_conf_;    // localization confidence (raw, 0..1) over time
     std::unique_ptr<rc::CameraVisualizer> camera_viz_;
     bool camera_media_plane_initialized_ = false;
 };

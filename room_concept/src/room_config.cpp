@@ -52,6 +52,10 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     {
         p.ROOM_LAYOUT_SVG = svg_file;
     });
+    // Ceiling height (m). Sets the room DSR node's room_height attribute (walls/ceiling overlay) and
+    // the EXPECTED ceiling location for the LiDAR startup geometry check. Set it explicitly for rooms
+    // whose ceiling is above the LiDAR's vertical reach (e.g. 3 m), where the check can't detect it.
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.RoomHeight", p.room_height);
 
     // Media plane (RGB for the camera window + LiDAR for LidarIngestor). DDS domain +
     // topics are read from the producer's media descriptor on the graph, not config.

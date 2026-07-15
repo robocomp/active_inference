@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <print>
+#include <sys/resource.h>   // getrusage — process CPU% readout
 #include <cstdlib>   // std::_Exit — crash-free terminal shutdown
 #include <thread>    // brief DDS flush before _Exit
 #include <chrono>
@@ -346,15 +347,33 @@ void SpecificWorker::update_rt_rate_readout(std::int64_t now_ms, bool on_gui_thr
     const float ee_pct = (opt.count > 0)
         ? 100.0f * static_cast<float>(opt.early_exits) / static_cast<float>(opt.count) : 0.0f;
 
+    // Process CPU usage over the same window (sum across all threads — loc/GUI/ingest — so >100% on a
+    // busy multithreaded frame is expected, exactly like `top`'s per-process %CPU). getrusage is portable
+    // and needs no /proc parsing; delta CPU-seconds / wall-seconds × 100.
+    float cpu_pct = 0.0f;
+    {
+        static double last_cpu_s = -1.0;
+        struct rusage ru;
+        if (getrusage(RUSAGE_SELF, &ru) == 0)
+        {
+            const double cpu_s = ru.ru_utime.tv_sec + ru.ru_utime.tv_usec * 1e-6
+                               + ru.ru_stime.tv_sec + ru.ru_stime.tv_usec * 1e-6;
+            if (last_cpu_s >= 0.0)
+                cpu_pct = static_cast<float>(100.0 * (cpu_s - last_cpu_s) / dt_s);
+            last_cpu_s = cpu_s;
+        }
+    }
+
     if (on_gui_thread && viewer_)
     {
         // RT/opt rates → live plot (trend). The text readout keeps only the scalar optimizer-health
-        // numbers that aren't plotted (ms per update, early-exit %).
+        // numbers that aren't plotted (ms per update, early-exit %, process CPU%).
         viewer_->add_rate_samples(corr_hz, opt_hz);
         viewer_->set_rt_rate_text(
-            QString("%1 ms/upd · %2% early-exit")
+            QString("%1 ms/upd · %2% early-exit · %3% CPU")
                 .arg(opt.avg_update_ms, 0, 'f', 1)
-                .arg(ee_pct, 0, 'f', 0));
+                .arg(ee_pct, 0, 'f', 0)
+                .arg(cpu_pct, 0, 'f', 0));
     }
 
     rt_corr_count_ = 0;

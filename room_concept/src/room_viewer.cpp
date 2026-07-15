@@ -99,13 +99,21 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
     }
     ts_plot_fe_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
     ts_plot_fe_->set_visible_window(60.f);
-    ts_plot_fe_->add_series("free_energy", QColor(255, 170, 0), 1.8f, 0);
-    ts_plot_fe_->add_series("cov_det_scaled", QColor(0, 190, 255), 1.6f, 0);
+    ts_plot_fe_->add_series("FE", QColor(255, 170, 0), 1.8f, 0);
     custom_widget_->frame_series->layout()->addWidget(ts_plot_fe_);
 
-    // Pipeline-rate plot (Hz over time), stacked under the FE plot: RT-publish rate (corrected pose)
-    // and optimizer rate. Separate plot from the FE one because the Y units differ (Hz vs free energy).
-    // No "predicted" series — predicted poses are no longer published (the optimizer output is the RT).
+    // Localization confidence plot (raw, fixed 0..1 scale): -log10(det Σ_pose)/12, clamped. 1 = tightly
+    // localized, 0 = uncertain. On its OWN axis so it's read directly (the old FE-scaled cov line dropped
+    // with the FE level even when confidence was high — misleading; removed). Stacked directly under FE.
+    ts_plot_conf_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
+    ts_plot_conf_->set_visible_window(60.f);
+    ts_plot_conf_->set_y_range(0.f, 1.f);
+    ts_plot_conf_->add_series("confidence", QColor(0, 190, 255), 1.8f, 0);
+    custom_widget_->frame_series->layout()->addWidget(ts_plot_conf_);
+
+    // Pipeline-rate plot (Hz over time): RT-publish rate (corrected pose) and optimizer rate. Separate
+    // plot because the Y units differ (Hz vs free energy). No "predicted" series — predicted poses are no
+    // longer published (the optimizer output is the RT).
     ts_plot_rates_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
     ts_plot_rates_->set_visible_window(60.f);
     ts_plot_rates_->set_y_range(0.f, 22.f);   // fixed Hz scale (optimizer tops out ~20 Hz)
@@ -196,6 +204,11 @@ void RoomViewer::update_viewer(const std::optional<rc::RoomConcept::UpdateResult
         viewer_2d_->draw_corners(loc_res->corner_matches, pose_for_draw);
     else
         viewer_2d_->draw_corners({}, pose_for_draw);
+
+    // Feed the same matched corners to the RGB camera overlay (translucent uncertainty circles).
+    if (camera_viz_)
+        camera_viz_->set_corner_matches(have_loc ? loc_res->corner_matches
+                                                 : std::vector<rc::CornerDetector::CornerMatch>{});
 }
 
 void RoomViewer::update_epistemic_overlay()
@@ -251,22 +264,15 @@ void RoomViewer::update_ui(const std::optional<rc::RoomConcept::UpdateResult>& l
     if (!loc_res.has_value() || !ts_plot_fe_)
         return;
     const float fe = loc_res->final_loss;
-    ts_plot_fe_->add_point("free_energy", fe);
-
-    // Robust EMA of the STEADY-STATE FE level: clamp out flip/Adam spikes (which reach ~150+) so the
-    // reference tracks the ~0.05–0.2 working band, not the spikes. This anchors the covariance series
-    // into the FE's range — otherwise a spike auto-scales the shared Y-axis to ~150 and the covariance
-    // (a tiny normalized value) collapses onto the zero line.
-    const float fe_clamped = std::min(std::max(fe, 0.f), 1.0f);
-    fe_level_ema_ = 0.99f * fe_level_ema_ + 0.01f * fe_clamped;
+    ts_plot_fe_->add_point("FE", fe);
 
     // Localization confidence from the pose covariance determinant: small det (well-localized) → high.
-    // det ~ 1e-8..1e-10 well-localized, ~1e-4 uncertain → -log10(det) ~ 4..10.
+    // det ~ 1e-8..1e-10 well-localized, ~1e-4 uncertain → -log10(det) ~ 4..10, mapped to [0,1] by /12.
+    // Plotted raw on its own fixed 0..1 axis (ts_plot_conf_) — 1 = tight, 0 = uncertain.
     const float det_cov = std::max(1e-12f, std::abs(loc_res->covariance.determinant()));
-    float conf = std::clamp(-std::log10(det_cov) / 12.f, 0.f, 1.f);   // [0,1]
-    // Scale the [0,1] confidence into the current FE band (×3 headroom) so both lines share a range and
-    // the covariance is legible next to free_energy instead of pinned at zero.
-    ts_plot_fe_->add_point("cov_det_scaled", conf * fe_level_ema_ * 3.0f);
+    const float conf = std::clamp(-std::log10(det_cov) / 12.f, 0.f, 1.f);
+    if (ts_plot_conf_)
+        ts_plot_conf_->add_point("confidence", conf);
 }
 
 void RoomViewer::show_camera()

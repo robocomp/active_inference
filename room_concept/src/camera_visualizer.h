@@ -21,6 +21,8 @@
 #include <memory>
 #include <string>
 
+#include "corner_detector.h"   // rc::CornerDetector::CornerMatch (matched-corner overlay)
+
 // Forward declarations
 namespace DSR {
     class DSRGraph;
@@ -56,6 +58,10 @@ class CameraVisualizer : public QDialog
         // alongside the LiDAR ingest thread safe. Call once after construction.
         void start_media_plane();
 
+        // Hand the latest matched corners (localizer thread → GUI) for the RGB uncertainty overlay.
+        // Each is projected as a translucent circle whose radius grows with det(Σ_corner). Thread-safe.
+        void set_corner_matches(std::vector<rc::CornerDetector::CornerMatch> matches);
+
         void update_frame();  // Call this periodically to refresh the visualization
 
     protected:
@@ -66,6 +72,10 @@ class CameraVisualizer : public QDialog
         std::shared_ptr<DSRGraph> graph_;
         std::vector<Eigen::Vector2f> room_polygon_;
         std::vector<std::string> overlay_object_types_;  // DSR node types projected as boxes (config Overlay.ObjectTypes)
+
+        // Latest matched corners for the uncertainty overlay (set from the GUI thread each frame).
+        std::mutex corner_matches_mtx_;
+        std::vector<rc::CornerDetector::CornerMatch> corner_matches_;
         QLabel* image_label_;
 
         // Cached camera data

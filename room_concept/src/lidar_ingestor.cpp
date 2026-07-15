@@ -6,6 +6,7 @@
 #include "lidar_ingestor.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <optional>
 #include <print>
@@ -28,6 +29,10 @@ constexpr float GEOM_Z_LO  = -0.5f;
 constexpr float GEOM_Z_HI  =  3.2f;
 constexpr float GEOM_BIN   =  0.02f;
 constexpr int   GEOM_NBINS = static_cast<int>((GEOM_Z_HI - GEOM_Z_LO) / GEOM_BIN) + 1;
+// Horizontal-radius binning for the ceiling perimeter-vs-interior test (body frame, metres).
+constexpr float GEOM_R_MAX = 10.0f;
+constexpr float GEOM_R_BIN = 0.25f;
+constexpr int   GEOM_NR    = static_cast<int>(GEOM_R_MAX / GEOM_R_BIN) + 1;
 }  // namespace
 
 namespace rc
@@ -69,6 +74,7 @@ void LidarIngestor::start()
     geom_sweeps_     = 0;
     geom_bpearl_sweeps_ = 0;
     geom_hist_.assign(GEOM_NBINS, 0);
+    geom_rz_hist_.assign(static_cast<std::size_t>(GEOM_NBINS) * GEOM_NR, 0);
     geom_hist_bpearl_.assign(GEOM_NBINS, 0);
     high_max_z_      = params_ ? params_->LIDAR_HIGH_MAX_HEIGHT : 2.0f;
     thread_ = std::thread(&LidarIngestor::ingest_loop, this);
@@ -152,27 +158,18 @@ bool LidarIngestor::pump()
                 run_startup_geometry_check();
                 geom_check_done_ = true;
                 std::vector<int>().swap(geom_hist_);
+                std::vector<int>().swap(geom_rz_hist_);
             }
         }
 
         const float min_h_m = params_->LIDAR_HIGH_MIN_HEIGHT;
         const float max_h_m = high_max_z_;                 // upper bound excludes the ceiling plane
 
-        // Compute z min/max of raw points for debug
-        float z_raw_min = 1e9f, z_raw_max = -1e9f;
-        for (const auto& p : sweep->points) {
-            if (p.z() < z_raw_min) z_raw_min = p.z();
-            if (p.z() > z_raw_max) z_raw_max = p.z();
-        }
-        std::println("[LidarSrc] z range: min={:.3f} max={:.3f}  high band=[{:.3f}, {:.3f}]  raw_pts={}  filtered_pts=",
-                     z_raw_min, z_raw_max, min_h_m, max_h_m, sweep->points.size());
-
         std::vector<Eigen::Vector3f> points_high;
         points_high.reserve(sweep->points.size());
         for (const auto& p : sweep->points)
             if (p.z() > min_h_m and p.z() < max_h_m)
                 points_high.emplace_back(p);
-        std::println("[LidarSrc] high band pts={}", points_high.size());
         ingest_scan(std::move(points_high), sweep->stamp_ms);
         ingested = true;
     }
@@ -204,11 +201,17 @@ void LidarIngestor::accumulate_geometry_sample(const std::vector<Eigen::Vector3f
 {
     for (const auto& p : pts)
     {
-        if (p.head<2>().norm() < 0.8f)       // skip self-hits hugging the robot base
+        const float r = p.head<2>().norm();
+        if (r < 0.8f)                        // skip self-hits hugging the robot base
             continue;
         const int b = static_cast<int>(std::floor((p.z() - GEOM_Z_LO) / GEOM_BIN));
         if (b >= 0 and b < static_cast<int>(geom_hist_.size()))
+        {
             ++geom_hist_[b];
+            const int rb = static_cast<int>(r / GEOM_R_BIN);   // horizontal-radius bin
+            if (rb >= 0 and rb < GEOM_NR)
+                ++geom_rz_hist_[static_cast<std::size_t>(b) * GEOM_NR + rb];
+        }
     }
     ++geom_sweeps_;   // trigger decision lives in pump() (it also gates on bpearl warm-up)
 }
@@ -240,7 +243,6 @@ void LidarIngestor::run_startup_geometry_check()
     // the datum. With the source floor cut removed, the real floor reaches us and must land at world z ≈ 0.
     const auto [he_floor_z, he_cnt] = peak_in(geom_hist_,        GEOM_Z_LO, 0.5f);   // helios (grazing, ref)
     const auto [bp_floor_z, bp_cnt] = peak_in(geom_hist_bpearl_, GEOM_Z_LO, 0.5f);   // bpearl (head-on, datum)
-    const int floor_cnt = he_cnt;   // used to scale the ceiling threshold below
     if (base_z.has_value())
     {
         const float bp_root = bp_floor_z + static_cast<float>(*base_z);
@@ -281,23 +283,74 @@ void LidarIngestor::run_startup_geometry_check()
     clo = std::max(clo, params_->LIDAR_HIGH_MIN_HEIGHT + 0.2f);
     const auto [ceil_z, ceil_cnt] = peak_in(geom_hist_, clo, chi);
     const float cfg_max = params_->LIDAR_HIGH_MAX_HEIGHT;
-    // Absolute threshold: the search window is already location-restricted to the expected ceiling, so a
-    // substantial peak there IS the ceiling. (The old `floor_cnt/5` broke once the source floor cut was
-    // removed — the un-filtered floor is now huge, making that ratio reject a real ceiling; floor_cnt is
-    // helios's grazing floor here anyway.)
-    if (ceil_cnt >= 400)
+
+    // Median horizontal radius of the returns in a z-window, from the joint (z,r) histogram. This is the
+    // spatial discriminant: a ceiling PLANE fills the interior, so its returns land CLOSER than the walls;
+    // an upright-LiDAR wall-top locus sits at the wall range. Compares like-for-like (both are helios).
+    const auto median_radius_in = [this](float zlo, float zhi) -> std::pair<float, int>
+    {
+        std::array<int, GEOM_NR> racc{};
+        int total = 0;
+        for (int b = 0; b < GEOM_NBINS; ++b)
+        {
+            const float z = GEOM_Z_LO + (b + 0.5f) * GEOM_BIN;
+            if (z < zlo or z > zhi) continue;
+            const int* row = &geom_rz_hist_[static_cast<std::size_t>(b) * GEOM_NR];
+            for (int rb = 0; rb < GEOM_NR; ++rb) { racc[rb] += row[rb]; total += row[rb]; }
+        }
+        if (total == 0) return {0.f, 0};
+        int cum = 0;
+        for (int rb = 0; rb < GEOM_NR; ++rb)
+        {
+            cum += racc[rb];
+            if (cum * 2 >= total) return {(rb + 0.5f) * GEOM_R_BIN, total};
+        }
+        return {(GEOM_NR - 0.5f) * GEOM_R_BIN, total};
+    };
+
+    // Perimeter-vs-interior test: a real ceiling's returns are meaningfully CLOSER than the walls. Reference
+    // = the UPPER-WALL band just below the peak (same walls, one notch lower — above furniture, apples-to-
+    // apples). A wall-top ring has r_peak ≈ r_ref (ratio≈1); a ceiling has r_peak < r_ref. The 0.75 boundary
+    // is scale-free (relative range), not an absolute distance cut.
+    constexpr float kCeilInteriorRatio = 0.75f;
+    const float ref_lo = std::max(0.9f, ceil_z - 0.70f);
+    const float ref_hi = ceil_z - 0.25f;                       // strictly below the peak window
+    const auto [r_ref, ref_n]   = median_radius_in(ref_lo, ref_hi);
+    const auto [r_peak, peak_n] = median_radius_in(ceil_z - 0.10f, ceil_z + 0.10f);
+    const bool spatial_ok  = (ceil_cnt >= 400) and (ref_hi > ref_lo)
+                             and ref_n >= 200 and peak_n >= 200 and r_ref > 0.f;
+    const bool is_ceiling  = spatial_ok and (r_peak < kCeilInteriorRatio * r_ref);
+
+    if (ceil_cnt >= 400 and is_ceiling)
     {
         high_max_z_ = std::clamp(ceil_z - params_->LIDAR_CEILING_MARGIN,
                                  params_->LIDAR_HIGH_MIN_HEIGHT + 0.1f, GEOM_Z_HI);
-        std::println("[FloorCheck] ceiling detected at body z = {:.2f} m ({} pts) -> high band capped at "
-                     "{:.2f} m (upper walls only; config max was {:.2f} m)",
-                     ceil_z, ceil_cnt, high_max_z_, cfg_max);
+        std::println("[CeilingCheck] CEILING at body z = {:.2f} m ({} pts): interior-filling "
+                     "(r_peak={:.2f} m < {:.2f}×r_wall={:.2f} m) -> high band capped at {:.2f} m.",
+                     ceil_z, ceil_cnt, r_peak, kCeilInteriorRatio, r_ref, high_max_z_);
+    }
+    else if (ceil_cnt >= 400 and spatial_ok)   // strong z-peak but at the wall range → wall-top, keep it
+    {
+        high_max_z_ = cfg_max;
+        std::println("[CeilingCheck] z-peak at {:.2f} m ({} pts) is WALL-TOP, not a ceiling "
+                     "(r_peak={:.2f} m ≈ r_wall={:.2f} m — on the boundary, above LiDAR ceiling-reach) -> "
+                     "high band kept at config max {:.2f} m (top-wall points retained for the SDF).",
+                     ceil_z, ceil_cnt, r_peak, r_ref, cfg_max);
+    }
+    else if (ceil_cnt >= 400)   // z-peak but spatial test inconclusive (sparse ref/peak) → cut, to be safe
+    {
+        high_max_z_ = std::clamp(ceil_z - params_->LIDAR_CEILING_MARGIN,
+                                 params_->LIDAR_HIGH_MIN_HEIGHT + 0.1f, GEOM_Z_HI);
+        std::println("[CeilingCheck] z-peak at {:.2f} m ({} pts) but spatial test inconclusive "
+                     "(ref_n={}, peak_n={}) -> conservatively capped at {:.2f} m.",
+                     ceil_z, ceil_cnt, ref_n, peak_n, high_max_z_);
     }
     else
     {
         high_max_z_ = cfg_max;
-        std::println("[FloorCheck] no clear ceiling (best high peak {} pts, floor_ref {}) -> high band max kept at {:.2f} m",
-                     ceil_cnt, floor_cnt, cfg_max);
+        std::println("[CeilingCheck] no z-density peak in [{:.2f}, {:.2f}] m (best {} pts) -> high band max = "
+                     "config cutoff {:.2f} m (NOT an assumed ceiling; just where the band stops).",
+                     clo, chi, ceil_cnt, cfg_max);
     }
 
     // Drop the one-shot bpearl probe reader + histogram (diagnostic; frees the extra subscriber).

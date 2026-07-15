@@ -104,6 +104,10 @@ private:
     bool  geom_check_done_ = false;
     int   geom_sweeps_     = 0;
     std::vector<int> geom_hist_;   // helios z-histogram (walls/ceiling; floor is grazing/high)
+    // Joint (z-bin × horizontal-radius-bin) helios histogram, for the ceiling perimeter-vs-interior test:
+    // a real ceiling fills the interior (returns CLOSER than the walls), a wall-top ring sits at the wall
+    // range. Row-major [z_bin * GEOM_NR + r_bin]. Dropped with geom_hist_ after the one-shot check.
+    std::vector<int> geom_rz_hist_;
     // bpearl (downward dome) is the HEAD-ON floor sensor — its own z-histogram is the floor calibration
     // datum. Comes up later than helios → warm-up counter; separate reader dropped after the check.
     int   geom_bpearl_sweeps_ = 0;
