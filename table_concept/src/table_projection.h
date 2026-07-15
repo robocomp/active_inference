@@ -36,11 +36,17 @@ struct SilhouetteExistence
     float e_occ = 0.0f, e_free = 0.0f;
     int   n_total      = 0;    // silhouette samples attempted (top face + legs) — the "whole object"
     int   n_detectable = 0;    // samples that land in the real camera FRUSTUM and are un-occluded (0 ⇒ HOLD)
+    int   n_central    = 0;    // detectable samples in the CENTRAL image region (the ZED resolves those; a
+                               // peripheral table is unreliable — the robot isn't really looking AT it)
     int   n_occluded   = 0;    // in-frustum samples hidden by a nearer (non-table) mask
     float mean_range_m = 0.0f; // mean camera→silhouette depth over the detectable samples (absence confidence ∝ 1/range)
     // "Should be visible" fraction: n_detectable / n_total. Absence is only evidence of removal in
     // proportion to how much of the object the sensor could actually have seen from here (real FoV).
     float in_fov_frac() const { return n_total > 0 ? static_cast<float>(n_detectable) / n_total : 0.0f; }
+    // Fraction of detectable samples that fall CENTRALLY — how much the robot is actually LOOKING at the table
+    // (vs it merely clipping the wide frustum edge). A verifying view is central; a peripheral one only warrants
+    // an epistemic "go look", not a removal vote. See the verification-gated removal in table_existence.
+    float central_frac() const { return n_detectable > 0 ? static_cast<float>(n_central) / n_detectable : 0.0f; }
 };
 
 class TableProjection

@@ -474,11 +474,13 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
     inst.dbg_yaw_pre = inst.ai2_belief.state().yaw;
     inst.dbg_dyaw_points = 0.0f; inst.dbg_dyaw_moment = 0.0f; inst.dbg_dyaw_flip = 0.0f; inst.dbg_completeness = 1.0f;
     Eigen::Vector3f cam_origin_room = Eigen::Vector3f::Zero();   // for the anisotropic per-point R (Stage 1)
+    Eigen::Matrix4f zed_T_room = Eigen::Matrix4f::Identity();    // room→zed: transform points to the CAMERA frame
     bool have_cam = false;
     if (const auto rTz = projection_->room_T_zed_matrix(inst.last_mask_timestamp_ms); rTz)
     {
         const Eigen::Vector3d cam = rTz->block<3, 1>(0, 3);   // camera origin in the room frame
         cam_origin_room = cam.cast<float>(); have_cam = true;
+        zed_T_room = rTz->inverse().cast<float>();            // for the camera-frame azimuth (tilt-state identifiability)
         const auto& s0b = inst.ai2_belief.state();
         const Eigen::Vector3d ray(s0b.cx - cam.x(), s0b.cy - cam.y(), s0b.H - cam.z());   // camera→tabletop centre
         const double rn = ray.norm();
@@ -495,9 +497,21 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
         frame.points.insert(frame.points.end(), observation.candidate_pts.begin(), observation.candidate_pts.end());
         frame.points.insert(frame.points.end(), observation.residual_pts.begin(), observation.residual_pts.end());
         frame.R.assign(frame.points.size(), R);
-        // Ray geometry (needed by the footprint residual + tilt→yaw common-mode below and the anisotropic R later).
+        // Ray geometry (needed by the footprint residual + the anisotropic R later).
         if ((cfg_.anisotropic_r or cfg_.footprint_residual) and have_cam)
         { frame.cam_origin = cam_origin_room; frame.has_rays = true; }
+        // Camera-frame azimuth per point (about the optical axis; ZED frame x-right, y-depth) for the N=7 depth-
+        // tilt STATE — computed from the TRUE extrinsic, NOT the belief's drifting table-centre, so a persistent
+        // tilt is coherent across viewpoints (the identifiability the tilt estimate needs). See PRECISION_AS_INFO.
+        if (cfg_.footprint_residual and have_cam)
+        {
+            frame.point_azim.reserve(frame.points.size());
+            for (const auto& p : frame.points)
+            {
+                const Eigen::Vector4f pc = zed_T_room * Eigen::Vector4f(p.x(), p.y(), p.z(), 1.0f);
+                frame.point_azim.push_back(std::atan2(pc.x(), pc.y()));   // signed azimuth about the optical axis
+            }
+        }
         frame.chain_cov_xx  = inst.chain_cov_xx + range_lat_var;   // range adds to the SHARED position error (cap)
         frame.chain_cov_yy  = inst.chain_cov_yy + range_lat_var;
         // Obliquity yaw cap: at an edge-on (grazing) view the tabletop cloud is ~1-D along the near edge, so yaw
@@ -509,10 +523,11 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
         constexpr float kObliquityYawGain = 0.05f;   // ~30° σ_yaw at cos=0.09 → per-point GN holds yaw at grazing
         const float oblq_cos          = std::clamp(inst.dbg_obliquity_cos, 0.05f, 1.0f);
         const float obliquity_yaw_std = kObliquityYawGain * (1.0f / oblq_cos - 1.0f);   // 0 at top-down
-        // FootprintResidual on ⇒ chain_cov_yaw is the DERIVED tilt→yaw aliasing variance (replaces the tuned
-        // obliquity+range yaw gains — PRECISION_AS_INFORMATION.md a2′ Tier-1); else the legacy tuned form.
+        // FootprintResidual on ⇒ the depth tilt is an ESTIMATED N=7 state (no per-frame yaw cap — that ratcheted
+        // and needed a fragile sweet-spot); chain_cov_yaw carries only the WHITE range term. Else the legacy tuned
+        // obliquity+range form. (The tilt STATE replaces both the cap and the obliquity/range yaw gains.)
         frame.chain_cov_yaw = cfg_.footprint_residual
-            ? range_yaw_var + inst.ai2_belief.tilt_yaw_common_mode(frame, cfg_.depth_tilt_std)
+            ? range_yaw_var
             : range_yaw_var + obliquity_yaw_std * obliquity_yaw_std;   // range + grazing-view cap
         frame.chain_cov_size = range_size_var;                     // ...nor RESHAPE/inflate — geometry freezes afar
         // Footprint-moment SHARED per-frame variance: ego-motion mask corruption + a GENTLE range term (a global
@@ -696,7 +711,8 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
                  << "cx,cy,H,w,h,yaw,std_cx,std_cy,std_H,std_w,std_h,std_yaw,"
                  << "std_yaw_within,flip_ev,p_alt,lidar_rays,lidar_raw,lidar_bpearl,lidar_resid_m,lidar_meanz,lidar_topz,lidar_floorz,lidar_cov_ang,"
                  << "dyaw_points,dyaw_moment,dyaw_flip,obliquity_cos,completeness,moment_aniso,moment_r_yaw,"   // rogue-mask diag
-                 << "ex_L,ex_p,ex_locc,ex_lfree,ex_lfree_eff,ex_ln,ex_socc,ex_sfree,ex_sfree_eff,ex_sndet,ex_streak\n";   // existence-removal diag
+                 << "ex_L,ex_p,ex_locc,ex_lfree,ex_lfree_eff,ex_ln,ex_socc,ex_sfree,ex_sfree_eff,ex_sndet,ex_streak,"
+                 << "ex_pdetect,ex_central,ex_verify,ex_wantsverify\n";   // existence-removal + verification-gate diag
     }
     const auto& s = inst.ai2_belief.state();
     const auto& S = inst.ai2_belief.covariance();
@@ -719,7 +735,9 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
              << inst.existence.logodds() << ',' << inst.existence.p_exists() << ','
              << inst.dbg_ex_lidar_occ << ',' << inst.dbg_ex_lidar_free << ',' << inst.dbg_ex_lidar_free_eff << ',' << inst.dbg_ex_lidar_n << ','
              << inst.dbg_ex_sil_occ << ',' << inst.dbg_ex_sil_free << ',' << inst.dbg_ex_sil_free_eff << ',' << inst.dbg_ex_sil_ndet << ','
-             << inst.existence_remove_streak << '\n';   // existence-removal diag
+             << inst.existence_remove_streak << ','
+             << inst.dbg_ex_pdetect << ',' << inst.dbg_ex_central << ','
+             << inst.verify_surprise << ',' << (inst.wants_verification ? 1 : 0) << '\n';   // existence-removal + verification-gate diag
     ai2_csv_.flush();
 }
 

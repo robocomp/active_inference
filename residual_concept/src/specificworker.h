@@ -161,6 +161,10 @@ private:
     // is a large blob published at ~2 Hz). Feeds the RGB-semantic floor down-weighting of ZED grid hits.
     rc::SemanticMap semantic_map_;
 
+    // Data-driven floor plane (z=a·x+b·y+c), estimated each cycle from the LiDAR sweep and EMA-smoothed. The grid
+    // references its obstacle band to this instead of z=0, so an offset/tilted floor (new scenario) never latches.
+    rc::FloorPlane floor_plane_;
+
     // PHASE-0 REBUILD: the occupancy-grid safety layer (runs live as a diagnostic first, then becomes the
     // single source of obstacle truth once verified stable).
     rc::OccupancyGrid grid_;

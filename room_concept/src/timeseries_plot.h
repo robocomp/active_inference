@@ -47,6 +47,12 @@ public:
     /** Pin the Y axis to a fixed [v_min, v_max] range (disables auto-scaling). */
     void set_y_range(float v_min, float v_max);
 
+    /** Draw a horizontal dashed reference line at value y (e.g. a decision threshold), labelled.
+     *  When auto-scaling, y is folded into the value range so the line is always visible.
+     *  Pass NaN to disable. */
+    void set_reference_line(float y, QColor colour = QColor(200, 60, 60),
+                            const std::string& label = "");
+
 protected:
     void paintEvent(QPaintEvent* event) override;
     void timerEvent(QTimerEvent* event) override;
@@ -77,6 +83,12 @@ private:
     bool  y_fixed_ = false;
     float y_fixed_min_ = 0.f;
     float y_fixed_max_ = 1.f;
+
+    // Optional horizontal reference line (e.g. a decision threshold).
+    bool        ref_line_enabled_ = false;
+    float       ref_line_y_ = 0.f;
+    QColor      ref_line_colour_{200, 60, 60};
+    std::string ref_line_label_;
 
     // Margins (pixels)
     static constexpr int kLeft = 55;

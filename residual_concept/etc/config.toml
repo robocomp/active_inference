@@ -41,7 +41,7 @@ agent_info_period_ms = 1000
 # Owned graph nodes torn down on shutdown / peer-loss. "residual*" matches every obstacle this agent
 # scaffolds (residual_1, residual_2, …) so none survive a restart.
 [Owns]
-nodes = ["residual_concept 14", "residual*", "grid"]
+nodes = ["residual_concept 14", "residual*"]   # "residual*" covers the belief-field node (now named "residual")
 
 # ── residual_concept agent loop ───────────────────────────────────────────────
 [ResidualConcept]
@@ -221,6 +221,24 @@ FreshHalfLifeS  = 0.50   # suppression strength halves per this much map age (fr
 # 3 floor · 6 road · 9 grass · 11 sidewalk · 13 earth/ground · 28 rug · 29 field · 46 sand · 52 path · 54 runway
 # · 91 dirt-track · 94 land/soil. Excluded on purpose: 53 stairs / 59 stairway / 121 step (hazards, not floor-flat).
 FloorClassIds   = "3,6,9,11,13,28,29,46,52,54,91,94"
+
+# ── DATA-DRIVEN FLOOR PLANE (fixes systematic floor phantoms in a NEW scenario) ──
+# The grid's obstacle test uses a floor band referenced to room z=0. If a new room's floor is OFFSET or TILTED
+# vs z=0 (localization datum / uneven floor / room-fit pitch), a large floor swath reads above the band, latches
+# as obstacles, and the z-aware clearing makes it permanent → the robot can't navigate. This estimates the floor
+# plane z=a·x+b·y+c robustly from the LiDAR each cycle and references the band to it, so the floor is explained
+# away wherever it actually is. Flat z=0 floor ⇒ plane≈(0,0,0) ⇒ identical to the fixed band (no regression).
+# The estimator ALWAYS runs and logs `[floor-plane] z = a·x + b·y + c (offset .. cm, tilt ..°)` — read that FIRST
+# to see how far off the floor is; then flip Enabled=true to apply it.
+[FloorPlane]
+Enabled       = false   # master flag. false ⇒ log-only (fixed band kept). true ⇒ grid band follows the fit.
+CandidateBandM = 0.25   # a return within this ABOVE the current floor estimate is a floor candidate for the fit
+TrimK         = 2.5     # robust trim: drop candidates > k·σ(MAD) after each fit (rejects legs / low obstacles)
+Iters         = 2       # robust reweighting rounds
+MinCandidates = 80      # fewer floor candidates than this ⇒ keep the previous plane (never fit on noise)
+Ema           = 0.10    # temporal smoothing toward the new fit (slow = stable)
+MaxOffsetM    = 0.30    # reject a fitted |offset| beyond this (keep previous plane) — a sanity guard
+MaxTilt       = 0.15    # reject a fitted |tilt a,b| beyond this (~8.5°/m) — a sanity guard
 
 # ── Instance tracker (birth/associate/death) — TUNED FOR STABILITY (not bottle's crisp-mask values) ──
 # A residual's OBB centroid jitters as the robot sees different faces, and residuals are large & transient,

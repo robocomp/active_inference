@@ -139,6 +139,12 @@ struct TableInstance
     // — deleting furniture warrants SUSTAINED evidence, not a transient hiccup.
     rc::exist::ExistenceBelief existence;
     int existence_remove_streak = 0;
+    // Verification-gated removal (active-inference): a predicted-visible-but-absent observation from a view that
+    // CANNOT resolve the table (far / peripheral / edge-on) does NOT vote removal — it raises this decayed
+    // go-VERIFY surprise. When it crosses existence_verify_surprise, wants_verification arms the epistemic planner
+    // to drive the robot to a good ZED viewpoint; only a HIGH-P(detect) view can then confirm-or-remove.
+    float verify_surprise    = 0.0f;
+    bool  wants_verification = false;
 
     // ── EvidenceMonitor per-cycle snapshots (persisted copies of transient fit/existence values) ──
     int   dbg_n_zed_slices = 0;   // ZED mask slices fused this cycle (ricoh is bearing-only, never fused)
@@ -172,6 +178,9 @@ struct TableInstance
     // absence-confidence scaling AND the observed-guard (so raw→eff shows how much the absence was degraded).
     float dbg_ex_lidar_occ = 0.0f, dbg_ex_lidar_free = 0.0f, dbg_ex_lidar_free_eff = 0.0f;  int dbg_ex_lidar_n   = 0;
     float dbg_ex_sil_occ   = 0.0f, dbg_ex_sil_free   = 0.0f, dbg_ex_sil_free_eff   = 0.0f;  int dbg_ex_sil_ndet  = 0;
+    // Verification-gated removal diagnostics: p_detect (how resolving this view is), central_frac, and the
+    // decayed go-verify surprise. Show why an absence went to REMOVAL (high p_detect) vs VERIFICATION (low).
+    float dbg_ex_pdetect = 1.0f, dbg_ex_central = 0.0f;
 
     // ── Predicted in-image table ROI (current model projected through the camera extrinsic) ───────
     // Normalised so the controller is resolution-agnostic: drive offset→0 (centre the table in the frame)

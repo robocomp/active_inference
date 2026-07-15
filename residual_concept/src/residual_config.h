@@ -15,6 +15,7 @@
 #include "residual_clusterer.h"   // rc::ResidualClusterParams
 #include "residual_zed_boost.h"   // rc::ZedBoostParams
 #include "residual_semantic.h"    // rc::SemanticFloorParams
+#include "residual_floor_plane.h" // rc::FloorPlaneParams
 
 class ConfigLoader;   // RoboComp config façade (defined in genericworker.h)
 
@@ -72,6 +73,11 @@ struct ResidualConfig
     // label map (voxelizer `semantic` node under `zed`) is sampled per ZED grid-point; a floor-class label at a
     // NEAR-floor return down-weights its occupancy HIT (height-gated + freshness-decayed, never discards). Flag OFF.
     SemanticFloorParams semantic_floor;
+
+    // DATA-DRIVEN FLOOR PLANE: estimate the floor z=a·x+b·y+c from the LiDAR each cycle and reference the grid's
+    // obstacle band to it (instead of a fixed z=0). Fixes systematic floor phantoms when a new scenario's floor is
+    // offset/tilted. Estimator always runs+logs; the grid uses it only when enabled (flag OFF ⇒ fixed band).
+    FloorPlaneParams floor_plane;
 
     // ── instance tracker (shared rc::InstanceTracker) ──
     float tracker_gate_mahalanobis  = 9.0f;

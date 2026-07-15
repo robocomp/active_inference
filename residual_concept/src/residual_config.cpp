@@ -127,6 +127,16 @@ ResidualConfig load_residual_config(const ConfigLoader& cfg)
     out.semantic_floor.fresh_half_life_s = getf("Semantic.FreshHalfLifeS", 0.50f);
     out.semantic_floor.floor_z0         = out.cluster.floor_z0;   // share the geometric nav band
     out.semantic_floor.floor_slope      = out.cluster.floor_slope;
+
+    // ── data-driven floor plane (grid floor explainer follows an offset/tilted floor) ──
+    out.floor_plane.enabled          = getb("FloorPlane.Enabled",         false);
+    out.floor_plane.candidate_band_m = getf("FloorPlane.CandidateBandM",  0.25f);
+    out.floor_plane.trim_k           = getf("FloorPlane.TrimK",           2.5f);
+    out.floor_plane.iters            = geti("FloorPlane.Iters",           2);
+    out.floor_plane.min_candidates   = geti("FloorPlane.MinCandidates",   80);
+    out.floor_plane.ema              = getf("FloorPlane.Ema",             0.10f);
+    out.floor_plane.max_offset_m     = getf("FloorPlane.MaxOffsetM",      0.30f);
+    out.floor_plane.max_tilt         = getf("FloorPlane.MaxTilt",         0.15f);
     // Optional override of the ADE20K walkable-ground class set (comma/space-separated ids). Empty ⇒ the built-in
     // default (floor/road/grass/sidewalk/earth/rug/field/sand/path/runway/dirt-track/land). Lets the set be tuned
     // to the deployed segmenter without a rebuild.

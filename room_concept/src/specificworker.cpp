@@ -102,14 +102,28 @@ void SpecificWorker::request_shutdown()
     room_concept_.stop();
     cleanup_owned_nodes();
 
-    // Crash-free terminal exit. After our cleanup (state saved, self agent node deleted, peers
-    // notified) we hard-exit instead of returning into Ice::Application's communicator teardown +
-    // C++ static destruction. Those run with UNDEFINED cross-TU order: a global/DDS holder copies a
-    // graph Node (e.g. type "mind") AFTER the node-type registry static is destroyed, so Node::type()
-    // throws "<type> is not a valid node type" -> std::terminate/abort on every exit. _Exit skips all
-    // of that; the OS reclaims memory/sockets/threads and peers detect departure via the presence
-    // protocol. Only reached on a real shutdown (shutting_down_ latched above). Brief pause lets the
-    // self-agent-node deletion delta reach peers first.
+    // Cleanly remove THIS agent's DDS participant + entities so peers free agent id 5 IMMEDIATELY.
+    // A bare _Exit skips ~DSRGraph (which does exactly this), so the dead id-5 participant lingers in
+    // live peers' discovery until the FastDDS liveliness lease expires — a quick reopen then hits
+    // "There is already an agent connected with the id: 5". DSRGraph::reset() runs
+    // remove_participant_and_entities() directly, WITHOUT touching the Ice communicator, so it doesn't
+    // trip the static-destruction abort below. Mirrors bottle_concept's known-good shutdown. This must
+    // run even if other shared_ptr copies of G survive — reset() is an explicit method, not refcount-
+    // driven, so we don't need to chase down every holder (scene_graph_/camera_viz_/viewer_2d_).
+    if (G)
+    {
+        try { G->reset(); }
+        catch (...) { /* best-effort: exiting regardless */ }
+    }
+
+    // Crash-free terminal exit. After our cleanup (state saved, self agent node deleted, participant
+    // removed, peers notified) we hard-exit instead of returning into Ice::Application's communicator
+    // teardown + C++ static destruction. Those run with UNDEFINED cross-TU order: a global/DDS holder
+    // copies a graph Node (e.g. type "mind") AFTER the node-type registry static is destroyed, so
+    // Node::type() throws "<type> is not a valid node type" -> std::terminate/abort on every exit.
+    // _Exit skips all of that; the OS reclaims memory/sockets/threads. Only reached on a real shutdown
+    // (shutting_down_ latched above). Brief pause lets the removal deltas + participant departure reach
+    // peers first.
     std::cout.flush();
     std::cerr.flush();
     std::this_thread::sleep_for(std::chrono::milliseconds(300));

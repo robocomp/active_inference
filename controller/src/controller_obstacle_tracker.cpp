@@ -1023,7 +1023,7 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
     //   [ P, (V, x0,y0, …, x_{V-1},y_{V-1}) × P ].
     // Decode each hull and add it to the planner obstacles — so the robot plans around the residual/unmodelled
     // world (from the grid) AND the known object boxes (read above), one unified obstacle list.
-    if (const auto g = graph_->get_node("grid"); g.has_value())
+    if (const auto g = graph_->get_node("residual"); g.has_value())   // node renamed "grid"→"residual" (type kept)
     {
         if (const auto opt = graph_->get_attrib_by_name<grid_obstacle_hulls_att>(g.value()); opt.has_value())
         {

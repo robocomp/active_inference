@@ -112,17 +112,13 @@ private:
                           ControllerMotionCommander &motion_commander,
                           ControllerDisplay &display);
 
-    // ── Physical-stuck recovery ──────────────────────────────────────────────────────
-    // Detector: while PURSUING a live, unreached target (caller asserts `pursuing`), is the robot
-    // failing to ADVANCE ALONG ITS COMMITTED PLAN? Progress is the waypoint index the robot has
-    // reached (`wp_index` of `wp_count` total), NOT the straight-line goal distance — straight-line
-    // distance is the wrong signal (it plateaus at the goal and grows on any legitimate detour, so it
-    // reads "no progress" when the robot is fine, which fired spurious escapes). Following the plan —
-    // even the long way around an obstacle — advances the index; a genuine wedge stalls it. Reaching
-    // the final waypoint is arrival (goal/alignment logic owns it, not this). Pass std::nullopt for
-    // wp_index when there is no route at all (boxed in — cannot advance). Accumulates the no-advance
-    // window and returns true once it exceeds stuck_confirm_ms. No spatial thresholds — one quantity.
-    bool detect_stuck(bool pursuing, std::optional<int> wp_index, int wp_count, std::uint64_t now_ms);
+    // ── Physical-wedge recovery ──────────────────────────────────────────────────────
+    // Debounce over a per-cycle wedge signal supplied by the caller. A wedge is a PREDICTION ERROR: the
+    // robot commands translation but the base doesn't achieve it (execute_plan compares commanded vs
+    // measured base speed), or there is no route at all (ensure_current_plan → always stalled). A robot
+    // that IS moving as commanded — detour, slow nav, arrival rotation, a still-sliding creep — is not
+    // stalled, so none false-fire. Returns true once `stalled_this_cycle` has held for stuck_confirm_ms.
+    bool detect_stuck(bool pursuing, bool stalled_this_cycle, std::uint64_t now_ms);
     // Begin an escape: choose turn direction from side clearance, drop a temp obstacle at
     // the stuck spot, reset the plan, and record the start pose/time.
     void begin_escape(const ControllerRobotPose &robot_pose,
@@ -176,8 +172,7 @@ private:
     bool target_wait_logged_ = false;
 
     // Physical-stuck recovery state.
-    std::uint64_t stuck_since_ms_ = 0;          // start of the current no-advance window (0 = not stuck)
-    int           best_wp_index_ = -1;          // furthest plan waypoint reached (progress along committed plan)
+    std::uint64_t stuck_since_ms_ = 0;          // start of the current wedge window (0 = not wedged)
     bool          escape_active_ = false;       // an escape maneuver currently owns the base
     std::uint64_t escape_start_ms_ = 0;         // escape start time (for the time bound)
     Eigen::Vector2f escape_start_pos_ = Eigen::Vector2f::Zero();  // pose at escape start (distance bound)

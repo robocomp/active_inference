@@ -101,7 +101,7 @@ MinTrackingSteps       = 5     # Warm-up tras reset: 5 frames (default 20).
                                 # tras cada recovery antes de que early exit
                                 # pudiera actuar. Con 5 se alcanza steady-state
                                 # en cuanto la ventana está llena.
-RotationSdfCoupling    = 0.5   # Extra tolerancia SDF por rotación (m/rad)
+RotationSdfCoupling    = 0.0   # VALIDATION 07-15: rot_boost OFF to test marginalization-prior poisoning ratchet (was 0.5). Restore to 0.5 after test.
 
 # ── 180° symmetry-flip guard (harden against spurious flips) ───────────────────
 # The optimizer periodically tests whether rotating the robot 180° fits the room
@@ -285,6 +285,16 @@ RerunPort         = 9877
 RerunSdfEveryN    = 20
 RerunSdfResolution = 150
 RerunMaxQueue     = 30
+
+# ── Room stabilisation → DSR graph upload gate (room_scene_graph.cpp) ──
+# A frame is "stable" when iters==0 (early-exit) AND sdf_mse<StableSdfMseMax AND cov_tt<StableCovTtMax;
+# after StableFramesRequired consecutive stable frames the room node is created and the robot reparented.
+[DSR]
+# This apartment fits chronically at ~0.079 mean|SDF| on early-exit frames (5th–95th pct 0.075–0.083),
+# so the 0.06 header default was UNREACHABLE on the very (iters==0) frames the gate requires → the room
+# never uploaded (0/2213 frames stable, longest streak 0). Raised above the 95th pct with margin.
+StableSdfMseMax = 0.09
+# StableCovTtMax (0.001) and StableFramesRequired (30) left at header defaults — both already pass 100%.
 
 # ── Object anchors (validated modelled objects as SE(2) pose landmarks in the RFE loss) ──
 [ObjectAnchor]

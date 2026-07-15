@@ -198,6 +198,11 @@ struct TableFrame
     // COMPUTED not tuned. has_rays=false ⇒ the scalar-R path (baseline) is used.
     Eigen::Vector3f              cam_origin = Eigen::Vector3f::Zero();
     bool                         has_rays   = false;
+    // CAMERA-FRAME azimuth of each point about the optical axis (rad), parallel to `points`. Computed by the
+    // fitter from the true extrinsic (NOT the belief's drifting table-centre estimate), so a persistent depth
+    // tilt is a coherent camera intrinsic across viewpoints — the identifiability the N=7 tilt state needs.
+    // Empty ⇒ the tilt column is inert (t stays at prior). See PRECISION_AS_INFORMATION.md (camera-frame azimuth).
+    std::vector<float>           point_azim;
     float chain_cov_xx = 0.0f;             // extra shared position variance (m²) from the pose chain (cx)
     float chain_cov_yy = 0.0f;             // ...                                                      (cy)
     float chain_cov_yaw = 0.0f;            // extra shared yaw variance (rad²) — grows with view range so a

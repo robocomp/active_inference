@@ -25,8 +25,11 @@ namespace
 {
 constexpr auto kWinSettingsOrg = "RoboComp";
 constexpr auto kWinSettingsApp = "room_concept";
-constexpr auto kWinSettingsKey = "RoomLayoutWindow_geometry";
-constexpr auto kSplitterStateKey = "RoomLayoutWindow_splitterState";
+// _h2 suffix: the layout changed from a vertical stack (canvas over timeseries) to a horizontal
+// split (canvas | timeseries column). Old persisted geometry/splitter state is for the tall layout
+// and would fight the new compact default — new keys let the new layout start fresh, then persist.
+constexpr auto kWinSettingsKey = "RoomLayoutWindow_geometry_h2";
+constexpr auto kSplitterStateKey = "RoomLayoutWindow_splitterState_h2";
 }  // namespace
 
 RoomViewer::~RoomViewer()
@@ -43,7 +46,7 @@ void RoomViewer::restore_window_geometry()
     if (!geom.isEmpty())
         custom_widget_->restoreGeometry(geom);
     else
-        custom_widget_->resize(820, 430);
+        custom_widget_->resize(700, 430);   // compact: square canvas on the left + timeseries column on the right
 }
 
 void RoomViewer::save_window_geometry() const
@@ -89,7 +92,10 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
     // from the compute loop). Objects render blue, obstacles red.
     viewer_2d_->start_semantic_bbox_overlay(graph, 1000);
 
-    // Free-Energy time series in the lower frame of the custom widget.
+    // Free-Energy time series stacked in the right-hand frame of the custom widget (was the lower
+    // frame before the layout went horizontal). Keep a minimum width so the narrow right column can't
+    // collapse the plots to unreadable slivers when the canvas grows / the splitter is dragged left.
+    custom_widget_->frame_series->setMinimumWidth(200);
     if (custom_widget_->frame_series->layout() == nullptr)
     {
         auto* series_layout = new QVBoxLayout(custom_widget_->frame_series);
@@ -99,7 +105,19 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
     }
     ts_plot_fe_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
     ts_plot_fe_->set_visible_window(60.f);
-    ts_plot_fe_->add_series("FE", QColor(255, 170, 0), 1.8f, 0);
+    // FE series hidden for now — it overlapped/obscured the early-exit decision variable below.
+    // Re-add ts_plot_fe_->add_series("FE", QColor(255, 170, 0), 1.8f, 0); (and its add_point) to restore.
+    // Early-exit decision variable: mean |SDF| at the odometry-predicted pose (meters). When it sits
+    // BELOW the dashed threshold line the optimizer is skipped (prediction trusted); when it rises
+    // above, Adam runs. The straight line is the base trust threshold sigma_sdf*prediction_trust_factor
+    // (a small rotation-dependent boost is added at runtime, so brief crossings during turns are
+    // expected). Same axis as FE — both are SDF-energy quantities in meters.
+    ts_plot_fe_->add_series("pred |SDF|", QColor(0, 150, 70), 1.6f, 0);
+    if (room_concept_ != nullptr)
+    {
+        const float thr = room_concept_->params.sigma_sdf * room_concept_->params.prediction_trust_factor;
+        ts_plot_fe_->set_reference_line(thr, QColor(200, 60, 60), "opt threshold");
+    }
     custom_widget_->frame_series->layout()->addWidget(ts_plot_fe_);
 
     // Localization confidence plot (raw, fixed 0..1 scale): -log10(det Σ_pose)/12, clamped. 1 = tightly
@@ -121,22 +139,24 @@ RoomViewer::RoomViewer(std::shared_ptr<DSR::DSRGraph> graph,
     ts_plot_rates_->add_series("optimizer Hz",  QColor(230, 126, 34), 1.6f, 0);   // loc-thread solve rate
     custom_widget_->frame_series->layout()->addWidget(ts_plot_rates_);
 
-    // Thicken the layout lines — a wider splitter handle plus a 2px border on both frames. Then
-    // restore the user's last splitter drag if we have one; otherwise start 50/50 (equal stretch →
-    // equal proportions regardless of the actual pixel height). saveState()/restoreState() persists
-    // the handle position across sessions (saveGeometry() does not cover it).
+    // Horizontal split: the (roughly square) room canvas on the left takes the larger share, the
+    // timeseries column on the right stays narrower. On resize the canvas absorbs most of the extra
+    // width (stretch 3 vs 2) so the plots keep a readable-but-compact width. Thicken the handle and
+    // border both frames. Then restore the user's last splitter drag if we have one; otherwise start
+    // from the ~60/40 default. saveState()/restoreState() persists the handle position across
+    // sessions (saveGeometry() does not cover it).
     if (custom_widget_->splitter != nullptr)
     {
         custom_widget_->splitter->setHandleWidth(6);
-        custom_widget_->splitter->setStretchFactor(0, 1);
-        custom_widget_->splitter->setStretchFactor(1, 1);
+        custom_widget_->splitter->setStretchFactor(0, 3);   // room canvas grows more on resize
+        custom_widget_->splitter->setStretchFactor(1, 2);   // timeseries column grows less
         custom_widget_->splitter->setStyleSheet("QSplitter::handle { background-color: #5a5f64; }");
         QSettings settings(kWinSettingsOrg, kWinSettingsApp);
         const QByteArray split_state = settings.value(kSplitterStateKey).toByteArray();
         if (!split_state.isEmpty())
             custom_widget_->splitter->restoreState(split_state);
         else
-            custom_widget_->splitter->setSizes({10000, 10000});   // first run → 50/50 default
+            custom_widget_->splitter->setSizes({10000, 6500});   // first run → ~60/40 (canvas | series)
     }
     for (auto* f : {custom_widget_->frame, custom_widget_->frame_series})
         if (f != nullptr)
@@ -263,8 +283,12 @@ void RoomViewer::update_ui(const std::optional<rc::RoomConcept::UpdateResult>& l
 {
     if (!loc_res.has_value() || !ts_plot_fe_)
         return;
-    const float fe = loc_res->final_loss;
-    ts_plot_fe_->add_point("FE", fe);
+    // FE series hidden for now (see constructor) — no add_point("FE", ...) while it's not registered.
+
+    // Early-exit decision variable (predicted-pose mean |SDF|). NaN on frames where the gate never
+    // ran (warmup / no odometry) — skip those so the line doesn't spike to a garbage sample.
+    if (std::isfinite(loc_res->early_exit_metric))
+        ts_plot_fe_->add_point("pred |SDF|", loc_res->early_exit_metric);
 
     // Localization confidence from the pose covariance determinant: small det (well-localized) → high.
     // det ~ 1e-8..1e-10 well-localized, ~1e-4 uncertain → -log10(det) ~ 4..10, mapped to [0,1] by /12.

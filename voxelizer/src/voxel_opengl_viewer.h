@@ -45,7 +45,9 @@ public:
     void set_show_grid(bool show);
     // Beta-posterior BELIEF FIELD heatmap: per-cell centres + mean occupancy P (RISK, hue) + Var[P] (EPISTEMIC,
     // brightness). Cells the source collapsed to P=0 (a modelled object owns them) are skipped.
-    void update_grid_field(std::span<const QVector3D> centres, std::span<const float> prob, std::span<const float> var);
+    // Residual "surprise landscape" surface: occupied cells carry a real top height in z; the grid extent
+    // is [xmin,ymin] + cell·(w,h). Builds the shared Gaussian-splat mesh (blue→orange→red by height).
+    void update_grid_field(std::span<const QVector3D> occupied, float xmin, float ymin, float cell, int w, int h);
     void set_show_field(bool show);
     // Fitted-model layer: the table mesh, the solid bottle cylinder and the graph object boxes.
     void set_show_models(bool show);

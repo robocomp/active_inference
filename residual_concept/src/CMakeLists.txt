@@ -13,6 +13,7 @@ LIST(APPEND SOURCES
   ../src/residual_occupancy_grid.cpp   # PHASE-0 REBUILD: fixed room-frame log-odds occupancy grid (safety layer)
   ../src/residual_zed_boost.cpp     # dense ZED-depth boost: project box → backproject region → likelihood
   ../src/residual_semantic.cpp      # RGB-semantic floor down-weighting of ZED grid hits (2nd uncorrelated cue)
+  ../src/residual_floor_plane.cpp   # data-driven floor-plane fit → grid floor band follows an offset/tilted floor
   ../src/residual_zed_ingestor.cpp  # ZED depth media-plane consumer
   # Zero-copy media plane (lidar3D consumer for the YOLO-independent range factor). Mirrors room_concept:
   # media_transport.cpp is type-agnostic but references all IDL frame types, so link every PubSubTypes pair.
@@ -41,6 +42,7 @@ LIST(APPEND HEADERS
   ../src/residual_clusterer.h
   ../src/residual_zed_boost.h
   ../src/residual_semantic.h
+  ../src/residual_floor_plane.h
   ../src/residual_zed_ingestor.h
   ../src/residual_fitter.h
   ../src/residual_model.h

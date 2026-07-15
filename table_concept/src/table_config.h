@@ -184,6 +184,10 @@ struct TableConfig
     // This is P(detect|present) falling with range, the codebase's "range→precision, not a gate" pattern.
     float existence_absence_range_ref_m = 2.5f;   // range (m) below which absence is trusted at full weight
     float existence_absence_range_power = 2.0f;   // decay exponent (2 ≈ angular-area ∝ 1/range²); 0 disables
+    float existence_verify_surprise     = 20.0f;  // decayed go-verify surprise (un-resolvable absence) above which
+                                                  // a table is flagged wants_verification (epistemic pull, not removal)
+    float existence_verify_gain         = 5.0f;   // epistemic gain (nats) a wants_verification table gets, so the
+                                                  // controller drives to a resolving ZED view (confirm-or-remove)
     // LiDAR removal reliability: the model's top slab is a SOLID band, but a real tabletop is a THIN plate, so
     // horizontal beams passing UNDER the top surface exit the band and read as false "free" — unreliable
     // ABSENCE. So by default the LiDAR carve contributes OCCUPANCY only (holds L up / confirms presence) and

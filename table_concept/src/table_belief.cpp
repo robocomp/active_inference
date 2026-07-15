@@ -499,17 +499,17 @@ void TableBelief::accumulate_footprint(const TableBeliefState& s, const TableFra
     const float e   = params_.fd_eps;
     const float pix = params_.pixel_sigma_over_f, s0 = params_.depth_sigma0_m, sc = params_.depth_sigma_range_coef;
     const float sm2 = params_.model_sigma_m * params_.model_sigma_m;
-    Eigen::Vector2f view(s.cx - f.cam_origin.x(), s.cy - f.cam_origin.y());   // horizontal view axis (for azimuth)
-    const bool have_view = view.norm() > 1e-6f;
-    if (have_view) view.normalize();
+    const bool  have_azim = f.point_azim.size() == f.points.size();       // CAMERA-frame azimuth (fitter-supplied)
 
     // The footprint factor with the CO-ESTIMATED depth-tilt state (N=7, a2′ final). The measurement is the SDF at
     // the tilt-CORRECTED point: d = sdf_fp(q,θ) − G·t, G = (n_fp·r̂∥)·azimuth (azimuth-odd, the only mode that
     // aliases into yaw). The Jacobian gains a 7th column −G, so a PERSISTENT depth tilt is estimated into t and
-    // SUBTRACTED — yaw stays fully informed and unbiased (no per-frame cap, no sweet-spot). See PRECISION_AS_INFO.
+    // SUBTRACTED — yaw stays fully informed and unbiased (no per-frame cap, no sweet-spot). Azimuth is the CAMERA-
+    // frame angle (fitter-supplied), NOT the belief's drifting table-centre proxy (that fed back → t̂ divergence).
     int npts = 0;
-    for (const auto& p : f.points)
+    for (std::size_t pi = 0; pi < f.points.size(); ++pi)
     {
+        const Eigen::Vector3f& p = f.points[pi];
         if (p.z() < z_lo or p.z() > z_hi) continue;                       // top-band points only
         const float qx = p.x(), qy = p.y();
         const float d0 = sdf_fp(qx, qy, s.cx, s.cy, s.w, s.h, s.yaw);
@@ -539,7 +539,7 @@ void TableBelief::accumulate_footprint(const TableBeliefState& s, const TableFra
         // essential: a top-down (vertical) ray has ~0 in-plane shift ⇒ G≈0 (no spurious tilt info in a burn-in),
         // a grazing ray ⇒ full coupling. Estimate t (slot 6) jointly; evaluate the residual at the current t̂.
         const float hfrac = (z > 1e-6f) ? (rn / z) : 0.0f;              // |ray_xy| / range = horizontal fraction
-        const float azim = have_view ? std::atan2(view.x() * rpar.y() - view.y() * rpar.x(), view.dot(rpar)) : 0.0f;
+        const float azim = have_azim ? f.point_azim[pi] : 0.0f;         // CAMERA-frame azimuth (coherent across views)
         const float G_i  = ndr * azim * hfrac;
         J(6) = -G_i;
         const float d = d0 - G_i * s.t;                                 // tilt-corrected residual

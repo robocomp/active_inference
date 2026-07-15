@@ -525,6 +525,7 @@ void SpecificWorker::load_params()
 	load_optional_cast<double>("Controller.StuckCmdRotEps",     params.stuck_cmd_rot_eps);
 	load_optional_cast<double>("Controller.StuckMeasLinEps",    params.stuck_meas_lin_eps);
 	load_optional_cast<double>("Controller.StuckMeasRotEps",    params.stuck_meas_rot_eps);
+	load_optional_cast<double>("Controller.StuckSlipRatio",     params.stuck_slip_ratio);
 	load_optional_cast<double>("Controller.StuckConfirmMs",     params.stuck_confirm_ms);
 	load_optional_cast<double>("Controller.EscapeAdvSpeedMps",  params.escape_adv_speed_mps);
 	load_optional_cast<double>("Controller.EscapeRotSpeedRps",  params.escape_rot_speed_rps);

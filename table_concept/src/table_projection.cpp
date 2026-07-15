@@ -193,6 +193,8 @@ SilhouetteExistence TableProjection::compute_silhouette_existence(const TableIns
         if (occluder_cells.contains(k) and not table_cells.contains(k))
         { ++out.n_occluded; return; }                                 // nearer object hides it ⇒ HOLD
         ++out.n_detectable;
+        if (col > 0.25f * W and col < 0.75f * W and row > 0.25f * Himg and row < 0.75f * Himg)
+            ++out.n_central;                                          // central image region ⇒ the robot is looking AT it
         range_sum += std::sqrt(X * X + Y * Y + Z * Z);                 // camera→sample distance (absence conf ∝ 1/range)
         if (table_cells.contains(k)) out.e_occ  += 1.0f;              // still there
         else                         out.e_free += 1.0f;              // predicted-but-absent

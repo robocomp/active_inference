@@ -100,6 +100,15 @@ void TimeSeriesPlot::set_y_range(float v_min, float v_max)
     y_fixed_     = (y_fixed_max_ > y_fixed_min_);
 }
 
+void TimeSeriesPlot::set_reference_line(float y, QColor colour, const std::string& label)
+{
+    std::lock_guard lk(mu_);
+    ref_line_enabled_ = std::isfinite(y);
+    ref_line_y_       = y;
+    ref_line_colour_  = colour;
+    ref_line_label_   = label;
+}
+
 void TimeSeriesPlot::timerEvent(QTimerEvent*)
 {
     update();  // schedule repaint
@@ -137,6 +146,12 @@ void TimeSeriesPlot::paintEvent(QPaintEvent*)
                 v_max = std::max(v_max, pt.v);
             }
         }
+        // Keep the reference line in view even when the data doesn't reach it.
+        if (ref_line_enabled_)
+        {
+            v_min = std::min(v_min, ref_line_y_);
+            v_max = std::max(v_max, ref_line_y_);
+        }
         if (v_min >= v_max) { v_min = 0.f; v_max = 1.f; }
 
         const float pad = (v_max - v_min) * 0.05f;
@@ -152,6 +167,21 @@ void TimeSeriesPlot::paintEvent(QPaintEvent*)
 
     auto map_x = [&](float t) -> float { return kLeft + (t - t_min) / (t_max - t_min) * pw; };
     auto map_y = [&](float v) -> float { return kTop  + (1.f - (v - v_min) / (v_max - v_min)) * ph; };
+
+    // Horizontal reference line (decision threshold) — dashed, drawn under the series.
+    if (ref_line_enabled_ && ref_line_y_ >= v_min && ref_line_y_ <= v_max)
+    {
+        const int ry = static_cast<int>(map_y(ref_line_y_));
+        p.setPen(QPen(ref_line_colour_, 1.2f, Qt::DashLine));
+        p.drawLine(kLeft, ry, kLeft + static_cast<int>(pw), ry);
+        if (!ref_line_label_.empty())
+        {
+            p.setFont(QFont("Monospace", 7));
+            const QString txt = QString::fromStdString(ref_line_label_);
+            p.drawText(kLeft + static_cast<int>(pw) - 4 - QFontMetrics(p.font()).horizontalAdvance(txt),
+                       ry - 2, txt);
+        }
+    }
 
     // Draw each series
     for (const auto& [_, s] : series_)

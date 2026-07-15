@@ -195,6 +195,15 @@ ExistenceRemoveFrames = 15     # debounce: require the removal decision for this
 ExistenceAbsenceRangeRefM = 2.5   # range (m) below which absence is trusted at full weight
 ExistenceAbsenceRangePower = 2.0  # decay exponent (2 ≈ angular area ∝ 1/range²)
 
+# Verification-gated removal (active inference): a predicted-visible-but-absent observation is only evidence of
+# REMOVAL in proportion to P(detect | present, geometry) = range_conf × in_fov_frac × central_frac. The REMAINING
+# absence (from a far / peripheral / edge-on view that CAN'T resolve the table) is epistemic surprise, not removal:
+# it feeds a decayed go-VERIFY accumulator. Above ExistenceVerifySurprise the table is flagged wants_verification
+# and gets an epistemic pull (ExistenceVerifyGain nats) so the controller drives to a resolving ZED view — absence
+# never deletes a table the robot never properly looked at; it sends the robot to look (confirm-or-remove).
+ExistenceVerifySurprise = 20.0    # decayed un-resolvable-absence surprise above which a table wants verification
+ExistenceVerifyGain     = 5.0     # epistemic gain (nats) a wants_verification table gets (drives a resolving view)
+
 # LiDAR removal reliability: the model top slab is a SOLID band but a real tabletop is a THIN plate, so
 # horizontal beams passing UNDER the top surface exit the band and read as false "free" (unreliable absence).
 # Default false ⇒ the LiDAR carve contributes OCCUPANCY only (holds L up), never drives removal; removal is the

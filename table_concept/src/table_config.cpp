@@ -135,6 +135,8 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.existence_remove_frames   = geti("TableModel.ExistenceRemoveFrames",   15);
     out.existence_absence_range_ref_m = getf("TableModel.ExistenceAbsenceRangeRefM", 2.5f);
     out.existence_absence_range_power = getf("TableModel.ExistenceAbsenceRangePower", 2.0f);
+    out.existence_verify_surprise     = getf("TableModel.ExistenceVerifySurprise",   20.0f);
+    out.existence_verify_gain         = getf("TableModel.ExistenceVerifyGain",       5.0f);
     out.existence_lidar_absence       = getb("TableModel.ExistenceLidarAbsence", false);
     out.existence_leg_occupancy       = getb("TableModel.ExistenceLegOccupancy", true);
 

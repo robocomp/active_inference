@@ -658,43 +658,25 @@ void SceneProcessor::update_viewer_grid()
         for (std::size_t i = 0; i < n; ++i) v.emplace_back(flat[3 * i], flat[3 * i + 1], flat[3 * i + 2]);
         return v;
     };
-    std::vector<QVector3D> cells, border;
-    std::vector<QVector3D> field_centres;
-    std::vector<float> field_prob, field_var;
-    if (const auto g = graph_->get_node("grid"); g.has_value())
+    std::vector<QVector3D> cells_real, border;                 // occupied cells keep their REAL top height in z
+    float gxmin = 0.f, gymin = 0.f, gcell = 0.f; int gw = 0, gh = 0;
+    if (const auto g = graph_->get_node("residual"); g.has_value())   // node renamed "grid"→"residual" (type kept)
     {
-        if (const auto o = graph_->get_attrib_by_name<grid_occupied_cells_att>(g.value()); o.has_value()) cells  = read_pts(o.value().get());
-        if (const auto o = graph_->get_attrib_by_name<grid_border_cells_att>  (g.value()); o.has_value()) border = read_pts(o.value().get());
-        // Beta BELIEF FIELD: dense row-major P and Var + meta=[xmin,ymin,cell,w,h]. Reconstruct each cell's room
-        // centre from the meta and index — only cells with meaningful occupancy are drawn (filtered in the viewer).
-        const auto pa = graph_->get_attrib_by_name<grid_occupancy_prob_att>(g.value());
-        const auto va = graph_->get_attrib_by_name<grid_occupancy_var_att> (g.value());
-        const auto ma = graph_->get_attrib_by_name<grid_field_meta_att>     (g.value());
-        if (pa.has_value() and va.has_value() and ma.has_value())
+        if (const auto o = graph_->get_attrib_by_name<grid_occupied_cells_att>(g.value()); o.has_value()) cells_real = read_pts(o.value().get());
+        if (const auto o = graph_->get_attrib_by_name<grid_border_cells_att>  (g.value()); o.has_value()) border     = read_pts(o.value().get());
+        // grid_field_meta = [xmin, ymin, cell, w, h] frames the surface lattice.
+        if (const auto ma = graph_->get_attrib_by_name<grid_field_meta_att>(g.value()); ma.has_value() and ma.value().get().size() >= 5)
         {
-            const auto& P = pa.value().get(); const auto& V = va.value().get(); const auto& M = ma.value().get();
-            if (M.size() >= 5)
-            {
-                const float xmin = M[0], ymin = M[1], cell = M[2];
-                const int w = static_cast<int>(M[3]), h = static_cast<int>(M[4]);
-                if (static_cast<int>(P.size()) >= w * h and static_cast<int>(V.size()) >= w * h)
-                {
-                    field_centres.reserve(P.size()); field_prob.reserve(P.size()); field_var.reserve(P.size());
-                    for (int y = 0; y < h; ++y)
-                        for (int x = 0; x < w; ++x)
-                        {
-                            const int i = y * w + x;
-                            if (P[i] <= 0.5f) continue;                 // collapsed/free → skip (keeps payload small)
-                            field_centres.emplace_back(xmin + (x + 0.5f) * cell, ymin + (y + 0.5f) * cell, 0.03f);
-                            field_prob.push_back(P[i]); field_var.push_back(V[i]);
-                        }
-                }
-            }
+            const auto& M = ma.value().get();
+            gxmin = M[0]; gymin = M[1]; gcell = M[2]; gw = static_cast<int>(M[3]); gh = static_cast<int>(M[4]);
         }
     }
-    voxel_viewer_->update_grid_cells(cells, 0.05f);
+    // Flat 2-D amber cells want the floor; flatten a copy. The 3-D surface uses the real height.
+    std::vector<QVector3D> cells_flat = cells_real;
+    for (auto& c : cells_flat) c.setZ(0.02f);
+    voxel_viewer_->update_grid_cells(cells_flat, 0.05f);
     voxel_viewer_->update_grid_border(border);
-    voxel_viewer_->update_grid_field(field_centres, field_prob, field_var);
+    voxel_viewer_->update_grid_field(cells_real, gxmin, gymin, gcell, gw, gh);
 }
 
 void SceneProcessor::update_viewer_mask_points()

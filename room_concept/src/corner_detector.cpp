@@ -76,20 +76,29 @@ static std::vector<int> solve_hungarian(
         std::vector<float> minv(N + 1, INFEASIBLE);
         std::vector<bool>  used(N + 1, false);
 
+        bool augmented = true;
         do {
             used[j0] = true;
             const int i0 = p[j0];
-            int   j1    = 1;           // safe fallback; always overwritten below
+            int   j1    = -1;          // -1 ⇒ no unused column found this step
             float delta = INFEASIBLE;
             for (int j = 1; j <= N; ++j)
             {
-                if (!used[j])
+                if (not used[j])
                 {
                     const float c = cell(i0 - 1, j - 1) - u[i0] - v[j];
                     if (c < minv[j]) { minv[j] = c; way[j] = j0; }
                     if (minv[j] < delta) { delta = minv[j]; j1 = j; }
                 }
             }
+            // Termination guard: a valid augmenting step must reach a FEASIBLE free column. If none
+            // exists (row i0 reaches only INFEASIBLE/padded columns — e.g. corner candidates far from
+            // every model corner), the classic Kuhn-Munkres loop leaves delta==INFEASIBLE, never
+            // advances j0 to a free column, and spins FOREVER (caught live via gdb: this thread at
+            // 100% CPU, the whole agent hung, needing kill -9). Bail here WITHOUT touching the
+            // potentials so the matching stays consistent; row i then stays unassigned (-1) — exactly
+            // this function's documented contract for a row with no feasible column.
+            if (j1 < 0 or delta >= INFEASIBLE * 0.5f) { augmented = false; break; }
             for (int j = 0; j <= N; ++j)
             {
                 if (used[j]) { u[p[j]] += delta; v[j] -= delta; }
@@ -98,11 +107,16 @@ static std::vector<int> solve_hungarian(
             j0 = j1;
         } while (p[j0] != 0);
 
-        do {
-            const int j1 = way[j0];
-            p[j0] = p[j1];
-            j0 = j1;
-        } while (j0);
+        // Augment along the discovered path only when we actually reached a free column. On a bail
+        // the loop above never wrote p[], so previously matched rows/columns are left intact.
+        if (augmented)
+        {
+            do {
+                const int j1 = way[j0];
+                p[j0] = p[j1];
+                j0 = j1;
+            } while (j0);
+        }
     }
 
     // Extract: p[j] = 1-indexed row assigned to column j

@@ -792,6 +792,14 @@ void SpecificWorker::step_epistemic(rc::TableInstance& inst, DSR::Node& node)
     if (inst.epistemic_cooldown > 0)
         prop.epistemic_gain = 0.0f;
 
+    // Verification pull (active inference): a table whose predicted absence could NOT be resolved from recent
+    // views (wants_verification — far/peripheral/edge-on "I don't see it") does NOT get deleted; it gets a strong
+    // epistemic gain so the controller drives to a good ZED viewpoint to CONFIRM-or-remove it. Absence never
+    // deletes a table the robot hasn't properly looked at — it sends the robot to look. Overrides the cooldown
+    // (a "might be gone" alarm is not anti-chatter-suppressible). Clears once a verifying view resolves it.
+    if (inst.wants_verification)
+        prop.epistemic_gain = std::max(prop.epistemic_gain, cfg_.existence_verify_gain);
+
     // Write attributes to the table node (read by legacy consumers)
     scene_graph_->write_epistemic_proposal(node, prop);
     // Publish / refresh dedicated affordance node (persists; update_node refreshes target+gain)

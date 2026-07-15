@@ -2125,6 +2125,9 @@ namespace rc
             debug_log_.flush();
         }
 
+        // Adam path: expose the predicted-pose SDF that triggered this optimization (NaN if the
+        // early-exit gate never evaluated it this frame — e.g. warmup / no odometry).
+        res.early_exit_metric = last_early_exit_metric_;
         return res;
     }
 
@@ -2279,6 +2282,10 @@ namespace rc
         // slot_odom_delta used command velocity (inconsistent with the fused prediction).
         // Now that slot_odom_delta uses measured odometry, the prediction is self-consistent
         // and the SDF gate alone is sufficient.
+        // Fresh each frame: NaN unless we actually reach the SDF evaluation below. This lets update()
+        // report NaN (⇒ not plotted) for frames where the gate never ran, rather than a stale value.
+        last_early_exit_metric_ = std::numeric_limits<float>::quiet_NaN();
+
         if (!params.prediction_early_exit ||
             !last_update_result.ok ||
             !odometry_prior.valid ||
@@ -2291,6 +2298,9 @@ namespace rc
         auto pose_th = newest.pose.index({torch::indexing::Slice(2, 3)});
         const auto sdf_pred = model_->sdf_at_pose(points_tensor, pose_xy, pose_th);
         const float mean_sdf_pred = torch::mean(torch::abs(sdf_pred)).item<float>();
+        // Record the decision variable whether or not we early-exit — on an Adam frame this is the
+        // value that TRIGGERED optimization (it exceeded the trust threshold). update() reads it back.
+        last_early_exit_metric_ = mean_sdf_pred;
 
         // Widen the SDF trust threshold when the robot is rotating.
         // A theta error ε at room scale R produces SDF displacement ~R*ε.
@@ -2355,6 +2365,7 @@ namespace rc
         res.ok = true;
         res.final_loss = mean_sdf_pred;
         res.sdf_mse = mean_sdf_pred;
+        res.early_exit_metric = mean_sdf_pred;   // the value that PASSED the threshold (optimizer skipped)
         res.iterations_used = 0;
         {
             auto ext_cpu = model_->half_extents.to(torch::kCPU);

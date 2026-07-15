@@ -92,15 +92,28 @@ void TableExistence::update_and_remove(TableFitter& fitter, TableLidarIngestor* 
                 // only by the ricoh whose silhouette the ZED-based check can't confirm, must never vote it away.
                 // Occupancy always counts. (The ricoh-projected silhouette, once the producer ships 360 mask
                 // pixels, will let absence be judged in the ricoh view directly instead of relying on this guard.)
-                float sfree = observed ? 0.0f : sil.e_free;
-                // Absence is evidence of removal only in proportion to how much of the table SHOULD have been
-                // seen from here: in_fov_frac = n_detectable / n_total folds the real camera FRUSTUM (out-of-FoV
-                // samples don't count) AND the occlusion HOLD together, and range_conf adds the angular-size /
-                // detectability drop. A ricoh-only table (barely in the ZED frustum) → in_fov_frac ≈ 0 → HOLD.
-                sfree *= absence_range_conf(sil.mean_range_m) * sil.in_fov_frac();
-                inst.dbg_ex_sil_free_eff = sfree;   // effective absence after range/occlusion + observed-guard
+                const float raw_free = observed ? 0.0f : sil.e_free;
+                // P(detect | present, geometry): how confidently the ZED would resolve this table FROM HERE.
+                // in_fov_frac folds the real FRUSTUM + occlusion; range_conf the angular-size drop; central_frac
+                // whether the robot is actually LOOKING at it (a peripheral table clipping the wide FoV edge is
+                // NOT a verifying view). A predicted-visible-but-absent observation is only evidence of REMOVAL in
+                // proportion to P(detect); the REST is epistemic surprise — "I can't resolve this from here" — which
+                // must make the robot GO VERIFY, never delete a table it never properly looked at.
+                // A verifying view = CLOSE (range_conf) + in frustum & unoccluded (in_fov_frac) + the robot is
+                // LOOKING at it (central_frac). NOT obliquity: this robot is chronically edge-on and an edge-on
+                // table IS detectable up close (table_1), so obliquity would wrongly block legitimate removal.
+                const float p_detect = absence_range_conf(sil.mean_range_m) * sil.in_fov_frac() * sil.central_frac();
+                const float sfree  = raw_free * p_detect;                 // confident absence → removal log-odds
+                const float verify = raw_free * (1.0f - p_detect);        // un-confident absence → go-verify surprise
+                inst.dbg_ex_sil_free_eff = sfree;
+                inst.dbg_ex_pdetect = p_detect; inst.dbg_ex_central = sil.central_frac();
                 inst.existence.integrate(rc::exist::mask_evidence(sil.e_occ, sfree, sil.n_detectable, sm));
                 integrated = true;
+                // Route the un-resolvable absence into an epistemic VERIFY pull (decayed accumulator). When it
+                // builds up, the table is flagged for verification (the epistemic planner drives the robot to a
+                // good ZED viewpoint). Removal then only ever fires from a HIGH-p_detect view — verification-gated.
+                inst.verify_surprise = 0.9f * inst.verify_surprise + 0.1f * verify;
+                inst.wants_verification = inst.verify_surprise > cfg_.existence_verify_surprise;
             }
         }
 

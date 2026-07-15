@@ -40,6 +40,7 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader, TuplePrx tprx, 
     rc::zed_boost_self_test();
     rc::OccupancyGrid::self_test();   // PHASE-0 REBUILD: safety-layer grid (completeness / occluded / carve / z-aware)
     rc::semantic_self_test();         // RGB-semantic floor down-weighting (height gate / freshness / class / safety)
+    rc::floor_plane_self_test();      // data-driven floor-plane fit (offset+tilt recovery / flat-z0 no-op / hold)
 
 #ifdef HIBERNATION_ENABLED
     hibernationChecker.start(500);
@@ -398,6 +399,22 @@ void SpecificWorker::compute()
         if (grid_ready_)   // integrate now (needs no explainers); read-out + publish happen after explainers below
         {
             ego_reliability_ = compute_ego_reliability();   // <1 while moving → down-weight the whole sweep
+            // DATA-DRIVEN FLOOR PLANE: fit the floor from the RAW LiDAR (best floor coverage) and reference the
+            // grid's obstacle band to it, so a new scenario's offset/tilted floor never latches as phantoms. The
+            // estimator always runs+logs (so the offset is visible); the grid uses it only when the flag is on.
+            floor_plane_ = rc::estimate_floor_plane(lidar_ingestor_->sweep_room(), lidar_ingestor_->origin_room(),
+                                                    cfg_.cluster.floor_z0, cfg_.cluster.floor_slope,
+                                                    cfg_.floor_plane, floor_plane_);
+            if (cfg_.floor_plane.enabled and floor_plane_.valid)
+                grid_.set_floor_plane(floor_plane_.a, floor_plane_.b, floor_plane_.c);
+            else
+                grid_.set_floor_plane(0.0f, 0.0f, 0.0f);
+            static int fpc = 0;
+            if ((fpc++ % 40) == 0 and floor_plane_.valid)
+                std::println("[floor-plane] z = {:.3f}·x + {:.3f}·y + {:.3f}  (offset {:.1f} cm, tilt {:.1f}°) {}",
+                             floor_plane_.a, floor_plane_.b, floor_plane_.c, floor_plane_.c * 100.0f,
+                             std::atan(std::hypot(floor_plane_.a, floor_plane_.b)) * 57.2958f,
+                             cfg_.floor_plane.enabled ? "[APPLIED]" : "[log-only, flag off]");
             const auto& lidar_sweep = filtered_lidar_sweep();   // bpearl floor grazing removed (per-device band)
             grid_.integrate_sweep(lidar_ingestor_->origin_room(), lidar_sweep,
                                   /*begin_cycle=*/true, ego_reliability_);            // accumulate LiDAR
@@ -820,11 +837,12 @@ void SpecificWorker::publish_grid_display(const rc::OccupancyGrid::CellExplained
     auto room = G->get_node(room_node_id_);
     if (not room.has_value()) return;
 
-    // Create the `grid` node once (owned; cleaned up on exit via the "grid" [Owns] entry).
-    auto gopt = G->get_node("grid");
+    // Create the `residual` node once (owned; cleaned up on exit via the "residual" [Owns] entry). Node NAME is
+    // "residual"; node TYPE stays grid_node_type ("grid") — consumers still key attrs off the grid_* type.
+    auto gopt = G->get_node("residual");
     if (not gopt.has_value())
     {
-        DSR::Node gn = DSR::Node::create<grid_node_type>("grid");
+        DSR::Node gn = DSR::Node::create<grid_node_type>("residual");
         const float rpx = G->get_attrib_by_name<pos_x_att>(room.value()).value_or(200.f);
         const float rpy = G->get_attrib_by_name<pos_y_att>(room.value()).value_or(200.f);
         G->add_or_modify_attrib_local<pos_x_att>(gn, rpx);
@@ -833,7 +851,7 @@ void SpecificWorker::publish_grid_display(const rc::OccupancyGrid::CellExplained
         if (not idopt.has_value()) return;
         rt_api_->insert_or_assign_edge_RT(room.value(), idopt.value(), {0.f, 0.f, 0.f}, {0.f, 0.f, 0.f});
         graph_dirty_ = true;
-        std::println("[grid] published 'grid' node id={} under room", idopt.value());
+        std::println("[grid] published 'residual' node id={} under room", idopt.value());
         gopt = G->get_node(idopt.value());
         if (not gopt.has_value()) return;
     }
@@ -849,8 +867,10 @@ void SpecificWorker::publish_grid_display(const rc::OccupancyGrid::CellExplained
         return xyz;
     };
     // Two display layers (dedicated, type-checked grid attrs): grid_occupied_cells = raw OCCUPIED cells
-    // (colour A); grid_border_cells = the INFLATED half-robot-width clearance ring (colour B).
-    G->add_or_modify_attrib_local<grid_occupied_cells_att>(gn, to_xyz(grid_.residual_cell_centres(explained)));
+    // (colour A) with z = the cell's REAL top height (hit z-band max), so a 3-D consumer can raise a
+    // surface to the true obstacle height; grid_border_cells = the INFLATED clearance ring (colour B),
+    // kept at a flat display z (clearance is a footprint, not an obstacle).
+    G->add_or_modify_attrib_local<grid_occupied_cells_att>(gn, grid_.residual_cell_centres_xyz(explained));
     G->add_or_modify_attrib_local<grid_border_cells_att>  (gn, to_xyz(grid_.inflated_border_centres(explained, grid_.params().inflate_radius_m)));
     G->add_or_modify_attrib_local<grid_cell_size_att>     (gn, static_cast<float>(grid_.params().cell_size_m));
 

@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>822</width>
-    <height>433</height>
+    <width>700</width>
+    <height>430</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -47,7 +47,7 @@
    <item>
     <widget class="QSplitter" name="splitter">
      <property name="orientation">
-      <enum>Qt::Vertical</enum>
+      <enum>Qt::Horizontal</enum>
      </property>
      <widget class="QFrame" name="frame">
       <property name="frameShape">

@@ -1,5 +1,6 @@
 #include "voxel_opengl_viewer.h"
 #include "obj_loader.h"
+#include "../../common/viewers/grid_surface_builder.h"
 
 #include <QCoreApplication>
 #include <QHash>
@@ -318,43 +319,30 @@ void VoxelOpenGLViewer::set_show_grid(bool show)
 // occupancy P (collision RISK: green→red as 0.5→1), BRIGHTNESS encodes confidence 1−Var/Var_prior (the EPISTEMIC
 // term: vivid = well-observed, faded = uncertain). Cells the source collapsed to P=0 (a modelled object owns
 // them) or that lean free (P≤0.5) are skipped, so objects visibly collapse and free space stays uncluttered.
-void VoxelOpenGLViewer::update_grid_field(std::span<const QVector3D> centres, std::span<const float> prob,
-                                          std::span<const float> var)
+void VoxelOpenGLViewer::update_grid_field(std::span<const QVector3D> occupied,
+                                          float xmin, float ymin, float cell, int w, int h)
 {
-    // Draw the Beta belief field as ELEVATED COLUMNS: one vertical bar per cell rising from the floor,
-    // its HEIGHT ∝ occupancy probability P (the "height of the cell"), hue also = P (green→red) and
-    // brightness = confidence (1 − Var/prior). The column is a floor→top line pair (GL_LINES) plus a
-    // top-cap point; the base is dimmed so each bar fades upward and reads as a 3D stalagmite.
-    constexpr float var_prior  = 0.125f;                // Beta(0.5,0.5) prior variance = "unknown"
-    constexpr float max_height = 0.60f;                 // room metres for a fully-occupied (P=1) cell
-    constexpr float base_z     = 0.02f;                 // lift the foot just off the floor plane
-    std::vector<Vertex> lines;                          // 2 verts per cell (bottom, top)
-    std::vector<Vertex> caps;                           // 1 vert per cell (top)
-    const std::size_t n = std::min({centres.size(), prob.size(), var.size()});
-    lines.reserve(2 * n);
-    caps.reserve(n);
+    // Residual "surprise landscape": a smooth Gaussian-splat surface rising to each occupied cell's real
+    // top height (blue→orange→red). Geometry comes from the SHARED builder (same code as the standalone
+    // viewer). The scene shader is unlit, so bake a simple flat Lambert shade into the vertex colour here.
+    const auto surface = rc::viewers::build_residual_surface(occupied, xmin, ymin, cell, w, h);
     const float fx = voxel_flip_x_ ? -1.f : 1.f;
     const float fy = voxel_flip_y_ ? -1.f : 1.f;
-    for (std::size_t i = 0; i < n; ++i)
+    const QVector3D light = QVector3D(fx * 0.4f, 0.85f, fy * 0.35f).normalized();   // match the mapped frame
+    std::vector<Vertex> tris;
+    tris.reserve(surface.size());
+    for (const auto& v : surface)
     {
-        const float p = prob[i];
-        if (p <= 0.5f) continue;                        // collapsed (P=0) or free-leaning → don't draw
-        const float t = std::clamp((p - 0.5f) * 2.0f, 0.f, 1.f);       // 0 at P=0.5 → 1 at P=1
-        const float conf = std::clamp(1.0f - var[i] / var_prior, 0.f, 1.f);
-        const float r = (0.40f + 0.60f * t) * conf;
-        const float g = (0.90f - 0.70f * t) * conf;
-        const float b = 0.10f * conf;
-        const float x   = fx * centres[i].x();
-        const float z   = fy * centres[i].y();
-        const float top = base_z + t * max_height;      // viewer up-axis is Y ( = room z )
-        lines.push_back(Vertex{x, base_z, z, 0.20f * r, 0.20f * g, 0.20f * b});   // dim foot
-        lines.push_back(Vertex{x, top,    z, r,         g,         b});           // bright top
-        caps.push_back(Vertex{x, top, z, r, g, b});
+        // ROOM (x, y, up) → viewer axes (fx·x, up, fy·y); the same map applies to the normal.
+        const QVector3D p(fx * v.pos.x(), v.pos.z(), fy * v.pos.y());
+        const QVector3D n(fx * v.nrm.x(), v.nrm.z(), fy * v.nrm.y());
+        const float shade = 0.45f + 0.55f * std::max(QVector3D::dotProduct(n.normalized(), light), 0.f);
+        tris.push_back(Vertex{p.x(), p.y(), p.z(), v.col.x() * shade, v.col.y() * shade, v.col.z() * shade});
     }
     {
         std::scoped_lock lk(data_mutex_);
-        grid_field_vertices_     = std::move(lines);
-        grid_field_cap_vertices_ = std::move(caps);
+        grid_field_vertices_ = std::move(tris);
+        grid_field_cap_vertices_.clear();   // mesh has no column caps
     }
     request_update_throttled();
 }
@@ -802,14 +790,13 @@ void VoxelOpenGLViewer::paintGL()
     // be compared against / overlaid on the hard amber occupied cells. Drawn slightly smaller so both read.
     if (has_field && show_field_)
     {
-        // ELEVATED COLUMNS: a vertical bar per cell (height ∝ P) + a round cap point on top. Depth test ON
-        // so nearer/taller bars correctly occlude those behind them (unlike the flat overlays above).
+        // SURPRISE-LANDSCAPE MESH: a smooth Gaussian-splat surface rising to each cell's real obstacle
+        // height (blue→orange→red, flat shading baked in). Depth test ON so bumps occlude correctly.
         room_vao_.bind();
         room_vbo_.bind();
         program_.setUniformValue("u_round_points", 0);
         room_vbo_.allocate(grid_field_draw_vertices.data(), static_cast<int>(grid_field_draw_vertices.size() * sizeof(Vertex)));
-        glLineWidth(3.0f);
-        glDrawArrays(GL_LINES, 0, static_cast<GLsizei>(grid_field_draw_vertices.size()));
+        glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(grid_field_draw_vertices.size()));
         if (not grid_field_cap_draw_vertices.empty())
         {
             room_vbo_.allocate(grid_field_cap_draw_vertices.data(), static_cast<int>(grid_field_cap_draw_vertices.size() * sizeof(Vertex)));
