@@ -276,6 +276,25 @@ public:
         //   to the last known good pose instead of following the confused estimate.
         float boundary_hessian_quality_threshold = 0.08f; // m — above this: motion-only Hessian
         float boundary_mu_quality_threshold = 0.10f;      // m — above this: keep previous mu
+
+        // ===== FEJ + Schur marginalization boundary prior (replaces Solutions B/C when ON) =====
+        // The legacy boundary prior above is a rough approximation to sliding-window
+        // marginalization: it anchors the surviving oldest slot to the DROPPED slot's pose with a
+        // Hessian that double-counts the survivor's own obs, and it re-anchors mu to drifting slots
+        // every slide (a non-FEJ moving linearization point) — the "erroneous information gain" that
+        // poisons the prior into the loss_boundary ratchet (0→559) diagnosed 2026-07-15.
+        //
+        // When boundary_fej_schur is ON, recompute_boundary_prior/append are replaced by
+        // marginalize_oldest(), which forms the EXACT Schur complement of the dropped slot over its
+        // Markov blanket (the next slot, via the motion factor) — folding the previous marginal, the
+        // dropped slot's obs Hessian, and the motion factor into a marginal prior on the survivor —
+        // and FREEZES its linearization point (First-Estimates Jacobians). The prior then carries a
+        // linear term g (absent in the legacy form). No re-linearization ⇒ no information-gain ratchet.
+        bool  boundary_fej_schur = false;
+        // Continuous quality-as-precision weight on the dropped slot's obs contribution to the Schur
+        // fold: w = 1/(1+(sdf_mse_final/σ_q)²). Replaces the hard 0.08/0.10 gates (no threshold) — a
+        // poorly-fit dropped slot contributes weak, high-covariance information that cannot anchor.
+        float boundary_quality_sigma = 0.10f;             // m — σ_q for the soft obs-quality weight
         float covariance_regularization = 1e-4f;       // λ added to posterior precision diagonal
         float covariance_det_min = 1e-10f;             // Min determinant for valid covariance
         float condition_number_max = 1e6f;             // Max condition number for valid covariance
@@ -644,8 +663,17 @@ public:
 
     struct BoundaryPrior
     {
-        Eigen::Vector3f mu = Eigen::Vector3f::Zero();        // MAP pose of dropped state
-        Eigen::Matrix3f precision = Eigen::Matrix3f::Identity(); // Σ^{-1} from diag Hessian
+        // Legacy (boundary_fej_schur=false): mu = dropped state's MAP pose, precision = quality-gated
+        // Hessian, grad unused. Boundary loss = 0.5·(x_front−mu)ᵀ·precision·(x_front−mu).
+        //
+        // FEJ+Schur (boundary_fej_schur=true): mu = FROZEN marginal MODE (mean form) of the surviving
+        // slot, computed from the unclamped Schur complement as mu = x₁* − Λ_marg⁻¹·g_marg (≈ x₀*+odom);
+        // precision = Λ_marg = Ω − ΩΛ₀₀⁻¹Ω, eigenvalue-clamped AFTER the mode is fixed (so clamping only
+        // softens confidence, never moves the anchor). Same pure-quadratic loss 0.5·Δᵀ·precision·Δ,
+        // Δ = wrap(x_front − mu). mu is NOT updated between marginalizations (the FEJ discipline).
+        Eigen::Vector3f mu = Eigen::Vector3f::Zero();            // dropped-state pose (legacy) / frozen marginal mode (Schur)
+        Eigen::Matrix3f precision = Eigen::Matrix3f::Identity(); // Σ^{-1} (legacy Hessian) / Λ_marg (Schur)
+        Eigen::Vector3f grad = Eigen::Vector3f::Zero();          // vestigial (mean form uses no linear term)
         bool valid = false;
     };
 
@@ -751,8 +779,12 @@ private:
 
        /// Slide if full, append new slot.  Returns true if window was slid.
        /// mu_quality_threshold: only update boundary_prior.mu from the dropped slot if its
-       /// sdf_mse_final is below this value (Solution C).
-       bool append(WindowSlot slot, int max_window_size, float mu_quality_threshold = std::numeric_limits<float>::max());
+       /// sdf_mse_final is below this value (Solution C — legacy path only).
+       /// fej_schur: when true, do NOT touch boundary_prior here — marginalize_oldest() (called
+       /// BEFORE append) has already folded the dropped slot into the FEJ+Schur prior.
+       bool append(WindowSlot slot, int max_window_size,
+                   float mu_quality_threshold = std::numeric_limits<float>::max(),
+                   bool fej_schur = false);
 
        /// Subsample lidar in all slots except the newest.
        void subsample_old_slots(int max_pts_per_slot);
@@ -777,9 +809,16 @@ private:
        LossBreakdown compute_rfe_loss_breakdown(const Model& model, const Params& params,
                                                  torch::Device device) const;
 
-       /// Recompute boundary prior Hessian from oldest surviving slot.
+       /// Recompute boundary prior Hessian from oldest surviving slot (LEGACY path).
        void recompute_boundary_prior(const Model& model, const Params& params,
                                       torch::Device device);
+
+       /// FEJ + Schur marginalization (boundary_fej_schur path). Call BEFORE append() pops, while
+       /// both the dropping slot (window.front() = x₀) and its blanket (window[1] = x₁) are live.
+       /// Forms the exact Schur complement of x₀ over x₁ from {previous marginal on x₀, x₀'s obs
+       /// factor (soft quality-weighted), x₀↔x₁ motion factor}, and stores a FEJ-frozen prior on x₁.
+       /// No-op unless the window is full (>= max_window_size) with size > 1.
+       void marginalize_oldest(const Model& model, const Params& params, torch::Device device);
    };
    WindowManager window_mgr_;
 

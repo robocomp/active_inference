@@ -101,7 +101,7 @@ MinTrackingSteps       = 5     # Warm-up tras reset: 5 frames (default 20).
                                 # tras cada recovery antes de que early exit
                                 # pudiera actuar. Con 5 se alcanza steady-state
                                 # en cuanto la ventana está llena.
-RotationSdfCoupling    = 0.0   # VALIDATION 07-15: rot_boost OFF to test marginalization-prior poisoning ratchet (was 0.5). Restore to 0.5 after test.
+RotationSdfCoupling    = 0.5   # restored to original after rot_boost=0 validation (07-15). FEJ+Schur now handles turn poisoning without this crutch.
 
 # ── 180° symmetry-flip guard (harden against spurious flips) ───────────────────
 # The optimizer periodically tests whether rotating the robot 180° fits the room
@@ -168,9 +168,15 @@ BoundaryQualityGate    = true  # Suprime prior de frontera si frame anterior fue
 # (desplazamiento forzado, obstáculo persistente).
 # B: si sdf_mse_final del slot > HessianQualityThreshold → Hessiana solo cinemática.
 # C: si sdf_mse_final del slot > MuQualityThreshold → mu no se actualiza.
-BoundaryHessianQualityThreshold = 0.06   # m — umbral para incluir H_obs en Hessiana
-BoundaryMuQualityThreshold      = 0.10   # m — umbral para actualizar mu del prior
+BoundaryHessianQualityThreshold = 0.06   # m — umbral para incluir H_obs en Hessiana (LEGACY path)
+BoundaryMuQualityThreshold      = 0.10   # m — umbral para actualizar mu del prior (LEGACY path)
 EigenvalueClampBoundaryMax      = 500.0  # techo autovalores precisión (evita over-confidence)
+# FEJ + Schur marginalization boundary prior (replaces the legacy rough prior + its hard quality
+# gates above). ON = exact Schur complement of the dropped slot folded into a First-Estimates-
+# Jacobian-frozen prior on the survivor (no re-linearization → no loss_boundary poisoning ratchet).
+# Default OFF for A/B against the legacy path. See room-fast-rotation-track-lag memory (2026-07-15).
+BoundaryFejSchur      = true   # VALIDATION 07-15: ON to test FEJ+Schur vs the loss_boundary ratchet (rot_boost restored to 0.5). Set false for legacy A/B.
+BoundaryQualitySigma  = 0.10   # m — σ_q for the continuous obs-quality weight w=1/(1+(sdf/σ_q)²)
 
 # ── Recovery ──────────────────────────────────────────────────────────────────
 RecoveryLossThreshold    = 0.45  # sqrt(sdf_mse) > umbral → frame malo (m).
@@ -201,7 +207,7 @@ CmdNoiseBase    = 0.05  # Ruido base translacional del comando (m)
 OdomNoiseTrans  = 0.08  # Fracción de ruido translacional de odometría
 OdomNoiseRot    = 0.04  # Fracción de ruido rotacional de odometría
 OdomNoiseBase   = 0.01  # Ruido base translacional de odometría (m)
-EncoderRotSlipK = 0.05  # Incertidumbre extra por slip: (k·|ω|)² (rad/rad·s⁻¹)
+EncoderRotSlipK = 0.25  # A/B 07-16: raised 0.05→0.25 to loosen rotation precision ∝ angular SPEED so the FEJ marginal prior stops fighting the SDF during fast turns (|ω|>0.6 sdf 0.22→?). Restore 0.05 after test.
 StationaryMotionThreshold = 0.02  # FIX 1: de 0.001 a 0.02 m. Cuando el robot
                                    # está parado, position_std = este valor y
                                    # cov(0,0) = (0.02)² = 4e-4 m². El valor
@@ -221,7 +227,7 @@ StationaryMotionThreshold = 0.02  # FIX 1: de 0.001 a 0.02 m. Cuando el robot
 #   MotionLearnMinOmega   — min |ω| (rad/s) for slip-k sample to be used
 #   MotionLearnMinFrames  — warmup: static params used until this many quality
 #                           frames have been accumulated (default 50 ≈ 10 s @ 5 Hz)
-LearnMotionModel            = true    # enabled; disable to fall back to static params
+LearnMotionModel            = false   # A/B 07-16: OFF so static EncoderRotSlipK=0.25 is authoritative (learned slip_k would otherwise override it, and it's gated off during the poisoned fast turns). Restore true after test.
 MotionLearnAlpha            = 0.05    # slip-k and trans-noise EMA rate
 MotionLearnBeta             = 0.02    # bias EMA rate
 MotionLearnMinOmega         = 0.05    # rad/s — min angular speed per slot to update slip-k

@@ -1689,8 +1689,16 @@ namespace rc
             new_slot.motion_prec_tensor = prec_cpu.to(get_device());
         }
 
+        // FEJ+Schur: marginalize the dropping slot BEFORE append() pops it, while both x₀ (front)
+        // and its Markov blanket x₁ (window[1]) are still live at their converged linearization
+        // points. append() then just pops (fej_schur=true suppresses the legacy mu re-anchoring),
+        // and the post-optimization recompute_boundary_prior() below is skipped.
+        if (params.boundary_fej_schur)
+            window_mgr_.marginalize_oldest(*model_, params, get_device());
+
         const bool window_slid = window_mgr_.append(std::move(new_slot), params.rfe_window_size,
-                                                     params.boundary_mu_quality_threshold);
+                                                     params.boundary_mu_quality_threshold,
+                                                     params.boundary_fej_schur);
         window_mgr_.subsample_old_slots(params.rfe_max_lidar_per_old_slot);
 
         // ===== CORNER DETECTION (optional, controlled by EnableCornerTracking) =====
@@ -1953,7 +1961,10 @@ namespace rc
         }
 
         // ===== FINALIZE =====
-        if (window_slid && window_mgr_.size() > 0)
+        // Legacy boundary prior is recomputed post-optimization from the surviving oldest slot.
+        // FEJ+Schur already folded the dropped slot into a frozen prior BEFORE the slide (above),
+        // so skip this re-anchoring entirely when the flag is on.
+        if (window_slid && window_mgr_.size() > 0 && not params.boundary_fej_schur)
             window_mgr_.recompute_boundary_prior(*model_, params, get_device());
 
         model_->robot_prev_pose = res.robot_pose;
@@ -3447,21 +3458,27 @@ namespace rc
     // =====================================================================
 
     bool RoomConcept::WindowManager::append(WindowSlot slot, int max_window_size,
-                                             float mu_quality_threshold)
+                                             float mu_quality_threshold, bool fej_schur)
     {
         bool slid = false;
         if (static_cast<int>(window.size()) >= max_window_size)
         {
-            auto pose_cpu = window.front().pose.detach().to(torch::kCPU);
-            auto pose_acc = pose_cpu.accessor<float, 1>();
+            // FEJ+Schur path: marginalize_oldest() (called before this) already folded the dropping
+            // slot into the boundary prior at a FROZEN linearization point. Touching mu here would be
+            // exactly the non-FEJ re-anchoring we are removing — so just pop.
+            if (not fej_schur)
+            {
+                auto pose_cpu = window.front().pose.detach().to(torch::kCPU);
+                auto pose_acc = pose_cpu.accessor<float, 1>();
 
-            // Solution C: only update boundary mu if the dropped slot had acceptable
-            // localization quality. If the slot was confused (displacement, obstacle),
-            // keep the previous mu so the prior continues anchoring to the last good pose.
-            const bool slot_is_good = (window.front().sdf_mse_final < mu_quality_threshold)
-                                      || !boundary_prior.valid;
-            if (slot_is_good)
-                boundary_prior.mu = Eigen::Vector3f(pose_acc[0], pose_acc[1], pose_acc[2]);
+                // Solution C: only update boundary mu if the dropped slot had acceptable
+                // localization quality. If the slot was confused (displacement, obstacle),
+                // keep the previous mu so the prior continues anchoring to the last good pose.
+                const bool slot_is_good = (window.front().sdf_mse_final < mu_quality_threshold)
+                                          || !boundary_prior.valid;
+                if (slot_is_good)
+                    boundary_prior.mu = Eigen::Vector3f(pose_acc[0], pose_acc[1], pose_acc[2]);
+            }
 
             window.pop_front();
             slid = true;
@@ -3523,11 +3540,15 @@ namespace rc
                 for (int j = 0; j < 3; j++)
                     prec_data[i][j] = boundary_prior.precision(i, j);
 
+            // Δ = wrap(x_front − mu). For FEJ+Schur, mu is the FROZEN linearization point; for the
+            // legacy path, mu is the dropped-slot pose. Same quadratic core either way.
             auto raw_diff = oldest_pose - mu;
             auto angle_diff = raw_diff.index({2});
             auto wrapped_diff = torch::cat({raw_diff.index({torch::indexing::Slice(0, 2)}),
                                              torch::atan2(torch::sin(angle_diff), torch::cos(angle_diff)).unsqueeze(0)});
             auto diff = wrapped_diff.unsqueeze(1);
+            // Both paths use the same pure-quadratic form; FEJ+Schur differs only in how mu/precision
+            // are computed (marginalize_oldest → frozen marginal mode + Schur precision).
             auto boundary_loss = boundary_weight *
                 0.5f * torch::matmul(diff.t(), torch::matmul(prec_data, diff)).squeeze();
             total_loss = total_loss + boundary_loss;
@@ -3835,6 +3856,134 @@ namespace rc
 
         boundary_prior.precision = H;
         boundary_prior.valid = true;
+    }
+
+    // =====================================================================
+    //  FEJ + Schur marginalization of the dropping slot (boundary_fej_schur)
+    //
+    //  Called BEFORE append() pops, with x₀ = window.front() (dropping) and
+    //  x₁ = window[1] (its Markov blanket via the motion factor). Forms the exact
+    //  Schur complement of x₀ over x₁ from the factors touching x₀ — the previous
+    //  marginal prior on x₀, x₀'s (soft quality-weighted) obs factor, and the
+    //  x₀↔x₁ motion factor — and stores a First-Estimates-Jacobian-frozen prior on x₁.
+    //
+    //     Λ₀₀ = Λ_prev + w₀·H_obs(x₀*) + Ω     Λ₀₁ = Λ₁₀ = −Ω     Λ₁₁ = Ω
+    //     g₀  = Λ_prev·Δ_prev + g_prev + w₀·g_obs − Ω·r          g₁ = +Ω·r
+    //     Λ_marg = Ω − Ω Λ₀₀⁻¹ Ω               g_marg = Ω·r + Ω Λ₀₀⁻¹ g₀
+    //
+    //  All Jacobians are evaluated at the CURRENT (converged-from-previous-frame)
+    //  estimates x₀*, x₁* and then frozen — that fixed linearization point is what
+    //  prevents the "erroneous information gain" ratchet (loss_boundary 0→559).
+    // =====================================================================
+    void RoomConcept::WindowManager::marginalize_oldest(
+        const Model& model, const Params& params, torch::Device device)
+    {
+        // Only meaningful when a slide is imminent (window full) and there IS a blanket slot.
+        if (static_cast<int>(window.size()) < params.rfe_window_size || window.size() < 2)
+            return;
+
+        const auto& x0slot = window.front();   // dropping
+        const auto& x1slot = window[1];        // Markov blanket (motion-linked survivor)
+
+        auto to_eig3 = [](const torch::Tensor& t) {
+            auto c = t.detach().to(torch::kCPU).contiguous();
+            auto a = c.accessor<float, 1>();
+            return Eigen::Vector3f(a[0], a[1], a[2]);
+        };
+        auto to_eig33 = [](const torch::Tensor& t) {
+            auto c = t.detach().to(torch::kCPU).contiguous();
+            auto a = c.accessor<float, 2>();
+            Eigen::Matrix3f M;
+            for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) M(i, j) = a[i][j];
+            return M;
+        };
+        auto wrap = [](float a) { return std::atan2(std::sin(a), std::cos(a)); };
+
+        const Eigen::Vector3f x0 = to_eig3(x0slot.pose);   // FEJ linearization points
+        const Eigen::Vector3f x1 = to_eig3(x1slot.pose);
+
+        // ── Motion factor x₀↔x₁ (precision Ω, residual r), linearized at (x₀*, x₁*) ──
+        // odom_delta_tensor of x₁ is the odometry delta from x₀ to x₁; J₀ = −I, J₁ = +I.
+        const Eigen::Matrix3f Omega = to_eig33(x1slot.motion_prec_tensor);
+        const Eigen::Vector3f odom = to_eig3(x1slot.odom_delta_tensor);
+        Eigen::Vector3f r = (x1 - x0) - odom;
+        r[2] = wrap(r[2]);
+
+        // ── Dropped slot's obs factor: H_obs, g_obs at x₀*, softly quality-weighted ──
+        // w₀ = 1/(1+(sdf/σ_q)²): a poorly-fit dropped slot injects weak, high-covariance
+        // information that cannot anchor the survivor (continuous replacement of the hard gate).
+        Eigen::Matrix3f H_obs = Eigen::Matrix3f::Zero();
+        Eigen::Vector3f g_obs = Eigen::Vector3f::Zero();
+        {
+            const float sq = std::max(1e-6f, params.boundary_quality_sigma);
+            const float ratio = x0slot.sdf_mse_final / sq;
+            const float w0 = 1.0f / (1.0f + ratio * ratio);
+
+            auto pose_h = x0slot.pose.clone().detach().requires_grad_(true);
+            auto pose_xy    = pose_h.index({torch::indexing::Slice(0, 2)});
+            auto pose_theta = pose_h.index({torch::indexing::Slice(2, 3)});
+            auto obs = compute_observation_loss(model, params, x0slot.lidar_points, pose_xy, pose_theta);
+
+            // First-order gradient (graph retained/created so the Hessian pass can reuse it).
+            auto grad = torch::autograd::grad({obs}, {pose_h}, {}, /*retain*/true, /*create*/true)[0];
+            g_obs = w0 * to_eig3(grad);
+            for (int i = 0; i < 3; ++i)
+            {
+                auto row = torch::autograd::grad({grad.index({i})}, {pose_h}, {},
+                                                 /*retain*/(i < 2), /*create*/false)[0];
+                auto rc = row.to(torch::kCPU); auto ra = rc.accessor<float, 1>();
+                for (int j = 0; j < 3; ++j) H_obs(i, j) = w0 * ra[j];
+            }
+            H_obs = 0.5f * (H_obs + H_obs.transpose().eval());
+        }
+
+        // ── Assemble the joint linear system over (x₀, x₁) from factors touching x₀ ──
+        Eigen::Matrix3f L00 = H_obs + Omega;     // + Λ_prev below
+        Eigen::Matrix3f L01 = -Omega;            // L10 = L01ᵀ = −Ω (symmetric)
+        Eigen::Matrix3f L11 = Omega;
+        Eigen::Vector3f g0  = g_obs - Omega * r; // motion: J₀ᵀΩr = −Ωr
+        Eigen::Vector3f g1  =         Omega * r; // motion: J₁ᵀΩr = +Ωr
+
+        // Previous marginal prior on x₀ (FEJ form 0.5·ΔᵀΛΔ + gᵀΔ, Δ = wrap(x₀* − mu_prev)).
+        if (boundary_prior.valid)
+        {
+            Eigen::Vector3f dprev = x0 - boundary_prior.mu;
+            dprev[2] = wrap(dprev[2]);
+            L00 += boundary_prior.precision;
+            g0  += boundary_prior.precision * dprev + boundary_prior.grad;
+        }
+
+        // ── Schur complement: eliminate x₀ ──
+        const Eigen::Matrix3f L00inv =
+            L00.ldlt().solve(Eigen::Matrix3f::Identity());
+        Eigen::Matrix3f Lmarg = L11 - L01.transpose() * L00inv * L01;  // Ω − ΩL₀₀⁻¹Ω
+        Eigen::Vector3f gmarg = g1 - L01.transpose() * L00inv * g0;    // Ωr + ΩL₀₀⁻¹g₀
+
+        // ── Convert to (mean, precision) form BEFORE clamping ──
+        // The marginal's mode is  mean = x₁* − Λ_marg⁻¹·g_marg  (≈ x₀*+odom, the odometry-propagated
+        // anchor). We store the prior as a pure quadratic 0.5·(x−mean)ᵀΛ(x−mean) rather than a frozen
+        // point + linear term, because the eigenvalue clamp below scales Λ: clamping Λ while KEEPING
+        // g_marg would move the effective mode by Λ_clamped⁻¹·g_marg (with Ω~1e4 that is a ~0.2 m
+        // phantom anchor that drags the window off the walls — the bug seen 2026-07-16). Computing the
+        // mean from the UNCLAMPED Λ_marg fixes the mode; clamping then only softens the confidence.
+        const Eigen::Vector3f mean = x1 - Lmarg.ldlt().solve(gmarg);
+
+        // Eigenvalue clamp (floor + ceiling) for numerical safety, as in the legacy path.
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix3f> eig(Lmarg);
+        Eigen::Vector3f evals = eig.eigenvalues()
+            .cwiseMax(params.eigenvalue_clamp_boundary)
+            .cwiseMin(params.eigenvalue_clamp_boundary_max);
+        Lmarg = eig.eigenvectors() * evals.asDiagonal() * eig.eigenvectors().transpose();
+
+        Eigen::Vector3f mu = mean;
+        mu[2] = wrap(mu[2]);
+        if (not Lmarg.allFinite() or not mu.allFinite())
+            return;   // keep the previous prior rather than poison with NaNs
+
+        boundary_prior.mu        = mu;                       // FROZEN marginal mode (FEJ anchor)
+        boundary_prior.precision = Lmarg;
+        boundary_prior.grad      = Eigen::Vector3f::Zero();  // mean form ⇒ no separate linear term
+        boundary_prior.valid     = true;
     }
 
 } // namespace rc
