@@ -175,6 +175,10 @@ EigenvalueClampBoundaryMax      = 500.0  # techo autovalores precisión (evita o
 # gates above). ON = exact Schur complement of the dropped slot folded into a First-Estimates-
 # Jacobian-frozen prior on the survivor (no re-linearization → no loss_boundary poisoning ratchet).
 # Default OFF for A/B against the legacy path. See room-fast-rotation-track-lag memory (2026-07-15).
+# PyTorch intra-op CPU threads for the window solve. Was hard-coded 5 (= the 4-core budget). The
+# solve is tiny (3 DOF × ~5 slots × ~400 pts) so parallelism mostly buys dispatch overhead. Lower
+# to shed cores; watch t_adam_ms in optimizer_timing.csv. Try 1 vs 2.
+TorchNumThreads       = 1
 BoundaryFejSchur      = true   # VALIDATION 07-15: ON to test FEJ+Schur vs the loss_boundary ratchet (rot_boost restored to 0.5). Set false for legacy A/B.
 BoundaryQualitySigma  = 0.10   # m — σ_q for the continuous obs-quality weight w=1/(1+(sdf/σ_q)²)
 

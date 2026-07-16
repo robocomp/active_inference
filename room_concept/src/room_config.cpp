@@ -111,6 +111,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.BoundaryHessianQualityThreshold", room_concept.params.boundary_hessian_quality_threshold);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.BoundaryMuQualityThreshold", room_concept.params.boundary_mu_quality_threshold);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.EigenvalueClampBoundaryMax", room_concept.params.eigenvalue_clamp_boundary_max);
+    rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomConcept.TorchNumThreads", room_concept.params.torch_num_threads);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.BoundaryFejSchur", room_concept.params.boundary_fej_schur);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.BoundaryQualitySigma", room_concept.params.boundary_quality_sigma);
 

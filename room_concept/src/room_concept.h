@@ -349,9 +349,12 @@ public:
         float object_anchor_early_exit_sigma = 2.0f;   // prediction early-exit gate: whitened anchor-residual
                                                        // σ-cutoff above which the optimizer is forced to run
 
-        // Torch threading configuration
-        int torch_num_threads = 5;          // Limit CPU threads to avoid overload
-        int torch_num_interop_threads = 2;  // Limit inter-op threads for better latency
+        // Torch threading configuration. The window solve is a tiny problem (3 DOF × ~5 slots ×
+        // ~400 pts), so intra-op parallelism mostly buys thread-dispatch overhead, not speed, while
+        // pinning that many cores. Applied in start() (set_num_threads is runtime-safe), config key
+        // RoomConcept.TorchNumThreads. Lower this to shed CPU cores; A/B against t_adam_ms.
+        int torch_num_threads = 2;          // intra-op CPU threads (was hard-coded 5 = the 4-core budget)
+        int torch_num_interop_threads = 2;  // inter-op threads (set once at static init; not runtime-tunable)
 
         // ===== Debug Logging =====
         bool debug_log_enabled = false;      // Write per-frame CSV to tmp/sdf_localizer/log.csv

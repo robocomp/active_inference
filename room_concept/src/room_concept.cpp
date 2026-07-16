@@ -107,10 +107,13 @@ namespace rc
     //  Threading: start / stop / run / get_last_result / push_command
     // =====================================================================
 
-    // Static initialization: limit PyTorch threads to avoid CPU overload
+    // Static initialization: limit PyTorch threads to avoid CPU overload. These run before config
+    // loads, so they are conservative defaults; start() re-applies the config intra-op count once
+    // params are live. (set_num_interop_threads must be called before the inter-op pool is first
+    // used, so it stays here and is NOT runtime-tunable.)
     static bool torch_threads_initialized = []() {
-        torch::set_num_threads(5);
-        torch::set_num_interop_threads(2);
+        torch::set_num_threads(2);
+        torch::set_num_interop_threads(1);
         return true;
     }();
 
@@ -128,6 +131,12 @@ namespace rc
             std::lock_guard lock(wake_mutex_);
             latest_notified_lidar_ts_ = std::numeric_limits<std::int64_t>::min();
         }
+
+        // Apply the configured intra-op thread count now that params are loaded (the static
+        // initializer used a conservative default before config was available). set_num_threads is
+        // safe to call at runtime; this is the main lever for room_concept's CPU-core footprint.
+        if (params.torch_num_threads > 0)
+            torch::set_num_threads(params.torch_num_threads);
 
         // If CUDA is requested, initialize the CUDA context HERE on the calling thread
         // (main/Qt thread) before spawning the localization thread.
