@@ -68,7 +68,6 @@ struct TableConfig
     // Anisotropic per-point R (PRECISION_AS_INFORMATION.md Stage 1). Replaces the scalar per-point variance with
     // the deprojection noise projected on the SDF normal → a grazing view carries ~0 yaw information by
     // construction (no obliquity/range yaw gains needed). The 4 constants are PHYSICAL (ZED sensor), not tuning.
-    bool  anisotropic_r          = false;
     float pixel_sigma_over_f     = 0.0015f;  // σ_px/f → transverse std per m of range
     float depth_sigma0_m         = 0.006f;   // depth std floor (m)
     float depth_sigma_range_coef = 0.004f;   // depth std growth (m per m² of range)
@@ -193,7 +192,6 @@ struct TableConfig
     // ABSENCE. So by default the LiDAR carve contributes OCCUPANCY only (holds L up / confirms presence) and
     // NEVER drives removal; removal is the camera silhouette's job (predicted-visible-but-absent, which HOLDs
     // when out of FoV). Set true to ALSO trust LiDAR free-space (only where the slab is a faithful solid model).
-    bool  existence_lidar_absence = false;
     // Leg OCCUPANCY: also carve the 4 leg volumes [0, H−t] for occupancy (never free — thin legs, and the hollow
     // space between them must not vote absence). Robustifies confirmation when the thin top slab is at an awkward
     // height for the LiDAR rings (tall legs are far likelier to be struck). Occupancy-only ⇒ cannot false-remove.
@@ -232,8 +230,6 @@ struct TableConfig
     float birth_fusion_mass_ref = 8.0f;   // residual mass at which corroboration is half-saturated (m/(m+ref))
     float birth_fusion_radius_m = 0.50f;  // window (m) for the residual-mass sample under the detection
     int   tracker_death_frames      = 300;    // frames an instance may go unobserved before retirement (large)
-    bool  tracker_death_enabled     = false;  // OFF: a table is rigid, persistent furniture — never retired by
-                                              // a miss timer. Removal is by the MERGE operator only.
     float tracker_birth_min_sep_m   = 0.60f;  // a birth must be ≥ this (m) from every existing table
     // Physical exclusion: collapse two instances whose oriented footprints overlap by ≥ this fraction of
     // the SMALLER footprint (two tables cannot share space). 0 disables the merge.
@@ -242,7 +238,6 @@ struct TableConfig
     float tracker_birth_width_m  = 1.0f;
     float tracker_birth_depth_m  = 0.6f;
     float tracker_birth_height_m = 0.75f;
-    bool  tracker_nll_cost       = false;     // association cost = ½(m²+ln|S|) NLL (vs raw m²); see InstanceTracker
 
     // ── Ricoh-360 attention gate ──────────────────────────────────────────────────────────────────
     // A ricoh (depth_var>0) 360-RGB YOLO detection is bearing-only: it never births or fits, it only raises

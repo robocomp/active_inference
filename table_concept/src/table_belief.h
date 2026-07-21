@@ -93,11 +93,11 @@ struct TableBeliefParams
     // ── Anisotropic per-point measurement noise (PRECISION_AS_INFORMATION.md Stage 1) ──────────────────
     // A deprojected mask point's position noise is NOT isotropic: pixel noise → transverse (⊥ ray) std =
     // range·(σ_px/f); depth noise → along-ray std = σ_d(range) = depth_sigma0 + depth_sigma_range_coef·range².
-    // fill_anisotropic_R projects this 3×3 onto the SDF surface normal n: R_i = nᵀΣᵢn + σ_model². At a grazing
-    // view a yaw-carrying edge point (n ∥ the horizontal ray) gets ≈σ_d² → almost no yaw information, so an
-    // uninformative view CANNOT rotate the box — with NO obliquity/range yaw gains. These are PHYSICAL sensor
-    // constants (ZED datasheet), measurable, not tuned. anisotropic_r=false ⇒ baseline scalar-R path unchanged.
-    bool  anisotropic_r          = false;
+    // These are PHYSICAL sensor constants (ZED datasheet), measurable, not tuned. They feed the weighted
+    // footprint residual (accumulate_footprint) and the tilt→yaw common mode (tilt_yaw_common_mode).
+    // The standalone per-point variant (Stage 1 "AnisotropicR") was REMOVED 2026-07-21: measured alone on the
+    // fixed engine it had NO effect on the far-range rotation (err 0.0718 vs 0.0727 control). Per-point noise
+    // reshaping cannot fix a MEAN BIAS; only marginalising the per-frame SHARED nuisance can. See TABLE.md.
     float pixel_sigma_over_f     = 0.0015f;  // σ_px / focal_px → transverse std per metre of range
     float depth_sigma0_m         = 0.006f;   // depth std floor (m)
     float depth_sigma_range_coef = 0.004f;   // depth std growth (m per m² of range): σ_d = σ0 + coef·range²
@@ -117,6 +117,7 @@ struct TableBeliefParams
     float depth_scale_std        = 0.010f;   // shared per-frame depth SCALE prior std (frac) — extent nuisance (future)
     float clutter_frac    = 0.10f;   // ε: prior weight of the uniform clutter component
     float clutter_scale_m = 0.12f;   // a point further than ~this from every surface is likely clutter
+
 
     // Coverage / traction factor: grow-only extent pull from clutter-ceded on-plane mask points. 0 = OFF.
     //
@@ -192,8 +193,8 @@ struct TableFrame
     std::vector<Eigen::Vector3f> points;
     std::vector<float>           R;        // per-point measurement variance (m²); empty ⇒ σ_base² for all
     // Camera origin (room frame) of THIS frame's mask points, for the anisotropic deprojection-noise model
-    // (PRECISION_AS_INFORMATION.md Stage 1). Each point's ray is p−cam_origin; its position noise is anisotropic
-    // (transverse ∝ range·σ_px/f, along-ray ∝ σ_d(range)). fill_anisotropic_R projects that onto the SDF normal
+    // Each point's ray is p−cam_origin; its position noise is anisotropic
+    // (transverse ∝ range·σ_px/f, along-ray ∝ σ_d(range)), used by the footprint residual
     // → a grazing-view edge point (normal ∥ the near-horizontal ray) gets ~σ_d² (huge) → ~0 yaw information,
     // COMPUTED not tuned. has_rays=false ⇒ the scalar-R path (baseline) is used.
     Eigen::Vector3f              cam_origin = Eigen::Vector3f::Zero();
@@ -287,6 +288,7 @@ public:
     // a table's mask stream is stale/dead so Σ grows on the agent's clock instead of freezing (see TABLE).
     void  inflate_for_age(float dt_s, float dt_nominal_s)
     { ai::inflate_for_age<N>(*this, Sigma_, state_, prior_mean_, dt_s, dt_nominal_s); }
+
     Eigen::Matrix<float, 7, 7> predicted_information(const std::vector<Eigen::Vector3f>& pts, float R) const
     { return ai::predicted_information<N>(*this, state_, pts, R); }
 
@@ -299,7 +301,6 @@ public:
     // at the current state, where nᵢ is the SDF surface normal (spatial gradient) and Σᵢ the deprojection noise
     // pushforward from frame.cam_origin. No-op unless frame.has_rays. extra_iso adds an isotropic floor (e.g. the
     // frame's ego-motion variance) preserved from the scalar path. See PRECISION_AS_INFORMATION.md Stage 1.
-    void fill_anisotropic_R(TableFrame& frame, float extra_iso = 0.0f) const;
     float sdf_prim(const Eigen::Vector3f& p, const TableBeliefState& s, int prim) const;
     Eigen::Matrix<float, 7, 1> sdf_jacobian(const Eigen::Vector3f& p, const TableBeliefState& s, int prim) const;
     // Soft responsibilities: [top, leg0..3, clutter] (sum = 1) at measurement variance R.
@@ -361,6 +362,11 @@ public:
     float dbg_moment_dyaw()      const { return dbg_moment_dyaw_; }
     float dbg_moment_ext_major() const { return dbg_moment_ext_major_; }
     float dbg_moment_ext_minor() const { return dbg_moment_ext_minor_; }
+    // RAW measured principal-axis angle of the tabletop footprint (room frame, rad) BEFORE the symmetry-
+    // consistent (major,minor)->(w,h) assignment. This is the un-massaged statistic the mask actually
+    // supplies, so it says whether a far/foreshortened view is reporting the box's true axis or its DIAGONAL.
+    float dbg_moment_phi()       const { return dbg_moment_phi_; }
+    int   dbg_moment_pts()       const { return dbg_moment_pts_; }
 
     // 2D footprint second-moment of the points whose z falls in [z_lo, z_hi] (the tabletop band). Shared by
     // the per-frame moment factor (accumulate_extra) and the birth seed (the fitter's lazy init) so both use
@@ -396,6 +402,7 @@ private:
     float                      dbg_moment_dyaw_      = 0.0f;  // last moment requested yaw move myaw−yaw (rad)
     float                      dbg_moment_ext_major_ = 0.0f;  // last observed footprint major extent (m)
     float                      dbg_moment_ext_minor_ = 0.0f;  // last observed footprint minor extent (m)
+    float                      dbg_moment_phi_       = 0.0f;  // last RAW measured principal-axis angle (rad, room)
 };
 
 }  // namespace rc

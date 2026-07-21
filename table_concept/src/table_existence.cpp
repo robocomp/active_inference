@@ -161,7 +161,7 @@ void TableExistence::update_and_remove(TableFitter& fitter, TableLidarIngestor* 
                 // unreliable (beams under the top surface read as gone), so it must not drive removal — only
                 // the camera silhouette does. Suppress free unless it was observed (hollow guard) OR the
                 // ExistenceLidarAbsence override is on. Occupancy still counts, holding L up.
-                const bool suppress_free = observed or not cfg_.existence_lidar_absence;
+                const bool suppress_free = true;   // LiDAR absence-evidence REFUTED on live data (A/B 2026-07-12)
                 inst.dbg_ex_lidar_free_eff = suppress_free ? 0.0f : ev.e_free;
                 ev.log_odds_delta = rc::exist::hollow_guarded_delta(ev, suppress_free, sm);
                 inst.existence.integrate(ev);

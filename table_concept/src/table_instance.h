@@ -162,6 +162,14 @@ struct TableInstance
     float fe_surprise = 0.0f;
     bool  dbg_gated   = false;    // truncation-gated (predict-only, no geometric update) this frame
 
+    // Provenance of the mask packet this fit consumed (instrumentation; NO effect on the fit). The CSV showed
+    // long runs of fits whose GEOMETRY was bit-identical (npts/range pinned) while the belief ratcheted — i.e.
+    // the same capture re-integrated as independent evidence. These two columns say WHICH identity signal
+    // moved: fid = mask_frame_id (a publish counter, advances on every republish), ts = mask_timestamp_ms
+    // (the capture stamp; absent ⇒ 0 ⇒ the capture-stamp half of the freshness gate is disabled).
+    int           dbg_pkt_frame_id = -1;
+    std::uint64_t dbg_pkt_ts_ms    = 0;
+
     // ── Rogue-mask yaw diagnostics (instrumentation; NO effect on the fit) ─────────────────────────
     // Captured per fresh cycle to CATCH the abrupt-rotation frames (robot turning / entering-leaving FoV /
     // passing by, where an in-frame-but-partial mask snaps yaw). yaw at cycle entry + the per-channel yaw split,

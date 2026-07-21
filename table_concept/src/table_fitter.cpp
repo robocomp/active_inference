@@ -267,6 +267,8 @@ TableFitter::TableObservation TableFitter::observe_slice(TableInstance& inst, in
     // A slice assigned to this table ⇒ detection is alive; latch its per-slice R inputs.
     inst.frames_since_detection = 0;
     inst.last_mask_confidence   = slice.confidence;
+    inst.dbg_pkt_frame_id       = masks_packet.frame_id;       // provenance of THIS fit (instrumentation)
+    inst.dbg_pkt_ts_ms          = masks_packet.timestamp_ms;
     inst.last_mask_timestamp_ms = masks_packet.timestamp_ms;   // chain-cov pinning (Part B)
     // Ego-motion capture-corruption + depth uncertainty for THIS mask (AI2 obs precision / bias gate; 0 if the
     // producer predates the feature, or for a dense zed slice). See MASK_MOTION_CORRUPTION.md / depth_projection.
@@ -384,7 +386,6 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
         p.clutter_frac    = cfg_.ai2_clutter_frac;
         p.clutter_scale_m = cfg_.ai2_clutter_scale_m;
         p.prior_size_std  = cfg_.ai2_prior_size_std;
-        p.anisotropic_r          = cfg_.anisotropic_r;   // Stage 1: per-point deprojection-noise R (sensor consts)
         p.pixel_sigma_over_f     = cfg_.pixel_sigma_over_f;
         p.depth_sigma0_m         = cfg_.depth_sigma0_m;
         p.depth_sigma_range_coef = cfg_.depth_sigma_range_coef;
@@ -498,7 +499,7 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
         frame.points.insert(frame.points.end(), observation.residual_pts.begin(), observation.residual_pts.end());
         frame.R.assign(frame.points.size(), R);
         // Ray geometry (needed by the footprint residual + the anisotropic R later).
-        if ((cfg_.anisotropic_r or cfg_.footprint_residual) and have_cam)
+        if (cfg_.footprint_residual and have_cam)
         { frame.cam_origin = cam_origin_room; frame.has_rays = true; }
         // Camera-frame azimuth per point (about the optical axis; ZED frame x-right, y-depth) for the N=7 depth-
         // tilt STATE — computed from the TRUE extrinsic, NOT the belief's drifting table-centre, so a persistent
@@ -559,8 +560,6 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
         // subsume it into the nuisance Jacobian). No-op unless the flag is on and we know the camera origin — then
         // a grazing view's yaw-carrying points get huge R → the per-point GN cannot rotate a converged table,
         // WITHOUT the obliquity/range yaw gains above (which this is designed to make redundant).
-        if (cfg_.anisotropic_r and frame.has_rays)   // cam_origin/has_rays set above with the chain-cov block
-            inst.ai2_belief.fill_anisotropic_R(frame, std::max(0.0f, inst.last_motion_var));
         // (the footprint residual runs inside ai2_belief.update via accumulate_footprint; its tilt→yaw common-mode
         //  was folded into frame.chain_cov_yaw above so the engine Woodbury caps the total yaw information)
 
@@ -707,10 +706,11 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
     {
         ai2_csv_.open(cfg_.ai2_csv_path, std::ios::out | std::ios::trunc);
         if (not ai2_csv_.is_open()) { cfg_.ai2_csv_path.clear(); return; }
-        ai2_csv_ << "cycle,node,npts,gated,energy,fe_baseline,fe_surprise,R,motion_var,depth_var,motion_dotd,trunc_frac,range,"
+        ai2_csv_ << "cycle,node,pkt_fid,pkt_ts,npts,gated,energy,fe_baseline,fe_surprise,R,motion_var,depth_var,motion_dotd,trunc_frac,range,"
                  << "cx,cy,H,w,h,yaw,std_cx,std_cy,std_H,std_w,std_h,std_yaw,"
                  << "std_yaw_within,flip_ev,p_alt,lidar_rays,lidar_raw,lidar_bpearl,lidar_resid_m,lidar_meanz,lidar_topz,lidar_floorz,lidar_cov_ang,"
-                 << "dyaw_points,dyaw_moment,dyaw_flip,obliquity_cos,completeness,moment_aniso,moment_r_yaw,"   // rogue-mask diag
+                 << "dyaw_points,dyaw_moment,dyaw_flip,obliquity_cos,completeness,moment_aniso,moment_r_yaw,"
+                 << "mom_major,mom_minor,mom_phi,mom_pts,"   // RAW footprint statistic (basin diagnosis)   // rogue-mask diag
                  << "ex_L,ex_p,ex_locc,ex_lfree,ex_lfree_eff,ex_ln,ex_socc,ex_sfree,ex_sfree_eff,ex_sndet,ex_streak,"
                  << "ex_pdetect,ex_central,ex_verify,ex_wantsverify\n";   // existence-removal + verification-gate diag
     }
@@ -718,7 +718,9 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
     const auto& S = inst.ai2_belief.covariance();
     const auto sd = [&](int i) { return std::sqrt(std::max(0.0f, S(i, i))); };   // posterior std (m / rad)
     // std_yaw is now the MARGINAL (mode-entropy-inflated) yaw std; std_yaw_within is the within-mode Σ(5,5).
-    ai2_csv_ << inst.processed_cycles << ',' << inst.node_name << ',' << npts << ',' << (gated ? 1 : 0) << ','
+    ai2_csv_ << inst.processed_cycles << ',' << inst.node_name << ','
+             << inst.dbg_pkt_frame_id << ',' << inst.dbg_pkt_ts_ms << ','
+             << npts << ',' << (gated ? 1 : 0) << ','
              << energy << ',' << inst.fe_baseline << ',' << inst.fe_surprise << ','
              << R << ',' << inst.last_motion_var << ',' << inst.last_depth_var << ',' << inst.last_motion_dotd << ','
              << inst.last_trunc_frac << ',' << inst.last_range << ','
@@ -732,6 +734,8 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
              << inst.dbg_dyaw_points << ',' << inst.dbg_dyaw_moment << ',' << inst.dbg_dyaw_flip << ','
              << inst.dbg_obliquity_cos << ',' << inst.dbg_completeness << ','
              << inst.ai2_belief.dbg_moment_aniso() << ',' << inst.ai2_belief.dbg_moment_r_yaw() << ','   // rogue-mask diag
+             << inst.ai2_belief.dbg_moment_ext_major() << ',' << inst.ai2_belief.dbg_moment_ext_minor() << ','
+             << inst.ai2_belief.dbg_moment_phi() << ',' << inst.ai2_belief.dbg_moment_pts() << ','
              << inst.existence.logodds() << ',' << inst.existence.p_exists() << ','
              << inst.dbg_ex_lidar_occ << ',' << inst.dbg_ex_lidar_free << ',' << inst.dbg_ex_lidar_free_eff << ',' << inst.dbg_ex_lidar_n << ','
              << inst.dbg_ex_sil_occ << ',' << inst.dbg_ex_sil_free << ',' << inst.dbg_ex_sil_free_eff << ',' << inst.dbg_ex_sil_ndet << ','

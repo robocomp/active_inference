@@ -65,7 +65,6 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.ai2_gn_iters         = geti("TableModel.AI2GnIters",          4);
     out.ai2_csv_path         = gets("TableModel.AI2CsvPath",          "");
     out.birth_surprise_probe = getb("TableModel.BirthSurpriseProbe",  false);
-    out.anisotropic_r          = getb("TableModel.AnisotropicR",          false);
     out.pixel_sigma_over_f     = getf("TableModel.PixelSigmaOverF",       0.0015f);
     out.depth_sigma0_m         = getf("TableModel.DepthSigma0M",          0.006f);
     out.depth_sigma_range_coef = getf("TableModel.DepthSigmaRangeCoef",   0.004f);
@@ -91,13 +90,11 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.birth_fusion_mass_ref    = getf("Tracker.BirthFusionMassRef",8.0f);
     out.birth_fusion_radius_m    = getf("Tracker.BirthFusionRadiusM",0.50f);
     out.tracker_death_frames     = geti("Tracker.DeathFrames",      300);
-    out.tracker_death_enabled    = getb("Tracker.DeathEnabled",     false);
     out.tracker_birth_min_sep_m  = getf("Tracker.BirthMinSepM",     0.60f);
     out.tracker_merge_overlap    = getf("Tracker.MergeOverlap",     0.05f);
     out.tracker_birth_width_m    = getf("Tracker.BirthWidthM",      1.0f);
     out.tracker_birth_depth_m    = getf("Tracker.BirthDepthM",      0.6f);
     out.tracker_birth_height_m   = getf("Tracker.BirthHeightM",     0.75f);
-    out.tracker_nll_cost         = getb("Tracker.NllCost",          false);
     out.ricoh_attention_conf     = getf("Tracker.RicohAttentionConf", 0.60f);
     out.ricoh_attention_angle_margin_rad = getf("Tracker.RicohAttentionAngleMargin", 0.05f);
     out.ricoh_attention_range_band_m     = getf("Tracker.RicohAttentionRangeBandM",  1.0f);
@@ -137,7 +134,6 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.existence_absence_range_power = getf("TableModel.ExistenceAbsenceRangePower", 2.0f);
     out.existence_verify_surprise     = getf("TableModel.ExistenceVerifySurprise",   20.0f);
     out.existence_verify_gain         = getf("TableModel.ExistenceVerifyGain",       5.0f);
-    out.existence_lidar_absence       = getb("TableModel.ExistenceLidarAbsence", false);
     out.existence_leg_occupancy       = getb("TableModel.ExistenceLegOccupancy", true);
 
     std::print("table_concept: configuration loaded.\n");

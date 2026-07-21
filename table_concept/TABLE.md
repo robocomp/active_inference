@@ -530,6 +530,94 @@ yaw/extent recovery at range, and the moment grow-only guard (partial view holds
 | `Tracker.BirthFrames` / `BirthMinSepM` / `MergeOverlap` | — | birth persistence / anti-dup / merge (§8) |
 | `Tracker.DeathEnabled` / `DeathFrames` | — | timeout retirement (OFF for tables) |
 
+## The static table rotates: two independent bugs (2026-07-21)
+
+Symptom as reported: *"it rotates a static table when seen again from far away or rotating."* It was two
+unrelated faults with the same visible signature. Both were diagnosed from `etc/ai2_log.csv`; the method is
+as reusable as the findings, so it is recorded here for the other concept agents.
+
+### Bug 1 — float32 cancellation in the shared Woodbury saturation (FIXED, affects EVERY concept)
+
+`common/ai_belief/recursive_laplace.h` evaluated the common-mode saturation the way it is derived:
+
+    Ieff = Id - Id*(Id + Scinv).inverse()*Id;
+
+`Id` (raw data information, thousands of points at 1/R each) reaches 1e6-1e7, while `Ieff` saturates at
+`Sc^-1` ~ 1e3. In float32 that subtraction's error EXCEEDS the result, so `Ieff` comes out INDEFINITE
+(measured min eigenvalue -4.03 at real magnitudes; relative error 6.7e-3). `Sigma = (P0+Ieff).inverse()`
+inherits it, Sigma acquires zero/negative variances — "yaw is known exactly" — and the next update teleports
+the state. Near-square footprints land 45/90 deg away and stay.
+
+Fixed by the algebraically identical Woodbury rearrangement (`saturate<N>()`), which approaches the same cap
+from below without ever forming the large difference: relative error 2.7e-8, PD preserved. NOT a threshold,
+NOT a model change — the mathematics is unchanged.
+
+Live, matched viewpoints, guard off: indefinite-Sigma frames 102 -> 0 (range 3.84 m) and 33 -> 0 (1.79 m);
+yaw wander 16.6 -> 3.4 deg. No regression where the bug does not fire (two matched pairs, identical to 3 dp).
+`self_test` PASS for table, bottle AND chair.
+
+Signature to look for in any concept: a `std_*` column that is EXACTLY 0.0. That means Sigma(i,i) <= 0, i.e.
+the covariance has lost positive-definiteness. It is never legitimate.
+
+### Bug 2 — the moment channel becomes CONFIDENT about a foreshortened axis (OPEN)
+
+Independent of Bug 1: it reproduces with a perfectly well-conditioned Sigma (zero indefinite frames).
+
+The fit is correct up to ~2.4 m and wrong past ~2.9 m, with a sharp transition and no graceful degradation:
+
+| range  | npts | belief yaw | belief extent | moment_aniso | moment_r_yaw | verdict |
+|--------|------|-----------|---------------|--------------|--------------|---------|
+| 1.79 m | 7408 | +0.3 deg  | 0.95 x 0.96   | 0.038        | 105          | correct |
+| 2.10 m | 5393 | +0.4 deg  | 0.96 x 0.95   | 0.029        | 212          | correct |
+| 2.42 m | 3592 | -1.2 deg  | 0.97 x 0.95   | -            | -            | correct |
+| 2.89 m | 2334 | -45.2 deg | 1.30 x 0.72   | 0.184        | 6.2          | WRONG   |
+| 3.84 m |  831 | -45.0 deg | 1.27 x 0.67   | 0.160        | 15.4         | WRONG   |
+
+Mechanism. The view is grazing (obliquity ~0.1) and along-ray depth noise grows as
+`sigma_d = 0.006 + 0.004*range^2` (0.019 m at 1.8 m, 0.040 m at 2.9 m). That scatter stretches the tabletop
+cloud ALONG THE VIEWING RAY, manufacturing an elongation whose axis is the ray bearing. The moment channel
+weights yaw by `r_yaw = r_base / aniso^2`, so this SPURIOUS anisotropy is read as genuine information:
+`r_yaw` collapses 20-30x and the channel confidently rotates the box onto the ray. The raw `mom_phi` sits at
+-41..-45 deg at EVERY range including the good ones — what changes with range is not the direction but the
+CONFIDENCE, and past the break the moment outvotes the per-point evidence.
+
+Neither existing protection engages:
+- `1/aniso^2` correctly encodes "near-square => distrust yaw", but has no defence against "a far view makes a
+  square LOOK elongated".
+- The completeness backoff is inert (completeness 0.97-1.16, i.e. >=1, so `cs = gain*(1/c - 1) ~ 0`). It
+  compares observed area to BELIEVED area, so once the belief has been dragged to 1.30 x 0.72 the areas agree.
+  It structurally cannot see foreshortening.
+
+`FootprintResidual` (a1'+a2') attacks exactly this and its header comment predicts it. Measured, alone, on the
+fixed engine, error = Frobenius distance of the footprint 2nd-moment tensor from close-range truth
+(symmetry-invariant, so no fold can flatter it):
+
+| pose            | control          | FootprintResidual |
+|-----------------|------------------|-------------------|
+| close 1.94 m    | ERR 0.0015, E 2.03 | ERR 0.0256, E 2.47 |
+| far   3.59 m    | ERR 0.0727, E 2.47 | ERR 0.0081, E 1.69 |
+
+9x better far, 17x WORSE close — so it stays OFF. The regression is explained: `FootprintResidual` REPLACES
+the moment channel, and the moment channel carries the grow-only guard ("a mask is only ever a LOWER BOUND").
+That guard is what compensates YOLO mask erosion, which `self_test` measures at mask-only 0.880 vs truth
+1.000. Remove the channel, lose the compensation, and the box shrinks ~12%.
+
+A shippable fix therefore needs the shared-nuisance marginalisation AND a grow-only extent bound. NOT DONE.
+`AnisotropicR` alone is not the answer (0.0718 vs 0.0727 control = no effect): per-point noise reshaping
+cannot fix a MEAN BIAS; only marginalising the per-frame SHARED nuisance can.
+
+### Method notes (reusable)
+
+- Measure orientation with the footprint 2nd-moment tensor `R diag(w^2/12, h^2/12) R^T`, not raw yaw. It is
+  invariant under all four box symmetries, so a w<->h relabel cannot masquerade as a 90 deg rotation. Two
+  wrong conclusions in this investigation came from a symmetry-blind yaw metric.
+- Always report FUSED row count. A belief that is merely AGEING (mean held, no fresh mask) looks perfectly
+  stable and will fake a passing result.
+- Free energy adjudicates: a fit that is wrong-but-confident shows HIGHER energy. That is how the far-range
+  basin (E 2.47) was distinguished from a merely uninformed fit.
+- Verify a viewpoint actually triggers the fault before A/B-ing a fix there. Several viewpoints do not, and
+  one clean run at a non-triggering pose proves nothing.
+
 ---
 
 *Keep in sync with `src/table_belief.{h,cpp}`, `src/table_fitter.cpp`, `src/epistemic_planner.cpp`,

@@ -53,10 +53,6 @@ SdfThresholdForStorage = 0.08  # |SDF| below which a mask support point is on-su
 AI2CsvPath = "etc/ai2_log.csv"  # per-cycle AI2 log (state + Σ diag + mask R/bias); empty disables
 BirthSurpriseProbe = true    # EXPERIMENTAL read-only: read residual_concept's `grid` node as a surprise (unexplained-occupancy) field, cluster it, log uncovered high-surprise regions vs the tracker's births → etc/birth_surprise.csv. true to test; no fit/graph effect
 AI2SigmaBaseM = 0.03        # base on-surface obs noise std (m); R = σ² + mask_motion_var per frame
-# Anisotropic per-point R (PRECISION_AS_INFORMATION.md Stage 1): per-point variance = deprojection noise
-# projected on the SDF normal → a grazing view carries ~0 yaw information by construction (replaces the
-# obliquity/range yaw gains). The 4 constants below are PHYSICAL ZED sensor noise, not tuning knobs.
-AnisotropicR = false        # true to enable; when on, obliquity/range yaw gains become redundant (Stage 1 A/B)
 PixelSigmaOverF = 0.0015    # σ_px/focal → transverse position std per metre of range
 DepthSigma0M = 0.006        # depth std floor (m)
 DepthSigmaRangeCoef = 0.004 # depth std growth (m per m² of range): σ_d = σ0 + coef·range²
@@ -209,7 +205,6 @@ ExistenceVerifyGain     = 5.0     # epistemic gain (nats) a wants_verification t
 # Default false ⇒ the LiDAR carve contributes OCCUPANCY only (holds L up), never drives removal; removal is the
 # camera silhouette's job (predicted-visible-but-absent, which HOLDs when out of FoV → a table out of camera
 # view is never falsely removed). Set true only where the slab is a faithful solid model of the tabletop.
-ExistenceLidarAbsence = false   # REVERTED 2026-07-12: the A/B "true" REFUTED on live data. ai2_log.csv cyc2230-2244
                                 # showed an OUT-OF-FoV table (sndet=0 → silhouette correctly HOLDs) deleted purely by
                                 # LiDAR free-space: ex_lfree≈10-16 (beams passing UNDER the thin real top but THROUGH the
                                 # solid model band [H-3cm,H]) swamped ex_locc≈2 (genuine returns proving the table is STILL
@@ -237,7 +232,7 @@ ObjectObsFrame = "body"     # localizer base frame z_o is expressed in (== room'
 # Multi-instance birth/associate/merge (shared rc::InstanceTracker; the only instance-lifecycle path —
 # prior-scaffold + greedy nearest-mask were removed in Stage 2). "table" masks are associated to instances
 # by a covariance-gated global 1-to-1; an unexplained mask spawns a new table; overlapping tables merge
-# (two can't share space); death is OFF (a long occlusion is not absence — DeathEnabled to restore it).
+# (two can't share space); a table is NEVER retired by occlusion (a long occlusion is not absence).
 GateMahalanobis = 9.0     # χ²₂ gate (~3σ) for a mask↔instance match once it has a cov
 GateFallbackM = 0.50      # metric XY gate (m) before an instance has a usable covariance
 DetectionNoiseM = 0.35    # det-noise std R added to fit cov in the gate (S=P+R²I): covers the mask-centroid
@@ -251,8 +246,6 @@ BirthFusion = true         # true to enable; needs BirthSurpriseProbe infra (rea
 BirthFusionGain = 6.0      # max extra evidence/frame at full corroboration (0 ⇒ baseline birth timing)
 BirthFusionMassRef = 8.0   # residual mass at which corroboration is half-saturated
 BirthFusionRadiusM = 0.50  # window (m) for the residual-mass sample under the detection
-DeathFrames = 300         # (only if DeathEnabled) frames unobserved before retirement (~30 s @ 100 ms)
-DeathEnabled = false      # OFF: a table is rigid persistent furniture — a long occlusion is not absence.
                           # Removal is by the MERGE operator ONLY (two tables can't share space).
 BirthMinSepM = 0.60       # a birth must be ≥ this (m) from every existing table (anti-duplicate)
 MergeOverlap = 0.05       # physical exclusion: collapse two instances whose oriented footprints overlap by
@@ -260,7 +253,6 @@ MergeOverlap = 0.05       # physical exclusion: collapse two instances whose ori
 BirthWidthM = 1.0         # default geometry for a table BORN from a mask (the fit refines from here)
 BirthDepthM = 0.6
 BirthHeightM = 0.75
-NllCost = false           # association cost = ½(m²+ln|S|) NLL (compete by likelihood, not raw distance)
                           # vs raw squared-Mahalanobis. Gate is m² either way. Matters under clutter.
 # Ricoh-360 ATTENTION gate. A slice with depth_var>0 is a peripheral 360-RGB YOLO detection (dense ZED slices
 # have depth_var==0). It is bearing-only: it never births/associates/fits, it only raises attention

@@ -91,7 +91,6 @@ void SpecificWorker::run_instance_tracker()
     tp.birth_frames     = cfg_.tracker_birth_frames;
     tp.death_frames     = cfg_.tracker_death_frames;
     tp.birth_min_sep_m  = cfg_.tracker_birth_min_sep_m;
-    tp.nll_cost         = cfg_.tracker_nll_cost;
     tp.multi_det_per_track = true;   // fuse multiple ZED slices of one table (one belief update per slice)
     tracker_.set_params(tp);
 
@@ -185,15 +184,9 @@ void SpecificWorker::run_instance_tracker()
             std::print("[tracker]   det slice={} xy=({:.2f},{:.2f})\n", d.slice_index, d.xy.x(), d.xy.y());
     }
 
-    // DEATH: OFF by default — a table is rigid, persistent furniture, so a long occlusion (no mask for
-    // many frames) is NOT absence and must not retire it. The ONLY way a table is removed is the MERGE
-    // operator (two tables can't share space). Enable Tracker.DeathEnabled to restore miss-timer retirement.
-    if (cfg_.tracker_death_enabled)
-        for (const std::uint64_t id : res.deaths)
-        {
-            std::print("table_concept: [tracker] DEATH id={} (unobserved {} frames)\n", id, cfg_.tracker_death_frames);
-            retire_instance(id);
-        }
+    // DEATH: a table is rigid, persistent furniture, so a long occlusion (no mask for many frames) is NOT
+    // absence and must never retire it. The ONLY way a table is removed is the MERGE operator (two tables
+    // cannot share space) or the existence-removal channel. res.deaths is deliberately ignored.
 
     // ASSOCIATE: route every matched detection's mask slice to its instance (read in observe_slice()). With
     // multi_det_per_track a track may collect SEVERAL ZED slices → fused as sequential updates.

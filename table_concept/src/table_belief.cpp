@@ -86,40 +86,6 @@ float TableBelief::sdf_compound(const Eigen::Vector3f& p, const TableBeliefState
     return m;
 }
 
-// Anisotropic per-point measurement variance = the SDF-residual noise, which is the point's position noise
-// PROJECTED ONTO the surface normal n. n = ∇_p sdf (spatial gradient, FD). The deprojection noise is Σ =
-// σ_trans²(I − r̂r̂ᵀ) + σ_d² r̂r̂ᵀ (transverse ⊥ ray, depth ∥ ray), so nᵀΣn = σ_trans²(1−(n·r̂)²) + σ_d²(n·r̂)² —
-// only the scalar n·r̂ is needed. At a grazing view a yaw-carrying edge point has n nearly ∥ the horizontal ray
-// ⇒ R ≈ σ_d² (large) ⇒ ~0 yaw information; a top point has n=ẑ ⊥ ray ⇒ R ≈ σ_trans² (small) ⇒ H stays sharp.
-// The yaw collapse is a CONSEQUENCE of correct noise, not a yaw-specific gain. See PRECISION_AS_INFORMATION.md.
-void TableBelief::fill_anisotropic_R(TableFrame& frame, float extra_iso) const
-{
-    if (not frame.has_rays or frame.points.empty()) return;
-    frame.R.resize(frame.points.size());
-    const float pix = params_.pixel_sigma_over_f;
-    const float s0  = params_.depth_sigma0_m;
-    const float sc  = params_.depth_sigma_range_coef;
-    const float sm2 = params_.model_sigma_m * params_.model_sigma_m + std::max(0.0f, extra_iso);
-    const float e   = 0.005f;                                   // spatial FD step (m) for the surface normal
-    const Eigen::Vector3f ex(e, 0, 0), ey(0, e, 0), ez(0, 0, e);
-    for (std::size_t i = 0; i < frame.points.size(); ++i)
-    {
-        const Eigen::Vector3f& p = frame.points[i];
-        const Eigen::Vector3f g(sdf_compound(p + ex, state_) - sdf_compound(p - ex, state_),
-                                sdf_compound(p + ey, state_) - sdf_compound(p - ey, state_),
-                                sdf_compound(p + ez, state_) - sdf_compound(p - ez, state_));
-        const float gn = g.norm();
-        const Eigen::Vector3f n = (gn > 1e-9f) ? Eigen::Vector3f(g / gn) : Eigen::Vector3f(0, 0, 1);
-        const Eigen::Vector3f d = p - frame.cam_origin;
-        const float z = d.norm();
-        const Eigen::Vector3f rhat = (z > 1e-6f) ? Eigen::Vector3f(d / z) : Eigen::Vector3f(0, 0, -1);
-        const float ndr    = n.dot(rhat);
-        const float sd     = s0 + sc * z * z;                  // depth std along the ray (grows with range²)
-        const float trans2 = (z * pix) * (z * pix);            // transverse variance
-        frame.R[i] = trans2 * (1.0f - ndr * ndr) + sd * sd * ndr * ndr + sm2;
-    }
-}
-
 // ─── Mixture responsibilities ────────────────────────────────────────────────────────────────────
 
 // UN-normalised mixture components u[0..5] (top, 4 legs, clutter) and their sum = the marginal likelihood
@@ -631,7 +597,7 @@ void TableBelief::apply_footprint_moment(const TableFrame& frame)
 {
     dbg_moment_pts_ = 0;
     dbg_moment_aniso_ = 0.0f; dbg_moment_r_yaw_ = 0.0f; dbg_moment_dyaw_ = 0.0f;   // DIAGNOSTIC: reset per cycle
-    dbg_moment_ext_major_ = 0.0f; dbg_moment_ext_minor_ = 0.0f;
+    dbg_moment_ext_major_ = 0.0f; dbg_moment_ext_minor_ = 0.0f; dbg_moment_phi_ = 0.0f;
     if (params_.footprint_moment_precision <= 0.0f or frame.points.empty()) return;
     const float z_hi = state_.H + 3.0f * params_.sigma_base_m;
     const float z_lo = state_.H - params_.top_thickness - 3.0f * params_.sigma_base_m;   // tabletop band (excl. legs)
@@ -682,7 +648,7 @@ void TableBelief::apply_footprint_moment(const TableFrame& frame)
     // moment actually used, the yaw move it requested, and the observed extents. Read by the fitter's [yaw-jump].
     dbg_moment_aniso_ = aniso; dbg_moment_r_yaw_ = r_yaw;
     dbg_moment_dyaw_  = std::remainder(myaw - state_.yaw, 2.0f * static_cast<float>(M_PI));
-    dbg_moment_ext_major_ = mom.ext_major; dbg_moment_ext_minor_ = mom.ext_minor;
+    dbg_moment_ext_major_ = mom.ext_major; dbg_moment_ext_minor_ = mom.ext_minor; dbg_moment_phi_ = mom.phi;
 
     // A mask is only ever a LOWER BOUND on the table extent. Occlusion, foreshortening (a side view of the
     // tabletop, whose far edge is grazing/self-occluded), FoV clipping and YOLO under-segmentation can all make
@@ -1243,40 +1209,6 @@ bool TableBelief::self_test()
         check(dyaw_on  < 0.10f,            "completeness backoff should keep yaw near the converged truth");
     }
 
-    // (n) ANISOTROPIC per-point R (PRECISION_AS_INFORMATION.md Stage 1). A grazing view's yaw-carrying points get
-    //     huge R (their SDF normal aligns with the near-horizontal ray → depth noise), so their yaw INFORMATION
-    //     collapses and the per-point GN cannot rotate a converged table — WITHOUT any obliquity/range yaw gain
-    //     (chain_cov_yaw=0 here) and with the moment channel OFF, isolating the per-point path. Baseline isotropic
-    //     R lets the same biased grazing cloud snap yaw. This is the mechanism that replaces knobs 1–4.
-    {
-        rng.seed(7777);
-        const float Rb = P.sigma_base_m * P.sigma_base_m;
-        const Eigen::Vector3f cam(gt.cx, gt.cy - 3.0f, gt.H);   // camera at tabletop height, 3 m to −y (grazing)
-        const float bias = 0.35f;                               // the cloud is rigidly rotated → "wants" to turn yaw
-        const float cb = std::cos(gt.yaw + bias), sb = std::sin(gt.yaw + bias);
-        auto grazing_cloud = [&]() {                            // FULL rectangle so boundary points carry yaw info
-            std::vector<Eigen::Vector3f> pts;
-            for (int i = 0; i < 1500; ++i)
-            { const float lx = U(rng) * 0.5f * gt.w, ly = U(rng) * 0.5f * gt.h;
-              pts.push_back({gt.cx + cb * lx - sb * ly, gt.cy + sb * lx + cb * ly, gt.H + noise(rng)}); }
-            return pts;
-        };
-        auto run = [&](bool aniso) {
-            TableBeliefParams pp = P; pp.anisotropic_r = aniso; pp.footprint_moment_precision = 0.0f;  // per-point only
-            TableBelief b(TableBeliefState{gt.cx, gt.cy, gt.H, gt.w, gt.h, gt.yaw}, pp);   // converged at truth
-            for (int it = 0; it < 200; ++it)
-            { auto pts = grazing_cloud();
-              TableFrame fr; fr.points = pts; fr.R.assign(pts.size(), Rb);   // chain_cov_yaw = 0 → NO yaw gains
-              fr.cam_origin = cam; fr.has_rays = true;
-              if (aniso) b.fill_anisotropic_R(fr, 0.0f);
-              b.update(fr); }
-            return std::abs(std::remainder(b.state().yaw - gt.yaw, static_cast<float>(M_PI)));
-        };
-        const float dyaw_off = run(false);   // isotropic R, no yaw gains → grazing biased cloud rotates yaw
-        const float dyaw_on  = run(true);    // anisotropic R (per-point only — informational; the real fix is (n2))
-        std::printf("  [info] per-point-only anisotropic-R grazing: dyaw OFF=%.3f ON=%.3f rad (clean-rotation tracking)\n",
-                    dyaw_off, dyaw_on);
-    }
 
     // (n2) FOOTPRINT RESIDUAL + TILT→YAW COMMON-MODE (PRECISION_AS_INFORMATION.md a1′ + a2′ Tier-1). Yaw on a
     //      top-plane observation lives on the footprint boundary, and the ONLY depth-nuisance mode that aliases
