@@ -116,6 +116,17 @@ struct VoxelizerParams
     bool        SEMANTIC_PUBLISH_NODE   = false;   // publish the dense label map to a 'semantic' DSR node under 'zed'
     float       SEMANTIC_PUBLISH_MIN_INTERVAL_S = 0.5f;   // rate cap for the (large) semantic-node publish
 
+    // Semantic-derived instance masks (semantic_mask_stage): turn the dense ADE20K class field into per-
+    // connected-region SegDetections for furniture classes YOLO-seg misses (cabinet/hood/shelf/door),
+    // append them to the 'masks' node (SAM2-refined). Default OFF. The master switch also force-runs the
+    // semantic model (regardless of the viewer toggle) and enables its per-pixel score map.
+    bool        SEMANTIC_PUBLISH_MASKS = false;                                 // Semantic.publish_masks
+    std::vector<std::string> SEMANTIC_ACCEPTED_LABELS{"cabinet", "hood", "shelf", "door"};  // ADE20K names
+    float       SEMANTIC_MASK_MIN_AREA_FRAC     = 0.003f;  // drop components smaller than this fraction of the frame
+    float       SEMANTIC_MASK_OVERLAP_DROP_FRAC = 0.5f;    // drop a component ≥this covered by a YOLO-seg mask (priority)
+    int         SEMANTIC_MASK_MORPH_KERNEL      = 5;       // open+close kernel (px) to denoise the class field; ≤1 = off
+    float       SEMANTIC_MASK_SCORE_DEFAULT     = 0.5f;    // confidence used when per-pixel scores are unavailable
+
     // SAM2.1 mask REFINEMENT (sam2_stage): a two-model ONNX pipeline that sharpens the mask of an
     // ALREADY-LOCATED YOLO object (bbox → box+centre prompt → tight SAM2 mask). Viewer overlay only for
     // now (own PerceptionResult slot; the mask_ingestor route comes later). Default OFF; the heavy 1024²

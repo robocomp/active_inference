@@ -27,7 +27,18 @@ GenericWorker::GenericWorker(const ConfigLoader& configLoader, TuplePrx tprx) : 
 
 	this->configLoader = configLoader;
     if (!this->configLoader.get<bool>("Component.Debug.Verbose")) {
-        qInstallMessageHandler([](QtMsgType, const QMessageLogContext&, const QString&) {});
+        // Suppress only qDebug() when not verbose; still let qInfo/qWarning/qCritical through so
+        // must-see state logs ([SM], presence) reach the terminal. (Matches residual_concept et al.;
+        // the old no-op handler swallowed EVERYTHING, hiding the FSM state.)
+        qInstallMessageHandler([](QtMsgType type, const QMessageLogContext& context, const QString& msg) {
+                switch (type) {
+                    case QtDebugMsg:   break; // Suppress qDebug()
+                    case QtInfoMsg:    qInfo().noquote() << msg; break;
+                    case QtWarningMsg: qWarning().noquote() << msg; break;
+                    case QtCriticalMsg: qCritical().noquote() << msg; break;
+                    case QtFatalMsg:   qFatal("%s", msg.toUtf8().constData()); break;
+                    default: qInfo().noquote() << msg; break;
+                }});
     }
 
 	states["Initialize"] = std::make_unique<GRAFCETStep>("Initialize", BASIC_PERIOD, nullptr, std::bind(&GenericWorker::initialize, this));

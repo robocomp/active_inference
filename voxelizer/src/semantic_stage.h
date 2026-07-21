@@ -14,7 +14,10 @@ namespace rc
 class SemanticStage : public Stage
 {
 public:
-    SemanticStage(const rc::semantic::YoloSemanticProcessor::Config& cfg, int decimation);
+    // `want_scores` fills SemanticMap::scores (per-pixel argmax confidence) — needed to score the
+    // semantic-derived instance masks (SemanticMaskStage); leave false for the viewer-only path.
+    SemanticStage(const rc::semantic::YoloSemanticProcessor::Config& cfg, int decimation,
+                  bool want_scores = false);
 
     const char* name() const override { return "semantic"; }
     bool ready() const override { return sem_ && sem_->ready(); }
@@ -26,6 +29,7 @@ public:
 private:
     std::unique_ptr<rc::semantic::YoloSemanticProcessor> sem_;
     int           decimation_ = 1;
+    bool          want_scores_ = false;
     std::uint64_t counter_ = 0;
 };
 

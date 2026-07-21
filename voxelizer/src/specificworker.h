@@ -89,6 +89,16 @@ class SpecificWorker : public GenericWorker
         void on_optional_peer_lost(const std::string &name, std::uint32_t id);
         void on_optional_peer_ready(const std::string &name, std::uint32_t id);
 
+        // Waiting→Operating extra gate: room_concept only publishes the 'room' node once its localization
+        // is STABLE, so the node's mere presence IS the stability signal we wait on (on top of peer presence).
+        bool room_node_present() const;
+
+        // Machine-ingestible FSM telemetry: emit one structured JSON line per state transition to stdout
+        // (parseable by log pipelines / netmon per-process capture) carrying a stable `reason` code so a
+        // monitor can tell WHY we left Operating (required_peer_lost vs room_unstable).
+        void log_sm_event(const std::string& from, const std::string& to,
+                          const std::string& reason, const std::string& detail);
+
     private:
         VoxelizerParams params;   // loaded via load_voxelizer_params() in initialize()
 
@@ -123,6 +133,16 @@ class SpecificWorker : public GenericWorker
         // Semantic-seg decimation counter (period read from params.SEMANTIC_SEG_DECIMATION).
         int semantic_frame_counter_ = 0;
         std::chrono::steady_clock::time_point last_semantic_pub_{};   // rate cap for the semantic-node publish
+        std::chrono::steady_clock::time_point last_waiting_log_{};    // throttle the "waiting for required peers" log
+        // Reverse room-stability gate: debounce room-node disappearance while Operating so a transient
+        // graph-resync gap (peer join/CRDT re-import) doesn't drop us; nullopt while the room is present.
+        std::optional<std::chrono::steady_clock::time_point> room_absent_since_{};
+        std::string current_sm_state_ = "Init";   // tracks the live FSM state; used as `from` in log_sm_event
+        // Reason we last left Operating, set at the presenceLost site and consumed by the next Waiting-enter
+        // event (Degraded is a transient pass-through). Empty ⇒ Waiting was entered without leaving Operating
+        // (startup / awaiting dependencies).
+        std::string pending_exit_reason_{};
+        std::string pending_exit_detail_{};
 
         // Homeostatic perception-rate regulator: adapts pose decimation to hold compute() near
         // params.TARGET_HZ (voxel-free; fed compute cost + frame stamp). Actuator = pose only.

@@ -36,6 +36,7 @@
 #include "seg_stage.h"
 #include "pose_stage.h"
 #include "semantic_stage.h"
+#include "semantic_mask_stage.h"
 #include "sam2_stage.h"
 #include "bearing_stage.h"
 #include "ricoh_source.h"
@@ -180,9 +181,43 @@ void SpecificWorker::initialize()
         sem_config.use_gpu       = params.SEMANTIC_SEG_USE_GPU;
         sem_config.use_trt       = params.SEMANTIC_SEG_USE_TRT;
         sem_config.verbose_debug = verbose_debug_;
-        auto sem_stage = std::make_unique<rc::SemanticStage>(sem_config, params.SEMANTIC_SEG_DECIMATION);
-        sem_stage->set_enabled(semantic_overlay_enabled_);
+        // want_scores ON when we publish semantic masks (they need the per-pixel confidence to be scored).
+        auto sem_stage = std::make_unique<rc::SemanticStage>(sem_config, params.SEMANTIC_SEG_DECIMATION,
+                                                             /*want_scores=*/params.SEMANTIC_PUBLISH_MASKS);
+        // Run when the overlay is on OR when producing semantic masks (publish_masks) — so the model runs
+        // even without the viewer toggle (mirrors the SAM2 publish_refined pattern below).
+        rc::SemanticStage* sem_stage_ptr = sem_stage.get();
+        sem_stage->set_enabled(semantic_overlay_enabled_ or params.SEMANTIC_PUBLISH_MASKS);
         zed_stages.push_back(std::move(sem_stage));
+
+        // Semantic-derived instance masks (cabinet/hood/shelf/door → 'masks' node, SAM2-refined). Resolve the
+        // accepted label strings to ADE20K class ids via the model's own class table, once, here.
+        if (params.SEMANTIC_PUBLISH_MASKS and sem_stage_ptr->processor())
+        {
+            const auto& names = sem_stage_ptr->processor()->class_names();
+            const auto iequals = [](const std::string& a, const std::string& b)
+            {
+                return a.size() == b.size() and std::equal(a.begin(), a.end(), b.begin(),
+                    [](char x, char y) { return std::tolower((unsigned char)x) == std::tolower((unsigned char)y); });
+            };
+            std::vector<std::pair<int, std::string>> accepted_classes;
+            for (const auto& want : params.SEMANTIC_ACCEPTED_LABELS)
+            {
+                const auto it = std::find_if(names.begin(), names.end(),
+                                             [&](const std::string& n) { return iequals(n, want); });
+                if (it != names.end())
+                    accepted_classes.emplace_back(static_cast<int>(std::distance(names.begin(), it)), *it);
+                else
+                    std::println("[SemanticMasks] class '{}' not in the model's ADE20K table — skipped", want);
+            }
+            if (not accepted_classes.empty())
+                zed_stages.push_back(std::make_unique<rc::SemanticMaskStage>(
+                    std::move(accepted_classes), params.SEMANTIC_MASK_MIN_AREA_FRAC,
+                    params.SEMANTIC_MASK_OVERLAP_DROP_FRAC, params.SEMANTIC_MASK_MORPH_KERNEL,
+                    params.SEMANTIC_MASK_SCORE_DEFAULT));
+        }
+        else if (params.SEMANTIC_PUBLISH_MASKS)
+            std::println("[SemanticMasks] semantic model not ready — semantic masks disabled");
     }
 
     // --- SAM2 mask refinement (optional). Runs AFTER SegStage so it can read its detections and sharpen
@@ -199,7 +234,14 @@ void SpecificWorker::initialize()
         sam2_config.mask_prior       = params.SAM2_MASK_PRIOR;
         sam2_config.mask_prior_logit = params.SAM2_MASK_PRIOR_LOGIT;
         sam2_config.verbose          = verbose_debug_;
-        auto sam2_stage = std::make_unique<rc::Sam2Stage>(sam2_config, params.SAM2_REFINE_LABELS,
+        // Refine the semantic furniture masks too. If SAM2_REFINE_LABELS is empty it already means "all",
+        // so only union when it is an explicit (non-empty) allow-list — otherwise we'd accidentally restrict it.
+        std::vector<std::string> refine_labels = params.SAM2_REFINE_LABELS;
+        if (params.SEMANTIC_PUBLISH_MASKS and not refine_labels.empty())
+            for (const auto& l : params.SEMANTIC_ACCEPTED_LABELS)
+                if (std::find(refine_labels.begin(), refine_labels.end(), l) == refine_labels.end())
+                    refine_labels.push_back(l);
+        auto sam2_stage = std::make_unique<rc::Sam2Stage>(sam2_config, refine_labels,
                                                           params.SAM2_DECIMATION, params.SAM2_METRICS_LOG);
         // Run when the overlay is on OR when routing refined masks to the fitters (publish_refined).
         sam2_stage->set_enabled(sam2_overlay_enabled_ or params.SAM2_PUBLISH_REFINED);
@@ -326,9 +368,34 @@ void SpecificWorker::initialize()
     }
 
     presence_coordinator_.configure(configLoader, G, static_cast<std::uint32_t>(agent_id));
+    // Colour this agent's node in the graph view by its live health: the coordinator already
+    // publishes the presence lifecycle; this adds the external FSM axis (Initialize/Compute/
+    // Emergency/Restore). Generic discovery via objectName(), so genericworker regeneration
+    // cannot break it.
+    presence_coordinator_.attach_state_machine(&statemachine);
     presence_coordinator_.set_transition_hooks({
-        .request_presence_ready = [this]() { Q_EMIT presenceReady(); },
-        .request_presence_lost  = [this]() { Q_EMIT presenceLost(); },
+        // Required peers are ready — but only advance to Operating once room_concept has also published
+        // the 'room' node (its stability signal). If the room isn't up yet, stay in Waiting; on_waiting_loop
+        // re-checks each tick and emits presenceReady the moment the room node appears.
+        .request_presence_ready = [this]()
+        {
+            if (room_node_present())
+                Q_EMIT presenceReady();
+            else
+                qInfo() << "[SM] required peers ready, but no stable 'room' node yet — holding in Waiting";
+        },
+        .request_presence_lost  = [this]()
+        {
+            if (current_sm_state_ == "Operating")   // tag WHY we're leaving Operating; the next Waiting event reports it
+            {
+                std::string peers;
+                for (const auto &n : presence_coordinator_.missing_required_names())
+                    peers += (peers.empty() ? "" : ",") + n;
+                pending_exit_reason_ = "required_peer_lost";
+                pending_exit_detail_ = "missing:" + peers;
+            }
+            Q_EMIT presenceLost();
+        },
     });
     presence_coordinator_.set_peer_hooks({
         .on_peer_restarted = [](std::uint32_t id)
@@ -347,30 +414,105 @@ void SpecificWorker::initialize()
     presence_coordinator_.set_lifecycle_hooks({
         .on_waiting_enter = [this]()
         {
-            qInfo() << "[SM] -> Waiting";
+            qInfo() << "[SM] -> Waiting: holding until all required peers are present AND the room is stable"
+                       " (no compute/graph access)";
             const auto missing = presence_coordinator_.missing_required_names();
             if (!missing.empty())
             {
                 QString m;
                 for (const auto &label : missing)
                     m += " " + QString::fromStdString(label);
-                qInfo() << "  missing:" << m;
+                qInfo() << "[SM]   waiting for peer(s):" << m << "— e.g. launch room_concept";
             }
+            else if (!room_node_present())
+                qInfo() << "[SM]   peers present, waiting for a stable 'room' node from room_concept";
+
+            // Structured event. If we got here by leaving Operating, report that reason (pending_exit_*);
+            // otherwise this is a startup / dependency wait.
+            if (!pending_exit_reason_.empty())
+                log_sm_event(current_sm_state_, "Waiting", pending_exit_reason_, pending_exit_detail_);
+            else
+            {
+                std::string detail;
+                for (const auto &label : missing)
+                    detail += (detail.empty() ? "" : ",") + label;
+                log_sm_event(current_sm_state_, "Waiting", "awaiting_dependencies",
+                             missing.empty() ? "room node not yet stable" : "missing:" + detail);
+            }
+            pending_exit_reason_.clear();
+            pending_exit_detail_.clear();
+            current_sm_state_ = "Waiting";
+            last_waiting_log_ = std::chrono::steady_clock::now();   // reset the throttle so the loop re-logs after the interval
+        },
+        // Ongoing feedback + the room-stability gate re-check. The coordinator emits presence-ready only on
+        // peer-state changes, so if the room node appears AFTER peers are already ready nothing else would
+        // advance us — this loop closes that gap and re-emits. Logging is throttled to ~3 s (the loop runs
+        // at the ~40 Hz Compute period) so it doesn't spam.
+        .on_waiting_loop = [this]()
+        {
+            const bool peers_ready = presence_coordinator_.all_required_ready();
+            const bool room_ready  = room_node_present();
+            if (peers_ready and room_ready)
+            {
+                Q_EMIT presenceReady();   // peers were ready and the stable room node has now appeared → advance
+                return;
+            }
+
+            const auto now = std::chrono::steady_clock::now();
+            if (now - last_waiting_log_ < std::chrono::seconds(3))
+                return;
+            last_waiting_log_ = now;
+            if (not peers_ready)
+            {
+                QString m;
+                for (const auto &label : presence_coordinator_.missing_required_names())
+                    m += " " + QString::fromStdString(label);
+                qInfo() << "[SM] Waiting — required peer(s) not running:" << m;
+            }
+            else   // peers ready, room node not yet published
+                qInfo() << "[SM] Waiting — required peers present, waiting for a stable 'room' node from room_concept";
         },
         .on_operating_enter = [this]()
         {
+            log_sm_event(current_sm_state_, "Operating", "constraints_satisfied",
+                         "required peers present and room stable");
+            current_sm_state_ = "Operating";
             qInfo() << "[SM] -> Operating: all required constraints satisfied";
+            room_absent_since_.reset();   // fresh session — clear any pending reverse-gate debounce
             if (render_timer_)
                 render_timer_->start();   // start fluid viewer refresh only once the graph is joined
         },
         .on_operating_loop = [this]()
         {
+            // Reverse room-stability gate: room_concept removes the 'room' node when localization goes
+            // unstable, so a missing room node means we must stop operating and fall back to Waiting.
+            // Debounced (~1.5 s) so a transient CRDT re-import gap during peer join/restart doesn't drop us.
+            if (not room_node_present())
+            {
+                const auto now = std::chrono::steady_clock::now();
+                if (not room_absent_since_)
+                    room_absent_since_ = now;
+                if (now - *room_absent_since_ >= std::chrono::milliseconds(1500))
+                {
+                    qInfo() << "[SM] 'room' node gone for >1.5s (room unstable) — leaving Operating";
+                    pending_exit_reason_ = "room_unstable";       // reported by the next Waiting-enter event
+                    pending_exit_detail_ = "room node absent >1.5s";
+                    room_absent_since_.reset();
+                    Q_EMIT presenceLost();   // → Degraded → Waiting; on_waiting_loop re-admits when the room returns
+                    return;                  // skip compute this tick (its room reads would be empty anyway)
+                }
+            }
+            else
+                room_absent_since_.reset();   // room back within the grace window → cancel the pending drop
+
             compute();
             if (auto it = graph_viewers.find(""); it != graph_viewers.end() && it->second)
                 it->second->set_external_fps(states.at("Operating")->getActualFps());
         },
         .on_degraded_enter = [this]()
         {
+            // Transient pass-through (auto-transitions to Waiting). Deliberately does NOT touch
+            // current_sm_state_ so the Waiting-enter event still reports from="Operating" with the exit reason.
             qInfo() << "[SM] -> Degraded: a required peer or node is no longer available";
             if (render_timer_)
                 render_timer_->stop();   // no graph access outside Operating
