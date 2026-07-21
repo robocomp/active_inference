@@ -31,6 +31,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 #include <vector>
 #include <Eigen/Dense>
 
@@ -83,6 +84,43 @@ void inflate_for_age(Model& m, Eigen::Matrix<float, N, N>& Sigma,
                               ? dt_seconds / dt_nominal_seconds     // frames-worth of Q over real time
                               : 1.0f;                               // no nominal rate known → one step
     predict<N>(m, Sigma, state, prior_mean, q_scale);
+}
+
+// ─── Common-mode saturation operator (numerically stable form) ───────────────────────────────────
+
+// Apply the within-frame common-mode saturation to a frame's information (Id) and gradient (bd):
+//
+//     Ieff = Id − Id(Id+Σc⁻¹)⁻¹Id          beff = bd − Id(Id+Σc⁻¹)⁻¹bd
+//
+// Those are the DEFINING expressions, but they must not be EVALUATED that way. Id is the raw data
+// information: thousands of points at 1/R each drive its entries to 1e6–1e7, while Ieff saturates at Σc⁻¹
+// (~1e3). Forming `Id - Id*M*Id` is therefore a difference of two huge, nearly-equal matrices whose true
+// difference is five orders of magnitude smaller — catastrophic cancellation. In float32 the absolute error
+// exceeds the result and Ieff comes out INDEFINITE (measured: min eigenvalue −4.03 at the table's real
+// magnitudes). `Sigma = (P0 + Ieff).inverse()` then inherits it, producing zero/negative variances — the
+// direct cause of the table_concept yaw/extent TELEPORTS (etc/ai2_log.csv: std_* == 0 rows immediately
+// precede them; see the ai2_log_run*.csv A/B set).
+//
+// Both are rearranged below via Woodbury into algebraically IDENTICAL forms that never build the large
+// difference. With M = (Id + Σc⁻¹)⁻¹:
+//
+//     Ieff = Σc⁻¹ − Σc⁻¹ M Σc⁻¹     ( = (Id⁻¹ + Σc)⁻¹, valid also when Id is rank-deficient )
+//     beff = Σc⁻¹ M bd              ( since I − Id·M = (Id+Σc⁻¹)M − Id·M = Σc⁻¹ M )
+//
+// Now the subtracted term is SMALL relative to Σc⁻¹ (it vanishes as Id→∞), so the cap is approached from
+// below without cancellation: same mathematics, ~2.7e-8 relative error instead of 6.7e-3, and PD preserved.
+// This is a pure numerics fix — no model term, no clamp, no threshold.
+template <int N>
+inline std::pair<Eigen::Matrix<float, N, N>, Eigen::Matrix<float, N, 1>>
+saturate(const Eigen::Matrix<float, N, N>& Id,
+         const Eigen::Matrix<float, N, 1>& bd,
+         const Eigen::Matrix<float, N, N>& Scinv)
+{
+    const Eigen::Matrix<float, N, N> M    = (Id + Scinv).inverse();
+    const Eigen::Matrix<float, N, N> ScM  = Scinv * M;
+    Eigen::Matrix<float, N, N> Ieff = Scinv - ScM * Scinv;
+    Ieff = 0.5f * (Ieff + Ieff.transpose());   // Ieff is symmetric in exact arithmetic; enforce it exactly
+    return {Ieff, ScM * bd};
 }
 
 // ─── Update (GN-MAP mean · Woodbury common-mode saturation of Σ) ─────────────────────────────────
@@ -157,9 +195,7 @@ float update(Model& m, typename Model::State& state, Eigen::Matrix<float, N, N>&
         // mask under-segmentation, exactly what Σc models) move the mean at full gain → the position wander.
         // b = Id·δθ_Newton ⇒ beff = Ieff·δθ_Newton, so when the prior is weak this is still the full Newton
         // step (recovery preserved); damping only engages once the prior is competitively strong.
-        const MatN IdMinv = Id * (Id + Scinv).inverse();
-        const MatN Ieff   = Id - IdMinv * Id;
-        const VecN beff   = bd - IdMinv * bd;
+        const auto [Ieff, beff] = saturate<N>(Id, bd, Scinv);
         const VecN dtheta = (P0 + Ieff).ldlt().solve(P0 * (prior_mean - theta) + beff);
         if (!dtheta.allFinite()) break;
         theta += dtheta;
@@ -173,9 +209,7 @@ float update(Model& m, typename Model::State& state, Eigen::Matrix<float, N, N>&
     state = s;
 
     accumulate(state.vec());    // data information at the converged state
-    const MatN IdMinv = Id * (Id + Scinv).inverse();
-    const MatN Ieff   = Id - IdMinv * Id;
-    Sigma = (P0 + Ieff).inverse();
+    Sigma = (P0 + saturate<N>(Id, bd, Scinv).first).inverse();
 
     double energy = 0.0;
     for (std::size_t i = 0; i < frame.points.size(); ++i)
