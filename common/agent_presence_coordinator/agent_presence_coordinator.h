@@ -9,6 +9,9 @@
 #include <vector>
 
 #include "../agent_presence_monitor/agent_presence_monitor.h"
+#include "../agent_state_publisher/agent_state_publisher.h"
+
+class QStateMachine;
 
 namespace DSR {
 class DSRGraph;
@@ -69,6 +72,12 @@ public:
     void start();
     void stop();
 
+    // Publish this agent's external FSM state (Initialize/Compute/Emergency/Restore) alongside the
+    // presence lifecycle, so its node in the graph view is coloured by the WORSE of the two. Call
+    // once from initialize(), right after configure(), passing GenericWorker's `statemachine`.
+    // Presence transitions are published automatically — this only adds the FSM axis.
+    void attach_state_machine(QStateMachine *sm) { state_publisher_.attach_state_machine(sm); }
+
     [[nodiscard]] AgentPresenceMonitor *monitor() const { return presence_monitor_.get(); }
     [[nodiscard]] bool all_required_ready() const;
     [[nodiscard]] std::vector<std::string> missing_required_names() const;
@@ -96,4 +105,5 @@ private:
     LifecycleHooks lifecycle_hooks_;
     Policy policy_;
     std::unique_ptr<AgentPresenceMonitor> presence_monitor_;
+    rc::AgentStatePublisher state_publisher_;
 };

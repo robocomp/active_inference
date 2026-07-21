@@ -11,6 +11,9 @@ void AgentPresenceCoordinator::configure(const ConfigLoader &config_loader,
     config_loader_ = &config_loader;
     graph_ = std::move(graph);
     local_agent_id_ = local_agent_id;
+    // Start reporting our health on our own agent node. Presence is still Unknown here, which
+    // publishes orange — correct: we are not known-healthy until we reach Operating.
+    state_publisher_.configure(graph_);
 }
 
 void AgentPresenceCoordinator::set_transition_hooks(TransitionHooks hooks)
@@ -78,6 +81,8 @@ void AgentPresenceCoordinator::start()
 
 void AgentPresenceCoordinator::stop()
 {
+    state_publisher_.stop();
+
     if (!presence_monitor_)
         return;
 
@@ -114,6 +119,9 @@ void AgentPresenceCoordinator::run_hook(const std::function<void()> &hook,
 
 void AgentPresenceCoordinator::waiting_enter()
 {
+    // Publish BEFORE the hooks: an agent's on_degraded_enter debounces for seconds before deciding
+    // whether to die, and the graph must show the trouble for that whole window, not after it.
+    state_publisher_.set_presence(rc::agent_status::Presence::Waiting);
     run_hook(lifecycle_hooks_.on_waiting_enter, policy_.waiting_enter_order, HookOrder::BeforeCoordinator);
     if (policy_.set_local_ready_false_on_waiting_enter && presence_monitor_)
         presence_monitor_->set_local_ready(false);
@@ -136,6 +144,7 @@ void AgentPresenceCoordinator::waiting_loop()
 
 void AgentPresenceCoordinator::operating_enter()
 {
+    state_publisher_.set_presence(rc::agent_status::Presence::Operating);
     run_hook(lifecycle_hooks_.on_operating_enter, policy_.operating_enter_order, HookOrder::BeforeCoordinator);
     if (policy_.set_local_ready_true_on_operating_enter && presence_monitor_)
         presence_monitor_->set_local_ready(true);
@@ -150,6 +159,7 @@ void AgentPresenceCoordinator::operating_loop()
 
 void AgentPresenceCoordinator::degraded_enter()
 {
+    state_publisher_.set_presence(rc::agent_status::Presence::Degraded);
     run_hook(lifecycle_hooks_.on_degraded_enter, policy_.degraded_enter_order, HookOrder::BeforeCoordinator);
     if (policy_.set_local_ready_false_on_degraded_enter && presence_monitor_)
         presence_monitor_->set_local_ready(false);
