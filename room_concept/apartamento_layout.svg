@@ -1,9 +1,38 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="9.11" height="9.86" viewBox="-0.3 -0.3 9.11 9.86">
-  <!-- Room layout polygon from apartamento.svg. Coordinates in meters. -->
+  <!-- Room layout polygon from apartamento.svg. Coordinates in meters.
+
+       ROUNDED CORNERS: the two corners at the ends of the room diagonal are rounded, and both carry
+       the SAME rounding. Each is modelled as a single chord across the arc (the tracing convention
+       already used for the first one), cutting the ideal corner back by 0.2741 m along the long
+       near-vertical wall and 0.2305 m along the near-horizontal wall — a 0.3526 m chord. The interior
+       angles agree to ~3° (88.2° vs 91.1°), so equal cut-backs mean equal effective fillet radius.
+
+         • top-left  (ideal -0.009,7.166) → chord  0.0,6.892  →  0.222,7.166   [pre-existing]
+         • bot-right (ideal  8.512,0.187) → chord  8.507,0.461 →  8.282,0.179  [added to match]
+
+       NOTE: a chord leaves two ~135° vertices where the sharp corner was. That is below
+       CornerDetector's max_corner_angle (155°), so each rounded corner still registers as TWO model
+       corners rather than none. If they turn out to be unhelpful detection targets, subdivide the arc
+       further (more, shallower vertices) rather than deleting the chord.
+       The webots walls in webots-piso/Piso.wbt are generated to match this polygon
+       (room frame = -x_svg, y_svg) — regenerate them after editing here.
+
+       PILLARS: the apartment's two columns, from the "Pillar" / "Pillar(1)" Solids in
+       webots-piso/worlds/Piso.wbt. Final size 0.4 m perpendicular to the wall × 0.6 m along it ×3 m
+       high. Centres mapped x_svg = -x_webots (y unchanged):
+         • Pillar     webots (-8.31,      0.91    ) → svg (8.310, 0.910), x 8.110..8.510, y 0.610..1.210
+         • Pillar(1)  webots (-0.310883,  0.894031) → svg (0.311, 0.894), x 0.111..0.511, y 0.594..1.194
+       Both are PILASTERS against the side walls, so they are modelled as inward protrusions of this
+       contour rather than as separate shapes — SvgRoomLoader reads ONE simple polygon and has no
+       hole support, and free-standing columns would need either that or a second polygon id. At this
+       size both outer faces embed INTO their wall (11 mm on the right, 76 mm on the left), so only
+       the part protruding into the room is drawn: each column shows as a 0.6 m-wide bay stepping
+       ~0.32 m (right) / ~0.33 m (left) out of the wall. Keep the pillar size in Piso.wbt and the
+       protrusion here in sync — this contour is what the localizer matches lidar against. -->
   <rect width="9.11" height="9.86" fill="#ffffff"/>
   <polygon
     id="room_contour"
-    points="0.215,0.0 0.0,6.892 0.222,7.166 4.172,7.166 4.212,5.012 4.296,5.022 4.196,9.231 5.871,9.256 5.884,8.007 6.33,8.026 6.336,7.169 5.92,7.163 5.932,7.102 8.392,7.09 8.512,0.187 5.184,0.068 5.207,0.822 4.331,0.814 4.329,2.497 4.184,2.506 4.222,0.82 3.232,0.792 3.236,0.078"
+    points="0.215,0.0 0.196,0.594 0.511,0.594 0.511,1.194 0.178,1.194 0.0,6.892 0.222,7.166 4.172,7.166 4.212,5.012 4.296,5.022 4.196,9.231 5.871,9.256 5.884,8.007 6.33,8.026 6.336,7.169 5.92,7.163 5.932,7.102 8.392,7.09 8.494,1.210 8.110,1.210 8.110,0.610 8.505,0.610 8.507,0.461 8.282,0.179 5.184,0.068 5.207,0.822 4.331,0.814 4.329,2.497 4.184,2.506 4.222,0.82 3.232,0.792 3.236,0.078"
     fill="#e8e2d9" fill-rule="evenodd" stroke="#2b2b2b" stroke-width="0.025" stroke-linejoin="round"/>
 </svg>

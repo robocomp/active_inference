@@ -1,6 +1,8 @@
 #include "corner_detector.h"
 #include "corner_visibility.h"
 #include <cmath>
+#include <algorithm>
+#include <ranges>
 
 namespace rc {
 
@@ -10,6 +12,7 @@ namespace rc {
 void CornerDetector::set_model_corners(const std::vector<Eigen::Vector2f>& polygon_vertices)
 {
     model_corners_.clear();
+    model_dups_dropped_ = 0;
     polygon_ = polygon_vertices;   // retained for the occlusion/visibility ray-cast in detect()
     const int N = static_cast<int>(polygon_vertices.size());
     if (N < 3) return;
@@ -19,6 +22,13 @@ void CornerDetector::set_model_corners(const std::vector<Eigen::Vector2f>& polyg
         const Eigen::Vector2f& prev = polygon_vertices[(i + N - 1) % N];
         const Eigen::Vector2f& curr = polygon_vertices[i];
         const Eigen::Vector2f& next = polygon_vertices[(i + 1) % N];
+
+        // Exclusion at the MODEL level: a repeated/duplicated polygon vertex (SVG authoring artefact)
+        // produces a zero-length edge whose .normalized() is NaN — the angle test then silently passes
+        // or fails at random and, when it passes, two model corners sit on the same physical point and
+        // BOTH predict + detect the same wall intersection. Drop degenerate edges outright.
+        if ((prev - curr).squaredNorm() < 1e-8f or (next - curr).squaredNorm() < 1e-8f)
+            { model_dups_dropped_++; continue; }
 
         const Eigen::Vector2f d1 = (prev - curr).normalized();
         const Eigen::Vector2f d2 = (next - curr).normalized();
@@ -36,6 +46,14 @@ void CornerDetector::set_model_corners(const std::vector<Eigen::Vector2f>& polyg
             mc.wall_in_length  = (curr - prev).norm();
             mc.wall_out_length = (next - curr).norm();
             mc.original_index = i;
+
+            // Exclusion at the MODEL level (2): two kept corners must not coincide. Non-adjacent
+            // vertices can still land on the same point in a self-touching polygon; keeping both makes
+            // the Hungarian arbitrate a tie it cannot resolve and yields the duplicate pair seen in the UI.
+            const bool coincides = std::ranges::any_of(model_corners_, [&](const ModelCorner& k)
+                { return (k.position - mc.position).squaredNorm() < 1e-6f; });
+            if (coincides) { model_dups_dropped_++; continue; }
+
             model_corners_.push_back(mc);
         }
     }
@@ -140,9 +158,11 @@ static std::vector<int> solve_hungarian(
 CornerDetector::DetectionResult CornerDetector::detect(
         const std::vector<Eigen::Vector3f>& lidar_points,
         float robot_x, float robot_y, float robot_theta,
+        const Eigen::Matrix3f& pose_cov,
         float max_range) const
 {
     DetectionResult result;
+    result.model_dup_dropped = model_dups_dropped_;
     if (model_corners_.empty() || lidar_points.empty())
         return result;
 
@@ -162,7 +182,7 @@ CornerDetector::DetectionResult CornerDetector::detect(
                -sin_t * v.x() + cos_t * v.y()};
     };
 
-    const float search_r2 = params_.search_radius * params_.search_radius;
+    // (the gather disc is per-corner now — see corner_r below; search_radius is only its upper bound)
     const float max_range2 = max_range * max_range;
 
     // ── Phase 1: per-model-corner detection attempt ───────────────────────
@@ -172,9 +192,42 @@ CornerDetector::DetectionResult CornerDetector::detect(
     struct FOVCorner {
         const ModelCorner* mc;
         Eigen::Vector2f    predicted;   // robot-frame expected position
+        Eigen::Matrix2f    pred_cov;    // H·P_pose·Hᵀ — how much the PREDICTION itself can move
     };
     std::vector<FOVCorner>   fov_corners;
     std::vector<CornerMatch> candidates;
+
+    // Prediction Jacobian for a corner at robot-frame p = R(-θ)·(m_w - t):
+    //   ∂p/∂x, ∂p/∂y = −R(-θ) columns;   ∂p/∂θ = (p_y, −p_x).
+    // So H·P·Hᵀ is the corner's positional uncertainty induced by the pose uncertainty — the term that
+    // makes the association gate breathe with localization quality instead of being a fixed radius.
+    auto prediction_cov = [&](const Eigen::Vector2f& p) -> Eigen::Matrix2f {
+        Eigen::Matrix<float, 2, 3> H;
+        H(0, 0) = -cos_t; H(0, 1) = -sin_t; H(0, 2) =  p.y();
+        H(1, 0) =  sin_t; H(1, 1) = -cos_t; H(1, 2) = -p.x();
+        return H * pose_cov * H.transpose();
+    };
+
+    // Σ of a detection = inverse of its graded information, regularised by the weak "the corner lies
+    // inside the search disc" prior so a rank-1 (shallow-corner) Λ_det stays invertible. Shared by the
+    // exclusion test and the association gate, so both speak the same units.
+    const float merge_prior_sigma = params_.merge_prior_sigma > 0.f ? params_.merge_prior_sigma
+                                                                    : params_.search_radius;
+    const Eigen::Matrix2f prior_info =
+        Eigen::Matrix2f::Identity() / (merge_prior_sigma * merge_prior_sigma);
+    auto pos_cov = [&](const Eigen::Matrix2f& Lambda) -> Eigen::Matrix2f {
+        return (Lambda + prior_info).inverse();
+    };
+    // Map error: the layout is a traced hypothesis, so a detection can legitimately sit ~0.1-0.3 m off
+    // its predicted corner with nothing wrong. Enters every innovation covariance isotropically.
+    const Eigen::Matrix2f map_cov =
+        Eigen::Matrix2f::Identity() * (params_.map_sigma * params_.map_sigma);
+    // Squared Mahalanobis distance of δ under S, plus |S| for the PDA likelihood normalisation.
+    auto mahalanobis2 = [](const Eigen::Vector2f& delta, const Eigen::Matrix2f& S, float* det_out) {
+        const Eigen::Matrix2f Sinv = S.inverse();
+        if (det_out) *det_out = std::max(1e-12f, S.determinant());
+        return delta.dot(Sinv * delta);
+    };
 
     for (const auto& mc : model_corners_)
     {
@@ -192,7 +245,7 @@ CornerDetector::DetectionResult CornerDetector::detect(
 
         const Eigen::Vector2f predicted = to_robot(dw);
         result.corners_in_fov++;
-        fov_corners.push_back({&mc, predicted});
+        fov_corners.push_back({&mc, predicted, prediction_cov(predicted)});
 
         const Eigen::Vector2f dir_in  = to_robot(mc.edge_in_dir);
         const Eigen::Vector2f dir_out = to_robot(mc.edge_out_dir);
@@ -206,14 +259,29 @@ CornerDetector::DetectionResult CornerDetector::detect(
         group_out.reserve(128);
         const float in_limit  = mc.wall_in_length  + 0.2f;
         const float out_limit = mc.wall_out_length + 0.2f;
-        // Perpendicular tolerance for gathering wall points around the PREDICTED wall line. Must exceed
-        // the chronic model misfit or true wall points fall outside the band and no detection forms.
-        const float wall_band = params_.wall_band;
+        // ── Neighbourhood scaled to THIS corner's own walls ────────────────────────────────────────
+        // A fixed 1.5 m disc + 0.35 m band is fine for a corner between multi-metre walls, but the
+        // pillars introduced corners whose walls are 0.40 m and 0.60 m long — and whose parallel
+        // neighbour (the room's right wall) sits only 0.385 m away, barely outside a 0.35 m band. Lidar
+        // noise then leaks far, near-PARALLEL structure into a wall group, both PCA fits land on
+        // almost the same line, and their intersection shoots ~1.2 m down the degenerate direction
+        // (observed live: svg_v20 resid 1.17→1.26 m climbing, Σ collapsed onto the prior floor).
+        //
+        // The corner's own geometry sets its scale: the band may not exceed half the shorter adjacent
+        // wall, so a structure further away than that wall is long cannot be mistaken for it. Bounded
+        // BELOW by map_sigma — a band tighter than the map is wrong can never gather the true wall —
+        // and above by the configured wall_band, so multi-metre room corners are untouched.
+        const float min_wall  = std::min(mc.wall_in_length, mc.wall_out_length);
+        const float wall_band = std::clamp(0.5f * min_wall, params_.map_sigma, params_.wall_band);
+        // Likewise cap the gather disc: no point reaching 1.5 m out for a corner defined by 0.4 m walls.
+        const float corner_r  = std::min(params_.search_radius,
+                                         std::max(mc.wall_in_length, mc.wall_out_length) + wall_band);
+        const float corner_r2 = corner_r * corner_r;
 
         for (const auto& p : pts2d)
         {
             const Eigen::Vector2f d = p - predicted;
-            if (d.squaredNorm() > search_r2)
+            if (d.squaredNorm() > corner_r2)
                 continue;
 
             const float dist_to_in  = std::abs(normal_in.dot(d));
@@ -248,24 +316,42 @@ CornerDetector::DetectionResult CornerDetector::detect(
         if (!intersection)
             continue;   // truly parallel (det≈0) → no intersection point exists at all
 
-        // ── Association cap (KEPT): a detection far from the prediction is a different physical
-        //    corner, not a graded-quality issue. Guards the 1-to-1 Hungarian assignment. ──
+        // ── Coarse pre-filter only: keep the cost matrix small. The REAL gate is the Mahalanobis
+        //    test below, once Λ_det (and therefore Σ_det) exists. ──
         const float isect_dist = (*intersection - predicted).norm();
         if (isect_dist > params_.max_match_distance)
             { result.rej_dist++; continue; }
 
-        // ── Convexity (KEPT as a hard gate — the rot180 disambiguator): |dir·model_dir| below is
-        //    blind to a 180° edge flip, so a rotated-by-π hypothesis passes the orientation test.
-        //    The SIGNED convexity of the corner (reflex vs convex — e.g. the notch) is the one
-        //    feature that distinguishes the true orientation from its 180° twin. ──
+        // ── Convexity: the rot180 disambiguator. |dir·model_dir| below is blind to a 180° edge flip,
+        //    so a rotated-by-π hypothesis passes the orientation test; the SIGNED convexity (reflex vs
+        //    convex — e.g. the notch, the pillar roots) is the one feature that breaks the tie.
+        //
+        //    This used to read `sign_model·cross_det < 0.50·|sign_model|`, which divides out to
+        //    `sign_model·cross_det < 0.50` — i.e. it demanded |sin(turn)| ≥ 0.5, an undocumented
+        //    "detected interior angle must be ≤ 150°" cutoff bolted onto the sign test. Two separate
+        //    claims in one comparison, and the wedge-sharpness half is a hard threshold this codebase
+        //    forbids: shallow wedges are ALREADY handled continuously, because near-parallel walls make
+        //    Λ_det collapse to rank-1 and the corner contributes almost nothing on its own. Worse, the
+        //    layout's two chamfer outer ends sit at |cross| 0.65 / 0.63 — barely 0.13 above the cliff,
+        //    so ~10° of line-fit noise silently deleted exactly the corners the rounding introduced.
+        //
+        //    Keep ONLY the topological claim: the detected turn must not have the opposite sign to the
+        //    model's. Magnitude is evidence strength, and that is Λ_det's job, not a gate's.
         const float raw_dot_in  = line_in->direction().dot(dir_in);
         const float raw_dot_out = line_out->direction().dot(dir_out);
         const Eigen::Vector2f ori_in  = (raw_dot_in  >= 0.f ? 1.f : -1.f) * line_in->direction();
         const Eigen::Vector2f ori_out = (raw_dot_out >= 0.f ? 1.f : -1.f) * line_out->direction();
         {
             const float detected_cross = ori_in.x() * ori_out.y() - ori_in.y() * ori_out.x();
-            if (mc.convexity_sign * detected_cross < 0.50f * std::abs(mc.convexity_sign))
-                { result.rej_convex++; continue; }
+            // Normalised agreement in [-1,1]: +1 = same turn direction and sharp, 0 = wedge too shallow
+            // to tell, -1 = confidently the opposite convexity (the 180°-flipped hypothesis).
+            const float agree = detected_cross * (mc.convexity_sign >= 0.f ? 1.f : -1.f);
+            if (agree < 0.f)
+            {
+                result.rej_convex++;
+                result.convex_rej_agree_sum += agree;   // near 0 ⇒ shallow/noisy, near -1 ⇒ real flip
+                continue;
+            }
         }
 
         // ── GRADED per-detection information matrix Λ_det (robot frame) ────────────────────────
@@ -295,6 +381,15 @@ CornerDetector::DetectionResult CornerDetector::detect(
             if (s < 0.05f) result.soft_orient++;
         }
 
+        // ── Mahalanobis self-consistency gate: is this intersection plausibly THIS model corner,
+        //    given both the detection noise and how far the pose itself could be wrong? ──
+        {
+            const Eigen::Matrix2f S = pos_cov(Lambda) + fov_corners.back().pred_cov + map_cov;
+            const float d2 = mahalanobis2(*intersection - predicted, S, nullptr);
+            if (params_.assoc_chi2 > 0.f and d2 > params_.assoc_chi2)
+                { result.rej_dist++; continue; }
+        }
+
         CornerMatch cand;
         cand.detected    = *intersection;
         cand.predicted   = predicted;          // overwritten by Phase 2 winner
@@ -319,40 +414,173 @@ CornerDetector::DetectionResult CornerDetector::detect(
     if (candidates.empty())
         return result;
 
-    // ── Phase 2: Hungarian assignment ────────────────────────────────────
-    // cost[r][c] = distance from candidate c's detected position to fov
-    // corner r's predicted position, or INFEASIBLE if beyond max_match_distance.
-    // The solver guarantees each physical detection is claimed by at most one
-    // model corner, choosing the globally cheapest 1-to-1 pairing.
+    // ── Phase 1.5: EXCLUSION — two corners cannot occupy the same physical space ──────────────
+    // Phase 1 runs INDEPENDENTLY per model corner, so two model corners whose search discs overlap
+    // (adjacent vertices of a short wall, or the two lips of the notch) can each fit the SAME pair of
+    // walls and emit their own candidate at essentially the same intersection. The Hungarian below
+    // only enforces "one model corner per candidate OBJECT" — it happily accepts two distinct objects
+    // sitting on top of each other, which is what shows up in the UI as duplicated/near-coincident
+    // corners, and what double-counts that corner's precision in the RFE loss.
+    //
+    // The test is statistical, not metric: candidates a and b are the same physical corner when their
+    // separation is not resolvable given their own uncertainties,
+    //     d² = δᵀ (Σ_a + Σ_b)⁻¹ δ  <  χ²₂,     δ = x_a − x_b,
+    // with Σ = (Λ_det + I/σ_prior²)⁻¹ — the detection information regularised by the weak prior "the
+    // corner lies inside the search disc", so a rank-1 (shallow-corner) detection gets a large but
+    // FINITE covariance along its unconstrained direction instead of an infinite one. Consequence:
+    // two crisp detections 10 cm apart stay separate (a genuine narrow notch survives), two vague or
+    // mutually unconstrained ones fuse. No metric cutoff, no discarded evidence — coincident
+    // candidates are FUSED in information form (Λ = ΣΛ_i, x = Λ⁻¹ΣΛ_i x_i), which is exactly the
+    // posterior of the two observations under the identity hypothesis.
+    if (params_.merge_chi2 > 0.f and candidates.size() > 1)
+    {
+        std::vector<CornerMatch> fused;
+        std::vector<Eigen::Matrix2f> fused_cov;   // Σ of the fused estimate, for the next comparisons
+        std::vector<Eigen::Vector2f> fused_info_x;// Λ·x accumulator (information vector)
+        fused.reserve(candidates.size());
 
+        for (const auto& cand : candidates)
+        {
+            const Eigen::Matrix2f cov_c = pos_cov(cand.information);
+
+            int host = -1;
+            float best_d2 = params_.merge_chi2;
+            for (int k = 0; k < static_cast<int>(fused.size()); ++k)
+            {
+                const Eigen::Vector2f delta = cand.detected - fused[k].detected;
+                const Eigen::Matrix2f S = cov_c + fused_cov[k];
+                const float d2 = delta.dot(S.inverse() * delta);
+                if (d2 < best_d2) { best_d2 = d2; host = k; }
+            }
+
+            if (host < 0)   // resolvably distinct from every kept candidate → a new physical corner
+            {
+                fused.push_back(cand);
+                fused_cov.push_back(cov_c);
+                fused_info_x.push_back(cand.information * cand.detected);
+                continue;
+            }
+
+            // Same physical corner → information-form fusion into the host.
+            result.merged_coincident++;
+            auto& h = fused[host];
+            h.information += cand.information;
+            fused_info_x[host] += cand.information * cand.detected;
+            // Recover the fused mean; fall back to the host's own estimate if the summed information
+            // is still singular (both detections rank-1 along the same direction).
+            const Eigen::Matrix2f H = h.information + prior_info;
+            h.detected  = H.inverse() * (fused_info_x[host] + prior_info * h.detected);
+            h.angle_deg = std::max(h.angle_deg, cand.angle_deg);   // keep the better-conditioned wedge
+            fused_cov[host] = pos_cov(h.information);
+            {   // refresh the legacy display covariance from the fused information
+                Eigen::SelfAdjointEigenSolver<Eigen::Matrix2f> es(h.information);
+                const Eigen::Vector2f ev = es.eigenvalues();
+                Eigen::Vector2f inv;
+                for (int i = 0; i < 2; ++i) inv(i) = ev(i) > 1e-6f ? 1.f / ev(i) : 1e6f;
+                h.covariance = es.eigenvectors() * inv.asDiagonal() * es.eigenvectors().transpose();
+            }
+        }
+        candidates.swap(fused);
+    }
+
+    // ── Phase 2: Hungarian assignment on MAHALANOBIS cost ────────────────────────────────────────
+    // The solver only needs a cost matrix, so the statistically correct distance drops straight in:
+    //   cost[r][c] = δᵀ S_rc⁻¹ δ,   S_rc = Σ_det(c) + H_r·P_pose·H_rᵀ,   δ = x_c − p_r
+    // gated at χ²₂ (assoc_chi2). Beyond the gate the pair is INFEASIBLE, so the solver's existing
+    // "row with no feasible column stays unassigned" contract does the rejecting. Unlike the old
+    // metric cap this shrinks as the pose sharpens, which is exactly what stops a 0.3 m-spaced pillar
+    // corner from being claimed by its neighbour once the robot knows where it is.
     const int R = static_cast<int>(fov_corners.size());
     const int C = static_cast<int>(candidates.size());
 
     std::vector<std::vector<float>> cost(R, std::vector<float>(C, INFEASIBLE));
+    std::vector<std::vector<float>> lik (R, std::vector<float>(C, 0.f));   // PDA likelihoods
     for (int r = 0; r < R; ++r)
         for (int c = 0; c < C; ++c)
         {
-            const float d = (candidates[c].detected - fov_corners[r].predicted).norm();
-            if (d <= params_.max_match_distance)
-                cost[r][c] = d;
+            const Eigen::Matrix2f S = pos_cov(candidates[c].information) + fov_corners[r].pred_cov + map_cov;
+            float detS = 1.f;
+            const float d2 = mahalanobis2(candidates[c].detected - fov_corners[r].predicted, S, &detS);
+            if (params_.assoc_chi2 <= 0.f or d2 <= params_.assoc_chi2)
+            {
+                cost[r][c] = d2;
+                // Gaussian association likelihood (shared 2π factor cancels in the normalisation).
+                lik[r][c] = std::exp(-0.5f * d2) / std::sqrt(detS);
+            }
         }
 
     const std::vector<int> assignment = solve_hungarian(cost, R, C);
 
+    float assoc_prob_sum = 0.f;
     for (int r = 0; r < R; ++r)
     {
         const int c = assignment[r];
         if (c < 0) continue;
 
-        // Stamp model identity with the winning FOV corner
+        // ── Association posterior (PDA): given detection c, how probable is it that model corner r
+        //    produced it rather than any OTHER in-gate model corner? Normalising the likelihoods down
+        //    column c answers exactly that. Two corners that explain the detection equally well each
+        //    get ~0.5, three get ~0.33 — the corner stops voting instead of voting wrongly. This is
+        //    the ambiguity fix; the Hungarian above only picks the best guess, it cannot know the
+        //    guess was a coin flip.
+        float denom = 0.f;
+        float runnerup = INFEASIBLE;
+        for (int rr = 0; rr < R; ++rr)
+        {
+            denom += lik[rr][c];
+            if (rr != r) runnerup = std::min(runnerup, cost[rr][c]);   // best RIVAL for this detection
+        }
+        const float w = denom > 1e-20f ? std::clamp(lik[r][c] / denom, params_.assoc_min_weight, 1.f)
+                                       : params_.assoc_min_weight;
+
         CornerMatch m    = candidates[c];
         m.model_index    = fov_corners[r].mc->original_index;
         m.predicted      = fov_corners[r].predicted;
         m.model_world    = fov_corners[r].mc->position;
         m.distance       = (m.detected - m.predicted).norm();
+        m.assoc_prob     = w;
+        m.assoc_chi2_val = cost[r][c];
+        m.runnerup_chi2  = runnerup;
+        // Precision IS the confidence in the correspondence: an ambiguous match carries proportionally
+        // less information into the loss. The loss needs no change — it already consumes `information`.
+        m.information   *= w;
+        {   // keep the display covariance consistent with the down-weighted information
+            Eigen::SelfAdjointEigenSolver<Eigen::Matrix2f> es(m.information);
+            const Eigen::Vector2f ev = es.eigenvalues();
+            Eigen::Vector2f inv;
+            for (int i = 0; i < 2; ++i) inv(i) = ev(i) > 1e-6f ? 1.f / ev(i) : 1e6f;
+            m.covariance = es.eigenvectors() * inv.asDiagonal() * es.eigenvectors().transpose();
+        }
+        assoc_prob_sum += w;
         result.matches.push_back(m);
     }
     result.corners_accepted = static_cast<int>(result.matches.size());
+    result.mean_assoc_prob  = result.corners_accepted > 0
+                            ? assoc_prob_sum / static_cast<float>(result.corners_accepted) : 1.f;
+
+    // Residual + ambiguity distribution over the accepted set. resid_* measures the real model misfit
+    // (so map_sigma stops being a guess); runnerup/min_assoc identify WHICH corners are coin flips.
+    if (result.corners_accepted > 0)
+    {
+        float rs = 0.f, rmax = 0.f, chi = 0.f, ru = 0.f, pmin = 1.f;
+        int   nru = 0;
+        for (const auto& m : result.matches)
+        {
+            rs   += m.distance;
+            rmax  = std::max(rmax, m.distance);
+            chi  += m.assoc_chi2_val;
+            pmin  = std::min(pmin, m.assoc_prob);
+            // Only corners that actually HAVE a rival in gate contribute to the rival statistic.
+            if (m.runnerup_chi2 < INFEASIBLE * 0.5f) { ru += m.runnerup_chi2; ++nru; }
+        }
+        const float inv_n = 1.f / static_cast<float>(result.corners_accepted);
+        result.resid_mean         = rs * inv_n;
+        result.resid_max          = rmax;
+        result.resid_chi2_mean    = chi * inv_n;
+        result.corners_with_rival = nru;
+        result.runnerup_chi2_mean = nru > 0 ? ru / static_cast<float>(nru) : 0.f;
+        result.min_assoc_prob     = pmin;
+    }
     // Candidates that passed every quality gate but lost the 1-to-1 assignment.
     result.rej_unassigned = C - result.corners_accepted;
 

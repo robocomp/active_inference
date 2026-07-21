@@ -279,6 +279,33 @@ void RoomViewer::set_rt_rate_text(const QString& text)
         rt_rate_label_->setText(text);
 }
 
+void RoomViewer::set_room_stable(bool stable, int stable_frames, int frames_required)
+{
+    if (custom_widget_ == nullptr or custom_widget_->lbl_room_stable == nullptr)
+        return;
+
+    auto* lbl = custom_widget_->lbl_room_stable;
+
+    // Repainting the stylesheet every frame forces a full re-parse + relayout in Qt, so only touch the
+    // widget when the displayed state actually changes.
+    const QString text = stable ? QStringLiteral("ROOM STABLE")
+                                : QStringLiteral("STABILIZING %1/%2")
+                                      .arg(stable_frames).arg(std::max(1, frames_required));
+    if (lbl->text() == text and room_stable_shown_ == static_cast<int>(stable))
+        return;
+    lbl->setText(text);
+
+    if (room_stable_shown_ != static_cast<int>(stable))
+    {
+        lbl->setStyleSheet(stable
+            ? QStringLiteral("QLabel { background-color: #1e8b3a; color: white; border: 1px solid #145c26;"
+                             " border-radius: 4px; font-weight: bold; }")
+            : QStringLiteral("QLabel { background-color: #b02020; color: white; border: 1px solid #7a1616;"
+                             " border-radius: 4px; font-weight: bold; }"));
+        room_stable_shown_ = static_cast<int>(stable);
+    }
+}
+
 void RoomViewer::update_ui(const std::optional<rc::RoomConcept::UpdateResult>& loc_res)
 {
     if (!loc_res.has_value() || !ts_plot_fe_)

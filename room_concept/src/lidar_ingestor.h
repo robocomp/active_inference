@@ -70,6 +70,20 @@ public:
     // The localizer reads its lidar from here (also wired into RoomConcept::RunContext).
     [[nodiscard]] rc::HighLidarBuffer& buffer() noexcept { return high_lidar_buffer_; }
 
+    // ── Stream liveness, for the Waiting/Operating gate ────────────────────────────────────────
+    // Without LiDAR the localizer can never stabilize, so the agent must not sit in Operating
+    // pretending to work. These are the two questions the state machine asks.
+
+    // (a) BEFORE any DDS exists: is the media plane even advertised? Pure DSR-graph read (sensor node
+    //     + its media descriptor + a "lidar" stream in it), so it is safe to call from Waiting on the
+    //     main thread — no participant is created, which is what the media-plane rule requires.
+    //     `detail` (optional) receives a human-readable reason when it returns false.
+    [[nodiscard]] bool stream_descriptor_available(std::string* detail = nullptr) const;
+
+    // (b) ONCE Operating: are frames actually arriving? Wall-clock ms since the last sweep reached the
+    //     buffer, or -1 if none ever has. A live descriptor with a silent producer still reads -1/large.
+    [[nodiscard]] std::int64_t ms_since_last_frame() const noexcept;
+
 private:
     // Ingest-thread body: tightly paced poll of the reader so a fresh scan reaches the localizer with
     // ~0-2 ms latency instead of waiting for the next ~16 ms compute() tick. Sleeps briefly (woken on
@@ -124,6 +138,10 @@ private:
     std::uint64_t fresh_frames_      = 0;   // LidarFrames drained from the plane
     std::uint64_t served_            = 0;   // scans actually pushed to the buffer
     std::int64_t  last_src_report_ms_ = 0;
+
+    // Wall-clock stamp (ms since epoch) of the last sweep pushed to the buffer, 0 = never. Written on
+    // the ingest thread, read by the state machine on the main thread ⇒ atomic.
+    std::atomic<std::int64_t> last_frame_wall_ms_{0};
 };
 
 }  // namespace rc

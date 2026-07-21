@@ -1436,6 +1436,8 @@ namespace rc
             cp.wall_band      = params.corner_wall_band;
             cp.base_sigma     = params.corner_base_sigma;
             cp.orient_tau_deg = params.corner_orient_tau_deg;
+            cp.merge_chi2         = params.corner_merge_chi2;
+            cp.merge_prior_sigma  = params.corner_merge_prior_sigma;
         }
         corner_detector_.set_model_corners(polygon_vertices);
 
@@ -1717,7 +1719,9 @@ namespace rc
             auto pa = newest_cpu.accessor<float, 1>();
             const float cx = pa[0], cy = pa[1], cth = pa[2];
 
-            auto det = corner_detector_.detect(all_points, cx, cy, cth);
+            // current_covariance feeds the association gate: a poorly-localized robot associates
+            // permissively, a sharply-localized one refuses a neighbouring corner outright.
+            auto det = corner_detector_.detect(all_points, cx, cy, cth, current_covariance);
             res.corners_in_fov = det.corners_in_fov;
             res.corner_matches = det.matches;
 
@@ -1726,10 +1730,19 @@ namespace rc
             static std::uint64_t corner_dbg_k = 0;
             if ((corner_dbg_k++ % 20) == 0)
                 std::print("[corners] in_fov={} detected={} accepted={} | occluded={} fewpoints(FORMATION)={} "
-                           "dist={} soft_orient={} convex={} unassigned={}\n",
+                           "gate={} soft_orient={} convex={}(agree={:.2f}) unassigned={} | "
+                           "merged_coincident={} model_dups={}\n",
                            det.corners_in_fov, det.corners_detected, det.corners_accepted,
                            det.rej_occluded, det.rej_fewpoints, det.rej_dist, det.soft_orient,
-                           det.rej_convex, det.rej_unassigned);
+                           det.rej_convex, det.convex_rej_agree_mean(), det.rej_unassigned,
+                           det.merged_coincident, det.model_dup_dropped);
+            // The residual-distribution line and the per-corner AMBIGUOUS dump that lived here were
+            // one-off instrumentation for setting map_sigma from data (2026-07-20) and are removed now
+            // that it is set. DetectionResult still CARRIES every one of those numbers — resid_mean/max,
+            // resid_chi2_mean, corners_with_rival, runnerup_chi2_mean, min_assoc_prob, and per-match
+            // assoc_prob / assoc_chi2_val / runnerup_chi2 — so re-enabling is a print, not a re-derivation.
+            // (They were also mis-scoped: only the print above was inside the %20 throttle, so those two
+            // fired EVERY frame.)
 
             // Store corner observations in the newest slot for the RFE loss
             auto& newest_slot = window_mgr_.newest();

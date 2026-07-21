@@ -134,6 +134,12 @@ struct RoomConfig
     // nodes + descriptors exist.
     bool        LIDAR_USE_MEDIA   = true;   // false ⇒ DSR graph laser_* only
 
+    // Waiting/Operating gate on the LiDAR media plane. Without LiDAR the localizer can never
+    // stabilize, so the agent stays in (or falls back to) Waiting instead of sitting in Operating
+    // doing nothing. 0 on either knob disables that half of the gate.
+    int LIDAR_STALL_TIMEOUT_MS = 3000;   // Operating: no sweep for this long ⇒ back to Waiting
+    int LIDAR_WAIT_LOG_PERIOD_MS = 2000; // Waiting: how often to reprint why we are still waiting
+
     // Camera-overlay object projection: DSR node TYPES whose oriented boxes are projected on
     // the live RGB image (alongside the always-drawn walls). Config Overlay.ObjectTypes is a
     // comma-separated list (e.g. "object,table,cylinder,chair"); order is irrelevant.

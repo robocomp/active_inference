@@ -79,6 +79,10 @@ public:
                                     std::uint64_t timestamp_ms);
 
     [[nodiscard]] bool  room_node_created() const noexcept { return room_node_created_; }
+    // Consecutive "stable" localization frames accumulated so far (resets to 0 on any unstable frame,
+    // on relocalization and on room deletion). Drives the UI stabilization readout; meaningless once
+    // room_node_created() is true, since the counter stops being advanced then.
+    [[nodiscard]] int   stable_frames() const noexcept { return stable_frames_; }
     [[nodiscard]] std::uint64_t robot_id() const noexcept { return dsr_robot_id_; }
 
     // World-frame (room) positions of the pinned-object landmarks, refreshed each frame by

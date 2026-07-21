@@ -326,6 +326,10 @@ public:
         float corner_wall_band      = 0.35f;           // perpendicular gather band (m) — MUST exceed model misfit
         float corner_base_sigma     = 0.04f;           // detection noise floor σ0 (m) per wall
         float corner_orient_tau_deg = 20.0f;           // smooth orientation-trust scale (deg)
+        // Exclusion ("two corners cannot occupy the same physical space"): coincident detections are
+        // fused when their separation is inside a χ²₂ region of their OWN combined covariance.
+        float corner_merge_chi2 = 5.991f;              // χ²₂ @95%; 0 disables the exclusion test
+        float corner_merge_prior_sigma = 0.0f;         // m; 0 ⇒ use the detector's search_radius
         // Corner-consistency gate on the prediction early-exit. Without it, the early-exit validates the
         // predicted pose on SDF ALONE — and a rot180-flipped pose is SDF-ambiguous, so a flip slips through
         // while the corners (which DO disagree) are bypassed. When on, a predicted pose whose worst corner

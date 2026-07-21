@@ -1,5 +1,45 @@
 #include "specificworker.h"
 
+#include <format>
+#include <print>
+
+#include <QDateTime>
+
+// ── LiDAR stream gate ───────────────────────────────────────────────────────────────────────────
+// The localizer's ONLY evidence is the LiDAR sweep. With no stream it cannot stabilize, so the agent
+// must advertise that honestly (Waiting + a log line) instead of sitting in Operating looking healthy
+// while nothing converges. Two probes, because "no stream" has two distinct causes:
+//   * the producer never advertised the plane  → graph-only descriptor probe, usable before any DDS;
+//   * the plane is advertised but silent/dead   → frame-age probe, only meaningful once Operating.
+bool SpecificWorker::lidar_stream_ready(std::string* why) const
+{
+    if (not lidar_ingestor_)
+    {
+        if (why) *why = "LidarIngestor not constructed yet";
+        return false;
+    }
+    return lidar_ingestor_->stream_descriptor_available(why);
+}
+
+bool SpecificWorker::lidar_stream_stalled(std::int64_t* age_ms_out) const
+{
+    const int timeout = params.LIDAR_STALL_TIMEOUT_MS;
+    if (timeout <= 0 or not lidar_ingestor_)
+        return false;
+
+    const std::int64_t age = lidar_ingestor_->ms_since_last_frame();
+    if (age_ms_out) *age_ms_out = age;
+
+    // Before the first sweep ever arrives, measure from Operating entry: subscriber discovery is
+    // throttled and the producer may be mid-startup, so a cold Operating is not yet a stall.
+    if (age < 0)
+    {
+        const std::int64_t since_entry = QDateTime::currentMSecsSinceEpoch() - operating_since_ms_;
+        return operating_since_ms_ > 0 and since_entry > timeout;
+    }
+    return age > timeout;
+}
+
 void SpecificWorker::waiting_enter()
 {
     presence_coordinator_.waiting_enter();

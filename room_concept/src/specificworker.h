@@ -102,6 +102,18 @@ class SpecificWorker : public GenericWorker
         // ── LiDAR acquisition (decoupled ingest thread + buffer + health) ──────
         std::unique_ptr<rc::LidarIngestor> lidar_ingestor_;
 
+        // ── LiDAR stream gate on Waiting→Operating ─────────────────────────────
+        // Without LiDAR the localizer can never stabilize, so Operating would be a lie. True when the
+        // media plane is advertised in the graph; `why` receives the reason when it is not.
+        [[nodiscard]] bool lidar_stream_ready(std::string* why = nullptr) const;
+        // Operating: has the stream gone silent past LidarStallTimeoutMs? Grace-counted from Operating
+        // entry so a normal warm-up (subscriber discovery + first sweep) is not mistaken for a stall.
+        [[nodiscard]] bool lidar_stream_stalled(std::int64_t* age_ms_out = nullptr) const;
+        std::int64_t operating_since_ms_    = 0;   // wall clock of the last Operating entry
+        std::int64_t last_wait_log_ms_      = 0;   // throttles the "still waiting" line
+        bool         lidar_stall_reported_  = false; // one presenceLost per stall episode
+        bool         degraded_from_lidar_   = false; // makes the Degraded log name the real reason
+
         // ── Compute-loop pacing / timing telemetry (worker-owned) ──────────────
         std::atomic<bool> operating_compute_queued_{false};
         std::int64_t      last_affordance_monitor_ms_ = 0;

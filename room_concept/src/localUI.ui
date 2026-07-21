@@ -42,6 +42,41 @@
        </property>
       </widget>
      </item>
+     <item>
+      <widget class="QLabel" name="lbl_room_stable">
+       <property name="text">
+        <string>ROOM ?</string>
+       </property>
+       <property name="alignment">
+        <set>Qt::AlignCenter</set>
+       </property>
+       <property name="minimumWidth">
+        <number>150</number>
+       </property>
+       <property name="minimumHeight">
+        <number>35</number>
+       </property>
+       <property name="maximumHeight">
+        <number>35</number>
+       </property>
+       <property name="toolTip">
+        <string>Room stabilization state: red until localization is stable enough to create the room node, green once the room exists in the DSR graph.</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <spacer name="controlsSpacer">
+       <property name="orientation">
+        <enum>Qt::Horizontal</enum>
+       </property>
+       <property name="sizeHint" stdset="0">
+        <size>
+         <width>40</width>
+         <height>20</height>
+        </size>
+       </property>
+      </spacer>
+     </item>
     </layout>
    </item>
    <item>

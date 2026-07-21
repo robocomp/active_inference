@@ -60,6 +60,8 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     // Media plane (RGB for the camera window + LiDAR for LidarIngestor). DDS domain +
     // topics are read from the producer's media descriptor on the graph, not config.
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "Media.lidar_use_media", p.LIDAR_USE_MEDIA);
+    rc::ConfigLoaderUtils::load_optional<int>(cl, "Media.lidar_stall_timeout_ms", p.LIDAR_STALL_TIMEOUT_MS);
+    rc::ConfigLoaderUtils::load_optional<int>(cl, "Media.lidar_wait_log_period_ms", p.LIDAR_WAIT_LOG_PERIOD_MS);
     rc::ConfigLoaderUtils::load_optional<std::string>(cl, "Media.lidar_helios_name", p.LIDAR_HELIOS_NAME);
     rc::ConfigLoaderUtils::load_optional<std::string>(cl, "Media.lidar_robot_frame", p.LIDAR_ROBOT_FRAME);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "Media.lidar_high_min_height", p.LIDAR_HIGH_MIN_HEIGHT);
@@ -157,6 +159,8 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.CornerWallBand", room_concept.params.corner_wall_band);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.CornerBaseSigma", room_concept.params.corner_base_sigma);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.CornerOrientTauDeg", room_concept.params.corner_orient_tau_deg);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.CornerMergeChi2", room_concept.params.corner_merge_chi2);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.CornerMergePriorSigma", room_concept.params.corner_merge_prior_sigma);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.CornerPrecisionGain", room_concept.params.corner_precision_gain);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.CornerHuberSigma", room_concept.params.corner_huber_sigma);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.CornerEarlyExitCheck", room_concept.params.corner_early_exit_check);

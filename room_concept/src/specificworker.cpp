@@ -227,13 +227,28 @@ void SpecificWorker::initialize()
 
     // ── Presence coordinator ────────────────────────────────────────────────
     presence_coordinator_.configure(configLoader, G, static_cast<std::uint32_t>(agent_id));
+    // Colour this agent's node in the graph view by its live health: the coordinator already
+    // publishes the presence lifecycle; this adds the external FSM axis (Initialize/Compute/
+    // Emergency/Restore). Generic discovery via objectName(), so genericworker regeneration
+    // cannot break it.
+    presence_coordinator_.attach_state_machine(&statemachine);
     AgentPresenceCoordinator::Policy presence_policy;
     presence_policy.set_local_ready_false_on_waiting_enter = false;
     presence_policy.set_local_ready_true_on_operating_enter = false;
     presence_policy.set_local_ready_false_on_degraded_enter = false;
     presence_coordinator_.set_policy(presence_policy);
     presence_coordinator_.set_transition_hooks({
-        .request_presence_ready = [this]() { emit presenceReady(); },
+        // Required peers being up is necessary but NOT sufficient: without the LiDAR media plane the
+        // localizer has no evidence and can never stabilize, so advancing to Operating would just look
+        // like a silent hang. Hold in Waiting until the stream is advertised; on_waiting_loop re-checks
+        // every tick and advances the moment it appears (same shape as the voxelizer's room gate).
+        // Declines SILENTLY when the stream is missing — this fires on every presence event, so
+        // logging here would spam. on_waiting_loop owns the (throttled) "why are we still waiting" line.
+        .request_presence_ready = [this]()
+        {
+            if (lidar_stream_ready())
+                emit presenceReady();
+        },
         .request_presence_lost  = [this]() { emit presenceLost(); },
     });
     presence_coordinator_.set_peer_hooks({
@@ -264,8 +279,39 @@ void SpecificWorker::initialize()
                 qInfo() << "  missing:" << m;
             }
         },
+        .on_waiting_loop = [this]()
+        {
+            if (shutting_down_)
+                return;
+            const bool peers_ready = presence_coordinator_.all_required_ready();
+            std::string why;
+            const bool lidar_ready = lidar_stream_ready(&why);
+            if (peers_ready and lidar_ready)
+            {
+                std::println("[SM] Waiting: peers ready and LiDAR stream '{}' advertised -> Operating", why);
+                emit presenceReady();
+                return;
+            }
+            // Say WHY we are stuck, on a throttle. This is the line that was missing: a room agent
+            // with no lidar producer used to sit in Waiting printing nothing at all.
+            const auto now = QDateTime::currentMSecsSinceEpoch();
+            if (params.LIDAR_WAIT_LOG_PERIOD_MS > 0 and
+                now - last_wait_log_ms_ >= params.LIDAR_WAIT_LOG_PERIOD_MS)
+            {
+                last_wait_log_ms_ = now;
+                std::string missing;
+                for (const auto& label : presence_coordinator_.missing_required_names())
+                    missing += " " + label;
+                std::println("[SM] Waiting — peers{}{} | lidar: {}",
+                             peers_ready ? " OK" : " MISSING:",
+                             peers_ready ? std::string{} : missing,
+                             lidar_ready ? ("OK (" + why + ")") : why);
+            }
+        },
         .on_operating_enter = [this]()
         {
+            operating_since_ms_   = QDateTime::currentMSecsSinceEpoch();
+            lidar_stall_reported_ = false;
             qInfo() << "[SM] -> Operating: all required constraints satisfied";
             QTimer::singleShot(0, this, [this]() { presence_coordinator_.set_local_ready(true); });
             if (!room_concept_.is_running())
@@ -283,6 +329,20 @@ void SpecificWorker::initialize()
             const auto run_operating_tick = [this]()
             {
                 operating_compute_queued_.store(false, std::memory_order_release);
+                // Stream-stall guard: acting on a dead LiDAR means integrating stale evidence, which
+                // CLAUDE.md forbids. Drop back to Waiting (via Degraded, whose only transition is
+                // ->Waiting) so the gate above can re-admit us when the producer returns.
+                if (std::int64_t age = 0; not lidar_stall_reported_ and lidar_stream_stalled(&age))
+                {
+                    lidar_stall_reported_ = true;
+                    degraded_from_lidar_  = true;
+                    std::println("[SM] Operating -> Waiting: LiDAR stream STALLED ({}) — "
+                                 "not localizing on stale evidence",
+                                 age < 0 ? std::string("no sweep ever arrived")
+                                         : std::format("last sweep {} ms ago", age));
+                    emit presenceLost();
+                    return;
+                }
                 compute();
                 if (auto v = find_graph_viewer(""); v)
                     v->set_external_fps(states.at("Operating")->getActualFps());
@@ -307,7 +367,16 @@ void SpecificWorker::initialize()
             // then "recovered" to Operating in a half-broken state and exited anyway. Wait a grace
             // period and shut down only if a required peer is STILL genuinely missing.
             constexpr int REQUIRED_LOSS_GRACE_MS = 3000;
-            qInfo() << "[SM] -> Degraded: required peer lost —" << REQUIRED_LOSS_GRACE_MS << "ms grace before shutdown";
+            // A LiDAR stall also routes through here (Degraded is the only way back to Waiting), but it
+            // is NOT a peer loss — say so, otherwise the log blames the wrong thing. The grace timer
+            // below then finds all peers present and correctly declines to shut down.
+            if (degraded_from_lidar_)
+            {
+                degraded_from_lidar_ = false;
+                qInfo() << "[SM] -> Degraded (LiDAR stall, peers intact) — passing through to Waiting";
+            }
+            else
+                qInfo() << "[SM] -> Degraded: required peer lost —" << REQUIRED_LOSS_GRACE_MS << "ms grace before shutdown";
             QTimer::singleShot(REQUIRED_LOSS_GRACE_MS, this, [this]()
             {
                 if (shutting_down_)
@@ -533,6 +602,11 @@ void SpecificWorker::compute()
     {
         section_timer.restart();
         viewer_->update_ui(loc_res);
+        // Room-stabilization indicator: GREEN once the room node exists in the graph (the very
+        // condition downstream consumers gate on), RED while stable frames are still accumulating.
+        viewer_->set_room_stable(scene_graph_->room_node_created(),
+                                 scene_graph_->stable_frames(),
+                                 params.STABLE_FRAMES_REQUIRED);
         t_ui_ms = section_timer.elapsed();
     }
 

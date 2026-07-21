@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <format>
 #include <optional>
 #include <print>
 #include <utility>
@@ -20,6 +21,7 @@
 #include <dsr/api/dsr_rt_api.h>
 
 #include "../../common/media_transport/lidar_plane_reader.h"
+#include "../../common/media_transport/media_transport.h"   // descriptor_from_graph (graph-only probe)
 
 namespace
 {
@@ -195,6 +197,49 @@ void LidarIngestor::ingest_scan(std::vector<Eigen::Vector3f>&& points_high, std:
     if (room_concept_)
         room_concept_->notify_new_lidar(static_cast<std::int64_t>(ts));
     ++served_;
+    // Wall clock, NOT the source stamp: the state machine asks "did anything arrive recently?", and a
+    // producer republishing an old stamp (or a clock skew between hosts) must not read as liveness.
+    last_frame_wall_ms_.store(QDateTime::currentMSecsSinceEpoch(), std::memory_order_release);
+}
+
+bool LidarIngestor::stream_descriptor_available(std::string* detail) const
+{
+    if (not params_->LIDAR_USE_MEDIA)
+    {
+        if (detail) *detail = "LidarUseMedia=false — no LiDAR source configured";
+        return false;
+    }
+    if (not G_)
+    {
+        if (detail) *detail = "no DSR graph";
+        return false;
+    }
+    // A plane is usable when its sensor node carries a media descriptor advertising a "lidar" stream.
+    // Same lookup make_lidar_subscriber_from_graph() does, minus the DDS init — so a true answer here
+    // means the subscriber WILL come up, and a false one names exactly what the producer hasn't
+    // published yet. Mirrors the reader's preference order: helios first, fused lidar3D as fallback.
+    for (const auto& node : {params_->LIDAR_HELIOS_NAME, params_->LIDAR_NAME})
+    {
+        const auto desc = rc::media::descriptor_from_graph(*G_, node);
+        if (desc.has_value() and desc->subscriber_config("lidar").has_value())
+        {
+            if (detail) *detail = node;
+            return true;
+        }
+    }
+    if (detail)
+        *detail = std::format("no 'lidar' media descriptor on node '{}' nor fallback '{}' "
+                              "(is robot_concept up and advertising?)",
+                              params_->LIDAR_HELIOS_NAME, params_->LIDAR_NAME);
+    return false;
+}
+
+std::int64_t LidarIngestor::ms_since_last_frame() const noexcept
+{
+    const std::int64_t last = last_frame_wall_ms_.load(std::memory_order_acquire);
+    if (last == 0)
+        return -1;   // nothing has ever arrived
+    return QDateTime::currentMSecsSinceEpoch() - last;
 }
 
 void LidarIngestor::accumulate_geometry_sample(const std::vector<Eigen::Vector3f>& pts)
