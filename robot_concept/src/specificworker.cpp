@@ -300,6 +300,11 @@ void SpecificWorker::initialize()
 	qInfo() << __FUNCTION__ << "Started reader threads (enabled sensors only)";
 
 	presence_coordinator_.configure(configLoader, G, static_cast<std::uint32_t>(agent_id));
+	// Colour this agent's node in the graph view by its live health: the coordinator already
+	// publishes the presence lifecycle; this adds the external FSM axis (Initialize/Compute/
+	// Emergency/Restore). Generic discovery via objectName(), so genericworker regeneration
+	// cannot break it.
+	presence_coordinator_.attach_state_machine(&statemachine);
 	presence_coordinator_.set_transition_hooks({
 		.request_presence_ready = [this]() { emit presenceReady(); },
 		.request_presence_lost  = [this]() { emit presenceLost(); },
@@ -382,6 +387,7 @@ void SpecificWorker::initialize()
 			return;
 		trigger_graph_layout_twopi();
 		wire_view_data_signal();   // enable right-click "View data" → live FPS viewer on media-plane nodes
+		wire_agent_status_overlay();   // colour every agent node by its live health (green/orange/red/grey)
 	});
 }
 
@@ -1167,6 +1173,31 @@ void SpecificWorker::wire_view_data_signal()
 	QObject::connect(graph_viewer, &DSR::GraphViewer::view_data_signal, this,
 	                 &SpecificWorker::open_stream_viewer,
 	                 static_cast<Qt::ConnectionType>(Qt::QueuedConnection | Qt::UniqueConnection));
+}
+
+void SpecificWorker::wire_agent_status_overlay()
+{
+	// Every agent already paints its own node under "mind" (rc::AgentStatePublisher writes
+	// agent_fsm_state/agent_presence_state/color on it). The one state nobody can self-report is
+	// death: a crashed agent's node just freezes on its last colour. Since robot_concept is the agent
+	// that displays the complete graph, it is the natural observer — it ages each agent's heartbeat
+	// and greys out the ones that stopped beating, so "everything green" actually means everything is
+	// alive AND working. Main-thread only; no-op when the graph view is disabled (Agent.graph=false).
+	const auto it = graph_viewers.find("");
+	if (it == graph_viewers.end() || !it->second)
+		return;
+	auto* graph_viewer = qobject_cast<DSR::GraphViewer*>(it->second->get_widget(DSR::DSRViewer::view::graph));
+	if (!graph_viewer)
+		return;
+	// Display-only horizon, INTENTIONALLY decoupled from Presence.heartbeat_timeout_ms. That one is
+	// deliberately long (15-25 s across the fleet) because acting on a short silence — declaring a
+	// required peer lost and shutting down — proved hypersensitive to graph-publish stalls and to the
+	// voxelizer's restart window. Greying a node early costs nothing and is undone the moment the
+	// heartbeat resumes, so the display gets its own, much shorter knob.
+	const int stale_after_ms = configLoader.exists("Presence.stale_display_ms")
+	                         ? configLoader.get<int>("Presence.stale_display_ms")
+	                         : 3000;
+	agent_status_overlay_.start(G, graph_viewer, stale_after_ms);
 }
 
 void SpecificWorker::open_stream_viewer(std::uint64_t node_id, const std::string &type)

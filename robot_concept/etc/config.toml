@@ -71,6 +71,12 @@ heartbeat_timeout_ms = 15000  # match controller/room_concept; 3s was hypersensi
 rejoin_grace_ms = 1500
 stale_grace_ms = 120000  # 2 min grace: covers peer restart time before declaring lost
 agent_info_period_ms = 1000
+# DISPLAY ONLY — how long an agent's heartbeat may go silent before its node in the graph view is
+# greyed out (see common/agent_state_publisher/agent_status_overlay.h). Deliberately much shorter
+# than heartbeat_timeout_ms above: seeing a dead agent go grey fast costs nothing, whereas ACTING on
+# a 3 s silence (declaring the peer lost and shutting down) is what proved hypersensitive. Nothing
+# behavioural keys off this value.
+stale_display_ms = 3000
 
 [Owns]
 nodes = ["mind", "robot_concept 6"]

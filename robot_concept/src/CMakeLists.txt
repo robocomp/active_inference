@@ -4,6 +4,10 @@ find_package(Qt6 COMPONENTS OpenGL OpenGLWidgets QUIET)
 LIST(APPEND SOURCES
   ../../common/agent_presence_monitor/agent_presence_monitor.cpp
   ../../common/agent_presence_coordinator/agent_presence_coordinator.cpp
+  # Observer half of the agent-health display: greys out agent nodes whose heartbeat went stale.
+  # robot_concept only — it is the agent that shows the complete graph. Its .cpp confines the
+  # dsr_gui includes to one TU (their AbstractGraphicViewer collides with the component-local one).
+  ../../common/agent_state_publisher/agent_status_overlay.cpp
   ../../common/media_transport/media_transport.cpp
   ../../common/media_transport/generated/idl/image_framePubSubTypes.cxx
   ../../common/media_transport/generated/idl/image_frameTypeObjectSupport.cxx
@@ -23,6 +27,9 @@ LIST(APPEND SOURCES
 LIST(APPEND HEADERS
   ../../common/agent_presence_monitor/agent_presence_monitor.h
   ../../common/agent_presence_coordinator/agent_presence_coordinator.h
+  ../../common/agent_state_publisher/agent_status.h
+  ../../common/agent_state_publisher/agent_state_publisher.h
+  ../../common/agent_state_publisher/agent_status_overlay.h
   ../../common/media_transport/media_transport.h
   ../src/sensor_media_publisher.h
   ../src/specificworker.h

@@ -39,6 +39,7 @@
 #include <QWidget>
 
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
+#include "../../common/agent_state_publisher/agent_status_overlay.h"
 #include "sensor_media_publisher.h"
 
 /**
@@ -253,6 +254,13 @@ private:
 	// window for zed/ricoh, a top-down point view for lidar3D/helios/bpearl. Each viewer owns its own
 	// media subscriber (built via the shared factory on the main thread) and polls it on a QTimer.
 	void wire_view_data_signal();                                          // connect once, main thread
+
+	// robot_concept is the only agent that displays the COMPLETE graph, so it is where the whole
+	// system's health is read at a glance: every agent paints its own node (rc::AgentStatePublisher),
+	// and this overlay adds the one thing a dead agent cannot report about itself — that its
+	// heartbeat went stale. See common/agent_state_publisher/agent_status_overlay.h.
+	void wire_agent_status_overlay();                                      // start once, main thread
+	rc::AgentStatusOverlay agent_status_overlay_;
 	void open_stream_viewer(std::uint64_t node_id, const std::string &type);
 	std::map<std::uint64_t, QWidget*> stream_viewers_;                     // one live viewer per node id
 	void on_optional_peer_lost(const std::string &name, std::uint32_t id);
