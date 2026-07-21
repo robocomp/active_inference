@@ -159,6 +159,11 @@ public:
         int soft_orient = 0;   // orientation trust ori_scale < 0.05 (heavily downweighted, NOT discarded)
         int rej_convex = 0;    // convexity sign mismatch — KEPT as a hard gate (topological disambiguator
                                // for rot180: |dir·model_dir| is 180°-blind, only convexity breaks the tie)
+        int rej_noninformative = 0; // ★ association posterior 0/NaN, or Λ_det not finite / rank-0 after
+                               // weighting ⇒ the match carries NO information and was DROPPED rather
+                               // than emitted as a zero-precision factor. A zero-precision observation
+                               // constrains nothing yet still enters the Hessian, which is how a
+                               // singular Hessian (cond_num 1e8) turned into a NaN pose on 2026-07-21.
         int rej_unassigned = 0;// survived to candidate but lost the 1-to-1 Hungarian assignment
         int merged_coincident = 0; // ★ candidates absorbed by the exclusion test — two model corners
                                // synthesised detections at the same physical point (overlapping search

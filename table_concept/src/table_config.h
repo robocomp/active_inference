@@ -209,9 +209,10 @@ struct TableConfig
 
     // ── Multi-instance birth/associate/death (shared rc::InstanceTracker) ─────────────────────────
     // "table" masks are associated to instances by a covariance-gated global 1-to-1; an unexplained mask
-    // spawns a new table; an instance unobserved for tracker_death_frames is retired (death off by default).
-    // Tables are large static furniture: keep birth_min_sep large (no two table centres that close) and
-    // death_frames LARGE so a long occlusion doesn't drop a table.
+    // spawns a new table. There is NO death-by-occlusion: a table is large static furniture, so a long
+    // occlusion is not absence. An instance leaves only via the MERGE operator (two tables cannot share
+    // space) or the existence-removal channel (table_existence.cpp). Keep birth_min_sep large so no two
+    // table centres can sit that close.
     float tracker_gate_mahalanobis = 9.0f;    // χ²₂ gate (~3σ) for a mask↔instance match once it has a cov
     float tracker_gate_fallback_m  = 0.50f;   // metric XY gate (m) before an instance has a usable covariance
     // Detection-noise std R (m) added to the fit cov in the Mahalanobis gate (S = P + R²I). For a table
@@ -229,7 +230,6 @@ struct TableConfig
     float birth_fusion_gain     = 6.0f;   // max extra evidence/frame at full corroboration (0 ⇒ baseline)
     float birth_fusion_mass_ref = 8.0f;   // residual mass at which corroboration is half-saturated (m/(m+ref))
     float birth_fusion_radius_m = 0.50f;  // window (m) for the residual-mass sample under the detection
-    int   tracker_death_frames      = 300;    // frames an instance may go unobserved before retirement (large)
     float tracker_birth_min_sep_m   = 0.60f;  // a birth must be ≥ this (m) from every existing table
     // Physical exclusion: collapse two instances whose oriented footprints overlap by ≥ this fraction of
     // the SMALLER footprint (two tables cannot share space). 0 disables the merge.

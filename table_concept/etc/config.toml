@@ -44,7 +44,7 @@ Emergency = 500
 [Component.Debug]
 Verbose = false
 
-# ── AI2 belief (TABLE_FIT_AI2.md): full-covariance recursive filter; legs derived, soft mixture ──
+# ── AI2 belief (TABLE.md): full-covariance recursive filter; legs derived, soft mixture ──
 # This is the ONLY fit path (the legacy SDF-gradient/Fisher/queue/silhouette fit has been removed).
 [TableModel]
 SigmaObs = 0.05             # top/leg SDF split band (m): a point within TOP_THICKNESS+SigmaObs below the top
@@ -246,14 +246,12 @@ BirthFusion = true         # true to enable; needs BirthSurpriseProbe infra (rea
 BirthFusionGain = 6.0      # max extra evidence/frame at full corroboration (0 ⇒ baseline birth timing)
 BirthFusionMassRef = 8.0   # residual mass at which corroboration is half-saturated
 BirthFusionRadiusM = 0.50  # window (m) for the residual-mass sample under the detection
-                          # Removal is by the MERGE operator ONLY (two tables can't share space).
 BirthMinSepM = 0.60       # a birth must be ≥ this (m) from every existing table (anti-duplicate)
 MergeOverlap = 0.05       # physical exclusion: collapse two instances whose oriented footprints overlap by
                           # ≥ this fraction of the smaller footprint (two tables cannot share space). 0=off.
 BirthWidthM = 1.0         # default geometry for a table BORN from a mask (the fit refines from here)
 BirthDepthM = 0.6
 BirthHeightM = 0.75
-                          # vs raw squared-Mahalanobis. Gate is m² either way. Matters under clutter.
 # Ricoh-360 ATTENTION gate. A slice with depth_var>0 is a peripheral 360-RGB YOLO detection (dense ZED slices
 # have depth_var==0). It is bearing-only: it never births/associates/fits, it only raises attention
 # (process_ricoh_bearings) so the robot seeks a good ZED view.

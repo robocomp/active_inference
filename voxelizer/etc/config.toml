@@ -107,14 +107,13 @@ input_size = 640
 use_trt = true             # dense model; CUDA EP avoids the TRT version lock
 decimation = 1              # run the model every Nth cycle; reuse the last map on skipped cycles (1 = every frame;
                             # semantic masks are only appended on FRESH cycles, so keep this low when publish_masks)
-publish_node = true         # ON: residual_concept consumes this node (get_node("semantic") + semantic_labels_att).
-                            # ⚠ KNOWN CRASH (2026-07-21, bisection-confirmed): publishing the ~900KB dense label
-                            # blob via update_node every ~0.5s triggers a heap-corruption SIGSEGV (in ~SemanticMap
-                            # while destroying the drained bundle) within ~2-5 min. voxelizer's publish_semantic()
-                            # is memory-safe (the attr stores the byte vector BY VALUE — common_types.h:26); the
-                            # corruption is in the DSR/DDS large-blob propagation it drives (the known DSR heap
-                            # data race, now reliably triggered). REAL FIX is cortex/DSR-level (or throttle/shrink
-                            # the blob) — TODO. Set false to stop the crash at the cost of residual's semantic input.
+publish_node = true        # OFF pending the cortex fix (see below). ROOT CAUSE FOUND 2026-07-21 via gdb hw-watchpoint: Publishing the ~900KB dense label blob via
+                            # update_node every ~0.5s triggers a heap-corruption SIGSEGV within ~2-5 min (bisection-
+                            # confirmed; in ~SemanticMap while destroying the drained bundle). voxelizer's
+                            # publish_semantic() is memory-safe (attr stored BY VALUE — common_types.h:26); the fault
+                            # is in the DSR/DDS large-blob propagation (known DSR heap data race, now reliably
+                            # triggered). TRADE-OFF: residual_concept loses its 'semantic' node input while this is
+                            # off. Real fix = cortex/DSR-level or throttle/shrink the blob — TODO before flipping on.
 publish_min_interval_s = 0.5  # min seconds between semantic-node publishes (rate cap; ~2 Hz). The map is big.
 
 # Semantic-derived INSTANCE masks: turn the dense class field into per-connected-region masks for furniture
@@ -124,7 +123,7 @@ publish_min_interval_s = 0.5  # min seconds between semantic-node publishes (rat
 # ON — furniture-mask feature (2026-07-21). Stable with Semantic.publish_node=false above: the earlier
 # reliable crash was the dense-node blob publish, NOT these masks (bisection-confirmed). Keep publish_node off.
 publish_masks = true
-accepted_labels = ["cabinet", "hood", "shelf", "door", "radiator"]   # ADE20K-150 class names (must match the model's table)
+accepted_labels = ["cabinet", "hood", "shelf", "door", "radiator", "counter", "countertop", "kitchen island", "chest of drawers"]   # ADE20K-150 class names (must match the model's table)
 mask_min_area_frac = 0.003      # drop connected components smaller than this fraction of the frame area
 mask_overlap_drop_frac = 0.5    # drop a semantic component ≥this covered by a YOLO-seg mask (YOLO priority)
 mask_morph_kernel = 5           # open+close kernel (px) to denoise the class field before component labelling; ≤1 = off
@@ -149,7 +148,7 @@ metrics_log = true          # log etc/sam2_refine_metrics.csv: per-object depth-
 publish_refined = true      # route SAM2 masks into the published 'masks' node (→ concept fitters). When true,
                             # SAM2 runs continuously (not just when the overlay toggle is on). Only fresh
                             # (non-decimated) cycles substitute, so set decimation=1 for every-frame refinement.
-refine_labels = ["table", "chair", "monitor", "tv", "bottle"]   # which classes to refine ([] → all detections)
+refine_labels = ["table", "chair", "monitor", "tv", "bottle", "cabinet"]   # which classes to refine ([] → all detections)
 
 [Voxel]
 # Custom drawing windows (own top-level windows). Set false for headless/production.

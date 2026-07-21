@@ -383,6 +383,9 @@ public:
     struct UpdateResult
     {
         bool ok = false;
+        // Set when the SDF optimization produced a non-finite pose and this result is a dead-reckoned
+        // FALLBACK, not a fix. Consumers must treat it as such (its covariance is inflated to match).
+        bool diverged = false;
         float final_loss = 0.f;      // Scaled loss (for optimization)
         float sdf_mse = 0.f;         // Unscaled SDF MSE (for display: sqrt gives avg error in meters)
         // Early-exit decision variable: mean |SDF| at the odometry-predicted pose (meters). The
@@ -703,6 +706,10 @@ public:
 
     // Current covariance estimate [3x3]
     Eigen::Matrix3f current_covariance = Eigen::Matrix3f::Identity() * 0.1f;
+    // Last pose the optimizer produced that was finite — the bottom rung of the divergence-recovery
+    // cascade (corners -> lidar/SDF -> odometry -> this).
+    Eigen::Vector3f last_good_pose_ = Eigen::Vector3f::Zero();
+    bool            last_good_pose_valid_ = false;
 
 private:
    // ===== Threading internals =====

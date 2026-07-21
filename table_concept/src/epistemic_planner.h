@@ -35,7 +35,7 @@ struct EpistemicProposal
     bool  valid = false;
 
     // Object-relative viewpoint constraint (authoritative) — see common/affordance_protocol.h.
-    std::array<float, 4> face_gains{};    // [+x,-x,+y,-y] adequacy-bounded ΔH (nats), object frame
+    std::array<float, 4> face_gains{};    // [+x,-x,+y,-y] RAW ΔH (nats) — NOT adequacy-clamped (clamping made all four faces tie; see .cpp), object frame
     float standoff_min_m = 0.0f;          // sensor-model stand-off band (FoV framing sweet spot)
     float standoff_max_m = 0.0f;
     float framing_fill   = 0.0f;          // desired projected fill fraction
@@ -43,10 +43,7 @@ struct EpistemicProposal
 
     bool is_finite() const
     {
-        return std::isfinite(epistemic_target_x_m) &&
-               std::isfinite(epistemic_target_y_m) &&
-               std::isfinite(epistemic_target_yaw_rad) &&
-               std::isfinite(epistemic_gain);
+        return std::isfinite(epistemic_target_x_m) and std::isfinite(epistemic_target_y_m) and std::isfinite(epistemic_target_yaw_rad) and std::isfinite(epistemic_gain);
     }
 };
 

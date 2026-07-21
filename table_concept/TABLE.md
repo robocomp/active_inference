@@ -573,13 +573,42 @@ The fit is correct up to ~2.4 m and wrong past ~2.9 m, with a sharp transition a
 | 2.89 m | 2334 | -45.2 deg | 1.30 x 0.72   | 0.184        | 6.2          | WRONG   |
 | 3.84 m |  831 | -45.0 deg | 1.27 x 0.67   | 0.160        | 15.4         | WRONG   |
 
-Mechanism. The view is grazing (obliquity ~0.1) and along-ray depth noise grows as
-`sigma_d = 0.006 + 0.004*range^2` (0.019 m at 1.8 m, 0.040 m at 2.9 m). That scatter stretches the tabletop
-cloud ALONG THE VIEWING RAY, manufacturing an elongation whose axis is the ray bearing. The moment channel
-weights yaw by `r_yaw = r_base / aniso^2`, so this SPURIOUS anisotropy is read as genuine information:
-`r_yaw` collapses 20-30x and the channel confidently rotates the box onto the ray. The raw `mom_phi` sits at
--41..-45 deg at EVERY range including the good ones — what changes with range is not the direction but the
-CONFIDENCE, and past the break the moment outvotes the per-point evidence.
+Mechanism: grazing-amplified image-space CENSORING (mask erosion), not depth noise.
+
+The proximal chain is: spurious footprint anisotropy -> `r_yaw = r_base / aniso^2` collapses 20-30x -> the
+moment channel confidently rotates the box onto the apparent axis. What produces the anisotropy is DATA LOSS.
+
+An earlier attribution in this file blamed along-ray depth noise stretching the cloud. That is REFUTED by the
+logged raw footprint statistic (`mom_major`/`mom_minor`, added 2026-07-21):
+
+| pose    | mom_major | mom_minor | truth side |
+|---------|-----------|-----------|------------|
+| 1.94 m  | 1.105     | 1.020     | 0.95       |
+| 3.59 m  | 1.165     | **0.724** | 0.95       |
+
+Three independent checks kill the noise story:
+- The MINOR axis SHRINKS (1.020 -> 0.724). Additive noise can only ever GROW an eigenvalue. Decisive and
+  assumption-free: a single row settles it.
+- `mom_major` = 1.165 EXCEEDS the noise ceiling. At 3.59 m, sigma_d = 0.006+0.004r^2 = 0.057 m adds at most
+  sigma_d^2 to lambda, capping mom_major at sqrt(12*(0.95^2/12 + sigma_d^2)) = 0.971.
+- The belief FAITHFULLY TRACKS what it sees: the far belief tensor sits 0.0242 from the RAW OBSERVED strip but
+  0.0727 from truth. The estimator is not being fooled; it is correctly fitting a strip.
+
+The strip: at obliquity_cos ~0.08-0.10 an image-space mask boundary erosion of eps ~2 px maps onto the plane as
+eps*(z/f)/obliquity_cos - a ~10x GRAZING AMPLIFICATION - so ~8-10 cm is eaten off each along-ray boundary while
+the transverse silhouette extent survives. With the camera bearing near the square's diagonal, that transverse
+span is the corner-to-corner 1.34 m, giving mom_major ~1.17-1.30 and mom_phi ~-45 deg. So the fit IS latching
+the diagonal, but -45 deg is simply transverse-to-bearing, not a degenerate yaw direction or a chart artifact.
+A face-on far approach should therefore NOT reproduce it (untested prediction).
+
+This single mechanism also explains what the noise story could not: why mom_phi is pinned at -41..-45 deg at
+EVERY range including the correct ones (erosion DIRECTION is set by the bearing; only its magnitude, ~z/obliquity,
+grows), and why close-range aniso is small but nonzero (~5 cm erosion -> aniso 0.03-0.06, matching 0.029-0.038).
+
+CRUCIALLY it makes the far bug and the FootprintResidual close-range regression ONE defect. The close regression
+back-solves to a ~13% per-side shrink = the self_test's measured 0.880 mask erosion. FootprintResidual removes the
+moment channel and with it the grow-only guard that was silently compensating erosion, without ever MODELLING the
+erosion. Model it once and both ends are fixed together.
 
 Neither existing protection engages:
 - `1/aniso^2` correctly encodes "near-square => distrust yaw", but has no defence against "a far view makes a
@@ -602,7 +631,18 @@ the moment channel, and the moment channel carries the grow-only guard ("a mask 
 That guard is what compensates YOLO mask erosion, which `self_test` measures at mask-only 0.880 vs truth
 1.000. Remove the channel, lose the compensation, and the box shrinks ~12%.
 
-A shippable fix therefore needs the shared-nuisance marginalisation AND a grow-only extent bound. NOT DONE.
+SHIPPABLE FIX (agreed with a Fable second opinion, 2026-07-21; NOT DONE): FootprintResidual PLUS a shared
+per-frame IMAGE-SPACE erosion nuisance eps_px, then delete the moment channel and its `kDrop` grow-only ratchet.
+Grow-only is the wrong compensation: it is a hard threshold (self-flagged in table_belief.cpp), and it is a
+RATCHET that helped CAUSE the far bug - it let w climb to 1.30 and could never recant. Model the bias instead of
+patching it with an asymmetric update rule. eps_px is a DETECTOR property in pixels (range-independent in image
+space), calibrated once from the self_test 0.880 extent ratio, with sigma ~1-2 px; its on-plane column carries
+the 1/obliquity amplification, so Schur-marginalising it removes exactly the along-ray extent + aliased yaw
+information the fake strip boundary injects, while transverse information from real edges survives. At close
+range the same eps absorbs the uniform ~12% shrink, curing the regression. Absolute scale stays anchored by the
+erosion-free LiDAR range/vacate channels. This is `s_erode` from PRECISION_AS_INFORMATION.md, which was dropped
+when a2' narrowed to depth-tilt - the missing insight being that erosion lives in PIXELS and the grazing
+geometry is what amplifies it into the far-range failure.
 `AnisotropicR` alone is not the answer (0.0718 vs 0.0727 control = no effect): per-point noise reshaping
 cannot fix a MEAN BIAS; only marginalising the per-frame SHARED nuisance can.
 

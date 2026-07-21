@@ -226,15 +226,19 @@ Eigen::Matrix<float, 7, 1> TableBelief::common_mode_inv_diag(const TableFrame& f
     const float inv_p_x = 1.0f / std::max(1e-9f, p2 + frame.chain_cov_xx);
     const float inv_p_y = 1.0f / std::max(1e-9f, p2 + frame.chain_cov_yy);
     const float inv_H   = 1.0f / std::max(1e-9f, s2 + cs);
-    // Tilt state t (slot 6) is NOT a per-frame shared error → NO common-mode marginalisation (inverse-var 0).
+    // Slot 6 (the depth-tilt state t) is NOT a per-frame shared error, so it must be admitted at FULL data
+    // information. NOTE THE SENSE — it was inverted here until 2026-07-21: Ieff = (Id⁻¹ + Σc)⁻¹, so "no common
+    // mode" means Σc → 0, i.e. Σc⁻¹ → LARGE. The slot previously carried Σc⁻¹ = 1e-6 (Σc = 1e6), which is the
+    // OPPOSITE: it capped the slot's per-frame information at 1e-6 and made t unestimable. Together with the
+    // canonicalize() zeroing above, that silently disabled the tilt state completely.
     if (not TableBeliefState::use_quotient)
         return (Eigen::Matrix<float, 7, 1>() << inv_p_x, inv_p_y, inv_H, inv_H, inv_H,
-                1.0f / std::max(1e-9f, y2 + frame.chain_cov_yaw), 1e-6f).finished();
+                1.0f / std::max(1e-9f, y2 + frame.chain_cov_yaw), 1e6f).finished();
     // Quotient: map the (w,h,yaw) common-mode variances into (s,a₁,a₂) marginal variances, then invert. The
     // tilt→yaw cap in frame.chain_cov_yaw thus caps the yaw-aliasing direction of (a₁,a₂) via the chart.
     const Eigen::Vector3f v = quotient_marginal(chart_jac(), {s2 + cs, s2 + cs, y2 + frame.chain_cov_yaw});
     return (Eigen::Matrix<float, 7, 1>() << inv_p_x, inv_p_y, inv_H,
-            1.0f / std::max(1e-9f, v(0)), 1.0f / std::max(1e-9f, v(1)), 1.0f / std::max(1e-9f, v(2)), 1e-6f).finished();
+            1.0f / std::max(1e-9f, v(0)), 1.0f / std::max(1e-9f, v(1)), 1.0f / std::max(1e-9f, v(2)), 1e6f).finished();
 }
 
 // FULL 6×6 common-mode inverse (Tier 2). The diagonal common_mode_inv above spreads the yaw cap isotropically over
@@ -258,7 +262,7 @@ Eigen::Matrix<float, 7, 7> TableBelief::common_mode_inv(const TableFrame& frame)
     Sc(1, 1) = p2 + frame.chain_cov_yy;
     Sc(2, 2) = s2 + cs;                                                     // H
     Sc.block<3, 3>(3, 3) = Saa;
-    Sc(6, 6) = 1e6f;                                                        // tilt state t: no common-mode (inv → ~0)
+    Sc(6, 6) = 1e-6f;                                                       // tilt state t: no shared error ⇒ Σc→0 ⇒ full info
     Sc += 1e-6f * Eigen::Matrix<float, 7, 7>::Identity();                   // regularise (near-square Saa near-singular)
     return Sc.inverse();
 }
@@ -705,10 +709,14 @@ void TableBelief::canonicalize(TableBeliefState& s) const
 
     // The four exact-symmetry representatives of s (cx,cy,H unchanged; only w,h,yaw transform).
     const std::array<TableBeliefState, 4> reps = {{
-        { s.cx, s.cy, s.H, s.w, s.h, wrap(s.yaw)            },   // e
-        { s.cx, s.cy, s.H, s.h, s.w, wrap(s.yaw + kHalfPi)  },   // swap ∘ r_{+π/2}
-        { s.cx, s.cy, s.H, s.w, s.h, wrap(s.yaw + 2*kHalfPi)},   // r_π
-        { s.cx, s.cy, s.H, s.h, s.w, wrap(s.yaw - kHalfPi)  },   // swap ∘ r_{−π/2}
+        // Slot 6 (the depth-tilt state t) MUST be carried through. These are aggregate initialisers and the
+        // state has SEVEN fields, so listing only six silently value-initialises t to 0. canonicalize() runs
+        // once per update, so t was being ZEROED every frame and could never accumulate — the co-estimated
+        // tilt state has been inert for its entire lifetime. Found 2026-07-21 while instrumenting slot 6.
+        { s.cx, s.cy, s.H, s.w, s.h, wrap(s.yaw),             s.t },   // e
+        { s.cx, s.cy, s.H, s.h, s.w, wrap(s.yaw + kHalfPi),   s.t },   // swap ∘ r_{+π/2}
+        { s.cx, s.cy, s.H, s.w, s.h, wrap(s.yaw + 2*kHalfPi), s.t },   // r_π
+        { s.cx, s.cy, s.H, s.h, s.w, wrap(s.yaw - kHalfPi),   s.t },   // swap ∘ r_{−π/2}
     }};
 
     // CONTINUITY fold with a FIXED yaw scale. The Σ-weighted alternative weighted the yaw difference by Σ_pred⁻¹,
@@ -851,7 +859,7 @@ bool TableBelief::self_test()
     // Legs (4 cylinders)
     for (int k = 0; k < 4; ++k)
     {
-        const float sx = (k == 0 || k == 3) ? 1.f : -1.f, sy = (k < 2) ? 1.f : -1.f;
+        const float sx = (k == 0 or k == 3) ? 1.f : -1.f, sy = (k < 2) ? 1.f : -1.f;
         const float cxk = sx * (0.5f * gt.w - P.leg_radius), cyk = sy * (0.5f * gt.h - P.leg_radius);
         for (int i = 0; i < 200; ++i)
         {

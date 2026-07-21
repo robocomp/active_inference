@@ -19,7 +19,7 @@ SET(RC_COMPONENT_INSTALL_PATH $ENV{ROBOCOMP} CACHE STRING "component install pat
 
 add_subdirectory(generated)
 
-INSTALL(FILES etc/config DESTINATION ${RC_COMPONENT_INSTALL_PATH}/etc-default/ RENAME table_concept.conf )
+INSTALL(FILES etc/config.toml DESTINATION ${RC_COMPONENT_INSTALL_PATH}/etc-default/ RENAME table_concept.conf )
 
 #ADD_CUSTOM_TARGET(doc doxygen Doxyfile)
 #ADD_CUSTOM_TARGET(installdoc mkdir -p ${RC_COMPONENT_INSTALL_PATH}/doc COMMAND cp -R doc/html ${RC_COMPONENT_INSTALL_PATH}/doc/table_concept )

@@ -7,6 +7,7 @@
  *  - process_ricoh_bearings      : ricoh-360 bearing-only PERIPHERAL ATTENTION (never births/fits).
  */
 
+#include <limits>
 #include "specificworker.h"
 #include "table_geometry.h"   // rc::geom::footprint_overlap_ratio
 
@@ -89,7 +90,7 @@ void SpecificWorker::run_instance_tracker()
     tp.gate_fallback_m  = cfg_.tracker_gate_fallback_m;
     tp.detection_noise_m = cfg_.tracker_detection_noise_m;
     tp.birth_frames     = cfg_.tracker_birth_frames;
-    tp.death_frames     = cfg_.tracker_death_frames;
+    tp.death_frames     = std::numeric_limits<int>::max();   // never retire by occlusion (see table_config.h)
     tp.birth_min_sep_m  = cfg_.tracker_birth_min_sep_m;
     tp.multi_det_per_track = true;   // fuse multiple ZED slices of one table (one belief update per slice)
     tracker_.set_params(tp);

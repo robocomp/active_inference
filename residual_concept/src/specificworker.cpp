@@ -120,6 +120,11 @@ void SpecificWorker::initialize()
 
     // Agent-presence protocol wiring (mirrors bottle_concept — Degraded DEBOUNCE is the CLAUDE.md rule).
     presence_coordinator_.configure(configLoader, G, static_cast<std::uint32_t>(agent_id));
+    // Colour this agent's node in the graph view by its live health: the coordinator already
+    // publishes the presence lifecycle; this adds the external FSM axis (Initialize/Compute/
+    // Emergency/Restore). Generic discovery via objectName(), so genericworker regeneration
+    // cannot break it.
+    presence_coordinator_.attach_state_machine(&statemachine);
     presence_coordinator_.set_transition_hooks({
         .request_presence_ready = [this]() { emit presenceReady(); },
         .request_presence_lost  = [this]() { emit presenceLost(); },
@@ -421,6 +426,7 @@ void SpecificWorker::compute()
             integrate_zed_into_grid();   // accumulate dense ZED FoV as a second sensor (fills grazed tabletops)
             grid_.commit_cycle();        // ONE log-odds update per cell (hit precedence) — the stability fix
             log_grid_diag();
+            log_floor_diag();
         }
     }
 
@@ -825,6 +831,36 @@ void SpecificWorker::log_grid_diag()
                      grid_.occupied_count(), d.hits, d.misses, d.miss_blocked_zaware,
                      d.cells_latched, d.cells_released, d.hit_then_cleared);
     }
+    ++cyc;
+}
+
+// Floor diagnostic: the estimated floor plane (offset/tilt/fit quality) next to the HEIGHT PROFILE of the latched
+// cells. This is the evidence that decides the phantom question, and it lands on disk (the [floor-plane] line only
+// ever went to stdout, which nobody captures). Read it as: if `occupied` is dominated by the low bins (tallest
+// return ever seen there only a few cm up) the latched mass IS the floor band; then `off_cm`/`tilt_deg` say whether
+// a plane mismatch explains it (⇒ FloorPlane.Enabled=true) or whether the floor sits at z≈0 and the cause is
+// elsewhere (grazing rings / ZED range² noise / localisation smear).
+void SpecificWorker::log_floor_diag()
+{
+    if (not grid_ready_) return;
+    static const std::vector<float> edges{0.10f, 0.15f, 0.25f, 0.40f, 0.70f, 1.20f};
+    static long cyc = 0;
+    static std::ofstream f;
+    if (not f.is_open())
+    {
+        f.open("etc/floor_diag.csv", std::ios::out | std::ios::trunc);
+        f << "cycle,applied,a,b,c,off_cm,tilt_deg,n_cand,rms_m,occupied,"
+             "h_le10,h_le15,h_le25,h_le40,h_le70,h_le120,h_gt120\n";
+    }
+    const auto bins = grid_.occupied_height_hist(edges);
+    f << cyc << ',' << (cfg_.floor_plane.enabled ? 1 : 0) << ','
+      << floor_plane_.a << ',' << floor_plane_.b << ',' << floor_plane_.c << ','
+      << floor_plane_.c * 100.0f << ','
+      << std::atan(std::hypot(floor_plane_.a, floor_plane_.b)) * 57.2958f << ','
+      << floor_plane_.n_candidates << ',' << floor_plane_.rms << ',' << grid_.occupied_count();
+    for (const long b : bins) f << ',' << b;
+    f << '\n';
+    if ((cyc % 20) == 0) f.flush();
     ++cyc;
 }
 

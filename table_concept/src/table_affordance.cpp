@@ -27,8 +27,8 @@ void TableAffordance::init(std::shared_ptr<DSR::DSRGraph> G,
 
 void TableAffordance::update(const EpistemicProposal& prop)
 {
-    if (!G_) return;
-    if (!prop.valid || !prop.is_finite())
+    if (not G_) return;
+    if (not prop.valid or not prop.is_finite())
     {
         if (prop.valid)
             qWarning() << "[affordance] rejecting non-finite epistemic proposal for"
@@ -36,7 +36,7 @@ void TableAffordance::update(const EpistemicProposal& prop)
         return;
     }
 
-    if (!node_created_)
+    if (not node_created_)
         create_node(prop);
     else
         update_node(prop);
@@ -44,28 +44,25 @@ void TableAffordance::update(const EpistemicProposal& prop)
 
 void TableAffordance::remove()
 {
-    if (!G_ || !node_created_) return;
+    if (not G_ or not node_created_) return;
 
     G_->delete_node(affordance_node_id_);
     std::print("[affordance] removed node for '{}' (state={})\n",
                table_node_name_, state_name(state_));
-    reset();
-    state_ = State::satisfied;
-    // Reset to idle so a new cycle can start if the model degrades later
-    state_ = State::idle;
+    reset();   // returns to State::idle so a new cycle can start if the model degrades later
 }
 
 void TableAffordance::on_node_modified(uint64_t id)
 {
-    if (!node_created_ || id != affordance_node_id_) return;
+    if (not node_created_ or id != affordance_node_id_) return;
 
     auto node_opt = G_->get_node(affordance_node_id_);
-    if (!node_opt.has_value()) return;
+    if (not node_opt.has_value()) return;
 
     const bool active = G_->get_attrib_by_name<active_att>(node_opt.value()).value_or(false);
     const bool pending = G_->get_attrib_by_name<epistemic_pending_att>(node_opt.value()).value_or(true);
 
-    if (active && pending)
+    if (active and pending)
     {
         if (state_ != State::executing)
         {
@@ -76,13 +73,13 @@ void TableAffordance::on_node_modified(uint64_t id)
         return;
     }
 
-    if (!active && pending)
+    if (not active and pending)
     {
         state_ = State::pending;
         return;
     }
 
-    if (!active && !pending)
+    if (not active and not pending)
     {
         if (state_ != State::satisfied)
         {
@@ -103,7 +100,7 @@ void TableAffordance::on_node_modified(uint64_t id)
 
 void TableAffordance::on_node_deleted(uint64_t id)
 {
-    if (!node_created_ || id != affordance_node_id_) return;
+    if (not node_created_ or id != affordance_node_id_) return;
 
     std::print("[affordance] '{}' node deleted externally (state={}) → idle\n",
                table_node_name_, state_name(state_));
@@ -165,7 +162,7 @@ void TableAffordance::create_node(const EpistemicProposal& prop)
     rc::affordance::write_viewpoint(*G_, aff_node, make_viewpoint(prop));
 
     const auto id_opt = G_->insert_node(aff_node);
-    if (!id_opt.has_value())
+    if (not id_opt.has_value())
     {
         qWarning() << "[affordance] failed to insert DSR node for" << aff_name.c_str();
         return;
@@ -192,9 +189,7 @@ void TableAffordance::create_node(const EpistemicProposal& prop)
         bool gains_ok = not vc.face_gains.empty();
         for (const float g : vc.face_gains)
             if (not (std::isfinite(g) and g >= 0.0f)) gains_ok = false;
-        const bool ok = vc.object_relative and vc.faces.size() == 4
-                    and vc.face_gains.size() == 4 and gains_ok
-                    and vc.sigma_star.size() == 6 and vc.standoff_min_m <= vc.standoff_max_m;
+        const bool ok = vc.object_relative and vc.faces.size() == 4 and vc.face_gains.size() == 4 and gains_ok and vc.sigma_star.size() == 6 and vc.standoff_min_m <= vc.standoff_max_m;
         if (ok)
             std::print("[affordance-selfcheck] '{}' viewpoint OK: gains(+x,-x,+y,-y)=[{:.2f},{:.2f},{:.2f},{:.2f}] "
                        "standoff=[{:.2f},{:.2f}] fill={:.2f} σ*=[{:.2f},{:.2f},{:.2f},{:.2f},{:.2f},{:.2f}]\n",
@@ -214,7 +209,7 @@ void TableAffordance::create_node(const EpistemicProposal& prop)
 void TableAffordance::update_node(const EpistemicProposal& prop)
 {
     auto node_opt = G_->get_node(affordance_node_id_);
-    if (!node_opt.has_value())
+    if (not node_opt.has_value())
     {
         // Node was deleted externally — recreate on next cycle
         std::print("[affordance] '{}' node missing, will recreate\n", table_node_name_);
@@ -225,7 +220,7 @@ void TableAffordance::update_node(const EpistemicProposal& prop)
     const bool active = G_->get_attrib_by_name<active_att>(n).value_or(false);
     const bool pending = G_->get_attrib_by_name<epistemic_pending_att>(n).value_or(true);
 
-    if (active && pending)
+    if (active and pending)
     {
         state_ = State::executing;
         // Refresh ONLY the epistemic value while the controller owns the claim, so the grounded EFE
@@ -250,7 +245,7 @@ void TableAffordance::update_node(const EpistemicProposal& prop)
     // like the pose, it is held stable while the controller owns an executing claim).
     rc::affordance::write_viewpoint(*G_, n, make_viewpoint(prop));
 
-    if (!pending || active)
+    if (not pending or active)
     {
         G_->add_or_modify_attrib_local<active_att>              (n, false);
         G_->add_or_modify_attrib_local<epistemic_pending_att>   (n, true);

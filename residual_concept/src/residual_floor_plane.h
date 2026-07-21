@@ -30,6 +30,10 @@ struct FloorPlane
 {
     float a = 0.0f, b = 0.0f, c = 0.0f;
     bool  valid = false;
+    // Fit diagnostics (of the LAST accepted fit — carried over unchanged when the fit is held/rejected), so the
+    // quality of the estimate is visible on disk and not only as a stdout line.
+    int   n_candidates = 0;      // floor candidates that survived the robust trim
+    float rms          = 0.0f;   // RMS residual of those candidates to the fitted plane (m) — floor roughness
     float z_at(float x, float y) const { return a * x + b * y + c; }
 };
 

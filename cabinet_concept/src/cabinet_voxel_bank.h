@@ -1,0 +1,105 @@
+/*
+ * cabinet_voxel_bank.h — the cabinet-owned voxel memory (extracted from CabinetFitter).
+ *
+ * Header-only free functions in rc::voxel_bank that maintain each instance's persistent point bank: key()
+ * (FNV-1a quantised voxel key), owned_by_cabinet() (XY-radius + height ownership gate), and ingest() (insert
+ * this cycle's candidate/residual points, cap-bounded, ownership-gated, de-duplicated by key). Depends only
+ * on rc::CabinetInstance and rc::CabinetConfig, so it never pulls in CabinetFitter's nested observation type.
+ */
+
+#pragma once
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <print>
+#include <vector>
+
+#include <Eigen/Dense>
+
+#include "cabinet_config.h"     // rc::CabinetConfig
+#include "cabinet_instance.h"   // rc::CabinetInstance
+
+namespace rc::voxel_bank {
+
+// FNV-1a hash of a point quantised to a quantization_m grid — the voxel bank's O(1) dedup key.
+inline std::uint64_t key(const Eigen::Vector3f& point, float quantization_m)
+{
+    const float q = std::max(1e-4f, quantization_m);
+    const int ix = static_cast<int>(std::floor(point.x() / q));
+    const int iy = static_cast<int>(std::floor(point.y() / q));
+    const int iz = static_cast<int>(std::floor(point.z() / q));
+
+    std::uint64_t h = 1469598103934665603ULL;  // FNV-1a offset basis
+    auto mix = [&](std::uint64_t v) { h ^= v; h *= 1099511628211ULL; };
+    mix(static_cast<std::uint64_t>(ix));
+    mix(static_cast<std::uint64_t>(iy));
+    mix(static_cast<std::uint64_t>(iz));
+    return h;
+}
+
+// True iff a point belongs to THIS cabinet's voxel bank (ownership gate rejecting foreign/floor points).
+//
+// Two THRESHOLDS, both physical, keep a neighbouring cabinet's or the floor's points out of the bank:
+// an XY radius (cabinet half-diagonal + config margin, floored at 1 m so a tiny model still owns nearby
+// returns) and a vertical band [z_min, cabinet_height + config margin].
+inline bool owned_by_cabinet(const CabinetInstance& inst, const Eigen::Vector3f& point, const CabinetConfig& cfg)
+{
+    const auto& s = inst.model.state();
+
+    // XY ownership gate: cabinet-centered radius with a configurable margin.
+    const float half_diag = 0.5f * std::sqrt(s.L * s.L + s.d * s.d);
+    const float gate_radius = std::max(1.0f, half_diag + cfg.voxel_select_radius_margin_m);
+    const float dx = point.x() - s.cx;
+    const float dy = point.y() - s.cy;
+    if (std::hypot(dx, dy) > gate_radius)
+        return false;
+
+    // Height gate to reject floor / distant clutter points in mixed scenes.
+    const float z_min = -0.05f;   // threshold: a little below the room floor (z≈0) to keep grazing returns
+    const float z_max = s.z1 + cfg.voxel_select_height_margin_m;
+    return point.z() >= z_min && point.z() <= z_max;
+}
+
+// Insert this cycle's candidate + residual points into the instance's voxel bank: ownership-gated,
+// de-duplicated by voxel key, and hard-capped at cfg.voxel_bank_max_points. Logs on the log period.
+inline void ingest(CabinetInstance& inst,
+                   const std::vector<Eigen::Vector3f>& candidate_pts,
+                   const std::vector<Eigen::Vector3f>& residual_pts,
+                   const CabinetConfig& cfg)
+{
+    std::size_t inserted = 0;
+    std::size_t rejected_foreign = 0;
+    const auto max_points = static_cast<std::size_t>(std::max(1, cfg.voxel_bank_max_points));
+
+    auto ingest_pts = [&](const std::vector<Eigen::Vector3f>& src)
+    {
+        for (const auto& p : src)
+        {
+            if (inst.voxel_bank_pts.size() >= max_points)
+                break;
+            if (not owned_by_cabinet(inst, p, cfg))
+            {
+                ++rejected_foreign;
+                continue;
+            }
+            const auto k = key(p, cfg.voxel_bank_quantization_m);
+            if (inst.voxel_bank_keys.insert(k).second)
+            {
+                inst.voxel_bank_pts.push_back(p);
+                ++inserted;
+            }
+        }
+    };
+
+    ingest_pts(candidate_pts);
+    ingest_pts(residual_pts);
+
+    const int period = std::max(1, cfg.cabinet_log_period_frames);
+    const bool do_log = (inst.processed_cycles % period) == 0;
+    if (inserted > 0 && do_log)
+        std::print("[{}] voxel-bank: +{} total={} (cap={}) reject_foreign={}\n",
+                   inst.node_name, inserted, inst.voxel_bank_pts.size(), max_points, rejected_foreign);
+}
+
+}  // namespace rc::voxel_bank

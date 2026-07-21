@@ -13,7 +13,7 @@
  *    self-throttled to ~1 Hz.
  *  - pump() reads the DSR graph (inner_eigen room←lidar3D) — it MUST be called on the main thread.
  *  - The owner (SpecificWorker) must reset this ingestor BEFORE tearing the graph down, while G is alive.
- *  - It stays entirely dormant (no DDS participant) while cfg.lidar_precision == 0, so the feature is a true
+ *  - It stays entirely dormant (no DDS participant) while both cfg.lidar_precision and cfg.free_space_precision are 0, so the feature is a true
  *    no-op when off.
  */
 

@@ -129,7 +129,7 @@ void SpecificWorker::build_dashboard()
     // top-level. NOT WA_DeleteOnClose: closing must only HIDE it, or the ts_*_plot_ pointers the
     // compute() feed uses would dangle. A QApplication always exists (generated/main.cpp).
     {
-        custom_widget_ = new Custom_widget("Table Model — Free Energy, Coverage Deficit, Residuals & Dimensions (w,h)");
+        custom_widget_ = new Custom_widget("Table Model — Free Energy, Belief Uncertainty, Residuals & Dimensions (w,h)");
         custom_widget_->setWindowTitle(QStringLiteral("table_concept — belief dashboard"));
         restore_dashboard_geometry();
         custom_widget_->show();
@@ -164,8 +164,10 @@ void SpecificWorker::build_dashboard()
         ts_state_plot_->set_visible_window(60.f);
         series_layout->addWidget(ts_state_plot_);
 
-        // (D) Counter-evidence accumulator S_w/S_h (the CUSUM gate is always on). Watch S charge on a
-        // surprise and decay back (glitch absorbed) vs climb to the barrier (a real change unlocks).
+        // (D) Belief SIZE POSTERIOR STD σ_w/σ_h, in mm (fed from specificworker.cpp; see SpecificWorker's member
+        // doc). This panel used to show a counter-evidence CUSUM accumulator; that quantity and its gate no
+        // longer exist. Read it as convergence: σ falls as the extent is resolved, and RISES again when the
+        // evidence goes stale (the age-inflation path) or a surprise widens the belief.
         {
             ts_ce_plot_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
             ts_ce_plot_->set_visible_window(60.f);

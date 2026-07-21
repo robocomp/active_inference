@@ -3,8 +3,7 @@
  *
  * Only the four vertical faces (±X, ±Y in table frame) are considered: a floor-navigating robot cannot
  * observe the top face from above or the bottom face at all. Each face is scored by the expected entropy
- * reduction ½·ln det(I₆ + Σ·ΔI) on the belief's full covariance, bounded by the adequacy gap to Σ*, and
- * the winning face's framed viewpoint + heading is returned. See epistemic_planner.h for the formulas.
+ * reduction ½·ln det(I₆ + Σ·ΔI) on the belief's full covariance, bounded by the adequacy gap to Σ*, and * the winning face's framed viewpoint + heading is returned. See epistemic_planner.h for the formulas.
  */
 
 #include "epistemic_planner.h"
@@ -127,7 +126,7 @@ EpistemicProposal EpistemicPlanner::compute(const TableBelief& belief, float lat
         face_raw[i] = raw_gain;
         if (raw_gain > best_raw) { best_raw = raw_gain; best_idx = i; best_standoff = standoff; }
     }
-    if (!std::isfinite(best_raw))   // low-but-finite gain is NOT withdrawn (controller ranks it low)
+    if (not std::isfinite(best_raw))   // low-but-finite gain is NOT withdrawn (controller ranks it low)
         return {};
 
     // SCALAR affordance value (epistemic_gain): the winning face's info BOUNDED by the adequacy gap to Σ*, so
@@ -176,7 +175,7 @@ EpistemicProposal EpistemicPlanner::compute(const TableBelief& belief, float lat
     proposal.standoff_max_m = max_stand_off;
     proposal.framing_fill   = kFramingFill;
     proposal.sigma_star     = kTargetStd;
-    if (!proposal.is_finite())
+    if (not proposal.is_finite())
         return {};
     return proposal;
 }

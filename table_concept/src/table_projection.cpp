@@ -4,8 +4,7 @@
  * Implements the camera→room extrinsic (room_T_zed, room→body pinned to a capture stamp), the model-box →
  * normalised in-image ROI used by the controller's lock-on, and the PIXEL-LEVEL silhouette existence evidence
  * (project the tabletop top face + leg axes, then over the predicted-visible pixels vote occupancy / absence /
- * occlusion against the current YOLO foreground). Owns the ZED CameraAPI (lazily bound to the "zed" node) and
- * uses the shared graph, InnerEigenAPI, and MaskIngestor packet source.
+ * occlusion against the current YOLO foreground). Owns the ZED CameraAPI (lazily bound to the "zed" node) and * uses the shared graph, InnerEigenAPI, and MaskIngestor packet source.
  */
 
 #include "table_projection.h"
@@ -70,7 +69,7 @@ void TableProjection::compute_projected_roi(TableInstance& inst)
     const float fy = camera_api_->get_focal_y();
     const float W  = static_cast<float>(camera_api_->get_width());
     const float H  = static_cast<float>(camera_api_->get_height());
-    if (fx <= 0.f || fy <= 0.f || W <= 0.f || H <= 0.f)
+    if (fx <= 0.f or fy <= 0.f or W <= 0.f or H <= 0.f)
         return;
     const float cx_px = W * 0.5f, cy_px = H * 0.5f;
 
@@ -109,8 +108,7 @@ void TableProjection::compute_projected_roi(TableInstance& inst)
     // bbox explodes to absurd offsets). Beyond a sane bound the ROI is unusable for centring:
     // mark invalid (the controller then keeps sweeping / treats framing as unknown) and clamp the
     // stored values so consumers/logs never see garbage.
-    const bool sane = std::isfinite(off_x) && std::isfinite(off_y) && std::isfinite(fill)
-                      && std::abs(off_x) < 3.0f && std::abs(off_y) < 3.0f && fill < 4.0f;
+    const bool sane = std::isfinite(off_x) and std::isfinite(off_y) and std::isfinite(fill) and std::abs(off_x) < 3.0f and std::abs(off_y) < 3.0f and fill < 4.0f;
     inst.roi_offset_x = std::clamp(off_x, -3.0f, 3.0f);
     inst.roi_offset_y = std::clamp(off_y, -3.0f, 3.0f);
     inst.roi_fill     = std::clamp(fill, 0.0f, 4.0f);
@@ -207,8 +205,7 @@ SilhouetteExistence TableProjection::compute_silhouette_existence(const TableIns
             classify((-1.0f + 2.0f * (ix + 0.5f) / NX) * hw, (-1.0f + 2.0f * (iy + 0.5f) / NY) * hd, s.H);
 
     // (b) the 4 LEGS (vertical axes at the inset corners, floor→join): valuable extra evidence, especially from
-    // edge-on/low views where the top face projects to a thin sliver — the legs project BELOW the tabletop and
-    // extend the detectable footprint (occupancy when masked, absence when the volume is empty).
+    // edge-on/low views where the top face projects to a thin sliver — the legs project BELOW the tabletop and // extend the detectable footprint (occupancy when masked, absence when the volume is empty).
     const float leg_top = std::max(0.0f, s.H - rc::TableModel::TOP_THICKNESS);
     const float inset    = rc::TableModel::LEG_RADIUS;
     constexpr int NZ = 16;

@@ -5,8 +5,7 @@
  *
  *    RoboComp is free software: you can redistribute it and/or modify
  *    it under the terms of the GNU General Public License as published by
- *    the Free Software Foundation, either version 3 of the License, or
- *    (at your option) any later version.
+ *    the Free Software Foundation, either version 3 of the License, or *    (at your option) any later version.
  *
  *    RoboComp is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -499,12 +498,16 @@ void SpecificWorker::log_birth_surprise()
 // ─── Per-node processing + publish ───────────────────────────────────────────────────────────────
 
 // Process one "table" DSR node this cycle: ensure its instance exists, then fuse each assigned ZED slice
-// (one belief update per slice, gated to a fresh mask frame) or age the belief when no mask arrived, and
-// hand the result to publish_table_cycle. run_instance_tracker has already associated this cycle's slices.
+// (one belief update per slice, gated to a fresh mask frame) or age the belief when no mask arrived, and // hand the result to publish_table_cycle. run_instance_tracker has already associated this cycle's slices.
 void SpecificWorker::process_table_node(const DSR::Node& node)
 {
     const bool created = fitter_->ensure_instance(node, room_node_id_);
-    auto& inst = fitter_->instances().at(node.id());
+    // ensure_instance() may bail (bad RT read, missing room), and its bool return does NOT report that —
+    // so look the instance up defensively rather than .at()-ing into a possibly-absent key on the compute path.
+    const auto it = fitter_->instances().find(node.id());
+    if (it == fitter_->instances().end())
+        return;
+    auto& inst = it->second;
 
     if (created)
     {
@@ -542,8 +545,7 @@ void SpecificWorker::process_table_node(const DSR::Node& node)
     // continuity), but re-fitting the SAME packet each cycle would overcount evidence — gate on a new frame_id.
     const auto& pkt = mask_ingestor_->packet();
     // Freshness gate. mask_frame_id is a PUBLISH counter — it advances on every republish even when the source
-    // camera is FROZEN/paused, so gating on it alone re-integrates the SAME capture as independent evidence and
-    // the belief RATCHETS: w/h/yaw rotate + reshape with the robot AND scene stationary (ai2_log.csv symptom —
+    // camera is FROZEN/paused, so gating on it alone re-integrates the SAME capture as independent evidence and // the belief RATCHETS: w/h/yaw rotate + reshape with the robot AND scene stationary (ai2_log.csv symptom —
     // npts pinned identical, flip_ev saturated, yaw walking ~90°). The producer also ships mask_timestamp_ms =
     // the CAPTURE stamp of the source RGBD frame; require THAT to advance too. A stale capture stamp ⇒ no new
     // sensor information ⇒ fall through to AGE the belief (predict-only, Σ grows), never re-integrate the same
@@ -822,12 +824,12 @@ void SpecificWorker::step_epistemic(rc::TableInstance& inst, DSR::Node& node)
 void SpecificWorker::trigger_graph_layout_twopi()
 {
     const auto it = graph_viewers.find("");
-    if (it == graph_viewers.end() || !it->second)
+    if (it == graph_viewers.end() or not it->second)
         return;
 
     QWidget* graph_widget = it->second->get_widget(DSR::DSRViewer::view::graph);
     auto* graph_viewer = qobject_cast<DSR::GraphViewer*>(graph_widget);
-    if (!graph_viewer)
+    if (not graph_viewer)
         return;
 
     // Run now and once queued, so layout also happens after pending node/edge

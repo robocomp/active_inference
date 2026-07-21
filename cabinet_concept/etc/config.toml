@@ -1,0 +1,277 @@
+
+# --- Common Agent Data ---
+[Agent]
+id = 21 # unique across the shared graph (room=5 robot=6 table=7 ctrl=8 voxelizer=9 bottle=10
+        # kinova=11 self_calib=12 human=13 residual=14 chair=20). A collision = CRDT actor clash → SIGSEGV.
+name = "cabinet_concept"
+
+# --- Single Instance Configuration ---
+# Use this if you only have one graph.
+configFile = ""
+domain = 0
+tree = false
+graph = false 
+2d = false
+3d = false
+
+# --- Multiple Instance Template ---
+# If you define multiple instances, the single instance config above will be ignored.
+# [Agent.instance_name]
+# configFile = ""
+# domain = 1
+# tree = true
+# graph = true
+# 2d = true
+# 3d = true
+
+[Presence]
+required_agent_names = ["robot_concept", "room_concept"]
+config_dir = "etc"
+monitor_period_ms = 500
+heartbeat_timeout_ms = 3000
+rejoin_grace_ms = 1500
+stale_grace_ms = 120000
+agent_info_period_ms = 1000
+
+[Owns]
+# "cabinet*" matches every cabinet this agent births/scaffolds (cabinet_1, cabinet_2, …) so none survive a
+# restart as a stale node (mirrors bottle_concept owning "bottle*").
+nodes = ["cabinet_concept 21", "cabinet*"]
+
+[Period]
+Compute = 100
+Emergency = 500
+
+[Component.Debug]
+Verbose = false
+
+# ── AI2 belief (CABINET_FIT_AI2.md): full-covariance recursive filter; legs derived, soft mixture ──
+# This is the ONLY fit path (the legacy SDF-gradient/Fisher/queue/silhouette fit has been removed).
+[CabinetModel]
+SigmaObs = 0.05             # top/leg SDF split band (m): a point within TOP_THICKNESS+SigmaObs below the top
+                            # face is attributed to the slab (candidate) vs a leg — used for the mask split.
+SdfThresholdForStorage = 0.08  # |SDF| below which a mask support point is on-surface (candidate) vs residual
+AI2CsvPath = "etc/ai2_log.csv"  # per-cycle AI2 log (state + Σ diag + mask R/bias); empty disables
+BirthSurpriseProbe = true    # EXPERIMENTAL read-only: read residual_concept's `grid` node as a surprise (unexplained-occupancy) field, cluster it, log uncovered high-surprise regions vs the tracker's births → etc/birth_surprise.csv. true to test; no fit/graph effect
+AI2SigmaBaseM = 0.03        # base on-surface obs noise std (m); R = σ² + mask_motion_var per frame
+PixelSigmaOverF = 0.0015    # σ_px/focal → transverse position std per metre of range
+DepthSigma0M = 0.006        # depth std floor (m)
+DepthSigmaRangeCoef = 0.004 # depth std growth (m per m² of range): σ_d = σ0 + coef·range²
+ModelSigmaM = 0.010         # residual model/surface std floor (m)
+# a1′+a2′ (PRECISION_AS_INFORMATION.md): weighted 2-D footprint residual + shared per-frame depth-affine nuisance.
+# THE grazing-yaw fix — models yaw where it lives (the footprint) and marginalizes the common depth bias/scale
+# that aliases into yaw at grazing. REPLACES the footprint-moment channel when on. depth_*_std = ZED depth priors.
+FootprintResidual = true    # true to enable (needs the ray geometry; supersedes the FootprintMoment* + obliquity yaw knobs)
+QuotientChart = false       # C2v symmetry-quotient chart [s,a1,a2] (Stage 3): kills 90°/180° yaw snaps + honest near-square σ_yaw; retires the fold/flip machinery. Pair with FootprintResidual
+ErosionPxStd = 2.0        # prior std (multiples of sigma_px) on the co-estimated MASK-EROSION nuisance eps_px.
+                          # Zero-mean and weak: the data decides how eroded the masks are; a positive estimate
+                          # CONFIRMS the model. Replaced DepthTiltStd 2026-07-21 (tilt was NOT load-bearing).
+DepthBiasStd = 0.015        # shared per-frame depth bias prior std (m)   — extent/pos nuisance (future)
+DepthScaleStd = 0.010       # shared per-frame depth scale prior std (fraction) — extent nuisance (future)
+AI2ClutterFrac = 0.10       # ε: prior weight of the uniform clutter mixture component
+AI2ClutterScaleM = 0.12     # a point further than ~this from EVERY surface is explained by clutter
+AI2PriorSizeStd = 0.30      # broad size prior std (m) on w,h,H
+AI2ProcessStdM = 0.005      # predict process-noise std, length DOFs (m/frame) — rigid+static ⇒ small
+AI2ProcessStdYaw = 0.01     # predict process-noise std, yaw (rad/frame)
+AI2AgeNominalDtS = 0.1      # stale-belief aging: mask stream nominal period (s, 10 Hz masks). Σ inflates by Q·(dt/this) while the feed is silent (measurement-age→covariance) — completes the frozen-frame fix: a stale capture stamp now AGES the belief instead of freezing it. 0 = freeze on stale (historic).
+AI2TruncGateFrac = 0.10     # skip the geometric update when >this fraction of the mask silhouette is on the image border (truncated → biased)
+# Static range weighting (motion-free): common-mode error grows with view distance so a far, vague mask
+# can confirm existence but NOT resolve pose/orientation (can't rotate a converged cabinet). Continuous, no gate.
+AI2RangeNoiseLatPerM = 0.02 # lateral deprojection std growth (m per m of range) → feeds R + position common-mode
+AI2RangeNoiseYawPerM = 0.03 # yaw common-mode std growth (rad per m of range) → the binding term vs far-view rotation
+AI2RangeNoiseSizePerM = 0.08 # SIZE (w,h,H) common-mode std growth (m per m of range): the per-frame size info
+                             # SATURATES lower with range, so a distant/vague mask can't reshape or INFLATE a
+                             # converged cabinet (freezes geometry afar; also caps the coverage grow-term). Raise
+                             # to freeze harder at range; the sibling of the lat/yaw range terms. 0 = off.
+AI2GnIters = 4              # Gauss-Newton iterations per frame
+
+# ── YOLO-INDEPENDENT LiDAR first-hit range channel (common/ai_belief/lidar_ray_factor.h) ──────────────────
+# Second, sensor-INDEPENDENT evidence: lidar3D returns on the cabinet's LEGS + RIM pin the extent/centre in
+# METRIC range along the viewing ray. Its error mechanism is uncorrelated with the YOLO segmentation, so it
+# attacks the mask-erosion extent UNDER-SIZE (~6cm) the mask cannot self-correct. Consumes the lidar3D media
+# plane (CabinetLidarIngestor); the media subscriber is created only while this is > 0.
+# ON at 2500 (load-bearing): ≈1/σ²@2cm = depth-point scale → w/h under-size shrinks and extent σ tightens.
+LidarPrecision = 2500.0          # per-ray range precision (1/m², ≈1/σ²@2cm=2500 when load-bearing). 0=OFF
+# A/B: use the LOW 'bpearl' LiDAR as a SEPARATE per-device ray-set (own origin, occlusion-aware first-hit) — it sees
+# the LEGS / lower extent the high 'helios' grazes over. Summed into the SAME GN as helios (NOT merged: each keeps its
+# origin), and feeds the existence leg-occupancy carve from its own origin. Try ~2500 to match helios. 0=OFF (helios only).
+LidarBpearlPrecision = 0.0
+LidarRobustCM = 0.05          # Cauchy scale (m): returns this far off the surface fade out (continuous, no gate)
+LidarSelectMarginM = 0.10     # pre-select returns within (birth half-diagonal + margin) horiz, floor..birth_H vert
+LidarCoverageN0 = 60.0        # LiDAR ray count for full weight; fewer → proportionally down-weighted (sparse-safe)
+LidarCoverageAngPower = 1.0    # ANGULAR-coverage weight precision×=(1−R)^p (R=mean-resultant of return bearings):
+                               # down-weights ONE-SIDED sweeps that over-commit the near-square w↔h mode from a
+                               # single view. 0=off (flat), 1=pure circular variance. Belief still accrues over orbit.
+MaxStepM = 1.0                 # divergence guard: reject a GN centre step > this (m) in one frame (static cabinet)
+# Coverage / traction (EXISTENCE_BELIEF_PLAN.md): on-plane mask points the mixture ceded to CLUTTER exert a
+# GROW-ONLY pull on the top slab, so a model under-covering a large mask grows to explain it (fixes cabinet_1.png:
+# green mask far outside the box, no traction). Self-bounded + on-plane-gated. STAGED — OFF (0.0) by default;
+# try 500 (≈ mask-point scale) and watch w/h grow to the mask extent without over-growing. Anti-contamination
+# bound = free-space carve (not yet wired) → keep modest until then.
+CoveragePrecision = 0.0          # DEBUG BASELINE: OFF (was 500). Re-add after the ZED+LiDAR pair is calibrated.
+CoverageRobustCM = 0.15        # Cauchy scale (m): on-plane points this far outside fade out (stray-point guard)
+
+# Free-space / VACATE (EXISTENCE_BELIEF_PLAN.md Step 4): the SHRINK-only counter-force that BOUNDS CoveragePrecision.
+# A LiDAR beam that passes THROUGH the top-slab band and exits the far side proves that crossing is empty → pull the
+# extent back IN (occupy-where-masked + vacate-where-through settle the extent where camera & LiDAR agree, so coverage
+# can no longer inflate onto clutter). Uses the same sweep as LidarPrecision (auto-staged when either is > 0). Beams
+# that RETURN inside the slab (occupancy) are ignored, so a real tabletop is untouched. Runs SOLO at 500 here
+# (CoveragePrecision is off), bounding the extent from LiDAR through-beams alone.
+FreeSpacePrecision = 500.0         # shrink-only free-space pull strength (per through-beam, ~1/σ²). 0=OFF
+
+# Footprint SECOND-MOMENT factor (cabinet_belief.h): measures (w,h,yaw) from the top-band cloud's 2D inertia
+# tensor and folds it as a linear Gaussian factor into the GN update — the escape from the clutter-trap that
+# leaves a DENSE, bigger/yawed mask unable to rotate/resize the box (the tables_5.png "stuck yaw"). The
+# per-point SDF mixture can't do this: interior top points have ∂sdf/∂yaw≈∂sdf/∂w≈0, and the outboard rim/leg
+# points that carry the signal fall outside the box → routed to clutter. This global statistic uses them all.
+# Also seeds (w,h,yaw) at birth so the box starts near-right. yaw pull scales with extent anisotropy (a square
+# gives none); per-frame authority capped by the range-driven common-mode (far view can't rotate a converged
+# cabinet — no manual gate). NOT applied to cx,cy (partial-view centroid bias; the mixture handles position).
+FootprintMomentPrecision = 2000.0   # A/B: try ~2000 on the right cabinet; 0=OFF (baseline births/fits unchanged)
+
+# Orientation w↔h mode: pure sequential-Bayesian evidence on the TRUE free energy (−log mixture likelihood).
+# No hysteresis/leak/discriminability knobs — those were band-aids for a BROKEN energy readout (clutter silently
+# zeroed misfit → FE≈0 → the mode comparison was noise → periodic 90° flips). With a real FE the evidence is
+# decisive and a near-square cabinet rests at the honest ambiguity on its own.
+# Footprint-moment per-frame covariance: the moment's measurement variance is 1/FootprintMomentPrecision (a static
+# noise FLOOR) + ego-motion mask corruption (motion_var) + (FootprintMomentRangePerM·range)². The extra terms make
+# the moment ACCUMULATE over frames and back off while the robot is moving / far, instead of snapping the belief to
+# each frame's noisy footprint (the live yaw/extent wander). The range coeff is << AI2RangeNoiseSizePerM because a
+# GLOBAL footprint fit is far more range-robust than a single boundary point. Raise to trust the moment less per frame.
+FootprintMomentRangePerM = 0.03
+
+# FE ATTENTION / SURPRISE (active-perception trigger). fe_surprise = smoothed positive gap FE−baseline. The
+# baseline is the "well-fit" free-energy level: it tracks DOWN fast (consolidate a better fit) and UP SLOW so a
+# SUSTAINED mismatch — the cabinet was moved — stays surprising long enough for the robot to attend and dwell until
+# the fit re-converges (FE→baseline → surprise→0). Watch fe_surprise in ai2_log.csv: move a cabinet → spike → decay.
+FeBaselineAdaptDown = 0.05
+FeBaselineAdaptUp   = 0.005
+FeSurpriseSmooth    = 0.10
+
+# Ego-motion coupling (your observation: all misalignments arrive on going-away/rotation frames, where masks are
+# degraded/split). moment variance += (FootprintMomentMotionGain·motion_dotd)² so a moving frame CANNOT reshape the
+# established fit; the w↔h mode accumulator is halved at motion_dotd=OrientationMotionRef so a split mask can't flip
+# it. Both continuous (no gate); static frames (dotd≈0) are unaffected. Raise the gain to freeze harder while moving.
+FootprintMomentMotionGain = 0.30
+OrientationMotionRef = 0.50
+
+# Grazing-view yaw stability (CSV rogue-rotation fix). The tabletop is viewed nearly edge-on (obliquity_cos≈0.09),
+# so yaw is weakly observable and the per-point GN snaps between the box's symmetric orientations (±180° r_π /
+# ±90° w↔h). The continuity fold + per-point obliquity yaw cap were validated live 2026-07-11 and are now ALWAYS
+# ON (no flags): the fold lives in canonicalize(), the cap is kObliquityYawGain in cabinet_fitter.cpp.
+
+# MOMENT-channel yaw stability (CSV rogue-rotation fix, part 2). The per-point caps above do NOT touch the footprint
+# MOMENT factor, but the live rogue rotations came in on the MOMENT channel (dyaw_moment) — a partial/foreshortened
+# view yields a fragmentary footprint whose 2D inertia is spuriously anisotropic, so r_yaw=r_base/aniso² becomes
+# razor-sharp and SNAPS yaw the wrong way (ai2_log.csv cyc1244: completeness≈0.01, aniso≈0.8, dyaw_moment≈-0.57).
+# Both terms inflate moment_extra_var as continuous covariance — no gate. self_test (m): dyaw 0.52→0.02 rad.
+FootprintMomentCompletenessGain = 0.5   # moment var += (gain·(1/completeness−1))², completeness=observed/believed footprint area → a partial-view sliver can no longer rotate a converged cabinet. completeness≥1 (full/larger view) unchanged. 0=OFF
+ObliquityMomentGain = 0.05              # grazing-view cap on the MOMENT channel: moment var += (gain·(1/|cosθ|−1))². Mirrors ObliquityYawGain (which only guards per-point). 0=OFF
+
+
+# ── Existence / removal (common/existence_belief.h) ───────────────────────────────────────────────────────
+# Each cycle the LiDAR sweep is carved against every cabinet footprint: beams RETURNING inside → occupancy, beams
+# passing THROUGH to beyond → free-space (absence). A per-cabinet occupancy log-odds accrues (common-mode tanh
+# saturated; HOLD when not looked at; free-evidence suppressed while the cabinet is actively seen = hollow guard),
+# and the cabinet is removed when P(occupied) < ExistenceRemovalProb. Evidence-based, NOT a miss counter. STAGED —
+# OFF by default (a mis-removal deletes furniture). Enable + watch the console "[existence] L=..." before trusting.
+ExistenceRemovalEnabled = true    # ON (fit calibrated). Optimizer-orthogonal: writes only inst.existence log-odds, at
+                                  # most delete_node — never touches θ/Σ. Silhouette channel HOLDs on occlusion (non-cabinet
+                                  # mask over the pixels) AND out-of-FoV (in_fov_frac≈0), so an unseen/occluded cabinet is
+                                  # NEVER falsely removed — it removes only when the camera LOOKS and sees empty.
+ExistenceRemovalProb = 0.12    # remove when L < log(p/(1−p)); lower = more conservative
+ExistenceLogoddsMax = 4.0      # clamp |L| so evidence stays finite AND recoverable
+ExistenceDetectionProb = 0.85  # P(beam through an OCCUPIED footprint returns from it) — sensor hit rate
+ExistenceClutterProb = 0.05    # P(beam through an EMPTY footprint returns anyway) — spurious rate
+ExistenceSensorSigmaM = 0.03   # LiDAR range σ (m) for the soft occupancy/free-space surface split
+ExistenceRemoveFrames = 15     # debounce: require the removal decision for this many CONSECUTIVE cycles before
+                               # deleting (a transient association/fit hiccup can't delete a real cabinet)
+
+# ABSENCE evidence degradation vs range + occlusion (no gate). "Predicted-visible but no mask/return there" is
+# weak removal evidence when the sensor likely couldn't resolve the cabinet anyway — far away (tiny projection /
+# sparse beams) or largely occluded. The FREE half of both channels is scaled by (RangeRef/range)^Power (≤1) ×
+# visible_fraction; OCCUPANCY stays fully informative (a distant detection still confirms). Power=0 disables.
+ExistenceAbsenceRangeRefM = 2.5   # range (m) below which absence is trusted at full weight
+ExistenceAbsenceRangePower = 2.0  # decay exponent (2 ≈ angular area ∝ 1/range²)
+
+# Verification-gated removal (active inference): a predicted-visible-but-absent observation is only evidence of
+# REMOVAL in proportion to P(detect | present, geometry) = range_conf × in_fov_frac × central_frac. The REMAINING
+# absence (from a far / peripheral / edge-on view that CAN'T resolve the cabinet) is epistemic surprise, not removal:
+# it feeds a decayed go-VERIFY accumulator. Above ExistenceVerifySurprise the cabinet is flagged wants_verification
+# and gets an epistemic pull (ExistenceVerifyGain nats) so the controller drives to a resolving ZED view — absence
+# never deletes a cabinet the robot never properly looked at; it sends the robot to look (confirm-or-remove).
+ExistenceVerifySurprise = 20.0    # decayed un-resolvable-absence surprise above which a cabinet wants verification
+ExistenceVerifyGain     = 5.0     # epistemic gain (nats) a wants_verification cabinet gets (drives a resolving view)
+
+# LiDAR removal reliability: the model top slab is a SOLID band but a real tabletop is a THIN plate, so
+# horizontal beams passing UNDER the top surface exit the band and read as false "free" (unreliable absence).
+# Default false ⇒ the LiDAR carve contributes OCCUPANCY only (holds L up), never drives removal; removal is the
+# camera silhouette's job (predicted-visible-but-absent, which HOLDs when out of FoV → a cabinet out of camera
+# view is never falsely removed). Set true only where the slab is a faithful solid model of the tabletop.
+                                # showed an OUT-OF-FoV cabinet (sndet=0 → silhouette correctly HOLDs) deleted purely by
+                                # LiDAR free-space: ex_lfree≈10-16 (beams passing UNDER the thin real top but THROUGH the
+                                # solid model band [H-3cm,H]) swamped ex_locc≈2 (genuine returns proving the cabinet is STILL
+                                # THERE) ~5:1 → ex_L floored at -4, streak→15, removed. The solid-slab LiDAR free is
+                                # model-inconsistent for a thin plate viewed edge-on; it must not drive removal. LiDAR =
+                                # occupancy-only (holds L up); removal is the silhouette's job (HOLDs out-of-FoV → an
+                                # unseen cabinet is never deleted). Re-enable ONLY with a thin-plate LiDAR likelihood.
+# Leg OCCUPANCY: also carve the 4 leg volumes [0, H−t] for confirmation. Occupancy-ONLY (legs are thin → a miss isn't
+# absence; the hollow space between legs must never vote free) ⇒ CANNOT cause a false removal, only holds a real cabinet
+# up. Robust when the thin top slab is at an awkward height for the horizontal LiDAR rings (tall legs get struck).
+ExistenceLegOccupancy = true
+
+[CabinetConcept]
+ObsDistance = 1.8           # comfortable maximum stand-off from the target face for epistemic poses
+EpistemicCooldownCycles = 200 # min cycles a satisfied cabinet stays withdrawn (anti-chatter)
+VoxelBankMaxPoints = 4000   # max number of cabinet-owned voxels kept in memory
+VoxelBankQuantizationM = 0.02 # dedup grid (m) for voxel-bank hashing
+VoxelSelectRadiusMarginM = 0.50 # per-cabinet XY ownership gate margin for mixed proto-cabinets
+VoxelSelectHeightMarginM = 0.25 # extra Z margin above cabinet height when selecting owned voxels
+RtCovScale = 1.0            # scales the belief Σ → published room→cabinet RT covariance (calibrate toward NEES≈1)
+PublishObjectObs = true     # publish per-frame ROBOT-frame fit z_o (obj_obs_robot) → room's object-anchor factor
+ObjectObsFrame = "body"     # localizer base frame z_o is expressed in (== room's LIDAR_ROBOT_FRAME)
+
+[Tracker]
+# Multi-instance birth/associate/merge (shared rc::InstanceTracker; the only instance-lifecycle path —
+# prior-scaffold + greedy nearest-mask were removed in Stage 2). "cabinet" masks are associated to instances
+# by a covariance-gated global 1-to-1; an unexplained mask spawns a new cabinet; overlapping cabinets merge
+# (two can't share space); a cabinet is NEVER retired by occlusion (a long occlusion is not absence).
+GateMahalanobis = 9.0     # χ²₂ gate (~3σ) for a mask↔instance match once it has a cov
+GateFallbackM = 0.50      # metric XY gate (m) before an instance has a usable covariance
+DetectionNoiseM = 0.35    # det-noise std R added to fit cov in the gate (S=P+R²I): covers the mask-centroid
+                          # vs fitted-centre offset of a partially-viewed cabinet (~0.2–0.5 m), else the
+                          # overconfident fit rejects its own detection. Cabinets are far apart → safe.
+BirthFrames = 8           # frames a mask must stay unexplained before spawning a cabinet
+# FUSED BIRTH (EXPERIMENTAL): residual-grid surprise mass under a detection accelerates its birth. birth_evidence
+# = 1 + Gain·(m/(m+MassRef)) per frame toward BirthFrames; a corroborated detection (high unexplained-occupancy)
+# births in ~1-2 frames, a phantom (m≈0 → evidence 1) serves the full 8-frame debounce. Needs residual_concept.
+BirthFusion = true         # true to enable; needs BirthSurpriseProbe infra (reads the `grid` node)
+BirthFusionGain = 6.0      # max extra evidence/frame at full corroboration (0 ⇒ baseline birth timing)
+BirthFusionMassRef = 8.0   # residual mass at which corroboration is half-saturated
+BirthFusionRadiusM = 0.50  # window (m) for the residual-mass sample under the detection
+                          # Removal is by the MERGE operator ONLY (two cabinets can't share space).
+BirthMinSepM = 0.60       # a birth must be ≥ this (m) from every existing cabinet (anti-duplicate)
+MergeOverlap = 0.05       # physical exclusion: collapse two instances whose oriented footprints overlap by
+                          # ≥ this fraction of the smaller footprint (two cabinets cannot share space). 0=off.
+BirthWidthM = 1.0         # default geometry for a cabinet BORN from a mask (the fit refines from here)
+BirthDepthM = 0.6
+BirthHeightM = 0.75
+                          # vs raw squared-Mahalanobis. Gate is m² either way. Matters under clutter.
+# Ricoh-360 ATTENTION gate. A slice with depth_var>0 is a peripheral 360-RGB YOLO detection (dense ZED slices
+# have depth_var==0). It is bearing-only: it never births/associates/fits, it only raises attention
+# (process_ricoh_bearings) so the robot seeks a good ZED view.
+RicohAttentionConf = 0.60         # min YOLO confidence for a ricoh detection to raise attention
+
+# Ricoh peripheral attention (process_ricoh_bearings) is always on (validated live): ricoh (depth_var>0)
+# detections raise attention targets but never fit — the ZED fits. NOTE: ricoh depth is reliable only for FRONTAL
+# views; lateral/back views smear the mask cloud, which is why ricoh is attention-only, never a fit source.
+# Ricoh attention association gates: small margins on the physical angular size / range roughness when deciding
+# whether an unassigned ricoh bearing already matches a known cabinet (process_ricoh_bearings).
+RicohAttentionAngleMargin = 0.05  # extra angular tolerance (rad) on the cabinet's angular half-size
+RicohAttentionRangeBandM  = 1.0   # extra range band (m); ricoh range is rough/indicative
+
+[Ice]
+Warn.Connections = "0"
+Trace.Network = "0"
+Trace.Protocol = "0"
+MessageSizeMax = "20004800"

@@ -1751,6 +1751,16 @@ namespace rc
             {
                 if (m.model_index < 0 || m.model_index >= static_cast<int>(init_polygon_vertices_.size()))
                     continue;
+                // Contract check at the OPTIMIZER BOUNDARY (independent of the detector's own check —
+                // this is the line the Hessian is actually built from). A non-finite observation, or a
+                // zero-precision one, must never enter: it constrains nothing yet still participates in
+                // the Hessian assembly, which is how min_ev → 0 (cond_num sentinel 1e8) produced NaN
+                // losses and a NaN pose on 2026-07-21. Dropping it degrades to SDF-only, which is the
+                // intended cascade.
+                if (not m.detected.allFinite() or not m.information.allFinite())
+                    continue;
+                if (m.information.cwiseAbs().maxCoeff() <= 1e-9f)
+                    continue;
                 WindowSlot::CornerObs obs;
                 obs.model_corner_world = init_polygon_vertices_[m.model_index];
                 obs.detected_robot = m.detected;
@@ -1861,6 +1871,58 @@ namespace rc
             auto newest_cpu = window_mgr_.newest().pose.detach().to(torch::kCPU);
             auto p_acc = newest_cpu.accessor<float, 1>();
             float x = p_acc[0], y = p_acc[1], phi = p_acc[2];
+
+            // ── DIVERGENCE RECOVERY: evidence is a cascade, never a cliff ────────────────────────
+            // Corners are OPTIONAL evidence: none matched simply means the SDF term drives alone, and
+            // that already happens naturally (loss_corner = 0). The failure that must never propagate
+            // is the SDF optimization itself going non-finite — observed 2026-07-21: a singular Hessian
+            // (cond_num hit its 1e8 sentinel) produced NaN losses, NaN was copied into the window pose
+            // here, and from then on EVERY frame was NaN: the robot vanished from the canvas, the RT
+            // edge published NaN to every peer, and corner detection silently reported in_fov=32 /
+            // fewpoints=32 because NaN fails every comparison. Nothing recovered on its own.
+            //
+            // So: if the optimizer's output is not finite, drop one rung down the evidence ladder and
+            // dead-reckon on odometry instead. The window slot is rewritten with the fallback so the
+            // NaN cannot persist into the next frame's linearization point, and the covariance is
+            // inflated because a dead-reckoned pose genuinely IS less certain — downstream consumers
+            // then see the uncertainty grow rather than a confident lie.
+            if (not std::isfinite(x) or not std::isfinite(y) or not std::isfinite(phi))
+            {
+                const bool have_odom = model_->has_prediction
+                                       and std::isfinite(model_->predicted_pos[0].item<float>())
+                                       and std::isfinite(model_->predicted_pos[1].item<float>())
+                                       and std::isfinite(model_->predicted_theta[0].item<float>());
+                if (have_odom)   // rung 2: odometry dead-reckoning
+                {
+                    x   = model_->predicted_pos[0].item<float>();
+                    y   = model_->predicted_pos[1].item<float>();
+                    phi = model_->predicted_theta[0].item<float>();
+                }
+                else if (last_good_pose_valid_)   // rung 3: hold the last pose we trusted
+                {
+                    x = last_good_pose_[0]; y = last_good_pose_[1]; phi = last_good_pose_[2];
+                }
+                else { x = 0.f; y = 0.f; phi = 0.f; }
+
+                // Overwrite the poisoned slot so the next optimization starts from a finite point.
+                window_mgr_.newest().pose.data().copy_(torch::tensor({x, y, phi},
+                    torch::TensorOptions().device(window_mgr_.newest().pose.device())));
+                // Dead reckoning ⇒ uncertainty grows. Keep it finite and clearly worse than a fix.
+                if (not current_covariance.allFinite())
+                    current_covariance = Eigen::Matrix3f::Identity() * 0.5f;
+                else
+                    current_covariance *= 4.0f;
+                res.diverged = true;
+                std::println("[SAFETY] SDF optimization produced a NON-FINITE pose — falling back to {} "
+                             "(x={:.3f} y={:.3f} th={:.3f}); covariance inflated, corners bypassed",
+                             have_odom ? "ODOMETRY" : (last_good_pose_valid_ ? "LAST GOOD POSE" : "ORIGIN"),
+                             x, y, phi);
+            }
+            else
+            {
+                last_good_pose_ = Eigen::Vector3f{x, y, phi};
+                last_good_pose_valid_ = true;
+            }
 
             while (phi > M_PI) phi -= 2.0f * M_PI;
             while (phi < -M_PI) phi += 2.0f * M_PI;

@@ -89,7 +89,6 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.birth_fusion_gain        = getf("Tracker.BirthFusionGain",   6.0f);
     out.birth_fusion_mass_ref    = getf("Tracker.BirthFusionMassRef",8.0f);
     out.birth_fusion_radius_m    = getf("Tracker.BirthFusionRadiusM",0.50f);
-    out.tracker_death_frames     = geti("Tracker.DeathFrames",      300);
     out.tracker_birth_min_sep_m  = getf("Tracker.BirthMinSepM",     0.60f);
     out.tracker_merge_overlap    = getf("Tracker.MergeOverlap",     0.05f);
     out.tracker_birth_width_m    = getf("Tracker.BirthWidthM",      1.0f);

@@ -117,7 +117,7 @@ void ChairSceneGraph::step_write_model(ChairInstance& inst, DSR::Node& node,
         std::vector<float> bank_flat;
         bank_flat.reserve(inst.voxel_bank_pts.size() * 3);
         for (const auto& p : inst.voxel_bank_pts) { bank_flat.push_back(p.x()); bank_flat.push_back(p.y()); bank_flat.push_back(p.z()); }
-        G_->runtime_checked_add_or_modify_attrib_local(node, "chair_voxel_bank_pts", bank_flat);
+        G_->add_or_modify_attrib_local<chair_voxel_bank_pts_att>(node, bank_flat);
     }
 
     // Latest residual points (model-unexplained) for the voxelizer's residual layer — it reads
@@ -126,7 +126,7 @@ void ChairSceneGraph::step_write_model(ChairInstance& inst, DSR::Node& node,
         std::vector<float> res_flat;
         res_flat.reserve(inst.last_residual_pts.size() * 3);
         for (const auto& p : inst.last_residual_pts) { res_flat.push_back(p.x()); res_flat.push_back(p.y()); res_flat.push_back(p.z()); }
-        G_->runtime_checked_add_or_modify_attrib_local(node, "residual_pts", res_flat);
+        G_->add_or_modify_attrib_local<residual_pts_att>(node, res_flat);
     }
 
     // Active-perception channel for the controller's local lock-on search:
@@ -135,13 +135,13 @@ void ChairSceneGraph::step_write_model(ChairInstance& inst, DSR::Node& node,
     //  - chair_roi_fill: projected extent fraction (drive toward a sweet-spot for stand-off/scale).
     //  - chair_roi_valid: model currently projects in front of the camera.
     //  - chair_detection_alive / _confidence / _frames_since: is YOLO firing here, and how strongly.
-    G_->runtime_checked_add_or_modify_attrib_local(node, "chair_roi_offset",
+    G_->add_or_modify_attrib_local<chair_roi_offset_att>(node,
         std::vector<float>{inst.roi_offset_x, inst.roi_offset_y});
-    G_->runtime_checked_add_or_modify_attrib_local(node, "chair_roi_fill", inst.roi_fill);
-    G_->runtime_checked_add_or_modify_attrib_local(node, "chair_roi_valid", inst.roi_valid ? 1 : 0);
-    G_->runtime_checked_add_or_modify_attrib_local(node, "chair_detection_alive", inst.detection_alive ? 1 : 0);
-    G_->runtime_checked_add_or_modify_attrib_local(node, "chair_detection_confidence", inst.last_mask_confidence);
-    G_->runtime_checked_add_or_modify_attrib_local(node, "chair_frames_since_detection", inst.frames_since_detection);
+    G_->add_or_modify_attrib_local<chair_roi_fill_att>(node, inst.roi_fill);
+    G_->add_or_modify_attrib_local<chair_roi_valid_att>(node, inst.roi_valid);
+    G_->add_or_modify_attrib_local<chair_detection_alive_att>(node, inst.detection_alive);
+    G_->add_or_modify_attrib_local<chair_detection_confidence_att>(node, inst.last_mask_confidence);
+    G_->add_or_modify_attrib_local<chair_frames_since_detection_att>(node, inst.frames_since_detection);
 
     G_->update_node(node);
 

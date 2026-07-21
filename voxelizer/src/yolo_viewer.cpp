@@ -42,8 +42,13 @@ QPixmap YoloViewer::render_frame(const cv::Mat& rgb,
 
     for (const auto& det : detections)
     {
-        const cv::Vec3b color = class_color(det.class_id);
+        // YOLO-sem-derived furniture masks use a class_id offset of 1000 (SemanticMaskStage) so they are
+        // clear of the COCO range. Render them DISTINCTLY from the YOLO-seg masks: a fixed bright cyan, a
+        // thicker box, and a "sem:" label prefix — so it's obvious what the semantic branch contributes.
+        const bool is_semantic = det.class_id >= 1000;
+        const cv::Vec3b color = is_semantic ? cv::Vec3b{0, 229, 255} : class_color(det.class_id);
         const cv::Scalar color_s(color[0], color[1], color[2]);
+        const int box_thickness = is_semantic ? 3 : 2;
 
         // ── Mask overlay (50 % alpha blend in mask region) ────────────────────
         if (!det.mask.empty())
@@ -71,10 +76,10 @@ QPixmap YoloViewer::render_frame(const cv::Mat& rgb,
         }
 
         // ── Bounding box ──────────────────────────────────────────────────────
-        cv::rectangle(canvas, det.bbox, color_s, 2, cv::LINE_AA);
+        cv::rectangle(canvas, det.bbox, color_s, box_thickness, cv::LINE_AA);
 
         // ── Label chip ───────────────────────────────────────────────────────
-        const std::string text = det.label + " " + cv::format("%.2f", det.confidence);
+        const std::string text = (is_semantic ? "sem:" : "") + det.label + " " + cv::format("%.2f", det.confidence);
         int baseline = 0;
         const cv::Size ts = cv::getTextSize(text, cv::FONT_HERSHEY_SIMPLEX, 0.55, 1, &baseline);
         const cv::Point tl = det.bbox.tl();

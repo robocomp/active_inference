@@ -86,6 +86,14 @@ FloorPlane estimate_floor_plane(const std::vector<Eigen::Vector3f>& points_room,
     // 4) Temporal EMA toward the new fit (slow → stable). First valid fit initialises directly.
     FloorPlane out;
     out.valid = true;
+    // Fit quality of the surviving candidates (how planar the "floor" we just fitted really is).
+    {
+        double s2 = 0.0;
+        for (const int i : idx)
+        { const double r = points_room[i].z() - (a * points_room[i].x() + b * points_room[i].y() + c); s2 += r * r; }
+        out.n_candidates = static_cast<int>(idx.size());
+        out.rms = idx.empty() ? 0.0f : static_cast<float>(std::sqrt(s2 / idx.size()));
+    }
     if (prev.valid)
     {
         const float e = std::clamp(p.ema, 0.0f, 1.0f);

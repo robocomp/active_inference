@@ -22,6 +22,7 @@ from rich.table import Table
 
 from .bandwidth import BandwidthMonitor
 from .registry import MonitorLock, RegistryWriter, claim_commands
+from .shm_guard import clean_orphan_shm, preflight_dds
 from .server import MonitorServer
 from .topology import agent_domain, parse_endpoint
 
@@ -176,6 +177,13 @@ def run_launcher(toml_path, launcher, layer, start_webots=False,
         c["_domain"] = agent_domain(c).get("domain") if layer == "cognitive" else None
 
     _remove_existing(components, console)
+
+    # With this launcher's components just killed, garbage-collect FastDDS segments nothing
+    # references any more, then confirm shared-memory discovery really works before starting the
+    # producers. Both run here because this is the one moment we know our own processes are down.
+    clean_orphan_shm(console)
+    if not preflight_dds(console):
+        raise SystemExit(1)
 
     tbl = Table(title=f"🧠 Loaded Components — {launcher} [{layer}]", box=box.SIMPLE_HEAVY)
     for col, st in [("Name", "bold cyan"), ("Endpoint", "bold blue"), ("Port", "bold magenta"),

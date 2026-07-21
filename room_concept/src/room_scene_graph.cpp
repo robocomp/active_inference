@@ -94,6 +94,26 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose,
 {
     if (!G_ || !rt_api_) return;
 
+    // ── SAFETY BARRIER: never publish a non-finite pose to the graph ─────────────────────────────
+    // This RT edge is what every other agent — including the controller that drives the wheels —
+    // reads as "where the robot is". A NaN/Inf here does not stay inside this process: it propagates
+    // into the RT tree, poisons every inner_eigen transform chained through it, and reaches motion
+    // control. On a real robot around people that is not an acceptable failure mode, so the write is
+    // refused outright and the last good edge is left in place (consumers then see it age, which the
+    // freshness-as-precision path already treats as growing uncertainty). Observed 2026-07-21: a
+    // singular Hessian (cond_num sentinel 1e8) produced a NaN pose that reached the graph and made
+    // the robot vanish from the canvas; downstream agents had no way to tell.
+    const bool pose_finite = robot_pose.matrix().allFinite() and covariance.allFinite();
+    if (not pose_finite)
+    {
+        static std::uint64_t nan_rt_k = 0;
+        if ((nan_rt_k++ % 20) == 0)
+            qCritical() << "[SAFETY] refusing to publish NON-FINITE robot RT (pose_finite="
+                        << robot_pose.matrix().allFinite() << "cov_finite=" << covariance.allFinite()
+                        << ") — keeping the last good edge; localizer is diverged, count=" << nan_rt_k;
+        return;
+    }
+
     const auto describe_node = [this](uint64_t id) -> QString
     {
         if (id == 0)
@@ -490,11 +510,15 @@ void RoomSceneGraph::log_table_landmarks()
         bool alive = true;
         int  age   = 0;   // table_frames_since_detection: 0 = fresh this cycle, grows while unseen
         {
-            const auto& attrs = n.attrs();
-            if (const auto it = attrs.find("table_detection_alive"); it != attrs.end())
-                alive = (it->second.dec() != 0);
-            if (const auto it = attrs.find("table_frames_since_detection"); it != attrs.end())
-                age = std::max(0, it->second.dec());
+            // TYPE-ATTRIBUTED reads (CLAUDE.md): checked against the REGISTER_TYPE in dsr_attr_name.h at
+            // COMPILE time. The previous form looked the attribute up by string in the raw attrs() map and
+            // called Attribute::dec(), which consults the declared type not at all — so when the producer
+            // changed table_detection_alive from int to bool this threw "INT is not selected, selected is
+            // BOOL" at runtime instead of failing the build here.
+            if (const auto v = G_->get_attrib_by_name<table_detection_alive_att>(n); v.has_value())
+                alive = v.value();
+            if (const auto v = G_->get_attrib_by_name<table_frames_since_detection_att>(n); v.has_value())
+                age = std::max(0, v.value());
         }
         // Freshness-as-precision weight actually applied to this obs by object_anchor_source:
         //   R_o ← R_o·(1+age/scale)²  ⇒  relative precision (weight) = 1/(1+age/scale)². 1=fresh, →0 stale.
@@ -615,7 +639,7 @@ void RoomSceneGraph::refresh_object_anchors()
 
     // Cache the pinned landmark world positions (+ live "being measured" flag) for the viewer
     // (robot→landmark sight lines). "Measured" = the producer's per-frame detection flag; for tables
-    // that is `table_detection_alive` (runtime-typed → read off the node's attrs map). Absent flag ⇒
+    // that is `table_detection_alive` (type-attributed read, compile-checked). Absent flag ⇒
     // default to measured, so an object type that doesn't publish it still shows its sight line.
     latest_pinned_landmarks_.clear();
     latest_pinned_measured_.clear();
@@ -627,9 +651,9 @@ void RoomSceneGraph::refresh_object_anchors()
         bool measured = true;
         if (const auto n = G_->get_node(a.node_id); n.has_value())
         {
-            const auto& attrs = n->attrs();
-            if (const auto it = attrs.find("table_detection_alive"); it != attrs.end())
-                measured = (it->second.dec() != 0);
+            // Type-attributed read — compile-time checked against dsr_attr_name.h (see note above).
+            if (const auto v = G_->get_attrib_by_name<table_detection_alive_att>(n.value()); v.has_value())
+                measured = v.value();
         }
         latest_pinned_measured_.push_back(measured ? 1 : 0);
     }

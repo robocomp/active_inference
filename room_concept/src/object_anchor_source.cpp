@@ -81,10 +81,11 @@ namespace rc
             // smoothly instead of pulling the pose to a phantom "in front" reading. Fresh (age 0) ⇒ ×1.
             if (cfg.freshness_enable)
             {
+                // Type-attributed read — compile-checked against dsr_attr_name.h (CLAUDE.md). The string +
+                // Attribute::dec() form this replaced bypassed the declared type entirely.
                 int age = 0;
-                const auto& attrs = node.attrs();
-                if (const auto it = attrs.find("table_frames_since_detection"); it != attrs.end())
-                    age = std::max(0, it->second.dec());
+                if (const auto v = G.get_attrib_by_name<table_frames_since_detection_att>(node); v.has_value())
+                    age = std::max(0, v.value());
                 const float scale = std::max(1e-3f, cfg.freshness_age_scale);
                 const float f2 = (1.0f + static_cast<float>(age) / scale);   // σ→ f·σ  ⇒  var → f²·var
                 R_pos *= f2 * f2;

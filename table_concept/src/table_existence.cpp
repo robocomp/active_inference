@@ -157,13 +157,13 @@ void TableExistence::update_and_remove(TableFitter& fitter, TableLidarIngestor* 
                 // top-slab subtends few of them, so a pass-through is weak evidence the tabletop is gone.
                 const float lidar_range = (origin - Eigen::Vector3f(bs.cx, bs.cy, bs.H)).norm();
                 ev.e_free *= absence_range_conf(lidar_range);
-                // OCCUPANCY-ONLY by default: a solid-slab model vs a thin real tabletop makes LiDAR "free"
-                // unreliable (beams under the top surface read as gone), so it must not drive removal — only
-                // the camera silhouette does. Suppress free unless it was observed (hollow guard) OR the
-                // ExistenceLidarAbsence override is on. Occupancy still counts, holding L up.
-                const bool suppress_free = true;   // LiDAR absence-evidence REFUTED on live data (A/B 2026-07-12)
-                inst.dbg_ex_lidar_free_eff = suppress_free ? 0.0f : ev.e_free;
-                ev.log_odds_delta = rc::exist::hollow_guarded_delta(ev, suppress_free, sm);
+                // OCCUPANCY-ONLY, unconditionally: a solid-slab model vs a thin real tabletop makes LiDAR
+                // "free" unreliable (beams passing under the top surface read as gone), so it must never drive
+                // removal — only the camera silhouette does. The A/B that enabled LiDAR absence evidence was
+                // REFUTED on live data (2026-07-12) and its flag has been removed; occupancy still counts and
+                // holds L up. e_free is computed above only for the diagnostic columns.
+                inst.dbg_ex_lidar_free_eff = 0.0f;
+                ev.log_odds_delta = rc::exist::hollow_guarded_delta(ev, true, sm);
                 inst.existence.integrate(ev);
                 integrated = true;
             }

@@ -58,7 +58,7 @@ inline bool owned_by_table(const TableInstance& inst, const Eigen::Vector3f& poi
     // Height gate to reject floor / distant clutter points in mixed scenes.
     const float z_min = -0.05f;   // threshold: a little below the room floor (z≈0) to keep grazing returns
     const float z_max = s.table_height + cfg.voxel_select_height_margin_m;
-    return point.z() >= z_min && point.z() <= z_max;
+    return point.z() >= z_min and point.z() <= z_max;
 }
 
 // Insert this cycle's candidate + residual points into the instance's voxel bank: ownership-gated,
@@ -97,7 +97,7 @@ inline void ingest(TableInstance& inst,
 
     const int period = std::max(1, cfg.table_log_period_frames);
     const bool do_log = (inst.processed_cycles % period) == 0;
-    if (inserted > 0 && do_log)
+    if (inserted > 0 and do_log)
         std::print("[{}] voxel-bank: +{} total={} (cap={}) reject_foreign={}\n",
                    inst.node_name, inserted, inst.voxel_bank_pts.size(), max_points, rejected_foreign);
 }

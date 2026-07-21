@@ -285,6 +285,11 @@ void SpecificWorker::initialize()
     }
 
     presence_coordinator_.configure(configLoader, G, static_cast<std::uint32_t>(agent_id));
+    // Colour this agent's node in the graph view by its live health: the coordinator already
+    // publishes the presence lifecycle; this adds the external FSM axis (Initialize/Compute/
+    // Emergency/Restore). Generic discovery via objectName(), so genericworker regeneration
+    // cannot break it.
+    presence_coordinator_.attach_state_machine(&statemachine);
     presence_coordinator_.set_transition_hooks({
         .request_presence_ready = [this]() { emit presenceReady(); },
         .request_presence_lost  = [this]() { emit presenceLost(); },

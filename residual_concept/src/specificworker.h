@@ -104,6 +104,7 @@ private:
     // "hit_then_cleared" smoking-gun for grazing beams erasing a horizontal surface they graze). Optionally
     // probes a rectangular region [GridProbe*] (e.g. a tabletop) reporting occupied/hit cells inside it.
     void  log_grid_diag();
+    void  log_floor_diag();   // floor-plane fit + latched-cell height histogram → etc/floor_diag.csv
 
     // ── Per-cycle orchestration ──
     void run_instance_tracker(const std::vector<rc::SpecialistSdf>& specialists);

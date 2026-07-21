@@ -201,11 +201,16 @@ CornerDetector::DetectionResult CornerDetector::detect(
     //   ∂p/∂x, ∂p/∂y = −R(-θ) columns;   ∂p/∂θ = (p_y, −p_x).
     // So H·P·Hᵀ is the corner's positional uncertainty induced by the pose uncertainty — the term that
     // makes the association gate breathe with localization quality instead of being a fixed radius.
+    // Refuse to build the association algebra on a poisoned pose covariance: S = Σ_det + H P Hᵀ would
+    // inherit the NaN, every Mahalanobis cost would be NaN, and the PDA weights with it. Treating an
+    // unusable P as ZERO degrades to "gate on detection + map error alone", which is conservative
+    // (tighter gate) rather than silently wrong.
+    const Eigen::Matrix3f P = pose_cov.allFinite() ? pose_cov : Eigen::Matrix3f::Zero();
     auto prediction_cov = [&](const Eigen::Vector2f& p) -> Eigen::Matrix2f {
         Eigen::Matrix<float, 2, 3> H;
         H(0, 0) = -cos_t; H(0, 1) = -sin_t; H(0, 2) =  p.y();
         H(1, 0) =  sin_t; H(1, 1) = -cos_t; H(1, 2) = -p.x();
-        return H * pose_cov * H.transpose();
+        return H * P * H.transpose();
     };
 
     // Σ of a detection = inverse of its graded information, regularised by the weak "the corner lies
@@ -530,8 +535,19 @@ CornerDetector::DetectionResult CornerDetector::detect(
             denom += lik[rr][c];
             if (rr != r) runnerup = std::min(runnerup, cost[rr][c]);   // best RIVAL for this detection
         }
-        const float w = denom > 1e-20f ? std::clamp(lik[r][c] / denom, params_.assoc_min_weight, 1.f)
-                                       : params_.assoc_min_weight;
+        // ── NO EVIDENCE ⇒ NO FACTOR ────────────────────────────────────────────────────────────
+        // The posterior can legitimately reach 0 (every in-gate likelihood underflowed) and NaN if any
+        // covariance upstream was already poisoned. Emitting the match anyway with Λ *= 0 hands the
+        // optimizer a ZERO-precision observation: it constrains nothing, yet it still enters the
+        // Hessian assembly and can drive min_ev to 0 ⇒ cond_num sentinel 1e8 ⇒ NaN losses ⇒ NaN pose
+        // (root cause of the 2026-07-21 divergence). A corner we cannot associate is not weak
+        // evidence, it is ABSENT evidence — so it must not become a factor at all.
+        // NOTE std::clamp does NOT sanitise NaN (NaN<lo and hi<NaN are both false ⇒ NaN passes
+        // through), so the finiteness test has to come first and explicitly.
+        const float w_raw = denom > 1e-20f ? lik[r][c] / denom : 0.f;
+        if (not std::isfinite(w_raw) or w_raw <= 0.f)
+            { result.rej_noninformative++; continue; }
+        const float w = std::clamp(w_raw, params_.assoc_min_weight, 1.f);
 
         CornerMatch m    = candidates[c];
         m.model_index    = fov_corners[r].mc->original_index;
@@ -544,6 +560,14 @@ CornerDetector::DetectionResult CornerDetector::detect(
         // Precision IS the confidence in the correspondence: an ambiguous match carries proportionally
         // less information into the loss. The loss needs no change — it already consumes `information`.
         m.information   *= w;
+        // Final contract check before this leaves the detector: the emitted precision must be finite
+        // and must actually constrain at least one direction. Rank-1 is legitimate (a shallow corner
+        // leaves its bisector free); rank-0 or non-finite is not, and must never reach the optimizer.
+        {
+            Eigen::SelfAdjointEigenSolver<Eigen::Matrix2f> chk(m.information);
+            if (not m.information.allFinite() or chk.eigenvalues().maxCoeff() <= 1e-9f)
+                { result.rej_noninformative++; continue; }
+        }
         {   // keep the display covariance consistent with the down-weighted information
             Eigen::SelfAdjointEigenSolver<Eigen::Matrix2f> es(m.information);
             const Eigen::Vector2f ev = es.eigenvalues();

@@ -711,7 +711,8 @@ void Viewer2D::draw_corners(const std::vector<rc::CornerDetector::CornerMatch>& 
         return item;
     });
 
-    // Numeric det(cov) label at the midpoint of each sight line (screen-sized, transform-invariant).
+    // Numeric |Σ| (= det of the detection covariance) label at the midpoint of each sight line
+    // (screen-sized, transform-invariant).
     resize_pool(corner_cov_text_items_, n, [&]() {
         auto* item = agv_->scene.addText("");
         item->setZValue(31);
@@ -758,9 +759,10 @@ void Viewer2D::draw_corners(const std::vector<rc::CornerDetector::CornerMatch>& 
         const QColor col(static_cast<int>(255 * u), static_cast<int>(200 * (1.f - u)), 60, 220);
         corner_robot_line_items_[i]->setPen(QPen(col, width));
 
-        // Numeric label: det(cov) in m⁴ at the line midpoint.
+        // Numeric label at the line midpoint: the covariance determinant in m⁴, written in the standard
+        // |Σ| notation purely to save canvas width over spelling out "det(cov)".
         auto* txt = corner_cov_text_items_[i];
-        txt->setPlainText(QString("det(cov)=%1").arg(det_cov, 0, 'g', 3));
+        txt->setPlainText(QStringLiteral("|Σ|=%1").arg(det_cov, 0, 'g', 3));
         txt->setDefaultTextColor(col);
         txt->setPos(0.5f * (t.x() + det_world.x()), 0.5f * (t.y() + det_world.y()));
     }

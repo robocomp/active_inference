@@ -231,7 +231,7 @@ FloorClassIds   = "3,6,9,11,13,28,29,46,52,54,91,94"
 # The estimator ALWAYS runs and logs `[floor-plane] z = a·x + b·y + c (offset .. cm, tilt ..°)` — read that FIRST
 # to see how far off the floor is; then flip Enabled=true to apply it.
 [FloorPlane]
-Enabled       = false   # master flag. false ⇒ log-only (fixed band kept). true ⇒ grid band follows the fit.
+Enabled       = true    # master flag. false ⇒ log-only (fixed band kept). true ⇒ grid band follows the fit.
 CandidateBandM = 0.25   # a return within this ABOVE the current floor estimate is a floor candidate for the fit
 TrimK         = 2.5     # robust trim: drop candidates > k·σ(MAD) after each fit (rejects legs / low obstacles)
 Iters         = 2       # robust reweighting rounds

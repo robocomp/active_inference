@@ -203,6 +203,22 @@ public:
     bool  world_to_cell(float x, float y, int& ix, int& iy) const;
     void  cell_to_world_pub(int ix, int iy, float& x, float& y) const { cell_to_world(ix, iy, x, y); }
     long  occupied_count() const { long n = 0; for (auto v : occ_) n += v; return n; }
+    // Height histogram of the LATCHED cells, binned by the cell's running-max hit height zmx_ (the tallest thing
+    // ever seen there). Diagnostic for "are these phantoms?": a cell whose tallest return is only a few cm above
+    // the floor is a GRAZING/floor return, not an obstacle — a mass of such cells is the floor-band signature.
+    // `edges` are the upper bin edges in metres; the returned vector has edges.size()+1 entries (last = above all).
+    std::vector<long> occupied_height_hist(const std::vector<float>& edges) const
+    {
+        std::vector<long> bins(edges.size() + 1, 0);
+        for (std::size_t i = 0; i < occ_.size(); ++i)
+        {
+            if (not occ_[i] or not hit_[i]) continue;
+            std::size_t k = 0;
+            while (k < edges.size() and zmx_[i] > edges[k]) ++k;
+            ++bins[k];
+        }
+        return bins;
+    }
     const SweepDiag& last_sweep_diag() const { return sd_; }
 
     static bool self_test();
