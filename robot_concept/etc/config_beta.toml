@@ -1,0 +1,154 @@
+[Proxies]
+# This property is used by the clients to connect to IceStorm.
+TopicManager = "IceStorm/TopicManager:default -p 9999"
+
+# Proxies for required interfaces
+CameraRGBDSimple = "camerargbdsimple:tcp -h localhost -p 12001" #ZED
+IMU = "imu:tcp -h localhost -p 10007"
+Lidar3D = "lidar3d:tcp -h localhost -p 11995"
+Camera360RGBD = "camera360rgbd:tcp -h localhost -p 12003" # ricoh+lidar
+Camera360RGB = "camera360rgb:tcp -h localhost -p 10097" # Ricoh
+MediaPlaneDDS = "mediaplanedds:tcp -h localhost -p 12002" # zed_camera: query its DDS media descriptor
+MediaPlaneDDS1 = "mediaplanedds:tcp -h localhost -p 10099" # ricoh_omni_dds: query its DDS media descriptor
+MediaPlaneDDS2 = "mediaplanedds:tcp -h localhost -p 11890" # lidar3d_dds helios: query its DDS media descriptor
+MediaPlaneDDS3 = "mediaplanedds:tcp -h localhost -p 11889" # lidar3d_dds bpearl: query its DDS media descriptor
+
+[Endpoints]
+# Endpoints for subscriptions interfaces
+FullPoseEstimationPubTopic = "tcp -p 0"
+FullPoseEstimationPubPrefix = ""
+
+# --- Common Agent Data ---
+[Agent]
+id = 6 # Change id
+name = "robot_concept"
+robot_name = "Shadow"
+
+# --- Single Instance Configuration ---
+# Use this if you only have one graph.
+configFile = "shadow.json"   
+domain = 0
+tree = false
+graph = true
+2d = false
+3d = false
+
+# --- Multiple Instance Template ---
+# If you define multiple instances, the single instance config above will be ignored.
+# [Agent.instance_name]
+# configFile = "shadow.json"
+# domain = 1
+# tree = true
+# graph = true
+# 2d = true
+# 3d = true
+
+[Period]
+Compute = 100
+Emergency = 500
+
+# ── [Presence] ────────────────────────────────────────────────────────────────
+# required_agent_names   = ["a","b"]  # Must be Ready before on_required_ready fires (blocks Operating state)
+# optional_agent_names   = ["a","b"]  # Tracked; fires on_optional_agent_ready/lost but never blocks
+# required_agent_ids     = [1,2]      # Same as required_agent_names but by numeric DSR agent ID
+# optional_agent_ids     = [1,2]      # Same as optional_agent_names but by ID
+# node_requires          = ["body"]   # DSR node names that must exist in graph (checked every tick)
+# monitor_period_ms      = 500        # Timer period for scan + timeout checks (ms)
+# heartbeat_timeout_ms   = 3000       # Silence after which a peer is downgraded to Stale (ms)
+# rejoin_grace_ms        = 1500       # Grace window after detected restart before peer is Ready again (ms)
+# agent_info_period_ms   = 1000       # How often this agent publishes its own heartbeat (ms)
+# config_dir             = "etc"      # Dir searched for {peer}.toml to clean up crashed peer's owned nodes
+#
+# ── [Owns] ────────────────────────────────────────────────────────────────────
+# nodes    = ["node_a","prefix_*"]    # DSR nodes deleted on clean shutdown; * is a prefix wildcard
+# subtrees = ["root_node"]            # Root nodes whose entire RT-edge subtree is deleted on shutdown
+# Note: other agents with config_dir set will also read this file on peer crash to clean up these nodes.
+# ──────────────────────────────────────────────────────────────────────────────
+
+[Presence]
+optional_agent_names = ["room_concept", "table_concept", "controller", "voxelizer", "bottle_concept"]
+config_dir = "etc"
+monitor_period_ms = 500
+heartbeat_timeout_ms = 15000  # match controller/room_concept; 3s was hypersensitive to graph-publish stalls
+rejoin_grace_ms = 1500
+stale_grace_ms = 120000  # 2 min grace: covers peer restart time before declaring lost
+agent_info_period_ms = 1000
+# DISPLAY ONLY — how long an agent's heartbeat may go silent before its node in the graph view is
+# greyed out (see common/agent_state_publisher/agent_status_overlay.h). Deliberately much shorter
+# than heartbeat_timeout_ms above: seeing a dead agent go grey fast costs nothing, whereas ACTING on
+# a 3 s silence (declaring the peer lost and shutting down) is what proved hypersensitive. Nothing
+# behavioural keys off this value.
+stale_display_ms = 3000
+
+[Owns]
+nodes = ["mind", "robot_concept 6"]
+subtrees = ["Shadow"]
+
+[Camera]
+# DSR upload frame rates:
+#   >0: throttle to that rate
+#    0: upload every captured frame
+#   <0: disable upload
+# RGBD pixels now travel on the zero-copy media plane (rc/zed/rgb + rc/zed/depth);
+# DSR cam_rgb/cam_depth blob uploads are decommissioned to keep large payloads off
+# the shared CRDT graph / liveliness path. Set >=0 only to temporarily re-enable
+# the legacy DSR path for debugging.
+dsr_rgb_fps   = -1
+dsr_depth_fps = -1
+
+# Zero-copy RGBD media plane. Kept on a DEDICATED DDS domain (NOT the DSR
+# Agent.domain = 0) so media participant churn (e.g. a voxelizer restart) can
+# never perturb the cortex/DSR discovery + graph-resync path. Must MATCH across
+# robot_concept (producer), voxelizer and room_concept (consumers).
+[Media]
+domain_id   = 7
+rgb_topic   = "rc/zed/rgb"
+depth_topic = "rc/zed/depth"
+ricoh_topic = "rc/ricoh/rgb"
+lidar_topic = "rc/lidar3d/points"
+imu_topic   = "rc/imu/data"
+
+# Per-sensor stream gates. When false: no media publisher is created, no descriptor
+# is advertised, and the sensor's Ice reader thread is not started (no proxy traffic).
+enable_zed   = true    # ZED RGB + depth
+enable_ricoh = true    # RGBD_360 360 panorama
+enable_lidar = true    # 3D LiDAR cloud
+enable_imu   = true    # IMU
+
+# RGB source selector (only effective when enable_zed = true): auto | ice | dds.
+#   auto: bridge via Ice RPC until zed_camera appears on DDS, then follow it.
+#   ice : always bridge via Ice RPC.   dds: never bridge; only monitor zed_camera's DDS topic (alive+FPS).
+zed_source   = "auto"
+
+# 360 source selector (only effective when enable_ricoh = true): auto | ice | dds.
+#   auto: bridge via Ice RPC until ricoh_omni_dds appears on DDS (Proxies.MediaPlaneDDS1), then follow it.
+#   ice : always bridge via Ice RPC.   dds: never bridge; only monitor ricoh_omni_dds's DDS topic (alive+FPS).
+ricoh_source = "auto"
+
+# LiDAR source selector (only effective when enable_lidar = true): auto | ice | dds.
+#   auto: bridge via Ice RPC until BOTH lidar3d_dds (helios=MediaPlaneDDS2, bpearl=MediaPlaneDDS3)
+#         appear on DDS, then relay their descriptors to the 'helios'/'bpearl' nodes and stop bridging.
+#   ice : always bridge via Ice RPC.   dds: never bridge; only relay/monitor the lidar3d_dds planes.
+lidar_source = "dds"
+
+[Lidar]
+# Legacy DSR-graph lidar upload. <0 DISABLES it (default): lidar is published on the zero-copy
+# media plane (rc/lidar3d/points) and consumed there by room_concept + voxelizer. Set >=0 to
+# re-enable the graph laser_* write at that fps (0 = unthrottled) for any consumer still reading the
+# graph — currently controller_obstacle_tracker. NOTE: 0 (unthrottled) floods the shared DSR/FastDDS
+# writer with the full cloud every scan, blocking G->update_node and starving the agent heartbeat
+# (timestamp_agent_att) → false "stale peer" detection; prefer a bounded rate (e.g. 20) if re-enabled.
+dsr_lidar_fps = -1
+
+[Transforms]
+# Use RT interpolation for timestamped graph transforms. Disable to fall back to nearest sample.
+interpolate_rt = true
+
+[Component.Debug]
+Verbose = false
+
+[Ice]
+Warn.Connections = "0"
+Trace.Network = "0"
+Trace.Protocol = "0"
+MessageSizeMax = "20004800"
