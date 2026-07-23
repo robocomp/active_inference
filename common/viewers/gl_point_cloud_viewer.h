@@ -32,6 +32,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <span>
 #include <vector>
@@ -65,7 +66,10 @@ public:
 	// Replace the displayed cloud. group_a and group_b are drawn in distinct colours (e.g. two
 	// LiDAR rings); pass an empty group_b for a single cloud. Auto-frames on the first non-empty
 	// cloud until the user interacts with the camera.
-	void set_points(std::span<const QVector3D> group_a, std::span<const QVector3D> group_b = {})
+	// src_stamp_ms: the SOURCE capture stamp (ms) of this cloud, used for the display-rate estimate.
+	// Pass 0 (the default) to fall back to wall-clock call intervals for stampless callers.
+	void set_points(std::span<const QVector3D> group_a, std::span<const QVector3D> group_b = {},
+	                std::uint64_t src_stamp_ms = 0)
 	{
 		point_vertices_.clear();
 		point_vertices_.reserve(group_a.size() + group_b.size());
@@ -88,18 +92,38 @@ public:
 		group_a_count_ = point_vertices_.size();   // split index for two-colour draw
 		add(group_b);
 
-		// Rolling display-rate estimate from set_points() call intervals.
-		const auto now = std::chrono::steady_clock::now();
-		if(have_last_)
+		// Rolling display-rate estimate. Prefer the SOURCE capture stamp: wall-clock intervals between
+		// set_points() calls collapse toward 0 on a buffered burst (the drain-to-newest reader returns
+		// instantly when a frame is already queued) and read far above the true scan rate. Stamp deltas
+		// are the real inter-scan period and can only skip, never spike above nominal. dt<=0 (dup/
+		// reordered) is ignored. Fall back to wall-clock only when no stamp is supplied (src_stamp_ms==0).
+		if(src_stamp_ms != 0)
 		{
-			const double dt_ms = std::chrono::duration<double, std::milli>(now - last_).count();
-			if(dt_ms > 0.0 and dt_ms < 10000.0)
+			if(have_last_stamp_ and src_stamp_ms > last_stamp_)
 			{
-				const float inst = 1000.0f / static_cast<float>(dt_ms);
-				fps_ = (fps_ > 0.0f) ? (0.85f * fps_ + 0.15f * inst) : inst;
+				const double dt_ms = static_cast<double>(src_stamp_ms - last_stamp_);
+				if(dt_ms > 0.5 and dt_ms < 10000.0)
+				{
+					const float inst = 1000.0f / static_cast<float>(dt_ms);
+					fps_ = (fps_ > 0.0f) ? (0.9f * fps_ + 0.1f * inst) : inst;
+				}
 			}
+			last_stamp_ = src_stamp_ms; have_last_stamp_ = true;
 		}
-		last_ = now; have_last_ = true;
+		else
+		{
+			const auto now = std::chrono::steady_clock::now();
+			if(have_last_)
+			{
+				const double dt_ms = std::chrono::duration<double, std::milli>(now - last_).count();
+				if(dt_ms > 0.0 and dt_ms < 10000.0)
+				{
+					const float inst = 1000.0f / static_cast<float>(dt_ms);
+					fps_ = (fps_ > 0.0f) ? (0.85f * fps_ + 0.15f * inst) : inst;
+				}
+			}
+			last_ = now; have_last_ = true;
+		}
 
 		if(not point_vertices_.empty())
 		{
@@ -307,8 +331,10 @@ private:
 	QPoint last_mouse_pos_;
 
 	float fps_ = 0.0f;
-	std::chrono::steady_clock::time_point last_{};
+	std::chrono::steady_clock::time_point last_{};   // wall-clock fallback (stampless callers)
 	bool have_last_ = false;
+	std::uint64_t last_stamp_ = 0;                    // last source capture stamp (ms) for the FPS estimate
+	bool have_last_stamp_ = false;
 
 	QOpenGLShaderProgram program_;
 	QOpenGLVertexArrayObject vao_;

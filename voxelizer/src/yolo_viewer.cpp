@@ -86,8 +86,9 @@ QPixmap YoloViewer::render_frame(const cv::Mat& rgb,
         const cv::Point chip_tl(tl.x, std::max(0, tl.y - ts.height - 6));
         const cv::Point chip_br(tl.x + ts.width + 4, tl.y);
         cv::rectangle(canvas, chip_tl, chip_br, color_s, cv::FILLED);
+        // Dark text on the bright class-colour chips (white was illegible on cyan/yellow/green).
         cv::putText(canvas, text, cv::Point(tl.x + 2, std::max(ts.height, tl.y - 4)),
-                    cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(255, 255, 255), 1, cv::LINE_AA);
+                    cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(20, 20, 20), 1, cv::LINE_AA);
     }
 
     // ── FPS overlay (top-left, green on a dark chip for legibility) ───────────

@@ -684,11 +684,11 @@ void SceneProcessor::update_viewer_mask_points()
     if (voxel_viewer_ == nullptr || graph_ == nullptr)
         return;
 
-    // The masks node carries the YOLO support points (flat xyz, room frame) as a runtime
-    // attribute. Draw the object slices — "bottle" (bottle_concept), "table" (table_concept) and
-    // "chair" — so the Masks toggle shows them; other detections are clutter here. Each is coloured
-    // by color_for_category (table green, bottle red, chair cyan). Per-mask point ranges come from
-    // mask_support_offsets; the i-th label in mask_labels ('|'-joined) owns range [offsets[i], offsets[i+1]).
+    // The masks node carries the mask support points (flat xyz, room frame) as a runtime attribute.
+    // Draw the object slices — the YOLO concept targets "bottle"/"table"/"chair" AND every YOLO-sem
+    // furniture mask (class_id >= 1000, produced by SemanticMaskStage: cabinet/hood/shelf/…) — so the
+    // Masks toggle shows them; other detections are clutter here. Coloured by color_for_category. Per-mask
+    // point ranges come from mask_support_offsets; label i in mask_labels ('|'-joined) owns [offsets[i], offsets[i+1]).
     static const std::array<std::string_view, 3> kDrawnMaskLabels{"bottle", "table", "chair"};
     std::vector<QVector3D>   mask_points;
     std::vector<std::string> mask_categories;   // parallel to mask_points → per-class colour in the viewer
@@ -699,6 +699,7 @@ void SceneProcessor::update_viewer_mask_points()
         const auto pts_it     = attrs.find("mask_support_points");
         const auto off_it     = attrs.find("mask_support_offsets");
         const auto labels_it  = attrs.find("mask_labels");
+        const auto ids_it     = attrs.find("mask_label_ids");   // class_id per mask; semantic masks use 1000+ade_id
         const auto src_it     = attrs.find("mask_source");   // optional (older producers omit it → treated as zed/bright)
         if (pts_it != attrs.end() and off_it != attrs.end() and labels_it != attrs.end())
         {
@@ -706,6 +707,7 @@ void SceneProcessor::update_viewer_mask_points()
             const auto& offsets = off_it->second.float_vec();
             const std::vector<float> empty_src;
             const auto& sources = (src_it != attrs.end()) ? src_it->second.float_vec() : empty_src;
+            const auto& label_ids = (ids_it != attrs.end()) ? ids_it->second.float_vec() : empty_src;
 
             std::vector<std::string> labels;
             std::stringstream ls(labels_it->second.str());
@@ -715,7 +717,9 @@ void SceneProcessor::update_viewer_mask_points()
             const std::size_t n_masks = labels.size();
             for (std::size_t m = 0; m < n_masks and m + 1 < offsets.size(); ++m)
             {
-                if (std::find(kDrawnMaskLabels.begin(), kDrawnMaskLabels.end(), labels[m]) == kDrawnMaskLabels.end())
+                const bool is_semantic = (m < label_ids.size()) and (label_ids[m] >= 1000.0f);
+                if (not is_semantic
+                    and std::find(kDrawnMaskLabels.begin(), kDrawnMaskLabels.end(), labels[m]) == kDrawnMaskLabels.end())
                     continue;
                 const std::size_t begin = static_cast<std::size_t>(offsets[m]);
                 const std::size_t end   = static_cast<std::size_t>(offsets[m + 1]);

@@ -388,13 +388,10 @@ bool CameraVisualizer::fetch_rgb_from_dsr(QImage& rgb_image, std::uint64_t& fram
     {
         case rc::media::FORMAT_BGR8:
         {
-            // NOTE: the producer tags the stream FORMAT_BGR8, but the Webots-bridge bytes are actually
-            // RGB-ordered — decoding them as BGR turned scene orange into blue. So interpret the bytes
-            // as RGB here (no swap). (Format_BGR888 ≡ Format_RGB888+rgbSwapped, both of which produced
-            // the swapped result.) If a real ZED that emits true BGR is used, this branch must swap —
-            // the clean long-term fix is to correct the format tag at the producer per source.
+            // All Webots-derived RGB producers now tag their true order FORMAT_RGB8 (the branch below),
+            // so FORMAT_BGR8 now means GENUINE BGR (e.g. real Theta/ZED hardware) and must swap R/B.
             QImage img(data, width, height, width * 3, QImage::Format_RGB888);
-            rgb_image = img.copy();
+            rgb_image = img.rgbSwapped();
             return true;
         }
         case rc::media::FORMAT_RGB8:

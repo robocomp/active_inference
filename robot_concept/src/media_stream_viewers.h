@@ -58,6 +58,9 @@ inline QImage qimage_from_media(const std::uint8_t *data, int w, int h, int step
 	switch(fmt)
 	{
 		case rc::media::FORMAT_RGB8:  return QImage(data, w, h, step, QImage::Format_RGB888).copy();
+		// All Webots-derived RGB producers (robot_concept, zed_camera, ricoh sim) now tag FORMAT_RGB8
+		// (their true order), so RGB8 above is the normal path. FORMAT_BGR8 now means GENUINE BGR (e.g.
+		// real Theta Ricoh hardware's gstreamer pipeline) → swap R/B for correct display.
 		case rc::media::FORMAT_BGR8:  return QImage(data, w, h, step, QImage::Format_RGB888).rgbSwapped();
 		case rc::media::FORMAT_GRAY8: return QImage(data, w, h, step, QImage::Format_Grayscale8).copy();
 		case rc::media::FORMAT_Z16:
@@ -121,30 +124,34 @@ private:
 		bool logged = false;
 		while(not st.stop_requested())
 		{
-			QImage frame; int w = 0, h = 0; std::uint32_t fmt = 0;
+			QImage frame; int w = 0, h = 0; std::uint32_t fmt = 0; std::uint64_t stamp = 0;
 			// Blocks up to 200 ms; returns the instant a frame is available (drains to newest).
 			sub_->wait_and_poll([&](const Frame &f, std::int64_t)
 			{
 				const auto &buf = f.data();
 				const int step = (f.step() > 0) ? static_cast<int>(f.step()) : static_cast<int>(f.width()) * 3;
 				w = static_cast<int>(f.width()); h = static_cast<int>(f.height()); fmt = f.format();
+				stamp = f.stamp_ms();   // SOURCE capture stamp (ms), not consumer arrival time
 				frame = qimage_from_media(buf.data(), w, h, step, fmt);   // deep copy, off GUI thread
 			}, 200);
 			if(frame.isNull())
 				continue;
 			if(not logged) { qInfo() << "[view-data] image viewer first frame" << w << "x" << h << "fmt" << fmt; logged = true; }
-			// Rolling display-rate estimate from arrival deltas (worker thread).
-			const auto now = std::chrono::steady_clock::now();
-			if(have_last_)
+			// Rolling display-rate estimate from the SOURCE capture stamps — NOT consumer wall-clock
+			// arrival. wait_and_poll() drains-to-newest and returns instantly when a frame is already
+			// queued, so wall-clock deltas between returns collapse toward 0 on a buffered burst and read
+			// far above the true rate; stamp deltas are the real inter-frame period and can only skip
+			// (read at or below nominal), never spike above it. dt<=0 (dup/reordered) is ignored.
+			if(stamp != 0 and have_last_ and stamp > last_stamp_)
 			{
-				const double dt_ms = std::chrono::duration<double, std::milli>(now - last_).count();
-				if(dt_ms > 0.0 and dt_ms < 10000.0)
+				const double dt_ms = static_cast<double>(stamp - last_stamp_);
+				if(dt_ms > 0.5 and dt_ms < 10000.0)
 				{
 					const float inst = 1000.0f / static_cast<float>(dt_ms);
-					fps_ = (fps_ > 0.0f) ? (0.85f * fps_ + 0.15f * inst) : inst;
+					fps_ = (fps_ > 0.0f) ? (0.9f * fps_ + 0.1f * inst) : inst;
 				}
 			}
-			last_ = now; have_last_ = true;
+			if(stamp != 0) { last_stamp_ = stamp; have_last_ = true; }
 			// One arrival → one repaint on the GUI thread.
 			const float fps = fps_;
 			QMetaObject::invokeMethod(this, [this, frame, fps]() { render(frame, fps); }, Qt::QueuedConnection);
@@ -165,7 +172,7 @@ private:
 	std::unique_ptr<Subscriber> sub_;
 	QLabel label_;
 	float fps_ = 0.0f;
-	std::chrono::steady_clock::time_point last_{};
+	std::uint64_t last_stamp_ = 0;   // last source capture stamp (ms) used for the FPS estimate
 	bool have_last_ = false;
 	std::jthread poller_;   // declared last → stops/joins first on destruction
 };
@@ -251,7 +258,8 @@ public:
 	}
 
 private:
-	static bool drain_latest(rc::media::LidarSubscriber *sub, std::vector<QVector3D> &dst, int timeout_ms)
+	static bool drain_latest(rc::media::LidarSubscriber *sub, std::vector<QVector3D> &dst, int timeout_ms,
+	                         std::uint64_t *stamp_out = nullptr)
 	{
 		if(sub == nullptr)
 			return false;
@@ -265,6 +273,7 @@ private:
 			const auto &pts = f.points();
 			for(std::size_t i = 0; i < npts; ++i)
 				dst.emplace_back(pts[i * stride + 0], pts[i * stride + 1], pts[i * stride + 2]);
+			if(stamp_out != nullptr) *stamp_out = f.stamp_ms();   // SOURCE scan stamp (ms)
 			got = true;
 		};
 		// Wait on the primary ring (helios); non-blocking drain for the secondary (bpearl).
@@ -280,17 +289,22 @@ private:
 		{
 			// Block on whichever ring exists; refresh the other non-blockingly. Keep the last known
 			// cloud of each so a repaint always shows both rings.
-			const bool a = drain_latest(helios_.get(), helios_pts_, helios_ ? 200 : 0);
-			const bool b = drain_latest(bpearl_.get(), bpearl_pts_, helios_ ? 0 : 200);
+			std::uint64_t helios_stamp = 0, bpearl_stamp = 0;
+			const bool a = drain_latest(helios_.get(), helios_pts_, helios_ ? 200 : 0, &helios_stamp);
+			const bool b = drain_latest(bpearl_.get(), bpearl_pts_, helios_ ? 0 : 200, &bpearl_stamp);
 			if(not a and not b)
 				continue;
 			if(not logged) { qInfo() << "[view-data] lidar viewer first frame — helios" << helios_pts_.size()
 			                         << "bpearl" << bpearl_pts_.size(); logged = true; }
+			// Drive the FPS estimate off the PRIMARY (blocking) ring's source stamp — helios if present,
+			// else bpearl. That ring refreshes on essentially every loop iteration, so the counter tracks
+			// the true scan rate; 0 (rare: only the secondary ring updated) falls back to wall-clock.
+			const std::uint64_t src_stamp = helios_ ? helios_stamp : bpearl_stamp;
 			// Copy the vectors for the GUI thread; the worker keeps its own persistent copies.
 			auto ha = helios_pts_; auto bp = bpearl_pts_;
-			QMetaObject::invokeMethod(this, [this, ha = std::move(ha), bp = std::move(bp)]()
+			QMetaObject::invokeMethod(this, [this, ha = std::move(ha), bp = std::move(bp), src_stamp]()
 			{
-				set_points(std::span<const QVector3D>(ha), std::span<const QVector3D>(bp));
+				set_points(std::span<const QVector3D>(ha), std::span<const QVector3D>(bp), src_stamp);
 			}, Qt::QueuedConnection);
 		}
 	}

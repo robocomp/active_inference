@@ -7,6 +7,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <mutex>
+#include <optional>
 #include <string_view>
 #include <unordered_map>
 
@@ -101,6 +102,12 @@ efd::DomainParticipant* make_participant(const ParticipantKey& key)
         // Payload zero-copy is handled independently by data-sharing.
         pqos.transport().use_builtin_transports = false;
         auto shm = std::make_shared<eprosima::fastdds::rtps::SharedMemTransportDescriptor>();
+        // The default SHM segment is 512 KB — too small for even ONE media sample (Image360 ~5.5 MB,
+        // LiDAR clouds up to ~20 MB with DataSharing=false, so the full payload rides this segment).
+        // At the default the writer blocks / drops fragments → SHM transmission cuts out. 32 MB holds a
+        // few worst-case samples. Grows together with Ice.MessageSizeMax if frame sizes ever increase.
+        // See DDS_SHADOW.md §2.1.
+        shm->segment_size(32 * 1024 * 1024);
         pqos.transport().user_transports.push_back(shm);
     }
     return efd::DomainParticipantFactory::get_instance()->create_participant(
@@ -398,6 +405,11 @@ int MediaSubscriber::poll(const FrameCallback& cb)
         return 0;
 
     int delivered = 0;
+    // Real-time media: DRAIN the whole backlog (else the reader's bounded pool fills and the writer
+    // blocks), but deliver only the SINGLE most-recent valid sample — acting on a stale queued frame
+    // is worse than useless. Copy it out (survives return_loan) and invoke cb once. See DDS_SHADOW.md §2.3.
+    std::optional<ImageFrame> latest;
+    std::int64_t latest_recv = 0;
     ImageFrameSeq data;
     efd::SampleInfoSeq infos;
     while (reader_->take(data, infos) == efd::RETCODE_OK)
@@ -407,13 +419,16 @@ int MediaSubscriber::poll(const FrameCallback& cb)
         {
             if (infos[i].valid_data)
             {
-                cb(data[i], recv);
+                latest = data[i];
+                latest_recv = recv;
                 ++delivered;
             }
         }
         reader_->return_loan(data, infos);
     }
-    return delivered;
+    if (latest)
+        cb(*latest, latest_recv);
+    return delivered;   // total received, for stats
 }
 
 int MediaSubscriber::wait_and_poll(const FrameCallback& cb, int timeout_ms)
@@ -527,6 +542,9 @@ int Image360Subscriber::poll(const FrameCallback& cb)
         return 0;
 
     int delivered = 0;
+    // Latest-only delivery (drain backlog, act on the newest frame only). See DDS_SHADOW.md §2.3.
+    std::optional<Image360Frame> latest;
+    std::int64_t latest_recv = 0;
     Image360FrameSeq data;
     efd::SampleInfoSeq infos;
     while (reader_->take(data, infos) == efd::RETCODE_OK)
@@ -536,13 +554,16 @@ int Image360Subscriber::poll(const FrameCallback& cb)
         {
             if (infos[i].valid_data)
             {
-                cb(data[i], recv);
+                latest = data[i];
+                latest_recv = recv;
                 ++delivered;
             }
         }
         reader_->return_loan(data, infos);
     }
-    return delivered;
+    if (latest)
+        cb(*latest, latest_recv);
+    return delivered;   // total received, for stats
 }
 
 int Image360Subscriber::wait_and_poll(const FrameCallback& cb, int timeout_ms)
@@ -641,6 +662,9 @@ int LidarSubscriber::poll(const FrameCallback& cb)
         return 0;
 
     int delivered = 0;
+    // Latest-only delivery (drain backlog, act on the newest cloud only). See DDS_SHADOW.md §2.3.
+    std::optional<LidarFrame> latest;
+    std::int64_t latest_recv = 0;
     LidarFrameSeq data;
     efd::SampleInfoSeq infos;
     while (reader_->take(data, infos) == efd::RETCODE_OK)
@@ -650,13 +674,16 @@ int LidarSubscriber::poll(const FrameCallback& cb)
         {
             if (infos[i].valid_data)
             {
-                cb(data[i], recv);
+                latest = data[i];
+                latest_recv = recv;
                 ++delivered;
             }
         }
         reader_->return_loan(data, infos);
     }
-    return delivered;
+    if (latest)
+        cb(*latest, latest_recv);
+    return delivered;   // total received, for stats
 }
 
 int LidarSubscriber::wait_and_poll(const FrameCallback& cb, int timeout_ms)

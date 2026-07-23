@@ -756,16 +756,6 @@ void SpecificWorker::compute()
         // The "YOLO" toggle in the ZED window gates only the seg-detection overlay (masks/bboxes);
         // the semantic underlay, skeletons and model projections above are independent.
         static const std::vector<SegDetection> kNoDetections;
-        {   // [diag-viewer] TEMP: confirm semantic masks (class_id>=1000) reach the viewer with valid data
-            int nsem = 0; cv::Rect fb; bool fmask_ok = false;
-            for (const auto& d : detections)
-                if (d.class_id >= 1000) { if (nsem == 0) { fb = d.bbox; fmask_ok = not d.mask.empty(); } ++nsem; }
-            static int dc = 0;
-            if (dc++ % 40 == 0)
-                std::println("[diag-viewer] win_vis={} yolo_on={} total={} SEM={} first_sem_bbox=({},{},{},{}) mask_ok={}",
-                             yolo_window_->isVisible(), yolo_overlay_enabled_, detections.size(), nsem,
-                             fb.x, fb.y, fb.width, fb.height, fmask_ok);
-        }
         yolo_viewer_->update_frame(viewer_rgb, yolo_overlay_enabled_ ? detections : kNoDetections);
         // Feed the dense label map for the hover readout (cleared internally when not active).
         if (sem_map)

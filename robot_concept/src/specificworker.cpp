@@ -904,12 +904,17 @@ void SpecificWorker::read_rgbd_thread()
 					           : static_cast<std::uint64_t>(t);              // already ms
 				};
 				const auto &img = frame.image;
+				// Tag the TRUE channel order: the Webots-shadow bridge (our live CameraRGBDSimple source)
+				// delivers RGB-ordered bytes, so publish them as FORMAT_RGB8. Consumers with an RGB8 path
+				// (voxelizer RGB2BGR, the room/robot viewers no-swap) then get correct colours without the
+				// per-consumer BGR8 workaround. If a real ZED emitting true BGR is ever bridged here, tag
+				// FORMAT_BGR8 for that source instead (drive it from config rather than hard-coding).
 				media_.publish_image("rgb", {
 					.stamp_ms = to_epoch_ms(img.alivetime),
 					.width    = static_cast<std::uint32_t>(img.width),
 					.height   = static_cast<std::uint32_t>(img.height),
 					.step     = static_cast<std::uint32_t>(img.width) * 3u,
-					.format   = rc::media::FORMAT_BGR8,
+					.format   = rc::media::FORMAT_RGB8,
 					.data     = reinterpret_cast<const std::uint8_t*>(img.image.data()),
 					.nbytes   = img.image.size()});
 
@@ -1405,9 +1410,10 @@ void SpecificWorker::read_ricoh_thread()
 				}
 			}
 
-			// Publish the RGB panorama on the wide Image360Frame plane. Channel order
-			// follows the RGBD_360 output (webots-derived); tagged BGR8 to match the
-			// zed convention — a consumer flips if it needs RGB.
+			// Publish the RGB panorama on the wide Image360Frame plane. The Camera360RGB source is
+			// webots-derived and delivers RGB-ordered bytes (same as the ZED path above), so tag the
+			// TRUE order IMG360_FORMAT_RGB8. Consumers' RGB8 path (voxelizer RGB2BGR) then yields correct
+			// colours without the BGR8 workaround. Tag BGR8 only for a source that emits genuine BGR.
 			if (media_.image360_ready())
 			{
 				media_.publish_image360({
@@ -1415,7 +1421,7 @@ void SpecificWorker::read_ricoh_thread()
 					.width    = static_cast<std::uint32_t>(frame.width),
 					.height   = static_cast<std::uint32_t>(frame.height),
 					.step     = static_cast<std::uint32_t>(frame.width) * 3u,
-					.format   = rc::media::IMG360_FORMAT_BGR8,
+					.format   = rc::media::IMG360_FORMAT_RGB8,
 					.data     = reinterpret_cast<const std::uint8_t*>(frame.image.data()),
 					.nbytes   = frame.image.size()});
 			}
