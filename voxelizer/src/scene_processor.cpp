@@ -434,7 +434,11 @@ std::optional<GraphObjectBox> SceneProcessor::build_graph_object_box(const DSR::
     // Furniture like the table stands ON the floor: its node origin is the base, so the box
     // must extend upward (z in [origin, origin+height]). Free objects (e.g. a fitted bottle
     // cylinder) are center-anchored, so they keep z in [origin-h/2, origin+h/2].
-    const bool stands_on_floor = (node.type() == "table") or (node.name().rfind("table", 0) == 0);
+    // Base-origin convention (RT origin at the carcass base, box extends [origin, origin+height]):
+    // tables stand on the floor; cabinet_concept runs pin their RT origin at z0 (the carcass base — 0 for a
+    // base unit, ~1.45 for a wall unit), so they use the same upward-extending convention, NOT centre-anchor.
+    const bool stands_on_floor = (node.type() == "table") or (node.name().rfind("table", 0) == 0)
+                              or (node.name().rfind("cabinet_", 0) == 0);
     const float z_lo = stands_on_floor ? 0.f : -half_height;
     const float z_hi = stands_on_floor ? height : half_height;
 
@@ -480,6 +484,11 @@ std::optional<GraphObjectBox> SceneProcessor::build_graph_object_box(const DSR::
     if (node.type() == "cylinder")
         category = "bottle";
 
+    // cabinet_concept publishes runs as `box` nodes named "cabinet_*" — tag them so the viewer draws
+    // the oriented wireframe box in cyan (matching the solid cabinet mesh).
+    if (node.type() == "box" and node.name().rfind("cabinet_", 0) == 0)
+        category = "cabinet";
+
     const Eigen::Matrix3d& R = room_T_object->linear();
     const float yaw = static_cast<float>(std::atan2(R(1, 0), R(0, 0)));
 
@@ -508,21 +517,27 @@ std::vector<GraphObjectBox> SceneProcessor::get_graph_object_boxes(const std::st
     const auto object_nodes   = graph_->get_nodes_by_type("object");
     const auto table_nodes    = graph_->get_nodes_by_type("table");
     const auto cylinder_nodes = graph_->get_nodes_by_type("cylinder");   // bottle_concept bottles
+    const auto box_nodes      = graph_->get_nodes_by_type("box");        // cabinet_concept runs (cabinet_*)
     // residual_concept `obstacle` nodes are NO LONGER drawn as red boxes — the occupancy grid (amber cells,
     // the `grid` node) is now the residual display. The obstacle nodes still exist for the controller.
-    graph_boxes.reserve(object_nodes.size() + table_nodes.size() + cylinder_nodes.size());
-    auto add_boxes = [&](const auto& nodes)
+    graph_boxes.reserve(object_nodes.size() + table_nodes.size() + cylinder_nodes.size() + box_nodes.size());
+    auto add_boxes = [&](const auto& nodes, auto&& keep)
     {
         for (const auto& node : nodes)
         {
+            if (not keep(node))
+                continue;
             const auto box = build_graph_object_box(node, room_name, timestamp_ms);
             if (box.has_value())
                 graph_boxes.push_back(box.value());
         }
     };
-    add_boxes(object_nodes);
-    add_boxes(table_nodes);
-    add_boxes(cylinder_nodes);
+    const auto always = [](const DSR::Node&) { return true; };
+    add_boxes(object_nodes,   always);
+    add_boxes(table_nodes,    always);
+    add_boxes(cylinder_nodes, always);
+    // `box` is a reused primitive type — only the "cabinet_*" runs are ours to draw.
+    add_boxes(box_nodes, [](const DSR::Node& n) { return n.name().rfind("cabinet_", 0) == 0; });
     return graph_boxes;
 }
 
@@ -604,6 +619,17 @@ void SceneProcessor::update_viewer_object_meshes()
                 meshes.emplace_back(opt.value().get());
                 categories.emplace_back(type);
             }
+    // cabinet_concept publishes each run as a `box` node named "cabinet_*" (Cortex registers no `cabinet`
+    // type — the reuse-a-primitive + name-prefix pattern), with the fitted carcass in mesh_vertices_att
+    // (room frame, yaw baked in). Draw it as its solid model like table/chair. The `box` query returns ALL
+    // box nodes, so it MUST be paired with the "cabinet_" name filter.
+    for (const auto& node : graph_->get_nodes_by_type("box"))
+        if (node.name().rfind("cabinet_", 0) == 0)
+            if (const auto opt = graph_->get_attrib_by_name<mesh_vertices_att>(node); opt.has_value())
+            {
+                meshes.emplace_back(opt.value().get());
+                categories.emplace_back("cabinet");
+            }
     voxel_viewer_->update_object_meshes(meshes, categories);
 }
 
@@ -627,7 +653,7 @@ void SceneProcessor::update_viewer_table_rfe_points()
         return;
 
     std::vector<QVector3D> residual_points;
-    for (const auto& node : graph_->get_nodes_by_type("table"))
+    const auto gather_residuals = [&](const DSR::Node& node)
     {
         if (auto residual_opt = graph_->get_attrib_by_name<residual_pts_att>(node); residual_opt.has_value())
         {
@@ -640,7 +666,14 @@ void SceneProcessor::update_viewer_table_rfe_points()
                 residual_points.emplace_back(flat[idx], flat[idx + 1], flat[idx + 2]);
             }
         }
-    }
+    };
+    for (const auto& node : graph_->get_nodes_by_type("table"))
+        gather_residuals(node);
+    // cabinet_concept writes its model-unexplained points into residual_pts_att of the "cabinet_*" box
+    // nodes (the SDF off-surface split). Same dark-blue cloud layer, same "Residual" toggle.
+    for (const auto& node : graph_->get_nodes_by_type("box"))
+        if (node.name().rfind("cabinet_", 0) == 0)
+            gather_residuals(node);
 
     voxel_viewer_->update_residual_points(residual_points);
 }

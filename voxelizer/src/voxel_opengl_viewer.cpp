@@ -1609,6 +1609,7 @@ QColor VoxelOpenGLViewer::color_for_category(const std::string& category)
     if (category == "bottle") return QColor(255, 0, 200);  // hot magenta — bottle cylinder boxes
     if (category == "monitor") return QColor(186, 85, 211); // orchid-violet
     if (category == "obstacle") return QColor(255, 45, 45); // red — residual_concept obstacle boxes (obstacle=red)
+    if (category == "cabinet") return QColor(0, 210, 210);  // cyan — cabinet_concept fitted carcass models
 
     static const std::array<QColor, 20> palette = {
         QColor(220, 20, 60), QColor(0, 90, 181), QColor(34, 139, 34), QColor(255, 140, 0),

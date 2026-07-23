@@ -187,7 +187,7 @@ void SpecificWorker::initialize()
         // Run when the overlay is on OR when producing semantic masks (publish_masks) — so the model runs
         // even without the viewer toggle (mirrors the SAM2 publish_refined pattern below).
         rc::SemanticStage* sem_stage_ptr = sem_stage.get();
-        sem_stage->set_enabled(semantic_overlay_enabled_ or params.SEMANTIC_PUBLISH_MASKS);
+        sem_stage->set_enabled(semantic_overlay_enabled_ or params.SEMANTIC_PUBLISH_MASKS or params.SEMANTIC_PUBLISH_NODE);
         zed_stages.push_back(std::move(sem_stage));
 
         // Semantic-derived instance masks (cabinet/hood/shelf/door → 'masks' node, SAM2-refined). Resolve the
@@ -573,10 +573,11 @@ void SpecificWorker::on_render_tick()
                     }
                     if (rres->masks and not rres->masks->empty())
                     {
-                        cv::Mat pano_rgb;
-                        cv::cvtColor(pano, pano_rgb, cv::COLOR_BGR2RGB);
+                        // pano is BGR; SegStage::compose is base-order-preserving and the popup viewer
+                        // converts BGR→RGB on display, so keep everything BGR. (The old BGR2RGB pre-swap
+                        // here double-converted once the producer began tagging its true RGB order.)
                         auto* seg = dynamic_cast<rc::SegStage*>(ricoh_worker_->stage("seg"));
-                        ricoh_viewer_->update_image(seg ? seg->compose(pano_rgb, *rres->masks) : pano_rgb);
+                        ricoh_viewer_->update_image(seg ? seg->compose(pano, *rres->masks) : pano);
                     }
                     else
                         ricoh_viewer_->update_image(pano);
@@ -727,7 +728,11 @@ void SpecificWorker::compute()
 
     if (yolo_viewer_ and yolo_window_ and yolo_window_->isVisible())
     {
-        cv::Mat viewer_rgb = zed_res->frame.rgbd.rgb;   // the worker's frame; update_frame clones
+        // rgbd.rgb is BGR (the order seg/sam2 consume, since the producer now tags its true RGB order and
+        // MediaPlaneSource converts RGB→BGR). The ZED popup overlays + YoloViewer work in RGB, so convert
+        // once here — this also detaches viewer_rgb from the shared worker frame.
+        cv::Mat viewer_rgb;
+        cv::cvtColor(zed_res->frame.rgbd.rgb, viewer_rgb, cv::COLOR_BGR2RGB);
         // Dense semantic class-map underlay (blended) first, then skeletons + seg masks on top.
         if (sem_stage and sem_stage->processor() and semantic_overlay_enabled_
             and sem_map and not sem_map->labels.empty())

@@ -364,10 +364,13 @@ void SpecificWorker::setup_custom_viewers()
             accent(sem_btn, "#64C8FF");
             connect(sem_btn, &QPushButton::toggled, this, [this, sem_btn](bool checked)
             {
+                // The toggle controls ONLY the overlay display. Keep the model running whenever its output
+                // is consumed downstream (publish_masks → furniture masks; publish_node → residual's semantic
+                // node); it may only be gated off in pure display-only mode. (Mirrors the SAM2 toggle.)
                 semantic_overlay_enabled_ = checked;
                 if (zed_worker_)
                     if (auto* s = dynamic_cast<rc::SemanticStage*>(zed_worker_->stage("semantic")))
-                        s->set_enabled(checked);   // gate the (heavy) model — no work when the overlay is off
+                        s->set_enabled(checked or params.SEMANTIC_PUBLISH_MASKS or params.SEMANTIC_PUBLISH_NODE);
                 sem_btn->setText(checked ? "Semantic: ON" : "Semantic: OFF");
             });
             controls->addWidget(sem_btn);
