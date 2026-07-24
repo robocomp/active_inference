@@ -73,6 +73,25 @@ struct CabinetConfig
     float wall_reach_m            = 0.35f;   // gap scale over which the flush hypothesis loses weight
     float wall_sigma_m            = 0.02f;   // room-model wall position uncertainty (m)
     float wall_parallel_precision = 200.0f;  // on sin(angle between run axis and wall) (0 = OFF)
+    // Room-axis (Manhattan) yaw prior: a strong, wall-independent pull toward the nearest π/2 room axis
+    // so every run (incl. a peninsula/island touching a wall on only one short side) stays parallel to
+    // the room. Silent once aligned. capture_rad ≤0 ⇒ always active (see cabinet_belief.h).
+    float room_axis_precision     = 300.0f;  // 1/rad² on the yaw→nearest-axis residual (0 = OFF)
+    float room_axis_capture_rad   = 0.0f;    // release beyond |Δyaw| (rad); 0 ⇒ always on
+    // Birth on the dominant room axis instead of the raw PCA diagonal — stops an L-shaped corner mask
+    // from birthing one oblique box spanning both walls (which grow-only extent can never retract).
+    bool  seed_room_axis_snap     = true;
+    // Wall-split: attribute each mask point to its nearest room wall; points flush to a DIFFERENT wall than
+    // the run they feed are pulled out of the fit (→ residual-birth of the neighbour). Splits one L/U-corner
+    // mask into two axis-aligned runs at the corner bisector. See CabinetFitter::observe_slice.
+    // L-corner mask split (a cabinet run cannot be L-shaped ⇒ an L-mask is two runs). Split one 'cabinet'
+    // mask into its two perpendicular room-axis arms upstream (cabinet_lshape_split.h), so each run fits a
+    // clean single-arm cloud. Replaces the fragile per-instance observe-time split.
+    bool  counter_evidence_enabled = true;   // ingest 'counter'/'countertop' masks as top-face run evidence
+    bool  lshape_split_enabled    = true;
+    int   lshape_min_arm_pts      = 500;     // an arm (and the peeling residue) must exceed this to split
+    float lshape_bin_m            = 0.15f;   // histogram bin for locating each arm's line
+    float lshape_arm_halfwidth_m  = 0.45f;   // half-width of an arm's footprint band (≈ half a carcass depth)
     // Censored along-axis containment: the ONLY channel that can lengthen a run (the per-point
     // mixture cedes points past the end cap to clutter). One-sided ⇒ inert once the box contains
     // the cloud; shrinking belongs to the free-space channel, never here.
@@ -254,6 +273,8 @@ struct CabinetConfig
     float birth_fusion_radius_m = 0.50f;  // window (m) for the residual-mass sample under the detection
     int   tracker_death_frames      = 300;    // frames an instance may go unobserved before retirement (large)
     float tracker_birth_min_sep_m   = 0.60f;  // a birth must be ≥ this (m) from every existing cabinet
+    float tracker_z_gate_m          = 0.60f;  // association VERTICAL gate: a mask can't bind a track >this in z
+                                              // apart → WALL units (z≈1.7) never fuse with BASE runs (z≈0.35)
     // Physical exclusion: collapse two instances whose oriented footprints overlap by ≥ this fraction of
     // the SMALLER footprint (two cabinets cannot share space). 0 disables the merge.
     float tracker_merge_overlap = 0.05f;
@@ -266,6 +287,20 @@ struct CabinetConfig
     float tracker_birth_width_m  = 1.0f;
     float tracker_birth_depth_m  = 0.6f;
     float tracker_birth_height_m = 0.75f;
+
+    // ── Residual-driven birth (SpecificWorker::birth_from_residual + cabinet_residual_birth.h) ─────
+    // Cluster the pooled model-unexplained (residual) points; a coherent, elongated, separated arm that no
+    // believed run covers (e.g. the perpendicular arm of an L-shaped corner mask) matures over a few cycles
+    // into its own axis-aligned "cabinet_N". A residual-born run then footprint-claims the shared mask slice
+    // so it is actually fed (the tracker's single-assignment gives the slice to the parent).
+    bool  residual_birth_enabled  = true;
+    int   residual_birth_frames   = 4;      // consecutive cycles a candidate must persist before birth
+    float residual_birth_match_m  = 0.40f;  // candidate↔candidate match radius across cycles (debounce)
+    int   residual_birth_min_pts  = 600;    // min residual cluster mass to consider
+    float residual_birth_sep_m    = 0.60f;  // min separation of the arm from every existing run
+    float residual_claim_frac     = 0.15f;  // slice claimed by a residual-born run if ≥ this fraction of its
+                                            // support points fall on the run's footprint
+    float residual_claim_margin_m = 0.20f;  // footprint expansion for the claim test
 
     // ── Ricoh-360 attention gate ──────────────────────────────────────────────────────────────────
     // A ricoh (depth_var>0) 360-RGB YOLO detection is bearing-only: it never births or fits, it only raises

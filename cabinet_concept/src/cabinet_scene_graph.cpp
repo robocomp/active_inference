@@ -66,9 +66,14 @@ std::uint64_t CabinetSceneGraph::create_instance_from_detection(const Eigen::Vec
     if (not id_opt.has_value())
         return 0;
 
-    const float z = cfg_.tracker_birth_height_m * 0.5f;
+    // Birth the carcass BASE (RT origin = z0) UNDER the detection centroid, not at a fixed floor height.
+    // A WALL-unit detection sits at z≈1.7, so a floor birth (z0≈0) makes the newborn's track-z base-like
+    // → the z_gate then blocks the unit's OWN mask from associating (1.7 vs 0.37) so it never gets fit up
+    // to the wall tier, and the collinear-merge z-guard (base_z1 vs newborn_z0) fuses it into the base run
+    // right below it. Seeding z0 from the detection breaks that deadlock: the upper track is born high.
+    const float z0_birth = std::max(0.0f, centroid_room.z() - 0.5f * cfg_.tracker_birth_height_m);
     rt_api_->insert_or_assign_edge_RT(room_opt.value(), id_opt.value(),
-                                      {centroid_room.x(), centroid_room.y(), z}, {0.0f, 0.0f, 0.0f});
+                                      {centroid_room.x(), centroid_room.y(), z0_birth}, {0.0f, 0.0f, 0.0f});
 
     if (relayout_)
         relayout_();

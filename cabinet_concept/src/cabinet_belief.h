@@ -68,6 +68,14 @@ struct WallRef
     Eigen::Vector2f p       = Eigen::Vector2f::Zero();   // any point on the wall line (room frame, m)
     Eigen::Vector2f n       = Eigen::Vector2f::UnitX();  // UNIT normal, pointing INTO the room
     float           sigma_m = 0.02f;                     // wall position uncertainty (m)
+    // The wall SEGMENT (its two corners, room frame), collinear-merged so an authored jog/door-notch does
+    // not plant a phantom corner mid-run. A flush run's along-axis extent is bounded by these endpoints:
+    // accumulate_extent censors the observed span at them (never grow past a corner) and adds a symmetric
+    // inward hinge (retract an already-overgrown end back to the corner). has_segment=false ⇒ both inert.
+    bool            has_segment = false;
+    Eigen::Vector2f a       = Eigen::Vector2f::Zero();   // segment endpoint A (corner)
+    Eigen::Vector2f b       = Eigen::Vector2f::Zero();   // segment endpoint B (corner)
+    int             seg_id  = -1;                        // canonical wall id (stable across the merged run)
 };
 
 // Birth seed derived from a raw point cloud: the run's own 2-D principal axis + extents + z-band.
@@ -155,6 +163,18 @@ struct CabinetBeliefParams
     float wall_precision   = 400.0f;  // 1/m^2 at zero gap (~1/sigma^2 with sigma=5 cm)
     float wall_reach_m     = 0.35f;   // gap scale over which the flush hypothesis loses its weight
     float wall_parallel_precision = 200.0f;   // on sin(angle between run axis and wall) — 0 = OFF
+
+    // ── Room-axis (Manhattan) yaw prior (accumulate_axis_alignment) ─────────────────────────────
+    // A kitchen run is built parallel to a room wall — its yaw sits on a room axis (a multiple of
+    // π/2 in the room frame). The wall_parallel term only supplies this while the run is flush along
+    // its length against a DETECTED wall (weighted by the flush mixture), so a peninsula/island that
+    // touches a wall on only one short side (U-/L-kitchen aisle), a merged/mis-positioned run, or a
+    // run whose wall isn't currently seen feels nothing and drifts oblique. This factor adds the
+    // room-independent Manhattan prior directly on yaw: a strong soft pull to the NEAREST π/2 axis,
+    // silent once aligned (residual→0). Capture range bounds it so a genuinely oblique object outside
+    // the range is left alone; ≤0 (or ≥π/4) ⇒ always active. Precision 0 = OFF.
+    float room_axis_precision   = 300.0f;   // 1/rad^2 on the yaw→nearest-axis residual
+    float room_axis_capture_rad = 0.0f;     // |Δyaw| beyond which the pull is released (0 ⇒ always on)
 
     // ── Along-axis CONTAINMENT factor (accumulate_extent) ─────────────────────────────────────
     // The per-point SDF mixture structurally cannot GROW a run: a point past the current end cap is
@@ -291,10 +311,22 @@ public:
     int   last_lidar_rays()   const { return dbg_lidar_rays_; }
     float last_span_obs()     const { return dbg_span_obs_; }      // observed along-axis span (m)
     int   last_span_pts()     const { return dbg_span_pts_; }      // points inside the run cross-section
+    float last_axis_resid()   const { return dbg_axis_resid_; }    // signed yaw error to nearest room axis (rad)
+    // Wall-segment domain instrumentation: is it binding? corner projections onto the run axis + retract residuals.
+    int   last_seg_active()   const { return dbg_seg_active_; }    // 1 if the wall-segment terms are live this frame
+    float last_seg_tlo()      const { return dbg_seg_tlo_; }       // −u corner projected onto the run axis (m)
+    float last_seg_thi()      const { return dbg_seg_thi_; }       // +u corner projected onto the run axis (m)
+    float last_seg_shi()      const { return dbg_seg_shi_; }       // observed +u span end (m) — grows past thi ⇒ censored
+    float last_seg_qhi()      const { return dbg_seg_qhi_; }       // +u retract residual (box end past the corner, m)
 
     // Global birth statistic (see RunSeed). Pure geometry, no state — shared by the fitter's birth
     // path so the seed and the per-frame extent factor agree on what "the run's axis" means.
-    static RunSeed seed_from_points(const std::vector<Eigen::Vector3f>& pts);
+    // room_axis_snap: seed the run on the dominant ROOM axis (X or Y) instead of the raw PCA principal
+    // axis. A kitchen run lies on a room axis; an L-shaped corner-spanning mask has a DIAGONAL PCA axis
+    // and a long diagonal extent, so a PCA seed births one oblique box straddling both walls (which
+    // grow-only extent can never retract). Snapping births the dominant arm axis-aligned and lets the
+    // perpendicular arm fall off-surface (residual). See seed_from_points / the corner-merge note.
+    static RunSeed seed_from_points(const std::vector<Eigen::Vector3f>& pts, bool room_axis_snap = false);
 
     static bool self_test();
 
@@ -303,6 +335,12 @@ private:
                          Eigen::Matrix<float, 7, 7>& Id, Eigen::Matrix<float, 7, 1>& bd) const;
     void accumulate_extent(const CabinetBeliefState& s, const CabinetFrame& f,
                            Eigen::Matrix<float, 7, 7>& Id, Eigen::Matrix<float, 7, 1>& bd) const;
+    // Posterior weight of the "flush against this wall" mixture component: exp(−(gap/reach)²), gap measured
+    // from the run's back face. ONE definition shared by accumulate_wall (flush + parallel) and
+    // accumulate_extent (wall-segment domain). 0 when no wall this frame ⇒ both terms inert (island).
+    float flush_weight(const CabinetBeliefState& s, const CabinetFrame& f) const;
+    void accumulate_axis_alignment(const CabinetBeliefState& s,
+                                   Eigen::Matrix<float, 7, 7>& Id, Eigen::Matrix<float, 7, 1>& bd) const;
 
     CabinetBeliefState         state_;
     CabinetBeliefParams        params_;
@@ -319,6 +357,13 @@ private:
     mutable int   dbg_lidar_rays_  = 0;
     mutable float dbg_span_obs_    = 0.0f;
     mutable int   dbg_span_pts_    = 0;
+    mutable float dbg_axis_resid_  = 0.0f;
+    mutable int   dbg_seg_active_  = 0;
+    mutable float dbg_seg_tlo_     = 0.0f;
+    mutable float dbg_seg_thi_     = 0.0f;
+    mutable float dbg_seg_shi_     = 0.0f;
+    mutable float dbg_seg_qlo_     = 0.0f;
+    mutable float dbg_seg_qhi_     = 0.0f;
 };
 
 }  // namespace rc

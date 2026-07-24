@@ -45,6 +45,11 @@ public:
         bool has_fresh_data = false;
         std::vector<Eigen::Vector3f> candidate_pts;
         std::vector<Eigen::Vector3f> residual_pts;
+        // Points of THIS mask slice that are flush to a DIFFERENT room wall than the one this run is built
+        // against — i.e. the perpendicular arm of an L/U-corner mask. Excluded from the fit (never enter
+        // frame.points, so the box cannot grow/tilt into them) and handed to residual-birth to spawn the
+        // neighbouring run. Empty for a single-wall run or an island. See observe_slice's wall-split.
+        std::vector<Eigen::Vector3f> foreign_pts;
         // Ricoh slices are bearing-only and never fitted (see observe_slice / process_ricoh_bearings): a
         // peripheral 360 detection has a reliable DIRECTION but a biased centroid/extent, so it only drives
         // the attention path and never contributes candidate/residual points to a belief update.
@@ -84,13 +89,18 @@ public:
     // Room-frame XY a NEWLY born instance's model should start at (from the tracker's detection). The
     // room→cabinet RT edge written at birth is NOT reliably queryable in the same cycle, so ensure_instance
     // would read the 0,0 default and the model would freeze there. Consumed once by ensure_instance.
-    void note_birth(std::uint64_t id, const Eigen::Vector2f& xy) { birth_seeds_[id] = xy; }
+    void note_birth(std::uint64_t id, const Eigen::Vector3f& c) { birth_seeds_[id] = c; }
+
+    // As note_birth, but for a RESIDUAL-born run: carries a full room-axis seed (cx,cy,yaw,L) of the arm
+    // so ensure_instance/lazy-init commit the box to THIS arm instead of re-deriving it from the shared
+    // mask slice (whose dominant arm belongs to the parent). Marks the instance residual_born.
+    void note_birth_seed(std::uint64_t id, const RunSeed& seed) { birth_full_seeds_[id] = seed; }
 
     // Room interior reference point (polygon centroid, room frame) + the room's wall polygon. The
     // first resolves the box's 180° C2v yaw ambiguity (the front normal must face the room); the
     // second feeds the per-frame wall-flush factor. Both are set by the worker once the room is known.
     void set_room_geometry(const Eigen::Vector2f& interior, std::vector<Eigen::Vector2f> polygon)
-    { room_interior_ = interior; room_polygon_ = std::move(polygon); }
+    { room_interior_ = interior; room_polygon_ = std::move(polygon); rebuild_wall_ids(); }
     bool should_log(const CabinetInstance& inst) const;
 
     // Emit a CSV row for an OUT-OF-VIEW instance whose EXISTENCE evidence integrated this cycle (LiDAR/silhouette
@@ -120,6 +130,19 @@ private:
     // INWARD unit normal). ok=false when no polygon is available, which makes the wall-flush factor
     // inert rather than guessing — an unknown room is exactly the free-standing case.
     WallRef nearest_wall(const Eigen::Vector2f& p) const;
+    // Build a WallRef for a SPECIFIC committed wall (canonical seg_id), projecting q onto that wall's
+    // nearest edge. Returns ok=false if the id no longer exists (polygon changed) → caller re-commits.
+    // Lets an instance reuse its persistent wall instead of re-choosing the nearest one every frame.
+    WallRef wall_ref_by_seg_id(int seg_id, const Eigen::Vector2f& q) const;
+    // Nearest wall to a point: canonical id, distance, and the wall's unit DIRECTION. The lean per-point
+    // version for the wall-split in observe_slice. Uses wall_seg_id_ precomputed by rebuild_wall_ids.
+    struct PointWall { int id = -1; float dist = 1e9f; Eigen::Vector2f dir = Eigen::Vector2f::UnitX(); };
+    PointWall point_wall(const Eigen::Vector2f& p) const;
+    // Group the room polygon's edges into WALLS (collinear-merged) and cache each edge's canonical wall id
+    // so a point can be attributed to a wall in O(edges). Rebuilt whenever the polygon is (re)set.
+    void rebuild_wall_ids();
+    // Shared WallRef builder for a given polygon edge (foot/normal/segment/seg_id), q projected onto it.
+    WallRef build_wall_ref(std::size_t edge_i, const Eigen::Vector2f& q) const;
 
     // Compute the localization/chain covariance term (J·Σ_chain·Jᵀ) at the cabinet centre by transforming
     // it from the measurement frame back to room with ZERO input cov; stored on the instance for the
@@ -146,9 +169,11 @@ private:
     std::unique_ptr<CabinetProjection> projection_;   // camera-projection unit (owns the ZED CameraAPI)
 
     std::unordered_map<std::uint64_t, CabinetInstance> instances_;
-    std::unordered_map<std::uint64_t, Eigen::Vector2f> birth_seeds_;   // tracker-provided birth XY (see note_birth)
+    std::unordered_map<std::uint64_t, Eigen::Vector3f> birth_seeds_;   // tracker-provided birth centroid XYZ (see note_birth)
+    std::unordered_map<std::uint64_t, RunSeed>         birth_full_seeds_;   // residual-born full seed (see note_birth_seed)
     Eigen::Vector2f                room_interior_ = Eigen::Vector2f::Zero();   // polygon centroid: C2v yaw fold
     std::vector<Eigen::Vector2f>   room_polygon_;                              // room walls: wall-flush factor
+    std::vector<int>               wall_seg_id_;                               // per-edge canonical wall id (merged)
     std::uint64_t                  room_node_id_ = 0;   // latched per ensure_instance call
     std::ofstream                  ai2_csv_;            // per-cycle AI2 belief log (optional)
 

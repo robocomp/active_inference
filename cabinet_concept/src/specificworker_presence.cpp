@@ -130,7 +130,10 @@ void SpecificWorker::remove_stale_affordance_nodes()
         if (not ours)
             if (const auto pid = G->get_attrib_by_name<parent_att>(aff); pid.has_value())
                 if (const auto parent = G->get_node(pid.value());
-                    parent.has_value() and parent->type() == "cabinet")
+                    // A cabinet run is a `box` node named "cabinet_*" (cortex has no `cabinet` type), so the
+                    // parent-type backstop must match box+name, NOT type()=="cabinet" (which never matched).
+                    parent.has_value() and parent->type() == "box"
+                    and parent->name().starts_with("cabinet"))
                 {
                     ours = true;
                     why = "parent cabinet";

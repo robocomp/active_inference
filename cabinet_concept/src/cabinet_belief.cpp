@@ -197,6 +197,14 @@ Eigen::Matrix<float, 7, 1> CabinetBelief::common_mode_inv_diag(const CabinetFram
 // exp(−(gap/reach)²), and marginalising the discrete component multiplies the factor's precision by
 // exactly that weight. So the term fades smoothly to nothing for a genuine island (the apartamento
 // kitchen has one: Worktop3 sits 2.17 m / 1.18 m off both walls) and `d` stays honestly wide there.
+float CabinetBelief::flush_weight(const CabinetBeliefState& s, const CabinetFrame& f) const
+{
+    if (not f.wall.ok) return 0.0f;
+    const float gap = (s.back_centre() - f.wall.p).dot(f.wall.n);
+    const float rel = gap / std::max(1e-3f, params_.wall_reach_m);
+    return std::exp(-rel * rel);
+}
+
 void CabinetBelief::accumulate_wall(const CabinetBeliefState& s, const CabinetFrame& f,
                                     Eigen::Matrix<float, 7, 7>& Id, Eigen::Matrix<float, 7, 1>& bd) const
 {
@@ -211,9 +219,9 @@ void CabinetBelief::accumulate_wall(const CabinetBeliefState& s, const CabinetFr
     const float gap = gap_of(s);
     dbg_wall_gap_ = gap;
 
-    // Posterior weight of the "flush against this wall" component, and the wall's own uncertainty.
-    const float rel = gap / std::max(1e-3f, params_.wall_reach_m);
-    const float wgt = std::exp(-rel * rel);
+    // Posterior weight of the "flush against this wall" component (shared definition), and the wall's own
+    // uncertainty. accumulate_extent uses the SAME weight for the wall-segment domain terms.
+    const float wgt = flush_weight(s, f);
     const float lam_flush = wgt / (1.0f / params_.wall_precision + f.wall.sigma_m * f.wall.sigma_m);
     dbg_wall_lambda_ = lam_flush;
     if (not(lam_flush > 1e-6f)) return;
@@ -299,25 +307,62 @@ void CabinetBelief::accumulate_extent(const CabinetBeliefState& s, const Cabinet
     const float s_lo = pick(true), s_hi = pick(false);
     dbg_span_obs_ = s_hi - s_lo;
 
-    // Re-express the two extreme observations as FIXED room-frame points, so the residual is a pure
-    // function of the state (the along-axis coordinate itself depends on cx,cy,yaw and must not be
-    // frozen inside the residual).
     const Eigen::Vector2f c(s.cx, s.cy);
-    const Eigen::Vector2f p_lo = c + u * s_lo, p_hi = c + u * s_hi;
 
-    // Hinge residuals: how far each observed end sticks OUT of the box along the axis.
+    // ── Wall-segment domain (corner-aware growth) ────────────────────────────────────────────────
+    // A run built flush against a wall physically ENDS at that wall segment's corners. nearest_wall
+    // supplies them (collinear-merged). Two one-sided effects, both scaled by the flush mixture weight so
+    // they vanish continuously for an island / when no polygon is known (no gate, no `if (near_wall)`):
+    //   (1) CENSOR the observed span at the corners — points past a corner belong to the perpendicular
+    //       run, not this one, so they must not be evidence FOR its length (the corrected conditioning of
+    //       the censored lower-bound invariant). This PREVENTS growing across the corner.
+    //   (2) A symmetric INWARD hinge that fires when a box END already sticks out past its corner, pulling
+    //       it back. This RETRACTS an over-grown run (the only channel that can — the space beyond the
+    //       corner is occupied by the other run, so free-space evidence never arrives there).
+    float s_lo_eff = s_lo, s_hi_eff = s_hi;
+    const float wgt = flush_weight(s, f);
+    const bool  seg = f.wall.has_segment and wgt > 1e-3f;
+    Eigen::Vector2f P_lo_seg = Eigen::Vector2f::Zero(), P_hi_seg = Eigen::Vector2f::Zero();
+    if (seg)
+    {
+        const float t_a = (f.wall.a - c).dot(u), t_b = (f.wall.b - c).dot(u);
+        const float t_lo_w = std::min(t_a, t_b), t_hi_w = std::max(t_a, t_b);
+        P_lo_seg = (t_a <= t_b) ? f.wall.a : f.wall.b;   // fixed room corners on the −u / +u ends
+        P_hi_seg = (t_a <= t_b) ? f.wall.b : f.wall.a;
+        s_hi_eff = s_hi - wgt * std::max(0.0f, s_hi - t_hi_w);
+        s_lo_eff = s_lo + wgt * std::max(0.0f, t_lo_w - s_lo);
+    }
+
+    // Re-express the (censored) extreme observations as FIXED room-frame points so the residual is a pure
+    // function of the state (the along-axis coordinate depends on cx,cy,yaw and must not be frozen in it).
+    const Eigen::Vector2f p_lo = c + u * s_lo_eff, p_hi = c + u * s_hi_eff;
+
+    // GROW hinges: how far each (censored) observed end sticks OUT of the box along the axis.
     const auto r_lo_of = [&](const CabinetBeliefState& st)
     { return std::max(0.0f, (st.centre() - p_lo).dot(st.axis()) - 0.5f * st.L); };
     const auto r_hi_of = [&](const CabinetBeliefState& st)
     { return std::max(0.0f, (p_hi - st.centre()).dot(st.axis()) - 0.5f * st.L); };
+    // RETRACT hinges: how far each box END extends PAST its wall corner (silent inside the segment).
+    const auto q_lo_of = [&](const CabinetBeliefState& st)
+    { return seg ? std::max(0.0f, (P_lo_seg - st.centre()).dot(st.axis()) + 0.5f * st.L) : 0.0f; };
+    const auto q_hi_of = [&](const CabinetBeliefState& st)
+    { return seg ? std::max(0.0f, (st.centre() - P_hi_seg).dot(st.axis()) + 0.5f * st.L) : 0.0f; };
 
     const float r_lo = r_lo_of(s), r_hi = r_hi_of(s);
-    if (r_lo <= 0.0f and r_hi <= 0.0f) return;      // already contained ⇒ the factor is silent
+    const float q_lo = q_lo_of(s), q_hi = q_hi_of(s);
+    // Instrumentation: is the wall-segment domain actually binding? (corner projections + retract residuals)
+    dbg_seg_active_ = seg ? 1 : 0;
+    if (seg) { const float t_a = (f.wall.a - c).dot(u), t_b = (f.wall.b - c).dot(u);
+               dbg_seg_tlo_ = std::min(t_a, t_b); dbg_seg_thi_ = std::max(t_a, t_b); }
+    dbg_seg_shi_ = s_hi; dbg_seg_qlo_ = q_lo; dbg_seg_qhi_ = q_hi;
+    if (r_lo <= 0.0f and r_hi <= 0.0f and q_lo <= 0.0f and q_hi <= 0.0f) return;   // fully contained ⇒ silent
 
     const float lam = params_.extent_precision;
+    // Retract precision folds the wall's own position uncertainty (like accumulate_wall's lam_flush).
+    const float lam_seg = seg ? lam * wgt / (1.0f + f.wall.sigma_m * f.wall.sigma_m * lam) : 0.0f;
     const float eps = params_.fd_eps;
     const Eigen::Matrix<float, 7, 1> v = s.vec();
-    Eigen::Matrix<float, 7, 1> Jlo, Jhi;
+    Eigen::Matrix<float, 7, 1> Jlo, Jhi, Qlo, Qhi;
     for (int k = 0; k < 7; ++k)
     {
         Eigen::Matrix<float, 7, 1> vp = v, vm = v;
@@ -325,9 +370,41 @@ void CabinetBelief::accumulate_extent(const CabinetBeliefState& s, const Cabinet
         const auto sp = CabinetBeliefState::from_vec(vp), sm = CabinetBeliefState::from_vec(vm);
         Jlo(k) = std::clamp((r_lo_of(sp) - r_lo_of(sm)) / (2.0f * eps), -kJClamp, kJClamp);
         Jhi(k) = std::clamp((r_hi_of(sp) - r_hi_of(sm)) / (2.0f * eps), -kJClamp, kJClamp);
+        Qlo(k) = std::clamp((q_lo_of(sp) - q_lo_of(sm)) / (2.0f * eps), -kJClamp, kJClamp);
+        Qhi(k) = std::clamp((q_hi_of(sp) - q_hi_of(sm)) / (2.0f * eps), -kJClamp, kJClamp);
     }
-    if (r_lo > 0.0f) { Id.noalias() += lam * (Jlo * Jlo.transpose()); bd.noalias() += -lam * Jlo * r_lo; }
-    if (r_hi > 0.0f) { Id.noalias() += lam * (Jhi * Jhi.transpose()); bd.noalias() += -lam * Jhi * r_hi; }
+    if (r_lo > 0.0f) { Id.noalias() += lam     * (Jlo * Jlo.transpose()); bd.noalias() += -lam     * Jlo * r_lo; }
+    if (r_hi > 0.0f) { Id.noalias() += lam     * (Jhi * Jhi.transpose()); bd.noalias() += -lam     * Jhi * r_hi; }
+    if (q_lo > 0.0f) { Id.noalias() += lam_seg * (Qlo * Qlo.transpose()); bd.noalias() += -lam_seg * Qlo * q_lo; }
+    if (q_hi > 0.0f) { Id.noalias() += lam_seg * (Qhi * Qhi.transpose()); bd.noalias() += -lam_seg * Qhi * q_hi; }
+}
+
+// ─── Room-axis (Manhattan) yaw alignment ──────────────────────────────────────────────────────────
+//
+// Pull yaw to the NEAREST room axis (a multiple of π/2 in the room frame — a kitchen run is built
+// parallel to a wall). Unlike accumulate_wall's parallel term, this needs no detected wall and no
+// flush weight, so it also aligns a peninsula/island that only touches a wall on one short side, a
+// merged/mis-positioned run, or a run whose wall isn't currently observed. The residual is the signed
+// angular error to that axis (in [-π/4, π/4]); it is a pure yaw term (∂r/∂yaw = 1, all other partials
+// zero), so no finite differences are needed. Silent once aligned (r→0): it biases orientation without
+// fighting a correctly-aligned run, and — being a room-frame axis — it is invariant to canonicalize's
+// 180° C2v flip. Per-frame like the other structural factors; predict-step process noise on yaw bounds
+// the information it accumulates.
+void CabinetBelief::accumulate_axis_alignment(const CabinetBeliefState& s,
+                                              Eigen::Matrix<float, 7, 7>& Id, Eigen::Matrix<float, 7, 1>& bd) const
+{
+    dbg_axis_resid_ = 0.0f;
+    if (params_.room_axis_precision <= 0.0f) return;
+    constexpr float kQuarter = std::numbers::pi_v<float> / 2.0f;
+    const float nearest = std::round(s.yaw / kQuarter) * kQuarter;   // nearest room axis
+    const float r = wrap_pi(s.yaw - nearest);                        // signed error ∈ [-π/4, π/4]
+    dbg_axis_resid_ = r;
+    // Capture range: outside it, release the pull so a genuinely oblique object is left alone.
+    // ≤0 or ≥π/4 means "always on" (every yaw is within π/4 of some axis).
+    if (params_.room_axis_capture_rad > 0.0f and std::abs(r) > params_.room_axis_capture_rad) return;
+    const float lam = params_.room_axis_precision;
+    Id(2, 2) += lam;              // yaw is state index 2 [cx,cy,yaw,L,d,z0,z1]
+    bd(2)    += -lam * r;
 }
 
 void CabinetBelief::accumulate_extra(const CabinetBeliefState& s, const CabinetFrame& f,
@@ -335,6 +412,7 @@ void CabinetBelief::accumulate_extra(const CabinetBeliefState& s, const CabinetF
 {
     accumulate_wall(s, f, Id, bd);
     accumulate_extent(s, f, Id, bd);
+    accumulate_axis_alignment(s, Id, bd);
 
     // YOLO-independent LiDAR first-hit range factor, once per device ray-set (each keeps its OWN
     // origin so the sphere-trace stays occlusion-aware per device — merging would lose that).
@@ -402,7 +480,7 @@ bool CabinetBelief::resolve_tier(const std::vector<Eigen::Vector3f>& pts, float 
 // (L, d). Seeding from it starts the box near the data; a small axis-aligned seed would route the real
 // run to clutter and never grow into it. `aniso` reports how well-determined the axis is — a nearly
 // square cloud has no meaningful principal direction and the caller should leave yaw to other evidence.
-RunSeed CabinetBelief::seed_from_points(const std::vector<Eigen::Vector3f>& pts)
+RunSeed CabinetBelief::seed_from_points(const std::vector<Eigen::Vector3f>& pts, bool room_axis_snap)
 {
     RunSeed s;
     if (pts.size() < 8) return s;
@@ -421,15 +499,34 @@ RunSeed CabinetBelief::seed_from_points(const std::vector<Eigen::Vector3f>& pts)
     }
     sxx /= pts.size(); syy /= pts.size(); sxy /= pts.size();
 
-    // Principal axis + eigenvalues of the 2x2 covariance.
-    const double tr = sxx + syy, det = sxx * syy - sxy * sxy;
-    const double disc = std::sqrt(std::max(0.0, 0.25 * tr * tr - det));
-    const double l1 = 0.5 * tr + disc, l2 = std::max(0.0, 0.5 * tr - disc);
-    s.yaw = static_cast<float>(0.5 * std::atan2(2.0 * sxy, sxx - syy));
-    s.L = static_cast<float>(std::sqrt(std::max(0.0, 12.0 * l1)));   // equivalent uniform rectangle
-    s.d = static_cast<float>(std::sqrt(std::max(0.0, 12.0 * l2)));
-    const float sum = s.L + s.d;
-    s.aniso = (sum > 1e-4f) ? (s.L - s.d) / sum : 0.0f;
+    if (room_axis_snap)
+    {
+        // Room-axis seed: a kitchen run lies on a ROOM axis, so pick the axis (X or Y) the cloud spreads
+        // along MOST as the run's long axis — never the PCA diagonal. For an L-shaped corner mask the raw
+        // PCA axis is diagonal and its major extent spans BOTH walls, which births one oblique box the
+        // grow-only extent factor can never retract; the marginal room-axis variance instead measures the
+        // dominant arm alone (the perpendicular arm contributes only its narrow off-axis position spread).
+        const bool along_x = sxx >= syy;
+        s.yaw = along_x ? 0.0f : static_cast<float>(std::numbers::pi_v<double> * 0.5);
+        s.L = static_cast<float>(std::sqrt(std::max(0.0, 12.0 * (along_x ? sxx : syy))));
+        s.d = static_cast<float>(std::sqrt(std::max(0.0, 12.0 * (along_x ? syy : sxx))));
+        // aniso = how much more the cloud spreads along the dominant room axis than the other. Low for a
+        // near-symmetric L ⇒ the caller leaves yaw to the wall/Manhattan factors rather than guessing an arm.
+        const double sum2 = sxx + syy;
+        s.aniso = (sum2 > 1e-8) ? static_cast<float>(std::abs(sxx - syy) / sum2) : 0.0f;
+    }
+    else
+    {
+        // Principal axis + eigenvalues of the 2x2 covariance.
+        const double tr = sxx + syy, det = sxx * syy - sxy * sxy;
+        const double disc = std::sqrt(std::max(0.0, 0.25 * tr * tr - det));
+        const double l1 = 0.5 * tr + disc, l2 = std::max(0.0, 0.5 * tr - disc);
+        s.yaw = static_cast<float>(0.5 * std::atan2(2.0 * sxy, sxx - syy));
+        s.L = static_cast<float>(std::sqrt(std::max(0.0, 12.0 * l1)));   // equivalent uniform rectangle
+        s.d = static_cast<float>(std::sqrt(std::max(0.0, 12.0 * l2)));
+        const float sum = s.L + s.d;
+        s.aniso = (sum > 1e-4f) ? (s.L - s.d) / sum : 0.0f;
+    }
 
     // Robust vertical band (2% / 98%) — the carcass top/bottom, immune to a few stray returns.
     std::vector<float> zs; zs.reserve(pts.size());
@@ -572,6 +669,113 @@ bool CabinetBelief::self_test()
         for (int it = 0; it < 12 and not switched; ++it)
             switched = b.resolve_tier(pts, R, 1.0f);
         check(switched and b.tier() == CabinetTier::Base, "tier mode switches to Base for a floor-level cloud");
+    }
+
+    // ── (f) THE PENINSULA. A U-/L-kitchen aisle runs parallel to a wall but touches it on only one
+    //    SHORT side, so the flush/parallel wall factor is absent along its length and cannot hold its
+    //    orientation. The room-axis (Manhattan) prior must keep it parallel to a room axis on its own.
+    //    Ground truth here is a run along the room +y axis (yaw = ±π/2); seed it OBLIQUE with NO wall
+    //    and require it to settle on an axis.
+    {
+        std::vector<Eigen::Vector3f> pts_y;                    // same run as gt, rotated onto +y
+        for (int i = 0; i <= 60; ++i)
+        {
+            const float t = -1.5f + 3.0f * static_cast<float>(i) / 60.0f;
+            for (int j = 0; j <= 9; ++j)
+                pts_y.emplace_back(0.3f, t, 0.9f * static_cast<float>(j) / 9.0f);   // front face (x = d/2)
+            pts_y.emplace_back(0.0f, t, 0.9f);                                      // top face
+        }
+        for (int j = 0; j <= 9; ++j)                                               // the two end caps
+        {
+            const float z = 0.9f * static_cast<float>(j) / 9.0f;
+            pts_y.emplace_back(0.15f, -1.5f, z);
+            pts_y.emplace_back(0.15f,  1.5f, z);
+        }
+        CabinetBeliefState pseed;
+        pseed.cx = 0.2f; pseed.cy = 0.1f; pseed.yaw = std::numbers::pi_v<float> / 2.0f - 0.35f;  // ~20° oblique
+        pseed.L = 1.2f;  pseed.d = 0.4f; pseed.z0 = 0.0f; pseed.z1 = 0.9f;
+        CabinetBelief b(pseed, pr);
+        b.set_room_interior({5.0f, 0.0f});                    // room on the +x side ⇒ front normal → +x
+        for (int it = 0; it < 25; ++it) { CabinetFrame f; f.points = pts_y; b.update(f); }   // NO wall
+        const float yaw = b.state().yaw;
+        constexpr float kQ = std::numbers::pi_v<float> / 2.0f;
+        const float axis_resid = std::abs(wrap_pi(yaw - std::round(yaw / kQ) * kQ));
+        check(axis_resid < 0.10f, "peninsula (no wall) settles on a room axis via the Manhattan prior");
+        check(std::abs(std::cos(yaw)) < 0.20f, "peninsula aligns to the CORRECT axis (+y, from the cloud)");
+    }
+
+    // ── (g) THE CORNER MASK. One SAM mask that wraps a corner gives an L-shaped cloud: a long arm along
+    //    +x and a shorter arm along +y meeting at the origin. The raw PCA seed diagonalises it into ONE
+    //    oblique, over-long box straddling both walls; the room-axis seed must instead pick the dominant
+    //    arm's axis and its extent alone, leaving the other arm to fall out as residual.
+    {
+        std::vector<Eigen::Vector3f> Lc;
+        for (int i = 0; i <= 60; ++i)                          // arm A: long, along +x
+        {
+            const float x = 3.0f * static_cast<float>(i) / 60.0f;
+            for (int w = -1; w <= 1; ++w) Lc.emplace_back(x, 0.12f * static_cast<float>(w), 0.45f);
+        }
+        for (int j = 0; j <= 30; ++j)                          // arm B: shorter, along +y
+        {
+            const float y = 1.5f * static_cast<float>(j) / 30.0f;
+            for (int w = -1; w <= 1; ++w) Lc.emplace_back(0.12f * static_cast<float>(w), y, 0.45f);
+        }
+        const RunSeed raw  = seed_from_points(Lc, /*room_axis_snap=*/false);
+        const RunSeed snap = seed_from_points(Lc, /*room_axis_snap=*/true);
+        constexpr float kQ = std::numbers::pi_v<float> / 2.0f;
+        const float raw_axis  = std::abs(wrap_pi(raw.yaw  - std::round(raw.yaw  / kQ) * kQ));
+        const float snap_axis = std::abs(wrap_pi(snap.yaw - std::round(snap.yaw / kQ) * kQ));
+        check(raw_axis > 0.15f,  "PCA seed of an L-mask IS oblique (the bug the room-axis seed prevents)");
+        check(snap_axis < 0.02f, "room-axis seed of an L-mask lands on a room axis");
+        check(std::abs(std::cos(snap.yaw)) > 0.98f, "room-axis seed picks the dominant (+x) arm");
+        check(snap.L < raw.L, "room-axis seed length is the arm, not the longer diagonal span");
+    }
+
+    // ── (h) WALL-SEGMENT DOMAIN: corner-aware growth prevention + retract + island invariance ──────
+    //    A corner mask hands arm A (a run along +x, flush to a wall at y=−0.3, spanning x∈[0,3], corner at
+    //    x=3) the perpendicular arm B (along +y at x≈3). The segment terms must (h1) stop arm A growing
+    //    past x=3 into arm B, (h2) retract an already-overgrown end back to the corner, and (h3) stay
+    //    fully inert when the wall is far (no manufactured length on an island).
+    {
+        std::vector<Eigen::Vector3f> armA_pts, Lc;
+        for (int i = 0; i <= 60; ++i)
+        {
+            const float x = 3.0f * static_cast<float>(i) / 60.0f;
+            for (int j = 0; j <= 9; ++j) armA_pts.emplace_back(x, 0.3f, 0.9f * static_cast<float>(j) / 9.0f);  // front face y=+0.3
+            armA_pts.emplace_back(x, 0.0f, 0.9f);                                                              // top
+        }
+        Lc = armA_pts;
+        for (int j = 0; j <= 30; ++j)                                       // arm B (perpendicular, at the corner)
+        {
+            const float y = 0.2f + 1.3f * static_cast<float>(j) / 30.0f;
+            for (int k = 0; k <= 9; ++k) Lc.emplace_back(3.0f, y, 0.9f * static_cast<float>(k) / 9.0f);
+        }
+        const auto set_wall = [](CabinetFrame& fr, float wall_y)
+        {
+            fr.wall.ok = true; fr.wall.p = {0.0f, wall_y}; fr.wall.n = {0.0f, 1.0f};
+            fr.wall.has_segment = true; fr.wall.a = {-0.5f, wall_y}; fr.wall.b = {3.0f, wall_y};   // +x corner at x=3
+        };
+        CabinetBeliefState base; base.cy = 0.0f; base.yaw = 0.0f; base.d = 0.6f; base.z0 = 0.0f; base.z1 = 0.9f;
+
+        // (h1) corner absorption PREVENTED: seed arm A short; feed the full L-cloud; must not grow past x=3.
+        { CabinetBeliefState sd = base; sd.cx = 1.4f; sd.L = 2.4f;
+          CabinetBelief b(sd, pr); b.set_room_interior({1.5f, 5.0f});
+          for (int it = 0; it < 60; ++it) { CabinetFrame f; f.points = Lc; set_wall(f, -0.3f); b.update(f); }
+          const auto st = b.state();
+          check(st.cx + 0.5f * st.L < 3.0f + 0.10f, "corner: +x end is censored at the wall corner (no growth into arm B)");
+          check(std::abs(wrap_pi(st.yaw)) < 0.08f,   "corner: run stays axis-aligned (arm B not absorbed → no tilt)"); }
+
+        // (h2) RETRACT: seed OVERGROWN past the corner; arm-A points only; the inward hinge pulls it back.
+        { CabinetBeliefState sd = base; sd.cx = 2.2f; sd.L = 4.8f;
+          CabinetBelief b(sd, pr); b.set_room_interior({1.5f, 5.0f});
+          for (int it = 0; it < 80; ++it) { CabinetFrame f; f.points = armA_pts; set_wall(f, -0.3f); b.update(f); }
+          check(b.state().cx + 0.5f * b.state().L < 3.0f + 0.15f, "retract: overgrown +x end is pulled back to the corner"); }
+
+        // (h3) ISLAND INVARIANCE: same overgrown seed but the wall is 2 m away ⇒ wgt≈0 ⇒ NO retract.
+        { CabinetBeliefState sd = base; sd.cx = 2.2f; sd.L = 4.8f;
+          CabinetBelief b(sd, pr); b.set_room_interior({1.5f, 5.0f});
+          for (int it = 0; it < 80; ++it) { CabinetFrame f; f.points = armA_pts; set_wall(f, -2.3f); b.update(f); }
+          check(b.state().cx + 0.5f * b.state().L > 3.5f, "island: a far wall does NOT retract the run (no manufactured length)"); }
     }
 
     if (ok) std::print("[cabinet_belief::self_test] all checks passed\n");

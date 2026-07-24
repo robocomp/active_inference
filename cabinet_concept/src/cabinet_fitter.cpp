@@ -18,7 +18,9 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <format>
 #include <print>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -141,32 +143,130 @@ void CabinetFitter::compute_object_observation(CabinetInstance& inst)
 // Closest point on each polygon edge, keeping the nearest. The inward normal is chosen by pointing it
 // at the room interior (the polygon centroid) rather than assuming a winding order, so a polygon
 // authored either CW or CCW — and the apartamento layout's concave jogs — both behave.
-WallRef CabinetFitter::nearest_wall(const Eigen::Vector2f& q) const
+// Group the polygon's edges into collinear-merged WALLS; cache each edge's canonical wall id (the start
+// edge of its collinear run, found by walking backward while the neighbour stays parallel to within 3°).
+void CabinetFitter::rebuild_wall_ids()
 {
-    WallRef w;
-    if (room_polygon_.size() < 2)
-        return w;                                   // no room model ⇒ inert ⇒ treated as free-standing
+    const std::size_t n = room_polygon_.size();
+    wall_seg_id_.assign(n, -1);
+    if (n < 2) return;
+    constexpr float kColinCos = 0.99863f;   // cos(3°)
+    const auto dir = [&](std::size_t i)
+    { return (room_polygon_[(i + 1) % n] - room_polygon_[i]).normalized(); };
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        const Eigen::Vector2f ui = dir(i);
+        std::size_t start = i;
+        for (std::size_t step = 0; step + 1 < n; ++step)
+        {
+            const std::size_t prev = (start + n - 1) % n;
+            if (std::abs(dir(prev).dot(ui)) < kColinCos) break;
+            start = prev;
+        }
+        wall_seg_id_[i] = static_cast<int>(start);
+    }
+}
 
+// Nearest wall to a point: canonical id, distance, unit direction. Lean per-point version for the wall-split.
+CabinetFitter::PointWall CabinetFitter::point_wall(const Eigen::Vector2f& q) const
+{
+    PointWall out;
+    const std::size_t n = room_polygon_.size();
+    if (n < 2 or wall_seg_id_.size() != n) return out;
     float best = std::numeric_limits<float>::max();
-    for (std::size_t i = 0, n = room_polygon_.size(); i < n; ++i)
+    std::size_t bi = n;
+    for (std::size_t i = 0; i < n; ++i)
     {
         const Eigen::Vector2f& a = room_polygon_[i];
-        const Eigen::Vector2f& b = room_polygon_[(i + 1) % n];
-        const Eigen::Vector2f ab = b - a;
+        const Eigen::Vector2f ab = room_polygon_[(i + 1) % n] - a;
         const float len2 = ab.squaredNorm();
         if (len2 < 1e-8f) continue;
         const float t = std::clamp((q - a).dot(ab) / len2, 0.0f, 1.0f);
-        const Eigen::Vector2f foot = a + t * ab;
-        const float dist2 = (q - foot).squaredNorm();
-        if (dist2 >= best) continue;
-        best = dist2;
-        Eigen::Vector2f nrm(-ab.y(), ab.x());
-        nrm.normalize();
-        if (nrm.dot(room_interior_ - foot) < 0.0f) nrm = -nrm;   // point INTO the room
-        w.ok = true; w.p = foot; w.n = nrm;
+        const float d2 = (q - (a + t * ab)).squaredNorm();
+        if (d2 < best) { best = d2; bi = i; }
     }
-    w.sigma_m = cfg_.wall_sigma_m;
+    if (bi == n) return out;
+    out.id   = wall_seg_id_[bi];
+    out.dist = std::sqrt(best);
+    out.dir  = (room_polygon_[(bi + 1) % n] - room_polygon_[bi]).normalized();
+    return out;
+}
+
+// Build the full WallRef (foot, inward normal, collinear-merged segment corners, canonical seg_id) for a
+// GIVEN polygon edge, projecting q onto it. Shared by nearest_wall (argmin edge) and wall_ref_by_seg_id
+// (committed edge). The segment walk collinear-merges an authored jog/door-notch into ONE segment so
+// accumulate_extent doesn't clamp the run at a phantom interior corner; a true corner (≈90°) stops it.
+WallRef CabinetFitter::build_wall_ref(std::size_t edge_i, const Eigen::Vector2f& q) const
+{
+    WallRef w;
+    const std::size_t n = room_polygon_.size();
+    if (n < 2 or edge_i >= n) return w;
+    const Eigen::Vector2f& a = room_polygon_[edge_i];
+    const Eigen::Vector2f  b = room_polygon_[(edge_i + 1) % n];
+    const Eigen::Vector2f  ab = b - a;
+    const float len2 = ab.squaredNorm();
+    if (len2 < 1e-8f) return w;
+    const float t = std::clamp((q - a).dot(ab) / len2, 0.0f, 1.0f);
+    const Eigen::Vector2f foot = a + t * ab;
+    Eigen::Vector2f nrm(-ab.y(), ab.x());
+    nrm.normalize();
+    if (nrm.dot(room_interior_ - foot) < 0.0f) nrm = -nrm;   // point INTO the room
+    w.ok = true; w.p = foot; w.n = nrm; w.sigma_m = cfg_.wall_sigma_m;
+
+    constexpr float kColinCos = 0.99863f;   // cos(3°): edges within 3° are the "same" wall
+    const auto edge_dir = [&](std::size_t i)
+    { return (room_polygon_[(i + 1) % n] - room_polygon_[i]).normalized(); };
+    const Eigen::Vector2f u0 = edge_dir(edge_i);
+    std::size_t lo = edge_i, hi = edge_i;   // edge indices; segment spans vertex lo .. vertex (hi+1)
+    for (std::size_t step = 0; step + 1 < n; ++step)
+    { const std::size_t prev = (lo + n - 1) % n; if (std::abs(edge_dir(prev).dot(u0)) < kColinCos) break; lo = prev; }
+    for (std::size_t step = 0; step + 1 < n; ++step)
+    { const std::size_t nxt = (hi + 1) % n; if (std::abs(edge_dir(nxt).dot(u0)) < kColinCos) break; hi = nxt; }
+    w.a = room_polygon_[lo];
+    w.b = room_polygon_[(hi + 1) % n];
+    w.has_segment = true;
+    w.seg_id = (wall_seg_id_.size() == n) ? wall_seg_id_[edge_i] : static_cast<int>(lo);
     return w;
+}
+
+WallRef CabinetFitter::nearest_wall(const Eigen::Vector2f& q) const
+{
+    const std::size_t n = room_polygon_.size();
+    if (n < 2) return WallRef{};                    // no room model ⇒ inert ⇒ treated as free-standing
+    float best = std::numeric_limits<float>::max();
+    std::size_t best_i = n;
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        const Eigen::Vector2f& a = room_polygon_[i];
+        const Eigen::Vector2f  ab = room_polygon_[(i + 1) % n] - a;
+        const float len2 = ab.squaredNorm();
+        if (len2 < 1e-8f) continue;
+        const float t = std::clamp((q - a).dot(ab) / len2, 0.0f, 1.0f);
+        const float dist2 = (q - (a + t * ab)).squaredNorm();
+        if (dist2 < best) { best = dist2; best_i = i; }
+    }
+    return (best_i < n) ? build_wall_ref(best_i, q) : WallRef{};
+}
+
+// The committed wall's nearest edge (by seg_id), projected onto for q. Returns ok=false if the id is gone.
+WallRef CabinetFitter::wall_ref_by_seg_id(int seg_id, const Eigen::Vector2f& q) const
+{
+    const std::size_t n = room_polygon_.size();
+    if (n < 2 or wall_seg_id_.size() != n or seg_id < 0) return WallRef{};
+    float best = std::numeric_limits<float>::max();
+    std::size_t best_i = n;
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        if (wall_seg_id_[i] != seg_id) continue;
+        const Eigen::Vector2f& a = room_polygon_[i];
+        const Eigen::Vector2f  ab = room_polygon_[(i + 1) % n] - a;
+        const float len2 = ab.squaredNorm();
+        if (len2 < 1e-8f) continue;
+        const float t = std::clamp((q - a).dot(ab) / len2, 0.0f, 1.0f);
+        const float dist2 = (q - (a + t * ab)).squaredNorm();
+        if (dist2 < best) { best = dist2; best_i = i; }
+    }
+    return (best_i < n) ? build_wall_ref(best_i, q) : WallRef{};
 }
 
 // Compute the localization/chain covariance term (J·Σ_chain·Jᵀ) at the cabinet centre; store it on the instance.
@@ -245,11 +345,32 @@ bool CabinetFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_id
     // Tracker birth seed: authoritative for a freshly-born instance. The room→cabinet RT edge written at
     // birth is not reliably queryable this same cycle (it reads as 0,0), and the warm-start would then
     // freeze the model at the origin forever → the tracker never associates and re-births endlessly.
-    if (auto it = birth_seeds_.find(node.id()); it != birth_seeds_.end())
+    // A residual-born run carries a FULL room-axis seed of its arm — commit cx,cy,yaw,L so its footprint
+    // is correct immediately (the tracker's footprint-claim uses it next cycle) and mark it residual_born.
+    // The seed is kept (not erased) so the lazy belief init below applies the SAME arm rather than the
+    // shared slice's dominant (parent) arm.
+    const bool has_full_seed = birth_full_seeds_.find(node.id()) != birth_full_seeds_.end();
+    if (has_full_seed)
+    {
+        const RunSeed& fs = birth_full_seeds_.at(node.id());
+        init_state.cx = fs.cx; init_state.cy = fs.cy; init_state.yaw = fs.yaw;
+        init_state.L  = std::max(0.10f, fs.L);
+        std::print("[{}] residual birth-seed applied → cx={:.2f} cy={:.2f} yaw={:.2f} L={:.2f}\n",
+                   node.name(), fs.cx, fs.cy, fs.yaw, fs.L);
+    }
+    else if (auto it = birth_seeds_.find(node.id()); it != birth_seeds_.end())
     {
         init_state.cx = it->second.x();
         init_state.cy = it->second.y();
-        std::print("[{}] birth-seed applied → cx={:.2f} cy={:.2f}\n", node.name(), init_state.cx, init_state.cy);
+        // Seed the vertical band from the detection centroid so a WALL-unit birth (centroid z≈1.7) starts
+        // HIGH, not on the floor. Otherwise the newborn's track-z is base-like and the z_gate blocks the
+        // unit's own mask from ever associating/fitting (see cabinet_scene_graph birth). Keep the carcass
+        // height; centre the band on the detection centroid.
+        const float h = std::max(0.10f, init_state.z1 - init_state.z0);
+        init_state.z0 = std::max(0.0f, it->second.z() - 0.5f * h);
+        init_state.z1 = init_state.z0 + h;
+        std::print("[{}] birth-seed applied → cx={:.2f} cy={:.2f} z0={:.2f}\n",
+                   node.name(), init_state.cx, init_state.cy, init_state.z0);
         birth_seeds_.erase(it);
     }
     else
@@ -281,6 +402,7 @@ bool CabinetFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_id
     CabinetInstance inst;
     inst.node_id   = node.id();
     inst.node_name = node.name();
+    inst.residual_born = has_full_seed;   // gets the footprint-claim slice feed in run_instance_tracker
 
     inst.model = CabinetModel(init_state, make_model_params());
     inst.affordance.init(G_, node.id(), node.name());
@@ -332,6 +454,9 @@ CabinetFitter::CabinetObservation CabinetFitter::observe_slice(CabinetInstance& 
     const std::size_t begin = std::min(slice.support_begin, masks_packet.support_points.size());
     const std::size_t end   = std::min(slice.support_end,   masks_packet.support_points.size());
 
+    // Simple SDF split into on-surface (candidate) vs off-surface (residual). An L-corner mask is separated
+    // UPSTREAM into two single-arm sub-slices (SpecificWorker::split_lshaped_cabinet_masks + cabinet_lshape_
+    // split.h), so this run always sees a clean single-arm cloud — no per-instance corner arbitration here.
     observation.candidate_pts.reserve(end > begin ? end - begin : 0);
     observation.residual_pts.reserve(end > begin ? end - begin : 0);
     for (std::size_t i = begin; i < end; ++i)
@@ -413,7 +538,7 @@ float CabinetFitter::run_inference(CabinetInstance& inst, const CabinetObservati
                 pts.reserve(static_cast<std::size_t>(npts));
                 pts.insert(pts.end(), observation.candidate_pts.begin(), observation.candidate_pts.end());
                 pts.insert(pts.end(), observation.residual_pts.begin(), observation.residual_pts.end());
-                if (const auto sd = CabinetBelief::seed_from_points(pts); sd.ok)
+                if (const auto sd = CabinetBelief::seed_from_points(pts, cfg_.seed_room_axis_snap); sd.ok)
                 {
                     s0.cx = sd.cx; s0.cy = sd.cy;
                     s0.L  = std::max(0.10f, sd.L);
@@ -429,6 +554,16 @@ float CabinetFitter::run_inference(CabinetInstance& inst, const CabinetObservati
                     // settle it once the run has length.
                     if (sd.aniso > 0.10f)
                         s0.yaw = sd.yaw;
+                }
+                // Residual-born run: the seed above came from the WHOLE shared slice, whose dominant arm
+                // is the parent's — override with the stored arm seed so this box commits to ITS arm. The
+                // per-instance SDF split (observe_slice) then feeds it only the arm's points; the parent's
+                // arm falls to residual. Consumed once here.
+                if (const auto fit = birth_full_seeds_.find(inst.node_id); fit != birth_full_seeds_.end())
+                {
+                    const RunSeed& fs = fit->second;
+                    s0.cx = fs.cx; s0.cy = fs.cy; s0.yaw = fs.yaw; s0.L = std::max(0.10f, fs.L);
+                    birth_full_seeds_.erase(fit);
                 }
             }
         }
@@ -447,6 +582,8 @@ float CabinetFitter::run_inference(CabinetInstance& inst, const CabinetObservati
         p.wall_precision          = cfg_.wall_precision;
         p.wall_reach_m            = cfg_.wall_reach_m;
         p.wall_parallel_precision = cfg_.wall_parallel_precision;
+        p.room_axis_precision     = cfg_.room_axis_precision;
+        p.room_axis_capture_rad   = cfg_.room_axis_capture_rad;
         p.extent_precision        = cfg_.extent_precision;
         p.base_tier = {cfg_.base_depth_m, cfg_.base_depth_std, cfg_.base_z0_m, cfg_.base_z0_std,
                        cfg_.base_z1_m,    cfg_.base_z1_std};
@@ -454,13 +591,26 @@ float CabinetFitter::run_inference(CabinetInstance& inst, const CabinetObservati
                        cfg_.wall_z1_m,    cfg_.wall_z1_std};
         inst.ai2_belief = CabinetBelief(s0, p);
         inst.ai2_belief.set_room_interior(room_interior_);   // for the 180° C2v yaw fold
+
+        // Seed the DISCRETE tier at its MAP given the birth cloud's vertical band. The seed z-band
+        // (s0.z0,z1) already comes from the cloud (seed_from_points, 2%/98% z), so pick whichever tier
+        // prior it lies closer to. A wall unit's carcass sits at z≈1.4–2.1; born as Base (the default),
+        // its Base carcass prior (z0_mean=0) then drags z0 to the FLOOR faster than resolve_tier climbs
+        // back — the "upper cabinet on the floor" symptom. This is a MAP over the discrete mode from the
+        // evidence, exactly what resolve_tier does per-frame; here we just start it in the right mode.
+        {
+            const float d_base = std::abs(s0.z0 - p.base_tier.z0_mean) + std::abs(s0.z1 - p.base_tier.z1_mean);
+            const float d_wall = std::abs(s0.z0 - p.wall_tier.z0_mean) + std::abs(s0.z1 - p.wall_tier.z1_mean);
+            if (d_wall < d_base)
+                inst.ai2_belief.set_tier(CabinetTier::Wall);
+        }
         inst.ai2_initialized = true;
     }
 
     if (observation.has_fresh_data)
     {
         rc::voxel_bank::ingest(inst, observation.candidate_pts, observation.residual_pts, cfg_);   // keep the viewer's voxel bank fed
-        inst.last_residual_pts = observation.residual_pts;   // model-unexplained points for the viewer layer
+        inst.last_residual_pts = observation.residual_pts;   // model-unexplained points for the viewer / residual-birth
     }
 
     const auto now = std::chrono::steady_clock::now();
@@ -546,10 +696,28 @@ float CabinetFitter::run_inference(CabinetInstance& inst, const CabinetObservati
         frame.R.assign(frame.points.size(), R);
         if (have_cam)
             frame.cam_origin = cam_origin_room;
-        // The nearest room wall for the flush factor — the term that makes the never-observed back
-        // face (and hence the depth) identifiable. Recomputed each frame from the CURRENT estimate so
-        // a run that slides along an L-corner picks up the wall it is actually against.
-        frame.wall = nearest_wall(Eigen::Vector2f(inst.ai2_belief.state().cx, inst.ai2_belief.state().cy));
+        // The room wall for the flush factor — the term that makes the never-observed back face (and
+        // hence the depth) identifiable. PERSISTENT commitment: choose the wall ONCE (a cabinet run does
+        // not migrate between walls) and reuse it every frame. The old per-frame nearest-wall argmin
+        // flip-flopped between two walls as a tilted/overgrown run's back face drifted near a corner —
+        // positive feedback that produced the oblique-drift + impossible-depth failures. A free-standing
+        // run still commits to its nearest wall, but its flush weight stays ~0 (gap ≫ reach), so the
+        // choice is inert. The back centre remains the flush reference within the committed wall.
+        const Eigen::Vector2f back_c = inst.ai2_belief.state().back_centre();
+        // Commit only AFTER the fit has settled: during the noisy birth phase yaw/d (hence back_centre)
+        // are not yet converged, so an early commit could lock onto the wrong wall. Until then use the
+        // per-frame nearest wall (the drift-feedback it can cause needs many frames and is cut off once
+        // we commit). `frames_converged` counts consecutive small-Δ frames.
+        constexpr int kWallCommitFrames = 5;
+        if (inst.committed_wall_seg_id < 0 and inst.frames_converged >= kWallCommitFrames)
+            inst.committed_wall_seg_id = nearest_wall(back_c).seg_id;
+        frame.wall = (inst.committed_wall_seg_id >= 0) ? wall_ref_by_seg_id(inst.committed_wall_seg_id, back_c)
+                                                       : nearest_wall(back_c);
+        if (not frame.wall.ok)                        // committed wall gone (polygon changed) → re-commit
+        {
+            frame.wall = nearest_wall(back_c);
+            inst.committed_wall_seg_id = frame.wall.seg_id;
+        }
         frame.chain_cov_xx  = inst.chain_cov_xx + range_lat_var;   // range adds to the SHARED position error (cap)
         frame.chain_cov_yy  = inst.chain_cov_yy + range_lat_var;
         // Obliquity yaw cap: at an edge-on (grazing) view the tabletop cloud is ~1-D along the near edge, so yaw
@@ -704,7 +872,7 @@ float CabinetFitter::run_inference(CabinetInstance& inst, const CabinetObservati
     compute_object_observation(inst);
 
     if (should_log(inst))
-        std::print("[{}] AI2 npts={} R={:.4f} dotd={:.2f} trunc={:.2f}{} tier={} | FE={:.2f} base={:.2f} surprise={:.2f} | cx={:.3f} cy={:.3f} ψ={:.3f} L={:.3f} d={:.3f} z=[{:.3f},{:.3f}] | σ(L,d,z1)mm=({:.0f},{:.0f},{:.0f}) | wall gap={:.3f} λ={:.0f} span={:.2f}/{} | lidar {}/{} bp{} resid={:.3f}m div={}\n",
+        std::print("[{}] AI2 npts={} R={:.4f} dotd={:.2f} trunc={:.2f}{} tier={} | FE={:.2f} base={:.2f} surprise={:.2f} | cx={:.3f} cy={:.3f} ψ={:.3f} L={:.3f} d={:.3f} z=[{:.3f},{:.3f}] | σ(L,d,z1)mm=({:.0f},{:.0f},{:.0f}) | wall gap={:.3f} λ={:.0f} axis={:.2f}° span={:.2f}/{} | lidar {}/{} bp{} resid={:.3f}m div={}\n",
                    inst.node_name, npts, R, inst.last_motion_dotd, inst.last_trunc_frac, gated ? " GATED" : "",
                    inst.ai2_belief.tier() == CabinetTier::Base ? "base" : "wall",
                    energy, inst.fe_baseline, inst.fe_surprise,
@@ -713,9 +881,20 @@ float CabinetFitter::run_inference(CabinetInstance& inst, const CabinetObservati
                    1000.f * std::sqrt(std::max(0.f, inst.ai2_belief.covariance()(4, 4))),
                    1000.f * std::sqrt(std::max(0.f, inst.ai2_belief.covariance()(6, 6))),
                    inst.ai2_belief.last_wall_gap(), inst.ai2_belief.last_wall_lambda(),
+                   57.2958f * inst.ai2_belief.last_axis_resid(),
                    inst.ai2_belief.last_span_obs(), inst.ai2_belief.last_span_pts(),
                    inst.dbg_lidar_rays, inst.dbg_lidar_raw, inst.dbg_lidar_bpearl_rays, inst.dbg_lidar_resid_m,
                    inst.frames_diverged);
+
+    // Wall-segment domain diagnostic: is the corner clamp BINDING? seg=1 ⇒ live; corners t=[tlo,thi] are the
+    // wall endpoints projected onto the run axis; shi = observed +u span end (grows PAST thi ⇒ should censor);
+    // qhi = +u retract residual (box end past the corner ⇒ should pull back). slices = masks fed to THIS run.
+    if (should_log(inst))
+        std::print("[{}] SEG seg={} t=[{:.2f},{:.2f}] shi={:.2f} qhi={:.2f} | slices_fed={}\n",
+                   inst.node_name, inst.ai2_belief.last_seg_active(),
+                   inst.ai2_belief.last_seg_tlo(), inst.ai2_belief.last_seg_thi(),
+                   inst.ai2_belief.last_seg_shi(), inst.ai2_belief.last_seg_qhi(),
+                   static_cast<int>(inst.assigned_mask_idxs.size()));
 
     // EvidenceMonitor snapshot: persist this frame's fit evidence (else it dies with the local observation).
     inst.dbg_cand_pts  = static_cast<int>(observation.candidate_pts.size());
@@ -737,13 +916,17 @@ void CabinetFitter::log_ai2_csv(const CabinetInstance& inst, int npts, float R, 
     {
         ai2_csv_.open(cfg_.ai2_csv_path, std::ios::out | std::ios::trunc);
         if (not ai2_csv_.is_open()) { cfg_.ai2_csv_path.clear(); return; }
+        // Header MUST match the body row below field-for-field. It had drifted: the state block still
+        // named the old 6-DOF layout (cx,cy,H,w,h,yaw) while the body writes the 7-DOF state
+        // (cx,cy,yaw,L,d,z0,z1), and several stale moment_/completeness columns were never emitted — so
+        // every column past cy parsed under the wrong name. Rewritten to the current body exactly.
         ai2_csv_ << "cycle,node,pkt_fid,pkt_ts,npts,gated,energy,fe_baseline,fe_surprise,R,motion_var,depth_var,motion_dotd,trunc_frac,range,"
-                 << "cx,cy,H,w,h,yaw,std_cx,std_cy,std_H,std_w,std_h,std_yaw,"
-                 << "std_yaw_within,flip_ev,p_alt,lidar_rays,lidar_raw,lidar_bpearl,lidar_resid_m,lidar_meanz,lidar_topz,lidar_floorz,lidar_cov_ang,"
-                 << "dyaw_points,dyaw_moment,dyaw_flip,obliquity_cos,completeness,moment_aniso,moment_r_yaw,"
-                 << "mom_major,mom_minor,mom_phi,mom_pts,"   // RAW footprint statistic (basin diagnosis)   // rogue-mask diag
+                 << "cx,cy,yaw,L,d,z0,z1,std_cx,std_cy,std_yaw,std_L,std_d,std_z0,std_z1,"
+                 << "tier_ev,p_alt,lidar_rays,lidar_raw,lidar_bpearl,lidar_resid_m,lidar_meanz,lidar_topz,lidar_floorz,lidar_cov_ang,"
+                 << "dyaw_points,obliquity_cos,wall_gap,wall_lambda,span_obs,span_pts,span_lidar_rays,"
                  << "ex_L,ex_p,ex_locc,ex_lfree,ex_lfree_eff,ex_ln,ex_socc,ex_sfree,ex_sfree_eff,ex_sndet,ex_streak,"
-                 << "ex_pdetect,ex_central,ex_verify,ex_wantsverify\n";   // existence-removal + verification-gate diag
+                 << "ex_pdetect,ex_central,ex_verify,ex_wantsverify,"
+                 << "axis_resid,cand_pts,resid_pts\n";   // + Manhattan-yaw residual (rad) & candidate/residual split (merge diag)
     }
     const auto& s = inst.ai2_belief.state();
     const auto& S = inst.ai2_belief.covariance();
@@ -771,7 +954,8 @@ void CabinetFitter::log_ai2_csv(const CabinetInstance& inst, int npts, float R, 
              << inst.dbg_ex_sil_occ << ',' << inst.dbg_ex_sil_free << ',' << inst.dbg_ex_sil_free_eff << ',' << inst.dbg_ex_sil_ndet << ','
              << inst.existence_remove_streak << ','
              << inst.dbg_ex_pdetect << ',' << inst.dbg_ex_central << ','
-             << inst.verify_surprise << ',' << (inst.wants_verification ? 1 : 0) << '\n';   // existence-removal + verification-gate diag
+             << inst.verify_surprise << ',' << (inst.wants_verification ? 1 : 0) << ','
+             << inst.ai2_belief.last_axis_resid() << ',' << inst.dbg_cand_pts << ',' << inst.dbg_resid_pts << '\n';   // + axis residual (rad) & candidate/residual split (merge diag)
     ai2_csv_.flush();
 }
 

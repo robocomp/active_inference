@@ -41,6 +41,18 @@ struct CabinetInstance
     CabinetBelief ai2_belief;
     bool        ai2_initialized = false;
 
+    // Born from a residual cluster (SpecificWorker::birth_from_residual), not a mask detection. Such a run
+    // shares its mask slice with the parent it split off from, so the tracker's single-assignment cannot
+    // feed it — run_instance_tracker gives it a supplementary footprint-claim on overlapping slices.
+    bool        residual_born = false;
+
+    // The room wall this run is built against, fixed ONCE at birth (nearest wall to the birth centre) and
+    // never recomputed — a per-cycle recompute flips walls as a transiently-tilted box drifts. The wall-split
+    // (observe_slice) measures each point's perpendicular distance from THIS wall's line; a point beyond a
+    // depth is the neighbouring L-arm. −1 ⇒ island / no wall within reach ⇒ no split. West-arm run keys on
+    // the west wall, back-arm run on the back wall, so each keeps its own leg of an L-mask.
+    int         wall_seg_id = -1;
+
     // ── Per-frame mask corruption / range (from the selected mask slice) ──────────────────────────
     // motion_var inflates the observation precision R (downweight); trunc_frac gates the update (truncated →
     // biased mask); dotd is the motion-corruption speed, kept for diagnostics (see MASK_MOTION_CORRUPTION.md).
@@ -73,6 +85,11 @@ struct CabinetInstance
     // ── Convergence / association bookkeeping ─────────────────────────────────────────────────────
     int  matched_frames        = 0;   // frames with fresh sensing data
     int  frames_converged      = 0;   // consecutive frames with |Δstate| < state_eps
+    // Persistent wall commitment: the room-wall this run is anchored to, chosen ONCE and reused every frame
+    // (a run does not migrate between walls). Replaces the per-frame nearest-wall argmin whose choice
+    // flip-flops as the fit drifts near a corner (positive feedback → oblique drift + impossible depth).
+    // -1 = not yet committed (free-standing runs commit to their nearest wall; the flush weight stays ~0).
+    int  committed_wall_seg_id = -1;
     int  last_masks_frame_seen = -1;  // last masks packet frame consumed
     std::uint64_t last_mask_timestamp_ms = 0;  // capture stamp of the last consumed mask (chain-cov pinning)
     // Wall-clock (agent's own steady clock) of the last belief touch — measured on EVERY inference cycle, not

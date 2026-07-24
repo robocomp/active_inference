@@ -88,6 +88,18 @@ inline std::vector<Eigen::Vector2f> clip_poly(std::vector<Eigen::Vector2f> subj,
     return subj;
 }
 
+// Is the room-frame point p inside the run's oriented footprint, expanded by `margin` on every side?
+// Used to (a) exclude residual points that already sit on/near a believed run, and (b) let a
+// residual-born run claim the shared mask slice's points that fall on ITS arm.
+inline bool point_in_footprint(const rc::CabinetState& s, const Eigen::Vector2f& p, float margin = 0.0f)
+{
+    const float c = std::cos(s.yaw), sn = std::sin(s.yaw);
+    const Eigen::Vector2f d(p.x() - s.cx, p.y() - s.cy);
+    const float along = d.x() * c + d.y() * sn;      // along the run axis
+    const float lat   = -d.x() * sn + d.y() * c;     // across it
+    return std::abs(along) <= 0.5f * s.L + margin and std::abs(lat) <= 0.5f * s.d + margin;
+}
+
 // Overlap area as a fraction of the SMALLER footprint (1.0 = one cabinet fully inside the other).
 inline float footprint_overlap_ratio(const rc::CabinetState& a, const rc::CabinetState& b)
 {

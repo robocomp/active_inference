@@ -8,12 +8,15 @@
  */
 
 #include "specificworker.h"
-#include "cabinet_geometry.h"   // rc::geom::footprint_overlap_ratio
+#include "cabinet_geometry.h"        // rc::geom::footprint_overlap_ratio, point_in_footprint
+#include "cabinet_residual_birth.h"  // rc::find_residual_birth (residual-cluster → new-run seed)
+#include "cabinet_lshape_split.h"    // rc::lshape_split (L-corner mask → two arms)
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <print>
+#include <format>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -96,6 +99,18 @@ void SpecificWorker::merge_overlapping_instances()
             if (removed.count(ids[j])) continue;
             const auto ia = insts.find(ids[i]), ib = insts.find(ids[j]);
             if (ia == insts.end() or ib == insts.end()) continue;
+
+            // MERGE NEEDS YAW EVIDENCE ON BOTH SIDES. The collinear test asserts "these two runs share an
+            // axis"; that claim is only supportable once each run's axis has actually been MEASURED. A
+            // just-born fragment is not ai2_initialized, so sd() would hand the parallel gate an
+            // uninformative yaw std (1.0 rad ≈ 57°) → n_sigma·s_yaw ≫ π/2 → the gate can NEVER reject, and
+            // the two PERPENDICULAR arms of an L-corner (dyaw≈90°) get fused into one tilted, oscillating
+            // run every cycle (then the dropped arm re-births → endless birth→merge churn). Requiring both
+            // instances fit before they are merge-eligible lets the split's two arms persist as separate
+            // runs and re-associate to their own tracks next cycle. This is evidence-gating, not a threshold:
+            // no measured axis ⇒ no support for "same axis" ⇒ not mergeable yet.
+            if (not ia->second.ai2_initialized or not ib->second.ai2_initialized) continue;
+
             const auto& sa = ia->second.model.state();
             const auto& sb = ib->second.model.state();
 
@@ -155,6 +170,7 @@ void SpecificWorker::run_instance_tracker()
     tp.death_frames     = cfg_.tracker_death_frames;
     tp.birth_min_sep_m  = cfg_.tracker_birth_min_sep_m;
     tp.multi_det_per_track = true;   // fuse multiple ZED slices of one cabinet (one belief update per slice)
+    tp.z_gate_m         = cfg_.tracker_z_gate_m;   // keep WALL-unit masks (z≈1.7) off BASE tracks (z≈0.35)
     tracker_.set_params(tp);
 
     // Tracks ← live instances: centre from the fit, XY cov from the belief's position covariance Σ.
@@ -166,6 +182,7 @@ void SpecificWorker::run_instance_tracker()
         t.id = id;
         const auto& s = inst.model.state();
         t.xy = {s.cx, s.cy};
+        t.z  = s.zc();                    // box-centre height → the z_gate keeps tiers separate
         if (inst.ai2_initialized)
         {
             // Gate on the belief's position covariance (+ localization chain) so association uses the
@@ -202,14 +219,26 @@ void SpecificWorker::run_instance_tracker()
         for (int i = 0; i < static_cast<int>(pkt.slices.size()); ++i)
         {
             const auto& sl = pkt.slices[i];
-            if (sl.label != "cabinet" or sl.support_end <= sl.support_begin)
+            // COUNTERTOP AS RUN EVIDENCE. The 'counter' mask is the base run's TOP FACE seen from above:
+            // the highest-completeness observation of its along-axis span + axis (spans the whole run, far
+            // less occluded than the carcass front) and the ONLY channel that sees depth d directly (front
+            // edge → wall). It is a deterministic function of the base run (a slab at z1), NOT its own
+            // object, so it REFINES a base run and never BIRTHS one (birthable=false). It rides the normal
+            // association: the z_gate (|0.8−base_zc|≈0.4 < ZGateM) binds it to the base run below and keeps
+            // it off the upper tier (|0.8−1.7|>gate); observe_slice then feeds its points to the belief,
+            // where they land on the top face (SDF≈0 → candidate) and drive accumulate_extent's full span.
+            const bool is_cabinet = sl.label == "cabinet";
+            const bool is_counter = cfg_.counter_evidence_enabled
+                                    and (sl.label == "counter" or sl.label == "countertop");
+            if ((not is_cabinet and not is_counter) or sl.support_end <= sl.support_begin)
                 continue;
             if (sl.depth_var > 0.0f)   // RICOH is BEARING-ONLY: never births/associates/fits — the tracker sees
                 continue;              // ZED masks only. Ricoh drives the attention path (process_ricoh_bearings).
             rc::DetectionView dv;
             dv.xy = {sl.centroid.x(), sl.centroid.y()};
+            dv.z  = sl.centroid.z();   // slice height → the z_gate keeps WALL masks off BASE tracks
             dv.slice_index = i;
-            dv.birthable = true;       // ZED only reaches here → always birthable
+            dv.birthable = is_cabinet; // a countertop refines a base run; only a 'cabinet' mask births one
             // FUSED BIRTH: raise this detection's per-frame birth evidence by the residual SURPRISE MASS under it
             // (independent geometric corroboration). Saturating m/(m+ref) ∈ [0,1) → a real, unexplained-occupancy
             // detection matures in ~1-2 frames; a phantom (m≈0 → evidence 1.0) still serves the full debounce.
@@ -256,6 +285,18 @@ void SpecificWorker::run_instance_tracker()
                        t.id, t.xy.x(), t.xy.y(), t.has_cov);
         for (const auto& d : dets)
             std::print("[tracker]   det slice={} xy=({:.2f},{:.2f})\n", d.slice_index, d.xy.x(), d.xy.y());
+        // FULL slice dump — EVERY mask this cycle (all labels), so we can see what YOLO-sem actually produced
+        // vs what became a cabinet detection: label, confidence, z-band (base ~0–0.9 vs wall ~1.4–2.0), support.
+        for (int i = 0; i < static_cast<int>(pkt.slices.size()); ++i)
+        {
+            const auto& s = pkt.slices[i];
+            std::print("[slice {}] '{}' conf={:.2f} depth={} c=({:.2f},{:.2f},{:.2f}) z=[{:.2f},{:.2f}] "
+                       "xy=[{:.2f},{:.2f}]x[{:.2f},{:.2f}] support={}\n",
+                       i, s.label, s.confidence, s.has_depth ? "Y" : "N",
+                       s.centroid.x(), s.centroid.y(), s.centroid.z(), s.bbox_min.z(), s.bbox_max.z(),
+                       s.bbox_min.x(), s.bbox_max.x(), s.bbox_min.y(), s.bbox_max.y(),
+                       s.support_end - s.support_begin);
+        }
     }
 
     // DEATH: a cabinet is rigid, persistent furniture, so a long occlusion (no mask for many frames) is NOT
@@ -272,6 +313,38 @@ void SpecificWorker::run_instance_tracker()
                 it->second.assigned_mask_idxs.push_back(dets[d].slice_index);
         }
 
+    // FOOTPRINT CLAIM (residual-born runs only): a run split off from a corner mask shares that mask's
+    // slice with its parent, so the single-assignment above never feeds it. Give each residual-born
+    // instance any cabinet slice whose support points substantially fall on ITS footprint. observe_slice
+    // then re-splits the shared cloud per-model, so parent and child each keep their own arm (they are
+    // perpendicular, so the collinear-merge guard never fuses them). Scoped to residual_born instances,
+    // so the established cabinet_1/2 assignment is untouched.
+    if (cfg_.residual_birth_enabled)
+        for (auto& [id, inst] : fitter_->instances())
+        {
+            if (not inst.residual_born) continue;
+            const auto& st = inst.model.state();
+            for (int d = 0; d < static_cast<int>(dets.size()); ++d)
+            {
+                const int si = dets[d].slice_index;
+                if (std::find(inst.assigned_mask_idxs.begin(), inst.assigned_mask_idxs.end(), si)
+                    != inst.assigned_mask_idxs.end())
+                    continue;   // already assigned by the tracker
+                const auto& sl = pkt.slices[si];
+                const std::size_t b = std::min(sl.support_begin, pkt.support_points.size());
+                const std::size_t e = std::min(sl.support_end,   pkt.support_points.size());
+                int inside = 0, total = 0;
+                for (std::size_t k = b; k < e; k += 4)   // subsample: a fraction estimate needs no full scan
+                {
+                    ++total;
+                    const Eigen::Vector2f q(pkt.support_points[k].x(), pkt.support_points[k].y());
+                    if (rc::geom::point_in_footprint(st, q, cfg_.residual_claim_margin_m)) ++inside;
+                }
+                if (total > 0 and static_cast<float>(inside) / static_cast<float>(total) >= cfg_.residual_claim_frac)
+                    inst.assigned_mask_idxs.push_back(si);   // dbg_n_zed_slices recomputed at the tracker tail
+            }
+        }
+
     // BIRTH: spawn an instance from each promoted (persistently-unexplained) detection, seeding the
     // fitter with the detection XY so the model starts AT the cabinet (not the 0,0 RT-read default).
     for (const int d : res.births)
@@ -279,7 +352,7 @@ void SpecificWorker::run_instance_tracker()
         const Eigen::Vector3f& c = pkt.slices[dets[d].slice_index].centroid;
         const auto new_id = scene_graph_->create_instance_from_detection(c, room_node_id_);
         if (new_id != 0)
-            fitter_->note_birth(new_id, Eigen::Vector2f(c.x(), c.y()));
+            fitter_->note_birth(new_id, c);   // full XYZ: z seeds the tier so a WALL unit is born high
     }
 
     // Per-instance ZED-slice count for the EvidenceMonitor. Every assigned slice is a ZED detection now
@@ -288,6 +361,166 @@ void SpecificWorker::run_instance_tracker()
         inst.dbg_n_zed_slices = static_cast<int>(inst.assigned_mask_idxs.size());
 }
 
+
+// ─── L-corner mask split ────────────────────────────────────────────────────────────────────────
+
+// A cabinet RUN cannot be L-shaped, so one 'cabinet' mask that wraps a room corner is TWO runs. Split each
+// such mask into its two perpendicular room-axis arms IN PLACE: partition its support points (cabinet_lshape_
+// split.h), reorder them so each arm is contiguous, and replace the one slice with two single-arm sub-slices.
+// The tracker then sees two clean detections and the ordinary single-run path births/fits each — no per-frame
+// per-instance corner arbitration. Runs after refresh(), before the tracker, on the mutable packet.
+void SpecificWorker::split_lshaped_cabinet_masks()
+{
+    if (not cfg_.lshape_split_enabled or not mask_ingestor_)
+        return;
+    auto& pkt = mask_ingestor_->mutable_packet();
+    if (not pkt.valid or pkt.slices.empty())
+        return;
+
+    rc::LShapeParams lp;
+    lp.min_arm_pts     = cfg_.lshape_min_arm_pts;
+    lp.bin_m           = cfg_.lshape_bin_m;
+    lp.arm_halfwidth_m = cfg_.lshape_arm_halfwidth_m;
+
+    std::vector<rc::MaskIngestor::MaskSlice> out;
+    out.reserve(pkt.slices.size() + 2);
+    bool any_split = false;
+
+    // Recompute a sub-slice's centroid + z-band from its (reordered, contiguous) support range.
+    const auto sub_slice = [&](const rc::MaskIngestor::MaskSlice& parent, std::size_t sb, std::size_t se)
+    {
+        rc::MaskIngestor::MaskSlice s = parent;     // inherit label/conf/motion/etc.
+        s.support_begin = sb; s.support_end = se;
+        Eigen::Vector3f sum = Eigen::Vector3f::Zero();
+        float zmin = 1e9f, zmax = -1e9f;
+        for (std::size_t i = sb; i < se; ++i)
+        {
+            sum += pkt.support_points[i];
+            zmin = std::min(zmin, pkt.support_points[i].z());
+            zmax = std::max(zmax, pkt.support_points[i].z());
+        }
+        const float n = static_cast<float>(std::max<std::size_t>(1, se - sb));
+        s.centroid = sum / n;
+        s.bbox_min.z() = zmin; s.bbox_max.z() = zmax;
+        return s;
+    };
+
+    for (const auto& s : pkt.slices)
+    {
+        // 'counter' masks split too: a countertop that wraps the U spans multiple runs and must decompose
+        // per-arm just like the carcass mask (a straight counter yields one arm ⇒ unchanged).
+        const bool label_ok = s.label == "cabinet"
+                              or (cfg_.counter_evidence_enabled and (s.label == "counter" or s.label == "countertop"));
+        const bool splittable = label_ok and s.has_depth and s.support_end > s.support_begin;
+        if (not splittable) { out.push_back(s); continue; }
+
+        const auto r = rc::lshape_split(pkt.support_points, s.support_begin, s.support_end, lp);
+        if (not r.is_split) { out.push_back(s); continue; }
+
+        // Reorder this slice's support points arm-by-arm so each arm's sub-slice is a contiguous range,
+        // then emit one sub-slice per arm (2 for an L, 3 for a U, …). Points that fell to a dropped tiny
+        // arm are left past the last bound and simply go unreferenced (no sub-slice covers them).
+        const std::size_t b = s.support_begin, e = s.support_end;
+        std::vector<Eigen::Vector3f> reordered;
+        reordered.reserve(e - b);
+        std::vector<std::size_t> bounds{b};
+        for (const auto& arm : r.arms)
+        {
+            for (const int idx : arm.idx) reordered.push_back(pkt.support_points[idx]);
+            bounds.push_back(b + reordered.size());
+        }
+        std::copy(reordered.begin(), reordered.end(), pkt.support_points.begin() + static_cast<std::ptrdiff_t>(b));
+
+        std::string dbg;
+        for (std::size_t k = 0; k < r.arms.size(); ++k)
+        {
+            out.push_back(sub_slice(s, bounds[k], bounds[k + 1]));
+            dbg += std::format(" | {}={} c=({:.2f},{:.2f})",
+                               r.arms[k].axis == 0 ? "y-run" : "x-run",
+                               r.arms[k].idx.size(), r.arms[k].c.x(), r.arms[k].c.y());
+        }
+        any_split = true;
+        std::print("cabinet_concept: [split] '{}' mask ({} pts) → {} arms{}\n",
+                   s.label, e - b, r.arms.size(), dbg);
+    }
+    if (any_split)
+        pkt.slices = std::move(out);
+}
+
+// ─── Residual-driven birth ────────────────────────────────────────────────────────────────────────
+
+// Cluster the pooled model-unexplained (residual) points across all instances; a coherent, elongated,
+// separated arm that no believed run covers (e.g. the perpendicular arm of an L-shaped corner mask)
+// matures over residual_birth_frames cycles into its own axis-aligned "cabinet_N", pre-seeded from the
+// arm so it commits to it (not the shared slice's dominant/parent arm). Runs AFTER the fits, when
+// last_residual_pts is current. The clustering/seed/separation logic is pure (cabinet_residual_birth.h).
+void SpecificWorker::birth_from_residual()
+{
+    if (not cfg_.residual_birth_enabled)
+        return;
+    auto& insts = fitter_->instances();
+    if (insts.empty())
+    {
+        residual_cand_active_ = false; residual_cand_hits_ = 0;
+        return;
+    }
+
+    // Pool residuals + snapshot the current footprints (to exclude points already on a believed run).
+    std::vector<Eigen::Vector3f>  residual;
+    std::vector<rc::CabinetState> existing;
+    existing.reserve(insts.size());
+    for (auto& [id, inst] : insts)
+    {
+        existing.push_back(inst.model.state());
+        residual.insert(residual.end(), inst.last_residual_pts.begin(), inst.last_residual_pts.end());
+    }
+
+    rc::ResidualBirthParams p;
+    p.min_cluster_pts = cfg_.residual_birth_min_pts;
+    p.sep_m           = cfg_.residual_birth_sep_m;
+    const auto cand = rc::find_residual_birth(residual, existing, p);
+
+    // Per-cycle tuning diagnostic (throttled; always on a candidate/near-miss so a rejected arm is visible).
+    // Fields: residual pool (all instances) → free pool (off believed footprints) → top cluster mass;
+    // then the seed's length/elongation/separation and WHY it was rejected, plus the debounce progress.
+    static int rdbg = 0;
+    if (++rdbg % 30 == 0 or cand.ok or cand.pts > 0 /* a cluster formed */ or residual_cand_hits_ > 0)
+        std::print("[residual-birth] pool={} free={} topcluster={} (min={}) L={:.2f} aniso={:.2f} sep={:.2f} "
+                   "reason={} hits={}/{}\n",
+                   static_cast<int>(residual.size()), cand.pool, cand.pts, cfg_.residual_birth_min_pts,
+                   cand.seed.L, cand.seed.aniso, cand.nearest_sep, cand.reason,
+                   residual_cand_hits_, cfg_.residual_birth_frames);
+
+    if (not cand.ok)
+    {
+        if (--residual_cand_hits_ <= 0) { residual_cand_active_ = false; residual_cand_hits_ = 0; }
+        return;
+    }
+
+    // Debounce: the same arm must recur near the same place for residual_birth_frames cycles.
+    const Eigen::Vector2f xy(cand.seed.cx, cand.seed.cy);
+    if (residual_cand_active_ and (xy - residual_cand_xy_).norm() < cfg_.residual_birth_match_m)
+        ++residual_cand_hits_;
+    else
+    { residual_cand_active_ = true; residual_cand_hits_ = 1; }
+    residual_cand_xy_   = xy;
+    residual_cand_seed_ = cand.seed;
+    if (residual_cand_hits_ < cfg_.residual_birth_frames)
+        return;
+
+    // Mature → birth. The full seed (via note_birth_seed) makes ensure_instance/lazy-init commit the box
+    // to this arm; run_instance_tracker's footprint-claim then feeds it from the shared slice.
+    const Eigen::Vector3f c3(cand.seed.cx, cand.seed.cy, 0.5f * (cand.seed.z0 + cand.seed.z1));
+    const auto new_id = scene_graph_->create_instance_from_detection(c3, room_node_id_);
+    if (new_id != 0)
+    {
+        fitter_->note_birth_seed(new_id, cand.seed);
+        std::print("cabinet_concept: [residual-birth] new run id={} at ({:.2f},{:.2f}) yaw={:.1f}° L={:.2f} pts={}\n",
+                   new_id, cand.seed.cx, cand.seed.cy, cand.seed.yaw * 57.2958f, cand.seed.L, cand.pts);
+        ++ev_g_.births; ++ev_g_.births_cum;
+    }
+    residual_cand_active_ = false; residual_cand_hits_ = 0;
+}
 
 // ─── Ricoh 360 peripheral attention (bearing-only) ───────────────────────────────────────────────
 

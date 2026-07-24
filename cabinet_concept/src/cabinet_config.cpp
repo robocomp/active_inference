@@ -91,12 +91,20 @@ CabinetConfig load_cabinet_config(const ConfigLoader& cfg)
     out.birth_fusion_radius_m    = getf("Tracker.BirthFusionRadiusM",0.50f);
     out.tracker_death_frames     = geti("Tracker.DeathFrames",      300);
     out.tracker_birth_min_sep_m  = getf("Tracker.BirthMinSepM",     0.60f);
+    out.tracker_z_gate_m         = getf("Tracker.ZGateM",           0.60f);
     out.tracker_merge_overlap    = getf("Tracker.MergeOverlap",     0.05f);
     out.merge_n_sigma            = getf("Tracker.MergeNSigma",       3.0f);
     out.merge_gap_floor_m        = getf("Tracker.MergeGapFloorM",    0.30f);
     out.tracker_birth_width_m    = getf("Tracker.BirthWidthM",      1.0f);
     out.tracker_birth_depth_m    = getf("Tracker.BirthDepthM",      0.6f);
     out.tracker_birth_height_m   = getf("Tracker.BirthHeightM",     0.75f);
+    out.residual_birth_enabled   = getb("Tracker.ResidualBirthEnabled", true);
+    out.residual_birth_frames    = geti("Tracker.ResidualBirthFrames",  4);
+    out.residual_birth_match_m   = getf("Tracker.ResidualBirthMatchM",  0.40f);
+    out.residual_birth_min_pts   = geti("Tracker.ResidualBirthMinPts",  600);
+    out.residual_birth_sep_m     = getf("Tracker.ResidualBirthSepM",    0.60f);
+    out.residual_claim_frac      = getf("Tracker.ResidualClaimFrac",    0.15f);
+    out.residual_claim_margin_m  = getf("Tracker.ResidualClaimMarginM", 0.20f);
     out.ricoh_attention_conf     = getf("Tracker.RicohAttentionConf", 0.60f);
     out.ricoh_attention_angle_margin_rad = getf("Tracker.RicohAttentionAngleMargin", 0.05f);
     out.ricoh_attention_range_band_m     = getf("Tracker.RicohAttentionRangeBandM",  1.0f);
@@ -140,6 +148,14 @@ CabinetConfig load_cabinet_config(const ConfigLoader& cfg)
     out.wall_reach_m                  = getf("CabinetModel.WallReachM", 0.35f);
     out.wall_sigma_m                  = getf("CabinetModel.WallSigmaM", 0.02f);
     out.wall_parallel_precision       = getf("CabinetModel.WallParallelPrecision", 200.0f);
+    out.room_axis_precision           = getf("CabinetModel.RoomAxisPrecision", 300.0f);
+    out.room_axis_capture_rad         = getf("CabinetModel.RoomAxisCaptureRad", 0.0f);
+    out.seed_room_axis_snap           = getb("CabinetModel.SeedRoomAxisSnap", true);
+    out.counter_evidence_enabled      = getb("CabinetModel.CounterEvidence", true);
+    out.lshape_split_enabled          = getb("CabinetModel.LShapeSplitEnabled", true);
+    out.lshape_min_arm_pts            = geti("CabinetModel.LShapeMinArmPts", 500);
+    out.lshape_bin_m                  = getf("CabinetModel.LShapeBinM", 0.15f);
+    out.lshape_arm_halfwidth_m        = getf("CabinetModel.LShapeArmHalfwidthM", 0.45f);
     out.extent_precision              = getf("CabinetModel.ExtentPrecision", 800.0f);
     out.existence_lidar_absence       = getb("CabinetModel.ExistenceLidarAbsence", false);
 

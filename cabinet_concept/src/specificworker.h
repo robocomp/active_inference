@@ -123,6 +123,15 @@ private:
     // Physical-exclusion invariant: two cabinets cannot share space. Collapse any pair of instances whose
     // oriented footprints overlap beyond Tracker.MergeOverlap, keeping the more-observed one.
     void merge_overlapping_instances();
+    // Residual-driven birth: cluster the pooled model-unexplained points; a coherent, separated, elongated
+    // arm no believed run covers matures over residual_birth_frames cycles into its own axis-aligned
+    // "cabinet_N", pre-seeded from the arm. Called each cycle after the fits (residuals are current then).
+    void birth_from_residual();
+    // A cabinet RUN cannot be L-shaped: if one YOLO-sem 'cabinet' mask wraps a corner it is TWO runs. Split
+    // each such mask into its two perpendicular arms IN PLACE (mask packet), so the tracker sees two clean
+    // single-arm detections and the ordinary single-run machinery births/fits each. Called after refresh(),
+    // before the tracker. See cabinet_lshape_split.h.
+    void split_lshaped_cabinet_masks();
 
     // ── Presence protocol ────────────────────────────────────────────────────
     void waiting_enter();
@@ -191,6 +200,13 @@ private:
     int                  birth_surprise_log_ctr_ = 0;   // console-throttle counter
     long                 birth_surprise_cycle_ = 0;     // probe cycle index (advances only when the grid was read)
     std::vector<Eigen::Vector2f> last_cabinet_dets_xy_;   // this cycle's ZED "cabinet" detection centroids (room frame)
+
+    // Residual-birth debounce: a candidate arm must recur near the same place for residual_birth_frames
+    // cycles before it births (rejects a transient residual flicker). Holds the current candidate.
+    bool            residual_cand_active_ = false;
+    Eigen::Vector2f residual_cand_xy_     = Eigen::Vector2f::Zero();
+    rc::RunSeed     residual_cand_seed_{};
+    int             residual_cand_hits_   = 0;
     std::chrono::steady_clock::time_point last_monitor_tp_{};   // ~5 Hz throttle
     std::chrono::steady_clock::time_point last_compute_tp_{};   // compute-rate EMA
 

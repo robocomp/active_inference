@@ -216,6 +216,12 @@ void SpecificWorker::initialize()
             {
                 startup_affordance_sweep_done_ = true;
                 remove_stale_affordance_nodes();
+                // ALSO purge stale "cabinet*" box nodes now that the graph has fully SYNCED from peers.
+                // The initialize() sweep can run BEFORE those nodes arrive from the persistent DSR server,
+                // so a leftover from a crashed / SIGKILLed previous run would survive it. Safe here:
+                // on_operating_enter fires before the first compute(), so this run has created none of its
+                // own cabinets yet. Guarded (same flag) so a Degraded→Operating bounce never wipes live ones.
+                remove_owned_cabinet_nodes();
             }
         },
         .on_operating_loop = [this]()
@@ -322,6 +328,10 @@ void SpecificWorker::compute()
 
     const bool fresh_masks = mask_ingestor_->refresh();
 
+    // A cabinet run cannot be L-shaped: split any L-corner 'cabinet' mask into its two perpendicular arms
+    // (in place) BEFORE the tracker, so it births/fits two clean single-arm runs instead of one tilted box.
+    split_lshaped_cabinet_masks();
+
     // EvidenceMonitor per-cycle counters (cumulative *_cum fields persist across cycles). The producers below
     // (tracker / merge / removal) add to these; the snapshot is pushed at the end of the cycle.
     ev_g_.births = ev_g_.merges = ev_g_.removals = 0;
@@ -359,6 +369,10 @@ void SpecificWorker::compute()
             cabinet_nodes.push_back(n);
     for (const auto& node : cabinet_nodes)
         process_cabinet_node(node);
+
+    // Residual-driven birth: after the fits (residuals current), cluster the pooled unexplained points and
+    // mature a coherent unmodeled arm (e.g. an L-corner's perpendicular arm) into its own axis-aligned run.
+    birth_from_residual();
 
     // Ricoh 360 = peripheral attention: associate ricoh detections to cabinets BY DIRECTION (after the ZED fits,
     // so cabinet positions are current); an unassigned bearing becomes a "seek a ZED view here" attention target.
@@ -888,6 +902,11 @@ void SpecificWorker::modify_node_attrs_slot(std::uint64_t id,
 
 void SpecificWorker::del_node_slot(std::uint64_t id)
 {
+    // The del_node signal is connected BEFORE fitter_ is constructed, and initialize()'s startup
+    // stale-node sweep (remove_owned_cabinet_nodes) deletes leftover "cabinet_*" nodes — firing this slot
+    // while fitter_ is still null. Guard it (a leftover node has no live instance to notify anyway).
+    if (not fitter_)
+        return;
     // Notify affordance in case its own DSR node was deleted externally
     for (auto& [cabinet_id, inst] : fitter_->instances())
         if (inst.affordance.node_id() == id)
