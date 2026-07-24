@@ -50,6 +50,7 @@ struct Args
     double fps   = 30.0;
     int   secs   = 0;  // 0 = run until Ctrl-C
     bool  udp    = false;  // true => allow builtin transports (UDP+SHM)
+    bool  datasharing = false;  // true => opt into zero-copy SHM data-sharing loans
 };
 
 Args parse(int argc, char** argv)
@@ -65,6 +66,7 @@ Args parse(int argc, char** argv)
         else if (k == "--fps")    a.fps    = std::atof(next());
         else if (k == "--secs")   a.secs   = std::atoi(next());
         else if (k == "--udp")    a.udp    = true;
+        else if (k == "--datasharing") a.datasharing = true;
     }
     return a;
 }
@@ -77,6 +79,7 @@ int run_pub(const Args& a)
     cfg.topic_name = a.topic;
     cfg.history_depth = 8;
     cfg.shared_memory_only = !a.udp;
+    cfg.data_sharing = a.datasharing;
     if (!pub.init(cfg))
     {
         std::fprintf(stderr, "[pub] init failed\n");
@@ -147,6 +150,7 @@ int run_sub(const Args& a)
     cfg.topic_name = a.topic;
     cfg.history_depth = 8;
     cfg.shared_memory_only = !a.udp;
+    cfg.data_sharing = a.datasharing;
     if (!sub.init(cfg))
     {
         std::fprintf(stderr, "[sub] init failed\n");

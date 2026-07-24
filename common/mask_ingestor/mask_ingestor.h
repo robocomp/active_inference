@@ -109,8 +109,23 @@ public:
     // Re-read the "masks" node. Returns true only when a NEW frame was ingested.
     bool refresh();
 
+    // ── Producer-liveness probes (for a consumer's primary-input stream gate; see CONCEPT_AGENT_RECIPE.md) ──
+    // Wall-clock ms since the last NEW masks frame was ingested (mask_frame_id advanced), or -1 if none ever
+    // has. The producer's mask_frame_id is a monotonic PUBLISH counter that advances on every fresh camera
+    // frame even with zero masks, so a non-advancing id reliably means producer-dead/stalled (an empty scene
+    // never false-trips). Single-threaded (main-thread refresh + read), so no atomic.
+    [[nodiscard]] std::int64_t ms_since_last_frame() const noexcept;
+
+    // Graph-only readiness probe (usable from Waiting, before any frame): is the "masks" DSR node present and
+    // carrying a mask_frame_id? True ⇒ refresh() will start yielding frames once the producer publishes.
+    // `detail` (optional) receives a human-readable reason when false. Object-agnostic.
+    [[nodiscard]] bool stream_ready(std::string* detail = nullptr) const;
+
     // The most recently ingested packet (read-only).
     const MasksPacket& packet() const { return masks_packet_; }
+    // Mutable access for a consumer that post-processes the freshly-refreshed packet in place (e.g. splitting
+    // an L-shaped mask into two sub-slices). All packet() readers then see the modified packet this cycle.
+    MasksPacket& mutable_packet() { return masks_packet_; }
 
     // Nearest `label`-labelled slice to `query_centroid` (room frame). nullopt if none. The caller
     // builds the centroid from its model state, so this stays object-agnostic.
@@ -124,6 +139,7 @@ private:
     std::shared_ptr<DSR::DSRGraph> G_;
     MasksPacket                    masks_packet_;
     int                            last_masks_frame_seen_ = -1;
+    std::int64_t                   last_fresh_wall_ms_    = 0;   // wall-clock ms of the last NEW-frame ingest (0 = never)
 
     // Opt-in source→target frame transform (see enable_frame_transform).
     DSR::InnerEigenAPI* inner_eigen_       = nullptr;

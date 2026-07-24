@@ -7,13 +7,17 @@
  * and serves the nearest slice of a requested label. Frame-agnostic; the caller chooses room vs camera frame.
  */
 
+#include <optional>
 #include "mask_ingestor.h"
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <print>
 #include <sstream>
 #include <utility>
+
+#include <QDateTime>   // wall-clock ms source for the producer-liveness probes (kept out of the header)
 
 namespace rc {
 
@@ -46,82 +50,86 @@ bool MaskIngestor::refresh()
     }
 
     const auto& masks_node = masks_node_opt.value();
-    const auto& attrs = masks_node.attrs();
 
-    const auto find_attr = [&](const std::string& key) -> const DSR::Attribute*
-    {
-        const auto it = attrs.find(key);
-        return (it != attrs.end()) ? &it->second : nullptr;
-    };
+    // TYPE-ATTRIBUTED reads (CLAUDE.md): compile-checked against dsr_attr_name.h. Held in named optionals so
+    // the reference_wrapper payloads stay alive for the rest of the function (they reference masks_node, which
+    // is in scope throughout). The vec() helper gives the previous "attr ? ->float_vec() : empty" semantics.
+    static const std::vector<float> empty_flat;
+    using VecOpt = std::optional<std::reference_wrapper<const std::vector<float>>>;
+    const auto vref = [](const VecOpt& o) -> const std::vector<float>& { return o ? o->get() : empty_flat; };
 
-    const DSR::Attribute* frame_attr = find_attr("mask_frame_id");
-    const DSR::Attribute* ts_attr = find_attr("mask_timestamp_ms");   // optional (newer producers only)
-    const DSR::Attribute* count_attr = find_attr("mask_count");
-    const DSR::Attribute* labels_attr = find_attr("mask_labels");
-    const DSR::Attribute* label_ids_attr = find_attr("mask_label_ids");
-    const DSR::Attribute* confs_attr = find_attr("mask_confidences");
-    const DSR::Attribute* offsets_attr = find_attr("mask_support_offsets");
-    const DSR::Attribute* points_attr = find_attr("mask_support_points");
-    const DSR::Attribute* centroids_attr = find_attr("mask_centroids_xyz");
-    const DSR::Attribute* bbox_min_attr = find_attr("mask_bbox_min_xyz");
-    const DSR::Attribute* bbox_max_attr = find_attr("mask_bbox_max_xyz");
-    const DSR::Attribute* pixels_attr = find_attr("mask_pixels_xy");
-    const DSR::Attribute* pixel_offsets_attr = find_attr("mask_pixel_offsets");
-    // Ego-motion capture-corruption channel (optional; newer producers only) — see MASK_MOTION_CORRUPTION.md
-    const DSR::Attribute* motion_var_attr      = find_attr("mask_motion_var");
-    const DSR::Attribute* motion_bias_attr     = find_attr("mask_motion_bias");
-    const DSR::Attribute* motion_dotd_attr     = find_attr("mask_motion_dotd");
-    const DSR::Attribute* trunc_frac_attr      = find_attr("mask_trunc_frac");
-    const DSR::Attribute* centroid_radius_attr = find_attr("mask_centroid_radius");
-    const DSR::Attribute* range_attr           = find_attr("mask_range");
-    // RGB-360 bearing-only channel (optional; newer producers only) — see RICOH_360_PERIPHERAL_DETECTION.md
-    const DSR::Attribute* has_depth_attr       = find_attr("mask_has_depth");
-    const DSR::Attribute* azimuth_attr         = find_attr("mask_azimuth");
-    const DSR::Attribute* depth_var_attr       = find_attr("mask_depth_var");
-    const DSR::Attribute* cam_twist_attr       = find_attr("mask_cam_twist");
-    const DSR::Attribute* frame_dt_attr        = find_attr("mask_frame_dt_s");
+    // REQUIRED core attributes — all must be present or this is not a valid mask packet.
+    const auto frame_opt     = G_->get_attrib_by_name<mask_frame_id_att>(masks_node);
+    const auto count_opt     = G_->get_attrib_by_name<mask_count_att>(masks_node);
+    const VecOpt label_ids_opt = G_->get_attrib_by_name<mask_label_ids_att>(masks_node);
+    const VecOpt confs_opt     = G_->get_attrib_by_name<mask_confidences_att>(masks_node);
+    const VecOpt offsets_opt   = G_->get_attrib_by_name<mask_support_offsets_att>(masks_node);
+    const VecOpt points_opt    = G_->get_attrib_by_name<mask_support_points_att>(masks_node);
+    const VecOpt centroids_opt = G_->get_attrib_by_name<mask_centroids_xyz_att>(masks_node);
+    const VecOpt bbox_min_opt  = G_->get_attrib_by_name<mask_bbox_min_xyz_att>(masks_node);
+    const VecOpt bbox_max_opt  = G_->get_attrib_by_name<mask_bbox_max_xyz_att>(masks_node);
+    const auto labels_opt      = G_->get_attrib_by_name<mask_labels_att>(masks_node);   // ref_wrapper<const string>
 
-    if (frame_attr == nullptr || count_attr == nullptr || labels_attr == nullptr ||
-        label_ids_attr == nullptr || confs_attr == nullptr || offsets_attr == nullptr ||
-        points_attr == nullptr || centroids_attr == nullptr || bbox_min_attr == nullptr ||
-        bbox_max_attr == nullptr)
+    if (not frame_opt or not count_opt or not labels_opt or not label_ids_opt or not confs_opt
+        or not offsets_opt or not points_opt or not centroids_opt or not bbox_min_opt or not bbox_max_opt)
     {
         masks_packet_ = {};
         return false;
     }
 
-    const int frame_id = frame_attr->dec();
-    if (frame_id <= last_masks_frame_seen_)
-        return false;
+    const int frame_id = frame_opt.value();
+    if (frame_id == last_masks_frame_seen_)
+        return false;                          // same frame republished (producer frozen) — not a new ingest
+    if (frame_id < last_masks_frame_seen_)
+        // mask_frame_id is a per-PROCESS publish counter; a backward jump means the producer (voxelizer)
+        // RESTARTED and reset it. Adopt the new stream (fall through to ingest) — otherwise refresh() would
+        // reject every frame until the fresh counter climbs past the stale pre-restart value, silently
+        // starving ALL mask consumers after a producer restart.
+        std::println("[MaskIngestor] mask_frame_id {} < last-seen {} — producer restarted; adopting new stream",
+                     frame_id, last_masks_frame_seen_);
 
-    const int mask_count = std::max(0, count_attr->dec());
-    const auto& labels = labels_attr->str();
-    const auto& label_ids = label_ids_attr->float_vec();
-    const auto& confidences = confs_attr->float_vec();
-    const auto& offsets = offsets_attr->float_vec();
-    const auto& support_flat = points_attr->float_vec();
-    const auto& centroids_flat = centroids_attr->float_vec();
-    const auto& bbox_min_flat = bbox_min_attr->float_vec();
-    const auto& bbox_max_flat = bbox_max_attr->float_vec();
-    static const std::vector<float> empty_flat;
-    const auto& pixels_flat  = pixels_attr        ? pixels_attr->float_vec()        : empty_flat;
-    const auto& pixel_offsets = pixel_offsets_attr ? pixel_offsets_attr->float_vec() : empty_flat;
-    const auto& motion_var_v      = motion_var_attr      ? motion_var_attr->float_vec()      : empty_flat;
-    const auto& motion_bias_v     = motion_bias_attr     ? motion_bias_attr->float_vec()     : empty_flat;
-    const auto& motion_dotd_v     = motion_dotd_attr     ? motion_dotd_attr->float_vec()     : empty_flat;
-    const auto& trunc_frac_v      = trunc_frac_attr      ? trunc_frac_attr->float_vec()      : empty_flat;
-    const auto& centroid_radius_v = centroid_radius_attr ? centroid_radius_attr->float_vec() : empty_flat;
-    const auto& range_v           = range_attr           ? range_attr->float_vec()           : empty_flat;
-    const auto& has_depth_v       = has_depth_attr       ? has_depth_attr->float_vec()       : empty_flat;
-    const auto& azimuth_v         = azimuth_attr         ? azimuth_attr->float_vec()         : empty_flat;
-    const auto& depth_var_v       = depth_var_attr       ? depth_var_attr->float_vec()       : empty_flat;
+    // OPTIONAL attributes (newer-producer channels): timestamp, pixels, ego-motion corruption, RGB-360 bearing.
+    const auto   ts_opt          = G_->get_attrib_by_name<mask_timestamp_ms_att>(masks_node);   // uint64, optional
+    const VecOpt pixels_opt      = G_->get_attrib_by_name<mask_pixels_xy_att>(masks_node);
+    const VecOpt pixel_offs_opt  = G_->get_attrib_by_name<mask_pixel_offsets_att>(masks_node);
+    const VecOpt motion_var_opt  = G_->get_attrib_by_name<mask_motion_var_att>(masks_node);
+    const VecOpt motion_bias_opt = G_->get_attrib_by_name<mask_motion_bias_att>(masks_node);
+    const VecOpt motion_dotd_opt = G_->get_attrib_by_name<mask_motion_dotd_att>(masks_node);
+    const VecOpt trunc_frac_opt  = G_->get_attrib_by_name<mask_trunc_frac_att>(masks_node);
+    const VecOpt cent_rad_opt    = G_->get_attrib_by_name<mask_centroid_radius_att>(masks_node);
+    const VecOpt range_opt       = G_->get_attrib_by_name<mask_range_att>(masks_node);
+    const VecOpt has_depth_opt   = G_->get_attrib_by_name<mask_has_depth_att>(masks_node);
+    const VecOpt azimuth_opt     = G_->get_attrib_by_name<mask_azimuth_att>(masks_node);
+    const VecOpt depth_var_opt   = G_->get_attrib_by_name<mask_depth_var_att>(masks_node);
+    const auto   cam_twist_opt   = G_->get_attrib_by_name<mask_cam_twist_att>(masks_node);
+    const auto   frame_dt_opt    = G_->get_attrib_by_name<mask_frame_dt_s_att>(masks_node);
+
+    const int mask_count = std::max(0, count_opt.value());
+    const auto& labels = labels_opt.value().get();
+    const auto& label_ids = label_ids_opt.value().get();
+    const auto& confidences = confs_opt.value().get();
+    const auto& offsets = offsets_opt.value().get();
+    const auto& support_flat = points_opt.value().get();
+    const auto& centroids_flat = centroids_opt.value().get();
+    const auto& bbox_min_flat = bbox_min_opt.value().get();
+    const auto& bbox_max_flat = bbox_max_opt.value().get();
+    const auto& pixels_flat  = vref(pixels_opt);
+    const auto& pixel_offsets = vref(pixel_offs_opt);
+    const auto& motion_var_v      = vref(motion_var_opt);
+    const auto& motion_bias_v     = vref(motion_bias_opt);
+    const auto& motion_dotd_v     = vref(motion_dotd_opt);
+    const auto& trunc_frac_v      = vref(trunc_frac_opt);
+    const auto& centroid_radius_v = vref(cent_rad_opt);
+    const auto& range_v           = vref(range_opt);
+    const auto& has_depth_v       = vref(has_depth_opt);
+    const auto& azimuth_v         = vref(azimuth_opt);
+    const auto& depth_var_v       = vref(depth_var_opt);
 
     // Part B: with frame-transform enabled, source the camera-frame support array and transform it to
     // the target frame below; otherwise use the legacy room-frame array as-is.
-    const DSR::Attribute* points_cam_attr = find_attr("mask_support_points_cam");
-    const bool use_cam = transform_enabled_ and points_cam_attr != nullptr
-                         and not points_cam_attr->float_vec().empty();
-    const auto& source_flat = use_cam ? points_cam_attr->float_vec() : support_flat;
+    const VecOpt points_cam_opt = G_->get_attrib_by_name<mask_support_points_cam_att>(masks_node);
+    const bool use_cam = transform_enabled_ and points_cam_opt and not points_cam_opt->get().empty();
+    const auto& source_flat = use_cam ? points_cam_opt->get() : support_flat;
 
     const std::size_t support_count = source_flat.size() / 3;
     const std::size_t pixel_count = pixels_flat.size() / 2;
@@ -140,10 +148,10 @@ bool MaskIngestor::refresh()
     MasksPacket packet;
     packet.valid = true;
     packet.frame_id = frame_id;
-    packet.timestamp_ms = ts_attr ? ts_attr->uint64() : 0;   // 0 → consumer falls back to latest pose
-    if (cam_twist_attr and cam_twist_attr->float_vec().size() >= 6)
-        for (int k = 0; k < 6; ++k) packet.cam_twist[k] = cam_twist_attr->float_vec()[k];
-    packet.frame_dt_s = frame_dt_attr ? frame_dt_attr->fl() : 0.0f;
+    packet.timestamp_ms = ts_opt ? ts_opt.value() : 0;   // 0 → consumer falls back to latest pose
+    if (cam_twist_opt and cam_twist_opt->get().size() >= 6)
+        for (int k = 0; k < 6; ++k) packet.cam_twist[k] = cam_twist_opt->get()[k];
+    packet.frame_dt_s = frame_dt_opt ? frame_dt_opt.value() : 0.0f;
 
     // src→tgt transform (Part B): one matrix for the whole frame, pinned to the capture stamp. Built
     // element-wise to dodge the Eigen-alignment ABI trap. Identity fallback if the chain isn't ready
@@ -172,9 +180,9 @@ bool MaskIngestor::refresh()
     // RAW camera-frame support points (untransformed), when the producer dual-published them — 1-to-1
     // with support_points' indexing. Pose-independent; consumed by object-anchor z_o. Loaded regardless
     // of use_cam (which only governs the room/target-frame support_points path above).
-    if (points_cam_attr != nullptr and points_cam_attr->float_vec().size() == source_flat.size() and not use_cam)
+    if (points_cam_opt and points_cam_opt->get().size() == source_flat.size() and not use_cam)
     {
-        const auto& cam_flat = points_cam_attr->float_vec();
+        const auto& cam_flat = points_cam_opt->get();
         packet.support_points_cam.reserve(support_count);
         for (std::size_t i = 0; i < support_count; ++i)
             packet.support_points_cam.emplace_back(cam_flat[i*3], cam_flat[i*3+1], cam_flat[i*3+2]);
@@ -254,6 +262,28 @@ bool MaskIngestor::refresh()
 
     masks_packet_ = std::move(packet);
     last_masks_frame_seen_ = frame_id;
+    // Stamp liveness ONLY on the fresh-frame success path (wall clock, never the source stamp) — a producer
+    // republishing an old mask_frame_id must read as NOT live, which is exactly the stall we want to detect.
+    last_fresh_wall_ms_ = QDateTime::currentMSecsSinceEpoch();
+    return true;
+}
+
+// ─── Producer-liveness probes ──────────────────────────────────────────────────────────────────────
+
+std::int64_t MaskIngestor::ms_since_last_frame() const noexcept
+{
+    if (last_fresh_wall_ms_ == 0) return -1;   // nothing ever ingested
+    return QDateTime::currentMSecsSinceEpoch() - last_fresh_wall_ms_;
+}
+
+bool MaskIngestor::stream_ready(std::string* detail) const
+{
+    if (not G_) { if (detail) *detail = "no DSR graph"; return false; }
+    const auto n = G_->get_node("masks");
+    if (not n.has_value()) { if (detail) *detail = "no 'masks' node (voxelizer not up?)"; return false; }
+    if (not G_->get_attrib_by_name<mask_frame_id_att>(n.value()).has_value())
+    { if (detail) *detail = "'masks' node has no mask_frame_id"; return false; }
+    if (detail) *detail = "masks";
     return true;
 }
 

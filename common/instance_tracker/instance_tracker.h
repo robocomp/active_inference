@@ -66,6 +66,12 @@ struct TrackerParams
     // scale than the metric-fallback r² (no-cov pairs); when both kinds coexist in one frame the cov
     // pairs sort first — usually desirable (an established track wins), but be aware when enabling.
     bool  nll_cost = false;
+    // Optional VERTICAL separation gate (m). 0 (default) = disabled → purely 2-D association (bottle/
+    // chair/table unchanged). When > 0, a det↔track pair is infeasible if |det.z − track.z| exceeds it,
+    // and a detection stacked vertically above/below a track (beyond this) does NOT count as "on top of"
+    // it for the birth-separation test. cabinet_concept uses it so a WALL-unit mask (z≈1.7) and a BASE
+    // run (z≈0.35) sharing an XY footprint become DIFFERENT tracks instead of one flip-flopping instance.
+    float z_gate_m = 0.0f;
 };
 
 // One live instance the tracker reasons about (filled by the agent from its instances each cycle).
@@ -75,6 +81,7 @@ struct TrackView
     Eigen::Vector2f xy  = Eigen::Vector2f::Zero();   // current/predicted centre (room frame)
     Eigen::Matrix2f cov = Eigen::Matrix2f::Identity();
     bool            has_cov = false;                 // false → use the metric fallback gate
+    float           z   = 0.0f;                      // vertical coord for the optional z_gate (see TrackerParams)
     // Negative-information gate for DEATH: only accrue an unsupported "miss" when the object SHOULD be
     // visible (inside the camera frustum, not behind it) yet wasn't detected — that is real evidence it
     // was removed. Out-of-FoV absence is NOT evidence: with expected_visible=false the miss timer is
@@ -87,6 +94,7 @@ struct DetectionView
 {
     Eigen::Vector2f xy = Eigen::Vector2f::Zero();
     int             slice_index = -1;
+    float           z  = 0.0f;                       // vertical coord for the optional z_gate (see TrackerParams)
     // A detection may ASSOCIATE to (refine) an existing track regardless, but only a birthable one may
     // SPAWN a new instance. The agent sets this false for evidence it judges too weak to create an object on
     // its own this frame — e.g. a low-confidence or high-range-variance 360-RGB/LiDAR peripheral mask. Such a
@@ -129,6 +137,9 @@ public:
         for (int d = 0; d < static_cast<int>(dets.size()); ++d)
             for (int t = 0; t < static_cast<int>(tracks.size()); ++t)
             {
+                // Vertical separation gate: an upper-tier det never associates to a base-tier track.
+                if (params_.z_gate_m > 0.0f and std::abs(dets[d].z - tracks[t].z) > params_.z_gate_m)
+                    continue;
                 const Eigen::Vector2f e = dets[d].xy - tracks[t].xy;
                 float cost; bool ok;
                 if (tracks[t].has_cov)
@@ -189,10 +200,14 @@ public:
 
         // ── 4. BIRTH: unassigned detections, persisted across frames, far from tracks + each other ──
         std::vector<Candidate> next_cand;
-        const auto far_from_tracks = [&](const Eigen::Vector2f& xy)
+        const auto far_from_tracks = [&](const Eigen::Vector2f& xy, float z)
         {
             for (const auto& t : tracks)
+            {
+                // A track stacked far above/below (a different tier) does not block a birth here.
+                if (params_.z_gate_m > 0.0f and std::abs(t.z - z) > params_.z_gate_m) continue;
                 if ((t.xy - xy).norm() < params_.birth_min_sep_m) return false;
+            }
             return true;
         };
         for (int d = 0; d < static_cast<int>(dets.size()); ++d)
@@ -200,7 +215,7 @@ public:
             if (out.assignment[d] != -1) continue;            // explained by an existing instance
             if (not dets[d].birthable) continue;              // low-trust evidence may refine, never spawn
             const Eigen::Vector2f& xy = dets[d].xy;
-            if (not far_from_tracks(xy)) continue;            // sits on top of a track → not a new object
+            if (not far_from_tracks(xy, dets[d].z)) continue; // sits on top of a same-tier track → not new
 
             // Match to a pending candidate (carried from prior frames) within birth_match_m.
             int best = -1; float best_r = params_.birth_match_m;

@@ -288,23 +288,23 @@ inline std::optional<std::string> attr_string(const DSR::Attribute& a)
 // (Caller does G.update_node(node) afterwards, as usual.)
 inline void write_contract(DSR::DSRGraph& G, DSR::Node& node, const Contract& c)
 {
-    G.runtime_checked_add_or_modify_attrib_local(node, "aff_policy",       std::string(to_string(c.policy)));
-    G.runtime_checked_add_or_modify_attrib_local(node, "aff_err_vec_attr", c.err_vec_attr);
-    G.runtime_checked_add_or_modify_attrib_local(node, "aff_scalar_attr",  c.scalar_attr);
-    G.runtime_checked_add_or_modify_attrib_local(node, "aff_scalar_target", c.scalar_target);
-    G.runtime_checked_add_or_modify_attrib_local(node, "aff_valid_attr",   c.valid_attr);
+    G.add_or_modify_attrib_local<aff_policy_att>      (node, std::string(to_string(c.policy)));
+    G.add_or_modify_attrib_local<aff_err_vec_attr_att>(node, c.err_vec_attr);
+    G.add_or_modify_attrib_local<aff_scalar_attr_att> (node, c.scalar_attr);
+    G.add_or_modify_attrib_local<aff_scalar_target_att>(node, c.scalar_target);
+    G.add_or_modify_attrib_local<aff_valid_attr_att>  (node, c.valid_attr);
 
     std::vector<std::string> attrs, ops; std::vector<float> vals;
     attrs.reserve(c.goal.size()); ops.reserve(c.goal.size()); vals.reserve(c.goal.size());
     for (const auto& g : c.goal) { attrs.push_back(g.attr); ops.emplace_back(to_string(g.op)); vals.push_back(g.value); }
-    G.runtime_checked_add_or_modify_attrib_local(node, "aff_goal_attrs",  detail::join(attrs, '|'));
-    G.runtime_checked_add_or_modify_attrib_local(node, "aff_goal_ops",    detail::join(ops, '|'));
-    G.runtime_checked_add_or_modify_attrib_local(node, "aff_goal_values", vals);
-    G.runtime_checked_add_or_modify_attrib_local(node, "aff_goal_stable_n", c.stable_n);
-    G.runtime_checked_add_or_modify_attrib_local(node, "aff_timeout_ms",  c.timeout_ms);
-    G.runtime_checked_add_or_modify_attrib_local(node, "aff_on_fail",     std::string(to_string(c.on_fail)));
-    G.runtime_checked_add_or_modify_attrib_local(node, "aff_max_vel",    c.max_observe_vel);
-    G.runtime_checked_add_or_modify_attrib_local(node, "aff_max_omega",  c.max_observe_omega);
+    G.add_or_modify_attrib_local<aff_goal_attrs_att>  (node, detail::join(attrs, '|'));
+    G.add_or_modify_attrib_local<aff_goal_ops_att>    (node, detail::join(ops, '|'));
+    G.add_or_modify_attrib_local<aff_goal_values_att> (node, vals);
+    G.add_or_modify_attrib_local<aff_goal_stable_n_att>(node, c.stable_n);
+    G.add_or_modify_attrib_local<aff_timeout_ms_att>  (node, c.timeout_ms);
+    G.add_or_modify_attrib_local<aff_on_fail_att>     (node, std::string(to_string(c.on_fail)));
+    G.add_or_modify_attrib_local<aff_max_vel_att>     (node, c.max_observe_vel);
+    G.add_or_modify_attrib_local<aff_max_omega_att>   (node, c.max_observe_omega);
 }
 
 // ─── executor: type defaults + per-node overrides ─────────────────────────────
@@ -361,13 +361,13 @@ inline Contract read_contract(const DSR::Node& node, std::string_view parent_typ
 // scalar-attr path as the rest. (Caller does G.update_node(node) afterwards, as usual.)
 inline void write_viewpoint(DSR::DSRGraph& G, DSR::Node& node, const ViewpointConstraint& v)
 {
-    G.runtime_checked_add_or_modify_attrib_local(node, "aff_view_object_relative", v.object_relative ? 1 : 0);
-    G.runtime_checked_add_or_modify_attrib_local(node, "aff_view_faces",        detail::join(v.faces, '|'));
-    G.runtime_checked_add_or_modify_attrib_local(node, "aff_view_face_gains",   v.face_gains);
-    G.runtime_checked_add_or_modify_attrib_local(node, "aff_view_standoff_min", v.standoff_min_m);
-    G.runtime_checked_add_or_modify_attrib_local(node, "aff_view_standoff_max", v.standoff_max_m);
-    G.runtime_checked_add_or_modify_attrib_local(node, "aff_view_framing_fill", v.framing_fill);
-    G.runtime_checked_add_or_modify_attrib_local(node, "aff_view_sigma_star",   v.sigma_star);
+    G.add_or_modify_attrib_local<aff_view_object_relative_att>(node, v.object_relative ? 1 : 0);
+    G.add_or_modify_attrib_local<aff_view_faces_att>       (node, detail::join(v.faces, '|'));
+    G.add_or_modify_attrib_local<aff_view_face_gains_att>  (node, v.face_gains);
+    G.add_or_modify_attrib_local<aff_view_standoff_min_att>(node, v.standoff_min_m);
+    G.add_or_modify_attrib_local<aff_view_standoff_max_att>(node, v.standoff_max_m);
+    G.add_or_modify_attrib_local<aff_view_framing_fill_att>(node, v.framing_fill);
+    G.add_or_modify_attrib_local<aff_view_sigma_star_att>  (node, v.sigma_star);
 }
 
 inline ViewpointConstraint read_viewpoint(const DSR::Node& node)
