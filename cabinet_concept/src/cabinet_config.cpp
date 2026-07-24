@@ -35,6 +35,7 @@ CabinetConfig load_cabinet_config(const ConfigLoader& cfg)
     out.state_eps                = getf("CabinetConcept.StateEps",               0.04f);
     out.K_stable                 = geti("CabinetConcept.KStable",                30);
     out.detection_alive_max_frames = geti("CabinetConcept.DetectionAliveMaxFrames", 40);
+    out.masks_stall_timeout_ms   = geti("Media.MasksStallTimeoutMs",           3000);
     out.obs_distance             = getf("CabinetConcept.ObsDistance",            1.8f);
     out.epistemic_cooldown_cycles= geti("CabinetConcept.EpistemicCooldownCycles", 200);
     out.cabinet_log_period_frames  = geti("CabinetConcept.CabinetLogPeriodFrames",   30);

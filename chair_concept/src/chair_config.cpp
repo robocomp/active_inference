@@ -36,6 +36,7 @@ ChairConfig load_chair_config(const ConfigLoader& cfg)
     out.min_standoff_m           = getf("ChairConcept.MinStandOffM",           1.8f);
     out.epistemic_cooldown_cycles= geti("ChairConcept.EpistemicCooldownCycles", 200);
     out.chair_log_period_frames  = geti("ChairConcept.ChairLogPeriodFrames",   30);
+    out.masks_stall_timeout_ms   = geti("Media.MasksStallTimeoutMs",           3000);
     out.voxel_bank_max_points    = geti("ChairConcept.VoxelBankMaxPoints",     4000);
     out.voxel_bank_quantization_m= getf("ChairConcept.VoxelBankQuantizationM", 0.02f);
     out.voxel_select_radius_margin_m = getf("ChairConcept.VoxelSelectRadiusMarginM", 0.50f);
@@ -65,6 +66,11 @@ ChairConfig load_chair_config(const ConfigLoader& cfg)
     out.ai2_common_mode_yaw_std  = getf("ChairModel.AI2CommonModeYawStd",     0.03f);
     out.ai2_range_noise_lat_per_m = getf("ChairModel.AI2RangeNoiseLatPerM",   0.02f);
     out.ai2_range_noise_yaw_per_m = getf("ChairModel.AI2RangeNoiseYawPerM",   0.03f);
+    out.ai2_obliquity_yaw_gain    = getf("ChairModel.AI2ObliquityYawGain",    0.05f);
+    out.ai2_orientation_motion_ref = getf("ChairModel.AI2OrientationMotionRef", 0.50f);
+    out.ai2_fe_baseline_adapt_down = getf("ChairModel.AI2FeBaselineAdaptDown", 0.05f);
+    out.ai2_fe_baseline_adapt_up   = getf("ChairModel.AI2FeBaselineAdaptUp",   0.005f);
+    out.ai2_fe_surprise_smooth     = getf("ChairModel.AI2FeSurpriseSmooth",    0.10f);
     out.ai2_trunc_gate_frac      = getf("ChairModel.AI2TruncGateFrac",        0.10f);
     out.ai2_gn_iters             = geti("ChairModel.AI2GnIters",              4);
     out.ai2_extent_std           = getf("ChairModel.AI2ExtentStd",            0.05f);

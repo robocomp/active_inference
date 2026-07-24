@@ -90,6 +90,12 @@ struct BottleInstance
     bool  last_pub_detection_alive = false;    // dead-band trace for the published flag
     float last_pub_detection_conf  = -1.0f;    // dead-band trace for the published confidence
     float prev_free_energy     = std::numeric_limits<float>::max();
+    // Clutter-inclusive free-energy readout (TABLE.md §3) + attention baseline (§9). last_clutter_frac is the
+    // honest "explains none of its data" signal (replaces the old surface-energy==0 divergence sentinel).
+    // fe_baseline tracks DOWN fast / UP slow so a sustained rise (the bottle moved) surfaces as fe_surprise.
+    float last_clutter_frac    = 0.0f;
+    float fe_baseline          = -1.0f;   // <0 = uninitialised (seed to the first explained FE)
+    float fe_surprise          = 0.0f;
     // Dead-band tracking for write_rt_pose — suppress tiny oscillations
     float last_written_cx = std::numeric_limits<float>::max();
     float last_written_cy = std::numeric_limits<float>::max();

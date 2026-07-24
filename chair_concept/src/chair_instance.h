@@ -48,6 +48,14 @@ struct ChairInstance
     float last_trunc_frac  = 0.0f;   // silhouette truncation (predict-only gate)
     float last_range       = 0.0f;   // mean camera→mask depth Z (m): static range weighting
     float last_clutter_frac = 0.0f;  // mean clutter responsibility (fraction of the mask the model can't explain)
+    float dbg_obliquity_cos = 1.0f;  // |cos| of camera→chair horizontal ray vs backrest normal (1=face-on, →0 grazing)
+
+    // Free-energy readout + attention baseline (clutter-inclusive F; TABLE.md §9). dbg_energy HOLDS the last
+    // FE across a gated/rejected cycle (which took no measurement). fe_baseline tracks DOWN fast / UP slow so a
+    // sustained rise (the chair moved) surfaces as fe_surprise before the baseline accepts it.
+    float dbg_energy   = 0.0f;
+    float fe_baseline  = -1.0f;   // <0 = uninitialised (seed to the first accepted FE)
+    float fe_surprise  = 0.0f;
 
     int  last_frame_seen    = -1;     // last_sensing_frame_att value read
     int  matched_frames     = 0;      // frames with fresh sensing data

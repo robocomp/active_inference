@@ -32,14 +32,15 @@ SensorMediaPublisher::~SensorMediaPublisher()
 
 namespace
 {
-// Build a PublisherConfig that all streams share (same domain + QoS depth).
+// Build a PublisherConfig that all streams share (same domain + QoS depth + data-sharing).
 rc::media::PublisherConfig stream_config(std::uint32_t domain_id, int history_depth,
-                                         const std::string& topic)
+                                         const std::string& topic, bool data_sharing)
 {
     rc::media::PublisherConfig pc;
     pc.domain_id     = domain_id;
     pc.topic_name    = topic;
     pc.history_depth = history_depth;
+    pc.data_sharing  = data_sharing;
     return pc;
 }
 }  // namespace
@@ -49,9 +50,11 @@ bool SensorMediaPublisher::init(const Config& cfg)
     domain_id_     = cfg.domain_id;
     history_depth_ = cfg.history_depth;
     // The QoS the publishers actually use, so the advertised descriptor matches.
+    // shared_memory_only stays at the lib default (SHM transport, same-board); only
+    // the zero-copy data-sharing layer is exposed to config (cfg.data_sharing).
     const rc::media::PublisherConfig defaults;
     shared_memory_only_ = defaults.shared_memory_only;
-    data_sharing_       = defaults.data_sharing;
+    data_sharing_       = cfg.data_sharing;
 
     QString summary;
     // "ready" = every stream we were ASKED to create came up, and at least one was.
@@ -68,7 +71,7 @@ bool SensorMediaPublisher::init(const Config& cfg)
         st.key       = spec.key;
         st.topic     = spec.topic;
         st.stream_id = spec.stream_id;
-        if (not st.pub.init(stream_config(cfg.domain_id, cfg.history_depth, spec.topic)))
+        if (not st.pub.init(stream_config(cfg.domain_id, cfg.history_depth, spec.topic, cfg.data_sharing)))
         {
             all_ok = false;
             qWarning() << "[Media] image publisher init FAILED" << QString::fromStdString(spec.key)
@@ -84,7 +87,7 @@ bool SensorMediaPublisher::init(const Config& cfg)
         lidar_->key       = cfg.lidar_stream->key;
         lidar_->topic     = cfg.lidar_stream->topic;
         lidar_->stream_id = cfg.lidar_stream->stream_id;
-        if (not lidar_->pub.init(stream_config(cfg.domain_id, cfg.history_depth, cfg.lidar_stream->topic)))
+        if (not lidar_->pub.init(stream_config(cfg.domain_id, cfg.history_depth, cfg.lidar_stream->topic, cfg.data_sharing)))
         {
             all_ok = false;
             qWarning() << "[Media] lidar publisher init FAILED topic="
@@ -103,7 +106,7 @@ bool SensorMediaPublisher::init(const Config& cfg)
         imu_->key       = cfg.imu_stream->key;
         imu_->topic     = cfg.imu_stream->topic;
         imu_->stream_id = cfg.imu_stream->stream_id;
-        if (not imu_->pub.init(stream_config(cfg.domain_id, cfg.history_depth, cfg.imu_stream->topic)))
+        if (not imu_->pub.init(stream_config(cfg.domain_id, cfg.history_depth, cfg.imu_stream->topic, cfg.data_sharing)))
         {
             all_ok = false;
             qWarning() << "[Media] imu publisher init FAILED topic="
@@ -122,7 +125,7 @@ bool SensorMediaPublisher::init(const Config& cfg)
         image360_->key       = cfg.image360_stream->key;
         image360_->topic     = cfg.image360_stream->topic;
         image360_->stream_id = cfg.image360_stream->stream_id;
-        if (not image360_->pub.init(stream_config(cfg.domain_id, cfg.history_depth, cfg.image360_stream->topic)))
+        if (not image360_->pub.init(stream_config(cfg.domain_id, cfg.history_depth, cfg.image360_stream->topic, cfg.data_sharing)))
         {
             all_ok = false;
             qWarning() << "[Media] image360 publisher init FAILED topic="
@@ -416,6 +419,20 @@ void SensorMediaPublisher::maybe_report_stats(StatsGroup group, std::chrono::sec
         at = now;
         return true;
     };
+
+    // Periodic transport status so the zero-copy state stays visible in the live log
+    // (not just at startup). Called from all four sensor threads, so gate on an atomic
+    // CAS — exactly one thread prints per interval. data_sharing_active() reads a flag
+    // fixed at init, so it is safe to sample concurrently.
+    const std::int64_t now_ns = now.time_since_epoch().count();
+    std::int64_t next_ns = status_report_next_ns_.load(std::memory_order_relaxed);
+    if (now_ns >= next_ns and
+        status_report_next_ns_.compare_exchange_strong(
+            next_ns, now_ns + std::chrono::nanoseconds(interval).count(),
+            std::memory_order_relaxed))
+        qInfo() << "[Media] transport domain=" << domain_id_
+                << "data_sharing=" << data_sharing_active()
+                << "(1=zero-copy SHM loans, 0=SHM-transport memcpy)";
 
     switch (group)
     {

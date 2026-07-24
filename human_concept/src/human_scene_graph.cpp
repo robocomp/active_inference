@@ -100,10 +100,8 @@ void HumanSceneGraph::step_write_model(HumanInstance& inst, DSR::Node& node, flo
     if (inst.detection_alive != inst.last_pub_detection_alive or
         std::abs(inst.last_mask_confidence - inst.last_pub_detection_conf) > 1.0f)
     {
-        G_->runtime_checked_add_or_modify_attrib_local(node, "human_detection_alive",
-                                                       inst.detection_alive ? 1 : 0);
-        G_->runtime_checked_add_or_modify_attrib_local(node, "human_detection_confidence",
-                                                       inst.last_mask_confidence);
+        G_->add_or_modify_attrib_local<human_detection_alive_att>(node, inst.detection_alive);
+        G_->add_or_modify_attrib_local<human_detection_confidence_att>(node, inst.last_mask_confidence);
         inst.last_pub_detection_alive = inst.detection_alive;
         inst.last_pub_detection_conf  = inst.last_mask_confidence;
     }

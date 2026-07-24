@@ -223,8 +223,8 @@ void BottleSceneGraph::step_write_model(BottleInstance& inst, DSR::Node& node, f
     {
         inst.last_pub_detection_alive = inst.detection_alive;
         inst.last_pub_detection_conf  = inst.last_mask_confidence;
-        G_->runtime_checked_add_or_modify_attrib_local(node, "bottle_detection_alive", inst.detection_alive ? 1 : 0);
-        G_->runtime_checked_add_or_modify_attrib_local(node, "bottle_detection_confidence", inst.last_mask_confidence);
+        G_->add_or_modify_attrib_local<bottle_detection_alive_att>(node, inst.detection_alive);
+        G_->add_or_modify_attrib_local<bottle_detection_confidence_att>(node, inst.last_mask_confidence);
     }
 
     constexpr float kPosEps  = 0.005f;   // 5 mm
@@ -262,7 +262,7 @@ void BottleSceneGraph::step_write_model(BottleInstance& inst, DSR::Node& node, f
         std::vector<float> qflat;
         qflat.reserve(qpts.size() * 3);
         for (const auto& p : qpts) { qflat.push_back(p.x()); qflat.push_back(p.y()); qflat.push_back(p.z()); }
-        G_->runtime_checked_add_or_modify_attrib_local(node, "rfe_pts", qflat);
+        G_->add_or_modify_attrib_local<rfe_pts_att>(node, qflat);
     }
 
     G_->update_node(node);

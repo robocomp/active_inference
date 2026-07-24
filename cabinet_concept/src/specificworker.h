@@ -151,6 +151,17 @@ private:
     void on_optional_peer_lost(const std::string &name, std::uint32_t id);
     void on_optional_peer_ready(const std::string &name, std::uint32_t id);
 
+    // ── Primary-input (masks) stream gate — mirrors room_concept's LiDAR gate (see CONCEPT_AGENT_RECIPE.md) ──
+    // Admission probe (Waiting→Operating gate): the `masks` node is present and advertising a frame id.
+    bool masks_stream_ready(std::string *detail = nullptr) const;
+    // Operating stall predicate: no NEW masks frame for cfg_.masks_stall_timeout_ms, with a cold-start grace
+    // measured from operating_since_ms_ before the first frame ever arrives. false when the gate is disabled.
+    bool masks_stream_stalled(std::int64_t *age_ms_out = nullptr) const;
+    // Admission predicate: the producer is CURRENTLY publishing fresh frames (a frame within the timeout
+    // window). Distinct from masks_stream_ready() (node-exists, which persists after the producer dies) —
+    // admitting on node-exists causes an instant re-stall flap. Requires refresh() to be pumped while Waiting.
+    bool masks_stream_live() const;
+
     // ── Members ──────────────────────────────────────────────────────────────
     bool startup_check_flag = false;
     bool owned_nodes_cleaned_ = false;
@@ -158,6 +169,12 @@ private:
                                                    // on every Operating re-entry would wipe live affordances.
     std::atomic<bool> shutting_down_{false};
     AgentPresenceCoordinator presence_coordinator_;
+
+    // Primary-input stream-gate bookkeeping (mirrors room_concept). All main-thread (FSM hooks).
+    std::int64_t operating_since_ms_   = 0;      // wall ms at Operating entry — cold-start stall-grace baseline
+    bool         masks_stall_reported_ = false;  // one-shot: emit presenceLost once per stall episode (reset on entry)
+    bool         degraded_from_masks_  = false;  // Degraded reason: recoverable mask-stall vs a real peer loss
+    std::int64_t last_wait_log_ms_     = 0;      // throttle for the "why still Waiting" line
 
     rc::CabinetConfig                                         cfg_;
     rc::EpistemicPlanner                                    epistemic_planner_;

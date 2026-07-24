@@ -61,17 +61,20 @@ CV-coupled AI2 transition (velocity DOFs) is a future extension, not the current
 **`accumulate_extra` (optional, C++23 `requires`-detected).** The engine folds an extra per-frame GN factor
 `(Id, bd)` into the normal equations iff the model defines it — no virtuals, zero cost when absent. Use it
 for a model-specific structural term that isn't a plain point-SDF likelihood:
-- **chair:** a **seat-layer height anchor** + a **footprint-extent anchor** (fixes the `seat_h` gauge
-  runaway and `seat_d` collapse — see the chair notes).
 - **bottle:** the **occluding-contour silhouette** tangent term `dist(axis, ray)=radius` — the ONLY term
   that pins the depth-degenerate radius of a symmetric cylinder from a one-sided depth cloud.
+- **chair:** none. Chair is now **pose-only** (see below): a fixed standard-chair TEMPLATE, so there is no
+  size DOF to anchor. (Historically it carried seat-height + footprint-extent anchors when it fitted size;
+  those were removed with the size DOFs — a per-axis-size chair would reinstate them.)
 - **table:** none required (the box+legs SDF + extent likelihood suffice).
 
 `<obj>_model.{h,cpp}` is now **only the state holder (`<Obj>State`) + the compound SDF** (+ any silhouette
 store). All inference lives in `<obj>_belief`; the fitted posterior is written back into `<Obj>State` so the
-downstream publish/viewer/RT code is unchanged. See `table_concept/src/table_belief.{h,cpp}` (box+legs, N=6),
-`chair_concept/src/chair_belief.{h,cpp}` (seat+back+legs, N=8, `accumulate_extra` anchors — the most evolved
-reference), `bottle_concept/src/bottle_belief.{h,cpp}` (single cylinder, N=5, silhouette `accumulate_extra`).
+downstream publish/viewer/RT code is unchanged. See `table_concept/src/table_belief.{h,cpp}` (box+legs, N=7,
+w↔h/yaw symmetry fold + orientation-mode entropy — **the most evolved reference**),
+`bottle_concept/src/bottle_belief.{h,cpp}` (single cylinder, N=5, silhouette `accumulate_extra`),
+`chair_concept/src/chair_belief.{h,cpp}` (seat+back+legs but **pose-only N=3** — `[cx,cy,yaw]`, fixed
+template, `cz` pinned to floor; the simplest legged model — see §5).
 
 Everything else is **shared** and unchanged by a new object: `instance_tracker`, `mask_ingestor`, the worker
 merge operator, `<obj>_scene_graph` (RT-cov maps the belief Σ), affordance / epistemic (Σ-based NBV) /
@@ -81,7 +84,29 @@ dashboard. So the §1 contract below holds; only the model hooks are authored.
 
 - **Free energy is the true `−log` mixture MARGINAL likelihood** (the clutter component **included**), so F
   rises with misfit. A surface-only / responsibility-weighted energy reads ≈0 on a bad fit and *silently*
-  breaks mode resolution and any reject-worse-fit logic. (This was THE root-cause bug fixed this session.)
+  breaks mode resolution and any reject-worse-fit logic. ★The shared engine's `update()` RETURN is that
+  surface-only energy — do **not** publish/log/converge on it. Compute F with the model's `mixture_nll(pts,
+  s, R)` (clutter-inclusive) and use THAT everywhere the agent reasons about fit quality: the published FE,
+  the convergence gate, orientation-mode comparison, and any divergence/"explains-nothing" signal. (2026-07:
+  chair published the surface-only FE; bottle additionally *converged and RETIRED nodes* on its `energy==0`
+  all-clutter quirk — a band-aid for exactly this blindness. Both now use `mixture_nll`; bottle's divergence
+  sentinel became a direct `clutter_fraction > k` test instead of the energy==0 proxy.)
+- **The discrete orientation mode must reach the REPORTED covariance.** The N×N Σ carries only the
+  *within-mode* yaw width. A sequential-Bayesian mode accumulator (`resolve_orientation`) that only edits the
+  mean/state, without folding its entropy into the yaw variance the scene-graph and NBV planner consume,
+  advertises a falsely-confident heading. Expose `covariance_reported()` (Σ with `p(1−p)`-style mode entropy
+  added to the yaw block) and have the RT-cov upload + `EpistemicPlanner` read it, not raw `covariance()`.
+  ★CLAMP the mode accumulator (±~6 nats) so a long confident run can still RECANT a physical rotation, and
+  weight each frame's vote by ego-motion reliability `1/(1+(dotd/ref)²)` (reshapes/flips arrive on motion
+  frames). Table (2-mode, w↔h) and chair (4-mode, backrest) both do this.
+- **FE-surprise is the attention trigger** (once F is honest): an asymmetric-EMA baseline (down fast /
+  up slow) + the smoothed positive gap `max(0, F−baseline)`; a sustained rise = the object moved, and
+  reopens active perception without a hard re-detect. Update it only on an accepted-measurement frame. Table,
+  chair, and bottle all carry it.
+- **Obliquity yaw cap** (for any agent with a yaw DOF): grow the SHARED yaw variance as the yaw-carrying
+  surface grazes edge-on (`gain·(1/|cos|−1)`), so a grazing view confirms the object but can't rotate a
+  converged one. ★Key on the RIGHT surface: table = incidence vs the horizontal top; chair = the VERTICAL
+  backrest (`n̂=(sinψ,−cosψ)`), a different geometry — port the *form*, re-tune the gain per surface.
 - **No thresholds/gates** unless strictly necessary and flagged — encode the effect as a covariance/precision
   and let it fall out of inference (see `CLAUDE.md` modeling philosophy).
 - **A mask is a LOWER BOUND on extent** (occlusion / foreshortening only shorten it) → extent evidence is
@@ -121,6 +146,11 @@ lidar (media plane) ──► <Obj>LidarIngestor ──► <Obj>LidarRangeChanne
 ## 0. Object spec (the prompt syntax)
 
 Fill this from the human prompt + reference images. It is the complete input to generation.
+
+> The `chair` example below is written in its **size-fitting** form (8 DOF, seat/extent `accumulate_extra`)
+> to exercise every spec field. The **shipped** `chair_concept` is the pose-only N=3 reduction (§5) — a
+> template with only `[cx,cy,yaw]` fitted. Both are valid; pick per the object (size-fitting like table, or
+> pose-only-on-a-template like chair).
 
 ```yaml
 object:
@@ -235,7 +265,7 @@ std::unordered_map<std::uint64_t,<Obj>Instance>& instances();
 void                forget_node(std::uint64_t id);
 bool                should_log(const <Obj>Instance&) const;                  // NOT should_log_<obj>
 void                note_birth(std::uint64_t id, const Eigen::Vector2f& xy); // tracker seeds the birth centroid
-void                set_chain_cov_source(DSR::InnerGaussianAPI*, std::string source_frame, bool enabled);  // Part B
+void                set_chain_cov_source(DSR::InnerGaussianAPI*, std::string source_frame);  // Part B (calling it enables the chain term)
 ```
 **Multi-sensor fusion (the primary path).** A cycle now fuses *several* observations per instance. For each
 mask slice the tracker assigned to the instance, the worker calls `observe_slice(inst, slice_index)` to build
@@ -253,7 +283,7 @@ mask_ingestor_->refresh();
 run_instance_tracker();                     // THE birth/associate/death path — every cycle, not gated
 for (const auto& node : G->get_nodes_by_type("<dsr_node_type>"))   // (bottle: "cylinder" named "bottle*")
     process_<obj>_node(node);
-fps_counter_.print("[Compute]", 3000);      // heartbeat, once per cycle (see below)
+// per-cycle compute-rate heartbeat on std::cout (see below) — table/cabinet keep an EvidenceMonitor Hz EMA
 ```
 `process_<obj>_node`:
 ```cpp
@@ -272,9 +302,59 @@ inst.prev_free_energy = fe;
 DSR slots forward to the affordance: `del_node_slot`→`on_node_deleted`, `modify_node_attrs_slot`→
 `on_node_modified`. No `Qt::DirectConnection`; poll-only is fine.
 
-**`[Compute]` heartbeat (every agent).** Hold an `FPSCounter fps_counter_;` (`#include <fps/fps.h>`) and
-call `fps_counter_.print("[Compute]", 3000);` as the LAST line of `compute()` — once per cycle. Prints
-`Period = …ms. Fps = …` every 3 s on `std::cout` (NOT `qInfo`, which RoboComp filters).
+**Compute-rate heartbeat (every agent).** Log the compute rate once per cycle on `std::cout` (NOT `qInfo`,
+which RoboComp filters) so a stalled agent is visible. Two equivalent forms are in use — either satisfies the
+pattern, don't add both: (a) an `FPSCounter fps_counter_;` (`#include <fps/fps.h>`) with
+`fps_counter_.print("[Compute]", 3000);` as the last line of `compute()` (prints `Period = …ms. Fps = …`
+every 3 s); or (b) — as the **reference `table_concept` and `cabinet_concept` do** — an EMA of the per-cycle
+rate on the EvidenceMonitor (`ev_g_.compute_hz`) surfaced in the dashboard/monitor. (Historically this section
+mandated (a); the reference agents converged on (b).)
+
+### Primary-input stream gate (readiness + staleness) — every agent that consumes a live stream
+The required-peer set proves the *producers exist*, not that the *stream is flowing*. Sitting in Operating
+with a dead primary input looks healthy while nothing converges and — worse — re-integrates stale/frozen
+frames as fresh evidence (CLAUDE.md: stop on a stalled consumed stream). Gate the FSM on the agent's
+**primary input**, keyed per agent, reusing the SAME `presenceReady`/`presenceLost` signals as an extra
+axis on top of presence (the coordinator has no notion of stream age — this is worker-owned):
+- **Admission (Waiting→Operating).** AND a stream-**liveness** probe into `request_presence_ready` *and*
+  re-poll it in an `on_waiting_loop` hook (the guarded event-driven fire declines silently when the stream
+  isn't up yet at the instant peers arrive; the loop is what re-admits). ★Admit on **actual freshness**
+  (a frame within the timeout), NOT on "the producer node exists" — a graph node (e.g. `masks`) PERSISTS
+  after its producer dies, so admitting on existence re-admits straight into an instant re-stall (a
+  tick-rate flap). room → `lidar_stream_ready()` works as bare existence only because its LiDAR ingestor is
+  a **free-running thread** whose age advances off the FSM path. ★A **graph-node-polled** input (table
+  reads the `masks` node only inside `compute()`) has NO such thread → you MUST pump the ingest
+  (`ingestor->refresh()`) inside `on_waiting_loop` too, or liveness never updates while Waiting and the
+  agent can neither avoid the flap nor detect the producer returning.
+- **Staleness demotion (Operating→Degraded→Waiting).** In `on_operating_loop`, before `compute()`:
+  `if (not stall_reported_ and stream_stalled(&age)) { stall_reported_=true; degraded_from_stream_=true;
+  emit presenceLost(); return; }`. `stream_stalled` = ingestor `ms_since_last_frame() >
+  <Stream>StallTimeoutMs`, with a **cold-start grace** measured from `operating_since_ms_` when no frame
+  has ever arrived (`ms_since_last_frame()` returns −1). Reset `operating_since_ms_` + `stall_reported_` in
+  `on_operating_enter`.
+- **Degraded is recoverable, not terminal.** A stall routes through Degraded (its only exit is →Waiting) but
+  peers are intact, so set a `degraded_from_stream_` flag: `on_degraded_enter` logs "stall, peers intact"
+  and the SHARED required-loss grace timer finds all peers present and declines to shut down. The gate then
+  re-admits when the producer returns. Contrast a *real* peer loss (flag false) → shutdown after grace.
+- **Ingestor bookkeeping (shared readers).** Stamp a wall-clock ms on the single fresh-frame success path
+  only; expose `ms_since_last_frame()` (−1 = never) + `stream_ready()`. Stamp on the wall clock, NEVER the
+  source stamp — a producer republishing an old frame must read as *not* live. **Key on an id that advances
+  on every producer heartbeat even with zero detections** (table's `mask_frame_id` is a monotonic *publish*
+  counter → an empty scene never false-trips; a per-detection counter would). ★**Handle producer restart:**
+  that publish counter is per-PROCESS and RESETS when the producer restarts, so a "new frame = id >
+  last-seen" guard silently rejects the whole restarted stream (starving every consumer) until the fresh
+  counter climbs past the stale value. Treat a **backward** id jump as a restart and adopt the new stream.
+  Additions to a shared ingestor (`common/mask_ingestor`) must be backward-compatible so non-gating
+  consumers ignore them.
+- **Config.** One liveness key, `<Stream>StallTimeoutMs` (default 3000 ms) that MUST exceed the producer's
+  HOLD/hysteresis window. This is a **lifecycle/liveness** bound, NOT a belief-precision knob (see §Belief
+  invariants / no-thresholds) — orthogonal to Σ-aging, which handles *belief* staleness on the different,
+  belief axis (both can be on at once; the stall gate trips before Σ-aging is even exercised). 0 disables.
+
+References: `table_concept` (masks; `common/mask_ingestor` + `specificworker_presence.cpp`),
+`room_concept` (lidar; `lidar_ingestor` + `specificworker_presence.cpp`). The **controller** deliberately
+does NOT use this FSM-routing model — it uses a *local hold + stop-robot* response to a stalled stream
+(it must halt the arm, not bounce to Waiting); do not collapse the two.
 
 ### Startup: birth is tracker-only
 There is **no prior-scaffold**. `initialize()` sweeps any leftover `<obj>*` nodes from a crashed run
@@ -300,12 +380,13 @@ weight). Config namespace `<Obj>Model.MaskConf*`.
 `<Obj>SceneGraph` writes a 6×6 `rt_covariance` on the room→obj RT edge from the belief Σ (row-major
 [x,y,z,rx,ry,rz]; unobservable roll/pitch = big). ★ADD the **chain covariance `J·Σ_chain·Jᵀ`** — the
 uncertainty the room-frame pose inherits from robot localization (the fit cov is conditional on the robot
-pose). Enabled uniformly via `fitter_->set_chain_cov_source(gaussian_api_.get(), "zed", cfg_.rt_cov_add_chain)`:
+pose). Enabled uniformly via `fitter_->set_chain_cov_source(gaussian_api_.get(), "zed")` (calling it turns the chain term on):
 the fitter computes it with `DSR::InnerGaussianAPI` (transform the fitted centre room→"zed" then back with a
 ZERO input cov; `transform_point` returns exactly `J·Σ_chain·Jᵀ`, Σ_chain = each RT edge's `rt_covariance`
 adjoint-composed; `room_concept` publishes the robot↔room term), pinned to the capture stamp. Its xy block
 adds to the published translation cov. The scene-graph write self-gates (geometry republish OR trace change
->5%) to suppress churn once settled. Config `*.RtCovAddChain`. COV ONLY — masks stay room-frame.
+>5%) to suppress churn once settled. The chain term is unconditionally on (the `set_chain_cov_source` call
+enables it — there is no longer an `RtCovAddChain` toggle). COV ONLY — masks stay room-frame.
 
 ### Dashboard (`publish_<obj>_diagnostics`, if `dashboard`) — stacked `TimeSeriesPlot` panels, per node:
 FE → dimensions → **posterior σ(mm)** per DOF (from `sqrt(diag Σ)` — the honest calibrated uncertainty; this
@@ -324,6 +405,32 @@ state + Σ diag. (`TimeSeriesPlot` strokes lines only — never set a brush befo
   declarations. Prefer the shared `common/` factory/util over a hand-rolled copy.
 - **Flag every threshold.** If a magic cutoff is truly unavoidable, say so in the comment and name the
   physical quantity it stands for.
+
+### DSR attribute access — typed `<foo_att>` template forms ONLY (never `runtime_checked_*`)
+
+Every graph attribute read/write uses the **type-attributed** template overloads —
+`add_or_modify_attrib_local<foo_att>(node, v)`, `get_attrib_by_name<foo_att>(node)` — which are
+compile-time-checked (`valid_type<name,Ta>()`) and self-documenting. **Do NOT** use the
+`runtime_checked_*` forms (name-as-string, validated at runtime → a typo/type-mismatch is a runtime
+throw). **`table_concept` is the exemplar: 100% typed, zero `runtime_checked_*`** — a copy MUST match it.
+
+To add a NEW attribute: `REGISTER_TYPE(foo, <c++ type>, false)` in cortex's
+`core/include/dsr/core/types/type_checking/dsr_attr_name.h` (generates the `foo_att` alias; large
+read-mostly blobs → `std::reference_wrapper<const std::vector<T>>`, but you still SET by passing a plain
+`std::vector<T>` by value — `valid_type` unwraps it), **the user reinstalls cortex** (root-owned header),
+then rebuild the agent so its TUs see `foo_att`. Until the alias exists the typed call won't compile —
+that's expected, not a reason to fall back to `runtime_checked_*`.
+
+Two **legitimate** `runtime_checked_*` exceptions (flag them in a comment):
+1. **Genuinely dynamic attribute name** — the attr name is a runtime value, not a compile-time constant
+   (e.g. the per-node media-descriptor helper in `robot_concept/sensor_media_publisher.h`, which writes an
+   `attr_name` param).
+2. **A deliberately DSR-att-header-free header** — a lightweight header that takes `DSRGraph&` from its
+   includer and includes no `dsr/` headers (so no `foo_att` alias is in scope); coupling it to the heavy
+   att header just to type one write isn't worth it. (Same `sensor_media_publisher.h`.)
+
+Anything else carrying `runtime_checked_*` is **opportunistic-migration debt**: register the attribute in
+cortex, then switch to `<foo_att>`. Don't add new `runtime_checked_*` sites.
 
 ---
 
@@ -352,10 +459,10 @@ state + Σ diag. (`TimeSeriesPlot` strokes lines only — never set a brush befo
 
 ## 3. Generation procedure (deterministic)
 
-1. **Pick the closer skeleton** (all AI2): `table` (box top + inset legs, symmetry fold), `chair`
-   (seat+back+legs, floor-anchored, `accumulate_extra` seat/extent anchors — the most evolved), `bottle`
-   (single cylinder, silhouette `accumulate_extra`, single primitive). Primitive-box/legged → table/chair;
-   single round body → bottle.
+1. **Pick the closer skeleton** (all AI2): `table` (box top + inset legs, symmetry fold, size-fitting N=7 —
+   the most evolved), `chair` (seat+back+legs, floor-anchored, **pose-only N=3 on a fixed template**, 4-way
+   backrest disambiguation), `bottle` (single cylinder, silhouette `accumulate_extra`, single primitive).
+   Legged + fit size → `table`; legged + rigid known dims → `chair`; single round body → `bottle`.
 2. **Copy + token-rename** the module set (`table`→`<obj>`, `Table`→`<Obj>`); keep the
    `common/ai_belief/recursive_laplace.h` `#include`.
 3. **Author `<Obj>Belief`** from `belief.sdf`: `sdf_prim`, `responsibilities`, the Q/prior/common-mode
@@ -382,30 +489,47 @@ state + Σ diag. (`TimeSeriesPlot` strokes lines only — never set a brush befo
 - [ ] Builds green; binary links (no torch).
 - [ ] `<Obj>Belief::self_test()` prints PASS (isolated Eigen unit test + at startup).
 - [ ] Launches, presence reaches Operating (copy bottle's presence protocol verbatim; unique `[Agent] id`).
+- [ ] Primary-input stream gate wired: admission probe AND-ed in + re-polled in `on_waiting_loop`; stall
+      demotion in `on_operating_loop`; recoverable-Degraded branch. Kill the producer → demote to Waiting &
+      stay alive; restart → re-admit. `<Stream>StallTimeoutMs` > producer HOLD; empty scene never trips it.
 - [ ] On a fresh mask the tracker births a `<obj>_*` node; `ensure_instance` fires once; FE is finite and
       the fit moves toward the object.
 - [ ] Dashboard panels populate (FE / dims / posterior σ); the gated AI2 CSV writes when its path is set.
-- [ ] RT edge carries a calibrated 6×6 `rt_covariance` (+ chain term when `RtCovAddChain`).
+- [ ] RT edge carries a calibrated 6×6 `rt_covariance` (+ the always-on `J·Σ_chain·Jᵀ` chain term).
 - [ ] (affordance) `aff_<obj>_*` node appears with a sane target + ΔH; controller honours the contract's
       `.still(v, ω)` (dwells before completing a look).
 - Day-one ≠ tuned: gains/deadbands/`epistemic.obs_distance` refine over a few live iterations.
 
 ---
 
-## 5. Worked example — `chair_concept` (the most evolved reference)
+## 5. Worked example — `chair_concept` (a POSE-ONLY legged model)
+
+Chair is the **simplest legged agent**: a chair is rigid standard furniture, so the belief estimates only
+its POSE against a fixed standard-chair TEMPLATE — it does **not** fit size. This deletes the whole
+degenerate size space (`seat_w/seat_d/seat_h/back_h`) that a flat-clutter escape valve kept
+collapsing/inflating one DOF at a time. (A global size scale could return later as ONE well-conditioned DOF;
+per-axis size is a further extension that would reinstate the seat/extent `accumulate_extra` anchors.)
 
 - `<Obj>Model` SDF = per-primitive box distances `{seat, back, leg×4}` in local frame, posed by
-  `(cx,cy,cz,yaw)`; `<Obj>Belief::responsibilities` soft-mixes them `[seat, back, leg0..3, clutter]`.
-- `N=8`, DOFs `[cx,cy,cz,yaw,seat_w,seat_d,seat_h,back_h]`.
-- `support.rests_on_surface=true` → `cz` pinned to the floor (`ai2_floor_z`), floor uncertainty → common-mode z.
-- `canonicalize` = no-op (a chair has a front); `resolve_orientation` does the 180° yaw disambiguation
-  (backrest breaks symmetry).
-- `accumulate_extra` = **seat-layer height anchor + footprint-extent anchor** (fixes `seat_h` gauge runaway
-  and `seat_d` collapse); density-aware clutter (`ai2_clutter_structure_gain`) closes the coplanar escape valve.
-- `epistemic.target=hidden-face`, `degenerate_dof=seat_d`. Tracker uses the belief mixture NLL
-  (`association_nll`) for association under same-class clutter.
-- Authored code ≈ `sdf_prim` + `responsibilities` + the two anchors in `accumulate_extra` + `ChairBeliefState`;
-  everything else is rename + spec-fill.
+  `(cx,cy,yaw)` with the **template** dims and `cz` pinned to the floor; `<Obj>Belief::responsibilities`
+  soft-mixes them `[seat, back, leg0..3, clutter]` with a z-band part attribution.
+- `N=3`, DOFs `[cx,cy,yaw]`. Size = fixed template (`tpl_seat_w/d/h`, `tpl_back_h`); `cz = ai2_floor_z`
+  (pinned, floor uncertainty → common-mode z). This is bottle-level conditioned: position is the point
+  centroid, yaw is fixed by the asymmetric backrest.
+- `canonicalize` = no-op (a chair has a front). `resolve_orientation` is a **4-way** sequential-Bayesian test
+  over `{0,π/2,π,3π/2}` on the clutter-inclusive NLL (the seat+legs are ~symmetric, so only real backrest
+  evidence moves it); its mode entropy folds into `covariance_reported()`'s yaw block, and it is clamped +
+  ego-motion-weighted (see the belief invariants above).
+- `accumulate_extra` = **none** (no size DOF to anchor). The obliquity yaw cap keys on the **vertical
+  backrest** normal `n̂=(sinψ,−cosψ)`, not a horizontal top.
+- `epistemic.target=hidden-face`, `degenerate_dof=yaw` (the backrest-revealing face). Tracker uses the belief
+  mixture NLL (`association_nll`) for association under same-class clutter.
+- Authored code ≈ `sdf_prim` + `responsibilities` + `resolve_orientation`/`covariance_reported` +
+  `ChairBeliefState`; everything else is rename + spec-fill.
+
+The **spec YAML in §0 shows the full 8-DOF size-fitting form** as an illustration of the prompt syntax; the
+shipped chair is the pose-only reduction above. Start a new legged agent from whichever matches the object:
+size-fitting (like table) or pose-only-on-a-template (like chair).
 
 ---
 
@@ -494,8 +618,9 @@ message channel down.
   holding the latent belief; connect it to each constituent by a **non-RT `member_of` edge**.
 - **Edge payload = the top-down message:** each `member_of` edge carries the **predicted slot pose + its
   covariance**. The constituent agent reads it and folds it in as an empirical-prior GN factor through the
-  `accumulate_extra` hook it already has (chair: alongside its seat/extent anchors) — exactly the existing
-  mechanism, zero engine change on the consumer side.
+  `accumulate_extra` hook (the C++23 `requires`-detected extra GN factor — chair currently defines none, so a
+  meta-consumer chair would ADD this one; bottle already has silhouette) — exactly the existing mechanism,
+  zero engine change on the consumer side.
 - ★**Single-writer:** the relational agent OWNS the `member_of` edge + payload; constituent agents only READ
   it. Same discipline as the RT chain-cov (one writer per edge).
 - ★★**Leave-one-out (the one real hazard):** the message sent DOWN to chair *i* must be the arrangement

@@ -38,15 +38,19 @@ std::optional<PerceptionFrame> ZedSource::operator()()
     pf.stamp  = stamp;
     pf.is_360 = false;
 
-    // room<-zed at the capture stamp (real ts → no InnerEigenAPI cache), own instance.
-    if (inner_eigen_ && graph_)
+    // room<-zed at the capture stamp WITH forward pose-extrapolation (the same correction the voxel path
+    // gets), so masks land at the capture-instant robot pose instead of the ~100 ms-lagged newest RT block.
+    // Own inner_eigen instance (ts!=0 room<-robot → no cache; ts==0 static robot->zed).
+    if (inner_eigen_ && graph_ && scene_)
     {
-        std::string room_name;
+        std::string room_name, robot_name;
         if (const auto rooms = graph_->get_nodes_by_type("room"); !rooms.empty())
             room_name = rooms.front().name();
-        if (!room_name.empty())
-            if (auto T = inner_eigen_->get_transformation_matrix(room_name, "zed", stamp); T.has_value())
-                pf.room_T_sensor = T.value();
+        if (const auto robots = graph_->get_nodes_by_type("robot"); !robots.empty())
+            robot_name = robots.front().name();
+        if (auto T = scene_->room_T_zed_extrapolated(inner_eigen_.get(), room_name, robot_name, stamp);
+            T.has_value())
+            pf.room_T_sensor = T.value();
     }
     return pf;
 }

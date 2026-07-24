@@ -407,11 +407,100 @@ void CabinetBelief::accumulate_axis_alignment(const CabinetBeliefState& s,
     bd(2)    += -lam * r;
 }
 
+// ─── Free-space / VACATE: the occlusion-aware UPPER bound that closes accumulate_extent ──────────────
+//
+// A LiDAR beam that TRAVERSES the carcass box and lands BEYOND its far face proves that crossing is empty.
+// Its midpoint is a witness point inside the footprint; driving the 2-D footprint SDF→0 there RETREATS the
+// nearest face just past it (shrink-only). p_through = Φ((1−t_far)·len/σ_surf) is the mixture posterior of
+// the "beam exited the far face" component vs "beam returned from the surface" — continuous, no gate, and
+// occlusion-aware BY GEOMETRY: a short return (occluder) has t_far>1 ⇒ p_through→0 ⇒ no witness past it, so
+// a legitimately occluded extension is never carved (it just ages). The full solid carcass [z0,z1] is the
+// carve volume (no legs, no top-slab z-gate — a cabinet is solid). Correlated beams saturate through the
+// engine's common-mode Woodbury, same as the range factor. Ported from table_belief's vacate term.
+void CabinetBelief::accumulate_freespace(const CabinetBeliefState& s, const CabinetFrame& f,
+                                         Eigen::Matrix<float, 7, 7>& Id, Eigen::Matrix<float, 7, 1>& bd) const
+{
+    dbg_vacate_beams_ = 0;
+    if (params_.free_space_precision <= 0.0f or f.lidar_freespace.endpoints.empty())
+        return;
+
+    const rc::ai::LidarRays& rays = f.lidar_freespace;
+    const float cyaw = std::cos(-s.yaw), syaw = std::sin(-s.yaw);
+    const float hL = 0.5f * std::max(kMinExtent, s.L);
+    const float hd = 0.5f * std::max(kMinExtent, s.d);
+    const float lo[3] = {-hL, -hd, s.z0};      // local carcass box: full footprint, SOLID z-band [z0,z1]
+    const float hi[3] = { hL,  hd, s.z1};
+    const float sigma_surf = std::sqrt(params_.sigma_base_m * params_.sigma_base_m
+                                     + params_.common_mode_pos_std * params_.common_mode_pos_std);
+    const auto phi = [](float x) { return 0.5f * std::erfc(-x * 0.70710678f); };   // Φ(x)
+
+    const Eigen::Vector3f& O = rays.origin;
+    const float oxr = O.x() - s.cx, oyr = O.y() - s.cy;
+    const Eigen::Vector3f Ol(oxr * cyaw - oyr * syaw, oxr * syaw + oyr * cyaw, O.z());   // sensor in local frame
+    for (const auto& ep : rays.endpoints)
+    {
+        const float exr = ep.x() - s.cx, eyr = ep.y() - s.cy;
+        const Eigen::Vector3f El(exr * cyaw - eyr * syaw, exr * syaw + eyr * cyaw, ep.z());
+        const Eigen::Vector3f dloc = El - Ol;                       // local ray (t=1 at the endpoint)
+        const float len = dloc.norm();
+        if (len < 1e-4f) continue;
+
+        float t_near = 0.0f, t_far = std::numeric_limits<float>::max();
+        bool miss = false;
+        for (int a = 0; a < 3 and not miss; ++a)
+        {
+            if (std::abs(dloc(a)) < 1e-6f) { if (Ol(a) < lo[a] or Ol(a) > hi[a]) miss = true; }
+            else
+            {
+                float t1 = (lo[a] - Ol(a)) / dloc(a), t2 = (hi[a] - Ol(a)) / dloc(a);
+                if (t1 > t2) std::swap(t1, t2);
+                t_near = std::max(t_near, t1);
+                t_far  = std::min(t_far,  t2);
+            }
+        }
+        if (miss or t_near > t_far or t_far < 0.0f or t_near >= 1.0f) continue;
+
+        const float p_through = phi((1.0f - t_far) / (sigma_surf / len));   // endpoint beyond far face ⇒ empty
+        if (p_through < 1e-3f) continue;
+
+        const float t_mid = 0.5f * (t_near + t_far);
+        const Eigen::Vector3f p_free = O + t_mid * (ep - O);       // WORLD witness point (certified empty)
+
+        // 2-D footprint SDF (L×d rectangle in the yaw frame, z ignored) — the 3-D box SDF is degenerate on
+        // the thin faces (∂/∂L=∂/∂d=0), so use the lateral SDF to recover the L/d/cx/cy gradient. e<0 (witness
+        // INSIDE the footprint) ⇒ driving e→0 retreats the nearest face just past it = shrink-only.
+        const auto sdf_fp = [&](const CabinetBeliefState& st) -> float
+        {
+            const float cc = std::cos(-st.yaw), s2 = std::sin(-st.yaw);
+            const float lx = (p_free.x() - st.cx) * cc - (p_free.y() - st.cy) * s2;
+            const float ly = (p_free.x() - st.cx) * s2 + (p_free.y() - st.cy) * cc;
+            const float dx = std::abs(lx) - 0.5f * st.L, dy = std::abs(ly) - 0.5f * st.d;
+            const float ox = std::max(dx, 0.0f), oy = std::max(dy, 0.0f);
+            return std::sqrt(ox * ox + oy * oy) + std::min(std::max(dx, dy), 0.0f);   // 2-D box SDF
+        };
+        const float e = sdf_fp(s);
+        if (e >= 0.0f) continue;                                   // must be inside the footprint to shrink
+        Eigen::Matrix<float, 7, 1> J;
+        const Eigen::Matrix<float, 7, 1> base = s.vec();
+        const float fde = params_.fd_eps;
+        for (int j = 0; j < 7; ++j)
+        {
+            Eigen::Matrix<float, 7, 1> vp = base, vm = base; vp(j) += fde; vm(j) -= fde;
+            J(j) = (sdf_fp(CabinetBeliefState::from_vec(vp)) - sdf_fp(CabinetBeliefState::from_vec(vm))) / (2.0f * fde);
+        }
+        const float w = params_.free_space_precision * p_through;
+        Id.noalias() += w * (J * J.transpose());
+        bd.noalias() += -w * J * e;
+        ++dbg_vacate_beams_;
+    }
+}
+
 void CabinetBelief::accumulate_extra(const CabinetBeliefState& s, const CabinetFrame& f,
                                      Eigen::Matrix<float, 7, 7>& Id, Eigen::Matrix<float, 7, 1>& bd) const
 {
     accumulate_wall(s, f, Id, bd);
     accumulate_extent(s, f, Id, bd);
+    accumulate_freespace(s, f, Id, bd);   // occlusion-aware UPPER bound closing the one-sided extent
     accumulate_axis_alignment(s, Id, bd);
 
     // YOLO-independent LiDAR first-hit range factor, once per device ray-set (each keeps its OWN
@@ -435,6 +524,26 @@ void CabinetBelief::accumulate_extra(const CabinetBeliefState& s, const CabinetF
 float CabinetBelief::tier_posterior() const
 {
     return 1.0f / (1.0f + std::exp(tier_evidence_));   // p(alternative tier)
+}
+
+// REPORTED covariance: Σ_ with the discrete TIER-mode entropy folded into the DOFs the tier actually
+// loads — d (4), z0 (5), z1 (6). For each, add p(1−p)Δ² where p = tier_posterior() and Δ is the gap
+// between the two tiers' prior means for that DOF (base vs wall). Undecided tier (p≈½) → an honest wide
+// σ that straddles both carcasses; resolved (p→0) → collapses to Σ_. Diagonal-only (mirrors table/chair).
+Eigen::Matrix<float, 7, 7> CabinetBelief::covariance_reported() const
+{
+    Eigen::Matrix<float, 7, 7> S = Sigma_;
+    const float p  = tier_posterior();
+    const float pe = std::max(0.0f, p * (1.0f - p));   // discrete-mode entropy weight, p∈[0,1] ⇒ ≥0
+    const CabinetTierPrior& b = params_.base_tier;
+    const CabinetTierPrior& w = params_.wall_tier;
+    const float dd  = std::abs(b.d_mean  - w.d_mean);   // Δ: tier separation for each loaded DOF
+    const float dz0 = std::abs(b.z0_mean - w.z0_mean);
+    const float dz1 = std::abs(b.z1_mean - w.z1_mean);
+    S(4, 4) += pe * dd  * dd;
+    S(5, 5) += pe * dz0 * dz0;
+    S(6, 6) += pe * dz1 * dz1;
+    return S;
 }
 
 // Sequential Bayesian comparison of {current tier, other tier}. A Laplace filter cannot represent the
@@ -669,6 +778,20 @@ bool CabinetBelief::self_test()
         for (int it = 0; it < 12 and not switched; ++it)
             switched = b.resolve_tier(pts, R, 1.0f);
         check(switched and b.tier() == CabinetTier::Base, "tier mode switches to Base for a floor-level cloud");
+    }
+
+    // ── (e′) covariance_reported() folds the tier-mode entropy into (d,z0,z1) ──────────────────
+    {
+        CabinetBelief bu(gt, pr);                             // fresh ⇒ tier_evidence_=0 ⇒ p=½ (undecided)
+        const auto cov = bu.covariance();
+        const auto rep = bu.covariance_reported();
+        check(rep(5, 5) > cov(5, 5) and rep(6, 6) > cov(6, 6),
+              "covariance_reported inflates σ_z0/σ_z1 while the tier is undecided (p≈½)");
+        // Accumulate agreeing base-cloud frames (no switch) ⇒ tier_evidence_ grows ⇒ p→0 ⇒ collapse to Σ_.
+        for (int it = 0; it < 40; ++it) bu.resolve_tier(pts, R, 1.0f);
+        const auto rep2 = bu.covariance_reported();
+        check(rep2(5, 5) < rep(5, 5) and std::abs(rep2(5, 5) - bu.covariance()(5, 5)) < 1e-4f,
+              "covariance_reported collapses to Σ_ on z once the tier resolves (p→0)");
     }
 
     // ── (f) THE PENINSULA. A U-/L-kitchen aisle runs parallel to a wall but touches it on only one

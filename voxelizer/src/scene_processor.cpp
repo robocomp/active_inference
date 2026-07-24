@@ -182,71 +182,108 @@ std::optional<Mat::RTMat> SceneProcessor::get_room_robot_transform(FPSCounter& c
         return std::nullopt;
     }
 
-    // DSR's InterpolatedRT clamps the pose to the newest RT block, which lags the camera capture stamp
-    // by ~100 ms — so masks would deproject against a stale robot pose. Extrapolate the pose FORWARD to
-    // the capture stamp using the body-frame velocity room_concept writes on the robot→room RT edge
-    // (rt_translation_velocity=[adv,side,0], rt_rotation_euler_xyz_velocity=[0,0,rot]). Consumer-side,
-    // no producer rate change — the same efference-copy trick the controller uses for its overlay.
-    if (mask_pose_extrapolate_ && graph_ && graph_->get_rt_api())
+    // DSR's InterpolatedRT clamps the pose to the newest RT block, which lags the camera capture stamp by
+    // ~100 ms — so masks would deproject against a stale robot pose. Roll it FORWARD to the capture stamp
+    // via the shared helper (efference copy off the robot→room RT-edge velocity), then log raw vs
+    // extrapolated for analysis. The masks worker path uses the same helper (room_T_zed_extrapolated).
+    if (mask_pose_extrapolate_)
     {
-        const auto robot_node = graph_->get_node(robot_name);
-        const auto room_node  = graph_->get_node(room_name);
-        if (robot_node.has_value() && room_node.has_value())
+        PoseExtrapDiag diag;
+        forward_extrapolate_room_T_robot(room_T_robot.value(), room_name, robot_name, timestamp_ms, diag);
+        if (diag.applied)
         {
-            if (auto edge = graph_->get_rt_api()->get_edge_RT(robot_node.value(), room_node.value().id());
-                edge.has_value())
+            if (!pose_extrap_csv_open_attempted_)
             {
-                const auto ts = graph_->get_attrib_by_name<rt_timestamps_att>(edge.value());
-                const auto tv = graph_->get_attrib_by_name<rt_translation_velocity_att>(edge.value());
-                const auto rv = graph_->get_attrib_by_name<rt_rotation_euler_xyz_velocity_att>(edge.value());
-                if (ts.has_value() && tv.has_value() && tv->get().size() >= 2
-                    && rv.has_value() && rv->get().size() >= 3)
-                {
-                    std::uint64_t newest = 0;
-                    for (const auto t : ts->get())
-                        newest = std::max(newest, t);
-                    if (newest > 0 && timestamp_ms > newest)
-                    {
-                        float dt = static_cast<float>(timestamp_ms - newest) * 1e-3f;
-                        dt = std::min(dt, mask_pose_extrap_max_dt_s_);
-                        const double adv = tv->get()[0], side = tv->get()[1], rot = rv->get()[2];
-                        auto& T = room_T_robot.value();
-                        const Eigen::Matrix3d R = T.linear();
-                        const double th  = std::atan2(R(1, 0), R(0, 0));
-                        const double raw_x = T.translation().x(), raw_y = T.translation().y();
-                        const double dth = rot * dt;
-                        const double thm = th + 0.5 * dth;   // midpoint integration
-                        const double dx = (adv * std::cos(thm) - side * std::sin(thm)) * dt;
-                        const double dy = (adv * std::sin(thm) + side * std::cos(thm)) * dt;
-                        T.translation().x() += dx;
-                        T.translation().y() += dy;
-                        T.linear() = (Eigen::AngleAxisd(dth, Eigen::Vector3d::UnitZ()).toRotationMatrix() * R);
-
-                        // Log raw vs extrapolated pose + dt/velocity/displacement for analysis.
-                        if (!pose_extrap_csv_open_attempted_)
-                        {
-                            pose_extrap_csv_open_attempted_ = true;
-                            pose_extrap_csv_.open("etc/pose_extrap_log.csv", std::ios::out | std::ios::trunc);
-                            if (pose_extrap_csv_.is_open())
-                                pose_extrap_csv_ << "frame_ts_ms,newest_block_ms,dt_s,adv,side,rot,"
-                                                    "raw_x,raw_y,raw_th,ext_x,ext_y,ext_th,disp_m,dtheta_rad\n";
-                        }
-                        if (pose_extrap_csv_.is_open())
-                        {
-                            pose_extrap_csv_ << timestamp_ms << ',' << newest << ',' << dt << ','
-                                             << adv << ',' << side << ',' << rot << ','
-                                             << raw_x << ',' << raw_y << ',' << th << ','
-                                             << (raw_x + dx) << ',' << (raw_y + dy) << ',' << (th + dth) << ','
-                                             << std::hypot(dx, dy) << ',' << dth << '\n';
-                            pose_extrap_csv_.flush();
-                        }
-                    }
-                }
+                pose_extrap_csv_open_attempted_ = true;
+                pose_extrap_csv_.open("etc/pose_extrap_log.csv", std::ios::out | std::ios::trunc);
+                if (pose_extrap_csv_.is_open())
+                    pose_extrap_csv_ << "frame_ts_ms,newest_block_ms,dt_s,adv,side,rot,"
+                                        "raw_x,raw_y,raw_th,ext_x,ext_y,ext_th,disp_m,dtheta_rad\n";
+            }
+            if (pose_extrap_csv_.is_open())
+            {
+                pose_extrap_csv_ << timestamp_ms << ',' << diag.newest_block_ms << ',' << diag.dt_s << ','
+                                 << diag.adv << ',' << diag.side << ',' << diag.rot << ','
+                                 << diag.raw_x << ',' << diag.raw_y << ',' << diag.raw_th << ','
+                                 << (diag.raw_x + diag.dx) << ',' << (diag.raw_y + diag.dy) << ','
+                                 << (diag.raw_th + diag.dth) << ','
+                                 << std::hypot(diag.dx, diag.dy) << ',' << diag.dth << '\n';
+                pose_extrap_csv_.flush();
             }
         }
     }
 
     return room_T_robot;
+}
+
+void SceneProcessor::forward_extrapolate_room_T_robot(Mat::RTMat& room_T_robot, const std::string& room_name,
+                                                      const std::string& robot_name, std::uint64_t timestamp_ms,
+                                                      PoseExtrapDiag& diag) const
+{
+    if (graph_ == nullptr || graph_->get_rt_api() == nullptr)
+        return;
+    const auto robot_node = graph_->get_node(robot_name);
+    const auto room_node  = graph_->get_node(room_name);
+    if (!robot_node.has_value() || !room_node.has_value())
+        return;
+    const auto edge = graph_->get_rt_api()->get_edge_RT(robot_node.value(), room_node.value().id());
+    if (!edge.has_value())
+        return;
+    const auto ts = graph_->get_attrib_by_name<rt_timestamps_att>(edge.value());
+    const auto tv = graph_->get_attrib_by_name<rt_translation_velocity_att>(edge.value());
+    const auto rv = graph_->get_attrib_by_name<rt_rotation_euler_xyz_velocity_att>(edge.value());
+    if (!ts.has_value() || !tv.has_value() || tv->get().size() < 2 || !rv.has_value() || rv->get().size() < 3)
+        return;
+
+    std::uint64_t newest = 0;
+    for (const auto t : ts->get())
+        newest = std::max(newest, t);
+    if (newest == 0 || timestamp_ms <= newest)
+        return;
+
+    float dt = static_cast<float>(timestamp_ms - newest) * 1e-3f;
+    dt = std::min(dt, mask_pose_extrap_max_dt_s_);
+    const double adv = tv->get()[0], side = tv->get()[1], rot = rv->get()[2];
+    const Eigen::Matrix3d R = room_T_robot.linear();
+    const double th    = std::atan2(R(1, 0), R(0, 0));
+    const double raw_x = room_T_robot.translation().x(), raw_y = room_T_robot.translation().y();
+    const double dth = rot * dt;
+    const double thm = th + 0.5 * dth;   // midpoint integration
+    const double dx = (adv * std::cos(thm) - side * std::sin(thm)) * dt;
+    const double dy = (adv * std::sin(thm) + side * std::cos(thm)) * dt;
+    room_T_robot.translation().x() += dx;
+    room_T_robot.translation().y() += dy;
+    room_T_robot.linear() = (Eigen::AngleAxisd(dth, Eigen::Vector3d::UnitZ()).toRotationMatrix() * R);
+
+    diag = PoseExtrapDiag{ newest, dt, adv, side, rot, raw_x, raw_y, th, dx, dy, dth, /*applied=*/true };
+}
+
+std::optional<Mat::RTMat> SceneProcessor::room_T_zed_extrapolated(DSR::InnerEigenAPI* eigen,
+                                                                  const std::string& room_name,
+                                                                  const std::string& robot_name,
+                                                                  std::uint64_t stamp) const
+{
+    if (eigen == nullptr || room_name.empty() || robot_name.empty())
+        return std::nullopt;
+
+    // room←robot at the capture stamp (ts!=0 → no InnerEigenAPI cache), then forward-extrapolate to beat
+    // the RT lag — the same correction the voxel path applies.
+    auto room_T_robot = eigen->get_transformation_matrix(room_name, robot_name, stamp);
+    if (!room_T_robot.has_value())
+        return std::nullopt;
+    if (mask_pose_extrapolate_)
+    {
+        PoseExtrapDiag diag;   // discarded — no CSV logging off the worker thread
+        forward_extrapolate_room_T_robot(room_T_robot.value(), room_name, robot_name, stamp, diag);
+    }
+
+    // robot→zed is the rigid, static camera extrinsic → query "latest" (ts==0) on the CALLER's own instance,
+    // so the ts==0 cache stays per-thread; the extrinsic never changes so a stale cache is harmless.
+    const auto robot_T_zed = eigen->get_transformation_matrix(robot_name, "zed", 0);
+    if (!robot_T_zed.has_value())
+        return std::nullopt;
+
+    return room_T_robot.value() * robot_T_zed.value();
 }
 
 std::optional<Mat::RTMat> SceneProcessor::get_room_zed_transform(FPSCounter& compute_fps,
@@ -722,28 +759,29 @@ void SceneProcessor::update_viewer_mask_points()
     // furniture mask (class_id >= 1000, produced by SemanticMaskStage: cabinet/hood/shelf/…) — so the
     // Masks toggle shows them; other detections are clutter here. Coloured by color_for_category. Per-mask
     // point ranges come from mask_support_offsets; label i in mask_labels ('|'-joined) owns [offsets[i], offsets[i+1]).
-    static const std::array<std::string_view, 3> kDrawnMaskLabels{"bottle", "table", "chair"};
+    static const std::array<std::string_view, 5> kDrawnMaskLabels{"bottle", "table", "chair",
+                                                                  "refrigerator", "microwave"};
     std::vector<QVector3D>   mask_points;
     std::vector<std::string> mask_categories;   // parallel to mask_points → per-class colour in the viewer
     std::vector<float>       mask_sources;       // parallel to mask_points → sensor source (0=zed, 1=ricoh) → brightness
     if (const auto masks_node = graph_->get_node("masks"); masks_node.has_value())
     {
-        const auto& attrs = masks_node->attrs();
-        const auto pts_it     = attrs.find("mask_support_points");
-        const auto off_it     = attrs.find("mask_support_offsets");
-        const auto labels_it  = attrs.find("mask_labels");
-        const auto ids_it     = attrs.find("mask_label_ids");   // class_id per mask; semantic masks use 1000+ade_id
-        const auto src_it     = attrs.find("mask_source");   // optional (older producers omit it → treated as zed/bright)
-        if (pts_it != attrs.end() and off_it != attrs.end() and labels_it != attrs.end())
+        // TYPE-ATTRIBUTED reads (CLAUDE.md), compile-checked against dsr_attr_name.h.
+        const auto pts_opt    = graph_->get_attrib_by_name<mask_support_points_att>(masks_node.value());
+        const auto off_opt    = graph_->get_attrib_by_name<mask_support_offsets_att>(masks_node.value());
+        const auto labels_opt = graph_->get_attrib_by_name<mask_labels_att>(masks_node.value());
+        const auto ids_opt    = graph_->get_attrib_by_name<mask_label_ids_att>(masks_node.value());  // class_id per mask; semantic masks use 1000+ade_id
+        const auto src_opt    = graph_->get_attrib_by_name<mask_source_att>(masks_node.value());     // optional (older producers omit it → treated as zed/bright)
+        if (pts_opt and off_opt and labels_opt)
         {
-            const auto& flat    = pts_it->second.float_vec();
-            const auto& offsets = off_it->second.float_vec();
+            const auto& flat    = pts_opt->get();
+            const auto& offsets = off_opt->get();
             const std::vector<float> empty_src;
-            const auto& sources = (src_it != attrs.end()) ? src_it->second.float_vec() : empty_src;
-            const auto& label_ids = (ids_it != attrs.end()) ? ids_it->second.float_vec() : empty_src;
+            const auto& sources = src_opt ? src_opt->get() : empty_src;
+            const auto& label_ids = ids_opt ? ids_opt->get() : empty_src;
 
             std::vector<std::string> labels;
-            std::stringstream ls(labels_it->second.str());
+            std::stringstream ls(labels_opt->get());
             for (std::string lbl; std::getline(ls, lbl, '|'); )
                 labels.push_back(lbl);
 

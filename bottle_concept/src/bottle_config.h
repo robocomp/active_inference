@@ -20,7 +20,16 @@ struct BottleConfig
 {
     float fe_eps           = 1e-3f;
     int   K_stable         = 30;
-    int   diverged_retire_frames = 20;   // retire an instance after this many consecutive no-data (E==0) fits; 0 = off
+    int   diverged_retire_frames = 20;   // retire an instance after this many consecutive unexplained fits; 0 = off
+    // Divergence sentinel (replaces the old surface-energy==0 all-clutter test): a frame is UNEXPLAINED when
+    // its mean clutter responsibility exceeds this — the honest "the cylinder explains none of its data"
+    // signal on the clutter-inclusive free energy. A healthy fit sits well below (most points on-surface).
+    float clutter_diverge_frac = 0.90f;
+    // FE-surprise attention baseline (TABLE.md §9): asymmetric EMA (down fast = consolidate a better fit; up
+    // slow = a sustained rise, the bottle moved, stays surprising) + a smoothed positive gap = the surprise.
+    float fe_baseline_adapt_down = 0.05f;
+    float fe_baseline_adapt_up   = 0.005f;
+    float fe_surprise_smooth     = 0.10f;
     float max_step_m       = 0.5f;   // reject a frame whose net centre move exceeds this (m); a bottle can't teleport — a corrupted cloud can. 0 = off
     float write_threshold  = 1e-3f;
     int   log_period_frames = 30;
@@ -28,6 +37,13 @@ struct BottleConfig
     float voxel_bank_quantization_m = 0.01f;
     float voxel_select_radius_margin_m = 0.10f;
     float voxel_select_height_margin_m = 0.10f;
+
+    // ── Primary-input stream gate (readiness + staleness) — LIFECYCLE, not a belief knob ──────────────
+    // Demote Operating→Degraded→Waiting when the voxelizer's `masks` node stops advancing its mask_frame_id
+    // for this long (producer dead/stalled) — don't integrate stale evidence; re-admit when it returns.
+    // Orthogonal to ai2_age_nominal_dt_s (belief-axis Σ-aging). MUST exceed the voxelizer HOLD_ENTER_S so a
+    // legitimately empty scene (still-advancing counter) never trips it. 0 = disable the gate.
+    int   masks_stall_timeout_ms       = 3000;
 
     // BottleModel prior geometry (forwarded to BottleModelParams — the model is the SDF + state carrier).
     float prior_radius      = 0.035f;

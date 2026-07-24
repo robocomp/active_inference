@@ -72,10 +72,11 @@ EpistemicProposal EpistemicPlanner::compute(const CabinetBelief& belief, float l
     constexpr float kMinimumStandOffM = 1.15f;         // YOLO won't fire too close → keep a viewing gap
     constexpr float kStandOffSafetyMarginM = 0.45f;    // extra stand-off beyond the FoV-fit distance
 
-    // REPORTED covariance: Σ with the yaw entry inflated by the discrete-mode entropy (p(1−p)(π/2)²), so a
-    // near-square cabinet whose orientation mode is unresolved shows a large yaw variance → the D-optimal NBV
-    // scores a mode-discriminating (side/leg) view highly and drives the orbit that resolves it.
-    const Eigen::Matrix<float, 7, 7> S = belief.covariance();   // [cx,cy,yaw,L,d,z0,z1] — full state, matching predicted_information's ordering
+    // REPORTED covariance: Σ with the (d,z0,z1) entries inflated by the discrete TIER-mode entropy
+    // (p(1−p)Δ²), so a cabinet whose base-vs-wall tier is still unresolved shows a large σ_z → it stays
+    // inadequate on those DOFs and the D-optimal NBV scores a tier-discriminating (height) view highly,
+    // driving the view that resolves the mode.
+    const Eigen::Matrix<float, 7, 7> S = belief.covariance_reported();   // [cx,cy,yaw,L,d,z0,z1] — full state, matching predicted_information's ordering
     const CabinetBeliefState& s = belief.state();
 
     const float cy = std::cos(s.yaw), sy = std::sin(s.yaw);

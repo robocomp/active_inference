@@ -121,15 +121,36 @@ void SpecificWorker::merge_overlapping_instances()
             const float z_overlap = std::min(sa.z1, sb.z1) - std::max(sa.z0, sb.z0);
             if (z_overlap <= 0.0f) continue;
 
-            // COLLINEAR-RUN merge: the operator that turns "a run glimpsed in pieces" into one object.
-            // Oriented-rectangle overlap (still used by table/chair) can never join two co-linear
-            // NON-overlapping fragments — the dominant duplicate mode for a run — so use the segment test
-            // against the pair's joint uncertainty. sigma_L gets a generous floor: fragments seen seconds
-            // apart legitimately abut with a gap on the order of the mask's own coarseness.
-            const float s_yaw = std::hypot(sd(ia->second, 2), sd(ib->second, 2)) + 0.05f;   // yaw index 2
-            const float s_lat = std::hypot(sd(ia->second, 1), sd(ib->second, 1)) + 0.10f;   // lateral floor
-            const float s_L   = std::hypot(sd(ia->second, 3), sd(ib->second, 3)) + cfg_.merge_gap_floor_m;
-            const auto m = rc::geom::collinear_merge(sa, sb, s_yaw, s_lat, s_L, cfg_.merge_n_sigma);
+            // WALL-KEYED IDENTITY (re-key Stage 3). Two runs committed to the SAME wall + same tier, both
+            // FLUSH-anchored, ARE the same physical run — merge them BY CONSTRUCTION (take the union
+            // interval), with NO σ-gated collinear test that an unconverged covariance could defeat (the
+            // root cause behind the whole merge-churn patch chain). A free-standing or not-yet-committed
+            // run has no reliable wall id, so it falls back to the geometric collinear test below.
+            const auto& A = ia->second;
+            const auto& B = ib->second;
+            const bool same_cell = A.committed_wall_seg_id >= 0
+                                   and A.committed_wall_seg_id == B.committed_wall_seg_id
+                                   and A.ai2_belief.tier() == B.ai2_belief.tier();
+            const bool both_flush = std::abs(A.ai2_belief.last_wall_gap()) < cfg_.wall_reach_m
+                                    and std::abs(B.ai2_belief.last_wall_gap()) < cfg_.wall_reach_m;
+
+            rc::geom::RunMerge m;
+            if (same_cell and both_flush)
+            {
+                // Identity ⇒ gates inert (huge σ) so collinear_merge just returns the union geometry.
+                m = rc::geom::collinear_merge(sa, sb, 1.0e3f, 1.0e3f, 1.0e3f, 1.0f);
+            }
+            else
+            {
+                // COLLINEAR-RUN merge: turn "a run glimpsed in pieces" into one object. Oriented-rectangle
+                // overlap can never join two co-linear NON-overlapping fragments, so use the segment test
+                // against the pair's joint uncertainty (sigma_L floored: fragments seen seconds apart abut
+                // with a gap on the order of the mask's coarseness).
+                const float s_yaw = std::hypot(sd(A, 2), sd(B, 2)) + 0.05f;   // yaw index 2
+                const float s_lat = std::hypot(sd(A, 1), sd(B, 1)) + 0.10f;   // lateral floor
+                const float s_L   = std::hypot(sd(A, 3), sd(B, 3)) + cfg_.merge_gap_floor_m;
+                m = rc::geom::collinear_merge(sa, sb, s_yaw, s_lat, s_L, cfg_.merge_n_sigma);
+            }
             if (not m.merge) continue;
 
             // Keep the more-observed instance and GRAFT the fused length onto it, so the union interval
@@ -227,7 +248,10 @@ void SpecificWorker::run_instance_tracker()
             // association: the z_gate (|0.8−base_zc|≈0.4 < ZGateM) binds it to the base run below and keeps
             // it off the upper tier (|0.8−1.7|>gate); observe_slice then feeds its points to the belief,
             // where they land on the top face (SDF≈0 → candidate) and drive accumulate_extent's full span.
-            const bool is_cabinet = sl.label == "cabinet";
+            // A 'chest of drawers' is standalone storage furniture — a cabinet run in its own right, so it
+            // is a BIRTHABLE cabinet label just like 'cabinet' (fits a short run; wall-flush handles whether
+            // it stands against a wall or free). Its carcass reaches the floor, so it is a base-tier run.
+            const bool is_cabinet = sl.label == "cabinet" or sl.label == "chest of drawers";
             const bool is_counter = cfg_.counter_evidence_enabled
                                     and (sl.label == "counter" or sl.label == "countertop");
             if ((not is_cabinet and not is_counter) or sl.support_end <= sl.support_begin)
@@ -409,7 +433,7 @@ void SpecificWorker::split_lshaped_cabinet_masks()
     {
         // 'counter' masks split too: a countertop that wraps the U spans multiple runs and must decompose
         // per-arm just like the carcass mask (a straight counter yields one arm ⇒ unchanged).
-        const bool label_ok = s.label == "cabinet"
+        const bool label_ok = s.label == "cabinet" or s.label == "chest of drawers"
                               or (cfg_.counter_evidence_enabled and (s.label == "counter" or s.label == "countertop"));
         const bool splittable = label_ok and s.has_depth and s.support_end > s.support_begin;
         if (not splittable) { out.push_back(s); continue; }

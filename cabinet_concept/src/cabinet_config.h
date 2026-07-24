@@ -20,6 +20,13 @@ struct CabinetConfig
     float state_eps                    = 0.04f;   // Σ|Δstate| convergence threshold between cycles (m+rad)
     int   K_stable                     = 30;      // consecutive converged cycles before model_stable
     int   detection_alive_max_frames   = 40;      // cycles without a fresh mask before detection_alive=false
+
+    // ── Primary-input stream gate (readiness + staleness) — LIFECYCLE, not a belief knob ──────────────
+    // Demote Operating→Degraded→Waiting when the voxelizer's `masks` node stops advancing its mask_frame_id
+    // for this long (producer dead/stalled) — don't integrate stale evidence; re-admit when it returns.
+    // Orthogonal to ai2_age_nominal_dt_s (belief-axis Σ-aging). MUST exceed the voxelizer HOLD_ENTER_S so a
+    // legitimately empty scene (still-advancing counter) never trips it. 0 = disable the gate.
+    int   masks_stall_timeout_ms       = 3000;
     float obs_distance                 = 1.8f;    // d_obs for the epistemic planner
     int   epistemic_cooldown_cycles    = 200;     // min cycles withdrawn after satisfaction
     int   cabinet_log_period_frames      = 30;      // per-cycle log throttle
@@ -69,7 +76,11 @@ struct CabinetConfig
     // Wall-flush factor: the back face is never observed, so (centre-along-normal, depth) is a null
     // direction; the wall breaks it. The precision is the marginal of a {flush, free-standing}
     // mixture, so it decays continuously with the gap — a free-standing island needs no special case.
-    float wall_precision          = 400.0f;  // 1/m² at zero gap (0 = OFF)
+    float wall_precision          = 400.0f;  // 1/m² at zero gap (0 = OFF). NB: bumping this to force WT1's
+                                              // back onto the wall did NOT help — d and the flush are a
+                                              // coupled null-direction, so a precision knob just moves the
+                                              // equilibrium. The clean fix is the wall-chart reparametrization
+                                              // (θ_wall with δ_lat≡0), see WALL_KEYED_REKEY_PLAN.md.
     float wall_reach_m            = 0.35f;   // gap scale over which the flush hypothesis loses weight
     float wall_sigma_m            = 0.02f;   // room-model wall position uncertainty (m)
     float wall_parallel_precision = 200.0f;  // on sin(angle between run axis and wall) (0 = OFF)
@@ -97,8 +108,15 @@ struct CabinetConfig
     // the cloud; shrinking belongs to the free-space channel, never here.
     float extent_precision        = 800.0f;  // 1/m² on the end-containment residuals (0 = OFF)
     // Standard kitchen carcass priors per TIER, selected by model evidence (never a height cut).
-    float base_depth_m = 0.60f, base_depth_std = 0.10f;
-    float base_z0_m    = 0.00f, base_z0_std    = 0.05f;
+    float base_depth_m = 0.60f, base_depth_std = 0.04f;   // base cabinets are ~60 cm deep almost
+                                                          // universally → STRONG prior. The back face is
+                                                          // never observed, so without this the visible
+                                                          // near-face slab shrinks d (WT1 fit 0.28); the
+                                                          // wall-flush pins the back, this pins the depth.
+    float base_z0_m    = 0.00f, base_z0_std    = 0.02f;   // a base carcass sits ON the floor: strong prior
+                                                          // so a free-standing run whose floor contact is
+                                                          // occluded (only its top/counter seen) is not
+                                                          // lifted off z0=0 by the visible points.
     float base_z1_m    = 0.90f, base_z1_std    = 0.06f;   // worktop height
     float wall_depth_m = 0.35f, wall_depth_std = 0.08f;
     float wall_z0_m    = 1.45f, wall_z0_std    = 0.15f;

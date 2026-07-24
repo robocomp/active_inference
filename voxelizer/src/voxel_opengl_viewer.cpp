@@ -369,8 +369,11 @@ void VoxelOpenGLViewer::update_mask_points(std::span<const QVector3D> positions,
         // fall back to off-white when no category is supplied. Brightened so the points stay legible.
         QColor c(235, 235, 242);
         if (not categories.empty() and i < categories.size())
-            c = categories[i] == "bottle" ? QColor(255, 40, 40)   // bottle mask: red (contrasts the magenta cylinder)
-                                          : color_for_category(categories[i]).lighter(125);
+        {
+            if (categories[i] == "bottle")       c = QColor(255, 40, 40);    // bottle mask: red (contrasts the magenta cylinder)
+            else if (categories[i] == "cabinet") c = QColor(120, 200, 255);  // cabinet mask: light blue (contrasts the orange carcass)
+            else                                 c = color_for_category(categories[i]).lighter(125);
+        }
         // Source brightness channel: keep the category HUE but dim + desaturate ricoh (360) points so
         // the front RGB-D (zed, bright) and peripheral 360 evidence read apart at a glance.
         if (not sources.empty() and i < sources.size() and sources[i] > 0.5f)
@@ -739,20 +742,9 @@ void VoxelOpenGLViewer::paintGL()
         glEnable(GL_DEPTH_TEST);
     }
 
-    if (has_residual && show_residual_)
-    {
-        glDisable(GL_DEPTH_TEST);
-        room_vao_.bind();
-        room_vbo_.bind();
-        room_vbo_.allocate(residual_draw_vertices.data(), static_cast<int>(residual_draw_vertices.size() * sizeof(Vertex)));
-        program_.setUniformValue("u_round_points", 1);
-        program_.setUniformValue("u_point_size", 6.0f);
-        glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(residual_draw_vertices.size()));
-        program_.setUniformValue("u_point_size", 4.5f);
-        room_vbo_.release();
-        room_vao_.release();
-        glEnable(GL_DEPTH_TEST);
-    }
+    // NOTE: the residual point cloud is drawn LATER, with the mask overlay (see end of paintGL). Drawing it
+    // here painted it UNDER the opaque belief-field surprise-landscape mesh and the solid object meshes, so it
+    // was invisible whenever the Field/models layers covered it — same hazard the mask overlay avoids.
 
     // residual_concept occupancy grid — inflated clearance BORDER first (cyan, under the obstacle), then the
     // OCCUPIED cells (amber) on top, both square cell-like points. Same `Grid` toggle.
@@ -1443,6 +1435,23 @@ void VoxelOpenGLViewer::paintGL()
         }
     }
 
+    // Residual (model-unexplained) point cloud — drawn LATE as a depth-test-off overlay, same as the mask
+    // points, so the opaque belief-field mesh / object meshes drawn above don't paint over it.
+    if (has_residual && show_residual_)
+    {
+        glDisable(GL_DEPTH_TEST);
+        room_vao_.bind();
+        room_vbo_.bind();
+        room_vbo_.allocate(residual_draw_vertices.data(), static_cast<int>(residual_draw_vertices.size() * sizeof(Vertex)));
+        program_.setUniformValue("u_round_points", 1);
+        program_.setUniformValue("u_point_size", 6.0f);
+        glDrawArrays(GL_POINTS, 0, static_cast<GLsizei>(residual_draw_vertices.size()));
+        program_.setUniformValue("u_point_size", 4.5f);
+        room_vbo_.release();
+        room_vao_.release();
+        glEnable(GL_DEPTH_TEST);
+    }
+
     // Mask support points — drawn LAST as a depth-test-off overlay so they stay visible on top of
     // the solid bottle cylinder / object meshes from any view angle (notably from above).
     if (has_mask && show_masks_)
@@ -1609,7 +1618,8 @@ QColor VoxelOpenGLViewer::color_for_category(const std::string& category)
     if (category == "bottle") return QColor(255, 0, 200);  // hot magenta — bottle cylinder boxes
     if (category == "monitor") return QColor(186, 85, 211); // orchid-violet
     if (category == "obstacle") return QColor(255, 45, 45); // red — residual_concept obstacle boxes (obstacle=red)
-    if (category == "cabinet") return QColor(0, 210, 210);  // cyan — cabinet_concept fitted carcass models
+    if (category == "cabinet") return QColor(255, 140, 0);  // orange — cabinet_concept fitted carcass models (distinct from the light-blue cabinet mask)
+    if (category == "hood") return QColor(0, 210, 210);     // cyan — range-hood semantic masks
 
     static const std::array<QColor, 20> palette = {
         QColor(220, 20, 60), QColor(0, 90, 181), QColor(34, 139, 34), QColor(255, 140, 0),

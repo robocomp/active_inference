@@ -127,32 +127,29 @@ std::vector<SkeletonBody> DsrSkeletonSource::poll()
     if (not node_opt.has_value())
         return {};
 
-    const auto& attrs = node_opt.value().attrs();
-    const auto find_attr = [&](const std::string& key) -> const DSR::Attribute*
-    {
-        const auto it = attrs.find(key);
-        return (it != attrs.end()) ? &it->second : nullptr;
-    };
-
-    const DSR::Attribute* frame_attr = find_attr("skeleton_frame_id");
-    const DSR::Attribute* count_attr = find_attr("skeleton_count");
-    const DSR::Attribute* ids_attr   = find_attr("skeleton_ids");
-    const DSR::Attribute* xyz_attr   = find_attr("skeleton_kp_xyz");
-    const DSR::Attribute* conf_attr  = find_attr("skeleton_kp_conf");
-    const DSR::Attribute* ts_attr    = find_attr("skeleton_timestamp_ms");   // capture stamp (optional)
-    if (not frame_attr or not count_attr or not xyz_attr)
+    // TYPE-ATTRIBUTED reads (CLAUDE.md), compile-checked against dsr_attr_name.h. Optionals held so the
+    // reference_wrapper payloads stay alive; skeleton_timestamp_ms is uint64 (read via .value()).
+    const auto& node = node_opt.value();
+    using VecOpt = std::optional<std::reference_wrapper<const std::vector<float>>>;
+    const auto frame_opt = G_->get_attrib_by_name<skeleton_frame_id_att>(node);
+    const auto count_opt = G_->get_attrib_by_name<skeleton_count_att>(node);
+    const VecOpt ids_opt  = G_->get_attrib_by_name<skeleton_ids_att>(node);
+    const VecOpt xyz_opt  = G_->get_attrib_by_name<skeleton_kp_xyz_att>(node);
+    const VecOpt conf_opt = G_->get_attrib_by_name<skeleton_kp_conf_att>(node);
+    const auto ts_opt     = G_->get_attrib_by_name<skeleton_timestamp_ms_att>(node);   // capture stamp (optional)
+    if (not frame_opt or not count_opt or not xyz_opt)
         return {};
 
-    const int frame_id = frame_attr->dec();
+    const int frame_id = frame_opt.value();
     if (frame_id == last_frame_id_)   // same frame already consumed
         return {};
     last_frame_id_ = frame_id;
 
-    const int count = std::max(0, count_attr->dec());
-    const auto& xyz  = xyz_attr->float_vec();
+    const int count = std::max(0, count_opt.value());
+    const auto& xyz  = xyz_opt.value().get();
     static const std::vector<float> empty_flat;
-    const auto& ids  = ids_attr  ? ids_attr->float_vec()  : empty_flat;
-    const auto& conf = conf_attr ? conf_attr->float_vec() : empty_flat;
+    const auto& ids  = ids_opt  ? ids_opt->get()  : empty_flat;
+    const auto& conf = conf_opt ? conf_opt->get() : empty_flat;
 
     constexpr int K = human::NUM_KP;   // 18
     if (static_cast<int>(xyz.size()) < count * K * 3)
@@ -163,7 +160,7 @@ std::vector<SkeletonBody> DsrSkeletonSource::poll()
     // while the robot is moving. ts==0 ⇒ the API falls back to the nearest/latest pose. Identity
     // fallback keeps camera-frame data flowing if the RT tree isn't ready yet (better than dropping
     // the frame); placement just won't be world-correct.
-    const std::uint64_t capture_ts = ts_attr ? ts_attr->uint64() : 0;
+    const std::uint64_t capture_ts = ts_opt ? ts_opt.value() : 0;
     Mat::RTMat world_T_cam = Mat::RTMat::Identity();
     bool have_tf = false;
     if (inner_eigen_)

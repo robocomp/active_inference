@@ -160,6 +160,7 @@ void SpecificWorker::initialize()
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.enable_ricoh", params.ENABLE_RICOH);
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.enable_lidar", params.ENABLE_LIDAR);
 	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.enable_imu",   params.ENABLE_IMU);
+	rc::ConfigLoaderUtils::load_optional(configLoader, "Media.data_sharing", params.MEDIA_DATA_SHARING);
 	// Per-sensor source selector ("auto" | "ice" | "dds"), normalized+validated by read_media_source().
 	// Forced modes seed the runtime gate up front: "dds" starts already bypassing (monitor-only),
 	// "ice"/"auto" start bridging. negotiate() then honours or re-checks it each tick.
@@ -243,6 +244,7 @@ void SpecificWorker::initialize()
 		SensorMediaPublisher::Config mcfg;
 		mcfg.domain_id     = static_cast<std::uint32_t>(params.MEDIA_DOMAIN_ID);
 		mcfg.history_depth = 8;
+		mcfg.data_sharing  = params.MEDIA_DATA_SHARING;   // zero-copy SHM loans (static topology only)
 		// Each stream is registered only when its [Media].enable_* gate is on.
 		if (params.ENABLE_ZED)
 			mcfg.image_streams = {{"rgb",   params.MEDIA_RGB_TOPIC,   rc::media::STREAM_ZED_RGB},
@@ -257,7 +259,8 @@ void SpecificWorker::initialize()
 			mcfg.imu_stream    = {{"imu",   params.MEDIA_IMU_TOPIC,   rc::media::STREAM_IMU}};
 		media_.init(mcfg);
 		qInfo() << "[Media] stream gates — zed:" << params.ENABLE_ZED << "ricoh:" << params.ENABLE_RICOH
-		        << "lidar:" << params.ENABLE_LIDAR << "imu:" << params.ENABLE_IMU;
+		        << "lidar:" << params.ENABLE_LIDAR << "imu:" << params.ENABLE_IMU
+		        << "| data_sharing:" << params.MEDIA_DATA_SHARING;
 	}
 
 	// Advertise the plane PER SENSOR NODE so ANY agent can discover and subscribe
@@ -524,7 +527,7 @@ void SpecificWorker::compute()
 				}
 				if (auto n = G->get_node(mn.node); n.has_value())
 				{
-					G->runtime_checked_add_or_modify_attrib_local(n.value(), "media_bps", static_cast<float>(bps));
+					G->add_or_modify_attrib_local<media_bps_att>(n.value(), static_cast<float>(bps));
 					G->update_node(n.value());
 				}
 			}
@@ -538,7 +541,7 @@ void SpecificWorker::compute()
 					const auto it = n->attrs().find("media_ice_port");
 					if (it == n->attrs().end() or it->second.str() != val)
 					{
-						G->runtime_checked_add_or_modify_attrib_local(n.value(), "media_ice_port", val);
+						G->add_or_modify_attrib_local<media_ice_port_att>(n.value(), val);
 						G->update_node(n.value());
 					}
 				}
@@ -1135,7 +1138,7 @@ void SpecificWorker::relay_media_descriptor(const std::string& node_name, const 
 		           << "node not found — cannot relay media descriptor";
 		return;
 	}
-	G->runtime_checked_add_or_modify_attrib_local(node.value(), rc::media::MEDIA_DESCRIPTOR_ATTR, descriptor_json);
+	G->add_or_modify_attrib_local<media_descriptor_att>(node.value(), descriptor_json);
 	G->update_node(node.value());
 }
 

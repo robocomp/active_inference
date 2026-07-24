@@ -203,19 +203,14 @@ private:
 		const auto n = g_->get_node(id_);
 		if(not n.has_value())
 			return;
-		const auto &attrs = n->attrs();
-		const auto find = [&](const std::string &key) -> const DSR::Attribute *
-		{
-			const auto it = attrs.find(key);
-			return (it != attrs.end()) ? &it->second : nullptr;
-		};
-		const DSR::Attribute *count_attr = find("skeleton_count");
-		const DSR::Attribute *xyz_attr   = find("skeleton_kp_xyz");
-		if(not count_attr or not xyz_attr)
+		// TYPE-ATTRIBUTED reads (CLAUDE.md), compile-checked against dsr_attr_name.h.
+		const auto count_opt = g_->get_attrib_by_name<skeleton_count_att>(n.value());
+		const auto xyz_opt   = g_->get_attrib_by_name<skeleton_kp_xyz_att>(n.value());
+		if(not count_opt or not xyz_opt)
 			return;
 
-		const int count = std::max(0, count_attr->dec());
-		const auto &xyz  = xyz_attr->float_vec();   // count*18*3 flat, ZED camera frame
+		const int count = std::max(0, count_opt.value());
+		const auto &xyz  = xyz_opt->get();          // count*18*3 flat, ZED camera frame
 		constexpr int K = GLSkeletonViewer::K;      // 18
 		if(static_cast<int>(xyz.size()) < count * K * 3)
 			return;

@@ -115,6 +115,14 @@ enable_ricoh = true    # RGBD_360 360 panorama
 enable_lidar = true    # 3D LiDAR cloud
 enable_imu   = true    # IMU
 
+# Zero-copy SHM data-sharing QoS. false (default) = churn-safe: payload rides the SHM
+# TRANSPORT (one memcpy/frame), safe while concept agents join/leave. true = true zero-copy
+# writer/reader loans into a mapped SHM segment — ONLY for a static, non-churning topology
+# (a consumer holding a mapped frame across a discovery event reads a remapped segment →
+# heap corruption). Advertised in the descriptor, so consumers adopt the same setting.
+# Env MEDIA_NO_DATASHARING force-disables regardless. See media_transport.h.
+data_sharing = true
+
 # RGB source selector (only effective when enable_zed = true): auto | ice | dds.
 #   auto: bridge via Ice RPC until zed_camera appears on DDS, then follow it.
 #   ice : always bridge via Ice RPC.   dds: never bridge; only monitor zed_camera's DDS topic (alive+FPS).

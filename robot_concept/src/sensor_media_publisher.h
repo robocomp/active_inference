@@ -61,6 +61,10 @@ public:
     {
         std::uint32_t            domain_id     = 0;
         int                      history_depth = 8;
+        // Zero-copy SHM data-sharing QoS. Default OFF (churn-safe): opt in only on a
+        // static, non-churning topology — see rc::media::PublisherConfig::data_sharing.
+        // Advertised in the descriptor so consumers adopt the same setting.
+        bool                     data_sharing  = false;
         std::vector<StreamSpec>  image_streams;   // rgb, depth, …
         std::optional<StreamSpec> image360_stream;// nullopt ⇒ ricoh panorama not published (wide Image360Frame)
         std::optional<StreamSpec> lidar_stream;   // nullopt ⇒ lidar not published
@@ -200,6 +204,10 @@ private:
     std::chrono::steady_clock::time_point image360_report_at_{};
     std::chrono::steady_clock::time_point lidar_report_at_{};
     std::chrono::steady_clock::time_point imu_report_at_{};
+    // Transport-status clock. Unlike the per-group clocks above, maybe_report_stats()
+    // runs on ALL FOUR sensor threads, so this one is atomic: a CAS lets exactly one
+    // thread emit the periodic data_sharing line per interval, whichever sensors are on.
+    std::atomic<std::int64_t> status_report_next_ns_{0};
 };
 
 // ── advertise() is templated on the DSR graph, so it stays in the header ──────
@@ -224,6 +232,9 @@ bool SensorMediaPublisher::advertise_stats(Graph& graph, const std::string& node
     auto node = graph.get_node(node_name);
     if (not node.has_value())
         return false;
+    // NOTE: runtime_checked (not the typed <media_bps_att> form) on purpose — this header stays
+    // DSR-att-header-free (it receives DSRGraph& from its includer and includes no dsr/ headers),
+    // so the typed alias isn't in scope here. See CONCEPT_AGENT_RECIPE.md §"Attribute access".
     graph.runtime_checked_add_or_modify_attrib_local(node.value(), "media_bps",
                                                       static_cast<float>(current_bps(keys)));
     graph.update_node(node.value());

@@ -70,7 +70,9 @@ EpistemicProposal EpistemicPlanner::compute(const ChairBelief& belief, float lat
     constexpr float kEffectiveHorizontalFovRad = 70.0f * std::numbers::pi_v<float> / 180.0f;
     constexpr float kStandOffSafetyMarginM = 0.45f;    // extra stand-off beyond the FoV-fit distance
 
-    const Eigen::Matrix<float, 3, 3>& S = belief.covariance();   // Σ over [cx,cy,yaw]
+    // REPORTED Σ: the yaw term folds in the discrete orientation-mode entropy, so a mode-ambiguous (side-on)
+    // chair scores a backrest-revealing face highly and the orbit resolves the ambiguity. (Raw Σ would hide it.)
+    const Eigen::Matrix<float, 3, 3> S = belief.covariance_reported();   // Σ over [cx,cy,yaw]
     const ChairBeliefState& s = belief.state();
 
     const float cy = std::cos(s.yaw), sy = std::sin(s.yaw);

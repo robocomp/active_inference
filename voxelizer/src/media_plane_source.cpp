@@ -130,8 +130,12 @@ void MediaPlaneSource::drain_media_plane() const
     const auto now_rx = std::chrono::steady_clock::now();
     if (now_rx - last_rx_report >= std::chrono::seconds(5))
     {
-        std::println("[MediaRx] 5s stats rgb={} depth={} rgb_stamp={} depth_stamp={}",
-                     rx_rgb, rx_depth, latest_rgb_stamp_.load(), latest_depth_stamp_.load());
+        // data_sharing=1 ⇒ true zero-copy SHM loans on BOTH streams; 0 ⇒ SHM-transport memcpy.
+        const bool ds = media_rgb_sub_ and media_depth_sub_
+                        and media_rgb_sub_->data_sharing_active()
+                        and media_depth_sub_->data_sharing_active();
+        std::println("[MediaRx] 5s stats rgb={} depth={} rgb_stamp={} depth_stamp={} data_sharing={}",
+                     rx_rgb, rx_depth, latest_rgb_stamp_.load(), latest_depth_stamp_.load(), ds ? 1 : 0);
         rx_rgb = rx_depth = 0;
         last_rx_report = now_rx;
     }

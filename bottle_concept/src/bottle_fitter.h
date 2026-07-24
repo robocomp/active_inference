@@ -3,11 +3,12 @@
  *
  * The active-inference core of bottle_concept. Owns the per-bottle instance map and
  * runs the free-energy fit for each "bottle_*" cylinder node every cycle:
- *   - instance lifecycle (ensure_instance + the BottleModel/SampleQueue factories),
- *   - observation: split the selected mask's support points into queue anchors vs
+ *   - instance lifecycle (ensure_instance),
+ *   - observation: split the selected mask's support points into on-surface candidates vs
  *     residuals against the current SDF (observe),
  *   - inference: voxel-bank ingest + cold-start seed (with camera-ward de-projection)
- *     + queue update + RGB silhouette likelihood + the gradient/free-energy step,
+ *     + recursive-Laplace belief update (common/ai_belief) + the occluding-contour silhouette
+ *     factor (accumulate_extra) folded into the free-energy step,
  *   - the bottle-owned voxel memory (ownership gate + FNV voxel keys).
  *
  * Pure belief engine (mirrors TableFitter): exposes ensure_instance → observe → run_inference and
@@ -48,7 +49,7 @@ public:
                  MaskIngestor* perception,
                  BottleSceneGraph* scene_graph);
 
-    // Per-cycle fresh observation: the selected mask's support split into queue anchors vs residuals.
+    // Per-cycle fresh observation: the selected mask's support split into on-surface candidates vs residuals.
     struct BottleObservation
     {
         bool has_fresh_data = false;

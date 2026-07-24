@@ -270,8 +270,9 @@ float BottleFitter::run_inference(BottleInstance& inst, const BottleObservation&
     const BottleBeliefState pre_state = inst.ai2_belief.state();
     const BottleBelief      pre_belief = inst.ai2_belief;   // full snapshot (state + Σ)
 
-    float energy = inst.ai2_belief.update(frame);
+    inst.ai2_belief.update(frame);   // MAP mean + posterior Σ; its surface-only return is NOT the FE (below)
 
+    bool frame_rejected = false;
     if (cfg_.max_step_m > 0.0f)
     {
         const auto& ns = inst.ai2_belief.state();
@@ -282,9 +283,17 @@ float BottleFitter::run_inference(BottleInstance& inst, const BottleObservation&
                        inst.node_name, std::sqrt(dx * dx + dy * dy + dz * dz), cfg_.max_step_m);
             inst.ai2_belief = pre_belief;         // reject the corrupted update (restore state + Σ)
             inst.ai2_belief.predict_stale();      // widen position Σ so the next good frame re-associates
-            energy = 0.0f;                        // explained nothing → drives frames_diverged (retirement)
+            frame_rejected = true;                // explained nothing → drives frames_diverged (retirement)
         }
     }
+
+    // FREE ENERGY = the clutter-INCLUSIVE mixture NLL (rises with misfit), NOT the engine's surface-only
+    // responsibility-weighted energy (which reads ≈0 on a bad fit because misfit points route to clutter — the
+    // TABLE.md §3 / recipe-invariant-#1 bug that made a diverged fit read F≈0). CLUTTER-FRACTION is the honest
+    // "explains none of its data" signal that REPLACES the old energy==0 all-clutter divergence sentinel.
+    const float energy = inst.ai2_belief.mixture_nll(frame.points, inst.ai2_belief.state(), R);
+    const float clut   = inst.ai2_belief.clutter_fraction(frame.points, R);
+    inst.last_clutter_frac = clut;
 
     // Write the belief back into the legacy BottleState so all downstream publish/viewer/RT code is
     // unchanged. Hang the bottle from the table when a support surface is known (cz = table_top + h/2),
@@ -300,31 +309,49 @@ float BottleFitter::run_inference(BottleInstance& inst, const BottleObservation&
     inst.frames_since_detection = 0;
     inst.detection_alive = true;
 
-    // Convergence bookkeeping on the committed free energy (mirrors the legacy path's gate). GUARD: energy is
-    // the mean cylinder-responsibility-weighted squared residual, so energy == 0 means EVERY point fell to the
-    // clutter component — the model explains NONE of its data (drifted/inflated off the cloud, a diverged fit,
-    // not a physical energy). A stuck-at-0 energy has a ~0 frame-to-frame delta and would otherwise be MISread
-    // as "converged" while the state diverges (observed live: radius ran 0.06→0.93 m with frames_converged
-    // marching to K_stable). Require a VALID, data-explaining fit (finite AND > 0) before counting stability;
-    // a non-explaining frame resets the counter. Not a magic threshold — energy == 0 is the all-clutter
-    // degeneracy sentinel (a genuine fit never reaches exactly 0; the healthy floor observed is ~0.03).
-    const bool explained = std::isfinite(energy) and energy > 0.0f;
+    // Convergence bookkeeping on the committed free energy. GUARD: a fit that explains NONE of its data
+    // (drifted/inflated off the cloud) has a HIGH-but-STABLE F (all points to the clutter floor) and would be
+    // MISread as "converged" while the state diverges (observed live: radius ran 0.06→0.93 m with
+    // frames_converged marching to K_stable). The honest "explains its data" test is the mean clutter
+    // responsibility: `explained` iff clutter_fraction < clutter_diverge_frac AND the frame wasn't rejected.
+    // (The old sentinel used the surface-only energy==0, only reachable because that energy was blind to
+    // misfit; on the clutter-inclusive F, F never hits 0, so the sentinel moves to clutter_fraction.)
+    const bool explained = std::isfinite(energy) and not frame_rejected
+                           and clut < cfg_.clutter_diverge_frac;
     if (explained and std::abs(energy - inst.prev_free_energy) < cfg_.fe_eps)
         inst.frames_converged = std::min(inst.frames_converged + 1, cfg_.K_stable);
     else
         inst.frames_converged = 0;
-    // Divergence persistence: a fit that explains none of its data (energy == 0) is diverged. Accrue; the
-    // worker retires the instance past cfg_.diverged_retire_frames so it can't keep writing a garbage model.
+    // Divergence persistence: an unexplained fit accrues; the worker retires the instance past
+    // cfg_.diverged_retire_frames so it can't keep writing a garbage model.
     inst.frames_diverged = explained ? 0 : inst.frames_diverged + 1;
+
+    // FE-surprise attention (TABLE.md §9): baseline tracks DOWN fast (consolidate a better fit) / UP slow (a
+    // sustained rise = the bottle moved surfaces as surprise before the baseline accepts it); surprise = the
+    // smoothed positive gap F−baseline. Updated only on an explained (accepted-measurement) frame.
+    if (explained)
+    {
+        if (inst.fe_baseline < 0.0f)
+            inst.fe_baseline = energy;
+        else
+        {
+            const float a = (energy < inst.fe_baseline) ? cfg_.fe_baseline_adapt_down
+                                                        : cfg_.fe_baseline_adapt_up;
+            inst.fe_baseline += a * (energy - inst.fe_baseline);
+        }
+        const float gap = std::max(0.0f, energy - inst.fe_baseline);
+        inst.fe_surprise += cfg_.fe_surprise_smooth * (gap - inst.fe_surprise);
+    }
 
     update_expected_visible(inst);   // negative-information death gate (persist out-of-FoV)
 
     if (should_log(inst))
-        std::print("[{}] AI2 npts={} R={:.4f} | c=({:.3f},{:.3f},{:.3f}) r={:.3f} h={:.3f} | σ(r,h)mm=({:.1f},{:.1f}) | lidar {}/{} raw resid={:.3f}m | E={:.4f} div={} rscale={:.1f}\n",
+        std::print("[{}] AI2 npts={} R={:.4f} | c=({:.3f},{:.3f},{:.3f}) r={:.3f} h={:.3f} | σ(r,h)mm=({:.1f},{:.1f}) | lidar {}/{} raw resid={:.3f}m | F={:.3f} base={:.3f} surprise={:.3f} clut={:.0f}% div={} rscale={:.1f}\n",
                    inst.node_name, npts, R, bs.cx, bs.cy, bs.cz, bs.radius, bs.height,
                    1000.f * std::sqrt(std::max(0.f, inst.ai2_belief.covariance()(3, 3))),
                    1000.f * std::sqrt(std::max(0.f, inst.ai2_belief.covariance()(4, 4))),
-                   inst.dbg_lidar_rays, inst.dbg_lidar_raw, inst.dbg_lidar_resid_m, energy, inst.frames_diverged, range_scale);
+                   inst.dbg_lidar_rays, inst.dbg_lidar_raw, inst.dbg_lidar_resid_m,
+                   energy, inst.fe_baseline, inst.fe_surprise, 100.0f * inst.last_clutter_frac, inst.frames_diverged, range_scale);
 
     log_ai2_csv(inst, npts, R, energy);
     return energy;
@@ -346,7 +373,7 @@ void BottleFitter::log_ai2_csv(const BottleInstance& inst, int point_count, floa
             cfg_.ai2_csv_path.clear();   // disable further attempts
             return;
         }
-        ai2_csv_ << "cycle,node,pts,R,energy,frames_converged,sil_rays";   // sil_rays = silhouette edge rays folded
+        ai2_csv_ << "cycle,node,pts,R,energy,fe_baseline,fe_surprise,clutter_frac,frames_converged,sil_rays";   // sil_rays = silhouette edge rays folded
         for (const auto* d : kDof) ai2_csv_ << ",state_" << d;
         for (const auto* d : kDof) ai2_csv_ << ",std_"   << d;   // posterior std (m) = sqrt(Σ_jj)
         ai2_csv_ << ",chain_xx,chain_yy,lidar_rays,lidar_raw,lidar_resid_m,frames_diverged";
@@ -356,7 +383,7 @@ void BottleFitter::log_ai2_csv(const BottleInstance& inst, int point_count, floa
     const auto s = inst.ai2_belief.state().vec();
     const auto& S = inst.ai2_belief.covariance();
     ai2_csv_ << inst.processed_cycles << ',' << inst.node_name << ',' << point_count << ','
-             << R << ',' << energy << ',' << inst.frames_converged << ','
+             << R << ',' << energy << ',' << inst.fe_baseline << ',' << inst.fe_surprise << ',' << inst.last_clutter_frac << ',' << inst.frames_converged << ','
              << inst.model.silhouette_ray_count();
     for (int j = 0; j < 5; ++j) ai2_csv_ << ',' << s[j];
     for (int j = 0; j < 5; ++j) ai2_csv_ << ',' << std::sqrt(std::max(0.0f, S(j, j)));

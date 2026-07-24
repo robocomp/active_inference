@@ -270,10 +270,10 @@ void SpecificWorker::publish_joint_buffer(std::uint64_t stamp_ms,
         for (float v : a)
             qflat.push_back(v);
     }
-    G->runtime_checked_add_or_modify_attrib_local(node.value(), "joint_buffer_base_ms",      base_ms);
-    G->runtime_checked_add_or_modify_attrib_local(node.value(), "joint_buffer_stamp_off_ms", stamp_off);
-    G->runtime_checked_add_or_modify_attrib_local(node.value(), "joint_buffer_q",            qflat);
-    G->runtime_checked_add_or_modify_attrib_local(node.value(), "joint_buffer_dof",          static_cast<int>(Kinematics::N_ARM_JOINTS));
+    G->add_or_modify_attrib_local<joint_buffer_base_ms_att>     (node.value(), base_ms);
+    G->add_or_modify_attrib_local<joint_buffer_stamp_off_ms_att>(node.value(), stamp_off);
+    G->add_or_modify_attrib_local<joint_buffer_q_att>          (node.value(), qflat);
+    G->add_or_modify_attrib_local<joint_buffer_dof_att>        (node.value(), static_cast<int>(Kinematics::N_ARM_JOINTS));
     G->update_node(node.value());
 }
 

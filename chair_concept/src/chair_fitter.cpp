@@ -344,7 +344,7 @@ float ChairFitter::run_inference(ChairInstance& inst, const ChairObservation& ob
         }
         inst.last_belief_touch = now;
         compute_projected_roi(inst);
-        return 0.0f;
+        return inst.dbg_energy;   // HOLD last FE — an aged cycle took no measurement (no new energy)
     }
     // Fresh path: update()/predict() below carry their own one-step Q, so just reset the age clock here.
     inst.last_belief_touch = now;
@@ -356,10 +356,34 @@ float ChairFitter::run_inference(ChairInstance& inst, const ChairObservation& ob
     const float range_yaw_var = (cfg_.ai2_range_noise_yaw_per_m * range) * (cfg_.ai2_range_noise_yaw_per_m * range);
     const float R = cfg_.ai2_sigma_base_m * cfg_.ai2_sigma_base_m + std::max(0.0f, inst.last_motion_var) + range_lat_var;
 
+    // Obliquity of the view onto the BACKREST (the chair's yaw-carrying surface, a VERTICAL plate whose normal
+    // is horizontal, unlike the table's horizontal top). Backrest sits on the −local_y edge ⇒ its room-frame
+    // outward normal is n̂ = (sin ψ, −cos ψ). obliquity_cos = |r̂_xy·n̂| ∈ [0,1]: 1 = facing it square-on, →0 =
+    // viewing it edge-on (yaw barely observable). Feeds the shared yaw variance below (§D). Needs the camera
+    // origin; default 1.0 (no cap) when the extrinsic isn't available this frame.
+    inst.dbg_obliquity_cos = 1.0f;
+    if (const auto rTz = room_T_zed_matrix(inst.last_mask_timestamp_ms); rTz.has_value())
+    {
+        const auto& s0b = inst.ai2_belief.state();
+        Eigen::Vector2f r_xy(s0b.cx - static_cast<float>(rTz->coeff(0, 3)),
+                             s0b.cy - static_cast<float>(rTz->coeff(1, 3)));   // horizontal camera→chair
+        if (r_xy.norm() > 1e-6f)
+        {
+            r_xy.normalize();
+            const Eigen::Vector2f n_back(std::sin(s0b.yaw), -std::cos(s0b.yaw));   // backrest outward normal (room xy)
+            inst.dbg_obliquity_cos = std::abs(r_xy.dot(n_back));
+        }
+    }
+    // Grow the SHARED yaw variance as the backrest grazes (1/cos−1): continuous covariance, no gate. THRESHOLD
+    // (flagged, physical): clamp obliquity_cos to [0.05,1] so 1/cos stays finite at a perfectly edge-on view.
+    // ⚠ gain is table's value, UNVALIDATED for chair (different surface) — tune from the logged obliquity_cos.
+    const float oblq_cos = std::clamp(inst.dbg_obliquity_cos, 0.05f, 1.0f);
+    const float obliquity_yaw_std = cfg_.ai2_obliquity_yaw_gain * (1.0f / oblq_cos - 1.0f);
+
     const bool gated = inst.last_trunc_frac > cfg_.ai2_trunc_gate_frac;
     compute_chain_cov(inst);
 
-    float energy = 0.0f;
+    float energy = inst.dbg_energy;   // default = HOLD last FE (a gated cycle takes no measurement)
     if (gated)
         inst.ai2_belief.predict();
     else
@@ -371,24 +395,49 @@ float ChairFitter::run_inference(ChairInstance& inst, const ChairObservation& ob
         frame.R.assign(frame.points.size(), R);
         frame.chain_cov_xx  = inst.chain_cov_xx + range_lat_var;
         frame.chain_cov_yy  = inst.chain_cov_yy + range_lat_var;
-        frame.chain_cov_yaw = range_yaw_var;
-        energy = inst.ai2_belief.update(frame);
+        frame.chain_cov_yaw = range_yaw_var + obliquity_yaw_std * obliquity_yaw_std;   // range + grazing cap (§D)
+        inst.ai2_belief.update(frame);   // MAP mean + posterior Σ; its surface-only return is NOT the FE (below)
         // NOTE: refine_extent (coverage/extent likelihood) DISABLED — coverage without a free-space
         // counter-force is positive feedback: it inflated the footprint to cover contamination/neighbours
         // (seat → 2–5.8 m) and spawned phantom instances. Kept in the belief for reference; see Fable review.
 
+        // FREE ENERGY = the clutter-INCLUSIVE mixture NLL, NOT the engine's surface-only return: a misfit point
+        // routes to clutter (r_surface≈0) and contributes ≈0 to the surface energy, so a badly-fit chair would
+        // read F≈0 — blind to exactly the errors that matter (TABLE.md §3, "do NOT reintroduce"). mixture_nll
+        // includes the clutter term so F RISES with misfit; it is the same quantity association/orientation use.
+        energy = inst.ai2_belief.mixture_nll(frame.points, inst.ai2_belief.state(), R);
+
         // 180° yaw-flip: a chair's only front/back asymmetry is the backrest, so the fit can lock 180° off
         // when the backrest was weakly seen at seed time, and no gradient step makes the π jump once yaw is
-        // confidently converged. resolve_orientation() runs a SEQUENTIAL test (EMA of the yaw+π energy
-        // advantage) — it corrects a sustained-wrong orientation but ignores single partial-view frames.
-        if (inst.ai2_belief.resolve_orientation(frame.points, R) and should_log(inst))
+        // confidently converged. resolve_orientation() runs a SEQUENTIAL test (accumulated yaw-mode NLL
+        // advantage) — it corrects a sustained-wrong orientation but ignores single partial-view frames. The
+        // ego-motion weight w=1/(1+(dotd/ref)²) down-votes smeared/moving frames (the flips arrived on those).
+        const float mref = std::max(1e-3f, cfg_.ai2_orientation_motion_ref);
+        const float dotd = std::abs(inst.last_motion_dotd);
+        const float mode_evidence_weight = 1.0f / (1.0f + (dotd / mref) * (dotd / mref));
+        if (inst.ai2_belief.resolve_orientation(frame.points, R, mode_evidence_weight) and should_log(inst))
             std::print("[{}] AI2 yaw 180° FLIP corrected (sustained backrest evidence)\n", inst.node_name);
+
+        // FE-surprise attention (TABLE.md §9): baseline tracks DOWN fast (consolidate a better fit) / UP slow (a
+        // sustained rise = the chair moved surfaces as surprise before the baseline accepts it); surprise = the
+        // smoothed positive gap F−baseline. Updated only on this accepted-measurement branch.
+        if (inst.fe_baseline < 0.0f)
+            inst.fe_baseline = energy;
+        else
+        {
+            const float a = (energy < inst.fe_baseline) ? cfg_.ai2_fe_baseline_adapt_down
+                                                        : cfg_.ai2_fe_baseline_adapt_up;
+            inst.fe_baseline += a * (energy - inst.fe_baseline);
+        }
+        const float gap = std::max(0.0f, energy - inst.fe_baseline);
+        inst.fe_surprise += cfg_.ai2_fe_surprise_smooth * (gap - inst.fe_surprise);
 
         // Clutter diagnostic: how much of the assigned mask the model can't explain (off-model points —
         // e.g. the table bleeding into a chair mask, which drags the centroid). High + a position jump ⇒
         // contamination the clutter component didn't fully reject.
         inst.last_clutter_frac = inst.ai2_belief.clutter_fraction(frame.points, R);
     }
+    inst.dbg_energy = energy;   // remember for the next gated/aged cycle to HOLD
 
     // Write belief → legacy ChairState so downstream publish/viewer/RT code is unchanged.
     const auto& bs = inst.ai2_belief.state();
@@ -404,9 +453,11 @@ float ChairFitter::run_inference(ChairInstance& inst, const ChairObservation& ob
     compute_projected_roi(inst);
 
     if (should_log(inst))
-        std::print("[{}] AI2 npts={} clutter={:.0f}% R={:.4f} range={:.2f} trunc={:.2f}{} | cx={:.2f} cy={:.2f} ψ={:.2f} (template sw={:.2f} sh={:.2f})\n",
-                   inst.node_name, npts, 100.0f * inst.last_clutter_frac, R, range, inst.last_trunc_frac, gated ? " GATED" : "",
-                   bs.cx, bs.cy, bs.yaw, inst.ai2_belief.seat_w(), inst.ai2_belief.seat_h());
+        std::print("[{}] AI2 npts={} clutter={:.0f}% R={:.4f} range={:.2f} oblq={:.2f} trunc={:.2f}{} | FE={:.2f} base={:.2f} surprise={:.2f} | cx={:.2f} cy={:.2f} ψ={:.2f} σψ_rep={:.0f}° (template sw={:.2f} sh={:.2f})\n",
+                   inst.node_name, npts, 100.0f * inst.last_clutter_frac, R, range, inst.dbg_obliquity_cos, inst.last_trunc_frac, gated ? " GATED" : "",
+                   energy, inst.fe_baseline, inst.fe_surprise,
+                   bs.cx, bs.cy, bs.yaw, std::sqrt(std::max(0.0f, inst.ai2_belief.covariance_reported()(2, 2))) * 57.2958f,
+                   inst.ai2_belief.seat_w(), inst.ai2_belief.seat_h());
 
     log_ai2_csv(inst, npts, R, gated, energy);
     return energy;
@@ -420,17 +471,17 @@ void ChairFitter::log_ai2_csv(const ChairInstance& inst, int npts, float R, bool
     {
         ai2_csv_.open(cfg_.ai2_csv_path, std::ios::out | std::ios::trunc);
         if (not ai2_csv_.is_open()) { cfg_.ai2_csv_path.clear(); return; }
-        ai2_csv_ << "cycle,node,npts,gated,energy,R,motion_var,trunc_frac,range,clutter_frac,"
-                 << "cx,cy,yaw,seat_w,seat_d,seat_h,back_h,std_cx,std_cy,std_yaw\n";
+        ai2_csv_ << "cycle,node,npts,gated,energy,fe_baseline,fe_surprise,R,motion_var,trunc_frac,range,obliquity_cos,clutter_frac,"
+                 << "cx,cy,yaw,seat_w,seat_d,seat_h,back_h,std_cx,std_cy,std_yaw,std_yaw_rep\n";
     }
     const auto& s = inst.ai2_belief.state();
     const auto& S = inst.ai2_belief.covariance();
     const auto sd = [&](int i) { return std::sqrt(std::max(0.0f, S(i, i))); };
     ai2_csv_ << inst.processed_cycles << ',' << inst.node_name << ',' << npts << ',' << (gated ? 1 : 0) << ','
-             << energy << ',' << R << ',' << inst.last_motion_var << ',' << inst.last_trunc_frac << ',' << inst.last_range << ',' << inst.last_clutter_frac << ','
+             << energy << ',' << inst.fe_baseline << ',' << inst.fe_surprise << ',' << R << ',' << inst.last_motion_var << ',' << inst.last_trunc_frac << ',' << inst.last_range << ',' << inst.dbg_obliquity_cos << ',' << inst.last_clutter_frac << ','
              << s.cx << ',' << s.cy << ',' << s.yaw << ','
              << inst.ai2_belief.seat_w() << ',' << inst.ai2_belief.seat_d() << ',' << inst.ai2_belief.seat_h() << ',' << inst.ai2_belief.back_h() << ','
-             << sd(0) << ',' << sd(1) << ',' << sd(2) << '\n';
+             << sd(0) << ',' << sd(1) << ',' << sd(2) << ',' << std::sqrt(std::max(0.0f, inst.ai2_belief.covariance_reported()(2, 2))) << '\n';
     ai2_csv_.flush();
 }
 

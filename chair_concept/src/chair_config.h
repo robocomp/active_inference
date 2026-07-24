@@ -25,6 +25,10 @@ struct ChairConfig
     float min_standoff_m    = 1.8f;    // min stand-off floor for epistemic viewpoints (YOLO misses too-close chairs)
     int   epistemic_cooldown_cycles = 200;    // min cycles withdrawn after satisfaction
     int   chair_log_period_frames = 30;
+
+    // Primary-input (masks) stream gate: no NEW masks frame for this many ms while Operating ⇒ demote
+    // out of Operating rather than integrate stale evidence. 0 disables the gate. Mirrors table_concept.
+    int   masks_stall_timeout_ms  = 3000;
     int   voxel_bank_max_points = 4000;
     float voxel_bank_quantization_m = 0.02f;
     float voxel_select_radius_margin_m = 0.50f;
@@ -58,6 +62,20 @@ struct ChairConfig
     float ai2_common_mode_yaw_std  = 0.03f;
     float ai2_range_noise_lat_per_m = 0.02f;   // static range → R + position common-mode (m per m)
     float ai2_range_noise_yaw_per_m = 0.03f;   // static range → yaw common-mode (rad per m)
+    // Obliquity yaw cap (TABLE.md §6): the backrest (the chair's yaw-carrying surface) is a vertical plate, so
+    // a view that grazes it edge-on can barely observe yaw. Grow the SHARED yaw variance as 1/obliquity_cos−1
+    // so a grazing frame confirms the chair but can't rotate a converged one. Continuous covariance, no gate.
+    // ⚠ Starts at table's value; the surface geometry differs (vertical backrest vs horizontal top) so treat
+    // it as UNVALIDATED for chair and re-tune from the logged obliquity_cos before trusting it. 0 = OFF.
+    float ai2_obliquity_yaw_gain = 0.05f;
+    // Ego-motion reliability of the discrete orientation vote: w = 1/(1+(dotd/ref)²). A smeared/moving frame
+    // (large motion_dotd) barely votes on the 4-way mode — the observed 180° flips arrived on motion frames.
+    float ai2_orientation_motion_ref = 0.50f;
+    // FE-surprise attention baseline (TABLE.md §9): asymmetric EMA (down fast = consolidate a better fit; up
+    // slow = a sustained rise, the chair moved, stays surprising) + a smoothed positive gap = the surprise.
+    float ai2_fe_baseline_adapt_down = 0.05f;
+    float ai2_fe_baseline_adapt_up   = 0.005f;
+    float ai2_fe_surprise_smooth     = 0.10f;
     float ai2_trunc_gate_frac    = 0.10f;
     int   ai2_gn_iters           = 4;
     float ai2_extent_std         = 0.05f;   // extent-observation noise (m) for the coverage/extent likelihood

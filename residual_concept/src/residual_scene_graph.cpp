@@ -159,7 +159,7 @@ void ResidualSceneGraph::step_write_model(ResidualInstance& inst, DSR::Node& nod
             const Eigen::Vector2f q = (r.norm() > 1e-4f) ? (p + per_side * r.normalized()) : p;
             hull_flat.push_back(q.x()); hull_flat.push_back(q.y());
         }
-        G_->runtime_checked_add_or_modify_attrib_local(node, "footprint_hull", hull_flat);
+        G_->add_or_modify_attrib_local<footprint_hull_att>(node, hull_flat);
     }
 
     G_->update_node(node);

@@ -185,8 +185,9 @@ void CabinetSceneGraph::step_write_model(CabinetInstance& inst, DSR::Node& node,
     write_rt_covariance(room_id, inst, geometry_changed);
 }
 
-// Map the belief's 6×6 Σ [cx,cy,H,w,h,yaw] onto the room→cabinet RT edge covariance (+ chain term), with
-// roll/pitch pinned small by the flat-on-the-floor prior and yaw as the marginal (mode-entropy) variance.
+// Map the belief's 7×7 Σ [cx,cy,yaw,L,d,z0,z1] onto the room→cabinet RT edge covariance (+ chain term), with
+// roll/pitch pinned small by the flat-on-the-floor prior and the tier (z0/z1) mode-entropy folded in via
+// covariance_reported().
 void CabinetSceneGraph::write_rt_covariance(std::uint64_t room_id, CabinetInstance& inst, bool force)
 {
     if (room_id == 0)
@@ -202,10 +203,12 @@ void CabinetSceneGraph::write_rt_covariance(std::uint64_t room_id, CabinetInstan
     if (not inst.ai2_initialized)
         return;   // belief not seeded yet — nothing calibrated to publish
 
-    // The belief carries a full 7×7 Σ over [cx,cy,yaw,L,d,z0,z1] — publish it directly. Σ already folds the
-    // per-frame common-mode floor (incl. chain), but across-frame accumulation can tighten cx,cy below it,
-    // so we still ADD the localization/chain term below — the safe direction for the controller's governor.
-    const auto& S = inst.ai2_belief.covariance();
+    // The belief carries a full 7×7 Σ over [cx,cy,yaw,L,d,z0,z1] — publish the REPORTED covariance, which
+    // additionally folds the discrete TIER-mode entropy into (d,z0,z1): an undecided base-vs-wall tier
+    // advertises an honest wide σ_z spanning both carcasses (the point-Σ can't carry that bimodal doubt).
+    // Σ already folds the per-frame common-mode floor (incl. chain), but across-frame accumulation can
+    // tighten cx,cy below it, so we still ADD the localization/chain term below — the safe direction.
+    const Eigen::Matrix<float, 7, 7> S = inst.ai2_belief.covariance_reported();
     float vx   = scale * S(0, 0);          // cx
     float vy   = scale * S(1, 1);          // cy
     float vz   = scale * 0.25f * (S(5, 5) + S(6, 6));  // box centre z = (z0+z1)/2

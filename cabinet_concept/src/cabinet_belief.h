@@ -192,6 +192,18 @@ struct CabinetBeliefParams
     float extent_precision = 800.0f;   // 1/m^2 on the end-containment residuals
     float extent_quantile  = 0.02f;    // robust order statistic for the span ends (0 ⇒ raw min/max)
 
+    // ── Free-space / VACATE factor (accumulate_freespace) ─────────────────────────────────────────
+    // The occlusion-aware UPPER bound that CLOSES the one-sided extent factor above (the "loan" its
+    // comment promised). A LiDAR beam that traverses the carcass volume and lands BEYOND its far face
+    // proves that crossing is empty; its midpoint is a witness point INSIDE the footprint, so a GLS pull
+    // driving the FOOTPRINT SDF→0 there retreats the nearest face past it = shrink. A beam that RETURNS
+    // inside the box (occupancy) has p_through≈0 ⇒ no vacate, so a real cabinet is untouched. p_through is
+    // a {returned-from-surface, exited-far-face} mixture posterior (same construction as flush_weight) ⇒
+    // continuous, no gate. Occlusion-safe by geometry: a beam stopped by an occluder never yields a witness
+    // past it. Ported from table_belief; a cabinet carcass is SOLID [z0,z1] so the whole box is carved (no
+    // top-slab z-gate, no hollow guard). 0 = OFF.
+    float free_space_precision = 0.0f;   // 1/m^2 per through-beam (shrink-only)
+
     // ── Tier mode ─────────────────────────────────────────────────────────────────────────────
     // Per-frame evidence for the alternative tier is accumulated; the MAP mode supplies the priors.
     // tier_evidence_cap bounds the accumulator so a long run of agreeing frames cannot make the mode
@@ -234,6 +246,10 @@ struct CabinetFrame
     // the run — precisely the along-axis extent evidence that defines L.
     rc::ai::LidarRays              lidar;
     std::vector<rc::ai::LidarRays> lidar_extra;   // per-device sets (e.g. the low `bpearl`), own origins
+    // Beams whose SEGMENT (origin→endpoint) crosses the CURRENT fitted box — the through-beams that carry
+    // the free-space/VACATE negative evidence. Selected against the box (not the mask centroid) precisely
+    // because an overgrown end's carving beams land BEYOND it, far from the mask the range channel anchors on.
+    rc::ai::LidarRays              lidar_freespace;
 };
 
 class CabinetBelief
@@ -249,6 +265,15 @@ public:
 
     const CabinetBeliefState&         state()      const { return state_; }
     const Eigen::Matrix<float, 7, 7>& covariance() const { return Sigma_; }
+    // ── Reported covariance: fold the discrete TIER-mode entropy into Σ ─────────────────────────
+    // Σ_ carries only the WITHIN-tier carcass widths — it CANNOT hold the genuinely bimodal "base OR
+    // wall unit" ambiguity on (d, z0, z1) that the tier rides outside the Gaussian. So the reported
+    // covariance inflates those three diagonals by the discrete-mode entropy p(1−p)Δ², where
+    // p = tier_posterior() (probability of the alternative tier) and Δ is the separation between the
+    // two tiers' prior means for that DOF. A still-undecided tier (p≈½) advertises an honest large σ
+    // spanning both carcasses; a resolved one (p→0) collapses back to Σ_. Consumed by the RT-edge cov
+    // upload and the NBV planner. Mirrors Table/ChairBelief::covariance_reported (see TABLE.md §4.2).
+    Eigen::Matrix<float, 7, 7> covariance_reported() const;
     const CabinetBeliefParams&        params()     const { return params_; }
     void set_state (const CabinetBeliefState&  s) { state_  = s; }
     void set_params(const CabinetBeliefParams& p) { params_ = p; }
@@ -311,6 +336,7 @@ public:
     int   last_lidar_rays()   const { return dbg_lidar_rays_; }
     float last_span_obs()     const { return dbg_span_obs_; }      // observed along-axis span (m)
     int   last_span_pts()     const { return dbg_span_pts_; }      // points inside the run cross-section
+    int   last_vacate_beams() const { return dbg_vacate_beams_; }  // through-beams that carved this frame
     float last_axis_resid()   const { return dbg_axis_resid_; }    // signed yaw error to nearest room axis (rad)
     // Wall-segment domain instrumentation: is it binding? corner projections onto the run axis + retract residuals.
     int   last_seg_active()   const { return dbg_seg_active_; }    // 1 if the wall-segment terms are live this frame
@@ -341,6 +367,9 @@ private:
     float flush_weight(const CabinetBeliefState& s, const CabinetFrame& f) const;
     void accumulate_axis_alignment(const CabinetBeliefState& s,
                                    Eigen::Matrix<float, 7, 7>& Id, Eigen::Matrix<float, 7, 1>& bd) const;
+    // Free-space / VACATE: the occlusion-aware upper bound that closes accumulate_extent (see params).
+    void accumulate_freespace(const CabinetBeliefState& s, const CabinetFrame& f,
+                              Eigen::Matrix<float, 7, 7>& Id, Eigen::Matrix<float, 7, 1>& bd) const;
 
     CabinetBeliefState         state_;
     CabinetBeliefParams        params_;
@@ -357,6 +386,7 @@ private:
     mutable int   dbg_lidar_rays_  = 0;
     mutable float dbg_span_obs_    = 0.0f;
     mutable int   dbg_span_pts_    = 0;
+    mutable int   dbg_vacate_beams_ = 0;   // through-beams that carved this frame (free-space diag)
     mutable float dbg_axis_resid_  = 0.0f;
     mutable int   dbg_seg_active_  = 0;
     mutable float dbg_seg_tlo_     = 0.0f;

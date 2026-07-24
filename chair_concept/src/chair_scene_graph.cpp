@@ -164,8 +164,10 @@ void ChairSceneGraph::write_rt_covariance(std::uint64_t room_id, ChairInstance& 
         return;   // belief not seeded yet — nothing calibrated to publish
 
     // The belief carries a 3×3 Σ over [cx,cy,yaw] (pose-only; size is a fixed template). z is pinned to the
-    // floor → its uncertainty is the floor-height std (not a DOF).
-    const auto& S = inst.ai2_belief.covariance();
+    // floor → its uncertainty is the floor-height std (not a DOF). Use covariance_REPORTED so the yaw term
+    // folds in the discrete orientation-mode entropy — a side-on chair (backrest unseen) advertises an honest
+    // large σ_yaw to the controller instead of a falsely-confident heading (mirrors table's reported cov).
+    const auto S = inst.ai2_belief.covariance_reported();
     float vx   = scale * S(0, 0);   // cx
     float vy   = scale * S(1, 1);   // cy
     float vz   = inst.ai2_belief.params().floor_std * inst.ai2_belief.params().floor_std;   // cz pinned

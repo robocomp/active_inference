@@ -86,6 +86,14 @@ public:
     std::optional<Mat::RTMat> get_room_zed_transform(FPSCounter& compute_fps,
                                                      const std::string& robot_name,
                                                      const Mat::RTMat& room_T_robot);
+    // Worker-thread-callable room_T_zed at `stamp`, using the CALLER's own InnerEigenAPI instance (for the
+    // ts==0 static robot→zed extrinsic) and applying the SAME forward pose-extrapolation the voxel path
+    // gets — so masks are placed at the capture-instant pose, not the ~100 ms-lagged newest RT block. No
+    // CSV/logging (that stays on the main-thread get_room_robot_transform). std::nullopt on a missing hop.
+    std::optional<Mat::RTMat> room_T_zed_extrapolated(DSR::InnerEigenAPI* eigen,
+                                                      const std::string& room_name,
+                                                      const std::string& robot_name,
+                                                      std::uint64_t stamp) const;
     // DSR-native data accessors (no proxy needed)
     std::uint64_t get_frame_timestamp_ms() const;
     // Latest LiDAR scan from the media plane (LidarFrame). std::nullopt if disabled or nothing received.
@@ -145,6 +153,22 @@ private:
     bool verbose_debug_ = false;
     bool mask_pose_extrapolate_ = true;       // extrapolate robot pose to capture stamp via RT-edge velocity
     float mask_pose_extrap_max_dt_s_ = 0.2f;  // clamp the extrapolation horizon
+
+    // Shared forward pose-extrapolation, used by BOTH the main-thread voxel path (get_room_robot_transform)
+    // and the worker-thread masks path (room_T_zed_extrapolated). Reads the robot→room RT edge's body-frame
+    // velocity from the graph (thread-safe) and rolls room_T_robot FORWARD to `timestamp_ms`. Mutates in
+    // place; fills `diag`. No-op (diag.applied=false) if edge/velocity/attrs missing or ts<=newest block.
+    struct PoseExtrapDiag {
+        std::uint64_t newest_block_ms = 0;
+        float  dt_s = 0.0f;
+        double adv = 0.0, side = 0.0, rot = 0.0;
+        double raw_x = 0.0, raw_y = 0.0, raw_th = 0.0;   // pose before extrapolation
+        double dx = 0.0, dy = 0.0, dth = 0.0;            // applied displacement
+        bool   applied = false;
+    };
+    void forward_extrapolate_room_T_robot(Mat::RTMat& room_T_robot, const std::string& room_name,
+                                          const std::string& robot_name, std::uint64_t timestamp_ms,
+                                          PoseExtrapDiag& diag) const;
     // Diagnostic CSV (etc/pose_extrap_log.csv): raw vs extrapolated pose + dt/velocity/displacement, so
     // the extrapolation magnitude (= the mask lag-bias being cancelled) can be analysed. Opened lazily.
     std::ofstream pose_extrap_csv_;

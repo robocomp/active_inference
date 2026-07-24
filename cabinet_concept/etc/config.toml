@@ -45,6 +45,9 @@ Emergency = 500
 [Component.Debug]
 Verbose = false
 
+[Media]
+MasksStallTimeoutMs = 3000   # 0 = disable the stall gate
+
 # ── AI2 belief (CABINET_FIT_AI2.md): full-covariance recursive filter; legs derived, soft mixture ──
 # This is the ONLY fit path (the legacy SDF-gradient/Fisher/queue/silhouette fit has been removed).
 [CabinetModel]

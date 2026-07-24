@@ -146,33 +146,33 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
 
     if (rgbd.depth.empty() || rgbd.width <= 0 || rgbd.height <= 0 || rgbd.focal_x <= 0.f || rgbd.focal_y <= 0.f)
     {
-        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_frame_id", static_cast<int>(sensing_frame));
-        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_timestamp_ms", frame_ts_ms);
-        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_count", 0);
-        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_labels", std::string{});
-        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_label_ids", std::vector<float>{});
-        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_confidences", std::vector<float>{});
-        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_support_offsets", std::vector<float>{0.0f});
-        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_support_points", std::vector<float>{});
-        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_support_points_cam", std::vector<float>{});
-        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_centroids_xyz", std::vector<float>{});
-        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_bbox_min_xyz", std::vector<float>{});
-        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_bbox_max_xyz", std::vector<float>{});
-        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_pixels_xy", std::vector<float>{});
-        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_pixel_offsets", std::vector<float>{0.0f});
-        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_depth_var", std::vector<float>{});
+        G_->add_or_modify_attrib_local<mask_frame_id_att>(masks_node, static_cast<int>(sensing_frame));
+        G_->add_or_modify_attrib_local<mask_timestamp_ms_att>(masks_node, frame_ts_ms);
+        G_->add_or_modify_attrib_local<mask_count_att>(masks_node, 0);
+        G_->add_or_modify_attrib_local<mask_labels_att>(masks_node, std::string{});
+        G_->add_or_modify_attrib_local<mask_label_ids_att>(masks_node, std::vector<float>{});
+        G_->add_or_modify_attrib_local<mask_confidences_att>(masks_node, std::vector<float>{});
+        G_->add_or_modify_attrib_local<mask_support_offsets_att>(masks_node, std::vector<float>{0.0f});
+        G_->add_or_modify_attrib_local<mask_support_points_att>(masks_node, std::vector<float>{});
+        G_->add_or_modify_attrib_local<mask_support_points_cam_att>(masks_node, std::vector<float>{});
+        G_->add_or_modify_attrib_local<mask_centroids_xyz_att>(masks_node, std::vector<float>{});
+        G_->add_or_modify_attrib_local<mask_bbox_min_xyz_att>(masks_node, std::vector<float>{});
+        G_->add_or_modify_attrib_local<mask_bbox_max_xyz_att>(masks_node, std::vector<float>{});
+        G_->add_or_modify_attrib_local<mask_pixels_xy_att>(masks_node, std::vector<float>{});
+        G_->add_or_modify_attrib_local<mask_pixel_offsets_att>(masks_node, std::vector<float>{0.0f});
+        G_->add_or_modify_attrib_local<mask_depth_var_att>(masks_node, std::vector<float>{});
         if (params_.MASK_MOTION_ENABLED)
         {
-            G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_motion_dotd", std::vector<float>{});
-            G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_motion_bias", std::vector<float>{});
-            G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_motion_var", std::vector<float>{});
-            G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_trunc_frac", std::vector<float>{});
-            G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_centroid_radius", std::vector<float>{});
-            G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_range", std::vector<float>{});
-            G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_cam_twist", std::vector<float>{0,0,0,0,0,0});
-            G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_frame_dt_s", 0.0f);
-            G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_rt_lag_s", -1.0f);
-            G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_rt_gap_s", -1.0f);
+            G_->add_or_modify_attrib_local<mask_motion_dotd_att>(masks_node, std::vector<float>{});
+            G_->add_or_modify_attrib_local<mask_motion_bias_att>(masks_node, std::vector<float>{});
+            G_->add_or_modify_attrib_local<mask_motion_var_att>(masks_node, std::vector<float>{});
+            G_->add_or_modify_attrib_local<mask_trunc_frac_att>(masks_node, std::vector<float>{});
+            G_->add_or_modify_attrib_local<mask_centroid_radius_att>(masks_node, std::vector<float>{});
+            G_->add_or_modify_attrib_local<mask_range_att>(masks_node, std::vector<float>{});
+            G_->add_or_modify_attrib_local<mask_cam_twist_att>(masks_node, std::vector<float>{0,0,0,0,0,0});
+            G_->add_or_modify_attrib_local<mask_frame_dt_s_att>(masks_node, 0.0f);
+            G_->add_or_modify_attrib_local<mask_rt_lag_s_att>(masks_node, -1.0f);
+            G_->add_or_modify_attrib_local<mask_rt_gap_s_att>(masks_node, -1.0f);
         }
         G_->update_node(std::move(masks_node));
         return;
@@ -643,39 +643,39 @@ void GraphPublisher::upload_masks(const RGBDData& rgbd, const Mat::RTMat& room_T
     }
 
     const int mask_count = static_cast<int>(label_ids.size());
-    G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_frame_id", static_cast<int>(sensing_frame));
-    G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_timestamp_ms", frame_ts_ms);
-    G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_count", mask_count);
-    G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_labels", labels_joined.str());
-    G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_label_ids", label_ids);
-    G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_confidences", confidences);
-    G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_support_offsets", support_offsets);
-    G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_support_points", support_points);
-    G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_support_points_cam", support_points_cam);
-    G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_centroids_xyz", centroids_xyz);
-    G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_bbox_min_xyz", bbox_min_xyz);
-    G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_bbox_max_xyz", bbox_max_xyz);
-    G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_pixels_xy", mask_pixels_xy);
-    G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_pixel_offsets", mask_pixel_offsets);
-    G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_has_depth", has_depth_flags);
-    G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_source", mask_source);
-    G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_azimuth", azimuths);
-    G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_depth_var", depth_var);
+    G_->add_or_modify_attrib_local<mask_frame_id_att>(masks_node, static_cast<int>(sensing_frame));
+    G_->add_or_modify_attrib_local<mask_timestamp_ms_att>(masks_node, frame_ts_ms);
+    G_->add_or_modify_attrib_local<mask_count_att>(masks_node, mask_count);
+    G_->add_or_modify_attrib_local<mask_labels_att>(masks_node, labels_joined.str());
+    G_->add_or_modify_attrib_local<mask_label_ids_att>(masks_node, label_ids);
+    G_->add_or_modify_attrib_local<mask_confidences_att>(masks_node, confidences);
+    G_->add_or_modify_attrib_local<mask_support_offsets_att>(masks_node, support_offsets);
+    G_->add_or_modify_attrib_local<mask_support_points_att>(masks_node, support_points);
+    G_->add_or_modify_attrib_local<mask_support_points_cam_att>(masks_node, support_points_cam);
+    G_->add_or_modify_attrib_local<mask_centroids_xyz_att>(masks_node, centroids_xyz);
+    G_->add_or_modify_attrib_local<mask_bbox_min_xyz_att>(masks_node, bbox_min_xyz);
+    G_->add_or_modify_attrib_local<mask_bbox_max_xyz_att>(masks_node, bbox_max_xyz);
+    G_->add_or_modify_attrib_local<mask_pixels_xy_att>(masks_node, mask_pixels_xy);
+    G_->add_or_modify_attrib_local<mask_pixel_offsets_att>(masks_node, mask_pixel_offsets);
+    G_->add_or_modify_attrib_local<mask_has_depth_att>(masks_node, has_depth_flags);
+    G_->add_or_modify_attrib_local<mask_source_att>(masks_node, mask_source);
+    G_->add_or_modify_attrib_local<mask_azimuth_att>(masks_node, azimuths);
+    G_->add_or_modify_attrib_local<mask_depth_var_att>(masks_node, depth_var);
     if (params_.MASK_MOTION_ENABLED)
     {
-        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_motion_dotd", motion_dotd);
-        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_motion_bias", motion_bias);
-        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_motion_var", motion_var);
-        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_trunc_frac", trunc_frac);
-        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_centroid_radius", centroid_radius);
-        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_range", mask_range);
+        G_->add_or_modify_attrib_local<mask_motion_dotd_att>(masks_node, motion_dotd);
+        G_->add_or_modify_attrib_local<mask_motion_bias_att>(masks_node, motion_bias);
+        G_->add_or_modify_attrib_local<mask_motion_var_att>(masks_node, motion_var);
+        G_->add_or_modify_attrib_local<mask_trunc_frac_att>(masks_node, trunc_frac);
+        G_->add_or_modify_attrib_local<mask_centroid_radius_att>(masks_node, centroid_radius);
+        G_->add_or_modify_attrib_local<mask_range_att>(masks_node, mask_range);
         const std::vector<float> twist_flat{
             cam_twist_optical.v.x(), cam_twist_optical.v.y(), cam_twist_optical.v.z(),
             cam_twist_optical.w.x(), cam_twist_optical.w.y(), cam_twist_optical.w.z()};
-        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_cam_twist", twist_flat);
-        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_frame_dt_s", frame_dt_s);
-        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_rt_lag_s", rt_lag_s);
-        G_->runtime_checked_add_or_modify_attrib_local(masks_node, "mask_rt_gap_s", rt_gap_s);
+        G_->add_or_modify_attrib_local<mask_cam_twist_att>(masks_node, twist_flat);
+        G_->add_or_modify_attrib_local<mask_frame_dt_s_att>(masks_node, frame_dt_s);
+        G_->add_or_modify_attrib_local<mask_rt_lag_s_att>(masks_node, rt_lag_s);
+        G_->add_or_modify_attrib_local<mask_rt_gap_s_att>(masks_node, rt_gap_s);
     }
     G_->update_node(std::move(masks_node));
 
@@ -830,12 +830,12 @@ void GraphPublisher::upload_skeletons(const RGBDData& rgbd,
         ++written;
     }
 
-    G_->runtime_checked_add_or_modify_attrib_local(node, "skeleton_frame_id", static_cast<int>(sensing_frame));
-    G_->runtime_checked_add_or_modify_attrib_local(node, "skeleton_timestamp_ms", frame_ts_ms);
-    G_->runtime_checked_add_or_modify_attrib_local(node, "skeleton_count", written);
-    G_->runtime_checked_add_or_modify_attrib_local(node, "skeleton_ids", ids);
-    G_->runtime_checked_add_or_modify_attrib_local(node, "skeleton_kp_xyz", kp_xyz);
-    G_->runtime_checked_add_or_modify_attrib_local(node, "skeleton_kp_conf", kp_conf);
+    G_->add_or_modify_attrib_local<skeleton_frame_id_att>(node, static_cast<int>(sensing_frame));
+    G_->add_or_modify_attrib_local<skeleton_timestamp_ms_att>(node, frame_ts_ms);
+    G_->add_or_modify_attrib_local<skeleton_count_att>(node, written);
+    G_->add_or_modify_attrib_local<skeleton_ids_att>(node, ids);
+    G_->add_or_modify_attrib_local<skeleton_kp_xyz_att>(node, kp_xyz);
+    G_->add_or_modify_attrib_local<skeleton_kp_conf_att>(node, kp_conf);
     G_->update_node(std::move(node));
 
     // Detection signal: log when the people count changes (so you SEE 0→1 when someone steps in),

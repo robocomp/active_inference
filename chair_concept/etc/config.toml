@@ -42,6 +42,9 @@ Emergency = 500
 [Component.Debug]
 Verbose = false
 
+[Media]
+MasksStallTimeoutMs = 3000   # 0 = disable the stall gate
+
 [ChairModel]
 # ── AI2 recursive-Laplace belief (mirrors table_concept). ──
 SigmaObs = 0.05                  # compound-SDF band for the candidate/residual split in observe()

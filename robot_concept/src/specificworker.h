@@ -117,6 +117,11 @@ private:
 		// producers (helios + bpearl). "auto" negotiate, "ice" always bridge, "dds" never bridge.
 		std::string LIDAR_SOURCE  = "auto";
 		bool        ENABLE_IMU    = true;   // IMU sample        (rc/imu/data)
+		// Zero-copy SHM data-sharing QoS (Media.data_sharing). Default OFF = churn-safe
+		// (one memcpy/frame over the SHM transport). Set true ONLY on a static, non-churning
+		// topology to test true zero-copy loans — see rc::media::PublisherConfig::data_sharing.
+		// Advertised in the descriptor so consumers (voxelizer/room_concept) adopt it.
+		bool        MEDIA_DATA_SHARING = false;
 		int         MEDIA_DOMAIN_ID   = 0;
 		std::string MEDIA_RGB_TOPIC   = "rc/zed/rgb";
 		std::string MEDIA_DEPTH_TOPIC = "rc/zed/depth";

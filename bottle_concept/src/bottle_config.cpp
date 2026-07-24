@@ -31,6 +31,10 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
     out.fe_eps            = getf("BottleConcept.FEps",            1e-3f);
     out.K_stable          = geti("BottleConcept.KStable",         30);
     out.diverged_retire_frames = geti("BottleConcept.DivergedRetireFrames", 20);
+    out.clutter_diverge_frac   = getf("BottleConcept.ClutterDivergeFrac",   0.90f);
+    out.fe_baseline_adapt_down = getf("BottleConcept.FeBaselineAdaptDown",  0.05f);
+    out.fe_baseline_adapt_up   = getf("BottleConcept.FeBaselineAdaptUp",    0.005f);
+    out.fe_surprise_smooth     = getf("BottleConcept.FeSurpriseSmooth",     0.10f);
     out.max_step_m        = getf("BottleConcept.MaxStepM",        0.5f);
     out.write_threshold   = getf("BottleConcept.WriteThreshold",  1e-3f);
     out.log_period_frames = geti("BottleConcept.LogPeriodFrames", 30);
@@ -38,6 +42,7 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
     out.voxel_bank_quantization_m    = getf("BottleConcept.VoxelBankQuantizationM",    0.01f);
     out.voxel_select_radius_margin_m = getf("BottleConcept.VoxelSelectRadiusMarginM",  0.10f);
     out.voxel_select_height_margin_m = getf("BottleConcept.VoxelSelectHeightMarginM",  0.10f);
+    out.masks_stall_timeout_ms       = geti("Media.MasksStallTimeoutMs",           3000);
 
     out.prior_radius       = getf("BottleModel.PriorRadius",       0.035f);
     out.prior_height       = getf("BottleModel.PriorHeight",       0.20f);
