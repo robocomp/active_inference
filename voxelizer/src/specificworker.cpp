@@ -200,13 +200,25 @@ void SpecificWorker::initialize()
                 return a.size() == b.size() and std::equal(a.begin(), a.end(), b.begin(),
                     [](char x, char y) { return std::tolower((unsigned char)x) == std::tolower((unsigned char)y); });
             };
+            // Some ADE20K classes are emitted UNDER a different downstream label: e.g. YOLO-seg (COCO) has no
+            // "radiator", and radiators are otherwise mistaken for chairs, so the ADE20K classes that a radiator
+            // segments into ("railing"/"bannister" — the grille/fins) are relabelled to "radiator".
+            // Key = ADE20K canonical name (lowercase); value = output label the mask carries.
+            static const std::vector<std::pair<std::string, std::string>> label_alias = {
+                {"railing", "radiator"}, {"bannister", "radiator"}
+            };
             std::vector<std::pair<int, std::string>> accepted_classes;
             for (const auto& want : params.SEMANTIC_ACCEPTED_LABELS)
             {
                 const auto it = std::find_if(names.begin(), names.end(),
                                              [&](const std::string& n) { return iequals(n, want); });
                 if (it != names.end())
-                    accepted_classes.emplace_back(static_cast<int>(std::distance(names.begin(), it)), *it);
+                {
+                    std::string out_label = *it;   // default: emit under the ADE20K name itself
+                    for (const auto& [ade, alias] : label_alias)
+                        if (iequals(*it, ade)) { out_label = alias; break; }
+                    accepted_classes.emplace_back(static_cast<int>(std::distance(names.begin(), it)), out_label);
+                }
                 else
                     std::println("[SemanticMasks] class '{}' not in the model's ADE20K table — skipped", want);
             }

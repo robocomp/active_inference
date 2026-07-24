@@ -864,7 +864,7 @@ void SpecificWorker::step_epistemic(rc::CabinetInstance& inst, DSR::Node& node)
     if (not inst.ai2_initialized)
         return;
     rc::EpistemicProposal prop =
-        epistemic_planner_.compute(inst.ai2_belief, cfg_.ai2_range_noise_lat_per_m, cfg_.ai2_sigma_base_m);
+        epistemic_planner_.compute(inst.ai2_belief, cfg_.ai2_range_noise_lat_per_m, cfg_.ai2_sigma_base_m, cfg_.verbose_log);
     if (not prop.valid or not prop.is_finite())
         return;   // degenerate (non-finite) fit — leave the existing affordance node as-is, retry next cycle
 

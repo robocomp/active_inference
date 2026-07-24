@@ -62,6 +62,29 @@ struct ChairConfig
     float ai2_common_mode_yaw_std  = 0.03f;
     float ai2_range_noise_lat_per_m = 0.02f;   // static range → R + position common-mode (m per m)
     float ai2_range_noise_yaw_per_m = 0.03f;   // static range → yaw common-mode (rad per m)
+    // Ego-motion "be-still-to-update" fixation (ported from table_concept motion_cm_*_gain; CONCEPT_AGENT_RECIPE
+    // §"Belief invariants" → ego-motion common-mode). A moving frame's mask is ONE shared smear, so route it into
+    // the per-frame COMMON-MODE (frame.chain_cov_*), NOT per-point R — per-point R averages the shared error away,
+    // whereas the common-mode caps the frame's authority to MOVE the mean. Effect: geometry updates concentrate at
+    // stillness; a frame captured while the robot moves only CONFIRMS. Continuous, no gate (0 at stillness).
+    // Chair is pose-only N=3 [cx,cy,yaw] → no size gain. std growth per m/s of motion_dotd; 0 disables.
+    float motion_cm_pos_gain = 0.30f;   // position (cx,cy) shared-error std per m/s — anti-DRIFT  (0.10→0.30)
+    // yaw is the one that BIT: "passing by the chair rotated it". This term is 0 at stillness, so a large gain has
+    // NO cost on a stationary/correctly-seen chair — it only denies a moving frame the authority to rotate the mean.
+    float motion_cm_yaw_gain = 0.50f;   // yaw shared-error std (rad) per m/s      — anti-ROTATE (0.12→0.50)
+    // HARD "be-still-to-update" gate (the agreed invariant): ONLY a still/almost-still robot with a fresh ZED YOLO
+    // mask may alter pose/shape; every other frame is CONFIRMATION-of-existence only (predict, no mean/shape move).
+    // The common-mode above softens the near-still regime; this makes the moving regime EXACT (zero authority).
+    bool  ai2_motion_confirm_only = true;   // moving robot → predict-only (no pose/shape update)
+    float ai2_still_lin_mps       = 0.05f;  // camera linear speed (m/s) below which the robot counts as "still"
+    float ai2_still_ang_radps     = 0.10f;  // camera angular speed (rad/s) below which the robot counts as "still"
+    float ai2_still_dotd          = 0.05f;  // per-mask ego-motion corruption speed (m/s) still-level (OR'd in)
+    // Moving-robot EXCEPTION: a mask WELL-CENTRED in the image (near the principal point) has minimal motion smear
+    // and no peripheral distortion, so it is trustworthy enough to update pose/shape EVEN while moving. Allow the
+    // update when the mask centroid radius is below this. UNITS = focal-normalised (tan of the ray angle off the
+    // optical axis): 0.35 ≈ tan(19°), i.e. the centroid within ~19° of the axis; ~1.0 ≈ the edge of a ~90° FoV.
+    // Lower = stricter (only near-axis masks may update while moving). <0 disables the exception.
+    float ai2_moving_update_center_radius = 0.35f;
     // Obliquity yaw cap (TABLE.md §6): the backrest (the chair's yaw-carrying surface) is a vertical plate, so
     // a view that grazes it edge-on can barely observe yaw. Grow the SHARED yaw variance as 1/obliquity_cos−1
     // so a grazing frame confirms the chair but can't rotate a converged one. Continuous covariance, no gate.
@@ -104,6 +127,31 @@ struct ChairConfig
     bool  tracker_prune_enabled        = true; // stillbirth prune of phantom duplicates born from churn
     int   tracker_prune_maturity_cycles = 90;  // probation window; older instances are permanent furniture
     int   tracker_prune_patience       = 30;   // consecutive tracker-unassigned cycles in probation → prune
+    // ── Existence belief (continuous log-odds removal; replaces the wall-clock stillbirth prune above) ──
+    // A phantom accumulates NEGATIVE existence evidence every SENSOR frame it is expected-visible yet
+    // under-supported (silhouette-contradiction / free-space), and is removed when its log-odds drops below
+    // the floor — regardless of age. A real chair keeps its log-odds pinned at the cap by being explained.
+    // Expected support scales as E[npts] = ExpectedSupportC / range² (a chair's silhouette solid angle);
+    // ExpectedSupportC ≈ npts·range² of a well-seen chair (measured ~7000 for the webots dining set).
+    bool  exist_enabled            = true;   // Existence.Enabled — use the log-odds belief (else the old prune)
+    float exist_birth_logodds      = 1.0f;   // Existence.BirthLogodds — L seeded at birth (a birth already needed birth_frames of evidence)
+    float exist_remove_logodds     = -3.0f;  // Existence.RemoveLogodds — remove when L falls below this
+    float exist_max_logodds        =  4.0f;  // Existence.MaxLogodds — saturation cap (a real chair can't earn infinite immunity)
+    float exist_evidence_gain      = 0.15f;  // Existence.EvidenceGain — per-frame |ΔL| scale (occlusion tolerance = span/gain frames)
+    float exist_expected_support_c = 2500.f; // Existence.ExpectedSupportC — expected support scale: E[npts]=C/range² (boundary ≈ a handful of pts)
+    float exist_adequacy_ref       = 0.25f;  // Existence.AdequacyRef — WON-mask support/expected below this → negative evidence
+    float exist_adequacy_cap       = 1.5f;   // Existence.AdequacyCap — clamp so one dense frame can't over-confirm
+    float exist_calib_adapt        = 0.0f;   // Existence.CalibAdapt — EWMA adapting C (0=OFF; a dense chair would poison a sparse one)
+    int   exist_vacate_confident_frames = 45; // Existence.VacateConfidentFrames — frames_since_detection at which an in-view,
+                                              // unexplained instance draws FULL vacate negative (ramps 0→1; grace vs death-spiral)
+    bool  exist_occlusion_check    = true;   // Existence.OcclusionCheck — suppress the vacate negative when the chair is hidden
+    float exist_occlusion_margin_m = 0.30f;  // Existence.OcclusionMarginM — an occluder must be ≥ this much CLOSER to count
+    // Room-containment pose prior: P(a chair outside the room walls) ≈ 0. Applies even when the instance is out
+    // of view / behind a wall (a localization glitch can birth a chair outside; the sensor then can't reach it
+    // to vacate it). An out-of-room instance draws this STRONG negative log-odds each frame → removed in a few.
+    bool  exist_room_prior         = true;   // Existence.RoomPrior — enforce the room-containment pose prior
+    float exist_room_margin_m      = 0.40f;  // Existence.RoomMarginM — tolerance a chair centre may sit OUTSIDE the walls
+    float exist_out_of_room_gain   = 1.5f;   // Existence.OutOfRoomGain — |ΔL| per frame while outside (debounces a 1-frame glitch)
     float tracker_birth_seat_w     = 0.45f;   // seed seat width/depth/heights for a freshly born chair node
     float tracker_birth_seat_d     = 0.45f;
     float tracker_birth_seat_h     = 0.45f;

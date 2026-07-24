@@ -229,6 +229,29 @@ WallRef CabinetFitter::build_wall_ref(std::size_t edge_i, const Eigen::Vector2f&
     return w;
 }
 
+// One KitchenWall per canonical wall id (collinear-merged corners + inward normal). Stage 0 cell geometry.
+std::vector<rc::KitchenWall> CabinetFitter::kitchen_walls() const
+{
+    std::vector<rc::KitchenWall> out;
+    const std::size_t n = room_polygon_.size();
+    if (n < 2 or wall_seg_id_.size() != n) return out;
+    std::unordered_set<int> seen;
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        const int sid = wall_seg_id_[i];
+        if (sid < 0 or seen.count(sid)) continue;
+        seen.insert(sid);
+        const WallRef wr = build_wall_ref(i, room_polygon_[i]);   // corners a,b + inward normal for this wall
+        if (not wr.ok or not wr.has_segment) continue;
+        rc::KitchenWall w;
+        w.a = wr.a; w.b = wr.b; w.W = (wr.b - wr.a).norm();
+        if (w.W < 1e-4f) continue;
+        w.u = (wr.b - wr.a) / w.W; w.n = wr.n; w.seg_id = sid;
+        out.push_back(w);
+    }
+    return out;
+}
+
 WallRef CabinetFitter::nearest_wall(const Eigen::Vector2f& q) const
 {
     const std::size_t n = room_polygon_.size();
@@ -450,6 +473,11 @@ CabinetFitter::CabinetObservation CabinetFitter::observe_slice(CabinetInstance& 
     inst.last_centroid_radius = slice.centroid_radius;
     inst.last_range           = slice.range;
     inst.last_depth_var       = slice.depth_var;   // mask depth uncertainty → R (ricoh lidar-depth masks)
+    // FRAME ego-motion (shared, this whole capture) → common-mode next: |v|, |ω| of the camera twist + dt.
+    const auto& tw = masks_packet.cam_twist;   // [vx,vy,vz,wx,wy,wz] (optical frame); zeros if absent
+    inst.last_ego_v  = std::hypot(std::hypot(tw[0], tw[1]), tw[2]);
+    inst.last_ego_w  = std::hypot(std::hypot(tw[3], tw[4]), tw[5]);
+    inst.last_ego_dt = masks_packet.frame_dt_s;
 
     const std::size_t begin = std::min(slice.support_begin, masks_packet.support_points.size());
     const std::size_t end   = std::min(slice.support_end,   masks_packet.support_points.size());
@@ -493,6 +521,7 @@ CabinetFitter::CabinetObservation CabinetFitter::observe(CabinetInstance& inst, 
 // True on the config-driven log period (one in cabinet_log_period_frames cycles).
 bool CabinetFitter::should_log(const CabinetInstance& inst) const
 {
+    if (not cfg_.verbose_log) return false;   // quiet terminal by default (the CSV keeps every cycle)
     const int period = std::max(1, cfg_.cabinet_log_period_frames);
     return (inst.processed_cycles % period) == 0;
 }
@@ -585,6 +614,7 @@ float CabinetFitter::run_inference(CabinetInstance& inst, const CabinetObservati
         p.room_axis_precision     = cfg_.room_axis_precision;
         p.room_axis_capture_rad   = cfg_.room_axis_capture_rad;
         p.extent_precision        = cfg_.extent_precision;
+        p.free_space_precision    = cfg_.free_space_precision;   // VACATE: closes the one-sided extent
         p.base_tier = {cfg_.base_depth_m, cfg_.base_depth_std, cfg_.base_z0_m, cfg_.base_z0_std,
                        cfg_.base_z1_m,    cfg_.base_z1_std};
         p.wall_tier = {cfg_.wall_depth_m, cfg_.wall_depth_std, cfg_.wall_z0_m, cfg_.wall_z0_std,
@@ -720,6 +750,20 @@ float CabinetFitter::run_inference(CabinetInstance& inst, const CabinetObservati
         }
         frame.chain_cov_xx  = inst.chain_cov_xx + range_lat_var;   // range adds to the SHARED position error (cap)
         frame.chain_cov_yy  = inst.chain_cov_yy + range_lat_var;
+        // EGO-MOTION → common-mode ("still to update"): the shared ego-DISPLACEMENT this capture, (gain·|v|·dt)²
+        // on position/size and (gain·|ω|·dt)² on yaw. A moving frame thus loses its authority to move the mean
+        // (Woodbury) and only confirms existence; a near-still frame updates fully. Continuous, no motion gate.
+        {
+            const float g  = cfg_.ai2_common_mode_motion_gain;
+            const float dt = std::max(0.0f, inst.last_ego_dt);
+            // POSITION uses the DEPTH-AMPLIFIED shared corruption motion_dotd = Z·‖ṡ‖ (m/s), NOT the raw
+            // camera |v|: at ~3 m range a small ego-motion moves the DEPROJECTED mask a lot, so |v|·dt (mm)
+            // is far too small to bite at slow driving — motion_dotd·dt is the real shared position error.
+            const float dp = g * inst.last_motion_dotd * dt;   // shared position displacement (m)
+            const float da = g * inst.last_ego_w       * dt;   // shared yaw displacement (rad)
+            frame.ego_motion_pos_var = dp * dp;
+            frame.ego_motion_yaw_var = da * da;
+        }
         // Obliquity yaw cap: at an edge-on (grazing) view the tabletop cloud is ~1-D along the near edge, so yaw
         // is barely observable and the per-point GN snaps between the box's symmetric orientations (r_π / w↔h —
         // the CSV flips). Grow the SHARED yaw variance as the view grazes (|cos(incidence)|→0 ⇒ 1/cos→∞), so a
@@ -872,7 +916,7 @@ float CabinetFitter::run_inference(CabinetInstance& inst, const CabinetObservati
     compute_object_observation(inst);
 
     if (should_log(inst))
-        std::print("[{}] AI2 npts={} R={:.4f} dotd={:.2f} trunc={:.2f}{} tier={} | FE={:.2f} base={:.2f} surprise={:.2f} | cx={:.3f} cy={:.3f} ψ={:.3f} L={:.3f} d={:.3f} z=[{:.3f},{:.3f}] | σ(L,d,z1)mm=({:.0f},{:.0f},{:.0f}) | wall gap={:.3f} λ={:.0f} axis={:.2f}° span={:.2f}/{} | lidar {}/{} bp{} resid={:.3f}m div={}\n",
+        std::print("[{}] AI2 npts={} R={:.4f} dotd={:.2f} trunc={:.2f}{} tier={} | FE={:.2f} base={:.2f} surprise={:.2f} | cx={:.3f} cy={:.3f} ψ={:.3f} L={:.3f} d={:.3f} z=[{:.3f},{:.3f}] | σ(L,d,z1)mm=({:.0f},{:.0f},{:.0f}) | wall gap={:.3f} λ={:.0f} axis={:.2f}° span={:.2f}/{} | lidar {}/{} bp{} resid={:.3f}m vac={} div={}\n",
                    inst.node_name, npts, R, inst.last_motion_dotd, inst.last_trunc_frac, gated ? " GATED" : "",
                    inst.ai2_belief.tier() == CabinetTier::Base ? "base" : "wall",
                    energy, inst.fe_baseline, inst.fe_surprise,
@@ -884,6 +928,7 @@ float CabinetFitter::run_inference(CabinetInstance& inst, const CabinetObservati
                    57.2958f * inst.ai2_belief.last_axis_resid(),
                    inst.ai2_belief.last_span_obs(), inst.ai2_belief.last_span_pts(),
                    inst.dbg_lidar_rays, inst.dbg_lidar_raw, inst.dbg_lidar_bpearl_rays, inst.dbg_lidar_resid_m,
+                   inst.ai2_belief.last_vacate_beams(),
                    inst.frames_diverged);
 
     // Wall-segment domain diagnostic: is the corner clamp BINDING? seg=1 ⇒ live; corners t=[tlo,thi] are the
@@ -920,7 +965,7 @@ void CabinetFitter::log_ai2_csv(const CabinetInstance& inst, int npts, float R, 
         // named the old 6-DOF layout (cx,cy,H,w,h,yaw) while the body writes the 7-DOF state
         // (cx,cy,yaw,L,d,z0,z1), and several stale moment_/completeness columns were never emitted — so
         // every column past cy parsed under the wrong name. Rewritten to the current body exactly.
-        ai2_csv_ << "cycle,node,pkt_fid,pkt_ts,npts,gated,energy,fe_baseline,fe_surprise,R,motion_var,depth_var,motion_dotd,trunc_frac,range,"
+        ai2_csv_ << "cycle,node,pkt_fid,pkt_ts,npts,gated,energy,fe_baseline,fe_surprise,R,motion_var,depth_var,motion_dotd,ego_v,ego_w,ego_dt,trunc_frac,range,"
                  << "cx,cy,yaw,L,d,z0,z1,std_cx,std_cy,std_yaw,std_L,std_d,std_z0,std_z1,"
                  << "tier_ev,p_alt,lidar_rays,lidar_raw,lidar_bpearl,lidar_resid_m,lidar_meanz,lidar_topz,lidar_floorz,lidar_cov_ang,"
                  << "dyaw_points,obliquity_cos,wall_gap,wall_lambda,span_obs,span_pts,span_lidar_rays,"
@@ -937,6 +982,7 @@ void CabinetFitter::log_ai2_csv(const CabinetInstance& inst, int npts, float R, 
              << npts << ',' << (gated ? 1 : 0) << ','
              << energy << ',' << inst.fe_baseline << ',' << inst.fe_surprise << ','
              << R << ',' << inst.last_motion_var << ',' << inst.last_depth_var << ',' << inst.last_motion_dotd << ','
+             << inst.last_ego_v << ',' << inst.last_ego_w << ',' << inst.last_ego_dt << ','
              << inst.last_trunc_frac << ',' << inst.last_range << ','
              << s.cx << ',' << s.cy << ',' << s.yaw << ',' << s.L << ',' << s.d << ',' << s.z0 << ',' << s.z1 << ','
              << sd(0) << ',' << sd(1) << ',' << sd(2) << ',' << sd(3) << ',' << sd(4) << ','

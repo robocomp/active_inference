@@ -121,6 +121,15 @@ struct TableInstance
     // ── Table-owned voxel memory bank (room frame), independent of per-frame uploads ──────────────
     std::vector<Eigen::Vector3f> voxel_bank_pts;
     std::unordered_set<std::uint64_t> voxel_bank_keys;
+    bool cloud_dumped = false;   // one-shot guard for the diagnostic voxel-bank dump (cfg_.dump_cloud_path)
+
+    // ── Shape model-selection (round vs square), set by TableFitter::evaluate_shape ──────────────
+    // Published as the node's object_subtype string (the voxelizer renders the matching mesh). Chosen by
+    // free-energy / model evidence, NOT a threshold: shape_evidence is a bounded accumulated log-Bayes-
+    // factor (round − square) over periodic voxel-bank comparisons; subtype flips at the zero boundary.
+    std::string subtype        = "square";   // "square" | "round" (free-form for future sub-subtypes)
+    float       shape_evidence = 0.0f;       // >0 ⇒ round better explains the accumulated cloud
+    int         shape_eval_ctr = 0;          // cycles since the last periodic shape evaluation
     // Most recent fresh-frame residual points (model-unexplained), held for the viewer.
     std::vector<Eigen::Vector3f> last_residual_pts;
     // Epistemic action request published to DSR (filled by the epistemic planner).

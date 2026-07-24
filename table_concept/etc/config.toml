@@ -246,12 +246,14 @@ DetectionAliveMaxFrames = 40 # cycles without a fresh mask before detection_aliv
 MatchedFramesBeforeAging = 5 # a barely-born belief (fewer matched frames) is not aged by a stale no-mask cycle
 CentralRegionFrac = 0.25    # central image box [f,1-f]²; a detectable sample inside counts toward p_detect (removal)
 TableLogPeriodFrames = 30   # per-cycle log throttle (cosmetic; no effect on the fit)
+ShowDashboard = true        # false = no GUI (belief dashboard + evidence monitor combined into one window)
 ObsDistance = 1.8           # comfortable maximum stand-off from the target face for epistemic poses
 EpistemicCooldownCycles = 200 # min cycles a satisfied table stays withdrawn (anti-chatter)
 VoxelBankMaxPoints = 4000   # max number of table-owned voxels kept in memory
 VoxelBankQuantizationM = 0.02 # dedup grid (m) for voxel-bank hashing
 VoxelSelectRadiusMarginM = 0.50 # per-table XY ownership gate margin for mixed proto-tables
 VoxelSelectHeightMarginM = 0.25 # extra Z margin above table height when selecting owned voxels
+DumpCloudPath = "/tmp/round_table.xyz" # DIAGNOSTIC one-shot: dump a table's voxel-bank cloud here for tests/compare_models ("" = off)
 RtCovScale = 1.0            # scales the belief Σ → published room→table RT covariance (calibrate toward NEES≈1)
 PublishObjectObs = true     # publish per-frame ROBOT-frame fit z_o (obj_obs_robot) → room's object-anchor factor
 ObjectObsFrame = "body"     # localizer base frame z_o is expressed in (== room's LIDAR_ROBOT_FRAME)

@@ -11,6 +11,7 @@
 
 #include "table_fitter.h"
 #include "table_voxel_bank.h"
+#include "round_table_belief.h"   // round hypothesis for the shape model-selection (evaluate_shape)
 #include "../../common/object_anchor/object_anchor_contract.h"
 #include "../../common/object_anchor/ray_anisotropic_cov.h"
 
@@ -457,6 +458,19 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
     const float R = cfg_.ai2_sigma_base_m * cfg_.ai2_sigma_base_m
                   + std::max(0.0f, inst.last_motion_var) + std::max(0.0f, inst.last_depth_var) + range_lat_var;
 
+    // ── Ego-motion → COMMON-MODE: the "be still to UPDATE, else CONFIRM" fixation term (like the VOR / an
+    // animal taking in detail only during fixations). A moving frame's mask is smeared/displaced by ego-motion
+    // by ≈ effective-lag · motion-speed — a per-mask SHARED error that per-point R averages away (N points
+    // collapse it). Route it into the per-frame COMMON-MODE instead: the engine's Woodbury marginalisation
+    // then caps the frame's authority to move the GEOMETRY MEAN (size/pose/yaw), so geometric updates
+    // concentrate at stillness while a moving frame contributes CONFIRMATION only (existence/association don't
+    // read this). motion_dotd = Z·‖ṡ‖ (m/s) from the voxelizer. CONTINUOUS, no gate: at dotd→0 the term
+    // vanishes (a still frame updates fully); the gains are ~effective-lag (s), 0 disables a channel.
+    const float mot_dotd    = std::abs(inst.last_motion_dotd);
+    const float mot_pos_var = std::pow(cfg_.motion_cm_pos_gain  * mot_dotd, 2.0f);   // m²  (cx,cy)
+    const float mot_size_var= std::pow(cfg_.motion_cm_size_gain * mot_dotd, 2.0f);   // m²  (w,h,H)
+    const float mot_yaw_var = std::pow(cfg_.motion_cm_yaw_gain  * mot_dotd, 2.0f);   // rad² (yaw)
+
     // Truncation gate: a mask clipped by the image border has a chopped silhouette → it biases the fit
     // (shrinks/displaces the model). Above tolerance, skip the geometric update (predict only) — but
     // keep the instance (association ran upstream). Ego-motion corruption is handled by CONTINUOUS covariance
@@ -514,8 +528,8 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
                 frame.point_azim.push_back(std::atan2(pc.x(), pc.y()));   // signed azimuth about the optical axis
             }
         }
-        frame.chain_cov_xx  = inst.chain_cov_xx + range_lat_var;   // range adds to the SHARED position error (cap)
-        frame.chain_cov_yy  = inst.chain_cov_yy + range_lat_var;
+        frame.chain_cov_xx  = inst.chain_cov_xx + range_lat_var + mot_pos_var;   // pose-chain + range + EGO-MOTION
+        frame.chain_cov_yy  = inst.chain_cov_yy + range_lat_var + mot_pos_var;
         // Obliquity yaw cap: at an edge-on (grazing) view the tabletop cloud is ~1-D along the near edge, so yaw
         // is barely observable and the per-point GN snaps between the box's symmetric orientations (r_π / w↔h —
         // the CSV flips). Grow the SHARED yaw variance as the view grazes (|cos(incidence)|→0 ⇒ 1/cos→∞), so a
@@ -534,10 +548,10 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
         // FootprintResidual on ⇒ the depth tilt is an ESTIMATED N=7 state (no per-frame yaw cap — that ratcheted
         // and needed a fragile sweet-spot); chain_cov_yaw carries only the WHITE range term. Else the legacy tuned
         // obliquity+range form. (The tilt STATE replaces both the cap and the obliquity/range yaw gains.)
-        frame.chain_cov_yaw = cfg_.footprint_residual
+        frame.chain_cov_yaw = mot_yaw_var + (cfg_.footprint_residual
             ? range_yaw_var
-            : range_yaw_var + obliquity_yaw_std * obliquity_yaw_std;   // range + grazing-view cap
-        frame.chain_cov_size = range_size_var;                     // ...nor RESHAPE/inflate — geometry freezes afar
+            : range_yaw_var + obliquity_yaw_std * obliquity_yaw_std);   // range + grazing-view cap + EGO-MOTION
+        frame.chain_cov_size = range_size_var + mot_size_var;      // range freezes afar + EGO-MOTION freezes while moving
         // Footprint-moment SHARED per-frame variance: ego-motion mask corruption + a GENTLE range term (a global
         // footprint fit is far more range-robust than a single boundary point, so a coefficient << the per-point
         // AI2RangeNoiseSizePerM). This makes the moment ACCUMULATE across frames and back off when the robot is
@@ -701,7 +715,47 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
     inst.dbg_gated     = gated;
 
     log_ai2_csv(inst, npts, R, gated, energy);
+
+    // Periodic shape model-selection (round vs square) on the accumulated cloud → inst.subtype.
+    evaluate_shape(inst);
     return energy;
+}
+
+// Round-vs-square shape hypothesis test by free energy / model evidence (CONCEPT_AGENT_RECIPE.md §6, the
+// "evidence over hypotheses, not a threshold" pattern; validated offline in tests/compare_models). Every
+// cfg_.shape_eval_period cycles, once the ownership-gated voxel bank has enough points, fit a ROUND model
+// (disc top + 4 ring legs — MATCHED primitive cardinality with the square's top+4legs, so the mixture-prior
+// baseline cancels and only disc-vs-box TOP shape is measured) to the SAME accumulated cloud with the SAME R,
+// and accumulate a BOUNDED sequential log-Bayes-factor (E_square − E_round). subtype flips at the zero
+// boundary — no tuned cutoff. The clamp lets a converged run RECANT if a fuller view turns the evidence.
+void TableFitter::evaluate_shape(TableInstance& inst)
+{
+    if (cfg_.shape_eval_period <= 0) return;                              // gate disabled
+    if (++inst.shape_eval_ctr < cfg_.shape_eval_period) return;
+    inst.shape_eval_ctr = 0;
+    const auto& cloud = inst.voxel_bank_pts;
+    if (static_cast<int>(cloud.size()) < cfg_.shape_eval_min_points) return;
+
+    const float R = cfg_.ai2_sigma_base_m * cfg_.ai2_sigma_base_m;        // SAME R as the square → normaliser cancels
+    // Square hypothesis: the already-fitted belief's clutter-inclusive free energy on the accumulated cloud.
+    const float e_square = inst.ai2_belief.mean_energy(cloud, inst.ai2_belief.state(), R);
+    // Round hypothesis: fit a fresh round(ring) belief to the same cloud, seeded from the square's pose/size.
+    const auto& sq = inst.ai2_belief.state();
+    RoundTableParams rp; rp.sigma_base_m = cfg_.ai2_sigma_base_m; rp.clutter_frac = cfg_.ai2_clutter_frac;
+    rp.clutter_scale_m = cfg_.ai2_clutter_scale_m; rp.prior_size_std = cfg_.ai2_prior_size_std;
+    RoundTableBelief round({sq.cx, sq.cy, sq.H, 0.25f * (sq.w + sq.h)}, rp, RoundBase::Ring);
+    TableFrame f; f.points = cloud;
+    for (int it = 0; it < 40; ++it) round.update(f);
+    const float e_round = round.mean_energy(cloud, round.state(), R);
+
+    // Bounded sequential accumulation of the per-evaluation log-Bayes-factor (>0 ⇒ round explains it better).
+    inst.shape_evidence = std::clamp(inst.shape_evidence + (e_square - e_round),
+                                     -cfg_.shape_evidence_clamp, cfg_.shape_evidence_clamp);
+    const std::string prev = inst.subtype;
+    inst.subtype = inst.shape_evidence > 0.0f ? "round" : "square";
+    if (inst.subtype != prev)
+        std::print("[{}] shape → {} (log-BF acc={:.2f}; e_sq={:.3f} e_round={:.3f})\n",
+                   inst.node_name, inst.subtype, inst.shape_evidence, e_square, e_round);
 }
 
 // Append one AI2 belief row (state + Σ-diag std + mask R/bias/trunc + mode evidence + LiDAR diag) to the CSV.

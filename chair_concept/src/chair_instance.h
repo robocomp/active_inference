@@ -47,6 +47,7 @@ struct ChairInstance
     float last_motion_dotd = 0.0f;   // motion-corruption speed (diagnostic)
     float last_trunc_frac  = 0.0f;   // silhouette truncation (predict-only gate)
     float last_range       = 0.0f;   // mean camera→mask depth Z (m): static range weighting
+    float last_centroid_radius = 1.0f; // normalised mask-centroid radius from the principal point (0=centred, →1 edge)
     float last_clutter_frac = 0.0f;  // mean clutter responsibility (fraction of the mask the model can't explain)
     float dbg_obliquity_cos = 1.0f;  // |cos| of camera→chair horizontal ray vs backrest normal (1=face-on, →0 grazing)
 
@@ -68,6 +69,17 @@ struct ChairInstance
     float chain_cov_xx = 0.0f, chain_cov_yy = 0.0f, chain_cov_yaw = 0.0f;  // localization/chain cov (m²,rad²)
     int  assigned_mask_idx  = -1;     // tracker's gated mask-slice assignment (-1 = use greedy nearest)
     int  unassigned_streak  = 0;      // consecutive tracker cycles with no mask assignment (stillbirth prune)
+    // ── Existence belief (continuous log-odds; supersedes the wall-clock stillbirth prune) ──────────
+    // L = log P(exists)/P(¬exists). Integrated once per SENSOR frame while the instance is in the camera
+    // frustum (roi_valid), via two channels: (1) WON a mask → POSITIVE/NEGATIVE by how much of the expected
+    // chair silhouette the model EXPLAINS = (support/expected_at_range)·(1−clutter): a real chair explains a
+    // good fraction (+); a far-too-sparse OR a big ~all-clutter won mask explains ≈nothing (−). (2) WON NOTHING
+    // → absence evidence whose confidence RAMPS with frames_since_detection (freshness-as-precision): a brief
+    // occlusion / lost slice barely moves L and recovers on the next win (this ramp prevents the death-spiral
+    // churn), but a spot left unexplained for seconds accrues the full negative. HELD out of frustum / stale /
+    // bearing-only / un-initialised. Removed when L < cfg.exist_remove_logodds — evidence-based, NO age
+    // immunity; a real chair keeps L pinned at the saturation cap by being explained. NaN = un-seeded.
+    float exist_logodds = std::numeric_limits<float>::quiet_NaN();
     int  processed_cycles   = 0;      // per-chair compute cycles for log throttling
     bool model_stable       = false;
     int  model_generation   = 0;

@@ -66,7 +66,8 @@ EpistemicPlanner::EpistemicPlanner(float d_obs)
 {}
 
 // AI2-native Σ-based D-optimal next-best-view: score the four faces, return the best framed viewpoint.
-EpistemicProposal EpistemicPlanner::compute(const CabinetBelief& belief, float lat_rate, float sigma_base) const
+EpistemicProposal EpistemicPlanner::compute(const CabinetBelief& belief, float lat_rate, float sigma_base,
+                                            bool verbose) const
 {
     constexpr float kEffectiveHorizontalFovRad = 70.0f * std::numbers::pi_v<float> / 180.0f;
     constexpr float kMinimumStandOffM = 1.15f;         // YOLO won't fire too close → keep a viewing gap
@@ -162,6 +163,7 @@ EpistemicProposal EpistemicPlanner::compute(const CabinetBelief& belief, float l
             const float n = std::sqrt(std::max(0.0f, S(j, j))) / ref[j];
             if (n > best) { best = n; dom = j; }
         }
+        if (verbose)
         std::print("[epistemic-NBV] face={} gain={:.3f}(raw {:.3f}) adq_gap={:.3f} | Σ dom-unc={} σ={:.3f}{} | raw +x={:.2f} -x={:.2f} +y={:.2f} -y={:.2f}\n",
                    fn[best_idx], best_gain, best_raw, adequacy_gap, dof[dom], std::sqrt(std::max(0.0f, S(dom, dom))), (dom == 5 ? "rad" : "m"),
                    face_raw[0], face_raw[1], face_raw[2], face_raw[3]);

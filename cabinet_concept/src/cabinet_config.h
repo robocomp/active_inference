@@ -30,6 +30,8 @@ struct CabinetConfig
     float obs_distance                 = 1.8f;    // d_obs for the epistemic planner
     int   epistemic_cooldown_cycles    = 200;     // min cycles withdrawn after satisfaction
     int   cabinet_log_period_frames      = 30;      // per-cycle log throttle
+    bool  verbose_log                    = false;   // false = quiet terminal (only births/merges/removals);
+                                                    // true = per-cycle diagnostics (dashboard/tracker/split/…)
     int   voxel_bank_max_points        = 4000;    // cap on the cabinet-owned voxel memory bank
     float voxel_bank_quantization_m    = 0.02f;   // voxel-bank dedup grid (m)
     float voxel_select_radius_margin_m = 0.50f;   // XY margin (m) around the model for voxel-bank selection
@@ -59,6 +61,12 @@ struct CabinetConfig
     float ai2_common_mode_pos_std  = 0.03f;  // shared position error (m); pose-chain cov adds to it
     float ai2_common_mode_size_std = 0.02f;  // shared size error w,h,H (m)
     float ai2_common_mode_yaw_std  = 0.03f;  // shared yaw error (rad)
+    // EGO-MOTION → common-mode ("still to update"). The shared frame error is the camera's ego-DISPLACEMENT
+    // during capture: pos_var=(gain·|v|·dt)², yaw_var=(gain·|ω|·dt)². gain is dimensionless (exposure-vs-frame
+    // + deprojection amplification). At ~0.2 m/s or ~0.2 rad/s it dominates the base common-mode ⇒ geometry
+    // frozen, existence-only. 0 disables. Continuous — no motion gate.
+    float ai2_common_mode_motion_gain = 8.0f;   // strong: even slow driving (motion_dotd~0.1) freezes geometry;
+                                                 // only a near-still frame (motion_dotd→0) commits a full update
     // STATIC range weighting (motion-free): the common-mode error grows with view distance, so a far, vague
     // mask cannot resolve pose — orientation least of all (a far view confirms existence, can't rotate the
     // cabinet). Continuous, no gate. lat feeds R + position common-mode (m per m of range); yaw feeds the yaw

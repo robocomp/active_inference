@@ -107,6 +107,16 @@ dashboard. So the §1 contract below holds; only the model hooks are authored.
   surface grazes edge-on (`gain·(1/|cos|−1)`), so a grazing view confirms the object but can't rotate a
   converged one. ★Key on the RIGHT surface: table = incidence vs the horizontal top; chair = the VERTICAL
   backrest (`n̂=(sinψ,−cosψ)`), a different geometry — port the *form*, re-tune the gain per surface.
+- **Ego-motion → common-mode ("be still to UPDATE, else CONFIRM" — the VOR/fixation term).** A moving frame's
+  mask is smeared/displaced by ego-motion (≈ effective-lag · speed), a per-mask SHARED error. Route it into the
+  per-frame **common-mode** (`frame.chain_cov_*`), NOT per-point `R` — per-point `R` lets N points average the
+  shared error away, while the Woodbury common-mode caps the frame's authority to move the **mean**, so a moving
+  frame confirms the object but can't reshape/reposition/rotate a converged one; geometric updates concentrate
+  at stillness. Add `(gain·|motion_dotd|)²` (motion_dotd = Z·‖ṡ‖ m/s, from the voxelizer) to the common-mode of
+  each fitted geometric channel — position always; **size** (w,h / radius,height) — the anti-RESHAPE lever, the
+  worst offender on rotation; **yaw** (agents with a yaw DOF) — the anti-ROTATE lever. Continuous (0 at
+  stillness), no gate; one gain per channel (0 disables). Reference: `table_fitter.cpp` (`motion_cm_*_gain`),
+  cabinet. Complement (action side): the affordance's `.still(v,ω)` dwell creates fixation windows.
 - **No thresholds/gates** unless strictly necessary and flagged — encode the effect as a covariance/precision
   and let it fall out of inference (see `CLAUDE.md` modeling philosophy).
 - **A mask is a LOWER BOUND on extent** (occlusion / foreshortening only shorten it) → extent evidence is

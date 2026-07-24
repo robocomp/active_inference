@@ -116,6 +116,7 @@ private:
     // Associates "cabinet" masks to instances, spawns a cabinet from an unexplained mask, merges overlaps.
     rc::InstanceTracker tracker_;
     void run_instance_tracker();   // called every cycle from compute()
+    void shadow_route_kitchen_cells();   // kitchen-model Stage 0 SHADOW: route masks → (wall,tier) cells, log only
     // Read the room's delimiting polygon + interior centroid and push them to the fitter (wall-flush
     // factor + the C2v yaw canonicalize reference). Cheap; called each cycle once the room is known.
     void refresh_room_geometry();
@@ -179,6 +180,7 @@ private:
     rc::CabinetConfig                                         cfg_;
     rc::EpistemicPlanner                                    epistemic_planner_;
     std::unique_ptr<rc::CabinetFitter>                        fitter_;    // active-inference fit core (owns instances)
+    rc::KitchenRouting                                        kitchen_routing_;   // Stage 0 shadow cell table
     std::unique_ptr<rc::CabinetExistence>                    existence_; // evidence-based removal (existence log-odds)
 
     // Live belief dashboard — its OWN top-level window (extracted from the DSR graph dock so it shows

@@ -526,6 +526,12 @@ std::optional<GraphObjectBox> SceneProcessor::build_graph_object_box(const DSR::
     if (node.type() == "box" and node.name().rfind("cabinet_", 0) == 0)
         category = "cabinet";
 
+    // Inferred shape subtype (table_concept publishes "round"/"square" on object_subtype_att). The viewer
+    // renders the matching shape (round → disc-top table, square → the box mesh).
+    std::string subtype;
+    if (const auto sub_opt = graph_->get_attrib_by_name<object_subtype_att>(node); sub_opt.has_value())
+        subtype = sub_opt.value();
+
     const Eigen::Matrix3d& R = room_T_object->linear();
     const float yaw = static_cast<float>(std::atan2(R(1, 0), R(0, 0)));
 
@@ -541,7 +547,7 @@ std::optional<GraphObjectBox> SceneProcessor::build_graph_object_box(const DSR::
 
     return GraphObjectBox{min_corner, max_corner, center,
                           Eigen::Vector3f(half_width, half_depth, half_height),
-                          yaw, node.name(), std::move(category)};
+                          yaw, node.name(), std::move(category), std::move(subtype)};
 }
 
 std::vector<GraphObjectBox> SceneProcessor::get_graph_object_boxes(const std::string& room_name,
@@ -622,10 +628,14 @@ void SceneProcessor::update_viewer_graph_object_boxes(std::span<const GraphObjec
     std::vector<QVector3D> half_extents;
     std::vector<float> yaws;
     std::vector<std::string> categories;
+    std::vector<std::string> names;
+    std::vector<std::string> subtypes;
     centers.reserve(graph_boxes.size());
     half_extents.reserve(graph_boxes.size());
     yaws.reserve(graph_boxes.size());
     categories.reserve(graph_boxes.size());
+    names.reserve(graph_boxes.size());
+    subtypes.reserve(graph_boxes.size());
 
     for (const auto& box : graph_boxes)
     {
@@ -633,9 +643,11 @@ void SceneProcessor::update_viewer_graph_object_boxes(std::span<const GraphObjec
         half_extents.emplace_back(box.half_extents.x(), box.half_extents.y(), box.half_extents.z());
         yaws.push_back(box.yaw_rad);
         categories.push_back(box.category);
+        names.push_back(box.node_name);
+        subtypes.push_back(box.subtype);
     }
 
-    voxel_viewer_->update_graph_boxes(centers, half_extents, yaws, categories);
+    voxel_viewer_->update_graph_boxes(centers, half_extents, yaws, categories, names, subtypes);
 }
 
 void SceneProcessor::update_viewer_object_meshes()
@@ -649,12 +661,21 @@ void SceneProcessor::update_viewer_object_meshes()
     // these types — see the box pass — so the mesh is their only visual.)
     std::vector<std::vector<float>> meshes;
     std::vector<std::string>        categories;   // parallel to meshes → per-class mesh colour in the viewer
+    std::vector<std::string>        names;        // parallel to meshes → per-instance shade + 3D text label
     for (const char* type : {"table", "chair"})
         for (const auto& node : graph_->get_nodes_by_type(type))
             if (const auto opt = graph_->get_attrib_by_name<mesh_vertices_att>(node); opt.has_value())
             {
+                // table_concept's mesh is ALWAYS a box slab; for a round table it misrepresents the shape.
+                // Skip it here so the viewer's box pass draws the round table (disc top + pedestal) instead,
+                // keyed off the same object_subtype attribute. Square tables keep the solid box mesh.
+                if (std::string_view(type) == "table")
+                    if (const auto s = graph_->get_attrib_by_name<object_subtype_att>(node);
+                        s.has_value() and s.value() == "round")
+                        continue;
                 meshes.emplace_back(opt.value().get());
                 categories.emplace_back(type);
+                names.emplace_back(node.name());
             }
     // cabinet_concept publishes each run as a `box` node named "cabinet_*" (Cortex registers no `cabinet`
     // type — the reuse-a-primitive + name-prefix pattern), with the fitted carcass in mesh_vertices_att
@@ -666,8 +687,9 @@ void SceneProcessor::update_viewer_object_meshes()
             {
                 meshes.emplace_back(opt.value().get());
                 categories.emplace_back("cabinet");
+                names.emplace_back(node.name());
             }
-    voxel_viewer_->update_object_meshes(meshes, categories);
+    voxel_viewer_->update_object_meshes(meshes, categories, names);
 }
 
 void SceneProcessor::update_viewer_person_skeletons()

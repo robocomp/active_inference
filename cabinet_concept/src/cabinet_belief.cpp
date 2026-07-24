@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <numbers>
 #include <print>
 
@@ -171,11 +172,15 @@ Eigen::Matrix<float, 7, 1> CabinetBelief::prior_mean_vec() const
 
 Eigen::Matrix<float, 7, 1> CabinetBelief::common_mode_inv_diag(const CabinetFrame& f) const
 {
-    const float pos  = params_.common_mode_pos_std  * params_.common_mode_pos_std;
+    // Ego-motion (v·dt, ω·dt): a SHARED frame error → common-mode, so a moving frame loses its authority to
+    // move the geometry MEAN (Woodbury), leaving existence confirmation only. "Still is the spot to update."
+    const float egp = std::max(0.0f, f.ego_motion_pos_var);
+    const float egy = std::max(0.0f, f.ego_motion_yaw_var);
+    const float pos  = params_.common_mode_pos_std  * params_.common_mode_pos_std + egp;
     const float size = params_.common_mode_size_std * params_.common_mode_size_std
-                     + std::max(0.0f, f.chain_cov_size);
+                     + std::max(0.0f, f.chain_cov_size) + egp;
     const float yaw  = params_.common_mode_yaw_std  * params_.common_mode_yaw_std
-                     + std::max(0.0f, f.chain_cov_yaw);
+                     + std::max(0.0f, f.chain_cov_yaw) + egy;
     const float sx = pos + std::max(0.0f, f.chain_cov_xx);
     const float sy = pos + std::max(0.0f, f.chain_cov_yy);
     Eigen::Matrix<float, 7, 1> c;
@@ -445,53 +450,67 @@ void CabinetBelief::accumulate_freespace(const CabinetBeliefState& s, const Cabi
         const float len = dloc.norm();
         if (len < 1e-4f) continue;
 
+        // Ray∩box slab, tracking WHICH face the beam EXITS (the axis + side that produced t_far).
         float t_near = 0.0f, t_far = std::numeric_limits<float>::max();
-        bool miss = false;
+        int   far_axis = -1;      // 0=along-axis end (u), 1=depth (n), 2=vertical
+        bool  far_positive = true;   // exit through the +side (hi) bound of far_axis
+        bool  miss = false;
         for (int a = 0; a < 3 and not miss; ++a)
         {
-            if (std::abs(dloc(a)) < 1e-6f) { if (Ol(a) < lo[a] or Ol(a) > hi[a]) miss = true; }
-            else
-            {
-                float t1 = (lo[a] - Ol(a)) / dloc(a), t2 = (hi[a] - Ol(a)) / dloc(a);
-                if (t1 > t2) std::swap(t1, t2);
-                t_near = std::max(t_near, t1);
-                t_far  = std::min(t_far,  t2);
-            }
+            if (std::abs(dloc(a)) < 1e-6f) { if (Ol(a) < lo[a] or Ol(a) > hi[a]) miss = true; continue; }
+            const float s1 = (lo[a] - Ol(a)) / dloc(a), s2 = (hi[a] - Ol(a)) / dloc(a);
+            t_near = std::max(t_near, std::min(s1, s2));
+            const float exit_a = std::max(s1, s2);
+            if (exit_a < t_far) { t_far = exit_a; far_axis = a; far_positive = dloc(a) > 0.0f; }  // ray exits hi if d>0
         }
-        if (miss or t_near > t_far or t_far < 0.0f or t_near >= 1.0f) continue;
+        if (miss or far_axis < 0 or t_near > t_far or t_far < 0.0f or t_near >= 1.0f) continue;
 
         const float p_through = phi((1.0f - t_far) / (sigma_surf / len));   // endpoint beyond far face ⇒ empty
         if (p_through < 1e-3f) continue;
 
         const float t_mid = 0.5f * (t_near + t_far);
         const Eigen::Vector3f p_free = O + t_mid * (ep - O);       // WORLD witness point (certified empty)
-
-        // 2-D footprint SDF (L×d rectangle in the yaw frame, z ignored) — the 3-D box SDF is degenerate on
-        // the thin faces (∂/∂L=∂/∂d=0), so use the lateral SDF to recover the L/d/cx/cy gradient. e<0 (witness
-        // INSIDE the footprint) ⇒ driving e→0 retreats the nearest face just past it = shrink-only.
-        const auto sdf_fp = [&](const CabinetBeliefState& st) -> float
-        {
-            const float cc = std::cos(-st.yaw), s2 = std::sin(-st.yaw);
-            const float lx = (p_free.x() - st.cx) * cc - (p_free.y() - st.cy) * s2;
-            const float ly = (p_free.x() - st.cx) * s2 + (p_free.y() - st.cy) * cc;
-            const float dx = std::abs(lx) - 0.5f * st.L, dy = std::abs(ly) - 0.5f * st.d;
-            const float ox = std::max(dx, 0.0f), oy = std::max(dy, 0.0f);
-            return std::sqrt(ox * ox + oy * oy) + std::min(std::max(dx, dy), 0.0f);   // 2-D box SDF
-        };
-        const float e = sdf_fp(s);
-        if (e >= 0.0f) continue;                                   // must be inside the footprint to shrink
-        Eigen::Matrix<float, 7, 1> J;
-        const Eigen::Matrix<float, 7, 1> base = s.vec();
-        const float fde = params_.fd_eps;
-        for (int j = 0; j < 7; ++j)
-        {
-            Eigen::Matrix<float, 7, 1> vp = base, vm = base; vp(j) += fde; vm(j) -= fde;
-            J(j) = (sdf_fp(CabinetBeliefState::from_vec(vp)) - sdf_fp(CabinetBeliefState::from_vec(vm))) / (2.0f * fde);
-        }
         const float w = params_.free_space_precision * p_through;
-        Id.noalias() += w * (J * J.transpose());
-        bd.noalias() += -w * J * e;
-        ++dbg_vacate_beams_;
+
+        // FACE-GATED residual — carve ONLY the OBSERVABLE extent faces:
+        //   exit via an ALONG-AXIS end (axis 0) ⇒ the run is too LONG here → carve L (and cx,cy along u);
+        //   exit via the TOP (axis 2, +side)    ⇒ too TALL → carve z1;
+        //   exit via a DEPTH face (axis 1) or the BOTTOM ⇒ SKIP — the wall owns depth, the floor owns z0,
+        //   and a beam grazing a thin front face must NEVER collapse the depth null direction (the bug that
+        //   drove d→0.05). This face gate is the whole correction over the old 2-D-footprint-SDF carve.
+        if (far_axis == 0)
+        {
+            const auto sdf_axis = [&](const CabinetBeliefState& st) -> float
+            {
+                const float ux = std::cos(st.yaw), uy = std::sin(st.yaw);
+                const float s_al = (p_free.x() - st.cx) * ux + (p_free.y() - st.cy) * uy;
+                return std::abs(s_al) - 0.5f * std::max(kMinExtent, st.L);   // <0 ⇒ witness inside the span
+            };
+            const float e = sdf_axis(s);
+            if (e >= 0.0f) continue;                              // already past the end (nothing to retract)
+            Eigen::Matrix<float, 7, 1> J;
+            const Eigen::Matrix<float, 7, 1> base = s.vec();
+            const float fde = params_.fd_eps;
+            for (int j = 0; j < 7; ++j)
+            {
+                Eigen::Matrix<float, 7, 1> vp = base, vm = base; vp(j) += fde; vm(j) -= fde;
+                J(j) = (sdf_axis(CabinetBeliefState::from_vec(vp)) - sdf_axis(CabinetBeliefState::from_vec(vm))) / (2.0f * fde);
+            }
+            Id.noalias() += w * (J * J.transpose());
+            bd.noalias() += -w * J * e;
+            ++dbg_vacate_beams_;
+        }
+        else if (far_axis == 2 and far_positive)
+        {
+            const float rz = s.z1 - p_free.z();                   // >0: top above the empty witness ⇒ shrink z1
+            if (rz <= 0.0f) continue;
+            Eigen::Matrix<float, 7, 1> Jz = Eigen::Matrix<float, 7, 1>::Zero();
+            Jz(6) = 1.0f;
+            Id.noalias() += w * (Jz * Jz.transpose());
+            bd.noalias() += -w * Jz * rz;
+            ++dbg_vacate_beams_;
+        }
+        // else: exit via a depth face (±n) or the bottom ⇒ no carve (continue).
     }
 }
 
@@ -899,6 +918,75 @@ bool CabinetBelief::self_test()
           CabinetBelief b(sd, pr); b.set_room_interior({1.5f, 5.0f});
           for (int it = 0; it < 80; ++it) { CabinetFrame f; f.points = armA_pts; set_wall(f, -2.3f); b.update(f); }
           check(b.state().cx + 0.5f * b.state().L > 3.5f, "island: a far wall does NOT retract the run (no manufactured length)"); }
+    }
+
+    // ── (i) STILLNESS LEVER: ego-motion → common-mode freezes the geometry MEAN ("still to update"). ──
+    //    Seed the box DISPLACED 30 cm from the data; a STILL frame must pull it onto the data, a MOVING
+    //    frame (large ego common-mode) must leave the mean essentially where it was — pure confirmation.
+    {
+        CabinetBeliefState seed = gt; seed.z1 = 0.65f;         // top too LOW; the data's top face is at z = 0.9,
+                                                               // so the top-face points sit OUTSIDE ⇒ they GROW z1
+                                                               // (a point-driven mean move the common-mode gates).
+        const auto fit_disp = [&](float ego_pos_var)
+        {
+            CabinetBelief b(seed, pr);
+            b.set_room_interior({0.0f, 5.0f});
+            for (int it = 0; it < 25; ++it)
+            {
+                CabinetFrame f; f.points = pts;
+                f.ego_motion_pos_var = ego_pos_var;   // egp also grows the SIZE common-mode (z1 is a size DOF)
+                b.update(f);
+            }
+            return b.state().z1;
+        };
+        const float still_z1 = fit_disp(0.0f);                 // still: top-face data pulls z1 up toward 0.9
+        const float move_z1  = fit_disp(1.0f);                 // moving: size frozen ⇒ z1 stays near 0.65
+        check(still_z1 > 0.82f,                       "stillness: a STILL frame grows z1 onto the top-face data");
+        check(move_z1  < 0.78f,                       "stillness: a MOVING frame barely grows z1 (size frozen)");
+        check(still_z1 - move_z1 > 0.10f,             "stillness: a still frame moves the mean MORE than a moving one");
+    }
+
+    // ── (j) FACE-GATED free-space carve: carves L (end) + z1 (top), NEVER d (depth) / z0 (bottom). ──
+    {
+        CabinetBeliefParams cp = pr;
+        cp.free_space_precision = 800.0f;
+        cp.wall_precision       = 0.0f;   // free-standing ⇒ depth is a pure null direction; the carve must not touch it
+        cp.extent_precision     = 0.0f;   // isolate the carve (no grow term) so any change is the carve's alone
+        const auto box = []() { CabinetBeliefState s; s.cx = 0; s.cy = 0; s.yaw = 0; s.L = 4.0f; s.d = 0.6f; s.z0 = 0; s.z1 = 0.9f; return s; };
+        // Front-face points (on the un-carved DEPTH face) so the engine runs its update (it early-returns on
+        // empty points) and holds the front/depth. The REAL cabinet is x∈[-1.5,1.5], z∈[0,0.6] — so the box
+        // (L=4, z1=0.9) is genuinely over-long AND over-tall, and the points don't sit on the carved faces.
+        std::vector<Eigen::Vector3f> front;
+        for (int i = 0; i <= 30; ++i) { const float x = -1.5f + 3.0f * i / 30.0f;
+            for (int j = 0; j <= 4; ++j) front.emplace_back(x, 0.3f, 0.6f * j / 4.0f); }
+        const auto carve = [&](const Eigen::Vector3f& org, const std::vector<Eigen::Vector3f>& eps, int n)
+        {
+            CabinetBelief b(box(), cp);
+            for (int it = 0; it < n; ++it)
+            { CabinetFrame f; f.points = front; f.lidar_freespace.origin = org; f.lidar_freespace.endpoints = eps; b.update(f); }
+            return b.state();
+        };
+        // (1) DEPTH-exiting beam (straight through the middle along +y, exits the +n face) → d UNCHANGED.
+        {
+            const auto s = carve({0.0f, -3.0f, 0.45f}, {{0.0f, 3.0f, 0.45f}}, 20);
+            check(std::abs(s.d - 0.6f) < 0.03f, "carve: a DEPTH-exiting beam leaves d unchanged (the d→0.05 bug fix)");
+        }
+        // (2) TOP-exiting beams (enter the front ABOVE the real top, exit the +z face) → z1 shrinks toward
+        //     the real top (0.6), d unchanged. A fan of entry heights so the carve converges past one frame.
+        {
+            std::vector<Eigen::Vector3f> tops;
+            for (int k = 0; k < 6; ++k) { const float ze = 0.62f + 0.05f * k;
+                tops.emplace_back(0.0f, 1.0f, ze + 1.0f); }        // exit up-and-back, endpoint above the top
+            const auto s = carve({0.0f, -1.0f, 0.30f}, tops, 40);
+            check(s.z1 < 0.78f,                 "carve: TOP-exiting beams shrink z1 toward the real top");
+            check(std::abs(s.d - 0.6f) < 0.08f, "carve: a TOP-exiting beam leaves d unchanged");
+        }
+        // (3) END-exiting beam (enters near the over-long +x end, exits the +u end) → L shrinks, d unchanged.
+        {
+            const auto s = carve({1.4f, -1.0f, 0.45f}, {{2.5f, 1.0f, 0.45f}}, 20);
+            check(s.L < 3.9f,                   "carve: an END-exiting beam shrinks L");
+            check(std::abs(s.d - 0.6f) < 0.05f, "carve: an END-exiting beam leaves d unchanged");
+        }
     }
 
     if (ok) std::print("[cabinet_belief::self_test] all checks passed\n");

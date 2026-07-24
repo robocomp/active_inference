@@ -174,6 +174,12 @@ void SpecificWorker::setup_custom_viewers()
         field_btn->setChecked(true);
         field_btn->setCursor(Qt::PointingHandCursor);
 
+        // Node-name text labels drawn in the 3D view (debug reference) — ON by default.
+        auto* labels_btn = new QPushButton("Labels: ON", voxel_panel);
+        labels_btn->setCheckable(true);
+        labels_btn->setChecked(true);
+        labels_btn->setCursor(Qt::PointingHandCursor);
+
         // ZED popup toggle — opens the ZED RGB window (YOLO seg overlay lives inside it). Created here;
         // the window itself is built (hidden) in the SHOW_YOLO_VIEWER block below, so the lambda
         // resolves yolo_window_ at click time.
@@ -210,6 +216,7 @@ void SpecificWorker::setup_custom_viewers()
         accent(residual_btn,  "#2633CC");  // residual: dark blue
         accent(grid_btn,      "#CC8C0D");  // occupancy grid: amber
         accent(field_btn,     "#D64550");  // belief field: risk red
+        accent(labels_btn,    "#DDDDDD");  // node-name labels: light grey
         if (yolo_btn)  accent(yolo_btn,  "#64C8FF");  // yolo: light blue
         if (ricoh_btn) accent(ricoh_btn, "#00D4BB");  // ricoh: teal
 
@@ -219,6 +226,7 @@ void SpecificWorker::setup_custom_viewers()
         controls_layout->addWidget(residual_btn);
         controls_layout->addWidget(grid_btn);
         controls_layout->addWidget(field_btn);
+        controls_layout->addWidget(labels_btn);
         if (yolo_btn)  controls_layout->addWidget(yolo_btn);
         if (ricoh_btn) controls_layout->addWidget(ricoh_btn);
         controls_layout->addStretch(1);
@@ -270,6 +278,13 @@ void SpecificWorker::setup_custom_viewers()
             if (voxel_viewer_gl)
                 voxel_viewer_gl->set_show_field(checked);
             field_btn->setText(checked ? "Field: ON" : "Field: OFF");
+        });
+
+        connect(labels_btn, &QPushButton::toggled, this, [this, labels_btn](bool checked)
+        {
+            if (voxel_viewer_gl)
+                voxel_viewer_gl->set_show_labels(checked);
+            labels_btn->setText(checked ? "Labels: ON" : "Labels: OFF");
         });
 
         if (yolo_btn)

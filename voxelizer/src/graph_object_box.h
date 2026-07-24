@@ -13,4 +13,5 @@ struct GraphObjectBox
     float           yaw_rad      = 0.0f;                     // Z-axis yaw of the object in room frame
     std::string     node_name;                               // DSR node name (empty for non-DSR boxes)
     std::string     category;
+    std::string     subtype;                                 // object_subtype ("round"/"square" for tables); "" if unset
 };

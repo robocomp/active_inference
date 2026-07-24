@@ -179,8 +179,48 @@ void SpecificWorker::merge_overlapping_instances()
 // One tracker cycle: merge overlaps, build tracks from live instances (Mahalanobis gate on belief Σ) and
 // detections from this frame's ZED "cabinet" slices, then apply the result (death / associate / birth). Ricoh
 // slices are excluded here (bearing-only). This is the ONLY path that creates/associates cabinet instances.
+// Kitchen-model Stage 0 SHADOW (instrument-only, no belief/fit change): build the (wall_id, tier) cell table
+// from the trusted room polygon and soft-route this cycle's cabinet/counter/chest mask points into it, then
+// log the per-cell evidence mass. Validates the routing foundation live before any behaviour depends on it.
+void SpecificWorker::shadow_route_kitchen_cells()
+{
+    if (not fitter_ or not mask_ingestor_) return;
+    if (kitchen_routing_.cells.empty())                     // (re)build when we first have a polygon
+    {
+        const auto walls = fitter_->kitchen_walls();
+        if (walls.empty()) return;
+        const rc::KitchenTier tiers[2] = { {0.0f, 0.87f, 0.55f, "base"}, {1.40f, 2.10f, 0.35f, "upper"} };
+        kitchen_routing_.build(walls, tiers);
+    }
+    const auto& pkt = mask_ingestor_->packet();
+    if (not pkt.valid) return;
+    std::vector<Eigen::Vector3f> pts;
+    for (const auto& sl : pkt.slices)
+    {
+        const bool run_label = sl.label == "cabinet" or sl.label == "chest of drawers"
+                               or sl.label == "counter" or sl.label == "countertop";
+        if (not run_label or sl.depth_var > 0.0f) continue;   // ZED-depth run masks only
+        for (std::size_t k = std::min(sl.support_begin, pkt.support_points.size());
+             k < std::min(sl.support_end, pkt.support_points.size()); k += 4)   // subsample
+            pts.push_back(pkt.support_points[k]);
+    }
+    if (pts.empty()) return;
+    kitchen_routing_.route(pts, 0.15f, 0.20f, 0.05f);
+
+    static int kdbg = 0;
+    if (++kdbg % 30 == 0)   // Stage-0 shadow: one low-frequency diagnostic line (not gated by verbose_log)
+    {
+        std::string s;
+        for (const auto& c : kitchen_routing_.cells)
+            if (c.mass > 0.02 * static_cast<double>(pts.size()))
+                s += std::format(" {}={:.0f}", c.id, c.mass);
+        std::print("[kitchen-cells] pts={} clutter={:.0f} |{}\n", pts.size(), kitchen_routing_.clutter_mass, s);
+    }
+}
+
 void SpecificWorker::run_instance_tracker()
 {
+    shadow_route_kitchen_cells();     // Stage 0: shadow routing diagnostic (no behaviour change)
     merge_overlapping_instances();   // enforce physical exclusion before associating/birthing this cycle
 
     rc::TrackerParams tp;
@@ -299,7 +339,7 @@ void SpecificWorker::run_instance_tracker()
     ev_g_.discarded     = static_cast<int>(dets.size()) - n_assigned;
     ev_g_.births       += static_cast<int>(res.births.size());
     ev_g_.births_cum   += static_cast<long>(res.births.size());
-    if (++dbg % 30 == 0 or not res.births.empty() or not res.deaths.empty())
+    if (cfg_.verbose_log and (++dbg % 30 == 0 or not res.births.empty() or not res.deaths.empty()))
     {
         std::print("[tracker] instances={} cabinet_dets={} assigned={} unassigned={} births={} deaths={}\n",
                    tracks.size(), dets.size(), n_assigned,
@@ -464,8 +504,9 @@ void SpecificWorker::split_lshaped_cabinet_masks()
                                r.arms[k].idx.size(), r.arms[k].c.x(), r.arms[k].c.y());
         }
         any_split = true;
-        std::print("cabinet_concept: [split] '{}' mask ({} pts) → {} arms{}\n",
-                   s.label, e - b, r.arms.size(), dbg);
+        if (cfg_.verbose_log)
+            std::print("cabinet_concept: [split] '{}' mask ({} pts) → {} arms{}\n",
+                       s.label, e - b, r.arms.size(), dbg);
     }
     if (any_split)
         pkt.slices = std::move(out);
@@ -508,7 +549,7 @@ void SpecificWorker::birth_from_residual()
     // Fields: residual pool (all instances) → free pool (off believed footprints) → top cluster mass;
     // then the seed's length/elongation/separation and WHY it was rejected, plus the debounce progress.
     static int rdbg = 0;
-    if (++rdbg % 30 == 0 or cand.ok or cand.pts > 0 /* a cluster formed */ or residual_cand_hits_ > 0)
+    if (cfg_.verbose_log and (++rdbg % 30 == 0 or cand.ok or cand.pts > 0 /* a cluster formed */ or residual_cand_hits_ > 0))
         std::print("[residual-birth] pool={} free={} topcluster={} (min={}) L={:.2f} aniso={:.2f} sep={:.2f} "
                    "reason={} hits={}/{}\n",
                    static_cast<int>(residual.size()), cand.pool, cand.pts, cfg_.residual_birth_min_pts,

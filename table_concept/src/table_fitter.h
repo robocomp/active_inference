@@ -114,6 +114,9 @@ private:
     // it from the measurement frame back to room with ZERO input cov; stored on the instance for the
     // RT-cov write. No-op unless set_chain_cov_source enabled it.
     void compute_chain_cov(TableInstance& inst);
+    // Periodic round-vs-square shape model-selection on the accumulated voxel bank → inst.subtype
+    // (bounded log-Bayes-factor, no threshold). Runs every cfg_.shape_eval_period cycles.
+    void evaluate_shape(TableInstance& inst);
 
     TableModelParams  make_model_params() const;
 

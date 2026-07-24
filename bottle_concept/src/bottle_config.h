@@ -93,6 +93,13 @@ struct BottleConfig
     // information saturates here, so N correlated points can't collapse σ → calibrated posterior.
     float ai2_common_mode_pos_std  = 0.02f;  // shared position error (m); pose-chain cov adds to it
     float ai2_common_mode_size_std = 0.01f;  // shared size error radius,height (m)
+    // Ego-motion → COMMON-MODE fixation ("be still to UPDATE, else CONFIRM"; mirrors table_concept MotionCm*Gain).
+    // A moving frame's mask is smeared/displaced by ego-motion by ≈ effective-lag·speed — a per-mask SHARED error
+    // that per-point R averages away. Route it into the frame's common-mode (chain_cov) so the Woodbury cap freezes
+    // how far a moving frame can move/reshape the GEOMETRY (existence/association don't read this). CONTINUOUS, no
+    // gate: std growth per unit motion_dotd (m/s); at dotd→0 it vanishes (a still frame updates fully); 0 disables.
+    float motion_cm_pos_gain       = 0.10f;  // position (cx,cy) shared-error std per m/s of motion_dotd
+    float motion_cm_size_gain      = 0.20f;  // size (radius,height) shared-error std per m/s — the anti-RESHAPE lever
     int   ai2_gn_iters             = 4;      // Gauss-Newton iterations per frame
     std::string ai2_csv_path       = "";     // non-empty → append a per-cycle AI2 belief CSV (state + Σ diag)
     // ── Support-surface decision (room vs table parent) ───────────────────────────────────────────

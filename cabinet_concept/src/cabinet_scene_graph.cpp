@@ -250,6 +250,7 @@ void CabinetSceneGraph::write_rt_covariance(std::uint64_t room_id, CabinetInstan
 
     // Verification readout: the controller-visible pose uncertainty published on the RT edge — ~cm
     // (Σ-mapped). Naturally throttled — the cov write self-gates above (>5 % trace change or republish).
+    if (cfg_.verbose_log)
     std::print("[{}] RT-cov σ x={:.1f}cm y={:.1f}cm z={:.1f}cm yaw={:.2f}° (src=Σ)\n",
                inst.node_name,
                100.0f * std::sqrt(std::max(0.0f, vx)), 100.0f * std::sqrt(std::max(0.0f, vy)),

@@ -29,6 +29,7 @@
 
 #include "cabinet_config.h"        // rc::CabinetConfig
 #include "cabinet_instance.h"      // rc::CabinetInstance, CabinetState
+#include "cabinet_kitchen_cells.h" // rc::KitchenWall (kitchen-model Stage 0 cell table)
 #include "cabinet_model.h"         // CabinetModel / CabinetModelParams
 #include "cabinet_projection.h"    // rc::CabinetProjection, rc::SilhouetteExistence
 #include "cabinet_lidar_range_channel.h"   // rc::CabinetLidarRangeChannel
@@ -102,6 +103,9 @@ public:
     void set_room_geometry(const Eigen::Vector2f& interior, std::vector<Eigen::Vector2f> polygon)
     { room_interior_ = interior; room_polygon_ = std::move(polygon); rebuild_wall_ids(); }
     bool should_log(const CabinetInstance& inst) const;
+    // Kitchen-model Stage 0: the collinear-merged room walls as KitchenWall (corners + inward normal), one
+    // per canonical wall id — the geometry the (wall_id, tier) cell table is built on. Empty if no polygon.
+    std::vector<rc::KitchenWall> kitchen_walls() const;
 
     // Emit a CSV row for an OUT-OF-VIEW instance whose EXISTENCE evidence integrated this cycle (LiDAR/silhouette
     // carve) but which the fitter did NOT fit (no fresh mask) — so the existence log-odds trajectory that drives a

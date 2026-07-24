@@ -70,6 +70,8 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
     out.ai2_age_nominal_dt_s     = getf("BottleModel.AI2AgeNominalDtS",       0.0f);
     out.ai2_common_mode_pos_std  = getf("BottleModel.AI2CommonModePosStd",    0.02f);
     out.ai2_common_mode_size_std = getf("BottleModel.AI2CommonModeSizeStd",   0.01f);
+    out.motion_cm_pos_gain       = getf("BottleModel.MotionCmPosGain",        0.10f);
+    out.motion_cm_size_gain      = getf("BottleModel.MotionCmSizeGain",       0.20f);
     out.ai2_gn_iters             = geti("BottleModel.AI2GnIters",             4);
     out.ai2_csv_path             = gets("BottleModel.AI2CsvPath",             "");
     out.support_sigma_z          = getf("Support.SigmaZ",            0.04f);

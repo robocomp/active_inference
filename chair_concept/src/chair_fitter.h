@@ -68,6 +68,32 @@ public:
 
     std::unordered_map<std::uint64_t, ChairInstance>& instances() { return instances_; }
     void forget_node(std::uint64_t id) { instances_.erase(id); }
+    // Line-of-sight occlusion test (room frame): is the camera→chair ray blocked by a CLOSER object whose
+    // bearing cone covers the chair — another chair instance, or any other detected mask this frame (table /
+    // person / …)? Used to SUPPRESS the existence "vacate" negative: a chair hidden behind something must not
+    // be removed just because no mask reaches it. Conservative (over-suppress = keep) by design.
+    bool los_occluded(const ChairInstance& inst) const;
+
+    // ── Room-containment pose prior ───────────────────────────────────────────────────────────────
+    // The room polygon (room frame) is a trusted NOMINAL model (authored from the SVG layout, never fitted),
+    // so it is a legitimate strong prior: P(a chair's centre outside the walls) ≈ 0. Loaded from the room
+    // node's delimiting_polygon_{x,y}. Used to suppress out-of-room births AND remove an instance that a
+    // localization glitch placed outside (it can't be reached by the sensor to vacate it — behind a wall).
+    void set_room_geometry(const Eigen::Vector2f& interior, std::vector<Eigen::Vector2f> polygon)
+    { room_interior_ = interior; room_polygon_ = std::move(polygon); }
+    bool has_room_polygon() const { return room_polygon_.size() >= 3; }
+
+    // Robot/camera ego-motion (room frame), from the transform chain — producer-independent. Call once per
+    // compute cycle; run_inference then gates the pose/shape update to STILLNESS ("be-still-to-update").
+    void  update_ego_motion();
+    float ego_lin_mps() const   { return ego_lin_mps_; }
+    float ego_ang_radps() const { return ego_ang_radps_; }
+    // True when this frame must be CONFIRMATION-ONLY (no pose/shape change): robot linear/angular speed above
+    // the still-level, OR the mask's own ego-motion corruption (motion_dotd) above its still-level.
+    bool  confirm_only(const ChairInstance& inst) const;
+    // true if q is inside the polygon, or outside by no more than margin_m (tolerance for a wall-hugging chair
+    // whose centroid noise pokes through the wall). No polygon loaded ⇒ always true (unknown room → no prior).
+    bool point_in_room(const Eigen::Vector2f& q, float margin_m = 0.0f) const;
     bool should_log(const ChairInstance& inst) const;
     // Part B (chain covariance): enable adding the localization/chain term J·Σ_chain·Jᵀ (measurement
     // frame → room, capture-stamp pinned) per instance, read by the scene-graph's RT-cov write.
@@ -118,6 +144,15 @@ private:
     std::unordered_map<std::uint64_t, ChairInstance> instances_;
     std::unordered_map<std::uint64_t, Eigen::Vector2f> birth_seeds_;   // tracker-provided birth XY (note_birth)
     std::uint64_t                  room_node_id_ = 0;   // latched per ensure_instance call
+    std::vector<Eigen::Vector2f>   room_polygon_;       // room-frame delimiting polygon (containment prior)
+    Eigen::Vector2f                room_interior_ = Eigen::Vector2f::Zero();   // a known-interior point (centroid)
+    // Ego-motion state (camera pose deltas → robot speed), updated once per cycle in update_ego_motion().
+    float           ego_lin_mps_   = 0.0f;
+    float           ego_ang_radps_ = 0.0f;
+    Eigen::Vector3f prev_cam_pos_  = Eigen::Vector3f::Zero();
+    Eigen::Vector3f prev_cam_fwd_  = Eigen::Vector3f::UnitY();
+    bool            have_prev_cam_ = false;
+    std::chrono::steady_clock::time_point prev_cam_tp_{};
     std::ofstream                  ai2_csv_;            // per-cycle AI2 belief log (optional)
 };
 

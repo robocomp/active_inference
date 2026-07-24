@@ -40,6 +40,23 @@ struct TableConfig
     // legitimately empty scene (still-advancing counter) never trips it. 0 = disable the gate.
     int   masks_stall_timeout_ms       = 3000;
 
+    // Show the combined GUI window (belief timeseries dashboard + evidence monitor in one splitter).
+    // false ⇒ no GUI windows are built at all (headless); the compute feed no-ops on the null widgets.
+    bool  show_dashboard         = true;
+
+    // ── Shape model-selection (round vs square) — free-energy evidence, no threshold ──────────────────
+    // Every shape_eval_period cycles (once the voxel bank has ≥ shape_eval_min_points) fit a ROUND model to
+    // the accumulated cloud and accumulate a bounded log-Bayes-factor (round − square) → inst.subtype. The
+    // accumulator is clamped to ±shape_evidence_clamp so a converged run can still RECANT if evidence turns.
+    int   shape_eval_period      = 30;
+    int   shape_eval_min_points  = 300;
+    float shape_evidence_clamp   = 8.0f;
+
+    // DIAGNOSTIC one-shot: if non-empty, dump a fitted table's accumulated voxel-bank point cloud (room
+    // frame, XYZ per line) to this path ONCE (when the bank exceeds ~200 pts), for the offline
+    // square-vs-round model-comparison harness (tests/compare_models). "" = off. Not a runtime knob.
+    std::string dump_cloud_path        = "";
+
     // ── Top/leg SDF split band ────────────────────────────────────────────────────────────────────
     // Forwarded to TableModelParams.sigma_obs: a mask point within TOP_THICKNESS + sigma_obs below the top
     // face is attributed to the slab (candidate) vs a leg.
@@ -64,6 +81,14 @@ struct TableConfig
     float ai2_common_mode_pos_std  = 0.03f;  // shared position error (m); pose-chain cov adds to it
     float ai2_common_mode_size_std = 0.02f;  // shared size error w,h,H (m)
     float ai2_common_mode_yaw_std  = 0.03f;  // shared yaw error (rad)
+    // Ego-motion → COMMON-MODE ("be still to UPDATE, else CONFIRM" — the VOR/fixation term). Routes the per-mask
+    // ego-motion smear (a SHARED error) into the per-frame common-mode so Woodbury caps the frame's authority to
+    // move the GEOMETRY MEAN: a moving frame confirms but can't reshape/reposition/rotate the table; geometry
+    // updates concentrate at stillness. Std growth per unit motion_dotd (m/s), CONTINUOUS (0 at stillness, no
+    // gate). Reshape (w,h≡size) is the worst offender while rotating → size gain is largest. 0 disables a channel.
+    float motion_cm_pos_gain  = 0.10f;   // position (cx,cy) shared-error std per m/s of motion_dotd
+    float motion_cm_size_gain = 0.20f;   // extent (w,h,H) shared-error std per m/s — the anti-RESHAPE lever
+    float motion_cm_yaw_gain  = 0.12f;   // yaw shared-error std (rad) per m/s      — the anti-ROTATE lever
     // STATIC range weighting (motion-free): the common-mode error grows with view distance, so a far, vague
     // mask cannot resolve pose — orientation least of all (a far view confirms existence, can't rotate the
     // table). Continuous, no gate. lat feeds R + position common-mode (m per m of range); yaw feeds the yaw

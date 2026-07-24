@@ -12,6 +12,7 @@
 
 #include <QByteArray>
 #include <QSettings>
+#include <QSplitter>
 #include <QVBoxLayout>
 #include <QColor>
 
@@ -65,6 +66,7 @@ void SpecificWorker::refresh_evidence_monitor()
         x.streak     = inst.existence_remove_streak;
         const auto& s = inst.ai2_belief.state();
         x.w = s.w; x.h = s.h; x.H = s.H;
+        x.subtype = inst.subtype;   // round/square from the free-energy shape model-selection
         rows.push_back(std::move(x));
     }
     evidence_monitor_->update_view(ev_g_, rows);
@@ -77,22 +79,22 @@ void SpecificWorker::refresh_evidence_monitor()
 // carry its own QSettings entry (mirrors room_concept's RoomViewer).
 void SpecificWorker::restore_dashboard_geometry()
 {
-    if (not custom_widget_)
+    if (not dashboard_window_)
         return;
     QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("table_concept"));
     const QByteArray geom = settings.value(QStringLiteral("DashboardWindow_geometry")).toByteArray();
     if (not geom.isEmpty())
-        custom_widget_->restoreGeometry(geom);
+        dashboard_window_->restoreGeometry(geom);
     else
-        custom_widget_->resize(560, 620);
+        dashboard_window_->resize(1180, 900);
 }
 
 void SpecificWorker::save_dashboard_geometry() const
 {
-    if (not custom_widget_)
+    if (not dashboard_window_)
         return;
     QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("table_concept"));
-    settings.setValue(QStringLiteral("DashboardWindow_geometry"), custom_widget_->saveGeometry());
+    settings.setValue(QStringLiteral("DashboardWindow_geometry"), dashboard_window_->saveGeometry());
     settings.sync();
 }
 
@@ -118,21 +120,21 @@ void SpecificWorker::prune_dead_series()
     }
     for (const auto& [id, inst] : fitter_->instances()) ts_known_tables_.insert(inst.node_name);
 }
-// Build the two standalone top-level windows (belief timeseries dashboard + evidence monitor) on the main
-// thread from initialize(). Plain QWidgets (no QOpenGL), only HIDDEN on close (compute() keeps raw pointers).
+// Build ONE combined top-level window — the belief timeseries dashboard + the evidence monitor stacked in a
+// vertical splitter — on the main thread from initialize(). cfg_.show_dashboard=false builds NOTHING (headless):
+// the widget pointers stay null and the compute feed (publish_table_diagnostics / refresh_evidence_monitor /
+// prune_dead_series) already no-ops on null. Plain QWidgets (no QOpenGL); only HIDDEN on close (compute() keeps
+// raw pointers, so never WA_DeleteOnClose). A QApplication always exists (generated/main.cpp).
 void SpecificWorker::build_dashboard()
 {
-    // ── Time-series dashboard — its OWN top-level window ──────────────────────
-    // Extracted from the DSR graph dock (add_custom_widget_to_dock) into a standalone window, so the
-    // dashboard shows even with Agent.graph=false (no DSRViewer created). Mirrors room_concept and
-    // kinova_controller. The TimeSeriesPlot is a plain QWidget (no QOpenGL backing store), safe as a
-    // top-level. NOT WA_DeleteOnClose: closing must only HIDE it, or the ts_*_plot_ pointers the
-    // compute() feed uses would dangle. A QApplication always exists (generated/main.cpp).
+    if (not cfg_.show_dashboard)
+        return;   // headless: no GUI windows built; the compute feed no-ops on the null widgets
+
+    // ── Belief timeseries dashboard (goes into the LOWER splitter pane) ───────
+    // The TimeSeriesPlot is a plain QWidget; here it is a CHILD of the combined window rather than its own
+    // top-level. Shows even with Agent.graph=false (no DSRViewer).
     {
         custom_widget_ = new Custom_widget("Table Model — Free Energy, Belief Uncertainty, Residuals & Dimensions (w,h)");
-        custom_widget_->setWindowTitle(QStringLiteral("table_concept — belief dashboard"));
-        restore_dashboard_geometry();
-        custom_widget_->show();
 
         // Create plot inside frame_series
         auto* series_layout = new QVBoxLayout(custom_widget_->frame_series);
@@ -178,10 +180,23 @@ void SpecificWorker::build_dashboard()
         // every cycle, so pre-existing instances need no separate registration here.
     }
 
-    // ── Evidence-consuming monitor — its OWN top-level window (per-instance snapshot + global counters) ──
-    // Same lifecycle discipline as the dashboard above: plain QWidget (no QOpenGL), built on the main thread,
-    // updated from compute() (which is the GUI thread here). Only HIDDEN on close, never deleted (compute()
-    // keeps a raw pointer). Shows even with Agent.graph=false.
+    // ── Evidence-consuming monitor (goes into the UPPER splitter pane) — per-instance snapshot + counters ──
+    // Same lifecycle: plain QWidget, main-thread, updated from compute(). A CHILD of the combined window now.
     evidence_monitor_ = new rc::EvidenceMonitor(QStringLiteral("table_concept — evidence monitor"));
-    evidence_monitor_->show();
+
+    // ── Combined window: evidence monitor (top) over the belief plots (bottom) in a resizable splitter ──
+    dashboard_window_ = new QWidget;
+    dashboard_window_->setWindowTitle(QStringLiteral("table_concept — dashboard"));
+    auto* outer = new QVBoxLayout(dashboard_window_);
+    outer->setContentsMargins(0, 0, 0, 0);
+    auto* split = new QSplitter(Qt::Vertical, dashboard_window_);
+    split->addWidget(evidence_monitor_);   // reparents into the splitter
+    split->addWidget(custom_widget_);
+    split->setStretchFactor(0, 0);          // monitor keeps its size; plots take the extra space
+    split->setStretchFactor(1, 1);
+    split->setSizes({320, 580});
+    outer->addWidget(split);
+
+    restore_dashboard_geometry();
+    dashboard_window_->show();
 }

@@ -63,6 +63,8 @@ Verbose = false
 # same masks, no TRT speedup — if the TRT libs can't be reconciled (e.g. after an apt upgrade).
 use_trt =true
 model_path = "models/yolo26/yolo26x-seg.onnx"    # L (was yolo26x-seg): lighter seg to lift compute toward the 24 Hz RGB feed
+conf_thresh = 0.25          # min class confidence to ACCEPT a seg detection/mask (argmax score floor); raise to reject weak masks
+iou_thresh  = 0.45          # NMS IoU: dedupe overlapping same-class boxes above this
 accepted_labels = ["table", "chair", "monitor", "tv", "bottle", "microwave", "bookshelf", "refrigerator", "radiator"]
 mask_tray = true
 tray_mask_ref_width  = 1280
@@ -123,7 +125,7 @@ publish_min_interval_s = 0.5  # min seconds between semantic-node publishes (rat
 # ON — furniture-mask feature (2026-07-21). Stable with Semantic.publish_node=false above: the earlier
 # reliable crash was the dense-node blob publish, NOT these masks (bisection-confirmed). Keep publish_node off.
 publish_masks = true
-accepted_labels = ["cabinet", "hood", "shelf", "door", "radiator", "counter", "countertop", "kitchen island", "chest of drawers"]   # ADE20K-150 class names (must match the model's table)
+accepted_labels = ["cabinet", "hood", "shelf", "door", "radiator", "counter", "countertop", "kitchen island", "chest of drawers", "railing", "bannister"]   # ADE20K-150 class names (must match the model's table); railing/bannister are relabelled to "radiator" in specificworker.cpp (COCO has no radiator → else mistaken for chairs)
 mask_min_area_frac = 0.003      # drop connected components smaller than this fraction of the frame area
 mask_overlap_drop_frac = 0.5    # drop a semantic component ≥this covered by a YOLO-seg mask (YOLO priority)
 mask_morph_kernel = 5           # open+close kernel (px) to denoise the class field before component labelling; ≤1 = off

@@ -39,6 +39,7 @@ CabinetConfig load_cabinet_config(const ConfigLoader& cfg)
     out.obs_distance             = getf("CabinetConcept.ObsDistance",            1.8f);
     out.epistemic_cooldown_cycles= geti("CabinetConcept.EpistemicCooldownCycles", 200);
     out.cabinet_log_period_frames  = geti("CabinetConcept.CabinetLogPeriodFrames",   30);
+    out.verbose_log                = getb("CabinetConcept.VerboseLog",              false);
     out.voxel_bank_max_points    = geti("CabinetConcept.VoxelBankMaxPoints",     4000);
     out.voxel_bank_quantization_m= getf("CabinetConcept.VoxelBankQuantizationM", 0.02f);
     out.voxel_select_radius_margin_m = getf("CabinetConcept.VoxelSelectRadiusMarginM", 0.50f);
@@ -59,6 +60,7 @@ CabinetConfig load_cabinet_config(const ConfigLoader& cfg)
     out.ai2_common_mode_pos_std  = getf("CabinetModel.AI2CommonModePosStd",  0.03f);
     out.ai2_common_mode_size_std = getf("CabinetModel.AI2CommonModeSizeStd", 0.02f);
     out.ai2_common_mode_yaw_std  = getf("CabinetModel.AI2CommonModeYawStd",  0.03f);
+    out.ai2_common_mode_motion_gain = getf("CabinetModel.AI2CommonModeMotionGain", 3.0f);
     out.ai2_range_noise_lat_per_m = getf("CabinetModel.AI2RangeNoiseLatPerM", 0.02f);
     out.ai2_range_noise_yaw_per_m = getf("CabinetModel.AI2RangeNoiseYawPerM", 0.03f);
     out.ai2_range_noise_size_per_m = getf("CabinetModel.AI2RangeNoiseSizePerM", 0.08f);

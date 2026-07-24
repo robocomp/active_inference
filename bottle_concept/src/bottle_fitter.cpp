@@ -107,6 +107,7 @@ BottleFitter::BottleObservation BottleFitter::observe(BottleInstance& inst,
             // YOLO produced a bottle mask this frame → detection is alive; record its confidence.
             inst.frames_since_detection = 0;
             inst.last_mask_confidence   = slice.confidence;
+            inst.last_motion_dotd       = slice.motion_dotd;   // ego-motion smear speed → common-mode fixation
             inst.last_mask_timestamp_ms = mask_ingestor_->packet().timestamp_ms;   // chain-cov pinning (Part B)
             const std::size_t begin = std::min(slice.support_begin, mask_ingestor_->packet().support_points.size());
             const std::size_t end   = std::min(slice.support_end,   mask_ingestor_->packet().support_points.size());
@@ -237,10 +238,19 @@ float BottleFitter::run_inference(BottleInstance& inst, const BottleObservation&
     frame.points.insert(frame.points.end(), observation.residual_pts.begin(), observation.residual_pts.end());
     frame.R.assign(frame.points.size(), R);
     frame.precision_scale = range_scale;   // inflate the common-mode with range — the BINDING cap on the mean
+    // Ego-motion → COMMON-MODE fixation ("be still to UPDATE, else CONFIRM"): a moving frame's mask is
+    // smeared/displaced by ego-motion by ≈ effective-lag·speed — a per-mask SHARED error that per-point R
+    // averages away. Route it into the frame's common-mode (position AND size), so the Woodbury cap freezes
+    // how far a moving frame can move/reshape the bottle while existence/association still update. CONTINUOUS,
+    // no gate: at motion_dotd→0 both terms vanish (a still frame refines fully); gains 0 disable a channel.
+    const float mot_dotd     = std::abs(inst.last_motion_dotd);
+    const float mot_pos_var  = std::pow(cfg_.motion_cm_pos_gain  * mot_dotd, 2.0f);   // m²  (cx,cy)
+    const float mot_size_var = std::pow(cfg_.motion_cm_size_gain * mot_dotd, 2.0f);   // m²  (radius,height)
     // Pose-chain (localization) shared error at the bottle centre, computed in write_rt_pose the previous
     // cycle (slowly varying) — fed into the common-mode so the frame's information saturates (calibrated σ).
-    frame.chain_cov_xx = std::max(0.0f, inst.dbg_chain_cov_xx);
-    frame.chain_cov_yy = std::max(0.0f, inst.dbg_chain_cov_yy);
+    frame.chain_cov_xx   = std::max(0.0f, inst.dbg_chain_cov_xx) + mot_pos_var;   // pose-chain + EGO-MOTION
+    frame.chain_cov_yy   = std::max(0.0f, inst.dbg_chain_cov_yy) + mot_pos_var;
+    frame.chain_cov_size = mot_size_var;                                          // EGO-MOTION freezes size while moving
 
     // Occluding-contour silhouette (mask edge rays) — the term that pins the depth-degenerate radius a
     // symmetric cylinder's depth SDF cannot (see bottle-sdf-depth-bias). feed_silhouette computes the

@@ -82,6 +82,7 @@ struct BottleInstance
     int   assigned_mask_idx        = -1;
     int   frames_since_detection   = 100000;   // cycles since the last fresh bottle mask (0 = just seen)
     float last_mask_confidence     = 0.0f;     // YOLO confidence of the last selected bottle mask
+    float last_motion_dotd         = 0.0f;     // last slice's ego-motion smear speed Z·‖ṡ‖ (m/s) → common-mode fixation
     std::uint64_t last_mask_timestamp_ms = 0;  // capture stamp of the last consumed mask frame (chain-cov pinning)
     // Agent-clock stamp of the last belief touch (set EVERY inference cycle) so a stale cycle inflates the
     // position Σ by the real elapsed time (measurement-age → covariance) rather than a fixed per-frame step.

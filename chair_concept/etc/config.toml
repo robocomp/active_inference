@@ -69,6 +69,24 @@ AI2CommonModeSizeStd = 0.02
 AI2CommonModeYawStd = 0.03
 AI2RangeNoiseLatPerM = 0.02      # static range → R + position common-mode (m per m)
 AI2RangeNoiseYawPerM = 0.03      # static range → yaw common-mode (rad per m) — anti far-view rotation
+# Ego-motion "be-still-to-update" fixation (ported from table_concept). A frame captured while the robot moves is
+# a shared smear → routed into the per-frame COMMON-MODE (caps its authority to move the mean), not per-point R.
+# Geometry updates concentrate at stillness; moving frames only confirm. Continuous, 0 at stillness. 0 disables.
+MotionCmPosGain = 0.30           # position (cx,cy) shared-error std per m/s of motion_dotd — anti-DRIFT  (0.10→0.30)
+MotionCmYawGain = 0.50           # yaw shared-error std (rad) per m/s of motion_dotd      — anti-ROTATE (0.12→0.50);
+                                 # the "passing by rotated the chair" lever. 0 at stillness → zero cost stationary,
+                                 # so push higher (0.7–1.0) if a moving pass still swings yaw.
+# HARD be-still invariant: ONLY a still/almost-still robot with a fresh ZED YOLO mask may alter pose/shape; every
+# other frame is CONFIRMATION-of-existence only (predict-only, mean/shape held). Robot speed is measured from the
+# camera transform chain (producer-independent), OR'd with the per-mask motion_dotd.
+AI2MotionConfirmOnly = true      # moving robot → predict-only (no pose/shape update)
+AI2StillLinMps   = 0.05          # camera linear speed (m/s) below which the robot counts as "still"
+AI2StillAngRadps = 0.10          # camera angular speed (rad/s) below which the robot counts as "still" (~6°/s)
+AI2StillDotd     = 0.05          # per-mask ego-motion corruption speed (m/s) still-level (OR'd in)
+AI2MovingUpdateCenterRadius = 0.35  # EXCEPTION: while moving, still allow a pose/shape update if the mask is WELL
+                                 # CENTRED. UNITS = focal-normalised (tan of the ray angle off the optical axis):
+                                 # 0.35 ≈ within ~19° of the axis; ~1.0 ≈ edge of a ~90° FoV. Lower = stricter
+                                 # (only near-axis masks update while moving); <0 disables the exception.
 AI2TruncGateFrac = 0.10          # skip the geometric update (predict only) when this fraction of the mask is on the image border
 AI2GnIters = 4                   # Gauss-Newton iterations per frame
 AI2ExtentStd = 0.05              # extent-observation noise (m) for the coverage/extent likelihood
@@ -114,6 +132,36 @@ BirthSeatD = 0.45
 BirthSeatH = 0.45
 BirthBackH = 0.45
 NllCost = false          # association cost = ½(m²+ln|S|) NLL (compete by likelihood, not raw distance)
+
+[Existence]
+# Continuous existence log-odds — the removal path (the stillbirth prune above is OFF, and merge only kills
+# spatial DUPLICATES, so a phantom that sits apart from the real chairs had NO removal path). Each instance
+# integrates one sensor frame of evidence while it is in the camera frustum: POSITIVE when its assigned support
+# mass matches a chair's expected silhouette at that range, NEGATIVE (silhouette-contradiction / free-space)
+# when it is in view yet under-supported. No age immunity — L is pinned high only by continuing to be explained.
+Enabled = true           # use the log-odds belief for removal (false → fall back to the stillbirth prune)
+BirthLogodds = 1.0       # L seeded at birth (a birth already required BirthFrames of unexplained evidence)
+RemoveLogodds = -3.0     # remove when L falls below this (span BirthLogodds→RemoveLogodds / EvidenceGain = frames to kill)
+MaxLogodds = 4.0         # saturation cap: a real chair sits here; occlusion tolerance = (Max−Remove)/EvidenceGain frames
+EvidenceGain = 0.15      # per-sensor-frame |ΔL| scale
+ExpectedSupportC = 2500.0  # expected support scale: E[npts] = C / range². Sets the negative boundary at a HANDFUL of
+                         # points (≈0.25·C/range²): sparse-but-real chairs (~20 pts @6m) stay positive, a phantom
+                         # feeding on ~8 clutter points goes negative. Evidence is only taken on a WON mask slice.
+AdequacyRef = 0.25       # WON-mask support/expected below this fraction → NEGATIVE evidence (else positive)
+AdequacyCap = 1.5        # clamp adequacy so one dense frame can't over-confirm
+CalibAdapt = 0.0         # EWMA rate adapting C (0 = fixed C; a dense chair would poison a sparse one via a shared C)
+VacateConfidentFrames = 45  # an in-frustum instance that keeps winning NO mask draws vacate negative that ramps 0→1 over
+                         # this many frames_since_detection. Small (brief occlusion / lost slice) → barely touched, recovers
+                         # on its next win (anti-churn grace); unexplained for seconds (a phantom) → full negative → removed.
+OcclusionCheck = true    # SUPPRESS the vacate negative when the camera→chair ray is blocked by a CLOSER object (another
+                         # chair, the table, a person …). A chair hidden behind something is not removed for lack of a mask.
+OcclusionMarginM = 0.30  # an occluder must be ≥ this many metres CLOSER than the chair to count as blocking it
+# Room-containment pose prior: P(a chair centre outside the room walls) ≈ 0 (the room polygon is a trusted nominal
+# model, never fitted). Suppresses out-of-room BIRTHS and removes an instance a localization glitch put outside —
+# even behind a wall where the sensor can never reach it to vacate. Independent of frustum/occlusion.
+RoomPrior = true         # enforce the room-containment pose prior
+RoomMarginM = 0.40       # tolerance a chair centre may sit OUTSIDE the walls (wall-hugging chair + centroid noise)
+OutOfRoomGain = 1.5      # |ΔL| per frame while outside → removed in a few frames (also debounces a 1-frame glitch)
 
 [Ice]
 Warn.Connections = "0"

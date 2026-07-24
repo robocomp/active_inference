@@ -63,6 +63,7 @@ struct EvidenceRow
     float ex_socc = 0.0f, ex_sfree = 0.0f, ex_sfree_eff = 0.0f;  int ex_sndet = 0;  // existence silhouette-mask channel
     int   streak      = 0;       // removal-decision debounce streak
     float w = 0.0f, h = 0.0f, H = 0.0f;   // fitted dims (m)
+    std::string subtype = "?";   // inferred shape subtype (e.g. "round"/"square") from model-evidence; "?" = agent doesn't set it
 };
 
 // Global pipeline counters for the header strip.
@@ -101,7 +102,7 @@ public:
             "table", "conf", "since", "fuse", "cand", "resid", "expl%", "gate",
             "energy", "R", "Lrays", "Lraw", "Lresid", "covA", "vac", "cov+",
             "L", "p", "l.occ", "l.free", "l.n", "s.occ", "s.free", "s.ndet", "strk",
-            "w", "h", "H" };
+            "w", "h", "H", "shape" };
         table_ = new QTableWidget(0, cols.size(), this);
         table_->setHorizontalHeaderLabels(cols);
         table_->verticalHeader()->setVisible(false);
@@ -170,6 +171,7 @@ public:
             put(QString::asprintf("%.3f", x.w));
             put(QString::asprintf("%.3f", x.h));
             put(QString::asprintf("%.3f", x.H));
+            put(QString::fromStdString(x.subtype));
         }
     }
 

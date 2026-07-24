@@ -94,6 +94,8 @@ private:
     void process_chair_node(const DSR::Node& node);
     void run_instance_tracker();          // data-driven birth/associate/death (the only instance-lifecycle path)
     void merge_overlapping_instances();   // collapse two instances on the same chair (seat-footprint overlap)
+    void update_existence_beliefs();      // continuous existence log-odds → evidence-based removal (no age immunity)
+    void refresh_room_geometry();         // load the room delimiting polygon into the fitter (containment pose prior)
     void publish_chair_cycle(rc::ChairInstance& inst,
                              const DSR::Node& node,
                              const ChairObservation& observation,
@@ -172,6 +174,8 @@ private:
     std::unique_ptr<rc::MaskIngestor>                   mask_ingestor_;   // perception (masks-only)
     std::unique_ptr<rc::ChairSceneGraph>               scene_graph_;     // DSR node/RT I/O
     rc::InstanceTracker                                tracker_;         // multi-instance (Tracker.Enabled)
+    float exist_support_scale_   = 0.0f;   // existence belief: online-calibrated E[npts·range²] (0 = seed from cfg)
+    int   exist_last_mask_frame_ = -1;     // last mask frame_id folded into the existence belief (sensor-rate gate)
     rc::BearingHypothesisStager                        bearing_stager_;  // Part C-birth: stages unmatched 360 bearings
     uint64_t                                            room_node_id_ = 0;
     FPSCounter                                          fps_counter_;     // overall compute()-cycle rate

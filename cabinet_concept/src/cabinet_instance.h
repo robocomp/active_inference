@@ -58,6 +58,13 @@ struct CabinetInstance
     // biased mask); dotd is the motion-corruption speed, kept for diagnostics (see MASK_MOTION_CORRUPTION.md).
     float last_motion_var      = 0.0f;
     float last_motion_dotd     = 0.0f;
+    // FRAME ego-motion (camera twist magnitudes, from the masks node's mask_cam_twist) + capture dt. Unlike
+    // last_motion_var (per-mask → R), this is a SHARED frame error → the belief COMMON-MODE, so the whole
+    // frame's authority to move the geometry MEAN vanishes as motion rises (Woodbury), while existence still
+    // confirms. "Still is the spot to update" — a fixation/VOR precision, not a motion gate.
+    float last_ego_v           = 0.0f;   // |linear twist|  (m/s)
+    float last_ego_w           = 0.0f;   // |angular twist| (rad/s)
+    float last_ego_dt          = 0.0f;   // capture dt (s) — motion×dt = the shared ego-displacement this frame
     float last_trunc_frac      = 0.0f;
     float last_centroid_radius = 0.0f;
     float last_range           = 0.0f;   // mean camera→mask depth Z (m), this frame — static range weighting

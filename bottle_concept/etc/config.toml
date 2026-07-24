@@ -149,6 +149,8 @@ AI2ProcessStdM = 0.005        # predict process-noise std, all 5 length DOFs (m/
 AI2AgeNominalDtS = 0.0        # stale-belief aging: mask nominal period (s). >0 ⇒ unseen bottle's POSITION Σ grows by Q·(dt/this) on the agent clock (measurement-age→covariance); 0 = historic 1-Q-per-unseen-cycle. Try 0.1.
 AI2CommonModePosStd = 0.02    # per-frame SHARED position error (m); pose-chain cov adds → Σ saturates (calibrated)
 AI2CommonModeSizeStd = 0.01   # per-frame SHARED size error radius,height (m)
+MotionCmPosGain = 0.10        # ego-motion→common-mode: position (cx,cy) shared-error std per m/s of motion_dotd. CONTINUOUS "be still to UPDATE, else CONFIRM" fixation; 0 = off.
+MotionCmSizeGain = 0.20       # ego-motion→common-mode: size (radius,height) shared-error std per m/s — the anti-RESHAPE lever (a moving frame confirms but can't grow/shrink the bottle). 0 = off.
 AI2GnIters = 4                # Gauss-Newton iterations per frame
 AI2CsvPath = "etc/bottle_ai2_log.csv"   # per-cycle AI2 belief CSV (state + Σ diag); empty = off
 

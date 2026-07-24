@@ -66,7 +66,8 @@ public:
     /// with Rᵢ = sigma_base² + (lat_rate·standoffᵢ)² — range-aware so far faces yield less information.
     /// Targets the dominant uncertainty eigen-direction of Σ (an unobserved extent / yaw). A low but
     /// finite gain is NOT withdrawn here; the controller's EFE selection simply won't pick a low-nat target.
-    EpistemicProposal compute(const CabinetBelief& belief, float lat_rate, float sigma_base) const;
+    EpistemicProposal compute(const CabinetBelief& belief, float lat_rate, float sigma_base,
+                              bool verbose = false) const;
 
 private:
     float d_obs_;

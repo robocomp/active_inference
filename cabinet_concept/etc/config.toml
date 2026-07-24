@@ -120,7 +120,9 @@ CoverageRobustCM = 0.15        # Cauchy scale (m): on-plane points this far outs
 # can no longer inflate onto clutter). Uses the same sweep as LidarPrecision (auto-staged when either is > 0). Beams
 # that RETURN inside the slab (occupancy) are ignored, so a real tabletop is untouched. Runs SOLO at 500 here
 # (CoveragePrecision is off), bounding the extent from LiDAR through-beams alone.
-FreeSpacePrecision = 500.0         # shrink-only free-space pull strength (per through-beam, ~1/σ²). 0=OFF
+FreeSpacePrecision = 500.0         # RE-ENABLED: the carve is now FACE-GATED (carves along-axis L via end-exit
+                                   # beams + top z1 via top-exit beams; SKIPS depth/bottom faces so d is never
+                                   # collapsed). Validated by cabinet_belief self_test (j). ~1/σ² per through-beam.
 
 # Footprint SECOND-MOMENT factor (cabinet_belief.h): measures (w,h,yaw) from the top-band cloud's 2D inertia
 # tensor and folds it as a linear Gaussian factor into the GN update — the escape from the clutter-trap that

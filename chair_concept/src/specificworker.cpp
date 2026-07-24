@@ -536,6 +536,8 @@ void SpecificWorker::compute()
         room_node_id_ = rooms.front().id();
     }
 
+    refresh_room_geometry();  // room-containment pose prior (cheap; the polygon is a nominal model)
+    fitter_->update_ego_motion();   // robot/camera speed → "be-still-to-update" gate (once per cycle)
     mask_ingestor_->refresh();
     run_instance_tracker();   // data-driven birth/associate/death + merge (the only instance-lifecycle path)
 
@@ -766,13 +768,15 @@ void SpecificWorker::run_instance_tracker()
         }
     }
 
-    // STILLBIRTH PRUNE: a phantom born from association churn (it stole a detection the real chair then
-    // re-won) starves once the real instance reclaims its mask. A young instance (still inside its probation
-    // window) that the tracker leaves unassigned for a sustained streak is such a phantom. A real chair
-    // locks on and matches essentially every cycle → its streak resets and never reaches patience → it
-    // survives probation and becomes permanent furniture (immune, like DeathEnabled=false). The streak is
-    // updated for ALL instances here so a mature chair's history stays correct even though it can't be pruned.
-    if (cfg_.tracker_prune_enabled)
+    // EXISTENCE BELIEF: continuous log-odds removal — the principled replacement for the wall-clock
+    // stillbirth prune below. The prune could not kill a MATURE phantom (processed_cycles≥maturity → "furniture"
+    // immunity, purely age-based) and its binary streak reset on ANY assignment, so a phantom fed a trickle of
+    // clutter (chair_3: 8 points at 7.4 m) never reached patience AND aged into permanence. The existence belief
+    // fixes both: it integrates SUPPORT-MASS-WEIGHTED evidence (8 pts where ~130 are expected → strong negative)
+    // once per sensor frame, with no age immunity — a real chair stays only by continuing to be explained.
+    if (cfg_.exist_enabled)
+        update_existence_beliefs();
+    else if (cfg_.tracker_prune_enabled)
     {
         std::vector<std::uint64_t> stillborn;
         for (auto& [id, inst] : fitter_->instances())
@@ -816,6 +820,17 @@ void SpecificWorker::run_instance_tracker()
         // centroid birth and the evidence assignment can disagree). Full birth-validity (P(v=clean) — don't
         // birth from a merged/contaminated mask at all) is §2, still to come.
         const Eigen::Vector3f& c = pkt.slices[slice].centroid;
+
+        // Room-containment pose prior at BIRTH: never spawn a chair outside the walls (a mislocalized frame while
+        // the robot is lost drops a detection beyond a wall). Zero prior mass outside the room → suppress.
+        if (cfg_.exist_room_prior and fitter_->has_room_polygon()
+            and not fitter_->point_in_room(Eigen::Vector2f(c.x(), c.y()), cfg_.exist_room_margin_m))
+        {
+            std::print("chair_concept: [tracker] BIRTH SUPPRESSED slice={} at ({:.2f},{:.2f}) — OUTSIDE room\n",
+                       slice, c.x(), c.y());
+            log_tracker_event("SUPPRESS", 0, c.x(), c.y(), "outside room");
+            continue;
+        }
         {
             std::uint64_t claimer = 0;
             for (auto& [id, inst] : fitter_->instances())
@@ -915,6 +930,151 @@ void SpecificWorker::run_instance_tracker()
                 log_tracker_event("BEARING_BIRTH", new_id, p_nom.x(), p_nom.y(), "");
             }
         }
+    }
+}
+
+// Load the room's delimiting polygon (a trusted NOMINAL model authored by room_concept, never fitted) into the
+// fitter so it can impose the room-containment pose prior. Mirrors cabinet_concept::refresh_room_geometry.
+void SpecificWorker::refresh_room_geometry()
+{
+    if (not G or room_node_id_ == 0) return;
+    const auto room = G->get_node(room_node_id_);
+    if (not room.has_value()) return;
+    const auto px = G->get_attrib_by_name<delimiting_polygon_x_att>(room.value());
+    const auto py = G->get_attrib_by_name<delimiting_polygon_y_att>(room.value());
+    if (not px.has_value() or not py.has_value()) return;
+    const auto& xs = px->get(); const auto& ys = py->get();
+    const std::size_t n = std::min(xs.size(), ys.size());
+    if (n < 3) return;
+    std::vector<Eigen::Vector2f> poly; poly.reserve(n);
+    Eigen::Vector2f centroid = Eigen::Vector2f::Zero();
+    for (std::size_t i = 0; i < n; ++i) { poly.emplace_back(xs[i], ys[i]); centroid += poly.back(); }
+    centroid /= static_cast<float>(n);
+    fitter_->set_room_geometry(centroid, std::move(poly));
+}
+
+// Continuous existence belief: fold one sensor frame of evidence into each instance's log-odds L and remove
+// any whose L crosses the floor. See the ChairInstance::exist_logodds comment for the model. Runs from
+// run_instance_tracker (association already resolved, so assigned_mask_idx is this cycle's assignment).
+void SpecificWorker::update_existence_beliefs()
+{
+    // Integrate at the SENSOR rate, not the compute rate: only when a new mask frame arrived. Otherwise a fast
+    // compute loop would decay a briefly-occluded real chair away between two sensor frames.
+    const auto& pkt = mask_ingestor_->packet();
+    const bool sensor_fresh = pkt.valid and static_cast<int>(pkt.frame_id) != exist_last_mask_frame_;
+    if (not sensor_fresh)
+        return;
+    exist_last_mask_frame_ = static_cast<int>(pkt.frame_id);
+
+    if (exist_support_scale_ <= 0.0f)                 // lazy-seed the expected-support scale C = E[npts·range²]
+        exist_support_scale_ = cfg_.exist_expected_support_c;
+
+    const float g   = cfg_.exist_evidence_gain;
+    const float ar  = cfg_.exist_adequacy_ref;
+    const float cap = cfg_.exist_adequacy_cap;
+
+    std::vector<std::uint64_t> to_remove;
+    for (auto& [id, inst] : fitter_->instances())
+    {
+        if (std::isnan(inst.exist_logodds))           // seed on first visit (fresh birth OR adopted graph node)
+            inst.exist_logodds = cfg_.exist_birth_logodds;
+
+        // ROOM-CONTAINMENT POSE PRIOR (runs BEFORE the frustum gate, so it reaches a chair a localization glitch
+        // put OUTSIDE the walls / behind a wall where the sensor can never vacate it): P(chair outside) ≈ 0, so
+        // an out-of-room centre draws a STRONG negative every frame regardless of visibility → removed in a few.
+        if (cfg_.exist_room_prior and fitter_->has_room_polygon() and not inst.is_bearing_hypothesis)
+        {
+            const auto& ms = inst.model.state();
+            if (not fitter_->point_in_room(Eigen::Vector2f(ms.cx, ms.cy), cfg_.exist_room_margin_m))
+            {
+                inst.exist_logodds = std::clamp(inst.exist_logodds - cfg_.exist_out_of_room_gain,
+                                                cfg_.exist_remove_logodds - 1.0f, cfg_.exist_max_logodds);
+                if (inst.exist_logodds < cfg_.exist_remove_logodds)
+                    to_remove.push_back(id);
+                continue;   // outside the room → no sensor evidence can rescue it; skip the normal channels
+            }
+        }
+
+        // HOLD (no evidence) unless the instance is a depth chair in the camera frustum with a real belief.
+        // roi_valid is one compute-cycle stale (fine for a frustum test); a bearing-only hypothesis carries no
+        // depth (existence unjudgeable from support mass); an un-initialised newborn hasn't had a chance yet.
+        if (inst.is_bearing_hypothesis or not inst.roi_valid or not inst.ai2_initialized)
+            continue;
+
+        // TWO evidence channels for whether a chair really occupies this in-frustum spot.
+        float llr;
+        const bool won = inst.assigned_mask_idx >= 0 and inst.assigned_mask_idx < static_cast<int>(pkt.slices.size());
+        if (won)
+        {
+            // WON a mask → how much of the EXPECTED chair silhouette does the model actually EXPLAIN?
+            //   explanation = (support / expected_at_range) × (1 − clutter_frac).
+            // A real chair explains a good fraction → POSITIVE. Two failure modes both explain ≈nothing → NEGATIVE:
+            // a far-too-SPARSE won mask (chair_3's ~8 points), OR a big but ~ALL-CLUTTER blob (chair_3/chair_5's
+            // 5994/1126 pts at clutter≈0.99 — support present, but the chair model fits none of it). Folding
+            // clutter into the SIGN is the fix for the "won a garbage blob → scored neutral → never removed" gap.
+            const auto& sl = pkt.slices[inst.assigned_mask_idx];
+            const int npts = (sl.support_end > sl.support_begin) ? static_cast<int>(sl.support_end - sl.support_begin) : 0;
+            const float range    = std::max(0.5f, inst.last_range);
+            const float expected = exist_support_scale_ / (range * range);
+            const float adequacy = std::clamp(static_cast<float>(npts) / std::max(1.0f, expected), 0.0f, cap);
+            const float explained = adequacy * std::clamp(1.0f - inst.last_clutter_frac, 0.0f, 1.0f);
+            llr = (explained >= ar) ? g * (explained - ar) / std::max(1e-3f, cap - ar)
+                                    : -g * (ar - explained) / std::max(1e-3f, ar);
+            // Be-still invariant: a MOVING frame only CONFIRMS existence — its smeared/high-clutter mask must not
+            // count as NEGATIVE evidence. Winning the slice already reset frames_since_detection (no vacate); floor
+            // the log-odds delta at 0 so a moving pass can hold/raise existence but never argue the chair away.
+            if (fitter_->confirm_only(inst))
+                llr = std::max(0.0f, llr);
+        }
+        else if (cfg_.exist_occlusion_check and fitter_->los_occluded(inst))
+            // WON NOTHING but the line of sight is BLOCKED by a closer object (another chair, the table, a
+            // person …): absence of a mask is EXPECTED, not evidence the chair is gone → HOLD, never vacate.
+            continue;
+        else
+        {
+            // WON NOTHING while in the frustum, UNOCCLUDED, on a live sensor frame → absence evidence, but its
+            // CONFIDENCE RAMPS with how long the instance has gone unexplained (freshness-as-precision, NOT a
+            // hard gate): a chair that just lost the 1-to-1 slice or is briefly hidden (small frames_since_
+            // detection) is barely touched and recovers on its next win — this ramp prevents the death-spiral;
+            // a spot left unexplained-and-in-clear-view for seconds (a real phantom) accrues the FULL negative.
+            const float conf = (cfg_.exist_vacate_confident_frames > 0)
+                ? std::clamp(static_cast<float>(inst.frames_since_detection)
+                             / static_cast<float>(cfg_.exist_vacate_confident_frames), 0.0f, 1.0f)
+                : 0.0f;
+            llr = -g * conf;
+        }
+
+        inst.exist_logodds = std::clamp(inst.exist_logodds + llr,
+                                        cfg_.exist_remove_logodds - 1.0f, cfg_.exist_max_logodds);
+
+        if (inst.exist_logodds < cfg_.exist_remove_logodds)
+            to_remove.push_back(id);
+    }
+
+    // Throttled existence readout so a "why is this phantom still here?" case is diagnosable from the log.
+    static int ex_dbg = 0;
+    if (++ex_dbg % 60 == 0)
+        for (const auto& [id, inst] : fitter_->instances())
+            if (not inst.is_bearing_hypothesis)
+                std::print("chair_concept: [existence] {} L={:.2f} roi={} won={} since_det={} occluded={}\n",
+                           inst.node_name, inst.exist_logodds, inst.roi_valid ? 1 : 0,
+                           inst.assigned_mask_idx >= 0 ? 1 : 0, inst.frames_since_detection,
+                           (inst.roi_valid and inst.assigned_mask_idx < 0 and fitter_->los_occluded(inst)) ? 1 : 0);
+
+    for (const std::uint64_t id : to_remove)
+    {
+        const auto it = fitter_->instances().find(id);
+        const float L = (it != fitter_->instances().end()) ? it->second.exist_logodds : 0.0f;
+        std::print("chair_concept: [existence] REMOVE id={} (log-odds {:.2f} < {:.2f}; unexplained/vacated in view)\n",
+                   id, L, cfg_.exist_remove_logodds);
+        if (it != fitter_->instances().end())
+        {
+            log_tracker_event("REMOVE", id, it->second.model.state().cx, it->second.model.state().cy,
+                              std::format("logodds {:.2f}", L));
+            it->second.affordance.remove();
+        }
+        fitter_->forget_node(id);
+        G->delete_node(id);
     }
 }
 

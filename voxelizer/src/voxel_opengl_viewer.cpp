@@ -5,16 +5,20 @@
 #include <QCoreApplication>
 #include <QHash>
 #include <QDebug>
+#include <QFont>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QSettings>
 #include <QSurfaceFormat>
 #include <QTimer>
+#include <QVector4D>
 #include <QWheelEvent>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -118,11 +122,13 @@ VoxelOpenGLViewer::~VoxelOpenGLViewer()
 }
 
 void VoxelOpenGLViewer::update_object_meshes(std::span<const std::vector<float>> meshes,
-                                             std::span<const std::string> categories)
+                                             std::span<const std::string> categories,
+                                             std::span<const std::string> names)
 {
     std::scoped_lock lk(object_meshes_mutex_);
     object_meshes_.assign(meshes.begin(), meshes.end());
     object_mesh_categories_.assign(categories.begin(), categories.end());
+    object_mesh_names_.assign(names.begin(), names.end());
     request_update_throttled();
 }
 
@@ -191,7 +197,9 @@ void VoxelOpenGLViewer::set_show_skeletons(bool show)
 void VoxelOpenGLViewer::update_graph_boxes(std::span<const QVector3D> centers,
                                            std::span<const QVector3D> half_extents,
                                            std::span<const float> yaws,
-                                           std::span<const std::string> categories)
+                                           std::span<const std::string> categories,
+                                           std::span<const std::string> names,
+                                           std::span<const std::string> subtypes)
 {
     {
         std::scoped_lock lk(graph_boxes_mutex_);
@@ -199,6 +207,8 @@ void VoxelOpenGLViewer::update_graph_boxes(std::span<const QVector3D> centers,
         graph_box_half_extents_.assign(half_extents.begin(), half_extents.end());
         graph_box_yaws_.assign(yaws.begin(), yaws.end());
         graph_box_categories_.assign(categories.begin(), categories.end());
+        graph_box_names_.assign(names.begin(), names.end());
+        graph_box_subtypes_.assign(subtypes.begin(), subtypes.end());
     }
 }
 
@@ -225,6 +235,38 @@ void VoxelOpenGLViewer::set_show_models(bool show)
 {
     show_models_ = show;
     request_update_throttled();
+}
+
+void VoxelOpenGLViewer::set_show_labels(bool show)
+{
+    show_labels_ = show;
+    request_update_throttled();
+}
+
+int VoxelOpenGLViewer::instance_index_from_name(const std::string& name)
+{
+    // Trailing run of digits ("cabinet_2" → 2, "bottle_10" → 10, "table" → 0).
+    std::size_t i = name.size();
+    while (i > 0 and std::isdigit(static_cast<unsigned char>(name[i - 1]))) --i;
+    if (i == name.size()) return 0;
+    return std::atoi(name.c_str() + i);
+}
+
+QColor VoxelOpenGLViewer::shade_for_instance(const QColor& base, int instance_id)
+{
+    if (instance_id <= 0) return base;   // lone / unnumbered instance keeps the canonical tone
+    // Same hue, distinct value/saturation per id so several nodes of one type read apart. The cycle is
+    // deterministic (keyed to the node's own index), so a given node keeps its shade across frames.
+    static constexpr std::array<float, 6> v_mult = {1.00f, 0.68f, 1.28f, 0.82f, 1.14f, 0.55f};
+    static constexpr std::array<float, 6> s_mult = {1.00f, 1.05f, 0.72f, 0.90f, 0.60f, 1.10f};
+    const std::size_t k = static_cast<std::size_t>(instance_id) % v_mult.size();
+    float h, s, v, a;
+    base.getHsvF(&h, &s, &v, &a);
+    v = std::clamp(v * v_mult[k], 0.18f, 1.0f);
+    s = std::clamp(s * s_mult[k], 0.0f, 1.0f);
+    QColor c;
+    c.setHsvF(h < 0.f ? 0.f : h, s, v, a);   // h == -1 for achromatic base; clamp to a valid hue
+    return c;
 }
 
 void VoxelOpenGLViewer::update_lidar_points(std::span<const QVector3D> positions,
@@ -721,6 +763,11 @@ void VoxelOpenGLViewer::paintGL()
 
     const QMatrix4x4 mvp = proj * view;
 
+    // Node-name text labels (debug reference). Collected in OGL-space during the model passes below and
+    // projected with `mvp` in the QPainter overlay at the end of paintGL.
+    struct NodeLabel { QVector3D pos; QString text; QColor color; };
+    std::vector<NodeLabel> node_labels;
+
     program_.bind();
     program_.setUniformValue("u_mvp", mvp);
     program_.setUniformValue("u_point_size", 4.5f);
@@ -1079,13 +1126,15 @@ void VoxelOpenGLViewer::paintGL()
     {
         std::vector<QVector3D> local_centers, local_half;
         std::vector<float> local_yaws;
-        std::vector<std::string> local_cats;
+        std::vector<std::string> local_cats, local_names, local_subtypes;
         {
             std::scoped_lock lk(graph_boxes_mutex_);
             local_centers = graph_box_centers_;
             local_half = graph_box_half_extents_;
             local_yaws = graph_box_yaws_;
             local_cats = graph_box_categories_;
+            local_names = graph_box_names_;
+            local_subtypes = graph_box_subtypes_;
         }
 
         if (!local_centers.empty() && local_centers.size() == local_half.size())
@@ -1169,17 +1218,47 @@ void VoxelOpenGLViewer::paintGL()
                 const float sy = std::sin(yaw);
                 std::string cat;
                 if (i < local_cats.size()) cat = local_cats[i];
-                // Skip the green table BBs (per request) — shown via mesh/voxels/RFE points.
-                if (cat == "table" or cat == "model_table")
+                const std::string& name = (i < local_names.size()) ? local_names[i] : std::string{};
+                const std::string& subtype = (i < local_subtypes.size()) ? local_subtypes[i] : std::string{};
+                const bool is_table = (cat == "table" or cat == "model_table");
+                // Per-instance shade: several nodes of the same type get distinct intensities of one tone.
+                // Tables use the amber model tone so the round-table shape drawn here matches the square-table mesh.
+                const QColor base = is_table ? QColor(255, 200, 100) : color_for_category(cat);
+                const QColor c = shade_for_instance(base, instance_index_from_name(name));
+
+                // Node-name label at the box centre (collected for the QPainter overlay; drawn for every
+                // model type, including the table/bottle branches that draw no wireframe below).
+                if (show_labels_ and not name.empty())
+                    node_labels.push_back({map_room_to_ogl(ctr.x(), ctr.y(), ctr.z()),
+                                           QString::fromStdString(name), c});
+
+                // Tables: a ROUND table is drawn here as a solid disc-top + central pedestal (the box mesh is
+                // suppressed upstream for round tables). A SQUARE table is drawn by its solid box mesh (mesh
+                // pass), so skip it here.
+                if (is_table)
+                {
+                    if (subtype == "round")
+                    {
+                        const float radius  = 0.5f * (he.x() + he.y());          // mean footprint half-extent
+                        const float top_z   = ctr.z() + he.z();                  // top surface of the box
+                        const float slab_hh = std::min(0.03f, he.z() * 0.15f);   // thin round top slab
+                        append_cylinder(QVector3D(ctr.x(), ctr.y(), top_z - slab_hh), radius, slab_hh, c);
+                        // Central pedestal from the floor up to the underside of the slab.
+                        const float ped_bot = ctr.z() - he.z();
+                        const float ped_top = top_z - 2.f * slab_hh;
+                        const float ped_hh  = std::max(0.01f, 0.5f * (ped_top - ped_bot));
+                        append_cylinder(QVector3D(ctr.x(), ctr.y(), 0.5f * (ped_top + ped_bot)),
+                                        std::max(0.03f, radius * 0.18f), ped_hh, c.darker(115));
+                    }
                     continue;
+                }
                 // Bottle: draw a SOLID cylinder (radius from the box footprint, full height = 2·hz)
                 // instead of the wireframe box. he = (radius, radius, height/2) for a cylinder node.
                 if (cat == "bottle")
                 {
-                    append_cylinder(ctr, 0.5f * (he.x() + he.y()), he.z(), color_for_category(cat));
+                    append_cylinder(ctr, 0.5f * (he.x() + he.y()), he.z(), c);
                     continue;
                 }
-                const QColor c = color_for_category(cat);
                 const float r = c.redF();
                 const float g = c.greenF();
                 const float b = c.blueF();
@@ -1239,8 +1318,8 @@ void VoxelOpenGLViewer::paintGL()
     if (show_models_)
     {
         std::vector<std::vector<float>> local_meshes;
-        std::vector<std::string>        local_mesh_cats;
-        { std::scoped_lock lk(object_meshes_mutex_); local_meshes = object_meshes_; local_mesh_cats = object_mesh_categories_; }
+        std::vector<std::string>        local_mesh_cats, local_mesh_names;
+        { std::scoped_lock lk(object_meshes_mutex_); local_meshes = object_meshes_; local_mesh_cats = object_mesh_categories_; local_mesh_names = object_mesh_names_; }
 
         const float fx = voxel_flip_x_ ? -1.f : 1.f;
         const float fy = voxel_flip_y_ ? -1.f : 1.f;
@@ -1252,16 +1331,30 @@ void VoxelOpenGLViewer::paintGL()
             if (mesh.size() < 9 || mesh.size() % 9 != 0) continue;
 
             // Per-class mesh colour: the table keeps its amber model colour; everything else (chair, …)
-            // uses its class colour so the chair model matches its mask/voxels (electric blue).
-            const std::string cat = mi < local_mesh_cats.size() ? local_mesh_cats[mi] : std::string{};
-            const QColor mc = (cat.empty() || cat == "table") ? amber : color_for_category(cat);
+            // uses its class colour so the chair model matches its mask/voxels (electric blue). A per-instance
+            // shade then separates table_1/table_2, cabinet_1/cabinet_2, … by intensity of the same tone.
+            const std::string cat  = mi < local_mesh_cats.size()  ? local_mesh_cats[mi]  : std::string{};
+            const std::string name = mi < local_mesh_names.size() ? local_mesh_names[mi] : std::string{};
+            const QColor mc_base = (cat.empty() || cat == "table") ? amber : color_for_category(cat);
+            const QColor mc = shade_for_instance(mc_base, instance_index_from_name(name));
             const float mc_r = mc.redF(), mc_g = mc.greenF(), mc_b = mc.blueF();
 
             std::vector<Vertex> mv;
             mv.reserve(mesh.size() / 3);
+            QVector3D centroid_ogl{0.f, 0.f, 0.f};
             for (std::size_t i = 0; i + 2 < mesh.size(); i += 3)
-                mv.push_back(Vertex{fx * mesh[i], mesh[i + 2], fy * mesh[i + 1],
-                                    mc_r, mc_g, mc_b});
+            {
+                const Vertex v{fx * mesh[i], mesh[i + 2], fy * mesh[i + 1], mc_r, mc_g, mc_b};
+                mv.push_back(v);
+                centroid_ogl += QVector3D(v.px, v.py, v.pz);
+            }
+
+            // Chairs are drawn ONLY as meshes (they are not in the graph-box list), so label them here.
+            // Every other mesh type (table, cabinet) is already labelled from the box pass — skip to avoid
+            // a duplicate label at the same node.
+            if (show_labels_ and cat == "chair" and not name.empty() and not mv.empty())
+                node_labels.push_back({centroid_ogl / static_cast<float>(mv.size()),
+                                       QString::fromStdString(name), mc});
 
             room_vao_.bind();
             room_vbo_.bind();
@@ -1473,6 +1566,33 @@ void VoxelOpenGLViewer::paintGL()
 
     QPainter painter(this);
     painter.setRenderHint(QPainter::TextAntialiasing, true);
+
+    // Node-name labels: project each collected room/OGL-space anchor with the same MVP and draw the DSR
+    // name so nodes can be referenced by name while debugging. A dark shadow keeps it legible on any layer.
+    if (show_labels_ and not node_labels.empty())
+    {
+        QFont label_font = painter.font();
+        label_font.setPointSizeF(9.0);
+        label_font.setBold(true);
+        painter.setFont(label_font);
+        const float w = static_cast<float>(width());
+        const float h = static_cast<float>(height());
+        for (const auto& lbl : node_labels)
+        {
+            const QVector4D clip = mvp * QVector4D(lbl.pos, 1.0f);
+            if (clip.w() <= 1e-4f) continue;                      // behind the camera
+            const QVector3D ndc = clip.toVector3DAffine();        // perspective divide
+            if (ndc.z() < -1.f or ndc.z() > 1.f) continue;        // outside the depth range
+            const float sx = (ndc.x() * 0.5f + 0.5f) * w;
+            const float sy = (1.f - (ndc.y() * 0.5f + 0.5f)) * h;
+            const QString text = lbl.text;
+            painter.setPen(QColor(0, 0, 0, 200));
+            painter.drawText(QPointF(sx + 1.0f, sy + 1.0f), text);
+            painter.setPen(lbl.color.lighter(160));               // brightened tone → matches its model colour
+            painter.drawText(QPointF(sx, sy), text);
+        }
+    }
+
     painter.setPen(QColor(255, 255, 255));
     auto hz = [](float v) { return v >= 0.0f ? QString::number(v, 'f', 1) : QStringLiteral("--"); };
     painter.drawText(QRect(10, 10, width() - 20, 24),

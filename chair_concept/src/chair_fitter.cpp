@@ -204,6 +204,7 @@ ChairFitter::ChairObservation ChairFitter::observe(ChairInstance& inst, const DS
             inst.last_motion_dotd = slice.motion_dotd;
             inst.last_trunc_frac  = slice.trunc_frac;
             inst.last_range       = slice.range;
+            inst.last_centroid_radius = slice.centroid_radius;   // image-centredness (moving-update exception)
             const std::size_t begin = std::min(slice.support_begin, masks_packet.support_points.size());
             const std::size_t end = std::min(slice.support_end, masks_packet.support_points.size());
 
@@ -380,7 +381,10 @@ float ChairFitter::run_inference(ChairInstance& inst, const ChairObservation& ob
     const float oblq_cos = std::clamp(inst.dbg_obliquity_cos, 0.05f, 1.0f);
     const float obliquity_yaw_std = cfg_.ai2_obliquity_yaw_gain * (1.0f / oblq_cos - 1.0f);
 
-    const bool gated = inst.last_trunc_frac > cfg_.ai2_trunc_gate_frac;
+    // "Be-still-to-update" invariant: a truncated view (gated) OR a MOVING robot may only CONFIRM the chair, never
+    // move/reshape it. A moving frame's mask is a shared smear whose centroid is unreliable — predict-only here
+    // (mean held, Σ carries its one-step Q); the existence belief still confirms it (its mask reset stops vacate).
+    const bool gated = inst.last_trunc_frac > cfg_.ai2_trunc_gate_frac or confirm_only(inst);
     compute_chain_cov(inst);
 
     float energy = inst.dbg_energy;   // default = HOLD last FE (a gated cycle takes no measurement)
@@ -393,9 +397,15 @@ float ChairFitter::run_inference(ChairInstance& inst, const ChairObservation& ob
         frame.points.insert(frame.points.end(), observation.candidate_pts.begin(), observation.candidate_pts.end());
         frame.points.insert(frame.points.end(), observation.residual_pts.begin(), observation.residual_pts.end());
         frame.R.assign(frame.points.size(), R);
-        frame.chain_cov_xx  = inst.chain_cov_xx + range_lat_var;
-        frame.chain_cov_yy  = inst.chain_cov_yy + range_lat_var;
-        frame.chain_cov_yaw = range_yaw_var + obliquity_yaw_std * obliquity_yaw_std;   // range + grazing cap (§D)
+        // Ego-motion "be-still-to-update" common-mode: a frame captured while the robot moves is ONE shared
+        // smear → cap its authority to move the mean via the per-frame common-mode (NOT per-point R). Continuous,
+        // 0 at stillness. std grows per m/s of motion_dotd. (motion_cm_*_gain, ported from table_concept.)
+        const float md          = std::abs(inst.last_motion_dotd);
+        const float mot_pos_var = std::pow(cfg_.motion_cm_pos_gain * md, 2.0f);   // m²  (cx,cy)
+        const float mot_yaw_var = std::pow(cfg_.motion_cm_yaw_gain * md, 2.0f);   // rad² (yaw)
+        frame.chain_cov_xx  = inst.chain_cov_xx + range_lat_var + mot_pos_var;
+        frame.chain_cov_yy  = inst.chain_cov_yy + range_lat_var + mot_pos_var;
+        frame.chain_cov_yaw = range_yaw_var + obliquity_yaw_std * obliquity_yaw_std + mot_yaw_var;   // range + grazing cap (§D) + ego-motion
         inst.ai2_belief.update(frame);   // MAP mean + posterior Σ; its surface-only return is NOT the FE (below)
         // NOTE: refine_extent (coverage/extent likelihood) DISABLED — coverage without a free-space
         // counter-force is positive feedback: it inflated the footprint to cover contamination/neighbours
@@ -505,6 +515,144 @@ std::optional<Eigen::Matrix4d> ChairFitter::room_T_zed_matrix(std::uint64_t pose
         return m;
     };
     return to_mat4(rtb.value()) * to_mat4(btz.value());
+}
+
+void ChairFitter::update_ego_motion()
+{
+    const auto M = room_T_zed_matrix();   // camera→room (ts=0 = current robot pose)
+    const auto now = std::chrono::steady_clock::now();
+    if (not M.has_value())
+    {
+        have_prev_cam_ = false;           // pose chain unavailable → can't judge motion; reset baseline
+        return;
+    }
+    const Eigen::Vector3f pos(static_cast<float>(M->coeff(0, 3)),
+                              static_cast<float>(M->coeff(1, 3)),
+                              static_cast<float>(M->coeff(2, 3)));
+    const Eigen::Vector3f fwd(static_cast<float>(M->coeff(0, 1)),   // zed +y is the depth/forward axis
+                              static_cast<float>(M->coeff(1, 1)),
+                              static_cast<float>(M->coeff(2, 1)));
+    if (have_prev_cam_)
+    {
+        const float dt = std::max(1e-3f, std::chrono::duration<float>(now - prev_cam_tp_).count());
+        ego_lin_mps_ = (pos - prev_cam_pos_).norm() / dt;
+        const float fa = prev_cam_fwd_.norm(), fb = fwd.norm();
+        const float cang = (fa > 1e-6f and fb > 1e-6f)
+            ? std::clamp(prev_cam_fwd_.dot(fwd) / (fa * fb), -1.0f, 1.0f) : 1.0f;
+        ego_ang_radps_ = std::acos(cang) / dt;
+    }
+    prev_cam_pos_ = pos; prev_cam_fwd_ = fwd; prev_cam_tp_ = now; have_prev_cam_ = true;
+}
+
+bool ChairFitter::confirm_only(const ChairInstance& inst) const
+{
+    if (not cfg_.ai2_motion_confirm_only)
+        return false;
+    const bool moving = ego_lin_mps_   > cfg_.ai2_still_lin_mps
+                     or ego_ang_radps_ > cfg_.ai2_still_ang_radps
+                     or std::abs(inst.last_motion_dotd) > cfg_.ai2_still_dotd;
+    if (not moving)
+        return false;
+    // EXCEPTION: a well-centred mask (near the principal point) is trustworthy even while moving → allow the update.
+    if (cfg_.ai2_moving_update_center_radius >= 0.0f
+        and inst.last_centroid_radius <= cfg_.ai2_moving_update_center_radius)
+        return false;
+    return true;   // moving AND the mask is off-centre → confirmation only
+}
+
+bool ChairFitter::point_in_room(const Eigen::Vector2f& q, float margin_m) const
+{
+    const std::size_t n = room_polygon_.size();
+    if (n < 3)
+        return true;                       // no trusted polygon → unknown room → impose no prior
+
+    // Ray-cast parity test (even-odd rule) for strict interior.
+    bool inside = false;
+    for (std::size_t i = 0, j = n - 1; i < n; j = i++)
+    {
+        const Eigen::Vector2f& a = room_polygon_[i];
+        const Eigen::Vector2f& b = room_polygon_[j];
+        if (((a.y() > q.y()) != (b.y() > q.y())) and
+            (q.x() < (b.x() - a.x()) * (q.y() - a.y()) / (b.y() - a.y() + 1e-12f) + a.x()))
+            inside = not inside;
+    }
+    if (inside)
+        return true;
+    if (margin_m <= 0.0f)
+        return false;
+
+    // Outside the polygon: accept only if within margin_m of the boundary (wall-hugging chair, centroid noise).
+    float best2 = std::numeric_limits<float>::max();
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        const Eigen::Vector2f& a = room_polygon_[i];
+        const Eigen::Vector2f ab = room_polygon_[(i + 1) % n] - a;
+        const float len2 = ab.squaredNorm();
+        const float t = (len2 > 1e-8f) ? std::clamp((q - a).dot(ab) / len2, 0.0f, 1.0f) : 0.0f;
+        best2 = std::min(best2, (q - (a + t * ab)).squaredNorm());
+    }
+    return best2 <= margin_m * margin_m;
+}
+
+bool ChairFitter::los_occluded(const ChairInstance& inst) const
+{
+    const auto Mopt = room_T_zed_matrix();   // camera→room
+    if (not Mopt.has_value())
+        return false;                        // no extrinsic → can't judge occlusion → let vacate proceed
+    const Eigen::Vector3f O(static_cast<float>(Mopt->coeff(0, 3)),
+                            static_cast<float>(Mopt->coeff(1, 3)),
+                            static_cast<float>(Mopt->coeff(2, 3)));
+    const auto& s = inst.model.state();
+    const Eigen::Vector3f C(s.cx, s.cy, s.cz + 0.5f * (s.seat_h + s.back_h));   // chair mid-height
+    Eigen::Vector3f dc = C - O;
+    const float rc = dc.norm();
+    if (rc < 1e-3f)
+        return false;
+    dc /= rc;
+
+    const float margin = std::max(0.0f, cfg_.exist_occlusion_margin_m);   // occluder must be at least this closer
+    // An object at range rs subtending a half-extent `half` covers a bearing cone of half-angle atan(half/rs).
+    // The chair is occluded if a CLOSER object's cone contains the chair's bearing.
+    const auto blocks = [&](const Eigen::Vector3f& Cs, float half, float rs) -> bool
+    {
+        if (not std::isfinite(rs) or rs >= rc - margin)   // not meaningfully closer → cannot occlude
+            return false;
+        Eigen::Vector3f ds = Cs - O;
+        const float n = ds.norm();
+        if (n < 1e-3f)
+            return false;
+        ds /= n;
+        const float ang      = std::acos(std::clamp(dc.dot(ds), -1.0f, 1.0f));   // camera-bearing offset chair↔occluder
+        const float occ_half = std::atan2(std::max(0.05f, half), std::max(0.2f, rs));
+        return ang < occ_half;
+    };
+
+    // (a) other chair instances (always known, even when undetected this frame).
+    for (const auto& [jid, jinst] : instances_)
+    {
+        if (jid == inst.node_id or not jinst.ai2_initialized)
+            continue;
+        const auto& js = jinst.model.state();
+        const Eigen::Vector3f Cj(js.cx, js.cy, js.cz + 0.5f * (js.seat_h + js.back_h));
+        if (blocks(Cj, 0.5f * std::max(js.seat_w, js.seat_d), (Cj - O).norm()))
+            return true;
+    }
+    // (b) any other object DETECTED this frame (table, person, …) via its mask slice geometry.
+    if (mask_ingestor_)
+    {
+        const auto& pkt = mask_ingestor_->packet();
+        if (pkt.valid)
+            for (const auto& sl : pkt.slices)
+            {
+                if (not sl.has_depth or not sl.centroid.allFinite() or not sl.bbox_max.allFinite())
+                    continue;
+                const float half = 0.5f * (sl.bbox_max - sl.bbox_min).head<2>().norm();
+                const float rs   = (sl.range > 0.0f) ? sl.range : (sl.centroid - O).norm();
+                if (blocks(sl.centroid, half, rs))
+                    return true;
+            }
+    }
+    return false;
 }
 
 void ChairFitter::compute_projected_roi(ChairInstance& inst)

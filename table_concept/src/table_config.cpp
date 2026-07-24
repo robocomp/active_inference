@@ -47,6 +47,11 @@ TableConfig load_table_config(const ConfigLoader& cfg)
 
     // ─── Primary-input (masks) stream gate — lifecycle liveness ────────────────
     out.masks_stall_timeout_ms   = geti("Media.MasksStallTimeoutMs",           3000);
+    out.show_dashboard           = getb("TableConcept.ShowDashboard",          true);
+    out.shape_eval_period        = geti("TableConcept.ShapeEvalPeriod",        30);
+    out.shape_eval_min_points    = geti("TableConcept.ShapeEvalMinPoints",     300);
+    out.shape_evidence_clamp     = getf("TableConcept.ShapeEvidenceClamp",     8.0f);
+    out.dump_cloud_path          = gets("TableConcept.DumpCloudPath",          "");
 
     // ─── TableModel geometry / mask split ──────────────────────────────────────
     out.sigma_obs          = getf("TableModel.SigmaObs",          0.05f);
@@ -63,6 +68,9 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.ai2_common_mode_pos_std  = getf("TableModel.AI2CommonModePosStd",  0.03f);
     out.ai2_common_mode_size_std = getf("TableModel.AI2CommonModeSizeStd", 0.02f);
     out.ai2_common_mode_yaw_std  = getf("TableModel.AI2CommonModeYawStd",  0.03f);
+    out.motion_cm_pos_gain       = getf("TableModel.MotionCmPosGain",      0.10f);
+    out.motion_cm_size_gain      = getf("TableModel.MotionCmSizeGain",     0.20f);
+    out.motion_cm_yaw_gain       = getf("TableModel.MotionCmYawGain",      0.12f);
     out.ai2_range_noise_lat_per_m = getf("TableModel.AI2RangeNoiseLatPerM", 0.02f);
     out.ai2_range_noise_yaw_per_m = getf("TableModel.AI2RangeNoiseYawPerM", 0.03f);
     out.ai2_range_noise_size_per_m = getf("TableModel.AI2RangeNoiseSizePerM", 0.08f);

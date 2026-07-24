@@ -66,12 +66,18 @@ public:
     void update_graph_boxes(std::span<const QVector3D> centers,
                             std::span<const QVector3D> half_extents,
                             std::span<const float> yaws,
-                            std::span<const std::string> categories = {});
+                            std::span<const std::string> categories = {},
+                            std::span<const std::string> names = {},
+                            std::span<const std::string> subtypes = {});
 
     // Flat triangle-list meshes in room frame [x0,y0,z0, x1,y1,z1, ...]. Optional per-mesh categories
-    // colour them by class (table = amber model colour, others via color_for_category).
+    // colour them by class (table = amber model colour, others via color_for_category). Optional per-mesh
+    // node names drive the per-instance shade + the 3D text label.
     void update_object_meshes(std::span<const std::vector<float>> meshes,
-                              std::span<const std::string> categories = {});
+                              std::span<const std::string> categories = {},
+                              std::span<const std::string> names = {});
+    // Draw each drawn node's DSR name as a text label at its position (debug reference). ON by default.
+    void set_show_labels(bool show);
 
     // Human skeletons: one flat BODY_18 array per person [x0,y0,z0, ... x17,y17,z17] (54 floats),
     // room frame. NaN joints are skipped. Drawn as bones (BODY18 edges) + joint points.
@@ -104,6 +110,10 @@ private:
     };
 
     static QColor color_for_category(const std::string& category);
+    // Trailing integer of a DSR node name ("cabinet_2" → 2, "table" → 0) → per-instance id.
+    static int instance_index_from_name(const std::string& name);
+    // Same hue as `base`, but a distinct brightness per instance id so several nodes of one type read apart.
+    static QColor shade_for_instance(const QColor& base, int instance_id);
     void request_update_throttled();
     void load_view_state();
     void save_view_state() const;
@@ -127,6 +137,8 @@ private:
     std::vector<QVector3D> graph_box_half_extents_;
     std::vector<float> graph_box_yaws_;
     std::vector<std::string> graph_box_categories_;
+    std::vector<std::string> graph_box_names_;   // parallel to graph_box_centers_ → per-instance shade + label
+    std::vector<std::string> graph_box_subtypes_;// parallel to graph_box_centers_ → shape subtype ("round"/"square")
     // Raw polygon coordinates (room frame) plus current debug rotation in 90deg steps.
     std::vector<float> raw_polygon_x_;
     std::vector<float> raw_polygon_y_;
@@ -143,6 +155,7 @@ private:
     bool show_field_ = true;       // residual_concept Beta belief-field heatmap — ON by default
     bool show_models_ = true;
     bool show_skeletons_ = true;
+    bool show_labels_ = true;      // draw DSR node names as 3D text labels (debug reference)
     std::vector<QVector3D> robot_mesh_local_;
     std::mutex robot_mesh_mutex_;
 
@@ -156,6 +169,7 @@ private:
     std::mutex graph_boxes_mutex_;
     std::vector<std::vector<float>> object_meshes_;
     std::vector<std::string>        object_mesh_categories_;   // parallel to object_meshes_
+    std::vector<std::string>        object_mesh_names_;        // parallel to object_meshes_ → shade + label
     std::mutex object_meshes_mutex_;
     std::vector<std::vector<float>> skeletons_;                // BODY_18 flat (54 floats) per person, room frame
     std::vector<QVector3D> skeleton_facing_;                   // EMA-smoothed facing (room frame), parallel to skeletons_

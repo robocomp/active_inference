@@ -171,6 +171,7 @@ private:
 
     // Live belief dashboard — its OWN top-level window (extracted from the DSR graph dock so it shows
     // independently of Agent.graph; mirrors room_concept/kinova_controller). Geometry persisted via QSettings.
+    QWidget*             dashboard_window_ = nullptr;   // single top-level container: evidence monitor + belief plots
     Custom_widget*       custom_widget_ = nullptr;
     rc::TimeSeriesPlot*  ts_plot_       = nullptr;   // FE (+ baseline)
     rc::TimeSeriesPlot*  ts_surprise_plot_ = nullptr;   // FE surprise (attention signal), own panel/scale

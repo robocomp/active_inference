@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <fstream>
 #include <limits>
 #include <print>
 #include <utility>
@@ -125,6 +126,9 @@ void TableSceneGraph::step_write_model(TableInstance& inst, DSR::Node& node,
         inst.last_pub_H  = s.table_height; inst.last_pub_yaw = s.yaw;
     }
     G_->add_or_modify_attrib_local<free_energy_att>(node, free_energy);
+    // Inferred shape subtype (round/square), chosen by free-energy model evidence in TableFitter::evaluate_shape.
+    // The voxelizer reads this to render the matching mesh (disc vs box).
+    G_->add_or_modify_attrib_local<object_subtype_att>(node, inst.subtype);
 
     // Export full table-owned voxel memory (room frame) as XYZ triples.
     {
@@ -132,6 +136,20 @@ void TableSceneGraph::step_write_model(TableInstance& inst, DSR::Node& node,
         bank_flat.reserve(inst.voxel_bank_pts.size() * 3);
         for (const auto& p : inst.voxel_bank_pts) { bank_flat.push_back(p.x()); bank_flat.push_back(p.y()); bank_flat.push_back(p.z()); }
         G_->add_or_modify_attrib_local<table_voxel_bank_pts_att>(node, bank_flat);
+    }
+
+    // DIAGNOSTIC one-shot: dump this table's accumulated voxel-bank cloud (room frame) to a file for the
+    // offline square-vs-round model comparison (tests/compare_models). Gated on a config path + a populated
+    // bank; fires exactly once per instance. No effect unless TableConcept.DumpCloudPath is set.
+    if (not cfg_.dump_cloud_path.empty() and not inst.cloud_dumped and inst.voxel_bank_pts.size() > 200)
+    {
+        if (std::ofstream f{cfg_.dump_cloud_path}; f)
+        {
+            for (const auto& p : inst.voxel_bank_pts) f << p.x() << ' ' << p.y() << ' ' << p.z() << '\n';
+            inst.cloud_dumped = true;
+            std::print("[{}] dumped {} voxel-bank pts -> {}\n",
+                       inst.node_name, inst.voxel_bank_pts.size(), cfg_.dump_cloud_path);
+        }
     }
 
     // Latest residual points (model-unexplained) for the voxelizer's residual layer — it reads

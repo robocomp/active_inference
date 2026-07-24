@@ -235,6 +235,12 @@ struct CabinetFrame
     float chain_cov_yy  = 0.0f;
     float chain_cov_yaw = 0.0f;   // grows with range ⇒ a distant vague mask cannot rotate a fitted run
     float chain_cov_size = 0.0f;  // grows with range ⇒ nor reshape it
+    // EGO-MOTION common-mode (the "still to update" lever): the SHARED position/yaw error from the camera's
+    // own twist during capture ((v·dt)², (ω·dt)²). Added to the common-mode Σc so — via Woodbury — a MOVING
+    // frame's authority to shift the geometry mean (pose/size) fades to zero, leaving pure existence
+    // confirmation; a near-still frame contributes fully. Continuous (no ω<k gate). Also the rotation fix.
+    float ego_motion_pos_var = 0.0f;   // (v·dt)²·gain² added to the position + size common-mode (m²)
+    float ego_motion_yaw_var = 0.0f;   // (ω·dt)²·gain² added to the yaw common-mode (rad²)
 
     // The nearest room wall for the wall-flush factor (see WallRef).
     WallRef wall;

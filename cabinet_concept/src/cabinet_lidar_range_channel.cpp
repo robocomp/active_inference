@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -133,6 +134,49 @@ void CabinetLidarRangeChannel::feed(CabinetInstance& inst, CabinetFrame& frame) 
             inst.dbg_lidar_meanz_m  = static_cast<float>(zsum / zs.size());
             inst.dbg_lidar_topz_m   = static_cast<float>(topsum / k);
             inst.dbg_lidar_floorz_m = static_cast<float>(botsum / k);
+        }
+    }
+
+    // ── Free-space VACATE beam selection ─────────────────────────────────────────────────────────
+    // Select beams whose SEGMENT (helios origin → return) crosses the CURRENT fitted box (inflated) —
+    // INCLUDING through-beams whose endpoint lands BEYOND it. Those are exactly the beams the mask-centroid
+    // range selection above filters out (an overgrown end's carving beams return far from the mask), so this
+    // is a SEPARATE selection anchored on the fitted box (Fable's fix). The vacate factor then decides
+    // membership continuously via p_through. Anchoring on the fitted box is correct here (not the risk the
+    // range channel guards against): if the box sits in empty space we WANT the beams through it, to carve.
+    if (helios_on and cfg_.free_space_precision > 0.0f and s.L > 0.0f)
+    {
+        const float m = cfg_.lidar_select_margin_m;
+        const float cyaw = std::cos(-s.yaw), syaw = std::sin(-s.yaw);
+        const float hL = 0.5f * s.L + m, hd = 0.5f * s.d + m;        // inflated fitted footprint
+        const float lo[3] = {-hL, -hd, s.z0 - m};
+        const float hi[3] = { hL,  hd, s.z1 + m};
+        const Eigen::Vector3f& O = lidar_origin_room_;
+        const float oxr = O.x() - s.cx, oyr = O.y() - s.cy;
+        const Eigen::Vector3f Ol(oxr * cyaw - oyr * syaw, oxr * syaw + oyr * cyaw, O.z());
+        frame.lidar_freespace.origin = O;
+        frame.lidar_freespace.endpoints.clear();
+        frame.lidar_freespace.endpoints.reserve(256);
+        for (const auto& p : lidar_sweep_room_)
+        {
+            const float exr = p.x() - s.cx, eyr = p.y() - s.cy;
+            const Eigen::Vector3f El(exr * cyaw - eyr * syaw, exr * syaw + eyr * cyaw, p.z());
+            const Eigen::Vector3f dloc = El - Ol;
+            float t_near = 0.0f, t_far = std::numeric_limits<float>::max();
+            bool miss = false;
+            for (int a = 0; a < 3 and not miss; ++a)
+            {
+                if (std::abs(dloc(a)) < 1e-6f) { if (Ol(a) < lo[a] or Ol(a) > hi[a]) miss = true; }
+                else
+                {
+                    float t1 = (lo[a] - Ol(a)) / dloc(a), t2 = (hi[a] - Ol(a)) / dloc(a);
+                    if (t1 > t2) std::swap(t1, t2);
+                    t_near = std::max(t_near, t1);
+                    t_far  = std::min(t_far,  t2);
+                }
+            }
+            if (miss or t_near > t_far or t_far < 0.0f or t_near > 1.0f) continue;   // segment crosses the box
+            frame.lidar_freespace.endpoints.push_back(p);
         }
     }
 
