@@ -32,12 +32,14 @@
 #include "table_geometry.h"   // rc::geom pure footprint/uncertainty helpers
 
 #include <print>
+#include <format>    // stall-transition log formatting (std::println on cout, survives Verbose=false)
 #include <cstdlib>   // std::_Exit — crash-free terminal shutdown
 #include <thread>    // brief DDS flush before _Exit
 #include <chrono>
 #include <iostream>  // std::cout/cerr flush
 #include <QSettings>   // persist the standalone dashboard window geometry
 #include <QByteArray>
+#include <QDateTime>   // wall-clock ms for the primary-input stream gate (operating_since_ms_, stall grace)
 
 #include <algorithm>
 #include <array>
@@ -173,7 +175,11 @@ void SpecificWorker::initialize()
     // cannot break it.
     presence_coordinator_.attach_state_machine(&statemachine);
     presence_coordinator_.set_transition_hooks({
-        .request_presence_ready = [this]() { emit presenceReady(); },
+        // Peers-ready is necessary but NOT sufficient: also require the masks producer to be LIVE (a fresh
+        // frame within the timeout — not merely a persisting `masks` node, which would re-admit into an
+        // instant re-stall). Declines silently — this fires on every presence event; on_waiting_loop pumps
+        // the ingest and re-polls until the stream is actually producing.
+        .request_presence_ready = [this]() { if (masks_stream_live()) emit presenceReady(); },
         .request_presence_lost  = [this]() { emit presenceLost(); },
     });
     presence_coordinator_.set_peer_hooks({
@@ -204,8 +210,38 @@ void SpecificWorker::initialize()
                 qInfo() << "[SM] -> Waiting (missing:" << m.trimmed() << ")";
             }
         },
+        .on_waiting_loop = [this]()
+        {
+            if (shutting_down_)
+                return;
+            // Pump the masks ingest WHILE Waiting: table polls a graph node (no free-running ingest thread
+            // like room's LiDAR), so producer liveness (ms_since_last_frame) only advances if we refresh
+            // here too. Without it the agent could neither detect the producer coming back nor avoid the
+            // re-admit→instant-re-stall flap. It also lets admission key on real freshness, not node-exists.
+            if (mask_ingestor_)
+                mask_ingestor_->refresh();
+            const bool peers_ready = presence_coordinator_.all_required_ready();
+            const bool masks_live  = masks_stream_live();
+            if (peers_ready and masks_live)   // promote only when peers AND a live masks producer are both up
+            {
+                emit presenceReady();
+                return;
+            }
+            const auto now = QDateTime::currentMSecsSinceEpoch();
+            if (now - last_wait_log_ms_ >= 2000)   // throttle the "why still Waiting" line
+            {
+                last_wait_log_ms_ = now;
+                const auto age = mask_ingestor_ ? mask_ingestor_->ms_since_last_frame() : -1;
+                std::println("[SM] Waiting — peers {} | masks {} (age {} ms)",
+                             peers_ready ? "OK" : "MISSING", masks_live ? "LIVE" : "stale",
+                             age < 0 ? std::string("none") : std::to_string(age));
+            }
+        },
         .on_operating_enter = [this]()
         {
+            // Primary-input stream-gate resets: baseline for the cold-start stall grace + re-arm the one-shot.
+            operating_since_ms_   = QDateTime::currentMSecsSinceEpoch();
+            masks_stall_reported_ = false;
             qInfo("[SM] -> Operating: all required peers present");
             // One-time startup sweep: remove leftover affordance nodes from a PREVIOUS run (e.g. a crash
             // that skipped cleanup) so a fresh create doesn't collide and get a DSR-generated name.
@@ -219,16 +255,38 @@ void SpecificWorker::initialize()
         },
         .on_operating_loop = [this]()
         {
+            // Primary-input stream gate: a dead masks producer means acting on stale evidence. Demote out
+            // of Operating (Operating→Degraded→Waiting) rather than re-integrating frozen frames; the gate
+            // re-admits when the producer returns. Belief Σ-aging (a different, belief axis) is untouched.
+            if (std::int64_t age = 0; not masks_stall_reported_ and masks_stream_stalled(&age))
+            {
+                masks_stall_reported_ = true;
+                degraded_from_masks_  = true;
+                std::println("[SM] Operating -> Waiting: masks stream STALLED ({}) — not integrating stale evidence",
+                             age < 0 ? std::string("no frame ever arrived")
+                                     : std::format("last frame {} ms ago", age));
+                emit presenceLost();
+                return;
+            }
             compute();
         },
         .on_degraded_enter = [this]()
         {
             if (shutting_down_)
                 return;
-            // Debounce: a transient required-peer flap (startup handshake, brief node churn) fires
-            // presenceLost momentarily and then recovers; tearing down here would kill the agent on a
-            // blip. Wait a grace period and only shut down if a required peer is STILL missing.
-            qInfo("[SM] -> Degraded: required peer lost — %d ms grace before shutdown", REQUIRED_LOSS_GRACE_MS);
+            // A mask-stream stall (peers intact) routes through Degraded too — but it is RECOVERABLE, not a
+            // shutdown cause. Flag it so the grace timer below finds all peers present and declines to exit;
+            // the FSM has already bounced Degraded→Waiting, where the admission gate holds until masks return.
+            if (degraded_from_masks_)
+            {
+                degraded_from_masks_ = false;
+                qInfo("[SM] -> Degraded (masks stall, peers intact) — passing through to Waiting, re-admit on producer return");
+            }
+            else
+                // Debounce: a transient required-peer flap (startup handshake, brief node churn) fires
+                // presenceLost momentarily and then recovers; tearing down here would kill the agent on a
+                // blip. Wait a grace period and only shut down if a required peer is STILL missing.
+                qInfo("[SM] -> Degraded: required peer lost — %d ms grace before shutdown", REQUIRED_LOSS_GRACE_MS);
             QTimer::singleShot(REQUIRED_LOSS_GRACE_MS, this, [this]()
             {
                 if (shutting_down_)
@@ -457,6 +515,10 @@ void SpecificWorker::log_birth_surprise()
     }
     if (birth_fusion_csv_.is_open())
     {
+        // DIAGNOSTIC block only — the 0.50/0.30 m probe radii and the 0.30 m footprint margin below feed the
+        // birth_fusion.csv columns for offline analysis of residual-vs-birth fusion. None of these values touch
+        // the live belief or any birth decision, so they are hardcoded (a config key would imply they matter at
+        // runtime). If residual-gated birth is ever wired in, promote them then.
         int di = 0;
         for (const auto& d : last_table_dets_xy_)
         {
@@ -570,7 +632,7 @@ void SpecificWorker::process_table_node(const DSR::Node& node)
     {
         // No mask associated this cycle: legacy node-attrib path, else a stale observation → age the belief.
         last_obs = fitter_->observe(inst, node);
-        if (not last_obs.has_fresh_data and inst.matched_frames < 5)
+        if (not last_obs.has_fresh_data and inst.matched_frames < cfg_.matched_frames_before_aging)
             return;
         free_energy = fitter_->run_inference(inst, last_obs);
     }

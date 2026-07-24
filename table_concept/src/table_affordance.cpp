@@ -228,6 +228,9 @@ void TableAffordance::update_node(const EpistemicProposal& prop)
         // NOT touch the target pose or active/pending flags. Dead-band the write to avoid per-cycle
         // graph churn.
         const float cur_gain = G_->get_attrib_by_name<epistemic_gain_att>(n).value_or(0.f);
+        // 0.1 nat dead-band: write-suppression only (avoids per-cycle DSR churn on sub-perceptible gain
+        // changes), NOT a belief threshold — it gates a graph WRITE, never the fit or a decision. Left
+        // hardcoded; a deployer never needs to tune graph-write hysteresis.
         if (std::abs(cur_gain - prop.epistemic_gain) > 0.1f)
         {
             G_->add_or_modify_attrib_local<epistemic_gain_att>(n, prop.epistemic_gain);

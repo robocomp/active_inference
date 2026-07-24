@@ -44,6 +44,14 @@ Emergency = 500
 [Component.Debug]
 Verbose = false
 
+# ── Primary-input (masks) stream gate — LIFECYCLE liveness, not a belief knob ──────────────────────────
+# Demote Operating→Degraded→Waiting when the voxelizer's `masks` node stops advancing its mask_frame_id for
+# this long (producer dead/stalled) — don't integrate stale evidence; re-admit automatically when it returns
+# (peers stay intact, so the agent never shuts down). Orthogonal to AI2AgeNominalDtS (belief-axis Σ-aging).
+# MUST exceed the voxelizer HOLD_ENTER_S so a legitimately empty scene (counter still advancing) never trips.
+[Media]
+MasksStallTimeoutMs = 3000   # 0 = disable the stall gate
+
 # ── AI2 belief (TABLE.md): full-covariance recursive filter; legs derived, soft mixture ──
 # This is the ONLY fit path (the legacy SDF-gradient/Fisher/queue/silhouette fit has been removed).
 [TableModel]
@@ -81,6 +89,13 @@ AI2RangeNoiseSizePerM = 0.08 # SIZE (w,h,H) common-mode std growth (m per m of r
                              # converged table (freezes geometry afar; also caps the coverage grow-term). Raise
                              # to freeze harder at range; the sibling of the lat/yaw range terms. 0 = off.
 AI2GnIters = 4              # Gauss-Newton iterations per frame
+# Per-frame SHARED-ERROR common-mode stds — the information-saturation FLOORS (CLAUDE.md "encode the effect as a
+# continuous covariance"): N correlated points from one frame cannot collapse Σ below these. LOAD-BEARING. They
+# were previously read from these getters with the keys ABSENT from config (silent defaults) — now exposed. A NEW
+# concept agent must expose its own equivalents.
+AI2CommonModePosStd  = 0.03  # shared position (cx,cy) error floor (m)
+AI2CommonModeSizeStd = 0.02  # shared size (w,h,H) error floor (m)
+AI2CommonModeYawStd  = 0.03  # shared yaw error floor (rad)
 
 # ── YOLO-INDEPENDENT LiDAR first-hit range channel (common/ai_belief/lidar_ray_factor.h) ──────────────────
 # Second, sensor-INDEPENDENT evidence: lidar3D returns on the table's LEGS + RIM pin the extent/centre in
@@ -163,6 +178,9 @@ OrientationMotionRef = 0.50
 # razor-sharp and SNAPS yaw the wrong way (ai2_log.csv cyc1244: completeness≈0.01, aniso≈0.8, dyaw_moment≈-0.57).
 # Both terms inflate moment_extra_var as continuous covariance — no gate. self_test (m): dyaw 0.52→0.02 rad.
 FootprintMomentCompletenessGain = 0.5   # moment var += (gain·(1/completeness−1))², completeness=observed/believed footprint area → a partial-view sliver can no longer rotate a converged table. completeness≥1 (full/larger view) unchanged. 0=OFF
+FootprintMomentMinCompleteness  = 0.02  # clamp floor for 1/completeness in the term above (caps the inflation of
+                                        # a near-zero-completeness sliver). Active whenever the gain is >0 — was a
+                                        # hidden default while its PAIR above was configurable; now exposed.
 ObliquityMomentGain = 0.05              # grazing-view cap on the MOMENT channel: moment var += (gain·(1/|cosθ|−1))². Mirrors ObliquityYawGain (which only guards per-point). 0=OFF
 
 
@@ -218,6 +236,16 @@ ExistenceVerifyGain     = 5.0     # epistemic gain (nats) a wants_verification t
 ExistenceLegOccupancy = true
 
 [TableConcept]
+# Convergence / cadence + a couple of tuned constants promoted here from hardcoded values (defaults unchanged).
+# StateEps / KStable / DetectionAliveMaxFrames were read by getters with the keys ABSENT from config (silent
+# defaults) — now exposed; a NEW concept agent must expose its own. MatchedFramesBeforeAging / CentralRegionFrac
+# were bare magic numbers in the code, promoted for the same reason.
+StateEps = 0.04             # Σ|Δstate| (m+rad) below which a cycle counts as converged
+KStable = 30                # consecutive converged cycles before the belief is declared model_stable
+DetectionAliveMaxFrames = 40 # cycles without a fresh mask before detection_alive → false
+MatchedFramesBeforeAging = 5 # a barely-born belief (fewer matched frames) is not aged by a stale no-mask cycle
+CentralRegionFrac = 0.25    # central image box [f,1-f]²; a detectable sample inside counts toward p_detect (removal)
+TableLogPeriodFrames = 30   # per-cycle log throttle (cosmetic; no effect on the fit)
 ObsDistance = 1.8           # comfortable maximum stand-off from the target face for epistemic poses
 EpistemicCooldownCycles = 200 # min cycles a satisfied table stays withdrawn (anti-chatter)
 VoxelBankMaxPoints = 4000   # max number of table-owned voxels kept in memory

@@ -35,6 +35,8 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.state_eps                = getf("TableConcept.StateEps",               0.04f);
     out.K_stable                 = geti("TableConcept.KStable",                30);
     out.detection_alive_max_frames = geti("TableConcept.DetectionAliveMaxFrames", 40);
+    out.matched_frames_before_aging = geti("TableConcept.MatchedFramesBeforeAging", 5);
+    out.central_region_frac      = getf("TableConcept.CentralRegionFrac",     0.25f);
     out.obs_distance             = getf("TableConcept.ObsDistance",            1.8f);
     out.epistemic_cooldown_cycles= geti("TableConcept.EpistemicCooldownCycles", 200);
     out.table_log_period_frames  = geti("TableConcept.TableLogPeriodFrames",   30);
@@ -42,6 +44,9 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.voxel_bank_quantization_m= getf("TableConcept.VoxelBankQuantizationM", 0.02f);
     out.voxel_select_radius_margin_m = getf("TableConcept.VoxelSelectRadiusMarginM", 0.50f);
     out.voxel_select_height_margin_m = getf("TableConcept.VoxelSelectHeightMarginM", 0.25f);
+
+    // ─── Primary-input (masks) stream gate — lifecycle liveness ────────────────
+    out.masks_stall_timeout_ms   = geti("Media.MasksStallTimeoutMs",           3000);
 
     // ─── TableModel geometry / mask split ──────────────────────────────────────
     out.sigma_obs          = getf("TableModel.SigmaObs",          0.05f);
@@ -132,6 +137,7 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.existence_absence_range_ref_m = getf("TableModel.ExistenceAbsenceRangeRefM", 2.5f);
     out.existence_absence_range_power = getf("TableModel.ExistenceAbsenceRangePower", 2.0f);
     out.existence_verify_surprise     = getf("TableModel.ExistenceVerifySurprise",   20.0f);
+    out.verify_surprise_smooth        = getf("TableModel.VerifySurpriseSmooth",       0.10f);
     out.existence_verify_gain         = getf("TableModel.ExistenceVerifyGain",       5.0f);
     out.existence_leg_occupancy       = getb("TableModel.ExistenceLegOccupancy", true);
 

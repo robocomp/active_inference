@@ -37,6 +37,7 @@ TableFitter::TableFitter(std::shared_ptr<DSR::DSRGraph> graph,
       projection_(std::make_unique<TableProjection>(graph, inner_eigen, mask_ingestor))
 {
     TableBeliefState::use_quotient = cfg.quotient_chart;   // C2v symmetry-quotient optimisation chart (global mode)
+    projection_->set_central_region_frac(cfg.central_region_frac);
 }
 
 // Enable Part-B chain-covariance propagation from source_frame (no-op unless a gaussian API + frame are given).
@@ -519,8 +520,14 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
         // is barely observable and the per-point GN snaps between the box's symmetric orientations (r_π / w↔h —
         // the CSV flips). Grow the SHARED yaw variance as the view grazes (|cos(incidence)|→0 ⇒ 1/cos→∞), so a
         // grazing frame confirms the table but cannot rotate it — the same continuous-covariance form as the range
-        // term, keyed on view angle instead of distance. Validated live 2026-07-11 → always on; kObliquityYawGain
-        // is a candidate for derivation from the deprojection Jacobian (replace the tuned coefficient with physics).
+        // term, keyed on view angle instead of distance. Validated live 2026-07-11 → always on.
+        //
+        // THIS IS THE LIVE YAW CAP on the shipped (FootprintResidual == false) branch below — a tuned coefficient,
+        // deliberately kept. Its intended derived replacement, TableBelief::tilt_yaw_common_mode() (a2′), is WIP and
+        // NOT wired here: the fitter never calls it, and its self_test drift check is disabled. So on the
+        // FootprintResidual == true branch there is currently NO obliquity/tilt yaw cap wired in (chain_cov_yaw
+        // carries only the white range term) — that branch is experimental. Do not delete kObliquityYawGain until
+        // tilt_yaw_common_mode is called here and validated. See table_belief.cpp::tilt_yaw_common_mode.
         constexpr float kObliquityYawGain = 0.05f;   // ~30° σ_yaw at cos=0.09 → per-point GN holds yaw at grazing
         const float oblq_cos          = std::clamp(inst.dbg_obliquity_cos, 0.05f, 1.0f);
         const float obliquity_yaw_std = kObliquityYawGain * (1.0f / oblq_cos - 1.0f);   // 0 at top-down

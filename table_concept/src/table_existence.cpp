@@ -112,7 +112,8 @@ void TableExistence::update_and_remove(TableFitter& fitter, TableLidarIngestor* 
                 // Route the un-resolvable absence into an epistemic VERIFY pull (decayed accumulator). When it
                 // builds up, the table is flagged for verification (the epistemic planner drives the robot to a
                 // good ZED viewpoint). Removal then only ever fires from a HIGH-p_detect view — verification-gated.
-                inst.verify_surprise = 0.9f * inst.verify_surprise + 0.1f * verify;
+                const float vss = cfg_.verify_surprise_smooth;
+                inst.verify_surprise = (1.0f - vss) * inst.verify_surprise + vss * verify;
                 inst.wants_verification = inst.verify_surprise > cfg_.existence_verify_surprise;
             }
         }
@@ -130,6 +131,9 @@ void TableExistence::update_and_remove(TableFitter& fitter, TableLidarIngestor* 
             if (cfg_.existence_leg_occupancy)
             {
                 const float lr   = rc::TableModel::LEG_RADIUS;
+                // 5 cm floor: a degenerate-geometry guard, not a tuned gate. If the belief's H collapses toward
+                // the top thickness the leg volume would vanish/invert; floor it to a minimum plausible leg extent
+                // so the carve stays valid. Physical minimum, no config key.
                 const float legz = std::max(0.05f, bs.H - rc::TableModel::TOP_THICKNESS);
                 const float ix   = 0.5f * bs.w - lr, iy = 0.5f * bs.h - lr;   // leg centres inset at the outer corners
                 const float cyaw = std::cos(bs.yaw), syaw = std::sin(bs.yaw);

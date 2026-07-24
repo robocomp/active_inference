@@ -341,6 +341,8 @@ public:
     // Shared depth-TILT → yaw common-mode variance (a2′ Tier-1): (∂ψ_MAP/∂t)²·σ_t², to ADD to frame.chain_cov_yaw
     // so the engine's Woodbury caps the total yaw information consistently. The azimuth-odd tilt is the only
     // depth mode that aliases into yaw. 0 unless footprint_residual + has_rays. See PRECISION_AS_INFORMATION.md.
+    // ⚠ WIP — self_test ONLY; the fitter does not call this, so it has NO production effect. See the .cpp comment;
+    // kObliquityYawGain (table_fitter.cpp) is the live yaw cap. Do not assume this is active.
     float tilt_yaw_common_mode(const TableFrame& f, float sigma_tilt) const;
 
     // ── Monitor instrumentation ───────────────────────────────────────────────

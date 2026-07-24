@@ -20,6 +20,11 @@ struct TableConfig
     float state_eps                    = 0.04f;   // Σ|Δstate| convergence threshold between cycles (m+rad)
     int   K_stable                     = 30;      // consecutive converged cycles before model_stable
     int   detection_alive_max_frames   = 40;      // cycles without a fresh mask before detection_alive=false
+    int   matched_frames_before_aging  = 5;       // a barely-born belief (fewer matched frames than this) is NOT
+                                                  // aged by a stale no-mask cycle — protects it from decaying before
+                                                  // it has ever been fit. Small integer; not a belief threshold.
+    float central_region_frac          = 0.25f;   // central image box is [frac, 1-frac]×[frac, 1-frac]; a detectable
+                                                  // sample inside it counts toward central_frac → p_detect → removal
     float obs_distance                 = 1.8f;    // d_obs for the epistemic planner
     int   epistemic_cooldown_cycles    = 200;     // min cycles withdrawn after satisfaction
     int   table_log_period_frames      = 30;      // per-cycle log throttle
@@ -27,6 +32,13 @@ struct TableConfig
     float voxel_bank_quantization_m    = 0.02f;   // voxel-bank dedup grid (m)
     float voxel_select_radius_margin_m = 0.50f;   // XY margin (m) around the model for voxel-bank selection
     float voxel_select_height_margin_m = 0.25f;   // Z margin (m) around the model for voxel-bank selection
+
+    // ── Primary-input stream gate (readiness + staleness) — LIFECYCLE, not a belief knob ──────────────
+    // Demote Operating→Degraded→Waiting when the voxelizer's `masks` node stops advancing its mask_frame_id
+    // for this long (producer dead/stalled) — don't integrate stale evidence; re-admit when it returns.
+    // Orthogonal to ai2_age_nominal_dt_s (belief-axis Σ-aging). MUST exceed the voxelizer HOLD_ENTER_S so a
+    // legitimately empty scene (still-advancing counter) never trips it. 0 = disable the gate.
+    int   masks_stall_timeout_ms       = 3000;
 
     // ── Top/leg SDF split band ────────────────────────────────────────────────────────────────────
     // Forwarded to TableModelParams.sigma_obs: a mask point within TOP_THICKNESS + sigma_obs below the top
@@ -185,6 +197,8 @@ struct TableConfig
     float existence_absence_range_power = 2.0f;   // decay exponent (2 ≈ angular-area ∝ 1/range²); 0 disables
     float existence_verify_surprise     = 20.0f;  // decayed go-verify surprise (un-resolvable absence) above which
                                                   // a table is flagged wants_verification (epistemic pull, not removal)
+    float verify_surprise_smooth        = 0.10f;  // EMA weight of the go-verify surprise accumulator (new sample
+                                                  // weight; 1−this holds the old). Parity with fe_surprise_smooth.
     float existence_verify_gain         = 5.0f;   // epistemic gain (nats) a wants_verification table gets, so the
                                                   // controller drives to a resolving ZED view (confirm-or-remove)
     // LiDAR removal reliability: the model's top slab is a SOLID band, but a real tabletop is a THIN plate, so

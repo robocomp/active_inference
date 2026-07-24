@@ -525,7 +525,16 @@ void TableBelief::accumulate_footprint(const TableBeliefState& s, const TableFra
 // azimuth-EVEN → they alias to position/extent, not yaw. Its MAP yaw sensitivity is ∂ψ/∂t = e₅ᵀ A⁻¹ C_tilt, with
 // A = the frame's data info (+prior) and C_tilt = Σ w J·(n_fp·r̂∥)·azimuth. Returned as a VARIANCE (∂ψ/∂t)²·σ_t²
 // to add to frame.chain_cov_yaw, so the engine's common-mode Woodbury caps the TOTAL yaw info consistently
-// (engine-level, no factor-local Schur). This is the derivation that replaces kObliquityYawGain + range-yaw gain.
+// (engine-level, no factor-local Schur).
+//
+// ⚠ WIP — NOT WIRED INTO THE FITTER, NOT VALIDATED ON LIVE DATA. This is the INTENDED derived replacement for the
+// legacy tuned kObliquityYawGain (table_fitter.cpp), but it is currently called ONLY from self_test — the fitter
+// never invokes it, so it has NO effect in production. The depth-tilt STATE it depends on (slot 6) was inert for
+// its whole lifetime until the 2026-07-21 slot-6 fixes (canonicalize() dropped it; the common-mode sense was
+// inverted), so it has never actually accumulated on real data. Its self_test only proves the returned variance
+// has the right SHAPE (large at grazing, ~0 top-down); the drift-suppression check is disabled pending the
+// quotient chart. Do NOT retire kObliquityYawGain in its favour until the fitter calls this AND the drift check
+// is re-enabled and passes. A new concept agent must treat kObliquityYawGain — not this — as the live mechanism.
 float TableBelief::tilt_yaw_common_mode(const TableFrame& f, float sigma_tilt) const
 {
     if (not params_.footprint_residual or not f.has_rays or f.points.empty() or sigma_tilt <= 0.0f) return 0.0f;
@@ -667,6 +676,14 @@ void TableBelief::apply_footprint_moment(const TableFrame& frame)
     // effectively removes the w or h row (K→0: no mean move, no Σ reduction). It fires when the moment would
     // SHRINK an extent, because a mask is only ever a LOWER BOUND (see the grow-only paragraph above) — a
     // measured shrink is an untrustworthy partial view, so drop it. Legitimate shrink is the vacate channel's job.
+    //
+    // ⚠ DO NOT COPY THIS AS A GOOD IDEA INTO A NEW CONCEPT AGENT. This grow-only rule is not merely inelegant —
+    // it is a RATCHET that CONTRIBUTED to the far-range rotation failure (TABLE.md, "The static table rotates").
+    // Because it can only ever grow an extent, once mask erosion at a grazing view stretched w toward the box
+    // DIAGONAL (~1.30 m on a 0.95 m table) the guard could never let it recant, so the elongated wrong shape
+    // latched. The principled replacement is to MODEL the mask under-segmentation (a shared per-frame image-space
+    // erosion nuisance, "eps_px") so the extent is corrected symmetrically instead of ratcheting one way. Kept
+    // for now because it is the only erosion compensation on the shipped (FootprintResidual=false) path.
     constexpr float kDrop = 1e12f;
     if (mw < state_.w) r_w = kDrop;      // moment would SHRINK w ⇒ partial view → drop the row
     if (mh < state_.h) r_h = kDrop;      // moment would SHRINK h ⇒ partial view → drop the row

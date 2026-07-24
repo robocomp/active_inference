@@ -65,11 +65,16 @@ public:
     void compute_projected_roi(TableInstance& inst);
     SilhouetteExistence compute_silhouette_existence(const TableInstance& inst);
 
+    // Central-image box fraction: a detectable sample inside [f, 1-f]² of the image counts as "central"
+    // (looking AT the table) → central_frac → p_detect → removal. Set once from config (default 0.25).
+    void set_central_region_frac(float f) { central_region_frac_ = f; }
+
 private:
     std::shared_ptr<DSR::DSRGraph>  G_;
     DSR::InnerEigenAPI*             inner_eigen_ = nullptr;
     MaskIngestor*                   mask_ingestor_ = nullptr;
     std::unique_ptr<DSR::CameraAPI> camera_api_;   // ZED intrinsics, lazily bound to the "zed" node
+    float                           central_region_frac_ = 0.25f;
 };
 
 }  // namespace rc

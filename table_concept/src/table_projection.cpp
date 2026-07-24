@@ -96,6 +96,9 @@ void TableProjection::compute_projected_roi(TableInstance& inst)
                 min_row = std::min(min_row, row); max_row = std::max(max_row, row);
             }
 
+    // GEOMETRY gate (not a belief threshold): require ≥4 of the box's 8 corners in front of the image plane
+    // before trusting the ROI. With <4 corners forward the projection is near-degenerate (X/Y blow up at the
+    // plane) and the centre/fill estimate is meaningless — this rejects that geometry, it does not tune the fit.
     if (in_front < 4)   // need most of the box in front of the camera to trust the ROI
         return;
 
@@ -150,7 +153,9 @@ SilhouetteExistence TableProjection::compute_silhouette_existence(const TableIns
     const auto& pkt = mask_ingestor_->packet();
     if (not pkt.valid or pkt.mask_pixels.empty())
         return out;
-    constexpr float CELL = 6.0f;
+    constexpr float CELL = 6.0f;   // spatial-hash cell size (px). A discretization/method constant, not a belief
+                                   // gate: larger absorbs more mask-boundary jitter into membership, smaller is
+                                   // sharper. Does not affect the AI fit; tune only if mask resolution changes.
     const auto key = [&](float col, float row) -> std::int64_t
     {
         const std::int64_t cx = static_cast<std::int64_t>(std::floor(col / CELL));
@@ -191,7 +196,8 @@ SilhouetteExistence TableProjection::compute_silhouette_existence(const TableIns
         if (occluder_cells.contains(k) and not table_cells.contains(k))
         { ++out.n_occluded; return; }                                 // nearer object hides it ⇒ HOLD
         ++out.n_detectable;
-        if (col > 0.25f * W and col < 0.75f * W and row > 0.25f * Himg and row < 0.75f * Himg)
+        const float f = central_region_frac_, g = 1.0f - central_region_frac_;   // central box [f,1-f]²
+        if (col > f * W and col < g * W and row > f * Himg and row < g * Himg)
             ++out.n_central;                                          // central image region ⇒ the robot is looking AT it
         range_sum += std::sqrt(X * X + Y * Y + Z * Z);                 // camera→sample distance (absence conf ∝ 1/range)
         if (table_cells.contains(k)) out.e_occ  += 1.0f;              // still there
@@ -199,6 +205,9 @@ SilhouetteExistence TableProjection::compute_silhouette_existence(const TableIns
     };
 
     // (a) tabletop TOP face (z = H): regular grid over the footprint.
+    // NX/NY (and NZ below) are NUMERIC SAMPLING RESOLUTION for the detectability/occupancy count — a
+    // quadrature density, not a decision threshold. More samples = smoother central_frac/e_occ estimate at
+    // linear cost. Not a belief gate; no config key needed.
     constexpr int NX = 24, NY = 24;
     for (int ix = 0; ix < NX; ++ix)
         for (int iy = 0; iy < NY; ++iy)
