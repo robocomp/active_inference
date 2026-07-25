@@ -30,6 +30,29 @@ namespace
 {
 constexpr auto kViewerSettingsGroup = "VoxelOpenGLViewer";
 
+// Soft studio lighting for the solid furniture meshes, baked per-face into vertex colour (the shader is a
+// plain colour pass-through). Room frame is Z-up. A hemispheric ambient (brighter from above) keeps every
+// face readable — no pure-black shadows — while a key + fill directional pair gives the form. Two-sided
+// (abs) on the directionals so meshes with inconsistent winding still light cleanly. Returns a brightness
+// multiplier for the base colour; >1 is allowed for a gentle highlight (callers clamp the final colour).
+float mesh_shade_factor(const QVector3D& n_room)
+{
+    static const QVector3D key  = QVector3D( 0.35f,  0.25f, 0.90f).normalized();  // from up-front
+    static const QVector3D fill = QVector3D(-0.60f, -0.35f, 0.30f).normalized();  // opposite, weaker
+    const QVector3D n = n_room.normalized();
+    const float kd   = std::abs(QVector3D::dotProduct(n, key));
+    const float fd   = std::abs(QVector3D::dotProduct(n, fill));
+    const float hemi = 0.5f + 0.5f * n.z();                       // 1 facing up → 0 facing down
+    return 0.30f + 0.14f * hemi + 0.54f * kd + 0.14f * fd;        // ≈ [0.30 .. 1.12]
+}
+
+// Apply mesh_shade_factor to a base colour, clamped to [0,1] per channel.
+QVector3D shade_rgb(float br, float bg, float bb, const QVector3D& n_room)
+{
+    const float s = mesh_shade_factor(n_room);
+    return { std::clamp(br * s, 0.f, 1.f), std::clamp(bg * s, 0.f, 1.f), std::clamp(bb * s, 0.f, 1.f) };
+}
+
 }
 
 VoxelOpenGLViewer::VoxelOpenGLViewer(QWidget* parent)
@@ -118,6 +141,9 @@ VoxelOpenGLViewer::~VoxelOpenGLViewer()
     makeCurrent();
     if (room_vbo_.isCreated())
         room_vbo_.destroy();
+    if (tex_vbo_.isCreated())
+        tex_vbo_.destroy();
+    mesh_cache_.clear();         // QOpenGLTexture(s) must be destroyed with a current context
     doneCurrent();
 }
 
@@ -199,7 +225,9 @@ void VoxelOpenGLViewer::update_graph_boxes(std::span<const QVector3D> centers,
                                            std::span<const float> yaws,
                                            std::span<const std::string> categories,
                                            std::span<const std::string> names,
-                                           std::span<const std::string> subtypes)
+                                           std::span<const std::string> subtypes,
+                                           std::span<const std::string> mesh_paths,
+                                           std::span<const std::string> mesh_texture_paths)
 {
     {
         std::scoped_lock lk(graph_boxes_mutex_);
@@ -209,6 +237,8 @@ void VoxelOpenGLViewer::update_graph_boxes(std::span<const QVector3D> centers,
         graph_box_categories_.assign(categories.begin(), categories.end());
         graph_box_names_.assign(names.begin(), names.end());
         graph_box_subtypes_.assign(subtypes.begin(), subtypes.end());
+        graph_box_mesh_paths_.assign(mesh_paths.begin(), mesh_paths.end());
+        graph_box_mesh_tex_.assign(mesh_texture_paths.begin(), mesh_texture_paths.end());
     }
 }
 
@@ -511,6 +541,70 @@ bool VoxelOpenGLViewer::load_robot_mesh(const std::string& path)
     return true;
 }
 
+// Resolve a concept-published RELATIVE asset path: try the viewer's own meshes/ root first, then the
+// generic cwd/app-dir search. Concept agents publish bare names ("fridge.obj"); the asset library lives
+// with the renderer, so the DSR graph stays machine-independent.
+namespace
+{
+std::optional<std::filesystem::path> resolve_asset_path(const std::string& rel)
+{
+    if (rel.empty())
+        return std::nullopt;
+    if (auto p = rc::obj::resolve_robot_mesh_path("meshes/" + rel); p.has_value())
+        return p;
+    return rc::obj::resolve_robot_mesh_path(rel);
+}
+}  // namespace
+
+// Load (once, cached by path) a concept-published display mesh + optional base-colour texture. The GL
+// texture is uploaded lazily here since paintGL holds a current context. A failed load is cached (empty
+// tris) so it isn't retried every frame. The OBJ is expected already normalised (see mesh_path contract).
+VoxelOpenGLViewer::FurnitureTemplate* VoxelOpenGLViewer::get_or_load_template(const std::string& mesh_path,
+                                                                             const std::string& texture_path)
+{
+    if (mesh_path.empty())
+        return nullptr;
+
+    auto it = mesh_cache_.find(mesh_path);
+    if (it == mesh_cache_.end())
+    {
+        FurnitureTemplate t;
+        if (const auto resolved = resolve_asset_path(mesh_path); resolved.has_value())
+        {
+            if (const auto mesh = rc::obj::load_obj_mesh_data(resolved.value()); mesh.has_value())
+            {
+                t.tris = mesh->triangles;
+                t.uv = mesh->uvs;
+                qInfo() << "VoxelOpenGLViewer loaded display mesh" << QString::fromStdString(mesh_path)
+                        << "triangles=" << t.tris.size() / 3;
+            }
+        }
+        if (t.tris.empty())
+            qWarning() << "VoxelOpenGLViewer display mesh not found/loadable:" << QString::fromStdString(mesh_path);
+        if (not texture_path.empty())
+        {
+            if (const auto tr = resolve_asset_path(texture_path); tr.has_value())
+                t.tex_image = QImage(QString::fromStdString(tr->string()));
+            if (t.tex_image.isNull())
+                qWarning() << "VoxelOpenGLViewer display texture not loaded:" << QString::fromStdString(texture_path);
+        }
+        it = mesh_cache_.emplace(mesh_path, std::move(t)).first;
+    }
+
+    FurnitureTemplate& t = it->second;
+    if (t.tris.size() < 3)
+        return nullptr;
+    if (tex_program_.isLinked() and t.tex == nullptr and not t.tex_image.isNull())
+    {
+        t.tex = std::make_unique<QOpenGLTexture>(t.tex_image.mirrored(false, true),
+                                                 QOpenGLTexture::GenerateMipMaps);
+        t.tex->setWrapMode(QOpenGLTexture::Repeat);
+        t.tex->setMinificationFilter(QOpenGLTexture::LinearMipMapLinear);
+        t.tex->setMagnificationFilter(QOpenGLTexture::Linear);
+    }
+    return &t;
+}
+
 void VoxelOpenGLViewer::rebuild_polygon_locked_()
 {
     // Apply polygon_rotation_quadrants_ * 90deg rotation around the room Z axis
@@ -684,6 +778,72 @@ void VoxelOpenGLViewer::initializeGL()
     room_vbo_.release();
     room_vao_.release();
 
+    // ── Textured-furniture program: sample the base-colour texture and modulate by the baked light. ──
+    static constexpr const char* tvs_330 = R"(
+        #version 330 core
+        layout(location = 0) in vec3 in_pos;
+        layout(location = 1) in float in_light;
+        layout(location = 2) in vec2 in_uv;
+        uniform mat4 u_mvp;
+        out float v_light;
+        out vec2 v_uv;
+        void main() { gl_Position = u_mvp * vec4(in_pos, 1.0); v_light = in_light; v_uv = in_uv; }
+    )";
+    static constexpr const char* tfs_330 = R"(
+        #version 330 core
+        in float v_light;
+        in vec2 v_uv;
+        uniform sampler2D u_tex;
+        uniform float u_alpha;
+        out vec4 out_col;
+        void main() { out_col = vec4(texture(u_tex, v_uv).rgb * v_light, u_alpha); }
+    )";
+    static constexpr const char* tvs_120 = R"(
+        #version 120
+        attribute vec3 in_pos; attribute float in_light; attribute vec2 in_uv;
+        uniform mat4 u_mvp; varying float v_light; varying vec2 v_uv;
+        void main() { gl_Position = u_mvp * vec4(in_pos, 1.0); v_light = in_light; v_uv = in_uv; }
+    )";
+    static constexpr const char* tfs_120 = R"(
+        #version 120
+        varying float v_light; varying vec2 v_uv;
+        uniform sampler2D u_tex; uniform float u_alpha;
+        void main() { gl_FragColor = vec4(texture2D(u_tex, v_uv).rgb * v_light, u_alpha); }
+    )";
+    bool tex_ok = false;
+    for (auto [vs, fs] : {std::pair{tvs_330, tfs_330}, std::pair{tvs_120, tfs_120}})
+    {
+        tex_program_.removeAllShaders();
+        if (tex_program_.addShaderFromSourceCode(QOpenGLShader::Vertex, vs)
+            and tex_program_.addShaderFromSourceCode(QOpenGLShader::Fragment, fs))
+        {
+            tex_program_.bindAttributeLocation("in_pos", 0);
+            tex_program_.bindAttributeLocation("in_light", 1);
+            tex_program_.bindAttributeLocation("in_uv", 2);
+            if (tex_program_.link()) { tex_ok = true; break; }
+        }
+    }
+    if (tex_ok)
+    {
+        tex_vao_.create();
+        tex_vao_.bind();
+        tex_vbo_.create();
+        tex_vbo_.bind();
+        tex_vbo_.setUsagePattern(QOpenGLBuffer::DynamicDraw);
+        tex_program_.bind();
+        tex_program_.enableAttributeArray(0);
+        tex_program_.enableAttributeArray(1);
+        tex_program_.enableAttributeArray(2);
+        tex_program_.setAttributeBuffer(0, GL_FLOAT, offsetof(TexVertex, px),    3, sizeof(TexVertex));
+        tex_program_.setAttributeBuffer(1, GL_FLOAT, offsetof(TexVertex, light), 1, sizeof(TexVertex));
+        tex_program_.setAttributeBuffer(2, GL_FLOAT, offsetof(TexVertex, u),     2, sizeof(TexVertex));
+        tex_program_.release();
+        tex_vbo_.release();
+        tex_vao_.release();
+    }
+    else
+        qWarning() << "VoxelOpenGLViewer textured-furniture shader failed; falling back to flat colour:" << tex_program_.log();
+
     gl_ready_ = true;
 }
 
@@ -767,6 +927,10 @@ void VoxelOpenGLViewer::paintGL()
     // projected with `mvp` in the QPainter overlay at the end of paintGL.
     struct NodeLabel { QVector3D pos; QString text; QColor color; };
     std::vector<NodeLabel> node_labels;
+
+    // Concept-published display meshes are loaded on demand (cached by path) and batched per base-colour
+    // texture so all instances sharing an asset draw in one call after the box pass.
+    std::unordered_map<QOpenGLTexture*, std::vector<TexVertex>> tex_batches;
 
     program_.bind();
     program_.setUniformValue("u_mvp", mvp);
@@ -1126,7 +1290,7 @@ void VoxelOpenGLViewer::paintGL()
     {
         std::vector<QVector3D> local_centers, local_half;
         std::vector<float> local_yaws;
-        std::vector<std::string> local_cats, local_names, local_subtypes;
+        std::vector<std::string> local_cats, local_names, local_subtypes, local_mesh_paths, local_mesh_tex;
         {
             std::scoped_lock lk(graph_boxes_mutex_);
             local_centers = graph_box_centers_;
@@ -1135,6 +1299,8 @@ void VoxelOpenGLViewer::paintGL()
             local_cats = graph_box_categories_;
             local_names = graph_box_names_;
             local_subtypes = graph_box_subtypes_;
+            local_mesh_paths = graph_box_mesh_paths_;
+            local_mesh_tex = graph_box_mesh_tex_;
         }
 
         if (!local_centers.empty() && local_centers.size() == local_half.size())
@@ -1197,6 +1363,67 @@ void VoxelOpenGLViewer::paintGL()
                 }
             };
 
+            // Furniture template drawing: a unit OBJ (room-frame Z-up: footprint x,y ∈ [-0.5,0.5], height
+            // z ∈ [0,1]) drawn SOLID like the bottle cylinders (same bottle_tris list, depth-tested), scaled to
+            // the fitted box (w,d,h), yaw-rotated, floor-anchored. Flat per-triangle shading so it reads 3D.
+            const auto append_scaled_mesh = [&](const std::vector<QVector3D>& tmpl, const QVector3D& ctr,
+                                                const QVector3D& he, float cy_, float sy_, const QColor& col)
+            {
+                if (tmpl.size() < 3) return;
+                const float cr = col.redF(), cg = col.greenF(), cb = col.blueF();
+                const float W = 2.f * he.x(), D = 2.f * he.y(), H = 2.f * he.z();
+                const float floor_z = ctr.z() - he.z();
+                for (std::size_t t = 0; t + 2 < tmpl.size(); t += 3)
+                {
+                    QVector3D room[3];
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        const QVector3D& v = tmpl[t + k];
+                        const float locx = v.x() * W, locy = v.y() * D;               // scale footprint
+                        room[k] = QVector3D(ctr.x() + cy_ * locx - sy_ * locy,        // yaw + translate
+                                            ctr.y() + sy_ * locx + cy_ * locy,
+                                            floor_z + v.z() * H);
+                    }
+                    const QVector3D n = QVector3D::normal(room[0], room[1], room[2]);  // room-frame face normal
+                    const QVector3D lit = shade_rgb(cr, cg, cb, n);                    // soft studio shading
+                    for (const auto& r : room)
+                    {
+                        const QVector3D p = map_room_to_ogl(r.x(), r.y(), r.z());
+                        bottle_tris.push_back(Vertex{p.x(), p.y(), p.z(), lit.x(), lit.y(), lit.z()});
+                    }
+                }
+            };
+
+            // Textured variant of append_scaled_mesh: emits TexVertex (pos + baked light + UV) into `out`,
+            // to be drawn later with the base-colour texture bound.
+            const auto append_scaled_mesh_tex = [&](const std::vector<QVector3D>& tmpl,
+                                                    const std::vector<QVector2D>& uv, const QVector3D& ctr,
+                                                    const QVector3D& he, float cy_, float sy_,
+                                                    std::vector<TexVertex>& out)
+            {
+                if (tmpl.size() < 3 or uv.size() != tmpl.size()) return;
+                const float W = 2.f * he.x(), D = 2.f * he.y(), H = 2.f * he.z();
+                const float floor_z = ctr.z() - he.z();
+                for (std::size_t t = 0; t + 2 < tmpl.size(); t += 3)
+                {
+                    QVector3D room[3];
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        const QVector3D& v = tmpl[t + k];
+                        const float locx = v.x() * W, locy = v.y() * D;
+                        room[k] = QVector3D(ctr.x() + cy_ * locx - sy_ * locy,
+                                            ctr.y() + sy_ * locx + cy_ * locy,
+                                            floor_z + v.z() * H);
+                    }
+                    const float s = mesh_shade_factor(QVector3D::normal(room[0], room[1], room[2]));
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        const QVector3D p = map_room_to_ogl(room[k].x(), room[k].y(), room[k].z());
+                        out.push_back(TexVertex{p.x(), p.y(), p.z(), s, uv[t + k].x(), uv[t + k].y()});
+                    }
+                }
+            };
+
             constexpr int edges[12][2] = {
                 {0,1}, {1,2}, {2,3}, {3,0},
                 {4,5}, {5,6}, {6,7}, {7,4},
@@ -1220,6 +1447,8 @@ void VoxelOpenGLViewer::paintGL()
                 if (i < local_cats.size()) cat = local_cats[i];
                 const std::string& name = (i < local_names.size()) ? local_names[i] : std::string{};
                 const std::string& subtype = (i < local_subtypes.size()) ? local_subtypes[i] : std::string{};
+                const std::string& mesh_path = (i < local_mesh_paths.size()) ? local_mesh_paths[i] : std::string{};
+                const std::string& mesh_tex  = (i < local_mesh_tex.size())   ? local_mesh_tex[i]   : std::string{};
                 const bool is_table = (cat == "table" or cat == "model_table");
                 // Per-instance shade: several nodes of the same type get distinct intensities of one tone.
                 // Tables use the amber model tone so the round-table shape drawn here matches the square-table mesh.
@@ -1232,9 +1461,24 @@ void VoxelOpenGLViewer::paintGL()
                     node_labels.push_back({map_room_to_ogl(ctr.x(), ctr.y(), ctr.z()),
                                            QString::fromStdString(name), c});
 
-                // Tables: a ROUND table is drawn here as a solid disc-top + central pedestal (the box mesh is
-                // suppressed upstream for round tables). A SQUARE table is drawn by its solid box mesh (mesh
-                // pass), so skip it here.
+                // Concept-published display mesh (checked FIRST — an agent that publishes an asset owns its
+                // appearance, incl. per-instance variants it picked from its belief, e.g. round vs square table
+                // or a one/two-door fridge). Scaled to the node's box, oriented by RT yaw directly (orientation
+                // baked into the asset per the mesh_path contract), textured if it carries a base-colour image.
+                // Cached by path; a failed load falls through to the type-specific fallbacks below.
+                if (not mesh_path.empty())
+                {
+                    if (FurnitureTemplate* tpl = get_or_load_template(mesh_path, mesh_tex))
+                    {
+                        if (tpl->tex != nullptr and tpl->uv.size() == tpl->tris.size())
+                            append_scaled_mesh_tex(tpl->tris, tpl->uv, ctr, he, cy, sy, tex_batches[tpl->tex.get()]);
+                        else
+                            append_scaled_mesh(tpl->tris, ctr, he, cy, sy, c);
+                        continue;
+                    }
+                }
+                // Tables WITHOUT a published mesh — fallback: a ROUND table as a solid disc-top + central
+                // pedestal; a SQUARE table via its solid box mesh (mesh pass), so skip it here.
                 if (is_table)
                 {
                     if (subtype == "round")
@@ -1311,6 +1555,31 @@ void VoxelOpenGLViewer::paintGL()
                 room_vbo_.release();
                 room_vao_.release();
             }
+
+            // Textured display meshes: one draw per base-colour texture (base × baked light), depth-tested.
+            // Uses its own shader/VAO; the main program is re-bound afterwards for the following passes.
+            if (tex_program_.isLinked() and not tex_batches.empty())
+            {
+                glEnable(GL_DEPTH_TEST);
+                tex_program_.bind();
+                tex_program_.setUniformValue("u_mvp", mvp);
+                tex_program_.setUniformValue("u_alpha", 1.0f);
+                tex_program_.setUniformValue("u_tex", 0);
+                tex_vao_.bind();
+                tex_vbo_.bind();
+                for (auto& [tex, verts] : tex_batches)
+                {
+                    if (verts.empty() or tex == nullptr) continue;
+                    tex->bind(0);
+                    tex_vbo_.allocate(verts.data(), static_cast<int>(verts.size() * sizeof(TexVertex)));
+                    glDrawArrays(GL_TRIANGLES, 0, static_cast<GLsizei>(verts.size()));
+                    tex->release(0);
+                }
+                tex_vbo_.release();
+                tex_vao_.release();
+                tex_program_.release();
+                program_.bind();   // restore the main program for the following passes
+            }
         }
     }
 
@@ -1335,18 +1604,30 @@ void VoxelOpenGLViewer::paintGL()
             // shade then separates table_1/table_2, cabinet_1/cabinet_2, … by intensity of the same tone.
             const std::string cat  = mi < local_mesh_cats.size()  ? local_mesh_cats[mi]  : std::string{};
             const std::string name = mi < local_mesh_names.size() ? local_mesh_names[mi] : std::string{};
+            // Nodes with a published display mesh are already suppressed upstream (SceneProcessor skips their
+            // mesh_vertices), so anything reaching here is a genuinely fitted mesh to draw.
             const QColor mc_base = (cat.empty() || cat == "table") ? amber : color_for_category(cat);
             const QColor mc = shade_for_instance(mc_base, instance_index_from_name(name));
             const float mc_r = mc.redF(), mc_g = mc.greenF(), mc_b = mc.blueF();
 
+            // Per-triangle soft shading: the mesh is a flat triangle soup (9 floats = 1 room-frame triangle),
+            // so compute each face's room-frame normal and light it (hemispheric + key/fill) — otherwise these
+            // published meshes render as flat, form-less silhouettes.
             std::vector<Vertex> mv;
             mv.reserve(mesh.size() / 3);
             QVector3D centroid_ogl{0.f, 0.f, 0.f};
-            for (std::size_t i = 0; i + 2 < mesh.size(); i += 3)
+            for (std::size_t i = 0; i + 8 < mesh.size(); i += 9)
             {
-                const Vertex v{fx * mesh[i], mesh[i + 2], fy * mesh[i + 1], mc_r, mc_g, mc_b};
-                mv.push_back(v);
-                centroid_ogl += QVector3D(v.px, v.py, v.pz);
+                const QVector3D a(mesh[i],     mesh[i + 1], mesh[i + 2]);   // room-frame triangle
+                const QVector3D b(mesh[i + 3], mesh[i + 4], mesh[i + 5]);
+                const QVector3D c(mesh[i + 6], mesh[i + 7], mesh[i + 8]);
+                const QVector3D lit = shade_rgb(mc_r, mc_g, mc_b, QVector3D::normal(a, b, c));
+                for (const QVector3D& r : {a, b, c})
+                {
+                    const Vertex v{fx * r.x(), r.z(), fy * r.y(), lit.x(), lit.y(), lit.z()};
+                    mv.push_back(v);
+                    centroid_ogl += QVector3D(v.px, v.py, v.pz);
+                }
             }
 
             // Chairs are drawn ONLY as meshes (they are not in the graph-box list), so label them here.
@@ -1738,8 +2019,9 @@ QColor VoxelOpenGLViewer::color_for_category(const std::string& category)
     if (category == "bottle") return QColor(255, 0, 200);  // hot magenta — bottle cylinder boxes
     if (category == "monitor") return QColor(186, 85, 211); // orchid-violet
     if (category == "obstacle") return QColor(255, 45, 45); // red — residual_concept obstacle boxes (obstacle=red)
-    if (category == "cabinet") return QColor(255, 140, 0);  // orange — cabinet_concept fitted carcass models (distinct from the light-blue cabinet mask)
+    if (category == "cabinet") return QColor(232, 230, 224);  // warm off-white — cabinet_concept models (kitchen units; distinct from the light-blue cabinet mask)
     if (category == "hood") return QColor(0, 210, 210);     // cyan — range-hood semantic masks
+    if (category == "refrigerator") return QColor(246, 247, 249);  // clean whitish — refrigerator_concept models
 
     static const std::array<QColor, 20> palette = {
         QColor(220, 20, 60), QColor(0, 90, 181), QColor(34, 139, 34), QColor(255, 140, 0),
