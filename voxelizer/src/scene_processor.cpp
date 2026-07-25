@@ -474,8 +474,12 @@ std::optional<GraphObjectBox> SceneProcessor::build_graph_object_box(const DSR::
     // Base-origin convention (RT origin at the carcass base, box extends [origin, origin+height]):
     // tables stand on the floor; cabinet_concept runs pin their RT origin at z0 (the carcass base — 0 for a
     // base unit, ~1.45 for a wall unit), so they use the same upward-extending convention, NOT centre-anchor.
+    // `object`-type furniture (refrigerator_concept and future generic floor objects) also writes its RT
+    // origin at the floor base (z=0) — same upward-extending convention as tables/cabinets. Without this the
+    // box would centre on the RT origin and sink half its height below the floor.
     const bool stands_on_floor = (node.type() == "table") or (node.name().rfind("table", 0) == 0)
-                              or (node.name().rfind("cabinet_", 0) == 0);
+                              or (node.name().rfind("cabinet_", 0) == 0)
+                              or (node.type() == "object");
     const float z_lo = stands_on_floor ? 0.f : -half_height;
     const float z_hi = stands_on_floor ? height : half_height;
 
@@ -526,11 +530,24 @@ std::optional<GraphObjectBox> SceneProcessor::build_graph_object_box(const DSR::
     if (node.type() == "box" and node.name().rfind("cabinet_", 0) == 0)
         category = "cabinet";
 
+    // refrigerator_concept publishes `object` nodes named "refrigerator_*" (subtype "refrigerator") — tag them
+    // so the viewer draws the scaled fridge template with a stable steel-grey colour/label.
+    if (node.name().rfind("refrigerator", 0) == 0)
+        category = "refrigerator";
+
     // Inferred shape subtype (table_concept publishes "round"/"square" on object_subtype_att). The viewer
     // renders the matching shape (round → disc-top table, square → the box mesh).
     std::string subtype;
     if (const auto sub_opt = graph_->get_attrib_by_name<object_subtype_att>(node); sub_opt.has_value())
         subtype = sub_opt.value();
+
+    // Concept-published display mesh + texture (relative asset paths). The viewer loads & renders these,
+    // scaled to this box — the agent owns the appearance, the viewer stays type-agnostic.
+    std::string mesh_path, mesh_texture_path;
+    if (const auto mp = graph_->get_attrib_by_name<mesh_path_att>(node); mp.has_value())
+        mesh_path = mp.value();
+    if (const auto mt = graph_->get_attrib_by_name<mesh_texture_path_att>(node); mt.has_value())
+        mesh_texture_path = mt.value();
 
     const Eigen::Matrix3d& R = room_T_object->linear();
     const float yaw = static_cast<float>(std::atan2(R(1, 0), R(0, 0)));
@@ -547,7 +564,8 @@ std::optional<GraphObjectBox> SceneProcessor::build_graph_object_box(const DSR::
 
     return GraphObjectBox{min_corner, max_corner, center,
                           Eigen::Vector3f(half_width, half_depth, half_height),
-                          yaw, node.name(), std::move(category), std::move(subtype)};
+                          yaw, node.name(), std::move(category), std::move(subtype),
+                          std::move(mesh_path), std::move(mesh_texture_path)};
 }
 
 std::vector<GraphObjectBox> SceneProcessor::get_graph_object_boxes(const std::string& room_name,
@@ -630,12 +648,16 @@ void SceneProcessor::update_viewer_graph_object_boxes(std::span<const GraphObjec
     std::vector<std::string> categories;
     std::vector<std::string> names;
     std::vector<std::string> subtypes;
+    std::vector<std::string> mesh_paths;
+    std::vector<std::string> mesh_texture_paths;
     centers.reserve(graph_boxes.size());
     half_extents.reserve(graph_boxes.size());
     yaws.reserve(graph_boxes.size());
     categories.reserve(graph_boxes.size());
     names.reserve(graph_boxes.size());
     subtypes.reserve(graph_boxes.size());
+    mesh_paths.reserve(graph_boxes.size());
+    mesh_texture_paths.reserve(graph_boxes.size());
 
     for (const auto& box : graph_boxes)
     {
@@ -645,9 +667,12 @@ void SceneProcessor::update_viewer_graph_object_boxes(std::span<const GraphObjec
         categories.push_back(box.category);
         names.push_back(box.node_name);
         subtypes.push_back(box.subtype);
+        mesh_paths.push_back(box.mesh_path);
+        mesh_texture_paths.push_back(box.mesh_texture_path);
     }
 
-    voxel_viewer_->update_graph_boxes(centers, half_extents, yaws, categories, names, subtypes);
+    voxel_viewer_->update_graph_boxes(centers, half_extents, yaws, categories, names, subtypes,
+                                      mesh_paths, mesh_texture_paths);
 }
 
 void SceneProcessor::update_viewer_object_meshes()
@@ -662,10 +687,17 @@ void SceneProcessor::update_viewer_object_meshes()
     std::vector<std::vector<float>> meshes;
     std::vector<std::string>        categories;   // parallel to meshes → per-class mesh colour in the viewer
     std::vector<std::string>        names;        // parallel to meshes → per-instance shade + 3D text label
+    // A node that publishes a display mesh_path is rendered from that template (box pass), so its fitted
+    // mesh_vertices is suppressed here to avoid a double-draw.
+    const auto has_display_mesh = [&](const DSR::Node& n)
+    { return graph_->get_attrib_by_name<mesh_path_att>(n).has_value()
+             and not graph_->get_attrib_by_name<mesh_path_att>(n).value().empty(); };
     for (const char* type : {"table", "chair"})
         for (const auto& node : graph_->get_nodes_by_type(type))
             if (const auto opt = graph_->get_attrib_by_name<mesh_vertices_att>(node); opt.has_value())
             {
+                if (has_display_mesh(node))
+                    continue;
                 // table_concept's mesh is ALWAYS a box slab; for a round table it misrepresents the shape.
                 // Skip it here so the viewer's box pass draws the round table (disc top + pedestal) instead,
                 // keyed off the same object_subtype attribute. Square tables keep the solid box mesh.
@@ -685,6 +717,8 @@ void SceneProcessor::update_viewer_object_meshes()
         if (node.name().rfind("cabinet_", 0) == 0)
             if (const auto opt = graph_->get_attrib_by_name<mesh_vertices_att>(node); opt.has_value())
             {
+                if (has_display_mesh(node))
+                    continue;
                 meshes.emplace_back(opt.value().get());
                 categories.emplace_back("cabinet");
                 names.emplace_back(node.name());
