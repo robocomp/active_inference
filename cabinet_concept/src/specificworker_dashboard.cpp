@@ -13,7 +13,6 @@
 
 #include <QByteArray>
 #include <QSettings>
-#include <QSplitter>
 #include <QVBoxLayout>
 #include <QWidget>
 #include <QColor>
@@ -28,8 +27,8 @@
 
 // ─── Evidence monitor ────────────────────────────────────────────────────────────────────────────
 
-// Build the per-instance snapshot from live instance state and push it to the monitor at ~5 Hz (a full
-// QTableWidget rebuild every compute cycle would waste the GUI thread). All reads are main-thread.
+// Section 1: push this cycle's evidence-pipeline counters, then (same tick, same data) the belief
+// inspector — so the two sections can never show different cycles. Throttled to ~5 Hz. Main-thread.
 void SpecificWorker::refresh_evidence_monitor()
 {
     if (not evidence_monitor_)
@@ -211,22 +210,22 @@ void SpecificWorker::build_dashboard()
 
         ts_plot_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
         ts_plot_->set_visible_window(60.f);
-        series_layout->addWidget(ts_plot_);
+        series_layout->addWidget(ts_plot_, 1);
 
         // FE SURPRISE (attention signal) on its own panel — it lives on a much smaller scale (~0–1) than the FE
         // (~2–8), so it needs the full panel height to be readable. Spikes when a cabinet moves, decays as the fit
         // re-converges. See the belief/fitter plumbing (inst.fe_surprise).
         ts_surprise_plot_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
         ts_surprise_plot_->set_visible_window(60.f);
-        series_layout->addWidget(ts_surprise_plot_);
+        series_layout->addWidget(ts_surprise_plot_, 1);
 
         ts_cov_plot_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
         ts_cov_plot_->set_visible_window(60.f);
-        series_layout->addWidget(ts_cov_plot_);
+        series_layout->addWidget(ts_cov_plot_, 1);
 
         ts_res_plot_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
         ts_res_plot_->set_visible_window(60.f);
-        series_layout->addWidget(ts_res_plot_);
+        series_layout->addWidget(ts_res_plot_, 1);
 
 
         // (D) BELIEF INSPECTOR — the panel that replaced the σ_w/σ_h trace. A time-series of two variances
@@ -252,13 +251,10 @@ void SpecificWorker::build_dashboard()
     dashboard_window_->setWindowTitle(QStringLiteral("cabinet_concept — dashboard"));
     auto* outer = new QVBoxLayout(dashboard_window_);
     outer->setContentsMargins(0, 0, 0, 0);
-    auto* split = new QSplitter(Qt::Vertical, dashboard_window_);
-    split->addWidget(evidence_monitor_);   // reparents into the splitter
-    split->addWidget(custom_widget_);
-    split->setStretchFactor(0, 0);          // counter strip keeps its (small) size
-    split->setStretchFactor(1, 1);
-    split->setSizes({64, 836});
-    outer->addWidget(split);
+    // No splitter: the counter strip is two lines of text with nothing to resize, so it simply takes
+    // its natural height and the plots + inspector get everything else.
+    outer->addWidget(evidence_monitor_, 0);   // section 1 — natural height
+    outer->addWidget(custom_widget_, 1);      // sections 2 + 3 — all remaining space
 
     restore_dashboard_geometry();
     dashboard_window_->show();
