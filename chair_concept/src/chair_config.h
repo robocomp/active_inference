@@ -165,6 +165,10 @@ struct ChairConfig
     float exist_zed_edge_offset = 1.0f;   // Existence.ZedEdgeOffset — normalised ROI offset at which ZED detectability→0
     float exist_zed_range_full  = 4.0f;   // Existence.ZedRangeFull — within this range (m) ZED detects reliably (pd=1)
     float exist_zed_range_ref   = 7.0f;   // Existence.ZedRangeRef — beyond this range (m) ZED absence is uninformative (pd=0)
+    // pd FLOOR for an UNOCCLUDED, in-frustum chair: even at the ZED periphery (low pd) a persistently-unexplained
+    // chair with clear line of sight still vacates at ≥ this rate, so a glitch-stranded phantom the robot never
+    // centres eventually dies (conf gates on staleness → a recently-seen chair is untouched). 0 = pure pd (no floor).
+    float exist_zed_clear_los_floor = 0.15f;  // Existence.ZedClearLosFloor
     float tracker_birth_seat_w     = 0.45f;   // seed seat width/depth/heights for a freshly born chair node
     float tracker_birth_seat_d     = 0.45f;
     float tracker_birth_seat_h     = 0.45f;

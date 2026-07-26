@@ -119,6 +119,7 @@ ChairConfig load_chair_config(const ConfigLoader& cfg)
     out.exist_zed_edge_offset    = getf("Existence.ZedEdgeOffset",    1.0f);
     out.exist_zed_range_full     = getf("Existence.ZedRangeFull",     4.0f);
     out.exist_zed_range_ref      = getf("Existence.ZedRangeRef",      7.0f);
+    out.exist_zed_clear_los_floor = getf("Existence.ZedClearLosFloor", 0.15f);
     out.tracker_birth_seat_w     = getf("Tracker.BirthSeatW",       0.45f);
     out.tracker_birth_seat_d     = getf("Tracker.BirthSeatD",       0.45f);
     out.tracker_birth_seat_h     = getf("Tracker.BirthSeatH",       0.45f);

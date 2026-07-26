@@ -179,6 +179,12 @@ OutOfRoomGain = 1.5      # |ΔL| per frame while outside → removed in a few fr
 ZedEdgeOffset = 1.0      # normalised ROI offset (0=centred, 1=image edge) at which ZED detectability → 0
 ZedRangeFull  = 4.0      # within this range (m) ZED detects reliably → absence fully counts (pd=1)
 ZedRangeRef   = 7.0      # beyond this range (m) ZED absence says nothing about existence (pd=0)
+ZedClearLosFloor = 0.15  # pd FLOOR for an UNOCCLUDED in-frustum chair: even at the ZED periphery a persistently-
+                         # unexplained chair with CLEAR line of sight still vacates at ≥ this rate → a glitch-
+                         # stranded phantom the robot never centres eventually dies. conf gates on staleness so a
+                         # recently-seen chair is untouched. Occluded chairs HOLD (protected before this branch).
+                         # 0 = pure pd (a peripheral phantom then persists until the robot centres it). Tune down
+                         # if real peripheral chairs get removed; up to clear glitch phantoms faster.
 
 [Ice]
 Warn.Connections = "0"

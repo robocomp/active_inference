@@ -1141,13 +1141,10 @@ void SpecificWorker::update_existence_beliefs()
     const float ar  = cfg_.exist_adequacy_ref;
     const float cap = cfg_.exist_adequacy_cap;
 
-    // "ZED removes": absence only counts as removal evidence on a frame where ZED actually produced detections
-    // (any depth_var==0 slice). A frame carrying only ricoh slices (or a dropped/empty ZED detector output) means
-    // ZED did not effectively look → an unexplained chair HOLDs, never vacates. Ricoh confirms, never removes.
-    bool zed_present = false;
-    for (const auto& s : pkt.slices)
-        if (s.has_depth and s.depth_var == 0.0f) { zed_present = true; break; }
-
+    // "ZED removes": every mask frame is ZED-cadenced (upload_masks runs per ZED RGBD frame, ricoh slices appended),
+    // so a fresh frame ALREADY means "ZED looked this cycle" — including a frame with ZERO ZED detections, which is
+    // exactly ZED staring at empty space and finding nothing (the strongest vacate evidence). Do NOT gate on
+    // "ZED produced a detection": that would refuse to remove a phantom precisely when ZED confirms it is gone.
     std::vector<std::uint64_t> to_remove;
     for (auto& [id, inst] : fitter_->instances())
     {
@@ -1209,10 +1206,6 @@ void SpecificWorker::update_existence_beliefs()
             // WON NOTHING but the line of sight is BLOCKED by a closer object (another chair, the table, a
             // person …): absence of a mask is EXPECTED, not evidence the chair is gone → HOLD, never vacate.
             continue;
-        else if (not zed_present)
-            // WON NOTHING and ZED produced no detections this frame → ZED didn't effectively look; ricoh absence
-            // never removes → HOLD.
-            continue;
         else
         {
             // WON NOTHING while in the frustum, UNOCCLUDED, on a ZED-active frame → absence evidence, but weighted
@@ -1226,7 +1219,11 @@ void SpecificWorker::update_existence_beliefs()
                 ? std::clamp(static_cast<float>(inst.frames_since_detection)
                              / static_cast<float>(cfg_.exist_vacate_confident_frames), 0.0f, 1.0f)
                 : 0.0f;
-            llr = -g * conf * fitter_->zed_detectability(inst);
+            // pd FLOOR (clear line of sight): occlusion is already HELD above, so here the LoS is clear. Even a
+            // peripheral chair (low pd) then vacates at ≥ the floor rate, so a glitch-stranded phantom the robot
+            // never centres still dies over time; conf gates on staleness so a recently-seen chair is untouched.
+            const float pd = std::max(fitter_->zed_detectability(inst), cfg_.exist_zed_clear_los_floor);
+            llr = -g * conf * pd;
         }
 
         inst.exist_logodds = std::clamp(inst.exist_logodds + llr,
