@@ -9,6 +9,7 @@
  */
 
 #include "epistemic_planner.h"
+#include "chair_dof.h"          // kChairDofs: names/units (no σ* published for the chair)
 
 #include <algorithm>
 #include <array>
@@ -109,17 +110,17 @@ EpistemicProposal EpistemicPlanner::compute(const ChairBelief& belief, float lat
     static int dbg = 0;
     if (++dbg % 30 == 0)
     {
-        static const float ref[3] = {0.10f, 0.10f, 0.10f};   // cx,cy (m); yaw (rad)
-        static const char* dof[3] = {"cx", "cy", "yaw"};
-        static const char* fn[4]  = {"+x", "-x", "+y", "-y"};
+        constexpr float kRef = 0.10f;   // common scale: 10 cm / 0.1 rad
+        static const char* fn[4] = {"+x", "-x", "+y", "-y"};
         int dom = 0; float best = -1.0f;
-        for (int j = 0; j < 3; ++j)
+        for (int j = 0; j < S.rows(); ++j)
         {
-            const float n = std::sqrt(std::max(0.0f, S(j, j))) / ref[j];
+            const float n = std::sqrt(std::max(0.0f, S(j, j))) / kRef;
             if (n > best) { best = n; dom = j; }
         }
         std::print("[epistemic-NBV] face={} gain={:.3f} | Σ dom-unc={} σ={:.3f}{} | gains +x={:.2f} -x={:.2f} +y={:.2f} -y={:.2f}\n",
-                   fn[best_idx], best_gain, dof[dom], std::sqrt(std::max(0.0f, S(dom, dom))), (dom == 2 ? "rad" : "m"),
+                   fn[best_idx], best_gain, kChairDofs[dom].name,
+                   std::sqrt(std::max(0.0f, S(dom, dom))), kChairDofs[dom].unit,
                    face_gain[0], face_gain[1], face_gain[2], face_gain[3]);
     }
 

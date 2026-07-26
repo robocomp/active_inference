@@ -72,19 +72,25 @@ struct ChairConfig
     // yaw is the one that BIT: "passing by the chair rotated it". This term is 0 at stillness, so a large gain has
     // NO cost on a stationary/correctly-seen chair — it only denies a moving frame the authority to rotate the mean.
     float motion_cm_yaw_gain = 0.50f;   // yaw shared-error std (rad) per m/s      — anti-ROTATE (0.12→0.50)
-    // HARD "be-still-to-update" gate (the agreed invariant): ONLY a still/almost-still robot with a fresh ZED YOLO
-    // mask may alter pose/shape; every other frame is CONFIRMATION-of-existence only (predict, no mean/shape move).
-    // The common-mode above softens the near-still regime; this makes the moving regime EXACT (zero authority).
-    bool  ai2_motion_confirm_only = true;   // moving robot → predict-only (no pose/shape update)
-    float ai2_still_lin_mps       = 0.05f;  // camera linear speed (m/s) below which the robot counts as "still"
-    float ai2_still_ang_radps     = 0.10f;  // camera angular speed (rad/s) below which the robot counts as "still"
-    float ai2_still_dotd          = 0.05f;  // per-mask ego-motion corruption speed (m/s) still-level (OR'd in)
-    // Moving-robot EXCEPTION: a mask WELL-CENTRED in the image (near the principal point) has minimal motion smear
-    // and no peripheral distortion, so it is trustworthy enough to update pose/shape EVEN while moving. Allow the
-    // update when the mask centroid radius is below this. UNITS = focal-normalised (tan of the ray angle off the
-    // optical axis): 0.35 ≈ tan(19°), i.e. the centroid within ~19° of the axis; ~1.0 ≈ the edge of a ~90° FoV.
-    // Lower = stricter (only near-axis masks may update while moving). <0 disables the exception.
-    float ai2_moving_update_center_radius = 0.35f;
+    // ── "Be-still-to-update" as CONTINUOUS PRECISION (AIF-aligned; replaces the old hard gate) ──────────────
+    // A frame's authority to MOVE the mean falls off smoothly with an UNRELIABILITY = motion × off-axis-position:
+    // a still OR well-centred mask keeps authority (u→0); a moving AND peripheral mask loses it (u→1) so it only
+    // CONFIRMS. "Confirmation-only" is the limit precision→0, not a branch — no threshold. The motion magnitude
+    // combines the per-mask corruption speed (motion_dotd) with the robot's own measured ego-speed (transform
+    // chain), and the off-axis penalty grows with the mask's centroid radius². Both enter the per-frame
+    // common-mode (mot_*_var below) and the existence reliability weight.
+    float ai2_ang_lever_m   = 2.0f;    // rad/s → m/s lever (tangential speed of a chair ~this far away) for ego-motion
+    float ai2_periph_ref    = 0.50f;   // centroid radius (focal-norm, tan of off-axis angle) at which the periphery
+                                       // penalty saturates to 1; 0.50 ≈ tan(27°). Smaller = only near-axis is "central".
+    float ai2_motion_ref_mps = 0.60f;  // motion magnitude (m/s) at which a fully-peripheral frame becomes fully
+                                       // unreliable (existence weight → 0). Larger = more tolerant of motion.
+    // A/B FALLBACK — the OLD hard gate (predict-only when moving & off-centre). Default OFF; the continuous
+    // precision above is the live path. Set true to compare. still_*/moving_update_center_radius feed only this.
+    bool  ai2_motion_confirm_only = false;
+    float ai2_still_lin_mps       = 0.05f;  // (hard gate) camera linear speed (m/s) below which robot counts as "still"
+    float ai2_still_ang_radps     = 0.10f;  // (hard gate) camera angular speed (rad/s) below which robot counts as "still"
+    float ai2_still_dotd          = 0.05f;  // (hard gate) per-mask ego-motion corruption speed (m/s) still-level
+    float ai2_moving_update_center_radius = 0.35f;  // (hard gate) mask centroid radius below which a moving update is allowed
     // Obliquity yaw cap (TABLE.md §6): the backrest (the chair's yaw-carrying surface) is a vertical plate, so
     // a view that grazes it edge-on can barely observe yaw. Grow the SHARED yaw variance as 1/obliquity_cos−1
     // so a grazing frame confirms the chair but can't rotate a converged one. Continuous covariance, no gate.
@@ -152,11 +158,24 @@ struct ChairConfig
     bool  exist_room_prior         = true;   // Existence.RoomPrior — enforce the room-containment pose prior
     float exist_room_margin_m      = 0.40f;  // Existence.RoomMarginM — tolerance a chair centre may sit OUTSIDE the walls
     float exist_out_of_room_gain   = 1.5f;   // Existence.OutOfRoomGain — |ΔL| per frame while outside (debounces a 1-frame glitch)
+    // "ZED removes, ricoh confirms": a ricoh WIN confirms existence (resets staleness) but a ricoh mask's ABSENCE
+    // never removes — only ZED absence does, and only to the degree ZED would RELIABLY have detected a present
+    // chair (falls off toward the image edge + with range). Stops removal of a far/peripheral, only-ricoh-visible
+    // chair whose 360 view is momentarily occluded (the reported bug).
+    float exist_zed_edge_offset = 1.0f;   // Existence.ZedEdgeOffset — normalised ROI offset at which ZED detectability→0
+    float exist_zed_range_full  = 4.0f;   // Existence.ZedRangeFull — within this range (m) ZED detects reliably (pd=1)
+    float exist_zed_range_ref   = 7.0f;   // Existence.ZedRangeRef — beyond this range (m) ZED absence is uninformative (pd=0)
     float tracker_birth_seat_w     = 0.45f;   // seed seat width/depth/heights for a freshly born chair node
     float tracker_birth_seat_d     = 0.45f;
     float tracker_birth_seat_h     = 0.45f;
     float tracker_birth_back_h     = 0.45f;
     bool  tracker_nll_cost         = false;   // association cost = ½(m²+ln|S|) NLL (vs raw m²); see InstanceTracker
+    // ZED-only BIRTH gate: only a ZED slice (depth_var==0) may SPAWN a chair; a ricoh LiDAR-depth slice
+    // (depth_var>0, unreliable depth/extent) may associate/confirm an existing chair but never birth a phantom.
+    // A confident-ricoh escape hatch (OFF by default) permits a very-confident, low-variance ricoh birth.
+    bool  ricoh_birth_enabled = false;   // Tracker.RicohBirthEnabled — allow a confident ricoh-depth slice to birth
+    float ricoh_birth_conf    = 0.60f;   // Tracker.RicohBirthConf — min YOLO confidence for a ricoh birth
+    float ricoh_birth_max_var = 0.005f;  // Tracker.RicohBirthMaxVar — max depth_var (m²) for a ricoh birth
     // ── RGB-360 bearing-only hypothesis birth (Part C-birth; RICOH_360_PERIPHERAL_DETECTION.md) ──────
     // A peripheral 360 "chair" bearing (a no-depth mask slice, azimuth calibrated 2026-07-04) that matches
     // no live chair and PERSISTS births a BROAD-Σ hypothesis: the mean is placed at a nominal range on the

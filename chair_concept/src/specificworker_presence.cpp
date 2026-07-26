@@ -80,9 +80,14 @@ void SpecificWorker::remove_owned_chair_nodes()
     if (not G)
         return;
 
-    // Chair instances are DSR `chair` nodes named "chair_*". Deleting the node also drops its
-    // room→chair RT edge, so no separate edge cleanup is needed. Startup stale-sweep (mirrors bottle).
+    // Chair instances are generic `object` nodes named "chair_*" (schema migration). Deleting the
+    // node also drops its room→chair RT edge, so no separate edge cleanup is needed. Startup
+    // stale-sweep (mirrors bottle). ALSO sweep the pre-migration `chair`-typed nodes so a leaked
+    // old-type node from a previous build gets reaped during the transition.
     std::vector<std::uint64_t> to_delete;
+    for (const auto& node : G->get_nodes_by_type("object"))
+        if (node.name().starts_with("chair"))
+            to_delete.push_back(node.id());
     for (const auto& node : G->get_nodes_by_type("chair"))
         if (node.name().starts_with("chair"))
             to_delete.push_back(node.id());
@@ -155,7 +160,11 @@ void SpecificWorker::remove_stale_affordance_nodes()
         if (not pid.has_value())
             continue;
         const auto parent = G->get_node(pid.value());
-        if (parent.has_value() and parent->type() == "chair")
+        // Chair parents are generic `object` nodes named "chair_*" (schema migration); accept the
+        // pre-migration `chair` type too so a transition-era affordance still gets reaped.
+        if (parent.has_value() and
+            ((parent->type() == "object" and parent->name().starts_with("chair")) or
+             parent->type() == "chair"))
         {
             qInfo() << "[chair_concept] removing affordance node"
                     << QString::fromStdString(aff.name()) << "id" << aff.id() << "(parent chair)";

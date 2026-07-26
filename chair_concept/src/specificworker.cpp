@@ -32,6 +32,7 @@
  */
 
 #include "specificworker.h"
+#include "chair_dof.h"   // rc::kChairDofs — names/units for the BeliefInspector rows
 
 #include <QTimer>
 #include <QSettings>   // persist the standalone dashboard window geometry
@@ -248,22 +249,22 @@ void SpecificWorker::terminal_shutdown()
 // carry its own QSettings entry (mirrors room_concept's RoomViewer).
 void SpecificWorker::restore_dashboard_geometry()
 {
-    if (not custom_widget_)
+    if (not dashboard_window_)
         return;
     QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("chair_concept"));
     const QByteArray geom = settings.value(QStringLiteral("DashboardWindow_geometry")).toByteArray();
     if (not geom.isEmpty())
-        custom_widget_->restoreGeometry(geom);
+        dashboard_window_->restoreGeometry(geom);
     else
-        custom_widget_->resize(560, 620);
+        dashboard_window_->resize(1180, 900);
 }
 
 void SpecificWorker::save_dashboard_geometry() const
 {
-    if (not custom_widget_)
+    if (not dashboard_window_)
         return;
     QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("chair_concept"));
-    settings.setValue(QStringLiteral("DashboardWindow_geometry"), custom_widget_->saveGeometry());
+    settings.setValue(QStringLiteral("DashboardWindow_geometry"), dashboard_window_->saveGeometry());
     settings.sync();
 }
 
@@ -470,10 +471,7 @@ void SpecificWorker::initialize()
     // backing store), safe as a top-level. NOT WA_DeleteOnClose: closing must only HIDE it, or the
     // ts_*_plot_ pointers the compute() feed uses would dangle. A QApplication always exists (generated/main.cpp).
     {
-        custom_widget_ = new Custom_widget("Chair Model — Free Energy, Coverage Deficit, Residuals & Dimensions (w,h)");
-        custom_widget_->setWindowTitle(QStringLiteral("chair_concept — belief dashboard"));
-        restore_dashboard_geometry();
-        custom_widget_->show();
+        custom_widget_ = new Custom_widget("Chair — Free Energy, Surprise, Belief Uncertainty & Residuals");
 
         // Create plot inside frame_series
         auto* series_layout = new QVBoxLayout(custom_widget_->frame_series);
@@ -482,26 +480,30 @@ void SpecificWorker::initialize()
 
         ts_plot_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
         ts_plot_->set_visible_window(60.f);
-        series_layout->addWidget(ts_plot_);
+        series_layout->addWidget(ts_plot_, 1);
+
+        // FE SURPRISE (attention signal) on its own panel — it lives on a much smaller scale (~0–1) than
+        // the FE, so it needs the full panel height to be readable. Spikes when a chair moves, decays as
+        // the fit re-converges.
+        ts_surprise_plot_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
+        ts_surprise_plot_->set_visible_window(60.f);
+        series_layout->addWidget(ts_surprise_plot_, 1);
 
         ts_cov_plot_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
         ts_cov_plot_->set_visible_window(60.f);
-        series_layout->addWidget(ts_cov_plot_);
+        series_layout->addWidget(ts_cov_plot_, 1);
 
         ts_res_plot_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
         ts_res_plot_->set_visible_window(60.f);
-        series_layout->addWidget(ts_res_plot_);
+        series_layout->addWidget(ts_res_plot_, 1);
 
-        // Inferred chair dimensions (w, h) — the size DOFs the stabiliser targets. Watch these to
-        // confirm the belief has stopped jittering between fresh masks (flat = stable).
-        ts_state_plot_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
-        ts_state_plot_->set_visible_window(60.f);
-        series_layout->addWidget(ts_state_plot_);
 
-        // Belief size posterior std σ_w/σ_h (mm) — watch the size uncertainty shrink as views accumulate.
-        ts_ce_plot_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
-        ts_ce_plot_->set_visible_window(60.f);
-        series_layout->addWidget(ts_ce_plot_);
+        // BELIEF INSPECTOR — the panel that replaced the pose-σ trace. A time-series of two variances showed
+        // a slice of the belief; this shows ALL of it: every state DOF with its posterior σ, Σ as a
+        // correlation heatmap (where the structure lives), and the 4-mode yaw posterior. Stretch 2.
+        belief_inspector_ = new rc::BeliefInspector(QStringLiteral("belief inspector"),
+                                                    custom_widget_->frame_series);
+        series_layout->addWidget(belief_inspector_, 2);
 
         // GenericWorker::initialize() may have already started compute(), so
         // some instances can exist before the plots are constructed.
@@ -510,15 +512,101 @@ void SpecificWorker::initialize()
             ts_plot_->add_series(inst.node_name + "_fe", QColor(255, 170, 0), 1.1f);
             ts_cov_plot_->add_series(inst.node_name + "_cov", QColor(0, 190, 255), 1.1f);
             ts_res_plot_->add_series(inst.node_name + "_res", QColor(170, 80, 255), 1.1f);
-            ts_state_plot_->add_series(inst.node_name + "_w", QColor(255, 90, 90), 1.1f);
-            ts_state_plot_->add_series(inst.node_name + "_h", QColor(90, 200, 90), 1.1f);
-            if (ts_ce_plot_)
-            {
-                ts_ce_plot_->add_series(inst.node_name + "_sW", QColor(255, 90, 90), 1.1f);
-                ts_ce_plot_->add_series(inst.node_name + "_sH", QColor(90, 200, 90), 1.1f);
-            }
         }
     }
+
+    // ── Section 1: evidence-pipeline counter strip ────────────────────────────
+    evidence_monitor_ = new rc::EvidenceMonitor(QStringLiteral("chair_concept — evidence monitor"));
+
+    // ── Combined window: counters (top) over the plots + belief inspector (bottom) ──
+    // Identical three-section structure to every other concept agent. Only HIDDEN on close, never deleted
+    // (compute() keeps the raw child pointers).
+    dashboard_window_ = new QWidget;
+    dashboard_window_->setWindowTitle(QStringLiteral("chair_concept — dashboard"));
+    auto* outer = new QVBoxLayout(dashboard_window_);
+    outer->setContentsMargins(0, 0, 0, 0);
+    // No splitter: the counter strip is two lines of text with nothing to resize, so it simply takes
+    // its natural height and the plots + inspector get everything else.
+    outer->addWidget(evidence_monitor_, 0);   // section 1 — natural height
+    outer->addWidget(custom_widget_, 1);      // sections 2 + 3 — all remaining space
+
+    restore_dashboard_geometry();
+    dashboard_window_->show();
+}
+
+// ─── Belief inspector ────────────────────────────────────────────────────────
+
+// Build the per-instance BELIEF snapshot (pose state, Σ, the 4-mode yaw posterior, scalar gauges) and push
+// it to the bottom panel, throttled to ~5 Hz (a full card rebuild every compute cycle would waste the GUI
+// thread). The chair has no EvidenceMonitor to share a tick with, so the gate lives here. Main-thread.
+// Section 1: push this cycle's evidence-pipeline counters, then (same tick, same data) the belief
+// inspector — so the two sections can never show different cycles. Throttled to ~5 Hz.
+void SpecificWorker::refresh_evidence_monitor()
+{
+    if (not evidence_monitor_)
+        return;
+    const auto tick = std::chrono::steady_clock::now();
+    if (last_monitor_tp_.time_since_epoch().count() != 0
+        and std::chrono::duration<float>(tick - last_monitor_tp_).count() < 0.2f)
+        return;
+    last_monitor_tp_ = tick;
+
+    evidence_monitor_->update_view(ev_g_);
+    refresh_belief_inspector();
+}
+
+void SpecificWorker::refresh_belief_inspector()
+{
+    if (not belief_inspector_)
+        return;
+    const auto now = std::chrono::steady_clock::now();
+
+    std::vector<rc::BeliefCard> cards;
+    cards.reserve(fitter_->instances().size());
+    for (const auto& [id, inst] : fitter_->instances())
+    {
+        rc::BeliefCard c;
+        c.node = inst.node_name;
+
+        // REPORTED covariance: σ_yaw carries the 4-mode orientation entropy, so an unresolved chair shows
+        // the honest orientation uncertainty rather than the within-mode one.
+        const auto  S = inst.ai2_belief.covariance_reported();
+        const auto& s = inst.ai2_belief.state();
+        const std::array<float, rc::ChairBelief::N> v = {s.cx, s.cy, s.yaw};
+        for (int j = 0; j < rc::ChairBelief::N; ++j)
+            c.dofs.push_back({rc::kChairDofs[j].name, rc::kChairDofs[j].unit, v[j],
+                              std::sqrt(std::max(0.0f, S(j, j))), rc::kChairDofs[j].sigma_star});
+
+        // Row-major copy, filled explicitly: Eigen stores column-major, and while Σ is symmetric today an
+        // implicit .data() copy would silently transpose if that ever stopped being true.
+        constexpr int N = rc::ChairBelief::N;
+        c.cov.resize(N * N);
+        for (int i = 0; i < N; ++i)
+            for (int j = 0; j < N; ++j)
+                c.cov[i * N + j] = S(i, j);
+
+        // The chair's discrete ambiguity is its 4-fold yaw symmetry (front/back/side of a squarish seat).
+        const auto pm = inst.ai2_belief.mode_posterior();
+        static const char* kYawLabels[4] = {"m0", "m0+90", "m0+180", "m0-90"};
+        for (int k = 0; k < 4; ++k)
+            c.modes.push_back({"yaw", kYawLabels[k], pm[k]});
+
+        c.s.fe          = inst.dbg_energy;
+        c.s.fe_baseline = inst.fe_baseline;
+        c.s.fe_surprise = inst.fe_surprise;
+        // exist_logodds is NaN until the existence channel initialises; pass it straight through so the
+        // card prints "-" rather than a fake 0.5 probability.
+        c.s.logodds     = inst.exist_logodds;
+        if (std::isfinite(inst.exist_logodds))
+            c.s.p_exists = 1.0f / (1.0f + std::exp(-inst.exist_logodds));
+        c.s.age_s       = inst.last_belief_touch.time_since_epoch().count() == 0
+                        ? -1.0f
+                        : std::chrono::duration<float>(now - inst.last_belief_touch).count();
+        c.s.since_det   = inst.frames_since_detection;
+        c.s.initialized = inst.ai2_initialized;
+        cards.push_back(std::move(c));
+    }
+    belief_inspector_->update_view(cards);
 }
 
 // ─── Main compute loop ───────────────────────────────────────────────────────
@@ -536,17 +624,41 @@ void SpecificWorker::compute()
         room_node_id_ = rooms.front().id();
     }
 
+    // Evidence-pipeline per-cycle counters (the *_cum fields persist). Producers below add to these; the
+    // snapshot is pushed at the end of the cycle.
+    ev_g_.births = ev_g_.merges = ev_g_.removals = 0;
+
     refresh_room_geometry();  // room-containment pose prior (cheap; the polygon is a nominal model)
     fitter_->update_ego_motion();   // robot/camera speed → "be-still-to-update" gate (once per cycle)
     mask_ingestor_->refresh();
     run_instance_tracker();   // data-driven birth/associate/death + merge (the only instance-lifecycle path)
 
-    const auto chair_nodes = G->get_nodes_by_type("chair");
+    // Chairs are generic `object` nodes named "chair_*" (schema migration); filter by name prefix.
+    const auto chair_nodes = G->get_nodes_by_type("object");
     for (const auto& node : chair_nodes)
-        process_chair_node(node);
+        if (node.name().starts_with("chair"))
+            process_chair_node(node);
 
     // Overall compute()-cycle rate: counts every cycle, prints "Epoch time = …ms. Fps = N" once a
     // second (FPSCounter::print is throttled and self-counting).
+    // ── Dashboard: counters + belief inspector, one throttled push ──
+    ev_g_.instances  = static_cast<int>(fitter_->instances().size());
+    ev_g_.mask_stale = not mask_ingestor_->packet().valid;
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (last_compute_tp_.time_since_epoch().count() != 0)
+        {
+            const float dt = std::chrono::duration<float>(now - last_compute_tp_).count();
+            if (dt > 1e-4f)
+            {
+                const float hz = 1.0f / dt;
+                ev_g_.compute_hz = ev_g_.compute_hz > 0.0f ? 0.9f * ev_g_.compute_hz + 0.1f * hz : hz;
+            }
+        }
+        last_compute_tp_ = now;
+    }
+    refresh_evidence_monitor();   // throttled inside; no-ops when the dashboard was not built
+
     fps_counter_.print("[chair_concept Compute]");
 }
 
@@ -642,8 +754,22 @@ void SpecificWorker::run_instance_tracker()
     const auto& pkt = mask_ingestor_->packet();
     if (pkt.valid)
         for (int i = 0; i < static_cast<int>(pkt.slices.size()); ++i)
-            if (pkt.slices[i].label == "chair" and pkt.slices[i].support_end > pkt.slices[i].support_begin)
-                dets.push_back({Eigen::Vector2f(pkt.slices[i].centroid.x(), pkt.slices[i].centroid.y()), i});
+        {
+            const auto& sl = pkt.slices[i];
+            if (sl.label != "chair" or sl.support_end <= sl.support_begin) continue;
+            rc::DetectionView dv;
+            dv.xy = Eigen::Vector2f(sl.centroid.x(), sl.centroid.y());
+            dv.slice_index = i;
+            // ZED-only BIRTH: only a ZED slice (per-pixel depth ⇒ depth_var==0) may SPAWN a chair. A ricoh
+            // LiDAR-reprojected-depth slice (depth_var>0) has unreliable depth/extent, so it may ASSOCIATE to /
+            // confirm an existing chair but must NOT birth a phantom — this is exactly what created chair_3 (a
+            // wrong ricoh detection at 8.8 m, outside the room). A confident-ricoh escape hatch is OFF by default.
+            const bool is_zed = sl.depth_var == 0.0f;
+            dv.birthable = is_zed or (cfg_.ricoh_birth_enabled
+                                      and sl.confidence >= cfg_.ricoh_birth_conf
+                                      and sl.depth_var  <= cfg_.ricoh_birth_max_var);
+            dets.push_back(dv);
+        }
 
     // DIAGNOSTIC (merged-vs-single mask): one CSV row per "chair" slice per cycle — count, size, centroid,
     // range. If a cluttered scene collapses to ONE big slice (npts ≫ a clean single chair) the extra chairs
@@ -679,6 +805,17 @@ void SpecificWorker::run_instance_tracker()
     static int dbg = 0;
     const int n_assigned = static_cast<int>(std::count_if(res.assignment.begin(), res.assignment.end(),
                                                           [](int a){ return a >= 0; }));
+
+    // Evidence-pipeline counters (section 1 of the dashboard). Same fields every concept agent fills.
+    ev_g_.mask_frame_id = pkt.valid ? pkt.frame_id : -1;
+    ev_g_.total_slices  = pkt.valid ? static_cast<int>(pkt.slices.size()) : 0;
+    ev_g_.class_dets    = static_cast<int>(dets.size());
+    ev_g_.assigned      = n_assigned;
+    ev_g_.discarded     = static_cast<int>(dets.size()) - n_assigned;
+    ev_g_.births       += static_cast<int>(res.births.size());
+    ev_g_.births_cum   += static_cast<long>(res.births.size());
+    ev_g_.removals     += static_cast<int>(res.deaths.size());
+    ev_g_.removals_cum += static_cast<long>(res.deaths.size());
     if (++dbg % 30 == 0 or not res.births.empty() or not res.deaths.empty())
         std::print("[tracker] instances={} chair_dets={} assigned={} unassigned={} births={} deaths={}\n",
                    tracks.size(), dets.size(), n_assigned,
@@ -937,20 +1074,51 @@ void SpecificWorker::run_instance_tracker()
 // fitter so it can impose the room-containment pose prior. Mirrors cabinet_concept::refresh_room_geometry.
 void SpecificWorker::refresh_room_geometry()
 {
+    static int miss = 0;                          // throttle the "polygon still missing" diagnostic
     if (not G or room_node_id_ == 0) return;
-    const auto room = G->get_node(room_node_id_);
-    if (not room.has_value()) return;
+    auto room = G->get_node(room_node_id_);
+    if (not room.has_value())
+    {
+        // Latched room id went stale (room_concept recreated the room on relocalization). Re-resolve so the
+        // containment prior recovers instead of silently reading a dead node forever.
+        const auto rooms = G->get_nodes_by_type("room");
+        if (rooms.empty()) { room_node_id_ = 0; return; }
+        room_node_id_ = rooms.front().id();
+        room = G->get_node(room_node_id_);
+        if (not room.has_value()) return;
+    }
     const auto px = G->get_attrib_by_name<delimiting_polygon_x_att>(room.value());
     const auto py = G->get_attrib_by_name<delimiting_polygon_y_att>(room.value());
-    if (not px.has_value() or not py.has_value()) return;
+    if (not px.has_value() or not py.has_value())
+    {
+        if (++miss % 120 == 1)
+            std::print("chair_concept: [room-prior] room node {} has NO delimiting_polygon attribute yet "
+                       "(containment prior INACTIVE — out-of-room chairs cannot be removed)\n", room_node_id_);
+        return;
+    }
     const auto& xs = px->get(); const auto& ys = py->get();
     const std::size_t n = std::min(xs.size(), ys.size());
-    if (n < 3) return;
+    if (n < 3)
+    {
+        if (++miss % 120 == 1)
+            std::print("chair_concept: [room-prior] delimiting_polygon present but degenerate (n={})\n", n);
+        return;
+    }
     std::vector<Eigen::Vector2f> poly; poly.reserve(n);
     Eigen::Vector2f centroid = Eigen::Vector2f::Zero();
-    for (std::size_t i = 0; i < n; ++i) { poly.emplace_back(xs[i], ys[i]); centroid += poly.back(); }
+    float xmin = 1e9f, xmax = -1e9f, ymin = 1e9f, ymax = -1e9f;
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        poly.emplace_back(xs[i], ys[i]); centroid += poly.back();
+        xmin = std::min(xmin, xs[i]); xmax = std::max(xmax, xs[i]);
+        ymin = std::min(ymin, ys[i]); ymax = std::max(ymax, ys[i]);
+    }
     centroid /= static_cast<float>(n);
+    const bool first = not fitter_->has_room_polygon();
     fitter_->set_room_geometry(centroid, std::move(poly));
+    if (first)
+        std::print("chair_concept: [room-prior] room polygon LOADED — {} verts, x∈[{:.2f},{:.2f}] y∈[{:.2f},{:.2f}] "
+                   "(containment prior ACTIVE)\n", n, xmin, xmax, ymin, ymax);
 }
 
 // Continuous existence belief: fold one sensor frame of evidence into each instance's log-odds L and remove
@@ -972,6 +1140,13 @@ void SpecificWorker::update_existence_beliefs()
     const float g   = cfg_.exist_evidence_gain;
     const float ar  = cfg_.exist_adequacy_ref;
     const float cap = cfg_.exist_adequacy_cap;
+
+    // "ZED removes": absence only counts as removal evidence on a frame where ZED actually produced detections
+    // (any depth_var==0 slice). A frame carrying only ricoh slices (or a dropped/empty ZED detector output) means
+    // ZED did not effectively look → an unexplained chair HOLDs, never vacates. Ricoh confirms, never removes.
+    bool zed_present = false;
+    for (const auto& s : pkt.slices)
+        if (s.has_depth and s.depth_var == 0.0f) { zed_present = true; break; }
 
     std::vector<std::uint64_t> to_remove;
     for (auto& [id, inst] : fitter_->instances())
@@ -1020,28 +1195,38 @@ void SpecificWorker::update_existence_beliefs()
             const float explained = adequacy * std::clamp(1.0f - inst.last_clutter_frac, 0.0f, 1.0f);
             llr = (explained >= ar) ? g * (explained - ar) / std::max(1e-3f, cap - ar)
                                     : -g * (ar - explained) / std::max(1e-3f, ar);
-            // Be-still invariant: a MOVING frame only CONFIRMS existence — its smeared/high-clutter mask must not
-            // count as NEGATIVE evidence. Winning the slice already reset frames_since_detection (no vacate); floor
-            // the log-odds delta at 0 so a moving pass can hold/raise existence but never argue the chair away.
-            if (fitter_->confirm_only(inst))
-                llr = std::max(0.0f, llr);
+            // Be-still invariant, CONTINUOUS: an unreliable frame (moving AND off-axis → smeared/high-clutter) only
+            // CONFIRMS — scale its NEGATIVE evidence by the frame reliability ∈ [0,1] so it can hold/raise existence
+            // (positive kept full) but not argue the chair away. Reliability→1 for a still or well-centred frame.
+            // ★RICOH CONFIRMS, NEVER REMOVES: a won ricoh slice (depth_var>0, or bearing-only) has unreliable
+            // depth/clutter → it may CONFIRM existence (its win already reset frames_since_detection) but must not
+            // produce NEGATIVE evidence. Only a ZED win (depth_var==0) may argue a chair down.
+            const bool won_zed = sl.has_depth and sl.depth_var == 0.0f;
+            if (llr < 0.0f)
+                llr = won_zed ? llr * fitter_->frame_reliability(inst) : 0.0f;
         }
         else if (cfg_.exist_occlusion_check and fitter_->los_occluded(inst))
             // WON NOTHING but the line of sight is BLOCKED by a closer object (another chair, the table, a
             // person …): absence of a mask is EXPECTED, not evidence the chair is gone → HOLD, never vacate.
             continue;
+        else if (not zed_present)
+            // WON NOTHING and ZED produced no detections this frame → ZED didn't effectively look; ricoh absence
+            // never removes → HOLD.
+            continue;
         else
         {
-            // WON NOTHING while in the frustum, UNOCCLUDED, on a live sensor frame → absence evidence, but its
-            // CONFIDENCE RAMPS with how long the instance has gone unexplained (freshness-as-precision, NOT a
-            // hard gate): a chair that just lost the 1-to-1 slice or is briefly hidden (small frames_since_
-            // detection) is barely touched and recovers on its next win — this ramp prevents the death-spiral;
-            // a spot left unexplained-and-in-clear-view for seconds (a real phantom) accrues the FULL negative.
+            // WON NOTHING while in the frustum, UNOCCLUDED, on a ZED-active frame → absence evidence, but weighted
+            // TWO ways: (1) CONFIDENCE ramps with frames_since_detection (freshness-as-precision, anti-death-spiral
+            // — a chair that just lost the slice or is briefly hidden barely moves and recovers on its next win);
+            // (2) ZED EXPECTED-DETECTABILITY pd ∈ [0,1] — absence only removes to the degree ZED would RELIABLY
+            // have detected a present chair (falls off toward the image edge + with range). A far/peripheral chair
+            // that only ricoh can see has pd≈0 → it HOLDs (maintained by ricoh confirmations) and is removed only
+            // once a clean, close, centred ZED look comes up empty. This is "ZED removes".
             const float conf = (cfg_.exist_vacate_confident_frames > 0)
                 ? std::clamp(static_cast<float>(inst.frames_since_detection)
                              / static_cast<float>(cfg_.exist_vacate_confident_frames), 0.0f, 1.0f)
                 : 0.0f;
-            llr = -g * conf;
+            llr = -g * conf * fitter_->zed_detectability(inst);
         }
 
         inst.exist_logodds = std::clamp(inst.exist_logodds + llr,
@@ -1056,10 +1241,30 @@ void SpecificWorker::update_existence_beliefs()
     if (++ex_dbg % 60 == 0)
         for (const auto& [id, inst] : fitter_->instances())
             if (not inst.is_bearing_hypothesis)
-                std::print("chair_concept: [existence] {} L={:.2f} roi={} won={} since_det={} occluded={}\n",
-                           inst.node_name, inst.exist_logodds, inst.roi_valid ? 1 : 0,
-                           inst.assigned_mask_idx >= 0 ? 1 : 0, inst.frames_since_detection,
-                           (inst.roi_valid and inst.assigned_mask_idx < 0 and fitter_->los_occluded(inst)) ? 1 : 0);
+            {
+                const auto& ms = inst.model.state();
+                const bool has_poly = fitter_->has_room_polygon();
+                const bool inroom = (not has_poly)
+                                    or fitter_->point_in_room(Eigen::Vector2f(ms.cx, ms.cy), cfg_.exist_room_margin_m);
+                const int occluded = (inst.roi_valid and inst.assigned_mask_idx < 0 and fitter_->los_occluded(inst)) ? 1 : 0;
+                const float zed_pd = fitter_->zed_detectability(inst);   // ZED expected-detectability that gates vacate
+                std::print("chair_concept: [existence] {} L={:.2f} pos=({:.2f},{:.2f}) inroom={} roomprior={} roi={} won={} since_det={} occluded={} zed_pd={:.2f}\n",
+                           inst.node_name, inst.exist_logodds, ms.cx, ms.cy, inroom ? 1 : 0,
+                           has_poly ? 1 : 0, inst.roi_valid ? 1 : 0,
+                           inst.assigned_mask_idx >= 0 ? 1 : 0, inst.frames_since_detection, occluded, zed_pd);
+                // Same diagnostic to a CSV (you read those) — roomprior=0 ⇒ polygon NOT loaded; inroom=0 ⇒ outside walls;
+                // zed_pd=0 ⇒ ZED can't reliably see it (far/edge) so absence won't remove it (ricoh-only-visible).
+                static std::ofstream ex_csv = []{ std::ofstream f("etc/chair_existence_log.csv", std::ios::trunc);
+                    f << "cycle,node,L,cx,cy,inroom,roomprior_loaded,roi,won,since_det,occluded,zed_pd\n"; return f; }();
+                if (ex_csv)
+                {
+                    ex_csv << ex_dbg << ',' << inst.node_name << ',' << inst.exist_logodds << ',' << ms.cx << ',' << ms.cy
+                           << ',' << (inroom ? 1 : 0) << ',' << (has_poly ? 1 : 0) << ',' << (inst.roi_valid ? 1 : 0)
+                           << ',' << (inst.assigned_mask_idx >= 0 ? 1 : 0) << ',' << inst.frames_since_detection
+                           << ',' << occluded << ',' << zed_pd << '\n';
+                    ex_csv.flush();
+                }
+            }
 
     for (const std::uint64_t id : to_remove)
     {
@@ -1158,6 +1363,17 @@ void SpecificWorker::publish_chair_diagnostics(const rc::ChairInstance& inst,
     {
         ts_plot_->add_series(inst.node_name + "_fe", QColor(255, 170, 0), 1.1f);
         ts_plot_->add_point (inst.node_name + "_fe", free_energy);
+        // FE BASELINE on the SAME panel (same units): the FE lifting ABOVE the grey baseline IS the
+        // surprise, shown visually. The smoothed gap goes on its own panel (much smaller scale).
+        ts_plot_->add_series(inst.node_name + "_base", QColor(140, 140, 140), 0.9f);
+        if (ts_surprise_plot_)
+            ts_surprise_plot_->add_series(inst.node_name + "_surprise", QColor(255, 60, 60), 1.3f);
+        if (inst.fe_baseline >= 0.0f)   // skip the uninitialised (-1) baseline before the first fit
+        {
+            ts_plot_->add_point(inst.node_name + "_base", inst.fe_baseline);
+            if (ts_surprise_plot_)
+                ts_surprise_plot_->add_point(inst.node_name + "_surprise", inst.fe_surprise);
+        }
         if (ts_cov_plot_)
         {
             ts_cov_plot_->add_series(inst.node_name + "_cov", QColor(0, 190, 255), 1.1f);
@@ -1172,25 +1388,10 @@ void SpecificWorker::publish_chair_diagnostics(const rc::ChairInstance& inst,
             if (observation.has_fresh_data)
                 ts_res_plot_->add_point (inst.node_name + "_res", static_cast<float>(observation.residual_pts.size()));
         }
-        if (ts_state_plot_)
-        {
-            // Sample EVERY cycle (not just fresh frames): the whole point is to see whether the accepted
-            // dimensions hold flat between masks (stabiliser working) or drift/jitter on stale data.
-            const auto& s = inst.model.state();
-            ts_state_plot_->add_series(inst.node_name + "_w", QColor(255, 90, 90), 1.1f);
-            ts_state_plot_->add_series(inst.node_name + "_h", QColor(90, 200, 90), 1.1f);
-            ts_state_plot_->add_point (inst.node_name + "_w", s.seat_w);
-            ts_state_plot_->add_point (inst.node_name + "_h", s.seat_d);
-        }
-        if (ts_ce_plot_ and inst.ai2_initialized)
-        {
-            // Pose posterior std (pose-only belief): position (Σ 0=cx, mm) and yaw (Σ 2, mrad).
-            const auto& S = inst.ai2_belief.covariance();
-            ts_ce_plot_->add_series(inst.node_name + "_pos", QColor(255, 90, 90), 1.1f);
-            ts_ce_plot_->add_series(inst.node_name + "_yaw", QColor(90, 200, 90), 1.1f);
-            ts_ce_plot_->add_point (inst.node_name + "_pos", 1000.f * std::sqrt(std::max(0.f, S(0, 0))));
-            ts_ce_plot_->add_point (inst.node_name + "_yaw", 1000.f * std::sqrt(std::max(0.f, S(2, 2))));
-        }
+        // (The inferred-dimensions trace that used to live here is gone: the BeliefInspector below shows
+        // every DOF's value AND its σ live, so a separate trace was showing the same thing twice.)
+        // (The pose-σ trace that used to live here is gone: the BeliefInspector panel now shows σ for EVERY
+        // DOF, next to the whole correlation structure and the yaw-mode posterior.)
     }
 
     if (fitter_->should_log(inst))
@@ -1368,11 +1569,14 @@ void SpecificWorker::trigger_graph_layout_twopi()
 
 void SpecificWorker::modify_node_slot(std::uint64_t id, const std::string& type)
 {
-    if (type != "chair")
+    // Chairs are generic `object` nodes named "chair_*" (schema migration).
+    if (type != "object")
         return;
 
     const auto node_opt = G->get_node(id);
     if (not node_opt.has_value())
+        return;
+    if (not node_opt.value().name().starts_with("chair"))
         return;
 
     fitter_->ensure_instance(node_opt.value(), room_node_id_);

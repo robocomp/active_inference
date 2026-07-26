@@ -48,6 +48,8 @@ struct ChairInstance
     float last_trunc_frac  = 0.0f;   // silhouette truncation (predict-only gate)
     float last_range       = 0.0f;   // mean camera→mask depth Z (m): static range weighting
     float last_centroid_radius = 1.0f; // normalised mask-centroid radius from the principal point (0=centred, →1 edge)
+    float last_depth_var   = 0.0f;   // σ_range² (m²) of the assigned slice: 0 for a ZED slice, >0 for a ricoh
+                                     // LiDAR-depth slice → added to R so ricoh's unreliable depth barely moves the fit
     float last_clutter_frac = 0.0f;  // mean clutter responsibility (fraction of the mask the model can't explain)
     float dbg_obliquity_cos = 1.0f;  // |cos| of camera→chair horizontal ray vs backrest normal (1=face-on, →0 grazing)
 

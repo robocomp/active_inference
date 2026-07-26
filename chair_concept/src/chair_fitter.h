@@ -90,7 +90,17 @@ public:
     float ego_ang_radps() const { return ego_ang_radps_; }
     // True when this frame must be CONFIRMATION-ONLY (no pose/shape change): robot linear/angular speed above
     // the still-level, OR the mask's own ego-motion corruption (motion_dotd) above its still-level.
+    // (A/B FALLBACK path only — the hard gate; used when cfg.ai2_motion_confirm_only is true.)
     bool  confirm_only(const ChairInstance& inst) const;
+    // Continuous frame reliability ∈ [0,1] (AIF): 1 = trustworthy (still OR centred), → 0 = moving AND peripheral.
+    // Scales the existence NEGATIVE evidence so a smeared/off-axis frame can only CONFIRM, never argue a chair away.
+    float frame_reliability(const ChairInstance& inst) const;
+    // ZED expected-detectability ∈ [0,1]: how reliably the ZED camera would detect a PRESENT chair at this
+    // instance's projected ROI — falls off toward the image edge (roi_offset) and with range. Used to weight
+    // the existence VACATE so absence only removes to the degree ZED should have resolved it ("ZED removes").
+    float zed_detectability(const ChairInstance& inst) const;
+    float motion_magnitude(const ChairInstance& inst) const;   // combined ego-motion speed (m/s)
+    float periphery_penalty(const ChairInstance& inst) const;  // off-axis penalty ∈ [0,1] (0 on-axis → 1 at periph_ref)
     // true if q is inside the polygon, or outside by no more than margin_m (tolerance for a wall-hugging chair
     // whose centroid noise pokes through the wall). No polygon loaded ⇒ always true (unknown room → no prior).
     bool point_in_room(const Eigen::Vector2f& q, float margin_m = 0.0f) const;

@@ -76,17 +76,21 @@ MotionCmPosGain = 0.30           # position (cx,cy) shared-error std per m/s of 
 MotionCmYawGain = 0.50           # yaw shared-error std (rad) per m/s of motion_dotd      — anti-ROTATE (0.12→0.50);
                                  # the "passing by rotated the chair" lever. 0 at stillness → zero cost stationary,
                                  # so push higher (0.7–1.0) if a moving pass still swings yaw.
-# HARD be-still invariant: ONLY a still/almost-still robot with a fresh ZED YOLO mask may alter pose/shape; every
-# other frame is CONFIRMATION-of-existence only (predict-only, mean/shape held). Robot speed is measured from the
-# camera transform chain (producer-independent), OR'd with the per-mask motion_dotd.
-AI2MotionConfirmOnly = true      # moving robot → predict-only (no pose/shape update)
-AI2StillLinMps   = 0.05          # camera linear speed (m/s) below which the robot counts as "still"
-AI2StillAngRadps = 0.10          # camera angular speed (rad/s) below which the robot counts as "still" (~6°/s)
-AI2StillDotd     = 0.05          # per-mask ego-motion corruption speed (m/s) still-level (OR'd in)
-AI2MovingUpdateCenterRadius = 0.35  # EXCEPTION: while moving, still allow a pose/shape update if the mask is WELL
-                                 # CENTRED. UNITS = focal-normalised (tan of the ray angle off the optical axis):
-                                 # 0.35 ≈ within ~19° of the axis; ~1.0 ≈ edge of a ~90° FoV. Lower = stricter
-                                 # (only near-axis masks update while moving); <0 disables the exception.
+# "Be-still-to-update" as CONTINUOUS PRECISION (AIF, no threshold): a frame's authority to MOVE the mean falls off
+# smoothly with an UNRELIABILITY = motion × off-axis-position. Still OR well-centred → full authority; moving AND
+# peripheral → the frame only CONFIRMS. Motion = per-mask motion_dotd OR'd with the robot's measured ego-speed;
+# off-axis penalty grows with the mask centroid radius². Feeds the pose common-mode AND the existence reliability.
+AI2AngLeverM   = 2.0             # rad/s → m/s lever (tangential speed of a chair ~this far) for the ego angular term
+AI2PeriphRef   = 0.50            # centroid radius (focal-norm, tan of off-axis angle) where the periphery penalty
+                                 # saturates to 1; 0.50 ≈ tan(27°). Smaller = only near-axis counts as "central".
+AI2MotionRefMps = 0.60           # motion (m/s) at which a fully-peripheral frame becomes fully unreliable (existence)
+# A/B FALLBACK — the OLD hard gate (predict-only when moving & off-centre). Default OFF; the continuous precision
+# above is the live path. Set AI2MotionConfirmOnly=true to compare; the four keys below feed only that path.
+AI2MotionConfirmOnly = false
+AI2StillLinMps   = 0.05
+AI2StillAngRadps = 0.10
+AI2StillDotd     = 0.05
+AI2MovingUpdateCenterRadius = 0.35
 AI2TruncGateFrac = 0.10          # skip the geometric update (predict only) when this fraction of the mask is on the image border
 AI2GnIters = 4                   # Gauss-Newton iterations per frame
 AI2ExtentStd = 0.05              # extent-observation noise (m) for the coverage/extent likelihood
@@ -132,6 +136,13 @@ BirthSeatD = 0.45
 BirthSeatH = 0.45
 BirthBackH = 0.45
 NllCost = false          # association cost = ½(m²+ln|S|) NLL (compete by likelihood, not raw distance)
+# ZED-only BIRTH: only a ZED slice (per-pixel depth ⇒ depth_var==0) may SPAWN a chair. A ricoh LiDAR-reprojected
+# depth slice (depth_var>0) has unreliable depth/extent → it may associate/confirm an existing chair but NOT birth
+# one (this is what created chair_3 — a wrong ricoh detection at 8.8 m, outside the room). ZED drives geometry,
+# ricoh confirms. Set RicohBirthEnabled=true to allow a confident, low-variance ricoh-depth slice to birth too.
+RicohBirthEnabled = false
+RicohBirthConf = 0.60      # min YOLO confidence for a ricoh birth (only when RicohBirthEnabled)
+RicohBirthMaxVar = 0.005   # max depth_var (m²) for a ricoh birth (only when RicohBirthEnabled)
 
 [Existence]
 # Continuous existence log-odds — the removal path (the stillbirth prune above is OFF, and merge only kills
@@ -162,6 +173,12 @@ OcclusionMarginM = 0.30  # an occluder must be ≥ this many metres CLOSER than 
 RoomPrior = true         # enforce the room-containment pose prior
 RoomMarginM = 0.40       # tolerance a chair centre may sit OUTSIDE the walls (wall-hugging chair + centroid noise)
 OutOfRoomGain = 1.5      # |ΔL| per frame while outside → removed in a few frames (also debounces a 1-frame glitch)
+# "ZED removes, ricoh confirms": a ricoh WIN confirms existence but a ricoh mask's ABSENCE never removes — only ZED
+# absence does, weighted by how reliably ZED would have detected a present chair (falls off toward the image edge +
+# with range). Fixes removal of a far/peripheral only-ricoh-visible chair when its 360 view is momentarily occluded.
+ZedEdgeOffset = 1.0      # normalised ROI offset (0=centred, 1=image edge) at which ZED detectability → 0
+ZedRangeFull  = 4.0      # within this range (m) ZED detects reliably → absence fully counts (pd=1)
+ZedRangeRef   = 7.0      # beyond this range (m) ZED absence says nothing about existence (pd=0)
 
 [Ice]
 Warn.Connections = "0"

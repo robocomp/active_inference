@@ -205,6 +205,7 @@ ChairFitter::ChairObservation ChairFitter::observe(ChairInstance& inst, const DS
             inst.last_trunc_frac  = slice.trunc_frac;
             inst.last_range       = slice.range;
             inst.last_centroid_radius = slice.centroid_radius;   // image-centredness (moving-update exception)
+            inst.last_depth_var   = slice.depth_var;             // 0=ZED, >0=ricoh LiDAR-depth → downweights the fit (added to R)
             const std::size_t begin = std::min(slice.support_begin, masks_packet.support_points.size());
             const std::size_t end = std::min(slice.support_end, masks_packet.support_points.size());
 
@@ -355,7 +356,11 @@ float ChairFitter::run_inference(ChairInstance& inst, const ChairObservation& ob
     const float range         = std::max(0.0f, inst.last_range);
     const float range_lat_var = (cfg_.ai2_range_noise_lat_per_m * range) * (cfg_.ai2_range_noise_lat_per_m * range);
     const float range_yaw_var = (cfg_.ai2_range_noise_yaw_per_m * range) * (cfg_.ai2_range_noise_yaw_per_m * range);
-    const float R = cfg_.ai2_sigma_base_m * cfg_.ai2_sigma_base_m + std::max(0.0f, inst.last_motion_var) + range_lat_var;
+    // depth_var (0 for a ZED slice, >0 for a ricoh LiDAR-depth slice) enters R in the SAME currency as motion_var:
+    // a ricoh point's along-ray depth uncertainty inflates its measurement noise, so it barely moves the belief
+    // mean (ZED drives geometry, ricoh only confirms). Mirrors table_concept's R = σ²+motion_var+depth_var+range.
+    const float R = cfg_.ai2_sigma_base_m * cfg_.ai2_sigma_base_m + std::max(0.0f, inst.last_motion_var)
+                    + std::max(0.0f, inst.last_depth_var) + range_lat_var;
 
     // Obliquity of the view onto the BACKREST (the chair's yaw-carrying surface, a VERTICAL plate whose normal
     // is horizontal, unlike the table's horizontal top). Backrest sits on the −local_y edge ⇒ its room-frame
@@ -397,12 +402,15 @@ float ChairFitter::run_inference(ChairInstance& inst, const ChairObservation& ob
         frame.points.insert(frame.points.end(), observation.candidate_pts.begin(), observation.candidate_pts.end());
         frame.points.insert(frame.points.end(), observation.residual_pts.begin(), observation.residual_pts.end());
         frame.R.assign(frame.points.size(), R);
-        // Ego-motion "be-still-to-update" common-mode: a frame captured while the robot moves is ONE shared
-        // smear → cap its authority to move the mean via the per-frame common-mode (NOT per-point R). Continuous,
-        // 0 at stillness. std grows per m/s of motion_dotd. (motion_cm_*_gain, ported from table_concept.)
-        const float md          = std::abs(inst.last_motion_dotd);
-        const float mot_pos_var = std::pow(cfg_.motion_cm_pos_gain * md, 2.0f);   // m²  (cx,cy)
-        const float mot_yaw_var = std::pow(cfg_.motion_cm_yaw_gain * md, 2.0f);   // rad² (yaw)
+        // AIF "be-still-to-update" as CONTINUOUS PRECISION: a frame's authority to MOVE the mean is capped via the
+        // per-frame common-mode (NOT per-point R), by a variance that grows with MOTION × OFF-AXIS position. Still
+        // (motion→0) OR well-centred (periphery→0) ⇒ ~0 common-mode ⇒ full authority; moving AND peripheral ⇒ large
+        // common-mode ⇒ the frame can only CONFIRM. No gate — "confirmation-only" is the precision→0 limit. The
+        // periphery factor is why a centred mask stays trustworthy while moving (the user's exception, emergent).
+        const float motion_mag  = motion_magnitude(inst);
+        const float periph      = periphery_penalty(inst);
+        const float mot_pos_var = std::pow(cfg_.motion_cm_pos_gain * motion_mag, 2.0f) * periph;   // m²  (cx,cy)
+        const float mot_yaw_var = std::pow(cfg_.motion_cm_yaw_gain * motion_mag, 2.0f) * periph;   // rad² (yaw)
         frame.chain_cov_xx  = inst.chain_cov_xx + range_lat_var + mot_pos_var;
         frame.chain_cov_yy  = inst.chain_cov_yy + range_lat_var + mot_pos_var;
         frame.chain_cov_yaw = range_yaw_var + obliquity_yaw_std * obliquity_yaw_std + mot_yaw_var;   // range + grazing cap (§D) + ego-motion
@@ -481,14 +489,14 @@ void ChairFitter::log_ai2_csv(const ChairInstance& inst, int npts, float R, bool
     {
         ai2_csv_.open(cfg_.ai2_csv_path, std::ios::out | std::ios::trunc);
         if (not ai2_csv_.is_open()) { cfg_.ai2_csv_path.clear(); return; }
-        ai2_csv_ << "cycle,node,npts,gated,energy,fe_baseline,fe_surprise,R,motion_var,trunc_frac,range,obliquity_cos,clutter_frac,"
+        ai2_csv_ << "cycle,node,npts,gated,energy,fe_baseline,fe_surprise,R,motion_var,depth_var,trunc_frac,range,obliquity_cos,clutter_frac,"
                  << "cx,cy,yaw,seat_w,seat_d,seat_h,back_h,std_cx,std_cy,std_yaw,std_yaw_rep\n";
     }
     const auto& s = inst.ai2_belief.state();
     const auto& S = inst.ai2_belief.covariance();
     const auto sd = [&](int i) { return std::sqrt(std::max(0.0f, S(i, i))); };
     ai2_csv_ << inst.processed_cycles << ',' << inst.node_name << ',' << npts << ',' << (gated ? 1 : 0) << ','
-             << energy << ',' << inst.fe_baseline << ',' << inst.fe_surprise << ',' << R << ',' << inst.last_motion_var << ',' << inst.last_trunc_frac << ',' << inst.last_range << ',' << inst.dbg_obliquity_cos << ',' << inst.last_clutter_frac << ','
+             << energy << ',' << inst.fe_baseline << ',' << inst.fe_surprise << ',' << R << ',' << inst.last_motion_var << ',' << inst.last_depth_var << ',' << inst.last_trunc_frac << ',' << inst.last_range << ',' << inst.dbg_obliquity_cos << ',' << inst.last_clutter_frac << ','
              << s.cx << ',' << s.cy << ',' << s.yaw << ','
              << inst.ai2_belief.seat_w() << ',' << inst.ai2_belief.seat_d() << ',' << inst.ai2_belief.seat_h() << ',' << inst.ai2_belief.back_h() << ','
              << sd(0) << ',' << sd(1) << ',' << sd(2) << ',' << std::sqrt(std::max(0.0f, inst.ai2_belief.covariance_reported()(2, 2))) << '\n';
@@ -542,6 +550,47 @@ void ChairFitter::update_ego_motion()
         ego_ang_radps_ = std::acos(cang) / dt;
     }
     prev_cam_pos_ = pos; prev_cam_fwd_ = fwd; prev_cam_tp_ = now; have_prev_cam_ = true;
+}
+
+// Combined ego-motion magnitude (m/s): the per-mask corruption speed OR'd with the robot's own measured speed
+// (linear + a lever-arm conversion of angular), so it works whether or not the producer populated motion_dotd.
+float ChairFitter::motion_magnitude(const ChairInstance& inst) const
+{
+    return std::max(std::abs(inst.last_motion_dotd),
+                    ego_lin_mps_ + cfg_.ai2_ang_lever_m * ego_ang_radps_);
+}
+
+// Off-axis penalty ∈ [0,1]: 0 on the optical axis (a centred mask has no peripheral smear/distortion), → 1 at
+// centroid radius ai2_periph_ref. This is the "well-centred masks stay trustworthy" lever, expressed continuously.
+float ChairFitter::periphery_penalty(const ChairInstance& inst) const
+{
+    const float ref = std::max(1e-6f, cfg_.ai2_periph_ref);
+    const float r = std::max(0.0f, inst.last_centroid_radius) / ref;
+    return std::clamp(r * r, 0.0f, 1.0f);
+}
+
+float ChairFitter::frame_reliability(const ChairInstance& inst) const
+{
+    // u = (motion / motion_ref) × periphery ∈ [0,1]: only high when the frame is BOTH moving AND off-axis.
+    const float u = std::clamp(motion_magnitude(inst) / std::max(1e-3f, cfg_.ai2_motion_ref_mps), 0.0f, 1.0f)
+                    * periphery_penalty(inst);
+    return 1.0f - u;
+}
+
+float ChairFitter::zed_detectability(const ChairInstance& inst) const
+{
+    if (not inst.roi_valid)
+        return 0.0f;
+    // Off-centre falloff: YOLO/depth degrade toward the ZED image edge. roi_offset is normalised (0=centred,
+    // ±1=image edge). Reliable near the axis, → 0 at the configured edge reach.
+    const float off = std::hypot(inst.roi_offset_x, inst.roi_offset_y);
+    const float pd_center = std::clamp(1.0f - off / std::max(1e-3f, cfg_.exist_zed_edge_offset), 0.0f, 1.0f);
+    // Range falloff: a far chair is a small, unreliable ZED detection → its ABSENCE is weak evidence. 1 within
+    // ZedRangeFull, smoothly → 0 by ZedRangeRef (beyond which ZED absence says nothing about existence).
+    const float r = std::max(0.0f, inst.last_range);
+    const float span = std::max(1e-3f, cfg_.exist_zed_range_ref - cfg_.exist_zed_range_full);
+    const float pd_range = std::clamp((cfg_.exist_zed_range_ref - r) / span, 0.0f, 1.0f);
+    return pd_center * pd_range;
 }
 
 bool ChairFitter::confirm_only(const ChairInstance& inst) const

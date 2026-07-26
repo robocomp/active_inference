@@ -52,6 +52,8 @@
 #include "epistemic_planner.h"
 #include "chair_affordance.h"
 #include "chair_model.h"
+#include "../../common/dashboard/belief_inspector.h"
+#include "../../common/dashboard/evidence_monitor.h"
 #include "../../common/dashboard/custom_widget.h"
 #include "../../common/dashboard/timeseries_plot.h"
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
@@ -160,11 +162,22 @@ private:
     // Live belief dashboard — its OWN top-level window (extracted from the DSR graph dock so it shows
     // independently of Agent.graph; mirrors room_concept/kinova_controller). Geometry persisted via QSettings.
     Custom_widget*       custom_widget_ = nullptr;
-    rc::TimeSeriesPlot*  ts_plot_       = nullptr;   // FE
+    rc::TimeSeriesPlot*  ts_plot_       = nullptr;   // FE (+ baseline)
+    rc::TimeSeriesPlot*  ts_surprise_plot_ = nullptr;   // FE surprise (attention signal), own panel/scale
     rc::TimeSeriesPlot*  ts_cov_plot_   = nullptr;   // belief uncertainty U(Σ) = Σ pos+size posterior std (m)
     rc::TimeSeriesPlot*  ts_res_plot_   = nullptr;   // residual point count
-    rc::TimeSeriesPlot*  ts_state_plot_ = nullptr;   // inferred dimensions w/h (stability check)
-    rc::TimeSeriesPlot*  ts_ce_plot_    = nullptr;   // belief size posterior std σ_w/σ_h (mm)
+    // Bottom panel (replaces the old pose-σ time-series): the WHOLE belief — every state DOF with its
+    // posterior σ, Σ as a correlation heatmap, and the 4-mode yaw posterior. The chair publishes no σ*,
+    // so the inspector drops the σ*/adequacy columns rather than show invented targets.
+    rc::BeliefInspector* belief_inspector_ = nullptr;
+    void refresh_belief_inspector();
+    // Section 1: the evidence-pipeline counter strip (same struct + widget as every other concept agent).
+    QWidget*             dashboard_window_ = nullptr;   // combined window: counters over plots + inspector
+    rc::EvidenceMonitor* evidence_monitor_ = nullptr;
+    rc::EvidenceGlobals  ev_g_{};                       // per-cycle fields reset at the head of compute()
+    void refresh_evidence_monitor();                    // throttled push of BOTH dashboard sections
+    std::chrono::steady_clock::time_point last_monitor_tp_{};   // ~5 Hz dashboard tick
+    std::chrono::steady_clock::time_point last_compute_tp_{};   // compute-rate estimate for the strip
     void restore_dashboard_geometry();
     void save_dashboard_geometry() const;
 

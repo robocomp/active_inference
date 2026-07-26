@@ -27,10 +27,13 @@ LIST(APPEND HEADERS
   ../src/chair_fitter.h
   ../src/chair_model.h
   ../src/chair_belief.h
+  ../src/chair_dof.h
   ../src/epistemic_planner.h
   ../src/chair_affordance.h
+  ${ACTIVE_INFERENCE_COMMON_DIR}/ai_belief/dof_spec.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/timeseries_plot.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/custom_widget.h
+  ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/belief_inspector.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_monitor/agent_presence_monitor.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_coordinator/agent_presence_coordinator.h
 )
