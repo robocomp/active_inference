@@ -51,6 +51,12 @@ MasksStallTimeoutMs = 3000   # 0 = disable the stall gate
 # ── AI2 belief (CABINET_FIT_AI2.md): full-covariance recursive filter; legs derived, soft mixture ──
 # This is the ONLY fit path (the legacy SDF-gradient/Fisher/queue/silhouette fit has been removed).
 [CabinetModel]
+# Stage 2 kitchen-of-runs model: (wall,tier) cells own the WallRunBeliefs — identity IS the cell, so there is
+# no birth/associate/merge and crossings / 10 cm slivers / ceiling boxes are structurally unrepresentable.
+# true fully REPLACES the classic tracker/fitter/residual-birth pipeline. Validate with the robot facing the
+# kitchen (routing needs the run masks in view). Islands/peninsulas are Stage 4, not yet handled.
+KitchenModel = true
+CeilingHeightM = 2.6        # z-domain upper bound for wall-run tops (H_room)
 SigmaObs = 0.05             # top/leg SDF split band (m): a point within TOP_THICKNESS+SigmaObs below the top
                             # face is attributed to the slab (candidate) vs a leg — used for the mask split.
 SdfThresholdForStorage = 0.08  # |SDF| below which a mask support point is on-surface (candidate) vs residual

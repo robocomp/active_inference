@@ -41,18 +41,24 @@ std::uint64_t CabinetSceneGraph::create_instance_from_detection(const Eigen::Vec
 
     // Auto-name: one past the highest existing "cabinet_<N>".
     int max_n = 0;
-    for (const auto& n : G_->get_nodes_by_type("box"))
+    for (const auto& n : G_->get_nodes_by_type("object"))
         if (n.name().rfind("cabinet_", 0) == 0)
             try { max_n = std::max(max_n, std::stoi(n.name().substr(8))); } catch (...) {}
     const std::string name = "cabinet_" + std::to_string(max_n + 1);
 
-    // Cortex registers no `cabinet` node type, so a run is a `box` node named "cabinet_*" — the same
-    // reuse-a-primitive-type + name-prefix pattern bottle_concept uses (`cylinder` named "bottle_*").
-    // Every get_nodes_by_type("box") MUST therefore be paired with a starts_with("cabinet") filter.
-    DSR::Node cabinet_node = DSR::Node::create<box_node_type>(name);
+    // Cortex registers no `cabinet` node type, so a run is a generic `object` node named "cabinet_*"
+    // (class carried in the `object_subtype` string attr) — the same reuse-a-primitive-type + name-prefix
+    // pattern the ecosystem uses. Every get_nodes_by_type("object") MUST therefore be paired with a
+    // starts_with("cabinet") filter.
+    DSR::Node cabinet_node = DSR::Node::create<object_node_type>(name);
+    // Display asset for the voxelizer 3D viewer (relative to its meshes/ root); the viewer loads & scales it
+    // to the fitted run box (cortex mesh_path contract — the agent owns its appearance).
+    G_->add_or_modify_attrib_local<mesh_path_att>(cabinet_node, std::string("cabinet_concept/meshes/cabinet.obj"));
+    G_->add_or_modify_attrib_local<mesh_texture_path_att>(cabinet_node, std::string("cabinet_concept/meshes/cabinet_basecolor.jpg"));
     G_->add_or_modify_attrib_local<width_m_att> (cabinet_node, cfg_.tracker_birth_width_m);
     G_->add_or_modify_attrib_local<depth_m_att> (cabinet_node, cfg_.tracker_birth_depth_m);
     G_->add_or_modify_attrib_local<height_m_att>(cabinet_node, cfg_.tracker_birth_height_m);
+    G_->add_or_modify_attrib_local<object_subtype_att>(cabinet_node, std::string("cabinet"));  // type-agnostic consumers
     G_->add_or_modify_attrib_local<level_att>   (cabinet_node, 3);
     G_->add_or_modify_attrib_local<parent_att>  (cabinet_node, room_node_id);
     {

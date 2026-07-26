@@ -8,14 +8,19 @@
  */
 
 #include "specificworker.h"
+#include "cabinet_dof.h"   // rc::kCabinetDofs / kWallRunDofs — names/units/σ* for the inspector rows
 #include "cabinet_geometry.h"   // rc::geom::belief_uncertainty
 
 #include <QByteArray>
 #include <QSettings>
+#include <QSplitter>
 #include <QVBoxLayout>
+#include <QWidget>
 #include <QColor>
 
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cmath>
 #include <string>
 #include <unordered_set>
@@ -35,39 +40,109 @@ void SpecificWorker::refresh_evidence_monitor()
         return;
     last_monitor_tp_ = now;
 
-    std::vector<rc::EvidenceRow> rows;
-    rows.reserve(fitter_->instances().size());
+    evidence_monitor_->update_view(ev_g_);
+    refresh_belief_inspector();   // same tick, same instance pass — the two views can never disagree
+}
+
+// ─── Belief inspector ────────────────────────────────────────────────────────────────────────────
+
+// Build the per-instance BELIEF snapshot and push it to the bottom panel. Called from
+// refresh_evidence_monitor(), so it inherits that method's ~5 Hz gate. All reads are main-thread.
+//
+// Two models, one card format — which is exactly what the agent-agnostic BeliefInspector API buys:
+//   • KITCHEN model: identity IS the (wall, tier) cell, so each ACTIVE cell owns a 5-DOF WallRunBelief
+//     [t0,t1,d,z0,z1] in its wall chart (yaw and lateral placement are unrepresentable by construction).
+//   • classic model: free 7-DOF boxes [cx,cy,yaw,L,d,z0,z1] tracked as instances, with a tier mode.
+void SpecificWorker::refresh_belief_inspector()
+{
+    if (not belief_inspector_)
+        return;
+    const auto now = std::chrono::steady_clock::now();
+    std::vector<rc::BeliefCard> cards;
+
+    // Fill one card's DOF rows + row-major Σ from any belief with a state vector `v` and covariance S.
+    // Eigen stores column-major, so the copy is an explicit double loop rather than a .data() memcpy.
+    const auto fill = [](rc::BeliefCard& c, const auto& S, const auto& v, const auto& specs)
+    {
+        constexpr int N = static_cast<int>(specs.size());
+        for (int j = 0; j < N; ++j)
+            c.dofs.push_back({specs[j].name, specs[j].unit, v[j],
+                              std::sqrt(std::max(0.0f, S(j, j))), specs[j].sigma_star});
+        c.cov.resize(N * N);
+        for (int i = 0; i < N; ++i)
+            for (int j = 0; j < N; ++j)
+                c.cov[i * N + j] = S(i, j);
+    };
+
+    if (cfg_.kitchen_model)
+    {
+        for (const auto& cell : kitchen_mgr_.cells())
+        {
+            if (not cell.active())
+                continue;   // a candidate cell has no belief yet — nothing to inspect
+            rc::BeliefCard c;
+            c.node  = cell.geom.id;
+            c.model = cell.geom.tier == 0 ? "wall-run base" : "wall-run upper";
+            const auto& S = cell.belief->covariance();
+            const auto& s = cell.belief->state();
+            const std::array<float, rc::WallRunBelief::N> v = {s.t0, s.t1, s.d, s.z0, s.z1};
+            fill(c, S, v, rc::kWallRunDofs);
+            c.s.fe          = cell.fe;
+            c.s.logodds     = cell.existence;
+            c.s.p_exists    = 1.0f / (1.0f + std::exp(-cell.existence));
+            c.s.initialized = true;   // an active cell is by definition a live belief
+            cards.push_back(std::move(c));
+        }
+        if (const auto* isl = kitchen_mgr_.island())   // the free-standing peninsula has no cell
+        {
+            rc::BeliefCard c;
+            c.node  = "island";
+            c.model = "wall-run island";
+            const auto& S = isl->covariance();
+            const auto& s = isl->state();
+            const std::array<float, rc::WallRunBelief::N> v = {s.t0, s.t1, s.d, s.z0, s.z1};
+            fill(c, S, v, rc::kWallRunDofs);
+            c.s.logodds     = kitchen_mgr_.island_existence();
+            c.s.p_exists    = 1.0f / (1.0f + std::exp(-kitchen_mgr_.island_existence()));
+            c.s.initialized = true;
+            cards.push_back(std::move(c));
+        }
+        belief_inspector_->update_view(cards);
+        return;
+    }
+
+    cards.reserve(fitter_->instances().size());
     for (const auto& [id, inst] : fitter_->instances())
     {
-        rc::EvidenceRow x;
-        x.node       = inst.node_name;
-        x.conf       = inst.last_mask_confidence;
-        x.since_det  = inst.frames_since_detection;
-        x.n_zed      = inst.dbg_n_zed_slices;
-        x.n_ricoh    = 0;   // ricoh is bearing-only now (never fused); column kept for the monitor layout
-        x.cand       = inst.dbg_cand_pts;
-        x.resid      = inst.dbg_resid_pts;
-        x.gated      = inst.dbg_gated;
-        x.energy     = inst.dbg_energy;
-        x.R          = inst.dbg_R;
-        x.lidar_rays = inst.dbg_lidar_rays;
-        x.lidar_raw  = inst.dbg_lidar_raw;
-        x.lidar_resid= inst.dbg_lidar_resid_m;
-        x.cov_ang    = inst.dbg_lidar_cov_ang;
-        x.vacate     = inst.ai2_belief.last_span_pts();
-        x.coverage   = inst.ai2_belief.last_lidar_rays();
-        x.L          = inst.existence.logodds();
-        x.p          = inst.existence.p_exists();
-        x.ex_locc    = inst.dbg_ex_lidar_occ;  x.ex_lfree = inst.dbg_ex_lidar_free;  x.ex_ln    = inst.dbg_ex_lidar_n;
-        x.ex_lfree_eff = inst.dbg_ex_lidar_free_eff;
-        x.ex_socc    = inst.dbg_ex_sil_occ;    x.ex_sfree = inst.dbg_ex_sil_free;    x.ex_sndet = inst.dbg_ex_sil_ndet;
-        x.ex_sfree_eff = inst.dbg_ex_sil_free_eff;
-        x.streak     = inst.existence_remove_streak;
+        rc::BeliefCard c;
+        c.node = inst.node_name;
+
+        // REPORTED covariance: the (d,z0,z1) diagonals carry the discrete-tier entropy, so a cabinet whose
+        // tier is unresolved shows the honest depth/height uncertainty. Same matrix the NBV planner scores.
+        const auto  S = inst.ai2_belief.covariance_reported();
         const auto& s = inst.ai2_belief.state();
-        x.w = s.L; x.h = s.d; x.H = s.z1;
-        rows.push_back(std::move(x));
+        const std::array<float, rc::CabinetBelief::N> v = {s.cx, s.cy, s.yaw, s.L, s.d, s.z0, s.z1};
+        fill(c, S, v, rc::kCabinetDofs);
+
+        const bool  base  = inst.ai2_belief.tier() == rc::CabinetTier::Base;
+        const float p_alt = inst.ai2_belief.tier_posterior();   // p(the OTHER tier)
+        c.modes.push_back({"tier", base ? "base" : "wall", 1.0f - p_alt});
+        c.modes.push_back({"tier", base ? "wall" : "base", p_alt});
+
+        c.s.fe            = inst.dbg_energy;
+        c.s.fe_baseline   = inst.fe_baseline;
+        c.s.fe_surprise   = inst.fe_surprise;
+        c.s.logodds       = inst.existence.logodds();
+        c.s.p_exists      = inst.existence.p_exists();
+        c.s.age_s         = inst.last_belief_touch.time_since_epoch().count() == 0
+                          ? -1.0f
+                          : std::chrono::duration<float>(now - inst.last_belief_touch).count();
+        c.s.remove_streak = inst.existence_remove_streak;
+        c.s.since_det     = inst.frames_since_detection;
+        c.s.initialized   = inst.ai2_initialized;
+        cards.push_back(std::move(c));
     }
-    evidence_monitor_->update_view(ev_g_, rows);
+    belief_inspector_->update_view(cards);
 }
 
 // ─── Dashboard construction + geometry ────────────────────────────────────────────────────────────
@@ -77,22 +152,22 @@ void SpecificWorker::refresh_evidence_monitor()
 // carry its own QSettings entry (mirrors room_concept's RoomViewer).
 void SpecificWorker::restore_dashboard_geometry()
 {
-    if (not custom_widget_)
+    if (not dashboard_window_)
         return;
     QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("cabinet_concept"));
     const QByteArray geom = settings.value(QStringLiteral("DashboardWindow_geometry")).toByteArray();
     if (not geom.isEmpty())
-        custom_widget_->restoreGeometry(geom);
+        dashboard_window_->restoreGeometry(geom);
     else
-        custom_widget_->resize(560, 620);
+        dashboard_window_->resize(560, 900);
 }
 
 void SpecificWorker::save_dashboard_geometry() const
 {
-    if (not custom_widget_)
+    if (not dashboard_window_)
         return;
     QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("cabinet_concept"));
-    settings.setValue(QStringLiteral("DashboardWindow_geometry"), custom_widget_->saveGeometry());
+    settings.setValue(QStringLiteral("DashboardWindow_geometry"), dashboard_window_->saveGeometry());
     settings.sync();
 }
 
@@ -112,8 +187,6 @@ void SpecificWorker::prune_dead_series()
         if (ts_surprise_plot_) ts_surprise_plot_->remove_series(n + "_surprise");
         if (ts_cov_plot_)      ts_cov_plot_->remove_series(n + "_cov");
         if (ts_res_plot_)      ts_res_plot_->remove_series(n + "_res");
-        if (ts_state_plot_)  { ts_state_plot_->remove_series(n + "_w");  ts_state_plot_->remove_series(n + "_h"); }
-        if (ts_ce_plot_)     { ts_ce_plot_->remove_series(n + "_sW");    ts_ce_plot_->remove_series(n + "_sH"); }
         it = ts_known_cabinets_.erase(it);
     }
     for (const auto& [id, inst] : fitter_->instances()) ts_known_cabinets_.insert(inst.node_name);
@@ -129,10 +202,7 @@ void SpecificWorker::build_dashboard()
     // top-level. NOT WA_DeleteOnClose: closing must only HIDE it, or the ts_*_plot_ pointers the
     // compute() feed uses would dangle. A QApplication always exists (generated/main.cpp).
     {
-        custom_widget_ = new Custom_widget("Cabinet Model — Free Energy, Coverage Deficit, Residuals & Dimensions (w,h)");
-        custom_widget_->setWindowTitle(QStringLiteral("cabinet_concept — belief dashboard"));
-        restore_dashboard_geometry();
-        custom_widget_->show();
+        custom_widget_ = new Custom_widget("Cabinet — Free Energy, Surprise, Belief Uncertainty & Residuals");
 
         // Create plot inside frame_series
         auto* series_layout = new QVBoxLayout(custom_widget_->frame_series);
@@ -158,28 +228,38 @@ void SpecificWorker::build_dashboard()
         ts_res_plot_->set_visible_window(60.f);
         series_layout->addWidget(ts_res_plot_);
 
-        // Inferred cabinet dimensions (w, h) — the size DOFs the stabiliser targets. Watch these to
-        // confirm the belief has stopped jittering between fresh masks (flat = stable).
-        ts_state_plot_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
-        ts_state_plot_->set_visible_window(60.f);
-        series_layout->addWidget(ts_state_plot_);
 
-        // (D) Counter-evidence accumulator S_w/S_h (the CUSUM gate is always on). Watch S charge on a
-        // surprise and decay back (glitch absorbed) vs climb to the barrier (a real change unlocks).
-        {
-            ts_ce_plot_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
-            ts_ce_plot_->set_visible_window(60.f);
-            series_layout->addWidget(ts_ce_plot_);
-        }
+        // (D) BELIEF INSPECTOR — the panel that replaced the σ_w/σ_h trace. A time-series of two variances
+        // showed a slice of the belief; this shows ALL of it: every state DOF (value, σ, the consumer's
+        // demand σ*, the remaining adequacy gap in nats), Σ as a correlation heatmap, and the discrete-tier
+        // posterior. Serves both cabinet models. Stretch 2: it is the panel you actually read.
+        belief_inspector_ = new rc::BeliefInspector(QStringLiteral("belief inspector"),
+                                                    custom_widget_->frame_series);
+        series_layout->addWidget(belief_inspector_, 2);
 
         // Per-instance series are registered idempotently by the diagnostics feed (publish_cabinet_diagnostics)
         // every cycle, so pre-existing instances need no separate registration here.
     }
 
-    // ── Evidence-consuming monitor — its OWN top-level window (per-instance snapshot + global counters) ──
+    // ── Evidence-consuming monitor (goes into the UPPER splitter pane) — per-instance snapshot + counters ──
     // Same lifecycle discipline as the dashboard above: plain QWidget (no QOpenGL), built on the main thread,
-    // updated from compute() (which is the GUI thread here). Only HIDDEN on close, never deleted (compute()
-    // keeps a raw pointer). Shows even with Agent.graph=false.
+    // updated from compute() (which is the GUI thread here). A CHILD of the combined window now.
     evidence_monitor_ = new rc::EvidenceMonitor(QStringLiteral("cabinet_concept — evidence monitor"));
-    evidence_monitor_->show();
+
+    // ── Combined window: evidence monitor (top) over the belief plots (bottom) in a resizable splitter ──
+    // (mirrors table_concept). Only HIDDEN on close, never deleted (compute() keeps the raw child pointers).
+    dashboard_window_ = new QWidget;
+    dashboard_window_->setWindowTitle(QStringLiteral("cabinet_concept — dashboard"));
+    auto* outer = new QVBoxLayout(dashboard_window_);
+    outer->setContentsMargins(0, 0, 0, 0);
+    auto* split = new QSplitter(Qt::Vertical, dashboard_window_);
+    split->addWidget(evidence_monitor_);   // reparents into the splitter
+    split->addWidget(custom_widget_);
+    split->setStretchFactor(0, 0);          // counter strip keeps its (small) size
+    split->setStretchFactor(1, 1);
+    split->setSizes({64, 836});
+    outer->addWidget(split);
+
+    restore_dashboard_geometry();
+    dashboard_window_->show();
 }

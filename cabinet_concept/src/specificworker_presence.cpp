@@ -94,9 +94,13 @@ void SpecificWorker::remove_owned_cabinet_nodes()
     if (not G)
         return;
 
-    // Cabinet instances are DSR `box` nodes named "cabinet_*". Deleting the node also drops its
+    // Cabinet instances are DSR `object` nodes named "cabinet_*". Deleting the node also drops its
     // room→cabinet RT edge, so no separate edge cleanup is needed. Startup stale-sweep (mirrors bottle).
+    // Also sweep the legacy `box` type so a pre-migration crashed/SIGKILLed run's leaked nodes get reaped.
     std::vector<std::uint64_t> to_delete;
+    for (const auto& node : G->get_nodes_by_type("object"))
+        if (node.name().starts_with("cabinet"))
+            to_delete.push_back(node.id());
     for (const auto& node : G->get_nodes_by_type("box"))
         if (node.name().starts_with("cabinet"))
             to_delete.push_back(node.id());
@@ -151,6 +155,14 @@ void SpecificWorker::cleanup_owned_nodes()
             qInfo() << "[cabinet_concept] removed cabinet node"
                     << QString::fromStdString(node_name);
         }
+
+        // Stage 2 kitchen model owns its own set of box nodes (keyed by cell, not in fitter_->instances()).
+        for (const auto& [cell_id, node_id] : kitchen_nodes_)
+        {
+            G->delete_node(node_id);
+            qInfo() << "[cabinet_concept] removed kitchen cell node" << QString::fromStdString(cell_id);
+        }
+        kitchen_nodes_.clear();
     }
 
     presence_coordinator_.cleanup_owned_nodes();
@@ -173,9 +185,10 @@ void SpecificWorker::remove_stale_affordance_nodes()
         if (not ours)
             if (const auto pid = G->get_attrib_by_name<parent_att>(aff); pid.has_value())
                 if (const auto parent = G->get_node(pid.value());
-                    // A cabinet run is a `box` node named "cabinet_*" (cortex has no `cabinet` type), so the
-                    // parent-type backstop must match box+name, NOT type()=="cabinet" (which never matched).
-                    parent.has_value() and parent->type() == "box"
+                    // A cabinet run is an `object` node named "cabinet_*" (cortex has no `cabinet` type;
+                    // class in the `object_subtype` attr), so the parent-type backstop must match
+                    // object+name, NOT type()=="cabinet" (which never matched).
+                    parent.has_value() and parent->type() == "object"
                     and parent->name().starts_with("cabinet"))
                 {
                     ours = true;

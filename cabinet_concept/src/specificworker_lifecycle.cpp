@@ -218,6 +218,190 @@ void SpecificWorker::shadow_route_kitchen_cells()
     }
 }
 
+// Transform-chain camera ego-motion (PRODUCER-INDEPENDENT, aligned with chair_concept::update_ego_motion): the
+// current room→zed pose vs the previous cycle's → linear + angular speed. ts==0 latest pose on the main thread ⇒
+// safe. Used by the stillness/VOR common-mode: geometry updates freeze continuously as motion×periphery grows.
+void SpecificWorker::update_kitchen_ego_motion()
+{
+    const auto now = std::chrono::steady_clock::now();
+    if (not inner_eigen_) { have_prev_cam_ = false; return; }
+    const auto T = inner_eigen_->get_transformation_matrix("room", "zed", 0);
+    if (not T.has_value()) { have_prev_cam_ = false; return; }   // pose chain unavailable → reset baseline
+    const Eigen::Vector3f pos = T->translation().cast<float>();
+    const Eigen::Vector3f fwd = T->linear().col(1).cast<float>();   // zed +y is the depth/forward axis
+    if (have_prev_cam_)
+    {
+        const float dt = std::max(1e-3f, std::chrono::duration<float>(now - prev_cam_tp_).count());
+        ego_lin_mps_ = (pos - prev_cam_pos_).norm() / dt;
+        const float fa = prev_cam_fwd_.norm(), fb = fwd.norm();
+        const float cang = (fa > 1e-6f and fb > 1e-6f)
+            ? std::clamp(prev_cam_fwd_.dot(fwd) / (fa * fb), -1.0f, 1.0f) : 1.0f;
+        ego_ang_radps_ = std::acos(cang) / dt;
+    }
+    prev_cam_pos_ = pos; prev_cam_fwd_ = fwd; prev_cam_tp_ = now; have_prev_cam_ = true;
+}
+
+// ─── Stage 2: kitchen-of-runs model ─────────────────────────────────────────────────────────────
+// The (wall,tier) cells own the WallRunBeliefs. Identity IS the cell, so there is no birth/associate/merge
+// and the disasters (crossings, 10 cm slivers, ceiling boxes) are unrepresentable — the wall chart fixes yaw
+// to the wall, pins the back on the wall, and bounds t∈[0,W], z∈[0,H_room]. Per cycle: gather the run-mask
+// support points, soft-route them to cells (responsibility → per-point R), let each active cell run one AI2
+// update, and reconcile the active set with DSR box nodes. Free-standing islands (peninsulas) route to no wall
+// and fall through here — that is Stage 4 (generic tracker), deliberately not handled yet.
+void SpecificWorker::run_kitchen_model()
+{
+    if (not fitter_ or not mask_ingestor_) return;
+    if (not kitchen_mgr_.built())                                   // build the cell table once we have a polygon
+    {
+        const auto walls = fitter_->kitchen_walls();
+        if (walls.empty()) return;
+        const rc::KitchenTier tiers[2] = { {0.0f, 0.87f, 0.55f, "base"}, {1.40f, 2.10f, 0.35f, "upper"} };
+        const rc::WallTierPrior tp[2] = {
+            { cfg_.base_depth_m, cfg_.base_depth_std, cfg_.base_z0_m, cfg_.base_z0_std, cfg_.base_z1_m, cfg_.base_z1_std },
+            { cfg_.wall_depth_m, cfg_.wall_depth_std, cfg_.wall_z0_m, cfg_.wall_z0_std, cfg_.wall_z1_m, cfg_.wall_z1_std },
+        };
+        rc::CabinetBeliefParams bp;                                 // only the fields WallRunBelief reads
+        bp.sigma_base_m         = cfg_.ai2_sigma_base_m;
+        bp.clutter_frac         = cfg_.ai2_clutter_frac;
+        bp.clutter_scale_m      = cfg_.ai2_clutter_scale_m;
+        bp.prior_L_std          = cfg_.ai2_prior_size_std;
+        bp.process_std_m        = cfg_.ai2_process_std_m;
+        bp.common_mode_pos_std  = cfg_.ai2_common_mode_pos_std;
+        bp.common_mode_size_std = cfg_.ai2_common_mode_size_std;
+        bp.gn_iters             = cfg_.ai2_gn_iters;
+        bp.extent_precision     = cfg_.extent_precision;
+        bp.free_space_precision = cfg_.free_space_precision;
+        kitchen_mgr_.build(walls, tiers, tp, bp, cfg_.ceiling_height_m);
+        std::print("cabinet_concept: [kitchen] built {} cells over {} walls (H_room={:.2f})\n",
+                   kitchen_mgr_.cells().size(), walls.size(), cfg_.ceiling_height_m);
+    }
+
+    const auto& pkt = mask_ingestor_->packet();                    // ZED-depth run masks (base + upper labels)
+    std::vector<Eigen::Vector3f> pts, island_pts;                  // wall-run points vs free-standing island points
+    double radius_wsum = 0.0, dotd_wsum = 0.0, w_sum = 0.0;         // point-weighted mean off-centring + mask motion
+    if (pkt.valid)
+        for (const auto& sl : pkt.slices)
+        {
+            const bool is_island = sl.label == "kitchen_island" or sl.label == "kitchen island" or sl.label == "island";
+            const bool run_label = sl.label == "cabinet" or sl.label == "chest of drawers"
+                                   or sl.label == "counter" or sl.label == "countertop";
+            if (sl.depth_var > 0.0f or not (run_label or is_island)) continue;   // ZED-depth cabinet/island masks
+            const std::size_t b = std::min(sl.support_begin, pkt.support_points.size());
+            const std::size_t e = std::min(sl.support_end,   pkt.support_points.size());
+            const double wn = static_cast<double>(e - b);
+            radius_wsum += static_cast<double>(sl.centroid_radius)     * wn;
+            dotd_wsum   += static_cast<double>(std::abs(sl.motion_dotd)) * wn;
+            w_sum       += wn;
+            std::vector<Eigen::Vector3f>& dst = is_island ? island_pts : pts;
+            for (std::size_t k = b; k < e; k += 2) dst.push_back(pkt.support_points[k]);
+        }
+
+    // STILLNESS / VOR gate (be still to UPDATE, else CONFIRM) — ALIGNED with chair_concept. The frame's authority
+    // to MOVE the geometry is capped by a common-mode covariance (NOT a hard gate) that the belief's Woodbury
+    // marginalisation saturates on. It grows with MOTION × OFF-AXIS position: motion = max(mask motion_dotd,
+    // ego_lin + ang_lever·ego_ang); periph = (radius/periph_ref)². Still (motion→0) OR well-centred (periph→0) ⇒
+    // ~0 common-mode ⇒ full authority; moving AND peripheral ⇒ confirm-only. A centred mask stays trusted while
+    // moving (the "pure-translation" exception, emergent from the periphery factor). WallRun has no yaw DOF.
+    update_kitchen_ego_motion();
+    const float radius     = (w_sum > 0.0) ? static_cast<float>(radius_wsum / w_sum) : 0.0f;
+    const float mean_dotd  = (w_sum > 0.0) ? static_cast<float>(dotd_wsum   / w_sum) : 0.0f;
+    const float motion_mag = std::max(mean_dotd, ego_lin_mps_ + cfg_.kitchen_ang_lever_m * ego_ang_radps_);
+    const float rr         = radius / std::max(1e-6f, cfg_.kitchen_periph_ref);
+    const float periph     = std::clamp(rr * rr, 0.0f, 1.0f);
+    const float mv         = cfg_.kitchen_motion_cm_gain * motion_mag;
+    rc::KitchenManagerParams mp;
+    rc::CabinetFrame tmpl;
+    tmpl.ego_motion_pos_var = mv * mv * periph;                     // fed to WallRunBelief::common_mode_inv_diag
+    static int mdbg = 0;
+    kitchen_mgr_.set_corner_fill_log(cfg_.verbose_log and (mdbg % 30) == 29);   // corner-fill state dump (verbose only)
+    kitchen_mgr_.update(pts, mp, tmpl);
+    kitchen_mgr_.update_island(island_pts, mp, tmpl);              // the free-standing 4th cabinet (peninsula)
+    publish_kitchen_boxes();
+
+    if (++mdbg % 30 == 0)                                           // low-rate stillness diagnostic
+        std::print("cabinet_concept: [kitchen] ego_lin={:.2f} ego_ang={:.2f} dotd={:.2f} radius={:.2f} periph={:.2f} → pos_var={:.4f}\n",
+                   ego_lin_mps_, ego_ang_radps_, mean_dotd, radius, periph, tmpl.ego_motion_pos_var);
+}
+
+// Reconcile the active cells with their DSR box nodes: create on activation, update size+RT while active,
+// delete on retirement. Nodes are `box` typed named "cabinet_w<seg>_<tier>" (stable per cell) — the same
+// reuse-a-primitive + "cabinet" prefix convention the classic path uses, so every consumer/cleanup still
+// matches them. Box convention (mirrors CabinetSceneGraph): width=L, depth=d, height=z1−z0, RT=(cx,cy,z0),(0,0,yaw).
+void SpecificWorker::publish_kitchen_boxes()
+{
+    if (not G or room_node_id_ == 0 or not rt_api_) return;
+    auto room_opt = G->get_node(room_node_id_);
+    if (not room_opt.has_value()) return;
+    const float rpx = G->get_attrib_by_name<pos_x_att>(room_opt.value()).value_or(200.f);
+    const float rpy = G->get_attrib_by_name<pos_y_att>(room_opt.value()).value_or(200.f);
+
+    const auto boxes = kitchen_mgr_.active_boxes();
+    std::unordered_set<std::string> live;
+    bool any_birth = false;
+    int slot = 0;
+    for (const auto& b : boxes)
+    {
+        live.insert(b.id);
+        const float H = std::max(0.05f, b.z1 - b.z0);
+        auto it = kitchen_nodes_.find(b.id);
+        if (it == kitchen_nodes_.end())
+        {
+            const std::string name = (b.wall_seg_id < 0)
+                ? std::string("cabinet_island")
+                : "cabinet_w" + std::to_string(b.wall_seg_id) + (b.tier == 0 ? "_base" : "_up");
+            DSR::Node node = DSR::Node::create<object_node_type>(name);
+            // Display asset for the voxelizer 3D viewer (relative to its meshes/ root); the viewer loads &
+            // scales it to the fitted run box (cortex mesh_path contract — the agent owns its appearance).
+            G->add_or_modify_attrib_local<mesh_path_att>(node, std::string("cabinet_concept/meshes/cabinet.obj"));
+            G->add_or_modify_attrib_local<mesh_texture_path_att>(node, std::string("cabinet_concept/meshes/cabinet_basecolor.jpg"));
+            G->add_or_modify_attrib_local<width_m_att> (node, b.L);
+            G->add_or_modify_attrib_local<depth_m_att> (node, b.d);
+            G->add_or_modify_attrib_local<height_m_att>(node, H);
+            G->add_or_modify_attrib_local<object_subtype_att>(node, std::string("cabinet"));  // type-agnostic consumers
+            G->add_or_modify_attrib_local<level_att>   (node, 3);
+            G->add_or_modify_attrib_local<parent_att>  (node, room_node_id_);
+            G->add_or_modify_attrib_local<pos_x_att>   (node, rpx + 150.f + 40.f * static_cast<float>(slot));
+            G->add_or_modify_attrib_local<pos_y_att>   (node, rpy + 50.f);
+            const auto id_opt = G->insert_node(node);
+            if (not id_opt.has_value()) { ++slot; continue; }
+            kitchen_nodes_[b.id] = id_opt.value();
+            rt_api_->insert_or_assign_edge_RT(room_opt.value(), id_opt.value(), {b.cx, b.cy, b.z0}, {0.f, 0.f, b.yaw});
+            any_birth = true;
+            std::print("cabinet_concept: [kitchen] BIRTH '{}' id={} run=({:.2f},{:.2f}) L={:.2f} d={:.2f} z=[{:.2f},{:.2f}]\n",
+                       name, id_opt.value(), b.cx, b.cy, b.L, b.d, b.z0, b.z1);
+        }
+        else
+        {
+            if (auto n = G->get_node(it->second); n.has_value())
+            {
+                // Backfill the display asset on nodes that predate this attribute (idempotent).
+                if (not G->get_attrib_by_name<mesh_path_att>(n.value()).has_value())
+                {
+                    G->add_or_modify_attrib_local<mesh_path_att>(n.value(), std::string("cabinet_concept/meshes/cabinet.obj"));
+                    G->add_or_modify_attrib_local<mesh_texture_path_att>(n.value(), std::string("cabinet_concept/meshes/cabinet_basecolor.jpg"));
+                }
+                G->add_or_modify_attrib_local<width_m_att> (n.value(), b.L);
+                G->add_or_modify_attrib_local<depth_m_att> (n.value(), b.d);
+                G->add_or_modify_attrib_local<height_m_att>(n.value(), H);
+                G->update_node(n.value());
+                rt_api_->insert_or_assign_edge_RT(room_opt.value(), it->second, {b.cx, b.cy, b.z0}, {0.f, 0.f, b.yaw});
+            }
+        }
+        ++slot;
+    }
+    for (auto it = kitchen_nodes_.begin(); it != kitchen_nodes_.end(); )
+    {
+        if (not live.contains(it->first))
+        {
+            G->delete_node(it->second);
+            std::print("cabinet_concept: [kitchen] RETIRE cell '{}' (node {})\n", it->first, it->second);
+            it = kitchen_nodes_.erase(it);
+        }
+        else ++it;
+    }
+    if (any_birth) trigger_graph_layout_twopi();
+}
+
 void SpecificWorker::run_instance_tracker()
 {
     shadow_route_kitchen_cells();     // Stage 0: shadow routing diagnostic (no behaviour change)
@@ -332,7 +516,7 @@ void SpecificWorker::run_instance_tracker()
     // EvidenceMonitor mask/tracker counters (merges are added in merge_overlapping_instances above).
     ev_g_.mask_frame_id = pkt.valid ? pkt.frame_id : -1;
     ev_g_.total_slices  = pkt.valid ? static_cast<int>(pkt.slices.size()) : 0;
-    ev_g_.table_dets      = static_cast<int>(dets.size());   // shared field in common/dashboard/evidence_monitor.h
+    ev_g_.class_dets      = static_cast<int>(dets.size());
                                                              // (generic "detections of this agent's class"; name is
                                                              // historical — do NOT rename, it is used by table/chair too)
     ev_g_.assigned      = n_assigned;

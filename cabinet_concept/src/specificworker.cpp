@@ -399,12 +399,18 @@ void SpecificWorker::compute()
     // tracker) and the logging probe (compute() tail) share one read. No-op unless a probe/fusion flag is on.
     if (cfg_.birth_fusion or cfg_.birth_surprise_probe) read_residual_field();
 
+    bool fresh_sweep = false;
+    // Stage 2 kitchen model: the (wall,tier) cells own the WallRunBeliefs; identity IS the cell, so there is no
+    // birth/associate/merge and the disasters (crossings, 10 cm, ceiling boxes) are unrepresentable. When on it
+    // fully replaces the classic tracker/fitter/residual-birth pipeline below.
+    if (cfg_.kitchen_model) { run_kitchen_model(); }
+    else {
+
     run_instance_tracker();   // data-driven birth / associate / merge (the only instance-lifecycle path)
 
     // Stage this cycle's LiDAR sweep (room frame) for the fitter's range factor. clear-then-set so the factor
     // never consumes a stale sweep; pump() is main-thread (reads the graph) + dormant while the feature is off.
     fitter_->clear_lidar_sweep();
-    bool fresh_sweep = false;
     if (lidar_ingestor_)
     {
         lidar_ingestor_->pump();   // pumps BOTH planes (helios primary; bpearl if LidarBpearlPrecision>0)
@@ -420,9 +426,10 @@ void SpecificWorker::compute()
         }
     }
 
-    // `box` nodes named "cabinet_*" are ours (see CabinetSceneGraph: cortex has no `cabinet` type).
+    // `object` nodes named "cabinet_*" are ours (see CabinetSceneGraph: cortex has no `cabinet` type;
+    // the class lives in the `object_subtype` attr).
     std::vector<DSR::Node> cabinet_nodes;
-    for (const auto& n : G->get_nodes_by_type("box"))
+    for (const auto& n : G->get_nodes_by_type("object"))
         if (n.name().starts_with("cabinet"))
             cabinet_nodes.push_back(n);
     for (const auto& node : cabinet_nodes)
@@ -442,8 +449,11 @@ void SpecificWorker::compute()
     if (cfg_.existence_removal_enabled)
         existence_->update_and_remove(*fitter_, lidar_ingestor_.get(), fresh_masks, fresh_sweep, ev_g_);
 
+    }   // end classic instance pipeline (skipped when cfg_.kitchen_model)
+
     // ── Evidence monitor: global counters + throttled snapshot push ──
-    ev_g_.instances    = static_cast<int>(fitter_->instances().size());
+    ev_g_.instances    = cfg_.kitchen_model ? static_cast<int>(kitchen_mgr_.active_boxes().size())
+                                            : static_cast<int>(fitter_->instances().size());
     ev_g_.sweep_points = (lidar_ingestor_ and fresh_sweep) ? static_cast<int>(lidar_ingestor_->sweep_room().size()) : 0;
     const auto now = std::chrono::steady_clock::now();
     if (last_compute_tp_.time_since_epoch().count() != 0)
@@ -459,6 +469,7 @@ void SpecificWorker::compute()
     refresh_evidence_monitor();
     prune_dead_series();   // drop timeseries lines for cabinets that were removed from the graph
     log_birth_surprise();  // EXPERIMENTAL read-only: residual grid → birth-surprise regions (cfg-gated, off by default)
+    fps_counter_.print("[cabinet_concept Compute]");
 }
 
 // EXPERIMENTAL, read-only. Reinterpret residual_concept's `grid` node (under room) as an unexplained-occupancy
@@ -723,25 +734,10 @@ void SpecificWorker::publish_cabinet_diagnostics(const rc::CabinetInstance& inst
             // observation.residual_pts only on fresh frames, so on a non-fresh publish it added nothing → no line.
             ts_res_plot_->add_point(inst.node_name + "_res", static_cast<float>(inst.dbg_resid_pts));
         }
-        if (ts_state_plot_)
-        {
-            // Sample EVERY cycle (not just fresh frames): the whole point is to see whether the accepted
-            // dimensions hold flat between masks (stabiliser working) or drift/jitter on stale data.
-            const auto& s = inst.model.state();
-            ts_state_plot_->add_series(inst.node_name + "_L", QColor(255, 90, 90), 1.1f);
-            ts_state_plot_->add_series(inst.node_name + "_d", QColor(90, 200, 90), 1.1f);
-            ts_state_plot_->add_point (inst.node_name + "_L", s.L);
-            ts_state_plot_->add_point (inst.node_name + "_d", s.d);
-        }
-        if (ts_ce_plot_ and inst.ai2_initialized)
-        {
-            // Belief posterior std for the size DOFs (Σ index 3=w, 4=h), in mm — the size-uncertainty trace.
-            const auto& S = inst.ai2_belief.covariance();
-            ts_ce_plot_->add_series(inst.node_name + "_sW", QColor(255, 90, 90), 1.1f);
-            ts_ce_plot_->add_series(inst.node_name + "_sH", QColor(90, 200, 90), 1.1f);
-            ts_ce_plot_->add_point (inst.node_name + "_sW", 1000.f * std::sqrt(std::max(0.f, S(3, 3))));
-            ts_ce_plot_->add_point (inst.node_name + "_sH", 1000.f * std::sqrt(std::max(0.f, S(4, 4))));
-        }
+        // (The inferred-dimensions trace that used to live here is gone: the BeliefInspector below shows
+        // every DOF's value AND its σ live, so a separate w/h trace was showing the same thing twice.)
+        // (The size-posterior σ_w/σ_h trace that used to live here is gone: the BeliefInspector panel now
+        // shows σ for EVERY DOF, next to its target σ* and the whole correlation structure.)
     }
 
     if (fitter_->should_log(inst))

@@ -42,6 +42,7 @@
 #include <fstream>
 
 #include <genericworker.h>
+#include <fps/fps.h>
 #include <Eigen/Dense>
 #include <unordered_set>
 
@@ -52,11 +53,13 @@
 #include "../../common/instance_tracker/instance_tracker.h"   // rc::InstanceTracker (birth/associate/death)
 #include "cabinet_scene_graph.h" // rc::CabinetSceneGraph (DSR node/RT I/O)
 #include "cabinet_fitter.h"      // rc::CabinetFitter (active-inference core)
+#include "cabinet_kitchen.h"     // rc::KitchenManager (Stage 2 kitchen-of-runs model)
 #include "cabinet_existence.h"   // rc::CabinetExistence (evidence-based removal)
 #include "birth_surprise_probe.h"   // rc::BirthSurpriseProbe (read-only: residual grid → birth surprise)
 #include "epistemic_planner.h"
 #include "cabinet_affordance.h"
 #include "cabinet_model.h"
+#include "../../common/dashboard/belief_inspector.h"
 #include "../../common/dashboard/custom_widget.h"
 #include "../../common/dashboard/evidence_monitor.h"
 #include "../../common/dashboard/timeseries_plot.h"
@@ -117,6 +120,20 @@ private:
     rc::InstanceTracker tracker_;
     void run_instance_tracker();   // called every cycle from compute()
     void shadow_route_kitchen_cells();   // kitchen-model Stage 0 SHADOW: route masks → (wall,tier) cells, log only
+    // Stage 2: the kitchen-of-runs model. Cells own the WallRunBeliefs; route masks → per-cell fit → existence →
+    // publish derived room-frame boxes. Replaces run_instance_tracker + process_cabinet_node when cfg_.kitchen_model.
+    void run_kitchen_model();
+    void publish_kitchen_boxes();        // reconcile active cells ↔ DSR cabinet_* box nodes (create/update/delete)
+    void update_kitchen_ego_motion();    // transform-chain camera speed (producer-independent), aligned with chair
+    rc::KitchenManager                        kitchen_mgr_;
+    std::unordered_map<std::string, std::uint64_t> kitchen_nodes_;   // cell signature → DSR node id
+    // Ego-motion state for the stillness/VOR gate (chair-aligned): camera pose deltas → linear/angular speed.
+    Eigen::Vector3f  prev_cam_pos_{0.0f, 0.0f, 0.0f};
+    Eigen::Vector3f  prev_cam_fwd_{0.0f, 1.0f, 0.0f};
+    std::chrono::steady_clock::time_point prev_cam_tp_{};
+    bool             have_prev_cam_ = false;
+    float            ego_lin_mps_   = 0.0f;   // camera linear speed (m/s)
+    float            ego_ang_radps_ = 0.0f;   // camera angular speed (rad/s), from the forward-axis rotation
     // Read the room's delimiting polygon + interior centroid and push them to the fitter (wall-flush
     // factor + the C2v yaw canonicalize reference). Cheap; called each cycle once the room is known.
     void refresh_room_geometry();
@@ -183,8 +200,10 @@ private:
     rc::KitchenRouting                                        kitchen_routing_;   // Stage 0 shadow cell table
     std::unique_ptr<rc::CabinetExistence>                    existence_; // evidence-based removal (existence log-odds)
 
-    // Live belief dashboard — its OWN top-level window (extracted from the DSR graph dock so it shows
-    // independently of Agent.graph; mirrors room_concept/kinova_controller). Geometry persisted via QSettings.
+    // Live belief dashboard + evidence monitor, MERGED into one top-level window (evidence monitor on top,
+    // belief plots below, in a vertical splitter — mirrors table_concept). Extracted from the DSR graph dock so
+    // it shows independently of Agent.graph. Geometry persisted via QSettings on dashboard_window_.
+    QWidget*             dashboard_window_ = nullptr;   // combined window owning the splitter
     Custom_widget*       custom_widget_ = nullptr;
     rc::TimeSeriesPlot*  ts_plot_       = nullptr;   // FE (+ baseline)
     rc::TimeSeriesPlot*  ts_surprise_plot_ = nullptr;   // FE surprise (attention signal), own panel/scale
@@ -201,8 +220,11 @@ private:
     void process_ricoh_bearings();   // associate ricoh detections to cabinets BY DIRECTION; collect the unassigned
     rc::TimeSeriesPlot*  ts_cov_plot_   = nullptr;   // belief uncertainty U(Σ) = Σ pos+size posterior std (m)
     rc::TimeSeriesPlot*  ts_res_plot_   = nullptr;   // residual point count
-    rc::TimeSeriesPlot*  ts_state_plot_ = nullptr;   // inferred dimensions w/h (stability check)
-    rc::TimeSeriesPlot*  ts_ce_plot_    = nullptr;   // belief size posterior std σ_w/σ_h (mm)
+    // Bottom panel (replaces the old σ_w/σ_h time-series): the WHOLE belief — every state DOF with its
+    // posterior σ, the consumer's demand σ* and the remaining adequacy gap, Σ as a correlation heatmap,
+    // and the discrete-tier posterior. Serves BOTH cabinet models (7-DOF box / 5-DOF wall run).
+    rc::BeliefInspector* belief_inspector_ = nullptr;
+    void refresh_belief_inspector();
     void build_dashboard();          // create the dashboard + evidence-monitor windows (called from initialize)
     void restore_dashboard_geometry();
     void save_dashboard_geometry() const;
@@ -228,6 +250,7 @@ private:
     int             residual_cand_hits_   = 0;
     std::chrono::steady_clock::time_point last_monitor_tp_{};   // ~5 Hz throttle
     std::chrono::steady_clock::time_point last_compute_tp_{};   // compute-rate EMA
+    FPSCounter                            fps_counter_;         // overall compute()-cycle rate (std::cout heartbeat)
 
     std::unique_ptr<DSR::RT_API>                        rt_api_;
     std::unique_ptr<DSR::InnerEigenAPI>                 inner_eigen_;      // for room↔body↔zed extrinsic (silhouette)

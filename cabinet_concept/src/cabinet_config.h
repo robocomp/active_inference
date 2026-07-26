@@ -106,6 +106,19 @@ struct CabinetConfig
     // L-corner mask split (a cabinet run cannot be L-shaped ⇒ an L-mask is two runs). Split one 'cabinet'
     // mask into its two perpendicular room-axis arms upstream (cabinet_lshape_split.h), so each run fits a
     // clean single-arm cloud. Replaces the fragile per-instance observe-time split.
+    // Stage 2 kitchen-of-runs model: the (wall,tier) cells own the WallRunBeliefs (identity IS the cell, so no
+    // birth/associate/merge, and crossings / 10 cm / ceiling boxes are unrepresentable). When true it fully
+    // REPLACES the tracker/fitter/residual-birth path. Off = classic pipeline. See cabinet_kitchen.h.
+    bool  kitchen_model           = false;
+    float ceiling_height_m        = 2.6f;    // z-domain upper bound for wall-run tops (H_room)
+    // Stillness/VOR common-mode (ALIGNED with chair_concept's non-movement validation): ego-motion from the
+    // transform chain (producer-independent) × off-axis periphery. ego_motion_pos_var = (gain·motion_mag)²·periph
+    // with motion_mag = max(mean|motion_dotd|, ego_lin + ang_lever·ego_ang) and periph = (radius/periph_ref)².
+    // A still OR well-centred frame ⇒ ~0 common-mode ⇒ full update authority; moving AND peripheral ⇒ confirm-only.
+    // Centred-while-moving stays trusted (the "pure-translation" exception, emergent from the periphery factor).
+    float kitchen_motion_cm_gain  = 0.30f;   // position shared-error std per (m/s) of motion  (chair MotionCmPosGain)
+    float kitchen_ang_lever_m     = 2.0f;    // rad/s → m/s lever for camera rotation           (chair AI2AngLeverM)
+    float kitchen_periph_ref      = 0.50f;   // centroid radius (focal-norm) at which periphery saturates (chair AI2PeriphRef)
     bool  counter_evidence_enabled = true;   // ingest 'counter'/'countertop' masks as top-face run evidence
     bool  lshape_split_enabled    = true;
     int   lshape_min_arm_pts      = 500;     // an arm (and the peeling residue) must exceed this to split

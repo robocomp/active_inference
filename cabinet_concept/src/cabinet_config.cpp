@@ -154,6 +154,11 @@ CabinetConfig load_cabinet_config(const ConfigLoader& cfg)
     out.room_axis_precision           = getf("CabinetModel.RoomAxisPrecision", 300.0f);
     out.room_axis_capture_rad         = getf("CabinetModel.RoomAxisCaptureRad", 0.0f);
     out.seed_room_axis_snap           = getb("CabinetModel.SeedRoomAxisSnap", true);
+    out.kitchen_model                 = getb("CabinetModel.KitchenModel",    false);
+    out.ceiling_height_m              = getf("CabinetModel.CeilingHeightM",  2.6f);
+    out.kitchen_motion_cm_gain        = getf("CabinetModel.KitchenMotionCmGain", 0.30f);
+    out.kitchen_ang_lever_m           = getf("CabinetModel.KitchenAngLeverM",    2.0f);
+    out.kitchen_periph_ref            = getf("CabinetModel.KitchenPeriphRef",    0.50f);
     out.counter_evidence_enabled      = getb("CabinetModel.CounterEvidence", true);
     out.lshape_split_enabled          = getb("CabinetModel.LShapeSplitEnabled", true);
     out.lshape_min_arm_pts            = geti("CabinetModel.LShapeMinArmPts", 500);

@@ -8,6 +8,7 @@
  */
 
 #include "epistemic_planner.h"
+#include "cabinet_dof.h"        // kCabinetDofs: names/units/σ* — one table shared with the dashboard
 
 #include <algorithm>
 #include <array>
@@ -95,26 +96,12 @@ EpistemicProposal EpistemicPlanner::compute(const CabinetBelief& belief, float l
                         kMinimumStandOffM, max_stand_off); };
 
     // ── Adequacy gap (active-perception step 1, CABINET.md) ─────────────────────────────────
-    // ★PLACEHOLDER target precision Σ* — the posterior covariance at which the cabinet is "adequately
-    // resolved" for its downstream consumer. It should be the physical manipulation tolerance (gripper
-    // clearance / placement margin / approach-cone half-angle) pushed through ∂success/∂θ, and ultimately
-    // PUBLISHED by the consuming grasp/place affordance. Hardcoded here until that channel exists — REPLACE.
-    static constexpr std::array<float, 7> kTargetStd =   // [cx,cy,yaw,L,d,z0,z1]  (m / rad)
-        {0.03f, 0.03f, 0.05f, 0.10f, 0.03f, 0.03f, 0.03f};
-    // Looser on L than on the rest ON PURPOSE: the navigation/landmark consumers care about where the
-    // run's faces are, not about its length to the centimetre, and a run is routinely seen in pieces
-    // so demanding a tight L would keep the affordance permanently hungry.
-    // Remaining information (nats) to carry the belief down to Σ*, summed PER-DOF over the marginal
-    // variances Σ_ii and clamped per DOF: ½·Σ_i max(0, ln(Σ_ii/Σ*_ii)). Per-DOF clamp (not the full
-    // ½ln detΣ/detΣ*) on purpose — the consumer needs EACH of w,h,yaw within tolerance, so an over-resolved
-    // DOF must NOT compensate for an under-resolved one (the full log-det lets a sub-mm position mask an
-    // unresolved 45° yaw). ≤0 on every DOF ⇒ adequate ⇒ no epistemic value left ⇒ the affordance goes quiet
-    // and the controller moves on — a threshold-free "done" set by the CONSUMER's precision demand, not a
-    // tuned Σ bound. A mode-ambiguous cabinet (marginal σyaw≈45°) stays inadequate on the yaw DOF until the
-    // mode resolves, so the robot keeps gathering evidence on it before releasing.
-    float adequacy_gap = 0.0f;
-    for (int j = 0; j < 7; ++j)
-        adequacy_gap += std::max(0.0f, 0.5f * std::log(S(j, j) / (kTargetStd[j] * kTargetStd[j])));
+    // Target precision Σ* and the gap formula now live in cabinet_dof.h / common/ai_belief/dof_spec.h —
+    // ONE table shared with the dashboard, so the demands the planner acts on are exactly the ones the
+    // BeliefInspector shows. Same values (incl. the deliberately loose L), same per-DOF clamp, same
+    // result as the old local kTargetStd. A mode-ambiguous cabinet (marginal σyaw≈45°) stays inadequate
+    // on the yaw DOF until the mode resolves, so the robot keeps gathering evidence before releasing.
+    const float adequacy_gap = adequacy_gap_nats(kCabinetDofs, [&](std::size_t j) { return S(j, j); });
 
     // Score each face by the D-optimal expected entropy reduction on Σ, with a range-aware R per face.
     const Eigen::Matrix<float, 7, 7> I6 = Eigen::Matrix<float, 7, 7>::Identity();
@@ -154,18 +141,18 @@ EpistemicProposal EpistemicPlanner::compute(const CabinetBelief& belief, float l
         // Dominant-uncertainty DOF, normalised by a common scale (10 cm / 0.1 rad) so metres and radians
         // are comparable — "which DOF is least known relative to its natural scale". (The gain decision
         // itself uses the unit-invariant log-det; this is only a readable diagnostic label.)
-        static const float  ref[7] = {0.10f, 0.10f, 0.10f, 0.10f, 0.10f, 0.10f, 0.10f};
-        static const char*  dof[7] = {"cx", "cy", "yaw", "L", "d", "z0", "z1"};
-        static const char*  fn[4]  = {"end+", "end-", "front", "back"};
+        constexpr float kRef = 0.10f;   // common scale: 10 cm / 0.1 rad
+        static const char* fn[4] = {"end+", "end-", "front", "back"};
         int dom = 0; float best = -1.0f;
-        for (int j = 0; j < 6; ++j)
+        for (int j = 0; j < S.rows(); ++j)   // all N (the old loop stopped at 6 and never named `z1`)
         {
-            const float n = std::sqrt(std::max(0.0f, S(j, j))) / ref[j];
+            const float n = std::sqrt(std::max(0.0f, S(j, j))) / kRef;
             if (n > best) { best = n; dom = j; }
         }
         if (verbose)
         std::print("[epistemic-NBV] face={} gain={:.3f}(raw {:.3f}) adq_gap={:.3f} | Σ dom-unc={} σ={:.3f}{} | raw +x={:.2f} -x={:.2f} +y={:.2f} -y={:.2f}\n",
-                   fn[best_idx], best_gain, best_raw, adequacy_gap, dof[dom], std::sqrt(std::max(0.0f, S(dom, dom))), (dom == 5 ? "rad" : "m"),
+                   fn[best_idx], best_gain, best_raw, adequacy_gap, kCabinetDofs[dom].name,
+                   std::sqrt(std::max(0.0f, S(dom, dom))), kCabinetDofs[dom].unit,
                    face_raw[0], face_raw[1], face_raw[2], face_raw[3]);
     }
 
@@ -185,7 +172,7 @@ EpistemicProposal EpistemicPlanner::compute(const CabinetBelief& belief, float l
     proposal.standoff_min_m = kMinimumStandOffM;
     proposal.standoff_max_m = max_stand_off;
     proposal.framing_fill   = kFramingFill;
-    proposal.sigma_star     = kTargetStd;
+    proposal.sigma_star     = sigma_star_array<7>(kCabinetDofs);   // the SAME demands the adequacy gap used
     if (!proposal.is_finite())
         return {};
     return proposal;

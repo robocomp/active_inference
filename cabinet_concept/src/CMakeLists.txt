@@ -47,11 +47,14 @@ LIST(APPEND HEADERS
   ../src/cabinet_lidar_range_channel.h
   ../src/cabinet_model.h
   ../src/cabinet_belief.h
+  ../src/cabinet_dof.h
   ../src/epistemic_planner.h
   ../src/cabinet_affordance.h
+  ${ACTIVE_INFERENCE_COMMON_DIR}/ai_belief/dof_spec.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/timeseries_plot.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/custom_widget.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/evidence_monitor.h
+  ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/belief_inspector.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_monitor/agent_presence_monitor.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_coordinator/agent_presence_coordinator.h
 )
