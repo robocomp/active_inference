@@ -45,7 +45,7 @@ class CameraVisualizer : public QDialog
 
     public:
         explicit CameraVisualizer(std::shared_ptr<DSRGraph> graph, const std::vector<Eigen::Vector2f>& room_polygon,
-                                  std::vector<std::string> overlay_object_types = {"object", "table", "cylinder", "chair"},
+                                  std::vector<std::string> overlay_object_types = {"object"},
                                   QWidget* parent = nullptr);
         ~CameraVisualizer();  // defined in .cpp for unique_ptr<MediaSubscriber> of incomplete type
 

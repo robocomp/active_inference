@@ -101,6 +101,19 @@ public:
         // Set to false to use fixed weight=1 (legacy behaviour).
         bool  rfe_boundary_quality_gate = true;
 
+        // ===== Hierarchical precision on the boundary prior (HIERARCHICAL_PRECISION.md) =====
+        // When enabled, boundary_weight is no longer min(1, σ_sdf²/sdf_mse_prev). Instead the boundary
+        // precision scale π=exp(u_b) is INFERRED (Gamma/log-precision hyperprior) from the boundary
+        // factor's own residual r_b, and a slow in-process hyper-state v (map_trust, Option A) predicts
+        // u via g(v)=u0+g_gain·v. Default OFF ⇒ identical behaviour to the legacy quality gate.
+        bool  hier_prec_boundary_enabled = false;
+        float hier_prec_u0        = 0.0f;   // log-precision prior mean (exp(0)=1 → full prior)
+        float hier_prec_sigma_u2  = 1.0f;   // how far r_b may pull u from g(v)
+        float hier_prec_lr_u      = 0.1f;   // π-step size (fast, per-frame)
+        float hier_prec_g_gain    = 1.0f;   // k in g(v)=u0+k·v (top-down map)
+        float hier_prec_lr_v      = 0.02f;  // v-step size (slow hyper-state)
+        float hier_prec_sigma_v2  = 1.0f;   // prior scale on the map_trust state v
+
         // ===== Far-point distance weighting =====
         // Far points have a longer lever arm for orientation correction and are
         // under-represented relative to their informational value (lidar point
@@ -869,6 +882,10 @@ private:
 
    std::ofstream      flip_csv_;   // one row per detected ~180° flip (tmp/sdf_localizer/flips_<ts>.csv)
    bool               flip_csv_open_attempted_ = false;
+   // Hierarchical boundary-precision A/B trace (etc/hier_prec.csv): one row per converged frame while
+   // params.hier_prec_boundary_enabled. Lazy-opened on first use; loc-thread only, no lock.
+   std::ofstream      hier_prec_csv_;
+   bool               hier_prec_csv_open_attempted_ = false;
    RerunLogger        rerun_logger_;
    int                rerun_frame_counter_ = 0;
    int                symmetry_check_counter_ = 0;
@@ -879,6 +896,15 @@ private:
    std::vector<float> last_adam_losses_;    // per-iteration losses from last Adam/LBFGS run
    float              last_loss_init_  = 0.f;  // loss before first step
    float              prev_sdf_mse_    = 0.f;  // sdf_mse from previous frame (for boundary quality gate)
+   // ===== Hierarchical boundary precision (HIERARCHICAL_PRECISION.md), persisted across frames =====
+   float              u_b_             = 0.f;  // boundary log-precision posterior; exp(u_b_) = ⟨π⟩ = boundary_weight
+   bool               u_b_init_        = false;// lazily seeded to g(v) on first use / after a recovery reset
+   float              map_trust_v_     = 0.f;  // Option-A slow hyper-state v; g(v)=u0+g_gain·v predicts u_b_
+   /// Stage-1 boundary-precision inference: one fast step on u_b_ (from the boundary residual r_b, using
+   /// the post-optimization posterior covariance sigma_x for the tr(Λ_b Σ) term) plus one slow step on the
+   /// map_trust hyper-state v. No-op unless params.hier_prec_boundary_enabled. Call once per frame after
+   /// the window pose has converged.
+   void               update_boundary_hyperprecision(const Eigen::Matrix3f &sigma_x);
    WindowManager::LossBreakdown last_loss_breakdown_;  // FE term breakdown after last Adam
    float              last_lbfgs_grad_norm_ = 0.f; // final gradient inf-norm after L-BFGS (0 for Adam/early-exit)
    // Per-frame timing — t_update_start_ set at entry of update(), shared with early-exit path

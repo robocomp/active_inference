@@ -1384,6 +1384,7 @@ namespace rc
         prediction_early_exits_ = 0;
         current_velocity_weights_ = Eigen::Vector3f::Ones();  // Reset velocity weights
         prev_sdf_mse_ = 0.f;  // Reset boundary quality gate
+        u_b_init_ = false;    // reseed hierarchical boundary log-precision to g(v) after a reset
         window_mgr_.clear();
         rerun_room_polygon_sent_ = false;
 
@@ -1427,6 +1428,7 @@ namespace rc
         prediction_early_exits_ = 0;
         current_velocity_weights_ = Eigen::Vector3f::Ones();  // Reset velocity weights
         prev_sdf_mse_ = 0.f;  // Reset boundary quality gate
+        u_b_init_ = false;    // reseed hierarchical boundary log-precision to g(v) after a reset
         window_mgr_.clear();
         rerun_room_polygon_sent_ = false;
 
@@ -1725,17 +1727,9 @@ namespace rc
             res.corners_in_fov = det.corners_in_fov;
             res.corner_matches = det.matches;
 
-            // Acceptance-rate diagnostic (~1/s): where do detected corners die? If detected≫accepted and
-            // one rej_* dominates, THAT gate is the too-strict one.
-            static std::uint64_t corner_dbg_k = 0;
-            if ((corner_dbg_k++ % 20) == 0)
-                std::print("[corners] in_fov={} detected={} accepted={} | occluded={} fewpoints(FORMATION)={} "
-                           "gate={} soft_orient={} convex={}(agree={:.2f}) unassigned={} | "
-                           "merged_coincident={} model_dups={}\n",
-                           det.corners_in_fov, det.corners_detected, det.corners_accepted,
-                           det.rej_occluded, det.rej_fewpoints, det.rej_dist, det.soft_orient,
-                           det.rej_convex, det.convex_rej_agree_mean(), det.rej_unassigned,
-                           det.merged_coincident, det.model_dup_dropped);
+            // Acceptance-rate diagnostic removed from the terminal (2026-07-25). DetectionResult still
+            // CARRIES every number it printed (corners_in_fov/detected/accepted, rej_*, soft_orient,
+            // convex agree, merged_coincident, model_dup_dropped) — re-enabling is a print, not a re-derivation.
             // The residual-distribution line and the per-corner AMBIGUOUS dump that lived here were
             // one-off instrumentation for setting map_sigma from data (2026-07-20) and are removed now
             // that it is set. DetectionResult still CARRIES every one of those numbers — resid_mean/max,
@@ -2066,6 +2060,10 @@ namespace rc
         res.timestamp_ms = lidar.second;
         last_update_result = res;
         prev_sdf_mse_ = res.sdf_mse;   // track for boundary quality gate next frame
+        // Hierarchical boundary precision (HIERARCHICAL_PRECISION.md): infer u_b_ (and the slow map_trust
+        // state) from this frame's converged boundary residual, for NEXT frame's boundary_weight. Optimized
+        // path only — the early-exit path skips optimization, so there is no fresh boundary evidence there.
+        update_boundary_hyperprecision(res.covariance);
 
         // ===== DEBUG LOG =====
         if (debug_log_.is_open())
@@ -2610,6 +2608,73 @@ namespace rc
         return res;
     }
 
+    // Hierarchical boundary precision (HIERARCHICAL_PRECISION.md, Stage 1 + Option A).
+    // Treat the boundary-prior precision scale as a random variable π=exp(u_b_) with a log-precision
+    // hyperprior u ~ N(g(v), σ_u²), g(v)=u0+g_gain·v, and a slow in-process hyper-state v (map_trust)
+    // with its own prior v ~ N(0, σ_v²). One fast VB step on u_b_ and one slow step on v per converged
+    // frame. Well-posed only because μ,Λ_b are FEJ-frozen (fixed linearization point) — see the FEJ+Schur
+    // marginalization. No-op unless enabled ⇒ zero effect on the legacy quality-gate path.
+    void RoomConcept::update_boundary_hyperprecision(const Eigen::Matrix3f &sigma_x)
+    {
+        if (not params.hier_prec_boundary_enabled) return;
+
+        const auto &bp = window_mgr_.boundary_prior;
+        // Same guard as the boundary loss term: it only contributes when the prior is valid AND the
+        // oldest slot is not the current one (window.size() > 1). Otherwise there is no residual to learn from.
+        if (not bp.valid or window_mgr_.size() <= 1) return;
+
+        // Oldest surviving pose x̂ (post-optimization) — the state the boundary prior anchors.
+        const auto &oldest = window_mgr_.window.front().pose;
+        const auto x_cpu = oldest.detach().to(torch::kCPU).contiguous();
+        const auto xa = x_cpu.accessor<float, 1>();
+        Eigen::Vector3f d(xa[0] - bp.mu[0], xa[1] - bp.mu[1], xa[2] - bp.mu[2]);
+        d[2] = std::atan2(std::sin(d[2]), std::cos(d[2]));   // wrap the angle residual
+
+        // Expected boundary residual ⟨r_b⟩ = Δᵀ Λ_b Δ + tr(Λ_b Σ_x): the point residual plus the
+        // pose-uncertainty discount (a shaky posterior should not over-drive the precision down).
+        const float quad  = d.dot(bp.precision * d);
+        const float trace = (bp.precision * sigma_x).trace();
+        const float r_b   = quad + std::max(0.0f, trace);
+
+        constexpr float d_dim = 3.0f;                        // boundary factor dimensionality
+        if (not u_b_init_)                                   // seed to the top-down prediction g(v)
+        {
+            u_b_ = params.hier_prec_u0 + params.hier_prec_g_gain * map_trust_v_;
+            u_b_init_ = true;
+        }
+        const float g_v = params.hier_prec_u0 + params.hier_prec_g_gain * map_trust_v_;
+
+        // Fast VB step on u=log π:  ∂F/∂u = ½ eᵘ r_b − d/2 + (u − g(v))/σ_u²  (minimize ⇒ u -= lr·∂F/∂u).
+        const float grad_u = 0.5f * std::exp(u_b_) * r_b - 0.5f * d_dim
+                             + (u_b_ - g_v) / params.hier_prec_sigma_u2;
+        u_b_ -= params.hier_prec_lr_u * grad_u;
+        // Pure numeric guard on exp(u_b_) (≈[2e-9, 5e8]); NOT a behavioural gate — the operating band is
+        // a few units around g(v). Prevents inf/denorm if a pathological residual ever appears.
+        u_b_ = std::clamp(u_b_, -20.0f, 20.0f);
+
+        // Slow VB step on the map_trust hyper-state v (Option A):
+        //   F_v = (u − g(v))²/(2σ_u²) + v²/(2σ_v²),  ∂F_v/∂v = −g_gain·(u − g(v))/σ_u² + v/σ_v².
+        const float grad_v = -params.hier_prec_g_gain * (u_b_ - g_v) / params.hier_prec_sigma_u2
+                             + map_trust_v_ / params.hier_prec_sigma_v2;
+        map_trust_v_ -= params.hier_prec_lr_v * grad_v;
+
+        // A/B trace: boundary_weight is exp(u_b_) AFTER this update (i.e. what next frame will apply).
+        if (!hier_prec_csv_open_attempted_)
+        {
+            hier_prec_csv_open_attempted_ = true;
+            hier_prec_csv_.open("etc/hier_prec.csv", std::ios::out | std::ios::trunc);
+            if (hier_prec_csv_.is_open())
+                hier_prec_csv_ << "ts_ms,r_b,quad,trace,u_b,boundary_weight,map_trust_v,window_size\n";
+        }
+        if (hier_prec_csv_.is_open())
+        {
+            hier_prec_csv_ << last_update_result.timestamp_ms << ',' << r_b << ',' << quad << ','
+                           << std::max(0.0f, trace) << ',' << u_b_ << ',' << std::exp(u_b_) << ','
+                           << map_trust_v_ << ',' << window_mgr_.size() << '\n';
+            hier_prec_csv_.flush();
+        }
+    }
+
     std::pair<float, int> RoomConcept::run_adam_loop(const OdometryPrior& odometry_prior)
     {
         auto window_params = window_mgr_.collect_params();
@@ -2630,8 +2695,13 @@ namespace rc
         // w = min(1, sigma_sdf² / sdf_mse_prev)
         // Good prev pose (sdf_mse_prev ≈ 0) → w≈1 (strong prior, normal behaviour).
         // Bad  prev pose (sdf_mse_prev >> sigma_sdf) → w→0 (prior suppressed, ADAM free to recover).
+        // Boundary precision scale. Legacy: quality gate min(1, σ_sdf²/sdf_mse_prev). Hierarchical
+        // (HIERARCHICAL_PRECISION.md): inferred π=exp(u_b_) from the previous frame's boundary residual,
+        // predicted top-down by the map_trust hyper-state. Mutually exclusive; hierarchical wins when on.
         float boundary_weight = 1.0f;
-        if (params.rfe_boundary_quality_gate && prev_sdf_mse_ > 1e-6f)
+        if (params.hier_prec_boundary_enabled)
+            boundary_weight = std::exp(u_b_);
+        else if (params.rfe_boundary_quality_gate && prev_sdf_mse_ > 1e-6f)
         {
             const float sigma2 = params.sigma_sdf * params.sigma_sdf;
             boundary_weight = std::min(1.0f, sigma2 / prev_sdf_mse_);
@@ -2719,8 +2789,13 @@ namespace rc
 
         const Eigen::Vector3f velocity_weights = compute_velocity_adaptive_weights(odometry_prior);
 
+        // Boundary precision scale. Legacy: quality gate min(1, σ_sdf²/sdf_mse_prev). Hierarchical
+        // (HIERARCHICAL_PRECISION.md): inferred π=exp(u_b_) from the previous frame's boundary residual,
+        // predicted top-down by the map_trust hyper-state. Mutually exclusive; hierarchical wins when on.
         float boundary_weight = 1.0f;
-        if (params.rfe_boundary_quality_gate && prev_sdf_mse_ > 1e-6f)
+        if (params.hier_prec_boundary_enabled)
+            boundary_weight = std::exp(u_b_);
+        else if (params.rfe_boundary_quality_gate && prev_sdf_mse_ > 1e-6f)
         {
             const float sigma2 = params.sigma_sdf * params.sigma_sdf;
             boundary_weight = std::min(1.0f, sigma2 / prev_sdf_mse_);

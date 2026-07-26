@@ -20,6 +20,8 @@
 #include <cstring>
 #include <limits>
 #include <print>
+#include <string>
+#include <string_view>
 
 namespace rc {
 
@@ -477,8 +479,9 @@ std::vector<CameraVisualizer::ObjectBox> CameraVisualizer::get_dsr_object_boxes(
     if (!graph_ || !inner_eigen_api_)
         return boxes;
 
-    // Same node families the voxelizer draws in its 3D viewer: generic objects, tables and the
-    // bottle_concept cylinders. Each carries width/depth/height + a room←node RT edge.
+    // Same node family the voxelizer draws in its 3D viewer: generic type()=="object" nodes (concept
+    // agents publish tables/chairs/bottles/… as objects, class in object_subtype). Each carries
+    // width/depth/height + a room←node RT edge; colour/label are derived per-node from object_subtype.
     const auto build_for = [&](const std::string& node_type)
     {
         for (const auto& node : graph_->get_nodes_by_type(node_type))
@@ -500,10 +503,17 @@ std::vector<CameraVisualizer::ObjectBox> CameraVisualizer::get_dsr_object_boxes(
 
             const float hw = width * 0.5f, hd = depth * 0.5f, hh = height * 0.5f;
 
-            // Floor-standing furniture (tables, chairs) anchors its node origin at the base → box
+            // Concept nodes are now generic type()=="object"; the class is in object_subtype (name prefix
+            // unchanged). Read it once and label/anchor by class instead of the old per-class node types.
+            std::string subtype;
+            if (const auto s = graph_->get_attrib_by_name<object_subtype_att>(node); s.has_value())
+                subtype = s.value();
+            const auto name_is = [&](std::string_view p) { return std::string_view(node.name()).starts_with(p); };
+
+            // Floor-standing furniture (tables, chairs, fridges) anchors its node origin at the base → box
             // extends upward [0, h]; free objects are center-anchored → [-h/2, h/2]. Matches the voxelizer.
-            const bool stands_on_floor = (node.type() == "table") || (node.type() == "chair")
-                                         || (node.name().rfind("table", 0) == 0);
+            const bool stands_on_floor = subtype == "table" || subtype == "chair" || subtype == "refrigerator"
+                                         || name_is("table") || name_is("chair") || name_is("refrigerator");
             const float z_lo = stands_on_floor ? 0.f     : -hh;
             const float z_hi = stands_on_floor ? height  :  hh;
 
@@ -520,9 +530,11 @@ std::vector<CameraVisualizer::ObjectBox> CameraVisualizer::get_dsr_object_boxes(
             if (const auto it = node.attrs().find("semantic_class");
                 it != node.attrs().end() && it->second.selected() == 0)
                 box.category = it->second.str();
-            if (node.type() == "table")    box.category = "model_table";
-            if (node.type() == "cylinder") box.category = "bottle";
-            if (node.type() == "chair")    box.category = "chair";
+            // Colour/label by class (object_subtype / name), mapping onto the palette's historic keys.
+            if (subtype == "table" || name_is("table"))          box.category = "model_table";
+            else if (subtype == "bottle" || subtype == "cylinder") box.category = "bottle";
+            else if (subtype == "chair" || name_is("chair"))      box.category = "chair";
+            else if (!subtype.empty())                            box.category = subtype;
 
             for (std::size_t i = 0; i < local.size(); ++i)
             {
@@ -535,8 +547,8 @@ std::vector<CameraVisualizer::ObjectBox> CameraVisualizer::get_dsr_object_boxes(
         }
     };
 
-    // Config-driven: project every DSR node type in Overlay.ObjectTypes (default
-    // object/table/cylinder/chair). Walls are handled separately (get_dsr_wall_quads).
+    // Config-driven: project every DSR node type in Overlay.ObjectTypes (default just "object" now that
+    // furniture is generic — legacy per-class types resolve to empty). Walls: get_dsr_wall_quads.
     for (const auto& node_type : overlay_object_types_)
         build_for(node_type);
     return boxes;

@@ -141,9 +141,10 @@ struct RoomConfig
     int LIDAR_WAIT_LOG_PERIOD_MS = 2000; // Waiting: how often to reprint why we are still waiting
 
     // Camera-overlay object projection: DSR node TYPES whose oriented boxes are projected on
-    // the live RGB image (alongside the always-drawn walls). Config Overlay.ObjectTypes is a
-    // comma-separated list (e.g. "object,table,cylinder,chair"); order is irrelevant.
-    std::vector<std::string> OVERLAY_OBJECT_TYPES = {"object", "table", "cylinder", "chair"};
+    // the live RGB image (alongside the always-drawn walls). Concept agents now publish all
+    // furniture as generic "object" nodes (class in object_subtype), so "object" alone covers
+    // tables/chairs/bottles/…. Config Overlay.ObjectTypes overrides this comma-separated list.
+    std::vector<std::string> OVERLAY_OBJECT_TYPES = {"object"};
 
     // ── Object anchors (validated modelled objects as SE(2) pose landmarks for localization) ──
     // OFF by default. Precision-weighted by each object's own belief covariance (no threshold).

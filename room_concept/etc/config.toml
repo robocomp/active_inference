@@ -173,6 +173,19 @@ BoundaryHessianQualityThreshold = 0.06   # m — umbral para incluir H_obs en He
 BoundaryMuQualityThreshold      = 0.10   # m — umbral para actualizar mu del prior
 EigenvalueClampBoundaryMax      = 500.0  # techo autovalores precisión (evita over-confidence)
 
+# ── Precisión jerárquica del prior de frontera (HIERARCHICAL_PRECISION.md) ──────
+# Sustituye BoundaryQualityGate por una precisión INFERIDA π=exp(u_b): hiperprior
+# Gamma/log-precisión sobre el residuo r_b del propio factor de frontera, con un
+# estado lento interno v (map_trust, Opción A) que la predice top-down g(v)=u0+k·v.
+# OFF por defecto ⇒ comportamiento idéntico al gate actual. NO activar en vivo sin avisar.
+# HierPrecBoundaryEnabled = false
+# HierPrecU0              = 0.0    # media prior de log-precisión (exp(0)=1 → prior completo)
+# HierPrecSigmaU2         = 1.0    # cuánto puede desviar r_b a u de g(v)
+# HierPrecLrU             = 0.1    # paso del update de π (rápido, por frame)
+# HierPrecGGain           = 1.0    # k en g(v)=u0+k·v (mapa top-down)
+# HierPrecLrV             = 0.02   # paso del estado lento v (map_trust)
+# HierPrecSigmaV2         = 1.0    # escala prior del estado v
+
 # ── Recovery ──────────────────────────────────────────────────────────────────
 RecoveryLossThreshold    = 0.45  # sqrt(sdf_mse) > umbral → frame malo (m).
                                   # Anterior 0.2 disparaba en giros normales.

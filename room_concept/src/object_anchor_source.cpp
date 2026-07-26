@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <print>
+#include <string_view>
 
 namespace rc
 {
@@ -19,10 +20,21 @@ namespace rc
             return m;
         }
 
-        // ─── Built-in reader: DSR "table" node (table_concept) → SE(2) pose landmark ───────────────
+        // ─── Built-in reader: DSR table node (table_concept) → SE(2) pose landmark ─────────────────
+        // table_concept nodes are now generic type()=="object"; this reader is registered under "object"
+        // and gather() calls it for every object node, so it must first accept only tables (class carried
+        // in object_subtype, name prefix table_* unchanged).
         bool read_table_anchor(const DSR::Node& node, DSR::DSRGraph& G, DSR::InnerGaussianAPI& gauss,
                                const ObjectAnchorSource::Config& cfg, ObjectAnchorObs& out)
         {
+            // 0. Class gate: only tables become SE(2) landmarks here.
+            bool is_table = std::string_view(node.name()).starts_with("table");
+            if (not is_table)
+                if (const auto s = G.get_attrib_by_name<object_subtype_att>(node); s.has_value())
+                    is_table = (s.value() == "table");
+            if (not is_table)
+                return false;
+
             // 1. Map anchor p_o + Σ_o (ROOM frame) via the chain-propagated Gaussian transform.
             //    Query in the object's PARENT (room) frame: the room→table edge covariance already
             //    folds the localization chain (table_concept), so we must NOT recompose through
@@ -119,7 +131,8 @@ namespace rc
 
     ObjectAnchorSource::ObjectAnchorSource()
     {
-        register_type("table", &read_table_anchor);
+        // Furniture nodes are generic type()=="object" now; the reader self-filters to the table class.
+        register_type("object", &read_table_anchor);
     }
 
     void ObjectAnchorSource::register_type(const std::string& node_type, Reader reader)

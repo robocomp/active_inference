@@ -17,6 +17,8 @@
 #include <cmath>
 #include <cstddef>
 #include <limits>
+#include <string>
+#include <string_view>
 #include <unordered_set>
 
 namespace rc {
@@ -922,10 +924,26 @@ void Viewer2D::draw_selected_grid_cell(const std::optional<Eigen::Vector2f>& cen
     selected_grid_cell_item_->setVisible(true);
 }
 
+namespace
+{
+// Furniture concept nodes are now generic type()=="object"; the class is carried in object_subtype (name
+// prefix table_*, chair_*, … unchanged). Return that class, or "" for a generic/unclassified object.
+std::string object_node_class(DSR::DSRGraph& G, const DSR::Node& n)
+{
+    if (const auto s = G.get_attrib_by_name<object_subtype_att>(n); s.has_value() and not s.value().empty())
+        return s.value();
+    for (std::string_view p : {"table", "chair", "bottle", "cabinet", "refrigerator"})
+        if (std::string_view(n.name()).starts_with(p))
+            return std::string(p);
+    return {};
+}
+}  // namespace
+
 void Viewer2D::refresh_semantic_bboxes(const std::shared_ptr<DSR::DSRGraph>& graph)
 {
-    // Poll DSR nodes of type object/obstacle/table on the main thread and draw their oriented
-    // BBs. Cadence is driven by the overlay's QTimer (no internal throttle).
+    // Poll DSR nodes (object/obstacle) on the main thread and draw their oriented BBs. Furniture is now
+    // generic "object" (class in object_subtype); tables get their own coloured layer via a class filter.
+    // Cadence is driven by the overlay's QTimer (no internal throttle).
     auto clear_map = [this](std::unordered_map<std::uint64_t, QGraphicsPolygonItem*>& items)
     {
         for (auto& [id, item] : items)
@@ -952,7 +970,10 @@ void Viewer2D::refresh_semantic_bboxes(const std::shared_ptr<DSR::DSRGraph>& gra
     if (!rt_api)
         return;
 
+    // want_class: "" ⇒ draw only GENERIC objects (no recognised furniture class), so classed nodes
+    // (tables, …) don't double-draw under the generic layer; non-empty ⇒ draw only that class.
     auto refresh_type = [this, &graph, &rt_api](const std::string& type,
+                                                 std::string_view want_class,
                                                  std::unordered_map<std::uint64_t, QGraphicsPolygonItem*>& items,
                                                  const QColor& stroke,
                                                  const QColor& fill,
@@ -961,6 +982,10 @@ void Viewer2D::refresh_semantic_bboxes(const std::shared_ptr<DSR::DSRGraph>& gra
         std::unordered_set<std::uint64_t> seen;
         for (const auto& node : graph->get_nodes_by_type(type))
         {
+            const std::string cls = object_node_class(*graph, node);
+            if (want_class.empty()) { if (not cls.empty()) continue; }   // generic objects only
+            else if (cls != want_class)               continue;         // a specific class layer
+
             const auto w_opt = graph->get_attrib_by_name<width_m_att>(node);
             const auto d_opt = graph->get_attrib_by_name<depth_m_att>(node);
             if (!w_opt.has_value() || !d_opt.has_value())
@@ -1033,11 +1058,12 @@ void Viewer2D::refresh_semantic_bboxes(const std::shared_ptr<DSR::DSRGraph>& gra
         }
     };
 
-    // Objects: blue. Obstacles: green. Tables: orange. Translucent fill so overlaps stay readable.
-    // table_concept publishes tables as type "table" (table_1, …), not "object".
-    refresh_type("object",   object_bbox_items_,   QColor(0, 160, 255), QColor(0, 160, 255, 60), 26);
-    refresh_type("obstacle", obstacle_bbox_items_, QColor(0, 200, 80),  QColor(0, 200, 80, 60),  27);
-    refresh_type("table",    table_bbox_items_,    QColor(255, 140, 0), QColor(255, 140, 0, 60), 28);
+    // Generic objects: blue. Obstacles: green. Tables: orange. Translucent fill so overlaps stay readable.
+    // All furniture is type "object" now (class in object_subtype); the table layer filters that class out
+    // of the generic-object pass so tables draw once, in orange.
+    refresh_type("object",   "",      object_bbox_items_,   QColor(0, 160, 255), QColor(0, 160, 255, 60), 26);
+    refresh_type("obstacle", "",      obstacle_bbox_items_, QColor(0, 200, 80),  QColor(0, 200, 80, 60),  27);
+    refresh_type("object",   "table", table_bbox_items_,    QColor(255, 140, 0), QColor(255, 140, 0, 60), 28);
 }
 
 void Viewer2D::start_semantic_bbox_overlay(std::shared_ptr<DSR::DSRGraph> graph, int period_ms)

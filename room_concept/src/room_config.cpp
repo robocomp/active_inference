@@ -117,6 +117,15 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.BoundaryFejSchur", room_concept.params.boundary_fej_schur);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.BoundaryQualitySigma", room_concept.params.boundary_quality_sigma);
 
+    // Hierarchical precision on the boundary prior (HIERARCHICAL_PRECISION.md) — default OFF.
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.HierPrecBoundaryEnabled", room_concept.params.hier_prec_boundary_enabled);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.HierPrecU0", room_concept.params.hier_prec_u0);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.HierPrecSigmaU2", room_concept.params.hier_prec_sigma_u2);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.HierPrecLrU", room_concept.params.hier_prec_lr_u);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.HierPrecGGain", room_concept.params.hier_prec_g_gain);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.HierPrecLrV", room_concept.params.hier_prec_lr_v);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.HierPrecSigmaV2", room_concept.params.hier_prec_sigma_v2);
+
     rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomConcept.RecoveryCooldownFrames", room_concept.params.recovery_cooldown_frames);
 
     // 180° symmetry-flip robustness (leaky evidence + confidence-scaled threshold).

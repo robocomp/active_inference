@@ -11,6 +11,7 @@
 #include <limits>
 #include <print>
 #include <string>
+#include <string_view>
 #include <sys/stat.h>
 #include <vector>
 
@@ -19,6 +20,21 @@
 
 namespace rc
 {
+
+namespace
+{
+// A furniture concept node now lives as a generic type()=="object" node whose class is carried in the
+// object_subtype string attribute; its NAME prefix (table_*, chair_*, …) is unchanged. Match either, so a
+// producer that publishes only the name (or only the subtype) is still recognised as that class.
+bool node_is_object_class(DSR::DSRGraph& G, const DSR::Node& n, std::string_view cls)
+{
+    if (std::string_view(n.name()).starts_with(cls))
+        return true;
+    if (const auto s = G.get_attrib_by_name<object_subtype_att>(n); s.has_value())
+        return s.value() == cls;
+    return false;
+}
+}  // namespace
 
 void RoomSceneGraph::monitor_affordance()
 {
@@ -289,6 +305,24 @@ void RoomSceneGraph::dsr_create_room_and_reparent(const rc::RoomConcept::UpdateR
         dsr_room_id_ = room_nodes.front().id();
         room_node_created_ = true;
         stable_frames_ = 0;
+        // Idempotent polygon write: a room node ADOPTED here (persisted from a prior session, or created bare by
+        // another agent) may LACK the delimiting polygon — it is only set on the create path below. Every
+        // consumer's room-containment prior (chair_concept, cabinet_concept) then silently goes inert. So if the
+        // adopted node has no usable polygon, author it now from the nominal model. Mirrors the create-path write.
+        if (auto adopted = G_->get_node(dsr_room_id_); adopted.has_value() and polygon_x.size() >= 3)
+        {
+            auto& rn = adopted.value();
+            const auto px = G_->get_attrib_by_name<delimiting_polygon_x_att>(rn);
+            const bool has_poly = px.has_value() and px->get().size() >= 3;
+            if (not has_poly)
+            {
+                rn.attrs()[delimiting_polygon_x_str.data()] = DSR::Attribute{polygon_x, 0, 0};
+                rn.attrs()[delimiting_polygon_y_str.data()] = DSR::Attribute{polygon_y, 0, 0};
+                G_->update_node(rn);
+                qWarning() << "RoomSceneGraph: authored missing delimiting_polygon on adopted room node"
+                           << dsr_room_id_ << "(" << static_cast<int>(polygon_x.size()) << "verts)";
+            }
+        }
         dsr_update_pose(res);
         return;
     }
@@ -441,9 +475,8 @@ void RoomSceneGraph::update_planner_obstacle_footprints()
         }
     };
 
-    collect("object");
+    collect("object");   // tables/chairs/bottles are now generic "object" nodes (class in object_subtype)
     collect("obstacle");
-    collect("table");   // tables (table_concept) are type "table", not "object" — avoid them too
 
     epistemic_->epistemic_planner().set_obstacle_footprints(std::move(footprints));
 }
@@ -467,8 +500,10 @@ void RoomSceneGraph::log_table_landmarks()
 
     const bool throttle_log = (table_landmark_log_k_++ % 10) == 0;   // stdout ~2/s; CSV gets every frame
 
-    for (const auto& n : G_->get_nodes_by_type("table"))
+    for (const auto& n : G_->get_nodes_by_type("object"))
     {
+        if (not node_is_object_class(*G_, n, "table")) continue;   // furniture is now type "object"
+
         // ROBOT-frame detection (raw): obj_obs_robot = [x, y]. Absent ⇒ table not detected this frame.
         const auto obs = G_->get_attrib_by_name<obj_obs_robot_att>(n);
         const bool has_obs = obs.has_value() and obs->get().size() >= 2;
@@ -601,8 +636,9 @@ void RoomSceneGraph::refresh_object_anchors()
     if ((anchor_dbg_k++ % 30) == 0)
     {
         int n_tables = 0, with_obs = 0;
-        for (const auto& n : G_->get_nodes_by_type("table"))
+        for (const auto& n : G_->get_nodes_by_type("object"))
         {
+            if (not node_is_object_class(*G_, n, "table")) continue;
             ++n_tables;
             if (const auto o = G_->get_attrib_by_name<obj_obs_robot_att>(n);
                 o.has_value() and o->get().size() >= 2)
@@ -623,8 +659,9 @@ void RoomSceneGraph::refresh_object_anchors()
         }
         // Cross-check: the table's RAW room→table RT + its actual parent frame. If parent!='room' or the
         // raw translation differs from p_o above, the map pose is being read in the wrong frame.
-        for (const auto& n : G_->get_nodes_by_type("table"))
+        for (const auto& n : G_->get_nodes_by_type("object"))
         {
+            if (not node_is_object_class(*G_, n, "table")) continue;
             std::string parent_name = "?";
             if (const auto p = G_->get_attrib_by_name<parent_att>(n); p.has_value())
                 if (const auto pn = G_->get_node(p.value()); pn.has_value())
