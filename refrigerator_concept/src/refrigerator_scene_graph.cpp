@@ -53,8 +53,8 @@ std::uint64_t RefrigeratorSceneGraph::create_instance_from_detection(const Eigen
     G_->add_or_modify_attrib_local<object_subtype_att>(refrigerator_node, std::string("refrigerator"));
     // Display asset for the voxelizer 3D viewer (relative to its meshes/ root). The agent owns its
     // appearance; the viewer loads & scales this to the fitted box (see cortex mesh_path contract).
-    G_->add_or_modify_attrib_local<mesh_path_att>(refrigerator_node, std::string("fridge.obj"));
-    G_->add_or_modify_attrib_local<mesh_texture_path_att>(refrigerator_node, std::string("fridge_basecolor.jpg"));
+    G_->add_or_modify_attrib_local<mesh_path_att>(refrigerator_node, std::string("refrigerator_concept/meshes/fridge.obj"));
+    G_->add_or_modify_attrib_local<mesh_texture_path_att>(refrigerator_node, std::string("refrigerator_concept/meshes/fridge_basecolor.jpg"));
     G_->add_or_modify_attrib_local<width_m_att> (refrigerator_node, cfg_.tracker_birth_width_m);
     G_->add_or_modify_attrib_local<depth_m_att> (refrigerator_node, cfg_.tracker_birth_depth_m);
     G_->add_or_modify_attrib_local<height_m_att>(refrigerator_node, cfg_.tracker_birth_height_m);

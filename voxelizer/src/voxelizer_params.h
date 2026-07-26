@@ -22,6 +22,7 @@ struct VoxelizerParams
     std::vector<std::string> YOLO_ACCEPTED_LABELS;
     float       YOLO_CONF_THRESH        = 0.25f;
     float       YOLO_IOU_THRESH         = 0.45f;
+    float       YOLO_SECOND_BEST_MARGIN = 0.0f;   // recover a rejected top class via an accepted runner-up within this margin (0 = off)
     int         YOLO_INPUT_SIZE         = 640;
     bool        YOLO_USE_GPU            = true;
     bool        YOLO_USE_TRT            = true;

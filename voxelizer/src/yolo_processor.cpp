@@ -259,6 +259,24 @@ void YoloProcessor::normalize_filter_and_erode(std::vector<SegDetection>& detect
     for (auto& detection : detections)
         detection.label = normalize_yolo_label(detection.label);
 
+    // Second-best recovery: before dropping a detection whose TOP class is not whitelisted, check its
+    // runner-up. If the runner-up IS accepted and the two classes are within second_best_margin, adopt the
+    // runner-up (label + confidence) rather than losing the mask to a near-tie misclassification. OFF at 0.
+    if (config_.second_best_margin > 0.0f)
+        for (auto& d : detections)
+        {
+            if (is_accepted_yolo_label(d.label) or d.second_class_id < 0)
+                continue;
+            const std::string second = normalize_yolo_label(d.second_label);
+            if (is_accepted_yolo_label(second)
+                and (d.confidence - d.second_confidence) <= config_.second_best_margin)
+            {
+                d.label      = second;
+                d.class_id   = d.second_class_id;
+                d.confidence = d.second_confidence;
+            }
+        }
+
     std::erase_if(detections, [&](const SegDetection& detection)
     {
         return !is_accepted_yolo_label(detection.label);

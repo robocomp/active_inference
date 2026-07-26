@@ -1,20 +1,26 @@
 #pragma once
 
 #include <QColor>
+#include <QImage>
 #include <QMatrix4x4>
 #include <QOpenGLBuffer>
 #include <QOpenGLFunctions>
 #include <QOpenGLShaderProgram>
+#include <QOpenGLTexture>
 #include <QOpenGLVertexArrayObject>
 #include <QOpenGLWidget>
 #include <QPoint>
+#include <QVector2D>
 #include <QVector3D>
+
+#include <memory>
 
 #include <array>
 #include <chrono>
 #include <mutex>
 #include <span>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace rc
@@ -68,7 +74,9 @@ public:
                             std::span<const float> yaws,
                             std::span<const std::string> categories = {},
                             std::span<const std::string> names = {},
-                            std::span<const std::string> subtypes = {});
+                            std::span<const std::string> subtypes = {},
+                            std::span<const std::string> mesh_paths = {},
+                            std::span<const std::string> mesh_texture_paths = {});
 
     // Flat triangle-list meshes in room frame [x0,y0,z0, x1,y1,z1, ...]. Optional per-mesh categories
     // colour them by class (table = amber model colour, others via color_for_category). Optional per-mesh
@@ -108,6 +116,21 @@ private:
         float px, py, pz;
         float r, g, b;
     };
+    // Textured furniture vertex: position + a baked lighting multiplier + UV (sampled base-colour × light).
+    struct TexVertex
+    {
+        float px, py, pz;
+        float light;
+        float u, v;
+    };
+    // A furniture display template: unit-normalised geometry + optional base-colour texture.
+    struct FurnitureTemplate
+    {
+        std::vector<QVector3D> tris;                   // positions (room-frame unit)
+        std::vector<QVector2D> uv;                     // per-vertex UV (parallel to tris)
+        QImage tex_image;                              // CPU base-colour image (null ⇒ untextured)
+        std::unique_ptr<QOpenGLTexture> tex;           // GPU texture, uploaded lazily in paintGL
+    };
 
     static QColor color_for_category(const std::string& category);
     // Trailing integer of a DSR node name ("cabinet_2" → 2, "table" → 0) → per-instance id.
@@ -115,11 +138,18 @@ private:
     // Same hue as `base`, but a distinct brightness per instance id so several nodes of one type read apart.
     static QColor shade_for_instance(const QColor& base, int instance_id);
     void request_update_throttled();
+    // Load (once, cached by relative asset path) a concept-published display mesh + optional base-colour
+    // texture. Called from paintGL (GL context current for the lazy texture upload). Returns nullptr if the
+    // path is empty or the OBJ failed to load (a failed load is cached to avoid retrying every frame).
+    FurnitureTemplate* get_or_load_template(const std::string& mesh_path, const std::string& texture_path);
     void load_view_state();
     void save_view_state() const;
     QOpenGLShaderProgram program_;
     QOpenGLVertexArrayObject room_vao_;
     QOpenGLBuffer room_vbo_{QOpenGLBuffer::VertexBuffer};
+    QOpenGLShaderProgram tex_program_;                 // textured-furniture pass (sampler2D × baked light)
+    QOpenGLVertexArrayObject tex_vao_;
+    QOpenGLBuffer tex_vbo_{QOpenGLBuffer::VertexBuffer};
 
     std::vector<Vertex> lidar_vertices_;
     std::vector<Vertex> residual_vertices_;
@@ -139,6 +169,8 @@ private:
     std::vector<std::string> graph_box_categories_;
     std::vector<std::string> graph_box_names_;   // parallel to graph_box_centers_ → per-instance shade + label
     std::vector<std::string> graph_box_subtypes_;// parallel to graph_box_centers_ → shape subtype ("round"/"square")
+    std::vector<std::string> graph_box_mesh_paths_;    // parallel → concept-published display OBJ (relative)
+    std::vector<std::string> graph_box_mesh_tex_;      // parallel → optional base-colour texture (relative)
     // Raw polygon coordinates (room frame) plus current debug rotation in 90deg steps.
     std::vector<float> raw_polygon_x_;
     std::vector<float> raw_polygon_y_;
@@ -158,6 +190,7 @@ private:
     bool show_labels_ = true;      // draw DSR node names as 3D text labels (debug reference)
     std::vector<QVector3D> robot_mesh_local_;
     std::mutex robot_mesh_mutex_;
+    std::unordered_map<std::string, FurnitureTemplate> mesh_cache_;   // display templates keyed by relative asset path
 
     // Robot pose (room frame).
     bool have_robot_pose_ = false;

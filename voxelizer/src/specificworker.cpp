@@ -149,6 +149,7 @@ void SpecificWorker::initialize()
     yolo_config.tray_mask_polygon_px= params.YOLO_TRAY_MASK_POLYGON_PX;
     yolo_config.tray_drop_fraction  = params.YOLO_TRAY_DROP_FRACTION;
     yolo_config.accepted_labels     = params.YOLO_ACCEPTED_LABELS;
+    yolo_config.second_best_margin  = params.YOLO_SECOND_BEST_MARGIN;
     yolo_config.verbose_debug       = verbose_debug_;
     // Build the ZED worker's stage list (seg + optional pose/semantic; each loads its ONNX model here).
     // The worker itself is STARTED later, after the media plane is up — its ZedSource pulls from it.
@@ -325,6 +326,7 @@ void SpecificWorker::initialize()
         ricoh_yolo_cfg.use_trt           = params.YOLO_USE_TRT;
         ricoh_yolo_cfg.mask_erode_kernel = params.YOLO_MASK_ERODE_KERNEL;
         ricoh_yolo_cfg.accepted_labels   = params.YOLO_ACCEPTED_LABELS;
+        ricoh_yolo_cfg.second_best_margin= params.YOLO_SECOND_BEST_MARGIN;
         ricoh_yolo_cfg.verbose_debug     = verbose_debug_;
 
         Detection360Config cfg360;

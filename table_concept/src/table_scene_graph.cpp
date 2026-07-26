@@ -42,12 +42,12 @@ std::uint64_t TableSceneGraph::create_instance_from_detection(const Eigen::Vecto
 
     // Auto-name: one past the highest existing "table_<N>".
     int max_n = 0;
-    for (const auto& n : G_->get_nodes_by_type("table"))
+    for (const auto& n : G_->get_nodes_by_type("object"))
         if (n.name().rfind("table_", 0) == 0)
             try { max_n = std::max(max_n, std::stoi(n.name().substr(6))); } catch (...) {}
     const std::string name = "table_" + std::to_string(max_n + 1);
 
-    DSR::Node table_node = DSR::Node::create<table_node_type>(name);
+    DSR::Node table_node = DSR::Node::create<object_node_type>(name);
     G_->add_or_modify_attrib_local<width_m_att> (table_node, cfg_.tracker_birth_width_m);
     G_->add_or_modify_attrib_local<depth_m_att> (table_node, cfg_.tracker_birth_depth_m);
     G_->add_or_modify_attrib_local<height_m_att>(table_node, cfg_.tracker_birth_height_m);
@@ -128,7 +128,14 @@ void TableSceneGraph::step_write_model(TableInstance& inst, DSR::Node& node,
     G_->add_or_modify_attrib_local<free_energy_att>(node, free_energy);
     // Inferred shape subtype (round/square), chosen by free-energy model evidence in TableFitter::evaluate_shape.
     // The voxelizer reads this to render the matching mesh (disc vs box).
-    G_->add_or_modify_attrib_local<object_subtype_att>(node, inst.subtype);
+    G_->add_or_modify_attrib_local<object_subtype_att>(node, std::string("table"));  // CLASS (uniform convention); the round/square SHAPE lives in mesh_path (round_table.obj vs table.obj)
+    // Publish the display mesh matching the inferred shape (agent picks the variant from its own belief; the
+    // viewer just loads it, cached by path, and scales to the fitted box). Flips with the subtype. Paths are
+    // relative to the voxelizer's meshes/ asset root — see the cortex mesh_path contract.
+    G_->add_or_modify_attrib_local<mesh_path_att>(node,
+        inst.subtype == "round" ? std::string("table_concept/meshes/round_table.obj")
+                                : std::string("table_concept/meshes/table.obj"));
+    G_->add_or_modify_attrib_local<mesh_texture_path_att>(node, std::string("table_concept/meshes/table_basecolor.png"));
 
     // Export full table-owned voxel memory (room frame) as XYZ triples.
     {

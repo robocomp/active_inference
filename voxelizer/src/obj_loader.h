@@ -3,6 +3,7 @@
 // Wavefront OBJ loading for the 3D viewer's robot mesh. Pure file I/O + triangulation, no GL or Qt
 // widget state — split out of voxel_opengl_viewer.cpp.
 
+#include <QVector2D>
 #include <QVector3D>
 
 #include <filesystem>
@@ -16,6 +17,7 @@ namespace rc::obj
 struct ObjMeshData
 {
     std::vector<QVector3D> triangles;
+    std::vector<QVector2D> uvs;        // per-triangle-vertex texture coords (parallel to `triangles`; (0,0) if the OBJ has none)
     QVector3D bb_min;
     QVector3D bb_max;
 };

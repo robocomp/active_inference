@@ -131,15 +131,19 @@ std::vector<YoloSegDetector::RawDetection> YoloSegDetector::parse_detections(con
         const float bw = data[2 * A + a];
         const float bh = data[3 * A + a];
 
-        float best_score = 0.0f;
-        int best_cls = -1;
+        float best_score = 0.0f, second_score = 0.0f;
+        int best_cls = -1, second_cls = -1;
         for (int c = 0; c < num_classes; ++c)
         {
             const float s = data[(4 + c) * A + a];
             if (s > best_score)
             {
-                best_score = s;
-                best_cls = c;
+                second_score = best_score;   second_cls = best_cls;
+                best_score = s;              best_cls = c;
+            }
+            else if (s > second_score)
+            {
+                second_score = s;            second_cls = c;
             }
         }
         if (best_score < conf_thresh_ || best_cls < 0)
@@ -161,7 +165,8 @@ std::vector<YoloSegDetector::RawDetection> YoloSegDetector::parse_detections(con
         if (x2 <= x1 || y2 <= y1)
             continue;
 
-        raws.push_back({cv::Rect2f(x1, y1, x2 - x1, y2 - y1), best_cls, best_score, std::move(coeff)});
+        raws.push_back({cv::Rect2f(x1, y1, x2 - x1, y2 - y1), best_cls, best_score, std::move(coeff),
+                        second_cls, second_score});
     }
 
     return raws;
@@ -397,11 +402,15 @@ std::vector<SegDetection> YoloSegDetector::detect(const cv::Mat& image, bool is_
                                    proto_data, proto_h, proto_w,
                                    bbox, orig_size, scale, pad_l, pad_t);
 
-        const std::string lbl = (rd.class_id < static_cast<int>(class_names_.size()))
-            ? class_names_[static_cast<std::size_t>(rd.class_id)]
-            : "unknown";
+        const auto name_of = [&](int cls) -> std::string
+        {
+            return (cls >= 0 and cls < static_cast<int>(class_names_.size()))
+                ? class_names_[static_cast<std::size_t>(cls)] : std::string{};
+        };
+        const std::string lbl = name_of(rd.class_id).empty() ? "unknown" : name_of(rd.class_id);
 
-        results.push_back({bbox, rd.class_id, lbl, rd.confidence, std::move(mask)});
+        results.push_back({bbox, rd.class_id, lbl, rd.confidence, std::move(mask),
+                           rd.second_class_id, name_of(rd.second_class_id), rd.second_confidence});
     }
 
     return results;

@@ -312,6 +312,24 @@ void SpecificWorker::run_kitchen_model()
     rc::KitchenManagerParams mp;
     rc::CabinetFrame tmpl;
     tmpl.ego_motion_pos_var = mv * mv * periph;                     // fed to WallRunBelief::common_mode_inv_diag
+
+    // FREE-SPACE CARVE (evidence of absence) — the complement to the grow-only extent. Feed the room-frame LiDAR
+    // sweep into the frame; WallRunBelief::accumulate_freespace marches each ray against the run's box and, for a
+    // THROUGH-beam exiting an END/TOP face (p_through gating separates hits from through-beams), RETRACTS that
+    // face. So an over-grown end proven empty by LiDAR shrinks back, and corner-fill becomes evidence-gated (a
+    // ray seeing through the corner overrides the fill). The reader is live because FreeSpacePrecision>0.
+    std::size_t sweep_n = 0;
+    if (lidar_ingestor_)
+    {
+        lidar_ingestor_->pump();                                   // main-thread; pins the sweep to room frame
+        if (lidar_ingestor_->helios_fresh())
+        {
+            tmpl.lidar_freespace.origin    = lidar_ingestor_->origin_room();
+            tmpl.lidar_freespace.endpoints = lidar_ingestor_->sweep_room();
+            sweep_n = tmpl.lidar_freespace.endpoints.size();
+        }
+    }
+
     static int mdbg = 0;
     kitchen_mgr_.set_corner_fill_log(cfg_.verbose_log and (mdbg % 30) == 29);   // corner-fill state dump (verbose only)
     kitchen_mgr_.update(pts, mp, tmpl);
@@ -319,8 +337,8 @@ void SpecificWorker::run_kitchen_model()
     publish_kitchen_boxes();
 
     if (++mdbg % 30 == 0)                                           // low-rate stillness diagnostic
-        std::print("cabinet_concept: [kitchen] ego_lin={:.2f} ego_ang={:.2f} dotd={:.2f} radius={:.2f} periph={:.2f} → pos_var={:.4f}\n",
-                   ego_lin_mps_, ego_ang_radps_, mean_dotd, radius, periph, tmpl.ego_motion_pos_var);
+        std::print("cabinet_concept: [kitchen] ego_lin={:.2f} ego_ang={:.2f} dotd={:.2f} radius={:.2f} periph={:.2f} sweep={} → pos_var={:.4f}\n",
+                   ego_lin_mps_, ego_ang_radps_, mean_dotd, radius, periph, sweep_n, tmpl.ego_motion_pos_var);
 }
 
 // Reconcile the active cells with their DSR box nodes: create on activation, update size+RT while active,

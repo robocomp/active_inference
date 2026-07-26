@@ -39,6 +39,10 @@ public:
         // (strongest — the tray is circular but ROIs are rectangular, so any touch is suspect).
         float tray_drop_fraction = 0.0f;
         std::vector<std::string> accepted_labels;
+        // Second-best recovery: if a detection's TOP class is NOT accepted but its runner-up class IS, and
+        // the two are within this confidence margin, relabel the detection to the runner-up instead of
+        // dropping it. 0 ⇒ OFF (top-class-only whitelist, the classic behaviour).
+        float second_best_margin = 0.0f;
         bool verbose_debug = false;
     };
 

@@ -19,6 +19,12 @@ struct SegDetection
     std::string label;
     float confidence;
     cv::Mat mask;
+    // Runner-up class for the same mask (argmax #2). Lets a downstream whitelist recover a detection whose
+    // TOP class is rejected but whose 2nd is accepted and within a small confidence margin. -1/"" if none
+    // (e.g. end2end models emit a single class per row, so no runner-up is available).
+    int second_class_id = -1;
+    std::string second_label;
+    float second_confidence = 0.f;
 };
 
 class YoloSegDetector
@@ -76,6 +82,8 @@ private:
         int class_id;
         float confidence;
         std::vector<float> mask_coeff;
+        int second_class_id = -1;      // argmax #2 over class scores (multi-class raw path only)
+        float second_confidence = 0.f;
     };
 
     [[nodiscard]] LetterboxResult preprocess(const cv::Mat& rgb_image) const;

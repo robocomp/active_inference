@@ -14,4 +14,6 @@ struct GraphObjectBox
     std::string     node_name;                               // DSR node name (empty for non-DSR boxes)
     std::string     category;
     std::string     subtype;                                 // object_subtype ("round"/"square" for tables); "" if unset
+    std::string     mesh_path;                               // display OBJ (relative asset path) published by the concept agent; "" ⇒ box/fitted
+    std::string     mesh_texture_path;                       // optional base-colour texture (relative); "" ⇒ flat colour
 };

@@ -234,6 +234,8 @@ void SpecificWorker::setup_custom_viewers()
         voxel_viewer_gl = std::make_unique<rc::VoxelOpenGLViewer>(nullptr);
         voxel_viewer_gl->set_perf_log(params.PERF_LOG);   // per-paint CSV probe off unless perf logging on
         voxel_viewer_gl->load_robot_mesh("meshes/shadow.obj");
+        // Furniture display meshes are no longer hardcoded here: each concept agent publishes mesh_path /
+        // mesh_texture_path on its node, and the viewer loads them on demand (cached) — see update_graph_boxes.
 
         panel_layout->addLayout(controls_layout);
         panel_layout->addWidget(voxel_viewer_gl.get(), 1);

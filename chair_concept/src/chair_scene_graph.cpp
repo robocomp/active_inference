@@ -30,17 +30,26 @@ std::uint64_t ChairSceneGraph::create_instance_from_detection(const Eigen::Vecto
     if (not room_opt.has_value())
         return 0;
 
-    // Auto-name: one past the highest existing "chair_<N>".
+    // Auto-name: one past the highest existing "chair_<N>". Chairs are now generic `object` nodes
+    // named "chair_*" (schema migration), so scan get_nodes_by_type("object") + name-prefix filter.
     int max_n = 0;
-    for (const auto& n : G_->get_nodes_by_type("chair"))
+    for (const auto& n : G_->get_nodes_by_type("object"))
         if (n.name().rfind("chair_", 0) == 0)
             try { max_n = std::max(max_n, std::stoi(n.name().substr(6))); } catch (...) {}
     const std::string name = "chair_" + std::to_string(max_n + 1);
 
-    DSR::Node chair_node = DSR::Node::create<chair_node_type>(name);
+    // Generic `object` node named "chair_*"; class carried in object_subtype ("chair"). Every
+    // get_nodes_by_type("object") MUST therefore be paired with a starts_with("chair") filter.
+    DSR::Node chair_node = DSR::Node::create<object_node_type>(name);
+    // Display asset for the voxelizer 3D viewer (relative to its meshes/ root); the viewer loads & scales it
+    // to the fitted box (cortex mesh_path contract — the agent owns its appearance). Empty/missing asset
+    // falls back to the fitted box.
+    G_->add_or_modify_attrib_local<mesh_path_att>(chair_node, std::string("chair_concept/meshes/chair.obj"));
+    G_->add_or_modify_attrib_local<mesh_texture_path_att>(chair_node, std::string("chair_concept/meshes/chair_basecolor.png"));
     G_->add_or_modify_attrib_local<width_m_att> (chair_node, cfg_.tracker_birth_seat_w);
     G_->add_or_modify_attrib_local<depth_m_att> (chair_node, cfg_.tracker_birth_seat_d);
     G_->add_or_modify_attrib_local<height_m_att>(chair_node, cfg_.tracker_birth_seat_h + cfg_.tracker_birth_back_h);
+    G_->add_or_modify_attrib_local<object_subtype_att>(chair_node, std::string("chair"));  // type-agnostic consumers
     G_->add_or_modify_attrib_local<level_att>   (chair_node, 3);
     G_->add_or_modify_attrib_local<parent_att>  (chair_node, room_node_id);
     {

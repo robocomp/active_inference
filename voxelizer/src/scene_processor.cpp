@@ -21,6 +21,28 @@
 #include <string_view>
 #include <variant>
 
+namespace
+{
+// Schema migration: every concept publishes its object as a generic type "object" node with the class in
+// the object_subtype string attr (table/chair/bottle/cabinet/refrigerator); node NAME prefixes are unchanged
+// (table_*, chair_*, bottle_*, cabinet_*, refrigerator_*). refrigerator_concept is the end-to-end example.
+// Derive the class from object_subtype when it names a known class, else from the node NAME prefix. Note that
+// for a table, object_subtype instead carries the SHAPE (round/square) — not a class — so it is only accepted
+// when it names a class and otherwise falls through to the name prefix. Returns "" for a non-furniture object.
+std::string object_class_of(DSR::DSRGraph& g, const DSR::Node& node)
+{
+    static constexpr std::array<std::string_view, 5> kClasses{"table", "chair", "bottle", "cabinet", "refrigerator"};
+    if (const auto s = g.get_attrib_by_name<object_subtype_att>(node); s.has_value())
+        if (const std::string& sv = s.value();
+            std::find(kClasses.begin(), kClasses.end(), sv) != kClasses.end())
+            return sv;
+    for (const auto cls : kClasses)
+        if (node.name().rfind(cls, 0) == 0)   // NAME-prefix fallback (unchanged across the migration)
+            return std::string(cls);
+    return {};
+}
+}   // namespace
+
 SceneProcessor::SceneProcessor(const std::shared_ptr<DSR::DSRGraph>& graph)
     : graph_(graph)
     , media_(std::make_unique<MediaPlaneSource>(graph))
@@ -512,34 +534,21 @@ std::optional<GraphObjectBox> SceneProcessor::build_graph_object_box(const DSR::
     if (const auto it = node.attrs().find("semantic_class"); it != node.attrs().end() && it->second.selected() == 0)
         category = it->second.str();
 
-    // Keep graph/model tables visually distinct from YOLO-derived table tracks.
-    // node.type() == "table" covers all table_1, table_2, … nodes.
-    if (node.type() == "table")
-        category = "model_table";
+    // Schema migration: every concept publishes its object as a generic type "object" node with the class in
+    // the object_subtype attr (table/chair/bottle/cabinet/refrigerator), NAME prefixes unchanged. Derive the
+    // display category from that class (object_subtype, else the NAME prefix — see object_class_of). Tables
+    // become "model_table" so graph/model tables stay visually distinct from YOLO-derived table tracks / mask
+    // points. bottle→hot-magenta box, cabinet→off-white carcass, refrigerator→scaled fridge template, etc.
+    if (node.type() == "object")
+    {
+        if (const std::string cls = object_class_of(*graph_, node); cls == "table")
+            category = "model_table";
+        else if (not cls.empty())
+            category = cls;
+    }
     // residual_concept obstacles (type "obstacle", named residual_*) → their own category/colour.
     if (node.type() == "obstacle")
         category = "obstacle";
-
-    // bottle_concept publishes bottles as `cylinder` nodes (bottle_1, …); tag them so
-    // the viewer paints their bounding box in a colour distinct from the table.
-    if (node.type() == "cylinder")
-        category = "bottle";
-
-    // cabinet_concept publishes runs as `box` nodes named "cabinet_*" — tag them so the viewer draws
-    // the oriented wireframe box in cyan (matching the solid cabinet mesh).
-    if (node.type() == "box" and node.name().rfind("cabinet_", 0) == 0)
-        category = "cabinet";
-
-    // refrigerator_concept publishes `object` nodes named "refrigerator_*" (subtype "refrigerator") — tag them
-    // so the viewer draws the scaled fridge template with a stable steel-grey colour/label.
-    if (node.name().rfind("refrigerator", 0) == 0)
-        category = "refrigerator";
-
-    // Inferred shape subtype (table_concept publishes "round"/"square" on object_subtype_att). The viewer
-    // renders the matching shape (round → disc-top table, square → the box mesh).
-    std::string subtype;
-    if (const auto sub_opt = graph_->get_attrib_by_name<object_subtype_att>(node); sub_opt.has_value())
-        subtype = sub_opt.value();
 
     // Concept-published display mesh + texture (relative asset paths). The viewer loads & renders these,
     // scaled to this box — the agent owns the appearance, the viewer stays type-agnostic.
@@ -548,6 +557,11 @@ std::optional<GraphObjectBox> SceneProcessor::build_graph_object_box(const DSR::
         mesh_path = mp.value();
     if (const auto mt = graph_->get_attrib_by_name<mesh_texture_path_att>(node); mt.has_value())
         mesh_texture_path = mt.value();
+
+    // Shape hint for the round-top table (disc) render. `object_subtype` now carries the CLASS uniformly
+    // (schema convention), so the round/square SHAPE is read from the shape-selected mesh_path filename
+    // (table_concept publishes round_table.obj vs table.obj) — same "round" value the viewer keyed on before.
+    const std::string subtype = (mesh_path.find("round") != std::string::npos) ? "round" : "square";
 
     const Eigen::Matrix3d& R = room_T_object->linear();
     const float yaw = static_cast<float>(std::atan2(R(1, 0), R(0, 0)));
@@ -575,30 +589,24 @@ std::vector<GraphObjectBox> SceneProcessor::get_graph_object_boxes(const std::st
     if (!graph_ || room_name.empty())
         return graph_boxes;
 
-    const auto object_nodes   = graph_->get_nodes_by_type("object");
-    const auto table_nodes    = graph_->get_nodes_by_type("table");
-    const auto cylinder_nodes = graph_->get_nodes_by_type("cylinder");   // bottle_concept bottles
-    const auto box_nodes      = graph_->get_nodes_by_type("box");        // cabinet_concept runs (cabinet_*)
-    // residual_concept `obstacle` nodes are NO LONGER drawn as red boxes — the occupancy grid (amber cells,
-    // the `grid` node) is now the residual display. The obstacle nodes still exist for the controller.
-    graph_boxes.reserve(object_nodes.size() + table_nodes.size() + cylinder_nodes.size() + box_nodes.size());
-    auto add_boxes = [&](const auto& nodes, auto&& keep)
+    // Schema migration: all concept furniture (table/bottle/cabinet/refrigerator/…) now publishes generic
+    // type "object" nodes, so a SINGLE query gathers them all (no per-class table/cylinder/box queries).
+    // build_graph_object_box skips any node missing box dimensions, so non-furniture "object" nodes fall out.
+    // residual_concept `obstacle` nodes are NOT drawn as red boxes — the occupancy grid is the residual display.
+    const auto object_nodes = graph_->get_nodes_by_type("object");
+    graph_boxes.reserve(object_nodes.size());
+    for (const auto& node : object_nodes)
     {
-        for (const auto& node : nodes)
-        {
-            if (not keep(node))
+        // Chairs with NO display mesh stay mesh-only (fitted mesh pass) — skip them here so the pre-migration
+        // behaviour is preserved. A chair that DOES publish a mesh_path is boxed like any other object so the
+        // box pass renders its scaled display template (the mesh pass then suppresses its fitted carcass).
+        if (object_class_of(*graph_, node) == "chair")
+            if (const auto mp = graph_->get_attrib_by_name<mesh_path_att>(node);
+                not mp.has_value() or mp.value().empty())
                 continue;
-            const auto box = build_graph_object_box(node, room_name, timestamp_ms);
-            if (box.has_value())
-                graph_boxes.push_back(box.value());
-        }
-    };
-    const auto always = [](const DSR::Node&) { return true; };
-    add_boxes(object_nodes,   always);
-    add_boxes(table_nodes,    always);
-    add_boxes(cylinder_nodes, always);
-    // `box` is a reused primitive type — only the "cabinet_*" runs are ours to draw.
-    add_boxes(box_nodes, [](const DSR::Node& n) { return n.name().rfind("cabinet_", 0) == 0; });
+        if (const auto box = build_graph_object_box(node, room_name, timestamp_ms); box.has_value())
+            graph_boxes.push_back(box.value());
+    }
     return graph_boxes;
 }
 
@@ -692,37 +700,31 @@ void SceneProcessor::update_viewer_object_meshes()
     const auto has_display_mesh = [&](const DSR::Node& n)
     { return graph_->get_attrib_by_name<mesh_path_att>(n).has_value()
              and not graph_->get_attrib_by_name<mesh_path_att>(n).value().empty(); };
-    for (const char* type : {"table", "chair"})
-        for (const auto& node : graph_->get_nodes_by_type(type))
-            if (const auto opt = graph_->get_attrib_by_name<mesh_vertices_att>(node); opt.has_value())
-            {
-                if (has_display_mesh(node))
-                    continue;
-                // table_concept's mesh is ALWAYS a box slab; for a round table it misrepresents the shape.
-                // Skip it here so the viewer's box pass draws the round table (disc top + pedestal) instead,
-                // keyed off the same object_subtype attribute. Square tables keep the solid box mesh.
-                if (std::string_view(type) == "table")
-                    if (const auto s = graph_->get_attrib_by_name<object_subtype_att>(node);
-                        s.has_value() and s.value() == "round")
-                        continue;
-                meshes.emplace_back(opt.value().get());
-                categories.emplace_back(type);
-                names.emplace_back(node.name());
-            }
-    // cabinet_concept publishes each run as a `box` node named "cabinet_*" (Cortex registers no `cabinet`
-    // type — the reuse-a-primitive + name-prefix pattern), with the fitted carcass in mesh_vertices_att
-    // (room frame, yaw baked in). Draw it as its solid model like table/chair. The `box` query returns ALL
-    // box nodes, so it MUST be paired with the "cabinet_" name filter.
-    for (const auto& node : graph_->get_nodes_by_type("box"))
-        if (node.name().rfind("cabinet_", 0) == 0)
-            if (const auto opt = graph_->get_attrib_by_name<mesh_vertices_att>(node); opt.has_value())
-            {
-                if (has_display_mesh(node))
-                    continue;
-                meshes.emplace_back(opt.value().get());
-                categories.emplace_back("cabinet");
-                names.emplace_back(node.name());
-            }
+    // Schema migration: table/chair/cabinet all publish generic type "object" nodes now, so a SINGLE query
+    // gathers them; the per-instance mesh CATEGORY (its colour) comes from the object class (object_subtype,
+    // else name prefix — see object_class_of). Only these three classes carry a solid mesh_vertices carcass
+    // to draw here (bottles are box-only; the fridge draws from its display mesh_path in the box pass).
+    for (const auto& node : graph_->get_nodes_by_type("object"))
+    {
+        const std::string cls = object_class_of(*graph_, node);
+        if (cls != "table" and cls != "chair" and cls != "cabinet")
+            continue;
+        const auto opt = graph_->get_attrib_by_name<mesh_vertices_att>(node);
+        if (not opt.has_value())
+            continue;
+        if (has_display_mesh(node))
+            continue;
+        // table_concept's mesh is ALWAYS a box slab; for a round table it misrepresents the shape.
+        // Skip it here so the viewer's box pass draws the round table (disc top + pedestal) instead,
+        // keyed off the same object_subtype attribute. Square tables keep the solid box mesh.
+        if (cls == "table")
+            if (const auto s = graph_->get_attrib_by_name<object_subtype_att>(node);
+                s.has_value() and s.value() == "round")
+                continue;
+        meshes.emplace_back(opt.value().get());
+        categories.emplace_back(cls);
+        names.emplace_back(node.name());
+    }
     voxel_viewer_->update_object_meshes(meshes, categories, names);
 }
 
@@ -760,13 +762,11 @@ void SceneProcessor::update_viewer_table_rfe_points()
             }
         }
     };
-    for (const auto& node : graph_->get_nodes_by_type("table"))
+    // Schema migration: table + cabinet both publish generic type "object" nodes now. Only they write their
+    // model-unexplained points into residual_pts_att (table fit residual / cabinet SDF off-surface split);
+    // gather_residuals no-ops on any object node lacking the attr, so one "object" query covers both classes.
+    for (const auto& node : graph_->get_nodes_by_type("object"))
         gather_residuals(node);
-    // cabinet_concept writes its model-unexplained points into residual_pts_att of the "cabinet_*" box
-    // nodes (the SDF off-surface split). Same dark-blue cloud layer, same "Residual" toggle.
-    for (const auto& node : graph_->get_nodes_by_type("box"))
-        if (node.name().rfind("cabinet_", 0) == 0)
-            gather_residuals(node);
 
     voxel_viewer_->update_residual_points(residual_points);
 }

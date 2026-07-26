@@ -65,6 +65,7 @@ use_trt =true
 model_path = "models/yolo26/yolo26x-seg.onnx"    # L (was yolo26x-seg): lighter seg to lift compute toward the 24 Hz RGB feed
 conf_thresh = 0.25          # min class confidence to ACCEPT a seg detection/mask (argmax score floor); raise to reject weak masks
 iou_thresh  = 0.45          # NMS IoU: dedupe overlapping same-class boxes above this
+second_best_margin = 0.0    # if top class is NOT in accepted_labels but the runner-up IS and within this margin, adopt the runner-up (0 = off; try 0.10 to recover near-tie furniture)
 accepted_labels = ["table", "chair", "monitor", "tv", "bottle", "microwave", "bookshelf", "refrigerator", "radiator"]
 mask_tray = true
 tray_mask_ref_width  = 1280
@@ -109,7 +110,11 @@ input_size = 640
 use_trt = true             # dense model; CUDA EP avoids the TRT version lock
 decimation = 1              # run the model every Nth cycle; reuse the last map on skipped cycles (1 = every frame;
                             # semantic masks are only appended on FRESH cycles, so keep this low when publish_masks)
-publish_node = true        # OFF pending the cortex fix (see below). ROOT CAUSE FOUND 2026-07-21 via gdb hw-watchpoint: Publishing the ~900KB dense label blob via
+publish_node = true        # RE-ENABLED 2026-07-25: the crash was NOT this blob — it was the DSR dangling-atomic stray write
+                            # (cortex fullgraph_request_thread), fixed 2026-07-21 in libdsr_api.so (see cortex/FULLGRAPH_DANGLING_ATOMIC_BUG.md).
+                            # publish_node merely reshaped the stack so the 1-byte wild write hit a live object. Fix is in the installed
+                            # libdsr_api.so (07-24 20:29) + this binary is built against it. Original note kept below for history:
+                            # ROOT CAUSE FOUND 2026-07-21 via gdb hw-watchpoint: Publishing the ~900KB dense label blob via
                             # update_node every ~0.5s triggers a heap-corruption SIGSEGV within ~2-5 min (bisection-
                             # confirmed; in ~SemanticMap while destroying the drained bundle). voxelizer's
                             # publish_semantic() is memory-safe (attr stored BY VALUE — common_types.h:26); the fault
