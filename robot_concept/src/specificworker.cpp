@@ -22,8 +22,10 @@
 #include "../../common/media_transport/media_transport.h"
 
 #include <dsr/gui/viewers/graph_viewer/graph_viewer.h>
+#include "../../common/viewers/gl_graph3d_viewer.h"
 #include "media_stream_viewers.h"
 #include "graph_attr_viewers.h"
+#include "graph_safe.h"   // rc::safe_update_node — guard update_node against exceptions
 #include <QTimer>
 #include <QLabel>
 #include <QVBoxLayout>
@@ -197,7 +199,7 @@ void SpecificWorker::initialize()
 		if (!G->get_attrib_by_name<height_m_att>(body_node.value()).has_value())
 		{ G->add_or_modify_attrib_local<height_m_att>(body_node.value(), 1.6f); seeded = true; }
 
-		G->update_node(body_node.value());
+		rc::safe_update_node(*G, body_node.value());
 		if (seeded)
 			qInfo() << __FUNCTION__ << "Seeded body node with default dimensions (width=0.47, depth=0.47, height=1.6)";
 		else
@@ -339,9 +341,13 @@ void SpecificWorker::initialize()
 				qInfo() << "  missing:" << m;
 			}
 		},
-		.on_operating_enter = []()
+		.on_operating_enter = [this]()
 		{
 			qInfo() << "[SM] -> Operating: all required constraints satisfied";
+			// Post-sync check (once): a stale "Shadow" from an unclean previous exit may have
+			// synced in AFTER initialize() ran; flag an unexpected id so a lingering illegal
+			// robot node is visible rather than silently colliding on the next update_node.
+			check_shadow_identity();
 		},
 		.on_operating_loop = [this]()
 		{
@@ -391,6 +397,8 @@ void SpecificWorker::initialize()
 		trigger_graph_layout_twopi();
 		wire_view_data_signal();   // enable right-click "View data" → live FPS viewer on media-plane nodes
 		wire_agent_status_overlay();   // colour every agent node by its live health (green/orange/red/grey)
+		wire_graph3d_viewer();     // stratified 3D companion view: z = abstraction, x/y = metric pose
+		check_shadow_identity();   // flag a stale/mismatched Shadow node ingested during bootstrap
 	});
 }
 
@@ -418,6 +426,22 @@ void SpecificWorker::schedule_graph_relayout()
 {
 	if (relayout_timer_)
 		relayout_timer_->start(400);
+}
+
+// One-shot diagnostic: verify the robot node "Shadow" carries its canonical id from shadow.json. A stale
+// Shadow left by an unclean previous exit (which no peer reaps while etc/robot_concept.toml is absent)
+// surfaces here as an unexpected id — the same mismatch that makes update_node("Shadow") throw. We only
+// WARN: DSR keeps names unique, so this is the sole robot node and deleting it would be worse than the leak.
+void SpecificWorker::check_shadow_identity()
+{
+	if (shadow_checked_ or shutting_down_.load())
+		return;
+	shadow_checked_ = true;
+	if (auto s = G->get_node(robot_name); s.has_value() and s->id() != kCanonicalShadowId)
+		qWarning() << "[graph] robot node" << QString::fromStdString(robot_name) << "has unexpected id"
+		           << s->id() << "(expected" << kCanonicalShadowId
+		           << ") — likely a stale node from an unclean previous exit; stop agents with SIGTERM, "
+		              "not kill -9, and ensure etc/robot_concept.toml exists so peers reap it.";
 }
 
 void SpecificWorker::compute()
@@ -528,7 +552,7 @@ void SpecificWorker::compute()
 				if (auto n = G->get_node(mn.node); n.has_value())
 				{
 					G->add_or_modify_attrib_local<media_bps_att>(n.value(), static_cast<float>(bps));
-					G->update_node(n.value());
+					rc::safe_update_node(*G, n.value());
 				}
 			}
 
@@ -542,7 +566,7 @@ void SpecificWorker::compute()
 					if (it == n->attrs().end() or it->second.str() != val)
 					{
 						G->add_or_modify_attrib_local<media_ice_port_att>(n.value(), val);
-						G->update_node(n.value());
+						rc::safe_update_node(*G, n.value());
 					}
 				}
 	}
@@ -733,7 +757,7 @@ void SpecificWorker::read_lidar_thread()
 				G->add_or_modify_attrib_local<laser_timestamp_att>(laser_node.value(), static_cast<uint64_t>(data.timestamp));
 				// Last use of laser_node: move it in so the (multi-MB) laser blobs are
 				// moved into the engine instead of deep-copied under the graph write lock.
-				G->update_node(std::move(laser_node.value()));
+				rc::safe_update_node(*G, std::move(laser_node.value()));
 			}
 			else if (!shutting_down_.load())
 				qWarning() << "Laser node not found in DSR graph";
@@ -955,7 +979,7 @@ void SpecificWorker::read_rgbd_thread()
 					G->add_or_modify_attrib_local<cam_rgb_cameraID_att>(cam_node.value(), 0);
 					G->add_or_modify_attrib_local<cam_rgb_att>(cam_node.value(), std::move(frame.image.image));
 					G->add_or_modify_attrib_local<cam_rgb_alivetime_att>(cam_node.value(), static_cast<std::uint64_t>(frame.image.alivetime));
-					G->update_node(cam_node.value());
+					rc::safe_update_node(*G, cam_node.value());
 				}
 
 				if (do_depth)
@@ -969,7 +993,7 @@ void SpecificWorker::read_rgbd_thread()
 					G->add_or_modify_attrib_local<cam_depth_att>(cam_node.value(), std::move(frame.depth.depth));
 					// Last use of cam_node in this block: move it in so the camera blobs are
 					// moved into the engine instead of deep-copied under the graph write lock.
-					G->update_node(std::move(cam_node.value()));
+					rc::safe_update_node(*G, std::move(cam_node.value()));
 				}
 			}
 			else if (!shutting_down_.load())
@@ -1139,7 +1163,7 @@ void SpecificWorker::relay_media_descriptor(const std::string& node_name, const 
 		return;
 	}
 	G->add_or_modify_attrib_local<media_descriptor_att>(node.value(), descriptor_json);
-	G->update_node(node.value());
+	rc::safe_update_node(*G, node.value());
 }
 
 void SpecificWorker::trigger_graph_layout_twopi()
@@ -1206,6 +1230,51 @@ void SpecificWorker::wire_agent_status_overlay()
 	                         ? configLoader.get<int>("Presence.stale_display_ms")
 	                         : 3000;
 	agent_status_overlay_.start(G, graph_viewer, stale_after_ms);
+}
+
+void SpecificWorker::wire_graph3d_viewer()
+{
+	// The planar GraphViewer draws room→table→aff_table_1 with exactly the same weight as mind→agent,
+	// so neither AGENT OWNERSHIP nor META-CONCEPT GROUPING is visible in it — and group_member, being
+	// a non-RT edge, has no transform for a spatial force layout to work with at all. This companion
+	// view splits the two roles: z carries the abstraction stratum, x/y carries the true metric pose.
+	// Gated on the Agent.3d key, which has existed in every agent's [Agent] block all along but was
+	// never read: setupViewer's options vector has no "3d" entry. (Nor is there a cortex view to map
+	// it to — the old view::osg enum was a dead stub and has since been removed.)
+	if (not configLoader.exists("Agent.3d") or not configLoader.get<bool>("Agent.3d"))
+		return;
+	const auto it = graph_viewers.find("");
+	if (it == graph_viewers.end() || !it->second)
+		return;
+
+	graph3d_builder_.set_graph(G);
+	// Same display horizon as the 2D overlay, so an agent greys out in both views at the same moment.
+	graph3d_builder_.config().stale_after_ms = configLoader.exists("Presence.stale_display_ms")
+	                                         ? configLoader.get<int>("Presence.stale_display_ms")
+	                                         : 3000;
+
+	graph3d_viewer_ = std::make_unique<rc::viewers::GLGraph3DViewer>();
+	// Same (id, type) payload the 2D view's view_data_signal carries, into the same handler — so
+	// clicking a sensor glyph here opens the very same live stream viewer.
+	graph3d_viewer_->set_pick_callback([this](std::uint64_t id, const std::string &type)
+	                                  { open_stream_viewer(id, type); });
+	it->second->add_custom_widget_to_dock("Graph 3D", graph3d_viewer_.get());
+
+	// POLLED, not signal-driven, on purpose: CLAUDE.md says not to connect update_node_signal unless
+	// you need it, and the ts==0 inner_eigen cache the builder walks is main-thread-only — a QTimer
+	// guarantees that. A full rebuild over ~50 nodes at 5 Hz is nothing.
+	graph3d_timer_ = new QTimer(this);
+	QObject::connect(graph3d_timer_, &QTimer::timeout, this, &SpecificWorker::refresh_graph3d);
+	graph3d_timer_->start(200);
+	refresh_graph3d();
+	qInfo() << "[graph3d] stratified 3D graph view enabled (Agent.3d)";
+}
+
+void SpecificWorker::refresh_graph3d()
+{
+	if (shutting_down_.load() or not graph3d_viewer_)
+		return;
+	graph3d_viewer_->set_scene(graph3d_builder_.build());
 }
 
 void SpecificWorker::open_stream_viewer(std::uint64_t node_id, const std::string &type)
@@ -1548,7 +1617,7 @@ void SpecificWorker::FullPoseEstimationPub_newFullPose(RoboCompFullPoseEstimatio
 		G->add_or_modify_attrib_local<robot_current_speed_timestamp_att>(pose_node.value(), static_cast<unsigned long>(pose.timestamp));
 		// pose_node is not read after this; move it so update_node forwards
 		// the rvalue into the engine (no deep blob copy under the graph mutex).
-		G->update_node(std::move(pose_node.value()));
+		rc::safe_update_node(*G, std::move(pose_node.value()));
 	}
 	else if (!shutting_down_.load())
 		qWarning() << "FullPose node not found in DSR graph";

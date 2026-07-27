@@ -8,6 +8,10 @@ LIST(APPEND SOURCES
   # robot_concept only — it is the agent that shows the complete graph. Its .cpp confines the
   # dsr_gui includes to one TU (their AbstractGraphicViewer collides with the component-local one).
   ../../common/agent_state_publisher/agent_status_overlay.cpp
+  # Stratified 3D graph view: z = abstraction stratum, x/y = true metric pose. The builder depends on
+  # dsr_api ONLY (never dsr_gui — its AbstractGraphicViewer collides with the component-local one),
+  # so it stays includable from anywhere; the renderer is header-only in common/viewers.
+  ../../common/graph3d/graph3d_scene_builder.cpp
   ../../common/media_transport/media_transport.cpp
   ../../common/media_transport/generated/idl/image_framePubSubTypes.cxx
   ../../common/media_transport/generated/idl/image_frameTypeObjectSupport.cxx
@@ -30,6 +34,9 @@ LIST(APPEND HEADERS
   ../../common/agent_state_publisher/agent_status.h
   ../../common/agent_state_publisher/agent_state_publisher.h
   ../../common/agent_state_publisher/agent_status_overlay.h
+  ../../common/graph3d/graph3d_scene.h
+  ../../common/graph3d/graph3d_scene_builder.h
+  ../../common/viewers/gl_graph3d_viewer.h
   ../../common/media_transport/media_transport.h
   ../src/sensor_media_publisher.h
   ../src/specificworker.h

@@ -43,6 +43,8 @@
 #include <string>
 #include <vector>
 
+#include "graph_safe.h"   // rc::safe_update_node — guard update_node against exceptions
+
 #include "../../common/media_transport/media_transport.h"
 
 class SensorMediaPublisher
@@ -221,7 +223,7 @@ bool SensorMediaPublisher::advertise(Graph& graph, const std::string& node_name,
         return false;
     graph.runtime_checked_add_or_modify_attrib_local(node.value(), attr_name,
                                                       make_descriptor(keys).to_json());
-    graph.update_node(node.value());
+    rc::safe_update_node(graph, node.value());
     return true;
 }
 
@@ -237,6 +239,6 @@ bool SensorMediaPublisher::advertise_stats(Graph& graph, const std::string& node
     // so the typed alias isn't in scope here. See CONCEPT_AGENT_RECIPE.md §"Attribute access".
     graph.runtime_checked_add_or_modify_attrib_local(node.value(), "media_bps",
                                                       static_cast<float>(current_bps(keys)));
-    graph.update_node(node.value());
+    rc::safe_update_node(graph, node.value());
     return true;
 }
