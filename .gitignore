@@ -1,0 +1,45 @@
+# Editor / tooling
+.aider*
+.vscode/
+.qt/
+
+# Build trees (cmake/make) — every variant: build/ build-asan/ build-tsan/ build-gcc15/
+# build_test_migration/ build_lateral_probe/ build-make-copilot/ cmake-build*/ …
+# NOTE: generated/ is intentionally NOT ignored — the robocompdsl Ice stubs are committed; only the
+# build output UNDER it (*_autogen/) and the in-source cmake droppings are ignored.
+build*/
+cmake-build*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+*_autogen/
+.trt_cache/
+
+# Compiled / binary output
+bin/
+*.o
+*.so
+*.a
+a.out
+__pycache__/
+*.pyc
+
+# Large ML model weights (too big for git; regenerate/export locally)
+*.onnx
+*.pt
+*.engine
+
+# Run artifacts + scratch edits/backups
+# Per-component run logs (chair's ai2_log.csv, ring_metaconcept's ring_fit.csv, …).
+# NOTE: a bare `etc/*.csv` contains a slash, so git anchors it to THIS directory and it
+# never matched <component>/etc/ — `git add <component>/` then silently staged run logs.
+# (.gitignore has no trailing comments: a `#` after the pattern becomes part of it.)
+**/etc/*.csv
+*.log
+*.bak
+*.back
+*.new
+*.poisoned*
+
+# Scratch / throwaway experiments
+caca/
