@@ -22,7 +22,7 @@ struct ChairConfig
     // mode is STICKY (observed 2026-07-26: 570 cycles wrong, cleared only by restarting the agent).
     // The rig supplies the missing structural evidence ("a chair at this spot faces the table").
     bool  rig_yaw_prior_enabled = true;    // master A/B switch
-    float rig_yaw_kappa_max     = 6.0f;    // consumer cap; can only WEAKEN ChairBelief::kRigKappaMax
+    float rig_yaw_kappa_max     = 1.5f;    // consumer cap; ChairBelief::kRigKappaMax enforces the same bound
     int   rig_prior_stale_ms    = 5000;    // ignore a message no rig is refreshing; 0 disables
 
     // Agent convergence
@@ -195,6 +195,13 @@ struct ChairConfig
     float tracker_birth_back_h     = 0.655f;  // backrest height above the seat top (→ top at 1.25)
     float tracker_birth_seat_thick = 0.075f;  // seat slab thickness (also sets the leg/seat z-band split)
     float tracker_birth_leg_half   = 0.0375f; // square leg half-side
+
+    // ── Discrete yaw-mode evidence weighting (see ChairBeliefParams::mode_obs_weighting) ──────────
+    // Weight each frame's yaw-mode vote by the information it carries (backrest mass × viewpoint
+    // novelty) instead of counting every frame equally. false = the pre-2026-07-27 behaviour, kept
+    // for A/B: that path let 21-point frames at 6.5 m rotate a chair resolved on 1700 points at 3.5 m.
+    bool  ai2_mode_obs_weighting = true;
+    float ai2_mode_sat_back_pts  = 60.0f;   // backrest mass at which a frame is half-informative
     bool  tracker_nll_cost         = false;   // association cost = ½(m²+ln|S|) NLL (vs raw m²); see InstanceTracker
     // ZED-only BIRTH gate: only a ZED slice (depth_var==0) may SPAWN a chair; a ricoh LiDAR-depth slice
     // (depth_var>0, unreliable depth/extent) may associate/confirm an existing chair but never birth a phantom.

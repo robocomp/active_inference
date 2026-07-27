@@ -34,6 +34,8 @@ ChairBeliefParams ChairFitter::make_belief_params() const
     // height is corrected would just move the misattribution rather than remove it.
     p.seat_thickness = cfg_.tracker_birth_seat_thick;
     p.leg_half       = cfg_.tracker_birth_leg_half;
+    p.mode_obs_weighting = cfg_.ai2_mode_obs_weighting;
+    p.mode_sat_back_pts  = cfg_.ai2_mode_sat_back_pts;
     p.sigma_base_m         = cfg_.ai2_sigma_base_m;
     p.clutter_frac         = cfg_.ai2_clutter_frac;
     p.clutter_scale_m      = cfg_.ai2_clutter_scale_m;
@@ -383,6 +385,10 @@ float ChairFitter::run_inference(ChairInstance& inst, const ChairObservation& ob
             r_xy.normalize();
             const Eigen::Vector2f n_back(std::sin(s0b.yaw), -std::cos(s0b.yaw));   // backrest outward normal (room xy)
             inst.dbg_obliquity_cos = std::abs(r_xy.dot(n_back));
+            // Room-frame bearing chair→CAMERA. This is the viewpoint identity the discrete yaw-mode
+            // test discounts by: re-observing one bearing is not new evidence about which way the
+            // chair faces. (r_xy is camera→chair, so negate.)
+            inst.dbg_view_azimuth = std::atan2(-r_xy.y(), -r_xy.x());
         }
     }
     // Grow the SHARED yaw variance as the backrest grazes (1/cos−1): continuous covariance, no gate. THRESHOLD
@@ -438,7 +444,7 @@ float ChairFitter::run_inference(ChairInstance& inst, const ChairObservation& ob
         const float mref = std::max(1e-3f, cfg_.ai2_orientation_motion_ref);
         const float dotd = std::abs(inst.last_motion_dotd);
         const float mode_evidence_weight = 1.0f / (1.0f + (dotd / mref) * (dotd / mref));
-        if (inst.ai2_belief.resolve_orientation(frame.points, R, mode_evidence_weight) and should_log(inst))
+        if (inst.ai2_belief.resolve_orientation(frame.points, R, mode_evidence_weight, inst.dbg_view_azimuth) and should_log(inst))
             std::print("[{}] AI2 yaw 180° FLIP corrected (sustained backrest evidence)\n", inst.node_name);
 
         // FE-surprise attention (TABLE.md §9): baseline tracks DOWN fast (consolidate a better fit) / UP slow (a

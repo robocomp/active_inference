@@ -105,7 +105,7 @@ ChairConfig load_chair_config(const ConfigLoader& cfg)
 
     // Level-2 arrangement prior (ring_metaconcept). Off ⇒ the belief is bit-for-bit pre-rig.
     out.rig_yaw_prior_enabled    = getb("RigPrior.Enabled",           true);
-    out.rig_yaw_kappa_max        = getf("RigPrior.YawKappaMax",       6.0f);
+    out.rig_yaw_kappa_max        = getf("RigPrior.YawKappaMax",       1.5f);
     out.rig_prior_stale_ms       = geti("RigPrior.StaleMs",           5000);
     out.exist_birth_logodds      = getf("Existence.BirthLogodds",     1.0f);
     out.exist_remove_logodds     = getf("Existence.RemoveLogodds",   -3.0f);
@@ -131,6 +131,8 @@ ChairConfig load_chair_config(const ConfigLoader& cfg)
     out.tracker_birth_back_h     = getf("Tracker.BirthBackH",       0.655f);
     out.tracker_birth_seat_thick = getf("Tracker.BirthSeatThick",   0.075f);
     out.tracker_birth_leg_half   = getf("Tracker.BirthLegHalf",     0.0375f);
+    out.ai2_mode_obs_weighting   = getb("ChairModel.AI2ModeObsWeighting", true);
+    out.ai2_mode_sat_back_pts    = getf("ChairModel.AI2ModeSatBackPts",   60.0f);
     out.tracker_nll_cost         = getb("Tracker.NllCost",          false);
     out.ricoh_birth_enabled      = getb("Tracker.RicohBirthEnabled", false);
     out.ricoh_birth_conf         = getf("Tracker.RicohBirthConf",    0.60f);
