@@ -95,6 +95,14 @@ AI2TruncGateFrac = 0.10          # skip the geometric update (predict only) when
 AI2GnIters = 4                   # Gauss-Newton iterations per frame
 AI2ExtentStd = 0.05              # extent-observation noise (m) for the coverage/extent likelihood
 
+# ── Discrete yaw-mode evidence: weight by INFORMATION, not by dwell time ────────────────────────
+# Each frame's yaw-mode vote is scaled by (backrest point mass observed) x (viewpoint novelty), so a
+# starved far frame cannot outvote a rich near one and staring from one spot stops accumulating
+# confidence. false restores the pre-2026-07-27 behaviour, where 21-point frames at 6.5 m rotated a
+# chair that 1700 points at 3.5 m had resolved correctly.
+AI2ModeObsWeighting = true
+AI2ModeSatBackPts = 60.0
+
 [ChairConcept]
 StateEps = 0.04             # Σ|Δstate| threshold between cycles for convergence (m+rad)
 KStable = 30                # consecutive stable frames before model_stable
@@ -143,6 +151,7 @@ BirthSeatH = 0.595       # seat TOP above the floor
 BirthBackH = 0.655       # backrest height above the seat top (top ends up at 1.25)
 BirthSeatThick = 0.075   # seat slab thickness — also sets the leg/seat z-band split
 BirthLegHalf = 0.0375    # square leg half-side
+
 NllCost = false          # association cost = ½(m²+ln|S|) NLL (compete by likelihood, not raw distance)
 # ZED-only BIRTH: only a ZED slice (per-pixel depth ⇒ depth_var==0) may SPAWN a chair. A ricoh LiDAR-reprojected
 # depth slice (depth_var>0) has unreliable depth/extent → it may associate/confirm an existing chair but NOT birth
@@ -205,15 +214,14 @@ MessageSizeMax = "20004800"
 # is STICKY (2026-07-26: 570 cycles wrong, cleared only by restarting the agent). The rig supplies
 # the missing structural evidence. Enabled=false restores the exact pre-rig behaviour (A/B).
 [RigPrior]
-# ★DISABLED 2026-07-27. The cap that was meant to make this safe is provably impossible: rig_mode_cost
-# is -kappa*cos(delta), so the prior's differential is kappa for a 90 deg error but 2*kappa for 180 deg.
-# Overturning the observed 90 deg failure needed kappa > 4.19; staying safe at 180 deg against saturated
-# data (flip_acc_ clamped at 6) needs 2*kappa < 6 i.e. kappa <= 3. The admissible window is EMPTY, and at
-# the shipped 5.4 a prior pointing 180 deg away will rotate a chair whose evidence is fully saturated and
-# CORRECT. The self-test only exercised a 90 deg-wrong prior, so it never caught this.
-# It is off rather than deleted because the machinery is sound once (a) the template matches the world —
-# done, see Tracker.BirthSeat* — and (b) flip_acc_ stops summing repeated static evidence, at which point
-# no cap is needed. Re-enable only after both, and add a 180 deg case to the self-test first.
-Enabled = false
-YawKappaMax = 6.0      # consumer cap; can only WEAKEN ChairBelief::kRigKappaMax (= kFlipClamp)
+# ★RE-ENABLED 2026-07-27, after the safety hole it was disabled for was actually closed.
+# The cap is bounded by the 180° case, not the 90° one: rig_mode_cost = -kappa*cos(delta) has a
+# differential of kappa at 90 deg but 2*kappa at 180 deg, so safety needs 2*kappa < kFlipClamp(6).
+# That was impossible while flip_acc_ measured DWELL TIME (an ambiguous chair also sat at the 6.0
+# clamp, so overturning it needed kappa > 4.19 while safety needed kappa <= 3 -- an empty window).
+# With the mode evidence now information-weighted the two separate cleanly (measured: well-seen
+# chair 6.00, backrest-blind chair 0.21 after 2000 frames), so the window is (0.2, 3.0) and 1.5
+# sits ~7x above the ambiguous case and 2x below the saturated one. Self-test covers 90 AND 180.
+Enabled = true
+YawKappaMax = 1.5      # consumer cap; ChairBelief::kRigKappaMax = 0.25*kFlipClamp enforces the same
 StaleMs = 5000         # ignore a message no rig is refreshing; 0 disables
