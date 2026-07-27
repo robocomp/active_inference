@@ -80,6 +80,11 @@ class SpecificWorker : public GenericWorker
         void del_edge_slot(std::uint64_t from, std::uint64_t to, const std::string &edge_tag){};
         void del_node_slot(std::uint64_t from){};
 
+        // twopi relayout of the DSR graph viewer; MOVED out of the regenerated genericworker
+        // (robocompdsl clobbers hand edits there) — mirror robot_concept. Uses the inherited
+        // find_graph_viewer(). Injected into RoomSceneGraph as the relayout callback.
+        void trigger_graph_layout_twopi();
+
     private:
         rc::RoomConfig params;   // worker config; loaded by rc::load_room_config()
 

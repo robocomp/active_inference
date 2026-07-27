@@ -221,25 +221,6 @@ QString GenericWorker::settings_group_name(const std::string& graph_name, int ag
     return QStringLiteral("windows/%1/%2").arg(agent_id).arg(graph_suffix);
 }
 
-void GenericWorker::trigger_graph_layout_twopi()
-{
-    auto graph_viewer_owner = find_graph_viewer("");
-    if (!graph_viewer_owner)
-        return;
-
-    QWidget* graph_widget = graph_viewer_owner->get_widget(DSR::DSRViewer::view::graph);
-    auto* graph_viewer = qobject_cast<DSR::GraphViewer*>(graph_widget);
-    if (!graph_viewer)
-        return;
-
-    // Run now and once queued, so layout also happens after pending node/edge
-    // update signals are processed by the viewer.
-    graph_viewer->compute_layout("twopi");
-    QMetaObject::invokeMethod(graph_viewer,
-                              [graph_viewer]() { graph_viewer->compute_layout("twopi"); },
-                              Qt::QueuedConnection);
-}
-
 std::shared_ptr<DSR::DSRViewer> GenericWorker::find_graph_viewer(const std::string& name) const
 {
     const auto it = graph_viewers.find(name);

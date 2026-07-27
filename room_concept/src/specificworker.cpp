@@ -856,6 +856,29 @@ void SpecificWorker::modify_node_slot(std::uint64_t /*id*/, const std::string& /
 {
     // LiDAR now arrives via the media plane (pumped in compute); the graph 'laser' node is not read.
 }
+
+// Re-run the graph viewer's twopi layout now and again once queued, so it also settles after the
+// pending node/edge update signals are processed. No-op when Agent.graph is off (no viewer widget).
+// Lives here (not in the regenerated genericworker) so robocompdsl regeneration cannot clobber it;
+// mirrors robot_concept. find_graph_viewer() is the inherited GenericWorker helper.
+void SpecificWorker::trigger_graph_layout_twopi()
+{
+    auto graph_viewer_owner = find_graph_viewer("");
+    if (not graph_viewer_owner)
+        return;
+
+    QWidget* graph_widget = graph_viewer_owner->get_widget(DSR::DSRViewer::view::graph);
+    auto* graph_viewer = qobject_cast<DSR::GraphViewer*>(graph_widget);
+    if (not graph_viewer)
+        return;
+
+    // Run now and once queued, so layout also happens after pending node/edge
+    // update signals are processed by the viewer.
+    graph_viewer->compute_layout("twopi");
+    QMetaObject::invokeMethod(graph_viewer,
+                              [graph_viewer]() { graph_viewer->compute_layout("twopi"); },
+                              Qt::QueuedConnection);
+}
 ///////////////////////////////////////////////////////////////////////////////
 void SpecificWorker::emergency()
 {
