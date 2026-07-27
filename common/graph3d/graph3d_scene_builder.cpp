@@ -97,6 +97,12 @@ std::optional<SceneBuilder::Classified> SceneBuilder::classify(const std::string
 	if (type == "root" or type == "body" or type == "laser" or type == "rgbd" or type == "imu"
 	    or type == "camera")
 		return std::nullopt;
+	// Field/blob nodes are DATA PRODUCTS hung on the tree as a carrier, not things the room
+	// contains: the voxelizer's `semantic_grid` lives under `zed`, and residual_concept's `grid`
+	// ("residual") is an occupancy field. Neither has a footprint, so both drew as an anonymous
+	// sphere on the instances plane.
+	if (type == "semantic_grid" or type == "grid")
+		return std::nullopt;
 
 	if (type == "agent")
 		return Classified{Kind::Agent, Glyph::Pin};
@@ -128,6 +134,53 @@ std::optional<SceneBuilder::Classified> SceneBuilder::classify(const std::string
 	    or type == "box" or type == "obstacle")    return Classified{Kind::Instance, Glyph::Box};
 
 	return Classified{Kind::Instance, Glyph::Sphere};
+}
+
+std::string SceneBuilder::class_of(const std::string &type, const std::string &subtype,
+                                   const std::string &name)
+{
+	// object_subtype is trusted ONLY when it names a class we know. For tables it historically
+	// carried the SHAPE ("round"/"square") instead, which is exactly why the repo's own
+	// object_class_of helpers fall back to the name prefix rather than believing it blindly.
+	static constexpr std::string_view kClasses[] = {"table",  "chair", "cabinet",     "refrigerator",
+	                                                "bottle", "door",  "person",      "wall",
+	                                                "floor",  "obstacle", "dining_set"};
+	for (const std::string_view c : kClasses)
+		if (subtype == c)
+			return std::string{c};
+	for (const std::string_view c : kClasses)
+		if (name.starts_with(c))
+			return std::string{c};
+	// The DSR type is the last resort — it is what walls, floors, obstacles and people carry, since
+	// those are not `object` nodes and have no subtype at all.
+	if (type == "wall" or type == "floor" or type == "obstacle" or type == "person")
+		return type;
+	return {};   // unclassified ⇒ folds into the neutral "other" slot
+}
+
+Rgb SceneBuilder::class_color(const std::string &cls) noexcept
+{
+	// Categorical palette, FIXED ORDER, never cycled. Machine-selected against this widget's dark
+	// surface (#16181D) with the all-pairs pairlist — correct here because in a 3-D scene any class
+	// can end up next to any other, unlike a bar chart where only neighbours compete. Verified:
+	// worst-pair normal-vision ΔE 15.1 (≥15 hard floor), worst CVD ΔE 6.6 deutan / 7.1 tritan.
+	// A CVD ΔE in the 6–8 band is admissible ONLY alongside a secondary encoding — this view has
+	// two: a distinct glyph silhouette per class and an always-on text label per node. Three slots
+	// also sit just under 3:1 against the surface, whose documented relief is exactly those labels.
+	// Eight is the ceiling: no larger set clears the normal-vision floor, so anything unrecognised
+	// deliberately folds into the neutral slot instead of inventing a ninth hue.
+	if (cls == "table")        return {0.765f, 0.424f, 0.212f};   // #c36c36
+	if (cls == "chair")        return {0.000f, 0.588f, 0.882f};   // #0096e1
+	if (cls == "cabinet")      return {0.000f, 0.584f, 0.424f};   // #00956c
+	if (cls == "refrigerator") return {0.604f, 0.451f, 0.722f};   // #9a73b8
+	if (cls == "wall")         return {0.000f, 0.427f, 0.584f};   // #006d95
+	if (cls == "floor")        return {0.447f, 0.392f, 0.000f};   // #726400
+	if (cls == "bottle")       return {0.580f, 0.271f, 0.380f};   // #944561
+	if (cls == "person")       return {0.404f, 0.267f, 0.773f};   // #6744c5
+	// A door IS part of a wall, and it lives on the PARTS plane rather than the wall's, so sharing
+	// the wall hue reads correctly instead of spending a scarce slot.
+	if (cls == "door")         return {0.000f, 0.427f, 0.584f};   // #006d95
+	return kSteel;                                                // "other": obstacles, unknown
 }
 
 Rgb SceneBuilder::identity_color(const std::uint32_t agent_id) noexcept
@@ -202,8 +255,12 @@ Scene SceneBuilder::build()
 		node.name    = n.name();
 		node.type    = n.type();
 		node.subtype = subtype;
+		node.cls     = class_of(n.type(), subtype, n.name());
 		node.kind    = kind;
 		node.glyph   = glyph;
+		// The agent owns its own appearance (same contract the voxelizer consumes); the viewer stays
+		// type-agnostic and falls back to the synthetic glyph when no mesh is published.
+		node.mesh_path = g_->get_attrib_by_name<mesh_path_att>(n).value_or("");
 
 		// Metric pose, asked for ONLY where it can exist. `mind` carries parent/level attributes
 		// naming Shadow as its parent but has no RT edge to it (shadow.json), and agent nodes have
@@ -234,6 +291,22 @@ Scene SceneBuilder::build()
 		const float d = g_->get_attrib_by_name<depth_m_att>(n).value_or(0.0f);
 		node.radius = (w > 0.0f or d > 0.0f) ? std::clamp(0.35f * std::max(w, d), 0.10f, 0.32f)
 		                                     : (kind == Kind::Agent ? 0.16f : 0.12f);
+		node.draw   = {2.0f * node.radius, 2.0f * node.radius, 2.0f * node.radius};
+		if (node.cls == "floor")
+		{
+			// The floor's OBJ is the room layout, centred on the polygon's bbox — so it is drawn at
+			// TRUE footprint size (width_m/depth_m are that bbox) and flat. Its z span is degenerate,
+			// which add_mesh() handles.
+			node.draw = {std::max(w, 0.05f), std::max(d, 0.05f), 0.01f};
+		}
+		else if (node.cls == "wall")
+		{
+			// A wall panel is drawn at its TRUE length so the walls trace the real footprint and line
+			// up with the room polygon a rung below. Its height is NOT true, though: a 2.5 m wall
+			// would punch straight through the plane above it, so it is capped to a fraction of the
+			// inter-plane gap. Thickness is nominal — the mesh is a flat quad.
+			node.draw = {std::max(w, 0.05f), 0.02f, 0.40f * cfg_.stratum_gap};
+		}
 
 		node.owner_agent_id = n.agent_id();
 
@@ -269,41 +342,76 @@ Scene SceneBuilder::build()
 				}
 	}
 
+	// The floor node's RT pose is the room ORIGIN — a corner of the layout, since it is only a
+	// semantic parent for floor-attached objects. Its mesh is centred on the polygon's bbox, so the
+	// glyph is moved to that centre; otherwise the floor would be drawn a half-room off (and its
+	// label would sit in the corner). Same reasoning as pinning the room glyph above the robot.
+	if (scene.ground.polygon.size() >= 3)
+	{
+		float minx = scene.ground.polygon[0][0], maxx = minx;
+		float miny = scene.ground.polygon[0][1], maxy = miny;
+		for (const auto &p : scene.ground.polygon)
+		{
+			minx = std::min(minx, p[0]); maxx = std::max(maxx, p[0]);
+			miny = std::min(miny, p[1]); maxy = std::max(maxy, p[1]);
+		}
+		for (auto &n : scene.nodes)
+			if (n.cls == "floor")
+			{
+				n.pos[0] = 0.5f * (minx + maxx);
+				n.pos[1] = 0.5f * (miny + maxy);
+				n.placed = true;
+			}
+	}
+
 	// ── Pass 1b: the LADDER. Both of its tails are open-ended, which is what makes the number of
 	// planes a per-build quantity rather than an enum.
-	std::unordered_map<std::uint64_t, Kind> kind_of;
+	std::unordered_map<std::uint64_t, Kind>        kind_of;
+	std::unordered_map<std::uint64_t, std::string> cls_of;
 	for (const auto &n : scene.nodes)
+	{
 		kind_of[n.id] = n.kind;
+		cls_of[n.id]  = n.cls;
+	}
 
 	std::unordered_set<std::uint64_t> visiting;   // guard: a malformed graph can hold a cycle
 
-	// (i) INSTANCES follow the RT PATH. An instance parented to another instance is a PART of it —
-	// a door hanging off a wall, a bottle re-parented onto its supporting table
-	// (bottle_scene_graph.cpp) — so it belongs one rung above its parent, not alongside it. Since it
-	// also keeps its own metric x/y, and a part sits physically on its parent, this draws the door
-	// vertically above its wall for free. Depth is measured in INSTANCE-to-instance hops: a child of
-	// the room is depth 0, and a parent that is not a drawn instance (the robot, or an excluded
-	// sensor mount) also anchors at 0.
-	std::unordered_map<std::uint64_t, int> inst_depth;
-	std::function<int(std::uint64_t)>      inst_depth_of = [&](const std::uint64_t id) -> int
+	// (i) INSTANCE LEVELS, resolved recursively so two rules fall out of one definition:
+	//   · the ROOM SHELL (walls + the floor) forms the BASE instance plane, and everything the room
+	//     merely CONTAINS is lifted clear of it. Cabinets and refrigerators stand flush against
+	//     walls, so on a shared plane their glyphs collided with the wall glyphs they touch.
+	//   · a PART sits one rung above its WHOLE — a door on its wall, a bottle on the table
+	//     bottle_concept re-parented it onto — because it hangs off it in the RT tree.
+	// The recursion composes them: level(door) = level(wall)+1 keeps a door exactly one plane above
+	// the wall it belongs to even though the wall is a rung lower than ordinary furniture.
+	const auto is_shell = [&](const std::uint64_t id)
 	{
-		if (const auto it = inst_depth.find(id); it != inst_depth.end())
-			return it->second;
-		if (not visiting.insert(id).second)
-			return 0;
-		int depth = 0;
-		if (const auto p = rt_parent.find(id); p != rt_parent.end())
-			if (const auto k = kind_of.find(p->second); k != kind_of.end() and k->second == Kind::Instance)
-				depth = 1 + inst_depth_of(p->second);
-		visiting.erase(id);
-		inst_depth[id] = depth;
-		return depth;
+		const auto it = cls_of.find(id);
+		return it != cls_of.end() and (it->second == "wall" or it->second == "floor");
 	};
 
-	int max_inst = 0;
+	std::unordered_map<std::uint64_t, int> inst_level;
+	std::function<int(std::uint64_t)>      inst_level_of = [&](const std::uint64_t id) -> int
+	{
+		if (const auto it = inst_level.find(id); it != inst_level.end())
+			return it->second;
+		if (not visiting.insert(id).second)
+			return kLevelInstance + 1;
+		int lvl = kLevelInstance + 1;   // a child of the room (or of anything undrawn)
+		if (is_shell(id))
+			lvl = kLevelInstance;
+		else if (const auto p = rt_parent.find(id); p != rt_parent.end())
+			if (const auto k = kind_of.find(p->second); k != kind_of.end() and k->second == Kind::Instance)
+				lvl = inst_level_of(p->second) + 1;
+		visiting.erase(id);
+		inst_level[id] = lvl;
+		return lvl;
+	};
+
+	int deepest_inst = kLevelInstance + 1;
 	for (const auto &n : scene.nodes)
 		if (n.kind == Kind::Instance)
-			max_inst = std::max(max_inst, inst_depth_of(n.id));
+			deepest_inst = std::max(deepest_inst, inst_level_of(n.id));
 
 	// (ii) META levels stack on top of the DEEPEST instance plane: a rig grouping plain instances is
 	// meta-1, a rig grouping THOSE rigs is meta-2, and so on down the `group_member` chain.
@@ -334,8 +442,6 @@ Scene SceneBuilder::build()
 		if (n.kind == Kind::Meta)
 			max_meta = std::max(max_meta, meta_depth_of(n.id));
 
-	const int deepest_inst = kLevelInstance + max_inst;
-
 	// Optional layers stack ON TOP of everything: an affordance is a property of an instance and an
 	// agent is an observer of the whole thing, so neither is a rung of the containment ladder —
 	// parking them above keeps the ladder itself honest.
@@ -357,8 +463,9 @@ Scene SceneBuilder::build()
 		    : l == kLevelRoom ? "ROOM"
 		    : (cfg_.show_agents and l == agent_level)    ? "AGENTS"
 		    : (cfg_.show_affordances and l == aff_level) ? "AFFORDANCES"
-		    : l == kLevelInstance                        ? "INSTANCES"
-		    : l <= deepest_inst ? "PARTS-" + std::to_string(l - kLevelInstance)
+		    : l == kLevelInstance                        ? "WALLS"       // the room shell (+ floor)
+		    : l == kLevelInstance + 1                    ? "INSTANCES"
+		    : l <= deepest_inst ? "PARTS-" + std::to_string(l - kLevelInstance - 1)
 		                        : "META-" + std::to_string(l - deepest_inst);
 	}
 
@@ -368,7 +475,7 @@ Scene SceneBuilder::build()
 		{
 			case Kind::Robot:      node.level = kLevelRobot;                          break;
 			case Kind::Room:       node.level = kLevelRoom;                           break;
-			case Kind::Instance:   node.level = kLevelInstance + inst_depth_of(node.id); break;
+			case Kind::Instance:   node.level = inst_level_of(node.id);               break;
 			case Kind::Meta:       node.level = deepest_inst + meta_depth_of(node.id); break;
 			case Kind::Affordance: node.level = aff_level;                            break;
 			case Kind::Agent:      node.level = agent_level;                          break;
@@ -500,24 +607,24 @@ Scene SceneBuilder::build()
 			break;
 	}
 
-	// ── Pass 4: colour every non-agent node by WHO WROTE IT. Health lives on the agent glyph; hue
-	// carries identity, so ownership is legible at rest without turning on the ribbons.
+	// ── Pass 4: colour. Instances are coloured by their CLASS, not by their owning agent: "which of
+	// these is a chair" is the question the eye actually asks of this view, and a class palette is
+	// stable across runs where an agent-id hash is not. Ownership has not been lost — it still drives
+	// the selection ribbons, where it is asked for explicitly.
+	// Robot / room / meta keep RESERVED colours outside the categorical set: each is a singleton on
+	// a plane of its own, so it never competes with the class palette for separation.
 	for (auto &node : scene.nodes)
 	{
 		if (node.type == "agent")
 			continue;
-		const auto it  = owner_node.find(node.id);
-		const Rgb  hue = (it != owner_node.end() and agent_hue.contains(it->second))
-		                     ? agent_hue.at(it->second)
-		                     : kSteel;
 		switch (node.kind)
 		{
-			case Kind::Robot:      node.color = kRobot;                  break;
-			case Kind::Room:       node.color = mix(kSlate, hue, 0.25f); break;
-			case Kind::Affordance: node.color = mix(kAmber, hue, 0.35f); break;
-			case Kind::Meta:       node.color = mix(kViolet, hue, 0.35f); break;
-			case Kind::Agent:      node.color = kGrey;                   break;   // mind
-			case Kind::Instance:   node.color = mix(kSteel, hue, 0.72f); break;
+			case Kind::Robot:      node.color = kRobot;                        break;
+			case Kind::Room:       node.color = kSlate;                        break;
+			case Kind::Affordance: node.color = kAmber;                        break;
+			case Kind::Meta:       node.color = kViolet;                       break;
+			case Kind::Agent:      node.color = kGrey;                         break;   // mind
+			case Kind::Instance:   node.color = class_color(node.cls);         break;
 		}
 		if (not node.placed)
 			node.color = mix(node.color, kGrey, 0.6f);   // no RT chain — say so instead of lying

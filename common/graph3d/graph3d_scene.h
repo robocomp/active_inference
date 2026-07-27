@@ -86,9 +86,19 @@ struct Node3D
 	std::string   name;
 	std::string   type;        // DSR node type
 	std::string   subtype;     // object_subtype, when present
+	std::string   cls;         // canonical class ("table"/"chair"/…) — what the colour encodes
+	// Display mesh the OWNING AGENT published (repo-relative, e.g. "chair_concept/meshes/chair.obj").
+	// When present the renderer draws THAT instead of a synthetic glyph, so the silhouette and its
+	// axis convention come from the agent rather than being re-derived — and re-derived wrongly.
+	std::string   mesh_path;
 	Vec3          pos{0, 0, 0};
 	Rgb           color{0.7f, 0.75f, 0.8f};
 	float         radius = 0.10f;
+	// Metre size the display mesh is drawn at, per LOCAL axis (x,y = footprint, z = height). Mostly
+	// isotropic and schematic (2·radius cubed), because this is a graph view rather than a scene
+	// view — but a wall is a long thin panel whose whole point is to trace the real footprint, so it
+	// needs its true length and a separately capped height. Glyphs ignore this and use `radius`.
+	Vec3          draw{0.2f, 0.2f, 0.2f};
 	Glyph         glyph = Glyph::Sphere;
 	Kind          kind  = Kind::Instance;
 	int           level = kLevelInstance;

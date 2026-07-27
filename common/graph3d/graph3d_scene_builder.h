@@ -84,8 +84,19 @@ private:
 
 	// Stable, well-separated identity colour per agent (golden-angle hue walk). Distinct from the
 	// agent's HEALTH colour: health answers "is it working?", identity answers "who wrote this?",
-	// and the view needs both at once.
+	// and the view needs both at once. Used for the ownership ribbons, not for node fill.
 	[[nodiscard]] static Rgb identity_color(std::uint32_t agent_id) noexcept;
+
+	// The canonical class of an object node — "table", "chair", "wall", … — which is what its colour
+	// encodes. Mirrors the convention already used by voxelizer/src/scene_processor.cpp
+	// (`object_class_of`) and ring_metaconcept: object_subtype wins ONLY when it names a known
+	// class, because for tables it historically carried the SHAPE ("round"/"square"); otherwise the
+	// node-name prefix decides, and the DSR type is the last resort.
+	[[nodiscard]] static std::string class_of(const std::string &type, const std::string &subtype,
+	                                          const std::string &name);
+
+	// Fixed-order categorical palette, assigned per class and never cycled.
+	[[nodiscard]] static Rgb class_color(const std::string &cls) noexcept;
 
 	std::shared_ptr<DSR::DSRGraph>      g_;
 	std::unique_ptr<DSR::InnerEigenAPI> inner_;   // one instance, main thread only (ts==0 cache)
