@@ -250,6 +250,21 @@ inline Contract default_contract_for(std::string_view object_type)
             .still(0.12f, 0.20f)
             .stable(1).timeout_s(20).on_fail(Consume);
     }
+    if (object_type == "refrigerator")   // refrigerator_concept's node = generic "object", class key "refrigerator"
+    {
+        // Refrigerator: same RGB-mask lock-on as the table (its scene-graph writes the same table_roi_*/
+        // table_detection_* active-perception channel). Centre the projected ROI + reach the stand-off fill;
+        // done when YOLO is firing on the fridge. A tall box fills the frame → keep base rotation (ω) tight
+        // for a clean, motion-free look (the .still dwell).
+        return Contract::servo()
+            .center ("table_roi_offset")
+            .advance("table_roi_fill", 0.45f)
+            .valid  ("table_roi_valid")
+            .until  ("table_detection_alive",      GE, 0.5f)
+            .and_   ("table_detection_confidence", GE, 0.20f)
+            .still  (0.10f, 0.15f)
+            .stable(1).timeout_s(25).on_fail(Consume);
+    }
     return Contract::reach();   // default: navigate to the pose, done on arrival
 }
 
