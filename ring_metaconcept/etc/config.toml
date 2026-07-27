@@ -1,0 +1,75 @@
+
+# --- Common Agent Data ---
+[Agent]
+# MUST be unique across the shared graph — a collision is a CRDT actor-id clash → SIGSEGV in BOTH
+# agents. Taken: room=5 robot=6 table=7 controller=8 voxelizer=9 bottle=10 kinova=11 self_calib=12
+# human=13 residual=14 chair=20 cabinet=21 refrigerator=22 ring_metaconcept=23.
+# (Was 21, which collided with cabinet_concept — cabinet was never entered in the registry.)
+id = 23
+name = "ring_metaconcept"
+
+# --- Single Instance Configuration ---
+# Use this if you only have one graph.
+configFile = ""
+domain = 0
+tree = false
+graph = false
+2d = false
+3d = false
+
+[Presence]
+# The base infrastructure this agent needs to operate: room_concept supplies the room frame
+# the members live under, robot_concept the localization. table_concept / chair_concept produce
+# the member nodes we read — they are OPTIONAL (poll returns 0 when absent) until Milestone 3
+# (evidence-based birth), where a dining_set can only exist once its members do.
+required_agent_names = ["robot_concept", "room_concept"]
+config_dir = "etc"
+monitor_period_ms = 500
+heartbeat_timeout_ms = 3000
+rejoin_grace_ms = 1500
+stale_grace_ms = 120000
+agent_info_period_ms = 1000
+
+[Owns]
+nodes = ["ring_metaconcept 23"]
+
+[Period]
+Compute = 100
+Emergency = 500
+
+[Component.Debug]
+Verbose = false
+
+[RingMetaconcept]
+# Schema = ring (radial arrangement). The graph-reader polls the generic "object" nodes each cycle
+# and filters by CLASS (object_subtype, else the node NAME prefix) — since the object-type migration
+# there is no "table"/"chair" DSR node type to poll.
+AnchorClass = "table"          # central member (the dining table)
+RingClass = "chair"            # ring members arranged around the anchor
+NodeSubtype = "dining_set"     # object_subtype written on the node this agent owns / births (M3+)
+NodePrefix = "dining_set_"     # owned-node NAME prefix — the stale-sweep / cleanup key
+LogPeriodFrames = 30           # per-cycle log + CSV throttle for the graph-reader
+CsvPath = "etc/ring_members.csv"   # per-member snapshot (pose + published Σ); "" disables
+FitCsvPath = "etc/ring_fit.csv"    # arrangement fit + the down-prior it WOULD publish; "" disables
+
+# ── Arrangement belief ──────────────────────────────────────────────────────────────────────
+SigmaSlotM = 0.20              # seat↔chair slack (NOT sensor noise — that comes from each peer's Σ)
+ClutterFrac = 0.20             # prior mass on "this member belongs to no rig"
+OccupancyQ = 0.70              # P(a seat of a real rig is occupied)
+MemberYawOffsetDeg = -90.0     # inward direction → MEMBER yaw convention (chair backrest on −y)
+FacingModelStdDeg = 12.0       # intrinsic spread of "a chair faces the table" — BOUNDS the push (κ=p_ring/var)
+EvidenceEmaAlpha = 0.05        # low-pass rate for ring-vs-null (NOT a sum — static scenes aren't new evidence)
+
+# ── Slot visibility: an EMPTY seat is only evidence where the robot has actually LOOKED ─────
+SlotVisibilityEnabled = true
+ZedHFovDeg = 100.0             # physical camera FoV, not a tuning knob
+ZedMaxRangeM = 6.0             # beyond this a seat is not reliably resolvable
+ZedFovSoftDeg = 12.0           # soft edge — a seat at the frame rim is PARTIALLY observed, not a step
+ZedRangeSoftM = 1.0
+RoomAreaM2Fallback = 50.0      # null support when the room polygon is unavailable (prefer the polygon)
+
+[Ice]
+Warn.Connections = "0"
+Trace.Network = "0"
+Trace.Protocol = "0"
+MessageSizeMax = "20004800"
