@@ -40,11 +40,14 @@ LIST(APPEND HEADERS
   ${ACTIVE_INFERENCE_COMMON_DIR}/mask_ingestor/mask_ingestor.h
   ../src/bottle_scene_graph.h
   ../src/bottle_belief.h
+  ../src/bottle_dof.h
   ../src/bottle_fitter.h
   ../src/epistemic_planner.h
   ../src/bottle_affordance.h
+  ${ACTIVE_INFERENCE_COMMON_DIR}/ai_belief/dof_spec.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/timeseries_plot.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/custom_widget.h
+  ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/belief_inspector.h
   ../src/bottle_model.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_monitor/agent_presence_monitor.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_coordinator/agent_presence_coordinator.h

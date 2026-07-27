@@ -97,6 +97,9 @@ struct BottleInstance
     float last_clutter_frac    = 0.0f;
     float fe_baseline          = -1.0f;   // <0 = uninitialised (seed to the first explained FE)
     float fe_surprise          = 0.0f;
+    // Off-surface (unexplained) support points of the last FRESH frame. HELD between masks on purpose so
+    // the dashboard trace keeps its last real value instead of crashing to 0 on every idle cycle.
+    int   dbg_resid_pts        = 0;
     // Dead-band tracking for write_rt_pose — suppress tiny oscillations
     float last_written_cx = std::numeric_limits<float>::max();
     float last_written_cy = std::numeric_limits<float>::max();

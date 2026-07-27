@@ -151,6 +151,16 @@ AI2CommonModePosStd = 0.02    # per-frame SHARED position error (m); pose-chain 
 AI2CommonModeSizeStd = 0.01   # per-frame SHARED size error radius,height (m)
 MotionCmPosGain = 0.10        # ego-motion→common-mode: position (cx,cy) shared-error std per m/s of motion_dotd. CONTINUOUS "be still to UPDATE, else CONFIRM" fixation; 0 = off.
 MotionCmSizeGain = 0.20       # ego-motion→common-mode: size (radius,height) shared-error std per m/s — the anti-RESHAPE lever (a moving frame confirms but can't grow/shrink the bottle). 0 = off.
+# ── Ego-motion DISCRETE "confirm-only" gate (mirrors refrigerator/chair confirm_only) ─────────────────────
+# When the robot is clearly MOVING the fit takes a PREDICT-ONLY branch (Σ inflates, geometry mean HELD) so a
+# motion-smeared mask may only CONFIRM a converged bottle, never move/reshape it (correct: a static bottle loses
+# nothing by not updating while moving). Complements the CONTINUOUS common-mode above (the graceful backstop).
+# motion_magnitude = max(|motion_dotd|, ego_lin_mps + AI2AngLeverM·ego_ang_radps) — producer-independent motion.
+AI2MotionConfirmOnly = true   # master switch for the discrete gate (false = continuous common-mode only)
+AI2StillLinMps = 0.05         # camera linear speed (m/s) below which the robot counts as "still"
+AI2StillAngRadps = 0.10       # camera angular speed (rad/s) below which the robot counts as "still"
+AI2StillDotd = 0.05           # per-mask ego-motion corruption speed (m/s) still-level
+AI2AngLeverM = 2.0            # rad/s → m/s lever (tangential speed of a bottle ~this far away) for ego-motion
 AI2GnIters = 4                # Gauss-Newton iterations per frame
 AI2CsvPath = "etc/bottle_ai2_log.csv"   # per-cycle AI2 belief CSV (state + Σ diag); empty = off
 

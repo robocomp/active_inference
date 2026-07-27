@@ -1,7 +1,7 @@
 
 # --- Common Agent Data ---
 [Agent]
-id = 21 # unique across the shared graph (room5 robot6 table7 ctrl8 vox9 bottle10 kinova11 selfcal12 human13 residual14 chair20)
+id = 22 # unique across the shared graph (room5 robot6 table7 ctrl8 vox9 bottle10 kinova11 selfcal12 human13 residual14 chair20 cabinet21)
 name = "refrigerator_concept"
 
 # --- Single Instance Configuration ---

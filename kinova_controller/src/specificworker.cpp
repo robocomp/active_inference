@@ -720,14 +720,20 @@ void SpecificWorker::update_bottle_pose_in_dsr()
                 table_world_.linear()      = arm_base_world_.linear() * R_at;
                 table_world_.translation() = arm_base_world_ * Eigen::Vector3d(v[0], v[1], v[2]);
             }
-            // bottle_concept publishes the bottle as a `cylinder` node named bottle_* (parented to
-            // room), so resolve it by TYPE, not a literal name; express it in the table frame and
-            // lift via table_world_.
+            // bottle_concept publishes the bottle as a generic `object` node named bottle_*
+            // (object_subtype=="bottle", parented to room). Post schema-migration all concept
+            // nodes share the type "object", so resolve the bottle by its CLASS (object_subtype,
+            // falling back to the name prefix), not the old `cylinder` type; express it in the
+            // table frame and lift via table_world_.
             std::string bottle_name;
             if (G)
-                if (const auto cyls = G->get_nodes_by_type("cylinder"); not cyls.empty())
+                for (const auto& bnode : G->get_nodes_by_type("object"))
                 {
-                    const auto& bnode = cyls.front();
+                    const auto st = G->get_attrib_by_name<object_subtype_att>(bnode);
+                    const bool is_bottle = st.has_value() ? st.value() == "bottle"
+                                                          : bnode.name().starts_with("bottle");
+                    if (not is_bottle)
+                        continue;
                     bottle_name = bnode.name();
                     // model_generation is the perception clock: it advances only when bottle_concept
                     // re-fits the bottle, so an unchanged value means this read is the SAME info as
@@ -752,6 +758,7 @@ void SpecificWorker::update_bottle_pose_in_dsr()
                             bottle_obs_fresh_        = true;
                         }
                     }
+                    break;   // first bottle only (mirrors the old cyls.front())
                 }
             if (not bottle_name.empty())
                 if (auto bt = inner_eigen_api_->transform_axis("table", bottle_name); bt.has_value())

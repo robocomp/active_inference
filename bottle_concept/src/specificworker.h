@@ -48,6 +48,7 @@
 #include <vector>
 
 #include <genericworker.h>
+#include <fps/fps.h>
 #include <Eigen/Dense>
 
 #include <dsr/api/dsr_rt_api.h>
@@ -64,6 +65,8 @@
 #include "bottle_fitter.h"      // rc::BottleFitter (active-inference fit core)
 #include "bottle_lidar_ingestor.h"  // rc::BottleLidarIngestor (lidar3D media plane → room-frame sweep)
 #include "../../common/instance_tracker/instance_tracker.h"   // rc::InstanceTracker (birth/associate/death)
+#include "../../common/dashboard/belief_inspector.h"   // rc::BeliefInspector (full-belief bottom panel)
+#include "../../common/dashboard/evidence_monitor.h"   // rc::EvidenceMonitor (counter strip)
 #include "../../common/dashboard/custom_widget.h"      // Custom_widget (dockable dashboard host)
 #include "../../common/dashboard/timeseries_plot.h"    // rc::TimeSeriesPlot
 
@@ -169,10 +172,23 @@ private:
     // Live belief dashboard — its OWN top-level window (extracted from the DSR graph dock so it shows
     // independently of Agent.graph; mirrors room_concept/kinova_controller). Geometry persisted via QSettings.
     Custom_widget*      custom_widget_ = nullptr;
-    rc::TimeSeriesPlot* ts_fe_plot_    = nullptr;   // free energy
-    rc::TimeSeriesPlot* ts_dim_plot_   = nullptr;   // radius, height (m)
-    rc::TimeSeriesPlot* ts_sigma_plot_ = nullptr;   // posterior σ(radius,height) (mm)
-    rc::TimeSeriesPlot* ts_ce_plot_    = nullptr;   // CUSUM/SPRT counter-evidence (radius, height)
+    rc::TimeSeriesPlot* ts_plot_          = nullptr;   // FE (+ baseline)
+    rc::TimeSeriesPlot* ts_surprise_plot_ = nullptr;   // FE surprise (attention signal), own panel/scale
+    rc::TimeSeriesPlot* ts_cov_plot_      = nullptr;   // belief uncertainty U(Σ)
+    rc::TimeSeriesPlot* ts_res_plot_      = nullptr;   // residual point count
+    // Bottom panel (replaces the old Σ[cx,cy] time-series): the WHOLE belief — every state DOF with its
+    // posterior σ and Σ as a correlation heatmap. The bottle publishes no σ*, so the inspector drops the
+    // σ*/adequacy columns rather than show invented targets; a cylinder has no discrete modes either.
+    rc::BeliefInspector* belief_inspector_ = nullptr;
+    void refresh_belief_inspector();
+    // Section 1: the evidence-pipeline counter strip (same struct + widget as every other concept agent).
+    QWidget*             dashboard_window_ = nullptr;   // combined window: counters over plots + inspector
+    rc::EvidenceMonitor* evidence_monitor_ = nullptr;
+    rc::EvidenceGlobals  ev_g_{};                       // per-cycle fields reset at the head of compute()
+    void refresh_evidence_monitor();                    // throttled push of BOTH dashboard sections
+    std::chrono::steady_clock::time_point last_monitor_tp_{};   // ~5 Hz dashboard tick
+    std::chrono::steady_clock::time_point last_compute_tp_{};   // compute-rate estimate for the strip
+    FPSCounter                            fps_counter_;         // overall compute()-cycle rate (std::cout heartbeat)
     void restore_dashboard_geometry();
     void save_dashboard_geometry() const;
 

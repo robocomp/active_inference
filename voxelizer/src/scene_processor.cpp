@@ -31,7 +31,7 @@ namespace
 // when it names a class and otherwise falls through to the name prefix. Returns "" for a non-furniture object.
 std::string object_class_of(DSR::DSRGraph& g, const DSR::Node& node)
 {
-    static constexpr std::array<std::string_view, 5> kClasses{"table", "chair", "bottle", "cabinet", "refrigerator"};
+    static constexpr std::array<std::string_view, 6> kClasses{"table", "chair", "bottle", "cabinet", "refrigerator", "door"};
     if (const auto s = g.get_attrib_by_name<object_subtype_att>(node); s.has_value())
         if (const std::string& sv = s.value();
             std::find(kClasses.begin(), kClasses.end(), sv) != kClasses.end())

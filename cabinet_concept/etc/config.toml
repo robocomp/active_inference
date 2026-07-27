@@ -130,6 +130,13 @@ FreeSpacePrecision = 500.0         # RE-ENABLED: the carve is now FACE-GATED (ca
                                    # beams + top z1 via top-exit beams; SKIPS depth/bottom faces so d is never
                                    # collapsed). Validated by cabinet_belief self_test (j). ~1/σ² per through-beam.
 
+# Scene-object non-penetration: a run may not cross OTHER agents' furniture (fridge/table/…) read from the shared
+# graph. The factor retracts a penetrating END onto the object; a run mostly ENGULFED by an object is retired (the
+# on-fridge false-cabinet the LiDAR carve can't reach). Must DOMINATE ExtentPrecision (≥800). 0 = OFF.
+ObjectExclusionPrecision = 800.0
+ObjectExclusionMarginM   = 0.03    # flush clearance kept off the object boundary
+ObjectEngulfFrac         = 0.60    # retire when along-wall AND depth AND z overlap all exceed this
+
 # Footprint SECOND-MOMENT factor (cabinet_belief.h): measures (w,h,yaw) from the top-band cloud's 2D inertia
 # tensor and folds it as a linear Gaussian factor into the GN update — the escape from the clutter-trap that
 # leaves a DENSE, bigger/yawed mask unable to rotate/resize the box (the tables_5.png "stuck yaw"). The

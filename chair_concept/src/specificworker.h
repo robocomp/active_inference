@@ -94,6 +94,9 @@ private:
     // ── Orchestration + post-fit steps ────────────────────────────────────────
     void load_config(const ConfigLoader& cfg);
     void process_chair_node(const DSR::Node& node);
+    // Read the level-2 arrangement prior off the incoming `group_member` edge (ring_metaconcept is
+    // the sole writer) and hand it to the belief. Inert when absent / kappa<=0 / stale.
+    void refresh_rig_yaw_prior(rc::ChairInstance& inst, const DSR::Node& node);
     void run_instance_tracker();          // data-driven birth/associate/death (the only instance-lifecycle path)
     void merge_overlapping_instances();   // collapse two instances on the same chair (seat-footprint overlap)
     void update_existence_beliefs();      // continuous existence log-odds → evidence-based removal (no age immunity)

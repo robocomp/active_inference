@@ -123,13 +123,20 @@ private:
         float light;
         float u, v;
     };
-    // A furniture display template: unit-normalised geometry + optional base-colour texture.
-    struct FurnitureTemplate
+    // One material group of a display template: geometry + its material (flat Kd and/or a base-colour texture).
+    struct SubMeshGL
     {
         std::vector<QVector3D> tris;                   // positions (room-frame unit)
         std::vector<QVector2D> uv;                     // per-vertex UV (parallel to tris)
-        QImage tex_image;                              // CPU base-colour image (null ⇒ untextured)
+        QColor diffuse;                                // Kd flat colour (used when no texture)
+        bool has_diffuse = false;                      // true iff the .mtl gave a Kd
+        QImage tex_image;                              // CPU base-colour image (null ⇒ untextured group)
         std::unique_ptr<QOpenGLTexture> tex;           // GPU texture, uploaded lazily in paintGL
+    };
+    // A furniture display template: the material groups of one OBJ (+ its .mtl). Self-describes appearance.
+    struct FurnitureTemplate
+    {
+        std::vector<SubMeshGL> subs;
     };
 
     static QColor color_for_category(const std::string& category);

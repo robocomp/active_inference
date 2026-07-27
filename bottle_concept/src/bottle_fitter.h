@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <fstream>
 #include <memory>
@@ -78,6 +79,21 @@ public:
     float run_inference(BottleInstance& inst, const BottleObservation& observation);
     bool should_log(const BottleInstance& inst) const;
 
+    // Robot/camera ego-motion (room frame), from the transform chain — producer-INDEPENDENT. Call once per compute
+    // cycle (before the instance loop); run_inference then gates the GEOMETRY update to STILLNESS ("be-still-to-
+    // update"). Mirrors refrigerator/chair confirm_only. Uses the SAME room_T_zed extrinsic (room_T_zed_matrix) the
+    // fit uses, pinned to the CURRENT pose (ts=0), diffed across cycles on the MAIN thread.
+    void  update_ego_motion();
+    float ego_lin_mps() const   { return ego_lin_mps_; }
+    float ego_ang_radps() const { return ego_ang_radps_; }
+    // Robust combined ego-motion speed (m/s): max(|motion_dotd|, ego_lin + ai2_ang_lever_m·ego_ang). Works even if
+    // the producer never populated motion_dotd. The SAME motion measure the discrete confirm_only gate reads.
+    float motion_magnitude(const BottleInstance& inst) const;
+    // CONFIRMATION-ONLY (no geometry-mean change) when the robot is MOVING (ego lin/ang OR motion_dotd above the
+    // still-level). Gated behind cfg_.ai2_motion_confirm_only. True ⇒ run_inference takes the predict-only branch.
+    // A bottle is a yaw-symmetric CYLINDER, so this governs position + size (radius,height) only — there is no yaw.
+    bool  confirm_only(const BottleInstance& inst) const;
+
     // The live instance map (the validation sweep mutates it; del_node prunes it).
     std::unordered_map<std::uint64_t, BottleInstance>& instances() { return instances_; }
     void forget_node(std::uint64_t id) { instances_.erase(id); }
@@ -136,6 +152,15 @@ private:
     std::vector<Eigen::Vector3f>    lidar_sweep_room_;
     Eigen::Vector3f                 lidar_origin_room_ = Eigen::Vector3f::Zero();
     bool                            lidar_have_sweep_  = false;
+
+    // Ego-motion state (camera pose deltas → robot speed), updated once per cycle in update_ego_motion().
+    // (Mirrors refrigerator/chair — the "be-still-to-update" signal source for the discrete confirm_only gate.)
+    float           ego_lin_mps_   = 0.0f;
+    float           ego_ang_radps_ = 0.0f;
+    Eigen::Vector3f prev_cam_pos_  = Eigen::Vector3f::Zero();
+    Eigen::Vector3f prev_cam_fwd_  = Eigen::Vector3f::UnitY();
+    bool            have_prev_cam_ = false;
+    std::chrono::steady_clock::time_point prev_cam_tp_{};
 };
 
 }  // namespace rc

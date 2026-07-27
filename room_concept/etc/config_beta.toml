@@ -179,6 +179,16 @@ HierPrecGGain           = 1.0    # k en g(v)=u0+k·v (mapa top-down)
 HierPrecLrV             = 0.02   # paso del estado lento v (map_trust)
 HierPrecSigmaV2         = 1.0    # escala prior del estado v
 
+# ── Relocalización FE-nativa por colapso de map-trust (HIERARCHICAL_PRECISION.md) ──
+# Cuando exp(u_b) cae bajo el suelo varios frames → misma grid search jerárquica que
+# RecoveryManager (que se mantiene como backstop de sdf crudo). OFF por defecto.
+# NO activar en vivo sin avisar ([[ask-before-changing-running-params]]).
+# HierPrecRelocEnabled         = false
+# HierPrecRelocFloor           = 0.10  # exp(u_b) bajo esto = colapso de confianza en el mapa
+# HierPrecRelocConsecutive     = 3     # frames bajo el suelo antes de disparar (debounce)
+# HierPrecRelocCooldownFrames  = 30    # frames suprimidos tras un disparo
+# HierPrecEeDthetaMin          = 0.15  # rad (|Δθ|) que habilita el nudge en early-exit (giro)
+
 # ── Recovery ──────────────────────────────────────────────────────────────────
 RecoveryLossThreshold    = 0.45  # sqrt(sdf_mse) > umbral → frame malo (m).
                                   # Anterior 0.2 disparaba en giros normales.

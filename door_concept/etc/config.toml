@@ -1,0 +1,193 @@
+
+# --- Common Agent Data ---
+[Agent]
+id = 15 # unique across the shared graph: room=5 robot=6 table=7 controller=8 voxelizer=9 bottle=10 kinova=11 self_calib=12
+name = "door_concept"
+
+# --- Single Instance Configuration ---
+# Use this if you only have one graph.
+configFile = ""
+domain = 0
+tree = false
+graph = false
+2d = false
+3d = false
+
+# --- Multiple Instance Template ---
+# If you define multiple instances, the single instance config above will be ignored.
+# [Agent.instance_name]
+# configFile = ""
+# domain = 1
+# tree = true
+# graph = true
+# 2d = true
+# 3d = true
+
+[Presence]
+required_agent_names = ["robot_concept", "room_concept"]
+config_dir = "etc"
+monitor_period_ms = 500
+heartbeat_timeout_ms = 3000
+rejoin_grace_ms = 1500
+stale_grace_ms = 120000
+agent_info_period_ms = 1000
+
+[Owns]
+nodes = ["door_concept 20"]
+
+[Period]
+Compute = 100
+Emergency = 500
+
+[Component.Debug]
+Verbose = false
+
+[Media]
+MasksStallTimeoutMs = 3000   # 0 = disable the stall gate
+
+[DoorModel]
+# ── AI2 recursive-Laplace belief (mirrors table_concept). ──
+SigmaObs = 0.05                  # compound-SDF band for the candidate/residual split in observe()
+SdfThresholdForStorage = 0.08    # on-surface membership for the candidate/residual split
+AI2CsvPath = "etc/ai2_log.csv"   # per-cycle AI2 log (state + Σ diag + range/motion); empty disables
+AI2SigmaBaseM = 0.03
+AI2ClutterFrac = 0.10
+AI2ClutterScaleM = 0.12
+AI2ClutterStructureGain = 1.0    # density-aware clutter: shrink the clutter prior for seat-coplanar points (closes the escape valve → seat_d recovers with honest Σ). 0 = flat clutter
+AI2PriorSizeStd = 0.15
+AI2ProcessStdM = 0.005
+AI2ProcessStdYaw = 0.01
+AI2ProcessStdSize = 0.0005       # process noise for RIGID size DOFs (≪ pose; furniture shape doesn't drift)
+AI2AgeNominalDtS = 0.0           # stale-belief aging: mask nominal period (s). >0 ⇒ Σ inflates by Q·(dt/this) while unseen (measurement-age→covariance); 0 = freeze on stale. Try 0.1.
+AI2FloorZ = 0.0                  # room-frame floor plane; cz is PINNED here (shared, view-independent)
+AI2FloorStd = 0.03               # floor-height uncertainty (m) → common-mode z
+AI2SeatAnchorStd = 0.04          # seat-layer height-anchor obs noise (m); 0 disables. Pins seat_h to the dense seat layer (gauge fix)
+AI2SeatAnchorBand = 0.12         # seat-layer mean-shift bandwidth (m) — vertical scale separating seat from contamination
+AI2SeatExtentStd = 0.02          # seat-layer FOOTPRINT (seat_w/seat_d) span-anchor obs noise (m); 0 disables. Fixes seat_d collapse
+AI2CommonModePosStd = 0.03
+AI2CommonModeSizeStd = 0.02
+AI2CommonModeYawStd = 0.03
+AI2RangeNoiseLatPerM = 0.02      # static range → R + position common-mode (m per m)
+AI2RangeNoiseYawPerM = 0.03      # static range → yaw common-mode (rad per m) — anti far-view rotation
+# Ego-motion "be-still-to-update" fixation (ported from table_concept). A frame captured while the robot moves is
+# a shared smear → routed into the per-frame COMMON-MODE (caps its authority to move the mean), not per-point R.
+# Geometry updates concentrate at stillness; moving frames only confirm. Continuous, 0 at stillness. 0 disables.
+MotionCmPosGain = 0.30           # position (cx,cy) shared-error std per m/s of motion_dotd — anti-DRIFT  (0.10→0.30)
+MotionCmYawGain = 0.50           # yaw shared-error std (rad) per m/s of motion_dotd      — anti-ROTATE (0.12→0.50);
+                                 # the "passing by rotated the door" lever. 0 at stillness → zero cost stationary,
+                                 # so push higher (0.7–1.0) if a moving pass still swings yaw.
+# "Be-still-to-update" as CONTINUOUS PRECISION (AIF, no threshold): a frame's authority to MOVE the mean falls off
+# smoothly with an UNRELIABILITY = motion × off-axis-position. Still OR well-centred → full authority; moving AND
+# peripheral → the frame only CONFIRMS. Motion = per-mask motion_dotd OR'd with the robot's measured ego-speed;
+# off-axis penalty grows with the mask centroid radius². Feeds the pose common-mode AND the existence reliability.
+AI2AngLeverM   = 2.0             # rad/s → m/s lever (tangential speed of a door ~this far) for the ego angular term
+AI2PeriphRef   = 0.50            # centroid radius (focal-norm, tan of off-axis angle) where the periphery penalty
+                                 # saturates to 1; 0.50 ≈ tan(27°). Smaller = only near-axis counts as "central".
+AI2MotionRefMps = 0.60           # motion (m/s) at which a fully-peripheral frame becomes fully unreliable (existence)
+# A/B FALLBACK — the OLD hard gate (predict-only when moving & off-centre). Default OFF; the continuous precision
+# above is the live path. Set AI2MotionConfirmOnly=true to compare; the four keys below feed only that path.
+AI2MotionConfirmOnly = false
+AI2StillLinMps   = 0.05
+AI2StillAngRadps = 0.10
+AI2StillDotd     = 0.05
+AI2MovingUpdateCenterRadius = 0.35
+AI2TruncGateFrac = 0.10          # skip the geometric update (predict only) when this fraction of the mask is on the image border
+AI2GnIters = 4                   # Gauss-Newton iterations per frame
+AI2ExtentStd = 0.05              # extent-observation noise (m) for the coverage/extent likelihood
+
+[DoorConcept]
+StateEps = 0.04             # Σ|Δstate| threshold between cycles for convergence (m+rad)
+KStable = 30                # consecutive stable frames before model_stable
+DetectionAliveMaxFrames = 40 # cycles without a fresh door mask before detection_alive=false
+ObsDistance = 1.8           # comfortable maximum stand-off from the target face for epistemic poses
+MinStandOffM = 2.0          # min stand-off floor for epistemic viewpoints (YOLO misses doors seen too close)
+EpistemicCooldownCycles = 200 # min cycles a satisfied door stays withdrawn (anti-chatter)
+DoorLogPeriodFrames = 30   # per-door log throttle
+VoxelBankMaxPoints = 4000   # max number of door-owned voxels kept in memory
+VoxelBankQuantizationM = 0.02 # dedup grid (m) for voxel-bank hashing
+VoxelSelectRadiusMarginM = 0.50 # per-door XY ownership gate margin for mixed proto-doors
+VoxelSelectHeightMarginM = 0.25 # extra Z margin above door height when selecting owned voxels
+RtCovUpload = true          # upload the door pose covariance (rt_covariance_att, 6×6 SE3) onto the room→door RT edge from the belief Σ
+RtCovScale = 1.0            # var = RtCovScale · Σ_ii; calibrate toward NEES≈1
+RtCovAddChain = true        # Part B: add the localization/chain cov J·Σ_chain·Jᵀ to the published RT cov
+
+[Tracker]
+# Multi-instance birth/associate/death (shared rc::InstanceTracker) — the only instance-lifecycle path.
+# Masks are associated to instances by a covariance-gated 1-to-1, an unexplained mask spawns a new door,
+# and the MERGE operator collapses two instances on the same door.
+GateMahalanobis = 9.0     # χ²₂ gate (~3σ) for a mask↔instance match once it has a cov
+GateFallbackM = 0.40     # metric XY gate (m) before an instance has a usable covariance
+DetectionNoiseM = 0.20   # R in the association innovation cov S=P+R²I (≥ centroid-vs-fit offset)
+BirthFrames = 8          # frames a mask must stay unexplained before spawning a door
+DeathFrames = 300        # frames an instance may go unobserved before retirement
+DeathEnabled = false     # OFF: a door is persistent furniture — removed only by MERGE
+BirthMinSepM = 0.70      # a birth must be ≥ this (m) from every existing door (anti-duplicate)
+MergeOverlap = 0.20      # collapse two instances whose seat footprints overlap ≥ this fraction of the smaller, keeping the more-observed. 0 disables.
+# Stillbirth prune — a phantom born from association churn starves once the real instance reclaims its
+# mask. Prune a YOUNG instance (still inside its probation window) left unassigned for a sustained streak.
+PruneEnabled = false     # OFF (2026-07-02): match table's proven merge-only lifecycle for STATIC furniture.
+                         # With the §3.1 position gate now fixed (no far mis-claims), the stillbirth prune's
+                         # phantom-killing job is redundant and was a prime suspect for "create-then-remove"
+                         # churn (a glimpsed door pruned before it matures). Removal is by MERGE only.
+PruneMaturityCycles = 90 # probation window: an instance older than this is permanent furniture, never pruned
+PrunePatience = 30       # consecutive tracker-unassigned cycles within probation → prune as stillborn
+BirthSeatW = 0.45        # seed seat width/depth + seat/back heights for a freshly born door node
+BirthSeatD = 0.45
+BirthSeatH = 0.45
+BirthBackH = 0.45
+NllCost = false          # association cost = ½(m²+ln|S|) NLL (compete by likelihood, not raw distance)
+# ZED-only BIRTH: only a ZED slice (per-pixel depth ⇒ depth_var==0) may SPAWN a door. A ricoh LiDAR-reprojected
+# depth slice (depth_var>0) has unreliable depth/extent → it may associate/confirm an existing door but NOT birth
+# one (this is what created door_3 — a wrong ricoh detection at 8.8 m, outside the room). ZED drives geometry,
+# ricoh confirms. Set RicohBirthEnabled=true to allow a confident, low-variance ricoh-depth slice to birth too.
+RicohBirthEnabled = false
+RicohBirthConf = 0.60      # min YOLO confidence for a ricoh birth (only when RicohBirthEnabled)
+RicohBirthMaxVar = 0.005   # max depth_var (m²) for a ricoh birth (only when RicohBirthEnabled)
+
+[Existence]
+# Continuous existence log-odds — the removal path (the stillbirth prune above is OFF, and merge only kills
+# spatial DUPLICATES, so a phantom that sits apart from the real doors had NO removal path). Each instance
+# integrates one sensor frame of evidence while it is in the camera frustum: POSITIVE when its assigned support
+# mass matches a door's expected silhouette at that range, NEGATIVE (silhouette-contradiction / free-space)
+# when it is in view yet under-supported. No age immunity — L is pinned high only by continuing to be explained.
+Enabled = true           # use the log-odds belief for removal (false → fall back to the stillbirth prune)
+BirthLogodds = 1.0       # L seeded at birth (a birth already required BirthFrames of unexplained evidence)
+RemoveLogodds = -3.0     # remove when L falls below this (span BirthLogodds→RemoveLogodds / EvidenceGain = frames to kill)
+MaxLogodds = 4.0         # saturation cap: a real door sits here; occlusion tolerance = (Max−Remove)/EvidenceGain frames
+EvidenceGain = 0.15      # per-sensor-frame |ΔL| scale
+ExpectedSupportC = 2500.0  # expected support scale: E[npts] = C / range². Sets the negative boundary at a HANDFUL of
+                         # points (≈0.25·C/range²): sparse-but-real doors (~20 pts @6m) stay positive, a phantom
+                         # feeding on ~8 clutter points goes negative. Evidence is only taken on a WON mask slice.
+AdequacyRef = 0.25       # WON-mask support/expected below this fraction → NEGATIVE evidence (else positive)
+AdequacyCap = 1.5        # clamp adequacy so one dense frame can't over-confirm
+CalibAdapt = 0.0         # EWMA rate adapting C (0 = fixed C; a dense door would poison a sparse one via a shared C)
+VacateConfidentFrames = 45  # an in-frustum instance that keeps winning NO mask draws vacate negative that ramps 0→1 over
+                         # this many frames_since_detection. Small (brief occlusion / lost slice) → barely touched, recovers
+                         # on its next win (anti-churn grace); unexplained for seconds (a phantom) → full negative → removed.
+OcclusionCheck = true    # SUPPRESS the vacate negative when the camera→door ray is blocked by a CLOSER object (another
+                         # door, the table, a person …). A door hidden behind something is not removed for lack of a mask.
+OcclusionMarginM = 0.30  # an occluder must be ≥ this many metres CLOSER than the door to count as blocking it
+# Room-containment pose prior: P(a door centre outside the room walls) ≈ 0 (the room polygon is a trusted nominal
+# model, never fitted). Suppresses out-of-room BIRTHS and removes an instance a localization glitch put outside —
+# even behind a wall where the sensor can never reach it to vacate. Independent of frustum/occlusion.
+RoomPrior = true         # enforce the room-containment pose prior
+RoomMarginM = 0.40       # tolerance a door centre may sit OUTSIDE the walls (wall-hugging door + centroid noise)
+OutOfRoomGain = 1.5      # |ΔL| per frame while outside → removed in a few frames (also debounces a 1-frame glitch)
+# "ZED removes, ricoh confirms": a ricoh WIN confirms existence but a ricoh mask's ABSENCE never removes — only ZED
+# absence does, weighted by how reliably ZED would have detected a present door (falls off toward the image edge +
+# with range). Fixes removal of a far/peripheral only-ricoh-visible door when its 360 view is momentarily occluded.
+ZedEdgeOffset = 1.0      # normalised ROI offset (0=centred, 1=image edge) at which ZED detectability → 0
+ZedRangeFull  = 4.0      # within this range (m) ZED detects reliably → absence fully counts (pd=1)
+ZedRangeRef   = 7.0      # beyond this range (m) ZED absence says nothing about existence (pd=0)
+ZedClearLosFloor = 0.15  # pd FLOOR for an UNOCCLUDED in-frustum door: even at the ZED periphery a persistently-
+                         # unexplained door with CLEAR line of sight still vacates at ≥ this rate → a glitch-
+                         # stranded phantom the robot never centres eventually dies. conf gates on staleness so a
+                         # recently-seen door is untouched. Occluded doors HOLD (protected before this branch).
+                         # 0 = pure pd (a peripheral phantom then persists until the robot centres it). Tune down
+                         # if real peripheral doors get removed; up to clear glitch phantoms faster.
+
+[Ice]
+Warn.Connections = "0"
+Trace.Network = "0"
+Trace.Protocol = "0"
+MessageSizeMax = "20004800"

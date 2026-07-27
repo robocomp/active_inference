@@ -125,6 +125,7 @@ private:
     void run_kitchen_model();
     void publish_kitchen_boxes();        // reconcile active cells ↔ DSR cabinet_* box nodes (create/update/delete)
     void update_kitchen_ego_motion();    // transform-chain camera speed (producer-independent), aligned with chair
+    std::vector<rc::SceneObjectBox> read_scene_objects() const;   // OTHER agents' furniture boxes (room frame) to not penetrate
     rc::KitchenManager                        kitchen_mgr_;
     std::unordered_map<std::string, std::uint64_t> kitchen_nodes_;   // cell signature → DSR node id
     // Ego-motion state for the stillness/VOR gate (chair-aligned): camera pose deltas → linear/angular speed.

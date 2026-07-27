@@ -208,8 +208,11 @@ std::vector<rc::SpecialistSdf> SpecificWorker::build_specialist_sdfs() const
     if (not inner_eigen_)
         return out;
     const float sensor_var = cfg_.cluster.explain_sensor_sigma_m * cfg_.cluster.explain_sensor_sigma_m;
-    for (const char* type : {"table", "chair", "cylinder"})
-        for (const auto& n : G->get_nodes_by_type(type))
+    // Post schema-migration every concept publishes its instance as a generic `object` node
+    // (class in the object_subtype string attr), so the whole modelled-furniture set is exactly
+    // get_nodes_by_type("object") — no per-class type list needed here (any object with a valid
+    // box becomes an explainer).
+    for (const auto& n : G->get_nodes_by_type("object"))
         {
             const float w = G->get_attrib_by_name<width_m_att> (n).value_or(0.0f);
             const float d = G->get_attrib_by_name<depth_m_att> (n).value_or(0.0f);
@@ -260,8 +263,13 @@ void SpecificWorker::build_support_surfaces()
     support_surfaces_.clear();
     if (not inner_eigen_ or not G)
         return;
-    for (const auto& n : G->get_nodes_by_type("table"))
+    // Only tables are support surfaces. Every concept is now a generic `object` node, so filter
+    // the object set down to tables. Tables carry object_subtype "round"/"square" (the shape model,
+    // NOT the literal "table"), so the reliable class discriminator is the "table_" name prefix.
+    for (const auto& n : G->get_nodes_by_type("object"))
     {
+        if (not n.name().starts_with("table"))
+            continue;
         const float w = G->get_attrib_by_name<width_m_att> (n).value_or(0.0f);
         const float d = G->get_attrib_by_name<depth_m_att> (n).value_or(0.0f);
         const float h = G->get_attrib_by_name<height_m_att>(n).value_or(0.0f);
@@ -450,12 +458,20 @@ void SpecificWorker::compute()
     static int cs = 0;
     if ((cs++ % 40) == 0)
     {
-        const int n_tab = static_cast<int>(G->get_nodes_by_type("table").size());
-        const int n_chr = static_cast<int>(G->get_nodes_by_type("chair").size());
-        const int n_cyl = static_cast<int>(G->get_nodes_by_type("cylinder").size());
+        // All concepts are generic `object` nodes now; split the per-class counts by object_subtype
+        // (tables report "round"/"square"), falling back to the name prefix.
+        int n_tab = 0, n_chr = 0, n_cyl = 0;
+        for (const auto& n : G->get_nodes_by_type("object"))
+        {
+            const auto st = G->get_attrib_by_name<object_subtype_att>(n);
+            const std::string sub = st.has_value() ? st.value() : std::string{};
+            if      (n.name().starts_with("table")  or sub == "table" or sub == "round" or sub == "square") ++n_tab;
+            else if (n.name().starts_with("chair")  or sub == "chair")  ++n_chr;
+            else if (n.name().starts_with("bottle") or sub == "bottle") ++n_cyl;
+        }
         std::string s;
         for (const auto& o : soft_objects_) s += std::format("[σxy={:.3f} σz={:.3f} ztop={:.2f} hx={:.2f} hy={:.2f}] ", o.sigma_xy, o.sigma_z, o.z_top, o.hx, o.hy);
-        std::println("[collapse] nodes table={} chair={} cylinder={} → {} objects; {}",
+        std::println("[collapse] nodes table={} chair={} bottle={} → {} objects; {}",
                      n_tab, n_chr, n_cyl, soft_objects_.size(), s.empty() ? "(none)" : s);
     }
 

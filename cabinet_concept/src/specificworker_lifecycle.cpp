@@ -241,6 +241,38 @@ void SpecificWorker::update_kitchen_ego_motion()
     prev_cam_pos_ = pos; prev_cam_fwd_ = fwd; prev_cam_tp_ = now; have_prev_cam_ = true;
 }
 
+// Read OTHER agents' furniture from the shared graph as room-frame OBBs (mirrors voxelizer build_graph_object_box):
+// type "object", SKIP our own cabinet_* runs, need width/depth/height + a room->object RT transform. A min-footprint
+// guard drops small clutter (bottles/cups). ts==0 transform on the main thread ⇒ cache-safe. Empty if the feature
+// is off / graph unavailable. Consumed by the exclusion factor + engulfment retirement.
+std::vector<rc::SceneObjectBox> SpecificWorker::read_scene_objects() const
+{
+    std::vector<rc::SceneObjectBox> out;
+    if (not G or not inner_eigen_) return out;
+    constexpr float kMinFootprintM2 = 0.06f;
+    for (const auto& node : G->get_nodes_by_type("object"))
+    {
+        if (node.name().starts_with("cabinet")) continue;                 // our own kitchen runs — never self-exclude
+        const auto w = G->get_attrib_by_name<width_m_att>(node);
+        const auto d = G->get_attrib_by_name<depth_m_att>(node);
+        const auto h = G->get_attrib_by_name<height_m_att>(node);
+        if (not w or not d or not h) continue;
+        if (w.value() <= 0.0f or d.value() <= 0.0f or h.value() <= 0.0f) continue;
+        if (w.value() * d.value() < kMinFootprintM2) continue;            // drop bottles/cups (class-agnostic)
+        const auto T = inner_eigen_->get_transformation_matrix("room", node.name(), 0);
+        if (not T.has_value()) continue;
+        rc::SceneObjectBox b;
+        b.cx  = static_cast<float>(T->translation().x());
+        b.cy  = static_cast<float>(T->translation().y());
+        b.z0  = static_cast<float>(T->translation().z());                  // base origin (0 for a floor object)
+        b.z1  = b.z0 + h.value();
+        b.yaw = static_cast<float>(std::atan2(T->linear()(1, 0), T->linear()(0, 0)));
+        b.w   = w.value(); b.d = d.value();
+        out.push_back(b);
+    }
+    return out;
+}
+
 // ─── Stage 2: kitchen-of-runs model ─────────────────────────────────────────────────────────────
 // The (wall,tier) cells own the WallRunBeliefs. Identity IS the cell, so there is no birth/associate/merge
 // and the disasters (crossings, 10 cm slivers, ceiling boxes) are unrepresentable — the wall chart fixes yaw
@@ -271,6 +303,8 @@ void SpecificWorker::run_kitchen_model()
         bp.gn_iters             = cfg_.ai2_gn_iters;
         bp.extent_precision     = cfg_.extent_precision;
         bp.free_space_precision = cfg_.free_space_precision;
+        bp.object_exclusion_precision = cfg_.object_exclusion_precision;   // retract a run's crossing end
+        bp.object_exclusion_margin_m  = cfg_.object_exclusion_margin_m;
         kitchen_mgr_.build(walls, tiers, tp, bp, cfg_.ceiling_height_m);
         std::print("cabinet_concept: [kitchen] built {} cells over {} walls (H_room={:.2f})\n",
                    kitchen_mgr_.cells().size(), walls.size(), cfg_.ceiling_height_m);
@@ -310,8 +344,16 @@ void SpecificWorker::run_kitchen_model()
     const float periph     = std::clamp(rr * rr, 0.0f, 1.0f);
     const float mv         = cfg_.kitchen_motion_cm_gain * motion_mag;
     rc::KitchenManagerParams mp;
+    mp.object_exclusion_enabled = cfg_.object_exclusion_precision > 0.0f;   // gate the engulfment-retirement pass
+    mp.engulf_frac              = cfg_.object_engulf_frac;
     rc::CabinetFrame tmpl;
     tmpl.ego_motion_pos_var = mv * mv * periph;                     // fed to WallRunBelief::common_mode_inv_diag
+
+    // SCENE-OBJECT NON-PENETRATION: read OTHER agents' furniture (fridge/table/…) so a run does not cross them.
+    // The exclusion factor retracts a crossing end; a run engulfed by an object is retired (the on-fridge false
+    // cabinet the LiDAR carve can't reach). Same frame flows to both update() and update_island().
+    if (cfg_.object_exclusion_precision > 0.0f)
+        tmpl.scene_objects = read_scene_objects();
 
     // FREE-SPACE CARVE (evidence of absence) — the complement to the grow-only extent. Feed the room-frame LiDAR
     // sweep into the frame; WallRunBelief::accumulate_freespace marches each ray against the run's box and, for a
@@ -337,8 +379,8 @@ void SpecificWorker::run_kitchen_model()
     publish_kitchen_boxes();
 
     if (++mdbg % 30 == 0)                                           // low-rate stillness diagnostic
-        std::print("cabinet_concept: [kitchen] ego_lin={:.2f} ego_ang={:.2f} dotd={:.2f} radius={:.2f} periph={:.2f} sweep={} → pos_var={:.4f}\n",
-                   ego_lin_mps_, ego_ang_radps_, mean_dotd, radius, periph, sweep_n, tmpl.ego_motion_pos_var);
+        std::print("cabinet_concept: [kitchen] ego_lin={:.2f} ego_ang={:.2f} dotd={:.2f} radius={:.2f} periph={:.2f} sweep={} objs={} → pos_var={:.4f}\n",
+                   ego_lin_mps_, ego_ang_radps_, mean_dotd, radius, periph, sweep_n, tmpl.scene_objects.size(), tmpl.ego_motion_pos_var);
 }
 
 // Reconcile the active cells with their DSR box nodes: create on activation, update size+RT while active,

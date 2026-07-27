@@ -117,6 +117,15 @@ dashboard. So the §1 contract below holds; only the model hooks are authored.
   worst offender on rotation; **yaw** (agents with a yaw DOF) — the anti-ROTATE lever. Continuous (0 at
   stillness), no gate; one gain per channel (0 disables). Reference: `table_fitter.cpp` (`motion_cm_*_gain`),
   cabinet. Complement (action side): the affordance's `.still(v,ω)` dwell creates fixation windows.
+  ★**Discrete confirm-only companion (`confirm_only()`).** The continuous common-mode above SOFTENS a moving
+  frame; pair it with a HARD predict-only branch for frames where the robot is clearly moving — when
+  ego-speed exceeds still thresholds, take `belief.predict()` (Σ carries one-step Q, **mean unchanged**)
+  instead of `belief.update(frame)`, so a strongly-moving frame cannot touch geometry at all (it still
+  CONFIRMS existence). Ego-speed = `max(|motion_dotd|, ego_lin + ang_lever·ego_ang)` where `ego_lin/ego_ang`
+  come from **`room←zed` transform diffs** (producer-independent, works even when `motion_dotd` is stale).
+  Config: `AI2MotionConfirmOnly` (master), `AI2StillLinMps`/`AI2StillAngRadps`/`AI2StillDotd` (thresholds).
+  Reference: `chair_fitter.cpp` / `refrigerator_fitter.cpp` (`confirm_only()`, gate `gated = … or
+  confirm_only(inst)`). ★2026-07 audit: **bottle_concept has only the continuous half** — port this gate.
 - **No thresholds/gates** unless strictly necessary and flagged — encode the effect as a covariance/precision
   and let it fall out of inference (see `CLAUDE.md` modeling philosophy).
 - **A mask is a LOWER BOUND on extent** (occlusion / foreshortening only shorten it) → extent evidence is
@@ -124,6 +133,32 @@ dashboard. So the §1 contract below holds; only the model hooks are authored.
   shrink; short-return = occluded → hold).
 - **Common-mode saturation**: the per-frame information caps at a shared-error covariance, so N correlated
   points can't collapse σ.
+
+#### Box-fit robustness (any floor-anchored cuboid — fridge/cabinet/table-top; 2026-07 fridge refresh)
+A single-box, partially-viewed object has three degenerate extent directions the mask cannot pin. Each is a
+covariance keyed on the right observability covariate, NOT a clamp:
+- **Unobserved-depth prior.** An extent DOF (depth) is identifiable ONLY when points fall on BOTH of its
+  opposing faces — a front-only view is a thin slab that still *spuriously* drags the extent to its clamp
+  (the size common-mode caps σ, not the mean). Grow that DOF's prior precision by `k·(1 − two_sided)` where
+  `two_sided = 2·min(n₊,n₋)/(n₊+n₋)` counts points on the ± faces using a **fixed** forward/back margin δ (NOT
+  keyed to the collapsing half-extent — that circularity re-collapses it). So a single face holds the extent
+  at its footprint prior and it relaxes to data-driven the moment the far face is seen. Ref: `refrigerator_belief.cpp`
+  `accumulate_extra` (`AI2DepthUnobsPrecision`, `AI2DepthObsBandM`).
+- **Floor-anchored top is a FREE upper boundary.** Extending the top ABOVE the cloud costs nothing (empty
+  surface is unpenalised) so `H` ratchets up on the mask's over-segmentation tail (junk points above the
+  object) — observed `H`→2.37 m for a 1.9 m mask. Fix = (a) a firm TWO-SIDED anchor pinning `H` to the
+  **observed robust top** (`z-p97`, which sits below the junk tail) + (b) grow per-point `R` with height ABOVE
+  that top so the junk tail fades and can't ratchet. Data still sets the LOWER bound (front points force
+  `H ≥ real top`). Ref: `refrigerator` `AI2TopNoFloatPrecision` / `AI2TopOversegSigmaPerM`.
+- **Height-only birth for tall objects.** A partial front view is a vertical face → its 2-D footprint is a
+  thin line → aspect/size are MEANINGLESS at birth and reject a real object. Gate BIRTH on the mask's
+  z-extent alone (tall vs short); let the footprint settle later from the fit + footprint prior.
+- **Per-cycle plausibility singleton.** Judge shape-plausibility (aspect·size·height) EVERY cycle from the
+  CURRENT fitted state — NOT only on an accepted mask-fit. Otherwise a mis-detection that diverged to a wrong
+  shape then coasts out-of-FoV FREEZES its birth-time positive evidence and stays immortal. Fold the per-cycle
+  score into a bounded log-odds accumulator that drives existence; a stronger instance inhibits a weaker
+  duplicate (soft singleton). Ref: `refrigerator` `specificworker_lifecycle.cpp` (singleton loop) +
+  `singleton_existence_deltas`.
 
 ### Multi-sensor policy — one sensor births, peripheral sensors only cue attention
 
@@ -216,6 +251,45 @@ capabilities:                     # opt-in; each is a copyable unit
 
 ## 1. Fixed contract (copy verbatim; rename only)
 
+### ★ Agent-ID registry (authoritative — a collision = CRDT actor clash → SIGSEGV)
+Every `[Agent] id` in `etc/config.toml` MUST be unique across the shared graph. A clone keeps its template's
+id, so **re-number it as the FIRST edit** and record the new id HERE (the per-file id-map comments drift; this
+table is the source of truth). Taken:
+
+| id | agent | id | agent | id | agent |
+|----|-------|----|-------|----|-------|
+| 5 | room_concept | 10 | bottle_concept | 20 | chair_concept |
+| 6 | robot_concept | 11 | kinova_controller | 21 | cabinet_concept |
+| 7 | table_concept | 12 | self_calibration | 22 | refrigerator_concept |
+| 8 | controller | 13 | human_concept | 23 | ring_metaconcept |
+| 9 | voxelizer | 14 | residual_concept | 15 | door_concept |
+
+Next free: **16–19, 24+** (15 = door_concept, 2026-07-26). (2026-07: cabinet=21 and refrigerator=21 collided because cabinet was never
+recorded — refrigerator moved to 22. Same cause again 2026-07-26: the ring_metaconcept scaffold shipped
+on 21, colliding with cabinet — moved to 23. A clone keeps its template's id; renumber it FIRST.) A one-line self-check: `grep -rE '^\s*id\s*=' */etc/config.toml`.
+
+### ★ Node type = `object`, class in `object_subtype` (graph schema convention)
+Every concept agent creates its instance node as the GENERIC DSR type **`object`** (`Node::create<object_node_type>`)
+and writes its **class** into the **`object_subtype`** string attribute (`add_or_modify_attrib_local<object_subtype_att>`,
+`"table"`, `"chair"`, `"bottle"`, `"cabinet"`, `"refrigerator"`). `object_subtype` is the CLASS and nothing else —
+finer distinctions live in their own channel (e.g. table round/square is carried by the shape-selected `mesh_path`,
+`round_table.obj` vs `table.obj`, NOT in `object_subtype`).
+Rationale: `type()` is the FIRST-level discriminator after the root hierarchy; everything below branches on the
+subtype string — so a cross-cutting consumer (controller, room, voxelizer, residual) does ONE
+`get_nodes_by_type("object")` and reasons over all furniture, reading `object_subtype` for the specifics. Do NOT
+mint a per-class cortex node type (`table_node_type`, `cylinder_node_type`, …). Consequences a copy MUST honour:
+its own compute-loop query, stale-sweep, and affordance parent-backstop all key on `type()=="object"` **filtered by
+the `<obj>_` NAME prefix** (many `object`s share the graph), NOT on a class-specific type. Reference: refrigerator.
+
+### ★ Display mesh (required): publish `mesh_path` + `mesh_texture_path` per instance
+Every concept agent MUST publish, on each instance node, a `mesh_path_att` (a **bare** OBJ/DAE filename resolved
+under `voxelizer/meshes/`, e.g. `"table.obj"`) and a `mesh_texture_path_att` base-colour image, so the voxelizer
+renders the real solid+textured mesh (it scales the asset to the fitted box; asset must be **pre-normalised and
+pre-oriented** — orientation baked in, see the `mesh_path` contract in `graph_object_box.h`). A real asset file must
+exist in `voxelizer/meshes/`. Empty `mesh_path` ⇒ the viewer falls back to the fitted box. table/cabinet/refrigerator
+ship assets (`table.obj`/`round_table.obj`, `cabinet.obj`, `fridge.obj`); **chair and bottle currently publish only a
+procedural `mesh_vertices` and need an OBJ asset added**.
+
 ### Module set (identical across agents; `+` = opt-in capability)
 ```
 <obj>_config.{h,cpp}  <obj>_instance.h  <obj>_model.{h,cpp}  <obj>_belief.{h,cpp}  <obj>_fitter.{h,cpp}
@@ -229,6 +303,14 @@ stays a THIN orchestrator; each is opt-in per the object's sensing/memory needs)
     feeds range residuals to a frame)                                                     — +lidar
 +<obj>_voxel_bank.h           (header-only free functions: <obj>-owned historical point memory —
     ownership gate + FNV voxel keys)                                                      — +voxel_bank
++<obj>_existence.{h,cpp}      (support-mass log-odds EXISTENCE belief → node REMOVAL, `common/existence_belief.h`:
+    OCCUPANCY confirms (holds L up) · LiDAR through-beam free-space REMOVES · out-of-FoV / occlusion HOLDs.
+    Debounced by a removal streak; NO age-immunity (evidence-based only). This is the "does it still exist?"
+    channel — SEPARATE from and complementary to the tracker's negative-info death (which is OFF by default
+    for persistent furniture, removal=MERGE+existence). `update_and_remove(fitter, lidar, …)` each cycle →
+    `delete_node`+`forget_node`+`affordance.remove()`. Ref: table/refrigerator have the file; chair inlines
+    it in `specificworker.cpp`; cabinet adapts it (kitchen presence log-odds). ★2026-07 audit: bottle has
+    only tracker-death, no support-mass existence belief.)                                — +existence
 shared (do NOT copy, #include + add to CMake):
   common/ai_belief/recursive_laplace.h                (header-only; rc::ai predict/MAP/Woodbury engine —
     the belief delegates update/predict/predicted_information to it. This replaced belief_stabilizer,
@@ -312,13 +394,14 @@ inst.prev_free_energy = fe;
 DSR slots forward to the affordance: `del_node_slot`→`on_node_deleted`, `modify_node_attrs_slot`→
 `on_node_modified`. No `Qt::DirectConnection`; poll-only is fine.
 
-**Compute-rate heartbeat (every agent).** Log the compute rate once per cycle on `std::cout` (NOT `qInfo`,
-which RoboComp filters) so a stalled agent is visible. Two equivalent forms are in use — either satisfies the
-pattern, don't add both: (a) an `FPSCounter fps_counter_;` (`#include <fps/fps.h>`) with
-`fps_counter_.print("[Compute]", 3000);` as the last line of `compute()` (prints `Period = …ms. Fps = …`
-every 3 s); or (b) — as the **reference `table_concept` and `cabinet_concept` do** — an EMA of the per-cycle
-rate on the EvidenceMonitor (`ev_g_.compute_hz`) surfaced in the dashboard/monitor. (Historically this section
-mandated (a); the reference agents converged on (b).)
+**Compute-rate heartbeat (REQUIRED, every agent).** Every agent MUST log a per-cycle perf line on `std::cout`
+(NOT `qInfo`, which RoboComp filters) so a stalled or CPU-pegged agent is visible from the terminal. Use the
+shared `FPSCounter` (`#include <fps/fps.h>`, robocomp_core, header-only — no CMake/link change): a private
+member `FPSCounter fps_counter_;` and, as the LAST line of `compute()`,
+`fps_counter_.print("[<obj>_concept Compute]");`. Its `print()` emits **`Period = …ms. Fps = … <text> cpu = …%
+mem = …MB`** — FPS **and** CPU% **and** RSS, once per ~1 s. All five concept agents carry this
+(2026-07-25). The EvidenceMonitor `ev_g_.compute_hz` EMA (dashboard/monitor Hz readout) is a COMPLEMENT, not a
+substitute — it is not on the log and carries no CPU; keep both where a dashboard exists.
 
 ### Primary-input stream gate (readiness + staleness) — every agent that consumes a live stream
 The required-peer set proves the *producers exist*, not that the *stream is flowing*. Sitting in Operating
@@ -498,10 +581,28 @@ cortex, then switch to `<foo_att>`. Don't add new `runtime_checked_*` sites.
 
 - [ ] Builds green; binary links (no torch).
 - [ ] `<Obj>Belief::self_test()` prints PASS (isolated Eigen unit test + at startup).
-- [ ] Launches, presence reaches Operating (copy bottle's presence protocol verbatim; unique `[Agent] id`).
+- [ ] **Unique `[Agent] id`** — re-numbered from the template and added to the §1 Agent-ID registry (a
+      collision SIGSEGVs both agents). Verify: `grep -rE '^\s*id\s*=' */etc/config.toml`.
+- [ ] Launches, presence reaches Operating (copy bottle's presence protocol verbatim; Degraded DEBOUNCE grace
+      timer ~3000 ms, NOT immediate cleanup+exit).
 - [ ] Primary-input stream gate wired: admission probe AND-ed in + re-polled in `on_waiting_loop`; stall
       demotion in `on_operating_loop`; recoverable-Degraded branch. Kill the producer → demote to Waiting &
       stay alive; restart → re-admit. `<Stream>StallTimeoutMs` > producer HOLD; empty scene never trips it.
+- [ ] **No-update-while-moving**: continuous ego-motion→common-mode gains set AND the discrete `confirm_only()`
+      predict-only gate wired (`AI2MotionConfirmOnly` + `AI2Still*`). Moving the robot confirms but does not
+      reshape/rotate a converged object.
+- [ ] **Removal**: either `+<obj>_existence` support-mass belief (occupancy-confirms / free-space-removes /
+      out-of-FoV-holds, no age-immunity) or the tracker MERGE+negative-info death — a genuine physical
+      disappearance retires the node; a look-away does NOT. Graceful SIGTERM deletes owned nodes;
+      startup stale-sweep reaps leaked ones.
+- [ ] All graph-attribute access is typed `<foo_att>` (zero `runtime_checked_*`).
+- [ ] Node created as type **`object`** with `object_subtype="<obj>"`; the agent's own query / stale-sweep /
+      affordance-backstop key on `type()=="object"` + the `<obj>_` name prefix (NOT a per-class type).
+- [ ] Publishes `mesh_path` (bare OBJ/DAE filename in `voxelizer/meshes/`) + `mesh_texture_path` per instance;
+      the asset exists and is pre-normalised/oriented; the voxelizer draws it scaled to the fitted box.
+- [ ] Per-cycle **`FPSCounter fps_counter_.print("[<obj>_concept Compute]")`** on the last line of `compute()`
+      → `std::cout` shows `Period/Fps/cpu%/mem` once/s. (`ev_g_.compute_hz` dashboard EMA is a complement, not a
+      substitute.)
 - [ ] On a fresh mask the tracker births a `<obj>_*` node; `ensure_instance` fires once; FE is finite and
       the fit moves toward the object.
 - [ ] Dashboard panels populate (FE / dims / posterior σ); the gated AI2 CSV writes when its path is set.

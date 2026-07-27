@@ -130,6 +130,11 @@ struct ChairInstance
     float roi_offset_x = 0.0f;   // [-1,1], 0 = horizontally centred in the image
     float roi_offset_y = 0.0f;   // [-1,1], 0 = vertically centred
     float roi_fill     = 0.0f;   // max(w/W, h/H): projected extent as a fraction of the image
+
+    // ── Level-2 rig prior actually received this cycle (diagnostics; see refresh_rig_yaw_prior) ──
+    bool  rig_edge_found = false;   // an incoming group_member edge was present
+    float rig_kappa      = 0.0f;    // precision handed to the belief AFTER both caps
+    float rig_prior_yaw  = 0.0f;    // rad, member convention
 };
 
 }  // namespace rc

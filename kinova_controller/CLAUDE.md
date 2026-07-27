@@ -1,7 +1,5 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 > **⚠ Working agreement: never `git commit` (or push) on your own. Always ask first and wait for explicit approval before committing.**
 
 ## What This Component Is
@@ -25,8 +23,8 @@ bin/kinova_controller etc/config         # run (copy etc/config to etc/yourConfi
 
 ### Phase machine inside `Phase::ActiveEFE`
 `SpecificWorker` has a two-level state machine:
-1. **Outer phases** (`Phase` enum in `specificworker.h:118`): `SendingRestPose` → `Homing` → `ActiveEFE`. The agent commands its own homing rather than trusting the bridge, so behavior is independent of pre-homing.
-2. **Inner cycle** (`CycleMode` enum, `specificworker.h:129`): `ReachingTarget` → `SendingReturn` → `Returning` → `Done`. Runs `CYCLES_MAX` random table-surface targets, returning to rest pose between each. Targets are sampled in the arm-base frame from `(x∈[0.20,0.50], y∈[−0.15,0.15], z=0.10)`.
+1. **Outer phases** (`Phase` enum in `specificworker.h`): `SendingRestPose` → `Homing` → `ActiveEFE`. The agent commands its own homing rather than trusting the bridge, so behavior is independent of pre-homing.
+2. **Inner cycle** (`CycleMode` enum, `specificworker.h`): `ReachingTarget` → `SendingReturn` → `Returning` → `Done`. Runs `CYCLES_MAX` random table-surface targets, returning to rest pose between each. Targets are sampled in the arm-base frame from `(x∈[0.20,0.50], y∈[−0.15,0.15], z=0.10)`.
 
 Continuous joints (4 of the 7) accumulate revolutions across runs, so use `angular_distance()` in `specificworker.cpp` for tolerance checks — raw `|a − b|` will be wrong when the encoder reports e.g. +8.6 rad.
 
@@ -62,14 +60,6 @@ CMake picks it up via `list(PREPEND CMAKE_PREFIX_PATH "/opt/openrobots")` in `sr
 
 ### Shutdown safety
 `~SpecificWorker` sends a zero `TJointSpeeds` to the proxy on exit — without it the bridge keeps holding the last commanded q̇ and the arm drifts in Webots after Ctrl+C. The catch is intentional: the proxy may already be unreachable on shutdown.
-
-## RoboComp Framework Context
-
-- Components inherit from `GenericWorker` (in `generated/`) and implement an Ice interface declared in `*.cdsl` (here: `requires KinovaArm`).
-- Lifecycle = state machine: `Initialize` (once) → `Compute` (cyclic, period from `Period.Compute` in `etc/config`) → `Emergency`/`Restore` on faults.
-- Configuration via `configLoader.get<T>("key")`. Periods are `getPeriod("Compute")` / `setPeriod("Compute", n)`.
-- `#define HIBERNATION_ENABLED` in `specificworker.h` reduces period to 500 ms after 5 s of no method calls (currently commented out here).
-- This workspace shares state across agents via the CORTEX DSR distributed graph; `options dsr` in the `.cdsl` provides graph viewers and the `G` pointer in `GenericWorker`. This agent currently doesn't read or write the graph in `compute()` — slots are stubs.
 
 ## Frames (see `FRAMES.md` and `../FRAMES.md`)
 

@@ -84,12 +84,15 @@ void SpecificWorker::remove_owned_bottle_nodes()
     if (not G)
         return;
 
-    // Bottle instances are DSR `cylinder` nodes named "bottle_*". Deleting the node
+    // Bottle instances are DSR `object` nodes named "bottle_*". Deleting the node
     // also drops its room→bottle RT edge, so no separate edge cleanup is needed.
+    // Sweep the new "object" type AND the legacy "cylinder" type (transition reap of nodes
+    // leaked by a pre-migration run) — both filtered to "bottle*".
     std::vector<std::uint64_t> to_delete;
-    for (const auto& node : G->get_nodes_by_type("cylinder"))
-        if (node.name().starts_with("bottle"))
-            to_delete.push_back(node.id());
+    for (const char* ty : {"object", "cylinder"})
+        for (const auto& node : G->get_nodes_by_type(ty))
+            if (node.name().starts_with("bottle"))
+                to_delete.push_back(node.id());
 
     for (const auto id : to_delete)
         if (G->delete_node(id))
@@ -130,10 +133,12 @@ void SpecificWorker::remove_stale_affordance_nodes()
         if (not ours)
             if (const auto pid = G->get_attrib_by_name<parent_att>(aff); pid.has_value())
                 if (const auto parent = G->get_node(pid.value());
-                    parent.has_value() and parent->type() == "cylinder")
+                    parent.has_value() and
+                    (parent->type() == "cylinder" or
+                     (parent->type() == "object" and parent->name().starts_with("bottle"))))
                 {
                     ours = true;
-                    why = "parent cylinder";
+                    why = "parent bottle";
                 }
         if (ours)
         {

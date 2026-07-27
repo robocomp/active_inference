@@ -131,10 +131,18 @@ PruneEnabled = false     # OFF (2026-07-02): match table's proven merge-only lif
                          # churn (a glimpsed chair pruned before it matures). Removal is by MERGE only.
 PruneMaturityCycles = 90 # probation window: an instance older than this is permanent furniture, never pruned
 PrunePatience = 30       # consecutive tracker-unassigned cycles within probation → prune as stillborn
-BirthSeatW = 0.45        # seed seat width/depth + seat/back heights for a freshly born chair node
-BirthSeatD = 0.45
-BirthSeatH = 0.45
-BirthBackH = 0.45
+# ★TEMPLATE GEOMETRY — the chair the belief actually believes in. The pose-only belief does NOT fit
+# size, so an error here is a systematic model-vs-world mismatch that the clutter term silently absorbs.
+# These were all 0.45 against a real Webots SimpleChair (seat 0.60x0.52, top 0.595, backrest to 1.25);
+# that mismatch routed 99% of SEAT points into the BACKREST component (the z-band gate keys on SeatH)
+# and dumped 30-56% of every mask above the model into flat clutter. Fixing SeatH alone moved a chair's
+# continuous yaw error from 98.1 deg to 1.0 deg. Re-derive these for any different chair model.
+BirthSeatW = 0.60        # x extent — the span the backrest covers
+BirthSeatD = 0.52        # y extent — front-to-back; the backrest sits on the -y edge
+BirthSeatH = 0.595       # seat TOP above the floor
+BirthBackH = 0.655       # backrest height above the seat top (top ends up at 1.25)
+BirthSeatThick = 0.075   # seat slab thickness — also sets the leg/seat z-band split
+BirthLegHalf = 0.0375    # square leg half-side
 NllCost = false          # association cost = ½(m²+ln|S|) NLL (compete by likelihood, not raw distance)
 # ZED-only BIRTH: only a ZED slice (per-pixel depth ⇒ depth_var==0) may SPAWN a chair. A ricoh LiDAR-reprojected
 # depth slice (depth_var>0) has unreliable depth/extent → it may associate/confirm an existing chair but NOT birth
@@ -191,3 +199,21 @@ Warn.Connections = "0"
 Trace.Network = "0"
 Trace.Protocol = "0"
 MessageSizeMax = "20004800"
+
+# ── Level-2 arrangement prior, published by ring_metaconcept on the group_member edge ───────────
+# A square seat makes yaw 4-fold ambiguous and the thin backrest often cannot break it; a wrong mode
+# is STICKY (2026-07-26: 570 cycles wrong, cleared only by restarting the agent). The rig supplies
+# the missing structural evidence. Enabled=false restores the exact pre-rig behaviour (A/B).
+[RigPrior]
+# ★DISABLED 2026-07-27. The cap that was meant to make this safe is provably impossible: rig_mode_cost
+# is -kappa*cos(delta), so the prior's differential is kappa for a 90 deg error but 2*kappa for 180 deg.
+# Overturning the observed 90 deg failure needed kappa > 4.19; staying safe at 180 deg against saturated
+# data (flip_acc_ clamped at 6) needs 2*kappa < 6 i.e. kappa <= 3. The admissible window is EMPTY, and at
+# the shipped 5.4 a prior pointing 180 deg away will rotate a chair whose evidence is fully saturated and
+# CORRECT. The self-test only exercised a 90 deg-wrong prior, so it never caught this.
+# It is off rather than deleted because the machinery is sound once (a) the template matches the world —
+# done, see Tracker.BirthSeat* — and (b) flip_acc_ stops summing repeated static evidence, at which point
+# no cap is needed. Re-enable only after both, and add a 180 deg case to the self-test first.
+Enabled = false
+YawKappaMax = 6.0      # consumer cap; can only WEAKEN ChairBelief::kRigKappaMax (= kFlipClamp)
+StaleMs = 5000         # ignore a message no rig is refreshing; 0 disables

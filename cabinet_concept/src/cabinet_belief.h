@@ -204,6 +204,14 @@ struct CabinetBeliefParams
     // top-slab z-gate, no hollow guard). 0 = OFF.
     float free_space_precision = 0.0f;   // 1/m^2 per through-beam (shrink-only)
 
+    // ── Scene-object non-penetration (accumulate_object_exclusion) ─────────────────────────────
+    // A run may not intersect another agent's furniture (fridge/table/…). Per penetrating END, retract
+    // that face onto the object boundary — the negative-evidence analogue of the free-space carve, but
+    // sourced from the object's CLAIMED VOLUME instead of a LiDAR through-beam. Retract-only. Must
+    // DOMINATE extent_precision so a mislabelled point can't grow a run past a solid object. 0 = OFF.
+    float object_exclusion_precision = 0.0f;   // 1/m^2 per penetrating end (retract-only)
+    float object_exclusion_margin_m  = 0.03f;  // flush clearance kept off the object boundary
+
     // ── Tier mode ─────────────────────────────────────────────────────────────────────────────
     // Per-frame evidence for the alternative tier is accumulated; the MAP mode supplies the priors.
     // tier_evidence_cap bounds the accumulator so a long run of agreeing frames cannot make the mode
@@ -222,6 +230,17 @@ struct CabinetBeliefParams
     // ── Optimiser ─────────────────────────────────────────────────────────────────────────────
     int   gn_iters = 4;
     float fd_eps   = 1e-3f;
+};
+
+// Another agent's furniture as a room-frame, BASE-origin oriented box — the unit of scene-object
+// non-penetration evidence (mirrors a LidarRays through-beam: negative evidence carried on the frame).
+// Read from the shared DSR graph each cycle (width_m/depth_m/height_m + the room->object RT edge).
+struct SceneObjectBox
+{
+    float cx = 0.0f, cy = 0.0f;   // footprint centre at the carcass BASE (room frame, m)
+    float yaw = 0.0f;             // OBB long axis (rad) = atan2(R(1,0), R(0,0))
+    float w = 0.0f, d = 0.0f;     // full extents along the object's local +x / +y (m)
+    float z0 = 0.0f, z1 = 0.0f;   // base / top height (z0 = 0 for a floor object)
 };
 
 // One fitted frame's evidence: room-frame points and per-point measurement variance R (m^2).
@@ -256,6 +275,9 @@ struct CabinetFrame
     // the free-space/VACATE negative evidence. Selected against the box (not the mask centroid) precisely
     // because an overgrown end's carving beams land BEYOND it, far from the mask the range channel anchors on.
     rc::ai::LidarRays              lidar_freespace;
+
+    // OTHER agents' furniture this run must NOT penetrate (room-frame OBBs; set per-cycle by the worker).
+    std::vector<SceneObjectBox>    scene_objects;
 };
 
 class CabinetBelief

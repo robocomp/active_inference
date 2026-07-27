@@ -1313,6 +1313,11 @@ void SpecificWorker::process_chair_node(const DSR::Node& node)
     }
 
     ++inst.processed_cycles;
+
+    // Refresh the level-2 arrangement prior BEFORE inference: run_inference both fuses it as a GN
+    // factor (accumulate_extra) and consults it when picking the discrete yaw mode.
+    refresh_rig_yaw_prior(inst, node);
+
     const auto observation = fitter_->observe(inst, node);
 
     // Stale check: skip heavy update if data hasn't moved for too long
@@ -1323,6 +1328,56 @@ void SpecificWorker::process_chair_node(const DSR::Node& node)
     publish_chair_cycle(inst, node, observation, free_energy);
 }
 
+
+// ─── Level-2 arrangement prior (ring_metaconcept → this chair) ───────────────────────────────────
+//
+// Read the incoming non-RT `group_member` edge and hand its message to the belief. The rig is the
+// SOLE writer of that edge; this agent only reads it. (The message deliberately does not live on our
+// own node: update_node resets attributes absent from the submitted copy, so our own writes would
+// intermittently delete a prior parked there — see the note in cortex's dsr_attr_name.h.)
+//
+// Three ways the prior goes inert, all of which reduce the belief to its pre-rig behaviour exactly:
+// no edge, κ ≤ 0 (the rig's own "ignore me" signal, written when a member leaves a set), or a stale
+// message (the rig died without cleaning up — a prior nobody is maintaining must not steer a chair).
+void SpecificWorker::refresh_rig_yaw_prior(rc::ChairInstance& inst, const DSR::Node& node)
+{
+    inst.rig_edge_found = false;
+    inst.rig_kappa      = 0.0f;
+    if (not cfg_.rig_yaw_prior_enabled)
+        return;
+    inst.ai2_belief.clear_rig_yaw_prior();
+
+    for (const auto& e : G->get_edges_to_id(node.id()))
+    {
+        if (e.type() != "group_member")
+            continue;
+
+        const auto kappa = G->get_attrib_by_name<rig_yaw_kappa_att>(e);
+        const auto yaw   = G->get_attrib_by_name<rig_yaw_prior_att>(e);
+        if (not kappa.has_value() or not yaw.has_value() or kappa.value() <= 0.0f)
+            continue;
+
+        // Staleness: a rig that stopped publishing must stop steering. 0 disables the check.
+        if (cfg_.rig_prior_stale_ms > 0)
+            if (const auto stamp = G->get_attrib_by_name<rig_stamp_ms_att>(e); stamp.has_value())
+            {
+                const auto now = static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count());
+                if (now > stamp.value() and (now - stamp.value()) > static_cast<std::uint64_t>(cfg_.rig_prior_stale_ms))
+                    continue;
+            }
+
+        // The consumer-side cap is a second bound on top of the belief's own structural one
+        // (ChairBelief::kRigModeShare·kFlipClamp): config can only ever make the prior WEAKER.
+        const float k = std::min(kappa.value(), cfg_.rig_yaw_kappa_max);
+        inst.ai2_belief.set_rig_yaw_prior(yaw.value(), k);
+        inst.rig_edge_found = true;
+        inst.rig_kappa      = k;
+        inst.rig_prior_yaw  = yaw.value();
+        return;   // one rig per member
+    }
+}
 
 void SpecificWorker::publish_chair_cycle(rc::ChairInstance& inst,
                                          const DSR::Node& node,

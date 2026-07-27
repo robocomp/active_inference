@@ -815,6 +815,38 @@ namespace rc
                 }
             }
 
+                // ===== 8b. FE-NATIVE RELOCALIZATION (map-trust collapse) =========
+            // Runs the SAME hierarchical grid search as recovery above, but triggered by the higher-level
+            // map-trust belief exp(u_b_) collapsing (the map no longer explains the robot) rather than a raw
+            // sdf threshold. u_b_ was just updated this frame (optimized path) or nudged (early-exit rotation),
+            // so it is current here. Coexists with recovery_ (independent backstop). See HIERARCHICAL_PRECISION.md.
+            if (params.hier_prec_reloc_enabled && params.hier_prec_boundary_enabled
+                && relocalization_enabled_.load())
+            {
+                if (map_trust_reloc_cooldown_ > 0)
+                    --map_trust_reloc_cooldown_;
+                else
+                {
+                    const float map_trust = std::exp(u_b_);
+                    map_trust_low_streak_ = (map_trust < params.hier_prec_reloc_floor)
+                                          ? map_trust_low_streak_ + 1 : 0;
+                    if (map_trust_low_streak_ >= params.hier_prec_reloc_consecutive)
+                    {
+                        qWarning() << "[reloc] map_trust collapsed exp(u_b)=" << map_trust << "for"
+                                   << map_trust_low_streak_ << "frames — running grid search...";
+                        log_hier_prec_row("reloc", 0.f, 0.f, 0.f, /*reloc_fired=*/true);
+                        const auto& pts = lidar_high.first;
+                        grid_search_initial_pose(pts, 0.5f, static_cast<float>(M_PI_4));
+                        window_mgr_.clear();
+                        u_b_init_ = false;   // reseed u_b_ to g(v) on the next boundary update
+                        map_trust_v_ = 0.f;  // fresh full trust after relocating
+                        map_trust_low_streak_ = 0;
+                        map_trust_reloc_cooldown_ = params.hier_prec_reloc_cooldown_frames;
+                        symmetry_check_counter_ = 0;
+                    }
+                }
+            }
+
                 // ===== 9. PERIODIC SYMMETRY CHECK ================================
             // Only while relocalization is active (before room node is created).
             // Uses res.sdf_mse as reference (already computed this frame).
@@ -2450,6 +2482,11 @@ namespace rc
         last_t_cov_ms_ = 0.f;
         last_t_breakdown_ms_ = 0.f;
 
+        // Rotation early-exit gap: this frame skips the optimizer, so update_boundary_hyperprecision won't
+        // run. If we're turning hard, feed the predicted-pose residual into map-trust so a degrading
+        // rotation can't silently evade the collapse trigger. No-op unless the reloc feature is enabled.
+        nudge_map_trust_early_exit(mean_sdf_pred, odometry_prior.delta_pose[2]);
+
         auto pose_cpu = newest.pose.detach().to(torch::kCPU);
         auto p_acc = pose_cpu.accessor<float, 1>();
         const float x = p_acc[0], y = p_acc[1], phi = p_acc[2];
@@ -2659,20 +2696,52 @@ namespace rc
         map_trust_v_ -= params.hier_prec_lr_v * grad_v;
 
         // A/B trace: boundary_weight is exp(u_b_) AFTER this update (i.e. what next frame will apply).
+        log_hier_prec_row("opt", r_b, quad, std::max(0.0f, trace), /*reloc_fired=*/false);
+    }
+
+    // Append one row to etc/hier_prec.csv (lazy-opened, truncate). Loc-thread only, no lock — same
+    // discipline as opt_csv_. src labels the origin: "opt" (optimized boundary update), "ee"
+    // (early-exit rotation surrogate), "reloc" (a map-trust relocalization just fired).
+    void RoomConcept::log_hier_prec_row(const char *src, float r_b, float quad, float trace, bool reloc_fired)
+    {
         if (!hier_prec_csv_open_attempted_)
         {
             hier_prec_csv_open_attempted_ = true;
             hier_prec_csv_.open("etc/hier_prec.csv", std::ios::out | std::ios::trunc);
             if (hier_prec_csv_.is_open())
-                hier_prec_csv_ << "ts_ms,r_b,quad,trace,u_b,boundary_weight,map_trust_v,window_size\n";
+                hier_prec_csv_ << "ts_ms,src,r_b,quad,trace,u_b,boundary_weight,map_trust_v,window_size,reloc_fired\n";
         }
         if (hier_prec_csv_.is_open())
         {
-            hier_prec_csv_ << last_update_result.timestamp_ms << ',' << r_b << ',' << quad << ','
-                           << std::max(0.0f, trace) << ',' << u_b_ << ',' << std::exp(u_b_) << ','
-                           << map_trust_v_ << ',' << window_mgr_.size() << '\n';
+            hier_prec_csv_ << last_update_result.timestamp_ms << ',' << src << ',' << r_b << ',' << quad << ','
+                           << trace << ',' << u_b_ << ',' << std::exp(u_b_) << ','
+                           << map_trust_v_ << ',' << window_mgr_.size() << ',' << (reloc_fired ? 1 : 0) << '\n';
             hier_prec_csv_.flush();
         }
+    }
+
+    // Rotation early-exit gap closer — see the method's header doc. Fast-only step on u_b_ using a
+    // surrogate residual so a degrading rotation that keeps early-exiting can still collapse map-trust.
+    void RoomConcept::nudge_map_trust_early_exit(float mean_sdf_pred, float dtheta)
+    {
+        if (not params.hier_prec_boundary_enabled or not params.hier_prec_reloc_enabled) return;
+        if (std::abs(dtheta) < params.hier_prec_ee_dtheta_min) return;      // only in the rotation gap
+        if (params.sigma_sdf <= 0.f) return;
+
+        // Surrogate residual: no boundary factor is evaluated on early-exit, so use the whitened
+        // predicted-pose residual as evidence that the map's explanatory precision should drop.
+        const float w    = mean_sdf_pred / params.sigma_sdf;
+        const float r_ee = w * w;
+
+        if (not u_b_init_) { u_b_ = params.hier_prec_u0 + params.hier_prec_g_gain * map_trust_v_; u_b_init_ = true; }
+        const float g_v   = params.hier_prec_u0 + params.hier_prec_g_gain * map_trust_v_;
+        constexpr float d_dim = 3.0f;
+        const float grad_u = 0.5f * std::exp(u_b_) * r_ee - 0.5f * d_dim
+                             + (u_b_ - g_v) / params.hier_prec_sigma_u2;
+        u_b_ -= params.hier_prec_lr_u * grad_u;
+        u_b_ = std::clamp(u_b_, -20.0f, 20.0f);
+        // Fast-only: leave the slow map_trust_v_ to the optimized path (real boundary evidence).
+        log_hier_prec_row("ee", r_ee, r_ee, 0.0f, /*reloc_fired=*/false);
     }
 
     std::pair<float, int> RoomConcept::run_adam_loop(const OdometryPrior& odometry_prior)

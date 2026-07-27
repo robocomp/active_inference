@@ -29,6 +29,11 @@ ChairBeliefParams ChairFitter::make_belief_params() const
     p.tpl_seat_d = cfg_.tracker_birth_seat_d;
     p.tpl_seat_h = cfg_.tracker_birth_seat_h;
     p.tpl_back_h = cfg_.tracker_birth_back_h;
+    // Thickness + leg size are part of the TEMPLATE too: seat_thickness sets the leg/seat z-band split in
+    // responsibilities() (z_low = tpl_seat_h - seat_thickness), so leaving it at a default while the seat
+    // height is corrected would just move the misattribution rather than remove it.
+    p.seat_thickness = cfg_.tracker_birth_seat_thick;
+    p.leg_half       = cfg_.tracker_birth_leg_half;
     p.sigma_base_m         = cfg_.ai2_sigma_base_m;
     p.clutter_frac         = cfg_.ai2_clutter_frac;
     p.clutter_scale_m      = cfg_.ai2_clutter_scale_m;
@@ -490,7 +495,7 @@ void ChairFitter::log_ai2_csv(const ChairInstance& inst, int npts, float R, bool
         ai2_csv_.open(cfg_.ai2_csv_path, std::ios::out | std::ios::trunc);
         if (not ai2_csv_.is_open()) { cfg_.ai2_csv_path.clear(); return; }
         ai2_csv_ << "cycle,node,npts,gated,energy,fe_baseline,fe_surprise,R,motion_var,depth_var,trunc_frac,range,obliquity_cos,clutter_frac,"
-                 << "cx,cy,yaw,seat_w,seat_d,seat_h,back_h,std_cx,std_cy,std_yaw,std_yaw_rep\n";
+                 << "cx,cy,yaw,seat_w,seat_d,seat_h,back_h,std_cx,std_cy,std_yaw,std_yaw_rep,rig_found,rig_kappa,rig_prior_deg,facc1,facc2,facc3\n";
     }
     const auto& s = inst.ai2_belief.state();
     const auto& S = inst.ai2_belief.covariance();
@@ -499,7 +504,15 @@ void ChairFitter::log_ai2_csv(const ChairInstance& inst, int npts, float R, bool
              << energy << ',' << inst.fe_baseline << ',' << inst.fe_surprise << ',' << R << ',' << inst.last_motion_var << ',' << inst.last_depth_var << ',' << inst.last_trunc_frac << ',' << inst.last_range << ',' << inst.dbg_obliquity_cos << ',' << inst.last_clutter_frac << ','
              << s.cx << ',' << s.cy << ',' << s.yaw << ','
              << inst.ai2_belief.seat_w() << ',' << inst.ai2_belief.seat_d() << ',' << inst.ai2_belief.seat_h() << ',' << inst.ai2_belief.back_h() << ','
-             << sd(0) << ',' << sd(1) << ',' << sd(2) << ',' << std::sqrt(std::max(0.0f, inst.ai2_belief.covariance_reported()(2, 2))) << '\n';
+             << sd(0) << ',' << sd(1) << ',' << sd(2) << ',' << std::sqrt(std::max(0.0f, inst.ai2_belief.covariance_reported()(2, 2))) << ','
+    // Level-2 rig prior diagnostics: did the message arrive (rig_found), how strong after both caps
+    // (rig_kappa), and what DATA evidence it is competing against (facc1..3 = flip_acc_ for the three
+    // rival yaw modes, relative to the current one). A prior that fails to flip a chair is either
+    // absent (rig_found=0), capped too low, or out-voted — these three columns say which.
+             << (inst.rig_edge_found ? 1 : 0) << ',' << inst.rig_kappa << ','
+             << inst.rig_prior_yaw * 57.29578f << ','
+             << inst.ai2_belief.flip_acc()[1] << ',' << inst.ai2_belief.flip_acc()[2] << ','
+             << inst.ai2_belief.flip_acc()[3] << '\n';
     ai2_csv_.flush();
 }
 

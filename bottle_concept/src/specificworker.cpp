@@ -29,9 +29,13 @@
 #include <thread>    // std::this_thread::sleep_for — let DDS flush before _Exit
 #include <chrono>
 
+#include "bottle_dof.h"   // rc::kBottleDofs — names/units for the BeliefInspector rows
+
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <format>    // stall-transition log formatting (std::println on cout, survives Verbose=false)
+#include <limits>
 #include <numbers>
 #include <print>
 #include <sstream>
@@ -174,22 +178,22 @@ void SpecificWorker::terminal_shutdown()
 // carry its own QSettings entry (mirrors room_concept's RoomViewer).
 void SpecificWorker::restore_dashboard_geometry()
 {
-    if (not custom_widget_)
+    if (not dashboard_window_)
         return;
     QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("bottle_concept"));
     const QByteArray geom = settings.value(QStringLiteral("DashboardWindow_geometry")).toByteArray();
     if (not geom.isEmpty())
-        custom_widget_->restoreGeometry(geom);
+        dashboard_window_->restoreGeometry(geom);
     else
-        custom_widget_->resize(560, 560);
+        dashboard_window_->resize(1180, 900);
 }
 
 void SpecificWorker::save_dashboard_geometry() const
 {
-    if (not custom_widget_)
+    if (not dashboard_window_)
         return;
     QSettings settings(QStringLiteral("RoboComp"), QStringLiteral("bottle_concept"));
-    settings.setValue(QStringLiteral("DashboardWindow_geometry"), custom_widget_->saveGeometry());
+    settings.setValue(QStringLiteral("DashboardWindow_geometry"), dashboard_window_->saveGeometry());
     settings.sync();
 }
 
@@ -402,10 +406,7 @@ void SpecificWorker::initialize()
     // must only HIDE it, or the ts_*_plot_ pointers publish_bottle_diagnostics uses would dangle. A
     // QApplication always exists (generated/main.cpp). Fed each cycle in publish_bottle_diagnostics.
     {
-        custom_widget_ = new Custom_widget("Bottle Model — Free Energy, Dimensions (r,h), Posterior σ & Epistemic ΔH");
-        custom_widget_->setWindowTitle(QStringLiteral("bottle_concept — belief dashboard"));
-        restore_dashboard_geometry();
-        custom_widget_->show();
+        custom_widget_ = new Custom_widget("Bottle — Free Energy, Surprise, Belief Uncertainty & Residuals");
 
         auto* series_layout = new QVBoxLayout(custom_widget_->frame_series);
         series_layout->setContentsMargins(0, 0, 0, 0);
@@ -415,17 +416,43 @@ void SpecificWorker::initialize()
         {
             plot = new rc::TimeSeriesPlot(custom_widget_->frame_series);
             plot->set_visible_window(60.f);
-            series_layout->addWidget(plot);
+            series_layout->addWidget(plot, 1);
         };
-        add_plot(ts_fe_plot_);
-        add_plot(ts_dim_plot_);
-        add_plot(ts_sigma_plot_);
-        add_plot(ts_ce_plot_);
+        add_plot(ts_plot_);            // free energy + its baseline
+        add_plot(ts_surprise_plot_);   // FE surprise (attention signal) — own panel, much smaller scale
+        add_plot(ts_cov_plot_);        // U(Σ) belief uncertainty
+        add_plot(ts_res_plot_);        // residual (unexplained) points
+
+        // BELIEF INSPECTOR — the panel that replaced the Σ[cx,cy] trace. A time-series of two variances
+        // showed a slice of the belief; this shows ALL of it: every state DOF with its posterior σ and Σ as
+        // a correlation heatmap, which is where the structure lives (the bottle's radius is depth-degenerate
+        // and its correlation with cz is exactly what the trace could not show). Stretch 2.
+        belief_inspector_ = new rc::BeliefInspector(QStringLiteral("belief inspector"),
+                                                    custom_widget_->frame_series);
+        series_layout->addWidget(belief_inspector_, 2);
 
         // GenericWorker::initialize() may have started compute() already, so some instances can exist.
         for (auto& [_, inst] : fitter_->instances())
             publish_bottle_diagnostics(inst, inst.prev_free_energy);
     }
+
+    // ── Section 1: evidence-pipeline counter strip ────────────────────────────
+    evidence_monitor_ = new rc::EvidenceMonitor(QStringLiteral("bottle_concept — evidence monitor"));
+
+    // ── Combined window: counters (top) over the plots + belief inspector (bottom) ──
+    // Identical three-section structure to every other concept agent. Only HIDDEN on close, never deleted
+    // (compute() keeps the raw child pointers).
+    dashboard_window_ = new QWidget;
+    dashboard_window_->setWindowTitle(QStringLiteral("bottle_concept — dashboard"));
+    auto* outer = new QVBoxLayout(dashboard_window_);
+    outer->setContentsMargins(0, 0, 0, 0);
+    // No splitter: the counter strip is two lines of text with nothing to resize, so it simply takes
+    // its natural height and the plots + inspector get everything else.
+    outer->addWidget(evidence_monitor_, 0);   // section 1 — natural height
+    outer->addWidget(custom_widget_, 1);      // sections 2 + 3 — all remaining space
+
+    restore_dashboard_geometry();
+    dashboard_window_->show();
 }
 
 namespace { constexpr int PLACE_SETTLE_CYCLES = 30; }   // ~settle time after a start-placement move
@@ -456,6 +483,10 @@ void SpecificWorker::compute()
         return;
     }
 
+    // Evidence-pipeline per-cycle counters (the *_cum fields persist). Producers below add to these; the
+    // snapshot is pushed at the end of the cycle.
+    ev_g_.births = ev_g_.merges = ev_g_.removals = 0;
+
     mask_ingestor_->refresh();
 
     // Stage this cycle's LiDAR sweep (room frame) for the fitter's range factor. clear-then-set so the factor
@@ -466,8 +497,12 @@ void SpecificWorker::compute()
 
     run_instance_tracker();   // data-driven birth/associate/death (the only instance-lifecycle path)
 
-    // Bottle instances are DSR `cylinder` nodes named "bottle_*".
-    for (const auto& node : G->get_nodes_by_type("cylinder"))
+    // Robot/camera ego-motion (room frame) for this cycle — the "be-still-to-update" signal. Computed ONCE on
+    // the main thread (ts=0 pose diff) before the per-instance loop; run_inference's confirm_only gate reads it.
+    fitter_->update_ego_motion();
+
+    // Bottle instances are DSR `object` nodes named "bottle_*" (migrated from type "cylinder").
+    for (const auto& node : G->get_nodes_by_type("object"))
         if (node.name().starts_with("bottle"))
             process_bottle_node(node);
 
@@ -481,6 +516,26 @@ void SpecificWorker::compute()
         else
             evaluator_->step_move_experiment(fitter_->instances());
     }
+
+    // ── Dashboard: counters + belief inspector, one throttled push ──
+    ev_g_.instances    = static_cast<int>(fitter_->instances().size());
+    ev_g_.mask_stale   = not mask_ingestor_->packet().valid;
+    ev_g_.sweep_points = lidar_ingestor_ ? static_cast<int>(lidar_ingestor_->sweep_room().size()) : 0;
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (last_compute_tp_.time_since_epoch().count() != 0)
+        {
+            const float dt = std::chrono::duration<float>(now - last_compute_tp_).count();
+            if (dt > 1e-4f)
+            {
+                const float hz = 1.0f / dt;
+                ev_g_.compute_hz = ev_g_.compute_hz > 0.0f ? 0.9f * ev_g_.compute_hz + 0.1f * hz : hz;
+            }
+        }
+        last_compute_tp_ = now;
+    }
+    refresh_evidence_monitor();   // throttled inside; no-ops when the dashboard was not built
+    fps_counter_.print("[bottle_concept Compute]");
 }
 
 // Canonical per-node orchestration (mirrors table_concept::process_table_node): the fitter runs the
@@ -650,6 +705,17 @@ void SpecificWorker::run_instance_tracker()
     static int dbg = 0;
     const int n_assigned = static_cast<int>(std::count_if(res.assignment.begin(), res.assignment.end(),
                                                           [](int a){ return a >= 0; }));
+
+    // Evidence-pipeline counters (section 1 of the dashboard). Same fields every concept agent fills.
+    ev_g_.mask_frame_id = pkt.valid ? pkt.frame_id : -1;
+    ev_g_.total_slices  = pkt.valid ? static_cast<int>(pkt.slices.size()) : 0;
+    ev_g_.class_dets    = static_cast<int>(dets.size());
+    ev_g_.assigned      = n_assigned;
+    ev_g_.discarded     = static_cast<int>(dets.size()) - n_assigned;
+    ev_g_.births       += static_cast<int>(res.births.size());
+    ev_g_.births_cum   += static_cast<long>(res.births.size());
+    ev_g_.removals     += static_cast<int>(res.deaths.size());
+    ev_g_.removals_cum += static_cast<long>(res.deaths.size());
     if (++dbg % 30 == 0 or not res.births.empty() or not res.deaths.empty())
     {
         std::print("[tracker] instances={} bottle_dets={} assigned={} unassigned={} births={} deaths={}\n",
@@ -710,6 +776,10 @@ void SpecificWorker::process_bottle_node(const DSR::Node& node)
     // Epistemic capability: publish/refresh the hidden-face affordance for the controller.
     step_epistemic(inst);
 
+    // Hold the residual count so the dashboard trace keeps its last real value between masks.
+    if (observation.has_fresh_data)
+        inst.dbg_resid_pts = static_cast<int>(observation.residual_pts.size());
+
     // Live dashboard (after step_epistemic so last_epistemic_gain is current).
     publish_bottle_diagnostics(inst, free_energy);
 
@@ -724,33 +794,116 @@ void SpecificWorker::process_bottle_node(const DSR::Node& node)
 // belief between fresh masks.
 void SpecificWorker::publish_bottle_diagnostics(rc::BottleInstance& inst, float free_energy)
 {
-    if (not ts_fe_plot_)
+    if (not ts_plot_)
         return;   // no graph viewer / dashboard this run
 
-    const auto& s = inst.model.state();
-    // Posterior std (mm) from the Fisher precision; -1 (drawn as a floor) until a DOF is first observed.
-    const auto sigma_mm = [&](int j) -> float {
-        return inst.ai2_initialized ? 1000.0f * std::sqrt(std::max(0.0f, inst.ai2_belief.covariance()(j, j))) : -1.0f;
+    // U(Σ): the belief's scalar uncertainty = Σ of the posterior stds over position + size — the same
+    // definition the other concept agents plot (cf. rc::geom::belief_uncertainty).
+    const auto sigma_of = [&](int j) -> float {
+        return std::sqrt(std::max(0.0f, inst.ai2_belief.covariance()(j, j)));
     };
+    const float u_sigma = inst.ai2_initialized
+                        ? sigma_of(0) + sigma_of(1) + sigma_of(3) + sigma_of(4)   // cx,cy,radius,height
+                        : 0.0f;
 
-    ts_fe_plot_->add_series(inst.node_name + "_fe", QColor(255, 170, 0), 1.1f);
-    ts_fe_plot_->add_point (inst.node_name + "_fe", free_energy);
+    ts_plot_->add_series(inst.node_name + "_fe", QColor(255, 170, 0), 1.1f);
+    ts_plot_->add_point (inst.node_name + "_fe", free_energy);
+    // FE BASELINE on the SAME panel (same units): the FE lifting ABOVE the grey baseline IS the surprise,
+    // shown visually. The smoothed gap gets its own panel (it lives on a much smaller scale).
+    ts_plot_->add_series(inst.node_name + "_base", QColor(140, 140, 140), 0.9f);
+    if (ts_surprise_plot_)
+        ts_surprise_plot_->add_series(inst.node_name + "_surprise", QColor(255, 60, 60), 1.3f);
+    if (inst.fe_baseline >= 0.0f)   // skip the uninitialised (-1) baseline before the first fit
+    {
+        ts_plot_->add_point(inst.node_name + "_base", inst.fe_baseline);
+        if (ts_surprise_plot_)
+            ts_surprise_plot_->add_point(inst.node_name + "_surprise", inst.fe_surprise);
+    }
+    if (ts_cov_plot_)
+    {
+        ts_cov_plot_->add_series(inst.node_name + "_cov", QColor(0, 190, 255), 1.1f);
+        ts_cov_plot_->add_point (inst.node_name + "_cov", u_sigma);
+    }
+    if (ts_res_plot_)
+    {
+        // dbg_resid_pts HOLDS its last fresh-frame value, so the line doesn't crash to 0 between masks.
+        ts_res_plot_->add_series(inst.node_name + "_res", QColor(170, 80, 255), 1.1f);
+        ts_res_plot_->add_point (inst.node_name + "_res", static_cast<float>(inst.dbg_resid_pts));
+    }
 
-    ts_dim_plot_->add_series(inst.node_name + "_r", QColor(255, 90, 90), 1.1f);
-    ts_dim_plot_->add_series(inst.node_name + "_h", QColor(90, 200, 90), 1.1f);
-    ts_dim_plot_->add_point (inst.node_name + "_r", s.radius);
-    ts_dim_plot_->add_point (inst.node_name + "_h", s.height);
+    // (The dimensions (r,h) and posterior-σ traces that used to live here are gone: the BeliefInspector
+    // below shows every DOF's value AND its σ live, next to the whole correlation structure.)
+}
 
-    ts_sigma_plot_->add_series(inst.node_name + "_sr", QColor(255, 90, 90), 1.1f);
-    ts_sigma_plot_->add_series(inst.node_name + "_sh", QColor(90, 200, 90), 1.1f);
-    ts_sigma_plot_->add_point (inst.node_name + "_sr", sigma_mm(3));   // radius (depth-degenerate)
-    ts_sigma_plot_->add_point (inst.node_name + "_sh", sigma_mm(4));   // height
+// ─── Belief inspector ────────────────────────────────────────────────────────
+//
+// Build the per-instance BELIEF snapshot (state, Σ, scalar gauges) and push it to the bottom panel,
+// throttled to ~5 Hz. Deliberately NOT hung off publish_bottle_diagnostics: that runs per-node inside the
+// publish loop and early-returns on a missing plot, whereas the inspector wants one pass over ALL live
+// instances. Main-thread only.
+// Section 1: push this cycle's evidence-pipeline counters, then (same tick, same data) the belief
+// inspector — so the two sections can never show different cycles. Throttled to ~5 Hz.
+void SpecificWorker::refresh_evidence_monitor()
+{
+    if (not evidence_monitor_)
+        return;
+    const auto tick = std::chrono::steady_clock::now();
+    if (last_monitor_tp_.time_since_epoch().count() != 0
+        and std::chrono::duration<float>(tick - last_monitor_tp_).count() < 0.2f)
+        return;
+    last_monitor_tp_ = tick;
 
-    // Position uncertainty Σ[cx,cy] std (mm) — the calibrated posterior the tracker gate and controller use.
-    ts_ce_plot_->add_series(inst.node_name + "_scx", QColor(255, 90, 90), 1.1f);
-    ts_ce_plot_->add_series(inst.node_name + "_scy", QColor(90, 200, 90), 1.1f);
-    ts_ce_plot_->add_point (inst.node_name + "_scx", sigma_mm(0));
-    ts_ce_plot_->add_point (inst.node_name + "_scy", sigma_mm(1));
+    evidence_monitor_->update_view(ev_g_);
+    refresh_belief_inspector();
+}
+
+void SpecificWorker::refresh_belief_inspector()
+{
+    if (not belief_inspector_)
+        return;
+    const auto now = std::chrono::steady_clock::now();
+
+    std::vector<rc::BeliefCard> cards;
+    cards.reserve(fitter_->instances().size());
+    for (const auto& [id, inst] : fitter_->instances())
+    {
+        rc::BeliefCard c;
+        c.node = inst.node_name;
+
+        // A bottle is a yaw-symmetric cylinder: no orientation DOF and no discrete modes, so Σ is the plain
+        // posterior (there is no covariance_reported() to fold a mode entropy into).
+        const auto& S = inst.ai2_belief.covariance();
+        const auto& s = inst.ai2_belief.state();
+        const std::array<float, rc::BottleBelief::N> v = {s.cx, s.cy, s.cz, s.radius, s.height};
+        for (int j = 0; j < rc::BottleBelief::N; ++j)
+            c.dofs.push_back({rc::kBottleDofs[j].name, rc::kBottleDofs[j].unit, v[j],
+                              std::sqrt(std::max(0.0f, S(j, j))), rc::kBottleDofs[j].sigma_star});
+
+        // Row-major copy, filled explicitly: Eigen stores column-major, and while Σ is symmetric today an
+        // implicit .data() copy would silently transpose if that ever stopped being true.
+        constexpr int N = rc::BottleBelief::N;
+        c.cov.resize(N * N);
+        for (int i = 0; i < N; ++i)
+            for (int j = 0; j < N; ++j)
+                c.cov[i * N + j] = S(i, j);
+
+        // prev_free_energy is seeded to FLT_MAX, not 0 — pass NaN before the first fit so the gauge reads
+        // "-" instead of a nonsense 3.4e38.
+        c.s.fe          = inst.prev_free_energy < std::numeric_limits<float>::max()
+                        ? inst.prev_free_energy
+                        : std::numeric_limits<float>::quiet_NaN();
+        c.s.fe_baseline = inst.fe_baseline;
+        c.s.fe_surprise = inst.fe_surprise;
+        // The bottle carries no existence log-odds (it relies on the tracker's negative-information death),
+        // so logodds/p_exists stay NaN and the card prints "-" rather than a fabricated probability.
+        c.s.age_s       = inst.last_belief_touch.time_since_epoch().count() == 0
+                        ? -1.0f
+                        : std::chrono::duration<float>(now - inst.last_belief_touch).count();
+        c.s.since_det   = inst.frames_since_detection;
+        c.s.initialized = inst.ai2_initialized;
+        cards.push_back(std::move(c));
+    }
+    belief_inspector_->update_view(cards);
 }
 
 // Publish/refresh the "go see the hidden face" affordance (mirrors table_concept::step_epistemic). The

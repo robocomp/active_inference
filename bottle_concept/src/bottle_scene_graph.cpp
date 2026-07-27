@@ -72,7 +72,7 @@ float BottleSceneGraph::table_top_of(std::uint64_t table_id) const
     if (not inner_eigen_ or table_id == 0)
         return nan;
     const auto t = G_->get_node(table_id);
-    if (not t.has_value() or t->type() != "table")
+    if (not t.has_value() or not t->name().starts_with("table"))   // table migrated to generic type "object"
         return nan;
     const float h = G_->get_attrib_by_name<height_m_att>(t.value()).value_or(0.0f);
     if (h <= 0.0f)
@@ -103,8 +103,11 @@ BottleSceneGraph::decide_support_surface(float cx, float cy, float base_z,
 
     float best_ll = -std::numeric_limits<float>::infinity();
     SupportDecision best;
-    for (const auto& t : G_->get_nodes_by_type("table"))
+    // Tables migrated to the generic node type "object"; identify them by name (subtype=="table").
+    for (const auto& t : G_->get_nodes_by_type("object"))
     {
+        if (not t.name().starts_with("table"))
+            continue;
         const float w = G_->get_attrib_by_name<width_m_att> (t).value_or(0.0f);
         const float d = G_->get_attrib_by_name<depth_m_att> (t).value_or(0.0f);
         const float h = G_->get_attrib_by_name<height_m_att>(t).value_or(0.0f);
@@ -162,17 +165,23 @@ std::uint64_t BottleSceneGraph::create_instance_from_detection(const Eigen::Vect
     if (not room_opt.has_value() or not inner_eigen_)
         return 0;
 
-    // Auto-name: one past the highest existing "bottle_<N>".
+    // Auto-name: one past the highest existing "bottle_<N>" (bottles migrated to generic type "object").
     int max_n = 0;
-    for (const auto& n : G_->get_nodes_by_type("cylinder"))
+    for (const auto& n : G_->get_nodes_by_type("object"))
         if (n.name().rfind("bottle_", 0) == 0)
             try { max_n = std::max(max_n, std::stoi(n.name().substr(7))); } catch (...) {}
     const std::string name = "bottle_" + std::to_string(max_n + 1);
 
-    DSR::Node bottle_node = DSR::Node::create<cylinder_node_type>(name);
+    DSR::Node bottle_node = DSR::Node::create<object_node_type>(name);
     G_->add_or_modify_attrib_local<width_m_att> (bottle_node, 2.0f * cfg_.prior_radius);
     G_->add_or_modify_attrib_local<depth_m_att> (bottle_node, 2.0f * cfg_.prior_radius);
     G_->add_or_modify_attrib_local<height_m_att>(bottle_node, cfg_.prior_height);
+    G_->add_or_modify_attrib_local<object_subtype_att>(bottle_node, std::string("bottle"));  // type-agnostic consumers
+    // Display mesh (loaded by the voxelizer viewer, scaled to the fitted box; asset supplied later). Path is
+    // relative to the components dir, `<concept>/meshes/<name>` — same convention as chair/table/cabinet/fridge
+    // (a missing asset falls back to the fitted box). Was a bare "bottle.obj" that could never resolve.
+    G_->add_or_modify_attrib_local<mesh_path_att>        (bottle_node, std::string("bottle_concept/meshes/bottle.obj"));
+    G_->add_or_modify_attrib_local<mesh_texture_path_att>(bottle_node, std::string("bottle_concept/meshes/bottle_basecolor.png"));
 
     const float cz = centroid_room.z() > 1e-3f ? centroid_room.z() : cfg_.prior_height * 0.5f;
     const auto dec = decide_support_surface(centroid_room.x(), centroid_room.y(),

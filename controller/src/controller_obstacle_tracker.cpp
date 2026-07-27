@@ -771,13 +771,11 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
     };
 
     // Gather every graph node that represents a real shaped object the robot must avoid AND that can
-    // EXPLAIN/retire a controller-published temporary obstacle. Crucially this includes the concept
-    // object types (table_concept→"table", bottle_concept→"cylinder"), not only generic "object"/
-    // "obstacle". Previously a real table was missed (it is type "table") because the width/depth
-    // fallback only ran when NO obstacle node existed — but the controller's own published temp
-    // obstacles are type "obstacle", so the fallback never ran → temp obstacles over a table were
-    // never retired. Add new object types here.
-    static constexpr std::array<const char *, 5> kObjectTypes = {"object", "obstacle", "table", "cylinder", "chair"};
+    // EXPLAIN/retire a controller-published temporary obstacle. Post graph-schema migration every
+    // concept agent's node is the generic type "object" (class in the object_subtype attribute), so
+    // "object" catches all of them; "obstacle" catches the controller's own published temp obstacles.
+    // (The old per-class entries "table"/"cylinder"/"chair" are dead now — no node carries those types.)
+    static constexpr std::array<const char *, 2> kObjectTypes = {"object", "obstacle"};
     std::vector<DSR::Node> obstacle_nodes;
     std::unordered_set<std::uint64_t> obstacle_node_ids;
     for (const char *type : kObjectTypes)
@@ -977,7 +975,10 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
         std::string visual_label;
         if (kind == ControllerObstacleKind::Object)
         {
-            const std::string prefix = object_label_prefix(node.type());
+            // Post-migration the node type is generic "object"; the class label lives in the
+            // object_subtype attribute (cosmetic log label). Fall back to type() for legacy nodes.
+            const auto subtype_attr = graph_->get_attrib_by_name<object_subtype_att>(node);
+            const std::string prefix = object_label_prefix(subtype_attr.value_or(node.type()));
             visual_label = prefix + "_" + std::to_string(++object_label_counts_[prefix]);
         }
         else

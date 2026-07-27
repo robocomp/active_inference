@@ -102,6 +102,11 @@ ChairConfig load_chair_config(const ConfigLoader& cfg)
     out.tracker_prune_maturity_cycles = geti("Tracker.PruneMaturityCycles", 90);
     out.tracker_prune_patience        = geti("Tracker.PrunePatience",       30);
     out.exist_enabled            = getb("Existence.Enabled",          true);
+
+    // Level-2 arrangement prior (ring_metaconcept). Off ⇒ the belief is bit-for-bit pre-rig.
+    out.rig_yaw_prior_enabled    = getb("RigPrior.Enabled",           true);
+    out.rig_yaw_kappa_max        = getf("RigPrior.YawKappaMax",       6.0f);
+    out.rig_prior_stale_ms       = geti("RigPrior.StaleMs",           5000);
     out.exist_birth_logodds      = getf("Existence.BirthLogodds",     1.0f);
     out.exist_remove_logodds     = getf("Existence.RemoveLogodds",   -3.0f);
     out.exist_max_logodds        = getf("Existence.MaxLogodds",       4.0f);
@@ -120,10 +125,12 @@ ChairConfig load_chair_config(const ConfigLoader& cfg)
     out.exist_zed_range_full     = getf("Existence.ZedRangeFull",     4.0f);
     out.exist_zed_range_ref      = getf("Existence.ZedRangeRef",      7.0f);
     out.exist_zed_clear_los_floor = getf("Existence.ZedClearLosFloor", 0.15f);
-    out.tracker_birth_seat_w     = getf("Tracker.BirthSeatW",       0.45f);
-    out.tracker_birth_seat_d     = getf("Tracker.BirthSeatD",       0.45f);
-    out.tracker_birth_seat_h     = getf("Tracker.BirthSeatH",       0.45f);
-    out.tracker_birth_back_h     = getf("Tracker.BirthBackH",       0.45f);
+    out.tracker_birth_seat_w     = getf("Tracker.BirthSeatW",       0.60f);
+    out.tracker_birth_seat_d     = getf("Tracker.BirthSeatD",       0.52f);
+    out.tracker_birth_seat_h     = getf("Tracker.BirthSeatH",       0.595f);
+    out.tracker_birth_back_h     = getf("Tracker.BirthBackH",       0.655f);
+    out.tracker_birth_seat_thick = getf("Tracker.BirthSeatThick",   0.075f);
+    out.tracker_birth_leg_half   = getf("Tracker.BirthLegHalf",     0.0375f);
     out.tracker_nll_cost         = getb("Tracker.NllCost",          false);
     out.ricoh_birth_enabled      = getb("Tracker.RicohBirthEnabled", false);
     out.ricoh_birth_conf         = getf("Tracker.RicohBirthConf",    0.60f);

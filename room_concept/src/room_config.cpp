@@ -126,6 +126,13 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.HierPrecLrV", room_concept.params.hier_prec_lr_v);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.HierPrecSigmaV2", room_concept.params.hier_prec_sigma_v2);
 
+    // FE-native relocalization on map-trust collapse (HIERARCHICAL_PRECISION.md) — default OFF.
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.HierPrecRelocEnabled", room_concept.params.hier_prec_reloc_enabled);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.HierPrecRelocFloor", room_concept.params.hier_prec_reloc_floor);
+    rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomConcept.HierPrecRelocConsecutive", room_concept.params.hier_prec_reloc_consecutive);
+    rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomConcept.HierPrecRelocCooldownFrames", room_concept.params.hier_prec_reloc_cooldown_frames);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.HierPrecEeDthetaMin", room_concept.params.hier_prec_ee_dtheta_min);
+
     rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomConcept.RecoveryCooldownFrames", room_concept.params.recovery_cooldown_frames);
 
     // 180° symmetry-flip robustness (leaky evidence + confidence-scaled threshold).

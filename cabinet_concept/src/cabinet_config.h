@@ -205,6 +205,14 @@ struct CabinetConfig
     // LidarPrecision > 0).
     float free_space_precision = 0.0f;
 
+    // ── Scene-object non-penetration (cabinet_wall_run_belief.h + cabinet_kitchen.h) ────────────────
+    // A run may not cross another agent's furniture (fridge/table/…) read from the shared graph. The factor
+    // retracts a penetrating END onto the object; a run mostly ENGULFED by an object is retired (the on-fridge
+    // false-cabinet the LiDAR carve can't reach). Precision should DOMINATE extent_precision (≥ 800). 0 = OFF.
+    float object_exclusion_precision = 0.0f;   // 1/m² per penetrating end (retract-only)
+    float object_exclusion_margin_m  = 0.03f;  // flush clearance off the object boundary
+    float object_engulf_frac         = 0.60f;  // retire when along-wall AND depth AND z overlap all exceed this
+
     // ── Footprint SECOND-MOMENT factor (cabinet_belief.h) ───────────────────────────────────────────
     // Measures (w,h,yaw) from the top-band cloud's 2D inertia tensor and folds it as a linear Gaussian factor —
     // the escape from the clutter-trap that leaves a dense, bigger/yawed mask unable to rotate/resize the box

@@ -500,6 +500,8 @@ void SpecificWorker::compute()
     refresh_evidence_monitor();
     prune_dead_series();   // drop timeseries lines for refrigerators that were removed from the graph
     log_birth_surprise();  // EXPERIMENTAL read-only: residual grid → birth-surprise regions (cfg-gated, off by default)
+
+    fps_counter_.print("[refrigerator_concept Compute]");   // std::cout heartbeat: Period/Fps/cpu%/mem (every ~1s)
 }
 
 // EXPERIMENTAL, read-only. Reinterpret residual_concept's `grid` node (under room) as an unexplained-occupancy
@@ -771,25 +773,10 @@ void SpecificWorker::publish_refrigerator_diagnostics(const rc::RefrigeratorInst
             // observation.residual_pts only on fresh frames, so on a non-fresh publish it added nothing → no line.
             ts_res_plot_->add_point(inst.node_name + "_res", static_cast<float>(inst.dbg_resid_pts));
         }
-        if (ts_state_plot_)
-        {
-            // Sample EVERY cycle (not just fresh frames): the whole point is to see whether the accepted
-            // dimensions hold flat between masks (stabiliser working) or drift/jitter on stale data.
-            const auto& s = inst.model.state();
-            ts_state_plot_->add_series(inst.node_name + "_w", QColor(255, 90, 90), 1.1f);
-            ts_state_plot_->add_series(inst.node_name + "_h", QColor(90, 200, 90), 1.1f);
-            ts_state_plot_->add_point (inst.node_name + "_w", s.w);
-            ts_state_plot_->add_point (inst.node_name + "_h", s.h);
-        }
-        if (ts_ce_plot_ and inst.ai2_initialized)
-        {
-            // Belief posterior std for the size DOFs (Σ index 3=w, 4=h), in mm — the size-uncertainty trace.
-            const auto& S = inst.ai2_belief.covariance();
-            ts_ce_plot_->add_series(inst.node_name + "_sW", QColor(255, 90, 90), 1.1f);
-            ts_ce_plot_->add_series(inst.node_name + "_sH", QColor(90, 200, 90), 1.1f);
-            ts_ce_plot_->add_point (inst.node_name + "_sW", 1000.f * std::sqrt(std::max(0.f, S(3, 3))));
-            ts_ce_plot_->add_point (inst.node_name + "_sH", 1000.f * std::sqrt(std::max(0.f, S(4, 4))));
-        }
+        // (The inferred-dimensions trace that used to live here is gone: the BeliefInspector below shows
+        // every DOF's value AND its σ live, so a separate w/h trace was showing the same thing twice.)
+        // (The size-posterior σ_w/σ_h trace that used to live here is gone: the BeliefInspector panel now
+        // shows σ for EVERY DOF, next to its target σ* and the whole correlation structure.)
     }
 
     if (fitter_->should_log(inst))

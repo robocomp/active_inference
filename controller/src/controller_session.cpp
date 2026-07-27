@@ -10,6 +10,22 @@
 #include <print>
 #include <sstream>
 
+namespace
+{
+// Contract-resolution key for an affordance's parent object node. Post graph-schema migration the
+// node type is the generic "object" and the class lives in the object_subtype attribute; prefer it
+// so rc::affordance::default_contract_for() recovers the class-specific default (table/chair/…)
+// rather than the generic Reach fallback. Per-node baked aff_* overrides still win on top. Falls
+// back to type() for legacy typed nodes (e.g. bottle_concept's "cylinder").
+std::string parent_contract_key(const DSR::Node &node)
+{
+    if (const auto subtype = node.attrs().find("object_subtype"); subtype != node.attrs().end())
+        if (subtype->second.selected() == 0 and not subtype->second.str().empty())
+            return subtype->second.str();
+    return node.type();
+}
+}  // namespace
+
 void ControllerSession::set_params(const ControllerParams *params)
 {
     params_ = params;
@@ -360,7 +376,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
             std::string parent_type;
             if (last_target_info_->parent_node_id != 0)
                 if (const auto pn = graph_->get_node(last_target_info_->parent_node_id); pn.has_value())
-                    parent_type = pn->type();
+                    parent_type = parent_contract_key(pn.value());
             const auto contract = rc::affordance::read_contract(aff.value(), parent_type);
             if (contract.policy == rc::affordance::Policy::Orient)
             {
@@ -528,7 +544,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                 std::string parent_type;
                 if (last_target_info_->parent_node_id != 0)
                     if (const auto pn = graph_->get_node(last_target_info_->parent_node_id); pn.has_value())
-                        parent_type = pn->type();
+                        parent_type = parent_contract_key(pn.value());
                 active_contract_ = rc::affordance::read_contract(aff_node.value(), parent_type);
                 feedback_node_id_ = active_contract_.feedback_node_id != 0
                                   ? active_contract_.feedback_node_id

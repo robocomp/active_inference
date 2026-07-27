@@ -523,20 +523,21 @@ bool VoxelOpenGLViewer::load_robot_mesh(const std::string& path)
                               0.5f * (mesh->bb_min.y() + mesh->bb_max.y()),
                               mesh->bb_min.z());
 
-    std::vector<QVector3D> local_vertices;
-    local_vertices.reserve(mesh->triangles.size());
-    for (const auto& vertex : mesh->triangles)
-        local_vertices.emplace_back(vertex.x() - center_xy.x(),
-                                    vertex.y() - center_xy.y(),
-                                    vertex.z() - center_xy.z());
+    std::vector<QVector3D> local_vertices;   // robot mesh is drawn flat (no material) → flatten all groups
+    for (const auto& sub : mesh->submeshes)
+        for (const auto& vertex : sub.triangles)
+            local_vertices.emplace_back(vertex.x() - center_xy.x(),
+                                        vertex.y() - center_xy.y(),
+                                        vertex.z() - center_xy.z());
 
+    const std::size_t n = local_vertices.size();
     {
         std::scoped_lock lk(robot_mesh_mutex_);
         robot_mesh_local_ = std::move(local_vertices);
     }
 
     qInfo() << "VoxelOpenGLViewer loaded robot mesh" << QString::fromStdString(resolved_path->string())
-            << "triangles=" << mesh->triangles.size() / 3;
+            << "triangles=" << n / 3;
     request_update_throttled();
     return true;
 }
@@ -563,11 +564,13 @@ std::optional<std::filesystem::path> resolve_asset_path(const std::string& rel)
 }
 }  // namespace
 
-// Load (once, cached by path) a concept-published display mesh + optional base-colour texture. The GL
-// texture is uploaded lazily here since paintGL holds a current context. A failed load is cached (empty
-// tris) so it isn't retried every frame. The OBJ is expected already normalised (see mesh_path contract).
+// Load (once, cached by path) a concept-published display mesh. Appearance comes from the OBJ's .mtl:
+// per-material submeshes carry their Kd (flat colour) and/or map_Kd (texture). `fallback_texture` (the
+// node's legacy mesh_texture_path) is applied only to submeshes whose .mtl gave no texture. GL textures are
+// uploaded lazily here (paintGL holds a current context). A failed load caches an empty template so it isn't
+// retried every frame. The OBJ is expected already normalised (see the mesh_path contract).
 VoxelOpenGLViewer::FurnitureTemplate* VoxelOpenGLViewer::get_or_load_template(const std::string& mesh_path,
-                                                                             const std::string& texture_path)
+                                                                             const std::string& fallback_texture)
 {
     if (mesh_path.empty())
         return nullptr;
@@ -580,35 +583,50 @@ VoxelOpenGLViewer::FurnitureTemplate* VoxelOpenGLViewer::get_or_load_template(co
         {
             if (const auto mesh = rc::obj::load_obj_mesh_data(resolved.value()); mesh.has_value())
             {
-                t.tris = mesh->triangles;
-                t.uv = mesh->uvs;
+                for (const auto& src : mesh->submeshes)
+                {
+                    SubMeshGL sub;
+                    sub.tris = src.triangles;
+                    sub.uv = src.uvs;
+                    sub.has_diffuse = src.has_diffuse;
+                    sub.diffuse = QColor::fromRgbF(std::clamp(src.diffuse.x(), 0.f, 1.f),
+                                                   std::clamp(src.diffuse.y(), 0.f, 1.f),
+                                                   std::clamp(src.diffuse.z(), 0.f, 1.f));
+                    // Texture: the .mtl's map_Kd (already an absolute path), else the node's legacy fallback.
+                    std::string tex = src.texture_path;
+                    if (tex.empty() and not fallback_texture.empty())
+                        if (const auto tr = resolve_asset_path(fallback_texture); tr.has_value())
+                            tex = tr->string();
+                    if (not tex.empty())
+                    {
+                        sub.tex_image = QImage(QString::fromStdString(tex));
+                        if (sub.tex_image.isNull())
+                            qWarning() << "VoxelOpenGLViewer texture not loaded:" << QString::fromStdString(tex);
+                    }
+                    t.subs.push_back(std::move(sub));
+                }
                 qInfo() << "VoxelOpenGLViewer loaded display mesh" << QString::fromStdString(mesh_path)
-                        << "triangles=" << t.tris.size() / 3;
+                        << "submeshes=" << t.subs.size();
             }
         }
-        if (t.tris.empty())
+        if (t.subs.empty())
             qWarning() << "VoxelOpenGLViewer display mesh not found/loadable:" << QString::fromStdString(mesh_path);
-        if (not texture_path.empty())
-        {
-            if (const auto tr = resolve_asset_path(texture_path); tr.has_value())
-                t.tex_image = QImage(QString::fromStdString(tr->string()));
-            if (t.tex_image.isNull())
-                qWarning() << "VoxelOpenGLViewer display texture not loaded:" << QString::fromStdString(texture_path);
-        }
         it = mesh_cache_.emplace(mesh_path, std::move(t)).first;
     }
 
     FurnitureTemplate& t = it->second;
-    if (t.tris.size() < 3)
+    if (t.subs.empty())
         return nullptr;
-    if (tex_program_.isLinked() and t.tex == nullptr and not t.tex_image.isNull())
-    {
-        t.tex = std::make_unique<QOpenGLTexture>(t.tex_image.mirrored(false, true),
-                                                 QOpenGLTexture::GenerateMipMaps);
-        t.tex->setWrapMode(QOpenGLTexture::Repeat);
-        t.tex->setMinificationFilter(QOpenGLTexture::LinearMipMapLinear);
-        t.tex->setMagnificationFilter(QOpenGLTexture::Linear);
-    }
+    if (tex_program_.isLinked())   // lazy GPU upload per submesh (context current in paintGL)
+        for (auto& sub : t.subs)
+            if (sub.tex == nullptr and not sub.tex_image.isNull())
+            {
+                sub.tex = std::make_unique<QOpenGLTexture>(sub.tex_image.mirrored(false, true),
+                                                           QOpenGLTexture::GenerateMipMaps);
+                sub.tex->setWrapMode(QOpenGLTexture::Repeat);
+                sub.tex->setMinificationFilter(QOpenGLTexture::LinearMipMapLinear);
+                sub.tex->setMagnificationFilter(QOpenGLTexture::Linear);
+            }
     return &t;
 }
 
@@ -1477,10 +1495,17 @@ void VoxelOpenGLViewer::paintGL()
                 {
                     if (FurnitureTemplate* tpl = get_or_load_template(mesh_path, mesh_tex))
                     {
-                        if (tpl->tex != nullptr and tpl->uv.size() == tpl->tris.size())
-                            append_scaled_mesh_tex(tpl->tris, tpl->uv, ctr, he, cy, sy, tex_batches[tpl->tex.get()]);
-                        else
-                            append_scaled_mesh(tpl->tris, ctr, he, cy, sy, c);
+                        // Draw each material group: textured groups (.mtl map_Kd) go through the texture pass;
+                        // flat groups use their .mtl Kd (else the node's category colour), per-instance shaded.
+                        const int inst = instance_index_from_name(name);
+                        for (auto& sub : tpl->subs)
+                        {
+                            if (sub.tex != nullptr and sub.uv.size() == sub.tris.size())
+                                append_scaled_mesh_tex(sub.tris, sub.uv, ctr, he, cy, sy, tex_batches[sub.tex.get()]);
+                            else
+                                append_scaled_mesh(sub.tris, ctr, he, cy, sy,
+                                                   shade_for_instance(sub.has_diffuse ? sub.diffuse : base, inst));
+                        }
                         continue;
                     }
                 }

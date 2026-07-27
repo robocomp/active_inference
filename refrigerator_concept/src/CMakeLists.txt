@@ -49,11 +49,14 @@ LIST(APPEND HEADERS
   ../src/refrigerator_lidar_range_channel.h
   ../src/refrigerator_model.h
   ../src/refrigerator_belief.h
+  ../src/refrigerator_dof.h
   ../src/epistemic_planner.h
   ../src/refrigerator_affordance.h
+  ${ACTIVE_INFERENCE_COMMON_DIR}/ai_belief/dof_spec.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/timeseries_plot.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/custom_widget.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/evidence_monitor.h
+  ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/belief_inspector.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_monitor/agent_presence_monitor.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_coordinator/agent_presence_coordinator.h
 )

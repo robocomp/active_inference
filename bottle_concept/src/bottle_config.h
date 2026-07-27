@@ -100,6 +100,15 @@ struct BottleConfig
     // gate: std growth per unit motion_dotd (m/s); at dotd→0 it vanishes (a still frame updates fully); 0 disables.
     float motion_cm_pos_gain       = 0.10f;  // position (cx,cy) shared-error std per m/s of motion_dotd
     float motion_cm_size_gain      = 0.20f;  // size (radius,height) shared-error std per m/s — the anti-RESHAPE lever
+    // Ego-motion DISCRETE "confirm-only" gate (mirrors refrigerator/chair confirm_only). The continuous common-
+    // mode above is the graceful backstop; this gate takes a PREDICT-ONLY branch (Σ inflates, geometry mean HELD)
+    // when the robot is clearly MOVING, so a motion-smeared mask may only CONFIRM a converged bottle, never
+    // move/reshape it. motion_magnitude(inst) = max(|motion_dotd|, ego_lin_mps + ai2_ang_lever_m·ego_ang_radps).
+    bool  ai2_motion_confirm_only = true;    // master switch for the discrete gate (false = continuous common-mode only)
+    float ai2_still_lin_mps       = 0.05f;   // camera linear speed (m/s) below which the robot counts as "still"
+    float ai2_still_ang_radps     = 0.10f;   // camera angular speed (rad/s) below which the robot counts as "still"
+    float ai2_still_dotd          = 0.05f;   // per-mask ego-motion corruption speed (m/s) still-level
+    float ai2_ang_lever_m         = 2.0f;    // rad/s → m/s lever (tangential speed of a bottle ~this far away)
     int   ai2_gn_iters             = 4;      // Gauss-Newton iterations per frame
     std::string ai2_csv_path       = "";     // non-empty → append a per-cycle AI2 belief CSV (state + Σ diag)
     // ── Support-surface decision (room vs table parent) ───────────────────────────────────────────

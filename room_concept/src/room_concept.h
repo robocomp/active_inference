@@ -114,6 +114,16 @@ public:
         float hier_prec_lr_v      = 0.02f;  // v-step size (slow hyper-state)
         float hier_prec_sigma_v2  = 1.0f;   // prior scale on the map_trust state v
 
+        // ===== FE-native relocalization when map-trust collapses (HIERARCHICAL_PRECISION.md) =====
+        // When the higher-level belief exp(u_b_) drops below a floor for a few frames, the map no longer
+        // explains the robot → run the existing hierarchical grid search (same action as RecoveryManager,
+        // which is kept as an independent raw-sdf backstop). Requires hier_prec_boundary_enabled. OFF by default.
+        bool  hier_prec_reloc_enabled        = false;
+        float hier_prec_reloc_floor          = 0.10f; // exp(u_b_) below this = map-trust collapse
+        int   hier_prec_reloc_consecutive    = 3;     // frames below floor before firing (debounce)
+        int   hier_prec_reloc_cooldown_frames= 30;    // frames suppressed after a fire
+        float hier_prec_ee_dtheta_min        = 0.15f; // rad (|Δθ| over window) gating the early-exit nudge
+
         // ===== Far-point distance weighting =====
         // Far points have a longer lever arm for orientation correction and are
         // under-represented relative to their informational value (lidar point
@@ -900,11 +910,20 @@ private:
    float              u_b_             = 0.f;  // boundary log-precision posterior; exp(u_b_) = ⟨π⟩ = boundary_weight
    bool               u_b_init_        = false;// lazily seeded to g(v) on first use / after a recovery reset
    float              map_trust_v_     = 0.f;  // Option-A slow hyper-state v; g(v)=u0+g_gain·v predicts u_b_
+   int                map_trust_low_streak_     = 0;  // consecutive frames exp(u_b_) < hier_prec_reloc_floor
+   int                map_trust_reloc_cooldown_ = 0;  // frames left suppressing a map-trust relocalization
    /// Stage-1 boundary-precision inference: one fast step on u_b_ (from the boundary residual r_b, using
    /// the post-optimization posterior covariance sigma_x for the tr(Λ_b Σ) term) plus one slow step on the
    /// map_trust hyper-state v. No-op unless params.hier_prec_boundary_enabled. Call once per frame after
    /// the window pose has converged.
    void               update_boundary_hyperprecision(const Eigen::Matrix3f &sigma_x);
+   /// Close the rotation early-exit gap: on an early-exit frame with large |dtheta|, nudge u_b_ down using a
+   /// SURROGATE residual r_ee=(mean_sdf_pred/sigma_sdf)² (no boundary factor is evaluated on early-exit), so a
+   /// degrading rotation that keeps early-exiting can still collapse map-trust. Fast-only (leaves v to the
+   /// optimized path). No-op unless hier_prec_boundary_enabled && hier_prec_reloc_enabled.
+   void               nudge_map_trust_early_exit(float mean_sdf_pred, float dtheta);
+   /// Append one row to etc/hier_prec.csv (lazy-opened). src ∈ {opt, ee, reloc}. Loc-thread only, no lock.
+   void               log_hier_prec_row(const char *src, float r_b, float quad, float trace, bool reloc_fired);
    WindowManager::LossBreakdown last_loss_breakdown_;  // FE term breakdown after last Adam
    float              last_lbfgs_grad_norm_ = 0.f; // final gradient inf-norm after L-BFGS (0 for Adam/early-exit)
    // Per-frame timing — t_update_start_ set at entry of update(), shared with early-exit path

@@ -72,6 +72,11 @@ BottleConfig load_bottle_config(const ConfigLoader& cfg)
     out.ai2_common_mode_size_std = getf("BottleModel.AI2CommonModeSizeStd",   0.01f);
     out.motion_cm_pos_gain       = getf("BottleModel.MotionCmPosGain",        0.10f);
     out.motion_cm_size_gain      = getf("BottleModel.MotionCmSizeGain",       0.20f);
+    out.ai2_motion_confirm_only  = getb("BottleModel.AI2MotionConfirmOnly",   true);
+    out.ai2_still_lin_mps        = getf("BottleModel.AI2StillLinMps",         0.05f);
+    out.ai2_still_ang_radps      = getf("BottleModel.AI2StillAngRadps",       0.10f);
+    out.ai2_still_dotd           = getf("BottleModel.AI2StillDotd",           0.05f);
+    out.ai2_ang_lever_m          = getf("BottleModel.AI2AngLeverM",           2.0f);
     out.ai2_gn_iters             = geti("BottleModel.AI2GnIters",             4);
     out.ai2_csv_path             = gets("BottleModel.AI2CsvPath",             "");
     out.support_sigma_z          = getf("Support.SigmaZ",            0.04f);

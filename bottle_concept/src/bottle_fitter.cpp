@@ -3,6 +3,7 @@
  */
 
 #include "bottle_fitter.h"
+#include "bottle_dof.h"         // kBottleDofs: the AI2 CSV column names
 
 #include <algorithm>
 #include <array>
@@ -23,6 +24,57 @@ BottleFitter::BottleFitter(std::shared_ptr<DSR::DSRGraph> graph,
     : G_(std::move(graph)), inner_eigen_(inner_eigen), cfg_(cfg),
       mask_ingestor_(perception), scene_graph_(scene_graph)
 {}
+
+// ─── Ego-motion "be-still-to-update" (mirrors refrigerator/chair confirm_only) ───────────────────────
+// Robot/camera speed in the room frame from the transform chain (producer-independent). Uses the SAME
+// room_T_zed extrinsic the fit uses, pinned to the CURRENT pose (ts=0 = latest). Call once per compute cycle
+// on the MAIN thread. ALWAYS checks the returned optional; bails (leaves ego_* unchanged) if the chain is gone.
+void BottleFitter::update_ego_motion()
+{
+    const auto M = room_T_zed_matrix(0);   // camera→room (ts=0 = current robot pose)
+    const auto now = std::chrono::steady_clock::now();
+    if (not M.has_value())
+    {
+        have_prev_cam_ = false;   // pose chain unavailable → can't judge motion; reset the baseline
+        return;
+    }
+    const Eigen::Vector3f pos(static_cast<float>(M->coeff(0, 3)),
+                              static_cast<float>(M->coeff(1, 3)),
+                              static_cast<float>(M->coeff(2, 3)));
+    const Eigen::Vector3f fwd(static_cast<float>(M->coeff(0, 1)),   // zed +y is the depth/forward axis
+                              static_cast<float>(M->coeff(1, 1)),
+                              static_cast<float>(M->coeff(2, 1)));
+    if (have_prev_cam_)
+    {
+        const float dt = std::max(1e-3f, std::chrono::duration<float>(now - prev_cam_tp_).count());
+        ego_lin_mps_ = (pos - prev_cam_pos_).norm() / dt;
+        const float fa = prev_cam_fwd_.norm(), fb = fwd.norm();
+        const float cang = (fa > 1e-6f and fb > 1e-6f)
+            ? std::clamp(prev_cam_fwd_.dot(fwd) / (fa * fb), -1.0f, 1.0f) : 1.0f;
+        ego_ang_radps_ = std::acos(cang) / dt;
+    }
+    prev_cam_pos_ = pos; prev_cam_fwd_ = fwd; prev_cam_tp_ = now; have_prev_cam_ = true;
+}
+
+// Robust combined ego-motion magnitude (m/s): the per-mask corruption speed OR'd with the robot's own measured
+// speed (linear + a lever-arm conversion of angular), so it works whether or not the producer populated motion_dotd.
+float BottleFitter::motion_magnitude(const BottleInstance& inst) const
+{
+    return std::max(std::abs(inst.last_motion_dotd),
+                    ego_lin_mps_ + cfg_.ai2_ang_lever_m * ego_ang_radps_);
+}
+
+// "Be-still-to-update": true ⇒ this frame may only CONFIRM (predict-only), never move/reshape the geometry mean.
+// Robot linear/angular speed above the still-level, OR the mask's own ego-motion corruption (motion_dotd) above
+// its still-level. A bottle is a yaw-symmetric CYLINDER, so this governs position + size only (no yaw channel).
+bool BottleFitter::confirm_only(const BottleInstance& inst) const
+{
+    if (not cfg_.ai2_motion_confirm_only)
+        return false;
+    return ego_lin_mps_   > cfg_.ai2_still_lin_mps
+        or ego_ang_radps_ > cfg_.ai2_still_ang_radps
+        or std::abs(inst.last_motion_dotd) > cfg_.ai2_still_dotd;
+}
 
 void BottleFitter::update_support_surface(BottleInstance& inst)
 {
@@ -271,39 +323,58 @@ float BottleFitter::run_inference(BottleInstance& inst, const BottleObservation&
     // down-weighted by sparse coverage + the range fade.
     feed_lidar(inst, frame, range_scale);
 
-    // Physical step-bound (fix 2a). A corrupted mask cloud (e.g. mask points deprojected to garbage during
-    // fast robot motion) can produce ONE wild GN step that teleports the centre tens of metres; once that
-    // happens LiDAR's restoring returns fall outside its robust kernel (huge residual → ~0 weight) and the fit
-    // can't recover → runaway. A static-scene bottle cannot physically move MaxStepM in one frame, so a frame
-    // whose net centre move exceeds it is an OUTLIER FRAME: reject its update (restore state+Σ), widen the
-    // position Σ like a look-away, and mark it no-data so persistent corruption still retires via frames_diverged.
-    const BottleBeliefState pre_state = inst.ai2_belief.state();
-    const BottleBelief      pre_belief = inst.ai2_belief;   // full snapshot (state + Σ)
+    // Ego-motion "be-still-to-update" DISCRETE gate (mirrors refrigerator/chair confirm_only). When the robot is
+    // clearly MOVING (ego lin/ang speed OR the mask's own motion_dotd above the still-level), a motion-smeared mask
+    // is a shared displacement whose per-point R averages away — it may only CONFIRM the bottle (existence +
+    // association still run), never move/reshape a converged one. Take the PREDICT-ONLY branch (Σ inflates, geometry
+    // mean HELD) instead of a full geometry update. The continuous common-mode above is the graceful backstop; this
+    // discrete gate concentrates GEOMETRY updates at stillness. A static bottle loses nothing by not updating while
+    // moving. Bottle is a yaw-symmetric CYLINDER, so the gate governs position + size (radius,height) only — no yaw.
+    const bool gated = confirm_only(inst);
 
-    inst.ai2_belief.update(frame);   // MAP mean + posterior Σ; its surface-only return is NOT the FE (below)
-
-    bool frame_rejected = false;
-    if (cfg_.max_step_m > 0.0f)
+    bool  frame_rejected = false;
+    float energy;
+    float clut = inst.last_clutter_frac;   // hold last on a gated (no-measurement) cycle
+    if (gated)
     {
-        const auto& ns = inst.ai2_belief.state();
-        const float dx = ns.cx - pre_state.cx, dy = ns.cy - pre_state.cy, dz = ns.cz - pre_state.cz;
-        if (std::sqrt(dx * dx + dy * dy + dz * dz) > cfg_.max_step_m)
-        {
-            std::print("[{}] AI2 step-bound REJECT: centre moved {:.2f}m (>{:.2f}) — outlier frame dropped\n",
-                       inst.node_name, std::sqrt(dx * dx + dy * dy + dz * dz), cfg_.max_step_m);
-            inst.ai2_belief = pre_belief;         // reject the corrupted update (restore state + Σ)
-            inst.ai2_belief.predict_stale();      // widen position Σ so the next good frame re-associates
-            frame_rejected = true;                // explained nothing → drives frames_diverged (retirement)
-        }
+        inst.ai2_belief.predict();          // confirmation only: Σ inflates, geometry mean UNCHANGED
+        energy = inst.prev_free_energy;     // hold last FE — a confirm-only frame took no geometry measurement
     }
+    else
+    {
+        // Physical step-bound (fix 2a). A corrupted mask cloud (e.g. mask points deprojected to garbage during
+        // fast robot motion) can produce ONE wild GN step that teleports the centre tens of metres; once that
+        // happens LiDAR's restoring returns fall outside its robust kernel (huge residual → ~0 weight) and the fit
+        // can't recover → runaway. A static-scene bottle cannot physically move MaxStepM in one frame, so a frame
+        // whose net centre move exceeds it is an OUTLIER FRAME: reject its update (restore state+Σ), widen the
+        // position Σ like a look-away, and mark it no-data so persistent corruption still retires via frames_diverged.
+        const BottleBeliefState pre_state = inst.ai2_belief.state();
+        const BottleBelief      pre_belief = inst.ai2_belief;   // full snapshot (state + Σ)
 
-    // FREE ENERGY = the clutter-INCLUSIVE mixture NLL (rises with misfit), NOT the engine's surface-only
-    // responsibility-weighted energy (which reads ≈0 on a bad fit because misfit points route to clutter — the
-    // TABLE.md §3 / recipe-invariant-#1 bug that made a diverged fit read F≈0). CLUTTER-FRACTION is the honest
-    // "explains none of its data" signal that REPLACES the old energy==0 all-clutter divergence sentinel.
-    const float energy = inst.ai2_belief.mixture_nll(frame.points, inst.ai2_belief.state(), R);
-    const float clut   = inst.ai2_belief.clutter_fraction(frame.points, R);
-    inst.last_clutter_frac = clut;
+        inst.ai2_belief.update(frame);   // MAP mean + posterior Σ; its surface-only return is NOT the FE (below)
+
+        if (cfg_.max_step_m > 0.0f)
+        {
+            const auto& ns = inst.ai2_belief.state();
+            const float dx = ns.cx - pre_state.cx, dy = ns.cy - pre_state.cy, dz = ns.cz - pre_state.cz;
+            if (std::sqrt(dx * dx + dy * dy + dz * dz) > cfg_.max_step_m)
+            {
+                std::print("[{}] AI2 step-bound REJECT: centre moved {:.2f}m (>{:.2f}) — outlier frame dropped\n",
+                           inst.node_name, std::sqrt(dx * dx + dy * dy + dz * dz), cfg_.max_step_m);
+                inst.ai2_belief = pre_belief;         // reject the corrupted update (restore state + Σ)
+                inst.ai2_belief.predict_stale();      // widen position Σ so the next good frame re-associates
+                frame_rejected = true;                // explained nothing → drives frames_diverged (retirement)
+            }
+        }
+
+        // FREE ENERGY = the clutter-INCLUSIVE mixture NLL (rises with misfit), NOT the engine's surface-only
+        // responsibility-weighted energy (which reads ≈0 on a bad fit because misfit points route to clutter — the
+        // TABLE.md §3 / recipe-invariant-#1 bug that made a diverged fit read F≈0). CLUTTER-FRACTION is the honest
+        // "explains none of its data" signal that REPLACES the old energy==0 all-clutter divergence sentinel.
+        energy = inst.ai2_belief.mixture_nll(frame.points, inst.ai2_belief.state(), R);
+        clut   = inst.ai2_belief.clutter_fraction(frame.points, R);
+        inst.last_clutter_frac = clut;
+    }
 
     // Write the belief back into the legacy BottleState so all downstream publish/viewer/RT code is
     // unchanged. Hang the bottle from the table when a support surface is known (cz = table_top + h/2),
@@ -319,38 +390,44 @@ float BottleFitter::run_inference(BottleInstance& inst, const BottleObservation&
     inst.frames_since_detection = 0;
     inst.detection_alive = true;
 
-    // Convergence bookkeeping on the committed free energy. GUARD: a fit that explains NONE of its data
-    // (drifted/inflated off the cloud) has a HIGH-but-STABLE F (all points to the clutter floor) and would be
-    // MISread as "converged" while the state diverges (observed live: radius ran 0.06→0.93 m with
-    // frames_converged marching to K_stable). The honest "explains its data" test is the mean clutter
-    // responsibility: `explained` iff clutter_fraction < clutter_diverge_frac AND the frame wasn't rejected.
-    // (The old sentinel used the surface-only energy==0, only reachable because that energy was blind to
-    // misfit; on the clutter-inclusive F, F never hits 0, so the sentinel moves to clutter_fraction.)
-    const bool explained = std::isfinite(energy) and not frame_rejected
-                           and clut < cfg_.clutter_diverge_frac;
-    if (explained and std::abs(energy - inst.prev_free_energy) < cfg_.fe_eps)
-        inst.frames_converged = std::min(inst.frames_converged + 1, cfg_.K_stable);
-    else
-        inst.frames_converged = 0;
-    // Divergence persistence: an unexplained fit accrues; the worker retires the instance past
-    // cfg_.diverged_retire_frames so it can't keep writing a garbage model.
-    inst.frames_diverged = explained ? 0 : inst.frames_diverged + 1;
-
-    // FE-surprise attention (TABLE.md §9): baseline tracks DOWN fast (consolidate a better fit) / UP slow (a
-    // sustained rise = the bottle moved surfaces as surprise before the baseline accepts it); surprise = the
-    // smoothed positive gap F−baseline. Updated only on an explained (accepted-measurement) frame.
-    if (explained)
+    // Convergence / divergence / surprise bookkeeping — ONLY on a genuine geometry measurement. A confirm-only
+    // (gated) cycle took no measurement (predict-only), so it must NOT accrue frames_diverged (which would retire
+    // a perfectly good bottle while the robot is merely moving) nor be misread as converged: leave both counters
+    // untouched (matches refrigerator/chair, whose gated branch touches neither).
+    if (not gated)
     {
-        if (inst.fe_baseline < 0.0f)
-            inst.fe_baseline = energy;
+        // GUARD: a fit that explains NONE of its data (drifted/inflated off the cloud) has a HIGH-but-STABLE F (all
+        // points to the clutter floor) and would be MISread as "converged" while the state diverges (observed live:
+        // radius ran 0.06→0.93 m with frames_converged marching to K_stable). The honest "explains its data" test is
+        // the mean clutter responsibility: `explained` iff clutter_fraction < clutter_diverge_frac AND not rejected.
+        // (The old sentinel used the surface-only energy==0, only reachable because that energy was blind to
+        // misfit; on the clutter-inclusive F, F never hits 0, so the sentinel moves to clutter_fraction.)
+        const bool explained = std::isfinite(energy) and not frame_rejected
+                               and clut < cfg_.clutter_diverge_frac;
+        if (explained and std::abs(energy - inst.prev_free_energy) < cfg_.fe_eps)
+            inst.frames_converged = std::min(inst.frames_converged + 1, cfg_.K_stable);
         else
+            inst.frames_converged = 0;
+        // Divergence persistence: an unexplained fit accrues; the worker retires the instance past
+        // cfg_.diverged_retire_frames so it can't keep writing a garbage model.
+        inst.frames_diverged = explained ? 0 : inst.frames_diverged + 1;
+
+        // FE-surprise attention (TABLE.md §9): baseline tracks DOWN fast (consolidate a better fit) / UP slow (a
+        // sustained rise = the bottle moved surfaces as surprise before the baseline accepts it); surprise = the
+        // smoothed positive gap F−baseline. Updated only on an explained (accepted-measurement) frame.
+        if (explained)
         {
-            const float a = (energy < inst.fe_baseline) ? cfg_.fe_baseline_adapt_down
-                                                        : cfg_.fe_baseline_adapt_up;
-            inst.fe_baseline += a * (energy - inst.fe_baseline);
+            if (inst.fe_baseline < 0.0f)
+                inst.fe_baseline = energy;
+            else
+            {
+                const float a = (energy < inst.fe_baseline) ? cfg_.fe_baseline_adapt_down
+                                                            : cfg_.fe_baseline_adapt_up;
+                inst.fe_baseline += a * (energy - inst.fe_baseline);
+            }
+            const float gap = std::max(0.0f, energy - inst.fe_baseline);
+            inst.fe_surprise += cfg_.fe_surprise_smooth * (gap - inst.fe_surprise);
         }
-        const float gap = std::max(0.0f, energy - inst.fe_baseline);
-        inst.fe_surprise += cfg_.fe_surprise_smooth * (gap - inst.fe_surprise);
     }
 
     update_expected_visible(inst);   // negative-information death gate (persist out-of-FoV)
@@ -372,7 +449,9 @@ void BottleFitter::log_ai2_csv(const BottleInstance& inst, int point_count, floa
     if (cfg_.ai2_csv_path.empty())
         return;
 
-    static const std::array<const char*, 5> kDof = {"cx", "cy", "cz", "r", "h"};
+    // Column names come from the shared DOF table (bottle_dof.h) so the CSV header and the dashboard's
+    // BeliefInspector rows can no longer drift apart.
+    const auto& kDof = kBottleDofs;
 
     if (not ai2_csv_.is_open())
     {
@@ -384,8 +463,8 @@ void BottleFitter::log_ai2_csv(const BottleInstance& inst, int point_count, floa
             return;
         }
         ai2_csv_ << "cycle,node,pts,R,energy,fe_baseline,fe_surprise,clutter_frac,frames_converged,sil_rays";   // sil_rays = silhouette edge rays folded
-        for (const auto* d : kDof) ai2_csv_ << ",state_" << d;
-        for (const auto* d : kDof) ai2_csv_ << ",std_"   << d;   // posterior std (m) = sqrt(Σ_jj)
+        for (const auto& d : kDof) ai2_csv_ << ",state_" << d.name;
+        for (const auto& d : kDof) ai2_csv_ << ",std_"   << d.name;   // posterior std (m) = sqrt(Σ_jj)
         ai2_csv_ << ",chain_xx,chain_yy,lidar_rays,lidar_raw,lidar_resid_m,frames_diverged";
         ai2_csv_ << '\n';
     }

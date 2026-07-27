@@ -17,6 +17,14 @@ namespace rc {
 
 struct ChairConfig
 {
+    // ── Level-2 arrangement prior (ring_metaconcept → chair, via the group_member edge) ──────────
+    // A square seat makes yaw 4-fold ambiguous; the thin backrest often cannot break it, and a wrong
+    // mode is STICKY (observed 2026-07-26: 570 cycles wrong, cleared only by restarting the agent).
+    // The rig supplies the missing structural evidence ("a chair at this spot faces the table").
+    bool  rig_yaw_prior_enabled = true;    // master A/B switch
+    float rig_yaw_kappa_max     = 6.0f;    // consumer cap; can only WEAKEN ChairBelief::kRigKappaMax
+    int   rig_prior_stale_ms    = 5000;    // ignore a message no rig is refreshing; 0 disables
+
     // Agent convergence
     float state_eps         = 0.04f;   // Σ|Δstate| threshold between cycles for convergence (m+rad)
     int   K_stable          = 30;
@@ -169,10 +177,24 @@ struct ChairConfig
     // chair with clear line of sight still vacates at ≥ this rate, so a glitch-stranded phantom the robot never
     // centres eventually dies (conf gates on staleness → a recently-seen chair is untouched). 0 = pure pd (no floor).
     float exist_zed_clear_los_floor = 0.15f;  // Existence.ZedClearLosFloor
-    float tracker_birth_seat_w     = 0.45f;   // seed seat width/depth/heights for a freshly born chair node
-    float tracker_birth_seat_d     = 0.45f;
-    float tracker_birth_seat_h     = 0.45f;
-    float tracker_birth_back_h     = 0.45f;
+    // ★TEMPLATE GEOMETRY — this is the chair the belief actually believes in. The pose-only belief does
+    // NOT fit size, so any error here is a systematic model-vs-world mismatch that the clutter component
+    // silently absorbs. 2026-07-27: these were 0.45 across the board against a real Webots SimpleChair of
+    // seat 0.60x0.52 with its top at 0.595 and a backrest reaching 1.25. Two consequences, both measured:
+    //   · responsibilities() gates the parts by z about tpl_seat_h, so with z_high=0.45 against a real seat
+    //     top of 0.595, back_g = 1/(1+e^((0.45-0.595)/0.03)) = 0.992 — 99% of SEAT points were attributed to
+    //     the BACKREST, turning it into a line detector across the seat plane and voting for a 90°-rotated
+    //     mode. Fixing tpl_seat_h alone moved a chair's continuous yaw error from 98.1° to 1.0°.
+    //   · 30-56% of each mask sat above the template's backrest top (0.90) and was dumped into flat clutter
+    //     — the tallest, most yaw-informative surface in the scene was invisible to the model.
+    // Also note the real seat is RECTANGULAR: the 4-fold yaw ambiguity resolve_orientation exists to fight
+    // was largely an artefact of the square 0.45x0.45 template. Re-derive these for any new chair model.
+    float tracker_birth_seat_w     = 0.60f;   // x extent — the span the backrest covers
+    float tracker_birth_seat_d     = 0.52f;   // y extent — front-to-back; backrest sits on the -y edge
+    float tracker_birth_seat_h     = 0.595f;  // seat TOP above the floor
+    float tracker_birth_back_h     = 0.655f;  // backrest height above the seat top (→ top at 1.25)
+    float tracker_birth_seat_thick = 0.075f;  // seat slab thickness (also sets the leg/seat z-band split)
+    float tracker_birth_leg_half   = 0.0375f; // square leg half-side
     bool  tracker_nll_cost         = false;   // association cost = ½(m²+ln|S|) NLL (vs raw m²); see InstanceTracker
     // ZED-only BIRTH gate: only a ZED slice (depth_var==0) may SPAWN a chair; a ricoh LiDAR-depth slice
     // (depth_var>0, unreliable depth/extent) may associate/confirm an existing chair but never birth a phantom.

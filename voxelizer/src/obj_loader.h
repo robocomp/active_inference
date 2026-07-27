@@ -14,10 +14,20 @@
 namespace rc::obj
 {
 
+// One material group of a mesh (all the faces that share a `usemtl`). Carries its own geometry + material,
+// so a single OBJ can mix e.g. a textured body and a flat-coloured handle.
+struct ObjSubmesh
+{
+    std::vector<QVector3D> triangles;   // positions (fan-triangulated)
+    std::vector<QVector2D> uvs;         // per-vertex texture coords (parallel to `triangles`; (0,0) if none)
+    QVector3D diffuse{0.8f, 0.8f, 0.8f};// Kd from the .mtl
+    bool has_diffuse = false;           // true iff the .mtl specified Kd for this material
+    std::string texture_path;           // ABSOLUTE path to the .mtl's map_Kd (empty ⇒ untextured); resolved by the loader
+};
+
 struct ObjMeshData
 {
-    std::vector<QVector3D> triangles;
-    std::vector<QVector2D> uvs;        // per-triangle-vertex texture coords (parallel to `triangles`; (0,0) if the OBJ has none)
+    std::vector<ObjSubmesh> submeshes;  // ≥1 group (a bare OBJ with no materials yields one default group)
     QVector3D bb_min;
     QVector3D bb_max;
 };
