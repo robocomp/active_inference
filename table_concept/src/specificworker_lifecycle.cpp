@@ -168,7 +168,7 @@ void SpecificWorker::run_instance_tracker()
     // EvidenceMonitor mask/tracker counters (merges are added in merge_overlapping_instances above).
     ev_g_.mask_frame_id = pkt.valid ? pkt.frame_id : -1;
     ev_g_.total_slices  = pkt.valid ? static_cast<int>(pkt.slices.size()) : 0;
-    ev_g_.table_dets    = static_cast<int>(dets.size());
+    ev_g_.class_dets    = static_cast<int>(dets.size());
     ev_g_.assigned      = n_assigned;
     ev_g_.discarded     = static_cast<int>(dets.size()) - n_assigned;
     ev_g_.births       += static_cast<int>(res.births.size());

@@ -42,6 +42,7 @@
 #include <fstream>
 
 #include <genericworker.h>
+#include <fps/fps.h>
 #include <Eigen/Dense>
 #include <unordered_set>
 
@@ -57,6 +58,7 @@
 #include "epistemic_planner.h"
 #include "table_affordance.h"
 #include "table_model.h"
+#include "../../common/dashboard/belief_inspector.h"
 #include "../../common/dashboard/custom_widget.h"
 #include "../../common/dashboard/evidence_monitor.h"
 #include "../../common/dashboard/timeseries_plot.h"
@@ -188,8 +190,11 @@ private:
     void process_ricoh_bearings();   // associate ricoh detections to tables BY DIRECTION; collect the unassigned
     rc::TimeSeriesPlot*  ts_cov_plot_   = nullptr;   // belief uncertainty U(Σ) = Σ pos+size posterior std (m)
     rc::TimeSeriesPlot*  ts_res_plot_   = nullptr;   // residual point count
-    rc::TimeSeriesPlot*  ts_state_plot_ = nullptr;   // inferred dimensions w/h (stability check)
-    rc::TimeSeriesPlot*  ts_ce_plot_    = nullptr;   // belief size posterior std σ_w/σ_h (mm)
+    // Bottom panel (replaces the old σ_w/σ_h time-series): the WHOLE belief — every state DOF with its
+    // posterior σ, the consumer's demand σ* and the remaining adequacy gap, Σ as a correlation heatmap,
+    // and the discrete-mode posteriors. Fed by refresh_belief_inspector() on the evidence-monitor tick.
+    rc::BeliefInspector* belief_inspector_ = nullptr;
+    void refresh_belief_inspector();
     void build_dashboard();          // create the dashboard + evidence-monitor windows (called from initialize)
     void restore_dashboard_geometry();
     void save_dashboard_geometry() const;
@@ -208,6 +213,7 @@ private:
     std::vector<Eigen::Vector2f> last_table_dets_xy_;   // this cycle's ZED "table" detection centroids (room frame)
     std::chrono::steady_clock::time_point last_monitor_tp_{};   // ~5 Hz throttle
     std::chrono::steady_clock::time_point last_compute_tp_{};   // compute-rate EMA
+    FPSCounter                            fps_counter_;         // overall compute()-cycle rate (std::cout heartbeat)
 
     std::unique_ptr<DSR::RT_API>                        rt_api_;
     std::unique_ptr<DSR::InnerEigenAPI>                 inner_eigen_;      // for room↔body↔zed extrinsic (silhouette)

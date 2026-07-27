@@ -9,10 +9,10 @@
 
 #include "specificworker.h"
 #include "table_geometry.h"   // rc::geom::belief_uncertainty
+#include "table_dof.h"        // rc::kTableDofs — names/units/σ* for the BeliefInspector rows
 
 #include <QByteArray>
 #include <QSettings>
-#include <QSplitter>
 #include <QVBoxLayout>
 #include <QColor>
 
@@ -21,11 +21,13 @@
 #include <string>
 #include <unordered_set>
 #include <vector>
+#include <array>
+#include <chrono>
 
 // ─── Evidence monitor ────────────────────────────────────────────────────────────────────────────
 
-// Build the per-instance snapshot from live instance state and push it to the monitor at ~5 Hz (a full
-// QTableWidget rebuild every compute cycle would waste the GUI thread). All reads are main-thread.
+// Section 1: push this cycle's evidence-pipeline counters, then (same tick, same data) the belief
+// inspector — so the two sections can never show different cycles. Throttled to ~5 Hz. Main-thread.
 void SpecificWorker::refresh_evidence_monitor()
 {
     if (not evidence_monitor_)
@@ -36,40 +38,70 @@ void SpecificWorker::refresh_evidence_monitor()
         return;
     last_monitor_tp_ = now;
 
-    std::vector<rc::EvidenceRow> rows;
-    rows.reserve(fitter_->instances().size());
+    evidence_monitor_->update_view(ev_g_);
+    refresh_belief_inspector();   // same tick, same instance pass — the two views can never disagree
+}
+
+// ─── Belief inspector ────────────────────────────────────────────────────────────────────────────
+
+// Build the per-instance BELIEF snapshot (state, Σ, discrete modes, scalar gauges) and push it to the
+// bottom panel. Called from refresh_evidence_monitor(), so it inherits that method's ~5 Hz gate and its
+// single pass over the live instances. All reads are main-thread.
+void SpecificWorker::refresh_belief_inspector()
+{
+    if (not belief_inspector_)
+        return;   // headless (cfg_.show_dashboard=false): nothing was built
+    const auto now = std::chrono::steady_clock::now();
+
+    std::vector<rc::BeliefCard> cards;
+    cards.reserve(fitter_->instances().size());
     for (const auto& [id, inst] : fitter_->instances())
     {
-        rc::EvidenceRow x;
-        x.node       = inst.node_name;
-        x.conf       = inst.last_mask_confidence;
-        x.since_det  = inst.frames_since_detection;
-        x.n_zed      = inst.dbg_n_zed_slices;
-        x.n_ricoh    = 0;   // ricoh is bearing-only now (never fused); column kept for the monitor layout
-        x.cand       = inst.dbg_cand_pts;
-        x.resid      = inst.dbg_resid_pts;
-        x.gated      = inst.dbg_gated;
-        x.energy     = inst.dbg_energy;
-        x.R          = inst.dbg_R;
-        x.lidar_rays = inst.dbg_lidar_rays;
-        x.lidar_raw  = inst.dbg_lidar_raw;
-        x.lidar_resid= inst.dbg_lidar_resid_m;
-        x.cov_ang    = inst.dbg_lidar_cov_ang;
-        x.vacate     = inst.ai2_belief.last_vacate_beams();
-        x.coverage   = inst.ai2_belief.last_coverage_pts();
-        x.L          = inst.existence.logodds();
-        x.p          = inst.existence.p_exists();
-        x.ex_locc    = inst.dbg_ex_lidar_occ;  x.ex_lfree = inst.dbg_ex_lidar_free;  x.ex_ln    = inst.dbg_ex_lidar_n;
-        x.ex_lfree_eff = inst.dbg_ex_lidar_free_eff;
-        x.ex_socc    = inst.dbg_ex_sil_occ;    x.ex_sfree = inst.dbg_ex_sil_free;    x.ex_sndet = inst.dbg_ex_sil_ndet;
-        x.ex_sfree_eff = inst.dbg_ex_sil_free_eff;
-        x.streak     = inst.existence_remove_streak;
+        rc::BeliefCard c;
+        c.node  = inst.node_name;
+        c.model = inst.subtype;   // "square" | "round" — the free-energy shape model-selection winner
+
+        // REPORTED covariance: the yaw entry carries the discrete-mode entropy, so a mode-ambiguous table
+        // shows the honest σ_yaw rather than the within-mode one. Same matrix the NBV planner scores.
+        const auto  S = inst.ai2_belief.covariance_reported();
         const auto& s = inst.ai2_belief.state();
-        x.w = s.w; x.h = s.h; x.H = s.H;
-        x.subtype = inst.subtype;   // round/square from the free-energy shape model-selection
-        rows.push_back(std::move(x));
+        const std::array<float, rc::TableBelief::N> v = {s.cx, s.cy, s.H, s.w, s.h, s.yaw, s.t};
+        for (int j = 0; j < rc::TableBelief::N; ++j)
+            c.dofs.push_back({rc::kTableDofs[j].name, rc::kTableDofs[j].unit, v[j],
+                              std::sqrt(std::max(0.0f, S(j, j))), rc::kTableDofs[j].sigma_star});
+
+        // Row-major copy, filled explicitly: Eigen stores column-major, and while Σ is symmetric today an
+        // implicit .data() copy would silently transpose if that ever stopped being true.
+        c.cov.resize(rc::TableBelief::N * rc::TableBelief::N);
+        for (int i = 0; i < rc::TableBelief::N; ++i)
+            for (int j = 0; j < rc::TableBelief::N; ++j)
+                c.cov[i * rc::TableBelief::N + j] = S(i, j);
+        // Under the C2v symmetry quotient only Σ's DIAGONAL is mapped back to (w,h,yaw); the off-diagonals
+        // stay in the (s,a1,a2) chart. Label the heatmap axes for what they are rather than mislabel them.
+        if (rc::TableBeliefState::use_quotient)
+            c.cov_labels = {"cx", "cy", "H", "s", "a1", "a2", "t"};
+
+        const float p_swap  = inst.ai2_belief.mode_posterior();          // p(the w↔h swapped mode)
+        c.modes.push_back({"w<->h", "keep", 1.0f - p_swap});
+        c.modes.push_back({"w<->h", "swap", p_swap});
+        const float p_round = 1.0f / (1.0f + std::exp(-inst.shape_evidence));   // accumulated log-Bayes factor
+        c.modes.push_back({"shape", "round",  p_round});
+        c.modes.push_back({"shape", "square", 1.0f - p_round});
+
+        c.s.fe            = inst.dbg_energy;
+        c.s.fe_baseline   = inst.fe_baseline;
+        c.s.fe_surprise   = inst.fe_surprise;
+        c.s.logodds       = inst.existence.logodds();
+        c.s.p_exists      = inst.existence.p_exists();
+        c.s.age_s         = inst.last_belief_touch.time_since_epoch().count() == 0
+                          ? -1.0f
+                          : std::chrono::duration<float>(now - inst.last_belief_touch).count();
+        c.s.remove_streak = inst.existence_remove_streak;
+        c.s.since_det     = inst.frames_since_detection;
+        c.s.initialized   = inst.ai2_initialized;
+        cards.push_back(std::move(c));
     }
-    evidence_monitor_->update_view(ev_g_, rows);
+    belief_inspector_->update_view(cards);
 }
 
 // ─── Dashboard construction + geometry ────────────────────────────────────────────────────────────
@@ -114,8 +146,6 @@ void SpecificWorker::prune_dead_series()
         if (ts_surprise_plot_) ts_surprise_plot_->remove_series(n + "_surprise");
         if (ts_cov_plot_)      ts_cov_plot_->remove_series(n + "_cov");
         if (ts_res_plot_)      ts_res_plot_->remove_series(n + "_res");
-        if (ts_state_plot_)  { ts_state_plot_->remove_series(n + "_w");  ts_state_plot_->remove_series(n + "_h"); }
-        if (ts_ce_plot_)     { ts_ce_plot_->remove_series(n + "_sW");    ts_ce_plot_->remove_series(n + "_sH"); }
         it = ts_known_tables_.erase(it);
     }
     for (const auto& [id, inst] : fitter_->instances()) ts_known_tables_.insert(inst.node_name);
@@ -134,7 +164,7 @@ void SpecificWorker::build_dashboard()
     // The TimeSeriesPlot is a plain QWidget; here it is a CHILD of the combined window rather than its own
     // top-level. Shows even with Agent.graph=false (no DSRViewer).
     {
-        custom_widget_ = new Custom_widget("Table Model — Free Energy, Belief Uncertainty, Residuals & Dimensions (w,h)");
+        custom_widget_ = new Custom_widget("Table — Free Energy, Surprise, Belief Uncertainty & Residuals");
 
         // Create plot inside frame_series
         auto* series_layout = new QVBoxLayout(custom_widget_->frame_series);
@@ -143,38 +173,32 @@ void SpecificWorker::build_dashboard()
 
         ts_plot_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
         ts_plot_->set_visible_window(60.f);
-        series_layout->addWidget(ts_plot_);
+        series_layout->addWidget(ts_plot_, 1);
 
         // FE SURPRISE (attention signal) on its own panel — it lives on a much smaller scale (~0–1) than the FE
         // (~2–8), so it needs the full panel height to be readable. Spikes when a table moves, decays as the fit
         // re-converges. See the belief/fitter plumbing (inst.fe_surprise).
         ts_surprise_plot_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
         ts_surprise_plot_->set_visible_window(60.f);
-        series_layout->addWidget(ts_surprise_plot_);
+        series_layout->addWidget(ts_surprise_plot_, 1);
 
         ts_cov_plot_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
         ts_cov_plot_->set_visible_window(60.f);
-        series_layout->addWidget(ts_cov_plot_);
+        series_layout->addWidget(ts_cov_plot_, 1);
 
         ts_res_plot_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
         ts_res_plot_->set_visible_window(60.f);
-        series_layout->addWidget(ts_res_plot_);
+        series_layout->addWidget(ts_res_plot_, 1);
 
-        // Inferred table dimensions (w, h) — the size DOFs the stabiliser targets. Watch these to
-        // confirm the belief has stopped jittering between fresh masks (flat = stable).
-        ts_state_plot_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
-        ts_state_plot_->set_visible_window(60.f);
-        series_layout->addWidget(ts_state_plot_);
 
-        // (D) Belief SIZE POSTERIOR STD σ_w/σ_h, in mm (fed from specificworker.cpp; see SpecificWorker's member
-        // doc). This panel used to show a counter-evidence CUSUM accumulator; that quantity and its gate no
-        // longer exist. Read it as convergence: σ falls as the extent is resolved, and RISES again when the
-        // evidence goes stale (the age-inflation path) or a surprise widens the belief.
-        {
-            ts_ce_plot_ = new rc::TimeSeriesPlot(custom_widget_->frame_series);
-            ts_ce_plot_->set_visible_window(60.f);
-            series_layout->addWidget(ts_ce_plot_);
-        }
+        // (D) BELIEF INSPECTOR — the panel that replaced the σ_w/σ_h trace. A time-series of two variances
+        // showed a slice of the belief; this shows ALL of it: every state DOF (value, σ, the consumer's
+        // demand σ*, the remaining adequacy gap in nats), Σ as a correlation heatmap — which is where the
+        // structure lives, e.g. w↔yaw going jointly unresolved on a grazing view — and the discrete-mode
+        // posteriors (shape, w↔h flip). Stretch 2: it is the panel you actually read.
+        belief_inspector_ = new rc::BeliefInspector(QStringLiteral("belief inspector"),
+                                                    custom_widget_->frame_series);
+        series_layout->addWidget(belief_inspector_, 2);
 
         // Per-instance series are registered idempotently by the diagnostics feed (publish_table_diagnostics)
         // every cycle, so pre-existing instances need no separate registration here.
@@ -189,13 +213,10 @@ void SpecificWorker::build_dashboard()
     dashboard_window_->setWindowTitle(QStringLiteral("table_concept — dashboard"));
     auto* outer = new QVBoxLayout(dashboard_window_);
     outer->setContentsMargins(0, 0, 0, 0);
-    auto* split = new QSplitter(Qt::Vertical, dashboard_window_);
-    split->addWidget(evidence_monitor_);   // reparents into the splitter
-    split->addWidget(custom_widget_);
-    split->setStretchFactor(0, 0);          // monitor keeps its size; plots take the extra space
-    split->setStretchFactor(1, 1);
-    split->setSizes({320, 580});
-    outer->addWidget(split);
+    // No splitter: the counter strip is two lines of text with nothing to resize, so it simply takes
+    // its natural height and the plots + inspector get everything else.
+    outer->addWidget(evidence_monitor_, 0);   // section 1 — natural height
+    outer->addWidget(custom_widget_, 1);      // sections 2 + 3 — all remaining space
 
     restore_dashboard_geometry();
     dashboard_window_->show();

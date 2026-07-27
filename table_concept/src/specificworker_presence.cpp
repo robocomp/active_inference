@@ -94,12 +94,15 @@ void SpecificWorker::remove_owned_table_nodes()
     if (not G)
         return;
 
-    // Table instances are DSR `table` nodes named "table_*". Deleting the node also drops its
-    // room→table RT edge, so no separate edge cleanup is needed. Startup stale-sweep (mirrors bottle).
+    // Table instances are DSR `object` nodes (object_subtype="table"/"round"/"square") named "table_*".
+    // Deleting the node also drops its room→table RT edge, so no separate edge cleanup is needed.
+    // Startup stale-sweep (mirrors bottle). Sweep the new "object" type AND — for the schema TRANSITION —
+    // the legacy "table" type, to reap pre-migration nodes still persisted under the old type.
     std::vector<std::uint64_t> to_delete;
-    for (const auto& node : G->get_nodes_by_type("table"))
-        if (node.name().starts_with("table"))
-            to_delete.push_back(node.id());
+    for (const auto& type : {"object", "table"})
+        for (const auto& node : G->get_nodes_by_type(type))
+            if (node.name().starts_with("table"))
+                to_delete.push_back(node.id());
 
     for (const auto id : to_delete)
         if (G->delete_node(id))
@@ -173,7 +176,9 @@ void SpecificWorker::remove_stale_affordance_nodes()
         if (not ours)
             if (const auto pid = G->get_attrib_by_name<parent_att>(aff); pid.has_value())
                 if (const auto parent = G->get_node(pid.value());
-                    parent.has_value() and parent->type() == "table")
+                    parent.has_value() and
+                    ((parent->type() == "object" and parent->name().starts_with("table")) or
+                     parent->type() == "table"))   // legacy pre-migration parent type
                 {
                     ours = true;
                     why = "parent table";
