@@ -19,6 +19,10 @@ feature: it simultaneously fixes the multi-rig bug, removes the anchor/ring clas
 turns "which schema is this?" into model selection instead of a config choice. Do that before
 adding rectangular support or any new schema.
 
+Separately from all of that, §2.5 records a gap of a different kind: the belief is **incomplete**, not
+merely narrow. It predicts member yaw but never scores that prediction, so a chair that deliberately
+faces outward produces no surprise at all.
+
 ---
 
 ## 1. What is ALREADY general (config only, no code)
@@ -80,6 +84,48 @@ visible gap after 2.1.
 Minor, related: `kSlotHypotheses{3,4,6,8}` (`ring_belief.h:161`) omits 5 and 7, and deliberately
 excludes 2 — a facing-pair is a different schema, and admitting N=2 would let the ring claim every
 sofa-and-armchair in the room.
+
+### 2.5 ★★ The belief predicts member yaw but never SCORES it — one-way inference
+
+Different in kind from §2.1–2.4: those are things the model cannot *express*; this is a claim the
+model *makes* and never checks.
+
+**Verified in code.** `SpecificWorker::build_ring_frame` packs only `m.xy` and a scalar `R` derived
+from `Sigma_xy`. `RingMember::yaw` / `var_yaw` are read in `read_member` (`specificworker.cpp:410`,
+`:419`) and then used ONLY by the diagnostic CSVs (`:779`, `:782`). They never reach the belief. So
+`mixture_nll`, `log_evidence`, `instant_log_odds` and hence `log_odds` / `p_ring` are functions of
+member **positions alone**.
+
+**Consequence.** Take a chair deliberately turned to face outward, correctly estimated as such by
+`chair_concept`, sitting at a perfectly good slot position. The rig registers **zero surprise**:
+`log_odds` stays at its clamp, `p_ring` ≈ 1, and it keeps publishing an inward-facing prior to that
+chair every cycle. The chair resists — its backrest evidence saturates at 6 nats while κ is capped at
+1.5 — so the *outcome* is correct, but for the wrong reason: the cap is doing the work and the model
+never learns that an exception exists. It is a standing disagreement neither side can resolve.
+
+It is plainly visible to a human (`facing_resid_deg ≈ 180` in `ring_members.csv`, `correction_deg ≈ 180`
+in `ring_fit.csv`) and invisible to the belief.
+
+**Why this matters beyond the one case.** The rig pushes yaw DOWN but never takes yaw UP. If `z_rig`
+predicts member yaw, then observed yaw is evidence about `z_rig` — and about whether that member
+belongs to the rig at all. The `not-a-member` clutter column is exactly the right mechanism for that
+and currently competes on position only. With yaw in it, the model can say the thing it should:
+*"a chair standing where a seat would be, but not part of the set."* A rig with one deliberately
+outward chair should then converge to **"a 3-seat ring with 2 members and one non-member"**, not to
+"a slightly bad 3-seat ring" — a strictly better description, and precisely what the `none` null and
+the clutter column were put there to express.
+
+**Sketch of the fix.** Add a von-Mises term on `(member_yaw − predicted_facing)` to
+`RingBelief::mixture_unnorm`, weighted by the member's own published `var_yaw` (already read, already
+thrown away). An uncertain member's yaw then correctly counts for little, with no gate.
+
+★**The hazard, and why this is not a ten-line change.** Scoring yaw closes a FEEDBACK LOOP: the rig
+tells a chair to face inward, the chair complies a little, the rig reads that as confirmation and
+grows more confident. That is exactly the self-confirmation the cavity discipline exists to prevent,
+and the cavity today excludes only member *i*'s **position** (`compute_cavity_priors` rebuilds the
+frame without `points[i]`). Closing it properly needs either the member to publish a **prior-free**
+yaw, or the rig to down-date its own outgoing message before scoring the reply — leave-one-out applied
+to the *message*, not just to the member. Do not add the yaw term without one of those.
 
 ---
 
@@ -150,6 +196,8 @@ speculatively). Candidates, all reusing the chassis and replacing only the slot 
   `cabinet_concept` is actually on the table.
 - Do not move the class filter into the belief. Which objects are candidates is a *front-end*
   question (`poll_members`); the belief should only ever see poses + Σ.
+- Do not add the §2.5 yaw likelihood without first solving the message down-date. A rig that scores
+  the yaw it just asked for will manufacture confidence, and it will look like the model working.
 
 ---
 
