@@ -1,0 +1,7 @@
+newmtl Mesa1
+Kd 0.55 0.52 0.48
+map_Kd table_basecolor.png
+
+newmtl material_0
+Kd 0.55 0.52 0.48
+map_Kd table_basecolor.png
