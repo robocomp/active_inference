@@ -66,10 +66,15 @@ def _config_path(comp):
 
 
 def _parse_config(path):
-    """Return (implements, requires, publishes, subscribes) for one config."""
-    impl, req, pub, sub = [], [], set(), set()
+    """Return (implements, requires, publishes, subscribes, dds) for one config.
+
+    dds is {"domain": int, "topics": [str, ...]} from a [DDS] block (Domain plus any
+    key ending in "Topic" — a component can publish more than one, e.g. RGBTopic/DepthTopic),
+    or None.
+    """
+    impl, req, pub, sub, dds = [], [], set(), set(), None
     if not path or not os.path.exists(path):
-        return impl, req, [], []
+        return impl, req, [], [], None
     section = None
     try:
         with open(path, "r", errors="ignore") as f:
@@ -83,6 +88,14 @@ def _parse_config(path):
                 if not kv:
                     continue
                 key, val = kv.group(1), kv.group(2).strip().strip('"')
+                if section == "DDS":
+                    if key == "Domain":
+                        dds = dds or {}
+                        dds["domain"] = int(val) if val.lstrip("-").isdigit() else val
+                    elif key.endswith("Topic"):
+                        dds = dds or {}
+                        dds.setdefault("topics", []).append(val)
+                    continue
                 if key.startswith("Proxies."):
                     group, name = "Proxies", key[len("Proxies."):]
                 elif key.startswith("Endpoints."):
@@ -113,7 +126,7 @@ def _parse_config(path):
                                         "host": ep["host"], "port": ep["port"]})
     except OSError:
         pass
-    return impl, req, sorted(pub), sorted(sub)
+    return impl, req, sorted(pub), sorted(sub), dds
 
 
 def _dedup(edges):
@@ -126,11 +139,18 @@ def _dedup(edges):
     return out
 
 
+def component_dds(comp):
+    """[DDS] domain/topics for one component's config, or None. Used by the launcher to
+    know which components to start with FASTDDS_STATISTICS and which DDS domains need a
+    dds_stats_bridge instance for real publish-bandwidth measurement."""
+    return _parse_config(_config_path(comp))[4]
+
+
 def build_topology(components):
     data = {}
     for c in components:
-        impl, req, pub, sub = _parse_config(_config_path(c))
-        data[c["name"]] = {"impl": impl, "req": req, "pub": pub, "sub": sub}
+        impl, req, pub, sub, dds = _parse_config(_config_path(c))
+        data[c["name"]] = {"impl": impl, "req": req, "pub": pub, "sub": sub, "dds": dds}
 
     port_owner = {}          # port -> component that implements it
     ident_owner = {}         # iface(lower) -> [(component, port)]
@@ -145,7 +165,7 @@ def build_topology(components):
             "id": name, "role": "component",
             "implements": d["impl"],
             "requires": [{"identity": r["identity"], "port": r["port"]} for r in d["req"]],
-            "publishes": d["pub"], "subscribes": d["sub"],
+            "publishes": d["pub"], "subscribes": d["sub"], "dds": d["dds"],
         }
 
     edges, externals = [], {}
@@ -185,11 +205,26 @@ def build_topology(components):
             any_ps = True
             edges.append({"src": "IceStorm", "dst": s, "topic": t, "kind": "sub"})
 
+    # DDS edges: one broker node per domain, components publish straight into it
+    # (no discovery/matching modeled here — RTPS pub/sub is host-wide per domain).
+    dds_domains = set()
+    for name, d in data.items():
+        if not d["dds"] or d["dds"].get("domain") is None:
+            continue
+        dom = d["dds"]["domain"]
+        broker = f"DDS·d{dom}"
+        dds_domains.add((broker, dom))
+        for topic in d["dds"].get("topics") or [None]:
+            edges.append({"src": name, "dst": broker, "topic": topic, "kind": "dds"})
+
     nodes.update(externals)
     if any_ps:
         nodes["IceStorm"] = {"id": "IceStorm", "role": "broker",
                              "implements": [{"iface": "TopicManager", "port": 9999}],
                              "requires": [], "publishes": [], "subscribes": []}
+    for broker, dom in dds_domains:
+        nodes[broker] = {"id": broker, "role": "ddsbroker", "domain": dom,
+                         "implements": [], "requires": [], "publishes": [], "subscribes": []}
 
     return {
         "nodes": list(nodes.values()),
