@@ -5,9 +5,12 @@
 
 #include "room_scene_graph.h"
 
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <ctime>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <print>
 #include <string>
@@ -34,6 +37,116 @@ bool node_is_object_class(DSR::DSRGraph& G, const DSR::Node& n, std::string_view
         return s.value() == cls;
     return false;
 }
+
+// ── Floor display mesh ────────────────────────────────────────────────────────────────────────
+// The floor's shape IS the room layout, so unlike the wall panel it cannot be a fixed asset: it is
+// generated from the live polygon and rewritten whenever that polygon is authored. Everything else
+// about it follows the shared contract — a unit-box OBJ (x,y in [-0.5,0.5]) that a consumer rescales
+// by width_m/depth_m.
+
+// Ear clipping, because nominal_room_polygon() may return an arbitrary CONFIGURED polygon
+// (room_concept.h: init_polygon_vertices_), not only the default rectangle — a centroid fan would
+// emit triangles outside a non-convex room.
+std::vector<std::array<int, 3>> triangulate_polygon(std::vector<Eigen::Vector2f> p)
+{
+    std::vector<std::array<int, 3>> tris;
+    const int n = static_cast<int>(p.size());
+    if (n < 3)
+        return tris;
+
+    std::vector<int> idx(n);
+    for (int i = 0; i < n; ++i) idx[i] = i;
+
+    // Work counter-clockwise so the "convex vertex" test has a fixed sense.
+    float area2 = 0.f;
+    for (int i = 0; i < n; ++i)
+    {
+        const auto& a = p[i]; const auto& b = p[(i + 1) % n];
+        area2 += a.x() * b.y() - b.x() * a.y();
+    }
+    if (area2 < 0.f)
+        std::reverse(idx.begin(), idx.end());
+
+    const auto cross = [](const Eigen::Vector2f& o, const Eigen::Vector2f& a, const Eigen::Vector2f& b)
+    { return (a.x() - o.x()) * (b.y() - o.y()) - (a.y() - o.y()) * (b.x() - o.x()); };
+
+    int guard = 0;
+    while (idx.size() > 3 && guard++ < 4 * n)
+    {
+        bool clipped = false;
+        const int m = static_cast<int>(idx.size());
+        for (int i = 0; i < m; ++i)
+        {
+            const int ia = idx[(i + m - 1) % m], ib = idx[i], ic = idx[(i + 1) % m];
+            if (cross(p[ia], p[ib], p[ic]) <= 0.f)
+                continue;   // reflex vertex — not an ear
+            bool contains = false;
+            for (const int j : idx)
+            {
+                if (j == ia || j == ib || j == ic)
+                    continue;
+                if (cross(p[ia], p[ib], p[j]) >= 0.f && cross(p[ib], p[ic], p[j]) >= 0.f
+                    && cross(p[ic], p[ia], p[j]) >= 0.f)
+                { contains = true; break; }
+            }
+            if (contains)
+                continue;
+            tris.push_back({ia, ib, ic});
+            idx.erase(idx.begin() + i);
+            clipped = true;
+            break;
+        }
+        if (!clipped)
+            break;   // degenerate/self-intersecting input — emit what we have rather than spin
+    }
+    if (idx.size() == 3)
+        tris.push_back({idx[0], idx[1], idx[2]});
+    return tris;
+}
+
+// Writes the floor OBJ and returns its bounding-box extents (metres) for width_m/depth_m.
+// `out` is relative to the agent's run dir, matching how the published path resolves for consumers.
+bool write_floor_obj(const std::vector<Eigen::Vector2f>& poly, const std::filesystem::path& out,
+                     float& out_w, float& out_d)
+{
+    if (poly.size() < 3)
+        return false;
+    float minx = poly[0].x(), maxx = minx, miny = poly[0].y(), maxy = miny;
+    for (const auto& v : poly)
+    {
+        minx = std::min(minx, v.x()); maxx = std::max(maxx, v.x());
+        miny = std::min(miny, v.y()); maxy = std::max(maxy, v.y());
+    }
+    out_w = std::max(maxx - minx, 1e-3f);
+    out_d = std::max(maxy - miny, 1e-3f);
+    const float cx = 0.5f * (minx + maxx), cy = 0.5f * (miny + maxy);
+
+    const auto tris = triangulate_polygon(poly);
+    if (tris.empty())
+        return false;
+
+    std::error_code ec;
+    std::filesystem::create_directories(out.parent_path(), ec);
+    std::ofstream o(out);
+    if (!o)
+        return false;
+    o << "# room_concept floor — GENERATED from the live room polygon; do not hand-edit.\n"
+      << "# Rewritten whenever the layout is authored, which a fixed asset could never track.\n"
+      << "# Unit-box convention: x,y in [-0.5,0.5] about the polygon's bbox centre, z = 0 (flat);\n"
+      << "# true size comes from the floor node's width_m/depth_m.\n";
+    for (const auto& v : poly)
+        o << "v " << (v.x() - cx) / out_w << ' ' << (v.y() - cy) / out_d << " 0.000000\n";
+    for (const auto& v : poly)
+        o << "vt " << (v.x() - minx) / out_w << ' ' << (v.y() - miny) / out_d << '\n';
+    for (const auto& t : tris)
+        o << "f " << t[0] + 1 << '/' << t[0] + 1 << ' '
+                  << t[1] + 1 << '/' << t[1] + 1 << ' '
+                  << t[2] + 1 << '/' << t[2] + 1 << '\n';
+    return static_cast<bool>(o);
+}
+
+constexpr std::string_view kFloorMeshRel = "room_concept/meshes/floor.obj";
+constexpr std::string_view kFloorMeshOut = "meshes/floor.obj";   // relative to the run dir
 }  // namespace
 
 void RoomSceneGraph::monitor_affordance()
@@ -743,13 +856,43 @@ void RoomSceneGraph::dsr_create_wall_nodes()
     auto room_node_opt = G_->get_node(dsr_room_id_);
     if (!room_node_opt.has_value()) { qWarning() << "dsr_create_wall_nodes: room node missing"; return; }
 
-    // Guard — idempotent: if wall nodes already exist under this room, skip.
-    if (!G_->get_nodes_by_type("wall").empty())
-        return;
-
     const auto polygon = room_concept_->nominal_room_polygon();
     const int n = static_cast<int>(polygon.size());
     if (n < 3) { qWarning() << "dsr_create_wall_nodes: polygon has fewer than 3 vertices"; return; }
+
+    // Guard — idempotent: if wall nodes already exist under this room, skip.
+    if (const auto existing = G_->get_nodes_by_type("wall"); !existing.empty())
+    {
+        // ...but walls and the floor persist in the shared graph, so ones created before the display
+        // meshes existed would never acquire them and every viewer would silently keep falling back
+        // to a generic box. Backfill here, exactly as the adopted room node's delimiting_polygon is
+        // backfilled above.
+        for (auto wall : existing)
+            if (const auto mp = G_->get_attrib_by_name<mesh_path_att>(wall);
+                !mp.has_value() || mp.value().empty())
+            {
+                G_->add_or_modify_attrib_local<mesh_path_att>(wall, std::string("room_concept/meshes/wall.obj"));
+                G_->update_node(wall);
+                qInfo() << "dsr_create_wall_nodes: backfilled mesh_path on existing"
+                        << QString::fromStdString(wall.name());
+            }
+        // The floor mesh is REGENERATED unconditionally: it encodes the layout, so an adopted floor
+        // may be carrying a mesh built from a different polygon than the one in force now.
+        if (auto f = G_->get_node("floor"); f.has_value())
+        {
+            if (float fw = 0.f, fd = 0.f;
+                write_floor_obj(polygon, std::filesystem::path(kFloorMeshOut), fw, fd))
+            {
+                G_->add_or_modify_attrib_local<mesh_path_att>(f.value(), std::string(kFloorMeshRel));
+                G_->add_or_modify_attrib_local<width_m_att>(f.value(), fw);
+                G_->add_or_modify_attrib_local<depth_m_att>(f.value(), fd);
+                G_->update_node(f.value());
+                qInfo() << "dsr_create_wall_nodes: regenerated floor display mesh"
+                        << fw << "x" << fd << "m";
+            }
+        }
+        return;
+    }
 
     const float half_h = params_->room_height * 0.5f;
 
@@ -772,6 +915,10 @@ void RoomSceneGraph::dsr_create_wall_nodes()
         DSR::Node wall_node = DSR::Node::create<wall_node_type>("wall_" + std::to_string(i));
         G_->add_or_modify_attrib_local<width_m_att>(wall_node, L);
         G_->add_or_modify_attrib_local<height_m_att>(wall_node, params_->room_height);
+        // Display mesh, same contract the furniture concepts use: a 2-triangle panel authored to the
+        // shared unit-box convention (local x ALONG the wall, z = height, y = the normal, no
+        // thickness), which a viewer rescales by width_m/height_m. The agent owns its appearance.
+        G_->add_or_modify_attrib_local<mesh_path_att>(wall_node, std::string("room_concept/meshes/wall.obj"));
         G_->add_or_modify_attrib_local<parent_att>(wall_node, dsr_room_id_);
         G_->add_or_modify_attrib_local<level_att>(wall_node, 4);
 
@@ -793,6 +940,16 @@ void RoomSceneGraph::dsr_create_wall_nodes()
     DSR::Node floor_node = DSR::Node::create<floor_node_type>("floor");
     G_->add_or_modify_attrib_local<parent_att>(floor_node, dsr_room_id_);
     G_->add_or_modify_attrib_local<level_att>(floor_node, 4);
+    // Display mesh generated from THIS polygon, so a viewer draws the actual layout instead of a
+    // stand-in rectangle. width_m/depth_m carry the bbox so the unit-box OBJ can be rescaled.
+    if (float fw = 0.f, fd = 0.f; write_floor_obj(polygon, std::filesystem::path(kFloorMeshOut), fw, fd))
+    {
+        G_->add_or_modify_attrib_local<mesh_path_att>(floor_node, std::string(kFloorMeshRel));
+        G_->add_or_modify_attrib_local<width_m_att>(floor_node, fw);
+        G_->add_or_modify_attrib_local<depth_m_att>(floor_node, fd);
+    }
+    else
+        qWarning() << "dsr_create_wall_nodes: could not write the floor display mesh";
 
     const auto floor_id = G_->insert_node(floor_node);
     if (!floor_id.has_value())
