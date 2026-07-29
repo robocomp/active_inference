@@ -758,13 +758,34 @@ void Viewer2D::draw_corners(const std::vector<rc::CornerDetector::CornerMatch>& 
         const float width = std::clamp(0.03f + 0.9f * sigma_scale, 0.03f, 0.9f);
         // Colour: green (confident, small σ) → red (uncertain, large σ) over ~[0.02, 0.6] m.
         const float u = std::clamp((sigma_scale - 0.02f) / (0.60f - 0.02f), 0.f, 1.f);
-        const QColor col(static_cast<int>(255 * u), static_cast<int>(200 * (1.f - u)), 60, 220);
-        corner_robot_line_items_[i]->setPen(QPen(col, width));
+        QColor col(static_cast<int>(255 * u), static_cast<int>(200 * (1.f - u)), 60, 220);
+
+        // A RETIRED corner (information yield never materialised — see CornerDetector's yield rule) is
+        // still detected and still shown, because a landmark that silently disappears reads as a broken
+        // detector. It must not read as a live one either: draw it dim, thin and DASHED so it is
+        // obvious at a glance that it is being watched but is not voting.
+        if (m.suppressed)
+        {
+            col = QColor(150, 150, 150, 110);
+            QPen pen(col, 0.03f);
+            pen.setStyle(Qt::DashLine);
+            corner_robot_line_items_[i]->setPen(pen);
+        }
+        else
+            corner_robot_line_items_[i]->setPen(QPen(col, width));
+
+        corner_detected_items_[i]->setOpacity(m.suppressed ? 0.25 : 1.0);
+        corner_predicted_items_[i]->setOpacity(m.suppressed ? 0.25 : 1.0);
+        corner_line_items_[i]->setOpacity(m.suppressed ? 0.25 : 1.0);
 
         // Numeric label at the line midpoint: the covariance determinant in m⁴, written in the standard
-        // |Σ| notation purely to save canvas width over spelling out "det(cov)".
+        // |Σ| notation purely to save canvas width over spelling out "det(cov)". A retired corner shows
+        // WHY instead — its yield against the bar is the number that decides when it comes back.
         auto* txt = corner_cov_text_items_[i];
-        txt->setPlainText(QStringLiteral("|Σ|=%1").arg(det_cov, 0, 'g', 3));
+        if (m.suppressed)
+            txt->setPlainText(QStringLiteral("RETIRED λ=%1").arg(m.yield, 0, 'g', 3));
+        else
+            txt->setPlainText(QStringLiteral("|Σ|=%1").arg(det_cov, 0, 'g', 3));
         txt->setDefaultTextColor(col);
         txt->setPos(0.5f * (t.x() + det_world.x()), 0.5f * (t.y() + det_world.y()));
     }

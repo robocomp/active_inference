@@ -13,9 +13,19 @@ void CornerDetector::set_model_corners(const std::vector<Eigen::Vector2f>& polyg
 {
     model_corners_.clear();
     model_dups_dropped_ = 0;
+    short_wall_dropped_.clear();
+    yield_.clear();
+    slot_of_original_.assign(polygon_vertices.size(), -1);
     polygon_ = polygon_vertices;   // retained for the occlusion/visibility ray-cast in detect()
     const int N = static_cast<int>(polygon_vertices.size());
     if (N < 3) return;
+
+    // Shortest adjacent wall a vertex must have to be claimed as a LANDMARK — see
+    // Params::min_wall_map_sigmas. Note polygon_ above already holds every vertex: what follows
+    // decides landmark status only, never geometry.
+    const float min_wall_for_landmark = params_.min_wall_map_sigmas > 0.f
+                                      ? params_.min_wall_map_sigmas * params_.map_sigma
+                                      : 0.f;
 
     for (int i = 0; i < N; ++i)
     {
@@ -29,6 +39,14 @@ void CornerDetector::set_model_corners(const std::vector<Eigen::Vector2f>& polyg
         // BOTH predict + detect the same wall intersection. Drop degenerate edges outright.
         if ((prev - curr).squaredNorm() < 1e-8f or (next - curr).squaredNorm() < 1e-8f)
             { model_dups_dropped_++; continue; }
+
+        // Landmark admissibility (see min_wall_for_landmark above). Applied BEFORE the angle test so
+        // a 6 cm trace wobble never reaches prediction, association or the loss: it cannot be
+        // distinguished from a straight wall by a map with map_sigma of error, and its neighbour
+        // vertex sits well inside the distance the sensor can resolve, so the pair can only alias.
+        const float min_adjacent_wall = std::min((prev - curr).norm(), (next - curr).norm());
+        if (min_adjacent_wall < min_wall_for_landmark)
+            { short_wall_dropped_.push_back(i); continue; }
 
         const Eigen::Vector2f d1 = (prev - curr).normalized();
         const Eigen::Vector2f d2 = (next - curr).normalized();
@@ -54,7 +72,9 @@ void CornerDetector::set_model_corners(const std::vector<Eigen::Vector2f>& polyg
                 { return (k.position - mc.position).squaredNorm() < 1e-6f; });
             if (coincides) { model_dups_dropped_++; continue; }
 
+            slot_of_original_[i] = static_cast<int>(model_corners_.size());
             model_corners_.push_back(mc);
+            yield_.emplace_back();
         }
     }
 }
@@ -159,10 +179,11 @@ CornerDetector::DetectionResult CornerDetector::detect(
         const std::vector<Eigen::Vector3f>& lidar_points,
         float robot_x, float robot_y, float robot_theta,
         const Eigen::Matrix3f& pose_cov,
-        float max_range) const
+        float max_range)
 {
     DetectionResult result;
     result.model_dup_dropped = model_dups_dropped_;
+    result.model_short_wall_dropped = static_cast<int>(short_wall_dropped_.size());
     if (model_corners_.empty() || lidar_points.empty())
         return result;
 
@@ -246,10 +267,11 @@ CornerDetector::DetectionResult CornerDetector::detect(
         // and must not count toward the early-exit decision. This is the real cause of the lone red-circle
         // corner that pinned early-exit at 0% (see corners_1.png): it was occluded, not mismatched.
         if (!corner_visibility::is_corner_visible(t_world, mc.original_index, polygon_, max_range))
-            { result.rej_occluded++; continue; }
+            { result.rej_occluded++; result.occluded_indices.push_back(mc.original_index); continue; }
 
         const Eigen::Vector2f predicted = to_robot(dw);
         result.corners_in_fov++;
+        result.in_fov_indices.push_back(mc.original_index);
         fov_corners.push_back({&mc, predicted, prediction_cov(predicted)});
 
         const Eigen::Vector2f dir_in  = to_robot(mc.edge_in_dir);
@@ -605,6 +627,71 @@ CornerDetector::DetectionResult CornerDetector::detect(
         result.runnerup_chi2_mean = nru > 0 ? ru / static_cast<float>(nru) : 0.f;
         result.min_assoc_prob     = pmin;
     }
+    // ── Landmark retirement by observed information (Params::min_yield_map_sigmas) ────────────────
+    // Fold THIS frame's evidence in first, then judge, so a corner that just became observable is
+    // released the same frame it recovers.
+    //
+    // Scored ONLY on frames where the corner actually produced a match — silence is deliberately NOT
+    // counted as zero information. A corner that fails to form a detection contributes nothing to the
+    // loss, so it does no harm; the failure mode being targeted is a corner that DOES fire and says
+    // something uninformative. The question is therefore "when this landmark speaks, is what it says
+    // worth hearing", not "how often does it speak". Verified against 23400 live frames: scoring
+    // silence would also retire v1 (λ≈67 when it fires, well above the bar, but only on 1.9% of
+    // frames) and v29 (λ≈121, two samples in the whole run) — both merely quiet, neither harmful.
+    {
+        const float leak = std::clamp(params_.yield_leak, 0.f, 1.f);
+        for (const auto& m : result.matches)
+        {
+            if (m.model_index < 0 || m.model_index >= static_cast<int>(slot_of_original_.size()))
+                continue;
+            const int slot = slot_of_original_[m.model_index];
+            if (slot < 0) continue;
+            Eigen::SelfAdjointEigenSolver<Eigen::Matrix2f> es(m.information);
+            if (es.info() != Eigen::Success) continue;
+            const float lam = std::max(0.f, es.eigenvalues()(0));
+            auto& y = yield_[slot];
+            // SEED on the first sample instead of leaking up from zero. Leaking from zero biases the
+            // estimate low by ~1/leak for the first samples (live: a corner whose single match had
+            // λ=91 read as yield=1.82), which would retire a good corner the moment the warmup ends.
+            y.lambda_min = (y.samples == 0) ? lam : y.lambda_min + leak * (lam - y.lambda_min);
+            ++y.samples;
+        }
+
+        if (params_.min_yield_map_sigmas > 0.f)
+        {
+            const float sigma_bar = params_.min_yield_map_sigmas * params_.map_sigma;
+            const float lambda_bar = 1.f / std::max(1e-9f, sigma_bar * sigma_bar);
+            // Release needs to CLEAR the bar, not merely touch it (Params::yield_release_factor).
+            const float release_bar = std::max(1.f, params_.yield_release_factor) * lambda_bar;
+            for (auto& m : result.matches)
+            {
+                const int slot = (m.model_index >= 0 && m.model_index < static_cast<int>(slot_of_original_.size()))
+                               ? slot_of_original_[m.model_index] : -1;
+                if (slot < 0) continue;
+                auto& y = yield_[slot];
+                m.yield = y.lambda_min;
+
+                if (y.retired)
+                {
+                    // Still measured while retired — that is the whole point of keeping it detected —
+                    // so it releases itself once the view genuinely improves.
+                    if (y.lambda_min > release_bar)
+                        y.retired = false;
+                }
+                // Warmup guard: never retire on a handful of samples. A corner that has spoken only
+                // twice has told us nothing about itself either way, so it keeps its vote.
+                else if (y.samples >= params_.yield_warmup && y.lambda_min < lambda_bar)
+                    y.retired = true;
+
+                if (y.retired)
+                {
+                    m.suppressed = true;
+                    result.corners_suppressed++;
+                }
+            }
+        }
+    }
+
     // Candidates that passed every quality gate but lost the 1-to-1 assignment.
     result.rej_unassigned = C - result.corners_accepted;
 

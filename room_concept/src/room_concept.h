@@ -3,6 +3,7 @@
 #include <memory>
 #include <vector>
 #include <deque>
+#include <map>
 #include <limits>
 #include <thread>
 #include <mutex>
@@ -353,6 +354,22 @@ public:
         // fused when their separation is inside a χ²₂ region of their OWN combined covariance.
         float corner_merge_chi2 = 5.991f;              // χ²₂ @95%; 0 disables the exclusion test
         float corner_merge_prior_sigma = 0.0f;         // m; 0 ⇒ use the detector's search_radius
+        // Landmark admissibility in units of the detector's map_sigma — a vertex whose shorter adjacent
+        // wall is below this is not a feature the traced layout can assert, so it never becomes a point
+        // landmark (it stays in the polygon and in the SDF). 0 disables. See CornerDetector::Params.
+        float corner_min_wall_map_sigmas = 3.0f;
+        // Landmark retirement by observed information — a corner whose weakest-axis σ never gets below
+        // this many map_sigmas is one the robot cannot measure here, whatever the layout claims. Leaky,
+        // so it recovers by itself. 0 disables. See CornerDetector::Params::min_yield_map_sigmas.
+        float corner_min_yield_map_sigmas = 5.0f;
+        float corner_yield_leak           = 0.02f;   // per matched frame (~2.5 s at 20 Hz)
+        float corner_yield_release_factor = 2.0f;    // hysteresis: release above this × the retire bar
+        int   corner_yield_warmup         = 10;      // MATCHED frames tolerated before retiring — an
+                                                     // evidence budget in "uninformative votes", not a
+                                                     // time delay. Keep small; see CornerDetector.
+        // Per-model-corner attribution CSV (etc/corner_stats.csv), rewritten periodically: which
+        // vertices actually earn their keep as landmarks vs cost work and return nothing.
+        bool  corner_stats_csv = true;
         // Corner-consistency gate on the prediction early-exit. Without it, the early-exit validates the
         // predicted pose on SDF ALONE — and a rot180-flipped pose is SDF-ambiguous, so a flip slips through
         // while the corners (which DO disagree) are bypassed. When on, a predicted pose whose worst corner
@@ -606,10 +623,6 @@ public:
                                      int max_samples = 300) const;
     bool is_initialized() const { return model_ != nullptr; }
 
-    /// Disable relocalization (symmetry check + recovery) once the room is stable.
-    void set_relocalization_enabled(bool enabled) { relocalization_enabled_.store(enabled); }
-    bool is_relocalization_enabled() const        { return relocalization_enabled_.load(); }
-
     // Grid search for initial pose (solves kidnapping problem)
     // Returns true if a good pose was found, false otherwise
     bool grid_search_initial_pose(const std::vector<Eigen::Vector3f>& lidar_points,
@@ -764,6 +777,11 @@ private:
    std::int64_t last_lidar_timestamp = 0;
    UpdateResult last_update_result;
    bool needs_orientation_search_ = true;  // Search for best orientation on first update
+   // Set when bootstrap seeded the model from the saved pose before any sweep had arrived, so the
+   // seed could not be checked against the room yet. The first new frame runs validate_seed_pose.
+   // Localizer-thread only (bootstrap and run() are both on loc_thread_) — no atomic needed.
+   bool pending_seed_validation_ = false;
+   bool validate_seed_pose(const std::vector<Eigen::Vector3f>& pts);
 
    // Manual pose reset - skip optimization for a few frames
    int manual_reset_frames_ = 0;  // Counter to skip optimization after manual reset
@@ -896,12 +914,40 @@ private:
    // params.hier_prec_boundary_enabled. Lazy-opened on first use; loc-thread only, no lock.
    std::ofstream      hier_prec_csv_;
    bool               hier_prec_csv_open_attempted_ = false;
+
+   // ── Per-model-corner attribution (etc/corner_stats.csv) ────────────────────────────────────────
+   // Accumulated over the run and rewritten whole every kCornerStatsRewritePeriod corner frames, so
+   // the file is always a current snapshot rather than an append log to be re-aggregated. Answers the
+   // question the aggregate rej_* counters cannot: WHICH vertices are worth keeping as landmarks.
+   // Loc-thread only, no lock — same discipline as opt_csv_/hier_prec_csv_.
+   struct CornerVertexStats
+   {
+       int    in_fov = 0;        // visible, detection attempted
+       int    occluded = 0;      // in range but occluded — not the corner's own fault
+       int    accepted = 0;      // survived to a match that entered the loss
+       int    rival_n = 0;       // accepted samples that had a competing model corner in gate
+       double assoc_prob_sum = 0.0;
+       double runnerup_chi2_sum = 0.0;   // over rival_n only (INFEASIBLE rivals excluded)
+       double resid_sum = 0.0;           // ‖detected − predicted‖ (m)
+       double lambda_min_sum = 0.0;      // smallest eigenvalue of Λ_det — the degenerate direction
+       double lambda_max_sum = 0.0;
+       int    suppressed = 0;            // CUMULATIVE frames retired by the information-yield rule —
+                                         // "has been retired at some point", NOT the current state
+       bool   retired_now = false;       // state at the most recent match. Read THIS for "is it
+                                         // retired right now"; with hysteresis the two differ often
+       float  last_yield = 0.f;          // most recent running λ_min estimate behind that decision
+   };
+   static constexpr int kCornerStatsRewritePeriod = 200;
+   std::map<int, CornerVertexStats> corner_vertex_stats_;
+   int                corner_stats_frames_ = 0;
+   std::ofstream      corner_stats_csv_;
+   void accumulate_corner_stats(const CornerDetector::DetectionResult& det);
+   void write_corner_stats_csv();
    RerunLogger        rerun_logger_;
    int                rerun_frame_counter_ = 0;
    int                symmetry_check_counter_ = 0;
    float              symmetry_flip_evidence_ = 0.f;  // leaky accumulator of contrary-orientation evidence
    int                good_fit_streak_        = 0;    // consecutive good-SDF frames (track establishment)
-   std::atomic<bool>  relocalization_enabled_{true};
    bool               rerun_room_polygon_sent_ = false;
    std::vector<float> last_adam_losses_;    // per-iteration losses from last Adam/LBFGS run
    float              last_loss_init_  = 0.f;  // loss before first step

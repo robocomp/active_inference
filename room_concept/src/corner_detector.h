@@ -93,6 +93,64 @@ public:
                                        // tighter than the map error can never gather the true wall.
         float assoc_min_weight = 0.0f; // floor on the association posterior (0 = pure PDA). Raise only
                                        // if you want ambiguous corners to retain some pull.
+
+        // ── Landmark admissibility: does the MAP actually assert this vertex? ──────────────────────
+        // Prior to inference, and not a gate on it. map_sigma is the layout's own positional error, so
+        // a jog whose adjacent walls are not long compared to it is not a feature the trace can claim
+        // exists — the SVG cannot distinguish a 6 cm step from a straight wall, and two model corners
+        // that close cannot be resolved by a sensor at base_sigma either, so they alias each other by
+        // construction (they are what feeds merged_coincident and drags mean_assoc_prob down).
+        // Excluding them is a MODEL-fidelity correction of the same kind as not modelling the skirting
+        // board — the vertex stays in polygon_ and in the SDF, it just stops being a point landmark.
+        // Scaled by map_sigma rather than set in metres so it tracks the map error it derives from.
+        // 0 disables. Live layout (apartamento, map_sigma=0.06): 3σ=0.18 m sits inside a clean bimodal
+        // gap — 8 trace artefacts (0.062–0.149 m) drop, the 24 real corners (≥0.315 m) all survive.
+        float min_wall_map_sigmas = 3.0f;
+
+        // ── Landmark RETIREMENT by observed information ────────────────────────────────────────────
+        // The rule above asks whether the MAP asserts a vertex. This asks whether the ROBOT can ever
+        // measure it — a different question, and live data (23400 frames, apartamento) showed geometry
+        // alone cannot answer it: v27 and v28 are adjacent vertices of the SAME pillar with identical
+        // 0.333 m walls, yet v28 yields λ_min≈107 while v27 is a permanent coin flip at λ_min≈1.6.
+        // Which corners actually compete depends on visibility along the driven trajectory, not on the
+        // layout, so no static geometric rule separates them (v5's nearest neighbour is 0.11 m away and
+        // it is still the best landmark in the room — because that neighbour is always occluded).
+        //
+        // So retire on evidence: track each corner's information yield — the smallest eigenvalue of the
+        // Λ_det the loss actually consumes, which is already scaled by the association posterior, so a
+        // corner is penalised for aliasing AND for shallowness through one number. A corner whose yield
+        // stays negligible is one this room-and-robot combination cannot observe informatively.
+        //
+        // The bar is expressed as a σ, in units of map_sigma, so it stays physical: a landmark must pin
+        // its own position along its WEAKEST axis at least this well, otherwise it says less than the
+        // polygon already does and has no business voting. λ_bar = 1/(min_yield_map_sigmas·map_sigma)².
+        // Live: 5σ = 0.30 m ⇒ λ_bar ≈ 11, inside the observed bimodal gap (worst good corner 46.4,
+        // best bad one 1.6) with ~4× margin either side. 0 disables retirement.
+        float min_yield_map_sigmas = 5.0f;
+        // Leak of the running yield estimate, per MATCHED frame: yield ← (1-leak)·yield + leak·λ_min.
+        // 0.02 at ~20 Hz ⇒ ~2.5 s time constant. Leaky ON PURPOSE — a retired corner keeps being
+        // detected and recovers by itself if the robot later drives where it becomes observable.
+        float yield_leak = 0.02f;
+        // Matched frames to observe before retirement may fire — an EVIDENCE BUDGET, not a delay.
+        // Counted in matches rather than in frames or seconds on purpose: a corner can only mislead
+        // the loss on a frame where it actually matched, so this is exactly "how many uninformative
+        // votes are tolerated before we stop listening", and it costs the same regardless of how often
+        // the corner fires. Keep it SMALL. It was 100 and that was a design error: the corners most
+        // worth retiring are the ones that match rarely, so the delay scaled inversely with how bad
+        // the corner was — live, the worst aliaser in the room (v11, assoc_prob 0.20, matching 0.86%
+        // of frames) needed ~10 minutes to reach 100 matches, while a merely-mediocre corner retired
+        // in seconds. 10 is ample given the seeded estimate and the ~28× gap between the worst kept
+        // corner and the best retired one.
+        int   yield_warmup = 10;
+        // Hysteresis. Retirement LATCHES: a corner is retired when its yield falls below λ_bar and is
+        // released only once it climbs back above yield_release_factor·λ_bar. Without the gap a corner
+        // sitting near the bar toggles every few frames, which is not merely ugly — each toggle adds
+        // and removes a factor from the loss, so the pose sees a landmark set that changes under it.
+        // These corners are strongly viewpoint-dependent (live: v27's running yield went 0.09 → 185 as
+        // the robot reached a view where that pillar face is observable), so crossings are frequent and
+        // genuine; the band decides how much improvement counts as "the view really did get better".
+        // 1.0 disables the hysteresis, restoring a single bar.
+        float yield_release_factor = 2.0f;
     };
 
     // ===== Output types =====
@@ -113,6 +171,13 @@ public:
         float  assoc_prob = 1.f;    // posterior probability that this detection belongs to model_index
                                     // rather than to another in-gate model corner. 1 = unambiguous.
         float  assoc_chi2_val = 0.f;// squared Mahalanobis distance of the winning association (display).
+        // ── Retirement (see Params::min_yield_map_sigmas) ────────────────────────────────────────
+        // A suppressed match is still DETECTED, still carries its numbers, and is still returned — it
+        // simply must not enter the loss. Kept in `matches` rather than dropped so the viewer can show
+        // it as retired and the stats can keep watching it recover; silently vanishing landmarks are
+        // how a detector starts looking broken.
+        bool   suppressed = false;  // retired: informative yield never materialised
+        float  yield = 0.f;         // running λ_min estimate (1/m²) behind that decision
         float  runnerup_chi2 = 1e9f;// squared Mahalanobis distance of the BEST RIVAL model corner for
                                     // this same detection. Large ⇒ the correspondence is unambiguous;
                                     // close to assoc_chi2_val ⇒ a coin flip, which is what makes the
@@ -171,6 +236,19 @@ public:
                                // polygon has corners closer together than the detector can resolve.
         int model_dup_dropped = 0; // model corners dropped at set_model_corners() because they coincide
                                // with an already-kept vertex (degenerate/repeated polygon vertices).
+        int model_short_wall_dropped = 0; // ★ vertices refused LANDMARK status at set_model_corners()
+                               // because their adjacent walls are too short for the map to assert them
+                               // (see Params::min_wall_map_sigmas). They remain in the polygon and in
+                               // the SDF; only their point-landmark channel is off.
+
+        // ── Per-model-corner attribution (indices into the ORIGINAL polygon vertex list) ───────────
+        // Aggregate rej_* counters say WHAT is failing but not WHICH corner, which is what decides
+        // whether a given pillar earns its keep. Pair these with the accepted corners in `matches`
+        // (each carries model_index, assoc_prob, runnerup_chi2, information) for the full picture:
+        // in_fov but rarely in matches ⇒ the corner costs work and returns nothing.
+        std::vector<int> in_fov_indices;    // corner was visible and a detection was attempted
+        std::vector<int> occluded_indices;  // corner was in range but occluded — NOT its own fault
+        int corners_suppressed = 0;         // matches retired this frame by the yield rule
     };
 
     // ===== Interface =====
@@ -184,13 +262,19 @@ public:
     /// association gate through the innovation covariance S = Σ_det + H·P·Hᵀ, so a poorly-localized
     /// robot associates permissively and a sharply-localized one refuses distant corners. Passing
     /// zero reduces the gate to detection noise alone.
+    /// NOT const: each call folds this frame's evidence into the per-corner information-yield belief
+    /// that drives retirement (see Params::min_yield_map_sigmas).
     DetectionResult detect(const std::vector<Eigen::Vector3f>& lidar_points,
                            float robot_x, float robot_y, float robot_theta,
                            const Eigen::Matrix3f& pose_cov = Eigen::Matrix3f::Zero(),
-                           float max_range = 15.0f) const;
+                           float max_range = 15.0f);
 
     Params& params() { return params_; }
     const Params& params() const { return params_; }
+
+    /// Polygon indices refused landmark status for having walls shorter than the map can assert.
+    /// Valid after set_model_corners(); reported once at startup so the exclusion is never silent.
+    const std::vector<int>& short_wall_dropped_indices() const { return short_wall_dropped_; }
 
 private:
     Params params_;
@@ -214,6 +298,18 @@ private:
 
     /// How many polygon vertices were rejected as coincident with an already-kept model corner.
     int model_dups_dropped_ = 0;
+
+    /// Polygon indices refused landmark status by the min_wall_map_sigmas admissibility rule.
+    std::vector<int> short_wall_dropped_;
+
+    /// Per-model-corner information-yield belief, parallel to model_corners_ (see
+    /// Params::min_yield_map_sigmas). Reset by set_model_corners; updated by detect().
+    // samples = frames this corner MATCHED. `retired` LATCHES (see Params::yield_release_factor):
+    // it is the state the hysteresis carries between frames, not a per-frame recomputation.
+    struct Yield { float lambda_min = 0.f; int samples = 0; bool retired = false; };
+    std::vector<Yield> yield_;
+    /// original polygon index → slot in model_corners_/yield_, for attributing a match back.
+    std::vector<int>   slot_of_original_;
 
     /// 2D line: normal · p = d   (normal is unit length)
     struct Line2D

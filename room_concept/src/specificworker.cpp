@@ -170,11 +170,10 @@ void SpecificWorker::initialize()
     if (!find_graph_viewer(""))
         qInfo() << "[room] No DSR viewer (Agent.graph=false); layout window runs standalone.";
 
-    // Load room polygon for visualizations (viewer outline + camera-projection overlay).
-    std::vector<Eigen::Vector2f> room_polygon_for_viz;
-    if (room_initialized_from_svg_polygon_)
-        room_polygon_for_viz = rc::SvgRoomLoader::load_polygon_points(
-            params.ROOM_LAYOUT_SVG, "room_contour", false, true);
+    // Room polygon for visualizations (viewer outline + camera-projection overlay). Reuse the one
+    // the localizer got — re-loading the SVG here would skip the recentring and draw the outline in
+    // the un-shifted frame.
+    const std::vector<Eigen::Vector2f>& room_polygon_for_viz = room_polygon_;
 
     // GUI / visualization (2-D viewer, FE plot, camera-projection window + RGB media plane).
     viewer_ = std::make_unique<rc::RoomViewer>(
@@ -653,14 +652,30 @@ void SpecificWorker::compute()
 
 void SpecificWorker::initialize_room_model_from_svg()
 {
-    const auto room_polygon = rc::SvgRoomLoader::load_polygon_points(
+    auto room_polygon = rc::SvgRoomLoader::load_polygon_points(
         params.ROOM_LAYOUT_SVG, "room_contour", false, true);
     if (room_polygon.size() >= 3)
     {
-        room_concept_.configure_room_from_polygon(room_polygon);
+        // Move the room-frame origin onto the layout's geometric centre. Everything downstream is
+        // origin-agnostic (the grid search derives its box from the polygon bbox, the planner grid
+        // carries its own origin, and the DSR `room` node republishes these very vertices as
+        // delimiting_polygon_x/y), so the shift propagates on its own.
+        room_polygon_offset_ = params.RECENTER_ROOM_POLYGON
+                                   ? rc::SvgRoomLoader::recenter_to_bbox_center(room_polygon)
+                                   : Eigen::Vector2f::Zero();
+        if (room_polygon_offset_.norm() > 1e-3f)
+            qInfo() << "[room] Room polygon recentred on its bbox centre: origin moved by"
+                    << room_polygon_offset_.x() << room_polygon_offset_.y() << "m."
+                    << "Poses in the room frame are shifted by that amount — a seed pose or object"
+                    << "RT edges saved before this change are stale.";
+
+        room_polygon_ = room_polygon;
+        room_concept_.configure_room_from_polygon(room_polygon_);
         room_initialized_from_svg_polygon_ = true;
         return;
     }
+    room_polygon_.clear();
+    room_polygon_offset_ = Eigen::Vector2f::Zero();
     room_concept_.configure_room_from_rect(params.GRID_MAX_DIM.width(), params.GRID_MAX_DIM.height());
     room_initialized_from_svg_polygon_ = false;
     qWarning() << "SVG polygon not loaded; using rectangular fallback.";

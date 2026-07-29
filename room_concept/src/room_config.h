@@ -64,6 +64,12 @@ struct RoomConfig
     bool        PREDICTION_EARLY_EXIT = true;
     std::string OptimizerType         = "LBFGS";
     std::string ROOM_LAYOUT_SVG       = "beta_layout.svg";  // config: RoomConcept.RoomLayoutSvg
+    // Put the room-frame origin on the layout's geometric (bounding-box) centre instead of wherever
+    // the SVG author happened to place (0,0). Only affects plans traced from a corner
+    // (apartamento_layout); layouts already drawn about their middle barely move.
+    // NOTE when flipping this: the room frame shifts, so etc/last_robot_pose.txt (seed pose, in room
+    // coords) and any object RT edges persisted under the DSR `room` node are stale by the offset.
+    bool        RECENTER_ROOM_POLYGON = true;   // config: RoomConcept.RecenterRoomPolygon
     float       ODOMETRY_NOISE_FACTOR = 0.0f;
 
     // DSR stabilization: this many consecutive "stable" frames before creating the

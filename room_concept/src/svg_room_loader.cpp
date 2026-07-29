@@ -62,6 +62,26 @@ std::vector<Eigen::Vector2f> SvgRoomLoader::load_polygon_points(const std::strin
     return {};
 }
 
+Eigen::Vector2f SvgRoomLoader::recenter_to_bbox_center(std::vector<Eigen::Vector2f>& points)
+{
+    if (points.empty())
+        return Eigen::Vector2f::Zero();
+
+    Eigen::Vector2f pmin = points.front();
+    Eigen::Vector2f pmax = points.front();
+    for (const auto& p : points)
+    {
+        pmin = pmin.cwiseMin(p);
+        pmax = pmax.cwiseMax(p);
+    }
+
+    const Eigen::Vector2f offset = 0.5f * (pmin + pmax);
+    for (auto& p : points)
+        p -= offset;
+
+    return offset;
+}
+
 std::vector<Eigen::Vector2f> SvgRoomLoader::parse_points_attribute(const QString& points_attr,
                                                                    bool flip_y,
                                                                    bool mirror_x)

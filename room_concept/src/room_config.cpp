@@ -52,6 +52,7 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     {
         p.ROOM_LAYOUT_SVG = svg_file;
     });
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.RecenterRoomPolygon", p.RECENTER_ROOM_POLYGON);
     // Ceiling height (m). Sets the room DSR node's room_height attribute (walls/ceiling overlay) and
     // the EXPECTED ceiling location for the LiDAR startup geometry check. Set it explicitly for rooms
     // whose ceiling is above the LiDAR's vertical reach (e.g. 3 m), where the check can't detect it.
@@ -177,6 +178,12 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.CornerOrientTauDeg", room_concept.params.corner_orient_tau_deg);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.CornerMergeChi2", room_concept.params.corner_merge_chi2);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.CornerMergePriorSigma", room_concept.params.corner_merge_prior_sigma);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.CornerMinWallMapSigmas", room_concept.params.corner_min_wall_map_sigmas);
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.CornerStatsCsv", room_concept.params.corner_stats_csv);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.CornerMinYieldMapSigmas", room_concept.params.corner_min_yield_map_sigmas);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.CornerYieldLeak", room_concept.params.corner_yield_leak);
+    rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomConcept.CornerYieldWarmup", room_concept.params.corner_yield_warmup);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.CornerYieldReleaseFactor", room_concept.params.corner_yield_release_factor);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.CornerPrecisionGain", room_concept.params.corner_precision_gain);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.CornerHuberSigma", room_concept.params.corner_huber_sigma);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.CornerEarlyExitCheck", room_concept.params.corner_early_exit_check);

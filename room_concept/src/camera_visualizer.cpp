@@ -938,7 +938,11 @@ void CameraVisualizer::draw_projections(QImage& image, std::uint64_t rt_timestam
             // orange tone — brightening slightly with uncertainty — rather than a hue ramp.
             const float radius_px = std::clamp(fx * sigma_m / static_cast<float>(cam.y()), 5.f, 140.f);
             const float u = std::clamp((sigma_m - 0.02f) / (0.60f - 0.02f), 0.f, 1.f);
-            const QColor fill(255, static_cast<int>(120 + 40 * u), 0, 130);   // orange, ~50% opacity
+            // A RETIRED corner (information yield never materialised) is still projected — it is still
+            // being detected and can still recover — but as a faint grey blob, so it never reads as a
+            // live landmark. Matches the 2D viewer's dashed-grey treatment.
+            const QColor fill = m.suppressed ? QColor(150, 150, 150, 55)
+                                             : QColor(255, static_cast<int>(120 + 40 * u), 0, 130);
             painter.setBrush(fill);
             painter.drawEllipse(QPointF(uv.x(), uv.y()), radius_px, radius_px);
         }

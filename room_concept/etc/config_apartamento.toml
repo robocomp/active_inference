@@ -91,6 +91,11 @@ lidar_high_max_height = 2.75
 
 [RoomConcept]
 RoomLayoutSvg          = "apartamento_layout.svg"  # apartamento layout; walls in webots-piso/Piso.wbt regenerated to match (room frame = -x_svg, y_svg)
+# Put the room-frame origin on the layout's geometric (bbox) centre instead of wherever the SVG
+# author placed (0,0). Matters for plans traced from a corner (apartamento); layouts already
+# drawn about their middle barely move. Flipping this SHIFTS the room frame: delete
+# etc/last_robot_pose.txt and restart the fleet on a clean graph.
+RecenterRoomPolygon    = true
 RoomHeight             = 3.0   # m — real apartamento ceiling. Sets the room DSR node room_height (walls/ceiling overlay) and the expected ceiling for the LiDAR startup check. The LiDAR can't reach 3 m, so set it here rather than relying on detection.
 PreserveBootstrapRoom  = false  # static-room phase: adopt the pre-seeded room/table from the bootstrap graph; do NOT delete on start or overwrite robot->room. Set false to go dynamic (localize + create room).
 PredictionEarlyExit    = true  # Skip optimization when prediction error < threshold
@@ -256,6 +261,35 @@ EnableCornerTracking = true  # Activa factores de esquinas en la perdida RFE
 #   model misfit (~0.32 m here) or the real wall points fall outside → NO detection forms (the actual
 #   reason corners fired in only 46/77559 frames). Was hardcoded 0.12; raised to 0.35.
 CornerWallBand       = 0.35
+# Landmark admissibility, in units of the detector's map_sigma (0.06 m). A vertex whose shorter
+# adjacent wall is below this is not a feature the traced SVG can assert (it cannot tell a 6 cm
+# step from a straight wall), and its neighbour sits closer than the sensor can resolve, so the
+# pair can only alias. Such vertices never become point landmarks; they REMAIN in the polygon and
+# in the SDF, so no geometry is lost. 0 disables. apartamento: 3 -> drops v8,v9,v15,v16,v21,v22,
+# v27,v28 (walls 0.062-0.149 m) and keeps all 24 real corners (>=0.315 m). Identical for 3..5.
+CornerMinWallMapSigmas = 3.0
+# Per-model-corner attribution -> etc/corner_stats.csv (rewritten every 200 corner frames).
+CornerStatsCsv         = true
+# Landmark RETIREMENT by observed information. A corner is retired when its running lambda_min
+# (smallest eigenvalue of the Lambda_det the loss consumes, already scaled by the association
+# posterior) stays below 1/(k*map_sigma)^2 -- i.e. it cannot pin its own position along its
+# weakest axis to better than k*map_sigma, so it says less than the polygon already does.
+# Scored ONLY on frames where it produced a match: silence costs nothing, misinformation does.
+# Leaky, so a retired corner keeps being detected and recovers by itself. 0 disables.
+# Live (apartamento, 23400 frames): k=5 -> lambda_bar=11.1, inside the observed gap (worst kept
+# 45.2, best retired 1.60). Retires v11, v13, v27 -- the aliasing/degenerate pillar corners.
+CornerMinYieldMapSigmas = 5.0
+CornerYieldLeak         = 0.02   # per matched frame (~2.5 s at 20 Hz)
+CornerYieldWarmup       = 10     # MATCHED frames tolerated before retiring. An evidence budget in
+CornerYieldReleaseFactor = 2.0   # hysteresis: retire below lambda_bar, release only above this
+                                 # multiple of it. These corners are strongly viewpoint-dependent
+                                 # (v27's yield went 0.09 -> 185 as the robot reached a view where
+                                 # the pillar face is observable), so bar crossings are frequent and
+                                 # real; without a band a corner toggles every few frames and the
+                                 # pose sees a landmark set changing under it. 1.0 = no hysteresis.
+                                 # "uninformative votes", NOT a delay: a corner can only mislead the
+                                 # loss on a frame it matched. Keep small -- at 100 the worst aliaser
+                                 # (v11, matching 0.86% of frames) needed ~10 min to retire.
 CornerBaseSigma      = 0.04   # detection noise floor σ0 (m) per wall
 CornerOrientTauDeg   = 20.0   # smooth orientation-trust scale (deg): ori_scale = exp(−(dev/τ)²)
 CornerPrecisionGain  = 1.0    # global scale on corner precision vs the SDF term

@@ -450,17 +450,20 @@ namespace rc
             }
         }
 
-        // When we have a saved pose the model can be seeded without lidar.
-        // When we have no saved pose we need lidar to estimate the initial position.
+        // Grab a sweep if one is already buffered. Without a saved pose we CANNOT proceed without it
+        // (the initial position is estimated from the cloud); with one we can seed immediately, but we
+        // still want the points — they are what tells us whether the seed is any good (below).
         std::vector<Eigen::Vector3f> pts;
-        if (!have_saved_pose)
         {
             const auto& [lidar_from_buffer] = run_ctx_.high_lidar_buffer->read_last();
-            std::optional<LidarData> lidar_high_ = lidar_from_buffer;
+            if (lidar_from_buffer.has_value())
+                pts = lidar_from_buffer->first;
+        }
 
-            if (!lidar_high_.has_value() || lidar_high_->first.empty())
+        if (!have_saved_pose)
+        {
+            if (pts.empty())
                 return false;
-            pts = lidar_high_->first;
 
             PointcloudCenterEstimator estimator;
             Eigen::Vector2d room_center_in_robot = Eigen::Vector2d::Zero();
@@ -496,11 +499,57 @@ namespace rc
             if (!used_grid_search)
                 qWarning() << "RoomConcept bootstrap: grid search failed. Keeping estimator-based initialization.";
         }
+        else
+        {
+            // The saved pose is a PRIOR, not certainty: the robot may have been moved while the agent
+            // was down, the file may predate a layout/room-frame change, or it may simply be stale.
+            // Check that it still explains the scan and fall through to the global search if it does
+            // not. Deferred when no sweep has arrived yet (the seeded model is published meanwhile so
+            // the viewer/planner have geometry) — validate_seed_pose runs on the first one instead.
+            if (pts.empty())
+                pending_seed_validation_ = true;
+            else
+                used_grid_search = !validate_seed_pose(pts);
+        }
 
-        if (!used_grid_search)
+        // Needs points; on the deferred-validation path there are none yet, and the saved yaw is
+        // carried as-is until the first sweep resolves it.
+        if (!used_grid_search && !pts.empty())
             resolve_initial_yaw_ambiguity(pts, init_phi);
 
         return true;
+    }
+
+    /// Accept-or-relocalize check for a seeded pose. Returns true when the pose stands, false when it
+    /// was rejected and the global grid search was run in its place.
+    ///
+    /// The bar is params.recovery_loss_threshold — deliberately the SAME "this fit means we are lost"
+    /// number the runtime RecoveryManager uses, rather than a new knob. Units match: both are metres
+    /// (mean |SDF| here, sqrt(sdf_mse) there), and both sit far above a converged fit (~0.13 m) and far
+    /// below a real mislocalization.
+    bool RoomConcept::validate_seed_pose(const std::vector<Eigen::Vector3f>& pts)
+    {
+        pending_seed_validation_ = false;
+        if (pts.empty() || model_ == nullptr)
+            return true;
+
+        const float seed_err = evaluate_pose_mean_abs_sdf(pts);
+        if (std::isfinite(seed_err) && seed_err <= params.recovery_loss_threshold)
+        {
+            qInfo() << "[RoomConcept] Seed pose accepted: mean|sdf| =" << seed_err << "m (bar"
+                    << params.recovery_loss_threshold << "m).";
+            return true;
+        }
+
+        qWarning() << "[RoomConcept] Seed pose REJECTED: mean|sdf| =" << seed_err << "m exceeds"
+                   << params.recovery_loss_threshold << "m — the saved pose does not explain the scan."
+                   << "Running grid search...";
+        if (!grid_search_initial_pose(pts, 0.5f, static_cast<float>(M_PI_4)))
+            qWarning() << "[RoomConcept] Grid search after seed rejection did not reach a good fit;"
+                       << "keeping its best candidate. Recovery will retry if it stays bad.";
+        window_mgr_.clear();
+        symmetry_check_counter_ = 0;
+        return false;
     }
 
     void RoomConcept::run()
@@ -618,6 +667,13 @@ namespace rc
 
             if (has_new_lidar_frame)
             {
+                // Deferred seed validation: bootstrap seeded the model from the saved pose before any
+                // sweep was available, so this is the first chance to ask whether that pose actually
+                // explains the room. Must run BEFORE update() — otherwise the optimizer spends this
+                // frame refining a pose we are about to throw away.
+                if (pending_seed_validation_)
+                    validate_seed_pose(lidar_high.first);
+
                 const auto t_update_start_ = std::chrono::high_resolution_clock::now();
                 const auto res = update(lidar_high, vel_snap, odom_snap);
                 update_ms = std::chrono::duration<float, std::milli>(
@@ -797,8 +853,12 @@ namespace rc
                     on_result_ready_();
 
                 // ===== 8. RECOVERY DETECTION =====
-            // Only while relocalization is enabled (i.e. before room is stable).
-            if (relocalization_enabled_.load())
+            // Relocalization (this, the map-trust reloc below, and the symmetry check) stays armed for
+            // the WHOLE run, not just until the room node stabilizes. There used to be a
+            // set_relocalization_enabled() hook to disarm it once stable; it never had a call site, so
+            // always-on is the behaviour that has actually run and been validated, and it is the one we
+            // want: a robot that is picked up and moved after the room is stable still needs to recover,
+            // and this is the backstop for a bad startup seed that validate_seed_pose let through.
             {
                 const float avg_sdf_err = std::sqrt(res.sdf_mse);
                 if (recovery_.check(avg_sdf_err, res.iterations_used,
@@ -820,8 +880,7 @@ namespace rc
             // map-trust belief exp(u_b_) collapsing (the map no longer explains the robot) rather than a raw
             // sdf threshold. u_b_ was just updated this frame (optimized path) or nudged (early-exit rotation),
             // so it is current here. Coexists with recovery_ (independent backstop). See HIERARCHICAL_PRECISION.md.
-            if (params.hier_prec_reloc_enabled && params.hier_prec_boundary_enabled
-                && relocalization_enabled_.load())
+            if (params.hier_prec_reloc_enabled && params.hier_prec_boundary_enabled)
             {
                 if (map_trust_reloc_cooldown_ > 0)
                     --map_trust_reloc_cooldown_;
@@ -848,7 +907,6 @@ namespace rc
             }
 
                 // ===== 9. PERIODIC SYMMETRY CHECK ================================
-            // Only while relocalization is active (before room node is created).
             // Uses res.sdf_mse as reference (already computed this frame).
             // Tests all four pose symmetries that a polygonal room may have:
             //   rot180  : (-x, -y,  θ+π)   — 180° rotation
@@ -856,7 +914,6 @@ namespace rc
             //   refl_x  : ( x, -y,   −θ)   — X-axis reflection
             //   rot180_y: (-x,  y,  θ+π)   — combined rot+refl (same as rot180 ∘ refl_y)
             if (params.symmetry_check_interval > 0
-                && relocalization_enabled_.load()
                 && res.iterations_used > 0)
             {
                 ++symmetry_check_counter_;
@@ -1472,9 +1529,37 @@ namespace rc
             cp.orient_tau_deg = params.corner_orient_tau_deg;
             cp.merge_chi2         = params.corner_merge_chi2;
             cp.merge_prior_sigma  = params.corner_merge_prior_sigma;
+            cp.min_wall_map_sigmas  = params.corner_min_wall_map_sigmas;
+            cp.min_yield_map_sigmas = params.corner_min_yield_map_sigmas;
+            cp.yield_leak           = params.corner_yield_leak;
+            cp.yield_warmup         = params.corner_yield_warmup;
+            cp.yield_release_factor = params.corner_yield_release_factor;
         }
         corner_detector_.set_model_corners(polygon_vertices);
 
+        // Report the landmark exclusion once, with the geometry that justified it — a silent drop of
+        // model corners is exactly the kind of thing that later reads as "the detector is broken".
+        if (const auto& dropped = corner_detector_.short_wall_dropped_indices(); !dropped.empty())
+        {
+            const int N = static_cast<int>(polygon_vertices.size());
+            QStringList detail;
+            for (const int i : dropped)
+            {
+                const float w_in  = (polygon_vertices[i] - polygon_vertices[(i + N - 1) % N]).norm();
+                const float w_out = (polygon_vertices[(i + 1) % N] - polygon_vertices[i]).norm();
+                detail << QString("v%1(%2/%3m)").arg(i).arg(w_in, 0, 'f', 3).arg(w_out, 0, 'f', 3);
+            }
+            qInfo().noquote()
+                << "[corners]" << dropped.size() << "of" << N
+                << "polygon vertices refused LANDMARK status: adjacent walls shorter than"
+                << params.corner_min_wall_map_sigmas * corner_detector_.params().map_sigma
+                << "m, which the traced layout cannot assert. They remain in the polygon and the SDF."
+                << "\n           " << detail.join(' ');
+        }
+
+        // A fresh polygon invalidates every per-vertex tally (indices may not even mean the same thing).
+        corner_vertex_stats_.clear();
+        corner_stats_frames_ = 0;
     }
 
     void RoomConcept::set_robot_pose(float x, float y, float theta, bool manual_reset)
@@ -1759,6 +1844,12 @@ namespace rc
             res.corners_in_fov = det.corners_in_fov;
             res.corner_matches = det.matches;
 
+            // Per-model-corner attribution → etc/corner_stats.csv. This is what decides whether a
+            // given pillar earns its landmark status or should follow the trace artefacts out of
+            // set_model_corners; the aggregate rej_* counters cannot say WHICH corner is at fault.
+            if (params.corner_stats_csv)
+                accumulate_corner_stats(det);
+
             // Acceptance-rate diagnostic removed from the terminal (2026-07-25). DetectionResult still
             // CARRIES every number it printed (corners_in_fov/detected/accepted, rej_*, soft_orient,
             // convex agree, merged_coincident, model_dup_dropped) — re-enabling is a print, not a re-derivation.
@@ -1776,6 +1867,10 @@ namespace rc
             for (const auto& m : det.matches)
             {
                 if (m.model_index < 0 || m.model_index >= static_cast<int>(init_polygon_vertices_.size()))
+                    continue;
+                // Retired by the information-yield rule: still detected, still drawn (as retired),
+                // but it must not vote. This is the ONLY place retirement touches inference.
+                if (m.suppressed)
                     continue;
                 // Contract check at the OPTIMIZER BOUNDARY (independent of the detector's own check —
                 // this is the line the Hessian is actually built from). A non-finite observation, or a
@@ -2697,6 +2792,96 @@ namespace rc
 
         // A/B trace: boundary_weight is exp(u_b_) AFTER this update (i.e. what next frame will apply).
         log_hier_prec_row("opt", r_b, quad, std::max(0.0f, trace), /*reloc_fired=*/false);
+    }
+
+    // Fold one detection frame into the per-model-corner tallies. Cheap (a handful of map lookups per
+    // frame); the expensive part is the rewrite below, which is throttled.
+    void RoomConcept::accumulate_corner_stats(const CornerDetector::DetectionResult& det)
+    {
+        for (const int idx : det.in_fov_indices)
+            corner_vertex_stats_[idx].in_fov++;
+        for (const int idx : det.occluded_indices)
+            corner_vertex_stats_[idx].occluded++;
+
+        for (const auto& m : det.matches)
+        {
+            auto& s = corner_vertex_stats_[m.model_index];
+            s.accepted++;
+            s.last_yield  = m.yield;
+            s.retired_now = m.suppressed;
+            if (m.suppressed) s.suppressed++;
+            s.assoc_prob_sum += m.assoc_prob;
+            s.resid_sum      += (m.detected - m.predicted).norm();
+            // Λ_det is 2×2 symmetric and ALREADY scaled by assoc_prob — i.e. exactly the precision the
+            // loss sees. Its smallest eigenvalue is the number that matters: near zero means the two
+            // wall fits were near-parallel and the corner constrains nothing along the bisector, which
+            // is the pillar failure mode described at detect()'s per-corner band clamp.
+            Eigen::SelfAdjointEigenSolver<Eigen::Matrix2f> es(m.information);
+            if (es.info() == Eigen::Success)
+            {
+                s.lambda_min_sum += es.eigenvalues()(0);
+                s.lambda_max_sum += es.eigenvalues()(1);
+            }
+            // A runner-up only exists when another model corner was inside the gate; the sentinel
+            // means "no rival", and averaging it in is what made the old rival statistic meaningless.
+            if (m.runnerup_chi2 < 1e8f)
+            {
+                s.rival_n++;
+                s.runnerup_chi2_sum += m.runnerup_chi2;
+            }
+        }
+
+        if (++corner_stats_frames_ % kCornerStatsRewritePeriod == 0)
+            write_corner_stats_csv();
+    }
+
+    // Rewrite etc/corner_stats.csv from scratch — one row per model corner, current totals. Truncating
+    // rather than appending keeps it directly readable (sort by accept_rate or lambda_min) without an
+    // aggregation step. Columns chosen to answer one question per pair:
+    //   accept_rate    — does this corner ever pay off, or is it pure cost?
+    //   assoc_prob     — is it aliasing with a neighbour? (≪1 ⇒ the PDA is already muting it)
+    //   runnerup_chi2  — how close was the rival? (near assoc χ² ⇒ coin flip ⇒ pose jumps)
+    //   lambda_min     — does it constrain anything, or only one direction? (→0 ⇒ no information)
+    //   resid_mean     — is the map honest here?
+    void RoomConcept::write_corner_stats_csv()
+    {
+        // Reopen with trunc rather than rewinding: field widths vary between rewrites (a shrinking
+        // average writes fewer characters), so seeking to 0 would leave the tail of the previous,
+        // longer row behind. Throttled to every kCornerStatsRewritePeriod frames, so this is free.
+        corner_stats_csv_.close();
+        corner_stats_csv_.open("etc/corner_stats.csv", std::ios::out | std::ios::trunc);
+        if (!corner_stats_csv_.is_open())
+            return;
+
+        corner_stats_csv_ << "# frames=" << corner_stats_frames_
+                          << " wall_in/wall_out are the adjacent polygon edge lengths (m)\n"
+                          << "vertex,wall_in,wall_out,in_fov,occluded,accepted,accept_rate,"
+                             "assoc_prob,rival_n,runnerup_chi2,lambda_min,lambda_max,resid_mean,"
+                             "yield,retired_now,suppressed,suppressed_frac\n";
+
+        const auto& poly = init_polygon_vertices_;
+        const int N = static_cast<int>(poly.size());
+        for (const auto& [idx, s] : corner_vertex_stats_)
+        {
+            float w_in = 0.f, w_out = 0.f;
+            if (N >= 3 && idx >= 0 && idx < N)
+            {
+                w_in  = (poly[idx] - poly[(idx + N - 1) % N]).norm();
+                w_out = (poly[(idx + 1) % N] - poly[idx]).norm();
+            }
+            const double acc  = s.accepted > 0 ? static_cast<double>(s.accepted) : 0.0;
+            const double rate = s.in_fov > 0 ? acc / s.in_fov : 0.0;
+            const auto avg = [&](double sum) { return s.accepted > 0 ? sum / acc : 0.0; };
+            corner_stats_csv_ << idx << ',' << w_in << ',' << w_out << ','
+                              << s.in_fov << ',' << s.occluded << ',' << s.accepted << ',' << rate << ','
+                              << avg(s.assoc_prob_sum) << ',' << s.rival_n << ','
+                              << (s.rival_n > 0 ? s.runnerup_chi2_sum / s.rival_n : 0.0) << ','
+                              << avg(s.lambda_min_sum) << ',' << avg(s.lambda_max_sum) << ','
+                              << avg(s.resid_sum) << ',' << s.last_yield << ','
+                              << (s.retired_now ? 1 : 0) << ',' << s.suppressed << ','
+                              << (s.accepted > 0 ? s.suppressed / acc : 0.0) << '\n';
+        }
+        corner_stats_csv_.flush();
     }
 
     // Append one row to etc/hier_prec.csv (lazy-opened, truncate). Loc-thread only, no lock — same

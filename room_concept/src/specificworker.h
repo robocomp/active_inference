@@ -137,6 +137,12 @@ class SpecificWorker : public GenericWorker
         // ── Localizer ──────────────────────────────────────────────────────────
         rc::RoomConcept room_concept_;
         bool room_initialized_from_svg_polygon_ = false;
+        // Room contour AS HANDED TO THE LOCALIZER (already recentred when RECENTER_ROOM_POLYGON).
+        // The viewer/camera overlay must reuse THIS, not re-load the SVG, or it would draw the
+        // outline in the un-shifted frame.
+        std::vector<Eigen::Vector2f> room_polygon_;
+        // Old-frame coordinates of the new origin; zero when no recentring was applied.
+        Eigen::Vector2f room_polygon_offset_ = Eigen::Vector2f::Zero();
         void initialize_room_model_from_svg();
         void save_robot_pose_on_exit() const;
 
