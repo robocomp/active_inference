@@ -6,6 +6,7 @@ lock first also runs the web server (reading every launcher's registry); the oth
 just keep updating. If the monitor holder dies, the next launcher takes over.
 """
 
+import json
 import os
 import signal
 import subprocess
@@ -21,10 +22,15 @@ from rich.live import Live
 from rich.table import Table
 
 from .bandwidth import BandwidthMonitor
+from .battery import BatteryMonitor
 from .registry import MonitorLock, RegistryWriter, claim_commands
 from .shm_guard import clean_orphan_shm, preflight_dds
 from .server import MonitorServer
-from .topology import agent_domain, parse_endpoint
+from .topology import agent_domain, component_dds, parse_endpoint
+
+_FASTDDS_STATISTICS_TOPIC = "_fastdds_statistics_publication_throughput"
+_DDS_BRIDGE_BIN = os.path.join(os.path.dirname(__file__), "dds_stats_bridge", "build", "dds_stats_bridge")
+_BATTERY_JSON = "/tmp/robocomp_netmon/battery.json"
 
 _STATUS_RENDER = {
     "alive": "[green]✅ Alive[/green]",
@@ -51,13 +57,80 @@ def _fmt_uptime(sec):
     return f"{h:02}:{m:02}:{s:02}"
 
 
-def _ping(ice_string):
+def _make_ice_comm():
+    """One long-lived Communicator for all status pings, with bounded connect/invoke
+    timeouts. Ice.initialize() defaults to no timeout at all: a single slow/unresponsive
+    component would otherwise stall the whole collector loop (and its cpu_percent()
+    sampling for every other component) for however long ICE takes to give up."""
+    props = Ice.createProperties()
+    props.setProperty("Ice.Override.ConnectTimeout", "500")
+    props.setProperty("Ice.Override.Timeout", "500")
+    init_data = Ice.InitializationData()
+    init_data.properties = props
+    return Ice.initialize(init_data)
+
+
+def _ping(comm, ice_string):
     try:
-        with Ice.initialize() as comm:
-            comm.stringToProxy(ice_string).ice_ping()
-            return True
+        comm.stringToProxy(ice_string).ice_ping()
+        return True
     except Exception:
         return False
+
+
+def _check_rcnode(console):
+    for p in psutil.process_iter(["name"]):
+        try:
+            if (p.info["name"] or "").lower() == "icebox":
+                console.print("[green]✓ rcnode (icebox) is already running[/green]")
+                return p
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    console.print("[yellow]rcnode not detected. Starting rcnode...[/yellow]")
+    script = os.path.expanduser("~/robocomp/tools/rcnode/rcnode.sh")
+    env = dict(os.environ)
+    env.setdefault("ROBOCOMP", os.path.expanduser("~/robocomp"))
+    try:
+        subprocess.Popen(["bash", script], env=env, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+        time.sleep(2)
+        for p in psutil.process_iter(["name"]):
+            try:
+                if (p.info["name"] or "").lower() == "icebox":
+                    return p
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+    except Exception as e:
+        console.print(f"[red]Failed to start rcnode: {e}[/red]")
+    return None
+
+
+def _check_dds_bridge(console, domain):
+    """Idempotent-start a dds_stats_bridge for one DDS domain (measures real publish
+    bandwidth via Fast DDS's statistics module; see netmon/dds_stats_bridge/main.cpp)."""
+    out_path = f"/tmp/robocomp_netmon/dds_stats_d{domain}.json"
+    marker = f"--domain {domain}"
+    for p in psutil.process_iter(["cmdline"]):
+        try:
+            cs = " ".join(p.info.get("cmdline") or [])
+            if "dds_stats_bridge" in cs and marker in cs:
+                console.print(f"[green]✓ dds_stats_bridge (domain {domain}) already running[/green]")
+                return p
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    if not os.path.exists(_DDS_BRIDGE_BIN):
+        console.print(f"[yellow]dds_stats_bridge binary missing at {_DDS_BRIDGE_BIN} "
+                      f"(build netmon/dds_stats_bridge/); DDS bandwidth won't be measured[/yellow]")
+        return None
+    console.print(f"[yellow]Starting dds_stats_bridge for domain {domain}...[/yellow]")
+    try:
+        proc = subprocess.Popen([_DDS_BRIDGE_BIN, "--domain", str(domain), "--out", out_path],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        time.sleep(1)
+        return psutil.Process(proc.pid)
+    except Exception as e:
+        console.print(f"[red]Failed to start dds_stats_bridge: {e}[/red]")
+        return None
 
 
 def _check_webots(console):
@@ -84,10 +157,33 @@ def _check_webots(console):
     return None
 
 
-def _launch(command, cwd, name):
+def _check_shm(console):
+    """Remove zombie Fast DDS SHM segments (left in /dev/shm by crashed/killed publishers)
+    before components start, so a stuck writer can't reuse a stale/undersized segment."""
+    before = [f for f in os.listdir("/dev/shm") if f.startswith(("fastdds_", "sem.fastdds_"))]
+    if not before:
+        console.print("[green]✓ /dev/shm has no Fast DDS segments[/green]")
+        return
+    console.print(f"[yellow]{len(before)} Fast DDS SHM file(s) in /dev/shm, running 'fastdds shm clean'...[/yellow]")
+    try:
+        result = subprocess.run(["fastdds", "shm", "clean"], capture_output=True, text=True, timeout=15)
+        after = [f for f in os.listdir("/dev/shm") if f.startswith(("fastdds_", "sem.fastdds_"))]
+        if result.returncode == 0:
+            console.print(f"[green]✓ fastdds shm clean: {len(before) - len(after)} zombie file(s) removed, "
+                          f"{len(after)} still in use[/green]")
+        else:
+            console.print(f"[red]fastdds shm clean failed: {result.stderr.strip()}[/red]")
+    except FileNotFoundError:
+        console.print("[red]'fastdds' CLI not found in PATH — skipping SHM cleanup[/red]")
+    except Exception as e:
+        console.print(f"[red]SHM cleanup error: {e}[/red]")
+
+
+def _launch(command, cwd, name, extra_env=None):
     log = os.path.expanduser(f"~/.local/logs/{name}")
     os.makedirs(os.path.dirname(log), exist_ok=True)
-    proc = subprocess.Popen(command, cwd=cwd, shell=True,
+    env = dict(os.environ, **extra_env) if extra_env else None
+    proc = subprocess.Popen(command, cwd=cwd, shell=True, env=env,
                             stdout=open(log + ".out", "w"), stderr=open(log + ".err", "w"))
     time.sleep(0.3)
     try:
@@ -96,6 +192,21 @@ def _launch(command, cwd, name):
     except Exception:
         ps = psutil.Process(proc.pid)
     return proc, ps
+
+
+_CBUILD_CMD = "cmake -B build && make -C build -j32"  # matches the `cbuild` shell alias
+
+
+def _build(name, cwd):
+    """Fire-and-forget cbuild, appended to the same out/err logs the terminal viewer tails
+    (so a build triggered from the web shows up where the user is already looking)."""
+    log = os.path.expanduser(f"~/.local/logs/{name}")
+    os.makedirs(os.path.dirname(log), exist_ok=True)
+    marker = f"\n=== cbuild {time.strftime('%H:%M:%S')} ===\n"
+    with open(log + ".out", "a") as f:
+        f.write(marker)
+    subprocess.Popen(_CBUILD_CMD, cwd=cwd, shell=True,
+                     stdout=open(log + ".out", "a"), stderr=open(log + ".err", "a"))
 
 
 def _remove_existing(components, console):
@@ -148,8 +259,8 @@ def _kill_tree(proc, timeout=5):
             pass
 
 
-def _status(info):
-    if info.get("is_webots"):
+def _status(info, ice_comm):
+    if info.get("is_external"):
         try:
             return "running" if info["psutil_proc"].is_running() else "stopped"
         except Exception:
@@ -159,24 +270,45 @@ def _status(info):
     ice = info.get("ice_name")
     if not ice:
         return "alive"
-    return "alive" if _ping(ice) else "up"
+    return "alive" if _ping(ice_comm, ice) else "up"
 
 
-def run_launcher(toml_path, launcher, layer, start_webots=False,
-                 web=True, web_port=8080, iface="lo", no_bw=False):
+def run_launcher(toml_path, launcher, layer, start_webots=False, start_rcnode=False,
+                 web=True, web_port=8080, web_host="0.0.0.0", iface="lo", no_bw=False,
+                 battery_port=None):
     console = Console()
-
-    webots = _check_webots(console) if start_webots else None
 
     path = os.path.expanduser(toml_path)
     if not os.path.exists(path):
         console.print(f"[red]Missing components file at {path}[/red]")
         raise SystemExit(1)
-    components = toml.load(path)["components"]
+    data = toml.load(path)
+    components = data["components"]
+    general = data.get("general", {})
+    start_webots = general.get("start_webots", start_webots)
+    start_rcnode = general.get("start_rcnode", start_rcnode)
+    battery_port = general.get("battery_port", battery_port)
+
+    rcnode = _check_rcnode(console) if start_rcnode else None
+    webots = _check_webots(console) if start_webots else None
+
     for c in components:
         c["_domain"] = agent_domain(c).get("domain") if layer == "cognitive" else None
 
+    # Components with a [DDS] config get FASTDDS_STATISTICS so they publish real throughput
+    # samples; one dds_stats_bridge per distinct domain then turns those into bytes/s the
+    # web monitor can read (see netmon/dds_stats_bridge/).
+    dds_domains = set()
+    dds_component_names = set()
+    for c in components:
+        info = component_dds(c)
+        if info and info.get("domain") is not None:
+            dds_domains.add(info["domain"])
+            dds_component_names.add(c["name"])
+    dds_bridges = {dom: _check_dds_bridge(console, dom) for dom in dds_domains}
+
     _remove_existing(components, console)
+    _check_shm(console)
 
     # With this launcher's components just killed, garbage-collect FastDDS segments nothing
     # references any more, then confirm shared-memory discovery really works before starting the
@@ -201,20 +333,47 @@ def run_launcher(toml_path, launcher, layer, start_webots=False,
         try:
             webots.cpu_percent(interval=None)
             processes["Webots"] = {"process": None, "psutil_proc": webots, "ice_name": None,
-                                   "start_time": time.time(), "is_webots": True,
+                                   "start_time": time.time(), "is_external": True,
                                    "status": "running", "in_registry": False}
+        except Exception:
+            pass
+    if rcnode:
+        try:
+            rcnode.cpu_percent(interval=None)
+            processes["rcnode"] = {"process": None, "psutil_proc": rcnode, "ice_name": None,
+                                   "start_time": time.time(), "is_external": True,
+                                   "status": "running", "in_registry": False}
+        except Exception:
+            pass
+    for dom, p in dds_bridges.items():
+        if not p:
+            continue
+        try:
+            p.cpu_percent(interval=None)
+            processes[f"dds_stats·d{dom}"] = {"process": None, "psutil_proc": p, "ice_name": None,
+                                              "start_time": time.time(), "is_external": True,
+                                              "status": "running", "in_registry": False}
         except Exception:
             pass
     for c in components:
         console.print(f"Starting {c['name']}...")
-        proc, ps = _launch(c["cmd"], _expand(c.get("cwd")), c["name"])
+        extra_env = {"FASTDDS_STATISTICS": _FASTDDS_STATISTICS_TOPIC} if c["name"] in dds_component_names else None
+        proc, ps = _launch(c["cmd"], _expand(c.get("cwd")), c["name"], extra_env)
         ps.cpu_percent(interval=None)
         processes[c["name"]] = {"process": proc, "psutil_proc": ps, "ice_name": c.get("ice_name"),
                                 "start_time": time.time(), "status": "unknown",
                                 "in_registry": True, "comp": c}
 
+    # Victron VE.Direct battery is hardware on this machine; the launcher that owns the
+    # serial (subcognitive passes battery_port) publishes its state to a shared json so the
+    # web monitor picks it up regardless of which launcher ends up serving (as DDS/media do).
+    battery = BatteryMonitor(port=battery_port) if battery_port else None
+    if battery:
+        console.print(f"[green]🔋 Battery monitor on {battery_port}[/green]")
+
     writer = RegistryWriter(launcher, layer)
     mlock = MonitorLock()
+    ice_comm = _make_ice_comm()
     srv = {"server": None, "bw": None}
 
     def take_monitor_role():
@@ -226,7 +385,7 @@ def run_launcher(toml_path, launcher, layer, start_webots=False,
                 console.print(f"[green]✓ Bandwidth capture on {iface}[/green]")
             else:
                 console.print(f"[yellow]⚠ Bandwidth off: {bw.error}[/yellow]")
-        server = MonitorServer(bw, port=web_port)
+        server = MonitorServer(bw, port=web_port, host=web_host)
         try:
             url = server.start()
         except OSError as e:
@@ -243,17 +402,21 @@ def run_launcher(toml_path, launcher, layer, start_webots=False,
     def run_command(cmd):
         name, action = cmd.get("name"), cmd.get("action")
         info = processes.get(name)
-        if not info or info.get("is_webots"):
+        if not info or info.get("is_external"):
+            return
+        console.print(f"[yellow]{action} '{name}' (from web)[/yellow]")
+        if action == "build":
+            _build(name, _expand(info["comp"].get("cwd")))
             return
         p = info["process"]
         running = p is not None and p.poll() is None
-        console.print(f"[yellow]{action} '{name}' (from web)[/yellow]")
         if action in ("stop", "restart") and running:
             _kill_tree(p)
             running = False
         if action in ("start", "restart") and not running:
             c = info["comp"]
-            proc, ps = _launch(c["cmd"], _expand(c.get("cwd")), name)
+            extra_env = {"FASTDDS_STATISTICS": _FASTDDS_STATISTICS_TOPIC} if name in dds_component_names else None
+            proc, ps = _launch(c["cmd"], _expand(c.get("cwd")), name, extra_env)
             ps.cpu_percent(interval=None)
             info.update({"process": proc, "psutil_proc": ps,
                          "start_time": time.time(), "status": "unknown"})
@@ -275,7 +438,7 @@ def run_launcher(toml_path, launcher, layer, start_webots=False,
                             info["mem_last"] = info["cpu_last"] = 0
                     except Exception:
                         info["mem_last"] = info["cpu_last"] = 0
-                    info["status"] = _status(info)
+                    info["status"] = _status(info, ice_comm)
                     if info.get("in_registry"):
                         c = info["comp"]
                         reg.append({"name": name, "status": info["status"],
@@ -284,6 +447,11 @@ def run_launcher(toml_path, launcher, layer, start_webots=False,
                                     "cwd": c.get("cwd"), "cmd": c.get("cmd"),
                                     "layer": layer, "domain": c.get("_domain")})
                 writer.update(reg)
+                if battery:
+                    tmp = _BATTERY_JSON + ".tmp"
+                    with open(tmp, "w") as f:
+                        json.dump(battery.snapshot(), f)
+                    os.replace(tmp, _BATTERY_JSON)  # atomic: server never reads a half-written file
                 if web:
                     if not mlock.owned:
                         if time.time() >= next_serve_try and mlock.try_acquire(web_port):
@@ -329,6 +497,12 @@ def run_launcher(toml_path, launcher, layer, start_webots=False,
             srv["server"].stop()
         mlock.release()
         writer.remove()
+        ice_comm.destroy()
+        if battery:
+            try:
+                os.remove(_BATTERY_JSON)
+            except OSError:
+                pass
         for info in processes.values():
             if info["process"]:
                 _kill_tree(info["process"])

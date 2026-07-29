@@ -23,6 +23,15 @@
     .btn  { background: #262b34; color: #cfd6e0; border: 1px solid #39414d; border-radius: 6px;
             padding: 3px 10px; font: inherit; font-size: 12px; cursor: pointer; }
     .btn:hover { background: #313947; border-color: #4a5568; }
+    .btn.off { background: #181a1f; color: #565e6b; border-color: #262b34; }
+    .btn:disabled { opacity: .45; cursor: default; }
+    .btn:disabled:hover { background: #262b34; border-color: #39414d; }
+    #toast { position: fixed; left: 50%; bottom: 24px; transform: translate(-50%, 12px);
+             background: #1c1f26; color: #cfd6e0; border: 1px solid #39414d; border-radius: 8px;
+             padding: 6px 14px; font-size: 12px; opacity: 0; pointer-events: none;
+             transition: opacity .15s, transform .15s; z-index: 40; }
+    #toast.show { opacity: 1; transform: translate(-50%, 0); }
+    #toast.err { border-color: #f85149; color: #ffb3ae; }
     table { width: 100%; border-collapse: collapse; font-size: 12px; }
     th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #23272f; white-space: nowrap; }
     th { position: sticky; top: 0; background: #1c1f26; color: #8a94a2; font-weight: normal; }
@@ -46,6 +55,26 @@
                 background: #1c1f26; border-bottom: 1px solid #2c313c; font-size: 12px; }
     #logtext { flex: 1; margin: 0; padding: 8px 12px; overflow: auto; font-size: 12px;
                color: #cbd3de; white-space: pre-wrap; word-break: break-word; }
+    #cfg { position: fixed; left: 0; right: 0; bottom: 0; height: 45%; background: #0d0f13;
+           border-top: 1px solid #2c313c; display: flex; flex-direction: column; z-index: 21; }
+    #cfg.hidden { display: none; }
+    #cfghead { display: flex; gap: 8px; align-items: center; padding: 6px 12px;
+               background: #1c1f26; border-bottom: 1px solid #2c313c; font-size: 12px; }
+    #cfgpath { color: #8a94a2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #cfgtext { flex: 1; margin: 0; padding: 8px 12px; overflow: auto; font-size: 12px;
+               font-family: inherit; color: #cbd3de; background: #0d0f13; border: 0; resize: none;
+               white-space: pre; tab-size: 4; }
+    #live { position: fixed; right: 16px; bottom: 16px; width: 380px; height: 280px;
+            min-width: 220px; min-height: 160px; background: #0d0f13; border: 1px solid #2c313c;
+            border-radius: 8px; display: flex; flex-direction: column; z-index: 25;
+            resize: both; overflow: hidden; box-shadow: 0 4px 18px rgba(0,0,0,.5); }
+    #live.hidden { display: none; }
+    #livehead { display: flex; gap: 6px; align-items: center; padding: 6px 8px;
+                background: #1c1f26; border-bottom: 1px solid #2c313c; font-size: 12px; }
+    #liveUrl { flex: 1; min-width: 0; background: #14161a; color: #cfd6e0; border: 1px solid #39414d;
+               border-radius: 4px; padding: 3px 6px; font: inherit; font-size: 12px; }
+    #liveBody { flex: 1; position: relative; background: #000; }
+    #liveFrame { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #000; }
   </style>
 </head>
 <body>
@@ -56,16 +85,24 @@
           <span class="dot" style="background:#f85149;margin-left:8px"></span>parado
           <span class="dot" style="background:#b072e0;margin-left:8px"></span>broker
           <span class="dot" style="background:#2ec5d3;margin-left:8px"></span>DSR</span>
-    <span style="color:#8a94a2">— RPC · <span style="color:#b072e0">- - pub/sub</span> · <span style="color:#2ec5d3">DSR</span></span>
+    <span style="color:#8a94a2">— RPC · <span style="color:#b072e0">- - pub/sub</span> · <span style="color:#e0952b">- - DDS</span> · <span style="color:#2ec5d3">DSR</span></span>
     <span id="bw" class="pill">bw…</span>
+    <span id="battery" class="pill" title="batería (Victron VE.Direct)" style="display:none"></span>
+    <span style="color:#8a94a2">capas:</span>
+    <button id="toggleRpc" class="btn" title="mostrar/ocultar aristas RPC (ICE)">RPC</button>
+    <button id="toggleIcestorm" class="btn" title="mostrar/ocultar pub/sub IceStorm">IceStorm</button>
+    <button id="toggleDds" class="btn" title="mostrar/ocultar publicaciones DDS">DDS</button>
     <span id="sel" class="hidden">
       <b id="selname"></b>
       <button class="btn" id="selStart" title="arrancar si está parado">▶ launch</button>
       <button class="btn" id="selRestart" title="reiniciar">🔄 relaunch</button>
       <button class="btn" id="selStop" title="parar">🛑 stop</button>
+      <button class="btn" id="selBuild" title="cbuild (cmake -B build && make -C build -j32) en su directorio">🔨 build</button>
       <button class="btn" id="selTerm" title="ver logs">📜 terminal</button>
+      <button class="btn" id="selConfig" title="editar archivo de configuración">⚙ config</button>
     </span>
-    <button id="layoutBtn" class="btn" style="margin-left:auto">Vista: Orgánico por nivel</button>
+    <button id="liveBtn" class="btn" style="margin-left:auto">🎥 Live view</button>
+    <button id="layoutBtn" class="btn">Vista: Orgánico por nivel</button>
     <button id="fitBtn" class="btn">Reorganizar</button>
     <button id="tableBtn" class="btn">Tabla</button>
     <span style="color:#6b7280" id="ts"></span>
@@ -77,6 +114,10 @@
       <table>
         <thead><tr><th>Componente</th><th>Capa</th><th>Estado</th><th class="num">CPU</th><th class="num">Mem</th></tr></thead>
         <tbody id="tbody"></tbody>
+      </table>
+      <table style="margin-top:10px" title="fps/drops(frame_id)/lost(RTPS)/latencia por stream de vídeo — media_transport StreamStats. fps=media de la ventana de 5s, min fps=peor instante dentro de esa ventana (detecta caídas breves que la media esconde). lat/max lat: latencia captura→recepción.">
+        <thead><tr><th>Media stream</th><th class="num">fps</th><th class="num">min fps</th><th class="num">drops</th><th class="num">lost</th><th class="num">lat ms</th><th class="num">max lat</th></tr></thead>
+        <tbody id="mediaTbody"></tbody>
       </table>
     </div>
   </div>
@@ -90,6 +131,25 @@
     </div>
     <pre id="logtext"></pre>
   </div>
+  <div id="cfg" class="hidden">
+    <div id="cfghead">
+      <b id="cfgtitle">config</b>
+      <span id="cfgpath"></span>
+      <button class="btn" id="cfgSave" style="margin-left:auto">💾 guardar</button>
+      <button class="btn" id="cfgClose">✕ cerrar</button>
+    </div>
+    <textarea id="cfgtext" spellcheck="false"></textarea>
+  </div>
+  <div id="live" class="hidden">
+    <div id="livehead">
+      <b>🎥 live view</b>
+      <input id="liveUrl" type="text" placeholder="http://host:8889/theta (mediamtx WebRTC)">
+      <button class="btn" id="liveLoad">Cargar</button>
+      <button class="btn" id="liveClose">✕</button>
+    </div>
+    <div id="liveBody"><iframe id="liveFrame" allow="autoplay; fullscreen" referrerpolicy="no-referrer"></iframe></div>
+  </div>
+  <div id="toast"></div>
   <script src="/app.js"></script>
 </body>
 </html>

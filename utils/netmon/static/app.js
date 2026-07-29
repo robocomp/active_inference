@@ -6,9 +6,10 @@ const STATUS_COLOR = {
   unknown: { background: "#26292f", border: "#6b7280" },
 };
 const ROLE_COLOR = {
-  broker:   { background: "#2b1d3d", border: "#b072e0" },
-  external: { background: "#22252b", border: "#55606e" },
-  dsr:      { background: "#10303a", border: "#2ec5d3" },
+  broker:    { background: "#2b1d3d", border: "#b072e0" },
+  ddsbroker: { background: "#3d2a14", border: "#e0952b" },
+  external:  { background: "#22252b", border: "#55606e" },
+  dsr:       { background: "#10303a", border: "#2ec5d3" },
 };
 const LABEL_STROKE = { strokeWidth: 3, strokeColor: "#14161a" };
 
@@ -50,6 +51,9 @@ const OPTIONS = {
 const MODES = ["level", "hier", "free"];
 const MODE_LABEL = { level: "Orgánico por nivel", hier: "Jerárquico", free: "Orgánico libre" };
 let layoutMode = "level";   // default view
+
+// which edge groups are shown; toggled from the toolbar, persists across topology rebuilds
+const edgeVisibility = { rpc: true, icestorm: true, dds: true };
 
 function setLevelPositions(on) {
   if (!nodes) return;
@@ -113,7 +117,8 @@ function computeLevels(topo) {
   topo.nodes.forEach(n => {
     if (n.role === "component" || n.role === "external") compMax = Math.max(compMax, depth(n.id, new Set()));
   });
-  const base = { external: 0, component: 0, broker: compMax + 2, agent: compMax + 3, dsr: compMax + 5 };
+  const base = { external: 0, component: 0, broker: compMax + 2, ddsbroker: compMax + 2,
+                 agent: compMax + 3, dsr: compMax + 5 };
 
   const levels = {};
   topo.nodes.forEach(n => {
@@ -131,18 +136,21 @@ function nodeTooltip(n) {
     L.push("requiere: " + n.requires.map(r => `${r.identity}:${r.port}`).join(", "));
   if (n.publishes && n.publishes.length) L.push("publica: " + n.publishes.join(", "));
   if (n.subscribes && n.subscribes.length) L.push("suscribe: " + n.subscribes.join(", "));
+  if (n.dds && n.dds.domain !== undefined)
+    L.push(`DDS: dominio ${n.dds.domain}, topics ${(n.dds.topics || []).join(", ") || "?"}`);
   return `${n.id}\n${L.join("\n") || "(sin interfaces ICE)"}`;
 }
 
 let network, nodes, edges;
 let rpcKey = {};        // "src->dst:port" -> vis edge id
+let ddsEdgeMeta = {};    // vis edge id -> [topic, ...] it aggregates (from dds_stats_bridge)
 let nodeInfo = {};      // id -> { serves, title }
 let nodeLevels = {};    // id -> hierarchy level
 let maxLevel = 0;
 let expectedProc = new Set();  // process node ids we expect in /api/state
 
 function buildNodes(topo) {
-  rpcKey = {}; nodeInfo = {};
+  rpcKey = {}; ddsEdgeMeta = {}; nodeInfo = {};
   const levels = nodeLevels = computeLevels(topo);
   maxLevel = Math.max(0, ...Object.values(levels));
   return topo.nodes.map(n => {
@@ -157,6 +165,8 @@ function buildNodes(topo) {
     };
     if (n.role === "broker")
       return { ...base, shape: "diamond", size: 22, color: ROLE_COLOR.broker, label: n.id };
+    if (n.role === "ddsbroker")
+      return { ...base, shape: "hexagon", size: 24, color: ROLE_COLOR.ddsbroker, label: n.id };
     if (n.role === "dsr")
       return { ...base, shape: "dot", size: 32, color: ROLE_COLOR.dsr,
                label: `${n.id}\n(grafo DSR)`, font: { ...base.font, size: 15 } };
@@ -171,11 +181,14 @@ function buildNodes(topo) {
 }
 
 function buildEdges(topo) {
-  const rpcEdges = [], dsrEdges = [], psGroups = {};
+  const rpcEdges = [], dsrEdges = [], psGroups = {}, ddsGroups = {};
   topo.edges.forEach(e => {
     if (e.kind === "pub" || e.kind === "sub") {
       const k = `${e.src}|${e.dst}|${e.kind}`;
       (psGroups[k] || (psGroups[k] = { src: e.src, dst: e.dst, kind: e.kind, topics: [] })).topics.push(e.topic);
+    } else if (e.kind === "dds") {
+      const k = `${e.src}|${e.dst}`;
+      (ddsGroups[k] || (ddsGroups[k] = { src: e.src, dst: e.dst, topics: [] })).topics.push(e.topic);
     } else if (e.kind === "dsr") dsrEdges.push(e);
     else rpcEdges.push(e);
   });
@@ -197,11 +210,13 @@ function buildEdges(topo) {
       color: { color: "#4a5568", highlight: "#7fd1ff" },
       font: { color: "#9aa4b2", size: 11, align: "horizontal", ...LABEL_STROKE },
       width: 1, smooth: { type: "cubicBezier", forceDirection: "vertical", roundness: round },
+      group: "rpc", hidden: !edgeVisibility.rpc,
     });
   });
   dsrEdges.forEach(e => visEdges.push({
     id: "e" + (ei++), from: e.src, to: e.dst, arrows: "",
     color: { color: "#2ec5d3", highlight: "#7fe3ec" }, width: 2, smooth: { type: "continuous" },
+    group: "dsr",
   }));
   Object.values(psGroups).forEach(g => {
     const head = g.kind === "pub" ? "pub" : "sub";
@@ -213,9 +228,31 @@ function buildEdges(topo) {
       color: { color: "#b072e0", highlight: "#d9b3ff" },
       font: { color: "#c39be6", size: 10, align: "middle", ...LABEL_STROKE },
       width: 1.5, smooth: { type: "cubicBezier" },
+      group: "icestorm", hidden: !edgeVisibility.icestorm,
+    });
+  });
+  Object.values(ddsGroups).forEach(g => {
+    const label = g.topics.length > 1
+      ? `dds (${g.topics.length}):\n` + g.topics.join("\n")
+      : `dds ${g.topics[0] || ""}`;
+    const id = "e" + (ei++);
+    ddsEdgeMeta[id] = { topics: g.topics, label };
+    visEdges.push({
+      id, from: g.src, to: g.dst, arrows: "to", label, dashes: [2, 3],
+      color: { color: "#e0952b", highlight: "#f5b95a" },
+      font: { color: "#e0952b", size: 10, align: "middle", ...LABEL_STROKE },
+      width: 1.5, smooth: { type: "cubicBezier" },
+      group: "dds", hidden: !edgeVisibility.dds,
     });
   });
   return visEdges;
+}
+
+function setEdgeGroupVisible(group, visible) {
+  edgeVisibility[group] = visible;
+  if (!edges) return;
+  const ids = edges.getIds().filter(id => edges.get(id).group === group);
+  edges.update(ids.map(id => ({ id, hidden: !visible })));
 }
 
 async function loadTopology() {
@@ -253,6 +290,29 @@ function renderTable(stNodes) {
   }).join("");
 }
 
+// Per-stream fps/drops/sample_lost/latency from media_transport's StreamStats (see
+// write_media_stats_json in media_transport.h). Labels already encode component + role +
+// stream (e.g. "voxelizer:zed:rgb" vs "robot_concept:ingest:zed_camera:rgb"), so an
+// ingest-side row and a final-consumer row for the same physical stream sit side by side
+// here instead of overwriting each other -- that's what pinpoints WHERE fps drop.
+function renderMediaTable(media) {
+  const rows = Object.entries(media || {}).sort(([a], [b]) => a.localeCompare(b));
+  document.getElementById("mediaTbody").innerHTML = rows.map(([label, s]) => {
+    const dropCol = s.drops > 0 ? "#f85149" : "#cfd6e0";
+    const lostCol = s.sample_lost > 0 ? "#f85149" : "#cfd6e0";
+    // min fps well under the window average flags a brief stall the average alone hides.
+    const minFpsCol = (s.min_fps > 0 && s.min_fps < s.fps * 0.5) ? "#f85149" : "#cfd6e0";
+    const maxLatCol = (s.max_latency_ms > s.latency_ms * 2) ? "#e0952b" : "#cfd6e0";
+    return `<tr><td>${label}</td>`
+      + `<td class="num">${s.fps.toFixed(1)}</td>`
+      + `<td class="num" style="color:${minFpsCol}">${s.min_fps.toFixed(1)}</td>`
+      + `<td class="num" style="color:${dropCol}">${s.drops}</td>`
+      + `<td class="num" style="color:${lostCol}">${s.sample_lost}</td>`
+      + `<td class="num">${s.latency_ms.toFixed(1)}</td>`
+      + `<td class="num" style="color:${maxLatCol}">${s.max_latency_ms.toFixed(1)}</td></tr>`;
+  }).join("");
+}
+
 // --- selection + process control + log viewer ---
 let selected = null, logName = null, logStream = "err";
 
@@ -274,21 +334,102 @@ function clearSelection() {
   if (network) network.unselectAll();
 }
 
+// small non-blocking status pill, replaces alert() for routine action feedback
+function toast(msg, isError) {
+  const el = document.getElementById("toast");
+  el.textContent = msg;
+  el.className = "show" + (isError ? " err" : "");
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => { el.className = ""; }, 2500);
+}
+
+// after an action, the launcher's collector only claims commands once per second (see
+// run_launcher's `collector()` loop), so a single immediate poll can still land just before
+// the change is applied -- keep polling faster for a few seconds to catch the transition
+// as soon as it happens instead of waiting for the next lazy 1Hz tick.
+let burstTimer = null;
+function burstPoll(durationMs = 4000, intervalMs = 350) {
+  if (burstTimer) clearInterval(burstTimer);
+  const deadline = Date.now() + durationMs;
+  poll();
+  burstTimer = setInterval(() => {
+    poll();
+    if (Date.now() > deadline) { clearInterval(burstTimer); burstTimer = null; }
+  }, intervalMs);
+}
+
 async function sendAction(action, name) {
   try {
     const r = await (await fetch("/api/action", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action, name }),
     })).json();
-    if (!r.ok) alert("Error: " + (r.error || "acción rechazada"));
-  } catch { alert("No se pudo enviar la acción"); }
+    if (!r.ok) { toast("Error: " + (r.error || "acción rechazada"), true); return; }
+    toast(`${action} → ${name}`);
+    burstPoll();
+  } catch { toast("No se pudo enviar la acción", true); }
+}
+
+// disables a button for a short cooldown after click, so a slow action (build, restart)
+// can't be fired twice in a row while the first request is still in flight
+function withCooldown(btn, fn) {
+  return async (...args) => {
+    if (btn.disabled) return;
+    btn.disabled = true;
+    try { await fn(...args); } finally { setTimeout(() => { btn.disabled = false; }, 1200); }
+  };
 }
 
 function openLogs(name) {
+  document.getElementById("cfg").classList.add("hidden");   // mutually exclusive, both dock at the bottom
   logName = name;
   document.getElementById("logtitle").textContent = "logs · " + name;
   document.getElementById("logs").classList.remove("hidden");
   refreshLogs();
+}
+
+// --- config file editor: reads the etc/ file the component's own `cmd` points at ---
+let cfgName = null, cfgPath = null, cfgOriginal = null;
+
+async function openConfig(name) {
+  document.getElementById("logs").classList.add("hidden");
+  cfgName = name;
+  cfgPath = cfgOriginal = null;
+  document.getElementById("cfgtitle").textContent = "config · " + name;
+  document.getElementById("cfgpath").textContent = "";
+  document.getElementById("cfgtext").value = "cargando...";
+  document.getElementById("cfg").classList.remove("hidden");
+  try {
+    const r = await (await fetch(`/api/config?name=${encodeURIComponent(name)}`)).json();
+    if (!r.ok) {
+      document.getElementById("cfgtext").value = "";
+      document.getElementById("cfgpath").textContent = r.error || "sin archivo de configuración";
+      return;
+    }
+    cfgPath = r.path; cfgOriginal = r.text;
+    document.getElementById("cfgpath").textContent = r.path;
+    document.getElementById("cfgtext").value = r.text;
+  } catch {
+    document.getElementById("cfgtext").value = "";
+    document.getElementById("cfgpath").textContent = "error de red";
+  }
+}
+
+async function saveConfig() {
+  if (!cfgName || !cfgPath) return;
+  const text = document.getElementById("cfgtext").value;
+  if (text === cfgOriginal) return;
+  if (!confirm(`¿Guardar cambios en ${cfgPath}?\nSe guarda una copia .bak del contenido anterior. `
+              + `El componente en marcha no recarga solo — usa 🔄 relaunch después.`)) return;
+  try {
+    const r = await (await fetch("/api/config", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: cfgName, text }),
+    })).json();
+    if (!r.ok) { toast("Error al guardar: " + (r.error || "desconocido"), true); return; }
+    cfgOriginal = text;
+    toast(`config guardada · ${cfgName}`);
+  } catch { toast("No se pudo guardar (red)", true); }
 }
 
 async function refreshLogs() {
@@ -303,6 +444,35 @@ async function refreshLogs() {
   } catch { /* ignore */ }
 }
 
+function bindEdgeToggle(btnId, group) {
+  const btn = document.getElementById(btnId);
+  btn.classList.toggle("off", !edgeVisibility[group]);
+  btn.addEventListener("click", () => {
+    setEdgeGroupVisible(group, !edgeVisibility[group]);
+    btn.classList.toggle("off", !edgeVisibility[group]);
+  });
+}
+
+// --- live view: generic iframe embed (works with mediamtx's built-in WebRTC player
+// page at http://host:8889/<path>, or any other URL the user pastes in) ---
+function setLiveVisible(show) {
+  document.getElementById("live").classList.toggle("hidden", !show);
+  const frame = document.getElementById("liveFrame");
+  if (show) {
+    const url = document.getElementById("liveUrl").value.trim();
+    if (url) frame.src = url;
+  } else {
+    frame.src = "about:blank";   // stop decoding/bandwidth while closed
+  }
+}
+
+function loadLiveUrl() {
+  const url = document.getElementById("liveUrl").value.trim();
+  if (!url) return;
+  localStorage.setItem("netmon_live_url", url);
+  document.getElementById("liveFrame").src = url;
+}
+
 async function init() {
   await loadTopology();
   document.getElementById("layoutBtn").addEventListener("click", cycleLayout);
@@ -312,6 +482,24 @@ async function init() {
     const hidden = document.getElementById("panel").classList.toggle("hidden");
     document.getElementById("resizer").classList.toggle("hidden", hidden);
     if (network) setTimeout(() => network.redraw(), 0);
+  });
+  bindEdgeToggle("toggleRpc", "rpc");
+  bindEdgeToggle("toggleIcestorm", "icestorm");
+  bindEdgeToggle("toggleDds", "dds");
+
+  const liveUrlInput = document.getElementById("liveUrl");
+  liveUrlInput.value = localStorage.getItem("netmon_live_url") || `http://${location.hostname}:8889/theta`;
+  document.getElementById("liveBtn").addEventListener("click",
+    () => setLiveVisible(document.getElementById("live").classList.contains("hidden")));
+  document.getElementById("liveClose").addEventListener("click", () => setLiveVisible(false));
+  document.getElementById("liveLoad").addEventListener("click", loadLiveUrl);
+  liveUrlInput.addEventListener("keydown", (e) => { if (e.key === "Enter") loadLiveUrl(); });
+
+  // manual drag frees that node from the level layout's y-lock, so it can be
+  // repositioned anywhere afterwards to declutter a crowded graph
+  network.on("dragEnd", (params) => {
+    if (!params.nodes || !params.nodes.length) return;
+    nodes.update(params.nodes.map(id => ({ id, fixed: false })));
   });
 
   // draggable divider to resize the side panel
@@ -345,11 +533,21 @@ async function init() {
   });
 
   // contextual actions in the top bar (act on the selected component)
-  document.getElementById("selStart").addEventListener("click", () => selected && sendAction("start", selected));
-  document.getElementById("selRestart").addEventListener("click", () => selected && sendAction("restart", selected));
-  document.getElementById("selStop").addEventListener("click",
-    () => { if (selected && confirm(`¿Parar ${selected}?`)) sendAction("stop", selected); });
+  const btnStart = document.getElementById("selStart");
+  const btnRestart = document.getElementById("selRestart");
+  const btnStop = document.getElementById("selStop");
+  const btnBuild = document.getElementById("selBuild");
+  btnStart.addEventListener("click", withCooldown(btnStart, () => selected && sendAction("start", selected)));
+  btnRestart.addEventListener("click", withCooldown(btnRestart, () => selected && sendAction("restart", selected)));
+  btnStop.addEventListener("click", withCooldown(btnStop,
+    () => { if (selected && confirm(`¿Parar ${selected}?`)) sendAction("stop", selected); }));
   document.getElementById("selTerm").addEventListener("click", () => selected && openLogs(selected));
+  btnBuild.addEventListener("click", withCooldown(btnBuild, () => {
+    if (!selected) return;
+    sendAction("build", selected);
+    logStream = "out";
+    openLogs(selected);           // jump to stdout so the cbuild output is visible right away
+  }));
 
   document.getElementById("logOut").addEventListener("click", () => { logStream = "out"; refreshLogs(); });
   document.getElementById("logErr").addEventListener("click", () => { logStream = "err"; refreshLogs(); });
@@ -357,8 +555,30 @@ async function init() {
     () => { document.getElementById("logs").classList.add("hidden"); logName = null; });
   setInterval(refreshLogs, 1500);
 
+  document.getElementById("selConfig").addEventListener("click", () => selected && openConfig(selected));
+  document.getElementById("cfgSave").addEventListener("click", saveConfig);
+  document.getElementById("cfgClose").addEventListener("click",
+    () => { document.getElementById("cfg").classList.add("hidden"); cfgName = null; });
+
   poll();
   setInterval(poll, 1000);
+}
+
+function renderBattery(b) {
+  const el = document.getElementById("battery");
+  if (!b) { el.style.display = "none"; return; }
+  el.style.display = "";
+  if (!b.available) {
+    el.className = "pill warn";
+    el.textContent = "🔋 sin datos";
+    el.title = "batería: " + (b.error || "n/d");
+    return;
+  }
+  const pct = b.percentage;
+  const icon = b.state === "Charging" ? "⚡" : "🔋";
+  el.className = "pill " + (pct <= 20 ? "warn" : "ok");
+  el.textContent = `${icon} ${pct}%  ${b.voltage}V ${b.current > 0 ? "+" : ""}${b.current}A`;
+  el.title = `batería ${b.state} — ${b.voltage} V · ${b.current} A · ${pct}%`;
 }
 
 async function poll() {
@@ -374,6 +594,7 @@ async function poll() {
   }
 
   renderTable(st.nodes);
+  renderMediaTable(st.media);
   if (selected && !cur.has(selected)) clearSelection();
 
   st.nodes.forEach(n => {
@@ -402,9 +623,25 @@ async function poll() {
     });
   }
 
+  const ddsBw = st.dds_bw || {};
+  for (const [id, meta] of Object.entries(ddsEdgeMeta)) {
+    const base = edges.get(id);
+    if (!base) continue;
+    const bps = meta.topics.reduce((sum, t) => sum + (ddsBw[t] || 0), 0);
+    const active = bps > 1;
+    edges.update({
+      id,
+      label: meta.label + (active ? "\n" + fmtBps(bps) : ""),
+      width: active ? Math.min(8, 1 + Math.log2(1 + bps / 512)) : 1.5,
+      color: { color: active ? "#3fb950" : "#e0952b", highlight: active ? "#7fd1ff" : "#f5b95a" },
+    });
+  }
+
   const bw = document.getElementById("bw");
   if (st.bw_available) { bw.className = "pill ok"; bw.textContent = "captura activa"; }
   else { bw.className = "pill warn"; bw.textContent = "bw: " + (st.bw_error || "n/d"); }
+
+  renderBattery(st.battery);
   document.getElementById("ts").textContent = new Date().toLocaleTimeString();
 }
 
