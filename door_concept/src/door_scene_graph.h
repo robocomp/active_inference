@@ -15,6 +15,8 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <string>
+#include <string_view>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -40,8 +42,12 @@ public:
     // Data-driven birth: create a fresh "door_N" node at the detection centroid (room frame), seeded
     // with the Tracker.Birth* default geometry. Returns the new node id (0 on failure). Used by the
     // worker's instance tracker — the only instance-lifecycle path.
+    // `preferred_name` (identity RE-ACQUISITION): reuse the name of a door that was removed and is now coming
+    // back at this spot, so it keeps its identity in the graph instead of taking the next free door_N. Ignored
+    // if empty or if a node of that name still exists.
     std::uint64_t create_instance_from_detection(const Eigen::Vector3f& centroid_room,
-                                                 std::uint64_t room_node_id);
+                                                 std::uint64_t room_node_id,
+                                                 std::string_view preferred_name = {});
 
     // Publish the instance's fitted model to its DSR node (geometry + FE + mesh + RFE/voxel-bank) and
     // the room→door RT edge. persist_* resolves the node by id first; both no-op if the node is gone.

@@ -97,6 +97,22 @@ private:
     void run_instance_tracker();          // data-driven birth/associate/death (the only instance-lifecycle path)
     void merge_overlapping_instances();   // collapse two instances on the same door (seat-footprint overlap)
     void update_existence_beliefs();      // continuous existence log-odds → evidence-based removal (no age immunity)
+    // ── Identity re-acquisition ───────────────────────────────────────────────
+    // A door that is removed leaves a GHOST: its name and the belief it had converged to. A later detection
+    // landing within Existence.ReacquireRadiusM of a ghost is the SAME physical door coming back, so it takes
+    // that name and resumes that geometry instead of being born as door_N+1 with template priors. Existence
+    // itself restarts from the birth prior — the shape is remembered, the confidence is re-earned.
+    struct DoorGhost
+    {
+        std::string     name;
+        Eigen::Vector2f xy = Eigen::Vector2f::Zero();
+        rc::DoorBelief  belief;
+        int             lived_cycles = 0;
+    };
+    void remember_ghost(const rc::DoorInstance& inst);                 // called just before a node is deleted
+    const DoorGhost* match_ghost(const Eigen::Vector2f& xy) const;     // nearest ghost within the radius, else null
+    void forget_ghost(const std::string& name);
+    std::vector<DoorGhost> ghosts_;
     void refresh_room_geometry();         // load the room delimiting polygon into the fitter (containment pose prior)
     void publish_door_cycle(rc::DoorInstance& inst,
                              const DSR::Node& node,
@@ -187,7 +203,6 @@ private:
     std::unique_ptr<rc::MaskIngestor>                   mask_ingestor_;   // perception (masks-only)
     std::unique_ptr<rc::DoorSceneGraph>               scene_graph_;     // DSR node/RT I/O
     rc::InstanceTracker                                tracker_;         // multi-instance (Tracker.Enabled)
-    float exist_support_scale_   = 0.0f;   // existence belief: online-calibrated E[npts·range²] (0 = seed from cfg)
     int   exist_last_mask_frame_ = -1;     // last mask frame_id folded into the existence belief (sensor-rate gate)
     rc::BearingHypothesisStager                        bearing_stager_;  // Part C-birth: stages unmatched 360 bearings
     uint64_t                                            room_node_id_ = 0;

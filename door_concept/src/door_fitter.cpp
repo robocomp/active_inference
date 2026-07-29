@@ -7,8 +7,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <print>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace rc {
@@ -357,6 +359,20 @@ float DoorFitter::run_inference(DoorInstance& inst, const DoorObservation& obser
     // the belief works in the wall frame θ=[s,w,h].
     if (not inst.ai2_initialized)
     {
+        // RE-ACQUISITION first: this node is a door that was removed and has now come back at the same place,
+        // so it resumes the belief it had converged to (state + Σ) rather than cold-starting at the template
+        // priors and re-fitting from scratch. See DoorFitter::note_reacquire.
+        if (const auto rs = restore_seeds_.find(inst.node_id); rs != restore_seeds_.end())
+        {
+            inst.ai2_belief = rs->second;
+            inst.ai2_initialized = true;
+            restore_seeds_.erase(rs);
+            std::print("door_concept: [{}] RE-ACQUIRED — resuming converged belief (s={:.2f} w={:.2f} h={:.2f})\n",
+                       inst.node_name, inst.ai2_belief.state().s, inst.ai2_belief.state().w, inst.ai2_belief.state().h);
+        }
+    }
+    if (not inst.ai2_initialized)
+    {
         const auto& m = inst.model.state();
         Eigen::Vector2f centroid_xy(m.cx, m.cy);
         if (npts > 0)
@@ -597,28 +613,160 @@ float DoorFitter::periphery_penalty(const DoorInstance& inst) const
     return std::clamp(r * r, 0.0f, 1.0f);
 }
 
-float DoorFitter::frame_reliability(const DoorInstance& inst) const
+// ─── Silhouette existence (pixel-level) ─────────────────────────────────────────────────────────
+
+// PIXEL-LEVEL silhouette existence evidence — see DoorSilhouette / DoorInstance::existence.
+//
+// Projects the door PANEL FACE (a w×h rectangle in the wall plane) into the ZED and, over the predicted
+// samples, splits into: lit by a "door" mask (occupancy), lit by a non-door mask (occlusion ⇒ excluded from
+// the detectable footprint), or lit by nothing (ABSENCE — the "gone" signal that fires even on a frame where
+// YOLO produced no door mask at all). A sample that does not land inside the real image is NOT detectable, so
+// n_detectable==0 means "the door was never looked at this frame" and rc::exist HOLDs.
+//
+// This is what makes turning the robot around harmless: the old scheme asked a bearing-free range term how
+// detectable the door was and got ≈0.4 for a door squarely BEHIND the camera, then charged absence evidence
+// against it every frame until it died. Here the frustum test is the detectability.
+DoorSilhouette DoorFitter::compute_silhouette_existence(const DoorInstance& inst)
 {
-    // u = (motion / motion_ref) × periphery ∈ [0,1]: only high when the frame is BOTH moving AND off-axis.
-    const float u = std::clamp(motion_magnitude(inst) / std::max(1e-3f, cfg_.ai2_motion_ref_mps), 0.0f, 1.0f)
-                    * periphery_penalty(inst);
-    return 1.0f - u;
+    DoorSilhouette out;
+    if (not inner_eigen_ or not inst.ai2_initialized)
+        return out;
+    if (not camera_api_)
+    {
+        const auto zed = G_->get_node("zed");
+        if (not zed.has_value()) return out;
+        camera_api_ = G_->get_camera_api(zed.value());
+        if (not camera_api_) return out;
+    }
+    const auto Mopt = room_T_zed_matrix();   // camera→room, current pose
+    if (not Mopt.has_value())
+        return out;
+    const Eigen::Matrix4d zed_T_room = Mopt.value().inverse();
+
+    const float W    = static_cast<float>(camera_api_->get_width());
+    const float Himg = static_cast<float>(camera_api_->get_height());
+    if (W <= 0.f or Himg <= 0.f)
+        return out;
+
+    if (not mask_ingestor_)
+        return out;
+    const auto& pkt = mask_ingestor_->packet();
+    if (not pkt.valid or pkt.mask_pixels.empty())
+        return out;
+
+    // Hashed pixel-cell coverage of the current YOLO foreground, split door (occupancy) vs other (occluder).
+    // A CELL-px cell absorbs mask-boundary jitter and makes membership O(1). Key packs the two cell indices.
+    // CELL is a discretization constant (quadrature), not a belief gate — no config key.
+    constexpr float CELL = 6.0f;
+    const auto key = [&](float col, float row) -> std::int64_t
+    {
+        const std::int64_t kx = static_cast<std::int64_t>(std::floor(col / CELL));
+        const std::int64_t ky = static_cast<std::int64_t>(std::floor(row / CELL));
+        return (kx << 32) ^ (ky & 0xffffffffLL);
+    };
+    std::unordered_set<std::int64_t> door_cells, occluder_cells;
+    for (const auto& sl : pkt.slices)
+    {
+        const std::size_t b = std::min(sl.pixel_begin, pkt.mask_pixels.size());
+        const std::size_t e = std::min(sl.pixel_end,   pkt.mask_pixels.size());
+        auto& dst = (sl.label == "door") ? door_cells : occluder_cells;
+        for (std::size_t i = b; i < e; ++i)
+            dst.insert(key(pkt.mask_pixels[i].x(), pkt.mask_pixels[i].y()));
+    }
+
+    const auto& s = inst.model.state();
+    const float c = std::cos(s.yaw), sn = std::sin(s.yaw), hw = 0.5f * s.w;
+
+    // Camera position (room frame) for the GEOMETRIC occlusion tests below.
+    const Eigen::Vector3f O(static_cast<float>(Mopt->coeff(0, 3)),
+                            static_cast<float>(Mopt->coeff(1, 3)),
+                            static_cast<float>(Mopt->coeff(2, 3)));
+    const Eigen::Vector2f Oxy(O.x(), O.y());
+    const float occ_margin = std::max(0.0f, cfg_.exist_occlusion_margin_m);
+
+    // Classify ONE panel-face sample (local x along the wall, z absolute): project it, then vote.
+    std::unordered_set<std::int64_t> covered_cells;   // distinct cells the DETECTABLE silhouette occupies
+    double range_sum = 0.0;
+    const auto classify = [&](float lx, float lz)
+    {
+        ++out.n_total;                                                  // one sample of the WHOLE panel
+        const Eigen::Vector4d Pr(s.cx + c * lx, s.cy + sn * lx, lz, 1.0);   // face at mid-thickness (ly = 0)
+        const Eigen::Vector4d Pc = zed_T_room * Pr;
+        const double X = Pc.x(), Y = Pc.y(), Z = Pc.z();
+        if (Y <= 0.20) return;                                          // behind / at the near clip
+        const Eigen::Vector2d uv = camera_api_->project(Eigen::Vector3d(X, Y, Z));
+        const float col = static_cast<float>(uv.x()), row = static_cast<float>(uv.y());
+        if (col < 0.f or col >= W or row < 0.f or row >= Himg) return;  // out of the REAL frustum ⇒ not detectable
+        const std::int64_t k = key(col, row);
+        if (occluder_cells.contains(k) and not door_cells.contains(k))
+        { ++out.n_occluded; return; }                                   // a nearer MASKED object hides it ⇒ no vote
+        // GEOMETRIC occluders, which carry no YOLO mask and so are invisible to the cell test above:
+        // (a) a room WALL crossing this sightline (the robot is around a corner / the door is in another
+        //     room's wall) — the structural case, and the one that would otherwise read as clean absence;
+        // (b) another door instance's panel standing in front of this sample.
+        // Per SAMPLE, not per instance: a partially-hidden door keeps the visible part of its footprint and
+        // votes with it, instead of the old all-or-nothing `continue` that froze a phantom indefinitely.
+        const Eigen::Vector3f Pw(static_cast<float>(Pr.x()), static_cast<float>(Pr.y()), static_cast<float>(Pr.z()));
+        if (rc::occlusion::walls_block(Oxy, {Pw.x(), Pw.y()}, room_polygon_, /*own_wall_skip_m=*/0.30f))
+        { ++out.n_occluded; return; }
+        {
+            Eigen::Vector3f dc = Pw - O;
+            const float rc_len = dc.norm();
+            if (rc_len > 1e-3f)
+            {
+                dc /= rc_len;
+                for (const auto& [jid, jinst] : instances_)
+                {
+                    if (jid == inst.node_id or not jinst.ai2_initialized) continue;
+                    const auto& js = jinst.model.state();
+                    const Eigen::Vector3f Cj(js.cx, js.cy, js.cz + 0.5f * js.h);
+                    if (rc::occlusion::cone_blocks(O, dc, rc_len, Cj, 0.5f * std::max(js.w, js.thickness),
+                                                   (Cj - O).norm(), occ_margin))
+                    { ++out.n_occluded; return; }
+                }
+            }
+        }
+        ++out.n_detectable;
+        covered_cells.insert(k);
+        const float f = central_region_frac_, g = 1.0f - central_region_frac_;
+        if (col > f * W and col < g * W and row > f * Himg and row < g * Himg)
+            ++out.n_central;                                            // the robot is looking AT it
+        range_sum += std::sqrt(X * X + Y * Y + Z * Z);
+        if (door_cells.contains(k)) out.e_occ  += 1.0f;                 // still there
+        else                        out.e_free += 1.0f;                 // predicted-but-absent
+    };
+
+    // Regular grid over the panel face. NX/NZ are numeric SAMPLING RESOLUTION (a quadrature density for the
+    // occupancy/detectability counts), not decision thresholds — denser is smoother at linear cost. A door is
+    // much taller than wide, so the vertical grid is finer.
+    constexpr int NX = 14, NZ = 30;
+    for (int ix = 0; ix < NX; ++ix)
+        for (int iz = 0; iz < NZ; ++iz)
+            classify((-1.0f + 2.0f * (ix + 0.5f) / NX) * hw, s.cz + s.h * (iz + 0.5f) / NZ);
+
+    out.n_cells = static_cast<int>(covered_cells.size());
+    if (out.n_detectable > 0)
+        out.mean_range_m = static_cast<float>(range_sum / out.n_detectable);
+    return out;
 }
 
-float DoorFitter::zed_detectability(const DoorInstance& inst) const
+// |cos| of the camera→door ray against the door's face normal (= the wall normal). 1 = square-on, 0 = grazing.
+float DoorFitter::door_view_obliquity(const DoorInstance& inst) const
 {
-    if (not inst.roi_valid)
-        return 0.0f;
-    // Off-centre falloff: YOLO/depth degrade toward the ZED image edge. roi_offset is normalised (0=centred,
-    // ±1=image edge). Reliable near the axis, → 0 at the configured edge reach.
-    const float off = std::hypot(inst.roi_offset_x, inst.roi_offset_y);
-    const float pd_center = std::clamp(1.0f - off / std::max(1e-3f, cfg_.exist_zed_edge_offset), 0.0f, 1.0f);
-    // Range falloff: a far door is a small, unreliable ZED detection → its ABSENCE is weak evidence. 1 within
-    // ZedRangeFull, smoothly → 0 by ZedRangeRef (beyond which ZED absence says nothing about existence).
-    const float r = std::max(0.0f, inst.last_range);
-    const float span = std::max(1e-3f, cfg_.exist_zed_range_ref - cfg_.exist_zed_range_full);
-    const float pd_range = std::clamp((cfg_.exist_zed_range_ref - r) / span, 0.0f, 1.0f);
-    return pd_center * pd_range;
+    if (not inst.ai2_initialized)
+        return 1.0f;
+    const auto M = room_T_zed_matrix();   // camera→room (current pose)
+    if (not M.has_value())
+        return 1.0f;                      // no extrinsic → can't judge → don't suppress
+    const Eigen::Vector2f cam(static_cast<float>(M->coeff(0, 3)), static_cast<float>(M->coeff(1, 3)));
+    const Eigen::Vector2f door = inst.ai2_belief.center_xy();
+    Eigen::Vector2f r = door - cam;
+    if (r.norm() < 1e-6f)
+        return 1.0f;
+    r.normalize();
+    const Eigen::Vector2f u = inst.ai2_belief.params().wall_u;
+    const Eigen::Vector2f n(-u.y(), u.x());   // door face normal (across the wall)
+    return std::clamp(std::abs(r.dot(n)), 0.0f, 1.0f);
 }
 
 bool DoorFitter::confirm_only(const DoorInstance& inst) const
@@ -669,67 +817,6 @@ bool DoorFitter::point_in_room(const Eigen::Vector2f& q, float margin_m) const
         best2 = std::min(best2, (q - (a + t * ab)).squaredNorm());
     }
     return best2 <= margin_m * margin_m;
-}
-
-bool DoorFitter::los_occluded(const DoorInstance& inst) const
-{
-    const auto Mopt = room_T_zed_matrix();   // camera→room
-    if (not Mopt.has_value())
-        return false;                        // no extrinsic → can't judge occlusion → let vacate proceed
-    const Eigen::Vector3f O(static_cast<float>(Mopt->coeff(0, 3)),
-                            static_cast<float>(Mopt->coeff(1, 3)),
-                            static_cast<float>(Mopt->coeff(2, 3)));
-    const auto& s = inst.model.state();
-    const Eigen::Vector3f C(s.cx, s.cy, s.cz + 0.5f * s.h);   // door mid-height
-    Eigen::Vector3f dc = C - O;
-    const float rc = dc.norm();
-    if (rc < 1e-3f)
-        return false;
-    dc /= rc;
-
-    const float margin = std::max(0.0f, cfg_.exist_occlusion_margin_m);   // occluder must be at least this closer
-    // An object at range rs subtending a half-extent `half` covers a bearing cone of half-angle atan(half/rs).
-    // The door is occluded if a CLOSER object's cone contains the door's bearing.
-    const auto blocks = [&](const Eigen::Vector3f& Cs, float half, float rs) -> bool
-    {
-        if (not std::isfinite(rs) or rs >= rc - margin)   // not meaningfully closer → cannot occlude
-            return false;
-        Eigen::Vector3f ds = Cs - O;
-        const float n = ds.norm();
-        if (n < 1e-3f)
-            return false;
-        ds /= n;
-        const float ang      = std::acos(std::clamp(dc.dot(ds), -1.0f, 1.0f));   // camera-bearing offset door↔occluder
-        const float occ_half = std::atan2(std::max(0.05f, half), std::max(0.2f, rs));
-        return ang < occ_half;
-    };
-
-    // (a) other door instances (always known, even when undetected this frame).
-    for (const auto& [jid, jinst] : instances_)
-    {
-        if (jid == inst.node_id or not jinst.ai2_initialized)
-            continue;
-        const auto& js = jinst.model.state();
-        const Eigen::Vector3f Cj(js.cx, js.cy, js.cz + 0.5f * js.h);
-        if (blocks(Cj, 0.5f * std::max(js.w, js.thickness), (Cj - O).norm()))
-            return true;
-    }
-    // (b) any other object DETECTED this frame (table, person, …) via its mask slice geometry.
-    if (mask_ingestor_)
-    {
-        const auto& pkt = mask_ingestor_->packet();
-        if (pkt.valid)
-            for (const auto& sl : pkt.slices)
-            {
-                if (not sl.has_depth or not sl.centroid.allFinite() or not sl.bbox_max.allFinite())
-                    continue;
-                const float half = 0.5f * (sl.bbox_max - sl.bbox_min).head<2>().norm();
-                const float rs   = (sl.range > 0.0f) ? sl.range : (sl.centroid - O).norm();
-                if (blocks(sl.centroid, half, rs))
-                    return true;
-            }
-    }
-    return false;
 }
 
 void DoorFitter::compute_projected_roi(DoorInstance& inst)

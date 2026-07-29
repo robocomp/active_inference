@@ -445,6 +445,7 @@ void SpecificWorker::initialize()
     // Active-inference fit core. Owns the instance map; collaborates with the ingestor + scene graph.
     fitter_ = std::make_unique<rc::DoorFitter>(
         G, inner_eigen_.get(), cfg_, mask_ingestor_.get(), scene_graph_.get());
+    fitter_->set_central_region_frac(cfg_.exist_central_region_frac);   // existence: "is the robot looking AT it"
 
     // Subscribe to graph signals ONLY now that fitter_ (which every slot dereferences) exists, and after
     // the startup stale-sweep above. Cross-thread Auto resolves to Queued (never add DirectConnection).
@@ -591,11 +592,14 @@ void SpecificWorker::refresh_belief_inspector()
         c.s.fe          = inst.dbg_energy;
         c.s.fe_baseline = inst.fe_baseline;
         c.s.fe_surprise = inst.fe_surprise;
-        // exist_logodds is NaN until the existence channel initialises; pass it straight through so the
-        // card prints "-" rather than a fake 0.5 probability.
-        c.s.logodds     = inst.exist_logodds;
-        if (std::isfinite(inst.exist_logodds))
-            c.s.p_exists = 1.0f / (1.0f + std::exp(-inst.exist_logodds));
+        // Un-seeded until the existence channel's first visit; leave the card's NaN so it prints "-" rather
+        // than a fake 0.5 probability.
+        if (inst.existence_seeded)
+        {
+            c.s.logodds  = inst.existence.logodds();
+            c.s.p_exists = inst.existence.p_exists();
+        }
+        c.s.remove_streak = inst.existence_remove_streak;
         c.s.age_s       = inst.last_belief_touch.time_since_epoch().count() == 0
                         ? -1.0f
                         : std::chrono::duration<float>(now - inst.last_belief_touch).count();
@@ -989,10 +993,29 @@ void SpecificWorker::run_instance_tracker()
                 continue;
             }
         }
-        const auto new_id = scene_graph_->create_instance_from_detection(c, room_node_id_);
+        // RE-ACQUISITION: is this detection a door that was removed and has come back at the same place? If so
+        // it is not a new object — it takes its old name and resumes the belief it had converged to, instead of
+        // becoming door_N+1 with template priors. (Live run: one real door burned three identities this way.)
+        const rc::DoorBelief* revive = nullptr;
+        std::string preferred_name;
+        if (const DoorGhost* g = match_ghost(Eigen::Vector2f(c.x(), c.y())); g != nullptr)
+        {
+            preferred_name = g->name;
+            revive = &g->belief;
+            std::print("door_concept: [tracker] RE-ACQUIRE '{}' at ({:.2f},{:.2f}) — {:.2f} m from where it was "
+                       "removed after {} cycles; resuming its belief\n",
+                       g->name, c.x(), c.y(), (g->xy - Eigen::Vector2f(c.x(), c.y())).norm(), g->lived_cycles);
+        }
+        const auto new_id = scene_graph_->create_instance_from_detection(c, room_node_id_, preferred_name);
         if (new_id != 0)
         {
             fitter_->note_birth(new_id, Eigen::Vector2f(c.x(), c.y()));
+            if (revive != nullptr)
+            {
+                fitter_->note_reacquire(new_id, *revive);
+                log_tracker_event("REACQUIRE", new_id, c.x(), c.y(), preferred_name);
+                forget_ghost(preferred_name);   // consumed — the door is alive again
+            }
             // Materialise the DoorInstance NOW, at birth — do not wait for the freshly inserted DSR node
             // to surface in get_nodes_by_type (it is not reliably visible the same cycle). Birth was
             // decoupled across three async steps (create node → ensure_instance when the node appears →
@@ -1120,9 +1143,55 @@ void SpecificWorker::refresh_room_geometry()
                    "(containment prior ACTIVE)\n", n, xmin, xmax, ymin, ymax);
 }
 
-// Continuous existence belief: fold one sensor frame of evidence into each instance's log-odds L and remove
-// any whose L crosses the floor. See the DoorInstance::exist_logodds comment for the model. Runs from
-// run_instance_tracker (association already resolved, so assigned_mask_idx is this cycle's assignment).
+// ─── Identity re-acquisition (ghost registry) ───────────────────────────────────────────────────
+
+// Remember a door about to be deleted, so the same physical door coming back resumes this identity + geometry.
+void SpecificWorker::remember_ghost(const rc::DoorInstance& inst)
+{
+    if (cfg_.exist_reacquire_radius_m <= 0.0f or not inst.ai2_initialized or inst.is_bearing_hypothesis)
+        return;
+    const auto& s = inst.model.state();
+    std::erase_if(ghosts_, [&](const DoorGhost& g) { return g.name == inst.node_name; });
+    ghosts_.push_back({inst.node_name, Eigen::Vector2f(s.cx, s.cy), inst.ai2_belief, inst.processed_cycles});
+    // Bounded, most-recent-first: this is a short-lived flicker memory, not a permanent map.
+    while (static_cast<int>(ghosts_.size()) > std::max(1, cfg_.exist_ghost_max))
+        ghosts_.erase(ghosts_.begin());
+}
+
+const SpecificWorker::DoorGhost* SpecificWorker::match_ghost(const Eigen::Vector2f& xy) const
+{
+    if (cfg_.exist_reacquire_radius_m <= 0.0f)
+        return nullptr;
+    const DoorGhost* best = nullptr;
+    float best_d = cfg_.exist_reacquire_radius_m;
+    for (const auto& g : ghosts_)
+        if (const float d = (g.xy - xy).norm(); d < best_d) { best_d = d; best = &g; }
+    return best;
+}
+
+void SpecificWorker::forget_ghost(const std::string& name)
+{
+    std::erase_if(ghosts_, [&](const DoorGhost& g) { return g.name == name; });
+}
+
+// Continuous existence belief on the SHARED rc::exist channel (the one table/chair use): fold one sensor
+// frame of pixel-level silhouette evidence into each instance's log-odds L and remove the doors whose
+// predicted silhouette is demonstrably empty. See DoorInstance::existence for the model.
+//
+// The discipline, and what each part of it fixes (live run 2026-07-29, etc/door_existence_log.csv):
+//   OCCUPANCY confirms · ABSENCE removes · OCCLUSION and OUT-OF-FoV **HOLD**.
+//   · HOLD is structural, not a special case: rc::exist HOLDs whenever n_detectable==0, so a door behind the
+//     robot contributes nothing. The old scheme took pd = max(zed_pd, range_detectability) where the second
+//     term had NO bearing test — a door squarely behind the camera scored pd≈0.25–0.47 and was charged
+//     absence every frame until it died (door_1: L 4 → −3.01 over ~180 frames while roi=0), then re-born as
+//     door_3 at the same spot. That whole term is gone.
+//   · Occlusion shrinks the detectable footprint continuously (occluded samples simply do not vote) instead
+//     of the old `continue`, which granted indefinite immunity — door_2 sat frozen at L=2.29 for 1204 frames
+//     because its line of sight happened to be blocked.
+//   · Detectability is now ONE physical covariate, the silhouette's subtended image area (n_cells), which
+//     collapses for a far door AND for an edge-on one. The old separate obliquity ramp returned exactly 0
+//     below cos=0.20, making a grazing phantom permanently unjudgeable.
+// Runs from run_instance_tracker (association already resolved, so assigned_mask_idx is this cycle's).
 void SpecificWorker::update_existence_beliefs()
 {
     // Integrate at the SENSOR rate, not the compute rate: only when a new mask frame arrived. Otherwise a fast
@@ -1133,102 +1202,108 @@ void SpecificWorker::update_existence_beliefs()
         return;
     exist_last_mask_frame_ = static_cast<int>(pkt.frame_id);
 
-    if (exist_support_scale_ <= 0.0f)                 // lazy-seed the expected-support scale C = E[npts·range²]
-        exist_support_scale_ = cfg_.exist_expected_support_c;
+    // The silhouette channel needs the producer's raw 2D mask pixels (mask_pixels_xy — an OPTIONAL, newer
+    // producer channel). Without them EVERY door reports n_detectable==0 and therefore HOLDs forever, which
+    // looks exactly like "phantoms are never removed". Say so once rather than failing silently.
+    if (pkt.mask_pixels.empty())
+    {
+        static bool warned = false;
+        if (not warned)
+        {
+            warned = true;
+            std::print("door_concept: [existence] WARNING — the masks node carries no mask_pixels_xy; the "
+                       "silhouette channel has no evidence, so NO door can be confirmed or removed. Check the "
+                       "voxelizer's mask-pixel publish.\n");
+        }
+        return;
+    }
 
-    const float g   = cfg_.exist_evidence_gain;
-    const float ar  = cfg_.exist_adequacy_ref;
-    const float cap = cfg_.exist_adequacy_cap;
+    // Physical sensor rates (interpretable detection/clutter probabilities), shared with table/chair.
+    rc::exist::SensorModel sm;
+    sm.sensor_sigma_m = cfg_.exist_sensor_sigma_m;
+    sm.detection_prob = cfg_.exist_detection_prob;
+    sm.clutter_prob   = cfg_.exist_clutter_prob;
 
-    // "ZED removes": every mask frame is ZED-cadenced (upload_masks runs per ZED RGBD frame, ricoh slices appended),
-    // so a fresh frame ALREADY means "ZED looked this cycle" — including a frame with ZERO ZED detections, which is
-    // exactly ZED staring at empty space and finding nothing (the strongest vacate evidence). Do NOT gate on
-    // "ZED produced a detection": that would refuse to remove a phantom precisely when ZED confirms it is gone.
     std::vector<std::uint64_t> to_remove;
     for (auto& [id, inst] : fitter_->instances())
     {
-        if (std::isnan(inst.exist_logodds))           // seed on first visit (fresh birth OR adopted graph node)
-            inst.exist_logodds = cfg_.exist_birth_logodds;
+        inst.existence.set_max(cfg_.exist_max_logodds);
+        if (not inst.existence_seeded)               // seed on first visit (fresh birth OR adopted graph node)
+        {
+            inst.existence.set(cfg_.exist_birth_logodds);
+            inst.existence_seeded = true;
+        }
 
-        // ROOM-CONTAINMENT POSE PRIOR (runs BEFORE the frustum gate, so it reaches a door a localization glitch
+        // ROOM-CONTAINMENT POSE PRIOR (runs BEFORE the sensor channel, so it reaches a door a localization glitch
         // put OUTSIDE the walls / behind a wall where the sensor can never vacate it): P(door outside) ≈ 0, so
         // an out-of-room centre draws a STRONG negative every frame regardless of visibility → removed in a few.
+        // This is a genuine PRIOR over pose, not a detectability heuristic, so it survives the port unchanged.
         if (cfg_.exist_room_prior and fitter_->has_room_polygon() and not inst.is_bearing_hypothesis)
         {
             const auto& ms = inst.model.state();
             if (not fitter_->point_in_room(Eigen::Vector2f(ms.cx, ms.cy), cfg_.exist_room_margin_m))
             {
-                inst.exist_logodds = std::clamp(inst.exist_logodds - cfg_.exist_out_of_room_gain,
-                                                cfg_.exist_remove_logodds - 1.0f, cfg_.exist_max_logodds);
-                if (inst.exist_logodds < cfg_.exist_remove_logodds)
+                inst.existence.set(inst.existence.logodds() - cfg_.exist_out_of_room_gain);
+                if (inst.existence.should_remove(cfg_.exist_removal_prob)) ++inst.existence_remove_streak;
+                else                                                       inst.existence_remove_streak = 0;
+                if (inst.existence_remove_streak >= cfg_.exist_remove_frames)
                     to_remove.push_back(id);
-                continue;   // outside the room → no sensor evidence can rescue it; skip the normal channels
+                continue;   // outside the room → no sensor evidence can rescue it; skip the normal channel
             }
         }
 
-        // HOLD (no evidence) unless the instance is a depth door in the camera frustum with a real belief.
-        // roi_valid is one compute-cycle stale (fine for a frustum test); a bearing-only hypothesis carries no
-        // depth (existence unjudgeable from support mass); an un-initialised newborn hasn't had a chance yet.
-        if (inst.is_bearing_hypothesis or not inst.roi_valid or not inst.ai2_initialized)
+        // A bearing-only hypothesis has no depth (existence unjudgeable) and an un-initialised newborn has no
+        // silhouette to project — both HOLD.
+        if (inst.is_bearing_hypothesis or not inst.ai2_initialized)
             continue;
 
-        // TWO evidence channels for whether a door really occupies this in-frustum spot.
-        float llr;
-        const bool won = inst.assigned_mask_idx >= 0 and inst.assigned_mask_idx < static_cast<int>(pkt.slices.size());
-        if (won)
+        // ── SILHOUETTE CHANNEL (the only one that may remove a door) ──────────────────────────────────
+        const auto sil = fitter_->compute_silhouette_existence(inst);
+        inst.dbg_sil_occ = sil.e_occ;     inst.dbg_sil_free  = sil.e_free;
+        inst.dbg_sil_ndet = sil.n_detectable; inst.dbg_sil_ntotal = sil.n_total;
+        inst.dbg_sil_noccl = sil.n_occluded;  inst.dbg_sil_ncells = sil.n_cells;
+        inst.dbg_sil_central = sil.central_frac(); inst.dbg_sil_resolv = sil.resolvability();
+        if (sil.n_detectable == 0)
         {
-            // WON a mask → how much of the EXPECTED door silhouette does the model actually EXPLAIN?
-            //   explanation = (support / expected_at_range) × (1 − clutter_frac).
-            // A real door explains a good fraction → POSITIVE. Two failure modes both explain ≈nothing → NEGATIVE:
-            // a far-too-SPARSE won mask (door_3's ~8 points), OR a big but ~ALL-CLUTTER blob (door_3/door_5's
-            // 5994/1126 pts at clutter≈0.99 — support present, but the door model fits none of it). Folding
-            // clutter into the SIGN is the fix for the "won a garbage blob → scored neutral → never removed" gap.
-            const auto& sl = pkt.slices[inst.assigned_mask_idx];
-            const int npts = (sl.support_end > sl.support_begin) ? static_cast<int>(sl.support_end - sl.support_begin) : 0;
-            const float range    = std::max(0.5f, inst.last_range);
-            const float expected = exist_support_scale_ / (range * range);
-            const float adequacy = std::clamp(static_cast<float>(npts) / std::max(1.0f, expected), 0.0f, cap);
-            const float explained = adequacy * std::clamp(1.0f - inst.last_clutter_frac, 0.0f, 1.0f);
-            llr = (explained >= ar) ? g * (explained - ar) / std::max(1e-3f, cap - ar)
-                                    : -g * (ar - explained) / std::max(1e-3f, ar);
-            // Be-still invariant, CONTINUOUS: an unreliable frame (moving AND off-axis → smeared/high-clutter) only
-            // CONFIRMS — scale its NEGATIVE evidence by the frame reliability ∈ [0,1] so it can hold/raise existence
-            // (positive kept full) but not argue the door away. Reliability→1 for a still or well-centred frame.
-            // ★RICOH CONFIRMS, NEVER REMOVES: a won ricoh slice (depth_var>0, or bearing-only) has unreliable
-            // depth/clutter → it may CONFIRM existence (its win already reset frames_since_detection) but must not
-            // produce NEGATIVE evidence. Only a ZED win (depth_var==0) may argue a door down.
-            const bool won_zed = sl.has_depth and sl.depth_var == 0.0f;
-            if (llr < 0.0f)
-                llr = won_zed ? llr * fitter_->frame_reliability(inst) : 0.0f;
-        }
-        else if (cfg_.exist_occlusion_check and fitter_->los_occluded(inst))
-            // WON NOTHING but the line of sight is BLOCKED by a closer object (another door, the table, a
-            // person …): absence of a mask is EXPECTED, not evidence the door is gone → HOLD, never vacate.
+            // NOT PROBED this frame — behind the robot, out of the frustum, or fully occluded. rc::exist HOLDs.
+            // This branch is the whole fix for "the door disappears when the robot turns around": there is no
+            // pd to fall back on, because a sensor that did not look produces no evidence either way.
+            inst.dbg_sil_pdetect = 0.0f; inst.dbg_sil_free_eff = 0.0f;
             continue;
-        else
-        {
-            // WON NOTHING while in the frustum, UNOCCLUDED, on a ZED-active frame → absence evidence, but weighted
-            // TWO ways: (1) CONFIDENCE ramps with frames_since_detection (freshness-as-precision, anti-death-spiral
-            // — a door that just lost the slice or is briefly hidden barely moves and recovers on its next win);
-            // (2) ZED EXPECTED-DETECTABILITY pd ∈ [0,1] — absence only removes to the degree ZED would RELIABLY
-            // have detected a present door (falls off toward the image edge + with range). A far/peripheral door
-            // that only ricoh can see has pd≈0 → it HOLDs (maintained by ricoh confirmations) and is removed only
-            // once a clean, close, centred ZED look comes up empty. This is "ZED removes".
-            const float conf = (cfg_.exist_vacate_confident_frames > 0)
-                ? std::clamp(static_cast<float>(inst.frames_since_detection)
-                             / static_cast<float>(cfg_.exist_vacate_confident_frames), 0.0f, 1.0f)
-                : 0.0f;
-            // pd FLOOR (clear line of sight): occlusion is already HELD above, so here the LoS is clear. Even a
-            // peripheral door (low pd) then vacates at ≥ the floor rate, so a glitch-stranded phantom the robot
-            // never centres still dies over time; conf gates on staleness so a recently-seen door is untouched.
-            const float pd = std::max(fitter_->zed_detectability(inst), cfg_.exist_zed_clear_los_floor);
-            llr = -g * conf * pd;
         }
 
-        inst.exist_logodds = std::clamp(inst.exist_logodds + llr,
-                                        cfg_.exist_remove_logodds - 1.0f, cfg_.exist_max_logodds);
+        // OCCUPANCY, weighted by how much of its mask the door MODEL actually explains. last_clutter_frac is the
+        // mixture's clutter responsibility — the same per-point posterior the free energy is built from — so a
+        // blob the door model fits none of confirms nothing. This is the missing term that let door_2 (FE 1.33
+        // vs 0.17 for the real door, clutter 0.38 → 0.98) climb to L=2.29 and then sit there: the old channel
+        // scored point MASS, never fit QUALITY. Stale between wins, but e_occ is only non-zero on a frame whose
+        // door mask overlaps this silhouette, i.e. one where the instance is being detected.
+        const float q_explain = std::clamp(1.0f - inst.last_clutter_frac, 0.0f, 1.0f);
+        const float e_occ = sil.e_occ * q_explain;
 
-        if (inst.exist_logodds < cfg_.exist_remove_logodds)
+        // ABSENCE. Suppressed entirely when the door was DETECTED this frame by any sensor (it is not gone —
+        // a ZED false-negative, or a door only the ricoh resolved, must never vote itself away). This is the
+        // honest form of "ricoh confirms, never removes": the old code enforced it on the positive side while
+        // the negative side removed through range_detectability, which is precisely the ricoh's own reach.
+        const bool observed = inst.frames_since_detection == 0;
+        const float raw_free = observed ? 0.0f : sil.e_free;
+        // P(detect | present, geometry): could this view have resolved a door that IS there?
+        //   resolvability — is the panel big enough in the image to segment (range × foreshortening),
+        //   in_fov_frac  — how much of it the real frustum + occluders actually left visible,
+        //   central_frac — whether the robot is LOOKING at it rather than clipping the frustum edge.
+        // Predicted-but-absent counts toward REMOVAL only in proportion to p_detect; the remainder is epistemic
+        // surprise ("I cannot resolve this from here"), which should send the robot to look, never delete.
+        const float p_detect = sil.resolvability() * sil.in_fov_frac() * sil.central_frac();
+        const float sfree = raw_free * p_detect;
+        inst.dbg_sil_pdetect = p_detect; inst.dbg_sil_free_eff = sfree;
+
+        inst.existence.integrate(rc::exist::mask_evidence(e_occ, sfree, sil.n_detectable, sm));
+
+        // Debounce on consecutive EVIDENCE cycles (not wall-clock), so a transient hiccup cannot delete a real
+        // door, and removal always reflects sustained agreement across frames.
+        if (inst.existence.should_remove(cfg_.exist_removal_prob)) ++inst.existence_remove_streak;
+        else                                                       inst.existence_remove_streak = 0;
+        if (inst.existence_remove_streak >= cfg_.exist_remove_frames)
             to_remove.push_back(id);
     }
 
@@ -1242,22 +1317,35 @@ void SpecificWorker::update_existence_beliefs()
                 const bool has_poly = fitter_->has_room_polygon();
                 const bool inroom = (not has_poly)
                                     or fitter_->point_in_room(Eigen::Vector2f(ms.cx, ms.cy), cfg_.exist_room_margin_m);
-                const int occluded = (inst.roi_valid and inst.assigned_mask_idx < 0 and fitter_->los_occluded(inst)) ? 1 : 0;
-                const float zed_pd = fitter_->zed_detectability(inst);   // ZED expected-detectability that gates vacate
-                std::print("door_concept: [existence] {} L={:.2f} pos=({:.2f},{:.2f}) inroom={} roomprior={} roi={} won={} since_det={} occluded={} zed_pd={:.2f}\n",
-                           inst.node_name, inst.exist_logodds, ms.cx, ms.cy, inroom ? 1 : 0,
-                           has_poly ? 1 : 0, inst.roi_valid ? 1 : 0,
-                           inst.assigned_mask_idx >= 0 ? 1 : 0, inst.frames_since_detection, occluded, zed_pd);
-                // Same diagnostic to a CSV (you read those) — roomprior=0 ⇒ polygon NOT loaded; inroom=0 ⇒ outside walls;
-                // zed_pd=0 ⇒ ZED can't reliably see it (far/edge) so absence won't remove it (ricoh-only-visible).
+                const float oblq = fitter_->door_view_obliquity(inst);   // diagnostic only (see door_fitter.h)
+                std::print("door_concept: [existence] {} L={:.2f} p={:.2f} pos=({:.2f},{:.2f}) inroom={} roomprior={} "
+                           "won={} since_det={} | sil occ={:.0f} free={:.0f} free_eff={:.1f} ndet={}/{} occl={} "
+                           "resolv={:.2f} central={:.2f} pdet={:.2f} oblq={:.2f} strk={}\n",
+                           inst.node_name, inst.existence.logodds(), inst.existence.p_exists(), ms.cx, ms.cy,
+                           inroom ? 1 : 0, has_poly ? 1 : 0,
+                           inst.assigned_mask_idx >= 0 ? 1 : 0, inst.frames_since_detection,
+                           inst.dbg_sil_occ, inst.dbg_sil_free, inst.dbg_sil_free_eff,
+                           inst.dbg_sil_ndet, inst.dbg_sil_ntotal, inst.dbg_sil_noccl,
+                           inst.dbg_sil_resolv, inst.dbg_sil_central, inst.dbg_sil_pdetect, oblq,
+                           inst.existence_remove_streak);
+                // Same diagnostic to a CSV. How to read it: ndet=0 ⇒ the door was NOT looked at (out of frustum
+                // or fully occluded) ⇒ HOLD, L must not move — that is the "robot turned around" case. A real
+                // door in view shows occ≫free. A phantom in a resolving view (pdet high) shows free≫occ and a
+                // rising strk. free_eff≪free means "seen, but this view could not resolve it" ⇒ go verify, not delete.
                 static std::ofstream ex_csv = []{ std::ofstream f("etc/door_existence_log.csv", std::ios::trunc);
-                    f << "cycle,node,L,cx,cy,inroom,roomprior_loaded,roi,won,since_det,occluded,zed_pd\n"; return f; }();
+                    f << "cycle,node,L,p_exists,cx,cy,inroom,roomprior_loaded,won,since_det,"
+                         "sil_occ,sil_free,sil_free_eff,n_detectable,n_total,n_occluded,"
+                         "resolvability,central_frac,p_detect,oblq,remove_streak\n"; return f; }();
                 if (ex_csv)
                 {
-                    ex_csv << ex_dbg << ',' << inst.node_name << ',' << inst.exist_logodds << ',' << ms.cx << ',' << ms.cy
-                           << ',' << (inroom ? 1 : 0) << ',' << (has_poly ? 1 : 0) << ',' << (inst.roi_valid ? 1 : 0)
+                    ex_csv << ex_dbg << ',' << inst.node_name << ',' << inst.existence.logodds() << ','
+                           << inst.existence.p_exists() << ',' << ms.cx << ',' << ms.cy
+                           << ',' << (inroom ? 1 : 0) << ',' << (has_poly ? 1 : 0)
                            << ',' << (inst.assigned_mask_idx >= 0 ? 1 : 0) << ',' << inst.frames_since_detection
-                           << ',' << occluded << ',' << zed_pd << '\n';
+                           << ',' << inst.dbg_sil_occ << ',' << inst.dbg_sil_free << ',' << inst.dbg_sil_free_eff
+                           << ',' << inst.dbg_sil_ndet << ',' << inst.dbg_sil_ntotal << ',' << inst.dbg_sil_noccl
+                           << ',' << inst.dbg_sil_resolv << ',' << inst.dbg_sil_central << ',' << inst.dbg_sil_pdetect
+                           << ',' << oblq << ',' << inst.existence_remove_streak << '\n';
                     ex_csv.flush();
                 }
             }
@@ -1265,11 +1353,14 @@ void SpecificWorker::update_existence_beliefs()
     for (const std::uint64_t id : to_remove)
     {
         const auto it = fitter_->instances().find(id);
-        const float L = (it != fitter_->instances().end()) ? it->second.exist_logodds : 0.0f;
-        std::print("door_concept: [existence] REMOVE id={} (log-odds {:.2f} < {:.2f}; unexplained/vacated in view)\n",
-                   id, L, cfg_.exist_remove_logodds);
+        const float L = (it != fitter_->instances().end()) ? it->second.existence.logodds() : 0.0f;
+        std::print("door_concept: [existence] REMOVE id={} (L={:.2f}, p={:.3f} < {:.3f} for {} evidence cycles)\n",
+                   id, L, 1.0f / (1.0f + std::exp(-L)), cfg_.exist_removal_prob, cfg_.exist_remove_frames);
         if (it != fitter_->instances().end())
         {
+            // Retain the identity before deleting the node: a door that comes back at the same place is the SAME
+            // door, and must resume its accumulated belief instead of being re-born as door_N+1 (see remember_ghost).
+            remember_ghost(it->second);
             log_tracker_event("REMOVE", id, it->second.model.state().cx, it->second.model.state().cy,
                               std::format("logodds {:.2f}", L));
             it->second.affordance.remove();

@@ -34,9 +34,36 @@
 #include "door_instance.h"      // rc::DoorInstance, DoorState
 #include "door_model.h"         // DoorModel / DoorModelParams
 #include "../../common/mask_ingestor/mask_ingestor.h"
+#include "../../common/occlusion/occlusion.h"   // rc::occlusion::{cone_blocks, walls_block} — shared LoS occlusion
 #include "door_scene_graph.h"
 
 namespace rc {
+
+// Pixel-level silhouette existence evidence for ONE door (see DoorFitter::compute_silhouette_existence).
+// Feeds rc::exist::mask_evidence — the shared channel table/chair use — so removal is a Bayesian decision on
+// P(exists), never a miss-counter or a detectability heuristic.
+struct DoorSilhouette
+{
+    float e_occ  = 0.0f;       // predicted samples LIT by a "door" mask     ⇒ still there
+    float e_free = 0.0f;       // predicted samples lit by NOTHING           ⇒ predicted-but-absent ("gone")
+    int   n_total      = 0;    // silhouette samples attempted (the whole panel face)
+    int   n_detectable = 0;    // samples inside the REAL camera frustum and un-occluded (0 ⇒ not probed ⇒ HOLD)
+    int   n_central    = 0;    // detectable samples in the central image region (the robot is LOOKING at it)
+    int   n_occluded   = 0;    // in-frustum samples hidden behind a nearer NON-door mask
+    int   n_cells      = 0;    // DISTINCT pixel cells the detectable silhouette covers (see resolvability)
+    float mean_range_m = 0.0f; // mean camera→sample distance over the detectable samples
+    // How much of the door the sensor could actually have seen from here. Absence is evidence of removal only
+    // in proportion to this — the rest is epistemic surprise ("I cannot resolve this from here"), not absence.
+    float in_fov_frac() const { return n_total > 0 ? static_cast<float>(n_detectable) / n_total : 0.0f; }
+    float central_frac() const { return n_detectable > 0 ? static_cast<float>(n_central) / n_detectable : 0.0f; }
+    // RESOLVABILITY ∈ (0,1]: the fraction of the sampling budget that lands in DISTINCT image cells — i.e. how
+    // many independent pixels the panel subtends per unit of model. Scale-free and reference-free: it is 1 when
+    // every sample resolves separately (close, face-on) and falls as samples collapse together (far away, or
+    // foreshortened edge-on). This one covariate replaces the old ZedRangeFull/ZedRangeRef falloff AND the
+    // obliquity ramp, with no tuning constant and — unlike that ramp, which returned exactly 0 below cos 0.20
+    // and made a grazing phantom permanently unjudgeable — it never reaches zero while the door is in view.
+    float resolvability() const { return n_detectable > 0 ? static_cast<float>(n_cells) / n_detectable : 0.0f; }
+};
 
 class DoorFitter
 {
@@ -68,12 +95,6 @@ public:
 
     std::unordered_map<std::uint64_t, DoorInstance>& instances() { return instances_; }
     void forget_node(std::uint64_t id) { instances_.erase(id); }
-    // Line-of-sight occlusion test (room frame): is the camera→door ray blocked by a CLOSER object whose
-    // bearing cone covers the door — another door instance, or any other detected mask this frame (table /
-    // person / …)? Used to SUPPRESS the existence "vacate" negative: a door hidden behind something must not
-    // be removed just because no mask reaches it. Conservative (over-suppress = keep) by design.
-    bool los_occluded(const DoorInstance& inst) const;
-
     // ── Room-containment pose prior ───────────────────────────────────────────────────────────────
     // The room polygon (room frame) is a trusted NOMINAL model (authored from the SVG layout, never fitted),
     // so it is a legitimate strong prior: P(a door's centre outside the walls) ≈ 0. Loaded from the room
@@ -92,13 +113,21 @@ public:
     // the still-level, OR the mask's own ego-motion corruption (motion_dotd) above its still-level.
     // (A/B FALLBACK path only — the hard gate; used when cfg.ai2_motion_confirm_only is true.)
     bool  confirm_only(const DoorInstance& inst) const;
-    // Continuous frame reliability ∈ [0,1] (AIF): 1 = trustworthy (still OR centred), → 0 = moving AND peripheral.
-    // Scales the existence NEGATIVE evidence so a smeared/off-axis frame can only CONFIRM, never argue a door away.
-    float frame_reliability(const DoorInstance& inst) const;
-    // ZED expected-detectability ∈ [0,1]: how reliably the ZED camera would detect a PRESENT door at this
-    // instance's projected ROI — falls off toward the image edge (roi_offset) and with range. Used to weight
-    // the existence VACATE so absence only removes to the degree ZED should have resolved it ("ZED removes").
-    float zed_detectability(const DoorInstance& inst) const;
+    // PIXEL-LEVEL silhouette existence evidence: project the panel face into the ZED and split the predicted
+    // samples into occupancy / absence / occluded / out-of-frustum. See DoorSilhouette + DoorInstance::existence.
+    // This is the ONLY channel that may remove a door — it is the only one that can tell "looked and found
+    // nothing" from "never looked".
+    DoorSilhouette compute_silhouette_existence(const DoorInstance& inst);
+    // Central-image box fraction: a detectable sample inside [f, 1-f]² of the image counts as "central" (the
+    // robot is looking AT the door, not merely clipping the wide frustum edge). Set once from config.
+    void set_central_region_frac(float f) { central_region_frac_ = f; }
+    // View-obliquity onto the door FACE ∈ [0,1]: |cos| of the camera→door ray against the door's face normal
+    // (= the wall normal, known exactly from the wall frame). 1 = viewed square-on, → 0 = grazing/edge-on.
+    // DIAGNOSTIC ONLY (a log column). Obliquity is no longer a separate factor in the existence decision: the
+    // silhouette's n_cells already measures the panel's subtended image area, which an edge-on view collapses
+    // on its own. Keeping both would double-count the same geometry — and the standalone ramp was what froze a
+    // grazing phantom at oblq=0.15 for 1200 frames.
+    float door_view_obliquity(const DoorInstance& inst) const;
     float motion_magnitude(const DoorInstance& inst) const;   // combined ego-motion speed (m/s)
     float periphery_penalty(const DoorInstance& inst) const;  // off-axis penalty ∈ [0,1] (0 on-axis → 1 at periph_ref)
     // true if q is inside the polygon, or outside by no more than margin_m (tolerance for a wall-hugging door
@@ -118,6 +147,13 @@ public:
     // The room→door RT written at birth is not reliably composable the same cycle, so without this the
     // model would start at 0,0; consumed once by ensure_instance.
     void note_birth(std::uint64_t id, const Eigen::Vector2f& xy) { birth_seeds_[id] = xy; }
+
+    // IDENTITY RE-ACQUISITION: hand a newly created node the CONVERGED belief of the door it is bringing back,
+    // so it resumes that geometry (state + Σ, i.e. the accumulated evidence) instead of cold-starting at the
+    // w,h template priors. Consumed once by the lazy belief init in run_inference. The existence log-odds is
+    // deliberately NOT restored — the door was removed because absence evidence won, so its EXISTENCE is
+    // re-earned from the birth prior even though its SHAPE is remembered.
+    void note_reacquire(std::uint64_t id, const DoorBelief& belief) { restore_seeds_[id] = belief; }
 
     // Part C-birth: initialise `inst` as a bearing-only hypothesis — belief mean placed at `nominal_range`
     // along the ray from `robot_xy` at `azimuth`, with a broad along-ray / tight across-ray Σ (see
@@ -156,9 +192,11 @@ private:
     MaskIngestor*                  mask_ingestor_ = nullptr;
     DoorSceneGraph*               scene_graph_   = nullptr;
     std::unique_ptr<DSR::CameraAPI> camera_api_;   // ZED intrinsics, lazily bound to the "zed" node
+    float                           central_region_frac_ = 0.25f;   // central-image box [f,1-f]² (set from config)
 
     std::unordered_map<std::uint64_t, DoorInstance> instances_;
     std::unordered_map<std::uint64_t, Eigen::Vector2f> birth_seeds_;   // tracker-provided birth XY (note_birth)
+    std::unordered_map<std::uint64_t, DoorBelief> restore_seeds_;      // re-acquired identity's belief (note_reacquire)
     std::uint64_t                  room_node_id_ = 0;   // latched per ensure_instance call
     std::vector<Eigen::Vector2f>   room_polygon_;       // room-frame delimiting polygon (containment prior)
     Eigen::Vector2f                room_interior_ = Eigen::Vector2f::Zero();   // a known-interior point (centroid)

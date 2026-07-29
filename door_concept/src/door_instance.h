@@ -20,6 +20,7 @@
 #include "door_model.h"        // DoorModel / DoorState
 #include "door_belief.h"       // rc::DoorBelief (AI2 recursive-Laplace belief)
 #include "door_affordance.h"   // DoorAffordance
+#include "../../common/existence_belief/existence_belief.h"   // rc::exist::ExistenceBelief (shared w/ table/chair)
 
 namespace rc {
 
@@ -75,17 +76,28 @@ struct DoorInstance
     float chain_cov_xx = 0.0f, chain_cov_yy = 0.0f, chain_cov_yaw = 0.0f;  // localization/chain cov (m²,rad²)
     int  assigned_mask_idx  = -1;     // tracker's gated mask-slice assignment (-1 = use greedy nearest)
     int  unassigned_streak  = 0;      // consecutive tracker cycles with no mask assignment (stillbirth prune)
-    // ── Existence belief (continuous log-odds; supersedes the wall-clock stillbirth prune) ──────────
-    // L = log P(exists)/P(¬exists). Integrated once per SENSOR frame while the instance is in the camera
-    // frustum (roi_valid), via two channels: (1) WON a mask → POSITIVE/NEGATIVE by how much of the expected
-    // door silhouette the model EXPLAINS = (support/expected_at_range)·(1−clutter): a real door explains a
-    // good fraction (+); a far-too-sparse OR a big ~all-clutter won mask explains ≈nothing (−). (2) WON NOTHING
-    // → absence evidence whose confidence RAMPS with frames_since_detection (freshness-as-precision): a brief
-    // occlusion / lost slice barely moves L and recovers on the next win (this ramp prevents the death-spiral
-    // churn), but a spot left unexplained for seconds accrues the full negative. HELD out of frustum / stale /
-    // bearing-only / un-initialised. Removed when L < cfg.exist_remove_logodds — evidence-based, NO age
-    // immunity; a real door keeps L pinned at the saturation cap by being explained. NaN = un-seeded.
-    float exist_logodds = std::numeric_limits<float>::quiet_NaN();
+    // ── Existence belief (shared rc::exist channel — same one table/chair use) ──────────────────────
+    // L = log P(exists)/P(¬exists), integrated per SENSOR frame from the PIXEL-LEVEL silhouette evidence
+    // (DoorFitter::compute_silhouette_existence): the model's panel silhouette is projected into the ZED and
+    // each predicted sample votes
+    //   lit by a "door" mask   ⇒ OCCUPANCY (still there),
+    //   lit by a NON-door mask ⇒ OCCLUDED  ⇒ excluded from the detectable footprint (no vote),
+    //   lit by nothing         ⇒ ABSENCE   (predicted-but-not-there — the "gone" signal, which fires even on a
+    //                                       frame where YOLO produced no door mask at all).
+    // The decisive property, and the reason this replaced the old pd·conf·obliquity scheme: a sample OUTSIDE
+    // the real camera frustum is not detectable, so a door behind the robot yields n_detectable==0 ⇒ rc::exist
+    // HOLDs. "Not looked at" is structurally distinct from "looked at and empty" — the old scheme charged
+    // absence evidence through a bearing-free range term and deleted a real door whenever the robot turned
+    // around. Occlusion is likewise a continuous shrinkage of the detectable footprint, never an indefinite
+    // freeze. Removal is a Bayesian decision on P(exists) (should_remove), debounced over consecutive
+    // EVIDENCE cycles — no age immunity, and no removal from a view that could not have resolved the door.
+    rc::exist::ExistenceBelief existence{};
+    bool existence_seeded = false;            // false until seeded with cfg.exist_birth_logodds on first visit
+    int  existence_remove_streak = 0;         // consecutive evidence cycles whose decision says "remove"
+    // Silhouette diagnostics (last evidence cycle) — the columns of etc/door_existence_log.csv.
+    float dbg_sil_occ = 0.0f, dbg_sil_free = 0.0f, dbg_sil_free_eff = 0.0f;
+    int   dbg_sil_ndet = 0, dbg_sil_ntotal = 0, dbg_sil_noccl = 0, dbg_sil_ncells = 0;
+    float dbg_sil_pdetect = 0.0f, dbg_sil_central = 0.0f, dbg_sil_resolv = 0.0f;
     int  processed_cycles   = 0;      // per-door compute cycles for log throttling
     bool model_stable       = false;
     int  model_generation   = 0;

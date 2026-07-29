@@ -133,24 +133,27 @@ struct DoorConfig
     bool  tracker_prune_enabled        = true; // stillbirth prune of phantom duplicates born from churn
     int   tracker_prune_maturity_cycles = 90;  // probation window; older instances are permanent furniture
     int   tracker_prune_patience       = 30;   // consecutive tracker-unassigned cycles in probation → prune
-    // ── Existence belief (continuous log-odds removal; replaces the wall-clock stillbirth prune above) ──
-    // A phantom accumulates NEGATIVE existence evidence every SENSOR frame it is expected-visible yet
-    // under-supported (silhouette-contradiction / free-space), and is removed when its log-odds drops below
-    // the floor — regardless of age. A real door keeps its log-odds pinned at the cap by being explained.
-    // Expected support scales as E[npts] = ExpectedSupportC / range² (a door's silhouette solid angle);
-    // ExpectedSupportC ≈ npts·range² of a well-seen door (measured ~7000 for the webots dining set).
+    // ── Existence belief (shared rc::exist log-odds channel — the same one table/chair use) ─────────────
+    // Evidence is the PIXEL-LEVEL silhouette (DoorFitter::compute_silhouette_existence): occupancy confirms,
+    // absence removes, occlusion and out-of-frustum HOLD. The parameters below are physical sensor RATES and
+    // one decision boundary — not gains, ramps or detectability curves. Removed with the old scheme:
+    // RemoveLogodds / EvidenceGain / ExpectedSupportC / AdequacyRef / AdequacyCap / CalibAdapt /
+    // VacateConfidentFrames / OcclusionCheck / ZedEdgeOffset / ZedRangeFull / ZedRangeRef / ZedClearLosFloor
+    // (the last of which was parsed but never read). Detectability is now measured from the projection itself.
     bool  exist_enabled            = true;   // Existence.Enabled — use the log-odds belief (else the old prune)
     float exist_birth_logodds      = 1.0f;   // Existence.BirthLogodds — L seeded at birth (a birth already needed birth_frames of evidence)
-    float exist_remove_logodds     = -3.0f;  // Existence.RemoveLogodds — remove when L falls below this
     float exist_max_logodds        =  4.0f;  // Existence.MaxLogodds — saturation cap (a real door can't earn infinite immunity)
-    float exist_evidence_gain      = 0.15f;  // Existence.EvidenceGain — per-frame |ΔL| scale (occlusion tolerance = span/gain frames)
-    float exist_expected_support_c = 2500.f; // Existence.ExpectedSupportC — expected support scale: E[npts]=C/range² (boundary ≈ a handful of pts)
-    float exist_adequacy_ref       = 0.25f;  // Existence.AdequacyRef — WON-mask support/expected below this → negative evidence
-    float exist_adequacy_cap       = 1.5f;   // Existence.AdequacyCap — clamp so one dense frame can't over-confirm
-    float exist_calib_adapt        = 0.0f;   // Existence.CalibAdapt — EWMA adapting C (0=OFF; a dense door would poison a sparse one)
-    int   exist_vacate_confident_frames = 45; // Existence.VacateConfidentFrames — frames_since_detection at which an in-view,
-                                              // unexplained instance draws FULL vacate negative (ramps 0→1; grace vs death-spiral)
-    bool  exist_occlusion_check    = true;   // Existence.OcclusionCheck — suppress the vacate negative when the door is hidden
+    // The ONE honest decision boundary: remove when P(exists) drops below this. Replaces RemoveLogodds — same
+    // quantity, stated as a probability instead of a log-odds so it reads as the decision it is.
+    float exist_removal_prob       = 0.12f;  // Existence.RemovalProb
+    int   exist_remove_frames      = 15;     // Existence.RemoveFrames — consecutive EVIDENCE cycles the decision must hold
+    // Physical sensor rates for the log-likelihood ratio (rc::exist::SensorModel), NOT gates.
+    float exist_detection_prob     = 0.85f;  // Existence.DetectionProb — P(mask lights a predicted pixel | door present & observable)
+    float exist_clutter_prob       = 0.05f;  // Existence.ClutterProb   — P(mask lights a predicted pixel | no door)
+    float exist_sensor_sigma_m     = 0.03f;  // Existence.SensorSigmaM  — range/localisation noise σ
+    // Central-image box [f, 1-f]²: a detectable silhouette sample inside it counts as the robot LOOKING at the
+    // door. A door merely clipping the wide frustum edge is not a verifying view, so its absence barely removes.
+    float exist_central_region_frac = 0.25f; // Existence.CentralRegionFrac
     float exist_occlusion_margin_m = 0.30f;  // Existence.OcclusionMarginM — an occluder must be ≥ this much CLOSER to count
     // Room-containment pose prior: P(a door outside the room walls) ≈ 0. Applies even when the instance is out
     // of view / behind a wall (a localization glitch can birth a door outside; the sensor then can't reach it
@@ -158,17 +161,14 @@ struct DoorConfig
     bool  exist_room_prior         = true;   // Existence.RoomPrior — enforce the room-containment pose prior
     float exist_room_margin_m      = 0.40f;  // Existence.RoomMarginM — tolerance a door centre may sit OUTSIDE the walls
     float exist_out_of_room_gain   = 1.5f;   // Existence.OutOfRoomGain — |ΔL| per frame while outside (debounces a 1-frame glitch)
-    // "ZED removes, ricoh confirms": a ricoh WIN confirms existence (resets staleness) but a ricoh mask's ABSENCE
-    // never removes — only ZED absence does, and only to the degree ZED would RELIABLY have detected a present
-    // door (falls off toward the image edge + with range). Stops removal of a far/peripheral, only-ricoh-visible
-    // door whose 360 view is momentarily occluded (the reported bug).
-    float exist_zed_edge_offset = 1.0f;   // Existence.ZedEdgeOffset — normalised ROI offset at which ZED detectability→0
-    float exist_zed_range_full  = 4.0f;   // Existence.ZedRangeFull — within this range (m) ZED detects reliably (pd=1)
-    float exist_zed_range_ref   = 7.0f;   // Existence.ZedRangeRef — beyond this range (m) ZED absence is uninformative (pd=0)
-    // pd FLOOR for an UNOCCLUDED, in-frustum door: even at the ZED periphery (low pd) a persistently-unexplained
-    // door with clear line of sight still vacates at ≥ this rate, so a glitch-stranded phantom the robot never
-    // centres eventually dies (conf gates on staleness → a recently-seen door is untouched). 0 = pure pd (no floor).
-    float exist_zed_clear_los_floor = 0.15f;  // Existence.ZedClearLosFloor
+    // ── Identity re-acquisition ────────────────────────────────────────────────────────────────────
+    // A removed door is remembered as a GHOST (name + converged belief). A later detection landing within
+    // ReacquireRadiusM of a ghost is the SAME door coming back: it resumes that identity and its accumulated
+    // geometry instead of being re-born as door_N+1. Without this, one flicker cost the live run three node
+    // identities for a single physical door (door_1 → door_3, same 2 cm spot) and every downstream consumer
+    // saw a brand-new object each time.
+    float exist_reacquire_radius_m = 0.60f;  // Existence.ReacquireRadiusM (0 disables re-acquisition)
+    int   exist_ghost_max          = 8;      // Existence.GhostMax — most recent removals retained
     // ── Door panel priors (wall-frame belief θ=[s,w,h]) ────────────────────────────────────────────
     // The door is a thin panel IN a wall: s (along-wall offset) is localised by the fit (BROAD prior),
     // while w,h are STRONG template priors — a standard leaf ≈ 0.70 m × 2.00 m. Realised as tight seed

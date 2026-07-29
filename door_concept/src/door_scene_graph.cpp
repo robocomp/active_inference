@@ -74,7 +74,8 @@ DoorSceneGraph::WallRef DoorSceneGraph::resolve_wall(std::uint64_t room_id, cons
 }
 
 std::uint64_t DoorSceneGraph::create_instance_from_detection(const Eigen::Vector3f& centroid_room,
-                                                              std::uint64_t room_node_id)
+                                                              std::uint64_t room_node_id,
+                                                              std::string_view preferred_name)
 {
     auto room_opt = G_->get_node(room_node_id);
     if (not room_opt.has_value())
@@ -83,10 +84,17 @@ std::uint64_t DoorSceneGraph::create_instance_from_detection(const Eigen::Vector
     // Auto-name: one past the highest existing "door_<N>". Doors are now generic `object` nodes
     // named "door_*" (schema migration), so scan get_nodes_by_type("object") + name-prefix filter.
     int max_n = 0;
+    bool preferred_free = not preferred_name.empty();
     for (const auto& n : G_->get_nodes_by_type("object"))
         if (n.name().rfind("door_", 0) == 0)
+        {
+            if (n.name() == preferred_name) preferred_free = false;   // still occupied → don't collide
             try { max_n = std::max(max_n, std::stoi(n.name().substr(5))); } catch (...) {}   // "door_" = 5 chars
-    const std::string name = "door_" + std::to_string(max_n + 1);
+        }
+    // RE-ACQUISITION: a door that flickered out and came back keeps its name, so downstream consumers see the
+    // same object rather than a fresh one. (The DSR id necessarily changes — the old node was deleted.)
+    const std::string name = preferred_free ? std::string(preferred_name)
+                                            : "door_" + std::to_string(max_n + 1);
 
     // Generic `object` node named "door_*"; class carried in object_subtype ("door"). Every
     // get_nodes_by_type("object") MUST therefore be paired with a starts_with("door") filter.
