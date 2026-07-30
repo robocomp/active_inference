@@ -279,30 +279,39 @@ void RoomViewer::set_rt_rate_text(const QString& text)
         rt_rate_label_->setText(text);
 }
 
-void RoomViewer::set_room_stable(bool stable, int stable_frames, int frames_required)
+void RoomViewer::set_room_stable(bool stable, int stable_frames, int frames_required, bool searching)
 {
     if (custom_widget_ == nullptr or custom_widget_->lbl_room_stable == nullptr)
         return;
 
     auto* lbl = custom_widget_->lbl_room_stable;
 
+    // SEARCHING outranks both other states: while a global grid search runs the pose is being
+    // relocated wholesale, so "ROOM STABLE" would be actively misleading — the room node still
+    // exists, but the robot's place in it is exactly what is currently in question.
+    const int state = searching ? 2 : (stable ? 1 : 0);
+
+    const QString text = searching ? QStringLiteral("SEARCHING…")
+                       : stable    ? QStringLiteral("ROOM STABLE")
+                                   : QStringLiteral("STABILIZING %1/%2")
+                                         .arg(stable_frames).arg(std::max(1, frames_required));
+
     // Repainting the stylesheet every frame forces a full re-parse + relayout in Qt, so only touch the
     // widget when the displayed state actually changes.
-    const QString text = stable ? QStringLiteral("ROOM STABLE")
-                                : QStringLiteral("STABILIZING %1/%2")
-                                      .arg(stable_frames).arg(std::max(1, frames_required));
-    if (lbl->text() == text and room_stable_shown_ == static_cast<int>(stable))
+    if (lbl->text() == text and room_stable_shown_ == state)
         return;
     lbl->setText(text);
 
-    if (room_stable_shown_ != static_cast<int>(stable))
+    if (room_stable_shown_ != state)
     {
-        lbl->setStyleSheet(stable
-            ? QStringLiteral("QLabel { background-color: #1e8b3a; color: white; border: 1px solid #145c26;"
-                             " border-radius: 4px; font-weight: bold; }")
-            : QStringLiteral("QLabel { background-color: #b02020; color: white; border: 1px solid #7a1616;"
-                             " border-radius: 4px; font-weight: bold; }"));
-        room_stable_shown_ = static_cast<int>(stable);
+        // amber (searching) / green (stable) / red (stabilizing)
+        static constexpr const char* kStyle =
+            "QLabel { background-color: %1; color: white; border: 1px solid %2;"
+            " border-radius: 4px; font-weight: bold; }";
+        const QString bg     = state == 2 ? "#c9791a" : state == 1 ? "#1e8b3a" : "#b02020";
+        const QString border = state == 2 ? "#8c520f" : state == 1 ? "#145c26" : "#7a1616";
+        lbl->setStyleSheet(QString(kStyle).arg(bg, border));
+        room_stable_shown_ = state;
     }
 }
 

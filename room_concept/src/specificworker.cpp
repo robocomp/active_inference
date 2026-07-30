@@ -601,11 +601,13 @@ void SpecificWorker::compute()
     {
         section_timer.restart();
         viewer_->update_ui(loc_res);
-        // Room-stabilization indicator: GREEN once the room node exists in the graph (the very
-        // condition downstream consumers gate on), RED while stable frames are still accumulating.
+        // Room-stabilization indicator: AMBER while a global grid search is relocating the robot,
+        // GREEN once the room node exists in the graph (the very condition downstream consumers gate
+        // on), RED while stable frames are still accumulating.
         viewer_->set_room_stable(scene_graph_->room_node_created(),
                                  scene_graph_->stable_frames(),
-                                 params.STABLE_FRAMES_REQUIRED);
+                                 params.STABLE_FRAMES_REQUIRED,
+                                 room_concept_.is_grid_searching());
         t_ui_ms = section_timer.elapsed();
     }
 

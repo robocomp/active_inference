@@ -91,7 +91,8 @@ public:
     // Room-stabilization indicator (the button-sized label right of the Lidar button). GREEN once the
     // room node exists in the DSR graph — the same condition consumers gate on — RED while the
     // localizer is still accumulating consecutive stable frames (shown as n/required). GUI thread only.
-    void set_room_stable(bool stable, int stable_frames, int frames_required);
+    /// `searching` (a global grid search is running or just finished) outranks the other two states.
+    void set_room_stable(bool stable, int stable_frames, int frames_required, bool searching = false);
 
     // Push one ~1 Hz sample of the RT-publish rate (corrected pose) and optimizer rate to the live
     // rate plot in the lower frame. Predicted poses are no longer published, so there is no pred rate.
@@ -124,7 +125,7 @@ private:
     QPointer<rc::TimeSeriesPlot> ts_plot_fe_;
     QPointer<rc::TimeSeriesPlot> ts_plot_rates_;   // RT-publish + optimizer rates (Hz) over time
     QPointer<rc::TimeSeriesPlot> ts_plot_conf_;    // localization confidence (raw, 0..1) over time
-    // Last stabilization colour pushed to lbl_room_stable: -1 = never painted, 0 = red, 1 = green.
+    // Last state pushed to lbl_room_stable: -1 = never painted, 0 = red, 1 = green, 2 = amber (searching).
     // Tri-state so the very first update always applies a stylesheet, whichever state it reports.
     int room_stable_shown_ = -1;
     std::unique_ptr<rc::CameraVisualizer> camera_viz_;

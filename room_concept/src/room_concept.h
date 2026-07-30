@@ -259,7 +259,11 @@ public:
         // ===== Grid Search / Orientation Search =====
         float grid_search_wall_margin = 0.3f;        // meters from room walls
         int grid_search_max_samples = 150;            // Lidar subsample for grid evaluation
-        float grid_search_good_threshold = 1.0f;      // SDF loss < this = acceptable pose
+        // Success bar as a FRACTION of recovery_loss_threshold, not an absolute. A search that reports
+        // success must leave a pose recovery will not instantly call lost again, or the two loop
+        // forever; deriving the bar makes that un-driftable. 0.5 ⇒ the search must halve the error
+        // recovery considers "lost" before it claims to have solved anything.
+        float grid_search_good_factor = 0.5f;
         int orientation_search_max_samples = 100;      // Lidar subsample for orientation candidates
 
         // ===== Optimizer Selection =====
@@ -427,7 +431,13 @@ public:
         // FALLBACK, not a fix. Consumers must treat it as such (its covariance is inflated to match).
         bool diverged = false;
         float final_loss = 0.f;      // Scaled loss (for optimization)
-        float sdf_mse = 0.f;         // Unscaled SDF MSE (for display: sqrt gives avg error in meters)
+        // MEDIAN |SDF| IN METRES — despite the name, which is legacy and kept only because two public
+        // config keys (SymmetryGoodFitMse, StableSdfMseMax) are named after it. It is NOT a mean and
+        // NOT squared, so do NOT sqrt it: that produced the square root of a length at the recovery
+        // trigger and made the grid search's bar ~5x looser than recovery's, so recovery fired forever
+        // on a state the search then declared fine. Compare it only against other metres, and produce
+        // it only via median_abs_sdf().
+        float sdf_mse = 0.f;
         // Early-exit decision variable: mean |SDF| at the odometry-predicted pose (meters). The
         // optimizer is SKIPPED when this falls below sigma_sdf*prediction_trust_factor (+rotation
         // boost). NaN when the early-exit gate wasn't evaluated this frame (warmup / no odometry /
@@ -619,9 +629,24 @@ public:
     void set_initial_state(float width, float length, float x, float y, float phi);
     void set_polygon_room(const std::vector<Eigen::Vector2f>& polygon_vertices);
     void set_robot_pose(float x, float y, float theta, bool manual_reset = true);  // Set robot pose manually (e.g., from UI click)
-    float evaluate_pose_mean_abs_sdf(const std::vector<Eigen::Vector3f>& lidar_points,
+    float evaluate_pose_fit(const std::vector<Eigen::Vector3f>& lidar_points,
                                      int max_samples = 300) const;
     bool is_initialized() const { return model_ != nullptr; }
+
+    /// True while a global grid search is running, and for `hold_ms` after one finishes. The hold
+    /// exists because the GUI polls at ~15-30 Hz from another thread: a search that completes between
+    /// two polls would otherwise never be seen, and the operator would have no way to tell a search
+    /// from a freeze. Safe to call from any thread (two atomics, no lock).
+    bool is_grid_searching(int hold_ms = 1500) const
+    {
+        if (grid_search_active_.load(std::memory_order_relaxed))
+            return true;
+        const auto ended = grid_search_end_ms_.load(std::memory_order_relaxed);
+        if (ended == 0) return false;
+        const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        return (now - ended) < hold_ms;
+    }
 
     // Grid search for initial pose (solves kidnapping problem)
     // Returns true if a good pose was found, false otherwise
@@ -783,6 +808,10 @@ private:
    bool pending_seed_validation_ = false;
    bool validate_seed_pose(const std::vector<Eigen::Vector3f>& pts);
 
+   // Grid-search liveness for the UI (written on the localizer thread, read on the GUI thread).
+   std::atomic<bool>         grid_search_active_{false};
+   std::atomic<std::int64_t> grid_search_end_ms_{0};
+
    // Manual pose reset - skip optimization for a few frames
    int manual_reset_frames_ = 0;  // Counter to skip optimization after manual reset
 
@@ -800,12 +829,20 @@ private:
        int consecutive_bad_frames = 0;
        int cooldown = 0;
 
-       /// Returns true if recovery should be triggered now.
-       bool check(float avg_sdf_err, int iterations_used,
+       /// Returns true if recovery should be triggered now. `avg_sdf_err` must be the WORST of the
+       /// prediction error and the post-fit residual — see the call site for why watching only the
+       /// post-fit number misses the case the operator actually sees.
+       ///
+       /// NOTE there is deliberately no `iterations_used <= 0` guard any more. It used to skip every
+       /// early-exit frame on the assumption that sdf_mse was stale then; it is not — the early-exit
+       /// path sets res.sdf_mse itself (room_concept.cpp, `res.sdf_mse = mean_sdf_pred`). The guard
+       /// made recovery structurally blind in exactly the regime where a silent mislocalization lives:
+       /// a 180°-flipped pose in a symmetric room is SDF-ambiguous, so it early-exits every frame, so
+       /// recovery never accumulated a single bad frame and could never fire.
+       bool check(float avg_sdf_err, int /*iterations_used*/,
                   float threshold, int consecutive_count)
        {
            if (cooldown > 0) { --cooldown; return false; }
-           if (iterations_used <= 0) return false;
            if (avg_sdf_err > threshold)
            {
                ++consecutive_bad_frames;
@@ -1146,12 +1183,21 @@ private:
         return device.is_cpu() ? tensor : tensor.to(device);
     }
 
-    // Returns median absolute SDF error for UI display (robust to outliers)
-    static float compute_sdf_mse_unscaled(const torch::Tensor &points_xyz, const Model &m)
+    /// THE fit metric for this class: median |SDF| in METRES, robust to the outliers that furniture
+    /// (absent from the polygon) always contributes. Every pose-quality number must be reduced with
+    /// this one function so they stay comparable — recovery's trigger, the grid search's success bar,
+    /// the symmetry check's candidate scores and the stability gate are all judged against each other,
+    /// and each was previously computing its own variant (mean-squared m², sqrt-of-a-length) while
+    /// being compared as though the units matched. See UpdateResult::sdf_mse.
+    static float median_abs_sdf(const torch::Tensor &sdf_vals)
     {
-        const auto sdf_vals = m.sdf(points_xyz);
-        const auto abs_sdf = torch::abs(sdf_vals);
-        return torch::median(abs_sdf).item<float>();
+        return torch::median(torch::abs(sdf_vals)).item<float>();
+    }
+
+    // Fit metric at the model's CURRENT pose.
+    static float compute_sdf_median_abs(const torch::Tensor &points_xyz, const Model &m)
+    {
+        return median_abs_sdf(m.sdf(points_xyz));
     }
 };
 

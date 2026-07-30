@@ -195,8 +195,16 @@ HierPrecSigmaV2         = 1.0    # escala prior del estado v
 # HierPrecEeDthetaMin          = 0.15  # rad (|Δθ|) que habilita el nudge en early-exit (giro)
 
 # ── Recovery ──────────────────────────────────────────────────────────────────
-RecoveryLossThreshold    = 0.45  # sqrt(sdf_mse) > umbral → frame malo (m).
-                                  # Anterior 0.2 disparaba en giros normales.
+# UNITS CHANGED 2026-07-29. sdf_mse is MEDIAN |SDF| IN METRES (it is not a mean and not squared);
+# the recovery trigger used to sqrt() it, i.e. the square root of a length. This threshold is now
+# compared to it DIRECTLY, in metres. 0.45-under-sqrt == 0.2025 m, so 0.20 here reproduces exactly
+# the behaviour that 0.45 gave before -- this is NOT a retune.
+# DO NOT 'restore' 0.45, and do not read the old note below as an argument against 0.20: the 0.2
+# that once fired on normal turns was 0.2 in the old sqrt units, i.e. 0.04 m -- 5x tighter than this.
+RecoveryLossThreshold    = 0.20  # median|sdf| > this (m) => bad frame. Also DERIVES the grid-search
+                                 # success bar (GridSearchGoodFactor x this), so a search that claims
+                                 # success cannot leave a pose recovery instantly calls lost again.
+GridSearchGoodFactor     = 0.5   # search must halve the 'lost' error before reporting success
 RecoveryConsecutiveCount = 10    # Frames malos consecutivos para recovery.
                                   # Anterior 3 reseteaba la ventana cada ~30 f.
 RecoveryCooldownFrames   = 60    # Frames sin detection tras recovery (default 30).

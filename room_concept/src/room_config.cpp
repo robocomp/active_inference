@@ -24,6 +24,9 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_required<int>(cl, "RoomConcept.MaxLidarOldSlot", room_concept.params.rfe_max_lidar_per_old_slot);
     rc::ConfigLoaderUtils::load_required<float, double>(cl, "RoomConcept.RecoveryLossThreshold", room_concept.params.recovery_loss_threshold);
     rc::ConfigLoaderUtils::load_required<int>(cl, "RoomConcept.RecoveryConsecutiveCount", room_concept.params.recovery_consecutive_count);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.GridSearchGoodFactor", room_concept.params.grid_search_good_factor);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.GridSearchWallMargin", room_concept.params.grid_search_wall_margin);
+    rc::ConfigLoaderUtils::load_optional<int>(cl, "RoomConcept.GridSearchMaxSamples", room_concept.params.grid_search_max_samples);
 
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.OdometryNoiseFactor", p.ODOMETRY_NOISE_FACTOR);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.OdomNoiseScale", room_concept.params.odom_noise_scale);

@@ -402,11 +402,11 @@ namespace rc
         const float theta = wrap_angle(state[4]);
 
         set_robot_pose(x, y, theta, false);
-        const float sdf_theta = evaluate_pose_mean_abs_sdf(lidar_points);
+        const float sdf_theta = evaluate_pose_fit(lidar_points);
 
         const float theta_pi = wrap_angle(theta + static_cast<float>(M_PI));
         set_robot_pose(x, y, theta_pi, false);
-        const float sdf_theta_pi = evaluate_pose_mean_abs_sdf(lidar_points);
+        const float sdf_theta_pi = evaluate_pose_fit(lidar_points);
 
         const bool similar_fit = std::isfinite(sdf_theta) && std::isfinite(sdf_theta_pi)
                                  && std::abs(sdf_theta - sdf_theta_pi) <= kYawTieTolerance;
@@ -525,7 +525,7 @@ namespace rc
     ///
     /// The bar is params.recovery_loss_threshold — deliberately the SAME "this fit means we are lost"
     /// number the runtime RecoveryManager uses, rather than a new knob. Units match: both are metres
-    /// (mean |SDF| here, sqrt(sdf_mse) there), and both sit far above a converged fit (~0.13 m) and far
+    /// (median |SDF| in both, since the units were unified), and both sit far above a converged fit and far
     /// below a real mislocalization.
     bool RoomConcept::validate_seed_pose(const std::vector<Eigen::Vector3f>& pts)
     {
@@ -533,7 +533,7 @@ namespace rc
         if (pts.empty() || model_ == nullptr)
             return true;
 
-        const float seed_err = evaluate_pose_mean_abs_sdf(pts);
+        const float seed_err = evaluate_pose_fit(pts);
         if (std::isfinite(seed_err) && seed_err <= params.recovery_loss_threshold)
         {
             qInfo() << "[RoomConcept] Seed pose accepted: mean|sdf| =" << seed_err << "m (bar"
@@ -860,7 +860,25 @@ namespace rc
             // want: a robot that is picked up and moved after the room is stable still needs to recover,
             // and this is the backstop for a bad startup seed that validate_seed_pose let through.
             {
-                const float avg_sdf_err = std::sqrt(res.sdf_mse);
+                // res.sdf_mse is ALREADY median |SDF| in metres — see its declaration. It used to be
+                // sqrt()'d here, which is the square root of a length: dimensionally meaningless, and
+                // it made the effective trigger 0.2025 m while the number in the config read 0.45.
+                // RecoveryLossThreshold is now that same 0.2 m directly.
+                //
+                // Judge on the WORST of the prediction error and the post-fit residual. The post-fit
+                // residual ALONE was the bug the operator hit: after the layout is repositioned, the
+                // prediction is chronically wrong (the plotted `pred |SDF|` sits ~0.5, far above the
+                // opt threshold) but Adam re-solves it from scratch every frame, so the post-fit number
+                // looks healthy and the bad-frame counter resets — the search never fires, even though
+                // the belief plainly does not explain the world. early_exit_metric is exactly the curve
+                // shown in the UI, so what the operator sees and what arms recovery are now the same
+                // signal.
+                //
+                // Turn safety: a hard turn legitimately spikes the prediction error. Two things absorb
+                // that — the metric is only compared against a threshold well above normal turn
+                // transients, and RecoveryConsecutiveCount (10) requires it to persist. If turns start
+                // triggering, that count is the dial, not the threshold.
+                const float avg_sdf_err = std::max(res.sdf_mse, res.early_exit_metric);
                 if (recovery_.check(avg_sdf_err, res.iterations_used,
                                     params.recovery_loss_threshold, params.recovery_consecutive_count))
                 {
@@ -935,15 +953,19 @@ namespace rc
 
                     const float loss_cur = res.sdf_mse;
 
-                    // Evaluate all symmetry candidates
+                    // Evaluate all symmetry candidates. MUST use the same reduction as loss_cur above
+                    // (median |SDF|, metres): this was mean(sdf²) in m² while loss_cur was already in
+                    // metres, so every candidate scored ~14x "better" than the current pose no matter
+                    // how correct that pose was, and `advantage` came out positive on every check —
+                    // the test was biased toward flipping until good_fit_streak_ grew large enough for
+                    // the confidence gain to outrun the bogus evidence.
                     auto eval_at = [&](float nx, float ny, float nth) -> float {
                         torch::NoGradGuard ng;
                         auto xy = torch::tensor({nx, ny},
                             torch::TensorOptions().dtype(torch::kFloat32).device(get_device()));
                         auto th = torch::tensor({nth},
                             torch::TensorOptions().dtype(torch::kFloat32).device(get_device()));
-                        return torch::mean(torch::square(
-                            model_->sdf_at_pose(pts_t, xy, th))).item<float>();
+                        return median_abs_sdf(model_->sdf_at_pose(pts_t, xy, th));
                     };
 
                     struct Candidate { const char* name; float x, y, theta, loss; };
@@ -1273,9 +1295,31 @@ namespace rc
         if (model_ == nullptr || lidar_points.empty())
             return false;
 
+        // Mark the search live for the UI. RAII because this function returns from four places
+        // (Stage 0's flip short-circuit, Stage 1's coarse hit, the Stage 2 tail); a manual clear
+        // would eventually be forgotten at one of them and pin the indicator on "SEARCHING".
+        struct SearchFlag
+        {
+            std::atomic<bool>& active;
+            std::atomic<std::int64_t>& end_ms;
+            explicit SearchFlag(std::atomic<bool>& a, std::atomic<std::int64_t>& e) : active(a), end_ms(e)
+            { active.store(true, std::memory_order_relaxed); }
+            ~SearchFlag()
+            {
+                end_ms.store(std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count(),
+                    std::memory_order_relaxed);
+                active.store(false, std::memory_order_relaxed);
+            }
+        } search_flag(grid_search_active_, grid_search_end_ms_);
+
         // ── Helpers ───────────────────────────────────────────────────────────
 
-        // Evaluate mean-squared SDF loss at a pose, without permanently touching the model.
+        // Fit at a pose, without permanently touching the model. Same reduction as everything else
+        // (median |SDF|, METRES) so this score is directly comparable to res.sdf_mse and therefore to
+        // the recovery trigger. It was mean(sdf²) in m², which is why good_thr=1.0 — read as "1 m²" —
+        // accepted anything under ~1 m of error and let Stage 0 declare victory on the pose it was
+        // handed, while recovery considered that same pose lost at 0.2 m.
         auto eval_loss = [&](const torch::Tensor& pts, float x, float y, float theta) -> float
         {
             model_->robot_pos.data().copy_(
@@ -1283,7 +1327,7 @@ namespace rc
             model_->robot_theta.data().copy_(
                 torch::tensor({theta}, torch::TensorOptions().device(get_device())));
             torch::NoGradGuard no_grad;
-            return torch::mean(torch::square(model_->sdf(pts))).item<float>();
+            return median_abs_sdf(model_->sdf(pts));
         };
 
         // Commit best pose and reset all tracking state.
@@ -1348,43 +1392,118 @@ namespace rc
         const torch::Tensor pts_coarse = make_tensor(params.grid_search_max_samples / 2);
         const torch::Tensor pts_fine   = make_tensor(params.grid_search_max_samples);
 
-        const float good_thr = params.grid_search_good_threshold;
+        // Success bar, DERIVED from the recovery trigger rather than set independently. The invariant
+        // is that a search which reports success must leave a pose recovery will not immediately call
+        // lost again — otherwise the two fight forever: recovery fires, the search "succeeds" without
+        // improving anything, the counter clears, the cooldown expires and it fires again. That is
+        // exactly what a standalone good_thr produced. Keeping it a FRACTION of the trigger makes the
+        // relationship un-driftable; grid_search_good_factor only chooses how much margin.
+        const float good_thr = params.grid_search_good_factor * params.recovery_loss_threshold;
 
-        // ══ STAGE 0: Symmetry flips at current position ═══════════════════════
-        // Rectangular/polygonal rooms have 180° rotational symmetry and often 90°
-        // symmetry too. The localizer frequently locks to the mirror solution.
-        // Try the four cardinal flips — 180° first — before any global search.
+        // Best pose seen so far, seeded from the pose we were handed (Stage 0 fills it in). Carried
+        // through every stage so the final commit is never a REGRESSION — the coarse 1 m grid does not
+        // evaluate the current pose, so without an incumbent a search over an already-decent pose could
+        // hand back a worse grid point.
+        float incumbent_x = 0.f, incumbent_y = 0.f, incumbent_theta = 0.f;
+        float incumbent_loss = std::numeric_limits<float>::infinity();
+
+        // ══ STAGE 0: FULL ROTATION SWEEP at the current position ══════════════
+        // Ordered by what actually goes wrong. A localizer that loses itself has almost always lost its
+        // ORIENTATION — the 180° mirror of a near-symmetric room, or yaw bled away during a fast turn —
+        // while the position stays roughly right, because translation is observable from wall distances
+        // every frame whereas a flip is SDF-ambiguous and can persist silently. A large teleport is the
+        // rare case, so paying for a full-room x/y lattice before trying rotation is backwards: it is
+        // the expensive search for the unlikely fault.
+        //
+        // So: sweep yaw over the whole circle at the CURRENT x/y, then refine around the winner. This
+        // subsumes the old four-cardinal-flip test (180/90/270 are simply members of the sweep) and
+        // additionally catches the small-to-moderate yaw errors it could not see at all — the drift
+        // that leaves the pose "nearly right" and the residual stubbornly high.
+        float s0_best_theta = 0.f;
         {
             const auto cur  = model_->get_state();
             const float cx  = cur[2];
             const float cy  = cur[3];
             const float cth = cur[4];
 
-            // Order: 180° → 90° → 270° → 0° (current)
-            const std::array<float, 4> flips = {
-                static_cast<float>(M_PI),
-                static_cast<float>(M_PI_2),
-                static_cast<float>(-M_PI_2),
-                0.f
-            };
-
-            float s0_best_loss  = std::numeric_limits<float>::infinity();
-            float s0_best_theta = cth;
-            for (float dth : flips)
+            const float coarse_dth = static_cast<float>(M_PI) / 15.f;   // 12° — 30 evals over 360°
+            float best_loss  = std::numeric_limits<float>::infinity();
+            float best_theta = cth;
+            for (int i = 0; i < 30; ++i)
             {
-                const float theta = cth + dth;
+                const float theta = cth + static_cast<float>(i) * coarse_dth;
                 const float loss  = eval_loss(pts_coarse, cx, cy, theta);
-                if (loss < s0_best_loss) { s0_best_loss = loss; s0_best_theta = theta; }
+                if (loss < best_loss) { best_loss = loss; best_theta = theta; }
             }
-            if (s0_best_loss < good_thr)
+            // Refine the winner at 2° over ±12°, so a flip is recovered to better than the angular
+            // resolution the coarse sweep could express.
+            const float fine_dth = 2.f * static_cast<float>(M_PI) / 180.f;
+            for (int i = -6; i <= 6; ++i)
             {
-                commit_pose(cx, cy, s0_best_theta);
+                const float theta = best_theta + static_cast<float>(i) * fine_dth;
+                const float loss  = eval_loss(pts_fine, cx, cy, theta);
+                if (loss < best_loss) { best_loss = loss; best_theta = theta; }
+            }
+
+            // The incumbent is the pose we were HANDED, always — so no later stage can return something
+            // worse than the caller's own estimate.
+            incumbent_x = cx; incumbent_y = cy; incumbent_theta = cth;
+            incumbent_loss = eval_loss(pts_fine, cx, cy, cth);
+
+            s0_best_theta = best_theta;
+            // Commit only on a real improvement that also clears the bar. Requiring the IMPROVEMENT is
+            // what stops the search concluding on the pose it was given: if rotation cannot help, this
+            // must fall through to the translational stages rather than report success unchanged.
+            if (best_loss < good_thr and best_loss < incumbent_loss)
+            {
+                commit_pose(cx, cy, best_theta);
                 return true;
+            }
+            if (best_loss < incumbent_loss)
+            {
+                incumbent_theta = best_theta;
+                incumbent_loss  = best_loss;
             }
         }
 
-        // ══ STAGE 1: Coarse global grid (≥1 m step, 90° angles) ══════════════
-        // Evaluate the whole room at low resolution and keep the top-K candidates.
+        // ══ STAGE 0b: LOCAL translation × rotation around the current pose ════
+        // Rotation alone did not explain the scan. Before searching the whole room, try a small
+        // neighbourhood — a modest position error combined with a yaw error is far more likely than a
+        // teleport, and this covers it for ~1/8 the cost of the global lattice.
+        {
+            const float span = 1.0f, step = 0.25f;                          // ±1 m at 25 cm
+            const float dth_span = 30.f * static_cast<float>(M_PI) / 180.f; // ±30°
+            const float dth_step = 10.f * static_cast<float>(M_PI) / 180.f; // at 10°
+            float best_x = incumbent_x, best_y = incumbent_y, best_theta = incumbent_theta;
+            float best_loss = incumbent_loss;
+            for (float dx = -span; dx <= span + 1e-4f; dx += step)
+                for (float dy = -span; dy <= span + 1e-4f; dy += step)
+                {
+                    const float rx = incumbent_x + dx, ry = incumbent_y + dy;
+                    if (rx < min_x or rx > max_x or ry < min_y or ry > max_y) continue;
+                    for (float dth = -dth_span; dth <= dth_span + 1e-4f; dth += dth_step)
+                    {
+                        const float th   = s0_best_theta + dth;
+                        const float loss = eval_loss(pts_coarse, rx, ry, th);
+                        if (loss < best_loss)
+                        { best_loss = loss; best_x = rx; best_y = ry; best_theta = th; }
+                    }
+                }
+            if (best_loss < good_thr and best_loss < incumbent_loss)
+            {
+                commit_pose(best_x, best_y, best_theta);
+                return true;
+            }
+            if (best_loss < incumbent_loss)
+            {
+                incumbent_x = best_x; incumbent_y = best_y;
+                incumbent_theta = best_theta; incumbent_loss = best_loss;
+            }
+        }
+
+        // ══ STAGE 1: Coarse GLOBAL grid — last resort (≥1 m step, 90° angles) ══
+        // Only reached when neither a pure rotation nor a ±1 m neighbourhood explains the scan, i.e.
+        // the genuine kidnapping case. Evaluate the whole room at low resolution, keep the top-K.
         constexpr int TOP_K = 8;
         const float   coarse_step  = std::max(grid_resolution, 1.0f);
         const float   coarse_angle = static_cast<float>(M_PI_2);   // 90°
@@ -1411,6 +1530,9 @@ namespace rc
             if (static_cast<int>(candidates.size()) > TOP_K)
                 candidates.resize(TOP_K);
 
+            // Only stop here if the COARSE grid already clears the bar outright. On a 1 m/90° lattice
+            // that is rare by construction, which is the point: the usual path is to fall through to
+            // the fine refinement rather than commit a lattice point as if it were a solution.
             if (candidates.front().loss < good_thr)
             {
                 const auto& b = candidates.front();
@@ -1426,10 +1548,17 @@ namespace rc
         const float fine_pos   = coarse_step  / 3.f;
         const float fine_angle = coarse_angle / 3.f;
 
+        // Start from the incumbent (the pose we were handed) when it still beats every coarse
+        // candidate, so refinement can only improve on it — never trade a good pose for a lattice point.
         float best_x     = candidates.front().x;
         float best_y     = candidates.front().y;
         float best_theta = candidates.front().theta;
         float best_loss  = candidates.front().loss;
+        if (incumbent_loss < best_loss)
+        {
+            best_x = incumbent_x; best_y = incumbent_y;
+            best_theta = incumbent_theta; best_loss = incumbent_loss;
+        }
         int   total2     = 0;
 
         for (const auto& cand : candidates)
@@ -1603,7 +1732,7 @@ namespace rc
         last_update_result.ok = true;
     }
 
-    float RoomConcept::evaluate_pose_mean_abs_sdf(const std::vector<Eigen::Vector3f>& lidar_points,
+    float RoomConcept::evaluate_pose_fit(const std::vector<Eigen::Vector3f>& lidar_points,
                                                   int max_samples) const
     {
         if (model_ == nullptr || lidar_points.empty())
@@ -1625,8 +1754,11 @@ namespace rc
 
         torch::NoGradGuard no_grad;
         const auto points_tensor = points_to_tensor_xyz(sampled, get_device());
-        const auto sdf_vals = model_->sdf(points_tensor);
-        return torch::mean(torch::abs(sdf_vals)).item<float>();
+        // Median, not mean: this result is compared against recovery_loss_threshold (validate_seed_pose)
+        // and against itself across yaw hypotheses, and every other fit number in this class is a
+        // median. Mean |SDF| runs high wherever furniture the polygon does not model is in view, which
+        // made the seed check stricter than the bar it was measured against.
+        return median_abs_sdf(model_->sdf(points_tensor));
     }
 
     Eigen::Vector3f RoomConcept::compute_velocity_adaptive_weights(const OdometryPrior& odometry_prior)
@@ -2053,7 +2185,7 @@ namespace rc
             model_->robot_theta.data().copy_(torch::tensor({phi},
                 torch::TensorOptions().device(get_device())));
 
-            res.sdf_mse = compute_sdf_mse_unscaled(points_tensor, *model_);
+            res.sdf_mse = compute_sdf_median_abs(points_tensor, *model_);
 
             // Store localization quality so future frames can quality-gate the boundary prior
             // (Solutions B & C): when this slot becomes the oldest it carries its own sdf_mse.
