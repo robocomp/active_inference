@@ -16,6 +16,7 @@
  *    You should have received a copy of the GNU General Public License
  *    along with RoboComp.  If not, see <http://www.gnu.org/licenses/>.
  */
+#include <print>
 #include "specificworker.h"
 
 #include "../../common/robust_metrics/robust_metrics.h"
@@ -289,6 +290,26 @@ void SpecificWorker::compute()
 	};
 	ScopedComputePerfLog perf_log{compute_perf_counter};
 
+	// Verify the output-rate guarantee rather than assume it. period_max is the number that matters: it is the
+	// longest the base went without a command, and it must stay near VelocityOutputPeriodMs no matter how badly
+	// this cycle overran. cmd_age_max / scale_min show how stale the planner got and how much the freshness
+	// term attenuated it — a scale_min well under 1 means compute() stalled and the robot was coasting down.
+	if (const auto stats = motion_commander_.take_output_rate_stats(); stats.ticks > 0)
+	{
+		static std::uint64_t last_rate_log_ms = 0;
+		const auto now_ms = static_cast<std::uint64_t>(
+			std::chrono::duration_cast<std::chrono::milliseconds>(
+				std::chrono::system_clock::now().time_since_epoch()).count());
+		if (now_ms - last_rate_log_ms >= 5000)
+		{
+			last_rate_log_ms = now_ms;
+			std::println("[vel-out] {} ticks | period mean {:.1f} ms max {:.1f} ms | cmd age max {:.0f} ms | "
+			             "freshness scale min {:.2f}",
+			             stats.ticks, stats.period_mean_ms, stats.period_max_ms,
+			             stats.cmd_age_max_ms, stats.scale_min);
+		}
+	}
+
 	auto update_selected_affordance_label = [this]()
 	{
 		const auto current_affordance_name = affordance_manager_.current_name();
@@ -443,6 +464,8 @@ void SpecificWorker::load_params()
 	load_optional_cast<double>("Controller.MaxRotSpeed", params.max_rot_speed_rps);
 	load_optional_cast<double>("Controller.PosGain", params.pos_gain);
 	load_optional_cast<double>("Controller.RotGain", params.rot_gain);
+	load_optional_cast<double>("Controller.VelocityOutputPeriodMs", params.velocity_output_period_ms);
+	load_optional_cast<double>("Controller.CommandFreshnessTauMs", params.command_freshness_tau_ms);
 	load_optional("Transforms.interpolate_rt", params.interpolate_rt);
 	load_optional("Transforms.overlay_extrapolate_to_now", params.overlay_extrapolate_to_now);
 	load_optional("Transforms.overlay_draw_one_frame_old", params.overlay_draw_one_frame_old);

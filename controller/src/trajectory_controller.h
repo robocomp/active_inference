@@ -273,6 +273,10 @@ public:
         // no waypoint progress by design.
         bool  aligning = false;
         float dist_to_goal = 0.f;
+        // Signed angular error to the commanded facing yaw, when the target carries one. This is the exact
+        // quantity the arrival test compares against align_yaw_tol_rad — surfaced so the UI can show what
+        // arrival is actually waiting on, instead of it only being inferable from the robot's behaviour.
+        std::optional<float> goal_yaw_err_rad;
         float min_esdf = 0.f;
 
         // ESDF-input diagnostics: how many RAW lidar points actually reached build_esdf this cycle
@@ -308,6 +312,14 @@ public:
     // should face once the goal position is reached. Empty = legacy behaviour:
     // declare the goal reached immediately on arrival, no final rotation.
     void set_goal_facing_yaw(std::optional<float> yaw_rad);
+
+    // Obstacle clearance this controller still enforces once the robot is AT the goal (the fully-relaxed
+    // near-goal d_safe). A navigation target closer than this to an obstacle is unreachable BY CONSTRUCTION:
+    // the robot approaches, the obstacle cost pushes it back out, and goal_reached never fires — it hunts at
+    // the boundary forever. So target repair must use THIS number, not its own guess, or the two disagree and
+    // the planner happily hands the robot a goal the local controller will never permit. Exposing it here
+    // keeps a single source of truth instead of two constants that silently drift apart.
+    float goal_clearance_requirement() const { return effective_d_safe_for_goal_dist(0.f); }
     ControlOutput compute(const Eigen::Affine2f& robot_pose);
     void stop();
     void set_lidar_buffer(LidarPointBuffer *buffer) { lidar_buffer_ = buffer; }
@@ -346,6 +358,11 @@ private:
     int wp_index_ = 0;
     std::optional<float> goal_facing_yaw_;  // desired room-frame facing dir after arrival
     bool aligning_ = false;                 // true while doing the final in-place rotation
+    // Worst-case time the base may keep executing one alignment command before we can revise it. Used to bound
+    // the in-place rotation so it cannot overshoot the tolerance band (see the arrival block). Measured p99 of
+    // the compute cadence is ~1 s with a tail to 1.5 s, so this is deliberately pessimistic — being slow to
+    // finish an alignment is harmless; overshooting it means never finishing at all.
+    float align_worst_cycle_s_ = 1.0f;
 
     // ---- ESDF ----
     std::vector<float> esdf_data_;

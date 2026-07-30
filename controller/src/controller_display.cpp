@@ -147,6 +147,15 @@ void ControllerDisplay::set_stuck_active(bool active)
     snapshot_.stuck_active = active;
 }
 
+void ControllerDisplay::set_goal_distance(std::optional<float> dist_m, std::optional<float> yaw_err_rad,
+                                          bool aligning)
+{
+    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+    snapshot_.goal_dist_m = dist_m;
+    snapshot_.goal_yaw_err_rad = yaw_err_rad;
+    snapshot_.goal_aligning = aligning;
+}
+
 void ControllerDisplay::update_affordance_efe(const std::vector<AffordanceEfeSample> &samples)
 {
     auto *plot = custom_widget_ ? custom_widget_->affordance_efe_plot : nullptr;
@@ -220,6 +229,7 @@ void ControllerDisplay::present()
         custom_widget_->set_selected_affordance_text(snap.selected_affordance_text);
 
     custom_widget_->set_stuck_active(snap.stuck_active);   // widget dedups same-state calls
+    custom_widget_->set_goal_distance(snap.goal_dist_m, snap.goal_yaw_err_rad, snap.goal_aligning);
 
     if (!snap.valid || !viewer_2d_)
         return;

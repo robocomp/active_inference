@@ -61,10 +61,14 @@ public:
     // free, or nullopt if nothing free is found within the search radius. Uses the SAME free-space
     // definition as plan_path, so a repaired target is guaranteed plannable. Lets the controller rescue
     // an affordance viewpoint that fell inside an obstacle footprint (which would otherwise stall).
+    // `min_clearance_m` is the clearance the LOCAL controller will still enforce at the goal — pass
+    // TrajectoryController::goal_clearance_requirement(). Repairing to anything tighter produces a target the
+    // robot can never settle on. <=0 falls back to the planner's own half-robot-width.
     std::optional<Eigen::Vector2f> repair_target(const Polygon &room_polygon,
                                                  const Polygon &inner_polygon,
                                                  const Polygons &obstacle_polygons,
-                                                 const Eigen::Vector2f &target) const;
+                                                 const Eigen::Vector2f &target,
+                                                 float min_clearance_m = 0.f) const;
 
 private:
     static constexpr float k_epsilon = 1e-5f;

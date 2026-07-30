@@ -1,8 +1,26 @@
 #include "controller_session.h"
 
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <cmath>
+
+namespace
+{
+// Short CSV tag for the obstacle layer that owns a polygon — the whole point of Stage 0 is that
+// "an obstacle is 0.13 m away" is useless until you know WHICH agent put it there.
+const char *obstacle_kind_tag(ControllerObstacleKind kind)
+{
+    switch (kind)
+    {
+        case ControllerObstacleKind::Object:        return "object";    // a concept agent's box
+        case ControllerObstacleKind::Obstacle:      return "obstacle";  // a graph "obstacle" node
+        case ControllerObstacleKind::Temporary:     return "temp";      // controller-born (LiDAR or escape disc)
+        case ControllerObstacleKind::GridOccupancy: return "grid";      // residual_concept occupancy hull
+    }
+    return "?";
+}
+}   // namespace
 #include <cstdio>
 #include <filesystem>
 #include <iostream>
@@ -188,9 +206,15 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     // nearest free point; the affordance's object/feedback (parent_node_id) is untouched, so the
     // contract still services the same object. Everything downstream (plan, arrival, display) then uses
     // the repaired target consistently.
-    if (const auto safe = planner.repair_target(room_polygon_, inner_polygon_,
-                                                obstacle_tracker.obstacle_polygons(), step.target.room_pos);
-        safe.has_value() && (*safe - step.target.room_pos).squaredNorm() > 1e-6f)
+    // Repair against the clearance the MPPI ACTUALLY enforces at the goal, not the planner's half-robot-width.
+    // With the live config those are 0.425 m and 0.20 m — so a target could be "repaired" into a 0.225 m band
+    // the local controller will never let the robot rest in: it drives up, the obstacle cost pushes it out,
+    // goal_reached never fires, and it hunts there indefinitely. Asking the controller for its own number
+    // keeps the two from drifting apart again.
+    const auto safe = planner.repair_target(room_polygon_, inner_polygon_,
+                                            obstacle_tracker.obstacle_polygons(), step.target.room_pos,
+                                            path_controller.goal_clearance_requirement());
+    if (safe.has_value() && (*safe - step.target.room_pos).squaredNorm() > 1e-6f)
     {
         qInfo() << "[controller] affordance target" << step.target.node_name.c_str()
                 << "blocked → repaired to nearest free point ("
@@ -204,6 +228,24 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
                 obj.has_value())
                 step.target.yaw_rad = std::atan2(obj->y() - step.target.room_pos.y(),
                                                  obj->x() - step.target.room_pos.x());
+    }
+    else if (not safe.has_value())
+    {
+        // No point within the search radius satisfies the clearance, so we are about to hand the planner a
+        // target it cannot reach — it will fail, the no-progress clock will run, and stuck-recovery will start
+        // reversing and dropping virtual obstacles. That was previously SILENT, which made it look like a
+        // planner or perception fault rather than an unreachable goal. Raising the clearance to match the
+        // controller makes this outcome more likely, so it must be visible. Rate-limited: the condition
+        // persists for as long as the target does, and one line per cycle would bury everything else.
+        if (timestamp_ms - last_unreachable_log_ms_ >= 3000)
+        {
+            last_unreachable_log_ms_ = timestamp_ms;
+            qWarning() << "[controller] target" << step.target.node_name.c_str()
+                       << "at (" << step.target.room_pos.x() << "," << step.target.room_pos.y() << ")"
+                       << "has NO point within reach clearing obstacles by"
+                       << path_controller.goal_clearance_requirement() << "m —"
+                       << "it is boxed in. Planning will fail until the obstacle set changes.";
+        }
     }
 
     current_target_room_ = step.target.room_pos;
@@ -396,6 +438,10 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         path_controller.set_room_boundary(boundary_polygon);
 
     const auto control_output = path_controller.compute(robot_pose.as_transform());
+    // Surface what the ARRIVAL test is waiting on, every cycle, before any of the branches below can return
+    // early — otherwise the readout would freeze exactly in the states worth watching (aligning, blocked).
+    display.set_goal_distance(control_output.dist_to_goal, control_output.goal_yaw_err_rad,
+                              control_output.aligning);
     last_mppi_trajectories_ = control_output.trajectories_room;
     last_mppi_average_trajectory_ = control_output.average_trajectory_room;
     last_best_mppi_trajectory_idx_ = control_output.best_trajectory_idx;
@@ -418,22 +464,62 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         //     (observed: the column pinned at 0.15/0.33), so 0.40 clears them and reveals the real
         //     approaching object in the 0.40–0.80 m window (contact is inside the footprint anyway).
         constexpr float kSelfR = 0.40f;
+        // NEAR-SHELL CHARACTERISATION (which self-return escapes the source footprint disc?). The 0.55 m
+        // population that dominates this log is a FIXED RADIUS travelling with the robot, i.e. the cut edge
+        // of lidar3d_dds's [Footprint] radius=0.55, not an obstacle. These columns say WHICH body part it is
+        // and therefore WHICH knob fixes it, without guessing a new radius:
+        //   shell_sectors ≈ 12 (returns all around)  ⇒ 360° body/base ring   ⇒ widen [Footprint] radius
+        //   shell_sectors small + bearing clustered  ⇒ arm/protrusion        ⇒ targeted envelope, not a disc
+        //   near_lidar_z  in [0.11,0.35]/[0.35,0.60] ⇒ raise the [Skirt] z_max (bpearl / helios band)
+        //   near_lidar_z  in [0.60,1.35]             ⇒ mid-band disc between [Skirt] and [Footprint]
+        //   near_lidar_z  > 1.35                     ⇒ ABOVE [Footprint] z_max: the disc never applied
+        // min_lidar_all_m drops the kSelfR cut entirely: it says whether anything at all survives inside
+        // 0.40 m (if it pins at 0.55 too, the source disc — not the controller — is what sets the floor).
+        constexpr float kShellOuterM = 0.70f;   // outer edge of the near shell we characterise
+        constexpr int   kShellSectors = 12;     // 30° azimuth bins → sector coverage = "is it a full ring?"
         float nearest_lidar = std::numeric_limits<float>::infinity();
+        float nearest_lidar_bearing_deg = 0.f;   // robot frame, 0 = straight ahead (+y), + = to the right (+x)
+        float nearest_lidar_z = 0.f;             // room-frame z of that return ≈ height above the floor
+        float min_lidar_all = std::numeric_limits<float>::infinity();
+        int shell_points = 0;
+        std::uint16_t shell_sector_mask = 0;
         if (auto *lb = obstacle_tracker.lidar_buffer())
         {
             const auto [cloud_opt] = lb->read_last();
             if (cloud_opt.has_value())
             {
                 const auto &[lxs, lys, lzs] = cloud_opt.value();
-                const std::size_t nn = std::min(lxs.size(), lys.size());
+                const Eigen::Affine2f robot_from_room = robot_pose.as_transform().inverse();
+                const std::size_t nn = std::min({lxs.size(), lys.size(), lzs.size()});
                 for (std::size_t i = 0; i < nn; ++i)
                 {
                     const float d = std::hypot(lxs[i] - rp.x(), lys[i] - rp.y());
-                    if (d >= kSelfR) nearest_lidar = std::min(nearest_lidar, d);
+                    min_lidar_all = std::min(min_lidar_all, d);
+                    if (d < kSelfR) continue;
+                    const Eigen::Vector2f p_robot = robot_from_room * Eigen::Vector2f(lxs[i], lys[i]);
+                    // Bearing in the ROBOT frame (x right, y forward — the convention the obstacle tracker
+                    // uses): a body-fixed return keeps a CONSTANT bearing no matter where the robot drives
+                    // or how it turns, which is exactly what separates a self-hit from a world obstacle.
+                    const float bearing_deg = std::atan2(p_robot.x(), p_robot.y()) * 180.f / static_cast<float>(M_PI);
+                    if (d < nearest_lidar)
+                    {
+                        nearest_lidar = d;
+                        nearest_lidar_bearing_deg = bearing_deg;
+                        nearest_lidar_z = lzs[i];
+                    }
+                    if (d <= kShellOuterM)
+                    {
+                        ++shell_points;
+                        int sector = static_cast<int>(std::floor((bearing_deg + 180.f) * kShellSectors / 360.f));
+                        shell_sector_mask |= static_cast<std::uint16_t>(1u << std::clamp(sector, 0, kShellSectors - 1));
+                    }
                 }
             }
         }
         const float nearest_lidar_out = std::isfinite(nearest_lidar) ? nearest_lidar : -1.f;
+        const float min_lidar_all_out = std::isfinite(min_lidar_all) ? min_lidar_all : -1.f;
+        const int shell_sectors_out = std::popcount(shell_sector_mask);
+        if (!std::isfinite(nearest_lidar)) { nearest_lidar_bearing_deg = 0.f; nearest_lidar_z = 0.f; }
 
         // (b) Nearest TRACKED obstacle polygon edge (what the controller actually reasons about).
         float nearest = std::numeric_limits<float>::infinity();
@@ -452,6 +538,13 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
             }
         }
         const float nearest_out = std::isfinite(nearest) ? nearest : -1.f;
+
+        // Same nearest polygon, but ATTRIBUTED to the layer that owns it, plus the raw (pre-z-band)
+        // cloud proximity. Together these answer the two questions the old columns could not: which
+        // agent's geometry is squeezing the robot, and whether "no LiDAR support" just meant the
+        // support was below the controller's own height band.
+        const auto near_obst = obstacle_tracker.nearest_obstacle_info(rp, robot_pose.theta);
+        const auto &raw_prox = obstacle_tracker.raw_cloud_proximity();
 
         // Gate on the RAW cloud first (fires even when nothing is tracked), plus the two model layers.
         const bool near = (nearest_lidar_out >= 0.f && nearest_lidar_out <= gate)
@@ -478,7 +571,24 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                                       // WEDGE signal = cmd_lin (commanded translation) vs meas_lin (measured
                                       // base speed): meas_lin < StuckSlipRatio×cmd_lin ⇒ wedged this cycle.
                                       // aligning=1 ⇒ arrived, rotating in place to face target (turn-around).
-                                      "near_temp_logodds,near_temp_missed,near_temp_age_ms,cmd_lin,meas_lin,aligning\n";
+                                      "near_temp_logodds,near_temp_missed,near_temp_age_ms,cmd_lin,meas_lin,aligning,"
+                                      // SELF-RETURN characterisation (see the block that computes these).
+                                      // near_lidar_bearing_deg: robot frame, 0 = ahead, + = right. CONSTANT
+                                      // across the room ⇒ body-fixed ⇒ self-hit. near_lidar_z: room-frame z
+                                      // ≈ height above floor → picks which lidar3d_dds z-band knob applies.
+                                      // shell_sectors: of 12 30°-bins in [0.40,0.70] m, how many hold a
+                                      // return — 12 ⇒ full 360° ring (base/tray), few ⇒ a local protrusion.
+                                      "near_lidar_bearing_deg,near_lidar_z,min_lidar_all_m,n_shell_pts,shell_sectors,"
+                                      // ATTRIBUTION: which of the four obstacle layers owns the nearest
+                                      // polygon (object = concept agent, grid = residual_concept hull,
+                                      // temp/virtual = ours), its label, bearing, and whether the robot
+                                      // centre is INSIDE it. nearest_obst_m alone could never say this.
+                                      "near_obst_kind,near_obst_label,near_obst_bearing_deg,near_obst_inside,"
+                                      // RAW cloud, measured BEFORE the [0.20,1.8] z-band cut: everything
+                                      // else on this row reads the filtered buffer, so "no LiDAR support"
+                                      // has meant "none in-band". raw_below_band_n counts returns under the
+                                      // band within 1 m — evidence residual sees and this side discards.
+                                      "raw_nearest_m,raw_nearest_z,raw_nearest_bearing_deg,raw_below_band_n\n";
                 proximity_csv_open_ = true;
             }
             if (proximity_csv_.is_open())
@@ -506,7 +616,14 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                                << od.near_temp_age_ms << ','
                                << std::hypot(control_output.adv, control_output.side) << ','
                                << base_speed_lin_ << ','
-                               << (control_output.aligning ? 1 : 0) << '\n';
+                               << (control_output.aligning ? 1 : 0) << ','
+                               << nearest_lidar_bearing_deg << ',' << nearest_lidar_z << ','
+                               << min_lidar_all_out << ',' << shell_points << ',' << shell_sectors_out << ','
+                               << obstacle_kind_tag(near_obst.kind) << ','
+                               << (near_obst.label.empty() ? "-" : near_obst.label) << ','
+                               << near_obst.bearing_deg << ',' << (near_obst.inside ? 1 : 0) << ','
+                               << raw_prox.distance_m << ',' << raw_prox.z_m << ','
+                               << raw_prox.bearing_deg << ',' << raw_prox.below_band_within_1m << '\n';
                 proximity_csv_.flush();
             }
         }
@@ -1002,7 +1119,15 @@ void ControllerSession::begin_escape(const ControllerRobotPose &robot_pose,
     const float fwd_off = std::max(fwd_off_cfg, body_radius + vrad + 0.05f);
     const Eigen::Vector2f fwd(std::cos(robot_pose.theta), std::sin(robot_pose.theta));
     const Eigen::Vector2f stuck_center = robot_pose.pos + fwd_off * fwd;
-    obstacle_tracker.add_virtual_obstacle(now_ms, stuck_center, vrad);
+    // Gated with the rest of controller-side obstacle creation. This disc was the one source NOT covered by
+    // obstacle_creation_enabled, and it is the one that litters the map: every wedge drops a fresh 0.30 m disc
+    // ~0.85 m ahead, and the robot has been wedging constantly (the no-route branch counts as a wedge, so an
+    // unreachable target alone produces a disc every few seconds along the whole approach). The escape
+    // maneuver itself — reverse and turn out — is a genuinely useful reflex and still runs; only the map
+    // pollution is removed. Re-enable with Controller.ObstacleCreationEnabled once residual_concept is trusted
+    // as the sole obstacle source.
+    if (!params_ || params_->obstacle_creation_enabled)
+        obstacle_tracker.add_virtual_obstacle(now_ms, stuck_center, vrad);
     // [stuck-diag] escape geometry — the escape early-returns before the proximity CSV block, so these
     // cycles aren't otherwise logged. near_edge = fwd_off − vrad must exceed the footprint (clearance_m),
     // else the disc traps the robot on itself. Watch how far dist_to_goal is when this keeps firing.

@@ -170,6 +170,8 @@ private:
     std::uint64_t active_target_id_ = 0;
     bool room_wait_logged_ = false;
     bool target_wait_logged_ = false;
+    // Rate limit for the "target is boxed in" warning — the condition persists as long as the target does.
+    std::uint64_t last_unreachable_log_ms_ = 0;
 
     // Physical-stuck recovery state.
     std::uint64_t stuck_since_ms_ = 0;          // start of the current wedge window (0 = not wedged)

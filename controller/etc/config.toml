@@ -98,7 +98,15 @@ TemporaryObstacleMinPoints = 6
 # physical-STUCK recovery (wedged on something invisible to the LiDAR) is separate and stays active.
 # Set TRUE when residual_concept is NOT running, else the controller has no obstacle source at all and
 # creeps straight into blockers (the fast in-loop reactive reflex is gated by this flag too).
-ObstacleCreationEnabled = true
+#
+# TURNED OFF 2026-07-29 — the controller was creating local obstacles everywhere. Now covers ALL
+# controller-side creation, including the stuck-recovery virtual disc that used to escape this flag and was
+# the main offender: every wedge dropped a fresh 0.30 m disc ~0.85 m ahead, and because the "no route to
+# target" branch counts as a wedge, an unreachable target alone littered discs along the entire approach.
+# The escape maneuver (reverse + turn out) still runs; only the map pollution is gone.
+# residual_concept is now the sole obstacle source. Set back to true if it is down — with both off the
+# controller has NO unmodelled-obstacle awareness and will drive into anything the concept agents don't model.
+ObstacleCreationEnabled = false
 TemporaryObstacleMinHeight = 0.20
 TemporaryObstacleMaxHeight = 1.8
 

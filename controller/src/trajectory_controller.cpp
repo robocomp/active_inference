@@ -511,6 +511,7 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
             const float robot_theta = std::atan2(robot_pose.linear()(1, 0), robot_pose.linear()(0, 0));
             const float theta_des = wrap_pi(*goal_facing_yaw_ - static_cast<float>(M_PI_2));
             const float yaw_err = wrap_pi(theta_des - robot_theta);
+            out.goal_yaw_err_rad = yaw_err;
             if (std::abs(yaw_err) <= active_params_.align_yaw_tol_rad)
             {
                 aligning_ = false;
@@ -527,8 +528,24 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
             // toward theta_des, with a floor to overcome stiction.
             float sent_rot = std::clamp(active_params_.align_kp * yaw_err,
                                         -active_params_.max_rot, active_params_.max_rot);
-            if (std::abs(sent_rot) < active_params_.align_min_rot)
+            // STICTION FLOOR — but only while it cannot overshoot. Applying it unconditionally is what made
+            // the final rotation HUNT instead of settling: the floor is 0.10 rad/s and the tolerance is
+            // 0.06 rad, so one cycle at the floor sweeps 0.10·dt. At the healthy 105 ms cycle that is 0.010 rad
+            // (fine), but the loop's measured tail runs to ~1.5 s, and 0.10·1.5 = 0.15 rad — more than TWICE
+            // the tolerance band. The robot therefore drives straight through the band, flips sign, and does it
+            // again: a limit cycle that never terminates, which is exactly "turns near the target and can't
+            // find the final position".
+            // So the floor is only applied while the remaining error is big enough to absorb a worst-case
+            // cycle at that rate. Inside that, the proportional term is used as-is and simply decays. This
+            // removes the overshoot without weakening the stiction help where it actually matters.
+            const float overshoot_guard_rad = active_params_.align_min_rot * align_worst_cycle_s_;
+            if (std::abs(sent_rot) < active_params_.align_min_rot
+                and std::abs(yaw_err) > overshoot_guard_rad)
                 sent_rot = std::copysign(active_params_.align_min_rot, sent_rot);
+            // Never command more rotation than the error itself, over a worst-case cycle: a deadbeat bound
+            // that makes overshoot impossible regardless of how long this cycle ends up taking.
+            const float no_overshoot = std::abs(yaw_err) / std::max(0.05f, align_worst_cycle_s_);
+            sent_rot = std::clamp(sent_rot, -no_overshoot, no_overshoot);
             out.rot = -sent_rot;
             out.goal_reached = false;
             return out;

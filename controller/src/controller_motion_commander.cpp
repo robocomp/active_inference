@@ -22,6 +22,15 @@ void ControllerMotionCommander::set_dependencies(std::shared_ptr<DSR::DSRGraph> 
     omnirobot_proxy_ = std::move(omnirobot_proxy);
     agent_id_ = agent_id;
     command_text_sink_ = std::move(command_text_sink);
+
+    // Start the fixed-rate actuation loop once the proxy exists (see the header for why this is a thread and
+    // not a QTimer). Guarded so a second set_dependencies call cannot spawn a second loop.
+    if (omnirobot_proxy_ and not output_thread_.joinable())
+    {
+        const float period_ms = params_ ? std::max(5.f, params_->velocity_output_period_ms) : 50.f;
+        output_thread_ = std::jthread([this](std::stop_token s) { output_loop(std::move(s)); });
+        qInfo() << "Controller velocity output loop started at" << period_ms << "ms";
+    }
 }
 
 float ControllerMotionCommander::ramp_uncertainty_scale(float value,
@@ -152,30 +161,148 @@ void ControllerMotionCommander::send_speed_command(float adv_mps, float side_mps
     if (!omnirobot_proxy_)
         return;
 
+    const auto timestamp_ms = current_time_ms();
+
+    // Hand the command to the fixed-rate output thread. The Ice call itself is NOT made here any more: it is
+    // what ties the base's command rate to however long this cycle took, and it is a synchronous RPC that can
+    // itself block the loop. Timestamped so the output loop can tell how stale it is getting.
+    {
+        const std::scoped_lock lock(mutex_);
+        pending_ = PendingCommand{.adv_mps = adv_mps, .side_mps = side_mps, .rot_rps = rot_rps,
+                                  .stamp_ms = timestamp_ms, .stop_requested = false};
+    }
+    cv_.notify_all();
+
+    // The DSR publish and the dedup stay on THIS (main) thread: update_node erases attributes absent from the
+    // submitted copy, so the robot node must keep a single writer. Deduping it also avoids pointless graph
+    // churn — but note the dedup no longer gates the BASE command, only the graph mirror of it.
     const Eigen::Vector3f cmd(adv_mps, side_mps, rot_rps);
     if (has_last_speed_command_ && (cmd - last_speed_command_).cwiseAbs().maxCoeff() < 1e-4f)
         return;
-
-    const auto timestamp_ms = current_time_ms();
     publish_robot_reference_speed(adv_mps, side_mps, rot_rps, timestamp_ms);
+    last_speed_command_ = cmd;
+    has_last_speed_command_ = true;
+    stop_command_latched_ = false;
+}
 
-    try
+ControllerMotionCommander::~ControllerMotionCommander()
+{
+    output_thread_.request_stop();
+    cv_.notify_all();     // don't make the destructor wait out a full tick
+}
+
+void ControllerMotionCommander::output_loop(std::stop_token stop)
+{
+    using namespace std::chrono;
+    const float period_ms = params_ ? std::max(5.f, params_->velocity_output_period_ms) : 50.f;
+    const float tau_ms    = params_ ? std::max(1.f, params_->command_freshness_tau_ms) : 500.f;
+    auto next = steady_clock::now();
+    auto last_send = steady_clock::time_point{};
+
+    while (not stop.stop_requested())
     {
-        omnirobot_proxy_->setSpeedBase(side_mm_s, adv_mm_s, rot_rps);
-        last_speed_command_ = cmd;
-        has_last_speed_command_ = true;
-        stop_command_latched_ = false;
+        next += milliseconds(static_cast<int>(period_ms));
+        {
+            std::unique_lock lock(mutex_);
+            if (cv_.wait_until(lock, stop, next, [&] { return stop.stop_requested(); }))
+                break;
+        }
+        if (stop.stop_requested()) break;
+        // A late wake-up must not make the loop chase a backlog of missed ticks.
+        if (const auto now = steady_clock::now(); next < now) next = now;
+
+        PendingCommand cmd;
+        {
+            const std::scoped_lock lock(mutex_);
+            cmd = pending_;
+        }
+
+        float adv = 0.f, side = 0.f, rot = 0.f, scale = 1.f, age_ms = 0.f;
+        if (not cmd.stop_requested)
+        {
+            const auto now_ms = current_time_ms();
+            age_ms = now_ms > cmd.stamp_ms ? static_cast<float>(now_ms - cmd.stamp_ms) : 0.f;
+            // FRESHNESS AS PRECISION. Re-issuing a stale command forever would drive the robot blind through
+            // exactly the multi-second stalls this loop exists to survive — but a hard age cutoff would chop
+            // the motion at normal cadence. So the command's authority falls off as 1/(1+(age/τ)²): the same
+            // form the occupancy grid uses for range precision. At the healthy ~108 ms cycle that is ≈0.95 (no
+            // practical penalty); by 1 s it is 0.2 and by 3 s effectively zero, so a stalled planner coasts
+            // smoothly to a halt instead of either lurching or ploughing on.
+            const float r = age_ms / tau_ms;
+            scale = 1.f / (1.f + r * r);
+            adv = cmd.adv_mps * scale; side = cmd.side_mps * scale; rot = cmd.rot_rps * scale;
+        }
+
+        // SLEW LIMIT toward the target, at the exact tick dt. Bounds what the base is asked to do to what it
+        // can physically achieve; also smooths the freshness scale's own recovery, which is otherwise a step
+        // (age resets to ~0 on a fresh command, so the factor would jump straight back to 1 after a stall).
+        {
+            const float dt_s = period_ms * 1e-3f;
+            const auto slew = [dt_s](float current, float target, float accel, float decel)
+            {
+                // Speeding up (or reversing through zero) is limited by accel; reducing magnitude by decel.
+                const float limit = (std::abs(target) >= std::abs(current) ? accel : decel) * dt_s;
+                return current + std::clamp(target - current, -limit, limit);
+            };
+            const float la = params_ ? params_->max_lin_accel_mps2 : 1.5f;
+            const float ld = params_ ? params_->max_lin_decel_mps2 : 3.0f;
+            const float ra = params_ ? params_->max_rot_accel_rps2 : 4.0f;
+            const float rd = params_ ? params_->max_rot_decel_rps2 : 8.0f;
+            adv  = slew(applied_adv_,  adv,  la, ld);
+            side = slew(applied_side_, side, la, ld);
+            rot  = slew(applied_rot_,  rot,  ra, rd);
+            applied_adv_ = adv; applied_side_ = side; applied_rot_ = rot;
+        }
+
+        try
+        {
+            // Sent EVERY tick, unchanged or not — a constant cadence is the whole point, and a base watchdog
+            // needs to keep hearing from us.
+            omnirobot_proxy_->setSpeedBase(side * 1000.f, adv * 1000.f, rot);
+        }
+        catch (const Ice::Exception &) { /* transient bridge hiccup: keep the cadence, try again next tick */ }
+
+        const auto now = steady_clock::now();
+        const std::scoped_lock lock(mutex_);
+        if (last_send.time_since_epoch().count() != 0)
+        {
+            const float gap = duration<float, std::milli>(now - last_send).count();
+            stat_period_sum_ms_ += gap;
+            stat_period_max_ms_ = std::max(stat_period_max_ms_, gap);
+            ++stat_ticks_;
+        }
+        last_send = now;
+        stat_cmd_age_max_ms_ = std::max(stat_cmd_age_max_ms_, age_ms);
+        stat_scale_min_ = std::min(stat_scale_min_, scale);
     }
-    catch (const Ice::Exception &e)
-    {
-        qWarning() << "Controller setSpeedBase failed:" << e.what();
-    }
+}
+
+ControllerMotionCommander::OutputRateStats ControllerMotionCommander::take_output_rate_stats()
+{
+    const std::scoped_lock lock(mutex_);
+    OutputRateStats s;
+    s.ticks = stat_ticks_;
+    s.period_mean_ms = stat_ticks_ > 0 ? stat_period_sum_ms_ / static_cast<float>(stat_ticks_) : 0.f;
+    s.period_max_ms = stat_period_max_ms_;
+    s.cmd_age_max_ms = stat_cmd_age_max_ms_;
+    s.scale_min = stat_scale_min_;
+    stat_ticks_ = 0; stat_period_sum_ms_ = 0.f; stat_period_max_ms_ = 0.f;
+    stat_cmd_age_max_ms_ = 0.f; stat_scale_min_ = 1.f;
+    return s;
 }
 
 void ControllerMotionCommander::stop_robot()
 {
     if (command_text_sink_)
         command_text_sink_(QStringLiteral("adv 0 mm/s   side 0 mm/s   rot 0.00 rad/s"));
+
+    // Latch the hold for the output thread FIRST and unconditionally: even when the graph-side dedup below
+    // decides there is nothing new to publish, the base must start receiving zeros on the very next tick.
+    {
+        const std::scoped_lock lock(mutex_);
+        pending_ = PendingCommand{.stamp_ms = current_time_ms(), .stop_requested = true};
+    }
+    cv_.notify_all();
 
     if (stop_command_latched_)
         return;

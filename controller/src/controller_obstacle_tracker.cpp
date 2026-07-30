@@ -775,6 +775,10 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
     // concept agent's node is the generic type "object" (class in the object_subtype attribute), so
     // "object" catches all of them; "obstacle" catches the controller's own published temp obstacles.
     // (The old per-class entries "table"/"cylinder"/"chair" are dead now — no node carries those types.)
+    // ★`metaconcept` is DELIBERATELY absent: a level-2 arrangement (ring_metaconcept's dining_set) is a
+    // belief about a RELATION among nodes, not a shaped thing. Its published footprint is the ring's
+    // extent — the robot drives through the middle of it — and its members are already here as their own
+    // `object` nodes, so adopting the rig would double-count them behind one huge phantom box.
     static constexpr std::array<const char *, 2> kObjectTypes = {"object", "obstacle"};
     std::vector<DSR::Node> obstacle_nodes;
     std::unordered_set<std::uint64_t> obstacle_node_ids;
@@ -790,6 +794,13 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
         for (const auto &node : graph_->get_nodes())
         {
             if (is_robot_body_node(node))
+                continue;
+            // Level-2 arrangements (ring_metaconcept's dining_set) publish width_m/depth_m as the
+            // ring's EXTENT so a viewer can outline it — but nothing occupies that footprint, and
+            // the robot must be free to drive through the middle of a dining set. The typed sweep
+            // above already excludes them by never asking for "metaconcept"; this width/depth
+            // fallback is the one path that could still turn an abstract grouping into an obstacle.
+            if (node.type() == "metaconcept")
                 continue;
 
             const auto width_attr = graph_->get_attrib_by_name<width_m_att>(node);
@@ -1372,6 +1383,50 @@ ControllerObstacleTracker::obstacle_proximity_diag(const Eigen::Vector2f &query_
     return diag;
 }
 
+ControllerObstacleTracker::NearestObstacleInfo
+ControllerObstacleTracker::nearest_obstacle_info(const Eigen::Vector2f &query_room, float robot_theta) const
+{
+    NearestObstacleInfo info;
+    float best = std::numeric_limits<float>::infinity();
+    Eigen::Vector2f best_point = Eigen::Vector2f::Zero();
+
+    for (const auto &visual : display_obstacle_polygons_)
+    {
+        const auto &poly = visual.polygon;
+        const std::size_t n = poly.size();
+        if (n < 2)
+            continue;
+        for (std::size_t i = 0; i < n; ++i)   // min point-to-edge distance, same metric as nearest_obst_m
+        {
+            const Eigen::Vector2f &a = poly[i];
+            const Eigen::Vector2f &b = poly[(i + 1) % n];
+            const Eigen::Vector2f ab = b - a;
+            const float len2 = ab.squaredNorm();
+            const float t = len2 > 1e-9f ? std::clamp((query_room - a).dot(ab) / len2, 0.f, 1.f) : 0.f;
+            const Eigen::Vector2f closest = a + t * ab;
+            const float d = (query_room - closest).norm();
+            if (d < best)
+            {
+                best = d;
+                best_point = closest;
+                info.kind = visual.kind;
+                info.label = visual.label;
+                info.inside = point_in_polygon_2d(poly, query_room);
+            }
+        }
+    }
+
+    if (!std::isfinite(best))
+        return {};
+    info.distance_m = best;
+    // Bearing of the offending edge in the ROBOT frame (x right, y forward), so the CSV says which way
+    // to look in the viewer rather than just how close it is.
+    const Eigen::Vector2f d_room = best_point - query_room;
+    const Eigen::Vector2f d_robot = Eigen::Rotation2Df(-robot_theta) * d_room;
+    info.bearing_deg = std::atan2(d_robot.x(), d_robot.y()) * 180.f / static_cast<float>(M_PI);
+    return info;
+}
+
 std::vector<Eigen::Vector2f> ControllerObstacleTracker::read_room_polygon_room_frame() const
 {
     std::vector<Eigen::Vector2f> poly;
@@ -1615,6 +1670,46 @@ bool ControllerObstacleTracker::handle_lidar_points(const std::string &lidar_nod
 
     const float min_h = params_->temporary_obstacle_min_height_m;
     const float max_h = params_->temporary_obstacle_max_height_m;
+
+    // ── RAW-cloud proximity, measured BEFORE the z-band cut below ──
+    // Everything else here reads the already-filtered buffer, so every controller diagnostic has been
+    // blind to returns under min_h — yet those returns DO feed residual_concept's grid. A low obstacle
+    // residual legitimately sees would therefore look like an unsupported phantom from this side. Take
+    // the measurement now, while the unfiltered sweep is still in hand.
+    {
+        raw_cloud_proximity_ = RawCloudProximity{};
+        float best = std::numeric_limits<float>::infinity();
+        for (std::size_t i = 0; i < raw_count; ++i)
+        {
+            const float x = proc_xs[i], y = proc_ys[i], z = proc_zs[i];
+            if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z))
+                continue;
+            const float rz = robot_from_lidar_is_identity
+                ? z
+                : static_cast<float>(robot_from_lidar_matrix(2, 0) * x + robot_from_lidar_matrix(2, 1) * y
+                                     + robot_from_lidar_matrix(2, 2) * z + robot_from_lidar_matrix(2, 3));
+            const float rx = robot_from_lidar_is_identity
+                ? x
+                : static_cast<float>(robot_from_lidar_matrix(0, 0) * x + robot_from_lidar_matrix(0, 1) * y
+                                     + robot_from_lidar_matrix(0, 2) * z + robot_from_lidar_matrix(0, 3));
+            const float ry = robot_from_lidar_is_identity
+                ? y
+                : static_cast<float>(robot_from_lidar_matrix(1, 0) * x + robot_from_lidar_matrix(1, 1) * y
+                                     + robot_from_lidar_matrix(1, 2) * z + robot_from_lidar_matrix(1, 3));
+            const float d = std::hypot(rx, ry);
+            if (rz < min_h && d <= 1.0f)
+                ++raw_cloud_proximity_.below_band_within_1m;   // what the band is discarding near the robot
+            if (d < best)
+            {
+                best = d;
+                raw_cloud_proximity_.z_m = rz;
+                raw_cloud_proximity_.bearing_deg = std::atan2(rx, ry) * 180.f / static_cast<float>(M_PI);
+            }
+        }
+        if (std::isfinite(best))
+            raw_cloud_proximity_.distance_m = best;
+    }
+
     lidar_room_buffer_.put<0>(
         rc::RawLidarPointVectors{
             .xs = std::move(proc_xs),

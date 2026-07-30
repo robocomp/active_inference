@@ -41,6 +41,32 @@ struct ControllerParams
     float max_rot_speed_rps = 0.8f;
     float pos_gain = 1.2f;
     float rot_gain = 1.5f;
+    // ── Fixed-rate velocity output (see controller_motion_commander.h) ──
+    // The base is commanded from a dedicated thread at this period instead of from compute(), whose measured
+    // cadence was median 108 ms but mean 212, p99 1.26 s and max 9.5 s — that variance IS the stutter. The
+    // command is re-sent every tick even when unchanged (the old code skipped identical commands entirely, so
+    // the base could hear nothing for seconds during steady driving).
+    float velocity_output_period_ms = 50.f;
+    // Authority of a command decays as 1/(1+(age/τ)²) so a stalled planner coasts to a stop rather than
+    // driving blind on a stale command. τ well above the healthy cycle time ⇒ no penalty in normal operation
+    // (≈0.95 at 108 ms), strong attenuation by ~1 s. Not a watchdog cutoff — a continuous precision term.
+    float command_freshness_tau_ms = 500.f;
+    // ── Output-stage acceleration limit ──
+    // Measured on a live run: the commanded rotation reverses at nearly full scale inside one cycle
+    // (+0.456 → −0.457 rad/s in 100 ms; |Δrot| > 0.1 rad/s on 12.7% of cycles, > 0.5 on 1.2%). A base cannot
+    // follow a step like that — its own controller saturates and the chassis lurches, which is the stutter you
+    // feel. Bounding the SLEW here converts the chatter into a signal the base can actually track, and because
+    // the chatter is near-symmetric (±0.45) the limiter also averages it toward zero instead of executing both
+    // extremes in turn. Applied in the fixed-rate output thread, where dt is exact — unlike the upstream
+    // per-iteration EMA, whose effective time constant swings with the 105–1470 ms compute cadence.
+    // This is an actuator constraint, not a tuning gate; it is deliberately NOT a substitute for giving the
+    // MPPI a control-continuity cost, which is where the oscillation actually comes from.
+    // ASYMMETRIC: slowing down is always safe, so braking gets a much higher limit than accelerating —
+    // a hold/stop still takes effect in ~0.2 s while acceleration stays smooth.
+    float max_lin_accel_mps2 = 1.5f;
+    float max_lin_decel_mps2 = 3.0f;
+    float max_rot_accel_rps2 = 4.0f;
+    float max_rot_decel_rps2 = 8.0f;
     bool interpolate_rt = true;
     // Dead-reckon the DISPLAYED lidar cloud + robot icon forward from the last lidar
     // timestamp to "now" using the measured base velocity, so the overlay tracks the robot
@@ -90,7 +116,14 @@ struct ControllerParams
     // CONSUMES graph "obstacle" nodes (read_obstacle_polygons) and no longer creates its own from LiDAR.
     // The physical-STUCK recovery (wedged on something invisible to the LiDAR) is a separate reflex and is
     // NOT gated by this flag.
-    bool obstacle_creation_enabled = true;
+    // DEFAULT OFF (2026-07-29). Every controller-side local obstacle is now gated by this, including the
+    // stuck-recovery virtual disc that previously escaped it. residual_concept is the sole obstacle source:
+    // it runs a proper inverse-sensor-model occupancy grid with ray carving and a Beta posterior, whereas the
+    // controller's version fitted padded boxes to a few LiDAR returns with an existence belief that saturated
+    // on first sight and could not be disconfirmed by free space. Two independent obstacle representations
+    // feeding one ESDF, each with its own inflation and neither able to retire the other, is what produced
+    // duplicated and immortal geometry. Flip back on only if residual_concept is down.
+    bool obstacle_creation_enabled = false;
     std::string target_edge_type = "target";
     float pose_xy_std_slow_m = 0.03f;
     float pose_xy_std_stop_m = 0.12f;

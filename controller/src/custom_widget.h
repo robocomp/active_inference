@@ -97,6 +97,25 @@ public:
         mppi_paths_toggle_btn->setCheckable(true);
         mppi_paths_toggle_btn->setChecked(false);
         toolbar_layout->addWidget(mppi_paths_toggle_btn);
+
+        // Live distance-to-target readout, immediately right of "MPPI paths". Shows what the ARRIVAL test is
+        // actually looking at: remaining linear distance to the end of the path, and remaining angular error
+        // to the commanded facing yaw. Monospaced so the digits don't jitter the layout as they change.
+        // Turns amber while rotating in place to align, so an alignment that hunts instead of converging is
+        // visible immediately rather than inferred from the robot's behaviour.
+        goal_distance_label_ = new QLabel(QStringLiteral("d — m   θ — °"), toolbar);
+        {
+            QFont f = goal_distance_label_->font();
+            f.setStyleHint(QFont::Monospace);
+            f.setFamily(QStringLiteral("monospace"));
+            goal_distance_label_->setFont(f);
+        }
+        goal_distance_label_->setToolTip(
+            QStringLiteral("Remaining distance to target.\n"
+                           "d = linear distance to the end of the planned path\n"
+                           "θ = angular error to the commanded facing yaw (blank if the target has none)\n"
+                           "Amber = rotating in place to align."));
+        toolbar_layout->addWidget(goal_distance_label_);
         toolbar_layout->addStretch();
 
         // Stuck-recovery indicator, pinned to the right of the toolbar. Hidden while the robot
@@ -165,6 +184,35 @@ public:
             stuck_status_label_->setVisible(false);
     }
 
+    // Remaining distance to target, shown next to "MPPI paths". `yaw_err_rad` is nullopt when the target
+    // carries no commanded facing yaw (a plain mouse target), in which case the angular field reads "—".
+    // Dedups on the rendered string so a per-cycle call doesn't churn Qt.
+    void set_goal_distance(std::optional<float> dist_m, std::optional<float> yaw_err_rad, bool aligning)
+    {
+        if (goal_distance_label_ == nullptr)
+            return;
+        const QString text = dist_m.has_value()
+            ? QStringLiteral("d %1 m   θ %2")
+                  .arg(*dist_m, 5, 'f', 2)
+                  .arg(yaw_err_rad.has_value()
+                           ? QStringLiteral("%1°").arg(*yaw_err_rad * 180.f / static_cast<float>(M_PI), 6, 'f', 1)
+                           : QStringLiteral("   —  "))
+            : QStringLiteral("d   —  m   θ   —  ");
+        if (text != goal_distance_shown_)
+        {
+            goal_distance_shown_ = text;
+            goal_distance_label_->setText(text);
+        }
+        if (aligning != goal_aligning_shown_)
+        {
+            goal_aligning_shown_ = aligning;
+            goal_distance_label_->setStyleSheet(
+                aligning ? "QLabel { background-color: #e67e22; color: white; font-weight: bold;"
+                           " border-radius: 4px; padding: 2px 6px; }"
+                         : "QLabel { padding: 2px 6px; }");
+        }
+    }
+
 public:
     QFrame *frame = nullptr;
     rc::TimeSeriesPlot *affordance_efe_plot = nullptr;
@@ -177,5 +225,8 @@ private:
     QLabel *selected_affordance_value_ = nullptr;
     QLabel *stuck_status_label_ = nullptr;
     bool stuck_active_shown_ = false;
+    QLabel *goal_distance_label_ = nullptr;
+    QString goal_distance_shown_;
+    bool goal_aligning_shown_ = false;
 };
 #endif

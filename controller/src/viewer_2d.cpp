@@ -521,25 +521,10 @@ void Viewer2D::draw_path(const PathDrawData &data)
             if (obstacle_visual.kind == ControllerObstacleKind::GridOccupancy)
                 continue;
 
-            for (std::size_t index = 0; index < obstacle.size(); ++index)
-            {
-                const auto &from = obstacle[index];
-                const auto &to = obstacle[(index + 1) % obstacle.size()];
-                const Eigen::Vector2f segment = to - from;
-                const float length = segment.norm();
-                const int subdivisions = std::max(1, static_cast<int>(std::ceil(length / 0.12f)));
-                for (int sample = 0; sample <= subdivisions; ++sample)
-                {
-                    const float t = static_cast<float>(sample) / static_cast<float>(subdivisions);
-                    const Eigen::Vector2f point = from + t * segment;
-                    auto *dot = agv_->scene.addEllipse(-0.028, -0.028, 0.056, 0.056,
-                                                       Qt::NoPen, obstacle_edge_brush);
-                    dot->setPos(point.x(), point.y());
-                    dot->setZValue(18.5);
-                    path_draw_items_.push_back(dot);
-                }
-            }
-
+            // The per-edge contour dots are gone. They added nothing the filled polygon + its pen did not
+            // already show, and they were expensive: one QGraphicsEllipseItem every 0.12 m of perimeter,
+            // rebuilt every frame for every obstacle. That is hundreds of scene items per redraw, which is a
+            // real contributor to the viewer's jank. The outline is the polygon's own pen.
             QPointF center;
             for (const auto &vertex : obstacle)
                 center += QPointF(vertex.x(), vertex.y());

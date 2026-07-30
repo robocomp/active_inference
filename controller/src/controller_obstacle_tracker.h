@@ -43,6 +43,38 @@ class ControllerObstacleTracker
         };
         ObstacleProximityDiag obstacle_proximity_diag(const Eigen::Vector2f &query_room,
                                                       std::uint64_t now_ms) const;
+
+        // ATTRIBUTION of the nearest planner obstacle. `nearest_obst_m` alone is a min over FOUR
+        // independent sources (concept-object boxes, graph obstacle nodes, residual_concept's
+        // occupancy hulls, our own temp/virtual geometry) that each inflate differently and cannot
+        // retire one another — so a bare distance can't say WHICH layer is squeezing the robot, and
+        // therefore can't say which agent to fix. Walks display_obstacle_polygons_ (kind + label are
+        // attached there) rather than obstacle_polygons_, so attribution never depends on the two
+        // lists staying index-parallel.
+        struct NearestObstacleInfo
+        {
+            float distance_m = -1.f;                                     // robot centre → nearest polygon edge
+            float bearing_deg = 0.f;                                     // robot frame, 0 = ahead, + = right
+            ControllerObstacleKind kind = ControllerObstacleKind::Obstacle;
+            std::string label;                                           // t_1/c_1/o_2/… ({} for grid hulls)
+            bool inside = false;                                         // robot centre INSIDE that polygon
+        };
+        NearestObstacleInfo nearest_obstacle_info(const Eigen::Vector2f &query_room, float robot_theta) const;
+
+        // RAW-cloud proximity, measured BEFORE the [min_h, max_h] z-band cut that handle_lidar_points
+        // applies on the way into lidar_room_buffer_. Everything else on the controller side — the
+        // ESDF, nearest_lidar_m, the near-shell columns — reads the ALREADY-FILTERED buffer, so
+        // "no LiDAR support" has really meant "no support in the 0.20–1.8 m band" all along. Returns
+        // below the band still feed residual_concept's grid, so a low obstacle it legitimately sees is
+        // structurally invisible to every controller diagnostic. These fields close that blind spot.
+        struct RawCloudProximity
+        {
+            float distance_m = -1.f;      // nearest return of the UNFILTERED sweep (no z-band, no self-cut)
+            float z_m = 0.f;              // its height in the robot frame
+            float bearing_deg = 0.f;      // robot frame, 0 = ahead, + = right
+            int   below_band_within_1m = 0;   // returns under min_h and within 1 m — what the band THREW AWAY
+        };
+        const RawCloudProximity &raw_cloud_proximity() const { return raw_cloud_proximity_; }
         const std::optional<std::uint64_t> &last_lidar_timestamp_ms() const { return last_lidar_timestamp_ms_; }
         void clear_published_obstacles();
 
@@ -208,6 +240,7 @@ class ControllerObstacleTracker
         const ControllerGraphState *graph_state_ = nullptr;
         std::function<void()> graph_layout_callback_;
         rc::LidarPointBuffer lidar_room_buffer_{5};
+        RawCloudProximity raw_cloud_proximity_;   // measured on the raw sweep, pre z-band (see the struct)
         std::vector<GraphObstacleRecord> known_graph_obstacles_;
         ControllerPolygons obstacle_polygons_;
         ControllerObstacleVisuals display_obstacle_polygons_;

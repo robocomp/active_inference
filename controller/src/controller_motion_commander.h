@@ -2,7 +2,11 @@
 
 #include <genericworker.h>
 
+#include <atomic>
+#include <condition_variable>
 #include <functional>
+#include <mutex>
+#include <thread>
 
 #include "controller_runtime_types.h"
 
@@ -20,11 +24,51 @@ public:
                           int agent_id,
                           CommandTextSink command_text_sink);
 
+    ~ControllerMotionCommander();
+
     void apply_uncertainty_speed_limit(float &adv_mps, float &side_mps, float &rot_rps) const;
     void send_speed_command(float adv_mps, float side_mps, float rot_rps);
     void stop_robot();
 
+    // Achieved output cadence since the last call (diagnostic; resets the accumulators).
+    struct OutputRateStats
+    {
+        int   ticks = 0;
+        float period_mean_ms = 0.f;
+        float period_max_ms = 0.f;    // worst gap between consecutive base commands
+        float cmd_age_max_ms = 0.f;   // oldest command ever pushed to the base
+        float scale_min = 1.f;        // strongest freshness attenuation applied
+    };
+    OutputRateStats take_output_rate_stats();
+
 private:
+    // ── Fixed-rate output loop ──
+    // The base used to be commanded from inside compute(), which meant the command rate WAS the perception
+    // rate: measured median 108 ms but mean 212, p99 1.26 s and a worst case of 9.5 s, with 16% of cycles over
+    // twice the configured 100 ms period. On top of that, send_speed_command() deduplicated — an unchanged
+    // command was never sent at all — so the base could go arbitrarily long with no message even when the loop
+    // was healthy. Both together are what makes the motion stutter.
+    //
+    // So the actuation path is now its own thread ticking at a fixed period, publishing the latest command
+    // regardless of what compute() is doing and WITHOUT dedup (a base watchdog needs to keep hearing from us).
+    // It deliberately touches nothing but the Ice proxy and a mutex-guarded POD: no DSR (the graph publish and
+    // the UI sink stay on the control thread, which also avoids racing another writer on the robot node's
+    // attrs), no Qt, no cv::Mat.
+    //
+    // Why a thread and not a QTimer: compute() already runs on its own control thread (the presence hook
+    // on_operating_loop only wakes it), so a GUI-thread timer would not be starved by a slow compute() — but
+    // it WOULD still be at the mercy of GUI work, and more to the point it would not help at all, because the
+    // problem is not only WHEN the command is sent but that setSpeedBase is a synchronous RPC issued from
+    // whichever thread produced the command. Owning the cadence in one place, decoupled from both, is what
+    // actually makes the period constant.
+    void output_loop(std::stop_token stop);
+
+    struct PendingCommand
+    {
+        float adv_mps = 0.f, side_mps = 0.f, rot_rps = 0.f;
+        std::uint64_t stamp_ms = 0;
+        bool stop_requested = true;   // start held: never drive until compute() has actually asked for it
+    };
     static float ramp_uncertainty_scale(float value, float slow_threshold, float stop_threshold, float min_scale);
     static float preserve_sign_clamp(float value, float max_abs);
     static std::uint64_t current_time_ms();
@@ -45,4 +89,19 @@ private:
     bool stop_command_latched_ = false;
     bool has_last_speed_command_ = false;
     Eigen::Vector3f last_speed_command_ = Eigen::Vector3f::Zero();
+
+    // Shared with the output thread. `mutex_` guards pending_ and the stats accumulators; `cv_` lets the
+    // destructor wake the loop immediately instead of waiting out a tick.
+    mutable std::mutex mutex_;
+    std::condition_variable_any cv_;
+    PendingCommand pending_;
+    // Last values actually sent to the base — the state the slew limiter integrates from. Output-thread only.
+    float applied_adv_ = 0.f, applied_side_ = 0.f, applied_rot_ = 0.f;
+    int   stat_ticks_ = 0;
+    float stat_period_sum_ms_ = 0.f;
+    float stat_period_max_ms_ = 0.f;
+    float stat_cmd_age_max_ms_ = 0.f;
+    float stat_scale_min_ = 1.f;
+    // Declared LAST so it is destroyed FIRST: the thread must stop before the Ice proxy it uses goes away.
+    std::jthread output_thread_;
 };

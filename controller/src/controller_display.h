@@ -56,6 +56,8 @@ public:
     void set_selected_affordance_text(const QString &text);
     // Stage the stuck-recovery indicator state (thread-safe; applied on the GUI thread in present()).
     void set_stuck_active(bool active);
+    // Push the live arrival state to the toolbar readout. Called every cycle; the widget dedups.
+    void set_goal_distance(std::optional<float> dist_m, std::optional<float> yaw_err_rad, bool aligning);
     // One sample per evaluated affordance for the EFE panel below the 2D view. Plots TWO lines per
     // affordance: the selection score (gain − λ·dist, solid) and the raw gain (ΔH, lighter) — so the
     // vertical gap between them is λ·dist. Thread-safe (the plot buffers under its own mutex).
@@ -91,6 +93,11 @@ private:
         bool selected_affordance_text_pending = false;
         bool clear_trajectory_pending = false;
         bool stuck_active = false;   // stuck-recovery indicator (pushed every cycle; widget dedups)
+        // Remaining distance to target, shown beside the MPPI-paths button. nullopt = no active plan.
+        // goal_yaw_err_rad is nullopt when the target carries no commanded facing yaw.
+        std::optional<float> goal_dist_m;
+        std::optional<float> goal_yaw_err_rad;
+        bool goal_aligning = false;
     };
 
     void restore_window_geometry();

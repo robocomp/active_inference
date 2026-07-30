@@ -495,14 +495,19 @@ std::optional<Eigen::Vector2f> RoomPathPlanner::repair_target(
     const Polygon &room_polygon,
     const Polygon &inner_polygon,
     const Polygons &obstacle_polygons,
-    const Eigen::Vector2f &target) const
+    const Eigen::Vector2f &target,
+    float min_clearance_m) const
 {
     if (room_polygon.size() < 3)
         return std::nullopt;
 
-    // Same free-space definition plan_path uses: inside the room (and the inner wall-clearance ring
-    // if present), and outside every obstacle inflated by half the robot width.
-    const float obs_clearance = std::max(0.01f, params.robot_width_m * 0.5f);
+    // Free-space definition for a TARGET is NOT the same as for a path waypoint. A waypoint only has to be
+    // traversable (half the robot width); a target has to be somewhere the local controller will let the robot
+    // COME TO REST. That second number is larger — the MPPI keeps enforcing its near-goal d_safe right up to
+    // the goal — and when the two disagree, repair "succeeds" onto a point the robot then hunts at forever,
+    // never reaching it. So take the caller's min_clearance_m (the controller's own requirement) whenever it
+    // is the stricter of the two.
+    const float obs_clearance = std::max({0.01f, params.robot_width_m * 0.5f, min_clearance_m});
     Polygons expanded_obs;
     expanded_obs.reserve(obstacle_polygons.size());
     for (const auto &obs : obstacle_polygons)
