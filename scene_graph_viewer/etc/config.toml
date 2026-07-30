@@ -1,0 +1,88 @@
+# scene_graph_viewer — the stratified 3D view of the shared DSR graph, as its own agent.
+# z = abstraction stratum (robot → room → instances → meta-concepts → agents),
+# x/y = true metric pose. Pure observer: infers nothing, writes nothing but its own presence node.
+
+# --- Common Agent Data ---
+[Agent]
+# MUST be unique across the shared graph — a collision is a CRDT actor-id clash → SIGSEGV in BOTH
+# agents. Taken: room=5 robot=6 table=7 controller=8 voxelizer=9 bottle=10 kinova=11 self_calib=12
+# human=13 residual=14 door=15 scene_graph_viewer=16 chair=20 cabinet=21 refrigerator=22 ring=23.
+# Next free: 17-19, 24+.
+id = 16
+name = "scene_graph_viewer"
+
+# --- Single Instance Configuration ---
+configFile = ""
+domain = 0
+# No cortex DSRViewer at all: with tree/graph/2d all false, setupViewer() returns nullptr and
+# GenericWorker creates no QMainWindow. This agent builds its OWN top-level window for the 3D view.
+# That is deliberate — a heavy QOpenGLWidget sharing the GraphViewer's backing store is a
+# stack-address free in paintAndFlush when a peer joins (see dsr_gui.h).
+tree  = false
+graph = false
+2d    = false
+# Historical key, read by nobody: setupViewer's options vector has no "3d" entry, and the old
+# view::osg enum it would have mapped to was a dead stub. Kept at false for symmetry with the rest
+# of the fleet — the 3D view IS this agent, it needs no flag.
+3d    = false
+
+# ── Agent-presence protocol ───────────────────────────────────────────────────────────────────
+[Presence]
+# required_agent_names is OMITTED ON PURPOSE — this agent has no required peers. A viewer must
+# render whatever exists and must never tear itself down because a peer is absent; the point of
+# splitting it out of robot_concept is that it survives everyone else's restarts. It still runs the
+# coordinator so it publishes its own health node like any other agent.
+# ★Write it as an absent key, NOT as `required_agent_names = []`: the RoboComp ConfigLoader throws
+# `std::runtime_error: Empty arrays are not supported.` on an empty TOML array and the process
+# aborts before main(). The presence monitor already guards the key with exists() and defaults to
+# an empty list, so omission is the supported way to say "none".
+config_dir = "etc"
+monitor_period_ms = 500
+heartbeat_timeout_ms = 25000
+rejoin_grace_ms = 8000
+stale_grace_ms = 120000
+agent_info_period_ms = 1000
+# Display-only greying horizon for OTHER agents' nodes in the scene. Intentionally decoupled from
+# heartbeat_timeout_ms above: that one is long because acting on a short silence proved
+# hypersensitive, whereas greying a node early costs nothing and is undone the moment the heartbeat
+# resumes. Matches robot_concept's 2D overlay so an agent greys out in both views at once.
+stale_display_ms = 3000
+
+[Owns]
+# Only its own presence node — this agent births nothing in the scene.
+nodes = ["scene_graph_viewer 16"]
+
+# ── The view ──────────────────────────────────────────────────────────────────────────────────
+[SceneGraphViewer]
+RefreshMs = 200            # full scene rebuild period (5 Hz); ~50 nodes, cheap
+StratumGap = 1.20          # metres between abstraction planes, sized against an apartment room
+WindowDelayMs = 1500       # let the graph sync before the first frame, so the camera doesn't snap
+RememberGeometry = true    # persist window position/size across runs (QSettings)
+LogPeriodFrames = 50       # throttle for the liveness line; 0 disables
+
+# The containment ladder is always drawn — it IS the view. These two are a second, orthogonal
+# story (what can be done with a thing, and who is doing the believing) that doubles the node
+# count, so they are off by default. Toggle either one to stack extra planes on top.
+ShowAffordances = false
+ShowAgents = false
+
+# Floor opacity, 0..1. The floor mesh spans the whole room on the room plane, so opaque it is a lid:
+# it hides the robot standing a rung below it and every drop-line that crosses it. 1.0 = opaque.
+FloorAlpha = 0.35
+# The robot's display mesh. Named here because the robot node's own `path` attr ("meshes/shadow.obj")
+# is relative to robot_concept's run dir, not to the components root like every other agent's
+# mesh_path. Empty ⇒ fall back to the synthetic two-box robot glyph.
+RobotMeshPath = "robot_concept/meshes/shadow.obj"
+
+[Period]
+Compute = 100
+Emergency = 500
+
+[Component.Debug]
+Verbose = false
+
+[Ice]
+Warn.Connections = "0"
+Trace.Network = "0"
+Trace.Protocol = "0"
+MessageSizeMax = "20004800"

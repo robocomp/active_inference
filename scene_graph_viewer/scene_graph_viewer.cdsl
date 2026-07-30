@@ -1,0 +1,11 @@
+
+Component scene_graph_viewer
+{
+    Communications
+    {
+    };
+    language Cpp11;
+    options dsr;
+
+};
+
