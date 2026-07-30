@@ -40,10 +40,7 @@
 
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 #include "../../common/agent_state_publisher/agent_status_overlay.h"
-#include "../../common/graph3d/graph3d_scene_builder.h"
 #include "sensor_media_publisher.h"
-
-namespace rc::viewers { class GLGraph3DViewer; }
 
 /**
  * \brief Class SpecificWorker implements the core functionality of the component.
@@ -278,16 +275,9 @@ private:
 	void wire_agent_status_overlay();                                      // start once, main thread
 	rc::AgentStatusOverlay agent_status_overlay_;
 
-	// Stratified 3D companion to the planar graph view. The flat viewer draws every edge with the
-	// same weight, so the two relations that actually structure this system — which AGENT owns a
-	// node, and which META-CONCEPT groups a set of instances — are invisible in it. This one puts
-	// abstraction on z and the true metric pose on x/y. Gated on the Agent.3d config key.
-	// See common/graph3d/graph3d_scene.h.
-	void wire_graph3d_viewer();                                            // start once, main thread
-	void refresh_graph3d();                                                // full rebuild, main thread
-	std::unique_ptr<rc::viewers::GLGraph3DViewer> graph3d_viewer_;
-	rc::graph3d::SceneBuilder                     graph3d_builder_;
-	QTimer*                                       graph3d_timer_ = nullptr;
+	// The stratified 3D companion to this planar view now lives in its OWN agent,
+	// active_inference/scene_graph_viewer (id 16) — it needs nothing but a DSRGraph, so tying it to
+	// robot_concept's lifetime only meant it died whenever this agent restarted.
 	void open_stream_viewer(std::uint64_t node_id, const std::string &type);
 	std::map<std::uint64_t, QWidget*> stream_viewers_;                     // one live viewer per node id
 	void on_optional_peer_lost(const std::string &name, std::uint32_t id);

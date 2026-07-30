@@ -22,7 +22,6 @@
 #include "../../common/media_transport/media_transport.h"
 
 #include <dsr/gui/viewers/graph_viewer/graph_viewer.h>
-#include "../../common/viewers/gl_graph3d_viewer.h"
 #include "media_stream_viewers.h"
 #include "graph_attr_viewers.h"
 #include "graph_safe.h"   // rc::safe_update_node — guard update_node against exceptions
@@ -397,7 +396,6 @@ void SpecificWorker::initialize()
 		trigger_graph_layout_twopi();
 		wire_view_data_signal();   // enable right-click "View data" → live FPS viewer on media-plane nodes
 		wire_agent_status_overlay();   // colour every agent node by its live health (green/orange/red/grey)
-		wire_graph3d_viewer();     // stratified 3D companion view: z = abstraction, x/y = metric pose
 		check_shadow_identity();   // flag a stale/mismatched Shadow node ingested during bootstrap
 	});
 }
@@ -1230,51 +1228,6 @@ void SpecificWorker::wire_agent_status_overlay()
 	                         ? configLoader.get<int>("Presence.stale_display_ms")
 	                         : 3000;
 	agent_status_overlay_.start(G, graph_viewer, stale_after_ms);
-}
-
-void SpecificWorker::wire_graph3d_viewer()
-{
-	// The planar GraphViewer draws room→table→aff_table_1 with exactly the same weight as mind→agent,
-	// so neither AGENT OWNERSHIP nor META-CONCEPT GROUPING is visible in it — and group_member, being
-	// a non-RT edge, has no transform for a spatial force layout to work with at all. This companion
-	// view splits the two roles: z carries the abstraction stratum, x/y carries the true metric pose.
-	// Gated on the Agent.3d key, which has existed in every agent's [Agent] block all along but was
-	// never read: setupViewer's options vector has no "3d" entry. (Nor is there a cortex view to map
-	// it to — the old view::osg enum was a dead stub and has since been removed.)
-	if (not configLoader.exists("Agent.3d") or not configLoader.get<bool>("Agent.3d"))
-		return;
-	const auto it = graph_viewers.find("");
-	if (it == graph_viewers.end() || !it->second)
-		return;
-
-	graph3d_builder_.set_graph(G);
-	// Same display horizon as the 2D overlay, so an agent greys out in both views at the same moment.
-	graph3d_builder_.config().stale_after_ms = configLoader.exists("Presence.stale_display_ms")
-	                                         ? configLoader.get<int>("Presence.stale_display_ms")
-	                                         : 3000;
-
-	graph3d_viewer_ = std::make_unique<rc::viewers::GLGraph3DViewer>();
-	// Same (id, type) payload the 2D view's view_data_signal carries, into the same handler — so
-	// clicking a sensor glyph here opens the very same live stream viewer.
-	graph3d_viewer_->set_pick_callback([this](std::uint64_t id, const std::string &type)
-	                                  { open_stream_viewer(id, type); });
-	it->second->add_custom_widget_to_dock("Graph 3D", graph3d_viewer_.get());
-
-	// POLLED, not signal-driven, on purpose: CLAUDE.md says not to connect update_node_signal unless
-	// you need it, and the ts==0 inner_eigen cache the builder walks is main-thread-only — a QTimer
-	// guarantees that. A full rebuild over ~50 nodes at 5 Hz is nothing.
-	graph3d_timer_ = new QTimer(this);
-	QObject::connect(graph3d_timer_, &QTimer::timeout, this, &SpecificWorker::refresh_graph3d);
-	graph3d_timer_->start(200);
-	refresh_graph3d();
-	qInfo() << "[graph3d] stratified 3D graph view enabled (Agent.3d)";
-}
-
-void SpecificWorker::refresh_graph3d()
-{
-	if (shutting_down_.load() or not graph3d_viewer_)
-		return;
-	graph3d_viewer_->set_scene(graph3d_builder_.build());
 }
 
 void SpecificWorker::open_stream_viewer(std::uint64_t node_id, const std::string &type)

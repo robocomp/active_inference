@@ -31,7 +31,7 @@ domain = 0
 tree = false
 graph = true
 2d = false
-3d = true    # stratified 3D graph view (z = abstraction stratum, x/y = metric pose)
+3d = false  # the stratified 3D graph view moved to its own agent: scene_graph_viewer (id 16)
 
 # --- Multiple Instance Template ---
 # If you define multiple instances, the single instance config above will be ignored.
