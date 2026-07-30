@@ -26,11 +26,11 @@
 namespace rc
 {
 
-// One camera frame ready for inference AND self-consistent publishing. Stages run on rgbd.rgb (the ZED
+// One camera frame ready for inference AND self-consistent publishing. Stages run on rgbd.bgr (the ZED
 // rgb or the ricoh panorama); publish uses rgbd.depth + intrinsics.
 struct PerceptionFrame
 {
-    RGBDData       rgbd;                                  // rgb + depth + intrinsics
+    RGBDData       rgbd;                                  // bgr + depth + intrinsics
     Mat::RTMat     room_T_sensor = Mat::RTMat::Identity();// transform pinned to `stamp`
     std::uint64_t  stamp = 0;                             // acquisition stamp
     bool           is_360 = false;                        // equirect source → 3-strip seg / bearing publish

@@ -345,7 +345,7 @@ std::optional<RGBDData> MediaPlaneSource::get_rgbd_frame_from_dsr() const
         return std::nullopt;
 
     RGBDData data;
-    data.rgb     = rgb.bgr.clone();   // owned copy for downstream
+    data.bgr     = rgb.bgr.clone();   // owned copy for downstream
     data.width   = rgb_w;
     data.height  = rgb_h;
     data.focal_x = focal_x;

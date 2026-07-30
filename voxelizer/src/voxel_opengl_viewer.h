@@ -76,7 +76,10 @@ public:
                             std::span<const std::string> names = {},
                             std::span<const std::string> subtypes = {},
                             std::span<const std::string> mesh_paths = {},
-                            std::span<const std::string> mesh_texture_paths = {});
+                            std::span<const std::string> mesh_texture_paths = {},
+                            // Per-box inferred albedo chromaticity (common/appearance_belief). A zero vector
+                            // means the agent published none, and the asset renders with its authored colours.
+                            std::span<const QVector3D> mesh_colors = {});
 
     // Flat triangle-list meshes in room frame [x0,y0,z0, x1,y1,z1, ...]. Optional per-mesh categories
     // colour them by class (table = amber model colour, others via color_for_category). Optional per-mesh
@@ -120,7 +123,10 @@ private:
     struct TexVertex
     {
         float px, py, pz;
-        float light;
+        // Baked light, per CHANNEL rather than a single scalar, so a per-instance albedo tint can ride along
+        // in the existing vertex attribute. Keeping it here means the textured pass still batches purely by
+        // texture pointer — two instances of the same asset with different inferred colours share one draw.
+        float lr, lg, lb;
         float u, v;
     };
     // One material group of a display template: geometry + its material (flat Kd and/or a base-colour texture).
@@ -137,7 +143,18 @@ private:
     struct FurnitureTemplate
     {
         std::vector<SubMeshGL> subs;
+        // The asset's OWN mean chromaticity (from the .mtl Kd values and any base-colour textures), computed
+        // once at load. An inferred instance colour is applied RELATIVE to this — tint = observed/authored,
+        // renormalised to unit mean — so the result matches the observed hue while preserving whatever
+        // inter-material contrast the artist authored. A straight replacement would flatten a wood-top /
+        // metal-leg asset to a single colour; multiplying raw would drive brown x brown toward black.
+        QVector3D mean_chroma{1.f / 3.f, 1.f / 3.f, 1.f / 3.f};
     };
+
+    // tint for a template given an inferred chromaticity (zero ⇒ none): observed/authored, renormalised to
+    // unit mean so it shifts hue without changing overall brightness. Returns (1,1,1) when there is nothing
+    // to apply, which is the identity everywhere it is used.
+    static QVector3D mesh_tint(const FurnitureTemplate& tpl, const QVector3D& inferred_chroma);
 
     static QColor color_for_category(const std::string& category);
     // Trailing integer of a DSR node name ("cabinet_2" → 2, "table" → 0) → per-instance id.
@@ -178,6 +195,7 @@ private:
     std::vector<std::string> graph_box_subtypes_;// parallel to graph_box_centers_ → shape subtype ("round"/"square")
     std::vector<std::string> graph_box_mesh_paths_;    // parallel → concept-published display OBJ (relative)
     std::vector<std::string> graph_box_mesh_tex_;      // parallel → optional base-colour texture (relative)
+    std::vector<QVector3D>   graph_box_mesh_color_;    // parallel → inferred albedo chromaticity ((0,0,0) ⇒ none)
     // Raw polygon coordinates (room frame) plus current debug rotation in 90deg steps.
     std::vector<float> raw_polygon_x_;
     std::vector<float> raw_polygon_y_;

@@ -22,17 +22,17 @@ SegStage::SegStage(const YoloProcessor::Config& cfg, const Detection360Config& c
 
 void SegStage::run(const PerceptionFrame& in, PerceptionResult& out)
 {
-    if (!ready_ || in.rgbd.rgb.empty())
+    if (!ready_ || in.rgbd.bgr.empty())
         return;
     if (in.is_360)
     {
         // Ricoh panorama is carried BGR (popup-native); the 360 detector wants RGB — convert here only.
         cv::Mat rgb;
-        cv::cvtColor(in.rgbd.rgb, rgb, cv::COLOR_BGR2RGB);
+        cv::cvtColor(in.rgbd.bgr, rgb, cv::COLOR_BGR2RGB);
         out.masks = yolo_.detect_segmentation_360(rgb, cfg360_);
     }
     else
-        out.masks = yolo_.detect_segmentation(in.rgbd.rgb);   // ZED frame (same BGR convention as before)
+        out.masks = yolo_.detect_segmentation(in.rgbd.bgr);   // ZED frame (same BGR convention as before)
 }
 
 } // namespace rc

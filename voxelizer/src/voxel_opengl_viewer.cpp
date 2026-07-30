@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <numbers>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -227,7 +228,8 @@ void VoxelOpenGLViewer::update_graph_boxes(std::span<const QVector3D> centers,
                                            std::span<const std::string> names,
                                            std::span<const std::string> subtypes,
                                            std::span<const std::string> mesh_paths,
-                                           std::span<const std::string> mesh_texture_paths)
+                                           std::span<const std::string> mesh_texture_paths,
+                                           std::span<const QVector3D> mesh_colors)
 {
     {
         std::scoped_lock lk(graph_boxes_mutex_);
@@ -239,6 +241,7 @@ void VoxelOpenGLViewer::update_graph_boxes(std::span<const QVector3D> centers,
         graph_box_subtypes_.assign(subtypes.begin(), subtypes.end());
         graph_box_mesh_paths_.assign(mesh_paths.begin(), mesh_paths.end());
         graph_box_mesh_tex_.assign(mesh_texture_paths.begin(), mesh_texture_paths.end());
+        graph_box_mesh_color_.assign(mesh_colors.begin(), mesh_colors.end());
     }
 }
 
@@ -280,6 +283,49 @@ int VoxelOpenGLViewer::instance_index_from_name(const std::string& name)
     while (i > 0 and std::isdigit(static_cast<unsigned char>(name[i - 1]))) --i;
     if (i == name.size()) return 0;
     return std::atoi(name.c_str() + i);
+}
+
+// Apply a multiplicative tint to a flat colour. Clamped because the tint is a ratio of chromaticities and
+// can legitimately exceed 1 on a channel the observation says is stronger than the asset's.
+static QColor tinted(const QColor& c, const QVector3D& tint)
+{
+    return QColor::fromRgbF(std::clamp(static_cast<float>(c.redF())   * tint.x(), 0.f, 1.f),
+                            std::clamp(static_cast<float>(c.greenF()) * tint.y(), 0.f, 1.f),
+                            std::clamp(static_cast<float>(c.blueF())  * tint.z(), 0.f, 1.f),
+                            static_cast<float>(c.alphaF()));
+}
+
+// Per-instance albedo tint, RELATIVE to what the asset already carries: tint = observed / authored,
+// renormalised so the tint changes HUE ONLY and leaves brightness alone. Identity (1,1,1) whenever there
+// is no inferred colour, so the untinted path is literally the same arithmetic and cannot regress.
+//
+// The renormalisation is by LUMINANCE, not by the tint's arithmetic mean. Unit-mean was equivalent for a
+// near-neutral asset and silently wrong for a saturated one: it ignores which channel carries the asset's
+// brightness. The chair asset is authored blue (Kd 0.12/0.35/1.00), so almost all its luminance sits in
+// the very channel a warm observation suppresses (×0.05) — measured result 38% darker than authored,
+// which read as "the chairs went black". Luminance-normalising fixes brightness by construction.
+//
+// The unknown overall scale of the asset's mean colour cancels, so this is computable from chromaticity
+// alone: mean_rgb = S·chroma for some S>0, and S divides out of the ratio below. That matters because the
+// tint must be ONE constant vector — the textured path rides it in a vertex attribute and multiplies it
+// per-texel in the shader, so a per-pixel correction is not available there.
+QVector3D VoxelOpenGLViewer::mesh_tint(const FurnitureTemplate& tpl, const QVector3D& inferred_chroma)
+{
+    const float s = inferred_chroma.x() + inferred_chroma.y() + inferred_chroma.z();
+    if (!(s > 1e-6f))
+        return {1.f, 1.f, 1.f};
+    const QVector3D obs = inferred_chroma / s;
+    const QVector3D& aut = tpl.mean_chroma;
+    QVector3D t{obs.x() / std::max(aut.x(), 1e-3f),
+                obs.y() / std::max(aut.y(), 1e-3f),
+                obs.z() / std::max(aut.z(), 1e-3f)};
+    // Rec.601 luma, the same weighting the eye applies and that QColor's value/HSV work in.
+    constexpr QVector3D kLuma{0.299f, 0.587f, 0.114f};
+    const float lum_aut = QVector3D::dotProduct(kLuma, aut);
+    const float lum_obs = QVector3D::dotProduct(kLuma, obs);   // == dot(kLuma, aut*t) by construction
+    if (lum_obs > 1e-6f and lum_aut > 1e-6f)
+        t *= lum_aut / lum_obs;
+    return t;
 }
 
 QColor VoxelOpenGLViewer::shade_for_instance(const QColor& base, int instance_id)
@@ -605,8 +651,49 @@ VoxelOpenGLViewer::FurnitureTemplate* VoxelOpenGLViewer::get_or_load_template(co
                     }
                     t.subs.push_back(std::move(sub));
                 }
+                // The asset's own mean chromaticity, so an inferred instance colour can be applied RELATIVE
+                // to what the artist authored (see FurnitureTemplate::mean_chroma). A textured group is
+                // summarised by its image's mean pixel, a flat group by its Kd; groups are weighted equally
+                // because triangle area here is in unit-box coordinates and says little about visible area.
+                {
+                    QVector3D sum_rgb{0.f, 0.f, 0.f};
+                    int n = 0;
+                    for (const auto& sub : t.subs)
+                    {
+                        if (not sub.tex_image.isNull())
+                        {
+                            // Scale to a small proxy first: we want the average colour, not every pixel.
+                            const QImage small = sub.tex_image.scaled(16, 16, Qt::IgnoreAspectRatio,
+                                                                      Qt::SmoothTransformation)
+                                                              .convertToFormat(QImage::Format_RGB888);
+                            QVector3D acc{0.f, 0.f, 0.f};
+                            for (int y = 0; y < small.height(); ++y)
+                                for (int x = 0; x < small.width(); ++x)
+                                {
+                                    const QColor px = small.pixelColor(x, y);
+                                    acc += QVector3D(px.redF(), px.greenF(), px.blueF());
+                                }
+                            const float npx = static_cast<float>(std::max(1, small.width() * small.height()));
+                            sum_rgb += acc / npx;
+                            ++n;
+                        }
+                        else if (sub.has_diffuse)
+                        {
+                            sum_rgb += QVector3D(sub.diffuse.redF(), sub.diffuse.greenF(), sub.diffuse.blueF());
+                            ++n;
+                        }
+                    }
+                    if (n > 0)
+                    {
+                        const QVector3D mean = sum_rgb / static_cast<float>(n);
+                        const float s = mean.x() + mean.y() + mean.z();
+                        if (s > 1e-6f)
+                            t.mean_chroma = mean / s;
+                    }
+                }
                 qInfo() << "VoxelOpenGLViewer loaded display mesh" << QString::fromStdString(mesh_path)
-                        << "submeshes=" << t.subs.size();
+                        << "submeshes=" << t.subs.size()
+                        << "mean_chroma=" << t.mean_chroma;
             }
         }
         if (t.subs.empty())
@@ -617,6 +704,7 @@ VoxelOpenGLViewer::FurnitureTemplate* VoxelOpenGLViewer::get_or_load_template(co
     FurnitureTemplate& t = it->second;
     if (t.subs.empty())
         return nullptr;
+
     if (tex_program_.isLinked())   // lazy GPU upload per submesh (context current in paintGL)
         for (auto& sub : t.subs)
             if (sub.tex == nullptr and not sub.tex_image.isNull())
@@ -807,16 +895,16 @@ void VoxelOpenGLViewer::initializeGL()
     static constexpr const char* tvs_330 = R"(
         #version 330 core
         layout(location = 0) in vec3 in_pos;
-        layout(location = 1) in float in_light;
+        layout(location = 1) in vec3 in_light;
         layout(location = 2) in vec2 in_uv;
         uniform mat4 u_mvp;
-        out float v_light;
+        out vec3 v_light;
         out vec2 v_uv;
         void main() { gl_Position = u_mvp * vec4(in_pos, 1.0); v_light = in_light; v_uv = in_uv; }
     )";
     static constexpr const char* tfs_330 = R"(
         #version 330 core
-        in float v_light;
+        in vec3 v_light;
         in vec2 v_uv;
         uniform sampler2D u_tex;
         uniform float u_alpha;
@@ -825,13 +913,13 @@ void VoxelOpenGLViewer::initializeGL()
     )";
     static constexpr const char* tvs_120 = R"(
         #version 120
-        attribute vec3 in_pos; attribute float in_light; attribute vec2 in_uv;
-        uniform mat4 u_mvp; varying float v_light; varying vec2 v_uv;
+        attribute vec3 in_pos; attribute vec3 in_light; attribute vec2 in_uv;
+        uniform mat4 u_mvp; varying vec3 v_light; varying vec2 v_uv;
         void main() { gl_Position = u_mvp * vec4(in_pos, 1.0); v_light = in_light; v_uv = in_uv; }
     )";
     static constexpr const char* tfs_120 = R"(
         #version 120
-        varying float v_light; varying vec2 v_uv;
+        varying vec3 v_light; varying vec2 v_uv;
         uniform sampler2D u_tex; uniform float u_alpha;
         void main() { gl_FragColor = vec4(texture2D(u_tex, v_uv).rgb * v_light, u_alpha); }
     )";
@@ -860,7 +948,7 @@ void VoxelOpenGLViewer::initializeGL()
         tex_program_.enableAttributeArray(1);
         tex_program_.enableAttributeArray(2);
         tex_program_.setAttributeBuffer(0, GL_FLOAT, offsetof(TexVertex, px),    3, sizeof(TexVertex));
-        tex_program_.setAttributeBuffer(1, GL_FLOAT, offsetof(TexVertex, light), 1, sizeof(TexVertex));
+        tex_program_.setAttributeBuffer(1, GL_FLOAT, offsetof(TexVertex, lr),    3, sizeof(TexVertex));
         tex_program_.setAttributeBuffer(2, GL_FLOAT, offsetof(TexVertex, u),     2, sizeof(TexVertex));
         tex_program_.release();
         tex_vbo_.release();
@@ -1316,6 +1404,7 @@ void VoxelOpenGLViewer::paintGL()
         std::vector<QVector3D> local_centers, local_half;
         std::vector<float> local_yaws;
         std::vector<std::string> local_cats, local_names, local_subtypes, local_mesh_paths, local_mesh_tex;
+        std::vector<QVector3D> local_mesh_color;
         {
             std::scoped_lock lk(graph_boxes_mutex_);
             local_centers = graph_box_centers_;
@@ -1326,6 +1415,7 @@ void VoxelOpenGLViewer::paintGL()
             local_subtypes = graph_box_subtypes_;
             local_mesh_paths = graph_box_mesh_paths_;
             local_mesh_tex = graph_box_mesh_tex_;
+            local_mesh_color = graph_box_mesh_color_;
         }
 
         if (!local_centers.empty() && local_centers.size() == local_half.size())
@@ -1424,7 +1514,7 @@ void VoxelOpenGLViewer::paintGL()
             const auto append_scaled_mesh_tex = [&](const std::vector<QVector3D>& tmpl,
                                                     const std::vector<QVector2D>& uv, const QVector3D& ctr,
                                                     const QVector3D& he, float cy_, float sy_,
-                                                    std::vector<TexVertex>& out)
+                                                    const QVector3D& tint, std::vector<TexVertex>& out)
             {
                 if (tmpl.size() < 3 or uv.size() != tmpl.size()) return;
                 const float W = 2.f * he.x(), D = 2.f * he.y(), H = 2.f * he.z();
@@ -1444,7 +1534,11 @@ void VoxelOpenGLViewer::paintGL()
                     for (int k = 0; k < 3; ++k)
                     {
                         const QVector3D p = map_room_to_ogl(room[k].x(), room[k].y(), room[k].z());
-                        out.push_back(TexVertex{p.x(), p.y(), p.z(), s, uv[t + k].x(), uv[t + k].y()});
+                        // Fold the per-instance tint into the baked light, so the texture batch (keyed by
+                        // texture pointer) still holds instances with different inferred colours together.
+                        out.push_back(TexVertex{p.x(), p.y(), p.z(),
+                                                s * tint.x(), s * tint.y(), s * tint.z(),
+                                                uv[t + k].x(), uv[t + k].y()});
                     }
                 }
             };
@@ -1474,11 +1568,24 @@ void VoxelOpenGLViewer::paintGL()
                 const std::string& subtype = (i < local_subtypes.size()) ? local_subtypes[i] : std::string{};
                 const std::string& mesh_path = (i < local_mesh_paths.size()) ? local_mesh_paths[i] : std::string{};
                 const std::string& mesh_tex  = (i < local_mesh_tex.size())   ? local_mesh_tex[i]   : std::string{};
+                // Inferred albedo chromaticity for THIS instance; (0,0,0) when the agent published none,
+                // which mesh_tint() turns into the identity tint.
+                const QVector3D inferred_chroma = (i < local_mesh_color.size()) ? local_mesh_color[i]
+                                                                                : QVector3D{0.f, 0.f, 0.f};
                 const bool is_table = (cat == "table" or cat == "model_table");
                 // Per-instance shade: several nodes of the same type get distinct intensities of one tone.
                 // Tables use the amber model tone so the round-table shape drawn here matches the square-table mesh.
                 const QColor base = is_table ? QColor(255, 200, 100) : color_for_category(cat);
-                const QColor c = shade_for_instance(base, instance_index_from_name(name));
+                // SUPPRESSED once this instance carries an inferred colour. The shade cycle exists to tell
+                // several nodes of one type apart when we know nothing about their appearance — it varies
+                // value and saturation by instance index. That is exactly what the appearance belief now
+                // measures, so applying both makes three identically-coloured chairs render as three
+                // different colours (observed live: same chromaticity to within 5%, drawn orange/brown/
+                // black by v_mult 0.68/1.28/0.82). Real colour is the better disambiguator, so when it
+                // exists the synthetic one must yield.
+                const bool has_inferred = inferred_chroma.length() > 1e-6f;
+                const QColor c = has_inferred ? base
+                                             : shade_for_instance(base, instance_index_from_name(name));
 
                 // Node-name label at the box centre (collected for the QPainter overlay; drawn for every
                 // model type, including the table/bottle branches that draw no wireframe below).
@@ -1498,13 +1605,26 @@ void VoxelOpenGLViewer::paintGL()
                         // Draw each material group: textured groups (.mtl map_Kd) go through the texture pass;
                         // flat groups use their .mtl Kd (else the node's category colour), per-instance shaded.
                         const int inst = instance_index_from_name(name);
+                        // ONE tint for the whole asset, applied multiplicatively to every material group.
+                        // We only ever infer a single colour per instance, so tinting groups differently
+                        // would be inventing information; scaling them all by the same factor keeps the
+                        // authored wood-top-vs-metal-legs contrast while matching the observed overall hue.
+                        const QVector3D tint = mesh_tint(*tpl, inferred_chroma);
                         for (auto& sub : tpl->subs)
                         {
                             if (sub.tex != nullptr and sub.uv.size() == sub.tris.size())
-                                append_scaled_mesh_tex(sub.tris, sub.uv, ctr, he, cy, sy, tex_batches[sub.tex.get()]);
+                                append_scaled_mesh_tex(sub.tris, sub.uv, ctr, he, cy, sy, tint,
+                                                       tex_batches[sub.tex.get()]);
                             else
-                                append_scaled_mesh(sub.tris, ctr, he, cy, sy,
-                                                   shade_for_instance(sub.has_diffuse ? sub.diffuse : base, inst));
+                            {
+                                // Same suppression as the fallback path above: the per-instance shade
+                                // cycle and the inferred tint are two answers to "what colour is this
+                                // instance", and only one of them is a measurement.
+                                const QColor group_base = sub.has_diffuse ? sub.diffuse : base;
+                                const QColor shaded = has_inferred ? group_base
+                                                                   : shade_for_instance(group_base, inst);
+                                append_scaled_mesh(sub.tris, ctr, he, cy, sy, tinted(shaded, tint));
+                            }
                         }
                         continue;
                     }
@@ -1533,6 +1653,33 @@ void VoxelOpenGLViewer::paintGL()
                 if (cat == "bottle")
                 {
                     append_cylinder(ctr, 0.5f * (he.x() + he.y()), he.z(), c);
+                    continue;
+                }
+                // Level-2 arrangement (ring_metaconcept's dining_set): draw the RING the agent
+                // believes in — a flat circle outline on the floor — never a box. The node has a
+                // footprint but NO body: nothing occupies it, and its dedicated DSR type keeps it
+                // out of the controller's obstacle sweep so the robot may drive straight through.
+                // A solid box would misstate both facts; the outline says "these things belong
+                // together" and stops there. Radius = mean footprint half-extent (2r was published
+                // as width and depth alike), drawn at the top of the nominal 2 cm slab.
+                if (cat == "metaconcept")
+                {
+                    const float radius = 0.5f * (he.x() + he.y());
+                    const float ring_z  = ctr.z() + he.z();
+                    constexpr int kRingSegments = 72;
+                    QVector3D prev = map_room_to_ogl(ctr.x() + radius, ctr.y(), ring_z);
+                    for (int k = 1; k <= kRingSegments; ++k)
+                    {
+                        const float a = 2.f * std::numbers::pi_v<float> * static_cast<float>(k)
+                                      / static_cast<float>(kRingSegments);
+                        const QVector3D cur = map_room_to_ogl(ctr.x() + radius * std::cos(a),
+                                                              ctr.y() + radius * std::sin(a), ring_z);
+                        box_lines.push_back(Vertex{prev.x(), prev.y(), prev.z(),
+                                                   c.redF(), c.greenF(), c.blueF()});
+                        box_lines.push_back(Vertex{cur.x(), cur.y(), cur.z(),
+                                                   c.redF(), c.greenF(), c.blueF()});
+                        prev = cur;
+                    }
                     continue;
                 }
                 const float r = c.redF();
@@ -2054,6 +2201,7 @@ QColor VoxelOpenGLViewer::color_for_category(const std::string& category)
     if (category == "cabinet") return QColor(232, 230, 224);  // warm off-white — cabinet_concept models (kitchen units; distinct from the light-blue cabinet mask)
     if (category == "hood") return QColor(0, 210, 210);     // cyan — range-hood semantic masks
     if (category == "refrigerator") return QColor(246, 247, 249);  // clean whitish — refrigerator_concept models
+    if (category == "metaconcept") return QColor(170, 120, 255);  // violet — level-2 arrangements (dining_set ring); same hue graph3d gives Kind::Meta, and no level-1 class owns it
 
     static const std::array<QColor, 20> palette = {
         QColor(220, 20, 60), QColor(0, 90, 181), QColor(34, 139, 34), QColor(255, 140, 0),

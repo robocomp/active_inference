@@ -62,6 +62,8 @@ VoxelizerParams load_voxelizer_params(const ConfigLoader& configLoader)
     rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "MaskMotion.timing_jitter_s", params.MASK_MOTION_TIMING_JITTER_S);
     rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "MaskMotion.timing_offset_s", params.MASK_MOTION_TIMING_OFFSET_S);
     rc::ConfigLoaderUtils::load_optional(configLoader, "MaskMotion.csv_log", params.MASK_MOTION_CSV_LOG);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "MaskColor.enabled", params.MASK_COLOR_ENABLED);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "MaskColor.cell_px", params.MASK_COLOR_CELL_PX);
     rc::ConfigLoaderUtils::load_optional(configLoader, "MaskMotion.pose_extrapolate", params.MASK_POSE_EXTRAPOLATE);
     rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "MaskMotion.pose_extrap_max_dt_s", params.MASK_POSE_EXTRAP_MAX_DT_S);
 

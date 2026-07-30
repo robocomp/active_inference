@@ -39,7 +39,7 @@ std::optional<PerceptionFrame> RicohSource::operator()()
         return std::nullopt;
 
     PerceptionFrame pf;
-    pf.rgbd.rgb = pano.clone();   // owned BGR panorama
+    pf.rgbd.bgr = pano.clone();   // owned BGR panorama
     pf.stamp    = stamp;
     pf.is_360   = true;
 

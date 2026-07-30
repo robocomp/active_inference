@@ -23,11 +23,11 @@ PoseStage::PoseStage(const rc::human_pose::YoloHumanProcessor::Config& cfg, int 
 
 void PoseStage::run(const PerceptionFrame& in, PerceptionResult& out)
 {
-    if (!ready() || in.rgbd.rgb.empty())
+    if (!ready() || in.rgbd.bgr.empty())
         return;
     const bool run_now = (counter_++ % static_cast<std::uint64_t>(decimation_) == 0);
     if (run_now)
-        (void) human_->detect_poses(in.rgbd.rgb, in.stamp);   // refreshes last_poses_ (held across misses)
+        (void) human_->detect_poses(in.rgbd.bgr, in.stamp);   // refreshes last_poses_ (held across misses)
     out.poses = human_->last_poses();
     out.poses_fresh = run_now;
 }

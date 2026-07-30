@@ -22,7 +22,7 @@ void BearingStage::run(const PerceptionFrame& in, PerceptionResult& out)
     // Depends on the seg stage having filled masks; always emit a (possibly empty) bearings vector so a
     // consumer can tell "ran, none" from "didn't run".
     out.bearings = std::vector<BearingDetection>{};
-    if (!out.masks || out.masks->empty() || in.rgbd.rgb.empty() || !graph_)
+    if (!out.masks || out.masks->empty() || in.rgbd.bgr.empty() || !graph_)
         return;
 
     if (!camera_api_)
@@ -31,7 +31,7 @@ void BearingStage::run(const PerceptionFrame& in, PerceptionResult& out)
     if (!camera_api_)
         return;
 
-    const double row_horizon = in.rgbd.rgb.rows * 0.5;   // horizon row → horizontal bearing
+    const double row_horizon = in.rgbd.bgr.rows * 0.5;   // horizon row → horizontal bearing
     auto& bearings = *out.bearings;
     bearings.reserve(out.masks->size());
     for (const auto& d : *out.masks)

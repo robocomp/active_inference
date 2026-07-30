@@ -499,9 +499,12 @@ std::optional<GraphObjectBox> SceneProcessor::build_graph_object_box(const DSR::
     // `object`-type furniture (refrigerator_concept and future generic floor objects) also writes its RT
     // origin at the floor base (z=0) — same upward-extending convention as tables/cabinets. Without this the
     // box would centre on the RT origin and sink half its height below the floor.
+    // A metaconcept's RT origin is on the floor too (ring_metaconcept publishes z=0 with a 0.02 m
+    // nominal height), so it uses the same upward-extending convention — its outline lies ON the
+    // floor rather than straddling it.
     const bool stands_on_floor = (node.type() == "table") or (node.name().rfind("table", 0) == 0)
                               or (node.name().rfind("cabinet_", 0) == 0)
-                              or (node.type() == "object");
+                              or (node.type() == "object") or (node.type() == "metaconcept");
     const float z_lo = stands_on_floor ? 0.f : -half_height;
     const float z_hi = stands_on_floor ? height : half_height;
 
@@ -549,6 +552,11 @@ std::optional<GraphObjectBox> SceneProcessor::build_graph_object_box(const DSR::
     // residual_concept obstacles (type "obstacle", named residual_*) → their own category/colour.
     if (node.type() == "obstacle")
         category = "obstacle";
+    // Level-2 arrangements get ONE category regardless of schema (ring/row/grid): the viewer draws
+    // them as an abstract outline, so there is nothing per-class to colour. The schema itself is in
+    // object_subtype ("dining_set") and the node NAME, which is what the label shows.
+    if (node.type() == "metaconcept")
+        category = "metaconcept";
 
     // Concept-published display mesh + texture (relative asset paths). The viewer loads & renders these,
     // scaled to this box — the agent owns the appearance, the viewer stays type-agnostic.
@@ -557,6 +565,17 @@ std::optional<GraphObjectBox> SceneProcessor::build_graph_object_box(const DSR::
         mesh_path = mp.value();
     if (const auto mt = graph_->get_attrib_by_name<mesh_texture_path_att>(node); mt.has_value())
         mesh_texture_path = mt.value();
+
+    // Inferred albedo chromaticity (common/appearance_belief → the agent's mesh_color_rgb). Absent for any
+    // agent that does not run an appearance belief, in which case the asset renders with its authored colours.
+    Eigen::Vector3f mesh_color = Eigen::Vector3f::Zero();
+    bool            has_mesh_color = false;
+    if (const auto mc = graph_->get_attrib_by_name<mesh_color_rgb_att>(node);
+        mc.has_value() and mc.value().size() >= 3)
+    {
+        mesh_color = Eigen::Vector3f(mc.value()[0], mc.value()[1], mc.value()[2]);
+        has_mesh_color = mesh_color.allFinite() and mesh_color.sum() > 1e-6f;
+    }
 
     // Shape hint for the round-top table (disc) render. `object_subtype` now carries the CLASS uniformly
     // (schema convention), so the round/square SHAPE is read from the shape-selected mesh_path filename
@@ -579,7 +598,8 @@ std::optional<GraphObjectBox> SceneProcessor::build_graph_object_box(const DSR::
     return GraphObjectBox{min_corner, max_corner, center,
                           Eigen::Vector3f(half_width, half_depth, half_height),
                           yaw, node.name(), std::move(category), std::move(subtype),
-                          std::move(mesh_path), std::move(mesh_texture_path)};
+                          std::move(mesh_path), std::move(mesh_texture_path),
+                          mesh_color, has_mesh_color};
 }
 
 std::vector<GraphObjectBox> SceneProcessor::get_graph_object_boxes(const std::string& room_name,
@@ -593,7 +613,15 @@ std::vector<GraphObjectBox> SceneProcessor::get_graph_object_boxes(const std::st
     // type "object" nodes, so a SINGLE query gathers them all (no per-class table/cylinder/box queries).
     // build_graph_object_box skips any node missing box dimensions, so non-furniture "object" nodes fall out.
     // residual_concept `obstacle` nodes are NOT drawn as red boxes — the occupancy grid is the residual display.
-    const auto object_nodes = graph_->get_nodes_by_type("object");
+    auto object_nodes = graph_->get_nodes_by_type("object");
+    // Level-2 arrangements (ring_metaconcept's dining_set, …) carry their own DSR type so that the
+    // CONTROLLER's obstacle sweep — which takes {"object","obstacle"} — cannot see them: a rig is a
+    // belief about a relation, nothing occupies its footprint, and the robot must be free to drive
+    // through it. This viewer is the opposite case: it SHOULD draw them, as the flat ring outline
+    // the box branch renders for the "metaconcept" category. Same reason residual_concept's carve
+    // and the level-1 association scans, all keyed on "object", still exclude them.
+    for (auto& n : graph_->get_nodes_by_type("metaconcept"))
+        object_nodes.push_back(std::move(n));
     graph_boxes.reserve(object_nodes.size());
     for (const auto& node : object_nodes)
     {
@@ -658,6 +686,8 @@ void SceneProcessor::update_viewer_graph_object_boxes(std::span<const GraphObjec
     std::vector<std::string> subtypes;
     std::vector<std::string> mesh_paths;
     std::vector<std::string> mesh_texture_paths;
+    // Per-box albedo tint; a zero vector means "no inferred colour" and the viewer leaves the asset alone.
+    std::vector<QVector3D>   mesh_colors;
     centers.reserve(graph_boxes.size());
     half_extents.reserve(graph_boxes.size());
     yaws.reserve(graph_boxes.size());
@@ -666,6 +696,7 @@ void SceneProcessor::update_viewer_graph_object_boxes(std::span<const GraphObjec
     subtypes.reserve(graph_boxes.size());
     mesh_paths.reserve(graph_boxes.size());
     mesh_texture_paths.reserve(graph_boxes.size());
+    mesh_colors.reserve(graph_boxes.size());
 
     for (const auto& box : graph_boxes)
     {
@@ -677,10 +708,13 @@ void SceneProcessor::update_viewer_graph_object_boxes(std::span<const GraphObjec
         subtypes.push_back(box.subtype);
         mesh_paths.push_back(box.mesh_path);
         mesh_texture_paths.push_back(box.mesh_texture_path);
+        mesh_colors.emplace_back(box.has_mesh_color ? box.mesh_color.x() : 0.0f,
+                                 box.has_mesh_color ? box.mesh_color.y() : 0.0f,
+                                 box.has_mesh_color ? box.mesh_color.z() : 0.0f);
     }
 
     voxel_viewer_->update_graph_boxes(centers, half_extents, yaws, categories, names, subtypes,
-                                      mesh_paths, mesh_texture_paths);
+                                      mesh_paths, mesh_texture_paths, mesh_colors);
 }
 
 void SceneProcessor::update_viewer_object_meshes()

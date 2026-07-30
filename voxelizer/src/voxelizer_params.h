@@ -76,6 +76,17 @@ struct VoxelizerParams
     // static, spikes on pan). Default ON during bring-up; turn off in production. MaskMotion.csv_log
     bool        MASK_MOTION_CSV_LOG        = true;
 
+    // Per-mask APPEARANCE summary (median chromaticity + between-cell variance + effective sample count),
+    // published on the 'masks' node for the concept agents' display-mesh tint. Pure annotation: consumers
+    // that ignore the attrs are unaffected, and nothing in any geometric fit reads it. MaskColor.enabled
+    bool        MASK_COLOR_ENABLED    = true;    // MaskColor.enabled
+    // Grid cell size in PIXELS. This is a RESOLUTION choice, not a gate: it sets the spatial scale at which
+    // mask pixels are treated as independent samples. Neighbouring pixels on one surface are massively
+    // correlated, so aggregating per cell (rather than per pixel) is what keeps the reported variance
+    // honest instead of collapsing it like 1/sqrt(N). Bigger cells ⇒ fewer, more-independent samples and
+    // heavier boundary erosion; smaller ⇒ more samples that are more correlated. MaskColor.cell_px
+    int         MASK_COLOR_CELL_PX    = 8;       // MaskColor.cell_px
+
     // Extrapolate the robot pose to the camera CAPTURE stamp using the body-frame velocity on the
     // robot→room RT edge. DSR's InterpolatedRT clamps to the newest block (poses lag the camera by
     // ~100 ms), so masks deproject against a stale pose; this fills that residual lag at the consumer

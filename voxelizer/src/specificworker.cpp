@@ -569,9 +569,9 @@ void SpecificWorker::on_render_tick()
             if (popup_visible)
             {
                 auto rres = ricoh_worker_->latest_result();
-                if (rres and not rres->frame.rgbd.rgb.empty())
+                if (rres and not rres->frame.rgbd.bgr.empty())
                 {
-                    cv::Mat pano = rres->frame.rgbd.rgb;   // BGR panorama the worker processed
+                    cv::Mat pano = rres->frame.rgbd.bgr;   // BGR panorama the worker processed
                     // Project the DSR scene (model boxes + room floor/ceiling/walls) onto the panorama
                     // when the Ricoh "Models" toggle is on. Draw on a clone (BGR) so we never mutate
                     // the worker's frame; the popup viewer converts BGR→RGB on display.
@@ -742,11 +742,11 @@ void SpecificWorker::compute()
 
     if (yolo_viewer_ and yolo_window_ and yolo_window_->isVisible())
     {
-        // rgbd.rgb is BGR (the order seg/sam2 consume, since the producer now tags its true RGB order and
+        // rgbd.bgr is the order seg/sam2 consume (the producer tags its true RGB order and
         // MediaPlaneSource converts RGB→BGR). The ZED popup overlays + YoloViewer work in RGB, so convert
         // once here — this also detaches viewer_rgb from the shared worker frame.
         cv::Mat viewer_rgb;
-        cv::cvtColor(zed_res->frame.rgbd.rgb, viewer_rgb, cv::COLOR_BGR2RGB);
+        cv::cvtColor(zed_res->frame.rgbd.bgr, viewer_rgb, cv::COLOR_BGR2RGB);
         // Dense semantic class-map underlay (blended) first, then skeletons + seg masks on top.
         if (sem_stage and sem_stage->processor() and semantic_overlay_enabled_
             and sem_map and not sem_map->labels.empty())
@@ -760,7 +760,7 @@ void SpecificWorker::compute()
         // ZED-window "Models" toggle is on. Independent, self-contained overlay (model_projection_overlay).
         if (model_overlay_enabled_ and model_overlay_)
         {
-            if (viewer_rgb.data == zed_res->frame.rgbd.rgb.data)
+            if (viewer_rgb.data == zed_res->frame.rgbd.bgr.data)
                 viewer_rgb = viewer_rgb.clone();   // don't scribble on the shared source frame
             // boxes/polygon from the main-thread scene gather; room<-zed from the worker's own frame.
             model_overlay_->draw(viewer_rgb, frame->graph_object_boxes, zed_res->frame.room_T_sensor,

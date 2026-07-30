@@ -25,11 +25,11 @@ SemanticStage::SemanticStage(const rc::semantic::YoloSemanticProcessor::Config& 
 
 void SemanticStage::run(const PerceptionFrame& in, PerceptionResult& out)
 {
-    if (!ready() || in.rgbd.rgb.empty())
+    if (!ready() || in.rgbd.bgr.empty())
         return;
     const bool run_now = (counter_++ % static_cast<std::uint64_t>(decimation_) == 0);
     if (run_now)
-        (void) sem_->segment(in.rgbd.rgb, want_scores_);   // refreshes last_map_ (reused between runs)
+        (void) sem_->segment(in.rgbd.bgr, want_scores_);   // refreshes last_map_ (reused between runs)
     // DEEP-COPY across the worker→main thread boundary (CLAUDE.md cv::Mat rule): last_map() aliases the
     // processor's cached buffer, so a shallow copy would share it with the drained bundle destroyed on the
     // main thread. Own independent buffers here so no cv::Mat header/refcount is touched from two threads.

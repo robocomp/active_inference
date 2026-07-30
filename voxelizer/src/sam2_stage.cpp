@@ -110,7 +110,7 @@ Sam2Stage::Sam2Stage(const rc::sam2::Config& cfg, std::vector<std::string> refin
 
 void Sam2Stage::run(const PerceptionFrame& in, PerceptionResult& out)
 {
-    if (!ready() || in.rgbd.rgb.empty() || !out.masks)
+    if (!ready() || in.rgbd.bgr.empty() || !out.masks)
         return;
 
     // Keep only the target classes (empty filter → all). Refining every YOLO box wastes the encoder;
@@ -125,7 +125,7 @@ void Sam2Stage::run(const PerceptionFrame& in, PerceptionResult& out)
     const bool run_now = (counter_++ % static_cast<std::uint64_t>(decimation_) == 0);
     if (run_now && !targets.empty())
     {
-        last_refined_ = refiner_->refine(in.rgbd.rgb, targets, /*is_bgr=*/true);
+        last_refined_ = refiner_->refine(in.rgbd.bgr, targets, /*is_bgr=*/true);
         if (metrics_log_ && last_refined_)
             log_metrics(in, targets, *last_refined_);
     }

@@ -49,7 +49,7 @@ public:
     bool start(std::vector<std::unique_ptr<Stage>> stages, const Config& config, FrameSource source = {});
     void stop();
 
-    // PUSH mode: hand a frame for inference (latest-wins). frame.rgbd.rgb MUST be an owned deep copy.
+    // PUSH mode: hand a frame for inference (latest-wins). frame.rgbd.bgr MUST be an owned deep copy.
     void submit(PerceptionFrame&& frame);
 
     // Consume the newest completed bundle (single reader); nullopt if nothing new since the last call.
