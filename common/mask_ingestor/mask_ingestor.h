@@ -76,6 +76,19 @@ public:
         // variance for ricoh masks depth-filled from reprojected lidar (grows as hits get sparse/scattered,
         // → the mask degrades back toward bearing-only). 0 when the producer predates the field.
         float depth_var        = 0.0f;
+        // Appearance channel (voxelizer MaskColor.*, consumed by common/appearance_belief for the agent's
+        // DISPLAY-mesh tint — no geometric fit reads it). color_chroma is the slice's median CHROMATICITY
+        // (R,G,B)/(R+G+B), which is invariant to the per-frame illumination gain by construction; the
+        // renderer applies its own shading, so raw RGB would be double-shaded. color_var is the scatter
+        // BETWEEN grid cells, not between pixels — mask pixels on one surface are massively correlated,
+        // and a per-pixel variance would collapse like 1/sqrt(N) and hugely overstate the precision.
+        // color_neff counts contributing interior cells; 0 means NO colour information this frame (ricoh
+        // bearing slices, tiny/distant masks, or a producer predating the feature) and consumers should
+        // simply gain nothing rather than branch. Frame-independent: colour is a 2D image quantity, so
+        // enable_frame_transform() does not affect it.
+        Eigen::Vector3f color_chroma = Eigen::Vector3f::Zero();
+        Eigen::Vector3f color_var    = Eigen::Vector3f::Zero();
+        float           color_neff   = 0.0f;
     };
 
     // One ingested masks frame: every slice plus the shared support-point and raw-pixel arrays they index into.

@@ -101,6 +101,9 @@ bool MaskIngestor::refresh()
     const VecOpt has_depth_opt   = G_->get_attrib_by_name<mask_has_depth_att>(masks_node);
     const VecOpt azimuth_opt     = G_->get_attrib_by_name<mask_azimuth_att>(masks_node);
     const VecOpt depth_var_opt   = G_->get_attrib_by_name<mask_depth_var_att>(masks_node);
+    const VecOpt color_rgb_opt   = G_->get_attrib_by_name<mask_color_rgb_att>(masks_node);
+    const VecOpt color_var_opt   = G_->get_attrib_by_name<mask_color_var_att>(masks_node);
+    const VecOpt color_neff_opt  = G_->get_attrib_by_name<mask_color_neff_att>(masks_node);
     const auto   cam_twist_opt   = G_->get_attrib_by_name<mask_cam_twist_att>(masks_node);
     const auto   frame_dt_opt    = G_->get_attrib_by_name<mask_frame_dt_s_att>(masks_node);
 
@@ -124,6 +127,9 @@ bool MaskIngestor::refresh()
     const auto& has_depth_v       = vref(has_depth_opt);
     const auto& azimuth_v         = vref(azimuth_opt);
     const auto& depth_var_v       = vref(depth_var_opt);
+    const auto& color_rgb_v       = vref(color_rgb_opt);
+    const auto& color_var_v       = vref(color_var_opt);
+    const auto& color_neff_v      = vref(color_neff_opt);
 
     // Part B: with frame-transform enabled, source the camera-frame support array and transform it to
     // the target frame below; otherwise use the legacy room-frame array as-is.
@@ -227,6 +233,20 @@ bool MaskIngestor::refresh()
                                  ? (has_depth_v[static_cast<std::size_t>(i)] != 0.0f) : true;
         slice.azimuth_room_rad = fetch1(azimuth_v);
         slice.depth_var        = fetch1(depth_var_v);
+        // Appearance: 3 floats per slice for chroma/var, 1 for n_eff. An absent attr (older producer) or a
+        // short array leaves all three at zero, i.e. "no colour information" — the same state a ricoh
+        // bearing slice publishes explicitly, so consumers need only one code path.
+        slice.color_neff = fetch1(color_neff_v);
+        {
+            const auto fetch3 = [&](const std::vector<float>& v) -> Eigen::Vector3f
+            {
+                const std::size_t base = static_cast<std::size_t>(i) * 3;
+                return (base + 2 < v.size()) ? Eigen::Vector3f{v[base], v[base + 1], v[base + 2]}
+                                             : Eigen::Vector3f::Zero();
+            };
+            slice.color_chroma = fetch3(color_rgb_v);
+            slice.color_var    = fetch3(color_var_v);
+        }
         slice.support_begin = clamped_begin;
         slice.support_end = clamped_end;
         {

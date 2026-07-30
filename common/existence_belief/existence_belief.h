@@ -47,10 +47,44 @@ using CarveParams = SensorModel;    // back-compat alias for residual_concept's 
 
 // One modality, one cycle, ALREADY common-mode saturated. n_reached==0 ⇒ the instance was NOT probed this
 // cycle (out of range / fully occluded / behind) ⇒ HOLD (no update, no removal).
+// ─── THE REMOVAL POLICY (one policy, all agents) ──────────────────────────────────────────────────
+//
+// Existence is a log-odds ratio. Per probe (a LiDAR beam, a silhouette sample) the ONLY honest update is
+//
+//     ΔL = p_vis · log[ P(outcome | exists) / P(outcome | ¬exists) ]
+//
+// where p_vis = P(this probe could have resolved the object | it exists). Everything else follows:
+//
+//   • p_vis → 0 (out of FoV, occluded, too far)  ⇒ contribution → 0. "HOLD" is not a special case, it is
+//     what the ratio DOES when both hypotheses predict the same observation. Every explicit `if (…) return;
+//     // HOLD` in this file was a place where the ratio was not being computed and someone clamped instead.
+//   • The update is SYMMETRIC by construction. An "occupancy-only" channel is not a likelihood ratio, it is a
+//     RATCHET: it can only push L to +L_max, where it sticks forever. That is not conservatism, it is a bug —
+//     it made a phantom fridge survive 2885 cycles (~5 min) of confident camera absence with L never once
+//     going negative, because an occupancy-only LiDAR channel re-pinned it at the clamp every cycle, after the
+//     camera's absence and before the removal test. See [[existence-policy-unification]].
+//
+// The ONE thing that is genuinely per-agent is the VISIBILITY / SHAPE model that produces p_vis — and that is
+// physics, not a tuning knob. `opaque_solid` below is that declaration, and it is what the old
+// hollow_guarded_delta(observed=…) hack was standing in for.
+//
+// THREE outcomes per beam, given "the object exists", not two:
+//   surface  — a return AT the object's near face                → consistent   ⇒ evidence FOR
+//   interior — a return deep INSIDE the carved volume            → see below
+//   through  — the beam crossed the volume and came out the far side ⇒ evidence AGAINST
+//
+// `interior` is the one that was wrong. For an OPAQUE SOLID (a fridge, a cabinet carcass) a return 1.5 m
+// inside the box is IMPOSSIBLE if the object is there — the object would have blocked it. So it is evidence
+// AGAINST, not for. Counting it as occupancy is a sign error, and it is exactly what makes a phantom box
+// drawn over a wall permanently self-confirming: the wall behind it keeps "proving" it exists.
+// For a NON-opaque model (a thin tabletop whose solid band is a lossy abstraction of mostly-empty space) an
+// interior return says nothing either way, and neither does a through-beam — so both get p_vis 0. That is the
+// hollow guard, derived instead of asserted, and it no longer needs to know whether the object was "observed".
 struct Evidence
 {
     float log_odds_delta = 0.0f;
     float e_occ = 0.0f, e_free = 0.0f;
+    float e_interior = 0.0f;        // returns terminating deep inside the carved volume (see above)
     int   n_reached = 0;
 };
 using CarveEvidence = Evidence;     // back-compat alias
@@ -87,7 +121,7 @@ inline Evidence carve_box(const Eigen::Vector3f& origin, const std::vector<Eigen
     const float odx = origin.x() - cx, ody = origin.y() - cy;
     const Eigen::Vector3f O(cyaw * odx + syaw * ody, -syaw * odx + cyaw * ody, origin.z());
 
-    float E_occ = 0.0f, E_free = 0.0f, reached_mass = 0.0f;
+    float E_occ = 0.0f, E_free = 0.0f, E_int = 0.0f, reached_mass = 0.0f;
     for (const auto& q : sweep)
     {
         const float pdx = q.x() - cx, pdy = q.y() - cy;
@@ -123,29 +157,70 @@ inline Evidence carve_box(const Eigen::Vector3f& origin, const std::vector<Eigen
         const float reached   = p_reached * z_weight;
         if (reached < 1e-3f) continue;
 
-        E_occ  += (p_reached - p_through) * z_weight;
-        E_free += p_through * z_weight;
+        // Split "returned inside" into SURFACE vs INTERIOR by how deep past the entry face the return landed.
+        // depth = (1 − t_near)·len metres beyond the near face; the return itself is at t = 1 by construction.
+        // A real surface hit has depth ≈ 0 (within the same σ that blurs the surface test). A return metres
+        // deep is the wall/furniture BEHIND a phantom box — the object, if present, would have occluded it.
+        const float inside = (p_reached - p_through) * z_weight;
+        const float depth  = std::max(0.0f, (1.0f - t_near) * len);
+        const float w_surf = std::exp(-0.5f * (depth * depth) / std::max(1e-6f, sigma_surf * sigma_surf));
+        E_occ      += inside * w_surf;              // consistent with the near face  ⇒ FOR
+        E_int      += inside * (1.0f - w_surf);     // impossible if the object is a solid ⇒ AGAINST (see below)
+        E_free     += p_through * z_weight;
         reached_mass += reached;
     }
 
-    ev.e_occ = E_occ; ev.e_free = E_free;
+    ev.e_occ = E_occ; ev.e_free = E_free; ev.e_interior = E_int;
     ev.n_reached = static_cast<int>(std::lround(reached_mass));
-    if (ev.n_reached == 0) return ev;                            // not looked at this cycle ⇒ HOLD
-    ev.log_odds_delta = saturate(E_occ * llr_occ + E_free * llr_free, llr_occ);
+    if (ev.n_reached == 0) return ev;                            // p_vis ≡ 0 for every beam ⇒ nothing to say
+    // Default ΔL keeps the historic two-outcome form so existing callers are byte-identical; the unified
+    // policy is solid_delta() / hollow_delta() below, which the caller selects by declaring its shape.
+    ev.log_odds_delta = saturate((E_occ + E_int) * llr_occ + E_free * llr_free, llr_occ);
     return ev;
+}
+
+// ─── The unified per-modality ΔL. Pick ONE by declaring the shape; there is no third option. ──────
+//
+// OPAQUE SOLID (fridge, cabinet carcass, any faithful filled volume): all three outcomes are informative.
+// A surface return is FOR; a through-beam is AGAINST; an interior return is AGAINST too, because a solid
+// object would have blocked it. Symmetric ⇒ cannot ratchet ⇒ a phantom over a wall dies instead of being
+// confirmed by the wall.
+inline float solid_delta(const Evidence& ev, const SensorModel& p)
+{
+    const float pd = std::clamp(p.detection_prob, 1e-3f, 1.0f - 1e-3f);
+    const float pc = std::clamp(p.clutter_prob,   1e-3f, 1.0f - 1e-3f);
+    const float llr_occ  = std::log(pd / pc);
+    const float llr_free = std::log((1.0f - pd) / (1.0f - pc));
+    return saturate(ev.e_occ * llr_occ + (ev.e_free + ev.e_interior) * llr_free, llr_occ);
+}
+
+// NON-OPAQUE model (thin tabletop / any band that abstracts mostly-empty space): only the surface return is
+// informative. Interior and through beams have p_vis ≈ 0 for the modelled surface — they pass through space
+// the model never claimed was filled — so they contribute 0. This is the old hollow guard, but DERIVED from
+// the shape declaration rather than asserted per-cycle, and it no longer needs an `observed` flag.
+inline float hollow_delta(const Evidence& ev, const SensorModel& p)
+{
+    const float pd = std::clamp(p.detection_prob, 1e-3f, 1.0f - 1e-3f);
+    const float pc = std::clamp(p.clutter_prob,   1e-3f, 1.0f - 1e-3f);
+    return saturate(ev.e_occ * std::log(pd / pc), std::log(pd / pc));
 }
 
 // HOLLOW-object guard: while the object is actively OBSERVED this cycle, beams passing through its interior
 // are NOT absence evidence (a solid box is a lossy abstraction of a hollow shape — e.g. empty under a tabletop)
 // → suppress e_free; occupancy always counts. Returns the re-weighted (saturated) ΔL to integrate. Mirrors
 // residual_concept's remove_by_occupancy_evidence.
+// ★LEGACY, superseded by solid_delta / hollow_delta above. Kept BIT-IDENTICAL for the callers that have not
+// been live-revalidated yet (table_concept, cabinet_concept): it must therefore use e_occ + e_interior, because
+// before the surface/interior split those were one number. Do not "simplify" it to e_occ — that would silently
+// weaken those agents' occupancy evidence. Migrating a caller means deleting the `observed` argument and
+// declaring its shape: hollow_delta for a thin-plate abstraction, solid_delta for a faithful filled volume.
 inline float hollow_guarded_delta(const Evidence& ev, bool observed, const SensorModel& p)
 {
     const float pd = std::clamp(p.detection_prob, 1e-3f, 1.0f - 1e-3f);
     const float pc = std::clamp(p.clutter_prob,   1e-3f, 1.0f - 1e-3f);
     const float llr_occ  = std::log(pd / pc);
     const float llr_free = std::log((1.0f - pd) / (1.0f - pc));
-    return saturate(ev.e_occ * llr_occ + (observed ? 0.0f : ev.e_free * llr_free), llr_occ);
+    return saturate((ev.e_occ + ev.e_interior) * llr_occ + (observed ? 0.0f : ev.e_free * llr_free), llr_occ);
 }
 
 // ── MODALITY 2: mask silhouette occupancy ──────────────────────────────────────────────────────────────────

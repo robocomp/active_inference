@@ -47,6 +47,18 @@ public:
 		// early costs nothing and is undone the moment the heartbeat resumes.
 		int stale_after_ms = 3000;
 
+		// Floor opacity. The floor mesh spans the whole room on the ROOM plane, so drawn opaque it
+		// hides the robot on the plane below it and every drop-line that crosses it — the two things
+		// that make the stack readable. Translucent, it still reads as a floor and still anchors the
+		// footprint, without being a lid.
+		float floor_alpha = 0.35f;
+
+		// The robot node carries `path = "meshes/shadow.obj"` — relative to ROBOT_CONCEPT'S OWN run
+		// dir, the older convention, whereas every mesh_path this viewer resolves is relative to the
+		// components root. Rather than teach the renderer a special case, name the qualified path
+		// here. Empty ⇒ fall back to the synthetic Robot glyph.
+		std::string robot_mesh_path = "robot_concept/meshes/shadow.obj";
+
 		// The containment ladder — robot → room → instances → meta-1 → meta-2 → … — is always drawn:
 		// it IS the view. These two are a second, orthogonal story (what can be done with a thing,
 		// and who is doing the believing) that doubles the node count, so they stay off by default.

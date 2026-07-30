@@ -93,12 +93,32 @@ struct Node3D
 	std::string   mesh_path;
 	Vec3          pos{0, 0, 0};
 	Rgb           color{0.7f, 0.75f, 0.8f};
+	// Two-sided panels (walls). A wall asset is a ZERO-THICKNESS quad, so its two faces are
+	// geometrically the same triangles and cannot be shaded apart — the renderer instead emits the
+	// panel twice, displaced half a thickness either way along its local y, and paints the copy on
+	// the room-interior side with `color_inside`.
+	//   inside_sign  0 ⇒ single-sided, draw once in `color` (every node but a wall)
+	//               ±1 ⇒ the sign of LOCAL Y that points into the room
+	// Which sign that is depends on the wall's yaw and on where the room's interior actually is, so
+	// it is resolved from the room polygon rather than from the mesh's winding — an asset authored
+	// with the opposite face order must not silently turn every room inside out.
+	Rgb           color_inside{0.7f, 0.75f, 0.8f};
+	float         inside_sign = 0.0f;
 	float         radius = 0.10f;
 	// Metre size the display mesh is drawn at, per LOCAL axis (x,y = footprint, z = height). Mostly
 	// isotropic and schematic (2·radius cubed), because this is a graph view rather than a scene
 	// view — but a wall is a long thin panel whose whole point is to trace the real footprint, so it
 	// needs its true length and a separately capped height. Glyphs ignore this and use `radius`.
 	Vec3          draw{0.2f, 0.2f, 0.2f};
+	// How `draw` is honoured. false (default) = STRETCH each local axis independently to fill the
+	// box, which is what a schematic cube or a wall panel wants. true = scale UNIFORMLY to fit
+	// inside it, preserving the asset's proportions — for a mesh whose silhouette is the point
+	// (the robot), squashing it into a cube destroys exactly the thing it was included for.
+	bool          keep_aspect = false;
+	// Opacity of the solid geometry, 0 = invisible, 1 = opaque. Below 1 the node is drawn in a
+	// second, blended pass with depth-writes off, so whatever is behind it stays visible. This is
+	// what lets the floor read as a floor without hiding the robot standing a rung underneath it.
+	float         alpha = 1.0f;
 	Glyph         glyph = Glyph::Sphere;
 	Kind          kind  = Kind::Instance;
 	int           level = kLevelInstance;

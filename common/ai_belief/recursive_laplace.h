@@ -47,16 +47,39 @@ namespace rc::ai
 // behaviour; update() below relies on this default so all existing call sites are unchanged). Q is
 // authored per-frame, so q_scale is how many nominal frames' worth of Q to inject — the mechanism
 // inflate_for_age() uses to integrate Q over real elapsed time when measurements are late or absent.
+// clamp_to_prior turns the free random walk into an ORNSTEIN-UHLENBECK decay toward the stationary prior:
+// Σ still grows monotonically with the age of the evidence (freshness-as-precision is untouched), but it
+// SATURATES at Σ₀ instead of diverging. The generative statement is "as my evidence ages I forget back toward
+// what I knew before I ever saw this object — never LESS than that", which is what a Bayesian filter with a
+// stationary prior actually implies; the unbounded walk asserts the object diffuses out of the room.
+// OFF by default so the 9 agents sharing this engine are unchanged; opt in per model (table/chair do).
+// Why it matters: Q is authored PER FRAME, so an unobserved static object loses its prior at σ ∝ √frames.
+// Live (table_concept ai2_log.csv, table_9 cycles 970→2290, ~2 min unobserved): std_w 0.030→0.170 m and
+// std_yaw 0.101→0.348 rad, purely from Q. The next sparse mask then landed on a 5×-loosened belief and
+// re-cut the table. Over 15 min the walk reaches ±0.47 m of extent and ±54° of yaw — total amnesia, so any
+// rogue mask wins outright. The clamp is a congruence Σ ← DΣD (D diagonal, ≤ I), so it stays symmetric PSD
+// and preserves the correlation structure rather than just truncating the diagonal.
 template <int N, class Model>
 void predict(Model& m, Eigen::Matrix<float, N, N>& Sigma,
              const typename Model::State& state, Eigen::Matrix<float, N, 1>& prior_mean,
-             float q_scale = 1.0f)
+             float q_scale = 1.0f, bool clamp_to_prior = false)
 {
     if (Sigma.isZero())
         Sigma.diagonal() = m.prior_cov_diag();
     const Eigen::Matrix<float, N, N> F = m.transition();
     Sigma = F * Sigma * F.transpose();
     Sigma.diagonal() += std::max(0.0f, q_scale) * m.process_noise_diag();
+    if (clamp_to_prior)
+    {
+        const Eigen::Matrix<float, N, 1> p0 = m.prior_cov_diag();
+        for (int i = 0; i < N; ++i)
+            if (p0(i) > 0.0f and Sigma(i, i) > p0(i))
+            {
+                const float s = std::sqrt(p0(i) / Sigma(i, i));   // symmetric rescale keeps Σ PSD
+                Sigma.row(i) *= s;
+                Sigma.col(i) *= s;
+            }
+    }
     prior_mean = state.vec();
 }
 
@@ -78,12 +101,12 @@ void predict(Model& m, Eigen::Matrix<float, N, N>& Sigma,
 template <int N, class Model>
 void inflate_for_age(Model& m, Eigen::Matrix<float, N, N>& Sigma,
                      const typename Model::State& state, Eigen::Matrix<float, N, 1>& prior_mean,
-                     float dt_seconds, float dt_nominal_seconds)
+                     float dt_seconds, float dt_nominal_seconds, bool clamp_to_prior = false)
 {
     const float q_scale = dt_nominal_seconds > 1e-6f
                               ? dt_seconds / dt_nominal_seconds     // frames-worth of Q over real time
                               : 1.0f;                               // no nominal rate known → one step
-    predict<N>(m, Sigma, state, prior_mean, q_scale);
+    predict<N>(m, Sigma, state, prior_mean, q_scale, clamp_to_prior);
 }
 
 // ─── Common-mode saturation operator (numerically stable form) ───────────────────────────────────

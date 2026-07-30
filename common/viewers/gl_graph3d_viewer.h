@@ -7,8 +7,8 @@
  *  set_scene(); it knows nothing about DSR, the graph or the media plane, so any agent can drive it.
  *  Non-Q_OBJECT (owner-driven) → no MOC; the pick hook is a std::function, not a signal.
  *
- *  Two-sided lighting (abs(N·L)) matches the house style of gl_mesh_viewer.h: glyphs are closed
- *  solids, but never rendering a face fully black keeps small marks readable at a distance.
+ *  Lighting is ONE-SIDED with the normal oriented toward the camera (see the fragment shader): an
+ *  ambient floor keeps any face from rendering fully black, so small marks stay readable at distance.
  *
  *  The scene is in ROOM coordinates, metres, Z-UP. GL is Y-UP, so every position goes through
  *  gl() — that mapping lives here and nowhere else.
@@ -33,6 +33,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <functional>
 #include <limits>
@@ -103,29 +104,51 @@ protected:
 			#version 330 core
 			layout(location = 0) in vec3 position;
 			layout(location = 1) in vec3 normal;
-			layout(location = 2) in vec3 color;
+			layout(location = 2) in vec4 color;
 			uniform mat4 u_mvp;
 			out vec3 v_normal;
-			out vec3 v_color;
-			void main() { gl_Position = u_mvp * vec4(position, 1.0); v_normal = normal; v_color = color; }
+			out vec3 v_world;
+			out vec4 v_color;
+			void main()
+			{
+				gl_Position = u_mvp * vec4(position, 1.0);
+				v_normal = normal;
+				v_world  = position;   // geometry is baked in world space on the CPU
+				v_color  = color;
+			}
 		)");
 		solid_.addShaderFromSourceCode(QOpenGLShader::Fragment, R"(
 			#version 330 core
 			in vec3 v_normal;
-			in vec3 v_color;
+			in vec3 v_world;
+			in vec4 v_color;
 			out vec4 fragColor;
 			uniform vec3 u_light;
+			uniform vec3 u_eye;
 			void main()
 			{
+				// Orient the face normal toward the CAMERA, then light it one-sided.
+				//
+				// This used to be abs(dot(N, L)) — "two-sided", so a surface facing AWAY from the
+				// light shaded exactly like one facing toward it. On a closed convex glyph that is
+				// invisible, which is why it survived; on a 47k-triangle robot it destroys the
+				// convex/concave reading and the model looks like its normals are inverted. (An
+				// actually-inverted normal was never observable under abs() — the sign was discarded.)
+				//
+				// Orienting toward the eye rather than trusting gl_FrontFacing keeps this independent
+				// of each asset's winding, which no producer here guarantees.
 				vec3 N = normalize(v_normal);
-				float d = abs(dot(N, u_light));            // two-sided
-				float shade = 0.34 + 0.66 * d;             // ambient + diffuse
-				fragColor = vec4(v_color * shade, 1.0);
+				vec3 V = normalize(u_eye - v_world);
+				if(dot(N, V) < 0.0) N = -N;
+				float d = max(dot(N, u_light), 0.0);
+				float shade = 0.34 + 0.66 * d;             // ambient floor: nothing renders fully black
+				fragColor = vec4(v_color.rgb * shade, v_color.a);
 			}
 		)");
 		solid_.link();
 		u_solid_mvp_   = solid_.uniformLocation("u_mvp");
 		u_solid_light_ = solid_.uniformLocation("u_light");
+		u_solid_eye_   = solid_.uniformLocation("u_eye");
 
 		flat_.addShaderFromSourceCode(QOpenGLShader::Vertex, R"(
 			#version 330 core
@@ -173,16 +196,37 @@ protected:
 			solid_.bind();
 			solid_.setUniformValue(u_solid_mvp_, last_mvp_);
 			solid_.setUniformValue(u_solid_light_, QVector3D(0.42f, 0.78f, 0.46f).normalized());
+			// Camera position in world space — where the view matrix sends the origin from.
+			const QVector3D eye = view.inverted().map(QVector3D(0.0f, 0.0f, 0.0f));
+			solid_.setUniformValue(u_solid_eye_, eye);
 			solid_vbo_.bind();
 			glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(SolidVertex), nullptr);
 			glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(SolidVertex),
 			                      reinterpret_cast<const void *>(offsetof(SolidVertex, nx)));
-			glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(SolidVertex),
+			glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, sizeof(SolidVertex),
 			                      reinterpret_cast<const void *>(offsetof(SolidVertex, r)));
 			glEnableVertexAttribArray(0);
 			glEnableVertexAttribArray(1);
 			glEnableVertexAttribArray(2);
-			glDrawArrays(GL_TRIANGLES, 0, solid_count_);
+
+			// Opaque first, filling the depth buffer.
+			if(opaque_count_ > 0)
+				glDrawArrays(GL_TRIANGLES, 0, opaque_count_);
+
+			// Then the translucent tail: blended, and with depth-WRITES off so the floor cannot
+			// occlude what is behind it (depth-testing stays on, so the opaque geometry in FRONT of
+			// it still wins). No face culling — the floor is a single-sided sheet and must stay
+			// visible when the camera drops below the room plane to look up at the robot.
+			if(solid_count_ > opaque_count_)
+			{
+				glEnable(GL_BLEND);
+				glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+				glDepthMask(GL_FALSE);
+				glDrawArrays(GL_TRIANGLES, opaque_count_, solid_count_ - opaque_count_);
+				glDepthMask(GL_TRUE);
+				glDisable(GL_BLEND);
+			}
+
 			glDisableVertexAttribArray(0);
 			glDisableVertexAttribArray(1);
 			glDisableVertexAttribArray(2);
@@ -279,7 +323,7 @@ protected:
 	}
 
 private:
-	struct SolidVertex { float x, y, z, nx, ny, nz, r, g, b; };
+	struct SolidVertex { float x, y, z, nx, ny, nz, r, g, b, a; };
 	struct LineVertex  { float x, y, z, r, g, b, a; };
 	struct CachedMesh  { std::vector<QVector3D> tris; QVector3D lo, hi; bool ok = false; };
 
@@ -288,12 +332,17 @@ private:
 	[[nodiscard]] static QVector3D gl(float x, float y, float z) noexcept { return {x, z, -y}; }
 
 	// ── solid geometry ────────────────────────────────────────────────────────────────────────
+	// Alpha rides on `emit_alpha_`, a member set once per node in rebuild_solids(), rather than being
+	// threaded through every add_* signature: opacity is a property of the NODE being emitted, never
+	// of an individual triangle, and passing it explicitly would put the same argument on nine
+	// helpers with no call site ever wanting to differ from its node.
 	void add_tri(const QVector3D &a, const QVector3D &b, const QVector3D &c, const graph3d::Rgb &col)
 	{
 		QVector3D n = QVector3D::crossProduct(b - a, c - a);
 		if(n.lengthSquared() > 0.0f) n.normalize();
 		for(const QVector3D &v : {a, b, c})
-			solid_verts_.push_back({v.x(), v.y(), v.z(), n.x(), n.y(), n.z(), col[0], col[1], col[2]});
+			solid_verts_.push_back({v.x(), v.y(), v.z(), n.x(), n.y(), n.z(),
+			                        col[0], col[1], col[2], emit_alpha_});
 	}
 	void add_quad(const QVector3D &a, const QVector3D &b, const QVector3D &c, const QVector3D &d,
 	              const graph3d::Rgb &col)
@@ -434,6 +483,47 @@ private:
 		return it->second.ok ? &it->second : nullptr;
 	}
 
+	// A wall as a real slab, in its own local frame: x along the wall (draw[0] = true length), y the
+	// thickness (draw[1]), z the height (draw[2], capped so it does not punch through the plane
+	// above). Seated on its plane, yawed about the vertical.
+	//
+	// The room-facing face — local y of n.inside_sign, which the builder resolved from the room
+	// polygon — carries `color_inside`. The TOP carries a half-blend of it, and that is not
+	// decoration: this camera looks down on the room, so a wall's top is by far the largest slice of
+	// it on screen (measured: ~10× the interior face's pixels). Painting the top with the wall hue
+	// made the whole ring read blue no matter how correct the interior face was. Half-blend rather
+	// than full white so the wall still reads as a wall, and the class palette survives.
+	void build_wall_slab(const graph3d::Node3D &n)
+	{
+		const float hl = 0.5f * std::max(n.draw[0], 0.05f);   // half length
+		const float ht = 0.5f * std::max(n.draw[1], 0.06f);   // half thickness — thin, but a SOLID
+		const float h  = std::max(n.draw[2], 0.02f);          // height, from the plane up
+		const float cs = std::cos(n.yaw), sn = std::sin(n.yaw);
+		// local (x along wall, y across, z up) → world
+		const auto P = [&](const float lx, const float ly, const float lz)
+		{ return gl(n.pos[0] + cs * lx - sn * ly, n.pos[1] + sn * lx + cs * ly, n.pos[2] + lz); };
+
+		const float yi = n.inside_sign * ht;    // the room-facing side
+		const float yo = -n.inside_sign * ht;   // the outward side
+
+		// The top follows the INTERIOR, slightly darkened — not a blend with the wall hue. Blending
+		// put the class colour back onto the one surface that dominates a top-down view, which is
+		// exactly what made the ring read blue however grey the interior face was.
+		const graph3d::Rgb top{0.88f * n.color_inside[0],
+		                       0.88f * n.color_inside[1],
+		                       0.88f * n.color_inside[2]};
+
+		// interior face — the one this whole mechanism exists for
+		add_quad(P(-hl, yi, 0.0f), P(hl, yi, 0.0f), P(hl, yi, h), P(-hl, yi, h), n.color_inside);
+		// exterior face
+		add_quad(P(hl, yo, 0.0f), P(-hl, yo, 0.0f), P(-hl, yo, h), P(hl, yo, h), n.color);
+		// top — the dominant surface from a camera above the room
+		add_quad(P(-hl, yi, h), P(hl, yi, h), P(hl, yo, h), P(-hl, yo, h), top);
+		// the two ends, where a run of walls butts together
+		add_quad(P(hl, yi, 0.0f), P(hl, yo, 0.0f), P(hl, yo, h), P(hl, yi, h), n.color);
+		add_quad(P(-hl, yo, 0.0f), P(-hl, yi, 0.0f), P(-hl, yi, h), P(-hl, yo, h), n.color);
+	}
+
 	// Draw the published mesh in place of the glyph, resized PER LOCAL AXIS to n.draw. The scale is
 	// deliberately non-uniform: most nodes ask for a schematic cube (a full-size table would punch
 	// through the plane above in a view whose planes are ~1.2 m apart), but a wall asks for its true
@@ -447,35 +537,89 @@ private:
 		// leave a degenerate axis alone; every vertex on it is at the centre anyway.
 		const auto axis = [](const float span, const float want)
 		{ return span > 1e-5f ? want / span : 1.0f; };
-		const float sx = axis(m.hi.x() - m.lo.x(), n.draw[0]);
-		const float sy = axis(m.hi.y() - m.lo.y(), n.draw[1]);
-		const float sz = axis(m.hi.z() - m.lo.z(), n.draw[2]);
+		float sx = axis(m.hi.x() - m.lo.x(), n.draw[0]);
+		float sy = axis(m.hi.y() - m.lo.y(), n.draw[1]);
+		float sz = axis(m.hi.z() - m.lo.z(), n.draw[2]);
+		// keep_aspect ⇒ `draw` is a box to FIT INSIDE, not to fill: take the tightest of the three
+		// scales so the asset's proportions survive. Degenerate axes returned 1.0 above and would
+		// win that minimum spuriously, so they are excluded from it.
+		if(n.keep_aspect)
+		{
+			float s = std::numeric_limits<float>::max();
+			if(m.hi.x() - m.lo.x() > 1e-5f) s = std::min(s, sx);
+			if(m.hi.y() - m.lo.y() > 1e-5f) s = std::min(s, sy);
+			if(m.hi.z() - m.lo.z() > 1e-5f) s = std::min(s, sz);
+			if(s < std::numeric_limits<float>::max())
+				sx = sy = sz = s;
+		}
 		const float cx = 0.5f * (m.lo.x() + m.hi.x());
 		const float cy = 0.5f * (m.lo.y() + m.hi.y());
 		const float z0 = m.lo.z();
 		const float cs = std::cos(n.yaw), sn = std::sin(n.yaw);
-		const auto  place = [&](const QVector3D &v)
+		// dy displaces the whole copy along the panel's LOCAL y before the yaw rotation, which is how
+		// the two faces of a zero-thickness quad get pulled apart into a real, if thin, slab.
+		const auto  place = [&](const QVector3D &v, const float dy)
 		{
-			const float lx = (v.x() - cx) * sx, ly = (v.y() - cy) * sy, lz = (v.z() - z0) * sz;
+			const float lx = (v.x() - cx) * sx, ly = (v.y() - cy) * sy + dy, lz = (v.z() - z0) * sz;
 			return gl(n.pos[0] + cs * lx - sn * ly, n.pos[1] + sn * lx + cs * ly, n.pos[2] + lz);
 		};
-		for(std::size_t t = 0; t + 2 < m.tris.size(); t += 3)
-			add_tri(place(m.tris[t]), place(m.tris[t + 1]), place(m.tris[t + 2]), n.color);
+		// NOT named `emit`: that is a Qt keyword macro and expands to nothing, so the declaration
+		// becomes `const auto = [...]` and the error points at the '=' rather than the name.
+		const auto emit_copy = [&](const float dy, const graph3d::Rgb &col)
+		{
+			for(std::size_t t = 0; t + 2 < m.tris.size(); t += 3)
+				add_tri(place(m.tris[t], dy), place(m.tris[t + 1], dy), place(m.tris[t + 2], dy), col);
+		};
+
+		if(n.inside_sign == 0.0f)
+		{
+			emit_copy(0.0f, n.color);
+			return;
+		}
+		// A two-sided panel (a wall) is NOT drawn from the asset at all — it is built as a real slab.
+		//
+		// The obvious approach, emitting the zero-thickness quad twice a centimetre either way, was
+		// tried and does not work: the two copies land on essentially the same pixels, so the
+		// interior colour only ever surfaces as a 1-px sliver along the top edge where parallax pulls
+		// them apart. A wall needs to be a SOLID with a distinguishable interior FACE, not two
+		// coincident sheets.
+		//
+		// So: a box in the wall's local frame — x along the wall (its true length), y the thickness,
+		// z the capped height — with the room-facing face painted `color_inside` and every other face
+		// the wall hue. Unambiguous, no depth-fight, and it gains a top face, which is what you
+		// actually look at from a camera above the room.
+		build_wall_slab(n);
 	}
 
+	// Opaque geometry first, translucent geometry after — ONE buffer, two ranges, so the second
+	// draw call can blend against a fully resolved depth buffer. Sorting by node rather than by
+	// triangle is enough here: the only translucent thing is the floor, a single horizontal slab
+	// with nothing else translucent to sort against.
 	void rebuild_solids()
 	{
 		solid_verts_.clear();
-		using graph3d::Glyph;
 		for(const auto &n : scene_.nodes)
+			if(n.alpha >= 0.999f)
+				emit_node(n);
+		opaque_count_ = static_cast<int>(solid_verts_.size());
+		for(const auto &n : scene_.nodes)
+			if(n.alpha < 0.999f)
+				emit_node(n);
+		solid_count_ = static_cast<int>(solid_verts_.size());
+	}
+
+	void emit_node(const graph3d::Node3D &n)
+	{
+		using graph3d::Glyph;
+		emit_alpha_ = n.alpha;
 		{
 			// Prefer the agent's own display mesh; the glyphs below are the fallback for everything
-			// that publishes none (walls, the floor, obstacles, the room, rigs).
+			// that publishes none (walls, obstacles, the room, rigs).
 			if(not n.mesh_path.empty())
 				if(const CachedMesh *m = mesh_for(n.mesh_path); m != nullptr)
 				{
 					add_mesh(n, *m);
-					continue;
+					return;
 				}
 			const float r = n.radius;
 			switch(n.glyph)
@@ -511,7 +655,6 @@ private:
 				default:              add_ball(n.pos, r * 0.85f, n.color);                     break;
 			}
 		}
-		solid_count_ = static_cast<int>(solid_verts_.size());
 	}
 
 	// ── line geometry ─────────────────────────────────────────────────────────────────────────
@@ -890,7 +1033,12 @@ private:
 	std::vector<SolidVertex> solid_verts_;
 	std::vector<LineVertex>  line_verts_;
 	int                      solid_count_ = 0;
+	// Split point inside solid_verts_: [0, opaque_count_) is opaque, [opaque_count_, solid_count_)
+	// is the blended tail. See rebuild_solids().
+	int                      opaque_count_ = 0;
 	int                      line_count_  = 0;
+	// Opacity of the node currently being emitted; see add_tri().
+	float                    emit_alpha_ = 1.0f;
 
 	std::uint64_t selected_id_        = 0;
 	bool          show_all_ownership_ = false;
@@ -910,7 +1058,7 @@ private:
 	QOpenGLVertexArrayObject vao_;
 	QOpenGLBuffer            solid_vbo_{QOpenGLBuffer::VertexBuffer};
 	QOpenGLBuffer            line_vbo_{QOpenGLBuffer::VertexBuffer};
-	int u_solid_mvp_ = -1, u_solid_light_ = -1, u_flat_mvp_ = -1;
+	int u_solid_mvp_ = -1, u_solid_light_ = -1, u_solid_eye_ = -1, u_flat_mvp_ = -1;
 };
 
 }   // namespace rc::viewers
