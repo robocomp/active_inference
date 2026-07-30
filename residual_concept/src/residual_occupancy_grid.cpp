@@ -101,12 +101,19 @@ void OccupancyGrid::mark_miss_flag(int ix, int iy, float beam_z, float w)
     else smiss_w_[i] = std::max(smiss_w_[i], w);        // the most RELIABLE (nearest) see-through sets the weight
 }
 
-void OccupancyGrid::commit_cycle()
+void OccupancyGrid::commit_cycle(float dt_s)
 {
     if (not valid()) return;
     // ONE log-odds update per cell: hit precedence (a cell hit by any beam this scan is a HIT, never cleared
     // this scan), else a single see-through miss. This is the costmap_2d/OctoMap marking-vs-clearing rule and
     // is what makes the field stable (no more dozens of misses per cell per cycle).
+    //
+    // FORGETTING (see OccGridParams::forget_half_life_s): a cell touched by NEITHER a hit nor a miss this cycle
+    // is unobserved — occluded, out of range, or behind us. It used to receive no update at all, which made
+    // anything ever latched behind an occluder immortal. It now relaxes toward the prior at a fixed half-life.
+    const float gamma = (p_.forget_half_life_s > 0.0f and dt_s > 0.0f)
+                      ? std::exp2(-dt_s / p_.forget_half_life_s)     // ½^(Δt/T) — evidence retained this cycle
+                      : 1.0f;                                        // 1 ⇒ forgetting off (never-forget behaviour)
     const std::size_t n = lo_.size();
     for (std::size_t i = 0; i < n; ++i)
     {
@@ -116,6 +123,16 @@ void OccupancyGrid::commit_cycle()
             lo_[i] = std::clamp(lo_[i] + w * p_.l_hit, -p_.l_clamp, p_.l_clamp);
             if (not hit_[i]) { zmn_[i] = shz_lo_[i]; zmx_[i] = shz_hi_[i]; dispz_[i] = shz_hi_[i]; hit_[i] = 1; }
             else { zmn_[i] = std::min(zmn_[i], shz_lo_[i]); zmx_[i] = std::max(zmx_[i], shz_hi_[i]);
+                   // ★ DO NOT make this band CONTRACT. It was tried (2026-07-29) on the theory that a
+                   // monotonically-widening band made cells progressively harder to clear. That theory has the
+                   // SIGN BACKWARDS. mark_miss_flag blocks a clearing beam when it falls OUTSIDE the band, so a
+                   // WIDER band admits MORE clearing and a NARROWER one admits LESS. Worse, a hit records a
+                   // single height (mark_hit_flag is called with zlo == zhi == pz), so any contraction drives the
+                   // band toward ZERO width, leaving only ±z_band_margin_m. Measured live over 400 cycles:
+                   // blocked see-throughs 117.8k → 357.7k per cycle (85.2% → 94.6% of all clearing evidence),
+                   // a 3.0× regression. The running min/max is correct; the high blocked FRACTION is inherent to
+                   // z-aware clearing on a 2-D grid (a beam at another height genuinely carries no information
+                   // about this column) and is not by itself evidence of a defect.
                    // Display height tracks the CURRENT top (EMA rise/fall), so a transient tall return doesn't
                    // permanently inflate it the way the running-max zmx_ does. 0.4 = quick but spike-rejecting.
                    dispz_[i] += 0.4f * (shz_hi_[i] - dispz_[i]); }
@@ -130,6 +147,30 @@ void OccupancyGrid::commit_cycle()
             b_[i] += w * p_.beta_miss_w;                         // Beta: free evidence, weighted → far/moving clears weakly
             ++sd_.misses;
             if (lo_[i] < p_.occ_clear and occ_[i]) { occ_[i] = 0; ++sd_.cells_released; }
+        }
+        else if (gamma < 1.0f)
+        {
+            // UNOBSERVED this cycle → relax toward the prior. The log-odds decays toward 0 (no information) and
+            // the Beta toward Jeffreys, so P → 0.5 and Var → max: "I no longer know what is there."
+            lo_[i] *= gamma;
+            a_[i] = p_.beta_prior_a + (a_[i] - p_.beta_prior_a) * gamma;
+            b_[i] = p_.beta_prior_b + (b_[i] - p_.beta_prior_b) * gamma;
+            // Release at occ_set, NOT at occ_clear. occ_clear is evidence of FREENESS ("I have seen through
+            // here repeatedly"), which decay can never produce: lo relaxes toward 0 = NO information, so a
+            // decaying cell would never cross a negative threshold and would stay latched forever — the very
+            // bug this term exists to fix. The meaningful question for an unobserved cell is instead "is the
+            // evidence that justified latching still there?", so it un-latches at the same level it latched:
+            // symmetric, and no new parameter. There is no flicker risk (an unobserved cell cannot oscillate),
+            // and completeness is preserved — one hit re-latches it the instant it is seen again. A released
+            // cell becomes UNKNOWN, which this grid already treats as not-an-obstacle for the hull read-out.
+            if (lo_[i] < p_.occ_set and occ_[i])
+            {
+                occ_[i] = 0; ++sd_.cells_released; ++sd_.cells_forgotten;
+                // The remembered z-band described an obstacle we have now forgotten. Keeping it would leave the
+                // z-aware gate blocking future clearing beams on behalf of something no longer believed to exist,
+                // which is precisely the ratchet this change exists to break. Drop it: the cell is unknown again.
+                hit_[i] = 0; zmn_[i] = 0.0f; zmx_[i] = 0.0f;
+            }
         }
         // Concentration cap: bound α+β ≤ κ_max (preserving the mean) → variance floor + bounded memory so old
         // evidence is discounted as new arrives (dynamic obstacles clear; the field is never over-confident).
@@ -204,6 +245,17 @@ void OccupancyGrid::integrate_sweep(const Eigen::Vector3f& origin, const std::ve
     const float rel = std::clamp(reliability, 0.0f, 1.0f); // global ego-motion trust for this sweep
     // precision weight of a hit at horizontal range r: ego-motion × range falloff (0<w≤rel; near/still → rel).
     const auto hit_w = [&](float r) { return r0 > 0.0f ? rel * (r0 * r0) / (r0 * r0 + r * r) : rel; };
+    // SELF-BODY term: P(this return came from the WORLD, not off our own body) = Φ(s/σ), s = signed distance from
+    // the return to the body envelope. A probit in s, not a radius cut — it is 0.5 exactly on the surface and
+    // fades to ~1 within 2σ outside, so a clearly-external return is never suppressed. HITS only: clearing free
+    // space is always safe, and the sensor's own cell already emits a miss. radius<=0 ⇒ term off (weight 1).
+    const auto world_w = [&](float px, float py)
+    {
+        if (self_r_ <= 0.0f) return 1.0f;
+        const float sigma = std::max(1e-3f, p_.self_body_sigma_m);
+        const float s = std::hypot(px - self_x_, py - self_y_) - self_r_;   // >0 outside the body envelope
+        return 0.5f * std::erfc(-s / (sigma * 1.41421356f));                 // Φ(s/σ)
+    };
 
     for (std::size_t pi = 0; pi < points_room.size(); ++pi)
     {
@@ -217,9 +269,11 @@ void OccupancyGrid::integrate_sweep(const Eigen::Vector3f& origin, const std::ve
         // floor (new scenario) is explained away and never latches.
         const float floor_z = fp_a_ * px + fp_b_ * py + fp_c_;
         const bool in_band = (pz > floor_z + p_.floor_z0 + p_.floor_slope * range) and (pz < p_.ceil_z);
-        // this return's HIT precision weight: range×ego (hit_w) × optional per-point cue (e.g. semantic floor).
-        // The MISS/clearing weight is deliberately left un-scaled — clearing free space is always safe.
-        const float w = hit_w(range) * (use_scale ? (*hit_weight_scale)[pi] : 1.0f);
+        // this return's HIT precision weight: range×ego (hit_w) × self-body (world_w) × optional per-point cue
+        // (e.g. semantic floor). The MISS/clearing weight is deliberately left un-scaled — clearing is always safe.
+        const float self_w = world_w(px, py);
+        if (self_w < 0.99f) ++sd_.self_hits_damped;
+        const float w = hit_w(range) * self_w * (use_scale ? (*hit_weight_scale)[pi] : 1.0f);
 
         int ex, ey; const bool endp_in = world_to_cell(px, py, ex, ey);
         if (L < 1e-4f)                                          // degenerate: just the endpoint
@@ -356,7 +410,26 @@ std::vector<OccComponent> OccupancyGrid::occupied_components(int min_cells, cons
     const float cs = 1.0f / inv_cell_;
     const auto occ = residual_mask(explained);                        // z-band source (only true-occupied cells)
     const int R = static_cast<int>(std::round(std::max(0.0f, inflate_radius_m) * inv_cell_));
-    const auto mask = (R > 0) ? dilate_mask(occ, R) : occ;            // components on the inflated set (bridges + clearance)
+    auto mask = (R > 0) ? dilate_mask(occ, R) : occ;                  // components on the inflated set (bridges + clearance)
+    // RE-MASK THE DILATION. residual_mask() applies the explainer, but the C-space dilation then grows the set
+    // back OUT by inflate_radius_m with no further check — straight into the very regions the explainer had just
+    // excluded. inflated_border_centres() already re-tests every dilated cell (see below); occupied_components()
+    // did not, and that asymmetry is a bug, not a tuning choice. It cost real clearance on both explainers that
+    // matter: the wall band lost 0.25 m of its 0.35 m margin (hulls reached to within ~0.09 m of a wall), and —
+    // the damaging one — the ROBOT's own exclusion disc did too, so a cell just outside the robot mask published
+    // a hull edge at (robot_radius − inflate) from the robot centre. That is the near-robot "phantom" the planner
+    // was being squeezed by. Filtering the added cells through the same predicate removes a defect rather than
+    // adding a knob, and restores both margins to their configured values.
+    if (R > 0 and explained)
+        for (int y = 0; y < h_; ++y)
+            for (int x = 0; x < w_; ++x)
+            {
+                const int i = idx(x, y);
+                if (not mask[i] or occ[i]) continue;                  // only cells ADDED by the dilation
+                float wx, wy; cell_to_world(x, y, wx, wy);
+                const float zlo = hit_[i] ? zmn_[i] : 0.0f, zhi = hit_[i] ? zmx_[i] : 0.05f;
+                if (explained(wx, wy, zlo, zhi) > 0.5f) mask[i] = 0;   // same MAP decision residual_mask() uses
+            }
 
     // Corner-space origin (bottom-left corner of cell (0,0)): cell centres are origin+((x+0.5)cs,(y+0.5)cs).
     float ox0, oy0; cell_to_world(0, 0, ox0, oy0); ox0 -= 0.5f * cs; oy0 -= 0.5f * cs;
@@ -365,7 +438,61 @@ std::vector<OccComponent> OccupancyGrid::occupied_components(int min_cells, cons
     // interior-on-left edge convention → outer boundary is CCW (kept); holes are CW (dropped = conservative).
     // Returns empty on a diagonal-pinch ambiguity (a corner shared by two boundary edges) so the caller
     // can fall back to the convex hull for that odd shape.
-    const auto trace_outline = [&](const std::vector<std::pair<int, int>>& cells)
+    // EXACT, HOLE-FREE COVER of a component's cells as axis-aligned rectangles (greedy maximal rectangles).
+    //
+    // This replaces the boundary-loop trace, which had two failure modes that both PUBLISHED FREE SPACE AS
+    // OCCUPIED — the cause of obstacle polygons appearing in never-observed areas (in front of a door the robot
+    // has never faced) and of half a room going solid:
+    //   1. It DROPPED interior holes (commented "holes dropped = conservative"), so free space enclosed by a
+    //      ring of residual became solid. Measured on a ring component: 6.49 m2 of cells published as 12.49 m2.
+    //   2. On a diagonal pinch — the 8-connected flood fill unions cells that its 4-connected edge convention
+    //      cannot trace — it bailed and the publisher fell back to the CONVEX HULL of the whole component: 15x.
+    // Rectangles have neither failure mode by construction: the union is exactly the occupied cell set, every
+    // piece is convex and simple, and there is no fallback path. The publisher and the controller both treat a
+    // ring as a filled polygon already, so nothing downstream changes — several small filled rectangles are
+    // exactly right where one big filled outline was wrong.
+    //
+    // Greedy: scan row-major, and from each uncovered cell extend maximally right, then extend down for as long
+    // as every row spans the same run. Cheap, deterministic, and typically a handful of rectangles per blob.
+    const auto rect_decompose = [&](const std::vector<std::pair<int, int>>& cells)
+        -> std::vector<std::vector<Eigen::Vector2f>>
+    {
+        std::vector<std::vector<Eigen::Vector2f>> rects;
+        if (cells.empty()) return rects;
+        int x0 = cells[0].first, x1 = x0, y0 = cells[0].second, y1 = y0;
+        for (const auto& [cx, cy] : cells)
+        { x0 = std::min(x0, cx); x1 = std::max(x1, cx); y0 = std::min(y0, cy); y1 = std::max(y1, cy); }
+        const int bw = x1 - x0 + 1, bh = y1 - y0 + 1;
+        std::vector<std::uint8_t> m(static_cast<std::size_t>(bw) * bh, 0);
+        for (const auto& [cx, cy] : cells) m[static_cast<std::size_t>(cy - y0) * bw + (cx - x0)] = 1;
+
+        for (int y = 0; y < bh; ++y)
+            for (int x = 0; x < bw; ++x)
+            {
+                if (not m[static_cast<std::size_t>(y) * bw + x]) continue;
+                int rx = x;                                            // extend right while still occupied
+                while (rx + 1 < bw and m[static_cast<std::size_t>(y) * bw + rx + 1]) ++rx;
+                int ry = y;                                            // extend down while the whole run matches
+                for (bool grow = true; grow and ry + 1 < bh; )
+                {
+                    for (int k = x; k <= rx; ++k)
+                        if (not m[static_cast<std::size_t>(ry + 1) * bw + k]) { grow = false; break; }
+                    if (grow) ++ry;
+                }
+                for (int j = y; j <= ry; ++j)                          // consume the rectangle
+                    for (int k = x; k <= rx; ++k) m[static_cast<std::size_t>(j) * bw + k] = 0;
+                // Corner-space rectangle (cell centres are corner + half a cell), CCW.
+                const float wx0 = ox0 + static_cast<float>(x0 + x) * cs;
+                const float wy0 = oy0 + static_cast<float>(y0 + y) * cs;
+                const float wx1 = ox0 + static_cast<float>(x0 + rx + 1) * cs;
+                const float wy1 = oy0 + static_cast<float>(y0 + ry + 1) * cs;
+                rects.push_back({{wx0, wy0}, {wx1, wy0}, {wx1, wy1}, {wx0, wy1}});
+            }
+        return rects;
+    };
+
+    // Kept for reference/regression only — see rect_decompose above for why it is no longer used.
+    [[maybe_unused]] const auto trace_outline = [&](const std::vector<std::pair<int, int>>& cells)
         -> std::vector<std::vector<Eigen::Vector2f>>
     {
         std::unordered_set<long> S; S.reserve(cells.size() * 2);
@@ -456,7 +583,7 @@ std::vector<OccComponent> OccupancyGrid::occupied_components(int min_cells, cons
             c.z_min = (zhi >= zlo) ? zlo : 0.0f;
             c.z_max = (zhi >= zlo) ? zhi : 0.05f;
             c.hull    = hull2d(centres);
-            c.outline = trace_outline(cellsxy);   // concave loops; empty ⇒ publisher falls back to hull
+            c.outline = rect_decompose(cellsxy);  // exact cover, hole-free; never empty for a non-empty component
             out.push_back(std::move(c));
         }
     return out;
@@ -567,6 +694,95 @@ bool OccupancyGrid::self_test()
         check(var_conflict > var_conf,    "a CONFLICTED cell must still be more uncertain than a CONFIDENT one");
         check(p_conf > 0.9f,              "a continuously-hit cell must have HIGH occupancy probability (risk)");
         check(var_conf < var_unknown,     "evidence must SHRINK the variance below the unobserved prior");
+    }
+
+    // ── (6) FORGETTING: an OCCLUDED cell must relax toward "unknown", not stay confidently occupied ──
+    // This is the door_2 case: mass latched while visible, then permanently occluded. No clearing beam can ever
+    // reach it, so the ONLY thing that can correct it is the passage of time.
+    {
+        OccGridParams P6 = P; P6.forget_half_life_s = 1.0f;      // fast half-life so the test stays quick
+        OccupancyGrid g; g.reset(-1, -1, 5, 5, P6);
+        std::vector<Eigen::Vector3f> obst; face_returns(obst);
+        for (int k = 0; k < 3; ++k) { g.integrate_sweep(sensor, obst); g.commit_cycle(0.05f); }
+        int ix, iy; g.world_to_cell(2.0f, 0.0f, ix, iy);
+        const bool occ_before = g.occupied(ix, iy);
+        const float p_before = g.prob(ix, iy), var_before = g.prob_variance(ix, iy);
+        // Now observe NOTHING at all (occluded): commit empty cycles. No hit, no miss — the old build left the
+        // cell untouched forever; the decay must walk it back toward the prior.
+        for (int k = 0; k < 200; ++k) { g.integrate_sweep(sensor, {}); g.commit_cycle(0.05f); }
+        const float p_after = g.prob(ix, iy), var_after = g.prob_variance(ix, iy);
+        std::printf("  forget: occ_before=%d P %.2f→%.2f  Var %.4f→%.4f  occupied_after=%d\n",
+                    occ_before, p_before, p_after, var_before, var_after, g.occupied(ix, iy));
+        check(occ_before, "the obstacle must have been occupied first");
+        check(not g.occupied(ix, iy), "an UNOBSERVED occupied cell must eventually be forgotten (released)");
+        check(std::abs(p_after - 0.5f) < std::abs(p_before - 0.5f), "P must relax TOWARD the 0.5 prior");
+        check(var_after > var_before, "Var must RISE as evidence ages — an unseen cell becomes UNKNOWN");
+    }
+
+    // ── (7) FORGETTING must not erode a cell that is still being observed ──
+    // The safety counterpart of (6): decay must lose to live evidence, or the map would dissolve under the robot.
+    {
+        OccGridParams P7 = P; P7.forget_half_life_s = 1.0f;
+        OccupancyGrid g; g.reset(-1, -1, 5, 5, P7);
+        std::vector<Eigen::Vector3f> obst; face_returns(obst);
+        for (int k = 0; k < 200; ++k) { g.integrate_sweep(sensor, obst); g.commit_cycle(0.05f); }
+        int ix, iy; g.world_to_cell(2.0f, 0.0f, ix, iy);
+        std::printf("  forget-hold: continuously-observed cell occupied=%d P=%.2f\n",
+                    g.occupied(ix, iy), g.prob(ix, iy));
+        check(g.occupied(ix, iy), "a CONTINUOUSLY-OBSERVED obstacle must survive the forgetting term");
+        check(g.prob(ix, iy) > 0.9f, "...and keep a high occupancy probability");
+    }
+
+    // ── (8) The published polygons must cover the OCCUPIED CELLS AND NOTHING ELSE ──
+    // The old boundary trace dropped interior holes ("holes dropped = conservative"), so free space ENCLOSED by
+    // residual was published as solid, and it fell back to the CONVEX HULL of the whole component on a diagonal
+    // pinch. Measured on a ring-shaped component: 6.49 m2 of occupied cells published as 12.49 m2 (1.9x), and
+    // 15x with the hull fallback. That is what put obstacle polygons into never-observed space.
+    {
+        OccupancyGrid g; g.reset(0, 0, 6, 6, P);
+        const Eigen::Vector3f s2(0.02f, 0.02f, 0.5f);
+        std::vector<Eigen::Vector3f> ring;                      // a closed ring enclosing a large free courtyard
+        for (float t = 1.0f; t <= 4.0f; t += 0.05f)
+        { ring.push_back({t, 1.0f, 0.40f}); ring.push_back({t, 4.0f, 0.40f});
+          ring.push_back({1.0f, t, 0.40f}); ring.push_back({4.0f, t, 0.40f}); }
+        for (int k = 0; k < 3; ++k) { g.integrate_sweep(s2, ring); g.commit_cycle(); }
+        const auto comps = g.occupied_components(2, {}, 0.25f);
+        double cell_area = 0, pub_area = 0; std::size_t rings = 0; int fell_back = 0;
+        for (const auto& c : comps)
+        {
+            cell_area += c.n_cells * 0.0025;
+            if (c.outline.empty()) { ++fell_back; continue; }
+            rings += c.outline.size();
+            for (const auto& L : c.outline)
+            { double a2 = 0; for (std::size_t i = 0; i < L.size(); ++i)
+              { const auto& u = L[i]; const auto& v = L[(i + 1) % L.size()]; a2 += u.x() * v.y() - v.x() * u.y(); }
+              pub_area += std::abs(a2) / 2.0; }
+        }
+        std::printf("  coverage: %zu comp(s) %zu polygon(s) hull_fallbacks=%d | cells %.3f m2 -> published %.3f m2 (%.2fx)\n",
+                    comps.size(), rings, fell_back, cell_area, pub_area, cell_area > 0 ? pub_area / cell_area : 0.0);
+        check(fell_back == 0, "no component may fall back to a convex hull");
+        check(pub_area <= cell_area * 1.02 + 1e-6, "published area must not EXCEED the occupied cells (no swallowed free space)");
+        check(pub_area >= cell_area * 0.98 - 1e-6, "published area must not UNDER-cover the occupied cells either");
+    }
+
+    // ── (9) SELF-BODY: returns off our own body must not latch, external ones must be untouched ──
+    {
+        OccGridParams P9 = P; P9.self_body_sigma_m = 0.05f;
+        OccupancyGrid g; g.reset(-2, -2, 5, 5, P9);
+        g.set_self_body(0.0f, 0.0f, 0.55f);                      // body envelope at the sensor
+        std::vector<Eigen::Vector3f> selfret, world;
+        for (int i = 0; i < 40; ++i)                              // a ring of returns ON the body surface
+        { const float a = 6.2831853f * i / 40.0f; selfret.push_back({0.52f * std::cos(a), 0.52f * std::sin(a), 0.40f}); }
+        for (int i = 0; i < 40; ++i) world.push_back({2.0f, -0.2f + 0.4f * (i / 39.0f), 0.40f});
+        for (int k = 0; k < 10; ++k)
+        { g.integrate_sweep(sensor, selfret); g.integrate_sweep(sensor, world, false); g.commit_cycle(); }
+        int sx, sy; g.world_to_cell(0.52f, 0.0f, sx, sy);
+        int wx2, wy2; g.world_to_cell(2.0f, 0.0f, wx2, wy2);
+        std::printf("  self-body: on-body cell occupied=%d (lo=%.2f) | external cell occupied=%d (lo=%.2f)\n",
+                    g.occupied(sx, sy), g.logodds(sx, sy), g.occupied(wx2, wy2), g.logodds(wx2, wy2));
+        check(g.logodds(sx, sy) < g.logodds(wx2, wy2),
+              "a return ON the body must carry far less occupancy evidence than an external one");
+        check(g.occupied(wx2, wy2), "the self-body term must NOT suppress a genuine external obstacle");
     }
 
     std::printf("OccupancyGrid::self_test %s\n", ok ? "PASS" : "FAIL");

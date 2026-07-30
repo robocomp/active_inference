@@ -86,6 +86,35 @@ struct OccGridParams
     float beta_hit_w   = 0.85f;     // α += this on a hit-cycle  (mirrors l_hit → safe occupied bias)
     float beta_miss_w  = 0.40f;     // β += this on a miss-cycle (mirrors l_miss)
     float beta_kappa_max = 40.0f;   // cap on α+β → variance floor (σ_P≈0.08) + bounded memory (dynamics clear)
+    // ── FORGETTING: evidence loses PRECISION with time since last observation ──
+    // κ_max above bounds how confident a cell can get, but it scales α and β TOGETHER, so it preserves the mean:
+    // it caps confidence and never relaxes the belief. A cell that stops being observed therefore keeps its
+    // posterior EXACTLY, forever — and an OCCLUDED cell can never be observed again by construction, so anything
+    // ever latched behind an occluder (a door that swung shut, someone who walked past, a mis-registered scan) is
+    // immortal. That is not a Bayesian subtlety, it is a missing term: with no new data the right posterior for a
+    // region you cannot see is not "still occupied", it is "I no longer know".
+    // So relax the posterior toward the Jeffreys prior at a fixed half-life: (α−α₀, β−β₀) ×= ½^(Δt/T). P drifts to
+    // 0.5 and Var rises — which is ALSO what makes Var[P] mean what this header claims it means (the EPISTEMIC
+    // term, "where to look"): stale space becomes uncertain and therefore attractive to re-observe, instead of
+    // reading as confidently occupied. Continuously-observed cells are unaffected (their evidence is renewed every
+    // cycle). 0 ⇒ off (original never-forget behaviour).
+    float forget_half_life_s = 10.0f;
+    // (There was a z_band_relax knob here that made the remembered z-band CONTRACT. It was removed: the theory
+    // behind it had the sign backwards and it caused a measured 3.0× clearing regression. See the long note at
+    // the zmn_/zmx_ update in commit_cycle before considering anything like it again.)
+    // ── SELF-BODY term in the SENSOR model ──
+    // A beam that terminates on the robot's own surface says nothing about the world, so it must not contribute
+    // occupancy evidence. Modelling the robot only as a read-out MASK around its CURRENT pose (which is what
+    // residual_concept did) cannot work against a LATCHED map: self-returns are written into the map permanently,
+    // stay hidden while the robot is standing over them, and re-emerge as residual the moment it drives away —
+    // the robot lays a trail of phantoms behind itself. The fix belongs in the sensor model, at integration.
+    // Not a self-filter radius: the HIT weight is scaled by P(this return came from the world, not from us) =
+    // Φ(s/σ) where s is the signed distance from the return to the body envelope. σ is the body surface's own
+    // positional uncertainty (mount + pose + beam footprint), so the term is a precision, not a cutoff — it fades
+    // to nothing within ~2σ of the surface and never suppresses a clearly-external return. Clearing is left alone
+    // (freeing space is always safe). radius 0 ⇒ off.
+    float self_body_radius_m = 0.0f;   // set per cycle via set_self_body(); 0 disables the term
+    float self_body_sigma_m  = 0.08f;  // positional uncertainty of the body surface
 };
 
 // Per-sweep integration counters — a DIAGNOSTIC of the sensor-model dynamics (esp. the tabletop-clearing bug:
@@ -98,6 +127,11 @@ struct SweepDiag
     long cells_latched = 0;      // cells that crossed occ_set → OCCUPIED this cycle
     long cells_released = 0;      // cells that fell below occ_clear → FREE this cycle
     long hit_then_cleared = 0;    // structurally 0 now (hit precedence): kept as a regression sentinel — must stay 0
+    long cells_forgotten = 0;     // cells RELEASED by the time-decay (unobserved too long) rather than by a
+                                  // see-through. Non-zero ⇒ forgetting is reaching occluded/stale space, which
+                                  // no amount of clearing evidence could ever have reached. 0 for a whole run
+                                  // with forget_half_life_s>0 ⇒ nothing is going stale (or the decay is too slow).
+    long self_hits_damped = 0;    // returns whose HIT weight was attenuated by the self-body term (<0.99×)
 };
 
 // One connected occupied region → footprint + z-band, ready for the scene-graph publish (box + hull).
@@ -130,6 +164,13 @@ public:
     // (zero regression). Set once per cycle before integrate_sweep; persists until changed.
     void set_floor_plane(float a, float b, float c) { fp_a_ = a; fp_b_ = b; fp_c_ = c; }
 
+    // Place the robot's body envelope for this cycle (room frame) so integrate_sweep can discount returns that
+    // came off the robot itself. radius<=0 ⇒ the term is off. Set once per cycle before integrate_sweep, like
+    // set_floor_plane; the value persists until changed. See OccGridParams self_body_* for why this belongs in
+    // the sensor model rather than in a read-out mask.
+    void set_self_body(float x, float y, float radius_m)
+    { self_x_ = x; self_y_ = y; self_r_ = radius_m; }
+
     // Integrate one sensor sweep (room frame). origin = sensor position (room). See the header comment.
     //
     // CRITICAL (occupancy-grid correctness): the inverse sensor model must be applied ONCE PER CELL PER SCAN,
@@ -157,7 +198,11 @@ public:
                          const std::vector<float>* hit_weight_scale = nullptr);
     // Fold this cycle's accumulated per-cell hit/miss flags into the log-odds field: exactly one +l_hit or
     // −l_miss per cell (hit precedence), then update the hysteresis latch. Call once after all sensors' sweeps.
-    void commit_cycle();
+    // `dt_s` is the elapsed time since the previous commit and drives the FORGETTING term (see
+    // OccGridParams::forget_half_life_s): cells observed by NEITHER a hit nor a miss this cycle relax toward the
+    // prior. Pass 0 (the default) to disable forgetting entirely — the original never-forget behaviour, which is
+    // what the self_test's older properties assume.
+    void commit_cycle(float dt_s = 0.0f);
 
     // A read-out predicate: the PROBABILITY (0..1) that this cell (world xy, hit z-band) is EXPLAINED by a known
     // model — hard for walls/floor/robot (0 or 1), SOFT for objects (Φ(−sdf/σ) marginalised over the object's
@@ -184,6 +229,10 @@ public:
     // ── read-out ──
     bool  occupied(int ix, int iy) const;
     float logodds (int ix, int iy) const { return in_bounds(ix, iy) ? lo_[idx(ix, iy)] : 0.0f; }
+    // Remembered hit z-band of a cell (0 if never hit). Exposed for the self_test's bounded-memory property —
+    // this band gates z-aware clearing, so its width IS the cell's clearability.
+    float zband_lo(int ix, int iy) const { return in_bounds(ix, iy) and hit_[idx(ix, iy)] ? zmn_[idx(ix, iy)] : 0.0f; }
+    float zband_hi(int ix, int iy) const { return in_bounds(ix, iy) and hit_[idx(ix, iy)] ? zmx_[idx(ix, iy)] : 0.0f; }
     // Beta–Bernoulli belief the planner consumes. prob = mean occupancy P (RISK). prob_variance = Var[P] (the
     // EPISTEMIC term). prob_std = √Var. Out-of-bounds ⇒ the unobserved prior (P=0.5, max variance) = "unknown".
     float prob         (int ix, int iy) const;
@@ -235,6 +284,7 @@ private:
     OccGridParams p_;
     float xmin_ = 0, ymin_ = 0, inv_cell_ = 0;
     float fp_a_ = 0, fp_b_ = 0, fp_c_ = 0;        // data-driven floor plane z=a·x+b·y+c (0 ⇒ fixed z=0 band)
+    float self_x_ = 0, self_y_ = 0, self_r_ = 0;  // robot body envelope this cycle (room frame); r<=0 ⇒ term off
     int   w_ = 0, h_ = 0;
     std::vector<float>        lo_;                 // log-odds (drives the hard occupied() latch — unchanged)
     std::vector<float>        a_, b_;              // Beta(α,β) posterior over occupancy probability (the belief field)

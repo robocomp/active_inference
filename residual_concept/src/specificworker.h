@@ -156,6 +156,9 @@ private:
     // publishes; re-initialised if the grid extent changes. Display/planner-facing only; not the safety latch.
     std::vector<float> pub_prob_ema_, pub_var_ema_;
     float ego_reliability_ = 1.0f;   // this cycle's ego-motion evidence trust (compute_ego_reliability())
+    // Timestamp of the previous grid commit. The elapsed time drives the grid's FORGETTING term, so the evidence
+    // half-life stays expressed in seconds and does not silently change with the cycle rate.
+    std::chrono::steady_clock::time_point last_commit_{};
     std::vector<Eigen::Vector3f> lidar_filtered_;   // reusable buffer: sweep with bpearl floor grazing removed
 
     // Cached ZED semantic label map (refreshed from the `semantic` node only when its frame_id changes — the map

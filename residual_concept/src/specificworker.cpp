@@ -404,6 +404,11 @@ void SpecificWorker::compute()
             }
             rc::OccGridParams gp;
             gp.floor_z0 = cfg_.cluster.floor_z0; gp.floor_slope = cfg_.cluster.floor_slope; gp.ceil_z = cfg_.cluster.ceil_z;
+            // Forgetting + self-body: give evidence a finite lifetime and put the robot's own body in the sensor
+            // model. Without these the grid accumulates monotonically (occluded cells immortal, z-band only ever
+            // widens, self-returns latched permanently along the driven path).
+            gp.forget_half_life_s  = cfg_.grid_forget_half_life_s;
+            gp.self_body_sigma_m   = cfg_.grid_self_body_sigma_m;
             grid_.reset(xmn, ymn, xmx, ymx, gp);
             grid_ready_ = grid_.valid();
             std::println("[grid] init bounds=({:.1f},{:.1f})..({:.1f},{:.1f}) cells={}x{}",
@@ -428,11 +433,24 @@ void SpecificWorker::compute()
                              floor_plane_.a, floor_plane_.b, floor_plane_.c, floor_plane_.c * 100.0f,
                              std::atan(std::hypot(floor_plane_.a, floor_plane_.b)) * 57.2958f,
                              cfg_.floor_plane.enabled ? "[APPLIED]" : "[log-only, flag off]");
+            // SELF-BODY envelope for this cycle: returns off our own body must not write occupancy into a LATCHED
+            // map (they would re-emerge as residual the moment the robot drives away — a trail of phantoms).
+            // Placed at the sensor origin's xy, which is the robot axis, exactly as the read-out robot explainer
+            // does. Radius matches the lidar driver's [Footprint] disc so both agree on ONE body model.
+            grid_.set_self_body(lidar_ingestor_->origin_room().x(), lidar_ingestor_->origin_room().y(),
+                                cfg_.grid_self_body_radius_m);
             const auto& lidar_sweep = filtered_lidar_sweep();   // bpearl floor grazing removed (per-device band)
             grid_.integrate_sweep(lidar_ingestor_->origin_room(), lidar_sweep,
                                   /*begin_cycle=*/true, ego_reliability_);            // accumulate LiDAR
             integrate_zed_into_grid();   // accumulate dense ZED FoV as a second sensor (fills grazed tabletops)
-            grid_.commit_cycle();        // ONE log-odds update per cell (hit precedence) — the stability fix
+            // Elapsed time since the previous commit drives the FORGETTING term (unobserved cells relax toward
+            // the prior). Measured, not assumed, so the half-life is in seconds regardless of the cycle rate.
+            const auto now_commit = std::chrono::steady_clock::now();
+            const float commit_dt_s = last_commit_.time_since_epoch().count() == 0
+                ? 0.0f
+                : std::chrono::duration<float>(now_commit - last_commit_).count();
+            last_commit_ = now_commit;
+            grid_.commit_cycle(commit_dt_s);   // ONE log-odds update per cell (hit precedence) + forgetting
             log_grid_diag();
             log_floor_diag();
         }
@@ -835,17 +853,28 @@ void SpecificWorker::log_grid_diag()
     if (not f.is_open())
     {
         f.open("etc/grid_diag.csv", std::ios::out | std::ios::trunc);
-        f << "cycle,occupied,hits,misses,miss_blocked_zaware,latched,released,hit_then_cleared\n";
+        // forgotten = cells released by the TIME-DECAY rather than by a see-through: space that no clearing beam
+        // could ever have reached (occluded / behind us). self_damped = returns whose hit weight the self-body
+        // sensor term attenuated. Both are 0 in the old never-forget build, so a run with zeros here means the
+        // new terms are not engaging — check Grid.ForgetHalfLifeS / Grid.SelfBodyRadiusM before believing a null
+        // result. The headline health metric stays miss_blocked_zaware vs misses: it ratcheted 85%→96% of
+        // see-throughs discarded on the old build, and should now stay well under `misses`.
+        f << "cycle,occupied,hits,misses,miss_blocked_zaware,latched,released,hit_then_cleared,"
+             "forgotten,self_damped\n";
     }
     f << cyc << ',' << grid_.occupied_count() << ',' << d.hits << ',' << d.misses << ','
       << d.miss_blocked_zaware << ',' << d.cells_latched << ',' << d.cells_released << ','
-      << d.hit_then_cleared << '\n';
+      << d.hit_then_cleared << ',' << d.cells_forgotten << ',' << d.self_hits_damped << '\n';
     if ((cyc % 20) == 0)
     {
         f.flush();
-        std::println("[grid-diag] occ={} hits={} miss={} zaware_block={} latch={} release={} hit_then_cleared={}",
-                     grid_.occupied_count(), d.hits, d.misses, d.miss_blocked_zaware,
-                     d.cells_latched, d.cells_released, d.hit_then_cleared);
+        const double blocked_frac = (d.misses + d.miss_blocked_zaware) > 0
+            ? 100.0 * static_cast<double>(d.miss_blocked_zaware) / (d.misses + d.miss_blocked_zaware) : 0.0;
+        std::println("[grid-diag] occ={} hits={} miss={} zaware_block={} ({:.0f}% of clearing) latch={} "
+                     "release={} forgotten={} self_damped={} hit_then_cleared={}",
+                     grid_.occupied_count(), d.hits, d.misses, d.miss_blocked_zaware, blocked_frac,
+                     d.cells_latched, d.cells_released, d.cells_forgotten, d.self_hits_damped,
+                     d.hit_then_cleared);
     }
     ++cyc;
 }
@@ -930,8 +959,10 @@ void SpecificWorker::publish_grid_display(const rc::OccupancyGrid::CellExplained
     //   [ P, (V, x0,y0, …, x_{V-1},y_{V-1}) × P ]   — P polygons, each V vertices (room-frame footprint,
     // already half-robot-width inflated). The controller decodes this and plans around each hull together
     // with the known object boxes.
-    // Prefer each component's CONCAVE outline loops (C/U/L concavities stay navigable for the planner);
-    // fall back to the convex hull only when the trace was degenerate (empty). Count total polygons first.
+    // Each component is published as an EXACT RECTANGULAR COVER of its occupied cells (see rect_decompose).
+    // The old boundary-loop trace dropped interior holes and fell back to a convex hull on a diagonal pinch,
+    // both of which published FREE space as occupied — that is what put obstacle polygons into never-observed
+    // areas and turned half a room solid. The convex hull remains only as a defensive fallback.
     std::size_t n_poly = 0;
     for (const auto& c : comps) n_poly += c.outline.empty() ? 1 : c.outline.size();
     std::vector<float> poly; poly.push_back(static_cast<float>(n_poly));
@@ -943,6 +974,38 @@ void SpecificWorker::publish_grid_display(const rc::OccupancyGrid::CellExplained
     {
         if (c.outline.empty()) push_ring(c.hull);
         else for (const auto& ring : c.outline) push_ring(ring);
+    }
+    // POLYGON BUDGET + coverage check. A rectangular cover means more, smaller polygons than one traced
+    // outline; the controller's visibility graph is O(N²) in total vertices, so a blow-up here shows up as
+    // planner latency (not as a wrong map) and is worth watching. The ratio is the real regression guard:
+    // published area should track the occupied-cell area at ≈1.00×; anything above 1 means free space is
+    // being published as occupied again.
+    {
+        static int pc = 0;
+        if ((pc++ % 20) == 0)
+        {
+            double pub_area = 0; std::size_t verts = 0;
+            for (const auto& c : comps)
+            {
+                const auto& rings = c.outline.empty()
+                    ? std::vector<std::vector<Eigen::Vector2f>>{c.hull} : c.outline;
+                for (const auto& ring : rings)
+                {
+                    verts += ring.size();
+                    double a2 = 0;
+                    for (std::size_t i = 0; i < ring.size(); ++i)
+                    { const auto& u = ring[i]; const auto& v = ring[(i + 1) % ring.size()];
+                      a2 += static_cast<double>(u.x()) * v.y() - static_cast<double>(v.x()) * u.y(); }
+                    pub_area += std::abs(a2) / 2.0;
+                }
+            }
+            const double cs = grid_.cell_size();
+            const double cell_area = static_cast<double>(grid_.occupied_count()) * cs * cs;
+            std::println("[grid-publish] {} comps → {} polys / {} verts | published {:.2f} m² vs occupied "
+                         "{:.2f} m² ({:.2f}× — >1 means free space published as occupied)",
+                         comps.size(), n_poly, verts, pub_area, cell_area,
+                         cell_area > 0.0 ? pub_area / cell_area : 0.0);
+        }
     }
     G->add_or_modify_attrib_local<grid_obstacle_hulls_att>(gn, std::move(poly));
 

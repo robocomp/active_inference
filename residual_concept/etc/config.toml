@@ -5,7 +5,7 @@ Webots2Robocomp = "webots2robocomp:tcp -h localhost -p 10006"
 
 # --- Common Agent Data ---
 [Agent]
-id = 14  # MUST be unique across the shared graph: room=5 robot=6 table=7 controller=8 voxelizer=9 bottle=10 kinova=11 self_calib=12 human=13 chair=20. A collision = CRDT actor-id clash → SIGSEGV.
+id = 14  # MUST be unique across the shared graph: room=5 robot=6 table=7 controller=8 voxelizer=9 bottle=10 kinova=11 self_calib=12 human=13 door=15 scene_graph_viewer=16 chair=20 cabinet=21 refrigerator=22 ring_metaconcept=23. A collision = CRDT actor-id clash → SIGSEGV.
 name = "residual_concept"
 
 configFile = ""
@@ -179,6 +179,30 @@ FieldEmaDown = 0.30   # blend toward lower risk per ~2 Hz publish (0.30 ≈ ~1 s
 # (latch in one frame — completeness); far/while-moving hits accumulate over several frames (no phantom flicker).
 MotionVel0   = 0.5    # linear speed (m/s) at which sweep trust halves
 MotionOmega0 = 0.6    # yaw rate (rad/s) at which sweep trust halves
+# ── FORGETTING: evidence loses precision with time since last observation ──
+# Before this the grid accumulated monotonically. A cell observed by NEITHER a hit nor a miss got no update at
+# all, so anything ever latched behind an occluder was IMMORTAL — the symptom being residual mass parked in
+# front of a closed door, which no clearing beam can ever reach. beta_kappa_max did not help: it scales α and β
+# TOGETHER, so it caps confidence while preserving the mean. Now an unobserved cell relaxes toward the prior at
+# this half-life: P → 0.5 and Var → max, i.e. "I no longer know" — which is also what finally makes Var[P]
+# usable as the epistemic term (stale space becomes attractive to re-observe). Continuously-observed cells are
+# unaffected; live evidence beats decay every cycle (self_test property 7). 0 disables it (never forget).
+# Live run showed 'forgotten' ~0-1 cells/cycle at 30 s: a cell at the log-odds clamp needs
+# log2(l_clamp/occ_set) = 3.6 half-lives to un-latch, so 30 s meant ~109 s before stale mass cleared —
+# far too slow to matter. 10 s gives ~36 s, which is in the usual costmap range.
+ForgetHalfLifeS = 10.0   # ↓ = forgets faster; ↑ = stickier map
+# SELF-BODY term in the sensor model. A beam terminating on the robot's own surface says nothing about the
+# world. Modelling the robot only as a READ-OUT mask (Clusterer.RobotRadiusM) cannot stop that: the map is
+# latched, so self-returns are written in permanently, stay hidden while the robot stands over them, and
+# re-emerge as residual the moment it drives away — a trail of phantoms along the driven path. This scales the
+# HIT weight by P(came from the world) = Φ(s/σ), s = signed distance to the body envelope. Not a cutoff: it is
+# 0.5 exactly on the surface and fades to ~1 within 2σ, so a clearly-external obstacle is never suppressed.
+# Clearing is untouched (freeing space is always safe). The radius matches the lidar3d_dds driver's own
+# [Footprint] radius so both agree on ONE body model — and since that driver already deletes returns inside the
+# disc, this is mainly a safety net for what leaks just outside it. Widen both together if the real envelope
+# turns out to be larger. 0 = off.
+SelfBodyRadiusM = 0.55
+SelfBodySigmaM  = 0.08   # positional uncertainty of the body surface (probit width)
 
 [ZedBoost]
 Enabled = true

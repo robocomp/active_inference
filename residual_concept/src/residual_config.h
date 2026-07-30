@@ -65,6 +65,17 @@ struct ResidualConfig
     // motion and sharpens when stopped. (Combined with the per-hit range weight — see OccGridParams.)
     float motion_vel0_mps    = 0.5f;     // linear speed (m/s) at which sweep trust halves
     float motion_omega0_rps  = 0.6f;     // yaw rate (rad/s) at which sweep trust halves
+    // ── FORGETTING + SELF-BODY (see OccGridParams for the full rationale) ──
+    // The grid used to accumulate monotonically: an unobserved cell was never updated (so anything latched behind
+    // an occluder was immortal) and the z-band could only widen (so clearing got progressively harder — measured
+    // 85%→96% of see-throughs discarded over one run). These three give evidence a finite lifetime.
+    float grid_forget_half_life_s = 10.0f;  // half-life of evidence in an UNOBSERVED cell (0 ⇒ never forget)
+    // Robot body envelope used by the SENSOR model to discount returns off our own body at integration time.
+    // Distinct from Clusterer.RobotRadiusM, which is only a READ-OUT mask around the current pose and therefore
+    // cannot stop self-returns being latched into the map in the first place. Default matches the lidar3d_dds
+    // driver's own [Footprint] radius so the two agree on one body model. 0 ⇒ term off.
+    float grid_self_body_radius_m = 0.55f;
+    float grid_self_body_sigma_m  = 0.08f;  // positional uncertainty of the body surface (probit width)
     // Robust infrastructure subtraction for the dense ZED cloud: floor/ceiling/wall removed with a band that
     // grows as the ZED's own depth noise (σ0 + q·range²), so a calibration offset / far-range blur can't leak.
     ResidualClusterer::DepthInfraParams zed_infra;

@@ -105,6 +105,9 @@ ResidualConfig load_residual_config(const ConfigLoader& cfg)
     out.grid_field_ema_down     = getf("Grid.FieldEmaDown",      0.30f);   // ...and fall (slow = stable)
     out.motion_vel0_mps         = getf("Grid.MotionVel0",        0.5f);    // linear speed (m/s) that halves sweep trust
     out.motion_omega0_rps       = getf("Grid.MotionOmega0",      0.6f);    // yaw rate (rad/s) that halves sweep trust
+    out.grid_forget_half_life_s = getf("Grid.ForgetHalfLifeS",   10.0f);   // evidence half-life in an UNOBSERVED cell
+    out.grid_self_body_radius_m = getf("Grid.SelfBodyRadiusM",   0.55f);   // body envelope for the sensor-model term
+    out.grid_self_body_sigma_m  = getf("Grid.SelfBodySigmaM",    0.08f);   // its positional uncertainty
     // Robust ZED infrastructure subtraction (reuse the floor/ceiling heights; ZED depth-noise band σ0+q·r²).
     out.zed_infra.floor_z0      = out.cluster.floor_z0;
     out.zed_infra.ceil_z        = out.cluster.ceil_z;
