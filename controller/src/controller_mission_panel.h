@@ -53,6 +53,7 @@ public:
         bool recording = false;
         bool driving = false;            // is the base allowed to move right now?
         int  mode_index = 0;             // rc::to_index(mode); the selector follows the state, not only clicks
+        int  recorded_points = 0;        // points placed so far in the recording being built
     };
 
     explicit MissionPanel(QWidget *parent, Callbacks callbacks);
@@ -90,6 +91,7 @@ private:
     bool running_ = false;
     bool recording_ = false;
     bool driving_ = false;
+    int  recorded_points_ = 0;
     // Status is NOT shown in this row: a stretchy label with lap/waypoint text forced the whole window
     // wider than the 2D view needed. It goes in the WINDOW TITLE instead, which costs no layout width.
     std::string status_;

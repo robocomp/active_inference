@@ -726,7 +726,8 @@ void SpecificWorker::push_mission_view()
 	                               .running = mission.running(),
 	                               .recording = mission.recording(),
 	                               .driving = driving_enabled_,
-	                               .mode_index = rc::to_index(mission.mode())},
+	                               .mode_index = rc::to_index(mission.mode()),
+	                               .recorded_points = static_cast<int>(mission.recorded().size())},
 	                           mission.display_waypoints(),
 	                           mission.running() ? mission.current_waypoint_index() : -1);
 }
@@ -825,6 +826,10 @@ void SpecificWorker::control_loop()
 		// plan — so pushing from compute()'s tail meant the UI only caught up on the next cycle that
 		// happened to have a target. That is why the mission list stayed shaded until Run, and why Stop
 		// left the button reading "Stop".
+		// A tour that finished on its own is not a reason to keep driving: drop back to halted so the
+		// button reads "Run" again and the robot is not left armed with nothing to do.
+		if (session_.mission().consume_completed())
+			driving_enabled_ = false;
 		push_mission_view();
 
 		// 2) Lidar decode off the GUI thread. LiDAR comes ONLY from the zero-copy media

@@ -7,6 +7,9 @@
 namespace rc
 {
 
+// Fewer than this and there is no tour to store; must match MissionRunner::finish_recording().
+constexpr int kMinWaypoints = 2;
+
 MissionPanel::MissionPanel(QWidget *parent, Callbacks callbacks)
     : QWidget(parent), cb_(std::move(callbacks))
 {
@@ -54,7 +57,9 @@ MissionPanel::MissionPanel(QWidget *parent, Callbacks callbacks)
     record_btn_->setToolTip(
         QStringLiteral("Create a NEW mission.\n"
                        "While checked, LEFT-CLICK in the view appends a waypoint (it does not drive).\n"
-                       "Ctrl+RIGHT-CLICK removes the last one. Uncheck to name and save.\n"
+                       "Ctrl+RIGHT-CLICK removes the last one.\n"
+                       "The button becomes 'Save' once there are enough points to store — press it to name\n"
+                       "and save the mission.\n"
                        "To change an existing mission, just drag its waypoints with the RIGHT button."));
     record_btn_->setStyleSheet("QPushButton:checked { background-color: #8e44ad; color: white; font-weight: bold; }");
     row->addWidget(record_btn_);
@@ -64,6 +69,13 @@ MissionPanel::MissionPanel(QWidget *parent, Callbacks callbacks)
                          if (checked)
                          {
                              if (cb_.on_record_begin) cb_.on_record_begin();
+                             return;
+                         }
+                         // Below the minimum, there is nothing to save — asking for a name and then
+                         // discarding the answer would be a dialog that lies about what it is doing.
+                         if (recorded_points_ < kMinWaypoints)
+                         {
+                             if (cb_.on_record_finish) cb_.on_record_finish({});   // empty name = discard
                              return;
                          }
                          const QString name = QInputDialog::getText(this, QStringLiteral("Save mission"),
@@ -139,6 +151,20 @@ void MissionPanel::apply(const View &view)
 {
     running_ = view.running;
     recording_ = view.recording;
+
+    // The button says what pressing it will DO. "New" starts a recording; once enough points exist to store
+    // one, the same press saves it — so it says "Save", with the running count, and the user never has to
+    // guess whether unchecking will keep or discard the route they just clicked out.
+    recorded_points_ = view.recorded_points;
+    if (record_btn_ != nullptr)
+    {
+        const QString label = not view.recording  ? QStringLiteral("New")
+                            : recorded_points_ >= kMinWaypoints
+                                  ? QStringLiteral("Save (%1)").arg(recorded_points_)
+                                  : QStringLiteral("New (%1)").arg(recorded_points_);
+        if (record_btn_->text() != label)
+            record_btn_->setText(label);
+    }
     if (drive_btn_ != nullptr and driving_ != view.driving)
     {
         driving_ = view.driving;

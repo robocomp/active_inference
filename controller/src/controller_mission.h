@@ -156,6 +156,11 @@ public:
     // mistaken for a completed one when the numbers are compared later.
     void stop(const std::string &reason, std::uint64_t now_ms);
 
+    // One-shot: true once, after a run ends BY ITSELF (all laps done, or nothing left to drive to). Not
+    // set when the user stops it, changes mode, or supersedes it with a click — those already express an
+    // intent about driving, whereas a tour finishing on its own does not mean "keep going".
+    bool consume_completed();
+
     State state() const { return state_; }
     bool  running() const { return state_ == State::Running; }
     bool  recording() const { return state_ == State::Recording; }
@@ -221,6 +226,7 @@ private:
     int loops_ = 1;
     std::uint64_t run_start_ms_ = 0;
     std::string stop_reason_;
+    bool completed_event_ = false;
 
     // Leg accumulators
     MissionLegMetrics leg_{};

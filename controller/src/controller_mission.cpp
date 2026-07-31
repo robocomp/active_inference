@@ -440,6 +440,7 @@ bool MissionRunner::start(int loops, std::uint64_t now_ms)
     repeat_sum_ = 0.0; repeat_n_ = 0; repeat_max_ = 0.f;
     last_pos_.reset();
     state_ = State::Running;
+    completed_event_ = false;   // a fresh run must not inherit the previous run's completion
     refresh_display_waypoints();
     begin_leg(now_ms);
     std::printf("[mission] START '%s' — %zu waypoints x %d lap(s)\n",
@@ -457,6 +458,7 @@ void MissionRunner::stop(const std::string &reason, std::uint64_t now_ms)
     // advance() already closed the last leg (the normal completion path).
     close_leg(last_pos_.value_or(Eigen::Vector2f::Zero()), now_ms, false);
     stop_reason_ = reason;
+    completed_event_ = reason == "completed" or reason == "exhausted";
     state_ = State::Idle;
     refresh_display_waypoints();   // a cancelled/finished tour stops being drawn
     const auto s = summary();
@@ -500,6 +502,13 @@ void MissionRunner::close_leg(const Eigen::Vector2f &arrived_at, std::uint64_t n
     if (leg_.min_body_clearance_m == std::numeric_limits<float>::max())
         leg_.min_body_clearance_m = kNaN;
     legs_.push_back(leg_);
+}
+
+bool MissionRunner::consume_completed()
+{
+    const bool e = completed_event_;
+    completed_event_ = false;
+    return e;
 }
 
 std::optional<ControllerTargetInfo> MissionRunner::current_target() const
@@ -723,6 +732,10 @@ bool MissionRunner::self_test()
             r.advance(tgt->room_pos, t);
         }
         check(not r.running(), "the mission must end after its last waypoint of the last lap");
+        // A tour that ends BY ITSELF must announce it, so the UI can drop back to "Run" instead of leaving
+        // the robot armed with nothing to drive to.
+        check(r.consume_completed(), "finishing all laps must raise the completed event");
+        check(not r.consume_completed(), "the completed event is ONE-SHOT");
         check(r.legs().size() == 3, "one leg per waypoint");
         check(r.legs().back().completed, "legs reached in order must be marked completed");
     }
@@ -747,6 +760,8 @@ bool MissionRunner::self_test()
         r.sample({0.f, 0.f}, 0.f, 0.f, 1.f, false, t += 100);
         r.stop("aborted", t);
         check(not r.running(), "stop must end the run");
+        check(not r.consume_completed(),
+              "a run the USER stopped must NOT look completed — that would silently halt driving they asked for");
         const auto legs = r.legs();
         check(not legs.empty() and not legs.back().completed,
               "a leg abandoned by stop() must be recorded as incomplete, not dropped");
