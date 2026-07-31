@@ -3,8 +3,9 @@
  *
  * Implements the camera→room extrinsic (room_T_zed, room→body pinned to a capture stamp), the model-box →
  * normalised in-image ROI used by the controller's lock-on, and the PIXEL-LEVEL silhouette existence evidence
- * (project the refrigeratortop top face + leg axes, then over the predicted-visible pixels vote occupancy / absence /
- * occlusion against the current YOLO foreground). Owns the ZED CameraAPI (lazily bound to the "zed" node) and * uses the shared graph, InnerEigenAPI, and MaskIngestor packet source.
+ * (project the solid box's camera-facing vertical faces, then over the predicted-visible pixels vote occupancy /
+ * absence / occlusion against the current YOLO foreground). Owns the ZED CameraAPI (lazily bound to the "zed"
+ * node) and uses the shared graph, InnerEigenAPI, and MaskIngestor packet source.
  */
 
 #include "refrigerator_projection.h"
@@ -23,18 +24,24 @@
 namespace rc {
 
 namespace {
-// Door-ness metric: AREA-NORMALISED vertical-edge energy of an upright grayscale face patch = the mean absolute
-// HORIZONTAL gradient (|Sobel_x|). A door face (handle + vertical seams = strong vertical lines) has large
-// horizontal gradients; a plain side face has few. Fixed warp size ⇒ the mean is comparable across faces. Shared
-// by detect_front and self_test so the test exercises the exact production metric.
+// Door-ness metric: AREA-NORMALISED AXIS-ALIGNED SEAM energy of an upright grayscale face patch — the mean of
+// |Sobel_x| (vertical lines: door jamb, handle) PLUS |Sobel_y| (horizontal lines: the freezer/fridge door split,
+// the gasket seam). A door face carries strong axis-aligned structure in AT LEAST ONE direction; a plain side
+// panel or a bare wall is flat in both. Fixed warp size ⇒ the mean is comparable across faces.
+//
+// ★It used to be |Sobel_x| ONLY, i.e. blind to horizontal seams. On the apartment fridge the most salient (often
+// the only) visible cue is the HORIZONTAL line separating the two doors, which scores exactly 0 under ∂/∂x — so
+// the door face never beat a blank side, the margin stayed under FrontMinConfidence, and the cue was suppressed.
+// With a square footprint (|w−h| ≈ 8 mm live) yaw is geometrically unobservable mod 90°, so losing this cue means
+// the quarter-turn is never resolved and the fridge renders rotated 90°. See [[refrigerator-square-yaw-door-cue]].
 float door_ness(const cv::Mat& gray)
 {
     if (gray.empty())
         return 0.0f;
-    cv::Mat gx;
+    cv::Mat gx, gy;
     cv::Sobel(gray, gx, CV_32F, 1, 0, 3);      // ∂/∂x → responds to VERTICAL lines
-    const cv::Mat agx = cv::abs(gx);
-    return static_cast<float>(cv::mean(agx)[0]);
+    cv::Sobel(gray, gy, CV_32F, 0, 1, 3);      // ∂/∂y → responds to HORIZONTAL lines (the door split)
+    return static_cast<float>(cv::mean(cv::abs(gx))[0] + cv::mean(cv::abs(gy))[0]);
 }
 }  // namespace
 
@@ -143,9 +150,10 @@ void RefrigeratorProjection::compute_projected_roi(RefrigeratorInstance& inst)
 
 // PIXEL-LEVEL silhouette existence evidence (occupancy / absence / occlusion) — see the header / SilhouetteExistence.
 //
-// Projects the refrigeratortop top face + the 4 leg axes onto the image and, over the predicted-visible pixels,
-// splits into: lit by a "refrigerator" mask (occupancy), lit by a non-refrigerator mask (occlusion → HOLD), or lit by
-// nothing (absence — the KEY "gone" signal that fires even when NO YOLO mask does this frame).
+// Projects the solid box's CAMERA-FACING vertical side faces (back-face culled; plus the top face only when the
+// camera is above it) onto the image and, over the predicted-visible pixels, splits into: lit by a "refrigerator"
+// mask (occupancy), lit by a non-refrigerator mask (occlusion → HOLD), or lit by nothing (absence — the KEY
+// "gone" signal that fires even when NO YOLO mask does this frame).
 SilhouetteExistence RefrigeratorProjection::compute_silhouette_existence(const RefrigeratorInstance& inst)
 {
     SilhouetteExistence out;
@@ -196,6 +204,43 @@ SilhouetteExistence RefrigeratorProjection::compute_silhouette_existence(const R
     const auto& s = inst.ai2_belief.state();
     const float c = std::cos(s.yaw), sn = std::sin(s.yaw), hw = 0.5f * s.w, hd = 0.5f * s.h;
 
+    // ── LINE OF SIGHT against the room's own walls ────────────────────────────────────────────────────
+    // "Predicted visible" was decided by the camera FRUSTUM alone, plus occlusion by whatever OTHER objects YOLO
+    // happened to segment. A wall is not a YOLO class, so a wall could never occlude anything: from the next room
+    // the fridge still projects into the image, lands on wall pixels that carry no fridge mask, and every sample
+    // votes ABSENCE. Live kill (etc/ai2_log.csv cyc3590-3608): camera 7.0 m away through a wall, yet
+    // in_fov_frac=1.00 and central_frac=1.00 — scored as the BEST possible verifying view — so p_detect=0.126 came
+    // from range alone, sfree_eff≈80/cycle, ex_L −4 in three cycles, streak 15, DELETED. Exactly the
+    // "it disappears when the robot is in the other room" report.
+    //
+    // A sample the camera cannot physically reach is not evidence of absence. Occlusion by known scene geometry
+    // belongs in the observation model, and the code already has the concept — n_occluded ⇒ HOLD — it just had no
+    // way to know about walls. Segment camera→sample vs every room-polygon edge; a strict interior crossing means
+    // the sample is behind a wall. See [[refrigerator-silhouette-line-of-sight]].
+    const Eigen::Vector3d cam3 = Mopt.value().block<3, 1>(0, 3);
+    const Eigen::Vector2f cam_xy(static_cast<float>(cam3.x()), static_cast<float>(cam3.y()));
+    const auto wall_between = [&](const Eigen::Vector2f& q) -> bool
+    {
+        const std::size_t n = room_polygon_.size();
+        if (n < 2) return false;                       // no room model ⇒ no occlusion test (pre-existing behaviour)
+        const Eigen::Vector2f d = q - cam_xy;
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            const Eigen::Vector2f& a = room_polygon_[i];
+            const Eigen::Vector2f  e = room_polygon_[(i + 1) % n] - a;
+            const float den = d.x() * e.y() - d.y() * e.x();
+            if (std::abs(den) < 1e-9f) continue;                       // parallel
+            const Eigen::Vector2f ac = a - cam_xy;
+            const float t = (ac.x() * e.y() - ac.y() * e.x()) / den;    // along camera→sample
+            const float u = (ac.x() * d.y() - ac.y() * d.x()) / den;    // along the wall edge
+            // STRICT interior crossing only. The 1e-3 slack at t=1 is what lets a fridge standing flush against a
+            // wall keep its own back-face samples: those sit ON the wall line, and a wall must not occlude itself.
+            if (t > 1e-3f and t < 1.0f - 1e-3f and u >= 0.0f and u <= 1.0f)
+                return true;
+        }
+        return false;
+    };
+
     // Classify ONE room-frame silhouette sample: project it, then vote occupancy / absence / occlusion. A
     // sample lit by a "refrigerator" mask is occupancy; lit by nothing is ABSENCE (the "gone" signal that fires even
     // with NO YOLO mask); lit by a non-refrigerator mask is OCCLUDED (a nearer object hides the point) ⇒ HOLD.
@@ -213,6 +258,11 @@ SilhouetteExistence RefrigeratorProjection::compute_silhouette_existence(const R
         const Eigen::Vector2d uv = camera_api_->project(Eigen::Vector3d(Pc.x(), Pc.y(), Pc.z()));
         const float col = static_cast<float>(uv.x()), row = static_cast<float>(uv.y());
         if (col < 0.f or col >= W or row < 0.f or row >= Himg) return; // out of frustum ⇒ not detectable
+        // A room wall between the camera and this sample hides it just as surely as a nearer object does — and
+        // unlike an object, no YOLO mask will ever report it. Same verdict: OCCLUDED ⇒ excluded from
+        // n_detectable ⇒ HOLD, never false absence.
+        if (wall_between(Pr.head<2>().cast<float>()))
+        { ++out.n_occluded; return; }
         const std::int64_t k = key(col, row);
         if (occluder_cells.contains(k) and not refrigerator_cells.contains(k))
         { ++out.n_occluded; return; }                                 // nearer object hides it ⇒ HOLD
@@ -225,27 +275,52 @@ SilhouetteExistence RefrigeratorProjection::compute_silhouette_existence(const R
         else                         out.e_free += 1.0f;              // predicted-but-absent
     };
 
-    // (a) refrigeratortop TOP face (z = H): regular grid over the footprint.
-    // NX/NY (and NZ below) are NUMERIC SAMPLING RESOLUTION for the detectability/occupancy count — a
-    // quadrature density, not a decision threshold. More samples = smoother central_frac/e_occ estimate at
-    // linear cost. Not a belief gate; no config key needed.
-    constexpr int NX = 24, NY = 24;
-    for (int ix = 0; ix < NX; ++ix)
-        for (int iy = 0; iy < NY; ++iy)
-            classify((-1.0f + 2.0f * (ix + 0.5f) / NX) * hw, (-1.0f + 2.0f * (iy + 0.5f) / NY) * hd, s.H);
+    // A refrigerator is a SOLID floor-anchored cuboid (refrigerator_model.cpp), so its predicted silhouette is
+    // the union of the VERTICAL side faces that face the camera — NOT the top face. Sampling the top face (the
+    // table-concept geometry this unit was cloned from) is wrong here in a way that manufactures absence: the top
+    // sits at H≈1.9 m, ABOVE the ZED and hidden behind the fridge's own body, so its samples project onto the
+    // wall above the fridge, land outside the YOLO mask, and every one of them votes "predicted-visible but
+    // ABSENT". Live evidence (etc/ai2_log.csv): a converged fit (0.63×0.61×1.91) at 2.78 m, dead centre of frame,
+    // scored socc=0 / sfree=640 → L pinned at −4 → removed, then re-born. See [[refrigerator-table-geometry-churn]].
+    //
+    // Visibility is decided by the outward normal, evaluated in the box-LOCAL frame where the faces are
+    // axis-aligned: the +x face is camera-facing iff the camera's local x exceeds +w/2, and so on. This is exact
+    // back-face culling for a convex box (no threshold), and for a convex box the camera-facing faces never
+    // occlude each other, so no further self-occlusion test is needed.
+    const Eigen::Vector3d cam_room = Mopt.value().block<3, 1>(0, 3);   // camera origin in the room frame
+    const float dxr = static_cast<float>(cam_room.x()) - s.cx, dyr = static_cast<float>(cam_room.y()) - s.cy;
+    const float cam_lx =  c * dxr + sn * dyr;      // camera in box-local coords (inverse yaw rotation)
+    const float cam_ly = -sn * dxr +  c * dyr;
+    const float cam_lz = static_cast<float>(cam_room.z());
 
-    // (b) the 4 LEGS (vertical axes at the inset corners, floor→join): valuable extra evidence, especially from
-    // edge-on/low views where the top face projects to a thin sliver — the legs project BELOW the refrigeratortop and // extend the detectable footprint (occupancy when masked, absence when the volume is empty).
-    const float leg_top = std::max(0.0f, s.H - rc::RefrigeratorModel::TOP_THICKNESS);
-    const float inset    = rc::RefrigeratorModel::LEG_RADIUS;
-    constexpr int NZ = 16;
-    for (const float sx : {-1.0f, 1.0f})
-        for (const float sy : {-1.0f, 1.0f})
+    // NU/NV are NUMERIC SAMPLING RESOLUTION for the detectability/occupancy count — a quadrature density, not a
+    // decision threshold. More samples = smoother central_frac/e_occ estimate at linear cost. No config key.
+    constexpr int NU = 16, NV = 20;   // across the face × up the height
+    // Sample the side face whose outward normal is ±local-x (normal_along_x) or ±local-y, at sign `sgn`: the
+    // face sits at that half-extent, the free lateral coordinate spans the OTHER half-extent, and the vertical
+    // spans the full box height [0, H].
+    const auto sample_face = [&](bool normal_along_x, float sgn)
+    {
+        const float half_lat = normal_along_x ? hd : hw;
+        for (int iu = 0; iu < NU; ++iu)
         {
-            const float lx = sx * std::max(0.0f, hw - inset), ly = sy * std::max(0.0f, hd - inset);
-            for (int iz = 0; iz < NZ; ++iz)
-                classify(lx, ly, leg_top * (iz + 0.5f) / NZ);
+            const float t  = (-1.0f + 2.0f * (iu + 0.5f) / NU) * half_lat;
+            const float lx = normal_along_x ? sgn * hw : t;
+            const float ly = normal_along_x ? t        : sgn * hd;
+            for (int iv = 0; iv < NV; ++iv)
+                classify(lx, ly, s.H * (iv + 0.5f) / NV);
         }
+    };
+    if (cam_lx >  hw) sample_face(true,  +1.0f);
+    if (cam_lx < -hw) sample_face(true,  -1.0f);
+    if (cam_ly >  hd) sample_face(false, +1.0f);
+    if (cam_ly < -hd) sample_face(false, -1.0f);
+    // TOP face only when the camera is genuinely above it (it is not visible otherwise). Same quadrature grid.
+    if (cam_lz > s.H)
+        for (int iu = 0; iu < NU; ++iu)
+            for (int iv = 0; iv < NV; ++iv)
+                classify((-1.0f + 2.0f * (iu + 0.5f) / NU) * hw, (-1.0f + 2.0f * (iv + 0.5f) / NV) * hd, s.H);
+    // No face qualified ⇒ the camera is inside the footprint (degenerate) ⇒ n_total==0 ⇒ the caller HOLDs.
     if (out.n_detectable > 0)
         out.mean_range_m = static_cast<float>(range_sum / out.n_detectable);
     return out;

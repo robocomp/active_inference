@@ -418,19 +418,30 @@ MinDistance        = 1.0    # ignore targets closer than this to robot (m)
 MaxCandidates      = 2000   # cap on evaluated candidates
 TargetWallMargin   = 1.0    # reject targets closer than this to walls (m)
 AngularDominanceRatio = 50.0 # σ²_θ / max(σ²_x, σ²_y) threshold to trigger rotate-in-place
-WExploration       = 0.5    # weight: distance bonus (explore farther)
+WExploration       = 0.5    # NATS: bounded far-is-better tie-break, added as w·(dist/room_diag).
+                            # (Was a MULTIPLICATIVE bonus; as a multiplier it became the sole
+                            #  differentiator whenever the info terms went flat and locked the
+                            #  arg-max onto the farthest corner. Same value, additive now.)
 IorCellSize        = 0.5    # inhibition-of-return grid resolution (m)
-IorDecayTime       = 120.0  # seconds until visited cell is fully stale
-WIor               = 2.0    # weight: staleness bonus
-WPathInterest      = 0.7    # blend weight: 0=target staleness only, 1=path staleness only (multiplicative IoR)
-# ---- Second-level IoR: perpetual patrol (keeps afford_room alive after pose-info saturates) ----
-PatrolEnabled      = true   # once info is exhausted, patrol the least-recently-visited reachable cell
-PatrolGainFloor    = 0.2    # nats floored onto afford_room's advertised gain in patrol mode so the
-                            # controller keeps executing it. Keep BELOW object-affordance ΔH so real
-                            # objects still win. 0 ⇒ off (robot rests once the room is fully known).
-InfoExhaustedGain  = 0.02   # max FIM gain (nats) below which pose-info is "exhausted" → enter patrol
+IorDecayTime       = 120.0  # τ: knowledge-decay time constant. Sets BOTH the staleness suppressor
+                            # and the scale of the neglect drive log(1 + age/τ).
+WIor               = 2.0    # exponent of the route-staleness suppressor on the pose-info term
+WPathInterest      = 0.7    # blend weight: 0=target cell only, 1=path cells only (suppressor + neglect)
+WIorDrive          = 0.5    # NATS per unit neglect information log(1 + age/τ). This is the
+                            # non-saturating exploration drive: strictly monotone and unbounded in
+                            # neglect age, so a least-recently-visited cell always exists and the
+                            # robot keeps sweeping. Replaces the old PatrolEnabled / PatrolGainFloor
+                            # / InfoExhaustedGain switch, which is gone — the pose-info term is now
+                            # MARGINAL (value of moving over staying put) and extinguishes itself,
+                            # so the hand-off to inhibition-of-return happens continuously.
 ArrivalDistance    = 0.15   # target reached threshold (m)
 DwellTime          = 2.0    # seconds to pause after reaching target
+# ---- Execution-stall watchdog (liveness on the affordance handshake, not a model threshold) ----
+# The planner idles while the controller holds the execution claim, so a target the controller can
+# never reach would park the run. If the closest approach fails to improve by ExecStallProgress for
+# ExecStallTimeout seconds, the claim is released and the target is stamped visited. 0 ⇒ disabled.
+ExecStallTimeout   = 25.0   # seconds without approach progress before abandoning the target
+ExecStallProgress  = 0.10   # metres of new closest-approach that counts as progress
 
 # ---- Acceleration ramp (SpecificWorker) ---- MOVE THIS TO ROBOT
 MaxLinAccel        = 1.2    # m/s² max translational acceleration

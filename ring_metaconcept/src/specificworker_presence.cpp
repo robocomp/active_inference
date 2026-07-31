@@ -18,19 +18,20 @@ void SpecificWorker::degraded_loop()   { presence_coordinator_.degraded_loop(); 
 // (crashed) run so it always starts from a clean slate. Deleting the node also drops its edges.
 // Main-thread only (graph access). Mirrors the level-1 agents' remove_owned_*_nodes().
 //
-// ★Keys on type()=="object" + the owned NAME prefix, NOT on a per-class node type. There is no
-// `dining_set` node type registered in cortex (and there must not be — the schema convention is one
-// generic `object` type with the class in object_subtype), so sweeping by type would be a silent
-// no-op and every crashed run would leak its node into the shared graph.
+// ★Sweeps BOTH types, keyed on the owned NAME prefix. `metaconcept` is where rigs live now (see
+// ring_scene_graph::ensure_rig_node); `object` is swept too because a node born by a run from
+// BEFORE that retype is still sitting in the persistent graph under the old type, and a sweep that
+// missed it would leave an immortal phantom with no process alive to own it.
 void SpecificWorker::remove_owned_dining_set_nodes()
 {
     if (not G)
         return;
 
     std::vector<std::uint64_t> to_delete;
-    for (const auto& node : G->get_nodes_by_type("object"))
-        if (node.name().rfind(cfg_.node_prefix, 0) == 0)
-            to_delete.push_back(node.id());
+    for (const std::string type : {"metaconcept", "object"})
+        for (const auto& node : G->get_nodes_by_type(type))
+            if (node.name().rfind(cfg_.node_prefix, 0) == 0)
+                to_delete.push_back(node.id());
 
     for (const auto id : to_delete)
         if (G->delete_node(id))

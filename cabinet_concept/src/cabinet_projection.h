@@ -65,11 +65,21 @@ public:
     void compute_projected_roi(CabinetInstance& inst);
     SilhouetteExistence compute_silhouette_existence(const CabinetInstance& inst);
 
+    // ── Room WALLS as occluders (silhouette line-of-sight) ─────────────────────────────────────────
+    // The silhouette's only occluder evidence is the NON-cabinet YOLO masks, and YOLO never segments WALLS.
+    // So a cabinet in the NEXT ROOM still projects into the frustum, lands on unmasked wall pixels, and every
+    // sample votes ABSENCE at full strength — a removal verdict for an object with zero visibility. Same bug,
+    // same fix and same shared helper (rc::occlusion::walls_block) as refrigerator_concept, door_concept and
+    // table_concept. Fed from CabinetFitter::set_room_geometry, which already owns this polygon for the
+    // wall-flush factor. Empty polygon ⇒ test inactive ⇒ historic behaviour.
+    void set_room_polygon(std::vector<Eigen::Vector2f> poly) { room_polygon_ = std::move(poly); }
+
 private:
     std::shared_ptr<DSR::DSRGraph>  G_;
     DSR::InnerEigenAPI*             inner_eigen_ = nullptr;
     MaskIngestor*                   mask_ingestor_ = nullptr;
     std::unique_ptr<DSR::CameraAPI> camera_api_;   // ZED intrinsics, lazily bound to the "zed" node
+    std::vector<Eigen::Vector2f>    room_polygon_; // room walls, as OCCLUDERS for the line-of-sight test
 };
 
 }  // namespace rc

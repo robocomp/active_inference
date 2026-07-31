@@ -16,6 +16,8 @@
 #include <unordered_set>
 #include <vector>
 
+#include "../../common/occlusion/occlusion.h"   // rc::occlusion::walls_block — shared with door/fridge/table
+
 namespace rc {
 
 // ─── Camera extrinsic (room_T_zed) ──────────────────────────────────────────────────────────────
@@ -140,6 +142,13 @@ SilhouetteExistence CabinetProjection::compute_silhouette_existence(const Cabine
     if (not Mopt.has_value())
         return out;
     const Eigen::Matrix4d zed_T_room = Mopt.value().inverse();
+    // Camera position in the room floor plane — one endpoint of the wall line-of-sight segment below.
+    const Eigen::Vector2f cam_xy(static_cast<float>(Mopt.value().coeff(0, 3)),
+                                 static_cast<float>(Mopt.value().coeff(1, 3)));
+    // A cabinet is wall-anchored, so its own samples sit on/just inside its wall: skip segments this close to
+    // the sample so the cabinet is never occluded by the very wall it hangs on. Deeper than table's 0.15 m
+    // because a cabinet run has real depth off the wall face.
+    constexpr float kOwnWallSkipM = 0.70f;
 
     const float fx = camera_api_->get_focal_x(), fy = camera_api_->get_focal_y();
     const float W  = static_cast<float>(camera_api_->get_width());
@@ -189,6 +198,13 @@ SilhouetteExistence CabinetProjection::compute_silhouette_existence(const Cabine
         const Eigen::Vector2d uv = camera_api_->project(Eigen::Vector3d(Pc.x(), Pc.y(), Pc.z()));
         const float col = static_cast<float>(uv.x()), row = static_cast<float>(uv.y());
         if (col < 0.f or col >= W or row < 0.f or row >= Himg) return; // out of frustum ⇒ not detectable
+        // A room WALL between the camera and this sample hides it just as surely as a nearer object does — and
+        // unlike an object, no YOLO mask will ever report it. Same verdict: OCCLUDED ⇒ excluded from
+        // n_detectable ⇒ HOLD, never false absence. Stops a cabinet in the NEXT ROOM voting its own removal.
+        // own_wall_skip_m is generous because a cabinet is WALL-ANCHORED by construction: its samples sit on
+        // (and just inside) its own wall, and that wall must never occlude it.
+        if (rc::occlusion::walls_block(cam_xy, Pr.head<2>().cast<float>(), room_polygon_, kOwnWallSkipM))
+        { ++out.n_occluded; return; }
         const std::int64_t k = key(col, row);
         if (occluder_cells.contains(k) and not cabinet_cells.contains(k))
         { ++out.n_occluded; return; }                                 // nearer object hides it ⇒ HOLD

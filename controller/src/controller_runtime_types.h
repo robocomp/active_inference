@@ -8,11 +8,17 @@
 #include <vector>
 
 #include "../../common/robust_metrics/robust_metrics.h"
-#include "room_path_planner.h"
 
 using ControllerPolygon = std::vector<Eigen::Vector2f>;
 using ControllerPolygons = std::vector<ControllerPolygon>;
-using ControllerPathPlan = RoomPathPlanner::PathPlan;
+
+// The route the grid planner returned, already reduced to its turning points. It used to carry a second
+// `graph_nodes` vector — the visibility graph's vertices — which the grid planner could only fill with a
+// verbatim copy of the path. Turning points ARE the waypoints, so one vector says it.
+struct ControllerPathPlan
+{
+    std::vector<Eigen::Vector2f> room_path;
+};
 
 enum class ControllerObstacleKind
 {
@@ -39,10 +45,14 @@ struct ControllerParams
     // this is only a preference on top of it, tuning it for comfort can no longer make a reachable goal
     // unreachable — which is what the old stack could do, and did.
     float footprint_safety_margin_m = 0.05f;
-    float clearance_m = 0.4f;
-    float grid_resolution_m = 0.35f;
-    float connection_radius_m = 1.2f;
-    float waypoint_tolerance_m = 0.25f;
+    // Planning grid resolution. Independent of the residual's evidence grid: the planner does not need
+    // centimetre fidelity, and cell count drives both memory and search time quadratically.
+    float planner_cell_size_m = 0.06f;
+    // Preferred standoff BEYOND the robot's real extent, handed to the MPPI as d_safe. Pure comfort: the
+    // hard constraint is the footprint test, so raising this can slow the robot near obstacles but can never
+    // make a reachable goal unreachable. It used to be `clearance_m` and did three unrelated jobs at once —
+    // it also shrank the navigable room polygon by its own value and set the MPPI's disc radius to half of it.
+    float comfort_standoff_m = 0.5f;
     float max_adv_speed_mps = 0.7f;
     float max_rot_speed_rps = 0.8f;
     float pos_gain = 1.2f;

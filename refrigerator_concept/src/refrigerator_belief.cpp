@@ -54,28 +54,65 @@ float RefrigeratorBelief::sdf_prim(const Eigen::Vector3f& p, const RefrigeratorB
 
 // ─── Mixture responsibilities ────────────────────────────────────────────────────────────────────
 
-// Un-normalised mixture components u[0]=box, u[1]=clutter and their sum = the marginal likelihood numerator
-// p(point|model) ∝ Σ_k π_k N(d_k; 0, R). The FREE ENERGY reads −log(sum); the clutter term keeps a far/misfit
-// point at a large real penalty (−log clutter likelihood) rather than silently zeroing the energy.
+// Un-normalised mixture components u[0]=box, u[1]=clutter, u[2]=wall, and their sum = the marginal likelihood
+// numerator p(point|model) ∝ Σ_k π_k N(d_k; 0, R). The FREE ENERGY reads −log(sum); the clutter term keeps a
+// far/misfit point at a large real penalty (−log clutter likelihood) rather than silently zeroing the energy.
+//
+// The WALL component is the room's already-inferred surface entering as a COMPETING EXPLANATION. Its distance
+// is to the vertical plane through the nearest room-polygon edge (the wall spans all z, so only the horizontal
+// offset matters), widened by the polygon/localization slack. Consequences, both automatic:
+//   • a point on the wall gets u[2] ≫ u[0] ⇒ its BOX responsibility collapses ⇒ zero GN pull on the geometry,
+//     so a wall mislabel can no longer drag the fitted box;
+//   • the marginal likelihood is already high there WITHOUT a box ⇒ box_log_evidence_gain ≈ 0 ⇒ the fridge
+//     hypothesis earns no birth/existence evidence from wall points.
+// A real fridge is unaffected: its VISIBLE faces stand a depth off the wall plane, so their points keep u[0].
+// Only the back face (which the camera never sees) is ambiguous, which is honest.
 float RefrigeratorBelief::mixture_unnormalized(const Eigen::Vector3f& p, const RefrigeratorBeliefState& s,
-                                               float R, std::array<float, 2>& u) const
+                                               float R, std::array<float, 3>& u) const
 {
     const float eps    = std::clamp(params_.clutter_frac, 0.0f, 0.99f);
+    const float pw     = wall_component_frac();
     const float inv2R  = 0.5f / std::max(1e-9f, R);
     const float d      = sdf_box(p, s);
-    u[0] = (1.0f - eps) * std::exp(-d * d * inv2R);
+    u[0] = (1.0f - eps - pw) * std::exp(-d * d * inv2R);
     const float cs = params_.clutter_scale_m;
     u[1] = eps * std::exp(-cs * cs * inv2R);
-    return u[0] + u[1];
+    u[2] = wall_component(p, R, pw);
+    return u[0] + u[1] + u[2];
 }
 
-std::array<float, 2> RefrigeratorBelief::responsibilities(const Eigen::Vector3f& p,
+// Prior weight actually available to the wall component this frame: 0 unless a room polygon was pushed AND the
+// feature is on, and never so large that box+clutter lose their mass.
+float RefrigeratorBelief::wall_component_frac() const
+{
+    if (not point_wall_.ok) return 0.0f;
+    const float eps = std::clamp(params_.clutter_frac, 0.0f, 0.99f);
+    return std::clamp(params_.wall_explain_frac, 0.0f, std::max(0.0f, 0.99f - eps));
+}
+
+// π_wall · N(distance-to-wall-plane; 0, R + σ_wall²), ONE-SIDED. Horizontal offset only — a wall is a vertical
+// plane. dw > 0 is the room interior: the wall explains a point less and less as it stands further in front.
+// dw ≤ 0 is ON or BEYOND the wall, i.e. inside the masonry or outside the room altogether — there the exterior
+// explains the point FULLY (flat at π_wall, no decay), because "beyond the room envelope" is a place the room
+// model already accounts for and no fridge of ours can occupy. That one-sidedness is what stops a detection
+// landing outside the layout from ever looking like unexplained evidence for a new fridge.
+float RefrigeratorBelief::wall_component(const Eigen::Vector3f& p, float R, float pw) const
+{
+    if (pw <= 0.0f) return 0.0f;
+    const float sw  = params_.wall_explain_sigma_m + point_wall_.sigma_m;
+    const float Rw  = std::max(1e-9f, R + sw * sw);
+    const float dw  = (p.head<2>() - point_wall_.p).dot(point_wall_.n);   // signed: >0 into the room
+    const float din = std::max(0.0f, dw);                                 // outside/on the wall ⇒ fully explained
+    return pw * std::exp(-din * din * 0.5f / Rw);
+}
+
+std::array<float, 3> RefrigeratorBelief::responsibilities(const Eigen::Vector3f& p,
                                                           const RefrigeratorBeliefState& s, float R) const
 {
-    std::array<float, 2> u{};
+    std::array<float, 3> u{};
     const float sum = mixture_unnormalized(p, s, R, u);
-    if (sum <= 0.0f) { u = {0.0f, 1.0f}; return u; }
-    u[0] /= sum; u[1] /= sum;
+    if (sum <= 0.0f) { u = {0.0f, 1.0f, 0.0f}; return u; }
+    u[0] /= sum; u[1] /= sum; u[2] /= sum;
     return u;
 }
 
@@ -83,13 +120,35 @@ float RefrigeratorBelief::mean_energy(const std::vector<Eigen::Vector3f>& pts,
                                       const RefrigeratorBeliefState& s, float R) const
 {
     if (pts.empty()) return 0.0f;
-    double acc = 0.0;
-    std::array<float, 2> u{};
+    double acc = 0.0, wacc = 0.0;
+    std::array<float, 3> u{};
     for (const auto& p : pts)
     {
         const float sum = mixture_unnormalized(p, s, R, u);
-        acc += -std::log(std::max(1e-30f, sum));
+        acc  += -std::log(std::max(1e-30f, sum));
+        wacc += (sum > 0.0f) ? (u[2] / sum) : 0.0;
     }
+    dbg_wall_resp_ = static_cast<float>(wacc / static_cast<double>(pts.size()));
+    return static_cast<float>(acc / static_cast<double>(pts.size()));
+}
+
+// The SAME mixture with the box component deleted: how well the scene explains these points with no fridge in
+// it. Independent of the box state by construction, hence no State argument. Paired with mean_energy() this
+// gives the log Bayes factor for "a fridge is here" (box_log_evidence_gain).
+float RefrigeratorBelief::mean_energy_no_box(const std::vector<Eigen::Vector3f>& pts, float R) const
+{
+    if (pts.empty()) return 0.0f;
+    const float eps = std::clamp(params_.clutter_frac, 0.0f, 0.99f);
+    const float pw  = wall_component_frac();
+    const float cs  = params_.clutter_scale_m;
+    // Renormalise the surviving components so the comparison is between two proper models, not between a
+    // 3-component mixture and a deficient 2-component one (that alone would fake a gain for every point).
+    const float z   = std::max(1e-6f, eps + pw);
+    const float inv2R = 0.5f / std::max(1e-9f, R);
+    const float uc  = (eps / z) * std::exp(-cs * cs * inv2R);
+    double acc = 0.0;
+    for (const auto& p : pts)
+        acc += -std::log(std::max(1e-30f, uc + wall_component(p, R, pw / z)));
     return static_cast<float>(acc / static_cast<double>(pts.size()));
 }
 
@@ -439,16 +498,34 @@ bool RefrigeratorBelief::resolve_front(const FrontCue& cue, float evidence_weigh
     const Eigen::Vector2f cue_dir(std::cos(cue.bearing_rad), std::sin(cue.bearing_rad));
     const std::array<bool, 4> allowed = allowed_modes();
 
-    // Accumulate evidence for every ALLOWED candidate: the alignment of that mode's door normal (local −Y rotated
-    // by the candidate yaw ψ_k) with the observed door bearing. Door local −Y ⇒ room dir R(ψ)·(0,−1)=(sinψ,−cosψ).
+    // Accumulate evidence for EVERY candidate: the alignment of that mode's door normal (local −Y rotated by the
+    // candidate yaw ψ_k) with the observed door bearing. Door local −Y ⇒ room dir R(ψ)·(0,−1)=(sinψ,−cosψ).
+    //
+    // ★Accumulate even for modes that are not currently ADOPTABLE. `allowed` reflects the footprint's present
+    // rectangularity, which changes as the fit converges — a fridge births elongated (live: |w−h|/(w+h)=0.47 at
+    // cyc26, so only {0,180} were allowed) and squares up later. `continue`-ing here THREW AWAY every observation
+    // of the true door while the box happened to be elongated, so by the time all four modes became adoptable the
+    // evidence for the right one had never been recorded. Adoption is still restricted below; only the bookkeeping
+    // is unconditional. See [[refrigerator-door-mode-lock]].
     for (int k = 0; k < 4; ++k)
     {
-        if (not allowed[k])
-            continue;
         const float psi = wrap(state_.yaw + static_cast<float>(k) * kHalfPi);
         const Eigen::Vector2f front_dir(std::sin(psi), -std::cos(psi));
-        front_acc_[k] = std::clamp(front_acc_[k] + w * front_dir.dot(cue_dir), -kFrontClamp, kFrontClamp);
+        front_acc_[k] += w * front_dir.dot(cue_dir);
     }
+
+    // ★Re-baseline on the INCUMBENT, then clamp. The accumulator is a log-odds RATIO against the currently held
+    // mode, so what must stay bounded is the DIFFERENCE between modes, not each mode's absolute score.
+    // Previously every entry was clamped independently to ±kFrontClamp: a static view re-adding the same w each
+    // frame drove the incumbent front_acc_[0] to +6, and since a challenger is bounded by the SAME clamp and must
+    // be STRICTLY greater to win, 6.0 > 6.0 is false ⇒ the mode could NEVER change again. Live: front_conf pinned
+    // at 0.996 (= softmax of exactly [+6,0,−6,0]) for thousands of cycles while the cue said "door is 90° from
+    // where you think", and the fridge stayed a quarter-turn off. Same defect family as
+    // [[chair-flip-acc-repetition-defect]]. With the incumbent held at 0, a challenger can always overtake it,
+    // and recanting — the reason the clamp exists — actually works.
+    const float base = front_acc_[0];
+    for (float& a : front_acc_)
+        a = std::clamp(a - base, -kFrontClamp, kFrontClamp);
 
     int kbest = 0;
     for (int k = 1; k < 4; ++k)
@@ -537,6 +614,46 @@ float RefrigeratorBelief::fridge_plausibility(const RefrigeratorBeliefState& s, 
     // `fe` stays in the signature (call sites unchanged) but is no longer used.
     (void) fe;
     return std::clamp(aspect_ok * size_ok * height_ok, 0.0f, 1.0f);
+}
+
+// Shape log-evidence ratio (nats): log p(θ | fridge) − log p(θ | other furniture). Three independent shape
+// features, each contributing the log-ratio of two NORMALISED densities — so the evidence comes from how much
+// more sharply the fridge hypothesis predicts this shape, and a feature that discriminates nothing contributes 0:
+//
+//   aspect  fridge: half-normal on |w−h|/(w+h), scale plaus_aspect_scale     alt: uniform on [0,1] (density 1)
+//   size    fridge: N(prior_footprint_m, plaus_size_scale²) on (w,h)         alt: same mean, plaus_alt_size_scale²
+//   height  fridge: P(tall | H) = the height_ok logistic                     alt: indifferent (1/2)
+//
+// A genuine wide fridge (0.77×0.63×1.52) scores ≈ +4 nats; a 1.20×0.40×0.70 cabinet ≈ −17. Under the old
+// `plausibility − 0.5` rule those were −0.20 and −0.47 — both negative, so the real fridge was deleted too.
+float RefrigeratorBelief::fridge_log_evidence_ratio(const RefrigeratorBeliefState& s,
+                                                    const RefrigeratorBeliefParams& p)
+{
+    constexpr float kSqrtPi = 1.7724539f;   // √π
+
+    // (a) ASPECT. exp(−(a/as)²) is a half-normal with σ = as/√2, whose normaliser is 2/(as·√π); the alternative
+    //     is uniform over the unit interval the aspect lives in, so its log-density is 0.
+    const float as       = std::max(1e-4f, p.plaus_aspect_scale);
+    const float sum_wh   = std::max(1e-4f, s.w + s.h);
+    const float aspect   = std::abs(s.w - s.h) / sum_wh;                    // 0 square → 1 elongated
+    const float llr_aspect = std::log(2.0f / (as * kSqrtPi)) - (aspect / as) * (aspect / as);
+
+    // (b) FOOTPRINT SIZE. Two isotropic 2-D Gaussians about the same mean: the log-ratio of their normalisers
+    //     (2·log(σ_alt/σ_fridge)) is the evidence a TIGHT prior earns for a shape that actually sits near it.
+    const float ss  = std::max(1e-4f, p.plaus_size_scale);
+    const float sa  = std::max(ss,    p.plaus_alt_size_scale);              // the alternative is never tighter
+    const float dw  = s.w - p.prior_footprint_m, dh = s.h - p.prior_footprint_m;
+    const float d2  = dw * dw + dh * dh;
+    const float llr_size = 2.0f * std::log(sa / ss) - d2 / (2.0f * ss * ss) + d2 / (2.0f * sa * sa);
+
+    // (c) HEIGHT. height_ok = P(tall | H); the alternative is indifferent about height (1/2). Being TALL is
+    //     therefore weak evidence (≈ +0.69 at most) while being SHORT is decisive against — which is the real
+    //     discriminator, since the mis-detections this filter exists to kill are ~70 cm cabinets.
+    const float hsoft     = std::max(1e-4f, p.plaus_height_soft);
+    const float height_ok = 1.0f / (1.0f + std::exp(-(s.H - p.plaus_height_min) / hsoft));
+    const float llr_height = std::log(std::max(1e-6f, 2.0f * height_ok));
+
+    return llr_aspect + llr_size + llr_height;
 }
 
 // Birth-candidate plausibility — HEIGHT ONLY. ★A partial mask (e.g. a front-only ZED view) is a VERTICAL
@@ -770,33 +887,41 @@ bool RefrigeratorBelief::self_test()
                 ok_front ? "PASS" : "FAIL", door_bearing(bd), kHalfPi,
                 sigma_yaw_undecided, sigma_yaw_settled, bd.front_confidence());
 
-    // ── (d) FRIDGE PLAUSIBILITY: proper fridge scores ~1, elongated/short scores ~0 ─────────────────────
+    // ── (d) SHAPE LOG-EVIDENCE RATIO: fridges score positive, the elongated/short mis-detection negative ──
+    // `ordinary` is the REGRESSION case: a perfectly real, slightly wide fridge observed live. Under the old
+    // `plausibility − 0.5` rule it scored 0.30 (⇒ −0.20 per cycle) and was accumulated to deletion; the LLR
+    // against an explicit "other furniture" alternative must place it clearly on the fridge side.
     const RefrigeratorBeliefState proper{0.0f, 0.0f, 1.75f, 0.60f, 0.60f, 0.0f};   // square + tall
+    const RefrigeratorBeliefState ordinary{0.0f, 0.0f, 1.52f, 0.77f, 0.63f, 0.0f}; // a real, slightly wide fridge
     const RefrigeratorBeliefState wrongish{0.0f, 0.0f, 0.70f, 1.20f, 0.40f, 0.0f}; // elongated + short (the mis-detection)
-    const float pl_proper = fridge_plausibility(proper,   P.plaus_fe_ref, P);       // low FE ⇒ fit_ok = 1
-    const float pl_wrong  = fridge_plausibility(wrongish, P.plaus_fe_ref, P);
-    const bool ok_plaus = pl_proper > 0.8f and pl_wrong < 0.05f;
-    std::printf("RefrigeratorBelief::self_test [plausibility]       %s  proper=%.3f wrongish=%.3f\n",
-                ok_plaus ? "PASS" : "FAIL", pl_proper, pl_wrong);
+    const float llr_proper   = fridge_log_evidence_ratio(proper,   P);
+    const float llr_ordinary = fridge_log_evidence_ratio(ordinary, P);
+    const float llr_wrong    = fridge_log_evidence_ratio(wrongish, P);
+    const bool ok_plaus = llr_proper > 2.0f and llr_ordinary > 0.0f and llr_wrong < -2.0f;
+    std::printf("RefrigeratorBelief::self_test [shape-LLR]          %s  proper=%+.2f ordinary=%+.2f wrongish=%+.2f\n",
+                ok_plaus ? "PASS" : "FAIL", llr_proper, llr_ordinary, llr_wrong);
 
     // ── (e) plaus_evidence sign convergence (bounded accumulator) + single-bad-frame robustness ─────────
-    // Mirror the fitter's accumulator: evidence += (plausibility − 0.5), clamped to ±PlausClamp (here 8).
+    // Mirror the worker's accumulator (apply_fridge_filter): evidence += clamp(LLR, ±PlausClamp), itself
+    // clamped to ±PlausClamp. Only MEASURED cycles accumulate — the loop count below is measured frames.
     constexpr float kClamp = 8.0f;
+    const auto step_of = [&](const RefrigeratorBeliefState& st)
+    { return std::clamp(fridge_log_evidence_ratio(st, P), -kClamp, kClamp); };
     const auto accumulate = [&](const RefrigeratorBeliefState& st, int frames, float ev0) {
         float ev = ev0;
-        const float pl = fridge_plausibility(st, P.plaus_fe_ref, P);
-        for (int i = 0; i < frames; ++i) ev = std::clamp(ev + (pl - 0.5f), -kClamp, kClamp);
+        const float st_step = step_of(st);
+        for (int i = 0; i < frames; ++i) ev = std::clamp(ev + st_step, -kClamp, kClamp);
         return ev;
     };
-    const float ev_proper = accumulate(proper,   40, 0.0f);   // proper frames → strongly positive
-    const float ev_wrong  = accumulate(wrongish, 40, 0.0f);   // short/elongated frames → strongly negative
-    // One bad frame must NOT flip a settled-positive fridge (bounded memory recants only over MANY frames).
-    const float ev_settled = accumulate(proper, 40, 0.0f);
-    const float pl_wrong_frame = fridge_plausibility(wrongish, P.plaus_fe_ref, P);
-    const float ev_after_bad   = std::clamp(ev_settled + (pl_wrong_frame - 0.5f), -kClamp, kClamp);
-    const bool ok_evidence = ev_proper > 2.0f and ev_wrong < -2.0f and ev_after_bad > 0.0f;
-    std::printf("RefrigeratorBelief::self_test [plaus-evidence]     %s  ev_proper=%.2f ev_wrong=%.2f ev_after_bad=%.2f\n",
-                ok_evidence ? "PASS" : "FAIL", ev_proper, ev_wrong, ev_after_bad);
+    const float ev_proper   = accumulate(proper,   40, 0.0f);   // proper frames → strongly positive
+    const float ev_ordinary = accumulate(ordinary, 40, 0.0f);   // an ordinary real fridge must NOT go negative
+    const float ev_wrong    = accumulate(wrongish, 40, 0.0f);   // short/elongated frames → strongly negative
+    // One bad frame must NOT flip a settled-positive fridge (the per-cycle clamp caps it at the accumulator
+    // bound, so a saturated +8 can at worst fall to 0 — never to −8).
+    const float ev_after_bad = std::clamp(accumulate(proper, 40, 0.0f) + step_of(wrongish), -kClamp, kClamp);
+    const bool ok_evidence = ev_proper > 2.0f and ev_ordinary > 2.0f and ev_wrong < -2.0f and ev_after_bad >= 0.0f;
+    std::printf("RefrigeratorBelief::self_test [plaus-evidence]     %s  ev_proper=%.2f ev_ordinary=%.2f ev_wrong=%.2f ev_after_bad=%.2f\n",
+                ok_evidence ? "PASS" : "FAIL", ev_proper, ev_ordinary, ev_wrong, ev_after_bad);
 
     // ── (f) SOFT SINGLETON: a strong (proper) + a weak (elongated) fridge → weak decays, strong survives ─
     // Two instances: i=0 strong (plaus_evidence>0), i=1 weak (plaus_evidence<0), both currently P(exists)≈0.9.
@@ -853,8 +978,73 @@ bool RefrigeratorBelief::self_test()
     std::printf("RefrigeratorBelief::self_test [short-height prior] %s  FE(0.70m)=%.3f > FE(1.70m)=%.3f\n",
                 ok_height ? "PASS" : "FAIL", fe_short, fe_tall);
 
-    return ok and ok_wall and ok_free and ok_nocross and ok_front and
-           ok_plaus and ok_evidence and ok_singleton and ok_height;
+    // ── (i) WALL EXPLAINING-AWAY: a wall patch must earn ~no evidence for a fridge; a real fridge must ────
+    // The discriminating case from fridge_1.png: YOLO puts a "refrigerator" box on a flat piece of WALL. Both
+    // clouds are fitted equally well by a box (a wall slab IS a box face), so free energy alone cannot separate
+    // them — the separator is the log Bayes factor vs a scene that already contains the wall.
+    {
+        RefrigeratorBeliefParams Pw = P;
+        Pw.wall_explain_frac = 0.25f; Pw.wall_explain_sigma_m = 0.05f;
+        RefrigeratorBelief bw(RefrigeratorBeliefState{0.0f, 0.0f, 1.90f, 0.60f, 0.60f, 0.0f}, Pw);
+        // Wall along y at x = 0, inward normal +x (room interior at x>0).
+        RefrigeratorFrame fw;
+        fw.wall.ok = true; fw.wall.p = {0.0f, 0.0f}; fw.wall.n = {1.0f, 0.0f}; fw.wall.sigma_m = 0.02f;
+
+        // (1) A WALL PATCH: a flat vertical sheet lying IN the wall plane (x≈0).
+        std::vector<Eigen::Vector3f> wall_pts;
+        for (int i = 0; i < 600; ++i)
+            wall_pts.push_back({noise(rng), U(rng) * 0.4f, U01(rng) * 1.9f});
+        // (2) A REAL FRIDGE standing against that wall: visible FRONT face 0.60 m into the room (x≈0.60).
+        std::vector<Eigen::Vector3f> fridge_pts;
+        for (int i = 0; i < 600; ++i)
+            fridge_pts.push_back({0.60f + noise(rng), U(rng) * 0.3f, U01(rng) * 1.9f});
+
+        const float Rq = bw.sigma2();
+        // Box hypotheses fitted to each cloud (both are legitimate box fits — that is the whole difficulty).
+        const RefrigeratorBeliefState box_on_wall  {0.0f, 0.0f, 1.90f, 0.60f, 0.60f, 0.0f};   // centre in the wall
+        const RefrigeratorBeliefState box_on_floor {0.30f, 0.0f, 1.90f, 0.60f, 0.60f, 0.0f};  // front face at x=0.60
+        bw.set_frame_wall_for_test(fw.wall);
+        const float gain_wall   = bw.box_log_evidence_gain(wall_pts,   box_on_wall,  Rq);
+        const float gain_fridge = bw.box_log_evidence_gain(fridge_pts, box_on_floor, Rq);
+        // last_wall_resp() is a side effect of scoring, so score each cloud then read it.
+        bw.mean_energy(wall_pts, box_on_wall, Rq);
+        const float resp_wall = bw.last_wall_resp();
+        bw.mean_energy(fridge_pts, box_on_floor, Rq);
+        const float resp_fridge = bw.last_wall_resp();
+        // The wall patch must gain far less than the real fridge, and its points must be owned by the wall.
+        const bool ok_explain = gain_fridge > 1.0f and gain_wall < 0.25f * gain_fridge and
+                                resp_wall > 0.5f and resp_fridge < 0.05f;
+        std::printf("RefrigeratorBelief::self_test [wall explain-away] %s  gain wall=%+.2f fridge=%+.2f | wall-resp %.2f vs %.2f\n",
+                    ok_explain ? "PASS" : "FAIL", gain_wall, gain_fridge, resp_wall, resp_fridge);
+
+    // ── (j) DOOR-MODE LOCK: a saturated incumbent must still be overtakeable ──────────────────────────
+    // Replays the live failure (etc/ai2_log.csv): hundreds of frames of one static view drive the incumbent's
+    // accumulator to the clamp; then the robot moves and sees the door on a DIFFERENT face. With the old
+    // independent per-mode clamp the challenger was bounded by the same ±6 and had to be STRICTLY greater, so
+    // 6.0 > 6.0 failed and the mode could never change — front_conf sat at 0.996 (= softmax[+6,0,−6,0]) for
+    // thousands of cycles while the cue said "the door is 90° from where you think it is".
+    bool ok_lock = false;
+    {
+        RefrigeratorBelief bl(RefrigeratorBeliefState{0.0f, 0.0f, 1.90f, 0.60f, 0.60f, 0.0f}, P);
+        // Phase 1: 300 identical frames confirming the CURRENT mode (door on local −Y ⇒ bearing = yaw − π/2).
+        for (int i = 0; i < 300; ++i)
+            bl.resolve_front(FrontCue{bl.state().yaw - kHalfPi, 0.6f}, 1.0f);
+        const float conf_locked = bl.front_confidence();
+        const float yaw_before  = bl.state().yaw;
+        // Phase 2: the robot moves and now sees the door on local +X (bearing = yaw). The belief MUST turn.
+        bool flipped = false;
+        for (int i = 0; i < 60 and not flipped; ++i)
+            flipped = bl.resolve_front(FrontCue{bl.state().yaw, 0.6f}, 1.0f);
+        const float turned = std::abs(std::remainder(bl.state().yaw - yaw_before, 2.0f * static_cast<float>(M_PI)));
+        ok_lock = conf_locked > 0.9f and flipped and std::abs(turned - kHalfPi) < 0.05f;
+        std::printf("RefrigeratorBelief::self_test [door-mode lock]    %s  saturated conf=%.3f → %s, turned %.1f°\n",
+                    ok_lock ? "PASS" : "FAIL", conf_locked,
+                    flipped ? "RECANTED" : "STUCK (locked)", turned * 57.29578f);
+    }
+
+        return ok and ok_wall and ok_free and ok_nocross and ok_front and
+               ok_plaus and ok_evidence and ok_singleton and ok_height and ok_explain and ok_lock;
+    }
 }
 
 }  // namespace rc

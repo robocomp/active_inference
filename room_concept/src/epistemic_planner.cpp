@@ -148,39 +148,56 @@ bool EpistemicPlanner::is_angular_dominated() const
 // ===========================================================================
 // FIM-based information-gain score
 // ===========================================================================
-float EpistemicPlanner::score_fim_gain(const Eigen::Vector2f& candidate,
-                                      const Eigen::Matrix3f& prior_precision) const
+Eigen::Matrix3f EpistemicPlanner::predicted_fim(const Eigen::Vector2f& viewpoint) const
 {
-    if (room_corners_.empty()) return 0.f;
-
     Eigen::Matrix3f fim = Eigen::Matrix3f::Zero();
+    if (room_corners_.empty()) return fim;
 
     // (1) Corner landmarks — full 2D fixes (rank-2 each).
-    if (const auto vis = corner_visibility::visible_corners(candidate, room_corners_,
+    if (const auto vis = corner_visibility::visible_corners(viewpoint, room_corners_,
                                                             params.fim_max_range);
         !vis.empty())
     {
-        const Eigen::Vector2f dir = candidate - robot_pos();
+        const Eigen::Vector2f dir = viewpoint - robot_pos();
         const float heading = (dir.squaredNorm() > 1e-4f)   // heading-independent for JᵀJ; kept for API
             ? std::atan2(-dir.x(), dir.y()) : robot_theta();
-        fim += corner_visibility::corner_fim(candidate, heading, vis,
+        fim += corner_visibility::corner_fim(viewpoint, heading, vis,
                                              room_corners_, params.fim_corner_sigma);
     }
 
     // (2) Wall surfaces — the localizer's actual point-to-wall SDF likelihood over a
     //     360° scan (rank-1, perpendicular-only). Captures the parallel-wall ambiguity.
     if (params.fim_use_walls)
-        fim += corner_visibility::wall_fim(candidate, room_corners_, params.fim_wall_sigma,
+        fim += corner_visibility::wall_fim(viewpoint, room_corners_, params.fim_wall_sigma,
                                            params.fim_max_range, params.fim_wall_rays,
                                            params.fim_wall_incidence_weight,
                                            params.fim_wall_incidence_min);
+    return fim;
+}
 
+float EpistemicPlanner::info_gain_nats(const Eigen::Matrix3f& prior_precision,
+                                       const Eigen::Matrix3f& fim)
+{
     if (fim.isZero(1e-12f)) return 0.f;
     // ΔH = ½·log det(I + Y_prior⁻¹·I_pred) in NATS — the expected reduction in DIFFERENTIAL
     // ENTROPY of the pose-belief Gaussian (the common EFE currency shared with aff_table).
     // d_optimality_gain returns the full log-det ( = 2·ΔH ), so apply ½. Mathematically ≥0 for a
     // PD prior + PSD FIM; clamp guards float roundoff so epistemic_gain is a non-negative benefit.
     return std::max(0.f, 0.5f * corner_visibility::d_optimality_gain(prior_precision, fim));
+}
+
+float EpistemicPlanner::neglect_nats(const Eigen::Vector2f& pos,
+                                     std::chrono::steady_clock::time_point now) const
+{
+    if (!visit_grid_.initialized) return 0.f;
+    // log(1 + a/τ): the information recovered by re-observing a cell whose knowledge has been
+    // decaying for `a` seconds. Strictly monotone and unbounded in a, so there is ALWAYS a unique
+    // stalest cell — unlike the clamped staleness = min(1, a/τ) this replaces, which ties at 1.0
+    // room-wide once everything is older than τ and leaves the ranking with nothing to steer on.
+    // Never-visited cells carry the ~11-day sentinel age and so rank far above any visited cell,
+    // which is what we want at start-up; the log keeps even that at a sane ~9 nats.
+    const float age = visit_grid_.age_seconds(pos, now);
+    return std::log1p(age / std::max(1e-3f, params.ior_decay_time));
 }
 
 Eigen::Matrix3f EpistemicPlanner::current_prior_precision() const
@@ -208,45 +225,37 @@ Eigen::Matrix3f EpistemicPlanner::current_prior_precision() const
 float EpistemicPlanner::live_epistemic_gain(const Eigen::Vector2f& viewpoint) const
 {
     if (!robot_state_set_ || room_corners_.empty()) return 0.f;
-    return score_fim_gain(viewpoint, current_prior_precision());
+    return info_gain_nats(current_prior_precision(), predicted_fim(viewpoint));
 }
 
-float EpistemicPlanner::live_total_epistemic_gain(const Eigen::Vector2f& viewpoint) const
+float EpistemicPlanner::marginal_epistemic_gain(const Eigen::Vector2f& viewpoint) const
 {
-    const float fim_gain = live_epistemic_gain(viewpoint);
-    // Non-saturating IoR patrol drive — advertise the SAME neglect covariate the patrol SELECTION
-    // uses (evaluate_targets re-ranks by UNCLAMPED age_seconds once pose-info is exhausted), so the
-    // published gain tracks how the target is actually chosen and can never collapse below the
-    // consumer's selection bar. staleness() is clamped to [0,1]: it flatlines the instant a cell's
-    // age exceeds ior_decay_time AND, worse, shrinks to ~0 in a small, fully-swept room (the stalest
-    // reachable cell is then only mildly old), dropping afford_room below its competitors even though
-    // a least-recently-visited cell always exists. Using raw age/decay instead makes the drive grow
-    // WITHOUT BOUND as neglect accumulates: a long-unobserved room's advertised gain keeps rising
-    // until it out-competes every other affordance and forces a re-patrol — a hard guarantee of
-    // continued selection, encoded as a continuous covariate (neglect time in decay-units), not a
-    // magic gain floor. Below w_ior_drive it sits under real object-affordance ΔH so genuine
-    // info-gathering still wins first; it only dominates once the room has been ignored for many
-    // decay-times.
-    float drive = 0.f;
-    if (params.w_ior_drive > 0.f && visit_grid_.initialized)
-    {
-        const float age = visit_grid_.age_seconds(viewpoint, std::chrono::steady_clock::now());
-        // Real neglect age is used UNCLAMPED so an abandoned room's pull is unbounded. Never-visited
-        // cells report the ~11-day sentinel; treat those as exactly one decay-time of neglect so an
-        // unreachable corner advertises a sensible drive (= w_ior_drive) rather than a sentinel-sized
-        // spike.
-        const float neglect = (age >= VisitGrid::kNeverVisitedAge) ? params.ior_decay_time : age;
-        drive = params.w_ior_drive * neglect / std::max(1e-3f, params.ior_decay_time);
-    }
-    const float gain = fim_gain + drive;
-    // Second-level IoR gain floor: once pose-info saturates, the pose-FIM term → 0 and the clamped
-    // staleness drive collapses, so the advertised gain would fall through the consumer's selection bar
-    // and the robot would rest. Floor it at patrol_gain_floor so afford_room stays selectable and the
-    // robot perpetually patrols the stalest reachable cell (chosen by the age-ranked selection above).
-    // Kept below object-affordance ΔH so real objects still win. 0 ⇒ off (legacy resting behaviour).
-    if (params.patrol_enabled && params.patrol_gain_floor > 0.f)
-        return std::max(gain, params.patrol_gain_floor);
-    return gain;
+    if (!robot_state_set_ || room_corners_.empty()) return 0.f;
+    const Eigen::Matrix3f Y = current_prior_precision();
+    // Value of the vantage MINUS the value of the vantage we already have. Equivalently
+    // ½·log[det(Y + I(v)) / det(Y + I(here))] — the prior log-det cancels, so this is the pure
+    // "what does moving buy me" term. Clamped at 0: a candidate that sees LESS than the current
+    // spot is simply worth no epistemic detour, it is not a cost in this channel (the distance
+    // preference and the neglect drive decide where to go instead).
+    return std::max(0.f, info_gain_nats(Y, predicted_fim(viewpoint))
+                       - info_gain_nats(Y, predicted_fim(robot_pos())));
+}
+
+float EpistemicPlanner::live_total_epistemic_gain(const Eigen::Vector2f& viewpoint,
+                                                  bool rotate_in_place) const
+{
+    // A heading recovery does not move, so the marginal-over-staying-put reading is meaningless
+    // there and would advertise ~0 for the action needed exactly when the robot is most lost.
+    const float info = rotate_in_place ? live_epistemic_gain(viewpoint)
+                                       : marginal_epistemic_gain(viewpoint);
+    // Neglect information of the destination cell. Unbounded in neglect age ⇒ the advertised gain
+    // recovers on its own however long the room goes unattended, so afford_room can never fall
+    // permanently out of the consumer's contention and exploration cannot stall. This is what the
+    // old `patrol_gain_floor` was faking; here the gain is held up by a computed quantity instead.
+    const float drive = (params.w_ior_drive > 0.f)
+        ? params.w_ior_drive * neglect_nats(viewpoint, std::chrono::steady_clock::now())
+        : 0.f;
+    return info + drive;
 }
 
 // ===========================================================================
@@ -273,8 +282,10 @@ std::vector<EpistemicPlanner::Target> EpistemicPlanner::evaluate_targets() const
         rot.score = robot_cov_(2, 2);
         // Advertise the same grounded ΔH currency for the recovery action: rotating in place
         // sweeps a 360° scan from the current vantage, so its expected pose-entropy reduction is
-        // the FIM gain here. Without this the heading-recovery action — needed exactly when the
-        // robot is most lost — would publish gain=0 and lose every cross-affordance EFE compare.
+        // the ABSOLUTE FIM gain here (not the marginal-over-staying-put reading, which is 0 by
+        // definition for an action that does not move). Without this the heading-recovery action —
+        // needed exactly when the robot is most lost — would publish gain=0 and lose every
+        // cross-affordance EFE compare.
         rot.eigenvector_score = live_epistemic_gain(robot_pos());
         self.cell_scores_.clear();
         self.ior_cells_.clear();
@@ -319,25 +330,31 @@ std::vector<EpistemicPlanner::Target> EpistemicPlanner::evaluate_targets() const
     const Eigen::Matrix3f prior_precision = current_prior_precision();
     const auto now = std::chrono::steady_clock::now();
 
-    // Distance bonus is NORMALISED by the room diagonal so it is a gentle tie-break (∈ [1, 1+w_exploration])
-    // that can never dominate the IoR/FIM ranking. The previous raw-metres form (1 + w_exploration·dist)
-    // grew unbounded with room size and, once IoR contrast is weak, became the sole differentiator — the
-    // arg-max then locked onto the geometrically-farthest reachable cell (always the same corner) and, in
-    // patrol mode, let a younger-but-farther cell outrank an older-but-nearer one, breaking oldest-first.
+    // Reference for the MARGINAL information term: what the robot can already see from where it
+    // stands. Computed once — it is the null policy every candidate is scored against.
+    const float here_gain = info_gain_nats(prior_precision, predicted_fim(robot_pos()));
+
+    // Distance preference is normalised by the room diagonal and added in nats, so it is bounded by
+    // w_exploration and can only break ties between comparably-valued cells. See Params::w_exploration
+    // for why it must not be a multiplier.
     const float room_diag = std::max(1e-3f, (room_max_ - room_min_).norm());
 
     std::vector<Target> targets;
     targets.reserve(candidates.size());
-    std::vector<float> ages;                 // raw seconds-since-visit per target, aligned pre-sort
-    ages.reserve(candidates.size());
-    float max_fim = 0.f;                      // best pose-info gain across candidates → patrol trigger
+    float max_fim = 0.f;                      // best MARGINAL pose-info gain across candidates
 
     for (const auto& pos : candidates)
     {
         Target t;
         t.position = pos;
         t.distance = (pos - robot_pos()).norm();
-        const float fim_gain = score_fim_gain(pos, prior_precision);
+        // MARGINAL pose information: what this vantage adds over the one we already occupy. Goes to
+        // 0 wherever the candidate sees no geometry the robot cannot already see — which, in a room
+        // whose layout is a fixed prior, is most of a convex region once the robot is inside it.
+        // That is the "no increase in room certainty is possible" condition, computed rather than
+        // thresholded, and it hands the ranking over to the neglect drive below all by itself.
+        const float fim_gain = std::max(0.f, info_gain_nats(prior_precision, predicted_fim(pos))
+                                             - here_gain);
         max_fim = std::max(max_fim, fim_gain);
 
         // Update cell's running FIM average
@@ -351,55 +368,52 @@ std::vector<EpistemicPlanner::Target> EpistemicPlanner::evaluate_targets() const
         const auto rpos = robot_pos();
         const int n_path = std::max(3, static_cast<int>(t.distance / params.ior_cell_size));
         float path_sum = 0.f;
+        float path_neglect_sum = 0.f;
         for (int s = 1; s < n_path; ++s)
         {
             const float alpha = static_cast<float>(s) / n_path;
-            path_sum += visit_grid_.staleness(rpos + alpha * (pos - rpos), params.ior_decay_time, now);
+            const Eigen::Vector2f cell = rpos + alpha * (pos - rpos);
+            path_sum += visit_grid_.staleness(cell, params.ior_decay_time, now);
+            path_neglect_sum += neglect_nats(cell, now);
         }
-        const float path_staleness = path_sum / static_cast<float>(std::max(1, n_path - 1));  // ∈ [0,1]
+        const float inv_path = 1.f / static_cast<float>(std::max(1, n_path - 1));
+        const float path_staleness = path_sum * inv_path;                 // ∈ [0,1]
+        const float path_neglect   = path_neglect_sum * inv_path;         // nats
 
         // Route staleness: blend of target cell and path cells.
         // w_path_interest=0 → target staleness only (old behaviour)
         // w_path_interest=1 → path staleness only
         // Use as multiplicative IoR suppressor so a visited path to an unvisited target
         // is penalised by the same power as a visited target, not just a small additive nudge.
+        // Staying CLAMPED is correct for this role: it only asks "did I just sweep this route",
+        // and it modulates a term that already self-extinguishes. The long-horizon steering is
+        // carried by route_neglect below, which does not saturate.
         const float route_staleness = (1.f - params.w_path_interest) * staleness
                                     + params.w_path_interest * path_staleness;
         const float ior_suppressor = std::pow(route_staleness, params.w_ior);
 
-        const float bonus = 1.f + params.w_exploration * (t.distance / room_diag);
+        // Neglect information of the route, in nats. Blended per-cell (not per-age) so the
+        // never-visited sentinel age is log-compressed before it enters the mean and cannot swamp
+        // an otherwise well-known path.
+        const float route_neglect = (1.f - params.w_path_interest) * neglect_nats(pos, now)
+                                  + params.w_path_interest * path_neglect;
 
-        // Score = (saturating pose-FIM term) + (non-saturating IoR patrol drive), all × distance
-        // bonus. The IoR drive is ADDITIVE (route_staleness ∈ [0,1] recovers over time), so once
-        // the pose-FIM term vanishes (localized) the planner still ranks the stalest reachable
-        // cell highest instead of going flat — this is what keeps it moving after a few
-        // completions. 1e-6 floor: tie-break when everything vanishes.
-        t.score = (fim_gain * ior_suppressor + params.w_ior_drive * route_staleness) * bonus + 1e-6f;
+        // Score, all in nats and all ADDITIVE:
+        //   (marginal pose info, suppressed if we just swept this route)
+        // + (neglect information of the route — the non-saturating exploration drive)
+        // + (bounded far-is-better tie-break)
+        // The first term extinguishes itself as the room becomes fully visible; the second never
+        // does, so the ranking degrades continuously into oldest-first inhibition-of-return with
+        // no mode switch, no "info exhausted" flag and no gain floor.
+        t.score = fim_gain * ior_suppressor
+                + params.w_ior_drive * route_neglect
+                + params.w_exploration * (t.distance / room_diag);
         t.eigenvector_score = fim_gain;
         targets.push_back(t);
-        ages.push_back(visit_grid_.age_seconds(pos, now));
     }
 
-    // ---- Second-level Inhibition of Return (patrol) ----------------------------------------------
-    // When pose-info is exhausted (best FIM gain below info_exhausted_gain) the first-level score above
-    // degenerates: staleness() has saturated at 1 room-wide, so fim_gain·ior_suppressor ≈ 0 and the
-    // w_ior_drive·route_staleness term is equal everywhere → the argmax collapses onto the distance
-    // bonus and the robot stops making progress around the room. Re-rank purely by RAW age so the single
-    // least-recently-visited reachable cell wins (distance only breaks ties), giving a systematic
-    // oldest-first patrol that never rests. Gated so genuine info-gathering always takes priority.
-    self.dbg_max_fim_ = max_fim;
-    self.dbg_patrol_  = (params.patrol_enabled && max_fim < params.info_exhausted_gain);
-    if (params.patrol_enabled && max_fim < params.info_exhausted_gain)
-    {
-        const float inv_decay = 1.f / std::max(1e-3f, params.ior_decay_time);
-        for (std::size_t i = 0; i < targets.size(); ++i)
-        {
-            // age/decay is UNCLAMPED, so an area untouched for many decay-times ranks strictly above a
-            // just-visited one; the mild distance bonus prefers the nearer of two equally-stale cells.
-            const float bonus = 1.f + params.w_exploration * (targets[i].distance / room_diag);
-            targets[i].score = ages[i] * inv_decay * bonus + 1e-6f;
-        }
-    }
+    self.dbg_max_fim_  = max_fim;
+    self.dbg_here_fim_ = here_gain;
 
     std::sort(targets.begin(), targets.end(),
               [](const Target& a, const Target& b) { return a.score > b.score; });
@@ -450,16 +464,20 @@ std::optional<EpistemicPlanner::Target> EpistemicPlanner::select_target()
         // Advertised gain for the CHOSEN target — the quantity the consumer ranks on, so this line
         // also diagnoses "runs out of affordances" (gain falling below competitors / the patrol floor).
         const float pub_gain = live_total_epistemic_gain(targets.front().position);
-        std::print("[planner] robot=({:.2f},{:.2f}) {} max_fim={:.4f} pub_gain={:.3f} | top:",
-                   rp.x(), rp.y(), dbg_patrol_ ? "PATROL" : "info", dbg_max_fim_, pub_gain);
+        // here_fim = absolute pose info available WITHOUT moving; max_fim = best MARGINAL gain over
+        // that. max_fim ≈ 0 with here_fim large is the healthy "room fully visible, nothing to learn
+        // by driving" regime — the robot should then be steered purely by the neglect term, which
+        // the per-target `neg=` column below shows.
+        std::print("[planner] robot=({:.2f},{:.2f}) here_fim={:.3f} max_marg_fim={:.4f} pub_gain={:.3f} | top:",
+                   rp.x(), rp.y(), dbg_here_fim_, dbg_max_fim_, pub_gain);
         const int n = std::min<int>(3, static_cast<int>(targets.size()));
         for (int i = 0; i < n; ++i)
         {
             const auto& t = targets[i];
-            const float stale = visit_grid_.staleness(t.position, params.ior_decay_time, now);
-            const float age   = visit_grid_.age_seconds(t.position, now);
-            std::print("  #{} ({:+.2f},{:+.2f}) score={:.3f} fim={:.4f} stale={:.2f} age={:.0f}s d={:.2f}",
-                       i, t.position.x(), t.position.y(), t.score, t.eigenvector_score, stale, age, t.distance);
+            const float age = visit_grid_.age_seconds(t.position, now);
+            std::print("  #{} ({:+.2f},{:+.2f}) score={:.3f} marg_fim={:.4f} neg={:.2f} age={:.0f}s d={:.2f}",
+                       i, t.position.x(), t.position.y(), t.score, t.eigenvector_score,
+                       neglect_nats(t.position, now), age, t.distance);
         }
         std::print("\n");
         std::fflush(stdout);
@@ -478,6 +496,18 @@ void EpistemicPlanner::mark_and_refresh()
 {
     if (!robot_state_set_ || !visit_grid_.initialized) return;
     visit_grid_.mark_visited_with_falloff(robot_pos(), params.ior_path_radius, params.ior_decay_time);
+    refresh_ior_overlay();
+}
+
+// mark_target_abandoned — an unreachable target is stamped as if visited, so the neglect drive
+// that selected it drops to ~0 there and the planner moves on instead of re-proposing it forever.
+// See the header for why this is a de-prioritisation and not a blacklist.
+void EpistemicPlanner::mark_target_abandoned(const Eigen::Vector2f& pos)
+{
+    if (!visit_grid_.initialized) return;
+    visit_grid_.mark_visited_with_falloff(pos, params.ior_path_radius, params.ior_decay_time);
+    current_target_.reset();
+    dwelling_ = false;
     refresh_ior_overlay();
 }
 

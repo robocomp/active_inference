@@ -161,6 +161,18 @@ struct DoorConfig
     bool  exist_room_prior         = true;   // Existence.RoomPrior — enforce the room-containment pose prior
     float exist_room_margin_m      = 0.40f;  // Existence.RoomMarginM — tolerance a door centre may sit OUTSIDE the walls
     float exist_out_of_room_gain   = 1.5f;   // Existence.OutOfRoomGain — |ΔL| per frame while outside (debounces a 1-frame glitch)
+    // ── MINIMUM-HEIGHT prior ───────────────────────────────────────────────────────────────────────
+    // A door is an aperture a person walks THROUGH: P(door | it tops out below ~1.8 m) ≈ 0. Same kind of
+    // categorical prior as RoomPrior above (a fact about what a door IS, not a tuned detectability curve),
+    // and applied the same way: suppress the BIRTH, and draw a strong negative on an instance that is
+    // confidently too short. It MUST be judged on the observed support top, never on the fitted h — the
+    // template anchor pins h at 2.0 m regardless of evidence, so a test on h can never fire. See
+    // DoorInstance::obs_top_z. MinConf guards against acting on a handful of clipped views.
+    bool  exist_min_height_prior = true;     // Existence.MinHeightPrior
+    float exist_min_height_m     = 1.80f;    // Existence.MinHeightM — a door's support must reach this (m)
+    float exist_min_height_conf  = 0.30f;    // Existence.MinHeightConf — untruncated-evidence weight required
+                                             // before the prior may act (0 = act on the first clean view)
+    float exist_short_gain       = 1.5f;     // Existence.ShortGain — |ΔL| per frame while confidently short
     // ── Identity re-acquisition ────────────────────────────────────────────────────────────────────
     // A removed door is remembered as a GHOST (name + converged belief). A later detection landing within
     // ReacquireRadiusM of a ghost is the SAME door coming back: it resumes that identity and its accumulated
@@ -169,6 +181,19 @@ struct DoorConfig
     // saw a brand-new object each time.
     float exist_reacquire_radius_m = 0.60f;  // Existence.ReacquireRadiusM (0 disables re-acquisition)
     int   exist_ghost_max          = 8;      // Existence.GhostMax — most recent removals retained
+    // ── Openable door: APERTURE / LEAF decomposition (M0 = structure only) ─────────────────────────
+    // A door is an APERTURE (a static hole in a wall) plus a LEAF (a rigid panel hinged on one of its
+    // vertical edges) — see door_geometry.h. M0 introduces the decomposition with phi PINNED at 0, so the
+    // leaf is flush in the aperture and behaviour is unchanged; phi becomes a fitted DOF in M1 and the
+    // hinge side / swing direction become discrete hypotheses in M2. This flag does NOT enable estimation:
+    // with it ON, phi is a CONSTANT read from PhiInitRad — a structural smoke test (open the door in the
+    // model and confirm the existence channel no longer deletes it), not an inference.
+    // Read in exactly one place, DoorFitter::make_belief_params, so the M0 pin cannot drift.
+    bool  openable_enabled     = false;      // Openable.Enabled — false ⇒ phi is the literal 0.0f everywhere
+    float openable_phi_init    = 0.0f;       // Openable.PhiInitRad — constant opening angle (rad)
+    int   openable_hinge_side  = 0;          // Openable.HingeSide — 0 = near (s) edge, 1 = far (s+w) edge
+    float openable_swing_dir   = 1.0f;       // Openable.SwingDir — +1 / −1: side of the wall it opens toward
+    float openable_phi_max_rad = 1.5707963f; // Openable.PhiMaxRad — physical hinge travel limit (M1 uses it)
     // ── Door panel priors (wall-frame belief θ=[s,w,h]) ────────────────────────────────────────────
     // The door is a thin panel IN a wall: s (along-wall offset) is localised by the fit (BROAD prior),
     // while w,h are STRONG template priors — a standard leaf ≈ 0.70 m × 2.00 m. Realised as tight seed

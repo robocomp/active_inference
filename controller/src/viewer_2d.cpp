@@ -127,7 +127,6 @@ Viewer2D::~Viewer2D()
     clear_path_items();
     clear_room_axis_items();
     clear_robot_trajectory();
-    clear_polygon_item(inner_polygon_item_);
     clear_polygon_item(polygon_item_);
 }
 
@@ -419,7 +418,6 @@ void Viewer2D::draw_lidar_points_from_buffer(int max_points)
 void Viewer2D::draw_path(const PathDrawData &data)
 {
     clear_path_items();
-    clear_polygon_item(inner_polygon_item_);
 
     if (mppi_paths_visible_ && !data.candidate_trajectories.empty())
     {
@@ -463,30 +461,11 @@ void Viewer2D::draw_path(const PathDrawData &data)
         }
     }
 
-    if (data.inner_poly.size() >= 3)
-    {
-        QPolygonF qpoly;
-        for (const auto &vertex : data.inner_poly)
-            qpoly << QPointF(vertex.x(), vertex.y());
-        qpoly << QPointF(data.inner_poly.front().x(), data.inner_poly.front().y());
-
-        QPen inner_pen(QColor(255, 220, 0));
-        inner_pen.setWidthF(3.0);
-        inner_pen.setCosmetic(true);
-        inner_pen.setStyle(Qt::DashLine);
-
-        inner_polygon_item_ = agv_->scene.addPolygon(
-            qpoly,
-            inner_pen,
-            Qt::NoBrush);
-        inner_polygon_item_->setZValue(30);
-    }
-
-    if (!data.graph_nodes.empty())
+    if (!data.waypoints.empty())
     {
         constexpr float radius = 0.04f;
         const QBrush graph_brush(QColor(0, 145, 199, 180));
-        for (const auto &point : data.graph_nodes)
+        for (const auto &point : data.waypoints)
         {
             auto *dot = agv_->scene.addEllipse(-radius, -radius, 2.f * radius, 2.f * radius,
                                                Qt::NoPen, graph_brush);

@@ -126,6 +126,10 @@ struct RefrigeratorBeliefParams
     float plaus_height_soft       = 0.15f;   // logistic softness (m) of the height_ok falloff
     float plaus_fe_ref            = 2.0f;    // "healthy fridge fit" free-energy reference (NEEDS LIVE TUNING)
     float plaus_fe_scale          = 1.0f;    // fit_ok = exp(−max(0, FE−fe_ref)/fe_scale)
+    // The ALTERNATIVE hypothesis "some other furniture-shaped box", against which the fridge hypothesis is
+    // scored (fridge_log_evidence_ratio). Broad on footprint size and uninformative on aspect/height, so it is
+    // the fridge hypothesis's tightness that earns the positive evidence — not an arbitrary 0.5 boundary.
+    float plaus_alt_size_scale    = 0.60f;   // alternative footprint std (m) around prior_footprint_m
     // Short-height PRIOR (accumulate_extra): a one-sided GN factor nudging H up when H < plaus_height_min, with
     // precision GROWING as H falls further below (λ = gain·(deficit/soft)). Continuous covariance, NOT a clamp:
     // fitting a 70 cm cloud as a fridge then fights this prior → worse fit → lower plausibility. 0 = OFF.
@@ -146,6 +150,18 @@ struct RefrigeratorBeliefParams
     // (λ = wall_no_cross_precision · how-far-past), leaving flush (gap≈0) untouched. Strong; continuous, no clamp.
     float wall_no_cross_precision = 2000.0f;  // 1/m² per m of penetration past the wall (>> wall_precision). 0 = OFF
     float wall_no_cross_margin_m  = 0.0f;     // interior margin (m) inside which the no-cross term activates
+    // ── WALL as a COMPETING EXPLANATION (per-point mixture component) ────────────────────────────────────
+    // A room wall is a surface another concept (room_concept) has already inferred, so a mask point lying on it
+    // is ALREADY EXPLAINED and must not be re-explained as fridge surface. This is explaining-away, NOT an
+    // exclusion zone: the wall enters the SAME per-point mixture as box/clutter, so (i) a wall point's box
+    // responsibility collapses ⇒ it exerts no GN pull, and (ii) the marginal likelihood is already high there
+    // WITHOUT a fridge ⇒ box_log_evidence_gain ≈ 0 ⇒ the hypothesis earns nothing. A real fridge is untouched:
+    // its visible front face stands ~h off the wall plane, so those points stay with the box.
+    // wall_explain_frac is the component's PRIOR weight — it should track how much the room is trusted; the
+    // fitter scales it by the room's own confidence, so bad localization returns the fridge hypothesis its
+    // freedom rather than silently vetoing detections. 0 = OFF (no wall component).
+    float wall_explain_frac  = 0.25f;   // π_wall: prior weight of "this point belongs to a known room wall"
+    float wall_explain_sigma_m = 0.05f; // extra std (m) on the wall plane: room-polygon + localization slack
 
     // Temporal transition (predict): rigid + static ⇒ small process noise per frame.
     float process_std_m   = 0.005f;  // cx,cy,H,w,h per-frame process std (m)
@@ -235,12 +251,20 @@ public:
     // Monitor instrumentation for the wall factor.
     float last_wall_gap()    const { return dbg_wall_gap_; }     // back face → wall signed gap (m)
     float last_wall_lambda() const { return dbg_wall_lambda_; }  // applied flush precision (1/m²)
+    float last_wall_resp()   const { return dbg_wall_resp_; }    // mean per-point WALL responsibility (0..1):
+                                                                 // →1 ⇒ the cloud is a wall, not a fridge
+    // Stage the wall the per-point mixture explains with, WITHOUT running an update. Only self_test needs this
+    // (production stages it via update(frame)); it lets the test score clouds against a known wall directly.
+    void set_frame_wall_for_test(const WallRef& w) { point_wall_ = w; }
     // Centre of the BACK face (the one against the wall): (cx,cy) + (h/2)·outward, outward = the depth axis
     // sign pointing AWAY from the room interior. Public so the fitter can query the nearest wall at it.
     Eigen::Vector2f back_centre(const RefrigeratorBeliefState& s) const;
 
     // ── Inference (delegated to the shared engine) ────────────────────────────
-    float update(const RefrigeratorFrame& frame) { return ai::update<N>(*this, state_, Sigma_, prior_mean_, frame); }
+    // Stash this frame's wall BEFORE the engine runs: the per-point mixture's wall component (explaining away)
+    // needs it, and mixture_unnormalized is a const hook the engine calls with no access to the frame.
+    float update(const RefrigeratorFrame& frame)
+    { point_wall_ = frame.wall; return ai::update<N>(*this, state_, Sigma_, prior_mean_, frame); }
     void  predict()                               { ai::predict<N>(*this, Sigma_, state_, prior_mean_); }
     void  inflate_for_age(float dt_s, float dt_nominal_s)
     { ai::inflate_for_age<N>(*this, Sigma_, state_, prior_mean_, dt_s, dt_nominal_s); }
@@ -252,11 +276,22 @@ public:
     float sdf_prim(const Eigen::Vector3f& p, const RefrigeratorBeliefState& s, int prim) const;   // prim == 0
     float sdf_compound(const Eigen::Vector3f& p, const RefrigeratorBeliefState& s) const { return sdf_box(p, s); }
     Eigen::Matrix<float, 6, 1> sdf_jacobian(const Eigen::Vector3f& p, const RefrigeratorBeliefState& s, int prim) const;
-    // Soft responsibilities: [box, clutter] (sum = 1) at measurement variance R.
-    std::array<float, 2> responsibilities(const Eigen::Vector3f& p, const RefrigeratorBeliefState& s, float R) const;
-    // Un-normalised mixture components [box, clutter] + their sum (= marginal likelihood p(point|model)).
+    // Soft responsibilities: [box, clutter, wall] (sum = 1) at measurement variance R. The engine reads only
+    // index 0 (n_prims()==1); the rest exist so the marginal likelihood is honest about what else explains a point.
+    std::array<float, 3> responsibilities(const Eigen::Vector3f& p, const RefrigeratorBeliefState& s, float R) const;
+    // Un-normalised mixture components [box, clutter, wall] + their sum (= marginal likelihood p(point|model)).
     float mixture_unnormalized(const Eigen::Vector3f& p, const RefrigeratorBeliefState& s, float R,
-                               std::array<float, 2>& u) const;
+                               std::array<float, 3>& u) const;
+    // Mean per-point NLL of the SAME mixture with the BOX COMPONENT REMOVED — i.e. how well the scene is
+    // explained WITHOUT positing a fridge here. mean_energy() minus this is the log Bayes factor for "there is
+    // a fridge here", the quantity birth/existence evidence should use: a mask lying on a known wall is already
+    // fully explained, so the factor is ≈0 no matter how well a box happens to fit it.
+    float mean_energy_no_box(const std::vector<Eigen::Vector3f>& pts, float R) const;
+    // log p(points | wall+clutter+box) − log p(points | wall+clutter) ≥ 0-ish. Large ⇒ the fridge hypothesis
+    // genuinely adds explanatory power; ≈0 ⇒ something already in the scene model accounts for these points.
+    float box_log_evidence_gain(const std::vector<Eigen::Vector3f>& pts, const RefrigeratorBeliefState& s,
+                                float R) const
+    { return mean_energy_no_box(pts, R) - mean_energy(pts, s, R); }
     // Mean per-point mixture NEGATIVE LOG-LIKELIHOOD (clutter INCLUDED) = the honest free energy (rises with
     // misfit, unlike the engine's surface-only return). Used for the published/logged FE + convergence.
     float mean_energy(const std::vector<Eigen::Vector3f>& pts, const RefrigeratorBeliefState& s, float R) const;
@@ -329,6 +364,13 @@ public:
     // static overload is pure (self_test / birth-candidate use); the member evaluates the current state.
     static float fridge_plausibility(const RefrigeratorBeliefState& s, float fe, const RefrigeratorBeliefParams& p);
     float fridge_plausibility(float fe) const { return fridge_plausibility(state_, fe, params_); }
+    // Shape LOG-EVIDENCE RATIO (nats): log p(θ | fridge) − log p(θ | other furniture), using NORMALISED
+    // densities for both hypotheses. This — not `plausibility − 0.5` — is the quantity that may be summed into
+    // an existence log-odds: fridge_plausibility is an UN-normalised product of exponentials whose 0.5 level is
+    // arbitrary, so a perfectly ordinary 0.77×0.63×1.52 fridge scored 0.30 and was driven to deletion. Positive
+    // ⇒ the fridge hypothesis explains this shape better than generic furniture. See [[refrigerator-table-geometry-churn]].
+    static float fridge_log_evidence_ratio(const RefrigeratorBeliefState& s, const RefrigeratorBeliefParams& p);
+    float fridge_log_evidence_ratio() const { return fridge_log_evidence_ratio(state_, params_); }
     // Birth-candidate plausibility from a raw mask cloud (BEFORE any fit): footprint aspect + size from the
     // 2-D principal extents, and a rough height from the cloud z-range. Scales the tracker's birth evidence so
     // an elongated/short candidate never accumulates enough to birth. fit term = 1 (no fit yet). Pure/static.
@@ -353,6 +395,11 @@ private:
     // Posterior weight of the "flush against this wall" mixture component: exp(−(gap/reach)²). 0 ⇒ inert.
     float flush_weight(const RefrigeratorBeliefState& s, const RefrigeratorFrame& f) const;
 
+    // Per-point WALL mixture component (explaining away): its available prior weight this frame, and its
+    // un-normalised density at p. Both 0 when no room polygon is known ⇒ the mixture is box+clutter as before.
+    float wall_component_frac() const;
+    float wall_component(const Eigen::Vector3f& p, float R, float pw) const;
+
     // Which of the 4 discrete door modes {0,90,180,270} the current footprint leaves open. A rectangular
     // footprint (|w−h|/(w+h) > kRectAspect) allows only {0,180} (a 90° swap would fight the fitted w↔h);
     // a near-square one allows all four. Shared by resolve_front and yaw_marginal_var so both agree.
@@ -373,8 +420,12 @@ private:
 
     Eigen::Vector2f room_interior_     = Eigen::Vector2f::Zero();   // polygon centroid: picks the BACK face
     bool            has_room_interior_ = false;
+    // This frame's nearest wall, stashed by update() so the const mixture hook can use it as a competing
+    // explanation. ok==false (no room polygon) ⇒ the wall component is inert and the mixture is box+clutter.
+    WallRef         point_wall_;
     mutable float   dbg_wall_gap_    = 0.0f;
     mutable float   dbg_wall_lambda_ = 0.0f;
+    mutable float   dbg_wall_resp_   = 0.0f;   // mean wall responsibility over the last scored cloud
 };
 
 }  // namespace rc

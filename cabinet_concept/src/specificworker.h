@@ -124,6 +124,7 @@ private:
     // publish derived room-frame boxes. Replaces run_instance_tracker + process_cabinet_node when cfg_.kitchen_model.
     void run_kitchen_model();
     void publish_kitchen_boxes();        // reconcile active cells ↔ DSR cabinet_* box nodes (create/update/delete)
+    void log_kitchen_cells(std::size_t sweep_n);   // per-cycle cell CSV (cfg_.kitchen_cells_csv_path; empty = off)
     void update_kitchen_ego_motion();    // transform-chain camera speed (producer-independent), aligned with chair
     std::vector<rc::SceneObjectBox> read_scene_objects() const;   // OTHER agents' furniture boxes (room frame) to not penetrate
     rc::KitchenManager                        kitchen_mgr_;
@@ -242,6 +243,8 @@ private:
     int                  birth_surprise_log_ctr_ = 0;   // console-throttle counter
     long                 birth_surprise_cycle_ = 0;     // probe cycle index (advances only when the grid was read)
     std::vector<Eigen::Vector2f> last_cabinet_dets_xy_;   // this cycle's ZED "cabinet" detection centroids (room frame)
+    std::ofstream        kitchen_cells_csv_;            // per-cycle kitchen-cell log (cfg_.kitchen_cells_csv_path)
+    long                 kitchen_cells_cycle_ = 0;      // kitchen CSV cycle index
 
     // Residual-birth debounce: a candidate arm must recur near the same place for residual_birth_frames
     // cycles before it births (rejects a transient residual flicker). Holds the current candidate.

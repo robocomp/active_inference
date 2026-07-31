@@ -360,18 +360,48 @@ void SpecificWorker::initialize()
 
 // ─── Main compute loop ───────────────────────────────────────────────────────────────────────────
 
+// Publish the room's wall polygon to the fitter → projection, where it becomes the silhouette channel's
+// LINE-OF-SIGHT test. Without it "predicted visible" was decided by the camera frustum plus occlusion by
+// whatever OTHER objects YOLO happened to segment — and a wall is not a YOLO class, so a wall could never
+// occlude anything: from the next room a table still projects into the image, lands on wall pixels carrying
+// no table mask, and every sample votes ABSENCE at full strength until the instance is deleted.
+// Identical bug, identical fix and identical polygon source as refrigerator_concept and door_concept; the
+// crossing test itself is the shared rc::occlusion::walls_block(). Polygon is in ROOM-frame METRES (verified
+// against both sibling consumers, which use it unscaled). Cheap: a few dozen floats, re-read per cycle so a
+// re-localised or re-fitted room takes effect immediately. No room node / no attribute ⇒ silently inactive,
+// which is exactly the pre-existing behaviour.
+void SpecificWorker::refresh_room_geometry()
+{
+    if (not G or room_node_id_ == 0 or not fitter_) return;
+    const auto room = G->get_node(room_node_id_);
+    if (not room.has_value()) return;
+    const auto px = G->get_attrib_by_name<delimiting_polygon_x_att>(room.value());
+    const auto py = G->get_attrib_by_name<delimiting_polygon_y_att>(room.value());
+    if (not px.has_value() or not py.has_value()) return;
+    const auto& xs = px->get(); const auto& ys = py->get();
+    const std::size_t n = std::min(xs.size(), ys.size());
+    if (n < 3) return;                       // degenerate ⇒ leave the test inactive rather than half-armed
+    std::vector<Eigen::Vector2f> poly;
+    poly.reserve(n);
+    for (std::size_t i = 0; i < n; ++i)
+        poly.emplace_back(xs[i], ys[i]);
+    fitter_->set_room_polygon(std::move(poly));
+}
+
 void SpecificWorker::compute()
 {
     if (not G or not rt_api_)
         return;
 
-    // Refresh room node id if not yet found
+    // Refresh room node id if not yet found (see refresh_room_geometry below for the walls)
     if (room_node_id_ == 0)
     {
         const auto rooms = G->get_nodes_by_type("room");
         if (rooms.empty()) return;
         room_node_id_ = rooms.front().id();
     }
+
+    refresh_room_geometry();   // room walls → the silhouette line-of-sight test (see below)
 
     const bool fresh_masks = mask_ingestor_->refresh();
 
@@ -597,6 +627,17 @@ void SpecificWorker::process_table_node(const DSR::Node& node)
     // Detection-aliveness ages once per cycle; observe_slice() resets it to 0 when a slice is assigned.
     if (inst.frames_since_detection < 1000000)
         ++inst.frames_since_detection;
+
+    // Appearance drift (DISPLAY only). Runs every cycle whether or not this table was seen: an unobserved
+    // object's colour genuinely becomes less certain as the lighting and viewpoint move on, and without
+    // this the belief saturates on the first confident view and can never be corrected.
+    {
+        const auto tp_now = std::chrono::steady_clock::now();
+        if (inst.last_appearance_tp.time_since_epoch().count() != 0)
+            inst.appearance.inflate_for_age(
+                std::chrono::duration<float>(tp_now - inst.last_appearance_tp).count());
+        inst.last_appearance_tp = tp_now;
+    }
 
     float free_energy = 0.0f;
     TableObservation last_obs;

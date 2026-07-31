@@ -64,6 +64,8 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.ai2_prior_size_std   = getf("TableModel.AI2PriorSizeStd",     0.30f);
     out.ai2_process_std_m    = getf("TableModel.AI2ProcessStdM",      0.005f);
     out.ai2_process_std_yaw  = getf("TableModel.AI2ProcessStdYaw",    0.01f);
+    out.ai2_process_std_extent_m  = getf("TableModel.AI2ProcessStdExtentM",  0.0f);
+    out.ai2_clamp_sigma_to_prior  = getb("TableModel.AI2ClampSigmaToPrior",  true);
     out.ai2_age_nominal_dt_s = getf("TableModel.AI2AgeNominalDtS",    0.0f);
     out.ai2_common_mode_pos_std  = getf("TableModel.AI2CommonModePosStd",  0.03f);
     out.ai2_common_mode_size_std = getf("TableModel.AI2CommonModeSizeStd", 0.02f);
@@ -74,7 +76,17 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.ai2_range_noise_lat_per_m = getf("TableModel.AI2RangeNoiseLatPerM", 0.02f);
     out.ai2_range_noise_yaw_per_m = getf("TableModel.AI2RangeNoiseYawPerM", 0.03f);
     out.ai2_range_noise_size_per_m = getf("TableModel.AI2RangeNoiseSizePerM", 0.08f);
+    out.ai2_coverage_size_gain     = getf("TableModel.AI2CoverageSizeGain",   0.30f);
+    out.ai2_coverage_yaw_gain      = getf("TableModel.AI2CoverageYawGain",    0.15f);
+    out.ai2_coverage_pos_gain      = getf("TableModel.AI2CoveragePosGain",    0.05f);
+    out.ai2_coverage_min           = getf("TableModel.AI2CoverageMin",        0.02f);
     out.ai2_trunc_gate_frac    = getf("TableModel.AI2TruncGateFrac",   0.10f);
+    out.fixation_enabled       = getb("TableModel.FixationEnabled",     true);
+    out.fixation_min_pts       = geti("TableModel.FixationMinPts",      300);
+    out.fixation_max_trunc     = getf("TableModel.FixationMaxTrunc",    0.10f);
+    out.fixation_range_m       = getf("TableModel.FixationRangeM",      0.0f);   // retired as a gate
+    out.fixation_centre_frac   = getf("TableModel.FixationCentreFrac",  0.60f);
+    out.fixation_still_dotd    = getf("TableModel.FixationStillDotd",   0.05f);
     out.ai2_gn_iters         = geti("TableModel.AI2GnIters",          4);
     out.ai2_csv_path         = gets("TableModel.AI2CsvPath",          "");
     out.birth_surprise_probe = getb("TableModel.BirthSurpriseProbe",  false);
@@ -144,6 +156,8 @@ TableConfig load_table_config(const ConfigLoader& cfg)
     out.existence_remove_frames   = geti("TableModel.ExistenceRemoveFrames",   15);
     out.existence_absence_range_ref_m = getf("TableModel.ExistenceAbsenceRangeRefM", 2.5f);
     out.existence_absence_range_power = getf("TableModel.ExistenceAbsenceRangePower", 2.0f);
+    out.existence_los_margin_m        = getf("TableModel.ExistenceLosMarginM",       0.25f);
+    out.existence_los_azim_bins       = geti("TableModel.ExistenceLosAzimBins",        0);
     out.existence_verify_surprise     = getf("TableModel.ExistenceVerifySurprise",   20.0f);
     out.verify_surprise_smooth        = getf("TableModel.VerifySurpriseSmooth",       0.10f);
     out.existence_verify_gain         = getf("TableModel.ExistenceVerifyGain",       5.0f);

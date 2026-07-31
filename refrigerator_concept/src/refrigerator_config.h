@@ -96,6 +96,10 @@ struct RefrigeratorConfig
     float ai2_wall_precision          = 400.0f;   // 1/m² at zero gap (back face → wall)
     float ai2_wall_parallel_precision = 200.0f;   // back face parallel to the wall (width-axis · wall-normal → 0)
     float ai2_wall_reach_m            = 0.15f;    // gap scale over which the flush hypothesis loses its weight
+    // WALL as a competing per-point explanation (explaining away — see RefrigeratorBeliefParams). π_wall and the
+    // extra wall-plane std. 0 = OFF (mixture stays box+clutter, i.e. the pre-existing behaviour).
+    float ai2_wall_explain_frac       = 0.25f;
+    float ai2_wall_explain_sigma_m    = 0.05f;
     // WALL NO-CROSS (ONE-SIDED): the flush factor above is two-sided (drives the back-face gap → 0) and its weight
     // decays away from the wall, so a fit can end up CROSSING the wall (back extending past it into the wall/
     // exterior) with the flush factor too weak there to recover it. This one-sided term resists penetration ONLY:
@@ -290,15 +294,10 @@ struct RefrigeratorConfig
                                                   // weight; 1−this holds the old). Parity with fe_surprise_smooth.
     float existence_verify_gain         = 5.0f;   // epistemic gain (nats) a wants_verification refrigerator gets, so the
                                                   // controller drives to a resolving ZED view (confirm-or-remove)
-    // LiDAR removal reliability: the model's top slab is a SOLID band, but a real refrigeratortop is a THIN plate, so
-    // horizontal beams passing UNDER the top surface exit the band and read as false "free" — unreliable
-    // ABSENCE. So by default the LiDAR carve contributes OCCUPANCY only (holds L up / confirms presence) and
-    // NEVER drives removal; removal is the camera silhouette's job (predicted-visible-but-absent, which HOLDs
-    // when out of FoV). Set true to ALSO trust LiDAR free-space (only where the slab is a faithful solid model).
-    // Leg OCCUPANCY: also carve the 4 leg volumes [0, H−t] for occupancy (never free — thin legs, and the hollow
-    // space between them must not vote absence). Robustifies confirmation when the thin top slab is at an awkward
-    // height for the LiDAR rings (tall legs are far likelier to be struck). Occupancy-only ⇒ cannot false-remove.
-    bool  existence_leg_occupancy = true;
+    // LiDAR carve: the WHOLE solid box z∈[0,H] from each available ray-set (helios + bpearl), OCCUPANCY only.
+    // Free-space is model-consistent for a solid fridge (unlike the thin-plate tabletop this was cloned from),
+    // but removal deliberately stays the camera silhouette's job — it HOLDs out-of-FoV, so an unseen fridge is
+    // never deleted. There is no leg carve: a refrigerator has no legs.
 
     // ── "Is this really a fridge?" plausibility filter + soft singleton (model-evidence mis-detection reject) ─
     // A YOLO "refrigerator" mis-detection (e.g. a ~70 cm elongated cabinet) contradicts the fridge shape priors
@@ -310,6 +309,8 @@ struct RefrigeratorConfig
     bool  fridge_filter_enabled   = true;    // master switch for the whole plausibility filter
     float plaus_aspect_scale      = 0.15f;   // aspect_ok = exp(−(|w−h|/(w+h)/scale)²): ~1 square, →0 elongated
     float plaus_size_scale        = 0.15f;   // size_ok  = exp(−((w−fp)²+(h−fp)²)/(2·scale²)); fp = AI2PriorFootprintM
+    float plaus_alt_size_scale    = 0.60f;   // the ALTERNATIVE ("other furniture") footprint std (m) the fridge
+                                             // hypothesis is scored against in fridge_log_evidence_ratio
     float plaus_height_min        = 1.20f;   // height_ok logistic centre (m): →1 tall, →0 below ~1 m ("70 cm improbable")
     float plaus_height_soft       = 0.15f;   // height_ok logistic softness (m)
     float plaus_fe_ref            = 2.0f;    // "healthy fridge fit" FE reference — NEEDS LIVE TUNING (≈ a good fridge's mean_energy)

@@ -15,7 +15,6 @@
 #include "controller_obstacle_tracker.h"
 #include "controller_runtime_types.h"
 #include "controller_world_model.h"
-#include "room_path_planner.h"
 #include "grid_planner.h"
 #include "trajectory_controller.h"
 #include "../../common/affordance_manager/affordance_manager.h"
@@ -31,7 +30,6 @@ public:
 
     bool sync_world_state(std::uint64_t timestamp_ms,
                           ControllerWorldModel &world_model,
-                          RoomPathPlanner &planner,
                           ControllerObstacleTracker &obstacle_tracker,
                           rc::TrajectoryController &path_controller,
                           ControllerMotionCommander &motion_commander,
@@ -41,13 +39,11 @@ public:
                                                               ControllerWorldModel &world_model,
                                                               ControllerObstacleTracker &obstacle_tracker,
                                                               rc::AffordanceManager &affordance_manager,
-                                                              RoomPathPlanner &planner,
                                                               rc::TrajectoryController &path_controller,
                                                               ControllerMotionCommander &motion_commander,
                                                               ControllerDisplay &display);
 
     bool ensure_current_plan(const ControllerPlanningStep &step,
-                             RoomPathPlanner &planner,
                              ControllerObstacleTracker &obstacle_tracker,
                              rc::TrajectoryController &path_controller,
                              ControllerMotionCommander &motion_commander,
@@ -163,7 +159,6 @@ private:
     std::uint64_t prev_robot_ts_ms_ = 0;                   // timestamp of that change (velocity dt base)
     std::uint64_t last_pose_change_ms_ = 0;                // = prev_robot_ts_ms_; pose-value age reference
     ControllerPolygon room_polygon_;
-    ControllerPolygon inner_polygon_;
     std::optional<ControllerPathPlan> current_plan_;
     std::optional<Eigen::Vector2f> current_target_room_;
     std::optional<Eigen::Vector2f> manual_target_room_;

@@ -154,6 +154,21 @@ void ChairSceneGraph::step_write_model(ChairInstance& inst, DSR::Node& node,
     G_->add_or_modify_attrib_local<chair_detection_confidence_att>(node, inst.last_mask_confidence);
     G_->add_or_modify_attrib_local<chair_frames_since_detection_att>(node, inst.frames_since_detection);
 
+    // Inferred albedo tint for the display mesh (DISPLAY ONLY — see common/appearance_belief). Published
+    // as CHROMATICITY, pre-scaled by the belief's confidence toward neutral grey, so the colour fades IN
+    // as evidence accumulates instead of popping to whatever the first frame's lighting happened to be.
+    // Not published at all until the belief has seen a frame, which leaves the viewer on the asset's
+    // authored colours — the correct default when we know nothing. Written here (per-cycle) rather than
+    // at node creation because the belief keeps moving as new views arrive.
+    if (inst.appearance.initialized())
+    {
+        const float           c       = inst.appearance.confidence();
+        const Eigen::Vector3f neutral = Eigen::Vector3f::Constant(1.0f / 3.0f);
+        const Eigen::Vector3f tint    = neutral + c * (inst.appearance.map() - neutral);
+        G_->add_or_modify_attrib_local<mesh_color_rgb_att>(node,
+            std::vector<float>{tint.x(), tint.y(), tint.z()});
+    }
+
     G_->update_node(node);
 
     write_rt_pose(room_id, inst);

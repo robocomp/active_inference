@@ -65,6 +65,12 @@ struct ChairBeliefParams
     // Temporal transition (static furniture): small process noise so the pose tracks localisation jitter.
     float process_std_m   = 0.005f;   // cx,cy
     float process_std_yaw = 0.01f;    // yaw
+    // Σ CEILING at the prior on predict: Q is authored PER FRAME, so an unobserved chair's pose belief decays
+    // as σ ∝ √frames with nothing bounding it — after minutes it is looser than at birth and one rogue mask
+    // can reposition it. Cap Σ at Σ₀ (Ornstein-Uhlenbeck decay toward the stationary prior rather than a free
+    // random walk): ageing still loosens the belief monotonically, it just saturates at "what I knew before I
+    // ever saw this chair". Same term and reasoning as table_concept. See rc::ai::predict.
+    bool  clamp_sigma_to_prior = true;
 
     // Per-frame COMMON-MODE error (shared by all points of a mask → doesn't average out; Woodbury cap in
     // the engine, so N correlated points can't collapse σ). chain_cov_* + range add via the frame.
@@ -94,6 +100,12 @@ struct ChairBeliefParams
     // correlated observations must not multiply into confidence.
     bool  mode_obs_weighting  = true;   // false → the pre-2026-07-27 unweighted running sum (A/B)
     float mode_sat_back_pts   = 60.0f;  // backrest mass at which a frame counts as half-informative
+    // Total mode-evidence weight ONE bearing bin may ever contribute, approached asymptotically. This is the
+    // "a fixation is worth one good look, not zero and not infinity" constant: a sustained stare converges to
+    // this much (decisive — flip_acc_ runs to ±kFlipClamp = 6), staring past it adds ~nothing, and a NEW
+    // bearing opens a fresh budget. Replaces the old 1/(1+visits) divisor, under which a viewpoint's total
+    // contribution grew only as log(n) and a 3-minute deliberate fixation could not settle a 45° error.
+    float view_budget         = 3.0f;
     static constexpr int kViewBins = 24;   // 15° azimuth bins around the chair
 
     // Optimiser
@@ -152,11 +164,13 @@ public:
 
     // ── Inference (delegated to the shared engine) ────────────────────────────
     float update(const ChairFrame& frame) { return ai::update<N>(*this, state_, Sigma_, prior_mean_, frame); }
-    void  predict()                       { ai::predict<N>(*this, Sigma_, state_, prior_mean_); }
-    // Age the belief with NO measurement: Σ ← FΣFᵀ + Q·(dt/dt_nominal), mean held. The fitter calls this
-    // when a chair's mask stream is stale/dead so Σ grows on the agent's clock instead of freezing.
+    void  predict()
+    { ai::predict<N>(*this, Sigma_, state_, prior_mean_, 1.0f, params_.clamp_sigma_to_prior); }
+    // Age the belief with NO measurement: Σ ← FΣFᵀ + Q·(dt/dt_nominal), mean held, capped at the prior. The
+    // fitter calls this when a chair's mask stream is stale/dead so Σ grows on the agent's clock instead of
+    // freezing — but saturates at Σ₀ so ageing never erases a converged chair (see rc::ai::predict).
     void  inflate_for_age(float dt_s, float dt_nominal_s)
-    { ai::inflate_for_age<N>(*this, Sigma_, state_, prior_mean_, dt_s, dt_nominal_s); }
+    { ai::inflate_for_age<N>(*this, Sigma_, state_, prior_mean_, dt_s, dt_nominal_s, params_.clamp_sigma_to_prior); }
     Eigen::Matrix<float, 3, 3> predicted_information(const std::vector<Eigen::Vector3f>& pts, float R) const
     { return ai::predicted_information<N>(*this, state_, pts, R); }
 
@@ -294,6 +308,9 @@ private:
     std::array<float, 4>       flip_acc_ = {0.f, 0.f, 0.f, 0.f};
     // Visits per viewpoint bin — drives the novelty discount (see mode_obs_weighting).
     std::array<std::uint32_t, ChairBeliefParams::kViewBins> view_visits_{};
+    // Mode-evidence weight already SPENT from each bearing bin's budget (see ChairBeliefParams::view_budget).
+    // This, not the raw visit count, is what throttles a repeated viewpoint.
+    std::array<float, ChairBeliefParams::kViewBins>         view_spent_{};
     // Rig arrangement prior on yaw (κ = 0 ⇒ absent/inert). NOT accumulated — see set_rig_yaw_prior.
     float                      rig_yaw_prior_ = 0.0f;
     float                      rig_yaw_kappa_ = 0.0f;

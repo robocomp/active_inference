@@ -436,7 +436,6 @@ bool SpecificWorker::sync_world_state(std::uint64_t timestamp_ms)
 {
 	return session_.sync_world_state(timestamp_ms,
 	                               world_model_,
-	                               planner_,
 	                               obstacle_tracker_,
 	                               path_controller_,
 	                               motion_commander_,
@@ -449,7 +448,6 @@ std::optional<SpecificWorker::PlanningStep> SpecificWorker::build_planning_step(
 	                                  world_model_,
 	                                  obstacle_tracker_,
 	                                  affordance_manager_,
-	                                  planner_,
 	                                  path_controller_,
 	                                  motion_commander_,
 	                                  display_);
@@ -458,7 +456,6 @@ std::optional<SpecificWorker::PlanningStep> SpecificWorker::build_planning_step(
 bool SpecificWorker::ensure_current_plan(const PlanningStep &step)
 {
 	return session_.ensure_current_plan(step,
-	                                  planner_,
 	                                  obstacle_tracker_,
 	                                  path_controller_,
 	                                  motion_commander_,
@@ -469,9 +466,8 @@ bool SpecificWorker::ensure_current_plan(const PlanningStep &step)
 /////////////////////////////////////////////////////////////////
 void SpecificWorker::load_params()
 {
-	load_optional_cast<double>("Planner.Clearance", params.clearance_m);
-	load_optional_cast<double>("Planner.GridResolution", params.grid_resolution_m);
-	load_optional_cast<double>("Planner.ConnectionRadius", params.connection_radius_m);
+	load_optional_cast<double>("Planner.CellSize", params.planner_cell_size_m);
+	load_optional_cast<double>("Controller.ComfortStandoff", params.comfort_standoff_m);
 	// Grounded EFE affordance selection (common/affordance_manager): nav-cost weight (nats/m) +
 	// commitment hysteresis (nats). G = λ_cost·dist − epistemic_gain; the room/table choice is now
 	// in one information currency instead of a hard table>room priority.
@@ -482,7 +478,6 @@ void SpecificWorker::load_params()
 		affordance_manager_.set_selection_params(static_cast<float>(aff_lambda_cost),
 		                                         static_cast<float>(aff_switch_margin));
 	}
-	load_optional_cast<double>("Controller.WaypointTolerance", params.waypoint_tolerance_m);
 	load_optional_cast<double>("Controller.MaxAdvSpeed", params.max_adv_speed_mps);
 	load_optional_cast<double>("Controller.MaxRotSpeed", params.max_rot_speed_rps);
 	load_optional_cast<double>("Controller.FootprintSafetyMarginM", params.footprint_safety_margin_m);
@@ -549,13 +544,6 @@ void SpecificWorker::load_params()
 	load_optional_cast<double>("Controller.StraightSpeedHeadingThreshold", params.straight_speed_heading_threshold_rad);
 	load_optional_cast<double>("Controller.StraightSpeedClearanceMargin", params.straight_speed_clearance_margin_m);
 	load_optional_cast<double>("Controller.StraightSpeedMinGoalDist", params.straight_speed_min_goal_dist_m);
-	planner_.params.clearance_m = params.clearance_m;
-	planner_.params.robot_width_m = 0.4f;
-	planner_.params.grid_resolution_m = params.grid_resolution_m;
-	planner_.params.connection_radius_m = params.connection_radius_m;
-	planner_.params.path_sample_spacing_m = std::max(0.1f, params.grid_resolution_m * 1.5f);
-	planner_.params.waypoint_tolerance_m = params.waypoint_tolerance_m;
-
 	// Controller-side LiDAR obstacle creation (false ⇒ residual_concept is the sole obstacle source).
 	load_optional("Controller.ObstacleCreationEnabled", params.obstacle_creation_enabled);
 
@@ -602,8 +590,9 @@ void SpecificWorker::load_params()
 
 	path_controller_.params.max_adv = params.max_adv_speed_mps;
 	path_controller_.params.max_rot = params.max_rot_speed_rps;
-	path_controller_.params.robot_radius = std::max(0.15f, params.clearance_m * 0.5f);
-	path_controller_.params.d_safe = params.clearance_m;
+	// No robot_radius: the MPPI derives every body extent from the footprint itself. d_safe is the ONE
+	// standoff knob, and it is comfort only — the hard constraint is the footprint test.
+	path_controller_.params.d_safe = params.comfort_standoff_m;
 	path_controller_.params.min_adv_cmd = 0.f;
 	path_controller_.params.goal_clearance_relax_dist = std::max(0.05f, params.goal_clearance_relax_dist_m);
 	path_controller_.params.goal_obstacle_margin = std::max(0.f, params.goal_obstacle_margin_m);

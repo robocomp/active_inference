@@ -76,10 +76,52 @@ DepthScaleStd = 0.010       # shared per-frame depth scale prior std (fraction) 
 AI2ClutterFrac = 0.10       # ε: prior weight of the uniform clutter mixture component
 AI2ClutterScaleM = 0.12     # a point further than ~this from EVERY surface is explained by clutter
 AI2PriorSizeStd = 0.30      # broad size prior std (m) on w,h,H
-AI2ProcessStdM = 0.005      # predict process-noise std, length DOFs (m/frame) — rigid+static ⇒ small
+AI2ProcessStdM = 0.005      # predict process-noise std, POSE cx,cy (m/frame) — rigid+static ⇒ small
 AI2ProcessStdYaw = 0.01     # predict process-noise std, yaw (rad/frame)
+# ── "a static dining set must STAY converged" — the two terms that stop a 15-min-old table being re-cut ─────
+# Q is authored PER FRAME, so an UNOBSERVED table's prior decays as sigma ~ sqrt(frames) with nothing stopping
+# it. Measured (ai2_log.csv table_9, cycles 970 -> 2290, ~2 min unobserved, npts=0 throughout): std_w grew
+# 0.030 -> 0.170 m and std_yaw 0.101 -> 0.348 rad on Q alone; the next sparse mask (cycle 2410, 178 pts at
+# 2.39 m) then landed on a 5x-loosened belief and moved the table. Extrapolated to 15 min the walk reaches
+# +-0.47 m of extent and +-54 deg of yaw, i.e. total amnesia — exactly "a rogue mask repositions the set".
+AI2ProcessStdExtentM = 0.0  # EXTENT (w,h,H) process noise, m/frame, SEPARATE from the pose walk above. 0 = a
+                            # table's dimensions are CONSTANTS of the object: it can be nudged, but it never
+                            # grows or shrinks, so its extent must not random-walk. <0 = historic (share
+                            # AI2ProcessStdM). Pose Q stays > 0 so a genuinely moved table is still tracked.
+AI2ClampSigmaToPrior = true # cap Sigma at the PRIOR on predict: knowledge ages back toward what was known
+                            # before the table was ever seen and SATURATES there, instead of diverging
+                            # (Ornstein-Uhlenbeck, not a free random walk). Freshness-as-precision is
+                            # preserved — Sigma still grows monotonically with evidence age, it just stops at
+                            # Sigma_0 — so a 15-minute-old converged table still outweighs one rogue mask.
+                            # false = historic unbounded growth.
 AI2AgeNominalDtS = 0.1      # stale-belief aging: mask stream nominal period (s, 10 Hz masks). Σ inflates by Q·(dt/this) while the feed is silent (measurement-age→covariance) — completes the frozen-frame fix: a stale capture stamp now AGES the belief instead of freezing it. 0 = freeze on stale (historic).
 AI2TruncGateFrac = 0.10     # skip the geometric update when >this fraction of the mask silhouette is on the image border (truncated → biased)
+
+# ── FIXATION gate: the ATTENTION mechanism (eye-fixation analogue) — a DELIBERATE, flagged threshold ─────────
+# WHY A GATE AND NOT MORE GRADED COVARIANCE. Every soft lever here (range, obliquity, coverage, ego-motion
+# common-mode) acts through the per-frame common-mode Sigma_c, and the engine saturates a frame's information
+# at Sigma_c^-1 — a NONZERO asymptote. So a bad frame's authority is ATTENUATED but never ZERO, and the GN mean
+# step still moves the mean by ~Sigma_c^-1 every frame: hundreds of frames at 6 m beat the attenuation. Measured
+# twice on live data after the range and coverage terms were added — the set was STILL repositioned from 6 m.
+# Primates take in detail only during FIXATIONS and actively suppress intake otherwise (saccadic suppression);
+# attention is precision, and an unattended channel's precision is zero — the observation is not integrated at
+# all. This robot has no pan-tilt, so a fixation is the whole-body condition: CLOSE + CENTRED + STILL.
+# Outside a fixation the cycle is predict-only: mean HELD, Sigma inflates. Association and existence do NOT
+# read this, so an unfixated object is still CONFIRMED and tracked — only its pose/shape is frozen.
+# CAVEAT BY DESIGN: an object the robot never approaches, centres and holds still for keeps its BIRTH geometry
+# forever. That is the honest outcome (never claim a shape you never resolved) but it means convergence now
+# REQUIRES going to look. Diagnose with the fixated/fix_close/fix_centred/fix_still/roi_off CSV columns.
+FixationEnabled = true      # false = revert to the graded-only behaviour
+# ★2026-07-30: the CLOSE condition was a hard RANGE cut and it had the physics backwards. Range is only a
+# proxy; what decides whether a frame can resolve the geometry is how much un-cluttered surface lands on the
+# object. A dense far stare is better evidence than a starved near glance, yet the range cut rejected the
+# former. On chair_concept the identical cut froze every instance for 400/400 cycles while the robot was
+# parked and staring. Range now enters via point density, and is kept as a diagnostic / optional condition.
+FixationMinPts = 300        # RESOLVABLE: min mask points before a frame may touch the geometry
+FixationMaxTrunc = 0.10     # RESOLVABLE: max silhouette truncation (mirrors AI2TruncGateFrac)
+FixationRangeM = 0.0        # RETIRED as a gate (0 = off). >0 re-enables the old hard range cut (A/B)
+FixationCentreFrac = 0.60   # CENTRED: max |roi offset|, the "fovea". <=0 disables this one
+FixationStillDotd = 0.05    # STILL: max |motion_dotd| = Z*||sdot|| (m/s), ego-motion mask smear. <=0 disables
 # Static range weighting (motion-free): common-mode error grows with view distance so a far, vague mask
 # can confirm existence but NOT resolve pose/orientation (can't rotate a converged table). Continuous, no gate.
 AI2RangeNoiseLatPerM = 0.02 # lateral deprojection std growth (m per m of range) → feeds R + position common-mode
@@ -88,6 +130,25 @@ AI2RangeNoiseSizePerM = 0.08 # SIZE (w,h,H) common-mode std growth (m per m of r
                              # SATURATES lower with range, so a distant/vague mask can't reshape or INFLATE a
                              # converged table (freezes geometry afar; also caps the coverage grow-term). Raise
                              # to freeze harder at range; the sibling of the lat/yaw range terms. 0 = off.
+# ── COVERAGE (completeness) common-mode: the VIEW-QUALITY half of "close enough to reshape" ────────────────
+# Range alone does not decide whether a frame may re-cut the geometry, and the live log proves it: the worst
+# distortion of the apartment table happened at range 0.75 m — well inside every range term — with completeness
+# 0.28. h jumped +0.76 m in ONE frame, the table stayed ~1.7 m long for 1200 cycles, and only a completeness-1.9
+# view snapped it back (ai2_log.csv table_9, cycles 1127 → 1136 → 2537). A foreshortened/partial footprint is a
+# SLIVER: the per-point SDF can only explain it by stretching the extent, because the rest of the table is not in
+# the measurement at all. So the covariate that licenses RESHAPE is COVERAGE, not distance.
+#   c = observed footprint area / believed w·h ;  sigma_extra = gain * (1/c - 1)
+# Exactly 0 at c >= 1, so a full view is UNCHANGED — and because the term is one-sided it never blocks a table
+# that needs to GROW (c >= 1), only one being re-cut by a partial look. Continuous, no gate: a sliver still
+# confirms the table and still refines what it can see. Live distribution for table_9 (292 fit frames):
+# p25 = 0.32, p50 = 0.55, p75 = 0.98, 23% at c >= 1. At the gains below that leaves the 23% full views with full
+# authority, gives a half view sigma_size = 0.30 m (~1/200 the size information), and effectively freezes
+# geometry on the c ~ 0.2 slivers that did the damage. Set gains to 0 to disable.
+AI2CoverageSizeGain = 0.30  # SIZE (w,h,H) common-mode std (m) per unit of (1/c - 1) — the anti-RESHAPE lever
+AI2CoverageYawGain  = 0.15  # yaw common-mode std (rad) per unit of (1/c - 1)        — the anti-ROTATE lever
+AI2CoveragePosGain  = 0.05  # position (cx,cy) common-mode std (m) per unit of (1/c - 1); small on purpose — a
+                            # sliver still localises the near edge well, it just cannot resize the table
+AI2CoverageMin      = 0.02  # clamp floor on c so 1/c stays finite (caps the inflation)
 AI2GnIters = 4              # Gauss-Newton iterations per frame
 # Per-frame SHARED-ERROR common-mode stds — the information-saturation FLOORS (CLAUDE.md "encode the effect as a
 # continuous covariance"): N correlated points from one frame cannot collapse Σ below these. LOAD-BEARING. They
@@ -208,6 +269,21 @@ ExistenceRemoveFrames = 15     # debounce: require the removal decision for this
 # visible_fraction; OCCUPANCY stays fully informative (a distant detection still confirms). Power=0 disables.
 ExistenceAbsenceRangeRefM = 2.5   # range (m) below which absence is trusted at full weight
 ExistenceAbsenceRangePower = 2.0  # decay exponent (2 ≈ angular area ∝ 1/range²)
+# ── LINE OF SIGHT: stop a table in ANOTHER ROOM voting its own removal ──────────────────────────────────────
+# The silhouette channel's only occluder evidence is the NON-table YOLO masks — and YOLO never segments WALLS.
+# So a table behind a wall projects into the camera frustum, lands on unmasked wall pixels, and is scored
+# "predicted-visible but ABSENT": full-strength removal evidence for an object with ZERO visibility. Live proof
+# (ai2_log.csv): table_1 at 5.72 m and table_3 behind a wall, both n_detectable=640 with e_free=640 and
+# streak=15 -> deleted. Identical bug and identical fix as refrigerator_concept and door_concept.
+# PRIMARY test = the room's own wall polygon (delimiting_polygon_x/y on the room node) via the SHARED helper
+# rc::occlusion::walls_block(). Exact, cheap, needs no LiDAR sweep, and is what the sibling agents already use.
+# It arms itself automatically once the room node carries a polygon; no key needed. A sample within ~0.15 m of
+# a wall segment is not occluded by that segment, so a table pushed flush against a wall keeps its samples.
+#
+# OPTIONAL EXTRA below: a LiDAR azimuth oracle for occluders a polygon cannot know about (furniture, people,
+# an open door leaf). Needs a fresh sweep and quantises bearing, so it is OFF by default.
+ExistenceLosMarginM = 0.25   # sample must lie this far BEYOND the first LiDAR hit to count as occluded
+ExistenceLosAzimBins = 0     # 0 = LiDAR oracle OFF (walls_block covers walls). 720 ~ 0.5 deg bins to enable
 
 # Verification-gated removal (active inference): a predicted-visible-but-absent observation is only evidence of
 # REMOVAL in proportion to P(detect | present, geometry) = range_conf × in_fov_frac × central_frac. The REMAINING

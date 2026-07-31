@@ -2,7 +2,8 @@
 # --- Common Agent Data ---
 [Agent]
 id = 21 # unique across the shared graph (room=5 robot=6 table=7 ctrl=8 voxelizer=9 bottle=10
-        # kinova=11 self_calib=12 human=13 residual=14 chair=20). A collision = CRDT actor clash → SIGSEGV.
+        # kinova=11 self_calib=12 human=13 residual=14 door=15 scene_graph_viewer=16 chair=20
+        # refrigerator=22 ring_metaconcept=23). A collision = CRDT actor clash → SIGSEGV.
 name = "cabinet_concept"
 
 # --- Single Instance Configuration ---
@@ -57,6 +58,19 @@ MasksStallTimeoutMs = 3000   # 0 = disable the stall gate
 # kitchen (routing needs the run masks in view). Islands/peninsulas are Stage 4, not yet handled.
 KitchenModel = true
 CeilingHeightM = 2.6        # z-domain upper bound for wall-run tops (H_room)
+# RETIREMENT (kitchen mode). A born cell used to be IMMORTAL: mask absence deliberately does not fade an active
+# run (a look-away is not evidence of absence) and the free-space carve only reshapes it, so the only removal
+# path was engulfment by another agent's object — hence phantom runs that never went away. This turns on the
+# missing channel: LiDAR evidence of absence. A beam that traverses a run and lands on the WALL BEHIND it
+# refutes it; front-face/top returns defend it; an occluded run is not probed and simply holds. It integrates
+# into the SAME existence log-odds as mask presence, so retirement keeps ONE boundary (retire_logodds ≈ the
+# ExistenceRemovalProb=0.12 point), debounced over ExistenceRemoveFrames agreeing EVIDENCE cycles, and reuses
+# the Existence* sensor rates below (detection/clutter/σ/absence-range). false = the old immortal behaviour.
+KitchenLidarExistence = true
+# Per-cycle CSV of every non-idle kitchen cell (box + existence + coverage + the absence evidence). In kitchen
+# mode the fitter has NO instances, so ai2_log.csv is never written and birth_surprise.csv's cabinet columns are
+# identically 0 — this is the only observability the kitchen model has. Empty string disables.
+KitchenCellsCsvPath = "etc/kitchen_cells.csv"
 SigmaObs = 0.05             # top/leg SDF split band (m): a point within TOP_THICKNESS+SigmaObs below the top
                             # face is attributed to the slab (candidate) vs a leg — used for the mask split.
 SdfThresholdForStorage = 0.08  # |SDF| below which a mask support point is on-surface (candidate) vs residual

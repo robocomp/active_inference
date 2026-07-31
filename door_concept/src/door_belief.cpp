@@ -12,39 +12,16 @@
 namespace rc
 {
 
-namespace
-{
-// Exact box SDF from per-axis face distances (|local| − half_extent).
-float box_sdf(float dx, float dy, float dz)
-{
-    const float ox = std::max(dx, 0.0f), oy = std::max(dy, 0.0f), oz = std::max(dz, 0.0f);
-    const float outside = std::sqrt(ox * ox + oy * oy + oz * oz);
-    const float inside  = std::min(std::max(dx, std::max(dy, dz)), 0.0f);
-    return outside + inside;
-}
-}  // namespace
-
-// ─── SDF: one thin panel in the wall frame (placed by [s,w,h]; yaw/lateral/floor fixed by the wall) ──────
+// ─── SDF: the LEAF, wherever it currently is ────────────────────────────────────────────────────────────
 //
-// Wall frame: near corner O = params_.wall_O, along-wall unit u = params_.wall_u, across-wall unit
-// n = (−u.y, u.x). The panel centre sits s+w/2 along the wall and h/2 above the floor:
-//   centre_xy = O + (s + w/2)·u,   centre_z = floor_z + h/2.
-// Local axes are (u, n, ẑ) with half-extents (w/2, T/2, h/2).
+// Delegates to rc::door::leaf_sdf — the single source of truth (see door_geometry.h). The state [s,w,h]
+// gives the APERTURE; params_.leaf gives the leaf's articulation (phi / hinge / swing). With phi pinned at
+// 0 (M0) the leaf is flush in the aperture and this reduces, term for term and BIT-EXACTLY, to the old
+// wall-plane expression this function used to spell out inline. Routing the fit through the same function
+// as the silhouette / split / mesh / planner is what stops those consumers drifting apart again.
 float DoorBelief::sdf_panel(const Eigen::Vector3f& p, const DoorBeliefState& s) const
 {
-    const Eigen::Vector2f& u = params_.wall_u;
-    const Eigen::Vector2f  nrm(-u.y(), u.x());
-    const Eigen::Vector2f  centre_xy = params_.wall_O + (s.s + 0.5f * s.w) * u;
-    const float centre_z = params_.floor_z + 0.5f * s.h;
-
-    const Eigen::Vector2f d_xy(p.x() - centre_xy.x(), p.y() - centre_xy.y());
-    const float along  = d_xy.dot(u);        // along the wall
-    const float across = d_xy.dot(nrm);      // out of the wall
-    const float up     = p.z() - centre_z;   // vertical
-
-    return box_sdf(std::abs(along)  - 0.5f * s.w,
-                   std::abs(across) - 0.5f * params_.thickness,
-                   std::abs(up)     - 0.5f * s.h);
+    return door::leaf_sdf(leaf_pose_at(s), p);
 }
 
 float DoorBelief::sdf_prim(const Eigen::Vector3f& p, const DoorBeliefState& s, int /*prim*/) const
@@ -152,6 +129,8 @@ void DoorBelief::apply_constraints(DoorBeliefState& s) const
     s.h = std::max(0.05f, s.h);
     // A door lies WITHIN its wall: its span [s, s+w] must fit the segment [0, wall_len]. Clamp the near
     // edge so it can't run past either corner (physical, from the wall geometry — not a tuning threshold).
+    // This constrains the APERTURE, which is rigid in the wall. A swung LEAF legitimately protrudes past
+    // the wall plane — never clamp the leaf footprint here.
     if (params_.wall_len > 0.0f)
         s.s = std::clamp(s.s, 0.0f, std::max(0.0f, params_.wall_len - s.w));
 }
@@ -303,6 +282,11 @@ bool DoorBelief::self_test()
         std::printf("  clamp: s=%.3f (wall_len=1.0, w=0.70 → s must be ≤ 0.30)\n", b.state().s);
         check(b.state().s <= 0.30f + 1e-4f and b.state().s >= 0.0f, "along-wall clamp did not keep the panel within its wall");
     }
+
+    // (g) APERTURE / LEAF geometry (door_geometry.h). Asserts that phi = 0 reproduces the old wall-plane
+    // expressions BIT-EXACTLY, that a swing pins the hinge, and that the aperture never moves with phi —
+    // the regression net that keeps M1/M2 from re-scattering the geometry. One test entry point for the agent.
+    check(door::self_test(), "door_geometry self_test failed (see the FAIL lines above)");
 
     const auto& S = belief.covariance();
     std::printf("  Σ diag (std): s=%.3f w=%.3f h=%.3f\n",

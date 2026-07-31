@@ -92,6 +92,10 @@ public:
     // the still-level, OR the mask's own ego-motion corruption (motion_dotd) above its still-level.
     // (A/B FALLBACK path only — the hard gate; used when cfg.ai2_motion_confirm_only is true.)
     bool  confirm_only(const ChairInstance& inst) const;
+    // FIXATION (attention): may this view touch the chair's POSE at all? CLOSE + CENTRED + STILL, all three.
+    // Outside a fixation the cycle is predict-only (mean held) — INHIBITION, not attenuation, because the
+    // graded covariance levers saturate at a nonzero asymptote. See ChairConfig::fixation_enabled.
+    bool  fixated(const ChairInstance& inst, int npts) const;
     // Continuous frame reliability ∈ [0,1] (AIF): 1 = trustworthy (still OR centred), → 0 = moving AND peripheral.
     // Scales the existence NEGATIVE evidence so a smeared/off-axis frame can only CONFIRM, never argue a chair away.
     float frame_reliability(const ChairInstance& inst) const;

@@ -19,9 +19,11 @@
 // body-dimension read-back. It is a pure consumer of UpdateResult and holds no
 // threading state; SpecificWorker calls update() on fresh localization frames.
 
+#include <chrono>
 #include <cstdint>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -103,6 +105,20 @@ private:
                              std::uint64_t timestamp_ms);
     void dsr_create_room_and_reparent(const rc::RoomConcept::UpdateResult& res);
     void dsr_update_affordance(const rc::RoomConcept::UpdateResult& res);
+    /// Liveness watchdog for a claimed-but-unreachable afford_room target. While the controller
+    /// holds the execution claim the planner is deliberately idle, so if the controller can never
+    /// get there (boxed in by an obstacle it cannot clear) NOTHING re-offers and the robot works
+    /// its stuck-recovery forever — the run just stops making progress. This tracks the closest
+    /// approach to the claimed target and, if it stops improving for long enough, releases the
+    /// claim and stamps the target as visited so a different one is picked.
+    ///
+    /// NOTE (CLAUDE.md "no thresholds"): the no-progress window IS a threshold, deliberately. It
+    /// guards LIVENESS of the offer/claim/complete handshake, not a modelling decision — there is
+    /// no generative quantity here to make it fall out of, because the room agent cannot observe
+    /// why the controller is not moving. Kept out of the belief entirely: the only thing it feeds
+    /// back into the model is `mark_target_abandoned`, i.e. ordinary IoR evidence.
+    /// Returns true if the claim was broken this cycle.
+    bool break_execution_stall(const Eigen::Vector2f& robot_pos);
     void update_planner_obstacle_footprints();
     // Gather validated modelled objects from the graph (MAIN thread) and hand them to the
     // localizer as SE(2) pose landmarks.  No-op unless params_->ObjectAnchorEnable.
@@ -126,6 +142,14 @@ private:
     // Chain-propagated pose+covariance reader for object anchors. Created lazily on the MAIN
     // thread (owns an RT_API whose ts==0 path uses the InnerEigen cache — see CLAUDE.md).
     std::unique_ptr<DSR::InnerGaussianAPI> inner_gaussian_;
+
+    // ---- Execution-stall watchdog state (see break_execution_stall) ----
+    // Closest the robot has come to the currently-claimed target, and when that best was last
+    // improved. Reset whenever no claim is held or the claimed target moves.
+    float                                 stall_best_dist_    = std::numeric_limits<float>::infinity();
+    Eigen::Vector2f                       stall_target_{0.f, 0.f};
+    bool                                  stall_tracking_     = false;
+    std::chrono::steady_clock::time_point stall_last_progress_{};
 
     std::uint64_t dsr_robot_id_ = 0;
     std::uint64_t dsr_body_id_  = 0;

@@ -346,6 +346,15 @@ void SpecificWorker::run_kitchen_model()
     rc::KitchenManagerParams mp;
     mp.object_exclusion_enabled = cfg_.object_exclusion_precision > 0.0f;   // gate the engulfment-retirement pass
     mp.engulf_frac              = cfg_.object_engulf_frac;
+    // RETIREMENT: LiDAR evidence of absence on the born cells (a beam reaching the wall BEHIND a run refutes it).
+    // Same physical sensor rates as the classic existence path — one calibrated model, two consumers.
+    mp.lidar_existence_enabled  = cfg_.kitchen_lidar_existence;
+    mp.sensor_sigma_m           = cfg_.existence_sensor_sigma_m;
+    mp.detection_prob           = cfg_.existence_detection_prob;
+    mp.clutter_prob             = cfg_.existence_clutter_prob;
+    mp.absence_range_ref_m      = cfg_.existence_absence_range_ref_m;
+    mp.absence_range_power      = cfg_.existence_absence_range_power;
+    mp.retire_frames            = cfg_.existence_remove_frames;
     rc::CabinetFrame tmpl;
     tmpl.ego_motion_pos_var = mv * mv * periph;                     // fed to WallRunBelief::common_mode_inv_diag
 
@@ -377,6 +386,7 @@ void SpecificWorker::run_kitchen_model()
     kitchen_mgr_.update(pts, mp, tmpl);
     kitchen_mgr_.update_island(island_pts, mp, tmpl);              // the free-standing 4th cabinet (peninsula)
     publish_kitchen_boxes();
+    log_kitchen_cells(sweep_n);   // per-cycle cell CSV (the only observability the kitchen model has)
 
     if (++mdbg % 30 == 0)                                           // low-rate stillness diagnostic
         std::print("cabinet_concept: [kitchen] ego_lin={:.2f} ego_ang={:.2f} dotd={:.2f} radius={:.2f} periph={:.2f} sweep={} objs={} → pos_var={:.4f}\n",
@@ -460,6 +470,51 @@ void SpecificWorker::publish_kitchen_boxes()
         else ++it;
     }
     if (any_birth) trigger_graph_layout_twopi();
+}
+
+// Per-cycle CSV of the KITCHEN CELLS. In kitchen mode the fitter holds no instances, so ai2_log.csv is never
+// written and birth_surprise.csv's cabinet columns are identically 0 (it reads fitter_->instances()) — this file
+// is the only place the cells' state is observable. One row per cell that is ACTIVE or has any evidence this
+// cycle (existence ≠ 0 / routed points), so an idle 30-cell table costs nothing. Columns: the derived room box,
+// the two birth signals (existence log-odds, coverage EMA), and the LiDAR absence evidence that drives
+// retirement (ex_n = beams that probed it; 0 ⇒ HOLD). Off unless cfg_.kitchen_cells_csv_path is set.
+void SpecificWorker::log_kitchen_cells(std::size_t sweep_n)
+{
+    if (cfg_.kitchen_cells_csv_path.empty()) return;
+    if (not kitchen_cells_csv_.is_open())
+    {
+        kitchen_cells_csv_.open(cfg_.kitchen_cells_csv_path, std::ios::out | std::ios::trunc);
+        if (not kitchen_cells_csv_.is_open()) { cfg_.kitchen_cells_csv_path.clear(); return; }
+        kitchen_cells_csv_ << "cycle,cell,wall_seg,tier,active,node_id,existence,cov_ema,n_route,sweep_n,"
+                              "cx,cy,yaw,L,d,z0,z1,fe,ex_n,ex_occ,ex_free,ex_dL,retire_streak\n";
+    }
+    const long cyc = ++kitchen_cells_cycle_;
+    const auto row = [&](const std::string& id, int seg, int tier, bool active, std::uint64_t node_id,
+                         float existence, float cov_ema, const rc::KitchenCellDiag& dg,
+                         const rc::WallRunBelief* b, float fe)
+    {
+        float cx = 0, cy = 0, yaw = 0, L = 0, d = 0, z0 = 0, z1 = 0;
+        if (b) b->room_box(cx, cy, yaw, L, d, z0, z1);
+        kitchen_cells_csv_ << cyc << ',' << id << ',' << seg << ',' << tier << ',' << (active ? 1 : 0) << ','
+                           << node_id << ',' << existence << ',' << cov_ema << ',' << dg.n_route << ',' << sweep_n << ','
+                           << cx << ',' << cy << ',' << yaw << ',' << L << ',' << d << ',' << z0 << ',' << z1 << ','
+                           << fe << ',' << dg.ex_n << ',' << dg.ex_occ << ',' << dg.ex_free << ',' << dg.ex_dL << ','
+                           << dg.retire_streak << '\n';
+    };
+    for (const auto& c : kitchen_mgr_.cells())
+    {
+        if (not c.active() and c.diag.n_route == 0 and std::abs(c.existence) < 1e-3f) continue;   // silent cell
+        const auto it = kitchen_nodes_.find(c.geom.id);
+        row(c.geom.id, c.geom.wall_seg_id, c.geom.tier, c.active(),
+            it != kitchen_nodes_.end() ? it->second : 0, c.existence, c.cov_ema, c.diag, c.belief.get(), c.fe);
+    }
+    if (const auto* isl = kitchen_mgr_.island(); isl or kitchen_mgr_.island_diag().n_route > 0)
+    {
+        const auto it = kitchen_nodes_.find("island");
+        row("island", -1, 0, isl != nullptr, it != kitchen_nodes_.end() ? it->second : 0,
+            kitchen_mgr_.island_existence(), 0.0f, kitchen_mgr_.island_diag(), isl, 0.0f);
+    }
+    kitchen_cells_csv_.flush();
 }
 
 void SpecificWorker::run_instance_tracker()

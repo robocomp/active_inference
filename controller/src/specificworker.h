@@ -46,7 +46,6 @@
 #include "controller_runtime_types.h"
 #include "controller_session.h"
 #include "controller_world_model.h"
-#include "room_path_planner.h"
 #include "../../common/affordance_manager/affordance_manager.h"
 #include "../../common/agent_presence_coordinator/agent_presence_coordinator.h"
 #include "trajectory_controller.h"
@@ -142,7 +141,6 @@ private:
 	bool stop_sent_when_paused_ = false;
 	bool compute_debug_logged_ = false;
 	bool owned_nodes_cleaned_ = false;
-	RoomPathPlanner planner_;
 	rc::TrajectoryController path_controller_;
 
 	void load_params();

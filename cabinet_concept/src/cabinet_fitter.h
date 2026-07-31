@@ -101,7 +101,10 @@ public:
     // first resolves the box's 180° C2v yaw ambiguity (the front normal must face the room); the
     // second feeds the per-frame wall-flush factor. Both are set by the worker once the room is known.
     void set_room_geometry(const Eigen::Vector2f& interior, std::vector<Eigen::Vector2f> polygon)
-    { room_interior_ = interior; room_polygon_ = std::move(polygon); rebuild_wall_ids(); }
+    { room_interior_ = interior; room_polygon_ = std::move(polygon); rebuild_wall_ids();
+      // The projection unit needs the same walls: a silhouette sample behind one is NOT "predicted visible".
+      // Without it a cabinet in the next room votes its own removal — see CabinetProjection::set_room_polygon.
+      if (projection_) projection_->set_room_polygon(room_polygon_); }
     bool should_log(const CabinetInstance& inst) const;
     // Kitchen-model Stage 0: the collinear-merged room walls as KitchenWall (corners + inward normal), one
     // per canonical wall id — the geometry the (wall_id, tier) cell table is built on. Empty if no polygon.

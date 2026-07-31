@@ -87,6 +87,38 @@ AI2MotionRefMps = 0.60           # motion (m/s) at which a fully-peripheral fram
 # A/B FALLBACK — the OLD hard gate (predict-only when moving & off-centre). Default OFF; the continuous precision
 # above is the live path. Set AI2MotionConfirmOnly=true to compare; the four keys below feed only that path.
 AI2MotionConfirmOnly = false
+
+# ── FIXATION gate: the ATTENTION mechanism (eye-fixation analogue) — a DELIBERATE, flagged threshold ─────────
+# WHY A GATE AND NOT MORE GRADED COVARIANCE. Every soft lever here (range, obliquity, coverage, ego-motion
+# common-mode) acts through the per-frame common-mode Sigma_c, and the engine saturates a frame's information
+# at Sigma_c^-1 — a NONZERO asymptote. So a bad frame's authority is ATTENUATED but never ZERO, and the GN mean
+# step still moves the mean by ~Sigma_c^-1 every frame: hundreds of frames at 6 m beat the attenuation. Measured
+# twice on live data after the range and coverage terms were added — the set was STILL repositioned from 6 m.
+# Primates take in detail only during FIXATIONS and actively suppress intake otherwise (saccadic suppression);
+# attention is precision, and an unattended channel's precision is zero — the observation is not integrated at
+# all. This robot has no pan-tilt, so a fixation is the whole-body condition: CLOSE + CENTRED + STILL.
+# Outside a fixation the cycle is predict-only: mean HELD, Sigma inflates. Association and existence do NOT
+# read this, so an unfixated object is still CONFIRMED and tracked — only its pose/shape is frozen.
+# CAVEAT BY DESIGN: an object the robot never approaches, centres and holds still for keeps its BIRTH geometry
+# forever. That is the honest outcome (never claim a shape you never resolved) but it means convergence now
+# REQUIRES going to look. Diagnose with the fixated/fix_close/fix_centred/fix_still/roi_off CSV columns.
+FixationEnabled = true      # false = revert to the graded-only behaviour
+# ★2026-07-30: the CLOSE condition was a hard RANGE cut and it had the physics backwards. Range is only a
+# proxy; what decides whether a frame can resolve the pose is how much UN-CLUTTERED surface it puts on the
+# chair. A dense 3.7 m stare (chair_3: 400 pts, clutter 0.13) is better evidence than a starved 2.4 m glance,
+# yet the range cut rejected the former. Live cost: gated 400/400 cycles on all three real chairs — yaw span
+# EXACTLY 0.0 deg, std_yaw pinned at the 0.60 prior — while the robot was deliberately parked and staring.
+# Calibrated against that stare: chair_1/2/3 = 1195/875/400 pts, clutter 0.03/0.06/0.13 -> FIXATE;
+# chair_4 = 30 pts at 4.53 m -> REJECT. Range now enters only via point density, and is a diagnostic column.
+FixationMinPts = 150        # RESOLVABLE: min mask points before the frame may touch the pose
+FixationMaxClutter = 0.35   # RESOLVABLE: max clutter fraction (surface the model cannot explain)
+FixationRangeM = 0.0        # RETIRED as a gate (0 = off). Kept so an A/B revert to the range cut is one edit
+FixationCentreFrac = 0.60   # CENTRED: max off-axis radius, the "fovea". <=0 disables this one. 0.60 matches
+                            # AI2PeriphRef (0.50 ~ tan 27 deg) where this codebase's own periphery penalty
+                            # saturates; the previous 0.35 was tighter than that and blocked chair_2 at 2.04 m
+FixationStillDotd = 0.05    # STILL: max |motion_dotd| = Z*||sdot|| (m/s), ego-motion mask smear. <=0 disables
+FixationStillLinMps = 0.05  # STILL: max robot linear speed (m/s). <=0 disables this one
+FixationStillAngRadps = 0.10 # STILL: max robot angular speed (rad/s) — the TURN case. <=0 disables this one
 AI2StillLinMps   = 0.05
 AI2StillAngRadps = 0.10
 AI2StillDotd     = 0.05
@@ -102,6 +134,12 @@ AI2ExtentStd = 0.05              # extent-observation noise (m) for the coverage
 # chair that 1700 points at 3.5 m had resolved correctly.
 AI2ModeObsWeighting = true
 AI2ModeSatBackPts = 60.0
+# Total mode-evidence weight ONE bearing bin may ever contribute, approached asymptotically. Replaces the old
+# novelty = 1/(1+visits) divisor, under which a viewpoint's TOTAL contribution grew only as log(n) — so a
+# deliberate 3-minute fixation on a chair whose model was visibly ~45 deg off still could not settle it.
+# A stare now converges to this much (decisive: flip_acc_ runs to +-6), staring past it adds ~nothing (dwell
+# still cannot inflate confidence), and orbiting to a NEW bearing opens a fresh budget.
+AI2ViewBudget = 3.0
 
 [ChairConcept]
 StateEps = 0.04             # Σ|Δstate| threshold between cycles for convergence (m+rad)
@@ -196,10 +234,13 @@ OutOfRoomGain = 1.5      # |ΔL| per frame while outside → removed in a few fr
 ZedEdgeOffset = 1.0      # normalised ROI offset (0=centred, 1=image edge) at which ZED detectability → 0
 ZedRangeFull  = 4.0      # within this range (m) ZED detects reliably → absence fully counts (pd=1)
 ZedRangeRef   = 7.0      # beyond this range (m) ZED absence says nothing about existence (pd=0)
-ZedClearLosFloor = 0.15  # pd FLOOR for an UNOCCLUDED in-frustum chair: even at the ZED periphery a persistently-
-                         # unexplained chair with CLEAR line of sight still vacates at ≥ this rate → a glitch-
-                         # stranded phantom the robot never centres eventually dies. conf gates on staleness so a
-                         # recently-seen chair is untouched. Occluded chairs HOLD (protected before this branch).
+ZedClearLosFloor = 0.0   # ★0 SINCE 2026-07-29 (was 0.15) — this floor WAS the "chairs vanish when unobserved" bug.
+                         # It overrode zed_detectability()==0 (chair beyond ZedRangeRef or at the image edge = ZED
+                         # provably cannot resolve it) and vacated anyway at a constant rate once since_det passed
+                         # VacateConfidentFrames, so L walked to RemoveLogodds on ZERO informative looks. Live proof
+                         # in etc/chair_existence_log.csv: 51 of 69 vacate rows had zed_pd == 0 exactly; chair_2 fell
+                         # 3.09→1.74 and chair_3 2.44→1.09 on the floor alone, then were deleted. Out-of-room glitch
+                         # phantoms (the case this was aimed at) are still reaped by the room-containment prior.
                          # 0 = pure pd (a peripheral phantom then persists until the robot centres it). Tune down
                          # if real peripheral chairs get removed; up to clear glitch phantoms faster.
 

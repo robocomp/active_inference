@@ -39,9 +39,12 @@ public:
         float max_back_adv = 0.20f; // m/s backward (for evasion maneuvers)
         float max_rot   = 0.7f;   // rad/s
 
-        // Safety
-        float d_safe       = 0.35f; // minimum ESDF distance to consider a trajectory safe
-        float robot_radius = 0.3f;
+        // Safety.
+        // d_safe is a PREFERRED standoff — comfort, not geometry. The hard limit is the footprint itself
+        // (see body_extent_* below), so d_safe can be tuned freely without ever making a reachable goal
+        // unreachable. There is deliberately NO robot_radius here: a disc radius is a guess, and six of them
+        // stacked across this stack once demanded ~0.95 m of gap for a robot that passes 0.461 m.
+        float d_safe       = 0.35f; // preferred ESDF standoff BEYOND the body extent
         float safety_priority_scale = 1.0f; // always-on safety boost applied before mood (>=1 recommended)
 
         // Carrot / path following
@@ -315,13 +318,6 @@ public:
     // declare the goal reached immediately on arrival, no final rotation.
     void set_goal_facing_yaw(std::optional<float> yaw_rad);
 
-    // Obstacle clearance this controller still enforces once the robot is AT the goal (the fully-relaxed
-    // near-goal d_safe). A navigation target closer than this to an obstacle is unreachable BY CONSTRUCTION:
-    // the robot approaches, the obstacle cost pushes it back out, and goal_reached never fires — it hunts at
-    // the boundary forever. So target repair must use THIS number, not its own guess, or the two disagree and
-    // the planner happily hands the robot a goal the local controller will never permit. Exposing it here
-    // keeps a single source of truth instead of two constants that silently drift apart.
-    float goal_clearance_requirement() const { return effective_d_safe_for_goal_dist(0.f); }
     ControlOutput compute(const Eigen::Affine2f& robot_pose);
     void stop();
     void set_lidar_buffer(LidarPointBuffer *buffer) { lidar_buffer_ = buffer; }
@@ -348,6 +344,10 @@ public:
     /// the ESDF built during the most recent compute(). Used by recovery to probe side /
     /// rear clearance. Returns the unknown-distance sentinel if no ESDF exists yet.
     float clearance_at(float rx, float ry) const { return query_esdf(rx, ry); }
+
+    /// The robot's real silhouette. Exposed so callers ask THIS object what the body reaches instead of
+    /// keeping their own radius — that habit is what produced six independent margins across three agents.
+    const RobotFootprint& footprint() const { return footprint_; }
 
     Params params;
 
@@ -479,6 +479,20 @@ private:
     // Robot extent toward the nearest obstacle at a pose — the footprint's support function along the
     // ESDF's negative gradient. Replaces the constant robot_radius disc in the obstacle terms.
     float body_extent_toward_obstacle(float rx, float ry, float theta) const;
+    // Robot extent toward a KNOWN direction, for a body at heading `heading`. Use this wherever the thing
+    // being tested has a bearing — a LiDAR return, a nearest obstacle point, a path tangent — because then
+    // the exact answer is available and a disc is pure pessimism. `dir` and `heading` must be in the SAME
+    // frame; which frame does not matter, only that they agree.
+    //
+    // ONE negation, in ONE place: this controller integrates x += adv·sin θ, y += adv·cos θ, so its heading
+    // is measured from +y toward +x — CLOCKWISE — while RobotFootprint rotates counter-clockwise. The Shadow
+    // hull is very nearly x-symmetric, so mixing the two costs only millimetres, which is precisely why it
+    // would never be caught by watching the robot drive. Keep the conversion here and it cannot drift.
+    float body_extent(const Eigen::Vector2f& dir, float heading = 0.f) const
+    { return footprint_.support_radius(-heading, dir); }
+    // Worst-case extent over all bearings. The ONLY legitimate fallback: score normalisations and scale
+    // constants, where no bearing exists and being conservative costs nothing but a slightly wider ramp.
+    float body_extent_max() const { return footprint_.circumscribed_radius(); }
     float obstacle_step_cost(float esdf_val, float d_safe_eff, float body_r) const;
     float obstacle_repulsion_strength(float esdf_val, float d_safe_eff, float body_r) const;
 

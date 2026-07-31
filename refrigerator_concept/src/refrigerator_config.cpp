@@ -74,6 +74,8 @@ RefrigeratorConfig load_refrigerator_config(const ConfigLoader& cfg)
     out.ai2_wall_precision          = getf("RefrigeratorModel.AI2WallPrecision",         400.0f);
     out.ai2_wall_parallel_precision = getf("RefrigeratorModel.AI2WallParallelPrecision", 200.0f);
     out.ai2_wall_reach_m            = getf("RefrigeratorModel.AI2WallReachM",             0.15f);
+    out.ai2_wall_explain_frac       = getf("RefrigeratorModel.AI2WallExplainFrac",        0.25f);
+    out.ai2_wall_explain_sigma_m    = getf("RefrigeratorModel.AI2WallExplainSigmaM",      0.05f);
     out.ai2_wall_no_cross_precision = getf("RefrigeratorModel.WallNoCrossPrecision",     2000.0f);
     out.ai2_wall_no_cross_margin_m  = getf("RefrigeratorModel.WallNoCrossMarginM",       0.0f);
     out.ai2_process_std_m    = getf("RefrigeratorModel.AI2ProcessStdM",      0.005f);
@@ -114,6 +116,7 @@ RefrigeratorConfig load_refrigerator_config(const ConfigLoader& cfg)
     out.fridge_filter_enabled   = getb("RefrigeratorConcept.FridgeFilterEnabled",   true);
     out.plaus_aspect_scale      = getf("RefrigeratorModel.AspectScale",             0.15f);
     out.plaus_size_scale        = getf("RefrigeratorModel.SizeScale",               0.15f);
+    out.plaus_alt_size_scale    = getf("RefrigeratorModel.AltSizeScale",            0.60f);
     out.plaus_height_min        = getf("RefrigeratorModel.HeightPlausibleMin",      1.20f);
     out.plaus_height_soft       = getf("RefrigeratorModel.HeightSoft",              0.15f);
     out.plaus_fe_ref            = getf("RefrigeratorModel.FeRef",                    2.0f);
@@ -189,7 +192,6 @@ RefrigeratorConfig load_refrigerator_config(const ConfigLoader& cfg)
     out.existence_verify_surprise     = getf("RefrigeratorModel.ExistenceVerifySurprise",   20.0f);
     out.verify_surprise_smooth        = getf("RefrigeratorModel.VerifySurpriseSmooth",       0.10f);
     out.existence_verify_gain         = getf("RefrigeratorModel.ExistenceVerifyGain",       5.0f);
-    out.existence_leg_occupancy       = getb("RefrigeratorModel.ExistenceLegOccupancy", true);
 
     std::print("refrigerator_concept: configuration loaded.\n");
     return out;

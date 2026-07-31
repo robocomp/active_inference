@@ -243,6 +243,8 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     auto& ec = epistemic.params;
     auto& ep = epistemic.epistemic_planner().params;
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "EpistemicController.PublishAffordance", p.PUBLISH_AFFORDANCE);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.ExecStallTimeout", p.EXEC_STALL_TIMEOUT_S);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.ExecStallProgress", p.EXEC_STALL_PROGRESS_M);
     rc::ConfigLoaderUtils::load_optional<int>(cl, "EpistemicController.NumArcCurvatures", ec.num_arc_curvatures);
     rc::ConfigLoaderUtils::load_optional<int>(cl, "EpistemicController.HorizonSteps", ec.horizon_steps);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.Dt", ec.dt);
@@ -278,9 +280,10 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.WIorDrive", ep.w_ior_drive);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.WPathInterest", ep.w_path_interest);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.IorPathRadius", ep.ior_path_radius);
-    rc::ConfigLoaderUtils::load_optional<bool>(cl, "EpistemicController.PatrolEnabled", ep.patrol_enabled);
-    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.PatrolGainFloor", ep.patrol_gain_floor);
-    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.InfoExhaustedGain", ep.info_exhausted_gain);
+    // PatrolEnabled / PatrolGainFloor / InfoExhaustedGain were the second-level "patrol mode"
+    // switch. Removed: the epistemic term is now MARGINAL (it extinguishes itself when there is
+    // nothing left to see) and the IoR drive is unbounded in neglect age (it never flatlines), so
+    // the hand-off happens continuously and there is nothing left to trigger or floor.
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.FimCornerSigma", ep.fim_corner_sigma);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.FimMaxRange", ep.fim_max_range);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.FimPriorPrecisionFloor", ep.fim_prior_precision_floor);

@@ -136,6 +136,19 @@ void TableSceneGraph::step_write_model(TableInstance& inst, DSR::Node& node,
         inst.subtype == "round" ? std::string("table_concept/meshes/round_table.obj")
                                 : std::string("table_concept/meshes/table.obj"));
     G_->add_or_modify_attrib_local<mesh_texture_path_att>(node, std::string("table_concept/meshes/table_basecolor.png"));
+    // Inferred albedo tint for that mesh (DISPLAY ONLY — see common/appearance_belief). Published as
+    // CHROMATICITY, pre-scaled by the belief's confidence toward neutral grey, so the colour fades IN as
+    // evidence accumulates instead of popping to whatever the first frame's lighting happened to be. Not
+    // published at all until the belief has seen a frame, which leaves the viewer on the asset's authored
+    // .mtl colours — the correct default when we know nothing.
+    if (inst.appearance.initialized())
+    {
+        const float           c       = inst.appearance.confidence();
+        const Eigen::Vector3f neutral = Eigen::Vector3f::Constant(1.0f / 3.0f);
+        const Eigen::Vector3f tint    = neutral + c * (inst.appearance.map() - neutral);
+        G_->add_or_modify_attrib_local<mesh_color_rgb_att>(node,
+            std::vector<float>{tint.x(), tint.y(), tint.z()});
+    }
 
     // Export full table-owned voxel memory (room frame) as XYZ triples.
     {

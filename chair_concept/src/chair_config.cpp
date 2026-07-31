@@ -72,6 +72,14 @@ ChairConfig load_chair_config(const ConfigLoader& cfg)
     out.ai2_periph_ref            = getf("ChairModel.AI2PeriphRef",           0.50f);
     out.ai2_motion_ref_mps        = getf("ChairModel.AI2MotionRefMps",        0.60f);
     out.ai2_motion_confirm_only   = getb("ChairModel.AI2MotionConfirmOnly",   false);
+    out.fixation_enabled          = getb("ChairModel.FixationEnabled",         true);
+    out.fixation_min_pts          = geti("ChairModel.FixationMinPts",          150);
+    out.fixation_max_clutter      = getf("ChairModel.FixationMaxClutter",      0.35f);
+    out.fixation_range_m          = getf("ChairModel.FixationRangeM",          0.0f);   // retired as a gate
+    out.fixation_centre_frac      = getf("ChairModel.FixationCentreFrac",      0.60f);
+    out.fixation_still_dotd       = getf("ChairModel.FixationStillDotd",       0.05f);
+    out.fixation_still_lin_mps    = getf("ChairModel.FixationStillLinMps",     0.05f);
+    out.fixation_still_ang_radps  = getf("ChairModel.FixationStillAngRadps",   0.10f);
     out.ai2_still_lin_mps         = getf("ChairModel.AI2StillLinMps",         0.05f);
     out.ai2_still_ang_radps       = getf("ChairModel.AI2StillAngRadps",       0.10f);
     out.ai2_still_dotd            = getf("ChairModel.AI2StillDotd",           0.05f);
@@ -124,7 +132,7 @@ ChairConfig load_chair_config(const ConfigLoader& cfg)
     out.exist_zed_edge_offset    = getf("Existence.ZedEdgeOffset",    1.0f);
     out.exist_zed_range_full     = getf("Existence.ZedRangeFull",     4.0f);
     out.exist_zed_range_ref      = getf("Existence.ZedRangeRef",      7.0f);
-    out.exist_zed_clear_los_floor = getf("Existence.ZedClearLosFloor", 0.15f);
+    out.exist_zed_clear_los_floor = getf("Existence.ZedClearLosFloor", 0.0f);   // 0 = pure pd (see chair_config.h)
     out.tracker_birth_seat_w     = getf("Tracker.BirthSeatW",       0.60f);
     out.tracker_birth_seat_d     = getf("Tracker.BirthSeatD",       0.52f);
     out.tracker_birth_seat_h     = getf("Tracker.BirthSeatH",       0.595f);
@@ -133,6 +141,7 @@ ChairConfig load_chair_config(const ConfigLoader& cfg)
     out.tracker_birth_leg_half   = getf("Tracker.BirthLegHalf",     0.0375f);
     out.ai2_mode_obs_weighting   = getb("ChairModel.AI2ModeObsWeighting", true);
     out.ai2_mode_sat_back_pts    = getf("ChairModel.AI2ModeSatBackPts",   60.0f);
+    out.ai2_view_budget          = getf("ChairModel.AI2ViewBudget",        3.0f);
     out.tracker_nll_cost         = getb("Tracker.NllCost",          false);
     out.ricoh_birth_enabled      = getb("Tracker.RicohBirthEnabled", false);
     out.ricoh_birth_conf         = getf("Tracker.RicohBirthConf",    0.60f);

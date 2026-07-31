@@ -32,8 +32,10 @@ struct RingConfig
     std::string ring_class   = "chair";      // ring members arranged around the anchor
 
     // ── The node this agent OWNS (births in M3) ──────────────────────────────────
-    // Also generic type "object"; the class lives in object_subtype and the name carries the
-    // prefix, so the stale-sweep keys on type()=="object" + this prefix (many objects share the graph).
+    // DSR type `metaconcept` — NOT `object` like the members above. A rig is a belief about a
+    // RELATION among nodes, so it must stay out of everyone's get_nodes_by_type("object") sweep
+    // (else it is drawn as a solid, carved out of the residual grid, and associated against). The
+    // class still lives in object_subtype and the name carries the prefix, which the sweep keys on.
     std::string node_subtype = "dining_set";     // object_subtype written on the owned node
     std::string node_prefix  = "dining_set_";    // owned-node NAME prefix (sweep/cleanup key)
 

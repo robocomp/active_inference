@@ -21,6 +21,7 @@
 #include "table_belief.h"       // AI2 full-covariance belief (TABLE.md)
 #include "table_affordance.h"   // TableAffordance
 #include "../../common/existence_belief/existence_belief.h"   // per-instance existence log-odds (removal)
+#include "../../common/appearance_belief/appearance_belief.h" // per-instance albedo chromaticity (DISPLAY only)
 
 namespace rc {
 
@@ -52,6 +53,17 @@ struct TableInstance
     // Depth-uncertainty of the mask (common/depth_projection): σ_range² (m²) added to R, sibling to
     // last_motion_var. 0 for dense-depth zed masks; the scored range variance for lidar-depth ricoh masks.
     float last_depth_var       = 0.0f;
+
+    // ── Appearance (DISPLAY ONLY) ─────────────────────────────────────────────────────────────────
+    // 3-DOF Gaussian over the table's albedo CHROMATICITY, fed by the voxelizer's per-mask colour summary
+    // and consumed only by table_scene_graph, which publishes its MAP as `mesh_color_rgb` for the 3D
+    // viewer's mesh tint. Nothing in the AI2 belief, the association gate, or the existence log-odds reads
+    // it — a channel built from tens of thousands of correlated mask pixels is kept out of the fit on
+    // purpose. See common/appearance_belief/appearance_belief.h.
+    rc::appearance::AppearanceBelief appearance;
+    // Wall stamp of the last appearance drift step, so the drift tracks real elapsed time rather than a
+    // cycle count — an agent running slow (or briefly stalled) must not under-inflate. Zero until first use.
+    std::chrono::steady_clock::time_point last_appearance_tp{};
 
     // ── LiDAR range-channel diagnostics (this frame) ──────────────────────────────────────────────
     // #returns fed to the factor, #returns in a generous box, and their mean |dist| to the current model
@@ -187,6 +199,19 @@ struct TableInstance
     float dbg_yaw_pre       = 0.0f;   // belief yaw at cycle start, before the update (rad)
     float dbg_obliquity_cos = 1.0f;   // |cos(incidence)| of camera→table ray vs tabletop normal +z (1=top-down, →0 grazing)
     float dbg_completeness  = 1.0f;   // observed footprint area / believed w·h (<1 = partial/foreshortened mask)
+    // PERSISTENT copy of the above (dbg_completeness is reset to 1 at the top of every fresh cycle, so it cannot
+    // be read back). Survives cycles — including GATED ones, where no new footprint is measured and the last
+    // known view quality is the right carry-forward. Feeds the COVERAGE common-mode in table_fitter.cpp: it is
+    // the covariate that says how much of the believed footprint this viewpoint actually spans, which is what
+    // licenses a frame to RESHAPE the table. One cycle stale by construction; harmless for a static object.
+    float last_completeness = 1.0f;
+    // FIXATION gate readouts (see TableConfig::fixation_enabled): which of the three attention conditions
+    // held this cycle, and whether the geometry update was therefore admitted. Logged to the CSV so a
+    // "why is my table frozen / why did it still move" question is answerable without a rebuild.
+    bool  dbg_fixated     = true;
+    bool  dbg_fix_close   = true;
+    bool  dbg_fix_centred = true;
+    bool  dbg_fix_still   = true;
     float dbg_dyaw_points   = 0.0f;   // this cycle's yaw move attributed to the per-point GN channel (rad)
     float dbg_dyaw_moment   = 0.0f;   // ...to the footprint-moment channel (rad)
     float dbg_dyaw_flip     = 0.0f;   // ...to the resolve_orientation 90° flip (rad)

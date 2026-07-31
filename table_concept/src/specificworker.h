@@ -77,6 +77,9 @@ public:
 public slots:
     void initialize();
     void compute();
+    // Room wall polygon → fitter → projection: the silhouette channel's line-of-sight test, so a table behind
+    // a wall is NOT scored "predicted visible but absent". See the definition for the failure it fixes.
+    void refresh_room_geometry();
     void emergency();
     void restore();
     int  startup_check();

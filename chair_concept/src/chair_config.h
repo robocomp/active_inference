@@ -99,6 +99,35 @@ struct ChairConfig
     float ai2_still_ang_radps     = 0.10f;  // (hard gate) camera angular speed (rad/s) below which robot counts as "still"
     float ai2_still_dotd          = 0.05f;  // (hard gate) per-mask ego-motion corruption speed (m/s) still-level
     float ai2_moving_update_center_radius = 0.35f;  // (hard gate) mask centroid radius below which a moving update is allowed
+
+    // ── FIXATION gate: the ATTENTION mechanism (a DELIBERATE, flagged threshold) ──────────────────────────
+    // Same rationale as table_concept's (see TableConfig::fixation_enabled): every graded lever acts through
+    // the per-frame common-mode Σc, and the engine saturates a frame's information at Σc⁻¹ — a NONZERO
+    // asymptote — so a bad frame is attenuated but still moves the GN mean, and accumulation over hundreds of
+    // frames beats attenuation. Live: chairs still repositioned from 6 m after the graded terms were added.
+    // The model is EYE FIXATION: primates take in detail only during fixations and actively suppress intake
+    // otherwise. Attention is precision, and an unattended channel's precision is ZERO — the observation is
+    // not integrated. With no pan-tilt, a fixation is the whole-body condition: CLOSE + CENTRED + STILL.
+    // Outside a fixation the cycle is predict-only (mean HELD, Σ inflates). Association and existence do not
+    // read this, so the chair is still CONFIRMED and tracked — only its POSE is frozen.
+    // Distinct from ai2_motion_confirm_only above, which required moving AND off-centre and had no range
+    // condition at all (so a still robot 6 m away updated at full authority — the actual live failure).
+    // CAVEAT by design: a chair never approached, centred and held still for keeps its birth pose.
+    bool  fixation_enabled       = true;
+    // RESOLVABLE (replaced the hard RANGE cut on 2026-07-30 — see ChairFitter::fixated). Range is only a
+    // proxy; what decides whether a frame can resolve the pose is how much UN-CLUTTERED surface it puts on
+    // the chair. The range cut rejected a dense 3.7 m stare while accepting a starved 2.4 m glance, and
+    // blocked 400/400 cycles on all three real chairs while the robot was parked and staring.
+    int   fixation_min_pts       = 150;    // min mask points for the frame to say anything about the pose
+    float fixation_max_clutter   = 0.35f;  // max clutter fraction (surface the model cannot explain)
+    float fixation_range_m       = 0.0f;   // RETIRED as a gate (0 = off). Kept so an A/B revert is one edit.
+    float fixation_centre_frac   = 0.60f;  // CENTRED: max mask-centroid radius (focal-norm) — the "fovea".
+                                           // 0.60 matches AI2PeriphRef (0.50 ≈ tan 27°, where the codebase's
+                                           // own periphery penalty saturates); 0.35 was tighter than that.
+    float fixation_still_dotd    = 0.05f;  // STILL: max |motion_dotd| = Z·‖ṡ‖ (m/s) ego-motion mask smear
+    float fixation_still_lin_mps = 0.05f;  // STILL: max robot linear speed (m/s)
+    float fixation_still_ang_radps = 0.10f;// STILL: max robot angular speed (rad/s) — the turn case
+
     // Obliquity yaw cap (TABLE.md §6): the backrest (the chair's yaw-carrying surface) is a vertical plate, so
     // a view that grazes it edge-on can barely observe yaw. Grow the SHARED yaw variance as 1/obliquity_cos−1
     // so a grazing frame confirms the chair but can't rotate a converged one. Continuous covariance, no gate.
@@ -173,10 +202,20 @@ struct ChairConfig
     float exist_zed_edge_offset = 1.0f;   // Existence.ZedEdgeOffset — normalised ROI offset at which ZED detectability→0
     float exist_zed_range_full  = 4.0f;   // Existence.ZedRangeFull — within this range (m) ZED detects reliably (pd=1)
     float exist_zed_range_ref   = 7.0f;   // Existence.ZedRangeRef — beyond this range (m) ZED absence is uninformative (pd=0)
-    // pd FLOOR for an UNOCCLUDED, in-frustum chair: even at the ZED periphery (low pd) a persistently-unexplained
-    // chair with clear line of sight still vacates at ≥ this rate, so a glitch-stranded phantom the robot never
-    // centres eventually dies (conf gates on staleness → a recently-seen chair is untouched). 0 = pure pd (no floor).
-    float exist_zed_clear_los_floor = 0.15f;  // Existence.ZedClearLosFloor
+    // pd FLOOR for an UNOCCLUDED, in-frustum chair. ★DEFAULT 0 SINCE 2026-07-29 — this floor was the live cause
+    // of "chairs disappear when the robot isn't looking at them". It overrides zed_detectability()==0 (chair past
+    // ZedRangeRef or at the image edge, i.e. the ZED provably CANNOT resolve it) and vacates anyway at the floor
+    // rate; with conf saturated (since_det ≥ VacateConfidentFrames) that is a constant −g·floor every sensor frame
+    // and L walks to RemoveLogodds with ZERO informative observations. Measured in chair_existence_log.csv: 53 of
+    // 69 vacate-branch rows had zed_pd < 0.15 (51 of them exactly 0), and chair_2/chair_3 fell 3.09→1.74 and
+    // 2.44→1.09 purely on the floor before being deleted — the real chairs the user reported.
+    // It is also a hard threshold of exactly the kind CLAUDE.md forbids: "absence removes only to the degree the
+    // sensor could have detected" IS the model, and the floor contradicts it. The glitch-stranded phantom it was
+    // aimed at is already handled by the room-containment prior above (a mislocalised chair lands outside the
+    // walls and draws exist_out_of_room_gain every frame regardless of visibility). A phantom that is genuinely
+    // in-room and never resolvable should drive the robot to GO LOOK (table_concept's wants_verification pull),
+    // not be deleted unseen. Set > 0 only to reinstate the old unseen-decay.
+    float exist_zed_clear_los_floor = 0.0f;  // Existence.ZedClearLosFloor
     // ★TEMPLATE GEOMETRY — this is the chair the belief actually believes in. The pose-only belief does
     // NOT fit size, so any error here is a systematic model-vs-world mismatch that the clutter component
     // silently absorbs. 2026-07-27: these were 0.45 across the board against a real Webots SimpleChair of
@@ -202,6 +241,9 @@ struct ChairConfig
     // for A/B: that path let 21-point frames at 6.5 m rotate a chair resolved on 1700 points at 3.5 m.
     bool  ai2_mode_obs_weighting = true;
     float ai2_mode_sat_back_pts  = 60.0f;   // backrest mass at which a frame is half-informative
+    // Total mode-evidence weight one bearing bin may ever contribute (see ChairBeliefParams::view_budget).
+    // Replaces the old 1/(1+visits) novelty divisor so a deliberate fixation can actually settle the yaw.
+    float ai2_view_budget        = 3.0f;
     bool  tracker_nll_cost         = false;   // association cost = ½(m²+ln|S|) NLL (vs raw m²); see InstanceTracker
     // ZED-only BIRTH gate: only a ZED slice (depth_var==0) may SPAWN a chair; a ricoh LiDAR-depth slice
     // (depth_var>0, unreliable depth/extent) may associate/confirm an existing chair but never birth a phantom.

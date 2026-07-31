@@ -36,6 +36,7 @@ ChairBeliefParams ChairFitter::make_belief_params() const
     p.leg_half       = cfg_.tracker_birth_leg_half;
     p.mode_obs_weighting = cfg_.ai2_mode_obs_weighting;
     p.mode_sat_back_pts  = cfg_.ai2_mode_sat_back_pts;
+    p.view_budget        = cfg_.ai2_view_budget;   // saturating per-viewpoint evidence budget (not 1/(1+n))
     p.sigma_base_m         = cfg_.ai2_sigma_base_m;
     p.clutter_frac         = cfg_.ai2_clutter_frac;
     p.clutter_scale_m      = cfg_.ai2_clutter_scale_m;
@@ -186,6 +187,18 @@ ChairFitter::ChairObservation ChairFitter::observe(ChairInstance& inst, const DS
     // Detection-aliveness ages every cycle; a fresh chair mask below resets it to 0.
     if (inst.frames_since_detection < 1000000) ++inst.frames_since_detection;
 
+    // Appearance drift (DISPLAY only). Runs every cycle whether or not this chair was seen: an
+    // unobserved object's colour genuinely becomes less certain as the lighting and viewpoint move on,
+    // and without this the belief saturates on the first confident view and can never be corrected.
+    // Wall-clock, not cycle count, so an agent running slow does not under-inflate.
+    {
+        const auto tp_now = std::chrono::steady_clock::now();
+        if (inst.last_appearance_tp.time_since_epoch().count() != 0)
+            inst.appearance.inflate_for_age(
+                std::chrono::duration<float>(tp_now - inst.last_appearance_tp).count());
+        inst.last_appearance_tp = tp_now;
+    }
+
     // Primary path: YOLO "masks" (room frame), masks-only. Classify-don't-destroy SDF split keeps
     // inliers as candidates and the rest as residuals that drive model expansion.
     const auto& masks_packet = mask_ingestor_->packet();
@@ -213,6 +226,11 @@ ChairFitter::ChairObservation ChairFitter::observe(ChairInstance& inst, const DS
             inst.last_range       = slice.range;
             inst.last_centroid_radius = slice.centroid_radius;   // image-centredness (moving-update exception)
             inst.last_depth_var   = slice.depth_var;             // 0=ZED, >0=ricoh LiDAR-depth → downweights the fit (added to R)
+            // Appearance (DISPLAY ONLY — deliberately NOT folded into the observation, so no fit can
+            // ever see it). Sidecar belief whose only consumer is the mesh tint sent to the voxelizer.
+            // color_neff==0 (every ricoh slice) is a no-op inside update(), so this is safe to call
+            // unconditionally on whatever slice won.
+            inst.appearance.update(slice.color_chroma, slice.color_var, slice.color_neff);
             const std::size_t begin = std::min(slice.support_begin, masks_packet.support_points.size());
             const std::size_t end = std::min(slice.support_end, masks_packet.support_points.size());
 
@@ -375,6 +393,7 @@ float ChairFitter::run_inference(ChairInstance& inst, const ChairObservation& ob
     // viewing it edge-on (yaw barely observable). Feeds the shared yaw variance below (§D). Needs the camera
     // origin; default 1.0 (no cap) when the extrinsic isn't available this frame.
     inst.dbg_obliquity_cos = 1.0f;
+    inst.dbg_obliquity_eff = 1.0f;
     if (const auto rTz = room_T_zed_matrix(inst.last_mask_timestamp_ms); rTz.has_value())
     {
         const auto& s0b = inst.ai2_belief.state();
@@ -383,8 +402,29 @@ float ChairFitter::run_inference(ChairInstance& inst, const ChairObservation& ob
         if (r_xy.norm() > 1e-6f)
         {
             r_xy.normalize();
-            const Eigen::Vector2f n_back(std::sin(s0b.yaw), -std::cos(s0b.yaw));   // backrest outward normal (room xy)
-            inst.dbg_obliquity_cos = std::abs(r_xy.dot(n_back));
+            const auto cos_at = [&](float psi)
+            { return std::abs(r_xy.dot(Eigen::Vector2f(std::sin(psi), -std::cos(psi)))); };
+            inst.dbg_obliquity_cos = cos_at(s0b.yaw);   // point estimate (diagnostic only, see below)
+            // MARGINAL obliquity: E|r̂·n̂_back(ψ)| under the yaw posterior, by fixed Gauss-Hermite-style
+            // quadrature over ψ ~ N(ψ̂, σ_ψ²). σ_ψ is the belief's own marginal yaw std, so this needs no new
+            // state and no tuning. Unconverged ⇒ the zero is smoothed away and yaw stays correctable;
+            // converged ⇒ collapses to the point estimate and the grazing cap returns at full strength.
+            const float sig = std::clamp(std::sqrt(std::max(0.0f, inst.ai2_belief.covariance()(2, 2))), 0.0f, 1.5f);
+            if (sig < 1e-3f)
+                inst.dbg_obliquity_eff = inst.dbg_obliquity_cos;
+            else
+            {
+                // 7-node symmetric quadrature over ±2σ with Gaussian weights (normalised).
+                constexpr std::array<float, 7> off = {-2.0f, -1.3f, -0.6f, 0.0f, 0.6f, 1.3f, 2.0f};
+                float acc = 0.0f, wsum = 0.0f;
+                for (const float o : off)
+                {
+                    const float w = std::exp(-0.5f * o * o);
+                    acc  += w * cos_at(s0b.yaw + o * sig);
+                    wsum += w;
+                }
+                inst.dbg_obliquity_eff = acc / std::max(1e-6f, wsum);
+            }
             // Room-frame bearing chair→CAMERA. This is the viewpoint identity the discrete yaw-mode
             // test discounts by: re-observing one bearing is not new evidence about which way the
             // chair faces. (r_xy is camera→chair, so negate.)
@@ -394,13 +434,38 @@ float ChairFitter::run_inference(ChairInstance& inst, const ChairObservation& ob
     // Grow the SHARED yaw variance as the backrest grazes (1/cos−1): continuous covariance, no gate. THRESHOLD
     // (flagged, physical): clamp obliquity_cos to [0.05,1] so 1/cos stays finite at a perfectly edge-on view.
     // ⚠ gain is table's value, UNVALIDATED for chair (different surface) — tune from the logged obliquity_cos.
-    const float oblq_cos = std::clamp(inst.dbg_obliquity_cos, 0.05f, 1.0f);
+    // ★DE-CIRCULARISED 2026-07-30. dbg_obliquity_cos is built from n_back(ψ) — the BELIEF's own yaw — so a
+    // wrong yaw declares its own error unobservable and thereby protects it. Live deadlock: chair_3 believed
+    // ψ=42.3°, which put the camera bearing almost exactly perpendicular to the believed backrest normal
+    // (oblq_cos = 0.001) ⇒ σ_yaw inflated ~19× ⇒ yaw frozen ⇒ the ~45° error could never be corrected, even
+    // though at the TRUE yaw the backrest was squarely visible (oblq ≈ 0.7). Self-reinforcing.
+    // Fix: you may only claim "the backrest is edge-on" to the degree you actually KNOW the yaw. Take the
+    // expectation of |r̂·n̂_back(ψ)| under the current yaw posterior instead of at the point estimate:
+    //     oblq_eff = E_{ψ ~ N(ψ̂, σ_ψ²)} |r̂·n̂_back(ψ)|
+    // σ_ψ large (unconverged) ⇒ the expectation smooths the zero away ⇒ the cap goes mild and yaw is free to
+    // move, which is correct precisely BECAUSE the yaw is not known. σ_ψ → 0 (converged) ⇒ it collapses to the
+    // old point-estimate value, so the grazing protection that fixed the earlier "far view rotates the chair"
+    // bug is retained exactly where it was earned. No threshold, no gate — the same term evaluated honestly
+    // under uncertainty, and self-resolving: the cap can only tighten as the belief earns confidence.
+    // (table_concept needs none of this: its obliquity uses the tabletop normal +z, independent of yaw.)
+    const float oblq_cos = std::clamp(inst.dbg_obliquity_eff, 0.05f, 1.0f);
     const float obliquity_yaw_std = cfg_.ai2_obliquity_yaw_gain * (1.0f / oblq_cos - 1.0f);
 
     // "Be-still-to-update" invariant: a truncated view (gated) OR a MOVING robot may only CONFIRM the chair, never
     // move/reshape it. A moving frame's mask is a shared smear whose centroid is unreliable — predict-only here
     // (mean held, Σ carries its one-step Q); the existence belief still confirms it (its mask reset stops vacate).
-    const bool gated = inst.last_trunc_frac > cfg_.ai2_trunc_gate_frac or confirm_only(inst);
+    // FIXATION (attention) gate: outside a CLOSE + CENTRED + STILL view the geometry update is INHIBITED, not
+    // merely down-weighted — the graded common-mode terms saturate at a nonzero asymptote, so attenuation loses
+    // to accumulation over hundreds of frames (chairs still repositioned from 6 m). See ChairFitter::fixated.
+    const bool trunc_gated = inst.last_trunc_frac > cfg_.ai2_trunc_gate_frac;
+    const bool fix_ok      = not cfg_.fixation_enabled or fixated(inst, npts);
+    const bool gated = trunc_gated or confirm_only(inst) or not fix_ok;
+    inst.dbg_fixated = fix_ok;
+    if (not fix_ok and not trunc_gated and should_log(inst))
+        std::print("[{}] [fixation] SUPPRESSED — npts={}(>={}) clutter={:.2f}(<={:.2f}) centroid_r={:.2f}(<={:.2f}) lin={:.3f} ang={:.3f} dotd={:.3f} | range={:.2f}\n",
+                   inst.node_name, npts, cfg_.fixation_min_pts, inst.last_clutter_frac, cfg_.fixation_max_clutter,
+                   inst.last_centroid_radius, cfg_.fixation_centre_frac, ego_lin_mps_, ego_ang_radps_,
+                   std::abs(inst.last_motion_dotd), inst.last_range);
     compute_chain_cov(inst);
 
     float energy = inst.dbg_energy;   // default = HOLD last FE (a gated cycle takes no measurement)
@@ -501,7 +566,12 @@ void ChairFitter::log_ai2_csv(const ChairInstance& inst, int npts, float R, bool
         ai2_csv_.open(cfg_.ai2_csv_path, std::ios::out | std::ios::trunc);
         if (not ai2_csv_.is_open()) { cfg_.ai2_csv_path.clear(); return; }
         ai2_csv_ << "cycle,node,npts,gated,energy,fe_baseline,fe_surprise,R,motion_var,depth_var,trunc_frac,range,obliquity_cos,clutter_frac,"
-                 << "cx,cy,yaw,seat_w,seat_d,seat_h,back_h,std_cx,std_cy,std_yaw,std_yaw_rep,rig_found,rig_kappa,rig_prior_deg,facc1,facc2,facc3\n";
+                 << "cx,cy,yaw,seat_w,seat_d,seat_h,back_h,std_cx,std_cy,std_yaw,std_yaw_rep,rig_found,rig_kappa,rig_prior_deg,facc1,facc2,facc3,"
+                 // FIXATION (attention) + de-circularised obliquity diagnostics. These are the covariates
+                 // that were MISSING when the belief froze: which condition blocked, and whether the yaw cap
+                 // was self-inflicted. oblq_eff is what actually feeds the yaw common-mode; obliquity_cos
+                 // above is the (circular) point estimate, kept only for comparison.
+                 << "fixated,centroid_r,ego_lin,ego_ang,oblq_eff\n";
     }
     const auto& s = inst.ai2_belief.state();
     const auto& S = inst.ai2_belief.covariance();
@@ -518,7 +588,9 @@ void ChairFitter::log_ai2_csv(const ChairInstance& inst, int npts, float R, bool
              << (inst.rig_edge_found ? 1 : 0) << ',' << inst.rig_kappa << ','
              << inst.rig_prior_yaw * 57.29578f << ','
              << inst.ai2_belief.flip_acc()[1] << ',' << inst.ai2_belief.flip_acc()[2] << ','
-             << inst.ai2_belief.flip_acc()[3] << '\n';
+             << inst.ai2_belief.flip_acc()[3] << ','
+             << (inst.dbg_fixated ? 1 : 0) << ',' << inst.last_centroid_radius << ','
+             << ego_lin_mps_ << ',' << ego_ang_radps_ << ',' << inst.dbg_obliquity_eff << '\n';
     ai2_csv_.flush();
 }
 
@@ -610,6 +682,41 @@ float ChairFitter::zed_detectability(const ChairInstance& inst) const
     const float span = std::max(1e-3f, cfg_.exist_zed_range_ref - cfg_.exist_zed_range_full);
     const float pd_range = std::clamp((cfg_.exist_zed_range_ref - r) / span, 0.0f, 1.0f);
     return pd_center * pd_range;
+}
+
+// FIXATION (attention): true only when this view may touch the chair's POSE — RESOLVABLE, CENTRED and STILL.
+// See ChairConfig::fixation_enabled for why the graded covariance terms could not replace a gate here.
+// Each condition is independently disable-able with a value <= 0. Fills the dbg_fix_* readouts.
+//
+// ★2026-07-30: the CLOSE condition was a hard RANGE cut (FixationRangeM = 2.5 m) and it had the physics
+// backwards. Range is only a proxy; what actually decides whether this frame can resolve the pose is how
+// much un-cluttered surface it puts on the chair. A dense 3.7 m stare (chair_3: 400 pts, clutter 0.13) is
+// far better evidence than a starved 2.4 m glance, yet the range cut rejected the former and accepted the
+// latter. Live cost: it blocked 400/400 cycles on all three real chairs (yaw span EXACTLY 0.0°, std_yaw
+// pinned at the 0.60 prior) while the robot was deliberately parked and staring — the evidence the user
+// went out of their way to gather was the evidence being thrown away.
+// So gate on the MASK QUALITY that resolvability actually depends on: point mass above a floor and clutter
+// below a ceiling. Range now enters only through its effect on point density, where it belongs, and is kept
+// as a diagnostic column only. Calibrated against the live stare (chair_1/2/3 = 1195/875/400 pts, clutter
+// 0.03/0.06/0.13 → FIXATE; chair_4 = 30 pts at 4.53 m → REJECT).
+bool ChairFitter::fixated(const ChairInstance& inst, int npts) const
+{
+    // RESOLVABLE: enough un-cluttered surface for this frame to say something about the pose.
+    const bool enough_pts = cfg_.fixation_min_pts <= 0
+                         or npts >= cfg_.fixation_min_pts;
+    const bool clean      = cfg_.fixation_max_clutter <= 0.0f
+                         or inst.last_clutter_frac <= cfg_.fixation_max_clutter;
+    const bool close      = enough_pts and clean;
+    // "In the fovea": the mask centroid's off-axis radius. A newborn with no measured centroid yet (0) counts
+    // as centred so the quality/stillness conditions decide — it must never be blocked by a missing covariate.
+    const bool centred = cfg_.fixation_centre_frac <= 0.0f
+                      or inst.last_centroid_radius <= cfg_.fixation_centre_frac;
+    // STILL on all three channels: robot body (lin, ang — the TURN case) and the per-mask ego-motion smear.
+    const bool still   = (cfg_.fixation_still_lin_mps   <= 0.0f or ego_lin_mps_   <= cfg_.fixation_still_lin_mps)
+                     and (cfg_.fixation_still_ang_radps <= 0.0f or ego_ang_radps_ <= cfg_.fixation_still_ang_radps)
+                     and (cfg_.fixation_still_dotd      <= 0.0f
+                          or std::abs(inst.last_motion_dotd) <= cfg_.fixation_still_dotd);
+    return close and centred and still;
 }
 
 bool ChairFitter::confirm_only(const ChairInstance& inst) const

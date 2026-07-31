@@ -461,6 +461,33 @@ WallRef RefrigeratorFitter::nearest_wall(const Eigen::Vector2f& q) const
     return w;
 }
 
+// Continuous interior support at q (see the header). Even-odd containment test against the room polygon, then a
+// smooth falloff over one fridge half-depth measured from the boundary — so a fridge legitimately pushed against
+// a wall keeps most of its support, while a detection at or past the boundary has none. No hard cutoff.
+float RefrigeratorFitter::interior_support(const Eigen::Vector2f& q) const
+{
+    const std::size_t n = room_polygon_.size();
+    if (not have_room_geometry_ or n < 3) return 1.0f;   // no room model ⇒ the room asserts nothing
+    bool inside = false;
+    for (std::size_t i = 0, j = n - 1; i < n; j = i++)
+    {
+        const Eigen::Vector2f& a = room_polygon_[i];
+        const Eigen::Vector2f& b = room_polygon_[j];
+        if ((a.y() > q.y()) != (b.y() > q.y()) and
+            q.x() < (b.x() - a.x()) * (q.y() - a.y()) / (b.y() - a.y() + 1e-12f) + a.x())
+            inside = not inside;
+    }
+    if (not inside) return 0.0f;                          // outside the layout: the room explains it, not a fridge
+    const auto w = nearest_wall(q);
+    if (not w.ok) return 1.0f;
+    const float d = (q - w.p).norm();                     // distance in from the boundary
+    // Reuse the flush factor's own scale: within AI2WallReachM of the boundary you are effectively AT the wall
+    // (that is precisely what that constant means), so no new knob. A real fridge's mask centroid sits well
+    // beyond it — a front-only view is ~a depth in — and keeps ~full support.
+    const float reach = std::max(1e-3f, cfg_.ai2_wall_reach_m);
+    return 1.0f - std::exp(-(d * d) / (2.0f * reach * reach));
+}
+
 // ─── Inference ────────────────────────────────────────────────────────────────────────────────────
 
 // One recursive full-covariance belief update (or age-only step) for this instance; returns the free energy.
@@ -492,28 +519,41 @@ float RefrigeratorFitter::run_inference(RefrigeratorInstance& inst, const Refrig
             std::nth_element(zs.begin(), zs.begin() + k, zs.end());
             s0.H = zs[k];   // observed top face
 
-            // Birth seed (w,h,yaw) from the footprint second-moment: start the box near the mask's real size and
-            // orientation so the per-point mixture + legs associate immediately, instead of a small axis-aligned
-            // box that sees the true rim/legs as clutter and never rotates. Same statistic as the per-frame factor;
-            // gated on footprint_moment_precision so the baseline (flag OFF) births exactly as before. Skip on a
-            // TRIMMED mask (extent is only a lower bound → would birth too small); wait for a full mask.
+            // Birth seed (w, yaw) from the footprint second-moment of the BODY cloud: start the box near the
+            // mask's real width and orientation so the per-point mixture associates immediately.
+            //
+            // ★The band is the whole box, NOT a top slab. The table-concept original sampled
+            // [H − TOP_THICKNESS − 3σ, H + 3σ] — for a table that IS the tabletop (the full footprint), but for a
+            // solid fridge it is a ~9 cm sliver at 1.9 m seen grazing, so its minor extent collapsed and line
+            // `h = max(0.10, ext_minor)` birthed EVERY fridge as a 10 cm-deep slab (live: every birth in
+            // etc/ai2_log.csv starts h=0.10). See [[refrigerator-table-geometry-churn]].
+            //
+            // DEPTH (h) is not seeded from a single view at all: one camera pose sees ONE vertical face, whose
+            // footprint projects to a line, so ext_minor measures mask noise rather than the fridge's depth. Depth
+            // is UNOBSERVED until the cloud spans it — exactly the condition the fit's depth-observability prior
+            // already tests (ai2_depth_obs_band_m). Below that span h stays at the footprint prior mean and the
+            // AI2DepthUnobsPrecision term holds it there; above it the view genuinely resolves depth, so use it.
+            // Skip on a TRIMMED mask (extent is only a lower bound → would birth too small); wait for a full mask.
             if (cfg_.footprint_moment_precision > 0.0f and inst.last_trunc_frac <= 1e-3f)
             {
                 std::vector<Eigen::Vector3f> pts;
                 pts.reserve(static_cast<std::size_t>(npts));
                 pts.insert(pts.end(), observation.candidate_pts.begin(), observation.candidate_pts.end());
                 pts.insert(pts.end(), observation.residual_pts.begin(), observation.residual_pts.end());
+                // Body band: the full observed height minus the floor-contact and above-top over-segmentation
+                // tails, which are cloud ARTEFACTS (not fridge surface) and would bias the footprint outward.
                 const float z_hi = s0.H + 3.0f * cfg_.ai2_sigma_base_m;
-                const float z_lo = s0.H - RefrigeratorModel::TOP_THICKNESS - 3.0f * cfg_.ai2_sigma_base_m;
+                const float z_lo = 3.0f * cfg_.ai2_sigma_base_m;
                 if (const auto mom = RefrigeratorBelief::footprint_moment(pts, z_lo, z_hi); mom.ok)
                 {
-                    s0.cx = mom.cx; s0.cy = mom.cy;   // top-plane centroid (sharper than the leg-biased full-cloud mean)
-                    s0.w = std::max(0.10f, mom.ext_major);
-                    s0.h = std::max(0.10f, mom.ext_minor);
+                    s0.cx = mom.cx; s0.cy = mom.cy;
+                    s0.w = std::max(0.10f, mom.ext_major);          // major axis = the seen face's width (reliable)
+                    s0.h = (mom.ext_minor > cfg_.ai2_depth_obs_band_m) ? mom.ext_minor
+                                                                       : cfg_.ai2_prior_footprint_m;
                     // Only commit the orientation when the footprint is clearly anisotropic. A near-square
                     // footprint has an ill-defined principal axis (phi swings ±90° on noise), so birthing yaw
-                    // from a single frame would seed a random ±90°; leave yaw at its RT/default seed and let the
-                    // per-frame moment (aniso-weighted) + resolve_orientation settle it once evidence accrues.
+                    // from a single frame would seed a random ±90°; leave yaw at its RT/default seed and let
+                    // resolve_orientation settle it once evidence accrues.
                     const float sum = mom.ext_major + mom.ext_minor;
                     if (sum > 1e-4f and (mom.ext_major - mom.ext_minor) / sum > 0.10f)
                         s0.yaw = mom.phi;
@@ -538,6 +578,12 @@ float RefrigeratorFitter::run_inference(RefrigeratorInstance& inst, const Refrig
         p.wall_reach_m            = cfg_.ai2_wall_reach_m;
         p.wall_no_cross_precision = cfg_.ai2_wall_no_cross_precision;
         p.wall_no_cross_margin_m  = cfg_.ai2_wall_no_cross_margin_m;
+        // The wall may only explain away mask points to the extent the room itself is trusted: with no room
+        // polygon pushed this session there is nothing to explain away with, so the component is OFF and the
+        // mixture is box+clutter exactly as before. (When room_concept publishes a map-trust scalar, multiply
+        // here — a poorly-localized room must return the fridge hypothesis its freedom, not silently veto it.)
+        p.wall_explain_frac    = have_room_geometry_ ? cfg_.ai2_wall_explain_frac : 0.0f;
+        p.wall_explain_sigma_m = cfg_.ai2_wall_explain_sigma_m;
         p.pixel_sigma_over_f     = cfg_.pixel_sigma_over_f;
         p.depth_sigma0_m         = cfg_.depth_sigma0_m;
         p.depth_sigma_range_coef = cfg_.depth_sigma_range_coef;
@@ -566,6 +612,7 @@ float RefrigeratorFitter::run_inference(RefrigeratorInstance& inst, const Refrig
         p.plaus_height_soft       = cfg_.plaus_height_soft;
         p.plaus_fe_ref            = cfg_.plaus_fe_ref;
         p.plaus_fe_scale          = cfg_.plaus_fe_scale;
+        p.plaus_alt_size_scale    = cfg_.plaus_alt_size_scale;
         p.plaus_height_prior_gain = cfg_.fridge_filter_enabled ? cfg_.plaus_height_prior_gain : 0.0f;
         inst.ai2_belief = RefrigeratorBelief(s0, p);
         inst.ai2_initialized = true;
@@ -952,7 +999,12 @@ void RefrigeratorFitter::log_ai2_csv(const RefrigeratorInstance& inst, int npts,
         if (not ai2_csv_.is_open()) { cfg_.ai2_csv_path.clear(); return; }
         ai2_csv_ << "cycle,node,pkt_fid,pkt_ts,npts,gated,energy,fe_baseline,fe_surprise,R,motion_var,depth_var,motion_dotd,trunc_frac,range,"
                  << "cx,cy,H,w,h,yaw,std_cx,std_cy,std_H,std_w,std_h,std_yaw,"
-                 << "std_yaw_within,flip_ev,p_alt,lidar_rays,lidar_raw,lidar_bpearl,lidar_resid_m,lidar_meanz,lidar_topz,lidar_floorz,lidar_cov_ang,"
+                 // door-mode resolver state. These REPLACE flip_ev/p_alt, which were flip_evidence() /
+                 // mode_posterior() — hardcoded `return 0.0f` stubs left from table_concept's w↔h mode machinery
+                 // that this asymmetric-box model does not use. They logged 0 for every row of every run, so the
+                 // ONE thing that can resolve yaw on a square footprint was completely uninstrumented.
+                 << "std_yaw_within,front_mode,front_conf,cue_conf,cue_bearing,wall_resp,"
+                 << "lidar_rays,lidar_raw,lidar_bpearl,lidar_resid_m,lidar_meanz,lidar_topz,lidar_floorz,lidar_cov_ang,"
                  << "dyaw_points,dyaw_moment,dyaw_flip,obliquity_cos,completeness,moment_aniso,moment_r_yaw,"
                  << "mom_major,mom_minor,mom_phi,mom_pts,"   // RAW footprint statistic (basin diagnosis)   // rogue-mask diag
                  << "ex_L,ex_p,ex_locc,ex_lfree,ex_lfree_eff,ex_ln,ex_socc,ex_sfree,ex_sfree_eff,ex_sndet,ex_streak,"
@@ -971,7 +1023,13 @@ void RefrigeratorFitter::log_ai2_csv(const RefrigeratorInstance& inst, int npts,
              << s.cx << ',' << s.cy << ',' << s.H << ',' << s.w << ',' << s.h << ',' << s.yaw << ','
              << sd(0) << ',' << sd(1) << ',' << sd(2) << ',' << sd(3) << ',' << sd(4) << ','
              << std::sqrt(std::max(0.0f, inst.ai2_belief.yaw_marginal_var())) << ','
-             << sd(5) << ',' << inst.ai2_belief.flip_evidence() << ',' << inst.ai2_belief.mode_posterior() << ','
+             << sd(5) << ','
+             // front_mode/front_conf = the belief's adopted door quarter-turn + its posterior peakedness;
+             // cue_conf/cue_bearing = what detect_front actually returned THIS frame (0 ⇒ no cue was emitted:
+             // no RGB frame, <2 faces qualified, or the margin fell under FrontMinConfidence).
+             << inst.ai2_belief.front_mode() << ',' << inst.ai2_belief.front_confidence() << ','
+             << inst.last_front_conf << ',' << inst.last_front_bearing << ','
+             << inst.ai2_belief.last_wall_resp() << ','   // mean per-point WALL responsibility (→1 ⇒ it IS a wall)
              << inst.dbg_lidar_rays << ',' << inst.dbg_lidar_raw << ',' << inst.dbg_lidar_bpearl_rays << ',' << inst.dbg_lidar_resid_m << ','
              << inst.dbg_lidar_meanz_m << ',' << inst.dbg_lidar_topz_m << ',' << inst.dbg_lidar_floorz_m << ','
              << inst.dbg_lidar_cov_ang << ','

@@ -47,7 +47,57 @@ DoorBeliefParams DoorFitter::make_belief_params() const
     p.tpl_w              = cfg_.door_prior_w_m;
     p.tpl_h              = cfg_.door_prior_h_m;
     p.gn_iters           = cfg_.ai2_gn_iters;
+    // ── Leaf articulation (openable door, M0) ──
+    // The ONE place the leaf state is authored, so the M0 pin cannot drift. With Openable.Enabled false
+    // phi is the literal 0.0f, which makes every geometry consumer reduce EXACTLY to the wall-plane
+    // behaviour (see door_geometry.h). phi becomes a fitted DOF in M1; hinge/swing hypotheses are M2.
+    p.leaf.phi   = cfg_.openable_enabled ? cfg_.openable_phi_init : 0.0f;
+    p.leaf.hinge = (cfg_.openable_enabled and cfg_.openable_hinge_side == 1) ? door::HingeSide::Far
+                                                                            : door::HingeSide::Near;
+    p.leaf.swing = (cfg_.openable_enabled and cfg_.openable_swing_dir < 0.0f) ? -1.0f : +1.0f;
     return p;
+}
+
+// ─── The SINGLE authoring point for a door's geometry ────────────────────────────────────────────
+// Refresh the cached aperture / leaf / leaf_pose from the belief, then write the room-frame read-back
+// into DoorState. Every geometry consumer in the agent reads one of these; nothing reconstructs the
+// panel rectangle for itself. Called from ensure_instance (pre-belief), the bearing seed, and the
+// per-cycle write-back — the only three places a door's shape can change.
+void DoorFitter::refresh_geometry(DoorInstance& inst)
+{
+    DoorState ms = inst.model.state();
+    if (inst.ai2_initialized)
+    {
+        inst.aperture  = inst.ai2_belief.aperture();
+        inst.leaf      = inst.ai2_belief.params().leaf;
+        inst.leaf_pose = inst.ai2_belief.leaf_pose();
+        ms.cz        = inst.ai2_belief.cz();
+        ms.w         = inst.ai2_belief.width();
+        ms.h         = inst.ai2_belief.height();
+        ms.thickness = inst.ai2_belief.thickness();
+        const Eigen::Vector2f ap = inst.ai2_belief.center_xy();
+        ms.ap_cx = ap.x(); ms.ap_cy = ap.y(); ms.ap_yaw = inst.ai2_belief.yaw();
+    }
+    else
+    {
+        // Pre-belief (a node adopted from the graph, or a fresh birth before its first mask): the only
+        // geometry we have is the published box, so derive the leaf pose from that. Identical result.
+        // The wall frame is not resolved yet, so the aperture is seeded as the box itself (u = the box's
+        // own heading, near edge at s = 0); run_inference re-authors it properly on the first fit.
+        inst.leaf_pose = door::leaf_pose_from_box(ms.cx, ms.cy, ms.cz, ms.yaw, ms.w, ms.h, ms.thickness);
+        inst.leaf      = {};
+        inst.aperture  = {};
+        inst.aperture.wall_u = inst.leaf_pose.ex;
+        inst.aperture.wall_O = inst.leaf_pose.hinge_xy;
+        inst.aperture.s = 0.0f; inst.aperture.w = ms.w; inst.aperture.h = ms.h;
+        inst.aperture.floor_z = ms.cz; inst.aperture.thickness = ms.thickness;
+        ms.ap_cx = ms.cx; ms.ap_cy = ms.cy; ms.ap_yaw = ms.yaw;
+    }
+    ms.cx  = inst.leaf_pose.centre_xy.x();
+    ms.cy  = inst.leaf_pose.centre_xy.y();
+    ms.yaw = inst.leaf_pose.yaw();
+    ms.phi = inst.leaf.phi;
+    inst.model.set_state(ms);
 }
 
 // Associate q (room frame) to the nearest room-polygon wall. The polygon has chamfered corners / door
@@ -125,12 +175,7 @@ void DoorFitter::seed_bearing_hypothesis(DoorInstance& inst, const Eigen::Vector
     inst.is_bearing_hypothesis = true;
     inst.hypothesis_azimuth    = azimuth;   // Orient affordance target yaw = the bearing to look toward
     // Write the room-frame read-back into the model so the scene-graph publish / viewer show it on the ray.
-    const Eigen::Vector2f c = inst.ai2_belief.center_xy();
-    DoorState ms = inst.model.state();
-    ms.cx = c.x(); ms.cy = c.y(); ms.cz = inst.ai2_belief.cz();
-    ms.yaw = inst.ai2_belief.yaw();
-    ms.w = inst.ai2_belief.width(); ms.h = inst.ai2_belief.height(); ms.thickness = inst.ai2_belief.thickness();
-    inst.model.set_state(ms);
+    refresh_geometry(inst);
 }
 
 void DoorFitter::set_chain_cov_source(DSR::InnerGaussianAPI* gaussian, std::string source_frame, bool enabled)
@@ -237,6 +282,9 @@ bool DoorFitter::ensure_instance(const DSR::Node& node, std::uint64_t room_id)
     inst.node_name = node.name();
     inst.model     = DoorModel(init_state, make_model_params());
     inst.affordance.init(G_, node.id(), node.name());
+    // Seed the cached geometry from the published box: the belief is not initialised yet, but observe()
+    // needs a valid leaf_pose for its candidate/residual split on this very cycle.
+    refresh_geometry(inst);
 
     instances_.emplace(node.id(), std::move(inst));
     std::print("door_concept: created instance for node '{}' id={}\n", node.name(), node.id());
@@ -279,6 +327,23 @@ DoorFitter::DoorObservation DoorFitter::observe(DoorInstance& inst, const DSR::N
             inst.last_range       = slice.range;
             inst.last_centroid_radius = slice.centroid_radius;   // image-centredness (moving-update exception)
             inst.last_depth_var   = slice.depth_var;             // 0=ZED, >0=ricoh LiDAR-depth → downweights the fit (added to R)
+            // MINIMUM-HEIGHT evidence: the top of the observed support (room frame; floor = 0), accumulated
+            // ONLY from views that actually saw the top. A border-clipped mask (trunc_frac → 1) reports a
+            // top that is merely a lower bound, so it carries no height information — weight it out
+            // continuously rather than gating, and never let it drag obs_top_z down. See DoorInstance.
+            if (slice.has_depth and slice.bbox_max.allFinite())
+            {
+                const float top = slice.bbox_max.z();
+                const float wgt = std::clamp(1.0f - slice.trunc_frac, 0.0f, 1.0f);
+                inst.obs_top_last = top;
+                if (wgt > 0.0f)
+                {
+                    constexpr float kEwma = 0.05f;   // smoothing over untruncated views (a measurement filter)
+                    const float a = kEwma * wgt;
+                    inst.obs_top_z    = std::isnan(inst.obs_top_z) ? top : (1.0f - a) * inst.obs_top_z + a * top;
+                    inst.obs_top_conf = (1.0f - a) * inst.obs_top_conf + a;
+                }
+            }
             const std::size_t begin = std::min(slice.support_begin, masks_packet.support_points.size());
             const std::size_t end = std::min(slice.support_end, masks_packet.support_points.size());
 
@@ -290,7 +355,9 @@ DoorFitter::DoorObservation DoorFitter::observe(DoorInstance& inst, const DSR::N
             for (std::size_t i = begin; i < end; ++i)
             {
                 const auto& p = masks_packet.support_points[i];
-                const float sdf = inst.model.sdf_point(p);
+                // Same SDF the belief fits with (door_geometry.h), evaluated at the cached leaf pose —
+                // there is no longer a second, independently-derived panel SDF that could disagree.
+                const float sdf = door::leaf_sdf(inst.leaf_pose, p);
                 if (std::abs(sdf) < cfg_.sdf_threshold_for_storage)
                     candidate_pts.push_back(p);
                 else
@@ -500,15 +567,11 @@ float DoorFitter::run_inference(DoorInstance& inst, const DoorObservation& obser
     }
     inst.dbg_energy = energy;   // remember for the next gated/aged cycle to HOLD
 
-    // Write belief → room-frame DoorState so downstream publish/viewer/RT code is unchanged.
+    // Write belief → cached aperture/leaf geometry + room-frame DoorState (the single authoring point).
     const auto& bs = inst.ai2_belief.state();
     const Eigen::Vector2f c = inst.ai2_belief.center_xy();
-    DoorState ms = inst.model.state();
-    ms.cx = c.x(); ms.cy = c.y();
-    ms.cz = inst.ai2_belief.cz();                     // pinned floor base
-    ms.yaw = inst.ai2_belief.yaw();                   // wall tangent
-    ms.w = inst.ai2_belief.width(); ms.h = inst.ai2_belief.height(); ms.thickness = inst.ai2_belief.thickness();
-    inst.model.set_state(ms);
+    refresh_geometry(inst);
+    const DoorState& ms = inst.model.state();
 
     ++inst.matched_frames;
     inst.detection_alive = inst.frames_since_detection < cfg_.detection_alive_max_frames;
@@ -533,17 +596,17 @@ void DoorFitter::log_ai2_csv(const DoorInstance& inst, int npts, float R, bool g
         ai2_csv_.open(cfg_.ai2_csv_path, std::ios::out | std::ios::trunc);
         if (not ai2_csv_.is_open()) { cfg_.ai2_csv_path.clear(); return; }
         ai2_csv_ << "cycle,node,npts,gated,energy,fe_baseline,fe_surprise,R,motion_var,depth_var,trunc_frac,range,clutter_frac,"
-                 << "s,w,h,cx,cy,yaw,std_s,std_w,std_h\n";
+                 << "s,w,h,cx,cy,yaw,std_s,std_w,std_h,phi\n";   // phi APPENDED so the existing columns stay byte-identical
     }
     const auto& s = inst.ai2_belief.state();
-    const Eigen::Vector2f c = inst.ai2_belief.center_xy();
+    const Eigen::Vector2f c = inst.ai2_belief.center_xy();   // APERTURE centre (see DoorBelief) — unchanged by phi
     const auto& S = inst.ai2_belief.covariance();
     const auto sd = [&](int i) { return std::sqrt(std::max(0.0f, S(i, i))); };
     ai2_csv_ << inst.processed_cycles << ',' << inst.node_name << ',' << npts << ',' << (gated ? 1 : 0) << ','
              << energy << ',' << inst.fe_baseline << ',' << inst.fe_surprise << ',' << R << ',' << inst.last_motion_var << ',' << inst.last_depth_var << ',' << inst.last_trunc_frac << ',' << inst.last_range << ',' << inst.last_clutter_frac << ','
              << s.s << ',' << s.w << ',' << s.h << ','
              << c.x() << ',' << c.y() << ',' << inst.ai2_belief.yaw() << ','
-             << sd(0) << ',' << sd(1) << ',' << sd(2) << '\n';
+             << sd(0) << ',' << sd(1) << ',' << sd(2) << ',' << inst.leaf.phi << '\n';
     ai2_csv_.flush();
 }
 
@@ -675,7 +738,7 @@ DoorSilhouette DoorFitter::compute_silhouette_existence(const DoorInstance& inst
     }
 
     const auto& s = inst.model.state();
-    const float c = std::cos(s.yaw), sn = std::sin(s.yaw), hw = 0.5f * s.w;
+    const float hw = inst.leaf_pose.half_w;
 
     // Camera position (room frame) for the GEOMETRIC occlusion tests below.
     const Eigen::Vector3f O(static_cast<float>(Mopt->coeff(0, 3)),
@@ -684,13 +747,20 @@ DoorSilhouette DoorFitter::compute_silhouette_existence(const DoorInstance& inst
     const Eigen::Vector2f Oxy(O.x(), O.y());
     const float occ_margin = std::max(0.0f, cfg_.exist_occlusion_margin_m);
 
-    // Classify ONE panel-face sample (local x along the wall, z absolute): project it, then vote.
+    // Classify ONE LEAF-face sample (local x hinge→free edge, z absolute): project it, then vote.
+    //
+    // ★ The sample comes from door::leaf_point at the instance's CURRENT leaf pose. It used to be spelled
+    // out here as a rectangle in the WALL PLANE, which meant that the moment a door actually opened, its
+    // predicted silhouette landed where the leaf no longer was: every sample came back unlit, e_free
+    // spiked, and the existence channel deleted the door BECAUSE it opened. With phi pinned at 0 (M0) this
+    // yields the identical samples; when phi becomes a fitted DOF in M1 it follows the leaf for free.
     std::unordered_set<std::int64_t> covered_cells;   // distinct cells the DETECTABLE silhouette occupies
     double range_sum = 0.0;
     const auto classify = [&](float lx, float lz)
     {
         ++out.n_total;                                                  // one sample of the WHOLE panel
-        const Eigen::Vector4d Pr(s.cx + c * lx, s.cy + sn * lx, lz, 1.0);   // face at mid-thickness (ly = 0)
+        const Eigen::Vector3f Ps = door::leaf_point(inst.leaf_pose, lx, 0.0f, lz);   // face at mid-thickness
+        const Eigen::Vector4d Pr(Ps.x(), Ps.y(), Ps.z(), 1.0);
         const Eigen::Vector4d Pc = zed_T_room * Pr;
         const double X = Pc.x(), Y = Pc.y(), Z = Pc.z();
         if (Y <= 0.20) return;                                          // behind / at the near clip
@@ -750,7 +820,9 @@ DoorSilhouette DoorFitter::compute_silhouette_existence(const DoorInstance& inst
     return out;
 }
 
-// |cos| of the camera→door ray against the door's face normal (= the wall normal). 1 = square-on, 0 = grazing.
+// |cos| of the camera→leaf ray against the LEAF's face normal. 1 = square-on, 0 = grazing. Diagnostic only
+// (a log column) — see the note in door_fitter.h. Keyed on the leaf, not the wall, so it stays meaningful
+// once phi is fitted: an open door presents its face at a different angle than its aperture does.
 float DoorFitter::door_view_obliquity(const DoorInstance& inst) const
 {
     if (not inst.ai2_initialized)
@@ -759,14 +831,11 @@ float DoorFitter::door_view_obliquity(const DoorInstance& inst) const
     if (not M.has_value())
         return 1.0f;                      // no extrinsic → can't judge → don't suppress
     const Eigen::Vector2f cam(static_cast<float>(M->coeff(0, 3)), static_cast<float>(M->coeff(1, 3)));
-    const Eigen::Vector2f door = inst.ai2_belief.center_xy();
-    Eigen::Vector2f r = door - cam;
+    Eigen::Vector2f r = inst.leaf_pose.centre_xy - cam;
     if (r.norm() < 1e-6f)
         return 1.0f;
     r.normalize();
-    const Eigen::Vector2f u = inst.ai2_belief.params().wall_u;
-    const Eigen::Vector2f n(-u.y(), u.x());   // door face normal (across the wall)
-    return std::clamp(std::abs(r.dot(n)), 0.0f, 1.0f);
+    return std::clamp(std::abs(r.dot(inst.leaf_pose.ey)), 0.0f, 1.0f);   // ey = the leaf's face normal
 }
 
 bool DoorFitter::confirm_only(const DoorInstance& inst) const
@@ -845,28 +914,25 @@ void DoorFitter::compute_projected_roi(DoorInstance& inst)
         return;
     const float cx_px = W * 0.5f, cy_px = H * 0.5f;
 
-    // Project the 8 box corners (top slab + footprint at floor) into the image. Camera convention
-    // matches the producer: X=right, Y=forward(depth), Z=up ⇒ col=cx+X/Y·fx, row=cy−Z/Y·fy.
-    const auto& s = inst.model.state();
-    const float c = std::cos(s.yaw), sn = std::sin(s.yaw);
-    const float hw = s.w * 0.5f, hh = s.thickness * 0.5f;   // along-wall × across-wall footprint
+    // Project the 8 LEAF corners into the image (door_geometry.h — the ROI must frame the panel the camera
+    // actually sees, so this follows the leaf, not the aperture). Camera convention matches the producer:
+    // X=right, Y=forward(depth), Z=up ⇒ col=cx+X/Y·fx, row=cy−Z/Y·fy.
     float min_col = 1e9f, min_row = 1e9f, max_col = -1e9f, max_row = -1e9f;
     int in_front = 0;
-    for (const int ix : {-1, 1})
-        for (const int iy : {-1, 1})
-            for (const float z : {s.cz, s.cz + s.h})
-            {
-                const float lx = static_cast<float>(ix) * hw, ly = static_cast<float>(iy) * hh;
-                const Eigen::Vector4d Pr(s.cx + c * lx - sn * ly, s.cy + sn * lx + c * ly, z, 1.0);
-                const Eigen::Vector4d Pc = zed_T_room * Pr;
-                const double X = Pc.x(), Y = Pc.y(), Z = Pc.z();
-                if (Y <= 0.20) continue;   // skip corners at/near the image plane: X/Y explodes there
-                ++in_front;
-                const float col = cx_px + static_cast<float>(X / Y) * fx;
-                const float row = cy_px - static_cast<float>(Z / Y) * fy;
-                min_col = std::min(min_col, col); max_col = std::max(max_col, col);
-                min_row = std::min(min_row, row); max_row = std::max(max_row, row);
-            }
+    {
+        for (const auto& corner : door::leaf_corners(inst.leaf_pose))
+        {
+            const Eigen::Vector4d Pr(corner.x(), corner.y(), corner.z(), 1.0);
+            const Eigen::Vector4d Pc = zed_T_room * Pr;
+            const double X = Pc.x(), Y = Pc.y(), Z = Pc.z();
+            if (Y <= 0.20) continue;   // skip corners at/near the image plane: X/Y explodes there
+            ++in_front;
+            const float col = cx_px + static_cast<float>(X / Y) * fx;
+            const float row = cy_px - static_cast<float>(Z / Y) * fy;
+            min_col = std::min(min_col, col); max_col = std::max(max_col, col);
+            min_row = std::min(min_row, row); max_row = std::max(max_row, row);
+        }
+    }
 
     if (in_front < 4)   // need most of the box in front of the camera to trust the ROI
         return;

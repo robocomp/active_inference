@@ -209,11 +209,19 @@ bool ChairBelief::resolve_orientation(const std::vector<Eigen::Vector3f>& pts, f
             n_back += responsibilities(p, state_, R)[1];   // [seat, BACK, leg0..3, clutter]
         const float obs_w = n_back / (n_back + std::max(1e-3f, params_.mode_sat_back_pts));
 
-        // ★NOVELTY. Re-observing one viewpoint is not new evidence about which way the chair faces.
-        // Discount by 1/(1+visits) so staring grows evidence only as log(n) — a stationary robot
-        // converges to about one viewpoint's worth, while orbiting the chair genuinely accumulates.
-        // Without this the accumulator measures dwell time, and 2000 identical frames win by sheer
-        // repetition no matter how weak each one is.
+        // ★NOVELTY as a SATURATING PER-VIEWPOINT BUDGET (was 1/(1+visits) until 2026-07-30).
+        // The intent is unchanged: dwell must not manufacture certainty, because 2000 identical frames share
+        // one common-mode error and are nowhere near 2000 independent observations. But dividing EVERY frame
+        // by the visit count made a viewpoint's TOTAL contribution grow only as log(n), which denies the
+        // other half of the requirement — a DELIBERATE FIXATION is an intentional epistemic action and its
+        // evidence must be able to settle the pose. Under log(n) the robot could park and stare for three
+        // minutes at a chair whose model was visibly ~45° off and still not resolve it.
+        // So give each bearing bin a BUDGET: the total weight it may ever contribute saturates at
+        // view_budget, approached asymptotically. Each frame is scaled by what is left of its bin's budget,
+        //     novelty = remaining / (remaining + view_budget),   remaining = max(0, budget − spent)
+        // ⇒ a sustained fixation converges to that viewpoint's full information worth (decisive), staring on
+        // past it adds ~nothing (dwell still cannot inflate confidence), and orbiting to a NEW bearing opens
+        // a fresh budget (genuinely new evidence still accumulates). Both halves of the rule.
         float novelty = 1.0f;
         if (std::isfinite(view_azimuth))
         {
@@ -221,8 +229,11 @@ bool ChairBelief::resolve_orientation(const std::vector<Eigen::Vector3f>& pts, f
             const float     span = 2.0f * static_cast<float>(M_PI) / static_cast<float>(B);
             int bin = static_cast<int>(std::floor((wrap(view_azimuth) + static_cast<float>(M_PI)) / span));
             bin = std::clamp(bin, 0, B - 1);
-            novelty = 1.0f / (1.0f + static_cast<float>(view_visits_[bin]));
-            ++view_visits_[bin];
+            const float budget    = std::max(1e-3f, params_.view_budget);
+            const float remaining = std::max(0.0f, budget - view_spent_[bin]);
+            novelty = remaining / (remaining + budget);
+            view_spent_[bin] += w * obs_w * novelty;   // charge the bin what this frame actually contributed
+            ++view_visits_[bin];                       // retained for diagnostics only
         }
         frame_w = w * obs_w * novelty;
     }

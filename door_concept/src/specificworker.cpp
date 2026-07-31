@@ -71,13 +71,15 @@ float belief_uncertainty(const rc::DoorInstance& inst)
     return sd(0) + sd(1) + sd(2);
 }
 
-// Two doors cannot share physical space. Footprint = the oriented panel rectangle (cx,cy,w,thickness,yaw)
-// in the room plane; these helpers compute the overlap area so the merge operator can collapse duplicate
-// instances. Corners CCW (local order (-,-),(+,-),(+,+),(-,+)). Mirrors table_concept.
+// Two doors cannot share physical space. Footprint = the oriented APERTURE rectangle in the room plane;
+// these helpers compute the overlap area so the merge operator can collapse duplicate instances.
+// The APERTURE, not the leaf: duplicates of one physical door are duplicates of one HOLE, and two
+// hypotheses that disagree about phi would stop overlapping as leaves while still being the same door.
+// Corners CCW (local order (-,-),(+,-),(+,+),(-,+)). Mirrors table_concept.
 std::array<Eigen::Vector2f, 4> footprint_corners(const rc::DoorState& s)
 {
-    const float c = std::cos(s.yaw), sn = std::sin(s.yaw);
-    const Eigen::Vector2f ex(c, sn), ey(-sn, c), ctr(s.cx, s.cy);
+    const float c = std::cos(s.ap_yaw), sn = std::sin(s.ap_yaw);
+    const Eigen::Vector2f ex(c, sn), ey(-sn, c), ctr(s.ap_cx, s.ap_cy);
     const float hw = 0.5f * s.w, hh = 0.5f * s.thickness;
     return { ctr - hw * ex - hh * ey, ctr + hw * ex - hh * ey,
              ctr + hw * ex + hh * ey, ctr - hw * ex + hh * ey };
@@ -163,7 +165,11 @@ SpecificWorker::SpecificWorker(const ConfigLoader& configLoader,
         return;
     }
 
-    rc::DoorBelief::self_test();   // startup sanity check of the wall-frame [s,w,h] belief (mirrors bottle_concept)
+    // Startup sanity check of the wall-frame [s,w,h] belief AND the aperture/leaf geometry (mirrors
+    // bottle_concept). Non-fatal — but say so loudly rather than discarding the result, because a FAIL here
+    // means every SDF, silhouette and projected ROI downstream is computed against the wrong panel.
+    if (not rc::DoorBelief::self_test())
+        std::print("door_concept: *** DoorBelief::self_test FAILED — panel geometry is NOT trustworthy ***\n");
 
     load_config(configLoader);
 
@@ -971,6 +977,31 @@ void SpecificWorker::run_instance_tracker()
             log_tracker_event("SUPPRESS", 0, c.x(), c.y(), "outside room");
             continue;
         }
+
+        // MINIMUM-HEIGHT prior at BIRTH: a door is an aperture a person walks THROUGH, so a blob that
+        // demonstrably tops out below MinHeightM is not one — it is a counter, a radiator, a window sill,
+        // a low cabinet. Zero prior mass ⇒ suppress, exactly like the room-containment prior above.
+        //
+        // Judged on the SUPPORT bbox top, never on the fitted h: the template anchor pins h at 2.0 m
+        // regardless of evidence, so by the time an instance exists it always claims to be door-height.
+        // (Live: the phantom at (−4.22,−2.16) reported h ≡ 2.000 for its whole life.)
+        //
+        // "demonstrably" is doing real work — a mask clipped by the image border has an UNOBSERVED top, so
+        // its bbox top is only a lower bound. The real door is routinely clipped, so suppressing on a
+        // truncated view would refuse to ever birth it. Require the view to be substantially untruncated.
+        if (cfg_.exist_min_height_prior and pkt.slices[slice].has_depth and pkt.slices[slice].bbox_max.allFinite())
+        {
+            const float top    = pkt.slices[slice].bbox_max.z();
+            const float untrunc = 1.0f - std::clamp(pkt.slices[slice].trunc_frac, 0.0f, 1.0f);
+            if (untrunc > 0.5f and top < cfg_.exist_min_height_m)
+            {
+                std::print("door_concept: [tracker] BIRTH SUPPRESSED slice={} at ({:.2f},{:.2f}) — support tops "
+                           "at {:.2f} m < {:.2f} m (untruncated view: it is NOT door-height)\n",
+                           slice, c.x(), c.y(), top, cfg_.exist_min_height_m);
+                log_tracker_event("SUPPRESS", 0, c.x(), c.y(), std::format("top {:.2f}m", top));
+                continue;
+            }
+        }
         {
             std::uint64_t claimer = 0;
             for (auto& [id, inst] : fitter_->instances())
@@ -1150,9 +1181,11 @@ void SpecificWorker::remember_ghost(const rc::DoorInstance& inst)
 {
     if (cfg_.exist_reacquire_radius_m <= 0.0f or not inst.ai2_initialized or inst.is_bearing_hypothesis)
         return;
+    // Keyed on the APERTURE: the identity of a door is its hole in the wall, so a door that flickers out
+    // while its leaf happens to be open must still be re-acquired at the same place.
     const auto& s = inst.model.state();
     std::erase_if(ghosts_, [&](const DoorGhost& g) { return g.name == inst.node_name; });
-    ghosts_.push_back({inst.node_name, Eigen::Vector2f(s.cx, s.cy), inst.ai2_belief, inst.processed_cycles});
+    ghosts_.push_back({inst.node_name, Eigen::Vector2f(s.ap_cx, s.ap_cy), inst.ai2_belief, inst.processed_cycles});
     // Bounded, most-recent-first: this is a short-lived flicker memory, not a permanent map.
     while (static_cast<int>(ghosts_.size()) > std::max(1, cfg_.exist_ghost_max))
         ghosts_.erase(ghosts_.begin());
@@ -1240,8 +1273,12 @@ void SpecificWorker::update_existence_beliefs()
         // This is a genuine PRIOR over pose, not a detectability heuristic, so it survives the port unchanged.
         if (cfg_.exist_room_prior and fitter_->has_room_polygon() and not inst.is_bearing_hypothesis)
         {
+            // The APERTURE centre, not the leaf's: a leaf swung OUTWARD moves the panel centre by w/2
+            // (0.45 m at the fitted w = 0.90 seen live) against RoomMarginM = 0.40, which would put a
+            // perfectly good door "outside the room" — and this branch `continue`s past the sensor
+            // channel, so nothing could rescue it before the 15-frame debounce deleted it.
             const auto& ms = inst.model.state();
-            if (not fitter_->point_in_room(Eigen::Vector2f(ms.cx, ms.cy), cfg_.exist_room_margin_m))
+            if (not fitter_->point_in_room(Eigen::Vector2f(ms.ap_cx, ms.ap_cy), cfg_.exist_room_margin_m))
             {
                 inst.existence.set(inst.existence.logodds() - cfg_.exist_out_of_room_gain);
                 if (inst.existence.should_remove(cfg_.exist_removal_prob)) ++inst.existence_remove_streak;
@@ -1250,6 +1287,27 @@ void SpecificWorker::update_existence_beliefs()
                     to_remove.push_back(id);
                 continue;   // outside the room → no sensor evidence can rescue it; skip the normal channel
             }
+        }
+
+        // MINIMUM-HEIGHT prior: same categorical prior as at birth, for an instance that is ALREADY alive —
+        // either it predates the birth check, or it drifted onto a low blob. A door is an aperture a person
+        // walks through, so a support that CONFIDENTLY tops out below MinHeightM says "this is not a door"
+        // no matter how well its silhouette is explained.
+        //
+        // obs_top_z accumulates untruncated views only, and obs_top_conf is the weight behind it, so a door
+        // whose top is always clipped by the image border never reaches MinHeightConf and is never judged —
+        // the prior stays silent rather than guessing. Not gated on visibility: like the room prior, this is
+        // a fact about what a door IS, so it applies whether or not the door is in view right now.
+        if (cfg_.exist_min_height_prior and not inst.is_bearing_hypothesis
+            and std::isfinite(inst.obs_top_z) and inst.obs_top_conf >= cfg_.exist_min_height_conf
+            and inst.obs_top_z < cfg_.exist_min_height_m)
+        {
+            inst.existence.set(inst.existence.logodds() - cfg_.exist_short_gain);
+            if (inst.existence.should_remove(cfg_.exist_removal_prob)) ++inst.existence_remove_streak;
+            else                                                       inst.existence_remove_streak = 0;
+            if (inst.existence_remove_streak >= cfg_.exist_remove_frames)
+                to_remove.push_back(id);
+            continue;   // too short to be a door → no amount of silhouette agreement makes it one
         }
 
         // A bearing-only hypothesis has no depth (existence unjudgeable) and an un-initialised newborn has no
@@ -1293,11 +1351,25 @@ void SpecificWorker::update_existence_beliefs()
         //   central_frac — whether the robot is LOOKING at it rather than clipping the frustum edge.
         // Predicted-but-absent counts toward REMOVAL only in proportion to p_detect; the remainder is epistemic
         // surprise ("I cannot resolve this from here"), which should send the robot to look, never delete.
+        //
+        // ★ p_detect scales the SATURATED delta, not the raw pixel COUNT. Scaling the count does not work:
+        // mask_evidence tanh-saturates the summed log-odds, and with hundreds of samples the sum sits far
+        // past the knee, so p_detect changes almost nothing until it hits exactly 0 — at which point the
+        // absence term vanishes entirely and the channel becomes a monotonic CONFIRMER. That is precisely
+        // what the live log showed: central_frac ≡ 0 ⇒ p_detect ≡ 0 ⇒ sil_free_eff ≡ 0, so the phantom at
+        // (−4.22,−2.16) sat at L = 4.0 with 230 of its 420 silhouette samples unlit, forever. (Same defect
+        // family as the table's "p_detect inert" — see the dining-set fix, which is where this form comes
+        // from.) Interpolating between the confirm-only delta and the full delta makes p_detect act
+        // linearly over its whole range, and keeps confirmation (+) untouched.
         const float p_detect = sil.resolvability() * sil.in_fov_frac() * sil.central_frac();
-        const float sfree = raw_free * p_detect;
-        inst.dbg_sil_pdetect = p_detect; inst.dbg_sil_free_eff = sfree;
+        inst.dbg_sil_pdetect = p_detect; inst.dbg_sil_free_eff = raw_free * p_detect;
 
-        inst.existence.integrate(rc::exist::mask_evidence(e_occ, sfree, sil.n_detectable, sm));
+        const float d_conf = rc::exist::mask_evidence(e_occ, 0.0f,     sil.n_detectable, sm).log_odds_delta;
+        const float d_full = rc::exist::mask_evidence(e_occ, raw_free, sil.n_detectable, sm).log_odds_delta;
+        rc::exist::Evidence ev;
+        ev.e_occ = e_occ; ev.e_free = raw_free; ev.n_reached = sil.n_detectable;
+        ev.log_odds_delta = d_conf + p_detect * (d_full - d_conf);
+        inst.existence.integrate(ev);
 
         // Debounce on consecutive EVIDENCE cycles (not wall-clock), so a transient hiccup cannot delete a real
         // door, and removal always reflects sustained agreement across frames.
@@ -1328,6 +1400,11 @@ void SpecificWorker::update_existence_beliefs()
                            inst.dbg_sil_ndet, inst.dbg_sil_ntotal, inst.dbg_sil_noccl,
                            inst.dbg_sil_resolv, inst.dbg_sil_central, inst.dbg_sil_pdetect, oblq,
                            inst.existence_remove_streak);
+                // Minimum-height evidence: obs_top is the support top over UNTRUNCATED views only, so a door
+                // whose top is always clipped by the image border shows conf→0 and is never judged short.
+                std::print("door_concept: [existence] {} obs_top={:.2f} m (conf {:.2f}, trunc {:.2f}) min={:.2f} m\n",
+                           inst.node_name, inst.obs_top_z, inst.obs_top_conf, inst.last_trunc_frac,
+                           cfg_.exist_min_height_m);
                 // Same diagnostic to a CSV. How to read it: ndet=0 ⇒ the door was NOT looked at (out of frustum
                 // or fully occluded) ⇒ HOLD, L must not move — that is the "robot turned around" case. A real
                 // door in view shows occ≫free. A phantom in a resolving view (pdet high) shows free≫occ and a
@@ -1335,7 +1412,8 @@ void SpecificWorker::update_existence_beliefs()
                 static std::ofstream ex_csv = []{ std::ofstream f("etc/door_existence_log.csv", std::ios::trunc);
                     f << "cycle,node,L,p_exists,cx,cy,inroom,roomprior_loaded,won,since_det,"
                          "sil_occ,sil_free,sil_free_eff,n_detectable,n_total,n_occluded,"
-                         "resolvability,central_frac,p_detect,oblq,remove_streak\n"; return f; }();
+                         "resolvability,central_frac,p_detect,oblq,remove_streak,"
+                         "obs_top_z,obs_top_conf,trunc\n"; return f; }();
                 if (ex_csv)
                 {
                     ex_csv << ex_dbg << ',' << inst.node_name << ',' << inst.existence.logodds() << ','
@@ -1345,7 +1423,8 @@ void SpecificWorker::update_existence_beliefs()
                            << ',' << inst.dbg_sil_occ << ',' << inst.dbg_sil_free << ',' << inst.dbg_sil_free_eff
                            << ',' << inst.dbg_sil_ndet << ',' << inst.dbg_sil_ntotal << ',' << inst.dbg_sil_noccl
                            << ',' << inst.dbg_sil_resolv << ',' << inst.dbg_sil_central << ',' << inst.dbg_sil_pdetect
-                           << ',' << oblq << ',' << inst.existence_remove_streak << '\n';
+                           << ',' << oblq << ',' << inst.existence_remove_streak
+                           << ',' << inst.obs_top_z << ',' << inst.obs_top_conf << ',' << inst.last_trunc_frac << '\n';
                     ex_csv.flush();
                 }
             }
@@ -1521,9 +1600,11 @@ void SpecificWorker::step_convergence(rc::DoorInstance& inst,
     // how much the accepted state moved between cycles instead.
     const auto& s = inst.model.state();
     const auto& p = inst.prev_conv_state;
+    // phi is in the sum so a door SWINGING cannot read as "converged" (its centre and yaw move together
+    // in a way the other terms alone under-report). Contributes exactly 0 while phi is pinned.
     const float state_delta = inst.has_prev_conv_state
         ? (std::abs(s.cx - p.cx) + std::abs(s.cy - p.cy) + std::abs(s.w - p.w) +
-           std::abs(s.h - p.h) + std::abs(s.yaw - p.yaw))
+           std::abs(s.h - p.h) + std::abs(s.yaw - p.yaw) + std::abs(s.phi - p.phi))
         : std::numeric_limits<float>::max();
     inst.prev_conv_state = s;
     inst.has_prev_conv_state = true;

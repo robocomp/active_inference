@@ -103,11 +103,23 @@ void TableExistence::update_and_remove(TableFitter& fitter, TableLidarIngestor* 
                 // LOOKING at it (central_frac). NOT obliquity: this robot is chronically edge-on and an edge-on
                 // table IS detectable up close (table_1), so obliquity would wrongly block legitimate removal.
                 const float p_detect = absence_range_conf(sil.mean_range_m) * sil.in_fov_frac() * sil.central_frac();
-                const float sfree  = raw_free * p_detect;                 // confident absence → removal log-odds
                 const float verify = raw_free * (1.0f - p_detect);        // un-confident absence → go-verify surprise
-                inst.dbg_ex_sil_free_eff = sfree;
+                // p_detect must scale the SATURATED per-cycle log-odds, NOT the raw pixel count. Scaling the count
+                // is a no-op in practice: e_free is thousands of pixels, so even p_detect=0.02 leaves the product
+                // far above the tanh knee and the cycle still lands at the full ±llr_occ ceiling — a 2%-resolvable
+                // view removed the table at the same rate as a clean one (live: table_5 p_detect=0.018 → L=−3.13,
+                // table_1 at 5.8 m p_detect=0.064 → removed). Instead take the frame's OCCUPANCY-only saturated
+                // delta as the floor and admit only p_detect of the additional absence swing, so one cycle of an
+                // un-resolvable view is worth p_detect of one confident look. p_detect→1 (close, centred, in
+                // frustum) reproduces the previous behaviour exactly; p_detect→0 ⇒ pure HOLD.
+                const rc::exist::Evidence e_conf = rc::exist::mask_evidence(sil.e_occ, 0.0f, sil.n_detectable, sm);
+                const rc::exist::Evidence e_full = rc::exist::mask_evidence(sil.e_occ, raw_free, sil.n_detectable, sm);
+                rc::exist::Evidence e_use = e_full;
+                e_use.log_odds_delta = e_conf.log_odds_delta
+                                     + p_detect * (e_full.log_odds_delta - e_conf.log_odds_delta);
+                inst.dbg_ex_sil_free_eff = raw_free * p_detect;   // diagnostic: absence mass actually admitted
                 inst.dbg_ex_pdetect = p_detect; inst.dbg_ex_central = sil.central_frac();
-                inst.existence.integrate(rc::exist::mask_evidence(sil.e_occ, sfree, sil.n_detectable, sm));
+                inst.existence.integrate(e_use);
                 integrated = true;
                 // Route the un-resolvable absence into an epistemic VERIFY pull (decayed accumulator). When it
                 // builds up, the table is flagged for verification (the epistemic planner drives the robot to a

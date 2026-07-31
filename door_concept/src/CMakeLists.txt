@@ -25,6 +25,7 @@ LIST(APPEND HEADERS
   ${ACTIVE_INFERENCE_COMMON_DIR}/mask_ingestor/mask_ingestor.h
   ../src/door_scene_graph.h
   ../src/door_fitter.h
+  ../src/door_geometry.h
   ../src/door_model.h
   ../src/door_belief.h
   ../src/door_dof.h

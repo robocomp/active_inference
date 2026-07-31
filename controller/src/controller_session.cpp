@@ -80,7 +80,6 @@ void ControllerSession::clear_tracking_state()
 
 bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
                                          ControllerWorldModel &world_model,
-                                         RoomPathPlanner &planner,
                                          ControllerObstacleTracker &obstacle_tracker,
                                          rc::TrajectoryController &path_controller,
                                          ControllerMotionCommander &motion_commander,
@@ -89,7 +88,6 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
     if (!world_model.refresh_graph_state())
     {
         room_polygon_.clear();
-        inner_polygon_.clear();
         current_plan_.reset();
         if (!room_wait_logged_)
         {
@@ -110,7 +108,6 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
     if (!room_polygon.has_value() || room_polygon->size() < 3)
     {
         room_polygon_.clear();
-        inner_polygon_.clear();
         current_plan_.reset();
         qInfo() << "Controller waiting for delimiting polygon attributes on room node";
         update_display(std::nullopt,
@@ -123,14 +120,13 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
     }
 
     room_polygon_ = room_polygon.value();
-    inner_polygon_ = planner.compute_inner_polygon(room_polygon_);
     obstacle_tracker.update_active_obstacle_polygons(timestamp_ms, path_controller);
     // Rasterise the SAME obstacle set the visibility graph used into the footprint planner's grid. Cheap
     // enough to redo every cycle (0.3 ms on the apartment) and independent of polygon count, so the obstacle
     // set can be as detailed as perception makes it without the planner degrading.
     if (params_)
     {
-        grid_planner_.params.cell_size_m = std::max(0.05f, params_->grid_resolution_m * 0.3f);
+        grid_planner_.params.cell_size_m = std::max(0.02f, params_->planner_cell_size_m);
         grid_planner_.params.safety_margin_m = params_->footprint_safety_margin_m;
     }
     grid_planner_.set_world(room_polygon_, obstacle_tracker.obstacle_polygons());
@@ -141,7 +137,6 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
                                                                              ControllerWorldModel &world_model,
                                                                              ControllerObstacleTracker &obstacle_tracker,
                                                                              rc::AffordanceManager &affordance_manager,
-                                                                             RoomPathPlanner &planner,
                                                                              rc::TrajectoryController &path_controller,
                                                                              ControllerMotionCommander &motion_commander,
                                                                              ControllerDisplay &display)
@@ -262,7 +257,6 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
 }
 
 bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
-                                            RoomPathPlanner &planner,
                                             ControllerObstacleTracker &obstacle_tracker,
                                             rc::TrajectoryController &path_controller,
                                             ControllerMotionCommander &motion_commander,
@@ -288,7 +282,7 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
         // FOOTPRINT PLANNER. The robot's real shape is tested against the grid; obstacles are NOT inflated.
         // Falls back to nothing — if this cannot find a route, the HOLD branch below reports precisely why.
         if (const auto route = grid_planner_.plan(step.plan_origin, step.target.room_pos); route.has_value())
-            current_plan_ = ControllerPathPlan{.room_path = *route, .graph_nodes = *route};
+            current_plan_ = ControllerPathPlan{.room_path = *route};
         else
             current_plan_.reset();
     }
@@ -359,7 +353,6 @@ void ControllerSession::update_display(const std::optional<ControllerRobotPose> 
 
     display.update(icon_pose,
                    room_polygon_,
-                   inner_polygon_,
                    current_plan_,
                    obstacle_polys,
                    obstacle_rfe_points,
@@ -448,9 +441,12 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         }
     }
 
-    const auto &boundary_polygon = inner_polygon_.empty() ? room_polygon_ : inner_polygon_;
-    if (boundary_polygon.size() >= 3)
-        path_controller.set_room_boundary(boundary_polygon);
+    // The MPPI gets the room's TRUE boundary. It used to get a copy shrunk inward by clearance_m (0.5 m),
+    // which is a C-space margin: it silently deleted a half-metre band of real floor along every wall, on top
+    // of the footprint test that already keeps the body inside. The body's extent is applied where it belongs
+    // — in the obstacle terms, per pose, per bearing.
+    if (room_polygon_.size() >= 3)
+        path_controller.set_room_boundary(room_polygon_);
 
     const auto control_output = path_controller.compute(robot_pose.as_transform());
     // Surface what the ARRIVAL test is waiting on, every cycle, before any of the branches below can return
@@ -1126,7 +1122,9 @@ void ControllerSession::begin_escape(const ControllerRobotPose &robot_pose,
     // is forgotten; if we re-wedge, another one is dropped.
     const float vrad        = params_ ? params_->stuck_virtual_obstacle_radius_m  : 0.30f;
     const float fwd_off_cfg = params_ ? params_->stuck_virtual_obstacle_forward_m : 0.40f;
-    const float body_radius = params_ ? std::max(0.f, params_->clearance_m)       : 0.40f;
+    // Worst-case body extent: the disc is dropped ahead of the robot before it turns, so it must clear the
+    // body at any heading. Asked of the footprint, not of a config knob that also meant three other things.
+    const float body_radius = path_controller.footprint().circumscribed_radius();
     // Push the disc far enough ahead that its NEAR edge clears the robot footprint. Otherwise the marker
     // overlaps the body (default 0.40 ahead − 0.30 radius = 0.10 m from centre, well inside clearance),
     // the planner/MPPI reads the robot as "already colliding" with its own marker, no rollout escapes,
@@ -1143,13 +1141,11 @@ void ControllerSession::begin_escape(const ControllerRobotPose &robot_pose,
     // as the sole obstacle source.
     if (!params_ || params_->obstacle_creation_enabled)
         obstacle_tracker.add_virtual_obstacle(now_ms, stuck_center, vrad);
-    // [stuck-diag] escape geometry — the escape early-returns before the proximity CSV block, so these
-    // cycles aren't otherwise logged. near_edge = fwd_off − vrad must exceed the footprint (clearance_m),
-    // else the disc traps the robot on itself. Watch how far dist_to_goal is when this keeps firing.
-    qInfo().nospace() << "[stuck-diag] escape begin: disc_center=(" << stuck_center.x() << ',' << stuck_center.y()
-                      << ") r=" << vrad << " fwd_off=" << fwd_off << " near_edge_to_robot=" << (fwd_off - vrad)
-                      << " body_radius=" << body_radius << " turn=" << escape_turn_sign_
-                      << " cl=" << cl << " cr=" << cr << " escape_count=" << escape_count_;
+    // An escape is an exceptional state transition, so it gets one line — but only the facts that identify
+    // the episode. The geometry dump that used to live here existed to prove the disc was not trapping the
+    // robot on itself; that is now guaranteed by construction (fwd_off clears the footprint above).
+    std::println("[controller] ESCAPE #{} — wedged, reversing and turning {}. Side clearance L={:.2f} R={:.2f} m.",
+                 escape_count_ + 1, escape_turn_sign_ > 0 ? "left" : "right", cl, cr);
 
     escape_active_   = true;
     escape_start_ms_ = now_ms;

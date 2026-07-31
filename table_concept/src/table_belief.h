@@ -172,6 +172,16 @@ struct TableBeliefParams
     // Temporal transition (predict): rigid + static ⇒ small process noise per frame.
     float process_std_m   = 0.005f;
     float process_std_yaw = 0.01f;
+    // EXTENT (w,h,H) process noise, SEPARATE from the pose walk and 0 by default. A table's dimensions are
+    // constants of the object: it may be nudged (pose Q > 0), but it never grows or shrinks. Sharing
+    // process_std_m with the extent asserted that w/h random-walk at 5 mm per FRAME (≈1 m per minute at
+    // 10 Hz), which is what let a converged footprint go soft while unobserved and be re-cut by the next
+    // partial mask. Set > 0 only if the extent must stay adaptable. Negative ⇒ fall back to process_std_m.
+    float process_std_extent_m = 0.0f;
+    // Σ CEILING: cap the predict-time covariance at prior_cov_diag() (Ornstein-Uhlenbeck decay toward the
+    // stationary prior instead of a divergent random walk). Knowledge ages back toward the prior and stops
+    // there — a 15-minute-old belief is still worth more than one rogue mask. See rc::ai::predict.
+    bool  clamp_sigma_to_prior = true;
 
     // Per-frame COMMON-MODE error: the error SHARED by all points of one mask (localization + mask
     // boundary + deprojection), which does NOT average out over points. The frame's information
@@ -283,11 +293,13 @@ public:
         dbg_yaw_after_moment_ = state_.yaw;   // DIAGNOSTIC: yaw after the footprint-moment fusion
         return e;
     }
-    void  predict()                       { ai::predict<N>(*this, Sigma_, state_, prior_mean_); }
-    // Age the belief with NO measurement: Σ ← FΣFᵀ + Q·(dt/dt_nominal), mean held. The fitter calls this when
-    // a table's mask stream is stale/dead so Σ grows on the agent's clock instead of freezing (see TABLE).
+    void  predict()
+    { ai::predict<N>(*this, Sigma_, state_, prior_mean_, 1.0f, params_.clamp_sigma_to_prior); }
+    // Age the belief with NO measurement: Σ ← FΣFᵀ + Q·(dt/dt_nominal), mean held, capped at the prior. The
+    // fitter calls this when a table's mask stream is stale/dead so Σ grows on the agent's clock instead of
+    // freezing (see TABLE) — but saturates at Σ₀ so ageing never erases a converged table (see rc::ai::predict).
     void  inflate_for_age(float dt_s, float dt_nominal_s)
-    { ai::inflate_for_age<N>(*this, Sigma_, state_, prior_mean_, dt_s, dt_nominal_s); }
+    { ai::inflate_for_age<N>(*this, Sigma_, state_, prior_mean_, dt_s, dt_nominal_s, params_.clamp_sigma_to_prior); }
 
     Eigen::Matrix<float, 7, 7> predicted_information(const std::vector<Eigen::Vector3f>& pts, float R) const
     { return ai::predicted_information<N>(*this, state_, pts, R); }

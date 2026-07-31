@@ -1,5 +1,7 @@
 #include "controller_obstacle_tracker.h"
 
+#include "../../common/robot_footprint/robot_footprint.h"
+
 #include <array>
 #include <algorithm>
 #include <cmath>
@@ -360,21 +362,26 @@ std::vector<Eigen::Vector2f> ControllerObstacleTracker::read_temporary_obstacle_
     const float max_robot_distance = max_front_distance + search_radius + 0.25f;
     // Returns inside the robot's own footprint are self/body/floor-ring hits, not obstacles — and any
     // real contact is already inside the footprint anyway. Drop them so we never fit an obstacle glued
-    // to the body. clearance_m is the footprint radius used everywhere else in the controller.
-    const float body_radius = std::max(0.f, params_->clearance_m);
+    // to the body. This is the FOOTPRINT, tested at each return's own bearing: the old code used a 0.50 m
+    // disc (clearance_m), which deleted every return in 0.79 m² around the robot — 3.4× the robot's actual
+    // area — including the obstacles closest to it, the ones that matter most.
+    static const rc::RobotFootprint footprint = rc::RobotFootprint::shadow();
 
     for (const auto &point3d_room : fused_points_room)
     {
         const Eigen::Vector2f point_room(point3d_room.x(), point3d_room.y());
         if ((point_room - region_center_room).norm() > search_radius)
             continue;
-        if ((point_room - robot_pose.pos).norm() < body_radius)
+        const Eigen::Vector2f from_robot = point_room - robot_pose.pos;
+        if (from_robot.norm() < footprint.support_radius_yaw(robot_pose.theta, from_robot))
             continue;
 
         const Eigen::Vector2f point_robot = robot_from_room * point_room;
         if (forward_only)
         {
-            if (point_robot.y() <= params_->clearance_m * 0.5f)
+            // Must be genuinely AHEAD of the body, not merely ahead of the origin. point_robot is already in
+            // the footprint's own frame (x right, y forward), so this is the front extent directly.
+            if (point_robot.y() <= footprint.support_radius(0.f, {0.f, 1.f}))
                 continue;
             if (point_robot.y() > max_front_distance)
                 continue;
@@ -637,7 +644,9 @@ bool ControllerObstacleTracker::has_compelling_absence_evidence(std::uint64_t ti
 
     const auto &state = instance.model.state();
     const Eigen::Vector2f center_robot = robot_pose.as_transform().inverse() * state.center;
-    if (center_robot.y() <= params_->clearance_m * 0.25f)
+    // The obstacle must be in front of the body for its absence to mean anything — behind it, "we see no
+    // points there" is a statement about the sensor, not about the world.
+    if (center_robot.y() <= rc::RobotFootprint::shadow().support_radius(0.f, {0.f, 1.f}))
         return false;
 
     const auto points_room = read_temporary_obstacle_points(timestamp_ms,
@@ -1289,12 +1298,12 @@ bool ControllerObstacleTracker::create_temporary_lidar_obstacle(std::uint64_t ti
     // either a self/floor phantom or something we are already in contact with; injected into the planner
     // it just traps every MPPI rollout ("already in collision") and can't be routed around — backing out
     // is the stuck-recovery escape's job, not a planner obstacle's. Require the fitted box surface to sit
-    // at least one footprint radius (clearance_m) from the robot centre.
+    // outside the body — worst-case extent, since obstacle_sdf returns a bare distance with no bearing.
     const ControllerObstacleState candidate{.center = observation->centroid,
                                             .yaw_rad = observation->yaw_rad,
                                             .width_m = observation->width_m,
                                             .depth_m = observation->depth_m};
-    if (obstacle_sdf(candidate, robot_pose.pos) < std::max(0.f, params_->clearance_m))
+    if (obstacle_sdf(candidate, robot_pose.pos) < rc::RobotFootprint::shadow().circumscribed_radius())
         return false;
 
     ingest_obstacle_observation(*observation, timestamp_ms);

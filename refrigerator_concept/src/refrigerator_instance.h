@@ -150,14 +150,19 @@ struct RefrigeratorInstance
     int existence_remove_streak = 0;
 
     // ── "Is this really a fridge?" plausibility filter (model-evidence mis-detection reject) ──────────
-    // last_plausibility ∈ (0,1] = this cycle's fridge-plausibility (aspect·size·height·fit); plaus_evidence is
-    // its bounded sequential-Bayes accumulator (+= plausibility−0.5, clamped ±PlausClamp): a settled fridge
-    // sits strongly positive, a mis-detection (elongated/short/poor-fit) drives it negative → existence decay.
-    // One bad frame cannot flip a settled sign; it can still RECANT over many frames. plaus_remove_streak is the
-    // dedicated debounce for the plausibility+singleton removal path (independent of the sensor-existence streak).
-    float last_plausibility = 0.5f;
+    // last_plausibility = this cycle's shape LOG-EVIDENCE RATIO log[p(θ|fridge)/p(θ|other furniture)] (nats,
+    // 0 = the two hypotheses are indifferent); plaus_evidence is its bounded sequential-Bayes accumulator
+    // (clamped ±PlausClamp): a settled fridge sits strongly positive, a mis-detection (elongated/short) drives it
+    // negative → existence decay. One bad frame cannot flip a settled sign; it can still RECANT over many frames.
+    // plaus_remove_streak is the dedicated debounce for the plausibility+singleton removal path (independent of
+    // the sensor-existence streak). plaus_seen_frames pins the accumulator to MEASURED cycles: it stores the
+    // matched_frames value already folded in, so a frozen belief (no fresh mask / gated update) contributes
+    // NOTHING instead of re-adding the same static shape term until it saturates the clamp — the repetition
+    // defect that deleted well-fitted fridges with zero new data. See [[refrigerator-table-geometry-churn]].
+    float last_plausibility = 0.0f;
     float plaus_evidence     = 0.0f;
     int   plaus_remove_streak = 0;
+    int   plaus_seen_frames   = -1;
     // Verification-gated removal (active-inference): a predicted-visible-but-absent observation from a view that
     // CANNOT resolve the refrigerator (far / peripheral / edge-on) does NOT vote removal — it raises this decayed
     // go-VERIFY surprise. When it crosses existence_verify_surprise, wants_verification arms the epistemic planner

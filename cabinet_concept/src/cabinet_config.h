@@ -119,6 +119,17 @@ struct CabinetConfig
     float kitchen_motion_cm_gain  = 0.30f;   // position shared-error std per (m/s) of motion  (chair MotionCmPosGain)
     float kitchen_ang_lever_m     = 2.0f;    // rad/s → m/s lever for camera rotation           (chair AI2AngLeverM)
     float kitchen_periph_ref      = 0.50f;   // centroid radius (focal-norm) at which periphery saturates (chair AI2PeriphRef)
+    // Kitchen RETIREMENT channel: LiDAR evidence of absence on the BORN cells. The mask channel can only add
+    // presence to an active cell (a look-away is not evidence of absence) and the free-space carve only reshapes,
+    // so without this a cell that ever births is immortal — the "phantom cabinets are never removed" defect.
+    // A beam that traverses a run and lands on the WALL BEHIND it refutes it; occupancy (front-face/top returns)
+    // defends it; an occluded run is not probed and simply holds. Reuses the classic path's Existence* sensor
+    // rates (detection/clutter/σ/absence-range/remove-frames) — no new tuning surface. See cabinet_kitchen.h.
+    bool  kitchen_lidar_existence = false;
+    // Per-cycle CSV of the kitchen cells (state + existence + the absence evidence that drives retirement). The
+    // birth-surprise probe reads fitter_->instances(), which is EMPTY in kitchen mode, so this is the only
+    // observability the kitchen model has. Empty path = off.
+    std::string kitchen_cells_csv_path = "";
     bool  counter_evidence_enabled = true;   // ingest 'counter'/'countertop' masks as top-face run evidence
     bool  lshape_split_enabled    = true;
     int   lshape_min_arm_pts      = 500;     // an arm (and the peeling residue) must exceed this to split

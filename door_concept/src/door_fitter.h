@@ -164,6 +164,10 @@ public:
 
 private:
     DoorBeliefParams make_belief_params() const;   // config → belief params (shared by init + hypothesis seed)
+    // The SINGLE authoring point for a door's geometry: refresh the cached aperture / leaf / leaf_pose from
+    // the belief and write the room-frame read-back into DoorState. Called from ensure_instance (pre-belief),
+    // the bearing seed, and the per-cycle write-back — the only three places a door's shape can change.
+    void refresh_geometry(DoorInstance& inst);
     // room_T_zed (camera→room). pose_ts_ms pins the room→body hop to the mask's capture time (Nearest RT
     // query); the rigid body→zed mount is always queried latest. 0 → current pose.
     std::optional<Eigen::Matrix4d> room_T_zed_matrix(std::uint64_t pose_ts_ms = 0) const;

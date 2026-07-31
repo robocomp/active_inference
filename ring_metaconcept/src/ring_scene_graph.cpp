@@ -54,16 +54,23 @@ std::uint64_t RingSceneGraph::ensure_rig_node(const RingBelief& belief, std::uin
     // ── Birth ────────────────────────────────────────────────────────────────
     if (rig_node_id_ == 0)
     {
-        // Auto-name one past the highest existing dining_set_<N>, same convention as the level-1
-        // agents (generic `object` node + NAME prefix; there is no per-class DSR node type).
+        // Auto-name one past the highest existing dining_set_<N>, same NAME convention as the
+        // level-1 agents (the class itself stays in object_subtype).
         int max_n = 0;
         const auto plen = cfg_.node_prefix.size();
-        for (const auto& n : G_->get_nodes_by_type("object"))
+        for (const auto& n : G_->get_nodes_by_type("metaconcept"))
             if (n.name().rfind(cfg_.node_prefix, 0) == 0)
                 try { max_n = std::max(max_n, std::stoi(n.name().substr(plen))); } catch (...) {}
         const std::string name = cfg_.node_prefix + std::to_string(max_n + 1);
 
-        DSR::Node node = DSR::Node::create<object_node_type>(name);
+        // ★Type `metaconcept`, NOT `object`. A rig is a belief about a RELATION among nodes, not a
+        // body: it has a footprint (the ring's extent) but nothing occupies it. Every furniture
+        // consumer in the fleet gathers with get_nodes_by_type("object") — the voxelizer's three
+        // draw passes, residual_concept's carve, the level-1 association scans — so publishing it
+        // as an `object` made a 2r×2r phantom box that got drawn, carved and associated against.
+        // The dedicated type is what excludes it everywhere at once; graph3d's SceneBuilder keys
+        // Kind::Meta off it and is the one view that DOES draw it.
+        DSR::Node node = DSR::Node::create<metaconcept_node_type>(name);
         G_->add_or_modify_attrib_local<object_subtype_att>(node, cfg_.node_subtype);
         G_->add_or_modify_attrib_local<level_att> (node, 3);
         G_->add_or_modify_attrib_local<parent_att>(node, room_id);

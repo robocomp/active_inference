@@ -90,7 +90,8 @@ void TrajectoryController::refresh_active_params()
     active_params_.T_min = std::max(1, std::min(active_params_.T_min, active_params_.T_max));
     active_params_.num_samples = std::clamp(active_params_.num_samples, active_params_.K_min, active_params_.K_max);
     active_params_.trajectory_steps = std::clamp(active_params_.trajectory_steps, active_params_.T_min, active_params_.T_max);
-    active_params_.d_safe = std::max(active_params_.d_safe, active_params_.robot_radius + 0.01f);
+    // d_safe is a standoff BEYOND the body, so it is meaningless below the body's own worst-case reach.
+    active_params_.d_safe = std::max(active_params_.d_safe, body_extent_max() + 0.01f);
     active_params_.max_back_adv = std::clamp(active_params_.max_back_adv, 0.f, active_params_.max_adv);
     active_params_.min_adv_cmd = std::clamp(active_params_.min_adv_cmd, 0.f, active_params_.max_adv);
     active_params_.mppi_lambda = std::clamp(active_params_.mppi_lambda, active_params_.lambda_min, active_params_.lambda_max);
@@ -98,9 +99,12 @@ void TrajectoryController::refresh_active_params()
 
 float TrajectoryController::effective_d_safe_for_goal_dist(float goal_dist) const
 {
-    const float near_safe = std::max({active_params_.robot_radius + active_params_.goal_obstacle_margin,
+    // No bearing is available here (this is the scalar the ramp relaxes TO), so the worst-case extent is the
+    // honest floor: the goal must at least admit the body at whatever heading it arrives with.
+    const float body_r = body_extent_max();
+    const float near_safe = std::max({body_r + active_params_.goal_obstacle_margin,
                                       active_params_.d_safe * active_params_.goal_clearance_min_ratio,
-                                      active_params_.robot_radius + 0.005f});
+                                      body_r + 0.005f});
     const float far_safe = std::max(active_params_.d_safe, near_safe);
     const float tau = std::max(active_params_.goal_clearance_relax_dist, 1e-3f);
     const float blend = smoothstep01(std::max(goal_dist, 0.f) / tau); // 0 near goal, 1 far
@@ -115,7 +119,7 @@ float TrajectoryController::body_extent_toward_obstacle(float rx, float ry, floa
     // gradient is degenerate (flat field, far from everything) support_radius falls back to the
     // circumscribed radius, i.e. the old worst-case disc — safe, and only in the region where it cannot matter.
     const Eigen::Vector2f g = query_esdf_gradient(rx, ry);
-    return footprint_.support_radius(theta, -g);
+    return body_extent(-g, theta);
 }
 
 float TrajectoryController::obstacle_step_cost(float esdf_val, float d_safe_eff, float body_r) const
@@ -315,18 +319,29 @@ void TrajectoryController::relax_path(int iterations)
     constexpr float alpha_obs    = 0.35f;   // obstacle repulsion gain per iteration
     constexpr float alpha_smooth = 0.15f;   // smoothing gain per iteration
     const float d_thresh = 1.5f;            // meters — influence radius for push
-    const float min_clearance = active_params_.robot_radius + 0.05f;  // safety margin
+    constexpr float smoothing_standoff = 0.05f;   // comfort beyond the body when nudging a waypoint
 
-    // Helper: minimum distance from point to any obstacle
-    auto min_obs_dist = [&](const Eigen::Vector2f& p) -> float
+    // Nearest obstacle point, and the distance to it. The POINT matters, not just the distance: it gives the
+    // bearing at which the body has to fit, and the body's reach is direction-dependent. Returning only a
+    // scalar is what forced the old code to compare against a worst-case disc.
+    auto nearest_obs = [&](const Eigen::Vector2f& p) -> std::pair<Eigen::Vector2f, float>
     {
         float best = std::numeric_limits<float>::max();
+        Eigen::Vector2f at = p;
         for (const auto& obs_pt : all_obs)
         {
             const float dsq = (p - obs_pt).squaredNorm();
-            if (dsq < best) best = dsq;
+            if (dsq < best) { best = dsq; at = obs_pt; }
         }
-        return std::sqrt(best);
+        return {at, std::sqrt(best)};
+    };
+    // The robot arrives at a waypoint travelling along the path, and that is the heading the footprint will
+    // present there — the same model the grid planner searches under (heading = direction of travel). So the
+    // smoother can ask the exact question the planner already answered, instead of a disc approximation.
+    auto heading_at = [&](int i) -> float
+    {
+        const Eigen::Vector2f t = path_room_[std::min(i + 1, n - 1)] - path_room_[std::max(i - 1, 0)];
+        return t.squaredNorm() > 1e-12f ? std::atan2(t.x(), t.y()) : 0.f;
     };
 
     for (int iter = 0; iter < iterations; ++iter)
@@ -335,16 +350,9 @@ void TrajectoryController::relax_path(int iterations)
         for (int i = 1; i < n - 1; ++i)
         {
             const Eigen::Vector2f& p = path_room_[i];
+            const float heading = heading_at(i);
 
-            // Find nearest obstacle point
-            float min_dist_sq = std::numeric_limits<float>::max();
-            Eigen::Vector2f nearest = p;
-            for (const auto& obs_pt : all_obs)
-            {
-                const float dsq = (p - obs_pt).squaredNorm();
-                if (dsq < min_dist_sq) { min_dist_sq = dsq; nearest = obs_pt; }
-            }
-            const float min_dist = std::sqrt(min_dist_sq);
+            const auto [nearest, min_dist] = nearest_obs(p);
 
             // Obstacle repulsion: push away from nearest wall, proportional to proximity
             Eigen::Vector2f obs_force = Eigen::Vector2f::Zero();
@@ -361,8 +369,11 @@ void TrajectoryController::relax_path(int iterations)
             // Candidate new position
             const Eigen::Vector2f candidate = p + alpha_obs * obs_force + alpha_smooth * smooth_force;
 
-            // Safety check: reject move if candidate is too close to any obstacle
-            if (min_obs_dist(candidate) >= min_clearance)
+            // Safety check: reject the move if the BODY would not fit there, at the heading it will arrive
+            // with, toward the obstacle that is actually nearest to the candidate.
+            const auto [cand_nearest, cand_dist] = nearest_obs(candidate);
+            const float need = body_extent(candidate - cand_nearest, heading) + smoothing_standoff;
+            if (cand_dist >= need)
                 path_room_[i] = candidate;
         }
     }
@@ -449,13 +460,15 @@ void TrajectoryController::smooth_path_spline()
     // Safety: verify spline points stay inside free space (min clearance from obstacles)
     if (!room_boundary_points_room_.empty() || !static_obstacle_points_room_.empty())
     {
-        const float min_clearance = active_params_.robot_radius + 0.03f;
+        constexpr float spline_standoff = 0.03f;   // comfort beyond the body
         std::vector<Eigen::Vector2f> all_obs;
         all_obs.insert(all_obs.end(), room_boundary_points_room_.begin(), room_boundary_points_room_.end());
         all_obs.insert(all_obs.end(), static_obstacle_points_room_.begin(), static_obstacle_points_room_.end());
 
-        for (auto& pt : smooth)
+        const int m = static_cast<int>(smooth.size());
+        for (int i = 0; i < m; ++i)
         {
+            auto& pt = smooth[i];
             float min_dist_sq = std::numeric_limits<float>::max();
             Eigen::Vector2f nearest = pt;
             for (const auto& obs_pt : all_obs)
@@ -463,13 +476,16 @@ void TrajectoryController::smooth_path_spline()
                 float dsq = (pt - obs_pt).squaredNorm();
                 if (dsq < min_dist_sq) { min_dist_sq = dsq; nearest = obs_pt; }
             }
-            float dist = std::sqrt(min_dist_sq);
-            if (dist < min_clearance && dist > 1e-4f)
-            {
-                // Push point away from obstacle to maintain clearance
-                Eigen::Vector2f away = (pt - nearest) / dist;
-                pt = nearest + away * min_clearance;
-            }
+            const float dist = std::sqrt(min_dist_sq);
+            if (dist < 1e-4f) continue;
+
+            // Heading = spline tangent: the robot follows this curve, so that is the pose the body presents
+            // here, and the reach toward THIS obstacle at THAT heading is the exact clearance required.
+            const Eigen::Vector2f tangent = smooth[std::min(i + 1, m - 1)] - smooth[std::max(i - 1, 0)];
+            const float heading = tangent.squaredNorm() > 1e-12f ? std::atan2(tangent.x(), tangent.y()) : 0.f;
+            const float min_clearance = body_extent(pt - nearest, heading) + spline_standoff;
+            if (dist < min_clearance)
+                pt = nearest + (pt - nearest) / dist * min_clearance;   // push out along the same bearing
         }
     }
 
@@ -589,7 +605,9 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
             if (py <= 0.f) continue;
 
             const float d = std::hypot(px, py);
-            if (d < active_params_.robot_radius + 0.05f) continue;
+            // Self-return reject. The bearing is right there in the point, so ask what the body actually
+            // reaches at that bearing — a disc throws away the one piece of information we have.
+            if (d < body_extent({px, py}) + 0.05f) continue;
 
             const float ang = std::abs(std::atan2(px, py));
             if (ang <= sg_front_cone_rad)
@@ -734,7 +752,10 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
             float clear_acc = 0.f;
             float w_acc = 0.f;
             const bool use_soft_weights = (w_sum > active_params_.weights_epsilon);
-            const float clear_denom = std::max(active_params_.d_safe - active_params_.robot_radius, 1e-3f);
+            // Normalisation only (a 0..1 clearance QUALITY score, not a safety test), and min_esdf carries no
+            // bearing — so the worst-case extent is the right scale here.
+            const float body_r_norm = body_extent_max();
+            const float clear_denom = std::max(active_params_.d_safe - body_r_norm, 1e-3f);
             for (int k = 0; k < actual_K; ++k)
             {
                 if (results[k].collides)
@@ -751,7 +772,7 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
                     steering_angle += seeds[k].rot[s] * active_params_.trajectory_dt;
 
                 const float clearance_norm = std::clamp(
-                    (results[k].min_esdf - active_params_.robot_radius) / clear_denom,
+                    (results[k].min_esdf - body_r_norm) / clear_denom,
                     0.f, 1.f);
 
                 cos_acc += wk * std::cos(steering_angle);
@@ -998,8 +1019,9 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
             RiskEval r;
             float x = 0.f, y = 0.f, theta = 0.f;
             const int steps = std::max(1, static_cast<int>(std::ceil(horizon_s / gate_dt)));
-            const float soft_thresh = active_params_.robot_radius + gate_inflate_m;
-            const float hard_thresh = active_params_.robot_radius + gate_hard_margin_m;
+            // Thresholds are per-STEP, below: the body's reach depends on the heading the rollout has turned
+            // to and on where the obstacle is, and this gate exists precisely to catch tight passages —
+            // exactly where a heading-blind disc is most wrong.
             int soft_consecutive = 0;
 
             for (int i = 0; i < steps; ++i)
@@ -1011,14 +1033,15 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
                 const float d = query_esdf(x, y);
                 r.min_esdf = std::min(r.min_esdf, d);
 
-                if (d < hard_thresh)
+                const float body_r = body_extent_toward_obstacle(x, y, theta);
+                if (d < body_r + gate_hard_margin_m)
                 {
                     r.trigger = true;
                     r.hard_collision = true;
                     return r;
                 }
 
-                if (d < soft_thresh)
+                if (d < body_r + gate_inflate_m)
                 {
                     soft_consecutive++;
                     if (soft_consecutive >= gate_soft_consecutive_needed)
@@ -1039,7 +1062,7 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
         // trigger only when an obstacle is close in a frontal cone.
         constexpr float lidar_front_cone_rad = 0.40f; // ~23 deg frontal cone
         const float lidar_trigger_dist = active_params_.d_safe + 0.08f;
-        const float lidar_min_valid_dist = active_params_.robot_radius + 0.08f;
+        constexpr float lidar_self_margin_m = 0.08f;   // beyond the body, a return is the world, not us
         constexpr int lidar_min_points_to_arm = 5;
         bool gate_armed = false;
         int frontal_close_count = 0;
@@ -1050,7 +1073,8 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
             if (py <= 0.f) continue; // front only
 
             const float d = std::hypot(px, py);
-            if (d < lidar_min_valid_dist) continue; // ignore near-body noise returns
+            // Near-body noise reject, at the bearing of the return itself.
+            if (d < body_extent({px, py}) + lidar_self_margin_m) continue;
 
             const float ang = std::abs(std::atan2(px, py));
             if (ang <= lidar_front_cone_rad && d < lidar_trigger_dist)
@@ -1116,7 +1140,8 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
                 out.adv = 0.f;
                 out.rot = preferred_sign * std::max(0.15f, 0.7f * active_params_.max_rot);
 
-                if (query_esdf(0.f, 0.f) < active_params_.robot_radius + 0.01f)
+                // Already touching something at the current pose (heading 0 in the robot frame) → back off.
+                if (query_esdf(0.f, 0.f) < body_extent_toward_obstacle(0.f, 0.f, 0.f) + 0.01f)
                     out.adv = -std::min(active_params_.max_back_adv, 0.05f);
             }
         }
@@ -1185,7 +1210,9 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
                 if (query_esdf(p_rob.x(), p_rob.y()) < thr)
                     max_r = std::max(max_r, (path_room_[i] - out.blockage_center_room).norm());
             }
-            out.blockage_radius = max_r + active_params_.robot_radius;
+            // A region radius reported to the caller, not a safety test: worst-case extent so the region
+            // covers the body at any heading.
+            out.blockage_radius = max_r + body_extent_max();
         };
 
         if (consec_blocked >= min_wp)
@@ -1304,8 +1331,9 @@ TrajectoryController::ControlOutput TrajectoryController::compute_pd(
             R r;
             float x = 0.f, y = 0.f, theta = 0.f;
             const int steps = std::max(1, static_cast<int>(std::ceil(horizon_s / gate_dt)));
-            const float soft_thresh = active_params_.robot_radius + gate_inflate_m;
-            const float hard_thresh = active_params_.robot_radius + gate_hard_margin_m;
+            // Thresholds are per-STEP, below: the body's reach depends on the heading the rollout has turned
+            // to and on where the obstacle is, and this gate exists precisely to catch tight passages —
+            // exactly where a heading-blind disc is most wrong.
             int soft_consecutive = 0;
             for (int i = 0; i < steps; ++i)
             {
@@ -1314,8 +1342,9 @@ TrajectoryController::ControlOutput TrajectoryController::compute_pd(
                 theta += rot * gate_dt;
                 const float d = query_esdf(x, y);
                 r.min_esdf = std::min(r.min_esdf, d);
-                if (d < hard_thresh) { r.trigger = true; r.hard_collision = true; return r; }
-                if (d < soft_thresh) { if (++soft_consecutive >= gate_soft_consecutive_needed) { r.trigger = true; return r; } }
+                const float body_r = body_extent_toward_obstacle(x, y, theta);
+                if (d < body_r + gate_hard_margin_m) { r.trigger = true; r.hard_collision = true; return r; }
+                if (d < body_r + gate_inflate_m) { if (++soft_consecutive >= gate_soft_consecutive_needed) { r.trigger = true; return r; } }
                 else soft_consecutive = 0;
             }
             return r;
@@ -1582,7 +1611,11 @@ TrajectoryController::SimResult TrajectoryController::simulate_and_score(
 
         const float dist_goal_step = (Eigen::Vector2f(x, y) - goal_robot).norm();
         const float d_safe_eff = effective_d_safe_for_goal_dist(dist_goal_step);
-        const float G_obs = obstacle_step_cost(esdf_val, d_safe_eff, body_extent_toward_obstacle(x, y, theta));
+        // The body's actual reach toward the nearest obstacle at THIS pose. Computed once and reused by the
+        // obstacle cost, the CBF barrier and the collision test, so all three agree by construction — they
+        // used to share a constant disc, which is the only reason they agreed before.
+        const float body_r = body_extent_toward_obstacle(x, y, theta);
+        const float G_obs = obstacle_step_cost(esdf_val, d_safe_eff, body_r);
 
         // Lateral-clearance shaping (continuous, pre-SG):
         // sample ESDF on both sides of the predicted body at front/center/rear
@@ -1625,7 +1658,11 @@ TrajectoryController::SimResult TrajectoryController::simulate_and_score(
 
             const float side_min = std::min(d_left_min, d_right_min);
 
-            const float side_target = active_params_.robot_radius
+            // side_min is a LATERAL distance, so the body's lateral reach is the exact number to beat — not
+            // its diagonal. The Shadow hull is 0.272 across the wheels against 0.325 corner-to-corner, so a
+            // disc was charging this term 5 cm of clearance the robot does not occupy sideways.
+            const float body_lat = std::max(body_extent({+1.f, 0.f}), body_extent({-1.f, 0.f}));
+            const float side_target = body_lat
                                     + std::max(0.f, active_params_.lateral_clearance_margin);
             const float side_span = std::max(active_params_.lateral_clearance_margin, 1e-3f);
 
@@ -1636,7 +1673,7 @@ TrajectoryController::SimResult TrajectoryController::simulate_and_score(
                 G_lat_step += active_params_.lambda_lateral_clearance * deficit * deficit;
             }
 
-            const float bumper_target = active_params_.robot_radius
+            const float bumper_target = body_lat
                                       + std::max(0.f, active_params_.lateral_bumper_margin);
             const float bumper_span = std::max(active_params_.lateral_bumper_margin, 1e-3f);
             if (side_min < bumper_target)
@@ -1684,7 +1721,7 @@ TrajectoryController::SimResult TrajectoryController::simulate_and_score(
         {
             const float v        = seed.adv[s];
             const float a_max    = std::max(active_params_.cbf_max_decel, 1e-3f);
-            const float h_curr   = esdf_val - active_params_.robot_radius
+            const float h_curr   = esdf_val - body_r
                                  - (v * v) / (2.f * a_max);
             if (std::isfinite(prev_h_cbf))
             {
@@ -1707,7 +1744,7 @@ TrajectoryController::SimResult TrajectoryController::simulate_and_score(
         // Collision semantics with finite hard horizon:
         // - near-term collision => hard infeasible (weight zero)
         // - far collision      => soft penalty only (keeps rollout useful)
-        if (esdf_val < active_params_.robot_radius + active_params_.close_obstacle_margin)
+        if (esdf_val < body_r + active_params_.close_obstacle_margin)
         {
             const float ttc_s = static_cast<float>(s + 1) * dt;
             if (ttc_s <= active_params_.hard_collision_horizon_s)
@@ -2084,8 +2121,10 @@ std::vector<Eigen::Vector3f> TrajectoryController::read_lidar_points_robot(const
     std::vector<Eigen::Vector3f> lidar_points;
     lidar_points.reserve(count);
 
+    // Floor on the configured self-filter disc. Worst-case extent: this radius is applied before any bearing
+    // is known, so it has to cover the body whichever way a return comes in.
     const float self_filter_radius = std::max(active_params_.esdf_self_filter_radius,
-                                             active_params_.robot_radius + 0.08f);
+                                              body_extent_max() + 0.08f);
     const float self_filter_half_width = std::max(0.05f, active_params_.esdf_self_filter_half_width);
     const float self_filter_front = std::max(0.05f, active_params_.esdf_self_filter_front);
     const float self_filter_rear = std::max(0.05f, active_params_.esdf_self_filter_rear);

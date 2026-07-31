@@ -498,16 +498,27 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
     {
         planner.mark_and_refresh();   // stamp path + refresh IoR overlay during navigation
         planner.refresh_belief();     // actively exploring → hold belief fresh; forgetting only when idle
-        // Throttled: a stuck claim (controller Executing but never completing) keeps the planner idle
-        // here forever — no reselect, no [planner] line. Reveals the OTHER "robot won't move on" path.
-        static int exec_hold_dbg = 0;
-        if (++exec_hold_dbg % 90 == 0)
-            std::print("[planner] afford_room EXECUTING (controller-claimed) — planner idle, holding "
-                       "target ({:.2f},{:.2f}); {} cycles\n",
-                       planner.current_target() ? planner.current_target()->position.x() : 0.f,
-                       planner.current_target() ? planner.current_target()->position.y() : 0.f,
-                       exec_hold_dbg);
-        return;
+
+        // Liveness: the planner is idle for as long as the claim is held, so a controller that can
+        // never reach this target would park the whole run here. Break the claim if the robot stops
+        // closing on it. Falls through to a fresh selection on the same cycle.
+        if (!break_execution_stall(planner.robot_pos()))
+        {
+            // Throttled: a stuck claim (controller Executing but never completing) keeps the planner
+            // idle here — no reselect, no [planner] line. Reveals the OTHER "robot won't move on" path.
+            static int exec_hold_dbg = 0;
+            if (++exec_hold_dbg % 90 == 0)
+                std::print("[planner] afford_room EXECUTING (controller-claimed) — planner idle, holding "
+                           "target ({:.2f},{:.2f}); {} cycles\n",
+                           planner.current_target() ? planner.current_target()->position.x() : 0.f,
+                           planner.current_target() ? planner.current_target()->position.y() : 0.f,
+                           exec_hold_dbg);
+            return;
+        }
+    }
+    else
+    {
+        stall_tracking_ = false;   // no claim in flight → nothing to watch
     }
 
     // Refresh obstacle exclusion zones from DSR graph before selecting the target.
@@ -523,20 +534,21 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
 
     const float tx   = target_opt->position.x();
     const float ty   = target_opt->position.y();
-    // Advertise the GROUNDED epistemic value in nats: the raw FIM D-optimality gain
-    // ΔH = ½·log det(I + Y_prior⁻¹·I_pred) = expected pose-entropy reduction from observing
-    // corners/walls at this viewpoint. NOT target.score (which folds in IoR-staleness × path
-    // heuristics used only for the room's own target ranking). This puts afford_room's gain in the
-    // same currency as afford_table's ΔH so the controller can compare them as one EFE term.
+    // Advertise the GROUNDED epistemic value in nats, so afford_room's gain is in the same currency
+    // as an object concept's ΔH and the controller can compare them as one EFE term. NOT
+    // target.score, which additionally folds in the distance tie-break used only for the room's own
+    // internal ranking.
     //
-    // Recompute LIVE against the current pose precision (do not reuse the value frozen at target
-    // selection): as the robot drives in and localization tightens, Y_prior grows ⇒ the pose-FIM
-    // part decays toward 0. We publish the TOTAL gain (pose-FIM ΔH + IoR patrol-staleness drive):
-    // the IoR term is NON-saturating, so once the pose is localized the advertised gain stays
-    // positive on long-unvisited cells instead of falling through the consumer's withdrawal
-    // threshold and stopping exploration after a single affordance.
-    // The recompute at target_opt->position also gives the rotate-in-place recovery a real gain.
-    const float gain = planner.live_total_epistemic_gain(target_opt->position);
+    // The published quantity is MARGINAL pose information (what this vantage adds over the one the
+    // robot already occupies) + the destination's neglect information. Marginal rather than
+    // absolute because the absolute ΔH reads ~4 nats from anywhere in a room whose layout is a
+    // fixed prior — it never falls, so it would advertise "there is something to learn here"
+    // forever and permanently out-bid every object affordance. Recomputed LIVE every publish cycle
+    // rather than frozen at selection time, so it tracks the pose precision as the robot drives in.
+    // The neglect part is unbounded in neglect age, so the gain can never collapse and exploration
+    // cannot stall. rotate_in_place switches to the absolute reading — see live_total_epistemic_gain.
+    const float gain = planner.live_total_epistemic_gain(target_opt->position,
+                                                         target_opt->rotate_in_place);
 
     // Heading: face toward room centre so the robot maximises wall/corner visibility
     const float cx  = (planner.room_min().x() + planner.room_max().x()) * 0.5f;
@@ -552,6 +564,69 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
         gain,
         [this]() { trigger_layout_(); },
         [this]() { trigger_layout_(); });
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// break_execution_stall — see the header for why this watchdog is a threshold on purpose.
+bool RoomSceneGraph::break_execution_stall(const Eigen::Vector2f& robot_pos)
+{
+    if (!epistemic_ || !params_ || params_->EXEC_STALL_TIMEOUT_S <= 0.f)
+        return false;
+
+    auto& planner = epistemic_->epistemic_planner();
+    const auto& target_opt = planner.current_target();
+    if (!target_opt.has_value())
+        return false;
+
+    // A rotate-in-place recovery does not close any distance by construction — it would trip the
+    // watchdog every time. It is also self-limiting (it ends when the heading covariance drops).
+    if (target_opt->rotate_in_place)
+    {
+        stall_tracking_ = false;
+        return false;
+    }
+
+    const auto  now  = std::chrono::steady_clock::now();
+    const float dist = (target_opt->position - robot_pos).norm();
+
+    // (Re)arm on a fresh claim or a target that moved.
+    if (!stall_tracking_ || (target_opt->position - stall_target_).squaredNorm() > 1e-6f)
+    {
+        stall_tracking_      = true;
+        stall_target_        = target_opt->position;
+        stall_best_dist_     = dist;
+        stall_last_progress_ = now;
+        return false;
+    }
+
+    // Progress = a new closest approach. Requires a real improvement so pose noise alone cannot
+    // keep resetting the clock (which would make the watchdog never fire — the failure it exists
+    // to catch is precisely one where the robot jitters in place).
+    if (dist < stall_best_dist_ - params_->EXEC_STALL_PROGRESS_M)
+    {
+        stall_best_dist_     = dist;
+        stall_last_progress_ = now;
+        return false;
+    }
+
+    const float idle_s = std::chrono::duration<float>(now - stall_last_progress_).count();
+    if (idle_s < params_->EXEC_STALL_TIMEOUT_S)
+        return false;
+
+    // Give up on this target: release the controller's claim and fold the failure into the visit
+    // grid, so the neglect drive that chose this cell reads ~0 there and the next selection goes
+    // somewhere else. The cell is NOT blacklisted — its neglect recovers over IorDecayTime, so a
+    // target that was only transiently blocked is retried later on its own.
+    const bool released = affordance_manager_.release_execution_claim(G_);
+    qWarning() << "[planner] afford_room target (" << target_opt->position.x() << ","
+               << target_opt->position.y() << ") abandoned: no approach progress for"
+               << idle_s << "s (closest" << stall_best_dist_ << "m)"
+               << (released ? "— execution claim released" : "— no claim to release")
+               << "; marking visited and re-selecting";
+
+    planner.mark_target_abandoned(stall_target_);
+    stall_tracking_ = false;
+    return true;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

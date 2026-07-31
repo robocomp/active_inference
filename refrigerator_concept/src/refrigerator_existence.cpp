@@ -38,8 +38,8 @@ void RefrigeratorExistence::update_and_remove(RefrigeratorFitter& fitter, Refrig
         const auto& s = lidar->sweep_room();
         if (not s.empty()) { sweep = &s; origin = lidar->origin_room(); }
     }
-    // Low bpearl sweep (own origin) — an occupancy-only source for the LEG carve (the low LiDAR is what actually
-    // strikes the legs the high helios grazes over). Only staged while its feature is on.
+    // Low bpearl sweep (own origin) — a second occupancy-only ray-set for the box carve (it strikes the fridge
+    // body low, where the high helios sweeps the upper part). Only staged while its feature is on.
     const std::vector<Eigen::Vector3f>* sweep_bp = nullptr;
     Eigen::Vector3f origin_bp = Eigen::Vector3f::Zero();
     if (fresh_sweep and lidar and cfg_.lidar_bpearl_precision > 0.0f)
@@ -118,56 +118,43 @@ void RefrigeratorExistence::update_and_remove(RefrigeratorFitter& fitter, Refrig
             }
         }
 
-        // LiDAR occupancy carve of the TOP-SLAB z-band [H−t, H] — LiDAR clock (the slab spans the full footprint
-        // there, so a beam hits rim/top = occupancy or passes through = gone — no hollow ambiguity between legs).
+        // LiDAR occupancy carve of the WHOLE SOLID BOX z∈[0, H] — LiDAR clock. A refrigerator is one solid
+        // floor-anchored cuboid (refrigerator_model.cpp), so every ring that reaches it strikes real surface at
+        // whatever height it happens to sweep: a return inside the volume is occupancy, a beam through it is a
+        // pass-through. The table-concept original carved only the [H−3cm, H] top slab plus four 2.5 cm corner
+        // "leg" columns — a 3 cm sliver at 1.9 m that the horizontal rings almost never intersect, so the fridge's
+        // massively-hit solid body contributed NO confirmation and ex_locc swung erratically between 0.03 and 70
+        // depending on whether a ring happened to graze a fake leg. See [[refrigerator-table-geometry-churn]].
+        // Both LiDARs are carved: the low bpearl strikes the fridge body low, the high helios mid/upper.
         if (sweep)
         {
             rc::exist::Evidence ev = rc::exist::carve_box(origin, *sweep, bs.cx, bs.cy, bs.yaw, bs.w, bs.h,
-                                                          bs.H - rc::RefrigeratorModel::TOP_THICKNESS, bs.H, surf_sigma, sm);
-            // Leg OCCUPANCY (the 3D model has 4 legs; the rings hit them too). Occupancy-ONLY: legs are thin, so a
-            // MISS is not evidence of absence and the hollow space between them must never vote free. Carve each leg's
-            // tall volume [0, H−t] and add only its e_occ — robustifies CONFIRMATION when the thin top slab sits at an
-            // awkward height for the horizontal rings (tall legs are far likelier struck). Cannot cause a false removal.
-            if (cfg_.existence_leg_occupancy)
+                                                          0.0f, bs.H, surf_sigma, sm);
+            if (sweep_bp != nullptr)   // second ray-set, own origin (occlusion-aware first-hit) — occupancy only
             {
-                const float lr   = rc::RefrigeratorModel::LEG_RADIUS;
-                // 5 cm floor: a degenerate-geometry guard, not a tuned gate. If the belief's H collapses toward
-                // the top thickness the leg volume would vanish/invert; floor it to a minimum plausible leg extent
-                // so the carve stays valid. Physical minimum, no config key.
-                const float legz = std::max(0.05f, bs.H - rc::RefrigeratorModel::TOP_THICKNESS);
-                const float ix   = 0.5f * bs.w - lr, iy = 0.5f * bs.h - lr;   // leg centres inset at the outer corners
-                const float cyaw = std::cos(bs.yaw), syaw = std::sin(bs.yaw);
-                // Carve the legs from EACH available LiDAR — the LOW bpearl is the one that actually strikes them
-                // (the high helios grazes over), so this is where the per-device split pays off. Occupancy-only.
-                const std::array<std::pair<const std::vector<Eigen::Vector3f>*, Eigen::Vector3f>, 2> leg_srcs = {{
-                    {sweep, origin}, {sweep_bp, origin_bp} }};
-                for (const auto& [swp, org] : leg_srcs)
-                {
-                    if (swp == nullptr) continue;
-                    for (const auto [llx, lly] : {std::pair{ix, iy}, std::pair{-ix, iy}, std::pair{ix, -iy}, std::pair{-ix, -iy}})
-                    {
-                        const float lx = bs.cx + cyaw * llx - syaw * lly;
-                        const float ly = bs.cy + syaw * llx + cyaw * lly;
-                        const rc::exist::Evidence le = rc::exist::carve_box(org, *swp, lx, ly, bs.yaw,
-                                                                            2.0f * lr, 2.0f * lr, 0.0f, legz, surf_sigma, sm);
-                        ev.e_occ += le.e_occ; ev.n_reached += le.n_reached;   // OCCUPANCY ONLY (discard leg e_free)
-                    }
-                }
+                const rc::exist::Evidence bp = rc::exist::carve_box(origin_bp, *sweep_bp, bs.cx, bs.cy, bs.yaw,
+                                                                    bs.w, bs.h, 0.0f, bs.H, surf_sigma, sm);
+                ev.e_occ += bp.e_occ; ev.n_reached += bp.n_reached;
             }
             inst.dbg_ex_lidar_occ = ev.e_occ; inst.dbg_ex_lidar_free = ev.e_free; inst.dbg_ex_lidar_n = ev.n_reached;
             if (ev.n_reached > 0)                                                    // 0 ⇒ not probed ⇒ HOLD
             {
-                // Degrade the free/absence half by LiDAR range: far away the beams are sparse and the thin
-                // top-slab subtends few of them, so a pass-through is weak evidence the refrigeratortop is gone.
-                const float lidar_range = (origin - Eigen::Vector3f(bs.cx, bs.cy, bs.H)).norm();
+                // Degrade the free/absence half by LiDAR range: far away the beams are sparse, so a pass-through
+                // is weak evidence the fridge is gone.
+                const float lidar_range = (origin - Eigen::Vector3f(bs.cx, bs.cy, 0.5f * bs.H)).norm();
                 ev.e_free *= absence_range_conf(lidar_range);
-                // OCCUPANCY-ONLY, unconditionally: a solid-slab model vs a thin real refrigeratortop makes LiDAR
-                // "free" unreliable (beams passing under the top surface read as gone), so it must never drive
-                // removal — only the camera silhouette does. The A/B that enabled LiDAR absence evidence was
-                // REFUTED on live data (2026-07-12) and its flag has been removed; occupancy still counts and
-                // holds L up. e_free is computed above only for the diagnostic columns.
-                inst.dbg_ex_lidar_free_eff = 0.0f;
-                ev.log_odds_delta = rc::exist::hollow_guarded_delta(ev, true, sm);
+                // A refrigerator IS a faithful opaque solid, so it declares itself as one and gets the symmetric
+                // policy: a return at the near face is FOR; a through-beam and — the fix — a return metres deep
+                // INSIDE the volume are AGAINST, because a solid fridge would have blocked them.
+                //
+                // This replaces occupancy-only, which was a RATCHET: it could only push L to the +4 clamp, and
+                // being integrated after the silhouette it re-pinned L there every cycle, before should_remove
+                // ran. Live: phantom refrigerator_2 accrued confident camera absence on 2885 of 3255 cycles
+                // (~5 min, mean sfree_eff 85.5) and its ex_L NEVER went below its initial 0.00, streak never
+                // left 0 — immortal. The wall behind it supplied ~54 interior returns/cycle that the old code
+                // scored as proof it existed. See [[existence-policy-unification]].
+                inst.dbg_ex_lidar_free_eff = ev.e_free + ev.e_interior;
+                ev.log_odds_delta = rc::exist::solid_delta(ev, sm);
                 inst.existence.integrate(ev);
                 integrated = true;
             }

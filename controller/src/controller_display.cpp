@@ -97,7 +97,6 @@ void ControllerDisplay::initialize(rc::LidarPointBuffer *lidar_buffer,
 
 void ControllerDisplay::update(const std::optional<ControllerRobotPose> &robot_pose,
                                const ControllerPolygon &room_polygon,
-                               const ControllerPolygon &inner_polygon,
                                const std::optional<ControllerPathPlan> &current_plan,
                                const ControllerObstacleVisuals &obstacle_polys,
                                const ControllerPolygons &obstacle_rfe_points,
@@ -113,7 +112,6 @@ void ControllerDisplay::update(const std::optional<ControllerRobotPose> &robot_p
     std::lock_guard<std::mutex> lock(snapshot_mutex_);
     snapshot_.robot_pose = robot_pose;
     snapshot_.room_polygon = room_polygon;
-    snapshot_.inner_polygon = inner_polygon;
     snapshot_.current_plan = current_plan;
     snapshot_.obstacle_polys = obstacle_polys;
     snapshot_.obstacle_rfe_points = obstacle_rfe_points;
@@ -243,8 +241,7 @@ void ControllerDisplay::present()
     viewer_2d_->draw_lidar_points_from_buffer(snap.max_lidar_draw_points);
     viewer_2d_->draw_path({
         .path = std::move(display_path),
-        .inner_poly = snap.inner_polygon,
-        .graph_nodes = snap.current_plan.has_value() ? snap.current_plan->graph_nodes : ControllerPolygon{},
+        .waypoints = snap.current_plan.has_value() ? snap.current_plan->room_path : ControllerPolygon{},
         .obstacle_polys = snap.obstacle_polys,
         .obstacle_rfe_points = snap.obstacle_rfe_points,
         .candidate_trajectories = snap.last_mppi_trajectories,

@@ -175,6 +175,18 @@ void SpecificWorker::run_instance_tracker()
                     std::print("[fridge-filter] birth cand slice={} plaus={:.3f} → birth_ev={:.3f}\n",
                                i, cand_plaus, dv.birth_evidence);
             }
+            // ROOM ENVELOPE. A fridge occupies room INTERIOR; a detection at or beyond the layout boundary is
+            // already accounted for by the room model (masonry / the space beyond), so it must not read as
+            // unexplained evidence for a new object. Continuous support ∈[0,1] — 0 outside, →1 once a fridge's
+            // centre could physically stand there — multiplied into the birth evidence exactly like the shape
+            // plausibility above, so it delays/denies maturation rather than hard-vetoing the detection. This is
+            // the birth-side twin of the belief's one-sided wall mixture component; 1.0 when no room polygon is
+            // known. Fixes fridges being born OUTSIDE the layout. See [[refrigerator-room-envelope-birth]].
+            const float support = fitter_->interior_support(dv.xy);
+            dv.birth_evidence *= support;
+            if (support < 0.99f and cfg_.fridge_filter_log)
+                std::print("[fridge-filter] birth cand slice={} OUTSIDE/at layout edge: interior_support={:.3f} → birth_ev={:.3f}\n",
+                           i, support, dv.birth_evidence);
             dets.push_back(dv);
         }
 
@@ -249,7 +261,7 @@ void SpecificWorker::run_instance_tracker()
 // (debounced). Everything is continuous + bounded: a genuine, strongly-supported second fridge survives; the
 // weaker mis-detection (elongated/short cabinet mislabelled "refrigerator") decays and is removed. The worker
 // owns this because the singleton term needs to see ALL instances at once. See RefrigeratorBelief::
-// singleton_existence_deltas / fridge_plausibility. Runs regardless of the sensor-existence channel.
+// singleton_existence_deltas / fridge_log_evidence_ratio. Runs regardless of the sensor-existence channel.
 void SpecificWorker::apply_fridge_filter()
 {
     if (not cfg_.fridge_filter_enabled)
@@ -265,14 +277,29 @@ void SpecificWorker::apply_fridge_filter()
     for (auto& [id, inst] : insts)
     {
         if (not inst.ai2_initialized) continue;   // only fitted instances participate (shape evidence is meaningful)
-        // Judge the CURRENT fitted shape EVERY cycle (not only on an accepted mask-update): a mis-detection that has
-        // diverged to a cabinet shape (w≫h, short) then coasts out-of-FoV keeps LOSING plausibility instead of
-        // freezing its birth-time positive value and staying immortal. Bounded (±plaus_clamp) so one frame can't
-        // kill a real fridge, yet a persistent bad shape sinks to −clamp → the singleton below decays it. Shape-only
-        // (aspect·size·height), so no fresh mask/energy is needed.
-        inst.last_plausibility = inst.ai2_belief.fridge_plausibility(0.0f);
-        inst.plaus_evidence    = std::clamp(inst.plaus_evidence + (inst.last_plausibility - 0.5f),
-                                            -cfg_.plaus_clamp, cfg_.plaus_clamp);
+        // Judge the CURRENT fitted shape, but ONLY on a cycle that actually MEASURED it — matched_frames advances
+        // solely inside run_inference, so comparing against plaus_seen_frames admits exactly the cycles that took
+        // a geometric update. Re-scoring a frozen belief every cycle is not sequential Bayes, it is the SAME
+        // evidence counted N times: it drove the accumulator to −clamp on an unchanged shape and deleted
+        // well-fitted fridges with no sensor evidence at all (live: L falling 1.1/cycle while sndet=socc=sfree=0).
+        // Same defect class as [[chair-flip-acc-repetition-defect]].
+        //
+        // The increment is the shape LOG-EVIDENCE RATIO vs "other furniture" (nats), clamped per cycle to
+        // ±plaus_clamp so a single frame can at most cancel a settled accumulator, never invert it.
+        //
+        // TRADE-OFF this replaces: the old every-cycle rule also kept decaying a mis-detection that had diverged
+        // to a cabinet shape and then coasted OUT OF FoV, so it could never be immortal. That decay is gone — but
+        // it was decay without observation, the same thing that killed real fridges. A diverged mis-detection now
+        // sits frozen until looked at, and one measured frame is enough (its LLR ≈ −17 saturates the accumulator
+        // immediately). Meanwhile the silhouette channel HOLDs out-of-FoV and raises wants_verification, which is
+        // the designed answer: send the robot to LOOK, never delete what it has not seen.
+        if (inst.matched_frames != inst.plaus_seen_frames and not inst.dbg_gated)
+        {
+            inst.plaus_seen_frames = inst.matched_frames;
+            inst.last_plausibility = inst.ai2_belief.fridge_log_evidence_ratio();
+            const float step = std::clamp(inst.last_plausibility, -cfg_.plaus_clamp, cfg_.plaus_clamp);
+            inst.plaus_evidence = std::clamp(inst.plaus_evidence + step, -cfg_.plaus_clamp, cfg_.plaus_clamp);
+        }
         ids.push_back(id);
         pe.push_back(inst.plaus_evidence);
         px.push_back(inst.existence.p_exists());
@@ -303,7 +330,7 @@ void SpecificWorker::apply_fridge_filter()
             inst.plaus_remove_streak = 0;
 
         if (cfg_.fridge_filter_log)
-            std::print("[fridge-filter] {} plaus_ev={:.2f} last_plaus={:.2f} ΔL={:+.2f} L={:.2f} p={:.2f} streak={}\n",
+            std::print("[fridge-filter] {} plaus_ev={:.2f} llr={:+.2f} ΔL={:+.2f} L={:.2f} p={:.2f} streak={}\n",
                        inst.node_name, inst.plaus_evidence, inst.last_plausibility, deltas[k],
                        inst.existence.logodds(), inst.existence.p_exists(), inst.plaus_remove_streak);
 

@@ -162,6 +162,8 @@ CabinetConfig load_cabinet_config(const ConfigLoader& cfg)
     out.kitchen_motion_cm_gain        = getf("CabinetModel.KitchenMotionCmGain", 0.30f);
     out.kitchen_ang_lever_m           = getf("CabinetModel.KitchenAngLeverM",    2.0f);
     out.kitchen_periph_ref            = getf("CabinetModel.KitchenPeriphRef",    0.50f);
+    out.kitchen_lidar_existence       = getb("CabinetModel.KitchenLidarExistence", false);
+    out.kitchen_cells_csv_path        = gets("CabinetModel.KitchenCellsCsvPath",   "");
     out.counter_evidence_enabled      = getb("CabinetModel.CounterEvidence", true);
     out.lshape_split_enabled          = getb("CabinetModel.LShapeSplitEnabled", true);
     out.lshape_min_arm_pts            = geti("CabinetModel.LShapeMinArmPts", 500);

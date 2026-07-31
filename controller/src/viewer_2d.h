@@ -32,8 +32,7 @@ class Viewer2D : public QObject
     struct PathDrawData
     {
         ControllerPolygon path;
-        ControllerPolygon inner_poly;
-        ControllerPolygon graph_nodes;
+        ControllerPolygon waypoints;      // the plan's turning points, drawn as dots
         ControllerObstacleVisuals obstacle_polys;
         ControllerPolygons obstacle_rfe_points;
         ControllerPolygons candidate_trajectories;
@@ -69,7 +68,6 @@ Q_SIGNALS:
 private:
     AbstractGraphicViewer *agv_ = nullptr;
     QGraphicsPolygonItem *polygon_item_ = nullptr;
-    QGraphicsPolygonItem *inner_polygon_item_ = nullptr;
     LidarPointBuffer *lidar_buffer_ = nullptr;
     Eigen::Affine2f lidar_draw_correction_ = Eigen::Affine2f::Identity();   // overlay dead-reckoning (room→room)
     bool lidar_visible_ = true;

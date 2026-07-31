@@ -33,9 +33,19 @@ struct DoorInstance
     // set by DoorSceneGraph::write_rt_pose once the door's centre resolves to a "wall_*" node.
     std::uint64_t wall_node_id = 0;
 
-    // Geometry / state container: holds the accepted pose+dims and the compound SDF used to split
-    // the mask's support points into on-surface (candidate) vs off-surface (residual) sets.
+    // Geometry / state container: the accepted room-frame pose + dims (leaf AND aperture).
     DoorModel  model;
+
+    // ── Cached geometry, authored ONLY by DoorFitter::refresh_geometry ──────────────────────────────
+    // The one place every consumer reads the door's shape from. `aperture` is the static hole in the wall
+    // (what the DSR RT edge, wall association, merge, ghost identity and the room prior key on); `leaf` is
+    // its articulation; `leaf_pose` is where the panel physically is right now. With phi pinned at 0 (M0)
+    // leaf_pose is exactly the aperture rectangle, so nothing observable changes. See door_geometry.h for
+    // why this is centralised — two independent SDFs and ~10 scattered cos/sin(yaw) rectangles used to
+    // disagree, and the disagreement deleted doors.
+    door::Aperture aperture{};
+    door::LeafState leaf{};
+    door::LeafPose  leaf_pose{};
 
     // ── AI2 belief ────────────────────────────────────────────────────────────────
     // Full-covariance recursive filter over θ=[cx,cy,cz,yaw,seat_w,seat_d,seat_h,back_h]. Lazily
@@ -98,6 +108,21 @@ struct DoorInstance
     float dbg_sil_occ = 0.0f, dbg_sil_free = 0.0f, dbg_sil_free_eff = 0.0f;
     int   dbg_sil_ndet = 0, dbg_sil_ntotal = 0, dbg_sil_noccl = 0, dbg_sil_ncells = 0;
     float dbg_sil_pdetect = 0.0f, dbg_sil_central = 0.0f, dbg_sil_resolv = 0.0f;
+
+    // ── Observed vertical extent (the MINIMUM-HEIGHT prior) ─────────────────────────────────────────
+    // A door is an aperture a person walks THROUGH, so P(door | its support tops out well below a door's
+    // height) ≈ 0. This has to be judged on what the sensor actually SAW, not on the fitted h: the template
+    // anchor (prior_h_std 0.08 ⇒ precision 156/frame vs the 8.2 per-frame cap) pins h at 2.0 m whatever the
+    // data says, so a phantom fed by a low blob still reports a confident 2.0 m — a test on fitted h can
+    // never fire. Measured live: the real door's h moved 2.000 → 2.063, the phantom's never left 2.000.
+    //
+    // obs_top_z is an EWMA of the support bbox top (room frame, floor = 0) over UNTRUNCATED observations
+    // only. Truncation matters: a mask clipped by the image border has an unobserved top, so its bbox top
+    // is a LOWER BOUND, not a measurement — the real door is routinely clipped (n_detectable 270/420 live),
+    // and counting those views would delete it. Confidence accumulates with (1 − trunc_frac).
+    float obs_top_z    = std::numeric_limits<float>::quiet_NaN();   // NaN = never measured untruncated
+    float obs_top_conf = 0.0f;   // ∈[0,1] EWMA weight of untruncated evidence behind obs_top_z
+    float obs_top_last = std::numeric_limits<float>::quiet_NaN();   // last raw measurement (diagnostic)
     int  processed_cycles   = 0;      // per-door compute cycles for log throttling
     bool model_stable       = false;
     int  model_generation   = 0;

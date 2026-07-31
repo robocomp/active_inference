@@ -40,7 +40,6 @@ public:
     // internal snapshot; no Qt objects are touched here.
     void update(const std::optional<ControllerRobotPose> &robot_pose,
                 const ControllerPolygon &room_polygon,
-                const ControllerPolygon &inner_polygon,
                 const std::optional<ControllerPathPlan> &current_plan,
                 const ControllerObstacleVisuals &obstacle_polys,
                 const ControllerPolygons &obstacle_rfe_points,
@@ -74,7 +73,6 @@ private:
     {
         std::optional<ControllerRobotPose> robot_pose;
         ControllerPolygon room_polygon;
-        ControllerPolygon inner_polygon;
         std::optional<ControllerPathPlan> current_plan;
         ControllerObstacleVisuals obstacle_polys;
         ControllerPolygons obstacle_rfe_points;

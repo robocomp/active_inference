@@ -57,14 +57,16 @@ agent_info_period_ms = 1000
 nodes = ["controller 8"]
 
 [Planner]
-Clearance = 0.5
-GridResolution = 0.20
-ConnectionRadius = 1.2
+# A* planning grid. Collision is the robot's real footprint tested against this grid, so the ONLY thing
+# this controls is planning resolution/cost — nothing here inflates obstacles.
+CellSize = 0.06
 
 [Controller]
+# Preferred standoff BEYOND the robot's real extent (MPPI d_safe). Comfort only: raising it makes the robot
+# keep its distance, and can never make a reachable goal unreachable — the footprint test decides that.
+ComfortStandoff = 0.5
 AffordanceLambdaCost = 0.2    # grounded EFE selection nav-cost weight (nats per metre): G = λ·dist − ΔH
 AffordanceSwitchMargin = 0.5  # commitment hysteresis (nats): held affordance must be beaten by this much to switch
-WaypointTolerance = 0.25
 MaxAdvSpeed = 0.7
 MaxRotSpeed = 0.8
 PosGain = 1.2

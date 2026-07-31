@@ -101,6 +101,16 @@ struct RoomConfig
                                                   // exploration affordance. false ⇒ room never offers an
                                                   // affordance (so it can't out-compete object affordances in
                                                   // the controller's EFE selection — e.g. the 360-glance test).
+    // ---- Execution-stall watchdog (RoomSceneGraph::break_execution_stall) ----
+    // While the controller holds the afford_room execution claim the planner is idle by design, so
+    // a target the controller can never reach parks the whole run. If the robot's closest approach
+    // to the claimed target fails to improve by EXEC_STALL_PROGRESS_M for EXEC_STALL_TIMEOUT_S, the
+    // claim is released and the target is stamped visited so a different one is selected. This is a
+    // LIVENESS guard on the affordance handshake, not a modelling threshold — see the header note.
+    // Set EXEC_STALL_TIMEOUT_S = 0 to disable.
+    float EXEC_STALL_TIMEOUT_S         = 25.0f;   // EpistemicController.ExecStallTimeout (s)
+    float EXEC_STALL_PROGRESS_M        = 0.10f;   // EpistemicController.ExecStallProgress (m)
+
     bool  PREDICT_PUBLISH_ENABLED      = true;    // PredictPublish.enabled (drives RT from odometry)
     float PREDICT_PUBLISH_MAX_COAST_S  = 1.0f;    // stop publishing if no lidar correction for this long
     float PREDICT_PROCESS_NOISE_XY     = 0.04f;   // (m/√s)² → variance growth m²/s on x,y while coasting

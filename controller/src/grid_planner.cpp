@@ -107,45 +107,6 @@ void GridPlanner::set_world(const std::vector<Eigen::Vector2f>& room_polygon,
                     occ_[idx(ix, iy)] = 1;
     }
     rebuild_offsets();
-
-    // One-shot-ish census separating the TWO ways a cell becomes occupied. "100% occupied" is ambiguous
-    // between "the obstacle set covers everything" and "point_in_polygon says every cell is OUTSIDE the room",
-    // and those have nothing to do with each other. Print the room polygon's own extent too: if it disagrees
-    // with the obstacles' extent, the two are not in the same frame or units.
-    static int wc = 0;
-    if ((wc++ % 50) == 0)
-    {
-        long outside = 0;
-        for (int iy = 0; iy < h_; ++iy)
-            for (int ix = 0; ix < w_; ++ix)
-                if (not point_in_polygon(room_polygon, cell_to_world(ix, iy))) ++outside;
-        float oxn = 1e9f, oxx = -1e9f, oyn = 1e9f, oyx = -1e9f;
-        long nv = 0;
-        for (const auto& poly : obstacles)
-            for (const auto& p : poly)
-            { oxn = std::min(oxn, p.x()); oxx = std::max(oxx, p.x());
-              oyn = std::min(oyn, p.y()); oyx = std::max(oyx, p.y()); ++nv; }
-        // Total polygon AREA vs the cells they mark. If the area is small but the cell count is huge, the
-        // rasteriser is at fault; if the area itself is huge, the producer is. Those are opposite fixes.
-        double poly_area = 0;
-        for (const auto& poly : obstacles)
-        {
-            double a2 = 0;
-            for (std::size_t i = 0; i < poly.size(); ++i)
-            { const auto& u = poly[i]; const auto& v = poly[(i + 1) % poly.size()];
-              a2 += static_cast<double>(u.x()) * v.y() - static_cast<double>(v.x()) * u.y(); }
-            poly_area += std::abs(a2) / 2.0;
-        }
-        std::printf("[grid-world] room %zu verts bbox x[%.2f,%.2f] y[%.2f,%.2f] | grid %dx%d cell %.3f | "
-                    "OUTSIDE-room %ld (%.0f%%)  obstacle-only %ld | obstacles %zu polys %ld verts "
-                    "bbox x[%.2f,%.2f] y[%.2f,%.2f] AREA %.2f m2 (cells imply %.2f m2)\n",
-                    room_polygon.size(), xmn, xmx, ymn, ymx, w_, h_, cell_,
-                    outside, 100.0 * outside / std::max(1, w_ * h_), occupied_cells() - outside,
-                    obstacles.size(), nv,
-                    nv ? oxn : 0.f, nv ? oxx : 0.f, nv ? oyn : 0.f, nv ? oyx : 0.f,
-                    poly_area, (occupied_cells() - outside) * cell_ * cell_);
-        std::fflush(stdout);
-    }
 }
 
 bool GridPlanner::world_to_cell(const Eigen::Vector2f& p, int& ix, int& iy) const

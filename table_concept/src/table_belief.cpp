@@ -204,13 +204,19 @@ Eigen::Matrix<float, 7, 1> TableBelief::prior_cov_diag() const
 
 Eigen::Matrix<float, 7, 1> TableBelief::process_noise_diag() const
 {
-    const float qm = params_.process_std_m * params_.process_std_m;     // rigid + static ⇒ small
+    const float qm = params_.process_std_m * params_.process_std_m;     // rigid + static ⇒ small (POSE: cx,cy)
     const float qy = params_.process_std_yaw * params_.process_std_yaw;
+    // EXTENT (H,w,h) gets its OWN Q, 0 by default: a table can be nudged but its dimensions are constants of
+    // the object. Sharing the pose walk here is what let a converged footprint decay to plastic while
+    // unobserved. Negative ⇒ historic behaviour (reuse qm). See TableBeliefParams::process_std_extent_m.
+    const float qe = (params_.process_std_extent_m < 0.0f)
+                         ? qm
+                         : params_.process_std_extent_m * params_.process_std_extent_m;
     const float qt = 1e-8f;   // tilt is a CONSTANT calibration (Fable: Q_t≈0, else it ratchets — absorbs model misfit)
     if (not TableBeliefState::use_quotient)
-        return (Eigen::Matrix<float, 7, 1>() << qm, qm, qm, qm, qm, qy, qt).finished();
-    const Eigen::Vector3f v = quotient_marginal(chart_jac(), {qm, qm, qy});
-    return (Eigen::Matrix<float, 7, 1>() << qm, qm, qm, v(0), v(1), v(2), qt).finished();
+        return (Eigen::Matrix<float, 7, 1>() << qm, qm, qe, qe, qe, qy, qt).finished();
+    const Eigen::Vector3f v = quotient_marginal(chart_jac(), {qe, qe, qy});
+    return (Eigen::Matrix<float, 7, 1>() << qm, qm, qe, v(0), v(1), v(2), qt).finished();
 }
 
 // Inverse of the per-frame common-mode covariance Σ_c (diagonal): position (cx,cy) = config floor + pose-

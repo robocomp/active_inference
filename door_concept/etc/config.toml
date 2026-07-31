@@ -178,6 +178,23 @@ OcclusionMarginM = 0.30  # a door/geometric occluder must be ≥ this many metre
 RoomPrior = true         # enforce the room-containment pose prior
 RoomMarginM = 0.40       # tolerance a door centre may sit OUTSIDE the walls (wall-hugging door + centroid noise)
 OutOfRoomGain = 1.5      # |ΔL| per frame while outside → removed in a few frames (also debounces a 1-frame glitch)
+# MINIMUM-HEIGHT prior. A door is an aperture a person walks THROUGH, so P(door | it tops out below ~1.8 m)
+# ≈ 0 — a counter, a radiator, a window sill or a low cabinet segmented as "door" is not one. Same kind of
+# categorical prior as RoomPrior (a fact about what a door IS, not a tuned detectability curve), applied the
+# same way: suppress the BIRTH, and draw a strong negative on a live instance that is confidently too short.
+#
+# Judged on the observed SUPPORT top, NEVER on the fitted h. The template anchor (PriorHeightStd 0.08 ⇒
+# precision 156 per frame vs the 8.2 per-frame cap) pins h at 2.00 m whatever the data says, so a phantom fed
+# by a low blob still reports a confident 2.00 m — a test on h can never fire. Measured live: the real door's
+# h moved 2.000 → 2.063, the phantom's never left 2.000.
+#
+# Truncation is the guard that keeps this from deleting real doors: a mask clipped by the image border has an
+# UNOBSERVED top, so its bbox top is only a lower bound. Evidence is weighted by (1 − trunc_frac), so a door
+# the robot only ever sees clipped never reaches MinHeightConf and is never judged — silent, not guessing.
+MinHeightPrior = true
+MinHeightM     = 1.80    # a door's support must reach this height (m, room frame; floor = 0)
+MinHeightConf  = 0.30    # untruncated-evidence weight required before the prior may act (0 = first clean view)
+ShortGain      = 1.5     # |ΔL| per frame while confidently too short (matches OutOfRoomGain)
 # Identity RE-ACQUISITION: a removed door leaves a ghost (its name + the belief it converged to). A detection
 # landing within this radius of a ghost is the SAME door coming back — it takes that name and resumes that
 # geometry instead of being born as door_N+1. Existence restarts from BirthLogodds: the shape is remembered,

@@ -102,8 +102,17 @@ public:
     // Room geometry for the wall-flush factor (ported from cabinet_concept, simplified — a fridge is a SINGLE
     // box, so no run / wall-id / segment machinery). Pushed each cycle by the worker from the room polygon +
     // its interior centroid. nearest_wall(p) returns the nearest polygon edge as a WallRef {foot, inward normal}.
+    // How much of the room's INTERIOR is available to hold an object centred at q, ∈ [0,1]. 1 well inside;
+    // decays over one fridge half-depth as q approaches a wall; 0 at or beyond it. This is the room model
+    // stating where an object CAN be, so a detection outside the layout accrues no birth evidence — the
+    // continuous counterpart of residual_concept's point_in_polygon reject, and the birth-side twin of the
+    // belief's one-sided wall mixture component. 1.0 when no room polygon is known (nothing to say).
+    float interior_support(const Eigen::Vector2f& q) const;
+
     void set_room_geometry(const Eigen::Vector2f& interior, std::vector<Eigen::Vector2f> polygon)
-    { room_interior_ = interior; room_polygon_ = std::move(polygon); have_room_geometry_ = not room_polygon_.empty(); }
+    { room_interior_ = interior; room_polygon_ = std::move(polygon); have_room_geometry_ = not room_polygon_.empty();
+      // The projection unit needs the same walls: a silhouette sample behind one is NOT "predicted visible".
+      if (projection_) projection_->set_room_polygon(room_polygon_); }
     WallRef nearest_wall(const Eigen::Vector2f& q) const;
     // Part B (chain covariance): enable adding the localization/chain term J·Σ_chain·Jᵀ (measurement
     // frame → room, capture-stamp pinned) to each instance, read by the scene-graph's RT-cov write.

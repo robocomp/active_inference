@@ -101,6 +101,12 @@ AI2TopOversegSigmaPerM = 2.0    # R inflation (σ per m) for points ABOVE the ro
 # duplicates. No hard cutoffs — encoded as covariance/evidence. Master switch: RefrigeratorConcept.FridgeFilterEnabled.
 AspectScale = 0.15          # aspect_ok = exp(−(|w−h|/(w+h)/scale)²): ~1 square-ish footprint, →0 elongated
 SizeScale = 0.15            # size_ok  = exp(−((w−0.60)²+(h−0.60)²)/(2·scale²)): footprint near the standard 0.60×0.60
+AltSizeScale = 0.60         # the ALTERNATIVE hypothesis ("some other furniture-shaped box") footprint std (m).
+                            # The filter scores log[p(θ|fridge)/p(θ|other)] with BOTH densities normalised, so the
+                            # evidence is how much more sharply the fridge prior predicts this shape. Raise → the
+                            # alternative gets broader → the fridge hypothesis earns MORE evidence per measured
+                            # frame. (Replaces the old `plausibility − 0.5` rule, whose 0.5 boundary was arbitrary
+                            # for an un-normalised likelihood and scored a real 0.77×0.63 fridge at 0.30 → deleted.)
 HeightPlausibleMin = 1.20   # height_ok logistic centre (m): →1 tall, →0 below ~1 m ("a 70 cm fridge is improbable")
 HeightSoft = 0.15           # height_ok logistic softness (m)
 FeRef = 2.0                 # "healthy fridge fit" FE reference — NEEDS LIVE TUNING (≈ a good fridge's mean_energy)
@@ -115,6 +121,14 @@ SingletonInhibition = 1.0   # mutual-inhibition: a STRONGER fridge subtracts thi
 AI2WallPrecision = 400.0         # 1/m² at zero gap (back face → wall line)
 AI2WallParallelPrecision = 200.0 # back face parallel to the wall (width-axis · wall-normal → 0)
 AI2WallReachM = 0.15             # gap scale (m) over which the flush hypothesis loses its weight
+# WALL AS A COMPETING EXPLANATION (per-point mixture component) — the principled form of "don't detect a fridge
+# where a wall already is". NOT an exclusion zone: the room's already-inferred wall surface joins the SAME
+# per-point mixture as box/clutter, so a mask point lying on it (i) has its BOX responsibility collapse ⇒ exerts
+# zero pull on the fitted geometry, and (ii) is already explained WITHOUT a fridge ⇒ the box earns no evidence
+# there (box_log_evidence_gain ≈ 0). A real fridge is untouched: its visible faces stand a depth off the wall
+# plane. Inert unless a room polygon has been pushed. 0 = OFF (mixture reverts to box+clutter).
+AI2WallExplainFrac = 0.25        # π_wall: prior weight of "this point belongs to a known room wall"
+AI2WallExplainSigmaM = 0.05      # extra wall-plane std (m): room-polygon + localization slack (adds to WallRef σ)
 # WALL NO-CROSS (one-sided): the flush factor is TWO-SIDED (drives gap→0) and its weight decays away from the wall,
 # so a fit can end up CROSSING the wall (back past it into the wall/exterior). This one-sided term resists penetration
 # ONLY — active when gap=(back_centre−wall.p)·(inward normal) goes negative (crossed) or within the margin; precision
@@ -282,22 +296,14 @@ ExistenceAbsenceRangePower = 2.0  # decay exponent (2 ≈ angular area ∝ 1/ran
 ExistenceVerifySurprise = 20.0    # decayed un-resolvable-absence surprise above which a refrigerator wants verification
 ExistenceVerifyGain     = 5.0     # epistemic gain (nats) a wants_verification refrigerator gets (drives a resolving view)
 
-# LiDAR removal reliability: the model top slab is a SOLID band but a real refrigeratortop is a THIN plate, so
-# horizontal beams passing UNDER the top surface exit the band and read as false "free" (unreliable absence).
-# Default false ⇒ the LiDAR carve contributes OCCUPANCY only (holds L up), never drives removal; removal is the
-# camera silhouette's job (predicted-visible-but-absent, which HOLDs when out of FoV → a refrigerator out of camera
-# view is never falsely removed). Set true only where the slab is a faithful solid model of the refrigeratortop.
-                                # showed an OUT-OF-FoV refrigerator (sndet=0 → silhouette correctly HOLDs) deleted purely by
-                                # LiDAR free-space: ex_lfree≈10-16 (beams passing UNDER the thin real top but THROUGH the
-                                # solid model band [H-3cm,H]) swamped ex_locc≈2 (genuine returns proving the refrigerator is STILL
-                                # THERE) ~5:1 → ex_L floored at -4, streak→15, removed. The solid-slab LiDAR free is
-                                # model-inconsistent for a thin plate viewed edge-on; it must not drive removal. LiDAR =
-                                # occupancy-only (holds L up); removal is the silhouette's job (HOLDs out-of-FoV → an
-                                # unseen refrigerator is never deleted). Re-enable ONLY with a thin-plate LiDAR likelihood.
-# Leg OCCUPANCY: also carve the 4 leg volumes [0, H−t] for confirmation. Occupancy-ONLY (legs are thin → a miss isn't
-# absence; the hollow space between legs must never vote free) ⇒ CANNOT cause a false removal, only holds a real refrigerator
-# up. Robust when the thin top slab is at an awkward height for the horizontal LiDAR rings (tall legs get struck).
-ExistenceLegOccupancy = true
+# LiDAR carve geometry — NO CONFIG KEY: it is the model's own geometry, nothing to choose. The carve covers the
+# WHOLE SOLID BOX z∈[0,H] from each available ray-set (helios + the low bpearl, each with its own origin), because
+# a fridge is one solid cuboid and every ring that reaches it strikes real surface at whatever height it sweeps.
+# (Was the table-concept [H−3cm, H] top slab + four 2.5 cm corner "leg" columns — a sliver at 1.9 m the horizontal
+# rings almost never intersect, so the fridge's solid body contributed NO confirmation and ex_locc swung 0.03…70.)
+# Still OCCUPANCY-ONLY: free-space is model-consistent for a solid box now (the thin-plate objection that refuted
+# it for tables does not apply), but removal deliberately stays the camera silhouette's job — the silhouette HOLDs
+# out-of-FoV, so a fridge the robot is not looking at can never be deleted.
 
 [RefrigeratorConcept]
 # Convergence / cadence + a couple of tuned constants promoted here from hardcoded values (defaults unchanged).
@@ -319,7 +325,10 @@ FridgeFilterLog = false     # log per-instance plausibility / plaus_evidence / e
 FrontDetectEnabled = true   # master switch: subscribe to ZED RGB media plane + run detect_front/resolve_front
 FrontMinFaceAreaPx = 900.0  # min projected face area (px²) to score for door-ness (rejects tiny grazing slivers)
 FrontMinConfidence = 0.10   # min door-ness margin (max−second)/(max+eps) for a cue to be emitted (else nullopt)
-FrontLog = false            # log each adopted door-mode flip / accepted appearance cue
+FrontLog = true             # log each adopted door-mode flip / accepted appearance cue. ON for the door-cue
+                            # diagnosis: with a square footprint (|w−h|≈8 mm live) yaw is unobservable mod 90°,
+                            # so this resolver is the ONLY thing that can pick the quarter-turn. Pair with the
+                            # new ai2_log columns front_mode/front_conf/cue_conf/cue_bearing.
 RefrigeratorLogPeriodFrames = 30   # per-cycle log throttle (cosmetic; no effect on the fit)
 ShowDashboard = true        # false = no GUI (belief dashboard + evidence monitor combined into one window)
 ObsDistance = 1.8           # comfortable maximum stand-off from the target face for epistemic poses

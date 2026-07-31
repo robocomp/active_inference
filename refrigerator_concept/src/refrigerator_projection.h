@@ -14,6 +14,8 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <utility>
+#include <vector>
 
 #include <Eigen/Dense>
 #include <dsr/api/dsr_api.h>
@@ -27,16 +29,17 @@ namespace cv { class Mat; }             // forward-decl: OpenCV lives only in re
 
 namespace rc {
 
-// PIXEL-LEVEL silhouette existence evidence (EXISTENCE_BELIEF_PLAN.md, mask channel). Projects the refrigeratortop
-// TOP face + the 4 LEG axes onto the image and, over the predicted-VISIBLE pixels, counts how many are lit by a "refrigerator" YOLO
-// mask (e_occ ⇒ still there) vs by nothing at all (e_free ⇒ predicted-visible-but-ABSENT ⇒ evidence it is
+// PIXEL-LEVEL silhouette existence evidence (EXISTENCE_BELIEF_PLAN.md, mask channel). Projects the solid box's
+// CAMERA-FACING vertical side faces (back-face culled by outward normal; the top face only when the camera is
+// above H) onto the image and, over the predicted-VISIBLE pixels, counts how many are lit by a "refrigerator"
+// YOLO mask (e_occ ⇒ still there) vs by nothing at all (e_free ⇒ predicted-visible-but-ABSENT ⇒ evidence it is
 // gone, EVEN WITH NO YOLO MASK this frame). Pixels covered by a NON-refrigerator mask are OCCLUDED (a nearer object
-// hides the refrigeratortop) and excluded from n_detectable → HOLD, never false absence. n_detectable==0 (out of
-// FoV / fully occluded) ⇒ the caller HOLDs. Feeds rc::exist::mask_evidence. Called from update_existence.
+// hides the fridge) and excluded from n_detectable → HOLD, never false absence. n_detectable==0 (out of
+// FoV / fully occluded / camera inside the footprint) ⇒ the caller HOLDs. Feeds rc::exist::mask_evidence.
 struct SilhouetteExistence
 {
     float e_occ = 0.0f, e_free = 0.0f;
-    int   n_total      = 0;    // silhouette samples attempted (top face + legs) — the "whole object"
+    int   n_total      = 0;    // silhouette samples attempted (the camera-facing faces) — the "whole object"
     int   n_detectable = 0;    // samples that land in the real camera FRUSTUM and are un-occluded (0 ⇒ HOLD)
     int   n_central    = 0;    // detectable samples in the CENTRAL image region (the ZED resolves those; a
                                // peripheral refrigerator is unreliable — the robot isn't really looking AT it)
@@ -90,11 +93,16 @@ public:
     // (looking AT the refrigerator) → central_frac → p_detect → removal. Set once from config (default 0.25).
     void set_central_region_frac(float f) { central_region_frac_ = f; }
 
+    // Room delimiting polygon (room frame), pushed by the fitter. Used ONLY as an occluder for the silhouette's
+    // line-of-sight test: a sample the camera cannot actually reach is not evidence of absence. Empty ⇒ no test.
+    void set_room_polygon(std::vector<Eigen::Vector2f> poly) { room_polygon_ = std::move(poly); }
+
 private:
     std::shared_ptr<DSR::DSRGraph>  G_;
     DSR::InnerEigenAPI*             inner_eigen_ = nullptr;
     MaskIngestor*                   mask_ingestor_ = nullptr;
     std::unique_ptr<DSR::CameraAPI> camera_api_;   // ZED intrinsics, lazily bound to the "zed" node
+    std::vector<Eigen::Vector2f>    room_polygon_;  // room walls, as OCCLUDERS for the line-of-sight test
     float                           central_region_frac_ = 0.25f;
     float                           front_min_face_area_px_ = 900.0f;   // detect_front: min projected face area (px²)
     float                           front_min_confidence_   = 0.10f;    // detect_front: min door-ness margin to emit

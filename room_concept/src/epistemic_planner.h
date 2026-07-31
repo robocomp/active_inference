@@ -34,7 +34,15 @@ public:
         float target_wall_margin = 1.0f;     // reject targets closer than this to walls (m)
 
         float angular_dominance_ratio = 50.0f; // σ²_θ / max(σ²_x, σ²_y) threshold
-        float w_exploration  = 0.5f;         // weight: linear distance bonus (explore farther)
+        // ADDITIVE distance preference, in the same nats currency as the two information terms:
+        //   + w_exploration · (distance / room_diagonal),  so it is bounded by w_exploration.
+        // It was previously a MULTIPLICATIVE bonus (score ×= 1 + w·d/diag). A multiplier scales
+        // whatever the information terms happen to be, so the moment those go flat (which they do —
+        // see the neglect discussion below) it becomes the ONLY differentiator and the arg-max locks
+        // onto the geometrically-farthest reachable cell forever. As a bounded ADDITIVE term it can
+        // only ever break ties between comparably-valued cells, which is all a distance preference
+        // should do.
+        float w_exploration  = 0.5f;         // nats: bounded far-is-better tie-break
 
         // ---- Inhibition of Return (visit grid) ----
         float ior_cell_size   = 0.5f;        // spatial resolution of the visit grid (m)
@@ -50,34 +58,22 @@ public:
         float w_path_interest = 0.3f;        // weight: bonus for paths that traverse unvisited cells
                                              //   path_interest = mean staleness of intermediate path cells ∈ [0,1]
                                              //   higher → prefer routes through unexplored territory
-        // ADDITIVE IoR patrol drive (nats). w_ior (above) is a MULTIPLICATIVE suppressor on fim_gain,
-        // so it vanishes once fim_gain→0 (localized) and map_gain→0 (room seen) — both info terms
-        // saturate in a static convex room and the robot stops after a few affordances. This term is
-        // ADDITIVE and NON-saturating: route_staleness recovers over ior_decay_time, so it keeps both
-        // the selection score AND the published gain positive on long-unvisited cells → the robot
-        // perpetually patrols the stalest reachable cell. It sits BELOW the info terms in magnitude so
-        // genuine info-gathering still takes priority; it only dominates once info is exhausted.
-        // 0 ⇒ off (robot rests once the room is fully known). Units: nats per unit staleness ∈ [0,1].
-        float w_ior_drive     = 0.5f;
 
-        // ---- Second-level Inhibition of Return: perpetual room patrol ----
-        // The first-level IoR terms above (w_ior suppressor + w_ior_drive additive drive) both use
-        // staleness() ∈ [0,1] CLAMPED at ior_decay_time. Once the whole room has gone unvisited for
-        // longer than ior_decay_time, every reachable cell saturates at staleness=1: the recency signal
-        // is lost, the selection argmax collapses onto the distance bonus, and the advertised gain flattens
-        // — so the robot rests after only a few affordances even though there is always a *stalest* area to
-        // revisit. This second level fixes both failure modes once pose-info is exhausted (max FIM gain <
-        // info_exhausted_gain):
-        //   (a) TARGET: re-rank candidates by RAW age (unclamped seconds since last visit), so the single
-        //       least-recently-visited reachable cell always wins and the robot patrols oldest-first.
-        //   (b) GAIN: floor afford_room's advertised gain at patrol_gain_floor nats so the consuming
-        //       controller keeps selecting/executing it instead of withdrawing when the pose-FIM term → 0.
-        // Keep patrol_gain_floor BELOW typical object-affordance ΔH so real objects still out-compete the
-        // patrol when present. This is a superset of w_ior_drive: leave w_ior_drive for the smooth blend
-        // while info is still trickling, and let this take over once info is truly exhausted.
-        bool  patrol_enabled       = true;   // second-level IoR patrol master switch
-        float patrol_gain_floor    = 0.0f;   // nats floored onto afford_room's gain in patrol mode (0 = off)
-        float info_exhausted_gain  = 0.02f;  // max FIM gain (nats) below which info is "exhausted" → patrol
+        // ---- Inhibition-of-Return DRIVE: the non-saturating exploration term (nats) ----
+        // Weight on the NEGLECT INFORMATION of a candidate route:
+        //     ΔH_neglect(a) = log(1 + a / ior_decay_time)     [a = raw seconds since last visit]
+        // Generative reading: knowledge of a cell is not permanent — its validity decays with a
+        // time-constant ior_decay_time, so re-observing a cell neglected for `a` seconds recovers
+        // log(1 + a/τ) nats of information about the room. This REPLACES the previous
+        // `w_ior_drive · staleness` form, whose staleness = min(1, a/τ) was CLAMPED. The clamp was
+        // the bug: once every reachable cell has gone unvisited for longer than τ they all report
+        // exactly 1.0, the drive is identical everywhere, and the ranking has nothing left to steer
+        // with. log(1+a/τ) is strictly monotone and unbounded in a, so a least-recently-visited cell
+        // ALWAYS exists and always outranks a fresher one given enough neglect — the robot keeps
+        // sweeping to less-visited places indefinitely, with no mode switch and no gain floor. Growth
+        // is only logarithmic, so it stays commensurate with the pose-information term rather than
+        // swamping it. 0 ⇒ off (pure info-seeking; the robot rests once the room is known).
+        float w_ior_drive     = 0.5f;
 
         // ---- FIM scoring ----
         float fim_corner_sigma  = 0.04f;     // isotropic corner detection noise σ (m)
@@ -150,22 +146,45 @@ public:
     std::vector<Target> evaluate_targets() const;
     std::optional<Target> select_target();
 
-    /// Live grounded epistemic value (nats) of observing from `viewpoint`, evaluated
-    /// against the CURRENT pose precision Y_prior: ΔH = ½·log det(I + Y_prior⁻¹·I_pred).
-    /// This is the common EFE currency advertised on afford_room — recompute it every
-    /// publish cycle so it decays as localization tightens (Y_prior grows ⇒ ΔH → 0) and
-    /// falls through the consumer's withdrawal threshold. Returns 0 when nothing is
-    /// visible. For a rotate-in-place recovery, pass robot_pos().
+    /// ABSOLUTE pose information (nats) available from `viewpoint`, evaluated against the CURRENT
+    /// pose precision Y_prior:  ΔH(v) = ½·log det(I + Y_prior⁻¹·I_pred(v)).
+    /// This is the value of TAKING A FIX from v, and it is the right quantity for the
+    /// rotate-in-place recovery (where the robot is not moving anywhere and the fix itself is the
+    /// whole action). It is NOT the right quantity for ranking places to drive to — see
+    /// marginal_epistemic_gain(). Returns 0 when nothing is visible.
     float live_epistemic_gain(const Eigen::Vector2f& viewpoint) const;
 
-    /// TOTAL epistemic gain advertised on afford_room = pose-FIM ΔH (nats, self-extinguishing
-    /// once localized) + w_ior_drive · (neglect age / ior_decay_time) IoR patrol drive. The drive
-    /// uses the same UNCLAMPED age_seconds the patrol re-ranking in evaluate_targets uses, so the
-    /// published gain tracks how targets are actually chosen and grows without bound as the room is
-    /// neglected — it can never collapse below the consumer's selection bar the way a clamped
-    /// staleness ∈ [0,1] does (which flatlines past ior_decay_time and shrinks to ~0 in a small,
-    /// fully-swept room). This guarantees afford_room stays selectable so exploration never stalls.
-    float live_total_epistemic_gain(const Eigen::Vector2f& viewpoint) const;
+    /// MARGINAL pose information (nats) of MOVING to `viewpoint` — the value of the vantage over
+    /// and above the one the robot already occupies:
+    ///     ΔH_move(v) = ΔH(v) − ΔH(here) = ½·log[ det(Y + I(v)) / det(Y + I(here)) ],  clamped ≥ 0.
+    ///
+    /// This is the fix for "the epistemic term never switches off". The absolute ΔH above is ~4.5
+    /// nats from ANY point in the room at ANY localization quality — the 64-ray wall-SDF FIM is so
+    /// large it does not self-extinguish until sub-centimetre pose covariance — so it registers
+    /// "there is information to be had here" forever, even in a room whose walls are all currently
+    /// in view and whose layout is a FIXED SVG prior with nothing left to learn. Scored against the
+    /// null policy (stay put), the quantity that actually matters falls out: if a candidate sees the
+    /// same geometry the robot already sees, moving there buys nothing and ΔH_move → 0 by
+    /// construction. It stays positive exactly where it should — vantages that open up walls or
+    /// corners not currently visible, i.e. the non-convex parts of an apartment. No threshold, no
+    /// "info exhausted" flag: the term extinguishes itself, and the IoR neglect drive below takes
+    /// over continuously as it does.
+    float marginal_epistemic_gain(const Eigen::Vector2f& viewpoint) const;
+
+    /// TOTAL epistemic value advertised on afford_room (nats):
+    ///     ΔH_move(v)  +  w_ior_drive · log(1 + age(v)/ior_decay_time)
+    /// i.e. the marginal pose information of the vantage plus the neglect information of the cell.
+    /// Both terms are grounded in nats, so this is directly comparable with an object concept's ΔH.
+    /// The neglect term is strictly monotone and UNBOUNDED in neglect age, so the advertised gain
+    /// can never collapse to zero and afford_room can never fall permanently out of contention —
+    /// exploration cannot stall. (This is what makes the old `patrol_gain_floor` unnecessary: the
+    /// gain is held up by a real, computed quantity instead of a magic floor.)
+    ///
+    /// `rotate_in_place` selects the ABSOLUTE reading instead of the marginal one: for a heading
+    /// recovery the robot IS staying put, so "what do I gain over staying put" is the wrong
+    /// question and would advertise 0 for the action needed exactly when the robot is most lost.
+    float live_total_epistemic_gain(const Eigen::Vector2f& viewpoint,
+                                    bool rotate_in_place = false) const;
 
     /// Called every plan cycle.  Returns the current navigation target,
     /// handling dwell and arrival logic internally.  Returns std::nullopt
@@ -186,6 +205,15 @@ public:
     /// update_target() path is skipped (e.g. while a sibling agent is
     /// executing the affordance) so the path trail stays live in the viewer.
     void mark_and_refresh();
+
+    /// Give up on `pos` as a navigation target and stamp it into the visit grid as if it had been
+    /// reached. Called when the executor could not get there (see RoomSceneGraph's no-progress
+    /// stall-breaker). Folding the failure into the SAME neglect belief that drives selection is
+    /// what stops the planner immediately re-proposing the identical unreachable cell: its neglect
+    /// information drops to ~0 and recovers over ior_decay_time, so the cell is naturally
+    /// de-prioritised for a while and then retried — no blacklist, no permanent exclusion, and a
+    /// cell that only *looked* unreachable (a transient obstacle) comes back into play on its own.
+    void mark_target_abandoned(const Eigen::Vector2f& pos);
 
     // ---- Cell score data for visualisation ----
     struct CellScore
@@ -218,8 +246,17 @@ public:
 private:
     std::vector<Eigen::Vector2f> generate_candidates() const;
     bool is_angular_dominated() const;
-    float score_fim_gain(const Eigen::Vector2f& candidate,
-                         const Eigen::Matrix3f& prior_precision) const;
+    /// Predicted Fisher information of a 360° observation taken from `viewpoint`: visible-corner
+    /// fixes (rank-2 each) + the localizer's own point-to-wall SDF rows (rank-1 each). Both are
+    /// heading-independent for a 360° sensor. Zero when the room polygon is unknown.
+    Eigen::Matrix3f predicted_fim(const Eigen::Vector2f& viewpoint) const;
+    /// ½·log det(I + Y⁻¹·I) for a predicted FIM — the absolute entropy reduction of one fix.
+    static float info_gain_nats(const Eigen::Matrix3f& prior_precision,
+                                const Eigen::Matrix3f& fim);
+    /// Neglect information of the cell containing `pos`: log(1 + age/ior_decay_time) nats.
+    /// Strictly monotone and unbounded in age — see Params::w_ior_drive.
+    float neglect_nats(const Eigen::Vector2f& pos,
+                       std::chrono::steady_clock::time_point now) const;
     /// Y_prior = inverse pose covariance with eigenvalues floored at
     /// fim_prior_precision_floor (a degenerate/lost prior then yields a
     /// large-but-finite ΔH, no ∞/NaN). Shared by evaluate_targets and live_epistemic_gain.
@@ -362,9 +399,10 @@ private:
 
         // Raw seconds since this cell was last visited, UNCLAMPED (unlike staleness(), which saturates
         // at 1 after decay_s). Never-visited cells return kNeverVisitedAge so they always rank as the
-        // "oldest". Used by the second-level IoR patrol to find a unique least-recently-visited reachable
-        // cell even after every cell has saturated staleness()=1.
-        static constexpr float kNeverVisitedAge = 1.0e6f;   // ~11.6 days; unvisited cells patrol first
+        // "oldest". This is the age neglect_nats() turns into information, and it is what lets the
+        // IoR drive find a unique least-recently-visited cell even after every cell has saturated
+        // staleness()=1.
+        static constexpr float kNeverVisitedAge = 1.0e6f;   // ~11.6 days; unvisited cells go first
         float age_seconds(const Eigen::Vector2f& pos,
                           std::chrono::steady_clock::time_point now) const
         {
@@ -385,8 +423,8 @@ private:
     mutable std::mt19937 rng_{std::random_device{}()};
 
     // ---- Selection diagnostics (set in evaluate_targets, printed in select_target) ----
-    mutable float dbg_max_fim_ = 0.f;   // best pose-FIM gain across candidates this cycle (nats)
-    mutable bool  dbg_patrol_  = false; // true when the second-level age-ranked patrol was active
+    mutable float dbg_max_fim_  = 0.f;   // best MARGINAL pose-info gain across candidates (nats)
+    mutable float dbg_here_fim_ = 0.f;   // absolute pose info available from the robot's own cell (nats)
 };
 
 } // namespace rc

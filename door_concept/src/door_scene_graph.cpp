@@ -259,12 +259,15 @@ void DoorSceneGraph::write_rt_covariance(std::uint64_t room_id, DoorInstance& in
     const Eigen::Vector2f u = inst.ai2_belief.params().wall_u;
     const float chain_along = u.x() * u.x() * inst.chain_cov_xx + u.y() * u.y() * inst.chain_cov_yy;
     const float vz   = inst.ai2_belief.params().floor_std * inst.ai2_belief.params().floor_std;   // cz pinned
-    constexpr float kWallYawVar = 3.0e-4f;   // (~1°)²: the wall fixes yaw; the nominal polygon is trusted
+    // This covariance describes the APERTURE, which is what the RT edge carries (see write_rt_pose). Both
+    // constants below are therefore unconditionally true and stay true once the leaf can swing: an aperture
+    // is rigid in its wall by definition, so its yaw is the wall's and it has no across-wall freedom.
+    constexpr float kWallYawVar = 3.0e-4f;   // (~1°)²: the wall fixes the APERTURE yaw; the polygon is trusted
     float vx, vy, vyaw = kWallYawVar;
     if (inst.wall_node_id != 0)
     {
         vx = vs + chain_along;   // along wall (local x)
-        vy = 1.0e-4f;            // across wall (local y) — the door lies in the wall plane
+        vy = 1.0e-4f;            // across wall (local y) — the APERTURE lies in the wall plane
     }
     else
     {
@@ -302,21 +305,25 @@ void DoorSceneGraph::write_rt_covariance(std::uint64_t room_id, DoorInstance& in
 
 std::vector<float> DoorSceneGraph::make_door_mesh(const DoorState& s)
 {
-    // Flat triangle list (room frame): ONE thin panel box (12 triangles). Local x = along the wall (width),
-    // local y = across the wall (thickness), local z = up. Centred horizontally at (cx,cy), spanning
-    // [cz, cz+h] vertically.
+    // Flat triangle list (room frame): ONE thin panel box (12 triangles) drawn at the LEAF's current pose
+    // (door_geometry.h). Local x = hinge → free edge, local y = across the face, local z = up.
+    //
+    // The leaf, not the aperture: this is the one DSR channel in which an open door is representable, since
+    // the RT edge and width_m/depth_m/height_m all describe the static aperture by design. (No consumer
+    // reads it for doors today — voxelizer/src/scene_processor.cpp:727 draws only table/chair/cabinet
+    // carcasses and suppresses any node publishing a mesh_path — so this is free to follow the leaf now and
+    // is where M2/M3 rendering will hook in.)
     std::vector<float> verts;
     verts.reserve(108);
 
-    const float cy = std::cos(s.yaw);
-    const float sy = std::sin(s.yaw);
+    const door::LeafPose L = door::leaf_pose_from_box(s.cx, s.cy, s.cz, s.yaw, s.w, s.h, s.thickness);
 
     auto push_box = [&](float bx, float by, float bz, float hw, float hd, float hh)
     {
         auto push = [&](float lx, float ly, float lz)
         {
-            verts.push_back(bx + cy * lx - sy * ly);
-            verts.push_back(by + sy * lx + cy * ly);
+            verts.push_back(bx + L.ex.x() * lx + L.ey.x() * ly);
+            verts.push_back(by + L.ex.y() * lx + L.ey.y() * ly);
             verts.push_back(bz + lz);
         };
         push(-hw,-hd,-hh); push( hw,-hd,-hh); push( hw, hd,-hh);  // bottom
@@ -350,11 +357,20 @@ void DoorSceneGraph::write_rt_pose(std::uint64_t room_id, DoorInstance& inst)
         return;
 
     const auto& s = inst.model.state();
+    // ★ EVERYTHING below keys on the APERTURE (ap_cx, ap_cy, ap_yaw) — the static hole in the wall — NEVER
+    // on the leaf. The door node is a PLACE IN THE BUILDING: what the robot navigates through is the hole,
+    // not the panel, and the aperture is what is rigidly attached to the wall this edge hangs from.
+    // Publishing the swinging leaf here would encode a revolute joint as a rigid transform, and would break
+    // three things at once: the 5 cm dead-band below would silently swallow a pure hinge rotation (leaving
+    // a stale edge), the {0,0,lyaw} euler would misrepresent it, and resolve_wall — keyed on the centre —
+    // could flip its nearest-wall answer once a 90° swing moved that centre by w/2, triggering a spurious
+    // re-parent + RT edge delete/recreate. At phi = 0 these are identical to the leaf values.
+    const float ap_cx = s.ap_cx, ap_cy = s.ap_cy, ap_yaw = s.ap_yaw;
 
     // A door hangs from its WALL: resolve the nearest wall node and publish the pose in that wall's frame.
     // Falls back to the room only while no wall nodes exist. If the parent changes (first association, or the
     // door moved onto another wall) we RE-PARENT: drop the stale RT edge and update parent/level.
-    const WallRef wall = resolve_wall(room_id, {s.cx, s.cy});
+    const WallRef wall = resolve_wall(room_id, {ap_cx, ap_cy});
     const std::uint64_t new_parent = wall.ok ? wall.id : room_id;
 
     auto door_opt = G_->get_node(inst.node_id);
@@ -366,22 +382,22 @@ void DoorSceneGraph::write_rt_pose(std::uint64_t room_id, DoorInstance& inst)
     // Dead-band: suppress RT edge updates below ~5 cm to avoid pos churn from gradient oscillations — but
     // NEVER skip a re-parent (the door must move onto its wall even when it hasn't translated).
     constexpr float kMinWriteDistSq = 0.05f * 0.05f;
-    const float dx = s.cx - inst.last_written_cx;
-    const float dy = s.cy - inst.last_written_cy;
+    const float dx = ap_cx - inst.last_written_cx;
+    const float dy = ap_cy - inst.last_written_cy;
     if (not reparent and dx * dx + dy * dy < kMinWriteDistSq)
         return;
 
     // Door node origin = BASE on the floor (z=0 in room). In the wall frame that base sits z0 below the wall
     // origin (which is at half room height). Every consumer assumes a base origin: the voxelizer box
     // (z∈[origin, origin+height]) and bottle_concept's door-top support test (top = origin.z + height).
-    float lx = s.cx, ly = s.cy, lz = 0.0f, lyaw = s.yaw;   // room-frame fallback
+    float lx = ap_cx, ly = ap_cy, lz = 0.0f, lyaw = ap_yaw;   // room-frame fallback
     std::optional<DSR::Node> parent_node;
     if (wall.ok)
     {
         parent_node = G_->get_node(wall.id);
         if (parent_node.has_value())
         {
-            const auto lp = door_in_wall(s.cx, s.cy, s.yaw, wall.mid, wall.yaw, wall.z0);
+            const auto lp = door_in_wall(ap_cx, ap_cy, ap_yaw, wall.mid, wall.yaw, wall.z0);
             lx = lp.x; ly = lp.y; lz = lp.z; lyaw = lp.yaw;
         }
     }
@@ -401,8 +417,8 @@ void DoorSceneGraph::write_rt_pose(std::uint64_t room_id, DoorInstance& inst)
     inst.wall_node_id = wall.ok ? wall.id : 0;
 
     rt_api_->insert_or_assign_edge_RT(parent_node.value(), inst.node_id, {lx, ly, lz}, {0.0f, 0.0f, lyaw});
-    inst.last_written_cx = s.cx;
-    inst.last_written_cy = s.cy;
+    inst.last_written_cx = ap_cx;
+    inst.last_written_cy = ap_cy;
 }
 
 void DoorSceneGraph::write_epistemic_proposal(DSR::Node& node, const EpistemicProposal& prop)

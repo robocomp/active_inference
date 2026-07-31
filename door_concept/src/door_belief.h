@@ -31,6 +31,7 @@
 #include <Eigen/Dense>
 
 #include "../../common/ai_belief/recursive_laplace.h"
+#include "door_geometry.h"      // rc::door:: Aperture / LeafState / LeafPose — the single geometry source
 
 namespace rc
 {
@@ -56,6 +57,13 @@ struct DoorBeliefParams
     float thickness = 0.05f;                 // panel thickness T (m, across the wall — fixed, not a DOF)
     float floor_z   = 0.0f;                  // room-frame floor: the door base is PINNED here (not a DOF)
     float floor_std = 0.03f;                 // floor-height uncertainty (m) → published z covariance
+
+    // ── Leaf articulation (openable door, M0) ────────────────────────────────────────────────────
+    // The hinged panel's opening angle + which aperture edge it hangs from. NOT part of theta: N stays 3
+    // and the shared inference engine is untouched. M0 pins phi = 0 (leaf flush in the aperture, so every
+    // geometry consumer reduces exactly to the old wall-plane behaviour); phi becomes a fitted DOF in M1
+    // and hinge/swing become discrete hypotheses in M2. Authored by DoorFitter::make_belief_params.
+    door::LeafState leaf{};
 
     // Observation model
     float sigma_base_m    = 0.03f;
@@ -140,15 +148,35 @@ public:
     }
 
     // ── Geometry read-back for the fitter write-back / scene-graph publish ──────────
+    // NOTE: center_xy()/yaw() describe the APERTURE — the static hole in the wall. They are what the DSR RT
+    // edge, resolve_wall, merge, ghost identity and the room-containment prior key on, precisely because
+    // they cannot be dragged by a swinging leaf. For the LEAF's current pose use leaf_pose() below.
     float width()     const { return state_.w; }
     float height()    const { return state_.h; }
     float thickness() const { return params_.thickness; }
     float cz()        const { return params_.floor_z; }                       // pinned floor datum (base)
     float center_z()  const { return params_.floor_z + 0.5f * state_.h; }     // panel centre height
-    // Room-frame (x,y) of the panel centre: along the wall by s+w/2 from the near corner O.
+    // Room-frame (x,y) of the APERTURE centre: along the wall by s+w/2 from the near corner O.
     Eigen::Vector2f center_xy() const { return params_.wall_O + (state_.s + 0.5f * state_.w) * params_.wall_u; }
-    // Room-frame yaw = the wall tangent direction (the door's local +x runs along the wall).
+    // Room-frame yaw of the APERTURE = the wall tangent (the aperture's local +x runs along the wall).
     float yaw() const { return std::atan2(params_.wall_u.y(), params_.wall_u.x()); }
+
+    // ── Aperture / leaf geometry (door_geometry.h is the single source of truth) ──────────
+    // The aperture at an arbitrary state (the SDF needs this for the finite-difference Jacobian), and at
+    // the current one. `leaf` carries the articulation; with phi pinned at 0 the leaf IS the aperture.
+    door::Aperture aperture_at(const DoorBeliefState& s) const
+    {
+        door::Aperture a;
+        a.wall_O = params_.wall_O; a.wall_u = params_.wall_u;
+        a.s = s.s; a.w = s.w; a.h = s.h;
+        a.floor_z = params_.floor_z; a.thickness = params_.thickness;
+        return a;
+    }
+    door::Aperture aperture()   const { return aperture_at(state_); }
+    door::LeafPose leaf_pose_at(const DoorBeliefState& s) const { return door::leaf_pose(aperture_at(s), params_.leaf); }
+    door::LeafPose leaf_pose()  const { return leaf_pose_at(state_); }
+    Eigen::Vector2f leaf_centre_xy() const { return leaf_pose().centre_xy; }
+    float           leaf_yaw()       const { return leaf_pose().yaw(); }
 
     // ── Inference (delegated to the shared engine) ────────────────────────────
     float update(const DoorFrame& frame) { return ai::update<N>(*this, state_, Sigma_, prior_mean_, frame); }

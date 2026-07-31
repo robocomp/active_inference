@@ -114,8 +114,19 @@ DoorConfig load_door_config(const ConfigLoader& cfg)
     out.exist_room_prior         = getb("Existence.RoomPrior",        true);
     out.exist_room_margin_m      = getf("Existence.RoomMarginM",      0.40f);
     out.exist_out_of_room_gain   = getf("Existence.OutOfRoomGain",    1.5f);
+    out.exist_min_height_prior   = getb("Existence.MinHeightPrior",   true);
+    out.exist_min_height_m       = getf("Existence.MinHeightM",       1.80f);
+    out.exist_min_height_conf    = getf("Existence.MinHeightConf",    0.30f);
+    out.exist_short_gain         = getf("Existence.ShortGain",        1.5f);
     out.exist_reacquire_radius_m = getf("Existence.ReacquireRadiusM", 0.60f);
     out.exist_ghost_max          = geti("Existence.GhostMax",         8);
+    // [Openable] — deliberately ABSENT from etc/config.toml (same as [Bearing]): a dormant, opt-in feature
+    // whose defaults keep the leaf pinned flush. See the block comment in door_config.h.
+    out.openable_enabled     = getb("Openable.Enabled",     false);
+    out.openable_phi_init    = getf("Openable.PhiInitRad",  0.0f);
+    out.openable_hinge_side  = geti("Openable.HingeSide",   0);
+    out.openable_swing_dir   = getf("Openable.SwingDir",    1.0f);
+    out.openable_phi_max_rad = getf("Openable.PhiMaxRad",   1.5707963f);
     out.door_prior_w_m           = getf("Door.PriorWidthM",         0.70f);
     out.door_prior_w_std         = getf("Door.PriorWidthStd",       0.06f);
     out.door_prior_h_m           = getf("Door.PriorHeightM",        2.00f);

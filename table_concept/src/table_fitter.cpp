@@ -280,6 +280,9 @@ TableFitter::TableObservation TableFitter::observe_slice(TableInstance& inst, in
     inst.last_centroid_radius = slice.centroid_radius;
     inst.last_range           = slice.range;
     inst.last_depth_var       = slice.depth_var;   // mask depth uncertainty → R (ricoh lidar-depth masks)
+    // Appearance (DISPLAY ONLY — deliberately NOT part of `observation`, so no fit can ever see it). This
+    // is a sidecar belief on the instance whose only consumer is the mesh tint published to the voxelizer.
+    inst.appearance.update(slice.color_chroma, slice.color_var, slice.color_neff);
 
     const std::size_t begin = std::min(slice.support_begin, masks_packet.support_points.size());
     const std::size_t end   = std::min(slice.support_end,   masks_packet.support_points.size());
@@ -397,6 +400,8 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
         p.depth_scale_std        = cfg_.depth_scale_std;
         p.process_std_m   = cfg_.ai2_process_std_m;
         p.process_std_yaw = cfg_.ai2_process_std_yaw;
+        p.process_std_extent_m   = cfg_.ai2_process_std_extent_m;    // 0 ⇒ a table's dimensions are constant
+        p.clamp_sigma_to_prior   = cfg_.ai2_clamp_sigma_to_prior;    // ageing saturates at Σ₀, never diverges
         p.common_mode_pos_std  = cfg_.ai2_common_mode_pos_std;
         p.common_mode_size_std = cfg_.ai2_common_mode_size_std;
         p.common_mode_yaw_std  = cfg_.ai2_common_mode_yaw_std;
@@ -455,6 +460,18 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
     const float range_yaw_var = yaw_std * yaw_std;
     const float range_size_var = size_std * size_std;
 
+    // COVERAGE (completeness) common-mode — the view-quality half of "close enough to reshape". Range says how
+    // far the table is; coverage says how much of it this viewpoint actually spans. Both must be good before a
+    // frame may re-cut the geometry, and the live failure was a CLOSE view with poor coverage (see the block
+    // comment on ai2_coverage_size_gain in table_config.h). σ = gain·(1/c − 1): identically 0 at c ≥ 1, so a
+    // full view behaves exactly as before; unbounded as the footprint fragments, so a sliver confirms but
+    // cannot reshape. c is last cycle's measured completeness (static table ⇒ one cycle stale is fine).
+    const float cover      = std::clamp(inst.last_completeness, cfg_.ai2_coverage_min, 1.0f);
+    const float cover_defect = 1.0f / cover - 1.0f;                        // 0 at full coverage
+    const float cov_size_var = std::pow(cfg_.ai2_coverage_size_gain * cover_defect, 2.0f);   // m²  (w,h,H)
+    const float cov_yaw_var  = std::pow(cfg_.ai2_coverage_yaw_gain  * cover_defect, 2.0f);   // rad² (yaw)
+    const float cov_pos_var  = std::pow(cfg_.ai2_coverage_pos_gain  * cover_defect, 2.0f);   // m²  (cx,cy)
+
     const float R = cfg_.ai2_sigma_base_m * cfg_.ai2_sigma_base_m
                   + std::max(0.0f, inst.last_motion_var) + std::max(0.0f, inst.last_depth_var) + range_lat_var;
 
@@ -475,7 +492,38 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
     // (shrinks/displaces the model). Above tolerance, skip the geometric update (predict only) — but
     // keep the instance (association ran upstream). Ego-motion corruption is handled by CONTINUOUS covariance
     // (moment_extra_var motion term + the mode evidence_weight), not a gate.
-    const bool gated = inst.last_trunc_frac > cfg_.ai2_trunc_gate_frac;
+    const bool trunc_gated = inst.last_trunc_frac > cfg_.ai2_trunc_gate_frac;
+
+    // ── FIXATION gate (attention): only a CLOSE, CENTRED, STILL view may touch the geometry ───────────
+    // See the block comment on TableConfig::fixation_enabled for why the graded common-mode terms could not
+    // do this: the engine saturates a frame's information at Σc⁻¹, a NONZERO asymptote, so a bad frame is
+    // attenuated but still moves the mean — and accumulation over hundreds of frames beats attenuation.
+    // A fixation is judged from the PREDICTED projection (roi_* is last cycle's, recomputed below at the same
+    // pre-update belief) + the voxelizer's ego-motion smear. Each condition is independently disable-able.
+    // roi_valid==false (no projection yet, e.g. a newborn's first cycle) cannot judge centring → do not let it
+    // block; the range and stillness conditions still apply.
+    const float roi_off      = std::hypot(inst.roi_offset_x, inst.roi_offset_y);
+    // RESOLVABLE (was a hard RANGE cut until 2026-07-30): gate on the mask quality that actually determines
+    // whether this frame can resolve the geometry — point mass and truncation — not on distance. Range is a
+    // proxy that had the physics backwards: a dense far stare beats a starved near glance. Kept as a
+    // diagnostic and as an optional extra condition (fixation_range_m > 0 re-enables the old cut).
+    const bool  fix_close    = (cfg_.fixation_min_pts   <= 0    or npts >= cfg_.fixation_min_pts)
+                           and (cfg_.fixation_max_trunc <= 0.0f or inst.last_trunc_frac <= cfg_.fixation_max_trunc)
+                           and (cfg_.fixation_range_m   <= 0.0f or (range > 0.0f and range <= cfg_.fixation_range_m));
+    const bool  fix_centred  = cfg_.fixation_centre_frac <= 0.0f or (not inst.roi_valid)
+                                                                or roi_off <= cfg_.fixation_centre_frac;
+    const bool  fix_still    = cfg_.fixation_still_dotd  <= 0.0f or mot_dotd <= cfg_.fixation_still_dotd;
+    const bool  fixated      = fix_close and fix_centred and fix_still;
+    inst.dbg_fix_close = fix_close; inst.dbg_fix_centred = fix_centred;
+    inst.dbg_fix_still = fix_still; inst.dbg_fixated = fixated;
+    // Outside a fixation take the SAME path as a truncated mask: predict() only, mean HELD. Association and
+    // existence do not read this, so the table is still confirmed and tracked — only its geometry is frozen.
+    const bool gated = trunc_gated or (cfg_.fixation_enabled and not fixated);
+    if (cfg_.fixation_enabled and not fixated and not trunc_gated and should_log(inst))
+        std::print("[{}] [fixation] SUPPRESSED — resolvable={} (npts={}>={} trunc={:.2f}<={:.2f}) centred={} (off={:.2f}<={:.2f}) still={} (dotd={:.3f}<={:.3f}) | range={:.2f}\n",
+                   inst.node_name, fix_close, npts, cfg_.fixation_min_pts, inst.last_trunc_frac,
+                   cfg_.fixation_max_trunc, fix_centred, roi_off, cfg_.fixation_centre_frac,
+                   fix_still, mot_dotd, cfg_.fixation_still_dotd, range);
 
     // Pose-chain covariance at the table centre (cx,cy) — the per-frame SHARED localization error. Fed
     // into the belief as part of the common-mode so the frame's information saturates (calibrated σ).
@@ -528,8 +576,8 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
                 frame.point_azim.push_back(std::atan2(pc.x(), pc.y()));   // signed azimuth about the optical axis
             }
         }
-        frame.chain_cov_xx  = inst.chain_cov_xx + range_lat_var + mot_pos_var;   // pose-chain + range + EGO-MOTION
-        frame.chain_cov_yy  = inst.chain_cov_yy + range_lat_var + mot_pos_var;
+        frame.chain_cov_xx  = inst.chain_cov_xx + range_lat_var + mot_pos_var + cov_pos_var;   // pose-chain + range + EGO-MOTION + COVERAGE
+        frame.chain_cov_yy  = inst.chain_cov_yy + range_lat_var + mot_pos_var + cov_pos_var;
         // Obliquity yaw cap: at an edge-on (grazing) view the tabletop cloud is ~1-D along the near edge, so yaw
         // is barely observable and the per-point GN snaps between the box's symmetric orientations (r_π / w↔h —
         // the CSV flips). Grow the SHARED yaw variance as the view grazes (|cos(incidence)|→0 ⇒ 1/cos→∞), so a
@@ -548,10 +596,12 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
         // FootprintResidual on ⇒ the depth tilt is an ESTIMATED N=7 state (no per-frame yaw cap — that ratcheted
         // and needed a fragile sweet-spot); chain_cov_yaw carries only the WHITE range term. Else the legacy tuned
         // obliquity+range form. (The tilt STATE replaces both the cap and the obliquity/range yaw gains.)
-        frame.chain_cov_yaw = mot_yaw_var + (cfg_.footprint_residual
+        frame.chain_cov_yaw = mot_yaw_var + cov_yaw_var + (cfg_.footprint_residual
             ? range_yaw_var
-            : range_yaw_var + obliquity_yaw_std * obliquity_yaw_std);   // range + grazing-view cap + EGO-MOTION
-        frame.chain_cov_size = range_size_var + mot_size_var;      // range freezes afar + EGO-MOTION freezes while moving
+            : range_yaw_var + obliquity_yaw_std * obliquity_yaw_std);   // range + grazing cap + EGO-MOTION + COVERAGE
+        // range freezes afar + EGO-MOTION freezes while moving + COVERAGE freezes on a partial view. The coverage
+        // term is what stops a close-but-fragmentary look from re-cutting w/h (the live +0.76 m h jump at 0.75 m).
+        frame.chain_cov_size = range_size_var + mot_size_var + cov_size_var;
         // Footprint-moment SHARED per-frame variance: ego-motion mask corruption + a GENTLE range term (a global
         // footprint fit is far more range-robust than a single boundary point, so a coefficient << the per-point
         // AI2RangeNoiseSizePerM). This makes the moment ACCUMULATE across frames and back off when the robot is
@@ -664,6 +714,7 @@ float TableFitter::run_inference(TableInstance& inst, const TableObservation& ob
             const float d_total  = wrap(yaw_now - inst.dbg_yaw_pre);
             const float em = inst.ai2_belief.dbg_moment_ext_major(), en = inst.ai2_belief.dbg_moment_ext_minor();
             inst.dbg_completeness = (st.w * st.h > 1e-4f and em > 0.0f) ? (em * en) / (st.w * st.h) : 1.0f;
+            inst.last_completeness = inst.dbg_completeness;   // persist for NEXT cycle's coverage common-mode
             constexpr float kYawJumpLogRad = 0.087f;   // ≈5°: diagnostic PRINT trigger only (no fit effect)
             constexpr float kRad2Deg       = 57.29578f;
             if (std::abs(d_total) > kYawJumpLogRad)
@@ -773,7 +824,8 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
                  << "dyaw_points,dyaw_moment,dyaw_flip,obliquity_cos,completeness,moment_aniso,moment_r_yaw,"
                  << "mom_major,mom_minor,mom_phi,mom_pts,"   // RAW footprint statistic (basin diagnosis)   // rogue-mask diag
                  << "ex_L,ex_p,ex_locc,ex_lfree,ex_lfree_eff,ex_ln,ex_socc,ex_sfree,ex_sfree_eff,ex_sndet,ex_streak,"
-                 << "ex_pdetect,ex_central,ex_verify,ex_wantsverify\n";   // existence-removal + verification-gate diag
+                 << "ex_pdetect,ex_central,ex_verify,ex_wantsverify,"   // existence-removal + verification-gate diag
+                 << "fixated,fix_close,fix_centred,fix_still,roi_off\n";  // FIXATION (attention) gate diag
     }
     const auto& s = inst.ai2_belief.state();
     const auto& S = inst.ai2_belief.covariance();
@@ -802,7 +854,10 @@ void TableFitter::log_ai2_csv(const TableInstance& inst, int npts, float R, bool
              << inst.dbg_ex_sil_occ << ',' << inst.dbg_ex_sil_free << ',' << inst.dbg_ex_sil_free_eff << ',' << inst.dbg_ex_sil_ndet << ','
              << inst.existence_remove_streak << ','
              << inst.dbg_ex_pdetect << ',' << inst.dbg_ex_central << ','
-             << inst.verify_surprise << ',' << (inst.wants_verification ? 1 : 0) << '\n';   // existence-removal + verification-gate diag
+             << inst.verify_surprise << ',' << (inst.wants_verification ? 1 : 0) << ','   // existence-removal + verification-gate diag
+             << (inst.dbg_fixated ? 1 : 0) << ',' << (inst.dbg_fix_close ? 1 : 0) << ','
+             << (inst.dbg_fix_centred ? 1 : 0) << ',' << (inst.dbg_fix_still ? 1 : 0) << ','
+             << std::hypot(inst.roi_offset_x, inst.roi_offset_y) << '\n';   // FIXATION (attention) gate diag
     ai2_csv_.flush();
 }
 

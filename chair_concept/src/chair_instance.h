@@ -20,6 +20,7 @@
 #include "chair_model.h"        // ChairModel / ChairState
 #include "chair_belief.h"       // rc::ChairBelief (AI2 recursive-Laplace belief)
 #include "chair_affordance.h"   // ChairAffordance
+#include "../../common/appearance_belief/appearance_belief.h" // per-instance albedo chromaticity (DISPLAY only)
 
 namespace rc {
 
@@ -52,6 +53,12 @@ struct ChairInstance
                                      // LiDAR-depth slice → added to R so ricoh's unreliable depth barely moves the fit
     float last_clutter_frac = 0.0f;  // mean clutter responsibility (fraction of the mask the model can't explain)
     float dbg_obliquity_cos = 1.0f;  // |cos| of camera→chair horizontal ray vs backrest normal (1=face-on, →0 grazing)
+    // Obliquity MARGINALISED over the yaw posterior — this, not the point estimate above, feeds the yaw
+    // common-mode. The point estimate is CIRCULAR (built from the belief's own yaw, so a wrong yaw declares
+    // its own error unobservable and protects it); this one may only claim "edge-on" to the degree the yaw is
+    // genuinely known, and tightens back to the point estimate as σ_yaw converges. See chair_fitter.cpp.
+    float dbg_obliquity_eff = 1.0f;
+    bool  dbg_fixated       = true;  // did the FIXATION (attention) gate admit a geometry update this cycle?
 
     // Free-energy readout + attention baseline (clutter-inclusive F; TABLE.md §9). dbg_energy HOLDS the last
     // FE across a gated/rejected cycle (which took no measurement). fe_baseline tracks DOWN fast / UP slow so a
@@ -139,6 +146,22 @@ struct ChairInstance
     bool  rig_edge_found = false;   // an incoming group_member edge was present
     float rig_kappa      = 0.0f;    // precision handed to the belief AFTER both caps
     float rig_prior_yaw  = 0.0f;    // rad, member convention
+
+    // ── Appearance (DISPLAY ONLY) ─────────────────────────────────────────────────────────────────
+    // 3-DOF Gaussian over this chair's albedo CHROMATICITY, fed by the voxelizer's per-mask colour
+    // summary and consumed only by chair_scene_graph, which publishes its MAP as `mesh_color_rgb` for
+    // the 3D viewer's mesh tint. Nothing in the AI2 belief, the association gate, the existence
+    // log-odds or the yaw-mode test reads it — a channel built from tens of thousands of correlated
+    // mask pixels is kept out of the fit on purpose. See common/appearance_belief/appearance_belief.h.
+    //
+    // Note for a future reader tempted to use it: colour would be a plausible cue for the 90°/180° yaw
+    // ambiguity, but NOT from this belief — it is one chromaticity for the whole instance, so it
+    // cannot distinguish seat from backrest. That needs the per-PART render deferred in
+    // appearance-belief-mesh-tint.
+    rc::appearance::AppearanceBelief appearance;
+    // Wall stamp of the last appearance drift step, so the drift tracks real elapsed time rather than a
+    // cycle count — an agent running slow (or briefly stalled) must not under-inflate. Zero until first use.
+    std::chrono::steady_clock::time_point last_appearance_tp{};
 };
 
 }  // namespace rc

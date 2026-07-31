@@ -69,8 +69,14 @@ struct TableConfig
     float ai2_clutter_frac    = 0.10f;   // ε: prior weight of the uniform clutter mixture component
     float ai2_clutter_scale_m = 0.12f;   // a point further than ~this from every surface is likely clutter
     float ai2_prior_size_std  = 0.30f;   // broad size prior std (m) on w,h,H
-    float ai2_process_std_m   = 0.005f;  // predict process-noise std, length DOFs (m/frame)
+    float ai2_process_std_m   = 0.005f;  // predict process-noise std, POSE (cx,cy) (m/frame)
     float ai2_process_std_yaw = 0.01f;   // predict process-noise std, yaw (rad/frame)
+    // EXTENT (w,h,H) process noise, separate from the pose walk. 0 = a table's dimensions are CONSTANT
+    // (the physical truth); <0 = historic behaviour (share ai2_process_std_m). See TableBeliefParams.
+    float ai2_process_std_extent_m = 0.0f;
+    // Cap Σ at the prior on predict (OU decay toward the stationary prior, not a divergent random walk), so
+    // ageing an unobserved table can never make it more plastic than it was before it was ever seen.
+    bool  ai2_clamp_sigma_to_prior = true;
     // Stale-belief aging (measurement-age → covariance). Nominal inter-frame period (s) of the mask stream,
     // used to convert the per-frame process noise Q into a RATE so Σ keeps inflating on the AGENT's own clock
     // while the sensor is silent (rc::ai::inflate_for_age). <=0 DISABLES it → the belief simply freezes on
@@ -97,9 +103,58 @@ struct TableConfig
     float ai2_range_noise_yaw_per_m  = 0.03f;  // yaw common-mode std growth (rad per m of range)
     float ai2_range_noise_size_per_m = 0.08f;  // SIZE (w,h,H) common-mode std growth (m per m of range): a distant
                                                // mask can't reshape/inflate a converged table (freezes geometry afar)
+    // ── COVERAGE (completeness) common-mode — the second half of "close enough to reshape" ──────────────────
+    // Range alone does NOT capture whether a view licenses a reshape, and the live log proves it: the worst
+    // observed distortion happened at range 0.75 m (well inside every range term) with completeness 0.28 —
+    // h jumped +0.76 m in ONE frame and the table stayed 1.7 m long for 1200 cycles until a completeness-1.9
+    // view snapped it back (ai2_log.csv, table_9 cycles 1127→1136→2537). A partial/foreshortened footprint is
+    // a SLIVER: the per-point SDF fit can only explain it by stretching the extent, because the rest of the
+    // table is simply not in the measurement. So the covariate that gates RESHAPE authority is coverage, not
+    // distance: c = observed footprint area / believed w·h (inst.last_completeness, one cycle stale).
+    //   σ_extra = gain · (1/c − 1)      → 0 at c ≥ 1 (full view: UNCHANGED), → ∞ as the view fragments.
+    // Same continuous-covariance form the moment channel already uses (FootprintMomentCompletenessGain) and the
+    // same discipline as the range/obliquity/ego-motion terms: no gate, no cutoff — a sliver frame still
+    // CONFIRMS the table and still refines what it can see, it just cannot re-cut the geometry. 0 disables.
+    float ai2_coverage_size_gain = 0.30f;  // SIZE (w,h,H) common-mode std (m) per unit of (1/c − 1) — anti-RESHAPE
+    float ai2_coverage_yaw_gain  = 0.15f;  // yaw common-mode std (rad) per unit of (1/c − 1)        — anti-ROTATE
+    float ai2_coverage_pos_gain  = 0.05f;  // position (cx,cy) common-mode std (m) per unit of (1/c − 1); small:
+                                           // a sliver still localises the near edge well, it just can't resize
+    float ai2_coverage_min       = 0.02f;  // clamp floor on c so 1/c stays finite (caps the inflation)
     // THRESHOLD (truncation gate): skip the geometric update (predict only) when this fraction of the mask
     // silhouette is on the image border — a truncated mask is a biased extent, not measurement noise.
     float ai2_trunc_gate_frac = 0.10f;
+
+    // ── FIXATION gate: the ATTENTION mechanism (a DELIBERATE, flagged threshold) ──────────────────────────
+    // Rationale, and why the continuous covariance terms were NOT enough. All the graded levers here (range,
+    // obliquity, coverage, ego-motion common-mode) act through the per-frame common-mode Σc, and the engine
+    // saturates the frame's information at Σc⁻¹ — a nonzero asymptote. So a bad frame's authority is
+    // ATTENUATED but never ZERO, and the GN mean step (recursive_laplace.h:221-222) still moves the mean by
+    // ~Σc⁻¹ each frame. Hundreds of frames at 6 m therefore still walk a converged table: attenuation loses
+    // to accumulation. Measured twice on live data after adding the range and coverage terms.
+    // The biological model the user asked for is EYE FIXATION: primates take in detail only during fixations
+    // and actively SUPPRESS intake otherwise (saccadic suppression) — attention is not a soft weight, it
+    // GATES. In active-inference terms attention is precision, and an unattended channel's precision goes to
+    // zero, i.e. the observation is not integrated at all. This robot has no pan-tilt, so a "fixation" is the
+    // whole-body condition: CLOSE + the object CENTRED in the frame + the robot STILL.
+    // Outside a fixation the cycle takes the existing truncation-gate path — predict() only, mean HELD, Σ
+    // inflates. Association and existence do NOT read this, so an unfixated table is still CONFIRMED and
+    // still tracked; only its GEOMETRY (pose/shape) is frozen. This is CLAUDE.md's "if a threshold is truly
+    // unavoidable, flag it and justify why no model-level term works" — justified above.
+    // CAVEAT, by design: a table the robot never approaches, centres and holds still for keeps its BIRTH
+    // geometry forever. That is the honest outcome (never claim to know a shape you never resolved), but it
+    // means convergence now REQUIRES the robot to actually go and look. Set FixationEnabled=false to revert.
+    bool  fixation_enabled     = true;
+    // RESOLVABLE (replaced the hard RANGE cut on 2026-07-30, same reasoning as chair_concept): range is only
+    // a proxy for whether the frame can resolve the geometry; what actually decides it is how much
+    // un-cluttered surface lands on the object. The range cut rejected dense far stares and accepted starved
+    // near glances, and on chair_concept it froze every instance for 400/400 cycles.
+    int   fixation_min_pts     = 300;    // RESOLVABLE: min mask points before a frame may touch the geometry
+    float fixation_max_trunc   = 0.10f;  // RESOLVABLE: max silhouette truncation (mirrors ai2_trunc_gate_frac)
+    float fixation_range_m     = 0.0f;   // RETIRED as a gate (0 = off). Kept so an A/B revert is one edit.
+    float fixation_centre_frac = 0.60f;  // CENTRED: max |roi offset| (normalised, 0=centred, 1=image edge) —
+                                         // the "fovea". <=0 disables just this condition.
+    float fixation_still_dotd  = 0.05f;  // STILL: max |motion_dotd| = Z·‖ṡ‖ (m/s), the ego-motion mask smear
+                                         // from the voxelizer. <=0 disables just this condition.
     int   ai2_gn_iters        = 4;       // Gauss-Newton iterations per frame
     std::string ai2_csv_path  = "";      // if non-empty, append per-cycle belief (state + Σ diag + mask R) to CSV
     // Anisotropic per-point R (PRECISION_AS_INFORMATION.md Stage 1). Replaces the scalar per-point variance with
@@ -220,6 +275,13 @@ struct TableConfig
     // This is P(detect|present) falling with range, the codebase's "range→precision, not a gate" pattern.
     float existence_absence_range_ref_m = 2.5f;   // range (m) below which absence is trusted at full weight
     float existence_absence_range_power = 2.0f;   // decay exponent (2 ≈ angular-area ∝ 1/range²); 0 disables
+    // OPTIONAL EXTRA line-of-sight oracle from the LiDAR sweep, for occluders a room polygon cannot know
+    // about (furniture, people, an open door leaf). WALLS are handled by the primary, exact and
+    // sweep-independent rc::occlusion::walls_block() test — see TableProjection::set_room_polygon. This one
+    // needs a fresh sweep and quantises bearing into bins, so it is OFF by default; set bins > 0 to enable.
+    float existence_los_margin_m  = 0.25f;  // sample must be this far BEYOND the first hit to count as occluded
+                                            // (absorbs the table's OWN returns + registration error)
+    int   existence_los_azim_bins = 0;      // azimuth bins over 2π (720 ≈ 0.5° each); 0 = oracle OFF (default)
     float existence_verify_surprise     = 20.0f;  // decayed go-verify surprise (un-resolvable absence) above which
                                                   // a table is flagged wants_verification (epistemic pull, not removal)
     float verify_surprise_smooth        = 0.10f;  // EMA weight of the go-verify surprise accumulator (new sample

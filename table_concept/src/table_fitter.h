@@ -99,10 +99,24 @@ public:
     // range factor. clear_lidar_sweep() each cycle first so a stale sweep never leaks into a frame with no
     // fresh LiDAR. Set/cleared from the compute() main thread by SpecificWorker (fed by TableLidarIngestor).
     void set_lidar_sweep(const std::vector<Eigen::Vector3f>& sweep_room, const Eigen::Vector3f& origin_room)
-    { lidar_channel_.set_sweep(sweep_room, origin_room); }
+    {
+        lidar_channel_.set_sweep(sweep_room, origin_room);
+        // Same sweep also arms the projection's line-of-sight oracle, so the silhouette existence channel can
+        // tell "I looked and it is gone" from "a WALL is in the way" — YOLO masks alone cannot (see
+        // TableProjection::set_lidar_los). Fed on the compute() main thread, cleared with the sweep.
+        projection_->set_lidar_los(sweep_room, origin_room, cfg_.existence_los_margin_m, cfg_.existence_los_azim_bins);
+    }
     void set_lidar_sweep_bpearl(const std::vector<Eigen::Vector3f>& sweep_room, const Eigen::Vector3f& origin_room)
     { lidar_channel_.set_sweep_bpearl(sweep_room, origin_room); }
-    void clear_lidar_sweep() { lidar_channel_.clear(); }
+    // Room walls → the projection's line-of-sight test, so a silhouette sample behind a wall is NOT counted
+    // "predicted visible". Mirrors RefrigeratorFitter::set_room_geometry. Empty ⇒ test inactive.
+    void set_room_polygon(std::vector<Eigen::Vector2f> poly)
+    { if (projection_) projection_->set_room_polygon(std::move(poly)); }
+    void clear_lidar_sweep()
+    {
+        lidar_channel_.clear();
+        projection_->set_lidar_los({}, Eigen::Vector3f::Zero(), cfg_.existence_los_margin_m, cfg_.existence_los_azim_bins);
+    }
 
     // PIXEL-LEVEL silhouette existence evidence (EXISTENCE_BELIEF_PLAN.md, mask channel). Delegates to
     // TableProjection; see rc::SilhouetteExistence in table_projection.h. Called from update_existence.

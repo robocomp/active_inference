@@ -15,7 +15,56 @@
 #include <unordered_set>
 #include <vector>
 
+#include "../../common/occlusion/occlusion.h"   // rc::occlusion::walls_block — shared with door/refrigerator
+
 namespace rc {
+
+// ─── LiDAR line-of-sight oracle (WALL occlusion for the silhouette channel) ──────────────────────
+
+// Bin the room-frame sweep by azimuth about the sensor origin and keep the NEAREST horizontal return per bin.
+// This is the free-space/blocked oracle the mask channel lacks: YOLO never segments walls, so without it a
+// table in the next room is "predicted visible" and votes its own removal. See table_projection.h.
+void TableProjection::set_lidar_los(const std::vector<Eigen::Vector3f>& sweep_room,
+                                    const Eigen::Vector3f& origin_room, float margin_m, int azim_bins)
+{
+    los_min_range_.clear();
+    los_origin_   = origin_room;
+    los_margin_m_ = std::max(0.0f, margin_m);
+    if (sweep_room.empty() or azim_bins <= 0)
+        return;                                   // no sweep ⇒ oracle OFF ⇒ historic behaviour
+    los_min_range_.assign(static_cast<std::size_t>(azim_bins), std::numeric_limits<float>::max());
+    const float k = static_cast<float>(azim_bins) / (2.0f * static_cast<float>(M_PI));
+    for (const auto& q : sweep_room)
+    {
+        const float dx = q.x() - origin_room.x(), dy = q.y() - origin_room.y();
+        const float r  = std::sqrt(dx * dx + dy * dy);
+        if (r < 1e-3f) continue;
+        float a = std::atan2(dy, dx);
+        if (a < 0.0f) a += 2.0f * static_cast<float>(M_PI);
+        auto b = static_cast<std::size_t>(a * k);
+        if (b >= los_min_range_.size()) b = los_min_range_.size() - 1;
+        los_min_range_[b] = std::min(los_min_range_[b], r);
+    }
+}
+
+bool TableProjection::los_blocked(const Eigen::Vector3f& p_room) const
+{
+    if (los_min_range_.empty())
+        return false;                             // oracle off ⇒ never claim occlusion
+    const float dx = p_room.x() - los_origin_.x(), dy = p_room.y() - los_origin_.y();
+    const float r  = std::sqrt(dx * dx + dy * dy);
+    if (r < 1e-3f) return false;
+    float a = std::atan2(dy, dx);
+    if (a < 0.0f) a += 2.0f * static_cast<float>(M_PI);
+    const float k = static_cast<float>(los_min_range_.size()) / (2.0f * static_cast<float>(M_PI));
+    auto b = static_cast<std::size_t>(a * k);
+    if (b >= los_min_range_.size()) b = los_min_range_.size() - 1;
+    const float first_hit = los_min_range_[b];
+    if (first_hit == std::numeric_limits<float>::max())
+        return false;                             // bearing never probed ⇒ UNKNOWN, not occluded
+    // Solid geometry stands in front of this sample (margin absorbs the table's own returns + registration).
+    return r > first_hit + los_margin_m_;
+}
 
 // ─── Camera extrinsic (room_T_zed) ──────────────────────────────────────────────────────────────
 
@@ -141,6 +190,13 @@ SilhouetteExistence TableProjection::compute_silhouette_existence(const TableIns
     if (not Mopt.has_value())
         return out;
     const Eigen::Matrix4d zed_T_room = Mopt.value().inverse();
+    // Camera position in the room floor plane — one endpoint of the wall line-of-sight segment below.
+    const Eigen::Vector2f cam_xy(static_cast<float>(Mopt.value().coeff(0, 3)),
+                                 static_cast<float>(Mopt.value().coeff(1, 3)));
+    // A silhouette sample within this distance of a wall segment does not count as occluded BY that segment —
+    // a table pushed flush against a wall must not hide behind it. Physical clearance, mirrors door_concept's
+    // 0.30 m; smaller here because a table is free-standing and only grazes a wall.
+    constexpr float kOwnWallSkipM = 0.15f;
 
     const float fx = camera_api_->get_focal_x(), fy = camera_api_->get_focal_y();
     const float W  = static_cast<float>(camera_api_->get_width());
@@ -183,6 +239,17 @@ SilhouetteExistence TableProjection::compute_silhouette_existence(const TableIns
     {
         ++out.n_total;                                                 // one silhouette sample of the WHOLE object
         const Eigen::Vector4d Pr(s.cx + c * lx - sn * ly, s.cy + sn * lx + c * ly, lz, 1.0);
+        // A room WALL between the camera and this sample hides it just as surely as a nearer object does — and
+        // unlike an object, no YOLO mask will ever report it. Same verdict: OCCLUDED ⇒ excluded from
+        // n_detectable ⇒ HOLD, never false absence. This is what stops a table in the NEXT ROOM voting its own
+        // removal. Shared helper, same call the door and fridge make. own_wall_skip_m keeps a table standing
+        // flush against a wall from occluding itself with that wall.
+        const Eigen::Vector2f p_xy(static_cast<float>(Pr.x()), static_cast<float>(Pr.y()));
+        if (rc::occlusion::walls_block(cam_xy, p_xy, room_polygon_, kOwnWallSkipM))
+        { ++out.n_occluded; return; }
+        // Optional extra: non-wall solid occluders (furniture, people) from the LiDAR sweep. OFF by default.
+        if (los_blocked(Eigen::Vector3f(p_xy.x(), p_xy.y(), static_cast<float>(Pr.z()))))
+        { ++out.n_occluded; return; }
         const Eigen::Vector4d Pc = zed_T_room * Pr;
         const double X = Pc.x(), Y = Pc.y(), Z = Pc.z();
         if (Y <= 0.20) return;                                         // behind / at the image plane (near clip)
