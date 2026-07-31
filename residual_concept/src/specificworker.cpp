@@ -314,11 +314,19 @@ std::vector<rc::SpecialistExplainer> SpecificWorker::build_explainers(
     std::vector<rc::SpecialistExplainer> ex;
     const auto& C = cfg_.cluster;
 
-    // 0: ROOM FLOOR — the room's floor plane (z=0). A grazing floor return lands higher with range, so the
-    //    floor model's tolerance GROWS with range (grazing angle × distance + datum offset) — not a flat gate.
+    // 0: ROOM FLOOR — the room's floor plane AS ACTUALLY FITTED (z=a·x+b·y+c), not the z=0 datum. The grid's hit
+    //    band already follows the fit (FloorPlane.Enabled); scoring the read-out against z=0 instead means one
+    //    surface with two datums, and the gap between them (4 cm offset + 0.6° tilt in this apartment, so up to
+    //    ~8 cm across the room) is exactly the band in which a cell built from floor returns can never be
+    //    explained as floor again. A grazing floor return lands higher with range, so the tolerance still GROWS
+    //    with range (grazing angle × distance) — not a flat gate.
     const float fz0 = C.floor_z0, fsl = C.floor_slope;
-    ex.push_back([fz0, fsl, robot_xy](const Eigen::Vector3f& p)
-                 { return p.z() < fz0 + fsl * (p.head<2>() - robot_xy).norm(); });
+    const bool  fp_on = cfg_.floor_plane.enabled and floor_plane_.valid;
+    const float fpa = fp_on ? floor_plane_.a : 0.0f, fpb = fp_on ? floor_plane_.b : 0.0f,
+                fpc = fp_on ? floor_plane_.c : 0.0f;
+    ex.push_back([fz0, fsl, fpa, fpb, fpc, robot_xy](const Eigen::Vector3f& p)
+                 { const float floor_z = fpa * p.x() + fpb * p.y() + fpc;
+                   return p.z() < floor_z + fz0 + fsl * (p.head<2>() - robot_xy).norm(); });
     // 1: ROOM CEILING — overhead structure above the navigation band.
     const float cz = C.ceil_z;
     ex.push_back([cz](const Eigen::Vector3f& p) { return p.z() > cz; });
@@ -409,6 +417,19 @@ void SpecificWorker::compute()
             // widens, self-returns latched permanently along the driven path).
             gp.forget_half_life_s  = cfg_.grid_forget_half_life_s;
             gp.self_body_sigma_m   = cfg_.grid_self_body_sigma_m;
+            // NO C-SPACE INFLATION. The controller now collides its ACTUAL footprint polygon against the grid
+            // (common/robot_footprint + controller/src/grid_planner), so inflating here is double-counted: a
+            // 0.25 m dilation plus the robot's own 0.28 m inscribed radius demands ~0.53 m of clearance from
+            // every occupied cell, which merges sparse residual into blobs that fill the room and makes every
+            // target report "not footprint-feasible". Publish the TRUE occupied extent and let the one consumer
+            // that knows the robot's shape apply it. Set >0 only if a consumer without a footprint model needs
+            // pre-inflated hulls again.
+            gp.inflate_radius_m    = cfg_.grid_inflate_radius_m;
+            // Tightened occupied condition: the floor competes for every return in a mixture instead of being a
+            // hard step, and a floor return finally carries its free-space meaning for its own cell.
+            gp.floor_responsibility = cfg_.grid_floor_responsibility;
+            gp.floor_return_clears  = cfg_.grid_floor_return_clears;
+            gp.floor_sigma_min_m    = cfg_.grid_floor_sigma_min_m;
             grid_.reset(xmn, ymn, xmx, ymx, gp);
             grid_ready_ = grid_.valid();
             std::println("[grid] init bounds=({:.1f},{:.1f})..({:.1f},{:.1f}) cells={}x{}",
@@ -420,13 +441,17 @@ void SpecificWorker::compute()
             // DATA-DRIVEN FLOOR PLANE: fit the floor from the RAW LiDAR (best floor coverage) and reference the
             // grid's obstacle band to it, so a new scenario's offset/tilted floor never latches as phantoms. The
             // estimator always runs+logs (so the offset is visible); the grid uses it only when the flag is on.
-            floor_plane_ = rc::estimate_floor_plane(lidar_ingestor_->sweep_room(), lidar_ingestor_->origin_room(),
+            // BPEARL ONLY — see floor_datum_sweep(). helios cannot be a floor datum, only a reference.
+            floor_plane_ = rc::estimate_floor_plane(floor_datum_sweep(), lidar_ingestor_->origin_room(),
                                                     cfg_.cluster.floor_z0, cfg_.cluster.floor_slope,
                                                     cfg_.floor_plane, floor_plane_);
+            // The fit's own residual RMS goes with it: it is the σ of the floor component in the per-return
+            // obstacle-vs-floor mixture, so the model's tolerance for a near-floor return is set by MEASURED floor
+            // quality (≈7 cm here — larger than floor_z0) instead of by a constant band.
             if (cfg_.floor_plane.enabled and floor_plane_.valid)
-                grid_.set_floor_plane(floor_plane_.a, floor_plane_.b, floor_plane_.c);
+                grid_.set_floor_plane(floor_plane_.a, floor_plane_.b, floor_plane_.c, floor_plane_.rms);
             else
-                grid_.set_floor_plane(0.0f, 0.0f, 0.0f);
+                grid_.set_floor_plane(0.0f, 0.0f, 0.0f, floor_plane_.valid ? floor_plane_.rms : 0.0f);
             static int fpc = 0;
             if ((fpc++ % 40) == 0 and floor_plane_.valid)
                 std::println("[floor-plane] z = {:.3f}·x + {:.3f}·y + {:.3f}  (offset {:.1f} cm, tilt {:.1f}°) {}",
@@ -439,9 +464,20 @@ void SpecificWorker::compute()
             // does. Radius matches the lidar driver's [Footprint] disc so both agree on ONE body model.
             grid_.set_self_body(lidar_ingestor_->origin_room().x(), lidar_ingestor_->origin_room().y(),
                                 cfg_.grid_self_body_radius_m);
-            const auto& lidar_sweep = filtered_lidar_sweep();   // bpearl floor grazing removed (per-device band)
-            grid_.integrate_sweep(lidar_ingestor_->origin_room(), lidar_sweep,
-                                  /*begin_cycle=*/true, ego_reliability_);            // accumulate LiDAR
+            // PER-DEVICE integration: each LiDAR carries its own floor sigma, taken from its own floor fit.
+            // See integrate_lidar_per_device(). Falls back to one merged sweep when the per-device tag is
+            // unavailable (fused lidar3D plane) — in which case the single datum sigma applies to everything,
+            // which is the behaviour that let the floor latch, so the fallback warns.
+            if (not integrate_lidar_per_device())
+            {
+                static int wc = 0;
+                if ((wc++ % 200) == 0)
+                    std::println("[floor-sigma] no per-device tag — ONE sigma for all sensors; helios's grazing "
+                                 "floor returns may latch as obstacles");
+                const auto& lidar_sweep = filtered_lidar_sweep();   // bpearl floor grazing removed (per-device band)
+                grid_.integrate_sweep(lidar_ingestor_->origin_room(), lidar_sweep,
+                                      /*begin_cycle=*/true, ego_reliability_);        // accumulate LiDAR
+            }
             integrate_zed_into_grid();   // accumulate dense ZED FoV as a second sensor (fills grazed tabletops)
             // Elapsed time since the previous commit drives the FORGETTING term (unobserved cells relax toward
             // the prior). Measured, not assumed, so the half-life is in seconds regardless of the cycle rate.
@@ -452,7 +488,8 @@ void SpecificWorker::compute()
             last_commit_ = now_commit;
             grid_.commit_cycle(commit_dt_s);   // ONE log-odds update per cell (hit precedence) + forgetting
             log_grid_diag();
-            log_floor_diag();
+            // log_floor_diag() now runs in the READ-OUT block below — it needs the explainer predicate to report
+            // the RESIDUAL set (the cells this agent actually publishes) rather than every latched cell.
         }
     }
 
@@ -511,6 +548,13 @@ void SpecificWorker::compute()
             {
                 const Eigen::Vector3f p(x, y, 0.5f * (zlo + zhi));
                 for (const auto& ex : explainers) if (ex(p)) return 1.0f;          // hard: floor/ceiling/robot/walls
+                // NOTE: the floor competes for evidence ONCE, at integration time (the per-return mixture
+                // responsibility in OccGridParams::floor_responsibility), and the log-odds then accumulate over
+                // time. Do NOT also apply that responsibility here. A cell that crossed occ_set in spite of the
+                // discount has earned it with repeated evidence; re-applying the discount at read-out is a
+                // second, evidence-BLIND height test, and it would permanently mask a real 20 cm obstacle no
+                // matter how many frames confirmed it. The read-out only subtracts what a model geometrically
+                // OWNS (floor below the band, ceiling, robot, walls, object footprints).
                 float pe = 0.0f;
                 for (const auto& o : soft_objects_)
                 {
@@ -525,6 +569,7 @@ void SpecificWorker::compute()
                 return pe;
             };
         const auto comps = grid_.occupied_components(2, cell_explained, grid_.params().inflate_radius_m);
+        log_floor_diag(cell_explained, comps);   // plane fit + the RESIDUAL set's height profile, jointly
         static int gc = 0;
         if ((gc++ % 20) == 0)
         {
@@ -738,7 +783,10 @@ void SpecificWorker::integrate_zed_into_grid()
     // detection path used); what remains is real ZED residual (tabletops, objects). LiDAR is precise and needs
     // no such filter (its own nav-band suffices).
     const std::size_t before = pts.size();
-    pts = rc::ResidualClusterer::subtract_infrastructure(pts, cam_origin, read_room_polygon(), cfg_.zed_infra);
+    auto infra = cfg_.zed_infra;                                  // reference the ZED floor band to the FITTED floor
+    if (cfg_.floor_plane.enabled and floor_plane_.valid)
+    { infra.floor_a = floor_plane_.a; infra.floor_b = floor_plane_.b; infra.floor_c = floor_plane_.c; }
+    pts = rc::ResidualClusterer::subtract_infrastructure(pts, cam_origin, read_room_polygon(), infra);
     static int zc = 0;
     if ((zc++ % 40) == 0)
         std::println("[zed-grid] fov={} → {} after infra-subtract (floor/ceiling/wall removed)", before, pts.size());
@@ -797,6 +845,141 @@ bool SpecificWorker::refresh_semantic_map()
     return semantic_map_.valid();
 }
 
+const std::vector<Eigen::Vector3f>& SpecificWorker::device_sweep(std::uint8_t plane)
+{
+    // One device's returns, with bpearl's own floor-grazing cut re-applied inline. Deliberately NOT built by
+    // indexing filtered_lidar_sweep(): that function drops points, so plane_id (indexed on the RAW sweep) no
+    // longer aligns with its output, and any index correspondence would break silently the next time that
+    // filter changes. Re-deriving the one cut it applies is cheaper and cannot desynchronise.
+    const auto& pid = lidar_ingestor_->plane_id();
+    device_pts_.clear();
+    if (pid.size() != lidar_ingestor_->sweep_room().size()) return device_pts_;   // no tag → caller falls back
+    const auto& raw = lidar_ingestor_->sweep_room();
+    const Eigen::Vector3f o = lidar_ingestor_->origin_room();
+    const float bz0 = cfg_.cluster.bpearl_floor_z0, slope = cfg_.cluster.floor_slope;
+    const float hz0 = cfg_.cluster_helios_floor_z0;
+    // Referenced to the FITTED floor plane, so the cut follows an offset/tilted floor instead of assuming z=0.
+    const bool use_fit = cfg_.floor_plane.enabled and floor_plane_.valid;
+    device_pts_.reserve(raw.size() / 2);
+    long dropped = 0;
+    for (std::size_t i = 0; i < raw.size(); ++i)
+    {
+        if (pid[i] != plane) continue;
+        // PER-DEVICE floor band. bpearl keeps its existing cut; helios gets its own, larger one, because it
+        // only ever grazes the floor and reads it 13-17 cm high. See Clusterer.HeliosFloorZ0 for why the two
+        // model-level alternatives (per-device sigma, per-device reference plane) cannot handle a
+        // range-dependent BIAS. Without this, helios's own floor latches as obstacle across the whole room.
+        const float z0 = (pid[i] == 1) ? bz0 : hz0;
+        const float range = std::hypot(raw[i].x() - o.x(), raw[i].y() - o.y());
+        const float floor_z = use_fit ? floor_plane_.z_at(raw[i].x(), raw[i].y()) : 0.0f;
+        if (raw[i].z() < floor_z + z0 + slope * range) { ++dropped; continue; }
+        device_pts_.push_back(raw[i]);
+    }
+    static int dsc = 0;
+    if (plane == 0 and (dsc++ % 40) == 0)
+        std::println("[helios-floor] dropped {} near-floor pts (band z0={:.2f}); {} kept for the grid",
+                     dropped, hz0, device_pts_.size());
+    return device_pts_;
+}
+
+bool SpecificWorker::integrate_lidar_per_device()
+{
+    // ── PER-DEVICE FLOOR SIGMA ──
+    // The floor component's sigma was a single number (the datum fit's RMS) applied to every return. That cannot
+    // be right for two sensors that see the floor completely differently: bpearl is a downward dome measuring it
+    // HEAD-ON (~1 cm scatter), helios is an upright lidar at ~1.1 m that only ever GRAZES it, landing 13-17 cm
+    // high. Feeding helios's returns a 1 cm sigma tells the mixture that a 15 cm-high helios floor return is a
+    // 15-sigma outlier — i.e. certainly an obstacle — and the whole floor latches. That is exactly what happened
+    // the moment the datum was corrected: the previously CONTAMINATED datum sat 5.9 cm high and had been
+    // accidentally holding the nav band above helios's bias. Fixing the datum removed the accident, so the real
+    // defect underneath — one sigma for two very different sensors — finally showed.
+    //
+    // So integrate device by device, and take each device's sigma from ITS OWN floor fit. No tuned constant:
+    // bpearl's sigma is the bpearl fit's RMS, helios's is the helios fit's RMS, both measured every cycle and
+    // both self-calibrating if the scenario changes. The PLANE — the datum — always stays bpearl's; helios's fit
+    // contributes its scatter and never moves the floor.
+    //
+    // The grid accumulates per-cell flags across sensors within one cycle (begin_cycle=false on later sweeps),
+    // which is the same mechanism the ZED pass already uses, so this needs no new machinery.
+    const auto& pid = lidar_ingestor_->plane_id();
+    if (pid.size() != lidar_ingestor_->sweep_room().size() or pid.empty())
+        return false;                                            // fused plane, no per-device tag → caller falls back
+
+    const auto& bp = device_sweep(1);
+    std::vector<Eigen::Vector3f> bpearl_pts(bp.begin(), bp.end());   // device_sweep reuses one buffer
+    const auto& he = device_sweep(0);
+    if (bpearl_pts.empty() and he.empty()) return false;
+
+    // helios-only floor fit — for its RMS only. Seeded from its own previous estimate so it converges
+    // independently of the datum fit.
+    floor_plane_helios_ = rc::estimate_floor_plane(he, lidar_ingestor_->origin_room(),
+                                                   cfg_.cluster.floor_z0, cfg_.cluster.floor_slope,
+                                                   cfg_.floor_plane, floor_plane_helios_);
+    const float a = (cfg_.floor_plane.enabled and floor_plane_.valid) ? floor_plane_.a : 0.0f;
+    const float b = (cfg_.floor_plane.enabled and floor_plane_.valid) ? floor_plane_.b : 0.0f;
+    const float c = (cfg_.floor_plane.enabled and floor_plane_.valid) ? floor_plane_.c : 0.0f;
+    const float sig_bp = floor_plane_.valid ? floor_plane_.rms : 0.0f;
+    // If the helios fit has not converged, fall back to the datum's sigma rather than to zero — zero would
+    // reinstate exactly the over-confidence this function exists to remove.
+    const float sig_he = floor_plane_helios_.valid ? std::max(floor_plane_helios_.rms, sig_bp) : sig_bp;
+
+    grid_.set_floor_plane(a, b, c, sig_bp);
+    grid_.integrate_sweep(lidar_ingestor_->origin_room(), bpearl_pts, /*begin_cycle=*/true, ego_reliability_);
+    grid_.set_floor_plane(a, b, c, sig_he);
+    grid_.integrate_sweep(lidar_ingestor_->origin_room(), he, /*begin_cycle=*/false, ego_reliability_);
+    grid_.set_floor_plane(a, b, c, sig_bp);   // leave the datum's sigma in place for the ZED pass that follows
+
+    static int dc = 0;
+    if ((dc++ % 40) == 0)
+        std::println("[floor-sigma] bpearl {} pts σ={:.3f} m | helios {} pts σ={:.3f} m (own fit, rms {:.3f}, "
+                     "valid={})", bpearl_pts.size(), sig_bp, he.size(), sig_he,
+                     floor_plane_helios_.rms, floor_plane_helios_.valid);
+    return true;
+}
+
+const std::vector<Eigen::Vector3f>& SpecificWorker::floor_datum_sweep()
+{
+    // BPEARL ONLY. The floor fit used to take the MERGED sweep, which quietly made helios a co-author of the
+    // floor datum — and helios physically cannot be one. It is an upright 360 lidar at ~1.1 m, so every floor
+    // return it produces is GRAZING and at range, reading several cm high by construction. ROBOT_GEOMETRY.md
+    // says so ("use for walls, not the floor datum", bias ~+17 cm) and room_concept's own startup check says so
+    // ("reference only, NOT the datum"); this fit was the one place that ignored both.
+    //
+    // The cost was not a constant offset — it was an unstable one. Because the bias grows with range, it moves
+    // with the scene: helios's floor reading was measured at 170 mm in one spot and 130 mm in another, purely
+    // from where the robot happened to stand. Fitted through a plane that also has a tilt term, that range
+    // correlation shows up as TILT. Measured on the same floor at the same moment:
+    //     merged (helios+bpearl):  +5.9 cm, tilt 1.0°   — and 2.88 / 11.2 / 5.9 cm across three runs
+    //     bpearl only:             −1.0 cm              — stable to the bin across three runs
+    // That datum is handed to set_floor_plane() and therefore sets the obstacle band, so a wandering 6 cm
+    // offset with a 1° tilt raises the latch threshold across the room AND varies it with position: genuinely
+    // low obstacles stop latching, in a way that changes as the robot drives.
+    //
+    // bpearl is the head-on downward dome — dense, near, and the sensor the geometry check already trusts.
+    // Fall back to the merged sweep when the per-device tag is absent (fused lidar3D plane), because an empty
+    // point set would silently HOLD the previous estimate and look like stability rather than a missing input.
+    const auto& pts = lidar_ingestor_->sweep_room();
+    const auto& pid = lidar_ingestor_->plane_id();
+    if (pid.size() != pts.size())
+    {
+        static int warn = 0;
+        if ((warn++ % 200) == 0)
+            std::println("[floor-datum] no per-device tag ({} pts, {} ids) — falling back to the MERGED sweep; "
+                         "the floor datum will carry helios's grazing bias", pts.size(), pid.size());
+        return pts;
+    }
+    floor_datum_pts_.clear();
+    floor_datum_pts_.reserve(pts.size() / 2);
+    for (std::size_t i = 0; i < pts.size(); ++i)
+        if (pid[i] == 1) floor_datum_pts_.push_back(pts[i]);   // 1 = bpearl
+    static int fc = 0;
+    if ((fc++ % 40) == 0)
+        std::println("[floor-datum] bpearl {} / {} pts feed the floor fit (helios excluded: grazing, not a datum)",
+                     floor_datum_pts_.size(), pts.size());
+    // If bpearl produced nothing this cycle, prefer the merged sweep over an empty fit for the same reason.
+    return floor_datum_pts_.empty() ? pts : floor_datum_pts_;
+}
+
 const std::vector<Eigen::Vector3f>& SpecificWorker::filtered_lidar_sweep()
 {
     // Drop the LOW bpearl lidar's FLOOR-GRAZING returns (device-specific higher floor band) while keeping helios
@@ -807,6 +990,12 @@ const std::vector<Eigen::Vector3f>& SpecificWorker::filtered_lidar_sweep()
     if (pid.size() != pts.size()) return pts;                    // no per-device tag (fused lidar3D) → pass through
     const Eigen::Vector3f o = lidar_ingestor_->origin_room();
     const float bz0 = cfg_.cluster.bpearl_floor_z0, slope = cfg_.cluster.floor_slope;
+    // Referenced to the FITTED floor plane, like the grid's own band. bpearl is the LOW dome sensor that grazes the
+    // floor around the robot, so its band is the one most sensitive to the datum: with the apartment floor sitting
+    // up to 8 cm above z=0, a z=0-referenced 12 cm band is only ~4 cm of real clearance and leaks a phantom ring.
+    const bool fp_on = cfg_.floor_plane.enabled and floor_plane_.valid;
+    const auto floor_z = [&](const Eigen::Vector3f& q)
+    { return fp_on ? floor_plane_.a * q.x() + floor_plane_.b * q.y() + floor_plane_.c : 0.0f; };
     lidar_filtered_.clear(); lidar_filtered_.reserve(pts.size());
     long dropped = 0;
     for (std::size_t i = 0; i < pts.size(); ++i)
@@ -814,7 +1003,7 @@ const std::vector<Eigen::Vector3f>& SpecificWorker::filtered_lidar_sweep()
         if (pid[i] == 1)                                         // bpearl → apply its higher floor band
         {
             const float range = std::hypot(pts[i].x() - o.x(), pts[i].y() - o.y());
-            if (pts[i].z() < bz0 + slope * range) { ++dropped; continue; }
+            if (pts[i].z() < floor_z(pts[i]) + bz0 + slope * range) { ++dropped; continue; }
         }
         lidar_filtered_.push_back(pts[i]);
     }
@@ -859,33 +1048,45 @@ void SpecificWorker::log_grid_diag()
         // new terms are not engaging — check Grid.ForgetHalfLifeS / Grid.SelfBodyRadiusM before believing a null
         // result. The headline health metric stays miss_blocked_zaware vs misses: it ratcheted 85%→96% of
         // see-throughs discarded on the old build, and should now stay well under `misses`.
+        // floor_damped = in-band returns whose weight the floor RESPONSIBILITY cut (the near-floor returns that
+        // used to latch a cell outright); floor_clears = below-band returns that freed THEIR OWN cell, the
+        // evidence the old inverse sensor model discarded entirely. Zeros in either column mean the tightened
+        // occupied condition is not engaging — check Grid.FloorResponsibility / Grid.FloorReturnClears and the
+        // fit's rms in floor_diag.csv before believing a null result.
         f << "cycle,occupied,hits,misses,miss_blocked_zaware,latched,released,hit_then_cleared,"
-             "forgotten,self_damped\n";
+             "forgotten,self_damped,floor_damped,floor_clears\n";
     }
     f << cyc << ',' << grid_.occupied_count() << ',' << d.hits << ',' << d.misses << ','
       << d.miss_blocked_zaware << ',' << d.cells_latched << ',' << d.cells_released << ','
-      << d.hit_then_cleared << ',' << d.cells_forgotten << ',' << d.self_hits_damped << '\n';
+      << d.hit_then_cleared << ',' << d.cells_forgotten << ',' << d.self_hits_damped << ','
+      << d.floor_damped_hits << ',' << d.floor_endpoint_clears << '\n';
     if ((cyc % 20) == 0)
     {
         f.flush();
         const double blocked_frac = (d.misses + d.miss_blocked_zaware) > 0
             ? 100.0 * static_cast<double>(d.miss_blocked_zaware) / (d.misses + d.miss_blocked_zaware) : 0.0;
         std::println("[grid-diag] occ={} hits={} miss={} zaware_block={} ({:.0f}% of clearing) latch={} "
-                     "release={} forgotten={} self_damped={} hit_then_cleared={}",
+                     "release={} forgotten={} self_damped={} floor_damped={} floor_clears={} hit_then_cleared={}",
                      grid_.occupied_count(), d.hits, d.misses, d.miss_blocked_zaware, blocked_frac,
                      d.cells_latched, d.cells_released, d.cells_forgotten, d.self_hits_damped,
-                     d.hit_then_cleared);
+                     d.floor_damped_hits, d.floor_endpoint_clears, d.hit_then_cleared);
     }
     ++cyc;
 }
 
-// Floor diagnostic: the estimated floor plane (offset/tilt/fit quality) next to the HEIGHT PROFILE of the latched
-// cells. This is the evidence that decides the phantom question, and it lands on disk (the [floor-plane] line only
-// ever went to stdout, which nobody captures). Read it as: if `occupied` is dominated by the low bins (tallest
-// return ever seen there only a few cm up) the latched mass IS the floor band; then `off_cm`/`tilt_deg` say whether
-// a plane mismatch explains it (⇒ FloorPlane.Enabled=true) or whether the floor sits at z≈0 and the cause is
-// elsewhere (grazing rings / ZED range² noise / localisation smear).
-void SpecificWorker::log_floor_diag()
+// Floor diagnostic: the estimated floor plane (offset/tilt/fit quality) next to the HEIGHT PROFILE of the cells
+// this agent actually publishes as obstacles. This is the evidence that decides the phantom question, and it lands
+// on disk (the [floor-plane] line only ever went to stdout, which nobody captures).
+//
+// READ IT AS: `resid` (occupied ∧ ¬explained) is the number that matters — `occupied` counts every latched cell and
+// in an apartment the WALLS are ~80% of them, which is why the previous version of this log looked healthy (a mass
+// of tall wall cells in h_gt120) while the robot could not navigate. If the low `r_le*` bins carry the residual
+// mass, the published obstacles ARE floor-height returns; `rms_m` then says how much scatter the floor model is
+// working with, and `off_cm`/`tilt_deg` whether the plane itself is the mismatch. Residual mass in the 0.25–0.70 m
+// bins instead means real furniture the object agents are failing to claim — an explainer problem, not a floor one.
+// The height used for binning is each cell's CURRENT top (dispz_), not the never-contracting running max.
+void SpecificWorker::log_floor_diag(const rc::OccupancyGrid::CellExplained& explained,
+                                    const std::vector<rc::OccComponent>& comps)
 {
     if (not grid_ready_) return;
     static const std::vector<float> edges{0.10f, 0.15f, 0.25f, 0.40f, 0.70f, 1.20f};
@@ -894,15 +1095,17 @@ void SpecificWorker::log_floor_diag()
     if (not f.is_open())
     {
         f.open("etc/floor_diag.csv", std::ios::out | std::ios::trunc);
-        f << "cycle,applied,a,b,c,off_cm,tilt_deg,n_cand,rms_m,occupied,"
-             "h_le10,h_le15,h_le25,h_le40,h_le70,h_le120,h_gt120\n";
+        f << "cycle,applied,a,b,c,off_cm,tilt_deg,n_cand,rms_m,occupied,resid,ncomp,max_cells,"
+             "r_le10,r_le15,r_le25,r_le40,r_le70,r_le120,r_gt120\n";
     }
-    const auto bins = grid_.occupied_height_hist(edges);
+    const auto bins = grid_.residual_height_hist(edges, explained);
+    std::size_t maxc = 0; for (const auto& c : comps) maxc = std::max<std::size_t>(maxc, c.n_cells);
     f << cyc << ',' << (cfg_.floor_plane.enabled ? 1 : 0) << ','
       << floor_plane_.a << ',' << floor_plane_.b << ',' << floor_plane_.c << ','
       << floor_plane_.c * 100.0f << ','
       << std::atan(std::hypot(floor_plane_.a, floor_plane_.b)) * 57.2958f << ','
-      << floor_plane_.n_candidates << ',' << floor_plane_.rms << ',' << grid_.occupied_count();
+      << floor_plane_.n_candidates << ',' << floor_plane_.rms << ',' << grid_.occupied_count() << ','
+      << grid_.residual_count(explained) << ',' << comps.size() << ',' << maxc;
     for (const long b : bins) f << ',' << b;
     f << '\n';
     if ((cyc % 20) == 0) f.flush();

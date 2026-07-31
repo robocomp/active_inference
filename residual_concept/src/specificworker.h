@@ -99,12 +99,30 @@ private:
     float compute_ego_reliability() const;
     // LiDAR sweep with the LOW bpearl lidar's floor-grazing returns removed (device-specific floor band), so
     // bpearl keeps its low-obstacle value without ringing the robot with phantom floor. Buffered in lidar_filtered_.
+    // BPEARL-ONLY sweep for the floor-plane fit. helios is an upright lidar whose floor returns are all
+    // grazing, so it reads several cm high and its bias moves with the scene — it is a wall sensor, not a
+    // floor datum. Falls back to the merged sweep if the per-device tag is unavailable. See the .cpp.
+    const std::vector<Eigen::Vector3f>& floor_datum_sweep();
+    // Per-device sweeps for the two-pass grid integration. Each LiDAR is integrated with ITS OWN floor sigma,
+    // because a single sigma cannot describe both: bpearl measures the floor head-on (~1 cm scatter) while
+    // helios only ever grazes it (~13 cm). See integrate_lidar_per_device().
+    const std::vector<Eigen::Vector3f>& device_sweep(std::uint8_t plane);
+    // Integrate the LiDAR sweep device-by-device, setting the floor component's sigma per device from that
+    // device's OWN floor fit. The PLANE (the datum) always stays bpearl's; helios's fit contributes only its
+    // scatter. Returns false if no per-device tag is available (caller falls back to a single merged sweep).
+    bool integrate_lidar_per_device();
+    rc::FloorPlane floor_plane_helios_;   // helios-only fit — used ONLY for its rms (never as the datum)
     const std::vector<Eigen::Vector3f>& filtered_lidar_sweep();
     // DIAGNOSTIC: append per-sweep grid dynamics to etc/grid_diag.csv (hits/misses/latched/released + the
     // "hit_then_cleared" smoking-gun for grazing beams erasing a horizontal surface they graze). Optionally
     // probes a rectangular region [GridProbe*] (e.g. a tabletop) reporting occupied/hit cells inside it.
     void  log_grid_diag();
-    void  log_floor_diag();   // floor-plane fit + latched-cell height histogram → etc/floor_diag.csv
+    // Floor-plane fit + the height profile of the cells that actually LEAVE this agent → etc/floor_diag.csv.
+    // Takes the read-out predicate because `occupied` alone cannot answer the phantom question: in an apartment
+    // the walls are ~80% of the latched cells, so a histogram of every latched cell reports a healthy-looking
+    // mass of tall wall cells and says nothing about the handful of floor phantoms that block navigation.
+    void  log_floor_diag(const rc::OccupancyGrid::CellExplained& explained,
+                         const std::vector<rc::OccComponent>& comps);
 
     // ── Per-cycle orchestration ──
     void run_instance_tracker(const std::vector<rc::SpecialistSdf>& specialists);
@@ -159,6 +177,8 @@ private:
     // Timestamp of the previous grid commit. The elapsed time drives the grid's FORGETTING term, so the evidence
     // half-life stays expressed in seconds and does not silently change with the cycle rate.
     std::chrono::steady_clock::time_point last_commit_{};
+    std::vector<Eigen::Vector3f> device_pts_;       // reusable buffer: single-device sweep (device_sweep)
+    std::vector<Eigen::Vector3f> floor_datum_pts_;  // reusable buffer: bpearl-only points for the floor fit
     std::vector<Eigen::Vector3f> lidar_filtered_;   // reusable buffer: sweep with bpearl floor grazing removed
 
     // Cached ZED semantic label map (refreshed from the `semantic` node only when its frame_id changes — the map

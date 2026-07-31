@@ -80,6 +80,24 @@ bool OccupancyGrid::occupied(int ix, int iy) const
 
 // ── per-scan ACCUMULATION (no log-odds change yet) — one flag per cell, OR-ed over all this cycle's beams ──
 
+float OccupancyGrid::floor_obstacle_responsibility(float x, float y, float z, float range) const
+{
+    if (not p_.floor_responsibility) return 1.0f;                 // term off ⇒ the old hard step
+    const float floor_z = fp_a_ * x + fp_b_ * y + fp_c_;
+    // σ of the FLOOR component: its own measured planar-fit scatter, the grazing term (a floor return lands higher
+    // the shallower the beam), and the sensor's irreducible range noise — added in quadrature (independent terms).
+    const float graze = p_.floor_slope * std::max(0.0f, range);
+    const float s2 = fp_rms_ * fp_rms_ + graze * graze + p_.floor_sigma_min_m * p_.floor_sigma_min_m;
+    const float sigma = std::sqrt(std::max(1e-6f, s2));
+    // Obstacle component: a height uniform over the nav band ⇒ density u = 1/(ceil_z − floor_z). Floor component:
+    // N(z; floor_z, σ²). Equal priors (no knob). r_obst = u / (u + N) — the mixture posterior for "obstacle".
+    const float span = std::max(0.10f, p_.ceil_z - floor_z);
+    const float u = 1.0f / span;
+    const float t = (z - floor_z) / sigma;
+    const float n = std::exp(-0.5f * t * t) / (sigma * 2.50662827f);            // N(z; floor_z, σ²)
+    return u / std::max(1e-12f, u + n);
+}
+
 void OccupancyGrid::mark_hit_flag(int ix, int iy, float zlo, float zhi, float w)
 {
     if (not in_bounds(ix, iy)) return;
@@ -99,6 +117,28 @@ void OccupancyGrid::mark_miss_flag(int ix, int iy, float beam_z, float w)
         { ++sd_.miss_blocked_zaware; return; }
     if (not smiss_[i]) { smiss_[i] = 1; smiss_w_[i] = w; }
     else smiss_w_[i] = std::max(smiss_w_[i], w);        // the most RELIABLE (nearest) see-through sets the weight
+}
+
+void OccupancyGrid::mark_floor_endpoint_flag(int ix, int iy, float band_top, float w)
+{
+    if (not in_bounds(ix, iy)) return;
+    const int i = idx(ix, iy);
+    // A beam that TERMINATED on the floor inside this cell cannot be gated the way a TRAVERSING beam is. The
+    // z-aware gate in mark_miss_flag asks "did the beam pass through the cell's remembered z-band?", and a floor
+    // return never does — it arrives at floor height by definition — so routing it through that gate discards it
+    // every time and leaves the ratchet exactly where it was (measured: the phantom in self_test property (11)
+    // survived 100 delivered floor returns).
+    // The right question for a terminating beam is different. The return reached the FLOOR at this cell, so
+    // anything RESTING on the floor here, of any height, would have blocked it first: a floor return refutes a
+    // floor-standing obstacle. What it cannot refute is a FLOATING one — a tabletop, a shelf, a windowsill — which
+    // it simply passed underneath. And the cell already records which of the two its evidence is: zmn_, the LOWEST
+    // return ever seen here. So the gate is support, not overlap: clear the cell if its lowest evidence sits within
+    // one z_band_margin_m of where the floor itself lives (⇒ floor-standing, refuted), hold it otherwise
+    // (⇒ floating, the beam went under it — the tabletop half of the property).
+    if (hit_[i] and zmn_[i] > band_top + p_.z_band_margin_m) { ++sd_.miss_blocked_zaware; return; }
+    if (not smiss_[i]) { smiss_[i] = 1; smiss_w_[i] = w; }
+    else smiss_w_[i] = std::max(smiss_w_[i], w);
+    ++sd_.floor_endpoint_clears;
 }
 
 void OccupancyGrid::commit_cycle(float dt_s)
@@ -216,7 +256,7 @@ void OccupancyGrid::occupancy_fields(std::vector<float>& prob_out, std::vector<f
             if (explained)                                     // SOFT collapse: attenuate by the explained prob
             {
                 float wx, wy; cell_to_world(x, y, wx, wy);
-                const float zlo = hit_[i] ? zmn_[i] : 0.0f, zhi = hit_[i] ? zmx_[i] : 0.05f;
+                float zlo, zhi; readout_zband(i, zlo, zhi);
                 keep = 1.0f - std::clamp(explained(wx, wy, zlo, zhi), 0.0f, 1.0f);
             }
             const float a = a_[i], b = b_[i], k = a + b;
@@ -268,21 +308,36 @@ void OccupancyGrid::integrate_sweep(const Eigen::Vector3f& origin, const std::ve
         // is an obstacle only if it rises above the local floor by more than the grazing band — so an offset/tilted
         // floor (new scenario) is explained away and never latches.
         const float floor_z = fp_a_ * px + fp_b_ * py + fp_c_;
-        const bool in_band = (pz > floor_z + p_.floor_z0 + p_.floor_slope * range) and (pz < p_.ceil_z);
-        // this return's HIT precision weight: range×ego (hit_w) × self-body (world_w) × optional per-point cue
-        // (e.g. semantic floor). The MISS/clearing weight is deliberately left un-scaled — clearing is always safe.
+        const float band_top = floor_z + p_.floor_z0 + p_.floor_slope * range;   // where the floor lives here
+        const bool in_band = (pz > band_top) and (pz < p_.ceil_z);
+        // BELOW the band = a FLOOR return. It is not neutral: the beam reached the floor here, so nothing RESTING
+        // on the floor in this cell could have been in the way. It clears its own cell, gated on support rather
+        // than on z-overlap — see mark_floor_endpoint_flag and floor_return_clears.
+        const bool floor_return = p_.floor_return_clears and pz <= band_top;
+        // this return's HIT precision weight: range×ego (hit_w) × self-body (world_w) × FLOOR RESPONSIBILITY (this
+        // return is only obstacle evidence in so far as the floor model does not already explain its height) ×
+        // optional per-point cue (e.g. semantic floor). The MISS/clearing weight is deliberately left un-scaled by
+        // the hit-side terms — clearing free space is always safe.
         const float self_w = world_w(px, py);
         if (self_w < 0.99f) ++sd_.self_hits_damped;
-        const float w = hit_w(range) * self_w * (use_scale ? (*hit_weight_scale)[pi] : 1.0f);
+        const float floor_w = floor_obstacle_responsibility(px, py, pz, range);
+        if (in_band and floor_w < 0.9f) ++sd_.floor_damped_hits;
+        const float w = hit_w(range) * self_w * floor_w * (use_scale ? (*hit_weight_scale)[pi] : 1.0f);
 
         int ex, ey; const bool endp_in = world_to_cell(px, py, ex, ey);
-        if (L < 1e-4f)                                          // degenerate: just the endpoint
-        { if (endp_in and in_band) mark_hit_flag(ex, ey, pz, pz, w); continue; }
+        // the endpoint's own evidence: an in-band return marks it occupied, a floor return marks it FREE.
+        const auto place_endpoint = [&]
+        {
+            if (not endp_in) return;
+            if (in_band) mark_hit_flag(ex, ey, pz, pz, w);
+            else if (floor_return) mark_floor_endpoint_flag(ex, ey, band_top, hit_w(range));
+        };
+        if (L < 1e-4f) { place_endpoint(); continue; }          // degenerate: just the endpoint
 
         const float ux = dx / L, uy = dy / L;
         int cx, cy;
-        if (not world_to_cell(ox, oy, cx, cy))                 // sensor outside the grid → only place the hit
-        { if (endp_in and in_band) mark_hit_flag(ex, ey, pz, pz, w); continue; }
+        if (not world_to_cell(ox, oy, cx, cy))                 // sensor outside the grid → only place the endpoint
+        { place_endpoint(); continue; }
 
         mark_miss_flag(cx, cy, oz, hit_w(0.0f));               // sensor cell is free (range 0 → full trust)
 
@@ -308,7 +363,7 @@ void OccupancyGrid::integrate_sweep(const Eigen::Vector3f& origin, const std::ve
             const float bz = oz + (t_here / L) * (pz - oz);    // beam height at this cell
             mark_miss_flag(cx, cy, bz, hit_w(t_here));         // weight the clearing by the CLEARED CELL's range
         }
-        if (endp_in and in_band) mark_hit_flag(ex, ey, pz, pz, w);    // the return itself: occupied (if a nav-band obstacle)
+        place_endpoint();      // the return itself: occupied if a nav-band obstacle, FREE if it landed on the floor
     }
 }
 
@@ -324,12 +379,39 @@ std::vector<std::uint8_t> OccupancyGrid::residual_mask(const CellExplained& expl
             {
                 const int i = idx(x, y);
                 float wx, wy; cell_to_world(x, y, wx, wy);
-                const float zlo = hit_[i] ? zmn_[i] : 0.0f, zhi = hit_[i] ? zmx_[i] : 0.05f;
+                float zlo, zhi; readout_zband(i, zlo, zhi);
                 if (explained(wx, wy, zlo, zhi) > 0.5f) continue;   // MAP decision: more likely explained than not
             }
             m[idx(x, y)] = 1;
         }
     return m;
+}
+
+long OccupancyGrid::residual_count(const CellExplained& explained) const
+{
+    if (not valid()) return 0;
+    const auto m = residual_mask(explained);
+    long n = 0; for (const auto v : m) n += v;
+    return n;
+}
+
+std::vector<long> OccupancyGrid::residual_height_hist(const std::vector<float>& edges,
+                                                      const CellExplained& explained) const
+{
+    std::vector<long> bins(edges.size() + 1, 0);
+    if (not valid()) return bins;
+    const auto m = residual_mask(explained);
+    for (std::size_t i = 0; i < m.size(); ++i)
+    {
+        if (not m[i]) continue;
+        // Bin by the cell's CURRENT top height (dispz_, the EMA of this cycle's hits), not the running-max zmx_.
+        // zmx_ never contracts, so one transient tall return relabels a floor-height cell "tall" for the rest of
+        // the run — which is precisely how a floor phantom hides from a zmx_-binned histogram.
+        std::size_t k = 0;
+        while (k < edges.size() and dispz_[i] > edges[k]) ++k;
+        ++bins[k];
+    }
+    return bins;
 }
 
 std::vector<std::uint8_t> OccupancyGrid::dilate_mask(const std::vector<std::uint8_t>& m, int R) const
@@ -394,7 +476,7 @@ std::vector<float> OccupancyGrid::inflated_border_centres(const CellExplained& e
             float wx, wy; cell_to_world(x, y, wx, wy);
             if (explained)                                            // a clearance ring INSIDE a known object is
             {                                                        // redundant (the planner avoids its box) → drop it
-                const float zlo = hit_[i] ? zmn_[i] : 0.0f, zhi = hit_[i] ? zmx_[i] : 0.05f;
+                float zlo, zhi; readout_zband(i, zlo, zhi);
                 if (explained(wx, wy, zlo, zhi) > 0.5f) continue;
             }
             out.push_back(wx); out.push_back(wy);
@@ -459,12 +541,20 @@ std::vector<OccComponent> OccupancyGrid::occupied_components(int min_cells, cons
     {
         std::vector<std::vector<Eigen::Vector2f>> rects;
         if (cells.empty()) return rects;
-        int x0 = cells[0].first, x1 = x0, y0 = cells[0].second, y1 = y0;
+        // Work on a COARSENED lattice (publish_cell_size_m). A coarse cell is occupied if ANY fine cell in it
+        // is — conservative, so the cover still never under-reports the obstacle. This is purely about how many
+        // polygons the planner has to chew on; see publish_cell_size_m for the measured cost of not doing it.
+        const int k = std::max(1, static_cast<int>(std::lround(p_.publish_cell_size_m * inv_cell_)));
+        const float ks = cs * static_cast<float>(k);
+        const auto floordiv = [k](int v) { return v >= 0 ? v / k : -(((-v) + k - 1) / k); };
+        int x0 = floordiv(cells[0].first), x1 = x0, y0 = floordiv(cells[0].second), y1 = y0;
         for (const auto& [cx, cy] : cells)
-        { x0 = std::min(x0, cx); x1 = std::max(x1, cx); y0 = std::min(y0, cy); y1 = std::max(y1, cy); }
+        { const int gx = floordiv(cx), gy = floordiv(cy);
+          x0 = std::min(x0, gx); x1 = std::max(x1, gx); y0 = std::min(y0, gy); y1 = std::max(y1, gy); }
         const int bw = x1 - x0 + 1, bh = y1 - y0 + 1;
         std::vector<std::uint8_t> m(static_cast<std::size_t>(bw) * bh, 0);
-        for (const auto& [cx, cy] : cells) m[static_cast<std::size_t>(cy - y0) * bw + (cx - x0)] = 1;
+        for (const auto& [cx, cy] : cells)
+            m[static_cast<std::size_t>(floordiv(cy) - y0) * bw + (floordiv(cx) - x0)] = 1;
 
         for (int y = 0; y < bh; ++y)
             for (int x = 0; x < bw; ++x)
@@ -481,11 +571,11 @@ std::vector<OccComponent> OccupancyGrid::occupied_components(int min_cells, cons
                 }
                 for (int j = y; j <= ry; ++j)                          // consume the rectangle
                     for (int k = x; k <= rx; ++k) m[static_cast<std::size_t>(j) * bw + k] = 0;
-                // Corner-space rectangle (cell centres are corner + half a cell), CCW.
-                const float wx0 = ox0 + static_cast<float>(x0 + x) * cs;
-                const float wy0 = oy0 + static_cast<float>(y0 + y) * cs;
-                const float wx1 = ox0 + static_cast<float>(x0 + rx + 1) * cs;
-                const float wy1 = oy0 + static_cast<float>(y0 + ry + 1) * cs;
+                // Corner-space rectangle on the COARSE lattice (cell centres are corner + half a cell), CCW.
+                const float wx0 = ox0 + static_cast<float>(x0 + x) * ks;
+                const float wy0 = oy0 + static_cast<float>(y0 + y) * ks;
+                const float wx1 = ox0 + static_cast<float>(x0 + rx + 1) * ks;
+                const float wy1 = oy0 + static_cast<float>(y0 + ry + 1) * ks;
                 rects.push_back({{wx0, wy0}, {wx1, wy0}, {wx1, wy1}, {wx0, wy1}});
             }
         return rects;
@@ -747,22 +837,54 @@ bool OccupancyGrid::self_test()
           ring.push_back({1.0f, t, 0.40f}); ring.push_back({4.0f, t, 0.40f}); }
         for (int k = 0; k < 3; ++k) { g.integrate_sweep(s2, ring); g.commit_cycle(); }
         const auto comps = g.occupied_components(2, {}, 0.25f);
-        double cell_area = 0, pub_area = 0; std::size_t rings = 0; int fell_back = 0;
+        // The published cover is built on the COARSE publish lattice, which rounds outward on purpose, so the
+        // fine-cell area is the wrong reference — it would flag legitimate conservative rounding as a bug.
+        // The right invariant is EXACTNESS ON THE COARSE LATTICE: the rectangles must tile precisely the set of
+        // coarse cells touched by the residual, no more and no less. That still catches the original defect —
+        // a dropped interior hole or a convex-hull fallback inflates the area far past the coarse cover — while
+        // accepting the rounding the coarsening is supposed to introduce.
+        const float pub_cs = P.publish_cell_size_m > 0.f ? P.publish_cell_size_m : P.cell_size_m;
+        std::unordered_set<long long> coarse;
+        {
+            const auto xy = g.residual_cell_centres({});
+            for (std::size_t i = 0; i + 1 < xy.size(); i += 2)
+                coarse.insert(static_cast<long long>(std::floor(xy[i] / pub_cs)) * 100000LL
+                              + static_cast<long long>(std::floor(xy[i + 1] / pub_cs)));
+        }
+        // The components are built on the INFLATED set, so re-derive the expected cover from the same cells the
+        // decomposition actually saw rather than from the un-inflated residual.
+        std::unordered_set<long long> expected;
+        double pub_area = 0; std::size_t rings = 0; int fell_back = 0;
         for (const auto& c : comps)
         {
-            cell_area += c.n_cells * 0.0025;
             if (c.outline.empty()) { ++fell_back; continue; }
             rings += c.outline.size();
             for (const auto& L : c.outline)
-            { double a2 = 0; for (std::size_t i = 0; i < L.size(); ++i)
-              { const auto& u = L[i]; const auto& v = L[(i + 1) % L.size()]; a2 += u.x() * v.y() - v.x() * u.y(); }
-              pub_area += std::abs(a2) / 2.0; }
+            {
+                double a2 = 0;
+                for (std::size_t i = 0; i < L.size(); ++i)
+                { const auto& u = L[i]; const auto& v = L[(i + 1) % L.size()];
+                  a2 += static_cast<double>(u.x()) * v.y() - static_cast<double>(v.x()) * u.y(); }
+                pub_area += std::abs(a2) / 2.0;
+                // Every coarse cell the rectangle spans must be a cell the decomposition was entitled to emit.
+                float mnx = L[0].x(), mxx = L[0].x(), mny = L[0].y(), mxy = L[0].y();
+                for (const auto& v : L)
+                { mnx = std::min(mnx, v.x()); mxx = std::max(mxx, v.x());
+                  mny = std::min(mny, v.y()); mxy = std::max(mxy, v.y()); }
+                for (float x = mnx + 0.5f * pub_cs; x < mxx; x += pub_cs)
+                    for (float y = mny + 0.5f * pub_cs; y < mxy; y += pub_cs)
+                        expected.insert(static_cast<long long>(std::floor(x / pub_cs)) * 100000LL
+                                        + static_cast<long long>(std::floor(y / pub_cs)));
+            }
         }
-        std::printf("  coverage: %zu comp(s) %zu polygon(s) hull_fallbacks=%d | cells %.3f m2 -> published %.3f m2 (%.2fx)\n",
-                    comps.size(), rings, fell_back, cell_area, pub_area, cell_area > 0 ? pub_area / cell_area : 0.0);
+        const double exact_area = static_cast<double>(expected.size()) * pub_cs * pub_cs;
+        std::printf("  coverage: %zu comp(s) %zu polygon(s) hull_fallbacks=%d | published %.3f m2 over %zu "
+                    "coarse cells (exact tiling %.3f m2) | residual touches %zu coarse cells\n",
+                    comps.size(), rings, fell_back, pub_area, expected.size(), exact_area, coarse.size());
         check(fell_back == 0, "no component may fall back to a convex hull");
-        check(pub_area <= cell_area * 1.02 + 1e-6, "published area must not EXCEED the occupied cells (no swallowed free space)");
-        check(pub_area >= cell_area * 0.98 - 1e-6, "published area must not UNDER-cover the occupied cells either");
+        check(std::abs(pub_area - exact_area) < 1e-4, "rectangles must EXACTLY tile the coarse cells they cover "
+                                                     "(overlap or a swallowed hole would break this)");
+        check(expected.size() >= coarse.size(), "the published cover must CONTAIN every residual cell");
     }
 
     // ── (9) SELF-BODY: returns off our own body must not latch, external ones must be untouched ──
@@ -783,6 +905,79 @@ bool OccupancyGrid::self_test()
         check(g.logodds(sx, sy) < g.logodds(wx2, wy2),
               "a return ON the body must carry far less occupancy evidence than an external one");
         check(g.occupied(wx2, wy2), "the self-body term must NOT suppress a genuine external obstacle");
+    }
+
+    // ── (10) FLOOR RESPONSIBILITY: a near-floor return must not latch a cell on its own, a real obstacle must ──
+    // The old hard band gave a return one millimetre above it FULL weight, so a single noisy near-floor return
+    // latched its cell in one frame. With the floor in the mixture, the SAME return is mostly explained by the
+    // floor's measured scatter and needs corroboration — while a return standing clear of that scatter is
+    // unaffected, which is the completeness half of the property.
+    {
+        OccGridParams PA = P; PA.forget_half_life_s = 0.0f;        // isolate the weight term from the decay
+        OccupancyGrid g; g.reset(-1, -1, 5, 5, PA);
+        g.set_floor_plane(0.0f, 0.0f, 0.0f, 0.07f);                // a rough floor: 7 cm measured fit scatter
+        // Two single returns at range 2 (band = 0.06 + 0.04·2 = 0.14): one marginally over it, one clearly over.
+        const std::vector<Eigen::Vector3f> marginal{{2.0f, 0.0f, 0.15f}};
+        const std::vector<Eigen::Vector3f> real    {{2.0f, 1.0f, 0.45f}};
+        g.integrate_sweep(sensor, marginal); g.integrate_sweep(sensor, real, false); g.commit_cycle();
+        int mx, my; g.world_to_cell(2.0f, 0.0f, mx, my);
+        int rx, ry; g.world_to_cell(2.0f, 1.0f, rx, ry);
+        const float r_marg = g.floor_obstacle_responsibility(2.0f, 0.0f, 0.15f, 2.0f);
+        const float r_real = g.floor_obstacle_responsibility(2.0f, 1.0f, 0.45f, 2.0f);
+        std::printf("  floor-resp: marginal z=0.15 r_obst=%.2f occupied=%d (lo=%.2f) | real z=0.45 r_obst=%.2f "
+                    "occupied=%d (lo=%.2f)\n", r_marg, g.occupied(mx, my), g.logodds(mx, my),
+                    r_real, g.occupied(rx, ry), g.logodds(rx, ry));
+        check(r_marg < r_real, "a near-floor return must carry LESS obstacle responsibility than a clear one");
+        check(not g.occupied(mx, my), "one marginally-above-band return must NOT latch its cell in a single frame");
+        check(g.occupied(rx, ry), "a return standing clear of the floor's scatter must STILL latch in one frame");
+        // …and the measured scatter is what sets the tolerance: over a crisp floor the same height is an obstacle.
+        OccupancyGrid gc; gc.reset(-1, -1, 5, 5, PA);
+        gc.set_floor_plane(0.0f, 0.0f, 0.0f, 0.005f);              // a crisp floor: 5 mm fit scatter
+        const float r_crisp = gc.floor_obstacle_responsibility(2.0f, 0.0f, 0.15f, 2.0f);
+        std::printf("  floor-resp: same z=0.15 over a CRISP floor r_obst=%.2f (vs %.2f rough)\n", r_crisp, r_marg);
+        check(r_crisp > r_marg, "the tolerance must follow the MEASURED floor scatter, not a constant");
+    }
+
+    // ── (11) A FLOOR RETURN CLEARS ITS OWN CELL — the ratchet must be broken ──
+    // A phantom latched from a transient near-floor return, then re-observed only by clean floor returns landing in
+    // the same cell. Every one of those is direct evidence the floor is there; the old model recorded none of them
+    // (the DDA breaks at the endpoint cell, and a below-band return produced no flag), so the phantom was immortal
+    // — no traversing beam passes through a floor-height z-band from a sensor 0.5 m up. It must now clear.
+    {
+        OccGridParams PB = P; PB.forget_half_life_s = 0.0f;        // no decay: the clearing must come from the data
+        OccupancyGrid g; g.reset(-1, -1, 5, 5, PB);
+        int ix, iy; g.world_to_cell(2.0f, 0.0f, ix, iy);
+        // Latch a phantom: a burst of returns just above the band at (2,0), the way a smeared scan or a reflection
+        // paints one. (Above-band ⇒ hits, exactly as before this change.)
+        const std::vector<Eigen::Vector3f> phantom{{2.0f, 0.0f, 0.20f}, {2.0f, 0.01f, 0.19f}, {2.0f, -0.01f, 0.21f}};
+        for (int k = 0; k < 6; ++k) { g.integrate_sweep(sensor, phantom); g.commit_cycle(); }
+        const bool latched = g.occupied(ix, iy);
+        // Now the truth: clean floor returns land in that cell, and beams continue past it to the back wall high up
+        // (so the only clearing evidence available is the floor returns themselves).
+        std::vector<Eigen::Vector3f> truth;
+        for (int i = 0; i < 12; ++i) truth.push_back({1.98f + 0.004f * i, -0.02f + 0.004f * i, 0.01f});
+        for (int i = 0; i < 12; ++i) truth.push_back({4.5f, -0.2f + 0.4f * (i / 11.0f), 1.20f});
+        long clears = 0;
+        for (int k = 0; k < 20; ++k)
+        { g.integrate_sweep(sensor, truth); g.commit_cycle(); clears += g.last_sweep_diag().floor_endpoint_clears; }
+        std::printf("  floor-clears: phantom latched=%d → occupied=%d (lo=%.2f) after %ld floor-endpoint clears\n",
+                    latched, g.occupied(ix, iy), g.logodds(ix, iy), clears);
+        check(latched, "the phantom must have latched first (otherwise the test proves nothing)");
+        check(clears > 0, "floor returns must DELIVER free evidence to their own cells");
+        check(not g.occupied(ix, iy), "a floor phantom must be cleared by the floor returns that land in it");
+        // The safety counterpart: the same floor returns must NOT erase a real TALL obstacle they pass under.
+        OccupancyGrid g2; g2.reset(-1, -1, 5, 5, PB);
+        std::vector<Eigen::Vector3f> tabletop;                      // a 0.73 m surface at x=2
+        for (int i = 0; i < 12; ++i) tabletop.push_back({2.0f, -0.2f + 0.4f * (i / 11.0f), 0.73f});
+        for (int k = 0; k < 4; ++k) { g2.integrate_sweep(sensor, tabletop); g2.commit_cycle(); }
+        const bool tab_occ = g2.occupied(ix, iy);
+        std::vector<Eigen::Vector3f> under;                          // floor returns BENEATH it (between the legs)
+        for (int i = 0; i < 12; ++i) under.push_back({2.0f, -0.2f + 0.4f * (i / 11.0f), 0.01f});
+        for (int k = 0; k < 20; ++k) { g2.integrate_sweep(sensor, under); g2.commit_cycle(); }
+        std::printf("  floor-clears: tabletop occ_before=%d after 20 under-table floor sweeps occupied=%d\n",
+                    tab_occ, g2.occupied(ix, iy));
+        check(tab_occ, "the tabletop must be occupied first");
+        check(g2.occupied(ix, iy), "a floor return passing UNDER a real obstacle must not erase it (z-aware gate)");
     }
 
     std::printf("OccupancyGrid::self_test %s\n", ok ? "PASS" : "FAIL");

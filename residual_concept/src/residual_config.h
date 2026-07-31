@@ -74,8 +74,36 @@ struct ResidualConfig
     // Distinct from Clusterer.RobotRadiusM, which is only a READ-OUT mask around the current pose and therefore
     // cannot stop self-returns being latched into the map in the first place. Default matches the lidar3d_dds
     // driver's own [Footprint] radius so the two agree on one body model. 0 ⇒ term off.
+    // Per-device floor band for HELIOS, mirroring Clusterer.BpearlFloorZ0. ★THIS IS A THRESHOLD and CLAUDE.md
+    // says to justify one rather than reach for it, so: the model-level routes were tried and do not work here.
+    //   - A per-device floor SIGMA (measured from helios's own floor fit) was implemented and had no effect:
+    //     helios's floor error is a systematic BIAS of +13-17 cm, not scatter, and widening a Gaussian centred
+    //     on the TRUE floor cannot explain returns that sit consistently above it.
+    //   - A per-device floor PLANE (use helios's own fitted floor as its reference) would cancel a CONSTANT
+    //     bias, but helios's bias is GRAZING, i.e. it grows with range. A plane fits the average, so near
+    //     returns would be over-corrected — and an over-corrected near return means a real 10-15 cm obstacle
+    //     right next to the robot reads as below its own floor reference and is discarded. Trading a false
+    //     positive at range for a false negative up close is the wrong trade.
+    // What remains is the sensor's documented role: ROBOT_GEOMETRY.md assigns helios the WALLS ("use for walls,
+    // not the floor datum") and bpearl the floor and low obstacles. This band encodes that division explicitly
+    // instead of letting helios's unusable near-floor returns latch as obstacles. The number is measured, not
+    // guessed: helios reads the floor at 130-170 mm (room_concept's startup FloorCheck, both headings).
+    // COST, stated plainly: helios contributes no obstacle evidence below this band, so low obstacles at range
+    // are bpearl's responsibility alone until the robot closes on them.
+    float cluster_helios_floor_z0 = 0.20f;
+    // C-space inflation of the PUBLISHED hulls. 0 because the controller collides its real footprint against
+    // the grid, so any inflation here is added twice. See the note at gp.inflate_radius_m.
+    float grid_inflate_radius_m = 0.0f;
     float grid_self_body_radius_m = 0.55f;
     float grid_self_body_sigma_m  = 0.08f;  // positional uncertainty of the body surface (probit width)
+    // ── TIGHTENING THE OCCUPIED CONDITION (see OccGridParams for the derivations) ──
+    // The nav band was a hard step and a single return one millimetre above it latched a cell for good, while the
+    // floor's own MEASURED scatter (the plane fit's residual RMS, ≈7 cm here) was thrown away. These put the floor
+    // back in the per-return mixture and give a floor return its free-space meaning. Both default ON; they exist as
+    // flags only so the pair can be A/B'd against the old behaviour on a live safety layer.
+    bool  grid_floor_responsibility = true;   // hit weight ×= P(obstacle | z) in the {floor, obstacle} mixture
+    bool  grid_floor_return_clears  = true;   // a below-band return marks its OWN cell free (breaks the ratchet)
+    float grid_floor_sigma_min_m    = 0.03f;  // irreducible sensor range noise (m) — σ floor of the floor model
     // Robust infrastructure subtraction for the dense ZED cloud: floor/ceiling/wall removed with a band that
     // grows as the ZED's own depth noise (σ0 + q·range²), so a calibration offset / far-range blur can't leak.
     ResidualClusterer::DepthInfraParams zed_infra;

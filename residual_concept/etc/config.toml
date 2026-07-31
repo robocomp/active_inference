@@ -203,6 +203,34 @@ ForgetHalfLifeS = 10.0   # ↓ = forgets faster; ↑ = stickier map
 # turns out to be larger. 0 = off.
 SelfBodyRadiusM = 0.55
 SelfBodySigmaM  = 0.08   # positional uncertainty of the body surface (probit width)
+# ── TIGHTENING THE OCCUPIED CONDITION (false floor obstacles) ──────────────────────────────────────────────
+# Two defects in the inverse sensor model, both about the FLOOR, both of which made a floor phantom permanent:
+#
+# 1. The nav band was a hard STEP. A return one millimetre above floor_z0 + FloorSlope·range was a FULL-weight
+#    obstacle, and since l_hit·w(r) > occ_set at every range under ~2.7 m, ONE such return latched its cell.
+#    Meanwhile the floor-plane fit MEASURES its own residual scatter — 6.9 cm RMS in this apartment, larger than
+#    FloorZ0 itself — and the band threw that measurement away. FloorResponsibility puts the floor back into the
+#    per-return mixture: hit weight ×= P(obstacle | z) = u / (u + N(z; floor_z(x,y), σ_f)) with u = 1/(CeilZ −
+#    floor_z) and σ_f² = rms² + (FloorSlope·range)² + FloorSigmaMinM². Same construction as the refrigerator's
+#    wall explain-away — a competing explanation belongs in the mixture, not in a gate. It self-calibrates: over
+#    a crisp floor a 6 cm obstacle keeps nearly full weight, over a rough one it must stand ~3σ clear. It only
+#    ever REDUCES a weight (the hard band stays as the term's support), so it is a strict tightening.
+#
+# 2. A floor return carried NO evidence at all. Below-band ⇒ no hit (right) and no miss either: the ray-DDA marks
+#    the cells it TRAVERSES and breaks at the endpoint cell. So the thousands of clean floor returns landing in a
+#    phantom cell every second — each one direct proof the floor, not an obstacle, is there — were recorded as
+#    nothing, and the phantom's only clearing route was a traversing beam that also passed inside its remembered
+#    z-band (that is the 95%+ of clearing evidence miss_blocked_zaware reports being discarded). A RATCHET:
+#    `occupied` grew monotonically and then never changed again. FloorReturnClears marks a below-band return's own
+#    cell free at the return's height; the z-aware gate is what keeps that safe and is already there (a floor
+#    return passing under a tabletop falls outside that cell's z-band and is discarded, as today).
+#
+# Both default true. They are flags only so the pair can be A/B'd against the old behaviour on a live safety
+# layer — watch floor_damped/floor_clears in grid_diag.csv and `resid` in floor_diag.csv.
+FloorResponsibility = true
+FloorReturnClears   = true
+FloorSigmaMinM = 0.03    # irreducible LiDAR range noise (m) — the σ floor of the floor model (same physical
+                         # quantity as Clusterer.ExplainSensorSigmaM / Fitter.SensorSigmaM)
 
 [ZedBoost]
 Enabled = true

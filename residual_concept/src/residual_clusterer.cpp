@@ -75,7 +75,8 @@ std::vector<Eigen::Vector3f> ResidualClusterer::subtract_infrastructure(
         const float r = (q.head<2>() - o).norm();                 // horizontal range from the sensor
         const float sigma = p.sigma0_m + p.sigma_quad * r * r;    // stereo depth noise grows with range²
         const float band = p.k * sigma;
-        if (q.z() < p.floor_z0 + band)          continue;         // floor (range-growing band)
+        const float floor_z = p.floor_a * q.x() + p.floor_b * q.y() + p.floor_c;   // fitted floor (0,0,0 ⇒ z=0)
+        if (q.z() < floor_z + p.floor_z0 + band) continue;        // floor (range-growing band, on the real floor)
         if (q.z() > p.ceil_z - band)            continue;         // ceiling
         if (have_poly)
         {

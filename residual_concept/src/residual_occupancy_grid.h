@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <vector>
@@ -67,10 +68,63 @@ struct OccGridParams
     float floor_slope = 0.04f;      // + per metre of horizontal range (grazing)
     float ceil_z      = 1.80f;
     float z_band_margin_m = 0.10f;  // z-aware clearing tolerance
+    // ── FLOOR EXPLAIN-AWAY AS A MIXTURE RESPONSIBILITY, not a hard band ──
+    // The nav band above is a STEP: a return one millimetre over floor_z0+floor_slope·r is a FULL-weight obstacle,
+    // and since l_hit·w(r) > occ_set for every range under ~2.7 m, it LATCHES its cell in a single frame. The floor
+    // is not a step, though — it is a MEASURED surface with MEASURED scatter: the plane fit reports its own
+    // residual RMS (≈7 cm in the apartment — larger than floor_z0 itself). A return just above the band is
+    // therefore far more likely a floor return in that scatter's tail than an obstacle, and the band cannot know
+    // that because it discards the scatter it was fitted with.
+    // So a return's HIT weight is multiplied by the RESPONSIBILITY of the OBSTACLE component in the two-component
+    // per-return mixture {floor, obstacle}: floor ~ N(z_floor(x,y), σ_f(r)²), obstacle ~ Uniform over the nav band,
+    //     r_obst(z) = u / (u + N(z; z_floor, σ_f)),        u = 1/(ceil_z − z_floor)
+    //     σ_f(r)²   = rms² + (floor_slope·r)² + floor_sigma_min²
+    // — the floor's own measured roughness, the grazing term, and the sensor's irreducible range noise. This is the
+    // construction that fixed the refrigerator's wall explain-away: a competing explanation belongs INSIDE the
+    // per-point mixture, never in a gate. It self-calibrates with no threshold to tune — over a crisp floor
+    // (small rms) a 6 cm obstacle already earns nearly full weight; over a rough or badly-registered floor
+    // (large rms) an obstacle must stand ~3σ clear before the model credits it. And it can only ever REDUCE a
+    // weight: the hard band above is KEPT as the term's support, so nothing that was not already a hit can become
+    // one, and the change is a strict tightening of the occupied condition.
+    bool  floor_responsibility = true;   // false ⇒ the old hard step (full weight everywhere above the band)
+    float floor_sigma_min_m    = 0.03f;  // irreducible sensor range noise (m) — the σ floor of the floor model
+    // ── A FLOOR RETURN IS FREE EVIDENCE FOR ITS OWN CELL (the other half of the inverse sensor model) ──
+    // A beam that terminates ON the floor at (x,y) says the column above the floor in that cell is EMPTY — that is
+    // the whole content of the floor explainer. The original model dropped it: a below-band return produced no hit
+    // (correct) and no miss either (the DDA marks the cells it TRAVERSES and breaks at the endpoint cell), so the
+    // endpoint cell received NO evidence at all. That is a RATCHET. Once a cell has latched from a single noisy
+    // near-floor return, the thousands of clean floor returns that land in it every second — each one direct proof
+    // that the floor, not an obstacle, is there — are recorded as nothing. Its only clearing route is a beam that
+    // both traverses it toward something farther away AND passes inside its remembered z-band, which is exactly
+    // what miss_blocked_zaware measures being discarded (95%+ of all clearing evidence). Hence floor phantoms that
+    // freeze forever: `occupied` grows monotonically and then never changes again.
+    // With this on, a below-band return delivers free evidence to its own cell, gated on SUPPORT: the return
+    // reached the floor, so anything RESTING on the floor there would have blocked it first (refuted, clear it),
+    // whereas a FLOATING surface — a tabletop, a shelf — was merely passed underneath (held). The cell already
+    // records which of the two its evidence is: zmn_, the lowest return ever seen there. See
+    // mark_floor_endpoint_flag; the ordinary z-overlap gate cannot serve here, because a beam that terminates on
+    // the floor arrives at floor height by definition and would be discarded every single time.
+    bool  floor_return_clears  = true;   // false ⇒ the old behaviour (a floor return carries no evidence at all)
     // C-space INFLATION: regrow the occupied set outward by this radius (≈ half the robot width) so narrow gaps
     // the robot can't pass close, and a table's sparse LiDAR ring-cells bridge into a solid footprint. The
     // inflated "border" is displayed in a second colour and the published obstacle components use it. 0 = off.
     float inflate_radius_m = 0.25f;
+    // Resolution at which the PUBLISHED obstacle polygons are built. The grid reasons at cell_size_m (0.05 m)
+    // because occupancy evidence wants to be fine; the planner does not — its own grid_resolution_m is 0.35 m,
+    // so 5 cm polygon fidelity buys nothing and costs enormously. Decomposing the occupied set at 5 cm produced
+    // 154 polygons median / 461 peak, and the controller's visibility graph is O(V²·E) in obstacle vertices:
+    // ~1.2e8 segment tests at 154 polygons, ~3.1e9 at 461. plan_path stops returning, so there is no route, and
+    // the robot reports itself stuck standing in open floor. Coarsening to 0.20 m cuts the count ~16×.
+    // CONSERVATIVE by construction: a coarse cell is occupied if ANY fine cell inside it is, so the published
+    // set never under-covers the real obstacle — it only rounds outward. 0 ⇒ publish at cell_size_m.
+    // 0 = publish at the grid's own resolution. It was 0.20 to cut polygon COUNT for the controller's
+    // visibility-graph planner, which was O(V²·E) in obstacle vertices. That planner is gone: the controller
+    // now rasterises the polygons into its own grid, where cost is independent of polygon count (measured:
+    // 24 vs 960 polygons, identical build and plan time). So the coarsening buys nothing and costs a great
+    // deal — roundingevery isolated 5 cm cell up to a 20 cm block is a 16× area inflation, which turned ~4.75 m²
+    // of scattered residual into ~60 m² of merged rectangles covering the whole room and made every target
+    // infeasible. Publish the true extent; the consumer that knows the robot's shape decides what fits.
+    float publish_cell_size_m = 0.0f;
     // ── BETA–BERNOULLI belief (the field the PLANNER consumes) ──
     // Alongside the log-odds latch, each cell carries a Beta(α,β) posterior over its occupancy PROBABILITY. It
     // gives the planner BOTH terms it needs: the mean P=α/(α+β) (collision RISK) and the variance Var[P] (the
@@ -132,6 +186,12 @@ struct SweepDiag
                                   // no amount of clearing evidence could ever have reached. 0 for a whole run
                                   // with forget_half_life_s>0 ⇒ nothing is going stale (or the decay is too slow).
     long self_hits_damped = 0;    // returns whose HIT weight was attenuated by the self-body term (<0.99×)
+    long floor_damped_hits = 0;   // in-band returns whose HIT weight the FLOOR RESPONSIBILITY cut (<0.9×) — these
+                                  // are the near-floor returns that used to latch a cell outright. 0 for a whole
+                                  // run ⇒ the term is not engaging (check floor_responsibility / the fit's rms).
+    long floor_endpoint_clears = 0;// below-band (floor) returns that cleared THEIR OWN cell — the evidence the old
+                                  // model discarded. Compare against miss_blocked_zaware: this is clearing that
+                                  // no traversing beam could ever have delivered.
 };
 
 // One connected occupied region → footprint + z-band, ready for the scene-graph publish (box + hull).
@@ -162,7 +222,19 @@ public:
     // test becomes: z > floor_z(x,y) + floor_z0 + floor_slope·range. This makes the floor explainer follow an
     // offset/tilted floor (a new scenario), so floor returns never latch. (0,0,0) ⇒ the original fixed band
     // (zero regression). Set once per cycle before integrate_sweep; persists until changed.
-    void set_floor_plane(float a, float b, float c) { fp_a_ = a; fp_b_ = b; fp_c_ = c; }
+    // `rms` is the fit's OWN residual scatter (metres) — how planar the surface it just fitted actually is. It is
+    // the σ of the floor component in the mixture responsibility (see OccGridParams::floor_responsibility), so the
+    // model's tolerance for a near-floor return is set by MEASURED floor quality rather than by a constant. 0 ⇒
+    // unknown ⇒ σ falls back to floor_sigma_min_m ⊕ the grazing term.
+    void set_floor_plane(float a, float b, float c, float rms = 0.0f)
+    { fp_a_ = a; fp_b_ = b; fp_c_ = c; fp_rms_ = rms; }
+
+    // P(this return came from an OBSTACLE, not from the floor) for a return at height z over (x,y) seen at
+    // horizontal range `range` — the obstacle component's responsibility in the {floor, obstacle} mixture. Public
+    // because the READ-OUT floor explainer must score a cell with the SAME model that scored the returns that
+    // built it; two datums/tolerances for one surface is how a floor cell ends up unexplainable. 1 ⇒ certainly an
+    // obstacle, 0 ⇒ certainly the floor. Returns 1 when floor_responsibility is off (the old hard-step behaviour).
+    float floor_obstacle_responsibility(float x, float y, float z, float range) const;
 
     // Place the robot's body envelope for this cycle (room frame) so integrate_sweep can discount returns that
     // came off the robot itself. radius<=0 ⇒ the term is off. Set once per cycle before integrate_sweep, like
@@ -268,6 +340,14 @@ public:
         }
         return bins;
     }
+    // Same histogram over the RESIDUAL set (occupied ∧ ¬explained) — the cells that actually leave this agent as
+    // obstacles. occupied_count()/occupied_height_hist() above count EVERY latched cell, walls included, and in an
+    // apartment the walls are the large majority of them: a diagnostic built on those numbers cannot see the
+    // phantoms at all (it reports ~1850 tall wall cells and calls the run healthy). These two are the ones to read.
+    long residual_count(const CellExplained& explained = {}) const;
+    std::vector<long> residual_height_hist(const std::vector<float>& edges,
+                                           const CellExplained& explained = {}) const;
+
     const SweepDiag& last_sweep_diag() const { return sd_; }
 
     static bool self_test();
@@ -276,14 +356,31 @@ private:
     int  idx(int ix, int iy) const { return iy * w_ + ix; }
     bool in_bounds(int ix, int iy) const { return ix >= 0 and ix < w_ and iy >= 0 and iy < h_; }
     void cell_to_world(int ix, int iy, float& x, float& y) const;
+    // The z-band a cell presents to the READ-OUT explainer. Deliberately NOT (zmn_, zmx_): zmx_ is a running MAX
+    // that never contracts (correct for gating clearing beams — see the note in commit_cycle) so a single transient
+    // tall return permanently relabels a floor-height cell as a tall one. The read-out asks a different question —
+    // "what is there NOW?" — whose answer is dispz_, the EMA of the cell's current top. Scoring the floor explainer
+    // against a ratcheted maximum is how a cell built entirely from floor-height returns becomes an obstacle that
+    // no explainer can ever account for again.
+    void readout_zband(int i, float& zlo, float& zhi) const
+    {
+        if (not hit_[i]) { zlo = 0.0f; zhi = 0.05f; return; }
+        zhi = dispz_[i];
+        zlo = std::min(zmn_[i], zhi);
+    }
     void mark_hit_flag (int ix, int iy, float zlo, float zhi, float w);   // accumulate a hit + its precision weight
     void mark_miss_flag(int ix, int iy, float beam_z, float w);           // accumulate a see-through + its weight
+    // A beam that TERMINATED on the floor in this cell: free evidence gated on SUPPORT (is the cell's own lowest
+    // evidence floor-standing, hence refuted, or floating, hence merely passed under?) rather than on z-overlap,
+    // which a floor return can never satisfy. See the long note at the definition.
+    void mark_floor_endpoint_flag(int ix, int iy, float band_top, float w);
     std::vector<std::uint8_t> residual_mask(const CellExplained& explained) const;   // occupied ∧ ¬explained
     std::vector<std::uint8_t> dilate_mask(const std::vector<std::uint8_t>& m, int radius_cells) const;
 
     OccGridParams p_;
     float xmin_ = 0, ymin_ = 0, inv_cell_ = 0;
     float fp_a_ = 0, fp_b_ = 0, fp_c_ = 0;        // data-driven floor plane z=a·x+b·y+c (0 ⇒ fixed z=0 band)
+    float fp_rms_ = 0;                            // that fit's own residual scatter (m) = σ of the floor component
     float self_x_ = 0, self_y_ = 0, self_r_ = 0;  // robot body envelope this cycle (room frame); r<=0 ⇒ term off
     int   w_ = 0, h_ = 0;
     std::vector<float>        lo_;                 // log-odds (drives the hard occupied() latch — unchanged)

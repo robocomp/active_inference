@@ -106,8 +106,13 @@ ResidualConfig load_residual_config(const ConfigLoader& cfg)
     out.motion_vel0_mps         = getf("Grid.MotionVel0",        0.5f);    // linear speed (m/s) that halves sweep trust
     out.motion_omega0_rps       = getf("Grid.MotionOmega0",      0.6f);    // yaw rate (rad/s) that halves sweep trust
     out.grid_forget_half_life_s = getf("Grid.ForgetHalfLifeS",   10.0f);   // evidence half-life in an UNOBSERVED cell
+    out.cluster_helios_floor_z0 = getf("Clusterer.HeliosFloorZ0", 0.20f);   // helios grazes: unusable near floor
+    out.grid_inflate_radius_m   = getf("Grid.InflateRadiusM",    0.0f);    // 0: controller does exact footprint
     out.grid_self_body_radius_m = getf("Grid.SelfBodyRadiusM",   0.55f);   // body envelope for the sensor-model term
     out.grid_self_body_sigma_m  = getf("Grid.SelfBodySigmaM",    0.08f);   // its positional uncertainty
+    out.grid_floor_responsibility = getb("Grid.FloorResponsibility", true); // floor in the per-return mixture
+    out.grid_floor_return_clears  = getb("Grid.FloorReturnClears",   true); // a floor return frees its own cell
+    out.grid_floor_sigma_min_m    = getf("Grid.FloorSigmaMinM",      0.03f);// sensor range noise (σ floor)
     // Robust ZED infrastructure subtraction (reuse the floor/ceiling heights; ZED depth-noise band σ0+q·r²).
     out.zed_infra.floor_z0      = out.cluster.floor_z0;
     out.zed_infra.ceil_z        = out.cluster.ceil_z;

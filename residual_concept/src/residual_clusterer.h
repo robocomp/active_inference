@@ -158,6 +158,11 @@ public:
     struct DepthInfraParams
     {
         float floor_z0     = 0.06f;   // floor height at the sensor (m)
+        // The floor this band is referenced to: z = floor_a·x + floor_b·y + floor_c, the plane residual_floor_plane
+        // fits from the LiDAR each cycle. (0,0,0) ⇒ the original fixed z=0 datum. Without it the ZED band and the
+        // grid's own band disagree by the floor's offset+tilt (~8 cm across this apartment), and dense ZED floor
+        // points in the disagreement leak straight into the occupancy grid as one-frame-latching hits.
+        float floor_a = 0.0f, floor_b = 0.0f, floor_c = 0.0f;
         float ceil_z       = 1.80f;   // ceiling height (m)
         float wall_margin_m = 0.10f;  // base wall tolerance (grown by k·σ(r))
         float sigma0_m     = 0.03f;   // depth-noise floor (m) — near-range + calibration offset
