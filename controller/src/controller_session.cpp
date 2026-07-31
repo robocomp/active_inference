@@ -125,6 +125,15 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
     room_polygon_ = room_polygon.value();
     inner_polygon_ = planner.compute_inner_polygon(room_polygon_);
     obstacle_tracker.update_active_obstacle_polygons(timestamp_ms, path_controller);
+    // Rasterise the SAME obstacle set the visibility graph used into the footprint planner's grid. Cheap
+    // enough to redo every cycle (0.3 ms on the apartment) and independent of polygon count, so the obstacle
+    // set can be as detailed as perception makes it without the planner degrading.
+    if (params_)
+    {
+        grid_planner_.params.cell_size_m = std::max(0.05f, params_->grid_resolution_m * 0.3f);
+        grid_planner_.params.safety_margin_m = params_->footprint_safety_margin_m;
+    }
+    grid_planner_.set_world(room_polygon_, obstacle_tracker.obstacle_polygons());
     return true;
 }
 
@@ -201,24 +210,22 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     target_wait_logged_ = false;
     step.target = *target;
 
-    // A producer's affordance viewpoint can land inside an obstacle footprint (its own object, or one
-    // that grew/moved), which the planner can't reach → stall. Move ONLY the navigation target to the
-    // nearest free point; the affordance's object/feedback (parent_node_id) is untouched, so the
-    // contract still services the same object. Everything downstream (plan, arrival, display) then uses
-    // the repaired target consistently.
-    // Repair against the clearance the MPPI ACTUALLY enforces at the goal, not the planner's half-robot-width.
-    // With the live config those are 0.425 m and 0.20 m — so a target could be "repaired" into a 0.225 m band
-    // the local controller will never let the robot rest in: it drives up, the obstacle cost pushes it out,
-    // goal_reached never fires, and it hunts there indefinitely. Asking the controller for its own number
-    // keeps the two from drifting apart again.
-    const auto safe = planner.repair_target(room_polygon_, inner_polygon_,
-                                            obstacle_tracker.obstacle_polygons(), step.target.room_pos,
-                                            path_controller.goal_clearance_requirement());
+    // TARGET REPAIR ON THE PLANNER'S OWN PREDICATE.
+    // A producer's affordance viewpoint can land inside an obstacle footprint (its own object, or one that grew
+    // or moved), which the planner cannot reach. Only the NAVIGATION target is moved; the affordance's object
+    // and feedback node (parent_node_id) are untouched, so the contract still services the same object.
+    //
+    // The repair now asks grid_planner_ itself for the nearest footprint-feasible pose, so "repaired" and
+    // "plannable" are the SAME predicate and cannot drift apart. They used to be two numbers in two files —
+    // repair guaranteed 0.20 m of clearance while the controller enforced 0.425 m at the goal — which left a
+    // 0.225 m band where repair reported success and the robot then hunted forever at a target it was never
+    // permitted to reach.
+    const auto safe = grid_planner_.nearest_free(step.target.room_pos, step.target.yaw_rad);
     if (safe.has_value() && (*safe - step.target.room_pos).squaredNorm() > 1e-6f)
     {
-        qInfo() << "[controller] affordance target" << step.target.node_name.c_str()
-                << "blocked → repaired to nearest free point ("
-                << (*safe).x() << "," << (*safe).y() << ")";
+        std::println("[controller] target '{}' blocked → repaired ({:.2f},{:.2f}) → ({:.2f},{:.2f}){}",
+                     step.target.node_name, step.target.room_pos.x(), step.target.room_pos.y(),
+                     safe->x(), safe->y(), "");
         step.target.room_pos = *safe;
 
         // Re-aim the heading at the object now that the standpoint moved (the producer's yaw faced the
@@ -240,11 +247,9 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         if (timestamp_ms - last_unreachable_log_ms_ >= 3000)
         {
             last_unreachable_log_ms_ = timestamp_ms;
-            qWarning() << "[controller] target" << step.target.node_name.c_str()
-                       << "at (" << step.target.room_pos.x() << "," << step.target.room_pos.y() << ")"
-                       << "has NO point within reach clearing obstacles by"
-                       << path_controller.goal_clearance_requirement() << "m —"
-                       << "it is boxed in. Planning will fail until the obstacle set changes.";
+            std::println("[controller] target '{}' at ({:.2f},{:.2f}) is BOXED IN — no footprint-feasible pose "
+                         "within reach. Planning will fail until the obstacles change.",
+                         step.target.node_name, step.target.room_pos.x(), step.target.room_pos.y());
         }
     }
 
@@ -280,34 +285,44 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
 
     if (step.target_changed || !current_plan_.has_value())
     {
-        current_plan_ = planner.plan_path(room_polygon_,
-                                          inner_polygon_,
-                                          obstacle_tracker.obstacle_polygons(),
-                                          step.plan_origin,
-                                          step.target.room_pos);
+        // FOOTPRINT PLANNER. The robot's real shape is tested against the grid; obstacles are NOT inflated.
+        // Falls back to nothing — if this cannot find a route, the HOLD branch below reports precisely why.
+        if (const auto route = grid_planner_.plan(step.plan_origin, step.target.room_pos); route.has_value())
+            current_plan_ = ControllerPathPlan{.room_path = *route, .graph_nodes = *route};
+        else
+            current_plan_.reset();
     }
 
     if (!current_plan_.has_value() || current_plan_->room_path.empty())
     {
-        qWarning() << "Controller could not produce a path to target" << step.target.node_name.c_str();
         update_display(step.robot_pose,
                        display,
                        obstacle_tracker.display_obstacle_polygons(),
                        obstacle_tracker.temporary_obstacle_rfe_points(),
                        params_ ? params_->max_lidar_draw_points : 0);
-        // No route to the target — the robot is boxed in. Treat sustained no-path exactly like a
-        // physical stall: accumulate the no-progress clock and, once confirmed, reverse+turn out
-        // and drop a temp obstacle so the next plan_path finds a way around. Hold the base
-        // meanwhile WITHOUT stop()'s reset_stuck_state() (that would zero the clock every cycle,
-        // so the escape would never fire and the robot would idle in front of the obstacle).
-        if (detect_stuck(/*pursuing=*/true, /*stalled_this_cycle=*/true, time_source()))  // no route ⇒ wedged
-        {
-            begin_escape(step.robot_pose, obstacle_tracker, path_controller, time_source());
-            step_escape(step.robot_pose, path_controller, motion_commander, time_source());
-            return false;
-        }
+        // ── PLANNER FAILURE → HOLD. Deliberately NOT the escape reflex. ──
+        // This branch used to feed the no-progress clock and, after stuck_confirm_ms, reverse+turn out. That
+        // conflates two unrelated faults. A WEDGE is a prediction error — we command translation and the base
+        // does not achieve it — and reversing is the right answer because backing off physically changes the
+        // situation. "plan_path returned nothing" is not that: the robot may be standing in clear floor,
+        // perfectly free to move, with the planner simply unable to produce a route. Reversing does not fix a
+        // planner, so the reflex fires, ends, finds no route again, and fires again — a closed loop. Measured
+        // live: the base sat at exactly the escape constants (−0.150 m/s, ±0.350 rad/s) for half a 35 s run,
+        // beginning 1.3 s after start and never leaving.
+        //
+        // So: hold the base, and SAY SO. A stationary robot with a clear message is diagnosable; one thrashing
+        // backwards looks like a perception or traction fault and hides the real cause. The stuck clock is
+        // reset here so a genuine wedge later starts from a clean window rather than inheriting this one.
+        reset_stuck_state();
         path_controller.stop();
         motion_commander.stop_robot();
+        if (time_source() - last_no_route_log_ms_ >= 3000)
+        {
+            last_no_route_log_ms_ = time_source();
+            std::println("[controller] HOLDING — no route to '{}': {}. Not escaping: the robot is not wedged, "
+                         "the planner produced no path, and reversing cannot fix a planner.",
+                         step.target.node_name, grid_planner_.last_failure());
+        }
         return false;
     }
 

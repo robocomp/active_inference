@@ -254,6 +254,10 @@ void ControllerMotionCommander::output_loop(std::stop_token stop)
             applied_adv_ = adv; applied_side_ = side; applied_rot_ = rot;
         }
 
+        // setSpeedBase is a SYNCHRONOUS Ice RPC to the Webots bridge, so its duration is a hard floor on this
+        // loop's period: no amount of scheduling here can beat a bridge that blocks. Time it, so if the output
+        // period is still not stable we can tell immediately whether the cause is us or the bridge.
+        const auto ice_t0 = steady_clock::now();
         try
         {
             // Sent EVERY tick, unchanged or not — a constant cadence is the whole point, and a base watchdog
@@ -263,6 +267,7 @@ void ControllerMotionCommander::output_loop(std::stop_token stop)
         catch (const Ice::Exception &) { /* transient bridge hiccup: keep the cadence, try again next tick */ }
 
         const auto now = steady_clock::now();
+        const float ice_ms = duration<float, std::milli>(now - ice_t0).count();
         const std::scoped_lock lock(mutex_);
         if (last_send.time_since_epoch().count() != 0)
         {
@@ -274,6 +279,8 @@ void ControllerMotionCommander::output_loop(std::stop_token stop)
         last_send = now;
         stat_cmd_age_max_ms_ = std::max(stat_cmd_age_max_ms_, age_ms);
         stat_scale_min_ = std::min(stat_scale_min_, scale);
+        stat_ice_max_ms_ = std::max(stat_ice_max_ms_, ice_ms);
+        stat_ice_sum_ms_ += ice_ms;
     }
 }
 
@@ -286,8 +293,11 @@ ControllerMotionCommander::OutputRateStats ControllerMotionCommander::take_outpu
     s.period_max_ms = stat_period_max_ms_;
     s.cmd_age_max_ms = stat_cmd_age_max_ms_;
     s.scale_min = stat_scale_min_;
+    s.ice_mean_ms = stat_ticks_ > 0 ? stat_ice_sum_ms_ / static_cast<float>(stat_ticks_) : 0.f;
+    s.ice_max_ms = stat_ice_max_ms_;
     stat_ticks_ = 0; stat_period_sum_ms_ = 0.f; stat_period_max_ms_ = 0.f;
     stat_cmd_age_max_ms_ = 0.f; stat_scale_min_ = 1.f;
+    stat_ice_max_ms_ = 0.f; stat_ice_sum_ms_ = 0.f;
     return s;
 }
 

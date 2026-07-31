@@ -23,6 +23,7 @@
 #include <Eigen/Dense>
 
 #include <optional>
+#include <string>
 #include <vector>
 
 class RoomPathPlanner
@@ -49,6 +50,13 @@ public:
 
     Params params;
 
+    // Why the last plan_path() returned nullopt. plan_path has several distinct ways to fail and they want
+    // completely different responses — a robot standing inside an obstacle polygon, a target inside one, and a
+    // genuinely disconnected free space are not the same fault. Without this the caller can only report "no
+    // path", which is exactly what sent one round of debugging chasing a performance red herring while the
+    // real cause was a precondition failing in the first few lines.
+    const std::string &last_failure() const { return last_failure_; }
+
     std::vector<Eigen::Vector2f> compute_inner_polygon(const Polygon &polygon) const;
     std::optional<PathPlan> plan_path(const Polygon &room_polygon,
                                       const Polygon &inner_polygon,
@@ -71,6 +79,8 @@ public:
                                                  float min_clearance_m = 0.f) const;
 
 private:
+    mutable std::string last_failure_;   // set by plan_path on every nullopt return; see last_failure()
+
     static constexpr float k_epsilon = 1e-5f;
 
     // Point-in-polygon (ray casting)

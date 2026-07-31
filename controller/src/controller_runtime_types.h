@@ -33,6 +33,12 @@ using ControllerObstacleVisuals = std::vector<ControllerObstacleVisual>;
 
 struct ControllerParams
 {
+    // THE standoff. Exactly one number now expresses "how much room do we want beyond the robot's actual
+    // shape", replacing six independent C-space margins that were spread across three agents and summed to
+    // ~0.95 m for a robot that physically passes 0.461 m. Because feasibility is the exact footprint test and
+    // this is only a preference on top of it, tuning it for comfort can no longer make a reachable goal
+    // unreachable — which is what the old stack could do, and did.
+    float footprint_safety_margin_m = 0.05f;
     float clearance_m = 0.4f;
     float grid_resolution_m = 0.35f;
     float connection_radius_m = 1.2f;

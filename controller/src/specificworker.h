@@ -153,6 +153,9 @@ private:
 	bool ensure_current_plan(const PlanningStep &step);
 	void update_custom_widget(const std::optional<RobotPose> &robot_pose);
 	static void log_compute_perf(FPSCounter &counter);
+	// Worst compute() period inside the current 1 s reporting window. The MEAN hides the problem — it sits at
+	// ~105 ms against a 100 ms target and looks healthy while the tail runs past a second.
+	static float worst_compute_period_ms_;
 	void set_manual_target(const QPointF &point);
 	void clear_manual_target();
 	void execute_plan(const RobotPose &robot_pose);

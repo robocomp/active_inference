@@ -38,6 +38,8 @@ public:
         float period_max_ms = 0.f;    // worst gap between consecutive base commands
         float cmd_age_max_ms = 0.f;   // oldest command ever pushed to the base
         float scale_min = 1.f;        // strongest freshness attenuation applied
+        float ice_mean_ms = 0.f;      // setSpeedBase RPC duration — a hard floor on the achievable period
+        float ice_max_ms = 0.f;
     };
     OutputRateStats take_output_rate_stats();
 
@@ -102,6 +104,8 @@ private:
     float stat_period_max_ms_ = 0.f;
     float stat_cmd_age_max_ms_ = 0.f;
     float stat_scale_min_ = 1.f;
+    float stat_ice_max_ms_ = 0.f;
+    float stat_ice_sum_ms_ = 0.f;
     // Declared LAST so it is destroyed FIRST: the thread must stop before the Ice proxy it uses goes away.
     std::jthread output_thread_;
 };

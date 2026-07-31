@@ -343,7 +343,13 @@ void Viewer2D::draw_lidar_points_from_buffer(int max_points)
     }
 
     const auto &[xs, ys, zs] = cloud_opt.value();
-    Q_UNUSED(zs)
+    // Draw only returns that are plausibly ABOVE the floor. The buffer's own z-band starts at 0.20 m, which is
+    // enough to reject a head-on floor return but NOT a grazing one: helios sits ~1.1 m up and reads the floor
+    // 13-17 cm high, rising with range, so its far floor returns clear 0.20 m and land in the buffer. Drawn as
+    // filled ForestGreen dots they carpet the floor and hide everything the overlay exists to show.
+    // This is DISPLAY ONLY — the obstacle/ESDF paths are untouched, so nothing about what the robot avoids
+    // changes. kDrawMinZ is deliberately above the band rather than equal to it, for exactly that grazing margin.
+    constexpr float kDrawMinZ = 0.30f;
 
     const std::size_t count = std::min(xs.size(), ys.size());
     if (count == 0)
@@ -377,6 +383,7 @@ void Viewer2D::draw_lidar_points_from_buffer(int max_points)
     std::size_t draw_index = 0;
     for (std::size_t point_index = 0; point_index < count && draw_index < draw_count; point_index += stride)
     {
+        if (point_index < zs.size() and zs[point_index] < kDrawMinZ) continue;   // floor carpet — display only
         float px = xs[point_index];
         float py = ys[point_index];
         if (correct)

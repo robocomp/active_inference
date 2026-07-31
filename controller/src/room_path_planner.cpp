@@ -20,6 +20,7 @@
 #include "room_path_planner.h"
 
 #include <algorithm>
+#include <format>
 #include <cmath>
 #include <limits>
 #include <queue>
@@ -254,7 +255,9 @@ std::optional<RoomPathPlanner::PathPlan> RoomPathPlanner::plan_path(
     const Eigen::Vector2f &robot_pos,
     const Eigen::Vector2f &target_room_pos) const
 {
-    if (room_polygon.size() < 3) return std::nullopt;
+    last_failure_.clear();
+    if (room_polygon.size() < 3)
+    { last_failure_ = "room polygon has <3 vertices (room node not read yet?)"; return std::nullopt; }
 
     // ----- Expand obstacles outward by half the robot width -----
     const float obs_clearance = std::max(0.01f, params.robot_width_m * 0.5f);
@@ -265,12 +268,33 @@ std::optional<RoomPathPlanner::PathPlan> RoomPathPlanner::plan_path(
             expanded_obs.push_back(offset_polygon_outward(obs, obs_clearance));
 
     // ----- Helpers -----
-    auto inside_any_obs = [&](const Eigen::Vector2f &p) -> bool
+    // START-IN-COLLISION RECOVERY. The robot's own position can legitimately end up inside an obstacle
+    // polygon — margins from different owners stack (residual excludes a 0.45 m disc around the robot, then
+    // grows the set back 0.25 m by C-space dilation, then plan_path expands it another 0.20 m here, then the
+    // publish lattice rounds outward), and the sum can reach the robot centre. Treating that as unplannable
+    // BRICKS the robot: no edge can leave the start, so there is never a route, from anywhere, until the
+    // obstacle set happens to change. A planner should instead route OUT.
+    // So obstacles that contain the start are ignored for edges incident to the start ONLY. They keep their
+    // full effect everywhere else, so the path may leave the enclosing region but may not cut through any
+    // other obstacle, and nothing else in the graph is weakened.
+    std::vector<const Polygon *> start_enclosing;
+    for (const auto &obs : expanded_obs)
+        if (point_in_polygon(obs, robot_pos)) start_enclosing.push_back(&obs);
+    for (const auto &obs : obstacle_polygons)
+        if (point_in_polygon(obs, robot_pos)) start_enclosing.push_back(&obs);
+    const bool start_in_collision = not start_enclosing.empty();
+    auto ignored_for_start = [&](const Polygon *poly) -> bool
+    {
+        for (const auto *p : start_enclosing) if (p == poly) return true;
+        return false;
+    };
+
+    auto inside_any_obs = [&](const Eigen::Vector2f &p, bool relax_start = false) -> bool
     {
         for (const auto &obs : expanded_obs)
-            if (point_in_polygon(obs, p)) return true;
+            if ((!relax_start or !ignored_for_start(&obs)) and point_in_polygon(obs, p)) return true;
         for (const auto &obs : obstacle_polygons)
-            if (point_in_polygon(obs, p)) return true;
+            if ((!relax_start or !ignored_for_start(&obs)) and point_in_polygon(obs, p)) return true;
         return false;
     };
 
@@ -289,30 +313,54 @@ std::optional<RoomPathPlanner::PathPlan> RoomPathPlanner::plan_path(
     const bool have_inner = inner_polygon.size() >= 3;
 
     // Visibility: reference approach — proper intersection, no sampling false-negatives
-    auto is_visible = [&](const Eigen::Vector2f &a, const Eigen::Vector2f &b) -> bool
+    auto is_visible = [&](const Eigen::Vector2f &a, const Eigen::Vector2f &b, bool relax_start = false) -> bool
     {
         if (!point_in_polygon(room_polygon, a) || !point_in_polygon(room_polygon, b))
             return false;
-        if (inside_any_obs(a) || inside_any_obs(b)) return false;
+        if (inside_any_obs(a, relax_start) || inside_any_obs(b, relax_start)) return false;
         // Midpoint check (catches pass-through)
-        if (inside_any_obs(0.5f * (a + b))) return false;
+        if (inside_any_obs(0.5f * (a + b), relax_start)) return false;
         // Must not cross room boundary
         if (seg_crosses_poly(a, b, room_polygon)) return false;
         // Must not cross inner polygon boundary (wall clearance constraint)
-        if (have_inner && seg_crosses_poly(a, b, inner_polygon)) return false;
+        // Relaxed for start edges too: an enclosed start is often enclosed precisely because it sits in the
+        // wall-clearance ring, and the escape leg has to be allowed to cross it.
+        if (have_inner && !relax_start && seg_crosses_poly(a, b, inner_polygon)) return false;
         // Must not cross any obstacle boundary
         for (const auto &obs : expanded_obs)
-            if (seg_crosses_poly(a, b, obs)) return false;
+            if ((!relax_start or !ignored_for_start(&obs)) and seg_crosses_poly(a, b, obs)) return false;
         for (const auto &obs : obstacle_polygons)
-            if (seg_crosses_poly(a, b, obs)) return false;
+            if ((!relax_start or !ignored_for_start(&obs)) and seg_crosses_poly(a, b, obs)) return false;
         return true;
     };
 
-    // ----- Sanity: robot must be inside the room -----
-    if (!point_in_polygon(room_polygon, robot_pos)) return std::nullopt;
+    // ----- Sanity: robot must be inside the room, and not standing in an obstacle -----
+    // These two preconditions abort BEFORE any search, so they look identical to "no route" from outside
+    // while having nothing to do with connectivity. Distinguishing them matters: a robot reported inside an
+    // obstacle means the obstacle set has swallowed the robot's own position, which is a perception/inflation
+    // bug, not a planning one — and no amount of replanning will ever clear it.
+    if (!point_in_polygon(room_polygon, robot_pos))
+    {
+        last_failure_ = std::format("robot ({:.2f},{:.2f}) is OUTSIDE the room polygon", robot_pos.x(), robot_pos.y());
+        return std::nullopt;
+    }
+    // NOTE: a start inside an obstacle is NOT an abort any more — see start-in-collision recovery above.
+    // It is still worth surfacing, because it means some layer's geometry has covered the robot itself.
+    if (!point_in_polygon(room_polygon, target_room_pos))
+    {
+        last_failure_ = std::format("target ({:.2f},{:.2f}) is OUTSIDE the room polygon",
+                                    target_room_pos.x(), target_room_pos.y());
+        return std::nullopt;
+    }
+    if (inside_any_obs(target_room_pos))
+    {
+        last_failure_ = std::format("target ({:.2f},{:.2f}) is INSIDE an obstacle polygon (repair_target did not "
+                                    "move it clear)", target_room_pos.x(), target_room_pos.y());
+        return std::nullopt;
+    }
 
     // ----- Direct line-of-sight shortcut -----
-    if (is_visible(robot_pos, target_room_pos))
+    if (is_visible(robot_pos, target_room_pos, start_in_collision))
     {
         Polygon direct{robot_pos, target_room_pos};
         return PathPlan{
@@ -351,7 +399,8 @@ std::optional<RoomPathPlanner::PathPlan> RoomPathPlanner::plan_path(
         }
     }
 
-    if (nodes.empty()) return std::nullopt;
+    if (nodes.empty())
+    { last_failure_ = "no navigation nodes (inner polygon empty and no obstacle bypass nodes)"; return std::nullopt; }
 
     // ----- Visibility graph over nav nodes (static part) -----
     const int n = static_cast<int>(nodes.size());
@@ -371,7 +420,7 @@ std::optional<RoomPathPlanner::PathPlan> RoomPathPlanner::plan_path(
     adj.resize(n + 2);
     for (int i = 0; i < n; ++i)
     {
-        if (is_visible(robot_pos, nodes[i]))
+        if (is_visible(robot_pos, nodes[i], start_in_collision))
         {
             const float c = (robot_pos - nodes[i]).norm();
             adj[si].push_back({i, c});
@@ -411,7 +460,18 @@ std::optional<RoomPathPlanner::PathPlan> RoomPathPlanner::plan_path(
         }
     }
 
-    if (parent[gi] == -1) return std::nullopt;
+    if (parent[gi] == -1)
+    {
+        // Reached the search and lost. The degrees say WHICH end is walled off — if the robot or the target
+        // has no visible nav node at all, free space is not disconnected, that endpoint is simply enclosed.
+        last_failure_ = std::format("no route: {} nav nodes, robot sees {} of them, target sees {} "
+                                    "({} obstacle polygons){}",
+                                    n, adj[si].size(), adj[gi].size(), obstacle_polygons.size(),
+                                    start_in_collision
+                                        ? " [robot started INSIDE an obstacle; escape edges were allowed and "
+                                          "still found nothing]" : "");
+        return std::nullopt;
+    }
 
     // ----- Reconstruct path -----
     std::vector<int> idx_path;
@@ -431,7 +491,7 @@ std::optional<RoomPathPlanner::PathPlan> RoomPathPlanner::plan_path(
     for (int idx : idx_path)
         path.push_back(idx_to_pt(idx));
 
-    if (path.size() < 2) return std::nullopt;
+    if (path.size() < 2) { last_failure_ = "reconstructed path has <2 points"; return std::nullopt; }
 
     // ----- Catmull-Rom spline smoothing -----
     // Smooth the raw waypoints; fall back to straight segment on visibility failure.

@@ -802,6 +802,37 @@ ControllerPolygons ControllerObstacleTracker::read_obstacle_polygons(std::uint64
             // fallback is the one path that could still turn an abstract grouping into an obstacle.
             if (node.type() == "metaconcept")
                 continue;
+            // ★ THE ROOM IS NOT AN OBSTACLE. The room node carries width_m/depth_m (its extent, for viewers),
+            // so this width/depth sweep happily turns the entire room into one room-sized obstacle box — the
+            // robot is then inside a solid object covering every cell, no target is ever footprint-feasible,
+            // and the 2-D canvas paints the whole floor in the green Object colour instead of leaving it the
+            // near-white room fill. Observed live: 27018/27018 cells occupied with a green floor.
+            // This fallback only runs when NO typed object/obstacle node exists, which is a perfectly normal
+            // state (no concept agent running) — so the failure appears exactly when the world is EMPTIEST,
+            // which is the least likely case to be tested and the worst one to fail in.
+            // Excluded by identity, not by type, because room_concept's node type has changed before.
+            if (graph_state_->room_id != 0 and node.id() == graph_state_->room_id) continue;
+            if (node.name() == graph_state_->room_name or node.type() == "room") continue;
+            // ...and the same for every other node that carries an extent WITHOUT being a thing to avoid.
+            // ★ THE FLOOR IS THE ONE THAT BIT US. room_concept publishes a node named "floor" whose
+            // width_m/depth_m are the WHOLE ROOM's extent (room_scene_graph.cpp:887) purely so a viewer can
+            // scale its display mesh. This sweep turned it into a room-sized obstacle box: every cell
+            // occupied, no target ever footprint-feasible, and the 2-D canvas painted entirely in the green
+            // Object colour — the literal "green floor". Walls are the same story (width_m = wall length).
+            // These carry an extent because something has to DRAW them, which is not the same as something
+            // to drive around: the room boundary is already enforced by the room polygon, and the residual
+            // hulls arrive separately, already shaped.
+            // Matched by type AND name, because these node types have been renamed before in this codebase
+            // and a silent miss here disables navigation completely rather than degrading it.
+            static constexpr std::array<const char *, 5> kNotObstacles = {"floor", "wall", "plane", "grid", "room"};
+            const auto is_infrastructure = [&](const auto &n)
+            {
+                for (const char *t : kNotObstacles)
+                    if (n.type() == t or n.name() == t or n.name().starts_with(std::string(t) + "_"))
+                        return true;
+                return n.name() == "residual";
+            };
+            if (is_infrastructure(node)) continue;
 
             const auto width_attr = graph_->get_attrib_by_name<width_m_att>(node);
             const auto depth_attr = graph_->get_attrib_by_name<depth_m_att>(node);

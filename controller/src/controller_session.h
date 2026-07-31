@@ -16,6 +16,7 @@
 #include "controller_runtime_types.h"
 #include "controller_world_model.h"
 #include "room_path_planner.h"
+#include "grid_planner.h"
 #include "trajectory_controller.h"
 #include "../../common/affordance_manager/affordance_manager.h"
 
@@ -113,11 +114,17 @@ private:
                           ControllerDisplay &display);
 
     // ── Physical-wedge recovery ──────────────────────────────────────────────────────
-    // Debounce over a per-cycle wedge signal supplied by the caller. A wedge is a PREDICTION ERROR: the
-    // robot commands translation but the base doesn't achieve it (execute_plan compares commanded vs
-    // measured base speed), or there is no route at all (ensure_current_plan → always stalled). A robot
-    // that IS moving as commanded — detour, slow nav, arrival rotation, a still-sliding creep — is not
-    // stalled, so none false-fire. Returns true once `stalled_this_cycle` has held for stuck_confirm_ms.
+    // Debounce over a per-cycle wedge signal supplied by the caller. A wedge is a PREDICTION ERROR and
+    // NOTHING ELSE: the robot commands translation and the base doesn't achieve a healthy fraction of it
+    // (execute_plan compares commanded vs measured base speed). A robot that IS moving as commanded —
+    // detour, slow nav, arrival rotation, a still-sliding creep — is not stalled, so none false-fire.
+    // Returns true once `stalled_this_cycle` has held for stuck_confirm_ms.
+    //
+    // PLANNER FAILURE IS NOT A WEDGE and no longer reaches here. It used to (ensure_current_plan passed
+    // stalled=true unconditionally), which produced a closed loop: no route → escape → escape ends → still
+    // no route → escape, with the base pinned at the escape constants indefinitely. Reversing changes the
+    // robot's position, which is the right response to being physically trapped and no response at all to a
+    // planner that cannot return a path. That branch now HOLDS and reports instead.
     bool detect_stuck(bool pursuing, bool stalled_this_cycle, std::uint64_t now_ms);
     // Begin an escape: choose turn direction from side clearance, drop a temp obstacle at
     // the stuck spot, reset the plan, and record the start pose/time.
@@ -175,6 +182,16 @@ private:
 
     // Physical-stuck recovery state.
     std::uint64_t stuck_since_ms_ = 0;          // start of the current wedge window (0 = not wedged)
+    // Rate limit for the planner-failure HOLD message. Planner failure is deliberately NOT routed into the
+    // stuck/escape reflex (reversing cannot fix a planner), so this line is the only signal that it happened.
+    std::uint64_t last_no_route_log_ms_ = 0;
+
+    // Grid planner with EXACT robot-footprint collision. Replaces the visibility graph: it rasterises the same
+    // obstacle polygons once into a fixed grid, so cost is independent of polygon COUNT (measured on the real
+    // apartment: 24 vs 960 polygons both build in 0.3 ms and plan in <1 ms, where the visibility graph needed
+    // ~1.2e8 segment tests at 154 polygons and stopped returning). Collision is the authored footprint, not an
+    // inflated obstacle, so the six stacked C-space margins collapse to one explicit safety_margin_m.
+    rc::GridPlanner grid_planner_;
     bool          escape_active_ = false;       // an escape maneuver currently owns the base
     std::uint64_t escape_start_ms_ = 0;         // escape start time (for the time bound)
     Eigen::Vector2f escape_start_pos_ = Eigen::Vector2f::Zero();  // pose at escape start (distance bound)

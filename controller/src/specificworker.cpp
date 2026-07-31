@@ -303,10 +303,10 @@ void SpecificWorker::compute()
 		if (now_ms - last_rate_log_ms >= 5000)
 		{
 			last_rate_log_ms = now_ms;
-			std::println("[vel-out] {} ticks | period mean {:.1f} ms max {:.1f} ms | cmd age max {:.0f} ms | "
-			             "freshness scale min {:.2f}",
+			std::println("[vel-out] {} ticks | period mean {:.1f} ms WORST {:.1f} ms | ice mean {:.1f} ms "
+			             "max {:.1f} ms | cmd age max {:.0f} ms | freshness min {:.2f}",
 			             stats.ticks, stats.period_mean_ms, stats.period_max_ms,
-			             stats.cmd_age_max_ms, stats.scale_min);
+			             stats.ice_mean_ms, stats.ice_max_ms, stats.cmd_age_max_ms, stats.scale_min);
 		}
 	}
 
@@ -373,10 +373,21 @@ void SpecificWorker::compute()
 /////////////////////////////////////////////////////////////////
 // ─── State machine ─────────────────────────────────────────────────────────
 
+float SpecificWorker::worst_compute_period_ms_ = 0.f;
+
 void SpecificWorker::log_compute_perf(FPSCounter &counter)
 {
 	counter.cont++;
 	const auto now = std::chrono::high_resolution_clock::now();
+	// Track the worst gap between consecutive compute() completions inside this reporting window.
+	{
+		static std::chrono::high_resolution_clock::time_point last_call{};
+		if (last_call.time_since_epoch().count() != 0)
+			worst_compute_period_ms_ = std::max(
+				worst_compute_period_ms_,
+				static_cast<float>(std::chrono::duration<double, std::milli>(now - last_call).count()));
+		last_call = now;
+	}
 	const auto elapsed_ms = std::chrono::duration<double, std::milli>(now - counter.begin).count();
 	if (elapsed_ms < 1000.0)
 		return;
@@ -385,7 +396,19 @@ void SpecificWorker::log_compute_perf(FPSCounter &counter)
 	counter.period = 1000;
 	const float fps = counter.get_frequency();
 	const float cpu = std::max(0.f, counter.get_cpu_use());
-	qInfo("[CTRL] fps=%.1f cpu=%.0f%% period=%.1fms", fps, cpu, counter.get_period());
+	// std::println, NOT qInfo. genericworker installs a NO-OP Qt message handler whenever
+	// Component.Debug.Verbose is false, which silently eats every qInfo/qDebug in the process — that is why
+	// this line never appeared. It is not a miswired initialization: table_concept's generated handler block
+	// is byte-identical and its config also has Verbose=false, so its qInfo is swallowed too; everything you
+	// actually see from these agents (table_concept, residual_concept) is printed with std::println. Setting
+	// Verbose=true would restore qInfo globally, at the cost of un-swallowing every Qt/library message too.
+	//
+	// MEAN period alone hid the problem: the loop's median is ~105 ms against a 100 ms target and looks
+	// healthy, while the tail runs past a second. So report the WORST period in the window as well — that is
+	// the number that corresponds to what you feel as a stall.
+	std::println("[CTRL] fps={:.1f} cpu={:.0f}% period mean {:.1f} ms  WORST {:.1f} ms",
+	             fps, cpu, counter.get_period(), worst_compute_period_ms_);
+	worst_compute_period_ms_ = 0.f;
 	counter.begin = now;
 	counter.cont = 0;
 }
@@ -462,6 +485,7 @@ void SpecificWorker::load_params()
 	load_optional_cast<double>("Controller.WaypointTolerance", params.waypoint_tolerance_m);
 	load_optional_cast<double>("Controller.MaxAdvSpeed", params.max_adv_speed_mps);
 	load_optional_cast<double>("Controller.MaxRotSpeed", params.max_rot_speed_rps);
+	load_optional_cast<double>("Controller.FootprintSafetyMarginM", params.footprint_safety_margin_m);
 	load_optional_cast<double>("Controller.PosGain", params.pos_gain);
 	load_optional_cast<double>("Controller.RotGain", params.rot_gain);
 	load_optional_cast<double>("Controller.VelocityOutputPeriodMs", params.velocity_output_period_ms);
