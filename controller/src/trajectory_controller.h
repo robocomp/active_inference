@@ -5,6 +5,8 @@
 #include <random>
 #include <Eigen/Dense>
 
+#include "../../common/robot_footprint/robot_footprint.h"
+
 #include "lidar_buffer_types.h"
 
 namespace rc
@@ -357,6 +359,10 @@ private:
     std::vector<Eigen::Vector2f> path_room_;
     int wp_index_ = 0;
     std::optional<float> goal_facing_yaw_;  // desired room-frame facing dir after arrival
+    // The robot's real shape — the SAME polygon the global planner collides (common/robot_footprint), so the
+    // two layers cannot disagree about what fits. Previously the MPPI used a 0.25 m disc while the planner
+    // used the footprint, which meant the planner could route through a 0.46 m gap the MPPI would then refuse.
+    RobotFootprint footprint_ = RobotFootprint::shadow();
     bool aligning_ = false;                 // true while doing the final in-place rotation
     // Worst-case time the base may keep executing one alignment command before we can revise it. Used to bound
     // the in-place rotation so it cannot overshoot the tolerance band (see the arrival block). Measured p99 of
@@ -470,8 +476,11 @@ private:
 
     // Obstacle scoring helpers (single-weight 2-stage quadratic model)
     float effective_d_safe_for_goal_dist(float goal_dist) const;
-    float obstacle_step_cost(float esdf_val, float d_safe_eff) const;
-    float obstacle_repulsion_strength(float esdf_val, float d_safe_eff) const;
+    // Robot extent toward the nearest obstacle at a pose — the footprint's support function along the
+    // ESDF's negative gradient. Replaces the constant robot_radius disc in the obstacle terms.
+    float body_extent_toward_obstacle(float rx, float ry, float theta) const;
+    float obstacle_step_cost(float esdf_val, float d_safe_eff, float body_r) const;
+    float obstacle_repulsion_strength(float esdf_val, float d_safe_eff, float body_r) const;
 
     // PD carrot-follower (alternative to MPPI)
     ControlOutput compute_pd(ControlOutput& out,

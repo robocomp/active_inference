@@ -107,12 +107,27 @@ float TrajectoryController::effective_d_safe_for_goal_dist(float goal_dist) cons
     return std::clamp(near_safe + blend * (far_safe - near_safe), near_safe, far_safe);
 }
 
-float TrajectoryController::obstacle_step_cost(float esdf_val, float d_safe_eff) const
+float TrajectoryController::body_extent_toward_obstacle(float rx, float ry, float theta) const
 {
-    const float d_safe = std::max(d_safe_eff, active_params_.robot_radius + 1e-3f);
-    const float soft_span = std::max(d_safe - active_params_.robot_radius, 1e-3f);
+    // The ESDF gradient points AWAY from the nearest obstacle, so -grad is the direction the body would have
+    // to reach to touch it. For a convex footprint the reach in that direction is exactly the support
+    // function, so `esdf < support` is an EXACT collision test rather than a disc approximation. Where the
+    // gradient is degenerate (flat field, far from everything) support_radius falls back to the
+    // circumscribed radius, i.e. the old worst-case disc — safe, and only in the region where it cannot matter.
+    const Eigen::Vector2f g = query_esdf_gradient(rx, ry);
+    return footprint_.support_radius(theta, -g);
+}
+
+float TrajectoryController::obstacle_step_cost(float esdf_val, float d_safe_eff, float body_r) const
+{
+    // body_r is the robot's REAL extent toward the nearest obstacle (footprint support function), not a disc
+    // radius. Everything below is unchanged in shape — the only difference is that the body term is now
+    // direction- and heading-dependent, so a rectangle is no longer forced to claim its diagonal in every
+    // direction. d_safe stays what it always was: a PREFERRED standoff beyond the body, i.e. a comfort term.
+    const float d_safe = std::max(d_safe_eff, body_r + 1e-3f);
+    const float soft_span = std::max(d_safe - body_r, 1e-3f);
     const float hard_margin = std::max(active_params_.close_obstacle_margin, 1e-3f);
-    const float hard_threshold = active_params_.robot_radius + hard_margin;
+    const float hard_threshold = body_r + hard_margin;
 
     float soft_penalty = 0.f;
     if (esdf_val < d_safe)
@@ -132,12 +147,12 @@ float TrajectoryController::obstacle_step_cost(float esdf_val, float d_safe_eff)
     return std::min(g_obs, active_params_.obstacle_cost_cap);
 }
 
-float TrajectoryController::obstacle_repulsion_strength(float esdf_val, float d_safe_eff) const
+float TrajectoryController::obstacle_repulsion_strength(float esdf_val, float d_safe_eff, float body_r) const
 {
-    const float d_safe = std::max(d_safe_eff, active_params_.robot_radius + 1e-3f);
-    const float soft_span = std::max(d_safe - active_params_.robot_radius, 1e-3f);
+    const float d_safe = std::max(d_safe_eff, body_r + 1e-3f);
+    const float soft_span = std::max(d_safe - body_r, 1e-3f);
     const float hard_margin = std::max(active_params_.close_obstacle_margin, 1e-3f);
-    const float hard_threshold = active_params_.robot_radius + hard_margin;
+    const float hard_threshold = body_r + hard_margin;
 
     float strength = 0.f;
     if (esdf_val < d_safe)
@@ -1567,7 +1582,7 @@ TrajectoryController::SimResult TrajectoryController::simulate_and_score(
 
         const float dist_goal_step = (Eigen::Vector2f(x, y) - goal_robot).norm();
         const float d_safe_eff = effective_d_safe_for_goal_dist(dist_goal_step);
-        const float G_obs = obstacle_step_cost(esdf_val, d_safe_eff);
+        const float G_obs = obstacle_step_cost(esdf_val, d_safe_eff, body_extent_toward_obstacle(x, y, theta));
 
         // Lateral-clearance shaping (continuous, pre-SG):
         // sample ESDF on both sides of the predicted body at front/center/rear
@@ -1832,7 +1847,9 @@ void TrajectoryController::optimize_seed(Seed& seed, const Eigen::Vector2f& carr
             if (esdf_val < d_safe_eff)
             {
                 Eigen::Vector2f grad = query_esdf_gradient(px[s], py[s]);
-                Eigen::Vector2f obs_correction = obstacle_repulsion_strength(esdf_val, d_safe_eff) * grad;
+                Eigen::Vector2f obs_correction =
+                    obstacle_repulsion_strength(esdf_val, d_safe_eff,
+                                                body_extent_toward_obstacle(px[s], py[s], ptheta[s])) * grad;
                 // Cap obstacle correction to at most 2x the goal correction magnitude
                 float goal_mag = correction.norm();
                 float obs_mag = obs_correction.norm();
