@@ -180,10 +180,47 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         return step;
     }
 
-    const auto target = world_model.read_target_in_room(timestamp_ms);
+    // ── MISSION: above the affordance planner, below a manual click. ──
+    // While a mission runs it is the SOLE target source. That is what makes two runs comparable: if
+    // affordance selection could preempt a benchmark tour, the trajectory would change whenever perception
+    // changed, and the measurement could no longer attribute a difference to the controller. The affordance
+    // planner resumes by itself the moment the mission ends or is stopped — nothing has to re-enable it.
+    if (mission_.running())
+    {
+        if (const auto mission_target = mission_.current_target(); mission_target.has_value())
+        {
+            step.target = *mission_target;
+            current_target_room_ = step.target.room_pos;
+            affordance_manager.clear_current();
+            active_target_id_ = 0;
+            target_wait_logged_ = false;
+
+            const auto safe = grid_planner_.nearest_free(step.target.room_pos, step.target.yaw_rad);
+            if (safe.has_value())
+                step.target.room_pos = *safe;
+
+            step.target_changed = !last_target_info_.has_value()
+                               || last_target_info_->node_name != step.target.node_name;
+            last_target_info_ = step.target;
+            return step;
+        }
+        // Exhausted without anyone calling stop() — close the run out rather than leaving it "running"
+        // with nothing to drive to.
+        mission_.stop("exhausted", timestamp_ms);
+    }
+
+    // THE DRIVE MODE SAYS WHAT DRIVES, and that has to hold when a target is CONSUMED, not just when one is
+    // chosen. Reaching a clicked point used to fall straight through to this branch: the affordance planner
+    // handed over a target on the very next cycle and the robot drove off again, which looked like it was
+    // returning to where it started. A one-click target ENDS at the point clicked.
+    // The same reasoning retires a mission: in "Mission" the selector must not quietly become "Affordances"
+    // the moment a tour finishes.
+    const auto target = rc::uses_mission(mission_.mode()) or mission_.mode() == rc::DriveMode::Target
+                            ? std::nullopt
+                            : world_model.read_target_in_room(timestamp_ms);
     if (!target.has_value())
     {
-        if (!target_wait_logged_)
+        if (!target_wait_logged_ and mission_.mode() == rc::DriveMode::AffordancesOnly)
         {
             qInfo() << "Controller waiting for an affordance target in DSR";
             target_wait_logged_ = true;
@@ -281,6 +318,7 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
     {
         // FOOTPRINT PLANNER. The robot's real shape is tested against the grid; obstacles are NOT inflated.
         // Falls back to nothing — if this cannot find a route, the HOLD branch below reports precisely why.
+        mission_.note_replan();   // counted whether or not it succeeds — a failed replan is the worse one
         if (const auto route = grid_planner_.plan(step.plan_origin, step.target.room_pos); route.has_value())
             current_plan_ = ControllerPathPlan{.room_path = *route};
         else
@@ -411,7 +449,8 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     if (lockon_.active())
     {
         if (step_lockon(motion_commander, time_source))
-            finalize_reached(affordance_manager, path_controller, motion_commander, display);
+            finalize_reached(affordance_manager, path_controller, motion_commander, display,
+                             robot_pose.pos, time_source());
         return;
     }
 
@@ -435,7 +474,8 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                                                                    : last_target_info_->parent_node_id;
                 path_controller.stop();
                 if (step_orient(robot_pose, motion_commander, time_source, last_target_info_->yaw_rad))
-                    finalize_reached(affordance_manager, path_controller, motion_commander, display);
+                    finalize_reached(affordance_manager, path_controller, motion_commander, display,
+                             robot_pose.pos, time_source());
                 return;
             }
         }
@@ -457,6 +497,18 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     last_mppi_average_trajectory_ = control_output.average_trajectory_room;
     last_best_mppi_trajectory_idx_ = control_output.best_trajectory_idx;
     last_display_wp_index_ = std::max(0, control_output.current_wp_index);
+
+    // Mission instrumentation. Sampled from the SAME control output the robot is about to execute, so the
+    // metrics describe what happened rather than what was planned. The clearance recorded is the gap between
+    // the BODY and the nearest obstacle — the ESDF measures from the rotation centre, and reporting that
+    // would flatter every run by one body radius.
+    if (mission_.running())
+    {
+        const float esdf_here = path_controller.clearance_at(0.f, 0.f);
+        const float body_clearance = esdf_here - path_controller.footprint().circumscribed_radius();
+        mission_.sample(robot_pose.pos, control_output.rot, std::abs(control_output.adv),
+                        body_clearance, control_output.safety_guard_triggered, time_source());
+    }
 
     // ── Near-obstacle black box. Fires BEFORE any branch below, so it captures the cycle whether the
     //    controller reacts (blocked/stalled) or keeps driving. It gates on the RAW lidar cloud (the
@@ -691,12 +743,14 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                           active_contract_.stable_n, active_contract_.timeout_ms);
             path_controller.stop();
             if (step_lockon(motion_commander, time_source))
-                finalize_reached(affordance_manager, path_controller, motion_commander, display);
+                finalize_reached(affordance_manager, path_controller, motion_commander, display,
+                             robot_pose.pos, time_source());
             return;
         }
         qInfo() << "[affordance]" << (last_target_info_.has_value() ? last_target_info_->node_name.c_str() : "?")
                 << "reached -> REACH (consume immediately)";
-        finalize_reached(affordance_manager, path_controller, motion_commander, display);
+        finalize_reached(affordance_manager, path_controller, motion_commander, display,
+                             robot_pose.pos, time_source());
         return;
     }
 
@@ -993,8 +1047,18 @@ bool ControllerSession::step_orient(const ControllerRobotPose &robot_pose,
 void ControllerSession::finalize_reached(rc::AffordanceManager &affordance_manager,
                                          rc::TrajectoryController &path_controller,
                                          ControllerMotionCommander &motion_commander,
-                                         ControllerDisplay &display)
+                                         ControllerDisplay &display,
+                                         const Eigen::Vector2f &arrived_at,
+                                         std::uint64_t now_ms)
 {
+    // A mission waypoint is reached the same way any target is; stepping the mission here means arrival
+    // logic exists in exactly one place and a mission cannot drift out of sync with what the robot did.
+    bool mission_continues = false;
+    if (mission_.running())
+    {
+        mission_.advance(arrived_at, now_ms);
+        mission_continues = mission_.running() and mission_.current_target().has_value();
+    }
     if (graph_)
         affordance_manager.mark_reached(graph_);
     lockon_.reset();
@@ -1002,8 +1066,6 @@ void ControllerSession::finalize_reached(rc::AffordanceManager &affordance_manag
     orient_stable_ = 0;
     reset_stuck_state();
     feedback_node_id_ = 0;
-    clear_tracking_state();
-    display.clear_robot_trajectory();
     current_plan_.reset();
     last_target_info_.reset();
     active_target_id_ = 0;
@@ -1011,6 +1073,31 @@ void ControllerSession::finalize_reached(rc::AffordanceManager &affordance_manag
     manual_target_room_.reset();
     manual_target_origin_room_.reset();
     manual_target_dirty_ = false;
+    // The clicked point has been reached, so its marker stops being the thing the robot is driving to.
+    // Leaving it drawn would claim an active target that is already history.
+    mission_.set_click_target(std::nullopt);
+
+    if (mission_continues)
+    {
+        // ── FLY-THROUGH ──
+        // An intermediate waypoint is a place to PASS, not a place to arrive. Stopping at each one would
+        // measure the start/stop transient N times instead of the trajectory, and it is not what the tour
+        // is asking for: the mission already has somewhere else to be.
+        //
+        // So: keep the base moving. current_plan_ is reset so the next cycle plans to the new waypoint, and
+        // the target name changed, so ensure_current_plan hands the follower a fresh path — none of which
+        // needs the base stopped first. Not calling stop_robot() means the motion commander keeps issuing
+        // the last command (under its usual freshness decay) across the one cycle it takes to replan,
+        // instead of a zero that the robot would have to accelerate out of again.
+        // The MPPI's warm start is deliberately left intact for the same reason: it is the continuity.
+        //
+        // The corner-cutting this allows is bounded by the follower's goal threshold, and it is MEASURED —
+        // arrival_error_m records exactly how close to each waypoint the robot actually came.
+        return;
+    }
+
+    clear_tracking_state();
+    display.clear_robot_trajectory();
     path_controller.stop();
     motion_commander.stop_robot();
 }
@@ -1147,6 +1234,7 @@ void ControllerSession::begin_escape(const ControllerRobotPose &robot_pose,
     std::println("[controller] ESCAPE #{} — wedged, reversing and turning {}. Side clearance L={:.2f} R={:.2f} m.",
                  escape_count_ + 1, escape_turn_sign_ > 0 ? "left" : "right", cl, cr);
 
+    mission_.note_escape();
     escape_active_   = true;
     escape_start_ms_ = now_ms;
     escape_start_pos_ = robot_pose.pos;

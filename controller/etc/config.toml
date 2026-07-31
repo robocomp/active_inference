@@ -56,6 +56,14 @@ agent_info_period_ms = 1000
 [Owns]
 nodes = ["controller 8"]
 
+[Mission]
+# Recorded missions: a replayable tour used to validate controller changes. Record one by checking
+# "Record" in the GUI and left-clicking the route in the 2D view; right-click undoes the last point.
+LibraryPath = "etc/missions.toml"
+# Per-leg metrics appended when a run ends (duration, driven length, detour ratio, min body clearance,
+# turning effort, replans, escapes, and lap-to-lap repeatability). Compare runs, not absolutes.
+MetricsCsvPath = "mission_metrics.csv"
+
 [Planner]
 # A* planning grid. Collision is the robot's real footprint tested against this grid, so the ONLY thing
 # this controls is planning resolution/cost — nothing here inflates obstacles.

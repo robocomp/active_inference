@@ -1,8 +1,12 @@
 #include "controller_display.h"
 
 #include <QByteArray>
+#include <QComboBox>
+#include <QInputDialog>
 #include <QPushButton>
 #include <QSettings>
+#include <QSignalBlocker>
+#include <QSpinBox>
 
 namespace
 {
@@ -32,11 +36,11 @@ void ControllerDisplay::save_window_geometry() const
     settings.sync();
 }
 
-void ControllerDisplay::initialize(rc::LidarPointBuffer *lidar_buffer,
-                                   ManualTargetCallback on_manual_target,
-                                   ClearTargetCallback on_clear_target,
-                                   FollowToggleCallback on_follow_toggle)
+void ControllerDisplay::initialize(rc::LidarPointBuffer *lidar_buffer, Callbacks callbacks)
 {
+    const auto on_manual_target = callbacks.on_manual_target;
+    const auto on_clear_target = callbacks.on_clear_target;
+
     // Own top-level window (parent == nullptr), NOT docked into the DSR graph viewer. This decouples
     // the planner GUI from Agent.graph, so the agent runs with graph=false (no DSRViewer). Mirrors
     // room_concept's RoomViewer.
@@ -60,6 +64,12 @@ void ControllerDisplay::initialize(rc::LidarPointBuffer *lidar_buffer,
                          if (on_manual_target)
                              on_manual_target(point);
                      });
+    QObject::connect(viewer_2d_.get(), &rc::Viewer2D::mission_waypoint_moved,
+                     custom_widget_.get(),
+                     [cb = callbacks.on_waypoint_moved](int index, const QPointF &p)
+                     {
+                         if (cb) cb(index, static_cast<float>(p.x()), static_cast<float>(p.y()));
+                     });
     QObject::connect(viewer_2d_.get(), &rc::Viewer2D::right_click,
                      custom_widget_.get(),
                      [on_clear_target](const QPointF &)
@@ -74,15 +84,6 @@ void ControllerDisplay::initialize(rc::LidarPointBuffer *lidar_buffer,
                          if (viewer_2d_)
                              viewer_2d_->set_lidar_visible(checked);
                      });
-    QObject::connect(custom_widget_->follow_toggle_btn, &QPushButton::toggled,
-                     custom_widget_.get(),
-                     [this, on_follow_toggle](bool checked)
-                     {
-                         if (custom_widget_ && custom_widget_->follow_toggle_btn)
-                             custom_widget_->follow_toggle_btn->setText(checked ? "Stop" : "Start");
-                         if (on_follow_toggle)
-                             on_follow_toggle(checked);
-                     });
     QObject::connect(custom_widget_->mppi_paths_toggle_btn, &QPushButton::toggled,
                      custom_widget_.get(),
                      [this](bool checked)
@@ -91,8 +92,36 @@ void ControllerDisplay::initialize(rc::LidarPointBuffer *lidar_buffer,
                              viewer_2d_->set_mppi_paths_visible(checked);
                      });
 
-    if (custom_widget_ && custom_widget_->follow_toggle_btn)
-        custom_widget_->follow_toggle_btn->setText(custom_widget_->follow_toggle_btn->isChecked() ? "Stop" : "Start");
+    mission_panel_ = std::make_unique<rc::MissionPanel>(custom_widget_.get(), callbacks.mission);
+    custom_widget_->attach_mission_panel(mission_panel_.get());
+
+}
+
+void ControllerDisplay::set_mission_list(const std::vector<std::string> &names, const std::string &selected)
+{
+    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+    snapshot_.mission_names = names;
+    snapshot_.mission_selected = selected;
+    snapshot_.mission_list_pending = true;
+}
+
+bool ControllerDisplay::mission_running() const
+{ return mission_panel_ && mission_panel_->mission_running(); }
+
+bool ControllerDisplay::mission_recording() const
+{ return mission_panel_ && mission_panel_->recording(); }
+
+bool ControllerDisplay::confirm_mission_supersede()
+{ return mission_panel_ && mission_panel_->confirm_supersede(); }
+
+void ControllerDisplay::set_mission_state(const rc::MissionPanel::View &view,
+                                          const std::vector<Eigen::Vector2f> &waypoints,
+                                          int current_index)
+{
+    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+    snapshot_.mission_view = view;
+    snapshot_.mission_waypoints = waypoints;
+    snapshot_.mission_index = current_index;
 }
 
 void ControllerDisplay::update(const std::optional<ControllerRobotPose> &robot_pose,
@@ -212,6 +241,7 @@ void ControllerDisplay::present()
         snapshot_.command_text_pending = false;
         snapshot_.selected_affordance_text_pending = false;
         snapshot_.clear_trajectory_pending = false;
+        snapshot_.mission_list_pending = false;
     }
 
     if (!custom_widget_)
@@ -228,6 +258,25 @@ void ControllerDisplay::present()
 
     custom_widget_->set_stuck_active(snap.stuck_active);   // widget dedups same-state calls
     custom_widget_->set_goal_distance(snap.goal_dist_m, snap.goal_yaw_err_rad, snap.goal_aligning);
+    if (mission_panel_)
+    {
+        if (snap.mission_list_pending)
+            mission_panel_->set_missions(snap.mission_names, snap.mission_selected);
+        mission_panel_->apply(snap.mission_view);
+    }
+    if (viewer_2d_)
+        viewer_2d_->draw_mission(snap.mission_waypoints, snap.mission_index, snap.mission_view.recording,
+                                 // Draggable whenever nothing is being measured: editing the route under a
+                                 // running mission would invalidate the run without saying so.
+                                 not snap.mission_view.running);
+    // Mission status rides in the WINDOW TITLE. As a stretchy label in the mission row it forced the whole
+    // window wider than the 2D view needs; the title bar is free real estate and always visible.
+    if (const QString t = snap.mission_view.status.empty()
+                              ? QStringLiteral("controller — planner")
+                              : QStringLiteral("controller — planner · %1")
+                                    .arg(QString::fromStdString(snap.mission_view.status));
+        custom_widget_->windowTitle() != t)
+        custom_widget_->setWindowTitle(t);
 
     if (!snap.valid || !viewer_2d_)
         return;

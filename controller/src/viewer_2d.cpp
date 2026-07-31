@@ -119,6 +119,8 @@ Viewer2D::Viewer2D(QWidget *parent, const QRectF &grid_dim, bool show_axis)
             this, &Viewer2D::new_mouse_coordinates);
     connect(agv_, &AbstractGraphicViewer::right_click,
             this, &Viewer2D::right_click);
+    // Mouse events reach the VIEWPORT, not the view, so the filter goes there.
+    agv_->viewport()->installEventFilter(this);
 }
 
 Viewer2D::~Viewer2D()
@@ -127,6 +129,7 @@ Viewer2D::~Viewer2D()
     clear_path_items();
     clear_room_axis_items();
     clear_robot_trajectory();
+    clear_mission_items();
     clear_polygon_item(polygon_item_);
 }
 
@@ -585,6 +588,152 @@ void Viewer2D::clear_path_items()
         delete item;
     }
     path_draw_items_.clear();
+}
+
+void Viewer2D::clear_mission_items()
+{
+    for (auto *item : mission_items_)
+    {
+        agv_->scene.removeItem(item);
+        delete item;
+    }
+    mission_items_.clear();
+}
+
+void Viewer2D::draw_mission(const std::vector<Eigen::Vector2f> &waypoints, int current_index, bool recording,
+                            bool draggable)
+{
+    // A drag in flight OWNS the waypoint positions. present() redraws every cycle from the control thread's
+    // snapshot, which cannot yet contain the point being dragged — rendering that snapshot mid-drag snapped
+    // the marker back to its old place between mouse moves, which is what made dragging feel like it only
+    // jumped, or did nothing at all for a point whose move was overwritten before it was ever painted.
+    if (drag_index_ < 0)
+    {
+        mission_wps_ = waypoints;
+        mission_draggable_ = draggable;
+    }
+    mission_index_ = current_index;
+    mission_recording_ = recording;
+    render_mission();
+}
+
+void Viewer2D::render_mission()
+{
+    clear_mission_items();
+    if (mission_wps_.empty())
+        return;
+
+    // Violet while recording, teal while running — the two states look nothing alike, because clicking in
+    // the view means "append a waypoint" in one and "drive there now" in the other.
+    const QColor base = mission_recording_ ? QColor(142, 68, 173) : QColor(22, 160, 133);
+
+    QPen link_pen(base.lighter(120), 0.03);
+    link_pen.setCosmetic(false);
+    link_pen.setStyle(Qt::DotLine);
+    for (std::size_t i = 0; i + 1 < mission_wps_.size(); ++i)
+    {
+        auto *line = agv_->scene.addLine(mission_wps_[i].x(), mission_wps_[i].y(),
+                                         mission_wps_[i + 1].x(), mission_wps_[i + 1].y(), link_pen);
+        line->setZValue(17);
+        mission_items_.push_back(line);
+    }
+
+    constexpr float radius = 0.10f;
+    for (std::size_t i = 0; i < mission_wps_.size(); ++i)
+    {
+        const bool is_current = static_cast<int>(i) == mission_index_;
+        const bool is_dragged = static_cast<int>(i) == drag_index_;
+        auto *dot = agv_->scene.addEllipse(-radius, -radius, 2.f * radius, 2.f * radius,
+                                           QPen(is_dragged ? QColor(255, 255, 255) : base.darker(140), 0.02),
+                                           QBrush(is_current ? QColor(241, 196, 15) : base));
+        dot->setPos(mission_wps_[i].x(), mission_wps_[i].y());
+        dot->setZValue(is_current or is_dragged ? 29 : 27);
+        mission_items_.push_back(dot);
+
+        auto *label = agv_->scene.addSimpleText(QString::number(i + 1));
+        label->setBrush(QBrush(Qt::white));
+        QFont f = label->font();
+        f.setPointSizeF(6.0);
+        label->setFont(f);
+        // The scene y axis points down for text; flip so the numbers read the right way up in room frame.
+        label->setTransform(QTransform().scale(0.02, -0.02));
+        const QRectF br = label->boundingRect();
+        label->setPos(mission_wps_[i].x() - 0.02 * br.width() * 0.5,
+                      mission_wps_[i].y() + 0.02 * br.height() * 0.5);
+        label->setZValue(30);
+        mission_items_.push_back(label);
+    }
+}
+
+bool Viewer2D::eventFilter(QObject *watched, QEvent *event)
+{
+    const auto index_valid = [this](int i) { return i >= 0 and i < static_cast<int>(mission_wps_.size()); };
+    // Right-drag a waypoint to move it. The base viewer binds a plain right-press to PANNING, so this
+    // filter consumes the press ONLY when it lands on a waypoint — panning still works everywhere else,
+    // which matters because panning is how you reach the parts of the room you are about to edit.
+    if (agv_ == nullptr or watched != agv_->viewport())
+        return QObject::eventFilter(watched, event);
+
+    // Pick radius in METRES, not pixels: the scene is in metres and the view zooms, so a pixel radius
+    // would grab a different amount of world at every zoom level.
+    constexpr float pick_radius_m = 0.18f;
+
+    const auto scene_pos = [this](QMouseEvent *me)
+    { return agv_->mapToScene(me->position().toPoint()); };
+
+    if (event->type() == QEvent::MouseButtonPress)
+    {
+        auto *me = static_cast<QMouseEvent *>(event);
+        if (me->button() != Qt::RightButton or me->modifiers() != Qt::NoModifier or not mission_draggable_)
+            return false;
+        const QPointF p = scene_pos(me);
+        // COINCIDENT WAYPOINTS ARE NORMAL — a hand-clicked tour that returns to the same corner stacks
+        // several on one spot. Ties go to the HIGHEST index, i.e. the one drawn last and therefore on top,
+        // so what you grab is what you can see. A strict `<` here silently grabbed the lowest index
+        // instead: clicking the visible marker moved a different, buried waypoint, which reads as "this
+        // point won't move" and leaves the edit apparently unsaved.
+        int best = -1;
+        float best_d2 = pick_radius_m * pick_radius_m;
+        for (std::size_t i = 0; i < mission_wps_.size(); ++i)
+        {
+            const float dx = static_cast<float>(p.x()) - mission_wps_[i].x();
+            const float dy = static_cast<float>(p.y()) - mission_wps_[i].y();
+            if (const float d2 = dx * dx + dy * dy; d2 <= best_d2) { best_d2 = d2; best = static_cast<int>(i); }
+        }
+        if (best < 0)
+            return false;                    // not on a waypoint → let the base viewer pan
+        drag_index_ = best;
+        agv_->viewport()->setCursor(Qt::ClosedHandCursor);
+        return true;
+    }
+
+    if (event->type() == QEvent::MouseMove and drag_index_ >= 0)
+    {
+        auto *me = static_cast<QMouseEvent *>(event);
+        const QPointF p = scene_pos(me);
+        if (drag_index_ < static_cast<int>(mission_wps_.size()))
+            mission_wps_[drag_index_] = {static_cast<float>(p.x()), static_cast<float>(p.y())};
+        render_mission();   // follows the cursor immediately, no round trip through the control thread
+        return true;
+    }
+
+    if (event->type() == QEvent::MouseButtonRelease and drag_index_ >= 0)
+    {
+        auto *me = static_cast<QMouseEvent *>(event);
+        if (me->button() != Qt::RightButton)
+            return false;
+        const QPointF p = scene_pos(me);
+        if (index_valid(drag_index_))
+            mission_wps_[drag_index_] = {static_cast<float>(p.x()), static_cast<float>(p.y())};
+        const int index = drag_index_;
+        drag_index_ = -1;
+        agv_->viewport()->unsetCursor();
+        render_mission();
+        emit mission_waypoint_moved(index, p);
+        return true;
+    }
+
+    return QObject::eventFilter(watched, event);
 }
 
 void Viewer2D::update_target_marker(float x, float y, bool visible)

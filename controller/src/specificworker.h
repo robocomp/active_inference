@@ -137,8 +137,11 @@ private:
 	rc::AffordanceManager affordance_manager_;
 	std::string last_selected_affordance_;   // most recent distinct selection (for the "prev" label)
 	std::string prev_selected_affordance_;   // the one selected before it
-	bool path_following_active_ = false;
-	bool stop_sent_when_paused_ = false;
+	// Driving is ON by default. The old Start/Stop toggle duplicated the mission bar's Stop and could
+	// disagree with it, so there is now ONE halt control: Stop halts whatever is driving (mission, click or
+	// affordance) and the next Run / target click / drive-mode change resumes.
+	bool driving_enabled_ = false;
+	bool stop_sent_when_halted_ = false;
 	bool compute_debug_logged_ = false;
 	bool owned_nodes_cleaned_ = false;
 	rc::TrajectoryController path_controller_;
@@ -150,6 +153,15 @@ private:
 	std::optional<PlanningStep> build_planning_step(std::uint64_t timestamp_ms);
 	bool ensure_current_plan(const PlanningStep &step);
 	void update_custom_widget(const std::optional<RobotPose> &robot_pose);
+	// Push the mission library into the dropdown. Called after load and after a recording is saved.
+	void refresh_mission_list();
+	// Push the mission/drive state to the panel. Called from the control loop EVERY iteration, not from
+	// compute(): compute() returns early on any cycle without a target — which is precisely the state Stop
+	// creates — so a push at its tail cannot report the thing the user just did.
+	void push_mission_view();
+	// Where recorded missions live. Alongside the agent's other config, so a tour is versioned with the
+	// settings it was recorded under.
+	std::string missions_path_ = "etc/missions.toml";
 	static void log_compute_perf(FPSCounter &counter);
 	// Worst compute() period inside the current 1 s reporting window. The MEAN hides the problem — it sits at
 	// ~105 ms against a 100 ms target and looks healthy while the tail runs past a second.

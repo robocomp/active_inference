@@ -240,26 +240,126 @@ void SpecificWorker::initialize()
 	// User-input callbacks fire on the GUI thread but mutate session_/path_controller_
 	// state owned by the control thread. Marshal them through the command queue so
 	// they execute on the control thread, avoiding data races with compute().
-	display_.initialize(obstacle_tracker_.lidar_buffer(),
-	                  [this](const QPointF &point) { enqueue_command([this, point]() { set_manual_target(point); }); },
-	                  [this]() { enqueue_command([this]() { clear_manual_target(); }); },
-	                  [this](bool checked)
-	                  {
-	                      enqueue_command([this, checked]()
-	                      {
-	                          path_following_active_ = checked;
-	                          if (checked)
-	                          {
-	                              stop_sent_when_paused_ = false;
-	                          }
-	                          else if (!stop_sent_when_paused_)
-	                          {
-	                              path_controller_.stop();
-	                              stop_robot();
-	                              stop_sent_when_paused_ = true;
-	                          }
-	                      });
-	                  });
+	ControllerDisplay::Callbacks gui;
+	// A left click means "add a waypoint" while recording and "drive there" otherwise. Branching here, on
+	// the control thread, keeps the viewer ignorant of missions — it just reports where you clicked.
+	gui.on_manual_target = [this](const QPointF &point)
+	{
+		// GUI thread. While recording, a click is a waypoint and nothing else. Otherwise the click becomes a
+		// TEMPORARY target that supersedes a running mission — and since that discards the rest of a
+		// measured run, it asks first. The question has to be posed here, on the GUI thread, before the
+		// intent is queued; asking from the control thread would mean a modal dialog off the GUI thread.
+		if (not display_.mission_recording() and display_.mission_running()
+		    and not display_.confirm_mission_supersede())
+			return;
+		enqueue_command([this, point]()
+		{
+			if (session_.mission().recording())
+			{
+				session_.mission().add_point({static_cast<float>(point.x()), static_cast<float>(point.y())});
+				return;
+			}
+			// Supersede: end the run (its CSV rows are closed out as aborted) and drop its overlay, so the
+			// canvas shows the target the robot is actually driving to and not the tour it abandoned.
+			if (session_.mission().running())
+				session_.mission().stop("superseded by click", current_time_ms());
+			// The selector names what is driving, so clicking a point puts it on "Target". Mode first, then
+			// the point: set_mode clears the click target on any transition AWAY from Target.
+			session_.mission().set_mode(rc::DriveMode::Target);
+			session_.mission().set_click_target(Eigen::Vector2f{static_cast<float>(point.x()),
+			                                                    static_cast<float>(point.y())});
+			driving_enabled_ = true;
+			set_manual_target(point);
+		});
+	};
+	gui.on_clear_target = [this]()
+	{
+		enqueue_command([this]()
+		{
+			// While recording, a right click takes back the last waypoint — the same gesture that clears a
+			// target, applied to the thing you are actually building.
+			if (session_.mission().recording()) { session_.mission().undo_point(); return; }
+			session_.mission().set_click_target(std::nullopt);
+			clear_manual_target();
+		});
+	};
+	gui.mission.on_drive_mode = [this](int index)
+	{
+		enqueue_command([this, index]()
+		{
+			session_.mission().set_mode(rc::from_index(index));
+		});
+	};
+	gui.mission.on_select = [this](std::string name)
+	{ enqueue_command([this, name]() { session_.mission().select(name); }); };
+	gui.on_waypoint_moved = [this](int index, float x, float y)
+	{
+		enqueue_command([this, index, x, y]()
+		{
+			// Dragging IS the editor — there is no Edit mode to enter and no Save to remember. So the edit
+			// is persisted immediately; a route silently lost on exit would be worse than a stray write.
+			if (session_.mission().move_waypoint(index, {x, y}))
+				session_.mission().save(missions_path_);
+		});
+	};
+	gui.mission.on_record_begin = [this]()
+	{ enqueue_command([this]() { session_.mission().start_recording(); }); };
+	gui.mission.on_record_finish = [this](std::string name)
+	{
+		enqueue_command([this, name]()
+		{
+			if (name.empty()) { session_.mission().cancel_recording(); return; }
+			if (session_.mission().finish_recording(name))
+			{
+				session_.mission().save(missions_path_);
+				refresh_mission_list();
+			}
+		});
+	};
+	gui.mission.on_delete = [this](std::string name)
+	{
+		enqueue_command([this, name]()
+		{
+			if (session_.mission().remove(name))
+			{
+				session_.mission().save(missions_path_);
+				refresh_mission_list();
+			}
+		});
+	};
+	gui.mission.on_run = [this](int laps)
+	{
+		enqueue_command([this, laps]()
+		{
+			// Without a mission there is nothing to start — Run just lets whatever is driving, drive.
+			if (not rc::uses_mission(session_.mission().mode()))
+			{
+				driving_enabled_ = true;
+				return;
+			}
+			session_.mission().set_click_target(std::nullopt);   // a tour replaces a lingering click target
+			clear_manual_target();
+			if (session_.mission().start(laps, current_time_ms()))
+				driving_enabled_ = true;
+		});
+	};
+	gui.mission.on_stop = [this]()
+	{
+		enqueue_command([this]()
+		{
+			// The ONE halt. Ends the mission, drops any click target, and stops the base whatever was
+			// driving it — including the affordance planner, which would otherwise re-target immediately.
+			session_.mission().stop("user", current_time_ms());
+			session_.mission().set_click_target(std::nullopt);
+			clear_manual_target();
+			driving_enabled_ = false;
+		});
+	};
+
+	display_.initialize(obstacle_tracker_.lidar_buffer(), std::move(gui));
+	session_.mission().set_csv_path(params.mission_csv_path);
+	session_.mission().load(missions_path_);
+	refresh_mission_list();
 	update_custom_widget(std::nullopt);
 
     //initializeCODE
@@ -353,20 +453,27 @@ void SpecificWorker::compute()
 	if (!step.has_value())
 		return;
 
+	// HALT IS CHECKED BEFORE PLANNING, not after. ensure_current_plan() steps an in-flight escape maneuver,
+	// which commands the base directly — so a halt tested further down would leave Stop unable to stop a
+	// robot that was reversing out of a wedge, i.e. exactly when stopping matters most. Nothing below this
+	// point may run while halted; the display still updates so the view stays live.
+	if (!driving_enabled_)
+	{
+		if (!stop_sent_when_halted_)
+		{
+			path_controller_.stop();
+			stop_robot();
+			stop_sent_when_halted_ = true;
+		}
+		update_custom_widget(step->robot_pose);
+		return;
+	}
+	stop_sent_when_halted_ = false;
+
 	if (!ensure_current_plan(*step))
 		return;
 
-	if (path_following_active_)
-	{
-		stop_sent_when_paused_ = false;
-		execute_plan(step->robot_pose);
-	}
-	else if (!stop_sent_when_paused_)
-	{
-		path_controller_.stop();
-		stop_robot();
-		stop_sent_when_paused_ = true;
-	}
+	execute_plan(step->robot_pose);
 	update_custom_widget(step->robot_pose);
 }
 
@@ -467,6 +574,8 @@ bool SpecificWorker::ensure_current_plan(const PlanningStep &step)
 void SpecificWorker::load_params()
 {
 	load_optional_cast<double>("Planner.CellSize", params.planner_cell_size_m);
+	load_optional("Mission.LibraryPath", missions_path_);
+	load_optional("Mission.MetricsCsvPath", params.mission_csv_path);
 	load_optional_cast<double>("Controller.ComfortStandoff", params.comfort_standoff_m);
 	// Grounded EFE affordance selection (common/affordance_manager): nav-cost weight (nats/m) +
 	// commitment hysteresis (nats). G = λ_cost·dist − epistemic_gain; the room/table choice is now
@@ -603,6 +712,25 @@ void SpecificWorker::load_params()
 	path_controller_.set_control_mode(rc::TrajectoryController::ControlMode::MPPI);
 }
 
+void SpecificWorker::refresh_mission_list()
+{
+	display_.set_mission_list(session_.mission().names(), session_.mission().selected_name());
+}
+
+void SpecificWorker::push_mission_view()
+{
+	const auto &mission = session_.mission();
+	display_.set_mission_state(rc::MissionPanel::View{
+	                               .status = mission.status_text(),
+	                               .controls_enabled = rc::uses_mission(mission.mode()),
+	                               .running = mission.running(),
+	                               .recording = mission.recording(),
+	                               .driving = driving_enabled_,
+	                               .mode_index = rc::to_index(mission.mode())},
+	                           mission.display_waypoints(),
+	                           mission.running() ? mission.current_waypoint_index() : -1);
+}
+
 void SpecificWorker::update_custom_widget(const std::optional<RobotPose> &robot_pose)
 {
 	session_.update_display(robot_pose,
@@ -691,6 +819,13 @@ void SpecificWorker::control_loop()
 			for (auto &command : commands)
 				if (command) command();
 		}
+
+		// Reflect mission/drive state EVERY iteration (~20 ms), independent of compute(). Selecting a mode
+		// or pressing Stop changes what the panel must show, and both leave the pipeline with nothing to
+		// plan — so pushing from compute()'s tail meant the UI only caught up on the next cycle that
+		// happened to have a target. That is why the mission list stayed shaded until Run, and why Stop
+		// left the button reading "Stop".
+		push_mission_view();
 
 		// 2) Lidar decode off the GUI thread. LiDAR comes ONLY from the zero-copy media
 		//    plane (robot_concept no longer publishes the laser_* node to DSR). The shared

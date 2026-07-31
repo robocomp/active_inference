@@ -35,6 +35,7 @@
 #endif
 
 #include "../../common/dashboard/timeseries_plot.h"
+#include "controller_mission_panel.h"
 
 
 class Custom_widget : public QWidget
@@ -84,14 +85,8 @@ public:
         lidar_toggle_btn->setCheckable(true);
         lidar_toggle_btn->setChecked(false);
         toolbar_layout->addWidget(lidar_toggle_btn);
+        toolbar_layout_ = toolbar_layout;
 
-        follow_toggle_btn = new QPushButton("Start", toolbar);
-        follow_toggle_btn->setCheckable(true);
-        follow_toggle_btn->setChecked(false);
-        follow_toggle_btn->setStyleSheet(
-            "QPushButton:checked { background-color: #c0392b; color: white; font-weight: bold; }"
-            "QPushButton:!checked { background-color: #27ae60; color: white; font-weight: bold; }");
-        toolbar_layout->addWidget(follow_toggle_btn);
 
         mppi_paths_toggle_btn = new QPushButton("MPPI paths", toolbar);
         mppi_paths_toggle_btn->setCheckable(true);
@@ -127,6 +122,11 @@ public:
         toolbar_layout->addWidget(stuck_status_label_);
 
         main_layout->addWidget(toolbar);
+
+        // ---- mission row ----
+        // All of it lives in MissionPanel; this widget only decides WHERE it goes.
+        // Created later by attach_mission_panel(), because it needs the worker's callbacks.
+        mission_row_index = main_layout->count();
 
         frame = new QFrame(this);
         frame->setFrameShape(QFrame::StyledPanel);
@@ -213,11 +213,28 @@ public:
         }
     }
 
+
 public:
     QFrame *frame = nullptr;
+    rc::MissionPanel *mission_panel = nullptr;
+    int mission_row_index = 0;   // where attach_mission_panel() inserts the panel
+    QHBoxLayout *toolbar_layout_ = nullptr;   // top line; hosts the drive button
+
+    void attach_mission_panel(rc::MissionPanel *panel)
+    {
+        mission_panel = panel;
+        if (panel == nullptr)
+            return;
+        if (auto *lay = qobject_cast<QVBoxLayout *>(layout()); lay != nullptr)
+            lay->insertWidget(mission_row_index, panel);
+        // The drive control is the primary action, so it goes FIRST on the top toolbar rather than at the
+        // end of the mission row. The panel still owns it; this only decides where it is shown.
+        if (toolbar_layout_ != nullptr and panel->drive_button() != nullptr)
+            toolbar_layout_->insertWidget(0, panel->drive_button());
+    }
+
     rc::TimeSeriesPlot *affordance_efe_plot = nullptr;
     QPushButton *lidar_toggle_btn = nullptr;
-    QPushButton *follow_toggle_btn = nullptr;
     QPushButton *mppi_paths_toggle_btn = nullptr;
 
 private:

@@ -14,6 +14,8 @@ LIST(APPEND SOURCES
   ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_coordinator/agent_presence_coordinator.cpp
   ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_monitor/agent_presence_monitor.cpp
   ${ACTIVE_INFERENCE_COMMON_DIR}/robust_metrics/robust_metrics.cpp
+  ../src/controller_mission.cpp
+  ../src/controller_mission_panel.cpp
   ../src/grid_planner.cpp
   ${ACTIVE_INFERENCE_COMMON_DIR}/robot_footprint/robot_footprint.cpp
   ../src/trajectory_controller.cpp
@@ -47,6 +49,8 @@ LIST(APPEND HEADERS
   ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_monitor/agent_presence_monitor.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/robust_metrics/robust_metrics.h
   ../src/custom_widget.h
+  ../src/controller_mission.h
+  ../src/controller_mission_panel.h
   ../src/grid_planner.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/robot_footprint/robot_footprint.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/timeseries_plot.h

@@ -53,6 +53,9 @@ struct ControllerParams
     // make a reachable goal unreachable. It used to be `clearance_m` and did three unrelated jobs at once —
     // it also shrank the navigable room polygon by its own value and set the MPPI's disc radius to half of it.
     float comfort_standoff_m = 0.5f;
+    // Per-leg mission metrics are appended here when a run ends. Empty disables the file (the console
+    // summary is printed either way).
+    std::string mission_csv_path = "mission_metrics.csv";
     float max_adv_speed_mps = 0.7f;
     float max_rot_speed_rps = 0.8f;
     float pos_gain = 1.2f;

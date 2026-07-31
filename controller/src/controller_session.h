@@ -10,6 +10,7 @@
 
 #include "controller_display.h"
 #include "controller_lockon.h"
+#include "controller_mission.h"
 #include "../../common/affordance_protocol/affordance_protocol.h"
 #include "controller_motion_commander.h"
 #include "controller_obstacle_tracker.h"
@@ -80,6 +81,12 @@ public:
     void stop(rc::TrajectoryController &path_controller,
               ControllerMotionCommander &motion_commander);
 
+    // The session is where targets are arbitrated (mouse > mission > affordance), so the mission runner
+    // lives here rather than in the worker — the alternative is a fourth party that has to be consulted
+    // by everyone who asks "what are we driving to".
+    rc::MissionRunner &mission() { return mission_; }
+    const rc::MissionRunner &mission() const { return mission_; }
+
 private:
     void clear_tracking_state();
 
@@ -104,10 +111,14 @@ private:
                                       const ControllerRobotPose &robot_pose,
                                       std::uint64_t timestamp_ms);
     bool robot_still() const;
+    // `arrived_at` / `now_ms` let a running mission close out the leg it just finished and step to the
+    // next waypoint. The affordance path ignores them.
     void finalize_reached(rc::AffordanceManager &affordance_manager,
                           rc::TrajectoryController &path_controller,
                           ControllerMotionCommander &motion_commander,
-                          ControllerDisplay &display);
+                          ControllerDisplay &display,
+                          const Eigen::Vector2f &arrived_at,
+                          std::uint64_t now_ms);
 
     // ── Physical-wedge recovery ──────────────────────────────────────────────────────
     // Debounce over a per-cycle wedge signal supplied by the caller. A wedge is a PREDICTION ERROR and
@@ -187,6 +198,7 @@ private:
     // ~1.2e8 segment tests at 154 polygons and stopped returning). Collision is the authored footprint, not an
     // inflated obstacle, so the six stacked C-space margins collapse to one explicit safety_margin_m.
     rc::GridPlanner grid_planner_;
+    rc::MissionRunner mission_;
     bool          escape_active_ = false;       // an escape maneuver currently owns the base
     std::uint64_t escape_start_ms_ = 0;         // escape start time (for the time bound)
     Eigen::Vector2f escape_start_pos_ = Eigen::Vector2f::Zero();  // pose at escape start (distance bound)

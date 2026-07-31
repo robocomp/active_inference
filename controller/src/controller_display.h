@@ -14,22 +14,41 @@
 #include <QString>
 
 #include "controller_runtime_types.h"
+#include "controller_mission_panel.h"
 #include "custom_widget.h"
 #include "viewer_2d.h"
 
 class ControllerDisplay
 {
 public:
-    using ManualTargetCallback = std::function<void(const QPointF &)>;
-    using ClearTargetCallback = std::function<void()>;
-    using FollowToggleCallback = std::function<void(bool)>;
+    // Everything the GUI can ask the worker to do. Bundled rather than passed positionally: the list grew
+    // past the point where a caller could get the order right by reading the call site.
+    struct Callbacks
+    {
+        std::function<void(const QPointF &)> on_manual_target;   // left click in the 2D view
+        std::function<void()>                on_clear_target;    // Ctrl+right click
+        // A mission waypoint was dragged to a new place (index, room x, room y).
+        std::function<void(int, float, float)> on_waypoint_moved;
+        // Everything mission-shaped is the panel's own vocabulary; the display just forwards it.
+        rc::MissionPanel::Callbacks          mission;
+    };
 
     // Creates the planner GUI as its OWN top-level window (not docked into the DSR graph viewer),
     // so the agent runs with Agent.graph=false. Mirrors room_concept's RoomViewer.
-    void initialize(rc::LidarPointBuffer *lidar_buffer,
-                    ManualTargetCallback on_manual_target,
-                    ClearTargetCallback on_clear_target,
-                    FollowToggleCallback on_follow_toggle);
+    void initialize(rc::LidarPointBuffer *lidar_buffer, Callbacks callbacks);
+
+    // Repopulate the mission dropdown (after load, or after a recording is saved). Thread-safe: STAGED,
+     // then applied on the GUI thread in present(). It is called from the control thread (a save finishing),
+     // and touching a QComboBox from there is undefined behaviour, not merely untidy.
+    void set_mission_list(const std::vector<std::string> &names, const std::string &selected);
+    // Stage the mission readout + waypoint overlay. Thread-safe, like update().
+    void set_mission_state(const rc::MissionPanel::View &view,
+                           const std::vector<Eigen::Vector2f> &waypoints,
+                           int current_index);
+    // GUI thread. True if a mission is running, so a click can ask before cancelling it.
+    bool mission_running() const;
+    bool mission_recording() const;
+    bool confirm_mission_supersede();
 
     // Persist the standalone window's geometry (call on shutdown, GUI thread).
     void save_window_geometry() const;
@@ -96,11 +115,19 @@ private:
         std::optional<float> goal_dist_m;
         std::optional<float> goal_yaw_err_rad;
         bool goal_aligning = false;
+        // Mission overlay + readout.
+        rc::MissionPanel::View mission_view;
+        std::vector<Eigen::Vector2f> mission_waypoints;
+        int mission_index = -1;
+        std::vector<std::string> mission_names;
+        std::string mission_selected;
+        bool mission_list_pending = false;
     };
 
     void restore_window_geometry();
 
     std::unique_ptr<Custom_widget> custom_widget_;
+    std::unique_ptr<rc::MissionPanel> mission_panel_;
     std::unique_ptr<rc::Viewer2D> viewer_2d_;
     bool room_view_fitted_ = false;
     std::unordered_set<std::string> efe_series_known_;   // plot series already registered
