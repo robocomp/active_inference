@@ -63,6 +63,10 @@ LibraryPath = "etc/missions.toml"
 # Per-leg metrics appended when a run ends (duration, driven length, detour ratio, min body clearance,
 # turning effort, replans, escapes, and lap-to-lap repeatability). Compare runs, not absolutes.
 MetricsCsvPath = "mission_metrics.csv"
+# One JSON record per completed run, at <RunDir>/<mission>/<YYYYmmdd-HHMMSS>.json — mission name, date,
+# laps, the config it ran under, every per-leg metric and the roll-up. One file per run on purpose: an
+# appending log cannot survive a schema change (see the header guard on the CSV). Empty disables.
+RunDir = "etc/runs"
 
 [Planner]
 # A* planning grid. Collision is the robot's real footprint tested against this grid, so the ONLY thing
@@ -72,10 +76,48 @@ CellSize = 0.06
 [Controller]
 # Preferred standoff BEYOND the robot's real extent (MPPI d_safe). Comfort only: raising it makes the robot
 # keep its distance, and can never make a reachable goal unreachable — the footprint test decides that.
-ComfortStandoff = 0.5
+# 2026-08-01: 0.50 -> 0.60, once the room boundary was injected into the MPPI's ESDF and walls stopped
+# disappearing at close range. The cost is ((d_safe - esdf) / (d_safe - body))^2, so this both extends the
+# reach of the push and steepens it: at the 0.44 m ESDF reading the tour used to hold near walls, the
+# penalty goes from 0.12 to 0.30. Measured body clearance was 0.117 min / 0.128 p05 against a 0.175 m
+# target; expect roughly 0.19 against the new 0.275 m target. Verify with p05_clearance_m, not min.
+ComfortStandoff = 0.6
+# ── Cross-cycle control continuity (the smoothness term the objective was missing) ──
+# Penalises how far a rollout's first control sits from the command ACTUALLY EXECUTED last cycle,
+# normalised by the kinematic limits — so a full-scale reversal costs exactly LambdaContinuity per
+# channel, whatever units the base uses. The measured defect is a ~5 Hz cross-cycle reversal
+# (+0.456 -> -0.457 rad/s in 100 ms) and nothing in the MPPI objective could see it.
+# 0 = OFF = the pre-existing behaviour, so a baseline recorded without it stays comparable.
+# Raise it and watch rot_reversals / SPARC_w fall; watch for sluggishness, which is what it buys with.
+# How many waypoints BEYOND the current one the follower's path extends. 1 = the old behaviour: the
+# path ends at the next waypoint, so the speed terms treat every waypoint as an arrival and decelerate
+# into it (nominal seed scales down inside 1.0 m, straight-speed override off inside 1.5 m). With 1.28 m
+# legs that is the whole tour. 3 gives the speed terms a far horizon; arrival is still judged at the
+# near waypoint. Costs one extra A* per extra waypoint (~0.5 ms each).
+PathHorizonWaypoints = 1
+# ── Continuous-route mode ──
+# true: the whole mission is planned once and fitted to a curvature-continuous (C2) curve, then driven
+# in arc-length coordinates. No per-waypoint target, no arrival radius, no per-waypoint replan — the
+# three mechanisms that made the robot decelerate into every waypoint and never reach cruise.
+# Waypoints still DEFINE the route and still delimit legs for the metrics; they just stop being goals.
+# RouteSmoothing is the corner-rounding scale; measured on this tour it has an interior optimum near
+# 0.40 m (smoother AND shorter than either 0.25 or 0.60).
+RouteContinuous = true
+# Fit the same C2 curve to EVERY planned path, not just missions — a clicked target gets the smooth
+# route a tour gets, and it is drawn on the canvas the same way. Independent of RouteContinuous, which
+# only governs how a MISSION is driven.
+SmoothPlannedPath = true
+RouteSpacing = 0.05
+RouteSmoothing = 0.40
+LambdaContinuity = 0.0
+ContinuityRotFactor = 1.0
 AffordanceLambdaCost = 0.2    # grounded EFE selection nav-cost weight (nats per metre): G = λ·dist − ΔH
 AffordanceSwitchMargin = 0.5  # commitment hysteresis (nats): held affordance must be beaten by this much to switch
 MaxAdvSpeed = 0.7
+# Lateral-acceleration budget, m/s^2. Sets BOTH the curvature speed ceiling (v = sqrt(a_lat/kappa), so the
+# robot arrives at a corner already slow enough to follow it) and the route optimiser's curvature
+# normaliser. Lower = gentler corners and slower laps; it does not affect straight-line speed at all.
+MaxLateralAccel = 1.0
 MaxRotSpeed = 0.8
 PosGain = 1.2
 RotGain = 1.5

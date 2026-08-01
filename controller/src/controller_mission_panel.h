@@ -40,6 +40,7 @@ public:
         // Empty name ⇒ the user cancelled; discard whatever was being recorded or edited.
         std::function<void(std::string)> on_record_finish;
         std::function<void(std::string)> on_delete;
+        std::function<void()>            on_smooth;
         std::function<void(int)>         on_run;           // laps
         std::function<void()>            on_stop;
     };
@@ -54,6 +55,7 @@ public:
         bool driving = false;            // is the base allowed to move right now?
         int  mode_index = 0;             // rc::to_index(mode); the selector follows the state, not only clicks
         int  recorded_points = 0;        // points placed so far in the recording being built
+        int  laps_remaining = 0;         // countdown incl. the lap in progress; 0 when idle
     };
 
     explicit MissionPanel(QWidget *parent, Callbacks callbacks);
@@ -64,6 +66,7 @@ public:
     QPushButton *drive_button() const { return drive_btn_; }
 
     void set_missions(const std::vector<std::string> &names, const std::string &selected);
+    void rebuild_actions(bool recording, int recorded_points);
     void apply(const View &view);
 
     // Is a mission running RIGHT NOW? Cached from the last apply() so the GUI thread can answer without
@@ -83,15 +86,20 @@ private:
     Callbacks cb_;
     QComboBox   *drive_mode_ = nullptr;
     QComboBox   *missions_ = nullptr;
-    QPushButton *record_btn_ = nullptr;
-    QPushButton *delete_btn_ = nullptr;
+    // One action menu for everything that acts ON the selected mission, instead of a button per verb.
+    // It is a MENU, not a state: it snaps back to its placeholder after firing, so it never claims to
+    // show a current value it does not have.
+    QComboBox   *actions_ = nullptr;
     QSpinBox    *loops_ = nullptr;
+    QLCDNumber  *laps_left_ = nullptr;
+    int  laps_left_shown_ = -1;
     QPushButton *drive_btn_ = nullptr;
 
     bool running_ = false;
     bool recording_ = false;
     bool driving_ = false;
     int  recorded_points_ = 0;
+    bool recording_was_ = false;
     // Status is NOT shown in this row: a stretchy label with lap/waypoint text forced the whole window
     // wider than the 2D view needed. It goes in the WINDOW TITLE instead, which costs no layout width.
     std::string status_;

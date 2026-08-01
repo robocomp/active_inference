@@ -53,10 +53,41 @@ struct ControllerParams
     // make a reachable goal unreachable. It used to be `clearance_m` and did three unrelated jobs at once —
     // it also shrank the navigable room polygon by its own value and set the MPPI's disc radius to half of it.
     float comfort_standoff_m = 0.5f;
-    // Per-leg mission metrics are appended here when a run ends. Empty disables the file (the console
+    // Cross-cycle control-continuity cost in the MPPI (see TrajectoryController::Params).
+    // 0 = off, which is the pre-existing behaviour and the baseline condition.
+    // How many waypoints BEYOND the current one the follower's path should extend. 1 = the previous
+    // behaviour (path ends at the next waypoint, so every waypoint is an arrival and a deceleration).
+    int path_horizon_waypoints = 1;
+    // true  = the mission is driven as ONE continuous curve (RouteFollower): no waypoint targets, no
+    //         arrival radius, no per-waypoint replan, curvature-continuous.
+    // false = the previous waypoint-by-waypoint behaviour.
+    bool route_continuous = false;
+    // Fit the C2 curve to EVERY planned path — click targets and affordance targets too, not only
+    // missions. Independent of route_continuous, which is about how a MISSION is driven.
+    bool smooth_planned_path = true;
+    float route_spacing_m = 0.05f;
+    float route_smoothing_m = 0.40f;
+    // Variationally optimise the route's control polygon before it is driven (route_optimizer.h).
+    // ★OFF by default — DISABLED 2026-08-01 after it wrecked a live route. Measured on the apartment tour:
+    // max control-point movement 24.8 m, min clearance 0.020 -> 0.000 m (it made its OWN safety term
+    // worse), 913 of 1324 samples rejected by the feasibility pass, and a route that doubled back around
+    // the table. The objective was ~69 with the clearance term bounded above by 1, so the anchor term was
+    // swamping everything — the same dilution failure the MPPI's G_info had, in a new place. Do not turn
+    // this on again until the term balance is diagnosed and the corridor test is extended to a real tour.
+    bool route_optimize = false;
+    float lambda_continuity = 0.0f;
+    float continuity_rot_factor = 1.0f;
+    // One row of continuous trajectory statistics per completed run is appended here. Empty disables the file (the console
     // summary is printed either way).
     std::string mission_csv_path = "mission_metrics.csv";
+    // One JSON per completed run, under <dir>/<mission>/. Empty disables.
+    std::string mission_run_dir = "etc/runs";
     float max_adv_speed_mps = 0.7f;
+    // Lateral-acceleration budget. ONE number with two consumers, deliberately: it sets the route
+    // optimiser's curvature normaliser (rho = v_max^2 / a_lat) and the controller's curvature speed
+    // ceiling (v = sqrt(a_lat / kappa)). If they disagreed, the route would be shaped for a comfort
+    // level the controller then refused to drive at.
+    float max_lateral_accel_mps2 = 1.0f;
     float max_rot_speed_rps = 0.8f;
     float pos_gain = 1.2f;
     float rot_gain = 1.5f;

@@ -210,7 +210,11 @@ void SpecificWorker::initialize()
 	                                 &world_model_,
 	                                 omnirobot_proxy,
 	                                 agent_id,
-	                                 [this](const QString &text) { display_.set_command_text(text); });
+	                                 [this](float adv, float side, float rot)
+	                                 { display_.set_command_values(adv, side, rot); });
+	motion_commander_.set_profile_sink(
+	    [this](std::uint64_t t_ms, float adv, float side, float rot, float freshness)
+	    { session_.mission().add_profile_sample(t_ms, adv, side, rot, freshness); });
 	path_controller_.set_lidar_buffer(obstacle_tracker_.lidar_buffer());
 
 	// Media-plane LiDAR: the graph is already loaded here, so verify the producer's
@@ -327,10 +331,32 @@ void SpecificWorker::initialize()
 			}
 		});
 	};
+	gui.mission.on_smooth = [this]()
+	{
+		enqueue_command([this]()
+		{
+			// Smoothing rewrites the authored route, so it is persisted at once — the same reasoning
+			// as a waypoint drag: there is no separate save step to remember.
+			if (session_.smooth_selected_mission() > 0)
+				session_.mission().save(missions_path_);
+		});
+	};
 	gui.mission.on_run = [this](int laps)
 	{
 		enqueue_command([this, laps]()
 		{
+			// Stamp the run with the configuration it was produced under. Comparing two runs is only
+			// meaningful if you can tell whether the ROBOT changed between them, and by the time the
+			// numbers are read the config has usually moved on.
+			session_.mission().set_run_context(rc::MissionRunContext{
+			    .build = "",
+			    .max_adv_mps = params.max_adv_speed_mps,
+			    .max_rot_rps = params.max_rot_speed_rps,
+			    .comfort_standoff_m = params.comfort_standoff_m,
+			    .footprint_safety_margin_m = params.footprint_safety_margin_m,
+			    .planner_cell_size_m = params.planner_cell_size_m,
+			    .body_inscribed_m = path_controller_.footprint().inscribed_radius(),
+			    .body_circumscribed_m = path_controller_.footprint().circumscribed_radius()});
 			// Without a mission there is nothing to start — Run just lets whatever is driving, drive.
 			if (not rc::uses_mission(session_.mission().mode()))
 			{
@@ -339,8 +365,18 @@ void SpecificWorker::initialize()
 			}
 			session_.mission().set_click_target(std::nullopt);   // a tour replaces a lingering click target
 			clear_manual_target();
-			if (session_.mission().start(laps, current_time_ms()))
-				driving_enabled_ = true;
+			const bool started = session_.mission().start(laps, current_time_ms());
+			// A new run starts with a clean canvas: the driven trace belongs to the run that drew it, and
+			// leaving the previous one on screen makes two different runs look like one confused path.
+			if (started) display_.clear_robot_trajectory();
+			if (started) driving_enabled_ = true;
+			// Say what Run actually decided. Driving is only enabled when the mission starts, so a
+			// refused start leaves the robot halted — and without this line that is silent from the
+			// user's side, who sees a button that did nothing.
+			std::println("[mission] RUN: mode={} mission='{}' laps={} -> {}  (driving {})",
+			             rc::to_string(session_.mission().mode()),
+			             session_.mission().selected_name(), laps,
+			             started ? "STARTED" : "REFUSED", driving_enabled_ ? "on" : "OFF");
 		});
 	};
 	gui.mission.on_stop = [this]()
@@ -358,6 +394,7 @@ void SpecificWorker::initialize()
 
 	display_.initialize(obstacle_tracker_.lidar_buffer(), std::move(gui));
 	session_.mission().set_csv_path(params.mission_csv_path);
+	session_.mission().set_run_dir(params.mission_run_dir);
 	session_.mission().load(missions_path_);
 	refresh_mission_list();
 	update_custom_widget(std::nullopt);
@@ -423,7 +460,7 @@ void SpecificWorker::compute()
 		                                                     : QString::fromStdString(current_affordance_name);
 		const QString prev = prev_selected_affordance_.empty() ? QStringLiteral("—")
 		                                                       : QString::fromStdString(prev_selected_affordance_);
-		display_.set_selected_affordance_text(cur + QStringLiteral("   (prev: ") + prev + QStringLiteral(")"));
+		display_.set_selected_affordance(cur, prev);
 	};
 	update_selected_affordance_label();
 
@@ -576,6 +613,7 @@ void SpecificWorker::load_params()
 	load_optional_cast<double>("Planner.CellSize", params.planner_cell_size_m);
 	load_optional("Mission.LibraryPath", missions_path_);
 	load_optional("Mission.MetricsCsvPath", params.mission_csv_path);
+	load_optional("Mission.RunDir", params.mission_run_dir);
 	load_optional_cast<double>("Controller.ComfortStandoff", params.comfort_standoff_m);
 	// Grounded EFE affordance selection (common/affordance_manager): nav-cost weight (nats/m) +
 	// commitment hysteresis (nats). G = λ_cost·dist − epistemic_gain; the room/table choice is now
@@ -588,6 +626,7 @@ void SpecificWorker::load_params()
 		                                         static_cast<float>(aff_switch_margin));
 	}
 	load_optional_cast<double>("Controller.MaxAdvSpeed", params.max_adv_speed_mps);
+	load_optional_cast<double>("Controller.MaxLateralAccel", params.max_lateral_accel_mps2);
 	load_optional_cast<double>("Controller.MaxRotSpeed", params.max_rot_speed_rps);
 	load_optional_cast<double>("Controller.FootprintSafetyMarginM", params.footprint_safety_margin_m);
 	load_optional_cast<double>("Controller.PosGain", params.pos_gain);
@@ -702,6 +741,16 @@ void SpecificWorker::load_params()
 	// No robot_radius: the MPPI derives every body extent from the footprint itself. d_safe is the ONE
 	// standoff knob, and it is comfort only — the hard constraint is the footprint test.
 	path_controller_.params.d_safe = params.comfort_standoff_m;
+	load_optional("Controller.PathHorizonWaypoints", params.path_horizon_waypoints);
+	load_optional("Controller.RouteContinuous", params.route_continuous);
+	load_optional("Controller.SmoothPlannedPath", params.smooth_planned_path);
+	load_optional_cast<double>("Controller.RouteSpacing", params.route_spacing_m);
+	load_optional_cast<double>("Controller.RouteSmoothing", params.route_smoothing_m);
+	load_optional("Controller.RouteOptimize", params.route_optimize);
+	load_optional_cast<double>("Controller.LambdaContinuity", params.lambda_continuity);
+	load_optional_cast<double>("Controller.ContinuityRotFactor", params.continuity_rot_factor);
+	path_controller_.params.lambda_continuity = std::max(0.f, params.lambda_continuity);
+	path_controller_.params.continuity_rot_factor = std::max(0.f, params.continuity_rot_factor);
 	path_controller_.params.min_adv_cmd = 0.f;
 	path_controller_.params.goal_clearance_relax_dist = std::max(0.05f, params.goal_clearance_relax_dist_m);
 	path_controller_.params.goal_obstacle_margin = std::max(0.f, params.goal_obstacle_margin_m);
@@ -710,6 +759,14 @@ void SpecificWorker::load_params()
 	path_controller_.params.straight_speed_clearance_margin = std::max(0.f, params.straight_speed_clearance_margin_m);
 	path_controller_.params.straight_speed_min_goal_dist = std::max(0.f, params.straight_speed_min_goal_dist_m);
 	path_controller_.set_control_mode(rc::TrajectoryController::ControlMode::MPPI);
+	// Say which way the robot will be driven, at startup, unconditionally. Two attempts at diagnosing
+	// "it still does the old thing" were spent reasoning about whether a flag had arrived; one printed
+	// line settles it.
+	std::println("[route] mode = {}   (RouteContinuous={}, spacing={:.2f} m, smoothing={:.2f} m, "
+	             "PathHorizonWaypoints={}, LambdaContinuity={:.1f}, SmoothPlannedPath={})",
+	             params.route_continuous ? "CONTINUOUS (one C2 curve, arc-length)" : "WAYPOINTS (per-leg)",
+	             params.route_continuous, params.route_spacing_m, params.route_smoothing_m,
+	             params.path_horizon_waypoints, params.lambda_continuity, params.smooth_planned_path);
 }
 
 void SpecificWorker::refresh_mission_list()
@@ -727,9 +784,10 @@ void SpecificWorker::push_mission_view()
 	                               .recording = mission.recording(),
 	                               .driving = driving_enabled_,
 	                               .mode_index = rc::to_index(mission.mode()),
-	                               .recorded_points = static_cast<int>(mission.recorded().size())},
+	                               .recorded_points = static_cast<int>(mission.recorded().size()),
+	                               .laps_remaining = mission.laps_remaining()},
 	                           mission.display_waypoints(),
-	                           mission.running() ? mission.current_waypoint_index() : -1);
+	                           -1);   // no waypoint index: the route is one curve
 }
 
 void SpecificWorker::update_custom_widget(const std::optional<RobotPose> &robot_pose)
@@ -865,7 +923,7 @@ void SpecificWorker::control_loop()
 				{
 					lidar_stalled_ = false;
 					qInfo() << "[EMERGENCY] LiDAR stream recovered — resuming control.";
-					display_.set_command_text("LiDAR stream recovered — resuming");
+					display_.set_command_text("");   // clear the alert badge
 				}
 			}
 

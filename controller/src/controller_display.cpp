@@ -154,6 +154,15 @@ void ControllerDisplay::update(const std::optional<ControllerRobotPose> &robot_p
     snapshot_.valid = true;
 }
 
+void ControllerDisplay::set_command_values(float adv_mm_s, float side_mm_s, float rot_rps)
+{
+    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+    snapshot_.cmd_adv_mm_s = adv_mm_s;
+    snapshot_.cmd_side_mm_s = side_mm_s;
+    snapshot_.cmd_rot_rps = rot_rps;
+    snapshot_.cmd_values_pending = true;
+}
+
 void ControllerDisplay::set_command_text(const QString &text)
 {
     std::lock_guard<std::mutex> lock(snapshot_mutex_);
@@ -161,10 +170,11 @@ void ControllerDisplay::set_command_text(const QString &text)
     snapshot_.command_text_pending = true;
 }
 
-void ControllerDisplay::set_selected_affordance_text(const QString &text)
+void ControllerDisplay::set_selected_affordance(const QString &current, const QString &previous)
 {
     std::lock_guard<std::mutex> lock(snapshot_mutex_);
-    snapshot_.selected_affordance_text = text;
+    snapshot_.affordance_current = current;
+    snapshot_.affordance_previous = previous;
     snapshot_.selected_affordance_text_pending = true;
 }
 
@@ -239,6 +249,7 @@ void ControllerDisplay::present()
         std::lock_guard<std::mutex> lock(snapshot_mutex_);
         snap = snapshot_;
         snapshot_.command_text_pending = false;
+        snapshot_.cmd_values_pending = false;
         snapshot_.selected_affordance_text_pending = false;
         snapshot_.clear_trajectory_pending = false;
         snapshot_.mission_list_pending = false;
@@ -250,11 +261,14 @@ void ControllerDisplay::present()
     if (snap.clear_trajectory_pending && viewer_2d_)
         viewer_2d_->clear_robot_trajectory();
 
+    if (snap.cmd_values_pending)
+        custom_widget_->set_cmd_vel(snap.cmd_adv_mm_s, snap.cmd_side_mm_s, snap.cmd_rot_rps);
+
     if (snap.command_text_pending)
         custom_widget_->set_cmd_vel_text(snap.command_text);
 
     if (snap.selected_affordance_text_pending)
-        custom_widget_->set_selected_affordance_text(snap.selected_affordance_text);
+        custom_widget_->set_selected_affordance(snap.affordance_current, snap.affordance_previous);
 
     custom_widget_->set_stuck_active(snap.stuck_active);   // widget dedups same-state calls
     custom_widget_->set_goal_distance(snap.goal_dist_m, snap.goal_yaw_err_rad, snap.goal_aligning);
@@ -290,7 +304,10 @@ void ControllerDisplay::present()
     viewer_2d_->draw_lidar_points_from_buffer(snap.max_lidar_draw_points);
     viewer_2d_->draw_path({
         .path = std::move(display_path),
-        .waypoints = snap.current_plan.has_value() ? snap.current_plan->room_path : ControllerPolygon{},
+        // The plan's turning points, drawn as dots — but ONLY when the plan IS a set of turning points.
+        // A continuous route is thousands of 5 cm samples and dotting each one is noise, not information.
+        .waypoints = (snap.current_plan.has_value() and snap.current_plan->room_path.size() <= 64)
+                         ? snap.current_plan->room_path : ControllerPolygon{},
         .obstacle_polys = snap.obstacle_polys,
         .obstacle_rfe_points = snap.obstacle_rfe_points,
         .candidate_trajectories = snap.last_mppi_trajectories,

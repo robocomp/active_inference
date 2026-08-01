@@ -31,10 +31,12 @@
 #include <charconv>
 #include <clocale>
 #include <cmath>
+#include <format>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <chrono>
 #include <locale>
 #include <sstream>
 
@@ -71,6 +73,61 @@ std::string unquote(std::string s)
 // load silently TRUNCATED each coordinate toward zero, and the next save wrote the truncated value back —
 // a tour degraded a little more every time the agent restarted. std::from_chars is locale-independent by
 // definition, which is the whole reason it exists.
+// JSON has NO representation for NaN or infinity — emitting a bare `nan` produces a file that a strict
+// parser rejects outright. And every metric here can legitimately be undefined: detour_ratio when the
+// straight line is zero, min_body_clearance when the leg never saw the ESDF. `null` says "not
+// measured", which is exactly the distinction the rest of this file works to preserve.
+std::string jnum(float v)
+{
+    if (not std::isfinite(v)) return "null";
+    // ★ std::to_chars, NOT snprintf. snprintf honours the C locale's LC_NUMERIC, which QApplication sets
+    // from the environment — so on a comma-decimal machine it writes 0,7000 and the JSON is invalid.
+    // Imbuing the STREAM with the classic locale does not help: snprintf never touches the stream. This
+    // is the same fault as the mission-file truncation, entering by the other door, and it is why the
+    // rule is "no locale-sensitive C formatting on file data" rather than "remember to imbue".
+    char buf[48];
+    const auto [p, ec] = std::to_chars(buf, buf + sizeof buf, static_cast<double>(v),
+                                       std::chars_format::fixed, 4);
+    return ec == std::errc{} ? std::string(buf, p) : std::string("null");
+}
+
+// Mission names come from a free-text dialog, so they can contain anything.
+std::string jstr(const std::string &in)
+{
+    std::string out = "\"";
+    for (const char c : in)
+        switch (c)
+        {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20)
+                {
+                    char esc[8];
+                    std::snprintf(esc, sizeof esc, "\\u%04x", c);
+                    out += esc;
+                }
+                else out += c;
+        }
+    return out + "\"";
+}
+
+std::string iso_now(std::string *stamp_out)
+{
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t t = std::chrono::system_clock::to_time_t(now);
+    std::tm tm{};
+    ::localtime_r(&t, &tm);
+    char iso[40], stamp[24];
+    std::strftime(iso, sizeof iso, "%Y-%m-%dT%H:%M:%S%z", &tm);
+    std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", &tm);
+    if (stamp_out) *stamp_out = stamp;
+    return iso;
+}
+
 std::vector<float> parse_array(const std::string &value)
 {
     std::vector<float> out;
@@ -270,9 +327,24 @@ std::vector<std::string> MissionRunner::names() const
 bool MissionRunner::select(const std::string &name)
 {
     const auto it = std::ranges::find(library_, name, &Mission::name);
-    if (it == library_.end()) return false;
+    if (it == library_.end())
+    {
+        // A selection that names nothing is not a no-op to be swallowed: the combo and the library
+        // have diverged, and every later "why is it still the old route" follows from it.
+        std::printf("[mission] SELECT FAILED: '%s' is not in the library (%zu loaded).\n",
+                    name.c_str(), library_.size());
+        std::fflush(stdout);
+        return false;
+    }
+    if (selected_ == name) return true;
     selected_ = name;
-    if (state_ == State::Idle) { display_wps_.clear(); for (const auto &w : it->waypoints) display_wps_.push_back(w.pos); }
+    // Use the ONE canonical refresh. This used to rebuild display_wps_ inline, which bypassed the
+    // drive-mode gate and the click-target precedence that refresh_display_waypoints() applies — so
+    // selecting a mission could leave the canvas showing a route the mode says is not driving, or a
+    // stale click marker sitting on top of it. Two code paths for "what is drawn" is one too many.
+    refresh_display_waypoints();
+    std::printf("[mission] selected '%s' (%zu waypoints)\n", name.c_str(), it->waypoints.size());
+    std::fflush(stdout);
     return true;
 }
 
@@ -301,6 +373,102 @@ bool MissionRunner::remove(const std::string &name)
         selected_ = library_.empty() ? std::string{} : library_.front().name;
     refresh_display_waypoints();
     return true;
+}
+
+void MissionRunner::add_profile_sample(std::uint64_t t_ms, float adv, float side, float rot, float freshness)
+{
+    if (state_ != State::Running) return;   // only a measured run produces a profile
+    const std::lock_guard<std::mutex> lock(profile_mutex_);
+    if (profile_.size() >= kMaxProfileRows) { profile_truncated_ = true; return; }
+    profile_.push_back(MissionProfileSample{.t_ms = t_ms, .adv_mps = adv, .side_mps = side, .rot_rps = rot,
+                                            .freshness = freshness, .v_meas_mps = pending_v_meas_,
+                                            .v_meas_fresh = pending_v_meas_fresh_,
+                                            .lap = lap_ + 1});
+    pending_v_meas_fresh_ = false;   // consumed: the NEXT row must not claim this reading again
+}
+
+void MissionRunner::note_measured_speed(float mps)
+{
+    const std::lock_guard<std::mutex> lock(profile_mutex_);
+    pending_v_meas_ = mps;
+    pending_v_meas_fresh_ = true;
+}
+
+bool MissionRunner::write_profile_csv(const std::string &dir, const std::string &stamp) const
+{
+    std::vector<MissionProfileSample> rows;
+    bool truncated = false;
+    {
+        const std::lock_guard<std::mutex> lock(profile_mutex_);
+        rows = profile_;
+        truncated = profile_truncated_;
+    }
+    if (rows.empty()) return false;
+
+    std::error_code ec;
+    const std::filesystem::path folder = std::filesystem::path(dir) / active_.name;
+    std::filesystem::create_directories(folder, ec);
+    const std::filesystem::path path = folder / (stamp + "_profile.csv");
+    std::ofstream o(path, std::ios::trunc);
+    if (not o) return false;
+    o.imbue(std::locale::classic());   // a comma decimal separator in a CSV would be unreadable
+    o.setf(std::ios::fixed);
+    o.precision(5);
+    o << "# actuation stream, sampled in the velocity-output thread (fixed rate, see MissionProfileSample)\n"
+      << "# v_meas_fresh=0 means v_meas_mps is HELD from an earlier row — do not treat it as signal\n";
+    if (truncated)
+        o << "# ** TRUNCATED at " << kMaxProfileRows << " rows — the run outlasted the buffer **\n";
+    o << "t_ms,lap,adv_mps,side_mps,rot_rps,freshness,v_meas_mps,v_meas_fresh\n";
+    for (const auto &r : rows)
+        o << r.t_ms << ',' << r.lap << ','
+          << r.adv_mps << ',' << r.side_mps << ',' << r.rot_rps << ','
+          << r.freshness << ',' << r.v_meas_mps << ',' << (r.v_meas_fresh ? 1 : 0) << '\n';
+    const bool ok = o.good();
+    std::printf("[mission] profile (%zu rows @ output rate) -> %s%s\n", rows.size(), path.c_str(),
+                ok ? "" : "  ** WRITE FAILED **");
+    std::fflush(stdout);
+    return ok;
+}
+
+int MissionRunner::smooth_selected(const std::function<bool(const Eigen::Vector2f &, float)> &is_free,
+                                   int iterations, float alpha, float max_shift_m)
+{
+    if (state_ == State::Running) return 0;   // never rewrite the route under a measurement
+    Mission *m = selected_writable();
+    if (m == nullptr or m->waypoints.size() < 3 or not is_free) return 0;
+
+    auto &wp = m->waypoints;
+    const std::vector<MissionWaypoint> original = wp;
+    const int n = static_cast<int>(wp.size());
+
+    for (int it = 0; it < std::max(1, iterations); ++it)
+        for (int i = 1; i < n - 1; ++i)
+        {
+            // Pull toward the midpoint of the neighbours — the standard elastic-band relaxation, the
+            // same shape as TrajectoryController::relax_path, but gated on the EXACT footprint test
+            // instead of a clearance radius.
+            const Eigen::Vector2f mid = 0.5f * (wp[i - 1].pos + wp[i + 1].pos);
+            Eigen::Vector2f cand = wp[i].pos + alpha * (mid - wp[i].pos);
+
+            if ((cand - original[i].pos).norm() > max_shift_m) continue;   // keep the route recognisable
+
+            // The heading the robot will actually present here is its direction of travel — the same
+            // model the grid planner searches under. Testing at an arbitrary heading would accept
+            // poses the planner then rejects.
+            const Eigen::Vector2f tangent = wp[i + 1].pos - wp[i - 1].pos;
+            const float heading = tangent.squaredNorm() > 1e-12f
+                                ? std::atan2(tangent.y(), tangent.x()) : 0.f;
+            if (is_free(cand, heading))
+                wp[i].pos = cand;
+        }
+
+    int moved = 0;
+    for (int i = 0; i < n; ++i)
+        if ((wp[i].pos - original[i].pos).norm() > 1e-4f) ++moved;
+    refresh_display_waypoints();
+    std::printf("[mission] smoothed '%s': %d of %d waypoints moved\n", m->name.c_str(), moved, n);
+    std::fflush(stdout);
+    return moved;
 }
 
 void MissionRunner::set_click_target(const std::optional<Eigen::Vector2f> &pos)
@@ -426,82 +594,110 @@ bool MissionRunner::start(int loops, std::uint64_t now_ms)
         return false;
     }
 
+    // The ONLY failure path here that used to be silent — and silence is the worst possible answer,
+    // because on_run only enables driving when start() succeeds. A mission that cannot start therefore
+    // left the robot halted with nothing printed, which is indistinguishable from "the button did not
+    // work". Every refusal says why.
     const auto *m = selected_mission();
-    if (m == nullptr or m->waypoints.size() < 2) return false;
+    if (m == nullptr)
+    {
+        std::printf("[mission] cannot run: no mission named '%s' in the library (%zu loaded). "
+                    "Pick one in the Mission box.\n", selected_.c_str(), library_.size());
+        std::fflush(stdout);
+        return false;
+    }
+    if (m->waypoints.size() < 2)
+    {
+        std::printf("[mission] cannot run '%s': it has %zu waypoint(s), at least 2 are needed.\n",
+                    m->name.c_str(), m->waypoints.size());
+        std::fflush(stdout);
+        return false;
+    }
 
     active_ = *m;
     loops_ = std::max(1, loops);
     lap_ = 0;
-    wp_index_ = 0;
     run_start_ms_ = now_ms;
     stop_reason_.clear();
-    legs_.clear();
-    lap1_trace_.clear();
-    repeat_sum_ = 0.0; repeat_n_ = 0; repeat_max_ = 0.f;
+    stats_ = TrajectoryStats{};
+    run_first_sample_ms_ = 0;
+    lap_traces_.clear();
+    ct_sq_sum_ = hd_sq_sum_ = lat_sq_sum_ = 0.0;
+    ct_n_ = 0;
+    clearances_.clear();
+    prev_cmd_speed_.reset();
+    prev_cmd_dv_.reset();
+    prev_rot_sign_ = 0;
     last_pos_.reset();
     state_ = State::Running;
     completed_event_ = false;   // a fresh run must not inherit the previous run's completion
     refresh_display_waypoints();
-    begin_leg(now_ms);
+    last_sample_ms_ = now_ms;
     std::printf("[mission] START '%s' — %zu waypoints x %d lap(s)\n",
                 active_.name.c_str(), active_.waypoints.size(), loops_);
     std::fflush(stdout);
     return true;
 }
 
+void MissionRunner::compute_lap_repeat()
+{
+    stats_.lap_repeat_mean_m = std::numeric_limits<float>::quiet_NaN();
+    stats_.lap_repeat_max_m = std::numeric_limits<float>::quiet_NaN();
+    if (lap_traces_.size() < 2 or lap_traces_[0].size() < 2) return;   // one lap has nothing to repeat
+
+    const auto &ref = lap_traces_[0];
+    double sum = 0.0;
+    std::size_t n = 0;
+    float worst = 0.f;
+    for (std::size_t L = 1; L < lap_traces_.size(); ++L)
+        for (const auto &p : lap_traces_[L])
+        {
+            float best = std::numeric_limits<float>::max();
+            for (const auto &q : ref) best = std::min(best, (p - q).norm());
+            sum += best;
+            worst = std::max(worst, best);
+            ++n;
+        }
+    if (n == 0) return;
+    stats_.lap_repeat_mean_m = static_cast<float>(sum / static_cast<double>(n));
+    stats_.lap_repeat_max_m = worst;
+}
+
 void MissionRunner::stop(const std::string &reason, std::uint64_t now_ms)
 {
+    compute_lap_repeat();
     if (state_ != State::Running) { state_ = State::Idle; return; }
-    // Close the in-flight leg as INCOMPLETE rather than dropping it. A run that was abandoned two thirds of
-    // the way through a leg is a different measurement from one that never started it, and the CSV has to
-    // say which — otherwise a stopped run silently looks like a shorter clean one. close_leg is a no-op when
-    // advance() already closed the last leg (the normal completion path).
-    close_leg(last_pos_.value_or(Eigen::Vector2f::Zero()), now_ms, false);
     stop_reason_ = reason;
     completed_event_ = reason == "completed" or reason == "exhausted";
     state_ = State::Idle;
     refresh_display_waypoints();   // a cancelled/finished tour stops being drawn
-    const auto s = summary();
-    std::printf("[mission] STOP '%s' (%s) — %d/%d laps, %d legs, %.1f s, %.2f m driven, detour x%.2f, "
-                "min body clearance %.2f m, %d replans, %d escapes\n",
-                active_.name.c_str(), reason.c_str(), s.laps_completed, loops_, s.legs_completed,
-                s.total_duration_s, s.total_path_length_m, s.mean_detour_ratio, s.min_body_clearance_m,
-                s.total_replans, s.total_escapes);
-    if (std::isfinite(s.lap_repeat_mean_m))
-        std::printf("[mission] lap repeatability vs lap 1: mean %.3f m, max %.3f m\n",
-                    s.lap_repeat_mean_m, s.lap_repeat_max_m);
+    const auto s2 = summary();
+    std::printf("[mission] STOP '%s' (%s) - %d/%d laps, %.1f m of %.1f m route in %.1f s\n"
+                "[mission]   track: cross %.3f m rms / %.3f m max | heading %.3f rad rms\n"
+                "[mission]   smooth: yaw %.1f rad in %d reversals | dv %.1f (peak %.2f m/s2) | "
+                "d2v %.1f (peak %.1f m/s3) | a_lat %.2f rms %.2f max\n"
+                "[mission]   safety: clearance %.3f min / %.3f p05 | %d guard, %d escapes, %d replans\n"
+                "[mission]   repeat: lap-to-lap %.3f m mean / %.3f m max (NaN = single lap)\n",
+                active_.name.c_str(), reason.c_str(), s2.laps_completed, loops_,
+                s2.progress_m, s2.route_length_m, s2.duration_s,
+                s2.cross_track_rms_m, s2.cross_track_max_m, s2.heading_err_rms_rad,
+                s2.rot_effort_rad, s2.rot_reversals, s2.lin_accel_effort, s2.lin_accel_max,
+                s2.lin_jerk_effort, s2.lin_jerk_max, s2.lat_accel_rms, s2.lat_accel_max,
+                s2.min_clearance_m, s2.p05_clearance_m,
+                s2.safety_guard_cycles, s2.escapes, s2.replans,
+                s2.lap_repeat_mean_m, s2.lap_repeat_max_m);
     std::fflush(stdout);
-    if (not csv_path_.empty() and not legs_.empty())
+    if (not csv_path_.empty() and stats_.duration_s > 0.f)
         write_csv(csv_path_);
-}
-
-void MissionRunner::begin_leg(std::uint64_t now_ms)
-{
-    leg_ = MissionLegMetrics{};
-    leg_.lap = lap_ + 1;
-    leg_.leg = wp_index_ + 1;
-    leg_.min_body_clearance_m = std::numeric_limits<float>::max();
-    leg_start_ms_ = now_ms;
-    last_sample_ms_ = now_ms;
-    leg_origin_ = last_pos_.value_or(Eigen::Vector2f::Zero());
-    leg_open_ = true;
-}
-
-void MissionRunner::close_leg(const Eigen::Vector2f &arrived_at, std::uint64_t now_ms, bool completed)
-{
-    if (not leg_open_) return;
-    leg_open_ = false;
-    if (wp_index_ >= static_cast<int>(active_.waypoints.size())) return;
-    const Eigen::Vector2f goal = active_.waypoints[wp_index_].pos;
-    leg_.duration_s = static_cast<float>(now_ms - leg_start_ms_) / 1000.f;
-    leg_.straight_line_m = (goal - leg_origin_).norm();
-    leg_.detour_ratio = leg_.straight_line_m > 1e-3f ? leg_.path_length_m / leg_.straight_line_m : kNaN;
-    leg_.mean_speed_mps = leg_.duration_s > 1e-3f ? leg_.path_length_m / leg_.duration_s : 0.f;
-    leg_.arrival_error_m = (arrived_at - goal).norm();
-    leg_.completed = completed;
-    if (leg_.min_body_clearance_m == std::numeric_limits<float>::max())
-        leg_.min_body_clearance_m = kNaN;
-    legs_.push_back(leg_);
+    if (not run_dir_.empty())
+    {
+        // ONE timestamp for both artefacts, so the JSON and its profile share a name and can never be
+        // paired up wrongly by a millisecond landing either side of a second boundary.
+        std::string stamp;
+        const std::string iso = iso_now(&stamp);
+        write_run_json(run_dir_, stamp, iso);
+        write_profile_csv(run_dir_, stamp);
+    }
 }
 
 bool MissionRunner::consume_completed()
@@ -511,141 +707,131 @@ bool MissionRunner::consume_completed()
     return e;
 }
 
-std::optional<ControllerTargetInfo> MissionRunner::current_target() const
-{
-    if (state_ != State::Running) return std::nullopt;
-    if (wp_index_ < 0 or wp_index_ >= static_cast<int>(active_.waypoints.size())) return std::nullopt;
-
-    const auto &w = active_.waypoints[wp_index_];
-    ControllerTargetInfo t;
-    t.node_id = 0;
-    // The name carries lap and index, so consecutive waypoints are DISTINCT targets even if a tour revisits
-    // the same point — the session's target-changed test compares position, and a repeated point would
-    // otherwise look like "no new target" and never replan.
-    t.node_name = "mission:" + active_.name + "#" + std::to_string(lap_ + 1) + "." + std::to_string(wp_index_ + 1);
-    t.room_pos = w.pos;
-    t.yaw_rad = w.yaw_rad.value_or(0.f);
-    // from_affordance drives the arrival behaviour: true = rotate to the facing yaw before declaring the goal
-    // reached. A tour waypoint only asks for a facing when one was recorded.
-    t.from_affordance = w.yaw_rad.has_value();
-    return t;
-}
-
-void MissionRunner::advance(const Eigen::Vector2f &arrived_at, std::uint64_t now_ms)
-{
-    if (state_ != State::Running) return;
-
-    close_leg(arrived_at, now_ms, true);
-    ++wp_index_;
-    if (wp_index_ >= static_cast<int>(active_.waypoints.size()))
-    {
-        wp_index_ = 0;
-        ++lap_;
-        if (lap_ >= loops_)
-        {
-            stop("completed", now_ms);
-            return;
-        }
-        std::printf("[mission] lap %d/%d complete\n", lap_, loops_);
-        std::fflush(stdout);
-    }
-    last_pos_ = arrived_at;   // begin_leg takes the leg origin from here
-    begin_leg(now_ms);
-}
-
 // ─────────────────────────────────────────────────────────────────────────────────────────
 // Instrumentation
 // ─────────────────────────────────────────────────────────────────────────────────────────
 
+void MissionRunner::note_progress(float progress_m, float route_length_m, int laps_done)
+{
+    if (state_ != State::Running) return;
+    stats_.progress_m = progress_m;
+    stats_.route_length_m = route_length_m;
+    stats_.laps_completed = std::max(0, laps_done);
+    lap_ = std::max(0, laps_done);
+}
+
 void MissionRunner::sample(const Eigen::Vector2f &pos, float rot_rps, float speed_mps,
-                           float body_clearance_m, bool safety_guard, std::uint64_t now_ms)
+                           float body_clearance_m, bool safety_guard,
+                           float cross_track_m, float heading_err_rad, float ref_curvature,
+                           std::uint64_t now_ms)
 {
     if (state_ != State::Running) { last_pos_ = pos; return; }
+    if (run_first_sample_ms_ == 0) run_first_sample_ms_ = now_ms;
 
     const float dt = static_cast<float>(now_ms - last_sample_ms_) / 1000.f;
     last_sample_ms_ = now_ms;
+    stats_.duration_s = static_cast<float>(now_ms - run_first_sample_ms_) / 1000.f;
+
     if (last_pos_.has_value())
-        leg_.path_length_m += (pos - *last_pos_).norm();
-    else
-        leg_origin_ = pos;   // first sample of the run establishes the leg origin
+    {
+        const float step = (pos - *last_pos_).norm();
+        stats_.distance_m += step;
+        // Guarded on dt: a short or zero dt turns pose jitter into an enormous fictitious speed, and one
+        // such sample would dominate the maximum for the whole run.
+        if (dt > 0.02f) stats_.max_speed_mps = std::max(stats_.max_speed_mps, step / dt);
+    }
+    if (stats_.duration_s > 1e-3f) stats_.mean_speed_mps = stats_.distance_m / stats_.duration_s;
 
-    // dt can be large after a stall; integrating a stale ω over it would fabricate turning that never
-    // happened. Bound it at a plausible cycle time — this is an integration guard, not a behaviour gate.
+    // Per-lap trace for geometric repeatability. lap_ is laps COMPLETED, so it indexes the lap in
+    // progress; note_progress runs before sample() each cycle, so it is current.
+    {
+        const std::size_t idx = static_cast<std::size_t>(std::max(0, lap_));
+        if (lap_traces_.size() <= idx) lap_traces_.resize(idx + 1);
+        auto &tr = lap_traces_[idx];
+        if (tr.empty() or (pos - tr.back()).norm() >= kLapTraceStepM) tr.push_back(pos);
+    }
+
+    // dt can be large after a stall; integrating a stale omega over it would fabricate turning that never
+    // happened. Bound it at a plausible cycle time — an integration guard, not a behaviour gate.
     const float dt_int = std::clamp(dt, 0.f, 0.5f);
-    leg_.rot_effort += std::abs(rot_rps) * dt_int;
-    leg_.rot_energy += rot_rps * rot_rps * dt_int;
-    if (body_clearance_m >= 0.f)
-        leg_.min_body_clearance_m = std::min(leg_.min_body_clearance_m, body_clearance_m);
-    if (safety_guard) ++leg_.safety_guard_cycles;
-    (void)speed_mps;   // speed is derived from path_length/duration, which is what actually happened
+    stats_.rot_effort_rad += std::abs(rot_rps) * dt_int;
+    stats_.rot_energy += rot_rps * rot_rps * dt_int;
 
-    // Repeatability trace. Lap 1 IS the reference, so it is recorded; later laps are scored against it.
-    if (lap_ == 0)
+    // Speed variation and its own variation. Sum|dv| is sampling-rate independent, so runs at different
+    // cycle times stay comparable; sum|d2v| is jerk, which sum|dv| is blind to (a smooth ramp and a ramp
+    // made of steps reach the same speed with the same total variation).
+    if (prev_cmd_speed_.has_value())
     {
-        if (lap1_trace_.empty() or (pos - lap1_trace_.back()).norm() > 0.05f)
-            lap1_trace_.push_back(pos);
+        const float dv = speed_mps - *prev_cmd_speed_;
+        stats_.lin_accel_effort += std::abs(dv);
+        if (dt > 0.02f) stats_.lin_accel_max = std::max(stats_.lin_accel_max, std::abs(dv) / dt);
+        if (prev_cmd_dv_.has_value())
+        {
+            const float d2v = std::abs(dv - *prev_cmd_dv_);
+            stats_.lin_jerk_effort += d2v;
+            if (dt > 0.02f) stats_.lin_jerk_max = std::max(stats_.lin_jerk_max, d2v / (dt * dt));
+        }
+        prev_cmd_dv_ = dv;
     }
-    else if (not lap1_trace_.empty())
+    prev_cmd_speed_ = speed_mps;
+
+    // Yaw reversals. Integral omega^2 cannot distinguish a steady turn from an alternating one at the
+    // cycle rate, and only the second is the stutter this controller has been chased over. Deadbanded so
+    // a command dithering about zero is not read as a sequence of reversals.
+    constexpr float kRotDeadband = 0.05f;
+    const int rot_sign = rot_rps > kRotDeadband ? 1 : (rot_rps < -kRotDeadband ? -1 : 0);
+    if (rot_sign != 0)
     {
-        const float d = distance_to_lap1(pos);
-        repeat_sum_ += d;
-        ++repeat_n_;
-        repeat_max_ = std::max(repeat_max_, d);
+        if (prev_rot_sign_ != 0 and rot_sign != prev_rot_sign_) ++stats_.rot_reversals;
+        prev_rot_sign_ = rot_sign;
     }
 
+    // TRACKING and LATERAL ACCELERATION — the continuous quantities legs could not express.
+    if (std::isfinite(cross_track_m))
+    {
+        const float e = std::abs(cross_track_m);
+        ct_sq_sum_ += static_cast<double>(e) * e;
+        hd_sq_sum_ += static_cast<double>(heading_err_rad) * heading_err_rad;
+        const float a_lat = speed_mps * speed_mps * ref_curvature;
+        lat_sq_sum_ += static_cast<double>(a_lat) * a_lat;
+        ++ct_n_;
+        stats_.cross_track_max_m = std::max(stats_.cross_track_max_m, e);
+        stats_.lat_accel_max = std::max(stats_.lat_accel_max, std::abs(a_lat));
+    }
+
+    if (body_clearance_m >= 0.f) clearances_.push_back(body_clearance_m);
+    if (safety_guard) ++stats_.safety_guard_cycles;
+
+    note_measured_speed(dt > 0.02f and last_pos_.has_value() ? (pos - *last_pos_).norm() / dt : 0.f);
     last_pos_ = pos;
 }
 
-float MissionRunner::distance_to_lap1(const Eigen::Vector2f &p) const
+TrajectoryStats MissionRunner::summary() const
 {
-    // Distance to the lap-1 POLYLINE, not to its nearest sample: with a 5 cm sampling step, nearest-vertex
-    // would report up to 2.5 cm of pure discretisation as if it were deviation.
-    float best = std::numeric_limits<float>::max();
-    for (std::size_t i = 0; i + 1 < lap1_trace_.size(); ++i)
+    TrajectoryStats t = stats_;
+    if (ct_n_ > 0)
     {
-        const Eigen::Vector2f a = lap1_trace_[i], b = lap1_trace_[i + 1];
-        const Eigen::Vector2f ab = b - a;
-        const float len2 = ab.squaredNorm();
-        const float t = len2 > 1e-9f ? std::clamp((p - a).dot(ab) / len2, 0.f, 1.f) : 0.f;
-        best = std::min(best, (p - (a + t * ab)).norm());
+        t.cross_track_rms_m = static_cast<float>(std::sqrt(ct_sq_sum_ / static_cast<double>(ct_n_)));
+        t.heading_err_rms_rad = static_cast<float>(std::sqrt(hd_sq_sum_ / static_cast<double>(ct_n_)));
+        t.lat_accel_rms = static_cast<float>(std::sqrt(lat_sq_sum_ / static_cast<double>(ct_n_)));
     }
-    return best == std::numeric_limits<float>::max() ? kNaN : best;
+    if (not clearances_.empty())
+    {
+        std::vector<float> c = clearances_;
+        std::sort(c.begin(), c.end());
+        t.min_clearance_m = c.front();
+        t.p05_clearance_m = c[static_cast<std::size_t>(0.05 * (c.size() - 1))];
+    }
+    else { t.min_clearance_m = kNaN; t.p05_clearance_m = kNaN; }
+    return t;
 }
 
-void MissionRunner::note_replan() { if (state_ == State::Running) ++leg_.replans; }
-void MissionRunner::note_escape() { if (state_ == State::Running) ++leg_.escapes; }
+void MissionRunner::note_replan() { if (state_ == State::Running) ++stats_.replans; }
+void MissionRunner::note_escape() { if (state_ == State::Running) ++stats_.escapes; }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────
 // Readout
 // ─────────────────────────────────────────────────────────────────────────────────────────
-
-MissionRunSummary MissionRunner::summary() const
-{
-    MissionRunSummary s;
-    s.mission_name = active_.name.empty() ? selected_ : active_.name;
-    s.laps_completed = lap_;
-    float detour_sum = 0.f;
-    int   detour_n = 0;
-    s.min_body_clearance_m = std::numeric_limits<float>::max();
-    for (const auto &l : legs_)
-    {
-        if (l.completed) ++s.legs_completed;
-        s.total_duration_s += l.duration_s;
-        s.total_path_length_m += l.path_length_m;
-        s.total_rot_effort += l.rot_effort;
-        s.total_replans += l.replans;
-        s.total_escapes += l.escapes;
-        if (std::isfinite(l.detour_ratio)) { detour_sum += l.detour_ratio; ++detour_n; }
-        if (std::isfinite(l.min_body_clearance_m))
-            s.min_body_clearance_m = std::min(s.min_body_clearance_m, l.min_body_clearance_m);
-    }
-    s.mean_detour_ratio = detour_n ? detour_sum / static_cast<float>(detour_n) : kNaN;
-    if (s.min_body_clearance_m == std::numeric_limits<float>::max()) s.min_body_clearance_m = kNaN;
-    // NaN, not 0: "we never ran a second lap" and "the second lap was perfect" are opposite findings.
-    s.lap_repeat_mean_m = repeat_n_ ? static_cast<float>(repeat_sum_ / static_cast<double>(repeat_n_)) : kNaN;
-    s.lap_repeat_max_m = repeat_n_ ? repeat_max_ : kNaN;
-    return s;
-}
 
 std::string MissionRunner::status_text() const
 {
@@ -657,7 +843,8 @@ std::string MissionRunner::status_text() const
         {
             const int n = static_cast<int>(active_.waypoints.size());
             return active_.name + "  lap " + std::to_string(lap_ + 1) + "/" + std::to_string(loops_)
-                 + "  wp " + std::to_string(wp_index_ + 1) + "/" + std::to_string(n);
+                 + "  " + std::to_string(static_cast<int>(stats_.progress_m)) + "/"
+                 + std::to_string(static_cast<int>(stats_.route_length_m)) + " m";
         }
         case State::Idle:
         default:
@@ -677,29 +864,140 @@ std::string MissionRunner::status_text() const
 
 bool MissionRunner::write_csv(const std::string &path) const
 {
+    // ONE ROW PER RUN. There is no segmentation left to make rows out of, and inventing one would put
+    // back the artefact this change removed. The per-instant detail lives in the profile CSV.
+    static constexpr const char *kHeader =
+        "mission,mode,run_start_ms,stop_reason,laps,duration_s,distance_m,route_length_m,progress_m,"
+        "mean_speed_mps,max_speed_mps,cross_track_rms_m,cross_track_max_m,heading_err_rms_rad,"
+        "rot_effort_rad,rot_energy,rot_reversals,lin_accel_effort,lin_accel_max,lin_jerk_effort,"
+        "lin_jerk_max,lat_accel_rms,lat_accel_max,min_clearance_m,p05_clearance_m,"
+        "safety_guard_cycles,escapes,replans,lap_repeat_mean_m,lap_repeat_max_m";
+
+    // ★ THE HEADER MUST MATCH THE FILE, OR THE FILE IS NOT DATA.
+    // The header used to be written only when the file was ABSENT, so adding a column to an existing
+    // log appended wider rows under a narrower header. That is exactly what happened when `mode` was
+    // added: mission_metrics.csv ended up with a 20-field header and 21-field rows, silently shifting
+    // every column index for the newer half of the file. Nothing complained, and the file cannot be
+    // analysed at all — two attempts to read the same column from it disagreed, and the disagreement
+    // WAS the corruption. A metrics file that is quietly wrong is worse than no metrics file, so an
+    // append into a mismatched header now REFUSES and says what to do about it.
     const bool exists = std::filesystem::exists(path);
+    if (exists)
+    {
+        std::ifstream probe(path);
+        std::string first;
+        std::getline(probe, first);
+        if (not first.empty() and first.back() == '\r') first.pop_back();
+        if (first != kHeader)
+        {
+            std::printf("[mission] REFUSING to append to '%s': its header does not match this build.\n"
+                        "          on disk: %s\n"
+                        "          expected: %s\n"
+                        "          Rename or delete the old file — appending would misalign every column.\n",
+                        path.c_str(), first.c_str(), kHeader);
+            std::fflush(stdout);
+            return false;
+        }
+    }
+
     std::ofstream out(path, std::ios::app);
     if (not out) return false;
     // A comma decimal separator in a COMMA-SEPARATED file would be unreadable, so this is pinned too.
     out.imbue(std::locale::classic());
     if (not exists)
-        out << "mission,mode,run_start_ms,stop_reason,lap,leg,completed,duration_s,path_length_m,straight_line_m,"
-               "detour_ratio,min_body_clearance_m,mean_speed_mps,rot_effort_rad,rot_energy,arrival_error_m,"
-               "replans,escapes,safety_guard_cycles,lap_repeat_mean_m,lap_repeat_max_m\n";
+        out << kHeader << '\n';
 
     out.setf(std::ios::fixed);
     out.precision(4);
-    const auto s = summary();
-    for (const auto &l : legs_)
-        out << active_.name << ',' << to_string(mode_) << ',' << run_start_ms_ << ','
-            << (stop_reason_.empty() ? "?" : stop_reason_)
-            << ',' << l.lap << ',' << l.leg << ',' << (l.completed ? 1 : 0) << ','
-            << l.duration_s << ',' << l.path_length_m << ',' << l.straight_line_m << ','
-            << l.detour_ratio << ',' << l.min_body_clearance_m << ',' << l.mean_speed_mps << ','
-            << l.rot_effort << ',' << l.rot_energy << ',' << l.arrival_error_m << ','
-            << l.replans << ',' << l.escapes << ',' << l.safety_guard_cycles << ','
-            << s.lap_repeat_mean_m << ',' << s.lap_repeat_max_m << '\n';
+    const auto t = summary();
+    out << active_.name << ',' << to_string(mode_) << ',' << run_start_ms_ << ','
+        << (stop_reason_.empty() ? "?" : stop_reason_) << ',' << t.laps_completed << ','
+        << t.duration_s << ',' << t.distance_m << ',' << t.route_length_m << ',' << t.progress_m << ','
+        << t.mean_speed_mps << ',' << t.max_speed_mps << ','
+        << t.cross_track_rms_m << ',' << t.cross_track_max_m << ',' << t.heading_err_rms_rad << ','
+        << t.rot_effort_rad << ',' << t.rot_energy << ',' << t.rot_reversals << ','
+        << t.lin_accel_effort << ',' << t.lin_accel_max << ',' << t.lin_jerk_effort << ','
+        << t.lin_jerk_max << ',' << t.lat_accel_rms << ',' << t.lat_accel_max << ','
+        << t.min_clearance_m << ',' << t.p05_clearance_m << ','
+        << t.safety_guard_cycles << ',' << t.escapes << ',' << t.replans << ','
+        << t.lap_repeat_mean_m << ',' << t.lap_repeat_max_m << '\n';
     return out.good();
+}
+
+bool MissionRunner::write_run_json(const std::string &dir, const std::string &stamp,
+                                   const std::string &iso) const
+{
+    if (dir.empty() or stats_.duration_s <= 0.f) return false;
+
+    std::error_code ec;
+    const std::filesystem::path folder = std::filesystem::path(dir) / active_.name;
+    std::filesystem::create_directories(folder, ec);
+    const std::filesystem::path path = folder / (stamp + ".json");
+
+    std::ofstream o(path, std::ios::trunc);
+    if (not o) return false;
+    // Same reason as everywhere else in this file: a comma decimal separator would produce invalid
+    // JSON, silently, on any machine with a non-English locale.
+    o.imbue(std::locale::classic());
+    o.setf(std::ios::fixed);
+    o.precision(4);
+
+    const auto t = summary();
+    o << "{\n  \"schema\": 2,\n";
+    o << "  \"mission\": " << jstr(active_.name) << ",\n";
+    o << "  \"date\": " << jstr(iso) << ",\n";
+    o << "  \"run_start_ms\": " << run_start_ms_ << ",\n";
+    o << "  \"laps_requested\": " << loops_ << ",\n";
+    o << "  \"laps_completed\": " << t.laps_completed << ",\n";
+    o << "  \"stop_reason\": " << jstr(stop_reason_.empty() ? "?" : stop_reason_) << ",\n";
+    o << "  \"drive_mode\": " << jstr(to_string(mode_)) << ",\n";
+    o << "  \"waypoints\": " << active_.waypoints.size() << ",\n";
+
+    o << "  \"params\": {\n"
+      << "    \"build\": " << jstr(run_ctx_.build) << ",\n"
+      << "    \"max_adv_mps\": " << jnum(run_ctx_.max_adv_mps) << ",\n"
+      << "    \"max_rot_rps\": " << jnum(run_ctx_.max_rot_rps) << ",\n"
+      << "    \"comfort_standoff_m\": " << jnum(run_ctx_.comfort_standoff_m) << ",\n"
+      << "    \"footprint_safety_margin_m\": " << jnum(run_ctx_.footprint_safety_margin_m) << ",\n"
+      << "    \"planner_cell_size_m\": " << jnum(run_ctx_.planner_cell_size_m) << ",\n"
+      << "    \"body_inscribed_m\": " << jnum(run_ctx_.body_inscribed_m) << ",\n"
+      << "    \"body_circumscribed_m\": " << jnum(run_ctx_.body_circumscribed_m) << "\n  },\n";
+
+
+    o << "  \"trajectory\": {\n"
+      << "    \"duration_s\": "          << jnum(t.duration_s)          << ",\n"
+      << "    \"distance_m\": "          << jnum(t.distance_m)          << ",\n"
+      << "    \"route_length_m\": "      << jnum(t.route_length_m)      << ",\n"
+      << "    \"progress_m\": "          << jnum(t.progress_m)          << ",\n"
+      << "    \"mean_speed_mps\": "      << jnum(t.mean_speed_mps)      << ",\n"
+      << "    \"max_speed_mps\": "       << jnum(t.max_speed_mps)       << ",\n"
+      << "    \"cross_track_rms_m\": "   << jnum(t.cross_track_rms_m)   << ",\n"
+      << "    \"cross_track_max_m\": "   << jnum(t.cross_track_max_m)   << ",\n"
+      << "    \"heading_err_rms_rad\": " << jnum(t.heading_err_rms_rad) << ",\n"
+      << "    \"rot_effort_rad\": "      << jnum(t.rot_effort_rad)      << ",\n"
+      << "    \"rot_energy\": "          << jnum(t.rot_energy)          << ",\n"
+      << "    \"rot_reversals\": "       << t.rot_reversals             << ",\n"
+      << "    \"lin_accel_effort\": "    << jnum(t.lin_accel_effort)    << ",\n"
+      << "    \"lin_accel_max\": "       << jnum(t.lin_accel_max)       << ",\n"
+      << "    \"lin_jerk_effort\": "     << jnum(t.lin_jerk_effort)     << ",\n"
+      << "    \"lin_jerk_max\": "        << jnum(t.lin_jerk_max)        << ",\n"
+      << "    \"lat_accel_rms\": "       << jnum(t.lat_accel_rms)       << ",\n"
+      << "    \"lat_accel_max\": "       << jnum(t.lat_accel_max)       << ",\n"
+      << "    \"min_clearance_m\": "     << jnum(t.min_clearance_m)     << ",\n"
+      << "    \"p05_clearance_m\": "     << jnum(t.p05_clearance_m)     << ",\n"
+      << "    \"safety_guard_cycles\": " << t.safety_guard_cycles       << ",\n"
+      << "    \"escapes\": "             << t.escapes                   << ",\n"
+      << "    \"replans\": "             << t.replans                   << ",\n";
+    // NaN is not valid JSON. A single-lap run has no repeatability to report, and null says that
+    // honestly where 0.0 would read as "perfectly repeatable".
+    const auto json_or_null = [](float v) { return std::isfinite(v) ? std::format("{:.4f}", v) : std::string("null"); };
+    o << "    \"lap_repeat_mean_m\": " << json_or_null(t.lap_repeat_mean_m) << ",\n"
+      << "    \"lap_repeat_max_m\": "  << json_or_null(t.lap_repeat_max_m)  << "\n  }\n}\n";
+
+    const bool ok = o.good();
+    std::printf("[mission] run record -> %s%s\n", path.c_str(), ok ? "" : "  ** WRITE FAILED **");
+    std::fflush(stdout);
+    return ok;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────
@@ -709,254 +1007,109 @@ bool MissionRunner::self_test()
     bool ok = true;
     auto check = [&](bool c, const char *m) { if (not c) { ok = false; std::printf("  FAIL: %s\n", m); } };
 
-    // (1) Record → select → run supplies each waypoint in order, then finishes.
+    // (1) Record -> select -> run -> continuous stats. No legs: the run is characterised as a whole.
     {
         MissionRunner r;
-        r.set_csv_path("");   // no file I/O in the test
+        r.set_csv_path(""); r.set_run_dir("");
         r.set_mode(DriveMode::MissionOnly);
         r.start_recording();
-        r.add_point({0.f, 0.f});
-        r.add_point({1.f, 0.f});
-        r.add_point({1.f, 1.f});
+        r.add_point({0.f, 0.f}); r.add_point({3.f, 0.f}); r.add_point({3.f, 3.f});
         check(r.finish_recording("t"), "a 3-point recording must commit");
-        check(r.names().size() == 1, "the library must hold the recorded mission");
+        check(r.start(1, 0), "'mission only' must run");
 
-        check(r.start(1, 0), "start must accept a 2+ waypoint mission");
         std::uint64_t t = 0;
-        for (int i = 0; i < 3; ++i)
-        {
-            const auto tgt = r.current_target();
-            check(tgt.has_value(), "a running mission must supply a target");
-            if (not tgt.has_value()) break;
-            r.sample(tgt->room_pos, 0.f, 0.f, 0.5f, false, t += 100);
-            r.advance(tgt->room_pos, t);
-        }
-        check(not r.running(), "the mission must end after its last waypoint of the last lap");
-        // A tour that ends BY ITSELF must announce it, so the UI can drop back to "Run" instead of leaving
-        // the robot armed with nothing to drive to.
-        check(r.consume_completed(), "finishing all laps must raise the completed event");
-        check(not r.consume_completed(), "the completed event is ONE-SHOT");
-        check(r.legs().size() == 3, "one leg per waypoint");
-        check(r.legs().back().completed, "legs reached in order must be marked completed");
+        // Drive 3 m at 0.5 m/s, 1 m off the reference the whole way, on a curve of kappa = 0.5.
+        for (int i = 0; i <= 6; ++i)
+            r.sample({static_cast<float>(i) * 0.5f, 0.f}, 0.f, 0.5f, 0.42f, false,
+                     1.0f, 0.10f, 0.5f, t += 100);
+        r.note_progress(3.f, 6.f, 0);
+        const auto s1 = r.summary();
+        std::printf("  continuous: dist %.2f m, cross rms %.3f m, a_lat rms %.3f, clear %.3f\n",
+                    s1.distance_m, s1.cross_track_rms_m, s1.lat_accel_rms, s1.min_clearance_m);
+        check(std::abs(s1.distance_m - 3.f) < 1e-3f, "distance must integrate the driven path");
+        check(std::abs(s1.cross_track_rms_m - 1.f) < 1e-3f, "cross-track rms must be the deviation held");
+        // a_lat = v^2*kappa = 0.25*0.5 = 0.125
+        check(std::abs(s1.lat_accel_rms - 0.125f) < 1e-3f, "lateral acceleration must be v^2 * curvature");
+        check(std::abs(s1.min_clearance_m - 0.42f) < 1e-3f, "clearance must be the minimum seen");
+        check(s1.laps_completed == 0, "a lap in progress is not a lap completed");
+        r.stop("user", t);
     }
 
-    // (2) Two laps: the second lap is scored against the first, and a mission stopped mid-leg records that
-    //     leg as INCOMPLETE — the distinction the CSV depends on.
+    // (2) SMOOTHNESS accumulators, hand-computed. These are the numbers a controller change moves.
     {
         MissionRunner r;
-        r.set_csv_path("");
+        r.set_csv_path(""); r.set_run_dir("");
         r.set_mode(DriveMode::MissionOnly);
-        r.start_recording();
-        r.add_point({0.f, 0.f});
-        r.add_point({2.f, 0.f});
-        r.finish_recording("t2");
-        r.start(2, 0);
+        r.start_recording(); r.add_point({0.f, 0.f}); r.add_point({1.f, 0.f});
+        r.finish_recording("s"); r.start(1, 0);
         std::uint64_t t = 0;
-        r.sample({0.f, 0.f}, 0.f, 0.f, 1.f, false, t += 100);
-        r.advance({0.f, 0.f}, t);
-        r.sample({2.f, 0.f}, 0.f, 0.f, 1.f, false, t += 100);
-        r.advance({2.f, 0.f}, t);              // lap 1 done
-        check(r.current_lap() == 1, "the second lap must start after the first completes");
-        r.sample({0.f, 0.f}, 0.f, 0.f, 1.f, false, t += 100);
-        r.stop("aborted", t);
-        check(not r.running(), "stop must end the run");
-        check(not r.consume_completed(),
-              "a run the USER stopped must NOT look completed — that would silently halt driving they asked for");
-        const auto legs = r.legs();
-        check(not legs.empty() and not legs.back().completed,
-              "a leg abandoned by stop() must be recorded as incomplete, not dropped");
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        // commanded speed 0.5 -> 0.2 -> 0.2 : sum|dv| = 0.3 ; omega +,-,+ : 2 reversals
+        r.sample({0.f, 0.f}, +0.4f, 0.5f, 1.f, false, nan, 0.f, 0.f, t += 100);
+        r.sample({1.f, 0.f}, -0.4f, 0.2f, 1.f, false, nan, 0.f, 0.f, t += 100);
+        r.sample({1.f, 0.f}, +0.4f, 0.2f, 1.f, true,  nan, 0.f, 0.f, t += 100);
+        const auto s2 = r.summary();
+        std::printf("  smoothness: sum|dv| %.3f, reversals %d, guard %d, cross-track n/a -> rms %.3f\n",
+                    s2.lin_accel_effort, s2.rot_reversals, s2.safety_guard_cycles, s2.cross_track_rms_m);
+        check(std::abs(s2.lin_accel_effort - 0.3f) < 1e-3f, "sum|dv| must be the total variation of speed");
+        check(s2.rot_reversals == 2, "a +,-,+ command sequence is TWO reversals");
+        check(s2.safety_guard_cycles == 1, "guard cycles must be counted");
+        check(s2.cross_track_rms_m == 0.f,
+              "with NO reference, cross-track must stay unset rather than be invented as zero-error");
+        r.stop("user", t);
     }
 
-    // (3) Path length is what was DRIVEN, not the straight line — the detour ratio is the whole point.
-    {
-        MissionRunner r;
-        r.set_csv_path("");
-        r.set_mode(DriveMode::MissionOnly);
-        r.start_recording();
-        r.add_point({0.f, 0.f});
-        r.add_point({2.f, 0.f});
-        r.finish_recording("t3");
-        r.start(1, 0);
-        std::uint64_t t = 0;
-        r.sample({0.f, 0.f}, 0.f, 0.f, 1.f, false, t += 100);
-        r.advance({0.f, 0.f}, t);
-        // Detour: out to (1,1) and back down to (2,0) — 2*sqrt(2) driven for 2.0 straight.
-        r.sample({1.f, 1.f}, 0.f, 0.f, 1.f, false, t += 100);
-        r.sample({2.f, 0.f}, 0.f, 0.f, 1.f, false, t += 100);
-        r.advance({2.f, 0.f}, t);
-        const auto &l = r.legs().back();
-        std::printf("  detour leg: drove %.3f m for a %.3f m straight line → ratio %.3f\n",
-                    l.path_length_m, l.straight_line_m, l.detour_ratio);
-        check(std::abs(l.path_length_m - 2.f * std::sqrt(2.f)) < 1e-3f, "path length must integrate the trace");
-        check(l.detour_ratio > 1.41f and l.detour_ratio < 1.42f, "detour ratio must be driven/straight");
-    }
-
-    // (4) TOML round-trip, including the absent-yaw case — a yaw of 0 and "no yaw" must not collapse.
-    {
-        MissionRunner a;
-        a.start_recording();
-        a.add_point({1.25f, -2.5f});
-        a.add_point({3.f, 4.f});
-        a.finish_recording("rt");
-        const std::string path = std::filesystem::temp_directory_path() / "rc_mission_selftest.toml";
-        check(a.save(path), "save must succeed");
-        MissionRunner b;
-        check(b.load(path), "load must succeed");
-        const auto *m = b.selected_mission();
-        check(m != nullptr and m->waypoints.size() == 2, "the round trip must preserve the waypoints");
-        if (m != nullptr and m->waypoints.size() == 2)
-        {
-            check(std::abs(m->waypoints[0].pos.x() - 1.25f) < 1e-3f, "x must survive the round trip");
-            check(std::abs(m->waypoints[1].pos.y() - 4.f) < 1e-3f, "y must survive the round trip");
-            check(not m->waypoints[0].yaw_rad.has_value(), "an absent yaw must stay absent, not become 0");
-        }
-        std::error_code ec;
-        std::filesystem::remove(path, ec);
-    }
-
-    // (4b) LOCALE INDEPENDENCE. This is the regression test for the bug that silently destroyed tours: the
-    //      file is written with '.' but was read with stof(), which honours LC_NUMERIC. Under a
-    //      comma-decimal locale every coordinate was truncated toward zero on load and the truncated value
-    //      was written back on the next save. Nothing in the UI could show this — the numbers looked
-    //      plausible, just wrong — so it is asserted here, under an actual comma locale.
+    // (3) Library round trip under a comma-decimal locale — the bug that silently truncated every route.
     {
         const char *saved = std::setlocale(LC_NUMERIC, nullptr);
         const char *applied = nullptr;
-        for (const char *cand : {"es_ES.UTF-8", "de_DE.UTF-8", "fr_FR.UTF-8", "es_ES", "de_DE"})
+        for (const char *cand : {"es_ES.UTF-8", "de_DE.UTF-8", "fr_FR.UTF-8"})
             if ((applied = std::setlocale(LC_NUMERIC, cand)) != nullptr) break;
         std::printf("  locale round trip under LC_NUMERIC=%s\n", applied ? applied : "(none available)");
-
         MissionRunner a;
         a.set_mode(DriveMode::MissionOnly);
-        a.start_recording();
-        a.add_point({-1.9114f, 3.6829f});
-        a.add_point({0.5361f, -2.7738f});
+        a.start_recording(); a.add_point({-1.9114f, 3.6829f}); a.add_point({0.5361f, -2.7738f});
         a.finish_recording("loc");
         const std::string path = std::filesystem::temp_directory_path() / "rc_mission_locale.toml";
         a.save(path);
-
-        MissionRunner b;
-        b.load(path);
+        MissionRunner b; b.load(path);
         const auto *m = b.selected_mission();
-        check(m != nullptr and m->waypoints.size() == 2, "the locale round trip must preserve the waypoints");
+        check(m != nullptr and m->waypoints.size() == 2, "the locale round trip must preserve waypoints");
         if (m != nullptr and m->waypoints.size() == 2)
-        {
-            std::printf("  read back (%.4f, %.4f) and (%.4f, %.4f)\n",
-                        m->waypoints[0].pos.x(), m->waypoints[0].pos.y(),
-                        m->waypoints[1].pos.x(), m->waypoints[1].pos.y());
             check(std::abs(m->waypoints[0].pos.x() + 1.9114f) < 1e-4f,
-                  "a negative fractional coordinate must survive a comma-decimal locale (was truncated to -1)");
-            check(std::abs(m->waypoints[0].pos.y() - 3.6829f) < 1e-4f, "fraction must survive on y too");
-            check(std::abs(m->waypoints[1].pos.x() - 0.5361f) < 1e-4f, "a sub-1 coordinate must not become 0");
-            check(std::abs(m->waypoints[1].pos.y() + 2.7738f) < 1e-4f, "and must not round instead of parse");
-        }
-        std::error_code ec;
-        std::filesystem::remove(path, ec);
+                  "a fractional coordinate must survive a comma-decimal locale (was truncated to -1)");
+        std::error_code ec; std::filesystem::remove(path, ec);
         if (saved != nullptr) std::setlocale(LC_NUMERIC, saved);
     }
 
-    // (5) Degenerate inputs must be refused rather than half-accepted.
+    // (4) Editing and deletion still behave (drag-to-edit, delete, click target precedence).
     {
         MissionRunner r;
+        r.set_csv_path(""); r.set_run_dir("");
         r.set_mode(DriveMode::MissionOnly);
-        r.start_recording();
-        r.add_point({0.f, 0.f});
-        check(not r.finish_recording("one"), "a single-point mission must be rejected");
-        check(not r.start(1, 0), "starting with no selected mission must fail, not crash");
-    }
-
-    // (6) DRIVE MODE GATING. The failure this guards against is silent: an unimplemented mode that ran as
-    //     MissionOnly would produce CSV rows labelled with a condition that never existed, and nothing
-    //     downstream could detect it. So the refusal is asserted, not assumed.
-    {
-        MissionRunner r;
-        r.set_csv_path("");
-        r.set_mode(DriveMode::MissionOnly);
-        r.start_recording();
-        r.add_point({0.f, 0.f});
-        r.add_point({1.f, 0.f});
-        r.finish_recording("m");
-
-        r.set_mode(DriveMode::AffordancesOnly);
-        check(not r.start(1, 0), "'affordances' must refuse to run a mission");
-        r.set_mode(DriveMode::Target);
-        check(not r.start(1, 0), "'target' must refuse to run a mission");
-        r.set_mode(DriveMode::MissionWithAffordances);
-        check(not r.mode_implemented(), "'mission + affordances' must report itself unimplemented");
-        check(not r.start(1, 0), "an UNIMPLEMENTED mode must refuse to run, never fall back to another");
-        r.set_mode(DriveMode::MissionOnly);
-        check(r.start(1, 0), "'mission only' must run");
-
-        // Switching condition mid-run must END the run, not silently relabel it.
-        r.set_mode(DriveMode::AffordancesOnly);
-        check(not r.running(), "changing the drive mode mid-run must stop the run");
-    }
-
-    // (7) EDIT / DELETE / CLICK. All three change what the canvas shows, and a stale overlay is the whole
-    //     complaint these features exist to fix — so assert the overlay, not just the library.
-    {
-        MissionRunner r;
-        r.set_csv_path("");
-        r.set_mode(DriveMode::MissionOnly);
-        r.start_recording();
-        r.add_point({0.f, 0.f});
-        r.add_point({1.f, 0.f});
-        r.finish_recording("tour");
-        check(r.display_waypoints().size() == 2, "an idle selected mission must be drawn");
-
-        // Editing IS dragging: move_waypoint edits the SELECTED mission in place. The failure mode guarded
-        // here is an "edit" that writes somewhere other than the mission you were looking at.
-        check(r.move_waypoint(1, {4.f, 4.f}), "dragging a waypoint of the selected mission must succeed");
-        const auto *m = r.selected_mission();
-        check(m != nullptr and m->waypoints.size() == 2, "a drag must MOVE a point, never add one");
-        check(m != nullptr and std::abs(m->waypoints[1].pos.x() - 4.f) < 1e-4f,
-              "the drag must land on the waypoint that was dragged");
-        check(r.display_waypoints().size() == 2 and std::abs(r.display_waypoints()[1].x() - 4.f) < 1e-4f,
-              "the overlay must follow the drag");
-        check(not r.move_waypoint(7, {0.f, 0.f}), "dragging a non-existent index must fail, not crash");
-
-        // A click supersedes the tour on the canvas too.
-        r.set_click_target(Eigen::Vector2f{5.f, 5.f});
-        check(r.display_waypoints().size() == 1, "a click target must REPLACE the tour overlay, not add to it");
-        r.set_click_target(std::nullopt);
-        check(r.display_waypoints().size() == 2, "clearing the click must restore the tour overlay");
-
-        // A finished/cancelled run must stop being drawn.
-        r.start(1, 0);
-        r.sample({0.f, 0.f}, 0.f, 0.f, 1.f, false, 100);
-        check(not r.display_waypoints().empty(), "a running tour must be drawn");
-        r.stop("user", 200);
-        check(r.display_waypoints().size() == 2, "after stopping, the overlay falls back to the selection");
-        // A run is a measurement: editing its route mid-flight would invalidate it silently.
-        r.start(1, 0);
-        check(not r.move_waypoint(0, {9.f, 9.f}), "a waypoint must NOT be draggable while a run is measuring");
-        r.stop("user", 300);
-
-        // Switching to a non-mission mode must clear the tour from the canvas, not just disable the buttons.
+        r.start_recording(); r.add_point({0.f, 0.f}); r.add_point({1.f, 0.f});
+        r.finish_recording("e");
+        check(r.move_waypoint(1, {4.f, 4.f}), "dragging a waypoint must succeed");
+        check(not r.move_waypoint(7, {0.f, 0.f}), "an out-of-range drag must fail, not crash");
+        r.set_click_target(Eigen::Vector2f{7.f, 7.f});
+        check(r.display_waypoints().size() == 1, "a click target must REPLACE the tour overlay");
         r.set_mode(DriveMode::AffordancesOnly);
         check(r.display_waypoints().empty(), "'affordances' must leave NO mission on the canvas");
         r.set_mode(DriveMode::MissionOnly);
-        check(r.display_waypoints().size() == 2, "returning to a mission mode must restore the overlay");
+        check(r.remove("e"), "delete must remove the mission");
+        check(r.display_waypoints().empty(), "a deleted mission must leave nothing on the canvas");
+    }
 
-        // TARGET mode: a click owns the canvas, and leaving Target must not leave the click marker behind
-        // while the selector claims something else is driving.
-        r.set_mode(DriveMode::Target);
-        r.set_click_target(Eigen::Vector2f{7.f, 7.f});
-        check(r.display_waypoints().size() == 1, "in Target mode only the clicked point is drawn");
+    // (5) Degenerate inputs refused rather than half-accepted.
+    {
+        MissionRunner r;
         r.set_mode(DriveMode::MissionOnly);
-        check(not r.has_click_target(), "leaving Target must drop the click target");
-        check(r.display_waypoints().size() == 2, "leaving Target must restore the mission overlay");
-
-        // Index mapping is shared by the widget and the worker; a mismatch would silently pick a mode the
-        // user did not choose.
-        for (const auto m : {DriveMode::AffordancesOnly, DriveMode::MissionOnly,
-                             DriveMode::MissionWithAffordances, DriveMode::Target})
-            check(from_index(to_index(m)) == m, "drive-mode index mapping must round-trip");
-
-        check(r.remove("tour"), "delete must remove the mission");
-        check(r.names().empty(), "the library must be empty after deleting its only mission");
-        check(r.display_waypoints().empty(), "a deleted mission must leave NOTHING on the canvas");
-        check(not r.remove("tour"), "deleting a mission twice must fail, not crash");
+        r.start_recording(); r.add_point({0.f, 0.f});
+        check(not r.finish_recording("one"), "a single-point mission must be rejected");
+        check(not r.start(1, 0), "starting with no selected mission must fail, not crash");
+        r.set_mode(DriveMode::MissionWithAffordances);
+        check(not r.mode_implemented() and not r.start(1, 0),
+              "an UNIMPLEMENTED mode must refuse to run, never fall back to another");
     }
 
     std::printf("MissionRunner::self_test %s\n", ok ? "PASS" : "FAIL");

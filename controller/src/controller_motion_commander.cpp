@@ -152,10 +152,7 @@ void ControllerMotionCommander::send_speed_command(float adv_mps, float side_mps
 
     if (command_text_sink_)
     {
-        command_text_sink_(QStringLiteral("adv %1 mm/s   side %2 mm/s   rot %3 rad/s")
-                               .arg(adv_mm_s, 0, 'f', 0)
-                               .arg(side_mm_s, 0, 'f', 0)
-                               .arg(rot_rps, 0, 'f', 2));
+        command_text_sink_(adv_mm_s, side_mm_s, rot_rps);
     }
 
     if (!omnirobot_proxy_)
@@ -254,6 +251,12 @@ void ControllerMotionCommander::output_loop(std::stop_token stop)
             applied_adv_ = adv; applied_side_ = side; applied_rot_ = rot;
         }
 
+        // Profile tap. AFTER the limiter, so it records the actuation the world receives — the command
+        // the MPPI emitted is already visible per-cycle in the trajectory stats, and it is the difference
+        // between the two that shows how much the limiter is absorbing.
+        if (profile_sink_)
+            profile_sink_(current_time_ms(), adv, side, rot, scale);
+
         // setSpeedBase is a SYNCHRONOUS Ice RPC to the Webots bridge, so its duration is a hard floor on this
         // loop's period: no amount of scheduling here can beat a bridge that blocks. Time it, so if the output
         // period is still not stable we can tell immediately whether the cause is us or the bridge.
@@ -304,7 +307,7 @@ ControllerMotionCommander::OutputRateStats ControllerMotionCommander::take_outpu
 void ControllerMotionCommander::stop_robot()
 {
     if (command_text_sink_)
-        command_text_sink_(QStringLiteral("adv 0 mm/s   side 0 mm/s   rot 0.00 rad/s"));
+        command_text_sink_(0.f, 0.f, 0.f);
 
     // Latch the hold for the output thread FIRST and unconditionally: even when the graph-side dedup below
     // decides there is nothing new to publish, the base must start receiving zeros on the very next tick.

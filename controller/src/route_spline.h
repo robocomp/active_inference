@@ -1,0 +1,107 @@
+/*
+ * route_spline.h — a route as ONE continuous, curvature-continuous curve parameterised by arc length.
+ *
+ * WHY THIS REPLACES THE WAYPOINT/CARROT/ARRIVAL SCHEME
+ * The follower used to be handed the path to the NEXT WAYPOINT, which made every waypoint a goal. Three
+ * things followed, all of them measured:
+ *   - it decelerated into every waypoint (the nominal seed scales speed by carrot distance inside 1 m,
+ *     and the straight-speed override switches off inside 1.5 m). With 1.28 m legs the robot was in the
+ *     arrival regime for the entire tour and never reached cruise: 0.30 m/s against a 0.7 m/s limit.
+ *   - set_path wiped the MPPI warm start at each waypoint, so continuity was destroyed 30 times a lap.
+ *   - extending the path instead made the carrot aim past the waypoint, so the robot cut the corner and
+ *     never entered the arrival radius — the leg never completed and it drove back and forth.
+ * Patching arrival (proximity, then passage) was patching the wrong thing: cutting the corner is what a
+ * smooth route DOES, so any test that asks "did we touch the waypoint" is asking the wrong question.
+ *
+ * Here the waypoints only DEFINE the route. Once built there are no waypoints, no arrival tests and no
+ * legs during execution — there is a curve, an arc-length coordinate, and a carrot a fixed distance
+ * ahead of the robot's projection onto it. Progress is a scalar that only increases.
+ *
+ * WHY C² MATTERS SPECIFICALLY
+ * Commanded rotation rate follows path curvature. A C¹ curve (the previous centripetal Catmull-Rom) has
+ * DISCONTINUOUS curvature at every knot, so the steering command steps at each one — which is jerk, and
+ * it is what the smoothness metric penalises. A uniform cubic B-spline is C² by construction, so
+ * curvature is continuous and the steering command has no steps to make. It is also APPROXIMATING
+ * rather than interpolating: the curve stays inside the convex hull of its control points, so it cannot
+ * overshoot a hand-clicked corner into a wall the way an interpolating spline does.
+ *
+ * FEASIBILITY IS NOT ASSUMED. Smoothing moves the curve off the planned polyline, and the planned
+ * polyline is the only thing known to be footprint-feasible. Every sample is therefore re-tested with
+ * the caller's own predicate (the grid planner's exact footprint test) and pulled back toward the
+ * polyline until it passes. A smoothed route that the planner would refuse to drive is worse than an
+ * unsmoothed one.
+ *
+ * Pure Eigen/STL — no Qt, no DSR → unit-testable in isolation (self_test()).
+ */
+
+#pragma once
+
+#include "route_optimizer.h"
+
+#include <functional>
+#include <vector>
+
+#include <Eigen/Dense>
+
+namespace rc
+{
+
+class RouteSpline
+{
+public:
+    // `polyline` must already be footprint-feasible (it comes from the grid planner). `spacing` is the
+    // arc-length step of the output samples. `is_free(pos, heading)` is the caller's feasibility test;
+    // pass an empty function to skip the feasibility pass (tests only).
+    // `smoothing_m` is the SCALE of the smoothing — the spacing of the B-spline's control points, and
+    // therefore roughly the radius a corner gets rounded to. It is deliberately independent of
+    // `spacing`, which is only the output resolution: tying them together (the first version did) means
+    // a 5 cm output step can only round a corner over 5 cm, which is not smoothing, it is resampling.
+    // `opt`, when non-null and enabled, VARIATIONALLY OPTIMISES the control polygon before the curve is
+    // evaluated — bending prior + one-sided clearance + waypoint fidelity + gauge. See route_optimizer.h.
+    // Null (the default) reproduces the previous behaviour exactly: fit, resample, feasibility-check.
+    bool build(const std::vector<Eigen::Vector2f> &polyline, float spacing,
+               const std::function<bool(const Eigen::Vector2f &, float)> &is_free,
+               float smoothing_m = 0.40f,
+               const RouteOptimizerConfig *opt = nullptr);
+
+    // The optimiser's report from the last build. Kept so the caller can WRITE IT DOWN: a diagnostic that
+    // only exists on stdout is a diagnostic nobody can compare across runs.
+    const RouteOptimizerReport &last_optimizer_report() const { return last_opt_; }
+
+    bool  valid() const { return samples_.size() >= 2; }
+    float length() const { return length_; }
+    float spacing() const { return spacing_; }
+    const std::vector<Eigen::Vector2f> &samples() const { return samples_; }
+
+    Eigen::Vector2f position_at(float s) const;
+    float heading_at(float s) const;      // atan2(dy,dx) of the tangent
+    float curvature_at(float s) const;    // 1/radius, signed
+
+    // Arc length of the closest point, searched FORWARD from `s_hint` within `window_m`. Monotone by
+    // construction: a route that crosses itself (this tour does) would otherwise let the projection jump
+    // to a distant branch and teleport progress backwards or forwards.
+    float project(const Eigen::Vector2f &p, float s_hint, float window_m = 3.0f) const;
+
+    // How many of the build's samples had to be pulled back to stay feasible — a smoothing that fights
+    // the geometry everywhere is a signal, not a detail.
+    int corrections() const { return corrections_; }
+
+    // How far the fitted curve strays from the PLANNED POLYLINE it was fitted to. The B-spline is
+    // APPROXIMATING, so some deviation is by design (that is what rounds a corner) — but "by design"
+    // needs a number, or "the smooth path does not follow the route" cannot be answered. Distance from
+    // each curve sample to the nearest point of the polyline, sampled every 4th point.
+    float max_deviation_m() const { return max_dev_; }
+    float mean_deviation_m() const { return mean_dev_; }
+
+    static bool self_test();
+
+private:
+    std::vector<Eigen::Vector2f> samples_;   // uniform in arc length, spacing_ apart
+    float spacing_ = 0.1f;
+    float length_ = 0.f;
+    int   corrections_ = 0;
+    RouteOptimizerReport last_opt_;
+    float max_dev_ = 0.f, mean_dev_ = 0.f;
+};
+
+}  // namespace rc

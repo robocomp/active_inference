@@ -17,6 +17,7 @@
 #include "controller_runtime_types.h"
 #include "controller_world_model.h"
 #include "grid_planner.h"
+#include "route_follower.h"
 #include "trajectory_controller.h"
 #include "../../common/affordance_manager/affordance_manager.h"
 
@@ -85,6 +86,9 @@ public:
     // lives here rather than in the worker — the alternative is a fourth party that has to be consulted
     // by everyone who asks "what are we driving to".
     rc::MissionRunner &mission() { return mission_; }
+    // Smooth the selected mission against the SAME grid + footprint predicate the planner drives with,
+    // so a smoothed route cannot contain a pose the planner would then refuse. Returns waypoints moved.
+    int smooth_selected_mission();
     const rc::MissionRunner &mission() const { return mission_; }
 
 private:
@@ -163,6 +167,22 @@ private:
     std::ofstream overlay_csv_;                    // per-cycle overlay-lag diagnostics
     bool overlay_csv_open_ = false;
     std::uint64_t overlay_csv_last_ms_ = 0;        // throttle for CSV rows
+    // ROUTE EVENTS. One row per route build / repair, appended immediately. These are RARE events whose
+    // diagnostics used to exist only on stdout, where they scroll away and cannot be compared between
+    // runs — a number you cannot read later is not a measurement.
+    std::ofstream route_events_csv_;
+    // Both geometries, side by side: the A* polyline as planned and the smoothed curve as driven.
+    // A deviation NUMBER says how far they differ; this says WHERE, which is the question when the
+    // driven path visibly does not follow the planned one.
+    std::ofstream route_geom_csv_;
+    bool route_geom_csv_open_ = false;
+    int  route_event_id_ = 0;
+    void log_route_geometry();
+    bool route_events_csv_open_ = false;
+    void log_route_event(const char *event, bool ok, std::uint64_t t_ms,
+                         const rc::TrajectoryController &path_controller,
+                         float window_m);
+
     std::ofstream proximity_csv_;                  // near-obstacle black box ("why didn't it react")
     bool proximity_csv_open_ = false;
     std::uint64_t proximity_csv_last_ms_ = 0;      // throttle for proximity CSV rows
@@ -199,6 +219,31 @@ private:
     // inflated obstacle, so the six stacked C-space margins collapse to one explicit safety_margin_m.
     rc::GridPlanner grid_planner_;
     rc::MissionRunner mission_;
+    // CONTINUOUS ROUTE MODE. The whole mission as one arc-length curve; no per-waypoint target, no
+    // arrival test, no per-waypoint replan. Built once when a mission starts.
+    rc::RouteFollower route_;
+    bool route_active_ = false;
+    bool waypoint_mode_logged_ = false;
+    std::uint64_t last_route_build_ms_ = 0;
+    bool build_route(const ControllerRobotPose &robot_pose);
+    // Why the last hop the planner refused was refused. GridPlanner computes eight distinct reasons
+    // (goal not footprint-feasible at any heading / start inside an obstacle / enclosed / expansion cap
+    // / outside the grid ...) and the route builder was discarding all of them, which left "no path"
+    // indistinguishable from every other cause. Recorded, not just printed.
+    std::string last_plan_failure_;
+    // Speed ceiling from the route's own curvature, looking ahead far enough to brake for what is coming.
+    // Returns v_cap unchanged when there is no route (a click target has no curve).
+    float route_speed_limit(float v_cap, float a_decel) const;
+    // ROUTE REPAIR. Set by the recovery reflexes (visible blockage, or a wedge that dropped a virtual
+    // disc) and consumed in the continuous-route branch of ensure_current_plan. Without it those
+    // reflexes are inert in route mode: they create the obstacle and reset current_plan_, but the route
+    // branch re-installs the SAME curve, so the robot backs off and drives at the blocker again.
+    bool          route_repair_pending_ = false;
+    std::uint64_t last_route_repair_ms_ = 0;
+    int           route_repair_count_ = 0;
+    // Fit the C2 curve to ANY planned polyline — a click target and an affordance target deserve the
+    // same smooth path a mission gets. Returns the polyline unchanged if smoothing is off or fails.
+    ControllerPolygon smooth_plan(const ControllerPolygon &poly) const;
     bool          escape_active_ = false;       // an escape maneuver currently owns the base
     std::uint64_t escape_start_ms_ = 0;         // escape start time (for the time bound)
     Eigen::Vector2f escape_start_pos_ = Eigen::Vector2f::Zero();  // pose at escape start (distance bound)

@@ -67,7 +67,8 @@ void TrajectoryController::refresh_active_params()
         active_params_.max_adv = scale_with_gain(params.max_adv, speed_gain, 0.01f);
         active_params_.max_rot = scale_with_gain(params.max_rot, speed_gain, 0.01f);
         active_params_.carrot_lookahead = scale_with_gain(params.carrot_lookahead, speed_gain, 0.05f);
-        active_params_.goal_threshold = scale_with_gain(params.goal_threshold, speed_gain * 0.5f, 0.01f);
+        if (params.mood_scales_goal_threshold)   // off by design — see the flag's comment
+            active_params_.goal_threshold = scale_with_gain(params.goal_threshold, speed_gain * 0.5f, 0.01f);
 
         // Reactivity family: output smoothing, warm-start inertia, brake
         active_params_.velocity_smoothing = std::clamp(
@@ -92,6 +93,11 @@ void TrajectoryController::refresh_active_params()
     active_params_.trajectory_steps = std::clamp(active_params_.trajectory_steps, active_params_.T_min, active_params_.T_max);
     // d_safe is a standoff BEYOND the body, so it is meaningless below the body's own worst-case reach.
     active_params_.d_safe = std::max(active_params_.d_safe, body_extent_max() + 0.01f);
+    // The curvature ceiling is applied AFTER mood and the priority scaling, so it bounds whatever those
+    // produced rather than being overwritten by them. Everything downstream — the nominal seed, the
+    // sampling clamp, the rollouts — reads max_adv, so the whole plan respects it, not just the output.
+    if (speed_limit_.has_value())
+        active_params_.max_adv = std::clamp(*speed_limit_, 0.05f, active_params_.max_adv);
     active_params_.max_back_adv = std::clamp(active_params_.max_back_adv, 0.f, active_params_.max_adv);
     active_params_.min_adv_cmd = std::clamp(active_params_.min_adv_cmd, 0.f, active_params_.max_adv);
     active_params_.mppi_lambda = std::clamp(active_params_.mppi_lambda, active_params_.lambda_min, active_params_.lambda_max);
@@ -110,6 +116,8 @@ float TrajectoryController::effective_d_safe_for_goal_dist(float goal_dist) cons
     const float blend = smoothstep01(std::max(goal_dist, 0.f) / tau); // 0 near goal, 1 far
     return std::clamp(near_safe + blend * (far_safe - near_safe), near_safe, far_safe);
 }
+
+float TrajectoryController::body_extent_here() const { return body_extent_toward_obstacle(0.f, 0.f, 0.f); }
 
 float TrajectoryController::body_extent_toward_obstacle(float rx, float ry, float theta) const
 {
@@ -178,22 +186,23 @@ float TrajectoryController::obstacle_repulsion_strength(float esdf_val, float d_
 // Public API
 // ============================================================================
 
-void TrajectoryController::set_path(const std::vector<Eigen::Vector2f>& path_room)
+// Everything a new path resets EXCEPT the geometry conditioning (relax_path / smooth_path_spline).
+// Split out so set_path_presmoothed can get the resets WITHOUT paying for a relax+spline pass whose
+// result it immediately overwrites — for a ~700-sample route against a 5 cm-sampled room boundary
+// that discarded work was tens of millions of distance evaluations, on the main Qt thread, at the
+// instant a route is installed.
+// `wp_index_` is deliberately NOT set here: the two callers disagree about it (set_path starts at 1,
+// set_path_presmoothed at 0) and each owns its own answer.
+void TrajectoryController::reset_mppi_state(const std::vector<Eigen::Vector2f>& path_room)
 {
     refresh_active_params();
 
     path_room_ = path_room;
-    wp_index_ = (path_room.size() > 1) ? 1 : 0;
     active_ = path_room.size() >= 2;
-
-    // Push waypoints away from walls/furniture toward center of free space
-    relax_path(40);
-
-    // Smooth path with Catmull-Rom spline interpolation for continuous curvature
-    smooth_path_spline();
 
     has_prev_vel_ = false;
     smoothed_vel_ = Eigen::Vector3f::Zero();
+    carrot_seg_hint_ = 0;   // a fresh path starts at the robot; the caller re-seeds it if it does not
 
     // Initialize MPPI state
     adaptive_K_ = active_params_.num_samples;
@@ -207,6 +216,7 @@ void TrajectoryController::set_path(const std::vector<Eigen::Vector2f>& path_roo
     carrot_curve_active_ = false;
 
     prev_optimal_.assign(adaptive_T_, {0.f, 0.f});
+    last_cmd_valid_ = false;   // a new path has no command to be continuous with
     adaptive_sigma_adv_ = active_params_.sigma_adv;
     adaptive_sigma_rot_ = active_params_.sigma_rot;
 
@@ -216,6 +226,28 @@ void TrajectoryController::set_path(const std::vector<Eigen::Vector2f>& path_roo
 
     // A fresh path means we are navigating again, not doing the final rotation.
     aligning_ = false;
+}
+
+void TrajectoryController::set_path(const std::vector<Eigen::Vector2f>& path_room)
+{
+    reset_mppi_state(path_room);
+    wp_index_ = (path_room.size() > 1) ? 1 : 0;
+
+    // Push waypoints away from walls/furniture toward center of free space
+    relax_path(40);
+
+    // Smooth path with Catmull-Rom spline interpolation for continuous curvature
+    smooth_path_spline();
+}
+
+void TrajectoryController::set_path_presmoothed(const std::vector<Eigen::Vector2f>& path_room)
+{
+    // Resets only — the geometry is already smooth and already footprint-checked, so relax_path
+    // and smooth_path_spline are not merely unnecessary here, they are harmful (see the header).
+    // This used to call set_path() and then overwrite path_room_, which RAN both passes in full
+    // and threw the result away.
+    reset_mppi_state(path_room);
+    wp_index_ = 0;
 }
 
 void TrajectoryController::set_goal_facing_yaw(std::optional<float> yaw_rad)
@@ -231,6 +263,7 @@ void TrajectoryController::stop()
     has_prev_vel_ = false;
     smoothed_vel_ = Eigen::Vector3f::Zero();
     prev_optimal_.clear();
+    last_cmd_valid_ = false;
     safety_guard_mood_cooldown_ = 0;
     carrot_curve_active_ = false;
     blockage_streak_ = 0;
@@ -525,10 +558,31 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
     // 2. Advance waypoints
     advance_waypoints(robot_pose);
 
-    // 3. Goal check
+    // 3. Goal check.
+    // goal_robot is the END OF THE PATH and drives the SPEED shaping (see set_arrival_point).
+    // arrival_robot is where arrival is judged. They are the same thing unless the caller has extended
+    // the path past the point it actually wants to reach.
     const Eigen::Vector2f goal_robot = room_to_robot(path_room_.back(), robot_pose);
-    out.dist_to_goal = goal_robot.norm();
-    if (out.dist_to_goal < active_params_.goal_threshold or aligning_)
+    const Eigen::Vector2f arrival_robot = arrival_point_room_.has_value()
+                                        ? room_to_robot(*arrival_point_room_, robot_pose)
+                                        : goal_robot;
+    out.dist_to_goal = arrival_robot.norm();
+
+    // PASSED the arrival point? Once the path continues past it the robot cuts the corner by design and
+    // may never enter the arrival radius, so proximity alone would leave the waypoint forever unreached.
+    bool passed_arrival = false;
+    if (arrival_point_room_.has_value() and arrival_outgoing_room_.has_value())
+    {
+        const Eigen::Vector2f dir = *arrival_outgoing_room_;
+        if (dir.squaredNorm() > 1e-9f)
+            passed_arrival = (robot_pose.translation() - *arrival_point_room_).dot(dir.normalized()) > 0.f;
+    }
+    // The whole arrival test is skipped when the caller owns arrival itself (a continuous route ends by
+    // ARC LENGTH — see set_endpoint_arrival). Skipping it, rather than ignoring its result, matters: this
+    // branch also clears active_, so a caller that merely discarded goal_reached would find the follower
+    // switched off and the base stopped for good.
+    if (endpoint_arrival_
+        and (out.dist_to_goal < active_params_.goal_threshold or passed_arrival or aligning_))
     {
         // Position reached. If the target carries a commanded facing yaw, rotate in
         // place to face it before finishing (so e.g. the robot looks AT the table at
@@ -548,6 +602,7 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
                 aligning_ = false;
                 active_ = false;
                 out.goal_reached = true;
+                last_cmd_valid_ = false;   // arrived: nothing to be continuous with
                 return out;
             }
             aligning_ = true;
@@ -579,6 +634,12 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
             sent_rot = std::clamp(sent_rot, -no_overshoot, no_overshoot);
             out.rot = -sent_rot;
             out.goal_reached = false;
+            // The alignment path bypasses the MPPI but still commands the base, so it must leave the
+            // continuity reference pointing at what was actually sent. Otherwise the first MPPI cycle
+            // after alignment would be scored for continuity against a command from before the turn.
+            last_cmd_adv_ = out.adv;
+            last_cmd_rot_ = out.rot;
+            last_cmd_valid_ = true;
             return out;
         }
         active_ = false;
@@ -628,10 +689,19 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
         }
     }
 
-    // 4. Carrot (fixed lookahead, no displacement/bias)
+    // 4. Carrot (fixed lookahead), CLIPPED TO WHAT THE ROBOT CAN CUT TO.
+    // The carrot is a straight-line attractor: the nominal seed steers at it and every rollout is a
+    // perturbation of that. So a carrot placed around a corner does not ask the robot to follow the
+    // route — it asks it to drive INTO the inside wall of the corner and rely on the obstacle cost to
+    // claw it back. The MPPI is not flexible enough to recover that, and the harder the corner the more
+    // the attractor and the obstacle term fight, which is exactly where the stutter lives.
+    // The rule: advance the carrot only as far as the ROUTE FRAGMENT LEFT BEHIND still admits the body.
+    // Tested against the LIVE ESDF (so it sees dynamic obstacles the static grid does not) with the
+    // footprint's real reach at the chord heading — the same predicate the obstacle cost uses.
     const Eigen::Vector2f carrot_room = compute_carrot(robot_pose);
-    const Eigen::Vector2f carrot_robot = room_to_robot(carrot_room, robot_pose);
-    out.carrot_room = carrot_room;
+    const Eigen::Vector2f carrot_robot = clip_carrot_to_reachable(room_to_robot(carrot_room, robot_pose));
+    out.carrot_room = robot_pose * carrot_robot;   // report the CLIPPED carrot: the viewer must show
+                                                   // where the robot is actually being pulled
     out.current_wp_index = wp_index_;
 
     // ---- PD carrot-follower mode: simple proportional-derivative controller ----
@@ -681,7 +751,7 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
     for (int k = 0; k < actual_K; ++k)
     {
         optimize_seed(seeds[k], carrot_robot);
-        results[k] = simulate_and_score(seeds[k], carrot_robot, goal_robot, sampling_center);
+        results[k] = simulate_and_score(seeds[k], carrot_robot, goal_robot);
         if (results[k].G_total < best_G)
         {
             best_G = results[k].G_total;
@@ -1265,6 +1335,11 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
     (void)steering_concentration_current;
     (void)safety_guard_modified_command;
 
+    // Remember what we are about to command: the continuity cost is referenced to this next cycle.
+    last_cmd_adv_ = out.adv;
+    last_cmd_rot_ = out.rot;
+    last_cmd_valid_ = true;
+
     return out;
 }
 
@@ -1465,7 +1540,6 @@ std::vector<TrajectoryController::Seed> TrajectoryController::sample_trajectorie
 
     // --- Seed 0: the nominal itself (zero perturbation) --------------------
     Seed nominal_copy = nominal;
-    nominal_copy.use_info_correction = false;
     seeds.push_back(std::move(nominal_copy));
 
     // --- Structured exploration seeds at wide angles -----------------------
@@ -1486,7 +1560,6 @@ std::vector<TrajectoryController::Seed> TrajectoryController::sample_trajectorie
         Seed s;
         s.adv.resize(T);
         s.rot.resize(T);
-        s.use_info_correction = false;
         float theta = 0.f;
 
         for (int t = 0; t < T; ++t)
@@ -1525,7 +1598,6 @@ std::vector<TrajectoryController::Seed> TrajectoryController::sample_trajectorie
         Seed s;
         s.adv.resize(T);
         s.rot.resize(T);
-        s.use_info_correction = true;
         for (int t = 0; t < T; ++t)
         {
             const float base_adv = (t < nom_T) ? nominal.adv[t] : 0.f;
@@ -1552,8 +1624,7 @@ std::vector<TrajectoryController::Seed> TrajectoryController::sample_trajectorie
 TrajectoryController::SimResult TrajectoryController::simulate_and_score(
     const Seed& seed,
     const Eigen::Vector2f& carrot_robot,
-    const Eigen::Vector2f& goal_robot,
-    const Seed& nominal)
+    const Eigen::Vector2f& goal_robot)
 {
     SimResult res;
     const int steps = static_cast<int>(seed.adv.size());
@@ -1692,14 +1763,27 @@ TrajectoryController::SimResult TrajectoryController::simulate_and_score(
                             * front_deficit * front_deficit;
             }
 
-            const float imbalance = std::abs(d_left_min - d_right_min);
-            if (imbalance > 1e-3f)
-            {
-                const float imbalance_norm = std::clamp(imbalance / side_span, 0.f, 1.5f);
+            // LATERAL BALANCE, on the one-sided DEFICITS rather than on the raw distance difference.
+            //
+            // The previous form was |d_left - d_right| / side_span, clamped at 1.5. With one side open,
+            // query_esdf returns the unknown-distance sentinel (~100 m), so the ratio was ~400 and the
+            // clamp SATURATED: a constant, with zero derivative, identical across every rollout — so it
+            // cancelled in the softmax and contributed nothing but cost. That is the single-wall case,
+            // i.e. every corner, which is exactly where a recentring signal was wanted.
+            //
+            // Measuring each side's own deficit instead makes the sentinel handle itself: an open side
+            // is simply not deficient, so it contributes 0 with no special case and no clamp to saturate.
+            // Both quantities are bounded in [0,1] by construction, so the term stays differentiable
+            // everywhere it is nonzero. In a corridor with both walls in range it is a genuine centring
+            // term (zero when the deficits match); with a single wall it degenerates to that wall's own
+            // deficit, reinforcing the clearance term's push away from it rather than going silent.
+            const float u_left  = std::clamp((side_target - d_left_min) / side_span, 0.f, 1.f);
+            const float u_right = std::clamp((side_target - d_right_min) / side_span, 0.f, 1.f);
+            const float asymmetry = u_left - u_right;
+            if (std::abs(asymmetry) > 1e-4f)
                 G_lat_step += active_params_.lambda_lateral_clearance
                             * std::max(0.f, active_params_.lateral_balance_gain)
-                            * imbalance_norm * imbalance_norm;
-            }
+                            * asymmetry * asymmetry;
 
             // Lateral closing-gain term — disabled; replaced by CBF below.
             // if (std::isfinite(prev_side_min) && side_min < prev_side_min)
@@ -1791,6 +1875,20 @@ TrajectoryController::SimResult TrajectoryController::simulate_and_score(
     float dr = seed.rot[0] - (prev_optimal_.empty() ? 0.f : prev_optimal_[0].rot);
     float G_smooth = active_params_.lambda_smooth * (dv * dv + dr * dr);
 
+    // G_continuity: distance from the command ACTUALLY EXECUTED last cycle (see Params).
+    // Skipped on the first cycle after a (re)plan: there is no executed command to be continuous with,
+    // and anchoring to a stale one would fight the new path exactly when it must be followed.
+    float G_cont = 0.f;
+    if (last_cmd_valid_ and active_params_.lambda_continuity > 0.f)
+    {
+        const float inv_adv = 1.f / std::max(active_params_.max_adv, 1e-3f);
+        const float inv_rot = 1.f / std::max(active_params_.max_rot, 1e-3f);
+        const float cv = (seed.adv[0] - last_cmd_adv_) * inv_adv;
+        const float cr = (seed.rot[0] - last_cmd_rot_) * inv_rot;
+        G_cont = active_params_.lambda_continuity
+               * (cv * cv + std::max(0.f, active_params_.continuity_rot_factor) * cr * cr);
+    }
+
     // G_velocity: magnitude regularization + action change penalty
     float G_vel_mag = 0.f;
     float G_vel_delta = 0.f;
@@ -1808,37 +1906,46 @@ TrajectoryController::SimResult TrajectoryController::simulate_and_score(
     G_vel_mag *= active_params_.lambda_velocity;
     G_vel_delta *= active_params_.lambda_delta_vel;
 
-    // Information-theoretic correction (Williams et al. 2017):
-    // S_k += λ · Σ_t  u_t^T · Σ^{-1} · ε_t
-    // where u_t is the sampling mean (nominal), and ε_t = seed_t - nominal_t.
-    // IMPORTANT: using seed_t here (u+ε) introduces an extra ε²/σ² bias term,
-    // which can dominate costs and collapse ESS in narrow passages.
-    float G_info = 0.f;
-    if (seed.use_info_correction)
-    {
-        const float inv_var_adv = 1.f / std::max(adaptive_sigma_adv_ * adaptive_sigma_adv_, 1e-8f);
-        const float inv_var_rot = 1.f / std::max(adaptive_sigma_rot_ * adaptive_sigma_rot_, 1e-8f);
-        const int nom_steps = static_cast<int>(nominal.adv.size());
-        for (int s = 0; s < actual_steps; ++s)
-        {
-            const float nom_adv = (s < nom_steps) ? nominal.adv[s] : 0.f;
-            const float nom_rot = (s < nom_steps) ? nominal.rot[s] : 0.f;
-            const float eps_adv = seed.adv[s] - nom_adv;
-            const float eps_rot = seed.rot[s] - nom_rot;
-            G_info += nom_adv * eps_adv * inv_var_adv
-                    + nom_rot * eps_rot * inv_var_rot;
-        }
-        G_info *= adaptive_lambda_;  // λ temperature
-    }
+    // ── NO INFORMATION-THEORETIC CORRECTION (G_info) HERE — DELETED ON PURPOSE ───────────────
+    // There used to be a Williams-et-al. importance-sampling term
+    //     S_k += λ · Σ_t  u_tᵀ Σ⁻¹ ε_t        (applied to the Gaussian seeds only)
+    // added into G_total. It is gone, and it must not come back. Three reasons, in order of
+    // how badly they broke the controller:
+    //
+    // 1. SCALE — it drowned every real cost. 1/σ_adv² = 1/0.12² ≈ 69; on a straight the
+    //    nominal pins adv at max_adv = 0.7 (compute_nominal), and × λ = 8 gives ≈ 389·ε per
+    //    step. Over 50 i.i.d. steps the across-sample spread is ≈ ±1500 — against a TASK-cost
+    //    spread of order 8. So `g_range` in the weighting block was essentially G_info alone,
+    //    and the adaptive floor `lambda_used = max(adaptive_lambda_, g_range/5)` landed near
+    //    300 instead of the configured 8. Goal, obstacle, CBF and lateral terms were all
+    //    diluted ~40× inside the softmax: the robot was being steered by sampling noise.
+    //
+    // 2. IT WAS A MULTIPLICATIVE BRAKE ON THE COMMAND. Under the resulting exponential tilt,
+    //    E[ε_t] = −(adaptive_lambda_ / lambda_used) · u_t, so the weighted mean this function
+    //    feeds back is u · (1 − adaptive_lambda_/lambda_used) — a gain strictly below 1 on
+    //    every commanded velocity. That gain lands in prev_optimal_ (the warm start) and is
+    //    re-applied next cycle, so it COMPOUNDS.
+    //
+    // 3. IT EXCLUDED EXACTLY THE SEEDS THAT FIND BYPASSES. Only the ~93 Gaussian seeds carried
+    //    it; the nominal and the 6 structured wide-angle detour seeds did not. That is a large
+    //    constant cost offset between the two families, so the detour seeds — the entire
+    //    mechanism for discovering a way around an obstacle — were effectively unweighted.
+    //
+    // ⚠ THE TRAP: do NOT "restore it properly" by making the two temperatures agree (the
+    // weights used lambda_used, the term used adaptive_lambda_). That drives the gain in (2)
+    // to exactly zero — i.e. it drives the commanded speed to zero. Williams' correction is
+    // only valid when the base measure is ZERO control, so the STATE cost has to actively pay
+    // for motion; here the state-cost spread is ~8 against a correction spread of ~1500 and it
+    // simply cannot. Dropping the term makes the base measure the nominal / warm start, which
+    // is what most practical MPPI implementations actually do.
 
     res.G_goal = G_goal + active_params_.lambda_goal * G_progress;
     res.G_obs = G_obs_total + (res.collides ? active_params_.collision_penalty : 0.f);
     res.G_lat = G_lat_total;
     res.G_cbf = G_cbf_total;
-    res.G_smooth = G_smooth;
+    res.G_smooth = G_smooth + G_cont;
     res.G_vel = G_vel_mag + G_vel_delta;
-    res.G_info = G_info;
-    res.G_total = res.G_goal + res.G_obs + res.G_lat + res.G_cbf + res.G_smooth + res.G_vel + res.G_info;
+    res.G_total = res.G_goal + res.G_obs + res.G_lat + res.G_cbf + res.G_smooth + res.G_vel;
     return res;
 }
 
@@ -1920,14 +2027,78 @@ void TrajectoryController::optimize_seed(Seed& seed, const Eigen::Vector2f& carr
 // Carrot computation
 // ============================================================================
 
+bool TrajectoryController::chord_admits_body(const Eigen::Vector2f& carrot_robot) const
+{
+    const float len = carrot_robot.norm();
+    if (len < 1e-3f) return true;
+    // Heading of travel along the chord, in this controller's convention (x right, y forward, measured
+    // from +y toward +x). The body presents THAT heading while cutting to the carrot.
+    const float heading = std::atan2(carrot_robot.x(), carrot_robot.y());
+    const int steps = std::max(2, static_cast<int>(std::ceil(len / 0.10f)));
+    for (int i = 1; i <= steps; ++i)
+    {
+        const Eigen::Vector2f p = carrot_robot * (static_cast<float>(i) / steps);
+        // The body's reach toward whatever is nearest AT that point, not a disc — the same predicate the
+        // obstacle cost and the safety gate use, so the three cannot disagree about what fits.
+        if (query_esdf(p.x(), p.y()) < body_extent(-query_esdf_gradient(p.x(), p.y()), heading))
+            return false;
+    }
+    return true;
+}
+
+Eigen::Vector2f TrajectoryController::clip_carrot_to_reachable(const Eigen::Vector2f& carrot_robot) const
+{
+    if (chord_admits_body(carrot_robot)) return carrot_robot;
+    // Walk back along the chord to the furthest admissible point. Never below a short minimum: a carrot
+    // at the robot's own position is not a direction to go, and the follower needs SOMETHING to aim at
+    // even when it is already tight — the MPPI's obstacle terms are what keep it safe there, not this.
+    constexpr float kMinCarrot = 0.30f;
+    const float len = carrot_robot.norm();
+    for (float f = 0.9f; f > 0.05f; f -= 0.1f)
+    {
+        if (len * f < kMinCarrot) break;
+        if (const Eigen::Vector2f c = carrot_robot * f; chord_admits_body(c)) return c;
+    }
+    return carrot_robot * std::min(1.f, kMinCarrot / std::max(len, 1e-3f));
+}
+
 Eigen::Vector2f TrajectoryController::compute_carrot(const Eigen::Affine2f& robot_pose)
 {
     const Eigen::Vector2f robot_pos = robot_pose.translation();
     float min_dist_sq = std::numeric_limits<float>::max();
-    int closest_seg = 0;
+    int closest_seg = carrot_seg_hint_;
     float closest_t = 0.f;
 
-    for (int i = 0; i + 1 < static_cast<int>(path_room_.size()); ++i)
+    // ── WINDOWED, NOT GLOBAL ──────────────────────────────────────────────────────────────────────
+    // This used to scan EVERY segment of path_room_ and take the spatial nearest. In continuous mode
+    // path_room_ is the whole multi-lap route, and a tour crosses itself: the apartment tour's outbound
+    // and inbound legs run 0.6 m apart. A global search binds the carrot to whichever branch is nearer
+    // IN SPACE, which at the middle of a spur is the leg going the OTHER WAY — so the robot turns
+    // around and drives back down the way it came. Reported live as "it turns around where the way out
+    // and the way in cross or are very close", and measured as cross_track 1.10 m rms / 4.03 m max on a
+    // run that then declared itself complete at waypoint 6.
+    // RouteSpline::project and RouteFollower::advance both already refuse to do this, and say why.
+    //
+    // The window must be SHORT relative to the arc-length separation between nearby branches, not merely
+    // "small": on that spur the two legs are 0.6 m apart in space but only ~3 m apart in arc length, so a
+    // 3 m window would still reach the wrong one. It only has to cover how far the robot can travel in a
+    // cycle plus tracking drift — 0.7 m/s over a 100 ms cycle is 7 cm — so 1.5 m forward is already
+    // generous by a factor of twenty, and a little backward slack absorbs the robot being pushed back.
+    constexpr float kWindowFwdM = 1.5f;
+    constexpr float kWindowBackM = 0.75f;
+    const int n_seg = static_cast<int>(path_room_.size()) - 1;
+    if (n_seg <= 0) return path_room_.empty() ? Eigen::Vector2f::Zero()
+                                              : room_to_robot(path_room_.back(), robot_pose);
+    carrot_seg_hint_ = std::clamp(carrot_seg_hint_, 0, n_seg - 1);
+
+    int lo = carrot_seg_hint_;
+    for (float back = 0.f; lo > 0 and back < kWindowBackM; --lo)
+        back += (path_room_[lo] - path_room_[lo - 1]).norm();
+    int hi = carrot_seg_hint_;
+    for (float fwd = 0.f; hi + 1 < n_seg and fwd < kWindowFwdM; ++hi)
+        fwd += (path_room_[hi + 1] - path_room_[hi]).norm();
+
+    for (int i = lo; i <= hi; ++i)
     {
         const Eigen::Vector2f a = path_room_[i];
         const Eigen::Vector2f ab = path_room_[i + 1] - a;
@@ -1939,6 +2110,10 @@ Eigen::Vector2f TrajectoryController::compute_carrot(const Eigen::Affine2f& robo
         const float d_sq = (robot_pos - proj).squaredNorm();
         if (d_sq < min_dist_sq) { min_dist_sq = d_sq; closest_seg = i; closest_t = t; }
     }
+    // Carried to the next cycle. A robot that has fallen far off the route keeps the windowed anchor and
+    // is steered back toward the stretch it was on — which is what we want. Snapping to whatever branch
+    // is nearest in space is what produced the turn-around.
+    carrot_seg_hint_ = closest_seg;
 
     float lookahead_eff = active_params_.carrot_lookahead;
     if (active_params_.carrot_curve_adaptation_enabled)
@@ -1990,22 +2165,51 @@ Eigen::Vector2f TrajectoryController::compute_carrot(const Eigen::Affine2f& robo
         carrot_curve_active_ = false;
     }
 
-    float remaining = lookahead_eff;
+    // Walk forward from the projection, and stop as soon as the chord would cut more of the route away
+    // than carrot_max_route_cut_m. The deviation is measured against the fragment ACTUALLY SPANNED, so a
+    // straight run is unaffected (deviation stays ~0 and the full lookahead is used) while a tight curve
+    // pulls the carrot in until the chord tracks it.
+    const Eigen::Vector2f ab0 = path_room_[closest_seg + 1] - path_room_[closest_seg];
+    const Eigen::Vector2f proj = path_room_[closest_seg] + closest_t * ab0;
+    const float max_cut = std::max(0.01f, active_params_.carrot_max_route_cut_m);
+
+    // Perpendicular distance of `p` from the chord proj->carrot.
+    const auto deviation = [&proj](const Eigen::Vector2f &carrot, const Eigen::Vector2f &p)
     {
-        const Eigen::Vector2f ab = path_room_[closest_seg + 1] - path_room_[closest_seg];
-        const float seg_remaining = (1.f - closest_t) * ab.norm();
-        if (seg_remaining >= remaining)
-            return path_room_[closest_seg] + std::min(closest_t + remaining / std::max(ab.norm(), 1e-6f), 1.f) * ab;
-        remaining -= seg_remaining;
-    }
-    for (int i = closest_seg + 1; i + 1 < static_cast<int>(path_room_.size()); ++i)
+        const Eigen::Vector2f ch = carrot - proj;
+        const float len2 = ch.squaredNorm();
+        if (len2 < 1e-9f) return (p - proj).norm();
+        const float t = std::clamp((p - proj).dot(ch) / len2, 0.f, 1.f);
+        return (p - (proj + t * ch)).norm();
+    };
+
+    std::vector<Eigen::Vector2f> spanned;      // route points between the projection and the carrot
+    spanned.reserve(64);
+    Eigen::Vector2f best = proj;
+    float travelled = 0.f;
+    Eigen::Vector2f prev = proj;
+
+    for (int i = closest_seg + 1; i < static_cast<int>(path_room_.size()); ++i)
     {
-        const Eigen::Vector2f ab = path_room_[i + 1] - path_room_[i];
-        const float seg_len = ab.norm();
-        if (seg_len >= remaining) return path_room_[i] + (remaining / seg_len) * ab;
-        remaining -= seg_len;
+        const Eigen::Vector2f p = path_room_[i];
+        travelled += (p - prev).norm();
+        prev = p;
+
+        float worst = 0.f;
+        for (const auto &q : spanned) worst = std::max(worst, deviation(p, q));
+        if (worst > max_cut)
+            break;                              // extending further would skip part of the route
+
+        best = p;
+        spanned.push_back(p);
+        if (travelled >= lookahead_eff) break;  // full lookahead reached with the route still tracked
     }
-    return path_room_.back();
+
+    // A carrot at the projection is not a direction to go. Fall back to the next sample ahead: the
+    // clip-to-reachable pass and the obstacle terms are what keep it safe in tight places, not this.
+    if ((best - proj).norm() < 1e-3f and closest_seg + 1 < static_cast<int>(path_room_.size()))
+        best = path_room_[closest_seg + 1];
+    return best;
 }
 
 // ============================================================================
@@ -2068,6 +2272,51 @@ void TrajectoryController::build_esdf(const std::vector<Eigen::Vector3f>& lidar_
             const int cj = static_cast<int>((p_robot.y() + half) / res);
             if (ci >= 0 && ci < N && cj >= 0 && cj < N)
                 occ[cj * N + ci] = 1;
+        }
+    }
+
+    // ── THE WALLS ────────────────────────────────────────────────────────────────────────────────
+    // The room boundary was sampled by set_room_boundary and, until now, was consumed ONLY by
+    // relax_path and smooth_path_spline — path SHAPING. It never reached this grid, so every safety
+    // term downstream (obstacle cost, CBF barrier, collision test, and all six lateral probes) knew a
+    // wall existed only while the LiDAR was currently returning from it. Three things make that fail
+    // exactly at a thin salient corner, which is where the robot was observed clipping walls:
+    //   • the self-filter drops every return within max(0.40, body+0.08) = 0.405 m of the robot centre,
+    //     against a circumscribed radius of 0.325 — so a corner closing on the body is DELETED from the
+    //     field in the last 8 cm, precisely when it matters;
+    //   • a salient corner seen at a grazing angle yields few returns, and its far face is occluded
+    //     until the robot is already around it;
+    //   • probing harder cannot help: the probes read this field, and the wall was not in it.
+    // Walls are geometry we already know from the room model, so there is no reason to rediscover them
+    // from a sensor every cycle. Same room->robot transform as the furniture above.
+    esdf_boundary_cells_ = 0;
+    esdf_boundary_rejected_ = false;
+    if (!room_boundary_points_room_.empty())
+    {
+        const Eigen::Affine2f robot_inv = robot_pose.inverse();
+        // Remember only the cells THIS pass turned on, so a rollback cannot erase a wall the LiDAR or the
+        // furniture set had already reported. Clearing every boundary cell would delete real obstacles
+        // wherever the two happen to coincide — which is exactly along the walls, i.e. everywhere it matters.
+        boundary_cells_.clear();
+        for (const auto& p_room : room_boundary_points_room_)
+        {
+            const Eigen::Vector2f p_robot = robot_inv * p_room;
+            const int ci = static_cast<int>((p_robot.x() + half) / res);
+            const int cj = static_cast<int>((p_robot.y() + half) / res);
+            if (ci >= 0 && ci < N && cj >= 0 && cj < N)
+                if (!occ[cj * N + ci]) { occ[cj * N + ci] = 1; boundary_cells_.push_back(cj * N + ci); }
+        }
+        // A room polygon is ONE input, and this stack has already been bitten once by a bad one (the
+        // grid planner saw 27018 of 27018 cells "outside" and refused to plan anywhere). A boundary is
+        // an outline, so it should mark a thin trace — if it claims a quarter of the window, it is not
+        // an outline and every rollout would collide. Drop it and say so rather than freeze the robot.
+        esdf_boundary_cells_ = static_cast<int>(boundary_cells_.size());
+        if (esdf_boundary_cells_ > N * N / 4)
+        {
+            for (const int c : boundary_cells_) occ[c] = 0;
+            esdf_boundary_rejected_ = true;
+            esdf_boundary_cells_ = 0;
+            boundary_cells_.clear();
         }
     }
 

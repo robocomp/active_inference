@@ -34,6 +34,9 @@
 	#include <QtWidgets>
 #endif
 
+#include <cmath>
+#include <limits>
+
 #include "../../common/dashboard/timeseries_plot.h"
 #include "controller_mission_panel.h"
 
@@ -47,31 +50,59 @@ public:
         main_layout->setContentsMargins(8, 8, 8, 8);
         main_layout->setSpacing(8);
 
+        // ── Row 1: what the base is being told to do, and what arrival is waiting on ──
+        // QLCDNumber rather than a formatted label: these are the numbers you WATCH while the robot
+        // moves, and a proportional label re-flows as digits change, which makes a jittering value hard
+        // to read precisely when it matters. Fixed-width segments do not move.
         auto *pose_panel = new QFrame(this);
         pose_panel->setFrameShape(QFrame::StyledPanel);
         pose_panel->setFrameShadow(QFrame::Raised);
 
-        auto *pose_layout = new QVBoxLayout(pose_panel);
-        pose_layout->setContentsMargins(8, 4, 8, 4);
-        pose_layout->setSpacing(4);
+        auto *pose_row = new QHBoxLayout(pose_panel);
+        pose_row->setContentsMargins(8, 4, 8, 4);
+        pose_row->setSpacing(6);
 
-        auto *cmd_row = new QHBoxLayout();
-        cmd_row->setSpacing(8);
-        auto *cmd_title = new QLabel("Cmd vel:", pose_panel);
-        cmd_vel_value_ = new QLabel("adv 0 mm/s   side 0 mm/s   rot 0.00 rad/s", pose_panel);
-        cmd_vel_value_->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        cmd_row->addWidget(cmd_title);
-        cmd_row->addWidget(cmd_vel_value_, 1);
-        pose_layout->addLayout(cmd_row);
+        const auto make_lcd = [&](QWidget *parent, int digits, const QString &tip)
+        {
+            auto *lcd = new QLCDNumber(digits, parent);
+            lcd->setSegmentStyle(QLCDNumber::Flat);
+            lcd->setFrameShape(QFrame::NoFrame);
+            lcd->setMinimumSize(58, 26);
+            lcd->setToolTip(tip);
+            lcd->display(QStringLiteral("---"));
+            return lcd;
+        };
 
-        auto *affordance_row = new QHBoxLayout();
-        affordance_row->setSpacing(8);
-        auto *affordance_title = new QLabel("Selected affordance:", pose_panel);
-        selected_affordance_value_ = new QLabel("none", pose_panel);
-        selected_affordance_value_->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        affordance_row->addWidget(affordance_title);
-        affordance_row->addWidget(selected_affordance_value_, 1);
-        pose_layout->addLayout(affordance_row);
+        pose_row->addWidget(new QLabel("adv", pose_panel));
+        cmd_adv_lcd_ = make_lcd(pose_panel, 5, QStringLiteral("Commanded forward speed (mm/s)."));
+        pose_row->addWidget(cmd_adv_lcd_);
+        pose_row->addWidget(new QLabel("side", pose_panel));
+        cmd_side_lcd_ = make_lcd(pose_panel, 5, QStringLiteral("Commanded lateral speed (mm/s)."));
+        pose_row->addWidget(cmd_side_lcd_);
+        pose_row->addWidget(new QLabel("rot", pose_panel));
+        cmd_rot_lcd_ = make_lcd(pose_panel, 5, QStringLiteral("Commanded rotation (rad/s)."));
+        pose_row->addWidget(cmd_rot_lcd_);
+
+        // Alerts (LiDAR stall, recovery). Hidden while nothing is wrong, so the row stays numeric —
+        // but a stalled sensor must never be silent just because the row is now made of digits.
+        alert_label_ = new QLabel(QString(), pose_panel);
+        alert_label_->setVisible(false);
+        alert_label_->setStyleSheet("QLabel { background-color: #c0392b; color: white; font-weight: bold;"
+                                    " border-radius: 4px; padding: 2px 8px; }");
+        pose_row->addWidget(alert_label_);
+
+        pose_row->addStretch();
+
+        // Right end: what the ARRIVAL test is waiting on — remaining distance and heading error.
+        pose_row->addWidget(new QLabel("d", pose_panel));
+        goal_dist_lcd_ = make_lcd(pose_panel, 5,
+            QStringLiteral("Remaining linear distance to the end of the planned path (m)."));
+        pose_row->addWidget(goal_dist_lcd_);
+        pose_row->addWidget(new QLabel("\u03b8", pose_panel));
+        goal_theta_lcd_ = make_lcd(pose_panel, 5,
+            QStringLiteral("Angular error to the commanded facing yaw (deg).\n"
+                           "Blank when the target carries none. Amber = rotating in place to align."));
+        pose_row->addWidget(goal_theta_lcd_);
 
         main_layout->addWidget(pose_panel);
 
@@ -93,24 +124,6 @@ public:
         mppi_paths_toggle_btn->setChecked(false);
         toolbar_layout->addWidget(mppi_paths_toggle_btn);
 
-        // Live distance-to-target readout, immediately right of "MPPI paths". Shows what the ARRIVAL test is
-        // actually looking at: remaining linear distance to the end of the path, and remaining angular error
-        // to the commanded facing yaw. Monospaced so the digits don't jitter the layout as they change.
-        // Turns amber while rotating in place to align, so an alignment that hunts instead of converging is
-        // visible immediately rather than inferred from the robot's behaviour.
-        goal_distance_label_ = new QLabel(QStringLiteral("d — m   θ — °"), toolbar);
-        {
-            QFont f = goal_distance_label_->font();
-            f.setStyleHint(QFont::Monospace);
-            f.setFamily(QStringLiteral("monospace"));
-            goal_distance_label_->setFont(f);
-        }
-        goal_distance_label_->setToolTip(
-            QStringLiteral("Remaining distance to target.\n"
-                           "d = linear distance to the end of the planned path\n"
-                           "θ = angular error to the commanded facing yaw (blank if the target has none)\n"
-                           "Amber = rotating in place to align."));
-        toolbar_layout->addWidget(goal_distance_label_);
         toolbar_layout->addStretch();
 
         // Stuck-recovery indicator, pinned to the right of the toolbar. Hidden while the robot
@@ -120,6 +133,17 @@ public:
         stuck_status_label_->setAlignment(Qt::AlignCenter);
         stuck_status_label_->setVisible(false);
         toolbar_layout->addWidget(stuck_status_label_);
+
+        // Which affordance the epistemic planner picked. It belongs beside the drive controls — it is
+        // the answer to "why is it going there", not a pose readout.
+        toolbar_layout->addWidget(new QLabel("affordance", toolbar));
+        selected_affordance_value_ = new QLabel(toolbar);
+        selected_affordance_value_->setTextFormat(Qt::RichText);
+        selected_affordance_value_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        // Bounded: affordance names come from graph nodes and can be long, and an unbounded label at the
+        // end of the row sets the window's minimum width. The full text stays in the tooltip.
+        selected_affordance_value_->setMaximumWidth(240);
+        toolbar_layout->addWidget(selected_affordance_value_);
 
         main_layout->addWidget(toolbar);
 
@@ -153,16 +177,49 @@ public:
 
     }
 
-    void set_cmd_vel_text(const QString &text)
+    // The commanded base velocity, as numbers rather than a sentence. Dedups: this is called on every
+    // command (~20 Hz) and re-displaying an unchanged value churns Qt for nothing.
+    void set_cmd_vel(float adv_mm_s, float side_mm_s, float rot_rps)
     {
-        if (cmd_vel_value_ != nullptr)
-            cmd_vel_value_->setText(text);
+        const auto put = [](QLCDNumber *lcd, float v, int decimals, float &shown)
+        {
+            if (lcd == nullptr or (std::isfinite(shown) and std::abs(v - shown) < 1e-4f)) return;
+            shown = v;
+            lcd->display(QString::number(static_cast<double>(v), 'f', decimals));
+        };
+        put(cmd_adv_lcd_, adv_mm_s, 0, cmd_adv_shown_);
+        put(cmd_side_lcd_, side_mm_s, 0, cmd_side_shown_);
+        put(cmd_rot_lcd_, rot_rps, 2, cmd_rot_shown_);
     }
 
-    void set_selected_affordance_text(const QString &text)
+    // Alerts that are not numbers (LiDAR stall, recovery). Empty hides the badge.
+    void set_cmd_vel_text(const QString &text)
     {
-        if (selected_affordance_value_ != nullptr)
-            selected_affordance_value_->setText(text);
+        if (alert_label_ == nullptr or text == alert_shown_) return;
+        alert_shown_ = text;
+        alert_label_->setText(text);
+        alert_label_->setVisible(not text.isEmpty());
+    }
+
+    // The CURRENT affordance is the thing you are looking for on this row, so it is coloured and bold;
+    // the previous one is context and is dimmed. Formatting lives here rather than in the worker: the
+    // worker knows which affordance is selected, not what colour "selected" should be.
+    // "none" is deliberately styled as absence (grey, italic) — a selection and the lack of one must not
+    // read the same at a glance.
+    void set_selected_affordance(const QString &current, const QString &previous)
+    {
+        if (selected_affordance_value_ == nullptr) return;
+        const bool have = not current.isEmpty() and current != QStringLiteral("none");
+        const QString html =
+            (have ? QStringLiteral("<span style='color:#2e86de; font-weight:bold;'>%1</span>")
+                  : QStringLiteral("<span style='color:#7f8c8d; font-style:italic;'>%1</span>"))
+                .arg(current.toHtmlEscaped())
+            + QStringLiteral("<span style='color:#95a5a6;'> &nbsp;(prev: %1)</span>")
+                  .arg(previous.toHtmlEscaped());
+        if (html == affordance_shown_) return;   // called every cycle; don't churn Qt
+        affordance_shown_ = html;
+        selected_affordance_value_->setText(html);
+        selected_affordance_value_->setToolTip(current + QStringLiteral("   (prev: ") + previous + ")");
     }
 
     // Toggle the stuck-recovery indicator. Orange + visible while the robot is escaping a wedge;
@@ -184,32 +241,30 @@ public:
             stuck_status_label_->setVisible(false);
     }
 
-    // Remaining distance to target, shown next to "MPPI paths". `yaw_err_rad` is nullopt when the target
-    // carries no commanded facing yaw (a plain mouse target), in which case the angular field reads "—".
-    // Dedups on the rendered string so a per-cycle call doesn't churn Qt.
+    // What the ARRIVAL test is waiting on, at the right end of the pose row. `yaw_err_rad` is nullopt
+    // when the target carries no commanded facing yaw (a plain mouse target), in which case theta reads
+    // "---" rather than 0 — an absent constraint and a satisfied one must not look alike.
     void set_goal_distance(std::optional<float> dist_m, std::optional<float> yaw_err_rad, bool aligning)
     {
-        if (goal_distance_label_ == nullptr)
-            return;
-        const QString text = dist_m.has_value()
-            ? QStringLiteral("d %1 m   θ %2")
-                  .arg(*dist_m, 5, 'f', 2)
-                  .arg(yaw_err_rad.has_value()
-                           ? QStringLiteral("%1°").arg(*yaw_err_rad * 180.f / static_cast<float>(M_PI), 6, 'f', 1)
-                           : QStringLiteral("   —  "))
-            : QStringLiteral("d   —  m   θ   —  ");
-        if (text != goal_distance_shown_)
+        if (goal_dist_lcd_ != nullptr)
         {
-            goal_distance_shown_ = text;
-            goal_distance_label_->setText(text);
+            const QString d = dist_m.has_value()
+                ? QString::number(static_cast<double>(*dist_m), 'f', 2) : QStringLiteral("---");
+            if (d != goal_dist_shown_) { goal_dist_shown_ = d; goal_dist_lcd_->display(d); }
         }
-        if (aligning != goal_aligning_shown_)
+        if (goal_theta_lcd_ != nullptr)
         {
-            goal_aligning_shown_ = aligning;
-            goal_distance_label_->setStyleSheet(
-                aligning ? "QLabel { background-color: #e67e22; color: white; font-weight: bold;"
-                           " border-radius: 4px; padding: 2px 6px; }"
-                         : "QLabel { padding: 2px 6px; }");
+            const QString th = yaw_err_rad.has_value()
+                ? QString::number(static_cast<double>(*yaw_err_rad) * 180.0 / M_PI, 'f', 1)
+                : QStringLiteral("---");
+            if (th != goal_theta_shown_) { goal_theta_shown_ = th; goal_theta_lcd_->display(th); }
+            if (aligning != goal_aligning_shown_)
+            {
+                goal_aligning_shown_ = aligning;
+                // Amber while rotating in place, so an alignment that hunts instead of converging is
+                // visible immediately rather than inferred from the robot's behaviour.
+                goal_theta_lcd_->setStyleSheet(aligning ? "QLCDNumber { background-color: #e67e22; }" : "");
+            }
         }
     }
 
@@ -238,12 +293,21 @@ public:
     QPushButton *mppi_paths_toggle_btn = nullptr;
 
 private:
-    QLabel *cmd_vel_value_ = nullptr;
+    QLCDNumber *cmd_adv_lcd_ = nullptr;
+    QLCDNumber *cmd_side_lcd_ = nullptr;
+    QLCDNumber *cmd_rot_lcd_ = nullptr;
+    QLCDNumber *goal_dist_lcd_ = nullptr;
+    QLCDNumber *goal_theta_lcd_ = nullptr;
+    QLabel *alert_label_ = nullptr;
+    QString alert_shown_;
+    float cmd_adv_shown_ = std::numeric_limits<float>::quiet_NaN();
+    float cmd_side_shown_ = std::numeric_limits<float>::quiet_NaN();
+    float cmd_rot_shown_ = std::numeric_limits<float>::quiet_NaN();
+    QString goal_dist_shown_, goal_theta_shown_;
     QLabel *selected_affordance_value_ = nullptr;
+    QString affordance_shown_;
     QLabel *stuck_status_label_ = nullptr;
     bool stuck_active_shown_ = false;
-    QLabel *goal_distance_label_ = nullptr;
-    QString goal_distance_shown_;
     bool goal_aligning_shown_ = false;
 };
 #endif

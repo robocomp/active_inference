@@ -33,6 +33,13 @@ public:
         float mood_speed_gain = 0.35f;        // max_adv, max_rot, carrot lookahead
         float mood_reactivity_gain = 0.35f;   // warm-start inertia, output smoothing, brake
         float mood_caution_gain = 0.30f;      // calm-side boost for d_safe and obstacle conservatism
+        // Should mood widen the ARRIVAL RADIUS? No — and this exists to keep it that way.
+        // goal_threshold is a tolerance, not a fluidity knob (the arm classes its REACH_TOLERANCE_M as
+        // fixed for the same reason, FSM.md:198-224). Letting a learned confidence widen it means each
+        // leg physically ENDS EARLIER, so duration_s and path_length_m fall — a 5-10% "improvement" on
+        // a 1.2 m leg that is really just a shorter leg, and indistinguishable from a real one after
+        // the fact. A mechanism must not be able to move the ruler it is measured with.
+        bool  mood_scales_goal_threshold = false;
 
         // Kinematic limits (differential drive: adv + rot only)
         float max_adv   = 0.8f;   // m/s forward
@@ -49,6 +56,14 @@ public:
 
         // Carrot / path following
         float carrot_lookahead = 2.0f;
+        // How far the chord to the carrot may deviate from the ROUTE FRAGMENT it spans, in metres.
+        // Pure pursuit cuts any route feature whose radius is small against the lookahead: with a 2 m
+        // lookahead, a tight curve or a spur can sit centimetres away in SPACE while being metres away
+        // in ARC LENGTH, so the robot drives straight at the carrot and never makes the excursion — it
+        // does not go where the route says to go. Obstacle-freedom does not catch this: the shortcut is
+        // usually through open floor. This is a FIDELITY limit (how much of the route may be skipped),
+        // not a safety one, which is why it is a stated allowance rather than derived.
+        float carrot_max_route_cut_m = 0.15f;
         bool  carrot_curve_adaptation_enabled = false; // temporary inhibit switch for curve-based carrot adaptation
         float carrot_curve_lookahead_min = 0.9f;   // minimum lookahead used only in tight curves
         float carrot_curve_radius_ref = 1.6f;      // radius where lookahead reduction reaches ~50%
@@ -122,6 +137,28 @@ public:
         float lambda_velocity  = 0.01f;  // velocity cost multiplier (penalizes excessive speed, encourages earlier arrival) 
         float lambda_delta_vel = 0.18f;  // extra penalty on changes in velocity (oscillation penalty)
         float lambda_heading   = 0.6f;   // heading term multiplier relative to lambda_goal
+        // ── CONTROL CONTINUITY (cross-cycle) ──────────────────────────────────────────────────────
+        // Penalises how far a rollout's FIRST control sits from the command actually EXECUTED last
+        // cycle. This is the term the measured stutter says is missing: the documented failure is a
+        // near-full-scale reversal BETWEEN cycles (+0.456 -> -0.457 rad/s in 100 ms), and nothing in
+        // the objective sees that. G_smooth looks like it should, but it references
+        // prev_optimal_[0] — the previously PLANNED first step, not what the base was told (the
+        // executed command is a 3-step mean, then possibly the straight-speed override, then the
+        // output smoother, then the slew limiter) — and at lambda_smooth = 0.1 a full reversal costs
+        // ~0.08 against goal/obstacle terms in the 5-400 range, i.e. nothing.
+        //
+        // Deviations are NORMALISED by the kinematic limits, so the two channels are commensurate and
+        // this weight is scale-free (a full-scale reversal costs exactly lambda_continuity per channel)
+        // rather than depending on the units the base happens to use.
+        //
+        // DEFAULT 0 = OFF. The A/B must be exactly one change, and a baseline recorded before this
+        // existed has to stay comparable.
+        // ⚠ This buys smoothness with REACTION LAG: a high weight makes the robot reluctant to change
+        // what it is doing, including when it should. The CBF, the safety guard and the footprint test
+        // are all downstream of it and unaffected, so the failure mode is sluggishness, not collision —
+        // but that is the axis to watch when raising it.
+        float lambda_continuity = 0.0f;
+        float continuity_rot_factor = 1.0f;   // relative weight of the rotation channel (where the stutter is)
         float lambda_progress  = 1.0f;   // moving-away penalty multiplier relative to lambda_goal
 
         // Obstacle model (simple 2-stage quadratic)
@@ -313,10 +350,70 @@ public:
     TrajectoryController() = default;
 
     void set_path(const std::vector<Eigen::Vector2f>& path_room);
+    /// As set_path, but WITHOUT relax_path/smooth_path_spline. For a path that is already smooth and
+    /// already footprint-checked (RouteSpline): re-running the elastic band would push samples around
+    /// with its own clearance heuristic and could undo the feasibility pass, and re-smoothing a C2 curve
+    /// with a C1 spline would put back the curvature steps the whole exercise removes.
+    void set_path_presmoothed(const std::vector<Eigen::Vector2f>& path_room);
     // Optional room-frame heading (atan2(dy,dx) direction) the robot's forward axis
     // should face once the goal position is reached. Empty = legacy behaviour:
     // declare the goal reached immediately on arrival, no final rotation.
     void set_goal_facing_yaw(std::optional<float> yaw_rad);
+
+    /// Where ARRIVAL is judged, when that is not the end of the path.
+    ///
+    /// The follower shapes speed against the end of its path: the nominal seed scales adv down inside
+    /// `nominal_goal_dist_scale`, the straight-speed override switches off inside
+    /// `straight_speed_min_goal_dist`, and `effective_d_safe_for_goal_dist` relaxes the standoff. All of
+    /// that is correct behaviour for ARRIVING and wrong for PASSING THROUGH. Handing the follower a path
+    /// that ends at the next waypoint therefore made every waypoint a deceleration — on a 30-waypoint
+    /// tour with 1.28 m legs, the robot was inside the arrival regime for essentially the whole run and
+    /// never reached cruise (measured mean 0.30 m/s against a 0.7 m/s limit).
+    ///
+    /// So the two questions are separated: the path may run several waypoints ahead, which is what the
+    /// SPEED terms see, while arrival is judged against this near point. Unset ⇒ the path end, i.e. the
+    /// previous behaviour exactly.
+    /// `outgoing_dir_room` is the direction the route CONTINUES in after this point. With it, arrival
+    /// also fires on PASSAGE — once the robot is past the plane through the point normal to that
+    /// direction — not only on proximity.
+    ///
+    /// This is not optional once the path runs past the arrival point. The carrot sits
+    /// `carrot_lookahead` (2 m) ahead ALONG the path, so with a 4 m horizon it aims well beyond the
+    /// waypoint and the robot deliberately cuts the corner — often never entering the 0.25 m arrival
+    /// radius at all. Measured: the robot drove 6.03 m on a 0.41 m leg, ended 1.57 m away, and the leg
+    /// never completed; the follower then ran out of path, went inactive, the session re-issued the same
+    /// path and it turned around and drove it again. Cutting the corner is the POINT of the horizon, so
+    /// arrival has to be a question about passing, not about touching.
+    void set_arrival_point(std::optional<Eigen::Vector2f> room_pos,
+                           std::optional<Eigen::Vector2f> outgoing_dir_room = std::nullopt)
+    { arrival_point_room_ = room_pos; arrival_outgoing_room_ = outgoing_dir_room; }
+
+    /// WHO OWNS ARRIVAL. The endpoint test above is EUCLIDEAN: "am I near path_room_.back()?". That is a
+    /// correct question for a path that goes from here to somewhere else, and a WRONG one for a closed
+    /// route, where the end IS the beginning: at s=0 the robot stands within the goal radius of the
+    /// endpoint it has not driven a single metre toward, so arrival fires on the first cycle and the tour
+    /// never starts. Proximity alone cannot distinguish "not yet departed" from "returned" — only arc
+    /// length can, and the RouteFollower already carries it (forward-only `progress()`), so a continuous
+    /// route judges its own completion and switches this test OFF. Two arrival definitions for one motion
+    /// is the defect; this leaves exactly one in force at a time.
+    void set_endpoint_arrival(bool on) { endpoint_arrival_ = on; }
+
+    // CURVATURE-LIMITED SPEED. A ceiling on max_adv for this cycle, supplied by whoever owns the
+    // reference curve. The MPPI cannot derive it: its horizon is ~1.4 s of travel and its nominal seed
+    // scales speed by carrot DISTANCE and alignment, neither of which knows how sharp the turn ahead is.
+    // The route does know — it is C2, so kappa(s) is continuous — and v = sqrt(a_lat_max / kappa) is the
+    // physical relation between lateral acceleration and turn radius, not a tuning threshold.
+    //
+    // It must be a CEILING ON THE PLAN, not a clamp on the output: clamping the command after the fact
+    // would leave the MPPI planning trajectories it is not allowed to execute, and the resulting
+    // commanded-vs-measured gap is exactly what the wedge detector reads as being stuck.
+    // nullopt clears it (a click target has no curve, so it keeps the full speed envelope).
+    void set_speed_limit(std::optional<float> v_max_mps) { speed_limit_ = v_max_mps; }
+
+    // Seed the carrot's forward-only anchor when a path is (re)installed mid-route — after a repair the
+    // robot is somewhere in the middle, and starting the search from segment 0 would aim it back at the
+    // route's beginning. set_path resets this to 0, which is correct for a path that starts at the robot.
+    void set_carrot_hint(int segment_index) { carrot_seg_hint_ = std::max(0, segment_index); }
 
     ControlOutput compute(const Eigen::Affine2f& robot_pose);
     void stop();
@@ -343,7 +440,28 @@ public:
     /// Signed-distance-to-obstacle (m) at a point given in the ROBOT frame, sampled from
     /// the ESDF built during the most recent compute(). Used by recovery to probe side /
     /// rear clearance. Returns the unknown-distance sentinel if no ESDF exists yet.
+    ///
+    /// FRAME: the same one the rollouts integrate in — **+Y is FORWARD, +X is RIGHT**
+    /// (`x += adv·sin θ`, `y += adv·cos θ`). This is NOT the OmniRobot command frame
+    /// (adv/side/rot, +side = left). So a LEFT probe is (−d, 0), RIGHT is (+d, 0),
+    /// FRONT is (0, +d) and REAR is (0, −d).
+    ///
+    /// ⚠ ONLY VALID ON A CYCLE WHERE compute() RAN. The grid is rebuilt by build_esdf()
+    /// inside compute(); nothing else refreshes it. During an escape/recovery manoeuvre
+    /// compute() is not called at all, so this keeps returning the field as it was FROZEN at
+    /// the moment the manoeuvre began — still expressed in robot-frame coordinates — while
+    /// the robot is reversing and rotating out from under it. Treat readings taken during
+    /// such a manoeuvre as a snapshot of the situation at its START, not as live clearance.
     float clearance_at(float rx, float ry) const { return query_esdf(rx, ry); }
+
+    // What the room-boundary injection did on the last build_esdf: how many cells it contributed, and
+    // whether it was rejected as implausible. Recorded rather than printed so it can be compared per run.
+    int  esdf_boundary_cells() const { return esdf_boundary_cells_; }
+    bool esdf_boundary_rejected() const { return esdf_boundary_rejected_; }
+
+    /// Body reach toward whatever is nearest RIGHT NOW (robot frame, heading 0) — the number to
+    /// subtract from clearance_at(0,0) to get the true gap between the body and the world.
+    float body_extent_here() const;
 
     /// The robot's real silhouette. Exposed so callers ask THIS object what the body reaches instead of
     /// keeping their own radius — that habit is what produced six independent margins across three agents.
@@ -358,11 +476,20 @@ private:
     ControlMode control_mode_ = ControlMode::MPPI;
     std::vector<Eigen::Vector2f> path_room_;
     int wp_index_ = 0;
-    std::optional<float> goal_facing_yaw_;  // desired room-frame facing dir after arrival
+    std::optional<float> goal_facing_yaw_;
+    std::optional<float> speed_limit_;   // see set_speed_limit
+    int carrot_seg_hint_ = 0;            // forward-only anchor for compute_carrot; see the comment there
+    std::optional<Eigen::Vector2f> arrival_point_room_;
+    std::optional<Eigen::Vector2f> arrival_outgoing_room_;  // desired room-frame facing dir after arrival
+    bool endpoint_arrival_ = true;   // see set_endpoint_arrival — off while a continuous route owns arrival
     // The robot's real shape — the SAME polygon the global planner collides (common/robot_footprint), so the
     // two layers cannot disagree about what fits. Previously the MPPI used a 0.25 m disc while the planner
     // used the footprint, which meant the planner could route through a 0.46 m gap the MPPI would then refuse.
     RobotFootprint footprint_ = RobotFootprint::shadow();
+    // The command actually returned last cycle — the reference for the continuity cost. Not
+    // prev_optimal_[0], which is what was planned rather than what was executed.
+    float last_cmd_adv_ = 0.f, last_cmd_rot_ = 0.f;
+    bool  last_cmd_valid_ = false;
     bool aligning_ = false;                 // true while doing the final in-place rotation
     // Worst-case time the base may keep executing one alignment command before we can revise it. Used to bound
     // the in-place rotation so it cannot overshoot the tolerance band (see the arrival block). Measured p99 of
@@ -380,6 +507,11 @@ private:
 
     // Room boundary walls — pre-sampled points in room frame (for path relaxation)
     std::vector<Eigen::Vector2f> room_boundary_points_room_;
+    // Cells the boundary pass turned on this cycle — kept so a rejected boundary can be rolled back
+    // without erasing obstacles the LiDAR or furniture had already marked at the same cells.
+    std::vector<int> boundary_cells_;
+    int  esdf_boundary_cells_ = 0;
+    bool esdf_boundary_rejected_ = false;
 
     // Output smoothing
     Eigen::Vector3f smoothed_vel_ = Eigen::Vector3f::Zero();
@@ -417,6 +549,12 @@ private:
     void adapt_from_dominance(float dominance, int K, float sg_gate);
     void refresh_active_params();
 
+    // Installs `path_room` and resets ALL per-path controller state (MPPI warm start, adaptive
+    // K/T/λ/σ, ESS, smoothing, blockage, alignment) WITHOUT any geometry conditioning. Both
+    // set_path and set_path_presmoothed go through this; only set_path then relaxes + splines.
+    // Does NOT set wp_index_ — the two callers legitimately differ, so each sets its own.
+    void reset_mppi_state(const std::vector<Eigen::Vector2f>& path_room);
+
     // Elastic-band path relaxation: push waypoints toward center of free space
     void relax_path(int iterations = 20);
 
@@ -432,7 +570,6 @@ private:
     {
         std::vector<float> adv;
         std::vector<float> rot;
-        bool use_info_correction = false;
     };
 
     // Result of simulating a seed
@@ -446,7 +583,6 @@ private:
         float G_cbf = 0.f;
         float G_smooth = 0.f;
         float G_vel = 0.f;
-        float G_info = 0.f;
         float min_esdf = 1e9f;
         bool  collides = false;
     };
@@ -468,10 +604,12 @@ private:
     std::vector<Seed> sample_trajectories(const Eigen::Vector2f& carrot_robot,
                                           const Seed& nominal);
 
+    // Takes no sampling-mean argument: the only thing that ever needed it was the
+    // information-theoretic correction, deleted on purpose (see the block comment in
+    // simulate_and_score for why it must not come back).
     SimResult simulate_and_score(const Seed& seed,
                                  const Eigen::Vector2f& carrot_robot,
-                                 const Eigen::Vector2f& goal_robot,
-                                 const Seed& nominal);
+                                 const Eigen::Vector2f& goal_robot);
     void optimize_seed(Seed& seed, const Eigen::Vector2f& carrot_robot);
 
     // Obstacle scoring helpers (single-weight 2-stage quadratic model)
@@ -493,6 +631,12 @@ private:
     // Worst-case extent over all bearings. The ONLY legitimate fallback: score normalisations and scale
     // constants, where no bearing exists and being conservative costs nothing but a slightly wider ramp.
     float body_extent_max() const { return footprint_.circumscribed_radius(); }
+    // Can the robot get from HERE to `carrot_robot` by heading straight at it? The MPPI pulls toward the
+    // carrot in a straight line, so a carrot the robot cannot cut to directly is not a target, it is a
+    // trap. Samples the chord against the live ESDF with the body's real reach at the chord heading.
+    bool chord_admits_body(const Eigen::Vector2f& carrot_robot) const;
+    // The furthest point along the chord that IS admissible, so the carrot can be pulled back to it.
+    Eigen::Vector2f clip_carrot_to_reachable(const Eigen::Vector2f& carrot_robot) const;
     float obstacle_step_cost(float esdf_val, float d_safe_eff, float body_r) const;
     float obstacle_repulsion_strength(float esdf_val, float d_safe_eff, float body_r) const;
 

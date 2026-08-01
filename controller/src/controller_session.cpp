@@ -180,33 +180,19 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
         return step;
     }
 
-    // ── MISSION: above the affordance planner, below a manual click. ──
-    // While a mission runs it is the SOLE target source. That is what makes two runs comparable: if
-    // affordance selection could preempt a benchmark tour, the trajectory would change whenever perception
-    // changed, and the measurement could no longer attribute a difference to the controller. The affordance
-    // planner resumes by itself the moment the mission ends or is stopped — nothing has to re-enable it.
+    // The mission no longer supplies per-waypoint targets: it IS the route, driven in arc-length
+    // coordinates by the RouteFollower in ensure_current_plan. Nothing to select here — but a running
+    // mission still owns the base, so the affordance planner must not be consulted.
     if (mission_.running())
     {
-        if (const auto mission_target = mission_.current_target(); mission_target.has_value())
-        {
-            step.target = *mission_target;
-            current_target_room_ = step.target.room_pos;
-            affordance_manager.clear_current();
-            active_target_id_ = 0;
-            target_wait_logged_ = false;
-
-            const auto safe = grid_planner_.nearest_free(step.target.room_pos, step.target.yaw_rad);
-            if (safe.has_value())
-                step.target.room_pos = *safe;
-
-            step.target_changed = !last_target_info_.has_value()
-                               || last_target_info_->node_name != step.target.node_name;
-            last_target_info_ = step.target;
-            return step;
-        }
-        // Exhausted without anyone calling stop() — close the run out rather than leaving it "running"
-        // with nothing to drive to.
-        mission_.stop("exhausted", timestamp_ms);
+        affordance_manager.clear_current();
+        active_target_id_ = 0;
+        target_wait_logged_ = false;
+        step.target.node_name = "mission:" + mission_.selected_name();
+        step.target.room_pos = robot_pose->pos;
+        step.target_changed = false;
+        last_target_info_ = step.target;
+        return step;
     }
 
     // THE DRIVE MODE SAYS WHAT DRIVES, and that has to hold when a target is CONSUMED, not just when one is
@@ -293,6 +279,198 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     return step;
 }
 
+ControllerPolygon ControllerSession::smooth_plan(const ControllerPolygon &poly) const
+{
+    if (poly.size() < 2 or params_ == nullptr or not params_->smooth_planned_path) return poly;
+    rc::RouteSpline spline;
+    if (not spline.build(poly, params_->route_spacing_m,
+                         [this](const Eigen::Vector2f &p, float h) { return grid_planner_.pose_free(p, h); },
+                         params_->route_smoothing_m))
+        return poly;   // smoothing is an improvement, never a precondition: fall back to the polyline
+    return spline.samples();
+}
+
+void ControllerSession::log_route_geometry()
+{
+    if (!route_geom_csv_open_)
+    {
+        route_geom_csv_.open("route_geometry.csv", std::ios::out | std::ios::trunc);
+        if (route_geom_csv_.is_open()) route_geom_csv_ << "event_id,kind,i,x,y\n";
+        route_geom_csv_open_ = true;
+    }
+    if (!route_geom_csv_.is_open()) return;
+    const auto &poly = route_.polyline();
+    for (std::size_t i = 0; i < poly.size(); ++i)
+        route_geom_csv_ << route_event_id_ << ",astar," << i << ',' << poly[i].x() << ',' << poly[i].y() << '\n';
+    const auto &curve = route_.path();
+    for (std::size_t i = 0; i < curve.size(); ++i)
+        route_geom_csv_ << route_event_id_ << ",smoothed," << i << ',' << curve[i].x() << ',' << curve[i].y() << '\n';
+    route_geom_csv_.flush();
+}
+
+void ControllerSession::log_route_event(const char *event, bool ok, std::uint64_t t_ms,
+                                        const rc::TrajectoryController &path_controller,
+                                        float window_m)
+{
+    if (!route_events_csv_open_)
+    {
+        route_events_csv_.open("route_events.csv", std::ios::out | std::ios::trunc);
+        if (route_events_csv_.is_open())
+            route_events_csv_ << "t_ms,event,ok,mission,route_len_m,samples,corrections,window_m,"
+                                 "opt_ran,opt_rejected,opt_iters,cost_before,cost_after,"
+                                 "e_kappa,e_clear,e_anchor,e_gauge,clear_before_m,clear_after_m,max_move_m,"
+                                 "esdf_boundary_cells,esdf_boundary_rejected,"
+                                 "max_dev_m,mean_dev_m,detail\n";
+        route_events_csv_open_ = true;
+    }
+    if (!route_events_csv_.is_open()) return;
+
+    const auto &o = route_.spline().last_optimizer_report();
+    route_events_csv_ << t_ms << ',' << event << ',' << (ok ? 1 : 0) << ','
+                      << mission_.selected_name() << ','
+                      << route_.length() << ',' << route_.path().size() << ',' << route_.corrections() << ','
+                      << window_m << ','
+                      << (o.ran ? 1 : 0) << ',' << (o.rejected ? 1 : 0) << ',' << o.iterations << ','
+                      << o.cost_before << ',' << o.cost_after << ','
+                      << o.e_kappa << ',' << o.e_clear << ',' << o.e_anchor << ',' << o.e_gauge << ','
+                      << o.min_clearance_before << ',' << o.min_clearance_after << ',' << o.max_move_m << ','
+                      << path_controller.esdf_boundary_cells() << ','
+                      << (path_controller.esdf_boundary_rejected() ? 1 : 0) << ','
+                      << route_.spline().max_deviation_m() << ',' << route_.spline().mean_deviation_m() << ','
+                      // The planner's reason contains commas AND is only meaningful for the event that
+                      // produced it. Sanitised so a naive splitter cannot be shifted a column, and
+                      // consumed so it cannot go stale on the next row.
+                      << [this]
+                         {
+                             std::string d = last_plan_failure_;
+                             std::replace(d.begin(), d.end(), ',', ';');
+                             last_plan_failure_.clear();
+                             return d;
+                         }() << '\n';
+    route_events_csv_.flush();
+    ++route_event_id_;
+    log_route_geometry();
+}
+
+bool ControllerSession::build_route(const ControllerRobotPose &robot_pose)
+{
+    const auto *m = mission_.selected_mission();
+    if (m == nullptr or m->waypoints.size() < 2) return false;
+
+    // REPAIR EVERY WAYPOINT FIRST. A recorded waypoint is a DESIRE; what can actually be driven is the
+    // nearest footprint-feasible pose to it. The world moves between recording and running — an obstacle
+    // appears, a wall is re-estimated — so a raw waypoint is not guaranteed drivable, and planning
+    // straight to it fails outright.
+    // This is not a workaround: the per-waypoint mode did exactly this (nearest_free, below) on every
+    // target, which is why it drove this same tour for five clean laps while the route builder could not
+    // plan past waypoint 6. Moving the planning into the route builder dropped the repair with it.
+    // Yaw is the direction of travel toward the NEXT waypoint — the pose the robot will actually present
+    // there, and the one the planner searches under.
+    std::vector<Eigen::Vector2f> wps;
+    wps.reserve(m->waypoints.size());
+    int repaired = 0, skipped = 0;
+    const int n = static_cast<int>(m->waypoints.size());
+    for (int i = 0; i < n; ++i)
+    {
+        const Eigen::Vector2f raw = m->waypoints[i].pos;
+        const Eigen::Vector2f next = m->waypoints[(i + 1) % n].pos;
+        const Eigen::Vector2f dir = next - raw;
+        const float yaw = dir.squaredNorm() > 1e-9f ? std::atan2(dir.y(), dir.x()) : 0.f;
+        const auto safe = grid_planner_.nearest_free(raw, yaw);
+        if (not safe.has_value())
+        {
+            // Boxed in beyond the repair radius. Dropping one waypoint keeps the tour drivable, which is
+            // better than refusing to move at all — but it CHANGES THE ROUTE, so it is said out loud
+            // rather than swallowed: a benchmark whose stimulus quietly differs is worse than no run.
+            std::println("[route] waypoint {} at ({:.2f},{:.2f}) is BOXED IN — dropping it from the route. "
+                         "The driven route no longer matches the recorded one.", i + 1, raw.x(), raw.y());
+            ++skipped;
+            continue;
+        }
+        if ((*safe - raw).squaredNorm() > 1e-6f) ++repaired;
+        wps.push_back(*safe);
+    }
+    if (wps.size() < 2)
+    {
+        std::println("[route] fewer than 2 drivable waypoints remain — cannot build a route.");
+        return false;
+    }
+    if (repaired > 0 or skipped > 0)
+        std::println("[route] {} waypoint(s) moved to the nearest feasible pose, {} dropped.",
+                     repaired, skipped);
+
+    // ── VARIATIONAL ROUTE OPTIMISATION ──
+    // Every constant here is read off a measured physical quantity of THIS robot, not tuned:
+    //   d_target = what the body actually occupies (worst-case reach, since the field carries no bearing)
+    //              plus the same comfort standoff the MPPI prefers,
+    //   rho      = v_max^2 / a_lat_max, the radius below which a turn stops being drivable at speed,
+    //   sigma_a  = a stated fidelity allowance — how far the route may drift from what was clicked —
+    //              in the same sense as carrot_max_route_cut_m, not a safety number.
+    // The distance field is EXACT (GridPlanner's EDT): an optimiser follows the gradient of whatever it
+    // is handed, so a chamfer's direction-dependent error would be baked into the route's shape.
+    {
+        rc::RouteOptimizerConfig opt;
+        opt.enabled = params_ == nullptr or params_->route_optimize;
+        opt.distance = [this](const Eigen::Vector2f &p) { return grid_planner_.distance_at(p); };
+        opt.distance_gradient = [this](const Eigen::Vector2f &p) { return grid_planner_.distance_gradient_at(p); };
+        opt.d_target = rc::RobotFootprint::shadow().circumscribed_radius()
+                     + (params_ ? params_->comfort_standoff_m : 0.35f);
+        const float v_max = params_ ? params_->max_adv_speed_mps : 0.7f;
+        opt.rho = v_max * v_max / std::max(0.05f, params_ ? params_->max_lateral_accel_mps2 : 1.0f);
+        opt.sigma_a = 0.30f;
+        opt.clearance_floor = rc::RobotFootprint::shadow().circumscribed_radius();
+        opt.iterations = 30;
+        route_.set_optimizer(opt);
+    }
+
+    last_plan_failure_.clear();
+    const bool built = route_.build(
+        robot_pose.pos, wps, mission_.laps_remaining(),
+        [this](const Eigen::Vector2f &a, const Eigen::Vector2f &b)
+        {
+            auto r = grid_planner_.plan(a, b);
+            if (not r.has_value()) last_plan_failure_ = grid_planner_.last_failure();
+            return r;
+        },
+        [this](const Eigen::Vector2f &p, float h) { return grid_planner_.pose_free(p, h); },
+        params_ ? params_->route_spacing_m : 0.05f,
+        params_ ? params_->route_smoothing_m : 0.40f);
+    route_active_ = built;
+    if (not built and not last_plan_failure_.empty())
+        std::println("[route] the planner refused that hop: {}", last_plan_failure_);
+    return built;
+}
+
+float ControllerSession::route_speed_limit(float v_cap, float a_decel) const
+{
+    if (not route_active_ or not route_.valid() or params_ == nullptr) return v_cap;
+
+    const float a_lat = std::max(0.05f, params_->max_lateral_accel_mps2);
+    const float a_dec = std::max(0.05f, a_decel);
+    const float s_now = route_.progress();
+    // Look ahead by the distance needed to stop from the cap, plus a little: anything closer than that
+    // is something we must ALREADY be slowing for. Beyond it, no amount of braking is required yet.
+    const float horizon = v_cap * v_cap / (2.f * a_dec) + 1.0f;
+
+    float v = v_cap;
+    // Sampled at 10 cm against a 5 cm curve — deliberately coarser than the curve's own spacing, because
+    // curvature_at is a second difference of the samples and is therefore noisiest at that scale.
+    for (float ds = 0.f; ds <= horizon; ds += 0.10f)
+    {
+        const float k = std::abs(route_.spline().curvature_at(s_now + ds));
+        if (k < 1e-3f) continue;                       // straight: no constraint from here
+        const float v_here = std::sqrt(a_lat / k);     // v^2·kappa = a_lat, the whole model
+        // The bound is on the speed we may hold NOW: we must be able to shed the difference over ds.
+        const float v_allowed = std::sqrt(v_here * v_here + 2.f * a_dec * ds);
+        v = std::min(v, v_allowed);
+    }
+    // A floor purely against numerical noise in the curvature estimate, not a behavioural knob: a
+    // spurious kappa spike must not be able to command a standstill. A differential drive has no minimum
+    // turn radius — it can rotate in place — so a genuinely sharp corner is handled by the rotation, and
+    // the forward speed never needs to reach zero for geometric reasons.
+    return std::clamp(v, 0.15f, v_cap);
+}
+
 bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
                                             ControllerObstacleTracker &obstacle_tracker,
                                             rc::TrajectoryController &path_controller,
@@ -314,13 +492,128 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
     if (step.target_changed)
         reset_stuck_state();   // a fresh target = fresh navigation; don't inherit a stale stuck clock
 
+    // ── CONTINUOUS ROUTE ──
+    // Built once, driven in arc-length coordinates. Nothing below this block runs in that mode: there is
+    // no target to replan to, and re-issuing a path is exactly what destroys the follower's continuity.
+    if (params_ and params_->route_continuous and mission_.running())
+    {
+        // A failed build must not be retried every cycle: that is ~30 A* calls and a screenful of log
+        // at 10 Hz, which buries the one line that says why. Try, then wait before trying again.
+        if (not route_active_ and time_source() - last_route_build_ms_ >= 2000)
+        {
+            last_route_build_ms_ = time_source();
+            const bool ok = build_route(step.robot_pose);
+            log_route_event("build", ok, time_source(), path_controller, 0.f);
+        }
+        if (not route_active_)
+        {
+            path_controller.stop();
+            motion_commander.stop_robot();
+            if (time_source() - last_no_route_log_ms_ >= 3000)
+            {
+                last_no_route_log_ms_ = time_source();
+                std::println("[controller] HOLDING — the mission route could not be built.");
+            }
+            return false;
+        }
+        // ── LOCAL REPAIR ──
+        // A recovery reflex fired and put a new obstacle in the planner's world. In leg mode the next
+        // cycle simply replanned to the current target; here there is no target to replan to, so the
+        // route itself has to be re-authored around the blocker or nothing changes at all. Rate-limited
+        // for the same reason the build is: a repair is ~one A* call plus a refit, and retrying it every
+        // cycle would bury the one line that says whether it worked.
+        if (route_repair_pending_ and route_active_
+            and time_source() - last_route_repair_ms_ >= 1500)
+        {
+            last_route_repair_ms_ = time_source();
+            // How much route may be re-authored. Behind: the robot has just reversed out, so the detour
+            // must start somewhere it can still reach. Ahead: far enough to clear the blocker and rejoin.
+            constexpr float kRepairBackM = 1.0f;
+            constexpr float kRepairAheadM = 4.0f;
+            const auto result = route_.repair(step.robot_pose.pos, kRepairBackM, kRepairAheadM,
+                              [this](const Eigen::Vector2f &a, const Eigen::Vector2f &b)
+                              {
+                                  auto r = grid_planner_.plan(a, b);
+                                  if (not r.has_value()) last_plan_failure_ = grid_planner_.last_failure();
+                                  return r;
+                              },
+                              [this](const Eigen::Vector2f &p, float hdg) { return grid_planner_.pose_free(p, hdg); });
+
+            using RR = rc::RouteFollower::RepairResult;
+            if (result == RR::NotNeeded)
+            {
+                // The reflex fired but the route across the window is still footprint-feasible: whatever
+                // was seen is not on our path. Clear the request and KEEP DRIVING — the expensive mistake
+                // here is not a missed repair, it is re-authoring a good route and stopping to do it.
+                route_repair_pending_ = false;
+                log_route_event("repair_skipped", true, time_source(), path_controller, kRepairBackM + kRepairAheadM);
+            }
+            else if (result == RR::Repaired)
+            {
+                route_repair_pending_ = false;
+                ++route_repair_count_;
+                mission_.note_replan();   // count the repair that HAPPENED, not the reflex that asked for one
+                // Force the repaired curve to be installed: the follower is still holding the old one.
+                path_controller.stop();
+                current_plan_.reset();
+                log_route_event("repair", true, time_source(), path_controller, kRepairBackM + kRepairAheadM);
+            }
+            else
+            {
+                // HOLD, and stay pending. The obstacle carries a TTL, so the retry after the cooldown
+                // either finds a detour or finds the blocker gone. Rebuilding the whole route would get
+                // the robot moving again, but it resets progress_ — laps and finished() would believe the
+                // robot was back at the start, and the run's metrics would silently stop meaning anything.
+                mission_.note_replan();
+                path_controller.stop();
+                motion_commander.stop_robot();
+                log_route_event("repair_failed", false, time_source(), path_controller, kRepairBackM + kRepairAheadM);
+                return false;
+            }
+        }
+        if (not path_controller.is_active())
+        {
+            // set_path_presmoothed: the curve is already C2 and already footprint-checked, so the
+            // elastic band and the C1 spline inside set_path would only undo both.
+            path_controller.set_path_presmoothed(route_.path());
+            // Seed the carrot's forward-only anchor at the robot's own arc length. After a repair the
+            // route is re-installed mid-drive, and a hint of 0 would aim the carrot at the route's start.
+            path_controller.set_carrot_hint(
+                static_cast<int>(route_.progress() / std::max(0.01f, route_.spline().spacing())));
+            path_controller.set_goal_facing_yaw(std::nullopt);
+            path_controller.set_arrival_point(std::nullopt);
+            // A TOUR ENDS WHERE IT BEGAN, so the follower's euclidean "am I near the last point?" test is
+            // true before the robot has moved: the route is installed, arrival fires on cycle 1, the
+            // session consumes it as an affordance arrival ("reached -> REACH") and stops. Measured:
+            // 09:34 completed the tour (progress 35.15/35.33 m); the next two runs recorded progress
+            // 0.00 m and 0.10 m of motion, because the robot was now parked on the endpoint. The mission
+            // is ended by arc length below (route_.finished()), which knows the difference between not
+            // yet departed and returned — so that is the only arrival test left running here.
+            path_controller.set_endpoint_arrival(false);
+            current_plan_ = ControllerPathPlan{.room_path = route_.path()};
+        }
+        return true;
+    }
+
+    if (mission_.running() and params_ and not params_->route_continuous and not waypoint_mode_logged_)
+    {
+        waypoint_mode_logged_ = true;
+        std::println("[route] mission running in WAYPOINT mode — RouteContinuous is false.");
+    }
     if (step.target_changed || !current_plan_.has_value())
     {
         // FOOTPRINT PLANNER. The robot's real shape is tested against the grid; obstacles are NOT inflated.
         // Falls back to nothing — if this cannot find a route, the HOLD branch below reports precisely why.
         mission_.note_replan();   // counted whether or not it succeeds — a failed replan is the worse one
         if (const auto route = grid_planner_.plan(step.plan_origin, step.target.room_pos); route.has_value())
-            current_plan_ = ControllerPathPlan{.room_path = *route};
+        {
+            ControllerPathPlan plan{.room_path = *route};
+            // Smooth it the same way a mission route is smoothed. A click target should not get a
+            // visibly worse path than a tour does, and the follower's steering command follows curvature
+            // either way — a C1 polyline steps it at every turning point regardless of who asked.
+            plan.room_path = smooth_plan(plan.room_path);
+            current_plan_ = std::move(plan);
+        }
         else
             current_plan_.reset();
     }
@@ -360,12 +653,22 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
 
     if (step.target_changed || !path_controller.is_active())
     {
-        path_controller.set_path(current_plan_->room_path);
+        // Presmoothed: smooth_plan already fitted the C2 curve AND checked every sample against the
+        // footprint, so set_path's elastic band and C1 spline would only undo both.
+        if (params_ and params_->smooth_planned_path)
+            path_controller.set_path_presmoothed(current_plan_->room_path);
+        else
+            path_controller.set_path(current_plan_->room_path);
+        // Arrival is judged at the waypoint we are actually going to, not at the end of the extended
+        // path. Without this the mission would skip every waypoint but the last one on the horizon.
         // Affordance targets carry a desired facing yaw (point AT the table); manual
         // mouse targets do not, so they keep the legacy stop-on-arrival behaviour.
         path_controller.set_goal_facing_yaw(step.target.from_affordance
                                                 ? std::optional<float>(step.target.yaw_rad)
                                                 : std::nullopt);
+        // A point target DOES end at its endpoint — restore the follower's own arrival test, which a
+        // continuous route switched off (it may have been the previous thing installed).
+        path_controller.set_endpoint_arrival(true);
     }
 
     return true;
@@ -488,6 +791,14 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     if (room_polygon_.size() >= 3)
         path_controller.set_room_boundary(room_polygon_);
 
+    // Curvature-limited speed. Only a continuous route carries kappa(s); a click target has no curve, so
+    // it keeps the full envelope and the ceiling is cleared rather than left stale from a previous mission.
+    if (route_active_ and mission_.running())
+        path_controller.set_speed_limit(route_speed_limit(params_ ? params_->max_adv_speed_mps : 0.7f,
+                                                          path_controller.params.cbf_max_decel));
+    else
+        path_controller.set_speed_limit(std::nullopt);
+
     const auto control_output = path_controller.compute(robot_pose.as_transform());
     // Surface what the ARRIVAL test is waiting on, every cycle, before any of the branches below can return
     // early — otherwise the readout would freeze exactly in the states worth watching (aligning, blocked).
@@ -502,12 +813,48 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     // metrics describe what happened rather than what was planned. The clearance recorded is the gap between
     // the BODY and the nearest obstacle — the ESDF measures from the rotation centre, and reporting that
     // would flatter every run by one body radius.
+    if (route_active_ and not mission_.running()) route_active_ = false;
+    if (route_active_ and mission_.running())
+    {
+        // Progress is a scalar that only increases. Legs are read OFF it rather than driven by it.
+        route_.advance(robot_pose.pos);
+        mission_.note_progress(route_.progress(), route_.length(), route_.laps_done());
+        if (route_.finished(robot_pose.pos))
+        {
+            mission_.stop("completed", time_source());
+            route_active_ = false;
+            path_controller.stop();
+            motion_commander.stop_robot();
+            return;
+        }
+    }
+
     if (mission_.running())
     {
         const float esdf_here = path_controller.clearance_at(0.f, 0.f);
-        const float body_clearance = esdf_here - path_controller.footprint().circumscribed_radius();
+        // Subtract the body's reach TOWARD THE OBSTACLE, not its worst-case disc. Using the
+        // circumscribed radius (0.325 m) where the true reach at that bearing may be 0.230 m understates
+        // the gap by up to 9.5 cm — which is the same disc-for-footprint substitution this controller was
+        // rewritten to remove, reintroduced in the measurement instead of the model. It made every
+        // recorded run report 1-5 cm of clearance and fail the safety constraint.
+        const float body_clearance = esdf_here - path_controller.body_extent_here();
+        // Deviation from the reference curve — the continuous tracking signal. NaN when there is no
+        // reference (a click target has no route), and the stats skip it rather than inventing a zero.
+        float cross_track = std::numeric_limits<float>::quiet_NaN();
+        float heading_err = 0.f, ref_kappa = 0.f;
+        if (route_active_)
+        {
+            const float s_now = route_.progress();
+            const Eigen::Vector2f ref = route_.spline().position_at(s_now);
+            const float ref_h = route_.spline().heading_at(s_now);
+            const Eigen::Vector2f d = robot_pose.pos - ref;
+            cross_track = -std::sin(ref_h) * d.x() + std::cos(ref_h) * d.y();   // signed, left positive
+            heading_err = std::atan2(std::sin(robot_pose.theta - ref_h), std::cos(robot_pose.theta - ref_h));
+            ref_kappa = route_.spline().curvature_at(s_now);
+        }
         mission_.sample(robot_pose.pos, control_output.rot, std::abs(control_output.adv),
-                        body_clearance, control_output.safety_guard_triggered, time_source());
+                        body_clearance, control_output.safety_guard_triggered,
+                        cross_track, heading_err, ref_kappa, time_source());
     }
 
     // ── Near-obstacle black box. Fires BEFORE any branch below, so it captures the cycle whether the
@@ -546,6 +893,39 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         float min_lidar_all = std::numeric_limits<float>::infinity();
         int shell_points = 0;
         std::uint16_t shell_sector_mask = 0;
+        // ── NEAR-BODY CENSUS ──────────────────────────────────────────────────────────────────────────
+        // Everything above measures distance from the robot's ORIGIN in PLAN VIEW, which cannot answer the
+        // question that matters: is a surviving return actually ON the robot? A downward sensor puts floor
+        // returns at plan-view radius ~0 (measured: min_lidar_all median 0.0012 m on every cycle) and those
+        // are perfectly legitimate. What is NOT legitimate is a return inside the body's own silhouette AT
+        // BODY HEIGHT — that is a self-hit the mesh filter failed to remove, and until now nothing recorded
+        // it, so three separate diagnoses tonight were argued from a 2-D proxy instead of measured.
+        // Signed clearance to the body SURFACE, using the same support function the collision test uses:
+        // negative ⇒ the return is inside the footprint column.
+        float body_clear_min = std::numeric_limits<float>::infinity();
+        float body_clear_z = 0.f, body_clear_bearing = 0.f;
+        int n_in_footprint = 0;      // inside the silhouette, any height
+        int n_in_body = 0;           // ...and at body height ⇒ a self-return that got through
+        int n_under_floor = 0;       // ...and below the body ⇒ floor seen under the robot (expected)
+        constexpr float kBodyZLo = 0.05f;   // above this is the body, below it is the floor beneath us
+        constexpr float kBodyZHi = 1.45f;   // the mesh tops out at 1.42 m
+        int n_in_hull = 0;           // ...and inside the body's radius AT ITS OWN HEIGHT — the honest count
+        // ── THE ROBOT IS NOT A COLUMN ────────────────────────────────────────────────────────────────
+        // RobotFootprint is the 2-D PROJECTION, so it reports 0.31 m at every height. The real silhouette
+        // varies by a factor of 2.4: 0.311 at the base, 0.150 at the waist, 0.255 at the shoulder. A return
+        // beside the waist at 0.25 m is INSIDE the projection and 10 cm CLEAR of the body — and counting it
+        // as a self-hit is what sent me chasing a filter bug that was not there.
+        // Max radius per 0.1 m band, measured from shadow.obj recentred by +0.0534 m (the same mesh and the
+        // same placement the driver's self-filter uses). ★If that mesh changes this table must be regenerated
+        // — which is precisely why the real fix is a height-banded footprint derived from the mesh at load
+        // time rather than a copy living here. This is a DIAGNOSTIC, and it is labelled as one.
+        static constexpr float kHullR[15] = {0.311f, 0.309f, 0.304f, 0.269f, 0.205f, 0.150f, 0.129f, 0.178f,
+                                             0.255f, 0.174f, 0.170f, 0.168f, 0.174f, 0.168f, 0.134f};
+        const auto hull_radius_at = [](float z)
+        {
+            const int i = std::clamp(static_cast<int>(std::floor(z / 0.1f)), 0, 14);
+            return kHullR[i];
+        };
         if (auto *lb = obstacle_tracker.lidar_buffer())
         {
             const auto [cloud_opt] = lb->read_last();
@@ -558,6 +938,37 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                 {
                     const float d = std::hypot(lxs[i] - rp.x(), lys[i] - rp.y());
                     min_lidar_all = std::min(min_lidar_all, d);
+
+                    // Census FIRST: it must see the returns the kSelfR gate below discards, since those are
+                    // precisely the ones in question.
+                    {
+                        const Eigen::Vector2f q = robot_from_room * Eigen::Vector2f(lxs[i], lys[i]);
+                        if (d < 1.0f)   // cheap reject; the body reaches 0.325 m
+                        {
+                            const auto &fp = path_controller.footprint();
+                            const Eigen::Vector2f dir = d > 1e-6f ? Eigen::Vector2f(q.x() / d, q.y() / d)
+                                                                 : Eigen::Vector2f(0.f, 1.f);
+                            // theta = 0: q is already in the robot frame, so the footprint needs no rotation.
+                            const float reach = fp.support_radius(0.f, dir);
+                            if (const float clear = d - reach; clear < body_clear_min)
+                            {
+                                body_clear_min = clear;
+                                body_clear_z = lzs[i];
+                                body_clear_bearing = std::atan2(q.x(), q.y()) * 180.f / static_cast<float>(M_PI);
+                            }
+                            if (fp.contains(q))
+                            {
+                                ++n_in_footprint;
+                                if (lzs[i] >= kBodyZLo and lzs[i] <= kBodyZHi)
+                                {
+                                    ++n_in_body;
+                                    if (d < hull_radius_at(lzs[i])) ++n_in_hull;   // genuinely inside the body
+                                }
+                                else if (lzs[i] < kBodyZLo)                        ++n_under_floor;
+                            }
+                        }
+                    }
+
                     if (d < kSelfR) continue;
                     const Eigen::Vector2f p_robot = robot_from_room * Eigen::Vector2f(lxs[i], lys[i]);
                     // Bearing in the ROBOT frame (x right, y forward — the convention the obstacle tracker
@@ -582,6 +993,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         const float nearest_lidar_out = std::isfinite(nearest_lidar) ? nearest_lidar : -1.f;
         const float min_lidar_all_out = std::isfinite(min_lidar_all) ? min_lidar_all : -1.f;
         const int shell_sectors_out = std::popcount(shell_sector_mask);
+        const float body_clear_out = std::isfinite(body_clear_min) ? body_clear_min : 99.f;
         if (!std::isfinite(nearest_lidar)) { nearest_lidar_bearing_deg = 0.f; nearest_lidar_z = 0.f; }
 
         // (b) Nearest TRACKED obstacle polygon edge (what the controller actually reasons about).
@@ -642,6 +1054,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                                       // shell_sectors: of 12 30°-bins in [0.40,0.70] m, how many hold a
                                       // return — 12 ⇒ full 360° ring (base/tray), few ⇒ a local protrusion.
                                       "near_lidar_bearing_deg,near_lidar_z,min_lidar_all_m,n_shell_pts,shell_sectors,"
+                                      "body_clear_m,body_clear_z,body_clear_bearing_deg,n_in_footprint,n_in_body,n_in_hull,n_under_floor,"
                                       // ATTRIBUTION: which of the four obstacle layers owns the nearest
                                       // polygon (object = concept agent, grid = residual_concept hull,
                                       // temp/virtual = ours), its label, bearing, and whether the robot
@@ -682,6 +1095,8 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                                << (control_output.aligning ? 1 : 0) << ','
                                << nearest_lidar_bearing_deg << ',' << nearest_lidar_z << ','
                                << min_lidar_all_out << ',' << shell_points << ',' << shell_sectors_out << ','
+                               << body_clear_out << ',' << body_clear_z << ',' << body_clear_bearing << ','
+                               << n_in_footprint << ',' << n_in_body << ',' << n_in_hull << ',' << n_under_floor << ','
                                << obstacle_kind_tag(near_obst.kind) << ','
                                << (near_obst.label.empty() ? "-" : near_obst.label) << ','
                                << near_obst.bearing_deg << ',' << (near_obst.inside ? 1 : 0) << ','
@@ -702,6 +1117,10 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                                                              control_output.blockage_radius,
                                                              path_controller);
         current_plan_.reset();
+        // In leg mode resetting the plan WAS the replan trigger. A continuous route has no target to
+        // replan to, so the request has to be explicit or the route branch just re-installs the same
+        // curve and the robot drives at the blocker again.
+        route_repair_pending_ = true;
         path_controller.stop();
         motion_commander.stop_robot();
         return;
@@ -1053,12 +1472,7 @@ void ControllerSession::finalize_reached(rc::AffordanceManager &affordance_manag
 {
     // A mission waypoint is reached the same way any target is; stepping the mission here means arrival
     // logic exists in exactly one place and a mission cannot drift out of sync with what the robot did.
-    bool mission_continues = false;
-    if (mission_.running())
-    {
-        mission_.advance(arrived_at, now_ms);
-        mission_continues = mission_.running() and mission_.current_target().has_value();
-    }
+    const bool mission_continues = false;   // a mission is ended by arc length, never by an arrival
     if (graph_)
         affordance_manager.mark_reached(graph_);
     lockon_.reset();
@@ -1100,6 +1514,17 @@ void ControllerSession::finalize_reached(rc::AffordanceManager &affordance_manag
     display.clear_robot_trajectory();
     path_controller.stop();
     motion_commander.stop_robot();
+}
+
+int ControllerSession::smooth_selected_mission()
+{
+    if (grid_planner_.width() == 0 or grid_planner_.height() == 0)
+    {
+        std::println("[controller] cannot smooth: no occupancy grid yet — wait for the room and obstacles.");
+        return 0;
+    }
+    return mission_.smooth_selected(
+        [this](const Eigen::Vector2f &p, float heading) { return grid_planner_.pose_free(p, heading); });
 }
 
 void ControllerSession::set_manual_target(const QPointF &point,
@@ -1189,12 +1614,22 @@ void ControllerSession::begin_escape(const ControllerRobotPose &robot_pose,
                                      rc::TrajectoryController &path_controller,
                                      std::uint64_t now_ms)
 {
-    // Choose the turn direction toward whichever side has more ESDF clearance (robot frame:
-    // +y left, −y right). If the two sides are within an epsilon, alternate across
-    // consecutive escapes so repeated attempts don't keep re-wedging the same way.
+    // Choose the turn direction toward whichever side has more ESDF clearance.
+    //
+    // ⚠ TWO DIFFERENT ROBOT FRAMES ARE IN PLAY HERE — they are NOT the same one.
+    //   • The COMMAND frame (OmniRobot / send_speed_command): adv = forward, side = +y left.
+    //   • The ESDF frame that clearance_at(rx, ry) queries: +Y IS FORWARD, +X IS RIGHT.
+    //     That is the frame TrajectoryController integrates its rollouts in
+    //     (trajectory_controller.cpp: `x += adv*sin(theta)`, `y += adv*cos(theta)`, with the
+    //     explicit comment "Differential-drive kinematics (Y+ = forward, X+ = right)").
+    // So a SIDE probe varies rx, and a FRONT/REAR probe varies ry. This block previously
+    // probed (0, +probe)/(0, −probe) and called them left/right — they were front and rear,
+    // which meant the turn direction was picked by comparing FRONT clearance against REAR,
+    // and since a wedge means something is in front, the sign came out the same nearly every
+    // time. Do not "simplify" these back to the y axis.
     const float probe = params_ ? params_->escape_side_probe_m : 0.5f;
-    const float cl = path_controller.clearance_at(0.f, +probe);   // left clearance
-    const float cr = path_controller.clearance_at(0.f, -probe);   // right clearance
+    const float cl = path_controller.clearance_at(-probe, 0.f);   // left clearance  (−x = left)
+    const float cr = path_controller.clearance_at(+probe, 0.f);   // right clearance (+x = right)
     if (std::abs(cl - cr) > 0.05f)
         escape_turn_sign_ = (cl > cr) ? +1.f : -1.f;
     else
@@ -1243,6 +1678,9 @@ void ControllerSession::begin_escape(const ControllerRobotPose &robot_pose,
 
     clear_tracking_state();
     current_plan_.reset();
+    // Same reason as the visible-blockage path: the virtual disc just dropped ahead of the robot is only
+    // useful if something re-plans against it, and in continuous-route mode nothing does unless asked.
+    route_repair_pending_ = true;
     path_controller.stop();
 
     qInfo() << "[recovery] STUCK -> escape | reverse + turn"
@@ -1268,9 +1706,15 @@ void ControllerSession::step_escape(const ControllerRobotPose &robot_pose,
 
     // Rear-clearance guard: don't reverse into a wall. If the space behind is tight, escape
     // by rotating in place only (adv = 0).
+    //
+    // ⚠ clearance_at() is in the ESDF/rollout frame: +Y FORWARD, +X RIGHT (see begin_escape
+    // above for why this is not the OmniRobot command frame). REAR is therefore −y, not −x.
+    // This read used to be clearance_at(−rear_probe, 0) — that is the LEFT side, so the guard
+    // was gating "may I reverse?" on whether the robot's LEFT was clear, and would happily
+    // reverse into a wall behind it any time the left flank was open.
     const float rear_probe = params_ ? params_->escape_rear_probe_m : 0.45f;
     const float rear_min   = params_ ? params_->escape_rear_min_m   : 0.30f;
-    const float rear = path_controller.clearance_at(-rear_probe, 0.f);
+    const float rear = path_controller.clearance_at(0.f, -rear_probe);
     const float adv = (rear < rear_min) ? 0.f : -(params_ ? params_->escape_adv_speed_mps : 0.15f);
     const float rot = escape_turn_sign_ * (params_ ? params_->escape_rot_speed_rps : 0.35f);
     motion_commander.send_speed_command(adv, 0.f, rot);

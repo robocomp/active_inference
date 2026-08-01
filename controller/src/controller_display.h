@@ -70,8 +70,9 @@ public:
                 int max_lidar_draw_points,
                 const std::optional<Eigen::Affine2f> &lidar_correction = std::nullopt);
 
-    void set_command_text(const QString &text);
-    void set_selected_affordance_text(const QString &text);
+    void set_command_values(float adv_mm_s, float side_mm_s, float rot_rps);
+    void set_command_text(const QString &text);   // alerts only (LiDAR stall / recovery)
+    void set_selected_affordance(const QString &current, const QString &previous);
     // Stage the stuck-recovery indicator state (thread-safe; applied on the GUI thread in present()).
     void set_stuck_active(bool active);
     // Push the live arrival state to the toolbar readout. Called every cycle; the widget dedups.
@@ -106,7 +107,9 @@ private:
 
         QString command_text;
         bool command_text_pending = false;
-        QString selected_affordance_text;
+        float cmd_adv_mm_s = 0.f, cmd_side_mm_s = 0.f, cmd_rot_rps = 0.f;
+        bool cmd_values_pending = false;
+        QString affordance_current, affordance_previous;
         bool selected_affordance_text_pending = false;
         bool clear_trajectory_pending = false;
         bool stuck_active = false;   // stuck-recovery indicator (pushed every cycle; widget dedups)

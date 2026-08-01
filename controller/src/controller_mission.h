@@ -28,6 +28,8 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -73,44 +75,97 @@ struct Mission
     int loops = 1;
 };
 
-// One leg = one waypoint-to-waypoint segment. These are the numbers a controller change actually moves.
-struct MissionLegMetrics
+// CONTINUOUS CHARACTERISATION OF ONE TRAJECTORY.
+//
+// Legs are gone. They were waypoint-to-waypoint segments, and a segment can only say where it started
+// and where it ended — not how the robot got there. Worse, the segmentation was an artefact of how the
+// route USED to be driven; once the route is one curve, cutting it at the old waypoints measures nothing
+// physical. Everything below is defined at every instant of the run and aggregated over it.
+//
+// The two quantities legs could never express, and which now carry most of the signal:
+//   CROSS-TRACK ERROR — how far the driven path sat from the reference curve. This is "did it follow the
+//   route", continuously. A leg knew only its endpoints, so a leg that bulged two metres wide and came
+//   back scored the same as one driven straight.
+//   LATERAL ACCELERATION v^2*kappa — how hard the trajectory is driven through its own curvature. It is
+//   what makes motion feel abrupt or natural, it is bounded in human and vehicle motion, and it is
+//   meaningless without a continuous curve to measure curvature on.
+struct TrajectoryStats
 {
-    int   lap = 0;
-    int   leg = 0;
     float duration_s = 0.f;
-    float path_length_m = 0.f;     // integrated |Δpos| — what the robot actually drove
-    float straight_line_m = 0.f;   // waypoint-to-waypoint distance
-    float detour_ratio = 0.f;      // path_length / straight_line; 1.0 = perfect, >1 = wandering
-    float min_body_clearance_m = 0.f;   // closest the BODY came to anything (ESDF minus the body's reach)
+    float distance_m = 0.f;          // integrated |dpos| — what was actually driven
+    float route_length_m = 0.f;      // arc length of the reference curve
+    float progress_m = 0.f;          // arc length reached
+    int   laps_completed = 0;
+
     float mean_speed_mps = 0.f;
-    float rot_effort = 0.f;        // ∫|ω| dt (rad) — total turning done; a smoothness/economy proxy
-    float rot_energy = 0.f;        // ∫ω² dt — penalises fast reversals specifically (the stutter signature)
-    float arrival_error_m = 0.f;   // distance from the waypoint where the leg was declared reached
-    int   replans = 0;
-    int   escapes = 0;
+    float max_speed_mps = 0.f;
+
+    // Tracking — driven path vs reference curve
+    float cross_track_rms_m = 0.f;
+    float cross_track_max_m = 0.f;
+    float heading_err_rms_rad = 0.f;
+
+    // Smoothness. rot_* and lin_* are COMMANDED (what the controller decided, noise-free);
+    // cross-track, clearance and speed are MEASURED.
+    float rot_effort_rad = 0.f;      // integral |omega| dt
+    float rot_energy = 0.f;          // integral omega^2 dt
+    int   rot_reversals = 0;         // commanded-omega sign flips: the hunting signature
+    float lin_accel_effort = 0.f;    // sum |dv|  — total variation of speed, sampling-rate independent
+    float lin_accel_max = 0.f;
+    float lin_jerk_effort = 0.f;     // sum |d2v| — total variation of acceleration
+    float lin_jerk_max = 0.f;
+    float lat_accel_rms = 0.f;
+    float lat_accel_max = 0.f;
+
+    // Safety — reported as a CONSTRAINT, never folded into an objective.
+    float min_clearance_m = 0.f;
+    float p05_clearance_m = 0.f;     // a minimum is extreme-value noisy (measured 44% spread); a low
+                                     // percentile says the same thing without the jitter
     int   safety_guard_cycles = 0;
-    bool  completed = false;       // false ⇒ the leg was abandoned (mission stopped mid-leg)
+    int   escapes = 0;
+    int   replans = 0;
+
+    // ── GEOMETRIC REPEATABILITY (multi-lap runs only; NaN below two laps) ──
+    // How closely each later lap retraces the FIRST one, in space. This is the metric a multi-lap run
+    // exists to produce: the robot is far more repeatable in space than in time (measured 2.5 cm mean /
+    // 27 cm max against a 2.0% spread in lap time and 14.5% in reversals), so lap-to-lap geometry is the
+    // most sensitive signal available for whether a change altered where the robot actually goes.
+    // Measured as the distance from each sampled pose of lap N to the NEAREST point of lap 1's trace —
+    // a curve-to-curve distance, not a same-index comparison, which would confound geometry with speed.
+    float lap_repeat_mean_m = std::numeric_limits<float>::quiet_NaN();
+    float lap_repeat_max_m  = std::numeric_limits<float>::quiet_NaN();
 };
 
-// Whole-run roll-up, including the one number that answers "is my controller repeatable".
-struct MissionRunSummary
+// One row of the actuation stream, sampled in the VELOCITY-OUTPUT thread rather than in compute().
+// Two reasons, both load-bearing for smoothness analysis:
+//  1. RATE. compute() runs at 10 Hz (Nyquist 5 Hz), and the stutter this work exists to remove is a
+//     ~5 Hz command reversal. At the compute rate that defect sits exactly AT Nyquist and cannot be
+//     resolved. The output thread runs at 50 ms (20 Hz).
+//  2. UNIFORMITY. A spectral measure needs even sampling. compute()'s cadence is ragged (median 108 ms,
+//     p99 1.26 s); the output thread is fixed-rate by construction.
+struct MissionProfileSample
 {
-    std::string mission_name;
-    int   laps_completed = 0;
-    int   legs_completed = 0;
-    float total_duration_s = 0.f;
-    float total_path_length_m = 0.f;
-    float mean_detour_ratio = 0.f;
-    float min_body_clearance_m = 0.f;
-    float total_rot_effort = 0.f;
-    int   total_replans = 0;
-    int   total_escapes = 0;
-    // Lap-to-lap repeatability: mean and max distance from each sampled pose of laps 2..N to the polyline
-    // traced on lap 1. Zero laps>1 ⇒ not measured (reported as NaN, never as 0 — a missing measurement and
-    // a perfect score must not print the same).
-    float lap_repeat_mean_m = 0.f;
-    float lap_repeat_max_m = 0.f;
+    std::uint64_t t_ms = 0;
+    float adv_mps = 0.f, side_mps = 0.f, rot_rps = 0.f;
+    float freshness = 1.f;      // command-age attenuation actually applied to this tick
+    float v_meas_mps = 0.f;     // latest MEASURED speed
+    bool  v_meas_fresh = false; // false => held from a previous row; not signal
+    int   lap = 0;              // which lap this instant belongs to
+};
+
+// Everything about the AGENT that a metric computed later needs in order to know whether two runs are
+// comparable at all. A run recorded without it is a number with no units: a 12 % improvement means
+// nothing if MaxAdvSpeed or the comfort standoff changed in between.
+struct MissionRunContext
+{
+    std::string build;
+    float max_adv_mps = 0.f;
+    float max_rot_rps = 0.f;
+    float comfort_standoff_m = 0.f;
+    float footprint_safety_margin_m = 0.f;
+    float planner_cell_size_m = 0.f;
+    float body_inscribed_m = 0.f;
+    float body_circumscribed_m = 0.f;
 };
 
 class MissionRunner
@@ -127,6 +182,18 @@ public:
     const std::string &selected_name() const { return selected_; }
     const Mission *selected_mission() const;
     bool remove(const std::string &name);
+
+    // Smooth the SELECTED mission's waypoints in place, keeping every one feasible.
+    // `is_free(pos, heading)` is supplied by the caller — in the agent it is the grid planner's exact
+    // footprint test — so this stays DSR-free and testable, and so that "smooth" can never produce a
+    // route the planner would then refuse to drive. Endpoints are held: they are where the tour starts
+    // and ends, and moving them would silently redefine it.
+    // `max_shift_m` bounds how far a point may travel from where it was AUTHORED. That is a limit on how
+    // much "smooth" may reinterpret the user's intent, not a physics gate — without it, repeated
+    // smoothing walks a deliberate detour into a straight line.
+    // Returns the number of waypoints actually moved.
+    int smooth_selected(const std::function<bool(const Eigen::Vector2f &, float)> &is_free,
+                        int iterations = 40, float alpha = 0.30f, float max_shift_m = 0.50f);
 
     // ── Recording / editing ────────────────────────────────────────────────────────────
     void start_recording();
@@ -174,44 +241,86 @@ public:
     bool has_click_target() const { return click_target_.has_value(); }
 
     // ── Target supply ──────────────────────────────────────────────────────────────────
-    // The current waypoint as a controller target. nullopt ⇒ the mission is finished; the caller should
-    // stop() and let the affordance planner resume.
-    std::optional<ControllerTargetInfo> current_target() const;
-    // Call when the current target has been reached. Advances to the next waypoint / lap / end.
-    void advance(const Eigen::Vector2f &arrived_at, std::uint64_t now_ms);
+
+    // Progress along the reference curve, fed by the route follower. Laps and completion are read off
+    // arc length instead of counting waypoint arrivals.
+    // `laps_done` is laps FINISHED, not the lap index. Passing the index and subtracting one is what
+    // made a completed single-lap run report 0 of 1 — see RouteFollower::laps_completed_at.
+    void note_progress(float progress_m, float route_length_m, int laps_done);
+private:
+    // One decimated position trace per lap, for lap_repeat_*. Decimated at kLapTraceStepM so the
+    // end-of-run comparison stays O(n^2) on a few hundred points rather than a few thousand.
+    static constexpr float kLapTraceStepM = 0.10f;
+    std::vector<std::vector<Eigen::Vector2f>> lap_traces_;
+    void compute_lap_repeat();
+public:
 
     // ── Per-cycle instrumentation ──────────────────────────────────────────────────────
-    // `body_clearance_m` = ESDF at the robot origin MINUS the body's own reach, i.e. the real gap between
-    // the robot and the nearest obstacle. Pass a negative value when unknown and it is ignored.
+    // One instant of the trajectory. `cross_track_m` and `heading_err_rad` are the deviation from the
+    // reference curve, `ref_curvature` its curvature there — the three things a leg could never carry.
+    // `body_clearance_m` = ESDF at the robot origin MINUS the body's reach toward the obstacle, i.e. the
+    // real gap; pass a negative value when unknown and it is ignored.
     void sample(const Eigen::Vector2f &pos, float rot_rps, float speed_mps,
-                float body_clearance_m, bool safety_guard, std::uint64_t now_ms);
+                float body_clearance_m, bool safety_guard,
+                float cross_track_m, float heading_err_rad, float ref_curvature,
+                std::uint64_t now_ms);
     void note_replan();
     void note_escape();
 
     // ── Readout ────────────────────────────────────────────────────────────────────────
     std::string status_text() const;                 // one line for the UI
     const std::vector<Eigen::Vector2f> &display_waypoints() const { return display_wps_; }
-    int  current_waypoint_index() const { return wp_index_; }
     int  current_lap() const { return lap_; }
-    const std::vector<MissionLegMetrics> &legs() const { return legs_; }
-    MissionRunSummary summary() const;
+    // Laps still to drive, INCLUDING the one in progress — a countdown reads as "how much is left",
+    // so the lap you are on has not been done yet. 0 when nothing is running.
+    int  laps_remaining() const { return running() ? std::max(0, loops_ - lap_) : 0; }
+    const TrajectoryStats &stats() const { return stats_; }
+    TrajectoryStats summary() const;
     // Append the finished run (legs + summary) to a CSV. Header is written once per file.
     bool write_csv(const std::string &path) const;
+
+    // ── Per-run record ─────────────────────────────────────────────────────────────────────────────
+    // ONE FILE PER RUN, under <dir>/<mission>/. Not one growing file: the CSV already demonstrated
+    // what happens when a schema changes under an appending log — old and new rows silently disagree
+    // and the whole file becomes unreadable. A file per run cannot suffer that; adding a field only
+    // makes newer files richer.
+    // WRITE-ONLY from C++. Nothing here is ever read back to drive behaviour, so a hand-edited or
+    // half-written record can change an analysis but can never change what the robot does.
+    void set_run_context(const MissionRunContext &ctx) { run_ctx_ = ctx; }
+    void set_run_dir(std::string dir) { run_dir_ = std::move(dir); }
+
+    // Called from the VELOCITY-OUTPUT thread (see MissionProfileSample). Buffered in memory and written
+    // once at the end of the run: file I/O on the fixed-rate actuation thread would be the one place in
+    // this agent where a slow disk could delay a command to the base.
+    void add_profile_sample(std::uint64_t t_ms, float adv, float side, float rot, float freshness);
+    // Latest measured speed, pushed from the control thread; picked up by the next profile row.
+    void note_measured_speed(float mps);
     void set_csv_path(std::string path) { csv_path_ = std::move(path); }
     const std::string &csv_path() const { return csv_path_; }
 
     static bool self_test();
 
 private:
-    void  begin_leg(std::uint64_t now_ms);
-    void  close_leg(const Eigen::Vector2f &arrived_at, std::uint64_t now_ms, bool completed);
     void  refresh_display_waypoints();
     Mission *selected_writable();
-    float distance_to_lap1(const Eigen::Vector2f &p) const;
 
     std::vector<Mission> library_;
     std::string selected_;
     std::string csv_path_ = "mission_metrics.csv";
+    std::string run_dir_ = "etc/runs";
+    MissionRunContext run_ctx_;
+
+    // Profile buffer. Touched by the output thread (append) and the control thread (measured speed,
+    // start/stop, write), so it carries its own mutex — the rest of MissionRunner is single-threaded.
+    mutable std::mutex profile_mutex_;
+    std::vector<MissionProfileSample> profile_;
+    float pending_v_meas_ = 0.f;
+    bool  pending_v_meas_fresh_ = false;
+    // Bound: ~2.8 h at 20 Hz. A run left going overnight must not consume memory without limit.
+    static constexpr std::size_t kMaxProfileRows = 200000;
+    bool profile_truncated_ = false;
+    bool write_run_json(const std::string &dir, const std::string &stamp, const std::string &iso) const;
+    bool write_profile_csv(const std::string &dir, const std::string &stamp) const;
     State state_ = State::Idle;
     DriveMode mode_ = DriveMode::AffordancesOnly;
 
@@ -222,29 +331,23 @@ private:
     // Run state
     Mission active_;
     int lap_ = 0;              // 0-based
-    int wp_index_ = 0;
     int loops_ = 1;
     std::uint64_t run_start_ms_ = 0;
     std::string stop_reason_;
     bool completed_event_ = false;
 
-    // Leg accumulators
-    MissionLegMetrics leg_{};
-    // Is a leg currently in flight? stop() must close an ABANDONED leg but must not re-close the one
-    // advance() just finished — without this, completing the final waypoint appended a phantom zero-length
-    // leg marked incomplete, which made every clean run look like it had been aborted.
-    bool leg_open_ = false;
-    std::uint64_t leg_start_ms_ = 0;
+    // Continuous accumulators — no segmentation.
+    TrajectoryStats stats_;
+    std::uint64_t run_first_sample_ms_ = 0;
     std::uint64_t last_sample_ms_ = 0;
+    double ct_sq_sum_ = 0.0, hd_sq_sum_ = 0.0, lat_sq_sum_ = 0.0;
+    long   ct_n_ = 0;
+    std::vector<float> clearances_;
+    std::optional<float> prev_cmd_speed_;   // for sum|dv|
+    std::optional<float> prev_cmd_dv_;      // for sum|d2v|
+    int prev_rot_sign_ = 0;                 // for the reversal count
     std::optional<Eigen::Vector2f> last_pos_;
-    Eigen::Vector2f leg_origin_ = Eigen::Vector2f::Zero();
-    std::vector<MissionLegMetrics> legs_;
 
-    // Repeatability: the pose trace of lap 1, and the running deviation of later laps from it.
-    std::vector<Eigen::Vector2f> lap1_trace_;
-    double repeat_sum_ = 0.0;
-    long   repeat_n_ = 0;
-    float  repeat_max_ = 0.f;
 };
 
 }  // namespace rc

@@ -31,13 +31,14 @@ MissionPanel::MissionPanel(QWidget *parent, Callbacks callbacks)
     // Order must match rc::to_index().
     drive_mode_->addItem("Affordances");
     drive_mode_->addItem("Mission");
-    drive_mode_->addItem("Mission + affordances");
+    drive_mode_->addItem("Mission+Aff");
     drive_mode_->addItem("Target");
     drive_mode_->setToolTip(
         QStringLiteral("What is driving the robot.\n"
                        "Affordances — normal operation; the epistemic planner chooses.\n"
                        "Mission — the tour is the sole target source (the clean benchmark).\n"
-                       "Mission + affordances — NOT IMPLEMENTED YET; Run will refuse and say why.\n"
+                       "Mission+Aff — mission with affordances interleaved. NOT IMPLEMENTED YET;\n"
+                       "              Run will refuse and say why.\n"
                        "Target — a single clicked point. Selected automatically when you click one."));
     row->addWidget(drive_mode_);
     QObject::connect(drive_mode_, &QComboBox::currentIndexChanged, this,
@@ -45,62 +46,68 @@ MissionPanel::MissionPanel(QWidget *parent, Callbacks callbacks)
 
     row->addWidget(new QLabel("Mission:", frame));
     missions_ = new QComboBox(frame);
-    missions_->setMinimumWidth(150);
+    missions_->setMinimumWidth(110);
     missions_->setToolTip(QStringLiteral("Recorded missions (etc/missions.toml)."));
     row->addWidget(missions_);
     QObject::connect(missions_, &QComboBox::currentTextChanged, this,
                      [this](const QString &n)
                      { if (cb_.on_select and not n.isEmpty()) cb_.on_select(n.toStdString()); });
 
-    record_btn_ = new QPushButton("New", frame);
-    record_btn_->setCheckable(true);
-    record_btn_->setToolTip(
-        QStringLiteral("Create a NEW mission.\n"
-                       "While checked, LEFT-CLICK in the view appends a waypoint (it does not drive).\n"
-                       "Ctrl+RIGHT-CLICK removes the last one.\n"
-                       "The button becomes 'Save' once there are enough points to store — press it to name\n"
-                       "and save the mission.\n"
-                       "To change an existing mission, just drag its waypoints with the RIGHT button."));
-    record_btn_->setStyleSheet("QPushButton:checked { background-color: #8e44ad; color: white; font-weight: bold; }");
-    row->addWidget(record_btn_);
-    QObject::connect(record_btn_, &QPushButton::toggled, this,
-                     [this](bool checked)
+    // ── Mission actions ──
+    // A menu, not a row of verbs. Everything here acts on the SELECTED mission, and the item list
+    // changes with state so it only ever offers what is actually possible: while recording, the only
+    // sensible actions are save and cancel.
+    actions_ = new QComboBox(frame);
+    actions_->setMinimumWidth(100);
+    actions_->setToolTip(
+        QStringLiteral("Actions on the selected mission.\n"
+                       "New — start clicking a fresh route (LEFT-CLICK appends, Ctrl+RIGHT-CLICK undoes).\n"
+                       "Delete — remove it from etc/missions.toml.\n"
+                       "Smooth — relax the waypoints, keeping every one footprint-feasible against the\n"
+                       "         live occupancy grid. Endpoints are held; shifts are bounded so the\n"
+                       "         route stays the one you authored."));
+    row->addWidget(actions_);
+    QObject::connect(actions_, &QComboBox::activated, this,
+                     [this](int index)
                      {
-                         if (checked)
-                         {
-                             if (cb_.on_record_begin) cb_.on_record_begin();
-                             return;
-                         }
-                         // Below the minimum, there is nothing to save — asking for a name and then
-                         // discarding the answer would be a dialog that lies about what it is doing.
-                         if (recorded_points_ < kMinWaypoints)
-                         {
-                             if (cb_.on_record_finish) cb_.on_record_finish({});   // empty name = discard
-                             return;
-                         }
-                         const QString name = QInputDialog::getText(this, QStringLiteral("Save mission"),
-                                                                    QStringLiteral("Mission name:"));
-                         if (cb_.on_record_finish) cb_.on_record_finish(name.trimmed().toStdString());
-                     });
+                         if (index <= 0) return;                       // 0 is the placeholder
+                         const QString action = actions_->itemText(index);
+                         // Snap back BEFORE acting: the action may open a modal dialog, and a combo
+                         // left showing "Delete" would read as a state the panel does not have.
+                         { const QSignalBlocker block(actions_); actions_->setCurrentIndex(0); }
 
-    delete_btn_ = new QPushButton("Delete", frame);
-    delete_btn_->setToolTip(QStringLiteral("Delete the selected mission from etc/missions.toml."));
-    row->addWidget(delete_btn_);
-    QObject::connect(delete_btn_, &QPushButton::clicked, this,
-                     [this]()
-                     {
-                         const std::string name = selected_mission();
-                         if (name.empty()) return;
-                         // Deleting a recorded tour destroys a baseline that other runs are compared against,
-                         // and it is one click away from Run. Confirm it.
-                         const auto answer = QMessageBox::question(
-                             this, QStringLiteral("Delete mission"),
-                             QStringLiteral("Delete mission '%1'?\n\nRuns already recorded in the metrics CSV "
-                                            "will no longer have their route on file.")
-                                 .arg(QString::fromStdString(name)),
-                             QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-                         if (answer == QMessageBox::Yes and cb_.on_delete) cb_.on_delete(name);
+                         if (action.startsWith("New"))
+                         { if (cb_.on_record_begin) cb_.on_record_begin(); return; }
+                         if (action.startsWith("Cancel"))
+                         { if (cb_.on_record_finish) cb_.on_record_finish({}); return; }
+                         if (action.startsWith("Save"))
+                         {
+                             if (recorded_points_ < kMinWaypoints)
+                             { if (cb_.on_record_finish) cb_.on_record_finish({}); return; }
+                             const QString name = QInputDialog::getText(this, QStringLiteral("Save mission"),
+                                                                        QStringLiteral("Mission name:"));
+                             if (cb_.on_record_finish) cb_.on_record_finish(name.trimmed().toStdString());
+                             return;
+                         }
+                         if (action.startsWith("Smooth"))
+                         { if (cb_.on_smooth) cb_.on_smooth(); return; }
+                         if (action.startsWith("Delete"))
+                         {
+                             const std::string name = selected_mission();
+                             if (name.empty()) return;
+                             // Deleting a recorded tour destroys a baseline other runs are compared
+                             // against, and it sits one item away from Smooth. Confirm it.
+                             if (QMessageBox::question(
+                                     this, QStringLiteral("Delete mission"),
+                                     QStringLiteral("Delete mission '%1'?\n\nRuns already in the metrics CSV "
+                                                    "will no longer have their route on file.")
+                                         .arg(QString::fromStdString(name)),
+                                     QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes
+                                 and cb_.on_delete)
+                                 cb_.on_delete(name);
+                         }
                      });
+    rebuild_actions(false, 0);
 
     row->addWidget(new QLabel("laps", frame));
     loops_ = new QSpinBox(frame);
@@ -111,6 +118,17 @@ MissionPanel::MissionPanel(QWidget *parent, Callbacks callbacks)
                        "Laps 2..N are scored against lap 1 — that difference IS the repeatability number.\n"
                        "Lap 1 starts from standstill, so consider it a warm-up and use N+1."));
     row->addWidget(loops_);
+
+    // Laps REMAINING, counting down. The spin box says how many were asked for; this says how many are
+    // left, which is the question you actually have while watching a long run. Two digits is enough for
+    // the spin box's own 1..99 range, and it costs almost no width.
+    laps_left_ = new QLCDNumber(2, frame);
+    laps_left_->setSegmentStyle(QLCDNumber::Flat);
+    laps_left_->setFrameShape(QFrame::NoFrame);
+    laps_left_->setMinimumSize(30, 22);
+    laps_left_->setToolTip(QStringLiteral("Laps remaining, including the one in progress."));
+    laps_left_->display(QStringLiteral("--"));
+    row->addWidget(laps_left_);
 
     // The ONE drive control. It replaces both the old toolbar Start/Stop toggle and the mission row's
     // separate Run and Stop: three buttons for two states, any two of which could disagree. It is NEVER
@@ -139,12 +157,49 @@ void MissionPanel::set_missions(const std::vector<std::string> &names, const std
     if (missions_ == nullptr) return;
     // Repopulating fires currentTextChanged for every intermediate state, which would round-trip a
     // selection change back into the worker for missions the user never picked. Block it.
-    const QSignalBlocker block(missions_);
-    missions_->clear();
-    for (const auto &n : names)
-        missions_->addItem(QString::fromStdString(n));
-    if (const int idx = missions_->findText(QString::fromStdString(selected)); idx >= 0)
-        missions_->setCurrentIndex(idx);
+    QString shown;
+    {
+        const QSignalBlocker block(missions_);
+        missions_->clear();
+        for (const auto &n : names)
+            missions_->addItem(QString::fromStdString(n));
+        if (const int idx = missions_->findText(QString::fromStdString(selected)); idx >= 0)
+            missions_->setCurrentIndex(idx);
+        shown = missions_->currentText();
+    }
+
+    // CLOSE THE DESYNC. If `selected` was not in the list, setCurrentIndex never ran and the combo is
+    // left showing item 0 while the worker still believes something else is selected. The user then
+    // clicks the item already displayed, currentTextChanged does NOT fire (the text did not change),
+    // and nothing happens — the classic "changing mission does nothing". Blocking the signal above is
+    // right (it stops a repopulate being echoed back as a user choice), so the agreement has to be
+    // restored explicitly here.
+    if (not shown.isEmpty() and shown.toStdString() != selected and cb_.on_select)
+        cb_.on_select(shown.toStdString());
+}
+
+void MissionPanel::rebuild_actions(bool recording, int recorded_points)
+{
+    if (actions_ == nullptr) return;
+    const QSignalBlocker block(actions_);
+    actions_->clear();
+    if (recording)
+    {
+        actions_->addItem(recorded_points >= kMinWaypoints
+                              ? QStringLiteral("Recording (%1)…").arg(recorded_points)
+                              : QStringLiteral("Recording (%1)").arg(recorded_points));
+        if (recorded_points >= kMinWaypoints)
+            actions_->addItem(QStringLiteral("Save…"));
+        actions_->addItem(QStringLiteral("Cancel"));
+    }
+    else
+    {
+        actions_->addItem(QStringLiteral("Mission…"));
+        actions_->addItem(QStringLiteral("New"));
+        actions_->addItem(QStringLiteral("Delete…"));
+        actions_->addItem(QStringLiteral("Smooth"));
+    }
+    actions_->setCurrentIndex(0);
 }
 
 void MissionPanel::apply(const View &view)
@@ -152,18 +207,13 @@ void MissionPanel::apply(const View &view)
     running_ = view.running;
     recording_ = view.recording;
 
-    // The button says what pressing it will DO. "New" starts a recording; once enough points exist to store
-    // one, the same press saves it — so it says "Save", with the running count, and the user never has to
-    // guess whether unchecking will keep or discard the route they just clicked out.
-    recorded_points_ = view.recorded_points;
-    if (record_btn_ != nullptr)
+    // The action list follows the state, so it only ever offers what is possible — and while
+    // recording it carries the running point count, which is the one thing the user needs to know.
+    if (recorded_points_ != view.recorded_points or recording_was_ != view.recording)
     {
-        const QString label = not view.recording  ? QStringLiteral("New")
-                            : recorded_points_ >= kMinWaypoints
-                                  ? QStringLiteral("Save (%1)").arg(recorded_points_)
-                                  : QStringLiteral("New (%1)").arg(recorded_points_);
-        if (record_btn_->text() != label)
-            record_btn_->setText(label);
+        recorded_points_ = view.recorded_points;
+        recording_was_ = view.recording;
+        rebuild_actions(view.recording, view.recorded_points);
     }
     if (drive_btn_ != nullptr and driving_ != view.driving)
     {
@@ -176,6 +226,14 @@ void MissionPanel::apply(const View &view)
 
     status_ = view.status;
 
+    if (laps_left_ != nullptr and laps_left_shown_ != view.laps_remaining)
+    {
+        laps_left_shown_ = view.laps_remaining;
+        // "--" not "0" when idle: nothing is counting down, and a zero would read as "finished now".
+        laps_left_->display(view.laps_remaining > 0 ? QString::number(view.laps_remaining)
+                                                    : QStringLiteral("--"));
+    }
+
     // The selector REPORTS what is driving, so it has to follow state the user did not set with it —
     // clicking a target switches it to "Target". Blocked, or the echo would be sent back as a fresh
     // mode change and clear the very click target that caused it.
@@ -186,19 +244,11 @@ void MissionPanel::apply(const View &view)
     }
 
     // The drive button is deliberately NOT in this list: it must work in every mode.
-    for (QWidget *w : {static_cast<QWidget *>(missions_), static_cast<QWidget *>(record_btn_),
-                       static_cast<QWidget *>(delete_btn_), static_cast<QWidget *>(loops_)})
+    for (QWidget *w : {static_cast<QWidget *>(missions_),
+                       static_cast<QWidget *>(actions_), static_cast<QWidget *>(loops_)})
         if (w != nullptr and w->isEnabled() != view.controls_enabled)
             w->setEnabled(view.controls_enabled);
 
-    // Keep Record showing the ACTUAL state: a recording can end from the worker's side (a save that failed
-    // validation, a mode change), and a button that still looks armed would send the next click to a
-    // recording that no longer exists.
-    if (record_btn_ != nullptr and record_btn_->isChecked() != view.recording)
-    {
-        const QSignalBlocker block(record_btn_);
-        record_btn_->setChecked(view.recording);
-    }
 }
 
 bool MissionPanel::confirm_supersede()

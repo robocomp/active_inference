@@ -15,7 +15,14 @@ class ControllerWorldModel;
 class ControllerMotionCommander
 {
 public:
-    using CommandTextSink = std::function<void(const QString &)>;
+    // Numbers, not a sentence: the UI shows them on LCDs, and formatting here only to re-parse there
+    // would put the display's precision decision inside the motion path.
+    using CommandTextSink = std::function<void(float adv_mm_s, float side_mm_s, float rot_rps)>;
+    // Sampled once per OUTPUT tick, after the freshness scale and the slew limiter — i.e. what the base
+    // is actually told, not what the planner wished for. That is the signal a smoothness metric must
+    // measure, and the output thread is the only fixed-rate clock in the agent (compute() is ragged).
+    using ProfileSink = std::function<void(std::uint64_t t_ms, float adv, float side, float rot, float freshness)>;
+    void set_profile_sink(ProfileSink sink) { profile_sink_ = std::move(sink); }
 
     void set_params(const ControllerParams *params);
     void set_dependencies(std::shared_ptr<DSR::DSRGraph> graph,
@@ -88,6 +95,7 @@ private:
     RoboCompOmniRobot::OmniRobotPrxPtr omnirobot_proxy_;
     int agent_id_ = 0;
     CommandTextSink command_text_sink_;
+    ProfileSink profile_sink_;
     bool stop_command_latched_ = false;
     bool has_last_speed_command_ = false;
     Eigen::Vector3f last_speed_command_ = Eigen::Vector3f::Zero();

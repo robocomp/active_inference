@@ -16,6 +16,9 @@ LIST(APPEND SOURCES
   ${ACTIVE_INFERENCE_COMMON_DIR}/robust_metrics/robust_metrics.cpp
   ../src/controller_mission.cpp
   ../src/controller_mission_panel.cpp
+  ../src/route_spline.cpp
+  ../src/route_follower.cpp
+  ../src/route_optimizer.cpp
   ../src/grid_planner.cpp
   ${ACTIVE_INFERENCE_COMMON_DIR}/robot_footprint/robot_footprint.cpp
   ../src/trajectory_controller.cpp
@@ -51,6 +54,9 @@ LIST(APPEND HEADERS
   ../src/custom_widget.h
   ../src/controller_mission.h
   ../src/controller_mission_panel.h
+  ../src/route_spline.h
+  ../src/route_follower.h
+  ../src/route_optimizer.h
   ../src/grid_planner.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/robot_footprint/robot_footprint.h
   ${ACTIVE_INFERENCE_COMMON_DIR}/dashboard/timeseries_plot.h

@@ -92,6 +92,26 @@ public:
     std::optional<Eigen::Vector2f> nearest_free(const Eigen::Vector2f& pos_room, float theta,
                                                 float max_radius_m = 3.0f) const;
 
+    // ── DISTANCE FIELD ────────────────────────────────────────────────────────────────────────────
+    // Metres from `p` to the nearest occupied cell (outside-the-room counts as occupied, so walls are
+    // included). Zero inside an obstacle. Returns a large positive value if there is no world yet, so a
+    // caller that forgot to set_world gets "wide open" rather than a spurious obstacle.
+    //
+    // EXACT, not chamfer. The planner's own collision test needs no distance at all, so this exists for
+    // callers that OPTIMISE against clearance — and an optimiser follows the gradient of whatever field
+    // it is handed, so a chamfer's ~8% direction-dependent error would be baked into the shape of the
+    // result, not merely mis-score it. Felzenszwalb's two-pass squared-distance transform is O(cells)
+    // and exact, so there is no reason to approximate.
+    //
+    // Built LAZILY and cached: set_world runs every control cycle, while the field is wanted only when a
+    // route is built or repaired. Nothing pays for it until something asks.
+    float distance_at(const Eigen::Vector2f& pos_room) const;
+    // ∇distance (metres per metre), by central differences over `fd_cells` cells. The field is C0 across
+    // cell boundaries, so a step of about one cell is deliberate: it is what keeps a gradient-based
+    // caller from chattering on the facets of the interpolant.
+    Eigen::Vector2f distance_gradient_at(const Eigen::Vector2f& pos_room, float fd_cells = 1.0f) const;
+    bool  has_distance_field() const { return w_ > 0 and h_ > 0; }
+
     int   width()  const { return w_; }
     int   height() const { return h_; }
     long  occupied_cells() const;
@@ -108,8 +128,13 @@ private:
     // Footprint at heading bucket `h` centred on cell (ix,iy) overlaps no occupied cell and stays in bounds.
     bool  cell_free(int ix, int iy, int h) const;
     void  rebuild_offsets();
+    void  build_distance_field() const;   // lazy; fills dist_ with metres, sets dist_valid_
 
     std::vector<std::uint8_t> occ_;
+    // Cached distance field, in metres, one entry per cell. Mutable because it is a memoised view of occ_:
+    // asking for a distance does not change the planner's world, it only realises part of it.
+    mutable std::vector<float> dist_;
+    mutable bool dist_valid_ = false;
     float xmin_ = 0, ymin_ = 0, cell_ = 0.1f;
     int   w_ = 0, h_ = 0;
     // Precomputed footprint coverage per heading bucket — the reason exact collision is affordable here.

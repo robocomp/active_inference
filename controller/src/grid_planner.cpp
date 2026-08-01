@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdio>
 #include <format>
+#include <limits>
 #include <queue>
 
 namespace rc
@@ -46,7 +47,8 @@ void GridPlanner::set_world(const std::vector<Eigen::Vector2f>& room_polygon,
                             const std::vector<std::vector<Eigen::Vector2f>>& obstacles)
 {
     cell_ = std::max(0.02f, params.cell_size_m);
-    if (room_polygon.size() < 3) { w_ = h_ = 0; occ_.clear(); return; }
+    dist_valid_ = false;          // the world changed; any cached distance field describes the old one
+    if (room_polygon.size() < 3) { w_ = h_ = 0; occ_.clear(); dist_.clear(); return; }
 
     float xmn = room_polygon[0].x(), xmx = xmn, ymn = room_polygon[0].y(), ymx = ymn;
     for (const auto& p : room_polygon)
@@ -126,6 +128,113 @@ long GridPlanner::occupied_cells() const
     long n = 0;
     for (const auto v : occ_) n += v;
     return n;
+}
+
+// ── Exact Euclidean distance transform (Felzenszwalb & Huttenlocher) ──────────────────────────────
+// Two O(n) passes of a 1-D squared-distance transform — down the columns, then across the rows —
+// give the EXACT squared distance to the nearest occupied cell. The 1-D transform works by finding
+// the lower envelope of the parabolas rooted at each sample; `v` holds the parabolas currently on
+// the envelope and `z` the boundaries between them.
+namespace
+{
+void dt_1d(const std::vector<float>& f, std::vector<float>& d, int n,
+           std::vector<int>& v, std::vector<float>& z)
+{
+    constexpr float kInf = std::numeric_limits<float>::max();
+    int k = 0;
+    v[0] = 0;
+    z[0] = -kInf;
+    z[1] = kInf;
+    for (int q = 1; q < n; ++q)
+    {
+        const auto sq = [](float a) { return a * a; };
+        float s = ((f[q] + sq(static_cast<float>(q))) - (f[v[k]] + sq(static_cast<float>(v[k]))))
+                / (2.f * static_cast<float>(q) - 2.f * static_cast<float>(v[k]));
+        while (k > 0 and s <= z[k])
+        {
+            --k;
+            s = ((f[q] + sq(static_cast<float>(q))) - (f[v[k]] + sq(static_cast<float>(v[k]))))
+              / (2.f * static_cast<float>(q) - 2.f * static_cast<float>(v[k]));
+        }
+        ++k;
+        v[k] = q;
+        z[k] = s;
+        z[k + 1] = kInf;
+    }
+    k = 0;
+    for (int q = 0; q < n; ++q)
+    {
+        while (z[k + 1] < static_cast<float>(q)) ++k;
+        const float dq = static_cast<float>(q - v[k]);
+        d[q] = dq * dq + f[v[k]];
+    }
+}
+}  // namespace
+
+void GridPlanner::build_distance_field() const
+{
+    if (dist_valid_) return;
+    if (w_ <= 0 or h_ <= 0) { dist_.clear(); dist_valid_ = true; return; }
+
+    constexpr float kInf = std::numeric_limits<float>::max();
+    const std::size_t n = static_cast<std::size_t>(w_) * static_cast<std::size_t>(h_);
+    std::vector<float> g(n);
+    for (std::size_t i = 0; i < n; ++i) g[i] = occ_[i] ? 0.f : kInf;
+
+    const int maxdim = std::max(w_, h_);
+    std::vector<float> f(maxdim), d(maxdim), z(maxdim + 1);
+    std::vector<int> v(maxdim);
+
+    for (int ix = 0; ix < w_; ++ix)                       // columns
+    {
+        for (int iy = 0; iy < h_; ++iy) f[iy] = g[idx(ix, iy)];
+        dt_1d(f, d, h_, v, z);
+        for (int iy = 0; iy < h_; ++iy) g[idx(ix, iy)] = d[iy];
+    }
+    for (int iy = 0; iy < h_; ++iy)                       // rows
+    {
+        for (int ix = 0; ix < w_; ++ix) f[ix] = g[idx(ix, iy)];
+        dt_1d(f, d, w_, v, z);
+        for (int ix = 0; ix < w_; ++ix) g[idx(ix, iy)] = d[ix];
+    }
+
+    dist_.resize(n);
+    for (std::size_t i = 0; i < n; ++i)
+        dist_[i] = (g[i] >= kInf) ? 1e6f : std::sqrt(g[i]) * cell_;   // cells -> metres
+    dist_valid_ = true;
+}
+
+float GridPlanner::distance_at(const Eigen::Vector2f& pos_room) const
+{
+    if (w_ <= 0 or h_ <= 0) return 1e6f;      // no world: wide open, never a spurious obstacle
+    build_distance_field();
+    if (dist_.empty()) return 1e6f;
+
+    // Bilinear interpolation on cell CENTRES, so the field is continuous rather than blocky.
+    const float fx = (pos_room.x() - xmin_) / cell_ - 0.5f;
+    const float fy = (pos_room.y() - ymin_) / cell_ - 0.5f;
+    const int ix = static_cast<int>(std::floor(fx));
+    const int iy = static_cast<int>(std::floor(fy));
+    const float tx = fx - static_cast<float>(ix);
+    const float ty = fy - static_cast<float>(iy);
+    // Outside the grid is outside the room, which set_world already marked occupied — so clamping to the
+    // border reports the border cell's distance rather than inventing free space beyond the world.
+    const auto at = [this](int cx, int cy)
+    {
+        return dist_[idx(std::clamp(cx, 0, w_ - 1), std::clamp(cy, 0, h_ - 1))];
+    };
+    const float d00 = at(ix, iy),     d10 = at(ix + 1, iy);
+    const float d01 = at(ix, iy + 1), d11 = at(ix + 1, iy + 1);
+    return (1.f - tx) * (1.f - ty) * d00 + tx * (1.f - ty) * d10
+         + (1.f - tx) * ty * d01 + tx * ty * d11;
+}
+
+Eigen::Vector2f GridPlanner::distance_gradient_at(const Eigen::Vector2f& pos_room, float fd_cells) const
+{
+    const float e = std::max(0.25f, fd_cells) * cell_;
+    const float dx = distance_at({pos_room.x() + e, pos_room.y()}) - distance_at({pos_room.x() - e, pos_room.y()});
+    const float dy = distance_at({pos_room.x(), pos_room.y() + e}) - distance_at({pos_room.x(), pos_room.y() - e});
+    return {dx / (2.f * e), dy / (2.f * e)};
 }
 
 bool GridPlanner::cell_free(int ix, int iy, int h) const
@@ -371,6 +480,53 @@ bool GridPlanner::self_test()
                     path ? path->size() : 0);
         check(path.has_value(), "an empty room must be trivially plannable");
         check(path and path->size() == 2, "a straight run must simplify to its two endpoints");
+    }
+
+    // (1b) DISTANCE FIELD vs BRUTE FORCE. The transform is exact, so it must agree with an O(n^2) scan
+    // over every occupied cell to within the interpolation error — not "closely", exactly. Checked at
+    // cell centres (where interpolation is the identity) so any discrepancy is the transform's, and on a
+    // world with obstacles in the interior AND the room border, since outside-the-room is occupied too.
+    {
+        GridPlanner p; p.params.safety_margin_m = 0.f; p.params.cell_size_m = 0.10f;
+        const std::vector<std::vector<Eigen::Vector2f>> obs = {
+            {{-1.f, -1.f}, {0.f, -1.f}, {0.f, 0.f}, {-1.f, 0.f}},
+            {{2.f, 1.5f}, {3.f, 1.5f}, {3.f, 2.5f}, {2.f, 2.5f}}};
+        p.set_world(room, obs);
+
+        // Brute force: nearest occupied cell centre, in metres.
+        std::vector<Eigen::Vector2f> occupied;
+        for (int iy = 0; iy < p.height(); ++iy)
+            for (int ix = 0; ix < p.width(); ++ix)
+                if (p.occ_[p.idx(ix, iy)]) occupied.push_back(p.cell_to_world(ix, iy));
+        check(not occupied.empty(), "the test world must contain occupied cells");
+
+        float worst = 0.f;
+        int checked = 0;
+        for (int iy = 0; iy < p.height(); iy += 3)
+            for (int ix = 0; ix < p.width(); ix += 3)
+            {
+                const Eigen::Vector2f c = p.cell_to_world(ix, iy);
+                float best = std::numeric_limits<float>::max();
+                for (const auto& o : occupied) best = std::min(best, (o - c).norm());
+                worst = std::max(worst, std::abs(p.distance_at(c) - best));
+                ++checked;
+            }
+        std::printf("  distance field: %d cells vs brute force, worst error %.6f m (cell %.2f m)\n",
+                    checked, worst, 0.10f);
+        check(worst < 1e-4f, "the distance transform must be EXACT at cell centres, not approximate");
+
+        // The gradient must point AWAY from an obstacle and be a unit vector in open space (|grad d| = 1
+        // is the eikonal property of a true distance field — a chamfer violates it by up to 8%).
+        const Eigen::Vector2f probe{1.0f, -0.5f};             // right of the first box, clear of both
+        const Eigen::Vector2f g = p.distance_gradient_at(probe);
+        check(g.x() > 0.f, "the gradient must point away from the obstacle to the left");
+        check(std::abs(g.norm() - 1.f) < 0.12f, "|grad d| must be ~1 in open space (eikonal)");
+        std::printf("  gradient at (1.0,-0.5): (%.3f,%.3f), |g| = %.3f\n", g.x(), g.y(), g.norm());
+
+        // Inside an obstacle the distance is zero, and an empty world is wide open rather than blocked.
+        check(p.distance_at({-0.5f, -0.5f}) < 1e-6f, "distance inside an obstacle must be zero");
+        GridPlanner empty;
+        check(empty.distance_at({0.f, 0.f}) > 1e5f, "with no world set, distance must read wide open");
     }
 
     // (2) THE POINT OF ALL OF THIS. A gap wider than the robot must be usable, and a gap narrower must not.

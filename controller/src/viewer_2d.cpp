@@ -6,6 +6,7 @@
 #include <QFont>
 #include <QMouseEvent>
 #include <QPen>
+#include <QPainterPath>
 #include <QPolygonF>
 
 #include <algorithm>
@@ -229,8 +230,10 @@ void Viewer2D::draw_room_polygon(const std::vector<Eigen::Vector2f> &verts)
     if (verts.size() >= 3)
         poly << QPointF(verts.front().x(), verts.front().y());
 
+    // 12 cm: the room outline is the frame everything else is read against, so it should read as the
+    // boundary rather than as one more line among the route, the trajectories and the obstacle hulls.
     polygon_item_ = agv_->scene.addPolygon(poly,
-                                           QPen(QColor(67, 87, 100), 0.06),
+                                           QPen(QColor(67, 87, 100), 0.12),
                                            QBrush(QColor(219, 227, 231, 80)));
     polygon_item_->setZValue(8);
 
@@ -558,25 +561,29 @@ void Viewer2D::draw_path(const PathDrawData &data)
     if (data.path.empty())
         return;
 
-    const QPen path_pen(QColor(56, 114, 219), 0.08);
-    for (std::size_t index = 0; index + 1 < data.path.size(); ++index)
-    {
-        auto *line = agv_->scene.addLine(data.path[index].x(), data.path[index].y(),
-                                         data.path[index + 1].x(), data.path[index + 1].y(),
-                                         path_pen);
-        line->setZValue(20);
-        path_draw_items_.push_back(line);
-    }
+    // ONE item for the whole path, not one per segment. This used to add a line AND a 12 cm dot per
+    // point, which is fine for the handful of turning points the leg planner produced and hopeless for a
+    // continuous route: 3300 samples at 5 cm became ~10 000 QGraphicsItems rebuilt every frame, drawn as
+    // a solid blob of overlapping dots that did not look like a route at all.
+    QPainterPath painter_path(QPointF(data.path.front().x(), data.path.front().y()));
+    for (std::size_t index = 1; index < data.path.size(); ++index)
+        painter_path.lineTo(data.path[index].x(), data.path[index].y());
+    auto *route_item = agv_->scene.addPath(painter_path, QPen(QColor(56, 114, 219), 0.06), Qt::NoBrush);
+    route_item->setZValue(20);
+    path_draw_items_.push_back(route_item);
 
-    for (const auto &point : data.path)
-    {
-        constexpr float radius = 0.06f;
-        auto *dot = agv_->scene.addEllipse(-radius, -radius, 2.f * radius, 2.f * radius,
-                                           Qt::NoPen, QBrush(QColor(56, 114, 219)));
-        dot->setPos(point.x(), point.y());
-        dot->setZValue(21);
-        path_draw_items_.push_back(dot);
-    }
+    // Vertex dots only when there are few enough for one to MEAN something. On a densely sampled curve
+    // every sample would carry a dot and the marks would say nothing the line does not already say.
+    if (data.path.size() <= 64)
+        for (const auto &point : data.path)
+        {
+            constexpr float radius = 0.06f;
+            auto *dot = agv_->scene.addEllipse(-radius, -radius, 2.f * radius, 2.f * radius,
+                                               Qt::NoPen, QBrush(QColor(56, 114, 219)));
+            dot->setPos(point.x(), point.y());
+            dot->setZValue(21);
+            path_draw_items_.push_back(dot);
+        }
 
 }
 
