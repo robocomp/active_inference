@@ -19,6 +19,7 @@
 #pragma once
 
 #include <cstdint>
+#include <limits>
 #include <functional>
 #include <optional>
 #include <vector>
@@ -147,7 +148,13 @@ private:
     // cannot drift apart from the geometry, because there is only one place that computes them.
     // `freeze_before` pins that many leading CONTROL POINTS — used on a repair so the stretch the robot
     // is already driving cannot move under it. 0 on a fresh build, where nothing is being driven yet.
-    bool fit_from_polyline(const FreeFn &is_free, std::size_t freeze_before = 0);
+    bool fit_from_polyline(const FreeFn &is_free, std::size_t freeze_before = 0,
+                           std::size_t freeze_after = std::numeric_limits<std::size_t>::max());
+    // Arc length of every waypoint ALONG THE POLYLINE — the metric the optimiser binds anchors in, and
+    // the only one that is defined before the curve exists. Distinct from wp_s_, which is arc length
+    // along the fitted CURVE and exists for progress and lap bookkeeping. Conflating the two deleted 15 m
+    // of a 3-lap tour; see fit_from_polyline.
+    std::vector<float> anchor_polyline_arclengths() const;
 
     RouteSpline spline_;
     // The planned polyline the curve is fitted to. Kept (build() used to discard it) because a local

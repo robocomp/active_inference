@@ -33,6 +33,7 @@
 #pragma once
 
 #include <cstdint>
+#include <iosfwd>
 #include <optional>
 #include <string>
 #include <vector>
@@ -115,6 +116,16 @@ public:
     int   width()  const { return w_; }
     int   height() const { return h_; }
     long  occupied_cells() const;
+
+    // ── SNAPSHOT ──────────────────────────────────────────────────────────────────────────────────
+    // Serialise/restore the rasterised world, so a route can be rebuilt OFFLINE against exactly the
+    // world the robot had. The RASTER is written rather than the source polygons on purpose: the
+    // polygons would have to be re-rasterised offline, and any difference between the two rasters —
+    // a padding rule, a cell-centre test, the room-mask fallback — would show up as a difference in
+    // the ROUTE and be read as an effect of whatever was being studied. There is nothing to re-derive
+    // here, so there is nothing to disagree about.
+    void write_grid(std::ostream& os) const;
+    bool read_grid(std::istream& is);   // false on a malformed stream; the planner is left empty
 
     static bool self_test();
 

@@ -383,7 +383,8 @@ void MissionRunner::add_profile_sample(std::uint64_t t_ms, float adv, float side
     profile_.push_back(MissionProfileSample{.t_ms = t_ms, .adv_mps = adv, .side_mps = side, .rot_rps = rot,
                                             .freshness = freshness, .v_meas_mps = pending_v_meas_,
                                             .v_meas_fresh = pending_v_meas_fresh_,
-                                            .lap = lap_ + 1});
+                                            .lap = lap_ + 1,
+                                            .route_s_m = pending_route_s_.load(std::memory_order_relaxed)});
     pending_v_meas_fresh_ = false;   // consumed: the NEXT row must not claim this reading again
 }
 
@@ -415,14 +416,16 @@ bool MissionRunner::write_profile_csv(const std::string &dir, const std::string 
     o.setf(std::ios::fixed);
     o.precision(5);
     o << "# actuation stream, sampled in the velocity-output thread (fixed rate, see MissionProfileSample)\n"
+      << "# route_s_m = arc length along the route, cumulative across laps; -1 = not a continuous route\n"
       << "# v_meas_fresh=0 means v_meas_mps is HELD from an earlier row — do not treat it as signal\n";
     if (truncated)
         o << "# ** TRUNCATED at " << kMaxProfileRows << " rows — the run outlasted the buffer **\n";
-    o << "t_ms,lap,adv_mps,side_mps,rot_rps,freshness,v_meas_mps,v_meas_fresh\n";
+    o << "t_ms,lap,adv_mps,side_mps,rot_rps,freshness,v_meas_mps,v_meas_fresh,route_s_m\n";
     for (const auto &r : rows)
         o << r.t_ms << ',' << r.lap << ','
           << r.adv_mps << ',' << r.side_mps << ',' << r.rot_rps << ','
-          << r.freshness << ',' << r.v_meas_mps << ',' << (r.v_meas_fresh ? 1 : 0) << '\n';
+          << r.freshness << ',' << r.v_meas_mps << ',' << (r.v_meas_fresh ? 1 : 0) << ','
+          << r.route_s_m << '\n';
     const bool ok = o.good();
     std::printf("[mission] profile (%zu rows @ output rate) -> %s%s\n", rows.size(), path.c_str(),
                 ok ? "" : "  ** WRITE FAILED **");
@@ -697,6 +700,18 @@ void MissionRunner::stop(const std::string &reason, std::uint64_t now_ms)
         const std::string iso = iso_now(&stamp);
         write_run_json(run_dir_, stamp, iso);
         write_profile_csv(run_dir_, stamp);
+        // Copy, do not move: the live file must stay where a running-analysis script expects it, and the
+        // next run truncates it anyway. Failure is silent by design — losing a diagnostic copy must never
+        // interfere with finishing a run.
+        for (const auto &src : archive_)
+        {
+            std::error_code ec;
+            const std::filesystem::path folder = std::filesystem::path(run_dir_) / active_.name;
+            std::filesystem::create_directories(folder, ec);
+            const std::filesystem::path stem = std::filesystem::path(src).stem();
+            std::filesystem::copy_file(src, folder / (stamp + "_" + stem.string() + ".csv"),
+                                       std::filesystem::copy_options::overwrite_existing, ec);
+        }
     }
 }
 
@@ -714,6 +729,9 @@ bool MissionRunner::consume_completed()
 void MissionRunner::note_progress(float progress_m, float route_length_m, int laps_done)
 {
     if (state_ != State::Running) return;
+    // Hand the actuation stream WHERE the robot is on the route, so a per-instant command can be
+    // attributed to a piece of geometry afterwards.
+    pending_route_s_.store(progress_m, std::memory_order_relaxed);
     stats_.progress_m = progress_m;
     stats_.route_length_m = route_length_m;
     stats_.laps_completed = std::max(0, laps_done);

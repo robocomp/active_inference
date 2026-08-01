@@ -43,6 +43,10 @@ public:
         std::function<void()>            on_smooth;
         std::function<void(int)>         on_run;           // laps
         std::function<void()>            on_stop;
+        // Route optimiser: speed (0) <-> safety (1). See RouteOptimizerConfig::safety_bias — it trades
+        // PRECISION between the clearance preference and the curvature prior, so it is one number with a
+        // measurable frontier rather than two weights to guess at.
+        std::function<void(float)>       on_safety_bias;
     };
 
     // What the panel needs to know each cycle to show the truth. Pushed from the GUI thread in present().
@@ -94,6 +98,8 @@ private:
     QLCDNumber  *laps_left_ = nullptr;
     int  laps_left_shown_ = -1;
     QPushButton *drive_btn_ = nullptr;
+    QSlider     *safety_ = nullptr;
+    QLabel      *safety_label_ = nullptr;
 
     bool running_ = false;
     bool recording_ = false;

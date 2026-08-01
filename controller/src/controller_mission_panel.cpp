@@ -53,6 +53,37 @@ MissionPanel::MissionPanel(QWidget *parent, Callbacks callbacks)
                      [this](const QString &n)
                      { if (cb_.on_select and not n.isEmpty()) cb_.on_select(n.toStdString()); });
 
+    // ── ROUTE CHARACTER: speed <-> safety ──
+    // One dial over the optimiser's loss, not a pair of weights: it moves precision from the curvature
+    // prior to the clearance preference and back (see RouteOptimizerConfig::safety_bias). It is here
+    // rather than in a config file because its effect is a JUDGEMENT — how much lap time a metre of
+    // clearance is worth — and that is the operator's call, made while watching the robot.
+    // ★It applies to the NEXT route build or repair; it does not reshape the curve under the robot.
+    row->addWidget(new QLabel("Route:", frame));
+    safety_ = new QSlider(Qt::Horizontal, frame);
+    safety_->setRange(0, 100);
+    safety_->setValue(50);
+    safety_->setFixedWidth(90);
+    safety_->setToolTip(
+        QStringLiteral("Route optimiser: speed <-> safety.\n"
+                       "Left  — curvature dominates: wider, smoother corners, hugging obstacles to get\n"
+                       "        them, and a higher speed allowed through v = sqrt(a_lat/kappa).\n"
+                       "Right — clearance dominates: the route climbs onto the medial axis and accepts\n"
+                       "        winding to stay there.\n"
+                       "Measured on the 30-waypoint tour, the full sweep buys +32% p05 clearance for\n"
+                       "+4.4% lap time. Applies to the NEXT route build or repair."));
+    row->addWidget(safety_);
+    safety_label_ = new QLabel("0.50", frame);
+    safety_label_->setFixedWidth(30);
+    row->addWidget(safety_label_);
+    QObject::connect(safety_, &QSlider::valueChanged, this,
+                     [this](int v)
+                     {
+                         const float bias = static_cast<float>(v) / 100.f;
+                         if (safety_label_) safety_label_->setText(QString::asprintf("%.2f", bias));
+                         if (cb_.on_safety_bias) cb_.on_safety_bias(bias);
+                     });
+
     // ── Mission actions ──
     // A menu, not a row of verbs. Everything here acts on the SELECTED mission, and the item list
     // changes with state so it only ever offers what is actually possible: while recording, the only

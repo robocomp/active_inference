@@ -178,10 +178,30 @@ private:
     bool route_geom_csv_open_ = false;
     int  route_event_id_ = 0;
     void log_route_geometry();
+    // WORLD SNAPSHOT at route-build time: the planner's raster, the waypoints (as recorded AND as
+    // repaired), and every parameter the build consumed. It exists so the route can be rebuilt offline
+    // by tools/route_bench against exactly this world — the route optimiser has weights whose effect is
+    // GEOMETRIC, and measuring a geometric effect by driving one lap per weight costs a run apiece
+    // against a 14.5%-noise reversal count. Written on every build; one file, last build wins.
+    void dump_route_world(const Eigen::Vector2f &start,
+                          const std::vector<Eigen::Vector2f> &raw,
+                          const std::vector<Eigen::Vector2f> &repaired,
+                          int laps,
+                          const rc::RouteOptimizerConfig &opt) const;
     bool route_events_csv_open_ = false;
     void log_route_event(const char *event, bool ok, std::uint64_t t_ms,
                          const rc::TrajectoryController &path_controller,
                          float window_m);
+
+    // MPPI BLACK BOX. One row per control cycle: the temperature actually applied, the cost spread it had
+    // to discriminate on, the effective sample size, and which term owns the cost. Written because the
+    // question "is the optimiser choosing, or averaging?" is not answerable from behaviour — a robot that
+    // creeps looks identical whether every rollout is genuinely bad or the softmax simply cannot tell them
+    // apart. Cheap (a few floats at 10 Hz) and only while a mission is running.
+    std::ofstream mppi_csv_;
+    bool mppi_csv_open_ = false;
+    void log_mppi_diagnostics(std::uint64_t t_ms, const rc::TrajectoryController::ControlOutput &o,
+                              float commanded_adv, float measured_speed);
 
     std::ofstream proximity_csv_;                  // near-obstacle black box ("why didn't it react")
     bool proximity_csv_open_ = false;

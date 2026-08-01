@@ -764,6 +764,7 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
     std::vector<ControlStep> weighted_optimal(T, {0.f, 0.f});
     float ess_current = 0.f;
     float lambda_used = adaptive_lambda_;
+    float cost_range_diag = 0.f;
     float dominance_current = 0.f;
     float p_free_current = 0.f;
     float steering_concentration_current = 0.f;
@@ -783,6 +784,7 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
         }
         // Adaptive floor: λ must cover the cost range so weight ratios stay ~exp(-5)
         const float g_range = g_max_nc - G_min;
+        cost_range_diag = g_range;
         const float range_lambda = std::max(1.f, g_range / 5.f);
         lambda_used = std::max(adaptive_lambda_, range_lambda);
 
@@ -887,12 +889,52 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
         }
         else if (best_idx >= 0)
         {
-            // Fallback: if all weights collapsed, use best seed
-            const int steps_b = static_cast<int>(seeds[best_idx].adv.size());
+            // ── EVERY ROLLOUT IS INFEASIBLE ────────────────────────────────────────────────────────
+            // Rare (measured: ~0.1% of cycles, once or twice a lap) but it is precisely the moment the
+            // robot is in trouble, so what gets chosen here matters more than in any other branch.
+            //
+            // It used to take `best_idx`, the lowest-cost seed overall — and that is BIASED TOWARD THE
+            // EARLIEST COLLISION. A rollout stops accumulating obstacle cost at the step it collides
+            // (the simulation `break`s) and every collider then receives the same flat collision_penalty,
+            // so a rollout that hits at step 2 carries almost nothing while one that hits at step 20
+            // carries nineteen steps of soft cost. The cheapest collider is therefore usually the one
+            // that crashes soonest, and cost ranking cannot express what actually matters here.
+            //
+            // What matters when nothing is feasible is TIME. The latest collision is the best available
+            // outcome: it maximises the distance the robot travels before contact, and — far more
+            // importantly — it buys the most cycles for the next solve to find a way out, for the
+            // obstacle to move, or for the speed limiter to bleed off speed. `positions.size()` is the
+            // number of steps simulated before the break, i.e. exactly that time.
+            //
+            // ★This is a tie-break among BAD options, not a safety mechanism. It does not prevent
+            // contact; it stops the controller from actively selecting the soonest one. The barrier that
+            // should have kept us out of this state is a separate question (the hard test is only 2 cm
+            // wide, and the terms covering everything outside it are capped) and is deliberately NOT
+            // touched here.
+            int chosen = best_idx;
+            std::size_t latest = 0;
+            float latest_cost = std::numeric_limits<float>::max();
+            for (int k = 0; k < actual_K; ++k)
+            {
+                const std::size_t steps_before_impact = results[k].positions.size();
+                if (steps_before_impact > latest
+                    or (steps_before_impact == latest and results[k].G_total < latest_cost))
+                {
+                    latest = steps_before_impact;
+                    latest_cost = results[k].G_total;
+                    chosen = k;
+                }
+            }
+            static int all_infeasible_logs = 0;
+            if ((all_infeasible_logs++ % 20) == 0)
+                std::printf("[mppi] ALL %d rollouts infeasible — driving the LATEST-impact one "
+                            "(%zu of %d steps clear, cost %.1f).\n",
+                            actual_K, latest, T, latest_cost);
+            const int steps_b = static_cast<int>(seeds[chosen].adv.size());
             for (int t = 0; t < std::min(T, steps_b); ++t)
             {
-                optimal[t].adv = seeds[best_idx].adv[t];
-                optimal[t].rot = seeds[best_idx].rot[t];
+                optimal[t].adv = seeds[chosen].adv[t];
+                optimal[t].rot = seeds[chosen].rot[t];
             }
         }
     }
@@ -958,6 +1000,21 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
 
     // Export ESS diagnostics
     out.ess = ess_smooth_;
+    out.lambda_used = lambda_used;
+    out.lambda_adaptive = adaptive_lambda_;
+    out.cost_range = cost_range_diag;
+    if (best_idx >= 0 and best_idx < static_cast<int>(results.size()))
+    {
+        const SimResult &b = results[best_idx];
+        out.cost_best = b.G_total;
+        out.g_goal = b.G_goal;
+        out.g_obs = b.G_obs;
+        out.g_vel = b.G_vel;
+        out.g_smooth = b.G_smooth;
+        out.g_lat = b.G_lat;
+        out.g_cbf = b.G_cbf;
+    }
+    out.n_collisions = num_collisions;
     out.ess_K = adaptive_K_;
     out.explore = explore_;
 
@@ -1776,7 +1833,8 @@ TrajectoryController::SimResult TrajectoryController::simulate_and_score(
             // Both quantities are bounded in [0,1] by construction, so the term stays differentiable
             // everywhere it is nonzero. In a corridor with both walls in range it is a genuine centring
             // term (zero when the deficits match); with a single wall it degenerates to that wall's own
-            // deficit, reinforcing the clearance term's push away from it rather than going silent.
+            // deficit, reinforcing G_obs's push away from it rather than going silent. (It used to say
+            // "the clearance term" — that term lived here and was deleted as a duplicate of G_obs.)
             const float u_left  = std::clamp((side_target - d_left_min) / side_span, 0.f, 1.f);
             const float u_right = std::clamp((side_target - d_right_min) / side_span, 0.f, 1.f);
             const float asymmetry = u_left - u_right;

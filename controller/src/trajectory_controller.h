@@ -332,6 +332,19 @@ public:
         int   ess_K = 1;          // current K (to compute ratio)
         float explore = 0.f;      // exploration signal [0,1]
 
+        // ── WHY THE SOFTMAX CHOSE WHAT IT CHOSE ───────────────────────────────────────────────────
+        // ESS alone says the weights are flat but not WHY. These say whether the temperature was the
+        // configured one or the adaptive floor, how much cost spread there was to discriminate on, and
+        // which term owns the cost — which is the difference between "the optimiser is averaging" and
+        // "every rollout really is equally good". Diagnostics only: nothing reads them to decide.
+        float lambda_used = 0.f;      // temperature actually applied in the softmax
+        float lambda_adaptive = 0.f;  // the controller's own adaptive temperature, before the floor
+        float cost_range = 0.f;       // g_max - g_min over non-colliding rollouts
+        float cost_best = 0.f;        // G_total of the best rollout
+        // Per-term cost of the BEST rollout, so "which term dominates" is answerable per cycle.
+        float g_goal = 0.f, g_obs = 0.f, g_vel = 0.f, g_smooth = 0.f, g_lat = 0.f, g_cbf = 0.f;
+        int   n_collisions = 0;
+
         Eigen::Vector2f carrot_room = Eigen::Vector2f::Zero();
         int current_wp_index = 0;
 

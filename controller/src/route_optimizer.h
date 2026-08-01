@@ -52,6 +52,7 @@
 #pragma once
 
 #include <cstddef>
+#include <limits>
 #include <functional>
 #include <vector>
 
@@ -69,7 +70,9 @@ struct RouteOptimizerConfig
     std::function<Eigen::Vector2f(const Eigen::Vector2f &)> distance_gradient;
 
     std::vector<Eigen::Vector2f> anchors;   // authored waypoints, in route order (laps concatenated)
-    // Arc length of each anchor along the route. Binding an anchor to a control point by NEAREST
+    // Arc length of each anchor ALONG THE POLYLINE the control points were resampled from — NOT along the
+    // fitted curve, which is shorter (smoothing cuts corners) and would drift out of step with s/h over a
+    // long route. Binding an anchor to a control point by NEAREST
     // POSITION is the same trap as a global carrot search: after a repair splices the polyline, a
     // waypoint can bind to a control point metres away in arc length, and with a quadratic penalty a
     // 2.5 m orphan is worth (2.5/0.30)^2 = 69 — which is what relocated control points 24.8 m and
@@ -85,6 +88,24 @@ struct RouteOptimizerConfig
     // a waypoint pulling the route off the medial axis costs clearance BY DESIGN, and a guard that
     // rejected any clearance regression would forbid the likelihood term from ever winning. 0 disables.
     float clearance_floor = 0.f;
+
+    // ── ONE DIAL: SPEED (0) <-> SAFETY (1) ────────────────────────────────────────────────────────
+    // In a quadratic objective the weights ARE precisions — inverse variances on how strongly each belief
+    // is held — so trading precision between the clearance PREFERENCE and the curvature PRIOR is a single
+    // meaningful scalar rather than two knobs to guess at. It moves them in OPPOSITE directions on a log
+    // scale, so the overall scale of the objective is unchanged and the anchor term (the LIKELIHOOD, i.e.
+    // fidelity to the authored tour) keeps its authority at every setting:
+    //     w_clear *= g,  w_kappa /= g,   g = exp(kBiasSpan * (bias - 0.5))
+    // 0.5 leaves both exactly as written, so this is inert unless it is moved.
+    // TOWARD 0: curvature dominates — wider, smoother corners, the route hugs obstacles to get them, and
+    //           a higher speed is allowed through v = sqrt(a_lat/kappa). Faster, closer.
+    // TOWARD 1: clearance dominates — the route climbs onto the medial axis and accepts winding to stay
+    //           there. Safer, and measurably NOT smoother: on this tour more clearance costs curvature.
+    // ★What each setting BUYS is measured, not asserted — sweep it with tools/route_bench and read the
+    // frontier (t_idl, clr_p05, R_min) before choosing. It is a dial with a table, not a magic number.
+    // ★It does NOT touch d_target: the comfort standoff is a stated preference about the WORLD, not about
+    // how much we care, and folding the two together would make the trade unreadable.
+    float safety_bias = 0.5f;
 
     float w_kappa   = 1.0f;
     float w_clear   = 1.0f;
@@ -106,6 +127,41 @@ struct RouteOptimizerConfig
     // taking min clearance from 0.454 to 0.396. Pure u^4 over-corrects: its gradient dies as u^3, so on a
     // uniformly-tight route it stalls 0.175 m off the medial axis where u^2 reaches 0.042 m.
     float clear_peak = 4.0f;
+    // The SAME construction on the bending term: E_kappa = mean(v^2 + kappa_peak*v^4), v = rho*kappa.
+    // A route is not made drivable by being smooth ON AVERAGE. What stops a differential drive is the ONE
+    // corner tighter than it can turn — there it must stop translating and pivot, which is where a lap's
+    // reversals come from — and a mean over ~90 control points cannot see it: measured offline on a
+    // hairpin, the solve lowered its own cost while taking the tightest radius from 0.133 to 0.079 m,
+    // because widening one corner costs clearance and anchor fidelity everywhere around it. This is the
+    // identical failure that clear_peak was introduced for, on the other term. 0 ⇒ plain bending energy.
+    float kappa_peak = 0.0f;
+    // WHICH CURVATURE THE BENDING TERM MEASURES.
+    // false = |d2 Q| / h^2, the classical elastic-band second difference. Fast-Planner describes this
+    //         term honestly: at zero it puts the control points UNIFORMLY ON A STRAIGHT LINE, i.e. it is
+    //         as much a spacing regulariser as a curvature measure, and it is only curvature at all while
+    //         the spacing it assumes holds.
+    // true  = the clamped-B-spline curvature UPPER BOUND per span (see curvature_bound() in the .cpp),
+    //         computed from the control polygon's own angles and its MEASURED segment lengths. It bounds
+    //         the whole span rather than sampling it, so a minimum turning radius becomes expressible.
+    // ★Two priors again, and again only one should survive: measure both on the real tour with
+    // tools/route_bench (curvature_bound=0,1) and delete the loser. The last time this protocol ran it
+    // killed the exact-curvature form on the evidence, which is the point of having it.
+    bool  curvature_bound = false;
+    // L_min for the bound above. A vanishing control segment sends any control-polygon curvature estimate
+    // to infinity for a corner that may be perfectly drivable; clipping it is what Choi et al. do, and
+    // they report the resulting overestimate has little effect on tracking.
+    float min_seg_m = 0.05f;
+    // ★TRIED AND REJECTED 2026-08-01, on the real tour, and recorded here so it is not re-invented: the
+    // bending prior above uses kappa ~ |d2 p| / h^2, which is curvature only while the control points sit
+    // at spacing h — an assumption E_gauge protects but does not guarantee. The parameterisation-free
+    // alternative, kappa = |c' x c''| / |c'|^3 at quadrature points on the curve, was implemented with an
+    // exact Jacobian (FD-verified) and measured against this tour with tools/route_bench. It LOST on every
+    // axis: at comparable weight the acceptance test rejected it for driving clearance from 0.333 to
+    // 0.015 m, and weak enough to be accepted it added 3 m of wandering (39.2 vs 36.5 m), left footprint-
+    // infeasible samples, and still left 2 pivots against the bending form's 1. The one thing that argued
+    // for it — w_gauge moving the geometry, which a structural term must not — turned out to be worth
+    // 0.074 -> 0.084 m of tightest radius across a 10x sweep on this tour, i.e. nothing. Two priors, one
+    // survivor; this is the one the world chose.
 
     int   iterations = 30;
     // Pin control points [0, freeze_before) in place. Used on a REPAIR: re-optimising the whole route
@@ -113,6 +169,17 @@ struct RouteOptimizerConfig
     // With local support, freezing a prefix is a clean restriction of the variable set — the same
     // mechanism as the always-pinned endpoints, not an approximation.
     std::size_t freeze_before = 0;
+    // Pin control points [freeze_after, M) in place — the other end of the same restriction, and the one
+    // that makes a REPAIR LOCAL. Without it a repair re-solves the whole route ahead of the robot, which
+    // has two consequences and both were measured live over 31 repairs in a 3-lap run:
+    //   • the route AHEAD is re-shaped against whatever the ESDF holds at the instant of an UNRELATED
+    //     local blockage — a transient obstacle at s=20 rewrites the geometry at s=80, so the route the
+    //     robot eventually drives there depends on what happened to be in the way a lap earlier;
+    //   • the trades accumulate. Anchor cost climbed 0.077 -> 0.70 and route length eroded 109.9 -> 106.3 m,
+    //     i.e. the tour drifted away from what was authored, one repair at a time.
+    // A repair is a LOCAL edit by definition, so its variable set should be local too. Everything outside
+    // the spliced window then keeps exactly the geometry it was built with, and N repairs cannot compound.
+    std::size_t freeze_after = std::numeric_limits<std::size_t>::max();
     bool  enabled = true;      // off ⇒ RouteSpline fits exactly as before
     bool  verbose = true;
 };
@@ -126,6 +193,7 @@ struct RouteOptimizerReport
     float cost_before = 0.f;
     float cost_after = 0.f;
     float max_move_m = 0.f;       // largest displacement of any control point
+    bool  uvd_violated = false;   // the solve moved the route ACROSS an obstacle (see the UVD test)
     float min_clearance_before = 0.f;
     float min_clearance_after = 0.f;
     // PER-TERM cost at the end. Without this a bad solve is undiagnosable: a big total says nothing about

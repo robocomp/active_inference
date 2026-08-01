@@ -8,7 +8,9 @@
 #include <cmath>
 #include <cstdio>
 #include <format>
+#include <istream>
 #include <limits>
+#include <ostream>
 #include <queue>
 
 namespace rc
@@ -128,6 +130,49 @@ long GridPlanner::occupied_cells() const
     long n = 0;
     for (const auto v : occ_) n += v;
     return n;
+}
+
+// ── Snapshot ─────────────────────────────────────────────────────────────────────────────────────
+// One row of '0'/'1' per grid row, preceded by everything needed to place it in the room frame. Text
+// rather than binary: a world snapshot is something a person reads and greps while working out why a
+// route came out the way it did, and 30k cells cost nothing.
+void GridPlanner::write_grid(std::ostream& os) const
+{
+    os << "grid " << cell_ << ' ' << xmin_ << ' ' << ymin_ << ' ' << w_ << ' ' << h_ << ' '
+       << params.safety_margin_m << ' ' << (room_mask_usable_ ? 1 : 0) << '\n';
+    os << "occ\n";
+    std::string row(static_cast<std::size_t>(std::max(0, w_)), '0');
+    for (int iy = 0; iy < h_; ++iy)
+    {
+        for (int ix = 0; ix < w_; ++ix) row[ix] = occ_[idx(ix, iy)] ? '1' : '0';
+        os << row << '\n';
+    }
+}
+
+bool GridPlanner::read_grid(std::istream& is)
+{
+    w_ = h_ = 0; occ_.clear(); dist_.clear(); dist_valid_ = false;
+    std::string tok;
+    while (is >> tok and tok != "grid") is.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+    if (tok != "grid") return false;
+    int usable = 1;
+    if (not (is >> cell_ >> xmin_ >> ymin_ >> w_ >> h_ >> params.safety_margin_m >> usable)) return false;
+    if (w_ <= 0 or h_ <= 0 or cell_ <= 0.f) { w_ = h_ = 0; return false; }
+    room_mask_usable_ = usable != 0;
+    params.cell_size_m = cell_;
+    while (is >> tok and tok != "occ") {}
+    if (tok != "occ") { w_ = h_ = 0; return false; }
+    occ_.assign(static_cast<std::size_t>(w_) * h_, 0);
+    for (int iy = 0; iy < h_; ++iy)
+    {
+        std::string row;
+        if (not (is >> row) or static_cast<int>(row.size()) != w_) { w_ = h_ = 0; occ_.clear(); return false; }
+        for (int ix = 0; ix < w_; ++ix) occ_[idx(ix, iy)] = row[ix] == '1' ? 1 : 0;
+    }
+    // The footprint rasterisation depends on cell size and margin, both of which just changed.
+    offsets_.clear();
+    rebuild_offsets();
+    return true;
 }
 
 // ── Exact Euclidean distance transform (Felzenszwalb & Huttenlocher) ──────────────────────────────

@@ -89,7 +89,45 @@ bool RouteFollower::build(const Eigen::Vector2f &start,
     return true;
 }
 
-bool RouteFollower::fit_from_polyline(const FreeFn &is_free, std::size_t freeze_before)
+std::vector<float> RouteFollower::anchor_polyline_arclengths() const
+{
+    std::vector<float> out;
+    if (poly_.size() < 2) return out;
+    out.reserve(wp_pos_.size());
+
+    std::vector<float> cum(poly_.size(), 0.f);
+    for (std::size_t i = 1; i < poly_.size(); ++i) cum[i] = cum[i - 1] + (poly_[i] - poly_[i - 1]).norm();
+
+    // FORWARD-ONLY, in route order, within a window. The waypoints are vertices of this polyline, so the
+    // projection lands on them exactly; the window and the monotone hint are what keep lap 2's copy of a
+    // waypoint from binding to lap 1's identical position. A global search cannot tell them apart at all —
+    // they are the same point in space, and only the order they are driven in distinguishes them.
+    constexpr float kWindow = 10.0f;      // a lap is ~36 m and waypoints ~1.2 m apart: no ambiguity here
+    float s_hint = 0.f;
+    for (const auto &w : wp_pos_)
+    {
+        float best_s = s_hint, best_d2 = std::numeric_limits<float>::max();
+        for (std::size_t i = 0; i + 1 < poly_.size(); ++i)
+        {
+            if (cum[i + 1] < s_hint) continue;              // behind the hint: already consumed
+            if (cum[i] > s_hint + kWindow) break;
+            const Eigen::Vector2f a = poly_[i], ab = poly_[i + 1] - a;
+            const float len2 = ab.squaredNorm();
+            const float t = len2 > 1e-9f ? std::clamp((w - a).dot(ab) / len2, 0.f, 1.f) : 0.f;
+            if (const float d2 = (a + t * ab - w).squaredNorm(); d2 < best_d2)
+            {
+                best_d2 = d2;
+                best_s = cum[i] + t * std::sqrt(len2);
+            }
+        }
+        out.push_back(best_s);
+        s_hint = best_s;
+    }
+    return out;
+}
+
+bool RouteFollower::fit_from_polyline(const FreeFn &is_free, std::size_t freeze_before,
+                                     std::size_t freeze_after)
 {
     if (poly_.size() < 2) return false;
 
@@ -97,8 +135,22 @@ bool RouteFollower::fit_from_polyline(const FreeFn &is_free, std::size_t freeze_
     // rather than asked of the caller — nothing outside this class knows what the route was authored from.
     RouteOptimizerConfig opt = opt_;
     opt.anchors = wp_pos_;
-    opt.anchor_s = wp_s_;   // bind by arc length, not by nearest control point (see RouteOptimizerConfig)
+    // ★POLYLINE arc length, not wp_s_. Two reasons, and both were live defects on a 3-lap run:
+    //   • wp_s_ is measured along the SMOOTHED CURVE, while the optimiser's control points are resampled
+    //     every h along the POLYLINE and it indexes them as s/h. The curve is shorter than the polyline
+    //     (smoothing cuts corners), so the two metrics drift apart with distance — invisible at 36 m,
+    //     several control points at 110 m.
+    //   • On a fresh build wp_s_ is EMPTY (it is derived from the curve that does not exist yet), so the
+    //     optimiser fell back to its nearest-control-point search. Control points are 0.40 m apart, so on
+    //     a route that repeats, lap 3's control point can sit 0.02 m from a waypoint where lap 1's sits
+    //     0.19 m: the anchor binds to the wrong lap, the forward-only hint follows it to the end of the
+    //     route, and every remaining anchor binds there too. Measured on 3 laps: anchor cost 11.87 of a
+    //     total 12.09, control points dragged 2.15 m, and 15 m of tour deleted.
+    // The polyline exists before the fit and is the metric the control points are actually spaced in, so
+    // this is the one quantity that is well defined at the moment the binding is made.
+    opt.anchor_s = anchor_polyline_arclengths();
     opt.freeze_before = freeze_before;
+    opt.freeze_after = freeze_after;
     const RouteOptimizerConfig *popt = (opt.enabled and opt.distance) ? &opt : nullptr;
 
     if (not spline_.build(poly_, spacing_, is_free, smoothing_, popt)) return false;
@@ -138,13 +190,16 @@ RouteFollower::RepairResult RouteFollower::repair(const Eigen::Vector2f &robot_p
     // that fired the reflex is not on our path — it is beside it, behind it, or already gone — and the
     // route needs no repair. This is the difference between "an obstacle appeared" and "I cannot get
     // through", and conflating them is what produced a detour storm in places that were plainly drivable.
+    // How much of the window is impassable, in metres — not merely whether any of it is. The amount is
+    // what makes the post-repair check below possible: a repair has to IMPROVE it, and "is there a
+    // blockage" cannot express improvement.
+    float blocked_before = 0.f;
     if (is_free)
     {
-        bool blocked = false;
-        for (float s = s0; s <= s1 and not blocked; s += spline_.spacing())
+        for (float s = s0; s <= s1; s += spline_.spacing())
             if (not is_free(spline_.position_at(s), spline_.heading_at(s)))
-                blocked = true;
-        if (not blocked) return RepairResult::NotNeeded;
+                blocked_before += spline_.spacing();
+        if (blocked_before <= 0.f) return RepairResult::NotNeeded;
     }
 
     // Map the arc-length window onto the POLYLINE, which is what gets spliced. Do it by ARC LENGTH, never
@@ -223,11 +278,65 @@ RouteFollower::RepairResult RouteFollower::repair(const Eigen::Vector2f &robot_p
     // points sit every `ctrl_step` along the POLYLINE, hence the same rescaling used for the bracket.
     const float ctrl_step = std::max(spacing_, smoothing_);
     const std::size_t freeze = static_cast<std::size_t>(std::max(0.f, s0 * scale / ctrl_step));
-    if (not fit_from_polyline(is_free, freeze))
+    // ...AND FREEZE EVERYTHING PAST THE SPLICE. A repair is a LOCAL edit, so its variable set must be
+    // local: without this the solve re-optimises the entire route ahead, against whatever the ESDF holds
+    // at the instant of this one blockage. Measured over 31 repairs in a 3-lap run, that compounds — the
+    // anchor cost climbed 0.077 -> 0.70 and the route eroded 109.9 -> 106.3 m, so the tour the robot drove
+    // on lap 3 was not the tour it was given, and the drift came from transients metres away.
+    // The window in POLYLINE arc length is [cum[i0], cum[i0] + |hop|]; kBlendCtrl control points of slack
+    // either side let the splice blend into what it joins instead of kinking against a pinned neighbour.
+    constexpr std::size_t kBlendCtrl = 3;
+    float hop_len = 0.f;
+    for (std::size_t i = 1; i < hop.size(); ++i) hop_len += (hop[i] - hop[i - 1]).norm();
+    const std::size_t window_end_ctrl =
+        static_cast<std::size_t>(std::max(0.f, (cum[i0] + hop_len) / ctrl_step)) + kBlendCtrl;
+    // A failed refit must leave the route EXACTLY as it was — not merely re-derived from the same
+    // polyline. Re-fitting would re-run the optimiser against the CURRENT distance field, so a repair
+    // that failed would still move the route; live, ten consecutive failures did exactly that, each one
+    // paying the full re-optimisation it could not use. Keeping the curve costs one copy of a few
+    // thousand points and makes a failed repair a genuine no-op.
+    auto prev_spline = spline_;
+    auto prev_wp_s = wp_s_;
+    if (not fit_from_polyline(is_free, freeze, window_end_ctrl))
     {
-        poly_ = std::move(previous);        // a failed refit must not leave a half-repaired route behind
-        fit_from_polyline(is_free);
+        poly_ = std::move(previous);
+        spline_ = std::move(prev_spline);
+        wp_s_ = std::move(prev_wp_s);
         return RepairResult::Failed;
+    }
+
+    // ── DID THE REPAIR ACTUALLY IMPROVE ANYTHING? ─────────────────────────────────────────────────
+    // A detour is planned on the POLYLINE, but what gets driven is the SMOOTHED curve, and smoothing at
+    // 0.40 m can round a narrow detour straight back into the obstacle it was authored to avoid. The
+    // route is then still blocked, the reflex fires again next cycle, and each firing splices another
+    // detour: the length grows, the tour drifts away from what was authored, and nothing improves.
+    // ★The test is COMPARATIVE, not absolute. "Is the window clear now?" is the wrong question, because
+    // the window deliberately starts BEHIND the robot — which is usually where the blocker is, the robot
+    // having just backed out of it — so an absolute test reverts every repair, including the ones that
+    // work. Requiring strictly LESS blocked arc length asks what a repair is actually for, and the
+    // stretch the robot is standing in cancels from both sides of the comparison.
+    if (is_free and blocked_before > 0.f)
+    {
+        const float poly_len_new = cum[i0] + hop_len + (cum.back() - cum[i1]);
+        const float L_new = spline_.length();
+        const float scale_new = poly_len_new / std::max(L_new, 1e-6f);
+        const float w0 = std::clamp(cum[i0] / std::max(scale_new, 1e-6f), 0.f, L_new);
+        const float w1 = std::clamp((cum[i0] + hop_len) / std::max(scale_new, 1e-6f), 0.f, L_new);
+        float blocked_after = 0.f;
+        for (float s = w0; s <= w1; s += spline_.spacing())
+            if (not is_free(spline_.position_at(s), spline_.heading_at(s)))
+                blocked_after += spline_.spacing();
+        if (blocked_after >= blocked_before - 0.5f * spline_.spacing())
+        {
+            std::printf("[route] repair REVERTED: %.2f m of the window was impassable and %.2f m still is, "
+                        "so this detour achieved nothing. Holding instead of splicing another one.\n",
+                        blocked_before, blocked_after);
+            std::fflush(stdout);
+            poly_ = std::move(previous);
+            spline_ = std::move(prev_spline);
+            wp_s_ = std::move(prev_wp_s);
+            return RepairResult::Failed;
+        }
     }
 
     // Re-anchor progress on the NEW curve. The arc-length scale changed under us, so the monotonicity
@@ -400,13 +509,28 @@ bool RouteFollower::self_test()
         RouteFollower r;
         // A big square: waypoints far enough apart that a 3 m window contains an interior one.
         const std::vector<Eigen::Vector2f> big{{4.f, 0.f}, {4.f, 4.f}, {0.f, 4.f}, {0.f, 0.f}};
-        // is_free says the route IS blocked, so the repair actually runs; the planner returns straight
-        // segments, which is the WORST case for shortcutting — it will cut any corner it is allowed to.
-        const FreeFn blocked = [](const Eigen::Vector2f &, float) { return false; };
+        // A REAL patch on the outbound leg, not an everywhere-blocked world. "Nothing is passable" used
+        // to be a convenient way to force the repair to run, but no detour can improve an impassable
+        // world, so the improvement check below (correctly) reverts every repair in it — a world with no
+        // solution cannot test whether we found one.
+        const FreeFn blocked = [](const Eigen::Vector2f &p, float)
+        { return not (p.x() > 3.7f and p.x() < 4.3f and p.y() > 2.0f and p.y() < 2.6f); };
+        // Detours to the RIGHT around that patch, straight everywhere else. Still the worst case for
+        // shortcutting: it cuts every corner it is permitted to.
+        const PlanFn side_step = [](const Eigen::Vector2f &a, const Eigen::Vector2f &b)
+            -> std::optional<std::vector<Eigen::Vector2f>>
+        {
+            std::vector<Eigen::Vector2f> out{a};
+            if (std::min(a.y(), b.y()) < 2.8f and std::max(a.y(), b.y()) > 1.8f
+                and a.x() > 3.f and b.x() > 3.f)
+                for (float y = 1.6f; y <= 3.0f; y += 0.35f) out.push_back({5.2f, y});
+            out.push_back(b);
+            return out;
+        };
         check(r.build({0.f, 0.f}, big, 1, straight, {}), "the big square must build");
         const float len_before = r.length();
         r.advance({4.f, 1.5f});
-        const auto res = r.repair({4.f, 1.5f}, 1.0f, 3.0f, straight, blocked);
+        const auto res = r.repair({4.f, 1.5f}, 1.0f, 3.0f, side_step, blocked);
         check(res == RepairResult::Repaired, "a blocked route must actually be repaired");
         // The corner at (4,4) lies inside the window. If it were bypassed the route would collapse
         // diagonally and lose metres; planning through it keeps the length.
@@ -466,6 +590,188 @@ bool RouteFollower::self_test()
         check(not r.build({0.f, 0.f}, square, 1, nearly_all_broken, {}),
               "fewer than two reachable waypoints must fail the build");
         check(not r.valid(), "a failed build must leave nothing valid behind");
+    }
+
+    // ── MULTI-LAP ANCHOR BINDING, WITH THE OPTIMISER ON ──────────────────────────────────────────────
+    // Every other test here runs with the optimiser OFF (no distance field), which is why a 2-lap route
+    // passed them all while the anchor binding was broken. On a repeating route the same waypoint is the
+    // same POINT once per lap, so only arc length can say which lap an anchor belongs to — and the
+    // failure is silent: the route comes back smooth, well cleared, and missing whole laps of the tour.
+    // Live, on 3 laps: 94.73 m where 109.7 m was asked for, i.e. 15 m of tour deleted, and the robot
+    // drove into a narrow passage the route had never been authored to enter.
+    // The invariant is exact and needs no tuning: N laps of a route is N times one lap of it.
+    {
+        RouteOptimizerConfig opt;
+        // A field with no deficit anywhere, so the clearance term is inert and this test is ABOUT the
+        // anchors: if it fails, the binding is wrong, not the trade-off between terms.
+        opt.distance = [](const Eigen::Vector2f &) { return 5.f; };
+        opt.distance_gradient = [](const Eigen::Vector2f &) { return Eigen::Vector2f::Zero(); };
+        opt.h = 0.40f; opt.d_target = 0.60f; opt.rho = 0.49f; opt.sigma_a = 0.30f;
+        opt.iterations = 30; opt.verbose = false;
+
+        RouteFollower r1, r3;
+        r1.set_optimizer(opt);
+        r3.set_optimizer(opt);
+        check(r1.build({0.f, 0.f}, square, 1, straight, {}), "1-lap optimised route must build");
+        check(r3.build({0.f, 0.f}, square, 3, straight, {}), "3-lap optimised route must build");
+        const float ratio = r3.length() / std::max(1e-3f, r1.length());
+        const auto &rep = r3.spline().last_optimizer_report();
+        std::printf("  multi-lap: 1 lap %.2f m, 3 laps %.2f m (ratio %.3f), anchor cost %.3f, "
+                    "max move %.3f m\n", r1.length(), r3.length(), ratio, rep.e_anchor, rep.max_move_m);
+        check(ratio > 2.85f and ratio < 3.15f,
+              "a 3-lap optimised route must be three times the 1-lap route — anchors bound to the wrong lap");
+        check(rep.e_anchor < 1.0f, "the anchor term must not explode on a repeating route");
+        check(rep.max_move_m < 3.f * opt.h, "control points must not be dragged across the route");
+
+        // The arc lengths handed to the optimiser must be monotone and cover the whole polyline — the
+        // property that makes "which lap" answerable at all.
+        const auto as = r3.anchor_polyline_arclengths();
+        check(as.size() == 12, "3 laps x 4 waypoints = 12 anchor arc lengths");
+        bool monotone = true;
+        for (std::size_t i = 1; i < as.size(); ++i) if (as[i] <= as[i - 1]) monotone = false;
+        check(monotone, "anchor arc lengths must increase strictly along the route");
+    }
+
+    // ── A REPAIR MUST BE LOCAL, AND REPAIRS MUST NOT COMPOUND ────────────────────────────────────────
+    // The route far ahead of a blockage is not evidence about the blockage. If a repair re-solves it, the
+    // geometry the robot eventually drives there depends on transient occupancy metres away and a lap
+    // earlier — and the trades accumulate: 31 repairs took the anchor cost 0.077 -> 0.70 and eroded the
+    // route 109.9 -> 106.3 m. Both assertions below are about CONFINEMENT, not quality.
+    {
+        // A corridor with a distance field, so the optimiser is genuinely active (with no field it is
+        // disabled and this test would pass vacuously — the trap the multi-lap test fell into).
+        RouteOptimizerConfig opt;
+        opt.distance = [](const Eigen::Vector2f &p) { return std::max(0.05f, 2.0f - std::abs(p.y())); };
+        opt.distance_gradient = [](const Eigen::Vector2f &p)
+        { return Eigen::Vector2f{0.f, p.y() > 0.f ? -1.f : 1.f}; };
+        opt.h = 0.40f; opt.d_target = 0.60f; opt.rho = 0.49f; opt.sigma_a = 0.30f;
+        opt.iterations = 30; opt.verbose = false;
+
+        const std::vector<Eigen::Vector2f> line{{4.f, 0.f}, {8.f, 0.f}, {12.f, 0.f}, {16.f, 0.f}, {20.f, 0.f}};
+        RouteFollower r;
+        r.set_optimizer(opt);
+        check(r.build({0.f, 0.f}, line, 1, straight, {}), "a long straight route must build");
+
+        // Drive a little, then repair around a blocker near the robot.
+        for (float s = 0.f; s <= 3.0f; s += 0.25f) r.advance(r.spline().position_at(s));
+        const auto before = r.path();
+        const float len_before = r.length();
+        // A planner that bulges around x in [3,6] — a detour local to the window.
+        // The detour must be WIDE, not just tall: the curve is smoothed at 0.40 m, so a single-vertex
+        // spike is rounded straight back into the obstacle it was meant to avoid — which is a real
+        // failure mode, not a test artefact, and is how a repair can leave the route still blocked and
+        // the reflex still firing.
+        const PlanFn detour = [](const Eigen::Vector2f &a, const Eigen::Vector2f &b)
+            -> std::optional<std::vector<Eigen::Vector2f>>
+        {
+            std::vector<Eigen::Vector2f> out{a};
+            if (a.x() < 6.8f and b.x() > 5.0f)
+                for (float x = std::max(a.x(), 5.0f); x <= std::min(b.x(), 6.8f); x += 0.4f)
+                    out.push_back({x, 1.2f});
+            out.push_back(b);
+            return out;
+        };
+        // BETWEEN the waypoints at x=4 and x=8. A blocker sitting ON an authored waypoint is a different
+        // problem entirely — the repair plans THROUGH the waypoints in its window, so it cannot route
+        // around one, and the post-check below correctly reverts every such attempt.
+        const FreeFn blocked_patch = [](const Eigen::Vector2f &p, float)
+        { return not (p.x() > 5.5f and p.x() < 6.1f and std::abs(p.y()) < 0.60f); };
+        const auto res = r.repair(r.spline().position_at(r.progress()), 1.0f, 4.0f, detour, blocked_patch);
+        check(res == RepairResult::Repaired, "a blocked window must repair");
+
+        // FAR from the window, the curve must be untouched — as GEOMETRY. A repair changes the route's
+        // LENGTH (a detour is longer than what it replaces), so every sample past the window shifts in
+        // arc length even when it has not moved a millimetre in space: comparing before[i] to after[i]
+        // measures the splice, not the shape, and reported 0.24 m of "movement" on a curve that was
+        // identical. The honest measure is curve-to-curve distance, the same one lap_repeat_* uses.
+        const auto &after = r.path();
+        float far_move = 0.f;
+        const float far_from = 12.0f;      // window was [~2, ~7]; this is well past it
+        for (std::size_t i = 0; i < after.size(); ++i)
+        {
+            if (static_cast<float>(i) * r.spline().spacing() < far_from) continue;
+            float nearest = std::numeric_limits<float>::max();
+            for (std::size_t j = 0; j < before.size(); ++j)
+                nearest = std::min(nearest, (after[i] - before[j]).norm());
+            far_move = std::max(far_move, nearest);
+        }
+        std::printf("  local repair: length %.2f -> %.2f m, curve beyond the window moved %.4f m\n",
+                    len_before, r.length(), far_move);
+        check(far_move < 0.02f, "a repair must not move the route far ahead of its own window");
+
+        // REPEATED REPAIRS MUST NOT COMPOUND. The live failure was not one repair, it was 31 of them: the
+        // reflex fires whenever something is near, and each firing used to re-author the whole route
+        // ahead. Once the detour exists the window is drivable again, so every further attempt must come
+        // back NotNeeded and change nothing at all — bit-identical, not merely similar.
+        {
+            const auto settled = r.path();
+            const float settled_len = r.length();
+            int not_needed = 0;
+            for (int k = 0; k < 5; ++k)
+                if (r.repair(r.spline().position_at(r.progress()), 1.0f, 4.0f, detour, blocked_patch)
+                    == RepairResult::NotNeeded) ++not_needed;
+            float drift = 0.f;
+            for (std::size_t i = 0; i < std::min(settled.size(), r.path().size()); ++i)
+                drift = std::max(drift, (settled[i] - r.path()[i]).norm());
+            std::printf("  repeated repairs: %d/5 NotNeeded, length %.2f -> %.2f m, drift %.6f m\n",
+                        not_needed, settled_len, r.length(), drift);
+            check(not_needed == 5, "a route that is already drivable must not be repaired again");
+            check(drift < 1e-6f, "repeated repair attempts must not move the route at all");
+        }
+
+        // ── A BLOCKER SITTING ON AN AUTHORED WAYPOINT ───────────────────────────────────────────────
+        // This is the case that loops forever, and it is not the one I first guessed. Smoothing alone
+        // cannot undo a detour — RouteSpline re-tests every sample and pulls failures back toward the
+        // polyline. But when the obstacle covers a WAYPOINT, pulling back lands inside it: the repair
+        // re-plans THROUGH the waypoints in its window (by design, so a shortest-path planner cannot
+        // straighten the tour), so every attempt reproduces a blocked route, the reflex fires again next
+        // cycle, and each firing splices more length. Live, a 3-lap run logged 31 repairs and the
+        // optimiser reported route clearance of 0.000 m — a route through an occupied cell.
+        // There is no detour to find here. The honest outcome is to fail and hold until the obstacle
+        // ages out on its TTL, not to re-author the tour once per cycle.
+        {
+            RouteFollower rw;
+            rw.set_optimizer(opt);
+            check(rw.build({0.f, 0.f}, line, 1, straight, {}), "route for the blocked-waypoint case must build");
+            for (float s = 0.f; s <= 3.0f; s += 0.25f) rw.advance(rw.spline().position_at(s));
+            // Covers the authored waypoint at (4,0).
+            const FreeFn on_waypoint = [](const Eigen::Vector2f &p, float)
+            { return not ((p - Eigen::Vector2f{4.f, 0.f}).norm() < 0.5f); };
+            const auto before_w = rw.path();
+            const float len_w = rw.length();
+            int failed = 0;
+            for (int k = 0; k < 5; ++k)
+                if (rw.repair(rw.spline().position_at(rw.progress()), 1.0f, 4.0f, detour, on_waypoint)
+                    == RepairResult::Failed) ++failed;
+            float moved = 0.f;
+            for (std::size_t i = 0; i < std::min(before_w.size(), rw.path().size()); ++i)
+                moved = std::max(moved, (before_w[i] - rw.path()[i]).norm());
+            std::printf("  blocked waypoint: %d/5 Failed, length %.2f -> %.2f m, curve moved %.6f m\n",
+                        failed, len_w, rw.length(), moved);
+            check(failed == 5, "a blocker on an authored waypoint has no detour — every attempt must fail");
+            check(std::abs(rw.length() - len_w) < 1e-4f,
+                  "five impossible repairs must not add a metre of route between them");
+            check(moved < 1e-6f, "a reverted repair must leave the route bit-identical");
+        }
+
+        // A FAILED repair must be a no-op, not a re-solve. Ten consecutive failures were observed live.
+        const PlanFn no_route = [](const Eigen::Vector2f &, const Eigen::Vector2f &)
+            -> std::optional<std::vector<Eigen::Vector2f>> { return std::nullopt; };
+        // A wall across the whole corridor INSIDE the window, so the route really is blocked and the
+        // repair reaches the planner — against `blocked_patch` the detour already exists and the answer
+        // would (correctly) be NotNeeded, which tests nothing about the failure path.
+        const FreeFn walled = [](const Eigen::Vector2f &p, float)
+        { return not (p.x() > 5.5f and p.x() < 6.1f); };
+        const auto path_before_fail = r.path();
+        const float len_pre_fail = r.length();
+        const auto fail = r.repair(r.spline().position_at(r.progress()), 1.0f, 4.0f, no_route, walled);
+        check(fail == RepairResult::Failed, "a repair with no plannable detour must fail");
+        float fail_move = 0.f;
+        for (std::size_t i = 0; i < std::min(path_before_fail.size(), r.path().size()); ++i)
+            fail_move = std::max(fail_move, (path_before_fail[i] - r.path()[i]).norm());
+        std::printf("  failed repair: length %.2f -> %.2f m, curve moved %.6f m\n",
+                    len_pre_fail, r.length(), fail_move);
+        check(fail_move < 1e-6f, "a FAILED repair must leave the route bit-identical");
     }
 
     std::printf("RouteFollower::self_test %s\n", ok ? "PASS" : "FAIL");

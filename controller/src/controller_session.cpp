@@ -23,6 +23,7 @@ const char *obstacle_kind_tag(ControllerObstacleKind kind)
 }   // namespace
 #include <cstdio>
 #include <filesystem>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <print>
@@ -308,6 +309,60 @@ void ControllerSession::log_route_geometry()
     route_geom_csv_.flush();
 }
 
+void ControllerSession::dump_route_world(const Eigen::Vector2f &start,
+                                         const std::vector<Eigen::Vector2f> &raw,
+                                         const std::vector<Eigen::Vector2f> &repaired,
+                                         int laps,
+                                         const rc::RouteOptimizerConfig &opt) const
+{
+    std::ofstream f("route_world.txt", std::ios::out | std::ios::trunc);
+    if (not f.is_open()) return;
+    f << std::setprecision(9);
+    f << "# route world snapshot — ControllerSession::build_route. Replay with tools/route_bench.\n";
+    f << "version 1\n";
+    f << "mission " << mission_.selected_name() << '\n';
+    f << "laps " << laps << '\n';
+    f << "start " << start.x() << ' ' << start.y() << '\n';
+    // Both waypoint sets: the tour as RECORDED and as REPAIRED to feasible poses. The bench must drive
+    // the repaired ones (they are what was planned through) but anchor-fidelity is only meaningful
+    // against what was actually asked for, and the two differ by however much the world moved.
+    for (const auto &p : raw)      f << "wp_raw "  << p.x() << ' ' << p.y() << '\n';
+    for (const auto &p : repaired) f << "wp_safe " << p.x() << ' ' << p.y() << '\n';
+    if (params_ != nullptr)
+        f << "fit " << params_->route_spacing_m << ' ' << params_->route_smoothing_m << ' '
+          << params_->max_adv_speed_mps << ' ' << params_->max_lateral_accel_mps2 << ' '
+          << params_->comfort_standoff_m << '\n';
+    // EVERY field the solve consumed, so the bench replays rather than infers. New fields go on the END:
+    // the reader takes them in order and leaves anything missing at its default, so an older snapshot
+    // stays readable instead of becoming a file that parses into a subtly different optimiser.
+    f << "opt " << opt.d_target << ' ' << opt.rho << ' ' << opt.sigma_a << ' ' << opt.clearance_floor << ' '
+      << opt.w_kappa << ' ' << opt.w_clear << ' ' << opt.w_gauge << ' ' << opt.clear_peak << ' '
+      << opt.anchor_huber << ' ' << opt.iterations << ' ' << opt.kappa_peak << '\n';
+    grid_planner_.write_grid(f);
+}
+
+void ControllerSession::log_mppi_diagnostics(std::uint64_t t_ms,
+                                             const rc::TrajectoryController::ControlOutput &o,
+                                             float commanded_adv, float measured_speed)
+{
+    if (!mppi_csv_open_)
+    {
+        mppi_csv_.open("mppi_diag.csv", std::ios::out | std::ios::trunc);
+        if (mppi_csv_.is_open())
+            mppi_csv_ << "t_ms,ess,ess_K,ess_ratio,lambda_used,lambda_adaptive,cost_range,cost_best,"
+                         "g_goal,g_obs,g_vel,g_smooth,g_lat,g_cbf,n_collisions,"
+                         "cmd_adv,meas_speed,min_esdf,explore\n";
+        mppi_csv_open_ = true;
+    }
+    if (!mppi_csv_.is_open()) return;
+    const float ratio = o.ess_K > 0 ? o.ess / static_cast<float>(o.ess_K) : 0.f;
+    mppi_csv_ << t_ms << ',' << o.ess << ',' << o.ess_K << ',' << ratio << ','
+              << o.lambda_used << ',' << o.lambda_adaptive << ',' << o.cost_range << ',' << o.cost_best << ','
+              << o.g_goal << ',' << o.g_obs << ',' << o.g_vel << ',' << o.g_smooth << ','
+              << o.g_lat << ',' << o.g_cbf << ',' << o.n_collisions << ','
+              << commanded_adv << ',' << measured_speed << ',' << o.min_esdf << ',' << o.explore << '\n';
+}
+
 void ControllerSession::log_route_event(const char *event, bool ok, std::uint64_t t_ms,
                                         const rc::TrajectoryController &path_controller,
                                         float window_m)
@@ -366,8 +421,9 @@ bool ControllerSession::build_route(const ControllerRobotPose &robot_pose)
     // plan past waypoint 6. Moving the planning into the route builder dropped the repair with it.
     // Yaw is the direction of travel toward the NEXT waypoint — the pose the robot will actually present
     // there, and the one the planner searches under.
-    std::vector<Eigen::Vector2f> wps;
+    std::vector<Eigen::Vector2f> wps, raw_wps;
     wps.reserve(m->waypoints.size());
+    raw_wps.reserve(m->waypoints.size());
     int repaired = 0, skipped = 0;
     const int n = static_cast<int>(m->waypoints.size());
     for (int i = 0; i < n; ++i)
@@ -389,6 +445,7 @@ bool ControllerSession::build_route(const ControllerRobotPose &robot_pose)
         }
         if ((*safe - raw).squaredNorm() > 1e-6f) ++repaired;
         wps.push_back(*safe);
+        raw_wps.push_back(raw);
     }
     if (wps.size() < 2)
     {
@@ -420,7 +477,9 @@ bool ControllerSession::build_route(const ControllerRobotPose &robot_pose)
         opt.sigma_a = 0.30f;
         opt.clearance_floor = rc::RobotFootprint::shadow().circumscribed_radius();
         opt.iterations = 30;
+        opt.safety_bias = params_ ? params_->route_safety_bias : 0.5f;
         route_.set_optimizer(opt);
+        dump_route_world(robot_pose.pos, raw_wps, wps, mission_.laps_remaining(), opt);
     }
 
     last_plan_failure_.clear();
@@ -814,6 +873,12 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     // the BODY and the nearest obstacle — the ESDF measures from the rotation centre, and reporting that
     // would flatter every run by one body radius.
     if (route_active_ and not mission_.running()) route_active_ = false;
+    // One MPPI row per cycle while a run is being measured. Gated on the mission so an idle agent does
+    // not write a file forever, and placed here — beside the other instrumentation — rather than inside
+    // the controller, which should not know that anything is being recorded.
+    if (mission_.running())
+        log_mppi_diagnostics(overlay_now_ms_, control_output, control_output.adv, base_speed_lin_);
+
     if (route_active_ and mission_.running())
     {
         // Progress is a scalar that only increases. Legs are read OFF it rather than driven by it.

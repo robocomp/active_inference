@@ -29,6 +29,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <atomic>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -151,6 +152,13 @@ struct MissionProfileSample
     float v_meas_mps = 0.f;     // latest MEASURED speed
     bool  v_meas_fresh = false; // false => held from a previous row; not signal
     int   lap = 0;              // which lap this instant belongs to
+    // WHERE ON THE ROUTE this instant happened, in metres of arc length, cumulative across laps.
+    // Without it the actuation stream can say a reversal HAPPENED but never WHERE, so no claim about
+    // which piece of geometry causes them can be tested — and one such claim (that the ~100 reversals
+    // per lap come from the sub-inscribed-radius pivots) survived unexamined until the optimiser removed
+    // three of the four pivots and the count did not move. -1 when the run is not driving a continuous
+    // route (a click target has no arc length), which is a fact about the run, not a missing value.
+    float route_s_m = -1.f;
 };
 
 // Everything about the AGENT that a metric computed later needs in order to know whether two runs are
@@ -295,6 +303,12 @@ public:
     void add_profile_sample(std::uint64_t t_ms, float adv, float side, float rot, float freshness);
     // Latest measured speed, pushed from the control thread; picked up by the next profile row.
     void note_measured_speed(float mps);
+    // Extra per-cycle diagnostic files to ARCHIVE beside the run's JSON and profile when it ends. They
+    // are written live to a fixed path (the writer cannot know the run's timestamp until it stops), so
+    // without this each run silently destroys the previous one's raw data — which is exactly what
+    // happened to the MPPI baseline the first time two runs were compared. The summary survived in a
+    // notebook; the rows did not.
+    void archive_on_stop(std::string path) { archive_.push_back(std::move(path)); }
     void set_csv_path(std::string path) { csv_path_ = std::move(path); }
     const std::string &csv_path() const { return csv_path_; }
 
@@ -308,6 +322,7 @@ private:
     std::string selected_;
     std::string csv_path_ = "mission_metrics.csv";
     std::string run_dir_ = "etc/runs";
+    std::vector<std::string> archive_;   // live diagnostic files copied into the run folder at stop
     MissionRunContext run_ctx_;
 
     // Profile buffer. Touched by the output thread (append) and the control thread (measured speed,
@@ -316,6 +331,13 @@ private:
     std::vector<MissionProfileSample> profile_;
     float pending_v_meas_ = 0.f;
     bool  pending_v_meas_fresh_ = false;
+    // Route arc length, written by the CONTROL thread in note_progress and read by the OUTPUT thread on
+    // the next profile row. Atomic rather than under profile_mutex_: it is one scalar on the control
+    // thread's hot path, and the actuation thread must never wait on that thread to emit a row.
+    // Deliberately NOT marked fresh/stale like v_meas: position along a route is a continuous quantity
+    // and the last known value is the best estimate of it, whereas a held SPEED reading would be a
+    // repeated measurement masquerading as a new one.
+    std::atomic<float> pending_route_s_{-1.f};
     // Bound: ~2.8 h at 20 Hz. A run left going overnight must not consume memory without limit.
     static constexpr std::size_t kMaxProfileRows = 200000;
     bool profile_truncated_ = false;

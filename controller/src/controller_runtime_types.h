@@ -75,6 +75,10 @@ struct ControllerParams
     // swamping everything — the same dilution failure the MPPI's G_info had, in a new place. Do not turn
     // this on again until the term balance is diagnosed and the corridor test is extended to a real tour.
     bool route_optimize = false;
+    // Route optimiser: speed (0) <-> safety (1). Trades PRECISION between the clearance preference and
+    // the curvature prior (see RouteOptimizerConfig::safety_bias). 0.5 is exactly the written weights, so
+    // it is inert until moved. Live from the UI slider; applies to the next route build or repair.
+    float route_safety_bias = 0.5f;
     float lambda_continuity = 0.0f;
     float continuity_rot_factor = 1.0f;
     // One row of continuous trajectory statistics per completed run is appended here. Empty disables the file (the console

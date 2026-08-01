@@ -331,6 +331,12 @@ void SpecificWorker::initialize()
 			}
 		});
 	};
+	gui.mission.on_safety_bias = [this](float bias)
+	{
+		// Through the command queue like every other GUI intent: the slider is moved on the Qt thread and
+		// the value is read by the control thread when it next builds or repairs a route.
+		enqueue_command([this, bias]() { params.route_safety_bias = std::clamp(bias, 0.f, 1.f); });
+	};
 	gui.mission.on_smooth = [this]()
 	{
 		enqueue_command([this]()
@@ -395,6 +401,11 @@ void SpecificWorker::initialize()
 	display_.initialize(obstacle_tracker_.lidar_buffer(), std::move(gui));
 	session_.mission().set_csv_path(params.mission_csv_path);
 	session_.mission().set_run_dir(params.mission_run_dir);
+	// Keep the per-cycle MPPI diagnostics with the run they describe. Written live to a fixed path and
+	// truncated by the next run, so without this a comparison destroys its own baseline.
+	session_.mission().archive_on_stop("mppi_diag.csv");
+	session_.mission().archive_on_stop("route_events.csv");
+	session_.mission().archive_on_stop("route_geometry.csv");
 	session_.mission().load(missions_path_);
 	refresh_mission_list();
 	update_custom_widget(std::nullopt);
@@ -747,6 +758,8 @@ void SpecificWorker::load_params()
 	load_optional_cast<double>("Controller.RouteSpacing", params.route_spacing_m);
 	load_optional_cast<double>("Controller.RouteSmoothing", params.route_smoothing_m);
 	load_optional("Controller.RouteOptimize", params.route_optimize);
+	load_optional_cast<double>("Controller.RouteSafetyBias", params.route_safety_bias);
+
 	load_optional_cast<double>("Controller.LambdaContinuity", params.lambda_continuity);
 	load_optional_cast<double>("Controller.ContinuityRotFactor", params.continuity_rot_factor);
 	path_controller_.params.lambda_continuity = std::max(0.f, params.lambda_continuity);
