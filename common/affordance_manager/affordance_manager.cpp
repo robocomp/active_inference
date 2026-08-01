@@ -145,7 +145,10 @@ void AffordanceManager::reset()
 
     current_affordance_id_ = 0;
     current_affordance_name_.clear();
-    selected_target_debug_report_.clear();
+    // NOT selected_target_debug_report_: it is a PRINT-dedup key, not affordance state. Clearing it here
+    // made [aff-select] re-print on every re-selection of the SAME affordance — and clear_current() runs
+    // once per cycle whenever there is no target (or a mission owns the base), so the "print only on
+    // change" intent degenerated into per-cycle spam.
     reset_observation();
     transition_to(State::Idle, "reset called");
 }
@@ -426,7 +429,10 @@ bool AffordanceManager::release_execution_claim(const std::shared_ptr<DSR::DSRGr
     last_managed_pending_ = true;
     current_affordance_id_ = 0;
     current_affordance_name_.clear();
-    selected_target_debug_report_.clear();
+    // NOT selected_target_debug_report_: it is a PRINT-dedup key, not affordance state. Clearing it here
+    // made [aff-select] re-print on every re-selection of the SAME affordance — and clear_current() runs
+    // once per cycle whenever there is no target (or a mission owns the base), so the "print only on
+    // change" intent degenerated into per-cycle spam.
     reset_observation();
     transition_to(State::Idle, "execution claim released", node.id(), node.name());
     return true;
@@ -675,7 +681,10 @@ void AffordanceManager::clear_current()
 {
     current_affordance_id_ = 0;
     current_affordance_name_.clear();
-    selected_target_debug_report_.clear();
+    // NOT selected_target_debug_report_: it is a PRINT-dedup key, not affordance state. Clearing it here
+    // made [aff-select] re-print on every re-selection of the SAME affordance — and clear_current() runs
+    // once per cycle whenever there is no target (or a mission owns the base), so the "print only on
+    // change" intent degenerated into per-cycle spam.
     reset_observation();
     transition_to(State::Idle, "clear_current called");
 }
