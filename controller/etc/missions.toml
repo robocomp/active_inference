@@ -1,0 +1,31 @@
+# controller missions — recorded by clicking in the 2D view. Room frame, metres.
+# A mission is a REPLAYABLE stimulus: keep these coordinates stable and two runs differ only by
+# what you changed in the controller. yaw = nan means "arrive, do not rotate".
+
+[[mission]]
+name = "complete tour"
+loops = 1
+x = [-0.0947, 0.5031, 1.0697, 1.3792, 3.0170, 3.3339, 3.4236, 2.5973, 1.7710, 1.1128, 0.5883, 0.0639, -0.5939, -1.0178, -1.8206, -3.1666, -3.4084, -2.9444, -2.9321, -2.9194, -3.0533, -2.7374, -2.3865, -1.2254, -1.0928, -1.0178, -0.4211, -0.5790, -0.5039, -0.4026]
+y = [-0.6390, 0.0409, 0.7264, 1.8246, 1.7384, -0.4217, -2.7954, -3.2599, -3.7243, -2.4528, -2.1238, -1.7948, -2.3395, -3.1586, -3.7683, -3.7739, -2.4769, -1.6769, -0.9803, -0.2843, 1.2985, 1.4389, -0.4913, 0.1030, 1.6587, 3.9657, 3.9657, 1.6713, 0.1988, -1.1231]
+yaw = [nan, nan, nan, nan, nan, nan, nan, nan, nan, nan, nan, nan, nan, nan, nan, nan, nan, nan, nan, nan, nan, nan, nan, nan, nan, nan, nan, nan, nan, nan]
+
+[[mission]]
+name = "dinning set"
+loops = 1
+x = [-0.1129, -1.5200, -3.1667, -3.3250, -3.1984, -2.1706, -1.4730, -0.8925, -0.4872, -0.0819]
+y = [-0.9837, -0.8233, -1.2667, -2.6759, -3.4359, -3.5403, -3.5299, -2.7380, -2.1336, -1.5293]
+yaw = [nan, nan, nan, nan, nan, nan, nan, nan, nan, nan]
+
+[[mission]]
+name = "kitchen"
+loops = 1
+x = [-0.0988, -1.9642, -3.2612, -3.3105, -2.7376, -2.7853, -0.0609]
+y = [-1.5703, -0.5827, 0.0282, 1.3369, 1.3369, 0.2547, -0.9750]
+yaw = [nan, nan, nan, nan, nan, nan, nan]
+
+[[mission]]
+name = "door"
+loops = 1
+x = [-0.0160, -0.8939, -1.0091, -0.5859, -0.5859, 0.0326]
+y = [-1.1015, 0.2235, 4.0690, 4.0365, 0.2604, -0.8138]
+yaw = [nan, nan, nan, nan, nan, nan]
