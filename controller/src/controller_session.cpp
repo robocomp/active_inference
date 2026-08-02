@@ -386,7 +386,9 @@ void ControllerSession::dump_route_world(const Eigen::Vector2f &start,
 void ControllerSession::log_mppi_diagnostics(std::uint64_t t_ms,
                                              const rc::TrajectoryController::ControlOutput &o,
                                              float commanded_adv, float measured_speed,
-                                             float path_kappa, float measured_rot)
+                                             float path_kappa, float measured_rot,
+                                             float pose_xy_std, float pose_theta_std,
+                                             const ControllerRobotPose &robot_pose)
 {
     if (!mppi_csv_open_)
     {
@@ -412,6 +414,23 @@ void ControllerSession::log_mppi_diagnostics(std::uint64_t t_ms,
                          "#   not mix them. This one is 0 in mppi mode (the law does not run).\n"
                          "#   With path_kappa this is the pair a gain self-tuner needs: under-gain shows\n"
                          "#   as e correlated with kappa, over-gain as e oscillating about zero.\n"
+                         "# model_dropped = room-frame MODEL points (furniture, room polygon) the ESDF\n"
+                         "#   dropped because the lidar already reported an obstacle there. STEADY means\n"
+                         "#   model and measurement agree — the normal case, NOT a fault. A sharp CHANGE\n"
+                         "#   means they disagree, i.e. the pose moved under the model, so this is a\n"
+                         "#   pose-jump detector that does not depend on the (blind) reported sigma.\n"
+                         "# pose_x/pose_y/pose_th = the RAW room-frame pose this cycle was computed from,\n"
+                         "#   logged so a localisation JUMP can be seen directly rather than inferred from\n"
+                         "#   its consequences. A jump is |d(pose)| far larger than the commanded speed can\n"
+                         "#   account for over the elapsed time. NOTE the covariance channel cannot show\n"
+                         "#   this: a localiser that snaps to a scan match is CONFIDENT about the new pose,\n"
+                         "#   so pose_xy_std stays small while the estimate teleports.\n"
+                         "# carrot_bear/carrot_dist = the STEERING TARGET both modes chase, AFTER\n"
+                         "#   clip_carrot_to_reachable. If this oscillates while cross-track is smooth, the\n"
+                         "#   target is moving and neither control law is at fault.\n"
+                         "# pose_xy_std / pose_theta_std = the localiser's own covariance, i.e. HOW NOISY\n"
+                         "#   THE POSE IS. -1 = the RT edge carried no covariance, so the value is absent,\n"
+                         "#   not zero. Lagged by one cycle (~100 ms) against a ~5 Hz localiser.\n"
                          "# bump_push = PD lateral bumper, signed, in [-1,1]: + = pushed RIGHT because\n"
                          "#   something is close on the LEFT. 0 = both sides clear (the term is one-sided,\n"
                          "#   so 0 means no deficit, NOT that the bumper is disabled). gap_l/gap_r are the\n"
@@ -423,7 +442,8 @@ void ControllerSession::log_mppi_diagnostics(std::uint64_t t_ms,
                          "g_goal,g_obs,g_vel,g_smooth,g_lat,g_cbf,n_collisions,"
                          "cmd_adv,cmd_rot,meas_speed,min_esdf,explore,p_free,steer_conc,side_asym,"
                          "sg_trig,gate_scale,gate_horizon,gate_min_esdf,gate_hard_stop,gate_hard_coll,"
-                         "pd_cross_err_m,path_kappa,meas_rot,bump_push,gap_l,gap_r\n";
+                         "pd_cross_err_m,path_kappa,meas_rot,bump_push,gap_l,gap_r,pose_xy_std,"
+                         "pose_theta_std,carrot_bear,carrot_dist,pose_x,pose_y,pose_th,model_dropped\n";
         mppi_csv_open_ = true;
     }
     if (!mppi_csv_.is_open()) return;
@@ -438,7 +458,11 @@ void ControllerSession::log_mppi_diagnostics(std::uint64_t t_ms,
               << o.gate_horizon_s << ',' << o.gate_min_esdf << ','
               << (o.gate_hard_stop ? 1 : 0) << ',' << (o.gate_hard_collision ? 1 : 0) << ','
               << o.cross_track_m << ',' << path_kappa << ',' << measured_rot << ','
-              << o.pd_bumper_push << ',' << o.pd_gap_left_m << ',' << o.pd_gap_right_m << '\n';
+              << o.pd_bumper_push << ',' << o.pd_gap_left_m << ',' << o.pd_gap_right_m << ','
+              << pose_xy_std << ',' << pose_theta_std << ','
+              << o.carrot_bearing_rad << ',' << o.carrot_dist_m << ','
+              << robot_pose.pos.x() << ',' << robot_pose.pos.y() << ',' << robot_pose.theta << ','
+              << o.esdf_model_dropped << '\n';
 }
 
 void ControllerSession::log_route_event(const char *event, bool ok, std::uint64_t t_ms,
@@ -1141,10 +1165,15 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     // the BODY and the nearest obstacle — the ESDF measures from the rotation centre, and reporting that
     // would flatter every run by one body radius.
     if (route_active_ and not mission_.running()) route_active_ = false;
-    // One MPPI row per cycle while a run is being measured. Gated on the mission so an idle agent does
-    // not write a file forever, and placed here — beside the other instrumentation — rather than inside
-    // the controller, which should not know that anything is being recorded.
-    if (mission_.running())
+    // One row per cycle while the robot is being DRIVEN — not only while a MISSION runs.
+    // ★It used to be gated on mission_.running(), which silently switched off cross_track, the safety
+    // gate, the bumper and path_kappa for every affordance and click target: the file simply stopped
+    // being written and kept the previous mission's contents, timestamped an hour earlier. Asked to
+    // diagnose a bad affordance trajectory, the log on disk described a different run entirely — the
+    // same absent-vs-stale confusion that band_diag.csv had, in the other direction.
+    // is_active() is the honest condition: there is a path being followed. It still keeps an idle agent
+    // from writing forever, which is all the mission gate was for.
+    if (path_controller.is_active())
     {
         // Signed curvature at the robot's own projection on the route. -999 marks "no continuous
         // route" rather than 0, which is a real curvature (a straight) — an absent value and a
@@ -1154,8 +1183,15 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         // them is wrong — they read the same spline at the same arc length.
         const float kappa_here = (route_active_ and route_.valid())
                                ? route_.spline().curvature_at(route_.progress()) : -999.f;
+        // Localisation sigma, so "is the pose noisy right now" is a MEASUREMENT and not an inference.
+        // It only lived in profile.csv, which is gated on a mission running, so during affordance
+        // driving — the mode being developed — it was invisible exactly when it was being blamed.
+        // ★One cycle old: apply_uncertainty_speed_limit runs later in this same function, so this is
+        // the previous cycle's read. The localiser publishes at ~5 Hz, so a 100 ms lag is well inside
+        // one update and cannot change any conclusion drawn from it.
+        const auto ud = motion_commander.last_uncertainty_diag();
         log_mppi_diagnostics(overlay_now_ms_, control_output, control_output.adv, base_speed_lin_,
-                             kappa_here, room_vel_.omega);
+                             kappa_here, room_vel_.omega, ud.xy_std_m, ud.theta_std_rad, robot_pose);
         // CAPTURE THE HARDEST CYCLE OF THE RUN for offline replay (tools/mppi_bench). "Hardest" is where
         // the controller had the least room to choose: every rollout infeasible, or the tightest the
         // horizon ever got. A snapshot from open floor proves nothing — measured, a cost term that is

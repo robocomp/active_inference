@@ -856,6 +856,19 @@ void SpecificWorker::load_params()
 	// walls; this keeps the BODY off them when the tracker's own error puts it there anyway.
 	load_optional_cast<double>("Controller.PdBumperGain", path_controller_.params.pd_bumper_gain);
 	load_optional_cast<double>("Controller.PdBumperDist", path_controller_.params.pd_bumper_dist_m);
+	// Carrot rate limit — see Params::carrot_rate_limit_factor. Bounds how far the STEERING TARGET may
+	// move per cycle, so a localisation jump cannot be converted straight into a steering command.
+	load_optional_cast<double>("Controller.CarrotRateLimitFactor", path_controller_.params.carrot_rate_limit_factor);
+	// Carrot lookahead. It was never config-exposed and ran on the 2.0 m default, but MEASURED on this
+	// apartment the route only supports ~1 m: clip_carrot_to_reachable binds on 75% of cycles and the
+	// achieved carrot_dist has p50 1.06 m. So the clip — not this number — was setting the lookahead,
+	// every cycle, through a test that flips as curvature and the live ESDF shift. Asking for a
+	// lookahead the geometry can actually give leaves the clip rarely binding.
+	load_optional_cast<double>("Controller.CarrotLookahead", path_controller_.params.carrot_lookahead);
+	// How close a lidar return must be for a room-frame MODEL point (furniture, room polygon) to be
+	// treated as already measured and dropped from the ESDF. Stops a pose jump painting a PHANTOM wall
+	// alongside the real one — see build_esdf.
+	load_optional_cast<double>("Controller.ModelMergeRadius", path_controller_.params.model_merge_radius_m);
 	{
 		std::string mode = "mppi";
 		load_optional("Controller.ControlMode", mode);

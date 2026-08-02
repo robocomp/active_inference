@@ -65,6 +65,21 @@ public:
         // usually through open floor. This is a FIDELITY limit (how much of the route may be skipped),
         // not a safety one, which is why it is a stated allowance rather than derived.
         float carrot_max_route_cut_m = 0.15f;
+        // ── CARROT RATE LIMIT ────────────────────────────────────────────────────────────────────
+        // How far the carrot may move IN THE ROOM FRAME in one control cycle, as a multiple of the
+        // distance the robot itself could have travelled (max_adv * dt). The carrot slides along the
+        // route at roughly the robot's own speed, so anything far above that is not the carrot
+        // advancing — it is the PROJECTION jumping because the pose jumped.
+        // ★Measured 2026-08-02: room_concept fails its odometry prediction, snaps to a scan match, and
+        // the pose moves further in one cycle than the robot can drive — 3.0% of cycles show a
+        // pose-differenced speed above the commanded LIMIT. The carrot then teleported up to 1.79 m in
+        // a single cycle and its bearing swung +-58 deg (1 sd), which both control modes faithfully
+        // steered at. That is why the weave survived replacing the entire controller.
+        // ★This bounds the CARROT's contribution. It cannot undo the pose jump's direct effect on the
+        // geometry — if the estimate moves 0.5 m sideways, the bearing to a perfectly steady carrot
+        // changes too. The real fix is that the localiser should not jump; this stops the steering
+        // target from amplifying it. 0 disables.
+        float carrot_rate_limit_factor = 3.0f;
         bool  carrot_curve_adaptation_enabled = false; // temporary inhibit switch for curve-based carrot adaptation
         float carrot_curve_lookahead_min = 0.9f;   // minimum lookahead used only in tight curves
         float carrot_curve_min_heading_change = 0.08f; // rad; below this, path is considered straight
@@ -258,6 +273,12 @@ public:
         float esdf_init_distance = 9999.0f;     // initial large value used during ESDF passes
         float esdf_diag_step = 1.414f;          // diagonal neighbor cost in grid units
         float esdf_grad_min_norm = 1e-4f;       // gradient norm threshold to normalize ESDF gradient
+        // How close a lidar return must be for a room-frame MODEL point (furniture, room polygon) to be
+        // considered already measured and therefore dropped. It is the scale of pose disagreement you are
+        // willing to attribute to LOCALISATION rather than to a genuine second obstacle — measured
+        // lateral pose snaps are ~75 mm, so 0.12 m covers them with margin while still admitting a real
+        // object 12 cm from a wall. 0 restores the old union behaviour (model always painted).
+        float model_merge_radius_m = 0.12f;
         float esdf_self_filter_radius = 0.40f;  // ignore lidar returns this close to robot center
         float esdf_self_filter_half_width = 0.32f; // ignore returns inside the robot body width
         float esdf_self_filter_front = 0.42f;   // ignore returns inside the robot body forward extent
@@ -355,6 +376,13 @@ public:
         // Lateral bumper: signed push in [-1,1] (+ = pushed right, i.e. something close on the left)
         // and the two body-to-obstacle gaps it was computed from. Recorded because "it still clips the
         // wall" and "the bumper never engaged" look identical without them.
+        // The STEERING TARGET itself, in the robot frame. Both control modes steer at the carrot, and
+        // it is passed through clip_carrot_to_reachable against the LIVE ESDF every cycle — so a clip
+        // that engages and disengages between cycles moves the target the robot is chasing, and nothing
+        // recorded it. The weave survived replacing the whole controller, so the cause is in something
+        // SHARED by both, and this is the main shared thing that was invisible.
+        float carrot_bearing_rad = 0.f;   // atan2(x, y): 0 = dead ahead, + = to the right
+        float carrot_dist_m = 0.f;        // after clipping — a chattering clip shows up here
         float pd_bumper_push = 0.f;
         float pd_gap_left_m = -1.f, pd_gap_right_m = -1.f;
 
@@ -363,6 +391,12 @@ public:
         // consumer tell whether an obstacle that IS in the cloud got dropped before the ESDF.
         int   n_esdf_points = 0;
         float nearest_esdf_point_m = -1.f;   // -1 when no points survived the self-filter
+        // Room-frame MODEL points (furniture, room polygon) dropped this build because the lidar already
+        // reported an obstacle within model_merge_radius_m. Steady = model and measurement AGREE, which
+        // is the normal case. A sharp CHANGE means they have started to disagree — i.e. the pose moved
+        // under the model. That makes this a pose-jump detector independent of the reported covariance,
+        // which is measurably blind to jumps (sigma ratio 1.12 at jumps, 2026-08-02).
+        int   esdf_model_dropped = 0;
 
         // ESS diagnostics for UI
         float ess = 0.f;          // current ESS value
@@ -572,6 +606,10 @@ public:
     // What the room-boundary injection did on the last build_esdf: how many cells it contributed, and
     // whether it was rejected as implausible. Recorded rather than printed so it can be compared per run.
     int  esdf_boundary_cells() const { return esdf_boundary_cells_; }
+    /// Room-frame model points dropped because the lidar already reported an obstacle there. A large
+    /// number is not a fault — it means the model and the measurement agree, which is the normal case.
+    /// It rising sharply means they have started to DISAGREE, i.e. the pose has moved under the model.
+    int  esdf_model_points_dropped() const { return esdf_model_points_dropped_; }
     bool esdf_boundary_rejected() const { return esdf_boundary_rejected_; }
 
     /// Body reach toward whatever is nearest RIGHT NOW (robot frame, heading 0) — the number to
@@ -591,6 +629,8 @@ private:
     ControlMode control_mode_ = ControlMode::MPPI;
     // Where the robot projects onto the path, from the last compute_carrot. Kept because compute_carrot
     // already computes it and the tracker needs it; recomputing would risk a second, disagreeing answer.
+    Eigen::Vector2f last_carrot_room_ = Eigen::Vector2f::Zero();
+    bool  has_last_carrot_ = false;      // reset with the path: a new route legitimately moves the carrot
     Eigen::Vector2f last_path_proj_room_ = Eigen::Vector2f::Zero();
     bool last_path_proj_valid_ = false;
     std::vector<Eigen::Vector2f> path_room_;
@@ -635,6 +675,7 @@ private:
     // Cells the boundary pass turned on this cycle — kept so a rejected boundary can be rolled back
     // without erasing obstacles the LiDAR or furniture had already marked at the same cells.
     std::vector<int> boundary_cells_;
+    int  esdf_model_points_dropped_ = 0;   // model points deferred to the lidar this build
     int  esdf_boundary_cells_ = 0;
     bool esdf_boundary_rejected_ = false;
 

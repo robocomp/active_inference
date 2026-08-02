@@ -205,6 +205,7 @@ void TrajectoryController::reset_mppi_state(const std::vector<Eigen::Vector2f>& 
     has_prev_vel_ = false;
     smoothed_vel_ = Eigen::Vector3f::Zero();
     carrot_seg_hint_ = 0;   // a fresh path starts at the robot; the caller re-seeds it if it does not
+    has_last_carrot_ = false;   // a NEW route may legitimately put the carrot somewhere else entirely
 
     // Initialize MPPI state
     adaptive_K_ = active_params_.num_samples;
@@ -565,6 +566,7 @@ TrajectoryController::ControlOutput TrajectoryController::compute(
     // ESDF-input diagnostics: count the raw points that survived the self-filter and the nearest one.
     // If something is in the cloud yet nearest_esdf_point_m stays large, it was dropped before the ESDF.
     out.n_esdf_points = static_cast<int>(lidar_points.size());
+    out.esdf_model_dropped = esdf_model_points_dropped_;
     {
         float nearest = std::numeric_limits<float>::infinity();
         for (const auto &p : lidar_points)
@@ -722,11 +724,48 @@ TrajectoryController::ControlOutput TrajectoryController::compute(
     // The rule: advance the carrot only as far as the ROUTE FRAGMENT LEFT BEHIND still admits the body.
     // Tested against the LIVE ESDF (so it sees dynamic obstacles the static grid does not) with the
     // footprint's real reach at the chord heading — the same predicate the obstacle cost uses.
-    const Eigen::Vector2f carrot_room = compute_carrot(robot_pose);
-    const Eigen::Vector2f carrot_robot = clip_carrot_to_reachable(room_to_robot(carrot_room, robot_pose));
+    const Eigen::Vector2f carrot_room_raw = compute_carrot(robot_pose);
+    Eigen::Vector2f carrot_robot = clip_carrot_to_reachable(room_to_robot(carrot_room_raw, robot_pose));
+
+    // ── RATE-LIMIT THE CARROT, AFTER THE CLIP ────────────────────────────────────────────────────
+    // ★It must be AFTER. A first version limited carrot_room BEFORE clip_carrot_to_reachable and did
+    // nothing measurable: the per-cycle step stayed at mean 0.147 m / max 1.794 m against a 0.21 m cap,
+    // because the jump is INTRODUCED by the clip, not by the projection. The clip re-tests the route
+    // fragment against the LIVE ESDF every cycle and yanks the carrot in — measured, it fires on 75% of
+    // cycles and collapses the carrot under 0.5 m on 15% — so when that test flickers the target moves
+    // 1.7 m in one cycle. Limiting upstream of the thing that jumps limits nothing.
+    //
+    // ASYMMETRIC ON PURPOSE. Pulling the carrot IN is the safety direction (the clip has just decided
+    // the route fragment beyond here is not admissible), so that is allowed to happen immediately and
+    // in full. Only the RELEASE is rate-limited. Chatter needs both directions — pull in, let out, pull
+    // in — so damping the release alone kills the oscillation without ever delaying a safety pull-in.
+    {
+        const Eigen::Vector2f carrot_room_now = robot_pose * carrot_robot;
+        if (active_params_.carrot_rate_limit_factor > 0.f and has_last_carrot_)
+        {
+            const float step_max = std::max(0.02f, active_params_.carrot_rate_limit_factor
+                                                 * active_params_.max_adv * active_params_.trajectory_dt);
+            const Eigen::Vector2f d = carrot_room_now - last_carrot_room_;
+            const float n = d.norm();
+            // Closer to the robot than last cycle's carrot ⇒ a pull-in ⇒ never delayed.
+            const bool pulling_in = carrot_robot.norm()
+                                  < (room_to_robot(last_carrot_room_, robot_pose)).norm();
+            if (n > step_max and not pulling_in)
+            {
+                const Eigen::Vector2f limited = last_carrot_room_ + d * (step_max / n);
+                carrot_robot = room_to_robot(limited, robot_pose);
+            }
+        }
+        last_carrot_room_ = robot_pose * carrot_robot;
+        has_last_carrot_ = true;
+    }
     out.carrot_room = robot_pose * carrot_robot;   // report the CLIPPED carrot: the viewer must show
                                                    // where the robot is actually being pulled
     out.current_wp_index = wp_index_;
+    // Recorded for BOTH modes, before either control law runs, so the steering target can be compared
+    // against what each mode did with it.
+    out.carrot_bearing_rad = std::atan2(carrot_robot.x(), carrot_robot.y());
+    out.carrot_dist_m = carrot_robot.norm();
 
     // ---- PD carrot-follower mode: simple proportional-derivative controller ----
     if (control_mode_ == ControlMode::PD)
@@ -2580,6 +2619,35 @@ void TrajectoryController::build_esdf(const std::vector<Eigen::Vector3f>& lidar_
             occ[cj * N + ci] = 1;
     }
 
+    // ── WHAT THE LIDAR ACTUALLY MEASURED, kept separate from what the room MODEL asserts ──────────
+    // This grid mixes two sources with different frames of truth. Lidar points are EGOCENTRIC: they are
+    // already in the robot frame and a pose error cannot move them. The furniture and the room polygon
+    // are room-frame MODEL, transformed in below with robot_pose.inverse() — so a pose error moves them,
+    // and a pose JUMP slides them sideways relative to the lidar returns of the very same walls.
+    // Measured 2026-08-02: the localiser snaps laterally by 75 mm on ~7% of updates. Taking the union of
+    // two disagreeing wall sets then paints a PHANTOM wall alongside the real one, narrowing the apparent
+    // corridor by up to that offset and moving it every time the pose jumps. Everything downstream reads
+    // it: clip_carrot_to_reachable, the safety gate, the PD bumper's side probes, the band's live field.
+    //
+    // The model exists to fill what the lidar CANNOT see (walls vanish at grazing incidence and close
+    // range) — not to restate what it already reports. So injection now defers to the measurement: a
+    // model point is dropped where the lidar has already put an obstacle nearby. Where they agree it was
+    // adding nothing; where they disagree the lidar is the one that cannot be wrong about the robot frame.
+    const std::vector<int> lidar_occ = occ;
+    const int merge_cells = std::max(0, static_cast<int>(std::lround(
+                                active_params_.model_merge_radius_m / std::max(res, 1e-3f))));
+    const auto lidar_says_obstacle_near = [&](int ci, int cj)
+    {
+        for (int dj = -merge_cells; dj <= merge_cells; ++dj)
+            for (int di = -merge_cells; di <= merge_cells; ++di)
+            {
+                const int i = ci + di, j = cj + dj;
+                if (i >= 0 && i < N && j >= 0 && j < N && lidar_occ[j * N + i]) return true;
+            }
+        return false;
+    };
+    esdf_model_points_dropped_ = 0;
+
     // Inject static obstacle points (furniture) — transform from room frame to robot frame
     if (!static_obstacle_points_room_.empty())
     {
@@ -2590,7 +2658,10 @@ void TrajectoryController::build_esdf(const std::vector<Eigen::Vector3f>& lidar_
             const int ci = static_cast<int>((p_robot.x() + half) / res);
             const int cj = static_cast<int>((p_robot.y() + half) / res);
             if (ci >= 0 && ci < N && cj >= 0 && cj < N)
+            {
+                if (lidar_says_obstacle_near(ci, cj)) { ++esdf_model_points_dropped_; continue; }
                 occ[cj * N + ci] = 1;
+            }
         }
     }
 
@@ -2623,7 +2694,12 @@ void TrajectoryController::build_esdf(const std::vector<Eigen::Vector3f>& lidar_
             const int ci = static_cast<int>((p_robot.x() + half) / res);
             const int cj = static_cast<int>((p_robot.y() + half) / res);
             if (ci >= 0 && ci < N && cj >= 0 && cj < N)
+            {
+                // Same deference as the furniture above: where the lidar already reports a wall, the
+                // model must not paint a second one offset by the pose error. See build_esdf's header.
+                if (lidar_says_obstacle_near(ci, cj)) { ++esdf_model_points_dropped_; continue; }
                 if (!occ[cj * N + ci]) { occ[cj * N + ci] = 1; boundary_cells_.push_back(cj * N + ci); }
+            }
         }
         // A room polygon is ONE input, and this stack has already been bitten once by a bad one (the
         // grid planner saw 27018 of 27018 cells "outside" and refused to plan anywhere). A boundary is

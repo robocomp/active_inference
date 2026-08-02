@@ -101,6 +101,20 @@ ClearancePref = 0.9
 # penalty goes from 0.12 to 0.30. Measured body clearance was 0.117 min / 0.128 p05 against a 0.175 m
 # target; expect roughly 0.19 against the new 0.275 m target. Verify with p05_clearance_m, not min.
 ComfortStandoff = 0.6
+# ── MODEL-vs-MEASUREMENT MERGE IN THE MPPI's ESDF ──
+# That grid mixes two sources with different frames of truth. Lidar points are EGOCENTRIC — already in
+# the robot frame, and no pose error can move them. Furniture and the room polygon are room-frame MODEL,
+# transformed in with robot_pose.inverse(), so a pose error moves them and a pose JUMP slides them
+# sideways relative to the lidar returns of the SAME walls.
+# ★Measured 2026-08-02: the localiser snaps laterally by ~75 mm on ~7% of pose updates (peak 173 mm),
+# with NO rise in reported sigma. Taking the union of two disagreeing wall sets paints a PHANTOM wall
+# beside the real one, narrowing the apparent corridor and moving it on every jump — and everything
+# downstream reads that field: clip_carrot_to_reachable, the safety gate, the PD bumper's side probes,
+# the band's live field, min_esdf.
+# The model is there to fill what the lidar CANNOT see (walls vanish at grazing incidence and close
+# range), not to restate what it already reports — so a model point within this radius of a lidar return
+# is dropped. 0 restores the old union behaviour.
+ModelMergeRadius = 0.12
 # ── Cross-cycle control continuity (the smoothness term the objective was missing) ──
 # Penalises how far a rollout's first control sits from the command ACTUALLY EXECUTED last cycle,
 # normalised by the kinematic limits — so a full-scale reversal costs exactly LambdaContinuity per
@@ -180,6 +194,34 @@ PdCrossTrackSoft = 0.30
 # are indistinguishable without them.
 PdBumperGain = 1.0
 PdBumperDist = 0.25
+# ── CARROT RATE LIMIT ──
+# How far the STEERING TARGET may move in the room frame per cycle, as a multiple of the distance the
+# robot itself could have driven (MaxAdvSpeed * dt). The route does not move and the carrot slides
+# along it at about the robot's own speed, so a much larger step is the PROJECTION jumping because the
+# POSE jumped — not the carrot advancing.
+# ★Measured 2026-08-02: room_concept fails its odometry prediction and snaps to a scan match. 3.0% of
+# cycles show a pose-differenced speed ABOVE the commanded limit (max 1.02 rad/s against MaxRotSpeed
+# 0.8), and around those cycles the carrot moved ~3x its baseline — up to 1.79 m in ONE cycle, bearing
+# swinging +-58 deg (1 sd), correlating +0.78 with cmd_rot which it LEADS by 0.2 s. Both control modes
+# steer at this carrot, which is why the weave survived replacing MPPI with the PD tracker entirely.
+# ★This bounds the CARROT's amplification. It cannot undo a pose jump's direct effect on the geometry;
+# the real fix is that the localiser should not jump. 0 disables.
+CarrotRateLimitFactor = 3.0
+# ── CARROT LOOKAHEAD ──
+# How far ahead on the route the steering target sits. NOT previously exposed — it ran on the 2.0 m
+# built-in default. ★Measured 2026-08-02 on this apartment: clip_carrot_to_reachable binds on 75% of
+# cycles and the ACHIEVED carrot distance has p50 1.06 m, collapsing under 0.5 m on 16%. So the clip,
+# not this number, was setting the lookahead — every cycle, via a test that flips as route curvature
+# and the live ESDF shift underneath it, bouncing the target between clipped-short and released-long.
+# Both control modes steer at that target, which is why the weave survived replacing MPPI with the PD
+# tracker. Asking for a lookahead the geometry can actually supply leaves the clip rarely binding.
+# ★Pure pursuit's standing offset on a curve grows with the SQUARE of this, so shortening it also
+# reduces corner-cutting — at the cost of a twitchier, less anticipatory line. Watch cross_track_rms.
+# ★TRIED AND REVERTED 2026-08-02: 2.0 -> 1.1 on the hypothesis that the clip was setting the lookahead
+# and chattering. It did what it says — carrot_dist p50 2.0->1.05, step max 1.767->0.890 — and the
+# WEAVE DID NOT MOVE: carrot_bear sd 1.035->1.003, cmd_rot sd 0.618->0.595. Hypothesis falsified; back
+# to the value every run today used. Left exposed because it should have been configurable anyway.
+CarrotLookahead = 2.0
 
 # ── LOCAL ELASTIC BAND (stage 1: the route deforms, the MPPI still follows it) ──
 # RouteOptimize above runs ONCE at install against GridPlanner's STATIC room-frame EDT (polygons only).
