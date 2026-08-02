@@ -111,6 +111,23 @@ public:
         // 30x sweep of mppi_lambda changed the closed-loop result by nothing at all. This exists to ask
         // one question: is the range floor amplifying a term's instability, or merely reporting it?
         bool  lambda_fixed = false;
+        // ── "NAV2-STYLE" SCORING (default off) ────────────────────────────────────────────────────
+        // Nav2's MPPI is a configuration that demonstrably works, and it is coherent in a way ours is
+        // not: every critic is bounded and O(1), the temperature is a small FIXED number (0.3), and the
+        // collision cost is a huge finite value. Those three facts are one mechanism — exp(-1e5/0.3) is
+        // zero, so a big collision cost IS hard rejection. Copying any one of them alone breaks: our
+        // measured cost spread is ~1400, so their lambda would put ESS at 0.03 (measured: 23-37 rotation
+        // flips per 10 s and 0.93 m covered in ten seconds).
+        // So this flag changes the SCALES, which is the precondition for a small fixed lambda to mean
+        // anything: every per-step term is clamped to obstacle_cost_cap, and the accumulated terms are
+        // divided by the number of steps actually simulated, so a total is a per-step average and does
+        // not grow with the horizon. Set with lambda_fixed + a small mppi_lambda to get nav2's regime.
+        bool  bounded_costs = false;
+        // Nav2 has no structured exploration seeds — only i.i.d. noise around the warm start. Ours
+        // inject 6 fixed wide-angle turns, and the closed-loop trace showed the winning seed alternating
+        // between those and the random ones (28 changes in 59 cycles), with the commanded rotation
+        // disagreeing in SIGN with the best rollout. They are a manufactured second mode.
+        bool  enable_injection_seeds = true;
         float ess_smoothing = 0.25f;       // EMA alpha for ESS (faster response to drops)
         float ess_initial_ratio = 0.5f;    // initial ESS / K used when a new path starts
 
@@ -260,6 +277,11 @@ public:
         float pd_Kp_rot = 2.0f;         // proportional gain for angular error
         float pd_Kd_rot = 0.3f;         // derivative gain for angular error
         float pd_speed_cos_power = 1.0f; // adv = max_adv * cos^power(angle_err)
+        // Cross-track feedback for the PD tracker (Stanley's second term). 0 disables it, which is pure
+        // pursuit and cuts corners — see compute_pd. Units: the gain is 1/s (it divides a metre by a
+        // speed), the softening constant is m/s and only sets how the term behaves near a standstill.
+        float pd_cross_track_gain = 1.0f;
+        float pd_cross_track_soft_mps = 0.30f;
 
         // Visualization
 
@@ -282,6 +304,16 @@ public:
         float side = 0.f;
         float rot  = 0.f;
         bool  safety_guard_triggered = false;
+        // ── Safety-gate record, per cycle ──
+        // In MPPI mode the gate is a backstop behind a controller that scores its own rollouts. In PD
+        // mode it is the ONLY thing between the tracker and an obstacle, and none of it was observable:
+        // safety_guard_triggered is a bool and the run JSON keeps only a total, so a lap the gate saved
+        // forty times and a lap where it never fired read identically. These say what it actually did.
+        float gate_speed_scale = 1.f;    // fraction of the commanded adv the gate allowed through (1 = untouched)
+        float gate_horizon_s = 0.f;      // lookahead it used — speed-dependent, so it varies per cycle
+        float gate_min_esdf = -1.f;      // worst clearance along the PREDICTED arc (-1 = gate did not run)
+        bool  gate_hard_stop = false;    // even adv=0 was unsafe ⇒ fell through to rotate-away
+        bool  gate_hard_collision = false;
         bool  goal_reached = false;
         // Position reached; rotating IN PLACE to the target facing yaw (arrival maneuver, adv=side=0).
         // goal_reached is still false until aligned. Consumers must NOT treat this as a wedge — it makes
@@ -293,6 +325,10 @@ public:
         // arrival is actually waiting on, instead of it only being inferable from the robot's behaviour.
         std::optional<float> goal_yaw_err_rad;
         float min_esdf = 0.f;
+        // Signed lateral offset of the PATH in the robot frame (+ = path lies to the right, so the robot
+        // has drifted left). The session computes a cross-track RMS for the run summary, but nothing
+        // recorded it per cycle, so "it wanders off the route" could not be turned into a number.
+        float cross_track_m = 0.f;
 
         // ESDF-input diagnostics: how many RAW lidar points actually reached build_esdf this cycle
         // (after the self-filter) and the nearest of them to the robot center (robot frame). Lets a
@@ -363,6 +399,20 @@ public:
     /// with its own clearance heuristic and could undo the feasibility pass, and re-smoothing a C2 curve
     /// with a C1 spline would put back the curvature steps the whole exercise removes.
     void set_path_presmoothed(const std::vector<Eigen::Vector2f>& path_room);
+
+    /// Swap the path GEOMETRY without resetting the follower — for a continuously deformed route
+    /// (the local elastic band), which hands over a slightly different curve every cycle.
+    ///
+    /// set_path/set_path_presmoothed both go through reset_mppi_state, which is correct for a NEW route
+    /// and catastrophic at control rate: it clears prev_optimal_ (the warm start the whole sampler leans
+    /// on), the adaptive lambda/K/T, smoothed_vel_, last_cmd_valid_ and carrot_seg_hint_. Calling it
+    /// every cycle would restart the optimisation from scratch 10 times a second.
+    ///
+    /// SAFE ONLY FOR A DEFORMATION, not a re-route: the caller must guarantee the new curve is the same
+    /// route, still starts behind the robot, and has not moved under it — which is what freezing the
+    /// control points before the robot buys. carrot_seg_hint_ is kept and merely clamped, because with a
+    /// frozen prefix the arc length behind the robot is unchanged, so the index still means what it did.
+    void update_path_geometry(const std::vector<Eigen::Vector2f>& path_room);
     // Optional room-frame heading (atan2(dy,dx) direction) the robot's forward axis
     // should face once the goal position is reached. Empty = legacy behaviour:
     // declare the goal reached immediately on arrival, no final rotation.
@@ -485,6 +535,11 @@ public:
     /// the robot is reversing and rotating out from under it. Treat readings taken during
     /// such a manoeuvre as a snapshot of the situation at its START, not as live clearance.
     float clearance_at(float rx, float ry) const { return query_esdf(rx, ry); }
+    /// Gradient of the same field (robot frame), for a caller that wants to DESCEND it rather than
+    /// merely read it — the local elastic band. Outside the grid clearance_at returns
+    /// esdf_unknown_distance (100 m), so a one-sided clearance term sees no deficit and therefore no
+    /// force: the band cannot be pulled by geometry the live field does not cover.
+    Eigen::Vector2f clearance_gradient_at(float rx, float ry) const { return query_esdf_gradient(rx, ry); }
 
     // What the room-boundary injection did on the last build_esdf: how many cells it contributed, and
     // whether it was rejected as implausible. Recorded rather than printed so it can be compared per run.
@@ -506,6 +561,10 @@ private:
 
     bool active_ = false;
     ControlMode control_mode_ = ControlMode::MPPI;
+    // Where the robot projects onto the path, from the last compute_carrot. Kept because compute_carrot
+    // already computes it and the tracker needs it; recomputing would risk a second, disagreeing answer.
+    Eigen::Vector2f last_path_proj_room_ = Eigen::Vector2f::Zero();
+    bool last_path_proj_valid_ = false;
     std::vector<Eigen::Vector2f> path_room_;
     int wp_index_ = 0;
     std::optional<float> goal_facing_yaw_;

@@ -126,6 +126,48 @@ std::vector<float> RouteFollower::anchor_polyline_arclengths() const
     return out;
 }
 
+// Arc length of every waypoint. Projected in ORDER with a forward-only hint so a self-crossing route
+// cannot bind a waypoint to the wrong passage — this tour crosses itself, so a global nearest-point
+// search would do exactly that. ONE place computes these, shared by the fit and the band, so the arc
+// lengths can never drift apart from the geometry they describe.
+void RouteFollower::rederive_waypoint_arclengths()
+{
+    wp_s_.clear();
+    wp_s_.reserve(wp_pos_.size());
+    float s_hint = 0.f;
+    for (const auto &w : wp_pos_)
+    {
+        s_hint = spline_.project(w, s_hint, 8.0f);
+        wp_s_.push_back(s_hint);
+    }
+}
+
+RouteOptimizerReport RouteFollower::deform_window(
+    std::function<float(const Eigen::Vector2f &)> distance,
+    std::function<Eigen::Vector2f(const Eigen::Vector2f &)> distance_gradient,
+    std::size_t freeze_before, std::size_t freeze_after, int iterations)
+{
+    // The band holds the SAME beliefs the route was built with — bending prior, clearance preference,
+    // anchor likelihood, gauge — and differs only in the field it measures them against and in being
+    // restricted to a window. Re-deriving the weights here would let the driven geometry and the authored
+    // geometry answer to two different objectives, which is how a route silently stops being the tour.
+    if (not spline_.valid() or not distance) return RouteOptimizerReport{};
+    RouteOptimizerConfig opt = opt_;
+    opt.enabled = true;
+    opt.distance = std::move(distance);
+    opt.distance_gradient = std::move(distance_gradient);
+    opt.anchors = wp_pos_;
+    opt.anchor_s = anchor_polyline_arclengths();   // polyline metric — see fit_from_polyline
+    opt.freeze_before = freeze_before;
+    opt.freeze_after = freeze_after;
+    opt.iterations = std::max(1, iterations);
+    opt.verbose = false;                           // this runs at control rate; per-cycle logging is noise
+
+    const RouteOptimizerReport rep = spline_.deform(opt);
+    if (rep.ran) rederive_waypoint_arclengths();
+    return rep;
+}
+
 bool RouteFollower::fit_from_polyline(const FreeFn &is_free, std::size_t freeze_before,
                                      std::size_t freeze_after)
 {
@@ -155,17 +197,7 @@ bool RouteFollower::fit_from_polyline(const FreeFn &is_free, std::size_t freeze_
 
     if (not spline_.build(poly_, spacing_, is_free, smoothing_, popt)) return false;
 
-    // Arc length of every waypoint. Projected in ORDER with a forward-only hint so a self-crossing route
-    // cannot bind a waypoint to the wrong passage — this tour crosses itself, so a global nearest-point
-    // search would do exactly that.
-    wp_s_.clear();
-    wp_s_.reserve(wp_pos_.size());
-    float s_hint = 0.f;
-    for (const auto &w : wp_pos_)
-    {
-        s_hint = spline_.project(w, s_hint, 8.0f);
-        wp_s_.push_back(s_hint);
-    }
+    rederive_waypoint_arclengths();
     return true;
 }
 

@@ -59,6 +59,9 @@ std::uint64_t ControllerMotionCommander::current_time_ms()
 
 void ControllerMotionCommander::apply_uncertainty_speed_limit(float &adv_mps, float &side_mps, float &rot_rps) const
 {
+    // Both early exits mean NO limiting happened. Record that explicitly rather than leaving the previous
+    // cycle's numbers standing, or the diagnostic would report a throttle that is not being applied.
+    uncertainty_diag_ = UncertaintyDiag{};
     if (!world_model_ || !params_)
         return;
 
@@ -117,6 +120,14 @@ void ControllerMotionCommander::apply_uncertainty_speed_limit(float &adv_mps, fl
     const float coupled_adv_scale = std::pow(std::max(rot_scale, 0.f),
                                              std::max(0.f, params_->adv_rotation_coupling_exponent) * turning_ratio);
     adv_scale = std::min(adv_scale, coupled_adv_scale);
+
+    // Recorded AFTER the rotation coupling, so adv_scale is the multiplier actually applied — the coupling
+    // is frequently the binding one while turning, and reporting the pre-coupling ramp would hide that.
+    uncertainty_diag_ = UncertaintyDiag{.valid = true,
+                                        .xy_std_m = uncertainty->xy_std_m,
+                                        .theta_std_rad = uncertainty->theta_std_rad,
+                                        .adv_scale = adv_scale,
+                                        .rot_scale = rot_scale};
 
     adv_mps *= adv_scale;
     side_mps *= adv_scale;

@@ -252,6 +252,21 @@ void TrajectoryController::set_path_presmoothed(const std::vector<Eigen::Vector2
     wp_index_ = 0;
 }
 
+void TrajectoryController::update_path_geometry(const std::vector<Eigen::Vector2f>& path_room)
+{
+    // Deliberately NOT reset_mppi_state — see the header. Everything the sampler carries between cycles
+    // survives; only the geometry it is measured against changes.
+    if (path_room.size() < 2) return;
+    path_room_ = path_room;
+    active_ = true;
+    // The carrot hint indexes path_room_. A deformation can change the sample COUNT slightly (the curve
+    // is resampled at fixed arc length, so a shorter curve has fewer samples), so the index is clamped
+    // rather than trusted. It is never reset: a forward-only carrot that restarts at 0 would search the
+    // whole route and can bind to a distant branch on this self-crossing tour.
+    carrot_seg_hint_ = std::min(carrot_seg_hint_, static_cast<int>(path_room_.size()) - 1);
+    wp_index_ = std::min(wp_index_, static_cast<int>(path_room_.size()) - 1);
+}
+
 void TrajectoryController::set_goal_facing_yaw(std::optional<float> yaw_rad)
 {
     goal_facing_yaw_ = yaw_rad;
@@ -1421,13 +1436,40 @@ TrajectoryController::ControlOutput TrajectoryController::compute_pd(
     ControlOutput& out,
     const Eigen::Vector2f& carrot_robot,
     const std::vector<Eigen::Vector3f>& /*lidar_points*/,
-    const Eigen::Affine2f& /*robot_pose*/)
+    const Eigen::Affine2f& robot_pose)
 {
     // Angle to carrot in robot frame (Y+ = forward, X+ = right)
-    const float angle_err = std::atan2(carrot_robot.x(), carrot_robot.y());
+    const float carrot_angle = std::atan2(carrot_robot.x(), carrot_robot.y());
     const float carrot_dist = carrot_robot.norm();
 
-    // PD rotation command
+    // ── CROSS-TRACK FEEDBACK (Stanley's second term) ──────────────────────────────────────────────
+    // Steering at the carrot ALONE is pure pursuit, and pure pursuit converges to the carrot's
+    // DIRECTION, not to the path: on a curve it settles at a standing offset that grows with the SQUARE
+    // of the lookahead, i.e. it cuts every corner. That is invisible while the MPPI drives (its lateral
+    // term pulls the body back onto the centre) and it is the whole reason the tracker wanders off the
+    // optimised route the band worked to produce.
+    // The fix is the term pure pursuit lacks: the signed distance to the path itself. Written in
+    // Stanley's form (Thrun et al. 2006) — atan(k*e / (v + k_soft)) — because it is BOUNDED (never more
+    // than a quarter turn, so a large excursion cannot demand an impossible rate) and SPEED-NORMALISED:
+    // the same lateral error justifies a sharper angular correction when moving slowly, which is exactly
+    // when there is room to make it. k_soft keeps it finite at a standstill.
+    // ★Sign: proj_robot.x > 0 means the PATH lies to the robot's right, so the robot has drifted LEFT
+    // and must steer right — the same sign convention as carrot_angle, so the two simply add.
+    float cross_track = 0.f;
+    float cross_term = 0.f;
+    if (last_path_proj_valid_ and active_params_.pd_cross_track_gain > 0.f)
+    {
+        const Eigen::Vector2f proj_robot = room_to_robot(last_path_proj_room_, robot_pose);
+        cross_track = proj_robot.x();
+        const float v_ref = std::max(active_params_.pd_cross_track_soft_mps,
+                                     has_prev_vel_ ? std::abs(smoothed_vel_[0]) : 0.f);
+        cross_term = std::atan2(active_params_.pd_cross_track_gain * cross_track, v_ref);
+    }
+    out.cross_track_m = cross_track;
+
+    // One angular error, then one PD on it — the cross-track term is an ANGLE, so it belongs inside the
+    // error the controller regulates, not bolted onto the rate afterwards.
+    const float angle_err = carrot_angle + cross_term;
     const float d_err = angle_err - prev_angle_err_;
     prev_angle_err_ = angle_err;
 
@@ -1436,7 +1478,12 @@ TrajectoryController::ControlOutput TrajectoryController::compute_pd(
     cmd_rot = std::clamp(cmd_rot, -active_params_.max_rot, active_params_.max_rot);
 
     // Forward speed: proportional to alignment, reduced near goal
-    const float alignment = std::pow(std::max(0.f, std::cos(angle_err)),
+    // Speed shaping stays on the CARROT bearing, deliberately not on the corrected error: it asks "how
+    // aligned am I with where I am going", which is a statement about the route ahead. Folding the
+    // cross-track correction in here would make the robot slow down BECAUSE it is correcting, which is
+    // the opposite of useful — and it would couple a steering fix to the speed profile, so a lap could
+    // not say which of the two changed the result.
+    const float alignment = std::pow(std::max(0.f, std::cos(carrot_angle)),
                                      active_params_.pd_speed_cos_power);
     float dist_factor = std::min(1.f, carrot_dist / std::max(active_params_.nominal_goal_dist_scale, 0.1f));
     float cmd_adv = active_params_.max_adv * alignment * dist_factor;
@@ -1458,7 +1505,18 @@ TrajectoryController::ControlOutput TrajectoryController::compute_pd(
 
     // Safety gate (same ESDF-based forward prediction as MPPI mode)
     {
-        constexpr float gate_horizon_s = 0.30f;
+        // ── HOW FAR AHEAD THE GATE MUST LOOK ──
+        // In MPPI mode this gate is a backstop behind a controller that scores its own rollouts. In PD
+        // mode it is the LAST line of defence, so a fixed 0.30 s is not defensible: at 0.376 m/s that is
+        // 0.11 m of lookahead, less than the body's own reach, and it can only report a collision the
+        // robot can no longer avoid. The horizon is therefore the time to STOP plus one control period
+        // of reaction — derived from the braking model already used by the CBF, not chosen.
+        // ★DIRECTIONAL BY CONSTRUCTION, and that matters: an earlier attempt inflated the OMNIDIRECTIONAL
+        // field by the stopping distance and made the robot crawl, because it demanded braking room from
+        // walls the robot drives PARALLEL to. eval_risk integrates along the COMMANDED ARC, so extending
+        // its horizon asks only for room along the path actually being taken.
+        const float gate_a_dec = std::max(0.1f, active_params_.cbf_max_decel);
+        const float gate_horizon_s = std::clamp(std::max(0.f, out.adv) / gate_a_dec + 0.15f, 0.30f, 1.50f);
         constexpr float gate_inflate_m = 0.03f;
         constexpr float gate_hard_margin_m = 0.01f;
         constexpr int gate_soft_consecutive_needed = 5;
@@ -1490,15 +1548,34 @@ TrajectoryController::ControlOutput TrajectoryController::compute_pd(
         };
 
         auto risk = eval_risk(out.adv, out.rot, gate_horizon_s);
+        // Recorded whether or not it triggers: a gate that never fires is evidence too, and it is the
+        // only way to tell "the route was clear" from "the gate was not looking".
+        out.gate_horizon_s = gate_horizon_s;
+        out.gate_min_esdf = risk.min_esdf;
+        out.gate_hard_collision = risk.hard_collision;
         if (risk.trigger)
         {
             out.safety_guard_triggered = true;
-            // Try reducing speed first
-            for (float scale : {0.5f, 0.25f, 0.f})
+            // ── LARGEST ADMISSIBLE SPEED, not the first of three guesses ──
+            // {0.5, 0.25, 0} quantises the response: a situation needing 0.9 gets 0.5, and one needing
+            // 0.45 gets 0.25. In MPPI mode that coarseness is hidden because the sampler is already
+            // slowing down via its obstacle cost; in PD mode this IS the speed control near obstacles,
+            // and quantising it is what "crawl or slam" feels like. Six bisections resolve the scale to
+            // ~1.6% using the SAME predicate, so the gate stays exactly as conservative as it was.
+            if (not eval_risk(0.f, out.rot, gate_horizon_s).trigger)
             {
-                if (!eval_risk(out.adv * scale, out.rot, gate_horizon_s).trigger)
-                { out.adv *= scale; return out; }
+                float lo = 0.f, hi = 1.f;      // lo verified safe, hi known to trigger
+                for (int i = 0; i < 6; ++i)
+                {
+                    const float mid = 0.5f * (lo + hi);
+                    if (eval_risk(out.adv * mid, out.rot, gate_horizon_s).trigger) hi = mid; else lo = mid;
+                }
+                out.adv *= lo;
+                out.gate_speed_scale = lo;
+                return out;
             }
+            out.gate_hard_stop = true;      // even a full stop was unsafe; rotating away below
+            out.gate_speed_scale = 0.f;
             // Full stop + rotate away from closest obstacle
             out.adv = 0.f;
             float sign = (out.rot >= 0.f) ? 1.f : -1.f;
@@ -1506,16 +1583,9 @@ TrajectoryController::ControlOutput TrajectoryController::compute_pd(
         }
     }
 
-    // Debug
-    static int dbg_pd = 0;
-    if (++dbg_pd % std::max(1, active_params_.debug_print_period) == 0)
-    {
-        std::cout << "[PD] angle=" << std::fixed << std::setprecision(2) << angle_err
-                  << " cmd(" << out.adv << "," << out.rot << ")"
-                  << " dist=" << std::setprecision(1) << out.dist_to_goal
-                  << " esdf=" << out.min_esdf << "\n";
-    }
-
+    // No per-cycle print: this path populates the same ControlOutput the session logs to mppi_diag.csv
+    // every cycle, so a terminal line would be a second, worse copy of a record that already exists —
+    // and one nobody can compare across runs.
     return out;
 }
 
@@ -1611,6 +1681,8 @@ std::vector<TrajectoryController::Seed> TrajectoryController::sample_trajectorie
     // These provide coarse coverage for detour discovery around obstacles.
     // With rot_cost_factor=40 they are heavily penalized in open space
     // (near-zero weight), so they don't cause oscillation.
+    if (active_params_.enable_injection_seeds)
+    {
     const std::array<float, 6> offsets = {
         active_params_.inject_offset_30, -active_params_.inject_offset_30,
         active_params_.inject_offset_60, -active_params_.inject_offset_60,
@@ -1653,6 +1725,7 @@ std::vector<TrajectoryController::Seed> TrajectoryController::sample_trajectorie
             theta += rot_cmd * dt;
         }
         seeds.push_back(std::move(s));
+    }
     }
 
     // --- What a differential drive can do that forward-biased noise cannot propose ----------------
@@ -1882,7 +1955,9 @@ TrajectoryController::SimResult TrajectoryController::simulate_and_score(
             //                 * std::max(0.f, closing);
             // }
 
-            G_lat_total += discount_acc * G_lat_step;
+            G_lat_total += discount_acc * (active_params_.bounded_costs
+                                           ? std::min(G_lat_step, active_params_.obstacle_cost_cap)
+                                           : G_lat_step);
             prev_side_min = side_min;
         }
 
@@ -2042,6 +2117,13 @@ TrajectoryController::SimResult TrajectoryController::simulate_and_score(
     // is what most practical MPPI implementations actually do.
 
     res.G_goal = G_goal + active_params_.lambda_goal * G_progress;
+    if (active_params_.bounded_costs)
+    {
+        // Per-step averages, so a total is horizon-independent and comparable across terms — the
+        // property that lets one small fixed temperature serve all of them.
+        const float inv = 1.f / static_cast<float>(std::max(1, actual_steps));
+        G_obs_total *= inv; G_lat_total *= inv; G_cbf_total *= inv;
+    }
     res.G_obs = G_obs_total + (res.collides ? active_params_.collision_penalty : 0.f);
     res.G_lat = G_lat_total;
     res.G_cbf = G_cbf_total;
@@ -2216,6 +2298,14 @@ Eigen::Vector2f TrajectoryController::compute_carrot(const Eigen::Affine2f& robo
     // is steered back toward the stretch it was on — which is what we want. Snapping to whatever branch
     // is nearest in space is what produced the turn-around.
     carrot_seg_hint_ = closest_seg;
+    // The PROJECTION itself, not just the anchor index. compute_carrot already knows exactly where the
+    // robot is on the route and threw it away; the PD tracker needs it, because steering at the carrot
+    // alone converges to the carrot's DIRECTION rather than to the path, and cuts every corner.
+    {
+        const Eigen::Vector2f a = path_room_[closest_seg];
+        last_path_proj_room_ = a + closest_t * (path_room_[closest_seg + 1] - a);
+        last_path_proj_valid_ = true;
+    }
 
     float lookahead_eff = active_params_.carrot_lookahead;
     if (active_params_.carrot_curve_adaptation_enabled)

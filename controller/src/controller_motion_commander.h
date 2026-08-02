@@ -34,6 +34,21 @@ public:
     ~ControllerMotionCommander();
 
     void apply_uncertainty_speed_limit(float &adv_mps, float &side_mps, float &rot_rps) const;
+
+    // What apply_uncertainty_speed_limit ACTUALLY did on its last call. The limiter is the only place the
+    // robot's own localisation covariance is allowed to bound its speed, and none of it was observable:
+    // a lap could not distinguish "sigma is large and this is throttling hard" from "no covariance on the
+    // RT edge at all, so the whole mechanism is inert". Both look like a robot that will not go fast.
+    // valid=false means read_pose_uncertainty() returned nullopt ⇒ NO limiting was applied.
+    struct UncertaintyDiag
+    {
+        bool  valid = false;
+        float xy_std_m = -1.f;      // -1 = not available (never a real sigma)
+        float theta_std_rad = -1.f;
+        float adv_scale = 1.f;      // multiplier actually applied to adv/side
+        float rot_scale = 1.f;      // multiplier actually applied to rot
+    };
+    UncertaintyDiag last_uncertainty_diag() const { return uncertainty_diag_; }
     void send_speed_command(float adv_mps, float side_mps, float rot_rps);
     void stop_robot();
 
@@ -51,6 +66,10 @@ public:
     OutputRateStats take_output_rate_stats();
 
 private:
+    // Written by apply_uncertainty_speed_limit (const, hence mutable) and read on the same thread by the
+    // control cycle that just called it. Never touched by the output loop, so it needs no lock.
+    mutable UncertaintyDiag uncertainty_diag_{};
+
     // ── Fixed-rate output loop ──
     // The base used to be commanded from inside compute(), which meant the command rate WAS the perception
     // rate: measured median 108 ms but mean 212, p99 1.26 s and a worst case of 9.5 s, with 16% of cycles over

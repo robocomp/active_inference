@@ -1,3 +1,4 @@
+#include <numbers>
 #include "controller_session.h"
 
 #include <algorithm>
@@ -344,15 +345,33 @@ void ControllerSession::dump_route_world(const Eigen::Vector2f &start,
 
 void ControllerSession::log_mppi_diagnostics(std::uint64_t t_ms,
                                              const rc::TrajectoryController::ControlOutput &o,
-                                             float commanded_adv, float measured_speed)
+                                             float commanded_adv, float measured_speed,
+                                             float path_kappa, float measured_rot)
 {
     if (!mppi_csv_open_)
     {
         mppi_csv_.open("mppi_diag.csv", std::ios::out | std::ios::trunc);
         if (mppi_csv_.is_open())
-            mppi_csv_ << "t_ms,ess,ess_K,ess_ratio,lambda_used,lambda_adaptive,cost_range,cost_best,"
+            mppi_csv_ << "# per-cycle control record. The ess/lambda/g_* columns describe the MPPI SAMPLER\n"
+                         "# and are ZERO when ControlMode=pd — that is the sampler not running, not a bug.\n"
+                         "# The gate_* columns are the SAFETY GATE and are meaningful in BOTH modes; in pd\n"
+                         "# mode the gate is the only thing between the tracker and an obstacle.\n"
+                         "#   gate_scale   = fraction of commanded adv it let through (1 = untouched)\n"
+                         "#   gate_horizon = its lookahead this cycle (speed-dependent: v/a_decel + 0.15)\n"
+                         "#   gate_min_esdf= worst clearance along the PREDICTED arc; -1 = gate did not run\n"
+                         "#   gate_hard_stop = even adv=0 was unsafe, so it rotated away instead\n"
+                         "# path_kappa = SIGNED route curvature at the robot's projection (1/m). Sentinel\n"
+                         "#   -999 = no continuous route, which is NOT the same as a straight (kappa=0).\n"
+                         "#   With cross_track_m this is the pair a gain self-tuner needs: under-gain shows\n"
+                         "#   as e correlated with kappa, over-gain as e oscillating about zero.\n"
+                         "# meas_rot = SIGNED measured angular rate (rad/s), EMA-smoothed and differenced\n"
+                         "#   from the localiser pose (~5 Hz) — so it LAGS. Adequate to identify a plant lag\n"
+                         "#   of order 0.2-0.5 s; do not read faster dynamics out of it.\n"
+                         "t_ms,ess,ess_K,ess_ratio,lambda_used,lambda_adaptive,cost_range,cost_best,"
                          "g_goal,g_obs,g_vel,g_smooth,g_lat,g_cbf,n_collisions,"
-                         "cmd_adv,cmd_rot,meas_speed,min_esdf,explore,p_free,steer_conc,side_asym\n";
+                         "cmd_adv,cmd_rot,meas_speed,min_esdf,explore,p_free,steer_conc,side_asym,"
+                         "sg_trig,gate_scale,gate_horizon,gate_min_esdf,gate_hard_stop,gate_hard_coll,"
+                         "cross_track_m,path_kappa,meas_rot\n";
         mppi_csv_open_ = true;
     }
     if (!mppi_csv_.is_open()) return;
@@ -362,7 +381,11 @@ void ControllerSession::log_mppi_diagnostics(std::uint64_t t_ms,
               << o.g_goal << ',' << o.g_obs << ',' << o.g_vel << ',' << o.g_smooth << ','
               << o.g_lat << ',' << o.g_cbf << ',' << o.n_collisions << ','
               << commanded_adv << ',' << o.rot << ',' << measured_speed << ',' << o.min_esdf << ',' << o.explore << ','
-              << o.p_free << ',' << o.steering_concentration << ',' << o.side_asymmetry << '\n';
+              << o.p_free << ',' << o.steering_concentration << ',' << o.side_asymmetry << ','
+              << (o.safety_guard_triggered ? 1 : 0) << ',' << o.gate_speed_scale << ','
+              << o.gate_horizon_s << ',' << o.gate_min_esdf << ','
+              << (o.gate_hard_stop ? 1 : 0) << ',' << (o.gate_hard_collision ? 1 : 0) << ','
+              << o.cross_track_m << ',' << path_kappa << ',' << measured_rot << '\n';
 }
 
 void ControllerSession::log_route_event(const char *event, bool ok, std::uint64_t t_ms,
@@ -513,6 +536,32 @@ float ControllerSession::route_speed_limit(float v_cap, float a_decel) const
     // is something we must ALREADY be slowing for. Beyond it, no amount of braking is required yet.
     const float horizon = v_cap * v_cap / (2.f * a_dec) + 1.0f;
 
+    // ── The curvature the ROTATION limit must use is not the one the lateral limit uses ──
+    // omega = v*kappa <= max_rot gives v <= max_rot/kappa, which is 1/kappa — it AMPLIFIES an
+    // overestimate of curvature, where the lateral limit's sqrt(a_lat/kappa) damps it. Fed the point
+    // value of curvature_at (a second difference, and the comment below says why that is noisy at this
+    // spacing) it throttled 15% of a lap below 0.40 m/s and cost 22% of the lap time, for curvature
+    // structure finer than the 0.40 m scale the route was actually fitted at — i.e. mostly fitting noise.
+    //
+    // What a differential drive must physically deliver is the NET HEADING CHANGE over the stretch it is
+    // about to drive, so the right quantity is the AVERAGE curvature over that stretch:
+    //     kappa_avg = |psi(s+W) - psi(s)| / W      (the mean value theorem, applied honestly)
+    // Two things make this the better estimator, not merely a smoother one:
+    //   • heading_at is a FIRST difference of positions; curvature_at is a SECOND difference. One order
+    //     less differentiation is one order less noise amplification.
+    //   • a lone 5 cm curvature spike contributes almost nothing to the net heading change, so it stops
+    //     mattering by construction rather than by being filtered out — while a sustained tight curve
+    //     accumulates its full turn and still binds.
+    // W is the route's own smoothing scale: the curve was fitted with control points that far apart, so
+    // curvature structure finer than W is a property of the fit, not of the route.
+    const float w_kappa = std::max(0.10f, params_->route_smoothing_m);
+    const auto kappa_avg_at = [this, w_kappa](float s)
+    {
+        const float h0 = route_.spline().heading_at(s);
+        const float h1 = route_.spline().heading_at(s + w_kappa);
+        return std::abs(std::remainder(h1 - h0, 2.f * std::numbers::pi_v<float>)) / w_kappa;
+    };
+
     float v = v_cap;
     // Sampled at 10 cm against a 5 cm curve — deliberately coarser than the curve's own spacing, because
     // curvature_at is a second difference of the samples and is therefore noisiest at that scale.
@@ -520,7 +569,21 @@ float ControllerSession::route_speed_limit(float v_cap, float a_decel) const
     {
         const float k = std::abs(route_.spline().curvature_at(s_now + ds));
         if (k < 1e-3f) continue;                       // straight: no constraint from here
-        const float v_here = std::sqrt(a_lat / k);     // v^2·kappa = a_lat, the whole model
+        // TWO limits, and only one of them was here. v^2·kappa = a_lat is the COMFORT limit — how much
+        // lateral acceleration the payload will accept, on the POINT curvature as before. omega = v·kappa
+        // <= max_rot is the KINEMATIC one: a differential drive physically cannot hold curvature kappa
+        // faster than max_rot/kappa, whatever the lateral budget says — and it takes the AVERAGED
+        // curvature, for the reasons given above the loop.
+        // ★Measured at the authored wp21/wp22 hairpin (0.35 m across a 104 deg turn): sqrt(a_lat/kappa)
+        // permits 0.41 m/s, which demands omega = 2.4 rad/s against a max_rot of 0.8. The robot was being
+        // allowed a speed it could not turn at, so it left the route — reported as "cuts quite a bit on
+        // the hairpin". The MPPI never showed this because its rollouts integrate the real kinematics
+        // with rot clamped, so a too-fast rollout visibly fails to track and is scored down; a geometric
+        // tracker has no such foresight and simply cannot comply.
+        const float v_lat = std::sqrt(a_lat / k);      // v^2·kappa = a_lat — comfort, POINT curvature
+        const float k_avg = kappa_avg_at(s_now + ds);  // net heading change / arc length — see above
+        const float v_rot = k_avg > 1e-3f ? std::max(0.05f, params_->max_rot_speed_rps) / k_avg : v_cap;
+        const float v_here = std::min(v_lat, v_rot);
         // The bound is on the speed we may hold NOW: we must be able to shed the difference over ds.
         const float v_allowed = std::sqrt(v_here * v_here + 2.f * a_dec * ds);
         v = std::min(v, v_allowed);
@@ -771,6 +834,116 @@ void ControllerSession::update_display(const std::optional<ControllerRobotPose> 
     display.set_stuck_active(escape_active_);
 }
 
+void ControllerSession::step_route_band(const ControllerRobotPose &robot_pose,
+                                        rc::TrajectoryController &path_controller)
+{
+    // Truncate the diagnostic FIRST, before any early return. Otherwise a run with the band OFF never
+    // opens the file, archive_on_stop copies the PREVIOUS run's rows under this run's stamp, and the
+    // archive claims the band solved 993 times during a lap where it never ran. Observed exactly that on
+    // 20260802-135917, whose band_diag.csv was byte-identical to 20260802-135128's.
+    ensure_band_csv(params_ != nullptr and params_->band_enabled);
+    if (params_ == nullptr or not params_->band_enabled) return;
+    if (not route_active_ or not mission_.running() or not route_.valid()) return;
+    if (not path_controller.is_active()) return;
+    const std::size_t M = route_.control_count();
+    if (M < 8) return;                       // nothing a window can be carved out of
+    if (params_->band_period_cycles > 1 and (band_cycle_++ % params_->band_period_cycles) != 0) return;
+
+    // ── The window, in control-point indices ──
+    // Control points sit every h along the POLYLINE; progress() is arc length along the CURVE, which is
+    // shorter (smoothing cuts corners). The two metrics are not interchangeable — conflating them is what
+    // deleted 15 m of a 3-lap tour once (see fit_from_polyline). A PROPORTIONAL map is used instead of
+    // either metric: it needs no correspondence, is monotone, and its error is absorbed by the lead
+    // margin, which exists to be conservative. It is only choosing which points to unfreeze.
+    const float len = std::max(0.01f, route_.spline().length());
+    const float frac = std::clamp(route_.progress() / len, 0.f, 1.f);
+    const float h = std::max(0.05f, route_.spline().control_spacing());
+    const auto i_robot = static_cast<std::size_t>(frac * static_cast<float>(M));
+    const auto lead = static_cast<std::size_t>(std::ceil(std::max(0.f, params_->band_lead_m) / h));
+    const auto span = static_cast<std::size_t>(std::ceil(std::max(h, params_->band_window_m) / h));
+    const std::size_t freeze_before = std::min(i_robot + lead, M);
+    const std::size_t freeze_after  = std::min(freeze_before + span, M);
+    if (freeze_after <= freeze_before + 1) return;    // window collapsed (route nearly finished)
+
+    // ── The live field, room frame ──
+    // The ESDF is robot-frame, so each query is transformed in and each gradient transformed back out.
+    // Outside its 8x8 m box clearance_at returns 100 m: a one-sided clearance term sees no deficit there
+    // and applies no force, so the band simply cannot be driven by geometry the field does not cover.
+    const Eigen::Affine2f pose = robot_pose.as_transform();
+    const Eigen::Matrix2f R = pose.linear();
+    const Eigen::Matrix2f Rt = R.transpose();
+    const Eigen::Vector2f t = pose.translation();
+    auto distance = [&path_controller, Rt, t](const Eigen::Vector2f &p) -> float
+    {
+        const Eigen::Vector2f r = Rt * (p - t);
+        return path_controller.clearance_at(r.x(), r.y());
+    };
+    auto gradient = [&path_controller, Rt, t, R](const Eigen::Vector2f &p) -> Eigen::Vector2f
+    {
+        const Eigen::Vector2f r = Rt * (p - t);
+        return R * path_controller.clearance_gradient_at(r.x(), r.y());
+    };
+
+    const auto rep = route_.deform_window(distance, gradient, freeze_before, freeze_after,
+                                          params_->band_iterations);
+    band_last_report_ = rep;
+    // Logged BEFORE the early return, so a rejected or no-op solve leaves a row too. A band that is on
+    // and doing nothing must be visible as such — "enabled" and "working" are different claims, and a
+    // run where every solve moved 0.000 m would otherwise look exactly like a working one.
+    log_band_diagnostics(overlay_now_ms_, rep, freeze_before, freeze_after, M);
+    if (not rep.ran or rep.rejected) return;
+
+    // Hand the follower the deformed geometry WITHOUT resetting it — see update_path_geometry. The
+    // prefix is frozen, so arc length behind the robot is unchanged and progress()/waypoint arc lengths
+    // still mean what they did.
+    path_controller.update_path_geometry(route_.path());
+    current_plan_ = ControllerPathPlan{.room_path = route_.path()};
+    band_deforms_++;
+    band_move_max_m_ = std::max(band_move_max_m_, rep.max_move_m);
+    band_move_sum_m_ += rep.max_move_m;
+}
+
+void ControllerSession::ensure_band_csv(bool band_enabled)
+{
+    if (band_csv_open_) return;
+    band_csv_.open("band_diag.csv", std::ios::out | std::ios::trunc);
+    band_csv_open_ = true;
+    if (!band_csv_.is_open()) return;
+    if (not band_enabled)
+    {
+        // A file that says so, rather than no file — which archive_on_stop would fill with the last
+        // run's contents. An absent measurement and a stale one are not the same thing.
+        band_csv_ << "# BAND DISABLED for this run (BandEnabled=false) — no solves were attempted.\n"
+                     "# This file is deliberately header-only: it records the ABSENCE of band activity,\n"
+                     "# which is what a control arm of the A/B needs to be able to state.\n";
+        band_csv_.flush();
+        return;
+    }
+    band_csv_ << "# local elastic band — ONE ROW PER SOLVE ATTEMPT, including the ones that did\n"
+                         "# nothing: ran=0 means the solve was refused (degenerate window / no field),\n"
+                         "# rejected=1 means it solved and the acceptance test reverted it. A band that is\n"
+                         "# enabled and inert must be readable as such.\n"
+                         "# win_lo/win_hi = deformable control-point index range; ctrl_n = polygon size.\n"
+                         "# clr_before/clr_after are the OPTIMISER's min clearance over the route, in the\n"
+                         "#   LIVE robot-frame field — not comparable with the run JSON's body clearance.\n"
+                         "t_ms,ran,rejected,uvd_violated,iterations,win_lo,win_hi,ctrl_n,"
+                         "max_move_m,cost_before,cost_after,clr_before,clr_after,"
+                 "e_kappa,e_clear,e_anchor,e_gauge\n";
+}
+
+void ControllerSession::log_band_diagnostics(std::uint64_t t_ms, const rc::RouteOptimizerReport &rep,
+                                             std::size_t freeze_before, std::size_t freeze_after,
+                                             std::size_t ctrl_count)
+{
+    if (!band_csv_.is_open()) return;
+    band_csv_ << t_ms << ',' << (rep.ran ? 1 : 0) << ',' << (rep.rejected ? 1 : 0) << ','
+              << (rep.uvd_violated ? 1 : 0) << ',' << rep.iterations << ','
+              << freeze_before << ',' << freeze_after << ',' << ctrl_count << ','
+              << rep.max_move_m << ',' << rep.cost_before << ',' << rep.cost_after << ','
+              << rep.min_clearance_before << ',' << rep.min_clearance_after << ','
+              << rep.e_kappa << ',' << rep.e_clear << ',' << rep.e_anchor << ',' << rep.e_gauge << '\n';
+}
+
 void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                                      rc::TrajectoryController &path_controller,
                                      ControllerObstacleTracker &obstacle_tracker,
@@ -852,6 +1025,12 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     if (room_polygon_.size() >= 3)
         path_controller.set_room_boundary(room_polygon_);
 
+    // LOCAL ELASTIC BAND: let the route absorb what the live field says, before the follower measures
+    // itself against it. Runs on the ESDF built by the PREVIOUS compute — one cycle old, which is the
+    // same age as everything else here and self-guarding on cycle 1, where the field is empty and every
+    // query returns esdf_unknown_distance ⇒ no deficit ⇒ no force ⇒ the polygon does not move.
+    step_route_band(robot_pose, path_controller);
+
     // Curvature-limited speed. Only a continuous route carries kappa(s); a click target has no curve, so
     // it keeps the full envelope and the ceiling is cleared rather than left stale from a previous mission.
     if (route_active_ and mission_.running())
@@ -880,7 +1059,13 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     // the controller, which should not know that anything is being recorded.
     if (mission_.running())
     {
-        log_mppi_diagnostics(overlay_now_ms_, control_output, control_output.adv, base_speed_lin_);
+        // Signed curvature at the robot's own projection on the route. -999 marks "no continuous
+        // route" rather than 0, which is a real curvature (a straight) — an absent value and a
+        // meaningful one must not share an encoding.
+        const float kappa_here = (route_active_ and route_.valid())
+                               ? route_.spline().curvature_at(route_.progress()) : -999.f;
+        log_mppi_diagnostics(overlay_now_ms_, control_output, control_output.adv, base_speed_lin_,
+                             kappa_here, room_vel_.omega);
         // CAPTURE THE HARDEST CYCLE OF THE RUN for offline replay (tools/mppi_bench). "Hardest" is where
         // the controller had the least room to choose: every rollout infeasible, or the tightest the
         // horizon ever got. A snapshot from open floor proves nothing — measured, a cost term that is
@@ -1306,6 +1491,13 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     float side_mps = control_output.side;
     float rot_rps = -control_output.rot;
     motion_commander.apply_uncertainty_speed_limit(adv_mps, side_mps, rot_rps);
+    // Publish what the limiter did into the actuation stream. It sits between the MPPI's command and the
+    // wheels, and until now a lap could show a 17% gap between the two with no way to say whether this
+    // was the cause or whether it was inert for want of a covariance on the RT edge.
+    {
+        const auto ud = motion_commander.last_uncertainty_diag();
+        mission_.note_uncertainty_limit(ud.valid, ud.xy_std_m, ud.theta_std_rad, ud.adv_scale, ud.rot_scale);
+    }
 
     // ARRIVAL ROTATION: position reached, the controller is rotating IN PLACE to the target facing yaw
     // (adv=side=0, goal_reached still false). This is a controller-owned maneuver that makes NO waypoint

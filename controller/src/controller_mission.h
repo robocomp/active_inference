@@ -159,6 +159,15 @@ struct MissionProfileSample
     // three of the four pivots and the count did not move. -1 when the run is not driving a continuous
     // route (a click target has no arc length), which is a fact about the run, not a missing value.
     float route_s_m = -1.f;
+    // ── Pose-covariance speed limiter (ControllerMotionCommander::apply_uncertainty_speed_limit) ──
+    // The one mechanism that lets localisation quality bound speed, and it was entirely unobservable: a
+    // slow lap could not be attributed to it or cleared of it. sigma = -1 means the RT edge carried no
+    // covariance, so the limiter did NOTHING that cycle — distinct from a genuinely tiny sigma, which is
+    // the difference between "the robot is being throttled" and "this mechanism is dead".
+    float pose_xy_std_m = -1.f;
+    float pose_theta_std_rad = -1.f;
+    float unc_adv_scale = 1.f;    // multiplier applied to adv (includes the rotation coupling)
+    float unc_rot_scale = 1.f;
 };
 
 // Everything about the AGENT that a metric computed later needs in order to know whether two runs are
@@ -303,6 +312,12 @@ public:
     void add_profile_sample(std::uint64_t t_ms, float adv, float side, float rot, float freshness);
     // Latest measured speed, pushed from the control thread; picked up by the next profile row.
     void note_measured_speed(float mps);
+    // What the pose-covariance speed limiter did on the last control cycle; picked up by the next profile
+    // row. Pushed from the CONTROL thread and read on the OUTPUT thread, so it uses the same relaxed
+    // atomics as pending_route_s_ — each field is independently useful and a torn set across a tick
+    // boundary would misreport by one 20 Hz row, which no analysis here can see.
+    void note_uncertainty_limit(bool valid, float xy_std_m, float theta_std_rad,
+                                float adv_scale, float rot_scale);
     // Extra per-cycle diagnostic files to ARCHIVE beside the run's JSON and profile when it ends. They
     // are written live to a fixed path (the writer cannot know the run's timestamp until it stops), so
     // without this each run silently destroys the previous one's raw data — which is exactly what
@@ -338,6 +353,10 @@ private:
     // and the last known value is the best estimate of it, whereas a held SPEED reading would be a
     // repeated measurement masquerading as a new one.
     std::atomic<float> pending_route_s_{-1.f};
+    std::atomic<float> pending_pose_xy_std_{-1.f};
+    std::atomic<float> pending_pose_theta_std_{-1.f};
+    std::atomic<float> pending_unc_adv_scale_{1.f};
+    std::atomic<float> pending_unc_rot_scale_{1.f};
     // Bound: ~2.8 h at 20 Hz. A run left going overnight must not consume memory without limit.
     static constexpr std::size_t kMaxProfileRows = 200000;
     bool profile_truncated_ = false;

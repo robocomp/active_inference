@@ -68,6 +68,21 @@ public:
     // only exists on stdout is a diagnostic nobody can compare across runs.
     const RouteOptimizerReport &last_optimizer_report() const { return last_opt_; }
 
+    // ── LOCAL ELASTIC BAND ────────────────────────────────────────────────────────────────────────
+    // Re-optimise the RETAINED control polygon in place against whatever field `opt` carries — normally
+    // the LIVE local ESDF, not the static planner field the route was built with — and re-evaluate the
+    // curve. The caller restricts the variable set with opt.freeze_before/freeze_after; with local
+    // support that is an exact restriction, not an approximation, so everything outside the window keeps
+    // exactly the geometry it had.
+    //
+    // ★The caller MUST freeze the control points behind the robot. The arc-length parameterisation is
+    // measured from s=0, so if the curve moves behind the robot every downstream number that indexes it
+    // — progress, waypoint arc lengths, the carrot — silently shifts meaning.
+    // Returns a report with ran=false if there is nothing to solve (no retained polygon, no field).
+    RouteOptimizerReport deform(const RouteOptimizerConfig &opt);
+    const std::vector<Eigen::Vector2f> &control_points() const { return ctrl_; }
+    float control_spacing() const { return ctrl_step_; }
+
     bool  valid() const { return samples_.size() >= 2; }
     float length() const { return length_; }
     float spacing() const { return spacing_; }
@@ -96,6 +111,17 @@ public:
     static bool self_test();
 
 private:
+    // Steps 2-4 of build() — B-spline evaluation, arc-length resample, feasibility pullback — as a pure
+    // function of ctrl_. Shared by build() and deform() so a deformed curve is produced by exactly the
+    // same pipeline as a freshly built one; there is no second code path to drift.
+    bool evaluate_from_ctrl();
+
+    // ── The decision variable, retained ──
+    std::vector<Eigen::Vector2f> ctrl_;       // B-spline control polygon
+    float ctrl_step_ = 0.40f;                 // its spacing == the bending prior's length scale
+    std::vector<Eigen::Vector2f> polyline_;   // what it was fitted to; the feasibility pullback target
+    std::function<bool(const Eigen::Vector2f &, float)> is_free_;   // the caller's footprint test
+
     std::vector<Eigen::Vector2f> samples_;   // uniform in arc length, spacing_ apart
     float spacing_ = 0.1f;
     float length_ = 0.f;

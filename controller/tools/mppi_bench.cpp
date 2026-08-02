@@ -29,6 +29,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <cstdio>
 #include <fstream>
 #include <numeric>
@@ -60,6 +61,7 @@ struct Row
     // and it is the one that was missing when a term was deleted and the robot started hitting things.
     float cmd_clearance = 1e9f;
     float esdf_on_plan = 0.f, body_extent = 0.f;
+    float solve_ms = 0.f;
 };
 
 // The closest the BODY comes to an obstacle along the plan the controller actually returned.
@@ -119,6 +121,8 @@ bool apply_key(rc::TrajectoryController::Params &p, const std::string &k, float 
     else if (k == "mppi_lambda")               p.mppi_lambda = v;
     else if (k == "sigma_rot")                 p.sigma_rot = v;
     else if (k == "lambda_fixed")              p.lambda_fixed = v != 0.f;
+    else if (k == "bounded_costs")             p.bounded_costs = v != 0.f;
+    else if (k == "injection_seeds")           p.enable_injection_seeds = v != 0.f;
     else if (k == "sigma_adv")                 p.sigma_adv = v;
     else if (k == "lambda_max")                p.lambda_max = v;
     else if (k == "warm_start_rot_weight")     p.warm_start_rot_weight = v;
@@ -203,7 +207,7 @@ void print_header()
 {
     std::printf("\n%-34s %6s %6s %6s %7s %7s %8s %8s %8s %6s %7s %7s %7s\n",
                 "config", "adv", "rot", "ESS/K", "lambda", "range", "g_goal", "g_obs", "g_lat",
-                "ncol", "p_free", "cmd_clr", "esdf_pl");
+                "ncol", "p_free", "cmd_clr", "solve_ms");
     std::printf("%s\n", std::string(126, '-').c_str());
 }
 
@@ -211,7 +215,7 @@ void print_row(const Row &r)
 {
     std::printf("%-34s %6.3f %6.3f %6.3f %7.1f %7.1f %8.2f %8.2f %8.2f %6d %7.3f %7.3f %7.3f\n",
                 r.label.c_str(), r.adv, r.rot, r.K ? r.ess / r.K : 0.f, r.lambda_used, r.cost_range,
-                r.g_goal, r.g_obs, r.g_lat, r.n_collisions, r.p_free, r.cmd_clearance, r.esdf_on_plan);
+                r.g_goal, r.g_obs, r.g_lat, r.n_collisions, r.p_free, r.cmd_clearance, r.solve_ms);
 }
 
 }  // namespace
@@ -261,7 +265,11 @@ int main(int argc, char **argv)
         const auto path_copy = tc.get_path();
         tc.set_path_presmoothed(path_copy);
         tc.set_seed(seed);
+        const auto t0 = std::chrono::steady_clock::now();
         const auto out = tc.compute(pose, lidar);
+        const double solve_ms = std::chrono::duration<double, std::milli>(
+                                    std::chrono::steady_clock::now() - t0).count();
+        r.solve_ms = static_cast<float>(solve_ms);
         r.adv = out.adv; r.rot = out.rot;
         r.ess = out.ess; r.K = out.ess_K;
         r.lambda_used = out.lambda_used; r.cost_range = out.cost_range;

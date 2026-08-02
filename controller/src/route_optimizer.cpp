@@ -569,6 +569,18 @@ RouteOptimizerReport optimize_route(std::vector<Eigen::Vector2f> &ctrl, const Ro
                 const auto B = basis(t);
                 Eigen::Vector2f ca = Eigen::Vector2f::Zero(), cb = Eigen::Vector2f::Zero();
                 for (int k = 0; k < 4; ++k) { ca += B[k] * pad_a[s + k]; cb += B[k] * pad_b[s + k]; }
+                // WHERE THE CURVE DID NOT MOVE THERE IS NOTHING TO TEST. UVD is a statement ABOUT THE
+                // DEFORMATION — "did the curve sweep across an obstacle getting from a to b" — so at a
+                // parameter where a == b it is vacuously satisfied. Without this, the degenerate branch
+                // of segment_hits_obstacle (len < 1e-6) instead asks "is this UNCHANGED point inside an
+                // obstacle?", which is a different question and belongs to the feasibility pass.
+                // ★It never fired for a build-time solve, where the whole route moves and the field is
+                // GridPlanner's static EDT on which an A*-derived route is feasible by construction. It
+                // fires for the LOCAL BAND, which freezes everything outside a ~10-point window and
+                // measures against the LIVE ESDF: any pre-existing route point lying in the live field's
+                // zero set then rejected EVERY solve, no matter how good, for a violation in a stretch
+                // the solve never touched.
+                if ((cb - ca).squaredNorm() < 1e-12f) continue;
                 if (segment_hits_obstacle(ca, cb)) uvd_ok = false;
             }
     }
@@ -895,6 +907,45 @@ bool route_optimizer_self_test()
         check(rep.uvd_violated, "pulling the route across a bar must be detected as a UVD violation");
         check(rep.rejected, "a UVD violation must reject the solve");
         check(moved < 1e-6f, "a rejected solve must leave the control polygon untouched");
+    }
+
+    // (6a-bis) UVD MUST NOT FIRE ON A STRETCH THE SOLVE NEVER TOUCHED. This is the LOCAL BAND's case:
+    // most of the route is frozen, so a == b there, and the field is the LIVE ESDF, in which a
+    // pre-existing route point can legitimately sit inside an obstacle (an object that appeared after
+    // the route was built). Before the fix, that unchanged point alone rejected every solve — a route
+    // that could never be improved because of a violation nowhere near the window.
+    {
+        // Obstacle sitting ON the route at x = 1.0, inside the FROZEN prefix. The deformable window is
+        // far away at x >= 4, in clear space, so no deformation can possibly cross anything.
+        const auto blob = [](const Eigen::Vector2f &p)
+        { return std::max(0.f, (p - Eigen::Vector2f{1.0f, 0.f}).norm() - 0.10f); };
+        const auto blob_g = [](const Eigen::Vector2f &p)
+        {
+            const Eigen::Vector2f d = p - Eigen::Vector2f{1.0f, 0.f};
+            const float n = d.norm();
+            return n > 1e-6f ? Eigen::Vector2f(d / n) : Eigen::Vector2f(0.f, 1.f);
+        };
+        std::vector<Eigen::Vector2f> c;
+        for (int i = 0; i <= 20; ++i) c.push_back({0.4f * static_cast<float>(i), 0.f});
+        const auto before = c;
+        RouteOptimizerConfig k;
+        k.distance = blob; k.distance_gradient = blob_g;
+        k.h = 0.40f; k.d_target = 0.30f; k.rho = 0.49f;
+        k.anchors = {{5.0f, 0.6f}};              // pulls the WINDOW only, and only in free space
+        k.anchor_s = {5.0f};
+        k.freeze_before = 10;                    // everything up to x = 4 pinned — the blob is at x = 1
+        k.iterations = 20; k.verbose = false;
+        const auto rep = optimize_route(c, k);
+        float moved_frozen = 0.f, moved_win = 0.f;
+        for (std::size_t i = 0; i < c.size(); ++i)
+        {
+            const float d = (c[i] - before[i]).norm();
+            (i < k.freeze_before ? moved_frozen : moved_win) = std::max(i < k.freeze_before ? moved_frozen : moved_win, d);
+        }
+        std::printf("  UVD frozen-region: uvd_violated=%d rejected=%d, frozen moved %.9f m, window moved %.4f m\n",
+                    rep.uvd_violated ? 1 : 0, rep.rejected ? 1 : 0, moved_frozen, moved_win);
+        check(not rep.uvd_violated, "an obstacle in a FROZEN stretch must not count as a UVD violation");
+        check(moved_frozen == 0.f, "the frozen prefix must not move");
     }
 
     // (6b) IS THE CURVATURE BOUND ACTUALLY A BOUND? The formula is taken from the literature, so it is

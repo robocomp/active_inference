@@ -135,6 +135,22 @@ public:
         if (remaining() <= finish_tol_m) return laps_;
         return laps_completed_at(progress_);
     }
+    // ── LOCAL ELASTIC BAND ────────────────────────────────────────────────────────────────────────
+    // Deform the installed route in a WINDOW of control points against a live field, without refitting
+    // from the polyline and without disturbing the geometry outside the window. `distance`/
+    // `distance_gradient` are room-frame; normally the controller's live local ESDF rather than the
+    // static planner field the route was built with. Waypoint arc lengths are re-derived on success.
+    //
+    // ★`freeze_before` MUST cover the robot: arc length is measured from s=0, so a curve that moves
+    // BEHIND the robot shifts the meaning of progress(), every waypoint arc length and the carrot at
+    // once. The caller owns that guarantee — this class cannot see where the robot is.
+    RouteOptimizerReport deform_window(std::function<float(const Eigen::Vector2f &)> distance,
+                                       std::function<Eigen::Vector2f(const Eigen::Vector2f &)> distance_gradient,
+                                       std::size_t freeze_before, std::size_t freeze_after,
+                                       int iterations);
+    // How many control points the installed route has — the index space freeze_before/after live in.
+    std::size_t control_count() const { return spline_.control_points().size(); }
+
     // Arc length at which each waypoint sits, in build order (laps concatenated).
     const std::vector<float> &waypoint_arclengths() const { return wp_s_; }
     int waypoints_per_lap() const { return wp_per_lap_; }
@@ -155,6 +171,9 @@ private:
     // along the fitted CURVE and exists for progress and lap bookkeeping. Conflating the two deleted 15 m
     // of a 3-lap tour; see fit_from_polyline.
     std::vector<float> anchor_polyline_arclengths() const;
+    // Re-project every waypoint onto the current curve. Shared by the fit and the band so there is
+    // exactly one place arc lengths are computed.
+    void rederive_waypoint_arclengths();
 
     RouteSpline spline_;
     // The planned polyline the curve is fitted to. Kept (build() used to discard it) because a local

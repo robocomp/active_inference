@@ -384,8 +384,24 @@ void MissionRunner::add_profile_sample(std::uint64_t t_ms, float adv, float side
                                             .freshness = freshness, .v_meas_mps = pending_v_meas_,
                                             .v_meas_fresh = pending_v_meas_fresh_,
                                             .lap = lap_ + 1,
-                                            .route_s_m = pending_route_s_.load(std::memory_order_relaxed)});
+                                            .route_s_m = pending_route_s_.load(std::memory_order_relaxed),
+                                            .pose_xy_std_m = pending_pose_xy_std_.load(std::memory_order_relaxed),
+                                            .pose_theta_std_rad = pending_pose_theta_std_.load(std::memory_order_relaxed),
+                                            .unc_adv_scale = pending_unc_adv_scale_.load(std::memory_order_relaxed),
+                                            .unc_rot_scale = pending_unc_rot_scale_.load(std::memory_order_relaxed)});
     pending_v_meas_fresh_ = false;   // consumed: the NEXT row must not claim this reading again
+}
+
+void MissionRunner::note_uncertainty_limit(bool valid, float xy_std_m, float theta_std_rad,
+                                           float adv_scale, float rot_scale)
+{
+    if (state_ != State::Running) return;
+    // No lock: these are the same relaxed cross-thread handoff as pending_route_s_, and taking
+    // profile_mutex_ here would put the control thread behind the output thread's push_back.
+    pending_pose_xy_std_.store(valid ? xy_std_m : -1.f, std::memory_order_relaxed);
+    pending_pose_theta_std_.store(valid ? theta_std_rad : -1.f, std::memory_order_relaxed);
+    pending_unc_adv_scale_.store(valid ? adv_scale : 1.f, std::memory_order_relaxed);
+    pending_unc_rot_scale_.store(valid ? rot_scale : 1.f, std::memory_order_relaxed);
 }
 
 void MissionRunner::note_measured_speed(float mps)
@@ -417,15 +433,22 @@ bool MissionRunner::write_profile_csv(const std::string &dir, const std::string 
     o.precision(5);
     o << "# actuation stream, sampled in the velocity-output thread (fixed rate, see MissionProfileSample)\n"
       << "# route_s_m = arc length along the route, cumulative across laps; -1 = not a continuous route\n"
-      << "# v_meas_fresh=0 means v_meas_mps is HELD from an earlier row — do not treat it as signal\n";
+      << "# v_meas_fresh=0 means v_meas_mps is HELD from an earlier row — do not treat it as signal\n"
+      << "# pose_xy_std_m/pose_theta_std_rad = localisation sigma the speed limiter saw; -1 = the RT edge\n"
+      << "#   carried NO covariance, so the limiter was INERT that cycle (not the same as a small sigma)\n"
+      << "# unc_adv_scale/unc_rot_scale = multipliers it actually applied; 1.0 = no throttling.\n"
+      << "#   adv_mps is POST-scale, so cmd_adv(mppi_diag) * unc_adv_scale should reproduce it\n";
     if (truncated)
         o << "# ** TRUNCATED at " << kMaxProfileRows << " rows — the run outlasted the buffer **\n";
-    o << "t_ms,lap,adv_mps,side_mps,rot_rps,freshness,v_meas_mps,v_meas_fresh,route_s_m\n";
+    o << "t_ms,lap,adv_mps,side_mps,rot_rps,freshness,v_meas_mps,v_meas_fresh,route_s_m,"
+         "pose_xy_std_m,pose_theta_std_rad,unc_adv_scale,unc_rot_scale\n";
     for (const auto &r : rows)
         o << r.t_ms << ',' << r.lap << ','
           << r.adv_mps << ',' << r.side_mps << ',' << r.rot_rps << ','
           << r.freshness << ',' << r.v_meas_mps << ',' << (r.v_meas_fresh ? 1 : 0) << ','
-          << r.route_s_m << '\n';
+          << r.route_s_m << ','
+          << r.pose_xy_std_m << ',' << r.pose_theta_std_rad << ','
+          << r.unc_adv_scale << ',' << r.unc_rot_scale << '\n';
     const bool ok = o.good();
     std::printf("[mission] profile (%zu rows @ output rate) -> %s%s\n", rows.size(), path.c_str(),
                 ok ? "" : "  ** WRITE FAILED **");

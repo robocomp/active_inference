@@ -75,6 +75,29 @@ struct ControllerParams
     // swamping everything — the same dilution failure the MPPI's G_info had, in a new place. Do not turn
     // this on again until the term balance is diagnosed and the corridor test is extended to a real tour.
     bool route_optimize = false;
+    // ── LOCAL ELASTIC BAND (route deformed at control rate against the LIVE field) ────────────────
+    // The route optimiser above runs ONCE, when the route is installed, against GridPlanner's static
+    // room-frame EDT — polygons only. The band re-runs the SAME objective every cycle on a window of
+    // control points ahead of the robot, against the MPPI's live robot-frame ESDF (rebuilt each compute
+    // from LiDAR), so the geometry keeps absorbing what the world actually says. This is Quinlan/
+    // Brock-Khatib with the B-spline control polygon as the decision variable, which is what
+    // route_optimizer already is — only the field and the variable window differ.
+    // ★OFF by default. It deforms the route the robot is driving; it must be earned on measurements.
+    bool band_enabled = false;
+    // Gauss-Newton steps per cycle. This is a WARM-STARTED incremental solve, not a fresh one: the
+    // polygon already sits near its optimum, so a handful of steps tracks a moving field. 30 (the build
+    // value) at control rate would be re-solving from scratch 10 times a second.
+    int   band_iterations = 4;
+    // Metres of route AHEAD of the robot left frozen before the window opens. The curve must not move
+    // under the robot, and the follower's carrot looks ahead — deforming inside that lookahead steps the
+    // command. Everything behind the robot is frozen too (arc length is measured from s=0).
+    float band_lead_m = 1.0f;
+    // Length of the deformable window beyond the lead. Bounded because a band is a LOCAL edit by
+    // definition, and because the live ESDF is an 8x8 m robot-frame box — asking about geometry outside
+    // it returns "no obstacle" (100 m), which is honest but carries no information.
+    float band_window_m = 4.0f;
+    // Run the band every N control cycles. 1 = every cycle.
+    int   band_period_cycles = 1;
     // Route optimiser: speed (0) <-> safety (1). Trades PRECISION between the clearance preference and
     // the curvature prior (see RouteOptimizerConfig::safety_bias). 0.5 is exactly the written weights, so
     // it is inert until moved. Live from the UI slider; applies to the next route build or repair.

@@ -120,6 +120,88 @@ RouteSmoothing = 0.40
 # about the tour, not about this switch.
 # ★An optimised route CHANGES THE STIMULUS: a run under this flag measures the route, not the controller.
 RouteOptimize = true
+
+# ── WHICH CONTROLLER DRIVES (stage 2 A/B) ──
+# "mppi"  = samples K rollouts and scores them; does its own obstacle avoidance (g_obs + g_lat are ~99%
+#           of its objective). This is what has driven every lap so far.
+# "pd"    = geometric carrot tracker (PD on carrot bearing + cos-shaped speed). It does NOT avoid
+#           obstacles; it assumes the route is already clear, which is the BAND's job.
+# ★"pd" is only coherent with BandEnabled = true. Together they are the band-plus-tracker architecture
+#  the whole exercise is aimed at; "pd" alone leaves NOTHING doing avoidance but the safety gate, and
+#  the agent prints a warning at startup if you do that.
+# ★Stage 1 measured a NULL because MPPI and the band duplicate each other's work. Stage 2 is where the
+#  band's avoidance replaces the sampler's rather than shadowing it, so this is the real test.
+# ★2026-08-02 set to "pd" for the first stage-2 lap. BandEnabled is true, so avoidance is the band's.
+# Restore "mppi" to get every previous lap's controller back.
+ControlMode = "pd"
+# Cross-track feedback for the PD tracker, in Stanley's form: the steering error becomes
+#   carrot_bearing + atan(gain * cross_track / max(soft, speed))
+# 0 = pure pursuit, which steers at the carrot ONLY and therefore converges to the carrot's DIRECTION
+# rather than to the path — it cuts every corner and wanders off the route the band just optimised.
+# Higher = sticks harder to the route; too high oscillates. Soft is the standstill softening constant.
+# ★2026-08-02 1.0 -> 2.0. Raised on evidence, not feel: tools/tune_cross_track.py over laps 143347 and
+# 143910 gives signed bias +0.003/-0.008 m, sign changes 0.20-0.36 Hz and autocorrelation at 0.5 s of
+# +0.85/+0.89 — the error is slowly varying and PERSISTENT, not oscillating. Over-gain would show as
+# oscillation about zero with NEGATIVE autocorrelation at half a period. So 1.0 was at worst too low and
+# could not have been too high. Expect cross_track_rms to fall from ~0.10; if it instead starts
+# oscillating, that autocorrelation goes negative and the tool will say so.
+PdCrossTrackGain = 1.4
+PdCrossTrackSoft = 0.30
+
+# ── LOCAL ELASTIC BAND (stage 1: the route deforms, the MPPI still follows it) ──
+# RouteOptimize above runs ONCE at install against GridPlanner's STATIC room-frame EDT (polygons only).
+# The band re-runs the SAME objective every cycle on a window of control points ahead of the robot,
+# against the MPPI's LIVE robot-frame ESDF, so unexpected obstacles reshape the geometry instead of
+# being fought by the follower. Quinlan/Brock-Khatib, with the B-spline control polygon as the decision
+# variable — which is what route_optimizer already was.
+# ★OFF by default: it deforms the route the robot is driving. Turn on for an A/B, not by habit.
+# ★BandLead is the safety-critical one. Everything behind the robot is frozen (arc length is measured
+# from s=0, so a curve that moves behind the robot changes what progress() means), and BandLead extends
+# that freeze AHEAD so the geometry cannot shift inside the follower's own lookahead.
+# ★2026-08-02 A/B IN PROGRESS — ALTERNATING, currently on the OFF arm (lap 3 of 4).
+#   1. OFF  20260802-133550  104.5 s  0.349 m/s  78 rev (2.14/m)  p05 0.1009
+#   2. ON   20260802-135128  105.4 s  0.347 m/s  66 rev (1.80/m)  p05 0.0784
+#   3. OFF  20260802-135917  103.2 s  0.355 m/s  65 rev (1.77/m)  p05 0.1016
+#   4. ON   <- this lap
+# ★Alternating rather than two more of the same: everything else in this system drifts between laps
+# (localiser state, the room's furniture, what the residual grid has accumulated), and ON,ON,OFF,OFF
+# cannot separate the flag from the drift. Order matters more than count at n=2.
+# ★★READ AFTER LAP 3: the REVERSAL effect did not survive. OFF gave 2.14 then 1.77 rev/m — an OFF-to-OFF
+# spread of 0.37 against an ON-vs-OFF difference of 0.15. n=1 was noise.
+# ★★What DID emerge: the two OFF laps agree on p05 clearance to 0.0007 m (0.1009, 0.1016) while ON gave
+# 0.0784 — a 0.023 m reduction, 33x the OFF-to-OFF spread. Lap 4 is testing THAT, not the reversals.
+BandEnabled = true
+BandIterations = 4        # warm-started incremental solve; 30 (the build value) would re-solve from scratch at 10 Hz
+BandLead = 1.0            # m of route ahead of the robot left frozen
+BandWindow = 4.0          # m of deformable window beyond the lead
+BandPeriodCycles = 1      # run every N cycles
+
+# ── MPPI scoring regime (A/B, all OFF = today's behaviour) ──
+# Measured in the offline closed-loop replay (tools/mppi_bench --loop, frozen world): the rotation weave
+# goes from 11 sign flips per 10 s to 2 with BoundedCosts + LambdaFixed + MppiLambda = 1, at a cost of
+# about 20% speed. Sharply tuned — MppiLambda = 3 gives 16 flips.
+# ★The three belong together. BoundedCosts clamps every per-step term and makes totals per-step averages,
+# which is the PRECONDITION for a small fixed temperature to mean anything: nav2 runs temperature 0.3
+# because its critics are O(1), and its huge collision cost is then de facto hard rejection. Our cost
+# spread is ~1400, so a small lambda WITHOUT bounded costs gives ESS 0.03 and a robot that covers 0.93 m
+# in ten seconds (measured).
+# ★InjectionSeeds = false is NOT part of the regime: removing them made the weave worse (2 -> 17).
+# ★★2026-08-02 TESTED LIVE AND REVERTED — the offline result DID NOT TRANSFER, and it failed in the
+# wrong DIRECTION. One lap under BoundedCosts+LambdaFixed+Lambda=1 (run 20260802-124835) against the
+# baseline lap seven minutes earlier on the same route (20260802-124128): reversals 79 -> 140 (2.21 ->
+# 4.03 per metre, against a 13-lap baseline band of 2.21-3.01), lap 116.8 -> 126.8 s, mean speed 0.306 ->
+# 0.274 m/s. The predicted ~20% speed cost never appeared either.
+# ★The regime itself worked — it is not a plumbing failure. Over 1277 cycles lambda_used was 1.000 with
+# min == max, and cost_range fell from ~1400 to 11.7. Bounded costs bounded the costs and the fixed
+# temperature stayed fixed; the weave still nearly doubled.
+# ★★Therefore: the lateral term's 91.6% cost share is NOT the cause of the weave. Under this regime
+# g_lat drops to ~30% (g_obs 4.02, g_lat 2.47, g_goal 1.63) and the robot weaves MORE. And the offline
+# bench predicted 11 -> 2 flips, so it is wrong about the sign, not just the size — nothing measured in
+# --loop transfers until the 1.72 Hz (bench) vs 0.69 Hz (robot) gap is explained.
+MppiBoundedCosts = false
+MppiLambdaFixed = false
+MppiLambda = 8.0
+MppiInjectionSeeds = true
 LambdaContinuity = 0.0
 ContinuityRotFactor = 1.0
 AffordanceLambdaCost = 0.2    # grounded EFE selection nav-cost weight (nats per metre): G = λ·dist − ΔH
@@ -132,14 +214,37 @@ MaxLateralAccel = 1.0
 MaxRotSpeed = 0.8
 PosGain = 1.2
 RotGain = 1.5
-PoseXYStdSlow = 0.03
+# ★★2026-08-02 MEASURED, was 0.03. The knee sat BELOW the localiser's achievable floor: over lap
+# 20260802-131205 the best sigma_xy anywhere was 0.0429 m (median 0.060, p90 0.072), so 0.0% of the lap
+# was under the old knee and the ramp NEVER released — it had degenerated into a constant 0.83x tax on
+# forward speed, throttling 89% of output samples and accounting for the whole 17% gap between the MPPI's
+# cmd_adv (0.353 mean) and the commanded adv_mps (0.293). 0.08 sits just above the observed p90, so the
+# ramp releases in normal operation and re-engages only when localisation genuinely degrades.
+# ★The growth-rate cap (PosePredictionHorizon/PoseXYStdGrowthPerMps) is untouched and still guards the
+# real constraint — do not outrun the rate localisation can correct. It bound only 6.4% of the lap; the
+# absolute ramp was doing 93% of the throttling. Restore 0.03 to get the old behaviour back.
+PoseXYStdSlow = 0.08
 PoseXYStdStop = 0.12
 PoseThetaStdSlow = 0.04
 PoseThetaStdStop = 0.20
 MinAdvSpeedScale = 0.15
 MinRotSpeedScale = 0.05
 PosePredictionHorizon = 0.4
-PoseXYStdGrowthPerMps = 0.5
+# ★★2026-08-02 MEASURED, was 0.5. This asserts sigma grows 0.5 m per metre driven, so the predictive cap
+# (v <= (sigma_stop - sigma)/(horizon*growth)) allowed only 0.30 m/s at sigma=0.06 — below what the MPPI
+# asks for, which is why it became the binding term (21.2% of the lap) once the absolute ramp was fixed.
+# ★Measured over 839 sigma-update intervals across laps 20260802-131205 and -132535: d(sigma)/dt during
+# RISING intervals is FLAT at 0.010-0.016 m/s across every speed bin, against a model predicting
+# 0.032 -> 0.306. Ratio measured/model falls 0.49 -> 0.03 as speed rises, i.e. the linear-in-v FORM is
+# wrong, not just the coefficient. Cross-check, independently in both laps: mean sigma by speed bin is
+# 0.067 at 0-0.1 m/s and 0.057-0.059 at 0.6-1.0 m/s — driving FASTER goes with LOWER sigma. Net dsigma/dt
+# over all intervals is +0.001 m/s (steady state). Sigma here is set by the localiser's convergence
+# (~0.06 m), not by motion.
+# ★0.1 is still 3-10x more pessimistic than measured, so the margin is real: at sigma=0.06 the cap permits
+# 1.5 m/s (inert), at sigma=0.11 it permits 0.25 m/s (full authority as sigma approaches the 0.12 stop).
+# RECALIBRATED, NOT DELETED: the measurement covers 0-1 m/s in a mapped room with a converged filter and
+# says nothing about a feature-poor corridor or a localisation loss, which is what this term guards.
+PoseXYStdGrowthPerMps = 0.1
 PoseThetaStdGrowthPerRps = 1.0
 AdvRotationCouplingExponent = 0.5
 TemporaryObstacleHistoryScans = 5

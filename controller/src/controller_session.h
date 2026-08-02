@@ -201,7 +201,8 @@ private:
     std::ofstream mppi_csv_;
     bool mppi_csv_open_ = false;
     void log_mppi_diagnostics(std::uint64_t t_ms, const rc::TrajectoryController::ControlOutput &o,
-                              float commanded_adv, float measured_speed);
+                              float commanded_adv, float measured_speed,
+                              float path_kappa, float measured_rot);
 
     // Closest the BODY has come to an obstacle this run; the cycle that beats it gets snapshotted.
     float tightest_cycle_clearance_ = std::numeric_limits<float>::max();
@@ -249,6 +250,24 @@ private:
     // CONTINUOUS ROUTE MODE. The whole mission as one arc-length curve; no per-waypoint target, no
     // arrival test, no per-waypoint replan. Built once when a mission starts.
     rc::RouteFollower route_;
+    // ── Local elastic band (see step_route_band / ControllerParams::band_*) ──
+    // Deform the installed route in a window ahead of the robot against the live ESDF, every cycle.
+    // Counters, not just a flag: "the band is on" and "the band is doing something" are different
+    // claims, and only the second one is evidence.
+    void step_route_band(const ControllerRobotPose &robot_pose, rc::TrajectoryController &path_controller);
+    // Truncate band_diag.csv for THIS run, whether or not the band is enabled. Called before any early
+    // return in step_route_band: a disabled run that never opens the file leaves the previous run's
+    // rows at the fixed path for archive_on_stop to copy under this run's stamp.
+    void ensure_band_csv(bool band_enabled);
+    void log_band_diagnostics(std::uint64_t t_ms, const rc::RouteOptimizerReport &rep,
+                              std::size_t freeze_before, std::size_t freeze_after, std::size_t ctrl_count);
+    rc::RouteOptimizerReport band_last_report_{};
+    std::ofstream band_csv_;
+    bool band_csv_open_ = false;
+    long long band_cycle_ = 0;
+    long long band_deforms_ = 0;
+    float band_move_max_m_ = 0.f;
+    double band_move_sum_m_ = 0.0;
     bool route_active_ = false;
     bool waypoint_mode_logged_ = false;
     std::uint64_t last_route_build_ms_ = 0;

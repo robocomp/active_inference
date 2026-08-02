@@ -404,6 +404,7 @@ void SpecificWorker::initialize()
 	// Keep the per-cycle MPPI diagnostics with the run they describe. Written live to a fixed path and
 	// truncated by the next run, so without this a comparison destroys its own baseline.
 	session_.mission().archive_on_stop("mppi_diag.csv");
+	session_.mission().archive_on_stop("band_diag.csv");
 	session_.mission().archive_on_stop("route_events.csv");
 	session_.mission().archive_on_stop("route_geometry.csv");
 	session_.mission().archive_on_stop("mppi_cycle.txt");
@@ -760,10 +761,22 @@ void SpecificWorker::load_params()
 	load_optional_cast<double>("Controller.RouteSpacing", params.route_spacing_m);
 	load_optional_cast<double>("Controller.RouteSmoothing", params.route_smoothing_m);
 	load_optional("Controller.RouteOptimize", params.route_optimize);
+	load_optional("Controller.BandEnabled", params.band_enabled);
+	load_optional("Controller.BandIterations", params.band_iterations);
+	load_optional_cast<double>("Controller.BandLead", params.band_lead_m);
+	load_optional_cast<double>("Controller.BandWindow", params.band_window_m);
+	load_optional("Controller.BandPeriodCycles", params.band_period_cycles);
 	load_optional_cast<double>("Controller.RouteSafetyBias", params.route_safety_bias);
 
 	load_optional_cast<double>("Controller.LambdaContinuity", params.lambda_continuity);
 	load_optional_cast<double>("Controller.ContinuityRotFactor", params.continuity_rot_factor);
+	// ── "NAV2 REGIME" A/B (all default off; see TrajectoryController::Params::bounded_costs) ──
+	// Config rather than compile-time so switching regimes is a restart, not a rebuild — three runs today
+	// were confounded by a binary that did not match what was believed to be running.
+	load_optional("Controller.MppiBoundedCosts", path_controller_.params.bounded_costs);
+	load_optional("Controller.MppiLambdaFixed", path_controller_.params.lambda_fixed);
+	load_optional_cast<double>("Controller.MppiLambda", path_controller_.params.mppi_lambda);
+	load_optional("Controller.MppiInjectionSeeds", path_controller_.params.enable_injection_seeds);
 	path_controller_.params.lambda_continuity = std::max(0.f, params.lambda_continuity);
 	path_controller_.params.continuity_rot_factor = std::max(0.f, params.continuity_rot_factor);
 	path_controller_.params.min_adv_cmd = 0.f;
@@ -773,7 +786,28 @@ void SpecificWorker::load_params()
 	path_controller_.params.straight_speed_heading_threshold = std::max(0.f, params.straight_speed_heading_threshold_rad);
 	path_controller_.params.straight_speed_clearance_margin = std::max(0.f, params.straight_speed_clearance_margin_m);
 	path_controller_.params.straight_speed_min_goal_dist = std::max(0.f, params.straight_speed_min_goal_dist_m);
-	path_controller_.set_control_mode(rc::TrajectoryController::ControlMode::MPPI);
+	// ── STAGE 2 A/B: which controller drives ──
+	// MPPI samples K rollouts and scores them, doing obstacle avoidance itself. PD follows the carrot
+	// geometrically and does NOT — it relies on the route already being clear, which is the local
+	// elastic band's job. So "pd" is only a coherent choice with BandEnabled=true: together they are
+	// the band-plus-tracker architecture, separately they are half of one.
+	// Cross-track feedback for the PD tracker. Without it the tracker is pure pursuit and cuts corners:
+	// it converges to the carrot's direction, not to the route the band just optimised.
+	load_optional_cast<double>("Controller.PdCrossTrackGain", path_controller_.params.pd_cross_track_gain);
+	load_optional_cast<double>("Controller.PdCrossTrackSoft", path_controller_.params.pd_cross_track_soft_mps);
+	{
+		std::string mode = "mppi";
+		load_optional("Controller.ControlMode", mode);
+		std::ranges::transform(mode, mode.begin(), [](unsigned char c) { return std::tolower(c); });
+		const bool pd = (mode == "pd" or mode == "pursuit" or mode == "tracker");
+		path_controller_.set_control_mode(pd ? rc::TrajectoryController::ControlMode::PD
+		                                     : rc::TrajectoryController::ControlMode::MPPI);
+		if (pd and not params.band_enabled)
+			std::println("[control] ⚠ ControlMode=pd with BandEnabled=false: NOTHING is doing obstacle "
+			             "avoidance except the safety gate. This is not the stage-2 architecture.");
+		std::println("[control] mode = {}", pd ? "PD carrot tracker (avoidance delegated to the band)"
+		                                       : "MPPI (samples and scores its own avoidance)");
+	}
 	// Say which way the robot will be driven, at startup, unconditionally. Two attempts at diagnosing
 	// "it still does the old thing" were spent reasoning about whether a flag had arrived; one printed
 	// line settles it.
@@ -782,6 +816,18 @@ void SpecificWorker::load_params()
 	             params.route_continuous ? "CONTINUOUS (one C2 curve, arc-length)" : "WAYPOINTS (per-leg)",
 	             params.route_continuous, params.route_spacing_m, params.route_smoothing_m,
 	             params.path_horizon_waypoints, params.lambda_continuity, params.smooth_planned_path);
+	// Same reason, for the MPPI scoring regime: the three A/B flags are the difference between an
+	// adaptive temperature of ~234 and a fixed 1, and nothing else in the log says which one is running.
+	std::println("[mppi] regime = {}   (BoundedCosts={}, LambdaFixed={}, Lambda={:.2f}, InjectionSeeds={})",
+	             (path_controller_.params.bounded_costs and path_controller_.params.lambda_fixed)
+	                 ? "NAV2 (bounded costs, fixed temperature)" : "BASELINE (adaptive lambda floor)",
+	             path_controller_.params.bounded_costs, path_controller_.params.lambda_fixed,
+	             path_controller_.params.mppi_lambda, path_controller_.params.enable_injection_seeds);
+	// Same reason again: the band silently reshapes the route the robot is driving, so "is it on" must
+	// never be a question answered by reading a config file and hoping it was the one that was loaded.
+	std::println("[band] local elastic band = {}   (iterations={}, lead={:.2f} m, window={:.2f} m, every {} cycles)",
+	             params.band_enabled ? "ON (route deformed against the LIVE ESDF)" : "off (route fixed at install)",
+	             params.band_iterations, params.band_lead_m, params.band_window_m, params.band_period_cycles);
 }
 
 void SpecificWorker::refresh_mission_list()
