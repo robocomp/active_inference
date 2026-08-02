@@ -285,11 +285,20 @@ void ControllerDisplay::present()
                                  not snap.mission_view.running);
     // Mission status rides in the WINDOW TITLE. As a stretchy label in the mission row it forced the whole
     // window wider than the 2D view needs; the title bar is free real estate and always visible.
-    if (const QString t = snap.mission_view.status.empty()
-                              ? QStringLiteral("controller — planner")
-                              : QStringLiteral("controller — planner · %1")
-                                    .arg(QString::fromStdString(snap.mission_view.status));
-        custom_widget_->windowTitle() != t)
+    // Control rate rides here too. It is the number that says whether the loop is keeping its deadline,
+    // and it was only ever visible on stdout — which is exactly where nobody looks while driving. Shown
+    // as rate plus the WORST period in the last window, because the mean stays healthy through a stall.
+    const float hz = control_hz_.load(std::memory_order_relaxed);
+    const float worst = control_worst_ms_.load(std::memory_order_relaxed);
+    QString rate;
+    if (hz > 0.f)
+        rate = QStringLiteral("%1 Hz").arg(hz, 0, 'f', 1)
+             + (worst > 0.f ? QStringLiteral(" (worst %1 ms)").arg(worst, 0, 'f', 0) : QString());
+    QString t = QStringLiteral("controller — planner");
+    if (!rate.isEmpty()) t += QStringLiteral(" · ") + rate;
+    if (!snap.mission_view.status.empty())
+        t += QStringLiteral(" · ") + QString::fromStdString(snap.mission_view.status);
+    if (custom_widget_->windowTitle() != t)
         custom_widget_->setWindowTitle(t);
 
     if (!snap.valid || !viewer_2d_)

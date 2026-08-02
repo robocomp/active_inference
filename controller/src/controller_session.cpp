@@ -87,6 +87,14 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
                                          ControllerMotionCommander &motion_commander,
                                          ControllerDisplay &display)
 {
+    // End-to-end perception latency, sampled once per cycle where the world model is in scope. Measured
+    // against the RT edge's own validity stamp (the lidar scan behind the pose), so it spans capture ->
+    // room_concept -> DSR -> this read. -1 when the edge carries no stamp history.
+    if (const auto age = world_model.pose_stamp_age_ms(timestamp_ms); age.has_value())
+        world_model_pose_stamp_age_ms_ = static_cast<float>(*age);
+    else
+        world_model_pose_stamp_age_ms_ = -1.f;
+
     if (!world_model.refresh_graph_state())
     {
         room_polygon_.clear();
@@ -388,7 +396,9 @@ void ControllerSession::log_mppi_diagnostics(std::uint64_t t_ms,
                                              float commanded_adv, float measured_speed,
                                              float path_kappa, float measured_rot,
                                              float pose_xy_std, float pose_theta_std,
-                                             const ControllerRobotPose &robot_pose)
+                                             const ControllerRobotPose &robot_pose,
+                                             const ControllerMotionCommander::OutputRateStats &ors,
+                                             float pose_stamp_age)
 {
     if (!mppi_csv_open_)
     {
@@ -414,6 +424,18 @@ void ControllerSession::log_mppi_diagnostics(std::uint64_t t_ms,
                          "#   not mix them. This one is 0 in mppi mode (the law does not run).\n"
                          "#   With path_kappa this is the pair a gain self-tuner needs: under-gain shows\n"
                          "#   as e correlated with kappa, over-gain as e oscillating about zero.\n"
+                         "# pose_stamp_age = END-TO-END perception latency in ms: wall clock now minus the\n"
+                         "#   VALIDITY STAMP on the room<-robot RT edge, which room_concept sets from the\n"
+                         "#   lidar scan that produced the pose. So it spans lidar capture -> room_concept\n"
+                         "#   -> DSR -> this read. -1 = the edge carries no stamp history, which is not\n"
+                         "#   the same as zero latency. This replaces a residual with a measurement.\n"
+                         "# out_* / ice_* = the ACTUATION path, per control cycle (the same numbers the\n"
+                         "#   5 s [vel-out] line prints — it is per-cycle, not per-5s, because the stats\n"
+                         "#   reset on read and only the PRINT is throttled). ice_ms is the synchronous\n"
+                         "#   setSpeedBase RPC to the bridge, a HARD FLOOR on the output period: measured\n"
+                         "#   0.2-41.3 ms, so the delivery delay swings ~40 ms cycle to cycle. Variable\n"
+                         "#   actuation delay costs more phase margin than fixed delay of the same size.\n"
+                         "#   Lagged one control cycle (cached, so reading it cannot steal the window).\n"
                          "# model_dropped = room-frame MODEL points (furniture, room polygon) the ESDF\n"
                          "#   dropped because the lidar already reported an obstacle there. STEADY means\n"
                          "#   model and measurement agree — the normal case, NOT a fault. A sharp CHANGE\n"
@@ -443,7 +465,9 @@ void ControllerSession::log_mppi_diagnostics(std::uint64_t t_ms,
                          "cmd_adv,cmd_rot,meas_speed,min_esdf,explore,p_free,steer_conc,side_asym,"
                          "sg_trig,gate_scale,gate_horizon,gate_min_esdf,gate_hard_stop,gate_hard_coll,"
                          "pd_cross_err_m,path_kappa,meas_rot,bump_push,gap_l,gap_r,pose_xy_std,"
-                         "pose_theta_std,carrot_bear,carrot_dist,pose_x,pose_y,pose_th,model_dropped\n";
+                         "pose_theta_std,carrot_bear,carrot_dist,pose_x,pose_y,pose_th,model_dropped,"
+                         "out_ticks,out_period_ms,out_period_max,ice_ms,ice_max,cmd_age_max,fresh_min,"
+                         "pose_stamp_age\n";
         mppi_csv_open_ = true;
     }
     if (!mppi_csv_.is_open()) return;
@@ -462,7 +486,11 @@ void ControllerSession::log_mppi_diagnostics(std::uint64_t t_ms,
               << pose_xy_std << ',' << pose_theta_std << ','
               << o.carrot_bearing_rad << ',' << o.carrot_dist_m << ','
               << robot_pose.pos.x() << ',' << robot_pose.pos.y() << ',' << robot_pose.theta << ','
-              << o.esdf_model_dropped << '\n';
+              << o.esdf_model_dropped << ','
+              << ors.ticks << ',' << ors.period_mean_ms << ',' << ors.period_max_ms << ','
+              << ors.ice_mean_ms << ',' << ors.ice_max_ms << ','
+              << ors.cmd_age_max_ms << ',' << ors.scale_min << ','
+              << pose_stamp_age << '\n';
 }
 
 void ControllerSession::log_route_event(const char *event, bool ok, std::uint64_t t_ms,
@@ -1191,7 +1219,9 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         // one update and cannot change any conclusion drawn from it.
         const auto ud = motion_commander.last_uncertainty_diag();
         log_mppi_diagnostics(overlay_now_ms_, control_output, control_output.adv, base_speed_lin_,
-                             kappa_here, room_vel_.omega, ud.xy_std_m, ud.theta_std_rad, robot_pose);
+                             kappa_here, room_vel_.omega, ud.xy_std_m, ud.theta_std_rad, robot_pose,
+                             motion_commander.last_output_rate_stats(),
+                             world_model_pose_stamp_age_ms_);
         // CAPTURE THE HARDEST CYCLE OF THE RUN for offline replay (tools/mppi_bench). "Hardest" is where
         // the controller had the least room to choose: every rollout infeasible, or the tightest the
         // horizon ever got. A snapshot from open floor proves nothing — measured, a cost term that is

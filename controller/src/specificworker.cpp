@@ -162,10 +162,12 @@ void SpecificWorker::initialize()
 	        // GUI thread and compute() (MPPI) can block for hundreds of ms. Just
 	        // wake the control thread, which runs compute() asynchronously.
 	        control_operating_.store(true, std::memory_order_release);
+	        operating_latched_.store(true, std::memory_order_release);
 	        control_cv_.notify_one();
 	    },
 	    .on_degraded_enter = [this]()
 	    {
+	        operating_latched_.store(false, std::memory_order_release);
 	        if (shutting_down_.load())
 	            return;
 	        QString m;
@@ -467,9 +469,10 @@ void SpecificWorker::compute()
 	struct ScopedComputePerfLog
 	{
 		FPSCounter &counter;
-		~ScopedComputePerfLog() { SpecificWorker::log_compute_perf(counter); }
+		ControllerDisplay *display;
+		~ScopedComputePerfLog() { SpecificWorker::log_compute_perf(counter, display); }
 	};
-	ScopedComputePerfLog perf_log{compute_perf_counter};
+	ScopedComputePerfLog perf_log{compute_perf_counter, &display_};
 
 	// Verify the output-rate guarantee rather than assume it. period_max is the number that matters: it is the
 	// longest the base went without a command, and it must stay near VelocityOutputPeriodMs no matter how badly
@@ -568,7 +571,7 @@ void SpecificWorker::compute()
 
 float SpecificWorker::worst_compute_period_ms_ = 0.f;
 
-void SpecificWorker::log_compute_perf(FPSCounter &counter)
+void SpecificWorker::log_compute_perf(FPSCounter &counter, ControllerDisplay *display)
 {
 	counter.cont++;
 	const auto now = std::chrono::high_resolution_clock::now();
@@ -601,6 +604,8 @@ void SpecificWorker::log_compute_perf(FPSCounter &counter)
 	// the number that corresponds to what you feel as a stall.
 	std::println("[CTRL] fps={:.1f} cpu={:.0f}% period mean {:.1f} ms  WORST {:.1f} ms",
 	             fps, cpu, counter.get_period(), worst_compute_period_ms_);
+	// Same numbers into the window title — visible while driving, unlike stdout.
+	if (display) display->set_control_rate(fps, worst_compute_period_ms_);
 	worst_compute_period_ms_ = 0.f;
 	counter.begin = now;
 	counter.cont = 0;
@@ -689,6 +694,11 @@ void SpecificWorker::load_params()
 	load_optional_cast<double>("Controller.PosGain", params.pos_gain);
 	load_optional_cast<double>("Controller.RotGain", params.rot_gain);
 	load_optional_cast<double>("Controller.VelocityOutputPeriodMs", params.velocity_output_period_ms);
+	// Run the pipeline on FRESH LIDAR rather than on the GUI-thread timer — see
+	// ControllerParams::control_data_driven. The rate then comes from the sensor (20 Hz) instead of
+	// from Period.Compute, and the decision is aligned to the scan it is made from.
+	load_optional("Controller.ControlDataDriven", params.control_data_driven);
+	load_optional_cast<double>("Controller.ControlPollMs", params.control_poll_ms);
 	load_optional_cast<double>("Controller.CommandFreshnessTauMs", params.command_freshness_tau_ms);
 	load_optional("Transforms.interpolate_rt", params.interpolate_rt);
 	load_optional("Transforms.overlay_extrapolate_to_now", params.overlay_extrapolate_to_now);
@@ -998,7 +1008,9 @@ void SpecificWorker::control_loop()
 	{
 		{
 			std::unique_lock<std::mutex> lock(control_mutex_);
-			control_cv_.wait_for(lock, 20ms, [this]()
+			const auto poll = std::chrono::milliseconds(
+			    static_cast<int>(std::max(1.f, params.control_poll_ms)));
+			control_cv_.wait_for(lock, poll, [this]()
 			{
 				return !control_running_.load(std::memory_order_acquire)
 				    || control_operating_.load(std::memory_order_acquire)
@@ -1045,7 +1057,43 @@ void SpecificWorker::control_loop()
 		// 3) Heavy pipeline (planning + MPPI + command emission), guarded by the LiDAR
 		//    stream watchdog: if the stream stalls, hold the robot in a local emergency
 		//    state and wait for recovery rather than planning on stale perception.
-		if (control_operating_.exchange(false, std::memory_order_acq_rel))
+		// ── WHAT TRIGGERS A DECISION ──────────────────────────────────────────────────────────
+		// Data-driven: a FRESH SCAN. The rate is then the sensor's (20 Hz, same as the DSR RT update)
+		// and the decision is aligned to the data it is made from, instead of to a GUI-thread timer
+		// that opens a gate every Period.Compute and uses whichever scan happened to survive.
+		// Legacy: the edge set by on_operating_loop, consumed here — the behaviour every run so far.
+		const bool data_driven = params.control_data_driven;
+		// ★BOOTSTRAP. poll_lidar_media() returns false while graph_state().robot_name is empty, and that
+		// name is filled by sync_world_state() — which runs INSIDE the pipeline. Gating the pipeline on
+		// fresh lidar alone is therefore a deadlock: no scan without the graph, no graph without a cycle.
+		// Until the world state is ready the loop runs on its own poll tick, exactly as the timer path
+		// did; once ready the sensor takes over the cadence. Costs one branch and removes a hang that
+		// only appears on a cold start, which is the worst kind to leave in.
+		const bool world_ready = world_model_.graph_state().ready();
+		const bool trigger = data_driven
+		                   ? (operating_latched_.load(std::memory_order_acquire)
+		                      and (fresh_lidar or not world_ready))
+		                   : control_operating_.exchange(false, std::memory_order_acq_rel);
+		if (data_driven)
+			control_operating_.store(false, std::memory_order_release);   // keep the edge from piling up
+		// Say WHY the pipeline is idle, throttled. A data-driven loop that never triggers is silent
+		// otherwise, and the two possible causes need different fixes: no scan is arriving (reader /
+		// media plane) versus the state latch never being set (presence hooks).
+		if (data_driven and not trigger)
+		{
+			static std::uint64_t last_idle_log = 0;
+			const auto now_ms = static_cast<std::uint64_t>(
+			    std::chrono::duration_cast<std::chrono::milliseconds>(
+			        std::chrono::system_clock::now().time_since_epoch()).count());
+			if (now_ms - last_idle_log >= 2000)
+			{
+				last_idle_log = now_ms;
+				std::println("[ctrl-idle] data-driven: fresh_lidar={} operating_latched={} world_ready={}"
+				             "  (needs latched AND (fresh_lidar OR not world_ready))",
+				             fresh_lidar, operating_latched_.load(std::memory_order_acquire), world_ready);
+			}
+		}
+		if (trigger)
 		{
 			if (lidar_ever_received_)
 			{

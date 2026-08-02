@@ -22,6 +22,18 @@ public:
         std::uint64_t timestamp_ms,
         const std::optional<std::uint64_t> &last_lidar_timestamp_ms) const;
     std::optional<ControllerPoseUncertainty> read_pose_uncertainty() const;
+
+    /// Age, in ms, of the pose currently on the room<-robot RT edge, measured against ITS OWN validity
+    /// stamp rather than against when we noticed it change.
+    ///
+    /// room_concept writes the edge through the RT_API timestamped overload with `res.timestamp_ms` —
+    /// the LOCALISATION stamp, derived from the lidar scan that produced the pose. So the edge already
+    /// carries the capture time of the scan behind it, and comparing that to the wall clock gives
+    /// end-to-end LIDAR -> pose -> controller latency as a MEASUREMENT instead of a residual. Both
+    /// agents share a machine, so system_clock is common and the subtraction is meaningful.
+    /// nullopt when the edge carries no timestamp history (nothing to measure, which is not the same
+    /// as zero latency).
+    std::optional<std::uint64_t> pose_stamp_age_ms(std::uint64_t now_ms) const;
     std::optional<ControllerTargetInfo> read_target_in_room(std::uint64_t timestamp_ms) const;
     // Room-frame XY of an arbitrary node (e.g. an affordance's parent object), via the RT tree. Used
     // to re-aim a repaired affordance target's heading at the object it observes.

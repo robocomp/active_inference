@@ -213,7 +213,10 @@ private:
                               float commanded_adv, float measured_speed,
                               float path_kappa, float measured_rot,
                               float pose_xy_std, float pose_theta_std,
-                              const ControllerRobotPose &robot_pose);
+                              const ControllerRobotPose &robot_pose,
+                              const ControllerMotionCommander::OutputRateStats &ors,
+                              float pose_stamp_age);
+    float world_model_pose_stamp_age_ms_ = -1.f;
 
     // Closest the BODY has come to an obstacle this run; the cycle that beats it gets snapshotted.
     float tightest_cycle_clearance_ = std::numeric_limits<float>::max();

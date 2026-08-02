@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+
 #include <genericworker.h>
 
 #include <functional>
@@ -42,6 +44,16 @@ public:
      // and touching a QComboBox from there is undefined behaviour, not merely untidy.
     void set_mission_list(const std::vector<std::string> &names, const std::string &selected);
     // Stage the mission readout + waypoint overlay. Thread-safe, like update().
+    /// Control-loop rate, shown in the window title. Written from the CONTROL thread once a second and
+    /// read on the GUI thread when the title is composed — two independent scalars, so plain atomics are
+    /// enough and no snapshot plumbing is needed. worst_ms is the tail, which is what a stall feels like;
+    /// the mean alone hid a loop whose median was healthy while its tail ran past a second.
+    void set_control_rate(float hz, float worst_ms)
+    {
+        control_hz_.store(hz, std::memory_order_relaxed);
+        control_worst_ms_.store(worst_ms, std::memory_order_relaxed);
+    }
+
     void set_mission_state(const rc::MissionPanel::View &view,
                            const std::vector<Eigen::Vector2f> &waypoints,
                            int current_index);
@@ -89,6 +101,9 @@ public:
     void present();
 
 private:
+    std::atomic<float> control_hz_{0.f};
+    std::atomic<float> control_worst_ms_{0.f};
+
     struct DisplaySnapshot
     {
         std::optional<ControllerRobotPose> robot_pose;

@@ -343,7 +343,14 @@ ControllerMotionCommander::OutputRateStats ControllerMotionCommander::take_outpu
     stat_ticks_ = 0; stat_period_sum_ms_ = 0.f; stat_period_max_ms_ = 0.f;
     stat_cmd_age_max_ms_ = 0.f; stat_scale_min_ = 1.f;
     stat_ice_max_ms_ = 0.f; stat_ice_sum_ms_ = 0.f;
+    last_rate_stats_ = s;      // so the per-cycle CSV can read it without stealing the window
     return s;
+}
+
+ControllerMotionCommander::OutputRateStats ControllerMotionCommander::last_output_rate_stats() const
+{
+    const std::scoped_lock lock(mutex_);
+    return last_rate_stats_;
 }
 
 void ControllerMotionCommander::stop_robot()

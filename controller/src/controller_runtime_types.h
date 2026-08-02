@@ -130,6 +130,19 @@ struct ControllerParams
     // command is re-sent every tick even when unchanged (the old code skipped identical commands entirely, so
     // the base could hear nothing for seconds during steady driving).
     float velocity_output_period_ms = 50.f;
+    // ── DATA-DRIVEN CONTROL ──────────────────────────────────────────────────────────────────────
+    // false = the pipeline runs when the presence state machine's on_operating_loop hook sets a flag,
+    //         i.e. at Period.Compute on the GUI THREAD. Lidar is drained at the control thread's own
+    //         wake rate and mostly discarded, and whichever scan survives to the next gate opening is
+    //         the one used — measured lidar age at decision p50 103 ms against scans arriving every
+    //         50 ms, with sd 17 ms which is the beat between the two rates.
+    // true  = the pipeline runs when a FRESH SCAN ARRIVES. The rate then comes from the sensor (20 Hz,
+    //         matching the DSR RT update) instead of from a timer, and the decision is aligned to the
+    //         data it is made from. The GUI hook becomes a liveness signal only.
+    bool  control_data_driven = false;
+    // How often the control thread wakes to look for a new scan. Only an upper bound on how late a
+    // fresh scan can be noticed; it is not the control rate, which is the scan rate.
+    float control_poll_ms = 20.f;
     // Authority of a command decays as 1/(1+(age/τ)²) so a stalled planner coasts to a stop rather than
     // driving blind on a stale command. τ well above the healthy cycle time ⇒ no penalty in normal operation
     // (≈0.95 at 108 ms), strong attenuation by ~1 s. Not a watchdog cutoff — a continuous precision term.

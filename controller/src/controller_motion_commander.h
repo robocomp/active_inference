@@ -77,11 +77,16 @@ public:
         float ice_max_ms = 0.f;
     };
     OutputRateStats take_output_rate_stats();
+    /// The last stats take_output_rate_stats() computed, WITHOUT consuming the accumulators. The taking
+    /// call resets them, so a second consumer would silently steal the first one's window — this lets the
+    /// per-cycle CSV record the same numbers the 5 s [vel-out] line prints, one control cycle old.
+    OutputRateStats last_output_rate_stats() const;
 
 private:
     // Written by apply_uncertainty_speed_limit (const, hence mutable) and read on the same thread by the
     // control cycle that just called it. Never touched by the output loop, so it needs no lock.
     mutable UncertaintyDiag uncertainty_diag_{};
+    OutputRateStats last_rate_stats_{};   // cached copy of the last take (see last_output_rate_stats)
 
     // ── Fixed-rate output loop ──
     // The base used to be commanded from inside compute(), which meant the command rate WAS the perception

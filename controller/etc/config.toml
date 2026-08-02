@@ -100,6 +100,27 @@ ClearancePref = 0.9
 # reach of the push and steepens it: at the 0.44 m ESDF reading the tour used to hold near walls, the
 # penalty goes from 0.12 to 0.30. Measured body clearance was 0.117 min / 0.128 p05 against a 0.175 m
 # target; expect roughly 0.19 against the new 0.275 m target. Verify with p05_clearance_m, not min.
+# ── DATA-DRIVEN CONTROL (A/B, default off = every run so far) ──
+# false: the pipeline runs when the presence hook on_operating_loop sets a flag — i.e. at Period.Compute
+#        ON THE GUI THREAD. Lidar is drained at the control thread's own wake rate and mostly discarded;
+#        whichever scan survives to the next gate opening is the one used.
+#        ★Measured 2026-08-02: lidar age at decision p50 103 ms, sd 17 ms — against scans arriving every
+#        50 ms. The sd is the beat between the two rates; the median is a full extra scan period of
+#        avoidable dead time in a loop that is already delay-limited.
+# true:  the pipeline runs when a FRESH SCAN ARRIVES. Rate = sensor rate = 20 Hz = the DSR RT update, so
+#        the three line up instead of beating. The GUI hook becomes a liveness signal only.
+# ★The control thread is already independent (a real std::thread, measured period 100.0 ms mean / 103 ms
+# worst at 14-17% CPU) — what was coupled to the GUI was the CADENCE, not the work.
+# ★2026-08-02 ON. Prediction: lidar age at decision should collapse from p50 103 ms toward the poll
+# interval, and the control rate should go 10 -> ~20 Hz (watch [CTRL] fps). Falsified if gap_ms does not
+# move — that would mean the scan is already old when poll_lidar_media returns it, i.e. the latency is
+# upstream in the reader or the sensor, not in the gating.
+ControlDataDriven = true
+# ★2026-08-02 20 -> 10. Measured with 20 ms: the control period came out BIMODAL — p05 25 / p50 48 /
+# p90 66 ms — because a scan landing just after a poll waits a full interval while one landing just
+# before is taken immediately. That is poll granularity, not sensor jitter, and it is the cheapest
+# remaining delay: halving it halves the worst-case notice latency and should tighten the spread.
+ControlPollMs = 10        # how often to look for a new scan; an upper bound on notice latency, not the rate
 ComfortStandoff = 0.6
 # ── MODEL-vs-MEASUREMENT MERGE IN THE MPPI's ESDF ──
 # That grid mixes two sources with different frames of truth. Lidar points are EGOCENTRIC — already in

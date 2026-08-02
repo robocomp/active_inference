@@ -168,7 +168,7 @@ private:
 	// Where recorded missions live. Alongside the agent's other config, so a tour is versioned with the
 	// settings it was recorded under.
 	std::string missions_path_ = "etc/missions.toml";
-	static void log_compute_perf(FPSCounter &counter);
+	static void log_compute_perf(FPSCounter &counter, ControllerDisplay *display);
 	// Worst compute() period inside the current 1 s reporting window. The MEAN hides the problem — it sits at
 	// ~105 ms against a 100 ms target and looks healthy while the tail runs past a second.
 	static float worst_compute_period_ms_;
@@ -200,6 +200,9 @@ private:
 		std::thread control_thread_;
 		std::atomic<bool> control_running_{false};
 		std::atomic<bool> control_operating_{false};
+		// LATCHED "we are in Operating", as opposed to control_operating_ which is an edge consumed by
+		// the legacy timer path. Data-driven mode needs the STATE, not each tick.
+		std::atomic<bool> operating_latched_{false};
 		std::mutex control_mutex_;
 		std::condition_variable control_cv_;
 		std::mutex command_mutex_;
