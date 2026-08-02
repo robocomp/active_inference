@@ -30,7 +30,10 @@ def pct(xs, p):
 def main():
     path = sys.argv[1] if len(sys.argv) > 1 else "mppi_diag.csv"
     try:
-        rows = [r for r in csv.DictReader(open(path))]
+        # mppi_diag.csv carries a '#' comment header (added 2026-08-02 to document the gate_* and
+        # pd_cross_err_m columns). A bare DictReader takes the first comment line AS the header and
+        # then reports zero rows, so the comments must be stripped before parsing.
+        rows = [r for r in csv.DictReader(ln for ln in open(path) if not ln.startswith('#'))]
     except OSError:
         print(f"cannot open {path}")
         return 1

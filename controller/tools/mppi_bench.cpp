@@ -60,7 +60,6 @@ struct Row
     // command is held open-loop for the horizon. This is the number a cost change must not quietly ruin,
     // and it is the one that was missing when a term was deleted and the robot started hitting things.
     float cmd_clearance = 1e9f;
-    float esdf_on_plan = 0.f, body_extent = 0.f;
     float solve_ms = 0.f;
 };
 
@@ -277,8 +276,7 @@ int main(int argc, char **argv)
         r.g_cbf = out.g_cbf; r.g_vel = out.g_vel; r.g_smooth = out.g_smooth;
         r.n_collisions = out.n_collisions; r.min_esdf = out.min_esdf; r.p_free = out.p_free;
         const auto [clr, raw] = command_clearance(tc, out.average_trajectory_room, pose);
-        r.cmd_clearance = clr; r.esdf_on_plan = raw; r.body_extent = tc.body_extent_here();
-        return r;
+        r.cmd_clearance = clr;        return r;
     };
 
     std::printf("snapshot: %s   (%d seed%s per config)\n", path.c_str(), n_seeds, n_seeds > 1 ? "s" : "");

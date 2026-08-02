@@ -24,8 +24,8 @@ for. That transfers by construction. Stanley's form already removes the speed de
 other large cross-platform term.
 
 USAGE
-    tools/tune_cross_track.py <run-stamp-prefix> [...]
-    tools/tune_cross_track.py "etc/runs/complete tour/20260802-143347"
+    scripts/tune_cross_track.py <run-stamp-prefix> [...]
+    scripts/tune_cross_track.py "etc/runs/complete tour/20260802-143347"
 Reads <prefix>_mppi_diag.csv and <prefix>.json (for the run window). Degrades gracefully: columns it
 does not find are reported as unavailable rather than silently skipped.
 """
@@ -43,7 +43,6 @@ def load(prefix):
     t0 = meta["run_start_ms"]
     t1 = t0 + meta["trajectory"]["duration_s"] * 1000.0
     rows = []
-    header = []
     with open(prefix + "_mppi_diag.csv") as fh:
         reader = csv.DictReader(ln for ln in fh if not ln.startswith("#"))
         header = list(reader.fieldnames or [])
@@ -117,9 +116,7 @@ def identify_plant(cmd, meas, dt):
     best = None
     for d in range(0, min(12, len(cmd) // 4)):
         y, x1, x2 = [], [], []
-        for k in range(1, len(meas)):
-            if k - d < 0:
-                continue
+        for k in range(max(1, d), len(meas)):
             y.append(meas[k]); x1.append(meas[k - 1]); x2.append(cmd[k - d])
         if len(y) < 20:
             continue
@@ -153,10 +150,15 @@ def report(prefix):
         print("  no rows inside the window — nothing to say"); return
     have = set(header)
 
-    if "cross_track_m" not in have:
-        print("  cross_track_m NOT LOGGED in this run — rebuild and re-run; nothing below is computable")
+    # The column was renamed pd_cross_err_m on 2026-08-02 (it is the error THE PD LAW SAW, in the robot
+    # frame — not the run JSON's cross_track_rms_m, which is measured against the spline with the
+    # opposite sign). Every lap recorded before the rename carries the old name; accept both rather than
+    # orphaning that data.
+    ekey = next((k for k in ("pd_cross_err_m", "cross_track_m") if k in have), None)
+    if ekey is None:
+        print("  cross-track NOT LOGGED in this run — rebuild and re-run; nothing below is computable")
         return
-    e = [r["cross_track_m"] for r in rows]
+    e = [r[ekey] for r in rows]
     m, sd, med = stats([abs(v) for v in e])
     bias = sum(e) / len(e)
     print(f"  |e|  mean {m:.4f}  median {med:.4f}  sd {sd:.4f}   signed bias {bias:+.4f} m")
@@ -174,15 +176,14 @@ def report(prefix):
     zc_hz = zc / (len(rows) * dt)
     ac = autocorr(e, max(1, int(round(0.5 / dt))))
     print(f"  oscillation: {zc} sign changes = {zc_hz:.2f} Hz"
-          f"   autocorr@0.5s {ac:+.2f}" if ac is not None else
-          f"  oscillation: {zc} sign changes = {zc_hz:.2f} Hz")
+          + (f"   autocorr@0.5s {ac:+.2f}" if ac is not None else ""))
 
     # ── UNDER-GAIN SIDE ───────────────────────────────────────────────────────────────────────
     if "path_kappa" not in have:
         print("  path_kappa NOT LOGGED — the under-gain half is UNAVAILABLE, so this run cannot")
         print("    distinguish 'gain too low' from 'gain about right'. Re-run with the current binary.")
     else:
-        pairs = [(r["path_kappa"], r["cross_track_m"]) for r in rows
+        pairs = [(r["path_kappa"], r[ekey]) for r in rows
                  if r["path_kappa"] > KAPPA_ABSENT + 1.0]
         # Only curved stretches carry information about the gain: on a straight, e says nothing about
         # it. This is the persistent-excitation condition, applied by weighting rather than gating.
@@ -194,8 +195,8 @@ def report(prefix):
             if c:
                 r, slope = c
                 print(f"  corr(e, kappa) = {r:+.3f}   slope {slope:+.4f} m per (1/m)")
-                print(f"    -> implied effective lookahead L = {math.sqrt(abs(slope) * 2):.2f} m"
-                      if abs(slope) > 1e-6 else "")
+                if abs(slope) > 1e-6:
+                    print(f"    -> implied effective lookahead L = {math.sqrt(abs(slope) * 2):.2f} m")
                 if r > 0.3:
                     print("    VERDICT: curvature-correlated offset => gain is TOO LOW (raise it)")
                 elif zc_hz > 0.6:

@@ -6,7 +6,6 @@
 # DSR/Qt-dependent affordance_manager lives in ai_common::affordance and is deliberately not linked
 # here. The target is created by generated/ -> src/CMakeLists.txt, which the parent
 # CMakeLists.txt add_subdirectory()s before this one.
-set(AI_COMMON_DIR "${CMAKE_CURRENT_LIST_DIR}/../../common")
 
 find_package(Eigen3 QUIET NO_MODULE)
 

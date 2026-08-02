@@ -354,15 +354,23 @@ void ControllerSession::log_mppi_diagnostics(std::uint64_t t_ms,
         if (mppi_csv_.is_open())
             mppi_csv_ << "# per-cycle control record. The ess/lambda/g_* columns describe the MPPI SAMPLER\n"
                          "# and are ZERO when ControlMode=pd — that is the sampler not running, not a bug.\n"
-                         "# The gate_* columns are the SAFETY GATE and are meaningful in BOTH modes; in pd\n"
-                         "# mode the gate is the only thing between the tracker and an obstacle.\n"
-                         "#   gate_scale   = fraction of commanded adv it let through (1 = untouched)\n"
+                         "# The gate_* columns are the SAFETY GATE. In pd mode it is the ONLY thing between\n"
+                         "# the tracker and an obstacle, and all six are populated. In mppi mode the gate has a\n"
+                         "# different shape (a ladder plus backup manoeuvres, and it is ARMED by a frontal-lidar\n"
+                         "# cone, so it does not run every cycle) — there only sg_trig, gate_horizon, gate_min_esdf\n"
+                         "# and gate_hard_coll are written; gate_scale/gate_hard_stop keep their defaults.\n"
+                         "#   gate_scale   = fraction of commanded adv it let through (1 = untouched, pd only)\n"
                          "#   gate_horizon = its lookahead this cycle (speed-dependent: v/a_decel + 0.15)\n"
                          "#   gate_min_esdf= worst clearance along the PREDICTED arc; -1 = gate did not run\n"
-                         "#   gate_hard_stop = even adv=0 was unsafe, so it rotated away instead\n"
+                         "#   gate_hard_stop = even adv=0 was unsafe, so it rotated away instead (pd only)\n"
                          "# path_kappa = SIGNED route curvature at the robot's projection (1/m). Sentinel\n"
                          "#   -999 = no continuous route, which is NOT the same as a straight (kappa=0).\n"
-                         "#   With cross_track_m this is the pair a gain self-tuner needs: under-gain shows\n"
+                         "# pd_cross_err_m = the cross-track error THE PD LAW SAW: signed lateral offset of the\n"
+                         "#   path in the ROBOT frame (+ = path to the right), from the polyline projection.\n"
+                         "#   ★NOT the run JSON's cross_track_rms_m, which the session computes against the\n"
+                         "#   SPLINE with the OPPOSITE sign and for both modes. Two different estimators; do\n"
+                         "#   not mix them. This one is 0 in mppi mode (the law does not run).\n"
+                         "#   With path_kappa this is the pair a gain self-tuner needs: under-gain shows\n"
                          "#   as e correlated with kappa, over-gain as e oscillating about zero.\n"
                          "# meas_rot = SIGNED measured angular rate (rad/s), EMA-smoothed and differenced\n"
                          "#   from the localiser pose (~5 Hz) — so it LAGS. Adequate to identify a plant lag\n"
@@ -371,7 +379,7 @@ void ControllerSession::log_mppi_diagnostics(std::uint64_t t_ms,
                          "g_goal,g_obs,g_vel,g_smooth,g_lat,g_cbf,n_collisions,"
                          "cmd_adv,cmd_rot,meas_speed,min_esdf,explore,p_free,steer_conc,side_asym,"
                          "sg_trig,gate_scale,gate_horizon,gate_min_esdf,gate_hard_stop,gate_hard_coll,"
-                         "cross_track_m,path_kappa,meas_rot\n";
+                         "pd_cross_err_m,path_kappa,meas_rot\n";
         mppi_csv_open_ = true;
     }
     if (!mppi_csv_.is_open()) return;
@@ -886,7 +894,6 @@ void ControllerSession::step_route_band(const ControllerRobotPose &robot_pose,
 
     const auto rep = route_.deform_window(distance, gradient, freeze_before, freeze_after,
                                           params_->band_iterations);
-    band_last_report_ = rep;
     // Logged BEFORE the early return, so a rejected or no-op solve leaves a row too. A band that is on
     // and doing nothing must be visible as such — "enabled" and "working" are different claims, and a
     // run where every solve moved 0.000 m would otherwise look exactly like a working one.
@@ -898,9 +905,6 @@ void ControllerSession::step_route_band(const ControllerRobotPose &robot_pose,
     // still mean what they did.
     path_controller.update_path_geometry(route_.path());
     current_plan_ = ControllerPathPlan{.room_path = route_.path()};
-    band_deforms_++;
-    band_move_max_m_ = std::max(band_move_max_m_, rep.max_move_m);
-    band_move_sum_m_ += rep.max_move_m;
 }
 
 void ControllerSession::ensure_band_csv(bool band_enabled)
@@ -1062,6 +1066,9 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         // Signed curvature at the robot's own projection on the route. -999 marks "no continuous
         // route" rather than 0, which is a real curvature (a straight) — an absent value and a
         // meaningful one must not share an encoding.
+        // ★Same quantity the mission sampler already derives below (ref_kappa); computed here rather
+        // than hoisted because that block sits inside a different guard. If these ever disagree, one of
+        // them is wrong — they read the same spline at the same arc length.
         const float kappa_here = (route_active_ and route_.valid())
                                ? route_.spline().curvature_at(route_.progress()) : -999.f;
         log_mppi_diagnostics(overlay_now_ms_, control_output, control_output.adv, base_speed_lin_,

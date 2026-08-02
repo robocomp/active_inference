@@ -761,6 +761,16 @@ void SpecificWorker::load_params()
 	load_optional_cast<double>("Controller.RouteSpacing", params.route_spacing_m);
 	load_optional_cast<double>("Controller.RouteSmoothing", params.route_smoothing_m);
 	load_optional("Controller.RouteOptimize", params.route_optimize);
+	// ── Blockage -> replan trigger ──
+	// The one thing the elastic band cannot do for itself: a gradient band cannot escape an obstacle
+	// sitting ON the route (the field's gradient there is axial). A* owns homotopy, the band owns
+	// geometry, and this is the handover. Exposed because it is the mechanism that has to be TUNED
+	// against a real "someone put a box in the corridor" test, and a rebuild per trial is not that.
+	load_optional_cast<double>("Controller.BlockageEsdfThreshold", path_controller_.params.blockage_esdf_threshold);
+	load_optional("Controller.BlockageMinWaypoints", path_controller_.params.blockage_min_waypoints);
+	load_optional_cast<double>("Controller.BlockageLookahead", path_controller_.params.blockage_lookahead_m);
+	load_optional("Controller.BlockageConfirmCycles", path_controller_.params.blockage_confirm_cycles);
+	load_optional("Controller.BlockageCooldownCycles", path_controller_.params.blockage_cooldown_cycles);
 	load_optional("Controller.BandEnabled", params.band_enabled);
 	load_optional("Controller.BandIterations", params.band_iterations);
 	load_optional_cast<double>("Controller.BandLead", params.band_lead_m);
@@ -800,6 +810,12 @@ void SpecificWorker::load_params()
 		load_optional("Controller.ControlMode", mode);
 		std::ranges::transform(mode, mode.begin(), [](unsigned char c) { return std::tolower(c); });
 		const bool pd = (mode == "pd" or mode == "pursuit" or mode == "tracker");
+		// WARN on an unrecognised value rather than silently falling back. This switch's entire purpose
+		// is that one printed line settles which arm ran; a typo ("mpi", "PD-tracker", a trailing space)
+		// would otherwise produce a confident "mode = MPPI" and a mislabelled lap.
+		if (not pd and mode != "mppi")
+			std::println("[control] ⚠ unrecognised Controller.ControlMode '{}' — falling back to MPPI. "
+			             "Valid: mppi | pd (aliases: pursuit, tracker).", mode);
 		path_controller_.set_control_mode(pd ? rc::TrajectoryController::ControlMode::PD
 		                                     : rc::TrajectoryController::ControlMode::MPPI);
 		if (pd and not params.band_enabled)

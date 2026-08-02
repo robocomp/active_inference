@@ -170,6 +170,23 @@ PdCrossTrackSoft = 0.30
 # spread of 0.37 against an ON-vs-OFF difference of 0.15. n=1 was noise.
 # ★★What DID emerge: the two OFF laps agree on p05 clearance to 0.0007 m (0.1009, 0.1016) while ON gave
 # 0.0784 — a 0.023 m reduction, 33x the OFF-to-OFF spread. Lap 4 is testing THAT, not the reversals.
+# ── BLOCKAGE -> REPLAN TRIGGER ──
+# A gradient elastic band CANNOT escape an obstacle sitting on the route: the distance field's gradient
+# there is axial, so the band is pushed along the route rather than off it (Zhou 2020 Fig. 2, reproduced
+# in RouteSpline::self_test). A* owns homotopy, the band owns geometry, and this is the handover.
+# ★Under ControlMode="pd" this is the ONLY thing that notices the route has become undrivable — the
+# sampler that used to find every rollout colliding is not running.
+# Threshold 0.20 m is measured from the ROTATION CENTRE against an inscribed radius of 0.2299 m, i.e. it
+# fires only where the body cannot fit AT ANY HEADING — a hard infeasibility test, not a comfort one.
+# MinWaypoints 4 x RouteSpacing 0.05 = 0.20 m of continuously blocked route.
+# ConfirmCycles 15 at 10 Hz = 1.5 s = 0.56 m of travel at 0.375 m/s; with a 1.5 m lookahead that leaves
+# ~0.9 m in hand. Cooldown 100 cycles = 10 s between triggers.
+BlockageEsdfThreshold = 0.20
+BlockageMinWaypoints = 4
+BlockageLookahead = 1.5
+BlockageConfirmCycles = 15
+BlockageCooldownCycles = 100
+
 BandEnabled = true
 BandIterations = 4        # warm-started incremental solve; 30 (the build value) would re-solve from scratch at 10 Hz
 BandLead = 1.0            # m of route ahead of the robot left frozen

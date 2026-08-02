@@ -96,13 +96,13 @@ bool RouteSpline::build(const std::vector<Eigen::Vector2f> &polyline, float spac
     ctrl_step_ = ctrl_step;
     polyline_  = polyline;
     is_free_   = is_free;
-    return evaluate_from_ctrl();
+    return evaluate_from_ctrl(true);
 }
 
 // Steps 2-4 of build(), factored out so a deformation can re-run them on a MODIFIED control polygon
 // without refitting from the polyline. Everything below is a deterministic function of ctrl_, which is
 // precisely why the control polygon is the thing worth keeping.
-bool RouteSpline::evaluate_from_ctrl()
+bool RouteSpline::evaluate_from_ctrl(bool measure_deviation)
 {
     const auto &ctrl      = ctrl_;
     const auto &polyline  = polyline_;
@@ -185,6 +185,12 @@ bool RouteSpline::evaluate_from_ctrl()
 
     // Fidelity of the fit to the polyline it was fitted to. Measured AFTER the feasibility pass, so it
     // describes the curve that will actually be driven, not the one the spline first proposed.
+    // ★SKIPPED on the band's per-cycle path (measure_deviation=false). It is O(samples x polyline) —
+    // measured at 43% of the whole band step, ~70k point-segment projections per cycle — and it is a
+    // pure diagnostic: max_deviation_m()/mean_deviation_m() are reported, never read by control. It
+    // also describes the fit to the ORIGINAL polyline, which a local deformation is deliberately
+    // moving away from, so recomputing it every cycle answers a question nobody asked.
+    if (measure_deviation)
     {
         const auto nearest_dist = [&polyline](const Eigen::Vector2f &p)
         {
@@ -227,7 +233,8 @@ RouteOptimizerReport RouteSpline::deform(const RouteOptimizerConfig &opt)
     const RouteOptimizerReport rep = optimize_route(ctrl_, cfg);
     // Re-evaluate unconditionally: optimize_route reverts ctrl_ itself when its acceptance test rejects
     // the solve, so on that path this rebuilds the identical curve rather than a stale one.
-    evaluate_from_ctrl();
+    // Deviation-to-polyline is not remeasured here — see evaluate_from_ctrl.
+    evaluate_from_ctrl(false);
     last_opt_ = rep;
     return rep;
 }

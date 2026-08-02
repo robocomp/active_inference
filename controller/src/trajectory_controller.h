@@ -294,7 +294,10 @@ public:
         float blockage_esdf_threshold = 0.2f;   // ESDF below this on path = blocked (well under d_safe)
         int   blockage_min_waypoints = 4;        // need N consecutive blocked waypoints
         float blockage_lookahead_m = 1.5f;       // only check waypoints within this distance ahead
-        int   blockage_confirm_cycles = 15;      // consecutive cycles before declaring blockage (~0.75s at 20Hz)
+        // ★compute() runs at Period.Compute = 100 ms (10 Hz), NOT 20 Hz — the old comment here said
+        // "~0.75s at 20Hz" and was wrong by 2x. 15 cycles is 1.5 s of confirmation, which at 0.375 m/s
+        // is 0.56 m of travel: with a 1.5 m lookahead the robot still has ~0.9 m in hand when it fires.
+        int   blockage_confirm_cycles = 15;      // consecutive cycles before declaring blockage (1.5 s at 10 Hz)
         int   blockage_cooldown_cycles = 100;    // minimum cycles between replan triggers
     };
 
@@ -651,6 +654,8 @@ private:
     // set_path and set_path_presmoothed go through this; only set_path then relaxes + splines.
     // Does NOT set wp_index_ — the two callers legitimately differ, so each sets its own.
     void reset_mppi_state(const std::vector<Eigen::Vector2f>& path_room);
+    // Path-blockage detector. Called from BOTH control modes (the PD branch returns before step 15).
+    void detect_path_blockage(ControlOutput& out, const Eigen::Affine2f& robot_pose);
 
     // Elastic-band path relaxation: push waypoints toward center of free space
     void relax_path(int iterations = 20);

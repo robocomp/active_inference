@@ -730,7 +730,18 @@ TrajectoryController::ControlOutput TrajectoryController::compute(
 
     // ---- PD carrot-follower mode: simple proportional-derivative controller ----
     if (control_mode_ == ControlMode::PD)
+    {
+        // Blockage detection BEFORE the early return, or the planner can never be triggered in this
+        // mode — it is the ONLY thing that notices the route has become undrivable once the sampler is
+        // not running. ★It is stateful (blockage_streak_/cooldown_) and must run exactly ONCE per
+        // cycle: that holds only because this branch returns, so the step-15 call below is unreachable
+        // from here. A third control mode, or removing this early return, breaks that silently.
+        detect_path_blockage(out, robot_pose);
+        // compute_pd writes through its ControlOutput& and returns the same object; no copy needed.
+        // last_cmd_* is deliberately NOT set here: it feeds the MPPI continuity cost only, which never
+        // runs in this mode, and writing it would imply a coupling that does not exist.
         return compute_pd(out, carrot_robot, lidar_points, robot_pose);
+    }
 
     // 5-6. Tracking MPPI: compute nominal toward carrot and blend it with
     //       the shifted previous optimum to create the actual sampling center.
@@ -1173,10 +1184,6 @@ TrajectoryController::ControlOutput TrajectoryController::compute(
     out.adv  = smoothed_vel_[0] * brake;
     out.side = smoothed_vel_[1];
     out.rot  = smoothed_vel_[2];
-    const float pre_safety_guard_adv = out.adv;
-    const float pre_safety_guard_rot = out.rot;
-    bool safety_guard_modified_command = false;
-
     // 14. Safety gate on top of MPPI output (short forward prediction on inflated ESDF)
     {
         constexpr float gate_horizon_s = 0.30f;     // shorter look-ahead to reduce false positives
@@ -1269,6 +1276,19 @@ TrajectoryController::ControlOutput TrajectoryController::compute(
             }
         }
         const auto nominal_risk = gate_armed ? eval_risk(out.adv, out.rot, gate_horizon_s) : RiskEval{};
+        // Record what this gate SAW, so the gate_* columns are not silently PD-only. Only the two
+        // observations are recorded: this gate's response is a ladder plus backup manoeuvres, not a
+        // single speed scale, so gate_speed_scale/gate_hard_stop have no honest value here and keep
+        // their defaults. ★The two gates have DIVERGED — this one still uses a fixed 0.30 s horizon and
+        // a {0.6,0.35,0.15,0} ladder while the PD one derives its horizon from stopping distance and
+        // bisects. Unifying them is a behaviour change and needs its own measurement, so it is left as
+        // a follow-up rather than smuggled into a cleanup.
+        if (gate_armed)
+        {
+            out.gate_horizon_s = gate_horizon_s;
+            out.gate_min_esdf = nominal_risk.min_esdf;
+            out.gate_hard_collision = nominal_risk.hard_collision;
+        }
 
         if (nominal_risk.trigger)
         {
@@ -1328,14 +1348,43 @@ TrajectoryController::ControlOutput TrajectoryController::compute(
         }
     }
 
-    safety_guard_modified_command = out.safety_guard_triggered
-        && (std::abs(out.adv - pre_safety_guard_adv) > 1e-4f
-            || std::abs(out.rot - pre_safety_guard_rot) > 1e-4f);
-
     // ── 15. Path blockage detection ──────────────────────────────────
-    // Look ahead along the planned path in room frame and query ESDF at each
-    // waypoint.  If several consecutive waypoints are blocked (ESDF < threshold)
-    // for many consecutive compute cycles, signal the caller to replan.
+    // Runs for BOTH control modes — see detect_path_blockage, called before the PD branch returns.
+    detect_path_blockage(out, robot_pose);
+
+    // Remember what we are about to command: the continuity cost is referenced to this next cycle.
+    last_cmd_adv_ = out.adv;
+    last_cmd_rot_ = out.rot;
+    last_cmd_valid_ = true;
+
+
+    return out;
+}
+
+// ============================================================================
+// PD carrot-follower: simple proportional-derivative controller
+//
+// rot = Kp * angle_error + Kd * d(angle_error)/dt
+// adv = max_adv * cos(angle_error) * dist_factor
+//
+// Uses the same ESDF, carrot, safety gate, gaussian brake and smoothing
+// as the MPPI mode but replaces all the sampling/weighting logic.
+// ============================================================================
+
+// Look ahead along the planned path in room frame and query the ESDF at each sample. If several
+// consecutive samples are blocked for several consecutive cycles, tell the caller to replan.
+//
+// ★MUST RUN IN BOTH CONTROL MODES. This used to be step 15 of compute(), which the PD branch returns
+// long before reaching — so under ControlMode="pd" `path_blocked` was permanently false and NOTHING
+// could trigger the planner. That is the one thing the elastic band structurally cannot do for itself:
+// a gradient band cannot escape an obstacle sitting on the route, because the distance field's gradient
+// there is axial (Zhou 2020 Fig. 2, and RouteSpline::self_test reproduces it). The band owns geometry,
+// A* owns homotopy, and this is the handover between them — with the tracker driving there is no
+// sampler left to notice the route is unusable.
+//
+// Depends only on path_room_, the pose and the ESDF, so it is valid anywhere after the field is built.
+void TrajectoryController::detect_path_blockage(ControlOutput &out, const Eigen::Affine2f &robot_pose)
+{
     out.path_blocked = false;
     if (blockage_cooldown_ > 0)
     {
@@ -1414,23 +1463,7 @@ TrajectoryController::ControlOutput TrajectoryController::compute(
     }
 
 
-    // Remember what we are about to command: the continuity cost is referenced to this next cycle.
-    last_cmd_adv_ = out.adv;
-    last_cmd_rot_ = out.rot;
-    last_cmd_valid_ = true;
-
-    return out;
 }
-
-// ============================================================================
-// PD carrot-follower: simple proportional-derivative controller
-//
-// rot = Kp * angle_error + Kd * d(angle_error)/dt
-// adv = max_adv * cos(angle_error) * dist_factor
-//
-// Uses the same ESDF, carrot, safety gate, gaussian brake and smoothing
-// as the MPPI mode but replaces all the sampling/weighting logic.
-// ============================================================================
 
 TrajectoryController::ControlOutput TrajectoryController::compute_pd(
     ControlOutput& out,

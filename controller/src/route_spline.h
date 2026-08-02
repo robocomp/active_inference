@@ -114,7 +114,8 @@ private:
     // Steps 2-4 of build() — B-spline evaluation, arc-length resample, feasibility pullback — as a pure
     // function of ctrl_. Shared by build() and deform() so a deformed curve is produced by exactly the
     // same pipeline as a freshly built one; there is no second code path to drift.
-    bool evaluate_from_ctrl();
+    // `measure_deviation` = recompute max_dev_/mean_dev_ (O(samples x polyline), build-time only).
+    bool evaluate_from_ctrl(bool measure_deviation);
 
     // ── The decision variable, retained ──
     std::vector<Eigen::Vector2f> ctrl_;       // B-spline control polygon
