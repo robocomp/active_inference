@@ -258,6 +258,12 @@ private:
     rc::MissionRunner mission_;
     // CONTINUOUS ROUTE MODE. The whole mission as one arc-length curve; no per-waypoint target, no
     // arrival test, no per-waypoint replan. Built once when a mission starts.
+    // The fitted curve for a NON-mission plan (affordance target, click target). Missions keep theirs
+    // inside route_; this is the same object for everything else, retained for the same reason — so the
+    // local elastic band can deform it every cycle instead of it being a one-shot fit.
+    rc::RouteSpline plan_spline_;
+    bool  plan_spline_valid_ = false;
+    float plan_progress_s_ = 0.f;      // robot's arc length along plan_spline_, forward-only
     rc::RouteFollower route_;
     // ── Local elastic band (see step_route_band / ControllerParams::band_*) ──
     // Deform the installed route in a window ahead of the robot against the live ESDF, every cycle.
@@ -294,7 +300,13 @@ private:
     int           route_repair_count_ = 0;
     // Fit the C2 curve to ANY planned polyline — a click target and an affordance target deserve the
     // same smooth path a mission gets. Returns the polyline unchanged if smoothing is off or fails.
-    ControllerPolygon smooth_plan(const ControllerPolygon &poly) const;
+    // One place builds the optimiser's configuration; the mission route and every other planned path
+    // both use it, so a clearance preference cannot apply to one and silently not the other.
+    rc::RouteOptimizerConfig make_route_optimizer_config() const;
+    // NOT const: it RETAINS the fitted spline so the band can keep deforming it. A plan that is only a
+    // list of samples cannot be re-optimised — the control polygon is the decision variable, and
+    // throwing it away is what made an affordance route a one-shot fit.
+    ControllerPolygon smooth_plan(const ControllerPolygon &poly);
     bool          escape_active_ = false;       // an escape maneuver currently owns the base
     std::uint64_t escape_start_ms_ = 0;         // escape start time (for the time bound)
     Eigen::Vector2f escape_start_pos_ = Eigen::Vector2f::Zero();  // pose at escape start (distance bound)

@@ -282,6 +282,26 @@ public:
         // speed), the softening constant is m/s and only sets how the term behaves near a standstill.
         float pd_cross_track_gain = 1.0f;
         float pd_cross_track_soft_mps = 0.30f;
+        // ── LATERAL BUMPER for the PD tracker ────────────────────────────────────────────────────
+        // In MPPI mode lambda_lateral_bumper pushes the body off things it is passing too close to. In
+        // PD mode that term does not run: the band shapes the route DELIBERATIVELY and the safety gate
+        // only BRAKES, so nothing pushes sideways. With measured p05 body clearance ~0.08 m and mean
+        // tracking error ~0.08 m the robot rides the margin and has no way to recover from it — which
+        // is what "still too close to thin walls" is. The route cannot fix this: the error is the
+        // tracker's, not the route's.
+        //
+        // ONE-SIDED AND SELF-EXTINGUISHING, in the same shape as the route optimiser's clearance term:
+        //     deficit_side = max(0, bumper_dist - gap_side)
+        //     push         = (deficit_left - deficit_right) / bumper_dist        // in [-1, 1]
+        // Both sides clear ⇒ both deficits zero ⇒ exactly zero push and zero gradient. There is no
+        // "if too close" switch; the term simply has no value where there is room. A wall on the LEFT
+        // makes deficit_left large ⇒ push positive ⇒ steer right, away from it.
+        // Fed into the SAME angular error the cross-track term uses, through the same bounded atan
+        // form, so it cannot demand a rate the base does not have and it strengthens as speed drops.
+        // 0 disables.
+        float pd_bumper_gain = 1.0f;
+        // Gap (m, measured from the BODY, not the centre) below which a side starts pushing back.
+        float pd_bumper_dist_m = 0.25f;
 
         // Visualization
 
@@ -332,6 +352,11 @@ public:
         // has drifted left). The session computes a cross-track RMS for the run summary, but nothing
         // recorded it per cycle, so "it wanders off the route" could not be turned into a number.
         float cross_track_m = 0.f;
+        // Lateral bumper: signed push in [-1,1] (+ = pushed right, i.e. something close on the left)
+        // and the two body-to-obstacle gaps it was computed from. Recorded because "it still clips the
+        // wall" and "the bumper never engaged" look identical without them.
+        float pd_bumper_push = 0.f;
+        float pd_gap_left_m = -1.f, pd_gap_right_m = -1.f;
 
         // ESDF-input diagnostics: how many RAW lidar points actually reached build_esdf this cycle
         // (after the self-filter) and the nearest of them to the robot center (robot frame). Lets a

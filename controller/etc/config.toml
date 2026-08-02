@@ -72,6 +72,25 @@ RunDir = "etc/runs"
 # A* planning grid. Collision is the robot's real footprint tested against this grid, so the ONLY thing
 # this controls is planning resolution/cost — nothing here inflates obstacles.
 CellSize = 0.06
+# ── CLEARANCE PREFERENCE INSIDE THE A* COST ──
+# The search cost was distance + a small turn penalty and NOTHING ELSE, with the footprint test
+# (+ Controller.FootprintSafetyMarginM) as the only thing keeping it off obstacles. So it returned the
+# shortest ADMISSIBLE path — which hugs every corner and wall it legally can — and the route optimiser
+# downstream spent its clearance term undoing that, while RouteSpline's feasibility pass pulled anything
+# it could not fix back TOWARD the same hugging polyline. Reported live as "it moves too close to
+# furniture and thin walls" with the safety slider already at maximum: the slider reweights the
+# OPTIMISER, which is the wrong end of the pipeline.
+# Cost per step is now  step * (1 + Weight * max(0, Pref - d)/Pref),  d = the planner's exact EDT.
+# ★A PREFERENCE, NOT A CONSTRAINT. It never makes a passable gap unplannable — that is what
+# FootprintSafetyMarginM does, and inflating THAT is how a stack ends up demanding 0.95 m of gap for a
+# robot that fits through 0.461 m. A corridor with no alternative is still planned, just at a cost
+# nothing competes with. Weight = 0 restores pure shortest path.
+# ★Measured offline (tools/route_bench, recorded world): on the RAW A* path min clearance 0.494 -> 0.607
+# and p05 0.527 -> 0.664, at no cost in length (10.90 -> 10.86 m). On that particular route the route
+# optimiser already reached the same place, so the post-optimiser numbers barely moved — the gain is
+# expected where the optimiser CANNOT help: tight passages where its clearance term saturates.
+ClearanceWeight = 1.5
+ClearancePref = 0.9
 
 [Controller]
 # Preferred standoff BEYOND the robot's real extent (MPPI d_safe). Comfort only: raising it makes the robot
@@ -147,6 +166,20 @@ ControlMode = "pd"
 # oscillating, that autocorrelation goes negative and the tool will say so.
 PdCrossTrackGain = 1.4
 PdCrossTrackSoft = 0.30
+# ── LATERAL BUMPER (PD mode only) ──
+# In MPPI mode LambdaLateralBumper pushes the body off whatever it is passing too close to. In PD mode
+# that term does not run: the band shapes the ROUTE and the safety gate only BRAKES, so nothing pushes
+# sideways. Measured p05 body clearance ~0.08 m against a mean tracking error of ~0.08 m — the robot
+# rides the margin with no way to recover, which is what "still too close to thin walls" is. The route
+# cannot fix it, because the error is the tracker's and not the route's.
+# ONE-SIDED, like the route optimiser's clearance term:  push = (deficit_L - deficit_R)/Dist, with
+# deficit = max(0, Dist - gap). Both sides clear ⇒ exactly zero push and zero gradient; there is no
+# "if too close" switch, the term simply has no value where there is room.
+# Gain 0 disables. Dist is the gap FROM THE BODY at which a side starts pushing back.
+# ★Watch bump_push / gap_l / gap_r in mppi_diag.csv: "it still clips" and "the bumper never engaged"
+# are indistinguishable without them.
+PdBumperGain = 1.0
+PdBumperDist = 0.25
 
 # ── LOCAL ELASTIC BAND (stage 1: the route deforms, the MPPI still follows it) ──
 # RouteOptimize above runs ONCE at install against GridPlanner's STATIC room-frame EDT (polygons only).
@@ -315,6 +348,12 @@ GoalClearanceMinRatio = 0.85
 StraightSpeedHeadingThreshold = 0.08
 StraightSpeedClearanceMargin = 0.20
 StraightSpeedMinGoalDist = 1.5
+
+# Rotate in place at the goal until facing the affordance's commanded yaw before reporting arrival.
+# false ⇒ arrival is judged on POSITION alone and the robot never orients at the target. Off for
+# navigation validation runs: the terminal rotation is wasted motion there, and it is one more way to
+# hang at a goal. Turn back on when object affordances need the robot to actually look at the object.
+GoalFacingYawEnabled = false
 
 # Affordance servo ("lock-on") executor — HOW (gains/caps/timing). The WHAT/WHEN (which feedback
 # attributes, completion predicate, scalar target, timeout) is per-affordance and declared by the

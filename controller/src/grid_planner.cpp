@@ -428,6 +428,12 @@ std::optional<std::vector<Eigen::Vector2f>> GridPlanner::plan(const Eigen::Vecto
     constexpr int DX[kHeadings] = {1, 1, 0, -1, -1, -1, 0, 1};
     constexpr int DY[kHeadings] = {0, 1, 1, 1, 0, -1, -1, -1};
     int goal_state = -1, expansions = 0;
+    // Hoisted out of the expansion loop; also FORCES the EDT to exist, since cell_free may have been
+    // satisfied without ever needing it. Reading dist_ unbuilt would silently disable the preference.
+    const float clearance_w = std::max(0.f, params.clearance_weight);
+    const float clearance_d = std::max(0.01f, params.clearance_pref_m);
+    if (clearance_w > 0.f) build_distance_field();
+
     while (not open.empty())
     {
         const auto [f, s] = open.top();
@@ -450,8 +456,14 @@ std::optional<std::vector<Eigen::Vector2f>> GridPlanner::plan(const Eigen::Vecto
             // A small turning penalty keeps the path from zig-zagging between diagonal and axial moves of
             // equal length, which the MPPI would otherwise chase.
             const float turn = (nh == h) ? 0.f : 0.25f * cell_;
+            // Tight cells cost more to cross — see Params::clearance_weight. The EDT is already built
+            // (cell_free forced it), so this is one lookup. The penalty MULTIPLIES the step so it scales
+            // with distance travelled rather than with how many cells the resolution happens to make.
+            const float tight = (clearance_w > 0.f and not dist_.empty())
+                              ? clearance_w * std::max(0.f, (clearance_d - dist_[idx(nx, ny)]) / clearance_d)
+                              : 0.f;
             const int ns = sid(nx, ny, nh);
-            if (const float ng = g[s] + step + turn; ng < g[ns])
+            if (const float ng = g[s] + step * (1.f + tight) + turn; ng < g[ns])
             { g[ns] = ng; parent[ns] = s; open.push({ng + heur(nx, ny), ns}); }
         }
     }

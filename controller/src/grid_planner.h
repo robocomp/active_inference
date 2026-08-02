@@ -61,6 +61,29 @@ public:
         // with no way out. Collision is ignored for the start cell ONLY, so the search can walk out of it.
         bool allow_start_in_collision = true;
         int  max_expansions = 400000;   // runaway guard; the apartment needs a small fraction of this
+
+        // ── CLEARANCE PREFERENCE IN THE SEARCH ITSELF ────────────────────────────────────────────
+        // The step cost used to be distance + a small turn penalty, i.e. pure shortest path, with
+        // `cell_free` (footprint + safety_margin_m) as the ONLY thing keeping it off the furniture. So
+        // A* returned the shortest admissible path, which hugs every corner and wall it legally can,
+        // and the route optimiser downstream then spent its clearance term trying to undo that — while
+        // RouteSpline's feasibility pass pulled any sample it could not fix back TOWARD the same
+        // hugging polyline. Reported live as "it moves too close to furniture and thin walls" with the
+        // safety slider already at maximum: the slider reweights the optimiser, which is the wrong end.
+        //
+        // A step through a tight cell now costs more:  step * (1 + w * max(0, d_pref - d)/d_pref)
+        // ★A PREFERENCE, NOT A CONSTRAINT — and deliberately so. It never makes a passable gap
+        // unplannable (that is `safety_margin_m`'s job, and inflating it is how a stack ends up
+        // demanding 0.95 m of gap for a robot that fits through 0.461 m); it only makes the roomy route
+        // cheaper when one exists. A corridor with no alternative still gets planned, at a higher cost
+        // that nothing competes with.
+        // ★The field is the planner's own exact EDT, already built for `distance_at`, so this costs one
+        // array lookup per expansion and no new state.
+        // 0 restores pure shortest path.
+        float clearance_weight = 1.5f;
+        // Distance (m, from the robot's CENTRE) beyond which a cell is "roomy" and costs nothing extra.
+        // Below it the penalty ramps linearly to `clearance_weight` at d = 0.
+        float clearance_pref_m = 0.9f;
     };
 
     Params params;

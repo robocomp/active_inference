@@ -91,6 +91,7 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
     {
         room_polygon_.clear();
         current_plan_.reset();
+        plan_spline_valid_ = false;   // the fitted curve belongs to the plan being dropped
         if (!room_wait_logged_)
         {
             qInfo() << "Controller waiting for room and robot nodes in DSR";
@@ -111,6 +112,7 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
     {
         room_polygon_.clear();
         current_plan_.reset();
+        plan_spline_valid_ = false;   // the fitted curve belongs to the plan being dropped
         qInfo() << "Controller waiting for delimiting polygon attributes on room node";
         update_display(std::nullopt,
                        display,
@@ -130,6 +132,8 @@ bool ControllerSession::sync_world_state(std::uint64_t timestamp_ms,
     {
         grid_planner_.params.cell_size_m = std::max(0.02f, params_->planner_cell_size_m);
         grid_planner_.params.safety_margin_m = params_->footprint_safety_margin_m;
+        grid_planner_.params.clearance_weight = params_->planner_clearance_weight;
+        grid_planner_.params.clearance_pref_m = params_->planner_clearance_pref_m;
     }
     grid_planner_.set_world(room_polygon_, obstacle_tracker.obstacle_polygons());
     return true;
@@ -214,6 +218,7 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
             target_wait_logged_ = true;
         }
         current_plan_.reset();
+        plan_spline_valid_ = false;   // the fitted curve belongs to the plan being dropped
         last_target_info_.reset();
         active_target_id_ = 0;
         current_target_room_.reset();
@@ -281,14 +286,49 @@ std::optional<ControllerPlanningStep> ControllerSession::build_planning_step(std
     return step;
 }
 
-ControllerPolygon ControllerSession::smooth_plan(const ControllerPolygon &poly) const
+// The optimiser's configuration, in ONE place. Every constant here is read off a measured physical
+// quantity of THIS robot, not tuned:
+//   d_target = what the body actually occupies (worst-case reach, since the field carries no bearing)
+//              plus the same comfort standoff the MPPI prefers,
+//   rho      = v_max^2 / a_lat_max, the radius below which a turn stops being drivable at speed,
+//   sigma_a  = a stated fidelity allowance — how far the route may drift from what was clicked — in
+//              the same sense as carrot_max_route_cut_m, not a safety number.
+// The distance field is EXACT (GridPlanner's EDT): an optimiser follows the gradient of whatever it is
+// handed, so a chamfer's direction-dependent error would be baked into the route's SHAPE.
+rc::RouteOptimizerConfig ControllerSession::make_route_optimizer_config() const
 {
+    rc::RouteOptimizerConfig opt;
+    opt.enabled = params_ == nullptr or params_->route_optimize;
+    opt.distance = [this](const Eigen::Vector2f &p) { return grid_planner_.distance_at(p); };
+    opt.distance_gradient = [this](const Eigen::Vector2f &p) { return grid_planner_.distance_gradient_at(p); };
+    opt.d_target = rc::RobotFootprint::shadow().circumscribed_radius()
+                 + (params_ ? params_->comfort_standoff_m : 0.35f);
+    const float v_max = params_ ? params_->max_adv_speed_mps : 0.7f;
+    opt.rho = v_max * v_max / std::max(0.05f, params_ ? params_->max_lateral_accel_mps2 : 1.0f);
+    opt.sigma_a = 0.30f;
+    opt.clearance_floor = rc::RobotFootprint::shadow().circumscribed_radius();
+    opt.iterations = 30;
+    opt.safety_bias = params_ ? params_->route_safety_bias : 0.5f;
+    return opt;
+}
+
+ControllerPolygon ControllerSession::smooth_plan(const ControllerPolygon &poly)
+{
+    plan_spline_valid_ = false;
+    plan_progress_s_ = 0.f;
     if (poly.size() < 2 or params_ == nullptr or not params_->smooth_planned_path) return poly;
-    rc::RouteSpline spline;
+    rc::RouteSpline &spline = plan_spline_;
+    // ★OPTIMISE THIS PATH TOO. It used to pass no optimiser at all, so an AFFORDANCE or click target
+    // got A* + a C2 fit and nothing else: the clearance term never ran, the safety slider did nothing,
+    // and BandEnabled did nothing either (step_route_band returns unless a mission is running). Which
+    // is exactly what "I don't see any movement in the path" was. A driven path is a driven path — the
+    // clearance preference should not depend on whether a MISSION happens to be the thing driving.
+    const rc::RouteOptimizerConfig opt = make_route_optimizer_config();
     if (not spline.build(poly, params_->route_spacing_m,
                          [this](const Eigen::Vector2f &p, float h) { return grid_planner_.pose_free(p, h); },
-                         params_->route_smoothing_m))
+                         params_->route_smoothing_m, &opt))
         return poly;   // smoothing is an improvement, never a precondition: fall back to the polyline
+    plan_spline_valid_ = true;
     return spline.samples();
 }
 
@@ -372,6 +412,10 @@ void ControllerSession::log_mppi_diagnostics(std::uint64_t t_ms,
                          "#   not mix them. This one is 0 in mppi mode (the law does not run).\n"
                          "#   With path_kappa this is the pair a gain self-tuner needs: under-gain shows\n"
                          "#   as e correlated with kappa, over-gain as e oscillating about zero.\n"
+                         "# bump_push = PD lateral bumper, signed, in [-1,1]: + = pushed RIGHT because\n"
+                         "#   something is close on the LEFT. 0 = both sides clear (the term is one-sided,\n"
+                         "#   so 0 means no deficit, NOT that the bumper is disabled). gap_l/gap_r are the\n"
+                         "#   body-to-obstacle gaps it read; -1 = the bumper did not run.\n"
                          "# meas_rot = SIGNED measured angular rate (rad/s), EMA-smoothed and differenced\n"
                          "#   from the localiser pose (~5 Hz) — so it LAGS. Adequate to identify a plant lag\n"
                          "#   of order 0.2-0.5 s; do not read faster dynamics out of it.\n"
@@ -379,7 +423,7 @@ void ControllerSession::log_mppi_diagnostics(std::uint64_t t_ms,
                          "g_goal,g_obs,g_vel,g_smooth,g_lat,g_cbf,n_collisions,"
                          "cmd_adv,cmd_rot,meas_speed,min_esdf,explore,p_free,steer_conc,side_asym,"
                          "sg_trig,gate_scale,gate_horizon,gate_min_esdf,gate_hard_stop,gate_hard_coll,"
-                         "pd_cross_err_m,path_kappa,meas_rot\n";
+                         "pd_cross_err_m,path_kappa,meas_rot,bump_push,gap_l,gap_r\n";
         mppi_csv_open_ = true;
     }
     if (!mppi_csv_.is_open()) return;
@@ -393,7 +437,8 @@ void ControllerSession::log_mppi_diagnostics(std::uint64_t t_ms,
               << (o.safety_guard_triggered ? 1 : 0) << ',' << o.gate_speed_scale << ','
               << o.gate_horizon_s << ',' << o.gate_min_esdf << ','
               << (o.gate_hard_stop ? 1 : 0) << ',' << (o.gate_hard_collision ? 1 : 0) << ','
-              << o.cross_track_m << ',' << path_kappa << ',' << measured_rot << '\n';
+              << o.cross_track_m << ',' << path_kappa << ',' << measured_rot << ','
+              << o.pd_bumper_push << ',' << o.pd_gap_left_m << ',' << o.pd_gap_right_m << '\n';
 }
 
 void ControllerSession::log_route_event(const char *event, bool ok, std::uint64_t t_ms,
@@ -499,18 +544,7 @@ bool ControllerSession::build_route(const ControllerRobotPose &robot_pose)
     // The distance field is EXACT (GridPlanner's EDT): an optimiser follows the gradient of whatever it
     // is handed, so a chamfer's direction-dependent error would be baked into the route's shape.
     {
-        rc::RouteOptimizerConfig opt;
-        opt.enabled = params_ == nullptr or params_->route_optimize;
-        opt.distance = [this](const Eigen::Vector2f &p) { return grid_planner_.distance_at(p); };
-        opt.distance_gradient = [this](const Eigen::Vector2f &p) { return grid_planner_.distance_gradient_at(p); };
-        opt.d_target = rc::RobotFootprint::shadow().circumscribed_radius()
-                     + (params_ ? params_->comfort_standoff_m : 0.35f);
-        const float v_max = params_ ? params_->max_adv_speed_mps : 0.7f;
-        opt.rho = v_max * v_max / std::max(0.05f, params_ ? params_->max_lateral_accel_mps2 : 1.0f);
-        opt.sigma_a = 0.30f;
-        opt.clearance_floor = rc::RobotFootprint::shadow().circumscribed_radius();
-        opt.iterations = 30;
-        opt.safety_bias = params_ ? params_->route_safety_bias : 0.5f;
+        const rc::RouteOptimizerConfig opt = make_route_optimizer_config();
         route_.set_optimizer(opt);
         dump_route_world(robot_pose.pos, raw_wps, wps, mission_.laps_remaining(), opt);
     }
@@ -688,6 +722,7 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
                 // Force the repaired curve to be installed: the follower is still holding the old one.
                 path_controller.stop();
                 current_plan_.reset();
+                plan_spline_valid_ = false;   // the fitted curve belongs to the plan being dropped
                 log_route_event("repair", true, time_source(), path_controller, kRepairBackM + kRepairAheadM);
             }
             else
@@ -747,7 +782,13 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
             current_plan_ = std::move(plan);
         }
         else
+        {
+            // BRACES MATTER HERE: without them the invalidation below runs on the SUCCESS path too,
+            // immediately undoing the smooth_plan() that just fitted the curve — and the band would
+            // then never deform a plan, silently, while every flag said it was enabled.
             current_plan_.reset();
+            plan_spline_valid_ = false;   // the fitted curve belongs to the plan being dropped
+        }
     }
 
     if (!current_plan_.has_value() || current_plan_->room_path.empty())
@@ -795,7 +836,13 @@ bool ControllerSession::ensure_current_plan(const ControllerPlanningStep &step,
         // path. Without this the mission would skip every waypoint but the last one on the horizon.
         // Affordance targets carry a desired facing yaw (point AT the table); manual
         // mouse targets do not, so they keep the legacy stop-on-arrival behaviour.
-        path_controller.set_goal_facing_yaw(step.target.from_affordance
+        // GoalFacingYawEnabled=false drops the facing requirement for affordances too, so arrival is
+        // judged on POSITION alone and the robot never turns in place at the goal. Wanted for pure
+        // navigation runs, where the terminal rotation is wasted motion and an extra way to hang at a
+        // target; object affordances that must actually look at their object need it back on.
+        const bool want_facing = step.target.from_affordance
+                              and (params_ == nullptr or params_->goal_facing_yaw_enabled);
+        path_controller.set_goal_facing_yaw(want_facing
                                                 ? std::optional<float>(step.target.yaw_rad)
                                                 : std::nullopt);
         // A point target DOES end at its endpoint — restore the follower's own arrival test, which a
@@ -851,9 +898,18 @@ void ControllerSession::step_route_band(const ControllerRobotPose &robot_pose,
     // 20260802-135917, whose band_diag.csv was byte-identical to 20260802-135128's.
     ensure_band_csv(params_ != nullptr and params_->band_enabled);
     if (params_ == nullptr or not params_->band_enabled) return;
-    if (not route_active_ or not mission_.running() or not route_.valid()) return;
     if (not path_controller.is_active()) return;
-    const std::size_t M = route_.control_count();
+    // A MISSION route lives in route_; everything else (affordance target, click target) lives in
+    // plan_spline_. Both are the same object with the same retained control polygon, so the band works
+    // on either — it used to require a running mission, which is why an affordance route never moved.
+    // Narrow spaces and corners are exactly where a one-shot fit is weakest, so this is where the
+    // continuous version earns its keep.
+    const bool on_mission = route_active_ and mission_.running() and route_.valid();
+    if (not on_mission and not (plan_spline_valid_ and plan_spline_.valid())) return;
+    // Read-only for the window arithmetic; the deform itself goes through whichever owner holds the
+    // curve, so nothing needs to cast away constness to reach it.
+    const rc::RouteSpline &spline = on_mission ? route_.spline() : plan_spline_;
+    const std::size_t M = on_mission ? route_.control_count() : spline.control_points().size();
     if (M < 8) return;                       // nothing a window can be carved out of
     if (params_->band_period_cycles > 1 and (band_cycle_++ % params_->band_period_cycles) != 0) return;
 
@@ -863,9 +919,15 @@ void ControllerSession::step_route_band(const ControllerRobotPose &robot_pose,
     // deleted 15 m of a 3-lap tour once (see fit_from_polyline). A PROPORTIONAL map is used instead of
     // either metric: it needs no correspondence, is monotone, and its error is absorbed by the lead
     // margin, which exists to be conservative. It is only choosing which points to unfreeze.
-    const float len = std::max(0.01f, route_.spline().length());
-    const float frac = std::clamp(route_.progress() / len, 0.f, 1.f);
-    const float h = std::max(0.05f, route_.spline().control_spacing());
+    const float len = std::max(0.01f, spline.length());
+    // Where the robot is along the curve. A mission tracks this itself; a plan does not, so it is
+    // projected here with a FORWARD-ONLY hint for the same reason the follower does — a path that
+    // crosses itself would otherwise teleport progress to the wrong branch.
+    if (not on_mission)
+        plan_progress_s_ = spline.project(robot_pose.pos, plan_progress_s_, 3.0f);
+    const float progress = on_mission ? route_.progress() : plan_progress_s_;
+    const float frac = std::clamp(progress / len, 0.f, 1.f);
+    const float h = std::max(0.05f, spline.control_spacing());
     const auto i_robot = static_cast<std::size_t>(frac * static_cast<float>(M));
     const auto lead = static_cast<std::size_t>(std::ceil(std::max(0.f, params_->band_lead_m) / h));
     const auto span = static_cast<std::size_t>(std::ceil(std::max(h, params_->band_window_m) / h));
@@ -892,8 +954,28 @@ void ControllerSession::step_route_band(const ControllerRobotPose &robot_pose,
         return R * path_controller.clearance_gradient_at(r.x(), r.y());
     };
 
-    const auto rep = route_.deform_window(distance, gradient, freeze_before, freeze_after,
-                                          params_->band_iterations);
+    rc::RouteOptimizerReport rep;
+    if (on_mission)
+    {
+        rep = route_.deform_window(distance, gradient, freeze_before, freeze_after,
+                                   params_->band_iterations);
+    }
+    else
+    {
+        // A plan has no authored waypoints, so it carries NO anchor likelihood — and it does not need
+        // one: optimize_route always pins the endpoints, which is exactly the requirement ("still start
+        // where I am and still end at the target"). Everything between is free to answer to clearance
+        // and bending alone, which is what makes this useful in a corner.
+        rc::RouteOptimizerConfig cfg = make_route_optimizer_config();
+        cfg.enabled = true;
+        cfg.distance = distance;
+        cfg.distance_gradient = gradient;
+        cfg.freeze_before = freeze_before;
+        cfg.freeze_after = freeze_after;
+        cfg.iterations = std::max(1, params_->band_iterations);
+        cfg.verbose = false;          // this runs at control rate; per-cycle logging is noise
+        rep = plan_spline_.deform(cfg);
+    }
     // Logged BEFORE the early return, so a rejected or no-op solve leaves a row too. A band that is on
     // and doing nothing must be visible as such — "enabled" and "working" are different claims, and a
     // run where every solve moved 0.000 m would otherwise look exactly like a working one.
@@ -903,8 +985,9 @@ void ControllerSession::step_route_band(const ControllerRobotPose &robot_pose,
     // Hand the follower the deformed geometry WITHOUT resetting it — see update_path_geometry. The
     // prefix is frozen, so arc length behind the robot is unchanged and progress()/waypoint arc lengths
     // still mean what they did.
-    path_controller.update_path_geometry(route_.path());
-    current_plan_ = ControllerPathPlan{.room_path = route_.path()};
+    const auto &deformed = on_mission ? route_.path() : plan_spline_.samples();
+    path_controller.update_path_geometry(deformed);
+    current_plan_ = ControllerPathPlan{.room_path = deformed};
 }
 
 void ControllerSession::ensure_band_csv(bool band_enabled)
@@ -1431,6 +1514,7 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
                                                              control_output.blockage_radius,
                                                              path_controller);
         current_plan_.reset();
+        plan_spline_valid_ = false;   // the fitted curve belongs to the plan being dropped
         // In leg mode resetting the plan WAS the replan trigger. A continuous route has no target to
         // replan to, so the request has to be explicit or the route branch just re-installs the same
         // curve and the robot drives at the blocker again.
@@ -1802,6 +1886,7 @@ void ControllerSession::finalize_reached(rc::AffordanceManager &affordance_manag
     reset_stuck_state();
     feedback_node_id_ = 0;
     current_plan_.reset();
+    plan_spline_valid_ = false;   // the fitted curve belongs to the plan being dropped
     last_target_info_.reset();
     active_target_id_ = 0;
     current_target_room_.reset();
@@ -1870,6 +1955,7 @@ void ControllerSession::set_manual_target(const QPointF &point,
     affordance_manager.clear_current();
     manual_target_dirty_ = true;
     current_plan_.reset();
+    plan_spline_valid_ = false;   // the fitted curve belongs to the plan being dropped
     last_target_info_.reset();
     active_target_id_ = 0;
     path_controller.stop();
@@ -1888,6 +1974,7 @@ void ControllerSession::clear_manual_target(rc::AffordanceManager &affordance_ma
     manual_target_origin_room_.reset();
     manual_target_dirty_ = false;
     current_plan_.reset();
+    plan_spline_valid_ = false;   // the fitted curve belongs to the plan being dropped
     last_target_info_.reset();
     active_target_id_ = 0;
     path_controller.stop();
@@ -1999,6 +2086,7 @@ void ControllerSession::begin_escape(const ControllerRobotPose &robot_pose,
 
     clear_tracking_state();
     current_plan_.reset();
+    plan_spline_valid_ = false;   // the fitted curve belongs to the plan being dropped
     // Same reason as the visible-blockage path: the virtual disc just dropped ahead of the robot is only
     // useful if something re-plans against it, and in continuous-route mode nothing does unless asked.
     route_repair_pending_ = true;
@@ -2058,6 +2146,7 @@ void ControllerSession::abort(rc::TrajectoryController &path_controller,
     route_active_ = false;
     route_repair_pending_ = false;
     current_plan_.reset();
+    plan_spline_valid_ = false;   // the fitted curve belongs to the plan being dropped
     active_target_id_ = 0;
     last_target_info_.reset();
     // Band bookkeeping belongs to the route that is going away.

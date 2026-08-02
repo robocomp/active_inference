@@ -660,6 +660,11 @@ bool SpecificWorker::ensure_current_plan(const PlanningStep &step)
 void SpecificWorker::load_params()
 {
 	load_optional_cast<double>("Planner.CellSize", params.planner_cell_size_m);
+	// Clearance PREFERENCE inside the A* cost (grid_planner.h). Distinct from FootprintSafetyMarginM,
+	// which is a hard admissibility margin — this one never makes a passable gap unplannable.
+	// ★[Planner], not [Controller]: these sit with CellSize, beside the thing they configure.
+	load_optional_cast<double>("Planner.ClearanceWeight", params.planner_clearance_weight);
+	load_optional_cast<double>("Planner.ClearancePref", params.planner_clearance_pref_m);
 	load_optional("Mission.LibraryPath", missions_path_);
 	load_optional("Mission.MetricsCsvPath", params.mission_csv_path);
 	load_optional("Mission.RunDir", params.mission_run_dir);
@@ -678,6 +683,9 @@ void SpecificWorker::load_params()
 	load_optional_cast<double>("Controller.MaxLateralAccel", params.max_lateral_accel_mps2);
 	load_optional_cast<double>("Controller.MaxRotSpeed", params.max_rot_speed_rps);
 	load_optional_cast<double>("Controller.FootprintSafetyMarginM", params.footprint_safety_margin_m);
+	// Clearance PREFERENCE inside the A* cost (grid_planner.h). Distinct from FootprintSafetyMarginM,
+	// which is a hard admissibility margin — this one never makes a passable gap unplannable.
+
 	load_optional_cast<double>("Controller.PosGain", params.pos_gain);
 	load_optional_cast<double>("Controller.RotGain", params.rot_gain);
 	load_optional_cast<double>("Controller.VelocityOutputPeriodMs", params.velocity_output_period_ms);
@@ -743,6 +751,10 @@ void SpecificWorker::load_params()
 	load_optional_cast<double>("Controller.StraightSpeedMinGoalDist", params.straight_speed_min_goal_dist_m);
 	// Controller-side LiDAR obstacle creation (false ⇒ residual_concept is the sole obstacle source).
 	load_optional("Controller.ObstacleCreationEnabled", params.obstacle_creation_enabled);
+
+	// Rotate in place at the goal to face an affordance's commanded yaw (false ⇒ arrive on position
+	// only, never orient). See ControllerParams::goal_facing_yaw_enabled.
+	load_optional("Controller.GoalFacingYawEnabled", params.goal_facing_yaw_enabled);
 
 	// Affordance servo ("lock-on") executor — HOW only; WHAT/WHEN is per-affordance (contract).
 	load_optional("Controller.LockOnEnabled", params.lockon_enabled);
@@ -840,6 +852,10 @@ void SpecificWorker::load_params()
 	// it converges to the carrot's direction, not to the route the band just optimised.
 	load_optional_cast<double>("Controller.PdCrossTrackGain", path_controller_.params.pd_cross_track_gain);
 	load_optional_cast<double>("Controller.PdCrossTrackSoft", path_controller_.params.pd_cross_track_soft_mps);
+	// Lateral bumper — the reactive half. The A* clearance preference and the band keep the ROUTE off
+	// walls; this keeps the BODY off them when the tracker's own error puts it there anyway.
+	load_optional_cast<double>("Controller.PdBumperGain", path_controller_.params.pd_bumper_gain);
+	load_optional_cast<double>("Controller.PdBumperDist", path_controller_.params.pd_bumper_dist_m);
 	{
 		std::string mode = "mppi";
 		load_optional("Controller.ControlMode", mode);

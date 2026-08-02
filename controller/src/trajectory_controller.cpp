@@ -1500,9 +1500,35 @@ TrajectoryController::ControlOutput TrajectoryController::compute_pd(
     }
     out.cross_track_m = cross_track;
 
-    // One angular error, then one PD on it — the cross-track term is an ANGLE, so it belongs inside the
-    // error the controller regulates, not bolted onto the rate afterwards.
-    const float angle_err = carrot_angle + cross_term;
+    // ── LATERAL BUMPER ────────────────────────────────────────────────────────────────────────────
+    // Probe the LIVE field either side of the body and push away from whichever side is tight. See
+    // Params::pd_bumper_gain. Gaps are measured from the BODY: query_esdf is distance from the probe
+    // point to the nearest obstacle, and the probe already sits at the body's lateral extent, so what
+    // is left is the gap the body actually has. Probed slightly AHEAD (half the carrot's reach or a
+    // body length, whichever is smaller) because steering now affects where the body will be, not
+    // where it is.
+    float bumper_term = 0.f;
+    if (active_params_.pd_bumper_gain > 0.f and active_params_.pd_bumper_dist_m > 1e-3f)
+    {
+        const float probe = std::max(0.05f, active_params_.lateral_probe_offset);
+        const float ahead = std::min(0.5f * std::max(0.f, carrot_dist), body_extent_max());
+        const float gap_l = query_esdf(-probe, ahead);
+        const float gap_r = query_esdf(+probe, ahead);
+        const float d_b = active_params_.pd_bumper_dist_m;
+        const float def_l = std::max(0.f, d_b - gap_l);
+        const float def_r = std::max(0.f, d_b - gap_r);
+        const float push = std::clamp((def_l - def_r) / d_b, -1.f, 1.f);   // + ⇒ steer right
+        out.pd_bumper_push = push;
+        out.pd_gap_left_m = gap_l;
+        out.pd_gap_right_m = gap_r;
+        const float v_ref = std::max(active_params_.pd_cross_track_soft_mps,
+                                     has_prev_vel_ ? std::abs(smoothed_vel_[0]) : 0.f);
+        bumper_term = std::atan2(active_params_.pd_bumper_gain * push, v_ref / std::max(0.05f, d_b));
+    }
+
+    // One angular error, then one PD on it — the cross-track and bumper terms are both ANGLES, so they
+    // belong inside the error the controller regulates, not bolted onto the rate afterwards.
+    const float angle_err = carrot_angle + cross_term + bumper_term;
     const float d_err = angle_err - prev_angle_err_;
     prev_angle_err_ = angle_err;
 

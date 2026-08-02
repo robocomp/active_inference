@@ -48,6 +48,12 @@ struct ControllerParams
     // Planning grid resolution. Independent of the residual's evidence grid: the planner does not need
     // centimetre fidelity, and cell count drives both memory and search time quadratically.
     float planner_cell_size_m = 0.06f;
+    // A* CLEARANCE PREFERENCE — see GridPlanner::Params::clearance_weight. The search cost was pure
+    // shortest-path, so it hugged anything the footprint test would legally allow and the route
+    // optimiser downstream had to undo it. This makes tight cells cost more inside the search itself.
+    // It is a PREFERENCE: it never makes a passable gap unplannable. 0 = the old behaviour.
+    float planner_clearance_weight = 1.5f;
+    float planner_clearance_pref_m = 0.9f;
     // Preferred standoff BEYOND the robot's real extent, handed to the MPPI as d_safe. Pure comfort: the
     // hard constraint is the footprint test, so raising this can slow the robot near obstacles but can never
     // make a reachable goal unreachable. It used to be `clearance_m` and did three unrelated jobs at once —
@@ -247,6 +253,13 @@ struct ControllerParams
     float straight_speed_heading_threshold_rad = 0.08f;
     float straight_speed_clearance_margin_m = 0.20f;
     float straight_speed_min_goal_dist_m = 1.5f;
+
+    // Honour an affordance's commanded facing yaw at arrival. true = the follower rotates in place at
+    // the goal until it faces target.yaw_rad, and only then reports goal_reached (needed when the
+    // point of the affordance is to LOOK at something). false = arrival is judged on POSITION alone
+    // and the terminal rotation never happens — the right setting for pure navigation runs, where
+    // turning on the spot at every waypoint is wasted motion and one more place to hang.
+    bool  goal_facing_yaw_enabled = true;
 
     // Affordance servo ("lock-on") executor — the HOW (gains/caps/timing). The WHAT/WHEN
     // (scalar_target, completion predicate, stable_n, timeout) is per-affordance and comes from the
