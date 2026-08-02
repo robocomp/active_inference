@@ -337,7 +337,8 @@ void ControllerSession::dump_route_world(const Eigen::Vector2f &start,
     // stays readable instead of becoming a file that parses into a subtly different optimiser.
     f << "opt " << opt.d_target << ' ' << opt.rho << ' ' << opt.sigma_a << ' ' << opt.clearance_floor << ' '
       << opt.w_kappa << ' ' << opt.w_clear << ' ' << opt.w_gauge << ' ' << opt.clear_peak << ' '
-      << opt.anchor_huber << ' ' << opt.iterations << ' ' << opt.kappa_peak << '\n';
+      << opt.anchor_huber << ' ' << opt.iterations << ' ' << opt.kappa_peak << ' '
+      << opt.safety_bias << '\n';
     grid_planner_.write_grid(f);
 }
 
@@ -351,7 +352,7 @@ void ControllerSession::log_mppi_diagnostics(std::uint64_t t_ms,
         if (mppi_csv_.is_open())
             mppi_csv_ << "t_ms,ess,ess_K,ess_ratio,lambda_used,lambda_adaptive,cost_range,cost_best,"
                          "g_goal,g_obs,g_vel,g_smooth,g_lat,g_cbf,n_collisions,"
-                         "cmd_adv,meas_speed,min_esdf,explore\n";
+                         "cmd_adv,cmd_rot,meas_speed,min_esdf,explore,p_free,steer_conc,side_asym\n";
         mppi_csv_open_ = true;
     }
     if (!mppi_csv_.is_open()) return;
@@ -360,7 +361,8 @@ void ControllerSession::log_mppi_diagnostics(std::uint64_t t_ms,
               << o.lambda_used << ',' << o.lambda_adaptive << ',' << o.cost_range << ',' << o.cost_best << ','
               << o.g_goal << ',' << o.g_obs << ',' << o.g_vel << ',' << o.g_smooth << ','
               << o.g_lat << ',' << o.g_cbf << ',' << o.n_collisions << ','
-              << commanded_adv << ',' << measured_speed << ',' << o.min_esdf << ',' << o.explore << '\n';
+              << commanded_adv << ',' << o.rot << ',' << measured_speed << ',' << o.min_esdf << ',' << o.explore << ','
+              << o.p_free << ',' << o.steering_concentration << ',' << o.side_asymmetry << '\n';
 }
 
 void ControllerSession::log_route_event(const char *event, bool ok, std::uint64_t t_ms,
@@ -877,7 +879,51 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
     // not write a file forever, and placed here — beside the other instrumentation — rather than inside
     // the controller, which should not know that anything is being recorded.
     if (mission_.running())
+    {
         log_mppi_diagnostics(overlay_now_ms_, control_output, control_output.adv, base_speed_lin_);
+        // CAPTURE THE HARDEST CYCLE OF THE RUN for offline replay (tools/mppi_bench). "Hardest" is where
+        // the controller had the least room to choose: every rollout infeasible, or the tightest the
+        // horizon ever got. A snapshot from open floor proves nothing — measured, a cost term that is
+        // load-bearing near contact is completely inert two metres away, so a comfortable cycle replays
+        // identically under every setting and answers no question at all.
+        const bool all_infeasible = control_output.ess_K > 0
+                                and control_output.n_collisions >= control_output.ess_K;
+        if (all_infeasible and tightest_cycle_clearance_ > -1.f)
+        {
+            tightest_cycle_clearance_ = -1.f;      // nothing beats this; stop re-requesting
+            path_controller.request_snapshot("mppi_cycle.txt");
+        }
+
+        // ── CAPTURE A REVERSAL ITSELF ─────────────────────────────────────────────────────────────
+        // The reversal count is the loudest defect in this stack and three hypotheses for it have now
+        // been falsified by measuring PROXIES: route geometry (the optimiser removed 3 of 4 tight corners
+        // and the count did not move), sampling dither (at an open cycle the command is 65x its own
+        // seed-to-seed noise), and mode averaging (which predicts flips clustered at obstacles, while
+        // measurement shows them spread over 83% of the lap). So capture the EVENT, not a proxy for it:
+        // the cycle on which the commanded rotation actually changes sign. Replaying that cycle with
+        // several seeds says immediately whether the flip was noise, a mode swap, or a real decision.
+        // ★Same deadband as TrajectoryStats::rot_reversals (0.05 rad/s) — a different one would count a
+        // different thing and the snapshot would not correspond to the metric it is meant to explain.
+        // ★OFF BY ONE CYCLE, deliberately not fixed: a request is served at the end of the NEXT compute,
+        // so the snapshot is the cycle AFTER the flip (100 ms later), not the flip itself. Capturing the
+        // exact cycle would mean buffering every cycle's cloud on the chance it turns out interesting.
+        // For the question being asked — is this command noise-dominated — the successor cycle answers it
+        // just as well, because the rollouts are resampled from scratch either way. If the question ever
+        // becomes "what CHANGED between the two cycles", this is no longer good enough and the buffering
+        // has to be built.
+        constexpr float kRotDeadband = 0.05f;
+        const int rot_sign = control_output.rot > kRotDeadband ? 1
+                           : (control_output.rot < -kRotDeadband ? -1 : 0);
+        if (rot_sign != 0)
+        {
+            if (prev_cmd_rot_sign_ != 0 and rot_sign != prev_cmd_rot_sign_ and not reversal_captured_)
+            {
+                reversal_captured_ = true;         // the first one; later ones would overwrite it
+                path_controller.request_snapshot("mppi_reversal.txt");
+            }
+            prev_cmd_rot_sign_ = rot_sign;
+        }
+    }
 
     if (route_active_ and mission_.running())
     {
@@ -903,6 +949,17 @@ void ControllerSession::execute_plan(const ControllerRobotPose &robot_pose,
         // rewritten to remove, reintroduced in the measurement instead of the model. It made every
         // recorded run report 1-5 cm of clearance and fail the safety constraint.
         const float body_clearance = esdf_here - path_controller.body_extent_here();
+        // SNAPSHOT THE CYCLE WHERE THE ROBOT WAS CLOSEST TO SOMETHING — this quantity, the gap between the
+        // BODY and the nearest obstacle right now, and not min_esdf. min_esdf is the minimum over the best
+        // rollout's WHOLE horizon, which is dominated by the 5 s tail every plan has; triggering on it
+        // selected the cycle whose prediction dipped lowest rather than the cycle where the robot was
+        // actually in trouble, and the snapshot it produced had 0.40 m of room. A trigger has to mean what
+        // its name says, for the same reason a metric does.
+        if (mission_.running() and body_clearance < tightest_cycle_clearance_)
+        {
+            tightest_cycle_clearance_ = body_clearance;
+            path_controller.request_snapshot("mppi_cycle.txt");
+        }
         // Deviation from the reference curve — the continuous tracking signal. NaN when there is no
         // reference (a click target has no route), and the stats skip it rather than inventing a zero.
         float cross_track = std::numeric_limits<float>::quiet_NaN();

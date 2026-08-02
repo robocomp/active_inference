@@ -708,8 +708,11 @@ void MissionRunner::stop(const std::string &reason, std::uint64_t now_ms)
             std::error_code ec;
             const std::filesystem::path folder = std::filesystem::path(run_dir_) / active_.name;
             std::filesystem::create_directories(folder, ec);
-            const std::filesystem::path stem = std::filesystem::path(src).stem();
-            std::filesystem::copy_file(src, folder / (stamp + "_" + stem.string() + ".csv"),
+            // Keep the source's own name and extension: these are not all CSVs (mppi_cycle.txt is a
+            // replay snapshot), and renaming an artefact to a format it is not is how a reader ends up
+            // parsing it as one.
+            const std::filesystem::path name = std::filesystem::path(src).filename();
+            std::filesystem::copy_file(src, folder / (stamp + "_" + name.string()),
                                        std::filesystem::copy_options::overwrite_existing, ec);
         }
     }

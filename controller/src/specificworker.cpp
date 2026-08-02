@@ -406,6 +406,8 @@ void SpecificWorker::initialize()
 	session_.mission().archive_on_stop("mppi_diag.csv");
 	session_.mission().archive_on_stop("route_events.csv");
 	session_.mission().archive_on_stop("route_geometry.csv");
+	session_.mission().archive_on_stop("mppi_cycle.txt");
+	session_.mission().archive_on_stop("mppi_reversal.txt");
 	session_.mission().load(missions_path_);
 	refresh_mission_list();
 	update_custom_widget(std::nullopt);

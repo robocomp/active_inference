@@ -22,3 +22,22 @@ else()
 endif()
 set_target_properties(route_bench PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}/../bin")
+
+# Replays ONE recorded control cycle through the real TrajectoryController. It links the controller
+# itself, which is possible only because that class depends on Eigen and robot_footprint and nothing
+# else — no Qt, no Ice, no DSR.
+add_executable(mppi_bench
+  mppi_bench.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/../src/trajectory_controller.cpp
+  ${AI_COMMON_DIR}/robot_footprint/robot_footprint.cpp
+)
+target_compile_features(mppi_bench PRIVATE cxx_std_23)
+target_compile_options(mppi_bench PRIVATE -O3 -fno-char8_t)
+if (TARGET Eigen3::Eigen)
+  target_link_libraries(mppi_bench PRIVATE Eigen3::Eigen)
+else()
+  target_include_directories(mppi_bench PRIVATE /usr/include/eigen3)
+endif()
+target_include_directories(mppi_bench PRIVATE /home/robocomp/robocomp/classes)
+set_target_properties(mppi_bench PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}/../bin")

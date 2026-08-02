@@ -203,6 +203,13 @@ private:
     void log_mppi_diagnostics(std::uint64_t t_ms, const rc::TrajectoryController::ControlOutput &o,
                               float commanded_adv, float measured_speed);
 
+    // Closest the BODY has come to an obstacle this run; the cycle that beats it gets snapshotted.
+    float tightest_cycle_clearance_ = std::numeric_limits<float>::max();
+    // Sign of the last commanded rotation outside the deadband, and whether a reversal has already been
+    // snapshotted this run (the first is enough; later ones would overwrite the file).
+    int  prev_cmd_rot_sign_ = 0;
+    bool reversal_captured_ = false;
+
     std::ofstream proximity_csv_;                  // near-obstacle black box ("why didn't it react")
     bool proximity_csv_open_ = false;
     std::uint64_t proximity_csv_last_ms_ = 0;      // throttle for proximity CSV rows

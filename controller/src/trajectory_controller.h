@@ -3,6 +3,7 @@
 #include <vector>
 #include <optional>
 #include <random>
+#include <string>
 #include <Eigen/Dense>
 
 #include "../../common/robot_footprint/robot_footprint.h"
@@ -66,7 +67,6 @@ public:
         float carrot_max_route_cut_m = 0.15f;
         bool  carrot_curve_adaptation_enabled = false; // temporary inhibit switch for curve-based carrot adaptation
         float carrot_curve_lookahead_min = 0.9f;   // minimum lookahead used only in tight curves
-        float carrot_curve_radius_ref = 1.6f;      // radius where lookahead reduction reaches ~50%
         float carrot_curve_min_heading_change = 0.08f; // rad; below this, path is considered straight
         float carrot_curve_release_heading_change = 0.04f; // hysteresis release threshold (straight again)
         float goal_threshold   = 0.25f;
@@ -85,6 +85,13 @@ public:
 
         // Command floors to avoid degenerate zero-motion plans
         float min_adv_cmd = 0.05f;
+        // Three deterministic seeds — stop, and pivot in place either way — added because the sampler
+        // cannot otherwise propose them (adv is clamped at >= 0 around a forward nominal, so "stop" needs
+        // ~12 consecutive noise draws to land on the clamp). ★DEFAULT OFF: they were added mid-session on
+        // an argument, they did not change either offline snapshot (one did not need them, the other was
+        // already overlapping), and the first lap that carried them came back slower. Unmeasured code
+        // does not get to ride along in the baseline. Switch on to measure.
+        bool  enable_stop_pivot_seeds = false;
 
         // Discount and numerical epsilons
         float cost_discount = 0.95f;          // per-step discount in rollout scoring
@@ -98,10 +105,14 @@ public:
         int   K_min = 20,  K_max = 300;    // adaptive K bounds
         int   T_min = 15,  T_max = 120;     // adaptive T bounds
         float lambda_min = 1.0f, lambda_max = 500.0f;  // adaptive λ bounds
-        float cpu_budget_ms = 5.0f;        // max MPPI time per cycle (10% of 50ms)
+        // DIAGNOSTIC ONLY (default off): bypass `lambda_used = max(adaptive, cost_range/5)` and use the
+        // configured mppi_lambda directly. The floor makes the temperature a function of whichever term
+        // has the widest spread, so no lambda sweep can ever be run while it is active — measured, a
+        // 30x sweep of mppi_lambda changed the closed-loop result by nothing at all. This exists to ask
+        // one question: is the range floor amplifying a term's instability, or merely reporting it?
+        bool  lambda_fixed = false;
         float ess_smoothing = 0.25f;       // EMA alpha for ESS (faster response to drops)
         float ess_initial_ratio = 0.5f;    // initial ESS / K used when a new path starts
-        int   adapt_interval = 2;          // adapt K/T every N cycles (was 5)
 
         // MPPI temperature (initial, adapted by ESS)
         float mppi_lambda       = 8.0f;
@@ -111,7 +122,6 @@ public:
         float sigma_rot   = 0.15f;
 
         // AR(1) temporal noise correlation
-        float noise_alpha  = 0.80f;
         // Adaptive sigma limits
         float sigma_min_adv   = 0.04f;
         float sigma_min_rot   = 0.08f;
@@ -206,7 +216,6 @@ public:
         float sg_explore_pre_distance = 0.40f; // start increasing exploration this much before SG activation distance
         float sg_explore_sigmoid_width = 0.12f; // transition softness (meters)
 
-
         // Nominal and injected seed shaping
         float nominal_alignment_floor = 0.1f; // minimum forward alignment when turning toward carrot
         float nominal_goal_dist_scale = 1.0f; // distance at which nominal speed reaches full scale
@@ -219,46 +228,11 @@ public:
         float inject_offset_30 = 0.5f;
         float inject_offset_60 = 1.05f;
         float inject_offset_90 = 1.57f;
-        float inject_offset_120 = 2.09f;
-        int   inject_count_start = 2;         // initial number of structured injection seeds
-        int   inject_count_very_low_ess = 6;  // injection count when ESS is very low
-        int   inject_count_low_ess = 4;       // injection count when ESS is low
-        int   inject_count_mid_ess = 3;       // injection count when ESS is medium
-        int   inject_count_high_ess = 2;      // injection count when ESS is healthy
 
         // ESS adaptation thresholds and gains
-        float ess_low_very = 0.15f;
-        float ess_low = 0.30f;
-        float ess_high = 0.50f;
-        float ess_high_strong = 0.60f;
-        float ess_inject_low = 0.25f;
-        float ess_inject_mid = 0.40f;
-
-        float lambda_gain_low_very = 1.15f;
-        float lambda_gain_low = 1.08f;
-        float lambda_gain_high = 0.96f;
 
         // Low-ESS decisiveness: blend weighted MPPI command with best seed
         // when ESS ratio collapses, preventing over-conservative averaging.
-        float ess_blend_best_start = 0.20f;  // start blending below this ESS/K ratio
-        float ess_blend_best_max = 0.55f;    // max blend factor toward best seed at ESS→0
-
-        float sigma_rot_gain_low_very = 1.08f;
-        float sigma_adv_gain_low_very = 0.90f;
-        float sigma_rot_gain_low = 1.04f;
-        float sigma_adv_gain_low = 0.95f;
-        float sigma_rot_gain_high = 0.97f;
-        float sigma_adv_gain_high = 1.01f;
-
-        float adapt_K_gain_low_very = 1.35f;
-        float adapt_K_gain_low = 1.20f;
-        float adapt_K_gain_high = 0.85f;
-        float adapt_T_gain_low = 1.15f;
-        float adapt_T_gain_high = 0.90f;
-
-        float collision_ratio_high = 0.5f;
-        float collision_ratio_low = 0.2f;
-        float cpu_estimation_min_ms = 0.1f;
 
         // ESDF grid
         float grid_resolution  = 0.05f;
@@ -288,7 +262,6 @@ public:
         float pd_speed_cos_power = 1.0f; // adv = max_adv * cos^power(angle_err)
 
         // Visualization
-        int num_trajectories_to_draw = 20;
 
         // Gaussian brake for high rotation (to prevent oscillation)
         // Reduced from 1.5: lambda_delta_vel now handles oscillation in scoring,
@@ -344,6 +317,28 @@ public:
         // Per-term cost of the BEST rollout, so "which term dominates" is answerable per cycle.
         float g_goal = 0.f, g_obs = 0.f, g_vel = 0.f, g_smooth = 0.f, g_lat = 0.f, g_cbf = 0.f;
         int   n_collisions = 0;
+        // Rollout-set shape, from the block that used to print all of this to a terminal every second and
+        // was commented out (removed 2026-08-01 — mppi_diag.csv records it per cycle to a file instead).
+        // p_free is the fraction of rollouts that survive the feasibility test; steering_concentration is
+        // how aligned the surviving ones are. Together they say whether there IS a dominant way through,
+        // which is a different question from whether the softmax can tell (that is ESS).
+        float p_free = 0.f;
+        float steering_concentration = 0.f;
+        // The lateral balance term's OWN INPUT, measured at the robot's current pose: the left/right
+        // difference of the normalised side-clearance deficits, in [-1,1]. Positive means the left side is
+        // the tighter one. g_lat is a total and cannot say whether the centring sub-term is what is
+        // steering; this can. If the commanded rotation tracks this with a lag, the weave is a centring
+        // servo with gain and delay — a control problem, not a cost-structure one.
+        float side_asymmetry = 0.f;
+        // WHICH SEED WON, as an index into the sampled set — not into the drawn/ranked list, which is
+        // what best_trajectory_idx reports and which is always 0 by construction. Seeds are generated in
+        // a fixed order (nominal, 6 structured injections, then the random ones), so the index says which
+        // FAMILY the winner came from, and watching it across cycles says whether the solver is switching
+        // between families or refining one.
+        int   best_seed_idx = -1;
+        // Rotation of that winning seed's first step. If the commanded rotation is a weighted mean that
+        // sits far from the best rollout's own value, the mean is not representing any single plan.
+        float best_seed_rot = 0.f;
 
         Eigen::Vector2f carrot_room = Eigen::Vector2f::Zero();
         int current_wp_index = 0;
@@ -429,6 +424,30 @@ public:
     void set_carrot_hint(int segment_index) { carrot_seg_hint_ = std::max(0, segment_index); }
 
     ControlOutput compute(const Eigen::Affine2f& robot_pose);
+    /// Same cycle, with the cloud supplied instead of read from the buffer — the replay path.
+    ControlOutput compute(const Eigen::Affine2f& robot_pose,
+                          const std::vector<Eigen::Vector3f>& lidar_points);
+
+    /// Seed the sampler. The default seeds from std::random_device, so two runs with IDENTICAL inputs
+    /// produce DIFFERENT commands — which is correct for a robot and useless for a comparison: it puts
+    /// sampling noise inside every A/B, on top of the 14.5% the world already contributes. Setting a seed
+    /// makes a cycle reproducible, which is what tools/mppi_bench needs to answer "what would this cost
+    /// change have done" without driving.
+    void set_seed(std::uint32_t seed) { rng_.seed(seed); }
+
+    /// Write everything the NEXT compute() consumes to `path`: pose, the lidar points it actually used,
+    /// the obstacle and boundary polygons, the path, and the parameters. Replaying it rebuilds the ESDF
+    /// with the SAME build_esdf on the SAME inputs, so nothing is re-derived by a second implementation
+    /// (the trap route_bench avoids by recording the planner's raster).
+    /// ★Snapshots the INPUTS, not the ESDF: here the producer and the replayer are the same function, so
+    /// the inputs are the smaller, more honest artefact.
+    void request_snapshot(std::string path) { snapshot_path_ = std::move(path); }
+
+    /// Restore a snapshot: parameters, path, obstacle and boundary points are set on THIS controller,
+    /// and the cycle's pose and cloud are handed back so the caller can replay it with
+    /// compute(pose, lidar). Returns false on a malformed stream.
+    bool load_snapshot(std::istream &is, Eigen::Affine2f &pose_out,
+                       std::vector<Eigen::Vector3f> &lidar_out);
     void stop();
     void set_lidar_buffer(LidarPointBuffer *buffer) { lidar_buffer_ = buffer; }
 
@@ -509,6 +528,12 @@ private:
     // the compute cadence is ~1 s with a tail to 1.5 s, so this is deliberately pessimistic — being slow to
     // finish an alignment is harmless; overshooting it means never finishing at all.
     float align_worst_cycle_s_ = 1.0f;
+
+    // Pending snapshot request (see request_snapshot). Written at the END of compute(), when the cycle's
+    // inputs and its outcome are both known.
+    std::string snapshot_path_;
+    void write_snapshot(const Eigen::Affine2f &robot_pose,
+                        const std::vector<Eigen::Vector3f> &lidar_points) const;
 
     // ---- ESDF ----
     std::vector<float> esdf_data_;

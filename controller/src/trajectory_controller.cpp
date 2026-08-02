@@ -3,7 +3,9 @@
 #include <cmath>
 #include <algorithm>
 #include <iostream>
+#include <fstream>
 #include <iomanip>
+#include <sstream>
 #include <limits>
 #include <chrono>
 #include <print>
@@ -529,14 +531,21 @@ void TrajectoryController::smooth_path_spline()
 // Main compute — Proper MPPI with warm-start + Gaussian perturbations
 // ============================================================================
 
+// The live entry point: read the cloud, then solve. Split from the solver below so that a cycle is a
+// FUNCTION OF ITS INPUTS rather than of a buffer the solver reaches into — which is what lets
+// tools/mppi_bench replay a recorded cycle through exactly this code instead of an imitation of it.
 TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::Affine2f& robot_pose)
+{
+    return compute(robot_pose, read_lidar_points_robot(robot_pose));
+}
+
+TrajectoryController::ControlOutput TrajectoryController::compute(
+    const Eigen::Affine2f& robot_pose, const std::vector<Eigen::Vector3f>& lidar_points)
 {
     refresh_active_params();
 
     ControlOutput out;
     if (!active_ || path_room_.empty()) { active_ = false; out.goal_reached = true; return out; }
-
-    const auto lidar_points = read_lidar_points_robot(robot_pose);
 
     // ESDF-input diagnostics: count the raw points that survived the self-filter and the nearest one.
     // If something is in the cloud yet nearest_esdf_point_m stays large, it was dropped before the ESDF.
@@ -786,7 +795,8 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
         const float g_range = g_max_nc - G_min;
         cost_range_diag = g_range;
         const float range_lambda = std::max(1.f, g_range / 5.f);
-        lambda_used = std::max(adaptive_lambda_, range_lambda);
+        lambda_used = active_params_.lambda_fixed ? active_params_.mppi_lambda
+                                                  : std::max(adaptive_lambda_, range_lambda);
 
         std::vector<float> weights(actual_K);
         float w_sum = 0.f;
@@ -1015,6 +1025,35 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
         out.g_cbf = b.G_cbf;
     }
     out.n_collisions = num_collisions;
+    out.best_seed_idx = best_idx;
+    if (best_idx >= 0 and best_idx < static_cast<int>(seeds.size()) and not seeds[best_idx].rot.empty())
+        out.best_seed_rot = seeds[best_idx].rot[0];
+    out.p_free = p_free_current;
+    out.steering_concentration = steering_concentration_current;
+    {
+        // Same probe geometry and the same normalisation as the balance sub-term inside the rollout cost,
+        // evaluated at the robot itself (theta = 0 in its own frame) so this is the servo's input now.
+        const float off = std::max(0.f, active_params_.lateral_probe_offset);
+        const float body_lat = std::max(body_extent({+1.f, 0.f}), body_extent({-1.f, 0.f}));
+        const float target = body_lat + std::max(0.f, active_params_.lateral_clearance_margin);
+        const float span = std::max(active_params_.lateral_clearance_margin, 1e-3f);
+        float dl = std::numeric_limits<float>::infinity(), dr = dl;
+        for (const float lon : {-active_params_.lateral_probe_rear_offset, 0.f,
+                                 active_params_.lateral_probe_front_offset})
+        {
+            dr = std::min(dr, query_esdf(+off, lon));
+            dl = std::min(dl, query_esdf(-off, lon));
+        }
+        const float ul = std::clamp((target - dl) / span, 0.f, 1.f);
+        const float ur = std::clamp((target - dr) / span, 0.f, 1.f);
+        out.side_asymmetry = ul - ur;
+    }
+
+    if (not snapshot_path_.empty())
+    {
+        write_snapshot(robot_pose, lidar_points);
+        snapshot_path_.clear();      // one request, one snapshot
+    }
     out.ess_K = adaptive_K_;
     out.explore = explore_;
 
@@ -1359,38 +1398,6 @@ TrajectoryController::ControlOutput TrajectoryController::compute(const Eigen::A
         }
     }
 
-//    // Debug (every ~1 second)
-//    static int dbg = 0;
-//    if (++dbg % std::max(1, active_params_.debug_print_period) == 0)
-//    {
-//        const SimResult *best_result = (best_idx >= 0 && best_idx < actual_K) ? &results[best_idx] : nullptr;
-//        const float sg_front = std::isfinite(frontal_min_dist) ? frontal_min_dist : -1.f;
-//        std::cout << "[MPPI] K=" << adaptive_K_ << " T=" << adaptive_T_
-//                  << " ESS=" << std::setprecision(0) << ess_smooth_ << "/" << adaptive_K_
-//                  << " ncol=" << num_collisions << "/" << actual_K
-//                  << " pf=" << std::setprecision(2) << p_free_current
-//                  << " sc=" << std::setprecision(2) << steering_concentration_current
-//                  << " C=" << std::setprecision(2) << clearance_quality_current
-//                  << " SG=" << std::setprecision(2) << sg_gate
-//                  << " fmin=" << std::setprecision(2) << sg_front
-//                  << " cmd(" << std::setprecision(2) << out.adv << "," << out.rot << ")"
-//                  << " sgmod=" << (safety_guard_modified_command ? 1 : 0)
-//                  << " dist=" << std::setprecision(1) << out.dist_to_goal
-//                  << " esdf=" << out.min_esdf
-//                  << " best=" << best_idx
-//                  << " Gtot=" << (best_result ? best_result->G_total : 0.f)
-//                  << " G(goal/obs/lat/cbf/vel)="
-//                  << (best_result ? best_result->G_goal : 0.f) << "/"
-//                  << (best_result ? best_result->G_obs : 0.f) << "/"
-//                  << (best_result ? best_result->G_lat : 0.f) << "/"
-//                  << (best_result ? best_result->G_cbf : 0.f) << "/"
-//                  << (best_result ? best_result->G_vel : 0.f)
-//                  << " mppi_ms=" << std::setprecision(1) << last_mppi_ms_
-//                  << "\n";
-//    }
-    (void)p_free_current;
-    (void)steering_concentration_current;
-    (void)safety_guard_modified_command;
 
     // Remember what we are about to command: the continuity cost is referenced to this next cycle.
     last_cmd_adv_ = out.adv;
@@ -1648,6 +1655,29 @@ std::vector<TrajectoryController::Seed> TrajectoryController::sample_trajectorie
         seeds.push_back(std::move(s));
     }
 
+    // --- What a differential drive can do that forward-biased noise cannot propose ----------------
+    // STOP, and PIVOT IN PLACE either way. Three deterministic seeds out of K.
+    // These are not exploration, they are the actions that are available exactly when nothing else is.
+    // Measured: at the tightest cycle of a lap the robot sat 3.7 mm from a wall, and ALL 100 rollouts were
+    // infeasible — even after the feasibility predicate was corrected so that standing still is admissible
+    // (esdf 0.3207 vs support 0.3170). The predicate was no longer the obstacle; the PROPOSAL was. Every
+    // sample carries adv >= 0 drawn around a forward nominal, so at a 3.7 mm gap every one of them
+    // overlaps within a step or two, and `cbf_max_decel` had no effect on the outcome at all — the
+    // signature of a feasible action that is never offered rather than one that is rejected.
+    // A stopped robot is feasible under the ICS predicate by construction, so with these seeds present the
+    // feasible set cannot be empty unless the robot is ALREADY overlapping, which is a different fault.
+    if (active_params_.enable_stop_pivot_seeds)
+    {
+        const std::array<float, 3> pivot_rates = {0.f, active_params_.max_rot, -active_params_.max_rot};
+        for (const float w : pivot_rates)
+        {
+            Seed s_stop;
+            s_stop.adv.assign(T, 0.f);
+            s_stop.rot.assign(T, w);
+            seeds.push_back(std::move(s_stop));
+        }
+    }
+
     // --- Remaining seeds: nominal + i.i.d. Gaussian perturbations ----------
     const int n_random = std::max(0, K - static_cast<int>(seeds.size()));
     for (int k = 0; k < n_random; ++k)
@@ -1886,6 +1916,20 @@ TrajectoryController::SimResult TrajectoryController::simulate_and_score(
         // Collision semantics with finite hard horizon:
         // - near-term collision => hard infeasible (weight zero)
         // - far collision      => soft penalty only (keeps rollout useful)
+        //
+        // ★AN ICS PREDICATE WAS TRIED HERE AND REVERTED (2026-08-02) — read this before trying again.
+        // `esdf < support + v*reaction + v^2/(2*decel)` is the right IDEA and was verified offline to fix
+        // what it was aimed at: at a reversal cycle p_free went 0.24 -> 0.93. Live, the robot barely moved.
+        // The defect is that the ESDF is OMNIDIRECTIONAL — the distance to the nearest obstacle in ANY
+        // direction — so inflating it by the stopping distance demands braking room from a wall the robot
+        // is driving PARALLEL to. At 0.7 m/s it requires 0.63 m of clearance in every direction, and this
+        // apartment's route runs at 0.4-0.55 m. Nothing at speed is feasible, so the robot crawls.
+        // The braking requirement is DIRECTIONAL and must be applied along the heading — the ESDF along
+        // the stopping segment ahead — not as an isotropic inflation of the current clearance.
+        // ★And the offline verification was too weak to catch it: two snapshots (the tightest cycle and
+        // one reversal), and I checked p_free without checking that commanded SPEED survived. A predicate
+        // that empties the feasible set and one that empties only the fast half look identical in p_free
+        // at a cycle that was already slow.
         if (esdf_val < body_r + active_params_.close_obstacle_margin)
         {
             const float ttc_s = static_cast<float>(s + 1) * dt;
@@ -2299,6 +2343,74 @@ void TrajectoryController::advance_waypoints(const Eigen::Affine2f& robot_pose)
 // ============================================================================
 // ESDF
 // ============================================================================
+
+// ── CYCLE SNAPSHOT ───────────────────────────────────────────────────────────────────────────────
+// Text, not binary: a snapshot is something a person greps while working out why a cycle went the way it
+// did, and a few thousand points cost nothing. Only what compute() actually consumes is written — the
+// ESDF is NOT among it, because the replay rebuilds it with this same build_esdf from these same inputs.
+void TrajectoryController::write_snapshot(const Eigen::Affine2f &robot_pose,
+                                          const std::vector<Eigen::Vector3f> &lidar_points) const
+{
+    std::ofstream f(snapshot_path_, std::ios::out | std::ios::trunc);
+    if (not f.is_open()) return;
+    f << std::setprecision(9);
+    f << "# MPPI cycle snapshot — replay with tools/mppi_bench\n";
+    f << "version 1\n";
+    const Eigen::Rotation2Df rot(robot_pose.linear());
+    f << "pose " << robot_pose.translation().x() << ' ' << robot_pose.translation().y() << ' '
+      << rot.angle() << '\n';
+    // The knobs a replay must reproduce to be the same cycle. Anything absent falls back to the
+    // constructor default, which is the same thing the live agent would have used.
+    f << "params " << active_params_.max_adv << ' ' << active_params_.max_rot << ' '
+      << active_params_.d_safe << ' ' << active_params_.mppi_lambda << ' '
+      << active_params_.num_samples << ' ' << active_params_.trajectory_steps << ' '
+      << active_params_.trajectory_dt << ' ' << active_params_.lambda_obstacle << ' '
+      << active_params_.lambda_goal << ' ' << active_params_.lambda_lateral_clearance << ' '
+      << active_params_.lambda_lateral_bumper << ' ' << active_params_.lambda_cbf << '\n';
+    for (const auto &p : path_room_) f << "path " << p.x() << ' ' << p.y() << '\n';
+    for (const auto &p : lidar_points) f << "lidar " << p.x() << ' ' << p.y() << ' ' << p.z() << '\n';
+    for (const auto &p : static_obstacle_points_room_) f << "obs " << p.x() << ' ' << p.y() << '\n';
+    for (const auto &p : room_boundary_points_room_) f << "wall " << p.x() << ' ' << p.y() << '\n';
+    std::printf("[mppi] cycle snapshot written to %s (%zu lidar, %zu obstacle, %zu wall points)\n",
+                snapshot_path_.c_str(), lidar_points.size(),
+                static_obstacle_points_room_.size(), room_boundary_points_room_.size());
+    std::fflush(stdout);
+}
+
+bool TrajectoryController::load_snapshot(std::istream &is, Eigen::Affine2f &pose_out,
+                                         std::vector<Eigen::Vector3f> &lidar_out)
+{
+    std::vector<Eigen::Vector2f> path;
+    lidar_out.clear();
+    static_obstacle_points_room_.clear();
+    room_boundary_points_room_.clear();
+    bool have_pose = false;
+    std::string line;
+    while (std::getline(is, line))
+    {
+        if (line.empty() or line[0] == '#') continue;
+        std::istringstream ls(line);
+        std::string key; ls >> key;
+        if (key == "pose")
+        {
+            float x, y, th; ls >> x >> y >> th;
+            pose_out = Eigen::Translation2f(x, y) * Eigen::Rotation2Df(th);
+            have_pose = true;
+        }
+        else if (key == "params")
+            ls >> params.max_adv >> params.max_rot >> params.d_safe >> params.mppi_lambda
+               >> params.num_samples >> params.trajectory_steps >> params.trajectory_dt
+               >> params.lambda_obstacle >> params.lambda_goal >> params.lambda_lateral_clearance
+               >> params.lambda_lateral_bumper >> params.lambda_cbf;
+        else if (key == "path")  { Eigen::Vector2f p; ls >> p.x() >> p.y(); path.push_back(p); }
+        else if (key == "lidar") { Eigen::Vector3f p; ls >> p.x() >> p.y() >> p.z(); lidar_out.push_back(p); }
+        else if (key == "obs")   { Eigen::Vector2f p; ls >> p.x() >> p.y(); static_obstacle_points_room_.push_back(p); }
+        else if (key == "wall")  { Eigen::Vector2f p; ls >> p.x() >> p.y(); room_boundary_points_room_.push_back(p); }
+    }
+    if (not have_pose or path.size() < 2) return false;
+    set_path_presmoothed(path);      // the route is already smoothed and feasibility-checked upstream
+    return true;
+}
 
 void TrajectoryController::build_esdf(const std::vector<Eigen::Vector3f>& lidar_points,
                                       const Eigen::Affine2f& robot_pose)

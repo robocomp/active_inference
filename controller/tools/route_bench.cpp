@@ -84,7 +84,7 @@ bool load_world(const std::string &path, World &w)
             // snapshot written before a field existed still replays as the optimiser that wrote it.
             ls >> w.opt.d_target >> w.opt.rho >> w.opt.sigma_a >> w.opt.clearance_floor
                >> w.opt.w_kappa >> w.opt.w_clear >> w.opt.w_gauge >> w.opt.clear_peak
-               >> w.opt.anchor_huber >> w.opt.iterations >> w.opt.kappa_peak;
+               >> w.opt.anchor_huber >> w.opt.iterations >> w.opt.kappa_peak >> w.opt.safety_bias;
     }
     // Rewind and let GridPlanner find its own header: it skips whatever it does not recognise, so the
     // two parsers never need to agree on where the boundary between the sections is.
@@ -396,10 +396,10 @@ int main(int argc, char **argv)
     std::printf("fit  : spacing %.3f smoothing %.3f | v_max %.2f a_lat %.2f standoff %.2f\n",
                 w.spacing, w.smoothing, w.v_max, w.a_lat, w.standoff);
     std::printf("opt  : d_target %.3f rho %.3f sigma_a %.3f floor %.3f | w_kappa %.2f w_clear %.2f "
-                "w_gauge %.3f clear_peak %.2f kappa_peak %.2f huber %.2f iters %d\n",
+                "w_gauge %.3f clear_peak %.2f kappa_peak %.2f huber %.2f iters %d safety_bias %.2f\n",
                 w.opt.d_target, w.opt.rho, w.opt.sigma_a, w.opt.clearance_floor,
                 w.opt.w_kappa, w.opt.w_clear, w.opt.w_gauge, w.opt.clear_peak, w.opt.kappa_peak,
-                w.opt.anchor_huber, w.opt.iterations);
+                w.opt.anchor_huber, w.opt.iterations, w.opt.safety_bias);
 
     // The distance field is what the optimiser descends; realise it once so the timing below is the
     // solve, not the field.
