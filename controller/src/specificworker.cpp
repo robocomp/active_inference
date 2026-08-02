@@ -364,6 +364,10 @@ void SpecificWorker::initialize()
 			    .body_inscribed_m = path_controller_.footprint().inscribed_radius(),
 			    .body_circumscribed_m = path_controller_.footprint().circumscribed_radius()});
 			// Without a mission there is nothing to start — Run just lets whatever is driving, drive.
+			// Run always re-arms: Stop disarmed the base output, and a Run that left it silent would
+			// look like a dead robot. It also clears a stale pause, so Run is unambiguously "go".
+			paused_ = false;
+			motion_commander_.set_output_enabled(true);
 			if (not rc::uses_mission(session_.mission().mode()))
 			{
 				driving_enabled_ = true;
@@ -385,16 +389,42 @@ void SpecificWorker::initialize()
 			             started ? "STARTED" : "REFUSED", driving_enabled_ ? "on" : "OFF");
 		});
 	};
+	gui.mission.on_pause = [this](bool paused)
+	{
+		enqueue_command([this, paused]()
+		{
+			// A HOLD, not an abort: the route, the mission, the lap counter and the follower's arc-length
+			// progress all survive, so un-pausing resumes exactly where it stopped. The base output stays
+			// ARMED and keeps receiving zeros — a paused robot is still under control, and a base watchdog
+			// should keep hearing from us. That is precisely the difference from Stop.
+			paused_ = paused;
+			if (paused_)
+			{
+				stop_robot();
+			}
+			std::println("[mission] {}", paused_ ? "PAUSED (route kept; press Pause again to resume)"
+			                                     : "RESUMED");
+		});
+	};
 	gui.mission.on_stop = [this]()
 	{
 		enqueue_command([this]()
 		{
-			// The ONE halt. Ends the mission, drops any click target, and stops the base whatever was
-			// driving it — including the affordance planner, which would otherwise re-target immediately.
+			// STOP IS AN ABORT, not a pause. It ends the mission, drops any click target, throws away
+			// the route/plan/trace, and then STOPS TALKING TO THE BASE until Run is pressed again —
+			// the output loop otherwise keeps sending setSpeedBase(0,0,0) at 20 Hz forever, which is
+			// right under control and wrong after the user has said stop.
+			// What survives is the mission SELECTION, so Run starts whichever mission is selected.
 			session_.mission().stop("user", current_time_ms());
 			session_.mission().set_click_target(std::nullopt);
 			clear_manual_target();
+			session_.abort(path_controller_, motion_commander_);
+			display_.clear_robot_trajectory();
 			driving_enabled_ = false;
+			paused_ = false;
+			motion_commander_.set_output_enabled(false);
+			std::println("[mission] STOP: aborted — route, plan and trace cleared, base output DISARMED. "
+			             "Run starts '{}' fresh.", session_.mission().selected_name());
 		});
 	};
 
@@ -508,11 +538,16 @@ void SpecificWorker::compute()
 	// which commands the base directly — so a halt tested further down would leave Stop unable to stop a
 	// robot that was reversing out of a wedge, i.e. exactly when stopping matters most. Nothing below this
 	// point may run while halted; the display still updates so the view stays live.
-	if (!driving_enabled_)
+	if (!driving_enabled_ or paused_)
 	{
 		if (!stop_sent_when_halted_)
 		{
-			path_controller_.stop();
+			// ★PAUSE MUST NOT CLEAR THE PATH. path_controller_.stop() wipes path_room_, which is
+			// precisely what makes a stop unresumable — so it runs only when driving is genuinely off
+			// (Run not pressed, or aborted). A pause leaves the follower loaded and merely stops
+			// commanding, so un-pausing resumes at the same arc length.
+			if (!driving_enabled_)
+				path_controller_.stop();
 			stop_robot();
 			stop_sent_when_halted_ = true;
 		}
@@ -859,7 +894,8 @@ void SpecificWorker::push_mission_view()
 	                               .controls_enabled = rc::uses_mission(mission.mode()),
 	                               .running = mission.running(),
 	                               .recording = mission.recording(),
-	                               .driving = driving_enabled_,
+	                               .driving = driving_enabled_ and not paused_,
+	                               .paused = paused_,
 	                               .mode_index = rc::to_index(mission.mode()),
 	                               .recorded_points = static_cast<int>(mission.recorded().size()),
 	                               .laps_remaining = mission.laps_remaining()},

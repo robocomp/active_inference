@@ -2049,3 +2049,17 @@ void ControllerSession::stop(rc::TrajectoryController &path_controller,
     clear_tracking_state();
     motion_commander.stop_robot();
 }
+
+void ControllerSession::abort(rc::TrajectoryController &path_controller,
+                              ControllerMotionCommander &motion_commander)
+{
+    stop(path_controller, motion_commander);
+    // Everything that would let the next Run resume the OLD activity rather than start a new one.
+    route_active_ = false;
+    route_repair_pending_ = false;
+    current_plan_.reset();
+    active_target_id_ = 0;
+    last_target_info_.reset();
+    // Band bookkeeping belongs to the route that is going away.
+    band_cycle_ = 0;
+}

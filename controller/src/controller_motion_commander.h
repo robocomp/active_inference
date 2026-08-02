@@ -52,6 +52,19 @@ public:
     void send_speed_command(float adv_mps, float side_mps, float rot_rps);
     void stop_robot();
 
+    /// ARM / DISARM the base output entirely.
+    ///
+    /// stop_robot() only makes the command ZERO — the output loop keeps sending setSpeedBase(0,0,0)
+    /// at the fixed cadence forever, because a constant cadence is what a base watchdog expects. That
+    /// is right while the robot is under control and wrong after an ABORT: the user pressed Stop and
+    /// expects the controller to stop talking to the base until they press Run again.
+    ///
+    /// Disarming sends a short BURST of explicit zeros first (a single dropped packet must not leave
+    /// the base coasting at the last non-zero command) and then goes silent. Arming resumes the
+    /// cadence immediately. The loop keeps ticking either way, so timing statistics stay continuous.
+    void set_output_enabled(bool enabled);
+    bool output_enabled() const;
+
     // Achieved output cadence since the last call (diagnostic; resets the accumulators).
     struct OutputRateStats
     {
@@ -122,6 +135,8 @@ private:
     // Shared with the output thread. `mutex_` guards pending_ and the stats accumulators; `cv_` lets the
     // destructor wake the loop immediately instead of waiting out a tick.
     mutable std::mutex mutex_;
+    bool output_enabled_ = true;      // false ⇒ the loop stays silent (see set_output_enabled)
+    int  quiet_burst_left_ = 0;       // zero commands still to send before going silent
     std::condition_variable_any cv_;
     PendingCommand pending_;
     // Last values actually sent to the base — the state the slew limiter integrates from. Output-thread only.

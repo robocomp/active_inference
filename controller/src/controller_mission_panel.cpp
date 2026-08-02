@@ -180,6 +180,17 @@ MissionPanel::MissionPanel(QWidget *parent, Callbacks callbacks)
                          else if (cb_.on_run) cb_.on_run(loops_ != nullptr ? loops_->value() : 1);
                      });
 
+    // Pause: a hold, not an abort. Parentless for the same reason as the drive button — Custom_widget
+    // reparents it into the toolbar next to Run/Stop.
+    pause_btn_ = new QPushButton("Pause", nullptr);
+    pause_btn_->setStyleSheet("QPushButton { background-color: #f39c12; color: white; font-weight: bold; }");
+    pause_btn_->setToolTip(
+        QStringLiteral("Pause — hold the current activity where it is. The mission, route and lap\n"
+                       "counter are kept, so pressing it again resumes from the same place.\n"
+                       "Use Stop to ABORT instead: that clears the route and trace and disarms the base."));
+    QObject::connect(pause_btn_, &QPushButton::clicked, this,
+                     [this]() { if (cb_.on_pause) cb_.on_pause(not paused_); });
+
     row->addStretch();
 }
 
@@ -246,6 +257,16 @@ void MissionPanel::apply(const View &view)
         recording_was_ = view.recording;
         rebuild_actions(view.recording, view.recorded_points);
     }
+    if (pause_btn_ != nullptr and paused_ != view.paused)
+    {
+        paused_ = view.paused;
+        pause_btn_->setText(paused_ ? "Resume" : "Pause");
+        pause_btn_->setStyleSheet(paused_
+            ? "QPushButton { background-color: #2980b9; color: white; font-weight: bold; }"
+            : "QPushButton { background-color: #f39c12; color: white; font-weight: bold; }");
+    }
+    // Pause means nothing when nothing is running.
+    if (pause_btn_ != nullptr) pause_btn_->setEnabled(view.driving or view.paused);
     if (drive_btn_ != nullptr and driving_ != view.driving)
     {
         driving_ = view.driving;

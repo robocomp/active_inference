@@ -82,6 +82,15 @@ public:
     void stop(rc::TrajectoryController &path_controller,
               ControllerMotionCommander &motion_commander);
 
+    /// ABORT: throw away the current activity entirely, leaving the session ready for a fresh Run.
+    ///
+    /// stop() halts the robot but keeps the route, the plan and the follower's progress, which is what
+    /// a PAUSE wants. An abort must additionally drop the route, the current plan and any pending
+    /// repair — otherwise the next Run re-installs the same curve at the same arc length and the robot
+    /// carries on the old mission instead of starting the selected one.
+    void abort(rc::TrajectoryController &path_controller,
+               ControllerMotionCommander &motion_commander);
+
     // The session is where targets are arbitrated (mouse > mission > affordance), so the mission runner
     // lives here rather than in the worker — the alternative is a fourth party that has to be consulted
     // by everyone who asks "what are we driving to".

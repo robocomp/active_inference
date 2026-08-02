@@ -141,6 +141,12 @@ private:
 	// disagree with it, so there is now ONE halt control: Stop halts whatever is driving (mission, click or
 	// affordance) and the next Run / target click / drive-mode change resumes.
 	bool driving_enabled_ = false;
+	// PAUSE is a SEPARATE axis from Run/Stop, not a third value of one.
+	//   driving_enabled_  = the user pressed Run and has not aborted   (owns the route + mission)
+	//   paused_           = the user pressed Pause                     (owns nothing; purely a hold)
+	// The robot drives iff driving_enabled_ and not paused_. Keeping them separate is what lets Pause
+	// resume exactly where it stopped while Stop cannot: Stop clears the first flag AND the route.
+	bool paused_ = false;
 	bool stop_sent_when_halted_ = false;
 	bool compute_debug_logged_ = false;
 	bool owned_nodes_cleaned_ = false;

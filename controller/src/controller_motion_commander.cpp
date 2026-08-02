@@ -199,6 +199,28 @@ ControllerMotionCommander::~ControllerMotionCommander()
     cv_.notify_all();     // don't make the destructor wait out a full tick
 }
 
+void ControllerMotionCommander::set_output_enabled(bool enabled)
+{
+    const std::scoped_lock lock(mutex_);
+    if (output_enabled_ == enabled) return;
+    output_enabled_ = enabled;
+    if (not enabled)
+    {
+        // Stop MEANS stop: zero the pending command and queue a burst of explicit zeros so the base
+        // cannot be left holding the last non-zero value if one packet is dropped. After the burst the
+        // loop goes quiet and stays quiet until this is re-armed.
+        pending_.stop_requested = true;
+        quiet_burst_left_ = 5;        // 5 ticks at 20 Hz = 250 ms of "definitely stop"
+        applied_adv_ = applied_side_ = applied_rot_ = 0.f;
+    }
+}
+
+bool ControllerMotionCommander::output_enabled() const
+{
+    const std::scoped_lock lock(mutex_);
+    return output_enabled_;
+}
+
 void ControllerMotionCommander::output_loop(std::stop_token stop)
 {
     using namespace std::chrono;
@@ -220,10 +242,19 @@ void ControllerMotionCommander::output_loop(std::stop_token stop)
         if (const auto now = steady_clock::now(); next < now) next = now;
 
         PendingCommand cmd;
+        bool armed = true;
         {
             const std::scoped_lock lock(mutex_);
             cmd = pending_;
+            // Disarmed: send the remaining zero burst, then nothing at all. The tick still happens, so
+            // the loop's own timing statistics do not develop a hole that looks like a stall.
+            if (not output_enabled_)
+            {
+                if (quiet_burst_left_ > 0) --quiet_burst_left_;
+                else armed = false;
+            }
         }
+        if (not armed) continue;
 
         float adv = 0.f, side = 0.f, rot = 0.f, scale = 1.f, age_ms = 0.f;
         if (not cmd.stop_requested)

@@ -43,6 +43,9 @@ public:
         std::function<void()>            on_smooth;
         std::function<void(int)>         on_run;           // laps
         std::function<void()>            on_stop;
+        // Pause is a HOLD on the current activity; Stop aborts it. Two controls because they are two
+        // different intentions, and folding them into one button is what made Stop unresumable.
+        std::function<void(bool)>        on_pause;
         // Route optimiser: speed (0) <-> safety (1). See RouteOptimizerConfig::safety_bias — it trades
         // PRECISION between the clearance preference and the curvature prior, so it is one number with a
         // measurable frontier rather than two weights to guess at.
@@ -57,6 +60,7 @@ public:
         bool running = false;
         bool recording = false;
         bool driving = false;            // is the base allowed to move right now?
+        bool paused = false;             // Run is still in force, but the activity is held
         int  mode_index = 0;             // rc::to_index(mode); the selector follows the state, not only clicks
         int  recorded_points = 0;        // points placed so far in the recording being built
         int  laps_remaining = 0;         // countdown incl. the lap in progress; 0 when idle
@@ -68,6 +72,8 @@ public:
     // mission behaviour stays in this class, but it is PLACED in the main toolbar by Custom_widget — it is
     // the primary control and belongs on the top line, not buried in the mission row.
     QPushButton *drive_button() const { return drive_btn_; }
+    // Placed in the toolbar beside Run/Stop by Custom_widget, for the same reason.
+    QPushButton *pause_button() const { return pause_btn_; }
 
     void set_missions(const std::vector<std::string> &names, const std::string &selected);
     void rebuild_actions(bool recording, int recorded_points);
@@ -98,6 +104,8 @@ private:
     QLCDNumber  *laps_left_ = nullptr;
     int  laps_left_shown_ = -1;
     QPushButton *drive_btn_ = nullptr;
+    QPushButton *pause_btn_ = nullptr;
+    bool paused_ = false;
     QSlider     *safety_ = nullptr;
     QLabel      *safety_label_ = nullptr;
 

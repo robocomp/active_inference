@@ -286,6 +286,8 @@ public:
         // end of the mission row. The panel still owns it; this only decides where it is shown.
         if (toolbar_layout_ != nullptr and panel->drive_button() != nullptr)
             toolbar_layout_->insertWidget(0, panel->drive_button());
+        if (toolbar_layout_ != nullptr and panel->pause_button() != nullptr)
+            toolbar_layout_->insertWidget(1, panel->pause_button());
     }
 
     rc::TimeSeriesPlot *affordance_efe_plot = nullptr;
