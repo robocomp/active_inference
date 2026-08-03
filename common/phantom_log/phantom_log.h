@@ -29,6 +29,7 @@
 
 #include <cstdint>
 #include <fstream>
+#include <locale>     // std::locale::classic — see the imbue in open()
 #include <string>
 #include <string_view>
 
@@ -75,6 +76,12 @@ public:
         if (path.empty()) return;
         f_.open(path, std::ios::out | std::ios::trunc);
         if (not f_.is_open()) return;
+        // ★MANDATORY on these machines (LANG=es_ES.UTF-8): Qt calls setlocale(LC_ALL, "") at startup, and if
+        // the C++ global locale is ever imbued from it, operator<< starts inserting THOUSANDS separators and a
+        // COMMA decimal point — silently corrupting a comma-separated file. Every other CSV writer in the
+        // fleet does this (table_fitter.cpp ai2_csv_, birth_surprise_csv_, …). See CLAUDE.md "Parsing numbers
+        // from files". Readers of this file must use std::from_chars for the same reason.
+        f_.imbue(std::locale::classic());
         f_ << "seq,event,id,name,x,y,robot_x,robot_y,robot_yaw,view_bearing,range_m,age_cycles,"
               "p_detect,in_fov_frac,central_frac,fixated,exist_logodds,note\n";
         f_.flush();
