@@ -27,7 +27,13 @@ graph = false   # DSR graph viewer optional: the planner GUI is its own top-leve
 # 3d = true
 
 [Period]
-Compute = 100
+# ★2026-08-03 100 -> 50. The PIPELINE no longer waits on this (ControlDataDriven runs it on the scan),
+# so this no longer sets the control rate. It still paces the presence GRAFCET step and the Qt event
+# loop — and the observed pose-refresh stalls come in an almost exact ~100 ms quantum (measured: runs of
+# 3 cycles at 99/95/99/99/101/100 ms while the control loop ticked normally at 46 ms). If DSR update
+# delivery is marshalled onto that thread, halving this should halve the stall quantum. If the quantum
+# stays at 100 ms, the pacing is NOT here and the cause is upstream.
+Compute = 50
 Emergency = 500
 
 [Component.Debug]
@@ -120,7 +126,17 @@ ControlDataDriven = true
 # p90 66 ms — because a scan landing just after a poll waits a full interval while one landing just
 # before is taken immediately. That is poll granularity, not sensor jitter, and it is the cheapest
 # remaining delay: halving it halves the worst-case notice latency and should tighten the spread.
-ControlPollMs = 10        # how often to look for a new scan; an upper bound on notice latency, not the rate
+ControlPollMs = 10
+# ── ACTUATION OUTPUT PERIOD ──
+# Was never in this file — it ran on the 50 ms built-in default. ★2026-08-03 set to 25 explicitly, now
+# that it is achievable: the synchronous setSpeedBase RPC used to be a HARD FLOOR on this loop (measured
+# ice p50 12.9 / p99 58.9 / MAX 78.4 ms, so a 25 ms period would simply have overrun every cycle). After
+# the bridge+Ice fix ice is p50 0.1 / p99 2.6 / MAX 6.5 ms and the loop holds its period exactly
+# (out_period p50 50.1, MAX 54.7).
+# At 25 ms the output oversamples a 20 Hz controller 2:1 again, which is what bounds cmd_age_max — that
+# stayed at p90 49 / MAX 87 ms through the Ice fix because it is set by the wait for the next output
+# tick, not by the RPC.
+VelocityOutputPeriodMs = 25        # how often to look for a new scan; an upper bound on notice latency, not the rate
 ComfortStandoff = 0.6
 # ── MODEL-vs-MEASUREMENT MERGE IN THE MPPI's ESDF ──
 # That grid mixes two sources with different frames of truth. Lidar points are EGOCENTRIC — already in

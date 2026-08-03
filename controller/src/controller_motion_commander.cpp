@@ -1,3 +1,5 @@
+#include <print>
+
 #include "controller_motion_commander.h"
 
 #include <algorithm>
@@ -29,7 +31,14 @@ void ControllerMotionCommander::set_dependencies(std::shared_ptr<DSR::DSRGraph> 
     {
         const float period_ms = params_ ? std::max(5.f, params_->velocity_output_period_ms) : 50.f;
         output_thread_ = std::jthread([this](std::stop_token s) { output_loop(std::move(s)); });
-        qInfo() << "Controller velocity output loop started at" << period_ms << "ms";
+        // Report whether params_ was available, not just the period. The period is read ONCE at
+        // thread start, so a set_params() that lands afterwards silently leaves the built-in 50 ms in
+        // force and NO config value can ever take effect — and the old line, printing only the number,
+        // could not distinguish "configured 50" from "defaulted to 50 because params_ was null".
+        // (The generic handler no longer swallows qInfo — it suppresses qDebug only — so either would
+        // reach the terminal; std::println just keeps this off the Qt path entirely.)
+        std::println("[vel-out] output loop started at {:.1f} ms  (params {})",
+                     period_ms, params_ ? "OK" : "NULL -> using the 50 ms built-in default");
     }
 }
 

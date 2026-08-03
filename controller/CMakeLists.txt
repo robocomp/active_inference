@@ -18,9 +18,6 @@ SET(RC_COMPONENT_INSTALL_PATH $ENV{ROBOCOMP} CACHE STRING "component install pat
 #SET(COMPONENT_NAME ${COMPONENT_NAME} CACHE STRING "component name" FORCE)
 
 add_subdirectory(generated)
-# Offline tools (bin/route_bench). Separate target: it shares the component's sources but none of its
-# dependencies, so building the component is unaffected by it and vice versa.
-add_subdirectory(tools)
 
 INSTALL(FILES etc/config DESTINATION ${RC_COMPONENT_INSTALL_PATH}/etc-default/ RENAME controller.conf )
 

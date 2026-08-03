@@ -592,12 +592,11 @@ void SpecificWorker::log_compute_perf(FPSCounter &counter, ControllerDisplay *di
 	counter.period = 1000;
 	const float fps = counter.get_frequency();
 	const float cpu = std::max(0.f, counter.get_cpu_use());
-	// std::println, NOT qInfo. genericworker installs a NO-OP Qt message handler whenever
-	// Component.Debug.Verbose is false, which silently eats every qInfo/qDebug in the process — that is why
-	// this line never appeared. It is not a miswired initialization: table_concept's generated handler block
-	// is byte-identical and its config also has Verbose=false, so its qInfo is swallowed too; everything you
-	// actually see from these agents (table_concept, residual_concept) is printed with std::println. Setting
-	// Verbose=true would restore qInfo globally, at the cost of un-swallowing every Qt/library message too.
+	// std::println rather than qInfo. ★HISTORICAL NOTE, CORRECTED 2026-08-03: this used to say the
+	// generated handler installed a NO-OP that swallowed every qInfo when Component.Debug.Verbose is
+	// false. That was true then and is NOT true now — genericworker.cpp's handler suppresses qDebug ONLY
+	// and forwards QtInfoMsg/Warning/Critical/Fatal, so qInfo reaches the terminal either way. Kept as
+	// println because it costs nothing and stays off the Qt path, not because qInfo is broken.
 	//
 	// MEAN period alone hid the problem: the loop's median is ~105 ms against a 100 ms target and looks
 	// healthy, while the tail runs past a second. So report the WORST period in the window as well — that is
