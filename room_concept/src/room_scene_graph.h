@@ -116,7 +116,7 @@ private:
     /// guards LIVENESS of the offer/claim/complete handshake, not a modelling decision — there is
     /// no generative quantity here to make it fall out of, because the room agent cannot observe
     /// why the controller is not moving. Kept out of the belief entirely: the only thing it feeds
-    /// back into the model is `mark_target_abandoned`, i.e. ordinary IoR evidence.
+    /// back into the model is `mark_target_finished`, i.e. ordinary IoR evidence.
     /// Returns true if the claim was broken this cycle.
     bool break_execution_stall(const Eigen::Vector2f& robot_pos);
     void update_planner_obstacle_footprints();
@@ -150,6 +150,9 @@ private:
     Eigen::Vector2f                       stall_target_{0.f, 0.f};
     bool                                  stall_tracking_     = false;
     std::chrono::steady_clock::time_point stall_last_progress_{};
+    int                                   exec_hold_cycles_   = 0;   // THIS episode only
+    int                                   publish_dbg_        = 0;   // throttle for the publish trace
+    int                                   no_target_dbg_      = 0;   // throttle for the no-target trace
 
     std::uint64_t dsr_robot_id_ = 0;
     std::uint64_t dsr_body_id_  = 0;

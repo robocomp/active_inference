@@ -493,7 +493,9 @@ bool SpecificWorker::maybe_publish_corrected_pose()
     if (shutting_down_.load() || params.PRESERVE_BOOTSTRAP_ROOM)
         return false;
 
-    const auto loc_res = room_concept_.get_last_result();
+    // NOT const: get_last_result() returns a by-value copy, and the kinematic clamp below rewrites
+    // robot_pose/covariance in place before this frame is handed to the scene graph.
+    auto loc_res = room_concept_.get_last_result();
     if (!loc_res.has_value() || !loc_res->ok)
         return false;
 
@@ -507,10 +509,77 @@ bool SpecificWorker::maybe_publish_corrected_pose()
         || (last_dsr_publish_try_ms_ != 0 && now_ms - last_dsr_publish_try_ms_ < 15))
         return false;
 
-    // Publish the optimizer output DIRECTLY (corrected pose → robot↔room RT). No prediction, no
-    // filtering — the lidar-corrected pose tracks truth and is smooth; rate = optimizer rate.
     last_dsr_publish_try_ms_ = now_ms;
+
+    // ---- KINEMATIC CLAMP on the published pose --------------------------------------------------
+    // The published stream must be a physically possible trajectory: the robot cannot have moved
+    // further between two published poses than its own speed limit allows. Measured on this agent's
+    // own debug log (71k frames), it routinely does — 92.8% of frames take the prediction early-exit
+    // and publish a drifting odometry prediction, then the optimizer runs on the remaining 7.2% and
+    // discharges the whole accumulated error in ONE frame: |innovation| p99 96.7 mm, max 280.2 mm,
+    // i.e. an implied 2.2 m/s at p99 and 7.2 m/s peak against a 0.70 m/s robot. 13.6% of those frames
+    // break the linear limit and 13.1% the angular one. The controller measured the same events
+    // independently as 6.9% of its updates, and they move its steering carrot up to 1.79 m in a cycle.
+    //
+    // This is not a tuning threshold — it is the support of the motion model. A delta implying 7.2 m/s
+    // is not unlikely, it is impossible, so it cannot be a report about where the robot went.
+    //
+    // The correction itself is LEGITIMATE (real accumulated drift, not a bad fit), so it is not
+    // rejected — only rate-limited. At a typical 0.35 m/s cruise there is ~20 mm/frame of headroom
+    // under the limit, which absorbs the p50 innovation (12 mm) in one frame and the p99 (97 mm) in
+    // about five. A genuine relocalization therefore still converges, just over a few frames.
+    if (params.POSE_CLAMP_ENABLED and last_published_pose_.has_value()
+        and last_published_ts_ms_ > 0 and loc_res->timestamp_ms > last_published_ts_ms_)
+    {
+        const float dt = static_cast<float>(loc_res->timestamp_ms - last_published_ts_ms_) / 1000.f;
+        if (dt > 0.f and dt <= params.POSE_CLAMP_MAX_DT_S)
+        {
+            const auto& prev = last_published_pose_.value();
+            const Eigen::Vector2f d_xy = loc_res->robot_pose.translation() - prev.translation();
+            const float prev_th = std::atan2(prev.linear()(1, 0), prev.linear()(0, 0));
+            const float new_th  = std::atan2(loc_res->robot_pose.linear()(1, 0),
+                                             loc_res->robot_pose.linear()(0, 0));
+            const float d_th = std::remainder(new_th - prev_th, 2.f * static_cast<float>(M_PI));
+
+            const float max_xy = params.POSE_CLAMP_V_MAX * dt;
+            const float max_th = params.POSE_CLAMP_W_MAX * dt;
+            const float n_xy = d_xy.norm();
+
+            if (n_xy > max_xy or std::abs(d_th) > max_th)
+            {
+                const Eigen::Vector2f xy_c = (n_xy > max_xy and n_xy > 1e-9f)
+                                             ? Eigen::Vector2f(d_xy * (max_xy / n_xy)) : d_xy;
+                const float th_c = std::clamp(d_th, -max_th, max_th);
+
+                // The part of the correction we did NOT apply is real, known error in the published
+                // pose. Surfacing it as covariance is what keeps the clamp honest rather than a lie:
+                // consumers learn the pose is deliberately behind the measurement, and it is the one
+                // signal in this stream that is genuinely informative (it fires on ~1% of frames, so
+                // it cannot shift the mean sigma the speed governor watches).
+                const Eigen::Vector2f res_xy = d_xy - xy_c;
+                const float res_th = d_th - th_c;
+                loc_res->covariance(0, 0) += res_xy.x() * res_xy.x();
+                loc_res->covariance(1, 1) += res_xy.y() * res_xy.y();
+                loc_res->covariance(2, 2) += res_th * res_th;
+
+                Eigen::Affine2f clamped = Eigen::Affine2f::Identity();
+                clamped.translation() = prev.translation() + xy_c;
+                clamped.linear() = Eigen::Rotation2Df(prev_th + th_c).toRotationMatrix();
+                loc_res->robot_pose = clamped;
+
+                if (++pose_clamp_hits_ % 20 == 1)
+                    qWarning() << "[pose-clamp] implied" << (n_xy / dt) << "m/s /" << (std::abs(d_th) / dt)
+                               << "rad/s over dt" << dt << "s — limits" << params.POSE_CLAMP_V_MAX << "/"
+                               << params.POSE_CLAMP_W_MAX << "; carried" << res_xy.norm() * 1000.f
+                               << "mm into covariance (" << pose_clamp_hits_ << " clamps)";
+            }
+        }
+    }
+
+    // Publish (corrected pose → robot↔room RT) at the optimizer rate.
     scene_graph_->update(*loc_res, last_robot_adv_speed_, last_robot_side_speed_, last_robot_rot_speed_);
+    last_published_pose_ = loc_res->robot_pose;
+    last_published_ts_ms_ = loc_res->timestamp_ms;
     last_dsr_published_ts_ms_ = loc_res->timestamp_ms;
 
     ++rt_corr_count_;

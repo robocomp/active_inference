@@ -334,7 +334,68 @@ public:
         float stationary_speed_threshold = 0.03f;      // m/s; below this = near-stationary for process noise
         float rotation_position_coupling = 0.15f;      // meters of position uncertainty per radian of rotation
         float rotation_noise_base = 0.01f;             // Base rotation std when no commanded motion
-        float default_slot_motion_cov = 0.01f;         // Default diagonal for slot motion covariance
+        // Fallback diagonal for the slot motion covariance, used ONLY when no odometry prior is valid.
+        // Measured over a 71k-frame run: that never happened (prior source = fused 70865 / measured 150 /
+        // fallback_zero 1, sel_valid==0 on zero frames), so this value is effectively inert. The prior
+        // actually in use is ~2.3e-4 (sigma 15 mm/frame). Do not tune this expecting an effect.
+        float default_slot_motion_cov = 0.01f;
+
+        // ===== Strided RFE window =====
+        // The window holds rfe_window_size poses, but at the lidar rate they are all essentially the
+        // SAME pose: measured while moving, the max pairwise separation across the 5 slots is 76 mm
+        // (p50) in a ~9 m room, and 75.8% of all frames span under 20 mm. Five near-coincident
+        // viewpoints buy five nearly-identical SDF evaluations and almost no independent geometric
+        // leverage on lateral position.
+        //
+        // With striding, a new slot is ADMITTED only once the robot has actually moved; until then the
+        // newest slot is REPLACED in place, so the current frame is always represented but does not
+        // consume the window's span. Predicted baselines from the same log: 0.10 m spacing -> ~222 mm
+        // p50, 0.25 m -> ~448 mm, against 76 mm today.
+        //
+        // ★ The motion factor between slots must then span the whole skipped interval, so the odometry
+        // delta and its covariance are ACCUMULATED across replaced frames (stride_delta_accum_).
+        // Getting that wrong would under-constrain the very DOF this is meant to fix.
+        // ★ Watch loss_boundary for a ratchet when enabling: room-fast-rotation-track-lag traced an
+        // earlier failure to the marginalization prior being poisoned by admitted early-exit poses, and
+        // a longer stride means each admitted slot carries more accumulated drift.
+        bool  window_stride_enabled  = false;
+        float window_min_travel_m    = 0.10f;   // admit a new slot after this much travel...
+        float window_min_turn_rad    = 0.15f;   // ...or this much turn, whichever comes first
+
+        // ===== Innovation-based adaptive covariance =====
+        // The published sigma is otherwise inert: measured over a 71k-frame run, a 26x change in
+        // innovation (2.4 -> 62.7 mm) moves sigma_xy by 6%, and the whole p10..p90 band is
+        // 0.0415..0.0508 m. Sigma comes from the Laplace curvature — how SHARP the minimum is, which
+        // says nothing about whether it is the RIGHT minimum — so a confident wrong pose is published
+        // as confident. Downstream, the controller's speed governor can never engage and all five
+        // concept agents fold a constant into their common-mode variance.
+        //
+        // Two attempts to fix this by accumulating process noise while coasting BOTH failed, measured:
+        //   - accumulating the full Q:  mean sigma 0.0443 -> 0.0748 (+69%), 29.7% of frames above the
+        //     controller's 0.080 throttle knee, innovation ratio only 1.059 -> 1.122. Q is dominated by
+        //     a per-frame constant floor (odom_noise_base is 86% of the term at 0.35 m/s), so that was
+        //     really accumulating TIME — and time has r=+0.001 against the correction that follows.
+        //   - accumulating only the motion-proportional part: mean preserved (40.7 vs 40.4 mm) but
+        //     ratio 1.000, because that term is ~1.6 mm/frame against a 40 mm base. Useless.
+        // The base sigma itself is the problem, so no process-noise scheme can repair it.
+        //
+        // INSTEAD: the innovation (optimised pose - predicted pose) is a direct SAMPLE of the estimate's
+        // own error — two independent estimates of the same pose, differenced. Its running second moment
+        // is therefore a lower bound on the error covariance that the filter cannot argue with. Publish
+        //     sigma_ii = max(laplace_ii, EMA[innovation_i^2])
+        // so the covariance can never claim more precision than the estimator's own disagreements
+        // demonstrate. This is standard innovation-based adaptive estimation.
+        //
+        // Why this passes where the others failed: at the median innovation (12 mm) the Laplace term
+        // (44 mm) dominates and the mean is untouched — protecting the 0.020 m of headroom under
+        // PoseXYStdSlow that a validated -11.2% lap-time tuning depends on — while a sustained run of
+        // large innovations (p99 97 mm, i.e. the corridor) lifts sigma above it. Mean unchanged,
+        // dynamic range restored, which is exactly the acceptance test.
+        bool  adaptive_cov_enabled = false;
+        // EMA rate for the innovation second moment. 0.02 ~= a 50-frame memory: long enough that one
+        // bad frame cannot spike the published sigma (which would hit the speed governor), short enough
+        // to track entering and leaving a feature-poor stretch.
+        float adaptive_cov_lambda  = 0.02f;
 
         // ===== Velocity-Adaptive =====
         float combined_motion_weight = 1.2f;           // Weight when both translating and rotating
@@ -913,6 +974,33 @@ private:
        void marginalize_oldest(const Model& model, const Params& params, torch::Device device);
    };
    WindowManager window_mgr_;
+
+   // ---- Strided-window state (see Params::window_stride_enabled) ----
+   // Pose at which the last slot was ADMITTED, and the odometry delta + covariance accumulated since.
+   // While the newest slot is being replaced rather than appended, the motion factor it carries has to
+   // describe the whole interval back to the last admitted slot, not the last frame.
+   Eigen::Vector3f stride_last_admitted_{0.f, 0.f, 0.f};
+   bool            stride_has_admitted_ = false;
+   Eigen::Vector3f stride_delta_accum_  = Eigen::Vector3f::Zero();
+   Eigen::Matrix3f stride_cov_accum_    = Eigen::Matrix3f::Zero();
+
+   // Running second moment of the innovation, per axis (x, y, theta). See Params::adaptive_cov_enabled.
+   Eigen::Vector3f innov_m2_ = Eigen::Vector3f::Zero();
+   /// Raise the published covariance to at least the error the innovations demonstrate. Call ONLY on
+   /// frames that actually had a prediction — a zero innovation otherwise means "no information", not
+   /// "perfect agreement", and folding those in would drag the estimate back down.
+   void apply_adaptive_covariance(UpdateResult& res);
+
+   /// Drop the strided-window bookkeeping. MUST accompany every window_mgr_.clear(): after a recovery
+   /// or relocalization the last-admitted pose refers to a trajectory that no longer exists, so
+   /// comparing against it would suppress admissions until the robot happened to travel far from a
+   /// stale reference.
+   void reset_stride_state()
+   {
+       stride_has_admitted_ = false;
+       stride_delta_accum_.setZero();
+       stride_cov_accum_.setZero();
+   }
 
    // Prediction-based early exit tracking
    int tracking_step_count_ = 0;

@@ -31,18 +31,34 @@ public:
         float grid_resolution = 0.5f;        // spacing between candidate targets (m)
         float min_distance = 1.0f;           // ignore candidates closer than this to robot (m)
         int   max_candidates = 2000;         // cap on number of evaluated candidates
+        // Clearance a candidate must have from walls / from an object-or-obstacle footprint (m).
+        // BOTH must be >= the CONSUMER's near-goal clearance, or this planner hands out targets the
+        // executor refuses to stop at: it drives up, gets pushed out by the obstacle cost, never
+        // reports arrival, and hunts there until the stall watchdog fires. The controller's number is
+        //   near_safe = max(body_extent + GoalObstacleMargin, ComfortStandoff * GoalClearanceMinRatio)
+        // = max(0.32+0.08, 0.6*0.85) = 0.51 m with the live config. Keep these above it.
+        // Obstacle clearance used to be the bare robot footprint radius (0.32 m) — 0.19 m short.
         float target_wall_margin = 1.0f;     // reject targets closer than this to walls (m)
+        float target_obstacle_clearance = 0.55f;  // ... and to object/obstacle footprints (m)
 
         float angular_dominance_ratio = 50.0f; // σ²_θ / max(σ²_x, σ²_y) threshold
-        // ADDITIVE distance preference, in the same nats currency as the two information terms:
-        //   + w_exploration · (distance / room_diagonal),  so it is bounded by w_exploration.
-        // It was previously a MULTIPLICATIVE bonus (score ×= 1 + w·d/diag). A multiplier scales
-        // whatever the information terms happen to be, so the moment those go flat (which they do —
-        // see the neglect discussion below) it becomes the ONLY differentiator and the arg-max locks
-        // onto the geometrically-farthest reachable cell forever. As a bounded ADDITIVE term it can
-        // only ever break ties between comparably-valued cells, which is all a distance preference
-        // should do.
-        float w_exploration  = 0.5f;         // nats: bounded far-is-better tie-break
+        // TRAVEL COST, subtracted in the same nats currency as the information terms:
+        //   score −= w_travel_cost · (distance / room_diagonal)
+        // Distance is a COST in expected free energy, never a reward — the consuming controller
+        // already scores affordances as (gain − λ_cost·dist), and this is the same quantity applied
+        // to the planner's own choice among cells.
+        //
+        // This was previously a far-is-BETTER bonus, and the sign mattered enormously. The neglect
+        // term below is flat across large regions by construction — every never-visited cell reports
+        // the same ~9 nats at start-up, and the field flattens again whenever a region has been
+        // uniformly neglected. Across such a plateau the distance term is the ONLY differentiator,
+        // so a far-is-better sign makes the arg-max the most DISTANT reachable cell; arriving there,
+        // the most distant cell is the one you just came from. The result is a permanent
+        // corner-to-corner oscillation that visits almost nothing in between (measured on the real
+        // apartment contour: mean leg 6.2 m in a 9 m room, 13/40 legs longer than 60% of the
+        // diagonal, 26 distinct cells). As a COST the nearest cell of an equally-stale group wins,
+        // which sweeps territory contiguously (mean leg 2.9 m, 0/40 long legs, 36 distinct cells).
+        float w_travel_cost  = 0.5f;         // nats per unit (distance / room_diagonal)
 
         // ---- Inhibition of Return (visit grid) ----
         float ior_cell_size   = 0.5f;        // spatial resolution of the visit grid (m)
@@ -142,6 +158,7 @@ public:
     /// candidate targets.  Typically refreshed every compute cycle from the DSR graph.
     void set_obstacle_footprints(std::vector<ObstacleFootprint> footprints);
 
+
     // ---- Target selection (public API) ----
     std::vector<Target> evaluate_targets() const;
     std::optional<Target> select_target();
@@ -206,14 +223,20 @@ public:
     /// executing the affordance) so the path trail stays live in the viewer.
     void mark_and_refresh();
 
-    /// Give up on `pos` as a navigation target and stamp it into the visit grid as if it had been
-    /// reached. Called when the executor could not get there (see RoomSceneGraph's no-progress
-    /// stall-breaker). Folding the failure into the SAME neglect belief that drives selection is
-    /// what stops the planner immediately re-proposing the identical unreachable cell: its neglect
-    /// information drops to ~0 and recovers over ior_decay_time, so the cell is naturally
-    /// de-prioritised for a while and then retried — no blacklist, no permanent exclusion, and a
-    /// cell that only *looked* unreachable (a transient obstacle) comes back into play on its own.
-    void mark_target_abandoned(const Eigen::Vector2f& pos);
+    /// This target is finished — stamp `pos` into the visit grid and drop it, so the next cycle
+    /// selects somewhere else. Used for BOTH outcomes, because the planner wants the same thing
+    /// from each:
+    ///   - REACHED: the executor reported completion. Do not require the planner's own
+    ///     arrival_distance to agree — the executor's goal tolerance is looser, so a target it
+    ///     considers done can still sit outside arrival_distance, and waiting for the planner's own
+    ///     check leaves the target set forever, re-published on the spot the robot is already
+    ///     standing on.
+    ///   - ABANDONED: the executor could not get there (see the no-progress stall-breaker).
+    /// Folding both into the SAME neglect belief that drives selection is what stops the planner
+    /// re-proposing the identical cell: its neglect information drops to ~0 and recovers over
+    /// ior_decay_time, so the cell is de-prioritised for a while and then retried — no blacklist,
+    /// and a cell that only *looked* unreachable comes back into play on its own.
+    void mark_target_finished(const Eigen::Vector2f& pos);
 
     // ---- Cell score data for visualisation ----
     struct CellScore

@@ -32,6 +32,20 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.OdomNoiseScale", room_concept.params.odom_noise_scale);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.DifferentialTest", room_concept.params.differential_test_enabled);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.SdfCurrentSlotOnly", room_concept.params.sdf_current_slot_only);
+    // Raise the published covariance to at least what the innovations demonstrate, so the sigma stops
+    // being a constant. Default OFF — see Params::adaptive_cov_enabled for the acceptance test and for
+    // the two measured process-noise approaches that failed before it.
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.AdaptiveCovEnabled", room_concept.params.adaptive_cov_enabled);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.AdaptiveCovLambda", room_concept.params.adaptive_cov_lambda);
+    // Strided RFE window — see Params::window_stride_enabled.
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.WindowStrideEnabled", room_concept.params.window_stride_enabled);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.WindowMinTravel", room_concept.params.window_min_travel_m);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.WindowMinTurn", room_concept.params.window_min_turn_rad);
+    // Kinematic clamp on the published pose — see RoomConfig::POSE_CLAMP_ENABLED.
+    rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.PoseClampEnabled", p.POSE_CLAMP_ENABLED);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.PoseClampVMax", p.POSE_CLAMP_V_MAX);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.PoseClampWMax", p.POSE_CLAMP_W_MAX);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.PoseClampMaxDt", p.POSE_CLAMP_MAX_DT_S);
     rc::ConfigLoaderUtils::load_optional<bool>(cl, "RoomConcept.PreserveBootstrapRoom", p.PRESERVE_BOOTSTRAP_ROOM);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.RobotVelCovAdv", p.ROBOT_VEL_COV_ADV);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "RoomConcept.RobotVelCovSide", p.ROBOT_VEL_COV_SIDE);
@@ -272,8 +286,11 @@ void load_room_config(const ConfigLoader& cl, RoomConfig& p,
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.MinDistance", ep.min_distance);
     rc::ConfigLoaderUtils::load_optional<int>(cl, "EpistemicController.MaxCandidates", ep.max_candidates);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.TargetWallMargin", ep.target_wall_margin);
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.TargetObstacleClearance", ep.target_obstacle_clearance);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.AngularDominanceRatio", ep.angular_dominance_ratio);
-    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.WExploration", ep.w_exploration);
+    // WExploration (a far-is-better distance BONUS) is gone — the sign was wrong and produced a
+    // corner-to-corner oscillation. Travel distance is a cost; see Params::w_travel_cost.
+    rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.WTravelCost", ep.w_travel_cost);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.IorCellSize", ep.ior_cell_size);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.IorDecayTime", ep.ior_decay_time);
     rc::ConfigLoaderUtils::load_optional<float, double>(cl, "EpistemicController.WIor", ep.w_ior);

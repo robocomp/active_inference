@@ -547,7 +547,7 @@ namespace rc
         if (!grid_search_initial_pose(pts, 0.5f, static_cast<float>(M_PI_4)))
             qWarning() << "[RoomConcept] Grid search after seed rejection did not reach a good fit;"
                        << "keeping its best candidate. Recovery will retry if it stays bad.";
-        window_mgr_.clear();
+        window_mgr_.clear(); reset_stride_state();
         symmetry_check_counter_ = 0;
         return false;
     }
@@ -887,7 +887,7 @@ namespace rc
                                << "Running grid search...";
                     const auto& pts = lidar_high.first;
                     grid_search_initial_pose(pts, 0.5f, static_cast<float>(M_PI_4));
-                    window_mgr_.clear();
+                    window_mgr_.clear(); reset_stride_state();
                     recovery_.on_recovery_done(params.recovery_cooldown_frames);
                     symmetry_check_counter_ = 0;
                 }
@@ -914,7 +914,7 @@ namespace rc
                         log_hier_prec_row("reloc", 0.f, 0.f, 0.f, /*reloc_fired=*/true);
                         const auto& pts = lidar_high.first;
                         grid_search_initial_pose(pts, 0.5f, static_cast<float>(M_PI_4));
-                        window_mgr_.clear();
+                        window_mgr_.clear(); reset_stride_state();
                         u_b_init_ = false;   // reseed u_b_ to g(v) on the next boundary update
                         map_trust_v_ = 0.f;  // fresh full trust after relocating
                         map_trust_low_streak_ = 0;
@@ -1047,7 +1047,7 @@ namespace rc
                                    << "(streak" << good_fit_streak_ << ")";
                         set_robot_pose(best->x, best->y, best->theta);
                         recovery_.reset();
-                        window_mgr_.clear();
+                        window_mgr_.clear(); reset_stride_state();
                         symmetry_flip_evidence_ = 0.f;
                         good_fit_streak_ = 0;   // fresh orientation — re-establish confidence from scratch
                     }
@@ -1603,7 +1603,7 @@ namespace rc
         current_velocity_weights_ = Eigen::Vector3f::Ones();  // Reset velocity weights
         prev_sdf_mse_ = 0.f;  // Reset boundary quality gate
         u_b_init_ = false;    // reseed hierarchical boundary log-precision to g(v) after a reset
-        window_mgr_.clear();
+        window_mgr_.clear(); reset_stride_state();
         rerun_room_polygon_sent_ = false;
 
     }
@@ -1647,7 +1647,7 @@ namespace rc
         current_velocity_weights_ = Eigen::Vector3f::Ones();  // Reset velocity weights
         prev_sdf_mse_ = 0.f;  // Reset boundary quality gate
         u_b_init_ = false;    // reseed hierarchical boundary log-precision to g(v) after a reset
-        window_mgr_.clear();
+        window_mgr_.clear(); reset_stride_state();
         rerun_room_polygon_sent_ = false;
 
         // Initialize corner detector with model polygon + graded-covariance tuning from config.
@@ -1723,7 +1723,7 @@ namespace rc
         model_->robot_prev_pose = std::nullopt;
 
         // Clear sliding window (stale poses are invalid after manual reset)
-        window_mgr_.clear();
+        window_mgr_.clear(); reset_stride_state();
 
         // Reset last update result with new pose
         last_update_result = UpdateResult{};
@@ -1928,6 +1928,32 @@ namespace rc
             slot_motion_cov = selected_prior.covariance_eigen;
         }
 
+        // ---- Strided window: decide ADMIT vs REPLACE, and span the motion factor accordingly -------
+        // See Params::window_stride_enabled. The per-frame delta above describes ONE inter-frame gap.
+        // While we are replacing the newest slot instead of appending, the motion factor that slot
+        // carries must describe the whole interval back to the last ADMITTED slot — otherwise the
+        // window's oldest-to-newest chain is constrained by a fraction of the motion that actually
+        // happened, which under-constrains exactly the DOF this change exists to fix.
+        bool stride_replace = false;
+        if (params.window_stride_enabled)
+        {
+            stride_delta_accum_ += slot_odom_delta;       // global-frame increments, additive
+            stride_cov_accum_   += slot_motion_cov;       // independent increments
+
+            if (stride_has_admitted_ and window_mgr_.size() > 1)
+            {
+                const float travel = std::hypot(pred_pos.x() - stride_last_admitted_[0],
+                                                pred_pos.y() - stride_last_admitted_[1]);
+                const float turn = std::abs(std::remainder(pred_theta - stride_last_admitted_[2],
+                                                           2.f * static_cast<float>(M_PI)));
+                stride_replace = (travel < params.window_min_travel_m
+                                  and turn < params.window_min_turn_rad);
+            }
+            // Either way the newest slot spans back to the last admitted one.
+            slot_odom_delta = stride_delta_accum_;
+            slot_motion_cov = stride_cov_accum_;
+        }
+
         WindowSlot new_slot;
         new_slot.pose = torch::tensor({pred_pos.x(), pred_pos.y(), pred_theta},
             torch::TensorOptions().dtype(torch::kFloat32).device(get_device()).requires_grad(true));
@@ -1951,16 +1977,34 @@ namespace rc
             new_slot.motion_prec_tensor = prec_cpu.to(get_device());
         }
 
-        // FEJ+Schur: marginalize the dropping slot BEFORE append() pops it, while both x₀ (front)
-        // and its Markov blanket x₁ (window[1]) are still live at their converged linearization
-        // points. append() then just pops (fej_schur=true suppresses the legacy mu re-anchoring),
-        // and the post-optimization recompute_boundary_prior() below is skipped.
-        if (params.boundary_fej_schur)
-            window_mgr_.marginalize_oldest(*model_, params, get_device());
+        bool window_slid = false;
+        if (stride_replace)
+        {
+            // Not enough motion to be worth a slot: overwrite the newest so the current frame is still
+            // represented (and still optimized) without consuming the window's span. Nothing is
+            // marginalized and nothing is dropped, so the older slots keep their separation.
+            window_mgr_.newest() = std::move(new_slot);
+        }
+        else
+        {
+            // FEJ+Schur: marginalize the dropping slot BEFORE append() pops it, while both x₀ (front)
+            // and its Markov blanket x₁ (window[1]) are still live at their converged linearization
+            // points. append() then just pops (fej_schur=true suppresses the legacy mu re-anchoring),
+            // and the post-optimization recompute_boundary_prior() below is skipped.
+            if (params.boundary_fej_schur)
+                window_mgr_.marginalize_oldest(*model_, params, get_device());
 
-        const bool window_slid = window_mgr_.append(std::move(new_slot), params.rfe_window_size,
-                                                     params.boundary_mu_quality_threshold,
-                                                     params.boundary_fej_schur);
+            window_slid = window_mgr_.append(std::move(new_slot), params.rfe_window_size,
+                                             params.boundary_mu_quality_threshold,
+                                             params.boundary_fej_schur);
+            if (params.window_stride_enabled)
+            {
+                stride_last_admitted_ = Eigen::Vector3f(pred_pos.x(), pred_pos.y(), pred_theta);
+                stride_has_admitted_  = true;
+                stride_delta_accum_.setZero();
+                stride_cov_accum_.setZero();
+            }
+        }
         window_mgr_.subsample_old_slots(params.rfe_max_lidar_per_old_slot);
 
         // ===== CORNER DETECTION (optional, controlled by EnableCornerTracking) =====
@@ -2294,6 +2338,7 @@ namespace rc
                 while (res.innovation[2] < -M_PI) res.innovation[2] += 2.0f * M_PI;
                 res.innovation_norm = std::sqrt(res.innovation[0]*res.innovation[0] +
                                                 res.innovation[1]*res.innovation[1]);
+                apply_adaptive_covariance(res);
             }
         }
 
@@ -2746,6 +2791,7 @@ namespace rc
             while (res.innovation[2] < -M_PI) res.innovation[2] += 2.0f * M_PI;
             res.innovation_norm = std::sqrt(res.innovation[0]*res.innovation[0] +
                                             res.innovation[1]*res.innovation[1]);
+            apply_adaptive_covariance(res);
         }
 
         model_->robot_pos.data().copy_(torch::tensor({x, y},
@@ -3632,6 +3678,37 @@ namespace rc
         t.early_exits   = ee;
         t.avg_update_ms = (n > 0) ? (static_cast<double>(us) / 1000.0 / n) : 0.0;
         return t;
+    }
+
+    // Innovation-based adaptive covariance — see Params::adaptive_cov_enabled.
+    // The innovation is the difference between two estimates of the SAME pose (SDF-optimised vs
+    // odometry-predicted), so its running second moment is a sample of the estimator's own error and a
+    // lower bound the published covariance must not undercut. Taking the max with the Laplace value
+    // leaves good frames alone and lifts sigma only where the estimator is demonstrably disagreeing
+    // with itself, which is what keeps the mean (and therefore the consumer's speed governor) intact.
+    void RoomConcept::apply_adaptive_covariance(UpdateResult& res)
+    {
+        if (not params.adaptive_cov_enabled)
+            return;
+        const float lambda = std::clamp(params.adaptive_cov_lambda, 1e-4f, 1.0f);
+        for (int i = 0; i < 3; ++i)
+        {
+            const float v = res.innovation[i];
+            if (not std::isfinite(v))
+                continue;
+            innov_m2_[i] = (1.0f - lambda) * innov_m2_[i] + lambda * v * v;
+            // BOTH terms, and the instantaneous one is the load-bearing half. With the EMA alone this
+            // measured a ratio of 0.788 — WORSE than the flat baseline of 1.059, and inverted: the
+            // largest-innovation frames reported sigma 0.0427 while the smallest reported 0.0542. Two
+            // reasons. The EMA only clears the ~46.6 mm Laplace floor if the innovation RMS is
+            // SUSTAINED above it, which a 12 mm median never does; and being an average it rises one
+            // time-constant AFTER the frames that caused it, so on the frame that actually disagreed it
+            // has not moved yet. |v| on this frame is a direct observation that two estimates of this
+            // same pose differ by that much, so the uncertainty is at least that — not circular, just
+            // refusing to claim precision the estimator has already contradicted.
+            if (std::isfinite(res.covariance(i, i)))
+                res.covariance(i, i) = std::max({res.covariance(i, i), innov_m2_[i], v * v});
+        }
     }
 
     Eigen::Affine2f RoomConcept::predict_pose_forward(const Eigen::Affine2f& pose,

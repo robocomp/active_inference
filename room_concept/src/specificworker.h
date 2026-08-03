@@ -171,6 +171,13 @@ class SpecificWorker : public GenericWorker
         std::unique_ptr<rc::RoomSceneGraph> scene_graph_;
         std::int64_t last_dsr_published_ts_ms_ = 0;
 
+        // Kinematic clamp state (see the clamp block in maybe_publish_corrected_pose). The clamp is
+        // relative to what was actually PUBLISHED last, not to the optimizer's previous output, because
+        // the invariant it enforces is about the stream consumers see.
+        std::optional<Eigen::Affine2f> last_published_pose_;
+        std::int64_t                   last_published_ts_ms_ = 0;
+        long                           pose_clamp_hits_      = 0;
+
 
         // Pose trace CSV (etc/pose_trace.csv): logs CORRECTED (20 Hz, compute) and PREDICTED (60 Hz,
         // tick) poses with timestamps so the intermediate dead-reckoned poses can be compared against

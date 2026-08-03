@@ -44,6 +44,7 @@ find_package(Torch REQUIRED)
 # target (TorchConfig.cmake), not via CMAKE_CXX_FLAGS, so it propagates at link time no matter what
 # CMAKE_CXX_FLAGS says here. Strip it from the target itself: prebuilt libdsr_api/core/gui, Qt6, Ice
 # and FastDDS are all built with the default (CXX11) ABI.
+# (The ai_common::* targets never link torch, so they are not exposed to this either way.)
 if(TARGET torch)
   get_target_property(_torch_compile_opts torch INTERFACE_COMPILE_OPTIONS)
   if(_torch_compile_opts)
@@ -57,13 +58,25 @@ find_package(Boost REQUIRED COMPONENTS system filesystem)
 
 set(ACTIVE_INFERENCE_COMMON_DIR "${CMAKE_CURRENT_LIST_DIR}/../../common")
 
+# AddressSanitizer (opt-in, separate build dir) — declared BEFORE add_subdirectory() so the
+# ai_common targets are instrumented too; behind a library boundary they no longer pick this up
+# from the directory-scope add_compile_options further down.
+option(ENABLE_ASAN "Build room_concept with AddressSanitizer" OFF)
+
+# Shared ai_common::* libraries (see common/CMakeLists.txt). room_concept has its OWN
+# src/timeseries_plot.cpp, so it deliberately does not link ai_common::ui.
+add_subdirectory(${ACTIVE_INFERENCE_COMMON_DIR} ${CMAKE_CURRENT_BINARY_DIR}/ai_common EXCLUDE_FROM_ALL)
+LIST(APPEND LIBS
+  ai_common::media        # zero-copy media plane (was 10 spliced IDL paths + an include_directories)
+  ai_common::presence     # agent presence monitor + coordinator
+  ai_common::affordance   # affordance_manager
+  ai_common::core         # header-only beliefs/geometry (object_anchor/, occlusion, …)
+)
 
 # ── Sources ────────────────────────────────────────────────────────────────────
 LIST(APPEND SOURCES
   ../src/specificworker.cpp
   ../src/specificworker_presence.cpp
-  ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_monitor/agent_presence_monitor.cpp
-  ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_coordinator/agent_presence_coordinator.cpp
   ../src/viewer_2d.cpp
   ../src/svg_room_loader.cpp
   ../src/room_concept.cpp
@@ -74,7 +87,6 @@ LIST(APPEND SOURCES
   ../src/lidar_ingestor.cpp
   ../src/room_viewer.cpp
   ../src/room_config.cpp
-  ${ACTIVE_INFERENCE_COMMON_DIR}/affordance_manager/affordance_manager.cpp
   ../src/epistemic_planner.cpp
   ../src/timeseries_plot.cpp
   ../src/corner_detector.cpp
@@ -82,49 +94,11 @@ LIST(APPEND SOURCES
   ../src/object_anchor_source.cpp
   ../src/rerun_logger.cpp
   ../src/camera_visualizer.cpp
-  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/media_transport.cpp
-  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/lidar_plane_reader.cpp
-  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/image_framePubSubTypes.cxx
-  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/image_frameTypeObjectSupport.cxx
-  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/image360_framePubSubTypes.cxx
-  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/image360_frameTypeObjectSupport.cxx
-  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/lidar_framePubSubTypes.cxx
-  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/lidar_frameTypeObjectSupport.cxx
-  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/imu_framePubSubTypes.cxx
-  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/generated/idl/imu_frameTypeObjectSupport.cxx
   ../src/custom_widget.h
-)
-
-# ── Headers ────────────────────────────────────────────────────────────────────
-LIST(APPEND HEADERS
-  ../src/specificworker.h
-  ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_monitor/agent_presence_monitor.h
-  ${ACTIVE_INFERENCE_COMMON_DIR}/agent_presence_coordinator/agent_presence_coordinator.h
-  ../src/viewer_2d.h
-  ../src/svg_room_loader.h
-  ../src/room_concept.h
-  ../src/room_model.h
-  ../src/pointcloud_center_estimator.h
-  ../src/epistemic_controller.h
-  ../src/room_scene_graph.h
-  ../src/lidar_ingestor.h
-  ../src/room_viewer.h
-  ../src/room_config.h
-  ${ACTIVE_INFERENCE_COMMON_DIR}/affordance_manager/affordance_manager.h
-  ../src/epistemic_planner.h
-  ../src/corner_visibility.h
-  ../src/timeseries_plot.h
-  ../src/corner_detector.h
-  ../src/rerun_logger.h
-  ../src/camera_visualizer.h
-  ${ACTIVE_INFERENCE_COMMON_DIR}/media_transport/media_transport.h
-  ${ACTIVE_INFERENCE_COMMON_DIR}/config/config_loader_utils.h
 )
 
 LIST(APPEND LIBS ${LIBS} "${TORCH_LIBRARIES}" tbb Qt6PrintSupport Qt6Xml
             Boost::system Boost::filesystem)
-
-include_directories(${CMAKE_CURRENT_LIST_DIR}/../../common/media_transport)
 
 # no-char8_t to avoid a problem with ICE Connection lib.
 # CRITICAL — match the prebuilt libdsr's Eigen ABI: use DEFAULT alignment (alignof(Transform)=16).
@@ -134,11 +108,6 @@ include_directories(${CMAKE_CURRENT_LIST_DIR}/../../common/media_transport)
 # with default Eigen alignment; the agents must too.
 add_definitions(-g -O3 -fmax-errors=1 -fno-char8_t)
 
-# AddressSanitizer (opt-in, separate build dir):
-#   cmake -B build-asan -DENABLE_ASAN=ON && cmake --build build-asan -j
-# Instruments room_concept's OWN code so we catch the corrupting WRITE behind the bottle-churn
-# segfault (the bad-free that surfaces in Qt paint), not just the later free. See run_asan.sh.
-option(ENABLE_ASAN "Build room_concept with AddressSanitizer" OFF)
 if(ENABLE_ASAN)
   message(STATUS "AddressSanitizer ENABLED for room_concept (-O1, frame pointers; -lasan-direct link)")
   add_compile_options(-fsanitize=address -fno-omit-frame-pointer -O1)
@@ -149,4 +118,3 @@ if(ENABLE_ASAN)
   # the libasan DT_NEEDED and LD_PRELOADs it, so ASan inits first while Ice's init order stays normal.
   add_link_options(-fno-omit-frame-pointer -Wl,--no-as-needed -lasan -Wl,--as-needed)
 endif()
-

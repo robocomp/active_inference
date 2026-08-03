@@ -100,6 +100,7 @@ std::vector<Eigen::Vector2f> EpistemicPlanner::generate_candidates() const
 
     // Filter cached grid by min_distance from robot (dynamic per cycle)
     const float min_d2 = params.min_distance * params.min_distance;
+    const float obstacle_clearance = std::max(params.target_obstacle_clearance, robot_footprint_radius_);
     std::vector<Eigen::Vector2f> candidates;
     candidates.reserve(std::min(static_cast<int>(cached_grid_.size()), params.max_candidates));
 
@@ -109,7 +110,9 @@ std::vector<Eigen::Vector2f> EpistemicPlanner::generate_candidates() const
             continue;
 
         // Reject candidates that fall inside (or too close to) any object/obstacle footprint.
-        // Clearance = robot_footprint_radius_ so the robot body won't overlap the object.
+        // Clearance must match the CONSUMER's near-goal requirement, not merely the robot body — a
+        // target that only clears the footprint is one the executor will not stop at. See
+        // Params::target_obstacle_clearance.
         bool blocked = false;
         for (const auto& obs : obstacle_footprints_)
         {
@@ -118,8 +121,8 @@ std::vector<Eigen::Vector2f> EpistemicPlanner::generate_candidates() const
             const float s = std::sin(-obs.yaw);
             const float lx = c * d.x() - s * d.y();
             const float ly = s * d.x() + c * d.y();
-            if (std::abs(lx) < obs.half_w + robot_footprint_radius_ &&
-                std::abs(ly) < obs.half_d + robot_footprint_radius_)
+            if (std::abs(lx) < obs.half_w + obstacle_clearance and
+                std::abs(ly) < obs.half_d + obstacle_clearance)
             {
                 blocked = true;
                 break;
@@ -303,6 +306,7 @@ std::vector<EpistemicPlanner::Target> EpistemicPlanner::evaluate_targets() const
         //                        e.g. residual_concept/table publishing boxes over the free space)
         int beyond_mindist = 0, blocked = 0;
         const float min_d2 = params.min_distance * params.min_distance;
+        const float obstacle_clearance = std::max(params.target_obstacle_clearance, robot_footprint_radius_);
         for (const auto& p : cached_grid_)
         {
             if ((p - robot_pos()).squaredNorm() < min_d2) continue;
@@ -313,14 +317,14 @@ std::vector<EpistemicPlanner::Target> EpistemicPlanner::evaluate_targets() const
                 const float c = std::cos(-obs.yaw), s = std::sin(-obs.yaw);
                 const float lx = c * d.x() - s * d.y();
                 const float ly = s * d.x() + c * d.y();
-                if (std::abs(lx) < obs.half_w + robot_footprint_radius_ &&
-                    std::abs(ly) < obs.half_d + robot_footprint_radius_) { ++blocked; break; }
+                if (std::abs(lx) < obs.half_w + obstacle_clearance and
+                    std::abs(ly) < obs.half_d + obstacle_clearance) { ++blocked; break; }
             }
         }
         std::print("[planner] NO TARGET (STARVED): grid={} beyond_mindist={} blocked_by_obstacles={} "
-                   "obstacles={} robot=({:.2f},{:.2f}) min_dist={:.2f}\n",
+                   "obstacles={} clearance={:.2f} robot=({:.2f},{:.2f}) min_dist={:.2f}\n",
                    cached_grid_.size(), beyond_mindist, blocked, obstacle_footprints_.size(),
-                   robot_pos().x(), robot_pos().y(), params.min_distance);
+                   obstacle_clearance, robot_pos().x(), robot_pos().y(), params.min_distance);
         std::fflush(stdout);
         self.cell_scores_.clear();
         self.ior_cells_.clear();
@@ -334,9 +338,9 @@ std::vector<EpistemicPlanner::Target> EpistemicPlanner::evaluate_targets() const
     // stands. Computed once — it is the null policy every candidate is scored against.
     const float here_gain = info_gain_nats(prior_precision, predicted_fim(robot_pos()));
 
-    // Distance preference is normalised by the room diagonal and added in nats, so it is bounded by
-    // w_exploration and can only break ties between comparably-valued cells. See Params::w_exploration
-    // for why it must not be a multiplier.
+    // Travel cost is normalised by the room diagonal and SUBTRACTED in nats. See Params::w_travel_cost
+    // for why the sign is load-bearing: the neglect field is flat across large regions, so this term
+    // decides the arg-max there, and a far-is-better sign turns that into corner-to-corner oscillation.
     const float room_diag = std::max(1e-3f, (room_max_ - room_min_).norm());
 
     std::vector<Target> targets;
@@ -398,16 +402,18 @@ std::vector<EpistemicPlanner::Target> EpistemicPlanner::evaluate_targets() const
         const float route_neglect = (1.f - params.w_path_interest) * neglect_nats(pos, now)
                                   + params.w_path_interest * path_neglect;
 
-        // Score, all in nats and all ADDITIVE:
+        // Score = expected free energy, all in nats:
         //   (marginal pose info, suppressed if we just swept this route)
         // + (neglect information of the route — the non-saturating exploration drive)
-        // + (bounded far-is-better tie-break)
+        // − (travel cost)
         // The first term extinguishes itself as the room becomes fully visible; the second never
         // does, so the ranking degrades continuously into oldest-first inhibition-of-return with
-        // no mode switch, no "info exhausted" flag and no gain floor.
+        // no mode switch, no "info exhausted" flag and no gain floor. The third makes the choice
+        // among equally-informative cells the CHEAPEST one, which is what turns the sweep into
+        // contiguous coverage instead of an oscillation between extremes.
         t.score = fim_gain * ior_suppressor
                 + params.w_ior_drive * route_neglect
-                + params.w_exploration * (t.distance / room_diag);
+                - params.w_travel_cost * (t.distance / room_diag);
         t.eigenvector_score = fim_gain;
         targets.push_back(t);
     }
@@ -451,9 +457,23 @@ std::optional<EpistemicPlanner::Target> EpistemicPlanner::select_target()
     if (targets.empty())
         return std::nullopt;
 
-    // Rotate-in-place: no randomness needed
+    // Rotate-in-place: no randomness needed. It MUST still report — this path used to return
+    // silently, which made a planner stuck proposing heading-recovery indistinguishable from a
+    // planner that had stopped selecting altogether. Note what it publishes: a target at the
+    // robot's OWN position, which a position-following consumer completes instantly without ever
+    // rotating.
     if (targets.front().rotate_in_place)
+    {
+        const float ratio = robot_cov_(2, 2) / std::max(1e-9f, std::max(robot_cov_(0, 0), robot_cov_(1, 1)));
+        std::print("[planner] ROTATE-IN-PLACE at ({:.2f},{:.2f}) — angular dominance {:.1f} > {:.1f} "
+                   "(σθ={:.3f}rad σxy={:.3f}m) gain={:.3f}\n",
+                   robot_pos().x(), robot_pos().y(), ratio, params.angular_dominance_ratio,
+                   std::sqrt(std::max(0.f, robot_cov_(2, 2))),
+                   std::sqrt(std::max(0.f, std::max(robot_cov_(0, 0), robot_cov_(1, 1)))),
+                   targets.front().eigenvector_score);
+        std::fflush(stdout);
         return targets.front();
+    }
 
     // ---- Selection diagnostic: shows WHY a target was picked (verifies IoR is steering, not the
     //      distance bonus). Printed once per new-target selection (update_target only calls this when
@@ -499,10 +519,10 @@ void EpistemicPlanner::mark_and_refresh()
     refresh_ior_overlay();
 }
 
-// mark_target_abandoned — an unreachable target is stamped as if visited, so the neglect drive
+// mark_target_finished — a reached OR abandoned target is stamped as visited, so the neglect drive
 // that selected it drops to ~0 there and the planner moves on instead of re-proposing it forever.
 // See the header for why this is a de-prioritisation and not a blacklist.
-void EpistemicPlanner::mark_target_abandoned(const Eigen::Vector2f& pos)
+void EpistemicPlanner::mark_target_finished(const Eigen::Vector2f& pos)
 {
     if (!visit_grid_.initialized) return;
     visit_grid_.mark_visited_with_falloff(pos, params.ior_path_radius, params.ior_decay_time);

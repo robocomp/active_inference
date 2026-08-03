@@ -101,6 +101,21 @@ struct RoomConfig
                                                   // exploration affordance. false ⇒ room never offers an
                                                   // affordance (so it can't out-compete object affordances in
                                                   // the controller's EFE selection — e.g. the 360-glance test).
+    // ---- Kinematic clamp on the published pose ----
+    // Bounds the pose delta between two published RT blocks to what the robot can physically do in the
+    // elapsed time. Not a tuning threshold: it is the support of the motion model, so a delta outside
+    // it cannot be a report about where the robot went. The un-applied residual is added to the
+    // published covariance so the lag is visible rather than hidden.
+    // ★ The limits must be the CONSUMER's, not this agent's own beliefs — room_concept's MaxAdvSpeed /
+    // MaxRotSpeed (0.9 / 0.75) disagree with what the controller actually commands (0.7 / 0.8) and
+    // neither is a superset. These default to the controller's and must be kept tracking it.
+    bool  POSE_CLAMP_ENABLED           = true;    // RoomConcept.PoseClampEnabled
+    float POSE_CLAMP_V_MAX             = 0.7f;    // m/s   — controller MaxAdvSpeed
+    float POSE_CLAMP_W_MAX             = 0.8f;    // rad/s — controller MaxRotSpeed
+    // Gap beyond which the clamp is skipped entirely (stream restart, agent stall, relocalization after
+    // a long silence). Clamping across a long gap would slew the pose in at v_max for many frames.
+    float POSE_CLAMP_MAX_DT_S          = 0.5f;    // s
+
     // ---- Execution-stall watchdog (RoomSceneGraph::break_execution_stall) ----
     // While the controller holds the afford_room execution claim the planner is idle by design, so
     // a target the controller can never reach parks the whole run. If the robot's closest approach

@@ -343,6 +343,41 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose,
         for (int c = 0; c < 3; ++c)
             cov_flat[r * 6 + c] = cov_se2(r, c);
 
+    // ── Body-frame twist, written BEFORE the RT block ───────────────────────
+    // Consumers read velocity DIRECTLY from here instead of differentiating the pose (which is what
+    // produced correction-induced velocity spikes). Convention: rt_translation_velocity =
+    // [adv(fwd,+x), side(lat,+y), 0], rt_rotation_euler_xyz_velocity = [0,0,rot]; last_adv_/side_/rot_
+    // are the measured odometry set in update(). Covariance is a config diagonal.
+    //
+    // ★ ORDER IS LOAD-BEARING. This used to run AFTER insert_or_assign_edge_RT, as a get_edge →
+    // add attributes → insert_or_assign_edge(copy) write-back. That copy is a snapshot of the edge
+    // INCLUDING its rt_timestamps / rt_head_index ring buffer, so assigning it back re-publishes the
+    // ring state as of the fetch — the edge-level form of the write-back hazard already documented on
+    // nodes. The write site's own comment records that an earlier version of this froze the position
+    // outright and was patched by re-fetching; re-fetching narrows the window but does not close it.
+    //
+    // Measured symptom: room_concept publishes at ~19.6 Hz (pose_trace inter-publish p50 51 ms, 3.3%
+    // over 100 ms, 0% over 200 ms) while the controller observes the RT stamp advancing at only 9.0 Hz
+    // (p50 100 ms, 47% over 100 ms, 10% over 200 ms) — a factor of 2.2, i.e. about every second update
+    // invisible. Writing the twist FIRST and letting the timestamped RT write land LAST means the
+    // ring-buffer advance is the final word on this edge for this frame and nothing can write over it.
+    if (auto edge = G_->get_edge(parent_opt.value().id(), child_id, "RT"); edge.has_value())
+    {
+        G_->add_or_modify_attrib_local<rt_translation_velocity_att>(
+            edge.value(), std::vector<float>{last_adv_, last_side_, 0.f});
+        G_->add_or_modify_attrib_local<rt_rotation_euler_xyz_velocity_att>(
+            edge.value(), std::vector<float>{0.f, 0.f, last_rot_});
+        std::vector<float> vel_cov(36, 0.f);   // 6×6 row-major; SE2 diag at [0],[7],[14] (matches pose cov)
+        if (params_)
+        {
+            vel_cov[0]  = params_->ROBOT_VEL_COV_ADV;
+            vel_cov[7]  = params_->ROBOT_VEL_COV_SIDE;
+            vel_cov[14] = params_->ROBOT_VEL_COV_ROT;
+        }
+        G_->add_or_modify_attrib_local<rt_se2_covariance_velocity_att>(edge.value(), vel_cov);
+        G_->insert_or_assign_edge(edge.value());
+    }
+
     // ── Timestamped RT write ────────────────────────────────────────────────
     // Write via the RT_API covariance+timestamp overload so the edge keeps a proper TIMESTAMPED
     // HISTORY ring buffer (rt_timestamps / rt_head_index). The previous code overwrote a single
@@ -373,28 +408,6 @@ void RoomSceneGraph::write_robot_room_rt(const Eigen::Affine2f& robot_pose,
         return;
     }
 
-    // Publish the robot's BODY-FRAME twist + covariance on the SAME RT edge, so the controller reads
-    // velocity DIRECTLY (no pose differentiation → no correction-induced velocity spikes). Convention:
-    // rt_translation_velocity = [adv(fwd,+x), side(lat,+y), 0], rt_rotation_euler_xyz_velocity = [0,0,rot].
-    // last_adv_/side_/rot_ are the measured odometry (set in update()). Covariance = diagonal (config).
-    // Re-fetch the edge FRESH from the graph (NOT from the stale parent_opt node captured before the RT
-    // write) — otherwise we'd write back the old pose ring buffer and freeze the position.
-    if (auto edge = G_->get_edge(parent_opt.value().id(), child_id, "RT"); edge.has_value())
-    {
-        G_->add_or_modify_attrib_local<rt_translation_velocity_att>(
-            edge.value(), std::vector<float>{last_adv_, last_side_, 0.f});
-        G_->add_or_modify_attrib_local<rt_rotation_euler_xyz_velocity_att>(
-            edge.value(), std::vector<float>{0.f, 0.f, last_rot_});
-        std::vector<float> vel_cov(36, 0.f);   // 6×6 row-major; SE2 diag at [0],[7],[14] (matches pose cov)
-        if (params_)
-        {
-            vel_cov[0]  = params_->ROBOT_VEL_COV_ADV;
-            vel_cov[7]  = params_->ROBOT_VEL_COV_SIDE;
-            vel_cov[14] = params_->ROBOT_VEL_COV_ROT;
-        }
-        G_->add_or_modify_attrib_local<rt_se2_covariance_velocity_att>(edge.value(), vel_cov);
-        G_->insert_or_assign_edge(edge.value());
-    }
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -488,6 +501,8 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
 
     if (affordance_manager_.consume_completion_event())
     {
+        std::print("[planner] completion consumed -> target cleared, will re-select next cycle\n");
+        std::fflush(stdout);
         planner.clear_target();
         planner.mark_and_refresh();   // keep path trail live in viewer
         planner.refresh_belief();     // just finished exploring → belief fresh (restart forget clock)
@@ -504,21 +519,65 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
         // closing on it. Falls through to a fresh selection on the same cycle.
         if (!break_execution_stall(planner.robot_pos()))
         {
-            // Throttled: a stuck claim (controller Executing but never completing) keeps the planner
-            // idle here — no reselect, no [planner] line. Reveals the OTHER "robot won't move on" path.
-            static int exec_hold_dbg = 0;
-            if (++exec_hold_dbg % 90 == 0)
-                std::print("[planner] afford_room EXECUTING (controller-claimed) — planner idle, holding "
-                           "target ({:.2f},{:.2f}); {} cycles\n",
-                           planner.current_target() ? planner.current_target()->position.x() : 0.f,
-                           planner.current_target() ? planner.current_target()->position.y() : 0.f,
-                           exec_hold_dbg);
+            // Throttled progress report while the controller owns the claim. Counts THIS execution
+            // episode only (reset below when no claim is held) and reports the quantities the
+            // watchdog actually decides on — current distance, best approach so far, and seconds
+            // since that best improved. A previous version used a never-reset static cycle counter,
+            // which made a perfectly normal drive look identical to a deadlock.
+            if (++exec_hold_cycles_ % 90 == 0)
+            {
+                const auto& t = planner.current_target();
+                const float dist = t ? (t->position - planner.robot_pos()).norm() : -1.f;
+                const float idle_s = stall_tracking_
+                    ? std::chrono::duration<float>(
+                          std::chrono::steady_clock::now() - stall_last_progress_).count()
+                    : 0.f;
+                std::print("[planner] afford_room EXECUTING (controller-claimed) — target "
+                           "({:.2f},{:.2f}) d={:.2f}m best={:.2f}m no_progress={:.1f}s/{:.0f}s "
+                           "episode_cycles={}\n",
+                           t ? t->position.x() : 0.f, t ? t->position.y() : 0.f,
+                           dist, stall_best_dist_, idle_s, params_->EXEC_STALL_TIMEOUT_S,
+                           exec_hold_cycles_);
+                std::fflush(stdout);
+            }
             return;
         }
+        exec_hold_cycles_ = 0;
     }
     else
     {
-        stall_tracking_ = false;   // no claim in flight → nothing to watch
+        stall_tracking_   = false;   // no claim in flight → nothing to watch
+        exec_hold_cycles_ = 0;       // per-episode counter, so a normal drive can't look like a stall
+
+        // ---- LEVEL-TRIGGERED completion ------------------------------------------------------
+        // consume_completion_event() above is EDGE-triggered off monitor_affordance(), which only
+        // polls every 200 ms — miss the Executing→Completed transition once and the planner keeps
+        // its target forever. That is not a benign miss: with the target still set, update_target()
+        // never reaches select_target(), so the planner re-publishes the SAME target, and since the
+        // executor's goal tolerance is looser than our arrival_distance the robot is already inside
+        // it — the affordance is claimed and completed instantly, on the spot, over and over, and
+        // the robot never moves again. (Symptom: zero [planner] selection lines and a stream of
+        // "reached -> REACH (consume immediately)" from the consumer.)
+        //
+        // Reading the Completed state directly is immune to the poll race: the executor's
+        // completion is authoritative about arrival, so retire the target on it and let the next
+        // cycle select a genuinely new one. Do NOT gate this on our own arrival_distance — the
+        // whole failure is that the two thresholds disagree.
+        if (const auto n = G_->get_node("afford_room"); n.has_value() and planner.current_target())
+        {
+            const bool a = G_->get_attrib_by_name<active_att>(n.value()).value_or(false);
+            const bool p = G_->get_attrib_by_name<epistemic_pending_att>(n.value()).value_or(true);
+            if (not a and not p)   // Completed
+            {
+                const auto done = planner.current_target()->position;
+                std::print("[planner] afford_room COMPLETED (level-triggered) — retiring target "
+                           "({:.2f},{:.2f}) at d={:.2f}m; re-selecting\n",
+                           done.x(), done.y(), (done - planner.robot_pos()).norm());
+                std::fflush(stdout);
+                planner.mark_target_finished(done);
+                planner.refresh_belief();
+            }
+        }
     }
 
     // Refresh obstacle exclusion zones from DSR graph before selecting the target.
@@ -530,7 +589,19 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
     // Ask the planner for the current best target (handles dwell / arrival internally)
     const auto target_opt = planner.update_target();
 
-    if (!target_opt.has_value()) return;
+    if (not target_opt.has_value())
+    {
+        // update_target() declined to produce one. Silent until now, which made this
+        // indistinguishable from "the publish path is not running at all". Two ways to get here:
+        // the planner is mid-dwell with a cleared target, or evaluate_targets bailed before the
+        // STARVED diagnostic (room bounds / robot state not yet set).
+        if (++no_target_dbg_ % 90 == 0)
+            std::print("[planner] update_target() returned NOTHING — no affordance published "
+                       "(dwell or unset room/robot state); {} cycles\n", no_target_dbg_);
+        std::fflush(stdout);
+        return;
+    }
+    no_target_dbg_ = 0;
 
     const float tx   = target_opt->position.x();
     const float ty   = target_opt->position.y();
@@ -550,12 +621,34 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
     const float gain = planner.live_total_epistemic_gain(target_opt->position,
                                                          target_opt->rotate_in_place);
 
-    // Heading: face toward room centre so the robot maximises wall/corner visibility
+    // Heading: face toward room centre so the robot maximises wall/corner visibility.
     const float cx  = (planner.room_min().x() + planner.room_max().x()) * 0.5f;
     const float cy  = (planner.room_min().y() + planner.room_max().y()) * 0.5f;
-    const float yaw = std::atan2(cy - ty, cx - tx);
+    float yaw = std::atan2(cy - ty, cx - tx);
 
-    affordance_manager_.publish_target(
+    // ---- Rotate-in-place (heading recovery) needs a yaw the robot does NOT already hold ----
+    // This target's POSITION is the robot's own, so the only executable part of it is the yaw: the
+    // consumer's arrival rotation turns in place until the heading matches, then completes. Aiming
+    // it at the room centre is therefore a no-op whenever the robot already happens to face that
+    // way — the consumer reports "reached" instantly, no rotation occurs, no heading information is
+    // gathered, and the next cycle re-proposes a byte-identical target (same position, same yaw,
+    // same gain). That identical re-proposal is fatal, not merely wasteful: publish_target refuses
+    // to re-arm a Completed affordance whose target is unchanged, so the affordance stays Completed
+    // forever and the consumer sits at "no eligible affordance" — the exploration stops dead.
+    //
+    // Publishing a substantial turn relative to the CURRENT heading fixes both halves: the rotation
+    // actually happens (which is the entire point of the recovery), and the commanded yaw advances
+    // every cycle, so successive recoveries sweep the full circle instead of colliding as "the same
+    // target". kRecoveryTurnRad is a fraction of a full turn, large enough to be unambiguously a
+    // real motion and to clear the consumer's heading tolerance.
+    if (target_opt->rotate_in_place)
+    {
+        constexpr float kRecoveryTurnRad = 2.0f;   // ~115°, so three legs cover a full sweep
+        yaw = std::atan2(std::sin(planner.robot_theta() + kRecoveryTurnRad),
+                         std::cos(planner.robot_theta() + kRecoveryTurnRad));
+    }
+
+    const bool published = affordance_manager_.publish_target(
         G_,
         dsr_room_id_,
         tx,
@@ -564,6 +657,30 @@ void RoomSceneGraph::dsr_update_affordance(const rc::RoomConcept::UpdateResult& 
         gain,
         [this]() { trigger_layout_(); },
         [this]() { trigger_layout_(); });
+
+    // ---- Publish trace: the ONLY place that shows why exploration stops ----------------------
+    // Everything upstream of here can look healthy while the affordance never returns to Offered:
+    // publish_target silently declines when the node is Completed and the proposed target is
+    // unchanged, and the planner path that re-proposes an unchanged target prints nothing (it never
+    // reaches select_target, because current_target_ is still set). So log the decision itself:
+    // the proposed target, whether publish_target accepted it, and the resulting protocol state read
+    // back from the graph. Throttled, plus an immediate line whenever the state is not Offered so a
+    // stuck Completed/Invalid shows up at once instead of up to 90 cycles later.
+    bool active = false, pending = true;
+    if (const auto n = G_->get_node("afford_room"); n.has_value())
+    {
+        active  = G_->get_attrib_by_name<active_att>(n.value()).value_or(false);
+        pending = G_->get_attrib_by_name<epistemic_pending_att>(n.value()).value_or(true);
+    }
+    const char* state = (not active and pending) ? "Offered"
+                      : (    active and pending) ? "Executing"
+                      : (not active and not pending) ? "COMPLETED(stuck?)" : "INVALID";
+    const bool offered = (not active and pending);
+    if (++publish_dbg_ % 90 == 0 or not offered)
+        std::print("[planner] publish target=({:.2f},{:.2f}) yaw={:.2f} gain={:.3f} rot_in_place={} "
+                   "accepted={} -> afford_room state={}\n",
+                   tx, ty, yaw, gain, target_opt->rotate_in_place, published, state);
+    std::fflush(stdout);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -574,9 +691,36 @@ bool RoomSceneGraph::break_execution_stall(const Eigen::Vector2f& robot_pos)
         return false;
 
     auto& planner = epistemic_->epistemic_planner();
+    const auto  now = std::chrono::steady_clock::now();
     const auto& target_opt = planner.current_target();
+
+    // A claim held while the planner has NO target of its own is already inconsistent: nothing is
+    // being driven toward, so no amount of waiting can produce a completion. This is reachable right
+    // after a completion is consumed (which clears the target) if the claim is not fully torn down,
+    // and it is the nastier deadlock of the two because the distance-progress test below has nothing
+    // to measure. Time it out on the same clock and release.
     if (!target_opt.has_value())
-        return false;
+    {
+        if (not stall_tracking_)
+        {
+            stall_tracking_      = true;
+            stall_target_        = Eigen::Vector2f::Zero();
+            stall_best_dist_     = std::numeric_limits<float>::infinity();
+            stall_last_progress_ = now;
+            return false;
+        }
+        if (std::chrono::duration<float>(now - stall_last_progress_).count()
+            < params_->EXEC_STALL_TIMEOUT_S)
+            return false;
+
+        const bool released = affordance_manager_.release_execution_claim(G_);
+        qWarning() << "[planner] afford_room claimed for" << params_->EXEC_STALL_TIMEOUT_S
+                   << "s with NO planner target — inconsistent claim"
+                   << (released ? "— execution claim released" : "— no claim to release")
+                   << "; re-selecting";
+        stall_tracking_ = false;
+        return true;
+    }
 
     // A rotate-in-place recovery does not close any distance by construction — it would trip the
     // watchdog every time. It is also self-limiting (it ends when the heading covariance drops).
@@ -586,7 +730,6 @@ bool RoomSceneGraph::break_execution_stall(const Eigen::Vector2f& robot_pos)
         return false;
     }
 
-    const auto  now  = std::chrono::steady_clock::now();
     const float dist = (target_opt->position - robot_pos).norm();
 
     // (Re)arm on a fresh claim or a target that moved.
@@ -624,7 +767,7 @@ bool RoomSceneGraph::break_execution_stall(const Eigen::Vector2f& robot_pos)
                << (released ? "— execution claim released" : "— no claim to release")
                << "; marking visited and re-selecting";
 
-    planner.mark_target_abandoned(stall_target_);
+    planner.mark_target_finished(stall_target_);
     stall_tracking_ = false;
     return true;
 }
@@ -667,6 +810,7 @@ void RoomSceneGraph::update_planner_obstacle_footprints()
     collect("obstacle");
 
     epistemic_->epistemic_planner().set_obstacle_footprints(std::move(footprints));
+
 }
 
 ///////////////////////////////////////////////////////////////////////////////

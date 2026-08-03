@@ -108,6 +108,56 @@ MinTrackingSteps       = 5     # Warm-up tras reset: 5 frames (default 20).
                                 # en cuanto la ventana está llena.
 RotationSdfCoupling    = 0.5   # restored to original after rot_boost=0 validation (07-15). FEJ+Schur now handles turn poisoning without this crutch.
 
+# ── Innovation-based adaptive covariance ──────────────────────────────────────
+# The published sigma is otherwise inert: a 26x change in innovation (2.4 -> 62.7 mm) moves sigma_xy by
+# 6%. It comes from the Laplace curvature — how SHARP the minimum is, not whether it is the RIGHT one —
+# so a confident wrong pose is published as confident, the controller's speed governor never engages,
+# and every concept agent folds a constant into its common-mode variance.
+# Two process-noise approaches were tried and BOTH measured as failures: accumulating the full Q gave
+# mean sigma +69% and 29.7% of frames above the 0.080 throttle knee for a ratio of only 1.122 (Q is 86%
+# a per-frame constant, so that was accumulating TIME, which has r=+0.001 against the correction that
+# follows); accumulating only the motion-proportional part preserved the mean but gave ratio 1.000.
+# INSTEAD: the innovation is a direct sample of the estimator's own error, so publish
+#     sigma_ii = max(laplace_ii, EMA[innovation_i^2])
+# The covariance then cannot claim more precision than the estimator's disagreements demonstrate.
+# At the median innovation (12 mm) the Laplace term (44 mm) dominates and the mean is untouched; a
+# sustained run of large innovations (p99 97 mm — the corridor) lifts it. Mean unchanged, range restored.
+AdaptiveCovEnabled     = true 
+AdaptiveCovLambda      = 0.02   # EMA rate ~= 50-frame memory: one bad frame cannot spike the governor
+
+# ── Strided RFE window ────────────────────────────────────────────────────────
+# The window holds WindowSize poses, but at the lidar rate they are nearly the SAME pose: measured
+# while moving, max pairwise separation across the 5 slots is 76 mm (p50) in a ~9 m room, and 75.8% of
+# frames span under 20 mm. That is the conditioning under which LATERAL position is weakly observable,
+# and the published pose then rattles sideways — consecutive cross-track increments alternate sign 61%
+# of the time (heading is clean at 4.8%). That lateral rattle is the wobble felt on the robot, and it
+# is built from individually legal steps (99% inside the kinematic clamp budget), so no magnitude cap
+# removes it. Striding admits a new slot only after real motion; until then the newest slot is replaced
+# in place, so the current frame is always represented without consuming the window's span.
+# Predicted baseline: 76 mm -> ~222 mm at 0.10 m spacing, ~448 mm at 0.25 m.
+# ★ Watch loss_boundary for a ratchet — a longer stride means each admitted slot carries more drift.
+WindowStrideEnabled    = true 
+WindowMinTravel        = 0.10   # m of travel before a new slot is admitted
+WindowMinTurn          = 0.15   # rad of turn before a new slot is admitted (whichever comes first)
+
+# ── Kinematic clamp on the published pose ─────────────────────────────────────
+# Bounds the pose delta between two published RT blocks to what the robot can physically do in the
+# elapsed time. Measured on this agent's own debug log: 92.8% of frames coast on the odometry
+# prediction, then the optimizer discharges the whole accumulated drift in ONE frame — |innovation|
+# p99 96.7 mm / max 280.2 mm, i.e. an implied 2.2 m/s at p99 and 7.2 m/s peak against a 0.70 m/s robot
+# (13.6% of those frames break the linear limit, 13.1% the angular). The controller independently
+# measured the same events as 6.9% of its updates, moving its steering carrot up to 1.79 m in a cycle.
+# NOT a tuning threshold — it is the support of the motion model. The correction is legitimate, so it
+# is rate-limited rather than rejected, and the un-applied residual is added to the published
+# covariance so the lag is visible instead of hidden.
+# ★ Limits are the CONTROLLER's (MaxAdvSpeed 0.7 / MaxRotSpeed 0.8), NOT this agent's MaxLinAccel block
+#   further down, which claims 0.9 / 0.75. Neither config is a superset of the other; keep these
+#   tracking controller/etc/config.toml.
+PoseClampEnabled       = true 
+PoseClampVMax          = 0.7    # m/s
+PoseClampWMax          = 0.8    # rad/s
+PoseClampMaxDt         = 0.5    # s; longer gap => skip the clamp (stream restart / long silence)
+
 # ── 180° symmetry-flip guard (harden against spurious flips) ───────────────────
 # The optimizer periodically tests whether rotating the robot 180° fits the room
 # better. Evidence accumulates leakily and must cross a confidence-scaled threshold
@@ -419,21 +469,49 @@ FimMaxRange        = 10.0   # max corner visibility range (m)
 GridResolution     = 0.5    # spacing between candidate targets (m)
 MinDistance        = 1.0    # ignore targets closer than this to robot (m)
 MaxCandidates      = 2000   # cap on evaluated candidates
-TargetWallMargin   = 1.0    # reject targets closer than this to walls (m)
+TargetWallMargin   = 0.55   # reject targets closer than this to walls (m). Must be >= the CONSUMER's
+                            # near-goal clearance, else the executor will not stop at what we offer:
+                            #   max(body_extent + GoalObstacleMargin, ComfortStandoff * GoalClearanceMinRatio)
+                            #   = max(0.32 + 0.08, 0.6 * 0.85) = 0.51 m with the live controller config.
+                            # Effective value is max(this, robot_footprint_radius = 0.32).
+                            # Was 1.0, which admits NO candidate in a corridor narrower than 2 m and so
+                            # deleted the apartment's ~1.68 m upper arm outright. 0.55 keeps the arm
+                            # (needs < 0.84) while still clearing the controller's bar.
+TargetObstacleClearance = 0.55  # same clearance, from object/obstacle footprints. Was the bare robot
+                            # footprint radius (0.32 m) — 0.19 m under the controller's requirement, so
+                            # room routinely proposed targets the controller refused to settle at.
 AngularDominanceRatio = 50.0 # σ²_θ / max(σ²_x, σ²_y) threshold to trigger rotate-in-place
-WExploration       = 0.5    # weight: distance bonus (explore farther)
+WTravelCost        = 0.5    # NATS per unit (distance / room_diagonal), SUBTRACTED from the score.
+                            # Travel distance is a COST in expected free energy, not a reward — the
+                            # controller already scores affordances as (gain - lambda*dist) and this
+                            # is the same quantity applied to the planner's own choice of cell.
+                            # Replaces WExploration, which had the opposite sign. That mattered: the
+                            # neglect field is FLAT across large regions (every never-visited cell
+                            # reports the same ~9 nats), so this term alone decides the arg-max there
+                            # — and far-is-better makes it the most DISTANT cell, whose own most
+                            # distant cell is the one you just left. Measured on the apartment
+                            # contour: bonus => mean leg 6.2 m, 13/40 legs over 60% of the diagonal,
+                            # 26 distinct cells; cost => 2.9 m, 0/40, 36 distinct cells.
 IorCellSize        = 0.5    # inhibition-of-return grid resolution (m)
-IorDecayTime       = 120.0  # seconds until visited cell is fully stale
-WIor               = 2.0    # weight: staleness bonus
-WPathInterest      = 0.7    # blend weight: 0=target staleness only, 1=path staleness only (multiplicative IoR)
-# ---- Second-level IoR: perpetual patrol (keeps afford_room alive after pose-info saturates) ----
-PatrolEnabled      = true   # once info is exhausted, patrol the least-recently-visited reachable cell
-PatrolGainFloor    = 0.2    # nats floored onto afford_room's advertised gain in patrol mode so the
-                            # controller keeps executing it. Keep BELOW object-affordance ΔH so real
-                            # objects still win. 0 ⇒ off (robot rests once the room is fully known).
-InfoExhaustedGain  = 0.02   # max FIM gain (nats) below which pose-info is "exhausted" → enter patrol
+IorDecayTime       = 120.0  # τ: knowledge-decay time constant. Sets BOTH the staleness suppressor
+                            # and the scale of the neglect drive log(1 + age/τ).
+WIor               = 2.0    # exponent of the route-staleness suppressor on the pose-info term
+WPathInterest      = 0.7    # blend weight: 0=target cell only, 1=path cells only (suppressor + neglect)
+WIorDrive          = 0.5    # NATS per unit neglect information log(1 + age/τ). This is the
+                            # non-saturating exploration drive: strictly monotone and unbounded in
+                            # neglect age, so a least-recently-visited cell always exists and the
+                            # robot keeps sweeping. Replaces the old PatrolEnabled / PatrolGainFloor
+                            # / InfoExhaustedGain switch, which is gone — the pose-info term is now
+                            # MARGINAL (value of moving over staying put) and extinguishes itself,
+                            # so the hand-off to inhibition-of-return happens continuously.
 ArrivalDistance    = 0.15   # target reached threshold (m)
 DwellTime          = 2.0    # seconds to pause after reaching target
+# ---- Execution-stall watchdog (liveness on the affordance handshake, not a model threshold) ----
+# The planner idles while the controller holds the execution claim, so a target the controller can
+# never reach would park the run. If the closest approach fails to improve by ExecStallProgress for
+# ExecStallTimeout seconds, the claim is released and the target is stamped visited. 0 ⇒ disabled.
+ExecStallTimeout   = 25.0   # seconds without approach progress before abandoning the target
+ExecStallProgress  = 0.10   # metres of new closest-approach that counts as progress
 
 # ---- Acceleration ramp (SpecificWorker) ---- MOVE THIS TO ROBOT
 MaxLinAccel        = 1.2    # m/s² max translational acceleration
