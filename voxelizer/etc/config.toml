@@ -216,6 +216,72 @@ azimuth_tune_deg      = 0.0   # tune in DEGREES: extra yaw on room_T_ricoh over 
 # cam_equirect_azimuth_sign (-1) / cam_equirect_azimuth_offset (0) intrinsics, applied by CameraAPI.
 # Both the 360 projection overlay and the detection→bearing publisher go through CameraAPI — no knobs here.
 
+# ── Monocular DEPTH on the 360 panorama (yolo26l-depth) ────────────────────────────────────────
+# Same 3-vertical-strip trick as the 360 seg, but with its OWN geometry, because depth is a
+# GEOMETRIC task and the seg strips are wrong for it:
+#   * band_half_elev_deg crops to ±60° about the equator. The head was trained on perspective
+#     photos; equirect distortion grows toward the poles, so the top/bottom thirds are the least
+#     trustworthy part of the panorama AND the least useful (ceiling / floor right under the robot).
+#   * overlap_px is 64, not the seg path's 200. The overlap is CONTEXT ONLY — nothing is merged
+#     across it. With 3 strips on a 1920-wide panorama that makes each strip 640+128 = 768 px wide,
+#     exactly the model input width, so there is zero horizontal resampling; the ±60° band is 640
+#     rows, so the letterbox scale is 1.0 and only the top/bottom get grey padding.
+#
+# ★DISPLAY-ONLY. The model is scale-and-shift invariant PER INPUT IMAGE, so the three strips do not
+# share a scale: measured 2026-08-02 on the same overlapping columns, adjacent strips disagreed by
+# 2.78x and 0.45x. Nothing is blended across a seam and the popup normalises each strip separately
+# and draws the seam lines, so what you see is the only thing the model asserts — relative depth
+# ordering WITHIN a strip. Making it metric needs an anchor: a per-strip least-squares fit of
+# (a,b) in log space against the helios points Ricoh.mask_depth already reprojects into the
+# panorama. See src/depth_processor.h.
+[RicohDepth]
+enabled             = true    # ON 2026-08-02 (user) — restart, then use the popup's "Depth" toggle
+model_path          = "models/yolo26/yolo26l-depth.onnx"
+input_size          = 768     # exported imgsz; changing it without re-exporting will letterbox wrongly
+use_gpu             = true
+use_trt             = true    # ON 2026-08-02: gnomonic runs n_strips inferences per frame (6, was 3), so the
+                              # per-call cost matters much more than it did. Matches seg/pose/semantic, which all
+                              # use TRT. First run after enabling is SLOW while the engine is built and cached.
+n_strips            = 6       # 6 x 60° of azimuth → 75° gnomonic views, close to a normal lens
+# ★GNOMONIC. Each strip is rendered as a virtual PINHOLE camera looking along its azimuth, the model
+# runs on that, and the depth is mapped back. Raw equirect crops were measured (2026-08-02, live lab
+# panorama) to give depth ANTI-CORRELATED with geometry: the wall at 3-5 m came out as the nearest
+# thing in the strip and the floor 1.4 m under the robot as the farthest, both band edges collapsing
+# to "far". Equirect smears content toward the poles and a depth head reads textureless expanses as
+# sky. Set false to A/B against that old behaviour.
+gnomonic            = false  # A/B 2026-08-03: measure the raw-equirect path's [depth-lidar] r against
+                             # gnomonic's +0.90. Restore to true if the reprojection wins.
+gnomonic_fov_deg    = 0.0     # 0 ⇒ 360/n_strips * 1.25 (25% context margin), capped at 140°.
+                              # NARROW IS THE WHOLE POINT: 6 strips ⇒ 75°, 3 strips ⇒ 140° (still extreme).
+zdepth_to_range     = true    # datasets encode z-depth; converting to ray range is additive in log space
+overlap_px          = 64      # equirect path only (gnomonic gets its margin from the FOV)
+band_half_elev_deg  = 60.0    # equirect path only; under gnomonic the covered band FALLS OUT of the FOV
+decimation          = 1       # run every Nth worker frame; raise if it eats the ricoh thread's budget
+# Per-view Pearson r of the model's log-depth against the helios LiDAR range at the SAME panorama
+# pixels, + the least-squares (a,b) of log_range ≈ a·log_model + b. THE measurement that says whether
+# the model is seeing this room at all: r near 0 ⇒ it is not, and no amount of scaling will help;
+# r high with a ≈ 1 ⇒ only the scale is missing and (a,b) is the anchor that supplies it.
+# → etc/ricoh_depth_lidar.csv + a "[depth-lidar] mean r=..." line every 40 cycles.
+lidar_diag          = true
+# Keep 1 sample in N when RECORDING (the correlation still uses every hit). ~20k LiDAR hits land in a
+# panorama and neighbouring returns on one surface are redundant, so stride 16 loses nothing the fit
+# can use and keeps the dataset ~40x smaller — 635 MB for 406 frames at stride 1.
+sample_stride       = 16
+# Save each ADMITTED frame's panorama as <frames_dir>/<stamp_ms>.jpg. The stamp is the panorama's own
+# capture stamp and is also the CSV row's stamp_ms, so the two join with no schema change. Needed only
+# by the OFFLINE enrichment pass (YOLO-sem segments ceiling/floor/wall, then the room envelope from
+# room_concept supplies synthetic depth where the LiDAR cannot reach — the whole upper half of the band
+# has zero returns, and walls would extend the fit past its current 0.39–10.16 m support).
+# ~250–400 kB per frame; a few hundred frames ≈ 150 MB. Only written while Collect is armed.
+save_frames         = true
+frames_dir          = "etc/depth_frames"
+frame_jpeg_quality  = 92
+# Fixed metres span of the CORRECTED overlay ramp. Only used once etc/ricoh_depth_map.csv exists AND
+# this frame's LiDAR anchor solved; until then the overlay stays per-strip relative with seam lines.
+metric_lo_m         = 0.4
+metric_hi_m         = 8.0
+overlay_alpha       = 0.65    # popup blend weight of the depth ramp over the panorama
+
 [Ice]
 Warn.Connections = "0"
 Trace.Network = "0"

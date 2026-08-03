@@ -21,6 +21,7 @@
 #include "yolo_processor.h"         // SegDetection
 #include "yolo_human.h"            // rc::human_pose::PoseDetection
 #include "yolo_semantic.h"        // rc::semantic::SemanticMap
+#include "depth_processor.h"      // rc::depth::DepthMap (ricoh 360 monocular depth)
 #include "graph_publisher.h"      // BearingDetection (ricoh 360 bearing channel)
 
 namespace rc
@@ -50,6 +51,10 @@ struct PerceptionResult
     std::optional<std::vector<BearingDetection>>              bearings;   // ricoh: room-frame bearing per mask
     std::optional<std::vector<SegDetection>>                  refined_masks;   // SAM2-sharpened masks (subset of `masks`)
     bool                                                      refined_fresh = false;
+    // Ricoh 360 monocular depth, per strip. ★NOT a continuous metric field — each strip carries its
+    // own arbitrary scale (see depth_processor.h). Display-only until something anchors it.
+    std::optional<rc::depth::DepthMap>                        depth;
+    bool                                                      depth_fresh = false;
 };
 
 // One inference capability. Owns its own ONNX session. run() is called every frame on the worker thread

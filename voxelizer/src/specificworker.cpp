@@ -39,6 +39,7 @@
 #include "semantic_mask_stage.h"
 #include "sam2_stage.h"
 #include "bearing_stage.h"
+#include "depth_stage.h"
 #include "ricoh_source.h"
 #include "zed_source.h"
 #include <dsr/gui/viewers/graph_viewer/graph_viewer.h>
@@ -50,6 +51,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <filesystem>
 #include <print>
 #include <sstream>
 #include <unordered_map>
@@ -338,6 +340,40 @@ void SpecificWorker::initialize()
         ricoh_stages.push_back(std::make_unique<rc::SegStage>(ricoh_yolo_cfg, cfg360));
         if (params.RICOH_PUBLISH_MASKS)
             ricoh_stages.push_back(std::make_unique<rc::BearingStage>(G));   // runs after seg (reads masks)
+        // Monocular depth on the same panorama, own strip geometry ([RicohDepth]). Independent of seg —
+        // it reads only in.rgbd.bgr — so stage order does not matter; last keeps the cheap stages first.
+        if (params.RICOH_DEPTH_ENABLED)
+        {
+            rc::depth::DepthProcessor::Config dcfg;
+            dcfg.model_path    = params.RICOH_DEPTH_MODEL_PATH;
+            dcfg.input_size    = params.RICOH_DEPTH_INPUT_SIZE;
+            dcfg.use_gpu       = params.RICOH_DEPTH_USE_GPU;
+            dcfg.use_trt       = params.RICOH_DEPTH_USE_TRT;
+            dcfg.verbose_debug = verbose_debug_;
+
+            rc::depth::Depth360Config dcfg360;
+            dcfg360.n_strips           = params.RICOH_DEPTH_N_STRIPS;
+            dcfg360.overlap_px         = params.RICOH_DEPTH_OVERLAP_PX;
+            dcfg360.band_half_elev_deg = params.RICOH_DEPTH_BAND_HALF_ELEV_DEG;
+            dcfg360.gnomonic           = params.RICOH_DEPTH_GNOMONIC;
+            dcfg360.gnomonic_fov_deg   = params.RICOH_DEPTH_GNOMONIC_FOV_DEG;
+            dcfg360.zdepth_to_range    = params.RICOH_DEPTH_ZDEPTH_TO_RANGE;
+
+            // A map fitted on a previous drive applies from the first frame — the dataset accumulates
+            // across runs, so the correction should too.
+            if (depth_fit_map_.load("etc/ricoh_depth_map.csv"))
+                std::println("[depth-map] loaded etc/ricoh_depth_map.csv — a={:.3f} r={:+.3f} "
+                             "resid ±{:.0f}% over {:.2f}..{:.2f} m ({} frames)",
+                             depth_fit_map_.a, depth_fit_map_.r,
+                             100.0 * (std::exp(depth_fit_map_.resid_rms) - 1.0),
+                             depth_fit_map_.range_lo, depth_fit_map_.range_hi, depth_fit_map_.n_frames);
+
+            auto depth_stage = std::make_unique<rc::DepthStage>(dcfg, dcfg360, params.RICOH_DEPTH_DECIMATION);
+            // Gated by the popup's "Depth" toggle: a disabled stage is skipped entirely, so the model
+            // does NO work while nobody is looking (same contract as the ZED semantic stage).
+            depth_stage->set_enabled(ricoh_depth_overlay_enabled_);
+            ricoh_stages.push_back(std::move(depth_stage));
+        }
 
         auto ricoh_src = std::make_shared<rc::RicohSource>(scene_processor.get(), G, params.RICOH_AZIMUTH_TUNE_DEG);
 
@@ -585,6 +621,65 @@ void SpecificWorker::on_render_tick()
                             ricoh_model_overlay_->draw(pano, ricoh_scene_.boxes, ricoh_scene_.room_T_ricoh,
                                                        ricoh_scene_.poly_x, ricoh_scene_.poly_y, ricoh_scene_.room_height);
                     }
+                    // Monocular-depth ramp UNDER the seg silhouettes: it is a dense full-band layer, so
+                    // drawing it last would bury the detections. Per-strip normalised with the seam
+                    // lines drawn — see depth_processor.h for why it must not be read across a seam.
+                    if (ricoh_depth_overlay_enabled_ and rres->depth and not rres->depth->empty())
+                        if (auto* dp = dynamic_cast<rc::DepthStage*>(ricoh_worker_->stage("depth")))
+                        {
+                            // With a fitted map + this frame's LiDAR anchor, rewrite the raw per-view
+                            // log-depth into METRIC log-range and draw it on one fixed scale. Without
+                            // them, fall through to the per-strip relative ramp — the only honest way
+                            // to render six mutually inconsistent scales.
+                            const bool corrected = depth_fit_map_.valid and depth_anchor_.any();
+                            rc::depth::DepthMap shown = *rres->depth;
+                            if (corrected)
+                            {
+                                shown.log_depth = rres->depth->log_depth.clone();   // never touch the worker's buffer
+                                const int sw = (shown.n_strips > 0) ? shown.log_depth.cols / shown.n_strips
+                                                                    : shown.log_depth.cols;
+                                // ★Offset INTERPOLATED across azimuth, not applied per-view as a step.
+                                // b is fitted per view but the ROOM is continuous, so a piecewise
+                                // constant correction puts a discontinuity at every seam whose size is
+                                // exactly |b_i − b_{i+1}| — measured ~0.10 log ≈ a 10% depth step, which
+                                // is what survives after the big per-view jumps are removed. Treating
+                                // each b as SAMPLED AT ITS VIEW CENTRE and lerping circularly between
+                                // neighbours makes the field continuous by construction while still
+                                // reproducing the fitted value at each centre. This is display
+                                // smoothing over a quantity that is genuinely per-image, so it belongs
+                                // here at compose time and NOT in anything that feeds a belief.
+                                const int nv = std::max(1, shown.n_strips);
+                                for (int y = 0; y < shown.log_depth.rows; ++y)
+                                {
+                                    auto* row = shown.log_depth.ptr<float>(y);
+                                    const auto* sid = shown.strip_id.ptr<unsigned char>(y);
+                                    const float t = std::clamp((y - 0.5f * shown.log_depth.rows)
+                                                               / (0.5f * shown.log_depth.rows), -1.f, 1.f);
+                                    for (int x = 0; x < shown.log_depth.cols; ++x)
+                                    {
+                                        if (not std::isfinite(row[x]) or sid[x] >= rc::depth::kMaxViews)
+                                            continue;
+                                        const float s = sw > 0 ? std::clamp((x - (sid[x] + 0.5f) * sw)
+                                                                            / (0.5f * sw), -1.f, 1.f) : 0.f;
+                                        // Position in "view units": f = 0 at view 0's centre, 1 at view 1's…
+                                        const float f  = sw > 0 ? (static_cast<float>(x) / sw - 0.5f) : 0.f;
+                                        const int   v0 = static_cast<int>(std::floor(f));
+                                        const float w  = f - static_cast<float>(v0);
+                                        const int   i0 = ((v0 % nv) + nv) % nv;          // wraps the seam
+                                        const int   i1 = (i0 + 1) % nv;
+                                        const float bb = (1.f - w) * depth_anchor_.b[i0] + w * depth_anchor_.b[i1];
+                                        row[x] = depth_fit_map_.apply_with(row[x], bb, s, t);
+                                    }
+                                }
+                            }
+                            pano = dp->compose(pano, shown, params.RICOH_DEPTH_OVERLAY_ALPHA, corrected,
+                                               params.RICOH_DEPTH_METRIC_LO_M, params.RICOH_DEPTH_METRIC_HI_M);
+                            // Hover readout — ONLY when corrected, because only then is the field in
+                            // metres. Uncorrected it is a per-view relative scale and printing "3.4 m"
+                            // off it would be inventing a measurement.
+                            ricoh_viewer_->set_depth_readout(shown.log_depth, corrected);
+                        }
+
                     if (rres->masks and not rres->masks->empty())
                     {
                         // pano is BGR; SegStage::compose is base-order-preserving and the popup viewer
@@ -802,6 +897,16 @@ void SpecificWorker::compute()
         // thread (own InnerEigenAPI, room<-ricoh at the panorama stamp — ricoh_yolo_worker.cpp::compute_bearings);
         // the LiDAR DEPTH-FILL runs HERE on the main thread, where the lidar cloud lives, augmenting those
         // bearings in place (has_depth=1 + support points + mask_depth_var). d.mask + bearing are a 1:1 snapshot.
+        // Monocular depth vs LiDAR, per gnomonic view. Independent of publish_masks — this is the
+        // measurement that says whether the depth model is seeing the room, and it must be available
+        // whether or not the 360 masks are being published.
+        if (params.RICOH_DEPTH_ENABLED and params.RICOH_DEPTH_LIDAR_DIAG and ricoh_worker_
+            and frame->ricoh_valid and not frame->lidar_points_room.empty())
+            if (auto rres = ricoh_worker_->latest_result(); rres and rres->depth and not rres->depth->empty())
+                log_ricoh_depth_lidar_correlation(*rres->depth, frame->lidar_points_room,
+                                                  frame->lidar_plane_id, frame->room_T_ricoh,
+                                                  rres->frame.rgbd.bgr, rres->frame.stamp);
+
         std::vector<BearingDetection> bearing_dets;
         if (params.RICOH_PUBLISH_MASKS and ricoh_worker_)
         {
@@ -1154,6 +1259,315 @@ std::optional<SpecificWorker::SceneFrame> SpecificWorker::process_scene_frame(FP
                       room_T_ricoh,
                       ricoh_valid,
                       frame_ts_ms};
+}
+
+void SpecificWorker::log_ricoh_depth_lidar_correlation(const rc::depth::DepthMap& map,
+                                                       const std::vector<Eigen::Vector3f>& lidar_room,
+                                                       const std::vector<std::uint8_t>& plane_id,
+                                                       const Mat::RTMat& room_T_ricoh,
+                                                       const cv::Mat& panorama_bgr,
+                                                       std::uint64_t frame_stamp_ms)
+{
+    if (map.empty() or lidar_room.empty())
+        return;
+    if (not ricoh_camera_api_)
+        if (const auto rn = G->get_node("ricoh"); rn.has_value())
+            ricoh_camera_api_ = G->get_camera_api(rn.value());
+    if (not ricoh_camera_api_)
+        return;
+
+    // HELIOS ONLY, for the same reason the mask depth-fill uses it: helios is co-located with the
+    // ricoh, so its returns share the optical centre and carry almost no occlusion parallax. bpearl
+    // sits low and looks down — its points would land in the panorama at pixels the ricoh sees from a
+    // materially different viewpoint, which is measurement error dressed up as model error.
+    std::vector<Eigen::Vector3f> cloud;
+    cloud.reserve(lidar_room.size());
+    for (std::size_t i = 0; i < lidar_room.size(); ++i)
+        if (i >= plane_id.size() or plane_id[i] == 0)
+            cloud.push_back(lidar_room[i]);
+    if (cloud.empty())
+        return;
+
+    const auto proj = rc::depth::reproject_cloud(cloud, *ricoh_camera_api_, room_T_ricoh.inverse());
+    if (proj.empty())
+        return;
+
+    // Per-view accumulators for Pearson r and the least-squares fit of log_range ≈ a·log_model + b.
+    // BOTH sides are ray range from the optical centre — ProjectedPoint::range is ‖p_cam‖ and
+    // zdepth_to_range makes the model emit range too — so they are directly comparable with no
+    // further geometry. With that flag OFF the model is still z-depth and `a` would absorb part of
+    // the mismatch, which is exactly why it defaults on.
+    // sbase = Σ base(log_model, s) — the map's full nonlinear response minus the offset. The anchor
+    // solves b = mean(log_range) − mean(base); with the piecewise-linear response `a*mean(lm)` is NO
+    // LONGER the mean of the base, so it must be accumulated sample by sample.
+    struct Acc { long n = 0; double sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0, sbase = 0; };
+    std::vector<Acc> acc(static_cast<std::size_t>(std::max(1, map.n_strips)));
+
+    // Dataset capture rides on the SAME pass — every pair the correlation consumes is exactly a
+    // training sample, so collecting costs one push_back and cannot drift out of sync with what the
+    // diagnostic reports.
+    rc::depth::DepthFrame cap;
+    // Collect at most ONCE per distinct panorama — see depth_collect_last_stamp_.
+    const bool collecting = ricoh_depth_collect_enabled_
+                        and (frame_stamp_ms == 0 or frame_stamp_ms != depth_collect_last_stamp_);
+    const int  strip_w    = (map.n_strips > 0) ? map.log_depth.cols / map.n_strips : map.log_depth.cols;
+    long       kept_stride_ = 0;
+
+    for (const auto& p : proj)
+    {
+        const int u = static_cast<int>(std::lround(p.u));
+        const int v = static_cast<int>(std::lround(p.v));
+        if (u < 0 or u >= map.log_depth.cols or v < 0 or v >= map.log_depth.rows)
+            continue;
+        const float m = map.log_depth.at<float>(v, u);
+        if (not std::isfinite(m) or p.range <= 1e-3f)
+            continue;                                    // outside any view's frustum, or a bad return
+        const unsigned char sid = map.strip_id.at<unsigned char>(v, u);
+        if (sid >= acc.size())
+            continue;
+        const double x = m, y = std::log(static_cast<double>(p.range));
+        const float s_in_view = strip_w > 0
+            ? std::clamp((u - (sid + 0.5f) * strip_w) / (0.5f * strip_w), -1.f, 1.f) : 0.f;
+        Acc& a = acc[sid];
+        ++a.n; a.sx += x; a.sy += y; a.sxx += x * x; a.syy += y * y; a.sxy += x * y;
+        if (depth_fit_map_.valid)
+            a.sbase += depth_fit_map_.base(m, s_in_view);
+
+        // STRIDE the recorded samples. A frame yields ~20k LiDAR hits and they are heavily redundant
+        // (neighbouring returns on one surface say the same thing), so keeping all of them cost 635 MB
+        // for 406 frames without adding information the fit can use. The correlation above still uses
+        // every hit — only what is WRITTEN is thinned.
+        if (collecting and (kept_stride_++ % std::max(1, params.RICOH_DEPTH_SAMPLE_STRIDE)) == 0)
+        {
+            rc::depth::DepthSample smp;
+            smp.log_model = m;
+            smp.log_range = static_cast<float>(y);
+            smp.view      = sid;
+            // Position WITHIN the view (s) and within the panorama height (t), both in [-1,1] — the
+            // coordinates the map's quadratic terms are expressed in, stored now so the offline fit
+            // never has to reconstruct the slicing geometry from a pixel index.
+            smp.s = strip_w > 0 ? std::clamp((u - (sid + 0.5f) * strip_w) / (0.5f * strip_w), -1.f, 1.f) : 0.f;
+            smp.t = std::clamp((v - 0.5f * map.log_depth.rows) / (0.5f * map.log_depth.rows), -1.f, 1.f);
+            cap.samples.push_back(smp);
+        }
+    }
+
+    if (collecting and not cap.samples.empty())
+    {
+        // ★The PANORAMA'S OWN capture stamp, not wall-clock-now. It is the join key between the CSV
+        // rows and the saved image, so it must identify the frame the samples came from — a collection
+        // timestamp would drift from it by however long the worker held the bundle.
+        cap.stamp_ms = frame_stamp_ms != 0
+            ? frame_stamp_ms
+            : static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::system_clock::now().time_since_epoch()).count());
+        const Eigen::Vector3d t = room_T_ricoh.translation();
+        const Eigen::Matrix3d R = room_T_ricoh.linear();
+        cap.rx = static_cast<float>(t.x());
+        cap.ry = static_cast<float>(t.y());
+        cap.rtheta = static_cast<float>(std::atan2(R(1, 0), R(0, 0)));
+        const std::uint64_t stamp = cap.stamp_ms;
+        if (depth_dataset_.add_frame(std::move(cap)))     // rejects a pose too close to the last kept
+        {
+            depth_collect_last_stamp_ = stamp;
+            ++depth_collect_session_;
+            depth_dataset_.append_csv("etc/ricoh_depth_dataset.csv");   // survives a crash mid-drive
+
+            // Save the panorama for the OFFLINE enrichment pass (YOLO-sem → ceiling/floor/wall
+            // segmentation → synthetic samples from the room envelope). Only for ADMITTED frames, so
+            // the image count matches the CSV's frame count exactly. imwrite reads the Mat and never
+            // writes it, so sharing the worker's buffer here is safe; the refcount keeps it alive.
+            if (params.RICOH_DEPTH_SAVE_FRAMES and not panorama_bgr.empty())
+            {
+                std::error_code ec;
+                std::filesystem::create_directories(params.RICOH_DEPTH_FRAMES_DIR, ec);
+                const auto path = std::format("{}/{}.jpg", params.RICOH_DEPTH_FRAMES_DIR, stamp);
+                const std::vector<int> jpeg{cv::IMWRITE_JPEG_QUALITY,
+                                            std::clamp(params.RICOH_DEPTH_FRAME_QUALITY, 50, 100)};
+                if (not cv::imwrite(path, panorama_bgr, jpeg))
+                    std::println(stderr, "[depth-collect] could not write {}", path);
+            }
+
+            if (depth_collect_session_ % 10 == 0)
+                std::println("[depth-collect] {} frames this session, {} samples total{}",
+                             depth_collect_session_, depth_dataset_.sample_count(),
+                             params.RICOH_DEPTH_SAVE_FRAMES
+                                 ? std::format(" (+ frames in {}/)", params.RICOH_DEPTH_FRAMES_DIR) : "");
+        }
+    }
+
+    // ── Per-frame scale anchor ───────────────────────────────────────────────────────────────────
+    // With `a` fixed at its DATASET value, the offset that best explains this frame's LiDAR is just
+    // b = mean(log_range) - a*mean(log_model) over that view's hits — one division, no solve. This is
+    // the quantity that must be re-estimated every frame (the model re-draws its scale per image);
+    // the dataset can never supply it. Views without enough hits keep the map's fallback b, so a view
+    // the LiDAR cannot reach degrades to the pooled estimate instead of to nonsense.
+    if (depth_fit_map_.valid)
+    {
+        for (std::size_t s = 0; s < acc.size() and s < rc::depth::kMaxViews; ++s)
+        {
+            const Acc& A = acc[s];
+            depth_anchor_.n[s]  = A.n;
+            depth_anchor_.ok[s] = (A.n >= 64);
+            depth_anchor_.b[s]  = depth_anchor_.ok[s]
+                ? static_cast<float>((A.sy - A.sbase) / A.n)     // mean(log_range) − mean(base)
+                : depth_fit_map_.b[s];
+        }
+    }
+
+    if (not ricoh_depth_csv_open_attempted_)
+    {
+        ricoh_depth_csv_open_attempted_ = true;
+        ricoh_depth_csv_.open("etc/ricoh_depth_lidar.csv", std::ios::trunc);
+        if (ricoh_depth_csv_.is_open())
+            ricoh_depth_csv_ << "cycle,view,n,pearson_r,a,b,resid_rms_log,median_model_m,median_lidar_m\n";
+    }
+
+    static long cycle = 0;
+    ++cycle;
+    double r_sum = 0.0;
+    long   r_cnt = 0, n_tot = 0;
+    std::string line;
+    for (std::size_t s = 0; s < acc.size(); ++s)
+    {
+        const Acc& a = acc[s];
+        n_tot += a.n;
+        // 24 is not a threshold on the physics — it is where a correlation coefficient stops carrying
+        // information. Views below it are simply not summarised; `n` is in the CSV either way.
+        if (a.n < 24)
+            continue;
+        const double n   = static_cast<double>(a.n);
+        const double cov = a.sxy / n - (a.sx / n) * (a.sy / n);
+        const double vx  = a.sxx / n - (a.sx / n) * (a.sx / n);
+        const double vy  = a.syy / n - (a.sy / n) * (a.sy / n);
+        if (vx <= 1e-12 or vy <= 1e-12)
+            continue;
+        const double r     = cov / std::sqrt(vx * vy);
+        const double A     = cov / vx;                                  // 1.0 ⇒ the model's scale is already right
+        const double B     = a.sy / n - A * (a.sx / n);                 // exp(B) is the metric scale factor
+        const double resid = std::sqrt(std::max(0.0, vy - A * cov));    // RMS of log_range about the fit
+        r_sum += r; ++r_cnt;
+        if (ricoh_depth_csv_.is_open())
+            ricoh_depth_csv_ << cycle << ',' << s << ',' << a.n << ',' << r << ',' << A << ',' << B
+                             << ',' << resid << ',' << std::exp(a.sx / n) << ',' << std::exp(a.sy / n) << '\n';
+        line += std::format(" v{}:r={:+.2f}(n={},a={:.2f})", s, r, a.n, A);
+    }
+    if (ricoh_depth_csv_.is_open())
+        ricoh_depth_csv_.flush();
+
+    // ── How good is it, in units a person can act on? ────────────────────────────────────────────
+    // `a` and `r` describe the FIT; they say nothing about how wrong a metre reading is. These are the
+    // standard monocular-depth measures, computed on the corrected field against the LiDAR:
+    //   AbsRel = median |d − d*| / d*      "typical error, as a fraction of true range"
+    //   med_err = median |d − d*|          the same thing in metres
+    //   δ1     = fraction within 1.25x     "how often is it in the right ballpark"
+    // ★IN-SAMPLE: b was solved from these very points, so this is the optimistic bound — it measures
+    // the model + map, NOT generalisation to a pose the anchor did not see. Reported as such.
+    if (depth_fit_map_.valid and depth_anchor_.any())
+    {
+        std::vector<float> rel, abs_m;
+        rel.reserve(proj.size());
+        abs_m.reserve(proj.size());
+        int within125 = 0, within156 = 0;
+        for (const auto& p : proj)
+        {
+            const int u = static_cast<int>(std::lround(p.u));
+            const int v = static_cast<int>(std::lround(p.v));
+            if (u < 0 or u >= map.log_depth.cols or v < 0 or v >= map.log_depth.rows) continue;
+            const float m = map.log_depth.at<float>(v, u);
+            if (not std::isfinite(m) or p.range <= 1e-3f) continue;
+            const unsigned char sid = map.strip_id.at<unsigned char>(v, u);
+            if (sid >= rc::depth::kMaxViews or not depth_anchor_.ok[sid]) continue;
+            const float s = strip_w > 0 ? std::clamp((u - (sid + 0.5f) * strip_w) / (0.5f * strip_w), -1.f, 1.f) : 0.f;
+            const float t = std::clamp((v - 0.5f * map.log_depth.rows) / (0.5f * map.log_depth.rows), -1.f, 1.f);
+            const float d = std::exp(depth_fit_map_.apply_with(m, depth_anchor_.b[sid], s, t));
+            const float e = std::abs(d - p.range);
+            rel.push_back(e / p.range);
+            abs_m.push_back(e);
+            const float ratio = std::max(d / p.range, p.range / d);
+            if (ratio < 1.25f) ++within125;
+            if (ratio < 1.5625f) ++within156;
+        }
+        if (rel.size() > 32)
+        {
+            const auto med = [](std::vector<float>& v)
+            { std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end()); return v[v.size() / 2]; };
+            const double n = static_cast<double>(rel.size());
+            static int qc = 0;
+            if ((qc++ % 40) == 0)
+                std::println("[depth-quality] typical error {:.0f}% ({:.2f} m) | within 1.25x: {:.0f}% | "
+                             "within 1.56x: {:.0f}% | n={} (IN-SAMPLE — the anchor was fitted on these points)",
+                             100.0 * med(rel), med(abs_m), 100.0 * within125 / n, 100.0 * within156 / n,
+                             rel.size());
+        }
+    }
+
+    static int lc = 0;
+    if ((lc++ % 40) == 0)
+    {
+        if (r_cnt > 0)
+            std::println("[depth-lidar] mean r={:+.3f} over {} views ({} lidar hits in-frustum){}",
+                         r_sum / static_cast<double>(r_cnt), r_cnt, n_tot, line);
+        else
+            std::println("[depth-lidar] no view had enough in-frustum lidar hits ({} total) — the "
+                         "gnomonic band is only ±37°, so a helios sweep at robot height barely enters it",
+                         n_tot);
+    }
+}
+
+std::string SpecificWorker::rebuild_depth_fit_map()
+{
+    // Re-read the WHOLE accumulated set, not just this session — the point of appending across runs
+    // is that every drive improves the same map.
+    const std::string path = "etc/ricoh_depth_dataset.csv";
+    rc::depth::DepthDataset all;
+    if (not all.load_csv(path))
+    {
+        // ALWAYS name the resolved path: every data path in this component is relative to the CWD, so
+        // an instance launched from the wrong directory looks for etc/etc/... and finds nothing. That
+        // is exactly how two instances produced mutually contradictory maps.
+        const auto abs = std::filesystem::absolute(path).string();
+        std::println("[depth-map] cannot open {} — check the working directory", abs);
+        return std::format("cannot open {}", abs);
+    }
+    if (all.frame_count() == 0)
+    {
+        std::println("[depth-map] {} has no frames — collect some first", path);
+        return "dataset empty";
+    }
+    const std::size_t before = all.frame_count();
+    const std::size_t removed = all.dedup();
+    const int n_views = std::max(1, params.RICOH_DEPTH_N_STRIPS);
+    std::println("[depth-map] loaded {} frames / {} samples from {}; {} duplicate poses dropped",
+                 before, all.sample_count(), path, removed);
+    const auto m = all.fit(n_views);
+    if (not m.valid)
+    {
+        std::println("[depth-map] fit FAILED — {} frames / {} samples after dedup is not enough for "
+                     "{} parameters", all.frame_count(), all.sample_count(), 1 + n_views + 2);
+        return std::format("fit failed ({} frames)", all.frame_count());
+    }
+
+    depth_fit_map_ = m;
+    m.save("etc/ricoh_depth_map.csv");
+    // ★Report BOTH residuals. `resid_rms` is the pooled fit (b constant per view) and is the
+    // PESSIMISTIC number — it charges the map for per-frame scale drift that the runtime's LiDAR
+    // anchor cancels. `resid_anchored` is what the system actually delivers. Showing only the first
+    // made the map look like it had not improved when the fix had already landed.
+    std::println("[depth-map] {} frames ({} duplicate poses dropped), {} samples\n"
+                 "            a={:.3f}  cs={:+.3f}  ct={:+.3f}  r={:+.3f}\n"
+                 "            resid pooled  {:.3f} (±{:.0f}%)   <- b fixed per view; not how it runs\n"
+                 "            resid ANCHORED {:.3f} (±{:.0f}%)  <- b re-solved per frame; THIS is live\n"
+                 "            supported range {:.2f}..{:.2f} m — OUTSIDE THAT THE MAP EXTRAPOLATES",
+                 before - removed, removed, m.n_samples, m.a, m.cs, m.ct, m.r,
+                 m.resid_rms,      100.0 * (std::exp(m.resid_rms) - 1.0),
+                 m.resid_anchored, 100.0 * (std::exp(m.resid_anchored) - 1.0),
+                 m.range_lo, m.range_hi);
+    std::string bs;
+    for (int v = 0; v < m.n_views; ++v)
+        bs += std::format(" b{}={:+.3f}", v, m.b[static_cast<std::size_t>(v)]);
+    std::println("[depth-map]           {}", bs);
+    return {};
 }
 
 void SpecificWorker::emergency()

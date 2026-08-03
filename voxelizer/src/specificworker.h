@@ -29,11 +29,14 @@
 
 #include <Eigen/Core>
 
+#include <fstream>
 #include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
+#include "depth_processor.h"   // rc::depth::DepthMap (ricoh 360 monocular depth diagnostic)
+#include "depth_dataset.h"     // rc::depth::DepthDataset / DepthFitMap (LiDAR-anchored correction)
 #include "rgbd_data.h"
 #include "voxelizer_params.h"
 #include "perception_rate_regulator.h"
@@ -200,6 +203,52 @@ class SpecificWorker : public GenericWorker
         // Ricoh-360 counterpart of the ZED Models overlay (equirectangular projection, wireframe).
         bool ricoh_model_overlay_enabled_ = false;   // Ricoh-window "Models" toggle (starts OFF)
         bool ricoh_lidar_overlay_enabled_ = false;   // Ricoh-window "Lidar" toggle: reprojected sparse depth (starts OFF)
+        // Ricoh-window "Depth" toggle: monocular depth ramp (yolo26l-depth, [RicohDepth]). Starts OFF and
+        // also GATES THE STAGE — the model does no work while the overlay is off. Relative per strip, not
+        // metric: see src/depth_processor.h before reading anything geometric off it.
+        bool ricoh_depth_overlay_enabled_ = false;
+        // ★THE measurement that decides whether yolo26l-depth is seeing this room at all. Per gnomonic
+        // view, correlate the model's log-depth against the helios LiDAR range at the SAME panorama
+        // pixels (both are ray range from the ricoh optical centre once zdepth_to_range is on, so they
+        // are directly comparable) and fit log_range ≈ a·log_model + b. r says whether the structure is
+        // real; (a,b) IS the metric anchor that would make the views consistent. Writes
+        // etc/ricoh_depth_lidar.csv. Main thread — the lidar cloud lives here.
+        // `panorama_bgr` + `frame_stamp_ms` are used ONLY when a dataset frame is admitted: the image
+        // is written as <frames_dir>/<frame_stamp_ms>.jpg so the offline enrichment pass can segment it,
+        // and the same stamp goes in the CSV row, which is what joins the two without a schema change.
+        void log_ricoh_depth_lidar_correlation(const rc::depth::DepthMap& map,
+                                               const std::vector<Eigen::Vector3f>& lidar_room,
+                                               const std::vector<std::uint8_t>& plane_id,
+                                               const Mat::RTMat& room_T_ricoh,
+                                               const cv::Mat& panorama_bgr,
+                                               std::uint64_t frame_stamp_ms);
+        std::ofstream ricoh_depth_csv_;
+        bool          ricoh_depth_csv_open_attempted_ = false;
+
+        // ── Depth-correction dataset (Ricoh popup: "Collect" / "Rebuild map") ───────────────────
+        // Collection is a DELIBERATE act, not background logging: the fit is only as good as its
+        // pose coverage, and a robot left standing would bury the set under copies of one viewpoint.
+        // add_frame() rejects a pose too close to the last kept one for the same reason.
+        bool                  ricoh_depth_collect_enabled_ = false;
+        rc::depth::DepthDataset depth_dataset_;
+        rc::depth::DepthFitMap  depth_fit_map_;      // applied when valid; loaded at startup if present
+        std::size_t           depth_collect_session_ = 0;   // frames kept since the button went ON
+        // ★Last panorama stamp actually admitted. latest_result() re-serves the SAME bundle while the
+        // worker is busy, so without this a robot that crosses the pose-novelty distance between two
+        // compute() ticks would admit ONE panorama as TWO frames — identical samples attributed to two
+        // different poses, and the second .jpg write would clobber the first.
+        std::uint64_t         depth_collect_last_stamp_ = 0;
+        // Load the set, drop duplicate poses, refit, save both, and hot-apply. Main thread.
+        // Returns an EMPTY string on success, else why it failed. ★It must report failure explicitly:
+        // on an early return depth_fit_map_ still holds whatever was loaded at startup, so a button
+        // that just prints depth_fit_map_ shows the OLD map's numbers and a failed rebuild is
+        // indistinguishable from a successful one. That cost real debugging time.
+        [[nodiscard]] std::string rebuild_depth_fit_map();
+        // Per-frame per-view offsets, re-solved by the correlation pass each compute() tick. The Ricoh
+        // popup redraws on the RENDER tick, so it consumes the anchor from the previous compute() —
+        // one tick stale on a quantity that moves with the scene, which is immaterial and much cheaper
+        // than duplicating the LiDAR reprojection on the render path.
+        rc::depth::DepthAnchor depth_anchor_;
         std::unique_ptr<rc::RicohProjectionOverlay> ricoh_model_overlay_;
         // The ricoh popup renders in on_render_tick (not compute), so cache the last scene the overlay
         // needs. Both run on the Qt main thread → no lock. Updated at the end of each compute() frame.

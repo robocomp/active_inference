@@ -12,6 +12,10 @@
 #include "semantic_stage.h"
 #include "sam2_stage.h"
 
+#include <QCoreApplication>
+#include <cmath>
+#include <print>
+
 #include <QPushButton>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -114,8 +118,107 @@ void SpecificWorker::setup_custom_viewers()
             lidar_btn->setText(checked ? "Lidar: ON" : "Lidar: OFF");
         });
 
+        // Monocular-depth ramp (yolo26l-depth, [RicohDepth]). The toggle also ENABLES THE STAGE, so the
+        // model does no work while the overlay is off — same contract as the ZED semantic toggle.
+        // ★Gated on the CONFIG FLAG, not on ricoh_worker_->stage("depth"): setup_custom_viewers() runs
+        // at specificworker.cpp:267, a hundred lines BEFORE the ricoh worker is constructed, so probing
+        // the worker here would always see nullptr and the button would silently never exist. The
+        // lambda resolves the stage lazily instead — by the time anyone can click, the worker is up.
+        QPushButton* depth_btn = nullptr;
+        if (params.RICOH_DEPTH_ENABLED)
+        {
+            depth_btn = new QPushButton(ricoh_depth_overlay_enabled_ ? "Depth: ON" : "Depth: OFF", ricoh_panel);
+            depth_btn->setCheckable(true);
+            depth_btn->setChecked(ricoh_depth_overlay_enabled_);
+            depth_btn->setCursor(Qt::PointingHandCursor);
+            depth_btn->setToolTip("Monocular depth per 120° strip — RELATIVE within a strip, not comparable "
+                                  "across the white seam lines (each strip has its own scale).");
+            depth_btn->setStyleSheet(QString(
+                "QPushButton { border: 2px solid %1; border-radius: 4px; padding: 3px 8px; }"
+                "QPushButton:checked { background-color: %1; color: #101010; }").arg("#7ED0C0"));
+            connect(depth_btn, &QPushButton::toggled, this, [this, depth_btn](bool checked)
+            {
+                ricoh_depth_overlay_enabled_ = checked;
+                if (ricoh_worker_)
+                    if (auto* s = ricoh_worker_->stage("depth"))
+                        s->set_enabled(checked);   // atomic; read on the worker thread
+                depth_btn->setText(checked ? "Depth: ON" : "Depth: OFF");
+            });
+        }
+
+        // Dataset collection + map rebuild. Both live next to the Depth toggle because they only mean
+        // anything while depth is running: collection needs the model's output, and the map corrects it.
+        QPushButton* collect_btn = nullptr;
+        QPushButton* rebuild_btn = nullptr;
+        if (params.RICOH_DEPTH_ENABLED)
+        {
+            collect_btn = new QPushButton("Collect: OFF", ricoh_panel);
+            collect_btn->setCheckable(true);
+            collect_btn->setCursor(Qt::PointingHandCursor);
+            collect_btn->setToolTip("Append LiDAR-anchored depth samples to etc/ricoh_depth_dataset.csv.\n"
+                                    "Frames are kept only when the robot has MOVED (>10 cm or >5°), so drive "
+                                    "it around — standing still adds nothing.");
+            collect_btn->setStyleSheet(QString(
+                "QPushButton { border: 2px solid %1; border-radius: 4px; padding: 3px 8px; }"
+                "QPushButton:checked { background-color: %1; color: #101010; }").arg("#E8B84B"));
+            connect(collect_btn, &QPushButton::toggled, this, [this, collect_btn](bool checked)
+            {
+                ricoh_depth_collect_enabled_ = checked;
+                if (checked)
+                    depth_collect_session_ = 0;
+                else
+                    std::println("[depth-collect] stopped — {} frames added this session", depth_collect_session_);
+                collect_btn->setText(checked ? "Collect: REC" : "Collect: OFF");
+            });
+
+            rebuild_btn = new QPushButton("Rebuild map", ricoh_panel);
+            rebuild_btn->setCursor(Qt::PointingHandCursor);
+            rebuild_btn->setToolTip("Reload the whole dataset, drop duplicate poses, refit the correction "
+                                    "map, save it to etc/ricoh_depth_map.csv and apply it live.");
+            rebuild_btn->setStyleSheet(
+                "QPushButton { border: 2px solid #B08CD9; border-radius: 4px; padding: 3px 8px; }"
+                "QPushButton:pressed { background-color: #B08CD9; color: #101010; }");
+            connect(rebuild_btn, &QPushButton::clicked, this, [this, rebuild_btn]
+            {
+                // Refitting reads the entire CSV and can take a moment on a big set; say so rather
+                // than letting the UI look wedged.
+                rebuild_btn->setEnabled(false);
+                rebuild_btn->setText("Fitting…");
+                QCoreApplication::processEvents();
+                const std::string err = rebuild_depth_fit_map();
+                // ★On failure show the ERROR, never depth_fit_map_ — that still holds the map loaded
+                // at startup, so printing it would report a stale fit as if it were the new one.
+                if (not err.empty())
+                {
+                    rebuild_btn->setText("FAILED: " + QString::fromStdString(err));
+                    rebuild_btn->setStyleSheet(
+                        "QPushButton { border: 2px solid #E05252; border-radius: 4px; padding: 3px 8px; }");
+                }
+                else
+                {
+                    // ★Show the TYPICAL ERROR, not `a`. `a` is a shape parameter of the fit and says
+                    // nothing about how wrong a metre reading is; median |d−d*|/d* does, and δ1 says
+                    // how often it is in the right ballpark. The log line carries the tail.
+                    rebuild_btn->setText(QString("Map: err %1% (%2 m) · δ1 %3%")
+                                             .arg(100.0 * depth_fit_map_.med_rel,   0, 'f', 0)
+                                             .arg(depth_fit_map_.med_abs_m,          0, 'f', 2)
+                                             .arg(100.0 * depth_fit_map_.delta125,  0, 'f', 0));
+                    rebuild_btn->setStyleSheet(
+                        "QPushButton { border: 2px solid #B08CD9; border-radius: 4px; padding: 3px 8px; }"
+                        "QPushButton:pressed { background-color: #B08CD9; color: #101010; }");
+                }
+                rebuild_btn->setEnabled(true);
+            });
+        }
+
         controls->addWidget(models_btn);
         controls->addWidget(lidar_btn);
+        if (depth_btn != nullptr)
+            controls->addWidget(depth_btn);
+        if (collect_btn != nullptr)
+            controls->addWidget(collect_btn);
+        if (rebuild_btn != nullptr)
+            controls->addWidget(rebuild_btn);
         controls->addStretch(1);
 
         ricoh_layout->addLayout(controls);

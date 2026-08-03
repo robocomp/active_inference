@@ -183,6 +183,45 @@ struct VoxelizerParams
     // the ricoh's mounting yaw + the panorama's 0-column convention — PROVISIONAL, verify live vs the
     // descriptor projection model before any consumer relies on the bearing (Part C is not built yet).
     bool        RICOH_PUBLISH_MASKS        = true;    // Ricoh.publish_masks
+    // ── [RicohDepth] — monocular depth (yolo26l-depth) on the 360 panorama, same strip trick ────────
+    // Its OWN slicing, deliberately not shared with the seg strips above: depth needs an ELEVATION BAND
+    // (a perspective-trained depth head degrades toward the equirect poles) and a much smaller overlap
+    // (the overlap is context only — nothing is merged across it, because the model's scale is
+    // per-strip arbitrary). The defaults make a strip exactly 768 px wide = the model input, so there
+    // is NO horizontal resampling at all. DISPLAY-ONLY — read depth_processor.h before changing that.
+    bool        RICOH_DEPTH_ENABLED        = false;   // RicohDepth.enabled
+    std::string RICOH_DEPTH_MODEL_PATH     = "models/yolo26/yolo26l-depth.onnx";  // RicohDepth.model_path
+    int         RICOH_DEPTH_INPUT_SIZE     = 768;     // RicohDepth.input_size — must match the exported imgsz
+    bool        RICOH_DEPTH_USE_GPU        = true;    // RicohDepth.use_gpu
+    bool        RICOH_DEPTH_USE_TRT        = false;   // RicohDepth.use_trt
+    int         RICOH_DEPTH_N_STRIPS       = 6;       // RicohDepth.n_strips — 6 ⇒ 75° views (gnomonic wants narrow)
+    int         RICOH_DEPTH_OVERLAP_PX     = 64;      // RicohDepth.overlap_px — equirect path only; context, never blended
+    float       RICOH_DEPTH_BAND_HALF_ELEV_DEG = 60.f;// RicohDepth.band_half_elev_deg — equirect path only
+    // Render each strip as a virtual PINHOLE view before inference (and map the depth back after).
+    // Raw equirect crops measured ANTI-CORRELATED with geometry — see depth_processor.h.
+    bool        RICOH_DEPTH_GNOMONIC       = true;    // RicohDepth.gnomonic
+    float       RICOH_DEPTH_GNOMONIC_FOV_DEG = 0.f;   // RicohDepth.gnomonic_fov_deg — 0 ⇒ 360/n_strips*1.25, cap 140
+    bool        RICOH_DEPTH_ZDEPTH_TO_RANGE = true;   // RicohDepth.zdepth_to_range — additive log correction
+    // Per-view Pearson r of model log-depth vs helios LiDAR range at the same panorama pixels, plus the
+    // least-squares (a,b) that would make the views metric. etc/ricoh_depth_lidar.csv. Cheap: one pass
+    // over the already-reprojected cloud.
+    bool        RICOH_DEPTH_LIDAR_DIAG     = true;    // RicohDepth.lidar_diag
+    // Keep every Nth LiDAR-anchored sample when recording. Neighbouring returns on one surface are
+    // redundant, so 1-in-16 loses no information the fit can use and keeps the file ~40x smaller
+    // (635 MB for 406 frames at stride 1). The CORRELATION still uses every hit.
+    int         RICOH_DEPTH_SAMPLE_STRIDE  = 16;      // RicohDepth.sample_stride
+    // Save the panorama alongside each ADMITTED dataset frame, keyed by the frame's own capture stamp
+    // (`<stamp_ms>.jpg`, the same stamp the CSV row carries — no schema change needed to join them).
+    // Needed ONLY by the offline enrichment pass: YOLO-sem needs pixels to segment ceiling/floor/wall,
+    // and the CSV holds numbers. ~250-400 kB per frame, so a few hundred frames is ~150 MB.
+    bool        RICOH_DEPTH_SAVE_FRAMES    = true;    // RicohDepth.save_frames
+    std::string RICOH_DEPTH_FRAMES_DIR     = "etc/depth_frames";  // RicohDepth.frames_dir
+    int         RICOH_DEPTH_FRAME_QUALITY  = 92;      // RicohDepth.frame_jpeg_quality
+    // Fixed metres span of the corrected (metric) overlay ramp — used only once a map + anchor exist.
+    float       RICOH_DEPTH_METRIC_LO_M    = 0.4f;    // RicohDepth.metric_lo_m
+    float       RICOH_DEPTH_METRIC_HI_M    = 8.0f;    // RicohDepth.metric_hi_m
+    int         RICOH_DEPTH_DECIMATION     = 1;       // RicohDepth.decimation — run every Nth worker frame
+    float       RICOH_DEPTH_OVERLAY_ALPHA  = 0.65f;   // RicohDepth.overlay_alpha — popup blend weight
     // Ricoh.mask_depth — reproject the lidar into the panorama and publish the 360 masks as FULL 3D
     // masks (has_depth=1, room+zed support points, mask_depth_var) instead of bearing-only. Default OFF:
     // flip ON only once the concept agents read mask_depth_var into R (else sparse ricoh masks are

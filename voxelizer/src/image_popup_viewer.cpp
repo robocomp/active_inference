@@ -2,7 +2,11 @@
 
 #include <opencv2/imgproc.hpp>
 #include <QImage>
+#include <QMouseEvent>
 #include <QResizeEvent>
+#include <QToolTip>
+#include <algorithm>
+#include <cmath>
 
 namespace rc
 {
@@ -56,6 +60,58 @@ void ImagePopupViewer::resizeEvent(QResizeEvent* event)
     QLabel::resizeEvent(event);
     if (!last_pixmap_.isNull())
         setPixmap(last_pixmap_.scaled(size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+}
+
+void ImagePopupViewer::set_depth_readout(const cv::Mat& metric_log_range, bool active)
+{
+    depth_active_ = active and not metric_log_range.empty();
+    if (depth_active_)
+    {
+        depth_log_range_ = metric_log_range.clone();
+        setMouseTracking(true);    // fire mouseMoveEvent with no button pressed
+    }
+    else
+    {
+        depth_log_range_.release();
+        setMouseTracking(false);
+        QToolTip::hideText();
+    }
+}
+
+void ImagePopupViewer::mouseMoveEvent(QMouseEvent* event)
+{
+    QLabel::mouseMoveEvent(event);
+    if (not depth_active_ or depth_log_range_.empty() or last_pixmap_.isNull())
+    {
+        QToolTip::hideText();
+        return;
+    }
+
+    // The pixmap is shown scaled-to-fit (KeepAspectRatio) and centred, so undo that letterbox
+    // transform to recover the panorama pixel under the cursor. Same maths as the ZED window's
+    // semantic hover readout (yolo_viewer.cpp) — keep the two in step if either changes.
+    const QSize shown = last_pixmap_.size().scaled(size(), Qt::KeepAspectRatio);
+    const int off_x = (width()  - shown.width())  / 2;
+    const int off_y = (height() - shown.height()) / 2;
+    const QPoint p = event->position().toPoint();
+    const double rx = static_cast<double>(p.x() - off_x) / shown.width();
+    const double ry = static_cast<double>(p.y() - off_y) / shown.height();
+    if (rx < 0.0 or rx >= 1.0 or ry < 0.0 or ry >= 1.0)   // cursor in the letterbox margin
+    {
+        QToolTip::hideText();
+        return;
+    }
+
+    const int ix = std::clamp(static_cast<int>(rx * depth_log_range_.cols), 0, depth_log_range_.cols - 1);
+    const int iy = std::clamp(static_cast<int>(ry * depth_log_range_.rows), 0, depth_log_range_.rows - 1);
+    const float lr = depth_log_range_.at<float>(iy, ix);
+
+    // NaN is not "0 m", it is NO ESTIMATE — outside the elevation band the model was never asked.
+    // Saying so beats printing a number that looks like a measurement.
+    QToolTip::showText(event->globalPosition().toPoint(),
+                       std::isfinite(lr) ? QString("%1 m").arg(std::exp(lr), 0, 'f', 2)
+                                         : QStringLiteral("no depth here"),
+                       this);
 }
 
 } // namespace rc

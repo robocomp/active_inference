@@ -53,6 +53,28 @@ VoxelizerParams load_voxelizer_params(const ConfigLoader& configLoader)
     rc::ConfigLoaderUtils::load_optional(configLoader, "Ricoh.mask_depth_helios_only", params.RICOH_MASK_DEPTH_HELIOS_ONLY);
     rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Ricoh.mask_fg_band_m", params.RICOH_MASK_FG_BAND_M);
     rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "Ricoh.azimuth_tune_deg", params.RICOH_AZIMUTH_TUNE_DEG);
+
+    // [RicohDepth] — monocular depth on the panorama (default OFF; display-only, see depth_processor.h).
+    rc::ConfigLoaderUtils::load_optional(configLoader, "RicohDepth.enabled", params.RICOH_DEPTH_ENABLED);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "RicohDepth.model_path", params.RICOH_DEPTH_MODEL_PATH);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "RicohDepth.input_size", params.RICOH_DEPTH_INPUT_SIZE);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "RicohDepth.use_gpu", params.RICOH_DEPTH_USE_GPU);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "RicohDepth.use_trt", params.RICOH_DEPTH_USE_TRT);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "RicohDepth.n_strips", params.RICOH_DEPTH_N_STRIPS);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "RicohDepth.overlap_px", params.RICOH_DEPTH_OVERLAP_PX);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RicohDepth.band_half_elev_deg", params.RICOH_DEPTH_BAND_HALF_ELEV_DEG);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "RicohDepth.gnomonic", params.RICOH_DEPTH_GNOMONIC);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RicohDepth.gnomonic_fov_deg", params.RICOH_DEPTH_GNOMONIC_FOV_DEG);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "RicohDepth.zdepth_to_range", params.RICOH_DEPTH_ZDEPTH_TO_RANGE);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "RicohDepth.lidar_diag", params.RICOH_DEPTH_LIDAR_DIAG);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "RicohDepth.sample_stride", params.RICOH_DEPTH_SAMPLE_STRIDE);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "RicohDepth.save_frames", params.RICOH_DEPTH_SAVE_FRAMES);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "RicohDepth.frames_dir", params.RICOH_DEPTH_FRAMES_DIR);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "RicohDepth.frame_jpeg_quality", params.RICOH_DEPTH_FRAME_QUALITY);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RicohDepth.metric_lo_m", params.RICOH_DEPTH_METRIC_LO_M);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RicohDepth.metric_hi_m", params.RICOH_DEPTH_METRIC_HI_M);
+    rc::ConfigLoaderUtils::load_optional(configLoader, "RicohDepth.decimation", params.RICOH_DEPTH_DECIMATION);
+    rc::ConfigLoaderUtils::load_optional<float, double>(configLoader, "RicohDepth.overlay_alpha", params.RICOH_DEPTH_OVERLAY_ALPHA);
     // Ricoh azimuth calibration is no longer a config knob — it lives in the graph (ricoh node's
     // cam_equirect_azimuth_sign/offset), applied by CameraAPI. See voxelizer_params.h.
 

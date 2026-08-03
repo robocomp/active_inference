@@ -25,13 +25,22 @@ public:
     // display-rate FPS chip so a live/stalled stream is obvious at a glance.
     void update_image(const cv::Mat& bgr);
 
+    // Hover readout: hand it the CORRECTED metric field (CV_32FC1, natural log of range in metres,
+    // NaN where no view covers) and hovering reports the depth under the cursor. Pass active=false to
+    // switch it off. The Mat is CLONED — it crosses no thread boundary here (both this and the
+    // producer run on the GUI thread) but the caller's copy is a scratch buffer it rewrites per frame.
+    void set_depth_readout(const cv::Mat& metric_log_range, bool active);
+
 protected:
     void resizeEvent(QResizeEvent* event) override;
+    void mouseMoveEvent(QMouseEvent* event) override;
 
 private:
     QPixmap last_pixmap_;
     std::chrono::steady_clock::time_point last_frame_time_{};
     float fps_ema_ = 0.f;
+    cv::Mat depth_log_range_;      // CV_32FC1 panorama-sized, ln(metres)
+    bool    depth_active_ = false;
 };
 
 } // namespace rc

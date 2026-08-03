@@ -1,4 +1,23 @@
+set(ACTIVE_INFERENCE_COMMON_DIR "${CMAKE_CURRENT_LIST_DIR}/../../common")
+
 find_package(Qt6 COMPONENTS OpenGL OpenGLWidgets QUIET)
+
+# Sanitizer switches are declared HERE, before add_subdirectory(), so the ai_common targets are
+# instrumented too — behind a library boundary they no longer pick this up from the directory-scope
+# add_compile_options further down. (The if() blocks with the full rationale stay at the bottom.)
+option(ENABLE_ASAN "Build voxelizer with AddressSanitizer" OFF)
+option(ENABLE_TSAN "Build voxelizer with ThreadSanitizer" OFF)
+
+# Shared ai_common::* libraries (see common/CMakeLists.txt). Placed FIRST, so these targets carry
+# their own explicit flags instead of silently inheriting the ones set further down this file.
+# NOTE these are STATIC archives, so the CMAKE_BUILD_RPATH/CMAKE_INSTALL_RPATH overwrite that the
+# ONNX Runtime block below performs does not affect finding them at runtime.
+add_subdirectory(${ACTIVE_INFERENCE_COMMON_DIR} ${CMAKE_CURRENT_BINARY_DIR}/ai_common EXCLUDE_FROM_ALL)
+LIST(APPEND LIBS
+  ai_common::media        # zero-copy DDS for RGBD pixels, carried OUT of the DSR graph
+  ai_common::presence     # agent presence monitor + coordinator
+  ai_common::core         # header-only beliefs/geometry
+)
 
 # Sources set
 LIST(APPEND SOURCES
@@ -7,18 +26,6 @@ LIST(APPEND SOURCES
   ../src/specificworker_viewers.cpp
   ../src/voxelizer_params.cpp
   ../src/graph_publisher.cpp
-  ../../common/agent_presence_monitor/agent_presence_monitor.cpp
-  ../../common/agent_presence_coordinator/agent_presence_coordinator.cpp
-  ../../common/media_transport/media_transport.cpp
-  ../../common/media_transport/lidar_plane_reader.cpp
-  ../../common/media_transport/generated/idl/image_framePubSubTypes.cxx
-  ../../common/media_transport/generated/idl/image_frameTypeObjectSupport.cxx
-  ../../common/media_transport/generated/idl/image360_framePubSubTypes.cxx
-  ../../common/media_transport/generated/idl/image360_frameTypeObjectSupport.cxx
-  ../../common/media_transport/generated/idl/lidar_framePubSubTypes.cxx
-  ../../common/media_transport/generated/idl/lidar_frameTypeObjectSupport.cxx
-  ../../common/media_transport/generated/idl/imu_framePubSubTypes.cxx
-  ../../common/media_transport/generated/idl/imu_frameTypeObjectSupport.cxx
   ../src/scene_processor.cpp
   ../src/media_plane_source.cpp
   ../src/zed_frame_aligner.cpp
@@ -33,6 +40,9 @@ LIST(APPEND SOURCES
   ../src/sam2_stage.cpp
   ../src/sam2_processor.cpp
   ../src/bearing_stage.cpp
+  ../src/depth_stage.cpp
+  ../src/depth_processor.cpp
+  ../src/depth_dataset.cpp
   ../src/yolo_human.cpp
   ../src/yolo_semantic.cpp
   ../src/ricoh_source.cpp
@@ -65,13 +75,7 @@ LIST(APPEND HEADERS
   ../src/graph_object_box.h
   ../src/model_projection_overlay.h
   ../src/ricoh_projection_overlay.h
-  ../../common/agent_presence_monitor/agent_presence_monitor.h
-  ../../common/agent_presence_coordinator/agent_presence_coordinator.h
-  ../../common/media_transport/media_transport.h
 )
-
-# Media transport plane: zero-copy DDS for RGBD pixels (carried OUT of the DSR graph).
-include_directories(${CMAKE_CURRENT_LIST_DIR}/../../common/media_transport)
 
 if(TARGET Qt6::OpenGL AND TARGET Qt6::OpenGLWidgets)
   LIST(APPEND SOURCES ../src/voxel_opengl_viewer.cpp ../src/obj_loader.cpp)
@@ -153,7 +157,7 @@ add_definitions(-g -O3 -fmax-errors=1 -fno-char8_t)
 # Instruments voxelizer's code AND intercepts global malloc/free, so it catches the bad
 # free()/use-after-free that crashes paintAndFlush even when it happens inside the
 # (non-instrumented) libdsr_gui — no need to ASan-build/install the shared lib.
-option(ENABLE_ASAN "Build voxelizer with AddressSanitizer" OFF)
+# (option() is declared at the top of this file so ai_common sees it before add_subdirectory().)
 if(ENABLE_ASAN)
   message(STATUS "AddressSanitizer ENABLED for voxelizer (-O1, frame pointers; preload-libasan link model)")
   add_compile_options(-fsanitize=address -fno-omit-frame-pointer -O1)
@@ -179,7 +183,7 @@ endif()
 # binary boots past the Ice static-init wall; run_tsan.sh strips the libtsan DT_NEEDED + LD_PRELOADs
 # it. Build against the TSan cortex (cmake passes LIBRARY_PATH to build-tsan libs).
 #   cmake -B build-tsan -DENABLE_TSAN=ON && cmake --build build-tsan -j
-option(ENABLE_TSAN "Build voxelizer with ThreadSanitizer" OFF)
+# (option() is declared at the top of this file so ai_common sees it before add_subdirectory().)
 if(ENABLE_TSAN)
   message(STATUS "ThreadSanitizer ENABLED for voxelizer (frame pointers; -ltsan-direct link)")
   add_compile_options(-fsanitize=thread -fno-omit-frame-pointer -O1)
