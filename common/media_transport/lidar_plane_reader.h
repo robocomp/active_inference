@@ -89,7 +89,10 @@ public:
     [[nodiscard]] bool any_live() const noexcept;
 
 private:
+    struct Plane;   // defined below; declared here so the helpers can take one
     void ensure_subscribers();
+    // Say, ONCE per plane, whether its subscriber actually matched a publisher — see the definition.
+    void report_discovery(Plane& p);
     // Drain one plane's newest frame into `raw` (its own device frame); returns its stamp or <=prev.
     std::int64_t drain_newest(LidarSubscriber& sub, std::int64_t prev_ts,
                               std::vector<Eigen::Vector3f>& raw) const;
@@ -115,6 +118,14 @@ private:
         // bpearl) drop in and out and the merged cloud BLINKS. Re-transformed per poll at cache_ts.
         std::vector<Eigen::Vector3f>     raw_cache;
         std::int64_t                     cache_ts = 0;
+        // Discovery health of this plane. A created subscriber is NOT a live stream: when the media
+        // domain's SHM discovery port is wedged (a participant that died uncleanly can leave it that
+        // way mid-session), init() still succeeds and poll() simply never yields a frame — the
+        // consumer goes quiet and looks like a code bug. Track when the subscriber came up and
+        // whether a publisher was ever matched so the reader can SAY that instead.
+        std::chrono::steady_clock::time_point sub_since{};
+        bool                                  ever_matched = false;
+        bool                                  warned_unmatched = false;
     };
     std::vector<Plane> preferred_planes_;   // one entry per preferred node (sub filled lazily)
     Plane              fallback_plane_;      // fused fallback (sub filled lazily, dropped once preferred live)

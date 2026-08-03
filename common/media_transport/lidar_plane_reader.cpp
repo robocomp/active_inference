@@ -69,9 +69,14 @@ void LidarPlaneReader::ensure_subscribers()
         {
             p.sub = make_lidar_subscriber_from_graph(*G_, p.node, stream_key_);
             if (p.sub)
-                std::println("[Lidar] plane '{}' live (device frame → RT transform)", p.node);
+            {
+                p.sub_since = now;
+                std::println("[Lidar] plane '{}' subscriber created (device frame → RT transform)"
+                             " — waiting for the publisher", p.node);
+            }
         }
         any_preferred = any_preferred or (p.sub != nullptr);
+        report_discovery(p);
     }
 
     if (any_preferred)
@@ -91,8 +96,45 @@ void LidarPlaneReader::ensure_subscribers()
     {
         fallback_plane_.sub = make_lidar_subscriber_from_graph(*G_, fallback_plane_.node, stream_key_);
         if (fallback_plane_.sub)
+        {
+            fallback_plane_.sub_since = now;
             std::println("[Lidar] using fused '{}' plane (robot frame)", fallback_);
+        }
     }
+    report_discovery(fallback_plane_);
+}
+
+void LidarPlaneReader::report_discovery(Plane& p)
+{
+    // A DataReader that exists but is matched with NO publisher is the signature of a media plane
+    // whose discovery is broken — and it is INVISIBLE otherwise, because "no frames" is also what a
+    // perfectly healthy idle sensor looks like. That ambiguity is what made the 2026-07-21 stale-SHM
+    // outage read as an agent regression for hours, so state which one it is, once, either way.
+    // The delay before complaining is a REPORTING grace (discovery is not instantaneous), not a
+    // tuning knob: nothing downstream branches on it.
+    if (not p.sub)
+        return;
+    const int matched = p.sub->matched_writers();
+    if (matched > 0)
+    {
+        if (not p.ever_matched)
+        {
+            p.ever_matched = true;
+            std::println("[Lidar] plane '{}' LIVE — matched {} publisher(s)", p.node, matched);
+        }
+        return;
+    }
+    if (p.ever_matched or p.warned_unmatched or p.sub_since.time_since_epoch().count() == 0)
+        return;
+    if (std::chrono::steady_clock::now() - p.sub_since < std::chrono::seconds(3))
+        return;
+    p.warned_unmatched = true;
+    std::println("[Lidar] ★ plane '{}': subscriber up for 3 s with NO publisher matched. The producer "
+                 "is running but its announcements are not reaching us, so NO SCAN WILL EVER ARRIVE.",
+                 p.node);
+    std::println("[Lidar]   This is the media plane's SHM discovery, not this agent. Confirm with "
+                 "'utils/dds_preflight/dds_preflight 7'; the cure is to stop every process on domain 7, "
+                 "'rm -f /dev/shm/fastdds_*', and relaunch.");
 }
 
 std::int64_t LidarPlaneReader::drain_newest(LidarSubscriber& sub, std::int64_t prev_ts,

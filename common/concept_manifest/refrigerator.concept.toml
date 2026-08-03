@@ -1,0 +1,111 @@
+# refrigerator.concept.toml — WHAT a refrigerator IS.
+#
+# STEP 1 (proposal, 2026-08-03): written ALONGSIDE the live config, generating nothing. Values are EXTRACTED
+# from the running agent, not invented — refrigerator_belief.h (RefrigeratorBeliefParams defaults) and
+# etc/config.toml. If a value here disagrees with etc/config.toml, etc/config.toml is authoritative today.
+#
+# The rule for what belongs here: every entry answers a question about the WORLD — how big is it, what does it
+# rest against, which face opens, what makes it this class rather than another. Nothing here is a gate, a
+# debounce, a frame count or a confidence cut-off. Those are LIFECYCLE, identical for every agent, and live in
+# the shared modules (common/instance_tracker, common/existence_belief). Keeping them in the same file as the
+# priors is what makes them look equally legitimate to tune.
+
+[concept]
+name       = "refrigerator"
+graph_type = "object"          # DSR node type
+subtype    = "refrigerator"    # object_subtype attr
+agent_id   = 22
+
+[model]
+shape          = "solid_box"        # one opaque cuboid ⇒ REMOVE uses rc::exist::solid_delta
+support        = "floor_anchored"   # spans z ∈ [0, H]
+state          = ["cx", "cy", "H", "w", "h", "yaw"]
+symmetry       = "none"             # w ≠ h resolves the 90° swap; no quotient chart, canonicalize() is a no-op
+opens          = "front"            # has a hinged face — see prior.clearance / cue.door_seam
+# 180° front/back is NOT folded away: it is an honest ambiguity left in the reported σ_yaw, and it is resolved
+# by prior.clearance (geometry) + cue.door_seam (appearance), not by a representation trick.
+
+# ── Priors: what a refrigerator is like before this one is measured ────────────────────────────────────
+[prior.footprint]
+kind = "gaussian"
+dims = ["w", "h"]
+mean_m = 0.60
+std_m = 0.08
+why  = "a standard fridge footprint is ~0.60x0.60 and TIGHT, so a front-only view cannot float the unseen depth"
+
+[prior.height]
+kind = "gaussian"
+dims = ["H"]
+mean_m = 1.90
+std_m = 0.30
+why  = "tall, but height varies a lot across models — deliberately BROAD so data leads"
+
+[prior.depth_observability]
+kind = "conditional_precision"
+dim = "h"
+precision = 20000.0                     # ★ was 1500 here, taken from the RefrigeratorBeliefParams
+                                        # DEFAULT — but etc/config.toml runs 20000, a 13x difference nobody
+                                        # could see, because the struct default is silently overridden. This
+                                        # is the triple-default problem (header default / loader default /
+                                        # TOML value) that the manifest exists to collapse. Surfaced by the
+                                        # very first cross-check run, 2026-08-03.
+observed_band_m = 0.10
+why  = "depth is identifiable only once the cloud spans it; a single-face view holds h at the footprint mean"
+
+[prior.top]
+kind = "two_sided_anchor"
+dim = "H"
+precision = 10000.0
+margin_m = 0.02
+target = "observed_robust_top"
+why  = "a floor-anchored box's top is a free boundary, so it ratchets up on mask over-segmentation"
+
+[prior.attachment]
+kind = "wall_flush"
+face = "back"
+precision = 400.0
+parallel_precision = 200.0
+reach_m = 0.15
+no_cross_precision = 2000.0
+why  = "the back rests against a room wall; the mixture weight decays to 0 for a genuine mid-room fridge"
+
+[prior.clearance]                       # ★ ADDED 2026-08-03 — was missing, caused persistent 180° errors
+kind = "facing_free_space"
+face = "front"
+gain_nats = 3.0
+why  = "a door cannot open into the wall the fridge is attached to. The ONLY thing that resolves 180°, since a half-turn swaps front/back but moves nothing the camera sees"
+
+[prior.identity]
+kind = "shape_log_evidence_ratio"       # log p(shape|fridge) - log p(shape|other furniture), both NORMALISED
+aspect_scale = 0.15
+size_scale = 0.15
+alt_size_scale = 0.60
+height_min_m = 1.20
+height_soft_m = 0.15
+why  = "separates a fridge from an elongated/short cabinet mislabelled 'refrigerator'"
+
+[prior.explaining_away]
+kind = "known_surface_mixture"
+source = "room.walls"
+weight = 0.25
+sigma_m = 0.05
+one_sided = true
+why  = "a mask point on a wall is already explained; one_sided ⇒ at/beyond the wall the exterior explains it fully, which also stops births outside the layout"
+
+# ── Appearance cues: evidence about the discrete door mode, not about geometry ────────────────────────
+[cue.door_seam]
+kind = "horizontal_seam"
+face_candidates = "camera_facing"
+min_face_area_px = 900
+min_confidence = 0.10
+single_face_sufficient = true
+why  = "the door-separating line identifies the door face ABSOLUTELY, so one head-on face is enough; a comparison between visible faces can never resolve 180% because the back is against the wall and never scored"
+
+# ── Sensing the concept relies on (declaration, so a missing stream is a stated gap, not a silent one) ──
+[sensing]
+primary   = "zed.masks:refrigerator"
+secondary = ["lidar3d.helios", "zed.rgb"]
+peripheral = "ricoh.bearing"    # attention only: never births, never fits
+
+[display]
+mesh = "meshes/fridge.obj"

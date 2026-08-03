@@ -10,19 +10,14 @@ endif()
 find_package(fastcdr REQUIRED)
 find_package(fastdds REQUIRED)
 
-set(GEN_DIR ${CMAKE_CURRENT_SOURCE_DIR}/generated/idl)
+# The IDL source list lives in ONE place, shared with ai_common::media (common/CMakeLists.txt),
+# so a new FrameKind cannot be added to the agents and silently leave this bench unlinkable.
+include(${CMAKE_CURRENT_SOURCE_DIR}/idl_sources.cmake)
 
 add_executable(media_bench
   bench/media_bench.cpp
   media_transport.cpp
-  ${GEN_DIR}/image_framePubSubTypes.cxx
-  ${GEN_DIR}/image_frameTypeObjectSupport.cxx
-  ${GEN_DIR}/image360_framePubSubTypes.cxx
-  ${GEN_DIR}/image360_frameTypeObjectSupport.cxx
-  ${GEN_DIR}/lidar_framePubSubTypes.cxx
-  ${GEN_DIR}/lidar_frameTypeObjectSupport.cxx
-  ${GEN_DIR}/imu_framePubSubTypes.cxx
-  ${GEN_DIR}/imu_frameTypeObjectSupport.cxx
+  ${AI_COMMON_IDL_SOURCES}
 )
 
 target_include_directories(media_bench PRIVATE

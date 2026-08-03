@@ -656,6 +656,16 @@ bool LidarSubscriber::init(const SubscriberConfig& cfg)
     return true;
 }
 
+int LidarSubscriber::matched_writers() const
+{
+    if (!reader_)
+        return 0;
+    efd::SubscriptionMatchedStatus st{};
+    if (reader_->get_subscription_matched_status(st) != efd::RETCODE_OK)
+        return 0;
+    return st.current_count;
+}
+
 int LidarSubscriber::poll(const FrameCallback& cb)
 {
     if (!reader_)

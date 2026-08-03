@@ -1,0 +1,100 @@
+# table.concept.toml — WHAT a table IS.
+#
+# STEP 1 (proposal, 2026-08-03): written ALONGSIDE the live config, generating nothing. Values EXTRACTED from
+# table_belief.h (TableBeliefParams defaults) + etc/config.toml. Written as a DELIBERATE CONTRAST to
+# refrigerator.concept.toml — the question step 1 exists to answer is whether two agents really do reduce to a
+# handful of differing declarations. Read the two side by side; the answer is written up at the bottom.
+#
+# Same rule: world facts only. Gates, debounces and frame counts are lifecycle and belong to the shared modules.
+
+[concept]
+name       = "table"
+graph_type = "object"
+subtype    = "table"        # ALSO a fitted output here: round vs square is model-SELECTED at runtime
+agent_id   = 7
+
+[model]
+shape          = "hollow_plate"     # a thin top + legs; the solid band is an ABSTRACTION of mostly-empty space
+                                    #   ⇒ REMOVE must use rc::exist::hollow_delta, NOT solid_delta:
+                                    #     a beam under the top passes through space the model never claimed
+support        = "leg_supported"    # top slab at z≈H, 4 legs to the floor — NOT floor-anchored
+state          = ["cx", "cy", "H", "w", "h", "yaw", "t"]
+symmetry       = "c2v"              # near-square footprint ⇒ 90° w<->h ambiguity is REAL and must be carried
+symmetry_chart = "quotient"         # [s, a1, a2] chart (optional) so yaw has no snap and sigma_yaw stays honest
+opens          = "none"             # no hinged face ⇒ no clearance prior, no door cue
+shape_variants = ["round", "square"]   # selected online by free energy, published to object_subtype
+
+# ★t = a slowly-varying DEPTH-TILT calibration state, CO-ESTIMATED. Not a prior — a nuisance parameter the
+# fridge does not have. A persistent depth tilt shears the footprint and aliases into yaw; capping it per frame
+# is a bias/variance trap, so it is estimated and subtracted, and its uncertainty folds into sigma_yaw.
+[model.nuisance.depth_tilt]
+dim = "t"
+tilt_std = 0.020
+bias_std = 0.015
+scale_std = 0.010
+why = "a shared per-frame depth affine aliases into yaw at grazing views; marginalise it rather than cap it"
+
+# ── Priors ─────────────────────────────────────────────────────────────────────────────────────────────
+[prior.size]
+kind = "gaussian"
+dims = ["w", "h", "H"]
+std_m = 0.30
+why  = "BROAD and mean-less: only breaks the empty-cloud degeneracy. Tables vary far too much to assert a size"
+
+[model.geometry]
+top_thickness_m = 0.03
+leg_radius_m = 0.025
+why = "fixed, not fitted — the top/leg attribution band for the compound SDF"
+
+# ── What a table DOES NOT declare, and why (the interesting half of this exercise) ──────────────────────
+# prior.footprint          — absent: no canonical table footprint exists (0.6 m side table .. 2.4 m dining)
+# prior.height             — absent: H is well observed top-down and needs no anchor
+# prior.attachment         — absent: a table is free-standing; nothing to be flush against
+# prior.clearance          — absent: opens = "none"
+# prior.identity           — ABSENT AND ARGUABLY A GAP. table_concept has no shape-LLR, so a mis-detected
+#                            object that fits a plausible slab has nothing pushing back on its identity.
+#                            The fridge needed exactly this to stop cabinets being born as fridges.
+# prior.explaining_away    — ABSENT AND A GAP. A table mask lying on a wall is not explained away, so the same
+#                            phantom-over-a-wall failure the fridge had is structurally still open here.
+# prior.depth_observability— absent: a table is seen top-down, so both footprint extents are observed directly
+
+[sensing]
+primary   = "zed.masks:table"
+secondary = ["lidar3d.helios", "lidar3d.bpearl"]
+
+[display]
+mesh = "meshes/table.obj"
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════════════
+# STEP-1 FINDING — does the manifest idea hold up?
+#
+# PARTLY, and the failure is more useful than the success.
+#
+# 1. The two concepts do NOT reduce to a handful of differing values. They differ STRUCTURALLY:
+#      shape          solid_box       vs hollow_plate     -> picks a different REMOVE policy
+#      support        floor_anchored  vs leg_supported    -> different SDF decomposition
+#      symmetry       none            vs c2v + quotient   -> different state chart and yaw semantics
+#      state          6 DOF           vs 7 DOF (+tilt)    -> different estimator width
+#      opens          front           vs none             -> clearance prior + door cue exist or do not
+#      variants       none            vs round/square     -> runtime model selection or not
+#    A manifest that only carried NUMBERS would not capture any of this. It has to carry these ENUMS, and each
+#    enum has to select shared machinery. That is the real design: the manifest is a set of CHOICES over
+#    shared components, and the numbers are secondary.
+#
+# 2. Where it pays off immediately is the ABSENCES. Writing table's manifest surfaced two gaps in minutes that
+#    nobody had listed, because there was no list to have a hole in:
+#      - no prior.identity      -> nothing resists a mis-detection that fits a plausible slab
+#      - no prior.explaining_away -> the phantom-over-a-wall failure fixed in the fridge is still open here
+#    Both are exactly the class of bug that cost days on the fridge. `shape = hollow_plate` also states in one
+#    line the fact that took a session to rediscover: the table's solid band is an abstraction, so its LiDAR
+#    free-space is not trustworthy — which is why hollow_delta exists.
+#
+# 3. Cost estimate for step 2 (generate the params struct + TOML from this): the numeric half is mechanical.
+#    The enum half means giving each choice a real dispatch point (shape -> delta fn, support -> SDF,
+#    symmetry -> chart). Those dispatch points mostly EXIST already; they are just selected by hand-written
+#    code per agent instead of by declaration.
+#
+# RECOMMENDATION: keep the manifest, but treat it as a CHOICE MANIFEST over shared machinery, not a parameter
+# file. Before step 2, close the two gaps this exercise surfaced in table_concept — they are live bugs, and
+# they are worth more than the codegen.
+# ═══════════════════════════════════════════════════════════════════════════════════════════════════════

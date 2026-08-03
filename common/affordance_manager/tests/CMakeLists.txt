@@ -32,7 +32,13 @@ else()
     set(CXX_STANDARD 23)
 endif()
 
-add_definitions(-O3 -march=native -fmax-errors=1 -fno-char8_t)
+# CRITICAL — no -march=native. It promotes Eigen's alignment (AVX2/AVX-512 → 32-/64-byte), which
+# changes sizeof(std::optional<Eigen::Transform>) away from the prebuilt libdsr's 144. This test
+# compiles the SAME affordance_manager.cpp that controller and room_concept link (via
+# ai_common::affordance), and both build it with default alignment — so building it differently
+# here made the test exercise a different ABI than production. See the comment block in every
+# component's src/CMakeLists.txt.
+add_definitions(-O3 -fmax-errors=1 -fno-char8_t)
 
 add_executable(affordance_protocol_test
   affordance_protocol_test.cpp

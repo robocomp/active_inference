@@ -321,6 +321,12 @@ public:
 
     [[nodiscard]] bool data_sharing_active() const { return data_sharing_active_; }
 
+    // How many publishers this reader is currently matched with. A successful init() only means the
+    // reader was CREATED — it says nothing about whether the producer was ever discovered, so a
+    // wedged SHM discovery port reads exactly like a healthy-but-idle sensor. This is the number
+    // that tells the two apart, so a consumer can say "no publisher matched" instead of going quiet.
+    [[nodiscard]] int matched_writers() const;
+
 private:
     eprosima::fastdds::dds::DomainParticipant* participant_ = nullptr;
     eprosima::fastdds::dds::Subscriber*        subscriber_  = nullptr;
