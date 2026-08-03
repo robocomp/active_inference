@@ -7,7 +7,10 @@
 
 #include "refrigerator_config.h"
 
+#include <algorithm>
+#include <cmath>
 #include <print>
+#include <string>
 
 #include <genericworker.h>   // ConfigLoader
 
@@ -74,6 +77,10 @@ RefrigeratorConfig load_refrigerator_config(const ConfigLoader& cfg)
     out.ai2_wall_precision          = getf("RefrigeratorModel.AI2WallPrecision",         400.0f);
     out.ai2_wall_parallel_precision = getf("RefrigeratorModel.AI2WallParallelPrecision", 200.0f);
     out.ai2_wall_reach_m            = getf("RefrigeratorModel.AI2WallReachM",             0.15f);
+    out.ai2_door_clearance_gain     = getf("RefrigeratorModel.AI2DoorClearanceGain",       3.0f);
+    out.ai2_volatility_infer        = getb("RefrigeratorModel.AI2VolatilityInfer",        false);
+    out.ai2_volatility_lr           = getf("RefrigeratorModel.AI2VolatilityLr",           0.02f);
+    out.ai2_volatility_sigma        = getf("RefrigeratorModel.AI2VolatilitySigma",        2.0f);
     out.ai2_wall_explain_frac       = getf("RefrigeratorModel.AI2WallExplainFrac",        0.25f);
     out.ai2_wall_explain_sigma_m    = getf("RefrigeratorModel.AI2WallExplainSigmaM",      0.05f);
     out.ai2_wall_no_cross_precision = getf("RefrigeratorModel.WallNoCrossPrecision",     2000.0f);
@@ -195,6 +202,61 @@ RefrigeratorConfig load_refrigerator_config(const ConfigLoader& cfg)
 
     std::print("refrigerator_concept: configuration loaded.\n");
     return out;
+}
+
+// ─── Concept-manifest cross-check (declarative-priors experiment, step 1½) ────────────────────────
+//
+// common/concept_manifest/<concept>.concept.toml declares WHAT a refrigerator IS — its priors as world facts,
+// separate from the lifecycle knobs. It is not authoritative yet. This compares it against the priors the live
+// etc/config.toml actually produced, so we learn whether a manifest can reproduce the running agent BEFORE
+// anything is generated from it. Startup-only, read-only: it never changes a value, it only reports.
+//
+// A DIFFERS line is a finding, not a failure — it means the manifest and the running config disagree about a
+// world fact, and one of them is wrong. A MISSING line means the manifest does not yet describe that prior.
+bool verify_refrigerator_manifest(const RefrigeratorConfig& out, const std::string& path)
+{
+    ConfigLoader man;
+    try { man.load(path); }
+    catch (...) { std::print("[manifest] not loaded ({}) — cross-check skipped\n", path); return false; }
+
+    int agree = 0, differ = 0, missing = 0;
+    const auto chk = [&](const char* key, float live, const char* what) {
+        if (not man.exists(key)) { ++missing;
+            std::print("[manifest] MISSING  {:<42} live={:<10.4g} ({})\n", key, live, what); return; }
+        const float m = static_cast<float>(man.get<double>(key));
+        const float tol = 1e-4f * std::max(1.0f, std::abs(live));
+        if (std::abs(m - live) <= tol) { ++agree; }
+        else { ++differ;
+            std::print("[manifest] DIFFERS  {:<42} manifest={:<10.4g} live={:<10.4g} ({})\n", key, m, live, what); }
+    };
+
+    chk("prior.footprint.mean_m",              out.ai2_prior_footprint_m,      "fridge footprint mean");
+    chk("prior.footprint.std_m",               out.ai2_prior_footprint_std,    "footprint prior std");
+    chk("prior.height.mean_m",                 out.ai2_prior_height_m,         "height anchor mean");
+    chk("prior.height.std_m",                  out.ai2_prior_height_std,       "height anchor std");
+    chk("prior.depth_observability.precision", out.ai2_depth_unobs_precision,  "depth-unobserved precision");
+    chk("prior.depth_observability.observed_band_m", out.ai2_depth_obs_band_m, "depth observed band");
+    chk("prior.top.precision",                 out.ai2_top_no_float_precision, "top no-float anchor");
+    chk("prior.top.margin_m",                  out.ai2_top_no_float_margin_m,  "top anchor margin");
+    chk("prior.attachment.precision",          out.ai2_wall_precision,         "wall flush");
+    chk("prior.attachment.parallel_precision", out.ai2_wall_parallel_precision,"wall parallel");
+    chk("prior.attachment.reach_m",            out.ai2_wall_reach_m,           "flush reach");
+    chk("prior.attachment.no_cross_precision", out.ai2_wall_no_cross_precision,"wall no-cross");
+    chk("prior.identity.aspect_scale",         out.plaus_aspect_scale,         "identity aspect");
+    chk("prior.identity.size_scale",           out.plaus_size_scale,           "identity size");
+    chk("prior.identity.alt_size_scale",       out.plaus_alt_size_scale,       "identity alternative");
+    chk("prior.identity.height_min_m",         out.plaus_height_min,           "identity height centre");
+    chk("prior.identity.height_soft_m",        out.plaus_height_soft,          "identity height softness");
+    chk("prior.clearance.gain_nats",           out.ai2_door_clearance_gain,    "door clearance prior");
+    chk("prior.explaining_away.weight",        out.ai2_wall_explain_frac,      "wall explain-away weight");
+    chk("prior.explaining_away.sigma_m",       out.ai2_wall_explain_sigma_m,   "wall explain-away sigma");
+    chk("cue.door_seam.min_face_area_px",      out.front_min_face_area_px,     "door cue min face area");
+    chk("cue.door_seam.min_confidence",        out.front_min_confidence,       "door cue min confidence");
+
+    std::print("[manifest] {} — {} agree, {} DIFFER, {} missing\n",
+               (differ == 0 and missing == 0) ? "reproduces the live config" : "does NOT yet reproduce the live config",
+               agree, differ, missing);
+    return differ == 0 and missing == 0;
 }
 
 }  // namespace rc

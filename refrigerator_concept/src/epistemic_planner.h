@@ -12,6 +12,7 @@
 
 #include <array>
 #include <cmath>
+#include <vector>
 
 #include "refrigerator_belief.h"            // AI2 belief: Σ + predicted_information for the Σ-based NBV
 
@@ -63,7 +64,17 @@ public:
     /// with Rᵢ = sigma_base² + (lat_rate·standoffᵢ)² — range-aware so far faces yield less information.
     /// Targets the dominant uncertainty eigen-direction of Σ (an unobserved extent / yaw). A low but
     /// finite gain is NOT withdrawn here; the controller's EFE selection simply won't pick a low-nat target.
-    EpistemicProposal compute(const RefrigeratorBelief& belief, float lat_rate, float sigma_base) const;
+    // An obstacle the viewpoint must not be placed inside: an oriented footprint from the DSR graph
+    // (any other `object`/`box` node), already inflated by the robot radius by the caller.
+    struct Obstacle { float cx = 0.0f, cy = 0.0f, w = 0.0f, h = 0.0f, yaw = 0.0f; };
+
+    /// @param hfov_rad   the camera's REAL horizontal FoV (2·atan(W/2fx) from the DSR CameraAPI). <=0 keeps
+    ///                   the conservative built-in default. The stand-off is framed on the HORIZONTAL FoV only.
+    /// @param obstacles  other objects in the room; a candidate viewpoint that lands inside one is rejected and
+    ///                   the next-best face is taken, so the robot is never sent to stand on the furniture.
+    EpistemicProposal compute(const RefrigeratorBelief& belief, float lat_rate, float sigma_base,
+                              float hfov_rad = -1.0f,
+                              const std::vector<Obstacle>& obstacles = {}) const;
 
 private:
     float d_obs_;

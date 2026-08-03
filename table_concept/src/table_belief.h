@@ -168,6 +168,26 @@ struct TableBeliefParams
     float footprint_moment_min_completeness  = 0.02f;  // clamp floor so 1/completeness stays finite
 
     // Priors
+    //
+    // ★★TODO (2026-08-03) — TWO PRIORS THIS MODEL IS MISSING. Surfaced by writing
+    // common/concept_manifest/table.concept.toml next to refrigerator.concept.toml: the manifest made the
+    // ABSENCES visible, because there was finally a list to have holes in. Both are the exact bug class that
+    // cost days on refrigerator_concept, and both are structurally still open here. Verified absent (`grep`
+    // finds no log_evidence_ratio / wall_explain in table_belief.*). See [[concept-manifest-step1]].
+    //
+    //  1. NO IDENTITY PRIOR. There is no shape log-evidence ratio, so nothing resists a mis-detection that
+    //     happens to fit a plausible slab — a cabinet top, a counter, a bed. The fridge needed exactly this
+    //     (RefrigeratorBelief::fridge_log_evidence_ratio) to stop cabinets being born as fridges; note the
+    //     lesson there was that the ratio must use NORMALISED densities against an explicit alternative,
+    //     because an un-normalised `plausibility − 0.5` scored a REAL object negative and deleted it.
+    //     Harder here than for a fridge: tables have no canonical size (see prior_size_std below), so the
+    //     alternative hypothesis has to be built from aspect/height/planarity, not footprint size.
+    //
+    //  2. NO EXPLAINING-AWAY OF KNOWN SURFACES. A table mask lying on a room WALL is not explained away, so
+    //     the phantom-over-a-wall failure fixed in the fridge (a third mixture component u[2] fed by the room
+    //     polygon, one-sided so at/beyond the wall the exterior explains a point fully) can still happen. The
+    //     fitter already stages the nearest wall for other purposes, so the input is present.
+    //
     float prior_size_std = 0.30f;  // broad size prior std (m) on w,h,H — only breaks the empty-cloud degeneracy
     // Temporal transition (predict): rigid + static ⇒ small process noise per frame.
     float process_std_m   = 0.005f;

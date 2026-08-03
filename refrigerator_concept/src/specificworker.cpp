@@ -31,6 +31,7 @@
 #include "specificworker.h"
 #include "refrigerator_geometry.h"   // rc::geom pure footprint/uncertainty helpers
 
+#include <locale>
 #include <print>
 #include <format>    // stall-transition log formatting (std::println on cout, survives Verbose=false)
 #include <cstdlib>   // std::_Exit — crash-free terminal shutdown
@@ -369,6 +370,10 @@ void SpecificWorker::initialize()
     // remove_stale_affordance_nodes(), keyed on the parent object type (robust to node-name renames).
 
     // Standalone Qt dashboard + evidence-monitor windows (belief plots + per-instance snapshot).
+    // Shadow-mode birth/death record (CONCEPT_AGENT_LIFECYCLE.md §4.2). Recording only — see
+    // log_phantom_event(). Truncating: one file per run.
+    phantom_log_.open("etc/refrigerator_phantom_events.csv");
+
     build_dashboard();
 }
 
@@ -396,6 +401,40 @@ void SpecificWorker::refresh_room_geometry()
     }
     centroid /= static_cast<float>(n);
     fitter_->set_room_geometry(centroid, std::move(poly));
+}
+
+// SHADOW-MODE birth/death recorder — CONCEPT_AGENT_LIFECYCLE.md §4.2, theory in MODEL_HISTORY.md §4.
+// RECORDS ONLY; it can never alter a birth or a removal. The attribution fields captured at death
+// (p_detect / in-FoV / central) are what tell a genuine classifier phantom from one of OUR removal defects —
+// a death with LOW p_detect means the log is recording a removal bug, and must not be learned from.
+void SpecificWorker::log_phantom_event(std::string_view event, std::uint64_t id, std::string_view name,
+                                       float x, float y, const rc::RefrigeratorInstance* inst, std::string_view note)
+{
+    if (not phantom_log_.is_open())
+        return;
+    rc::history::PhantomEvent e;
+    e.event = event; e.id = id; e.name = name; e.x = x; e.y = y; e.note = note;
+    // Observer pose → view bearing. The classifier failure is VIEWPOINT-dependent, so the eventual p_FA field
+    // is keyed on (world cell × bearing); a place-only key would suppress a genuine object placed there.
+    if (inner_eigen_)
+        if (const auto rtb = inner_eigen_->get_transformation_matrix("room", "body", 0); rtb.has_value())
+        {
+            const auto& Tm = rtb.value();
+            e.robot_x = static_cast<float>(Tm(0, 3));
+            e.robot_y = static_cast<float>(Tm(1, 3));
+            e.robot_yaw = std::atan2(static_cast<float>(Tm(1, 0)), static_cast<float>(Tm(0, 0)));
+            e.view_bearing = std::atan2(e.robot_y - y, e.robot_x - x);   // instance → camera, room frame
+            e.range_m = std::hypot(e.robot_x - x, e.robot_y - y);
+        }
+    if (inst)   // death: carry the existence state that says whether this was a CONFIDENT kill
+    {
+        e.age_cycles    = inst->processed_cycles;
+        e.p_detect      = inst->dbg_ex_pdetect;
+        e.central_frac  = inst->dbg_ex_central;
+        e.in_fov_frac   = (inst->dbg_ex_sil_ndet > 0) ? 1.0f : 0.0f;
+        e.exist_logodds = inst->existence.logodds();
+    }
+    phantom_log_.write(e);
 }
 
 void SpecificWorker::compute()
@@ -475,7 +514,14 @@ void SpecificWorker::compute()
     // fresh mask frame, LiDAR carve on a fresh sweep) — a camera-only cycle still accrues absence, a LiDAR-only
     // cycle still carves free space. After the fits so footprints are current. OFF unless enabled.
     if (cfg_.existence_removal_enabled)
-        existence_->update_and_remove(*fitter_, lidar_ingestor_.get(), fresh_masks, fresh_sweep, ev_g_);
+        existence_->update_and_remove(*fitter_, lidar_ingestor_.get(), fresh_masks, fresh_sweep, ev_g_,
+            [this](std::uint64_t id, const rc::RefrigeratorInstance& inst)
+            {   // shadow-mode death record (§4.2) — p_detect here says whether this was a CONFIDENT
+                // disconfirmation (a real phantom) or a weak one (more likely our own removal bug)
+                log_phantom_event("DEATH", id, inst.node_name,
+                                  inst.model.state().cx, inst.model.state().cy, &inst,
+                                  std::format("L {:.2f}", inst.existence.logodds()));
+            });
 
     // "Is this really a fridge?" soft SINGLETON + plausibility→existence decay → retire mis-detections. The
     // worker sees ALL instances, so mutual inhibition + the removal decision live here (not in the fitter). It
@@ -553,6 +599,10 @@ void SpecificWorker::log_birth_surprise()
     if (not birth_surprise_csv_.is_open())
     {
         birth_surprise_csv_.open("etc/birth_surprise.csv", std::ios::out | std::ios::trunc);
+        birth_surprise_csv_.imbue(std::locale::classic());   // ★Qt imbues the global locale, which inserts THOUSANDS SEPARATORS
+                                            // into integers (pkt_ts 1785763853131 -> "1,785,763,853,131"), splitting
+                                            // one CSV field into five and making the whole log unparseable by column.
+                                            // Pin "C" so the log is machine-readable regardless of the UI locale.
         if (birth_surprise_csv_.is_open())
             birth_surprise_csv_ << "cycle,region,cx,cy,cells,mass,ext_x,ext_y,mean_p,mean_var,covered,"
                                 << "n_refrigerators,tracker_births,instances\n";
@@ -575,6 +625,10 @@ void SpecificWorker::log_birth_surprise()
     if (not birth_fusion_csv_.is_open())
     {
         birth_fusion_csv_.open("etc/birth_fusion.csv", std::ios::out | std::ios::trunc);
+        birth_fusion_csv_.imbue(std::locale::classic());   // ★Qt imbues the global locale, which inserts THOUSANDS SEPARATORS
+                                            // into integers (pkt_ts 1785763853131 -> "1,785,763,853,131"), splitting
+                                            // one CSV field into five and making the whole log unparseable by column.
+                                            // Pin "C" so the log is machine-readable regardless of the UI locale.
         if (birth_fusion_csv_.is_open())
             birth_fusion_csv_ << "cycle,det,det_x,det_y,mass_r05,mass_r03,near_dist,near_mass,covered,"
                               << "n_refrigerators,tracker_births,instances\n";
@@ -804,8 +858,37 @@ void SpecificWorker::publish_refrigerator_intentions(rc::RefrigeratorInstance& i
 void SpecificWorker::load_config(const ConfigLoader& cfg)
 {
     cfg_ = rc::load_refrigerator_config(cfg);
+    // Declarative-priors experiment: report whether common/concept_manifest/refrigerator.concept.toml can
+    // reproduce the priors this config just produced. Read-only — the manifest is not authoritative yet.
+    rc::verify_refrigerator_manifest(cfg_, "../../common/concept_manifest/refrigerator.concept.toml");
 }
 
+
+
+// Every OTHER object the graph knows about, as robot-inflated oriented footprints, so the NBV never proposes a
+// viewpoint standing on the furniture. Reads `object` and `box` nodes (the two types concept agents publish),
+// skips this refrigerator itself, and inflates each footprint by the robot radius so a mere point-in-rectangle
+// test at the viewpoint is equivalent to a footprint overlap. See [[refrigerator-standoff-and-obstacles]].
+std::vector<rc::EpistemicPlanner::Obstacle> SpecificWorker::collect_viewpoint_obstacles(std::uint64_t self_id) const
+{
+    constexpr float kRobotRadiusM = 0.30f;   // must match the planner's collision floor
+    std::vector<rc::EpistemicPlanner::Obstacle> obs;
+    for (const char* type : {"object", "box"})
+        for (const auto& n : G->get_nodes_by_type(type))
+        {
+            if (n.id() == self_id) continue;
+            const auto wo = G->get_attrib_by_name<obj_width_att>(n);
+            const auto do_ = G->get_attrib_by_name<obj_depth_att>(n);
+            if (not (wo.has_value() and do_.has_value())) continue;         // no footprint ⇒ cannot avoid it
+            const auto tr = inner_eigen_->get_transformation_matrix("room", n.name(), 0);
+            if (not tr.has_value()) continue;                               // unlocatable ⇒ skip, never guess
+            const auto& M = tr.value();
+            const float yaw = std::atan2(static_cast<float>(M(1, 0)), static_cast<float>(M(0, 0)));
+            obs.push_back({static_cast<float>(M(0, 3)), static_cast<float>(M(1, 3)),
+                           wo.value() + 2.0f * kRobotRadiusM, do_.value() + 2.0f * kRobotRadiusM, yaw});
+        }
+    return obs;
+}
 
 // ─── Per-cycle steps ─────────────────────────────────────────────────────────────────────────────
 
@@ -898,8 +981,17 @@ void SpecificWorker::step_epistemic(rc::RefrigeratorInstance& inst, DSR::Node& n
     // the broad prior and the proposal is moot).
     if (not inst.ai2_initialized)
         return;
+    // The camera's REAL horizontal FoV, so the stand-off is framed on this sensor rather than a literal.
+    float hfov_rad = -1.0f;
+    if (const auto zed = G->get_node("zed"); zed.has_value())
+        if (auto cam = G->get_camera_api(zed.value()); cam)
+        {
+            const float fx = cam->get_focal_x(), W = static_cast<float>(cam->get_width());
+            if (fx > 0.0f and W > 0.0f) hfov_rad = 2.0f * std::atan(0.5f * W / fx);
+        }
     rc::EpistemicProposal prop =
-        epistemic_planner_.compute(inst.ai2_belief, cfg_.ai2_range_noise_lat_per_m, cfg_.ai2_sigma_base_m);
+        epistemic_planner_.compute(inst.ai2_belief, cfg_.ai2_range_noise_lat_per_m, cfg_.ai2_sigma_base_m,
+                                   hfov_rad, collect_viewpoint_obstacles(inst.node_id));
     if (not prop.valid or not prop.is_finite())
         return;   // degenerate (non-finite) fit — leave the existing affordance node as-is, retry next cycle
 

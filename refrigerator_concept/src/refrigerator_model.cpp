@@ -43,18 +43,9 @@ float box_sdf(float dx, float dy, float dz)
     return outside + inside;
 }
 
-/** Finite cylinder SDF (radius r, half-height hh, centred at origin). */
-float cylinder_sdf(float dx_local, float dy_local, float dz_local, float r, float hh)
-{
-    float d_radial   = std::sqrt(dx_local*dx_local + dy_local*dy_local) - r;
-    float d_vertical = std::abs(dz_local) - hh;
-
-    float or_ = std::max(d_radial, 0.0f);
-    float ov  = std::max(d_vertical, 0.0f);
-    float outside = std::sqrt(or_*or_ + ov*ov);
-    float inside  = std::min(std::max(d_radial, d_vertical), 0.0f);
-    return outside + inside;
-}
+// (The finite-cylinder SDF that lived here was table_concept's LEG primitive. A refrigerator is one solid
+//  floor-anchored cuboid with no legs — sdf_point_at() is a single box_sdf — so it was dead from the day this
+//  agent was cloned. Removed 2026-08-03; the compiler had been flagging it as unused ever since.)
 
 } // anonymous namespace
 

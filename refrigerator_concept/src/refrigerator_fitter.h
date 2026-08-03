@@ -91,6 +91,9 @@ public:
     // Gated behind cfg_.ai2_motion_confirm_only. True ⇒ run_inference takes the predict-only branch (like the
     // truncation gate). Ported 1:1 from chair_concept.
     bool  confirm_only(const RefrigeratorInstance& inst) const;
+    // The SAME admissibility, evaluated on a raw mask slice that has no instance yet: may this frame move
+    // geometry? The tracker gates BIRTH on it, so a frame the fit would refuse can never create an object.
+    bool  frame_admissible(const rc::MaskIngestor::MaskSlice& sl) const;
 
     // One-shot unit self-check (motion_magnitude robustness, the confirm_only gate + its predict-only mean-hold).
     // Pure — builds a fitter with a local config and null graph (no DSR needed). Returns true on all-PASS.

@@ -127,6 +127,22 @@ AI2WallReachM = 0.15             # gap scale (m) over which the flush hypothesis
 # zero pull on the fitted geometry, and (ii) is already explained WITHOUT a fridge ⇒ the box earns no evidence
 # there (box_log_evidence_gain ≈ 0). A real fridge is untouched: its visible faces stand a depth off the wall
 # plane. Inert unless a room polygon has been pushed. 0 = OFF (mixture reverts to box+clutter).
+# Door CLEARANCE prior: nats of preference, at full flush, for the door mode facing INTO the room over one
+# facing into the wall it is attached to. The ONLY thing that resolves the 180° front/back ambiguity, since a
+# half-turn swaps front/back but moves nothing the camera can see. Scaled by the flush mixture weight, so it
+# vanishes on its own for a genuine mid-room fridge. 0 = OFF. A precision, not a gate.
+AI2DoorClearanceGain = 3.0
+# ── INFERRED VOLATILITY (MODEL_HISTORY.md §3) — the HISTORY stage ─────────────────────────────────────────
+# Q stops being a per-frame constant and becomes exp(ω), a per-DOF latent inferred from how much the belief
+# actually MOVES. With a fixed Q, evidence is discarded exactly as fast as it is acquired (σ_steady=(q/i)^¼,
+# a ratio of two RATES — elapsed time never appears), so hours of touring leave the belief where seconds
+# would, and an unobserved fridge's σ_w walks back to the prior in ~6 minutes. Inferring ω repairs BOTH:
+# retention τ=Σ/exp(ω) grows AND the precision floor falls. Stiffness is then EARNED by evidence instead of
+# imposed by a clamp, and the hyperprior pull-back keeps it recoverable — shove the fridge and ω climbs, so
+# it re-adapts in seconds. self_test: static → retention x7.2, moved → x0.04. Watch omega_w/tau_w in ai2_log.
+AI2VolatilityInfer = true    # ON 08-03 for the A/B tour. Watch omega_w/tau_w in ai2_log.csv
+AI2VolatilityLr = 0.02       # gradient step on ω per MEASURED cycle (predict-only cycles never touch it)
+AI2VolatilitySigma = 2.0     # hyperprior width σ_ω: how far evidence may pull ω from the configured Q
 AI2WallExplainFrac = 0.25        # π_wall: prior weight of "this point belongs to a known room wall"
 AI2WallExplainSigmaM = 0.05      # extra wall-plane std (m): room-polygon + localization slack (adds to WallRef σ)
 # WALL NO-CROSS (one-sided): the flush factor is TWO-SIDED (drives gap→0) and its weight decays away from the wall,
@@ -352,10 +368,20 @@ GateFallbackM = 0.50      # metric XY gate (m) before an instance has a usable c
 DetectionNoiseM = 0.35    # det-noise std R added to fit cov in the gate (S=P+R²I): covers the mask-centroid
                           # vs fitted-centre offset of a partially-viewed refrigerator (~0.2–0.5 m), else the
                           # overconfident fit rejects its own detection. Refrigerators are far apart → safe.
-BirthFrames = 8           # frames a mask must stay unexplained before spawning a refrigerator
-# FUSED BIRTH (EXPERIMENTAL): residual-grid surprise mass under a detection accelerates its birth. birth_evidence
-# = 1 + Gain·(m/(m+MassRef)) per frame toward BirthFrames; a corroborated detection (high unexplained-occupancy)
-# births in ~1-2 frames, a phantom (m≈0 → evidence 1) serves the full 8-frame debounce. Needs residual_concept.
+# Evidence a mask must accumulate, while staying unexplained, before spawning a refrigerator. The unit is ONE
+# ideal observation: a perfect mask (confidence 1, untruncated, centred, within AI2PriorFootprint range) is worth
+# 1.0, and every real mask is worth less in proportion to its measured quality (see the birth-quality block in
+# specificworker_lifecycle.cpp: confidence · (1−trunc_frac) · periphery · range). A STALE cycle is worth 0 — the
+# candidate stays alive but does not accrue — so this counts genuine OBSERVATIONS, not compute cycles.
+# VALUE UNCHANGED (8). The tightening comes from valuing each observation correctly, not from raising the bar:
+# with a stale cycle worth 0 and every mask scaled by its measured quality, 8 now means 8 IDEAL observations,
+# which the same detection has to work much harder to reach. Worked examples at this unchanged 8:
+#   clean fridge at 1.5 m, conf 0.90, centred  → ~0.89/frame ⇒ ~9 mask frames (~0.9 s)  — unchanged in practice
+#   the `refrigerator 0.53` wall blob at 2.5 m → ~0.36/frame ⇒ ~23 frames of a SUSTAINED, unexplained blob
+#   anything at 7 m (q_range = (2.5/7)² = 0.13) → ~0.11/frame ⇒ ~73 frames — a distant blob cannot birth
+BirthFrames = 8
+# FUSED BIRTH: residual-grid surprise mass under a detection accelerates its birth (independent geometric
+# corroboration). birth_evidence = (1 + Gain·m/(m+MassRef)) · quality. Needs residual_concept.
 BirthFusion = true         # true to enable; needs BirthSurpriseProbe infra (reads the `grid` node)
 BirthFusionGain = 6.0      # max extra evidence/frame at full corroboration (0 ⇒ baseline birth timing)
 BirthFusionMassRef = 8.0   # residual mass at which corroboration is half-saturated

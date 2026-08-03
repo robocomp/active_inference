@@ -160,6 +160,22 @@ struct RefrigeratorBeliefParams
     // wall_explain_frac is the component's PRIOR weight — it should track how much the room is trusted; the
     // fitter scales it by the room's own confidence, so bad localization returns the fridge hypothesis its
     // freedom rather than silently vetoing detections. 0 = OFF (no wall component).
+    // Door CLEARANCE prior (door_clearance_logprior): nats of preference, at full flush, for the door mode
+    // pointing straight INTO the room over one pointing straight into the wall. Scaled by the flush mixture
+    // weight, so it vanishes for a genuine mid-room fridge. 0 = OFF. A precision, not a gate.
+    float door_clearance_gain = 3.0f;
+    // ── INFERRED VOLATILITY (MODEL_HISTORY.md §3): "how fast does THIS object change?" ──────────────────
+    // Q stops being a per-frame constant and becomes exp(ω), a per-DOF latent inferred from how much the
+    // belief actually MOVES. This is the history stage: with a fixed Q, evidence is discarded exactly as
+    // fast as it is acquired (σ_steady = (q/i)^¼ — a ratio of two RATES, with elapsed time absent), so hours
+    // of touring leave the belief where seconds would, and an unobserved object's σ walks back to the prior
+    // in ~6 minutes. Inferring ω fixes BOTH: retention τ ≈ Σ·exp(−ω) grows AND the floor (exp(ω)/i)^¼ falls.
+    // Stiffness is then EARNED by evidence rather than imposed by a clamp, and the hyperprior pull-back keeps
+    // it recoverable — a genuinely moved fridge drives ω back up and adapts in seconds.
+    bool  volatility_infer   = false;   // OFF ⇒ Q is the constant process_std_* exactly as before
+    float volatility_lr      = 0.02f;   // gradient step on ω per MEASURED cycle
+    float volatility_sigma   = 2.0f;    // hyperprior width σ_ω: how far evidence may pull ω from ω₀
+    float volatility_omega_min = -18.0f; // numerical floor on ω (exp(−18) ≈ 1.5e-8 m²) — not a tuning knob
     float wall_explain_frac  = 0.25f;   // π_wall: prior weight of "this point belongs to a known room wall"
     float wall_explain_sigma_m = 0.05f; // extra std (m) on the wall plane: room-polygon + localization slack
 
@@ -264,7 +280,20 @@ public:
     // Stash this frame's wall BEFORE the engine runs: the per-point mixture's wall component (explaining away)
     // needs it, and mixture_unnormalized is a const hook the engine calls with no access to the frame.
     float update(const RefrigeratorFrame& frame)
-    { point_wall_ = frame.wall; return ai::update<N>(*this, state_, Sigma_, prior_mean_, frame); }
+    {
+        point_wall_ = frame.wall;
+        const Eigen::Matrix<float, 6, 1> before = state_.vec();
+        const float fe = ai::update<N>(*this, state_, Sigma_, prior_mean_, frame);
+        // ω is inferred ONLY on a cycle that actually took a measurement. A predict-only cycle has δθ = 0,
+        // which under the update below would read as "this object never moves" and drive ω down — the same
+        // repetition-is-not-independence error that has bitten this codebase four times.
+        update_volatility(state_.vec() - before);
+        return fe;
+    }
+    // Per-DOF log-volatility ω (Q = exp ω) and its hyperprior mean ω₀ — the accumulated experience.
+    const Eigen::Matrix<float, 6, 1>& log_volatility() const { return omega_; }
+    // Retention time constant per DOF: τ = Σ_ii / exp(ω_i) frames — "how long this DOF remembers".
+    Eigen::Matrix<float, 6, 1> retention_frames() const;
     void  predict()                               { ai::predict<N>(*this, Sigma_, state_, prior_mean_); }
     void  inflate_for_age(float dt_s, float dt_nominal_s)
     { ai::inflate_for_age<N>(*this, Sigma_, state_, prior_mean_, dt_s, dt_nominal_s); }
@@ -328,6 +357,13 @@ public:
     // candidate restriction, NOT a belief threshold). Mirrors ChairBelief::resolve_orientation. Returns true iff
     // it adopted a new orientation. Door face = local −Y.
     bool  resolve_front(const FrontCue& cue, float evidence_weight = 1.0f);
+    // Adopt the best door mode from the accumulated appearance evidence PLUS the geometric clearance prior,
+    // with NO new appearance cue. Call every cycle: it is the only path that can fix a fridge whose door faces
+    // its own wall, which detect_front can never report (it needs 2 visible faces and never scores the back).
+    bool  resolve_front_geometric();
+    // Per-mode log-prior from door CLEARANCE: a door cannot open into the wall the fridge is attached to.
+    // Recomputed from current geometry wherever the mode is scored — a PRIOR, never accumulated.
+    std::array<float, 4> door_clearance_logprior() const;
     // Posterior over the 4 discrete front modes = softmax(front_acc_) with disallowed modes zeroed (see
     // allowed_modes). Front diagnostics: the winning mode's posterior mass (→1 once resolved) and its index.
     std::array<float, 4> front_posterior() const;
@@ -423,6 +459,16 @@ private:
     // This frame's nearest wall, stashed by update() so the const mixture hook can use it as a competing
     // explanation. ok==false (no room polygon) ⇒ the wall component is inert and the mixture is box+clutter.
     WallRef         point_wall_;
+    // Inferred per-DOF log-volatility and its hyperprior mean. omega_ starts AT omega0_, so with
+    // volatility_infer off the model is bit-identical to the constant-Q original.
+    Eigen::Matrix<float, 6, 1> omega_  = Eigen::Matrix<float, 6, 1>::Zero();
+    Eigen::Matrix<float, 6, 1> omega0_ = Eigen::Matrix<float, 6, 1>::Zero();
+    bool                       omega_init_ = false;
+    void update_volatility(const Eigen::Matrix<float, 6, 1>& dtheta);
+public:
+    // self_test only: drive one volatility step directly, so the test exercises the production update.
+    void update_volatility_for_test(const Eigen::Matrix<float, 6, 1>& d) { update_volatility(d); }
+private:
     mutable float   dbg_wall_gap_    = 0.0f;
     mutable float   dbg_wall_lambda_ = 0.0f;
     mutable float   dbg_wall_resp_   = 0.0f;   // mean wall responsibility over the last scored cloud

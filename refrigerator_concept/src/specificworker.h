@@ -53,7 +53,8 @@
 #include "refrigerator_rgb_ingestor.h"                            // rc::RefrigeratorRgbIngestor (ZED RGB for door detection)
 #include "../../common/instance_tracker/instance_tracker.h"   // rc::InstanceTracker (birth/associate/death)
 #include "refrigerator_scene_graph.h" // rc::RefrigeratorSceneGraph (DSR node/RT I/O)
-#include "refrigerator_fitter.h"      // rc::RefrigeratorFitter (active-inference core)
+#include "refrigerator_fitter.h"
+#include "../../common/phantom_log/phantom_log.h"   // rc::history::PhantomLog (shadow-mode birth/death record)      // rc::RefrigeratorFitter (active-inference core)
 #include "refrigerator_existence.h"   // rc::RefrigeratorExistence (evidence-based removal)
 #include "birth_surprise_probe.h"   // rc::BirthSurpriseProbe (read-only: residual grid → birth surprise)
 #include "epistemic_planner.h"
@@ -78,6 +79,12 @@ public:
 public slots:
     void initialize();
     void compute();
+    // SHADOW-MODE birth/death recorder (CONCEPT_AGENT_LIFECYCLE.md §4.2). Records ONLY — it can never
+    // alter a birth or a removal. The attribution fields it captures at death (p_detect, in-FoV, central)
+    // are what separate a genuine classifier phantom from one of our own removal defects.
+    void log_phantom_event(std::string_view event, std::uint64_t id, std::string_view name,
+                           float x, float y, const rc::RefrigeratorInstance* inst, std::string_view note);
+
     void emergency();
     void restore();
     int  startup_check();
@@ -121,6 +128,8 @@ private:
     // Multi-instance birth/associate/merge (shared rc::InstanceTracker; the only instance-lifecycle path).
     // Associates "refrigerator" masks to instances, spawns a refrigerator from an unexplained mask, merges overlaps.
     rc::InstanceTracker tracker_;
+    // Other objects in the graph as robot-inflated footprints, so the NBV never proposes standing on furniture.
+    std::vector<rc::EpistemicPlanner::Obstacle> collect_viewpoint_obstacles(std::uint64_t self_id) const;
     void run_instance_tracker();   // called every cycle from compute()
     void retire_instance(std::uint64_t id);   // shared teardown: affordance + fitter forget + graph delete
     // Physical-exclusion invariant: two refrigerators cannot share space. Collapse any pair of instances whose
@@ -174,6 +183,7 @@ private:
     rc::RefrigeratorConfig                                         cfg_;
     rc::EpistemicPlanner                                    epistemic_planner_;
     std::unique_ptr<rc::RefrigeratorFitter>                        fitter_;    // active-inference fit core (owns instances)
+    rc::history::PhantomLog                             phantom_log_;   // shadow-mode birth/death record
     std::unique_ptr<rc::RefrigeratorExistence>                    existence_; // evidence-based removal (existence log-odds)
 
     // Live belief dashboard — its OWN top-level window (extracted from the DSR graph dock so it shows
@@ -216,6 +226,11 @@ private:
     int                  birth_surprise_log_ctr_ = 0;   // console-throttle counter
     long                 birth_surprise_cycle_ = 0;     // probe cycle index (advances only when the grid was read)
     std::vector<Eigen::Vector2f> last_refrigerator_dets_xy_;   // this cycle's ZED "refrigerator" detection centroids (room frame)
+    // Highest mask frame_id already COUNTED toward birth maturation. The tracker is fed every cycle (so pending
+    // candidates never expire on a stale cycle), but a candidate may only ACCRUE on a genuinely new observation
+    // — otherwise BirthFrames counts compute cycles, not evidence, and one mask frame re-presented at 10 Hz
+    // matures a phantom in well under a second. See [[refrigerator-birth-tightening]].
+    long last_tracker_mask_frame_ = -1;
     std::chrono::steady_clock::time_point last_monitor_tp_{};   // ~5 Hz throttle
     std::chrono::steady_clock::time_point last_compute_tp_{};   // compute-rate EMA
     FPSCounter fps_counter_;   // per-cycle "[refrigerator_concept Compute] Period/Fps/cpu%/mem" heartbeat (std::cout)

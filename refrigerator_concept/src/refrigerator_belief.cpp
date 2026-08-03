@@ -200,7 +200,67 @@ Eigen::Matrix<float, 6, 1> RefrigeratorBelief::process_noise_diag() const
 {
     const float qm = params_.process_std_m   * params_.process_std_m;
     const float qy = params_.process_std_yaw * params_.process_std_yaw;
-    return (Eigen::Matrix<float, 6, 1>() << qm, qm, qm, qm, qm, qy).finished();
+    const Eigen::Matrix<float, 6, 1> q0 =
+        (Eigen::Matrix<float, 6, 1>() << qm, qm, qm, qm, qm, qy).finished();
+    // Q = exp(ω) once volatility is inferred. Until the first measured cycle ω is unset and we return the
+    // configured constant, so a belief that never updates behaves exactly as before.
+    if (not params_.volatility_infer or not omega_init_)
+        return q0;
+    Eigen::Matrix<float, 6, 1> q;
+    for (int i = 0; i < 6; ++i) q(i) = std::exp(omega_(i));
+    return q;
+}
+
+// ─── Inferred volatility: the HISTORY stage (MODEL_HISTORY.md §3) ────────────────────────────────
+//
+// Generative statement: between frames the state takes a step θ_t = θ_{t−1} + w, w ~ N(0, Q), and Q is not
+// known — it is a property of THIS object (a fridge bolted to a wall vs a chair someone keeps moving). Infer
+// ω = log Q by gradient ascent on the log-evidence of the observed step, regularised by a hyperprior:
+//
+//     ω_i ← ω_i + lr · [ ½·( δθ_i²·e^{−ω_i} − 1 )  −  (ω_i − ω₀_i)/σ_ω² ]
+//
+// The bracket is exactly d/dω log N(δθ_i; 0, e^{ω_i}) plus the hyperprior pull. Consistent observation makes
+// δθ² small relative to e^ω, the first term goes negative, ω falls, and BOTH failure modes of a constant Q
+// are repaired at once: retention τ = Σ/e^ω grows, and the precision floor (e^ω/i)^¼ drops. A fridge that is
+// actually shoved produces a large δθ², the term flips positive, ω climbs and the model adapts within
+// seconds — stiffness is never a lock, and the (ω−ω₀)/σ_ω² term guarantees recoverability structurally
+// rather than by a clamp.
+//
+// ★DEVIATION FROM THE DOC, deliberate: MODEL_HISTORY.md §3 writes the surprise as δθᵀΣ⁻¹δθ (dimensionless)
+// while multiplying it by e^{−ω} (units 1/θ²). That is dimensionally inconsistent — the quantity whose
+// variance is being inferred is the STEP itself, so the per-DOF squared step δθ_i² (m², rad²) is what pairs
+// with e^{−ω_i}. With the group reduced to one DOF, k/2 becomes the ½ above. Same behaviour, correct units.
+void RefrigeratorBelief::update_volatility(const Eigen::Matrix<float, 6, 1>& dtheta)
+{
+    if (not params_.volatility_infer)
+        return;
+    if (not omega_init_)   // seed ω at the configured constant: experience starts from the species prior
+    {
+        const Eigen::Matrix<float, 6, 1> q0_saved = omega_;   // unused; keeps the intent explicit
+        (void) q0_saved;
+        const float qm = params_.process_std_m   * params_.process_std_m;
+        const float qy = params_.process_std_yaw * params_.process_std_yaw;
+        for (int i = 0; i < 6; ++i) omega0_(i) = std::log(std::max(1e-12f, (i == 5) ? qy : qm));
+        omega_ = omega0_;
+        omega_init_ = true;
+    }
+    const float lr  = std::max(0.0f, params_.volatility_lr);
+    const float s2  = std::max(1e-6f, params_.volatility_sigma * params_.volatility_sigma);
+    for (int i = 0; i < 6; ++i)
+    {
+        const float d2   = dtheta(i) * dtheta(i);
+        const float grad = 0.5f * (d2 * std::exp(-omega_(i)) - 1.0f) - (omega_(i) - omega0_(i)) / s2;
+        omega_(i) = std::max(params_.volatility_omega_min, omega_(i) + lr * grad);
+    }
+}
+
+// τ = Σ_ii / Q_ii frames: how many predict-only frames double this DOF's variance — "how long it remembers".
+Eigen::Matrix<float, 6, 1> RefrigeratorBelief::retention_frames() const
+{
+    const Eigen::Matrix<float, 6, 1> q = process_noise_diag();
+    Eigen::Matrix<float, 6, 1> tau;
+    for (int i = 0; i < 6; ++i) tau(i) = (q(i) > 1e-20f) ? Sigma_(i, i) / q(i) : 0.0f;
+    return tau;
 }
 
 // Inverse of the per-frame common-mode covariance Σc (diagonal): position (cx,cy) = config floor + pose-
@@ -467,6 +527,67 @@ std::array<bool, 4> RefrigeratorBelief::allowed_modes() const
     return {true, not rect, true, not rect};
 }
 
+// ─── Door CLEARANCE prior over the 4 modes (a door cannot open into a wall) ──────────────────────
+//
+// A refrigerator stands with its BACK against a wall, so its door faces the room — it physically cannot face
+// the wall it is attached to. That is geometry the agent already knows (the same wall the flush factor uses),
+// and it is the ONLY thing that can resolve a 180° error: rotating the box half a turn swaps front↔back but
+// moves nothing the camera can see. The appearance cue is structurally blind here — detect_front needs ≥2
+// camera-facing faces and never scores the back one, so for a wall-flush fridge viewed head-on it emits
+// nothing at all. See [[refrigerator-door-clearance-prior]].
+//
+// Per candidate mode k: how much its door direction points INTO the room, measured against the wall's inward
+// normal, scaled by how strongly we believe this fridge is flush against that wall in the first place:
+//
+//     logprior_k = gain · flush_weight · (front_dir_k · wall_inward_normal)
+//
+// (front_dir·n) ∈ [−1,1] is +1 for a door facing straight into the room and −1 for one facing into the wall.
+// flush_weight is the EXISTING {flush, free-standing} mixture weight, so a genuine mid-room fridge finds no
+// wall in range, the weight decays to 0, and the prior vanishes on its own — continuous, no proximity gate.
+//
+// ★This is a PRIOR, not evidence: it is recomputed from current geometry wherever the mode is scored and is
+// never accumulated into front_acc_. Adding it per cycle would be the same static-evidence repetition that has
+// bitten this codebase four times now (see [[existence-policy-unification]]); as a prior it cannot saturate,
+// and it silently follows the belief if the fit's yaw or the room polygon changes.
+std::array<float, 4> RefrigeratorBelief::door_clearance_logprior() const
+{
+    std::array<float, 4> lp{0.0f, 0.0f, 0.0f, 0.0f};
+    if (not point_wall_.ok or params_.door_clearance_gain <= 0.0f)
+        return lp;                                   // no room polygon ⇒ nothing to say about clearance
+    const float gap  = (back_centre(state_) - point_wall_.p).dot(point_wall_.n);
+    const float rel  = gap / std::max(1e-3f, params_.wall_reach_m);
+    const float flush = std::exp(-rel * rel);        // same mixture weight the wall-flush factor uses
+    constexpr float kHalfPi = 0.5f * static_cast<float>(M_PI);
+    const auto wrap = [](float a) { return std::remainder(a, 2.0f * static_cast<float>(M_PI)); };
+    for (int k = 0; k < 4; ++k)
+    {
+        const float psi = wrap(state_.yaw + static_cast<float>(k) * kHalfPi);
+        const Eigen::Vector2f front_dir(std::sin(psi), -std::cos(psi));   // door = local −Y
+        lp[k] = params_.door_clearance_gain * flush * front_dir.dot(point_wall_.n);
+    }
+    return lp;
+}
+
+// Adopt whichever door mode the accumulated appearance evidence PLUS the clearance prior favours, with no new
+// appearance cue required. Called every cycle so the geometry alone can correct a fridge whose door faces its
+// own wall — the case detect_front can never report on. Returns true if the belief was rotated.
+bool RefrigeratorBelief::resolve_front_geometric()
+{
+    const auto lp = door_clearance_logprior();
+    const std::array<bool, 4> allowed = allowed_modes();
+    int kbest = 0;
+    float best = front_acc_[0] + lp[0];
+    for (int k = 1; k < 4; ++k)
+        if (allowed[k] and front_acc_[k] + lp[k] > best) { best = front_acc_[k] + lp[k]; kbest = k; }
+    if (kbest == 0)
+        return false;
+    apply_mode_rotation(kbest);
+    const std::array<float, 4> old = front_acc_;    // re-baseline so the adopted mode becomes index 0
+    for (int m = 0; m < 4; ++m)
+        front_acc_[m] = std::clamp(old[(m + kbest) % 4] - old[kbest], -6.0f, 6.0f);
+    return true;
+}
+
 // Adopt door mode k: rotate yaw + (for a 90°/270° swap) relabel w↔h and swap the matching Σ / prior rows+cols.
 void RefrigeratorBelief::apply_mode_rotation(int k)
 {
@@ -527,11 +648,16 @@ bool RefrigeratorBelief::resolve_front(const FrontCue& cue, float evidence_weigh
     for (float& a : front_acc_)
         a = std::clamp(a - base, -kFrontClamp, kFrontClamp);
 
+    // Score = accumulated APPEARANCE evidence + the geometric CLEARANCE prior (a door cannot open into the wall
+    // this fridge is attached to). Same currency (nats), so they simply add; the prior is recomputed here rather
+    // than accumulated, so it never saturates.
+    const auto lp = door_clearance_logprior();
     int kbest = 0;
+    float best = front_acc_[0] + lp[0];
     for (int k = 1; k < 4; ++k)
-        if (allowed[k] and front_acc_[k] > front_acc_[kbest]) kbest = k;
+        if (allowed[k] and front_acc_[k] + lp[k] > best) { best = front_acc_[k] + lp[k]; kbest = k; }
     if (kbest == 0)
-        return false;   // current believed door direction still best-explained by the accumulated appearance
+        return false;   // current believed door direction still best-explained by appearance + clearance
 
     apply_mode_rotation(kbest);
     const std::array<float, 4> old = front_acc_;    // re-baseline so the new current mode (old kbest) is index 0
@@ -544,11 +670,14 @@ bool RefrigeratorBelief::resolve_front(const FrontCue& cue, float evidence_weigh
 std::array<float, 4> RefrigeratorBelief::front_posterior() const
 {
     const std::array<bool, 4> allowed = allowed_modes();
+    const auto lp = door_clearance_logprior();   // the SAME score resolve_front decides on (evidence + prior)
+    std::array<float, 4> s{};
+    for (int k = 0; k < 4; ++k) s[k] = front_acc_[k] + lp[k];
     std::array<float, 4> p{};
     float mx = -std::numeric_limits<float>::infinity();
-    for (int k = 0; k < 4; ++k) if (allowed[k]) mx = std::max(mx, front_acc_[k]);
+    for (int k = 0; k < 4; ++k) if (allowed[k]) mx = std::max(mx, s[k]);
     float sum = 0.0f;
-    for (int k = 0; k < 4; ++k) { p[k] = allowed[k] ? std::exp(front_acc_[k] - mx) : 0.0f; sum += p[k]; }
+    for (int k = 0; k < 4; ++k) { p[k] = allowed[k] ? std::exp(s[k] - mx) : 0.0f; sum += p[k]; }
     if (sum <= 0.0f) { for (int k = 0; k < 4; ++k) p[k] = allowed[k] ? 0.5f : 0.0f; return p; }
     for (float& v : p) v /= sum;
     return p;
@@ -1042,8 +1171,41 @@ bool RefrigeratorBelief::self_test()
                     flipped ? "RECANTED" : "STUCK (locked)", turned * 57.29578f);
     }
 
+    // ── (k) INFERRED VOLATILITY (MODEL_HISTORY.md §3) — the two properties any fix must have ─────────
+    // The doc's own acceptance test: a STATIC object must show ω falling and its unobserved σ no longer
+    // growing, while a MOVED object must still adapt within seconds. A Σ-clamp passes only the first; an
+    // evidence-count stiffener only the second. Making Q itself inferred is what moves both.
+    bool ok_vol = false;
+    {
+        RefrigeratorBeliefParams Pv = P;
+        Pv.volatility_infer = true;
+        Pv.volatility_lr = 0.05f;
+
+        // Drive ω directly with the same update the filter applies, so the test exercises the real code.
+        const auto run = [&](float step_m, int frames) {
+            RefrigeratorBelief b(RefrigeratorBeliefState{0.0f, 0.0f, 1.90f, 0.60f, 0.60f, 0.0f}, Pv);
+            Eigen::Matrix<float, 6, 1> d = Eigen::Matrix<float, 6, 1>::Zero();
+            for (int i = 0; i < frames; ++i) { d(3) = (i % 2 ? step_m : -step_m); b.update_volatility_for_test(d); }
+            return b;
+        };
+        // (1) STATIC: the belief barely moves (0.2 mm jitter on w) for 600 measured frames.
+        RefrigeratorBelief b_static = run(0.0002f, 600);
+        // (2) MOVED: the fridge is shoved — 4 cm steps.
+        RefrigeratorBelief b_moved  = run(0.04f, 600);
+
+        const float w0   = std::log(Pv.process_std_m * Pv.process_std_m);   // ω₀ for a length DOF
+        const float ws   = b_static.log_volatility()(3);
+        const float wm   = b_moved.log_volatility()(3);
+        // Retention: frames to double σ_w², τ = Σ/Q. Report the RATIO against the constant-Q baseline.
+        const float tau_ratio_static = std::exp(w0 - ws);
+        const float tau_ratio_moved  = std::exp(w0 - wm);
+        ok_vol = ws < w0 - 1.0f and wm > w0 + 1.0f and tau_ratio_static > 3.0f and tau_ratio_moved < 0.5f;
+        std::printf("RefrigeratorBelief::self_test [volatility]        %s  omega0=%.2f | static->%.2f (retention x%.1f) | moved->%.2f (retention x%.2f)\n",
+                    ok_vol ? "PASS" : "FAIL", w0, ws, tau_ratio_static, wm, tau_ratio_moved);
+    }
+
         return ok and ok_wall and ok_free and ok_nocross and ok_front and
-               ok_plaus and ok_evidence and ok_singleton and ok_height and ok_explain and ok_lock;
+               ok_plaus and ok_evidence and ok_singleton and ok_height and ok_explain and ok_lock and ok_vol;
     }
 }
 

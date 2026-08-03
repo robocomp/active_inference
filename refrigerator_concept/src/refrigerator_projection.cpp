@@ -18,6 +18,8 @@
 #include <unordered_set>
 #include <vector>
 
+#include "../../common/occlusion/occlusion.h"   // rc::occlusion::walls_block — shared with door/table/cabinet
+
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 
@@ -42,6 +44,70 @@ float door_ness(const cv::Mat& gray)
     cv::Sobel(gray, gx, CV_32F, 1, 0, 3);      // ∂/∂x → responds to VERTICAL lines
     cv::Sobel(gray, gy, CV_32F, 0, 1, 3);      // ∂/∂y → responds to HORIZONTAL lines (the door split)
     return static_cast<float>(cv::mean(cv::abs(gx))[0] + cv::mean(cv::abs(gy))[0]);
+}
+
+// DOOR SEAM detector: is there a door-separating line across THIS face? Returns a SELF-NORMALISING strength —
+// the dominant horizontal ridge measured against the same patch's own typical row — so it carries an absolute
+// meaning that mean gradient energy cannot. ~0 = a blank panel or a wall, ≫1 = a fridge front.
+//
+// ★Why this and not door_ness: mean |Sobel| has no absolute scale (it moves with lighting, albedo and texture),
+// so it is only usable as a RELATIVE margin between two faces — which is why detect_front demanded ≥2 visible
+// faces and emitted nothing for a head-on, wall-flush fridge (etc/fridge_1.png: `refrigerator 0.95`, one face,
+// seam plainly visible, cue suppressed). A seam ratio is scale-free: dividing the peak row by the median row
+// cancels illumination, so ONE face is enough to say "this face is the door" — and that, unlike a comparison
+// between visible faces, resolves the 180° front/back ambiguity, because the back panel has no seam.
+//
+//   rowprof[r] = mean_x |∂I/∂y|                 — horizontal-line energy per row
+//   contrast   = max_r rowprof / mean intensity — WEBER contrast: invariant to multiplicative lighting, which
+//                                                 is the invariance a camera actually needs, and BOUNDED
+//   isolation  = 1 − median/peak ∈ [0,1]        — →1 for one dominant ridge, →0 for general texture
+//   coverage   = fraction of columns responding at the winning row — a real seam spans the door
+//   score      = contrast · isolation · coverage
+// ★NOT peak/median: on a smooth panel the median row energy is ~0, so that ratio explodes and a BLANK back
+// panel scored as high as a door (verified — it is why this is written the way it is). Weber contrast has a
+// real denominator, so "no seam" genuinely scores ~0.
+float door_seam_score(const cv::Mat& gray)
+{
+    if (gray.empty() or gray.rows < 8 or gray.cols < 8)
+        return 0.0f;
+    cv::Mat gy;
+    cv::Sobel(gray, gy, CV_32F, 0, 1, 3);
+    const cv::Mat agy = cv::abs(gy);
+
+    // Row profile, ignoring the outer border rows/cols: the warp's BORDER_REPLICATE edge and the box
+    // silhouette boundary both produce strong artificial gradients that are not a seam.
+    const int m = std::max(2, gray.rows / 12), mc = std::max(2, gray.cols / 12);
+    std::vector<float> prof;
+    prof.reserve(gray.rows);
+    for (int r = m; r < gray.rows - m; ++r)
+    {
+        const cv::Mat row = agy.row(r).colRange(mc, gray.cols - mc);
+        prof.push_back(static_cast<float>(cv::mean(row)[0]));
+    }
+    if (prof.size() < 8)
+        return 0.0f;
+
+    std::vector<float> sorted = prof;
+    std::nth_element(sorted.begin(), sorted.begin() + sorted.size() / 2, sorted.end());
+    const float med   = std::max(0.0f, sorted[sorted.size() / 2]);
+    const auto  it    = std::max_element(prof.begin(), prof.end());
+    const float peak  = *it;
+    const int   rbest = m + static_cast<int>(std::distance(prof.begin(), it));
+    if (peak <= 1e-6f)
+        return 0.0f;
+    // Weber contrast against the panel's own brightness ⇒ cancels lighting; bounded, unlike peak/median.
+    const float mean_I   = std::max(1.0f, static_cast<float>(cv::mean(gray)[0]));
+    const float contrast = peak / mean_I;
+    const float isolation = std::clamp(1.0f - med / peak, 0.0f, 1.0f);   // one ridge, not general texture
+
+    // Coverage: a genuine door seam runs across the panel, not a local blob (a handle, a sticker, a highlight).
+    const cv::Mat brow = agy.row(rbest).colRange(mc, gray.cols - mc);
+    int lit = 0;
+    for (int c = 0; c < brow.cols; ++c)
+        if (brow.at<float>(0, c) >= 0.5f * peak) ++lit;
+    const float coverage = static_cast<float>(lit) / std::max(1, brow.cols);
+
+    return contrast * isolation * coverage;
 }
 }  // namespace
 
@@ -219,27 +285,18 @@ SilhouetteExistence RefrigeratorProjection::compute_silhouette_existence(const R
     // the sample is behind a wall. See [[refrigerator-silhouette-line-of-sight]].
     const Eigen::Vector3d cam3 = Mopt.value().block<3, 1>(0, 3);
     const Eigen::Vector2f cam_xy(static_cast<float>(cam3.x()), static_cast<float>(cam3.y()));
+    // ★2026-07-31: this crossing test was hand-rolled here and is now the SHARED rc::occlusion::walls_block(),
+    // the same call door_concept, table_concept and cabinet_concept make. One implementation, one place to fix.
+    // NOTE the self-occlusion guard changed form: the local version used a ray-parameter slack (t < 1−1e-3, so
+    // only a sample sitting essentially ON the wall line was exempt); walls_block uses a METRIC skip — a
+    // segment closer than own_wall_skip_m to the sample never occludes it. For a wall-flush fridge both
+    // protect the back face; the metric form additionally protects the whole carcass depth, which is the
+    // intent. 0.70 m ≈ fridge depth. The validated failure this fixes (camera 7.0 m away through a wall,
+    // in_fov_frac=1.00, ex_L −4 in three cycles → DELETED) is unaffected: that wall is metres from the
+    // sample, far outside the skip. See [[refrigerator-silhouette-line-of-sight]].
+    constexpr float kOwnWallSkipM = 0.70f;
     const auto wall_between = [&](const Eigen::Vector2f& q) -> bool
-    {
-        const std::size_t n = room_polygon_.size();
-        if (n < 2) return false;                       // no room model ⇒ no occlusion test (pre-existing behaviour)
-        const Eigen::Vector2f d = q - cam_xy;
-        for (std::size_t i = 0; i < n; ++i)
-        {
-            const Eigen::Vector2f& a = room_polygon_[i];
-            const Eigen::Vector2f  e = room_polygon_[(i + 1) % n] - a;
-            const float den = d.x() * e.y() - d.y() * e.x();
-            if (std::abs(den) < 1e-9f) continue;                       // parallel
-            const Eigen::Vector2f ac = a - cam_xy;
-            const float t = (ac.x() * e.y() - ac.y() * e.x()) / den;    // along camera→sample
-            const float u = (ac.x() * d.y() - ac.y() * d.x()) / den;    // along the wall edge
-            // STRICT interior crossing only. The 1e-3 slack at t=1 is what lets a fridge standing flush against a
-            // wall keep its own back-face samples: those sit ON the wall line, and a wall must not occlude itself.
-            if (t > 1e-3f and t < 1.0f - 1e-3f and u >= 0.0f and u <= 1.0f)
-                return true;
-        }
-        return false;
-    };
+    { return rc::occlusion::walls_block(cam_xy, q, room_polygon_, kOwnWallSkipM); };
 
     // Classify ONE room-frame silhouette sample: project it, then vote occupancy / absence / occlusion. A
     // sample lit by a "refrigerator" mask is occupancy; lit by nothing is ABSENCE (the "gone" signal that fires even
@@ -388,7 +445,7 @@ std::optional<FrontCue> RefrigeratorProjection::detect_front(const RefrigeratorS
     constexpr int DST_W = 96, DST_H = 160;   // fixed upright warp size → mean door-ness comparable across faces
     const cv::Point2f dst[4] = { {0, 0}, {DST_W - 1.f, 0}, {DST_W - 1.f, DST_H - 1.f}, {0, DST_H - 1.f} };
 
-    float best = -1.0f, second = -1.0f, best_bearing = 0.0f;
+    float best = -1.0f, second = -1.0f, best_bearing = 0.0f, best_seam = 0.0f;
     int n_scored = 0;
     for (const auto& f : faces)
     {
@@ -429,7 +486,11 @@ std::optional<FrontCue> RefrigeratorProjection::detect_front(const RefrigeratorS
         cv::warpPerspective(rgb, patch, Mwarp, cv::Size(DST_W, DST_H), cv::INTER_LINEAR, cv::BORDER_REPLICATE);
         cv::Mat gray;
         cv::cvtColor(patch, gray, cv::COLOR_BGR2GRAY);
-        const float score = door_ness(gray);
+        // The SEAM is the discriminator (see door_seam_score); mean edge energy is kept only as a weak
+        // tie-break between two faces that both lack a seam.
+        const float seam  = door_seam_score(gray);
+        const float score = seam + 1e-3f * door_ness(gray);
+        if (seam > best_seam) best_seam = seam;
         ++n_scored;
 
         if (score > best)
@@ -442,10 +503,20 @@ std::optional<FrontCue> RefrigeratorProjection::detect_front(const RefrigeratorS
             second = score;
     }
 
-    if (n_scored < 2 or best <= 0.0f)
-        return std::nullopt;                                    // need ≥2 visible faces to tell door from side
+    if (n_scored < 1 or best <= 0.0f)
+        return std::nullopt;
 
-    const float confidence = (best - std::max(0.0f, second)) / (best + 1e-6f);
+    // ★ONE visible face is enough when it carries a SEAM. The old rule needed ≥2 faces because the score was a
+    // relative margin, so it emitted nothing for a fridge standing flush against a wall and viewed head-on —
+    // the clearest possible view of the door (etc/fridge_1.png). A seam is absolute evidence about the face it
+    // is on: "this face is the door" fixes the door bearing outright, and unlike any comparison between the
+    // faces that happen to be visible it resolves the 180° front/back ambiguity, since the back has no seam.
+    // The strength maps to confidence through the same saturating form used elsewhere: seam/(seam+1) — 1 unit
+    // of seam ratio×coverage is half-confident. No new constant, and still suppressed by FrontMinConfidence
+    // when the face is blank.
+    const float confidence = (n_scored >= 2)
+        ? (best - std::max(0.0f, second)) / (best + 1e-6f)      // two faces: which one is the door
+        : best_seam / (best_seam + 1.0f);                       // one face: does it carry a seam at all
     if (confidence < front_min_confidence_)
         return std::nullopt;                                    // margin too weak → suppress (don't feed noise)
     return FrontCue{ best_bearing, std::clamp(confidence, 0.0f, 1.0f) };
@@ -474,7 +545,35 @@ bool RefrigeratorProjection::self_test()
     const bool ok = s_lined > 2.0f * std::max(1.0f, s_plain);   // door face clearly beats the plain side
     std::printf("RefrigeratorProjection::self_test [door-ness] %s  lined=%.2f plain=%.2f (ratio %.1f)\n",
                 ok ? "PASS" : "FAIL", s_lined, s_plain, s_lined / std::max(0.01f, s_plain));
-    return ok;
+
+    // ── DOOR SEAM: the absolute, single-face discriminator (etc/fridge_1.png is exactly this view) ──────
+    // A fridge FRONT: flat panel with one full-width horizontal separator + a handle. Against the BACK panel
+    // (flat, no seam) and against a LIT panel (a bright vertical band — the specular/handle case that must NOT
+    // read as a seam). Scale-free, so the score is compared to an absolute level, not to another face.
+    const auto make = [&](bool seam, bool band, int base) {
+        cv::Mat m(160, 96, CV_8UC3, cv::Scalar(base, base, base));
+        for (int y = 0; y < m.rows; ++y)                                   // gentle shading, both patches
+            m.row(y).setTo(cv::Scalar(base + y / 20, base + y / 20, base + y / 20));
+        if (seam) cv::line(m, cv::Point(4, 88), cv::Point(91, 88), cv::Scalar(30, 30, 30), 2);   // door split
+        if (band) cv::rectangle(m, cv::Rect(70, 10, 8, 140), cv::Scalar(240, 240, 240), cv::FILLED);
+        return m;
+    };
+    cv::Mat gf, gb, gv;
+    cv::cvtColor(make(true,  true,  120), gf, cv::COLOR_BGR2GRAY);   // front: seam + handle
+    cv::cvtColor(make(false, false, 120), gb, cv::COLOR_BGR2GRAY);   // back: blank panel
+    cv::cvtColor(make(false, true,  120), gv, cv::COLOR_BGR2GRAY);   // blank + a bright vertical band
+    const float seam_front = door_seam_score(gf);
+    const float seam_back  = door_seam_score(gb);
+    const float seam_band  = door_seam_score(gv);
+    // Confidence a SINGLE face would emit, seam/(seam+1), vs FrontMinConfidence's default 0.10.
+    const float conf_front = seam_front / (seam_front + 1.0f);
+    const float conf_back  = seam_back  / (seam_back  + 1.0f);
+    const bool ok_seam = seam_front > 3.0f * std::max(0.05f, seam_back) and
+                         seam_front > 3.0f * std::max(0.05f, seam_band) and
+                         conf_front > 0.10f and conf_back < 0.10f;
+    std::printf("RefrigeratorProjection::self_test [door-seam] %s  front=%.2f (conf %.2f) back=%.2f (conf %.2f) vert-band=%.2f\n",
+                ok_seam ? "PASS" : "FAIL", seam_front, conf_front, seam_back, conf_back, seam_band);
+    return ok and ok_seam;
 }
 
 }  // namespace rc

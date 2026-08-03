@@ -14,6 +14,8 @@
 
 #pragma once
 
+#include <cstdint>
+#include <functional>
 #include <memory>
 
 #include <dsr/api/dsr_api.h>
@@ -22,7 +24,8 @@
 
 namespace rc {
 
-class RefrigeratorFitter;             // owns the instances (+ silhouette existence)
+class RefrigeratorFitter;
+struct RefrigeratorInstance;   // one tracked refrigerator (referenced by the on_remove sink below)             // owns the instances (+ silhouette existence)
 class RefrigeratorLidarIngestor;      // stages the per-plane room-frame sweeps
 struct EvidenceGlobals;        // dashboard/evidence_monitor.h — removal counters
 
@@ -36,7 +39,11 @@ public:
     // on a fresh sweep) and delete the demonstrably-empty refrigerators. Removed ids are forgotten in the fitter and
     // deleted from the graph; removal counters are accrued into ev_g. No-op when no channel has fresh evidence.
     void update_and_remove(RefrigeratorFitter& fitter, RefrigeratorLidarIngestor* lidar,
-                           bool fresh_masks, bool fresh_sweep, EvidenceGlobals& ev_g);
+                           bool fresh_masks, bool fresh_sweep, EvidenceGlobals& ev_g,
+                           // on_remove (optional) fires for each doomed instance BEFORE teardown, so the caller can
+                           // record the death while the existence state that justified it is still readable. Shadow-mode
+                           // phantom log (CONCEPT_AGENT_LIFECYCLE.md §4.2) — a SINK, never a veto: it cannot alter removal.
+                           const std::function<void(std::uint64_t, const RefrigeratorInstance&)>& on_remove = {});
 
 private:
     std::shared_ptr<DSR::DSRGraph> G_;

@@ -10,6 +10,7 @@
 #include <limits>
 #include "specificworker.h"
 #include "refrigerator_geometry.h"   // rc::geom::footprint_overlap_ratio
+#include "../../common/instance_tracker/birth_evidence.h"   // rc::birth — the SHARED CREATE policy
 
 #include <algorithm>
 #include <cmath>
@@ -136,6 +137,27 @@ void SpecificWorker::run_instance_tracker()
     plaus_p.plaus_fe_ref       = cfg_.plaus_fe_ref;
     plaus_p.plaus_fe_scale     = cfg_.plaus_fe_scale;
     plaus_p.prior_footprint_m  = cfg_.ai2_prior_footprint_m;
+    // ── Is this cycle a genuinely NEW observation? ────────────────────────────────────────────────────
+    // The detections below are rebuilt EVERY cycle on purpose: a pending birth candidate that finds no matching
+    // detection expires (instance_tracker.h swaps next_cand in), so skipping stale cycles would wipe every
+    // candidate and nothing would ever birth. But PERSISTING a candidate and ACCRUING evidence into it are two
+    // different things, and the old code did both — so `BirthFrames` counted COMPUTE CYCLES. At 10 Hz compute
+    // against a ~9.5 Hz mask stream that meant one mask frame could be counted several times, and 8 "frames" was
+    // well under a second of a single unchanging view. A YOLO false positive on a wall panel or a door easily
+    // survives that. Below, a stale cycle contributes birth_evidence 0: the candidate is still matched and kept
+    // alive, its streak simply does not grow. BirthFrames now means N distinct observations.
+    // This is the birth-side instance of "repetition is not independence" — see [[existence-policy-unification]].
+    const bool new_observation = pkt.valid and static_cast<long>(pkt.frame_id) > last_tracker_mask_frame_;
+    if (new_observation)
+        last_tracker_mask_frame_ = static_cast<long>(pkt.frame_id);
+
+    // This sensor's detectability, the ONLY thing the shared birth policy needs from the agent. Deliberately the
+    // same numbers the removal side weights absence by: an object the ZED cannot resolve well enough to DELETE
+    // is one it cannot resolve well enough to CREATE.
+    const rc::birth::Detectability birth_detectability{cfg_.ai2_periph_ref,
+                                                       cfg_.existence_absence_range_ref_m,
+                                                       cfg_.existence_absence_range_power};
+
     if (pkt.valid)
         for (int i = 0; i < static_cast<int>(pkt.slices.size()); ++i)
         {
@@ -187,6 +209,26 @@ void SpecificWorker::run_instance_tracker()
             if (support < 0.99f and cfg_.fridge_filter_log)
                 std::print("[fridge-filter] birth cand slice={} OUTSIDE/at layout edge: interior_support={:.3f} → birth_ev={:.3f}\n",
                            i, support, dv.birth_evidence);
+
+            // MASK QUALITY → how much this ONE observation is worth toward creating an instance. The policy is
+            // shared (common/instance_tracker/birth_evidence.h) so every concept agent births on the same terms;
+            // this agent only supplies its sensor's detectability, built once above. A birth used to count every
+            // mask equally, so the marginal `refrigerator 0.53` blob on a wall in fridge_1.png matured exactly as
+            // fast as a clean 0.90 detection of the real fridge, and a 7 m detection as fast as a 1.5 m one.
+            // ★Birth is admitted by the UPDATE rule: the very same predicate that decides whether this frame may
+            // move an EXISTING fridge's geometry (untruncated + robot still, or the mask well centred). A frame
+            // the fit would refuse can never create an object — no second, weaker birth-only notion of "good
+            // enough". On top of that the observation is worth its reliability (confidence · range).
+            const bool admissible = fitter_->frame_admissible(sl);
+            const rc::birth::MaskQuality mq{sl.confidence, sl.range};
+            const float quality = rc::birth::evidence(mq, birth_detectability, new_observation, admissible);
+            dv.birth_evidence *= quality;
+
+            if (cfg_.fridge_filter_log)
+                std::print("[fridge-filter] birth cand slice={} weight={:.3f} (conf={:.2f} range={:.1f}m){}{} → birth_ev={:.3f}\n",
+                           i, quality, sl.confidence, sl.range,
+                           new_observation ? "" : " STALE(0)",
+                           admissible ? "" : " INADMISSIBLE(0)", dv.birth_evidence);
             dets.push_back(dv);
         }
 
@@ -243,7 +285,12 @@ void SpecificWorker::run_instance_tracker()
         const Eigen::Vector3f& c = pkt.slices[dets[d].slice_index].centroid;
         const auto new_id = scene_graph_->create_instance_from_detection(c, room_node_id_);
         if (new_id != 0)
+        {
             fitter_->note_birth(new_id, Eigen::Vector2f(c.x(), c.y()));
+            // Shadow-mode birth record (CONCEPT_AGENT_LIFECYCLE.md §4.2): captures the place AND the
+            // viewpoint that produced it, so a phantom that dies young is attributable to both.
+            log_phantom_event("BIRTH", new_id, "", c.x(), c.y(), nullptr, "");
+        }
     }
 
     // Per-instance ZED-slice count for the EvidenceMonitor. Every assigned slice is a ZED detection now

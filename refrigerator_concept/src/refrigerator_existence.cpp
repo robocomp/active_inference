@@ -25,7 +25,8 @@ namespace rc {
 // Carve the LiDAR sweep(s) + silhouette against every refrigerator footprint, integrate the per-instance existence
 // log-odds, and remove the refrigerators whose volume is demonstrably empty (debounced). See refrigerator_existence.h.
 void RefrigeratorExistence::update_and_remove(RefrigeratorFitter& fitter, RefrigeratorLidarIngestor* lidar,
-                                       bool fresh_masks, bool fresh_sweep, EvidenceGlobals& ev_g)
+                                       bool fresh_masks, bool fresh_sweep, EvidenceGlobals& ev_g,
+                                       const std::function<void(std::uint64_t, const RefrigeratorInstance&)>& on_remove)
 {
     // Decoupled cadence: the SILHOUETTE/mask channel integrates on a fresh MASK frame (camera clock), the LiDAR
     // free-space carve on a fresh SWEEP (LiDAR clock). Each accrues its evidence independently, so a camera-only
@@ -92,7 +93,21 @@ void RefrigeratorExistence::update_and_remove(RefrigeratorFitter& fitter, Refrig
                 // only by the ricoh whose silhouette the ZED-based check can't confirm, must never vote it away.
                 // Occupancy always counts. (The ricoh-projected silhouette, once the producer ships 360 mask
                 // pixels, will let absence be judged in the ricoh view directly instead of relying on this guard.)
-                const float raw_free = observed ? 0.0f : sil.e_free;
+                // ★A frame that may not MOVE the geometry may not DESTROY the object either.
+                // `dbg_gated` is the fit's own admissibility verdict for this frame (truncated mask, or the
+                // robot moving with the mask off-centre). We already apply that rule to CREATE — birth accrues
+                // only on admissible frames — and removal is the same decision with the opposite sign, so it
+                // needs the same evidence standard. It did not have it, and that asymmetry is what deleted a
+                // healthy fridge in 5 seconds (etc/ai2_log.csv 19:55): the robot drove 2.28 m → 0.82 m, the
+                // motion gate froze the belief at cycle 16, and from cycle 30 the frozen box no longer projected
+                // onto the mask (socc 600 → 0 with npts still ~55000, i.e. the fridge was plainly visible). Every
+                // cycle that contributed removal evidence had gated=1. At 0.8 m a small pose-chain error is a
+                // large pixel error, so a frozen belief cannot be checked against the image at all.
+                //
+                // ⚠Consequence to watch: a phantom is now only removable from an admissible viewpoint — still,
+                // and reasonably framed. That is what the epistemic planner exists to produce, but it does mean
+                // removal waits for a good look instead of happening while driving past.
+                const float raw_free = (observed or inst.dbg_gated) ? 0.0f : sil.e_free;
                 // P(detect | present, geometry): how confidently the ZED would resolve this refrigerator FROM HERE.
                 // in_fov_frac folds the real FRUSTUM + occlusion; range_conf the angular-size drop; central_frac
                 // whether the robot is actually LOOKING at it (a peripheral refrigerator clipping the wide FoV edge is
@@ -139,10 +154,44 @@ void RefrigeratorExistence::update_and_remove(RefrigeratorFitter& fitter, Refrig
             inst.dbg_ex_lidar_occ = ev.e_occ; inst.dbg_ex_lidar_free = ev.e_free; inst.dbg_ex_lidar_n = ev.n_reached;
             if (ev.n_reached > 0)                                                    // 0 ⇒ not probed ⇒ HOLD
             {
-                // Degrade the free/absence half by LiDAR range: far away the beams are sparse, so a pass-through
-                // is weak evidence the fridge is gone.
+                // ── P(detect) for the LiDAR, exactly as the silhouette has one ────────────────────────
+                // Absence is evidence of removal only in proportion to how well this sensor could have
+                // resolved the object FROM HERE. The camera has had that discipline all along (range_conf x
+                // in_fov_frac x central_frac); the LiDAR did not, and once solid_delta made this channel
+                // SYMMETRIC that omission became a deletion mechanism: LiDAR is 360°, so it votes every cycle
+                // regardless of where the robot is looking. A fridge was removed with the robot 6 m away and
+                // FACING AWAY — the camera correctly HELD (n_detectable==0, nothing integrated) while the
+                // LiDAR walked L down on its own. See [[existence-policy-unification]].
+                //
+                //   coverage = n_reached / LidarCoverageN0 — how many beams actually reached the footprint
+                //              against the count that constitutes a resolving look. That constant already
+                //              exists and already means exactly this (the fit uses it the same way), so this
+                //              introduces no new number. At 6 m the rings are sparse, a handful of beams
+                //              graze the box, coverage ~0 ⇒ absence says nothing ⇒ HOLD. Up close a phantom
+                //              is swept by many beams, coverage 1 ⇒ absence at full strength ⇒ it still dies.
+                //
+                // ★Applied to e_interior AS WELL as e_free. Only e_free was degraded before, so the interior
+                // term — the one that makes a phantom-over-a-wall die — went in at FULL strength from any
+                // distance. That was a plain bug, not a policy choice.
                 const float lidar_range = (origin - Eigen::Vector3f(bs.cx, bs.cy, 0.5f * bs.H)).norm();
-                ev.e_free *= absence_range_conf(lidar_range);
+                const float coverage = (cfg_.lidar_coverage_n0 > 0.0f)
+                                     ? std::min(1.0f, static_cast<float>(ev.n_reached) / cfg_.lidar_coverage_n0)
+                                     : 1.0f;
+                // ★Same admissibility rule as the silhouette: a frame that may not MOVE the geometry may not
+                // DESTROY the object. I applied this to the camera channel first and the fridge died in exactly
+                // the same 5 seconds, because the LiDAR half had no such gate — etc/ai2_log.csv 20:08 shows
+                // ex_sfree_eff = 0 on every row (camera correctly silent) while ex_lfree_eff ran 714 → 971 with
+                // ex_locc ≈ 0.017: ~900 beams passing straight THROUGH the believed box each cycle.
+                //
+                // Both sensors were saying the same true thing — the believed box is not where the fridge is —
+                // and neither was entitled to act on it. The belief froze at cycle 16 (motion gate) while the
+                // robot drove 2.3 m → 1.15 m; a stale box at 1 m is metres of ray error and a whole frame of
+                // pixel error. The evidence is about OUR registration, not about the fridge's existence.
+                // Occupancy is unaffected: a return that lands on the box can only ever confirm.
+                const float admissible = inst.dbg_gated ? 0.0f : 1.0f;
+                const float p_detect_lidar = absence_range_conf(lidar_range) * coverage * admissible;
+                ev.e_free     *= p_detect_lidar;
+                ev.e_interior *= p_detect_lidar;
                 // A refrigerator IS a faithful opaque solid, so it declares itself as one and gets the symmetric
                 // policy: a return at the near face is FOR; a through-beam and — the fix — a return metres deep
                 // INSIDE the volume are AGAINST, because a solid fridge would have blocked them.
@@ -190,7 +239,11 @@ void RefrigeratorExistence::update_and_remove(RefrigeratorFitter& fitter, Refrig
     {
         std::print("refrigerator_concept: [existence] removing refrigerator id={} — free-space evidence (empty volume)\n", id);
         if (auto it = fitter.instances().find(id); it != fitter.instances().end())
+        {
+            // Record BEFORE teardown, while the existence state that justified the kill is readable.
+            if (on_remove) on_remove(id, it->second);
             it->second.affordance.remove();
+        }
         fitter.forget_node(id);
         G_->delete_node(id);
     }

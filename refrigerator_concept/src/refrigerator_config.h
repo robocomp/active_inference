@@ -98,6 +98,15 @@ struct RefrigeratorConfig
     float ai2_wall_reach_m            = 0.15f;    // gap scale over which the flush hypothesis loses its weight
     // WALL as a competing per-point explanation (explaining away — see RefrigeratorBeliefParams). π_wall and the
     // extra wall-plane std. 0 = OFF (mixture stays box+clutter, i.e. the pre-existing behaviour).
+    // Door CLEARANCE prior: nats of preference, at full flush, for the door mode facing INTO the room over
+    // one facing into the wall. Scaled by the flush mixture weight, so it vanishes for a mid-room fridge.
+    float ai2_door_clearance_gain     = 3.0f;
+    // INFERRED VOLATILITY (MODEL_HISTORY.md §3) — the HISTORY stage. Q becomes exp(ω) per DOF, inferred from
+    // how much the belief actually moves, so retention grows with consistent experience and collapses when the
+    // object genuinely moves. false ⇒ Q is the constant process_std_* exactly as before.
+    bool  ai2_volatility_infer        = false;
+    float ai2_volatility_lr           = 0.02f;
+    float ai2_volatility_sigma        = 2.0f;
     float ai2_wall_explain_frac       = 0.25f;
     float ai2_wall_explain_sigma_m    = 0.05f;
     // WALL NO-CROSS (ONE-SIDED): the flush factor above is two-sided (drives the back-face gap → 0) and its weight
@@ -375,5 +384,9 @@ struct RefrigeratorConfig
 
 // Fill a RefrigeratorConfig from a RoboComp ConfigLoader (all keys optional, defaults above).
 RefrigeratorConfig load_refrigerator_config(const ConfigLoader& cfg);
+
+// Cross-check common/concept_manifest/refrigerator.concept.toml against the priors etc/config.toml actually
+// produced. Read-only, startup-only: the manifest is NOT authoritative yet — this measures whether it could be.
+bool verify_refrigerator_manifest(const RefrigeratorConfig& out, const std::string& path);
 
 }  // namespace rc

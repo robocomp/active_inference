@@ -18,6 +18,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <locale>
 #include <print>
 #include <random>
 #include <unordered_map>
@@ -93,6 +94,29 @@ float RefrigeratorFitter::periphery_penalty(const RefrigeratorInstance& inst) co
 // "Be-still-to-update": true ⇒ this frame may only CONFIRM (predict-only), never move/reshape the geometry mean.
 // Robot linear/angular speed above the still-level, OR the mask's own ego-motion corruption (motion_dotd) above
 // its still-level. EXCEPTION: a well-centred mask (near the principal point) is trustworthy even while moving.
+// Is THIS raw mask good enough to move geometry? Byte-for-byte the admissibility the UPDATE path applies to an
+// existing instance (the trunc gate + confirm_only), but evaluated on a slice that has no instance yet — every
+// input is already on the slice (motion_dotd, centroid_radius, trunc_frac) plus this cycle's ego speeds.
+//
+// ★A frame that may not MOVE an existing belief must not CREATE one. Birth used to admit frames the fit itself
+// would refuse — a smeared mask taken while the robot drives past, or one clipped at the image border — which is
+// how furniture appeared in passing. One rule, defined once, applied to both ends of the lifecycle.
+bool RefrigeratorFitter::frame_admissible(const rc::MaskIngestor::MaskSlice& sl) const
+{
+    if (sl.trunc_frac > cfg_.ai2_trunc_gate_frac)
+        return false;                                   // truncated ⇒ extent is a lower bound ⇒ never births
+    if (not cfg_.ai2_motion_confirm_only)
+        return true;
+    const bool moving = ego_lin_mps_   > cfg_.ai2_still_lin_mps
+                     or ego_ang_radps_ > cfg_.ai2_still_ang_radps
+                     or std::abs(sl.motion_dotd) > cfg_.ai2_still_dotd;
+    if (not moving)
+        return true;                                    // robot still ⇒ admissible
+    // Moving: only a well-CENTRED mask is trusted (the robot is looking AT it), exactly as in confirm_only.
+    return cfg_.ai2_moving_update_center_radius >= 0.0f
+       and sl.centroid_radius <= cfg_.ai2_moving_update_center_radius;
+}
+
 bool RefrigeratorFitter::confirm_only(const RefrigeratorInstance& inst) const
 {
     if (not cfg_.ai2_motion_confirm_only)
@@ -584,6 +608,10 @@ float RefrigeratorFitter::run_inference(RefrigeratorInstance& inst, const Refrig
         // here — a poorly-localized room must return the fridge hypothesis its freedom, not silently veto it.)
         p.wall_explain_frac    = have_room_geometry_ ? cfg_.ai2_wall_explain_frac : 0.0f;
         p.wall_explain_sigma_m = cfg_.ai2_wall_explain_sigma_m;
+        p.door_clearance_gain  = cfg_.ai2_door_clearance_gain;
+        p.volatility_infer     = cfg_.ai2_volatility_infer;
+        p.volatility_lr        = cfg_.ai2_volatility_lr;
+        p.volatility_sigma     = cfg_.ai2_volatility_sigma;
         p.pixel_sigma_over_f     = cfg_.pixel_sigma_over_f;
         p.depth_sigma0_m         = cfg_.depth_sigma0_m;
         p.depth_sigma_range_coef = cfg_.depth_sigma_range_coef;
@@ -996,6 +1024,10 @@ void RefrigeratorFitter::log_ai2_csv(const RefrigeratorInstance& inst, int npts,
     if (not ai2_csv_.is_open())
     {
         ai2_csv_.open(cfg_.ai2_csv_path, std::ios::out | std::ios::trunc);
+        ai2_csv_.imbue(std::locale::classic());   // ★Qt imbues the global locale, which inserts THOUSANDS SEPARATORS
+                                            // into integers (pkt_ts 1785763853131 -> "1,785,763,853,131"), splitting
+                                            // one CSV field into five and making the whole log unparseable by column.
+                                            // Pin "C" so the log is machine-readable regardless of the UI locale.
         if (not ai2_csv_.is_open()) { cfg_.ai2_csv_path.clear(); return; }
         ai2_csv_ << "cycle,node,pkt_fid,pkt_ts,npts,gated,energy,fe_baseline,fe_surprise,R,motion_var,depth_var,motion_dotd,trunc_frac,range,"
                  << "cx,cy,H,w,h,yaw,std_cx,std_cy,std_H,std_w,std_h,std_yaw,"
@@ -1008,7 +1040,8 @@ void RefrigeratorFitter::log_ai2_csv(const RefrigeratorInstance& inst, int npts,
                  << "dyaw_points,dyaw_moment,dyaw_flip,obliquity_cos,completeness,moment_aniso,moment_r_yaw,"
                  << "mom_major,mom_minor,mom_phi,mom_pts,"   // RAW footprint statistic (basin diagnosis)   // rogue-mask diag
                  << "ex_L,ex_p,ex_locc,ex_lfree,ex_lfree_eff,ex_ln,ex_socc,ex_sfree,ex_sfree_eff,ex_sndet,ex_streak,"
-                 << "ex_pdetect,ex_central,ex_verify,ex_wantsverify\n";   // existence-removal + verification-gate diag
+                 << "ex_pdetect,ex_central,ex_verify,ex_wantsverify,"
+                 << "omega_w,omega_yaw,tau_w,tau_yaw\n";   // HISTORY: inferred log-volatility + retention (frames)   // existence-removal + verification-gate diag
     }
     const auto& s = inst.ai2_belief.state();
     const auto& S = inst.ai2_belief.covariance();
@@ -1043,7 +1076,9 @@ void RefrigeratorFitter::log_ai2_csv(const RefrigeratorInstance& inst, int npts,
              << inst.dbg_ex_sil_occ << ',' << inst.dbg_ex_sil_free << ',' << inst.dbg_ex_sil_free_eff << ',' << inst.dbg_ex_sil_ndet << ','
              << inst.existence_remove_streak << ','
              << inst.dbg_ex_pdetect << ',' << inst.dbg_ex_central << ','
-             << inst.verify_surprise << ',' << (inst.wants_verification ? 1 : 0) << '\n';   // existence-removal + verification-gate diag
+             << inst.verify_surprise << ',' << (inst.wants_verification ? 1 : 0) << ','
+             << inst.ai2_belief.log_volatility()(3) << ',' << inst.ai2_belief.log_volatility()(5) << ','
+             << inst.ai2_belief.retention_frames()(3) << ',' << inst.ai2_belief.retention_frames()(5) << '\n';   // existence-removal + verification-gate diag
     ai2_csv_.flush();
 }
 

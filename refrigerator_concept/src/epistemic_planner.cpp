@@ -62,11 +62,17 @@ EpistemicPlanner::EpistemicPlanner(float d_obs)
 {}
 
 // AI2-native Σ-based D-optimal next-best-view: score the four faces, return the best framed viewpoint.
-EpistemicProposal EpistemicPlanner::compute(const RefrigeratorBelief& belief, float lat_rate, float sigma_base) const
+EpistemicProposal EpistemicPlanner::compute(const RefrigeratorBelief& belief, float lat_rate, float sigma_base,
+                                            float hfov_rad, const std::vector<EpistemicPlanner::Obstacle>& obstacles) const
 {
-    constexpr float kEffectiveHorizontalFovRad = 70.0f * std::numbers::pi_v<float> / 180.0f;
-    constexpr float kMinimumStandOffM = 1.15f;         // YOLO won't fire too close → keep a viewing gap
-    constexpr float kStandOffSafetyMarginM = 0.45f;    // extra stand-off beyond the FoV-fit distance
+    // HORIZONTAL FoV only, from the camera's REAL intrinsics when the caller supplies them (2·atan(W/2fx));
+    // the 70° literal is only the fallback for a caller that has no CameraAPI yet.
+    const float hfov = (hfov_rad > 0.1f and hfov_rad < 3.0f)
+                     ? hfov_rad : (70.0f * std::numbers::pi_v<float> / 180.0f);
+    constexpr float kRobotRadiusM = 0.30f;   // Shadow's footprint radius — a physical dimension, not a knob
+    // Fraction of the half-FoV the object should subtend: 0.45 leaves ~55% of the half-frame as margin, so the
+    // silhouette stays whole and trunc_frac stays low. Same constant the servo contract already publishes.
+    constexpr float kFramingFill = 0.45f;
 
     // REPORTED covariance: Σ with the yaw entry inflated by the discrete-mode entropy (p(1−p)(π/2)²), so a
     // near-square refrigerator whose orientation mode is unresolved shows a large yaw variance → the D-optimal NBV
@@ -83,10 +89,29 @@ EpistemicProposal EpistemicPlanner::compute(const RefrigeratorBelief& belief, fl
         { {-sy,  cy}, {s.cx - sy * hh, s.cy + cy * hh}, hw },   // +y
         { { sy, -cy}, {s.cx + sy * hh, s.cy - cy * hh}, hw },   // -y
     }};
-    const float max_stand_off = std::max(kMinimumStandOffM, d_obs_);
-    const auto standoff_for = [&](float half_span)
-    { return std::clamp(half_span / std::tan(kEffectiveHorizontalFovRad * 0.5f) + kStandOffSafetyMarginM,
-                        kMinimumStandOffM, max_stand_off); };
+    // ── Stand-off: DERIVED framing distance, not a constant ────────────────────────────────────────────
+    // The old rule was half_span/tan(hfov/2) + 0.45, clamped into [1.15, d_obs]. Two faults: the "+0.45"
+    // margin was arbitrary, and half_span/tan(hfov/2) is the distance at which the face EXACTLY FILLS the
+    // frame width — the framing at which YOLO's mask is clipped by the image border, `trunc_frac` rises and
+    // the frame stops being admissible. For a 0.6 m fridge that evaluated to 0.89 m and then hit the 1.15 m
+    // floor, i.e. the floor was doing all the work and the geometry none. That is why standing close was
+    // producing truncated masks. See [[refrigerator-standoff-and-obstacles]].
+    //
+    // Instead: place the object so its horizontal extent occupies `fill` of the half-FoV, leaving (1−fill) as
+    // image margin, which is what keeps the silhouette whole:
+    //     d = R / tan(fill · hfov/2)
+    // R is the footprint's CIRCUMSCRIBED radius ½√(w²+h²), not the viewed face's half-width — the robot
+    // approaches from an arbitrary bearing, so the projected width can reach the diagonal. Using R makes the
+    // stand-off valid from every approach direction instead of only head-on.
+    const float R_circ = 0.5f * std::sqrt(s.w * s.w + s.h * s.h);
+    // Collision floor: the robot cannot stand closer than its own radius plus the object's. Geometry, not tuning.
+    const float collision_floor = R_circ + kRobotRadiusM;
+    const float framing_d = R_circ / std::max(1e-3f, std::tan(kFramingFill * 0.5f * hfov));
+    const float framed_standoff = std::max(framing_d, collision_floor);
+    // d_obs is a PREFERENCE for staying close enough to orbit; it must never pull the robot inside the
+    // framing distance, or we are back to truncated masks.
+    const float max_stand_off = std::max(framed_standoff, d_obs_);
+    const auto standoff_for = [&](float) { return framed_standoff; };
 
     // ── Adequacy gap (active-perception step 1, REFRIGERATOR.md) ─────────────────────────────────
     // Target precision Σ* and the gap formula now live in refrigerator_dof.h /
@@ -96,11 +121,35 @@ EpistemicProposal EpistemicPlanner::compute(const RefrigeratorBelief& belief, fl
     // resolves, so the robot keeps gathering evidence on it before releasing.
     const float adequacy_gap = adequacy_gap_nats(kRefrigeratorDofs, [&](std::size_t j) { return S(j, j); });
 
+    // ── Would this viewpoint stand ON another object? ───────────────────────────────────────────────
+    // The obstacles are every OTHER object the DSR graph knows about, already inflated by the robot radius by
+    // the caller, so the test is a plain point-in-oriented-rectangle. A face whose framed viewpoint lands
+    // inside one is skipped and the next-best face is taken — the ranking already exists for exactly this
+    // fallback, it was simply never consulted. If EVERY face is blocked we keep the argmax anyway and let the
+    // controller resolve it: this planner proposes, it does not own global occupancy.
+    const auto blocked = [&](float vx, float vy)
+    {
+        for (const auto& o : obstacles)
+        {
+            const float c = std::cos(-o.yaw), sn = std::sin(-o.yaw);
+            const float dx = vx - o.cx, dy = vy - o.cy;
+            const float lx = c * dx - sn * dy, ly = sn * dx + c * dy;   // into the obstacle's own frame
+            if (std::abs(lx) <= 0.5f * o.w and std::abs(ly) <= 0.5f * o.h)
+                return true;
+        }
+        return false;
+    };
+    const auto viewpoint_of = [&](int i, float standoff)
+    {
+        return Eigen::Vector2f{faces[i].centre.x() + faces[i].normal.x() * standoff,
+                               faces[i].centre.y() + faces[i].normal.y() * standoff};
+    };
+
     // Score each face by the D-optimal expected entropy reduction on Σ, with a range-aware R per face.
     const Eigen::Matrix<float, 6, 6> I6 = Eigen::Matrix<float, 6, 6>::Identity();
     int   best_idx      = 0;
     float best_raw      = -std::numeric_limits<float>::max();
-    float best_standoff = kMinimumStandOffM;
+    float best_standoff = framed_standoff;
     // RAW per-face D-optimal gain (nats), UNBOUNDED — this is the RANKING the controller uses to choose a
     // feasible face, so it must NOT be adequacy-clamped. Each face's single-view info typically EXCEEDS the
     // remaining gap, so clamping every face at the gap made all four tie (the degenerate ranked-set that
@@ -118,6 +167,24 @@ EpistemicProposal EpistemicPlanner::compute(const RefrigeratorBelief& belief, fl
     }
     if (not std::isfinite(best_raw))   // low-but-finite gain is NOT withdrawn (controller ranks it low)
         return {};
+
+    // Re-pick the highest-gain face whose framed viewpoint is NOT inside another object.
+    int   free_idx = -1;
+    float free_raw = -std::numeric_limits<float>::max();
+    for (int i = 0; i < 4; ++i)
+    {
+        const auto v = viewpoint_of(i, framed_standoff);
+        if (blocked(v.x(), v.y())) continue;
+        if (face_raw[i] > free_raw) { free_raw = face_raw[i]; free_idx = i; }
+    }
+    if (free_idx >= 0 and free_idx != best_idx)
+    {
+        std::print("[epistemic-NBV] argmax face blocked by another object → falling back (gain {:.3f} → {:.3f})\n",
+                   best_raw, free_raw);
+        best_idx = free_idx; best_raw = free_raw;
+    }
+    else if (free_idx < 0 and not obstacles.empty())
+        std::print("[epistemic-NBV] ALL four viewpoints blocked by other objects — keeping argmax, controller must resolve\n");
 
     // SCALAR affordance value (epistemic_gain): the winning face's info BOUNDED by the adequacy gap to Σ*, so
     // it → 0 as the belief reaches the consumer's precision — a threshold-free "done" AND the cross-affordance
@@ -159,9 +226,8 @@ EpistemicProposal EpistemicPlanner::compute(const RefrigeratorBelief& belief, fl
     // + Σ*, so the controller picks the best FEASIBLE face itself (a blocked argmax face falls back to the
     // next reachable one). The affordance's scalar epistemic_gain stays adequacy-bounded (cross-affordance
     // selection + "done"). Face order matches the [+x,-x,+y,-y] sampling order above.
-    constexpr float kFramingFill = 0.45f;   // FoV framing sweet spot (matches the refrigerator servo contract's advance target)
     proposal.face_gains    = face_raw;
-    proposal.standoff_min_m = kMinimumStandOffM;
+    proposal.standoff_min_m = collision_floor;
     proposal.standoff_max_m = max_stand_off;
     proposal.framing_fill   = kFramingFill;
     proposal.sigma_star     = sigma_star_array<6>(kRefrigeratorDofs);   // the SAME demands the adequacy gap used
